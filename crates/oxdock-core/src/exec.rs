@@ -1935,4 +1935,516 @@ mod tests {
         assert_eq!(runs[0].script, "cat");
         assert_eq!(runs[0].stdin, Some(b"hello world".to_vec()));
     }
+
+    fn failing_status() -> ExitStatus {
+        exit_status_from_code(9)
+    }
+
+    fn step<T>(kind: T) -> Step
+    where
+        T: Into<StepKind>,
+    {
+        Step {
+            guard: None,
+            kind: kind.into(),
+            scope_enter: 0,
+            scope_exit: 0,
+        }
+    }
+
+    #[test]
+    fn bg_failure_mid_pipeline_short_circuits_and_bails() {
+        let root = GuardedPath::new_root_from_str(".").unwrap();
+        let steps = vec![
+            step(StepKind::RunBg("flaky-bg".into())),
+            step(StepKind::Run("echo never".into())),
+        ];
+        let mock = MockProcessManager::default();
+        mock.push_bg_plan(0, failing_status());
+        let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
+        let err = run_steps_with_manager(fs, &steps, mock.clone(), ExecIo::new()).unwrap_err();
+
+        assert!(
+            err.to_string().contains("RUN_BG exited with status"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            mock.recorded_runs().is_empty(),
+            "pipeline must stop before the next RUN"
+        );
+        let spawns = mock.spawn_log();
+        let spawned: Vec<&str> = spawns.iter().map(|call| call.script.as_str()).collect();
+        assert_eq!(spawned, vec!["flaky-bg"]);
+        drop(spawns);
+        // The finished child is not killed again; only survivors would be.
+        assert!(mock.killed().is_empty());
+    }
+
+    #[test]
+    fn bg_failure_after_pipeline_end_reports_status() {
+        let root = GuardedPath::new_root_from_str(".").unwrap();
+        let steps = vec![step(StepKind::RunBg("late-failure".into()))];
+        let mock = MockProcessManager::default();
+        // usize::MAX models a child that never polls ready; end-of-pipeline
+        // `wait()` must still surface its failing status.
+        mock.push_bg_plan(usize::MAX, failing_status());
+        let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
+        let err = run_steps_with_manager(fs, &steps, mock.clone(), ExecIo::new()).unwrap_err();
+        assert!(
+            err.to_string().contains("RUN_BG exited with status"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn bg_success_after_pipeline_end_waits_cleanly() {
+        let root = GuardedPath::new_root_from_str(".").unwrap();
+        let steps = vec![step(StepKind::RunBg("late-success".into()))];
+        let mock = MockProcessManager::default();
+        mock.push_bg_plan(usize::MAX, success_status());
+        let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
+        run_steps_with_manager(fs, &steps, mock.clone(), ExecIo::new())
+            .expect("successful late child must not fail the pipeline");
+    }
+
+    #[test]
+    fn multi_child_teardown_kills_survivor_when_first_exits() {
+        let root = GuardedPath::new_root_from_str(".").unwrap();
+        let steps = vec![
+            step(StepKind::RunBg("first-finisher".into())),
+            step(StepKind::RunBg("survivor".into())),
+        ];
+        let mock = MockProcessManager::default();
+        // First child reports finished on the SECOND poll (after the second
+        // RUN_BG has spawned); the survivor must then be torn down.
+        mock.push_bg_plan(1, success_status());
+        mock.push_bg_plan(usize::MAX, success_status());
+        let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
+        run_steps_with_manager(fs, &steps, mock.clone(), ExecIo::new())
+            .expect("first child succeeded");
+
+        assert_eq!(mock.killed(), vec!["survivor".to_string()]);
+    }
+
+    #[test]
+    fn exit_kills_all_background_children() {
+        let root = GuardedPath::new_root_from_str(".").unwrap();
+        let steps = vec![
+            step(StepKind::RunBg("bg-a".into())),
+            step(StepKind::RunBg("bg-b".into())),
+            step(StepKind::Exit(3)),
+        ];
+        let mock = MockProcessManager::default();
+        mock.push_bg_plan(usize::MAX, success_status());
+        mock.push_bg_plan(usize::MAX, success_status());
+        let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
+        let err = run_steps_with_manager(fs, &steps, mock.clone(), ExecIo::new()).unwrap_err();
+        assert!(err.to_string().contains("EXIT requested with code 3"));
+        assert_eq!(mock.killed(), vec!["bg-a".to_string(), "bg-b".to_string()]);
+    }
+
+    /// Minimal stub whose foreground commands fail by script name, letting us
+    /// drive failure paths the stock mock cannot express.
+    #[derive(Clone, Default)]
+    struct FailingRunner {
+        calls: std::rc::Rc<std::cell::RefCell<Vec<String>>>,
+        fail_script: String,
+    }
+
+    impl ProcessManager for FailingRunner {
+        type Handle = oxdock_process::MockHandle;
+
+        fn run_command(
+            &mut self,
+            _ctx: &CommandContext,
+            script: &str,
+            _options: CommandOptions,
+        ) -> Result<CommandResult<Self::Handle>> {
+            self.calls.borrow_mut().push(script.to_string());
+            if script == self.fail_script {
+                bail!("simulated failure")
+            }
+            Ok(CommandResult::Completed)
+        }
+    }
+
+    #[test]
+    fn failing_foreground_run_aborts_with_step_context() {
+        let root = GuardedPath::new_root_from_str(".").unwrap();
+        let runner = FailingRunner {
+            calls: Default::default(),
+            fail_script: "boom".into(),
+        };
+        let calls = runner.calls.clone();
+        let steps = vec![
+            step(StepKind::Run("ok-first".into())),
+            step(StepKind::Run("boom".into())),
+            step(StepKind::Run("never-reached".into())),
+        ];
+        let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
+        let err = run_steps_with_manager(fs, &steps, runner, ExecIo::new()).unwrap_err();
+
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("step 2: RUN boom") && msg.contains("simulated failure"),
+            "error must carry step index and cause, got: {msg}"
+        );
+        assert_eq!(
+            *calls.borrow(),
+            vec!["ok-first".to_string(), "boom".to_string()]
+        );
+    }
+
+    #[test]
+    fn with_io_rejects_duplicate_stdout_binding() {
+        let steps = vec![Step {
+            guard: None,
+            kind: StepKind::WithIo {
+                bindings: vec![
+                    IoBinding {
+                        stream: IoStream::Stdout,
+                        pipe: Some("p".into()),
+                    },
+                    IoBinding {
+                        stream: IoStream::Stdout,
+                        pipe: Some("p".into()),
+                    },
+                ],
+                cmd: Box::new(StepKind::Echo("x".into())),
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+        }];
+        let fs = MockFs::new();
+        let mut state = create_exec_state(fs);
+        let mut proc = MockProcessManager::default();
+        let err = execute_steps(&mut state, &mut proc, &steps, None, false, None, None, true)
+            .expect_err("duplicate stdout binding");
+        assert!(
+            err.to_string().contains("declared stdout more than once"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn with_io_rejects_duplicate_stdin_and_stderr_bindings() {
+        for (variant, fragment) in [
+            ("stdin", "stdin more than once"),
+            ("stderr", "stderr more than once"),
+        ] {
+            let (stream_a, stream_b) = if variant == "stdin" {
+                (IoStream::Stdin, IoStream::Stdin)
+            } else {
+                (IoStream::Stderr, IoStream::Stderr)
+            };
+            let steps = vec![Step {
+                guard: None,
+                kind: StepKind::WithIo {
+                    bindings: vec![
+                        IoBinding {
+                            stream: stream_a,
+                            pipe: Some("p".into()),
+                        },
+                        IoBinding {
+                            stream: stream_b,
+                            pipe: Some("p".into()),
+                        },
+                    ],
+                    cmd: Box::new(StepKind::Echo("x".into())),
+                },
+                scope_enter: 0,
+                scope_exit: 0,
+            }];
+            let fs = MockFs::new();
+            let mut state = create_exec_state(fs);
+            let mut proc = MockProcessManager::default();
+            let err = execute_steps(&mut state, &mut proc, &steps, None, false, None, None, true)
+                .expect_err("duplicate binding");
+            assert!(
+                err.to_string().contains(fragment),
+                "expected '{fragment}', got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn with_io_block_form_bails_unexpanded() {
+        let steps = vec![Step {
+            guard: None,
+            kind: StepKind::WithIoBlock {
+                bindings: Vec::new(),
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+        }];
+        let fs = MockFs::new();
+        let mut state = create_exec_state(fs);
+        let mut proc = MockProcessManager::default();
+        let err = execute_steps(&mut state, &mut proc, &steps, None, false, None, None, true)
+            .expect_err("unexpanded WITH_IO block");
+        assert!(err.to_string().contains("expanded during parsing"));
+    }
+
+    #[test]
+    fn write_without_contents_or_stdin_bails() {
+        let steps = vec![step(StepKind::Write {
+            path: "out.txt".into(),
+            contents: None,
+        })];
+        let fs = MockFs::new();
+        let mut state = create_exec_state(fs);
+        let mut proc = MockProcessManager::default();
+        let err = execute_steps(&mut state, &mut proc, &steps, None, false, None, None, true)
+            .expect_err("write without source");
+        assert!(
+            err.to_string().contains("requires stdin"),
+            "unexpected: {err}"
+        );
+    }
+
+    #[test]
+    fn stderr_stream_handle_reaches_manager() {
+        let sink: SharedOutput = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let steps = vec![step(StepKind::Run("emits-stderr".into()))];
+        let fs = MockFs::new();
+        let mut state = create_exec_state(fs);
+        let mut proc = MockProcessManager::default();
+        execute_steps(
+            &mut state,
+            &mut proc,
+            &steps,
+            None,
+            false,
+            None,
+            Some(StreamHandle::Stream(sink)),
+            true,
+        )
+        .expect("run");
+
+        let runs = proc.recorded_runs();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(
+            runs[0].stderr_mode,
+            oxdock_process::MockStreamMode::Stream,
+            "stderr handle must be forwarded as CommandStderr::Stream"
+        );
+    }
+
+    #[test]
+    fn inherit_stdout_override_forces_inherit_modes() {
+        let out_sink: SharedOutput = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let err_sink: SharedOutput = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let steps = vec![
+            step(StepKind::Env {
+                key: "OXDOCK_INHERIT_STDOUT".into(),
+                value: "1".into(),
+            }),
+            step(StepKind::Run("captured-normally".into())),
+        ];
+        let fs = MockFs::new();
+        let mut state = create_exec_state(fs);
+        let mut proc = MockProcessManager::default();
+        execute_steps(
+            &mut state,
+            &mut proc,
+            &steps,
+            None,
+            false,
+            Some(StreamHandle::Stream(out_sink)),
+            Some(StreamHandle::Stream(err_sink)),
+            true,
+        )
+        .expect("run");
+
+        let runs = proc.recorded_runs();
+        assert_eq!(runs.len(), 1);
+        assert_eq!(
+            runs[0].stderr_mode,
+            oxdock_process::MockStreamMode::Inherit,
+            "OXDOCK_INHERIT_STDOUT must force stderr inheritance too"
+        );
+    }
+
+    #[test]
+    fn exec_io_stderr_precedence_and_stdout_fallback() {
+        let out_sink: SharedOutput = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let err_sink: SharedOutput = Arc::new(Mutex::new(Vec::<u8>::new()));
+
+        // set_stdout seeds stderr only while stderr is unset.
+        let mut io = ExecIo::new();
+        io.set_stdout(Some(out_sink.clone()));
+        assert!(Arc::ptr_eq(&io.stderr().unwrap(), &out_sink));
+
+        // An explicit stderr wins over the stdout fallback...
+        io.set_stderr(Some(err_sink.clone()));
+        assert!(Arc::ptr_eq(&io.stderr().unwrap(), &err_sink));
+        // ...and survives later stdout changes.
+        let replacement: SharedOutput = Arc::new(Mutex::new(Vec::<u8>::new()));
+        io.set_stdout(Some(replacement));
+        assert!(Arc::ptr_eq(&io.stderr().unwrap(), &err_sink));
+
+        // With no streams at all, stderr falls back to nothing.
+        let bare = ExecIo::new();
+        assert!(bare.stderr().is_none());
+    }
+
+    #[test]
+    fn exec_io_inherit_env_state_machine_round_trips() {
+        let mut io = ExecIo::new();
+        io.insert_inherit_env("K", "v1");
+        assert_eq!(io.inherit_env_value("K"), Some(&"v1".to_string()));
+        assert!(!io.inherit_env_is_removed("K"));
+
+        io.remove_inherit_env("K");
+        assert!(io.inherit_env_is_removed("K"));
+        assert_eq!(io.inherit_env_value("K"), None);
+
+        // Re-inserting after removal must clear the removed marker.
+        io.insert_inherit_env("K", "v2");
+        assert!(!io.inherit_env_is_removed("K"));
+        assert_eq!(io.inherit_env_value("K"), Some(&"v2".to_string()));
+    }
+
+    #[test]
+    fn exec_io_pipe_endpoints_expose_streams_and_inherit() {
+        let mut io = ExecIo::new();
+        let writer: SharedOutput = Arc::new(Mutex::new(Vec::<u8>::new()));
+
+        io.insert_output_pipe_stdout("s-out", writer.clone());
+        io.insert_output_pipe_stderr_inherit("s-inh");
+
+        match io.output_pipe_stdout("s-out") {
+            Some(PipeEndpoint::Stream(w)) => assert!(Arc::ptr_eq(&w, &writer)),
+            Some(PipeEndpoint::Script(_)) => {
+                panic!("expected streamed stdout endpoint, got script endpoint")
+            }
+            Some(PipeEndpoint::Inherit) => panic!("expected streamed stdout endpoint, got inherit"),
+            None => panic!("endpoint missing entirely"),
+        }
+        match io.output_pipe_stderr("s-inh") {
+            Some(PipeEndpoint::Inherit) => {}
+            _ => panic!("expected inherit stderr endpoint"),
+        }
+    }
+
+    #[test]
+    fn hash_sha256_matches_known_digest_for_file() {
+        // sha256("hello")
+        const HELLO_DIGEST: &str =
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+
+        let backing = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let sink: SharedOutput = backing.clone();
+        let steps = vec![
+            step(StepKind::Write {
+                path: "hello.txt".into(),
+                contents: Some("hello".into()),
+            }),
+            step(StepKind::HashSha256 {
+                path: "hello.txt".into(),
+            }),
+        ];
+        let fs = MockFs::new();
+        let mut state = create_exec_state(fs);
+        let mut proc = MockProcessManager::default();
+        execute_steps(
+            &mut state,
+            &mut proc,
+            &steps,
+            None,
+            false,
+            Some(StreamHandle::Stream(sink.clone())),
+            None,
+            true,
+        )
+        .expect("hash pipeline");
+
+        let produced = String::from_utf8(backing.lock().unwrap().clone()).unwrap();
+        assert_eq!(produced.trim(), HELLO_DIGEST);
+    }
+
+    #[test]
+    fn hash_sha256_directory_digest_is_deterministic() {
+        let digests: Vec<String> = (0..2)
+            .map(|_| {
+                let backing = Arc::new(Mutex::new(Vec::<u8>::new()));
+                let sink: SharedOutput = backing.clone();
+                let steps = vec![
+                    step(StepKind::Mkdir("pkg".into())),
+                    step(StepKind::Write {
+                        path: "pkg/b.txt".into(),
+                        contents: Some("22".into()),
+                    }),
+                    step(StepKind::Write {
+                        path: "pkg/a.txt".into(),
+                        contents: Some("1".into()),
+                    }),
+                    step(StepKind::HashSha256 { path: "pkg".into() }),
+                ];
+                let temp = GuardedPath::tempdir().unwrap();
+                let root = temp.as_guarded_path().clone();
+                let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
+                run_steps_with_manager(
+                    fs,
+                    &steps,
+                    MockProcessManager::default(),
+                    assemble_default_io(None, Some(sink.clone())),
+                )
+                .expect("hash dir pipeline");
+                String::from_utf8(backing.lock().unwrap().clone()).unwrap()
+            })
+            .collect();
+
+        assert_eq!(digests[0], digests[1], "directory hashing must be stable");
+        let hex = digests[0].trim();
+        assert_eq!(hex.len(), 64, "full sha256 hex expected: {hex}");
+    }
+
+    #[test]
+    fn copy_directory_branch_recurses_into_nested_target() {
+        let steps = vec![
+            step(StepKind::Mkdir("app".into())),
+            step(StepKind::Write {
+                path: "app/inner.txt".into(),
+                contents: Some("nested".into()),
+            }),
+            Step {
+                guard: None,
+                kind: StepKind::Copy {
+                    from_current_workspace: false,
+                    from: "app".into(),
+                    to: "copy-of-app".into(),
+                },
+                scope_enter: 0,
+                scope_exit: 0,
+            },
+        ];
+
+        let temp = GuardedPath::tempdir().unwrap();
+        let root = temp.as_guarded_path().clone();
+        let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
+        run_steps_with_manager(fs, &steps, MockProcessManager::default(), ExecIo::new())
+            .expect("copy pipeline");
+
+        let resolver = PathResolver::new_guarded(root.clone(), root.clone()).unwrap();
+        let copied = root.join("copy-of-app/inner.txt").unwrap();
+        assert_eq!(
+            resolver.read_file(&copied).unwrap(),
+            b"nested",
+            "COPY must recurse into directories"
+        );
+    }
+
+    #[test]
+    fn public_entrypoint_returns_final_working_directory() {
+        let temp = GuardedPath::tempdir().unwrap();
+        let root = temp.as_guarded_path().clone();
+        let steps = vec![
+            step(StepKind::Mkdir("app".into())),
+            step(StepKind::Workdir("app".into())),
+        ];
+        let final_cwd =
+            run_steps_with_context_result(&root, &root, &steps, None, None).expect("run");
+        assert_eq!(final_cwd.as_path(), root.as_path().join("app"));
+    }
 }

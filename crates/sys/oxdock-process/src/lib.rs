@@ -27,7 +27,7 @@ use std::{
 use oxdock_fs::PathResolver;
 
 #[cfg(feature = "mock-process")]
-pub use mock::{MockHandle, MockProcessManager, MockRunCall, MockSpawnCall};
+pub use mock::{MockHandle, MockProcessManager, MockRunCall, MockSpawnCall, MockStreamMode};
 
 /// Context passed to process managers describing the current execution
 /// environment. Clones are cheap and explicit so background handles can own
@@ -105,8 +105,10 @@ where
                 }
 
                 if closed {
-                    // Advance main iterator past content and closing braces
-                    for _ in 0..content.len() {
+                    // Advance main iterator past content and closing braces.
+                    // Count chars, not bytes: content may contain multi-byte
+                    // UTF-8 (e.g. non-ASCII placeholder names).
+                    for _ in 0..content.chars().count() {
                         chars.next();
                     }
                     chars.next(); // first }
@@ -722,8 +724,8 @@ fn expand_env(input: &str, ctx: &CommandContext) -> String {
         if c == '$' {
             match chars.peek() {
                 Some('$') => {
-                    // preserve literal $$
-                    out.push('$');
+                    // Preserve literal $$ (never a PID expansion here)
+                    out.push_str("$$");
                     chars.next();
                 }
                 Some('{') => {
@@ -785,13 +787,16 @@ fn expand_env(input: &str, ctx: &CommandContext) -> String {
 
 #[cfg(miri)]
 fn env_lookup(name: &str, ctx: &CommandContext) -> String {
-    if name == "CARGO_TARGET_DIR" {
+    // Accept both `{{ env:X }}` and bare `{{ X }}` forms, matching the
+    // host-side `expand_command_env` semantics.
+    let key = name.strip_prefix("env:").unwrap_or(name);
+    if key == "CARGO_TARGET_DIR" {
         return ctx.cargo_target_dir().display().to_string();
     }
     ctx.envs()
-        .get(name)
+        .get(key)
         .cloned()
-        .or_else(|| std::env::var(name).ok())
+        .or_else(|| std::env::var(key).ok())
         .unwrap_or_default()
 }
 
@@ -1236,5 +1241,510 @@ mod tests {
         let ctx = CommandContext::new(&cwd, &envs, &guard, &guard, &guard);
         let rendered = expand_command_env("{{ env:HOST_ONLY }}", &ctx);
         assert_eq!(rendered, "");
+    }
+
+    #[test]
+    fn expand_with_lookup_handles_multibyte_placeholder_names() {
+        // Regression: advancement used to count bytes instead of chars, so a
+        // multi-byte placeholder name swallowed characters after `}}`.
+        let rendered = expand_with_lookup("{{ env:héllo }}X", |name| {
+            if name == "env:héllo" {
+                Some("value".to_string())
+            } else {
+                None
+            }
+        });
+        assert_eq!(rendered, "valueX");
+    }
+
+    #[test]
+    fn expand_with_lookup_preserves_multibyte_text_outside_placeholders() {
+        let rendered = expand_with_lookup("héllo wörld {{ env:A }} ✓", |name| {
+            if name == "env:A" {
+                Some("1".to_string())
+            } else {
+                None
+            }
+        });
+        assert_eq!(rendered, "héllo wörld 1 ✓");
+    }
+
+    #[test]
+    fn expand_with_lookup_keeps_unclosed_double_brace_literal() {
+        let rendered = expand_with_lookup("a {{ b", |_| -> Option<String> {
+            panic!("input without any closing braces must not produce lookups")
+        });
+        assert_eq!(rendered, "a {{ b");
+    }
+
+    #[test]
+    fn expand_with_lookup_binds_first_open_to_next_close_across_text() {
+        // Pins current greedy behavior: the first `{{` binds to the next `}}`
+        // even across an interior `{{`, and the entire span is trimmed into a
+        // single lookup key. With no resolver entry for that composite key,
+        // the whole placeholder renders as empty text.
+        let seen = std::cell::RefCell::new(None);
+        let rendered = expand_with_lookup("a {{ b {{ env:X }} c", |name| {
+            *seen.borrow_mut() = Some(name.to_string());
+            if name == "env:X" {
+                Some("V".to_string())
+            } else {
+                None
+            }
+        });
+        assert_eq!(rendered, "a  c");
+        assert_eq!(seen.borrow().as_deref(), Some("b {{ env:X"));
+    }
+
+    #[test]
+    fn expand_with_lookup_skips_empty_and_blank_keys() {
+        let rendered = expand_with_lookup("x{{}}y", |_| -> Option<String> {
+            panic!("empty key must not be looked up")
+        });
+        assert_eq!(rendered, "xy");
+
+        let rendered_blank = expand_with_lookup("x{{   }}y", |_| -> Option<String> {
+            panic!("blank key must not be looked up")
+        });
+        assert_eq!(rendered_blank, "xy");
+    }
+
+    #[test]
+    fn expand_with_lookup_passes_through_stray_braces() {
+        let rendered_close = expand_with_lookup("a }} b", |_| -> Option<String> {
+            panic!("stray closing braces must not be looked up")
+        });
+        assert_eq!(rendered_close, "a }} b");
+
+        let rendered_single = expand_with_lookup("{ alone {", |_| -> Option<String> {
+            panic!("single brace must not be looked up")
+        });
+        assert_eq!(rendered_single, "{ alone {");
+    }
+
+    #[test]
+    fn expand_with_lookup_supports_adjacent_placeholders() {
+        let rendered = expand_with_lookup("{{ env:A }}{{ env:B }}", |name| match name {
+            "env:A" => Some("a".to_string()),
+            "env:B" => Some("b".to_string()),
+            _ => None,
+        });
+        assert_eq!(rendered, "ab");
+    }
+
+    // ---------- ShellProcessManager / internals ----------
+
+    fn make_ctx(envs: &[(&str, &str)]) -> (oxdock_fs::GuardedTempDir, CommandContext) {
+        let temp = GuardedPath::tempdir().expect("tempdir");
+        let guard = temp.as_guarded_path().clone();
+        let cwd: PolicyPath = guard.clone().into();
+        let map: HashMap<String, String> = envs
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect();
+        let ctx = CommandContext::new(&cwd, &map, &guard, &guard, &guard);
+        (temp, ctx)
+    }
+
+    #[test]
+    fn background_capture_stdout_bails_without_spawning() {
+        let (_temp, ctx) = make_ctx(&[]);
+        let mut pm = ShellProcessManager;
+        let options = CommandOptions {
+            mode: CommandMode::Background,
+            stdout: CommandStdout::Capture,
+            ..Default::default()
+        };
+        let err = match pm.run_command(&ctx, "echo hi", options) {
+            Err(err) => err,
+            Ok(_) => panic!("background capture must bail"),
+        };
+        assert!(
+            err.to_string().contains("cannot capture stdout"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[cfg_attr(
+        miri,
+        ignore = "spawns processes; Miri does not support process execution"
+    )]
+    #[test]
+    fn foreground_capture_returns_child_stdout_bytes() {
+        let (_temp, ctx) = make_ctx(&[]);
+        let mut pm = ShellProcessManager;
+        let options = CommandOptions {
+            stdout: CommandStdout::Capture,
+            ..Default::default()
+        };
+        match pm
+            .run_command(&ctx, "echo hello-capture", options)
+            .expect("run")
+        {
+            CommandResult::Captured(bytes) => {
+                let out = String::from_utf8_lossy(&bytes);
+                assert!(out.contains("hello-capture"), "captured: {out}");
+            }
+            CommandResult::Completed => panic!("expected Captured, got Completed"),
+            CommandResult::Background(_) => panic!("expected Captured, got Background"),
+        }
+    }
+
+    fn large_output_script() -> &'static str {
+        #[cfg(windows)]
+        {
+            "for /l %i in (1,1,20000) do @echo 0123456789abcdef"
+        }
+        #[cfg(not(windows))]
+        {
+            "i=0; while [ $i -lt 20000 ]; do echo 0123456789abcdef; i=$((i+1)); done"
+        }
+    }
+
+    #[cfg_attr(
+        miri,
+        ignore = "spawns processes; Miri does not support process execution"
+    )]
+    #[test]
+    fn streams_large_stdout_through_shared_output_without_deadlock() {
+        let (_temp, ctx) = make_ctx(&[]);
+        let mut pm = ShellProcessManager;
+        let buffer = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let options = CommandOptions {
+            stdout: CommandStdout::Stream(buffer.clone()),
+            ..Default::default()
+        };
+        pm.run_command(&ctx, large_output_script(), options)
+            .expect("run");
+        let bytes = buffer.lock().expect("buffer lock").len();
+        // 20000 lines x 17 bytes ~= 340KB, far beyond any OS pipe buffer, so
+        // the reader pump must have iterated continuously.
+        assert!(bytes >= 300_000, "streamed only {bytes} bytes");
+    }
+
+    #[cfg_attr(
+        miri,
+        ignore = "spawns processes; Miri does not support process execution"
+    )]
+    #[test]
+    fn foreground_stdin_is_piped_through_copy_thread() {
+        let (_temp, ctx) = make_ctx(&[]);
+        let mut pm = ShellProcessManager;
+        let payload: SharedInput = std::sync::Arc::new(std::sync::Mutex::new(
+            std::io::Cursor::new(b"b\na\n".to_vec()),
+        ));
+        let options = CommandOptions {
+            stdin: Some(payload),
+            stdout: CommandStdout::Capture,
+            ..Default::default()
+        };
+        // `sort` reads stdin to EOF on both Unix and Windows before printing.
+        match pm.run_command(&ctx, "sort", options).expect("run") {
+            CommandResult::Captured(bytes) => {
+                assert!(bytes.starts_with(b"a"), "sorted output: {:?}", bytes);
+                assert!(windows_compatible_contains(&bytes, b"b"));
+            }
+            CommandResult::Completed => panic!("expected Captured, got Completed"),
+            CommandResult::Background(_) => panic!("expected Captured, got Background"),
+        }
+    }
+
+    fn windows_compatible_contains(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack.windows(needle.len()).any(|w| w == needle)
+    }
+
+    #[cfg_attr(
+        miri,
+        ignore = "spawns processes; Miri does not support process execution"
+    )]
+    #[test]
+    fn child_handle_background_lifecycle_polls_then_waits() {
+        let (_temp, ctx) = make_ctx(&[]);
+        let mut pm = ShellProcessManager;
+        let options = CommandOptions {
+            mode: CommandMode::Background,
+            ..Default::default()
+        };
+        let mut handle = match pm.run_command(&ctx, "exit 0", options).expect("run") {
+            CommandResult::Background(handle) => handle,
+            CommandResult::Completed => panic!("expected Background, got Completed"),
+            CommandResult::Captured(_) => panic!("expected Background, got Captured"),
+        };
+
+        let mut status = None;
+        for _ in 0..500 {
+            if let Some(done) = handle.try_wait().expect("try_wait") {
+                status = Some(done);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let status = status.expect("child should exit within polling window");
+        assert!(status.success());
+
+        let waited = handle.wait().expect("wait");
+        assert!(waited.success());
+    }
+
+    fn long_running_script() -> &'static str {
+        #[cfg(windows)]
+        {
+            "ping -n 30 127.0.0.1 >NUL"
+        }
+        #[cfg(not(windows))]
+        {
+            "sleep 30"
+        }
+    }
+
+    #[cfg_attr(
+        miri,
+        ignore = "spawns processes; Miri does not support process execution"
+    )]
+    #[test]
+    fn child_handle_kill_is_idempotent_and_wait_joins_threads() {
+        let (_temp, ctx) = make_ctx(&[]);
+        let mut pm = ShellProcessManager;
+        let options = CommandOptions {
+            mode: CommandMode::Background,
+            stdout: CommandStdout::Stream(std::sync::Arc::new(std::sync::Mutex::new(
+                Vec::<u8>::new(),
+            ))),
+            ..Default::default()
+        };
+        let mut handle = match pm
+            .run_command(&ctx, long_running_script(), options)
+            .expect("run")
+        {
+            CommandResult::Background(handle) => handle,
+            CommandResult::Completed => panic!("expected Background, got Completed"),
+            CommandResult::Captured(_) => panic!("expected Background, got Captured"),
+        };
+
+        handle.kill().expect("first kill");
+        handle.kill().expect("second kill must be idempotent");
+        let _status = handle.wait().expect("wait after kill");
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    fn apply_ctx_sets_cwd_and_cargo_target_dir_precedence() {
+        // Default branch: executor-provided cargo target dir wins when the
+        // env map has no explicit override.
+        let (temp_a, ctx_a) = make_ctx(&[]);
+        let expected_default = oxdock_fs::command_path(ctx_a.cargo_target_dir())
+            .to_string_lossy()
+            .into_owned();
+        let mut cmd = ProcessCommand::new("prog");
+        apply_ctx(&mut cmd, &ctx_a);
+        let envs_a: HashMap<String, String> = cmd
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|value| value.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                )
+            })
+            .collect();
+        assert_eq!(envs_a.get("CARGO_TARGET_DIR"), Some(&expected_default));
+        drop(temp_a);
+
+        // Override branch: an explicit CARGO_TARGET_DIR env mapping wins over
+        // the executor default.
+        let (temp_b, ctx_b) = make_ctx(&[("CARGO_TARGET_DIR", "custom-target"), ("FOO", "bar")]);
+        let mut cmd = ProcessCommand::new("prog");
+        apply_ctx(&mut cmd, &ctx_b);
+        let envs_b: HashMap<String, String> = cmd
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|value| value.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            envs_b.get("CARGO_TARGET_DIR").map(String::as_str),
+            Some("custom-target")
+        );
+        assert_eq!(envs_b.get("FOO").map(String::as_str), Some("bar"));
+        drop(temp_b);
+    }
+
+    #[test]
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    fn apply_ctx_sets_working_directory_from_guarded_cwd() {
+        let (_temp, ctx) = make_ctx(&[]);
+        let mut cmd = ProcessCommand::new("prog");
+        apply_ctx(&mut cmd, &ctx);
+        let expected = oxdock_fs::command_path(match ctx.cwd() {
+            PolicyPath::Guarded(guarded) => guarded,
+            PolicyPath::Unguarded(_) => panic!("expected guarded cwd"),
+        });
+        assert_eq!(cmd.get_current_dir(), Some(expected.as_ref()));
+    }
+
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    #[test]
+    fn command_builder_snapshot_tracks_configuration() {
+        let temp = GuardedPath::tempdir().expect("tempdir");
+        let dir = temp.as_guarded_path().display().to_string();
+
+        let mut builder = CommandBuilder::new("prog");
+        builder.arg("a").args(["b", "c"]);
+        builder.env("K", "V");
+        builder.env("K", "V2"); // re-set replaces the earlier entry
+        builder.env("GONE", "x");
+        builder.env_remove("GONE");
+        builder.current_dir(&dir);
+
+        let snap = builder.snapshot();
+        assert_eq!(snap.program, OsString::from("prog"));
+        assert_eq!(
+            snap.args,
+            vec![
+                OsString::from("a"),
+                OsString::from("b"),
+                OsString::from("c")
+            ]
+        );
+        assert!(
+            snap.envs
+                .contains(&(OsString::from("K"), OsString::from("V2")))
+        );
+        assert!(
+            !snap.envs.iter().any(|(k, _)| k == "GONE"),
+            "env_remove must drop tracked entries"
+        );
+        assert_eq!(snap.cwd.as_deref(), Some(std::path::Path::new(&dir)));
+    }
+}
+
+// Unit tests for the Miri-only synthetic process backend. This module only
+// compiles under Miri, where the CI `cargo miri test` job exercises it.
+#[cfg(all(miri, test))]
+mod synthetic_backend_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn miri_ctx(envs: &[(&str, &str)]) -> (GuardedPath, CommandContext) {
+        let temp = GuardedPath::tempdir().expect("tempdir");
+        let guard = temp.as_guarded_path().clone();
+        let cwd: PolicyPath = guard.clone().into();
+        let map: HashMap<String, String> = envs
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect();
+        let ctx = CommandContext::new(&cwd, &map, &guard, &guard, &guard);
+        (guard, ctx)
+    }
+
+    #[test]
+    fn split_redirect_separates_target_and_trims() {
+        assert_eq!(
+            split_redirect("echo hi > out.txt"),
+            ("echo hi".to_string(), Some("out.txt".to_string()))
+        );
+        assert_eq!(
+            split_redirect("echo hi >> app.txt"),
+            ("echo hi".to_string(), Some("app.txt".to_string()))
+        );
+        assert_eq!(split_redirect("  echo hi  "), ("echo hi".to_string(), None));
+    }
+
+    #[test]
+    fn normalize_shell_strips_platform_wrappers() {
+        assert_eq!(normalize_shell("sh -c \"echo hi\""), "echo hi");
+        assert_eq!(normalize_shell("cmd /C \"echo hi\""), "echo hi");
+        assert_eq!(normalize_shell("  echo hi "), "echo hi");
+    }
+
+    #[test]
+    fn expand_env_supports_brace_and_dollar_forms() {
+        let (_root, ctx) = miri_ctx(&[("FOO", "bar")]);
+
+        assert_eq!(expand_env("{{ env:FOO }}!", &ctx), "bar!");
+        assert_eq!(expand_env("$FOO!", &ctx), "bar!");
+        assert_eq!(expand_env("${FOO}!", &ctx), "bar!");
+        assert_eq!(expand_env("cost $$5", &ctx), "cost $$5");
+        assert_eq!(expand_env("[${MISSING_XYZ}]", &ctx), "[]");
+
+        let target = expand_env("${CARGO_TARGET_DIR}", &ctx);
+        assert!(!target.is_empty(), "executor default must resolve");
+    }
+
+    #[test]
+    fn parse_command_interprets_sleep_exit_and_echo() {
+        let (_root, ctx) = miri_ctx(&[]);
+        let resolver = PathResolver::new(
+            ctx.workspace_root().as_path(),
+            ctx.build_context().as_path(),
+        )
+        .expect("resolver");
+
+        let (action, duration, code) =
+            parse_command("sleep 0.05", &ctx, &resolver, false).expect("sleep");
+        assert!(action.is_none());
+        assert_eq!(duration, std::time::Duration::from_millis(50));
+        assert!(code.is_none());
+
+        let (action, _, code) = parse_command("exit 7", &ctx, &resolver, false).expect("exit");
+        assert!(action.is_none());
+        assert_eq!(code, Some(7));
+
+        let (action, _, _) = parse_command("echo hi", &ctx, &resolver, true).expect("echo");
+        match action {
+            Some(CommandAction::Stdout { data }) => assert_eq!(data, b"hi\n"),
+            _ => panic!("expected stdout action for captured echo"),
+        }
+
+        // Without capture, echo is a no-op.
+        let (action, _, _) = parse_command("echo hi", &ctx, &resolver, false).expect("echo quiet");
+        assert!(action.is_none());
+    }
+
+    #[test]
+    fn parse_command_unknown_commands_are_noop_success() {
+        let (_root, ctx) = miri_ctx(&[]);
+        let resolver = PathResolver::new(
+            ctx.workspace_root().as_path(),
+            ctx.build_context().as_path(),
+        )
+        .expect("resolver");
+
+        let (action, duration, code) =
+            parse_command("cargo build --release", &ctx, &resolver, true).expect("unknown");
+        assert!(action.is_none());
+        assert_eq!(duration, std::time::Duration::ZERO);
+        assert!(code.is_none());
+    }
+
+    #[test]
+    fn parse_command_printf_redirects_write_into_workspace() {
+        let (_root, ctx) = miri_ctx(&[]);
+        let resolver = PathResolver::new(
+            ctx.workspace_root().as_path(),
+            ctx.build_context().as_path(),
+        )
+        .expect("resolver");
+
+        let (action, _, _) = parse_command(
+            "printf %s \"file-body\" > nested/out.txt",
+            &ctx,
+            &resolver,
+            false,
+        )
+        .expect("redirect write");
+
+        match action {
+            Some(CommandAction::Write { target, data }) => {
+                assert_eq!(data, b"file-body");
+                assert!(target.as_path().starts_with(ctx.workspace_root().as_path()));
+                assert!(target.as_path().ends_with("nested/out.txt"));
+            }
+            _ => panic!("expected write action"),
+        }
     }
 }

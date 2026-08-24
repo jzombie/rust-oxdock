@@ -20,7 +20,6 @@ proc-macro = true
 [features]
 default = []
 # Expose test utilities (e.g., DSL tokenizers) for dev/test builds.
-test-support = []
 
 [dependencies]
 anyhow.workspace = true

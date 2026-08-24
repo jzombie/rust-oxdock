@@ -79,4 +79,34 @@ mod tests {
         assert_eq!(env.get("CARGO_FEATURE_OXDOCK_TEST"), Some(&"1".into()));
         assert_eq!(env.get("CARGO_CFG_OXDOCK_TEST"), Some(&"enabled".into()));
     }
+
+    #[test]
+    fn collect_derives_feature_keys_from_cfg_feature_list() {
+        let temp = GuardedPath::tempdir().expect("tempdir");
+        let root = temp.as_guarded_path().clone();
+        let _guard = manifest_env_guard(&root, true);
+        let _cfg = TestEnvGuard::set("CARGO_CFG_FEATURE", "my-feat, other_feat,,  spaced ");
+        let env = BuiltinEnv::collect(&root).into_envs();
+
+        // Dashes become underscores; names uppercase; empty segments dropped.
+        assert_eq!(env.get("CARGO_FEATURE_MY_FEAT"), Some(&"1".to_string()));
+        assert_eq!(env.get("CARGO_FEATURE_OTHER_FEAT"), Some(&"1".to_string()));
+        assert_eq!(env.get("CARGO_FEATURE_SPACED"), Some(&"1".to_string()));
+    }
+
+    #[test]
+    fn collect_prefers_existing_feature_env_over_derived_value() {
+        let temp = GuardedPath::tempdir().expect("tempdir");
+        let root = temp.as_guarded_path().clone();
+        let _guard = manifest_env_guard(&root, true);
+        let _cfg = TestEnvGuard::set("CARGO_CFG_FEATURE", "my-feat");
+        let _existing = TestEnvGuard::set("CARGO_FEATURE_MY_FEAT", "custom");
+        let env = BuiltinEnv::collect(&root).into_envs();
+
+        assert_eq!(
+            env.get("CARGO_FEATURE_MY_FEAT"),
+            Some(&"custom".to_string()),
+            "derived '1' must not overwrite an explicit env value"
+        );
+    }
 }

@@ -46,6 +46,10 @@ Prefer explicit, test-only skips over runtime detection.
 - **Testing**: Prefer `cargo test --workspace --tests` to cover all crates; fixtures for the macros live under `crates/oxdock-logic-tests/fixtures/integration/buildtime_macros`.
 - **Workspace layout**: Internal crates live under `crates`; the CLI & build-time macros sit at the workspace root.
 
+## Process-Manager Boundary (decision record)
+
+`oxdock-process` and term-wm's PTY stack stay **independent**: batch script-to-completion orchestration vs. interactive PTY/vt100 streaming are disjoint mechanics with conflicting constraints (sync/std/Miri-clean vs. thread+channel event loops). The only genuine overlap — `shell_program()` shell resolution and `is_pid_alive()` liveness probing in `oxdock-fs` (backing the tempdir PID-lock GC) — is behavior-pinned by tests, so if duplication ever hurts, extraction into a small shared micro-crate is a mechanical follow-up. Do not introduce cross-dependencies between these projects without revisiting that assessment.
+
 ## Workflow
 
 - **Autonomy**: When test failures are reported or observed, proceed to investigate and fix them without asking for confirmation unless there are multiple viable options or the change is risky/behavior-altering.

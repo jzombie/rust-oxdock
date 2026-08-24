@@ -94,8 +94,14 @@ impl GuardedPath {
         configure(&mut builder);
         let tempdir = builder.tempdir()?;
         let guard = GuardedPath::new_root(tempdir.path())?;
-        write_temp_marker(&guard)?;
+        // Write the PID lock BEFORE the marker: cleanup scans on marker
+        // existence and reclaims marker-without-lock dirs, so publishing the
+        // marker last makes this directory invisible to a concurrent startup
+        // sweep until the lock (with our live PID) is durably in place. The
+        // accepted trade-off is that a crash inside this two-write window
+        // leaves an unmarked dir the GC never reclaims.
         let lock = write_temp_lock(&guard)?;
+        write_temp_marker(&guard)?;
         Ok(GuardedTempDir::new(guard, Some(tempdir), Some(lock)))
     }
 
@@ -765,5 +771,229 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&leaked);
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    fn plant_marked_dir(
+        base: &std::path::Path,
+        name: &str,
+        lock_bytes: Option<Vec<u8>>,
+        with_marker: bool,
+    ) -> std::path::PathBuf {
+        let dir = base.join(name);
+        std::fs::create_dir_all(&dir).expect("plant dir");
+        if with_marker {
+            std::fs::write(dir.join(OXDOCK_TEMP_MARKER), b"oxdock-tempdir").expect("marker");
+        }
+        if let Some(bytes) = lock_bytes {
+            std::fs::write(dir.join(OXDOCK_TEMP_LOCK), bytes).expect("lock");
+        }
+        dir
+    }
+
+    /// Pins the full reclaim/skip decision matrix of the stale-tempdir GC,
+    /// including the corrupt-lock trade-off: an unreadable/unparseable lock
+    /// falls through to RECLAIM because the marker proves ownership and a
+    /// crashed writer must stay recoverable (see plan D2).
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    #[cfg_attr(
+        miri,
+        ignore = "plants host tempdir fixtures; blocked under Miri isolation"
+    )]
+    #[test]
+    fn cleanup_decision_matrix_pins_reclaim_semantics() {
+        let base = std::env::temp_dir().join(format!("oxdock-matrix-{}", std::process::id()));
+        std::fs::create_dir_all(&base).expect("sandbox");
+
+        let self_pid = std::process::id();
+        let removed: Vec<std::path::PathBuf> = vec![
+            plant_marked_dir(&base, "oxdock-empty-lock", Some(Vec::new()), true),
+            plant_marked_dir(
+                &base,
+                "oxdock-garbage-lock",
+                Some(b"not-a-pid".to_vec()),
+                true,
+            ),
+            plant_marked_dir(
+                &base,
+                "oxdock-multiline-lock",
+                Some(b"123\n456".to_vec()),
+                true,
+            ),
+            plant_marked_dir(&base, "oxdock-negative-lock", Some(b"-5".to_vec()), true),
+            plant_marked_dir(&base, "oxdock-non-utf8-lock", Some(vec![0xff, 0xfe]), true),
+            plant_marked_dir(&base, "oxdock-missing-lock", None, true),
+        ];
+        let kept: Vec<std::path::PathBuf> = vec![
+            // Whitespace around a valid live PID still parses and keeps the dir.
+            plant_marked_dir(
+                &base,
+                "oxdock-padded-live-lock",
+                Some(format!("\n {self_pid}\n ").into_bytes()),
+                true,
+            ),
+            // Lock present but marker absent: invisible to the sweep by design
+            // (this is the invariant the lock-before-marker creation order
+            // relies on).
+            plant_marked_dir(
+                &base,
+                "oxdock-locked-unmarked",
+                Some(self_pid.to_string().into_bytes()),
+                false,
+            ),
+            // Prefixed non-directory entries are ignored.
+            {
+                let file = base.join("oxdock-stray-file.txt");
+                std::fs::write(&file, b"x").expect("stray file");
+                file
+            },
+            // Unmarked prefixed directory: not provably ours... actually it IS
+            // skipped because the marker gate runs first.
+            plant_marked_dir(&base, "oxdock-plain-unmarked", None, false),
+        ];
+
+        cleanup_marked_tempdirs_in(base.clone()).expect("sweep");
+
+        for path in &removed {
+            assert!(!path.exists(), "expected reclaim: {}", path.display());
+        }
+        for path in &kept {
+            assert!(path.exists(), "expected keep: {}", path.display());
+        }
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The system's raison d'être: a marked tempdir whose lock names a
+    /// genuinely dead (spawned + reaped) owner gets reclaimed.
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    #[cfg_attr(
+        miri,
+        ignore = "spawns a probe process and touches host tempdirs; blocked under Miri"
+    )]
+    #[test]
+    fn cleanup_reclaims_tempdir_of_reaped_owner() {
+        let mut child = {
+            #[cfg(windows)]
+            {
+                std::process::Command::new("cmd")
+                    .args(["/C", "exit 0"])
+                    .spawn()
+                    .expect("spawn probe")
+            }
+            #[cfg(not(windows))]
+            {
+                std::process::Command::new("sh")
+                    .args(["-c", "exit 0"])
+                    .spawn()
+                    .expect("spawn probe")
+            }
+        };
+        child.wait().expect("reap probe");
+        let dead_pid = child.id();
+
+        let base = std::env::temp_dir().join(format!("oxdock-dead-owner-{}", std::process::id()));
+        std::fs::create_dir_all(&base).expect("sandbox");
+        let stale = plant_marked_dir(
+            &base,
+            "oxdock-victim",
+            Some(format!("{dead_pid}").into_bytes()),
+            true,
+        );
+
+        cleanup_marked_tempdirs_in(base.clone()).expect("sweep");
+        assert!(!stale.exists(), "tempdir of reaped owner must be reclaimed");
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg_attr(miri, ignore = "liveness probing is stubbed to true under Miri")]
+    #[test]
+    fn is_pid_alive_probes_known_pids() {
+        assert!(!is_pid_alive(0), "PID 0 is never a live owner");
+        assert!(is_pid_alive(std::process::id()), "own PID must read alive");
+    }
+
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    #[cfg_attr(miri, ignore = "spawns a probe process; blocked under Miri isolation")]
+    #[test]
+    fn is_pid_alive_reports_reaped_child_dead() {
+        let mut child = {
+            #[cfg(windows)]
+            {
+                std::process::Command::new("cmd")
+                    .args(["/C", "exit 0"])
+                    .spawn()
+                    .expect("spawn probe")
+            }
+            #[cfg(not(windows))]
+            {
+                std::process::Command::new("sh")
+                    .args(["-c", "exit 0"])
+                    .spawn()
+                    .expect("spawn probe")
+            }
+        };
+        child.wait().expect("reap probe");
+        assert!(
+            !is_pid_alive(child.id()),
+            "a reaped child's PID must report dead (modulo exotic PID reuse)"
+        );
+    }
+
+    /// Contract test for what `tempdir_with` actually writes: caller-supplied
+    /// builder configuration applies, the marker identifies ownership, and
+    /// the lock carries our PID followed by a newline.
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    #[cfg_attr(
+        miri,
+        ignore = "GuardedPath::tempdir relies on OS tempdirs; blocked under Miri isolation"
+    )]
+    #[test]
+    fn tempdir_with_custom_configurator_writes_marker_and_pid_lock() {
+        let temp = GuardedPath::tempdir_with(|builder| {
+            builder.prefix("oxdock-contract-");
+        })
+        .expect("dir");
+        let path = temp.as_guarded_path().to_path_buf();
+
+        let name = path
+            .file_name()
+            .expect("name")
+            .to_string_lossy()
+            .into_owned();
+        assert!(
+            name.starts_with("oxdock-contract-"),
+            "custom prefix applied: {name}"
+        );
+
+        let marker = std::fs::read(path.join(OXDOCK_TEMP_MARKER)).expect("marker readable");
+        assert_eq!(marker, b"oxdock-tempdir".to_vec());
+
+        let lock = std::fs::read_to_string(path.join(OXDOCK_TEMP_LOCK)).expect("lock readable");
+        assert_eq!(lock, format!("{}\n", std::process::id()));
+    }
+
+    /// `into_parts` transfers persistence ownership to the caller: the
+    /// directory survives losing the `GuardedTempDir`, and is removed only
+    /// when the handed-out `TempDir` itself drops.
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    #[cfg_attr(
+        miri,
+        ignore = "GuardedPath::tempdir relies on OS tempdirs; blocked under Miri isolation"
+    )]
+    #[test]
+    fn into_parts_transfers_ownership_beyond_guard_drop() {
+        let temp = GuardedPath::tempdir().expect("dir");
+        let path = temp.as_guarded_path().to_path_buf();
+
+        let (inner, guard) = temp.into_parts();
+        drop(guard);
+
+        let inner = inner.expect("host tempdir present");
+        assert!(path.exists(), "survives guard drop while persisted");
+
+        drop(inner);
+        assert!(!path.exists(), "dropping the TempDir removes it");
     }
 }

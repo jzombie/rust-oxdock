@@ -302,8 +302,17 @@ fn load_workspace_dependencies(
             out.insert(name.to_string(), version.to_string());
             continue;
         }
+        // Workspace deps appear both as standard tables
+        // (`name = { version = ".." }` spans multiple lines) and as inline
+        // tables; both must contribute their version.
         if let Some(table) = item.as_table()
             && let Some(version) = table.get("version").and_then(|v| v.as_str())
+        {
+            out.insert(name.to_string(), version.to_string());
+            continue;
+        }
+        if let Some(inline) = item.as_inline_table()
+            && let Some(version) = inline.get("version").and_then(|v| v.as_str())
         {
             out.insert(name.to_string(), version.to_string());
         }
@@ -389,6 +398,235 @@ mod tests {
             Some("4.5.6")
         );
 
+        Ok(())
+    }
+
+    #[cfg_attr(
+        miri,
+        ignore = "load_workspace_dependencies performs an unguarded host read"
+    )]
+    #[test]
+    fn workspace_version_autofill_replaces_only_flagged_entries() -> Result<()> {
+        let tempdir = GuardedPath::tempdir()?;
+        let root = tempdir.as_guarded_path().clone();
+        let resolver = PathResolver::new_guarded(root.clone(), root.clone())?;
+
+        // A stand-in workspace manifest whose dependency versions are canonical.
+        let ws_manifest = indoc! {r#"
+            [workspace.dependencies]
+            anyhow = "1.9.9"
+            oxdock-fs = { version = "7.7.7", path = "crates/sys/oxdock-fs" }
+            unrelated = "3.3.3"
+        "#};
+        let ws_dir = root.join("ws")?;
+        resolver.create_dir_all(&ws_dir)?;
+        resolver.write_file(&ws_dir.join("Cargo.toml")?, ws_manifest.as_bytes())?;
+
+        // Fixture manifest: only `workspace = true` entries may be rewritten.
+        let manifest = indoc! {r#"
+            [dependencies]
+            anyhow = "0.0.1-placeholder"
+            oxdock-fs = { workspace = true }
+        "#};
+        let manifest_path = root.join("Cargo.toml")?;
+        resolver.write_file(&manifest_path, manifest.as_bytes())?;
+
+        patch_manifest(&resolver, &root, &BTreeMap::new(), Some(ws_dir.as_path()))?;
+
+        let doc = resolver
+            .read_to_string(&manifest_path)?
+            .parse::<DocumentMut>()?;
+        assert_eq!(
+            doc["dependencies"]["oxdock-fs"]["version"].as_str(),
+            Some("7.7.7"),
+            "workspace-flagged dep must adopt the workspace version"
+        );
+        assert!(doc["dependencies"]["oxdock-fs"].get("workspace").is_none());
+        assert_eq!(
+            doc["dependencies"]["anyhow"].as_str(),
+            Some("0.0.1-placeholder"),
+            "unflagged deps must stay untouched even when listed in the workspace"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn path_replacement_converts_plain_string_dep_to_inline_table() -> Result<()> {
+        let tempdir = GuardedPath::tempdir()?;
+        let root = tempdir.as_guarded_path().clone();
+        let resolver = PathResolver::new_guarded(root.clone(), root.clone())?;
+
+        let manifest_path = root.join("Cargo.toml")?;
+        resolver.write_file(
+            &manifest_path,
+            br#"
+[dependencies]
+bar = "0.9.0"
+"#,
+        )?;
+
+        let mut replacements = BTreeMap::new();
+        let dep_path = root.join("vendored/bar")?;
+        replacements.insert(
+            "bar".to_string(),
+            DependencyReplacement::Path(dep_path.as_path().to_path_buf()),
+        );
+        patch_manifest(&resolver, &root, &replacements, None)?;
+
+        let doc = resolver
+            .read_to_string(&manifest_path)?
+            .parse::<DocumentMut>()?;
+        assert_eq!(
+            doc["dependencies"]["bar"]["version"].as_str(),
+            Some("0.9.0"),
+            "existing version is carried into the inline table"
+        );
+        assert_eq!(
+            doc["dependencies"]["bar"]["path"].as_str(),
+            Some(path_string(dep_path.as_path()).as_str())
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn path_replacement_applies_to_table_form_dependency() -> Result<()> {
+        let tempdir = GuardedPath::tempdir()?;
+        let root = tempdir.as_guarded_path().clone();
+        let resolver = PathResolver::new_guarded(root.clone(), root.clone())?;
+
+        let manifest_path = root.join("Cargo.toml")?;
+        resolver.write_file(
+            &manifest_path,
+            br#"
+[dependencies]
+qux = { version = "1.0.0", features = ["full"] }
+"#,
+        )?;
+
+        let mut replacements = BTreeMap::new();
+        let dep_path = root.join("local/qux")?;
+        replacements.insert(
+            "qux".to_string(),
+            DependencyReplacement::Path(dep_path.as_path().to_path_buf()),
+        );
+        patch_manifest(&resolver, &root, &replacements, None)?;
+
+        let doc = resolver
+            .read_to_string(&manifest_path)?
+            .parse::<DocumentMut>()?;
+        assert_eq!(
+            doc["dependencies"]["qux"]["path"].as_str(),
+            Some(path_string(dep_path.as_path()).as_str())
+        );
+        assert_eq!(
+            doc["dependencies"]["qux"]["features"][0].as_str(),
+            Some("full"),
+            "table-form metadata must survive the patch"
+        );
+        Ok(())
+    }
+
+    #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+    #[cfg_attr(miri, ignore = "copies through unguarded host directories")]
+    #[test]
+    fn copy_fixture_template_skips_target_and_copies_nested_files() -> Result<()> {
+        let tempdir = GuardedPath::tempdir()?;
+        let root = tempdir.as_guarded_path().clone();
+        let resolver = PathResolver::new_guarded(root.clone(), root.clone())?;
+
+        // Build a template tree by hand.
+        let template = root.join("tpl")?;
+        resolver.create_dir_all(&template)?;
+        resolver.write_file(&template.join("Cargo.toml")?, b"[package]\n")?;
+        resolver.ensure_parent_dir(&template.join("src/lib.rs")?)?;
+        resolver.write_file(&template.join("src/lib.rs")?, b"pub fn f() {}\n")?;
+        resolver.ensure_parent_dir(&template.join("assets/data.txt")?)?;
+        resolver.write_file(&template.join("assets/data.txt")?, b"data\n")?;
+
+        // `target/` is copied via unguarded fs, so plant it directly.
+        let target_dir = template.as_path().join("target");
+        std::fs::create_dir_all(&target_dir)?;
+        std::fs::write(target_dir.join("junk.bin"), b"junk")?;
+
+        let dst = root.join("instance")?;
+        copy_fixture_template(
+            &resolver,
+            &UnguardedPath::new(template.as_path().to_path_buf()),
+            &dst,
+        )?;
+
+        assert_eq!(
+            resolver.read_file(&dst.join("Cargo.toml")?)?,
+            b"[package]\n"
+        );
+        assert_eq!(
+            resolver.read_file(&dst.join("src/lib.rs")?)?,
+            b"pub fn f() {}\n"
+        );
+        assert_eq!(
+            resolver.read_file(&dst.join("assets/data.txt")?)?,
+            b"data\n"
+        );
+        let junk = dst.join("target/junk.bin")?;
+        assert!(
+            !resolver.exists(&junk),
+            "build-artifact directory must be skipped during template copy"
+        );
+        Ok(())
+    }
+
+    #[cfg_attr(
+        miri,
+        ignore = "FixtureBuilder::new probes the host filesystem for existence"
+    )]
+    #[test]
+    fn builder_new_reports_missing_template() {
+        let err = match FixtureBuilder::new("/definitely/not/a/real/template-dir") {
+            Ok(_) => panic!("missing template must be rejected"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("does not exist"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[cfg_attr(miri, ignore = "instantiation copies a host template directory")]
+    #[test]
+    fn instantiated_fixture_scopes_cargo_and_injects_workspace_root() -> Result<()> {
+        // Template with a single file so instantiation has something to copy.
+        let staging = GuardedPath::tempdir()?;
+        let stage_root = staging.as_guarded_path().clone();
+        let stage_resolver = PathResolver::new_guarded(stage_root.clone(), stage_root.clone())?;
+        let template = stage_root.join("template")?;
+        stage_resolver.create_dir_all(&template)?;
+        stage_resolver.write_file(&template.join("Cargo.toml")?, b"[package]\n")?;
+
+        let instance = FixtureBuilder::new(template.as_path())?
+            .with_workspace_root("/original/repo")
+            .instantiate()?;
+
+        let snap = instance.cargo().snapshot();
+        assert_eq!(snap.program, std::ffi::OsString::from("cargo"));
+        let expected_cwd = command_path(instance.root()).into_owned();
+        assert_eq!(snap.cwd, Some(expected_cwd));
+        assert!(snap.envs.contains(&(
+            std::ffi::OsString::from("OXDOCK_WORKSPACE_ROOT"),
+            std::ffi::OsString::from("/original/repo")
+        )));
+
+        // Without the override, the env var must not appear.
+        let bare_template = stage_root.join("template2")?;
+        stage_resolver.create_dir_all(&bare_template)?;
+        stage_resolver.write_file(&bare_template.join("Cargo.toml")?, b"[package]\n")?;
+        let bare = FixtureBuilder::new(bare_template.as_path())?.instantiate()?;
+        let bare_snap = bare.cargo().snapshot();
+        assert!(
+            !bare_snap
+                .envs
+                .iter()
+                .any(|(k, _)| k == std::ffi::OsStr::new("OXDOCK_WORKSPACE_ROOT"))
+        );
         Ok(())
     }
 }

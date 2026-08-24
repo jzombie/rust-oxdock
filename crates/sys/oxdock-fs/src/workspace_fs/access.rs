@@ -219,3 +219,83 @@ impl PathResolver {
         self.check_access_with_root(&self.root, candidate, mode)
     }
 }
+
+#[cfg(test)]
+mod security_tests {
+    use crate::GuardedPath;
+    use crate::workspace_fs::PathResolver;
+
+    /// An adversarial symlink inside the root pointing OUTSIDE must never
+    /// yield a guarded path: canonicalization resolves the link and the
+    /// containment check rejects the resolved location.
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    #[cfg(not(miri))]
+    #[test]
+    fn guard_rejects_symlink_escaping_root() {
+        let inside = GuardedPath::tempdir().expect("inside root");
+        let outside = GuardedPath::tempdir().expect("outside target");
+        let root = inside.as_guarded_path().clone();
+
+        if !oxdock_sys_test_utils::can_create_symlinks(root.as_path()) {
+            eprintln!("skipping: symlink creation unavailable on this host");
+            return;
+        }
+
+        let escape_target = outside
+            .as_guarded_path()
+            .join("secret.txt")
+            .expect("target");
+        std::fs::write(escape_target.as_path(), b"leak").expect("outside file");
+
+        let link = root.join("door").expect("link path");
+        {
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(escape_target.as_path(), link.as_path())
+                .expect("create symlink");
+            #[cfg(windows)]
+            std::os::windows::fs::symlink_file(escape_target.as_path(), link.as_path())
+                .expect("create symlink");
+        }
+
+        // Direct guard construction.
+        let direct = GuardedPath::new(root.as_path(), link.as_path());
+        assert!(direct.is_err(), "symlink to outside root must be rejected");
+
+        // And through a resolver read.
+        let resolver = PathResolver::new_guarded(root.clone(), root.clone()).expect("resolver");
+        assert!(
+            resolver.read_file(&link).is_err(),
+            "reading through an escaping symlink must be rejected"
+        );
+    }
+
+    /// `..` traversal matrix: mid-path escapes are rejected, `..` that lands
+    /// back on the root itself is allowed, and climbing above the filesystem
+    /// root cannot smuggle a candidate past containment.
+    #[test]
+    fn traversal_matrix_is_clamped_to_root() {
+        let temp = GuardedPath::tempdir().expect("tempdir");
+        let root = temp.as_guarded_path().clone();
+        let resolver = PathResolver::new_guarded(root.clone(), root.clone()).expect("resolver");
+
+        assert!(
+            resolver
+                .resolve_read(&root, "sub/../../escape.txt")
+                .is_err(),
+            "mid-path traversal must be rejected"
+        );
+        assert!(
+            resolver.resolve_read(&root, "../../../escape.txt").is_err(),
+            "above-root traversal must be rejected"
+        );
+
+        let back_to_root = resolver.resolve_read(&root, "sub/..").expect("clamped");
+        assert_eq!(back_to_root.as_path(), root.as_path());
+
+        let dotform = resolver
+            .resolve_read(&root, "./sub/./file.txt")
+            .expect("dot components allowed");
+        assert!(dotform.as_path().starts_with(root.as_path()));
+        assert!(dotform.as_path().ends_with("sub/file.txt"));
+    }
+}

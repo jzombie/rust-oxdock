@@ -259,9 +259,7 @@ fn build_assets(
     span: proc_macro2::Span,
     out_dir: &GuardedPath,
 ) -> syn::Result<GuardedPath> {
-    let debug_embed = std::env::var("OXDOCK_EMBED_DEBUG")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
+    let debug_embed = embed_debug_enabled_from(std::env::var("OXDOCK_EMBED_DEBUG").ok());
 
     // Build in a temp dir; only the final workdir gets materialized into out_dir.
     let tempdir = GuardedPath::tempdir()
@@ -426,14 +424,27 @@ fn count_entries(dir: &GuardedPath, span: proc_macro2::Span) -> syn::Result<usiz
 /// Since `embed!` and `prepare!` can involve significant work (script execution,
 /// file I/O), running them during every keystroke analysis is undesirable.
 fn embed_execution_is_skipped() -> bool {
+    embed_execution_is_skipped_with(
+        |key| std::env::var(key).ok(),
+        || std::env::current_exe().ok(),
+    )
+}
+
+/// Pure form of [`embed_execution_is_skipped`] with injectable lookups so the
+/// branch matrix is unit-testable without mutating process-global state.
+#[allow(clippy::disallowed_types)]
+fn embed_execution_is_skipped_with(
+    env: impl Fn(&str) -> Option<String>,
+    current_exe: impl FnOnce() -> Option<std::path::PathBuf>,
+) -> bool {
     // Runtime check: rust-analyzer sets this variable in the proc-macro server process.
-    if std::env::var("RUST_ANALYZER_INTERNALS_DO_NOT_USE").is_ok() {
+    if env("RUST_ANALYZER_INTERNALS_DO_NOT_USE").is_some() {
         return true;
     }
 
     // Skip when running under a Miri-configured build (e.g., clippy with --cfg miri),
     // since proc-macro execution can touch filesystem APIs that Miri does not support.
-    if std::env::var("RUSTFLAGS")
+    if env("RUSTFLAGS")
         .map(|flags| flags.contains("--cfg miri"))
         .unwrap_or(false)
     {
@@ -441,8 +452,7 @@ fn embed_execution_is_skipped() -> bool {
     }
 
     // Fallback: Check executable name
-    if std::env::current_exe()
-        .ok()
+    if current_exe()
         .map(|pb| pb.to_string_lossy().contains("rust-analyzer"))
         .unwrap_or(false)
     {
@@ -453,11 +463,19 @@ fn embed_execution_is_skipped() -> bool {
     // If we are running inside VS Code (detected via VSCODE_PID), but TERM is missing,
     // it is likely a background analysis task (like rust-analyzer running cargo check)
     // rather than a user-initiated terminal command.
-    if std::env::var("VSCODE_PID").is_ok() && std::env::var("TERM").is_err() {
+    if env("VSCODE_PID").is_some() && env("TERM").is_none() {
         return true;
     }
 
     false
+}
+
+/// Truthiness rules for `OXDOCK_EMBED_DEBUG`: enabled by `1` or any casing of
+/// `true`; everything else (including absence) is disabled.
+fn embed_debug_enabled_from(value: Option<String>) -> bool {
+    value
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
 }
 
 enum MacroPlan {
@@ -976,5 +994,172 @@ mod tests {
         };
         visitor.visit_file(&file);
         visitor.matches
+    }
+
+    // ---------- hardening: escape rejection, skip predicates, IO edges ----------
+
+    #[test]
+    fn join_guard_rejects_paths_escaping_manifest_root() {
+        let temp = GuardedPath::tempdir().unwrap();
+        let base = temp.as_guarded_path().clone();
+
+        let err = join_guard(&base, "../outside.txt", proc_macro2::Span::call_site()).unwrap_err();
+        assert!(
+            err.to_string().contains("escapes"),
+            "escape attempts must be rejected, got: {err}"
+        );
+
+        // Deep escapes through nested parents are caught identically.
+        let deep = join_guard(
+            &base,
+            "a/b/../../../outside",
+            proc_macro2::Span::call_site(),
+        );
+        assert!(deep.is_err());
+    }
+
+    #[test]
+    fn join_guard_accepts_paths_within_root() {
+        let temp = GuardedPath::tempdir().unwrap();
+        let base = temp.as_guarded_path().clone();
+
+        let ok = join_guard(&base, "sub/dir/out", proc_macro2::Span::call_site())
+            .expect("in-root path must be accepted");
+        assert!(ok.as_path().starts_with(base.as_path()));
+
+        // `..` that clamps back to the root itself is still contained.
+        let clamp = join_guard(&base, "sub/..", proc_macro2::Span::call_site())
+            .expect("clamped path stays inside");
+        assert_eq!(clamp.as_path(), base.as_path());
+    }
+
+    #[test]
+    fn embed_skip_predicate_covers_all_branches() {
+        let clean = |_key: &str| None;
+        let no_exe = || None;
+
+        // Nothing set -> run normally.
+        assert!(!super::embed_execution_is_skipped_with(clean, no_exe));
+
+        // rust-analyzer runtime marker.
+        let ra_marker =
+            |key: &str| (key == "RUST_ANALYZER_INTERNALS_DO_NOT_USE").then(|| "1".to_string());
+        assert!(super::embed_execution_is_skipped_with(ra_marker, no_exe));
+
+        // Miri-configured RUSTFLAGS.
+        let miri_flags =
+            |key: &str| (key == "RUSTFLAGS").then(|| "--cfg miri -Zunstable-options".to_string());
+        assert!(super::embed_execution_is_skipped_with(miri_flags, no_exe));
+
+        let unrelated_flags = |key: &str| (key == "RUSTFLAGS").then(|| "-Dwarnings".to_string());
+        assert!(!super::embed_execution_is_skipped_with(
+            unrelated_flags,
+            no_exe
+        ));
+
+        // Executable-name fallback.
+        #[allow(clippy::disallowed_types)]
+        let ra_exe = std::path::PathBuf::from("/tools/rust-analyzer-proc-macro-srv");
+        assert!(super::embed_execution_is_skipped_with(clean, || Some(
+            ra_exe
+        )));
+        #[allow(clippy::disallowed_types)]
+        let cargo_exe = std::path::PathBuf::from("/bin/cargo");
+        assert!(!super::embed_execution_is_skipped_with(clean, || Some(
+            cargo_exe
+        )));
+
+        // VS Code background heuristic: VSCODE_PID without TERM.
+        let vscode_bg = |key: &str| match key {
+            "VSCODE_PID" => Some("4242".to_string()),
+            _ => None,
+        };
+        assert!(super::embed_execution_is_skipped_with(vscode_bg, no_exe));
+
+        let vscode_terminal = |key: &str| match key {
+            "VSCODE_PID" => Some("4242".to_string()),
+            "TERM" => Some("xterm-256color".to_string()),
+            _ => None,
+        };
+        assert!(!super::embed_execution_is_skipped_with(
+            vscode_terminal,
+            no_exe
+        ));
+    }
+
+    #[test]
+    fn embed_debug_flag_truthiness_matrix() {
+        for value in ["1", "true", "TRUE", "True"] {
+            assert!(
+                super::embed_debug_enabled_from(Some(value.to_string())),
+                "{value} must enable debug"
+            );
+        }
+        for value in ["0", "", "yes", "false"] {
+            assert!(
+                !super::embed_debug_enabled_from(Some(value.to_string())),
+                "{value} must not enable debug"
+            );
+        }
+        assert!(!super::embed_debug_enabled_from(None));
+    }
+
+    /// Runs `body` with a single tempdir serving as both the fake manifest
+    /// root (for `from_manifest_env` lookups) and the target directory.
+    fn in_manifest_scope<R>(body: impl FnOnce(&GuardedPath) -> R) -> R {
+        let temp = GuardedPath::tempdir().unwrap();
+        let root = temp.as_guarded_path().clone();
+        let _guard = manifest_env_guard(&root, true);
+        body(&root)
+    }
+
+    #[cfg_attr(miri, ignore = "clear_dir inspects real host directories")]
+    #[test]
+    fn clear_dir_reports_non_directory_destination() {
+        in_manifest_scope(|root| {
+            let resolver = PathResolver::new_guarded(root.clone(), root.clone()).unwrap();
+            let file = root.join("plain.txt").unwrap();
+            resolver.write_file(&file, b"x").unwrap();
+
+            let err = super::clear_dir(&file, proc_macro2::Span::call_site()).unwrap_err();
+            assert!(
+                err.to_string().contains("exists but is not a directory"),
+                "unexpected error: {err}"
+            );
+        });
+    }
+
+    #[cfg_attr(miri, ignore = "count_entries reads real host directories")]
+    #[test]
+    fn count_entries_counts_files_and_dirs() {
+        in_manifest_scope(|root| {
+            let resolver = PathResolver::new_guarded(root.clone(), root.clone()).unwrap();
+
+            // The tempdir root carries its own control files; assert on deltas.
+            let baseline = super::count_entries(root, proc_macro2::Span::call_site()).unwrap();
+            resolver.write_file(&root.join("a").unwrap(), b"1").unwrap();
+            resolver.create_dir_all(&root.join("b").unwrap()).unwrap();
+            assert_eq!(
+                super::count_entries(root, proc_macro2::Span::call_site()).unwrap(),
+                baseline + 2
+            );
+        });
+    }
+
+    #[test]
+    fn build_assets_reports_parse_errors_with_prefix() {
+        let out_dir = GuardedPath::tempdir().unwrap();
+        let err = in_manifest_scope(|_| {
+            super::build_assets(
+                "THIS IS NOT VALID DSL !!!",
+                proc_macro2::Span::call_site(),
+                out_dir.as_guarded_path(),
+            )
+            .expect_err("invalid DSL must fail")
+        });
+        assert!(
+            err.to_string().contains("parse error"),
+            "unexpected error: {err}"
+        );
     }
 }

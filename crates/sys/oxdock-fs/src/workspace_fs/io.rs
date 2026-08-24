@@ -329,4 +329,71 @@ mod tests {
             .remove_dir_all(&root.join("dir").expect("dir"))
             .expect("remove dir");
     }
+
+    fn symlink_capable_root() -> Option<(GuardedPath, PathResolver)> {
+        let temp = GuardedPath::tempdir().expect("tempdir");
+        let root = temp.as_guarded_path().clone();
+        if !oxdock_sys_test_utils::can_create_symlinks(root.as_path()) {
+            eprintln!("skipping: symlink creation unavailable on this host");
+            return None;
+        }
+        let resolver = PathResolver::new_guarded(root.clone(), root.clone()).expect("resolver");
+        Some((root, resolver))
+    }
+
+    #[cfg_attr(miri, ignore = "exercises real symlinks; blocked under Miri isolation")]
+    #[test]
+    fn symlink_rejects_existing_destination() {
+        let Some((root, resolver)) = symlink_capable_root() else {
+            return;
+        };
+
+        let src = root.join("src.txt").expect("src");
+        resolver.write_file(&src, b"body").expect("write src");
+        let dst = root.join("dst.txt").expect("dst");
+        resolver.write_file(&dst, b"existing").expect("write dst");
+
+        let err = resolver.symlink(&src, &dst).expect_err("must bail");
+        assert!(
+            err.to_string().contains("already exists"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[cfg_attr(miri, ignore = "exercises real symlinks; blocked under Miri isolation")]
+    #[test]
+    fn symlink_rejects_self_destination() {
+        let Some((root, resolver)) = symlink_capable_root() else {
+            return;
+        };
+
+        // The destination must not exist so we reach the identity check
+        // rather than tripping the earlier "already exists" gate.
+        let ghost = root.join("ghost-self.txt").expect("self");
+
+        let err = resolver.symlink(&ghost, &ghost).expect_err("must bail");
+        assert!(
+            err.to_string().contains("destination itself"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[cfg_attr(miri, ignore = "exercises real symlinks; blocked under Miri isolation")]
+    #[test]
+    fn symlink_creates_readable_link_within_workspace() {
+        let Some((root, resolver)) = symlink_capable_root() else {
+            return;
+        };
+
+        let src = root.join("real.txt").expect("src");
+        resolver
+            .write_file(&src, b"through-link")
+            .expect("write src");
+        let link = root.join("alias.txt").expect("link dst");
+
+        resolver.symlink(&src, &link).expect("symlink");
+
+        let contents = resolver.read_to_string(&link).expect("read through link");
+        assert_eq!(contents, "through-link");
+    }
 }

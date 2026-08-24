@@ -1,3 +1,0 @@
-READ {{ env:FOO }}
-
-READ "{{ env:BAR }}"

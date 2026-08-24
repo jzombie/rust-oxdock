@@ -269,6 +269,80 @@ mod tests {
         let cmd = launcher.program_arg("echo");
         assert_eq!(cmd.get_program(), OsStr::new("echo"));
     }
+
+    #[test]
+    fn shell_program_falls_back_to_default_without_env() {
+        let _lock = ENV_LOCK.lock().expect("env lock");
+        #[cfg(windows)]
+        {
+            let _guard = TestEnvGuard::remove("COMSPEC");
+            assert_eq!(shell_program(), "cmd");
+        }
+        #[cfg(not(windows))]
+        {
+            let _guard = TestEnvGuard::remove("SHELL");
+            assert_eq!(shell_program(), "sh");
+        }
+    }
+
+    #[test]
+    fn shell_cmd_applies_platform_flag_and_script() {
+        let cmd = shell_cmd("echo hi");
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        #[cfg(windows)]
+        assert_eq!(args, vec!["/C".to_string(), "echo hi".to_string()]);
+        #[cfg(not(windows))]
+        assert_eq!(args, vec!["-c".to_string(), "echo hi".to_string()]);
+    }
+
+    #[cfg_attr(
+        miri,
+        ignore = "spawns shell command; Miri does not support process execution"
+    )]
+    #[test]
+    fn shell_launcher_run_succeeds_on_zero_exit() {
+        let launcher = ShellLauncher;
+        let mut cmd = shell_cmd("exit 0");
+        launcher.run(&mut cmd).expect("zero exit should succeed");
+    }
+
+    #[cfg_attr(
+        miri,
+        ignore = "spawns shell command; Miri does not support process execution"
+    )]
+    #[test]
+    fn shell_launcher_run_reports_nonzero_status() {
+        let launcher = ShellLauncher;
+        let mut cmd = shell_cmd("exit 3");
+        let err = launcher.run(&mut cmd).expect_err("nonzero exit must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("failed with status"),
+            "unexpected error message: {msg}"
+        );
+    }
+
+    #[cfg_attr(
+        miri,
+        ignore = "spawns shell command; Miri does not support process execution"
+    )]
+    #[test]
+    fn shell_launcher_spawn_smoke() {
+        let launcher = ShellLauncher;
+        let mut cmd = shell_cmd("exit 0");
+        launcher.spawn(&mut cmd).expect("spawn should succeed");
+    }
+
+    #[test]
+    fn shell_launcher_with_stdins_none_passthrough_keeps_builder_usable() {
+        let launcher = ShellLauncher;
+        let mut cmd = launcher.program_arg("echo");
+        let same = launcher.with_stdins(&mut cmd, None);
+        assert_eq!(same.get_program(), OsStr::new("echo"));
+    }
 }
 
 #[cfg(test)]

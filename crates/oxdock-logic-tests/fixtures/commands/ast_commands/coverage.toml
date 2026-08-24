@@ -37,6 +37,8 @@ cases = [
   "semicolon",
   "cat_stdout",
   "cat_stdin",
+  "env_target_dir",
+  "inherit_env_blocking",
   "cwd_stdout",
   "with_io_bg",
   "copy_complex",

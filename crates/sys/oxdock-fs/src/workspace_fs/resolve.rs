@@ -337,4 +337,55 @@ mod tests {
             "expected error for relative path escaping workspace root"
         );
     }
+
+    #[cfg_attr(
+        miri,
+        ignore = "creates host files to resolve against; blocked under Miri isolation"
+    )]
+    #[test]
+    fn parse_env_path_normalizes_common_env_var_forms() {
+        let temp = GuardedPath::tempdir().unwrap();
+        let root = temp.as_guarded_path().clone();
+        let resolver = PathResolver::new_guarded(root.clone(), root.clone()).unwrap();
+
+        let file = root.join("target/data.txt").unwrap();
+        resolver.write_file(&file, b"env-form").unwrap();
+        let expected = file.as_path().to_string_lossy().to_string();
+
+        let plain = resolver
+            .parse_env_path(&root, "target/data.txt")
+            .expect("plain relative");
+        assert_eq!(plain.as_path().to_string_lossy(), expected);
+
+        for quoted in ["\"target/data.txt\"", "'target/data.txt'"] {
+            let resolved = resolver.parse_env_path(&root, quoted).expect("quoted form");
+            assert_eq!(resolved.as_path().to_string_lossy(), expected);
+        }
+
+        let backslashed = resolver
+            .parse_env_path(&root, "target\\data.txt")
+            .expect("backslash form");
+        assert_eq!(backslashed.as_path().to_string_lossy(), expected);
+
+        let padded = resolver
+            .parse_env_path(&root, "   target/data.txt   ")
+            .expect("whitespace trimmed");
+        assert_eq!(padded.as_path().to_string_lossy(), expected);
+
+        let absolute = format!("file:///{expected}");
+        let uri = resolver
+            .parse_env_path(&root, &absolute)
+            .expect("file:/// URI form");
+        assert_eq!(uri.as_path().to_string_lossy(), expected);
+    }
+
+    #[test]
+    fn parse_env_path_rejects_paths_outside_root() {
+        let temp = GuardedPath::tempdir().unwrap();
+        let root = temp.as_guarded_path().clone();
+        let resolver = PathResolver::new_guarded(root.clone(), root.clone()).unwrap();
+
+        let escape = resolver.parse_env_path(&root, "../outside.txt");
+        assert!(escape.is_err(), "env-supplied escapes must be rejected");
+    }
 }
