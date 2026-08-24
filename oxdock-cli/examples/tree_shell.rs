@@ -1,31 +1,47 @@
-// TODO: Rework this example; it's currently useless
+// Demo: build a small file tree with an embedded DSL script, then optionally
+// drop into an interactive shell inside it.
+//
+// Run without a shell:
+//   cargo run -p oxdock-cli --example tree_shell
+// Run and drop into the temp workspace once the script finishes:
+//   cargo run -p oxdock-cli --example tree_shell -- --shell
 
-use oxdock_cli::{parse_script, run_script};
-use oxdock_fs::GuardedPath;
+use oxdock_cli::{Options, ScriptSource, execute};
+use oxdock_fs::{GuardedPath, PathResolver};
 
-// Embedded DSL script: builds a small demo tree and drops you into a shell inside it.
 const SCRIPT: &str = r#"
-# Build a demo tree and explore it interactively.
-WORKDIR /
+# Build a demo tree to explore.
 MKDIR demo/assets
 MKDIR demo/logs
 WRITE demo/assets/hello.txt hello
 LS demo
-WORKDIR demo
-# To drop into the demo workspace after running the script, run this example with
-# the CLI `--shell` flag (e.g. `cargo run --example tree_shell -- --shell`).
 "#;
 
 fn main() -> anyhow::Result<()> {
+    let shell = std::env::args().skip(1).any(|arg| arg == "--shell");
+
     let temp = GuardedPath::tempdir()?;
     let root = temp.as_guarded_path().clone();
 
-    println!("temp workspace: {}", temp.display());
-    println!("script:\n{SCRIPT}");
-    println!(
-        "You'll be dropped into 'demo' inside the temp workspace. Exit the shell to finish the example.\n"
-    );
+    // Materialize the script inside the guarded temp workspace; the whole
+    // workspace (script included) disappears when `temp` drops at end of main.
+    let script_path = root.join("script.ox")?;
+    let resolver = PathResolver::new(root.as_path(), root.as_path())?;
+    resolver.write_file(&script_path, SCRIPT.as_bytes())?;
 
-    let steps = parse_script(SCRIPT)?;
-    run_script(&root, &steps)
+    println!("temp workspace: {}", temp.display());
+    println!("script:{SCRIPT}");
+    if shell {
+        println!(
+            "After the script runs you'll be dropped into the temp workspace. Exit the shell to finish.\n"
+        );
+    }
+
+    execute(
+        Options {
+            script: ScriptSource::Path(script_path),
+            shell,
+        },
+        root,
+    )
 }

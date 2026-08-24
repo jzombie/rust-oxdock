@@ -9,7 +9,7 @@ pub use builtin_env::BuiltinEnv;
 use oxdock_fs::{GuardedPath, PolicyPath};
 pub use oxdock_sys_test_utils::TestEnvGuard;
 use shell::shell_cmd;
-pub use shell::{ShellLauncher, shell_program};
+pub use shell::{ShellLauncher, shell_program, spawn_interactive_shell};
 use std::collections::HashMap;
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 use std::fs::File;
@@ -941,6 +941,7 @@ pub struct CommandBuilder {
     inner: ProcessCommand,
     program: OsString,
     args: Vec<OsString>,
+    envs: Vec<(OsString, OsString)>,
     cwd: Option<PathBuf>,
 }
 
@@ -952,6 +953,7 @@ impl CommandBuilder {
             inner: ProcessCommand::new(&prog),
             program: prog,
             args: Vec::new(),
+            envs: Vec::new(),
             cwd: None,
         }
     }
@@ -975,12 +977,18 @@ impl CommandBuilder {
     }
 
     pub fn env(&mut self, key: impl AsRef<OsStr>, value: impl AsRef<OsStr>) -> &mut Self {
-        self.inner.env(key, value);
+        let key = key.as_ref().to_os_string();
+        let value = value.as_ref().to_os_string();
+        self.inner.env(&key, &value);
+        self.envs.retain(|(k, _)| k != &key);
+        self.envs.push((key, value));
         self
     }
 
     pub fn env_remove(&mut self, key: impl AsRef<OsStr>) -> &mut Self {
+        let key = key.as_ref();
         self.inner.env_remove(key);
+        self.envs.retain(|(k, _)| k != key);
         self
     }
 
@@ -1057,6 +1065,7 @@ impl CommandBuilder {
         CommandSnapshot {
             program: self.program.clone(),
             args: self.args.clone(),
+            envs: self.envs.clone(),
             cwd: self.cwd.clone(),
         }
     }
@@ -1067,6 +1076,7 @@ impl CommandBuilder {
 pub struct CommandSnapshot {
     pub program: OsString,
     pub args: Vec<OsString>,
+    pub envs: Vec<(OsString, OsString)>,
     pub cwd: Option<PathBuf>,
 }
 

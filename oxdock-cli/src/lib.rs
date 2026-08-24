@@ -1,8 +1,8 @@
 use anyhow::{Context, Result, bail};
 use oxdock_fs::{GuardedPath, GuardedTempDir, PathResolver, discover_workspace_root};
-#[cfg(test)]
-use oxdock_process::CommandSnapshot;
-use oxdock_process::{CommandBuilder, SharedInput};
+#[cfg(windows)]
+use oxdock_process::CommandBuilder;
+use oxdock_process::SharedInput;
 use std::env;
 use std::io::{self, IsTerminal, Read};
 use std::sync::{Arc, Mutex};
@@ -316,141 +316,8 @@ fn shell_banner(cwd: &GuardedPath, workspace_root: &GuardedPath) -> String {
     "}
 }
 
-#[cfg(windows)]
-fn escape_for_cmd(s: &str) -> String {
-    // Escape characters that would otherwise be interpreted by cmd when echoed.
-    s.replace('^', "^^")
-        .replace('&', "^&")
-        .replace('|', "^|")
-        .replace('>', "^>")
-        .replace('<', "^<")
-}
-
-#[cfg(windows)]
-fn windows_banner_command(banner: &str, cwd: &GuardedPath) -> String {
-    let mut parts: Vec<String> = banner
-        .lines()
-        .map(|line| format!("echo {}", escape_for_cmd(line)))
-        .collect();
-    let cwd_path = oxdock_fs::command_path(cwd);
-    parts.push(format!(
-        "cd /d {}",
-        escape_for_cmd(&cwd_path.as_ref().display().to_string())
-    ));
-    parts.join(" && ")
-}
-
-// TODO: Migrate to oxdock-process crate so that Miri flags don't need to be handled here.
 fn run_shell(cwd: &GuardedPath, workspace_root: &GuardedPath) -> Result<()> {
-    let banner = shell_banner(cwd, workspace_root);
-
-    #[cfg(unix)]
-    {
-        let mut cmd = CommandBuilder::new(shell_program());
-        cmd.current_dir(cwd.as_path());
-
-        // Print a single banner inside the subshell, then exec the user's shell to stay interactive.
-        let script = format!("printf '%s\\n' \"{}\"; exec {}", banner, shell_program());
-        cmd.arg("-c").arg(script);
-
-        // Reattach stdin to the controlling TTY so a piped-in script can still open an interactive shell.
-        // Use `PathResolver::open_external_file` to centralize raw `File::open` usage.
-        #[cfg(not(miri))]
-        {
-            #[allow(clippy::disallowed_types)]
-            let tty_path = oxdock_fs::UnguardedPath::new("/dev/tty");
-            if let Ok(resolver) =
-                PathResolver::new(workspace_root.as_path(), workspace_root.as_path())
-                && let Ok(tty) = resolver.open_file_unguarded(&tty_path)
-            {
-                cmd.stdin_file(tty);
-            }
-        }
-
-        if try_shell_command_hook(&mut cmd)? {
-            return Ok(());
-        }
-
-        let status = cmd.status()?;
-        if !status.success() {
-            bail!("shell exited with status {}", status);
-        }
-        Ok(())
-    }
-
-    #[cfg(windows)]
-    {
-        // Launch via `start` so Windows opens a real interactive console window. Normalize the path
-        // and also set the parent process working directory to the temp workspace; this avoids
-        // start's `/D` parsing quirks on paths with spaces or verbatim prefixes.
-        let cwd_path = oxdock_fs::command_path(cwd);
-        let banner_cmd = windows_banner_command(&banner, cwd);
-        let mut cmd = CommandBuilder::new("cmd");
-        cmd.current_dir(cwd_path.as_ref())
-            .arg("/C")
-            .arg("start")
-            .arg("oxdock shell")
-            .arg("cmd")
-            .arg("/K")
-            .arg(banner_cmd);
-
-        if try_shell_command_hook(&mut cmd)? {
-            return Ok(());
-        }
-
-        // Fire-and-forget so the parent console regains control immediately; the child window is
-        // fully interactive. If the launch fails, surface the error right away.
-        cmd.spawn()
-            .context("failed to start interactive shell window")?;
-        Ok(())
-    }
-
-    #[cfg(not(any(unix, windows)))]
-    {
-        let _ = cwd;
-        bail!("interactive shell unsupported on this platform");
-    }
-}
-#[cfg(test)]
-type ShellCmdHook = dyn FnMut(&CommandSnapshot) -> Result<()> + Send;
-
-#[cfg(test)]
-thread_local! {
-    static SHELL_CMD_HOOK: std::cell::RefCell<Option<Box<ShellCmdHook>>> = std::cell::RefCell::new(None);
-}
-
-#[cfg(test)]
-fn set_shell_command_hook<F>(hook: F)
-where
-    F: FnMut(&CommandSnapshot) -> Result<()> + Send + 'static,
-{
-    SHELL_CMD_HOOK.with(|slot| {
-        *slot.borrow_mut() = Some(Box::new(hook));
-    });
-}
-
-#[cfg(test)]
-fn clear_shell_command_hook() {
-    SHELL_CMD_HOOK.with(|slot| {
-        *slot.borrow_mut() = None;
-    });
-}
-
-#[cfg(test)]
-fn try_shell_command_hook(cmd: &mut CommandBuilder) -> Result<bool> {
-    SHELL_CMD_HOOK.with(|slot| {
-        if let Some(hook) = slot.borrow_mut().as_mut() {
-            let snap = cmd.snapshot();
-            hook(&snap)?;
-            return Ok(true);
-        }
-        Ok(false)
-    })
-}
-
-#[cfg(not(test))]
-fn try_shell_command_hook(_cmd: &mut CommandBuilder) -> Result<bool> {
-    Ok(false)
+    oxdock_process::spawn_interactive_shell(cwd, workspace_root, &shell_banner(cwd, workspace_root))
 }
 
 // `command_path` now lives in `oxdock-fs` to centralize Path usage.
@@ -514,86 +381,6 @@ mod tests {
             observed.into_inner(),
             "shell runner closure should have been invoked"
         );
-        Ok(())
-    }
-
-    #[cfg(any(unix, windows))]
-    #[test]
-    fn run_shell_builds_command_for_platform() -> Result<()> {
-        let workspace = GuardedPath::tempdir()?;
-        let workspace_root = workspace.as_guarded_path().clone();
-        let cwd = workspace_root.join("subdir")?;
-        #[cfg(not(miri))]
-        {
-            let resolver = PathResolver::new(workspace_root.as_path(), workspace_root.as_path())?;
-            resolver.create_dir_all(&cwd)?;
-        }
-
-        let captured = std::sync::Arc::new(Mutex::new(None::<CommandSnapshot>));
-        let guard = captured.clone();
-        set_shell_command_hook(move |cmd| {
-            *guard.lock().unwrap() = Some(cmd.clone());
-            Ok(())
-        });
-        run_shell(&cwd, &workspace_root)?;
-        clear_shell_command_hook();
-
-        let snap = captured
-            .lock()
-            .unwrap()
-            .clone()
-            .expect("hook should capture snapshot");
-        let cwd_path = snap.cwd.expect("cwd should be set");
-        assert!(
-            cwd_path.ends_with("subdir"),
-            "expected cwd to include subdir, got {}",
-            cwd_path.display()
-        );
-
-        #[cfg(unix)]
-        {
-            let program = snap.program.to_string_lossy();
-            assert_eq!(program, shell_program(), "expected shell program name");
-            let args: Vec<_> = snap
-                .args
-                .iter()
-                .map(|s| s.to_string_lossy().to_string())
-                .collect();
-            assert_eq!(
-                args.len(),
-                2,
-                "expected two args (-c script), got {:?}",
-                args
-            );
-            assert_eq!(args[0], "-c");
-            assert!(
-                args[1].contains("exec"),
-                "expected script to exec the shell, got {:?}",
-                args[1]
-            );
-        }
-
-        #[cfg(windows)]
-        {
-            let program = snap.program.to_string_lossy().to_string();
-            assert_eq!(program, "cmd", "expected cmd.exe launcher");
-            let args: Vec<_> = snap
-                .args
-                .iter()
-                .map(|s| s.to_string_lossy().to_string())
-                .collect();
-            let banner_cmd = windows_banner_command(&shell_banner(&cwd, &workspace_root), &cwd);
-            let expected = vec![
-                "/C".to_string(),
-                "start".to_string(),
-                "oxdock shell".to_string(),
-                "cmd".to_string(),
-                "/K".to_string(),
-                banner_cmd,
-            ];
-            assert_eq!(args, expected, "expected exact windows shell argv");
-        }
-
         Ok(())
     }
 
@@ -708,68 +495,6 @@ mod windows_shell_tests {
         assert!(
             !as_str.starts_with(r"\\?\"),
             "expected non-verbatim path, got {as_str}"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn windows_banner_command_emits_all_lines() {
-        let banner = "line1\nline2\nline3";
-        let workspace = GuardedPath::tempdir().expect("tempdir");
-        let cwd = workspace.as_guarded_path().clone();
-        let cmd = windows_banner_command(banner, &cwd);
-        assert!(cmd.contains("line1"));
-        assert!(cmd.contains("line2"));
-        assert!(cmd.contains("line3"));
-        assert!(cmd.contains("cd /d "));
-    }
-
-    #[test]
-    fn run_shell_builds_windows_command() -> Result<()> {
-        let workspace = GuardedPath::tempdir_with(|builder| {
-            builder.prefix("oxdock shell win ");
-        })?;
-        let workspace_root = workspace.as_guarded_path().clone();
-        let cwd = workspace_root.join("subdir")?;
-        let resolver = PathResolver::new(workspace_root.as_path(), workspace_root.as_path())?;
-        resolver.create_dir_all(&cwd)?;
-
-        let captured = std::sync::Arc::new(Mutex::new(None::<CommandSnapshot>));
-        let guard = captured.clone();
-        set_shell_command_hook(move |cmd| {
-            *guard.lock().unwrap() = Some(cmd.clone());
-            Ok(())
-        });
-        run_shell(&cwd, &workspace_root)?;
-        clear_shell_command_hook();
-
-        let snap = captured
-            .lock()
-            .unwrap()
-            .clone()
-            .expect("hook should capture snapshot");
-        let program = snap.program.to_string_lossy().to_string();
-        assert_eq!(program, "cmd", "expected cmd.exe launcher");
-        let args: Vec<_> = snap
-            .args
-            .iter()
-            .map(|s| s.to_string_lossy().to_string())
-            .collect();
-        let banner_cmd = windows_banner_command(&shell_banner(&cwd, &workspace_root), &cwd);
-        let expected = vec![
-            "/C".to_string(),
-            "start".to_string(),
-            "oxdock shell".to_string(),
-            "cmd".to_string(),
-            "/K".to_string(),
-            banner_cmd,
-        ];
-        assert_eq!(args, expected, "expected exact windows shell argv");
-        let cwd_path = snap.cwd.expect("cwd should be set");
-        assert!(
-            cwd_path.ends_with("subdir"),
-            "expected cwd to include subdir, got {}",
-            cwd_path.display()
         );
         Ok(())
     }
