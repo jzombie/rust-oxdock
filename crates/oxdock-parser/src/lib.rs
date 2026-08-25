@@ -7,7 +7,9 @@ pub mod parser;
 pub use ast::*;
 pub use lexer::LANGUAGE_SPEC;
 #[cfg(feature = "proc-macro-api")]
-pub use macro_input::{parse_braced_tokens, script_from_braced_tokens};
+pub use macro_input::{
+    DslMacroInput, ScriptSource, parse_braced_tokens, script_from_braced_tokens,
+};
 pub use parser::parse_script;
 
 #[cfg(test)]

@@ -12,7 +12,7 @@
 
 use std::collections::{BTreeSet, HashSet};
 
-use oxdock_parser::{StepKind, TemplateString};
+use oxdock_parser::{GuardExpr, Step, StepKind, TemplateString};
 
 fn template_text(t: &TemplateString) -> &str {
     &t.0
@@ -125,6 +125,104 @@ fn collect_env_keys(out: &mut BTreeSet<String>, template: &str, assigned: &HashS
     }
 }
 
+/// Collect every environment variable name the script references — through
+/// `{{ env:KEY }}` placeholders in ANY template field of ANY step, and through
+/// `[env:KEY]` guard expressions (including nested `all`/`or`/`not` groups).
+///
+/// Used by fingerprinting so environment drift invalidates cached assets.
+pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
+    let mut keys = BTreeSet::new();
+
+    fn template_keys(out: &mut BTreeSet<String>, t: &TemplateString) {
+        out.extend(env_placeholders(template_text(t)));
+    }
+
+    fn walk_guard(out: &mut BTreeSet<String>, expr: &GuardExpr) {
+        match expr {
+            GuardExpr::Predicate(predicate) => match predicate {
+                oxdock_parser::Guard::EnvExists { key, .. } => {
+                    out.insert(key.clone());
+                }
+                oxdock_parser::Guard::EnvEquals { key, value, .. } => {
+                    // The pair matters: same key with a different expected
+                    // value gates differently.
+                    out.insert(format!("{key}={value}"));
+                    out.insert(key.clone());
+                }
+                oxdock_parser::Guard::Platform { .. } => {}
+            },
+            GuardExpr::All(children) | GuardExpr::Or(children) => {
+                for child in children {
+                    walk_guard(out, child);
+                }
+            }
+            GuardExpr::Not(inner) => walk_guard(out, inner),
+        }
+    }
+
+    for step in steps {
+        if let Some(guard) = &step.guard {
+            walk_guard(&mut keys, guard);
+        }
+        match &step.kind {
+            StepKind::Workdir(t) => template_keys(&mut keys, t),
+            StepKind::Workspace(_) | StepKind::Cwd | StepKind::Exit(_) => {}
+            StepKind::Env { key: _, value } => template_keys(&mut keys, value),
+            StepKind::InheritEnv { keys: _ } => {}
+            StepKind::Run(t) | StepKind::Echo(t) | StepKind::RunBg(t) => {
+                template_keys(&mut keys, t)
+            }
+            StepKind::Copy { from, to, .. } => {
+                template_keys(&mut keys, from);
+                template_keys(&mut keys, to);
+            }
+            StepKind::Symlink { from, to } => {
+                template_keys(&mut keys, from);
+                template_keys(&mut keys, to);
+            }
+            StepKind::Mkdir(t) => template_keys(&mut keys, t),
+            StepKind::Ls(Some(t)) => template_keys(&mut keys, t),
+            StepKind::Ls(None) => {}
+            StepKind::Read(None) => {}
+            StepKind::Read(Some(t)) => template_keys(&mut keys, t),
+            StepKind::Write { path, contents } => {
+                template_keys(&mut keys, path);
+                if let Some(body) = contents {
+                    template_keys(&mut keys, body);
+                }
+            }
+            StepKind::WithIo { cmd, .. } => {
+                // WITH_IO wraps exactly one inner command; its templates are
+                // reached when the parser expands blocks, but keep a defensive
+                // single-level walk for safety.
+                collect_env_references_inner(&mut keys, cmd);
+            }
+            StepKind::WithIoBlock { .. } => {}
+            StepKind::CopyGit { rev, from, to, .. } => {
+                template_keys(&mut keys, rev);
+                template_keys(&mut keys, from);
+                template_keys(&mut keys, to);
+            }
+            StepKind::HashSha256 { path } => template_keys(&mut keys, path),
+        }
+    }
+
+    fn collect_env_references_inner(out: &mut BTreeSet<String>, kind: &StepKind) {
+        // Minimal re-walk for boxed WithIo inner commands.
+        let step_like = Step {
+            guard: None,
+            kind: kind.clone(),
+            scope_enter: 0,
+            scope_exit: 0,
+        };
+        for k in collect_env_references(std::slice::from_ref(&step_like)) {
+            out.insert(k);
+        }
+    }
+
+    keys
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,6 +257,46 @@ mod tests {
             "placeholder-first path has no static head to watch"
         );
         assert_eq!(env, vec!["ASSET_DIR".to_string()]);
+    }
+
+    #[test]
+    fn env_references_cover_all_step_kinds_and_guards() {
+        let steps = script_steps(
+            r#"
+            WORKDIR {{ env:WD }}
+            RUN echo {{ env:RUNV }}
+            COPY "{{ env:COPYV }}/x" out
+            WRITE out/f.txt {{ env:BODY }}
+            [env:GATE] {
+                ECHO gated
+            }
+            [env:A==1] ECHO eq
+            [or(env:X, env:Y)] ECHO either
+            "#,
+        );
+        let refs = collect_env_references(&steps);
+        for key in ["WD", "RUNV", "COPYV", "BODY"] {
+            assert!(refs.contains(key), "missing {key} in {refs:?}");
+        }
+        // Guard keys: plain existence, equality pair, and nested or-group.
+        assert!(refs.contains("GATE"), "{refs:?}");
+        assert!(refs.contains("A"), "{refs:?}");
+        assert!(refs.contains("X") && refs.contains("Y"), "{refs:?}");
+
+        // The ENV step's value template is not reachable through the string
+        // grammar, so exercise that traversal arm directly.
+        use oxdock_parser::{Step, TemplateString};
+        let env_step = Step {
+            guard: None,
+            kind: StepKind::Env {
+                key: "A".into(),
+                value: TemplateString("{{ env:SEED }}".into()),
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+        };
+        let refs = collect_env_references(std::slice::from_ref(&env_step));
+        assert!(refs.contains("SEED"), "{refs:?}");
     }
 
     #[test]

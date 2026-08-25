@@ -12,6 +12,16 @@ publish.workspace = true
 proc-macro = true
 
 [dependencies]
+anyhow.workspace = true
+oxdock-buildtime-helpers.workspace = true
+oxdock-core = { workspace = true }
+oxdock-embed.workspace = true
+oxdock-fs.workspace = true
+oxdock-parser = { workspace = true, features = ["proc-macro-api"] }
+oxdock-process = { workspace = true }
 proc-macro2.workspace = true
 quote.workspace = true
 syn.workspace = true
+
+[dev-dependencies]
+oxdock-sys-test-utils.workspace = true

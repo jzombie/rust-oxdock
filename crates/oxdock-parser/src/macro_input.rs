@@ -12,6 +12,74 @@
 use super::{Command, Step, parse_script};
 use anyhow::Result;
 use proc_macro2::{Delimiter, LineColumn, Spacing, TokenStream as TokenStream2, TokenTree};
+use syn::parse::{Parse, ParseStream};
+use syn::{Ident, LitStr, Token};
+
+/// Parsed macro arguments for `embed!` and `prepare!`.
+pub struct DslMacroInput {
+    pub name: Ident,
+    pub script: ScriptSource,
+    pub out_dir: LitStr,
+}
+
+/// The script payload, either as a literal string or a braced token stream.
+pub enum ScriptSource {
+    Literal(LitStr),
+    Braced(TokenStream2),
+}
+
+impl Parse for DslMacroInput {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let name_label: Ident = input.parse()?;
+        if name_label != "name" {
+            return Err(syn::Error::new(name_label.span(), "expected `name` label"));
+        }
+        input.parse::<Token![:]>()?;
+        let name: Ident = input.parse()?;
+        let _ = input.parse::<Token![,]>().ok();
+
+        let script_label: Ident = input.parse()?;
+        if script_label != "script" {
+            return Err(syn::Error::new(
+                script_label.span(),
+                "expected `script` label",
+            ));
+        }
+        input.parse::<Token![:]>()?;
+        let script = if input.peek(LitStr) {
+            let s: LitStr = input.parse()?;
+            ScriptSource::Literal(s)
+        } else if input.peek(syn::token::Brace) {
+            let content;
+            syn::braced!(content in input);
+            let ts: TokenStream2 = content.parse()?;
+            ScriptSource::Braced(ts)
+        } else {
+            return Err(syn::Error::new(
+                input.span(),
+                "expected string literal or braced script block",
+            ));
+        };
+        let _ = input.parse::<Token![,]>().ok();
+
+        let out_dir_label: Ident = input.parse()?;
+        if out_dir_label != "out_dir" {
+            return Err(syn::Error::new(
+                out_dir_label.span(),
+                "expected `out_dir` label",
+            ));
+        }
+        input.parse::<Token![:]>()?;
+        let out_dir: LitStr = input.parse()?;
+        let _ = input.parse::<Token![,]>().ok();
+
+        Ok(Self {
+            name,
+            script,
+            out_dir,
+        })
+    }
+}
 
 fn finalize_line(lines: &mut Vec<String>, line: &mut String, capture_has_inner: &mut bool) {
     let trimmed = line.trim();
@@ -335,6 +403,24 @@ pub fn parse_braced_tokens(ts: &TokenStream2) -> Result<Vec<Step>> {
 mod tests {
     use super::*;
     use quote::quote;
+
+    #[test]
+    fn parse_dsl_macro_input_literal_script() {
+        let input: DslMacroInput =
+            syn::parse_str("name: foo, script: \"RUN echo hi\", out_dir: \"target/out\"")
+                .expect("parse literal script");
+        assert!(matches!(input.script, ScriptSource::Literal(_)));
+        assert_eq!(input.name.to_string(), "foo");
+        assert_eq!(input.out_dir.value(), "target/out");
+    }
+
+    #[test]
+    fn parse_dsl_macro_input_braced_script() {
+        let input: DslMacroInput =
+            syn::parse_str("name: foo, script: { RUN echo hi }, out_dir: \"out\"")
+                .expect("parse braced script");
+        assert!(matches!(input.script, ScriptSource::Braced(_)));
+    }
 
     #[test]
     fn braced_script_preserves_dot_path_spacing() {

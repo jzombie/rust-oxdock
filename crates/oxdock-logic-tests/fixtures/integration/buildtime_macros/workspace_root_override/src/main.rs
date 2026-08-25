@@ -1,6 +1,14 @@
 use oxdock_buildtime_macros::embed;
 
-embed!(WorkspaceAssets);
+embed! {
+    name: WorkspaceAssets,
+    script: {
+        WORKDIR /
+        COPY client client_copy
+        WORKDIR client_copy/dist
+    },
+    out_dir: "prebuilt",
+}
 
 fn main() {
     let file = WorkspaceAssets::get("version.txt").expect("workspace asset");

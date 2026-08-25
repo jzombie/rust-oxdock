@@ -16,11 +16,11 @@ Statuses:
 |---|---|---|---|
 | `OXDOCK_WORKSPACE_ROOT` | Retained | `crates/sys/oxdock-fs/src/lib.rs` : `discover_workspace_root`; propagated to child processes via `oxdock-fs::FixtureInstance::cargo` / CLI | Overrides workspace-root discovery; highest-priority input |
 | `OXDOCK_INHERIT_STDOUT` | Retained | `crates/oxdock-core/src/exec/handlers.rs` : `run` (read from script env map) | Value `1`/`true` (case-insensitive) forces stdout+stderr inheritance even when capture streams are wired; pinned by executor tests |
-| `OXDOCK_EMBED_DEBUG` | Relocated | `oxdock-buildtime-helpers/src/assets.rs` : `build_and_materialize` (via `debug_enabled_from`) | Truthiness `1` / any-case `true`. Was `oxdock-buildtime-macros` (`embed_debug_enabled_from`) |
-| `RUST_ANALYZER_INTERNALS_DO_NOT_USE` | Relocated | `oxdock-buildtime-helpers/src/assets.rs` : `execution_is_skipped_with` | IDE skip predicate. Was macros `embed_execution_is_skipped_with` |
-| `RUSTFLAGS` (`--cfg miri` substring) | Relocated | same as above | Miri-configured builds skip asset execution; unrelated flags (e.g. `-Dwarnings`) must NOT trigger it (negative branch pinned in tests) |
-| current-exe contains `rust-analyzer` | Relocated | same as above | Executable-name fallback predicate |
-| `VSCODE_PID` + absence of `TERM` | Relocated | same as above | VS Code background-task heuristic; interactive terminals do not skip |
+| `OXDOCK_EMBED_DEBUG` | Relocated (shared) | helpers `assets.rs` : `embed_debug_enabled()` → invoked from BOTH `oxdock-buildtime-macros/src/lib.rs` : `build_assets` AND helpers `build_and_materialize` | Truthiness `1` / any-case `true` |
+| `RUST_ANALYZER_INTERNALS_DO_NOT_USE` | Relocated (shared) | helpers `assets.rs` : `execution_is_skipped_with` → invoked from BOTH the restored inline macros (`expand_embed_internal`/`expand_prepare_internal`) and helpers asset engine | IDE skip predicate: stub placeholder / silent success instead of execution |
+| `RUSTFLAGS` (`--cfg miri` substring) | Relocated (shared) | same as above | Miri-configured builds skip asset execution; unrelated flags (e.g. `-Dwarnings`) must NOT trigger it (negative branch pinned in tests) |
+| current-exe contains `rust-analyzer` | Relocated (shared) | same as above | Executable-name fallback predicate |
+| `VSCODE_PID` + absence of `TERM` | Relocated (shared) | same as above | VS Code background-task heuristic; interactive terminals do not skip |
 | `OXDOCK_EMBED_FORCE_REBUILD` | **Purged** | *(none)* | Old macro cache-bust gate. Invalidation is now owned by Cargo via `cargo:rerun-if-changed` directives emitted by helpers `run_spec`; completeness + ordering pinned by `packaging_invariant::directives_are_complete_and_ordered`. Do not re-introduce. |
 | `.git` presence / `CARGO_PRIMARY_PACKAGE` (gate input) | **Purged** (as gate) | *(none in production code)* | The old `should_build = has_git \|\| is_primary` gate is gone; build scripts always execute outside IDE-skip contexts. Registry consumers running build.rs equals the normal ecosystem trust model. |
 | `CARGO_PRIMARY_PACKAGE` (test infra) | Retained | `crates/sys/oxdock-process/src/serial_cargo_env.rs` : `manifest_env_guard` | Set/restored around tests that emulate primary vs dependency packages; no production reader remains |
@@ -57,3 +57,20 @@ Statuses:
   --all-features --tests` · Miri on `oxdock-process` + `oxdock-core`
   (`cargo +nightly miri test -p oxdock-process -p oxdock-core --all-features`;
   falls back to the CI Miri job when no local nightly toolchain is installed).
+
+## Dual-mode asset pipeline
+
+1. **Inline (primary contract).** `embed! { name, script: { … } | "…", out_dir }`
+   and `prepare! { … }` execute the DSL inside the proc-macro via the guarded
+   engine. No build.rs is required. Cache: `<out_dir>/.oxdock_hash`
+   content-fingerprint of script text, statically discoverable inputs, and all
+   referenced env values (`{{ env:KEY }}` templates + `[env:KEY]` guards);
+   matching fingerprint ⇒ zero re-execution. Known limitation: dynamically
+   constructed inputs that are invisible to static analysis are not
+   fingerprinted — touch the script (or a watched file) to invalidate.
+2. **Build-script (alternative).** `oxdock_buildtime_helpers::embed_assets /
+   prepare_assets` from build.rs with `embed!(Ident)` consumer macro. Adds
+   Cargo-native `rerun-if-changed` invalidation for tracked inputs.
+
+Both paths share skip predicates, debug flag semantics, the guarded executor,
+and the staged materializer.

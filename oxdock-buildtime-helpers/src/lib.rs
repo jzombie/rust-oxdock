@@ -3,9 +3,11 @@ mod manifest_paths;
 mod track;
 
 pub use assets::{
-    DslSource, EmbedSpec, PrepareSpec, embed_assets, execution_is_skipped,
-    execution_is_skipped_with, prepare_assets, try_embed_assets, try_prepare_assets,
+    DslSource, EmbedSpec, PrepareSpec, asset_input_fingerprint, embed_assets, embed_debug_enabled,
+    execution_is_skipped, execution_is_skipped_with, prepare_assets, stage_materialize, sync_tree,
+    try_embed_assets, try_prepare_assets,
 };
+pub use track::{collect_env_references, plan_input_directives};
 
 use anyhow::Result;
 use oxdock_process::CommandBuilder;

@@ -13,6 +13,3 @@ oxdock-cli.workspace = true
 oxdock-core.workspace = true
 oxdock-fs.workspace = true
 oxdock-parser.workspace = true
-
-[build-dependencies]
-oxdock-buildtime-helpers.workspace = true

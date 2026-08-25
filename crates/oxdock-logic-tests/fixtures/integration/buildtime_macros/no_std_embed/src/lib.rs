@@ -7,9 +7,25 @@ use core::str;
 
 use oxdock_buildtime_macros::embed;
 
-embed!(FirmwareAssets);
+embed! {
+    name: FirmwareAssets,
+    script: {
+        WORKDIR /
+        MKDIR firmware
+        WRITE firmware/version.txt 1.0.0-no-std
+    },
+    out_dir: "prebuilt",
+}
 
-embed!(BrandingAssets);
+embed! {
+    name: BrandingAssets,
+    script: {
+        WORKDIR /
+        MKDIR branding
+        WRITE branding/note.txt OxDock-no-std
+    },
+    out_dir: "prebuilt_branding",
+}
 
 pub fn firmware_version() -> &'static str {
     let file = FirmwareAssets::get("firmware/version.txt").expect("embedded version file");

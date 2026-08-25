@@ -331,6 +331,7 @@ dependencies = [
  "oxdock-process",
  "oxdock-sys-test-utils",
  "proc-macro2",
+ "sha2",
  "syn",
 ]
 
@@ -338,6 +339,14 @@ dependencies = [
 name = "oxdock-buildtime-macros"
 version = "0.6.0-alpha"
 dependencies = [
+ "anyhow",
+ "oxdock-buildtime-helpers",
+ "oxdock-core",
+ "oxdock-embed",
+ "oxdock-fs",
+ "oxdock-parser",
+ "oxdock-process",
+ "oxdock-sys-test-utils",
  "proc-macro2",
  "quote",
  "syn",

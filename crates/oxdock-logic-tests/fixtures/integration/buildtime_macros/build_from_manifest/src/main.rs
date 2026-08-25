@@ -3,8 +3,17 @@ use oxdock_buildtime_macros::embed;
 mod demo_assets {
     use super::*;
 
-    embed!(DemoAssetsA);
-    embed!(DemoAssetsB);
+    embed! {
+        name: DemoAssetsA,
+        script: "COPY source_a.txt copied.txt",
+        out_dir: "prebuilt_a",
+    }
+
+    embed! {
+        name: DemoAssetsB,
+        script: "COPY source_b.txt copied.txt",
+        out_dir: "prebuilt_b",
+    }
 }
 
 use demo_assets::{DemoAssetsA, DemoAssetsB};

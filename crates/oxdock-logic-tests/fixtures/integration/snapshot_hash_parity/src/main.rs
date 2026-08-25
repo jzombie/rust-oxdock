@@ -1,4 +1,4 @@
-use oxdock_buildtime_macros::embed;
+use oxdock_buildtime_macros::{embed, prepare};
 use oxdock_cli::{ExecutionResult, Options, ScriptSource, execute_with_result};
 use oxdock_core::{run_steps_with_context_result_with_io, ExecIo};
 use oxdock_fs::{GuardedPath, PathResolver};
@@ -7,7 +7,45 @@ use std::error::Error;
 
 // TODO: For the main SnapshotAssets single-file hash, ensure that matches with the metadata hash defined with the SnapshotAssets.
 
-embed!(SnapshotAssets);
+embed! {
+    name: SnapshotAssets,
+    script: {
+        MKDIR data/inner
+        WRITE data/inner/a.txt alpha
+        WRITE data/b.txt beta
+        WITH_IO [stdout=pipe:cap_dir_hash] HASH_SHA256 data
+        WITH_IO [stdin=pipe:cap_dir_hash] WRITE dir_hash.txt
+        WITH_IO [stdout=pipe:cap_file_hash] HASH_SHA256 data/inner/a.txt
+        WITH_IO [stdin=pipe:cap_file_hash] WRITE file_hash.txt
+
+        // Double-check the hash matches on unix system
+        // TODO: Gate system cmd execution based on sha256sum detection: https://github.com/jzombie/oxdock-rs/issues/55
+        // [platform=unix] {
+        //     CAPTURE_TO_FILE system_hash.txt RUN sh -c "if command -v sha256sum >/dev/null 2>&1; then sha256sum data/inner/a.txt | awk '{print $1}'; elif command -v shasum >/dev/null 2>&1; then shasum -a 256 data/inner/a.txt | awk '{print $1}'; elif command -v openssl >/dev/null 2>&1; then openssl dgst -sha256 data/inner/a.txt | awk '{print $2}'; else echo 'no sha256 tool available' >&2; exit 1; fi | tr 'A-F' 'a-f'"
+        // }
+    },
+    out_dir: "prebuilt",
+}
+
+prepare! {
+    name: SnapshotPrepared,
+    script: {
+        MKDIR data/inner
+        WRITE data/inner/a.txt alpha
+        WRITE data/b.txt beta
+        WITH_IO [stdout=pipe:cap_dir_hash] HASH_SHA256 data
+        WITH_IO [stdin=pipe:cap_dir_hash] WRITE dir_hash.txt
+        WITH_IO [stdout=pipe:cap_file_hash] HASH_SHA256 data/inner/a.txt
+        WITH_IO [stdin=pipe:cap_file_hash] WRITE file_hash.txt
+
+        // Double-check the hash matches on unix system
+        // TODO: Gate system cmd execution based on sha256sum detection: https://github.com/jzombie/oxdock-rs/issues/55
+        // [platform=unix] {
+        //     CAPTURE_TO_FILE system_hash.txt RUN sh -c "if command -v sha256sum >/dev/null 2>&1; then sha256sum data/inner/a.txt | awk '{print $1}'; elif command -v shasum >/dev/null 2>&1; then shasum -a 256 data/inner/a.txt | awk '{print $1}'; elif command -v openssl >/dev/null 2>&1; then openssl dgst -sha256 data/inner/a.txt | awk '{print $2}'; else echo 'no sha256 tool available' >&2; exit 1; fi | tr 'A-F' 'a-f'"
+        // }
+    },
+    out_dir: "prebuilt_prepare",
+}
 
 const SCRIPT: &str = r#"
     MKDIR data/inner
@@ -103,15 +141,9 @@ fn main() -> Result<(), Box<dyn Error>> {
         "CLI/embed hash mismatch: cli={cli_hash} embed={embedded_hash}"
     );
 
-    let out_dir_root = PathResolver::new(
-        std::path::Path::new(env!("OUT_DIR")),
-        std::path::Path::new(env!("OUT_DIR")),
-    )?;
-    let prepared_path = out_dir_root.root().join("prepared/dir_hash.txt")?;
-    let prepared_hash = {
-        let contents = out_dir_root.read_to_string(&prepared_path)?;
-        contents.trim().to_string()
-    };
+    let manifest_resolver = PathResolver::from_manifest_env()?;
+    let prepared_hash =
+        read_manifest_hash(&manifest_resolver, "prebuilt_prepare/dir_hash.txt")?;
     assert_eq!(
         cli_hash, prepared_hash,
         "CLI/prepare hash mismatch: cli={cli_hash} prepare={prepared_hash}"

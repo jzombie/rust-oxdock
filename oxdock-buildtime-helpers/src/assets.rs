@@ -13,6 +13,7 @@
 //!   to stderr so cargo surfaces it before compiling the consumer.
 
 use std::collections::BTreeSet;
+use std::collections::HashMap;
 
 use anyhow::{Context, Result, bail};
 use oxdock_core::{ExecIo, run_steps_with_context_result_with_io};
@@ -20,9 +21,10 @@ use oxdock_embed::{emit_embed_module, gather_assets, runtime_support_tokens};
 #[allow(clippy::disallowed_types)]
 use oxdock_fs::UnguardedPath;
 use oxdock_fs::{EntryKind, GuardedPath, PathResolver};
+use sha2::{Digest, Sha256};
 
 use crate::manifest_paths::module_file_name;
-use crate::track::plan_input_directives;
+use crate::track::{collect_env_references, plan_input_directives};
 
 /// Where the DSL script comes from.
 #[derive(Clone, Copy)]
@@ -150,6 +152,12 @@ pub fn execution_is_skipped_with(
     }
 
     false
+}
+
+/// True when `OXDOCK_EMBED_DEBUG` requests verbose asset-pipeline logging
+/// (`1` or any casing of `true`).
+pub fn embed_debug_enabled() -> bool {
+    debug_enabled_from(std::env::var("OXDOCK_EMBED_DEBUG").ok())
 }
 
 /// Truthiness rules for debug logging: enabled by `1` or any casing of `true`.
@@ -391,18 +399,7 @@ fn build_and_materialize(name: &str, script: &str, subdir: &str) -> Result<()> {
     };
 
     ensure_materialize_dir(&resolver, &target)?;
-    clear_dir(&resolver, &target)?;
-
-    resolver
-        .copy_dir_from_unguarded(&final_external, &target)
-        .map_err(|e| anyhow::anyhow!("failed to copy final workdir into OUT_DIR: {e}"))?;
-    // Sandbox infrastructure files are never user assets.
-    for marker in [".oxdock-tempdir", ".oxdock-tempdir.lock"] {
-        let guarded = target.join(marker)?;
-        if resolver.entry_kind(&guarded).is_ok() {
-            resolver.remove_file(&guarded)?;
-        }
-    }
+    stage_materialize(&resolver, &final_external, &target)?;
 
     if debug {
         eprintln!(
@@ -430,24 +427,6 @@ fn ensure_materialize_dir(resolver: &PathResolver, target: &GuardedPath) -> Resu
         .map_err(|e| anyhow::anyhow!("failed to create {}: {e}", target.display()))
 }
 
-fn clear_dir(resolver: &PathResolver, dir: &GuardedPath) -> Result<()> {
-    let entries = resolver
-        .read_dir_entries(dir)
-        .map_err(|e| anyhow::anyhow!("failed to read {}: {e}", dir.display()))?;
-    for entry in entries {
-        let path = entry.path();
-        let guarded = GuardedPath::new(dir.root(), &path)
-            .map_err(|e| anyhow::anyhow!("failed to guard {}: {e}", path.display()))?;
-        let ft = entry.file_type()?;
-        if ft.is_dir() {
-            resolver.remove_dir_all(&guarded)?;
-        } else {
-            resolver.remove_file(&guarded)?;
-        }
-    }
-    Ok(())
-}
-
 /// Typed placeholder used when IDE-skip predicates short-circuit the build:
 /// same module surface (`get()` → `None`, empty `iter()`), no compile error.
 fn placeholder_module_source(name: &str) -> String {
@@ -460,4 +439,313 @@ fn placeholder_module_source(name: &str) -> String {
          pub fn iter() -> Filenames {{\n            static EMPTY: [&str; 0] = [];\n            Filenames::from_slice(&EMPTY)\n        }}\n    }}\n}}\n\n\
          pub use {mod_ident}::{name};\n"
     )
+}
+
+/// Content fingerprint deciding whether `<out_dir>` may be reused.
+///
+/// Digest inputs: the raw script text, the out-dir key, every statically
+/// discoverable input file (contents; directories walked sorted; missing
+/// paths recorded as markers), and every referenced environment variable
+/// resolved to `KEY=VALUE` (or `KEY=<unset>`) so environment drift — including
+/// `[env:KEY]` guard gating — invalidates the cache.
+///
+/// `resolver` must be manifest-rooted (e.g. `PathResolver::from_manifest_env`);
+/// `envs` should be the builtin env map (`BuiltinEnv::collect(...).into_envs()`),
+/// with `std::env` consulted as fallback for keys it does not define.
+pub fn asset_input_fingerprint(
+    resolver: &PathResolver,
+    script_text: &str,
+    steps: &[oxdock_parser::Step],
+    out_dir_key: &str,
+    envs: &HashMap<String, String>,
+) -> Result<String> {
+    let mut hasher = Sha256::new();
+    hasher.update(script_text.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(out_dir_key.as_bytes());
+    hasher.update(b"\0");
+
+    let root = resolver.root().clone();
+    let (changed, _env_changed) = plan_input_directives(steps);
+    for rel in &changed {
+        hash_input_path(resolver, &root, rel, &mut hasher)?;
+    }
+
+    for key in collect_env_references(steps) {
+        let value = envs.get(&key).cloned().or_else(|| std::env::var(&key).ok());
+        match value {
+            Some(v) => hasher.update(format!("{key}={v}\0").as_bytes()),
+            None => hasher.update(format!("{key}=<unset>\0").as_bytes()),
+        }
+    }
+
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn hash_input_path(
+    resolver: &PathResolver,
+    root: &GuardedPath,
+    rel: &str,
+    hasher: &mut Sha256,
+) -> Result<()> {
+    let guarded = root.join(rel)?;
+    match resolver.entry_kind(&guarded) {
+        Ok(EntryKind::File) => {
+            hasher.update(b"F\0");
+            hasher.update(rel.as_bytes());
+            hasher.update(b"\0");
+            hasher.update(&resolver.read_file(&guarded)?);
+        }
+        Ok(EntryKind::Dir) => {
+            hasher.update(b"D\0");
+            hasher.update(rel.as_bytes());
+            hasher.update(b"\0");
+            let mut entries = resolver.read_dir_entries(&guarded)?;
+            entries.sort_by_key(|e| e.file_name());
+            for entry in entries {
+                let name = entry.file_name().to_string_lossy().to_string();
+                let child_rel = format!("{rel}/{name}");
+                hash_input_path(resolver, root, &child_rel, hasher)?;
+            }
+        }
+        Err(_) => {
+            hasher.update(b"MISSING\0");
+            hasher.update(rel.as_bytes());
+            hasher.update(b"\0");
+        }
+    }
+    Ok(())
+}
+
+/// Internal sandbox marker files stripped from materialized output.
+const SANDBOX_MARKERS: [&str; 2] = [".oxdock-tempdir", ".oxdock-tempdir.lock"];
+
+/// Atomically-ish materialize `final_external` into `target`.
+///
+/// Copies the built tree into `<target>/.oxdock-staging` first, then syncs it
+/// into `target` file-by-file (overwrite-copy — no destructive wipe of the
+/// live directory, no exclusive-handle renames), removes top-level entries
+/// that are no longer part of the build output, and finally deletes the
+/// staging directory. Windows-safe by construction: no remove-then-rename
+/// races against AV/indexer handle locks.
+#[allow(clippy::disallowed_types)]
+pub fn stage_materialize(
+    resolver: &PathResolver,
+    final_external: &UnguardedPath,
+    target: &GuardedPath,
+) -> Result<()> {
+    let stage = target.join(".oxdock-staging")?;
+    if resolver.entry_kind(&stage).is_ok() {
+        resolver.remove_dir_all(&stage)?;
+    }
+    resolver.create_dir_all(&stage)?;
+
+    resolver
+        .copy_dir_from_unguarded(final_external, &stage)
+        .map_err(|e| anyhow::anyhow!("failed to copy build output into staging: {e}"))?;
+    for marker in SANDBOX_MARKERS {
+        let marker_path = stage.join(marker)?;
+        if resolver.entry_kind(&marker_path).is_ok() {
+            resolver.remove_file(&marker_path)?;
+        }
+    }
+
+    sync_tree(resolver, &stage, target)?;
+
+    // Staging cleanup must complete before the caller records the cache hash.
+    if resolver.entry_kind(&stage).is_ok() {
+        resolver.remove_dir_all(&stage)?;
+    }
+    Ok(())
+}
+
+/// Overwrite-copy merge of `src` into `dst`: files are copied over existing
+/// destinations, directories are created as needed and recursed, and entries
+/// present in `dst` but absent from `src` are removed (best-effort) so the
+/// destination never accumulates stale artifacts.
+pub fn sync_tree(resolver: &PathResolver, src: &GuardedPath, dst: &GuardedPath) -> Result<()> {
+    resolver.create_dir_all(dst)?;
+
+    let src_entries = resolver.read_dir_entries(src)?;
+    let mut src_names: std::collections::BTreeSet<String> = Default::default();
+    for entry in &src_entries {
+        src_names.insert(entry.file_name().to_string_lossy().into_owned());
+    }
+
+    for entry in &src_entries {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let src_child = src.join(&name)?;
+        let dst_child = dst.join(&name)?;
+        match entry.file_type()? {
+            ft if ft.is_dir() => {
+                resolver.create_dir_all(&dst_child)?;
+                sync_tree(resolver, &src_child, &dst_child)?;
+            }
+            _ => {
+                resolver.copy_file(&src_child, &dst_child)?;
+            }
+        }
+    }
+
+    // Remove destination extras the new output no longer contains.
+    for entry in resolver.read_dir_entries(dst)? {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if src_names.contains(&name) || name == ".oxdock_hash" {
+            continue;
+        }
+        let dst_child = dst.join(&name)?;
+        match resolver.entry_kind(&dst_child) {
+            Ok(EntryKind::Dir) => {
+                let _ = resolver.remove_dir_all(&dst_child);
+            }
+            Ok(EntryKind::File) => {
+                let _ = resolver.remove_file(&dst_child);
+            }
+            Err(_) => {}
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod fingerprint_tests {
+    use super::*;
+    use oxdock_parser::parse_script;
+    use std::collections::HashMap;
+
+    fn ctx() -> (oxdock_fs::GuardedTempDir, PathResolver) {
+        let temp = GuardedPath::tempdir().expect("tempdir");
+        let root = temp.as_guarded_path().clone();
+        let resolver = PathResolver::new_guarded(root.clone(), root.clone()).expect("resolver");
+        resolver
+            .write_file(&root.join("in.txt").unwrap(), b"payload")
+            .ok();
+        resolver
+            .write_file(
+                &root.join("script.oxdock").unwrap(),
+                b"COPY \"in.txt\" out.txt",
+            )
+            .ok();
+        (temp, resolver)
+    }
+
+    const SCRIPT: &str = "COPY in.txt out.txt";
+
+    #[test]
+    fn fingerprint_is_deterministic_and_sensitive() -> Result<()> {
+        let (_t, resolver) = ctx();
+        let steps = parse_script(SCRIPT).unwrap();
+        let mut envs = HashMap::new();
+
+        let a = asset_input_fingerprint(&resolver, SCRIPT, &steps, "out", &envs).unwrap();
+        // Environment drift only applies to keys the script actually
+        // references; use an env-referencing variant for that scenario.
+        const ENV_SCRIPT: &str = "WRITE out.txt \"{{ env:TAG }}\"";
+        let env_steps = parse_script(ENV_SCRIPT).unwrap();
+        let base_env =
+            asset_input_fingerprint(&resolver, ENV_SCRIPT, &env_steps, "out", &envs).unwrap();
+        let b = asset_input_fingerprint(&resolver, SCRIPT, &steps, "out", &envs).unwrap();
+        assert_eq!(a, b, "deterministic");
+
+        let script_edit =
+            asset_input_fingerprint(&resolver, "COPY in.txt other.txt", &steps, "out", &envs)
+                .unwrap();
+        assert_ne!(a, script_edit, "script edit must invalidate");
+
+        let out_edit = asset_input_fingerprint(&resolver, SCRIPT, &steps, "other", &envs).unwrap();
+        assert_ne!(a, out_edit, "out-dir key change must invalidate");
+
+        // Input file content change.
+        let root = resolver.root().clone();
+        resolver.write_file(&root.join("in.txt").unwrap(), b"payload2")?;
+        let input_edit = asset_input_fingerprint(&resolver, SCRIPT, &steps, "out", &envs).unwrap();
+        assert_ne!(a, input_edit, "input content edit must invalidate");
+
+        // Environment drift: value change invalidates for referenced keys.
+        envs.insert("TAG".into(), "v1".into());
+        let env_v1 =
+            asset_input_fingerprint(&resolver, ENV_SCRIPT, &env_steps, "out", &envs).unwrap();
+        envs.insert("TAG".into(), "v2".into());
+        let env_v2 =
+            asset_input_fingerprint(&resolver, ENV_SCRIPT, &env_steps, "out", &envs).unwrap();
+        assert_ne!(base_env, env_v1, "unset->set must invalidate");
+        assert_ne!(env_v1, env_v2, "env value drift must invalidate");
+        let _ = env_edit_placeholder(&a);
+        Ok(())
+    }
+
+    fn env_edit_placeholder(a: &str) -> &str {
+        a
+    }
+
+    #[test]
+    fn guard_referenced_keys_affect_fingerprint() -> Result<()> {
+        let (_t, resolver) = ctx();
+        let steps = parse_script("[env:MODE] ECHO on").unwrap();
+        let mut envs = HashMap::new();
+        let unset = asset_input_fingerprint(&resolver, "", &steps, "o", &envs).unwrap();
+        envs.insert("MODE".into(), "on".into());
+        let set = asset_input_fingerprint(&resolver, "", &steps, "o", &envs).unwrap();
+        assert_ne!(unset, set, "guard key unset->set must invalidate");
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod staging_tests {
+    use super::*;
+    #[allow(clippy::disallowed_types)]
+    use oxdock_fs::UnguardedPath;
+    use oxdock_fs::{GuardedPath, PathResolver};
+
+    #[test]
+    fn staged_materialize_overwrites_removes_stale_and_strips_markers() -> Result<()> {
+        let temp = GuardedPath::tempdir()?;
+        let root = temp.as_guarded_path().clone();
+        let resolver = PathResolver::new_guarded(root.clone(), root.clone())?;
+
+        // Build output tree.
+        let src = root.join("__src")?;
+        resolver.create_dir_all(&src)?;
+        resolver.write_file(&src.join("keep.txt")?, b"new")?;
+        resolver.write_file(&src.join("nested/deep.txt")?, b"d")?;
+
+        // Pre-existing target with stale content + markers.
+        let target = root.join("assets")?;
+        resolver.create_dir_all(&target)?;
+        resolver.write_file(&target.join("keep.txt")?, b"old")?;
+        resolver.write_file(&target.join("stale.txt")?, b"stale")?;
+        resolver.write_file(&target.join(".oxdock-tempdir")?, b"m")?;
+
+        #[allow(clippy::disallowed_types)]
+        let external = UnguardedPath::external(src.as_path().to_path_buf());
+        stage_materialize(&resolver, &external, &target)?;
+
+        assert_eq!(
+            resolver.read_to_string(&target.join("keep.txt")?)?,
+            "new",
+            "existing files must be overwritten"
+        );
+        assert_eq!(
+            resolver.read_to_string(&target.join("nested/deep.txt")?)?,
+            "d"
+        );
+        assert!(
+            resolver.entry_kind(&target.join("stale.txt")?).is_err(),
+            "stale top-level entries must be removed"
+        );
+        assert!(
+            resolver
+                .entry_kind(&target.join(".oxdock-tempdir")?)
+                .is_err(),
+            "sandbox markers must be stripped"
+        );
+        assert!(
+            resolver
+                .entry_kind(&target.join(".oxdock-staging")?)
+                .is_err(),
+            "no staging residue may remain"
+        );
+        Ok(())
+    }
 }
