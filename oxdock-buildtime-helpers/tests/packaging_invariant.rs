@@ -183,8 +183,14 @@ fn skip_predicate_branch_matrix() {
         },
         || None
     ));
+    // RUSTFLAGS unrelated to Miri must not trigger the skip.
+    assert!(!execution_is_skipped_with(
+        |k| (k == "RUSTFLAGS").then(|| "-Dwarnings".to_string()),
+        || None
+    ));
+    // Standard non-rust-analyzer executables must not trigger the skip.
     assert!(!execution_is_skipped_with(
         |_| None,
-        || Some("/usr/bin/cargo".into())
+        || Some("/bin/cargo".into())
     ));
 }
