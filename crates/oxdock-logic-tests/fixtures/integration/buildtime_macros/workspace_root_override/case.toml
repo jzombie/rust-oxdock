@@ -2,7 +2,6 @@ name = "workspace_root_override"
 args = ["run", "--quiet"]
 
 [env]
-OXDOCK_EMBED_FORCE_REBUILD = "1"
 
 [expect]
 status = "success"

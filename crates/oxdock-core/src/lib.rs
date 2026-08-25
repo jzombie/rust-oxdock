@@ -433,6 +433,37 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[cfg_attr(
+        miri,
+        ignore = "timing-sensitive background process test is unreliable under Miri"
+    )]
+    #[test]
+    fn background_killed_when_unrelated_step_fails() {
+        let temp = GuardedPath::tempdir().unwrap();
+        let root = guard_root(&temp);
+
+        let script = indoc! {
+            r#"
+            RUN_BG sh -c 'sleep 1; echo late > late.txt'
+            RUN __oxdock_missing_command_xyz__
+            "#
+        };
+
+        let steps = parse_script(script).unwrap();
+        assert!(
+            run_steps(&root, &steps).is_err(),
+            "pipeline should fail on the missing command"
+        );
+        // The RUN_BG handle is dropped mid-pipeline when the error propagates;
+        // its Drop safety net must kill the writer before it can emit the
+        // late artifact.
+        assert!(
+            !exists(&root, "late.txt"),
+            "abandoned background writer must be killed by Drop teardown"
+        );
+    }
+
+    #[cfg(unix)]
     #[test]
     fn exit_terminates_backgrounds_and_returns_code() {
         let temp = GuardedPath::tempdir().unwrap();

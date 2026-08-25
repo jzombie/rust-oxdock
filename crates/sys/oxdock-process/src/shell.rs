@@ -101,7 +101,7 @@ pub fn spawn_interactive_shell(
         #[cfg(not(miri))]
         {
             #[allow(clippy::disallowed_types)]
-            let tty_path = oxdock_fs::UnguardedPath::new("/dev/tty");
+            let tty_path = oxdock_fs::UnguardedPath::external("/dev/tty");
             if let Ok(resolver) =
                 PathResolver::new(workspace_root.as_path(), workspace_root.as_path())
                 && let Ok(tty) = resolver.open_file_unguarded(&tty_path)

@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use anyhow::{Result, anyhow, bail};
+use oxdock_sys_test_utils::exit_status_from_code;
 
 use crate::{
     BackgroundHandle, CommandContext, CommandMode, CommandOptions, CommandResult, CommandStderr,
@@ -106,7 +107,7 @@ impl ProcessManager for MockProcessManager {
                 self.runs.borrow_mut().push(MockRunCall {
                     script: script.to_string(),
                     cwd: ctx.cwd().to_path_buf(),
-                    envs: ctx.envs().clone(),
+                    envs: (**ctx.envs()).clone(),
                     cargo_target_dir: ctx.cargo_target_dir().to_path_buf(),
                     stdin_provided,
                     stdin: captured_stdin.clone(),
@@ -126,7 +127,7 @@ impl ProcessManager for MockProcessManager {
                 self.spawns.borrow_mut().push(MockSpawnCall {
                     script: script.to_string(),
                     cwd: ctx.cwd().to_path_buf(),
-                    envs: ctx.envs().clone(),
+                    envs: (**ctx.envs()).clone(),
                     cargo_target_dir: ctx.cargo_target_dir().to_path_buf(),
                     stdin_provided,
                     stdin: captured_stdin.clone(),
@@ -142,6 +143,7 @@ impl ProcessManager for MockProcessManager {
                     remaining: plan.ready_after,
                     status: plan.status,
                     killed: self.killed.clone(),
+                    reaped: false,
                 }))
             }
         }
@@ -168,11 +170,13 @@ pub struct MockHandle {
     remaining: usize,
     status: std::process::ExitStatus,
     killed: Rc<RefCell<Vec<String>>>,
+    reaped: bool,
 }
 
 impl BackgroundHandle for MockHandle {
     fn try_wait(&mut self) -> Result<Option<std::process::ExitStatus>> {
         if self.remaining == 0 {
+            self.reaped = true;
             Ok(Some(self.status))
         } else {
             self.remaining -= 1;
@@ -181,12 +185,25 @@ impl BackgroundHandle for MockHandle {
     }
 
     fn kill(&mut self) -> Result<()> {
+        self.reaped = true;
         self.killed.borrow_mut().push(self.script.clone());
         Ok(())
     }
 
     fn wait(&mut self) -> Result<std::process::ExitStatus> {
+        self.reaped = true;
         Ok(self.status)
+    }
+}
+
+impl Drop for MockHandle {
+    fn drop(&mut self) {
+        // Only naturally-completed-without-teardown handles reach here
+        // un-reaped; log them as killed so `pm.killed()` assertions observe
+        // Drop-driven teardown exactly like explicit kills.
+        if !self.reaped {
+            self.killed.borrow_mut().push(self.script.clone());
+        }
     }
 }
 
@@ -201,18 +218,6 @@ fn capture_stdin(stdin: Option<SharedInput>) -> Result<Option<Vec<u8>>> {
     }
 }
 
-#[cfg(unix)]
-fn exit_status_from_code(code: i32) -> std::process::ExitStatus {
-    use std::os::unix::process::ExitStatusExt;
-    ExitStatusExt::from_raw(code << 8)
-}
-
-#[cfg(windows)]
-fn exit_status_from_code(code: i32) -> std::process::ExitStatus {
-    use std::os::windows::process::ExitStatusExt;
-    ExitStatusExt::from_raw(code as u32)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -223,7 +228,7 @@ mod tests {
         let temp = GuardedPath::tempdir().expect("tempdir");
         let guard = temp.as_guarded_path().clone();
         let cwd: PolicyPath = guard.clone().into();
-        let ctx = CommandContext::new(&cwd, &HashMap::new(), &guard, &guard, &guard);
+        let ctx = CommandContext::from_map(&cwd, &HashMap::new(), &guard, &guard, &guard);
         (guard, ctx)
     }
 

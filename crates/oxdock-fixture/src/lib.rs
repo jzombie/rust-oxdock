@@ -44,7 +44,7 @@ impl FixtureBuilder {
             path.display()
         );
         Ok(Self {
-            template: UnguardedPath::new(path),
+            template: UnguardedPath::external(path),
             replacements: BTreeMap::new(),
             workspace_root_env: None,
             workspace_manifest_root: None,
@@ -184,7 +184,7 @@ fn copy_fixture_template(
         if name == "target" {
             continue;
         }
-        let src_path = UnguardedPath::new(entry.path());
+        let src_path = UnguardedPath::external(entry.path());
         let dst_path = dst.join(&name)?;
         let file_type = entry
             .file_type()
@@ -283,7 +283,7 @@ fn load_workspace_dependencies(
         return Ok(BTreeMap::new());
     };
     let manifest = resolver
-        .read_to_string_unguarded(&UnguardedPath::new(root.join("Cargo.toml")))
+        .read_to_string_unguarded(&UnguardedPath::external(root.join("Cargo.toml")))
         .context("read workspace Cargo.toml")?;
     let doc = manifest
         .parse::<DocumentMut>()
@@ -551,7 +551,7 @@ qux = { version = "1.0.0", features = ["full"] }
         let dst = root.join("instance")?;
         copy_fixture_template(
             &resolver,
-            &UnguardedPath::new(template.as_path().to_path_buf()),
+            &UnguardedPath::external(template.as_path().to_path_buf()),
             &dst,
         )?;
 

@@ -1,4 +1,4 @@
-use oxdock_fs::{GuardedPath, PathResolver};
+use oxdock_fs::{GuardedPath, PathResolver, init_temp_gc};
 
 fn make_stale_dir() -> std::path::PathBuf {
     let base = std::env::temp_dir();
@@ -11,7 +11,7 @@ fn make_stale_dir() -> std::path::PathBuf {
 }
 
 #[test]
-fn cleanup_runs_on_pathresolver_startup() {
+fn cleanup_runs_on_explicit_init() {
     let root = std::env::temp_dir().join("oxdock-cleanup-root");
     let _ = std::fs::create_dir_all(&root);
 
@@ -24,7 +24,8 @@ fn cleanup_runs_on_pathresolver_startup() {
     let live_path = live.as_guarded_path().to_path_buf();
     assert!(live_path.exists());
 
-    // First PathResolver creation in this process should trigger cleanup_once.
+    // Explicit opt-in: constructors no longer sweep implicitly.
+    init_temp_gc();
     let _resolver = PathResolver::new(&root, &root).expect("resolver");
 
     assert!(!stale.exists(), "stale dir should be removed on startup cleanup");

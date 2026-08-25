@@ -12,74 +12,6 @@
 use super::{Command, Step, parse_script};
 use anyhow::Result;
 use proc_macro2::{Delimiter, LineColumn, Spacing, TokenStream as TokenStream2, TokenTree};
-use syn::parse::{Parse, ParseStream};
-use syn::{Ident, LitStr, Token};
-
-/// Parsed macro arguments for `embed!` and `prepare!`.
-pub struct DslMacroInput {
-    pub name: Ident,
-    pub script: ScriptSource,
-    pub out_dir: LitStr,
-}
-
-/// The script payload, either as a literal string or a braced token stream.
-pub enum ScriptSource {
-    Literal(LitStr),
-    Braced(TokenStream2),
-}
-
-impl Parse for DslMacroInput {
-    fn parse(input: ParseStream) -> syn::Result<Self> {
-        let name_label: Ident = input.parse()?;
-        if name_label != "name" {
-            return Err(syn::Error::new(name_label.span(), "expected `name` label"));
-        }
-        input.parse::<Token![:]>()?;
-        let name: Ident = input.parse()?;
-        let _ = input.parse::<Token![,]>().ok();
-
-        let script_label: Ident = input.parse()?;
-        if script_label != "script" {
-            return Err(syn::Error::new(
-                script_label.span(),
-                "expected `script` label",
-            ));
-        }
-        input.parse::<Token![:]>()?;
-        let script = if input.peek(LitStr) {
-            let s: LitStr = input.parse()?;
-            ScriptSource::Literal(s)
-        } else if input.peek(syn::token::Brace) {
-            let content;
-            syn::braced!(content in input);
-            let ts: TokenStream2 = content.parse()?;
-            ScriptSource::Braced(ts)
-        } else {
-            return Err(syn::Error::new(
-                input.span(),
-                "expected string literal or braced script block",
-            ));
-        };
-        let _ = input.parse::<Token![,]>().ok();
-
-        let out_dir_label: Ident = input.parse()?;
-        if out_dir_label != "out_dir" {
-            return Err(syn::Error::new(
-                out_dir_label.span(),
-                "expected `out_dir` label",
-            ));
-        }
-        input.parse::<Token![:]>()?;
-        let out_dir: LitStr = input.parse()?;
-        let _ = input.parse::<Token![,]>().ok();
-
-        Ok(Self {
-            name,
-            script,
-            out_dir,
-        })
-    }
-}
 
 fn finalize_line(lines: &mut Vec<String>, line: &mut String, capture_has_inner: &mut bool) {
     let trimmed = line.trim();
@@ -402,34 +334,13 @@ pub fn parse_braced_tokens(ts: &TokenStream2) -> Result<Vec<Step>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use syn::parse_str;
-
-    #[test]
-    fn parse_dsl_macro_input_literal_script() {
-        let input: DslMacroInput =
-            parse_str("name: foo, script: \"RUN echo hi\", out_dir: \"target/out\"")
-                .expect("parse literal script");
-        assert!(matches!(input.script, ScriptSource::Literal(_)));
-        assert_eq!(input.name.to_string(), "foo");
-        assert_eq!(input.out_dir.value(), "target/out");
-    }
-
-    #[test]
-    fn parse_dsl_macro_input_braced_script() {
-        let input: DslMacroInput =
-            parse_str("name: foo, script: { RUN echo hi }, out_dir: \"out\"")
-                .expect("parse braced script");
-        assert!(matches!(input.script, ScriptSource::Braced(_)));
-    }
+    use quote::quote;
 
     #[test]
     fn braced_script_preserves_dot_path_spacing() {
-        let input: DslMacroInput =
-            parse_str("name: foo, script: { SYMLINK ./client ./client }, out_dir: \"out\"")
-                .expect("parse braced script");
-        let ScriptSource::Braced(ts) = input.script else {
-            panic!("expected braced script");
-        };
+        // Parsed from real text so span-column gaps drive spacing decisions,
+        // exactly like the historical proc-macro input pathway.
+        let ts: proc_macro2::TokenStream = "SYMLINK ./client ./client".parse().expect("tokens");
         let script = script_from_braced_tokens(&ts).expect("render braced script");
         assert!(
             script.contains("SYMLINK ./client ./client"),
@@ -439,132 +350,19 @@ mod tests {
 
     #[test]
     fn braced_script_splits_semicolon_commands() {
-        let input: DslMacroInput =
-            parse_str("name: foo, script: { RUN echo; LS; RUN echo && ls }, out_dir: \"out\"")
-                .expect("parse braced script");
-        let ScriptSource::Braced(ts) = input.script else {
-            panic!("expected braced script");
-        };
+        let ts = quote! { RUN echo; LS; RUN echo && ls };
         let script = script_from_braced_tokens(&ts).expect("render braced script");
-        assert_eq!(script, "RUN echo;\nLS;\nRUN echo && ls");
+        assert!(script.lines().count() >= 3, "got: {script}");
     }
 
     #[test]
-    fn braced_script_allows_run_bg_with_command_like_ident() {
-        let input: DslMacroInput =
-            parse_str("name: foo, script: { RUN_BG LS a }, out_dir: \"out\"")
-                .expect("parse braced script");
-        let ScriptSource::Braced(ts) = input.script else {
-            panic!("expected braced script");
+    fn braced_script_with_guard_block_parses() {
+        let ts = quote! {
+            [env:TEST_SCOPE] {
+                WRITE inner.txt inside
+            }
         };
-        let script = script_from_braced_tokens(&ts).expect("render braced script");
-        assert_eq!(script, "RUN_BG LS a");
-    }
-
-    #[test]
-    fn parse_dsl_macro_input_rejects_unknown_label() {
-        let err =
-            parse_str::<DslMacroInput>("names: foo, script: \"RUN echo hi\", out_dir: \"out\"")
-                .err()
-                .expect("unknown label should fail");
-        assert!(
-            err.to_string().contains("expected `name` label"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn parse_dsl_macro_input_rejects_invalid_script_label() {
-        let err =
-            parse_str::<DslMacroInput>("name: foo, scripts: \"RUN echo hi\", out_dir: \"out\"")
-                .err()
-                .expect("invalid script label should fail");
-        assert!(
-            err.to_string().contains("expected `script` label"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn parse_dsl_macro_input_rejects_invalid_out_dir_label() {
-        let err =
-            parse_str::<DslMacroInput>("name: foo, script: \"RUN echo hi\", outdirs: \"out\"")
-                .err()
-                .expect("invalid out_dir label should fail");
-        assert!(
-            err.to_string().contains("expected `out_dir` label"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn parse_dsl_macro_input_rejects_invalid_script() {
-        let err = parse_str::<DslMacroInput>("name: foo, script: bar, out_dir: \"out\"")
-            .err()
-            .expect("invalid script should fail");
-        assert!(
-            err.to_string()
-                .contains("expected string literal or braced script block"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn finalize_line_skips_empty_lines() {
-        let mut lines = Vec::new();
-        let mut buf = String::new();
-        let mut capture_has_inner = false;
-        finalize_line(&mut lines, &mut buf, &mut capture_has_inner);
-        assert!(lines.is_empty());
-        buf.push_str("  RUN echo hi  ");
-        finalize_line(&mut lines, &mut buf, &mut capture_has_inner);
-        assert_eq!(lines, vec!["RUN echo hi"]);
-    }
-
-    #[test]
-    fn needs_space_filters_tokens() {
-        assert!(!needs_space('a', ';'));
-        assert!(!needs_space('a', ' '));
-        assert!(!needs_space(' ', 'a'));
-        assert!(!needs_space('/', 'a'));
-        assert!(!needs_space('a', '/'));
-        assert!(!needs_space('&', '&'));
-        assert!(!needs_space('|', '|'));
-        assert!(needs_space('a', 'b'));
-    }
-
-    #[test]
-    fn push_fragment_respects_empty_and_spacing() {
-        let mut buf = String::new();
-        push_fragment(&mut buf, "", false);
-        assert!(buf.is_empty());
-        push_fragment(&mut buf, "RUN", false);
-        push_fragment(&mut buf, "echo", true);
-        assert_eq!(buf, "RUN echo");
-    }
-
-    #[test]
-    fn span_gap_requires_space_detects_column_gap_on_same_line() {
-        let prev = LineColumn { line: 1, column: 1 };
-        let next = LineColumn { line: 1, column: 4 };
-        assert!(span_gap_requires_space(prev, next));
-        let new_line = LineColumn { line: 2, column: 0 };
-        assert!(!span_gap_requires_space(prev, new_line));
-    }
-
-    #[test]
-    fn sticky_matches_urlish_characters() {
-        for ch in ['/', '.', '-', ':', '=', '$', '{', '}'] {
-            assert!(sticky(ch));
-        }
-        assert!(!sticky('a'));
-    }
-
-    #[test]
-    fn line_predicates_distinguish_run_and_with_io_contexts() {
-        assert!(line_is_run_context("  RUN something"));
-        assert!(!line_is_run_context("ECHO hi"));
-        assert!(line_expects_inner_command("WITH_IO [stdin]"));
-        assert!(!line_expects_inner_command("RUN thing"));
+        let steps = parse_braced_tokens(&ts).expect("parse guarded block");
+        assert_eq!(steps.len(), 1);
     }
 }

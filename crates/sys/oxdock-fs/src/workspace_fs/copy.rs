@@ -189,7 +189,7 @@ impl PathResolver {
                     fs::create_dir_all(&dst_path)
                         .with_context(|| format!("creating dir {}", dst_path.display()))?;
                     self.copy_dir_from_unguarded(
-                        &UnguardedPath::new(src_path),
+                        &UnguardedPath::external(src_path),
                         &GuardedPath::new(guarded_dst_root.root(), &dst_path)?,
                     )?;
                 }
@@ -320,7 +320,7 @@ mod extra_tests {
         std::fs::write(&src, b"payload")?;
 
         let dst = root.join("out.txt")?;
-        resolver.copy_file_from_unguarded(&UnguardedPath::new(src), &dst)?;
+        resolver.copy_file_from_unguarded(&UnguardedPath::external(src), &dst)?;
 
         let got = resolver.read_file(&dst)?;
         assert_eq!(got, b"payload");
@@ -345,7 +345,7 @@ mod extra_tests {
         std::fs::write(src_root.join("nested/deep.txt"), b"deep")?;
 
         let dst = root.join("copied")?;
-        resolver.copy_dir_from_unguarded(&UnguardedPath::new(src_root.to_path_buf()), &dst)?;
+        resolver.copy_dir_from_unguarded(&UnguardedPath::external(src_root.to_path_buf()), &dst)?;
 
         let top = dst.join("top.txt")?;
         assert_eq!(resolver.read_file(&top)?, b"top");

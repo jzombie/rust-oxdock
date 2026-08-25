@@ -1,3 +1,12 @@
+pub mod assets;
+mod manifest_paths;
+mod track;
+
+pub use assets::{
+    DslSource, EmbedSpec, PrepareSpec, embed_assets, execution_is_skipped,
+    execution_is_skipped_with, prepare_assets, try_embed_assets, try_prepare_assets,
+};
+
 use anyhow::Result;
 use oxdock_process::CommandBuilder;
 

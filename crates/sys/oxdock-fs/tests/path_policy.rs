@@ -30,7 +30,7 @@ fn policy_path_accessors_and_policy() {
     let tempdir = GuardedPath::tempdir().expect("tempdir");
     let guarded = tempdir.as_guarded_path().clone();
     #[allow(clippy::disallowed_types)]
-    let unguarded = UnguardedPath::new(guarded.as_path());
+    let unguarded = UnguardedPath::external(guarded.as_path());
     let guarded_policy = PolicyPath::from(guarded.clone());
     let unguarded_policy = PolicyPath::from(unguarded.clone());
     assert_eq!(guarded_policy.policy(), GuardPolicy::Guarded);

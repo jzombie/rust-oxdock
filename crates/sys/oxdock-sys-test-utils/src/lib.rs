@@ -137,6 +137,24 @@ pub fn can_create_symlinks(target: &Path) -> bool {
     }
 }
 
+/// Build a process [`ExitStatus`] from a raw exit code.
+///
+/// Single definition shared by the mock manager, the Miri synthetic backend,
+/// and executor tests (all need to fabricate statuses without spawning).
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+pub fn exit_status_from_code(code: i32) -> std::process::ExitStatus {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        ExitStatusExt::from_raw(code << 8)
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::ExitStatusExt;
+        ExitStatusExt::from_raw(code as u32)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::TestEnvGuard;

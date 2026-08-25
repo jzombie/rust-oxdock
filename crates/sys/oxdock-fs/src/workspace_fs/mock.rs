@@ -111,10 +111,6 @@ impl WorkspaceFs for MockFs {
     }
 
     #[allow(clippy::disallowed_types)]
-    fn canonicalize_unguarded(&self, _path: &UnguardedPath) -> Result<UnguardedPath> {
-        bail!("unguarded operations not supported in mock fs");
-    }
-
     #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
     fn metadata(&self, _path: &GuardedPath) -> Result<std::fs::Metadata> {
         bail!("metadata not supported in mock fs");
@@ -133,8 +129,8 @@ impl WorkspaceFs for MockFs {
         &self.build_context
     }
 
-    fn set_root(&mut self, root: GuardedPath) {
-        self.root = root;
+    fn set_root(&mut self, root: &GuardedPath) {
+        self.root = root.clone();
     }
 
     fn read_file(&self, path: &GuardedPath) -> Result<Vec<u8>> {

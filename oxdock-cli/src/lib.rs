@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use oxdock_fs::{GuardedPath, GuardedTempDir, PathResolver, discover_workspace_root};
+use oxdock_fs::{GuardedPath, GuardedTempDir, PathResolver, discover_workspace_root, init_temp_gc};
 #[cfg(windows)]
 use oxdock_process::CommandBuilder;
 use oxdock_process::SharedInput;
@@ -13,6 +13,7 @@ pub use oxdock_parser::{Guard, Step, StepKind, parse_script};
 pub use oxdock_process::shell_program;
 
 pub fn run() -> Result<()> {
+    init_temp_gc();
     let workspace_root = discover_workspace_root().context("guard workspace root")?;
 
     let mut args = std::env::args().skip(1);
@@ -72,6 +73,7 @@ impl Options {
 }
 
 pub fn execute(opts: Options, workspace_root: GuardedPath) -> Result<()> {
+    init_temp_gc();
     execute_with_shell_runner(opts, workspace_root, run_shell, true)
 }
 
@@ -271,7 +273,7 @@ fn maybe_reexec_shell_to_temp(opts: &Options) -> Result<()> {
     let resolver_temp = PathResolver::new(temp_root_guard.as_path(), temp_root_guard.as_path())?;
     let dest = temp_file;
     #[allow(clippy::disallowed_types)]
-    let source = oxdock_fs::UnguardedPath::new(self_path);
+    let source = oxdock_fs::UnguardedPath::external(self_path);
     resolver_temp
         .copy_file_from_unguarded(&source, &dest)
         .with_context(|| format!("failed to copy shell runner to {}", dest.display()))?;

@@ -2,7 +2,6 @@ name = "guard_scope"
 args = ["run", "--quiet"]
 
 [env]
-OXDOCK_EMBED_FORCE_REBUILD = "1"
 TEST_SCOPE = "1"
 
 [expect]

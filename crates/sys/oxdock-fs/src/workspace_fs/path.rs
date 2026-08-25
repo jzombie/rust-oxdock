@@ -143,6 +143,9 @@ impl GuardedPath {
     }
 
     #[allow(clippy::disallowed_types)]
+    /// Audited escape hatch: yields a raw std path reference.
+    /// Prefer guarded operations; do not persist the value beyond the
+    /// guarded operation that produced it.
     pub fn as_path(&self) -> &Path {
         &self.path
     }
@@ -155,11 +158,17 @@ impl GuardedPath {
     }
 
     #[allow(clippy::disallowed_types)]
+    /// Audited escape hatch: yields a raw std path reference to the guard root.
+    /// Prefer guarded operations; do not persist the value beyond the
+    /// guarded operation that produced it.
     pub fn root(&self) -> &Path {
         &self.root
     }
 
     #[allow(clippy::disallowed_types)]
+    /// Audited escape hatch: yields an owned std path outside the guard.
+    /// Prefer guarded operations; do not persist the value beyond the
+    /// guarded operation that produced it.
     pub fn to_path_buf(&self) -> PathBuf {
         self.path.clone()
     }
@@ -335,8 +344,12 @@ pub struct UnguardedPath {
 
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 impl UnguardedPath {
+    /// Constructs an unguarded handle for a path that originates OUTSIDE the
+    /// guarded workspace (host tooling, TTY devices, CLI-provided paths).
+    /// Every call site asserts, by name, that escaping the guard is
+    /// intentional. Audited escape hatch: prefer guarded operations.
     #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-    pub fn new(path: impl Into<PathBuf>) -> Self {
+    pub fn external(path: impl Into<PathBuf>) -> Self {
         Self { path: path.into() }
     }
 
@@ -387,25 +400,25 @@ impl PathLike for UnguardedPath {
             let base = base.trim_end_matches('/');
             let rel = rel.trim_start_matches('/');
             let joined = format!("{}/{}", base, rel);
-            Ok(UnguardedPath::new(PathBuf::from(joined)))
+            Ok(UnguardedPath::external(PathBuf::from(joined)))
         } else {
-            Ok(UnguardedPath::new(self.path.join(rel)))
+            Ok(UnguardedPath::external(self.path.join(rel)))
         }
     }
 
     fn parent(&self) -> Option<Self> {
         self.path
             .parent()
-            .map(|p| UnguardedPath::new(p.to_path_buf()))
+            .map(|p| UnguardedPath::external(p.to_path_buf()))
     }
 
     fn new_from_str(_root: &str, candidate: &str) -> Result<Self> {
-        Ok(UnguardedPath::new(Path::new(candidate).to_path_buf()))
+        Ok(UnguardedPath::external(Path::new(candidate).to_path_buf()))
     }
 
     #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
     fn new_root(root: &Path) -> Result<Self> {
-        Ok(UnguardedPath::new(root.to_path_buf()))
+        Ok(UnguardedPath::external(root.to_path_buf()))
     }
 }
 
@@ -663,7 +676,7 @@ mod tests {
     #[allow(clippy::disallowed_types)]
     #[test]
     fn unguarded_path_join_and_parent_work() {
-        let root = UnguardedPath::new("/tmp/oxdock-fs-test");
+        let root = UnguardedPath::external("/tmp/oxdock-fs-test");
         let joined = root.join("child").expect("join");
         assert_eq!(
             joined.as_path().to_string_lossy(),

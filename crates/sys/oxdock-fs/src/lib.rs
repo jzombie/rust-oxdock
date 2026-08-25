@@ -1,5 +1,15 @@
 use anyhow::{Context, Result};
 
+/// Opt into the once-per-process garbage-collection sweep of stale
+/// `oxdock-*` tempdirs (PID-lock based). Idempotent; cheap after the first
+/// call; errors are logged, never fatal.
+///
+/// Composition roots (CLI binaries, build scripts) call this early instead
+/// of relying on constructors to sweep implicitly.
+pub fn init_temp_gc() {
+    workspace_fs::path::run_temp_cleanup_once();
+}
+
 pub fn discover_workspace_root() -> Result<GuardedPath> {
     if let Ok(root) = std::env::var("OXDOCK_WORKSPACE_ROOT") {
         return GuardedPath::new_root_from_str(&root)
@@ -38,10 +48,19 @@ pub use workspace_fs::mock::MockFs;
 /// of constructors and a `root` accessor so code that needs to treat either
 /// type homogenously can do so without ad-hoc helper functions.
 pub trait PathLike: Sized + std::fmt::Display {
+    /// Audited escape hatch: yields a raw std path reference.
+    /// Prefer guarded operations; do not persist the value beyond the
+    /// guarded operation that produced it.
     #[allow(clippy::disallowed_types)]
     fn as_path(&self) -> &std::path::Path;
+    /// Audited escape hatch: yields a raw std path reference to the guard
+    /// root. Prefer guarded operations; do not persist the value beyond the
+    /// guarded operation that produced it.
     #[allow(clippy::disallowed_types)]
     fn root(&self) -> &std::path::Path;
+    /// Audited escape hatch: yields an owned std path outside the guard.
+    /// Prefer guarded operations; do not persist the value beyond the
+    /// guarded operation that produced it.
     #[allow(clippy::disallowed_types)]
     fn to_path_buf(&self) -> std::path::PathBuf;
     fn join(&self, rel: &str) -> Result<Self>;
@@ -62,8 +81,6 @@ pub trait PathLike: Sized + std::fmt::Display {
 /// depend on the abstraction rather than the concrete type.
 pub trait WorkspaceFs {
     fn canonicalize(&self, path: &GuardedPath) -> Result<GuardedPath>;
-    #[allow(clippy::disallowed_types)]
-    fn canonicalize_unguarded(&self, path: &UnguardedPath) -> Result<UnguardedPath>;
 
     fn metadata(&self, path: &GuardedPath) -> Result<std::fs::Metadata>;
     #[allow(clippy::disallowed_types)]
@@ -71,7 +88,7 @@ pub trait WorkspaceFs {
 
     fn root(&self) -> &GuardedPath;
     fn build_context(&self) -> &GuardedPath;
-    fn set_root(&mut self, root: GuardedPath);
+    fn set_root(&mut self, root: &GuardedPath);
 
     fn read_file(&self, path: &GuardedPath) -> Result<Vec<u8>>;
     #[allow(clippy::disallowed_types)]
@@ -146,12 +163,6 @@ impl WorkspaceFs for PathResolver {
         PathResolver::canonicalize(self, path)
     }
 
-    #[allow(clippy::disallowed_types)]
-    fn canonicalize_unguarded(&self, path: &UnguardedPath) -> Result<UnguardedPath> {
-        #[allow(clippy::disallowed_methods)]
-        Ok(UnguardedPath::new(std::fs::canonicalize(path.as_path())?))
-    }
-
     fn metadata(&self, path: &GuardedPath) -> Result<std::fs::Metadata> {
         PathResolver::metadata(self, path)
     }
@@ -169,7 +180,7 @@ impl WorkspaceFs for PathResolver {
         PathResolver::build_context(self)
     }
 
-    fn set_root(&mut self, root: GuardedPath) {
+    fn set_root(&mut self, root: &GuardedPath) {
         PathResolver::set_root(self, root)
     }
 

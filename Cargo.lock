@@ -324,24 +324,23 @@ name = "oxdock-buildtime-helpers"
 version = "0.6.0-alpha"
 dependencies = [
  "anyhow",
+ "oxdock-core",
+ "oxdock-embed",
+ "oxdock-fs",
+ "oxdock-parser",
  "oxdock-process",
  "oxdock-sys-test-utils",
+ "proc-macro2",
+ "syn",
 ]
 
 [[package]]
 name = "oxdock-buildtime-macros"
 version = "0.6.0-alpha"
 dependencies = [
- "anyhow",
- "oxdock-core",
- "oxdock-embed",
- "oxdock-fs",
- "oxdock-parser",
- "oxdock-process",
  "proc-macro2",
  "quote",
  "syn",
- "tracing",
 ]
 
 [[package]]

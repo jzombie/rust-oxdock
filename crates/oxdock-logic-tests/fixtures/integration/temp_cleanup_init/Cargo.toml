@@ -1,5 +1,5 @@
 [package]
-name = "fixture-temp-cleanup-autorun"
+name = "fixture-temp-cleanup-init"
 version = "0.0.0-dev"
 edition = "2024"
 publish = false

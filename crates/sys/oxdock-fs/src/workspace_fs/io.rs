@@ -318,7 +318,7 @@ mod tests {
 
         #[allow(clippy::disallowed_types)]
         {
-            let unguarded = UnguardedPath::new(file.to_path_buf());
+            let unguarded = UnguardedPath::external(file.to_path_buf());
             let _ = resolver.open_file_unguarded(&unguarded).expect("open");
             let _ = resolver.metadata_unguarded(&unguarded).expect("stat");
         }
