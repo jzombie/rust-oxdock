@@ -1,0 +1,1 @@
+TODO: Ensure that the SHA256 hashing is documented everywhere as being recursive, and ensure that the hash values it matches are the same as unix tooling that does the same thing.  A good test case for that is to hash the OxDock project itself during CI testing.
