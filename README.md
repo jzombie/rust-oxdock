@@ -49,10 +49,19 @@ Every internal command is engineered to run the same way across platforms, excep
 The following script is a complete OxDock program — it builds artifacts **and verifies them** with native assertions. Every fenced `oxdock` example in this README is executed against the implementation by [`crates/oxdock-logic-tests/tests/docs_conformance.rs`](./crates/oxdock-logic-tests/tests/docs_conformance.rs), so what you read here is guaranteed to match what the language actually does:
 
 ```oxdock
+// Script-local variable: usable by templates and guards below.
 ENV PROJECT=oxdock
+
+// Creates the directory and any missing parents.
 MKDIR dist
+
+// Interpolate the variable into the file body via a template.
 WRITE dist/hello.txt Built with {{ env:PROJECT }}
+
+// Fail the script unless the artifact exists with exactly these bytes.
 ASSERT_FILE dist/hello.txt Built with {{ env:PROJECT }}
+
+// LS prints "<dir>:" then the entry names, sorted.
 LS dist
 ASSERT_STDOUT hello.txt
 ```
@@ -97,6 +106,7 @@ Scripts are sequences of instructions, one per line. Instructions may be prefixe
 ### Statements and semicolons
 
 ```oxdock
+// One line, two instructions: the semicolon splits them.
 ECHO one; ECHO two
 ASSERT_STDOUT one
 ASSERT_STDOUT two
@@ -131,8 +141,11 @@ Comment markers inside quoted strings are always preserved.
 Arguments accept single- or double-quoted strings; the escape sequences `\"` and `\'` embed a quote, and any other backslash escape keeps the escaped character while dropping the backslash. Quoted fragments containing whitespace, `;`, newlines, `//`, or `/*` retain their quotes when `RUN` reconstructs the command string:
 
 ```oxdock
+// Single and double quotes behave identically.
 ECHO 'single quotes'
 ECHO "double quotes"
+
+// \" embeds a quote; the backslash itself is consumed.
 ECHO "escaped \" quote"
 ASSERT_STDOUT single quotes
 ASSERT_STDOUT double quotes
@@ -145,7 +158,11 @@ ASSERT_STDOUT escaped " quote
 
 ```oxdock
 ENV GREETING=hello-world
+
+// env:-prefixed form: interpolates from the SCRIPT environment.
 ECHO <{{ env:GREETING }}>
+
+// Bare braces are not a template: they expand to empty.
 ECHO <{{ GREETING }}>
 ASSERT_STDOUT <hello-world>
 ASSERT_STDOUT <>
@@ -169,10 +186,18 @@ Guard evaluation checks the script environment first and falls back to the proce
 ### Environment guards
 
 ```oxdock env:DEPLOY_TARGET=staging
+// Copy the key from the host environment (the runner injects it).
 INHERIT_ENV [DEPLOY_TARGET]
+
+// Passes when the variable exists with any non-empty value.
 [env:DEPLOY_TARGET] ECHO deploy-target-visible
+
+// Equality against the inherited value.
 [env:DEPLOY_TARGET==staging] ECHO deploying-to-staging
+
+// Inequality: skipped below, because DEPLOY_TARGET IS staging.
 [env:DEPLOY_TARGET!=staging] ECHO deploying-elsewhere
+
 ASSERT_STDOUT deploy-target-visible
 ASSERT_STDOUT deploying-to-staging
 ```
@@ -180,6 +205,8 @@ ASSERT_STDOUT deploying-to-staging
 ### Platform guards
 
 ```oxdock
+// Exactly one block runs depending on the host OS; every command
+// inside a guarded block inherits the block's guard.
 [windows] {
   WRITE os-report.txt windows
   ECHO windows-detected
@@ -197,10 +224,18 @@ ASSERT_STDOUT deploying-to-staging
 ### Negation, disjunction, and composition
 
 ```oxdock env:OXDOCK_DOC_FEATURE_A=enabled
+// Bring the runner-injected value into the script environment.
 INHERIT_ENV [OXDOCK_DOC_FEATURE_A]
+
+// ! inverts the predicate: passes because the variable does NOT exist.
 [!env:OXDOCK_DOC_UNDEFINED_VAR] ECHO negation-passes-for-undefined
+
+// or(...) passes when ANY branch holds; A exists, so this runs.
 [or(env:OXDOCK_DOC_FEATURE_A, env:OXDOCK_DOC_FEATURE_B)] ECHO or-matched-a-branch
+
+// Comma composes with AND: (A or linux) AND A — true here on every OS.
 [or(env:OXDOCK_DOC_FEATURE_A, linux), env:OXDOCK_DOC_FEATURE_A] ECHO composed-and-or-guard
+
 ASSERT_STDOUT negation-passes-for-undefined
 ASSERT_STDOUT or-matched-a-branch
 ASSERT_STDOUT composed-and-or-guard
@@ -211,11 +246,17 @@ ASSERT_STDOUT composed-and-or-guard
 Bracket expressions may span lines. Chained guard lines apply conjunctively to the next instruction; here neither variable is defined, so the gated instruction is skipped:
 
 ```oxdock
+// Brackets may span lines; chained lines AND together and gate
+// the next command.
 [
   env:OXDOCK_DOC_CHAIN_ONE,
   env:OXDOCK_DOC_CHAIN_TWO
 ]
+
+// Neither variable exists, so this WRITE is skipped entirely.
 WRITE chained.txt applied
+
+// The artifact was never created.
 ASSERT_ABSENT chained.txt
 ```
 
@@ -225,11 +266,16 @@ Instructions guarded by a `{ ... }` block run inside a scope: changes to `WORKDI
 
 ```oxdock
 ENV SCOPE_MARKER=armed
+
+// Guarded block: the WORKDIR change below is scoped and reverts
+// when the block closes.
 [env:SCOPE_MARKER==armed] {
   WORKDIR scoped-area
   WRITE inner.txt written-inside-scoped-block
   ASSERT_FILE inner.txt written-inside-scoped-block
 }
+
+// cwd is back at the workspace root — but files persist.
 ASSERT_FILE scoped-area/inner.txt written-inside-scoped-block
 WRITE outer.txt written-after-scope-restored
 ASSERT_FILE outer.txt written-after-scope-restored
@@ -269,7 +315,10 @@ Files created inside a scope persist; only the working directory, workspace root
 Sets the current working directory for subsequent commands. Relative paths resolve against the current directory; parent directories used by later writes are created on demand. Assertions are also working-directory relative:
 
 ```oxdock
+// Relative WORKDIR; later relative paths resolve against it.
 WORKDIR project/src
+
+// Parent directories are created on demand by WRITE.
 WRITE generated.txt generated-under-workdir
 ASSERT_FILE generated.txt generated-under-workdir
 ```
@@ -279,11 +328,16 @@ ASSERT_FILE generated.txt generated-under-workdir
 Switches the filesystem root between the isolated scratch workspace (`SNAPSHOT`, the default surface scripts operate on) and the build context (`LOCAL`, the tree OxDock was invoked against). Switching also resets the working directory to the new root.
 
 ```oxdock
+// LOCAL: operate directly on the build context tree.
 WORKSPACE LOCAL
 WRITE context-note.txt written-into-build-context
 ASSERT_FILE context-note.txt written-into-build-context
+
+// SNAPSHOT: back to the scratch workspace — the context file is
+// not visible here because the roots differ.
 WORKSPACE SNAPSHOT
 ASSERT_ABSENT context-note.txt
+
 WRITE workspace-note.txt written-into-workspace
 ASSERT_FILE workspace-note.txt written-into-workspace
 ```
@@ -294,6 +348,8 @@ Defines or overrides a script environment variable. Values support templates and
 
 ```oxdock
 ENV APP_MODE=production
+
+// Guards read script variables set by ENV.
 [env:APP_MODE==production] ECHO running-in-production
 [env:APP_MODE!=production] ECHO running-in-something-else
 ASSERT_STDOUT running-in-production
@@ -313,8 +369,11 @@ ASSERT_STDOUT plain-message-with-spaces
 Executes a command string through the host shell. This is the one intentionally platform-specific command: use platform guards to provide per-OS invocations when needed. Child stdout/stderr stream to the script's configured outputs, and a non-zero exit fails the script. Set `OXDOCK_INHERIT_STDOUT=1` (see [ENV_CONTRACTS.md](./ENV_CONTRACTS.md)) to force streaming straight to the terminal instead of any capture.
 
 ```oxdock
+// Host shell differs per OS: pick the invocation with guards.
 [unix] RUN echo native-unix-shell
 [windows] RUN cmd /c echo native-windows-shell
+
+// Child output streams into the script's stdout, so it is assertable.
 [unix] ASSERT_STDOUT native-unix-shell
 [windows] ASSERT_STDOUT native-windows-shell
 ```
@@ -324,8 +383,12 @@ Executes a command string through the host shell. This is the one intentionally 
 Like `RUN`, but spawns the command in the background and continues the script. Lifecycle rules: if any background child finishes early with a non-zero status, the script fails and remaining children are killed; otherwise at script end the first child is awaited to completion and the remainder are killed. Background children started before an `EXIT` are killed before unwinding.
 
 ```oxdock
+// Spawn a slow child; the script does NOT wait for it here.
 [unix] RUN_BG sleep 1
 [windows] RUN_BG ping -n 2 127.0.0.1
+
+// Mainline continues immediately. At script end the FIRST child
+// is awaited to completion and any remaining children are killed.
 ECHO mainline-continues-immediately
 ASSERT_STDOUT mainline-continues-immediately
 ```
@@ -340,8 +403,12 @@ Copies a file or directory into the workspace. Destinations always resolve withi
 The examples below opt into unified roots via fence metadata (`roots:unified`) so source resolution is observable in self-contained snippets. Note that sources never follow the current working directory — only destinations do:
 
 ```oxdock roots:unified
+// Seed a file at the (unified) build-context root.
 WRITE context-file.txt copied-by-default-resolution
 MKDIR app
+
+// Default form: the SOURCE resolves against the build context,
+// regardless of the current working directory.
 COPY context-file.txt app/local-copy.txt
 ASSERT_FILE app/local-copy.txt copied-by-default-resolution
 ```
@@ -349,6 +416,9 @@ ASSERT_FILE app/local-copy.txt copied-by-default-resolution
 ```oxdock roots:unified
 WRITE root-file.txt resolved-from-workspace-root
 WORKDIR app
+
+// Flag form: the source resolves from the workspace ROOT — note it
+// still ignores the current working directory ("app").
 COPY --from-current-workspace root-file.txt duplicated.txt
 ASSERT_FILE duplicated.txt resolved-from-workspace-root
 ```
@@ -357,11 +427,22 @@ ASSERT_FILE duplicated.txt resolved-from-workspace-root
 
 Copies a file or tree out of a Git revision without checking anything out. `<rev>` is any revision spec `git` understands, `<src>` is a path relative to the build context, and `<dst>` lands in the workspace. Git plumbing runs against the build context itself, so it must be (or live inside) a Git repository: files are fetched with `git show <rev>:<src>`; trees use `ls-tree` + `show` extraction. With `--include-dirty`, current working-tree contents overlay the copied result. Source paths are containment-checked exactly like `COPY`; the destination must stay inside the allowed workspace. Requires the `git` CLI on the host.
 
+A note on the self-provisioning example below: `git -c key=value` overrides apply to that single command invocation only — no git configuration is ever modified. If you adapt the provisioning steps for a real repository, drop them so commits use your normal identity.
+
 ```oxdock roots:unified
+// Everything below happens inside a disposable unified-root
+// workspace — no repository of yours is touched.
 RUN git init -q .
+
 WRITE tracked.txt recovered-from-git-history
+
+// Stage and commit the file. The -c flags override the committer
+// identity for THIS command only; git configuration (global,
+// system, or repo-level) is never read-modified or written.
 RUN git add tracked.txt
 RUN git -c user.name=oxdock-docs -c user.email=docs@oxdock.invalid commit -qm init
+
+// Recover the committed blob from history into the workspace.
 COPY_GIT HEAD tracked.txt restored.txt
 ASSERT_FILE restored.txt recovered-from-git-history
 ```
@@ -371,9 +452,15 @@ ASSERT_FILE restored.txt recovered-from-git-history
 Reroutes the standard streams of the next command — or, in block form, of every enclosed command. Bindings map streams (`stdin`, `stdout`, `stderr`) either to themselves (`stdin`) or to named pipes (`stdout=pipe:name`). Pipe names registered by the host runtime tee structured output elsewhere; a name bound as output can later feed another command's `stdin`, connecting commands without touching the terminal. Nested blocks stack defaults, inline bindings override inherited ones for their command only, and closing a block restores the previous wiring.
 
 ```oxdock
+// Route this ECHO's stdout into a named pipe instead of the terminal.
 WITH_IO [stdout=pipe:notes] ECHO routed-into-pipe
+
+// Bind the same name as stdin and capture it into a file. The hash
+// form is used because ECHO appends a trailing newline.
 WITH_IO [stdin=pipe:notes] WRITE notes-captured.txt
 ASSERT_FILE --hash 8f0cedf92cb5465ccf6c63d544f6cde9f9356d83c6036463ecdb0acf22f4ccd5 notes-captured.txt
+
+// Without a binding, output goes to the terminal as usual.
 ECHO printed-to-terminal
 ASSERT_STDOUT printed-to-terminal
 ```
@@ -381,6 +468,7 @@ ASSERT_STDOUT printed-to-terminal
 Bare stream bindings expose the script's own stdin to the inner command:
 
 ```oxdock stdin:streamed-through-stdin
+// stdin flows through untouched; the runner feeds it via fence metadata.
 WITH_IO [stdin] READ
 ASSERT_STDOUT streamed-through-stdin
 ```
@@ -389,6 +477,8 @@ Pipes connect commands to each other; relaying into `WRITE` makes the handoff ve
 
 ```oxdock
 WITH_IO [stdout=pipe:relay] ECHO relayed-content
+
+// The same pipe name now feeds another command's stdin.
 WITH_IO [stdin=pipe:relay] WRITE relayed.txt
 ASSERT_FILE --hash 8db60e0348412da251e028cdc7e4f6dd88b95571596225b63bca9a356f5ccf1d relayed.txt
 ```
@@ -396,12 +486,17 @@ ASSERT_FILE --hash 8db60e0348412da251e028cdc7e4f6dd88b95571596225b63bca9a356f5cc
 Block form hoists bindings over every enclosed command:
 
 ```oxdock
+// Every enclosed ECHO inherits stdout=pipe:block-log.
 WITH_IO [stdout=pipe:block-log] {
   ECHO blocked-one
   ECHO blocked-two
 }
+
+// Drain the captured output into a file for verification.
 WITH_IO [stdin=pipe:block-log] WRITE block-captured.txt
 ASSERT_FILE --hash bbbb7836492c68a5a7da2d8690dc9313f959ecc18b37ff09dd2c1866a88c049a block-captured.txt
+
+// Closing the block restores the previous wiring.
 ECHO outside-block-restores-terminal
 ASSERT_STDOUT outside-block-restores-terminal
 ```
@@ -409,19 +504,31 @@ ASSERT_STDOUT outside-block-restores-terminal
 Defaults stack across nested blocks, an inline binding overrides the inherited one for its command only, and closing each block restores the previous wiring:
 
 ```oxdock
+// Outer block routes plain enclosed commands to block_outer.
 WITH_IO [stdout=pipe:block_outer] {
   ECHO outer-1
+
+  // Inline bare [stdout] overrides the inherited binding — for this
+  // one command only.
   WITH_IO [stdout] ECHO override-to-terminal
+
+  // Nested block stacks on top; block_inner wins inside it.
   WITH_IO [stdout=pipe:block_inner] {
     ECHO inner-2
   }
+
+  // Inner block closed: outer routing resumes for outer-3.
   ECHO outer-3
 }
+
+// Drain both pipes; each captured exactly its own commands' output.
 WITH_IO [stdin=pipe:block_outer] WRITE outer-captured.txt
 WITH_IO [stdin=pipe:block_inner] WRITE inner-captured.txt
 ASSERT_FILE --hash 325b4603ad9aeb8be08236146d5b27eaba3858a752a4623c18d008b7343b72a7 outer-captured.txt
 ASSERT_FILE --hash 400b5f3a2268115082559537ddb90ac533a82df612a931dec2114a902ee05ae3 inner-captured.txt
 ASSERT_STDOUT override-to-terminal
+
+// Outside both blocks: terminal wiring fully restored.
 ECHO outside
 ASSERT_STDOUT outside
 ```
@@ -432,6 +539,8 @@ Prints the SHA-256 digest (hexadecimal, with trailing newline) of a file — or 
 
 ```oxdock
 WRITE payload.txt stable-content
+
+// The digest is deterministic: sha256("stable-content").
 HASH_SHA256 payload.txt
 ASSERT_STDOUT 08135c1b6349b0e4f894c36221952f0de00e6b4d82f80895abf359755e77103c
 ```
@@ -442,6 +551,9 @@ Creates `<to>` as a symlink pointing at `<from>`. Sources resolve like `COPY` so
 
 ```oxdock roots:unified
 WRITE original.txt reachable-through-link
+
+// link.txt references original.txt — or copies it on Windows hosts
+// where symlinks need elevated permissions.
 SYMLINK original.txt link.txt
 READ link.txt
 ASSERT_STDOUT reachable-through-link
@@ -452,6 +564,7 @@ ASSERT_STDOUT reachable-through-link
 Creates a directory and any missing parents (`create_dir_all` semantics):
 
 ```oxdock
+// Creates every missing parent, like create_dir_all.
 MKDIR deeply/nested/tree
 ASSERT_DIR deeply/nested/tree
 ```
@@ -464,6 +577,8 @@ Lists a directory's entries (or the current directory when omitted) sorted by na
 MKDIR inventory
 WRITE inventory/alpha.txt first
 WRITE inventory/beta.txt second
+
+// Prints "<dir>:" then the entries, sorted by name.
 LS inventory
 ASSERT_STDOUT alpha.txt
 ASSERT_STDOUT beta.txt
@@ -475,6 +590,9 @@ Prints the canonical physical path of the current working directory:
 
 ```oxdock
 WORKDIR level-one/level-two
+
+// Prints the canonical physical path; assert the stable suffix
+// rather than the machine-specific prefix.
 CWD
 ASSERT_STDOUT level-two
 ```
@@ -485,6 +603,8 @@ Prints a file's raw bytes to standard output; without an argument, echoes the sc
 
 ```oxdock
 WRITE note.txt file-read-back
+
+// Raw bytes in, raw bytes out — no newline is appended.
 READ note.txt
 ASSERT_STDOUT file-read-back
 ```
@@ -494,6 +614,8 @@ ASSERT_STDOUT file-read-back
 Writes contents to a file, creating parent directories. Without a contents argument it consumes the script's stdin instead (combine with `WITH_IO [stdin...]`):
 
 ```oxdock stdin:stdin-captured-body
+// No contents argument: the body comes from the script's stdin,
+// which the runner feeds via the fence metadata above.
 WITH_IO [stdin] WRITE captured.txt
 ASSERT_FILE captured.txt stdin-captured-body
 ```
@@ -504,7 +626,11 @@ Verifies that a workspace file exists and optionally matches expected content. T
 
 ```oxdock
 WRITE payload.bin stable-content
+
+// Exact-byte comparison against the expanded message.
 ASSERT_FILE payload.bin stable-content
+
+// Digest comparison: handy for trailing newlines or binary bytes.
 ASSERT_FILE --hash 08135c1b6349b0e4f894c36221952f0de00e6b4d82f80895abf359755e77103c payload.bin
 ```
 
@@ -516,6 +642,8 @@ Verifies that a directory exists at the given workspace path:
 
 ```oxdock
 MKDIR dist/assets
+
+// Fails the script if the directory is missing.
 ASSERT_DIR dist/assets
 ```
 
@@ -545,7 +673,10 @@ ASSERT_FILE fallback-artifact.txt fallback-content
 Verifies that the given substring was emitted to the script's stdout sink — covering interpreter output (`ECHO`, `LS`, `READ`, ...) as well as output streamed from `RUN` children. Matching is substring-based, so absolute paths can be asserted by a stable suffix:
 
 ```oxdock
+// Interpreter output (ECHO) ...
 ECHO build-complete
+
+// ... and output streamed from RUN children both reach the log.
 RUN echo artifact-built-ok
 ASSERT_STDOUT build-complete
 ASSERT_STDOUT artifact-built-ok
@@ -556,8 +687,13 @@ ASSERT_STDOUT artifact-built-ok
 Stops the script: background children are killed first, then execution fails with `EXIT requested with code N`. The CLI surfaces this as a failed run (the requested code travels in the error, while the process itself exits non-zero); the build-time macro treats it as a compilation failure. The example below declares its expected failure through fence metadata so the documentation harness can execute it:
 
 ```oxdock expect_error:"EXIT requested with code 42"
+// Teardown order: background children are killed before the error
+// surfaces.
 WRITE teardown-order.txt background-children-killed-first
 ASSERT_FILE teardown-order.txt background-children-killed-first
+
+// Fails the script with "EXIT requested with code 42"; nothing
+// after this line executes.
 EXIT 42
 ```
 
