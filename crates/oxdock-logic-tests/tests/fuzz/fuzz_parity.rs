@@ -204,6 +204,24 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
             }
         }),
         safe_string().prop_map(|path| StepKind::HashSha256 { path: path.into() }),
+        // The grammar defines ASSERT_FILE's hash form without trailing
+        // contents, so generators must preserve that invariant for
+        // Display round-trips.
+        ("[0-9a-f]{64}", safe_string()).prop_map(|(digest, path)| StepKind::AssertFile {
+            hash: Some(digest),
+            path: path.into(),
+            contents: None,
+        }),
+        (safe_string(), prop::option::of(safe_msg())).prop_map(|(path, contents)| {
+            StepKind::AssertFile {
+                hash: None,
+                path: path.into(),
+                contents: contents.map(Into::into),
+            }
+        }),
+        safe_string().prop_map(|s| StepKind::AssertDir(s.into())),
+        safe_string().prop_map(|s| StepKind::AssertAbsent(s.into())),
+        safe_msg().prop_map(|s| StepKind::AssertStdout(s.into())),
         (0i32..255).prop_map(StepKind::Exit),
     ]
 }

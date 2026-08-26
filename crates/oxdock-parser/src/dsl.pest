@@ -90,9 +90,12 @@ command = _{
     cwd_command |
     read_command |
     write_command |
+    assert_file_command |
+    assert_dir_command |
+    assert_absent_command |
+    assert_stdout_command |
     exit_command
 }
-
 // Commands
 workdir_command = ${ "WORKDIR" ~ sep ~ argument }
 workspace_command = ${ "WORKSPACE" ~ sep ~ workspace_target }
@@ -111,6 +114,19 @@ ls_command = ${ "LS" ~ (sep ~ argument)? }
 cwd_command = ${ "CWD" }
 read_command = ${ "READ" ~ (sep ~ argument)? }
 write_command = ${ "WRITE" ~ sep ~ argument ~ (sep ~ message)? }
+
+// Verification commands. ASSERT_FILE alternates on explicit forms so the
+// --hash digest can never be captured into the path slot, and a missing or
+// malformed digest after --hash is a loud parse error rather than a silent skip.
+assert_file_command = _{ assert_file_hash_command | assert_file_content_command }
+assert_file_hash_command = ${ "ASSERT_FILE" ~ sep ~ "--hash" ~ sep ~ hash_digest ~ sep ~ argument }
+assert_file_content_command = ${ "ASSERT_FILE" ~ sep ~ !hash_flag ~ argument ~ (sep ~ message)? }
+assert_dir_command = ${ "ASSERT_DIR" ~ sep ~ argument }
+assert_absent_command = ${ "ASSERT_ABSENT" ~ sep ~ argument }
+assert_stdout_command = ${ "ASSERT_STDOUT" ~ sep ~ message }
+hash_flag = { "--hash" }
+hash_digest = @{ ASCII_HEX_DIGIT{64} }
+
 exit_command = ${ "EXIT" ~ sep ~ exit_code }
 
 // Inherit environment variables (selective list only). Placed here so it's available

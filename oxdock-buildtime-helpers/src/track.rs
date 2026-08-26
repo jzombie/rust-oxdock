@@ -191,6 +191,18 @@ pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
                     template_keys(&mut keys, body);
                 }
             }
+            StepKind::AssertFile {
+                hash: _,
+                path,
+                contents,
+            } => {
+                template_keys(&mut keys, path);
+                if let Some(body) = contents {
+                    template_keys(&mut keys, body);
+                }
+            }
+            StepKind::AssertDir(t) | StepKind::AssertAbsent(t) => template_keys(&mut keys, t),
+            StepKind::AssertStdout(t) => template_keys(&mut keys, t),
             StepKind::WithIo { cmd, .. } => {
                 // WITH_IO wraps exactly one inner command; its templates are
                 // reached when the parser expands blocks, but keep a defensive

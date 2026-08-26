@@ -287,6 +287,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "line-ending"
+version = "1.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "834e592123b39b7b3ba3fdc4b7e4822fad3ced449010f8229f843fe6dd1a33f1"
+
+[[package]]
 name = "linux-raw-sys"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -421,6 +427,7 @@ dependencies = [
  "anyhow",
  "indoc",
  "libtest-mimic",
+ "line-ending",
  "oxdock-core",
  "oxdock-fixture",
  "oxdock-fs",
@@ -437,6 +444,7 @@ version = "0.6.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
+ "line-ending",
  "pest",
  "pest_derive",
  "proc-macro2",

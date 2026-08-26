@@ -1,0 +1,4 @@
+name = "assert_file"
+
+[expect]
+files = { "artifact.txt" = "expected-body" }

@@ -90,6 +90,14 @@ pub(super) fn execute_steps<P: ProcessManager>(
                 StepKind::Cwd => handlers::cwd(&mut cx, idx),
                 StepKind::Read(path_opt) => handlers::read(&mut cx, idx, path_opt),
                 StepKind::Write { path, contents } => handlers::write(&mut cx, idx, path, contents),
+                StepKind::AssertFile {
+                    hash,
+                    path,
+                    contents,
+                } => handlers::assert_file(&mut cx, idx, hash, path, contents),
+                StepKind::AssertDir(path) => handlers::assert_dir(&mut cx, idx, path),
+                StepKind::AssertAbsent(path) => handlers::assert_absent(&mut cx, idx, path),
+                StepKind::AssertStdout(msg) => handlers::assert_stdout(&mut cx, idx, msg),
                 StepKind::WithIo { bindings, cmd } => {
                     handlers::with_io(&mut cx, idx, bindings, cmd)
                 }
@@ -115,10 +123,11 @@ pub(super) fn execute_steps<P: ProcessManager>(
     if wait_at_end && !state.bg_children.is_empty() {
         let mut first = state.bg_children.remove(0);
         let status = first.wait()?;
+        // See `check_bg`: reap the remainder without joining pump threads.
         for child in state.bg_children.iter_mut() {
             if child.try_wait()?.is_none() {
                 let _ = child.kill();
-                let _ = child.wait();
+                let _ = child.try_wait();
             }
         }
         state.bg_children.clear();
@@ -141,11 +150,14 @@ fn check_bg<H: BackgroundHandle>(bg: &mut Vec<H>) -> Result<Option<ExitStatus>> 
         }
     }
     if let Some(status) = finished {
-        // Tear down remaining background children.
+        // Tear down remaining background children. Reap without joining the
+        // child's IO pump threads: a grandchild inheriting the stream can keep
+        // them alive well beyond the kill, and nothing downstream needs their
+        // residual output. `Drop` remains the bounded safety net.
         for child in bg.iter_mut() {
             if child.try_wait()?.is_none() {
                 let _ = child.kill();
-                let _ = child.wait();
+                let _ = child.try_wait();
             }
         }
         bg.clear();

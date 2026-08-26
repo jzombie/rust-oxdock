@@ -19,6 +19,10 @@ pub enum Command {
     Cwd,
     Read,
     Write,
+    AssertFile,
+    AssertDir,
+    AssertAbsent,
+    AssertStdout,
     Exit,
 }
 
@@ -40,6 +44,10 @@ pub const COMMANDS: &[Command] = &[
     Command::Cwd,
     Command::Read,
     Command::Write,
+    Command::AssertFile,
+    Command::AssertDir,
+    Command::AssertAbsent,
+    Command::AssertStdout,
     Command::Exit,
 ];
 
@@ -63,6 +71,10 @@ impl Command {
             Command::Cwd => "CWD",
             Command::Read => "READ",
             Command::Write => "WRITE",
+            Command::AssertFile => "ASSERT_FILE",
+            Command::AssertDir => "ASSERT_DIR",
+            Command::AssertAbsent => "ASSERT_ABSENT",
+            Command::AssertStdout => "ASSERT_STDOUT",
             Command::Exit => "EXIT",
         }
     }
@@ -90,6 +102,10 @@ impl Command {
             "CWD" => Some(Command::Cwd),
             "READ" => Some(Command::Read),
             "WRITE" => Some(Command::Write),
+            "ASSERT_FILE" => Some(Command::AssertFile),
+            "ASSERT_DIR" => Some(Command::AssertDir),
+            "ASSERT_ABSENT" => Some(Command::AssertAbsent),
+            "ASSERT_STDOUT" => Some(Command::AssertStdout),
             "EXIT" => Some(Command::Exit),
             _ => None,
         }
@@ -278,6 +294,17 @@ pub enum StepKind {
         path: TemplateString,
         contents: Option<TemplateString>,
     },
+    /// Verify a workspace file exists and, when `hash` or `contents` is
+    /// present, matches it. The grammar guarantees the invariant: `hash` set
+    /// implies a 64-hex digest and no `contents`.
+    AssertFile {
+        hash: Option<String>,
+        path: TemplateString,
+        contents: Option<TemplateString>,
+    },
+    AssertDir(TemplateString),
+    AssertAbsent(TemplateString),
+    AssertStdout(TemplateString),
     WithIo {
         bindings: Vec<IoBinding>,
         cmd: Box<StepKind>,
@@ -548,6 +575,24 @@ impl fmt::Display for StepKind {
                 }
                 Ok(())
             }
+            StepKind::AssertFile {
+                hash,
+                path,
+                contents,
+            } => {
+                if let Some(digest) = hash {
+                    write!(f, "ASSERT_FILE --hash {} {}", digest, quote_arg(path))
+                } else {
+                    write!(f, "ASSERT_FILE {}", quote_arg(path))?;
+                    if let Some(body) = contents {
+                        write!(f, " {}", quote_msg(body))?;
+                    }
+                    Ok(())
+                }
+            }
+            StepKind::AssertDir(arg) => write!(f, "ASSERT_DIR {}", quote_arg(arg)),
+            StepKind::AssertAbsent(arg) => write!(f, "ASSERT_ABSENT {}", quote_arg(arg)),
+            StepKind::AssertStdout(msg) => write!(f, "ASSERT_STDOUT {}", quote_msg(msg)),
             StepKind::WithIo { bindings, cmd } => {
                 let parts: Vec<String> = bindings.iter().map(format_io_binding).collect();
                 write!(f, "WITH_IO [{}] {}", parts.join(", "), cmd)

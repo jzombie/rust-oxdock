@@ -27,6 +27,7 @@ anyhow = "1.0.100"
 indoc = "2.0.7"
 libc = "0.2.178"
 libtest-mimic = "0.8.1"
+line-ending = "1.5"
 oxdock-buildtime-helpers = { path = "oxdock-buildtime-helpers", version = "0.6.0-alpha" }
 oxdock-buildtime-macros = { path = "oxdock-buildtime-macros", version = "0.6.0-alpha" }
 oxdock-core = { path = "crates/oxdock-core", version = "0.6.0-alpha" }

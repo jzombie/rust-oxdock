@@ -1,0 +1,4 @@
+name = "assert_stdout"
+
+[expect]
+stdout = "verification-marker\n"

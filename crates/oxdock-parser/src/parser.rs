@@ -587,6 +587,11 @@ fn parse_command(pair: Pair<Rule>) -> Result<StepKind> {
                 contents: contents.map(Into::into),
             }
         }
+        Rule::assert_file_hash_command => parse_assert_file_hash(pair)?,
+        Rule::assert_file_content_command => parse_assert_file_content(pair)?,
+        Rule::assert_dir_command => StepKind::AssertDir(parse_single_arg(pair)?.into()),
+        Rule::assert_absent_command => StepKind::AssertAbsent(parse_single_arg(pair)?.into()),
+        Rule::assert_stdout_command => StepKind::AssertStdout(parse_message(pair)?.into()),
         Rule::exit_command => {
             let code = parse_exit_code(pair)?;
             StepKind::Exit(code)
@@ -594,6 +599,48 @@ fn parse_command(pair: Pair<Rule>) -> Result<StepKind> {
         _ => bail!("unknown command rule: {:?}", pair.as_rule()),
     };
     Ok(kind)
+}
+
+fn parse_assert_file_hash(pair: Pair<Rule>) -> Result<StepKind> {
+    let mut digest = None;
+    let mut path = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::hash_digest => digest = Some(part.as_str().to_string()),
+            Rule::argument => path = Some(parse_argument(part)?),
+            _ => {}
+        }
+    }
+    Ok(StepKind::AssertFile {
+        hash: Some(digest.ok_or_else(|| anyhow!("missing hash digest"))?),
+        path: path
+            .ok_or_else(|| anyhow!("ASSERT_FILE --hash expects a path argument"))?
+            .into(),
+        contents: None,
+    })
+}
+
+fn parse_assert_file_content(pair: Pair<Rule>) -> Result<StepKind> {
+    let mut path = None;
+    let mut contents = None;
+    for part in pair.into_inner() {
+        match part.as_rule() {
+            Rule::argument if path.is_none() => {
+                path = Some(parse_argument(part)?);
+            }
+            Rule::message => {
+                contents = Some(parse_concatenated_string(part)?);
+            }
+            _ => {}
+        }
+    }
+    Ok(StepKind::AssertFile {
+        hash: None,
+        path: path
+            .ok_or_else(|| anyhow!("ASSERT_FILE expects a path argument"))?
+            .into(),
+        contents: contents.map(Into::into),
+    })
 }
 
 fn parse_single_arg(pair: Pair<Rule>) -> Result<String> {

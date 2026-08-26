@@ -20,7 +20,7 @@ use oxdock_process::{
 use std::sync::Arc;
 
 use self::fs_ops::describe_dir;
-use self::io::{StreamHandle, assemble_default_io};
+use self::io::{StreamHandle, assemble_default_io, teed_stdout};
 use self::state::ExecState;
 use self::steps::execute_steps;
 
@@ -136,6 +136,7 @@ fn run_steps_with_manager<P: ProcessManager>(
     let cwd = fs.root().clone();
     let build_context = fs.build_context().clone();
     let envs = Arc::new(BuiltinEnv::collect(&build_context).into_envs());
+    let stdout_log = Arc::new(std::sync::Mutex::new(Vec::new()));
     let mut state = ExecState {
         fs,
         cargo_target_dir: fs_root.join(".cargo-target")?,
@@ -144,11 +145,18 @@ fn run_steps_with_manager<P: ProcessManager>(
         bg_children: Vec::new(),
         scope_stack: Vec::new(),
         io,
+        stdout_log,
     };
 
     let _default_stdout = std::io::stdout();
     let stdin = state.io.stdin();
-    let stdout = state.io.stdout().map(StreamHandle::Stream);
+    // Every emitted byte flows through the tee so ASSERT_STDOUT sees both
+    // interpreter output and streamed child output, even when no capture
+    // sink was configured (forwarding to real stdout in that case).
+    let stdout = Some(StreamHandle::Stream(teed_stdout(
+        state.io.stdout(),
+        Arc::clone(&state.stdout_log),
+    )));
     let stderr = state.io.stderr().map(StreamHandle::Stream);
     let mut proc_mgr = process;
     execute_steps(

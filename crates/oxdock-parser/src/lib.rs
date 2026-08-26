@@ -2,6 +2,7 @@ pub mod ast;
 mod lexer;
 #[cfg(feature = "proc-macro-api")]
 mod macro_input;
+pub mod markdown;
 pub mod parser;
 
 pub use ast::*;
@@ -10,6 +11,7 @@ pub use lexer::LANGUAGE_SPEC;
 pub use macro_input::{
     DslMacroInput, ScriptSource, parse_braced_tokens, script_from_braced_tokens,
 };
+pub use markdown::{BlockMetadata, FencedBlock, extract_fenced_blocks};
 pub use parser::parse_script;
 
 #[cfg(test)]
@@ -336,6 +338,81 @@ mod tests {
         match &steps[0].kind {
             StepKind::Run(cmd) => assert_eq!(cmd, "echo hi"),
             other => panic!("expected RUN command, saw {:?}", other),
+        }
+    }
+
+    #[test]
+    fn assert_file_hash_form_binds_digest_and_path_in_order() {
+        let digest = "a".repeat(64);
+        let script = format!("ASSERT_FILE --hash {digest} out.txt");
+        let steps = parse_script(&script).expect("parse ok");
+        match &steps[0].kind {
+            StepKind::AssertFile {
+                hash,
+                path,
+                contents,
+            } => {
+                assert_eq!(hash.as_deref(), Some(digest.as_str()));
+                assert_eq!(path.as_ref(), "out.txt");
+                assert!(contents.is_none());
+            }
+            other => panic!("expected ASSERT_FILE, saw {:?}", other),
+        }
+    }
+
+    #[test]
+    fn assert_file_bad_digest_is_a_parse_error() {
+        for bad in [
+            "ASSERT_FILE --hash zzzz out.txt",
+            "ASSERT_FILE --hash aabbcc out.txt",
+        ] {
+            parse_script(bad).expect_err("malformed digest must fail loudly");
+        }
+    }
+
+    #[test]
+    fn assert_commands_parse_and_round_trip() {
+        let script = indoc! {r#"
+            ASSERT_FILE dist/hello.txt Built with oxdock
+            ASSERT_DIR deeply/nested/tree
+            ASSERT_ABSENT chained.txt
+            ASSERT_STDOUT visible-after-comments
+        "#};
+        let steps = parse_script(script).expect("parse ok");
+        assert_eq!(steps.len(), 4);
+        match &steps[0].kind {
+            StepKind::AssertFile {
+                hash,
+                path,
+                contents,
+            } => {
+                assert!(hash.is_none());
+                assert_eq!(path.as_ref(), "dist/hello.txt");
+                assert_eq!(
+                    contents.as_ref().map(AsRef::as_ref),
+                    Some("Built with oxdock")
+                );
+            }
+            other => panic!("expected ASSERT_FILE, saw {:?}", other),
+        }
+        assert!(
+            matches!(&steps[1].kind, StepKind::AssertDir(path) if path.as_ref() == "deeply/nested/tree")
+        );
+        assert!(
+            matches!(&steps[2].kind, StepKind::AssertAbsent(path) if path.as_ref() == "chained.txt")
+        );
+        assert!(
+            matches!(&steps[3].kind, StepKind::AssertStdout(msg) if msg.as_ref() == "visible-after-comments")
+        );
+
+        for step in &steps {
+            let rendered = step.to_string();
+            let reparsed = parse_script(&rendered).expect("display round trip parses");
+            assert_eq!(reparsed.len(), 1);
+            assert_eq!(
+                &reparsed[0].kind, &step.kind,
+                "round-trip mismatch: {rendered}"
+            );
         }
     }
 

@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use oxdock_process::{CommandStderr, CommandStdout, SharedInput, SharedOutput};
@@ -52,6 +53,44 @@ where
         let mut stdout = io::stdout();
         op(&mut stdout)
     }
+}
+
+/// Wraps the configured stdout sink so every byte written to it is also
+/// appended to `ExecState::stdout_log` for `ASSERT_STDOUT`. When no sink is
+/// configured (`inner` is `None`) output forwards to real stdout, preserving
+/// interactive behavior while still recording what was emitted.
+struct TeeWriter {
+    inner: Option<SharedOutput>,
+    log: Arc<Mutex<Vec<u8>>>,
+}
+
+impl Write for TeeWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if let Some(inner) = &self.inner
+            && let Ok(mut guard) = inner.lock()
+        {
+            guard.write_all(buf)?;
+        }
+        self.log
+            .lock()
+            .map_err(|_| io::Error::other("stdout log poisoned"))?
+            .extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        if let Some(inner) = &self.inner
+            && let Ok(mut guard) = inner.lock()
+        {
+            guard.flush()?;
+        }
+        Ok(())
+    }
+}
+
+/// Installs the tee around `sink` (or real stdout when absent).
+pub(crate) fn teed_stdout(sink: Option<SharedOutput>, log: Arc<Mutex<Vec<u8>>>) -> SharedOutput {
+    Arc::new(Mutex::new(TeeWriter { inner: sink, log }))
 }
 
 impl ExecIo {

@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, anyhow, bail};
 use std::sync::Arc;
 
+use oxdock_fs::EntryKind;
 use oxdock_parser::{IoBinding, IoStream, Step, StepKind, TemplateString, WorkspaceTarget};
 use oxdock_process::{
     BackgroundHandle, CommandOptions, CommandResult, CommandStderr, CommandStdout, ProcessManager,
@@ -515,6 +516,128 @@ pub(super) fn write<P: ProcessManager>(
     Ok(())
 }
 
+pub(super) fn assert_file<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    idx: usize,
+    hash: &Option<String>,
+    path: &TemplateString,
+    contents: &Option<TemplateString>,
+) -> Result<()> {
+    let ctx = cx.state.command_ctx()?;
+    let rendered = super::expand_template(path, &ctx);
+    let target = cx
+        .state
+        .fs
+        .resolve_read(&cx.state.cwd, &rendered)
+        .with_context(|| format!("step {}: ASSERT_FILE {}", idx + 1, rendered))?;
+    if !matches!(cx.state.fs.entry_kind(&target)?, EntryKind::File) {
+        bail!("step {}: ASSERT_FILE {} is not a file", idx + 1, rendered);
+    }
+    if let Some(expected) = hash {
+        let mut hasher = Sha256::new();
+        hash_path(cx.state.fs.as_ref(), &target, "", &mut hasher)?;
+        let actual = format!("{:x}", hasher.finalize());
+        if !actual.eq_ignore_ascii_case(expected) {
+            bail!(
+                "step {}: ASSERT_FILE --hash mismatch for {}: expected {}, computed {}",
+                idx + 1,
+                rendered,
+                expected,
+                actual
+            );
+        }
+        return Ok(());
+    }
+    if let Some(body) = contents {
+        let expected = super::expand_template(body, &ctx);
+        let actual = cx.state.fs.read_file(&target).with_context(|| {
+            format!(
+                "step {}: ASSERT_FILE {} could not be read",
+                idx + 1,
+                rendered
+            )
+        })?;
+        if actual != expected.as_bytes() {
+            bail!(
+                "step {}: ASSERT_FILE content mismatch for {}\nexpected: {:?}\nactual:   {:?}",
+                idx + 1,
+                rendered,
+                expected,
+                String::from_utf8_lossy(&actual)
+            );
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn assert_dir<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    idx: usize,
+    path: &TemplateString,
+) -> Result<()> {
+    let ctx = cx.state.command_ctx()?;
+    let rendered = super::expand_template(path, &ctx);
+    let target = cx
+        .state
+        .fs
+        .resolve_read(&cx.state.cwd, &rendered)
+        .with_context(|| format!("step {}: ASSERT_DIR {}", idx + 1, rendered))?;
+    if !matches!(cx.state.fs.entry_kind(&target)?, EntryKind::Dir) {
+        bail!(
+            "step {}: ASSERT_DIR {} is not a directory",
+            idx + 1,
+            rendered
+        );
+    }
+    Ok(())
+}
+
+pub(super) fn assert_absent<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    idx: usize,
+    path: &TemplateString,
+) -> Result<()> {
+    let ctx = cx.state.command_ctx()?;
+    let rendered = super::expand_template(path, &ctx);
+    let target = cx
+        .state
+        .fs
+        .resolve_write(&cx.state.cwd, &rendered)
+        .with_context(|| format!("step {}: ASSERT_ABSENT {}", idx + 1, rendered))?;
+    // Containment was already enforced by `resolve_write`; a lookup failure
+    // therefore means the path is absent, which is this command's success
+    // condition.
+    if cx.state.fs.entry_kind(&target).is_ok() {
+        bail!("step {}: ASSERT_ABSENT {} exists", idx + 1, rendered);
+    }
+    Ok(())
+}
+
+pub(super) fn assert_stdout<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    idx: usize,
+    needle: &TemplateString,
+) -> Result<()> {
+    let ctx = cx.state.command_ctx()?;
+    let rendered = super::expand_template(needle, &ctx);
+    let log = String::from_utf8_lossy(
+        &cx.state
+            .stdout_log
+            .lock()
+            .map_err(|_| anyhow!("stdout log poisoned"))?,
+    )
+    .into_owned();
+    if !log.contains(&rendered) {
+        bail!(
+            "step {}: ASSERT_STDOUT did not contain '{}'; emitted:\n{}",
+            idx + 1,
+            rendered,
+            log.trim_end()
+        );
+    }
+    Ok(())
+}
+
 pub(super) fn with_io<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     idx: usize,
@@ -626,7 +749,8 @@ pub(super) fn exit<P: ProcessManager>(cx: &mut StepCtx<'_, P>, code: i32) -> Res
     for child in cx.state.bg_children.iter_mut() {
         if child.try_wait()?.is_none() {
             let _ = child.kill();
-            let _ = child.wait();
+            // Reap without joining IO pump threads (see `check_bg`).
+            let _ = child.try_wait();
         }
     }
     cx.state.bg_children.clear();

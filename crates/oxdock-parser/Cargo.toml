@@ -14,6 +14,7 @@ proc-macro-api = ["proc-macro2", "syn", "quote"]
 
 [dependencies]
 anyhow.workspace = true
+line-ending.workspace = true
 pest.workspace = true
 pest_derive.workspace = true
 proc-macro2 = { workspace = true, optional = true, features = ["span-locations"] }

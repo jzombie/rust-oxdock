@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use oxdock_fs::{GuardedPath, WorkspaceFs};
@@ -15,6 +15,11 @@ pub(super) struct ExecState<P: ProcessManager> {
     pub(super) bg_children: Vec<P::Handle>,
     pub(super) scope_stack: Vec<ScopeSnapshot>,
     pub(super) io: ExecIo,
+    /// Everything emitted to the script's stdout sink (interpreter and
+    /// streamed child output alike), for `ASSERT_STDOUT`. Shared with the
+    /// tee wrapper installed around the configured sink so background
+    /// processes can append concurrently.
+    pub(super) stdout_log: Arc<Mutex<Vec<u8>>>,
 }
 
 pub(super) struct ScopeSnapshot {

@@ -1,0 +1,5 @@
+name = "assert_absent"
+
+[expect]
+dirs = ["scratch"]
+missing = ["never-created.txt"]

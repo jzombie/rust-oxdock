@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc c27628d4dfcfeca6abc379afa7e8565e21ad5ecef378f5fb93f79d6f20a494ed # shrinks to step = Step { guard: Some(All([Or([Predicate(Platform { target: Unix, invert: false }), Predicate(Platform { target: Unix, invert: false })]), Predicate(Platform { target: Unix, invert: false }), Predicate(Platform { target: Unix, invert: false })])), kind: Workdir(TemplateString("0")), scope_enter: 0, scope_exit: 0 }
+cc 8d347255bf768ea797d5085079818111f41f9598c53599c4bbf8664742a61b37 # shrinks to step = Step { guard: None, kind: AssertFile { hash: Some("a000a00a000a8f3669de4f3ee38c06b849d36c4eceaa29e44fa8b6c71fe2ab1a"), path: TemplateString("bC10_/ZFV_049Eqr__k_"), contents: Some(TemplateString("Ly")) }, scope_enter: 0, scope_exit: 0 }

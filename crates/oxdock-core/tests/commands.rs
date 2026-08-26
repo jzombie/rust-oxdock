@@ -1163,3 +1163,113 @@ fn with_io_routes_stdout_into_later_stdin() {
     let contents = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
     assert_eq!(contents, "streamed\n");
 }
+
+fn run_script(root: &GuardedPath, script: &str) -> Result<(), anyhow::Error> {
+    let steps = oxdock_parser::parse_script(script).expect("parse script");
+    run_steps_with_context_result_with_io(root, root, &steps, ExecIo::new()).map(|_| ())
+}
+
+#[test]
+fn assert_file_accepts_matching_content() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    run_script(
+        &root,
+        "WRITE out.txt payload\nASSERT_FILE out.txt payload\n",
+    )
+    .expect("matching content passes");
+}
+
+#[test]
+fn assert_file_rejects_content_mismatch() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let err = run_script(
+        &root,
+        "WRITE out.txt actual\nASSERT_FILE out.txt expected\n",
+    )
+    .expect_err("mismatch must fail");
+    assert!(err.to_string().contains("content mismatch"), "{err}");
+}
+
+#[test]
+fn assert_file_requires_existing_file() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let err = run_script(&root, "ASSERT_FILE missing.txt\n").expect_err("missing must fail");
+    assert!(err.to_string().contains("missing.txt"), "{err}");
+}
+
+#[test]
+fn assert_file_hash_mode_matches_and_rejects() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    // sha256("stable-content")
+    let digest = "08135c1b6349b0e4f894c36221952f0de00e6b4d82f80895abf359755e77103c";
+    run_script(
+        &root,
+        &format!("WRITE payload.bin stable-content\nASSERT_FILE --hash {digest} payload.bin\n"),
+    )
+    .expect("hash match passes");
+
+    let err = run_script(
+        &root,
+        "WRITE payload.bin stable-content\nASSERT_FILE --hash 1111111111111111111111111111111111111111111111111111111111111111 payload.bin\n",
+    )
+    .expect_err("hash mismatch must fail");
+    assert!(err.to_string().contains("--hash mismatch"), "{err}");
+}
+
+#[test]
+fn assert_dir_and_absent_cover_both_outcomes() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    run_script(
+        &root,
+        "MKDIR tree/deep\nASSERT_DIR tree/deep\nASSERT_ABSENT nope.txt\n",
+    )
+    .expect("positive assertions pass");
+
+    let dir_err = run_script(&root, "WRITE file.txt x\nASSERT_DIR file.txt\n")
+        .expect_err("file-as-dir must fail");
+    assert!(
+        dir_err.to_string().contains("is not a directory"),
+        "{dir_err}"
+    );
+
+    let absent_err = run_script(&root, "WRITE file.txt x\nASSERT_ABSENT file.txt\n")
+        .expect_err("present path must fail");
+    assert!(absent_err.to_string().contains("exists"), "{absent_err}");
+}
+
+#[test]
+fn assert_stdout_sees_interpreter_output_without_capture_sink() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    run_script(&root, "ECHO banner-line\nASSERT_STDOUT banner-line\n")
+        .expect("interpreter output is recorded even with no configured sink");
+}
+
+#[test]
+fn assert_stdout_sees_streamed_child_output() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    #[cfg(unix)]
+    let script = "RUN echo child-echo-line\nASSERT_STDOUT child-echo-line\n";
+    #[cfg(windows)]
+    let script = "RUN cmd /c echo child-echo-line\nASSERT_STDOUT child-echo-line\n";
+    run_script(&root, script).expect("child output is recorded");
+}
+
+#[test]
+fn assert_stdout_miss_reports_emitted_log() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let err = run_script(&root, "ECHO present-line\nASSERT_STDOUT absent-line\n")
+        .expect_err("miss must fail");
+    assert!(
+        err.to_string().contains("did not contain 'absent-line'")
+            && err.to_string().contains("present-line"),
+        "{err}"
+    );
+}

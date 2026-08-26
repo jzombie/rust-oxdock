@@ -1,0 +1,2 @@
+MKDIR out/inner
+ASSERT_DIR out/inner
