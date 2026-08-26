@@ -73,12 +73,13 @@ cargo install --path oxdock-cli
 oxdock --script Oxfile
 ```
 
-Or embed the same script at compile time:
+Or embed the same script at compile time — the macro runs the script during `rustc` and generates a pure-Rust struct whose assets live in the binary's data section, readable at runtime with zero heap allocation:
 
-```rust,ignore
+```rust
 use oxdock_buildtime_macros::embed;
 
 embed! {
+    // Embedded resources are mapped to `HelloAssets::get(resource)`
     name: HelloAssets,
     script: {
         ENV PROJECT=oxdock
@@ -87,6 +88,12 @@ embed! {
         ASSERT_FILE dist/hello.txt Built with {{ env:PROJECT }}
     },
     out_dir: "prebuilt",
+}
+
+fn main() {
+    // Verify we can read the resource we just created
+    let file = HelloAssets::get("dist/hello.txt").expect("dist/hello.txt must be embedded");
+    assert_eq!(file.data.as_ref(), b"Built with oxdock");
 }
 ```
 

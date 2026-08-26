@@ -16,8 +16,8 @@ embed! {
 }
 
 fn main() {
-    assert!(
-        VerifiedAssets::get("dist/hello.txt").is_some(),
-        "verified artifact must be embedded"
-    );
+    // Same read-back shape documented in the README quick start: the
+    // generated struct serves the asset straight from the binary.
+    let file = VerifiedAssets::get("dist/hello.txt").expect("dist/hello.txt must be embedded");
+    assert_eq!(file.data.as_ref(), b"Built with oxdock");
 }
