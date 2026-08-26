@@ -521,15 +521,23 @@ ASSERT_DIR dist/assets
 
 ### ASSERT_ABSENT
 
-Verifies that no file or directory exists at the given workspace path — useful for asserting cleanup ran or a gated branch never executed:
+Verifies that no file or directory exists at the given workspace path — useful for asserting cleanup ran or a gated branch never executed.
+
+Guards attach only to the command that immediately follows them. In the script below, the chained multi-line guard gates off just the first `WRITE`; because neither variable exists, that write is skipped and the artifact never comes into existence — the assertion confirms it, it does not remove anything:
 
 ```oxdock
+// Neither variable exists, so this chained guard skips ONLY the
+// next command: the WRITE below never runs.
 [
   env:RELEASE_SIGNING_KEY,
   env:ALSO_UNDEFINED
 ]
-WRITE unsigned-artifact.txt signed
-ASSERT_ABSENT unsigned-artifact.txt
+WRITE signed-artifact.txt signed-content
+ASSERT_ABSENT signed-artifact.txt
+
+// Commands after the gated one execute normally, unguarded.
+WRITE fallback-artifact.txt fallback-content
+ASSERT_FILE fallback-artifact.txt fallback-content
 ```
 
 ### ASSERT_STDOUT
