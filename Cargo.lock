@@ -386,6 +386,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxdock-doc-tests"
+version = "0.6.0-alpha"
+dependencies = [
+ "oxdock-buildtime-macros",
+]
+
+[[package]]
 name = "oxdock-embed"
 version = "0.6.0-alpha"
 dependencies = [

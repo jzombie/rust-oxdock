@@ -1,0 +1,12 @@
+[package]
+name = "oxdock-doc-tests"
+description = "Executes README.md Rust examples as doctests."
+authors.workspace = true
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[dev-dependencies]
+oxdock-buildtime-macros.workspace = true

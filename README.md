@@ -87,7 +87,8 @@ embed! {
         WRITE dist/hello.txt Built with {{ env:PROJECT }}
         ASSERT_FILE dist/hello.txt Built with {{ env:PROJECT }}
     },
-    out_dir: "prebuilt",
+    // Generated assets land under target/, keeping the source tree clean
+    out_dir: "target/prebuilt",
 }
 
 fn main() {
@@ -749,6 +750,7 @@ Every ```` ```oxdock ```` fence in this document is extracted with [`oxdock_pars
 - **Coverage gates:** every parser command must appear in at least one executable example, and key structural features (`or(`, `{{ env:`, `[env:`) must be demonstrated.
 - **Compile-time parity:** a [build-time fixture](./crates/oxdock-logic-tests/fixtures/integration/buildtime_macros/assert_verification/) runs this README's quick-start script through `embed!`, assertions included.
 - **Real-binary check:** the quick start is additionally executed through the actual `oxdock` binary exactly as documented (`--script Oxfile`).
+- **Doctest execution:** the Rust quick start is wired into [`crates/oxdock-doc-tests`](./crates/oxdock-doc-tests/) and compiled *and* run by `cargo test --doc` on every CI OS.
 - **Reference integrity:** every relative Markdown link target and every repo path referenced from a ```` ```bash ```` fence must exist.
 
 Snippets contain nothing but OxDock — copy any of them straight into an `Oxfile` or an `embed!` macro. Runner-specific configuration lives in the fence info-string, which Markdown renders as inert metadata:

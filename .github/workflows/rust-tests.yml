@@ -80,6 +80,9 @@ jobs:
       - name: Test
         run: cargo test --workspace --all-features --lib --bins --tests --examples -- --include-ignored
 
+      - name: README doctests
+        run: cargo test -p oxdock-doc-tests --doc --all-features
+
   test:
     name: test
     runs-on: ubuntu-latest
