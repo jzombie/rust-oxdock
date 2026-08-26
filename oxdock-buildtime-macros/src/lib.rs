@@ -25,7 +25,8 @@
 //! module.
 
 use oxdock_buildtime_helpers::{
-    asset_input_fingerprint, embed_debug_enabled, execution_is_skipped, stage_materialize,
+    asset_input_fingerprint, embed_debug_enabled, embed_force_rebuild, execution_is_skipped,
+    stage_materialize,
 };
 use oxdock_core::{ExecIo, run_steps_with_context_result_with_io};
 use oxdock_embed::{emit_embed_module, gather_assets, runtime_support_tokens};
@@ -206,6 +207,12 @@ fn prepare_inline_plan(input: &DslMacroInput) -> syn::Result<InlinePlan> {
     })
 }
 
+/// Force lever wins over cache validity: `OXDOCK_EMBED_FORCE_REBUILD`
+/// short-circuits the `.oxdock_hash` comparison entirely.
+fn should_rebuild(force: bool, cache_valid: bool) -> bool {
+    force || !cache_valid
+}
+
 fn cached_out_dir_valid(plan: &InlinePlan) -> bool {
     if plan.out_dir.as_path().exists() && !plan.out_dir.as_path().is_dir() {
         return false;
@@ -243,15 +250,14 @@ fn expand_prepare_internal(input: &DslMacroInput) -> syn::Result<()> {
         prepare_inline_plan(input)
     })?;
 
-    if cached_out_dir_valid(&plan) {
-        return Ok(());
+    if should_rebuild(embed_force_rebuild(), cached_out_dir_valid(&plan)) {
+        preflight_out_dir_for_build(&plan.out_dir, input.out_dir.span())?;
+        catch_engine_panics(plan.script_span, || {
+            build_assets(&plan.script_src, plan.script_span, &plan.out_dir)
+        })?;
+        record_cache_hash(&plan)?;
     }
-
-    preflight_out_dir_for_build(&plan.out_dir, input.out_dir.span())?;
-    catch_engine_panics(plan.script_span, || {
-        build_assets(&plan.script_src, plan.script_span, &plan.out_dir)
-    })?;
-    record_cache_hash(&plan)
+    Ok(())
 }
 
 fn expand_embed_internal(input: &DslMacroInput) -> syn::Result<proc_macro2::TokenStream> {
@@ -264,7 +270,7 @@ fn expand_embed_internal(input: &DslMacroInput) -> syn::Result<proc_macro2::Toke
         prepare_inline_plan(input)
     })?;
 
-    if !cached_out_dir_valid(&plan) {
+    if should_rebuild(embed_force_rebuild(), cached_out_dir_valid(&plan)) {
         preflight_out_dir_for_build(&plan.out_dir, input.out_dir.span())?;
         catch_engine_panics(plan.script_span, || {
             build_assets(&plan.script_src, plan.script_span, &plan.out_dir)
@@ -430,6 +436,17 @@ mod tests {
         let root = temp.as_guarded_path().clone();
         let resolver = PathResolver::new_guarded(root.clone(), root.clone()).expect("resolver");
         (temp, resolver, root)
+    }
+
+    #[test]
+    fn force_flag_overrides_cache_validity() {
+        assert!(
+            should_rebuild(true, true),
+            "force must bypass a valid cache"
+        );
+        assert!(!should_rebuild(false, true));
+        assert!(should_rebuild(false, false));
+        assert!(should_rebuild(true, false));
     }
 
     #[test]

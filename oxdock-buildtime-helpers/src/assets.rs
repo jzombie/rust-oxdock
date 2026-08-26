@@ -154,6 +154,26 @@ pub fn execution_is_skipped_with(
     false
 }
 
+/// Environment variable whose value is folded into the asset fingerprint
+/// when defined, forcing exactly one rebuild per change.
+pub const FINGERPRINT_SALT_ENV: &str = "OXDOCK_EMBED_FINGERPRINT_SALT";
+
+/// Environment variable that bypasses the `.oxdock_hash` cache read when
+/// truthy (`"1"` or case-insensitive `"true"`).
+pub const FORCE_REBUILD_ENV: &str = "OXDOCK_EMBED_FORCE_REBUILD";
+
+/// Pure truthiness rules for [`FORCE_REBUILD_ENV`].
+pub fn embed_force_rebuild_from(value: Option<String>) -> bool {
+    value
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// Process-env form of [`embed_force_rebuild_from`].
+pub fn embed_force_rebuild() -> bool {
+    embed_force_rebuild_from(std::env::var(FORCE_REBUILD_ENV).ok())
+}
+
 /// True when `OXDOCK_EMBED_DEBUG` requests verbose asset-pipeline logging
 /// (`1` or any casing of `true`).
 pub fn embed_debug_enabled() -> bool {
@@ -479,6 +499,17 @@ pub fn asset_input_fingerprint(
         }
     }
 
+    // Precision invalidation lever: a defined salt shifts the expected digest,
+    // forcing exactly one rebuild; absent salt contributes nothing so existing
+    // caches stay valid across the upgrade.
+    let salt = envs
+        .get(FINGERPRINT_SALT_ENV)
+        .cloned()
+        .or_else(|| std::env::var(FINGERPRINT_SALT_ENV).ok());
+    if let Some(salt) = salt {
+        hasher.update(format!("SALT={salt}\0").as_bytes());
+    }
+
     Ok(format!("{:x}", hasher.finalize()))
 }
 
@@ -633,6 +664,8 @@ mod fingerprint_tests {
 
     #[test]
     fn fingerprint_is_deterministic_and_sensitive() -> Result<()> {
+        // Hermetic: pin the process-level salt away from other parallel tests.
+        let _salt = oxdock_sys_test_utils::TestEnvGuard::remove(FINGERPRINT_SALT_ENV);
         let (_t, resolver) = ctx();
         let steps = parse_script(SCRIPT).unwrap();
         let mut envs = HashMap::new();
@@ -679,7 +712,77 @@ mod fingerprint_tests {
     }
 
     #[test]
+    fn salt_changes_digest_only_when_defined() -> Result<()> {
+        let (_t, resolver) = ctx();
+        let steps = parse_script(SCRIPT).unwrap();
+        let envs: HashMap<String, String> = HashMap::new();
+
+        let baseline = asset_input_fingerprint(&resolver, SCRIPT, &steps, "out", &envs).unwrap();
+
+        // Defined salt (even empty) shifts the digest...
+        let mut salted_empty = envs.clone();
+        salted_empty.insert(FINGERPRINT_SALT_ENV.into(), String::new());
+        let with_empty_salt =
+            asset_input_fingerprint(&resolver, SCRIPT, &steps, "out", &salted_empty).unwrap();
+        assert_ne!(baseline, with_empty_salt, "empty-but-defined salt counts");
+
+        // ...and different values differ from each other.
+        let mut salted_a = envs.clone();
+        salted_a.insert(FINGERPRINT_SALT_ENV.into(), "a".into());
+        let salt_a = asset_input_fingerprint(&resolver, SCRIPT, &steps, "out", &salted_a).unwrap();
+        assert_ne!(with_empty_salt, salt_a);
+
+        // Unsalted baseline is unaffected by an unrelated process env value
+        // because absent-from-map + absent-from-process contributes nothing.
+        Ok(())
+    }
+
+    #[test]
+    fn salt_map_entry_overrides_process_env() -> Result<()> {
+        use oxdock_sys_test_utils::TestEnvGuard;
+
+        let (_t, resolver) = ctx();
+        let steps = parse_script(SCRIPT).unwrap();
+        const SCRIPT_REF: &str = SCRIPT;
+
+        let mut map_only = HashMap::new();
+        map_only.insert(FINGERPRINT_SALT_ENV.into(), "from-map".into());
+
+        // Process env says something different; the explicit map must win.
+        let _proc = TestEnvGuard::set(FINGERPRINT_SALT_ENV, "from-process");
+        let with_proc =
+            asset_input_fingerprint(&resolver, SCRIPT_REF, &steps, "out", &map_only).unwrap();
+        drop(_proc);
+
+        let without_proc =
+            asset_input_fingerprint(&resolver, SCRIPT_REF, &steps, "out", &map_only).unwrap();
+        assert_eq!(
+            with_proc, without_proc,
+            "map entry must override process env"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn force_rebuild_truthiness_matrix() {
+        use super::{FORCE_REBUILD_ENV, embed_force_rebuild_from};
+        let f = embed_force_rebuild_from;
+        assert!(f(Some("1".into())));
+        assert!(f(Some("true".into())));
+        assert!(f(Some("TRUE".into())));
+        assert!(f(Some("True".into())));
+        assert!(!f(Some("0".into())));
+        assert!(!f(Some("yes".into())));
+        assert!(!f(Some(String::new())));
+        assert!(!f(None));
+        // Constant sanity so renames break loudly.
+        assert_eq!(FORCE_REBUILD_ENV, "OXDOCK_EMBED_FORCE_REBUILD");
+    }
+
+    #[test]
     fn guard_referenced_keys_affect_fingerprint() -> Result<()> {
+        // Hermetic: pin the process-level salt away from other parallel tests.
+        let _salt = oxdock_sys_test_utils::TestEnvGuard::remove(FINGERPRINT_SALT_ENV);
         let (_t, resolver) = ctx();
         let steps = parse_script("[env:MODE] ECHO on").unwrap();
         let mut envs = HashMap::new();

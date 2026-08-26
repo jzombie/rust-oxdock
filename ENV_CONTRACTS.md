@@ -74,3 +74,11 @@ Statuses:
 
 Both paths share skip predicates, debug flag semantics, the guarded executor,
 and the staged materializer.
+
+**Forcing rebuilds.** Two levers: bump `OXDOCK_EMBED_FINGERPRINT_SALT`
+(precision — one rebuild, then caching resumes) or set
+`OXDOCK_EMBED_FORCE_REBUILD=1` (bypasses cache reads while set). On the inline
+path, changing an env var does NOT by itself re-invoke rustc — pair it with a
+source-file `touch` or `cargo clean -p <pkg>` so the macro actually re-expands.
+On the build.rs path, salt edits trigger reruns automatically via the emitted
+directive.
