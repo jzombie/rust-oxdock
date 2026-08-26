@@ -57,8 +57,8 @@ where
 
 /// Wraps the configured stdout sink so every byte written to it is also
 /// appended to `ExecState::stdout_log` for `ASSERT_STDOUT`. When no sink is
-/// configured (`inner` is `None`) output forwards to real stdout, preserving
-/// interactive behavior while still recording what was emitted.
+/// configured (`inner` is `None`) bytes are forwarded to real stdout so
+/// interactive CLI output still reaches the terminal.
 struct TeeWriter {
     inner: Option<SharedOutput>,
     log: Arc<Mutex<Vec<u8>>>,
@@ -66,10 +66,14 @@ struct TeeWriter {
 
 impl Write for TeeWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        if let Some(inner) = &self.inner
-            && let Ok(mut guard) = inner.lock()
-        {
-            guard.write_all(buf)?;
+        match &self.inner {
+            Some(inner) => {
+                let mut guard = inner
+                    .lock()
+                    .map_err(|_| io::Error::other("stdout sink poisoned"))?;
+                guard.write_all(buf)?;
+            }
+            None => io::stdout().write_all(buf)?,
         }
         self.log
             .lock()
@@ -79,10 +83,14 @@ impl Write for TeeWriter {
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        if let Some(inner) = &self.inner
-            && let Ok(mut guard) = inner.lock()
-        {
-            guard.flush()?;
+        match &self.inner {
+            Some(inner) => {
+                let mut guard = inner
+                    .lock()
+                    .map_err(|_| io::Error::other("stdout sink poisoned"))?;
+                guard.flush()?;
+            }
+            None => io::stdout().flush()?,
         }
         Ok(())
     }

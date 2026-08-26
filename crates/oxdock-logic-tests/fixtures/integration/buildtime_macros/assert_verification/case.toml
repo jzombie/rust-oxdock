@@ -1,0 +1,5 @@
+name = "assert_verification"
+args = ["run", "--quiet"]
+
+[expect]
+status = "success"

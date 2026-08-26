@@ -213,24 +213,82 @@ fn walk(
                                 push_fragment(line, &close.to_string(), false);
                                 finalize_line(lines, line, capture_has_inner);
                             } else {
-                                finalize_line(lines, line, capture_has_inner);
-                                line.push(open);
-                                finalize_line(lines, line, capture_has_inner);
-                                *last_was_command = false;
-                                let mut inner_span_end = None;
-                                walk(
-                                    g.stream(),
-                                    line,
-                                    lines,
-                                    last_was_command,
-                                    false,
-                                    capture_has_inner,
-                                    &mut inner_span_end,
-                                )?;
-                                finalize_line(lines, line, capture_has_inner);
-                                line.push(close);
-                                finalize_line(lines, line, capture_has_inner);
-                                *last_was_command = false;
+                                // `{{ ... }}` template placeholder: Rust lexes
+                                // this as a brace group whose stream is a single
+                                // nested brace group. Emit both braces literally
+                                // on the current line so the string DSL sees the
+                                // templated_arg shape it expects.
+                                let mut inner_tokens = g.stream().into_iter();
+                                let nested_is_template = matches!(
+                                    inner_tokens.next(),
+                                    Some(TokenTree::Group(inner))
+                                        if inner.delimiter() == Delimiter::Brace
+                                            && inner_tokens.next().is_none()
+                                );
+                                if nested_is_template {
+                                    let Some(TokenTree::Group(inner)) =
+                                        g.stream().into_iter().next()
+                                    else {
+                                        unreachable!("nested_is_template checked above")
+                                    };
+                                    push_fragment(line, "{{", gap_space);
+
+                                    // Interior spacing is reconstructed
+                                    // explicitly on both sides: exactly two
+                                    // braces separate real content from the
+                                    // outer delimiters, so a larger offset on
+                                    // either side means source whitespace.
+                                    let mut inner_tokens = inner.stream().into_iter();
+                                    let leading_space = inner_tokens
+                                        .next()
+                                        .map(|tt| {
+                                            let start = tt.span().start();
+                                            start.line == span.start().line
+                                                && start.column > span.start().column + 2
+                                        })
+                                        .unwrap_or(false);
+                                    if leading_space {
+                                        line.push(' ');
+                                    }
+                                    let mut inner_span_end = None;
+                                    walk(
+                                        inner.stream(),
+                                        line,
+                                        lines,
+                                        last_was_command,
+                                        in_interpolation,
+                                        capture_has_inner,
+                                        &mut inner_span_end,
+                                    )?;
+                                    let trailing_space = inner_span_end
+                                        .map(|end| {
+                                            span.end().line == end.line
+                                                && span.end().column > end.column + 2
+                                        })
+                                        .unwrap_or(false);
+                                    let close_text = if trailing_space { " }}" } else { "}}" };
+                                    push_fragment(line, close_text, false);
+                                    *last_span_end = Some(span.end());
+                                } else {
+                                    finalize_line(lines, line, capture_has_inner);
+                                    line.push(open);
+                                    finalize_line(lines, line, capture_has_inner);
+                                    *last_was_command = false;
+                                    let mut inner_span_end = None;
+                                    walk(
+                                        g.stream(),
+                                        line,
+                                        lines,
+                                        last_was_command,
+                                        false,
+                                        capture_has_inner,
+                                        &mut inner_span_end,
+                                    )?;
+                                    finalize_line(lines, line, capture_has_inner);
+                                    line.push(close);
+                                    finalize_line(lines, line, capture_has_inner);
+                                    *last_was_command = false;
+                                }
                             }
                         }
                         Delimiter::Bracket => {
@@ -402,6 +460,8 @@ pub fn parse_braced_tokens(ts: &TokenStream2) -> Result<Vec<Step>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::StepKind;
+    use indoc::indoc;
     use quote::quote;
 
     #[test]
@@ -450,5 +510,70 @@ mod tests {
         };
         let steps = parse_braced_tokens(&ts).expect("parse guarded block");
         assert_eq!(steps.len(), 1);
+    }
+
+    #[test]
+    fn braced_script_preserves_template_placeholders() {
+        // `{{ env:X }}` nests as brace-within-brace in the token stream; the
+        // normalizer must re-emit it verbatim instead of exploding it across
+        // lines.
+        let ts: proc_macro2::TokenStream = "WRITE dist/hello.txt Built with {{ env:PROJECT }}"
+            .parse()
+            .expect("tokens");
+        let script = script_from_braced_tokens(&ts).expect("render braced script");
+        assert_eq!(
+            script, "WRITE dist/hello.txt Built with {{ env:PROJECT }}",
+            "template placeholder must round-trip"
+        );
+
+        let steps = parse_braced_tokens(&ts).expect("parse templated script");
+        match &steps[0].kind {
+            StepKind::Write { path, contents } => {
+                assert_eq!(path.as_ref(), "dist/hello.txt");
+                assert_eq!(
+                    contents.as_ref().map(AsRef::as_ref),
+                    Some("Built with {{ env:PROJECT }}")
+                );
+            }
+            other => panic!("expected WRITE, saw {:?}", other),
+        }
+    }
+
+    #[test]
+    fn braced_and_string_forms_agree_on_templates() {
+        let text = indoc! {r#"
+            ENV GREETING=hello
+            ECHO <{{ env:GREETING }}>
+        "#}
+        .trim();
+        let ts: proc_macro2::TokenStream = text.parse().expect("tokens");
+        let braced = parse_braced_tokens(&ts).expect("braced parse");
+        let string = parse_script(text).expect("string parse");
+        assert_eq!(braced, string, "template AST parity between forms");
+    }
+
+    #[test]
+    fn braced_template_spacing_round_trips_both_variants() {
+        for source in [
+            "WRITE f.txt Built with {{ env:P }}",
+            "WRITE f.txt Built with {{env:P}}",
+        ] {
+            let ts: proc_macro2::TokenStream = source.parse().expect("tokens");
+            let script = script_from_braced_tokens(&ts)
+                .unwrap_or_else(|e| panic!("render failed for {source}: {e}"));
+            assert_eq!(script, source, "spacing must round-trip verbatim");
+
+            let steps = parse_braced_tokens(&ts).expect("parse");
+            match &steps[0].kind {
+                StepKind::Write { contents, .. } => {
+                    assert_eq!(
+                        contents.as_ref().map(AsRef::as_ref),
+                        Some(source.strip_prefix("WRITE f.txt ").expect("prefix")),
+                        "AST interior must match source for {source}"
+                    );
+                }
+                other => panic!("expected WRITE, saw {:?}", other),
+            }
+        }
     }
 }

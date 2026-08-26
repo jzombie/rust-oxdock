@@ -1,0 +1,10 @@
+[package]
+name = "fixture-assert-verification"
+version = "0.0.0-dev"
+edition = "2024"
+publish = false
+license = "Apache-2.0"
+
+[dependencies]
+oxdock-buildtime-macros.workspace = true
+oxdock-embed.workspace = true
