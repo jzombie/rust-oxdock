@@ -421,6 +421,7 @@ dependencies = [
  "anyhow",
  "indoc",
  "libtest-mimic",
+ "oxdock-core",
  "oxdock-fixture",
  "oxdock-fs",
  "oxdock-parser",
