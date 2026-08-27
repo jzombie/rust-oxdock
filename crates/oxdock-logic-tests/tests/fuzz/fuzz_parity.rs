@@ -2,6 +2,7 @@ use oxdock_parser::ast::*;
 use oxdock_parser::{parse_braced_tokens, parse_script};
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
+use std::str::FromStr;
 
 // Strategies
 
@@ -237,6 +238,10 @@ fn arb_step() -> impl Strategy<Value = Step> {
         .prop_filter("Reject guarded INHERIT_ENV", |step| match &step.kind {
             StepKind::InheritEnv { .. } => step.guard.is_none(),
             _ => true,
+        })
+        .prop_filter("Reject strings that fail proc_macro2 lexing", |step| {
+            let s = step.to_string();
+            proc_macro2::TokenStream::from_str(&s).is_ok()
         })
 }
 
