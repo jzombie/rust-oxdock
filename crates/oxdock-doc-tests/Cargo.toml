@@ -8,5 +8,8 @@ license.workspace = true
 repository.workspace = true
 publish = false
 
+[package.metadata.cargo-udeps.ignore]
+development = ["oxdock-buildtime-macros"]
+
 [dev-dependencies]
 oxdock-buildtime-macros.workspace = true
