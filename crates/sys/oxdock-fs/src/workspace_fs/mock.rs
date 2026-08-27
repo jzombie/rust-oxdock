@@ -178,6 +178,22 @@ impl WorkspaceFs for MockFs {
         bail!("unguarded operations not supported in mock fs");
     }
 
+    fn append_file(&self, path: &GuardedPath, contents: &[u8]) -> Result<()> {
+        let rel = self.relative_path(path);
+        let mut state = self.state.borrow_mut();
+        if let Some(existing) = state.files.get_mut(&rel) {
+            existing.extend_from_slice(contents);
+        } else {
+            state.files.insert(rel, contents.to_vec());
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::disallowed_types)]
+    fn append_file_unguarded(&self, _path: &UnguardedPath, _contents: &[u8]) -> Result<()> {
+        bail!("unguarded operations not supported in mock fs");
+    }
+
     fn create_dir_all(&self, path: &GuardedPath) -> Result<()> {
         let rel = self.relative_path(path);
         let mut state = self.state.borrow_mut();

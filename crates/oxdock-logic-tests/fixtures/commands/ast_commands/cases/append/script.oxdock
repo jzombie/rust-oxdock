@@ -1,0 +1,2 @@
+APPEND note.txt hello
+APPEND note.txt world

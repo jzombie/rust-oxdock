@@ -90,6 +90,7 @@ command = _{
     cwd_command |
     read_command |
     write_command |
+    append_command |
     assert_file_command |
     assert_dir_command |
     assert_absent_command |
@@ -114,6 +115,7 @@ ls_command = ${ "LS" ~ (sep ~ argument)? }
 cwd_command = ${ "CWD" }
 read_command = ${ "READ" ~ (sep ~ argument)? }
 write_command = ${ "WRITE" ~ sep ~ argument ~ (sep ~ message)? }
+append_command = ${ "APPEND" ~ sep ~ argument ~ (sep ~ message)? }
 
 // Verification commands. ASSERT_FILE alternates on explicit forms so the
 // --hash digest can never be captured into the path slot, and a missing or

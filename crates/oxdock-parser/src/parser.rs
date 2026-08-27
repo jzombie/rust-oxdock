@@ -587,6 +587,27 @@ fn parse_command(pair: Pair<Rule>) -> Result<StepKind> {
                 contents: contents.map(Into::into),
             }
         }
+        Rule::append_command => {
+            let mut path = None;
+            let mut contents = None;
+            for inner in pair.into_inner() {
+                match inner.as_rule() {
+                    Rule::argument if path.is_none() => {
+                        path = Some(parse_argument(inner)?);
+                    }
+                    Rule::message => {
+                        contents = Some(parse_concatenated_string(inner)?);
+                    }
+                    _ => {}
+                }
+            }
+            StepKind::Append {
+                path: path
+                    .ok_or_else(|| anyhow!("APPEND expects a path argument"))?
+                    .into(),
+                contents: contents.map(Into::into),
+            }
+        }
         Rule::assert_file_hash_command => parse_assert_file_hash(pair)?,
         Rule::assert_file_content_command => parse_assert_file_content(pair)?,
         Rule::assert_dir_command => StepKind::AssertDir(parse_single_arg(pair)?.into()),

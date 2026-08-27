@@ -191,6 +191,12 @@ pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
                     template_keys(&mut keys, body);
                 }
             }
+            StepKind::Append { path, contents } => {
+                template_keys(&mut keys, path);
+                if let Some(body) = contents {
+                    template_keys(&mut keys, body);
+                }
+            }
             StepKind::AssertFile {
                 hash: _,
                 path,

@@ -66,6 +66,14 @@ impl PathResolver {
         self.backend.write_file(&guarded, contents)
     }
 
+    #[allow(clippy::disallowed_methods)]
+    pub fn append_file(&self, path: &GuardedPath, contents: &[u8]) -> Result<()> {
+        let guarded = self
+            .check_access(path.as_path(), AccessMode::Write)
+            .with_context(|| format!("append denied for {}", path.display()))?;
+        self.backend.append_file(&guarded, contents)
+    }
+
     pub fn ensure_parent_dir(&self, path: &GuardedPath) -> Result<()> {
         if let Some(parent) = path.as_path().parent() {
             let parent_guard = self

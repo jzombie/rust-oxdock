@@ -11,6 +11,7 @@ trait BackendImpl {
     fn read_dir_entries(&self, path: &GuardedPath) -> Result<Vec<DirEntry>>;
     fn read_file(&self, path: &GuardedPath) -> Result<Vec<u8>>;
     fn write_file(&self, path: &GuardedPath, contents: &[u8]) -> Result<()>;
+    fn append_file(&self, path: &GuardedPath, contents: &[u8]) -> Result<()>;
     fn canonicalize(&self, path: GuardedPath) -> Result<GuardedPath>;
     fn metadata(&self, path: &GuardedPath) -> Result<std::fs::Metadata>;
     fn entry_kind(&self, path: &GuardedPath) -> Result<super::EntryKind>;
@@ -82,6 +83,22 @@ impl BackendImpl for HostBackend {
         }
         fs::write(path.as_path(), contents)
             .with_context(|| format!("writing {}", path.display()))?;
+        Ok(())
+    }
+
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    fn append_file(&self, path: &GuardedPath, contents: &[u8]) -> Result<()> {
+        if let Some(parent) = path.as_path().parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("creating dir {}", parent.display()))?;
+        }
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path.as_path())
+            .with_context(|| format!("opening {} for append", path.display()))?;
+        std::io::Write::write_all(&mut file, contents)
+            .with_context(|| format!("appending to {}", path.display()))?;
         Ok(())
     }
 
@@ -261,6 +278,16 @@ mod miri_backend {
             Ok(())
         }
 
+        fn append_file(&self, path: &GuardedPath, contents: &[u8]) -> Result<()> {
+            let rel = normalize_rel(path);
+            let binding = self.state_for_guard_rc(path)?;
+            binding
+                .lock()
+                .expect("miri state poisoned")
+                .append_file(&rel, contents);
+            Ok(())
+        }
+
         fn canonicalize(&self, path: GuardedPath) -> Result<GuardedPath> {
             Ok(path)
         }
@@ -418,6 +445,19 @@ mod miri_backend {
             self.files.insert(rel.to_string(), contents.to_vec());
         }
 
+        fn append_file(&mut self, rel: &str, contents: &[u8]) {
+            if let Some((parent, _)) = rel.rsplit_once('/') {
+                self.ensure_dir(parent);
+            } else {
+                self.ensure_dir("");
+            }
+            if let Some(existing) = self.files.get_mut(rel) {
+                existing.extend_from_slice(contents);
+            } else {
+                self.files.insert(rel.to_string(), contents.to_vec());
+            }
+        }
+
         fn read_file(&self, rel: &str) -> Result<Vec<u8>> {
             self.files
                 .get(rel)
@@ -573,6 +613,10 @@ impl Backend {
 
     pub(super) fn write_file(&self, path: &GuardedPath, contents: &[u8]) -> Result<()> {
         self.as_impl().write_file(path, contents)
+    }
+
+    pub(super) fn append_file(&self, path: &GuardedPath, contents: &[u8]) -> Result<()> {
+        self.as_impl().append_file(path, contents)
     }
 
     pub(super) fn canonicalize(&self, path: GuardedPath) -> Result<GuardedPath> {

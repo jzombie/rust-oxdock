@@ -1,0 +1,4 @@
+name = "append"
+
+[expect]
+files = { "note.txt" = "helloworld" }

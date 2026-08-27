@@ -106,6 +106,10 @@ pub trait WorkspaceFs {
     #[allow(clippy::disallowed_types)]
     fn write_file_unguarded(&self, path: &UnguardedPath, contents: &[u8]) -> Result<()>;
 
+    fn append_file(&self, path: &GuardedPath, contents: &[u8]) -> Result<()>;
+    #[allow(clippy::disallowed_types)]
+    fn append_file_unguarded(&self, path: &UnguardedPath, contents: &[u8]) -> Result<()>;
+
     fn create_dir_all(&self, path: &GuardedPath) -> Result<()>;
     #[allow(clippy::disallowed_types)]
     fn create_dir_all_unguarded(&self, path: &UnguardedPath) -> Result<()>;
@@ -231,6 +235,24 @@ impl WorkspaceFs for PathResolver {
     fn write_file_unguarded(&self, path: &UnguardedPath, contents: &[u8]) -> Result<()> {
         #[allow(clippy::disallowed_methods)]
         Ok(std::fs::write(path.as_path(), contents)?)
+    }
+
+    fn append_file(&self, path: &GuardedPath, contents: &[u8]) -> Result<()> {
+        PathResolver::append_file(self, path, contents)
+    }
+
+    #[allow(clippy::disallowed_types)]
+    fn append_file_unguarded(&self, path: &UnguardedPath, contents: &[u8]) -> Result<()> {
+        #[allow(clippy::disallowed_methods)]
+        {
+            use std::fs::OpenOptions;
+            let mut file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path.as_path())?;
+            std::io::Write::write_all(&mut file, contents)?;
+        }
+        Ok(())
     }
 
     fn create_dir_all(&self, path: &GuardedPath) -> Result<()> {

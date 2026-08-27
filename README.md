@@ -312,6 +312,7 @@ Files created inside a scope persist; only the working directory, workspace root
 | [`CWD`](#cwd) | `CWD` |
 | [`READ`](#read) | `READ [<path>]` |
 | [`WRITE`](#write) | `WRITE <path> [<contents>]` |
+| [`APPEND`](#append) | `APPEND <path> <contents>` |
 | [`ASSERT_FILE`](#assert_file) | `ASSERT_FILE [--hash <sha256>] <path> [<expected>]` |
 | [`ASSERT_DIR`](#assert_dir) | `ASSERT_DIR <path>` |
 | [`ASSERT_ABSENT`](#assert_absent) | `ASSERT_ABSENT <path>` |
@@ -619,13 +620,29 @@ ASSERT_STDOUT file-read-back
 
 ### WRITE
 
-Writes contents to a file, creating parent directories. Without a contents argument it consumes the script's stdin instead (combine with `WITH_IO [stdin...]`):
+Writes contents to a file, **replacing** any existing contents (it does not append). Creates parent directories on demand. Without a contents argument it consumes the script's stdin instead (combine with `WITH_IO [stdin...]`):
 
 ```oxdock stdin:stdin-captured-body
 // No contents argument: the body comes from the script's stdin,
 // which the runner feeds via the fence metadata above.
 WITH_IO [stdin] WRITE captured.txt
 ASSERT_FILE captured.txt stdin-captured-body
+```
+
+### APPEND
+
+Appends contents to a file, creating parent directories if needed. Unlike `WRITE` (which overwrites), `APPEND` preserves existing file contents — ideal for log files, GitHub Actions environment files, and step summaries:
+
+```oxdock
+APPEND dist/log.txt "build started"
+APPEND dist/log.txt "build finished"
+ASSERT_FILE dist/log.txt "build startedbuild finished"
+```
+
+Without a contents argument it consumes stdin (combine with `WITH_IO [stdin...]`):
+
+```oxdock stdin:line-from-stdin
+WITH_IO [stdin] APPEND dist/stdin-log.txt
 ```
 
 ### ASSERT_FILE
@@ -770,6 +787,42 @@ If you change the language, update this reference in the same commit — CI will
 ## Environment variable contracts
 
 Environment variables understood by the toolchain (workspace roots, caching fingerprints, IDE integrations) are specified in [ENV_CONTRACTS.md](./ENV_CONTRACTS.md).
+
+## GitHub Actions Integration
+
+OxDock scripts can emit GitHub Actions workflow commands using native language primitives.
+All examples below use `[env:GITHUB_ACTIONS]` guards so they execute on CI runners
+but are skipped during local `docs_conformance` tests.
+
+### Log annotations
+
+`ECHO` writes to stdout, which GitHub Actions intercepts for annotations:
+
+```oxdock
+ECHO "::notice::build started"
+ECHO "::warning::something looks off"
+ECHO "::error::tests failed"
+```
+
+### Collapsible log groups
+
+```oxdock
+RUN echo "::group::unit tests"
+RUN echo "running tests"
+RUN echo "::endgroup::"
+```
+
+### Job summary, step outputs, and environment variables
+
+`APPEND` writes to append-only runner state files without truncating earlier entries:
+
+```oxdock
+[env:GITHUB_ACTIONS] {
+  APPEND "{{ env:GITHUB_STEP_SUMMARY }}" "### Build Report\n- Passed: 123\n- Failed: 0\n"
+  APPEND "{{ env:GITHUB_OUTPUT }}" "artifact_path=dist/app.tar\n"
+  APPEND "{{ env:GITHUB_ENV }}" "NOTEBOOK_MODE=release\n"
+}
+```
 
 ## Testing & Coverage
 

@@ -520,6 +520,53 @@ pub(super) fn write<P: ProcessManager>(
     Ok(())
 }
 
+pub(super) fn append<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    idx: usize,
+    path: &TemplateString,
+    contents: &Option<TemplateString>,
+) -> Result<()> {
+    let ctx = cx.state.command_ctx()?;
+    let path_rendered = super::expand_template(path, &ctx);
+    let target = cx
+        .state
+        .fs
+        .resolve_write(&cx.state.cwd, &path_rendered)
+        .with_context(|| format!("step {}: APPEND {}", idx + 1, path_rendered))?;
+    cx.state
+        .fs
+        .ensure_parent_dir(&target)
+        .with_context(|| format!("failed to create parent for {}", target.display()))?;
+    if let Some(body) = contents {
+        let rendered = super::expand_template(body, &ctx);
+        cx.state
+            .fs
+            .append_file(&target, rendered.as_bytes())
+            .with_context(|| format!("failed to append to {}", target.display()))?;
+    } else {
+        let Some(input_stream) = cx.stdin.clone() else {
+            bail!(
+                "step {}: APPEND {} requires stdin (use WITH_IO [stdin=...] APPEND)",
+                idx + 1,
+                path_rendered
+            );
+        };
+        let mut guard = input_stream
+            .lock()
+            .map_err(|_| anyhow!("failed to lock stdin for APPEND"))?;
+        let mut data = Vec::new();
+        guard
+            .read_to_end(&mut data)
+            .context("failed to read from stdin for APPEND")?;
+        drop(guard);
+        cx.state
+            .fs
+            .append_file(&target, &data)
+            .with_context(|| format!("failed to append to {}", target.display()))?;
+    }
+    Ok(())
+}
+
 pub(super) fn assert_file<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     idx: usize,

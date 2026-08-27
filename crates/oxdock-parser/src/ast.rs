@@ -19,6 +19,7 @@ pub enum Command {
     Cwd,
     Read,
     Write,
+    Append,
     AssertFile,
     AssertDir,
     AssertAbsent,
@@ -44,6 +45,7 @@ pub const COMMANDS: &[Command] = &[
     Command::Cwd,
     Command::Read,
     Command::Write,
+    Command::Append,
     Command::AssertFile,
     Command::AssertDir,
     Command::AssertAbsent,
@@ -71,6 +73,7 @@ impl Command {
             Command::Cwd => "CWD",
             Command::Read => "READ",
             Command::Write => "WRITE",
+            Command::Append => "APPEND",
             Command::AssertFile => "ASSERT_FILE",
             Command::AssertDir => "ASSERT_DIR",
             Command::AssertAbsent => "ASSERT_ABSENT",
@@ -102,6 +105,7 @@ impl Command {
             "CWD" => Some(Command::Cwd),
             "READ" => Some(Command::Read),
             "WRITE" => Some(Command::Write),
+            "APPEND" => Some(Command::Append),
             "ASSERT_FILE" => Some(Command::AssertFile),
             "ASSERT_DIR" => Some(Command::AssertDir),
             "ASSERT_ABSENT" => Some(Command::AssertAbsent),
@@ -291,6 +295,10 @@ pub enum StepKind {
     Cwd,
     Read(Option<TemplateString>),
     Write {
+        path: TemplateString,
+        contents: Option<TemplateString>,
+    },
+    Append {
         path: TemplateString,
         contents: Option<TemplateString>,
     },
@@ -570,6 +578,13 @@ impl fmt::Display for StepKind {
             }
             StepKind::Write { path, contents } => {
                 write!(f, "WRITE {}", quote_arg(path))?;
+                if let Some(body) = contents {
+                    write!(f, " {}", quote_msg(body))?;
+                }
+                Ok(())
+            }
+            StepKind::Append { path, contents } => {
+                write!(f, "APPEND {}", quote_arg(path))?;
                 if let Some(body) = contents {
                     write!(f, " {}", quote_msg(body))?;
                 }
