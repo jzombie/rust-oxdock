@@ -797,7 +797,9 @@ fn verify_expectations(
         let actual = read_trimmed_root(root, &hash.file)?;
         let mut hasher = Sha256::new();
         hasher.update(hash.source.as_bytes());
-        let expected = format!("{:x}", hasher.finalize());
+        let digest = hasher.finalize();
+        let bytes: &[u8] = digest.as_ref();
+        let expected: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
         if actual != expected {
             return Err(anyhow!(
                 "HASH_SHA256 output mismatch: expected {expected}, got {actual}"

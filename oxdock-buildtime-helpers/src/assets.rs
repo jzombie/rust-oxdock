@@ -510,7 +510,9 @@ pub fn asset_input_fingerprint(
         hasher.update(format!("SALT={salt}\0").as_bytes());
     }
 
-    Ok(format!("{:x}", hasher.finalize()))
+    let digest = hasher.finalize();
+    let bytes: &[u8] = digest.as_ref();
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
 }
 
 fn hash_input_path(

@@ -314,8 +314,12 @@ pub(super) fn hash_sha256<P: ProcessManager>(
     let mut hasher = Sha256::new();
     hash_path(cx.state.fs.as_ref(), &target, "", &mut hasher)?;
     let digest = hasher.finalize();
+    let bytes: &[u8] = digest.as_ref();
     write_stdout(cx.out.clone(), |writer| {
-        writeln!(writer, "{:x}", digest)?;
+        for b in bytes {
+            write!(writer, "{b:02x}")?;
+        }
+        writeln!(writer)?;
         Ok(())
     })?;
     Ok(())
@@ -536,7 +540,9 @@ pub(super) fn assert_file<P: ProcessManager>(
     if let Some(expected) = hash {
         let mut hasher = Sha256::new();
         hash_path(cx.state.fs.as_ref(), &target, "", &mut hasher)?;
-        let actual = format!("{:x}", hasher.finalize());
+        let digest = hasher.finalize();
+        let bytes: &[u8] = digest.as_ref();
+        let actual: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
         if !actual.eq_ignore_ascii_case(expected) {
             bail!(
                 "step {}: ASSERT_FILE --hash mismatch for {}: expected {}, computed {}",
