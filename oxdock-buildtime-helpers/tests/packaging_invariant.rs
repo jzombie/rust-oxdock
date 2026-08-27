@@ -66,14 +66,8 @@ fn identical_behavior_without_git_or_primary_package() -> Result<()> {
     let out_a = normalized_path(&with_git.as_guarded_path().join("target-out-a")?);
     let out_b = normalized_path(&without_git.as_guarded_path().join("target-out-b")?);
 
-    let (dirs_a, module_a) = run_embed(
-        &normalized_path(with_git.as_guarded_path()),
-        &out_a,
-    )?;
-    let (dirs_b, module_b) = run_embed(
-        &normalized_path(without_git.as_guarded_path()),
-        &out_b,
-    )?;
+    let (dirs_a, module_a) = run_embed(&normalized_path(with_git.as_guarded_path()), &out_a)?;
+    let (dirs_b, module_b) = run_embed(&normalized_path(without_git.as_guarded_path()), &out_b)?;
 
     // Directives must match modulo the differing manifest roots.
     let normalize = |dirs: &[String], root: &str| -> Vec<String> {
@@ -86,14 +80,8 @@ fn identical_behavior_without_git_or_primary_package() -> Result<()> {
             .collect()
     };
     assert_eq!(
-        normalize(
-            &dirs_a,
-            &normalized_path(with_git.as_guarded_path()),
-        ),
-        normalize(
-            &dirs_b,
-            &normalized_path(without_git.as_guarded_path()),
-        ),
+        normalize(&dirs_a, &normalized_path(with_git.as_guarded_path()),),
+        normalize(&dirs_b, &normalized_path(without_git.as_guarded_path()),),
         "directive sets must be identical regardless of .git presence"
     );
 
@@ -101,7 +89,9 @@ fn identical_behavior_without_git_or_primary_package() -> Result<()> {
     // paths (sandbox + OUT_DIR + MANIFEST_DIR differ per run) and timestamps before comparing.
     let normalize_module = |module: &str, out: &str, manifest: &str| -> String {
         digits_stripped(
-            &to_forward_slashes(module).replace(out, "<OUT>").replace(manifest, "<MANIFEST>"),
+            &to_forward_slashes(module)
+                .replace(out, "<OUT>")
+                .replace(manifest, "<MANIFEST>"),
         )
     };
     assert_eq!(
