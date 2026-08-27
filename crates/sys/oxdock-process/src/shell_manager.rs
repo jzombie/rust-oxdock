@@ -311,9 +311,13 @@ mod tests {
     fn foreground_stdin_is_piped_through_copy_thread() {
         let (_temp, ctx) = make_ctx(&[]);
         let mut pm = ShellProcessManager;
-        let payload: SharedInput = std::sync::Arc::new(std::sync::Mutex::new(
-            std::io::Cursor::new(b"b\na\n".to_vec()),
-        ));
+        // Windows `sort` requires `\r\n` line endings to recognize lines.
+        #[cfg(windows)]
+        let input: &[u8] = b"b\r\na\r\n";
+        #[cfg(not(windows))]
+        let input: &[u8] = b"b\na\n";
+        let payload: SharedInput =
+            std::sync::Arc::new(std::sync::Mutex::new(std::io::Cursor::new(input.to_vec())));
         let options = CommandOptions {
             stdin: Some(payload),
             stdout: CommandStdout::Capture,

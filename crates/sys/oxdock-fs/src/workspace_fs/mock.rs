@@ -110,7 +110,6 @@ impl WorkspaceFs for MockFs {
         Ok(path.clone())
     }
 
-    #[allow(clippy::disallowed_types)]
     #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
     fn metadata(&self, _path: &GuardedPath) -> Result<std::fs::Metadata> {
         bail!("metadata not supported in mock fs");

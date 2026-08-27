@@ -487,7 +487,6 @@ mod tests {
 #[cfg(all(test, windows))]
 mod windows_shell_tests {
     use super::*;
-    use oxdock_fs::PathResolver;
 
     #[test]
     fn command_path_strips_verbatim_prefix() -> Result<()> {

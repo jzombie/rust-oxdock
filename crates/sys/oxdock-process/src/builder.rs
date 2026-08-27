@@ -3,9 +3,11 @@ use std::{
     iter::IntoIterator,
 };
 
+#[cfg(not(miri))]
+use anyhow::Context;
+use anyhow::Result;
 #[cfg(miri)]
 use anyhow::bail;
-use anyhow::{Context, Result};
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 use std::fs::File;
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]

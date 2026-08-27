@@ -85,6 +85,7 @@ pub fn spawn_interactive_shell(
     workspace_root: &GuardedPath,
     banner: &str,
 ) -> Result<()> {
+    let _ = workspace_root;
     #[cfg(unix)]
     {
         let mut cmd = CommandBuilder::new(shell_program());
@@ -129,6 +130,7 @@ pub fn spawn_interactive_shell(
         let cwd_path = oxdock_fs::command_path(cwd);
         let banner_cmd = windows_banner_command(banner, cwd);
         let mut cmd = CommandBuilder::new("cmd");
+        cmd.env("OXDOCK_BANNER", banner);
         cmd.current_dir(cwd_path.as_ref())
             .arg("/C")
             .arg("start")

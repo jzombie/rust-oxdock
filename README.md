@@ -817,12 +817,12 @@ RUN echo "::endgroup::"
 `APPEND` writes to append-only runner state files without truncating earlier entries:
 
 ```oxdock
-[env:GITHUB_ACTIONS] {
-  APPEND "{{ env:GITHUB_STEP_SUMMARY }}" "### Build Report\n- Passed: 123\n- Failed: 0\n"
-  APPEND "{{ env:GITHUB_OUTPUT }}" "artifact_path=dist/app.tar\n"
-  APPEND "{{ env:GITHUB_ENV }}" "NOTEBOOK_MODE=release\n"
-}
+APPEND dist/summary.md "### Build Report\n- Passed: 123\n- Failed: 0\n"
+APPEND dist/outputs.txt "artifact_path=dist/app.tar\n"
+APPEND dist/env.txt "NOTEBOOK_MODE=release\n"
 ```
+
+On GitHub Actions, replace the paths with the runner-provided env vars (`{{ env:GITHUB_STEP_SUMMARY }}`, `{{ env:GITHUB_OUTPUT }}`, `{{ env:GITHUB_ENV }}`):
 
 ## Testing & Coverage
 

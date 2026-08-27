@@ -137,7 +137,7 @@ pub fn can_create_symlinks(target: &Path) -> bool {
     }
 }
 
-/// Build a process [`ExitStatus`] from a raw exit code.
+/// Build a process [`std::process::ExitStatus`] from a raw exit code.
 ///
 /// Single definition shared by the mock manager, the Miri synthetic backend,
 /// and executor tests (all need to fabricate statuses without spawning).
