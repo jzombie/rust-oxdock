@@ -1,7 +1,7 @@
 [
     {
         "label": "dev: git diff (unstaged)",
-        "command": "git diff > diff.patch"
+        "command": "bash -c 'git diff > diff.patch'"
     },
     {
         "label": "dev: cargo pkg --help",
