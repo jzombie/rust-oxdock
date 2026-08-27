@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 
 use anyhow::Result;
 use oxdock_buildtime_helpers::{DslSource, EmbedSpec, execution_is_skipped_with, try_embed_assets};
-use oxdock_fs::{GuardedPath, PathResolver};
+use oxdock_fs::{GuardedPath, PathResolver, normalized_path, to_forward_slashes};
 use oxdock_sys_test_utils::TestEnvGuard;
 
 /// Materialize a minimal package tree (build.rs + DSL + input file) under a
@@ -63,23 +63,15 @@ fn identical_behavior_without_git_or_primary_package() -> Result<()> {
     let with_git = setup_package("invariant_git", true)?;
     let without_git = setup_package("invariant_nogit", false)?;
 
-    let out_a = with_git
-        .as_guarded_path()
-        .join("target-out-a")?
-        .display()
-        .to_string();
-    let out_b = without_git
-        .as_guarded_path()
-        .join("target-out-b")?
-        .display()
-        .to_string();
+    let out_a = normalized_path(&with_git.as_guarded_path().join("target-out-a")?);
+    let out_b = normalized_path(&without_git.as_guarded_path().join("target-out-b")?);
 
     let (dirs_a, module_a) = run_embed(
-        with_git.as_guarded_path().display().to_string().as_str(),
+        &normalized_path(with_git.as_guarded_path()),
         &out_a,
     )?;
     let (dirs_b, module_b) = run_embed(
-        without_git.as_guarded_path().display().to_string().as_str(),
+        &normalized_path(without_git.as_guarded_path()),
         &out_b,
     )?;
 
@@ -96,23 +88,34 @@ fn identical_behavior_without_git_or_primary_package() -> Result<()> {
     assert_eq!(
         normalize(
             &dirs_a,
-            with_git.as_guarded_path().display().to_string().as_str()
+            &normalized_path(with_git.as_guarded_path()),
         ),
         normalize(
             &dirs_b,
-            without_git.as_guarded_path().display().to_string().as_str()
+            &normalized_path(without_git.as_guarded_path()),
         ),
         "directive sets must be identical regardless of .git presence"
     );
 
     // Generated modules must be structurally identical: strip each run's own
-    // paths (sandbox + OUT_DIR differ per run) and timestamps before comparing.
-    let normalize_module =
-        |module: &str, out: &str| -> String { digits_stripped(&module.replace(out, "<OUT>")) };
+    // paths (sandbox + OUT_DIR + MANIFEST_DIR differ per run) and timestamps before comparing.
+    let normalize_module = |module: &str, out: &str, manifest: &str| -> String {
+        digits_stripped(
+            &to_forward_slashes(module).replace(out, "<OUT>").replace(manifest, "<MANIFEST>"),
+        )
+    };
     assert_eq!(
-        normalize_module(&module_a, &out_a),
-        normalize_module(&module_b, &out_b),
-        "generated modules must be byte-identical modulo timestamps/paths"
+        normalize_module(
+            &module_a,
+            &out_a,
+            &normalized_path(with_git.as_guarded_path()),
+        ),
+        normalize_module(
+            &module_b,
+            &out_b,
+            &normalized_path(without_git.as_guarded_path()),
+        ),
+        "generated modules must be identical after path normalization"
     );
     // Marker infrastructure files must never leak into assets.
     assert!(
@@ -125,12 +128,8 @@ fn identical_behavior_without_git_or_primary_package() -> Result<()> {
 #[test]
 fn directives_are_complete_and_ordered() -> Result<()> {
     let pkg = setup_package("directives_golden", false)?;
-    let root_display = pkg.as_guarded_path().display().to_string();
-    let out_dir = pkg
-        .as_guarded_path()
-        .join("out-golden")?
-        .display()
-        .to_string();
+    let root_display = normalized_path(pkg.as_guarded_path());
+    let out_dir = normalized_path(&pkg.as_guarded_path().join("out-golden")?);
     let (dirs, _module) = run_embed(&root_display, &out_dir)?;
 
     assert!(!dirs.is_empty());
