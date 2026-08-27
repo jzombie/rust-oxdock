@@ -13,6 +13,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ### Added
 
+- `APPEND` command for cross-platform append-only file writes (ideal for GitHub Actions `$GITHUB_OUTPUT`, `$GITHUB_ENV`, `$GITHUB_STEP_SUMMARY`)
+- GitHub Actions Integration section in README documenting `ECHO`, `RUN`, and `APPEND` patterns for workflow commands
 - Markdown DSL parsing support (`oxdock-parser/src/markdown.rs`)
 - `OXDOCK_EMBED_FINGERPRINT_SALT` environment variable for cache busting
 - `ASSERT_STDOUT` and `ASSERT_ABSENT` command prototypes
