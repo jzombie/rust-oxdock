@@ -8,9 +8,6 @@ use crate::contract::CommandContext;
 /// If exceeded without finding closing delimiter, buffered bytes are flushed as literals.
 const MAX_PLACEHOLDER_SCAN: usize = 1024;
 
-/// Standard chunk size for all I/O handlers.
-pub const CHUNK_SIZE: usize = 8192;
-
 /// Configurable delimiter syntax for template expansion.
 pub struct TemplateDelimiters {
     pub open: &'static [u8],
@@ -428,7 +425,7 @@ mod tests {
         let expander = StreamingExpand::new(&[], &env);
         // Create input with `{{` followed by >1024 bytes without `}}`
         let mut input = b"{{ ".to_vec();
-        input.extend(std::iter::repeat(b'x').take(2000));
+        input.extend(std::iter::repeat_n(b'x', 2000));
         let result = expander
             .expand_string(&String::from_utf8_lossy(&input))
             .unwrap();
@@ -487,7 +484,7 @@ mod tests {
         let mut out = Vec::new();
 
         // 1MB of plain text with no placeholders
-        let input = std::iter::repeat(b'x').take(1024 * 1024).collect::<Vec<_>>();
+        let input = std::iter::repeat_n(b'x', 1024 * 1024).collect::<Vec<_>>();
         expander.process_bytes(&input, &mut out).unwrap();
         expander.flush(&mut out).unwrap();
 

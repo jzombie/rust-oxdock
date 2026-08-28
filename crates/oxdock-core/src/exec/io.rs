@@ -70,6 +70,11 @@ impl SlidingWindow {
             self.matched = true;
         }
     }
+
+    /// Return the ring buffer contents for debugging.
+    pub fn ring_buffer(&self) -> Vec<u8> {
+        self.ring.iter().copied().collect()
+    }
 }
 
 #[derive(Clone, Default)]

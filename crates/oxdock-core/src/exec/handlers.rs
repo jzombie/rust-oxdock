@@ -591,7 +591,6 @@ pub(super) fn replace<P: ProcessManager>(
     path_opt: &Option<TemplateString>,
     overrides: &[(String, TemplateString)],
 ) -> Result<()> {
-    use std::io::Read;
 
     let ctx = cx.state.command_ctx()?;
 
@@ -763,7 +762,6 @@ pub(super) fn assert_stdout<P: ProcessManager>(
     idx: usize,
     needle: &TemplateString,
 ) -> Result<()> {
-    use std::io::Read;
 
     let ctx = cx.state.command_ctx()?;
     let rendered = super::expand_template(needle, &ctx);
@@ -775,6 +773,7 @@ pub(super) fn assert_stdout<P: ProcessManager>(
             .map_err(|_| anyhow!("failed to lock stdin for ASSERT_STDOUT"))?;
         let mut window = super::io::SlidingWindow::new(rendered.as_bytes().to_vec());
         let mut buf = [0u8; super::io::CHUNK_SIZE];
+        let mut read_any = false;
         loop {
             let n = guard
                 .read(&mut buf)
@@ -782,6 +781,7 @@ pub(super) fn assert_stdout<P: ProcessManager>(
             if n == 0 {
                 break;
             }
+            read_any = true;
             window.push_chunk(&buf[..n]);
             // Tee to downstream — preserve pipeline continuity
             super::io::write_stdout(cx.out.clone(), |w| {
@@ -789,14 +789,20 @@ pub(super) fn assert_stdout<P: ProcessManager>(
                 Ok(())
             })?;
         }
-        if !window.matched {
+        // If stdin had data, the local window is authoritative — fail immediately
+        if read_any {
+            if window.matched {
+                return Ok(());
+            }
+            let emitted = String::from_utf8_lossy(&window.ring_buffer()).into_owned();
             bail!(
-                "step {}: ASSERT_STDOUT did not contain '{}'",
+                "step {}: ASSERT_STDOUT did not contain '{}'; emitted:\n{}",
                 idx + 1,
-                rendered
+                rendered,
+                emitted.trim_end()
             );
         }
-        return Ok(());
+        // If stdin was empty (e.g. /dev/null subprocess), fall through to step-scope mode
     }
 
     // Mode 2: Step scope — check pre-registered window
@@ -807,6 +813,16 @@ pub(super) fn assert_stdout<P: ProcessManager>(
         .map_err(|_| anyhow!("assert_windows poisoned"))?;
     match windows.get(&idx) {
         Some(w) if w.matched => Ok(()),
+        Some(w) => {
+            // Window exists but didn't match — include ring buffer content for debugging
+            let emitted = String::from_utf8_lossy(&w.ring_buffer()).into_owned();
+            bail!(
+                "step {}: ASSERT_STDOUT did not contain '{}'; emitted:\n{}",
+                idx + 1,
+                rendered,
+                emitted.trim_end()
+            )
+        }
         _ => bail!(
             "step {}: ASSERT_STDOUT did not contain '{}'",
             idx + 1,
