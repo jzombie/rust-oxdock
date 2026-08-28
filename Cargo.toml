@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "crates/oxdock",
     "crates/oxdock-core",
     "crates/oxdock-doc-tests",
     "crates/oxdock-embed",

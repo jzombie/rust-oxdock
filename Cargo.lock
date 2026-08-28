@@ -342,11 +342,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
+name = "oxdock"
+version = "0.0.0"
+
+[[package]]
 name = "oxdock-buildtime-helpers"
 version = "0.7.0-alpha"
 dependencies = [
  "anyhow",
- "oxdock-buildtime-helpers",
  "oxdock-core",
  "oxdock-embed",
  "oxdock-fs",
