@@ -18,7 +18,7 @@ pub use contract::{
     BackgroundHandle, CommandContext, CommandMode, CommandOptions, CommandResult, CommandStderr,
     CommandStdout, ProcessManager, SharedInput, SharedOutput,
 };
-pub use expand::{expand_command_env, expand_script_env};
+pub use expand::{StreamingExpand, expand_command_env, expand_script_env};
 pub use oxdock_sys_test_utils::TestEnvGuard;
 pub use shell::{ShellLauncher, shell_program, spawn_interactive_shell};
 pub use shell_manager::ShellProcessManager;

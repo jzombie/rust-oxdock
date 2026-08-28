@@ -12,6 +12,30 @@ use crate::{EntryKind, WorkspaceFs, to_forward_slashes};
 
 use super::GuardedPath;
 
+/// Write cursor for MockFs that buffers data and flushes to in-memory state on drop.
+struct MockWriteCursor {
+    state: Rc<RefCell<MockState>>,
+    rel: String,
+}
+
+impl std::io::Write for MockWriteCursor {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        // Append to mock state
+        let mut state = self.state.borrow_mut();
+        if let Some(existing) = state.files.get_mut(&self.rel) {
+            existing.extend_from_slice(buf);
+        } else {
+            state.files.insert(self.rel.clone(), buf.to_vec());
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        // No-op for in-memory state
+        Ok(())
+    }
+}
+
 /// In-memory workspace filesystem for tests and Miri runs.
 #[derive(Clone)]
 pub struct MockFs {
@@ -191,6 +215,33 @@ impl WorkspaceFs for MockFs {
     #[allow(clippy::disallowed_types)]
     fn append_file_unguarded(&self, _path: &UnguardedPath, _contents: &[u8]) -> Result<()> {
         bail!("unguarded operations not supported in mock fs");
+    }
+
+    fn open_read(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Read>> {
+        let data = self.read_file(path)?;
+        Ok(Box::new(std::io::Cursor::new(data)))
+    }
+
+    fn open_write(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write>> {
+        let rel = self.relative_path(path);
+        // Create an empty file first
+        self.state.borrow_mut().files.insert(rel.clone(), Vec::new());
+        // Return a cursor that will be flushed on drop
+        let state = self.state.clone();
+        Ok(Box::new(MockWriteCursor { state, rel }))
+    }
+
+    fn open_append(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write>> {
+        let rel = self.relative_path(path);
+        let _existing = self
+            .state
+            .borrow()
+            .files
+            .get(&rel)
+            .cloned()
+            .unwrap_or_default();
+        let state = self.state.clone();
+        Ok(Box::new(MockWriteCursor { state, rel }))
     }
 
     fn create_dir_all(&self, path: &GuardedPath) -> Result<()> {

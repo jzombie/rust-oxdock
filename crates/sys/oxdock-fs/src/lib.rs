@@ -94,6 +94,10 @@ pub trait WorkspaceFs {
     #[allow(clippy::disallowed_types)]
     fn read_file_unguarded(&self, path: &UnguardedPath) -> Result<Vec<u8>>;
 
+    fn open_read(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Read>>;
+    fn open_write(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write>>;
+    fn open_append(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write>>;
+
     fn read_to_string(&self, path: &GuardedPath) -> Result<String>;
     #[allow(clippy::disallowed_types)]
     fn read_to_string_unguarded(&self, path: &UnguardedPath) -> Result<String>;
@@ -196,6 +200,18 @@ impl WorkspaceFs for PathResolver {
     fn read_file_unguarded(&self, path: &UnguardedPath) -> Result<Vec<u8>> {
         #[allow(clippy::disallowed_methods)]
         Ok(std::fs::read(path.as_path())?)
+    }
+
+    fn open_read(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Read>> {
+        PathResolver::open_read(self, path)
+    }
+
+    fn open_write(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write>> {
+        PathResolver::open_write(self, path)
+    }
+
+    fn open_append(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write>> {
+        PathResolver::open_append(self, path)
     }
 
     fn read_to_string(&self, path: &GuardedPath) -> Result<String> {

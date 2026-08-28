@@ -14,7 +14,6 @@ use oxdock_fs::{GuardedPath, PathResolver, WorkspaceFs};
 use oxdock_parser::{Step, TemplateString};
 use oxdock_process::{
     BuiltinEnv, CommandContext, ProcessManager, SharedInput, SharedOutput, default_process_manager,
-    expand_command_env,
 };
 
 use std::sync::Arc;
@@ -25,7 +24,12 @@ use self::state::ExecState;
 use self::steps::execute_steps;
 
 fn expand_template(t: &TemplateString, ctx: &CommandContext) -> String {
-    expand_command_env(&t.0, ctx)
+    let expander = oxdock_process::StreamingExpand::new(&[], ctx.envs());
+    expander.expand_string(&t.0).unwrap_or_default()
+}
+
+pub(crate) fn expand_template_string(t: &TemplateString, ctx: &CommandContext) -> String {
+    expand_template(t, ctx)
 }
 
 pub fn run_steps(fs_root: &GuardedPath, steps: &[Step]) -> Result<()> {
@@ -136,7 +140,7 @@ fn run_steps_with_manager<P: ProcessManager>(
     let cwd = fs.root().clone();
     let build_context = fs.build_context().clone();
     let envs = Arc::new(BuiltinEnv::collect(&build_context).into_envs());
-    let stdout_log = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let assert_windows = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
     let mut state = ExecState {
         fs,
         cargo_target_dir: fs_root.join(".cargo-target")?,
@@ -145,7 +149,7 @@ fn run_steps_with_manager<P: ProcessManager>(
         bg_children: Vec::new(),
         scope_stack: Vec::new(),
         io,
-        stdout_log,
+        assert_windows: assert_windows.clone(),
     };
 
     let _default_stdout = std::io::stdout();
@@ -155,7 +159,7 @@ fn run_steps_with_manager<P: ProcessManager>(
     // sink was configured (forwarding to real stdout in that case).
     let stdout = Some(StreamHandle::Stream(teed_stdout(
         state.io.stdout(),
-        Arc::clone(&state.stdout_log),
+        assert_windows,
     )));
     let stderr = state.io.stderr().map(StreamHandle::Stream);
     let mut proc_mgr = process;

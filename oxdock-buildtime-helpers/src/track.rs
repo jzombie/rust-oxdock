@@ -197,6 +197,14 @@ pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
                     template_keys(&mut keys, body);
                 }
             }
+            StepKind::Replace { path, overrides } => {
+                if let Some(p) = path {
+                    template_keys(&mut keys, p);
+                }
+                for (_, value) in overrides {
+                    template_keys(&mut keys, value);
+                }
+            }
             StepKind::AssertFile {
                 hash: _,
                 path,

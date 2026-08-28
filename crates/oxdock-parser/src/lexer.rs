@@ -63,6 +63,7 @@ pub fn tokenize(input: &str) -> Result<Vec<RawToken<'_>>> {
             | Rule::read_command
             | Rule::write_command
             | Rule::append_command
+            | Rule::replace_command
             | Rule::assert_file_hash_command
             | Rule::assert_file_content_command
             | Rule::assert_dir_command

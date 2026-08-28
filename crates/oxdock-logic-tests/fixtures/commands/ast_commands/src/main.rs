@@ -1104,5 +1104,6 @@ fn step_kind_name(kind: &StepKind) -> &'static str {
         StepKind::Exit(_) => "Exit",
         StepKind::WithIo { .. } => "WithIo",
         StepKind::WithIoBlock { .. } => "WithIoBlock",
+        StepKind::Replace { .. } => "Replace",
     }
 }

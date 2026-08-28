@@ -1,0 +1,3 @@
+ENV NAME=World
+WRITE template.md Hello {{ env:NAME }}
+REPLACE template.md

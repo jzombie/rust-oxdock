@@ -1,0 +1,4 @@
+name = "replace"
+
+[expect]
+stdout_contains = ["Hello World"]

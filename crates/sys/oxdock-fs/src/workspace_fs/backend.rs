@@ -12,6 +12,9 @@ trait BackendImpl {
     fn read_file(&self, path: &GuardedPath) -> Result<Vec<u8>>;
     fn write_file(&self, path: &GuardedPath, contents: &[u8]) -> Result<()>;
     fn append_file(&self, path: &GuardedPath, contents: &[u8]) -> Result<()>;
+    fn open_read(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Read>>;
+    fn open_write(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write>>;
+    fn open_append(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write>>;
     fn canonicalize(&self, path: GuardedPath) -> Result<GuardedPath>;
     fn metadata(&self, path: &GuardedPath) -> Result<std::fs::Metadata>;
     fn entry_kind(&self, path: &GuardedPath) -> Result<super::EntryKind>;
@@ -102,6 +105,39 @@ impl BackendImpl for HostBackend {
         Ok(())
     }
 
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    fn open_read(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Read>> {
+        let file = fs::File::open(path.as_path())
+            .with_context(|| format!("failed to open {} for reading", path.display()))?;
+        Ok(Box::new(file))
+    }
+
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    fn open_write(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write>> {
+        if let Some(parent) = path.as_path().parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("creating dir {}", parent.display()))?;
+        }
+        let file = fs::File::create(path.as_path())
+            .with_context(|| format!("failed to open {} for writing", path.display()))?;
+        Ok(Box::new(file))
+    }
+
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    fn open_append(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write>> {
+        if let Some(parent) = path.as_path().parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("creating dir {}", parent.display()))?;
+        }
+        let file = fs::OpenOptions::new()
+            
+            .create(true)
+            .append(true)
+            .open(path.as_path())
+            .with_context(|| format!("failed to open {} for appending", path.display()))?;
+        Ok(Box::new(file))
+    }
+
     fn canonicalize(&self, path: GuardedPath) -> Result<GuardedPath> {
         Ok(path)
     }
@@ -184,6 +220,37 @@ mod miri_backend {
     static STATE_REGISTRY: OnceLock<
         Mutex<HashMap<std::path::PathBuf, Arc<Mutex<SyntheticRootState>>>>,
     > = OnceLock::new();
+
+    /// A write cursor that buffers data and flushes to synthetic state on drop.
+    struct MiriWriteCursor {
+        state: Arc<Mutex<SyntheticRootState>>,
+        rel: String,
+        cursor: std::io::Cursor<Vec<u8>>,
+    }
+
+    impl std::io::Write for MiriWriteCursor {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.cursor.write(buf)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.cursor.flush()?;
+            // Flush to synthetic state
+            let data = self.cursor.get_ref().clone();
+            self.state
+                .lock()
+                .expect("miri state poisoned")
+                .write_file(&self.rel, &data);
+            Ok(())
+        }
+    }
+
+    impl Drop for MiriWriteCursor {
+        fn drop(&mut self) {
+            // Ensure data is flushed to synthetic state
+            let _ = self.flush();
+        }
+    }
 
     pub(in crate::workspace_fs) struct MiriBackend {
         root_state: Option<Arc<Mutex<SyntheticRootState>>>,
@@ -286,6 +353,45 @@ mod miri_backend {
                 .expect("miri state poisoned")
                 .append_file(&rel, contents);
             Ok(())
+        }
+
+        fn open_read(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Read>> {
+            let data = self.read_file(path)?;
+            Ok(Box::new(std::io::Cursor::new(data)))
+        }
+
+        fn open_write(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write>> {
+            // Under Miri, we write to a Cursor and then flush to synthetic state
+            let rel = normalize_rel(path);
+            let state = self.state_for_guard_rc(path)?;
+            // Create an empty file first, then return a Cursor that will be flushed
+            state
+                .lock()
+                .expect("miri state poisoned")
+                .write_file(&rel, &[]);
+            Ok(Box::new(MiriWriteCursor {
+                state,
+                rel,
+                cursor: std::io::Cursor::new(Vec::new()),
+            }))
+        }
+
+        fn open_append(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write>> {
+            let rel = normalize_rel(path);
+            let state = self.state_for_guard_rc(path)?;
+            // Read existing content
+            let existing = state
+                .lock()
+                .expect("miri state poisoned")
+                .read_file(&rel)
+                .unwrap_or_default();
+            let mut cursor = std::io::Cursor::new(existing);
+            cursor.set_position(cursor.get_ref().len() as u64); // Seek to end
+            Ok(Box::new(MiriWriteCursor {
+                state,
+                rel,
+                cursor,
+            }))
         }
 
         fn canonicalize(&self, path: GuardedPath) -> Result<GuardedPath> {
@@ -617,6 +723,18 @@ impl Backend {
 
     pub(super) fn append_file(&self, path: &GuardedPath, contents: &[u8]) -> Result<()> {
         self.as_impl().append_file(path, contents)
+    }
+
+    pub(super) fn open_read(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Read>> {
+        self.as_impl().open_read(path)
+    }
+
+    pub(super) fn open_write(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write>> {
+        self.as_impl().open_write(path)
+    }
+
+    pub(super) fn open_append(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write>> {
+        self.as_impl().open_append(path)
     }
 
     pub(super) fn canonicalize(&self, path: GuardedPath) -> Result<GuardedPath> {

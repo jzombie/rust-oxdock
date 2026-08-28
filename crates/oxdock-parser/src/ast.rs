@@ -302,6 +302,14 @@ pub enum StepKind {
         path: TemplateString,
         contents: Option<TemplateString>,
     },
+    /// REPLACE [path] [KEY=val ...]
+    ///
+    /// Reads file or stdin, expands `{{ env:KEY }}` placeholders, outputs to stdout.
+    /// Explicit KEY=val arguments override env vars.
+    Replace {
+        path: Option<TemplateString>,
+        overrides: Vec<(String, TemplateString)>,
+    },
     /// Verify a workspace file exists and, when `hash` or `contents` is
     /// present, matches it. The grammar guarantees the invariant: `hash` set
     /// implies a 64-hex digest and no `contents`.
@@ -587,6 +595,16 @@ impl fmt::Display for StepKind {
                 write!(f, "APPEND {}", quote_arg(path))?;
                 if let Some(body) = contents {
                     write!(f, " {}", quote_msg(body))?;
+                }
+                Ok(())
+            }
+            StepKind::Replace { path, overrides } => {
+                write!(f, "REPLACE")?;
+                if let Some(p) = path {
+                    write!(f, " {}", quote_arg(p))?;
+                }
+                for (key, value) in overrides {
+                    write!(f, " {}={}", key, quote_arg(value))?;
                 }
                 Ok(())
             }

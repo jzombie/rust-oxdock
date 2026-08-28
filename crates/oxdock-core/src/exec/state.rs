@@ -5,7 +5,7 @@ use anyhow::Result;
 use oxdock_fs::{GuardedPath, WorkspaceFs};
 use oxdock_process::{CommandContext, ProcessManager};
 
-use super::io::ExecIo;
+use super::io::{ExecIo, SlidingWindow};
 
 pub(super) struct ExecState<P: ProcessManager> {
     pub(super) fs: Box<dyn WorkspaceFs>,
@@ -15,11 +15,9 @@ pub(super) struct ExecState<P: ProcessManager> {
     pub(super) bg_children: Vec<P::Handle>,
     pub(super) scope_stack: Vec<ScopeSnapshot>,
     pub(super) io: ExecIo,
-    /// Everything emitted to the script's stdout sink (interpreter and
-    /// streamed child output alike), for `ASSERT_STDOUT`. Shared with the
-    /// tee wrapper installed around the configured sink so background
-    /// processes can append concurrently.
-    pub(super) stdout_log: Arc<Mutex<Vec<u8>>>,
+    /// Pre-registered SlidingWindow observers for ASSERT_STDOUT steps.
+    /// Keyed by step index. TeeWriter pushes every chunk to all windows.
+    pub(super) assert_windows: Arc<Mutex<HashMap<usize, SlidingWindow>>>,
 }
 
 pub(super) struct ScopeSnapshot {
