@@ -346,7 +346,6 @@ name = "oxdock-buildtime-helpers"
 version = "0.7.0-alpha"
 dependencies = [
  "anyhow",
- "oxdock-buildtime-helpers",
  "oxdock-core",
  "oxdock-embed",
  "oxdock-fs",
