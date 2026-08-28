@@ -1,6 +1,6 @@
 [package]
 name = "oxdock-core"
-description = "Core engine for OxDock's Docker-inspired compile-time language, orchestrating workspace snapshots and asset embedding."
+description = "Core engine for OxDock's Dockerfile-inspired compile-time DSL, orchestrating workspace snapshots and asset embedding."
 authors.workspace = true
 version.workspace = true
 edition.workspace = true

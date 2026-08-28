@@ -308,6 +308,10 @@ mod tests {
         resolver.write_file(&path, body).expect("write asset");
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "GuardedPath::tempdir uses real filesystem ops blocked by Miri isolation"
+    )]
     #[test]
     fn gather_assets_walks_nested_tree_sorted_with_forward_slashes() {
         let temp = GuardedPath::tempdir().expect("tempdir");
@@ -332,6 +336,10 @@ mod tests {
         }
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "GuardedPath::tempdir uses real filesystem ops blocked by Miri isolation"
+    )]
     #[test]
     fn gather_assets_hashes_content_sha256_known_digest() {
         // sha256("hello")

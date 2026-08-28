@@ -1,6 +1,6 @@
 [package]
 name = "oxdock-buildtime-macros"
-description = "Compile-time macros for bundling assets using OxDock's Docker-inpspired language."
+description = "Compile-time macros for bundling assets using OxDock's Dockerfile-inspired DSL."
 authors.workspace = true
 version.workspace = true
 edition.workspace = true

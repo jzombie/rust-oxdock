@@ -1,6 +1,6 @@
 use oxdock_buildtime_macros::{embed, prepare};
 use oxdock_cli::{ExecutionResult, Options, ScriptSource, execute_with_result};
-use oxdock_core::{run_steps_with_context_result_with_io, ExecIo};
+use oxdock_core::{ExecIo, run_steps_with_context_result_with_io};
 use oxdock_fs::{GuardedPath, PathResolver};
 use oxdock_parser::parse_script;
 use std::error::Error;
@@ -19,7 +19,7 @@ embed! {
         WITH_IO [stdin=pipe:cap_file_hash] WRITE file_hash.txt
 
         // Double-check the hash matches on unix system
-        // TODO: Gate system cmd execution based on sha256sum detection: https://github.com/jzombie/oxdock-rs/issues/55
+        // TODO: Gate system cmd execution based on sha256sum detection: https://github.com/jzombie/rust-oxdock/issues/55
         // [platform=unix] {
         //     CAPTURE_TO_FILE system_hash.txt RUN sh -c "if command -v sha256sum >/dev/null 2>&1; then sha256sum data/inner/a.txt | awk '{print $1}'; elif command -v shasum >/dev/null 2>&1; then shasum -a 256 data/inner/a.txt | awk '{print $1}'; elif command -v openssl >/dev/null 2>&1; then openssl dgst -sha256 data/inner/a.txt | awk '{print $2}'; else echo 'no sha256 tool available' >&2; exit 1; fi | tr 'A-F' 'a-f'"
         // }
@@ -39,7 +39,7 @@ prepare! {
         WITH_IO [stdin=pipe:cap_file_hash] WRITE file_hash.txt
 
         // Double-check the hash matches on unix system
-        // TODO: Gate system cmd execution based on sha256sum detection: https://github.com/jzombie/oxdock-rs/issues/55
+        // TODO: Gate system cmd execution based on sha256sum detection: https://github.com/jzombie/rust-oxdock/issues/55
         // [platform=unix] {
         //     CAPTURE_TO_FILE system_hash.txt RUN sh -c "if command -v sha256sum >/dev/null 2>&1; then sha256sum data/inner/a.txt | awk '{print $1}'; elif command -v shasum >/dev/null 2>&1; then shasum -a 256 data/inner/a.txt | awk '{print $1}'; elif command -v openssl >/dev/null 2>&1; then openssl dgst -sha256 data/inner/a.txt | awk '{print $2}'; else echo 'no sha256 tool available' >&2; exit 1; fi | tr 'A-F' 'a-f'"
         // }
@@ -57,7 +57,7 @@ const SCRIPT: &str = r#"
     WITH_IO [stdin=pipe:cap_file_hash] WRITE file_hash.txt
 
     // Double-check the hash matches on unix system
-    // TODO: Gate system cmd execution based on sha256sum detection: https://github.com/jzombie/oxdock-rs/issues/55
+    // TODO: Gate system cmd execution based on sha256sum detection: https://github.com/jzombie/rust-oxdock/issues/55
     // [platform=unix] {
     //     CAPTURE_TO_FILE system_hash.txt RUN sh -c "if command -v sha256sum >/dev/null 2>&1; then sha256sum data/inner/a.txt | awk '{print $1}'; elif command -v shasum >/dev/null 2>&1; then shasum -a 256 data/inner/a.txt | awk '{print $1}'; elif command -v openssl >/dev/null 2>&1; then openssl dgst -sha256 data/inner/a.txt | awk '{print $2}'; else echo 'no sha256 tool available' >&2; exit 1; fi | tr 'A-F' 'a-f'"
     // }
@@ -75,10 +75,7 @@ fn read_file_hash(resolver: &PathResolver, root: &GuardedPath) -> Result<String,
     Ok(contents.trim().to_string())
 }
 
-fn read_manifest_hash(
-    resolver: &PathResolver,
-    rel_path: &str,
-) -> Result<String, Box<dyn Error>> {
+fn read_manifest_hash(resolver: &PathResolver, rel_path: &str) -> Result<String, Box<dyn Error>> {
     let hash_path = resolver.root().join(rel_path)?;
     let contents = resolver.read_to_string(&hash_path)?;
     Ok(contents.trim().to_string())
@@ -111,10 +108,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     };
 
     let ExecutionResult { tempdir, final_cwd } = execute_with_result(opts, workspace_root.clone())?;
-    let cli_resolver = PathResolver::new_guarded(
-        tempdir.as_guarded_path().clone(),
-        workspace_root.clone(),
-    )?;
+    let cli_resolver =
+        PathResolver::new_guarded(tempdir.as_guarded_path().clone(), workspace_root.clone())?;
     let cli_hash = read_dir_hash(&cli_resolver, &final_cwd)?;
     let cli_file_hash = read_file_hash(&cli_resolver, &final_cwd)?;
 
@@ -142,8 +137,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     );
 
     let manifest_resolver = PathResolver::from_manifest_env()?;
-    let prepared_hash =
-        read_manifest_hash(&manifest_resolver, "prebuilt_prepare/dir_hash.txt")?;
+    let prepared_hash = read_manifest_hash(&manifest_resolver, "prebuilt_prepare/dir_hash.txt")?;
     assert_eq!(
         cli_hash, prepared_hash,
         "CLI/prepare hash mismatch: cli={cli_hash} prepare={prepared_hash}"

@@ -59,6 +59,10 @@ fn digits_stripped(s: &str) -> String {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "exercises real filesystem ops (current_exe, readlink) blocked by Miri isolation"
+)]
 fn identical_behavior_without_git_or_primary_package() -> Result<()> {
     let with_git = setup_package("invariant_git", true)?;
     let without_git = setup_package("invariant_nogit", false)?;
@@ -116,6 +120,10 @@ fn identical_behavior_without_git_or_primary_package() -> Result<()> {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "exercises real filesystem ops (current_exe, readlink) blocked by Miri isolation"
+)]
 fn directives_are_complete_and_ordered() -> Result<()> {
     let pkg = setup_package("directives_golden", false)?;
     let root_display = normalized_path(pkg.as_guarded_path());

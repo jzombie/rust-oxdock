@@ -6,26 +6,33 @@
   <a href="https://www.rust-lang.org/">
     <img src="https://img.shields.io/badge/Made%20with-Rust-black?&logo=Rust" alt="Made with Rust" />
   </a>
+  <a href="https://github.com/jzombie/rust-oxdock/blob/main/LICENSE">
+    <img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="Apache 2.0" />
+  </a>
   <!-- <a href="https://docs.rs/oxdock">
     <img src="https://img.shields.io/docsrs/oxdock" alt="docs.rs" />
   </a> -->
-  <a href="https://github.com/jzombie/oxdock-rs/actions/workflows/rust-tests.yml?query=branch%3Amain+event%3Apush">
-    <img src="https://img.shields.io/github/actions/workflow/status/jzombie/oxdock-rs/rust-tests.yml?branch=main&label=Miri&logo=github" alt="Miri status" />
+  <a href="https://github.com/jzombie/rust-oxdock/actions/workflows/rust-tests.yml?query=branch%3Amain+event%3Apush">
+    <img src="https://img.shields.io/github/actions/workflow/status/jzombie/rust-oxdock/rust-tests.yml?branch=main&label=Miri&logo=github" alt="Miri status" />
   </a>
-  <a href="https://deepwiki.com/jzombie/rust-oxdock">
+  <!-- <a href="https://deepwiki.com/jzombie/rust-oxdock">
     <img src="https://deepwiki.com/badge.svg" alt="DeepWiki" />
-  </a>
-  <a href="https://coveralls.io/github/jzombie/oxdock-rs?branch=main">
-    <img src="https://coveralls.io/repos/github/jzombie/oxdock-rs/badge.svg?branch=main" alt="Coverage Status" />
+    </a> -->
+  <a href="https://coveralls.io/github/jzombie/rust-oxdock?branch=main">
+    <img src="https://coveralls.io/repos/github/jzombie/rust-oxdock/badge.svg?branch=main" alt="Coverage Status" />
   </a>
   <a href="#miri-coverage">
-    <img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fjzombie%2Foxdock-rs%2Fbadges%2Fmiri-coverage.json" alt="Miri Coverage" />
+    <img src="https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2Fjzombie%2Frust-oxdock%2Fbadges%2Fmiri-coverage.json" alt="Miri Coverage" />
   </a>
 </div>
 
+> **OxDock is an experimental DSL used for building embeddable artifacts and orchestrating pipelines.**
+>
+> **It is currently in alpha and is subject to rapid API changes.**
+
 # OxDock
 
-OxDock is a Docker-inspired language that runs **natively on your host** — no containers, no daemon, no VM. It comes in two flavors sharing one core: a [Rust build-time macro](./oxdock-buildtime-macros/) whose scripts run during compilation, embedding resources directly into the binary's data section (no heap allocation when the program starts; the generated asset structs are pure Rust and work in `no_std` targets), and a [standalone CLI](./oxdock-cli/) that orchestrates cross-platform workflows as ordinary local processes.
+OxDock is a Dockerfile-inspired DSL that runs **natively on your host** — no containers, no daemon, no VM. It comes in two flavors sharing one core: a [Rust build-time macro](./oxdock-buildtime-macros/) whose scripts run during compilation, embedding resources directly into the binary's data section (no heap allocation when the program starts; the generated asset structs are pure Rust and work in `no_std` targets), and a [standalone CLI](./oxdock-cli/) that orchestrates cross-platform workflows as ordinary local processes.
 
 Unlike Docker, commands execute directly on the host: they can be guarded by platform/env conditions, run inside scoped blocks so changes to `ENV` or `WORKDIR` don’t leak, and interoperate with containers whenever you want them — you can invoke Docker from an OxDock script, or even install Docker, while the DSL itself stays portable.
 
@@ -38,7 +45,7 @@ OxDock comes in two variants, each of which are independent of the other, but sh
 
 ## Goals
 
-OxDock has a simple goal to provide a simple language that works the same across Mac, Linux, and Windows, including support for background processes, symlinks, and boolean conditionals (such as env and platform-based command filtering), which runs the same whether it's used as a preprocessing step in a build-time Rust macro, or as a CLI program, regardless of platform it is building on.
+OxDock has a simple goal to provide a simple DSL that works the same across Mac, Linux, and Windows, including support for background processes, symlinks, and boolean conditionals (such as env and platform-based command filtering), which runs the same whether it's used as a preprocessing step in a build-time Rust macro, or as a CLI program, regardless of platform it is building on.
 
 Every internal command is engineered to run the same way across platforms, except for the `RUN` command, which calls native programs.
 
@@ -46,11 +53,11 @@ Every internal command is engineered to run the same way across platforms, excep
 
 ## Quick start
 
-The following script is a complete OxDock program — it builds artifacts **and verifies them** with native assertions. Every fenced `oxdock` example in this README is executed against the implementation by [`crates/oxdock-logic-tests/tests/docs_conformance.rs`](./crates/oxdock-logic-tests/tests/docs_conformance.rs), so what you read here is guaranteed to match what the language actually does:
+The following script is a complete OxDock script — it builds artifacts **and verifies them** with native assertions. Every fenced `oxdock` example in this README is executed against the implementation by [`crates/oxdock-logic-tests/tests/docs_conformance.rs`](./crates/oxdock-logic-tests/tests/docs_conformance.rs), so what you read here is guaranteed to match what the DSL actually does:
 
 ```oxdock
 // Script-local variable: usable by templates and guards below.
-ENV PROJECT=oxdock
+ENV PROJECT=OxDock
 
 // Creates the directory and any missing parents.
 MKDIR dist
@@ -63,6 +70,8 @@ ASSERT_FILE dist/hello.txt Built with {{ env:PROJECT }}
 
 // LS prints "<dir>:" then the entry names, sorted.
 LS dist
+
+// Assert stdout buffer of previous LS command is "hello.txt"
 ASSERT_STDOUT hello.txt
 ```
 
@@ -82,7 +91,7 @@ embed! {
     // Embedded resources are mapped to `HelloAssets::get(resource)`
     name: HelloAssets,
     script: {
-        ENV PROJECT=oxdock
+        ENV PROJECT=OxDock
         MKDIR dist
         WRITE dist/hello.txt Built with {{ env:PROJECT }}
         ASSERT_FILE dist/hello.txt Built with {{ env:PROJECT }}
@@ -94,13 +103,13 @@ embed! {
 fn main() {
     // Verify we can read the resource we just created
     let file = HelloAssets::get("dist/hello.txt").expect("dist/hello.txt must be embedded");
-    assert_eq!(file.data.as_ref(), b"Built with oxdock");
+    assert_eq!(file.data.as_ref(), b"Built with OxDock");
 }
 ```
 
 <!-- TODO: Describe Oxfile (which is a script which runs in the OxDock interpreter or is embedded in Rust compile-time macros). Note that guard expressions borrow TOML-like syntax for single-line conditions, gates are loosely inspired by Rust's derive macros, and support multi-line guarded blocks using `{ ... }` braces. -->
 
-# Language Reference
+# DSL Reference
 
 Scripts are sequences of instructions, one per line. Instructions may be prefixed with **guards** (`[...]`) that decide whether they run, and grouped into **scoped blocks** (`{ ... }`). The authoritative grammar is [`crates/oxdock-parser/src/dsl.pest`](./crates/oxdock-parser/src/dsl.pest), which is also embedded in the parser crate as the `LANGUAGE_SPEC` constant for tooling.
 
@@ -780,9 +789,9 @@ Snippets contain nothing but OxDock — copy any of them straight into an `Oxfil
 ```oxdock expect_error:"message substring"   snippet must fail with this text in its error
 ```
 
-Everything else you see inside the fences — including the `ASSERT_*` commands — is part of the language itself and executes identically in your own pipelines.
+Everything else you see inside the fences — including the `ASSERT_*` commands — is part of the DSL itself and executes identically in your own pipelines.
 
-If you change the language, update this reference in the same commit — CI will hold you to it.
+If you change the DSL, update this reference in the same commit — CI will hold you to it.
 
 ## Environment variable contracts
 
@@ -790,7 +799,7 @@ Environment variables understood by the toolchain (workspace roots, caching fing
 
 ## GitHub Actions Integration
 
-OxDock scripts can emit GitHub Actions workflow commands using native language primitives.
+OxDock scripts can emit GitHub Actions workflow commands using native DSL primitives.
 All examples below use `[env:GITHUB_ACTIONS]` guards so they execute on CI runners
 but are skipped during local `docs_conformance` tests.
 
@@ -799,9 +808,9 @@ but are skipped during local `docs_conformance` tests.
 `ECHO` writes to stdout, which GitHub Actions intercepts for annotations:
 
 ```oxdock
-ECHO "::notice::build started"
-ECHO "::warning::something looks off"
-ECHO "::error::tests failed"
+ECHO "::notice::test notice message"
+ECHO "::warning::test warning message"
+ECHO "::error::test error message"
 ```
 
 ### Collapsible log groups
@@ -873,3 +882,9 @@ If you run new tests under Miri locally, you can sanity-check parity with CI via
 cargo +nightly miri setup
 cargo +nightly miri test --workspace --all-features --lib --tests
 ```
+
+## License
+
+`OxDock` is primarily distributed under the terms of the Apache License (Version 2.0).
+
+See [LICENSE](./LICENSE) for details.

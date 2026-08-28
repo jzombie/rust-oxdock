@@ -360,6 +360,10 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[cfg_attr(
+        miri,
+        ignore = "stdout streaming not supported for background command under miri"
+    )]
     #[test]
     fn run_bg_exits_success_and_stops_pipeline() {
         let temp = GuardedPath::tempdir().unwrap();
@@ -373,6 +377,10 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[cfg_attr(
+        miri,
+        ignore = "stdout streaming not supported for background command under miri"
+    )]
     #[test]
     fn run_bg_failure_bubbles_status() {
         let temp = GuardedPath::tempdir().unwrap();
@@ -464,6 +472,10 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[cfg_attr(
+        miri,
+        ignore = "stdout streaming not supported for background command under miri"
+    )]
     #[test]
     fn exit_terminates_backgrounds_and_returns_code() {
         let temp = GuardedPath::tempdir().unwrap();
@@ -486,6 +498,10 @@ mod tests {
         );
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "stdout streaming not supported for background command under miri"
+    )]
     #[test]
     fn env_applies_to_run_and_background() {
         let temp = GuardedPath::tempdir().unwrap();

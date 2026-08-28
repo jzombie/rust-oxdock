@@ -1,6 +1,6 @@
 [package]
 name = "oxdock-cli"
-description = "CLI tooling for executing OxDock's Docker-inspired language on native platforms."
+description = "CLI tooling for executing OxDock's Dockerfile-inspired DSL on native platforms."
 authors.workspace = true
 version.workspace = true
 edition.workspace = true

@@ -373,7 +373,7 @@ mod tests {
     #[test]
     fn assert_commands_parse_and_round_trip() {
         let script = indoc! {r#"
-            ASSERT_FILE dist/hello.txt Built with oxdock
+            ASSERT_FILE dist/hello.txt Built with OxDock
             ASSERT_DIR deeply/nested/tree
             ASSERT_ABSENT chained.txt
             ASSERT_STDOUT visible-after-comments
@@ -390,7 +390,7 @@ mod tests {
                 assert_eq!(path.as_ref(), "dist/hello.txt");
                 assert_eq!(
                     contents.as_ref().map(AsRef::as_ref),
-                    Some("Built with oxdock")
+                    Some("Built with OxDock")
                 );
             }
             other => panic!("expected ASSERT_FILE, saw {:?}", other),
