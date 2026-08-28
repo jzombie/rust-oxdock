@@ -131,7 +131,7 @@ pub(super) fn hash_path(
                 hasher.update(rel.as_bytes());
                 hasher.update(b"\0");
             }
-            let mut buf = [0u8; 8192];
+            let mut buf = [0u8; super::io::CHUNK_SIZE];
             loop {
                 let n = reader.read(&mut buf)?;
                 if n == 0 {

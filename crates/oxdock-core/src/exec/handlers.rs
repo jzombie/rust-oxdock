@@ -512,7 +512,7 @@ pub(super) fn write<P: ProcessManager>(
             .fs
             .open_write(&target)
             .with_context(|| format!("failed to open {} for writing", target.display()))?;
-        let mut buf = [0u8; 8192];
+        let mut buf = [0u8; super::io::CHUNK_SIZE];
         loop {
             let n = guard
                 .read(&mut buf)
@@ -568,7 +568,7 @@ pub(super) fn append<P: ProcessManager>(
             .fs
             .open_append(&target)
             .with_context(|| format!("failed to open {} for appending", target.display()))?;
-        let mut buf = [0u8; 8192];
+        let mut buf = [0u8; super::io::CHUNK_SIZE];
         loop {
             let n = guard
                 .read(&mut buf)
@@ -601,7 +601,7 @@ pub(super) fn replace<P: ProcessManager>(
         .collect();
 
     let mut expander = oxdock_process::StreamingExpand::new(&resolved_overrides, ctx.envs());
-    let mut out_buf = Vec::with_capacity(8192);
+    let mut out_buf = Vec::with_capacity(super::io::CHUNK_SIZE);
 
     write_stdout(cx.out.clone(), |w| {
         if let Some(path) = path_opt {
@@ -611,7 +611,7 @@ pub(super) fn replace<P: ProcessManager>(
                 .with_context(|| format!("step {}: REPLACE {}", idx + 1, rendered))?;
             let mut reader = cx.state.fs.open_read(&target)
                 .with_context(|| format!("failed to open {}", target.display()))?;
-            let mut buf = [0u8; 8192];
+            let mut buf = [0u8; super::io::CHUNK_SIZE];
             loop {
                 let n = reader.read(&mut buf)
                     .with_context(|| format!("failed to read {}", target.display()))?;
@@ -632,7 +632,7 @@ pub(super) fn replace<P: ProcessManager>(
             };
             let mut guard = input_stream.lock()
                 .map_err(|_| anyhow!("failed to lock stdin for REPLACE"))?;
-            let mut buf = [0u8; 8192];
+            let mut buf = [0u8; super::io::CHUNK_SIZE];
             loop {
                 let n = guard.read(&mut buf)
                     .context("failed to read from stdin")?;
