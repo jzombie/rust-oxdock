@@ -804,6 +804,10 @@ mod staging_tests {
     use oxdock_fs::{GuardedPath, PathResolver};
 
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "GuardedPath::tempdir and stage_materialize use real filesystem ops"
+    )]
     fn staged_materialize_overwrites_removes_stale_and_strips_markers() -> Result<()> {
         let temp = GuardedPath::tempdir()?;
         let root = temp.as_guarded_path().clone();

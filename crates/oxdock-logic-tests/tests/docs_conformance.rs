@@ -49,6 +49,10 @@ fn contains_keyword(haystack: &str, keyword: &str) -> bool {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "requires CARGO_MANIFEST_DIR and host filesystem for README resolution"
+)]
 fn readme_snippets_parse_and_cover_every_command() -> Result<()> {
     let blocks = load_readme_blocks()?;
     assert!(
@@ -82,7 +86,7 @@ fn readme_snippets_parse_and_cover_every_command() -> Result<()> {
     for marker in ["or(", "{{ env:", "[env:"] {
         assert!(
             bodies.contains(marker),
-            "{README_NAME}: language reference must document structural feature '{marker}'"
+            "{README_NAME}: DSL reference must document structural feature '{marker}'"
         );
     }
     Ok(())

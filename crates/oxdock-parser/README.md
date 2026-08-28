@@ -5,7 +5,7 @@ CLI and the embedding macros. The DSL is intentionally compact, but it now has
 an explicit grammar so that other tooling (formatters, language servers, IDE
 plugins, etc.) can understand scripts without re‑implementing the parser.
 
-## Language definition
+## DSL definition
 
 The grammar lives in [`src/dsl.pest`](src/dsl.pest) and is consumed directly by
 the lexer. A copy of the grammar is also exposed at runtime via the
@@ -21,7 +21,7 @@ fn dump_grammar() {
 ```
 
 Because the parser is generated from this same file, the “spec” and the
-implementation stay in lockstep—the language is exactly what the grammar
+implementation stay in lockstep—the DSL is exactly what the grammar
 describes.
 
 ## Architecture overview
@@ -29,7 +29,7 @@ describes.
 1. The lexer (powered by [`pest`](https://pest.rs/)) tokenizes scripts
    according to `dsl.pest`, handling comments and semicolons along the way.
 2. Tokens are fed into the existing `ScriptParser`, which performs guard stack
-   combination, scope tracking, and `StepKind` construction (no language
+   combination, scope tracking, and `StepKind` construction (no DSL
    behaviour changed from the previous hand-written line parser).
 3. The resulting `Vec<Step>` is consumed by runtimes (CLI, macros, tests, etc.).
 
