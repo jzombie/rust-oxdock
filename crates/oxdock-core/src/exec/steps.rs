@@ -116,10 +116,13 @@ pub(super) fn execute_steps<P: ProcessManager>(
                 StepKind::Cwd => handlers::cwd(&mut cx, idx),
                 StepKind::Read(path_opt) => handlers::read(&mut cx, idx, path_opt),
                 StepKind::Write { path, contents } => handlers::write(&mut cx, idx, path, contents),
+                StepKind::RawWrite { path, contents } => {
+                    handlers::raw_write(&mut cx, idx, path, contents)
+                }
                 StepKind::Append { path, contents } => {
                     handlers::append(&mut cx, idx, path, contents)
                 }
-                StepKind::Replace { path, overrides } => {
+                StepKind::Expand { path, overrides } => {
                     handlers::replace(&mut cx, idx, path, overrides)
                 }
                 StepKind::AssertFile {

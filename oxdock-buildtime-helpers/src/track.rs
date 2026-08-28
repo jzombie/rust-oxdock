@@ -191,13 +191,16 @@ pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
                     template_keys(&mut keys, body);
                 }
             }
+            StepKind::RawWrite { path, .. } => {
+                template_keys(&mut keys, path);
+            }
             StepKind::Append { path, contents } => {
                 template_keys(&mut keys, path);
                 if let Some(body) = contents {
                     template_keys(&mut keys, body);
                 }
             }
-            StepKind::Replace { path, overrides } => {
+            StepKind::Expand { path, overrides } => {
                 if let Some(p) = path {
                     template_keys(&mut keys, p);
                 }

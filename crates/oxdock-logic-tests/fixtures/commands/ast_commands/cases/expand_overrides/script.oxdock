@@ -1,0 +1,2 @@
+ENV NAME=World
+EXPAND NAME=Alice

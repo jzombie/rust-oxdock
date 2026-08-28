@@ -588,6 +588,28 @@ fn parse_command(pair: Pair<Rule>) -> Result<StepKind> {
                 contents: contents.map(Into::into),
             }
         }
+        Rule::raw_write_command => {
+            let mut path = None;
+            let mut contents = None;
+            for inner in pair.into_inner() {
+                match inner.as_rule() {
+                    Rule::argument if path.is_none() => {
+                        path = Some(parse_argument(inner)?);
+                    }
+                    Rule::message => {
+                        contents = Some(parse_concatenated_string(inner)?);
+                    }
+                    _ => {}
+                }
+            }
+            StepKind::RawWrite {
+                path: path
+                    .ok_or_else(|| anyhow!("RAW_WRITE expects a path argument"))?
+                    .into(),
+                contents: contents
+                    .ok_or_else(|| anyhow!("RAW_WRITE expects a contents argument"))?,
+            }
+        }
         Rule::append_command => {
             let mut path = None;
             let mut contents = None;
@@ -609,7 +631,7 @@ fn parse_command(pair: Pair<Rule>) -> Result<StepKind> {
                 contents: contents.map(Into::into),
             }
         }
-        Rule::replace_command => {
+        Rule::expand_command => {
             let mut path = None;
             let mut overrides: Vec<(String, TemplateString)> = Vec::new();
             for inner in pair.into_inner() {
@@ -638,7 +660,7 @@ fn parse_command(pair: Pair<Rule>) -> Result<StepKind> {
                     _ => {}
                 }
             }
-            StepKind::Replace {
+            StepKind::Expand {
                 path: path.map(Into::into),
                 overrides,
             }

@@ -90,8 +90,9 @@ command = _{
     cwd_command |
     read_command |
     write_command |
+    raw_write_command |
     append_command |
-    replace_command |
+    expand_command |
     assert_file_command |
     assert_dir_command |
     assert_absent_command |
@@ -116,11 +117,12 @@ ls_command = ${ "LS" ~ (sep ~ argument)? }
 cwd_command = ${ "CWD" }
 read_command = ${ "READ" ~ (sep ~ argument)? }
 write_command = ${ "WRITE" ~ sep ~ argument ~ (sep ~ message)? }
+raw_write_command = ${ "RAW_WRITE" ~ sep ~ argument ~ sep ~ message }
 append_command = ${ "APPEND" ~ sep ~ argument ~ (sep ~ message)? }
 
-// REPLACE command: reads file or stdin, expands {{ env:KEY }} placeholders, outputs to stdout
+// EXPAND command: reads file or stdin, expands {{ env:KEY }} placeholders, outputs to stdout
 // Optional KEY=val overrides (key_value) follow the path argument
-replace_command = ${ "REPLACE" ~ (sep ~ argument)? ~ (sep ~ key_value)* }
+expand_command = ${ "EXPAND" ~ (sep ~ (key_value | argument) ~ (sep ~ key_value)*)? }
 key_value = ${ kv_key ~ "=" ~ argument }
 kv_key = @{ (!"=" ~ !WHITESPACE ~ !linebreak ~ ANY)+ }
 

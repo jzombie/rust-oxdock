@@ -19,7 +19,9 @@ pub enum Command {
     Cwd,
     Read,
     Write,
+    RawWrite,
     Append,
+    Expand,
     AssertFile,
     AssertDir,
     AssertAbsent,
@@ -45,7 +47,9 @@ pub const COMMANDS: &[Command] = &[
     Command::Cwd,
     Command::Read,
     Command::Write,
+    Command::RawWrite,
     Command::Append,
+    Command::Expand,
     Command::AssertFile,
     Command::AssertDir,
     Command::AssertAbsent,
@@ -73,7 +77,9 @@ impl Command {
             Command::Cwd => "CWD",
             Command::Read => "READ",
             Command::Write => "WRITE",
+            Command::RawWrite => "RAW_WRITE",
             Command::Append => "APPEND",
+            Command::Expand => "EXPAND",
             Command::AssertFile => "ASSERT_FILE",
             Command::AssertDir => "ASSERT_DIR",
             Command::AssertAbsent => "ASSERT_ABSENT",
@@ -105,7 +111,9 @@ impl Command {
             "CWD" => Some(Command::Cwd),
             "READ" => Some(Command::Read),
             "WRITE" => Some(Command::Write),
+            "RAW_WRITE" => Some(Command::RawWrite),
             "APPEND" => Some(Command::Append),
+            "EXPAND" => Some(Command::Expand),
             "ASSERT_FILE" => Some(Command::AssertFile),
             "ASSERT_DIR" => Some(Command::AssertDir),
             "ASSERT_ABSENT" => Some(Command::AssertAbsent),
@@ -298,15 +306,22 @@ pub enum StepKind {
         path: TemplateString,
         contents: Option<TemplateString>,
     },
+    /// RAW_WRITE writes literal bytes to a file without expanding template
+    /// placeholders.  The path is still resolved via `expand_template`; only
+    /// the file contents bypass expansion.
+    RawWrite {
+        path: TemplateString,
+        contents: String,
+    },
     Append {
         path: TemplateString,
         contents: Option<TemplateString>,
     },
-    /// REPLACE [path] [KEY=val ...]
+    /// EXPAND [path] [KEY=val ...]
     ///
     /// Reads file or stdin, expands `{{ env:KEY }}` placeholders, outputs to stdout.
     /// Explicit KEY=val arguments override env vars.
-    Replace {
+    Expand {
         path: Option<TemplateString>,
         overrides: Vec<(String, TemplateString)>,
     },
@@ -591,6 +606,9 @@ impl fmt::Display for StepKind {
                 }
                 Ok(())
             }
+            StepKind::RawWrite { path, contents } => {
+                write!(f, "RAW_WRITE {} {}", quote_arg(path), quote_msg(contents))
+            }
             StepKind::Append { path, contents } => {
                 write!(f, "APPEND {}", quote_arg(path))?;
                 if let Some(body) = contents {
@@ -598,8 +616,8 @@ impl fmt::Display for StepKind {
                 }
                 Ok(())
             }
-            StepKind::Replace { path, overrides } => {
-                write!(f, "REPLACE")?;
+            StepKind::Expand { path, overrides } => {
+                write!(f, "EXPAND")?;
                 if let Some(p) = path {
                     write!(f, " {}", quote_arg(p))?;
                 }

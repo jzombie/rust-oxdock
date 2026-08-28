@@ -19,6 +19,7 @@ pub mod harness {
         pub args: Vec<String>,
         pub env: Vec<(String, String)>,
         pub env_remove: Vec<String>,
+        pub stdin: Option<String>,
         pub expect_success: bool,
         pub error_expectation: Option<super::expectations::ErrorExpectation>,
         pub stdout_contains: Vec<String>,
@@ -305,12 +306,41 @@ pub mod harness {
         for key in &case.env_remove {
             cmd.env_remove(key);
         }
-        let output = cmd.output().context("failed to run fixture")?;
+        // If case has stdin content, pipe it to the child process
+        let (status, stdout_bytes, stderr_bytes) = if let Some(stdin_content) = &case.stdin {
+            use std::io::Write;
+            use std::process::{Command, Stdio};
+            let snap = cmd.snapshot();
+            let mut child = Command::new(&snap.program);
+            for arg in &snap.args {
+                child.arg(arg);
+            }
+            for (key, value) in &snap.envs {
+                child.env(key, value);
+            }
+            if let Some(cwd) = &snap.cwd {
+                child.current_dir(cwd);
+            }
+            child
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            let mut child = child.spawn().context("failed to spawn fixture")?;
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin.write_all(stdin_content.as_bytes())?;
+                drop(stdin);
+            }
+            let result = child.wait_with_output().context("failed to run fixture")?;
+            (result.status, result.stdout, result.stderr)
+        } else {
+            let result = cmd.output().context("failed to run fixture")?;
+            (result.status, result.stdout, result.stderr)
+        };
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&stdout_bytes);
+        let stderr = String::from_utf8_lossy(&stderr_bytes);
 
-        if case.expect_success && !output.success() {
+        if case.expect_success && !status.success() {
             anyhow::bail!(
                 "fixture {} failed. stdout:\n{}\nstderr:\n{}",
                 spec.name,
@@ -318,7 +348,7 @@ pub mod harness {
                 stderr
             );
         }
-        if !case.expect_success && output.success() {
+        if !case.expect_success && status.success() {
             anyhow::bail!(
                 "fixture {} unexpectedly succeeded. stdout:\n{}\nstderr:\n{}",
                 spec.name,
@@ -328,7 +358,7 @@ pub mod harness {
         }
 
         if let Some(expectation) = &case.error_expectation {
-            if output.success() {
+            if status.success() {
                 anyhow::bail!("fixture {} expected error, got success", spec.name);
             }
             super::expectations::assert_text_matches(
@@ -353,6 +383,7 @@ pub mod harness {
                 args: vec!["run".to_string(), "--quiet".to_string()],
                 env: Vec::new(),
                 env_remove: Vec::new(),
+                stdin: None,
                 expect_success: true,
                 error_expectation: None,
                 stdout_contains: Vec::new(),
@@ -421,6 +452,13 @@ pub mod harness {
         }
         if let Some(item) = doc.get("env_remove") {
             case.env_remove = parse_string_list(item, "env_remove")?;
+        }
+        if let Some(item) = doc.get("stdin") {
+            case.stdin = Some(
+                item.as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+            );
         }
 
         let mut expect_success_override = None;

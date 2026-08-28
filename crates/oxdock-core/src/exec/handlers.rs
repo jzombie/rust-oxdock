@@ -529,6 +529,30 @@ pub(super) fn write<P: ProcessManager>(
     Ok(())
 }
 
+pub(super) fn raw_write<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    idx: usize,
+    path: &TemplateString,
+    contents: &str,
+) -> Result<()> {
+    let ctx = cx.state.command_ctx()?;
+    let path_rendered = super::expand_template(path, &ctx);
+    let target = cx
+        .state
+        .fs
+        .resolve_write(&cx.state.cwd, &path_rendered)
+        .with_context(|| format!("step {}: RAW_WRITE {}", idx + 1, path_rendered))?;
+    cx.state
+        .fs
+        .ensure_parent_dir(&target)
+        .with_context(|| format!("failed to create parent for {}", target.display()))?;
+    cx.state
+        .fs
+        .write_file(&target, contents.as_bytes())
+        .with_context(|| format!("failed to write {}", target.display()))?;
+    Ok(())
+}
+
 pub(super) fn append<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     idx: usize,
@@ -608,7 +632,7 @@ pub(super) fn replace<P: ProcessManager>(
             // Streaming file read
             let rendered = super::expand_template(path, &ctx);
             let target = cx.state.fs.resolve_read(&cx.state.cwd, &rendered)
-                .with_context(|| format!("step {}: REPLACE {}", idx + 1, rendered))?;
+                .with_context(|| format!("step {}: EXPAND {}", idx + 1, rendered))?;
             let mut reader = cx.state.fs.open_read(&target)
                 .with_context(|| format!("failed to open {}", target.display()))?;
             let mut buf = [0u8; super::io::CHUNK_SIZE];
@@ -625,13 +649,13 @@ pub(super) fn replace<P: ProcessManager>(
             // Streaming stdin — error if no stdin available
             let Some(input_stream) = cx.stdin.clone() else {
                 bail!(
-                    "step {}: REPLACE requires stdin when no file path is given \
-                     (use WITH_IO [stdin=...] REPLACE)",
+                    "step {}: EXPAND requires stdin when no file path is given \
+                     (use WITH_IO [stdin=...] EXPAND)",
                     idx + 1
                 );
             };
             let mut guard = input_stream.lock()
-                .map_err(|_| anyhow!("failed to lock stdin for REPLACE"))?;
+                .map_err(|_| anyhow!("failed to lock stdin for EXPAND"))?;
             let mut buf = [0u8; super::io::CHUNK_SIZE];
             loop {
                 let n = guard.read(&mut buf)

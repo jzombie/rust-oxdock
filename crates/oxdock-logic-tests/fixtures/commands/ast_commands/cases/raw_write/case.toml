@@ -1,0 +1,4 @@
+name = "raw_write"
+
+[expect]
+stdout_contains = ["Hello, {{ env:NAME }}!"]
