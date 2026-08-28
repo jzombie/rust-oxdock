@@ -320,6 +320,7 @@ Files created inside a scope persist; only the working directory, workspace root
 | [`LS`](#ls) | `LS [<path>]` |
 | [`CWD`](#cwd) | `CWD` |
 | [`READ`](#read) | `READ [<path>]` |
+| [`REPLACE`](#replace) | `REPLACE [<path>] [<KEY=val> ...]` |
 | [`WRITE`](#write) | `WRITE <path> [<contents>]` |
 | [`APPEND`](#append) | `APPEND <path> <contents>` |
 | [`ASSERT_FILE`](#assert_file) | `ASSERT_FILE [--hash <sha256>] <path> [<expected>]` |
@@ -626,6 +627,34 @@ WRITE note.txt file-read-back
 READ note.txt
 ASSERT_STDOUT file-read-back
 ```
+
+### REPLACE
+
+Reads a template file (or stdin), expands `{{ env:KEY }}` placeholders using the script environment, and outputs the result to standard output. Explicit `KEY=val` arguments override environment variables.
+
+Like `READ`, `REPLACE` outputs to stdout — use `WITH_IO` to pipe the expanded result to `WRITE` or `APPEND`:
+
+```oxdock
+// Create a template file with placeholders.
+ENV GREETING=hello-world
+WRITE template.txt "Message: {{ env:GREETING }}"
+
+// Expand the template and pipe to a file.
+WITH_IO [stdout=pipe:expanded] REPLACE template.txt
+WITH_IO [stdin=pipe:expanded] WRITE output.txt
+ASSERT_FILE output.txt "Message: hello-world"
+```
+
+Use explicit overrides instead of `ENV`:
+
+```oxdock
+WRITE template.txt "Name: {{ env:NAME }}"
+WITH_IO [stdout=pipe:out] REPLACE template.txt NAME=custom-value
+WITH_IO [stdin=pipe:out] WRITE result.txt
+ASSERT_FILE result.txt "Name: custom-value"
+```
+
+Templates support the same `{{ env:KEY }}` syntax as all other commands. Unprefixed `{{ KEY }}` expands to empty. Keys without `env:` prefix only check explicit overrides, not the script environment.
 
 ### WRITE
 
