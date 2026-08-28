@@ -486,10 +486,11 @@ ASSERT_STDOUT printed-to-terminal
 
 Bare stream bindings expose the script's own stdin to the inner command:
 
-```oxdock stdin:streamed-through-stdin
-// stdin flows through untouched; the runner feeds it via fence metadata.
-WITH_IO [stdin] READ
-ASSERT_STDOUT streamed-through-stdin
+```oxdock
+RAW_WRITE input.txt "streamed-through-stdin"
+WITH_IO [stdout=pipe:data] READ input.txt
+WITH_IO [stdin=pipe:data] READ
+ASSERT_STDOUT "streamed-through-stdin"
 ```
 
 Pipes connect commands to each other; relaying into `WRITE` makes the handoff verifiable byte-for-byte:
@@ -636,6 +637,8 @@ Like `READ`, `EXPAND` outputs to stdout — use `WITH_IO` to pipe the expanded r
 
 Templates support the same `{{ env:KEY }}` syntax as all other commands. Unprefixed `{{ KEY }}` expands to empty. Keys without `env:` prefix only check explicit overrides, not the script environment.
 
+**File mode** — expand an existing template file:
+
 ```oxdock
 // Create a template file with literal {{ env:KEY }} tags (RAW_WRITE bypasses expansion)
 RAW_WRITE template.md "Hello, {{ env:NAME }}!"
@@ -645,15 +648,24 @@ EXPAND template.md NAME="Alice"
 ASSERT_STDOUT "Hello, Alice!"
 ```
 
+**Stdin mode** — omit the path to read from stdin instead of a file:
+
+```oxdock
+RAW_WRITE tmpl.txt "Hello, {{ env:NAME }}!"
+WITH_IO [stdout=pipe:raw_tmpl] READ tmpl.txt
+WITH_IO [stdin=pipe:raw_tmpl] EXPAND NAME="Bob"
+ASSERT_STDOUT "Hello, Bob!"
+```
+
 ### WRITE
 
 Writes contents to a file, **replacing** any existing contents (it does not append). Creates parent directories on demand. Without a contents argument it consumes the script's stdin instead (combine with `WITH_IO [stdin...]`):
 
-```oxdock stdin:stdin-captured-body
-// No contents argument: the body comes from the script's stdin,
-// which the runner feeds via the fence metadata above.
-WITH_IO [stdin] WRITE captured.txt
-ASSERT_FILE captured.txt stdin-captured-body
+```oxdock
+RAW_WRITE input.txt "captured body"
+WITH_IO [stdout=pipe:data] READ input.txt
+WITH_IO [stdin=pipe:data] WRITE captured.txt
+ASSERT_FILE captured.txt "captured body"
 ```
 
 ### APPEND
@@ -668,8 +680,10 @@ ASSERT_FILE dist/log.txt "build startedbuild finished"
 
 Without a contents argument it consumes stdin (combine with `WITH_IO [stdin...]`):
 
-```oxdock stdin:line-from-stdin
-WITH_IO [stdin] APPEND dist/stdin-log.txt
+```oxdock
+RAW_WRITE input.txt "line-from-stdin"
+WITH_IO [stdout=pipe:data] READ input.txt
+WITH_IO [stdin=pipe:data] APPEND dist/stdin-log.txt
 ```
 
 ### ASSERT_FILE
@@ -802,7 +816,6 @@ Snippets contain nothing but OxDock — copy any of them straight into an `Oxfil
 ```text
 ```oxdock                                    plain snippet, must parse and run clean
 ```oxdock env:KEY=value                      inject an environment value (visible to INHERIT_ENV/guards)
-```oxdock stdin:text                         feed the snippet's stdin
 ```oxdock roots:unified                      run with workspace root == build context (COPY/COPY_GIT demos)
 ```oxdock expect_error:"message substring"   snippet must fail with this text in its error
 ```
