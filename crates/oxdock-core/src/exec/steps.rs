@@ -227,10 +227,11 @@ fn reexpand_assert_windows<P: ProcessManager>(
     };
     for (idx, step) in steps.iter().enumerate() {
         if let StepKind::AssertStdout(needle) = &step.kind
-            && let Some(w) = windows.get_mut(&idx) {
-                let rendered = super::expand_template_string(needle, &ctx);
-                w.update_needle(rendered.into_bytes());
-            }
+            && let Some(w) = windows.get_mut(&idx)
+        {
+            let rendered = super::expand_template_string(needle, &ctx);
+            w.update_needle(rendered.into_bytes());
+        }
     }
     Ok(())
 }

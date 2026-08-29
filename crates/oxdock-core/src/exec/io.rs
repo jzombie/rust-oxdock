@@ -174,7 +174,10 @@ pub(crate) fn teed_stdout(
     sink: Option<SharedOutput>,
     windows: Arc<Mutex<HashMap<usize, SlidingWindow>>>,
 ) -> SharedOutput {
-    Arc::new(Mutex::new(TeeWriter { inner: sink, windows }))
+    Arc::new(Mutex::new(TeeWriter {
+        inner: sink,
+        windows,
+    }))
 }
 
 impl ExecIo {

@@ -615,7 +615,6 @@ pub(super) fn replace<P: ProcessManager>(
     path_opt: &Option<TemplateString>,
     overrides: &[(String, TemplateString)],
 ) -> Result<()> {
-
     let ctx = cx.state.command_ctx()?;
 
     // Resolve override values
@@ -631,18 +630,26 @@ pub(super) fn replace<P: ProcessManager>(
         if let Some(path) = path_opt {
             // Streaming file read
             let rendered = super::expand_template(path, &ctx);
-            let target = cx.state.fs.resolve_read(&cx.state.cwd, &rendered)
+            let target = cx
+                .state
+                .fs
+                .resolve_read(&cx.state.cwd, &rendered)
                 .with_context(|| format!("step {}: EXPAND {}", idx + 1, rendered))?;
-            let mut reader = cx.state.fs.open_read(&target)
+            let mut reader = cx
+                .state
+                .fs
+                .open_read(&target)
                 .with_context(|| format!("failed to open {}", target.display()))?;
             let mut buf = [0u8; super::io::CHUNK_SIZE];
             loop {
-                let n = reader.read(&mut buf)
+                let n = reader
+                    .read(&mut buf)
                     .with_context(|| format!("failed to read {}", target.display()))?;
-                if n == 0 { break; }
+                if n == 0 {
+                    break;
+                }
                 expander.process_bytes(&buf[..n], &mut out_buf)?;
-                w.write_all(&out_buf)
-                    .context("failed to write output")?;
+                w.write_all(&out_buf).context("failed to write output")?;
                 out_buf.clear();
             }
         } else {
@@ -654,16 +661,17 @@ pub(super) fn replace<P: ProcessManager>(
                     idx + 1
                 );
             };
-            let mut guard = input_stream.lock()
+            let mut guard = input_stream
+                .lock()
                 .map_err(|_| anyhow!("failed to lock stdin for EXPAND"))?;
             let mut buf = [0u8; super::io::CHUNK_SIZE];
             loop {
-                let n = guard.read(&mut buf)
-                    .context("failed to read from stdin")?;
-                if n == 0 { break; }
+                let n = guard.read(&mut buf).context("failed to read from stdin")?;
+                if n == 0 {
+                    break;
+                }
                 expander.process_bytes(&buf[..n], &mut out_buf)?;
-                w.write_all(&out_buf)
-                    .context("failed to write output")?;
+                w.write_all(&out_buf).context("failed to write output")?;
                 out_buf.clear();
             }
         }
@@ -671,8 +679,7 @@ pub(super) fn replace<P: ProcessManager>(
         // Flush remaining buffer (incomplete placeholders → literals)
         expander.flush(&mut out_buf)?;
         if !out_buf.is_empty() {
-            w.write_all(&out_buf)
-                .context("failed to write output")?;
+            w.write_all(&out_buf).context("failed to write output")?;
             out_buf.clear();
         }
 
@@ -786,7 +793,6 @@ pub(super) fn assert_stdout<P: ProcessManager>(
     idx: usize,
     needle: &TemplateString,
 ) -> Result<()> {
-
     let ctx = cx.state.command_ctx()?;
     let rendered = super::expand_template(needle, &ctx);
 

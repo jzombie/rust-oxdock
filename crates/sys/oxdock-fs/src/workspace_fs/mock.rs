@@ -225,7 +225,10 @@ impl WorkspaceFs for MockFs {
     fn open_write(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write>> {
         let rel = self.relative_path(path);
         // Create an empty file first
-        self.state.borrow_mut().files.insert(rel.clone(), Vec::new());
+        self.state
+            .borrow_mut()
+            .files
+            .insert(rel.clone(), Vec::new());
         // Return a cursor that will be flushed on drop
         let state = self.state.clone();
         Ok(Box::new(MockWriteCursor { state, rel }))

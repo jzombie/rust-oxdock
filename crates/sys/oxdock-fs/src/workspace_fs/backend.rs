@@ -130,7 +130,6 @@ impl BackendImpl for HostBackend {
                 .with_context(|| format!("creating dir {}", parent.display()))?;
         }
         let file = fs::OpenOptions::new()
-            
             .create(true)
             .append(true)
             .open(path.as_path())
@@ -388,11 +387,7 @@ mod miri_backend {
                 .unwrap_or_default();
             let mut cursor = std::io::Cursor::new(existing);
             cursor.set_position(cursor.get_ref().len() as u64); // Seek to end
-            Ok(Box::new(MiriWriteCursor {
-                state,
-                rel,
-                cursor,
-            }))
+            Ok(Box::new(MiriWriteCursor { state, rel, cursor }))
         }
 
         fn canonicalize(&self, path: GuardedPath) -> Result<GuardedPath> {
