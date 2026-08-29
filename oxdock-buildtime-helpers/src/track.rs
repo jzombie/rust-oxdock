@@ -233,6 +233,15 @@ pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
                 template_keys(&mut keys, to);
             }
             StepKind::HashSha256 { path } => template_keys(&mut keys, path),
+            StepKind::For { body, .. } => {
+                // Recursively collect env references from the loop body
+                for k in collect_env_references(body) {
+                    keys.insert(k);
+                }
+            }
+            StepKind::Assign { .. } => {
+                // LET assignments don't contain template strings that reference env vars
+            }
         }
     }
 

@@ -30,6 +30,8 @@ WithIo = ["with_io"]
 CopyGit = ["copy_git"]
 HashSha256 = ["hash_sha256"]
 Exit = ["exit"]
+Assign = ["assign"]
+For = ["for_loop"]
 
 [extras]
 cases = [

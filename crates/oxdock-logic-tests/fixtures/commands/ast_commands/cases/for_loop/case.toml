@@ -1,0 +1,4 @@
+name = "for_loop"
+
+[expect]
+files = { "a.txt" = "a", "b.txt" = "b", "c.txt" = "c" }

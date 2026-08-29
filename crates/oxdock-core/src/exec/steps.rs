@@ -49,7 +49,7 @@ pub(super) fn execute_steps<P: ProcessManager>(
         };
         for (idx, step) in steps.iter().enumerate() {
             if let StepKind::AssertStdout(needle) = &step.kind {
-                let rendered = super::expand_template_string(needle, &ctx);
+                let rendered = super::expand_template_no_vars(needle, &ctx);
                 windows.insert(idx, SlidingWindow::new(rendered.into_bytes()));
             }
         }
@@ -140,6 +140,12 @@ pub(super) fn execute_steps<P: ProcessManager>(
                     bail!("WITH_IO block should have been expanded during parsing")
                 }
                 StepKind::Exit(code) => handlers::exit(&mut cx, *code),
+                StepKind::For {
+                    var,
+                    in_expr,
+                    body,
+                } => handlers::for_loop(&mut cx, var, in_expr, body),
+                StepKind::Assign { var, expr } => handlers::assign(&mut cx, var, expr),
             }
         };
 
@@ -220,7 +226,6 @@ fn reexpand_assert_windows<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     steps: &[Step],
 ) -> Result<()> {
-    let ctx = cx.state.command_ctx()?;
     let mut windows = match cx.state.assert_windows.lock() {
         Ok(guard) => guard,
         Err(_) => bail!("assert_windows poisoned"),
@@ -229,7 +234,7 @@ fn reexpand_assert_windows<P: ProcessManager>(
         if let StepKind::AssertStdout(needle) = &step.kind
             && let Some(w) = windows.get_mut(&idx)
         {
-            let rendered = super::expand_template_string(needle, &ctx);
+            let rendered = super::expand_template(needle, cx);
             w.update_needle(rendered.into_bytes());
         }
     }

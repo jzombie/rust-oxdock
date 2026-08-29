@@ -305,6 +305,21 @@ pub struct IoBinding {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
+pub enum Value {
+    String(String),
+    List(Vec<String>),
+    Bool(bool),
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum Expr {
+    Literal(Value),
+    Var(String),
+    List(Vec<Expr>),
+    Call { name: String, args: Vec<Expr> },
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub enum StepKind {
     Workdir(TemplateString),
     Workspace(WorkspaceTarget),
@@ -384,6 +399,15 @@ pub enum StepKind {
         path: TemplateString,
     },
     Exit(i32),
+    For {
+        var: String,
+        in_expr: Expr,
+        body: Vec<Step>,
+    },
+    Assign {
+        var: String,
+        expr: Expr,
+    },
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -709,6 +733,68 @@ impl fmt::Display for StepKind {
             }
             StepKind::HashSha256 { path } => write!(f, "HASH_SHA256 {}", quote_arg(path)),
             StepKind::Exit(code) => write!(f, "EXIT {}", code),
+            StepKind::For {
+                var,
+                in_expr,
+                body,
+            } => {
+                write!(f, "FOR ${} IN {} {{", var, in_expr)?;
+                for step in body {
+                    write!(f, "\n    {}", step)?;
+                }
+                write!(f, "\n}}")
+            }
+            StepKind::Assign { var, expr } => {
+                write!(f, "LET ${} = {}", var, expr)
+            }
+        }
+    }
+}
+
+impl fmt::Display for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Value::String(s) => write!(f, "\"{}\"", s),
+            Value::List(items) => {
+                write!(f, "[")?;
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "\"{}\"", item)?;
+                }
+                write!(f, "]")
+            }
+            Value::Bool(b) => write!(f, "{}", b),
+        }
+    }
+}
+
+impl fmt::Display for Expr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Expr::Literal(v) => write!(f, "{}", v),
+            Expr::Var(name) => write!(f, "${}", name),
+            Expr::Call { name, args } => {
+                write!(f, "{}(", name)?;
+                for (i, arg) in args.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", arg)?;
+                }
+                write!(f, ")")
+            }
+            Expr::List(items) => {
+                write!(f, "[")?;
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", item)?;
+                }
+                write!(f, "]")
+            }
         }
     }
 }

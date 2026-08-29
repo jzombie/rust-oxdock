@@ -3,6 +3,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use oxdock_fs::{GuardedPath, WorkspaceFs};
+use oxdock_parser::Value;
 use oxdock_process::{CommandContext, ProcessManager};
 
 use super::io::{ExecIo, SlidingWindow};
@@ -18,6 +19,9 @@ pub(super) struct ExecState<P: ProcessManager> {
     /// Pre-registered SlidingWindow observers for ASSERT_STDOUT steps.
     /// Keyed by step index. TeeWriter pushes every chunk to all windows.
     pub(super) assert_windows: Arc<Mutex<HashMap<usize, SlidingWindow>>>,
+    /// Variable scopes for $variable bindings (FOR loops, LET assignments).
+    /// Innermost scope is last. Variables are looked up from innermost to outermost.
+    pub(super) var_scopes: Vec<HashMap<String, Value>>,
 }
 
 pub(super) struct ScopeSnapshot {
@@ -39,5 +43,29 @@ impl<P: ProcessManager> ExecState<P> {
             self.fs.root(),
             self.fs.build_context(),
         ))
+    }
+
+    pub(super) fn push_var_scope(&mut self) {
+        self.var_scopes.push(HashMap::new());
+    }
+
+    pub(super) fn pop_var_scope(&mut self) {
+        self.var_scopes.pop();
+    }
+
+    pub(super) fn set_var(&mut self, key: String, value: Value) {
+        if let Some(scope) = self.var_scopes.last_mut() {
+            scope.insert(key, value);
+        }
+    }
+
+    pub(super) fn get_var(&self, key: &str) -> Option<Value> {
+        // Walk scopes from innermost to outermost
+        for scope in self.var_scopes.iter().rev() {
+            if let Some(value) = scope.get(key) {
+                return Some(value.clone());
+            }
+        }
+        None
     }
 }

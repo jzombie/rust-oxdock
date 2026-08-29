@@ -41,7 +41,9 @@ pub fn assemble_readme(repo_root: &Path, output: Option<&Path>) -> Result<()> {
         }
     }
 
-    let out_path_buf = output.map(|p| p.to_path_buf()).unwrap_or_else(|| repo_root.join("README.md"));
+    let out_path_buf = output
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| repo_root.join("README.md"));
     let out_path = out_path_buf.as_path();
     if let Some(parent) = out_path.parent() {
         std::fs::create_dir_all(parent)?;

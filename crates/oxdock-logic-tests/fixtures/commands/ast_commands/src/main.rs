@@ -1106,5 +1106,7 @@ fn step_kind_name(kind: &StepKind) -> &'static str {
         StepKind::WithIo { .. } => "WithIo",
         StepKind::WithIoBlock { .. } => "WithIoBlock",
         StepKind::Expand { .. } => "Expand",
+        StepKind::For { .. } => "For",
+        StepKind::Assign { .. } => "Assign",
     }
 }

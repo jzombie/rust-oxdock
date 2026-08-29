@@ -518,4 +518,98 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn let_assign_with_bare_word() {
+        let script = r#"LET $x = hello"#;
+        let steps = match parse_script(script) {
+            Ok(s) => s,
+            Err(e) => panic!("parse failed: {e}"),
+        };
+        assert_eq!(steps.len(), 1);
+        match &steps[0].kind {
+            StepKind::Assign { var, expr } => {
+                assert_eq!(var, "x");
+                assert_eq!(expr, &Expr::Literal(Value::String("hello".to_string())));
+            }
+            other => panic!("expected Assign, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn let_assign_with_quoted_string() {
+        let script = r#"LET $x = "hello world""#;
+        let steps = parse_script(script).expect("parse ok");
+        assert_eq!(steps.len(), 1);
+        match &steps[0].kind {
+            StepKind::Assign { var, expr } => {
+                assert_eq!(var, "x");
+                assert_eq!(expr, &Expr::Literal(Value::String("hello world".to_string())));
+            }
+            other => panic!("expected Assign, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn let_assign_with_list_literal() {
+        let script = r#"LET $x = ["a", "b", "c"]"#;
+        let steps = parse_script(script).expect("parse ok");
+        assert_eq!(steps.len(), 1);
+        match &steps[0].kind {
+            StepKind::Assign { var, expr } => {
+                assert_eq!(var, "x");
+                assert_eq!(
+                    expr,
+                    &Expr::List(vec![
+                        Expr::Literal(Value::String("a".to_string())),
+                        Expr::Literal(Value::String("b".to_string())),
+                        Expr::Literal(Value::String("c".to_string()))
+                    ])
+                );
+            }
+            other => panic!("expected Assign, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn let_assign_with_variable_ref() {
+        let script = r#"LET $x = $y"#;
+        let steps = parse_script(script).expect("parse ok");
+        assert_eq!(steps.len(), 1);
+        match &steps[0].kind {
+            StepKind::Assign { var, expr } => {
+                assert_eq!(var, "x");
+                assert_eq!(expr, &Expr::Var("y".to_string()));
+            }
+            other => panic!("expected Assign, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn for_loop_parses() {
+        let script = indoc! {r#"
+            FOR $f IN ["x", "y"] {
+                ECHO $f
+            }
+        "#};
+        let steps = match parse_script(script) {
+            Ok(s) => s,
+            Err(e) => panic!("parse failed: {e}"),
+        };
+        assert_eq!(steps.len(), 1, "expected 1 step, got {}: {:?}", steps.len(), steps.iter().map(|s| &s.kind).collect::<Vec<_>>());
+        match &steps[0].kind {
+            StepKind::For { var, in_expr, body } => {
+                assert_eq!(var, "f");
+                assert_eq!(
+                    in_expr,
+                    &Expr::List(vec![
+                        Expr::Literal(Value::String("x".to_string())),
+                        Expr::Literal(Value::String("y".to_string()))
+                    ])
+                );
+                assert_eq!(body.len(), 1, "expected 1 body step, got {}: {:?}", body.len(), body.iter().map(|s| &s.kind).collect::<Vec<_>>());
+            }
+            other => panic!("expected For, got {:?}", other),
+        }
+    }
 }

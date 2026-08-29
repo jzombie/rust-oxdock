@@ -16,6 +16,7 @@ build = []
 
 [dependencies]
 anyhow.workspace = true
+glob.workspace = true
 oxdock-fs.workspace = true
 oxdock-parser.workspace = true
 oxdock-process.workspace = true

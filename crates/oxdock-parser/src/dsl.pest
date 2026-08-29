@@ -9,78 +9,88 @@ hash_comment = _{ WHITESPACE* ~ "#" ~ (!linebreak ~ ANY)* }
 
 script = { SOI ~ element* ~ EOI }
 
-element = _{ blank | hash_comment | semicolon | guard_line | block_start | block_end | command }
+// Structural statements MUST precede generic commands
+element = _{ blank | hash_comment | semicolon | guard_line | block_start | block_end | for_statement | let_statement | command }
+
+// Inside for/let blocks, block_start/block_end must NOT appear as elements
+// (the block's own braces handle them).  Nested guard blocks use guard_block.
+block_element = _{ blank | hash_comment | semicolon | guard_block | guard_line | for_statement | let_statement | command }
+guard_block = { guard_line ~ block }
 
 blank = _{ linebreak+ }
-
-semicolon = _{ ";" }
 
 block_start = { "{" }
 
 block_end = { "}" }
 
+semicolon = _{ ";" }
+
 guard_line = { "[" ~ ws? ~ guard_expr ~ ws? ~ "]" }
 
 guard_expr = { guard_seq }
-
 guard_seq = { guard_factor ~ ( ws? ~ "," ~ ws? ~ guard_factor )* }
-
 guard_factor = { guard_not }
-
 guard_not = { (invert ~ ws?)* ~ guard_primary }
-
 guard_primary = _{ guard_group | guard_or_call | guard_term }
-
 guard_group = { "(" ~ ws? ~ guard_expr ~ ws? ~ ")" }
-
 guard_or_call = { or_kw ~ "(" ~ ws? ~ guard_expr_list ~ ws? ~ ")" }
-
 or_kw = _{ "or" }
-
 guard_expr_list = { guard_expr ~ ( ws? ~ "," ~ ws? ~ guard_expr )* }
-
 guard_term = { ws? ~ guard_predicate ~ ws? }
-
 invert = { "!" }
-
 guard_predicate = _{ env_guard | bare_platform }
-
 env_guard = { env_prefix ~ ws? ~ env_key ~ env_comparison? }
-
 env_prefix = { "env" ~ ":" }
-
 env_key = @{ guard_key_char+ }
-
 guard_key_char = _{ !( ":" | "=" | "!" | "," | "|" | ")" | "]" | linebreak | "//" | "/*" ) ~ ANY }
-
 env_comparison = { not_equals_env | equals_env }
-
 equals_env = { eq_op ~ env_value }
-
 not_equals_env = { neq_op ~ env_value }
-
 env_value = @{ guard_value_char+ }
-
 guard_value_char = _{ !( "," | "|" | ")" | "]" | linebreak | "//" | "/*" ) ~ ANY }
-
-
 eq_op = { "==" }
-
 neq_op = { "!=" }
-
 bare_platform = { platform_tag }
-
 platform_tag = @{ ASCII_ALPHANUMERIC+ }
 
+// Identifiers
+ident_char = _{ ASCII_ALPHANUMERIC | "_" }
+ident = @{ ident_char+ }
+dollar_ident = @{ "$" ~ ident_char+ }
+
+// Expressions
+quoted_string = @{
+    "\"" ~ ( "\\\"" | (!"\"" ~ ANY) )* ~ "\"" |
+    "'" ~ ( "\\'" | (!"'" ~ ANY) )* ~ "'"
+}
+bare_word = @{ (ASCII_ALPHANUMERIC | "_" | "-" | "." | "/")+ }
+func_call = { ident ~ "(" ~ (expr ~ ("," ~ expr)*)? ~ ")" }
+variable = { "$" ~ ident }
+list_literal = { "[" ~ (expr ~ ("," ~ expr)*)? ~ "]" }
+string_literal = { quoted_string }
+expr = { func_call | variable | list_literal | string_literal | bare_word }
+
+// Block
+block = { "{" ~ block_element* ~ "}" }
+
+// Control flow & Assignment
+let_keyword = @{ "LET" ~ !ASCII_ALPHANUMERIC }
+for_keyword = @{ "FOR" ~ !ASCII_ALPHANUMERIC }
+in_keyword = @{ "IN" ~ !ASCII_ALPHANUMERIC }
+
+for_statement = { for_keyword ~ dollar_ident ~ in_keyword ~ expr ~ block }
+let_statement = { let_keyword ~ dollar_ident ~ "=" ~ expr }
+
+// Commands
 command = _{
     inherit_env_command |
     workdir_command |
     workspace_command |
     env_command |
     echo_command |
-    run_bg_command | // Must come before run_command to avoid prefix match
+    run_bg_command |
     run_command |
-    copy_git_command | // Must come before copy_command
+    copy_git_command |
     copy_command |
     with_io_command |
     hash_sha256_command |
@@ -99,7 +109,7 @@ command = _{
     assert_stdout_command |
     exit_command
 }
-// Commands
+
 workdir_command = ${ "WORKDIR" ~ sep ~ argument }
 workspace_command = ${ "WORKSPACE" ~ sep ~ workspace_target }
 env_command = ${ "ENV" ~ sep ~ env_pair }
@@ -119,16 +129,10 @@ read_command = ${ "READ" ~ (sep ~ argument)? }
 write_command = ${ "WRITE" ~ sep ~ argument ~ (sep ~ message)? }
 raw_write_command = ${ "RAW_WRITE" ~ sep ~ argument ~ sep ~ message }
 append_command = ${ "APPEND" ~ sep ~ argument ~ (sep ~ message)? }
-
-// EXPAND command: reads file or stdin, expands {{ env:KEY }} placeholders, outputs to stdout
-// Optional KEY=val overrides (key_value) follow the path argument
 expand_command = ${ "EXPAND" ~ (sep ~ (key_value | argument) ~ (sep ~ key_value)*)? }
 key_value = ${ kv_key ~ "=" ~ argument }
 kv_key = @{ (!"=" ~ !WHITESPACE ~ !linebreak ~ ANY)+ }
 
-// Verification commands. ASSERT_FILE alternates on explicit forms so the
-// --hash digest can never be captured into the path slot, and a missing or
-// malformed digest after --hash is a loud parse error rather than a silent skip.
 assert_file_command = _{ assert_file_hash_command | assert_file_content_command }
 assert_file_hash_command = ${ "ASSERT_FILE" ~ sep ~ "--hash" ~ sep ~ hash_digest ~ sep ~ argument }
 assert_file_content_command = ${ "ASSERT_FILE" ~ sep ~ !hash_flag ~ argument ~ (sep ~ message)? }
@@ -140,13 +144,9 @@ hash_digest = @{ ASCII_HEX_DIGIT{64} }
 
 exit_command = ${ "EXIT" ~ sep ~ exit_code }
 
-// Inherit environment variables (selective list only). Placed here so it's available
-// as a top-level command in the prelude. NOTE: `ALL` form is intentionally omitted.
 inherit_env_command = ${ "INHERIT_ENV" ~ sep ~ inherit_list }
-
 inherit_list = { "[" ~ ws? ~ env_key ~ (ws? ~ "," ~ ws? ~ env_key)* ~ ws? ~ "]" }
 
-// Arguments
 sep = _{ WHITESPACE+ }
 argument = { quoted_string | templated_arg | unquoted_arg }
 templated_arg = @{ "{{" ~ (!"}}" ~ ANY)* ~ "}}" }
@@ -171,10 +171,5 @@ run_args = { (quoted_string | unquoted_run_content)+ }
 unquoted_run_content = { !(linebreak | "//" | "/*" | ";") ~ ANY }
 
 exit_code = @{ ASCII_DIGIT+ }
-
-quoted_string = @{
-    "\"" ~ ( "\\\"" | (!"\"" ~ ANY) )* ~ "\"" |
-    "'" ~ ( "\\'" | (!"'" ~ ANY) )* ~ "'"
-}
 
 ws = _{ (WHITESPACE | linebreak)* }

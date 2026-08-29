@@ -674,9 +674,135 @@ fn parse_command(pair: Pair<Rule>) -> Result<StepKind> {
             let code = parse_exit_code(pair)?;
             StepKind::Exit(code)
         }
+        Rule::for_statement => parse_for_statement_from_pair(pair)?,
+        Rule::let_statement => parse_let_statement_from_pair(pair)?,
         _ => bail!("unknown command rule: {:?}", pair.as_rule()),
     };
     Ok(kind)
+}
+
+fn parse_for_statement_from_pair(pair: Pair<Rule>) -> Result<StepKind> {
+    let mut var = None;
+    let mut in_expr = None;
+    let mut body_steps = Vec::new();
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::dollar_ident => {
+                var = Some(parse_dollar_ident(inner));
+            }
+            Rule::expr => {
+                in_expr = Some(parse_expr(inner)?);
+            }
+            Rule::block => {
+                body_steps = parse_block_elements(inner)?;
+            }
+            _ => {}
+        }
+    }
+    Ok(StepKind::For {
+        var: var.ok_or_else(|| anyhow!("FOR requires a variable"))?,
+        in_expr: in_expr.ok_or_else(|| anyhow!("FOR requires an iterable expression"))?,
+        body: body_steps,
+    })
+}
+
+fn parse_let_statement_from_pair(pair: Pair<Rule>) -> Result<StepKind> {
+    let mut var = None;
+    let mut expr = None;
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::dollar_ident => {
+                var = Some(parse_dollar_ident(inner));
+            }
+            Rule::expr => {
+                expr = Some(parse_expr(inner)?);
+            }
+            _ => {}
+        }
+    }
+    Ok(StepKind::Assign {
+        var: var.ok_or_else(|| anyhow!("LET requires a variable"))?,
+        expr: expr.ok_or_else(|| anyhow!("LET requires an expression"))?,
+    })
+}
+
+fn parse_block_elements(block_pair: Pair<Rule>) -> Result<Vec<Step>> {
+    let mut steps = Vec::new();
+    for elem in block_pair.into_inner() {
+        match elem.as_rule() {
+            Rule::for_statement | Rule::let_statement => {
+                let step_kind = parse_command(elem)?;
+                steps.push(Step {
+                    guard: None,
+                    kind: step_kind,
+                    scope_enter: 0,
+                    scope_exit: 0,
+                });
+            }
+            Rule::guard_block => {
+                let mut guard_pair = None;
+                let mut inner_block = None;
+                for inner in elem.into_inner() {
+                    match inner.as_rule() {
+                        Rule::guard_line => guard_pair = Some(inner),
+                        Rule::block => inner_block = Some(inner),
+                        _ => {}
+                    }
+                }
+                if let (Some(gp), Some(bp)) = (guard_pair, inner_block) {
+                    let guard_expr = parse_guard_line(gp)?;
+                    let mut inner_steps = parse_block_elements(bp)?;
+                    for step in &mut inner_steps {
+                        step.guard = Some(guard_expr.clone());
+                    }
+                    steps.extend(inner_steps);
+                }
+            }
+            _ if is_command_rule(elem.as_rule()) => {
+                let step_kind = parse_command(elem)?;
+                steps.push(Step {
+                    guard: None,
+                    kind: step_kind,
+                    scope_enter: 0,
+                    scope_exit: 0,
+                });
+            }
+            _ => {} // blank, hash_comment, semicolon, block_start, block_end, etc.
+        }
+    }
+    Ok(steps)
+}
+
+fn is_command_rule(rule: Rule) -> bool {
+    matches!(
+        rule,
+        Rule::workdir_command
+            | Rule::workspace_command
+            | Rule::env_command
+            | Rule::echo_command
+            | Rule::run_command
+            | Rule::run_bg_command
+            | Rule::copy_command
+            | Rule::with_io_command
+            | Rule::copy_git_command
+            | Rule::hash_sha256_command
+            | Rule::inherit_env_command
+            | Rule::symlink_command
+            | Rule::mkdir_command
+            | Rule::ls_command
+            | Rule::cwd_command
+            | Rule::read_command
+            | Rule::write_command
+            | Rule::raw_write_command
+            | Rule::append_command
+            | Rule::expand_command
+            | Rule::assert_file_hash_command
+            | Rule::assert_file_content_command
+            | Rule::assert_dir_command
+            | Rule::assert_absent_command
+            | Rule::assert_stdout_command
+            | Rule::exit_command
+    )
 }
 
 fn parse_assert_file_hash(pair: Pair<Rule>) -> Result<StepKind> {
@@ -1186,4 +1312,64 @@ fn parse_platform_tag(tag: &str, invert: bool) -> Result<Guard> {
         _ => bail!("unknown platform '{}'", tag),
     };
     Ok(Guard::Platform { target, invert })
+}
+
+fn parse_dollar_ident(pair: Pair<Rule>) -> String {
+    // Strip the leading '$' from the identifier
+    let s = pair.as_str();
+    s.strip_prefix('$').unwrap_or(s).to_string()
+}
+
+use crate::ast::{Expr, Value};
+
+fn parse_expr(pair: Pair<Rule>) -> Result<Expr> {
+    let inner = pair.into_inner().next().unwrap();
+    match inner.as_rule() {
+        Rule::func_call => parse_func_call(inner),
+        Rule::variable => {
+            let name = inner.as_str();
+            let name = name.strip_prefix('$').unwrap_or(name).to_string();
+            Ok(Expr::Var(name))
+        }
+        Rule::list_literal => parse_list_literal(inner),
+        Rule::string_literal | Rule::quoted_string => {
+            let s = parse_quoted_string(inner)?;
+            Ok(Expr::Literal(Value::String(s)))
+        }
+        Rule::bare_word => {
+            let s = inner.as_str().to_string();
+            Ok(Expr::Literal(Value::String(s)))
+        }
+        _ => bail!("unexpected expression rule: {:?}", inner.as_rule()),
+    }
+}
+
+fn parse_func_call(pair: Pair<Rule>) -> Result<Expr> {
+    let mut name = None;
+    let mut args = Vec::new();
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::ident => {
+                name = Some(inner.as_str().to_string());
+            }
+            Rule::expr => {
+                args.push(parse_expr(inner)?);
+            }
+            _ => {}
+        }
+    }
+    Ok(Expr::Call {
+        name: name.ok_or_else(|| anyhow!("function call requires a name"))?,
+        args,
+    })
+}
+
+fn parse_list_literal(pair: Pair<Rule>) -> Result<Expr> {
+    let mut items = Vec::new();
+    for inner in pair.into_inner() {
+        if inner.as_rule() == Rule::expr {
+            items.push(parse_expr(inner)?);
+        }
+    }
+    Ok(Expr::List(items))
 }

@@ -1,0 +1,2 @@
+LET $msg = hello
+WRITE out.txt $msg

@@ -21,15 +21,26 @@ use std::sync::Arc;
 use self::fs_ops::describe_dir;
 use self::io::{StreamHandle, assemble_default_io, teed_stdout};
 use self::state::ExecState;
-use self::steps::execute_steps;
+use self::steps::{StepCtx, execute_steps};
 
-fn expand_template(t: &TemplateString, ctx: &CommandContext) -> String {
+/// Resolve `$variable` references in a `TemplateString`, then expand template
+/// expressions. This is the single entry point that all command handlers should
+/// use so that `$variable` interpolation works uniformly across the DSL.
+fn expand_template<P: ProcessManager>(
+    t: &TemplateString,
+    cx: &StepCtx<'_, P>,
+) -> String {
+    let resolved = handlers::resolve_dollar_vars(&t.0, cx.state);
+    let ctx = cx.state.command_ctx().unwrap();
     let expander = oxdock_process::StreamingExpand::new(&[], ctx.envs());
-    expander.expand_string(&t.0).unwrap_or_default()
+    expander.expand_string(&resolved).unwrap_or_default()
 }
 
-pub(crate) fn expand_template_string(t: &TemplateString, ctx: &CommandContext) -> String {
-    expand_template(t, ctx)
+/// Variant for contexts where only a `CommandContext` is available (e.g.
+/// assertion needle pre-expansion). No `$variable` resolution is performed.
+fn expand_template_no_vars(t: &TemplateString, ctx: &CommandContext) -> String {
+    let expander = oxdock_process::StreamingExpand::new(&[], ctx.envs());
+    expander.expand_string(&t.0).unwrap_or_default()
 }
 
 pub fn run_steps(fs_root: &GuardedPath, steps: &[Step]) -> Result<()> {
@@ -150,7 +161,11 @@ fn run_steps_with_manager<P: ProcessManager>(
         scope_stack: Vec::new(),
         io,
         assert_windows: assert_windows.clone(),
+        var_scopes: Vec::new(),
     };
+
+    // Push a global variable scope so top-level LET assignments are captured.
+    state.push_var_scope();
 
     let _default_stdout = std::io::stdout();
     let stdin = state.io.stdin();

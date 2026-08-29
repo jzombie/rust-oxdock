@@ -1,0 +1,4 @@
+name = "assign"
+
+[expect]
+files = { "out.txt" = "hello" }
