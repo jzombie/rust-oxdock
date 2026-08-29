@@ -12,7 +12,7 @@ pub fn generate(output: &Path) -> Result<()> {
 }
 
 fn generate_table() -> String {
-    let mut out = String::from("| Command | Syntax |\n| --- | --- |\n");
+    let mut out = String::from("## Command Reference\n\n| Command | Syntax |\n| --- | --- |\n");
     for cmd in COMMANDS {
         let keyword = cmd.as_str();
         let syntax = cmd.syntax();

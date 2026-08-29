@@ -1,3 +1,5 @@
+## Command Reference
+
 | Command | Syntax |
 | --- | --- |
 | [`INHERIT_ENV`](#inherit_env) | `INHERIT_ENV [KEY1, KEY2, ...]` |

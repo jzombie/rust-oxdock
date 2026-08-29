@@ -300,6 +300,8 @@ ASSERT_FILE outer.txt written-after-scope-restored
 
 Files created inside a scope persist; only the working directory, workspace root, and environment revert.
 
+## Command Reference
+
 | Command | Syntax |
 | --- | --- |
 | [`INHERIT_ENV`](#inherit_env) | `INHERIT_ENV [KEY1, KEY2, ...]` |
