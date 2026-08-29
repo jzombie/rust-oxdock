@@ -1,4 +1,3 @@
-
 ## Variants
 
 OxDock comes in two variants, each of which are independent of the other, but share the same core:
