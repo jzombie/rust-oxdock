@@ -2,6 +2,13 @@ use anyhow::{Context, Result};
 use line_ending::LineEnding;
 use std::path::{Path, PathBuf};
 
+// TODO: Replace w/ Oxfile syntax:
+// LET $sections = GLOB("docs/sections/*.md")
+// FOR $f IN $sections {
+//    READ "$f"
+//     APPEND "README.md" "\n\n"
+// }
+
 pub fn assemble_readme(repo_root: &Path, output: Option<&Path>) -> Result<()> {
     let sections_dir = repo_root.join("docs/sections");
     let mut entries: Vec<PathBuf> = std::fs::read_dir(&sections_dir)
