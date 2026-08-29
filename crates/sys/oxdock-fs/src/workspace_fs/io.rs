@@ -40,6 +40,33 @@ impl PathResolver {
         self.backend.read_file(&guarded)
     }
 
+    #[allow(clippy::disallowed_methods)]
+    pub fn open_read(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Read>> {
+        let guarded = self
+            .check_access(path.as_path(), AccessMode::Read)
+            .or_else(|_| {
+                self.check_access_with_root(&self.build_context, path.as_path(), AccessMode::Read)
+            })
+            .with_context(|| format!("open_read denied for {}", path.display()))?;
+        self.backend.open_read(&guarded)
+    }
+
+    #[allow(clippy::disallowed_methods)]
+    pub fn open_write(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write>> {
+        let guarded = self
+            .check_access(path.as_path(), AccessMode::Write)
+            .with_context(|| format!("open_write denied for {}", path.display()))?;
+        self.backend.open_write(&guarded)
+    }
+
+    #[allow(clippy::disallowed_methods)]
+    pub fn open_append(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write>> {
+        let guarded = self
+            .check_access(path.as_path(), AccessMode::Write)
+            .with_context(|| format!("open_append denied for {}", path.display()))?;
+        self.backend.open_append(&guarded)
+    }
+
     #[cfg(not(miri))]
     #[allow(clippy::disallowed_methods)]
     pub fn read_to_string(&self, path: &GuardedPath) -> Result<String> {

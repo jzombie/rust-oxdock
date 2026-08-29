@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 
@@ -6,6 +6,76 @@ use anyhow::Result;
 use oxdock_process::{CommandStderr, CommandStdout, SharedInput, SharedOutput};
 
 use super::pipe::{PipeEndpoint, PipeOutputs, ScriptPipe};
+
+/// Standard chunk size for all I/O handlers.
+pub const CHUNK_SIZE: usize = 8192;
+
+/// Minimum ring buffer capacity. Actual capacity scales with needle length.
+const MIN_RING_CAPACITY: usize = 1024;
+
+/// Sliding window for streaming pattern matching in ASSERT_STDOUT.
+/// Maintains a ring buffer and detects matches inline as chunks pass through.
+pub(crate) struct SlidingWindow {
+    pub(crate) needle: Vec<u8>,
+    ring: VecDeque<u8>,
+    pub matched: bool,
+}
+
+impl SlidingWindow {
+    pub fn new(needle: Vec<u8>) -> Self {
+        Self {
+            ring: VecDeque::with_capacity(needle.len().max(MIN_RING_CAPACITY)),
+            needle,
+            matched: false,
+        }
+    }
+
+    pub fn push_chunk(&mut self, chunk: &[u8]) {
+        if self.matched {
+            return;
+        }
+        // Eviction limit scales with needle length, never below MIN_RING_CAPACITY
+        let limit = self.needle.len().max(MIN_RING_CAPACITY);
+        for &byte in chunk {
+            self.ring.push_back(byte);
+            if self.ring.len() > limit {
+                self.ring.pop_front();
+            }
+            self.check_match();
+        }
+    }
+
+    /// Replace needle without discarding ring history.
+    /// Re-evaluates current ring against updated needle.
+    pub fn update_needle(&mut self, new_needle: Vec<u8>) {
+        if self.matched {
+            return;
+        }
+        self.needle = new_needle;
+        self.check_match();
+    }
+
+    fn check_match(&mut self) {
+        if self.matched || self.ring.len() < self.needle.len() {
+            return;
+        }
+        let start = self.ring.len() - self.needle.len();
+        if self
+            .ring
+            .iter()
+            .skip(start)
+            .zip(self.needle.iter())
+            .all(|(a, b)| a == b)
+        {
+            self.matched = true;
+        }
+    }
+
+    /// Return the ring buffer contents for debugging.
+    pub fn ring_buffer(&self) -> Vec<u8> {
+        self.ring.iter().copied().collect()
+    }
+}
 
 #[derive(Clone, Default)]
 pub struct ExecIo {
@@ -56,16 +126,17 @@ where
 }
 
 /// Wraps the configured stdout sink so every byte written to it is also
-/// appended to `ExecState::stdout_log` for `ASSERT_STDOUT`. When no sink is
-/// configured (`inner` is `None`) bytes are forwarded to real stdout so
-/// interactive CLI output still reaches the terminal.
+/// pushed to all registered SlidingWindow observers for `ASSERT_STDOUT`.
+/// When no sink is configured (`inner` is `None`) bytes are forwarded to
+/// real stdout so interactive CLI output still reaches the terminal.
 struct TeeWriter {
     inner: Option<SharedOutput>,
-    log: Arc<Mutex<Vec<u8>>>,
+    windows: Arc<Mutex<HashMap<usize, SlidingWindow>>>,
 }
 
 impl Write for TeeWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        // Forward to downstream (streaming)
         match &self.inner {
             Some(inner) => {
                 let mut guard = inner
@@ -75,10 +146,12 @@ impl Write for TeeWriter {
             }
             None => io::stdout().write_all(buf)?,
         }
-        self.log
-            .lock()
-            .map_err(|_| io::Error::other("stdout log poisoned"))?
-            .extend_from_slice(buf);
+        // Push to ALL registered assertion windows (O(1) per byte per window)
+        if let Ok(mut windows) = self.windows.lock() {
+            for window in windows.values_mut() {
+                window.push_chunk(buf);
+            }
+        }
         Ok(buf.len())
     }
 
@@ -97,8 +170,14 @@ impl Write for TeeWriter {
 }
 
 /// Installs the tee around `sink` (or real stdout when absent).
-pub(crate) fn teed_stdout(sink: Option<SharedOutput>, log: Arc<Mutex<Vec<u8>>>) -> SharedOutput {
-    Arc::new(Mutex::new(TeeWriter { inner: sink, log }))
+pub(crate) fn teed_stdout(
+    sink: Option<SharedOutput>,
+    windows: Arc<Mutex<HashMap<usize, SlidingWindow>>>,
+) -> SharedOutput {
+    Arc::new(Mutex::new(TeeWriter {
+        inner: sink,
+        windows,
+    }))
 }
 
 impl ExecIo {

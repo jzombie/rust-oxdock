@@ -1,3 +1,5 @@
+// TODO: This likely can be replaced entirely with the oxdock crate
+
 // Included only while rustdoc collects doctests, keeping normal `cargo doc`
 // free of README-relative link warnings.
 //

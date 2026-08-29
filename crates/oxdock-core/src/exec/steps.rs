@@ -7,7 +7,7 @@ use oxdock_parser::{Step, StepKind, guard_option_allows};
 use oxdock_process::{BackgroundHandle, ProcessManager, SharedInput};
 
 use super::handlers;
-use super::io::StreamHandle;
+use super::io::{SlidingWindow, StreamHandle};
 use super::state::{ExecState, ScopeSnapshot};
 
 pub(super) struct StepCtx<'a, P: ProcessManager> {
@@ -39,6 +39,22 @@ pub(super) fn execute_steps<P: ProcessManager>(
     let snapshot_root = state.fs.root().clone();
     let build_context = state.fs.build_context().clone();
 
+    // Pre-register ALL AssertStdout steps before execution loop begins
+    // Expand needles at step 0 context
+    {
+        let ctx = state.command_ctx()?;
+        let mut windows = match state.assert_windows.lock() {
+            Ok(guard) => guard,
+            Err(_) => bail!("assert_windows poisoned"),
+        };
+        for (idx, step) in steps.iter().enumerate() {
+            if let StepKind::AssertStdout(needle) = &step.kind {
+                let rendered = super::expand_template_string(needle, &ctx);
+                windows.insert(idx, SlidingWindow::new(rendered.into_bytes()));
+            }
+        }
+    }
+
     for (idx, step) in steps.iter().enumerate() {
         if step.scope_enter > 0 {
             for _ in 0..step.scope_enter {
@@ -65,10 +81,20 @@ pub(super) fn execute_steps<P: ProcessManager>(
                 err: err.clone(),
             };
             match &step.kind {
-                StepKind::InheritEnv { keys } => handlers::inherit_env(&mut cx, keys),
+                StepKind::InheritEnv { keys } => {
+                    handlers::inherit_env(&mut cx, keys)?;
+                    // Re-expand assertion needles after env mutation
+                    reexpand_assert_windows(&mut cx, steps)?;
+                    Ok(())
+                }
                 StepKind::Workdir(path) => handlers::workdir(&mut cx, idx, path),
                 StepKind::Workspace(target) => handlers::workspace(&mut cx, target),
-                StepKind::Env { key, value } => handlers::env(&mut cx, key, value),
+                StepKind::Env { key, value } => {
+                    handlers::env(&mut cx, key, value)?;
+                    // Re-expand assertion needles after env mutation
+                    reexpand_assert_windows(&mut cx, steps)?;
+                    Ok(())
+                }
                 StepKind::Run(cmd) => handlers::run(&mut cx, idx, cmd),
                 StepKind::Echo(msg) => handlers::echo(&mut cx, msg),
                 StepKind::RunBg(cmd) => handlers::run_bg(&mut cx, idx, cmd),
@@ -90,8 +116,14 @@ pub(super) fn execute_steps<P: ProcessManager>(
                 StepKind::Cwd => handlers::cwd(&mut cx, idx),
                 StepKind::Read(path_opt) => handlers::read(&mut cx, idx, path_opt),
                 StepKind::Write { path, contents } => handlers::write(&mut cx, idx, path, contents),
+                StepKind::RawWrite { path, contents } => {
+                    handlers::raw_write(&mut cx, idx, path, contents)
+                }
                 StepKind::Append { path, contents } => {
                     handlers::append(&mut cx, idx, path, contents)
+                }
+                StepKind::Expand { path, overrides } => {
+                    handlers::replace(&mut cx, idx, path, overrides)
                 }
                 StepKind::AssertFile {
                     hash,
@@ -178,6 +210,28 @@ fn restore_scopes<P: ProcessManager>(state: &mut ExecState<P>, count: usize) -> 
         state.fs.set_root(&snapshot.root);
         state.cwd = snapshot.cwd;
         state.envs = snapshot.envs;
+    }
+    Ok(())
+}
+
+/// Re-expand all assertion window needles after an environment mutation.
+/// Preserves ring buffer history via update_needle.
+fn reexpand_assert_windows<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    steps: &[Step],
+) -> Result<()> {
+    let ctx = cx.state.command_ctx()?;
+    let mut windows = match cx.state.assert_windows.lock() {
+        Ok(guard) => guard,
+        Err(_) => bail!("assert_windows poisoned"),
+    };
+    for (idx, step) in steps.iter().enumerate() {
+        if let StepKind::AssertStdout(needle) = &step.kind
+            && let Some(w) = windows.get_mut(&idx)
+        {
+            let rendered = super::expand_template_string(needle, &ctx);
+            w.update_needle(rendered.into_bytes());
+        }
     }
     Ok(())
 }

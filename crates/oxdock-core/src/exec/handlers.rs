@@ -507,16 +507,49 @@ pub(super) fn write<P: ProcessManager>(
         let mut guard = input_stream
             .lock()
             .map_err(|_| anyhow!("failed to lock stdin for WRITE"))?;
-        let mut data = Vec::new();
-        guard
-            .read_to_end(&mut data)
-            .context("failed to read from stdin for WRITE")?;
-        drop(guard);
-        cx.state
+        let mut writer = cx
+            .state
             .fs
-            .write_file(&target, &data)
-            .with_context(|| format!("failed to write {}", target.display()))?;
+            .open_write(&target)
+            .with_context(|| format!("failed to open {} for writing", target.display()))?;
+        let mut buf = [0u8; super::io::CHUNK_SIZE];
+        loop {
+            let n = guard
+                .read(&mut buf)
+                .context("failed to read from stdin for WRITE")?;
+            if n == 0 {
+                break;
+            }
+            writer
+                .write_all(&buf[..n])
+                .with_context(|| format!("failed to write to {}", target.display()))?;
+            writer.flush()?;
+        }
     }
+    Ok(())
+}
+
+pub(super) fn raw_write<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    idx: usize,
+    path: &TemplateString,
+    contents: &str,
+) -> Result<()> {
+    let ctx = cx.state.command_ctx()?;
+    let path_rendered = super::expand_template(path, &ctx);
+    let target = cx
+        .state
+        .fs
+        .resolve_write(&cx.state.cwd, &path_rendered)
+        .with_context(|| format!("step {}: RAW_WRITE {}", idx + 1, path_rendered))?;
+    cx.state
+        .fs
+        .ensure_parent_dir(&target)
+        .with_context(|| format!("failed to create parent for {}", target.display()))?;
+    cx.state
+        .fs
+        .write_file(&target, contents.as_bytes())
+        .with_context(|| format!("failed to write {}", target.display()))?;
     Ok(())
 }
 
@@ -554,16 +587,105 @@ pub(super) fn append<P: ProcessManager>(
         let mut guard = input_stream
             .lock()
             .map_err(|_| anyhow!("failed to lock stdin for APPEND"))?;
-        let mut data = Vec::new();
-        guard
-            .read_to_end(&mut data)
-            .context("failed to read from stdin for APPEND")?;
-        drop(guard);
-        cx.state
+        let mut writer = cx
+            .state
             .fs
-            .append_file(&target, &data)
-            .with_context(|| format!("failed to append to {}", target.display()))?;
+            .open_append(&target)
+            .with_context(|| format!("failed to open {} for appending", target.display()))?;
+        let mut buf = [0u8; super::io::CHUNK_SIZE];
+        loop {
+            let n = guard
+                .read(&mut buf)
+                .context("failed to read from stdin for APPEND")?;
+            if n == 0 {
+                break;
+            }
+            writer
+                .write_all(&buf[..n])
+                .with_context(|| format!("failed to append to {}", target.display()))?;
+            writer.flush()?;
+        }
     }
+    Ok(())
+}
+
+pub(super) fn replace<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    idx: usize,
+    path_opt: &Option<TemplateString>,
+    overrides: &[(String, TemplateString)],
+) -> Result<()> {
+    let ctx = cx.state.command_ctx()?;
+
+    // Resolve override values
+    let resolved_overrides: Vec<(String, String)> = overrides
+        .iter()
+        .map(|(k, v)| (k.clone(), super::expand_template(v, &ctx)))
+        .collect();
+
+    let mut expander = oxdock_process::StreamingExpand::new(&resolved_overrides, ctx.envs());
+    let mut out_buf = Vec::with_capacity(super::io::CHUNK_SIZE);
+
+    write_stdout(cx.out.clone(), |w| {
+        if let Some(path) = path_opt {
+            // Streaming file read
+            let rendered = super::expand_template(path, &ctx);
+            let target = cx
+                .state
+                .fs
+                .resolve_read(&cx.state.cwd, &rendered)
+                .with_context(|| format!("step {}: EXPAND {}", idx + 1, rendered))?;
+            let mut reader = cx
+                .state
+                .fs
+                .open_read(&target)
+                .with_context(|| format!("failed to open {}", target.display()))?;
+            let mut buf = [0u8; super::io::CHUNK_SIZE];
+            loop {
+                let n = reader
+                    .read(&mut buf)
+                    .with_context(|| format!("failed to read {}", target.display()))?;
+                if n == 0 {
+                    break;
+                }
+                expander.process_bytes(&buf[..n], &mut out_buf)?;
+                w.write_all(&out_buf).context("failed to write output")?;
+                out_buf.clear();
+            }
+        } else {
+            // Streaming stdin — error if no stdin available
+            let Some(input_stream) = cx.stdin.clone() else {
+                bail!(
+                    "step {}: EXPAND requires stdin when no file path is given \
+                     (use WITH_IO [stdin=...] EXPAND)",
+                    idx + 1
+                );
+            };
+            let mut guard = input_stream
+                .lock()
+                .map_err(|_| anyhow!("failed to lock stdin for EXPAND"))?;
+            let mut buf = [0u8; super::io::CHUNK_SIZE];
+            loop {
+                let n = guard.read(&mut buf).context("failed to read from stdin")?;
+                if n == 0 {
+                    break;
+                }
+                expander.process_bytes(&buf[..n], &mut out_buf)?;
+                w.write_all(&out_buf).context("failed to write output")?;
+                out_buf.clear();
+            }
+        }
+
+        // Flush remaining buffer (incomplete placeholders → literals)
+        expander.flush(&mut out_buf)?;
+        if !out_buf.is_empty() {
+            w.write_all(&out_buf).context("failed to write output")?;
+            out_buf.clear();
+        }
+
+        Ok(())
+    })?;
+
     Ok(())
 }
 
@@ -673,22 +795,70 @@ pub(super) fn assert_stdout<P: ProcessManager>(
 ) -> Result<()> {
     let ctx = cx.state.command_ctx()?;
     let rendered = super::expand_template(needle, &ctx);
-    let log = String::from_utf8_lossy(
-        &cx.state
-            .stdout_log
+
+    // Mode 1: Piped stdin — actively consume stream and check
+    if let Some(input_stream) = cx.stdin.clone() {
+        let mut guard = input_stream
             .lock()
-            .map_err(|_| anyhow!("stdout log poisoned"))?,
-    )
-    .into_owned();
-    if !log.contains(&rendered) {
-        bail!(
-            "step {}: ASSERT_STDOUT did not contain '{}'; emitted:\n{}",
-            idx + 1,
-            rendered,
-            log.trim_end()
-        );
+            .map_err(|_| anyhow!("failed to lock stdin for ASSERT_STDOUT"))?;
+        let mut window = super::io::SlidingWindow::new(rendered.as_bytes().to_vec());
+        let mut buf = [0u8; super::io::CHUNK_SIZE];
+        let mut read_any = false;
+        loop {
+            let n = guard
+                .read(&mut buf)
+                .context("failed to read from stdin for ASSERT_STDOUT")?;
+            if n == 0 {
+                break;
+            }
+            read_any = true;
+            window.push_chunk(&buf[..n]);
+            // Tee to downstream — preserve pipeline continuity
+            super::io::write_stdout(cx.out.clone(), |w| {
+                w.write_all(&buf[..n])?;
+                Ok(())
+            })?;
+        }
+        // If stdin had data, the local window is authoritative — fail immediately
+        if read_any {
+            if window.matched {
+                return Ok(());
+            }
+            let emitted = String::from_utf8_lossy(&window.ring_buffer()).into_owned();
+            bail!(
+                "step {}: ASSERT_STDOUT did not contain '{}'; emitted:\n{}",
+                idx + 1,
+                rendered,
+                emitted.trim_end()
+            );
+        }
+        // If stdin was empty (e.g. /dev/null subprocess), fall through to step-scope mode
     }
-    Ok(())
+
+    // Mode 2: Step scope — check pre-registered window
+    let windows = cx
+        .state
+        .assert_windows
+        .lock()
+        .map_err(|_| anyhow!("assert_windows poisoned"))?;
+    match windows.get(&idx) {
+        Some(w) if w.matched => Ok(()),
+        Some(w) => {
+            // Window exists but didn't match — include ring buffer content for debugging
+            let emitted = String::from_utf8_lossy(&w.ring_buffer()).into_owned();
+            bail!(
+                "step {}: ASSERT_STDOUT did not contain '{}'; emitted:\n{}",
+                idx + 1,
+                rendered,
+                emitted.trim_end()
+            )
+        }
+        _ => bail!(
+            "step {}: ASSERT_STDOUT did not contain '{}'",
+            idx + 1,
+            rendered
+        ),
+    }
 }
 
 pub(super) fn with_io<P: ProcessManager>(

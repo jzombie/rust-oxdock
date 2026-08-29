@@ -1,6 +1,7 @@
 use anyhow::Result;
 use oxdock_fs::{EntryKind, GuardedPath, WorkspaceFs, to_forward_slashes};
 use sha2::{Digest, Sha256};
+use std::io::Read;
 
 pub(super) fn copy_entry(fs: &dyn WorkspaceFs, src: &GuardedPath, dst: &GuardedPath) -> Result<()> {
     match fs.entry_kind(src)? {
@@ -123,14 +124,20 @@ pub(super) fn hash_path(
             }
         }
         EntryKind::File => {
-            let data = fs.read_file(path)?;
-            if rel.is_empty() {
-                hasher.update(&data);
-            } else {
+            // Use streaming read instead of loading entire file into memory
+            let mut reader = fs.open_read(path)?;
+            if !rel.is_empty() {
                 hasher.update(b"F\0");
                 hasher.update(rel.as_bytes());
                 hasher.update(b"\0");
-                hasher.update(&data);
+            }
+            let mut buf = [0u8; super::io::CHUNK_SIZE];
+            loop {
+                let n = reader.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                hasher.update(&buf[..n]);
             }
         }
     }

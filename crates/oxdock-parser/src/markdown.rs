@@ -1,11 +1,11 @@
 use anyhow::{Result, bail};
 use line_ending::LineEnding;
+use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag, TagEnd};
 
 /// Runner configuration parsed from a fenced block's info-string.
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
 pub struct BlockMetadata {
     pub env: Vec<(String, String)>,
-    pub stdin: Option<String>,
     pub unified_roots: bool,
     pub expect_error: Option<String>,
 }
@@ -20,69 +20,77 @@ pub struct FencedBlock {
     pub body: String,
 }
 
-fn fence_ticks(line: &str) -> Option<usize> {
-    let trimmed = line.trim_start();
-    if trimmed.len() - trimmed.trim_start_matches('`').len() < 3 {
-        return None;
-    }
-    let indent = line.len() - trimmed.len();
-    (indent <= 3).then(|| trimmed.len() - trimmed.trim_start_matches('`').len())
-}
-
 /// Extract fenced code blocks whose info-string starts with `lang`.
 ///
-/// The first whitespace-delimited token of an opening fence's info-string
-/// selects the language; remaining tokens are scanned as `key:value` metadata.
-/// Values may be double-quoted to contain spaces. Unknown keys and duplicate
-/// single-occurrence keys are hard errors so typos cannot silently change
-/// runner behavior.
+/// Uses `pulldown-cmark` for reliable CommonMark fence parsing. The first
+/// whitespace-delimited token of an opening fence's info-string selects the
+/// language; remaining tokens are scanned as `key:value` metadata.
 pub fn extract_fenced_blocks(markdown: &str, lang: &str) -> Result<Vec<FencedBlock>> {
-    let mut blocks = Vec::new();
-    let mut open: Option<(usize, usize)> = None;
-    let mut info_string: Option<String> = None;
-    let mut body: Vec<&str> = Vec::new();
+    let mut options = Options::empty();
+    options.insert(Options::ENABLE_TABLES);
+    let offset_parser = Parser::new_ext(markdown, options).into_offset_iter();
 
-    for (idx, line) in markdown.lines().enumerate() {
-        let line_no = idx + 1;
-        match (open, fence_ticks(line)) {
-            (None, Some(ticks)) => {
-                let trimmed = line.trim_start();
-                open = Some((line_no, ticks));
-                info_string = Some(trimmed[ticks..].trim().to_string());
-                body.clear();
-            }
-            (Some((open_no, open_ticks)), Some(ticks)) => {
-                let trimmed = line.trim_start();
-                if ticks >= open_ticks && trimmed[ticks..].trim().is_empty() {
-                    if let Some(info) = info_string.take()
-                        && first_token(&info) == lang
-                    {
-                        blocks.push(FencedBlock {
-                            line_no: open_no,
-                            metadata: parse_metadata(&info, open_no)?,
-                            info_string: info,
-                            body: LineEnding::normalize(&body.join("\n")),
-                        });
-                    }
-                    open = None;
-                    info_string = None;
-                } else {
-                    body.push(line);
+    // Pre-compute newline byte offsets for line-number mapping.
+    let mut line_starts: Vec<usize> = vec![0];
+    for (i, _) in markdown.match_indices('\n') {
+        line_starts.push(i + 1);
+    }
+
+    let md_len = markdown.len();
+    let mut blocks = Vec::new();
+    let mut in_block = false;
+    let mut current_line_no = 0;
+    let mut current_info = String::new();
+    let mut current_body = String::new();
+
+    for (event, range) in offset_parser {
+        match event {
+            Event::Start(Tag::CodeBlock(CodeBlockKind::Fenced(info))) => {
+                let info_str = info.to_string();
+                let first_token = info_str.split_whitespace().next().unwrap_or("");
+                if first_token == lang {
+                    in_block = true;
+                    // Map byte offset to 1-based line number.
+                    let line_no = line_starts.partition_point(|&start| start <= range.start);
+                    current_line_no = line_no;
+                    current_info = info_str;
+                    current_body.clear();
                 }
             }
-            (Some(_), None) => body.push(line),
-            (None, None) => {}
+            Event::Text(text) if in_block => {
+                current_body.push_str(&text);
+            }
+            Event::End(TagEnd::CodeBlock) if in_block => {
+                in_block = false;
+                // pulldown-cmark auto-closes unclosed fences by emitting End
+                // at EOF. Detect this: if the end offset reaches the document
+                // end, the fence was never explicitly closed.
+                if range.end >= md_len && !markdown.trim_end().ends_with("```") {
+                    bail!("markdown:{current_line_no}: code fence is never closed");
+                }
+                let metadata = parse_metadata(&current_info, current_line_no)?;
+                // Trim trailing newline that pulldown-cmark includes from the last line.
+                let body = current_body.trim_end_matches('\n').to_string();
+                blocks.push(FencedBlock {
+                    line_no: current_line_no,
+                    info_string: std::mem::take(&mut current_info),
+                    metadata,
+                    body: LineEnding::normalize(&body),
+                });
+            }
+            _ => {}
         }
     }
 
-    if let Some((open_no, _)) = open {
-        bail!("markdown:{open_no}: code fence is never closed");
+    if in_block {
+        bail!("markdown:{current_line_no}: code fence is never closed");
     }
     Ok(blocks)
 }
 
-fn first_token(info: &str) -> &str {
-    info.split_whitespace().next().unwrap_or("")
+fn skip_token(info: &str) -> &str {
+    let first = info.split_whitespace().next().unwrap_or("");
+    info.trim_start()[first.len()..].trim_start()
 }
 
 fn parse_metadata(info: &str, line_no: usize) -> Result<BlockMetadata> {
@@ -170,11 +178,6 @@ fn parse_metadata(info: &str, line_no: usize) -> Result<BlockMetadata> {
                     .ok_or_else(|| fail("env metadata must be 'env:KEY=VALUE'".to_string()))?;
                 metadata.env.push((name.to_string(), val.to_string()));
             }
-            "stdin" => {
-                if metadata.stdin.replace(value.clone()).is_some() {
-                    return Err(fail("stdin metadata specified more than once".to_string()));
-                }
-            }
             "roots" => {
                 if value != "unified" {
                     return Err(fail(format!(
@@ -195,16 +198,12 @@ fn parse_metadata(info: &str, line_no: usize) -> Result<BlockMetadata> {
             }
             other => {
                 return Err(fail(format!(
-                    "unknown fence metadata key '{other}' (supported: env, stdin, roots, expect_error)"
+                    "unknown fence metadata key '{other}' (supported: env, roots, expect_error)"
                 )));
             }
         }
     }
     Ok(metadata)
-}
-
-fn skip_token(info: &str) -> &str {
-    info.trim_start()[first_token(info).len()..].trim_start()
 }
 
 #[cfg(test)]
@@ -280,9 +279,9 @@ mod tests {
     }
 
     #[test]
-    fn parses_env_stdin_and_roots_metadata() {
+    fn parses_env_and_roots_metadata() {
         let md = concat!(
-            "```oxdock env:A=1 env:B=two stdin:hello roots:unified\n",
+            "```oxdock env:A=1 env:B=two roots:unified\n",
             "ECHO x\n",
             "```\n"
         );
@@ -294,7 +293,6 @@ mod tests {
                 ("B".to_string(), "two".to_string())
             ]
         );
-        assert_eq!(block.metadata.stdin.as_deref(), Some("hello"));
         assert!(block.metadata.unified_roots);
     }
 
@@ -306,10 +304,6 @@ mod tests {
             err.to_string()
                 .contains("unknown fence metadata key 'bogus'")
         );
-
-        let dup = "```oxdock stdin:a stdin:b\nECHO x\n```\n";
-        let err = extract_fenced_blocks(dup, "oxdock").expect_err("duplicate key");
-        assert!(err.to_string().contains("more than once"));
 
         let roots = "```oxdock roots:squashed\nECHO x\n```\n";
         let err = extract_fenced_blocks(roots, "oxdock").expect_err("bad roots");

@@ -79,6 +79,11 @@ impl CommandBuilder {
         self
     }
 
+    pub fn stdin_piped(&mut self) -> &mut Self {
+        self.inner.stdin(Stdio::piped());
+        self
+    }
+
     pub fn current_dir(&mut self, dir: impl AsRef<Path>) -> &mut Self {
         let path = dir.as_ref();
         self.inner.current_dir(path);

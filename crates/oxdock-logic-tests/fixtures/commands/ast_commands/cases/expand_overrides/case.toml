@@ -1,0 +1,5 @@
+name = "expand_overrides"
+stdin = "Hello {{ env:NAME }}!"
+
+[expect]
+stdout_contains = ["Hello Alice!"]

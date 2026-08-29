@@ -305,12 +305,13 @@ pub mod harness {
         for key in &case.env_remove {
             cmd.env_remove(key);
         }
-        let output = cmd.output().context("failed to run fixture")?;
+        let result = cmd.output().context("failed to run fixture")?;
+        let (status, stdout_bytes, stderr_bytes) = (result.status, result.stdout, result.stderr);
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&stdout_bytes);
+        let stderr = String::from_utf8_lossy(&stderr_bytes);
 
-        if case.expect_success && !output.success() {
+        if case.expect_success && !status.success() {
             anyhow::bail!(
                 "fixture {} failed. stdout:\n{}\nstderr:\n{}",
                 spec.name,
@@ -318,7 +319,7 @@ pub mod harness {
                 stderr
             );
         }
-        if !case.expect_success && output.success() {
+        if !case.expect_success && status.success() {
             anyhow::bail!(
                 "fixture {} unexpectedly succeeded. stdout:\n{}\nstderr:\n{}",
                 spec.name,
@@ -328,7 +329,7 @@ pub mod harness {
         }
 
         if let Some(expectation) = &case.error_expectation {
-            if output.success() {
+            if status.success() {
                 anyhow::bail!("fixture {} expected error, got success", spec.name);
             }
             super::expectations::assert_text_matches(

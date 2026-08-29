@@ -304,7 +304,7 @@ fn create_exec_state(fs: MockFs) -> ExecState<MockProcessManager> {
         bg_children: Vec::new(),
         scope_stack: Vec::new(),
         io: ExecIo::new(),
-        stdout_log: Arc::new(std::sync::Mutex::new(Vec::new())),
+        assert_windows: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     }
 }
 

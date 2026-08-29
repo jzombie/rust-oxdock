@@ -1,5 +1,3 @@
-use std::io::Cursor;
-
 use anyhow::{Context, Result, bail};
 use line_ending::LineEnding;
 use oxdock_core::{ExecIo, run_steps_with_context_result_with_io};
@@ -209,11 +207,6 @@ fn execute_block(block: &FencedBlock) -> Result<()> {
     let mut io = ExecIo::new();
     for (key, value) in &block.metadata.env {
         io.insert_inherit_env(key.clone(), value.clone());
-    }
-    if let Some(stdin_payload) = &block.metadata.stdin {
-        io.set_stdin(Some(std::sync::Arc::new(std::sync::Mutex::new(
-            Cursor::new(LineEnding::normalize(stdin_payload).as_bytes().to_vec()),
-        ))));
     }
 
     let execution = run_steps_with_context_result_with_io(&fs_root, &context_root, &steps, io);

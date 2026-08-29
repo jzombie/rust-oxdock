@@ -20,6 +20,7 @@ fn key_owners() -> &'static Mutex<HashMap<&'static str, ThreadId>> {
     KEY_OWNERS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+// TODO: Remove the Box::leak
 #[allow(clippy::disallowed_methods)] // Box::leak: one lock per distinct key; bounded by test-suite vocabulary
 fn key_lock(key: &'static str) -> &'static Mutex<()> {
     let locks = KEY_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));

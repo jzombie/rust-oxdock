@@ -1,5 +1,6 @@
 use crate::ast::{
-    Guard, GuardExpr, IoBinding, IoStream, PlatformGuard, Step, StepKind, WorkspaceTarget,
+    Guard, GuardExpr, IoBinding, IoStream, PlatformGuard, Step, StepKind, TemplateString,
+    WorkspaceTarget,
 };
 use crate::lexer::{self, RawToken, Rule};
 use anyhow::{Result, anyhow, bail};
@@ -587,6 +588,28 @@ fn parse_command(pair: Pair<Rule>) -> Result<StepKind> {
                 contents: contents.map(Into::into),
             }
         }
+        Rule::raw_write_command => {
+            let mut path = None;
+            let mut contents = None;
+            for inner in pair.into_inner() {
+                match inner.as_rule() {
+                    Rule::argument if path.is_none() => {
+                        path = Some(parse_argument(inner)?);
+                    }
+                    Rule::message => {
+                        contents = Some(parse_concatenated_string(inner)?);
+                    }
+                    _ => {}
+                }
+            }
+            StepKind::RawWrite {
+                path: path
+                    .ok_or_else(|| anyhow!("RAW_WRITE expects a path argument"))?
+                    .into(),
+                contents: contents
+                    .ok_or_else(|| anyhow!("RAW_WRITE expects a contents argument"))?,
+            }
+        }
         Rule::append_command => {
             let mut path = None;
             let mut contents = None;
@@ -606,6 +629,40 @@ fn parse_command(pair: Pair<Rule>) -> Result<StepKind> {
                     .ok_or_else(|| anyhow!("APPEND expects a path argument"))?
                     .into(),
                 contents: contents.map(Into::into),
+            }
+        }
+        Rule::expand_command => {
+            let mut path = None;
+            let mut overrides: Vec<(String, TemplateString)> = Vec::new();
+            for inner in pair.into_inner() {
+                match inner.as_rule() {
+                    Rule::argument if path.is_none() => {
+                        path = Some(parse_argument(inner)?);
+                    }
+                    Rule::key_value => {
+                        let mut key = None;
+                        let mut value = None;
+                        for kv_part in inner.into_inner() {
+                            match kv_part.as_rule() {
+                                Rule::kv_key => {
+                                    key = Some(kv_part.as_str().to_string());
+                                }
+                                Rule::argument => {
+                                    value = Some(parse_argument(kv_part)?);
+                                }
+                                _ => {}
+                            }
+                        }
+                        if let (Some(k), Some(v)) = (key, value) {
+                            overrides.push((k, TemplateString(v)));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            StepKind::Expand {
+                path: path.map(Into::into),
+                overrides,
             }
         }
         Rule::assert_file_hash_command => parse_assert_file_hash(pair)?,
