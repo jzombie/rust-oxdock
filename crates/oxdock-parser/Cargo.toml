@@ -19,6 +19,7 @@ pest.workspace = true
 pest_derive.workspace = true
 pulldown-cmark = { version = "0.13.4", default-features = false }
 proc-macro2 = { workspace = true, optional = true, features = ["span-locations"] }
+pulldown-cmark = { version = "0.13.4", default-features = false }
 quote = { workspace = true, optional = true }
 syn = { workspace = true, optional = true }
 

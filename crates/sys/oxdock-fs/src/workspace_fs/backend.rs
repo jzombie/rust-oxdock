@@ -214,6 +214,7 @@ mod miri_backend {
     use super::*;
     use anyhow::anyhow;
     use std::collections::{BTreeMap, HashMap, HashSet};
+    use std::io::Write;
     use std::path::Component;
     use std::sync::{Arc, Mutex, OnceLock};
 
