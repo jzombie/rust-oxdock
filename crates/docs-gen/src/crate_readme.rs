@@ -9,8 +9,7 @@ pub fn generate_all(repo_root: &Path) -> Result<()> {
         return Ok(());
     }
 
-    let template = std::fs::read_to_string(repo_root.join("docs/templates/crate-readme.md"))
-        .context("failed to read docs/templates/crate-readme.md")?;
+    let template_path = repo_root.join("docs/templates/crate-readme.md");
 
     let entries: Vec<PathBuf> = std::fs::read_dir(&crates_dir)
         .with_context(|| format!("failed to read {}", crates_dir.display()))?
@@ -31,7 +30,7 @@ pub fn generate_all(repo_root: &Path) -> Result<()> {
             continue;
         }
 
-        match generate_one(&template, &crate_dir, &cargo_toml_path) {
+        match generate_one(&template_path, &crate_dir, &cargo_toml_path, repo_root) {
             Ok(()) => {
                 let target_dir = cargo_toml_path.parent().unwrap_or(Path::new("."));
                 eprintln!("  Generated {}/README.md", target_dir.display());
@@ -57,31 +56,56 @@ fn resolve_cargo_toml(repo_root: &Path, crate_name: &str) -> Result<PathBuf> {
     Ok(candidates[0].clone())
 }
 
-fn generate_one(template: &str, crate_dir: &Path, cargo_toml: &Path) -> Result<()> {
+fn generate_one(
+    template_path: &Path,
+    crate_dir: &Path,
+    cargo_toml: &Path,
+    repo_root: &Path,
+) -> Result<()> {
+    use oxdock_core::{ExecIo, run_steps_with_context_result_with_io};
+    use oxdock_fs::GuardedPath;
+    use oxdock_parser::parse_script;
+
     let metadata = parse_cargo_metadata(cargo_toml)?;
     let source_files = load_source_files(crate_dir, &metadata.name);
 
-    let mut vars: HashMap<String, String> = HashMap::new();
+    let mut vars = HashMap::new();
     vars.insert("CRATE_NAME".to_string(), metadata.name);
     vars.insert("CRATE_DESCRIPTION".to_string(), metadata.description);
     vars.insert("CRATE_OVERVIEW".to_string(), source_files.overview);
-    vars.insert(
-        "CRATE_QUICK_START".to_string(),
-        source_files.quick_start,
-    );
+    vars.insert("CRATE_QUICK_START".to_string(), source_files.quick_start);
     vars.insert("CRATE_API".to_string(), source_files.api);
 
-    let mut output = template.to_string();
+    let target_dir = cargo_toml.parent().context("invalid Cargo.toml path")?;
+    let readme_path = target_dir.join("README.md");
+
+    // Sort keys: HashMap iteration order is randomized (SipHash seed),
+    // so sorting ensures deterministic INHERIT_ENV key list across runs.
+    // Note: This is not a correctness requirement.
+    let mut keys: Vec<_> = vars.keys().cloned().collect();
+    keys.sort();
+
+    let norm_template = template_path.to_string_lossy().replace('\\', "/");
+    let norm_readme = readme_path.to_string_lossy().replace('\\', "/");
+
+    let script = format!(
+        "INHERIT_ENV [{}]\nWORKSPACE LOCAL\nWITH_IO [stdout=pipe:out] EXPAND \"{}\"\nWITH_IO [stdin=pipe:out] WRITE \"{}\"",
+        keys.join(", "),
+        norm_template,
+        norm_readme
+    );
+
+    let mut io = ExecIo::new();
     for (key, value) in &vars {
-        let placeholder = format!("{{{{ env:{key} }}}}");
-        output = output.replace(&placeholder, value);
+        io.insert_inherit_env(key, value);
     }
 
-    let target_dir = cargo_toml
-        .parent()
-        .context("invalid Cargo.toml path")?;
-    let readme_path = target_dir.join("README.md");
-    std::fs::write(&readme_path, output)?;
+    let root = GuardedPath::new_root(repo_root)?;
+    let temp = GuardedPath::tempdir()?;
+    let steps = parse_script(&script)?;
+
+    run_steps_with_context_result_with_io(temp.as_guarded_path(), &root, &steps, io)?;
+
     Ok(())
 }
 

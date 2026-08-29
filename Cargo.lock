@@ -187,6 +187,8 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "line-ending",
+ "oxdock-core",
+ "oxdock-fs",
  "oxdock-parser",
  "toml_edit",
 ]
