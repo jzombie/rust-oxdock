@@ -1,6 +1,0 @@
-// README Assembly Script
-// Run: oxdock --script docs/templates/assemble-readme.oxdock
-// Or:  cargo run -p docs-gen -- generate-crate-readmes
-
-// Generate command reference, main README, and all sub-crate READMEs
-RUN cargo run -p docs-gen -- generate-crate-readmes
