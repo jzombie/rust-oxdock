@@ -1,11 +1,3 @@
-# oxdock-logic-tests
-
-Workspace-level test harness and fixtures for OxDock
-
-> Part of the [OxDock](https://github.com/jzombie/rust-oxdock) workspace.
-
-## Overview
-
 Workspace-level fixtures and a [libtest-mimic](https://crates.io/crates/libtest-mimic) harness.
 
 - Fixtures live under `fixtures/` as standalone Cargo projects (including nested subdirectories).
@@ -13,15 +5,3 @@ Workspace-level fixtures and a [libtest-mimic](https://crates.io/crates/libtest-
 - Workspace dependencies are patched to local paths at runtime.
 
 To add a fixture, create a new `fixtures/<name>/` (or nested) folder with a `Cargo.toml` and source files.
-
-## Quick Start
-
-See the [API documentation](https://docs.rs/oxdock-logic-tests).
-
-## API
-
-See the [API documentation](https://docs.rs/oxdock-logic-tests).
-
-## License
-
-`oxdock-logic-tests` is distributed under the terms of the Apache License (Version 2.0).

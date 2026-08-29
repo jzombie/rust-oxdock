@@ -1,0 +1,17 @@
+// README Assembly Script
+// Run: oxdock --script docs/templates/assemble-readme.oxdock
+// Or:  cargo run -p docs-gen -- assemble-readme
+
+ENV REPO_ROOT=.
+
+// Phase 1: Generate the command reference table from the grammar
+[unix] RUN cargo run --manifest-path crates/docs-gen/Cargo.toml -- generate-command-ref
+[windows] RUN cargo run --manifest-path crates/docs-gen/Cargo.toml -- generate-command-ref
+
+// Phase 2: Assemble final README from all sections
+[unix] RUN cargo run --manifest-path crates/docs-gen/Cargo.toml -- assemble-readme --output README.md
+[windows] RUN cargo run --manifest-path crates/docs-gen/Cargo.toml -- assemble-readme --output README.md
+
+// Phase 3: Generate all sub-crate READMEs
+[unix] RUN cargo run --manifest-path crates/docs-gen/Cargo.toml -- generate-crate-readmes
+[windows] RUN cargo run --manifest-path crates/docs-gen/Cargo.toml -- generate-crate-readmes

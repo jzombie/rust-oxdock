@@ -1,0 +1,3 @@
+- `emit_feature_envs()`: forward `CARGO_FEATURE_*` and `CARGO_CFG_FEATURE`
+- `emit_cfg_envs()`: forward `CARGO_CFG_*` derived from `rustc --print cfg`
+- `emit_feature_and_cfg_envs()`: calls both

@@ -88,6 +88,37 @@ impl Command {
         }
     }
 
+    pub const fn syntax(self) -> &'static str {
+        match self {
+            Command::InheritEnv => "INHERIT_ENV [KEY1, KEY2, ...]",
+            Command::Workdir => "WORKDIR <path>",
+            Command::Workspace => "WORKSPACE SNAPSHOT|LOCAL",
+            Command::Env => "ENV KEY=value",
+            Command::Echo => "ECHO <message>",
+            Command::Run => "RUN <command...>",
+            Command::RunBg => "RUN_BG <command...>",
+            Command::Copy => "COPY [--from-current-workspace] <from> <to>",
+            Command::CopyGit => "COPY_GIT [--include-dirty] <rev> <src> <dst>",
+            Command::WithIo => "WITH_IO [bindings] [command | { block }]",
+            Command::HashSha256 => "HASH_SHA256 <path>",
+            Command::Symlink => "SYMLINK <from> <to>",
+            Command::Mkdir => "MKDIR <path>",
+            Command::Ls => "LS [<path>]",
+            Command::Cwd => "CWD",
+            Command::Read => "READ [<path>]",
+            Command::Write => "WRITE <path> [<contents>]",
+            Command::RawWrite => "RAW_WRITE <path> <contents>",
+            Command::Append => "APPEND <path> [<contents>]",
+            Command::Expand => "EXPAND [<path>] [<KEY=val> ...]",
+            Command::AssertFile => "ASSERT_FILE [--hash <sha256>] <path> [<expected>]",
+            Command::AssertDir => "ASSERT_DIR <path>",
+            Command::AssertAbsent => "ASSERT_ABSENT <path>",
+            Command::AssertStdout => "ASSERT_STDOUT <substring>",
+            Command::Exit => "EXIT <code>",
+        }
+    }
+
+
     pub const fn expects_inner_command(self) -> bool {
         matches!(self, Command::WithIo)
     }

@@ -6,6 +6,7 @@ members = [
     "crates/oxdock-fixture",
     "crates/oxdock-logic-tests",
     "crates/oxdock-parser",
+    "crates/docs-gen",
     "crates/sys/oxdock-fs",
     "crates/sys/oxdock-process",
     "crates/sys/oxdock-sys-test-utils",

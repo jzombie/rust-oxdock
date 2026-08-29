@@ -36,7 +36,6 @@ pub fn extract_fenced_blocks(markdown: &str, lang: &str) -> Result<Vec<FencedBlo
         line_starts.push(i + 1);
     }
 
-    let md_len = markdown.len();
     let mut blocks = Vec::new();
     let mut in_block = false;
     let mut current_line_no = 0;
@@ -63,9 +62,10 @@ pub fn extract_fenced_blocks(markdown: &str, lang: &str) -> Result<Vec<FencedBlo
             Event::End(TagEnd::CodeBlock) if in_block => {
                 in_block = false;
                 // pulldown-cmark auto-closes unclosed fences by emitting End
-                // at EOF. Detect this: if the end offset reaches the document
-                // end, the fence was never explicitly closed.
-                if range.end >= md_len && !markdown.trim_end().ends_with("```") {
+                // at EOF. Detect this by checking whether the block byte
+                // range terminates with an explicit fence closer.
+                let block_slice = markdown[range.start..range.end].trim_end();
+                if !block_slice.ends_with("```") && !block_slice.ends_with("~~~") {
                     bail!("markdown:{current_line_no}: code fence is never closed");
                 }
                 let metadata = parse_metadata(&current_info, current_line_no)?;
