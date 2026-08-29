@@ -6,7 +6,9 @@ Test-fixture harness that materializes reproducible Cargo workspaces for OxDock'
 
 ## Overview
 
-Part of the OxDock workspace.
+Materializes a Cargo project template inside a temporary, auto-cleaned
+directory for integration tests. Workspace dependencies are patched to local
+paths at runtime so the fixture builds against the current checkout.
 
 ## Quick Start
 

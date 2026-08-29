@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use line_ending::LineEnding;
 use std::path::{Path, PathBuf};
 
 pub fn assemble_readme(repo_root: &Path, output: Option<&Path>) -> Result<()> {
@@ -13,13 +14,23 @@ pub fn assemble_readme(repo_root: &Path, output: Option<&Path>) -> Result<()> {
 
     entries.sort();
 
+    let lf = LineEnding::LF;
     let mut content = String::new();
     for entry in &entries {
         let section = std::fs::read_to_string(entry)
             .with_context(|| format!("failed to read {}", entry.display()))?;
+        let section = LineEnding::normalize(&section);
+        // Ensure a blank line separates sections so Markdown headings render correctly.
+        if !content.is_empty() && !content.ends_with("\n\n") {
+            if content.ends_with('\n') {
+                content.push_str(lf.as_str());
+            } else {
+                content.push_str("\n\n");
+            }
+        }
         content.push_str(&section);
         if !section.ends_with('\n') {
-            content.push('\n');
+            content.push_str(lf.as_str());
         }
     }
 

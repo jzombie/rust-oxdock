@@ -11,5 +11,6 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+line-ending.workspace = true
 oxdock-parser.workspace = true
 toml_edit.workspace = true

@@ -5,3 +5,4 @@ OxDock has a simple goal to provide a simple DSL that works the same across Mac,
 
 Every internal command is engineered to run the same way across platforms, except for the `RUN` command, which calls native programs.
 
+**OxDock adds no additional runtime dependencies if used as a macro preprocessor.**

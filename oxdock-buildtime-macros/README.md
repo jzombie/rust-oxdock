@@ -6,11 +6,11 @@ Compile-time macros for bundling assets using OxDock's Dockerfile-inspired DSL.
 
 ## Overview
 
-
+Part of the OxDock workspace.
 
 ## Quick Start
 
-
+See the [API documentation](https://docs.rs/oxdock-buildtime-macros).
 
 ## API
 

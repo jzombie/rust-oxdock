@@ -12,11 +12,6 @@ fn main() -> Result<()> {
     let repo_root = find_repo_root()?;
 
     match subcommand {
-        "assemble-readme" => {
-            let output = args.get(3).map(|s| PathBuf::from(s));
-            sections::assemble_readme(&repo_root, output.as_deref())?;
-            eprintln!("README.md assembled successfully");
-        }
         "generate-command-ref" => {
             let output = args
                 .get(3)
@@ -26,12 +21,21 @@ fn main() -> Result<()> {
             eprintln!("Command reference written to {}", output.display());
         }
         "generate-crate-readmes" => {
+            sections::assemble_readme(&repo_root, None)?;
             crate_readme::generate_all(&repo_root)?;
-            eprintln!("Sub-crate READMEs generated");
+            eprintln!("All READMEs generated");
+        }
+        "all" => {
+            let output = repo_root.join("docs/sections/06-command-reference.md");
+            command_ref::generate(&output)?;
+            eprintln!("Command reference written to {}", output.display());
+            sections::assemble_readme(&repo_root, None)?;
+            crate_readme::generate_all(&repo_root)?;
+            eprintln!("All READMEs generated");
         }
         other => {
             eprintln!("Unknown subcommand: {other}");
-            eprintln!("Usage: docs-gen <assemble-readme|generate-command-ref|generate-crate-readmes>");
+            eprintln!("Usage: docs-gen <generate-command-ref|generate-crate-readmes|all>");
             std::process::exit(1);
         }
     }
@@ -40,12 +44,14 @@ fn main() -> Result<()> {
 }
 
 fn find_repo_root() -> Result<PathBuf> {
-    let manifest_dir = PathBuf::from(
-        std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string()),
-    );
+    let manifest_dir =
+        PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_string()));
     let root = manifest_dir
         .to_str()
-        .and_then(|s| s.strip_suffix("/crates/docs-gen").or_else(|| s.strip_suffix("\\crates/docs-gen")))
+        .and_then(|s| {
+            s.strip_suffix("/crates/docs-gen")
+                .or_else(|| s.strip_suffix("\\crates/docs-gen"))
+        })
         .map(PathBuf::from)
         .unwrap_or(manifest_dir);
     Ok(root)

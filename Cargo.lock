@@ -186,6 +186,7 @@ name = "docs-gen"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "line-ending",
  "oxdock-parser",
  "toml_edit",
 ]
