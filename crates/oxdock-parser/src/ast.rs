@@ -317,7 +317,7 @@ pub enum StepKind {
         path: TemplateString,
         contents: Option<TemplateString>,
     },
-    /// EXPAND [path] [KEY=val ...]
+    /// EXPAND `[path]` `[KEY=val ...]`
     ///
     /// Reads file or stdin, expands `{{ env:KEY }}` placeholders, outputs to stdout.
     /// Explicit KEY=val arguments override env vars.
