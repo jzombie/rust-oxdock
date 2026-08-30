@@ -20,7 +20,9 @@ pub(crate) fn resolve_arg_state<P: ProcessManager>(
             let resolved = resolve_dollar_vars(&t.0, state);
             let ctx = state.command_ctx()?;
             let expander = oxdock_process::StreamingExpand::new(&[], ctx.envs());
-            Ok(expander.expand_string(&resolved).unwrap_or_default())
+            expander
+                .expand_string(&resolved)
+                .map_err(|e| anyhow::anyhow!("failed to expand template {}: {}", t.0, e))
         }
     }
 }
