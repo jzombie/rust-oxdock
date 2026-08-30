@@ -458,6 +458,7 @@ dependencies = [
  "oxdock-core",
  "oxdock-fixture",
  "oxdock-fs",
+ "oxdock-macros",
  "oxdock-parser",
  "oxdock-sys-test-utils",
  "proc-macro2",

@@ -306,10 +306,8 @@ fn walk(
                         }
                         Delimiter::Bracket => {
                             if *last_was_command {
-                                // Keep bracketed flags (e.g., WITH_IO [...] or guard lists) on the same line
-                                // when they immediately follow a command token. This avoids rendering a
-                                // newline between the command and its bracket payload, which the string DSL
-                                // parser would reject.
+                                // First bracket group after a command: attach to the command
+                                // (e.g., INHERIT_ENV [keys], WITH_IO [bindings]).
                                 push_fragment(line, &open.to_string(), gap_space);
                                 let mut inner_span_end = None;
                                 walk(
@@ -322,8 +320,12 @@ fn walk(
                                     &mut inner_span_end,
                                 )?;
                                 push_fragment(line, &close.to_string(), false);
-                                *last_was_command = true;
+                                // Reset so the next bracket group (if any) is recognized as a guard.
+                                *last_was_command = false;
                             } else {
+                                // Guard bracket (e.g., [#flag], [env:KEY])
+                                // or second bracket group after a command.
+                                // Finalize previous line and start guard on a new line.
                                 finalize_line(lines, line, capture_has_inner);
                                 push_fragment(line, &open.to_string(), gap_space);
                                 finalize_line(lines, line, capture_has_inner);

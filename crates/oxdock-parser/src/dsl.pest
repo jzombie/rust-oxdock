@@ -38,7 +38,7 @@ or_kw = _{ "or" }
 guard_expr_list = { guard_expr ~ ( ws? ~ "," ~ ws? ~ guard_expr )* }
 guard_term = { ws? ~ guard_predicate ~ ws? }
 invert = { "!" }
-guard_predicate = _{ env_guard | bare_platform }
+guard_predicate = _{ env_guard | bare_platform | bare_env_ident }
 env_guard = { env_prefix ~ ws? ~ env_key ~ env_comparison? }
 env_prefix = { "env" ~ ":" }
 env_key = @{ guard_key_char+ }
@@ -50,8 +50,8 @@ env_value = @{ guard_value_char+ }
 guard_value_char = _{ !( "," | "|" | ")" | "]" | linebreak | "//" | "/*" ) ~ ANY }
 eq_op = { "==" }
 neq_op = { "!=" }
-bare_platform = { platform_tag }
-platform_tag = @{ ASCII_ALPHANUMERIC+ }
+bare_platform = { "linux" | "macos" | "mac" | "windows" | "unix" }
+bare_env_ident = @{ guard_key_char+ }
 
 // Identifiers
 ident_char = _{ ASCII_ALPHANUMERIC | "_" }

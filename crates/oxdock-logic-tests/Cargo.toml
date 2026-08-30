@@ -22,6 +22,7 @@ toml_edit.workspace = true
 indoc.workspace = true
 line-ending.workspace = true
 oxdock-core.workspace = true
+oxdock-macros.workspace = true
 oxdock-parser = { workspace = true, features = ["proc-macro-api"] }
 proc-macro2.workspace = true
 proptest.workspace = true
