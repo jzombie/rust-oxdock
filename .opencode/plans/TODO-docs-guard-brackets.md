@@ -24,3 +24,19 @@ OxDock guard brackets `[...]` serve a single purpose: **static plan pruning** ba
 * Use **`#rust_var`** inside guards when passing host-side Rust variables into the `oxdock!` macro at compile time.
 * Use **`env:KEY`** inside guards when reading environment keys loaded into `ExecIo` at application start.
 * Never use **`$dsl_var`** inside guards; runtime script state requires step execution, not compile/plan-time guards.
+
+## The Two-Phase Architecture
+
+Phase 1: Static Plan Assembly (Compile & Setup)
+
+Macro Expansion: The oxdock! macro converts DSL tokens directly into a static Vec<Step> array and substitutes #rust_vars at Rust compile time.
+
+Guard Evaluation: Scope guards ([...]) evaluate against the environment map (ExecIo) to prune non-matching steps out of the plan before execution begins.
+
+Phase 2: Sequential Step Execution (Runtime)
+
+Linear Execution: The runner iterates through the pre-pruned Vec<Step> array.
+
+I/O Engine: Steps execute their operations sequentially (spawning processes, reading globs, expanding templates, writing files).
+
+This ahead-of-time design keeps script execution fast and deterministic with zero runtime parsing overhead, but it is precisely why scope guards [...] cannot react to dynamic runtime state (like $dsl_vars) generated mid-execution.
