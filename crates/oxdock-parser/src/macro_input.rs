@@ -142,19 +142,68 @@ fn current_line_command(line: &str) -> Option<Command> {
     Command::parse(head)
 }
 
+/// Check if a brace group is a `{{ ... }}` template placeholder.
+/// Rust lexes `{{ env:KEY }}` as a brace group containing a single nested brace group.
+fn is_template_group(g: &proc_macro2::Group) -> bool {
+    let mut inner_tokens = g.stream().into_iter();
+    matches!(
+        inner_tokens.next(),
+        Some(TokenTree::Group(inner))
+            if inner.delimiter() == Delimiter::Brace && inner_tokens.next().is_none()
+    )
+}
+
+/// Emit a `{{ ... }}` template placeholder on the current line,
+/// reconstructing interior spacing from span positions.
+fn emit_template_placeholder(
+    g: &proc_macro2::Group,
+    line: &mut String,
+    span: proc_macro2::Span,
+    gap_space: bool,
+    last_span_end: &mut Option<LineColumn>,
+) {
+    let Some(TokenTree::Group(inner)) = g.stream().into_iter().next() else {
+        unreachable!("is_template_group checked above")
+    };
+    push_fragment(line, "{{", gap_space);
+
+    let mut inner_tokens = inner.stream().into_iter();
+    let leading_space = inner_tokens
+        .next()
+        .map(|tt| {
+            let start = tt.span().start();
+            start.line == span.start().line && start.column > span.start().column + 2
+        })
+        .unwrap_or(false);
+    if leading_space {
+        line.push(' ');
+    }
+    let mut inner_span_end = None;
+    let mut last_was_command = false;
+    let mut capture_has_inner = false;
+    walk(
+        inner.stream(),
+        line,
+        &mut Vec::new(),
+        &mut last_was_command,
+        false,
+        &mut capture_has_inner,
+        &mut inner_span_end,
+    )
+    .ok();
+    let trailing_space = inner_span_end
+        .map(|end| span.end().line == end.line && span.end().column > end.column + 2)
+        .unwrap_or(false);
+    let close_text = if trailing_space { " }}" } else { "}}" };
+    push_fragment(line, close_text, false);
+    *last_span_end = Some(span.end());
+}
+
 fn line_expects_inner_command(line: &str) -> bool {
     matches!(
         current_line_command(line),
         Some(cmd) if cmd.expects_inner_command()
     )
-}
-
-/// Check if the current line contains a FOR or LET keyword, which also
-/// expect a brace block on the same line (like WITH_IO).
-fn line_has_for_or_let(line: &str) -> bool {
-    let trimmed = line.trim_start();
-    let head = trimmed.split_whitespace().next().unwrap_or("");
-    matches!(head, "FOR" | "LET")
 }
 
 fn line_is_run_context(line: &str) -> bool {
@@ -187,8 +236,12 @@ fn walk(
                 if let Some((open, close)) = delim_pair(g.delimiter()) {
                     match g.delimiter() {
                         Delimiter::Brace => {
-                            if line.trim_end().ends_with('$') {
-                                push_fragment(line, &open.to_string(), gap_space);
+                            let trimmed = line.trim_end();
+
+                            // 1. Interpolation context: ${var} or #{expr}
+                            //    Keep the entire expression on one line.
+                            if trimmed.ends_with('$') || trimmed.ends_with('#') {
+                                push_fragment(line, &open.to_string(), false);
                                 *last_was_command = false;
                                 let mut inner_span_end = None;
                                 walk(
@@ -201,10 +254,17 @@ fn walk(
                                     &mut inner_span_end,
                                 )?;
                                 push_fragment(line, &close.to_string(), false);
-                            } else if *last_was_command || line_has_for_or_let(line) {
-                                // Keep the opening brace attached to commands that expect an inner block
-                                // (e.g., WITH_IO block form), or to FOR/LET statements whose brace
-                                // block must stay on the same line for the Pest grammar.
+                            }
+                            // 2. Template placeholder: {{ env:KEY }}
+                            //    Rust lexes this as nested brace groups.
+                            else if is_template_group(&g) {
+                                emit_template_placeholder(
+                                    &g, line, span, gap_space, last_span_end,
+                                );
+                            }
+                            // 3. DSL statement block: WITH_IO [...] {, FOR ..., LET ...
+                            //    Attach opening brace to the current line, then walk body.
+                            else if !trimmed.is_empty() {
                                 push_fragment(line, &open.to_string(), gap_space);
                                 finalize_line(lines, line, capture_has_inner);
                                 *last_was_command = false;
@@ -221,83 +281,27 @@ fn walk(
                                 finalize_line(lines, line, capture_has_inner);
                                 push_fragment(line, &close.to_string(), false);
                                 finalize_line(lines, line, capture_has_inner);
-                            } else {
-                                // `{{ ... }}` template placeholder: Rust lexes
-                                // this as a brace group whose stream is a single
-                                // nested brace group. Emit both braces literally
-                                // on the current line so the string DSL sees the
-                                // templated_arg shape it expects.
-                                let mut inner_tokens = g.stream().into_iter();
-                                let nested_is_template = matches!(
-                                    inner_tokens.next(),
-                                    Some(TokenTree::Group(inner))
-                                        if inner.delimiter() == Delimiter::Brace
-                                            && inner_tokens.next().is_none()
-                                );
-                                if nested_is_template {
-                                    let Some(TokenTree::Group(inner)) =
-                                        g.stream().into_iter().next()
-                                    else {
-                                        unreachable!("nested_is_template checked above")
-                                    };
-                                    push_fragment(line, "{{", gap_space);
-
-                                    // Interior spacing is reconstructed
-                                    // explicitly on both sides: exactly two
-                                    // braces separate real content from the
-                                    // outer delimiters, so a larger offset on
-                                    // either side means source whitespace.
-                                    let mut inner_tokens = inner.stream().into_iter();
-                                    let leading_space = inner_tokens
-                                        .next()
-                                        .map(|tt| {
-                                            let start = tt.span().start();
-                                            start.line == span.start().line
-                                                && start.column > span.start().column + 2
-                                        })
-                                        .unwrap_or(false);
-                                    if leading_space {
-                                        line.push(' ');
-                                    }
-                                    let mut inner_span_end = None;
-                                    walk(
-                                        inner.stream(),
-                                        line,
-                                        lines,
-                                        last_was_command,
-                                        in_interpolation,
-                                        capture_has_inner,
-                                        &mut inner_span_end,
-                                    )?;
-                                    let trailing_space = inner_span_end
-                                        .map(|end| {
-                                            span.end().line == end.line
-                                                && span.end().column > end.column + 2
-                                        })
-                                        .unwrap_or(false);
-                                    let close_text = if trailing_space { " }}" } else { "}}" };
-                                    push_fragment(line, close_text, false);
-                                    *last_span_end = Some(span.end());
-                                } else {
-                                    finalize_line(lines, line, capture_has_inner);
-                                    line.push(open);
-                                    finalize_line(lines, line, capture_has_inner);
-                                    *last_was_command = false;
-                                    let mut inner_span_end = None;
-                                    walk(
-                                        g.stream(),
-                                        line,
-                                        lines,
-                                        last_was_command,
-                                        false,
-                                        capture_has_inner,
-                                        &mut inner_span_end,
-                                    )?;
-                                    finalize_line(lines, line, capture_has_inner);
-                                    line.push(close);
-                                    finalize_line(lines, line, capture_has_inner);
-                                    *last_was_command = false;
-                                }
+                            }
+                            // 4. Standalone / top-level block
+                            else {
+                                finalize_line(lines, line, capture_has_inner);
+                                line.push(open);
+                                finalize_line(lines, line, capture_has_inner);
+                                *last_was_command = false;
+                                let mut inner_span_end = None;
+                                walk(
+                                    g.stream(),
+                                    line,
+                                    lines,
+                                    last_was_command,
+                                    false,
+                                    capture_has_inner,
+                                    &mut inner_span_end,
+                                )?;
+                                finalize_line(lines, line, capture_has_inner);
+                                line.push(close);
+                                finalize_line(lines, line, capture_has_inner);
+                                *last_was_command = false;
                             }
                         }
                         Delimiter::Bracket => {
@@ -401,12 +405,15 @@ fn walk(
                     continue;
                 }
                 let is_command = super::Command::parse(&ident_text).is_some();
+                // LET and FOR introduce new statements but aren't in the Command enum.
+                // They must still trigger line finalization so they start on a new line.
+                let is_new_statement = is_command || matches!(ident_text.as_str(), "LET" | "FOR");
                 let trimmed = line.trim();
                 let trimmed_empty = trimmed.is_empty();
                 let guard_prefix = trimmed.starts_with('[');
                 let line_requires_inner = line_expects_inner_command(trimmed);
                 let mut should_finalize = false;
-                if is_command && !trimmed_empty && !guard_prefix {
+                if is_new_statement && !trimmed_empty && !guard_prefix {
                     let current_expects_inner = line_expects_inner_command(trimmed);
                     should_finalize = !line_is_run_context(trimmed) && !current_expects_inner;
                 }
@@ -431,7 +438,7 @@ fn walk(
                 {
                     *capture_has_inner = true;
                 }
-                *last_was_command = is_command;
+                *last_was_command = is_new_statement;
                 *last_span_end = Some(span.end());
             }
         }
