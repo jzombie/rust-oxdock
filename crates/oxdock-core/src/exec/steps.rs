@@ -125,6 +125,200 @@ pub(super) fn execute_steps<P: ProcessManager>(
     Ok(())
 }
 
+/// Execute a single step with an explicit generation and index.
+/// Used by `with_io` to preserve the parent step's index for assertion window keys.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
+    state: &mut ExecState<P>,
+    process: &mut P,
+    cmd: &StepKind,
+    generation: usize,
+    idx: usize,
+    stdin: Option<SharedInput>,
+    expose_stdin: bool,
+    out: Option<StreamHandle>,
+    err: Option<StreamHandle>,
+) -> Result<()> {
+    let snapshot_root = state.fs.root().clone();
+    let build_context = state.fs.build_context().clone();
+
+    let mut cx = StepCtx {
+        state,
+        process,
+        snapshot_root,
+        build_context,
+        stdin,
+        expose_stdin,
+        out,
+        err,
+    };
+    match cmd {
+        StepKind::Run(arg) => {
+            let cmd = super::args::resolve_arg(arg, &cx)?;
+            handlers::run(&mut cx, idx, &cmd)
+        }
+        StepKind::Echo(arg) => {
+            let msg = super::args::resolve_arg(arg, &cx)?;
+            handlers::echo(&mut cx, &msg)
+        }
+        StepKind::RunBg(arg) => {
+            let cmd = super::args::resolve_arg(arg, &cx)?;
+            handlers::run_bg(&mut cx, idx, &cmd)
+        }
+        StepKind::Workdir(arg) => {
+            let path = super::args::resolve_arg(arg, &cx)?;
+            handlers::workdir(&mut cx, idx, &path)
+        }
+        StepKind::Workspace(target) => handlers::workspace(&mut cx, target),
+        StepKind::Env { key, value } => {
+            let resolved = super::args::resolve_arg(value, &cx)?;
+            handlers::env(&mut cx, key, &resolved)
+        }
+        StepKind::InheritEnv { keys } => {
+            handlers::inherit_env(&mut cx, keys)?;
+            sync_iteration_assert_needles(
+                cx.state,
+                &[Step {
+                    guard: None,
+                    kind: cmd.clone(),
+                    scope_enter: 0,
+                    scope_exit: 0,
+                }],
+                generation,
+            )?;
+            Ok(())
+        }
+        StepKind::Copy {
+            from_current_workspace,
+            from,
+            to,
+        } => {
+            let from_resolved = super::args::resolve_arg(from, &cx)?;
+            let to_resolved = super::args::resolve_arg(to, &cx)?;
+            handlers::copy(
+                &mut cx,
+                idx,
+                *from_current_workspace,
+                &from_resolved,
+                &to_resolved,
+            )
+        }
+        StepKind::CopyGit {
+            rev,
+            from,
+            to,
+            include_dirty,
+        } => {
+            let rev_resolved = super::args::resolve_arg(rev, &cx)?;
+            let from_resolved = super::args::resolve_arg(from, &cx)?;
+            let to_resolved = super::args::resolve_arg(to, &cx)?;
+            handlers::copy_git(
+                &mut cx,
+                idx,
+                &rev_resolved,
+                &from_resolved,
+                &to_resolved,
+                *include_dirty,
+            )
+        }
+        StepKind::HashSha256 { path } => {
+            let path_resolved = super::args::resolve_arg(path, &cx)?;
+            handlers::hash_sha256(&mut cx, idx, &path_resolved)
+        }
+        StepKind::Symlink { from, to } => {
+            let from_resolved = super::args::resolve_arg(from, &cx)?;
+            let to_resolved = super::args::resolve_arg(to, &cx)?;
+            handlers::symlink(&mut cx, idx, &from_resolved, &to_resolved)
+        }
+        StepKind::Mkdir(arg) => {
+            let path = super::args::resolve_arg(arg, &cx)?;
+            handlers::mkdir(&mut cx, idx, &path)
+        }
+        StepKind::Ls(arg) => {
+            let resolved = super::args::resolve_arg_opt(arg, &cx)?;
+            handlers::ls(&mut cx, idx, &resolved)
+        }
+        StepKind::Cwd => handlers::cwd(&mut cx, idx),
+        StepKind::Read(arg) => {
+            let resolved = super::args::resolve_arg_opt(arg, &cx)?;
+            handlers::read(&mut cx, idx, &resolved)
+        }
+        StepKind::Write { path, contents } => {
+            let path_resolved = super::args::resolve_arg(path, &cx)?;
+            let contents_resolved = super::args::resolve_arg_opt(contents, &cx)?;
+            handlers::write(
+                &mut cx,
+                idx,
+                &path_resolved,
+                contents_resolved.as_deref(),
+            )
+        }
+        StepKind::RawWrite { path, contents } => {
+            let path_resolved = super::args::resolve_arg(path, &cx)?;
+            let contents_str = match contents {
+                Arg::Literal(s) => s.clone(),
+                Arg::Template(t) => super::args::resolve_dollar_vars(&t.0, cx.state),
+            };
+            handlers::raw_write(&mut cx, idx, &path_resolved, &contents_str)
+        }
+        StepKind::Append { path, contents } => {
+            let path_resolved = super::args::resolve_arg(path, &cx)?;
+            let contents_resolved = super::args::resolve_arg_opt(contents, &cx)?;
+            handlers::append(
+                &mut cx,
+                idx,
+                &path_resolved,
+                contents_resolved.as_deref(),
+            )
+        }
+        StepKind::Expand { path, overrides } => {
+            let path_resolved = super::args::resolve_arg_opt(path, &cx)?;
+            let overrides_resolved = super::args::resolve_overrides(overrides, &cx)?;
+            handlers::replace(&mut cx, idx, &path_resolved, &overrides_resolved)
+        }
+        StepKind::AssertFile {
+            hash,
+            path,
+            contents,
+        } => {
+            let path_resolved = super::args::resolve_arg(path, &cx)?;
+            let contents_resolved = super::args::resolve_arg_opt(contents, &cx)?;
+            handlers::assert_file(
+                &mut cx,
+                idx,
+                hash,
+                &path_resolved,
+                contents_resolved.as_deref(),
+            )
+        }
+        StepKind::AssertDir(arg) => {
+            let path = super::args::resolve_arg(arg, &cx)?;
+            handlers::assert_dir(&mut cx, idx, &path)
+        }
+        StepKind::AssertAbsent(arg) => {
+            let path = super::args::resolve_arg(arg, &cx)?;
+            handlers::assert_absent(&mut cx, idx, &path)
+        }
+        StepKind::AssertStdout(arg) => {
+            let needle = super::args::resolve_arg(arg, &cx)?;
+            handlers::assert_stdout(&mut cx, idx, generation, idx, &needle)
+        }
+        StepKind::WithIo { bindings, cmd } => {
+            handlers::with_io(&mut cx, generation, idx, bindings, cmd)
+        }
+        StepKind::WithIoBlock { .. } => {
+            bail!("WITH_IO block should have been expanded during parsing")
+        }
+        StepKind::Exit(code) => handlers::exit(&mut cx, *code),
+        StepKind::For {
+            var,
+            in_expr,
+            body,
+        } => handlers::for_loop(&mut cx, var, in_expr, body),
+        StepKind::Assign { var, expr } => handlers::assign(&mut cx, var, expr),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn execute_steps_inner<P: ProcessManager>(
     state: &mut ExecState<P>,

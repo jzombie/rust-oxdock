@@ -773,18 +773,11 @@ pub(super) fn assert_stdout<P: ProcessManager>(
 
 pub(super) fn with_io<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
-    _generation: usize,
+    generation: usize,
     idx: usize,
     bindings: &[IoBinding],
     cmd: &StepKind,
 ) -> Result<()> {
-    let inner_step = Step {
-        guard: None,
-        kind: cmd.clone(),
-        scope_enter: 0,
-        scope_exit: 0,
-    };
-    let steps = vec![inner_step];
     let mut step_stdin = None;
     let mut step_stdout = cx.out.clone();
     let mut step_stderr = cx.err.clone();
@@ -865,15 +858,16 @@ pub(super) fn with_io<P: ProcessManager>(
         }
     }
 
-    super::steps::execute_steps(
+    super::steps::execute_single_step_with_generation(
         cx.state,
         cx.process,
-        &steps,
+        cmd,
+        generation,
+        idx,
         step_stdin,
         next_expose_stdin,
         step_stdout,
         step_stderr,
-        false,
     )?;
     Ok(())
 }
