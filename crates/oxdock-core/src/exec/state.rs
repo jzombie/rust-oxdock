@@ -17,8 +17,8 @@ pub(super) struct ExecState<P: ProcessManager> {
     pub(super) scope_stack: Vec<ScopeSnapshot>,
     pub(super) io: ExecIo,
     /// Pre-registered SlidingWindow observers for ASSERT_STDOUT steps.
-    /// Keyed by step index. TeeWriter pushes every chunk to all windows.
-    pub(super) assert_windows: Arc<Mutex<HashMap<usize, SlidingWindow>>>,
+    /// Keyed by (generation, step index). TeeWriter pushes every chunk to all windows.
+    pub(super) assert_windows: Arc<Mutex<HashMap<(usize, usize), SlidingWindow>>>,
     /// Variable scopes for $variable bindings (FOR loops, LET assignments).
     /// Innermost scope is last. Variables are looked up from innermost to outermost.
     pub(super) var_scopes: Vec<HashMap<String, Value>>,

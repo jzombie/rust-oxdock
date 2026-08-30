@@ -1,3 +1,4 @@
+mod args;
 mod fs_ops;
 mod handlers;
 mod io;
@@ -11,9 +12,9 @@ pub use self::io::ExecIo;
 
 use anyhow::Result;
 use oxdock_fs::{GuardedPath, PathResolver, WorkspaceFs};
-use oxdock_parser::{Step, TemplateString};
+use oxdock_parser::Step;
 use oxdock_process::{
-    BuiltinEnv, CommandContext, ProcessManager, SharedInput, SharedOutput, default_process_manager,
+    BuiltinEnv, ProcessManager, SharedInput, SharedOutput, default_process_manager,
 };
 
 use std::sync::Arc;
@@ -21,27 +22,7 @@ use std::sync::Arc;
 use self::fs_ops::describe_dir;
 use self::io::{StreamHandle, assemble_default_io, teed_stdout};
 use self::state::ExecState;
-use self::steps::{StepCtx, execute_steps};
-
-/// Resolve `$variable` references in a `TemplateString`, then expand template
-/// expressions. This is the single entry point that all command handlers should
-/// use so that `$variable` interpolation works uniformly across the DSL.
-fn expand_template<P: ProcessManager>(
-    t: &TemplateString,
-    cx: &StepCtx<'_, P>,
-) -> String {
-    let resolved = handlers::resolve_dollar_vars(&t.0, cx.state);
-    let ctx = cx.state.command_ctx().unwrap();
-    let expander = oxdock_process::StreamingExpand::new(&[], ctx.envs());
-    expander.expand_string(&resolved).unwrap_or_default()
-}
-
-/// Variant for contexts where only a `CommandContext` is available (e.g.
-/// assertion needle pre-expansion). No `$variable` resolution is performed.
-fn expand_template_no_vars(t: &TemplateString, ctx: &CommandContext) -> String {
-    let expander = oxdock_process::StreamingExpand::new(&[], ctx.envs());
-    expander.expand_string(&t.0).unwrap_or_default()
-}
+use self::steps::execute_steps;
 
 pub fn run_steps(fs_root: &GuardedPath, steps: &[Step]) -> Result<()> {
     run_steps_with_context(fs_root, fs_root, steps)

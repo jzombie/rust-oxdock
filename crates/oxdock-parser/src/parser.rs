@@ -1,5 +1,5 @@
 use crate::ast::{
-    Guard, GuardExpr, IoBinding, IoStream, PlatformGuard, Step, StepKind, TemplateString,
+    Guard, GuardExpr, IoBinding, IoStream, PlatformGuard, Step, StepKind,
     WorkspaceTarget,
 };
 use crate::lexer::{self, RawToken, Rule};
@@ -606,8 +606,9 @@ fn parse_command(pair: Pair<Rule>) -> Result<StepKind> {
                 path: path
                     .ok_or_else(|| anyhow!("RAW_WRITE expects a path argument"))?
                     .into(),
-                contents: contents
-                    .ok_or_else(|| anyhow!("RAW_WRITE expects a contents argument"))?,
+                contents: crate::ast::Arg::Literal(
+                    contents.ok_or_else(|| anyhow!("RAW_WRITE expects a contents argument"))?,
+                ),
             }
         }
         Rule::append_command => {
@@ -633,7 +634,7 @@ fn parse_command(pair: Pair<Rule>) -> Result<StepKind> {
         }
         Rule::expand_command => {
             let mut path = None;
-            let mut overrides: Vec<(String, TemplateString)> = Vec::new();
+            let mut overrides: Vec<(String, crate::ast::Arg)> = Vec::new();
             for inner in pair.into_inner() {
                 match inner.as_rule() {
                     Rule::argument if path.is_none() => {
@@ -654,7 +655,7 @@ fn parse_command(pair: Pair<Rule>) -> Result<StepKind> {
                             }
                         }
                         if let (Some(k), Some(v)) = (key, value) {
-                            overrides.push((k, TemplateString(v)));
+                            overrides.push((k, v.into()));
                         }
                     }
                     _ => {}

@@ -131,7 +131,7 @@ where
 /// real stdout so interactive CLI output still reaches the terminal.
 struct TeeWriter {
     inner: Option<SharedOutput>,
-    windows: Arc<Mutex<HashMap<usize, SlidingWindow>>>,
+    windows: Arc<Mutex<HashMap<(usize, usize), SlidingWindow>>>,
 }
 
 impl Write for TeeWriter {
@@ -172,7 +172,7 @@ impl Write for TeeWriter {
 /// Installs the tee around `sink` (or real stdout when absent).
 pub(crate) fn teed_stdout(
     sink: Option<SharedOutput>,
-    windows: Arc<Mutex<HashMap<usize, SlidingWindow>>>,
+    windows: Arc<Mutex<HashMap<(usize, usize), SlidingWindow>>>,
 ) -> SharedOutput {
     Arc::new(Mutex::new(TeeWriter {
         inner: sink,

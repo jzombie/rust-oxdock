@@ -1,22 +1,90 @@
 use std::process::ExitStatus;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::{Result, bail};
 use oxdock_fs::GuardedPath;
-use oxdock_parser::{Step, StepKind, guard_option_allows};
+use oxdock_parser::{Arg, Step, StepKind, guard_option_allows};
 use oxdock_process::{BackgroundHandle, ProcessManager, SharedInput};
 
 use super::handlers;
 use super::io::{SlidingWindow, StreamHandle};
 use super::state::{ExecState, ScopeSnapshot};
 
+/// Monotonically increasing generation counter for assert_windows key scoping.
+/// Each execute_steps invocation gets a unique generation, preventing key
+/// collisions between nested scopes (for_loop bodies, WithIo blocks).
+static ASSERT_GENERATION: AtomicUsize = AtomicUsize::new(0);
+
+pub(super) fn allocate_assert_generation() -> usize {
+    ASSERT_GENERATION.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Extract the AssertStdout needle from a StepKind, handling both top-level
+/// and WITH_IO-wrapped variants.
+fn extract_assert_stdout_needle(kind: &StepKind) -> Option<&Arg> {
+    match kind {
+        StepKind::AssertStdout(needle) => Some(needle),
+        StepKind::WithIo { cmd, .. } => match cmd.as_ref() {
+            StepKind::AssertStdout(needle) => Some(needle),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Pre-register `ASSERT_STDOUT` window observers so the tee writer can feed
+/// them data before the step executes. Uses `args::resolve_arg_state` for
+/// actual template expansion. Handles both top-level and WITH_IO-wrapped
+/// assertions via `extract_assert_stdout_needle`.
+pub(super) fn pre_register_assertions<P: ProcessManager>(
+    state: &mut ExecState<P>,
+    steps: &[Step],
+    generation: usize,
+) -> Result<()> {
+    let mut windows = match state.assert_windows.lock() {
+        Ok(guard) => guard,
+        Err(_) => bail!("assert_windows poisoned"),
+    };
+    for (idx, step) in steps.iter().enumerate() {
+        if let Some(arg) = extract_assert_stdout_needle(&step.kind) {
+            let resolved = super::args::resolve_arg_state(arg, state)?;
+            windows.insert(
+                (generation, idx),
+                SlidingWindow::new(resolved.into_bytes()),
+            );
+        }
+    }
+    Ok(())
+}
+
+/// After an environment mutation (ENV or INHERIT_ENV), re-expand all assertion
+/// window needles for the current generation to reflect new env values.
+/// Preserves ring buffer history via `update_needle`. Handles both top-level
+/// and WITH_IO-wrapped assertions.
+pub(super) fn sync_iteration_assert_needles<P: ProcessManager>(
+    state: &ExecState<P>,
+    steps: &[Step],
+    generation: usize,
+) -> Result<()> {
+    let mut windows = match state.assert_windows.lock() {
+        Ok(guard) => guard,
+        Err(_) => bail!("assert_windows poisoned"),
+    };
+    for (idx, step) in steps.iter().enumerate() {
+        if let Some(arg) = extract_assert_stdout_needle(&step.kind) {
+            if let Some(w) = windows.get_mut(&(generation, idx)) {
+                let resolved = super::args::resolve_arg_state(arg, state)?;
+                w.update_needle(resolved.into_bytes());
+            }
+        }
+    }
+    Ok(())
+}
+
 pub(super) struct StepCtx<'a, P: ProcessManager> {
     pub(super) state: &'a mut ExecState<P>,
     pub(super) process: &'a mut P,
-    // Snapshot of the fs roots taken when `execute_steps` was entered. The
-    // WORKSPACE step must restore these *entry* values even after a previous
-    // WORKSPACE step mutated `state.fs` (behavior pinned by
-    // `workspace_switches_between_snapshot_and_local`).
     pub(super) snapshot_root: GuardedPath,
     pub(super) build_context: GuardedPath,
     pub(super) stdin: Option<SharedInput>,
@@ -36,24 +104,44 @@ pub(super) fn execute_steps<P: ProcessManager>(
     err: Option<StreamHandle>,
     wait_at_end: bool,
 ) -> Result<()> {
+    let generation = allocate_assert_generation();
+    execute_steps_inner(
+        state,
+        process,
+        generation,
+        steps,
+        stdin,
+        expose_stdin,
+        out,
+        err,
+        wait_at_end,
+    )?;
+    // Cleanup: remove all windows for this generation
+    let mut windows = match state.assert_windows.lock() {
+        Ok(guard) => guard,
+        Err(_) => bail!("assert_windows poisoned"),
+    };
+    windows.retain(|(g, _), _| *g != generation);
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn execute_steps_inner<P: ProcessManager>(
+    state: &mut ExecState<P>,
+    process: &mut P,
+    generation: usize,
+    steps: &[Step],
+    stdin: Option<SharedInput>,
+    expose_stdin: bool,
+    out: Option<StreamHandle>,
+    err: Option<StreamHandle>,
+    wait_at_end: bool,
+) -> Result<()> {
     let snapshot_root = state.fs.root().clone();
     let build_context = state.fs.build_context().clone();
 
-    // Pre-register ALL AssertStdout steps before execution loop begins
-    // Expand needles at step 0 context
-    {
-        let ctx = state.command_ctx()?;
-        let mut windows = match state.assert_windows.lock() {
-            Ok(guard) => guard,
-            Err(_) => bail!("assert_windows poisoned"),
-        };
-        for (idx, step) in steps.iter().enumerate() {
-            if let StepKind::AssertStdout(needle) = &step.kind {
-                let rendered = super::expand_template_no_vars(needle, &ctx);
-                windows.insert(idx, SlidingWindow::new(rendered.into_bytes()));
-            }
-        }
-    }
+    // Pre-register assertion windows for this generation
+    pre_register_assertions(state, steps, generation)?;
 
     for (idx, step) in steps.iter().enumerate() {
         if step.scope_enter > 0 {
@@ -83,58 +171,153 @@ pub(super) fn execute_steps<P: ProcessManager>(
             match &step.kind {
                 StepKind::InheritEnv { keys } => {
                     handlers::inherit_env(&mut cx, keys)?;
-                    // Re-expand assertion needles after env mutation
-                    reexpand_assert_windows(&mut cx, steps)?;
+                    sync_iteration_assert_needles(cx.state, steps, generation)?;
                     Ok(())
                 }
-                StepKind::Workdir(path) => handlers::workdir(&mut cx, idx, path),
+                StepKind::Workdir(arg) => {
+                    let path = super::args::resolve_arg(arg, &cx)?;
+                    handlers::workdir(&mut cx, idx, &path)
+                }
                 StepKind::Workspace(target) => handlers::workspace(&mut cx, target),
                 StepKind::Env { key, value } => {
-                    handlers::env(&mut cx, key, value)?;
-                    // Re-expand assertion needles after env mutation
-                    reexpand_assert_windows(&mut cx, steps)?;
+                    let resolved = super::args::resolve_arg(value, &cx)?;
+                    handlers::env(&mut cx, key, &resolved)?;
+                    sync_iteration_assert_needles(cx.state, steps, generation)?;
                     Ok(())
                 }
-                StepKind::Run(cmd) => handlers::run(&mut cx, idx, cmd),
-                StepKind::Echo(msg) => handlers::echo(&mut cx, msg),
-                StepKind::RunBg(cmd) => handlers::run_bg(&mut cx, idx, cmd),
+                StepKind::Run(arg) => {
+                    let cmd = super::args::resolve_arg(arg, &cx)?;
+                    handlers::run(&mut cx, idx, &cmd)
+                }
+                StepKind::Echo(arg) => {
+                    let msg = super::args::resolve_arg(arg, &cx)?;
+                    handlers::echo(&mut cx, &msg)
+                }
+                StepKind::RunBg(arg) => {
+                    let cmd = super::args::resolve_arg(arg, &cx)?;
+                    handlers::run_bg(&mut cx, idx, &cmd)
+                }
                 StepKind::Copy {
                     from_current_workspace,
                     from,
                     to,
-                } => handlers::copy(&mut cx, idx, *from_current_workspace, from, to),
+                } => {
+                    let from_resolved = super::args::resolve_arg(from, &cx)?;
+                    let to_resolved = super::args::resolve_arg(to, &cx)?;
+                    handlers::copy(
+                        &mut cx,
+                        idx,
+                        *from_current_workspace,
+                        &from_resolved,
+                        &to_resolved,
+                    )
+                }
                 StepKind::CopyGit {
                     rev,
                     from,
                     to,
                     include_dirty,
-                } => handlers::copy_git(&mut cx, idx, rev, from, to, *include_dirty),
-                StepKind::HashSha256 { path } => handlers::hash_sha256(&mut cx, idx, path),
-                StepKind::Symlink { from, to } => handlers::symlink(&mut cx, idx, from, to),
-                StepKind::Mkdir(path) => handlers::mkdir(&mut cx, idx, path),
-                StepKind::Ls(arg) => handlers::ls(&mut cx, idx, arg),
+                } => {
+                    let rev_resolved = super::args::resolve_arg(rev, &cx)?;
+                    let from_resolved = super::args::resolve_arg(from, &cx)?;
+                    let to_resolved = super::args::resolve_arg(to, &cx)?;
+                    handlers::copy_git(
+                        &mut cx,
+                        idx,
+                        &rev_resolved,
+                        &from_resolved,
+                        &to_resolved,
+                        *include_dirty,
+                    )
+                }
+                StepKind::HashSha256 { path } => {
+                    let path_resolved = super::args::resolve_arg(path, &cx)?;
+                    handlers::hash_sha256(&mut cx, idx, &path_resolved)
+                }
+                StepKind::Symlink { from, to } => {
+                    let from_resolved = super::args::resolve_arg(from, &cx)?;
+                    let to_resolved = super::args::resolve_arg(to, &cx)?;
+                    handlers::symlink(&mut cx, idx, &from_resolved, &to_resolved)
+                }
+                StepKind::Mkdir(arg) => {
+                    let path = super::args::resolve_arg(arg, &cx)?;
+                    handlers::mkdir(&mut cx, idx, &path)
+                }
+                StepKind::Ls(arg) => {
+                    let resolved = super::args::resolve_arg_opt(arg, &cx)?;
+                    handlers::ls(&mut cx, idx, &resolved)
+                }
                 StepKind::Cwd => handlers::cwd(&mut cx, idx),
-                StepKind::Read(path_opt) => handlers::read(&mut cx, idx, path_opt),
-                StepKind::Write { path, contents } => handlers::write(&mut cx, idx, path, contents),
+                StepKind::Read(arg) => {
+                    let resolved = super::args::resolve_arg_opt(arg, &cx)?;
+                    handlers::read(&mut cx, idx, &resolved)
+                }
+                StepKind::Write { path, contents } => {
+                    let path_resolved = super::args::resolve_arg(path, &cx)?;
+                    let contents_resolved = super::args::resolve_arg_opt(contents, &cx)?;
+                    handlers::write(
+                        &mut cx,
+                        idx,
+                        &path_resolved,
+                        contents_resolved.as_deref(),
+                    )
+                }
                 StepKind::RawWrite { path, contents } => {
-                    handlers::raw_write(&mut cx, idx, path, contents)
+                    let path_resolved = super::args::resolve_arg(path, &cx)?;
+                    let contents_str = match contents {
+                        Arg::Literal(s) => s.clone(),
+                        Arg::Template(t) => {
+                            // RAW_WRITE contents bypass template expansion
+                            // but still need $variable resolution
+                            super::args::resolve_dollar_vars(&t.0, cx.state)
+                        }
+                    };
+                    handlers::raw_write(&mut cx, idx, &path_resolved, &contents_str)
                 }
                 StepKind::Append { path, contents } => {
-                    handlers::append(&mut cx, idx, path, contents)
+                    let path_resolved = super::args::resolve_arg(path, &cx)?;
+                    let contents_resolved = super::args::resolve_arg_opt(contents, &cx)?;
+                    handlers::append(
+                        &mut cx,
+                        idx,
+                        &path_resolved,
+                        contents_resolved.as_deref(),
+                    )
                 }
                 StepKind::Expand { path, overrides } => {
-                    handlers::replace(&mut cx, idx, path, overrides)
+                    let path_resolved = super::args::resolve_arg_opt(path, &cx)?;
+                    let overrides_resolved = super::args::resolve_overrides(overrides, &cx)?;
+                    handlers::replace(&mut cx, idx, &path_resolved, &overrides_resolved)
                 }
                 StepKind::AssertFile {
                     hash,
                     path,
                     contents,
-                } => handlers::assert_file(&mut cx, idx, hash, path, contents),
-                StepKind::AssertDir(path) => handlers::assert_dir(&mut cx, idx, path),
-                StepKind::AssertAbsent(path) => handlers::assert_absent(&mut cx, idx, path),
-                StepKind::AssertStdout(msg) => handlers::assert_stdout(&mut cx, idx, msg),
+                } => {
+                    let path_resolved = super::args::resolve_arg(path, &cx)?;
+                    let contents_resolved = super::args::resolve_arg_opt(contents, &cx)?;
+                    handlers::assert_file(
+                        &mut cx,
+                        idx,
+                        hash,
+                        &path_resolved,
+                        contents_resolved.as_deref(),
+                    )
+                }
+                StepKind::AssertDir(arg) => {
+                    let path = super::args::resolve_arg(arg, &cx)?;
+                    handlers::assert_dir(&mut cx, idx, &path)
+                }
+                StepKind::AssertAbsent(arg) => {
+                    let path = super::args::resolve_arg(arg, &cx)?;
+                    handlers::assert_absent(&mut cx, idx, &path)
+                }
+                StepKind::AssertStdout(arg) => {
+                    let needle = super::args::resolve_arg(arg, &cx)?;
+                    handlers::assert_stdout(&mut cx, idx, generation, idx, &needle)
+                }
                 StepKind::WithIo { bindings, cmd } => {
-                    handlers::with_io(&mut cx, idx, bindings, cmd)
+                    handlers::with_io(&mut cx, generation, idx, bindings, cmd)
                 }
                 StepKind::WithIoBlock { .. } => {
                     bail!("WITH_IO block should have been expanded during parsing")
@@ -164,7 +347,6 @@ pub(super) fn execute_steps<P: ProcessManager>(
     if wait_at_end && !state.bg_children.is_empty() {
         let mut first = state.bg_children.remove(0);
         let status = first.wait()?;
-        // See `check_bg`: reap the remainder without joining pump threads.
         for child in state.bg_children.iter_mut() {
             if child.try_wait()?.is_none() {
                 let _ = child.kill();
@@ -191,10 +373,6 @@ fn check_bg<H: BackgroundHandle>(bg: &mut Vec<H>) -> Result<Option<ExitStatus>> 
         }
     }
     if let Some(status) = finished {
-        // Tear down remaining background children. Reap without joining the
-        // child's IO pump threads: a grandchild inheriting the stream can keep
-        // them alive well beyond the kill, and nothing downstream needs their
-        // residual output. `Drop` remains the bounded safety net.
         for child in bg.iter_mut() {
             if child.try_wait()?.is_none() {
                 let _ = child.kill();
@@ -216,27 +394,6 @@ fn restore_scopes<P: ProcessManager>(state: &mut ExecState<P>, count: usize) -> 
         state.fs.set_root(&snapshot.root);
         state.cwd = snapshot.cwd;
         state.envs = snapshot.envs;
-    }
-    Ok(())
-}
-
-/// Re-expand all assertion window needles after an environment mutation.
-/// Preserves ring buffer history via update_needle.
-fn reexpand_assert_windows<P: ProcessManager>(
-    cx: &mut StepCtx<'_, P>,
-    steps: &[Step],
-) -> Result<()> {
-    let mut windows = match cx.state.assert_windows.lock() {
-        Ok(guard) => guard,
-        Err(_) => bail!("assert_windows poisoned"),
-    };
-    for (idx, step) in steps.iter().enumerate() {
-        if let StepKind::AssertStdout(needle) = &step.kind
-            && let Some(w) = windows.get_mut(&idx)
-        {
-            let rendered = super::expand_template(needle, cx);
-            w.update_needle(rendered.into_bytes());
-        }
     }
     Ok(())
 }

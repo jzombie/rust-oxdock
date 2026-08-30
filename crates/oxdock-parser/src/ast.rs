@@ -291,6 +291,71 @@ impl std::ops::Deref for TemplateString {
     }
 }
 
+/// A command argument that may be a raw literal or a template requiring
+/// `$variable` resolution and `{{ env:KEY }}` expansion.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum Arg {
+    /// Raw string — no variable resolution or template expansion.
+    /// Used by RAW_WRITE contents.
+    Literal(String),
+    /// Template string — undergoes $variable resolution then {{ env:KEY }} expansion.
+    Template(TemplateString),
+}
+
+impl Arg {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Arg::Literal(s) => s,
+            Arg::Template(t) => &t.0,
+        }
+    }
+}
+
+impl From<String> for Arg {
+    fn from(s: String) -> Self {
+        Arg::Template(TemplateString(s))
+    }
+}
+
+impl From<&str> for Arg {
+    fn from(s: &str) -> Self {
+        Arg::Template(TemplateString(s.to_string()))
+    }
+}
+
+impl From<TemplateString> for Arg {
+    fn from(t: TemplateString) -> Self {
+        Arg::Template(t)
+    }
+}
+
+impl std::fmt::Display for Arg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Arg::Literal(s) => write!(f, "{}", s),
+            Arg::Template(t) => write!(f, "{}", t),
+        }
+    }
+}
+
+impl AsRef<str> for Arg {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl PartialEq<str> for Arg {
+    fn eq(&self, other: &str) -> bool {
+        self.as_str() == other
+    }
+}
+
+impl PartialEq<&str> for Arg {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_str() == *other
+    }
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum IoStream {
     Stdin,
@@ -321,67 +386,67 @@ pub enum Expr {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum StepKind {
-    Workdir(TemplateString),
+    Workdir(Arg),
     Workspace(WorkspaceTarget),
     Env {
         key: String,
-        value: TemplateString,
+        value: Arg,
     },
     /// Directive to inherit a selective list of environment variables from the host.
     /// This is intended to be declared in the prelude/top-level only.
     InheritEnv {
         keys: Vec<String>,
     },
-    Run(TemplateString),
-    Echo(TemplateString),
-    RunBg(TemplateString),
+    Run(Arg),
+    Echo(Arg),
+    RunBg(Arg),
     Copy {
         from_current_workspace: bool,
-        from: TemplateString,
-        to: TemplateString,
+        from: Arg,
+        to: Arg,
     },
     Symlink {
-        from: TemplateString,
-        to: TemplateString,
+        from: Arg,
+        to: Arg,
     },
-    Mkdir(TemplateString),
-    Ls(Option<TemplateString>),
+    Mkdir(Arg),
+    Ls(Option<Arg>),
     Cwd,
-    Read(Option<TemplateString>),
+    Read(Option<Arg>),
     Write {
-        path: TemplateString,
-        contents: Option<TemplateString>,
+        path: Arg,
+        contents: Option<Arg>,
     },
     /// RAW_WRITE writes literal bytes to a file without expanding template
-    /// placeholders.  The path is still resolved via `expand_template`; only
-    /// the file contents bypass expansion.
+    /// placeholders.  The path is still resolved via `resolve_arg`; only
+    /// the file contents bypass expansion (stored as Arg::Literal).
     RawWrite {
-        path: TemplateString,
-        contents: String,
+        path: Arg,
+        contents: Arg,
     },
     Append {
-        path: TemplateString,
-        contents: Option<TemplateString>,
+        path: Arg,
+        contents: Option<Arg>,
     },
     /// EXPAND `[path]` `[KEY=val ...]`
     ///
     /// Reads file or stdin, expands `{{ env:KEY }}` placeholders, outputs to stdout.
     /// Explicit KEY=val arguments override env vars.
     Expand {
-        path: Option<TemplateString>,
-        overrides: Vec<(String, TemplateString)>,
+        path: Option<Arg>,
+        overrides: Vec<(String, Arg)>,
     },
     /// Verify a workspace file exists and, when `hash` or `contents` is
     /// present, matches it. The grammar guarantees the invariant: `hash` set
     /// implies a 64-hex digest and no `contents`.
     AssertFile {
         hash: Option<String>,
-        path: TemplateString,
-        contents: Option<TemplateString>,
+        path: Arg,
+        contents: Option<Arg>,
     },
-    AssertDir(TemplateString),
-    AssertAbsent(TemplateString),
-    AssertStdout(TemplateString),
+    AssertDir(Arg),
+    AssertAbsent(Arg),
+    AssertStdout(Arg),
     WithIo {
         bindings: Vec<IoBinding>,
         cmd: Box<StepKind>,
@@ -390,13 +455,13 @@ pub enum StepKind {
         bindings: Vec<IoBinding>,
     },
     CopyGit {
-        rev: TemplateString,
-        from: TemplateString,
-        to: TemplateString,
+        rev: Arg,
+        from: Arg,
+        to: Arg,
         include_dirty: bool,
     },
     HashSha256 {
-        path: TemplateString,
+        path: Arg,
     },
     Exit(i32),
     For {
@@ -613,12 +678,12 @@ impl fmt::Display for StepKind {
             StepKind::InheritEnv { keys } => {
                 write!(f, "INHERIT_ENV [{}]", keys.join(", "))
             }
-            StepKind::Workdir(arg) => write!(f, "WORKDIR {}", quote_arg(arg)),
+            StepKind::Workdir(arg) => write!(f, "WORKDIR {}", quote_arg(arg.as_str())),
             StepKind::Workspace(target) => write!(f, "WORKSPACE {}", target),
-            StepKind::Env { key, value } => write!(f, "ENV {}={}", key, quote_arg(value)),
-            StepKind::Run(cmd) => write!(f, "RUN {}", quote_run(cmd)),
-            StepKind::Echo(msg) => write!(f, "ECHO {}", quote_msg(msg)),
-            StepKind::RunBg(cmd) => write!(f, "RUN_BG {}", quote_run(cmd)),
+            StepKind::Env { key, value } => write!(f, "ENV {}={}", key, quote_arg(value.as_str())),
+            StepKind::Run(cmd) => write!(f, "RUN {}", quote_run(cmd.as_str())),
+            StepKind::Echo(msg) => write!(f, "ECHO {}", quote_msg(msg.as_str())),
+            StepKind::RunBg(cmd) => write!(f, "RUN_BG {}", quote_run(cmd.as_str())),
             StepKind::Copy {
                 from_current_workspace,
                 from,
@@ -628,21 +693,21 @@ impl fmt::Display for StepKind {
                     write!(
                         f,
                         "COPY --from-current-workspace {} {}",
-                        quote_arg(from),
-                        quote_arg(to)
+                        quote_arg(from.as_str()),
+                        quote_arg(to.as_str())
                     )
                 } else {
-                    write!(f, "COPY {} {}", quote_arg(from), quote_arg(to))
+                    write!(f, "COPY {} {}", quote_arg(from.as_str()), quote_arg(to.as_str()))
                 }
             }
             StepKind::Symlink { from, to } => {
-                write!(f, "SYMLINK {} {}", quote_arg(from), quote_arg(to))
+                write!(f, "SYMLINK {} {}", quote_arg(from.as_str()), quote_arg(to.as_str()))
             }
-            StepKind::Mkdir(arg) => write!(f, "MKDIR {}", quote_arg(arg)),
+            StepKind::Mkdir(arg) => write!(f, "MKDIR {}", quote_arg(arg.as_str())),
             StepKind::Ls(arg) => {
                 write!(f, "LS")?;
                 if let Some(a) = arg {
-                    write!(f, " {}", quote_arg(a))?;
+                    write!(f, " {}", quote_arg(a.as_str()))?;
                 }
                 Ok(())
             }
@@ -650,34 +715,34 @@ impl fmt::Display for StepKind {
             StepKind::Read(arg) => {
                 write!(f, "READ")?;
                 if let Some(a) = arg {
-                    write!(f, " {}", quote_arg(a))?;
+                    write!(f, " {}", quote_arg(a.as_str()))?;
                 }
                 Ok(())
             }
             StepKind::Write { path, contents } => {
-                write!(f, "WRITE {}", quote_arg(path))?;
+                write!(f, "WRITE {}", quote_arg(path.as_str()))?;
                 if let Some(body) = contents {
-                    write!(f, " {}", quote_msg(body))?;
+                    write!(f, " {}", quote_msg(body.as_str()))?;
                 }
                 Ok(())
             }
             StepKind::RawWrite { path, contents } => {
-                write!(f, "RAW_WRITE {} {}", quote_arg(path), quote_msg(contents))
+                write!(f, "RAW_WRITE {} {}", quote_arg(path.as_str()), quote_msg(contents.as_str()))
             }
             StepKind::Append { path, contents } => {
-                write!(f, "APPEND {}", quote_arg(path))?;
+                write!(f, "APPEND {}", quote_arg(path.as_str()))?;
                 if let Some(body) = contents {
-                    write!(f, " {}", quote_msg(body))?;
+                    write!(f, " {}", quote_msg(body.as_str()))?;
                 }
                 Ok(())
             }
             StepKind::Expand { path, overrides } => {
                 write!(f, "EXPAND")?;
                 if let Some(p) = path {
-                    write!(f, " {}", quote_arg(p))?;
+                    write!(f, " {}", quote_arg(p.as_str()))?;
                 }
                 for (key, value) in overrides {
-                    write!(f, " {}={}", key, quote_arg(value))?;
+                    write!(f, " {}={}", key, quote_arg(value.as_str()))?;
                 }
                 Ok(())
             }
@@ -687,18 +752,18 @@ impl fmt::Display for StepKind {
                 contents,
             } => {
                 if let Some(digest) = hash {
-                    write!(f, "ASSERT_FILE --hash {} {}", digest, quote_arg(path))
+                    write!(f, "ASSERT_FILE --hash {} {}", digest, quote_arg(path.as_str()))
                 } else {
-                    write!(f, "ASSERT_FILE {}", quote_arg(path))?;
+                    write!(f, "ASSERT_FILE {}", quote_arg(path.as_str()))?;
                     if let Some(body) = contents {
-                        write!(f, " {}", quote_msg(body))?;
+                        write!(f, " {}", quote_msg(body.as_str()))?;
                     }
                     Ok(())
                 }
             }
-            StepKind::AssertDir(arg) => write!(f, "ASSERT_DIR {}", quote_arg(arg)),
-            StepKind::AssertAbsent(arg) => write!(f, "ASSERT_ABSENT {}", quote_arg(arg)),
-            StepKind::AssertStdout(msg) => write!(f, "ASSERT_STDOUT {}", quote_msg(msg)),
+            StepKind::AssertDir(arg) => write!(f, "ASSERT_DIR {}", quote_arg(arg.as_str())),
+            StepKind::AssertAbsent(arg) => write!(f, "ASSERT_ABSENT {}", quote_arg(arg.as_str())),
+            StepKind::AssertStdout(msg) => write!(f, "ASSERT_STDOUT {}", quote_msg(msg.as_str())),
             StepKind::WithIo { bindings, cmd } => {
                 let parts: Vec<String> = bindings.iter().map(format_io_binding).collect();
                 write!(f, "WITH_IO [{}] {}", parts.join(", "), cmd)
@@ -717,21 +782,21 @@ impl fmt::Display for StepKind {
                     write!(
                         f,
                         "COPY_GIT --include-dirty {} {} {}",
-                        quote_arg(rev),
-                        quote_arg(from),
-                        quote_arg(to)
+                        quote_arg(rev.as_str()),
+                        quote_arg(from.as_str()),
+                        quote_arg(to.as_str())
                     )
                 } else {
                     write!(
                         f,
                         "COPY_GIT {} {} {}",
-                        quote_arg(rev),
-                        quote_arg(from),
-                        quote_arg(to)
+                        quote_arg(rev.as_str()),
+                        quote_arg(from.as_str()),
+                        quote_arg(to.as_str())
                     )
                 }
             }
-            StepKind::HashSha256 { path } => write!(f, "HASH_SHA256 {}", quote_arg(path)),
+            StepKind::HashSha256 { path } => write!(f, "HASH_SHA256 {}", quote_arg(path.as_str())),
             StepKind::Exit(code) => write!(f, "EXIT {}", code),
             StepKind::For {
                 var,

@@ -12,11 +12,7 @@
 
 use std::collections::{BTreeSet, HashSet};
 
-use oxdock_parser::{GuardExpr, Step, StepKind, TemplateString};
-
-fn template_text(t: &TemplateString) -> &str {
-    &t.0
-}
+use oxdock_parser::{Arg, GuardExpr, Step, StepKind};
 
 /// Extract `{{ env:KEY }}` placeholder names from a template string.
 fn env_placeholders(template: &str) -> Vec<String> {
@@ -37,8 +33,8 @@ fn env_placeholders(template: &str) -> Vec<String> {
     keys
 }
 
-fn push_path_entry(entries: &mut BTreeSet<String>, template: &TemplateString) {
-    let mut text = template_text(template).trim();
+fn push_path_entry(entries: &mut BTreeSet<String>, arg: &Arg) {
+    let mut text = arg.as_str().trim();
     // Quoted DSL paths keep their quotes through parsing.
     while text.starts_with('"') && text.ends_with('"') && text.len() >= 2 {
         text = text[1..text.len() - 1].trim();
@@ -88,23 +84,23 @@ pub fn plan_input_directives(steps: &[oxdock_parser::Step]) -> (Vec<String>, Vec
         match &step.kind {
             StepKind::Copy { from, .. } => {
                 push_path_entry(&mut changed, from);
-                collect_env_keys(&mut env_changed, template_text(from), &assigned);
+                collect_env_keys(&mut env_changed, from.as_str(), &assigned);
             }
             StepKind::CopyGit { from, .. } => {
                 push_path_entry(&mut changed, from);
-                collect_env_keys(&mut env_changed, template_text(from), &assigned);
+                collect_env_keys(&mut env_changed, from.as_str(), &assigned);
             }
             StepKind::Symlink { from, .. } => {
                 push_path_entry(&mut changed, from);
-                collect_env_keys(&mut env_changed, template_text(from), &assigned);
+                collect_env_keys(&mut env_changed, from.as_str(), &assigned);
             }
             StepKind::HashSha256 { path } => {
                 push_path_entry(&mut changed, path);
-                collect_env_keys(&mut env_changed, template_text(path), &assigned);
+                collect_env_keys(&mut env_changed, path.as_str(), &assigned);
             }
             StepKind::Read(Some(path)) => {
                 push_path_entry(&mut changed, path);
-                collect_env_keys(&mut env_changed, template_text(path), &assigned);
+                collect_env_keys(&mut env_changed, path.as_str(), &assigned);
             }
             _ => {}
         }
@@ -133,8 +129,8 @@ fn collect_env_keys(out: &mut BTreeSet<String>, template: &str, assigned: &HashS
 pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
     let mut keys = BTreeSet::new();
 
-    fn template_keys(out: &mut BTreeSet<String>, t: &TemplateString) {
-        out.extend(env_placeholders(template_text(t)));
+    fn template_keys(out: &mut BTreeSet<String>, t: &Arg) {
+        out.extend(env_placeholders(t.as_str()));
     }
 
     fn walk_guard(out: &mut BTreeSet<String>, expr: &GuardExpr) {
@@ -323,12 +319,12 @@ mod tests {
 
         // The ENV step's value template is not reachable through the string
         // grammar, so exercise that traversal arm directly.
-        use oxdock_parser::{Step, TemplateString};
+        use oxdock_parser::{Arg, Step, TemplateString};
         let env_step = Step {
             guard: None,
             kind: StepKind::Env {
                 key: "A".into(),
-                value: TemplateString("{{ env:SEED }}".into()),
+                value: Arg::Template(TemplateString("{{ env:SEED }}".into())),
             },
             scope_enter: 0,
             scope_exit: 0,

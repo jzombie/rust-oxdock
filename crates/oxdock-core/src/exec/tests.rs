@@ -5,7 +5,8 @@ use anyhow::bail;
 use oxdock_fs::{GuardedPath, MockFs};
 use oxdock_parser::{Guard, GuardExpr, IoBinding, IoStream, StepKind};
 use oxdock_process::{
-    CommandMode, CommandOptions, CommandResult, MockProcessManager, MockRunCall, ProcessManager,
+    CommandContext, CommandMode, CommandOptions, CommandResult, MockProcessManager, MockRunCall,
+    ProcessManager,
 };
 use oxdock_sys_test_utils::exit_status_from_code;
 use std::collections::HashMap;

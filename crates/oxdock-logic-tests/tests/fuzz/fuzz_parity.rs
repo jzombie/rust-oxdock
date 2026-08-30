@@ -198,7 +198,7 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
         }),
         (safe_string(), safe_string()).prop_map(|(path, contents)| StepKind::RawWrite {
             path: path.into(),
-            contents,
+            contents: Arg::Literal(contents),
         }),
         (safe_string(), safe_string(), safe_string()).prop_map(|(rev, from, to)| {
             StepKind::CopyGit {

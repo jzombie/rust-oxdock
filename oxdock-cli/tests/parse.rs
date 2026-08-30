@@ -1,5 +1,6 @@
 use indoc::indoc;
 use oxdock_cli::{Options, ScriptSource, Step, StepKind, parse_script};
+use oxdock_parser::Arg;
 use oxdock_fs::{GuardedPath, GuardedTempDir};
 
 fn workspace_root() -> GuardedTempDir {
@@ -143,14 +144,14 @@ fn parse_semicolon_splits_multiple_instructions() {
     match &steps[0].kind {
         StepKind::Write { path, contents } => {
             assert_eq!(path, "one.txt");
-            assert_eq!(contents.as_deref(), Some("1"));
+            assert_eq!(contents.as_ref().map(Arg::as_str), Some("1"));
         }
         _ => panic!("expected first WRITE"),
     }
     match &steps[1].kind {
         StepKind::Write { path, contents } => {
             assert_eq!(path, "two.txt");
-            assert_eq!(contents.as_deref(), Some("2"));
+            assert_eq!(contents.as_ref().map(Arg::as_str), Some("2"));
         }
         _ => panic!("expected second WRITE"),
     }
