@@ -202,10 +202,20 @@ impl GuardedPath {
             pattern
         };
         let posix = clean.replace('\\', "/");
+        let path_pattern = Path::new(&posix);
+
+        let rel_pattern = if path_pattern.is_absolute() {
+            path_pattern
+                .strip_prefix(&self.root)
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_else(|_| posix.trim_start_matches('/').to_string())
+        } else {
+            posix.trim_start_matches('/').to_string()
+        };
+
         let root_str = self.root.to_string_lossy().replace('\\', "/");
         let escaped_root = glob::Pattern::escape(&root_str);
-        let rel = posix.strip_prefix(&root_str).unwrap_or(&posix).trim_start_matches('/');
-        let search = format!("{}/{}", escaped_root, rel);
+        let search = format!("{}/{}", escaped_root, rel_pattern);
 
         let mut results = Vec::new();
         for entry in glob::glob(&search).map_err(|e| {
