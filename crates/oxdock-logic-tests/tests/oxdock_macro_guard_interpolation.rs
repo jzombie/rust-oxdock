@@ -76,3 +76,29 @@ fn guard_not_interpolation() {
     run_steps_with_context_result_with_io(&root, &root, &steps, io_set).unwrap();
     assert!(!file.exists(), "file should not exist when negated guard fails");
 }
+
+#[test]
+fn guard_static_bool_interpolation() {
+    let flag = true;
+    let steps = oxdock! {
+        [bool:#flag] WRITE bool-test.txt passed
+    };
+
+    let root = GuardedPath::new_root(Path::new(".")).unwrap();
+
+    // Guard passes: flag is true
+    let io = ExecIo::new();
+    run_steps_with_context_result_with_io(&root, &root, &steps, io).unwrap();
+    let file = root.join("bool-test.txt").unwrap();
+    assert!(file.exists(), "file should exist when bool guard is true");
+
+    // Guard fails: flag is false
+    std::fs::remove_file(file.as_path()).ok();
+    let flag = false;
+    let steps = oxdock! {
+        [bool:#flag] WRITE bool-test.txt should-not-exist
+    };
+    let io = ExecIo::new();
+    run_steps_with_context_result_with_io(&root, &root, &steps, io).unwrap();
+    assert!(!file.exists(), "file should not exist when bool guard is false");
+}

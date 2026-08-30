@@ -1061,6 +1061,10 @@ fn emit_guard_pred(
             let v = resolve_placeholder_or_literal(value, interp);
             quote! { oxdock_parser::Guard::EnvEquals { key: #k, value: #v, invert: #invert } }
         }
+        oxdock_parser::Guard::StaticBool { value, invert } => {
+            let v = resolve_placeholder_or_literal(value, interp);
+            quote! { oxdock_parser::Guard::StaticBool { value: #v, invert: #invert } }
+        }
     }
 }
 

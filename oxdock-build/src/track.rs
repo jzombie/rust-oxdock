@@ -146,6 +146,7 @@ pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
                     out.insert(key.clone());
                 }
                 oxdock_parser::Guard::Platform { .. } => {}
+                oxdock_parser::Guard::StaticBool { .. } => {}
             },
             GuardExpr::All(children) | GuardExpr::Or(children) => {
                 for child in children {

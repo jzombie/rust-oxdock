@@ -178,6 +178,10 @@ pub enum Guard {
         value: String,
         invert: bool,
     },
+    StaticBool {
+        value: String,
+        invert: bool,
+    },
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -523,6 +527,10 @@ pub fn guard_allows(guard: &Guard, script_envs: &HashMap<String, String>) -> boo
                 .unwrap_or(false);
             if *invert { !res } else { res }
         }
+        Guard::StaticBool { value, invert } => {
+            let b = value.parse::<bool>().unwrap_or(false);
+            b != *invert
+        }
     }
 }
 
@@ -579,6 +587,13 @@ impl fmt::Display for Guard {
                     write!(f, "env:{}!={}", key, value)
                 } else {
                     write!(f, "env:{}=={}", key, value)
+                }
+            }
+            Guard::StaticBool { value, invert } => {
+                if *invert {
+                    write!(f, "!bool:{}", value)
+                } else {
+                    write!(f, "bool:{}", value)
                 }
             }
         }

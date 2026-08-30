@@ -76,6 +76,10 @@ fn invert_guard_predicate(guard: Guard) -> Guard {
             value,
             invert: !invert,
         },
+        Guard::StaticBool { value, invert } => Guard::StaticBool {
+            value,
+            invert: !invert,
+        },
     }
 }
 

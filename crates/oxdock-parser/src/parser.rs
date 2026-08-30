@@ -1255,12 +1255,28 @@ fn invert_guard(guard: Guard) -> Guard {
             value,
             invert: !invert,
         },
+        Guard::StaticBool { value, invert } => Guard::StaticBool {
+            value,
+            invert: !invert,
+        },
     }
 }
 
 fn parse_guard_term(pair: Pair<Rule>) -> Result<Guard> {
     for inner in pair.into_inner() {
         match inner.as_rule() {
+            Rule::bool_guard => {
+                let val = inner
+                    .into_inner()
+                    .find(|p| p.as_rule() == Rule::bool_value)
+                    .expect("grammar invariant violated: bool_guard missing bool_value")
+                    .as_str()
+                    .to_string();
+                return Ok(Guard::StaticBool {
+                    value: val,
+                    invert: false,
+                });
+            }
             Rule::env_guard => return parse_env_guard(inner),
             Rule::bare_guard_ident => {
                 let tag = inner.as_str();
