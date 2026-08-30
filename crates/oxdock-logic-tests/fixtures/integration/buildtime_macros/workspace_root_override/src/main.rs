@@ -1,6 +1,6 @@
-use oxdock_buildtime_macros::embed;
+use oxdock_macros::oxdock_embed;
 
-embed! {
+oxdock_embed! {
     name: WorkspaceAssets,
     script: {
         WORKDIR /

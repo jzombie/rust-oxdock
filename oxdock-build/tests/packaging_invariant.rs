@@ -8,7 +8,7 @@
 use std::collections::BTreeSet;
 
 use anyhow::Result;
-use oxdock_buildtime_helpers::{DslSource, EmbedSpec, execution_is_skipped_with, try_embed_assets};
+use oxdock_build::{DslSource, EmbedSpec, execution_is_skipped_with, try_embed_assets};
 use oxdock_fs::{GuardedPath, PathResolver, normalized_path, to_forward_slashes};
 use oxdock_sys_test_utils::TestEnvGuard;
 

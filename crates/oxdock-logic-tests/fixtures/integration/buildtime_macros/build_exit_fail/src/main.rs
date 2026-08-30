@@ -1,9 +1,9 @@
-use oxdock_buildtime_macros::embed;
+use oxdock_macros::oxdock_embed;
 
 mod demo_assets {
     use super::*;
 
-    embed! {
+    oxdock_embed! {
         name: DemoAssets,
         script: "EXIT 5",
         out_dir: "prebuilt",

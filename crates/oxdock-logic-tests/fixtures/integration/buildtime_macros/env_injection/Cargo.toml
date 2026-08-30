@@ -10,8 +10,8 @@ default = ["oxdock_test"]
 oxdock_test = []
 
 [dependencies]
-oxdock-buildtime-macros.workspace = true
+oxdock-macros.workspace = true
 oxdock-embed.workspace = true
 
 [build-dependencies]
-oxdock-buildtime-helpers.workspace = true
+oxdock-build.workspace = true

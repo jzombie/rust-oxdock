@@ -4,12 +4,12 @@ Every ```` ```oxdock ```` fence in this document is extracted with [`oxdock_pars
 
 - **Parse & execute:** every snippet must parse and run clean (or fail with its declared `expect_error:` message) on Linux, macOS, and Windows CI.
 - **Coverage gates:** every parser command must appear in at least one executable example, and key structural features (`or(`, `{{ env:`, `[env:`) must be demonstrated.
-- **Compile-time parity:** a [build-time fixture](./crates/oxdock-logic-tests/fixtures/integration/buildtime_macros/assert_verification/) runs this README's quick-start script through `embed!`, assertions included.
+- **Compile-time parity:** a [build-time fixture](./crates/oxdock-logic-tests/fixtures/integration/buildtime_macros/assert_verification/) runs this README's quick-start script through `oxdock_embed!`, assertions included.
 - **Real-binary check:** the quick start is additionally executed through the actual `oxdock` binary exactly as documented (`--script Oxfile`).
 - **Doctest execution:** the Rust quick start is wired into [`crates/oxdock-doc-tests`](./crates/oxdock-doc-tests/) and compiled *and* run by `cargo test --doc` on every CI OS.
 - **Reference integrity:** every relative Markdown link target and every repo path referenced from a ```` ```bash ```` fence must exist.
 
-Snippets contain nothing but OxDock — copy any of them straight into an `Oxfile` or an `embed!` macro. Runner-specific configuration lives in the fence info-string, which Markdown renders as inert metadata:
+Snippets contain nothing but OxDock — copy any of them straight into an `Oxfile` or an `oxdock_embed!` macro. Runner-specific configuration lives in the fence info-string, which Markdown renders as inert metadata:
 
 ```text
 ```oxdock                                    plain snippet, must parse and run clean

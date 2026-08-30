@@ -1,6 +1,6 @@
 //! Build-script asset pipeline: executes an OxDock DSL script in a tempdir
 //! sandbox, materializes the final workdir under `$OUT_DIR`, and emits the
-//! typed module consumed by `oxdock_buildtime_macros::embed!`.
+//! typed module consumed by `oxdock_macros::embed!`.
 //!
 //! Contract:
 //! - IDE/miri skip predicates write a placeholder module (typed surface,

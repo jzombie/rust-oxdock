@@ -15,7 +15,7 @@ use proc_macro2::{Delimiter, LineColumn, Spacing, TokenStream as TokenStream2, T
 use syn::parse::{Parse, ParseStream};
 use syn::{Ident, LitStr, Token};
 
-/// Parsed macro arguments for `embed!` and `prepare!`.
+/// Parsed macro arguments for `oxdock_embed!` and `oxdock_prepare!`.
 pub struct DslMacroInput {
     pub name: Ident,
     pub script: ScriptSource,
@@ -149,6 +149,14 @@ fn line_expects_inner_command(line: &str) -> bool {
     )
 }
 
+/// Check if the current line contains a FOR or LET keyword, which also
+/// expect a brace block on the same line (like WITH_IO).
+fn line_has_for_or_let(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    let head = trimmed.split_whitespace().next().unwrap_or("");
+    matches!(head, "FOR" | "LET")
+}
+
 fn line_is_run_context(line: &str) -> bool {
     matches!(
         current_line_command(line),
@@ -193,9 +201,10 @@ fn walk(
                                     &mut inner_span_end,
                                 )?;
                                 push_fragment(line, &close.to_string(), false);
-                            } else if *last_was_command {
+                            } else if *last_was_command || line_has_for_or_let(line) {
                                 // Keep the opening brace attached to commands that expect an inner block
-                                // (e.g., WITH_IO block form), then break to a new line for the body.
+                                // (e.g., WITH_IO block form), or to FOR/LET statements whose brace
+                                // block must stay on the same line for the Pest grammar.
                                 push_fragment(line, &open.to_string(), gap_space);
                                 finalize_line(lines, line, capture_has_inner);
                                 *last_was_command = false;

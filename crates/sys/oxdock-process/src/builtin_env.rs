@@ -19,7 +19,7 @@ impl BuiltinEnv {
         {
             // Propagate Cargo-provided feature/cfg envs into the OxDock environment.
             // Note: proc-macro processes do NOT receive these by default; the
-            // oxdock-buildtime-helpers build script emits them via rustc-env.
+            // oxdock-build build script emits them via rustc-env.
             // These are already namespaced by Cargo (CARGO_FEATURE_*, CARGO_CFG_*).
             for (key, value) in std::env::vars() {
                 if key.starts_with("CARGO_FEATURE_") || key.starts_with("CARGO_CFG_") {

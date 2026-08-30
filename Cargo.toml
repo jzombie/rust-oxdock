@@ -10,8 +10,8 @@ members = [
     "crates/sys/oxdock-fs",
     "crates/sys/oxdock-process",
     "crates/sys/oxdock-sys-test-utils",
-    "oxdock-buildtime-helpers",
-    "oxdock-buildtime-macros",
+    "oxdock-build",
+    "oxdock-macros",
     "oxdock-cli",
 ]
 resolver = "2"
@@ -31,8 +31,8 @@ indoc = "2.0.7"
 libc = "0.2.189"
 libtest-mimic = "0.8.2"
 line-ending = "1.5.1"
-oxdock-buildtime-helpers = { path = "oxdock-buildtime-helpers", version = "0.7.0-alpha" }
-oxdock-buildtime-macros = { path = "oxdock-buildtime-macros", version = "0.7.0-alpha" }
+oxdock-build = { path = "oxdock-build", version = "0.7.0-alpha" }
+oxdock-macros = { path = "oxdock-macros", version = "0.7.0-alpha" }
 oxdock-core = { path = "crates/oxdock-core", version = "0.7.0-alpha" }
 oxdock-embed = { path = "crates/oxdock-embed", version = "0.7.0-alpha" }
 oxdock-fixture = { path = "crates/oxdock-fixture", version = "0.7.0-alpha" }

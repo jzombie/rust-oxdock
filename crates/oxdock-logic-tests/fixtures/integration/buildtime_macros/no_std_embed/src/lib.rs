@@ -5,9 +5,9 @@ extern crate alloc;
 use alloc::borrow::Cow;
 use core::str;
 
-use oxdock_buildtime_macros::embed;
+use oxdock_macros::oxdock_embed;
 
-embed! {
+oxdock_embed! {
     name: FirmwareAssets,
     script: {
         WORKDIR /
@@ -17,7 +17,7 @@ embed! {
     out_dir: "prebuilt",
 }
 
-embed! {
+oxdock_embed! {
     name: BrandingAssets,
     script: {
         WORKDIR /

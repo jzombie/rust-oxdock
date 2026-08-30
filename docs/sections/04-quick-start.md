@@ -32,9 +32,9 @@ oxdock --script Oxfile
 Or embed the same script at compile time — the macro runs the script during `rustc` and generates a pure-Rust struct whose assets live in the binary's data section, readable at runtime with zero heap allocation:
 
 ```rust
-use oxdock_buildtime_macros::embed;
+use oxdock_macros::oxdock_embed;
 
-embed! {
+oxdock_embed! {
     // Embedded resources are mapped to `HelloAssets::get(resource)`
     name: HelloAssets,
     script: {

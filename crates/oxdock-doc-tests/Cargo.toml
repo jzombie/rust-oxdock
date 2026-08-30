@@ -9,7 +9,7 @@ repository.workspace = true
 publish = false
 
 [package.metadata.cargo-udeps.ignore]
-development = ["oxdock-buildtime-macros"]
+development = ["oxdock-macros"]
 
 [dev-dependencies]
-oxdock-buildtime-macros.workspace = true
+oxdock-macros.workspace = true

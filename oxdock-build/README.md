@@ -1,4 +1,4 @@
-# oxdock-buildtime-helpers
+# oxdock-build
 
 Build script helpers for OxDock.
 
@@ -6,20 +6,20 @@ Build script helpers for OxDock.
 
 ## License
 
-`oxdock-buildtime-helpers` is distributed under the terms of the Apache License (Version 2.0).
+`oxdock-build` is distributed under the terms of the Apache License (Version 2.0).
 - `emit_feature_envs()`: forward `CARGO_FEATURE_*` and `CARGO_CFG_FEATURE`
 - `emit_cfg_envs()`: forward `CARGO_CFG_*` derived from `rustc --print cfg`
 - `emit_feature_and_cfg_envs()`: calls both
 
 Build-script helpers for forwarding Cargo feature/cfg information to [OxDock's proc-macro
-execution environment](../oxdock-buildtime-macros).
+execution environment](../oxdock-macros).
 
 > **This crate is intended to be called from a `build.rs` build script. It is not
 meant to run at application runtime.**
 
 ```rust
 fn main() {
-    oxdock_buildtime_helpers::emit_feature_and_cfg_envs()
+    oxdock_build::emit_feature_and_cfg_envs()
         .expect("failed to emit feature/cfg envs");
 }
 ```

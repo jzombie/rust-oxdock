@@ -190,6 +190,7 @@ dependencies = [
  "line-ending",
  "oxdock-core",
  "oxdock-fs",
+ "oxdock-macros",
  "oxdock-parser",
  "toml_edit",
 ]
@@ -361,7 +362,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
-name = "oxdock-buildtime-helpers"
+name = "oxdock-build"
 version = "0.7.0-alpha"
 dependencies = [
  "anyhow",
@@ -373,23 +374,6 @@ dependencies = [
  "oxdock-sys-test-utils",
  "proc-macro2",
  "sha2",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "oxdock-buildtime-macros"
-version = "0.7.0-alpha"
-dependencies = [
- "anyhow",
- "oxdock-buildtime-helpers",
- "oxdock-core",
- "oxdock-embed",
- "oxdock-fs",
- "oxdock-parser",
- "oxdock-process",
- "oxdock-sys-test-utils",
- "proc-macro2",
- "quote",
  "syn 2.0.119",
 ]
 
@@ -424,7 +408,7 @@ dependencies = [
 name = "oxdock-doc-tests"
 version = "0.7.0-alpha"
 dependencies = [
- "oxdock-buildtime-macros",
+ "oxdock-macros",
 ]
 
 [[package]]
@@ -479,6 +463,23 @@ dependencies = [
  "proc-macro2",
  "proptest",
  "toml_edit",
+]
+
+[[package]]
+name = "oxdock-macros"
+version = "0.7.0-alpha"
+dependencies = [
+ "anyhow",
+ "oxdock-build",
+ "oxdock-core",
+ "oxdock-embed",
+ "oxdock-fs",
+ "oxdock-parser",
+ "oxdock-process",
+ "oxdock-sys-test-utils",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.119",
 ]
 
 [[package]]

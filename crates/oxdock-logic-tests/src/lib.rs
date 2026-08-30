@@ -224,12 +224,12 @@ pub mod harness {
 
         let fixture = builder
             .with_path_dependency(
-                "oxdock-buildtime-macros",
-                workspace_root.join("oxdock-buildtime-macros")?.to_string(),
+                "oxdock-macros",
+                workspace_root.join("oxdock-macros")?.to_string(),
             )
             .with_path_dependency(
-                "oxdock-buildtime-helpers",
-                workspace_root.join("oxdock-buildtime-helpers")?.to_string(),
+                "oxdock-build",
+                workspace_root.join("oxdock-build")?.to_string(),
             )
             .with_path_dependency(
                 "oxdock-embed",

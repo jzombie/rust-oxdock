@@ -1,6 +1,6 @@
 [package]
-name = "oxdock-buildtime-helpers"
-description = "Build script helpers for OxDock."
+name = "oxdock-macros"
+description = "Proc macros for OxDock: compile-time embedding, runtime AST construction, and DSL processing."
 authors.workspace = true
 version.workspace = true
 edition.workspace = true
@@ -8,15 +8,19 @@ license.workspace = true
 repository.workspace = true
 publish.workspace = true
 
+[lib]
+proc-macro = true
+
 [dependencies]
 anyhow.workspace = true
+oxdock-build.workspace = true
 oxdock-core = { workspace = true }
 oxdock-embed.workspace = true
 oxdock-fs.workspace = true
 oxdock-parser = { workspace = true, features = ["proc-macro-api"] }
-oxdock-process.workspace = true
+oxdock-process = { workspace = true }
 proc-macro2.workspace = true
-sha2.workspace = true
+quote.workspace = true
 syn.workspace = true
 
 [dev-dependencies]

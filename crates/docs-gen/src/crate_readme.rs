@@ -1,8 +1,9 @@
 use anyhow::Result;
 use oxdock_core::ExecIo;
+use oxdock_macros::oxdock;
 use std::path::{Path, PathBuf};
 
-use crate::doc_runner::{DocSpec, assemble_doc};
+use crate::doc_runner::assemble_doc;
 
 pub fn generate_all(repo_root: &Path) -> Result<()> {
     let crates_dir = repo_root.join("docs/crates");
@@ -65,16 +66,16 @@ fn generate_one(
     io.insert_inherit_env("CRATE_NAME", &metadata.name);
     io.insert_inherit_env("CRATE_DESCRIPTION", &metadata.description);
 
-    assemble_doc(
-        repo_root,
-        DocSpec {
-            template: Some(template_path),
-            sections_dir: crate_doc_dir,
-            output_path: &out_path,
-            inherit_keys: &["CRATE_NAME", "CRATE_DESCRIPTION"],
-        },
-        io,
-    )
+    let template_str = template_path.display().to_string();
+    let out_str = out_path.display().to_string();
+
+    let init_steps = oxdock! {
+        INHERIT_ENV [CRATE_NAME, CRATE_DESCRIPTION]
+        WITH_IO [stdout=pipe:base] EXPAND #template_str
+        WITH_IO [stdin=pipe:base] WRITE #out_str
+    };
+
+    assemble_doc(repo_root, init_steps, crate_doc_dir, &out_path, io)
 }
 
 struct CargoMetadata {

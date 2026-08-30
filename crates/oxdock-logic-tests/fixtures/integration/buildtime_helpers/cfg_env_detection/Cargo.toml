@@ -10,4 +10,4 @@ default = ["fixture_feature"]
 fixture_feature = []
 
 [build-dependencies]
-oxdock-buildtime-helpers.workspace = true
+oxdock-build.workspace = true

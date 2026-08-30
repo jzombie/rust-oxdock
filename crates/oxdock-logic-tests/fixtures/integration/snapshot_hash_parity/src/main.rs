@@ -1,4 +1,4 @@
-use oxdock_buildtime_macros::{embed, prepare};
+use oxdock_macros::{oxdock_embed, oxdock_prepare};
 use oxdock_cli::{ExecutionResult, Options, ScriptSource, execute_with_result};
 use oxdock_core::{ExecIo, run_steps_with_context_result_with_io};
 use oxdock_fs::{GuardedPath, PathResolver};
@@ -7,7 +7,7 @@ use std::error::Error;
 
 // TODO: For the main SnapshotAssets single-file hash, ensure that matches with the metadata hash defined with the SnapshotAssets.
 
-embed! {
+oxdock_embed! {
     name: SnapshotAssets,
     script: {
         MKDIR data/inner
@@ -27,7 +27,7 @@ embed! {
     out_dir: "prebuilt",
 }
 
-prepare! {
+oxdock_prepare! {
     name: SnapshotPrepared,
     script: {
         MKDIR data/inner

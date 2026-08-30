@@ -8,5 +8,5 @@ license = "Apache-2.0"
 [workspace]
 
 [dependencies]
-oxdock-buildtime-macros.workspace = true
+oxdock-macros.workspace = true
 oxdock-embed.workspace = true

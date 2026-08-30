@@ -33,7 +33,7 @@
 
 # OxDock
 
-OxDock is a Dockerfile-inspired DSL that runs **natively on your host** — no containers, no daemon, no VM. It comes in two flavors sharing one core: a [Rust build-time macro](./oxdock-buildtime-macros/) whose scripts run during compilation, embedding resources directly into the binary's data section (no heap allocation when the program starts; the generated asset structs are pure Rust and work in `no_std` targets), and a [standalone CLI](./oxdock-cli/) that orchestrates cross-platform workflows as ordinary local processes.
+OxDock is a Dockerfile-inspired DSL that runs **natively on your host** — no containers, no daemon, no VM. It comes in two flavors sharing one core: a [Rust build-time macro](./oxdock-macros/) whose scripts run during compilation, embedding resources directly into the binary's data section (no heap allocation when the program starts; the generated asset structs are pure Rust and work in `no_std` targets), and a [standalone CLI](./oxdock-cli/) that orchestrates cross-platform workflows as ordinary local processes.
 
 Unlike Docker, commands execute directly on the host: they can be guarded by platform/env conditions, run inside scoped blocks so changes to `ENV` or `WORKDIR` don’t leak, and interoperate with containers whenever you want them — you can invoke Docker from an OxDock script, or even install Docker, while the DSL itself stays portable.
 
@@ -41,7 +41,7 @@ Unlike Docker, commands execute directly on the host: they can be guarded by pla
 
 OxDock comes in two variants, each of which are independent of the other, but share the same core:
 
-- [oxdock-buildtime-macros](./oxdock-buildtime-macros/): Provides a Rust build-time dependency which runs OxDock scripts during the compilation of a Rust program.
+- [oxdock-macros](./oxdock-macros/): Provides a Rust build-time dependency which runs OxDock scripts during the compilation of a Rust program.
 - [oxdock-cli](./oxdock-cli/): Command-line interface for running OxDock scripts from the command line.
 
 ## Goals
@@ -86,9 +86,9 @@ oxdock --script Oxfile
 Or embed the same script at compile time — the macro runs the script during `rustc` and generates a pure-Rust struct whose assets live in the binary's data section, readable at runtime with zero heap allocation:
 
 ```rust
-use oxdock_buildtime_macros::embed;
+use oxdock_macros::oxdock_embed;
 
-embed! {
+oxdock_embed! {
     // Embedded resources are mapped to `HelloAssets::get(resource)`
     name: HelloAssets,
     script: {
@@ -806,12 +806,12 @@ Every ```` ```oxdock ```` fence in this document is extracted with [`oxdock_pars
 
 - **Parse & execute:** every snippet must parse and run clean (or fail with its declared `expect_error:` message) on Linux, macOS, and Windows CI.
 - **Coverage gates:** every parser command must appear in at least one executable example, and key structural features (`or(`, `{{ env:`, `[env:`) must be demonstrated.
-- **Compile-time parity:** a [build-time fixture](./crates/oxdock-logic-tests/fixtures/integration/buildtime_macros/assert_verification/) runs this README's quick-start script through `embed!`, assertions included.
+- **Compile-time parity:** a [build-time fixture](./crates/oxdock-logic-tests/fixtures/integration/buildtime_macros/assert_verification/) runs this README's quick-start script through `oxdock_embed!`, assertions included.
 - **Real-binary check:** the quick start is additionally executed through the actual `oxdock` binary exactly as documented (`--script Oxfile`).
 - **Doctest execution:** the Rust quick start is wired into [`crates/oxdock-doc-tests`](./crates/oxdock-doc-tests/) and compiled *and* run by `cargo test --doc` on every CI OS.
 - **Reference integrity:** every relative Markdown link target and every repo path referenced from a ```` ```bash ```` fence must exist.
 
-Snippets contain nothing but OxDock — copy any of them straight into an `Oxfile` or an `embed!` macro. Runner-specific configuration lives in the fence info-string, which Markdown renders as inert metadata:
+Snippets contain nothing but OxDock — copy any of them straight into an `Oxfile` or an `oxdock_embed!` macro. Runner-specific configuration lives in the fence info-string, which Markdown renders as inert metadata:
 
 ```text
 ```oxdock                                    plain snippet, must parse and run clean
