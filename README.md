@@ -36,14 +36,12 @@ OxDock is a Dockerfile-inspired DSL that runs **natively on your host** — no c
 
 Unlike Docker, commands execute directly on the host: they can be guarded by platform/env conditions, run inside scoped blocks so changes to `ENV` or `WORKDIR` don’t leak, and interoperate with containers whenever you want them — you can invoke Docker from an OxDock script, or even install Docker, while the DSL itself stays portable.
 
-
 ## Variants
 
 OxDock comes in two variants, each of which are independent of the other, but share the same core:
 
 - [oxdock-buildtime-macros](./oxdock-buildtime-macros/): Provides a Rust build-time dependency which runs OxDock scripts during the compilation of a Rust program.
 - [oxdock-cli](./oxdock-cli/): Command-line interface for running OxDock scripts from the command line.
-
 
 ## Goals
 
