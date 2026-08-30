@@ -1040,7 +1040,7 @@ fn emit_guard(
 
 fn emit_guard_pred(
     g: &oxdock_parser::Guard,
-    _interp: &[(proc_macro2::Ident, usize)],
+    interp: &[(proc_macro2::Ident, usize)],
 ) -> proc_macro2::TokenStream {
     match g {
         oxdock_parser::Guard::Platform { target, invert } => {
@@ -1053,11 +1053,30 @@ fn emit_guard_pred(
             quote! { oxdock_parser::Guard::Platform { target: oxdock_parser::PlatformGuard::#target_variant, invert: #invert } }
         }
         oxdock_parser::Guard::EnvExists { key, invert } => {
-            quote! { oxdock_parser::Guard::EnvExists { key: #key.to_string(), invert: #invert } }
+            let k = resolve_placeholder_or_literal(key, interp);
+            quote! { oxdock_parser::Guard::EnvExists { key: #k, invert: #invert } }
         }
         oxdock_parser::Guard::EnvEquals { key, value, invert } => {
-            quote! { oxdock_parser::Guard::EnvEquals { key: #key.to_string(), value: #value.to_string(), invert: #invert } }
+            let k = resolve_placeholder_or_literal(key, interp);
+            let v = resolve_placeholder_or_literal(value, interp);
+            quote! { oxdock_parser::Guard::EnvEquals { key: #k, value: #v, invert: #invert } }
         }
+    }
+}
+
+fn resolve_placeholder_or_literal(
+    s: &str,
+    interp: &[(proc_macro2::Ident, usize)],
+) -> proc_macro2::TokenStream {
+    if let Some(idx) = is_placeholder(s) {
+        let ident = &interp
+            .iter()
+            .find(|(_, i)| *i == idx)
+            .expect("unmapped placeholder index in guard predicate")
+            .0;
+        quote! { #ident.to_string() }
+    } else {
+        quote! { #s.to_string() }
     }
 }
 
