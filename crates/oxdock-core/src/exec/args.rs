@@ -98,23 +98,19 @@ fn evaluate_glob<P: ProcessManager>(args: &[Expr], cx: &mut StepCtx<'_, P>) -> R
         _ => bail!("GLOB pattern argument must evaluate to a string"),
     };
 
-    // Normalize backslashes to forward slashes before escaping (Windows paths)
-    let norm_root = cx.state.fs.root().as_path().to_string_lossy().replace('\\', "/");
-    let escaped_root = glob::Pattern::escape(&norm_root);
-    let full_pattern = format!("{}/{}", escaped_root, raw_pattern.trim_start_matches('/'));
-
-    let root = cx.state.fs.root().as_path().to_path_buf();
-    let mut entries: Vec<String> = glob::glob(&full_pattern)?
-        .filter_map(|e| e.ok())
-        // Strip root prefix to return workspace-relative paths
+    let root = cx.state.fs.root().clone();
+    let root_path = root.as_path().to_path_buf();
+    let mut entries: Vec<String> = root
+        .glob_paths(&raw_pattern)?
+        .into_iter()
         .filter_map(|p| {
-            p.strip_prefix(&root)
+            p.strip_prefix(&root_path)
                 .ok()
                 .map(|rel| rel.to_string_lossy().replace('\\', "/"))
         })
         .collect();
 
-    entries.sort(); // Deterministic order
+    entries.sort();
     Ok(Value::List(entries))
 }
 

@@ -4,21 +4,10 @@ OxDock binary embedding layer.
 
 > Part of the [OxDock](https://github.com/jzombie/rust-oxdock) workspace.
 
-## Overview
+## License
 
+`oxdock-embed` is distributed under the terms of the Apache License (Version 2.0).
 Generates the runtime `EmbeddedFile` module that the `embed!` macro emits.
 At build time it hashes, stamps, and serialises every asset; at run time the
 generated struct exposes `get(path) -> Option<EmbeddedFile>` and `iter()` over
 all embedded filenames.
-
-## Quick Start
-
-See the [API documentation](https://docs.rs/oxdock-embed).
-
-## API
-
-See the [API documentation](https://docs.rs/oxdock-embed).
-
-## License
-
-`oxdock-embed` is distributed under the terms of the Apache License (Version 2.0).

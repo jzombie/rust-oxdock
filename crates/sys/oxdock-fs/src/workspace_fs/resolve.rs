@@ -128,7 +128,9 @@ impl PathResolver {
     }
 
     fn resolve(&self, cwd: &GuardedPath, rel: &str, mode: AccessMode) -> Result<GuardedPath> {
-        let rel_path = Path::new(rel);
+        // Normalize backslashes to forward slashes before path construction
+        let normalized = to_forward_slashes(rel);
+        let rel_path = Path::new(&normalized);
         if Self::is_absolute_or_rooted(rel_path) {
             if let Ok(guarded) = self.check_access(rel_path, mode) {
                 return Ok(guarded);
@@ -138,7 +140,7 @@ impl PathResolver {
             return self.check_access(&candidate, mode);
         }
 
-        let candidate = cwd.as_path().join(rel);
+        let candidate = cwd.as_path().join(rel_path);
         self.check_access(&candidate, mode)
     }
 

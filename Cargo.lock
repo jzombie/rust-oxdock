@@ -412,7 +412,6 @@ name = "oxdock-core"
 version = "0.7.0-alpha"
 dependencies = [
  "anyhow",
- "glob",
  "indoc",
  "oxdock-fs",
  "oxdock-parser",
@@ -456,6 +455,7 @@ name = "oxdock-fs"
 version = "0.7.0-alpha"
 dependencies = [
  "anyhow",
+ "glob",
  "libc",
  "oxdock-sys-test-utils",
  "tempfile",

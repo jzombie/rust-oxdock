@@ -191,6 +191,33 @@ impl GuardedPath {
     pub(crate) fn from_guarded_parts(root: PathBuf, path: PathBuf) -> Self {
         Self { root, path }
     }
+
+    /// Evaluate a glob pattern against the sandbox root.
+    /// Normalizes backslashes, escapes the root path, and returns workspace-relative paths.
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    pub fn glob_paths(&self, pattern: &str) -> std::result::Result<Vec<PathBuf>, std::io::Error> {
+        let clean = if cfg!(not(windows)) && pattern.as_bytes().get(1) == Some(&b':') {
+            &pattern[2..]
+        } else {
+            pattern
+        };
+        let posix = clean.replace('\\', "/");
+        let root_str = self.root.to_string_lossy().replace('\\', "/");
+        let escaped_root = glob::Pattern::escape(&root_str);
+        let rel = posix.strip_prefix(&root_str).unwrap_or(&posix).trim_start_matches('/');
+        let search = format!("{}/{}", escaped_root, rel);
+
+        let mut results = Vec::new();
+        for entry in glob::glob(&search).map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, e)
+        })? {
+            let path = entry?;
+            if path.starts_with(&self.root) {
+                results.push(path);
+            }
+        }
+        Ok(results)
+    }
 }
 
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]

@@ -1,112 +1,80 @@
-use anyhow::{Context, Result};
-use std::collections::HashMap;
+use anyhow::Result;
+use oxdock_core::ExecIo;
 use std::path::{Path, PathBuf};
+
+use crate::doc_runner::{DocSpec, assemble_doc};
 
 pub fn generate_all(repo_root: &Path) -> Result<()> {
     let crates_dir = repo_root.join("docs/crates");
     if !crates_dir.exists() {
-        eprintln!("No docs/crates/ directory found, skipping sub-crate README generation");
         return Ok(());
     }
 
     let template_path = repo_root.join("docs/templates/crate-readme.md");
 
-    let entries: Vec<PathBuf> = std::fs::read_dir(&crates_dir)
-        .with_context(|| format!("failed to read {}", crates_dir.display()))?
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().map(|ft| ft.is_dir()).unwrap_or(false))
-        .map(|e| e.path())
-        .collect();
+    for entry in std::fs::read_dir(&crates_dir)?.flatten() {
+        if !entry.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
+            continue;
+        }
 
-    for crate_dir in entries {
-        let crate_name = crate_dir
-            .file_name()
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_default();
+        let crate_dir = entry.path();
+        let crate_name = match crate_dir.file_name() {
+            Some(n) => n.to_string_lossy().to_string(),
+            None => continue,
+        };
 
-        let cargo_toml_path = resolve_cargo_toml(repo_root, &crate_name)?;
+        let cargo_toml_path = find_cargo_toml(repo_root, &crate_dir, &crate_name);
         if !cargo_toml_path.exists() {
             eprintln!("Skipping {crate_name}: no Cargo.toml found");
             continue;
         }
 
-        match generate_one(&template_path, &crate_dir, &cargo_toml_path, repo_root) {
-            Ok(()) => {
-                let target_dir = cargo_toml_path.parent().unwrap_or(Path::new("."));
-                eprintln!("  Generated {}/README.md", target_dir.display());
-            }
-            Err(err) => eprintln!("  Warning: failed to generate {crate_name}/README.md: {err:#}"),
+        if let Err(err) = generate_one(&template_path, &crate_dir, &cargo_toml_path, repo_root) {
+            eprintln!("  Warning: failed to generate {crate_name}/README.md: {err:#}");
         }
     }
 
     Ok(())
 }
 
-fn resolve_cargo_toml(repo_root: &Path, crate_name: &str) -> Result<PathBuf> {
+fn find_cargo_toml(repo_root: &Path, crate_doc_dir: &Path, crate_name: &str) -> PathBuf {
     let candidates = [
-        repo_root.join(format!("crates/{crate_name}/Cargo.toml")),
-        repo_root.join(format!("crates/sys/{crate_name}/Cargo.toml")),
-        repo_root.join(format!("{crate_name}/Cargo.toml")),
+        repo_root.join("crates").join(crate_name).join("Cargo.toml"),
+        repo_root.join("crates/sys").join(crate_name).join("Cargo.toml"),
+        repo_root.join(crate_name).join("Cargo.toml"),
+        crate_doc_dir.join("Cargo.toml"),
     ];
     for candidate in &candidates {
         if candidate.exists() {
-            return Ok(candidate.clone());
+            return candidate.clone();
         }
     }
-    Ok(candidates[0].clone())
+    crate_doc_dir.join("Cargo.toml")
 }
 
 fn generate_one(
     template_path: &Path,
-    crate_dir: &Path,
+    crate_doc_dir: &Path,
     cargo_toml: &Path,
     repo_root: &Path,
 ) -> Result<()> {
-    use oxdock_core::{ExecIo, run_steps_with_context_result_with_io};
-    use oxdock_fs::GuardedPath;
-    use oxdock_parser::parse_script;
-
     let metadata = parse_cargo_metadata(cargo_toml)?;
-    let source_files = load_source_files(crate_dir, &metadata.name);
-
-    let mut vars = HashMap::new();
-    vars.insert("CRATE_NAME".to_string(), metadata.name);
-    vars.insert("CRATE_DESCRIPTION".to_string(), metadata.description);
-    vars.insert("CRATE_OVERVIEW".to_string(), source_files.overview);
-    vars.insert("CRATE_QUICK_START".to_string(), source_files.quick_start);
-    vars.insert("CRATE_API".to_string(), source_files.api);
-
-    let target_dir = cargo_toml.parent().context("invalid Cargo.toml path")?;
-    let readme_path = target_dir.join("README.md");
-
-    // Sort keys: HashMap iteration order is randomized (SipHash seed),
-    // so sorting ensures deterministic INHERIT_ENV key list across runs.
-    // Note: This is not a correctness requirement.
-    let mut keys: Vec<_> = vars.keys().cloned().collect();
-    keys.sort();
-
-    let norm_template = template_path.to_string_lossy().replace('\\', "/");
-    let norm_readme = readme_path.to_string_lossy().replace('\\', "/");
-
-    let script = format!(
-        "INHERIT_ENV [{}]\nWORKSPACE LOCAL\nWITH_IO [stdout=pipe:out] EXPAND \"{}\"\nWITH_IO [stdin=pipe:out] WRITE \"{}\"",
-        keys.join(", "),
-        norm_template,
-        norm_readme
-    );
+    let out_path = cargo_toml.parent().unwrap().join("README.md");
 
     let mut io = ExecIo::new();
-    for (key, value) in &vars {
-        io.insert_inherit_env(key, value);
-    }
+    io.insert_inherit_env("CRATE_NAME", &metadata.name);
+    io.insert_inherit_env("CRATE_DESCRIPTION", &metadata.description);
 
-    let root = GuardedPath::new_root(repo_root)?;
-    let temp = GuardedPath::tempdir()?;
-    let steps = parse_script(&script)?;
-
-    run_steps_with_context_result_with_io(temp.as_guarded_path(), &root, &steps, io)?;
-
-    Ok(())
+    assemble_doc(
+        repo_root,
+        DocSpec {
+            template: Some(template_path),
+            sections_dir: crate_doc_dir,
+            output_path: &out_path,
+            inherit_keys: &["CRATE_NAME", "CRATE_DESCRIPTION"],
+        },
+        io,
+    )
 }
 
 struct CargoMetadata {
@@ -115,9 +83,8 @@ struct CargoMetadata {
 }
 
 fn parse_cargo_metadata(cargo_toml: &Path) -> Result<CargoMetadata> {
-    let contents = std::fs::read_to_string(cargo_toml)
-        .with_context(|| format!("failed to read {}", cargo_toml.display()))?;
-    let doc: toml_edit::DocumentMut = contents.parse().context("failed to parse Cargo.toml")?;
+    let contents = std::fs::read_to_string(cargo_toml)?;
+    let doc: toml_edit::DocumentMut = contents.parse()?;
 
     let name = doc
         .get("package")
@@ -130,39 +97,8 @@ fn parse_cargo_metadata(cargo_toml: &Path) -> Result<CargoMetadata> {
         .get("package")
         .and_then(|p| p.get("description"))
         .and_then(|v| v.as_str())
-        .unwrap_or("No description")
+        .unwrap_or("No description provided.")
         .to_string();
 
     Ok(CargoMetadata { name, description })
-}
-
-struct SourceFiles {
-    overview: String,
-    quick_start: String,
-    api: String,
-}
-
-fn load_source_files(crate_dir: &Path, crate_name: &str) -> SourceFiles {
-    SourceFiles {
-        overview: load_section(crate_dir, "overview.md")
-            .unwrap_or_else(|| "Part of the OxDock workspace.".to_string()),
-        quick_start: load_section(crate_dir, "quick-start.md").unwrap_or_else(|| {
-            format!("See the [API documentation](https://docs.rs/{crate_name}).")
-        }),
-        api: load_section(crate_dir, "api.md").unwrap_or_else(|| {
-            format!("See the [API documentation](https://docs.rs/{crate_name}).")
-        }),
-    }
-}
-
-fn load_section(crate_dir: &Path, filename: &str) -> Option<String> {
-    let path = crate_dir.join(filename);
-    if path.exists() {
-        std::fs::read_to_string(&path)
-            .ok()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-    } else {
-        None
-    }
 }

@@ -879,9 +879,15 @@ fn parse_argument(pair: Pair<Rule>) -> Result<String> {
 
 fn parse_quoted_string(pair: Pair<Rule>) -> Result<String> {
     let s = pair.as_str();
-    let _quote = s.chars().next().unwrap();
+    let quote = s.chars().next().unwrap();
     let content = &s[1..s.len() - 1];
 
+    // Single-quoted strings are raw literals — backslashes preserved as-is
+    if quote == '\'' {
+        return Ok(content.to_string());
+    }
+
+    // Double-quoted strings process escape sequences
     let mut out = String::with_capacity(content.len());
     let mut escape = false;
     for ch in content.chars() {
