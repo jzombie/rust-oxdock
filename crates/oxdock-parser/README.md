@@ -3,10 +3,6 @@
 Parser and AST definitions for the OxDock DSL.
 
 > Part of the [OxDock](https://github.com/jzombie/rust-oxdock) workspace.
-
-## License
-
-`oxdock-parser` is distributed under the terms of the Apache License (Version 2.0).
 1. The lexer (powered by [`pest`](https://pest.rs/)) tokenizes scripts
    according to `dsl.pest`, handling comments and semicolons along the way.
 2. Tokens are fed into the existing `ScriptParser`, which performs guard stack
@@ -40,3 +36,6 @@ CLI and the embedding macros. The DSL is intentionally compact, but it now has
 an explicit grammar so that other tooling (formatters, language servers, IDE
 plugins, etc.) can understand scripts without re‑implementing the parser.
 
+## License
+
+`oxdock-parser` is distributed under the terms of the Apache License (Version 2.0).

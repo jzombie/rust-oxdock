@@ -1,11 +1,11 @@
 mod command_ref;
 mod runner;
-mod section_concat;
 mod template_doc;
 
 use anyhow::{Context, Result};
 use oxdock_core::ExecIo;
 use std::path::{Path, PathBuf};
+use template_doc::DocNode;
 
 fn main() -> Result<()> {
     let repo_root = find_repo_root()?;
@@ -15,48 +15,53 @@ fn main() -> Result<()> {
     command_ref::generate(&cmd_ref_out)?;
     eprintln!("Command reference written to {}", cmd_ref_out.display());
 
-    // Phase 2: root README from section files
-    let sections_dir = repo_root.join("docs/sections");
-    let sections_glob = format!("{}/*.md", sections_dir.display());
-    let root_readme = repo_root.join("README.md");
-    section_concat::assemble(&repo_root, &sections_glob, &root_readme, ExecIo::new())?;
-    eprintln!("Root README written to {}", root_readme.display());
-
-    // Phase 3: per-crate docs from template
-    let template = repo_root.join("docs/templates/crate-readme.md");
-    generate_crate_docs(&repo_root, &template)?;
+    // Phase 2: per-crate docs from template
+    let template_dir = repo_root.join("docs/templates");
+    generate_crate_docs(&repo_root, &template_dir)?;
     eprintln!("All crate READMEs generated");
 
     Ok(())
 }
 
-fn generate_crate_docs(repo_root: &Path, template: &Path) -> Result<()> {
+fn generate_crate_docs(repo_root: &Path, template_dir: &Path) -> Result<()> {
     let workspace_toml = repo_root.join("Cargo.toml");
     let members = parse_workspace_members(&workspace_toml)
         .context("failed to parse workspace members")?;
 
-    if !template.exists() {
+    let header = template_dir.join("crate-header.md");
+    let footer = template_dir.join("crate-footer.md");
+
+    if !header.exists() || !footer.exists() {
         eprintln!(
-            "Skipping crate docs: template not found at {}",
-            template.display()
+            "Skipping crate docs: templates not found at {}",
+            template_dir.display()
         );
         return Ok(());
     }
 
     for member in &members {
-        let cargo_toml = repo_root.join(member).join("Cargo.toml");
-        if !cargo_toml.exists() {
+        let member_cargo_toml = repo_root.join(member).join("Cargo.toml");
+        if !member_cargo_toml.exists() {
             eprintln!("Skipping {member}: no Cargo.toml found");
             continue;
         }
 
-        let meta = parse_cargo_metadata(&cargo_toml)?;
+        let meta = parse_cargo_metadata(&member_cargo_toml)?;
         let mut env = ExecIo::new();
         env.insert_inherit_env("CRATE_NAME", &meta.name);
         env.insert_inherit_env("CRATE_DESCRIPTION", &meta.description);
 
+        let sections_dir = repo_root.join("docs/crates").join(&meta.name);
+        let glob = format!("{}/*.md", sections_dir.display());
+
+        let manifest = vec![
+            DocNode::Template(header.clone()),
+            DocNode::Glob(glob),
+            DocNode::Template(footer.clone()),
+        ];
+
         let out_path = repo_root.join(member).join("README.md");
-        if let Err(err) = template_doc::expand(repo_root, template, &out_path, env) {
+        if let Err(err) = template_doc::compile(repo_root, &manifest, &out_path, env) {
             eprintln!("  Warning: failed to generate {member}/README.md: {err:#}");
         }
     }

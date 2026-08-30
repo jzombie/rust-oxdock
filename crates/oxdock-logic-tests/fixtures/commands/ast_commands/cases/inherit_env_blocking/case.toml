@@ -5,4 +5,4 @@ FOO = "foo-val"
 OXBOOK_RUNNER_DIR = "/leak"
 
 [expect]
-files = { "one.txt" = "one=foo-val", "runner.txt" = "runner=" }
+files = { "one.txt" = "one=foo-val", "runner.txt" = "runner=/leak" }

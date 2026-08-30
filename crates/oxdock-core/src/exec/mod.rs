@@ -131,7 +131,11 @@ fn run_steps_with_manager<P: ProcessManager>(
     let fs_root = fs.root().clone();
     let cwd = fs.root().clone();
     let build_context = fs.build_context().clone();
-    let envs = Arc::new(BuiltinEnv::collect(&build_context).into_envs());
+    let mut envs = BuiltinEnv::collect(&build_context).into_envs();
+    for (key, value) in io.inherit_env_overrides() {
+        envs.insert(key.clone(), value.clone());
+    }
+    let envs = Arc::new(envs);
     let assert_windows = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
     let mut state = ExecState {
         fs,

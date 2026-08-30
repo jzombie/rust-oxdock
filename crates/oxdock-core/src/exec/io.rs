@@ -220,6 +220,10 @@ impl ExecIo {
         self.inherit_env_removed.contains(key)
     }
 
+    pub fn inherit_env_overrides(&self) -> &std::collections::HashMap<String, String> {
+        &self.inherit_env_overrides
+    }
+
     pub fn insert_input_pipe<S: Into<String>>(&mut self, name: S, reader: SharedInput) {
         self.input_pipes.insert(name.into(), reader);
     }

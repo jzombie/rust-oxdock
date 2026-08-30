@@ -3,10 +3,6 @@
 Workspace-level test harness and fixtures for OxDock
 
 > Part of the [OxDock](https://github.com/jzombie/rust-oxdock) workspace.
-
-## License
-
-`oxdock-logic-tests` is distributed under the terms of the Apache License (Version 2.0).
 Fixtures used by the build-time macro integration tests live under
 `fixtures/integration/buildtime_macros/<name>/`. These are exercised by the same fixture
 harness via `case.toml` expectations.
@@ -56,3 +52,6 @@ Workspace-level fixtures and a [libtest-mimic](https://crates.io/crates/libtest-
 
 To add a fixture, create a new `fixtures/<name>/` (or nested) folder with a `Cargo.toml` and source files.
 
+## License
+
+`oxdock-logic-tests` is distributed under the terms of the Apache License (Version 2.0).

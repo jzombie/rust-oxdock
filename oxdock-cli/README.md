@@ -3,10 +3,6 @@
 CLI tooling for executing OxDock's Dockerfile-inspired DSL on native platforms.
 
 > Part of the [OxDock](https://github.com/jzombie/rust-oxdock) workspace.
-
-## License
-
-`oxdock-cli` is distributed under the terms of the Apache License (Version 2.0).
 ## Quick features
 
 - Create an isolated, temporary workspace and run a script inside it.
@@ -47,3 +43,6 @@ Drop into a shell inside the temporary workspace (interactive):
 oxdock --shell
 ```
 
+## License
+
+`oxdock-cli` is distributed under the terms of the Apache License (Version 2.0).
