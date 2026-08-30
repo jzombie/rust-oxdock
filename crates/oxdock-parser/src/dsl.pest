@@ -28,7 +28,7 @@ semicolon = _{ ";" }
 guard_line = { "[" ~ ws? ~ guard_expr ~ ws? ~ "]" }
 
 guard_expr = { guard_seq }
-guard_seq = { guard_factor ~ ( ws? ~ "," ~ ws? ~ guard_factor )* }
+guard_seq = { guard_factor ~ ( ws? ~ "," ~ ws? ~ guard_factor ~ ws? )* }
 guard_factor = { guard_not }
 guard_not = { (invert ~ ws?)* ~ guard_primary }
 guard_primary = _{ guard_group | guard_or_call | guard_term }
@@ -38,11 +38,11 @@ or_kw = _{ "or" }
 guard_expr_list = { guard_expr ~ ( ws? ~ "," ~ ws? ~ guard_expr )* }
 guard_term = { ws? ~ guard_predicate ~ ws? }
 invert = { "!" }
-guard_predicate = _{ env_guard | bare_platform | bare_env_ident }
+guard_predicate = _{ env_guard | bare_guard_ident }
 env_guard = { env_prefix ~ ws? ~ env_key ~ env_comparison? }
 env_prefix = { "env" ~ ":" }
 env_key = @{ guard_key_char+ }
-guard_key_char = _{ !( ":" | "=" | "!" | "," | "|" | ")" | "]" | linebreak | "//" | "/*" ) ~ ANY }
+guard_key_char = _{ !( ":" | "=" | "!" | "," | "|" | ")" | "]" | " " | "\t" | linebreak | "//" | "/*" ) ~ ANY }
 env_comparison = { not_equals_env | equals_env }
 equals_env = { eq_op ~ env_value }
 not_equals_env = { neq_op ~ env_value }
@@ -50,8 +50,7 @@ env_value = @{ guard_value_char+ }
 guard_value_char = _{ !( "," | "|" | ")" | "]" | linebreak | "//" | "/*" ) ~ ANY }
 eq_op = { "==" }
 neq_op = { "!=" }
-bare_platform = { "linux" | "macos" | "mac" | "windows" | "unix" }
-bare_env_ident = @{ guard_key_char+ }
+bare_guard_ident = @{ guard_key_char+ }
 
 // Identifiers
 ident_char = _{ ASCII_ALPHANUMERIC | "_" }

@@ -1262,11 +1262,13 @@ fn parse_guard_term(pair: Pair<Rule>) -> Result<Guard> {
     for inner in pair.into_inner() {
         match inner.as_rule() {
             Rule::env_guard => return parse_env_guard(inner),
-            Rule::bare_platform => return parse_bare_platform(inner, false),
-            Rule::bare_env_ident => {
-                let key = inner.as_str().to_string();
+            Rule::bare_guard_ident => {
+                let tag = inner.as_str();
+                if let Ok(g) = parse_platform_tag(tag, false) {
+                    return Ok(g);
+                }
                 return Ok(Guard::EnvExists {
-                    key,
+                    key: tag.to_string(),
                     invert: false,
                 });
             }
@@ -1321,11 +1323,6 @@ fn parse_env_guard(pair: Pair<Rule>) -> Result<Guard> {
     } else {
         Ok(Guard::EnvExists { key, invert: false })
     }
-}
-
-fn parse_bare_platform(pair: Pair<Rule>, invert: bool) -> Result<Guard> {
-    let tag = pair.as_str();
-    parse_platform_tag(tag, invert)
 }
 
 fn parse_platform_tag(tag: &str, invert: bool) -> Result<Guard> {
