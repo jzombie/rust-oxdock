@@ -186,6 +186,7 @@ name = "docs-gen"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "indoc",
  "line-ending",
  "oxdock-core",
  "oxdock-fs",
