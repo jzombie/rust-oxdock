@@ -12,7 +12,7 @@ pub fn assemble_readme(repo_root: &Path, output: Option<&Path>) -> Result<()> {
 
     let script = indoc!(
         r#"
-        RAW_WRITE "README.md" ""
+        RAW_WRITE README.md ""
         LET $sections = GLOB("docs/sections/*.md")
         FOR $f IN $sections {
             // Read file to `pipe:sec` pipe
