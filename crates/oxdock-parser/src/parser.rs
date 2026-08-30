@@ -886,7 +886,18 @@ fn parse_quoted_string(pair: Pair<Rule>) -> Result<String> {
     let mut escape = false;
     for ch in content.chars() {
         if escape {
-            out.push(ch);
+            match ch {
+                'n' => out.push('\n'),
+                'r' => out.push('\r'),
+                't' => out.push('\t'),
+                '\\' => out.push('\\'),
+                '\'' => out.push('\''),
+                '"' => out.push('"'),
+                other => {
+                    out.push('\\');
+                    out.push(other);
+                }
+            }
             escape = false;
         } else if ch == '\\' {
             escape = true;
