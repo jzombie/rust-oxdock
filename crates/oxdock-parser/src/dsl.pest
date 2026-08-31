@@ -106,7 +106,7 @@ let_statement = { let_keyword ~ dollar_ident ~ "=" ~ expr }
 
 else_if_clause = { else_keyword ~ if_keyword ~ expr ~ block }
 else_clause = { else_keyword ~ block }
-if_statement = { if_keyword ~ expr ~ block ~ else_if_clause* ~ else_clause? }
+if_statement = { if_keyword ~ expr ~ block ~ (blank* ~ else_if_clause)* ~ blank* ~ else_clause? }
 
 // Commands
 command = _{

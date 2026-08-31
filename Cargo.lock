@@ -192,6 +192,7 @@ dependencies = [
  "oxdock-fs",
  "oxdock-macros",
  "oxdock-parser",
+ "serde_json",
  "toml_edit",
 ]
 

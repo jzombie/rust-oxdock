@@ -6,7 +6,6 @@ use anyhow::{Context, Result};
 use oxdock_core::ExecIo;
 #[allow(clippy::disallowed_types)]
 use std::path::{Path, PathBuf};
-use template_doc::DocNode;
 
 fn main() -> Result<()> {
     let repo_root = find_repo_root()?;
@@ -16,7 +15,21 @@ fn main() -> Result<()> {
     command_ref::generate(&cmd_ref_out)?;
     eprintln!("Command reference written to {}", cmd_ref_out.display());
 
-    // Phase 2: per-crate docs from template
+    // Phase 2: root README from docs/sections/*.md
+    let root_manifest = serde_json::json!([
+        { "kind": "glob", "pattern": "docs/sections/*.md" }
+    ]);
+    let root_out = repo_root.join("README.md");
+    if let Err(err) = template_doc::compile(
+        &repo_root,
+        &root_manifest.to_string(),
+        &root_out,
+        ExecIo::new(),
+    ) {
+        eprintln!("  Warning: failed to generate root README.md: {err:#}");
+    }
+
+    // Phase 3: per-crate docs from template
     let template_dir = repo_root.join("docs/templates");
     generate_crate_docs(&repo_root, &template_dir)?;
     eprintln!("All crate READMEs generated");
@@ -41,6 +54,9 @@ fn generate_crate_docs(repo_root: &Path, template_dir: &Path) -> Result<()> {
         return Ok(());
     }
 
+    let header_str = "docs/templates/crate-header.md";
+    let footer_str = "docs/templates/crate-footer.md";
+
     for member in &members {
         let member_cargo_toml = repo_root.join(member).join("Cargo.toml");
         if !member_cargo_toml.exists() {
@@ -53,17 +69,19 @@ fn generate_crate_docs(repo_root: &Path, template_dir: &Path) -> Result<()> {
         env.insert_inherit_env("CRATE_NAME", &meta.name);
         env.insert_inherit_env("CRATE_DESCRIPTION", &meta.description);
 
-        let sections_dir = repo_root.join("docs/crates").join(&meta.name);
-        let glob = format!("{}/*.md", sections_dir.display());
+        // Workspace-relative glob pattern (not absolute)
+        let glob = format!("docs/crates/{}/*.md", meta.name);
 
-        let manifest = vec![
-            DocNode::Template(header.clone()),
-            DocNode::Glob(glob),
-            DocNode::Template(footer.clone()),
-        ];
+        // Build manifest as JSON array
+        let manifest = serde_json::json!([
+            { "kind": "template", "path": header_str },
+            { "kind": "glob", "pattern": glob },
+            { "kind": "template", "path": footer_str }
+        ]);
+        let manifest_json = manifest.to_string();
 
         let out_path = repo_root.join(member).join("README.md");
-        if let Err(err) = template_doc::compile(repo_root, &manifest, &out_path, env) {
+        if let Err(err) = template_doc::compile(repo_root, &manifest_json, &out_path, env) {
             eprintln!("  Warning: failed to generate {member}/README.md: {err:#}");
         }
     }
