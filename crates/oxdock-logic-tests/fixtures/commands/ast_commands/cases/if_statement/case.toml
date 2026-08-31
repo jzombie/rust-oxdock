@@ -1,0 +1,4 @@
+name = "if_statement"
+
+[expect]
+files = { "result.txt" = "yes" }

@@ -612,4 +612,60 @@ mod tests {
             other => panic!("expected For, got {:?}", other),
         }
     }
+
+    #[test]
+    fn if_statement_parses() {
+        let script = "IF true { ECHO yes }\n";
+        let steps = match parse_script(script) {
+            Ok(s) => s,
+            Err(e) => panic!("parse failed: {e}"),
+        };
+        assert_eq!(steps.len(), 1, "expected 1 step, got {}: {:?}", steps.len(), steps.iter().map(|s| &s.kind).collect::<Vec<_>>());
+        match &steps[0].kind {
+            StepKind::If { .. } => {}
+            other => panic!("expected If, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn if_keyword_matches_directly() {
+        use crate::lexer::{LanguageParser, Rule};
+        use pest::Parser;
+        let result = LanguageParser::parse(Rule::if_keyword, "IF ");
+        assert!(result.is_ok(), "if_keyword should match 'IF ': {:?}", result.err());
+    }
+
+    #[test]
+    fn if_statement_pest_matches() {
+        use crate::lexer::{LanguageParser, Rule};
+        use pest::Parser;
+        let result = LanguageParser::parse(Rule::if_statement, "IF true {\n    ECHO yes\n}");
+        assert!(result.is_ok(), "if_statement should match: {:?}", result.err());
+    }
+
+    #[test]
+    fn guard_block_with_echo_parses() {
+        let script = "WORKDIR foo\n[env:GATE] {\n    ECHO gated\n}\n[env:A==1] ECHO eq\n";
+        let steps = parse_script(script).expect("parse should succeed");
+        assert!(steps.len() >= 2, "expected at least 2 steps, got {}", steps.len());
+    }
+
+    #[test]
+    fn single_line_blocks_all_commands() {
+        let test_cases = [
+            "IF true { ECHO hello }",
+            "IF true { RUN cargo test }",
+            "IF true { WORKDIR /app }",
+            "IF true { ENV FOO=bar }",
+        ];
+
+        for script in test_cases {
+            assert!(
+                parse_script(script).is_ok(),
+                "Failed to parse single-line block script: {}",
+                script
+            );
+        }
+    }
+
 }

@@ -236,6 +236,22 @@ pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
                     keys.insert(k);
                 }
             }
+            StepKind::If { then_body, else_ifs, else_body, .. } => {
+                // Recursively collect env references from all branches
+                for k in collect_env_references(then_body) {
+                    keys.insert(k);
+                }
+                for (_, body) in else_ifs {
+                    for k in collect_env_references(body) {
+                        keys.insert(k);
+                    }
+                }
+                if let Some(body) = else_body {
+                    for k in collect_env_references(body) {
+                        keys.insert(k);
+                    }
+                }
+            }
             StepKind::Assign { .. } => {
                 // LET assignments don't contain template strings that reference env vars
             }

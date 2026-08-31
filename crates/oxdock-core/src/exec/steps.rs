@@ -315,6 +315,9 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
             in_expr,
             body,
         } => handlers::for_loop(&mut cx, var, in_expr, body),
+        StepKind::If { cond, then_body, else_ifs, else_body } => {
+            handlers::if_then(&mut cx, cond, then_body, else_ifs, else_body)
+        }
         StepKind::Assign { var, expr } => handlers::assign(&mut cx, var, expr),
     }
 }
@@ -522,6 +525,9 @@ fn execute_steps_inner<P: ProcessManager>(
                     in_expr,
                     body,
                 } => handlers::for_loop(&mut cx, var, in_expr, body),
+                StepKind::If { cond, then_body, else_ifs, else_body } => {
+                    handlers::if_then(&mut cx, cond, then_body, else_ifs, else_body)
+                }
                 StepKind::Assign { var, expr } => handlers::assign(&mut cx, var, expr),
             }
         };

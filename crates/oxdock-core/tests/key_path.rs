@@ -777,3 +777,238 @@ fn nested_for_loops_inner_shadows_outer() {
     assert_eq!(read_trimmed(&root, "i1.txt"), "i1");
     assert_eq!(read_trimmed(&root, "i2.txt"), "i2");
 }
+
+// ============================================================================
+// Comparison operators
+// ============================================================================
+
+#[test]
+fn comparison_equal_produces_bool() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = temp.as_guarded_path().clone();
+    run_script(&root, indoc! {r#"
+        LET $x = "hello"
+        LET $eq = $x == "hello"
+        IF $eq { WRITE out.txt yes }
+    "#}).unwrap();
+    assert_eq!(read_trimmed(&root, "out.txt"), "yes");
+}
+
+#[test]
+fn comparison_not_equal_produces_bool() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = temp.as_guarded_path().clone();
+    run_script(&root, indoc! {r#"
+        LET $x = "hello"
+        LET $ne = $x != "foo"
+        IF $ne { WRITE out.txt yes }
+    "#}).unwrap();
+    assert_eq!(read_trimmed(&root, "out.txt"), "yes");
+}
+
+#[test]
+fn comparison_key_path() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = temp.as_guarded_path().clone();
+    write_file(&root, "t.toml", b"name = \"test\"\n");
+
+    run_script(&root, indoc! {r#"
+        LET $d = LOAD_TOML("t.toml")
+        IF $d.name == "test" { WRITE out.txt yes }
+    "#}).unwrap();
+    assert_eq!(read_trimmed(&root, "out.txt"), "yes");
+}
+
+#[test]
+fn comparison_false_is_falsy() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = temp.as_guarded_path().clone();
+    run_script(&root, indoc! {r#"
+        LET $x = "hello"
+        LET $eq = $x == "nope"
+        IF $eq { WRITE out.txt should-not-exist }
+    "#}).unwrap();
+    assert!(root.join("out.txt").unwrap().as_path().exists() == false);
+}
+
+// ============================================================================
+// Logical operators
+// ============================================================================
+
+#[test]
+fn logical_and_short_circuit() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = temp.as_guarded_path().clone();
+    run_script(&root, indoc! {r#"
+        LET $a = true
+        LET $b = false
+        LET $both = $a && $b
+        IF $both { WRITE out.txt should-not-exist }
+    "#}).unwrap();
+    assert!(root.join("out.txt").unwrap().as_path().exists() == false);
+}
+
+#[test]
+fn logical_or_short_circuit() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = temp.as_guarded_path().clone();
+    run_script(&root, indoc! {r#"
+        LET $a = true
+        LET $b = false
+        LET $either = $a || $b
+        IF $either { WRITE out.txt yes }
+    "#}).unwrap();
+    assert_eq!(read_trimmed(&root, "out.txt"), "yes");
+}
+
+#[test]
+fn logical_or_right_side_evaluated_when_left_false() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = temp.as_guarded_path().clone();
+    run_script(&root, indoc! {r#"
+        LET $a = false
+        LET $b = true
+        LET $either = $a || $b
+        IF $either { WRITE out.txt yes }
+    "#}).unwrap();
+    assert_eq!(read_trimmed(&root, "out.txt"), "yes");
+}
+
+// ============================================================================
+// IF/ELSE statements
+// ============================================================================
+
+#[test]
+fn if_then_branch() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = temp.as_guarded_path().clone();
+    run_script(&root, indoc! {r#"
+        LET $x = "hello"
+        IF $x == "hello" { WRITE out.txt yes }
+    "#}).unwrap();
+    assert_eq!(read_trimmed(&root, "out.txt"), "yes");
+}
+
+#[test]
+fn if_else_branch() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = temp.as_guarded_path().clone();
+    run_script(&root, indoc! {r#"
+        LET $x = "hello"
+        IF $x == "nope" { WRITE out.txt wrong } ELSE { WRITE out.txt correct }
+    "#}).unwrap();
+    assert_eq!(read_trimmed(&root, "out.txt"), "correct");
+}
+
+#[test]
+fn if_else_if_chain() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = temp.as_guarded_path().clone();
+    run_script(&root, indoc! {r#"
+        LET $x = "2"
+        IF $x == "1" { WRITE out.txt 1 } ELSE IF $x == "2" { WRITE out.txt 2 } ELSE { WRITE out.txt 3 }
+    "#}).unwrap();
+    assert_eq!(read_trimmed(&root, "out.txt"), "2");
+}
+
+#[test]
+fn if_compound_condition() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = temp.as_guarded_path().clone();
+    run_script(&root, indoc! {r#"
+        LET $a = "1"
+        LET $b = "2"
+        IF $a == "1" && $b == "2" { WRITE out.txt combined }
+    "#}).unwrap();
+    assert_eq!(read_trimmed(&root, "out.txt"), "combined");
+}
+
+#[test]
+fn if_precedence_override() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = temp.as_guarded_path().clone();
+    run_script(&root, indoc! {r#"
+        LET $a = "1"
+        LET $b = "3"
+        IF ($a == "1" || $a == "2") && $b == "3" { WRITE out.txt precedence }
+    "#}).unwrap();
+    assert_eq!(read_trimmed(&root, "out.txt"), "precedence");
+}
+
+#[test]
+fn if_nested_inside_for() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = temp.as_guarded_path().clone();
+    write_file(&root, "t.toml", b"items = [\"a\", \"b\", \"c\"]\n");
+
+    run_script(&root, indoc! {r#"
+        LET $d = LOAD_TOML("t.toml")
+        FOR $x IN $d.items {
+            IF $x == "b" { WRITE $x.txt found }
+        }
+    "#}).unwrap();
+    assert_eq!(read_trimmed(&root, "b.txt"), "found");
+    assert!(root.join("a.txt").unwrap().as_path().exists() == false);
+    assert!(root.join("c.txt").unwrap().as_path().exists() == false);
+}
+
+// ============================================================================
+// Strict boolean: TypeError for non-bool conditions
+// ============================================================================
+
+#[test]
+fn if_string_condition_raises_type_error() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = temp.as_guarded_path().clone();
+    let err = run_script(&root, indoc! {r#"
+        LET $path = "docs/readme.md"
+        IF $path { WRITE out.txt should-not-exist }
+    "#}).unwrap_err();
+    assert!(err.to_string().contains("Type Error"), "{err}");
+}
+
+#[test]
+fn if_literal_true_works() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = temp.as_guarded_path().clone();
+    run_script(&root, indoc! {r#"
+        IF true { WRITE out.txt yes }
+    "#}).unwrap();
+    assert_eq!(read_trimmed(&root, "out.txt"), "yes");
+}
+
+#[test]
+fn if_literal_false_skips() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = temp.as_guarded_path().clone();
+    run_script(&root, indoc! {r#"
+        IF false { WRITE out.txt should-not-exist }
+    "#}).unwrap();
+    assert!(root.join("out.txt").unwrap().as_path().exists() == false);
+}
+
+#[test]
+fn if_bool_from_json_is_native() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = temp.as_guarded_path().clone();
+    write_file(&root, "t.json", b"{\"active\": true}");
+
+    run_script(&root, indoc! {r#"
+        LET $d = LOAD_JSON("t.json")
+        IF $d.active { WRITE out.txt yes }
+    "#}).unwrap();
+    assert_eq!(read_trimmed(&root, "out.txt"), "yes");
+}
+
+#[test]
+fn if_bool_from_toml_is_native() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = temp.as_guarded_path().clone();
+    write_file(&root, "t.toml", b"active = true\n");
+
+    run_script(&root, indoc! {r#"
+        LET $d = LOAD_TOML("t.toml")
+        IF $d.active { WRITE out.txt yes }
+    "#}).unwrap();
+    assert_eq!(read_trimmed(&root, "out.txt"), "yes");
+}

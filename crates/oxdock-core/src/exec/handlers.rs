@@ -937,3 +937,35 @@ pub(super) fn assign<P: ProcessManager>(
     cx.state.set_var(clean_var, value);
     Ok(())
 }
+
+pub(super) fn if_then<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    cond: &Expr,
+    then_body: &[Step],
+    else_ifs: &[(Box<Expr>, Vec<Step>)],
+    else_body: &Option<Vec<Step>>,
+) -> Result<()> {
+    let val = super::args::evaluate_expr(cond, cx)?;
+    if super::args::is_truthy(&val)? {
+        return super::steps::execute_steps(
+            cx.state, cx.process, then_body, cx.stdin.clone(),
+            false, cx.out.clone(), cx.err.clone(), false,
+        );
+    }
+    for (else_cond, else_block) in else_ifs {
+        let val = super::args::evaluate_expr(else_cond.as_ref(), cx)?;
+        if super::args::is_truthy(&val)? {
+            return super::steps::execute_steps(
+                cx.state, cx.process, else_block, cx.stdin.clone(),
+                false, cx.out.clone(), cx.err.clone(), false,
+            );
+        }
+    }
+    if let Some(body) = else_body {
+        super::steps::execute_steps(
+            cx.state, cx.process, body, cx.stdin.clone(),
+            false, cx.out.clone(), cx.err.clone(), false,
+        )?;
+    }
+    Ok(())
+}

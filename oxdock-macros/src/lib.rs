@@ -801,6 +801,36 @@ fn emit_expr(expr: &Expr, interp: &[(proc_macro2::Ident, usize)]) -> proc_macro2
             let arg_tokens: Vec<_> = args.iter().map(|e| emit_expr(e, interp)).collect();
             quote! { Expr::Call { name: #name.to_string(), args: vec![#(#arg_tokens),*] } }
         }
+        Expr::Compare { op, left, right } => {
+            let op_token = match op {
+                oxdock_parser::ast::CompareOp::Eq => quote! { oxdock_parser::ast::CompareOp::Eq },
+                oxdock_parser::ast::CompareOp::Ne => quote! { oxdock_parser::ast::CompareOp::Ne },
+            };
+            let left_tokens = emit_expr(left, interp);
+            let right_tokens = emit_expr(right, interp);
+            quote! {
+                oxdock_parser::ast::Expr::Compare {
+                    op: #op_token,
+                    left: Box::new(#left_tokens),
+                    right: Box::new(#right_tokens),
+                }
+            }
+        }
+        Expr::Logical { op, left, right } => {
+            let op_token = match op {
+                oxdock_parser::ast::LogicalOp::And => quote! { oxdock_parser::ast::LogicalOp::And },
+                oxdock_parser::ast::LogicalOp::Or => quote! { oxdock_parser::ast::LogicalOp::Or },
+            };
+            let left_tokens = emit_expr(left, interp);
+            let right_tokens = emit_expr(right, interp);
+            quote! {
+                oxdock_parser::ast::Expr::Logical {
+                    op: #op_token,
+                    left: Box::new(#left_tokens),
+                    right: Box::new(#right_tokens),
+                }
+            }
+        }
     }
 }
 
@@ -1018,6 +1048,30 @@ fn emit_stepkind(
             let in_tok = emit_expr(in_expr, interp);
             let body_tokens: Vec<_> = body.iter().map(|s| emit_step(s, interp)).collect();
             quote! { StepKind::For { var: #var.to_string(), in_expr: #in_tok, body: vec![#(#body_tokens),*] } }
+        }
+        StepKind::If { cond, then_body, else_ifs, else_body } => {
+            let cond_tokens = emit_expr(cond, interp);
+            let then_tokens: Vec<_> = then_body.iter().map(|s| emit_step(s, interp)).collect();
+            let else_if_tokens: Vec<_> = else_ifs.iter().map(|(c, b)| {
+                let ec = emit_expr(c, interp);
+                let eb: Vec<_> = b.iter().map(|s| emit_step(s, interp)).collect();
+                quote! { (Box::new(#ec), vec![#(#eb),*]) }
+            }).collect();
+            let else_tokens = match else_body {
+                Some(body) => {
+                    let eb: Vec<_> = body.iter().map(|s| emit_step(s, interp)).collect();
+                    quote! { Some(vec![#(#eb),*]) }
+                }
+                None => quote! { None },
+            };
+            quote! {
+                oxdock_parser::ast::StepKind::If {
+                    cond: Box::new(#cond_tokens),
+                    then_body: vec![#(#then_tokens),*],
+                    else_ifs: vec![#(#else_if_tokens),*],
+                    else_body: #else_tokens,
+                }
+            }
         }
         StepKind::Assign { var, expr } => {
             let e = emit_expr(expr, interp);

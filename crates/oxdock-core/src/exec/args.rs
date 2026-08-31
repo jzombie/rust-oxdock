@@ -1,5 +1,5 @@
 use anyhow::{Result, bail};
-use oxdock_parser::{Arg, Expr, Value};
+use oxdock_parser::{Arg, CompareOp, Expr, LogicalOp, Value};
 use oxdock_process::ProcessManager;
 
 use super::state::ExecState;
@@ -111,6 +111,45 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
             "LOAD_JSON" => evaluate_load_json(args, cx),
             _ => bail!("unknown function {name}"),
         },
+        Expr::Compare { op, left, right } => {
+            let lv = evaluate_expr(left, cx)?;
+            let rv = evaluate_expr(right, cx)?;
+            let ls = format_value_for_string(&lv);
+            let rs = format_value_for_string(&rv);
+            let result = match op {
+                CompareOp::Eq => ls == rs,
+                CompareOp::Ne => ls != rs,
+            };
+            Ok(Value::Bool(result))
+        }
+        Expr::Logical { op, left, right } => {
+            let left_val = evaluate_expr(left, cx)?;
+            let left_truthy = is_truthy(&left_val)?;
+            match op {
+                LogicalOp::Or => {
+                    if left_truthy {
+                        Ok(Value::Bool(true))
+                    } else {
+                        Ok(Value::Bool(is_truthy(&evaluate_expr(right, cx)?)?))
+                    }
+                }
+                LogicalOp::And => {
+                    if !left_truthy {
+                        Ok(Value::Bool(false))
+                    } else {
+                        Ok(Value::Bool(is_truthy(&evaluate_expr(right, cx)?)?))
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Check if a value is truthy. Only `Value::Bool` is accepted; all other types produce a TypeError.
+pub(crate) fn is_truthy(val: &Value) -> Result<bool> {
+    match val {
+        Value::Bool(b) => Ok(*b),
+        other => bail!("Type Error: condition must be a Bool, found {:?}", other),
     }
 }
 

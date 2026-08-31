@@ -29,6 +29,7 @@ struct IoScopeFrame {
 }
 
 #[derive(Clone, Copy)]
+#[derive(Debug)]
 enum BlockKind {
     Guard,
     Io,
@@ -677,6 +678,7 @@ fn parse_command(pair: Pair<Rule>) -> Result<StepKind> {
         }
         Rule::for_statement => parse_for_statement_from_pair(pair)?,
         Rule::let_statement => parse_let_statement_from_pair(pair)?,
+        Rule::if_statement => parse_if_statement_from_pair(pair)?,
         _ => bail!("unknown command rule: {:?}", pair.as_rule()),
     };
     Ok(kind)
@@ -727,11 +729,72 @@ fn parse_let_statement_from_pair(pair: Pair<Rule>) -> Result<StepKind> {
     })
 }
 
+fn parse_if_statement_from_pair(pair: Pair<Rule>) -> Result<StepKind> {
+    let mut cond = None;
+    let mut then_body = Vec::new();
+    let mut else_ifs = Vec::new();
+    let mut else_body = None;
+
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::expr => {
+                if cond.is_none() {
+                    cond = Some(parse_expr(inner)?);
+                }
+            }
+            Rule::block => {
+                if then_body.is_empty() {
+                    then_body = parse_block_elements(inner)?;
+                }
+            }
+            Rule::else_if_clause => {
+                let (eif_cond, eif_body) = parse_else_if_clause(inner)?;
+                else_ifs.push((eif_cond, eif_body));
+            }
+            Rule::else_clause => {
+                else_body = Some(parse_else_clause(inner)?);
+            }
+            _ => {}
+        }
+    }
+    Ok(StepKind::If {
+        cond: Box::new(cond.ok_or_else(|| anyhow!("IF requires a condition"))?),
+        then_body,
+        else_ifs,
+        else_body,
+    })
+}
+
+fn parse_else_if_clause(pair: Pair<Rule>) -> Result<(Box<Expr>, Vec<Step>)> {
+    let mut cond = None;
+    let mut body = Vec::new();
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::expr => cond = Some(parse_expr(inner)?),
+            Rule::block => body = parse_block_elements(inner)?,
+            _ => {}
+        }
+    }
+    Ok((
+        Box::new(cond.ok_or_else(|| anyhow!("ELSE IF requires a condition"))?),
+        body,
+    ))
+}
+
+fn parse_else_clause(pair: Pair<Rule>) -> Result<Vec<Step>> {
+    for inner in pair.into_inner() {
+        if let Rule::block = inner.as_rule() {
+            return parse_block_elements(inner);
+        }
+    }
+    Ok(Vec::new())
+}
+
 fn parse_block_elements(block_pair: Pair<Rule>) -> Result<Vec<Step>> {
     let mut steps = Vec::new();
     for elem in block_pair.into_inner() {
         match elem.as_rule() {
-            Rule::for_statement | Rule::let_statement => {
+            Rule::for_statement | Rule::let_statement | Rule::if_statement => {
                 let step_kind = parse_command(elem)?;
                 steps.push(Step {
                     guard: None,
@@ -938,6 +1001,7 @@ fn parse_env_pair(pair: Pair<Rule>) -> Result<(String, String)> {
                     let inner_val = value_pair.into_inner().next().unwrap();
                     match inner_val.as_rule() {
                         Rule::quoted_string => parse_quoted_string(inner_val)?,
+                        Rule::templated_arg => inner_val.as_str().to_string(),
                         Rule::unquoted_env_value => inner_val.as_str().to_string(),
                         _ => unreachable!(
                             "unexpected rule in env_value_part: {:?}",
@@ -1010,6 +1074,7 @@ fn parse_smart_concatenated_string(pair: Pair<Rule>) -> Result<String> {
                 }
             }
             Rule::unquoted_msg_content | Rule::unquoted_run_content => body.push_str(part.as_str()),
+            Rule::templated_arg => body.push_str(part.as_str()),
             _ => {}
         }
         last_end = Some(span.end());
@@ -1030,6 +1095,7 @@ fn parse_concatenated_string(pair: Pair<Rule>) -> Result<String> {
         match part.as_rule() {
             Rule::quoted_string => body.push_str(&parse_quoted_string(part)?),
             Rule::unquoted_msg_content | Rule::unquoted_run_content => body.push_str(part.as_str()),
+            Rule::templated_arg => body.push_str(part.as_str()),
             _ => {}
         }
         last_end = Some(span.end());
@@ -1358,11 +1424,64 @@ fn parse_dollar_ident(pair: Pair<Rule>) -> String {
     s.strip_prefix('$').unwrap_or(s).to_string()
 }
 
-use crate::ast::{Expr, Value};
+use crate::ast::{CompareOp, Expr, LogicalOp, Value};
 
 fn parse_expr(pair: Pair<Rule>) -> Result<Expr> {
     let inner = pair.into_inner().next().unwrap();
     match inner.as_rule() {
+        Rule::expr_logical_or => parse_expr_logical_or(inner),
+        _ => bail!("unexpected expr rule: {:?}", inner.as_rule()),
+    }
+}
+
+fn parse_expr_logical_or(pair: Pair<Rule>) -> Result<Expr> {
+    let mut inner = pair.into_inner();
+    let mut left = parse_expr_logical_and(inner.next().unwrap())?;
+    while let Some(op_pair) = inner.next() {
+        let op = match op_pair.as_rule() {
+            Rule::or_op => LogicalOp::Or,
+            _ => bail!("unexpected operator in logical-or: {:?}", op_pair.as_rule()),
+        };
+        let right = parse_expr_logical_and(inner.next().unwrap())?;
+        left = Expr::Logical { op, left: Box::new(left), right: Box::new(right) };
+    }
+    Ok(left)
+}
+
+fn parse_expr_logical_and(pair: Pair<Rule>) -> Result<Expr> {
+    let mut inner = pair.into_inner();
+    let mut left = parse_expr_comparison(inner.next().unwrap())?;
+    while let Some(op_pair) = inner.next() {
+        let op = match op_pair.as_rule() {
+            Rule::and_op => LogicalOp::And,
+            _ => bail!("unexpected operator in logical-and: {:?}", op_pair.as_rule()),
+        };
+        let right = parse_expr_comparison(inner.next().unwrap())?;
+        left = Expr::Logical { op, left: Box::new(left), right: Box::new(right) };
+    }
+    Ok(left)
+}
+
+fn parse_expr_comparison(pair: Pair<Rule>) -> Result<Expr> {
+    let mut inner = pair.into_inner();
+    let left = parse_expr_atom(inner.next().unwrap())?;
+    if let Some(op_pair) = inner.next() {
+        let op = match op_pair.as_rule() {
+            Rule::eq_op => CompareOp::Eq,
+            Rule::neq_op => CompareOp::Ne,
+            _ => bail!("unexpected comparison operator: {:?}", op_pair.as_rule()),
+        };
+        let right = parse_expr_atom(inner.next().unwrap())?;
+        Ok(Expr::Compare { op, left: Box::new(left), right: Box::new(right) })
+    } else {
+        Ok(left)
+    }
+}
+
+fn parse_expr_atom(pair: Pair<Rule>) -> Result<Expr> {
+    let inner = pair.into_inner().next().unwrap();
+    match inner.as_rule() {
+        Rule::parenthesized_expr => parse_expr(inner.into_inner().next().unwrap()),
         Rule::func_call => parse_func_call(inner),
         Rule::key_path => parse_key_path(inner),
         Rule::variable => {
@@ -1377,9 +1496,13 @@ fn parse_expr(pair: Pair<Rule>) -> Result<Expr> {
         }
         Rule::bare_word => {
             let s = inner.as_str().to_string();
-            Ok(Expr::Literal(Value::String(s)))
+            match s.as_str() {
+                "true" => Ok(Expr::Literal(Value::Bool(true))),
+                "false" => Ok(Expr::Literal(Value::Bool(false))),
+                _ => Ok(Expr::Literal(Value::String(s))),
+            }
         }
-        _ => bail!("unexpected expression rule: {:?}", inner.as_rule()),
+        _ => bail!("unexpected expression atom rule: {:?}", inner.as_rule()),
     }
 }
 

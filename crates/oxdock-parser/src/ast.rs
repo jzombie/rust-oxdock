@@ -381,6 +381,18 @@ pub enum Value {
     Bool(bool),
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum CompareOp {
+    Eq,
+    Ne,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum LogicalOp {
+    And,
+    Or,
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Expr {
     Literal(Value),
@@ -388,6 +400,8 @@ pub enum Expr {
     KeyPath { base: String, keys: Vec<String> },
     List(Vec<Expr>),
     Call { name: String, args: Vec<Expr> },
+    Compare { op: CompareOp, left: Box<Expr>, right: Box<Expr> },
+    Logical { op: LogicalOp, left: Box<Expr>, right: Box<Expr> },
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -474,6 +488,12 @@ pub enum StepKind {
         var: String,
         in_expr: Expr,
         body: Vec<Step>,
+    },
+    If {
+        cond: Box<Expr>,
+        then_body: Vec<Step>,
+        else_ifs: Vec<(Box<Expr>, Vec<Step>)>,
+        else_body: Option<Vec<Step>>,
     },
     Assign {
         var: String,
@@ -826,6 +846,28 @@ impl fmt::Display for StepKind {
                 }
                 write!(f, "\n}}")
             }
+            StepKind::If { cond, then_body, else_ifs, else_body } => {
+                write!(f, "IF {} {{", cond)?;
+                for step in then_body {
+                    write!(f, "\n    {}", step)?;
+                }
+                write!(f, " }}")?;
+                for (cond, body) in else_ifs {
+                    write!(f, " ELSE IF {} {{", cond)?;
+                    for step in body {
+                        write!(f, "\n    {}", step)?;
+                    }
+                    write!(f, " }}")?;
+                }
+                if let Some(body) = else_body {
+                    write!(f, " ELSE {{")?;
+                    for step in body {
+                        write!(f, "\n    {}", step)?;
+                    }
+                    write!(f, " }}")?;
+                }
+                Ok(())
+            }
             StepKind::Assign { var, expr } => {
                 write!(f, "LET ${} = {}", var, expr)
             }
@@ -894,6 +936,30 @@ impl fmt::Display for Expr {
                 }
                 write!(f, "]")
             }
+            Expr::Compare { op, left, right } => {
+                write!(f, "{} {} {}", left, op, right)
+            }
+            Expr::Logical { op, left, right } => {
+                write!(f, "({} {} {})", left, op, right)
+            }
+        }
+    }
+}
+
+impl fmt::Display for CompareOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CompareOp::Eq => write!(f, "=="),
+            CompareOp::Ne => write!(f, "!="),
+        }
+    }
+}
+
+impl fmt::Display for LogicalOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            LogicalOp::And => write!(f, "&&"),
+            LogicalOp::Or => write!(f, "||"),
         }
     }
 }

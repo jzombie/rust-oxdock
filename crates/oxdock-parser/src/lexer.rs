@@ -72,7 +72,8 @@ pub fn tokenize(input: &str) -> Result<Vec<RawToken<'_>>> {
             | Rule::assert_stdout_command
             | Rule::exit_command
             | Rule::for_statement
-            | Rule::let_statement => tokens.push(RawToken::Command { pair, line_no }),
+            | Rule::let_statement
+            | Rule::if_statement => tokens.push(RawToken::Command { pair, line_no }),
             other => bail!("unexpected parser rule {:?}", other),
         }
     }

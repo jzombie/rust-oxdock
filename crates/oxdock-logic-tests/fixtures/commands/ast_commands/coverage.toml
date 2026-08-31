@@ -32,6 +32,7 @@ HashSha256 = ["hash_sha256"]
 Exit = ["exit"]
 Assign = ["assign"]
 For = ["for_loop"]
+If = ["if_statement"]
 
 [extras]
 cases = [
