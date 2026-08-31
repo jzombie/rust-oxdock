@@ -93,7 +93,7 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
                             .cloned()
                             .ok_or_else(|| anyhow::anyhow!("Index {} out of bounds", idx))?;
                     }
-                    Value::String(_) | Value::Bool(_) => {
+                    Value::String(_) | Value::Bool(_) | Value::Int(_) => {
                         bail!("Cannot traverse into scalar value at key '{}'", key);
                     }
                 }
@@ -252,7 +252,15 @@ fn json_to_value(v: serde_json::Value) -> Value {
     match v {
         serde_json::Value::String(s) => Value::String(s),
         serde_json::Value::Bool(b) => Value::Bool(b),
-        serde_json::Value::Number(n) => Value::String(n.to_string()),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Value::Int(i)
+            } else if let Some(f) = n.as_f64() {
+                Value::String(f.to_string())
+            } else {
+                Value::String(n.to_string())
+            }
+        }
         serde_json::Value::Array(arr) => Value::List(arr.into_iter().map(json_to_value).collect()),
         serde_json::Value::Object(map) => Value::Map(
             map.into_iter()
@@ -349,7 +357,7 @@ pub(crate) fn resolve_dollar_vars<P: ProcessManager>(input: &str, state: &ExecSt
                             break;
                         }
                     }
-                    Value::String(_) | Value::Bool(_) => {
+                    Value::String(_) | Value::Bool(_) | Value::Int(_) => {
                         break; // Scalar reached; remaining dots belong to static text
                     }
                 }
@@ -376,6 +384,7 @@ pub(crate) fn resolve_dollar_vars<P: ProcessManager>(input: &str, state: &ExecSt
 pub(crate) fn format_value_for_string(val: &Value) -> String {
     match val {
         Value::String(s) => s.clone(),
+        Value::Int(i) => i.to_string(),
         Value::Bool(b) => b.to_string(),
         Value::List(items) => items
             .iter()

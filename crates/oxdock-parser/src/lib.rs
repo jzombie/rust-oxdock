@@ -607,7 +607,8 @@ mod tests {
             steps.iter().map(|s| &s.kind).collect::<Vec<_>>()
         );
         match &steps[0].kind {
-            StepKind::For { var, in_expr, body } => {
+            StepKind::For { key_var, var, in_expr, body } => {
+                assert!(key_var.is_none());
                 assert_eq!(var, "f");
                 assert_eq!(
                     in_expr,
@@ -623,6 +624,29 @@ mod tests {
                     body.len(),
                     body.iter().map(|s| &s.kind).collect::<Vec<_>>()
                 );
+            }
+            other => panic!("expected For, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn for_map_iteration_parses() {
+        let script = indoc! {r#"
+            FOR $k, $v IN $map {
+                ECHO $k
+            }
+        "#};
+        let steps = match parse_script(script) {
+            Ok(s) => s,
+            Err(e) => panic!("parse failed: {e}"),
+        };
+        assert_eq!(steps.len(), 1);
+        match &steps[0].kind {
+            StepKind::For { key_var, var, in_expr, body } => {
+                assert_eq!(key_var.as_deref(), Some("k"));
+                assert_eq!(var, "v");
+                assert_eq!(in_expr, &Expr::Var("map".to_string()));
+                assert_eq!(body.len(), 1);
             }
             other => panic!("expected For, got {:?}", other),
         }

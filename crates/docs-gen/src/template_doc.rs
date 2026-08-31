@@ -28,7 +28,8 @@ pub fn compile(
         RAW_WRITE #out_str ""
         LET $manifest = LOAD_JSON(#manifest_str)
 
-        FOR $node IN $manifest {
+        FOR $idx, $node IN $manifest {
+            ECHO "[$idx] $node.kind"
             IF $node.kind == "template" {
                 WITH_IO [stdout=pipe:tmpl] EXPAND $node.path
                 WITH_IO [stdin=pipe:tmpl] APPEND #out_str

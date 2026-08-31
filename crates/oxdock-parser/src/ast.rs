@@ -375,6 +375,7 @@ pub struct IoBinding {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Value {
     String(String),
+    Int(i64),
     List(Vec<Value>),
     Map(std::collections::BTreeMap<String, Value>),
     Bool(bool),
@@ -498,6 +499,7 @@ pub enum StepKind {
     },
     Exit(i32),
     For {
+        key_var: Option<String>,
         var: String,
         in_expr: Expr,
         body: Vec<Step>,
@@ -868,8 +870,11 @@ impl fmt::Display for StepKind {
             }
             StepKind::HashSha256 { path } => write!(f, "HASH_SHA256 {}", quote_arg(path.as_str())),
             StepKind::Exit(code) => write!(f, "EXIT {}", code),
-            StepKind::For { var, in_expr, body } => {
-                write!(f, "FOR ${} IN {} {{", var, in_expr)?;
+            StepKind::For { key_var, var, in_expr, body } => {
+                match key_var {
+                    Some(k) => write!(f, "FOR ${}, ${} IN {} {{", k, var, in_expr)?,
+                    None => write!(f, "FOR ${} IN {} {{", var, in_expr)?,
+                }
                 for step in body {
                     write!(f, "\n    {}", step)?;
                 }
@@ -913,6 +918,7 @@ impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Value::String(s) => write!(f, "\"{}\"", s),
+            Value::Int(i) => write!(f, "{}", i),
             Value::List(items) => {
                 write!(f, "[")?;
                 for (i, item) in items.iter().enumerate() {

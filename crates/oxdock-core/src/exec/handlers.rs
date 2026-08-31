@@ -850,43 +850,87 @@ pub(super) fn exit<P: ProcessManager>(cx: &mut StepCtx<'_, P>, code: i32) -> Res
 
 pub(super) fn for_loop<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
-    var: &str,
+    key_var: Option<&str>,
+    val_var: &str,
     in_expr: &Expr,
     body: &[Step],
 ) -> Result<()> {
     let iterable = super::args::evaluate_expr(in_expr, cx)?;
-    let clean_var = var.trim_start_matches('$').to_string();
+    let clean_val_var = val_var.trim_start_matches('$').to_string();
 
-    if let Value::List(items) = iterable {
-        for item in items {
-            cx.state.push_var_scope();
-            cx.state.set_var(clean_var.clone(), item);
+    match iterable {
+        Value::List(items) => {
+            for (i, item) in items.into_iter().enumerate() {
+                cx.state.push_var_scope();
+                if let Some(idx_name) = key_var {
+                    let clean_idx = idx_name.trim_start_matches('$').to_string();
+                    cx.state.set_var(clean_idx, Value::Int(i as i64));
+                }
+                cx.state.set_var(clean_val_var.clone(), item);
 
-            let saved_cwd = cx.state.cwd.clone();
-            let saved_root = cx.state.fs.root().clone();
-            let saved_envs = Arc::clone(&cx.state.envs);
+                let saved_cwd = cx.state.cwd.clone();
+                let saved_root = cx.state.fs.root().clone();
+                let saved_envs = Arc::clone(&cx.state.envs);
 
-            let res = super::steps::execute_steps(
-                cx.state,
-                cx.process,
-                body,
-                cx.stdin.clone(),
-                false,
-                cx.out.clone(),
-                cx.err.clone(),
-                false,
-            );
+                let res = super::steps::execute_steps(
+                    cx.state,
+                    cx.process,
+                    body,
+                    cx.stdin.clone(),
+                    false,
+                    cx.out.clone(),
+                    cx.err.clone(),
+                    false,
+                );
 
-            cx.state.cwd = saved_cwd;
-            cx.state.fs.set_root(&saved_root);
-            cx.state.envs = saved_envs;
+                cx.state.cwd = saved_cwd;
+                cx.state.fs.set_root(&saved_root);
+                cx.state.envs = saved_envs;
 
-            cx.state.pop_var_scope();
-            res?;
+                cx.state.pop_var_scope();
+                res?;
+            }
+            Ok(())
         }
-        Ok(())
-    } else {
-        bail!("FOR loop requires a list iterable")
+        Value::Map(map) => {
+            let key_name = key_var.ok_or_else(|| {
+                anyhow!("FOR loop over Map requires key and value bindings: FOR $k, $v IN $map")
+            })?;
+            let clean_key_var = key_name.trim_start_matches('$').to_string();
+            let mut keys: Vec<_> = map.keys().cloned().collect();
+            keys.sort();
+
+            for k in keys {
+                let v = map[&k].clone();
+                cx.state.push_var_scope();
+                cx.state.set_var(clean_key_var.clone(), Value::String(k.clone()));
+                cx.state.set_var(clean_val_var.clone(), v);
+
+                let saved_cwd = cx.state.cwd.clone();
+                let saved_root = cx.state.fs.root().clone();
+                let saved_envs = Arc::clone(&cx.state.envs);
+
+                let res = super::steps::execute_steps(
+                    cx.state,
+                    cx.process,
+                    body,
+                    cx.stdin.clone(),
+                    false,
+                    cx.out.clone(),
+                    cx.err.clone(),
+                    false,
+                );
+
+                cx.state.cwd = saved_cwd;
+                cx.state.fs.set_root(&saved_root);
+                cx.state.envs = saved_envs;
+
+                cx.state.pop_var_scope();
+                res?;
+            }
+            Ok(())
+        }
+        other => bail!("FOR loop requires a List or Map iterable, found {:?}", other),
     }
 }
 

@@ -718,6 +718,7 @@ fn emit_raw_value(v: &Value, interp: &[(proc_macro2::Ident, usize)]) -> proc_mac
             quote! { Value::Map(vec![#(#kv_tokens),*].into_iter().collect()) }
         }
         Value::Bool(b) => quote! { Value::Bool(#b) },
+        Value::Int(i) => quote! { Value::Int(#i) },
     }
 }
 
@@ -896,10 +897,14 @@ fn emit_stepkind(
             quote! { StepKind::HashSha256 { path: #p } }
         }
         StepKind::Exit(code) => quote! { StepKind::Exit(#code) },
-        StepKind::For { var, in_expr, body } => {
+        StepKind::For { key_var, var, in_expr, body } => {
             let in_tok = emit_expr(in_expr, interp);
             let body_tokens: Vec<_> = body.iter().map(|s| emit_step(s, interp)).collect();
-            quote! { StepKind::For { var: #var.to_string(), in_expr: #in_tok, body: vec![#(#body_tokens),*] } }
+            let key_var_tokens = match key_var {
+                Some(k) => quote! { Some(#k.to_string()) },
+                None => quote! { None },
+            };
+            quote! { StepKind::For { key_var: #key_var_tokens, var: #var.to_string(), in_expr: #in_tok, body: vec![#(#body_tokens),*] } }
         }
         StepKind::If {
             cond,

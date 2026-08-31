@@ -298,7 +298,9 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
             bail!("WITH_IO block should have been expanded during parsing")
         }
         StepKind::Exit(code) => handlers::exit(&mut cx, *code),
-        StepKind::For { var, in_expr, body } => handlers::for_loop(&mut cx, var, in_expr, body),
+        StepKind::For { key_var, var, in_expr, body } => {
+            handlers::for_loop(&mut cx, key_var.as_deref(), var, in_expr, body)
+        }
         StepKind::If {
             cond,
             then_body,
@@ -497,8 +499,8 @@ fn execute_steps_inner<P: ProcessManager>(
                     bail!("WITH_IO block should have been expanded during parsing")
                 }
                 StepKind::Exit(code) => handlers::exit(&mut cx, *code),
-                StepKind::For { var, in_expr, body } => {
-                    handlers::for_loop(&mut cx, var, in_expr, body)
+                StepKind::For { key_var, var, in_expr, body } => {
+                    handlers::for_loop(&mut cx, key_var.as_deref(), var, in_expr, body)
                 }
                 StepKind::If {
                     cond,

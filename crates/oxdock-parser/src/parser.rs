@@ -683,13 +683,13 @@ fn parse_command(pair: Pair<Rule>) -> Result<StepKind> {
 }
 
 fn parse_for_statement_from_pair(pair: Pair<Rule>) -> Result<StepKind> {
-    let mut var = None;
+    let mut idents = Vec::new();
     let mut in_expr = None;
     let mut body_steps = Vec::new();
     for inner in pair.into_inner() {
         match inner.as_rule() {
             Rule::dollar_ident => {
-                var = Some(parse_dollar_ident(inner));
+                idents.push(parse_dollar_ident(inner));
             }
             Rule::expr => {
                 in_expr = Some(parse_expr(inner)?);
@@ -700,8 +700,17 @@ fn parse_for_statement_from_pair(pair: Pair<Rule>) -> Result<StepKind> {
             _ => {}
         }
     }
+    let (key_var, var) = match idents.len() {
+        1 => (None, idents.into_iter().next().unwrap()),
+        2 => {
+            let mut iter = idents.into_iter();
+            (Some(iter.next().unwrap()), iter.next().unwrap())
+        }
+        _ => bail!("FOR requires at least one variable"),
+    };
     Ok(StepKind::For {
-        var: var.ok_or_else(|| anyhow!("FOR requires a variable"))?,
+        key_var,
+        var,
         in_expr: in_expr.ok_or_else(|| anyhow!("FOR requires an iterable expression"))?,
         body: body_steps,
     })

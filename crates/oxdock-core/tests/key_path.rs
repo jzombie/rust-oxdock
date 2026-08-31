@@ -950,6 +950,118 @@ fn nested_for_loops_inner_shadows_outer() {
     assert_eq!(read_trimmed(&root, "i2.txt"), "i2");
 }
 
+#[test]
+fn for_map_iteration_sorted_keys() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = temp.as_guarded_path().clone();
+
+    // Create a TOML file with a map
+    write_file(&root, "data.toml", indoc! {r#"
+        [settings]
+        zebra = "last"
+        alpha = "first"
+        middle = "second"
+    "#}.as_bytes());
+
+    let steps = parse_script(indoc! {r#"
+        LET $d = LOAD_TOML("data.toml")
+        FOR $k, $v IN $d.settings {
+            WRITE $k.txt $v
+        }
+    "#})
+    .unwrap();
+
+    run_steps_with_context_result_with_io(&root, &root, &steps, ExecIo::new()).unwrap();
+
+    // Keys should be sorted lexicographically: alpha, middle, zebra
+    assert_eq!(read_trimmed(&root, "alpha.txt"), "first");
+    assert_eq!(read_trimmed(&root, "middle.txt"), "second");
+    assert_eq!(read_trimmed(&root, "zebra.txt"), "last");
+}
+
+#[test]
+fn for_map_iteration_echo_stdout() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = temp.as_guarded_path().clone();
+
+    write_file(
+        &root,
+        "data.toml",
+        indoc! {r#"
+            [settings]
+            a = "1"
+            b = "2"
+        "#}
+        .as_bytes(),
+    );
+
+    let steps = parse_script(indoc! {r#"
+        LET $d = LOAD_TOML("data.toml")
+        FOR $k, $v IN $d.settings {
+            ECHO "$k = $v"
+        }
+    "#})
+    .unwrap();
+
+    let mut io = ExecIo::new();
+    let captured: std::sync::Arc<std::sync::Mutex<Vec<u8>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let pipe: oxdock_process::SharedOutput = captured.clone();
+    io.set_stdout(Some(pipe));
+
+    run_steps_with_context_result_with_io(&root, &root, &steps, io).unwrap();
+
+    let output = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
+    assert!(output.contains("a = 1"), "Expected 'a = 1', got: {output}");
+    assert!(output.contains("b = 2"), "Expected 'b = 2', got: {output}");
+}
+
+#[test]
+fn for_list_enumeration() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = temp.as_guarded_path().clone();
+
+    run_script(
+        &root,
+        indoc! {r#"
+        LET $items = ["a", "b", "c"]
+        FOR $i, $v IN $items {
+            WRITE $v.txt $i
+        }
+    "#},
+    )
+    .unwrap();
+    assert_eq!(read_trimmed(&root, "a.txt"), "0");
+    assert_eq!(read_trimmed(&root, "b.txt"), "1");
+    assert_eq!(read_trimmed(&root, "c.txt"), "2");
+}
+
+#[test]
+fn for_list_enumeration_echo() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = temp.as_guarded_path().clone();
+
+    let steps = parse_script(indoc! {r#"
+        LET $items = ["x", "y"]
+        FOR $i, $v IN $items {
+            ECHO "$i: $v"
+        }
+    "#})
+    .unwrap();
+
+    let mut io = ExecIo::new();
+    let captured: std::sync::Arc<std::sync::Mutex<Vec<u8>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let pipe: oxdock_process::SharedOutput = captured.clone();
+    io.set_stdout(Some(pipe));
+
+    run_steps_with_context_result_with_io(&root, &root, &steps, io).unwrap();
+
+    let output = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
+    assert!(output.contains("0: x"), "Expected '0: x', got: {output}");
+    assert!(output.contains("1: y"), "Expected '1: y', got: {output}");
+}
+
 // ============================================================================
 // Comparison operators
 // ============================================================================

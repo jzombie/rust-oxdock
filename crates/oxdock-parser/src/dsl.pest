@@ -1,23 +1,23 @@
 WHITESPACE = _{ " " | "\t" }
-linebreak = _{ "\r\n" | "\n" }
-COMMENT = _{ line_comment | block_comment }
+linebreak  = _{ "\r\n" | "\n" }
+COMMENT    = _{ line_comment | block_comment }
 line_comment = _{ "//" ~ (!linebreak ~ ANY)* }
 block_comment = _{ "/*" ~ (block_comment | !"*/" ~ ANY)* ~ "*/" }
 
 // Hash comments are only valid at the start of a line (possibly indented)
-hash_comment = _{ WHITESPACE* ~ "#" ~ (!linebreak ~ ANY)* }
+hash_comment = _{ "#" ~ (!linebreak ~ ANY)* }
+
+blank = _{ (WHITESPACE | linebreak)+ }
 
 script = { SOI ~ element* ~ EOI }
 
 // Structural statements MUST precede generic commands
-element = _{ blank | hash_comment | semicolon | guard_line | block_start | block_end | if_statement | for_statement | let_statement | command }
+element = _{ blank | hash_comment | COMMENT | semicolon | guard_line | block_start | block_end | if_statement | for_statement | let_statement | command }
 
 // Inside for/let blocks, block_start/block_end must NOT appear as elements
 // (the block's own braces handle them).  Nested guard blocks use guard_block.
-block_element = _{ blank | hash_comment | semicolon | guard_block | guard_line | if_statement | for_statement | let_statement | command }
+block_element = _{ blank | hash_comment | COMMENT | semicolon | guard_block | guard_line | if_statement | for_statement | let_statement | command }
 guard_block = { guard_line ~ block }
-
-blank = _{ linebreak+ }
 
 block_start = { "{" }
 
@@ -101,12 +101,12 @@ in_keyword = @{ "IN" ~ !(ASCII_ALPHANUMERIC | "_") }
 if_keyword = @{ "IF" ~ !(ASCII_ALPHANUMERIC | "_") }
 else_keyword = @{ "ELSE" ~ !(ASCII_ALPHANUMERIC | "_") }
 
-for_statement = { for_keyword ~ dollar_ident ~ in_keyword ~ expr ~ block }
+for_statement = { for_keyword ~ dollar_ident ~ ("," ~ dollar_ident)? ~ in_keyword ~ expr ~ block }
 let_statement = { let_keyword ~ dollar_ident ~ "=" ~ expr }
 
 else_if_clause = { else_keyword ~ if_keyword ~ expr ~ block }
 else_clause = { else_keyword ~ block }
-if_statement = { if_keyword ~ expr ~ block ~ (blank* ~ else_if_clause)* ~ blank* ~ else_clause? }
+if_statement = { if_keyword ~ expr ~ block ~ (ws? ~ else_if_clause)* ~ ws? ~ else_clause? }
 
 // Commands
 command = _{
@@ -177,7 +177,7 @@ inherit_list = { "[" ~ ws? ~ env_key ~ (ws? ~ "," ~ ws? ~ env_key)* ~ ws? ~ "]" 
 sep = _{ WHITESPACE+ }
 argument = { quoted_string | templated_arg | unquoted_arg }
 templated_arg = @{ "{{" ~ (!"}}" ~ ANY)* ~ "}}" }
-unquoted_arg = @{ (!WHITESPACE ~ !linebreak ~ !";" ~ !"}" ~ ANY)+ }
+unquoted_arg = @{ (!WHITESPACE ~ !linebreak ~ !";" ~ !"}" ~ !"//" ~ !"/*" ~ ANY)+ }
 include_dirty_flag = { "--include-dirty" }
 io_flags = { "[" ~ ws? ~ io_binding ~ (ws? ~ "," ~ ws? ~ io_binding)* ~ ws? ~ "]" }
 io_binding = { io_stream ~ (ws? ~ "=" ~ ws? ~ pipe_binding)? }
@@ -189,10 +189,10 @@ workspace_target = { "SNAPSHOT" | "LOCAL" | "snapshot" | "local" }
 env_pair = { env_key_part ~ ws? ~ "=" ~ ws? ~ env_value_part }
 env_key_part = @{ (!"=" ~ !WHITESPACE ~ !linebreak ~ ANY)+ }
 env_value_part = { quoted_string | templated_arg | unquoted_env_value }
-unquoted_env_value = @{ (!WHITESPACE ~ !linebreak ~ !";" ~ !"}" ~ ANY)+ }
+unquoted_env_value = @{ (!WHITESPACE ~ !linebreak ~ !";" ~ !"}" ~ !"//" ~ !"/*" ~ ANY)+ }
 
 message = { (quoted_string | templated_arg | unquoted_msg_content)+ }
-unquoted_msg_content = { !(linebreak | ";" | "}") ~ ANY }
+unquoted_msg_content = { !(linebreak | ";" | "}" | "//" | "/*") ~ ANY }
 
 run_args = { (quoted_string | templated_arg | unquoted_run_content)+ }
 unquoted_run_content = { !(linebreak | "//" | "/*" | ";" | "}") ~ ANY }
