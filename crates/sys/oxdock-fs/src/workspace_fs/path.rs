@@ -218,9 +218,9 @@ impl GuardedPath {
         let search = format!("{}/{}", escaped_root, rel_pattern);
 
         let mut results = Vec::new();
-        for entry in glob::glob(&search).map_err(|e| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, e)
-        })? {
+        for entry in glob::glob(&search)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?
+        {
             let path = entry?;
             if path.starts_with(&self.root) {
                 results.push(path);

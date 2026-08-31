@@ -1,6 +1,5 @@
 use crate::ast::{
-    Guard, GuardExpr, IoBinding, IoStream, PlatformGuard, Step, StepKind,
-    WorkspaceTarget,
+    Guard, GuardExpr, IoBinding, IoStream, PlatformGuard, Step, StepKind, WorkspaceTarget,
 };
 use crate::lexer::{self, RawToken, Rule};
 use anyhow::{Result, anyhow, bail};
@@ -28,8 +27,7 @@ struct IoScopeFrame {
     guards: Option<GuardExpr>,
 }
 
-#[derive(Clone, Copy)]
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 enum BlockKind {
     Guard,
     Io,
@@ -1443,7 +1441,11 @@ fn parse_expr_logical_or(pair: Pair<Rule>) -> Result<Expr> {
             _ => bail!("unexpected operator in logical-or: {:?}", op_pair.as_rule()),
         };
         let right = parse_expr_logical_and(inner.next().unwrap())?;
-        left = Expr::Logical { op, left: Box::new(left), right: Box::new(right) };
+        left = Expr::Logical {
+            op,
+            left: Box::new(left),
+            right: Box::new(right),
+        };
     }
     Ok(left)
 }
@@ -1454,10 +1456,17 @@ fn parse_expr_logical_and(pair: Pair<Rule>) -> Result<Expr> {
     while let Some(op_pair) = inner.next() {
         let op = match op_pair.as_rule() {
             Rule::and_op => LogicalOp::And,
-            _ => bail!("unexpected operator in logical-and: {:?}", op_pair.as_rule()),
+            _ => bail!(
+                "unexpected operator in logical-and: {:?}",
+                op_pair.as_rule()
+            ),
         };
         let right = parse_expr_comparison(inner.next().unwrap())?;
-        left = Expr::Logical { op, left: Box::new(left), right: Box::new(right) };
+        left = Expr::Logical {
+            op,
+            left: Box::new(left),
+            right: Box::new(right),
+        };
     }
     Ok(left)
 }
@@ -1472,7 +1481,11 @@ fn parse_expr_comparison(pair: Pair<Rule>) -> Result<Expr> {
             _ => bail!("unexpected comparison operator: {:?}", op_pair.as_rule()),
         };
         let right = parse_expr_atom(inner.next().unwrap())?;
-        Ok(Expr::Compare { op, left: Box::new(left), right: Box::new(right) })
+        Ok(Expr::Compare {
+            op,
+            left: Box::new(left),
+            right: Box::new(right),
+        })
     } else {
         Ok(left)
     }

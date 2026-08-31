@@ -50,7 +50,10 @@ fn guard_env_equals_interpolation() {
     let mut io_wrong = ExecIo::new();
     io_wrong.insert_inherit_env("OXDOCK_TEST_MODE", "debug");
     run_steps_with_context_result_with_io(&root, &root, &steps, io_wrong).unwrap();
-    assert!(!file.exists(), "file should not exist when env equals mismatch");
+    assert!(
+        !file.exists(),
+        "file should not exist when env equals mismatch"
+    );
 }
 
 #[test]
@@ -74,7 +77,10 @@ fn guard_not_interpolation() {
     let mut io_set = ExecIo::new();
     io_set.insert_inherit_env("OXDOCK_TEST_SKIP", "1");
     run_steps_with_context_result_with_io(&root, &root, &steps, io_set).unwrap();
-    assert!(!file.exists(), "file should not exist when negated guard fails");
+    assert!(
+        !file.exists(),
+        "file should not exist when negated guard fails"
+    );
 }
 
 #[test]
@@ -100,5 +106,8 @@ fn guard_static_bool_interpolation() {
     };
     let io = ExecIo::new();
     run_steps_with_context_result_with_io(&root, &root, &steps, io).unwrap();
-    assert!(!file.exists(), "file should not exist when bool guard is false");
+    assert!(
+        !file.exists(),
+        "file should not exist when bool guard is false"
+    );
 }

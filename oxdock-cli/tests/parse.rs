@@ -1,7 +1,7 @@
 use indoc::indoc;
 use oxdock_cli::{Options, ScriptSource, Step, StepKind, parse_script};
-use oxdock_parser::Arg;
 use oxdock_fs::{GuardedPath, GuardedTempDir};
+use oxdock_parser::Arg;
 
 fn workspace_root() -> GuardedTempDir {
     GuardedPath::tempdir().expect("tmpdir")

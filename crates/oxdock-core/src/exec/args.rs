@@ -79,17 +79,19 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
             for key in keys {
                 match current {
                     Value::Map(map) => {
-                        current = map.get(key).cloned().ok_or_else(|| {
-                            anyhow::anyhow!("Key '{}' not found in map", key)
-                        })?;
+                        current = map
+                            .get(key)
+                            .cloned()
+                            .ok_or_else(|| anyhow::anyhow!("Key '{}' not found in map", key))?;
                     }
                     Value::List(list) => {
-                        let idx: usize = key.parse().map_err(|_| {
-                            anyhow::anyhow!("Invalid array index '{}'", key)
-                        })?;
-                        current = list.get(idx).cloned().ok_or_else(|| {
-                            anyhow::anyhow!("Index {} out of bounds", idx)
-                        })?;
+                        let idx: usize = key
+                            .parse()
+                            .map_err(|_| anyhow::anyhow!("Invalid array index '{}'", key))?;
+                        current = list
+                            .get(idx)
+                            .cloned()
+                            .ok_or_else(|| anyhow::anyhow!("Index {} out of bounds", idx))?;
                     }
                     Value::String(_) | Value::Bool(_) => {
                         bail!("Cannot traverse into scalar value at key '{}'", key);
@@ -191,9 +193,15 @@ fn evaluate_load_toml<P: ProcessManager>(args: &[Expr], cx: &mut StepCtx<'_, P>)
         Value::String(s) => s,
         _ => bail!("LOAD_TOML path argument must evaluate to a string"),
     };
-    let target = cx.state.fs.resolve_read(&cx.state.cwd, &path_str)
+    let target = cx
+        .state
+        .fs
+        .resolve_read(&cx.state.cwd, &path_str)
         .map_err(|e| anyhow::anyhow!("failed to resolve TOML path '{}': {}", path_str, e))?;
-    let content = cx.state.fs.read_file(&target)
+    let content = cx
+        .state
+        .fs
+        .read_file(&target)
         .map_err(|e| anyhow::anyhow!("failed to read TOML file '{}': {}", path_str, e))?;
     let content_str = std::str::from_utf8(&content)
         .map_err(|e| anyhow::anyhow!("invalid UTF-8 in TOML file '{}': {}", path_str, e))?;
@@ -210,9 +218,15 @@ fn evaluate_load_json<P: ProcessManager>(args: &[Expr], cx: &mut StepCtx<'_, P>)
         Value::String(s) => s,
         _ => bail!("LOAD_JSON path argument must evaluate to a string"),
     };
-    let target = cx.state.fs.resolve_read(&cx.state.cwd, &path_str)
+    let target = cx
+        .state
+        .fs
+        .resolve_read(&cx.state.cwd, &path_str)
         .map_err(|e| anyhow::anyhow!("failed to resolve JSON path '{}': {}", path_str, e))?;
-    let content = cx.state.fs.read_file(&target)
+    let content = cx
+        .state
+        .fs
+        .read_file(&target)
         .map_err(|e| anyhow::anyhow!("failed to read JSON file '{}': {}", path_str, e))?;
     let content_str = std::str::from_utf8(&content)
         .map_err(|e| anyhow::anyhow!("invalid UTF-8 in JSON file '{}': {}", path_str, e))?;
@@ -221,15 +235,15 @@ fn evaluate_load_json<P: ProcessManager>(args: &[Expr], cx: &mut StepCtx<'_, P>)
 
 /// Parse TOML content into a DSL `Value`.
 pub fn load_toml_value(content: &str) -> Result<Value> {
-    let json_val: serde_json::Value = toml::from_str(content)
-        .map_err(|e| anyhow::anyhow!("TOML parse error: {}", e))?;
+    let json_val: serde_json::Value =
+        toml::from_str(content).map_err(|e| anyhow::anyhow!("TOML parse error: {}", e))?;
     Ok(json_to_value(json_val))
 }
 
 /// Parse JSON content into a DSL `Value`.
 pub fn load_json_value(content: &str) -> Result<Value> {
-    let json_val: serde_json::Value = serde_json::from_str(content)
-        .map_err(|e| anyhow::anyhow!("JSON parse error: {}", e))?;
+    let json_val: serde_json::Value =
+        serde_json::from_str(content).map_err(|e| anyhow::anyhow!("JSON parse error: {}", e))?;
     Ok(json_to_value(json_val))
 }
 
@@ -241,7 +255,9 @@ fn json_to_value(v: serde_json::Value) -> Value {
         serde_json::Value::Number(n) => Value::String(n.to_string()),
         serde_json::Value::Array(arr) => Value::List(arr.into_iter().map(json_to_value).collect()),
         serde_json::Value::Object(map) => Value::Map(
-            map.into_iter().map(|(k, v)| (k, json_to_value(v))).collect(),
+            map.into_iter()
+                .map(|(k, v)| (k, json_to_value(v)))
+                .collect(),
         ),
         serde_json::Value::Null => Value::String(String::new()),
     }
@@ -251,10 +267,7 @@ fn json_to_value(v: serde_json::Value) -> Value {
 /// from the current scope chain. Supports key-path traversal (`$pkg.name`)
 /// and falls back to environment variables when vars are not found.
 /// Unknown variables are left as-is.
-pub(crate) fn resolve_dollar_vars<P: ProcessManager>(
-    input: &str,
-    state: &ExecState<P>,
-) -> String {
+pub(crate) fn resolve_dollar_vars<P: ProcessManager>(input: &str, state: &ExecState<P>) -> String {
     let mut result = String::new();
     let mut chars = input.chars().peekable();
     while let Some(c) = chars.next() {
@@ -364,17 +377,15 @@ pub(crate) fn format_value_for_string(val: &Value) -> String {
     match val {
         Value::String(s) => s.clone(),
         Value::Bool(b) => b.to_string(),
-        Value::List(items) => {
-            items.iter()
-                .map(|v| format_value_for_string(v))
-                .collect::<Vec<_>>()
-                .join(" ")
-        }
-        Value::Map(map) => {
-            map.iter()
-                .map(|(k, v)| format!("\"{}\": {}", k, format_value_for_string(v)))
-                .collect::<Vec<_>>()
-                .join(", ")
-        }
+        Value::List(items) => items
+            .iter()
+            .map(|v| format_value_for_string(v))
+            .collect::<Vec<_>>()
+            .join(" "),
+        Value::Map(map) => map
+            .iter()
+            .map(|(k, v)| format!("\"{}\": {}", k, format_value_for_string(v)))
+            .collect::<Vec<_>>()
+            .join(", "),
     }
 }

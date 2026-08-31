@@ -65,10 +65,7 @@ impl StreamingExpand {
 
     /// Create with env vars, structured variables, and optional explicit overrides.
     /// Enables key-path evaluation in template tags (e.g., `{{ pkg.package.name }}`).
-    pub fn with_vars(
-        mut self,
-        vars: &HashMap<String, oxdock_parser::Value>,
-    ) -> Self {
+    pub fn with_vars(mut self, vars: &HashMap<String, oxdock_parser::Value>) -> Self {
         self.vars = vars.clone();
         self
     }
@@ -311,18 +308,16 @@ fn format_value_for_string(val: &oxdock_parser::Value) -> String {
     match val {
         oxdock_parser::Value::String(s) => s.clone(),
         oxdock_parser::Value::Bool(b) => b.to_string(),
-        oxdock_parser::Value::List(items) => {
-            items.iter()
-                .map(|v| format_value_for_string(v))
-                .collect::<Vec<_>>()
-                .join(" ")
-        }
-        oxdock_parser::Value::Map(map) => {
-            map.iter()
-                .map(|(k, v)| format!("\"{}\": {}", k, format_value_for_string(v)))
-                .collect::<Vec<_>>()
-                .join(", ")
-        }
+        oxdock_parser::Value::List(items) => items
+            .iter()
+            .map(|v| format_value_for_string(v))
+            .collect::<Vec<_>>()
+            .join(" "),
+        oxdock_parser::Value::Map(map) => map
+            .iter()
+            .map(|(k, v)| format!("\"{}\": {}", k, format_value_for_string(v)))
+            .collect::<Vec<_>>()
+            .join(", "),
     }
 }
 

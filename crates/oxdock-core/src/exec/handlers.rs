@@ -80,11 +80,7 @@ pub(super) fn env<P: ProcessManager>(
     Ok(())
 }
 
-pub(super) fn run<P: ProcessManager>(
-    cx: &mut StepCtx<'_, P>,
-    idx: usize,
-    cmd: &str,
-) -> Result<()> {
+pub(super) fn run<P: ProcessManager>(cx: &mut StepCtx<'_, P>, idx: usize, cmd: &str) -> Result<()> {
     let ctx = cx.state.command_ctx()?;
     let step_stdin = if cx.expose_stdin {
         cx.stdin.clone()
@@ -134,18 +130,10 @@ pub(super) fn run<P: ProcessManager>(
     {
         CommandResult::Completed => Ok(()),
         CommandResult::Captured(_) => {
-            bail!(
-                "step {}: RUN {} unexpectedly captured output",
-                idx + 1,
-                cmd
-            )
+            bail!("step {}: RUN {} unexpectedly captured output", idx + 1, cmd)
         }
         CommandResult::Background(_) => {
-            bail!(
-                "step {}: RUN {} returned background handle",
-                idx + 1,
-                cmd
-            )
+            bail!("step {}: RUN {} returned background handle", idx + 1, cmd)
         }
     }
 }
@@ -193,11 +181,7 @@ pub(super) fn run_bg<P: ProcessManager>(
             Ok(())
         }
         CommandResult::Completed => {
-            bail!(
-                "step {}: RUN_BG {} finished synchronously",
-                idx + 1,
-                cmd
-            )
+            bail!("step {}: RUN_BG {} finished synchronously", idx + 1, cmd)
         }
         CommandResult::Captured(_) => {
             bail!(
@@ -250,21 +234,11 @@ pub(super) fn copy_git<P: ProcessManager>(
         .state
         .fs
         .resolve_write(&cx.state.cwd, to)
-        .with_context(|| {
-            format!(
-                "step {}: COPY_GIT {} {} {}",
-                idx + 1, rev, from, to
-            )
-        })?;
+        .with_context(|| format!("step {}: COPY_GIT {} {} {}", idx + 1, rev, from, to))?;
     cx.state
         .fs
         .copy_from_git(rev, from, &to_abs, include_dirty)
-        .with_context(|| {
-            format!(
-                "step {}: COPY_GIT {} {} {}",
-                idx + 1, rev, from, to
-            )
-        })?;
+        .with_context(|| format!("step {}: COPY_GIT {} {} {}", idx + 1, rev, from, to))?;
     Ok(())
 }
 
@@ -302,19 +276,16 @@ pub(super) fn symlink<P: ProcessManager>(
         .state
         .fs
         .resolve_write(&cx.state.cwd, to)
-        .with_context(|| {
-            format!("step {}: SYMLINK {} {}", idx + 1, from, to)
-        })?;
+        .with_context(|| format!("step {}: SYMLINK {} {}", idx + 1, from, to))?;
     let from_abs = cx
         .state
         .fs
         .resolve_copy_source(from)
-        .with_context(|| {
-            format!("step {}: SYMLINK {} {}", idx + 1, from, to)
-        })?;
-    cx.state.fs.symlink(&from_abs, &to_abs).with_context(|| {
-        format!("step {}: SYMLINK {} {}", idx + 1, from, to)
-    })?;
+        .with_context(|| format!("step {}: SYMLINK {} {}", idx + 1, from, to))?;
+    cx.state
+        .fs
+        .symlink(&from_abs, &to_abs)
+        .with_context(|| format!("step {}: SYMLINK {} {}", idx + 1, from, to))?;
     Ok(())
 }
 
@@ -552,8 +523,7 @@ pub(super) fn replace<P: ProcessManager>(
     let ctx = cx.state.command_ctx()?;
     let vars = cx.state.all_vars();
 
-    let mut expander = oxdock_process::StreamingExpand::new(overrides, ctx.envs())
-        .with_vars(&vars);
+    let mut expander = oxdock_process::StreamingExpand::new(overrides, ctx.envs()).with_vars(&vars);
     let mut out_buf = Vec::with_capacity(super::io::CHUNK_SIZE);
 
     write_stdout(cx.out.clone(), |w| {
@@ -648,13 +618,10 @@ pub(super) fn assert_file<P: ProcessManager>(
         return Ok(());
     }
     if let Some(expected_body) = contents {
-        let actual = cx.state.fs.read_file(&target).with_context(|| {
-            format!(
-                "step {}: ASSERT_FILE {} could not be read",
-                idx + 1,
-                path
-            )
-        })?;
+        let actual =
+            cx.state.fs.read_file(&target).with_context(|| {
+                format!("step {}: ASSERT_FILE {} could not be read", idx + 1, path)
+            })?;
         if actual != expected_body.as_bytes() {
             bail!(
                 "step {}: ASSERT_FILE content mismatch for {}\nexpected: {:?}\nactual:   {:?}",
@@ -679,11 +646,7 @@ pub(super) fn assert_dir<P: ProcessManager>(
         .resolve_read(&cx.state.cwd, path)
         .with_context(|| format!("step {}: ASSERT_DIR {}", idx + 1, path))?;
     if !matches!(cx.state.fs.entry_kind(&target)?, EntryKind::Dir) {
-        bail!(
-            "step {}: ASSERT_DIR {} is not a directory",
-            idx + 1,
-            path
-        );
+        bail!("step {}: ASSERT_DIR {} is not a directory", idx + 1, path);
     }
     Ok(())
 }
@@ -948,23 +911,41 @@ pub(super) fn if_then<P: ProcessManager>(
     let val = super::args::evaluate_expr(cond, cx)?;
     if super::args::is_truthy(&val)? {
         return super::steps::execute_steps(
-            cx.state, cx.process, then_body, cx.stdin.clone(),
-            false, cx.out.clone(), cx.err.clone(), false,
+            cx.state,
+            cx.process,
+            then_body,
+            cx.stdin.clone(),
+            false,
+            cx.out.clone(),
+            cx.err.clone(),
+            false,
         );
     }
     for (else_cond, else_block) in else_ifs {
         let val = super::args::evaluate_expr(else_cond.as_ref(), cx)?;
         if super::args::is_truthy(&val)? {
             return super::steps::execute_steps(
-                cx.state, cx.process, else_block, cx.stdin.clone(),
-                false, cx.out.clone(), cx.err.clone(), false,
+                cx.state,
+                cx.process,
+                else_block,
+                cx.stdin.clone(),
+                false,
+                cx.out.clone(),
+                cx.err.clone(),
+                false,
             );
         }
     }
     if let Some(body) = else_body {
         super::steps::execute_steps(
-            cx.state, cx.process, body, cx.stdin.clone(),
-            false, cx.out.clone(), cx.err.clone(), false,
+            cx.state,
+            cx.process,
+            body,
+            cx.stdin.clone(),
+            false,
+            cx.out.clone(),
+            cx.err.clone(),
+            false,
         )?;
     }
     Ok(())

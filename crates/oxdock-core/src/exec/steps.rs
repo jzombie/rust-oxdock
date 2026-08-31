@@ -49,10 +49,7 @@ pub(super) fn pre_register_assertions<P: ProcessManager>(
     for (idx, step) in steps.iter().enumerate() {
         if let Some(arg) = extract_assert_stdout_needle(&step.kind) {
             let resolved = super::args::resolve_arg_state(arg, state)?;
-            windows.insert(
-                (generation, idx),
-                SlidingWindow::new(resolved.into_bytes()),
-            );
+            windows.insert((generation, idx), SlidingWindow::new(resolved.into_bytes()));
         }
     }
     Ok(())
@@ -246,12 +243,7 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
         StepKind::Write { path, contents } => {
             let path_resolved = super::args::resolve_arg(path, &cx)?;
             let contents_resolved = super::args::resolve_arg_opt(contents, &cx)?;
-            handlers::write(
-                &mut cx,
-                idx,
-                &path_resolved,
-                contents_resolved.as_deref(),
-            )
+            handlers::write(&mut cx, idx, &path_resolved, contents_resolved.as_deref())
         }
         StepKind::RawWrite { path, contents } => {
             let path_resolved = super::args::resolve_arg(path, &cx)?;
@@ -264,12 +256,7 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
         StepKind::Append { path, contents } => {
             let path_resolved = super::args::resolve_arg(path, &cx)?;
             let contents_resolved = super::args::resolve_arg_opt(contents, &cx)?;
-            handlers::append(
-                &mut cx,
-                idx,
-                &path_resolved,
-                contents_resolved.as_deref(),
-            )
+            handlers::append(&mut cx, idx, &path_resolved, contents_resolved.as_deref())
         }
         StepKind::Expand { path, overrides } => {
             let path_resolved = super::args::resolve_arg_opt(path, &cx)?;
@@ -310,14 +297,13 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
             bail!("WITH_IO block should have been expanded during parsing")
         }
         StepKind::Exit(code) => handlers::exit(&mut cx, *code),
-        StepKind::For {
-            var,
-            in_expr,
-            body,
-        } => handlers::for_loop(&mut cx, var, in_expr, body),
-        StepKind::If { cond, then_body, else_ifs, else_body } => {
-            handlers::if_then(&mut cx, cond, then_body, else_ifs, else_body)
-        }
+        StepKind::For { var, in_expr, body } => handlers::for_loop(&mut cx, var, in_expr, body),
+        StepKind::If {
+            cond,
+            then_body,
+            else_ifs,
+            else_body,
+        } => handlers::if_then(&mut cx, cond, then_body, else_ifs, else_body),
         StepKind::Assign { var, expr } => handlers::assign(&mut cx, var, expr),
     }
 }
@@ -452,12 +438,7 @@ fn execute_steps_inner<P: ProcessManager>(
                 StepKind::Write { path, contents } => {
                     let path_resolved = super::args::resolve_arg(path, &cx)?;
                     let contents_resolved = super::args::resolve_arg_opt(contents, &cx)?;
-                    handlers::write(
-                        &mut cx,
-                        idx,
-                        &path_resolved,
-                        contents_resolved.as_deref(),
-                    )
+                    handlers::write(&mut cx, idx, &path_resolved, contents_resolved.as_deref())
                 }
                 StepKind::RawWrite { path, contents } => {
                     let path_resolved = super::args::resolve_arg(path, &cx)?;
@@ -474,12 +455,7 @@ fn execute_steps_inner<P: ProcessManager>(
                 StepKind::Append { path, contents } => {
                     let path_resolved = super::args::resolve_arg(path, &cx)?;
                     let contents_resolved = super::args::resolve_arg_opt(contents, &cx)?;
-                    handlers::append(
-                        &mut cx,
-                        idx,
-                        &path_resolved,
-                        contents_resolved.as_deref(),
-                    )
+                    handlers::append(&mut cx, idx, &path_resolved, contents_resolved.as_deref())
                 }
                 StepKind::Expand { path, overrides } => {
                     let path_resolved = super::args::resolve_arg_opt(path, &cx)?;
@@ -520,14 +496,15 @@ fn execute_steps_inner<P: ProcessManager>(
                     bail!("WITH_IO block should have been expanded during parsing")
                 }
                 StepKind::Exit(code) => handlers::exit(&mut cx, *code),
-                StepKind::For {
-                    var,
-                    in_expr,
-                    body,
-                } => handlers::for_loop(&mut cx, var, in_expr, body),
-                StepKind::If { cond, then_body, else_ifs, else_body } => {
-                    handlers::if_then(&mut cx, cond, then_body, else_ifs, else_body)
+                StepKind::For { var, in_expr, body } => {
+                    handlers::for_loop(&mut cx, var, in_expr, body)
                 }
+                StepKind::If {
+                    cond,
+                    then_body,
+                    else_ifs,
+                    else_body,
+                } => handlers::if_then(&mut cx, cond, then_body, else_ifs, else_body),
                 StepKind::Assign { var, expr } => handlers::assign(&mut cx, var, expr),
             }
         };

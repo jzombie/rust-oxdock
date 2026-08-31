@@ -83,10 +83,14 @@ fn load_toml_flat_keys() {
     let root = temp.as_guarded_path().clone();
     write_file(&root, "t.toml", b"a = \"1\"\nb = \"2\"\n");
 
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         LET $d = LOAD_TOML("t.toml")
         WRITE out.txt $d.a $d.b
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     assert_eq!(read_trimmed(&root, "out.txt"), "1 2");
 }
 
@@ -96,10 +100,14 @@ fn load_toml_nested_tables() {
     let root = temp.as_guarded_path().clone();
     write_file(&root, "t.toml", b"[a]\nb = \"deep\"\n");
 
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         LET $d = LOAD_TOML("t.toml")
         WRITE out.txt $d.a.b
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     assert_eq!(read_trimmed(&root, "out.txt"), "deep");
 }
 
@@ -109,10 +117,14 @@ fn load_toml_array_of_strings() {
     let root = temp.as_guarded_path().clone();
     write_file(&root, "t.toml", b"x = [\"a\", \"b\", \"c\"]\n");
 
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         LET $d = LOAD_TOML("t.toml")
         WRITE out.txt $d.x.0 $d.x.1 $d.x.2
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     assert_eq!(read_trimmed(&root, "out.txt"), "a b c");
 }
 
@@ -122,10 +134,14 @@ fn load_toml_integer_becomes_string() {
     let root = temp.as_guarded_path().clone();
     write_file(&root, "t.toml", b"count = 42\n");
 
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         LET $d = LOAD_TOML("t.toml")
         WRITE out.txt $d.count
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     assert_eq!(read_trimmed(&root, "out.txt"), "42");
 }
 
@@ -135,10 +151,14 @@ fn load_toml_boolean_becomes_string() {
     let root = temp.as_guarded_path().clone();
     write_file(&root, "t.toml", b"flag = true\n");
 
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         LET $d = LOAD_TOML("t.toml")
         WRITE out.txt $d.flag
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     assert_eq!(read_trimmed(&root, "out.txt"), "true");
 }
 
@@ -148,10 +168,14 @@ fn load_toml_empty_table() {
     let root = temp.as_guarded_path().clone();
     write_file(&root, "t.toml", b"[empty]\n");
 
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         LET $d = LOAD_TOML("t.toml")
         WRITE out.txt $d.empty
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     // Empty table serializes as empty map
     let result = read_trimmed(&root, "out.txt");
     assert!(result.is_empty() || result == "{}", "got: {result}");
@@ -184,10 +208,14 @@ fn load_json_flat_object() {
     let root = temp.as_guarded_path().clone();
     write_file(&root, "t.json", b"{\"key\": \"val\"}");
 
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         LET $d = LOAD_JSON("t.json")
         WRITE out.txt $d.key
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     assert_eq!(read_trimmed(&root, "out.txt"), "val");
 }
 
@@ -197,10 +225,14 @@ fn load_json_nested_object() {
     let root = temp.as_guarded_path().clone();
     write_file(&root, "t.json", b"{\"a\": {\"b\": \"deep\"}}");
 
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         LET $d = LOAD_JSON("t.json")
         WRITE out.txt $d.a.b
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     assert_eq!(read_trimmed(&root, "out.txt"), "deep");
 }
 
@@ -210,10 +242,14 @@ fn load_json_array() {
     let root = temp.as_guarded_path().clone();
     write_file(&root, "t.json", b"{\"arr\": [10, 20, 30]}");
 
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         LET $d = LOAD_JSON("t.json")
         WRITE out.txt $d.arr.0 $d.arr.1 $d.arr.2
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     assert_eq!(read_trimmed(&root, "out.txt"), "10 20 30");
 }
 
@@ -223,10 +259,14 @@ fn load_json_boolean() {
     let root = temp.as_guarded_path().clone();
     write_file(&root, "t.json", b"{\"ok\": true}");
 
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         LET $d = LOAD_JSON("t.json")
         WRITE out.txt $d.ok
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     assert_eq!(read_trimmed(&root, "out.txt"), "true");
 }
 
@@ -236,10 +276,14 @@ fn load_json_null_becomes_empty_string() {
     let root = temp.as_guarded_path().clone();
     write_file(&root, "t.json", b"{\"n\": null}");
 
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         LET $d = LOAD_JSON("t.json")
         WRITE out.txt $d.n
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     assert_eq!(read_trimmed(&root, "out.txt"), "");
 }
 
@@ -270,10 +314,14 @@ fn key_path_resolves_top_level_field() {
     let root = temp.as_guarded_path().clone();
     write_file(&root, "t.toml", b"name = \"hello\"\n");
 
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         LET $d = LOAD_TOML("t.toml")
         WRITE out.txt $d.name
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     assert_eq!(read_trimmed(&root, "out.txt"), "hello");
 }
 
@@ -283,10 +331,14 @@ fn key_path_resolves_nested_field() {
     let root = temp.as_guarded_path().clone();
     write_file(&root, "t.toml", b"[a]\nb = \"nested\"\n");
 
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         LET $d = LOAD_TOML("t.toml")
         WRITE out.txt $d.a.b
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     assert_eq!(read_trimmed(&root, "out.txt"), "nested");
 }
 
@@ -296,10 +348,14 @@ fn key_path_deeply_nested() {
     let root = temp.as_guarded_path().clone();
     write_file(&root, "t.toml", b"[a]\n[a.b]\nc = \"deep\"\n");
 
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         LET $d = LOAD_TOML("t.toml")
         WRITE out.txt $d.a.b.c
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     assert_eq!(read_trimmed(&root, "out.txt"), "deep");
 }
 
@@ -309,10 +365,14 @@ fn key_path_array_index() {
     let root = temp.as_guarded_path().clone();
     write_file(&root, "t.toml", b"items = [\"x\", \"y\", \"z\"]\n");
 
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         LET $d = LOAD_TOML("t.toml")
         WRITE out.txt $d.items.0 $d.items.2
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     assert_eq!(read_trimmed(&root, "out.txt"), "x z");
 }
 
@@ -322,11 +382,15 @@ fn key_path_out_of_bounds_index_errors() {
     let root = temp.as_guarded_path().clone();
     write_file(&root, "t.toml", b"items = [\"a\"]\n");
 
-    let err = run_script(&root, indoc! {r#"
+    let err = run_script(
+        &root,
+        indoc! {r#"
         LET $d = LOAD_TOML("t.toml")
         LET $v = $d.items.99
         WRITE out.txt $v
-    "#}).unwrap_err();
+    "#},
+    )
+    .unwrap_err();
     assert!(err.to_string().contains("out of bounds"), "{err}");
 }
 
@@ -336,11 +400,15 @@ fn key_path_non_numeric_index_errors() {
     let root = temp.as_guarded_path().clone();
     write_file(&root, "t.toml", b"items = [\"a\"]\n");
 
-    let err = run_script(&root, indoc! {r#"
+    let err = run_script(
+        &root,
+        indoc! {r#"
         LET $d = LOAD_TOML("t.toml")
         LET $v = $d.items.foo
         WRITE out.txt $v
-    "#}).unwrap_err();
+    "#},
+    )
+    .unwrap_err();
     assert!(err.to_string().contains("Invalid"), "{err}");
 }
 
@@ -350,11 +418,15 @@ fn key_path_missing_key_errors() {
     let root = temp.as_guarded_path().clone();
     write_file(&root, "t.toml", b"a = 1\n");
 
-    let err = run_script(&root, indoc! {r#"
+    let err = run_script(
+        &root,
+        indoc! {r#"
         LET $d = LOAD_TOML("t.toml")
         LET $v = $d.nonexistent
         WRITE out.txt $v
-    "#}).unwrap_err();
+    "#},
+    )
+    .unwrap_err();
     assert!(err.to_string().contains("nonexistent"), "{err}");
 }
 
@@ -364,11 +436,15 @@ fn key_path_traverse_into_string_errors() {
     let root = temp.as_guarded_path().clone();
     write_file(&root, "t.toml", b"a = \"scalar\"\n");
 
-    let err = run_script(&root, indoc! {r#"
+    let err = run_script(
+        &root,
+        indoc! {r#"
         LET $d = LOAD_TOML("t.toml")
         LET $v = $d.a.b
         WRITE out.txt $v
-    "#}).unwrap_err();
+    "#},
+    )
+    .unwrap_err();
     assert!(err.to_string().contains("Cannot"), "{err}");
 }
 
@@ -378,10 +454,14 @@ fn key_path_with_underscore_key() {
     let root = temp.as_guarded_path().clone();
     write_file(&root, "t.toml", b"_hidden = \"secret\"\n");
 
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         LET $d = LOAD_TOML("t.toml")
         WRITE out.txt $d._hidden
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     assert_eq!(read_trimmed(&root, "out.txt"), "secret");
 }
 
@@ -396,10 +476,14 @@ fn missing_key_in_string_interpolation_does_not_dump_parent_map() {
     write_file(&root, "t.toml", b"name = \"oxdock\"\nversion = \"1.0\"\n");
 
     // $pkg.missing should emit literal "$pkg", not the stringified map
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         LET $pkg = LOAD_TOML("t.toml")
         WRITE out.txt docs/$pkg.missing/README.md
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     let result = read_trimmed(&root, "out.txt");
     assert_eq!(result, "docs/$pkg.missing/README.md");
 }
@@ -411,10 +495,14 @@ fn missing_key_after_successful_traversal_does_not_dump() {
     write_file(&root, "t.toml", b"[package]\nname = \"test\"\n");
 
     // $d.package works, but $d.package.nope fails — should emit literal
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         LET $d = LOAD_TOML("t.toml")
         WRITE out.txt $d.package.nope.txt
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     let result = read_trimmed(&root, "out.txt");
     assert_eq!(result, "$d.package.nope.txt");
 }
@@ -426,10 +514,14 @@ fn out_of_bounds_index_in_string_interpolation_does_not_dump_list() {
     write_file(&root, "t.toml", b"items = [\"a\", \"b\"]\n");
 
     // $d.items.0 works, but $d.items.99 fails — should emit literal
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         LET $d = LOAD_TOML("t.toml")
         WRITE out.txt $d.items.99.suffix
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     let result = read_trimmed(&root, "out.txt");
     assert_eq!(result, "$d.items.99.suffix");
 }
@@ -441,10 +533,14 @@ fn non_numeric_index_in_string_interpolation_does_not_dump() {
     write_file(&root, "t.toml", b"items = [\"a\"]\n");
 
     // $d.items works, but $d.items.foo is not a valid index
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         LET $d = LOAD_TOML("t.toml")
         WRITE out.txt $d.items.foo
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     let result = read_trimmed(&root, "out.txt");
     assert_eq!(result, "$d.items.foo");
 }
@@ -456,10 +552,14 @@ fn traverse_into_scalar_emits_value_and_literal_suffix() {
     write_file(&root, "t.toml", b"name = \"hello\"\n");
 
     // $d.name resolves to "hello", .x is a literal suffix on a scalar
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         LET $d = LOAD_TOML("t.toml")
         WRITE out.txt $d.name.x
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     let result = read_trimmed(&root, "out.txt");
     assert_eq!(result, "hello.x");
 }
@@ -473,10 +573,14 @@ fn dollar_var_resolves_string() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
 
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         LET $name = "world"
         WRITE out.txt hello-$name
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     assert_eq!(read_trimmed(&root, "out.txt"), "hello-world");
 }
 
@@ -485,10 +589,14 @@ fn dollar_var_with_trailing_dot_not_consumed() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
 
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         LET $name = "hello"
         WRITE out.txt $name.
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     assert_eq!(read_trimmed(&root, "out.txt"), "hello.");
 }
 
@@ -498,10 +606,14 @@ fn dollar_var_with_suffix_after_scalar() {
     let root = temp.as_guarded_path().clone();
     write_file(&root, "t.toml", b"name = \"ox\"\n");
 
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         LET $d = LOAD_TOML("t.toml")
         WRITE out.txt $d.name.dock
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     assert_eq!(read_trimmed(&root, "out.txt"), "ox.dock");
 }
 
@@ -528,11 +640,15 @@ fn multiple_dollar_vars_in_string() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
 
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         LET $a = "hello"
         LET $b = "world"
         WRITE out.txt $a $b
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     assert_eq!(read_trimmed(&root, "out.txt"), "hello world");
 }
 
@@ -546,11 +662,15 @@ fn expand_resolves_env_prefix_tag() {
     let root = temp.as_guarded_path().clone();
     write_file(&root, "tmpl.txt", b"Hi {{ env:WHO }}!");
 
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         LET $WHO = "Alice"
         WITH_IO [stdout=pipe:t] EXPAND tmpl.txt
         WITH_IO [stdin=pipe:t] WRITE out.txt
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     assert_eq!(read_trimmed(&root, "out.txt"), "Hi Alice!");
 }
 
@@ -561,11 +681,15 @@ fn expand_resolves_bare_key_path_tag() {
     write_file(&root, "t.toml", b"greeting = \"hello\"\n");
     write_file(&root, "tmpl.txt", b"{{ d.greeting }} world");
 
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         LET $d = LOAD_TOML("t.toml")
         WITH_IO [stdout=pipe:t] EXPAND tmpl.txt
         WITH_IO [stdin=pipe:t] WRITE out.txt
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     assert_eq!(read_trimmed(&root, "out.txt"), "hello world");
 }
 
@@ -576,11 +700,15 @@ fn expand_resolves_nested_key_path_tag() {
     write_file(&root, "t.toml", b"[pkg]\nname = \"ox\"\n");
     write_file(&root, "tmpl.txt", b"{{ d.pkg.name }}");
 
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         LET $d = LOAD_TOML("t.toml")
         WITH_IO [stdout=pipe:t] EXPAND tmpl.txt
         WITH_IO [stdin=pipe:t] WRITE out.txt
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     assert_eq!(read_trimmed(&root, "out.txt"), "ox");
 }
 
@@ -590,10 +718,14 @@ fn expand_missing_tag_resolves_to_empty() {
     let root = temp.as_guarded_path().clone();
     write_file(&root, "tmpl.txt", b"before {{ missing }} after");
 
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         WITH_IO [stdout=pipe:t] EXPAND tmpl.txt
         WITH_IO [stdin=pipe:t] WRITE out.txt
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     assert_eq!(read_trimmed(&root, "out.txt"), "before  after");
 }
 
@@ -604,12 +736,16 @@ fn expand_mixed_env_and_key_path_tags() {
     write_file(&root, "t.toml", b"val = \"from-toml\"\n");
     write_file(&root, "tmpl.txt", b"{{ env:HOST }} and {{ d.val }}");
 
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         LET $HOST = "from-var"
         LET $d = LOAD_TOML("t.toml")
         WITH_IO [stdout=pipe:t] EXPAND tmpl.txt
         WITH_IO [stdin=pipe:t] WRITE out.txt
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     assert_eq!(read_trimmed(&root, "out.txt"), "from-var and from-toml");
 }
 
@@ -620,11 +756,15 @@ fn expand_env_prefix_falls_back_to_vars() {
     write_file(&root, "t.toml", b"key = \"from-var\"\n");
     write_file(&root, "tmpl.txt", b"{{ env:d.key }}");
 
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         LET $d = LOAD_TOML("t.toml")
         WITH_IO [stdout=pipe:t] EXPAND tmpl.txt
         WITH_IO [stdin=pipe:t] WRITE out.txt
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     let result = read_trimmed(&root, "out.txt");
     // env: prefix with dot should fall back to vars
     assert_eq!(result, "from-var");
@@ -636,10 +776,14 @@ fn expand_no_placeholders_passthrough() {
     let root = temp.as_guarded_path().clone();
     write_file(&root, "tmpl.txt", b"plain text no tags");
 
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         WITH_IO [stdout=pipe:t] EXPAND tmpl.txt
         WITH_IO [stdin=pipe:t] WRITE out.txt
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     assert_eq!(read_trimmed(&root, "out.txt"), "plain text no tags");
 }
 
@@ -653,12 +797,16 @@ fn for_loop_over_key_path_array() {
     let root = temp.as_guarded_path().clone();
     write_file(&root, "t.toml", b"items = [\"a\", \"b\", \"c\"]\n");
 
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         LET $d = LOAD_TOML("t.toml")
         FOR $x IN $d.items {
             WRITE $x.txt $x
         }
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     assert_eq!(read_trimmed(&root, "a.txt"), "a");
     assert_eq!(read_trimmed(&root, "b.txt"), "b");
     assert_eq!(read_trimmed(&root, "c.txt"), "c");
@@ -669,12 +817,16 @@ fn for_loop_body_has_loop_var() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
 
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         LET $items = ["x", "y"]
         FOR $i IN $items {
             WRITE $i.txt $i
         }
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     assert_eq!(read_trimmed(&root, "x.txt"), "x");
     assert_eq!(read_trimmed(&root, "y.txt"), "y");
 }
@@ -690,11 +842,15 @@ fn load_toml_then_use_in_template() {
     write_file(&root, "crate.toml", b"[package]\nname = \"my-crate\"\n");
     write_file(&root, "header.txt", b"# {{ d.package.name }}");
 
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         LET $d = LOAD_TOML("crate.toml")
         WITH_IO [stdout=pipe:t] EXPAND header.txt
         WITH_IO [stdin=pipe:t] WRITE out.txt
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     assert_eq!(read_trimmed(&root, "out.txt"), "# my-crate");
 }
 
@@ -704,12 +860,16 @@ fn for_loop_writes_multiple_files_from_loaded_data() {
     let root = temp.as_guarded_path().clone();
     write_file(&root, "members.toml", b"members = [\"alpha\", \"beta\"]\n");
 
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         LET $d = LOAD_TOML("members.toml")
         FOR $m IN $d.members {
             WRITE $m.txt $m
         }
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     assert_eq!(read_trimmed(&root, "alpha.txt"), "alpha");
     assert_eq!(read_trimmed(&root, "beta.txt"), "beta");
 }
@@ -725,14 +885,18 @@ fn for_loop_var_shadows_outer_var_in_template() {
     write_file(&root, "tmpl.txt", b"{{ name }}");
 
     // $name is set to "outer" globally, then $name is shadowed by FOR loop
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         LET $name = "outer"
         LET $items = ["first", "second"]
         FOR $name IN $items {
             WITH_IO [stdout=pipe:t] EXPAND tmpl.txt
             WITH_IO [stdin=pipe:t] WRITE $name.txt
         }
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     assert_eq!(read_trimmed(&root, "first.txt"), "first");
     assert_eq!(read_trimmed(&root, "second.txt"), "second");
 }
@@ -743,13 +907,17 @@ fn for_loop_var_shadows_outer_var_in_command_args() {
     let root = temp.as_guarded_path().clone();
 
     // $x is set to "outer" globally, then shadowed by FOR loop
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         LET $x = "outer"
         LET $items = ["a", "b"]
         FOR $x IN $items {
             WRITE $x.txt $x
         }
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     assert_eq!(read_trimmed(&root, "a.txt"), "a");
     assert_eq!(read_trimmed(&root, "b.txt"), "b");
     // "outer" should NOT have created a file
@@ -763,7 +931,9 @@ fn nested_for_loops_inner_shadows_outer() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
 
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         LET $x = "global"
         LET $outer = ["o1", "o2"]
         FOR $x IN $outer {
@@ -772,7 +942,9 @@ fn nested_for_loops_inner_shadows_outer() {
                 WRITE $x.txt $x
             }
         }
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     // Inner loop should shadow outer — files named i1.txt, i2.txt
     assert_eq!(read_trimmed(&root, "i1.txt"), "i1");
     assert_eq!(read_trimmed(&root, "i2.txt"), "i2");
@@ -786,11 +958,15 @@ fn nested_for_loops_inner_shadows_outer() {
 fn comparison_equal_produces_bool() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         LET $x = "hello"
         LET $eq = $x == "hello"
         IF $eq { WRITE out.txt yes }
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     assert_eq!(read_trimmed(&root, "out.txt"), "yes");
 }
 
@@ -798,11 +974,15 @@ fn comparison_equal_produces_bool() {
 fn comparison_not_equal_produces_bool() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         LET $x = "hello"
         LET $ne = $x != "foo"
         IF $ne { WRITE out.txt yes }
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     assert_eq!(read_trimmed(&root, "out.txt"), "yes");
 }
 
@@ -812,10 +992,14 @@ fn comparison_key_path() {
     let root = temp.as_guarded_path().clone();
     write_file(&root, "t.toml", b"name = \"test\"\n");
 
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         LET $d = LOAD_TOML("t.toml")
         IF $d.name == "test" { WRITE out.txt yes }
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     assert_eq!(read_trimmed(&root, "out.txt"), "yes");
 }
 
@@ -823,11 +1007,15 @@ fn comparison_key_path() {
 fn comparison_false_is_falsy() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         LET $x = "hello"
         LET $eq = $x == "nope"
         IF $eq { WRITE out.txt should-not-exist }
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     assert!(root.join("out.txt").unwrap().as_path().exists() == false);
 }
 
@@ -839,12 +1027,16 @@ fn comparison_false_is_falsy() {
 fn logical_and_short_circuit() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         LET $a = true
         LET $b = false
         LET $both = $a && $b
         IF $both { WRITE out.txt should-not-exist }
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     assert!(root.join("out.txt").unwrap().as_path().exists() == false);
 }
 
@@ -852,12 +1044,16 @@ fn logical_and_short_circuit() {
 fn logical_or_short_circuit() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         LET $a = true
         LET $b = false
         LET $either = $a || $b
         IF $either { WRITE out.txt yes }
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     assert_eq!(read_trimmed(&root, "out.txt"), "yes");
 }
 
@@ -865,12 +1061,16 @@ fn logical_or_short_circuit() {
 fn logical_or_right_side_evaluated_when_left_false() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         LET $a = false
         LET $b = true
         LET $either = $a || $b
         IF $either { WRITE out.txt yes }
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     assert_eq!(read_trimmed(&root, "out.txt"), "yes");
 }
 
@@ -882,10 +1082,14 @@ fn logical_or_right_side_evaluated_when_left_false() {
 fn if_then_branch() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         LET $x = "hello"
         IF $x == "hello" { WRITE out.txt yes }
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     assert_eq!(read_trimmed(&root, "out.txt"), "yes");
 }
 
@@ -893,10 +1097,14 @@ fn if_then_branch() {
 fn if_else_branch() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         LET $x = "hello"
         IF $x == "nope" { WRITE out.txt wrong } ELSE { WRITE out.txt correct }
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     assert_eq!(read_trimmed(&root, "out.txt"), "correct");
 }
 
@@ -915,11 +1123,15 @@ fn if_else_if_chain() {
 fn if_compound_condition() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         LET $a = "1"
         LET $b = "2"
         IF $a == "1" && $b == "2" { WRITE out.txt combined }
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     assert_eq!(read_trimmed(&root, "out.txt"), "combined");
 }
 
@@ -927,11 +1139,15 @@ fn if_compound_condition() {
 fn if_precedence_override() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         LET $a = "1"
         LET $b = "3"
         IF ($a == "1" || $a == "2") && $b == "3" { WRITE out.txt precedence }
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     assert_eq!(read_trimmed(&root, "out.txt"), "precedence");
 }
 
@@ -941,12 +1157,16 @@ fn if_nested_inside_for() {
     let root = temp.as_guarded_path().clone();
     write_file(&root, "t.toml", b"items = [\"a\", \"b\", \"c\"]\n");
 
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         LET $d = LOAD_TOML("t.toml")
         FOR $x IN $d.items {
             IF $x == "b" { WRITE $x.txt found }
         }
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     assert_eq!(read_trimmed(&root, "b.txt"), "found");
     assert!(root.join("a.txt").unwrap().as_path().exists() == false);
     assert!(root.join("c.txt").unwrap().as_path().exists() == false);
@@ -960,10 +1180,14 @@ fn if_nested_inside_for() {
 fn if_string_condition_raises_type_error() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
-    let err = run_script(&root, indoc! {r#"
+    let err = run_script(
+        &root,
+        indoc! {r#"
         LET $path = "docs/readme.md"
         IF $path { WRITE out.txt should-not-exist }
-    "#}).unwrap_err();
+    "#},
+    )
+    .unwrap_err();
     assert!(err.to_string().contains("Type Error"), "{err}");
 }
 
@@ -971,9 +1195,13 @@ fn if_string_condition_raises_type_error() {
 fn if_literal_true_works() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         IF true { WRITE out.txt yes }
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     assert_eq!(read_trimmed(&root, "out.txt"), "yes");
 }
 
@@ -981,9 +1209,13 @@ fn if_literal_true_works() {
 fn if_literal_false_skips() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         IF false { WRITE out.txt should-not-exist }
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     assert!(root.join("out.txt").unwrap().as_path().exists() == false);
 }
 
@@ -993,10 +1225,14 @@ fn if_bool_from_json_is_native() {
     let root = temp.as_guarded_path().clone();
     write_file(&root, "t.json", b"{\"active\": true}");
 
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         LET $d = LOAD_JSON("t.json")
         IF $d.active { WRITE out.txt yes }
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     assert_eq!(read_trimmed(&root, "out.txt"), "yes");
 }
 
@@ -1006,9 +1242,13 @@ fn if_bool_from_toml_is_native() {
     let root = temp.as_guarded_path().clone();
     write_file(&root, "t.toml", b"active = true\n");
 
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         LET $d = LOAD_TOML("t.toml")
         IF $d.active { WRITE out.txt yes }
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     assert_eq!(read_trimmed(&root, "out.txt"), "yes");
 }

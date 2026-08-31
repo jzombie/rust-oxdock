@@ -258,9 +258,7 @@ fn walk(
                             // 2. Template placeholder: {{ env:KEY }}
                             //    Rust lexes this as nested brace groups.
                             else if is_template_group(&g) {
-                                emit_template_placeholder(
-                                    &g, line, span, gap_space, last_span_end,
-                                );
+                                emit_template_placeholder(&g, line, span, gap_space, last_span_end);
                             }
                             // 3. DSL statement block: WITH_IO [...] {, FOR ..., LET ...
                             //    Attach opening brace to the current line, then walk body.

@@ -25,8 +25,8 @@ fn main() -> Result<()> {
 
 fn generate_crate_docs(repo_root: &Path, template_dir: &Path) -> Result<()> {
     let workspace_toml = repo_root.join("Cargo.toml");
-    let members = parse_workspace_members(&workspace_toml)
-        .context("failed to parse workspace members")?;
+    let members =
+        parse_workspace_members(&workspace_toml).context("failed to parse workspace members")?;
 
     let header = template_dir.join("crate-header.md");
     let footer = template_dir.join("crate-footer.md");

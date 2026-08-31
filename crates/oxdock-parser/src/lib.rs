@@ -544,7 +544,10 @@ mod tests {
         match &steps[0].kind {
             StepKind::Assign { var, expr } => {
                 assert_eq!(var, "x");
-                assert_eq!(expr, &Expr::Literal(Value::String("hello world".to_string())));
+                assert_eq!(
+                    expr,
+                    &Expr::Literal(Value::String("hello world".to_string()))
+                );
             }
             other => panic!("expected Assign, got {:?}", other),
         }
@@ -596,7 +599,13 @@ mod tests {
             Ok(s) => s,
             Err(e) => panic!("parse failed: {e}"),
         };
-        assert_eq!(steps.len(), 1, "expected 1 step, got {}: {:?}", steps.len(), steps.iter().map(|s| &s.kind).collect::<Vec<_>>());
+        assert_eq!(
+            steps.len(),
+            1,
+            "expected 1 step, got {}: {:?}",
+            steps.len(),
+            steps.iter().map(|s| &s.kind).collect::<Vec<_>>()
+        );
         match &steps[0].kind {
             StepKind::For { var, in_expr, body } => {
                 assert_eq!(var, "f");
@@ -607,7 +616,13 @@ mod tests {
                         Expr::Literal(Value::String("y".to_string()))
                     ])
                 );
-                assert_eq!(body.len(), 1, "expected 1 body step, got {}: {:?}", body.len(), body.iter().map(|s| &s.kind).collect::<Vec<_>>());
+                assert_eq!(
+                    body.len(),
+                    1,
+                    "expected 1 body step, got {}: {:?}",
+                    body.len(),
+                    body.iter().map(|s| &s.kind).collect::<Vec<_>>()
+                );
             }
             other => panic!("expected For, got {:?}", other),
         }
@@ -620,7 +635,13 @@ mod tests {
             Ok(s) => s,
             Err(e) => panic!("parse failed: {e}"),
         };
-        assert_eq!(steps.len(), 1, "expected 1 step, got {}: {:?}", steps.len(), steps.iter().map(|s| &s.kind).collect::<Vec<_>>());
+        assert_eq!(
+            steps.len(),
+            1,
+            "expected 1 step, got {}: {:?}",
+            steps.len(),
+            steps.iter().map(|s| &s.kind).collect::<Vec<_>>()
+        );
         match &steps[0].kind {
             StepKind::If { .. } => {}
             other => panic!("expected If, got {:?}", other),
@@ -632,7 +653,11 @@ mod tests {
         use crate::lexer::{LanguageParser, Rule};
         use pest::Parser;
         let result = LanguageParser::parse(Rule::if_keyword, "IF ");
-        assert!(result.is_ok(), "if_keyword should match 'IF ': {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "if_keyword should match 'IF ': {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -640,14 +665,22 @@ mod tests {
         use crate::lexer::{LanguageParser, Rule};
         use pest::Parser;
         let result = LanguageParser::parse(Rule::if_statement, "IF true {\n    ECHO yes\n}");
-        assert!(result.is_ok(), "if_statement should match: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "if_statement should match: {:?}",
+            result.err()
+        );
     }
 
     #[test]
     fn guard_block_with_echo_parses() {
         let script = "WORKDIR foo\n[env:GATE] {\n    ECHO gated\n}\n[env:A==1] ECHO eq\n";
         let steps = parse_script(script).expect("parse should succeed");
-        assert!(steps.len() >= 2, "expected at least 2 steps, got {}", steps.len());
+        assert!(
+            steps.len() >= 2,
+            "expected at least 2 steps, got {}",
+            steps.len()
+        );
     }
 
     #[test]
@@ -667,5 +700,4 @@ mod tests {
             );
         }
     }
-
 }

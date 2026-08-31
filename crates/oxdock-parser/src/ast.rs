@@ -118,7 +118,6 @@ impl Command {
         }
     }
 
-
     pub const fn expects_inner_command(self) -> bool {
         matches!(self, Command::WithIo)
     }
@@ -397,11 +396,25 @@ pub enum LogicalOp {
 pub enum Expr {
     Literal(Value),
     Var(String),
-    KeyPath { base: String, keys: Vec<String> },
+    KeyPath {
+        base: String,
+        keys: Vec<String>,
+    },
     List(Vec<Expr>),
-    Call { name: String, args: Vec<Expr> },
-    Compare { op: CompareOp, left: Box<Expr>, right: Box<Expr> },
-    Logical { op: LogicalOp, left: Box<Expr>, right: Box<Expr> },
+    Call {
+        name: String,
+        args: Vec<Expr>,
+    },
+    Compare {
+        op: CompareOp,
+        left: Box<Expr>,
+        right: Box<Expr>,
+    },
+    Logical {
+        op: LogicalOp,
+        left: Box<Expr>,
+        right: Box<Expr>,
+    },
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -734,11 +747,21 @@ impl fmt::Display for StepKind {
                         quote_arg(to.as_str())
                     )
                 } else {
-                    write!(f, "COPY {} {}", quote_arg(from.as_str()), quote_arg(to.as_str()))
+                    write!(
+                        f,
+                        "COPY {} {}",
+                        quote_arg(from.as_str()),
+                        quote_arg(to.as_str())
+                    )
                 }
             }
             StepKind::Symlink { from, to } => {
-                write!(f, "SYMLINK {} {}", quote_arg(from.as_str()), quote_arg(to.as_str()))
+                write!(
+                    f,
+                    "SYMLINK {} {}",
+                    quote_arg(from.as_str()),
+                    quote_arg(to.as_str())
+                )
             }
             StepKind::Mkdir(arg) => write!(f, "MKDIR {}", quote_arg(arg.as_str())),
             StepKind::Ls(arg) => {
@@ -764,7 +787,12 @@ impl fmt::Display for StepKind {
                 Ok(())
             }
             StepKind::RawWrite { path, contents } => {
-                write!(f, "RAW_WRITE {} {}", quote_arg(path.as_str()), quote_msg(contents.as_str()))
+                write!(
+                    f,
+                    "RAW_WRITE {} {}",
+                    quote_arg(path.as_str()),
+                    quote_msg(contents.as_str())
+                )
             }
             StepKind::Append { path, contents } => {
                 write!(f, "APPEND {}", quote_arg(path.as_str()))?;
@@ -789,7 +817,12 @@ impl fmt::Display for StepKind {
                 contents,
             } => {
                 if let Some(digest) = hash {
-                    write!(f, "ASSERT_FILE --hash {} {}", digest, quote_arg(path.as_str()))
+                    write!(
+                        f,
+                        "ASSERT_FILE --hash {} {}",
+                        digest,
+                        quote_arg(path.as_str())
+                    )
                 } else {
                     write!(f, "ASSERT_FILE {}", quote_arg(path.as_str()))?;
                     if let Some(body) = contents {
@@ -835,18 +868,19 @@ impl fmt::Display for StepKind {
             }
             StepKind::HashSha256 { path } => write!(f, "HASH_SHA256 {}", quote_arg(path.as_str())),
             StepKind::Exit(code) => write!(f, "EXIT {}", code),
-            StepKind::For {
-                var,
-                in_expr,
-                body,
-            } => {
+            StepKind::For { var, in_expr, body } => {
                 write!(f, "FOR ${} IN {} {{", var, in_expr)?;
                 for step in body {
                     write!(f, "\n    {}", step)?;
                 }
                 write!(f, "\n}}")
             }
-            StepKind::If { cond, then_body, else_ifs, else_body } => {
+            StepKind::If {
+                cond,
+                then_body,
+                else_ifs,
+                else_body,
+            } => {
                 write!(f, "IF {} {{", cond)?;
                 for step in then_body {
                     write!(f, "\n    {}", step)?;

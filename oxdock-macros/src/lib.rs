@@ -783,14 +783,17 @@ fn emit_expr(expr: &Expr, interp: &[(proc_macro2::Ident, usize)]) -> proc_macro2
             } else {
                 quote! { #base.to_string() }
             };
-            let key_strs: Vec<_> = keys.iter().map(|k| {
-                if let Some(idx) = is_placeholder(k) {
-                    let ident = &interp.iter().find(|(_, i)| *i == idx).unwrap().0;
-                    quote! { #ident.to_string() }
-                } else {
-                    quote! { #k.to_string() }
-                }
-            }).collect();
+            let key_strs: Vec<_> = keys
+                .iter()
+                .map(|k| {
+                    if let Some(idx) = is_placeholder(k) {
+                        let ident = &interp.iter().find(|(_, i)| *i == idx).unwrap().0;
+                        quote! { #ident.to_string() }
+                    } else {
+                        quote! { #k.to_string() }
+                    }
+                })
+                .collect();
             quote! { Expr::KeyPath { base: #base_stream, keys: vec![#(#key_strs),*] } }
         }
         Expr::List(items) => {
@@ -850,7 +853,10 @@ fn emit_raw_value(v: &Value, interp: &[(proc_macro2::Ident, usize)]) -> proc_mac
             }
         }
         Value::List(items) => {
-            let item_tokens: Vec<_> = items.iter().map(|item| emit_raw_value(item, interp)).collect();
+            let item_tokens: Vec<_> = items
+                .iter()
+                .map(|item| emit_raw_value(item, interp))
+                .collect();
             quote! { Value::List(vec![#(#item_tokens),*]) }
         }
         Value::Map(map) => {
@@ -1049,14 +1055,22 @@ fn emit_stepkind(
             let body_tokens: Vec<_> = body.iter().map(|s| emit_step(s, interp)).collect();
             quote! { StepKind::For { var: #var.to_string(), in_expr: #in_tok, body: vec![#(#body_tokens),*] } }
         }
-        StepKind::If { cond, then_body, else_ifs, else_body } => {
+        StepKind::If {
+            cond,
+            then_body,
+            else_ifs,
+            else_body,
+        } => {
             let cond_tokens = emit_expr(cond, interp);
             let then_tokens: Vec<_> = then_body.iter().map(|s| emit_step(s, interp)).collect();
-            let else_if_tokens: Vec<_> = else_ifs.iter().map(|(c, b)| {
-                let ec = emit_expr(c, interp);
-                let eb: Vec<_> = b.iter().map(|s| emit_step(s, interp)).collect();
-                quote! { (Box::new(#ec), vec![#(#eb),*]) }
-            }).collect();
+            let else_if_tokens: Vec<_> = else_ifs
+                .iter()
+                .map(|(c, b)| {
+                    let ec = emit_expr(c, interp);
+                    let eb: Vec<_> = b.iter().map(|s| emit_step(s, interp)).collect();
+                    quote! { (Box::new(#ec), vec![#(#eb),*]) }
+                })
+                .collect();
             let else_tokens = match else_body {
                 Some(body) => {
                     let eb: Vec<_> = body.iter().map(|s| emit_step(s, interp)).collect();
