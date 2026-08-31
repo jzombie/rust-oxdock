@@ -4,6 +4,7 @@ mod template_doc;
 
 use anyhow::{Context, Result};
 use oxdock_core::ExecIo;
+#[allow(clippy::disallowed_types)]
 use std::path::{Path, PathBuf};
 use template_doc::DocNode;
 
@@ -23,6 +24,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::disallowed_types)]
 fn generate_crate_docs(repo_root: &Path, template_dir: &Path) -> Result<()> {
     let workspace_toml = repo_root.join("Cargo.toml");
     let members =
@@ -69,6 +71,7 @@ fn generate_crate_docs(repo_root: &Path, template_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 fn parse_workspace_members(workspace_toml: &Path) -> Result<Vec<String>> {
     let contents = std::fs::read_to_string(workspace_toml)?;
     let doc: toml_edit::DocumentMut = contents.parse()?;
@@ -90,6 +93,7 @@ struct CargoMetadata {
     description: String,
 }
 
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 fn parse_cargo_metadata(cargo_toml: &Path) -> Result<CargoMetadata> {
     let contents = std::fs::read_to_string(cargo_toml)?;
     let doc: toml_edit::DocumentMut = contents.parse()?;
@@ -111,6 +115,7 @@ fn parse_cargo_metadata(cargo_toml: &Path) -> Result<CargoMetadata> {
     Ok(CargoMetadata { name, description })
 }
 
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 fn find_repo_root() -> Result<PathBuf> {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
         .map(PathBuf::from)

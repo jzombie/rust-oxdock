@@ -379,7 +379,7 @@ pub(crate) fn format_value_for_string(val: &Value) -> String {
         Value::Bool(b) => b.to_string(),
         Value::List(items) => items
             .iter()
-            .map(|v| format_value_for_string(v))
+            .map(format_value_for_string)
             .collect::<Vec<_>>()
             .join(" "),
         Value::Map(map) => map

@@ -1,7 +1,9 @@
 use anyhow::Result;
 use oxdock_parser::COMMANDS;
+#[allow(clippy::disallowed_types)]
 use std::path::Path;
 
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 pub fn generate(output: &Path) -> Result<()> {
     let table = generate_table();
     if let Some(parent) = output.parent() {

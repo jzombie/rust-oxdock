@@ -194,7 +194,11 @@ impl GuardedPath {
 
     /// Evaluate a glob pattern against the sandbox root.
     /// Normalizes backslashes, escapes the root path, and returns workspace-relative paths.
-    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    #[allow(
+        clippy::disallowed_types,
+        clippy::disallowed_methods,
+        clippy::disallowed_macros
+    )]
     pub fn glob_paths(&self, pattern: &str) -> std::result::Result<Vec<PathBuf>, std::io::Error> {
         let clean = if cfg!(not(windows)) && pattern.as_bytes().get(1) == Some(&b':') {
             &pattern[2..]

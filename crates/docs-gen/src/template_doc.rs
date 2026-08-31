@@ -1,16 +1,20 @@
 use anyhow::Result;
 use oxdock_core::ExecIo;
 use oxdock_macros::oxdock;
+#[allow(clippy::disallowed_types)]
 use std::path::{Path, PathBuf};
 
 use crate::runner;
 
 pub enum DocNode {
+    #[allow(clippy::disallowed_types)]
     Template(PathBuf),
     Glob(String),
+    #[expect(dead_code)]
     Raw(String),
 }
 
+#[allow(clippy::disallowed_types)]
 pub fn compile(
     repo_root: &Path,
     manifest: &[DocNode],

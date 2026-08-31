@@ -1,3 +1,5 @@
+#![allow(clippy::disallowed_types, clippy::disallowed_methods)]
+
 use oxdock_core::{ExecIo, run_steps_with_context_result_with_io};
 use oxdock_fs::GuardedPath;
 use oxdock_macros::oxdock;

@@ -310,7 +310,7 @@ fn format_value_for_string(val: &oxdock_parser::Value) -> String {
         oxdock_parser::Value::Bool(b) => b.to_string(),
         oxdock_parser::Value::List(items) => items
             .iter()
-            .map(|v| format_value_for_string(v))
+            .map(format_value_for_string)
             .collect::<Vec<_>>()
             .join(" "),
         oxdock_parser::Value::Map(map) => map

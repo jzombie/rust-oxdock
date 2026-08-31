@@ -307,32 +307,39 @@ pub mod harness {
             cmd.env_remove(key);
         }
         let (status, stdout_bytes, stderr_bytes) = if let Some(stdin_content) = &case.stdin {
-            use std::io::Write;
-            use std::process::{Command, Stdio};
+            #[allow(
+                clippy::disallowed_types,
+                clippy::disallowed_methods,
+                clippy::disallowed_macros
+            )]
+            {
+                use std::io::Write;
+                use std::process::{Command, Stdio};
 
-            let snap = cmd.snapshot();
-            let mut child = Command::new(&snap.program);
-            for arg in &snap.args {
-                child.arg(arg);
-            }
-            for (key, value) in &snap.envs {
-                child.env(key, value);
-            }
-            if let Some(cwd) = &snap.cwd {
-                child.current_dir(cwd);
-            }
-            child
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped());
+                let snap = cmd.snapshot();
+                let mut child = Command::new(&snap.program);
+                for arg in &snap.args {
+                    child.arg(arg);
+                }
+                for (key, value) in &snap.envs {
+                    child.env(key, value);
+                }
+                if let Some(cwd) = &snap.cwd {
+                    child.current_dir(cwd);
+                }
+                child
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped());
 
-            let mut child = child.spawn().context("failed to spawn fixture")?;
-            if let Some(mut stdin) = child.stdin.take() {
-                stdin.write_all(stdin_content.as_bytes())?;
-                drop(stdin);
+                let mut child = child.spawn().context("failed to spawn fixture")?;
+                if let Some(mut stdin) = child.stdin.take() {
+                    stdin.write_all(stdin_content.as_bytes())?;
+                    drop(stdin);
+                }
+                let result = child.wait_with_output().context("failed to run fixture")?;
+                (result.status, result.stdout, result.stderr)
             }
-            let result = child.wait_with_output().context("failed to run fixture")?;
-            (result.status, result.stdout, result.stderr)
         } else {
             let result = cmd.output().context("failed to run fixture")?;
             (result.status, result.stdout, result.stderr)

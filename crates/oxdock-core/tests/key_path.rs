@@ -1016,7 +1016,7 @@ fn comparison_false_is_falsy() {
     "#},
     )
     .unwrap();
-    assert!(root.join("out.txt").unwrap().as_path().exists() == false);
+    assert!(!root.join("out.txt").unwrap().as_path().exists());
 }
 
 // ============================================================================
@@ -1037,7 +1037,7 @@ fn logical_and_short_circuit() {
     "#},
     )
     .unwrap();
-    assert!(root.join("out.txt").unwrap().as_path().exists() == false);
+    assert!(!root.join("out.txt").unwrap().as_path().exists());
 }
 
 #[test]
@@ -1168,8 +1168,8 @@ fn if_nested_inside_for() {
     )
     .unwrap();
     assert_eq!(read_trimmed(&root, "b.txt"), "found");
-    assert!(root.join("a.txt").unwrap().as_path().exists() == false);
-    assert!(root.join("c.txt").unwrap().as_path().exists() == false);
+    assert!(!root.join("a.txt").unwrap().as_path().exists());
+    assert!(!root.join("c.txt").unwrap().as_path().exists());
 }
 
 // ============================================================================
@@ -1216,7 +1216,7 @@ fn if_literal_false_skips() {
     "#},
     )
     .unwrap();
-    assert!(root.join("out.txt").unwrap().as_path().exists() == false);
+    assert!(!root.join("out.txt").unwrap().as_path().exists());
 }
 
 #[test]

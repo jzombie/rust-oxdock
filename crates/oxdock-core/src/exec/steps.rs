@@ -59,6 +59,7 @@ pub(super) fn pre_register_assertions<P: ProcessManager>(
 /// window needles for the current generation to reflect new env values.
 /// Preserves ring buffer history via `update_needle`. Handles both top-level
 /// and WITH_IO-wrapped assertions.
+#[allow(clippy::collapsible_if)]
 pub(super) fn sync_iteration_assert_needles<P: ProcessManager>(
     state: &ExecState<P>,
     steps: &[Step],

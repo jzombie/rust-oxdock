@@ -428,160 +428,6 @@ fn ensure_out_dir(
     })
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn make_ctx() -> (oxdock_fs::GuardedTempDir, PathResolver, GuardedPath) {
-        let temp = GuardedPath::tempdir().expect("tempdir");
-        let root = temp.as_guarded_path().clone();
-        let resolver = PathResolver::new_guarded(root.clone(), root.clone()).expect("resolver");
-        (temp, resolver, root)
-    }
-
-    #[test]
-    fn force_flag_overrides_cache_validity() {
-        assert!(
-            should_rebuild(true, true),
-            "force must bypass a valid cache"
-        );
-        assert!(!should_rebuild(false, true));
-        assert!(should_rebuild(false, false));
-        assert!(should_rebuild(true, false));
-    }
-
-    #[test]
-    fn internal_artifacts_are_excluded_from_assets() {
-        assert!(is_internal_artifact(".oxdock_hash"));
-        assert!(is_internal_artifact(".oxdock-staging"));
-        assert!(is_internal_artifact(".oxdock-staging/x"));
-        assert!(is_internal_artifact(".oxdock-tempdir"));
-        assert!(!is_internal_artifact("hello.txt"));
-        assert!(!is_internal_artifact("nested/dir/file.bin"));
-    }
-
-    fn include_bytes_paths(ts: &proc_macro2::TokenStream) -> Vec<String> {
-        use syn::visit::Visit;
-        let file: syn::File = syn::parse2(ts.clone()).expect("parse output as file");
-
-        struct IncludeVisitor {
-            matches: Vec<String>,
-        }
-
-        impl<'ast> Visit<'ast> for IncludeVisitor {
-            fn visit_macro(&mut self, mac: &'ast syn::Macro) {
-                if mac
-                    .path
-                    .segments
-                    .last()
-                    .map(|seg| seg.ident == "include_bytes")
-                    .unwrap_or(false)
-                    && let Ok(lit) = syn::parse2::<syn::LitStr>(mac.tokens.clone())
-                {
-                    self.matches.push(lit.value());
-                }
-                syn::visit::visit_macro(self, mac);
-            }
-        }
-
-        let mut visitor = IncludeVisitor {
-            matches: Vec::new(),
-        };
-        visitor.visit_file(&file);
-        visitor.matches
-    }
-
-    #[test]
-    fn join_guard_appends_relative_paths() {
-        let temp = GuardedPath::tempdir().unwrap();
-        let base = temp.as_guarded_path().clone();
-        let joined = join_guard(&base, "some/rel/path", proc_macro2::Span::call_site()).unwrap();
-        assert!(joined.as_path().starts_with(base.as_path()));
-    }
-
-    #[test]
-    fn join_guard_rejects_paths_escaping_manifest_root() {
-        let temp = GuardedPath::tempdir().unwrap();
-        let base = temp.as_guarded_path().clone();
-        let err = join_guard(&base, "../outside", proc_macro2::Span::call_site());
-        assert!(err.is_err(), "escaping paths must be rejected");
-    }
-
-    #[test]
-    fn join_guard_accepts_within_root() {
-        let temp = GuardedPath::tempdir().unwrap();
-        let base = temp.as_guarded_path().clone();
-        let ok = join_guard(&base, "./inside", proc_macro2::Span::call_site());
-        assert!(ok.is_ok());
-    }
-
-    #[test]
-    fn uses_final_workdir_for_folder() {
-        let temp = GuardedPath::tempdir().expect("tempdir");
-        let manifest_dir = temp.as_guarded_path().clone();
-        let resolver =
-            PathResolver::new_guarded(manifest_dir.clone(), manifest_dir.clone()).unwrap();
-        resolver
-            .write_file(&manifest_dir.join("seed.txt").unwrap(), b"seed")
-            .ok();
-
-        // Route CARGO_MANIFEST_DIR at the fixture root for this test.
-        let _guard = oxdock_sys_test_utils::TestEnvGuard::set(
-            "CARGO_MANIFEST_DIR",
-            manifest_dir.display().to_string().as_str(),
-        );
-        let _ws = oxdock_sys_test_utils::TestEnvGuard::remove("OXDOCK_WORKSPACE_ROOT");
-
-        let assets_rel = "prebuilt";
-        let script = ["MKDIR dist", "WRITE dist/hello.txt hi", "WORKDIR dist"].join("\n");
-
-        let input = DslMacroInput {
-            name: syn::Ident::new("DemoAssets", proc_macro2::Span::call_site()),
-            script: ScriptSource::Literal(syn::LitStr::new(
-                &script,
-                proc_macro2::Span::call_site(),
-            )),
-            out_dir: syn::LitStr::new(assets_rel, proc_macro2::Span::call_site()),
-        };
-
-        let ts = expand_embed_internal(&input).expect("inline build should succeed");
-        let include_paths = include_bytes_paths(&ts);
-        assert_eq!(include_paths.len(), 1, "only final WORKDIR file embedded");
-        assert!(
-            include_paths[0].contains("prebuilt") && include_paths[0].contains("hello.txt"),
-            "unexpected path: {:?}",
-            include_paths[0]
-        );
-    }
-
-    #[test]
-    fn cache_validation_requires_matching_hash_and_directory() {
-        let (_temp, resolver, root) = make_ctx();
-        let out = root.join("prebuilt").expect("join");
-        resolver.create_dir_all(&out).expect("mkdir");
-
-        let plan = InlinePlan {
-            script_src: "WRITE x.txt y".into(),
-            script_span: proc_macro2::Span::call_site(),
-            manifest_resolver: resolver,
-            out_dir: out,
-            fingerprint: "deadbeef".into(),
-        };
-        assert!(!cached_out_dir_valid(&plan), "no hash file yet");
-
-        let hash_path = plan.out_dir.join(HASH_FILE).unwrap();
-        plan.manifest_resolver
-            .write_file(&hash_path, b"cafebabe\n")
-            .unwrap();
-        assert!(!cached_out_dir_valid(&plan), "mismatched hash");
-
-        plan.manifest_resolver
-            .write_file(&hash_path, b" deadbeef \n")
-            .unwrap();
-        assert!(cached_out_dir_valid(&plan), "trimmed equality");
-    }
-}
-
 // ---------------------------------------------------------------------------
 // oxdock! — runtime AST construction macro with #var interpolation
 // ---------------------------------------------------------------------------
@@ -861,7 +707,7 @@ fn emit_raw_value(v: &Value, interp: &[(proc_macro2::Ident, usize)]) -> proc_mac
         }
         Value::Map(map) => {
             let mut pairs: Vec<_> = map.iter().collect();
-            pairs.sort_by_key(|(k, _)| k.clone());
+            pairs.sort_by_key(|(k, _)| k.to_owned());
             let kv_tokens: Vec<_> = pairs
                 .iter()
                 .map(|(k, v)| {
@@ -1198,5 +1044,159 @@ fn emit_step(step: &Step, interp: &[(proc_macro2::Ident, usize)]) -> proc_macro2
             scope_enter: #scope_enter,
             scope_exit: #scope_exit,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_ctx() -> (oxdock_fs::GuardedTempDir, PathResolver, GuardedPath) {
+        let temp = GuardedPath::tempdir().expect("tempdir");
+        let root = temp.as_guarded_path().clone();
+        let resolver = PathResolver::new_guarded(root.clone(), root.clone()).expect("resolver");
+        (temp, resolver, root)
+    }
+
+    #[test]
+    fn force_flag_overrides_cache_validity() {
+        assert!(
+            should_rebuild(true, true),
+            "force must bypass a valid cache"
+        );
+        assert!(!should_rebuild(false, true));
+        assert!(should_rebuild(false, false));
+        assert!(should_rebuild(true, false));
+    }
+
+    #[test]
+    fn internal_artifacts_are_excluded_from_assets() {
+        assert!(is_internal_artifact(".oxdock_hash"));
+        assert!(is_internal_artifact(".oxdock-staging"));
+        assert!(is_internal_artifact(".oxdock-staging/x"));
+        assert!(is_internal_artifact(".oxdock-tempdir"));
+        assert!(!is_internal_artifact("hello.txt"));
+        assert!(!is_internal_artifact("nested/dir/file.bin"));
+    }
+
+    fn include_bytes_paths(ts: &proc_macro2::TokenStream) -> Vec<String> {
+        use syn::visit::Visit;
+        let file: syn::File = syn::parse2(ts.clone()).expect("parse output as file");
+
+        struct IncludeVisitor {
+            matches: Vec<String>,
+        }
+
+        impl<'ast> Visit<'ast> for IncludeVisitor {
+            fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+                if mac
+                    .path
+                    .segments
+                    .last()
+                    .map(|seg| seg.ident == "include_bytes")
+                    .unwrap_or(false)
+                    && let Ok(lit) = syn::parse2::<syn::LitStr>(mac.tokens.clone())
+                {
+                    self.matches.push(lit.value());
+                }
+                syn::visit::visit_macro(self, mac);
+            }
+        }
+
+        let mut visitor = IncludeVisitor {
+            matches: Vec::new(),
+        };
+        visitor.visit_file(&file);
+        visitor.matches
+    }
+
+    #[test]
+    fn join_guard_appends_relative_paths() {
+        let temp = GuardedPath::tempdir().unwrap();
+        let base = temp.as_guarded_path().clone();
+        let joined = join_guard(&base, "some/rel/path", proc_macro2::Span::call_site()).unwrap();
+        assert!(joined.as_path().starts_with(base.as_path()));
+    }
+
+    #[test]
+    fn join_guard_rejects_paths_escaping_manifest_root() {
+        let temp = GuardedPath::tempdir().unwrap();
+        let base = temp.as_guarded_path().clone();
+        let err = join_guard(&base, "../outside", proc_macro2::Span::call_site());
+        assert!(err.is_err(), "escaping paths must be rejected");
+    }
+
+    #[test]
+    fn join_guard_accepts_within_root() {
+        let temp = GuardedPath::tempdir().unwrap();
+        let base = temp.as_guarded_path().clone();
+        let ok = join_guard(&base, "./inside", proc_macro2::Span::call_site());
+        assert!(ok.is_ok());
+    }
+
+    #[test]
+    fn uses_final_workdir_for_folder() {
+        let temp = GuardedPath::tempdir().expect("tempdir");
+        let manifest_dir = temp.as_guarded_path().clone();
+        let resolver =
+            PathResolver::new_guarded(manifest_dir.clone(), manifest_dir.clone()).unwrap();
+        resolver
+            .write_file(&manifest_dir.join("seed.txt").unwrap(), b"seed")
+            .ok();
+
+        // Route CARGO_MANIFEST_DIR at the fixture root for this test.
+        let _guard = oxdock_sys_test_utils::TestEnvGuard::set(
+            "CARGO_MANIFEST_DIR",
+            manifest_dir.display().to_string().as_str(),
+        );
+        let _ws = oxdock_sys_test_utils::TestEnvGuard::remove("OXDOCK_WORKSPACE_ROOT");
+
+        let assets_rel = "prebuilt";
+        let script = ["MKDIR dist", "WRITE dist/hello.txt hi", "WORKDIR dist"].join("\n");
+
+        let input = DslMacroInput {
+            name: syn::Ident::new("DemoAssets", proc_macro2::Span::call_site()),
+            script: ScriptSource::Literal(syn::LitStr::new(
+                &script,
+                proc_macro2::Span::call_site(),
+            )),
+            out_dir: syn::LitStr::new(assets_rel, proc_macro2::Span::call_site()),
+        };
+
+        let ts = expand_embed_internal(&input).expect("inline build should succeed");
+        let include_paths = include_bytes_paths(&ts);
+        assert_eq!(include_paths.len(), 1, "only final WORKDIR file embedded");
+        assert!(
+            include_paths[0].contains("prebuilt") && include_paths[0].contains("hello.txt"),
+            "unexpected path: {:?}",
+            include_paths[0]
+        );
+    }
+
+    #[test]
+    fn cache_validation_requires_matching_hash_and_directory() {
+        let (_temp, resolver, root) = make_ctx();
+        let out = root.join("prebuilt").expect("join");
+        resolver.create_dir_all(&out).expect("mkdir");
+
+        let plan = InlinePlan {
+            script_src: "WRITE x.txt y".into(),
+            script_span: proc_macro2::Span::call_site(),
+            manifest_resolver: resolver,
+            out_dir: out,
+            fingerprint: "deadbeef".into(),
+        };
+        assert!(!cached_out_dir_valid(&plan), "no hash file yet");
+
+        let hash_path = plan.out_dir.join(HASH_FILE).unwrap();
+        plan.manifest_resolver
+            .write_file(&hash_path, b"cafebabe\n")
+            .unwrap();
+        assert!(!cached_out_dir_valid(&plan), "mismatched hash");
+
+        plan.manifest_resolver
+            .write_file(&hash_path, b" deadbeef \n")
+            .unwrap();
+        assert!(cached_out_dir_valid(&plan), "trimmed equality");
     }
 }
