@@ -767,31 +767,7 @@ fn emit_arg(arg: &Arg, interp: &[(proc_macro2::Ident, usize)]) -> proc_macro2::T
 
 fn emit_expr(expr: &Expr, interp: &[(proc_macro2::Ident, usize)]) -> proc_macro2::TokenStream {
     match expr {
-        Expr::Literal(v) => match v {
-            Value::String(s) => {
-                if let Some(idx) = is_placeholder(s) {
-                    let ident = &interp.iter().find(|(_, i)| *i == idx).unwrap().0;
-                    quote! { Expr::Literal(Value::String(#ident.to_string())) }
-                } else {
-                    quote! { Expr::Literal(Value::String(#s.to_string())) }
-                }
-            }
-            Value::List(items) => {
-                let item_tokens: Vec<_> = items
-                    .iter()
-                    .map(|s| {
-                        if let Some(idx) = is_placeholder(s) {
-                            let ident = &interp.iter().find(|(_, i)| *i == idx).unwrap().0;
-                            quote! { #ident.to_string() }
-                        } else {
-                            quote! { #s.to_string() }
-                        }
-                    })
-                    .collect();
-                quote! { Expr::Literal(Value::List(vec![#(#item_tokens),*])) }
-            }
-            Value::Bool(b) => quote! { Expr::Literal(Value::Bool(#b)) },
-        },
+        Expr::Literal(v) => emit_value(v, interp),
         Expr::Var(s) => {
             if let Some(idx) = is_placeholder(s) {
                 let ident = &interp.iter().find(|(_, i)| *i == idx).unwrap().0;
@@ -799,6 +775,23 @@ fn emit_expr(expr: &Expr, interp: &[(proc_macro2::Ident, usize)]) -> proc_macro2
             } else {
                 quote! { Expr::Var(#s.to_string()) }
             }
+        }
+        Expr::KeyPath { base, keys } => {
+            let base_stream = if let Some(idx) = is_placeholder(base) {
+                let ident = &interp.iter().find(|(_, i)| *i == idx).unwrap().0;
+                quote! { #ident.to_string() }
+            } else {
+                quote! { #base.to_string() }
+            };
+            let key_strs: Vec<_> = keys.iter().map(|k| {
+                if let Some(idx) = is_placeholder(k) {
+                    let ident = &interp.iter().find(|(_, i)| *i == idx).unwrap().0;
+                    quote! { #ident.to_string() }
+                } else {
+                    quote! { #k.to_string() }
+                }
+            }).collect();
+            quote! { Expr::KeyPath { base: #base_stream, keys: vec![#(#key_strs),*] } }
         }
         Expr::List(items) => {
             let item_tokens: Vec<_> = items.iter().map(|e| emit_expr(e, interp)).collect();
@@ -808,6 +801,41 @@ fn emit_expr(expr: &Expr, interp: &[(proc_macro2::Ident, usize)]) -> proc_macro2
             let arg_tokens: Vec<_> = args.iter().map(|e| emit_expr(e, interp)).collect();
             quote! { Expr::Call { name: #name.to_string(), args: vec![#(#arg_tokens),*] } }
         }
+    }
+}
+
+fn emit_value(v: &Value, interp: &[(proc_macro2::Ident, usize)]) -> proc_macro2::TokenStream {
+    let raw = emit_raw_value(v, interp);
+    quote! { Expr::Literal(#raw) }
+}
+
+fn emit_raw_value(v: &Value, interp: &[(proc_macro2::Ident, usize)]) -> proc_macro2::TokenStream {
+    match v {
+        Value::String(s) => {
+            if let Some(idx) = is_placeholder(s) {
+                let ident = &interp.iter().find(|(_, i)| *i == idx).unwrap().0;
+                quote! { Value::String(#ident.to_string()) }
+            } else {
+                quote! { Value::String(#s.to_string()) }
+            }
+        }
+        Value::List(items) => {
+            let item_tokens: Vec<_> = items.iter().map(|item| emit_raw_value(item, interp)).collect();
+            quote! { Value::List(vec![#(#item_tokens),*]) }
+        }
+        Value::Map(map) => {
+            let mut pairs: Vec<_> = map.iter().collect();
+            pairs.sort_by_key(|(k, _)| k.clone());
+            let kv_tokens: Vec<_> = pairs
+                .iter()
+                .map(|(k, v)| {
+                    let val_tokens = emit_raw_value(v, interp);
+                    quote! { (#k.to_string(), #val_tokens) }
+                })
+                .collect();
+            quote! { Value::Map(vec![#(#kv_tokens),*].into_iter().collect()) }
+        }
+        Value::Bool(b) => quote! { Value::Bool(#b) },
     }
 }
 

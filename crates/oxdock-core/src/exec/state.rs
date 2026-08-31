@@ -68,4 +68,16 @@ impl<P: ProcessManager> ExecState<P> {
         }
         None
     }
+
+    /// Get a flattened view of all variables across all scopes.
+    /// Inner scopes take precedence over outer scopes.
+    pub(super) fn all_vars(&self) -> HashMap<String, Value> {
+        let mut result = HashMap::new();
+        for scope in self.var_scopes.iter().rev() {
+            for (k, v) in scope {
+                result.entry(k.clone()).or_insert_with(|| v.clone());
+            }
+        }
+        result
+    }
 }

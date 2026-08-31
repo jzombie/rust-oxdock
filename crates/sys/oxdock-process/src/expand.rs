@@ -35,6 +35,8 @@ pub struct StreamingExpand {
     overrides: HashMap<String, String>,
     /// Environment variable lookup.
     env: HashMap<String, String>,
+    /// Structured variable lookup (for key-path evaluation).
+    vars: HashMap<String, oxdock_parser::Value>,
     /// State: are we currently inside a placeholder?
     in_placeholder: bool,
     /// Trailing opening byte from previous chunk — deferred across chunks.
@@ -53,11 +55,22 @@ impl StreamingExpand {
             buffer: Vec::with_capacity(256),
             overrides: overrides.iter().cloned().collect(),
             env: env.clone(),
+            vars: HashMap::new(),
             in_placeholder: false,
             pending_brace: false,
             pending_close_brace: false,
             delimiters: TemplateDelimiters::default(),
         }
+    }
+
+    /// Create with env vars, structured variables, and optional explicit overrides.
+    /// Enables key-path evaluation in template tags (e.g., `{{ pkg.package.name }}`).
+    pub fn with_vars(
+        mut self,
+        vars: &HashMap<String, oxdock_parser::Value>,
+    ) -> Self {
+        self.vars = vars.clone();
+        self
     }
 
     /// Process a chunk of input bytes, writing expanded output to `out`.
@@ -76,7 +89,7 @@ impl StreamingExpand {
             if input[0] == self.delimiters.close[1] {
                 // Confirmed close delimiter across boundary — extract key, lookup, emit
                 let key = extract_key(&self.buffer);
-                let value = lookup(&key, &self.overrides, &self.env);
+                let value = lookup(&key, &self.overrides, &self.env, &self.vars);
                 out.extend_from_slice(value.as_bytes());
                 self.buffer.clear();
                 self.in_placeholder = false;
@@ -179,7 +192,7 @@ impl StreamingExpand {
                 if i + 1 < input.len() && input[i + 1] == self.delimiters.close[1] {
                     // Found closing delimiter — extract key, lookup, emit expansion
                     let key = extract_key(&self.buffer);
-                    let value = lookup(&key, &self.overrides, &self.env);
+                    let value = lookup(&key, &self.overrides, &self.env, &self.vars);
                     out.extend_from_slice(value.as_bytes());
                     self.buffer.clear();
                     self.in_placeholder = false;
@@ -222,6 +235,7 @@ fn lookup(
     raw_key: &str,
     overrides: &HashMap<String, String>,
     env: &HashMap<String, String>,
+    vars: &HashMap<String, oxdock_parser::Value>,
 ) -> String {
     let key = raw_key.trim();
     // Only look up keys with env: or script_env: prefix
@@ -230,20 +244,86 @@ fn lookup(
         None => match key.strip_prefix("script_env:") {
             Some(k) => k,
             None => {
-                // No namespace prefix — check overrides only, not env
-                return overrides.get(key).cloned().unwrap_or_default();
+                // No namespace prefix — check overrides first, then vars for key-path
+                if let Some(val) = overrides.get(key) {
+                    return val.clone();
+                }
+                // Try key-path evaluation against vars
+                if key.contains('.') {
+                    let parts: Vec<&str> = key.split('.').collect();
+                    if let Some(resolved) = resolve_key_path_in_vars(&parts, vars) {
+                        return resolved;
+                    }
+                } else if let Some(val) = vars.get(key) {
+                    return format_value_for_string(val);
+                }
+                return String::new();
             }
         },
     };
 
     // Check overrides with both raw and normalized keys
-    overrides
-        .get(key)
-        .or_else(|| overrides.get(normalized))
-        // Fall back to env with normalized key
-        .or_else(|| env.get(normalized))
-        .cloned()
-        .unwrap_or_default()
+    if let Some(val) = overrides.get(key).or_else(|| overrides.get(normalized)) {
+        return val.clone();
+    }
+    // Fall back to env with normalized key
+    if let Some(val) = env.get(normalized) {
+        return val.clone();
+    }
+    // Fall back to vars with normalized key (supports key-path in env: tags)
+    if normalized.contains('.') {
+        let parts: Vec<&str> = normalized.split('.').collect();
+        if let Some(resolved) = resolve_key_path_in_vars(&parts, vars) {
+            return resolved;
+        }
+    } else if let Some(val) = vars.get(normalized) {
+        return format_value_for_string(val);
+    }
+    String::new()
+}
+
+/// Resolve a key-path against the vars map.
+fn resolve_key_path_in_vars(
+    parts: &[&str],
+    vars: &HashMap<String, oxdock_parser::Value>,
+) -> Option<String> {
+    let base = parts[0];
+    let mut current = vars.get(base)?.clone();
+    for &key in &parts[1..] {
+        match current {
+            oxdock_parser::Value::Map(map) => {
+                current = map.get(key)?.clone();
+            }
+            oxdock_parser::Value::List(list) => {
+                let idx: usize = key.parse().ok()?;
+                current = list.get(idx)?.clone();
+            }
+            oxdock_parser::Value::String(_) | oxdock_parser::Value::Bool(_) => {
+                return None; // Cannot traverse into scalar
+            }
+        }
+    }
+    Some(format_value_for_string(&current))
+}
+
+/// Format a Value as a string for inline interpolation.
+fn format_value_for_string(val: &oxdock_parser::Value) -> String {
+    match val {
+        oxdock_parser::Value::String(s) => s.clone(),
+        oxdock_parser::Value::Bool(b) => b.to_string(),
+        oxdock_parser::Value::List(items) => {
+            items.iter()
+                .map(|v| format_value_for_string(v))
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
+        oxdock_parser::Value::Map(map) => {
+            map.iter()
+                .map(|(k, v)| format!("\"{}\": {}", k, format_value_for_string(v)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    }
 }
 
 // Legacy functions for backward compatibility

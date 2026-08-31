@@ -376,7 +376,8 @@ pub struct IoBinding {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Value {
     String(String),
-    List(Vec<String>),
+    List(Vec<Value>),
+    Map(std::collections::BTreeMap<String, Value>),
     Bool(bool),
 }
 
@@ -384,6 +385,7 @@ pub enum Value {
 pub enum Expr {
     Literal(Value),
     Var(String),
+    KeyPath { base: String, keys: Vec<String> },
     List(Vec<Expr>),
     Call { name: String, args: Vec<Expr> },
 }
@@ -841,9 +843,19 @@ impl fmt::Display for Value {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
-                    write!(f, "\"{}\"", item)?;
+                    write!(f, "{}", item)?;
                 }
                 write!(f, "]")
+            }
+            Value::Map(map) => {
+                write!(f, "{{")?;
+                for (i, (k, v)) in map.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}: {}", k, v)?;
+                }
+                write!(f, "}}")
             }
             Value::Bool(b) => write!(f, "{}", b),
         }
@@ -855,6 +867,13 @@ impl fmt::Display for Expr {
         match self {
             Expr::Literal(v) => write!(f, "{}", v),
             Expr::Var(name) => write!(f, "${}", name),
+            Expr::KeyPath { base, keys } => {
+                write!(f, "${}", base)?;
+                for key in keys {
+                    write!(f, ".{}", key)?;
+                }
+                Ok(())
+            }
             Expr::Call { name, args } => {
                 write!(f, "{}(", name)?;
                 for (i, arg) in args.iter().enumerate() {

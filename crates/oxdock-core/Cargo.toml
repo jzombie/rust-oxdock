@@ -20,6 +20,8 @@ oxdock-fs.workspace = true
 oxdock-parser.workspace = true
 oxdock-process.workspace = true
 sha2.workspace = true
+toml.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 indoc.workspace = true

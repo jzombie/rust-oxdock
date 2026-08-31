@@ -67,9 +67,11 @@ quoted_string = @{
 bare_word = @{ (ASCII_ALPHANUMERIC | "_" | "-" | "." | "/")+ }
 func_call = { ident ~ "(" ~ (expr ~ ("," ~ expr)*)? ~ ")" }
 variable = { "$" ~ ident }
+key_path_segment = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* | ASCII_DIGIT+ }
+key_path = { "$" ~ ident ~ ("." ~ key_path_segment)+ }
 list_literal = { "[" ~ (expr ~ ("," ~ expr)*)? ~ "]" }
 string_literal = { quoted_string }
-expr = { func_call | variable | list_literal | string_literal | bare_word }
+expr = { func_call | key_path | variable | list_literal | string_literal | bare_word }
 
 // Block
 block = { "{" ~ block_element* ~ "}" }

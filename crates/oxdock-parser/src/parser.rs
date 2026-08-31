@@ -1364,6 +1364,7 @@ fn parse_expr(pair: Pair<Rule>) -> Result<Expr> {
     let inner = pair.into_inner().next().unwrap();
     match inner.as_rule() {
         Rule::func_call => parse_func_call(inner),
+        Rule::key_path => parse_key_path(inner),
         Rule::variable => {
             let name = inner.as_str();
             let name = name.strip_prefix('$').unwrap_or(name).to_string();
@@ -1380,6 +1381,28 @@ fn parse_expr(pair: Pair<Rule>) -> Result<Expr> {
         }
         _ => bail!("unexpected expression rule: {:?}", inner.as_rule()),
     }
+}
+
+fn parse_key_path(pair: Pair<Rule>) -> Result<Expr> {
+    let mut base = None;
+    let mut keys = Vec::new();
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::ident => {
+                if base.is_none() {
+                    base = Some(inner.as_str().to_string());
+                }
+            }
+            Rule::key_path_segment => {
+                keys.push(inner.as_str().to_string());
+            }
+            _ => {}
+        }
+    }
+    Ok(Expr::KeyPath {
+        base: base.ok_or_else(|| anyhow!("key path requires a base identifier"))?,
+        keys,
+    })
 }
 
 fn parse_func_call(pair: Pair<Rule>) -> Result<Expr> {

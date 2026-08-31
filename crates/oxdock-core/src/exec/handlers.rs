@@ -550,8 +550,10 @@ pub(super) fn replace<P: ProcessManager>(
     overrides: &[(String, String)],
 ) -> Result<()> {
     let ctx = cx.state.command_ctx()?;
+    let vars = cx.state.all_vars();
 
-    let mut expander = oxdock_process::StreamingExpand::new(overrides, ctx.envs());
+    let mut expander = oxdock_process::StreamingExpand::new(overrides, ctx.envs())
+        .with_vars(&vars);
     let mut out_buf = Vec::with_capacity(super::io::CHUNK_SIZE);
 
     write_stdout(cx.out.clone(), |w| {
@@ -895,7 +897,7 @@ pub(super) fn for_loop<P: ProcessManager>(
     if let Value::List(items) = iterable {
         for item in items {
             cx.state.push_var_scope();
-            cx.state.set_var(clean_var.clone(), Value::String(item));
+            cx.state.set_var(clean_var.clone(), item);
 
             let saved_cwd = cx.state.cwd.clone();
             let saved_root = cx.state.fs.root().clone();
