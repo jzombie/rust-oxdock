@@ -887,7 +887,12 @@ fn emit_stepkind(
             quote! { StepKind::HashSha256 { path: #p } }
         }
         StepKind::Exit(code) => quote! { StepKind::Exit(#code) },
-        StepKind::For { key_var, var, in_expr, body } => {
+        StepKind::For {
+            key_var,
+            var,
+            in_expr,
+            body,
+        } => {
             let in_tok = emit_expr(in_expr, interp);
             let body_tokens: Vec<_> = body.iter().map(|s| emit_step(s, interp)).collect();
             let key_var_tokens = match key_var {

@@ -796,7 +796,12 @@ impl fmt::Display for StepKind {
             }
             StepKind::HashSha256 { path } => write!(f, "HASH_SHA256 {}", quote_arg(path.as_str())),
             StepKind::Exit(code) => write!(f, "EXIT {}", code),
-            StepKind::For { key_var, var, in_expr, body } => {
+            StepKind::For {
+                key_var,
+                var,
+                in_expr,
+                body,
+            } => {
                 match key_var {
                     Some(k) => write!(f, "FOR ${}, ${} IN {} {{", k, var, in_expr)?,
                     None => write!(f, "FOR ${} IN {} {{", var, in_expr)?,

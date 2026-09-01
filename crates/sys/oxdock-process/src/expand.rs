@@ -295,7 +295,9 @@ fn resolve_key_path_in_vars(
                 let idx: usize = key.parse().ok()?;
                 current = list.get(idx)?.clone();
             }
-            oxdock_parser::Value::String(_) | oxdock_parser::Value::Bool(_) | oxdock_parser::Value::Int(_) => {
+            oxdock_parser::Value::String(_)
+            | oxdock_parser::Value::Bool(_)
+            | oxdock_parser::Value::Int(_) => {
                 return None; // Cannot traverse into scalar
             }
         }

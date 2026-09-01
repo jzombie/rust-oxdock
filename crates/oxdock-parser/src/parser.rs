@@ -525,9 +525,9 @@ fn parse_command(pair: Pair<Rule>) -> Result<StepKind> {
                 include_dirty,
             }
         }
-        Rule::hash_sha256_command => {
-            StepKind::HashSha256 { path: parse_single_arg(pair)? }
-        }
+        Rule::hash_sha256_command => StepKind::HashSha256 {
+            path: parse_single_arg(pair)?,
+        },
         Rule::inherit_env_command => {
             let mut keys: Vec<String> = Vec::new();
             for inner in pair.into_inner() {
@@ -580,8 +580,7 @@ fn parse_command(pair: Pair<Rule>) -> Result<StepKind> {
                 }
             }
             StepKind::Write {
-                path: path
-                    .ok_or_else(|| anyhow!("WRITE expects a path argument"))?,
+                path: path.ok_or_else(|| anyhow!("WRITE expects a path argument"))?,
                 contents,
             }
         }
@@ -600,8 +599,7 @@ fn parse_command(pair: Pair<Rule>) -> Result<StepKind> {
                 }
             }
             StepKind::Append {
-                path: path
-                    .ok_or_else(|| anyhow!("APPEND expects a path argument"))?,
+                path: path.ok_or_else(|| anyhow!("APPEND expects a path argument"))?,
                 contents,
             }
         }
@@ -634,10 +632,7 @@ fn parse_command(pair: Pair<Rule>) -> Result<StepKind> {
                     _ => {}
                 }
             }
-            StepKind::Expand {
-                path,
-                overrides,
-            }
+            StepKind::Expand { path, overrides }
         }
         Rule::assert_file_hash_command => parse_assert_file_hash(pair)?,
         Rule::assert_file_content_command => parse_assert_file_content(pair)?,
@@ -861,8 +856,7 @@ fn parse_assert_file_hash(pair: Pair<Rule>) -> Result<StepKind> {
     }
     Ok(StepKind::AssertFile {
         hash: Some(digest.ok_or_else(|| anyhow!("missing hash digest"))?),
-        path: path
-            .ok_or_else(|| anyhow!("ASSERT_FILE --hash expects a path argument"))?,
+        path: path.ok_or_else(|| anyhow!("ASSERT_FILE --hash expects a path argument"))?,
         contents: None,
     })
 }
@@ -883,8 +877,7 @@ fn parse_assert_file_content(pair: Pair<Rule>) -> Result<StepKind> {
     }
     Ok(StepKind::AssertFile {
         hash: None,
-        path: path
-            .ok_or_else(|| anyhow!("ASSERT_FILE expects a path argument"))?,
+        path: path.ok_or_else(|| anyhow!("ASSERT_FILE expects a path argument"))?,
         contents,
     })
 }
@@ -1012,8 +1005,11 @@ fn parse_fragments(parts: &[Pair<Rule>]) -> Result<String> {
                 let unquoted = &s[1..s.len() - 1];
                 body.push_str(unquoted);
             }
-            Rule::templated_arg | Rule::unquoted_arg | Rule::unquoted_env_value
-            | Rule::unquoted_msg_content | Rule::unquoted_run_content => {
+            Rule::templated_arg
+            | Rule::unquoted_arg
+            | Rule::unquoted_env_value
+            | Rule::unquoted_msg_content
+            | Rule::unquoted_run_content => {
                 body.push_str(part.as_str());
             }
             Rule::expr => body.push_str(part.as_str()),

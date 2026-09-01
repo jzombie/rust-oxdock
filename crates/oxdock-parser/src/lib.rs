@@ -607,7 +607,12 @@ mod tests {
             steps.iter().map(|s| &s.kind).collect::<Vec<_>>()
         );
         match &steps[0].kind {
-            StepKind::For { key_var, var, in_expr, body } => {
+            StepKind::For {
+                key_var,
+                var,
+                in_expr,
+                body,
+            } => {
                 assert!(key_var.is_none());
                 assert_eq!(var, "f");
                 assert_eq!(
@@ -642,7 +647,12 @@ mod tests {
         };
         assert_eq!(steps.len(), 1);
         match &steps[0].kind {
-            StepKind::For { key_var, var, in_expr, body } => {
+            StepKind::For {
+                key_var,
+                var,
+                in_expr,
+                body,
+            } => {
                 assert_eq!(key_var.as_deref(), Some("k"));
                 assert_eq!(var, "v");
                 assert_eq!(in_expr, &Expr::Var("map".to_string()));

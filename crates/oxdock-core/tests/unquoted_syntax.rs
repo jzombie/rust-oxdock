@@ -10,8 +10,7 @@ use oxdock_parser::parse_script;
 
 fn run_script(root: &GuardedPath, script: &str) -> Result<(), anyhow::Error> {
     let steps = parse_script(script).expect("parse script");
-    run_steps_with_context_result_with_io(root, root, &steps, ExecIo::new())
-        .map(|_| ())
+    run_steps_with_context_result_with_io(root, root, &steps, ExecIo::new()).map(|_| ())
 }
 
 fn read_trimmed(root: &GuardedPath, rel: &str) -> String {
@@ -92,7 +91,9 @@ fn append_unquoted_path() {
     run_script(&root, "WRITE log.txt 'line1'").unwrap();
     run_script(&root, "APPEND log.txt 'line2'").unwrap();
     let resolver = PathResolver::new(root.root(), root.root()).unwrap();
-    let content = resolver.read_to_string(&root.join("log.txt").unwrap()).unwrap();
+    let content = resolver
+        .read_to_string(&root.join("log.txt").unwrap())
+        .unwrap();
     assert!(content.contains("line1"));
     assert!(content.contains("line2"));
 }
@@ -166,10 +167,14 @@ fn env_value_with_dollar_sign() {
 fn write_unquoted_template_in_path() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         LET $name = "output"
         WRITE "{{ $name }}.txt" "content"
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     assert_eq!(read_trimmed(&root, "output.txt"), "content");
 }
 
@@ -177,11 +182,15 @@ fn write_unquoted_template_in_path() {
 fn workdir_unquoted_template() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         LET $dir = "target"
         MKDIR "{{ $dir }}"
         WORKDIR "{{ $dir }}"
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     // WORKDIR succeeded — no error
 }
 
@@ -189,10 +198,14 @@ fn workdir_unquoted_template() {
 fn write_unquoted_template_with_suffix() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         LET $pkg = "mylib"
         WRITE "src/{{ $pkg }}/mod.rs" "// module"
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
     assert_eq!(read_trimmed(&root, "src/mylib/mod.rs"), "// module");
 }
 
@@ -218,10 +231,14 @@ fn run_unquoted_command() {
 fn run_unquoted_command_with_env_expansion() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
-    run_script(&root, indoc! {r#"
+    run_script(
+        &root,
+        indoc! {r#"
         ENV GREETING="hello"
         RUN echo $GREETING
-    "#}).unwrap();
+    "#},
+    )
+    .unwrap();
 }
 
 // ============================================================================

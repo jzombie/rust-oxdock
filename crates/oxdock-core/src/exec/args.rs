@@ -348,10 +348,9 @@ pub(crate) fn expand_string<P: ProcessManager>(
                         let mut parts = var_expr.split('.');
                         if let Some(base_var) = parts.next() {
                             let base_trim = base_var.trim();
-                            let mut current = state.get_var(base_trim).or_else(|| {
-                                env.get(base_trim)
-                                    .map(|v| Value::String(v.clone()))
-                            });
+                            let mut current = state
+                                .get_var(base_trim)
+                                .or_else(|| env.get(base_trim).map(|v| Value::String(v.clone())));
                             for part in parts {
                                 let part_trim = part.trim();
                                 current = match current {
@@ -401,10 +400,7 @@ pub(crate) fn expand_string<P: ProcessManager>(
 /// Expand bare `$var` references in a string using DSL scope.
 /// Used by RUN commands to expand DSL variables before passing to shell.
 /// Undefined variables are left as-is (shell will handle them).
-pub(crate) fn expand_dsl_vars<P: ProcessManager>(
-    input: &str,
-    state: &ExecState<P>,
-) -> String {
+pub(crate) fn expand_dsl_vars<P: ProcessManager>(input: &str, state: &ExecState<P>) -> String {
     let mut output = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
     while let Some(c) = chars.next() {

@@ -503,7 +503,10 @@ fn missing_key_after_successful_traversal_does_not_dump() {
     "#},
     )
     .unwrap_err();
-    assert!(err.to_string().contains("not found") || err.to_string().contains("undefined"), "{err}");
+    assert!(
+        err.to_string().contains("not found") || err.to_string().contains("undefined"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -521,7 +524,10 @@ fn out_of_bounds_index_in_string_interpolation_does_not_dump_list() {
     "#},
     )
     .unwrap_err();
-    assert!(err.to_string().contains("out of bounds") || err.to_string().contains("undefined"), "{err}");
+    assert!(
+        err.to_string().contains("out of bounds") || err.to_string().contains("undefined"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -539,7 +545,10 @@ fn non_numeric_index_in_string_interpolation_does_not_dump() {
     "#},
     )
     .unwrap_err();
-    assert!(err.to_string().contains("Invalid") || err.to_string().contains("undefined"), "{err}");
+    assert!(
+        err.to_string().contains("Invalid") || err.to_string().contains("undefined"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -953,12 +962,17 @@ fn for_map_iteration_sorted_keys() {
     let root = temp.as_guarded_path().clone();
 
     // Create a TOML file with a map
-    write_file(&root, "data.toml", indoc! {r#"
+    write_file(
+        &root,
+        "data.toml",
+        indoc! {r#"
         [settings]
         zebra = "last"
         alpha = "first"
         middle = "second"
-    "#}.as_bytes());
+    "#}
+        .as_bytes(),
+    );
 
     let steps = parse_script(indoc! {r#"
         LET $d = LOAD_TOML("data.toml")

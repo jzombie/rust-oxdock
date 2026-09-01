@@ -881,7 +881,8 @@ pub(super) fn for_loop<P: ProcessManager>(
             for k in keys {
                 let v = map[&k].clone();
                 cx.state.push_var_scope();
-                cx.state.set_var(clean_key_var.clone(), Value::String(k.clone()));
+                cx.state
+                    .set_var(clean_key_var.clone(), Value::String(k.clone()));
                 cx.state.set_var(clean_val_var.clone(), v);
 
                 let saved_cwd = cx.state.cwd.clone();
@@ -908,7 +909,10 @@ pub(super) fn for_loop<P: ProcessManager>(
             }
             Ok(())
         }
-        other => bail!("FOR loop requires a List or Map iterable, found {:?}", other),
+        other => bail!(
+            "FOR loop requires a List or Map iterable, found {:?}",
+            other
+        ),
     }
 }
 
