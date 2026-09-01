@@ -669,7 +669,7 @@ fn expand_resolves_env_prefix_tag() {
     run_script(
         &root,
         indoc! {r#"
-        LET $WHO = "Alice"
+        ENV WHO=Alice
         WITH_IO [stdout=pipe:t] EXPAND tmpl.txt
         WITH_IO [stdin=pipe:t] WRITE out.txt
     "#},
@@ -683,7 +683,7 @@ fn expand_resolves_bare_key_path_tag() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
     write_file(&root, "t.toml", b"greeting = \"hello\"\n");
-    write_file(&root, "tmpl.txt", b"{{ d.greeting }} world");
+    write_file(&root, "tmpl.txt", b"{{ $d.greeting }} world");
 
     run_script(
         &root,
@@ -702,7 +702,7 @@ fn expand_resolves_nested_key_path_tag() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
     write_file(&root, "t.toml", b"[pkg]\nname = \"ox\"\n");
-    write_file(&root, "tmpl.txt", b"{{ d.pkg.name }}");
+    write_file(&root, "tmpl.txt", b"{{ $d.pkg.name }}");
 
     run_script(
         &root,
@@ -722,15 +722,21 @@ fn expand_missing_tag_resolves_to_empty() {
     let root = temp.as_guarded_path().clone();
     write_file(&root, "tmpl.txt", b"before {{ missing }} after");
 
-    run_script(
+    let err = run_script(
         &root,
         indoc! {r#"
         WITH_IO [stdout=pipe:t] EXPAND tmpl.txt
         WITH_IO [stdin=pipe:t] WRITE out.txt
     "#},
-    )
-    .unwrap();
-    assert_eq!(read_trimmed(&root, "out.txt"), "before  after");
+    );
+    assert!(
+        err.is_err(),
+        "undefined variable in template should error"
+    );
+    assert!(
+        err.unwrap_err().to_string().contains("missing required step override"),
+        "error should mention missing step override"
+    );
 }
 
 #[test]
@@ -738,12 +744,12 @@ fn expand_mixed_env_and_key_path_tags() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
     write_file(&root, "t.toml", b"val = \"from-toml\"\n");
-    write_file(&root, "tmpl.txt", b"{{ env:HOST }} and {{ d.val }}");
+    write_file(&root, "tmpl.txt", b"{{ env:HOST }} and {{ $d.val }}");
 
     run_script(
         &root,
         indoc! {r#"
-        LET $HOST = "from-var"
+        ENV HOST=from-var
         LET $d = LOAD_TOML("t.toml")
         WITH_IO [stdout=pipe:t] EXPAND tmpl.txt
         WITH_IO [stdin=pipe:t] WRITE out.txt
@@ -754,11 +760,11 @@ fn expand_mixed_env_and_key_path_tags() {
 }
 
 #[test]
-fn expand_env_prefix_falls_back_to_vars() {
+fn expand_resolves_script_var_key_path() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
     write_file(&root, "t.toml", b"key = \"from-var\"\n");
-    write_file(&root, "tmpl.txt", b"{{ env:d.key }}");
+    write_file(&root, "tmpl.txt", b"{{ $d.key }}");
 
     run_script(
         &root,
@@ -770,7 +776,6 @@ fn expand_env_prefix_falls_back_to_vars() {
     )
     .unwrap();
     let result = read_trimmed(&root, "out.txt");
-    // env: prefix with dot should fall back to vars
     assert_eq!(result, "from-var");
 }
 
@@ -844,7 +849,7 @@ fn load_toml_then_use_in_template() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
     write_file(&root, "crate.toml", b"[package]\nname = \"my-crate\"\n");
-    write_file(&root, "header.txt", b"# {{ d.package.name }}");
+    write_file(&root, "header.txt", b"# {{ $d.package.name }}");
 
     run_script(
         &root,
@@ -886,7 +891,7 @@ fn for_loop_writes_multiple_files_from_loaded_data() {
 fn for_loop_var_shadows_outer_var_in_template() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
-    write_file(&root, "tmpl.txt", b"{{ name }}");
+    write_file(&root, "tmpl.txt", b"{{ $name }}");
 
     // $name is set to "outer" globally, then $name is shadowed by FOR loop
     run_script(

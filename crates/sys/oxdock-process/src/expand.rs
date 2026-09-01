@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow, bail};
 
 use crate::contract::CommandContext;
 
@@ -86,7 +86,7 @@ impl StreamingExpand {
             if input[0] == self.delimiters.close[1] {
                 // Confirmed close delimiter across boundary — extract key, lookup, emit
                 let key = extract_key(&self.buffer);
-                let value = lookup(&key, &self.overrides, &self.env, &self.vars);
+                let value = lookup(&key, &self.overrides, &self.env, &self.vars)?;
                 out.extend_from_slice(value.as_bytes());
                 self.buffer.clear();
                 self.in_placeholder = false;
@@ -115,7 +115,7 @@ impl StreamingExpand {
 
         if self.in_placeholder {
             // We're inside a placeholder — scan for closing delimiter
-            i = self.scan_placeholder(input, i, out);
+            i = self.scan_placeholder(input, i, out)?;
         }
 
         // Normal state — scan for opening byte or flush literals
@@ -126,7 +126,7 @@ impl StreamingExpand {
                     self.in_placeholder = true;
                     self.buffer.clear();
                     i += 2;
-                    i = self.scan_placeholder(input, i, out);
+                    i = self.scan_placeholder(input, i, out)?;
                 } else if i + 1 == input.len() {
                     // Opening byte is the LAST byte of chunk — defer
                     self.pending_brace = true;
@@ -183,22 +183,22 @@ impl StreamingExpand {
 
     /// Scan for closing delimiter starting at position `i`.
     /// Returns the next position to process after the placeholder.
-    fn scan_placeholder(&mut self, input: &[u8], mut i: usize, out: &mut Vec<u8>) -> usize {
+    fn scan_placeholder(&mut self, input: &[u8], mut i: usize, out: &mut Vec<u8>) -> Result<usize> {
         while i < input.len() {
             if input[i] == self.delimiters.close[0] {
                 if i + 1 < input.len() && input[i + 1] == self.delimiters.close[1] {
                     // Found closing delimiter — extract key, lookup, emit expansion
                     let key = extract_key(&self.buffer);
-                    let value = lookup(&key, &self.overrides, &self.env, &self.vars);
+                    let value = lookup(&key, &self.overrides, &self.env, &self.vars)?;
                     out.extend_from_slice(value.as_bytes());
                     self.buffer.clear();
                     self.in_placeholder = false;
-                    return i + 2;
+                    return Ok(i + 2);
                 }
                 if i + 1 == input.len() {
                     // Closing byte is the LAST byte — defer to next chunk
                     self.pending_close_brace = true;
-                    return i + 1;
+                    return Ok(i + 1);
                 }
             }
             self.buffer.push(input[i]);
@@ -210,10 +210,10 @@ impl StreamingExpand {
                 out.extend_from_slice(&self.buffer);
                 self.buffer.clear();
                 self.in_placeholder = false;
-                return i;
+                return Ok(i);
             }
         }
-        i
+        Ok(i)
     }
 }
 
@@ -224,85 +224,112 @@ fn extract_key(buffer: &[u8]) -> String {
 
 /// Lookup a key in overrides and env, stripping namespace prefixes.
 ///
-/// `{{ env:CRATE_NAME }}` or `{{ script_env:CRATE_NAME }}` → lookup `"CRATE_NAME"`.
-/// Overrides checked with both raw and normalized keys.
-/// Keys WITHOUT `env:` or `script_env:` prefix are NOT looked up in env
-/// (they expand to empty, matching the old behavior).
+/// Strict resolution contract:
+/// - `{{ KEY }}` (bare) → overrides only
+/// - `{{ env:KEY }}` → overrides then env
+/// - `{{ $var }}` → script vars
+/// - `{{ $var.field }}` → script var key-path
+///
+/// All missing or invalid references return an error.
 fn lookup(
     raw_key: &str,
     overrides: &HashMap<String, String>,
     env: &HashMap<String, String>,
     vars: &HashMap<String, oxdock_parser::Value>,
-) -> String {
+) -> Result<String> {
     let key = raw_key.trim();
-    // Only look up keys with env: or script_env: prefix
-    let normalized = match key.strip_prefix("env:") {
-        Some(k) => k,
-        None => match key.strip_prefix("script_env:") {
-            Some(k) => k,
-            None => {
-                // No namespace prefix — check overrides first, then vars for key-path
-                if let Some(val) = overrides.get(key) {
-                    return val.clone();
-                }
-                // Try key-path evaluation against vars
-                if key.contains('.') {
-                    let parts: Vec<&str> = key.split('.').collect();
-                    if let Some(resolved) = resolve_key_path_in_vars(&parts, vars) {
-                        return resolved;
-                    }
-                } else if let Some(val) = vars.get(key) {
-                    return format_value_for_string(val);
-                }
-                return String::new();
-            }
-        },
-    };
 
-    // Check overrides with both raw and normalized keys
-    if let Some(val) = overrides.get(key).or_else(|| overrides.get(normalized)) {
-        return val.clone();
+    // 1. Explicit overrides (command-level CLI flags: KEY=val)
+    if let Some(val) = overrides.get(key) {
+        return Ok(val.clone());
     }
-    // Fall back to env with normalized key
-    if let Some(val) = env.get(normalized) {
-        return val.clone();
-    }
-    // Fall back to vars with normalized key (supports key-path in env: tags)
-    if normalized.contains('.') {
-        let parts: Vec<&str> = normalized.split('.').collect();
-        if let Some(resolved) = resolve_key_path_in_vars(&parts, vars) {
-            return resolved;
+
+    // 2. Environment variables: must be prefixed with "env:"
+    if let Some(env_key) = key.strip_prefix("env:") {
+        if let Some(val) = overrides.get(env_key).or_else(|| env.get(env_key)) {
+            return Ok(val.clone());
         }
-    } else if let Some(val) = vars.get(normalized) {
-        return format_value_for_string(val);
+        let hint = if vars.contains_key(env_key) {
+            format!("; did you mean '${env_key}' (script variable)?")
+        } else {
+            String::new()
+        };
+        bail!("undefined environment variable: '{env_key}'{hint}");
     }
-    String::new()
+
+    // 3. Script variables: must be prefixed with "$"
+    if let Some(var_key) = key.strip_prefix('$') {
+        if var_key.contains('.') {
+            let parts: Vec<&str> = var_key.split('.').collect();
+            return resolve_key_path_strict(&parts, vars);
+        }
+        if let Some(val) = vars.get(var_key) {
+            return Ok(format_value_for_string(val));
+        }
+        let hint = if env.contains_key(var_key) {
+            format!("; did you mean 'env:{var_key}' (environment variable)?")
+        } else if overrides.contains_key(var_key) {
+            format!("; did you mean '{var_key}' (step override)?")
+        } else {
+            String::new()
+        };
+        bail!("undefined script variable: '${var_key}'{hint}");
+    }
+
+    // 4. Unprefixed key: could be a missing step override or invalid syntax
+    if !key.is_empty()
+        && key
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+    {
+        let hint = if vars.contains_key(key) {
+            format!("; did you mean '${key}' (script variable)?")
+        } else if env.contains_key(key) {
+            format!("; did you mean 'env:{key}' (environment variable)?")
+        } else {
+            String::new()
+        };
+        bail!("missing required step override argument: '{key}'{hint}");
+    }
+    bail!("invalid placeholder format '{key}': script variables must start with '$' and environment variables with 'env:'");
 }
 
-/// Resolve a key-path against the vars map.
-fn resolve_key_path_in_vars(
+/// Resolve nested key-paths against the vars map.
+///
+/// Fails explicitly on missing object keys, out-of-bounds array indices,
+/// or type mismatches (e.g. trying to access a property on a primitive).
+fn resolve_key_path_strict(
     parts: &[&str],
     vars: &HashMap<String, oxdock_parser::Value>,
-) -> Option<String> {
-    let base = parts[0];
-    let mut current = vars.get(base)?.clone();
-    for &key in &parts[1..] {
+) -> Result<String> {
+    let root_key = parts[0];
+    let mut current = vars
+        .get(root_key)
+        .ok_or_else(|| anyhow!("undefined script variable: '${root_key}'"))?;
+
+    for &segment in &parts[1..] {
         match current {
             oxdock_parser::Value::Map(map) => {
-                current = map.get(key)?.clone();
+                current = map.get(segment).ok_or_else(|| {
+                    anyhow!("property '{segment}' not found on object '${root_key}'")
+                })?;
             }
             oxdock_parser::Value::List(list) => {
-                let idx: usize = key.parse().ok()?;
-                current = list.get(idx)?.clone();
+                let idx: usize = segment.parse().map_err(|_| {
+                    anyhow!("invalid array index '{segment}' on list '${root_key}'")
+                })?;
+                current = list.get(idx).ok_or_else(|| {
+                    anyhow!(
+                        "index {idx} out of bounds for list '${root_key}' (len: {})",
+                        list.len()
+                    )
+                })?;
             }
-            oxdock_parser::Value::String(_)
-            | oxdock_parser::Value::Bool(_)
-            | oxdock_parser::Value::Int(_) => {
-                return None; // Cannot traverse into scalar
-            }
+            _ => bail!("cannot access property '{segment}' on primitive value of '${root_key}'"),
         }
     }
-    Some(format_value_for_string(&current))
+
+    Ok(format_value_for_string(current))
 }
 
 /// Format a Value as a string for inline interpolation.
@@ -431,8 +458,12 @@ mod tests {
     fn missing_var() {
         let env = HashMap::new();
         let expander = StreamingExpand::new(&[], &env);
-        let result = expander.expand_string("{{ env:MISSING }}").unwrap();
-        assert_eq!(result, "");
+        let result = expander.expand_string("{{ env:MISSING }}");
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("undefined environment variable"),
+            "error should mention undefined environment variable"
+        );
     }
 
     #[test]
@@ -622,5 +653,200 @@ mod tests {
         expander.flush(&mut out).unwrap();
 
         assert_eq!(String::from_utf8_lossy(&out), "World");
+    }
+
+    #[test]
+    fn missing_env_var_errors() {
+        let env = HashMap::new();
+        let expander = StreamingExpand::new(&[], &env);
+        let result = expander.expand_string("{{ env:UNDEFINED_VAR }}");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("undefined environment variable"), "got: {msg}");
+        assert!(msg.contains("UNDEFINED_VAR"), "got: {msg}");
+    }
+
+    #[test]
+    fn missing_script_var_errors() {
+        let env = HashMap::new();
+        let expander = StreamingExpand::new(&[], &env);
+        let result = expander.expand_string("{{ $undefined_var }}");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("undefined script variable"), "got: {msg}");
+        assert!(msg.contains("$undefined_var"), "got: {msg}");
+    }
+
+    #[test]
+    fn missing_key_in_map_errors() {
+        let mut vars = HashMap::new();
+        vars.insert(
+            "cfg".into(),
+            oxdock_parser::Value::Map(std::collections::BTreeMap::from([(
+                "server".into(),
+                oxdock_parser::Value::Map(std::collections::BTreeMap::from([(
+                    "port".into(),
+                    oxdock_parser::Value::Int(8080),
+                )])),
+            )])),
+        );
+        let expander = StreamingExpand::new(&[], &HashMap::new()).with_vars(&vars);
+        let result = expander.expand_string("{{ $cfg.missing_key }}");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("property 'missing_key' not found"), "got: {msg}");
+    }
+
+    #[test]
+    fn out_of_bounds_array_index_errors() {
+        let mut vars = HashMap::new();
+        vars.insert(
+            "arr".into(),
+            oxdock_parser::Value::List(vec![oxdock_parser::Value::String("a".into())]),
+        );
+        let expander = StreamingExpand::new(&[], &HashMap::new()).with_vars(&vars);
+        let result = expander.expand_string("{{ $arr.5 }}");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("index 5 out of bounds"), "got: {msg}");
+    }
+
+    #[test]
+    fn type_mismatch_navigation_errors() {
+        let mut vars = HashMap::new();
+        vars.insert(
+            "name".into(),
+            oxdock_parser::Value::String("alice".into()),
+        );
+        let expander = StreamingExpand::new(&[], &HashMap::new()).with_vars(&vars);
+        let result = expander.expand_string("{{ $name.sub_field }}");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("cannot access property 'sub_field' on primitive"),
+            "got: {msg}"
+        );
+    }
+
+    #[test]
+    fn unprefixed_identifier_errors() {
+        let env = HashMap::new();
+        let expander = StreamingExpand::new(&[], &env);
+        let result = expander.expand_string("{{ bare_word }}");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("missing required step override"),
+            "got: {msg}"
+        );
+    }
+
+    // ── Strict namespace isolation tests ─────────────────────────────────────
+
+    #[test]
+    fn script_var_does_not_fall_back_to_env() {
+        let mut env = HashMap::new();
+        env.insert("WHO".into(), "from-env".into());
+        let expander = StreamingExpand::new(&[], &env);
+        // $WHO queries vars, NOT env — should error even though env has WHO
+        let result = expander.expand_string("{{ $WHO }}");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("undefined script variable"), "got: {msg}");
+        assert!(
+            msg.contains("did you mean 'env:WHO'"),
+            "hint should suggest env: prefix, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn env_var_does_not_fall_back_to_vars() {
+        let mut vars = HashMap::new();
+        vars.insert(
+            "HOST".into(),
+            oxdock_parser::Value::String("from-var".into()),
+        );
+        let expander = StreamingExpand::new(&[], &HashMap::new()).with_vars(&vars);
+        // env:HOST queries env, NOT vars — should error even though vars has HOST
+        let result = expander.expand_string("{{ env:HOST }}");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("undefined environment variable"), "got: {msg}");
+        assert!(
+            msg.contains("did you mean '$HOST'"),
+            "hint should suggest $ prefix, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn step_override_does_not_fall_back_to_vars() {
+        let mut vars = HashMap::new();
+        vars.insert(
+            "PORT".into(),
+            oxdock_parser::Value::Int(8080),
+        );
+        let expander = StreamingExpand::new(&[], &HashMap::new()).with_vars(&vars);
+        // PORT (bare) queries overrides, NOT vars — should error
+        let result = expander.expand_string("{{ PORT }}");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("missing required step override"), "got: {msg}");
+        assert!(
+            msg.contains("did you mean '$PORT'"),
+            "hint should suggest $ prefix, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn env_prefix_isolated_from_script_vars() {
+        let mut vars = HashMap::new();
+        vars.insert(
+            "MODE".into(),
+            oxdock_parser::Value::String("dev".into()),
+        );
+        let expander = StreamingExpand::new(&[], &HashMap::new()).with_vars(&vars);
+        // env:MODE looks in env, not vars — should error
+        let result = expander.expand_string("{{ env:MODE }}");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("undefined environment variable"), "got: {msg}");
+        assert!(
+            msg.contains("did you mean '$MODE'"),
+            "hint should suggest $ prefix, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn dollar_prefix_isolated_from_env() {
+        let mut env = HashMap::new();
+        env.insert("PORT".into(), "3000".into());
+        let expander = StreamingExpand::new(&[], &env);
+        // $PORT looks in vars, not env — should error
+        let result = expander.expand_string("{{ $PORT }}");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("undefined script variable"), "got: {msg}");
+        assert!(
+            msg.contains("did you mean 'env:PORT'"),
+            "hint should suggest env: prefix, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn empty_placeholder_errors() {
+        let expander = StreamingExpand::new(&[], &HashMap::new());
+        let result = expander.expand_string("{{ }}");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("invalid placeholder format"), "got: {msg}");
+    }
+
+    #[test]
+    fn malformed_symbol_placeholder_errors() {
+        let expander = StreamingExpand::new(&[], &HashMap::new());
+        let result = expander.expand_string("{{ @invalid! }}");
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("invalid placeholder format"), "got: {msg}");
     }
 }
