@@ -436,6 +436,15 @@ Like RUN, but spawns the command in the background and continues the script. If 
 | --- | --- | --- | --- |
 | `command` | `string...` | yes | Shell command to run in background |
 
+**Examples:**
+
+**Example: background process**
+
+```oxdock
+RUN_BG sleep 1
+ECHO continues-immediately
+```
+
 
 ### ECHO
 
@@ -452,6 +461,15 @@ Outputs the message to stdout. Supports template expansion.
 | `message` | `string` | yes | Text to print |
 
 **Output:** Stdout
+
+**Examples:**
+
+**Example: print message**
+
+```oxdock
+ECHO hello-world
+ASSERT_STDOUT hello-world
+```
 
 
 ### WORKDIR
@@ -490,6 +508,17 @@ SNAPSHOT targets the read-only snapshot root; LOCAL targets the mutable build-co
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
 | `target` | `SNAPSHOT|LOCAL` | yes | SNAPSHOT or LOCAL |
+
+**Examples:**
+
+**Example: switch workspace**
+
+```oxdock
+WORKSPACE LOCAL
+WRITE context.txt in-context
+WORKSPACE SNAPSHOT
+ASSERT_ABSENT context.txt
+```
 
 
 ### ENV
@@ -536,6 +565,16 @@ Copies a file/directory from the host filesystem into the workspace. Plain COPY 
 | --- | --- | --- |
 | `--from-current-workspace` | Flag | Copy from the current workspace root instead of build context |
 
+**Examples:**
+
+**Example: copy file**
+
+```oxdock roots:unified
+WRITE source.txt copied-content
+COPY source.txt dest.txt
+ASSERT_FILE dest.txt copied-content
+```
+
 
 ### COPY_GIT
 
@@ -559,6 +598,14 @@ Checks out a specific git revision and copies the specified path into the worksp
 | --- | --- | --- |
 | `--include-dirty` | Flag | Include uncommitted changes |
 
+**Examples:**
+
+**Example: copy from git**
+
+```oxdock
+COPY_GIT HEAD file.txt restored.txt
+```
+
 
 ### SYMLINK
 
@@ -575,6 +622,17 @@ Creates a symlink at 'to' pointing to 'from'.
 | `from` | `path` | yes | Target of the symlink |
 | `to` | `path` | yes | Link path to create |
 
+**Examples:**
+
+**Example: create symlink**
+
+```oxdock roots:unified
+WRITE original.txt linked-content
+SYMLINK original.txt link.txt
+READ link.txt
+ASSERT_STDOUT linked-content
+```
+
 
 ### MKDIR
 
@@ -589,6 +647,15 @@ Creates the directory at the given path, including parents.
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
 | `path` | `path` | yes | Directory path to create |
+
+**Examples:**
+
+**Example: create directory**
+
+```oxdock
+MKDIR deeply/nested/tree
+ASSERT_DIR deeply/nested/tree
+```
 
 
 ### LS
@@ -607,6 +674,17 @@ Lists entries in the given directory, or the current directory if omitted.
 
 **Output:** Stdout
 
+**Examples:**
+
+**Example: list directory**
+
+```oxdock
+MKDIR inventory
+WRITE inventory/alpha.txt first
+LS inventory
+ASSERT_STDOUT alpha.txt
+```
+
 
 ### CWD
 
@@ -617,6 +695,16 @@ Print the current working directory.
 Outputs the current working directory to stdout.
 
 **Output:** Stdout
+
+**Examples:**
+
+**Example: print working dir**
+
+```oxdock
+WORKDIR level-one
+CWD
+ASSERT_STDOUT level-one
+```
 
 
 ### READ
@@ -635,6 +723,16 @@ Outputs the file contents. If no path, reads from stdin.
 
 **Output:** Stdout
 
+**Examples:**
+
+**Example: read file**
+
+```oxdock
+WRITE note.txt file-content
+READ note.txt
+ASSERT_STDOUT file-content
+```
+
 
 ### WRITE
 
@@ -650,6 +748,15 @@ Writes contents to a file, replacing any existing contents. Creates parent direc
 | --- | --- | --- | --- |
 | `path` | `path` | yes | File path to write |
 | `contents` | `string` | no | File contents (optional, stdin if omitted) |
+
+**Examples:**
+
+**Example: write file**
+
+```oxdock
+WRITE output.txt hello-world
+ASSERT_FILE output.txt hello-world
+```
 
 
 ### APPEND
@@ -667,6 +774,16 @@ Appends the contents to the specified file, creating it if it doesn't exist.
 | `path` | `path` | yes | File path to append to |
 | `contents` | `string` | no | Content to append (optional, stdin if omitted) |
 
+**Examples:**
+
+**Example: append to file**
+
+```oxdock
+WRITE log.txt line1
+APPEND log.txt line2
+ASSERT_FILE log.txt line1line2
+```
+
 
 ### EXPAND
 
@@ -683,6 +800,16 @@ Reads the file (or stdin), expands {{ env:KEY }} placeholders, and outputs to st
 | `path` | `path` | no | Template file path (optional, stdin if omitted) |
 
 **Output:** Stdout
+
+**Examples:**
+
+**Example: expand template**
+
+```oxdock
+WRITE template.md "Hello, \\{{ env:NAME }}!"
+EXPAND template.md NAME=Alice
+ASSERT_STDOUT "Hello, Alice!"
+```
 
 
 ### ASSERT_FILE
@@ -706,6 +833,15 @@ Verifies the file exists. With --hash, checks the SHA-256 digest. With an expect
 | --- | --- | --- |
 | `--hash` | String | Expected SHA-256 hash of the file contents |
 
+**Examples:**
+
+**Example: verify file**
+
+```oxdock
+WRITE payload.txt stable-content
+ASSERT_FILE payload.txt stable-content
+```
+
 
 ### ASSERT_DIR
 
@@ -720,6 +856,15 @@ Verifies the directory exists.
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
 | `path` | `path` | yes | Directory path to verify |
+
+**Examples:**
+
+**Example: verify directory**
+
+```oxdock
+MKDIR dist/assets
+ASSERT_DIR dist/assets
+```
 
 
 ### ASSERT_ABSENT
@@ -736,6 +881,14 @@ Verifies the path does not exist.
 | --- | --- | --- | --- |
 | `path` | `path` | yes | Path that must not exist |
 
+**Examples:**
+
+**Example: verify absent**
+
+```oxdock
+ASSERT_ABSENT nonexistent.txt
+```
+
 
 ### ASSERT_STDOUT
 
@@ -750,6 +903,15 @@ Verifies that subsequent command output contains the given substring.
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
 | `substring` | `string` | yes | Expected substring in stdout |
+
+**Examples:**
+
+**Example: verify stdout**
+
+```oxdock
+ECHO build-complete
+ASSERT_STDOUT build-complete
+```
 
 
 ### HASH_SHA256
@@ -768,6 +930,16 @@ Computes and outputs the SHA-256 digest of the file contents.
 
 **Output:** Stdout
 
+**Examples:**
+
+**Example: hash file**
+
+```oxdock
+WRITE payload.txt stable-content
+HASH_SHA256 payload.txt
+ASSERT_STDOUT 08135c1b6349b0e4f894c36221952f0de00e6b4d82f80895abf359755e77103c
+```
+
 
 ### EXIT
 
@@ -782,6 +954,14 @@ Terminates the pipeline immediately with the given exit code.
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
 | `code` | `int` | yes | Exit status code |
+
+**Examples:**
+
+**Example: exit with code**
+
+```oxdock expect_error:"EXIT requested with code 42"
+EXIT 42
+```
 
 
 

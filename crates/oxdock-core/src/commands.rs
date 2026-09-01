@@ -78,7 +78,7 @@ impl CommandSpec for WorkdirCmd {
             &[arg!("path", "string", "Directory to change to", IoDirection::Write, 0, true, None)],
             &[],
             None,
-            &[Example { name: "change dir", code: "WORKDIR src" }]
+            &[Example { name: "change dir", fence_meta: None, code: "WORKDIR src" }]
         )
     }
 
@@ -107,7 +107,7 @@ impl CommandSpec for WorkspaceCmd {
             &[arg!("target", "SNAPSHOT|LOCAL", "SNAPSHOT or LOCAL", IoDirection::Write, 0, true, None)],
             &[],
             None,
-            &[]
+            &[Example { name: "switch workspace", fence_meta: None, code: "WORKSPACE LOCAL\nWRITE context.txt in-context\nWORKSPACE SNAPSHOT\nASSERT_ABSENT context.txt" }]
         )
     }
 
@@ -141,7 +141,7 @@ impl CommandSpec for EnvCmd {
             &[arg!("assignment", "KEY=value", "KEY=value pair", IoDirection::Write, 0, true, None)],
             &[],
             None,
-            &[Example { name: "set env", code: "ENV FOO=bar" }]
+            &[Example { name: "set env", fence_meta: None, code: "ENV FOO=bar" }]
         )
     }
 
@@ -178,7 +178,7 @@ impl CommandSpec for EchoCmd {
             &[arg!("message", "string", "Text to print", IoDirection::Write, 0, true, None)],
             &[],
             Some(Stream::Stdout),
-            &[]
+            &[Example { name: "print message", fence_meta: None, code: "ECHO hello-world\nASSERT_STDOUT hello-world" }]
         )
     }
 
@@ -204,7 +204,7 @@ impl CommandSpec for RunCmd {
             &[arg!("command", "string...", "Shell command to execute", IoDirection::Write, 0, true, None)],
             &[],
             None,
-            &[Example { name: "run cargo", code: "RUN cargo build" }]
+            &[Example { name: "run cargo", fence_meta: None, code: "RUN cargo build" }]
         )
     }
 
@@ -230,7 +230,7 @@ impl CommandSpec for RunBgCmd {
             &[arg!("command", "string...", "Shell command to run in background", IoDirection::Write, 0, true, None)],
             &[],
             None,
-            &[]
+            &[Example { name: "background process", fence_meta: None, code: "RUN_BG sleep 1\nECHO continues-immediately" }]
         )
     }
 
@@ -265,7 +265,7 @@ impl CommandSpec for CopyCmd {
                 description: "Copy from the current workspace root instead of build context",
             }],
             None,
-            &[]
+            &[Example { name: "copy file", fence_meta: Some("roots:unified"), code: "WRITE source.txt copied-content\nCOPY source.txt dest.txt\nASSERT_FILE dest.txt copied-content" }]
         )
     }
 
@@ -313,7 +313,7 @@ impl CommandSpec for CopyGitCmd {
                 description: "Include uncommitted changes",
             }],
             None,
-            &[]
+            &[Example { name: "copy from git", fence_meta: None, code: "COPY_GIT HEAD file.txt restored.txt" }]
         )
     }
 
@@ -359,7 +359,7 @@ impl CommandSpec for SymlinkCmd {
             ],
             &[],
             None,
-            &[]
+            &[Example { name: "create symlink", fence_meta: Some("roots:unified"), code: "WRITE original.txt linked-content\nSYMLINK original.txt link.txt\nREAD link.txt\nASSERT_STDOUT linked-content" }]
         )
     }
 
@@ -392,7 +392,7 @@ impl CommandSpec for MkdirCmd {
             &[arg!("path", "path", "Directory path to create", IoDirection::Write, 0, true, None)],
             &[],
             None,
-            &[]
+            &[Example { name: "create directory", fence_meta: None, code: "MKDIR deeply/nested/tree\nASSERT_DIR deeply/nested/tree" }]
         )
     }
 
@@ -421,7 +421,7 @@ impl CommandSpec for LsCmd {
             &[arg!("path", "path", "Directory to list (optional)", IoDirection::Read, 0, false, None)],
             &[],
             Some(Stream::Stdout),
-            &[]
+            &[Example { name: "list directory", fence_meta: None, code: "MKDIR inventory\nWRITE inventory/alpha.txt first\nLS inventory\nASSERT_STDOUT alpha.txt" }]
         )
     }
 
@@ -446,7 +446,7 @@ impl CommandSpec for CwdCmd {
             &[],
             &[],
             Some(Stream::Stdout),
-            &[]
+            &[Example { name: "print working dir", fence_meta: None, code: "WORKDIR level-one\nCWD\nASSERT_STDOUT level-one" }]
         )
     }
 
@@ -471,7 +471,7 @@ impl CommandSpec for ReadCmd {
             &[arg!("path", "path", "File to read (optional, stdin if omitted)", IoDirection::Read, 0, false, None)],
             &[],
             Some(Stream::Stdout),
-            &[]
+            &[Example { name: "read file", fence_meta: None, code: "WRITE note.txt file-content\nREAD note.txt\nASSERT_STDOUT file-content" }]
         )
     }
 
@@ -499,7 +499,7 @@ impl CommandSpec for WriteCmd {
             ],
             &[],
             None,
-            &[]
+            &[Example { name: "write file", fence_meta: None, code: "WRITE output.txt hello-world\nASSERT_FILE output.txt hello-world" }]
         )
     }
 
@@ -536,7 +536,7 @@ impl CommandSpec for AppendCmd {
             ],
             &[],
             None,
-            &[]
+            &[Example { name: "append to file", fence_meta: None, code: "WRITE log.txt line1\nAPPEND log.txt line2\nASSERT_FILE log.txt line1line2" }]
         )
     }
 
@@ -570,9 +570,9 @@ impl CommandSpec for ExpandCmd {
             &[
                 arg!("path", "path", "Template file path (optional, stdin if omitted)", IoDirection::Read, 0, false, None),
             ],
-            &[],
+            &[            ],
             Some(Stream::Stdout),
-            &[]
+            &[Example { name: "expand template", fence_meta: None, code: "WRITE template.md \"Hello, \\\\{{ env:NAME }}!\"\nEXPAND template.md NAME=Alice\nASSERT_STDOUT \"Hello, Alice!\"" }]
         )
     }
 
@@ -618,7 +618,7 @@ impl CommandSpec for AssertFileCmd {
                 description: "Expected SHA-256 hash of the file contents",
             }],
             None,
-            &[]
+            &[Example { name: "verify file", fence_meta: None, code: "WRITE payload.txt stable-content\nASSERT_FILE payload.txt stable-content" }]
         )
     }
 
@@ -660,7 +660,7 @@ impl CommandSpec for AssertDirCmd {
             &[arg!("path", "path", "Directory path to verify", IoDirection::Read, 0, true, None)],
             &[],
             None,
-            &[]
+            &[Example { name: "verify directory", fence_meta: None, code: "MKDIR dist/assets\nASSERT_DIR dist/assets" }]
         )
     }
 
@@ -689,7 +689,7 @@ impl CommandSpec for AssertAbsentCmd {
             &[arg!("path", "path", "Path that must not exist", IoDirection::Read, 0, true, None)],
             &[],
             None,
-            &[]
+            &[Example { name: "verify absent", fence_meta: None, code: "ASSERT_ABSENT nonexistent.txt" }]
         )
     }
 
@@ -718,7 +718,7 @@ impl CommandSpec for AssertStdoutCmd {
             &[arg!("substring", "string", "Expected substring in stdout", IoDirection::Read, 0, true, None)],
             &[],
             None,
-            &[]
+            &[Example { name: "verify stdout", fence_meta: None, code: "ECHO build-complete\nASSERT_STDOUT build-complete" }]
         )
     }
 
@@ -744,7 +744,7 @@ impl CommandSpec for HashSha256Cmd {
             &[arg!("path", "path", "File or directory to hash", IoDirection::Read, 0, true, None)],
             &[],
             Some(Stream::Stdout),
-            &[]
+            &[Example { name: "hash file", fence_meta: None, code: "WRITE payload.txt stable-content\nHASH_SHA256 payload.txt\nASSERT_STDOUT 08135c1b6349b0e4f894c36221952f0de00e6b4d82f80895abf359755e77103c" }]
         )
     }
 
@@ -773,7 +773,7 @@ impl CommandSpec for ExitCmd {
             &[arg!("code", "int", "Exit status code", IoDirection::Write, 0, true, None)],
             &[],
             None,
-            &[]
+            &[Example { name: "exit with code", fence_meta: Some("expect_error:\"EXIT requested with code 42\""), code: "EXIT 42" }]
         )
     }
 

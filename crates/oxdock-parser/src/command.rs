@@ -62,6 +62,7 @@ pub struct CommandMeta {
 /// An executable example for a command.
 pub struct Example {
     pub name: &'static str,
+    pub fence_meta: Option<&'static str>,
     pub code: &'static str,
 }
 
