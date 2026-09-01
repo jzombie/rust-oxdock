@@ -1,42 +1,35 @@
-OxDock guard brackets `[...]` serve a single purpose: **static plan pruning** based on host platform properties or pre-execution environment variables (`ExecIo`). They evaluate before any script steps run.
+OxDock guard brackets `[...]` provide step-level execution filtering based on host platform properties and sequential process environment state (`ctx.env`). They evaluate sequentially at the exact moment the engine reaches the guarded step in the execution pipeline.
 
 **Supported Guard Syntax**
 
 | Guard Category | Valid Examples | Explanation |
 | --- | --- | --- |
-| **Platform** | `[unix]`, `[windows]`, `[macos]`, `[linux]` | Literals matching target OS. |
-| **Env Existence** | `[env:KEY]`, `[#rust_var]` | True if key exists in `ExecIo` or macro context. |
-| **Env Equality** | `[env:KEY == val]`, `[env:#k == #v]` | String comparison against `ExecIo` environment map. |
+| **Platform** | `[unix]`, `[windows]`, `[macos]`, `[linux]` | Literals matching the target operating system. |
+| **Env Existence** | `[env:KEY]`, `[#rust_var]` | True if key exists in process `ctx.env` or compile-time macro context. |
+| **Env Equality** | `[env:KEY == val]`, `[env:#k == #v]` | String comparison against the runtime process environment map. |
 | **Negation** | `[not(unix)]`, `[not(env:KEY)]` | Inverts inner predicate truth value. |
-| **Logical AND** | `[unix, env:KEY == val]` | Comma-separated list (all must be true). |
+| **Logical AND** | `[unix, env:KEY == val]` | Comma-separated list (all predicates must evaluate to true). |
 
-**Invalid Syntax & Common Misconceptions**
+**Invalid Syntax & Structural Constraints**
 
 | Invalid Syntax | Reason For Failure | Correct Alternative |
 | --- | --- | --- |
-| `[$x]` / `[env:$x == 1]` | Runtime DSL variables (`$var`) created by `LET` do not exist at guard evaluation time. | Use host Rust branching before step construction. |
+| `[$x]` / `[env:$x == 1]` | Script variables (`$var`) in `vars` are grammatically forbidden inside guard brackets. | Use `env:KEY` with `ENV` instructions or macro parameters. |
 | `[#platform_var]` | Platform predicates require hardcoded OS identifier tokens. | `[unix]` or `[windows]` |
-| `[#var == 1]` | Missing mandatory `env:` namespace prefix. | `[env:#var == 1]` |
+| `[#var == 1]` | Missing mandatory `env:` namespace prefix for environment variables. | `[env:#var == 1]` |
 | `[READ path]` | Guards cannot perform I/O operations, function calls, or subcommands. | Execute sequential DSL steps. |
+
+---
+
+**Guard Execution Lifecycle**
+
+* **Sequential Runtime Evaluation:** As the runner iterates through steps, step guards evaluate against the current state of `ctx.env`. Preceding steps that mutate process environment state (e.g., `ENV STAGE=prod`) immediately update `ctx.env`, enabling subsequent `[env:STAGE == "prod"]` guards to match.
+* **Grammatical Namespace Segregation:** Guard brackets evaluate strictly against platform properties and the `env` table. They cannot query the script variable table (`vars`). Syntax containing `$var` is rejected at parse time by `oxdock-parser` PEG grammar rules to prevent declarative guards from morphing into imperative control-flow logic.
+
+---
 
 **Rule of Thumb**
 
 * Use **`#rust_var`** inside guards when passing host-side Rust variables into the `oxdock!` macro at compile time.
-* Use **`env:KEY`** inside guards when reading environment keys loaded into `ExecIo` at application start.
-* Never use **`$dsl_var`** inside guards; runtime script state requires step execution, not compile/plan-time guards.
-
-## The Two-Phase Architecture
-
-Phase 1: Static Plan Assembly (Compile & Setup)
-
-Macro Expansion: The oxdock! macro converts DSL tokens directly into a static Vec<Step> array and substitutes #rust_vars at Rust compile time.
-
-Guard Evaluation: Scope guards ([...]) evaluate against the environment map (ExecIo) to prune non-matching steps out of the plan before execution begins.
-
-Phase 2: Sequential Step Execution (Runtime)
-
-Linear Execution: The runner iterates through the pre-pruned Vec<Step> array.
-
-I/O Engine: Steps execute their operations sequentially (spawning processes, reading globs, expanding templates, writing files).
-
-This ahead-of-time design keeps script execution fast and deterministic with zero runtime parsing overhead, but it is precisely why scope guards [...] cannot react to dynamic runtime state (like $dsl_vars) generated mid-execution.
+* Use **`env:KEY`** inside guards to check process environment variables (reflecting both ambient host environment and prior `ENV` step mutations).
+* Never use **`$var`** inside guards; script variable lookups are grammatically restricted to step payload arguments, template expansions (`EXPAND`), and explicit expression functions (`LOAD_TOML`).
