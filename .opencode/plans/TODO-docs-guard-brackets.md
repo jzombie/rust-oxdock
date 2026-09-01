@@ -33,3 +33,21 @@ OxDock guard brackets `[...]` provide step-level execution filtering based on ho
 * Use **`#rust_var`** inside guards when passing host-side Rust variables into the `oxdock!` macro at compile time.
 * Use **`env:KEY`** inside guards to check process environment variables (reflecting both ambient host environment and prior `ENV` step mutations).
 * Never use **`$var`** inside guards; script variable lookups are grammatically restricted to step payload arguments, template expansions (`EXPAND`), and explicit expression functions (`LOAD_TOML`).
+
+
+----
+
+`!windows` is a syntax leak—it introduces prefix operator syntax (`!`) into an otherwise function-based predicate model (`not(...)`, `or(...)`, `eq(...)`).
+
+In a functional guard system, prefix operators create unnecessary parser branching and visual inconsistency.
+
+**Inconsistent vs. Uniform Functional Syntax**
+
+| Inconsistent Syntax | Uniform Functional Syntax | AST Mapping |
+| --- | --- | --- |
+| `!windows` | `not(windows)` | `Guard::Not(Box<Guard::Platform("windows")>)` |
+| `or(env:A, env:B)` | `any(env:A, env:B)` | `Guard::Any(Vec<Guard>)` |
+| `and(env:A, env:B)` | `all(env:A, env:B)` | `Guard::All(Vec<Guard>)` |
+| `eq(env:FOO, bar)` | `eq(env:FOO, "bar")` | `Guard::Eq(String, String)` |
+
+Purging `!` in favor of `not(...)` removes operator prefix handling entirely from `dsl.pest`. Every guard node becomes either a atom identifier (`linux`, `env:FOO`) or a function call (`func(...)`).
