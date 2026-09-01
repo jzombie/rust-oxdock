@@ -1,4 +1,6 @@
-> OxDock intentionally omits a raw text-to-variable loader to enforce the boundary between bounded, structured script state (vars) and unbounded byte streaming (WITH_IO).
+OxDock's pipe architecture is engineered for low-level, zero-copy byte streaming across process boundaries without accumulating memory.
+
+OxDock intentionally omits a raw text-to-variable loader to enforce the boundary between bounded, structured script state (vars) and unbounded byte streaming (WITH_IO).
 
 By keeping byte streaming on low-level buffer pipes and reserving the interpreter heap strictly for small configuration state, OxDock guarantees deterministic performance and $O(1)$ memory overhead regardless of payload size.
 
