@@ -23,20 +23,22 @@ fn join_args(args: Vec<Arg>, cmd_name: &str) -> Result<Arg> {
 }
 
 macro_rules! arg {
-    ($name:expr, $type:expr, $io:expr, $idx:expr, $req:expr) => {
+    ($name:expr, $type:expr, $desc:expr, $io:expr, $idx:expr, $req:expr) => {
         ArgSpec {
             name: $name,
             arg_type: $type,
+            description: $desc,
             io: $io,
             index: $idx,
             required: $req,
             fallback_stream: None,
         }
     };
-    ($name:expr, $type:expr, $io:expr, $idx:expr, $req:expr, $stream:expr) => {
+    ($name:expr, $type:expr, $desc:expr, $io:expr, $idx:expr, $req:expr, $stream:expr) => {
         ArgSpec {
             name: $name,
             arg_type: $type,
+            description: $desc,
             io: $io,
             index: $idx,
             required: $req,
@@ -73,7 +75,7 @@ impl CommandSpec for WorkdirCmd {
             "WORKDIR <path>",
             "Change the working directory for subsequent steps.",
             "Sets the current working directory. Relative paths resolve against the current root.",
-            &[arg!("path", "string", IoDirection::Write, 0, true, None)],
+            &[arg!("path", "string", "Directory to change to", IoDirection::Write, 0, true, None)],
             &[],
             None,
             &[Example { name: "change dir", code: "WORKDIR src" }]
@@ -102,7 +104,7 @@ impl CommandSpec for WorkspaceCmd {
             "WORKSPACE SNAPSHOT|LOCAL",
             "Switch between snapshot and local workspace roots.",
             "SNAPSHOT targets the read-only snapshot root; LOCAL targets the mutable build-context root.",
-            &[arg!("target", "SNAPSHOT|LOCAL", IoDirection::Write, 0, true, None)],
+            &[arg!("target", "SNAPSHOT|LOCAL", "SNAPSHOT or LOCAL", IoDirection::Write, 0, true, None)],
             &[],
             None,
             &[]
@@ -136,7 +138,7 @@ impl CommandSpec for EnvCmd {
             "ENV KEY=value",
             "Set an environment variable for subsequent steps.",
             "Inserts or updates an environment variable. The value is an expandable string.",
-            &[arg!("assignment", "KEY=value", IoDirection::Write, 0, true, None)],
+            &[arg!("assignment", "KEY=value", "KEY=value pair", IoDirection::Write, 0, true, None)],
             &[],
             None,
             &[Example { name: "set env", code: "ENV FOO=bar" }]
@@ -173,7 +175,7 @@ impl CommandSpec for EchoCmd {
             "ECHO <message>",
             "Print a message to stdout.",
             "Outputs the message to stdout. Supports template expansion.",
-            &[arg!("message", "string", IoDirection::Write, 0, true, None)],
+            &[arg!("message", "string", "Text to print", IoDirection::Write, 0, true, None)],
             &[],
             Some(Stream::Stdout),
             &[]
@@ -198,8 +200,8 @@ impl CommandSpec for RunCmd {
             "RUN",
             "RUN <command...>",
             "Execute a shell command.",
-            "Runs the command in the current working directory. Arguments are joined with spaces.",
-            &[arg!("command", "string...", IoDirection::Write, 0, true, None)],
+            "Runs the command in the current working directory. Arguments are joined with spaces. Child stdout/stderr stream to the script's configured outputs, and a non-zero exit code fails the script. This is the one intentionally platform-specific command: use platform guards to provide per-OS invocations when needed.",
+            &[arg!("command", "string...", "Shell command to execute", IoDirection::Write, 0, true, None)],
             &[],
             None,
             &[Example { name: "run cargo", code: "RUN cargo build" }]
@@ -224,8 +226,8 @@ impl CommandSpec for RunBgCmd {
             "RUN_BG",
             "RUN_BG <command...>",
             "Execute a shell command in the background.",
-            "Spawns the command without blocking. The pipeline terminates background processes on exit.",
-            &[arg!("command", "string...", IoDirection::Write, 0, true, None)],
+            "Like RUN, but spawns the command in the background and continues the script. If any background child finishes early with a non-zero status, the script fails and remaining children are killed. At script end the first child is awaited to completion and the remainder are killed. Background children started before an EXIT are killed before unwinding.",
+            &[arg!("command", "string...", "Shell command to run in background", IoDirection::Write, 0, true, None)],
             &[],
             None,
             &[]
@@ -250,10 +252,10 @@ impl CommandSpec for CopyCmd {
             "COPY",
             "COPY [--from-current-workspace] <from> <to>",
             "Copy a file or directory into the workspace.",
-            "Copies a file/directory from the host filesystem into the workspace. Use --from-current-workspace to copy from the active workspace root instead of the build context.",
+            "Copies a file/directory from the host filesystem into the workspace. Plain COPY <from> <to> resolves <from> against the build context (the tree OxDock was invoked against), regardless of the current working directory. COPY --from-current-workspace <from> <to> resolves <from> against the workspace root instead. Parent directories at the destination are created on demand.",
             &[
-                arg!("from", "path", IoDirection::Read, 0, true, None),
-                arg!("to", "path", IoDirection::Write, 1, true, None),
+                arg!("from", "path", "Source path (build context or workspace root)", IoDirection::Read, 0, true, None),
+                arg!("to", "path", "Destination path in workspace", IoDirection::Write, 1, true, None),
             ],
             &[FlagSpec {
                 name: "from_current_workspace",
@@ -299,9 +301,9 @@ impl CommandSpec for CopyGitCmd {
             "Copy a file or directory from a git revision.",
             "Checks out a specific git revision and copies the specified path into the workspace.",
             &[
-                arg!("rev", "string", IoDirection::Read, 0, true, None),
-                arg!("src", "path", IoDirection::Read, 1, true, None),
-                arg!("dst", "path", IoDirection::Write, 2, true, None),
+                arg!("rev", "string", "Git revision spec", IoDirection::Read, 0, true, None),
+                arg!("src", "path", "Source path in repository", IoDirection::Read, 1, true, None),
+                arg!("dst", "path", "Destination path in workspace", IoDirection::Write, 2, true, None),
             ],
             &[FlagSpec {
                 name: "dirty",
@@ -352,8 +354,8 @@ impl CommandSpec for SymlinkCmd {
             "Create a symbolic link.",
             "Creates a symlink at 'to' pointing to 'from'.",
             &[
-                arg!("from", "path", IoDirection::Read, 0, true, None),
-                arg!("to", "path", IoDirection::Write, 1, true, None),
+                arg!("from", "path", "Target of the symlink", IoDirection::Read, 0, true, None),
+                arg!("to", "path", "Link path to create", IoDirection::Write, 1, true, None),
             ],
             &[],
             None,
@@ -387,7 +389,7 @@ impl CommandSpec for MkdirCmd {
             "MKDIR <path>",
             "Create a directory.",
             "Creates the directory at the given path, including parents.",
-            &[arg!("path", "path", IoDirection::Write, 0, true, None)],
+            &[arg!("path", "path", "Directory path to create", IoDirection::Write, 0, true, None)],
             &[],
             None,
             &[]
@@ -416,7 +418,7 @@ impl CommandSpec for LsCmd {
             "LS [<path>]",
             "List directory contents.",
             "Lists entries in the given directory, or the current directory if omitted.",
-            &[arg!("path", "path", IoDirection::Read, 0, false, None)],
+            &[arg!("path", "path", "Directory to list (optional)", IoDirection::Read, 0, false, None)],
             &[],
             Some(Stream::Stdout),
             &[]
@@ -466,7 +468,7 @@ impl CommandSpec for ReadCmd {
             "READ [<path>]",
             "Read file contents to stdout.",
             "Outputs the file contents. If no path, reads from stdin.",
-            &[arg!("path", "path", IoDirection::Read, 0, false, None)],
+            &[arg!("path", "path", "File to read (optional, stdin if omitted)", IoDirection::Read, 0, false, None)],
             &[],
             Some(Stream::Stdout),
             &[]
@@ -490,10 +492,10 @@ impl CommandSpec for WriteCmd {
             "WRITE",
             "WRITE <path> [<contents>]",
             "Write contents to a file.",
-            "Writes the contents to the specified file, creating or overwriting it.",
+            "Writes contents to a file, replacing any existing contents. Creates parent directories on demand. Without a contents argument it consumes the script's stdin instead (combine with WITH_IO [stdin...]).",
             &[
-                arg!("path", "path", IoDirection::Write, 0, true, None),
-                arg!("contents", "string", IoDirection::Write, 1, false, Some(Stream::Stdin)),
+                arg!("path", "path", "File path to write", IoDirection::Write, 0, true, None),
+                arg!("contents", "string", "File contents (optional, stdin if omitted)", IoDirection::Write, 1, false, Some(Stream::Stdin)),
             ],
             &[],
             None,
@@ -529,8 +531,8 @@ impl CommandSpec for AppendCmd {
             "Append contents to a file.",
             "Appends the contents to the specified file, creating it if it doesn't exist.",
             &[
-                arg!("path", "path", IoDirection::Write, 0, true, None),
-                arg!("contents", "string", IoDirection::Write, 1, false, Some(Stream::Stdin)),
+                arg!("path", "path", "File path to append to", IoDirection::Write, 0, true, None),
+                arg!("contents", "string", "Content to append (optional, stdin if omitted)", IoDirection::Write, 1, false, Some(Stream::Stdin)),
             ],
             &[],
             None,
@@ -566,7 +568,7 @@ impl CommandSpec for ExpandCmd {
             "Expand template placeholders in a file.",
             "Reads the file (or stdin), expands {{ env:KEY }} placeholders, and outputs to stdout.",
             &[
-                arg!("path", "path", IoDirection::Read, 0, false, None),
+                arg!("path", "path", "Template file path (optional, stdin if omitted)", IoDirection::Read, 0, false, None),
             ],
             &[],
             Some(Stream::Stdout),
@@ -605,8 +607,8 @@ impl CommandSpec for AssertFileCmd {
             "Assert a file exists and optionally matches expected content.",
             "Verifies the file exists. With --hash, checks the SHA-256 digest. With an expected argument, checks the contents match.",
             &[
-                arg!("path", "path", IoDirection::Read, 0, true, None),
-                arg!("expected", "string", IoDirection::Read, 1, false, None),
+                arg!("path", "path", "File path to verify", IoDirection::Read, 0, true, None),
+                arg!("expected", "string", "Expected file contents", IoDirection::Read, 1, false, None),
             ],
             &[FlagSpec {
                 name: "hash",
@@ -655,7 +657,7 @@ impl CommandSpec for AssertDirCmd {
             "ASSERT_DIR <path>",
             "Assert a directory exists.",
             "Verifies the directory exists.",
-            &[arg!("path", "path", IoDirection::Read, 0, true, None)],
+            &[arg!("path", "path", "Directory path to verify", IoDirection::Read, 0, true, None)],
             &[],
             None,
             &[]
@@ -684,7 +686,7 @@ impl CommandSpec for AssertAbsentCmd {
             "ASSERT_ABSENT <path>",
             "Assert a file or directory does not exist.",
             "Verifies the path does not exist.",
-            &[arg!("path", "path", IoDirection::Read, 0, true, None)],
+            &[arg!("path", "path", "Path that must not exist", IoDirection::Read, 0, true, None)],
             &[],
             None,
             &[]
@@ -713,7 +715,7 @@ impl CommandSpec for AssertStdoutCmd {
             "ASSERT_STDOUT <substring>",
             "Assert stdout contains a substring.",
             "Verifies that subsequent command output contains the given substring.",
-            &[arg!("substring", "string", IoDirection::Read, 0, true, None)],
+            &[arg!("substring", "string", "Expected substring in stdout", IoDirection::Read, 0, true, None)],
             &[],
             None,
             &[]
@@ -739,7 +741,7 @@ impl CommandSpec for HashSha256Cmd {
             "HASH_SHA256 <path>",
             "Print the SHA-256 hash of a file.",
             "Computes and outputs the SHA-256 digest of the file contents.",
-            &[arg!("path", "path", IoDirection::Read, 0, true, None)],
+            &[arg!("path", "path", "File or directory to hash", IoDirection::Read, 0, true, None)],
             &[],
             Some(Stream::Stdout),
             &[]
@@ -768,7 +770,7 @@ impl CommandSpec for ExitCmd {
             "EXIT <code>",
             "Exit the pipeline with a status code.",
             "Terminates the pipeline immediately with the given exit code.",
-            &[arg!("code", "int", IoDirection::Write, 0, true, None)],
+            &[arg!("code", "int", "Exit status code", IoDirection::Write, 0, true, None)],
             &[],
             None,
             &[]

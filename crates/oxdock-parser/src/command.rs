@@ -5,6 +5,7 @@ use anyhow::Result;
 pub struct ArgSpec {
     pub name: &'static str,
     pub arg_type: &'static str,
+    pub description: &'static str,
     pub io: IoDirection,
     pub index: usize,
     pub required: bool,

@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 fn main() -> Result<()> {
     let repo_root = find_repo_root()?;
 
-    // Phase 1: command reference
-    let cmd_ref_out = repo_root.join("docs/sections/06-command-reference.md");
+    // Phase 1: command reference from CommandSpec metadata
+    let cmd_ref_out = repo_root.join("docs/sections/07-command-body.md");
     command_ref::generate(&cmd_ref_out)?;
     eprintln!("Command reference written to {}", cmd_ref_out.display());
 
