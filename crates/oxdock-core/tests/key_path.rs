@@ -729,12 +729,11 @@ fn expand_missing_tag_resolves_to_empty() {
         WITH_IO [stdin=pipe:t] WRITE out.txt
     "#},
     );
+    assert!(err.is_err(), "undefined variable in template should error");
     assert!(
-        err.is_err(),
-        "undefined variable in template should error"
-    );
-    assert!(
-        err.unwrap_err().to_string().contains("missing required step override"),
+        err.unwrap_err()
+            .to_string()
+            .contains("missing required step override"),
         "error should mention missing step override"
     );
 }

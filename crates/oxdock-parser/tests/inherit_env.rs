@@ -26,7 +26,8 @@ fn inherit_env_must_appear_before_other_commands() {
 #[test]
 fn inherit_env_cannot_repeat() {
     let script = "INHERIT_ENV [FOO]\nINHERIT_ENV [BAR]";
-    let err = parse_script(script, mock_lower).expect_err("multiple INHERIT_ENV directives must fail");
+    let err =
+        parse_script(script, mock_lower).expect_err("multiple INHERIT_ENV directives must fail");
     assert!(err.to_string().contains("only one INHERIT_ENV"));
 }
 
@@ -47,7 +48,8 @@ fn inherit_env_cannot_appear_inside_with_io() {
 #[test]
 fn inherit_env_cannot_be_inside_guard_block_braces() {
     let script = "[env:FOO] { INHERIT_ENV [BAR] }";
-    let err = parse_script(script, mock_lower).expect_err("INHERIT_ENV inside guard block must fail");
+    let err =
+        parse_script(script, mock_lower).expect_err("INHERIT_ENV inside guard block must fail");
     assert!(
         err.to_string().contains("cannot be guarded")
             || err.to_string().contains("cannot be nested")
@@ -57,7 +59,8 @@ fn inherit_env_cannot_be_inside_guard_block_braces() {
 #[test]
 fn inherit_env_cannot_be_inside_with_io_block_braces() {
     let script = "WITH_IO [stdout=pipe:cap] { INHERIT_ENV [BAR] }";
-    let err = parse_script(script, mock_lower).expect_err("INHERIT_ENV inside WITH_IO block must fail");
+    let err =
+        parse_script(script, mock_lower).expect_err("INHERIT_ENV inside WITH_IO block must fail");
     assert!(err.to_string().contains("cannot be nested"));
 }
 

@@ -344,8 +344,8 @@ fn build_assets(
         .map_err(|e| syn::Error::new(span, format!("failed to create temp dir: {e}")))?;
     let temp_root_guard = tempdir.as_guarded_path().clone();
 
-    let steps =
-        oxdock_core::parse_script(script).map_err(|e| syn::Error::new(span, format!("parse error: {e}")))?;
+    let steps = oxdock_core::parse_script(script)
+        .map_err(|e| syn::Error::new(span, format!("parse error: {e}")))?;
 
     let resolver =
         PathResolver::from_manifest_env().map_err(|e| syn::Error::new(span, e.to_string()))?;

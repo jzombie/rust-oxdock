@@ -8,7 +8,9 @@ pub mod parser;
 pub mod strip_flags;
 
 pub use ast::*;
-pub use command::{ArgSpec, CommandMeta, CommandSpec, Example, FlagSpec, FlagValueType, IoDirection, Stream};
+pub use command::{
+    ArgSpec, CommandMeta, CommandSpec, Example, FlagSpec, FlagValueType, IoDirection, Stream,
+};
 pub use lexer::LANGUAGE_SPEC;
 #[cfg(feature = "proc-macro-api")]
 pub use macro_input::{
@@ -32,7 +34,10 @@ mod tests {
         match name {
             "MOCK_NO_ARGS" => Ok(StepKind::Cwd),
             "MOCK_POS" => {
-                let path = args.first().cloned().ok_or_else(|| anyhow!("MOCK_POS requires arg"))?;
+                let path = args
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| anyhow!("MOCK_POS requires arg"))?;
                 let contents = args.get(1).cloned();
                 Ok(StepKind::Write { path, contents })
             }
@@ -41,23 +46,53 @@ mod tests {
                 if a.first().map(|a| a.as_str()) == Some("--hash") {
                     // Skip --hash flag, then expect value and path
                     a.remove(0); // safe: first() confirmed "--hash" exists
-                    let hash = a.first().ok_or_else(|| anyhow!("MOCK_HASH --hash requires value"))?.as_str().to_string();
+                    let hash = a
+                        .first()
+                        .ok_or_else(|| anyhow!("MOCK_HASH --hash requires value"))?
+                        .as_str()
+                        .to_string();
                     a.remove(0); // safe: first() confirmed value exists
-                    let path = a.first().ok_or_else(|| anyhow!("MOCK_HASH requires path"))?.clone();
-                    Ok(StepKind::AssertFile { hash: Some(hash), path, contents: None })
+                    let path = a
+                        .first()
+                        .ok_or_else(|| anyhow!("MOCK_HASH requires path"))?
+                        .clone();
+                    Ok(StepKind::AssertFile {
+                        hash: Some(hash),
+                        path,
+                        contents: None,
+                    })
                 } else {
-                    let path = a.first().ok_or_else(|| anyhow!("MOCK_HASH requires path"))?.clone();
+                    let path = a
+                        .first()
+                        .ok_or_else(|| anyhow!("MOCK_HASH requires path"))?
+                        .clone();
                     let contents = a.get(1).cloned();
-                    Ok(StepKind::AssertFile { hash: None, path, contents })
+                    Ok(StepKind::AssertFile {
+                        hash: None,
+                        path,
+                        contents,
+                    })
                 }
             }
             "MOCK_ENV" => {
-                let arg = args.into_iter().next().ok_or_else(|| anyhow!("MOCK_ENV requires key=val"))?;
-                let (k, v) = arg.as_str().split_once('=').ok_or_else(|| anyhow!("MOCK_ENV requires key=val"))?;
-                Ok(StepKind::Env { key: k.to_string(), value: Arg::String(v.to_string()) })
+                let arg = args
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| anyhow!("MOCK_ENV requires key=val"))?;
+                let (k, v) = arg
+                    .as_str()
+                    .split_once('=')
+                    .ok_or_else(|| anyhow!("MOCK_ENV requires key=val"))?;
+                Ok(StepKind::Env {
+                    key: k.to_string(),
+                    value: Arg::String(v.to_string()),
+                })
             }
             "MOCK_TARGET" => {
-                let target = args.into_iter().next().ok_or_else(|| anyhow!("MOCK_TARGET requires arg"))?;
+                let target = args
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| anyhow!("MOCK_TARGET requires arg"))?;
                 match target.as_str() {
                     "A" => Ok(StepKind::Workspace(WorkspaceTarget::Snapshot)),
                     "B" => Ok(StepKind::Workspace(WorkspaceTarget::Local)),
@@ -160,9 +195,19 @@ mod tests {
         match &steps[0].kind {
             StepKind::WithIo { bindings, cmd } => {
                 assert_eq!(bindings.len(), 3);
-                assert!(bindings.iter().any(|b| matches!(b.stream, IoStream::Stdin) && b.pipe.is_none()));
-                assert!(bindings.iter().any(|b| matches!(b.stream, IoStream::Stdout) && b.pipe.as_deref() == Some("setup")));
-                assert!(bindings.iter().any(|b| matches!(b.stream, IoStream::Stderr) && b.pipe.as_deref() == Some("errors")));
+                assert!(
+                    bindings
+                        .iter()
+                        .any(|b| matches!(b.stream, IoStream::Stdin) && b.pipe.is_none())
+                );
+                assert!(
+                    bindings.iter().any(|b| matches!(b.stream, IoStream::Stdout)
+                        && b.pipe.as_deref() == Some("setup"))
+                );
+                assert!(
+                    bindings.iter().any(|b| matches!(b.stream, IoStream::Stderr)
+                        && b.pipe.as_deref() == Some("errors"))
+                );
                 assert!(matches!(cmd.as_ref(), StepKind::Write { .. }));
             }
             other => panic!("expected WITH_IO, saw {:?}", other),
@@ -271,8 +316,16 @@ mod tests {
     #[test]
     fn guard_or_requires_at_least_one_branch() {
         let expr = GuardExpr::or(vec![
-            Guard::EnvExists { key: "MISSING".into(), invert: false }.into(),
-            Guard::EnvExists { key: "ALSO_MISSING".into(), invert: false }.into(),
+            Guard::EnvExists {
+                key: "MISSING".into(),
+                invert: false,
+            }
+            .into(),
+            Guard::EnvExists {
+                key: "ALSO_MISSING".into(),
+                invert: false,
+            }
+            .into(),
         ]);
         assert!(!guard_expr_allows(&expr, &HashMap::new()));
         let mut env = HashMap::new();
@@ -292,7 +345,10 @@ mod tests {
         };
         assert!(matches!(children[0], GuardExpr::Or(_)));
         match &children[1] {
-            GuardExpr::Predicate(Guard::Platform { target: PlatformGuard::Macos, invert: false }) => {}
+            GuardExpr::Predicate(Guard::Platform {
+                target: PlatformGuard::Macos,
+                invert: false,
+            }) => {}
             other => panic!("unexpected trailing guard: {other:?}"),
         }
     }
@@ -307,7 +363,11 @@ mod tests {
 
     #[test]
     fn env_equals_guard_respects_inversion() {
-        let g = Guard::EnvEquals { key: "A".into(), value: "1".into(), invert: true };
+        let g = Guard::EnvEquals {
+            key: "A".into(),
+            value: "1".into(),
+            invert: true,
+        };
         let mut env = HashMap::new();
         env.insert("A".into(), "1".into());
         assert!(!guard_allows(&g, &env));
@@ -340,7 +400,11 @@ mod tests {
         let script = "MOCK_HASH --hash aabb path.txt";
         let steps = parse_script(script, test_lower).expect("parse ok");
         match &steps[0].kind {
-            StepKind::AssertFile { hash, path, contents } => {
+            StepKind::AssertFile {
+                hash,
+                path,
+                contents,
+            } => {
                 assert_eq!(hash.as_deref(), Some("aabb"));
                 assert_eq!(path.as_ref(), "path.txt");
                 assert!(contents.is_none());
@@ -362,7 +426,10 @@ mod tests {
 
         // Verify each step's kind matches what we expect
         for step in &steps {
-            assert!(matches!(&step.kind, StepKind::Write { .. }), "expected Write variant");
+            assert!(
+                matches!(&step.kind, StepKind::Write { .. }),
+                "expected Write variant"
+            );
         }
     }
 
@@ -458,7 +525,10 @@ mod tests {
                 .unwrap_or_else(|e| panic!("string parse failed for case {idx}: {e}"));
             let braced_steps = parse_braced_tokens(tokens, test_lower)
                 .unwrap_or_else(|e| panic!("token parse failed for case {idx}: {e}"));
-            assert_eq!(string_steps, braced_steps, "AST mismatch for case {idx} literal:\n{text}");
+            assert_eq!(
+                string_steps, braced_steps,
+                "AST mismatch for case {idx} literal:\n{text}"
+            );
         }
     }
 
@@ -484,7 +554,10 @@ mod tests {
         match &steps[0].kind {
             StepKind::Assign { var, expr } => {
                 assert_eq!(var, "x");
-                assert_eq!(expr, &Expr::Literal(Value::String("hello world".to_string())));
+                assert_eq!(
+                    expr,
+                    &Expr::Literal(Value::String("hello world".to_string()))
+                );
             }
             other => panic!("expected Assign, got {:?}", other),
         }
@@ -498,11 +571,14 @@ mod tests {
         match &steps[0].kind {
             StepKind::Assign { var, expr } => {
                 assert_eq!(var, "x");
-                assert_eq!(expr, &Expr::List(vec![
-                    Expr::Literal(Value::String("a".to_string())),
-                    Expr::Literal(Value::String("b".to_string())),
-                    Expr::Literal(Value::String("c".to_string()))
-                ]));
+                assert_eq!(
+                    expr,
+                    &Expr::List(vec![
+                        Expr::Literal(Value::String("a".to_string())),
+                        Expr::Literal(Value::String("b".to_string())),
+                        Expr::Literal(Value::String("c".to_string()))
+                    ])
+                );
             }
             other => panic!("expected Assign, got {:?}", other),
         }
@@ -532,13 +608,21 @@ mod tests {
         let steps = parse_script(script, test_lower).expect("parse ok");
         assert_eq!(steps.len(), 1);
         match &steps[0].kind {
-            StepKind::For { key_var, var, in_expr, body } => {
+            StepKind::For {
+                key_var,
+                var,
+                in_expr,
+                body,
+            } => {
                 assert!(key_var.is_none());
                 assert_eq!(var, "f");
-                assert_eq!(in_expr, &Expr::List(vec![
-                    Expr::Literal(Value::String("x".to_string())),
-                    Expr::Literal(Value::String("y".to_string()))
-                ]));
+                assert_eq!(
+                    in_expr,
+                    &Expr::List(vec![
+                        Expr::Literal(Value::String("x".to_string())),
+                        Expr::Literal(Value::String("y".to_string()))
+                    ])
+                );
                 assert_eq!(body.len(), 1);
             }
             other => panic!("expected For, got {:?}", other),
@@ -555,7 +639,12 @@ mod tests {
         let steps = parse_script(script, test_lower).expect("parse ok");
         assert_eq!(steps.len(), 1);
         match &steps[0].kind {
-            StepKind::For { key_var, var, in_expr, body } => {
+            StepKind::For {
+                key_var,
+                var,
+                in_expr,
+                body,
+            } => {
                 assert_eq!(key_var.as_deref(), Some("k"));
                 assert_eq!(var, "v");
                 assert_eq!(in_expr, &Expr::Var("map".to_string()));
@@ -581,7 +670,11 @@ mod tests {
         use crate::lexer::{LanguageParser, Rule};
         use pest::Parser;
         let result = LanguageParser::parse(Rule::if_keyword, "IF ");
-        assert!(result.is_ok(), "if_keyword should match 'IF ': {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "if_keyword should match 'IF ': {:?}",
+            result.err()
+        );
     }
 
     #[test]
@@ -589,14 +682,22 @@ mod tests {
         use crate::lexer::{LanguageParser, Rule};
         use pest::Parser;
         let result = LanguageParser::parse(Rule::if_statement, "IF true {\n    MOCK_POS yes\n}");
-        assert!(result.is_ok(), "if_statement should match: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "if_statement should match: {:?}",
+            result.err()
+        );
     }
 
     #[test]
     fn guard_block_with_mock_command() {
         let script = "MOCK_NO_ARGS\n[env:GATE] {\n    MOCK_POS gated\n}\n[env:A==1] MOCK_POS eq\n";
         let steps = parse_script(script, test_lower).expect("parse should succeed");
-        assert!(steps.len() >= 2, "expected at least 2 steps, got {}", steps.len());
+        assert!(
+            steps.len() >= 2,
+            "expected at least 2 steps, got {}",
+            steps.len()
+        );
     }
 
     #[test]
@@ -607,7 +708,11 @@ mod tests {
             "IF true { MOCK_POS \"/app\" }",
         ];
         for script in test_cases {
-            assert!(parse_script(script, test_lower).is_ok(), "Failed to parse: {}", script);
+            assert!(
+                parse_script(script, test_lower).is_ok(),
+                "Failed to parse: {}",
+                script
+            );
         }
     }
 }

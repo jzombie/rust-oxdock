@@ -59,7 +59,8 @@ fn with_io_block_wraps_commands() {
 #[test]
 fn with_io_block_requires_brace() {
     let script = "WITH_IO [stdout=pipe:setup]\nMOCK_RUN \"echo hi\"";
-    let err = parse_script(script, mock_lower).expect_err("script should reject missing block braces");
+    let err =
+        parse_script(script, mock_lower).expect_err("script should reject missing block braces");
     let msg = format!("{err:#}");
     assert!(
         msg.contains("WITH_IO block must be followed"),

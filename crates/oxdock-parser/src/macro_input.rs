@@ -494,7 +494,10 @@ mod tests {
         match name {
             "MOCK_NO_ARGS" => Ok(StepKind::Cwd),
             "MOCK_POS" => {
-                let path = args.first().cloned().ok_or_else(|| anyhow::anyhow!("missing arg"))?;
+                let path = args
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("missing arg"))?;
                 let contents = args.get(1).cloned();
                 Ok(StepKind::Write { path, contents })
             }

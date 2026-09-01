@@ -58,7 +58,9 @@ pub fn tokenize(input: &str) -> Result<Vec<RawToken<'_>>> {
             | Rule::let_statement
             | Rule::if_statement => tokens.push(RawToken::Command { pair, line_no }),
             // Generic instructions — lowered by a function
-            Rule::instruction | Rule::instruction_inner => tokens.push(RawToken::Instruction { pair, line_no }),
+            Rule::instruction | Rule::instruction_inner => {
+                tokens.push(RawToken::Instruction { pair, line_no })
+            }
             other => bail!("unexpected parser rule {:?}", other),
         }
     }

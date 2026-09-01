@@ -29,8 +29,7 @@ pub fn strip_flags(args: Vec<Arg>, meta: &CommandMeta) -> Result<StrippedArgs> {
             Arg::String(s) if s.starts_with("--") => {
                 let matched = meta.flags.iter().find(|f| {
                     s == f.long
-                        || s.starts_with(f.long)
-                            && s.as_bytes().get(f.long.len()) == Some(&b'=')
+                        || s.starts_with(f.long) && s.as_bytes().get(f.long.len()) == Some(&b'=')
                 });
                 match matched {
                     Some(flag_meta) => {
@@ -45,11 +44,7 @@ pub fn strip_flags(args: Vec<Arg>, meta: &CommandMeta) -> Result<StrippedArgs> {
                         flags.push((flag_meta.name.to_string(), value));
                     }
                     None => {
-                        return Err(anyhow!(
-                            "unknown flag {} for command {}",
-                            s,
-                            meta.name
-                        ));
+                        return Err(anyhow!("unknown flag {} for command {}", s, meta.name));
                     }
                 }
             }

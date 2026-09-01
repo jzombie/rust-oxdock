@@ -64,14 +64,10 @@ fn generate_body() -> String {
             out.push_str("**Examples:**\n\n");
             for example in meta.examples {
                 out.push_str(&format!("**Example: {}**\n\n", example.name));
-                let fence = example.fence_meta.map_or_else(
-                    || "oxdock".to_string(),
-                    |m| format!("oxdock {m}"),
-                );
-                out.push_str(&format!(
-                    "```{}\n{}\n```\n\n",
-                    fence, example.code
-                ));
+                let fence = example
+                    .fence_meta
+                    .map_or_else(|| "oxdock".to_string(), |m| format!("oxdock {m}"));
+                out.push_str(&format!("```{}\n{}\n```\n\n", fence, example.code));
             }
         }
 

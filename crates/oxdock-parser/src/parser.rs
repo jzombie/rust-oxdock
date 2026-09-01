@@ -1,6 +1,4 @@
-use crate::ast::{
-    Arg, Guard, GuardExpr, IoBinding, IoStream, PlatformGuard, Step, StepKind,
-};
+use crate::ast::{Arg, Guard, GuardExpr, IoBinding, IoStream, PlatformGuard, Step, StepKind};
 use crate::lexer::{self, RawToken, Rule};
 use anyhow::{Result, anyhow, bail};
 use pest::iterators::Pair;
@@ -101,7 +99,12 @@ impl<'a, F: Fn(&str, Vec<Arg>) -> Result<StepKind>> ScriptParser<'a, F> {
     pub fn parse(mut self) -> Result<Vec<Step>> {
         while let Some(token) = self.tokens.pop_front() {
             if self.pending_io_block.is_some()
-                && !matches!(token, RawToken::BlockStart { .. } | RawToken::Command { .. } | RawToken::Instruction { .. })
+                && !matches!(
+                    token,
+                    RawToken::BlockStart { .. }
+                        | RawToken::Command { .. }
+                        | RawToken::Instruction { .. }
+                )
             {
                 let pending = self.pending_io_block.take().unwrap();
                 bail!(
@@ -710,7 +713,6 @@ fn parse_block_elements_with_lower(
     }
     Ok(steps)
 }
-
 
 fn parse_argument(pair: Pair<Rule>) -> Result<Arg> {
     let inner: Vec<_> = pair.into_inner().collect();

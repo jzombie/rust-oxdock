@@ -649,23 +649,48 @@ mod fingerprint_tests {
     fn test_lower(name: &str, args: Vec<Arg>) -> Result<StepKind> {
         match name {
             "COPY" => {
-                let from = args.first().cloned().ok_or_else(|| anyhow::anyhow!("COPY requires source"))?;
-                let to = args.get(1).cloned().ok_or_else(|| anyhow::anyhow!("COPY requires destination"))?;
-                Ok(StepKind::Copy { from_current_workspace: false, from, to })
+                let from = args
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("COPY requires source"))?;
+                let to = args
+                    .get(1)
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("COPY requires destination"))?;
+                Ok(StepKind::Copy {
+                    from_current_workspace: false,
+                    from,
+                    to,
+                })
             }
             "WRITE" => {
-                let path = args.first().cloned().ok_or_else(|| anyhow::anyhow!("WRITE requires path"))?;
+                let path = args
+                    .first()
+                    .cloned()
+                    .ok_or_else(|| anyhow::anyhow!("WRITE requires path"))?;
                 let contents = args.get(1).cloned();
                 Ok(StepKind::Write { path, contents })
             }
             "ECHO" => {
-                let msg = args.into_iter().next().ok_or_else(|| anyhow::anyhow!("ECHO requires arg"))?;
+                let msg = args
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("ECHO requires arg"))?;
                 Ok(StepKind::Echo(msg))
             }
             "ENV" => {
-                let arg = args.into_iter().next().ok_or_else(|| anyhow::anyhow!("ENV requires key=val"))?;
-                let (k, v) = arg.as_str().split_once('=').ok_or_else(|| anyhow::anyhow!("ENV requires key=val"))?;
-                Ok(StepKind::Env { key: k.to_string(), value: Arg::String(v.to_string()) })
+                let arg = args
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| anyhow::anyhow!("ENV requires key=val"))?;
+                let (k, v) = arg
+                    .as_str()
+                    .split_once('=')
+                    .ok_or_else(|| anyhow::anyhow!("ENV requires key=val"))?;
+                Ok(StepKind::Env {
+                    key: k.to_string(),
+                    value: Arg::String(v.to_string()),
+                })
             }
             _ => anyhow::bail!("unknown command: {name}"),
         }

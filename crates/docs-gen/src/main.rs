@@ -23,12 +23,9 @@ fn main() -> Result<()> {
     let root_out = repo_root.join("README.md");
     let mut root_env = ExecIo::new();
     root_env.insert_inherit_env("CRATE_NAME", "OxDock");
-    if let Err(err) = template_doc::compile(
-        &repo_root,
-        &root_manifest.to_string(),
-        &root_out,
-        root_env,
-    ) {
+    if let Err(err) =
+        template_doc::compile(&repo_root, &root_manifest.to_string(), &root_out, root_env)
+    {
         eprintln!("  Warning: failed to generate root README.md: {err:#}");
     }
 

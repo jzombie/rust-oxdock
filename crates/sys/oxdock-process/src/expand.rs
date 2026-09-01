@@ -291,7 +291,9 @@ fn lookup(
         };
         bail!("missing required step override argument: '{key}'{hint}");
     }
-    bail!("invalid placeholder format '{key}': script variables must start with '$' and environment variables with 'env:'");
+    bail!(
+        "invalid placeholder format '{key}': script variables must start with '$' and environment variables with 'env:'"
+    );
 }
 
 /// Resolve nested key-paths against the vars map.
@@ -461,7 +463,10 @@ mod tests {
         let result = expander.expand_string("{{ env:MISSING }}");
         assert!(result.is_err());
         assert!(
-            result.unwrap_err().to_string().contains("undefined environment variable"),
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("undefined environment variable"),
             "error should mention undefined environment variable"
         );
     }
@@ -694,7 +699,10 @@ mod tests {
         let result = expander.expand_string("{{ $cfg.missing_key }}");
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("property 'missing_key' not found"), "got: {msg}");
+        assert!(
+            msg.contains("property 'missing_key' not found"),
+            "got: {msg}"
+        );
     }
 
     #[test]
@@ -714,10 +722,7 @@ mod tests {
     #[test]
     fn type_mismatch_navigation_errors() {
         let mut vars = HashMap::new();
-        vars.insert(
-            "name".into(),
-            oxdock_parser::Value::String("alice".into()),
-        );
+        vars.insert("name".into(), oxdock_parser::Value::String("alice".into()));
         let expander = StreamingExpand::new(&[], &HashMap::new()).with_vars(&vars);
         let result = expander.expand_string("{{ $name.sub_field }}");
         assert!(result.is_err());
@@ -735,10 +740,7 @@ mod tests {
         let result = expander.expand_string("{{ bare_word }}");
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
-        assert!(
-            msg.contains("missing required step override"),
-            "got: {msg}"
-        );
+        assert!(msg.contains("missing required step override"), "got: {msg}");
     }
 
     // ── Strict namespace isolation tests ─────────────────────────────────────
@@ -781,10 +783,7 @@ mod tests {
     #[test]
     fn step_override_does_not_fall_back_to_vars() {
         let mut vars = HashMap::new();
-        vars.insert(
-            "PORT".into(),
-            oxdock_parser::Value::Int(8080),
-        );
+        vars.insert("PORT".into(), oxdock_parser::Value::Int(8080));
         let expander = StreamingExpand::new(&[], &HashMap::new()).with_vars(&vars);
         // PORT (bare) queries overrides, NOT vars — should error
         let result = expander.expand_string("{{ PORT }}");
@@ -800,10 +799,7 @@ mod tests {
     #[test]
     fn env_prefix_isolated_from_script_vars() {
         let mut vars = HashMap::new();
-        vars.insert(
-            "MODE".into(),
-            oxdock_parser::Value::String("dev".into()),
-        );
+        vars.insert("MODE".into(), oxdock_parser::Value::String("dev".into()));
         let expander = StreamingExpand::new(&[], &HashMap::new()).with_vars(&vars);
         // env:MODE looks in env, not vars — should error
         let result = expander.expand_string("{{ env:MODE }}");

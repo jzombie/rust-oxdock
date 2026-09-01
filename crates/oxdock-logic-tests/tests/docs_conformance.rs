@@ -188,8 +188,8 @@ fn readme_snippets_execute_as_documented() -> Result<()> {
 }
 
 fn execute_block(block: &FencedBlock) -> Result<()> {
-    let steps =
-        oxdock_core::parse_script(&block.body).map_err(|e| anyhow::anyhow!("snippet failed to parse: {e}"))?;
+    let steps = oxdock_core::parse_script(&block.body)
+        .map_err(|e| anyhow::anyhow!("snippet failed to parse: {e}"))?;
 
     // Tempdirs must outlive execution; dropping a GuardedTempDir removes it.
     let workspace_temp = GuardedPath::tempdir().context("failed to create workspace tempdir")?;
