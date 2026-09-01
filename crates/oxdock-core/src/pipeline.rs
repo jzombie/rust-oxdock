@@ -6,10 +6,7 @@
 /// - `all_metadata()` — collect all command metadata for docs-gen
 ///
 /// Each entry specifies a pattern (`$pat`), a `CommandSpec` implementor,
-/// and a handler function. The pattern must match the `StepKind` variant
-/// shape exactly (e.g., `Write { .. }`, `Workdir(..)`, `Cwd`).
-///
-/// Requires `anyhow` and `oxdock_parser` to be in scope at the call site.
+/// and a handler function with signature `fn(&StepKind, &mut StepCtx<'_, P>) -> Result<()>`.
 #[macro_export]
 macro_rules! define_pipeline {
     (
@@ -33,16 +30,16 @@ macro_rules! define_pipeline {
         /// Execute a step by dispatching to the appropriate handler.
         pub fn execute_command<P: $crate::ProcessManager>(
             step: &$crate::StepKind,
-            cx: &mut $crate::StepCtx<'_, P>,
+            cx: &mut $crate::exec::StepCtx<'_, P>,
         ) -> ::anyhow::Result<()> {
             match step {
-                $( $crate::StepKind::$pat => $handler(step, cx), )*
-                // ALL structural variants handled explicitly
-                $crate::StepKind::WithIo { bindings, cmd } => $crate::handlers::with_io(cx, bindings, cmd),
-                $crate::StepKind::WithIoBlock { bindings } => $crate::handlers::with_io_block(cx, bindings),
-                $crate::StepKind::For { .. } => $crate::handlers::for_loop(cx, step),
-                $crate::StepKind::If { .. } => $crate::handlers::if_then(cx, step),
-                $crate::StepKind::Assign { .. } => $crate::handlers::assign(cx, step),
+                $( $pat => $handler(step, cx), )*
+                $crate::StepKind::WithIo { bindings, cmd } => $crate::exec::with_io(cx, 0, 0, bindings, cmd),
+                $crate::StepKind::WithIoBlock { bindings } => $crate::exec::with_io_block(cx, 0, 0, bindings),
+                $crate::StepKind::InheritEnv { .. } => $crate::exec::dispatch_inherit_env(step, cx),
+                $crate::StepKind::For { .. } => $crate::exec::dispatch_for_loop(step, cx),
+                $crate::StepKind::If { .. } => $crate::exec::dispatch_if_then(step, cx),
+                $crate::StepKind::Assign { .. } => $crate::exec::dispatch_assign(step, cx),
             }
         }
 

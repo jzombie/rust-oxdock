@@ -787,37 +787,3 @@ impl CommandSpec for ExitCmd {
 
 // ── lower_command ───────────────────────────────────────────────────────────
 
-/// Lower a command by name: strip flags, then call `CommandSpec::lower`.
-pub fn lower_command(name: &str, raw_args: Vec<Arg>) -> Result<StepKind> {
-    match name {
-        "WORKDIR" => dispatch::<WorkdirCmd>(raw_args),
-        "WORKSPACE" => dispatch::<WorkspaceCmd>(raw_args),
-        "ENV" => dispatch::<EnvCmd>(raw_args),
-        "ECHO" => dispatch::<EchoCmd>(raw_args),
-        "RUN" => dispatch::<RunCmd>(raw_args),
-        "RUN_BG" => dispatch::<RunBgCmd>(raw_args),
-        "COPY" => dispatch::<CopyCmd>(raw_args),
-        "COPY_GIT" => dispatch::<CopyGitCmd>(raw_args),
-        "SYMLINK" => dispatch::<SymlinkCmd>(raw_args),
-        "MKDIR" => dispatch::<MkdirCmd>(raw_args),
-        "LS" => dispatch::<LsCmd>(raw_args),
-        "CWD" => dispatch::<CwdCmd>(raw_args),
-        "READ" => dispatch::<ReadCmd>(raw_args),
-        "WRITE" => dispatch::<WriteCmd>(raw_args),
-        "APPEND" => dispatch::<AppendCmd>(raw_args),
-        "EXPAND" => dispatch::<ExpandCmd>(raw_args),
-        "ASSERT_FILE" => dispatch::<AssertFileCmd>(raw_args),
-        "ASSERT_DIR" => dispatch::<AssertDirCmd>(raw_args),
-        "ASSERT_ABSENT" => dispatch::<AssertAbsentCmd>(raw_args),
-        "ASSERT_STDOUT" => dispatch::<AssertStdoutCmd>(raw_args),
-        "HASH_SHA256" => dispatch::<HashSha256Cmd>(raw_args),
-        "EXIT" => dispatch::<ExitCmd>(raw_args),
-        _ => bail!("unknown command: {name}"),
-    }
-}
-
-fn dispatch<C: CommandSpec>(raw_args: Vec<Arg>) -> Result<StepKind> {
-    let meta = C::metadata();
-    let (flags, positional) = strip_flags(raw_args, &meta)?;
-    C::lower(flags, positional)
-}

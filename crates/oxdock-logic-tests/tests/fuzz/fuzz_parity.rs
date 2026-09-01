@@ -293,7 +293,7 @@ proptest! {
 
         // 2. Parse tokens (if feature enabled)
         let ts: proc_macro2::TokenStream = s.parse().expect("failed to tokenize string");
-        let token_steps = parse_braced_tokens(&ts, oxdock_core::commands::lower_command).expect("failed to parse tokens");
+        let token_steps = parse_braced_tokens(&ts, oxdock_core::lower_command).expect("failed to parse tokens");
 
         assert_eq!(token_steps.len(), 1);
         let mut token_step = token_steps[0].clone();

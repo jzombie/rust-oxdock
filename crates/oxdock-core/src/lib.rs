@@ -1,18 +1,41 @@
 pub mod commands;
 pub mod exec;
 pub mod pipeline;
+pub use commands::*;
 pub use exec::*;
-pub use oxdock_parser::{
-    Arg, CommandMeta, CommandSpec, StepKind, strip_flags,
-};
+pub use oxdock_parser::{Arg, CommandMeta, CommandSpec, StepKind, strip_flags};
+pub use oxdock_process::ProcessManager;
+
+use commands::*;
+
+define_pipeline! {
+    StepKind::Run(..) => (RunCmd, exec::dispatch_run),
+    StepKind::RunBg(..) => (RunBgCmd, exec::dispatch_run_bg),
+    StepKind::Echo(..) => (EchoCmd, exec::dispatch_echo),
+    StepKind::Workdir(..) => (WorkdirCmd, exec::dispatch_workdir),
+    StepKind::Workspace(..) => (WorkspaceCmd, exec::dispatch_workspace),
+    StepKind::Env { .. } => (EnvCmd, exec::dispatch_env),
+    StepKind::Copy { .. } => (CopyCmd, exec::dispatch_copy),
+    StepKind::CopyGit { .. } => (CopyGitCmd, exec::dispatch_copy_git),
+    StepKind::Symlink { .. } => (SymlinkCmd, exec::dispatch_symlink),
+    StepKind::Mkdir(..) => (MkdirCmd, exec::dispatch_mkdir),
+    StepKind::Ls(..) => (LsCmd, exec::dispatch_ls),
+    StepKind::Cwd => (CwdCmd, exec::dispatch_cwd),
+    StepKind::Read(..) => (ReadCmd, exec::dispatch_read),
+    StepKind::Write { .. } => (WriteCmd, exec::dispatch_write),
+    StepKind::Append { .. } => (AppendCmd, exec::dispatch_append),
+    StepKind::Expand { .. } => (ExpandCmd, exec::dispatch_expand),
+    StepKind::AssertFile { .. } => (AssertFileCmd, exec::dispatch_assert_file),
+    StepKind::AssertDir(..) => (AssertDirCmd, exec::dispatch_assert_dir),
+    StepKind::AssertAbsent(..) => (AssertAbsentCmd, exec::dispatch_assert_absent),
+    StepKind::AssertStdout(..) => (AssertStdoutCmd, exec::dispatch_assert_stdout),
+    StepKind::HashSha256 { .. } => (HashSha256Cmd, exec::dispatch_hash_sha256),
+    StepKind::Exit(..) => (ExitCmd, exec::dispatch_exit),
+}
 
 /// Parse a script using the production `lower_command` dispatcher.
-///
-/// This is the primary entry point for downstream crates (`oxdock-cli`,
-/// `oxdock-macros`, `oxdock-build`). It binds `commands::lower_command`
-/// to the parser so callers don't need to provide a lowering function.
 pub fn parse_script(input: &str) -> anyhow::Result<Vec<oxdock_parser::Step>> {
-    oxdock_parser::parse_script(input, commands::lower_command)
+    oxdock_parser::parse_script(input, lower_command)
 }
 
 #[cfg(test)]

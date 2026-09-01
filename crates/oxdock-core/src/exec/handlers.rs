@@ -714,7 +714,16 @@ pub(super) fn assert_stdout<P: ProcessManager>(
     }
 }
 
-pub(super) fn with_io<P: ProcessManager>(
+pub(crate) fn with_io_block<P: ProcessManager>(
+    _cx: &mut StepCtx<'_, P>,
+    _generation: usize,
+    _idx: usize,
+    _bindings: &[IoBinding],
+) -> Result<()> {
+    bail!("WITH_IO block should have been expanded during parsing")
+}
+
+pub(crate) fn with_io<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     generation: usize,
     idx: usize,
@@ -826,7 +835,7 @@ pub(super) fn exit<P: ProcessManager>(cx: &mut StepCtx<'_, P>, code: i32) -> Res
     bail!("EXIT requested with code {}", code);
 }
 
-pub(super) fn for_loop<P: ProcessManager>(
+pub(crate) fn for_loop<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     key_var: Option<&str>,
     val_var: &str,
@@ -916,7 +925,7 @@ pub(super) fn for_loop<P: ProcessManager>(
     }
 }
 
-pub(super) fn assign<P: ProcessManager>(
+pub(crate) fn assign<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     var: &str,
     expr: &Expr,
@@ -927,7 +936,7 @@ pub(super) fn assign<P: ProcessManager>(
     Ok(())
 }
 
-pub(super) fn if_then<P: ProcessManager>(
+pub(crate) fn if_then<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     cond: &Expr,
     then_body: &[Step],
@@ -975,4 +984,168 @@ pub(super) fn if_then<P: ProcessManager>(
         )?;
     }
     Ok(())
+}
+
+// ── Dispatch functions ──────────────────────────────────────────────────────
+// These extract fields from `StepKind` variants, resolve arguments, and
+// forward to the actual handler functions. Used by `define_pipeline!`.
+
+pub(crate) fn dispatch_run<P: ProcessManager>(step: &StepKind, cx: &mut StepCtx<'_, P>) -> Result<()> {
+    let StepKind::Run(arg) = step else { unreachable!() };
+    let cmd = super::args::resolve_arg(arg, cx)?;
+    let cmd = super::args::expand_dsl_vars(&cmd, cx.state);
+    run(cx, 0, &cmd)
+}
+
+pub(crate) fn dispatch_run_bg<P: ProcessManager>(step: &StepKind, cx: &mut StepCtx<'_, P>) -> Result<()> {
+    let StepKind::RunBg(arg) = step else { unreachable!() };
+    let cmd = super::args::resolve_arg(arg, cx)?;
+    let cmd = super::args::expand_dsl_vars(&cmd, cx.state);
+    run_bg(cx, 0, &cmd)
+}
+
+pub(crate) fn dispatch_echo<P: ProcessManager>(step: &StepKind, cx: &mut StepCtx<'_, P>) -> Result<()> {
+    let StepKind::Echo(arg) = step else { unreachable!() };
+    let msg = super::args::resolve_arg(arg, cx)?;
+    echo(cx, &msg)
+}
+
+pub(crate) fn dispatch_workdir<P: ProcessManager>(step: &StepKind, cx: &mut StepCtx<'_, P>) -> Result<()> {
+    let StepKind::Workdir(arg) = step else { unreachable!() };
+    let path = super::args::resolve_arg(arg, cx)?;
+    workdir(cx, 0, &path)
+}
+
+pub(crate) fn dispatch_workspace<P: ProcessManager>(step: &StepKind, cx: &mut StepCtx<'_, P>) -> Result<()> {
+    let StepKind::Workspace(target) = step else { unreachable!() };
+    workspace(cx, target)
+}
+
+pub(crate) fn dispatch_env<P: ProcessManager>(step: &StepKind, cx: &mut StepCtx<'_, P>) -> Result<()> {
+    let StepKind::Env { key, value } = step else { unreachable!() };
+    let resolved = super::args::resolve_arg(value, cx)?;
+    env(cx, key, &resolved)
+}
+
+pub(crate) fn dispatch_copy<P: ProcessManager>(step: &StepKind, cx: &mut StepCtx<'_, P>) -> Result<()> {
+    let StepKind::Copy { from_current_workspace, from, to } = step else { unreachable!() };
+    let from_resolved = super::args::resolve_arg(from, cx)?;
+    let to_resolved = super::args::resolve_arg(to, cx)?;
+    copy(cx, 0, *from_current_workspace, &from_resolved, &to_resolved)
+}
+
+pub(crate) fn dispatch_copy_git<P: ProcessManager>(step: &StepKind, cx: &mut StepCtx<'_, P>) -> Result<()> {
+    let StepKind::CopyGit { rev, from, to, include_dirty } = step else { unreachable!() };
+    let rev_resolved = super::args::resolve_arg(rev, cx)?;
+    let from_resolved = super::args::resolve_arg(from, cx)?;
+    let to_resolved = super::args::resolve_arg(to, cx)?;
+    copy_git(cx, 0, &rev_resolved, &from_resolved, &to_resolved, *include_dirty)
+}
+
+pub(crate) fn dispatch_symlink<P: ProcessManager>(step: &StepKind, cx: &mut StepCtx<'_, P>) -> Result<()> {
+    let StepKind::Symlink { from, to } = step else { unreachable!() };
+    let from_resolved = super::args::resolve_arg(from, cx)?;
+    let to_resolved = super::args::resolve_arg(to, cx)?;
+    symlink(cx, 0, &from_resolved, &to_resolved)
+}
+
+pub(crate) fn dispatch_mkdir<P: ProcessManager>(step: &StepKind, cx: &mut StepCtx<'_, P>) -> Result<()> {
+    let StepKind::Mkdir(arg) = step else { unreachable!() };
+    let path = super::args::resolve_arg(arg, cx)?;
+    mkdir(cx, 0, &path)
+}
+
+pub(crate) fn dispatch_ls<P: ProcessManager>(step: &StepKind, cx: &mut StepCtx<'_, P>) -> Result<()> {
+    let StepKind::Ls(arg) = step else { unreachable!() };
+    let resolved = super::args::resolve_arg_opt(arg, cx)?;
+    ls(cx, 0, &resolved)
+}
+
+pub(crate) fn dispatch_cwd<P: ProcessManager>(_step: &StepKind, cx: &mut StepCtx<'_, P>) -> Result<()> {
+    cwd(cx, 0)
+}
+
+pub(crate) fn dispatch_read<P: ProcessManager>(step: &StepKind, cx: &mut StepCtx<'_, P>) -> Result<()> {
+    let StepKind::Read(arg) = step else { unreachable!() };
+    let resolved = super::args::resolve_arg_opt(arg, cx)?;
+    read(cx, 0, &resolved)
+}
+
+pub(crate) fn dispatch_write<P: ProcessManager>(step: &StepKind, cx: &mut StepCtx<'_, P>) -> Result<()> {
+    let StepKind::Write { path, contents } = step else { unreachable!() };
+    let path_resolved = super::args::resolve_arg(path, cx)?;
+    let contents_resolved = super::args::resolve_arg_opt(contents, cx)?;
+    write(cx, 0, &path_resolved, contents_resolved.as_deref())
+}
+
+pub(crate) fn dispatch_append<P: ProcessManager>(step: &StepKind, cx: &mut StepCtx<'_, P>) -> Result<()> {
+    let StepKind::Append { path, contents } = step else { unreachable!() };
+    let path_resolved = super::args::resolve_arg(path, cx)?;
+    let contents_resolved = super::args::resolve_arg_opt(contents, cx)?;
+    append(cx, 0, &path_resolved, contents_resolved.as_deref())
+}
+
+pub(crate) fn dispatch_expand<P: ProcessManager>(step: &StepKind, cx: &mut StepCtx<'_, P>) -> Result<()> {
+    let StepKind::Expand { path, overrides } = step else { unreachable!() };
+    let path_resolved = super::args::resolve_arg_opt(path, cx)?;
+    let overrides_resolved = super::args::resolve_overrides(overrides, cx)?;
+    replace(cx, 0, &path_resolved, &overrides_resolved)
+}
+
+pub(crate) fn dispatch_assert_file<P: ProcessManager>(step: &StepKind, cx: &mut StepCtx<'_, P>) -> Result<()> {
+    let StepKind::AssertFile { hash, path, contents } = step else { unreachable!() };
+    let path_resolved = super::args::resolve_arg(path, cx)?;
+    let contents_resolved = super::args::resolve_arg_opt(contents, cx)?;
+    assert_file(cx, 0, hash, &path_resolved, contents_resolved.as_deref())
+}
+
+pub(crate) fn dispatch_assert_dir<P: ProcessManager>(step: &StepKind, cx: &mut StepCtx<'_, P>) -> Result<()> {
+    let StepKind::AssertDir(arg) = step else { unreachable!() };
+    let path = super::args::resolve_arg(arg, cx)?;
+    assert_dir(cx, 0, &path)
+}
+
+pub(crate) fn dispatch_assert_absent<P: ProcessManager>(step: &StepKind, cx: &mut StepCtx<'_, P>) -> Result<()> {
+    let StepKind::AssertAbsent(arg) = step else { unreachable!() };
+    let path = super::args::resolve_arg(arg, cx)?;
+    assert_absent(cx, 0, &path)
+}
+
+pub(crate) fn dispatch_assert_stdout<P: ProcessManager>(step: &StepKind, cx: &mut StepCtx<'_, P>) -> Result<()> {
+    let StepKind::AssertStdout(arg) = step else { unreachable!() };
+    let needle = super::args::resolve_arg(arg, cx)?;
+    assert_stdout(cx, 0, 0, 0, &needle)
+}
+
+pub(crate) fn dispatch_hash_sha256<P: ProcessManager>(step: &StepKind, cx: &mut StepCtx<'_, P>) -> Result<()> {
+    let StepKind::HashSha256 { path } = step else { unreachable!() };
+    let path_resolved = super::args::resolve_arg(path, cx)?;
+    hash_sha256(cx, 0, &path_resolved)
+}
+
+pub(crate) fn dispatch_exit<P: ProcessManager>(step: &StepKind, cx: &mut StepCtx<'_, P>) -> Result<()> {
+    let StepKind::Exit(code) = step else { unreachable!() };
+    exit(cx, *code)
+}
+
+pub(crate) fn dispatch_inherit_env<P: ProcessManager>(step: &StepKind, cx: &mut StepCtx<'_, P>) -> Result<()> {
+    let StepKind::InheritEnv { keys } = step else { unreachable!() };
+    inherit_env(cx, keys)
+}
+
+// ── Structural dispatch wrappers ────────────────────────────────────────────
+
+pub(crate) fn dispatch_for_loop<P: ProcessManager>(step: &StepKind, cx: &mut StepCtx<'_, P>) -> Result<()> {
+    let StepKind::For { key_var, var, in_expr, body } = step else { unreachable!() };
+    for_loop(cx, key_var.as_deref(), var, in_expr, body)
+}
+
+pub(crate) fn dispatch_if_then<P: ProcessManager>(step: &StepKind, cx: &mut StepCtx<'_, P>) -> Result<()> {
+    let StepKind::If { cond, then_body, else_ifs, else_body } = step else { unreachable!() };
+    if_then(cx, cond, then_body, else_ifs, else_body)
+}
+
+pub(crate) fn dispatch_assign<P: ProcessManager>(step: &StepKind, cx: &mut StepCtx<'_, P>) -> Result<()> {
+    let StepKind::Assign { var, expr } = step else { unreachable!() };
+    assign(cx, var, expr)
 }
