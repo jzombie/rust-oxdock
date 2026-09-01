@@ -1,4 +1,5 @@
 use anyhow::{Result, anyhow, bail};
+use indoc::indoc;
 use oxdock_parser::{
     Arg, ArgSpec, CommandMeta, CommandSpec, Example, FlagSpec, FlagValueType, IoDirection,
     StepKind, Stream, WorkspaceTarget, strip_flags,
@@ -78,7 +79,16 @@ impl CommandSpec for WorkdirCmd {
             &[arg!("path", "string", "Directory to change to", IoDirection::Write, 0, true, None)],
             &[],
             None,
-            &[Example { name: "change dir", fence_meta: None, code: "WORKDIR src" }]
+            &[Example {
+                name: "change working directory",
+                fence_meta: None,
+                code: indoc! {r#"
+                    // Relative WORKDIR; later relative paths resolve against it.
+                    WORKDIR project/src
+                    WRITE generated.txt generated-under-workdir
+                    ASSERT_FILE generated.txt generated-under-workdir
+                "#},
+            }]
         )
     }
 
@@ -107,7 +117,22 @@ impl CommandSpec for WorkspaceCmd {
             &[arg!("target", "SNAPSHOT|LOCAL", "SNAPSHOT or LOCAL", IoDirection::Write, 0, true, None)],
             &[],
             None,
-            &[Example { name: "switch workspace", fence_meta: None, code: "WORKSPACE LOCAL\nWRITE context.txt in-context\nWORKSPACE SNAPSHOT\nASSERT_ABSENT context.txt" }]
+            &[Example {
+                name: "switch workspace roots",
+                fence_meta: None,
+                code: indoc! {r#"
+                    // Write to isolated SNAPSHOT root
+                    WRITE workspace-note.txt "written-into-workspace"
+                    ASSERT_FILE workspace-note.txt "written-into-workspace"
+
+                    // LOCAL root does not contain SNAPSHOT files
+                    WORKSPACE LOCAL
+                    ASSERT_ABSENT workspace-note.txt
+
+                    // Return to default root
+                    WORKSPACE SNAPSHOT
+                "#},
+            }]
         )
     }
 
@@ -141,7 +166,17 @@ impl CommandSpec for EnvCmd {
             &[arg!("assignment", "KEY=value", "KEY=value pair", IoDirection::Write, 0, true, None)],
             &[],
             None,
-            &[Example { name: "set env", fence_meta: None, code: "ENV FOO=bar" }]
+            &[Example {
+                name: "set and read environment variable",
+                fence_meta: None,
+                code: indoc! {r#"
+                    ENV APP_MODE=production
+
+                    // Guards read script variables set by ENV.
+                    [env:APP_MODE==production] ECHO running-in-production
+                    ASSERT_STDOUT running-in-production
+                "#},
+            }]
         )
     }
 
@@ -178,7 +213,14 @@ impl CommandSpec for EchoCmd {
             &[arg!("message", "string", "Text to print", IoDirection::Write, 0, true, None)],
             &[],
             Some(Stream::Stdout),
-            &[Example { name: "print message", fence_meta: None, code: "ECHO hello-world\nASSERT_STDOUT hello-world" }]
+            &[Example {
+                name: "print message with assertion",
+                fence_meta: None,
+                code: indoc! {r#"
+                    ECHO build-complete
+                    ASSERT_STDOUT build-complete
+                "#},
+            }]
         )
     }
 
@@ -204,7 +246,19 @@ impl CommandSpec for RunCmd {
             &[arg!("command", "string...", "Shell command to execute", IoDirection::Write, 0, true, None)],
             &[],
             None,
-            &[Example { name: "run cargo", fence_meta: None, code: "RUN cargo build" }]
+            &[Example {
+                name: "run platform-specific command",
+                fence_meta: None,
+                code: indoc! {r#"
+                    // Host shell differs per OS: pick the invocation with guards.
+                    [unix] RUN echo native-unix-shell
+                    [windows] RUN cmd /c echo native-windows-shell
+
+                    // Child output streams into the script's stdout.
+                    [unix] ASSERT_STDOUT native-unix-shell
+                    [windows] ASSERT_STDOUT native-windows-shell
+                "#},
+            }]
         )
     }
 
@@ -230,7 +284,19 @@ impl CommandSpec for RunBgCmd {
             &[arg!("command", "string...", "Shell command to run in background", IoDirection::Write, 0, true, None)],
             &[],
             None,
-            &[Example { name: "background process", fence_meta: None, code: "RUN_BG sleep 1\nECHO continues-immediately" }]
+            &[Example {
+                name: "background process lifecycle",
+                fence_meta: None,
+                code: indoc! {r#"
+                    // Spawn a slow child; the script does NOT wait for it here.
+                    [unix] RUN_BG sleep 1
+                    [windows] RUN_BG ping -n 2 127.0.0.1
+
+                    // Mainline continues immediately.
+                    ECHO mainline-continues-immediately
+                    ASSERT_STDOUT mainline-continues-immediately
+                "#},
+            }]
         )
     }
 
@@ -265,7 +331,19 @@ impl CommandSpec for CopyCmd {
                 description: "Copy from the current workspace root instead of build context",
             }],
             None,
-            &[Example { name: "copy file", fence_meta: Some("roots:unified"), code: "WRITE source.txt copied-content\nCOPY source.txt dest.txt\nASSERT_FILE dest.txt copied-content" }]
+            &[Example {
+                name: "copy with default resolution",
+                fence_meta: Some("roots:unified"),
+                code: indoc! {r#"
+                    // Seed a file at the (unified) build-context root.
+                    WRITE context-file.txt copied-by-default-resolution
+                    MKDIR app
+
+                    // Default form: source resolves against the build context.
+                    COPY context-file.txt app/local-copy.txt
+                    ASSERT_FILE app/local-copy.txt copied-by-default-resolution
+                "#},
+            }]
         )
     }
 
@@ -313,7 +391,21 @@ impl CommandSpec for CopyGitCmd {
                 description: "Include uncommitted changes",
             }],
             None,
-            &[Example { name: "copy from git", fence_meta: None, code: "COPY_GIT HEAD file.txt restored.txt" }]
+            &[Example {
+                name: "copy from git revision",
+                fence_meta: Some("roots:unified"),
+                code: indoc! {r#"
+                    // Initialize a temporary repository.
+                    RUN git init -q .
+                    WRITE tracked.txt committed-content
+                    RUN git add tracked.txt
+                    RUN git -c user.name=oxdock-docs -c user.email=docs@oxdock.invalid commit -qm init
+
+                    // Recover the committed blob from history into the workspace.
+                    COPY_GIT HEAD tracked.txt restored.txt
+                    ASSERT_FILE restored.txt committed-content
+                "#},
+            }]
         )
     }
 
@@ -359,7 +451,18 @@ impl CommandSpec for SymlinkCmd {
             ],
             &[],
             None,
-            &[Example { name: "create symlink", fence_meta: Some("roots:unified"), code: "WRITE original.txt linked-content\nSYMLINK original.txt link.txt\nREAD link.txt\nASSERT_STDOUT linked-content" }]
+            &[Example {
+                name: "create symbolic link",
+                fence_meta: Some("roots:unified"),
+                code: indoc! {r#"
+                    WRITE original.txt linked-content
+
+                    // link.txt references original.txt (or copies on Windows).
+                    SYMLINK original.txt link.txt
+                    READ link.txt
+                    ASSERT_STDOUT linked-content
+                "#},
+            }]
         )
     }
 
@@ -392,7 +495,15 @@ impl CommandSpec for MkdirCmd {
             &[arg!("path", "path", "Directory path to create", IoDirection::Write, 0, true, None)],
             &[],
             None,
-            &[Example { name: "create directory", fence_meta: None, code: "MKDIR deeply/nested/tree\nASSERT_DIR deeply/nested/tree" }]
+            &[Example {
+                name: "create nested directories",
+                fence_meta: None,
+                code: indoc! {r#"
+                    // Creates every missing parent.
+                    MKDIR deeply/nested/tree
+                    ASSERT_DIR deeply/nested/tree
+                "#},
+            }]
         )
     }
 
@@ -421,7 +532,20 @@ impl CommandSpec for LsCmd {
             &[arg!("path", "path", "Directory to list (optional)", IoDirection::Read, 0, false, None)],
             &[],
             Some(Stream::Stdout),
-            &[Example { name: "list directory", fence_meta: None, code: "MKDIR inventory\nWRITE inventory/alpha.txt first\nLS inventory\nASSERT_STDOUT alpha.txt" }]
+            &[Example {
+                name: "list directory contents",
+                fence_meta: None,
+                code: indoc! {r#"
+                    MKDIR inventory
+                    WRITE inventory/alpha.txt first
+                    WRITE inventory/beta.txt second
+
+                    // Prints entries sorted by name.
+                    LS inventory
+                    ASSERT_STDOUT alpha.txt
+                    ASSERT_STDOUT beta.txt
+                "#},
+            }]
         )
     }
 
@@ -446,7 +570,17 @@ impl CommandSpec for CwdCmd {
             &[],
             &[],
             Some(Stream::Stdout),
-            &[Example { name: "print working dir", fence_meta: None, code: "WORKDIR level-one\nCWD\nASSERT_STDOUT level-one" }]
+            &[Example {
+                name: "print current directory",
+                fence_meta: None,
+                code: indoc! {r#"
+                    WORKDIR level-one/level-two
+
+                    // Prints the canonical physical path.
+                    CWD
+                    ASSERT_STDOUT level-two
+                "#},
+            }]
         )
     }
 
@@ -471,7 +605,17 @@ impl CommandSpec for ReadCmd {
             &[arg!("path", "path", "File to read (optional, stdin if omitted)", IoDirection::Read, 0, false, None)],
             &[],
             Some(Stream::Stdout),
-            &[Example { name: "read file", fence_meta: None, code: "WRITE note.txt file-content\nREAD note.txt\nASSERT_STDOUT file-content" }]
+            &[Example {
+                name: "read file to stdout",
+                fence_meta: None,
+                code: indoc! {r#"
+                    WRITE note.txt file-read-back
+
+                    // Raw bytes in, raw bytes out.
+                    READ note.txt
+                    ASSERT_STDOUT file-read-back
+                "#},
+            }]
         )
     }
 
@@ -499,7 +643,20 @@ impl CommandSpec for WriteCmd {
             ],
             &[],
             None,
-            &[Example { name: "write file", fence_meta: None, code: "WRITE output.txt hello-world\nASSERT_FILE output.txt hello-world" }]
+            &[Example {
+                name: "write and verify file",
+                fence_meta: None,
+                code: indoc! {r#"
+                    WRITE output.txt hello-world
+                    ASSERT_FILE output.txt hello-world
+
+                    // Pipe READ output into WRITE via WITH_IO.
+                    WRITE input.txt captured-body
+                    WITH_IO [stdout=pipe:data] READ input.txt
+                    WITH_IO [stdin=pipe:data] WRITE captured.txt
+                    ASSERT_FILE captured.txt captured-body
+                "#},
+            }]
         )
     }
 
@@ -536,7 +693,15 @@ impl CommandSpec for AppendCmd {
             ],
             &[],
             None,
-            &[Example { name: "append to file", fence_meta: None, code: "WRITE log.txt line1\nAPPEND log.txt line2\nASSERT_FILE log.txt line1line2" }]
+            &[Example {
+                name: "append to file",
+                fence_meta: None,
+                code: indoc! {r#"
+                    WRITE log.txt line1
+                    APPEND log.txt line2
+                    ASSERT_FILE log.txt line1line2
+                "#},
+            }]
         )
     }
 
@@ -572,7 +737,18 @@ impl CommandSpec for ExpandCmd {
             ],
             &[            ],
             Some(Stream::Stdout),
-            &[Example { name: "expand template", fence_meta: None, code: "WRITE template.md \"Hello, \\\\{{ env:NAME }}!\"\nEXPAND template.md NAME=Alice\nASSERT_STDOUT \"Hello, Alice!\"" }]
+            &[Example {
+                name: "expand template file",
+                fence_meta: None,
+                code: indoc! {r#"
+                    // Create a template file with literal {{ env:KEY }} tags.
+                    WRITE template.md "Hello, \{{ env:NAME }}!"
+
+                    // Expand the template with an explicit override.
+                    EXPAND template.md NAME="Alice"
+                    ASSERT_STDOUT "Hello, Alice!"
+                "#},
+            }]
         )
     }
 
@@ -618,7 +794,19 @@ impl CommandSpec for AssertFileCmd {
                 description: "Expected SHA-256 hash of the file contents",
             }],
             None,
-            &[Example { name: "verify file", fence_meta: None, code: "WRITE payload.txt stable-content\nASSERT_FILE payload.txt stable-content" }]
+            &[Example {
+                name: "verify file contents",
+                fence_meta: None,
+                code: indoc! {r#"
+                    WRITE payload.bin stable-content
+
+                    // Exact-byte comparison.
+                    ASSERT_FILE payload.bin stable-content
+
+                    // Digest comparison for trailing newlines or binary bytes.
+                    ASSERT_FILE --hash 08135c1b6349b0e4f894c36221952f0de00e6b4d82f80895abf359755e77103c payload.bin
+                "#},
+            }]
         )
     }
 
@@ -660,7 +848,14 @@ impl CommandSpec for AssertDirCmd {
             &[arg!("path", "path", "Directory path to verify", IoDirection::Read, 0, true, None)],
             &[],
             None,
-            &[Example { name: "verify directory", fence_meta: None, code: "MKDIR dist/assets\nASSERT_DIR dist/assets" }]
+            &[Example {
+                name: "verify directory exists",
+                fence_meta: None,
+                code: indoc! {r#"
+                    MKDIR dist/assets
+                    ASSERT_DIR dist/assets
+                "#},
+            }]
         )
     }
 
@@ -689,7 +884,15 @@ impl CommandSpec for AssertAbsentCmd {
             &[arg!("path", "path", "Path that must not exist", IoDirection::Read, 0, true, None)],
             &[],
             None,
-            &[Example { name: "verify absent", fence_meta: None, code: "ASSERT_ABSENT nonexistent.txt" }]
+            &[Example {
+                name: "verify path does not exist",
+                fence_meta: None,
+                code: indoc! {r#"
+                    // Neither variable exists, so this guard skips the WRITE.
+                    [env:UNDEFINED_VAR] WRITE signed-artifact.txt signed-content
+                    ASSERT_ABSENT signed-artifact.txt
+                "#},
+            }]
         )
     }
 
@@ -718,7 +921,17 @@ impl CommandSpec for AssertStdoutCmd {
             &[arg!("substring", "string", "Expected substring in stdout", IoDirection::Read, 0, true, None)],
             &[],
             None,
-            &[Example { name: "verify stdout", fence_meta: None, code: "ECHO build-complete\nASSERT_STDOUT build-complete" }]
+            &[Example {
+                name: "verify stdout substring",
+                fence_meta: None,
+                code: indoc! {r#"
+                    // Interpreter output and RUN child output both reach stdout.
+                    ECHO build-complete
+                    RUN echo artifact-built-ok
+                    ASSERT_STDOUT build-complete
+                    ASSERT_STDOUT artifact-built-ok
+                "#},
+            }]
         )
     }
 
@@ -744,7 +957,17 @@ impl CommandSpec for HashSha256Cmd {
             &[arg!("path", "path", "File or directory to hash", IoDirection::Read, 0, true, None)],
             &[],
             Some(Stream::Stdout),
-            &[Example { name: "hash file", fence_meta: None, code: "WRITE payload.txt stable-content\nHASH_SHA256 payload.txt\nASSERT_STDOUT 08135c1b6349b0e4f894c36221952f0de00e6b4d82f80895abf359755e77103c" }]
+            &[Example {
+                name: "compute file hash",
+                fence_meta: None,
+                code: indoc! {r#"
+                    WRITE payload.txt stable-content
+
+                    // The digest is deterministic: sha256("stable-content").
+                    HASH_SHA256 payload.txt
+                    ASSERT_STDOUT 08135c1b6349b0e4f894c36221952f0de00e6b4d82f80895abf359755e77103c
+                "#},
+            }]
         )
     }
 
@@ -773,7 +996,18 @@ impl CommandSpec for ExitCmd {
             &[arg!("code", "int", "Exit status code", IoDirection::Write, 0, true, None)],
             &[],
             None,
-            &[Example { name: "exit with code", fence_meta: Some("expect_error:\"EXIT requested with code 42\""), code: "EXIT 42" }]
+            &[Example {
+                name: "exit with status code",
+                fence_meta: Some("expect_error:\"EXIT requested with code 42\""),
+                code: indoc! {r#"
+                    // Teardown: background children are killed before the error.
+                    WRITE teardown-order.txt background-children-killed-first
+                    ASSERT_FILE teardown-order.txt background-children-killed-first
+
+                    // Fails the script with "EXIT requested with code 42".
+                    EXIT 42
+                "#},
+            }]
         )
     }
 

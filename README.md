@@ -415,10 +415,17 @@ Runs the command in the current working directory. Arguments are joined with spa
 
 **Examples:**
 
-**Example: run cargo**
+**Example: run platform-specific command**
 
 ```oxdock
-RUN cargo build
+// Host shell differs per OS: pick the invocation with guards.
+[unix] RUN echo native-unix-shell
+[windows] RUN cmd /c echo native-windows-shell
+
+// Child output streams into the script's stdout.
+[unix] ASSERT_STDOUT native-unix-shell
+[windows] ASSERT_STDOUT native-windows-shell
+
 ```
 
 
@@ -438,11 +445,17 @@ Like RUN, but spawns the command in the background and continues the script. If 
 
 **Examples:**
 
-**Example: background process**
+**Example: background process lifecycle**
 
 ```oxdock
-RUN_BG sleep 1
-ECHO continues-immediately
+// Spawn a slow child; the script does NOT wait for it here.
+[unix] RUN_BG sleep 1
+[windows] RUN_BG ping -n 2 127.0.0.1
+
+// Mainline continues immediately.
+ECHO mainline-continues-immediately
+ASSERT_STDOUT mainline-continues-immediately
+
 ```
 
 
@@ -464,11 +477,12 @@ Outputs the message to stdout. Supports template expansion.
 
 **Examples:**
 
-**Example: print message**
+**Example: print message with assertion**
 
 ```oxdock
-ECHO hello-world
-ASSERT_STDOUT hello-world
+ECHO build-complete
+ASSERT_STDOUT build-complete
+
 ```
 
 
@@ -488,10 +502,14 @@ Sets the current working directory. Relative paths resolve against the current r
 
 **Examples:**
 
-**Example: change dir**
+**Example: change working directory**
 
 ```oxdock
-WORKDIR src
+// Relative WORKDIR; later relative paths resolve against it.
+WORKDIR project/src
+WRITE generated.txt generated-under-workdir
+ASSERT_FILE generated.txt generated-under-workdir
+
 ```
 
 
@@ -511,13 +529,20 @@ SNAPSHOT targets the read-only snapshot root; LOCAL targets the mutable build-co
 
 **Examples:**
 
-**Example: switch workspace**
+**Example: switch workspace roots**
 
 ```oxdock
+// Write to isolated SNAPSHOT root
+WRITE workspace-note.txt "written-into-workspace"
+ASSERT_FILE workspace-note.txt "written-into-workspace"
+
+// LOCAL root does not contain SNAPSHOT files
 WORKSPACE LOCAL
-WRITE context.txt in-context
+ASSERT_ABSENT workspace-note.txt
+
+// Return to default root
 WORKSPACE SNAPSHOT
-ASSERT_ABSENT context.txt
+
 ```
 
 
@@ -537,10 +562,15 @@ Inserts or updates an environment variable. The value is an expandable string.
 
 **Examples:**
 
-**Example: set env**
+**Example: set and read environment variable**
 
 ```oxdock
-ENV FOO=bar
+ENV APP_MODE=production
+
+// Guards read script variables set by ENV.
+[env:APP_MODE==production] ECHO running-in-production
+ASSERT_STDOUT running-in-production
+
 ```
 
 
@@ -567,12 +597,17 @@ Copies a file/directory from the host filesystem into the workspace. Plain COPY 
 
 **Examples:**
 
-**Example: copy file**
+**Example: copy with default resolution**
 
 ```oxdock roots:unified
-WRITE source.txt copied-content
-COPY source.txt dest.txt
-ASSERT_FILE dest.txt copied-content
+// Seed a file at the (unified) build-context root.
+WRITE context-file.txt copied-by-default-resolution
+MKDIR app
+
+// Default form: source resolves against the build context.
+COPY context-file.txt app/local-copy.txt
+ASSERT_FILE app/local-copy.txt copied-by-default-resolution
+
 ```
 
 
@@ -600,10 +635,19 @@ Checks out a specific git revision and copies the specified path into the worksp
 
 **Examples:**
 
-**Example: copy from git**
+**Example: copy from git revision**
 
-```oxdock
-COPY_GIT HEAD file.txt restored.txt
+```oxdock roots:unified
+// Initialize a temporary repository.
+RUN git init -q .
+WRITE tracked.txt committed-content
+RUN git add tracked.txt
+RUN git -c user.name=oxdock-docs -c user.email=docs@oxdock.invalid commit -qm init
+
+// Recover the committed blob from history into the workspace.
+COPY_GIT HEAD tracked.txt restored.txt
+ASSERT_FILE restored.txt committed-content
+
 ```
 
 
@@ -624,13 +668,16 @@ Creates a symlink at 'to' pointing to 'from'.
 
 **Examples:**
 
-**Example: create symlink**
+**Example: create symbolic link**
 
 ```oxdock roots:unified
 WRITE original.txt linked-content
+
+// link.txt references original.txt (or copies on Windows).
 SYMLINK original.txt link.txt
 READ link.txt
 ASSERT_STDOUT linked-content
+
 ```
 
 
@@ -650,11 +697,13 @@ Creates the directory at the given path, including parents.
 
 **Examples:**
 
-**Example: create directory**
+**Example: create nested directories**
 
 ```oxdock
+// Creates every missing parent.
 MKDIR deeply/nested/tree
 ASSERT_DIR deeply/nested/tree
+
 ```
 
 
@@ -676,13 +725,18 @@ Lists entries in the given directory, or the current directory if omitted.
 
 **Examples:**
 
-**Example: list directory**
+**Example: list directory contents**
 
 ```oxdock
 MKDIR inventory
 WRITE inventory/alpha.txt first
+WRITE inventory/beta.txt second
+
+// Prints entries sorted by name.
 LS inventory
 ASSERT_STDOUT alpha.txt
+ASSERT_STDOUT beta.txt
+
 ```
 
 
@@ -698,12 +752,15 @@ Outputs the current working directory to stdout.
 
 **Examples:**
 
-**Example: print working dir**
+**Example: print current directory**
 
 ```oxdock
-WORKDIR level-one
+WORKDIR level-one/level-two
+
+// Prints the canonical physical path.
 CWD
-ASSERT_STDOUT level-one
+ASSERT_STDOUT level-two
+
 ```
 
 
@@ -725,12 +782,15 @@ Outputs the file contents. If no path, reads from stdin.
 
 **Examples:**
 
-**Example: read file**
+**Example: read file to stdout**
 
 ```oxdock
-WRITE note.txt file-content
+WRITE note.txt file-read-back
+
+// Raw bytes in, raw bytes out.
 READ note.txt
-ASSERT_STDOUT file-content
+ASSERT_STDOUT file-read-back
+
 ```
 
 
@@ -751,11 +811,18 @@ Writes contents to a file, replacing any existing contents. Creates parent direc
 
 **Examples:**
 
-**Example: write file**
+**Example: write and verify file**
 
 ```oxdock
 WRITE output.txt hello-world
 ASSERT_FILE output.txt hello-world
+
+// Pipe READ output into WRITE via WITH_IO.
+WRITE input.txt captured-body
+WITH_IO [stdout=pipe:data] READ input.txt
+WITH_IO [stdin=pipe:data] WRITE captured.txt
+ASSERT_FILE captured.txt captured-body
+
 ```
 
 
@@ -782,6 +849,7 @@ Appends the contents to the specified file, creating it if it doesn't exist.
 WRITE log.txt line1
 APPEND log.txt line2
 ASSERT_FILE log.txt line1line2
+
 ```
 
 
@@ -803,12 +871,16 @@ Reads the file (or stdin), expands {{ env:KEY }} placeholders, and outputs to st
 
 **Examples:**
 
-**Example: expand template**
+**Example: expand template file**
 
 ```oxdock
-WRITE template.md "Hello, \\{{ env:NAME }}!"
-EXPAND template.md NAME=Alice
+// Create a template file with literal {{ env:KEY }} tags.
+WRITE template.md "Hello, \{{ env:NAME }}!"
+
+// Expand the template with an explicit override.
+EXPAND template.md NAME="Alice"
 ASSERT_STDOUT "Hello, Alice!"
+
 ```
 
 
@@ -835,11 +907,17 @@ Verifies the file exists. With --hash, checks the SHA-256 digest. With an expect
 
 **Examples:**
 
-**Example: verify file**
+**Example: verify file contents**
 
 ```oxdock
-WRITE payload.txt stable-content
-ASSERT_FILE payload.txt stable-content
+WRITE payload.bin stable-content
+
+// Exact-byte comparison.
+ASSERT_FILE payload.bin stable-content
+
+// Digest comparison for trailing newlines or binary bytes.
+ASSERT_FILE --hash 08135c1b6349b0e4f894c36221952f0de00e6b4d82f80895abf359755e77103c payload.bin
+
 ```
 
 
@@ -859,11 +937,12 @@ Verifies the directory exists.
 
 **Examples:**
 
-**Example: verify directory**
+**Example: verify directory exists**
 
 ```oxdock
 MKDIR dist/assets
 ASSERT_DIR dist/assets
+
 ```
 
 
@@ -883,10 +962,13 @@ Verifies the path does not exist.
 
 **Examples:**
 
-**Example: verify absent**
+**Example: verify path does not exist**
 
 ```oxdock
-ASSERT_ABSENT nonexistent.txt
+// Neither variable exists, so this guard skips the WRITE.
+[env:UNDEFINED_VAR] WRITE signed-artifact.txt signed-content
+ASSERT_ABSENT signed-artifact.txt
+
 ```
 
 
@@ -906,11 +988,15 @@ Verifies that subsequent command output contains the given substring.
 
 **Examples:**
 
-**Example: verify stdout**
+**Example: verify stdout substring**
 
 ```oxdock
+// Interpreter output and RUN child output both reach stdout.
 ECHO build-complete
+RUN echo artifact-built-ok
 ASSERT_STDOUT build-complete
+ASSERT_STDOUT artifact-built-ok
+
 ```
 
 
@@ -932,12 +1018,15 @@ Computes and outputs the SHA-256 digest of the file contents.
 
 **Examples:**
 
-**Example: hash file**
+**Example: compute file hash**
 
 ```oxdock
 WRITE payload.txt stable-content
+
+// The digest is deterministic: sha256("stable-content").
 HASH_SHA256 payload.txt
 ASSERT_STDOUT 08135c1b6349b0e4f894c36221952f0de00e6b4d82f80895abf359755e77103c
+
 ```
 
 
@@ -957,10 +1046,16 @@ Terminates the pipeline immediately with the given exit code.
 
 **Examples:**
 
-**Example: exit with code**
+**Example: exit with status code**
 
 ```oxdock expect_error:"EXIT requested with code 42"
+// Teardown: background children are killed before the error.
+WRITE teardown-order.txt background-children-killed-first
+ASSERT_FILE teardown-order.txt background-children-killed-first
+
+// Fails the script with "EXIT requested with code 42".
 EXIT 42
+
 ```
 
 
