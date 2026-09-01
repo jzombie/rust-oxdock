@@ -17,14 +17,17 @@ fn main() -> Result<()> {
 
     // Phase 2: root README from docs/sections/*.md
     let root_manifest = serde_json::json!([
-        { "kind": "glob", "pattern": "docs/sections/*.md" }
+        { "kind": "glob", "pattern": "docs/sections/*.md" },
+        { "kind": "template", "path": "docs/templates/crate-footer.md" }
     ]);
     let root_out = repo_root.join("README.md");
+    let mut root_env = ExecIo::new();
+    root_env.insert_inherit_env("CRATE_NAME", "OxDock");
     if let Err(err) = template_doc::compile(
         &repo_root,
         &root_manifest.to_string(),
         &root_out,
-        ExecIo::new(),
+        root_env,
     ) {
         eprintln!("  Warning: failed to generate root README.md: {err:#}");
     }

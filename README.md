@@ -639,8 +639,8 @@ Templates support the same `{{ env:KEY }}` syntax as all other commands. Unprefi
 **File mode** — expand an existing template file:
 
 ```oxdock
-// Create a template file with literal {{ env:KEY }} tags (RAW_WRITE bypasses expansion)
-RAW_WRITE template.md "Hello, {{ env:NAME }}!"
+// Create a template file with literal {{ env:KEY }} tags (\{{ escapes expansion)
+WRITE template.md "Hello, \{{ env:NAME }}!"
 
 // Expand the template with an explicit override
 EXPAND template.md NAME="Alice"
@@ -650,7 +650,7 @@ ASSERT_STDOUT "Hello, Alice!"
 **Stdin mode** — omit the path to read from stdin instead of a file:
 
 ```oxdock
-RAW_WRITE tmpl.txt "Hello, \{{ env:NAME }}\!"
+WRITE tmpl.txt "Hello, \{{ env:NAME }}!"
 WITH_IO [stdout=pipe:raw_tmpl] READ tmpl.txt
 WITH_IO [stdin=pipe:raw_tmpl] EXPAND NAME="Bob"
 ASSERT_STDOUT "Hello, Bob!"
@@ -661,7 +661,7 @@ ASSERT_STDOUT "Hello, Bob!"
 Writes contents to a file, **replacing** any existing contents (it does not append). Creates parent directories on demand. Without a contents argument it consumes the script's stdin instead (combine with `WITH_IO [stdin...]`):
 
 ```oxdock
-RAW_WRITE input.txt "captured body"
+WRITE input.txt "captured body"
 WITH_IO [stdout=pipe:data] READ input.txt
 WITH_IO [stdin=pipe:data] WRITE captured.txt
 ASSERT_FILE captured.txt "captured body"
@@ -680,7 +680,7 @@ ASSERT_FILE dist/log.txt "build startedbuild finished"
 Without a contents argument it consumes stdin (combine with `WITH_IO [stdin...]`):
 
 ```oxdock
-RAW_WRITE input.txt "line-from-stdin"
+WRITE input.txt "line-from-stdin"
 WITH_IO [stdout=pipe:data] READ input.txt
 WITH_IO [stdin=pipe:data] APPEND dist/stdin-log.txt
 ```
@@ -912,3 +912,7 @@ If you run new tests under Miri locally, you can sanity-check parity with CI via
 cargo +nightly miri setup
 cargo +nightly miri test --workspace --all-features --lib --tests
 ```
+
+## License
+
+`OxDock` is distributed under the terms of the Apache License (Version 2.0).
