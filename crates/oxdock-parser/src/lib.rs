@@ -1,11 +1,14 @@
 pub mod ast;
+pub mod command;
 mod lexer;
 #[cfg(feature = "proc-macro-api")]
 mod macro_input;
 pub mod markdown;
 pub mod parser;
+pub mod strip_flags;
 
 pub use ast::*;
+pub use command::{CommandMeta, CommandSpec, Example, FlagSpec, FlagValueType, IoDirection, Stream};
 pub use lexer::LANGUAGE_SPEC;
 #[cfg(feature = "proc-macro-api")]
 pub use macro_input::{
@@ -13,6 +16,7 @@ pub use macro_input::{
 };
 pub use markdown::{BlockMetadata, FencedBlock, extract_fenced_blocks};
 pub use parser::parse_script;
+pub use strip_flags::strip_flags;
 
 #[cfg(test)]
 mod tests {

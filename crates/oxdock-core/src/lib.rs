@@ -1,5 +1,9 @@
 pub mod exec;
+pub mod pipeline;
 pub use exec::*;
+pub use oxdock_parser::{
+    Arg, CommandMeta, CommandSpec, StepKind, strip_flags,
+};
 
 #[cfg(test)]
 mod tests {
