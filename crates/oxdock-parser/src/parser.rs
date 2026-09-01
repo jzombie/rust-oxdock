@@ -426,6 +426,14 @@ pub fn parse_script(
     ScriptParser::new(input, lower)?.parse()
 }
 
+pub fn parse_guard_expr_str(input: &str) -> Result<GuardExpr> {
+    use pest::Parser;
+    let pairs = lexer::LanguageParser::parse(Rule::guard_expr, input)
+        .map_err(|e| anyhow!("guard parse error: {e}"))?;
+    let pair = pairs.into_iter().next().ok_or_else(|| anyhow!("empty guard"))?;
+    parse_guard_expr(pair)
+}
+
 fn and_guard_exprs(left: Option<GuardExpr>, right: Option<GuardExpr>) -> Option<GuardExpr> {
     match (left, right) {
         (None, None) => None,
@@ -818,11 +826,16 @@ fn parse_guard_expr(pair: Pair<Rule>) -> Result<GuardExpr> {
         }
         Rule::guard_seq => parse_guard_seq(pair),
         Rule::guard_factor => parse_guard_factor(pair),
-        Rule::guard_not => parse_guard_not(pair),
+        Rule::guard_not => {
+            // guard_not is silent, so its inner pairs are the actual content
+            bail!("guard_not should not create a pair")
+        }
         Rule::guard_primary => parse_guard_primary(pair),
         Rule::guard_group => parse_guard_group(pair),
-        Rule::guard_or_call => parse_guard_or_call(pair),
-        Rule::guard_term => Ok(GuardExpr::Predicate(parse_guard_term(pair)?)),
+        Rule::guard_any_call => parse_guard_any_call(pair),
+        Rule::guard_all_call => parse_guard_all_call(pair),
+        Rule::not_call => parse_not_call(pair),
+        Rule::guard_term => parse_guard_term(pair),
         _ => bail!("unexpected guard expression rule: {:?}", pair.as_rule()),
     }
 }
@@ -842,25 +855,20 @@ fn parse_guard_seq(pair: Pair<Rule>) -> Result<GuardExpr> {
 }
 
 fn parse_guard_factor(pair: Pair<Rule>) -> Result<GuardExpr> {
-    for inner in pair.into_inner() {
-        if inner.as_rule() == Rule::guard_not {
-            return parse_guard_not(inner);
-        }
-    }
-    bail!("guard factor missing expression")
+    let inner = pair
+        .into_inner()
+        .next()
+        .ok_or_else(|| anyhow!("guard factor missing expression"))?;
+    parse_guard_expr(inner)
 }
 
-fn parse_guard_not(pair: Pair<Rule>) -> Result<GuardExpr> {
-    let mut invert_count = 0usize;
-    let mut primary = None;
+fn parse_not_call(pair: Pair<Rule>) -> Result<GuardExpr> {
     for inner in pair.into_inner() {
-        match inner.as_rule() {
-            Rule::invert => invert_count += 1,
-            _ => primary = Some(parse_guard_primary(inner)?),
+        if inner.as_rule() == Rule::guard_expr {
+            return parse_guard_expr(inner).map(|e| GuardExpr::Not(Box::new(e)));
         }
     }
-    let expr = primary.ok_or_else(|| anyhow!("guard expression missing predicate"))?;
-    apply_inversion(expr, invert_count % 2 == 1)
+    bail!("not() missing expression")
 }
 
 fn parse_guard_primary(pair: Pair<Rule>) -> Result<GuardExpr> {
@@ -873,8 +881,10 @@ fn parse_guard_primary(pair: Pair<Rule>) -> Result<GuardExpr> {
             parse_guard_primary(inner)
         }
         Rule::guard_group => parse_guard_group(pair),
-        Rule::guard_or_call => parse_guard_or_call(pair),
-        Rule::guard_term => Ok(GuardExpr::Predicate(parse_guard_term(pair)?)),
+        Rule::guard_any_call => parse_guard_any_call(pair),
+        Rule::guard_all_call => parse_guard_all_call(pair),
+        Rule::not_call => parse_not_call(pair),
+        Rule::guard_term => parse_guard_term(pair),
         _ => bail!("unexpected guard primary rule: {:?}", pair.as_rule()),
     }
 }
@@ -888,7 +898,7 @@ fn parse_guard_group(pair: Pair<Rule>) -> Result<GuardExpr> {
     bail!("grouped guard missing expression")
 }
 
-fn parse_guard_or_call(pair: Pair<Rule>) -> Result<GuardExpr> {
+fn parse_guard_any_call(pair: Pair<Rule>) -> Result<GuardExpr> {
     let mut args = Vec::new();
     for inner in pair.into_inner() {
         if inner.as_rule() == Rule::guard_expr_list {
@@ -896,9 +906,22 @@ fn parse_guard_or_call(pair: Pair<Rule>) -> Result<GuardExpr> {
         }
     }
     if args.len() < 2 {
-        bail!("or(...) requires at least two guard expressions");
+        bail!("any(...) requires at least two guard expressions");
     }
     Ok(GuardExpr::or(args))
+}
+
+fn parse_guard_all_call(pair: Pair<Rule>) -> Result<GuardExpr> {
+    let mut args = Vec::new();
+    for inner in pair.into_inner() {
+        if inner.as_rule() == Rule::guard_expr_list {
+            args = parse_guard_expr_list(inner)?;
+        }
+    }
+    if args.is_empty() {
+        bail!("all(...) requires at least one guard expression");
+    }
+    Ok(GuardExpr::all(args))
 }
 
 fn parse_guard_expr_list(pair: Pair<Rule>) -> Result<Vec<GuardExpr>> {
@@ -932,56 +955,17 @@ fn push_guard_or_args_from_expr(expr_pair: Pair<Rule>, exprs: &mut Vec<GuardExpr
     Ok(())
 }
 
-fn apply_inversion(expr: GuardExpr, invert: bool) -> Result<GuardExpr> {
-    if !invert {
-        return Ok(expr);
-    }
-    match expr {
-        GuardExpr::Predicate(guard) => {
-            if let Guard::EnvEquals {
-                key,
-                value,
-                invert: false,
-            } = &guard
-            {
-                bail!(
-                    "inverted env equality is not allowed: use 'env:{}!={}' or '!env:{}'",
-                    key,
-                    value,
-                    key
-                );
-            }
-            Ok(GuardExpr::Predicate(invert_guard(guard)))
-        }
-        other => Ok(!other),
-    }
-}
 
-fn invert_guard(guard: Guard) -> Guard {
-    match guard {
-        Guard::Platform { target, invert } => Guard::Platform {
-            target,
-            invert: !invert,
-        },
-        Guard::EnvExists { key, invert } => Guard::EnvExists {
-            key,
-            invert: !invert,
-        },
-        Guard::EnvEquals { key, value, invert } => Guard::EnvEquals {
-            key,
-            value,
-            invert: !invert,
-        },
-        Guard::StaticBool { value, invert } => Guard::StaticBool {
-            value,
-            invert: !invert,
-        },
-    }
-}
-
-fn parse_guard_term(pair: Pair<Rule>) -> Result<Guard> {
+fn parse_guard_term(pair: Pair<Rule>) -> Result<GuardExpr> {
     for inner in pair.into_inner() {
         match inner.as_rule() {
+            Rule::eq_guard => {
+                return Ok(GuardExpr::Predicate(parse_func_guard(inner)?));
+            }
+            Rule::neq_guard => {
+                let guard = parse_func_guard(inner)?;
+                return Ok(GuardExpr::Not(Box::new(GuardExpr::Predicate(guard))));
+            }
             Rule::bool_guard => {
                 let val = inner
                     .into_inner()
@@ -989,21 +973,19 @@ fn parse_guard_term(pair: Pair<Rule>) -> Result<Guard> {
                     .expect("grammar invariant violated: bool_guard missing bool_value")
                     .as_str()
                     .to_string();
-                return Ok(Guard::StaticBool {
-                    value: val,
-                    invert: false,
-                });
+                return Ok(GuardExpr::Predicate(Guard::StaticBool { value: val }));
             }
-            Rule::env_guard => return parse_env_guard(inner),
+            Rule::env_guard => {
+                return Ok(GuardExpr::Predicate(parse_env_guard(inner)?));
+            }
             Rule::bare_guard_ident => {
                 let tag = inner.as_str();
-                if let Ok(g) = parse_platform_tag(tag, false) {
-                    return Ok(g);
+                if let Ok(g) = parse_platform_tag(tag) {
+                    return Ok(GuardExpr::Predicate(g));
                 }
-                return Ok(Guard::EnvExists {
+                return Ok(GuardExpr::Predicate(Guard::EnvExists {
                     key: tag.to_string(),
-                    invert: false,
-                });
+                }));
             }
             _ => {}
         }
@@ -1011,54 +993,43 @@ fn parse_guard_term(pair: Pair<Rule>) -> Result<Guard> {
     bail!("missing guard predicate")
 }
 
-fn parse_env_guard(pair: Pair<Rule>) -> Result<Guard> {
+fn parse_func_guard(pair: Pair<Rule>) -> Result<Guard> {
     let mut key = String::new();
-    let mut value = None;
-    let mut is_not_equals = false;
-
+    let mut value = String::new();
+    let mut saw_env_prefix = false;
     for inner in pair.into_inner() {
         match inner.as_rule() {
-            Rule::env_key => key = inner.as_str().trim().to_string(),
-            Rule::env_comparison => {
-                for comp_part in inner.into_inner() {
-                    match comp_part.as_rule() {
-                        Rule::equals_env | Rule::not_equals_env => {
-                            for part in comp_part.into_inner() {
-                                match part.as_rule() {
-                                    Rule::eq_op => {}
-                                    Rule::neq_op => is_not_equals = true,
-                                    Rule::env_value => {
-                                        value = Some(part.as_str().trim().to_string());
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                        Rule::eq_op => {}
-                        Rule::neq_op => is_not_equals = true,
-                        Rule::env_value => {
-                            value = Some(comp_part.as_str().trim().to_string());
-                        }
-                        _ => {}
-                    }
-                }
+            Rule::env_prefix => saw_env_prefix = true,
+            Rule::env_key if saw_env_prefix => {
+                key = inner.as_str().trim().to_string();
+            }
+            Rule::bare_guard_value | Rule::quoted_string => {
+                value = unquote(inner.as_str().trim()).to_string();
             }
             _ => {}
         }
     }
-
-    if let Some(val) = value {
-        Ok(Guard::EnvEquals {
-            key,
-            value: val,
-            invert: is_not_equals,
-        })
-    } else {
-        Ok(Guard::EnvExists { key, invert: false })
-    }
+    Ok(Guard::EnvEquals { key, value })
 }
 
-fn parse_platform_tag(tag: &str, invert: bool) -> Result<Guard> {
+fn unquote(s: &str) -> &str {
+    s.strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .or_else(|| s.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+        .unwrap_or(s)
+}
+
+fn parse_env_guard(pair: Pair<Rule>) -> Result<Guard> {
+    let mut key = String::new();
+    for inner in pair.into_inner() {
+        if inner.as_rule() == Rule::env_key {
+            key = inner.as_str().trim().to_string();
+        }
+    }
+    Ok(Guard::EnvExists { key })
+}
+
+fn parse_platform_tag(tag: &str) -> Result<Guard> {
     let target = match tag.to_ascii_lowercase().as_str() {
         "unix" => PlatformGuard::Unix,
         "windows" => PlatformGuard::Windows,
@@ -1066,7 +1037,7 @@ fn parse_platform_tag(tag: &str, invert: bool) -> Result<Guard> {
         "linux" => PlatformGuard::Linux,
         _ => bail!("unknown platform '{}'", tag),
     };
-    Ok(Guard::Platform { target, invert })
+    Ok(Guard::Platform { target })
 }
 
 fn parse_dollar_ident(pair: Pair<Rule>) -> String {
@@ -1156,6 +1127,7 @@ fn parse_expr_atom(pair: Pair<Rule>) -> Result<Expr> {
             Ok(Expr::Var(name))
         }
         Rule::list_literal => parse_list_literal(inner),
+        Rule::map_literal => parse_map_literal(inner),
         Rule::string_literal | Rule::quoted_string => {
             let s = parse_quoted_string(inner)?;
             Ok(Expr::Literal(Value::String(s)))
@@ -1222,4 +1194,31 @@ fn parse_list_literal(pair: Pair<Rule>) -> Result<Expr> {
         }
     }
     Ok(Expr::List(items))
+}
+
+fn parse_map_literal(pair: Pair<Rule>) -> Result<Expr> {
+    let mut entries = Vec::new();
+    for inner in pair.into_inner() {
+        if inner.as_rule() == Rule::map_entry {
+            let mut key = String::new();
+            let mut value = None;
+            for entry_inner in inner.into_inner() {
+                match entry_inner.as_rule() {
+                    Rule::quoted_string => {
+                        key = parse_quoted_string(entry_inner)?;
+                    }
+                    Rule::bare_word => {
+                        key = entry_inner.as_str().to_string();
+                    }
+                    Rule::expr => {
+                        value = Some(parse_expr(entry_inner)?);
+                    }
+                    _ => {}
+                }
+            }
+            let val = value.ok_or_else(|| anyhow!("map entry missing value"))?;
+            entries.push((key, val));
+        }
+    }
+    Ok(Expr::Map(entries))
 }

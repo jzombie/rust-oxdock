@@ -30,29 +30,32 @@ guard_line = { "[" ~ ws? ~ guard_expr ~ ws? ~ "]" }
 guard_expr = { guard_seq }
 guard_seq = { guard_factor ~ ( ws? ~ "," ~ ws? ~ guard_factor ~ ws? )* }
 guard_factor = { guard_not }
-guard_not = { (invert ~ ws?)* ~ guard_primary }
-guard_primary = _{ guard_group | guard_or_call | guard_term }
+guard_not = _{ guard_primary }
+guard_primary = _{ guard_group | guard_any_call | guard_all_call | not_call | guard_term }
 guard_group = { "(" ~ ws? ~ guard_expr ~ ws? ~ ")" }
-guard_or_call = { or_kw ~ "(" ~ ws? ~ guard_expr_list ~ ws? ~ ")" }
-or_kw = _{ "or" }
+not_call = { "not" ~ "(" ~ ws? ~ guard_expr ~ ws? ~ ")" }
+guard_any_call = { any_kw ~ "(" ~ ws? ~ guard_expr_list ~ ws? ~ ")" }
+guard_all_call = { all_kw ~ "(" ~ ws? ~ guard_expr_list ~ ws? ~ ")" }
+any_kw = _{ "any" }
+all_kw = _{ "all" }
 guard_expr_list = { guard_expr ~ ( ws? ~ "," ~ ws? ~ guard_expr )* }
-guard_term = { ws? ~ guard_predicate ~ ws? }
-invert = { "!" }
-guard_predicate = _{ bool_guard | env_guard | bare_guard_ident }
+guard_term = { ws? ~ guard_predicate ~ !( "(" | ":" | "=" | "!") ~ ws? }
+guard_predicate = _{ eq_guard | neq_guard | bool_guard | env_guard | bare_guard_ident }
 bool_guard = { "bool" ~ ":" ~ ws? ~ bool_value }
 bool_value = @{ guard_key_char+ }
-env_guard = { env_prefix ~ ws? ~ env_key ~ env_comparison? }
+eq_guard = { "eq" ~ "(" ~ env_prefix ~ env_key ~ "," ~ ws? ~ guard_value ~ ws? ~ ")" }
+neq_guard = { "neq" ~ "(" ~ env_prefix ~ env_key ~ "," ~ ws? ~ guard_value ~ ws? ~ ")" }
+env_guard = { env_prefix ~ ws? ~ env_key }
 env_prefix = { "env" ~ ":" }
 env_key = @{ guard_key_char+ }
-guard_key_char = _{ !( ":" | "=" | "!" | "," | "|" | ")" | "]" | " " | "\t" | linebreak | "//" | "/*" ) ~ ANY }
-env_comparison = { not_equals_env | equals_env }
-equals_env = { eq_op ~ env_value }
-not_equals_env = { neq_op ~ env_value }
-env_value = @{ guard_value_char+ }
-guard_value_char = _{ !( "," | "|" | ")" | "]" | linebreak | "//" | "/*" ) ~ ANY }
+guard_key_char = _{ !( ":" | "=" | "!" | "," | "|" | "(" | ")" | "]" | "$" | " " | "\t" | linebreak | "//" | "/*" ) ~ ANY }
+guard_value = _{ quoted_string | bare_guard_value }
+bare_guard_value = @{ (!( "," | "|" | ")" | "]" | "$" | linebreak | "//" | "/*" ) ~ ANY)+ }
+bare_guard_ident = @{ guard_key_char+ }
+
+// Comparison operators (used by expr_comparison in LET/IF expressions)
 eq_op = @{ "==" }
 neq_op = @{ "!=" }
-bare_guard_ident = @{ guard_key_char+ }
 
 // Identifiers
 ident_char = _{ ASCII_ALPHANUMERIC | "_" }
@@ -76,8 +79,10 @@ variable = { "$" ~ ident }
 key_path_segment = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")* | ASCII_DIGIT+ }
 key_path = { "$" ~ ident ~ ("." ~ key_path_segment)+ }
 list_literal = { "[" ~ (expr ~ ("," ~ expr)*)? ~ "]" }
+map_entry = { (quoted_string | bare_word) ~ ":" ~ ws? ~ expr }
+map_literal = { "{" ~ ws? ~ (map_entry ~ (ws? ~ "," ~ ws? ~ map_entry)*)? ~ ws? ~ "}" }
 string_literal = { quoted_string }
-expr_atom = { parenthesized_expr | func_call | key_path | variable | list_literal | string_literal | bare_word }
+expr_atom = { parenthesized_expr | func_call | key_path | variable | list_literal | map_literal | string_literal | bare_word }
 
 // Comparison level (==, !=)
 expr_comparison = { expr_atom ~ ((eq_op | neq_op) ~ expr_atom)? }

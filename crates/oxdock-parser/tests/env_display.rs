@@ -1,31 +1,26 @@
 mod common;
 use common::mock_lower;
 
-use oxdock_parser::ast::{Guard, Step, StepKind};
+use oxdock_parser::ast::{Guard, GuardExpr};
 use oxdock_parser::parse_script;
 
 #[test]
-fn env_equals_display_prefers_not_equals() {
+fn env_equals_display_uses_functional_syntax() {
     let guard = Guard::EnvEquals {
         key: "A".into(),
         value: "1".into(),
-        invert: true,
     };
 
-    assert_eq!(guard.to_string(), "env:A!=1");
+    assert_eq!(guard.to_string(), "eq(env:A, 1)");
 
-    let step = Step {
-        guard: Some(guard.into()),
-        kind: StepKind::Workdir("a".into()),
-        scope_enter: 0,
-        scope_exit: 0,
-    };
+    // not(eq(...)) for negation
+    let expr = GuardExpr::Not(Box::new(GuardExpr::Predicate(guard)));
+    assert_eq!(expr.to_string(), "not(eq(env:A, 1))");
 
-    let rendered = step.to_string();
-    assert_eq!(rendered, "[env:A!=1] WORKDIR a");
-
-    let parsed = parse_script(&rendered, mock_lower).expect("round-trip parse");
+    // Verify round-trip through parser with MOCK_WRITE command.
+    let rendered = "[not(eq(env:A, 1))] MOCK_WRITE a";
+    let parsed = parse_script(rendered, mock_lower).expect("round-trip parse");
     assert_eq!(parsed.len(), 1);
-    assert_eq!(parsed[0].guard, step.guard);
-    assert_eq!(parsed[0].kind, step.kind);
+    let parsed_guard = parsed[0].guard.as_ref().expect("missing guard");
+    assert_eq!(parsed_guard.to_string(), "not(eq(env:A, 1))");
 }

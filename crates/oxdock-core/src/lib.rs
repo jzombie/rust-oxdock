@@ -196,7 +196,7 @@ mod tests {
 
         let script = indoc!(
             r#"
-            [!unix] WRITE "platform.txt" "hi"
+            [not(unix)] WRITE "platform.txt" "hi"
             WRITE "always.txt" "ok"
             "#
         );
@@ -311,17 +311,17 @@ mod tests {
 
     #[test]
     fn guard_matches_profile_env() {
-        // Cargo sets PROFILE during builds/tests; verify guards see it.
+        // Set PROFILE via script ENV; guards now only see script-level env.
         let temp = GuardedPath::tempdir().unwrap();
         let root = guard_root(&temp);
 
         let profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".to_string());
-        let _env_guard = oxdock_sys_test_utils::TestEnvGuard::set("PROFILE", &profile);
         let script = format!(
             indoc!(
                 r#"
-                [env:PROFILE=={0}] WRITE "hit.txt" "yes"
-                [env:PROFILE!={0}] WRITE "miss.txt" "no"
+                ENV PROFILE={0}
+                [eq(env:PROFILE, {0})] WRITE "hit.txt" "yes"
+                [neq(env:PROFILE, {0})] WRITE "miss.txt" "no"
                 "#
             ),
             profile
@@ -346,12 +346,12 @@ mod tests {
         let root = guard_root(&temp);
 
         let key = "OXDOCK_MULTI_GUARD_TEST_PASS";
-        let _env_guard = oxdock_sys_test_utils::TestEnvGuard::set(key, "ok");
 
         let script = format!(
             indoc!(
                 r#"
-                [env:{k},env:{k}==ok] WRITE "hit.txt" "yes"
+                ENV {k}=ok
+                [env:{k},eq(env:{k}, ok)] WRITE "hit.txt" "yes"
                 WRITE "always.txt" "ok"
                 "#
             ),
@@ -373,12 +373,12 @@ mod tests {
         let root = guard_root(&temp);
 
         let key = "OXDOCK_MULTI_GUARD_TEST_FAIL";
-        let _env_guard = oxdock_sys_test_utils::TestEnvGuard::set(key, "ok");
 
         let script = format!(
             indoc!(
                 r#"
-                [env:{k},env:{k}!=ok] WRITE "miss.txt" "yes"
+                ENV {k}=ok
+                [env:{k},neq(env:{k}, ok)] WRITE "miss.txt" "yes"
                 WRITE "always.txt" "ok"
                 "#
             ),

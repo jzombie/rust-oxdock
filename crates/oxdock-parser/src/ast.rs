@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Command {
@@ -161,20 +162,16 @@ pub enum PlatformGuard {
 pub enum Guard {
     Platform {
         target: PlatformGuard,
-        invert: bool,
     },
     EnvExists {
         key: String,
-        invert: bool,
     },
     EnvEquals {
         key: String,
         value: String,
-        invert: bool,
     },
     StaticBool {
         value: String,
-        invert: bool,
     },
 }
 
@@ -343,6 +340,7 @@ pub enum Expr {
         keys: Vec<String>,
     },
     List(Vec<Expr>),
+    Map(Vec<(String, Expr)>),
     Call {
         name: String,
         args: Vec<Expr>,
@@ -474,52 +472,52 @@ fn platform_matches(target: PlatformGuard) -> bool {
     }
 }
 
-pub fn guard_allows(guard: &Guard, script_envs: &HashMap<String, String>) -> bool {
-    match guard {
-        Guard::Platform { target, invert } => {
-            let res = platform_matches(*target);
-            if *invert { !res } else { res }
-        }
-        Guard::EnvExists { key, invert } => {
-            let res = script_envs
-                .get(key)
-                .cloned()
-                .or_else(|| std::env::var(key).ok())
-                .map(|v| !v.is_empty())
-                .unwrap_or(false);
-            if *invert { !res } else { res }
-        }
-        Guard::EnvEquals { key, value, invert } => {
-            let res = script_envs
-                .get(key)
-                .cloned()
-                .or_else(|| std::env::var(key).ok())
-                .map(|v| v == *value)
-                .unwrap_or(false);
-            if *invert { !res } else { res }
-        }
-        Guard::StaticBool { value, invert } => {
-            let b = value.parse::<bool>().unwrap_or(false);
-            b != *invert
-        }
+pub trait EnvLookup {
+    fn get_env(&self, key: &str) -> Option<&str>;
+}
+
+impl EnvLookup for HashMap<String, String> {
+    fn get_env(&self, key: &str) -> Option<&str> {
+        self.get(key).map(|s| s.as_str())
     }
 }
 
-pub fn guard_expr_allows(expr: &GuardExpr, script_envs: &HashMap<String, String>) -> bool {
+impl EnvLookup for Arc<HashMap<String, String>> {
+    fn get_env(&self, key: &str) -> Option<&str> {
+        (**self).get_env(key)
+    }
+}
+
+pub fn guard_allows(guard: &Guard, env: &impl EnvLookup) -> bool {
+    match guard {
+        Guard::Platform { target } => platform_matches(*target),
+        Guard::EnvExists { key } => env
+            .get_env(key)
+            .map(|v| !v.is_empty())
+            .unwrap_or(false),
+        Guard::EnvEquals { key, value } => env
+            .get_env(key)
+            .map(|v| v == value.as_str())
+            .unwrap_or(false),
+        Guard::StaticBool { value } => value.parse::<bool>().unwrap_or(false),
+    }
+}
+
+pub fn guard_expr_allows(expr: &GuardExpr, env: &impl EnvLookup) -> bool {
     match expr {
-        GuardExpr::Predicate(guard) => guard_allows(guard, script_envs),
-        GuardExpr::All(children) => children.iter().all(|g| guard_expr_allows(g, script_envs)),
-        GuardExpr::Or(children) => children.iter().any(|g| guard_expr_allows(g, script_envs)),
-        GuardExpr::Not(child) => !guard_expr_allows(child, script_envs),
+        GuardExpr::Predicate(guard) => guard_allows(guard, env),
+        GuardExpr::All(children) => children.iter().all(|g| guard_expr_allows(g, env)),
+        GuardExpr::Or(children) => children.iter().any(|g| guard_expr_allows(g, env)),
+        GuardExpr::Not(child) => !guard_expr_allows(child, env),
     }
 }
 
 pub fn guard_option_allows(
     expr: Option<&GuardExpr>,
-    script_envs: &HashMap<String, String>,
+    env: &impl EnvLookup,
 ) -> bool {
     match expr {
-        Some(e) => guard_expr_allows(e, script_envs),
+        Some(e) => guard_expr_allows(e, env),
         None => true,
     }
 }
@@ -540,33 +538,10 @@ impl fmt::Display for PlatformGuard {
 impl fmt::Display for Guard {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Guard::Platform { target, invert } => {
-                if *invert {
-                    write!(f, "!{}", target)
-                } else {
-                    write!(f, "{}", target)
-                }
-            }
-            Guard::EnvExists { key, invert } => {
-                if *invert {
-                    write!(f, "!")?
-                }
-                write!(f, "env:{}", key)
-            }
-            Guard::EnvEquals { key, value, invert } => {
-                if *invert {
-                    write!(f, "env:{}!={}", key, value)
-                } else {
-                    write!(f, "env:{}=={}", key, value)
-                }
-            }
-            Guard::StaticBool { value, invert } => {
-                if *invert {
-                    write!(f, "!bool:{}", value)
-                } else {
-                    write!(f, "bool:{}", value)
-                }
-            }
+            Guard::Platform { target } => write!(f, "{}", target),
+            Guard::EnvExists { key } => write!(f, "env:{}", key),
+            Guard::EnvEquals { key, value } => write!(f, "eq(env:{}, {})", key, value),
+            Guard::StaticBool { value } => write!(f, "bool:{}", value),
         }
     }
 }
@@ -907,6 +882,16 @@ impl fmt::Display for Expr {
                 }
                 write!(f, "]")
             }
+            Expr::Map(entries) => {
+                write!(f, "{{")?;
+                for (i, (key, val)) in entries.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "\"{}\": {}", key, val)?;
+                }
+                write!(f, "}}")
+            }
             Expr::Compare { op, left, right } => {
                 write!(f, "{} {} {}", left, op, right)
             }
@@ -937,7 +922,7 @@ impl fmt::Display for LogicalOp {
 
 enum GuardDisplayContext {
     Root,
-    InOrArg,
+    InAnyArg,
     InNot,
     InAll,
 }
@@ -949,7 +934,7 @@ impl GuardExpr {
             GuardExpr::All(children) => {
                 let wrap = matches!(
                     ctx,
-                    GuardDisplayContext::InOrArg | GuardDisplayContext::InNot
+                    GuardDisplayContext::InAnyArg | GuardDisplayContext::InNot
                 ) && children.len() > 1;
                 if wrap {
                     write!(f, "(")?;
@@ -966,27 +951,19 @@ impl GuardExpr {
                 Ok(())
             }
             GuardExpr::Or(children) => {
-                write!(f, "or(")?;
+                write!(f, "any(")?;
                 for (i, child) in children.iter().enumerate() {
                     if i > 0 {
                         write!(f, ", ")?;
                     }
-                    child.fmt_with_ctx(f, GuardDisplayContext::InOrArg)?;
+                    child.fmt_with_ctx(f, GuardDisplayContext::InAnyArg)?;
                 }
                 write!(f, ")")
             }
             GuardExpr::Not(child) => {
-                write!(f, "!")?;
-                let needs_paren =
-                    !matches!(child.as_ref(), GuardExpr::Predicate(_) | GuardExpr::Not(_));
-                if needs_paren {
-                    write!(f, "(")?;
-                }
+                write!(f, "not(")?;
                 child.fmt_with_ctx(f, GuardDisplayContext::InNot)?;
-                if needs_paren {
-                    write!(f, ")")?;
-                }
-                Ok(())
+                write!(f, ")")
             }
         }
     }

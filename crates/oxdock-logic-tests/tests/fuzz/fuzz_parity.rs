@@ -17,16 +17,15 @@ fn arb_platform_guard() -> impl Strategy<Value = PlatformGuard> {
 
 fn arb_guard() -> impl Strategy<Value = Guard> {
     prop_oneof![
-        (arb_platform_guard(), any::<bool>())
-            .prop_map(|(target, invert)| Guard::Platform { target, invert }),
-        ("[a-zA-Z_][a-zA-Z0-9_]*", any::<bool>())
-            .prop_map(|(key, invert)| Guard::EnvExists { key, invert }),
+        arb_platform_guard()
+            .prop_map(|target| Guard::Platform { target }),
+        "[a-zA-Z_][a-zA-Z0-9_]*"
+            .prop_map(|key| Guard::EnvExists { key }),
         (
             "[a-zA-Z_][a-zA-Z0-9_]*",
             "[a-zA-Z_][a-zA-Z0-9_]*",
-            any::<bool>(),
         )
-            .prop_map(|(key, value, invert)| Guard::EnvEquals { key, value, invert }),
+            .prop_map(|(key, value)| Guard::EnvEquals { key, value }),
     ]
 }
 
@@ -55,31 +54,8 @@ fn arb_guard_expr() -> impl Strategy<Value = GuardExpr> {
 
 fn canonical_not(expr: GuardExpr) -> GuardExpr {
     match expr {
-        GuardExpr::Predicate(guard) => GuardExpr::Predicate(invert_guard_predicate(guard)),
         GuardExpr::Not(inner) => *inner,
-        other => !other,
-    }
-}
-
-fn invert_guard_predicate(guard: Guard) -> Guard {
-    match guard {
-        Guard::Platform { target, invert } => Guard::Platform {
-            target,
-            invert: !invert,
-        },
-        Guard::EnvExists { key, invert } => Guard::EnvExists {
-            key,
-            invert: !invert,
-        },
-        Guard::EnvEquals { key, value, invert } => Guard::EnvEquals {
-            key,
-            value,
-            invert: !invert,
-        },
-        Guard::StaticBool { value, invert } => Guard::StaticBool {
-            value,
-            invert: !invert,
-        },
+        other => GuardExpr::Not(Box::new(other)),
     }
 }
 

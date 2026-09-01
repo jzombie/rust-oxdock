@@ -35,7 +35,7 @@ fn guard_env_equals_interpolation() {
     let val = "release";
     let steps = oxdock! {
         INHERIT_ENV [OXDOCK_TEST_MODE]
-        [env:#key == #val] WRITE mode-test.txt matched
+        [eq(env:#key, #val)] WRITE mode-test.txt matched
     };
 
     let root = GuardedPath::new_root(Path::new(".")).unwrap();
@@ -63,7 +63,7 @@ fn guard_not_interpolation() {
     let flag = "OXDOCK_TEST_SKIP";
     let steps = oxdock! {
         INHERIT_ENV [OXDOCK_TEST_SKIP]
-        [!env:#flag] WRITE not-skip-test.txt ran
+        [not(env:#flag)] WRITE not-skip-test.txt ran
     };
 
     let root = GuardedPath::new_root(Path::new(".")).unwrap();

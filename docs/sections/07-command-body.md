@@ -238,7 +238,7 @@ Inserts or updates an environment variable. The value is an expandable string.
 ENV APP_MODE=production
 
 // Guards read script variables set by ENV.
-[env:APP_MODE==production] ECHO running-in-production
+[eq(env:APP_MODE, production)] ECHO running-in-production
 ASSERT_STDOUT running-in-production
 
 ```

@@ -106,6 +106,14 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
             }
             Ok(Value::List(result))
         }
+        Expr::Map(entries) => {
+            let mut result = std::collections::BTreeMap::new();
+            for (key, val_expr) in entries {
+                let val = evaluate_expr(val_expr, cx)?;
+                result.insert(key.clone(), val);
+            }
+            Ok(Value::Map(result))
+        }
         Expr::Call { name, args } => match name.as_str() {
             "GLOB" => evaluate_glob(args, cx),
             "LOAD_TOML" => evaluate_load_toml(args, cx),
@@ -371,17 +379,21 @@ pub(crate) fn expand_string<P: ProcessManager>(
                             // Missing → emit empty
                         }
                     } else {
-                        // {{ env:KEY }} or {{ bare_key }} — look up in env, then DSL vars
-                        let env_key = key
+                        // {{ env:KEY }} — look up in env (script + process)
+                        // {{ script_env:KEY }} — explicit script env
+                        // {{ bare_key }} — DSL variable only, NOT env
+                        if let Some(env_key) = key
                             .strip_prefix("env:")
                             .or_else(|| key.strip_prefix("script_env:"))
-                            .unwrap_or(key);
-                        if let Some(val) = env.get(env_key) {
-                            output.push_str(val);
-                        } else if let Some(val) = state.get_var(env_key) {
+                        {
+                            if let Some(val) = env.get(env_key) {
+                                output.push_str(val);
+                            }
+                            // Missing → emit empty
+                        } else if let Some(val) = state.get_var(key) {
                             output.push_str(&format_value_for_string(&val));
                         }
-                        // Missing → emit empty
+                        // Bare key not in DSL vars → emit empty
                     }
                 } else {
                     // Unclosed template — preserve verbatim

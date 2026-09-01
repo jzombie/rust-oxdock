@@ -398,8 +398,8 @@ mod tests {
             [env:GATE] {
                 ECHO "gated"
             }
-            [env:A==1] ECHO "eq"
-            [or(env:X, env:Y)] ECHO "either"
+            [eq(env:A, 1)] ECHO "eq"
+            [any(env:X, env:Y)] ECHO "either"
             "#,
         );
         let refs = collect_env_references(&steps);

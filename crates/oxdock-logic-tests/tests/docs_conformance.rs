@@ -81,7 +81,7 @@ fn readme_snippets_parse_and_cover_every_command() -> Result<()> {
         );
     }
 
-    for marker in ["or(", "{{ env:", "[env:"] {
+    for marker in ["any(", "{{ env:", "[env:"] {
         assert!(
             bodies.contains(marker),
             "{README_NAME}: DSL reference must document structural feature '{marker}'"

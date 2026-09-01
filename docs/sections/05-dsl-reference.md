@@ -78,12 +78,13 @@ ASSERT_STDOUT <>
 
 A guard is a bracketed expression that gates the instruction or block that follows it. Inside the brackets:
 
-- `env:KEY` passes when variable `KEY` exists and is non-empty; `env:KEY==value` and `env:KEY!=value` compare values.
+- `env:KEY` passes when variable `KEY` exists and is non-empty; `eq(env:KEY, value)` and `neq(env:KEY, value)` compare values.
 - Bare platform tags pass based on the host: `linux`, `macos` (alias `mac`), `windows`, `unix`. Tags are case-insensitive.
 - A comma-separated list means **AND**: `[env:A, linux]`.
-- Disjunction is expressed as a call — `or(expr, expr, ...)` with at least two branches — not an infix operator.
-- Any predicate may be negated with a (repeatable) leading `!`: `[!env:SKIP]`.
-- Parentheses group expressions: `[or(env:A, linux), mac]`.
+- Disjunction is expressed as a call — `any(expr, expr, ...)` with at least two branches — not an infix operator.
+- Conjunction is expressed as a call — `all(expr, expr, ...)` — or implicitly via comma separation.
+- Any predicate may be negated with `not(...)`: `[not(env:SKIP)]`.
+- Parentheses group expressions: `[any(env:A, linux), mac]`.
 
 Guards attach to the next instruction. Several guard lines in a row chain onto the same target, and a guard immediately followed by `{` opens a guarded block whose guard applies to every enclosed instruction.
 
@@ -99,10 +100,10 @@ INHERIT_ENV [DEPLOY_TARGET]
 [env:DEPLOY_TARGET] ECHO deploy-target-visible
 
 // Equality against the inherited value.
-[env:DEPLOY_TARGET==staging] ECHO deploying-to-staging
+[eq(env:DEPLOY_TARGET, staging)] ECHO deploying-to-staging
 
 // Inequality: skipped below, because DEPLOY_TARGET IS staging.
-[env:DEPLOY_TARGET!=staging] ECHO deploying-elsewhere
+[neq(env:DEPLOY_TARGET, staging)] ECHO deploying-elsewhere
 
 ASSERT_STDOUT deploy-target-visible
 ASSERT_STDOUT deploying-to-staging
@@ -133,14 +134,14 @@ ASSERT_STDOUT deploying-to-staging
 // Bring the runner-injected value into the script environment.
 INHERIT_ENV [OXDOCK_DOC_FEATURE_A]
 
-// ! inverts the predicate: passes because the variable does NOT exist.
-[!env:OXDOCK_DOC_UNDEFINED_VAR] ECHO negation-passes-for-undefined
+// not(...) inverts the predicate: passes because the variable does NOT exist.
+[not(env:OXDOCK_DOC_UNDEFINED_VAR)] ECHO negation-passes-for-undefined
 
-// or(...) passes when ANY branch holds; A exists, so this runs.
-[or(env:OXDOCK_DOC_FEATURE_A, env:OXDOCK_DOC_FEATURE_B)] ECHO or-matched-a-branch
+// any(...) passes when ANY branch holds; A exists, so this runs.
+[any(env:OXDOCK_DOC_FEATURE_A, env:OXDOCK_DOC_FEATURE_B)] ECHO or-matched-a-branch
 
 // Comma composes with AND: (A or linux) AND A — true here on every OS.
-[or(env:OXDOCK_DOC_FEATURE_A, linux), env:OXDOCK_DOC_FEATURE_A] ECHO composed-and-or-guard
+[any(env:OXDOCK_DOC_FEATURE_A, linux), env:OXDOCK_DOC_FEATURE_A] ECHO composed-and-or-guard
 
 ASSERT_STDOUT negation-passes-for-undefined
 ASSERT_STDOUT or-matched-a-branch
@@ -175,7 +176,7 @@ ENV SCOPE_MARKER=armed
 
 // Guarded block: the WORKDIR change below is scoped and reverts
 // when the block closes.
-[env:SCOPE_MARKER==armed] {
+[eq(env:SCOPE_MARKER, armed)] {
   WORKDIR scoped-area
   WRITE inner.txt written-inside-scoped-block
   ASSERT_FILE inner.txt written-inside-scoped-block

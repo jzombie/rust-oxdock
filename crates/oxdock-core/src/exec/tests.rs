@@ -179,7 +179,6 @@ fn guarded_run_waits_for_env_to_be_set() {
     let guard = Guard::EnvEquals {
         key: "READY".into(),
         value: "1".into(),
-        invert: false,
     };
     let steps = vec![
         Step {
@@ -218,12 +217,10 @@ fn guard_groups_allow_any_matching_branch() {
     let guard_alpha = Guard::EnvEquals {
         key: "MODE".into(),
         value: "alpha".into(),
-        invert: false,
     };
     let guard_beta = Guard::EnvEquals {
         key: "MODE".into(),
         value: "beta".into(),
-        invert: false,
     };
     let steps = vec![
         Step {

@@ -8,7 +8,6 @@ use oxdock_parser::parse_script;
 fn platform_guard_display_uses_equals() {
     let guard = Guard::Platform {
         target: PlatformGuard::Unix,
-        invert: false,
     };
 
     assert_eq!(guard.to_string(), "unix");

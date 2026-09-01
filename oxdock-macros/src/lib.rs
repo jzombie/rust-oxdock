@@ -641,6 +641,16 @@ fn emit_expr(expr: &Expr, interp: &[(proc_macro2::Ident, usize)]) -> proc_macro2
             let item_tokens: Vec<_> = items.iter().map(|e| emit_expr(e, interp)).collect();
             quote! { Expr::List(vec![#(#item_tokens),*]) }
         }
+        Expr::Map(entries) => {
+            let entry_tokens: Vec<_> = entries
+                .iter()
+                .map(|(k, v)| {
+                    let val = emit_expr(v, interp);
+                    quote! { (#k.to_string(), #val) }
+                })
+                .collect();
+            quote! { Expr::Map(vec![#(#entry_tokens),*]) }
+        }
         Expr::Call { name, args } => {
             let arg_tokens: Vec<_> = args.iter().map(|e| emit_expr(e, interp)).collect();
             quote! { Expr::Call { name: #name.to_string(), args: vec![#(#arg_tokens),*] } }
@@ -985,27 +995,27 @@ fn emit_guard_pred(
     interp: &[(proc_macro2::Ident, usize)],
 ) -> proc_macro2::TokenStream {
     match g {
-        oxdock_parser::Guard::Platform { target, invert } => {
+        oxdock_parser::Guard::Platform { target } => {
             let target_variant = match target {
                 oxdock_parser::PlatformGuard::Unix => quote! { Unix },
                 oxdock_parser::PlatformGuard::Windows => quote! { Windows },
                 oxdock_parser::PlatformGuard::Macos => quote! { Macos },
                 oxdock_parser::PlatformGuard::Linux => quote! { Linux },
             };
-            quote! { oxdock_parser::Guard::Platform { target: oxdock_parser::PlatformGuard::#target_variant, invert: #invert } }
+            quote! { oxdock_parser::Guard::Platform { target: oxdock_parser::PlatformGuard::#target_variant } }
         }
-        oxdock_parser::Guard::EnvExists { key, invert } => {
+        oxdock_parser::Guard::EnvExists { key } => {
             let k = resolve_placeholder_or_literal(key, interp);
-            quote! { oxdock_parser::Guard::EnvExists { key: #k, invert: #invert } }
+            quote! { oxdock_parser::Guard::EnvExists { key: #k } }
         }
-        oxdock_parser::Guard::EnvEquals { key, value, invert } => {
+        oxdock_parser::Guard::EnvEquals { key, value } => {
             let k = resolve_placeholder_or_literal(key, interp);
             let v = resolve_placeholder_or_literal(value, interp);
-            quote! { oxdock_parser::Guard::EnvEquals { key: #k, value: #v, invert: #invert } }
+            quote! { oxdock_parser::Guard::EnvEquals { key: #k, value: #v } }
         }
-        oxdock_parser::Guard::StaticBool { value, invert } => {
+        oxdock_parser::Guard::StaticBool { value } => {
             let v = resolve_placeholder_or_literal(value, interp);
-            quote! { oxdock_parser::Guard::StaticBool { value: #v, invert: #invert } }
+            quote! { oxdock_parser::Guard::StaticBool { value: #v } }
         }
     }
 }

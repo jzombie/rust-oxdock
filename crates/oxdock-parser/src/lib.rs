@@ -17,7 +17,7 @@ pub use macro_input::{
     DslMacroInput, ScriptSource, parse_braced_tokens, script_from_braced_tokens,
 };
 pub use markdown::{BlockMetadata, FencedBlock, extract_fenced_blocks};
-pub use parser::parse_script;
+pub use parser::{parse_guard_expr_str, parse_script};
 pub use strip_flags::strip_flags;
 
 #[cfg(test)]
@@ -292,13 +292,13 @@ mod tests {
     fn guard_or_and_and_compose_as_expected() {
         let script = indoc! {r#"
             [env:A]
-            [or(env:B, env:C)]
+            [any(env:B, env:C)]
             MOCK_POS "echo complex"
         "#};
         let steps = parse_script(script, test_lower).expect("parse ok");
         assert_eq!(steps.len(), 1);
         let guard = steps[0].guard.as_ref().expect("missing guard");
-        assert_eq!(guard.to_string(), "env:A, or(env:B, env:C)");
+        assert_eq!(guard.to_string(), "env:A, any(env:B, env:C)");
 
         let mut env = HashMap::new();
         env.insert("A".into(), "1".into());
@@ -318,12 +318,10 @@ mod tests {
         let expr = GuardExpr::or(vec![
             Guard::EnvExists {
                 key: "MISSING".into(),
-                invert: false,
             }
             .into(),
             Guard::EnvExists {
                 key: "ALSO_MISSING".into(),
-                invert: false,
             }
             .into(),
         ]);
@@ -335,11 +333,11 @@ mod tests {
 
     #[test]
     fn guard_or_can_chain_with_additional_predicates() {
-        let script = "[or(env:A, linux), mac] MOCK_POS \"echo hi\"";
+        let script = "[any(env:A, linux), mac] MOCK_POS \"echo hi\"";
         let steps = parse_script(script, test_lower).expect("parse ok");
         assert_eq!(steps.len(), 1);
         let guard = steps[0].guard.as_ref().expect("missing guard");
-        assert_eq!(guard.to_string(), "or(env:A, linux), macos");
+        assert_eq!(guard.to_string(), "any(env:A, linux), macos");
         let GuardExpr::All(children) = guard else {
             panic!("expected ALL guard");
         };
@@ -347,7 +345,6 @@ mod tests {
         match &children[1] {
             GuardExpr::Predicate(Guard::Platform {
                 target: PlatformGuard::Macos,
-                invert: false,
             }) => {}
             other => panic!("unexpected trailing guard: {other:?}"),
         }
@@ -357,22 +354,21 @@ mod tests {
     fn guard_or_guard_line_parses() {
         use crate::lexer::{LanguageParser, Rule};
         use pest::Parser;
-        LanguageParser::parse(Rule::guard_line, "[or(linux, env:FOO)]")
+        LanguageParser::parse(Rule::guard_line, "[any(linux, env:FOO)]")
             .expect("guard guard line should parse");
     }
 
     #[test]
-    fn env_equals_guard_respects_inversion() {
-        let g = Guard::EnvEquals {
+    fn env_equals_guard_with_not_wrapper() {
+        let g = GuardExpr::Not(Box::new(GuardExpr::Predicate(Guard::EnvEquals {
             key: "A".into(),
             value: "1".into(),
-            invert: true,
-        };
+        })));
         let mut env = HashMap::new();
         env.insert("A".into(), "1".into());
-        assert!(!guard_allows(&g, &env));
+        assert!(!guard_expr_allows(&g, &env));
         env.insert("A".into(), "2".into());
-        assert!(guard_allows(&g, &env));
+        assert!(guard_expr_allows(&g, &env));
     }
 
     #[test]
@@ -474,16 +470,16 @@ mod tests {
 
         cases.push((
             indoc! {r#"
-                [!env:SKIP]
+                [not(env:SKIP)]
                 [windows] MOCK_POS win
-                [env:MODE==beta, linux] MOCK_POS combo
+                [eq(env:MODE, beta), linux] MOCK_POS combo
             "#}
             .trim()
             .to_string(),
             quote! {
-                [!env:SKIP]
+                [not(env:SKIP)]
                 [windows] MOCK_POS win
-                [env:MODE==beta, linux] MOCK_POS combo
+                [eq(env:MODE, beta), linux] MOCK_POS combo
             },
         ));
 
@@ -506,14 +502,14 @@ mod tests {
 
         cases.push((
             indoc! {r#"
-                [env:TEST==1]
+                [eq(env:TEST, 1)]
                 WITH_IO [stdout=pipe:capture_case] MOCK_POS hi
                 WITH_IO [stdin=pipe:capture_case] MOCK_POS out.txt
             "#}
             .trim()
             .to_string(),
             quote! {
-                [env:TEST==1]
+                [eq(env:TEST, 1)]
                 WITH_IO [stdout=pipe:capture_case] MOCK_POS hi
                 WITH_IO [stdin=pipe:capture_case] MOCK_POS out.txt
             },
@@ -691,7 +687,7 @@ mod tests {
 
     #[test]
     fn guard_block_with_mock_command() {
-        let script = "MOCK_NO_ARGS\n[env:GATE] {\n    MOCK_POS gated\n}\n[env:A==1] MOCK_POS eq\n";
+        let script = "MOCK_NO_ARGS\n[env:GATE] {\n    MOCK_POS gated\n}\n[eq(env:A, 1)] MOCK_POS eq\n";
         let steps = parse_script(script, test_lower).expect("parse should succeed");
         assert!(
             steps.len() >= 2,

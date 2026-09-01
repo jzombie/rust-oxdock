@@ -197,7 +197,7 @@ impl CommandSpec for EnvCmd {
                     ENV APP_MODE=production
 
                     // Guards read script variables set by ENV.
-                    [env:APP_MODE==production] ECHO running-in-production
+                    [eq(env:APP_MODE, production)] ECHO running-in-production
                     ASSERT_STDOUT running-in-production
                 "#},
             }]
@@ -927,7 +927,12 @@ impl CommandSpec for ExpandCmd {
         for arg in args {
             let s = arg.as_str();
             if let Some((k, v)) = s.split_once('=') {
-                overrides.push((k.to_string(), Arg::String(v.to_string())));
+                let val = v
+                    .strip_prefix('"')
+                    .and_then(|s| s.strip_suffix('"'))
+                    .or_else(|| v.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+                    .unwrap_or(v);
+                overrides.push((k.to_string(), Arg::String(val.to_string())));
             } else if path.is_none() {
                 path = Some(arg);
             } else {
