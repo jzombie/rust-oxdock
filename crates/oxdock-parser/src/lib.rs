@@ -37,15 +37,15 @@ mod tests {
     fn string_dsl_supports_rust_style_comments() {
         let script = indoc! {r#"
             // leading comment line
-            WORKDIR /tmp // inline comment
-            RUN echo "keep // literal"
+            WORKDIR "/tmp" // inline comment
+            RUN 'echo "keep // literal"'
             /* block comment
                WORKDIR ignored
                /* nested inner */
                RUN ignored as well
             */
-            RUN echo final
-            RUN echo 'literal /* stay */ value'
+            RUN "echo final"
+            RUN "echo 'literal /* stay */ value'"
         "#};
         let steps = parse_script(script).expect("parse ok");
         assert_eq!(steps.len(), 4, "expected 4 executable steps");
@@ -78,7 +78,7 @@ mod tests {
 
     #[test]
     fn semicolon_attached_to_command_splits_instructions() {
-        let script = "RUN echo hi; RUN echo bye";
+        let script = "RUN \"echo hi\"; RUN \"echo bye\"";
         let steps = parse_script(script).expect("parse ok");
         assert_eq!(steps.len(), 2);
         match &steps[0].kind {
@@ -93,7 +93,7 @@ mod tests {
 
     #[test]
     fn guard_supports_colon_separator() {
-        let script = "[env:FOO] RUN echo hi";
+        let script = "[env:FOO] RUN \"echo hi\"";
         let steps = parse_script(script).expect("parse ok");
         assert_eq!(steps.len(), 1);
         assert_eq!(guard_text(&steps[0]).as_deref(), Some("env:FOO"));
@@ -124,7 +124,7 @@ mod tests {
 
     #[test]
     fn with_io_supports_named_pipes() {
-        let script = "WITH_IO [stdin, stdout=pipe:setup, stderr=pipe:errors] RUN echo hi";
+        let script = "WITH_IO [stdin, stdout=pipe:setup, stderr=pipe:errors] RUN \"echo hi\"";
         let steps = parse_script(script).expect("parse ok");
         assert_eq!(steps.len(), 1);
         match &steps[0].kind {
@@ -166,7 +166,7 @@ mod tests {
                 env:A,
                 env:B
             ]
-            RUN echo guarded
+            RUN "echo guarded"
         "#};
         let steps = parse_script(script).expect("parse ok");
         assert_eq!(steps.len(), 1);
@@ -228,7 +228,7 @@ mod tests {
         let script = indoc! {r#"
             [env:A]
             [or(env:B, env:C)]
-            RUN echo complex
+            RUN "echo complex"
         "#};
         let steps = parse_script(script).expect("parse ok");
         assert_eq!(steps.len(), 1);
@@ -270,7 +270,7 @@ mod tests {
 
     #[test]
     fn guard_or_can_chain_with_additional_predicates() {
-        let script = "[or(env:A, linux), mac] RUN echo hi";
+        let script = "[or(env:A, linux), mac] RUN \"echo hi\"";
         let steps = parse_script(script).expect("parse ok");
         assert_eq!(steps.len(), 1);
         let guard = steps[0].guard.as_ref().expect("missing guard");
@@ -373,10 +373,10 @@ mod tests {
     #[test]
     fn assert_commands_parse_and_round_trip() {
         let script = indoc! {r#"
-            ASSERT_FILE dist/hello.txt Built with OxDock
-            ASSERT_DIR deeply/nested/tree
-            ASSERT_ABSENT chained.txt
-            ASSERT_STDOUT visible-after-comments
+            ASSERT_FILE "dist/hello.txt" "Built with OxDock"
+            ASSERT_DIR "deeply/nested/tree"
+            ASSERT_ABSENT "chained.txt"
+            ASSERT_STDOUT "visible-after-comments"
         "#};
         let steps = parse_script(script).expect("parse ok");
         assert_eq!(steps.len(), 4);
@@ -418,7 +418,7 @@ mod tests {
 
     #[test]
     fn run_args_preserve_quotes_for_problematic_tokens() {
-        let script = "RUN echo \"a; b\"";
+        let script = "RUN 'echo \"a; b\"'";
         let steps = parse_script(script).expect("parse ok");
         match &steps[0].kind {
             StepKind::Run(cmd) => {
@@ -710,10 +710,10 @@ mod tests {
     #[test]
     fn single_line_blocks_all_commands() {
         let test_cases = [
-            "IF true { ECHO hello }",
-            "IF true { RUN cargo test }",
-            "IF true { WORKDIR /app }",
-            "IF true { ENV FOO=bar }",
+            "IF true { ECHO \"hello\" }",
+            "IF true { RUN \"cargo test\" }",
+            "IF true { WORKDIR \"/app\" }",
+            "IF true { ENV FOO=\"bar\" }",
         ];
 
         for script in test_cases {

@@ -1,1 +1,1 @@
-SYMLINK ./target_dir ./linked
+SYMLINK ./target_dir "./linked"

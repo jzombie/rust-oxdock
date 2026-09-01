@@ -1,1 +1,1 @@
-WRITE note.txt hello
+WRITE note.txt "hello"

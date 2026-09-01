@@ -1,6 +1,6 @@
-ENV CARGO_TARGET_DIR ="ws/target"
+ENV CARGO_TARGET_DIR="ws/target"
 WITH_IO [stdout=pipe:capture] {
-  ECHO {{ env:CARGO_TARGET_DIR }}
+  ECHO "{{ env:CARGO_TARGET_DIR }}"
 }
 WITH_IO [stdin=pipe:capture] {
   WRITE env-target.txt

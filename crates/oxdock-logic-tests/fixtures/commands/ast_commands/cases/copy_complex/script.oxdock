@@ -1,1 +1,1 @@
-COPY ./src ./dst
+COPY ./src "./dst"

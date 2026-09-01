@@ -1,3 +1,3 @@
 FOR $f IN ["a", "b", "c"] {
-    WRITE $f.txt $f
+    WRITE "{{ $f }}.txt" "{{ $f }}"
 }

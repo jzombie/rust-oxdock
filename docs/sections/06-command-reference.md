@@ -19,7 +19,6 @@
 | [`CWD`](#cwd) | `CWD` |
 | [`READ`](#read) | `READ [<path>]` |
 | [`WRITE`](#write) | `WRITE <path> [<contents>]` |
-| [`RAW_WRITE`](#raw_write) | `RAW_WRITE <path> <contents>` |
 | [`APPEND`](#append) | `APPEND <path> [<contents>]` |
 | [`EXPAND`](#expand) | `EXPAND [<path>] [<KEY=val> ...]` |
 | [`ASSERT_FILE`](#assert_file) | `ASSERT_FILE [--hash <sha256>] <path> [<expected>]` |

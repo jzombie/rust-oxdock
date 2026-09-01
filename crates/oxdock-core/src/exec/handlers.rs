@@ -439,28 +439,6 @@ pub(super) fn write<P: ProcessManager>(
     Ok(())
 }
 
-pub(super) fn raw_write<P: ProcessManager>(
-    cx: &mut StepCtx<'_, P>,
-    idx: usize,
-    path: &str,
-    contents: &str,
-) -> Result<()> {
-    let target = cx
-        .state
-        .fs
-        .resolve_write(&cx.state.cwd, path)
-        .with_context(|| format!("step {}: RAW_WRITE {}", idx + 1, path))?;
-    cx.state
-        .fs
-        .ensure_parent_dir(&target)
-        .with_context(|| format!("failed to create parent for {}", target.display()))?;
-    cx.state
-        .fs
-        .write_file(&target, contents.as_bytes())
-        .with_context(|| format!("failed to write {}", target.display()))?;
-    Ok(())
-}
-
 pub(super) fn append<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     idx: usize,

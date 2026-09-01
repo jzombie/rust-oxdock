@@ -1,1 +1,1 @@
-COPY ./source.txt ./copied.txt
+COPY ./source.txt "./copied.txt"

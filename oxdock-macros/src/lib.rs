@@ -489,7 +489,7 @@ fn expand_oxdock(input: TokenStream) -> syn::Result<TokenStream> {
 
     let ts_out = quote! {
         {
-            use oxdock_parser::{Arg, Expr, Step, StepKind, TemplateString, Value,
+            use oxdock_parser::{Arg, Expr, Step, StepKind, Value,
                 IoBinding, IoStream, WorkspaceTarget, GuardExpr, Guard, PlatformGuard};
             vec![#(#step_tokens),*]
         }
@@ -591,22 +591,17 @@ fn sanitize_hash_tokens_inner(
 
 fn emit_arg(arg: &Arg, interp: &[(proc_macro2::Ident, usize)]) -> proc_macro2::TokenStream {
     match arg {
-        Arg::Literal(s) => {
+        Arg::String(s) => {
             if let Some(idx) = is_placeholder(s) {
                 let ident = &interp.iter().find(|(_, i)| *i == idx).unwrap().0;
-                quote! { Arg::Literal(#ident.to_string()) }
+                quote! { Arg::String(#ident.to_string()) }
             } else {
-                quote! { Arg::Literal(#s.to_string()) }
+                quote! { Arg::String(#s.to_string()) }
             }
         }
-        Arg::Template(t) => {
-            let s = t.as_ref();
-            if let Some(idx) = is_placeholder(s) {
-                let ident = &interp.iter().find(|(_, i)| *i == idx).unwrap().0;
-                quote! { Arg::Literal(#ident.to_string()) }
-            } else {
-                quote! { Arg::Template(TemplateString(#s.to_string())) }
-            }
+        Arg::Expr(e) => {
+            let tok = emit_expr(e, interp);
+            quote! { Arg::Expr(#tok) }
         }
     }
 }
@@ -811,11 +806,6 @@ fn emit_stepkind(
                 }
                 None => quote! { StepKind::Write { path: #p, contents: None } },
             }
-        }
-        StepKind::RawWrite { path, contents } => {
-            let p = emit_arg(path, interp);
-            let c = emit_arg(contents, interp);
-            quote! { StepKind::RawWrite { path: #p, contents: #c } }
         }
         StepKind::Append { path, contents } => {
             let p = emit_arg(path, interp);

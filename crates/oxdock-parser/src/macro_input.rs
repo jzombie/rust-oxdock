@@ -407,13 +407,17 @@ fn walk(
                 let is_command = super::Command::parse(&ident_text).is_some();
                 // LET and FOR introduce new statements but aren't in the Command enum.
                 // They must still trigger line finalization so they start on a new line.
-                let is_new_statement = is_command || matches!(ident_text.as_str(), "LET" | "FOR");
+                let is_new_statement = is_command || matches!(ident_text.as_str(), "LET" | "FOR" | "IF" | "ELSE");
                 let trimmed = line.trim();
                 let trimmed_empty = trimmed.is_empty();
                 let guard_prefix = trimmed.starts_with('[');
                 let line_requires_inner = line_expects_inner_command(trimmed);
                 let mut should_finalize = false;
-                if is_new_statement && !trimmed_empty && !guard_prefix {
+                // ELSE always appends to current line — grammar handles } \n ELSE via blank*
+                // IF after ELSE stays on same line (ELSE IF clause)
+                if ident_text == "ELSE" || (ident_text == "IF" && trimmed.ends_with("ELSE")) {
+                    should_finalize = false;
+                } else if is_new_statement && !trimmed_empty && !guard_prefix {
                     let current_expects_inner = line_expects_inner_command(trimmed);
                     should_finalize = !line_is_run_context(trimmed) && !current_expects_inner;
                 }

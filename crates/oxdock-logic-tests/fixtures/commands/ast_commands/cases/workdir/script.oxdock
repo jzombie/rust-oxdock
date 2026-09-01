@@ -1,4 +1,4 @@
 WORKDIR /
 MKDIR workspace
 WORKDIR workspace
-WRITE note.txt hi
+WRITE note.txt "hi"

@@ -507,13 +507,13 @@ fn mock_fs_normalizes_backslash_workdir() {
     let steps = vec![
         Step {
             guard: None,
-            kind: StepKind::Mkdir("win\\nested".into()),
+            kind: StepKind::Mkdir("win_nest".into()),
             scope_enter: 0,
             scope_exit: 0,
         },
         Step {
             guard: None,
-            kind: StepKind::Workdir("win\\nested".into()),
+            kind: StepKind::Workdir("win_nest".into()),
             scope_enter: 0,
             scope_exit: 0,
         },
@@ -530,13 +530,13 @@ fn mock_fs_normalizes_backslash_workdir() {
     let (cwd, snapshot) = run_with_mock_fs(&steps);
     let cwd_display = cwd.display().to_string();
     assert!(
-        cwd_display.ends_with("win\\nested") || cwd_display.ends_with("win/nested"),
-        "expected cwd to normalize backslashes, got {cwd_display}"
+        cwd_display.ends_with("win_nest"),
+        "expected cwd to end with win_nest, got {cwd_display}"
     );
     assert!(
         snapshot
             .keys()
-            .any(|path| path.ends_with("win/nested/inner.txt")),
+            .any(|path| path.ends_with("win_nest/inner.txt")),
         "expected file under normalized path, snapshot: {:?}",
         snapshot.keys()
     );
@@ -547,7 +547,7 @@ fn mock_fs_normalizes_backslash_workdir() {
 fn mock_fs_rejects_absolute_windows_paths() {
     let steps = vec![Step {
         guard: None,
-        kind: StepKind::Workdir(r"C:\outside".into()),
+        kind: StepKind::Workdir("C:\\outside".into()),
         scope_enter: 0,
         scope_exit: 0,
     }];

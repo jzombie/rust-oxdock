@@ -6,36 +6,35 @@ use super::state::ExecState;
 use super::steps::StepCtx;
 
 /// Resolve an [`Arg`] using an [`ExecState`] directly (no [`StepCtx`] needed).
-///
-/// * `Arg::Literal` — returned as-is, no expansion.
-/// * `Arg::Template` — `$variable` references are resolved first, then
-///   `{{ env:KEY }}` template expressions are expanded via [`StreamingExpand`].
+/// Only handles `Arg::String` — `Arg::Expr` requires a `StepCtx` and must go through `resolve_arg`.
 pub(crate) fn resolve_arg_state<P: ProcessManager>(
     arg: &Arg,
     state: &ExecState<P>,
 ) -> Result<String> {
     match arg {
-        Arg::Literal(s) => Ok(s.clone()),
-        Arg::Template(t) => {
-            let resolved = resolve_dollar_vars(&t.0, state);
+        Arg::String(s) => {
             let ctx = state.command_ctx()?;
-            let expander = oxdock_process::StreamingExpand::new(&[], ctx.envs());
-            expander
-                .expand_string(&resolved)
-                .map_err(|e| anyhow::anyhow!("failed to expand template {}: {}", t.0, e))
+            Ok(expand_string(s, ctx.envs(), state)?)
         }
+        Arg::Expr(e) => bail!("Arg::Expr cannot be resolved without StepCtx: {:?}", e),
     }
 }
 
-/// Resolve an [`Arg`] by delegating to [`resolve_arg_state`] with `cx.state`.
-pub(crate) fn resolve_arg<P: ProcessManager>(arg: &Arg, cx: &StepCtx<'_, P>) -> Result<String> {
-    resolve_arg_state(arg, cx.state)
+/// Resolve an [`Arg`] — handles all variants.
+pub(crate) fn resolve_arg<P: ProcessManager>(arg: &Arg, cx: &mut StepCtx<'_, P>) -> Result<String> {
+    match arg {
+        Arg::String(s) => Ok(expand_string(s, &cx.state.envs, cx.state)?),
+        Arg::Expr(e) => {
+            let val = evaluate_expr(e, cx)?;
+            Ok(format_value_for_string(&val))
+        }
+    }
 }
 
 /// Resolve an optional [`Arg`]. Returns `Ok(None)` when `None` is passed.
 pub(crate) fn resolve_arg_opt<P: ProcessManager>(
     arg: &Option<Arg>,
-    cx: &StepCtx<'_, P>,
+    cx: &mut StepCtx<'_, P>,
 ) -> Result<Option<String>> {
     match arg {
         Some(a) => resolve_arg(a, cx).map(Some),
@@ -46,7 +45,7 @@ pub(crate) fn resolve_arg_opt<P: ProcessManager>(
 /// Resolve a list of `(name, Arg)` override pairs.
 pub(crate) fn resolve_overrides<P: ProcessManager>(
     overrides: &[(String, Arg)],
-    cx: &StepCtx<'_, P>,
+    cx: &mut StepCtx<'_, P>,
 ) -> Result<Vec<(String, String)>> {
     overrides
         .iter()
@@ -61,8 +60,8 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
 ) -> Result<Value> {
     match expr {
         Expr::Literal(Value::String(s)) => {
-            // Resolve embedded $variable references in string literals
-            Ok(Value::String(resolve_dollar_vars(s, cx.state)))
+            // Expand {{ $var }} and {{ env:KEY }} in string literals
+            Ok(Value::String(expand_string(s, &cx.state.envs, cx.state)?))
         }
         Expr::Literal(v) => Ok(v.clone()),
         Expr::Var(name) => cx
@@ -271,113 +270,169 @@ fn json_to_value(v: serde_json::Value) -> Value {
     }
 }
 
-/// Resolve `$variable` references in `input`, replacing each with its value
-/// from the current scope chain. Supports key-path traversal (`$pkg.name`)
-/// and falls back to environment variables when vars are not found.
-/// Unknown variables are left as-is.
-pub(crate) fn resolve_dollar_vars<P: ProcessManager>(input: &str, state: &ExecState<P>) -> String {
-    let mut result = String::new();
+/// Single-pass string expansion: handles escapes and `{{ }}` template tags.
+///
+/// `{{ $var }}` — interpolates script variable (supports key-paths: `{{ $d.name.0 }}`).
+/// `{{ env:KEY }}` — interpolates environment variable.
+/// Bare `$` is literal text — `{{ }}` is the ONLY interpolation trigger.
+///
+/// Escape rules:
+/// - `\\` → literal `\`
+/// - `\{{` → literal `{{` (skip template expansion)
+/// - `\n`, `\t`, `\r`, `\"` → control characters
+/// - Unrecognized `\X` → literal `\X`
+pub(crate) fn expand_string<P: ProcessManager>(
+    input: &str,
+    env: &std::collections::HashMap<String, String>,
+    state: &ExecState<P>,
+) -> Result<String> {
+    let mut output = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => match chars.peek() {
+                Some(&'\\') => {
+                    output.push('\\');
+                    chars.next();
+                }
+                Some(&'{') => {
+                    // Check for \{{ (literal {{)
+                    let mut lookahead = chars.clone();
+                    lookahead.next(); // skip first {
+                    if lookahead.next() == Some('{') {
+                        output.push_str("{{");
+                        chars.next(); // skip first {
+                        chars.next(); // skip second {
+                    } else {
+                        output.push('\\');
+                    }
+                }
+                Some(&'n') => {
+                    output.push('\n');
+                    chars.next();
+                }
+                Some(&'t') => {
+                    output.push('\t');
+                    chars.next();
+                }
+                Some(&'r') => {
+                    output.push('\r');
+                    chars.next();
+                }
+                Some(&'"') => {
+                    output.push('"');
+                    chars.next();
+                }
+                _ => {
+                    output.push('\\');
+                }
+            },
+            '{' if chars.peek() == Some(&'{') => {
+                chars.next(); // consume second {
+                let mut template_key = String::new();
+                let mut found_close = false;
+                while let Some(ch) = chars.next() {
+                    if ch == '}' && chars.peek() == Some(&'}') {
+                        chars.next(); // consume second }
+                        found_close = true;
+                        break;
+                    }
+                    template_key.push(ch);
+                }
+                if found_close {
+                    let key = template_key.trim();
+                    if let Some(var_expr) = key.strip_prefix('$') {
+                        // {{ $var }} or {{ $var.path.0 }} — look up in scope chain.
+                        // Parse key-path from the extracted string, NOT from chars.
+                        // Trim whitespace from segments to tolerate spaces around dots.
+                        let mut parts = var_expr.split('.');
+                        if let Some(base_var) = parts.next() {
+                            let base_trim = base_var.trim();
+                            let mut current = state.get_var(base_trim).or_else(|| {
+                                env.get(base_trim)
+                                    .map(|v| Value::String(v.clone()))
+                            });
+                            for part in parts {
+                                let part_trim = part.trim();
+                                current = match current {
+                                    Some(Value::Map(map)) => map.get(part_trim).cloned(),
+                                    Some(Value::List(list)) => part_trim
+                                        .parse::<usize>()
+                                        .ok()
+                                        .and_then(|idx| list.get(idx).cloned()),
+                                    _ => None,
+                                };
+                                if current.is_none() {
+                                    break;
+                                }
+                            }
+                            if let Some(v) = current {
+                                output.push_str(&format_value_for_string(&v));
+                            }
+                            // Missing → emit empty
+                        }
+                    } else {
+                        // {{ env:KEY }} or {{ bare_key }} — look up in env, then DSL vars
+                        let env_key = key
+                            .strip_prefix("env:")
+                            .or_else(|| key.strip_prefix("script_env:"))
+                            .unwrap_or(key);
+                        if let Some(val) = env.get(env_key) {
+                            output.push_str(val);
+                        } else if let Some(val) = state.get_var(env_key) {
+                            output.push_str(&format_value_for_string(&val));
+                        }
+                        // Missing → emit empty
+                    }
+                } else {
+                    // Unclosed template — preserve verbatim
+                    output.push_str("{{");
+                    output.push_str(&template_key);
+                }
+            }
+            _ => {
+                output.push(c);
+            }
+        }
+    }
+    Ok(output)
+}
+
+/// Expand bare `$var` references in a string using DSL scope.
+/// Used by RUN commands to expand DSL variables before passing to shell.
+/// Undefined variables are left as-is (shell will handle them).
+pub(crate) fn expand_dsl_vars<P: ProcessManager>(
+    input: &str,
+    state: &ExecState<P>,
+) -> String {
+    let mut output = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
     while let Some(c) = chars.next() {
         if c == '$' {
-            // Collect base identifier
-            let mut name = String::new();
+            let mut var_name = String::new();
             while let Some(&ch) = chars.peek() {
-                if ch.is_alphanumeric() || ch == '_' {
-                    name.push(ch);
+                if ch.is_ascii_alphanumeric() || ch == '_' {
+                    var_name.push(ch);
                     chars.next();
                 } else {
                     break;
                 }
             }
-            if name.is_empty() {
-                result.push('$');
+            if var_name.is_empty() {
+                output.push('$');
                 continue;
             }
-            // Attempt to look up base variable
-            let base_val = match state.get_var(&name) {
-                Some(v) => v,
-                None => {
-                    if let Some(env_val) = state.envs.get(&name) {
-                        Value::String(env_val.clone())
-                    } else {
-                        result.push('$');
-                        result.push_str(&name);
-                        continue;
-                    }
-                }
-            };
-            // Try to consume dot-separated key-path segments
-            let mut current = base_val;
-            let mut consumed_segments: Vec<String> = Vec::new();
-            let mut lookup_failed = false;
-            loop {
-                if chars.peek() != Some(&'.') {
-                    break;
-                }
-                // Peek ahead: collect the segment without consuming
-                let mut temp_chars = chars.clone();
-                temp_chars.next(); // consume '.'
-                let mut segment = String::new();
-                while let Some(&ch) = temp_chars.peek() {
-                    if ch.is_alphanumeric() || ch == '_' {
-                        segment.push(ch);
-                        temp_chars.next();
-                    } else {
-                        break;
-                    }
-                }
-                if segment.is_empty() {
-                    break;
-                }
-                // Try to traverse into current value
-                match &current {
-                    Value::Map(map) => {
-                        if let Some(next) = map.get(&segment) {
-                            current = next.clone();
-                            chars = temp_chars; // commit consumption
-                            consumed_segments.push(segment);
-                        } else {
-                            lookup_failed = true;
-                            break;
-                        }
-                    }
-                    Value::List(list) => {
-                        if let Ok(idx) = segment.parse::<usize>() {
-                            if let Some(next) = list.get(idx) {
-                                current = next.clone();
-                                chars = temp_chars;
-                                consumed_segments.push(segment);
-                            } else {
-                                lookup_failed = true;
-                                break;
-                            }
-                        } else {
-                            lookup_failed = true;
-                            break;
-                        }
-                    }
-                    Value::String(_) | Value::Bool(_) | Value::Int(_) => {
-                        break; // Scalar reached; remaining dots belong to static text
-                    }
-                }
-            }
-            if lookup_failed {
-                // Emit the full original expression: $base.seg1.seg2
-                result.push('$');
-                result.push_str(&name);
-                for seg in &consumed_segments {
-                    result.push('.');
-                    result.push_str(seg);
-                }
+            if let Some(val) = state.get_var(&var_name) {
+                output.push_str(&format_value_for_string(&val));
             } else {
-                result.push_str(&format_value_for_string(&current));
+                output.push('$');
+                output.push_str(&var_name);
             }
         } else {
-            result.push(c);
+            output.push(c);
         }
     }
-    result
+    output
 }
 
 /// Format a `Value` as a string for inline interpolation.

@@ -1,3 +1,3 @@
-ENV FOO=bar
+ENV FOO="bar"
 RUN_BG @RUN_BG_CMD@
 RUN @BG_WAIT_CMD@

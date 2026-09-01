@@ -1,1 +1,1 @@
-WRITE ../escape.txt nope
+WRITE ../escape.txt "nope"

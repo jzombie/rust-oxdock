@@ -1,8 +1,8 @@
 WORKDIR /
-WRITE snap.txt snap
+WRITE snap.txt "snap"
 WORKSPACE LOCAL
 WORKDIR /
-WRITE local.txt local
+WRITE local.txt "local"
 WORKSPACE SNAPSHOT
 WORKDIR /
-WRITE snap2.txt snap2
+WRITE snap2.txt "snap2"

@@ -1,2 +1,2 @@
-APPEND note.txt hello
-APPEND note.txt world
+APPEND note.txt "hello"
+APPEND note.txt "world"

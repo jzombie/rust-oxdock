@@ -19,7 +19,6 @@ pub enum Command {
     Cwd,
     Read,
     Write,
-    RawWrite,
     Append,
     Expand,
     AssertFile,
@@ -47,7 +46,6 @@ pub const COMMANDS: &[Command] = &[
     Command::Cwd,
     Command::Read,
     Command::Write,
-    Command::RawWrite,
     Command::Append,
     Command::Expand,
     Command::AssertFile,
@@ -77,7 +75,6 @@ impl Command {
             Command::Cwd => "CWD",
             Command::Read => "READ",
             Command::Write => "WRITE",
-            Command::RawWrite => "RAW_WRITE",
             Command::Append => "APPEND",
             Command::Expand => "EXPAND",
             Command::AssertFile => "ASSERT_FILE",
@@ -107,7 +104,6 @@ impl Command {
             Command::Cwd => "CWD",
             Command::Read => "READ [<path>]",
             Command::Write => "WRITE <path> [<contents>]",
-            Command::RawWrite => "RAW_WRITE <path> <contents>",
             Command::Append => "APPEND <path> [<contents>]",
             Command::Expand => "EXPAND [<path>] [<KEY=val> ...]",
             Command::AssertFile => "ASSERT_FILE [--hash <sha256>] <path> [<expected>]",
@@ -141,7 +137,6 @@ impl Command {
             "CWD" => Some(Command::Cwd),
             "READ" => Some(Command::Read),
             "WRITE" => Some(Command::Write),
-            "RAW_WRITE" => Some(Command::RawWrite),
             "APPEND" => Some(Command::Append),
             "EXPAND" => Some(Command::Expand),
             "ASSERT_FILE" => Some(Command::AssertFile),
@@ -247,96 +242,42 @@ impl From<Guard> for GuardExpr {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct TemplateString(pub String);
-
-impl From<String> for TemplateString {
-    fn from(s: String) -> Self {
-        TemplateString(s)
-    }
-}
-
-impl From<&str> for TemplateString {
-    fn from(s: &str) -> Self {
-        TemplateString(s.to_string())
-    }
-}
-
-impl std::fmt::Display for TemplateString {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl AsRef<str> for TemplateString {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl PartialEq<str> for TemplateString {
-    fn eq(&self, other: &str) -> bool {
-        self.0 == other
-    }
-}
-
-impl PartialEq<&str> for TemplateString {
-    fn eq(&self, other: &&str) -> bool {
-        self.0 == *other
-    }
-}
-
-impl std::ops::Deref for TemplateString {
-    type Target = str;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-/// A command argument that may be a raw literal or a template requiring
-/// `$variable` resolution and `{{ env:KEY }}` expansion.
+/// A command argument — either an expandable string or an expression.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Arg {
-    /// Raw string — no variable resolution or template expansion.
-    /// Used by RAW_WRITE contents.
-    Literal(String),
-    /// Template string — undergoes $variable resolution then {{ env:KEY }} expansion.
-    Template(TemplateString),
+    /// Expandable string — `{{ $var }}` and `{{ env:KEY }}` expanded at runtime by expand_string.
+    /// Backslash escapes (`\n`, `\\`, etc.) are also processed.
+    String(String),
+    /// Expression — resolved at runtime via evaluate_expr.
+    Expr(Expr),
 }
 
 impl Arg {
     pub fn as_str(&self) -> &str {
         match self {
-            Arg::Literal(s) => s,
-            Arg::Template(t) => &t.0,
+            Arg::String(s) => s,
+            Arg::Expr(_) => "",
         }
     }
 }
 
 impl From<String> for Arg {
     fn from(s: String) -> Self {
-        Arg::Template(TemplateString(s))
+        Arg::String(s)
     }
 }
 
 impl From<&str> for Arg {
     fn from(s: &str) -> Self {
-        Arg::Template(TemplateString(s.to_string()))
-    }
-}
-
-impl From<TemplateString> for Arg {
-    fn from(t: TemplateString) -> Self {
-        Arg::Template(t)
+        Arg::String(s.to_string())
     }
 }
 
 impl std::fmt::Display for Arg {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Arg::Literal(s) => write!(f, "{}", s),
-            Arg::Template(t) => write!(f, "{}", t),
+            Arg::String(s) => write!(f, "{}", s),
+            Arg::Expr(e) => write!(f, "{}", e),
         }
     }
 }
@@ -450,13 +391,6 @@ pub enum StepKind {
     Write {
         path: Arg,
         contents: Option<Arg>,
-    },
-    /// RAW_WRITE writes literal bytes to a file without expanding template
-    /// placeholders.  The path is still resolved via `resolve_arg`; only
-    /// the file contents bypass expansion (stored as Arg::Literal).
-    RawWrite {
-        path: Arg,
-        contents: Arg,
     },
     Append {
         path: Arg,
@@ -787,14 +721,6 @@ impl fmt::Display for StepKind {
                     write!(f, " {}", quote_msg(body.as_str()))?;
                 }
                 Ok(())
-            }
-            StepKind::RawWrite { path, contents } => {
-                write!(
-                    f,
-                    "RAW_WRITE {} {}",
-                    quote_arg(path.as_str()),
-                    quote_msg(contents.as_str())
-                )
             }
             StepKind::Append { path, contents } => {
                 write!(f, "APPEND {}", quote_arg(path.as_str()))?;

@@ -1,5 +1,5 @@
 use crate::ast::{
-    Guard, GuardExpr, IoBinding, IoStream, PlatformGuard, Step, StepKind, WorkspaceTarget,
+    Arg, Guard, GuardExpr, IoBinding, IoStream, PlatformGuard, Step, StepKind, WorkspaceTarget,
 };
 use crate::lexer::{self, RawToken, Rule};
 use anyhow::{Result, anyhow, bail};
@@ -438,7 +438,7 @@ fn parse_command(pair: Pair<Rule>) -> Result<StepKind> {
     let kind = match pair.as_rule() {
         Rule::workdir_command => {
             let arg = parse_single_arg(pair)?;
-            StepKind::Workdir(arg.into())
+            StepKind::Workdir(arg)
         }
         Rule::workspace_command => {
             let target = parse_workspace_target(pair)?;
@@ -453,7 +453,7 @@ fn parse_command(pair: Pair<Rule>) -> Result<StepKind> {
         }
         Rule::echo_command => {
             let msg = parse_message(pair)?;
-            StepKind::Echo(msg.into())
+            StepKind::Echo(msg)
         }
         Rule::run_command => {
             let cmd = parse_run_args(pair)?;
@@ -464,7 +464,7 @@ fn parse_command(pair: Pair<Rule>) -> Result<StepKind> {
             StepKind::RunBg(cmd.into())
         }
         Rule::copy_command => {
-            let mut args: Vec<String> = Vec::new();
+            let mut args: Vec<Arg> = Vec::new();
             let mut from_current_workspace = false;
             for inner in pair.into_inner() {
                 match inner.as_rule() {
@@ -478,8 +478,8 @@ fn parse_command(pair: Pair<Rule>) -> Result<StepKind> {
             }
             StepKind::Copy {
                 from_current_workspace,
-                from: args.remove(0).into(),
-                to: args.remove(0).into(),
+                from: args.remove(0),
+                to: args.remove(0),
             }
         }
         Rule::with_io_command => {
@@ -506,7 +506,7 @@ fn parse_command(pair: Pair<Rule>) -> Result<StepKind> {
             }
         }
         Rule::copy_git_command => {
-            let mut args = Vec::new();
+            let mut args: Vec<Arg> = Vec::new();
             let mut include_dirty = false;
             for inner in pair.into_inner() {
                 match inner.as_rule() {
@@ -519,15 +519,14 @@ fn parse_command(pair: Pair<Rule>) -> Result<StepKind> {
                 bail!("COPY_GIT expects 3 arguments (rev, from, to)");
             }
             StepKind::CopyGit {
-                rev: args.remove(0).into(),
-                from: args.remove(0).into(),
-                to: args.remove(0).into(),
+                rev: args.remove(0),
+                from: args.remove(0),
+                to: args.remove(0),
                 include_dirty,
             }
         }
         Rule::hash_sha256_command => {
-            let arg = parse_single_arg(pair)?;
-            StepKind::HashSha256 { path: arg.into() }
+            StepKind::HashSha256 { path: parse_single_arg(pair)? }
         }
         Rule::inherit_env_command => {
             let mut keys: Vec<String> = Vec::new();
@@ -549,22 +548,22 @@ fn parse_command(pair: Pair<Rule>) -> Result<StepKind> {
         Rule::symlink_command => {
             let mut args = parse_args(pair)?;
             StepKind::Symlink {
-                from: args.remove(0).into(),
-                to: args.remove(0).into(),
+                from: args.remove(0),
+                to: args.remove(0),
             }
         }
         Rule::mkdir_command => {
             let arg = parse_single_arg(pair)?;
-            StepKind::Mkdir(arg.into())
+            StepKind::Mkdir(arg)
         }
         Rule::ls_command => {
             let args = parse_args(pair)?;
-            StepKind::Ls(args.into_iter().next().map(Into::into))
+            StepKind::Ls(args.into_iter().next())
         }
         Rule::cwd_command => StepKind::Cwd,
         Rule::read_command => {
             let args = parse_args(pair)?;
-            StepKind::Read(args.into_iter().next().map(Into::into))
+            StepKind::Read(args.into_iter().next())
         }
         Rule::write_command => {
             let mut path = None;
@@ -575,39 +574,15 @@ fn parse_command(pair: Pair<Rule>) -> Result<StepKind> {
                         path = Some(parse_argument(inner)?);
                     }
                     Rule::message => {
-                        contents = Some(parse_concatenated_string(inner)?);
+                        contents = Some(parse_message_fragments(inner)?);
                     }
                     _ => {}
                 }
             }
             StepKind::Write {
                 path: path
-                    .ok_or_else(|| anyhow!("WRITE expects a path argument"))?
-                    .into(),
-                contents: contents.map(Into::into),
-            }
-        }
-        Rule::raw_write_command => {
-            let mut path = None;
-            let mut contents = None;
-            for inner in pair.into_inner() {
-                match inner.as_rule() {
-                    Rule::argument if path.is_none() => {
-                        path = Some(parse_argument(inner)?);
-                    }
-                    Rule::message => {
-                        contents = Some(parse_concatenated_string(inner)?);
-                    }
-                    _ => {}
-                }
-            }
-            StepKind::RawWrite {
-                path: path
-                    .ok_or_else(|| anyhow!("RAW_WRITE expects a path argument"))?
-                    .into(),
-                contents: crate::ast::Arg::Literal(
-                    contents.ok_or_else(|| anyhow!("RAW_WRITE expects a contents argument"))?,
-                ),
+                    .ok_or_else(|| anyhow!("WRITE expects a path argument"))?,
+                contents,
             }
         }
         Rule::append_command => {
@@ -619,16 +594,15 @@ fn parse_command(pair: Pair<Rule>) -> Result<StepKind> {
                         path = Some(parse_argument(inner)?);
                     }
                     Rule::message => {
-                        contents = Some(parse_concatenated_string(inner)?);
+                        contents = Some(parse_message_fragments(inner)?);
                     }
                     _ => {}
                 }
             }
             StepKind::Append {
                 path: path
-                    .ok_or_else(|| anyhow!("APPEND expects a path argument"))?
-                    .into(),
-                contents: contents.map(Into::into),
+                    .ok_or_else(|| anyhow!("APPEND expects a path argument"))?,
+                contents,
             }
         }
         Rule::expand_command => {
@@ -654,22 +628,22 @@ fn parse_command(pair: Pair<Rule>) -> Result<StepKind> {
                             }
                         }
                         if let (Some(k), Some(v)) = (key, value) {
-                            overrides.push((k, v.into()));
+                            overrides.push((k, v));
                         }
                     }
                     _ => {}
                 }
             }
             StepKind::Expand {
-                path: path.map(Into::into),
+                path,
                 overrides,
             }
         }
         Rule::assert_file_hash_command => parse_assert_file_hash(pair)?,
         Rule::assert_file_content_command => parse_assert_file_content(pair)?,
-        Rule::assert_dir_command => StepKind::AssertDir(parse_single_arg(pair)?.into()),
-        Rule::assert_absent_command => StepKind::AssertAbsent(parse_single_arg(pair)?.into()),
-        Rule::assert_stdout_command => StepKind::AssertStdout(parse_message(pair)?.into()),
+        Rule::assert_dir_command => StepKind::AssertDir(parse_single_arg(pair)?),
+        Rule::assert_absent_command => StepKind::AssertAbsent(parse_single_arg(pair)?),
+        Rule::assert_stdout_command => StepKind::AssertStdout(parse_message(pair)?),
         Rule::exit_command => {
             let code = parse_exit_code(pair)?;
             StepKind::Exit(code)
@@ -864,7 +838,6 @@ fn is_command_rule(rule: Rule) -> bool {
             | Rule::cwd_command
             | Rule::read_command
             | Rule::write_command
-            | Rule::raw_write_command
             | Rule::append_command
             | Rule::expand_command
             | Rule::assert_file_hash_command
@@ -889,8 +862,7 @@ fn parse_assert_file_hash(pair: Pair<Rule>) -> Result<StepKind> {
     Ok(StepKind::AssertFile {
         hash: Some(digest.ok_or_else(|| anyhow!("missing hash digest"))?),
         path: path
-            .ok_or_else(|| anyhow!("ASSERT_FILE --hash expects a path argument"))?
-            .into(),
+            .ok_or_else(|| anyhow!("ASSERT_FILE --hash expects a path argument"))?,
         contents: None,
     })
 }
@@ -904,7 +876,7 @@ fn parse_assert_file_content(pair: Pair<Rule>) -> Result<StepKind> {
                 path = Some(parse_argument(part)?);
             }
             Rule::message => {
-                contents = Some(parse_concatenated_string(part)?);
+                contents = Some(parse_message_fragments(part)?);
             }
             _ => {}
         }
@@ -912,13 +884,12 @@ fn parse_assert_file_content(pair: Pair<Rule>) -> Result<StepKind> {
     Ok(StepKind::AssertFile {
         hash: None,
         path: path
-            .ok_or_else(|| anyhow!("ASSERT_FILE expects a path argument"))?
-            .into(),
-        contents: contents.map(Into::into),
+            .ok_or_else(|| anyhow!("ASSERT_FILE expects a path argument"))?,
+        contents,
     })
 }
 
-fn parse_single_arg(pair: Pair<Rule>) -> Result<String> {
+fn parse_single_arg(pair: Pair<Rule>) -> Result<Arg> {
     for inner in pair.into_inner() {
         if inner.as_rule() == Rule::argument {
             return parse_argument(inner);
@@ -927,7 +898,7 @@ fn parse_single_arg(pair: Pair<Rule>) -> Result<String> {
     bail!("missing argument")
 }
 
-fn parse_args(pair: Pair<Rule>) -> Result<Vec<String>> {
+fn parse_args(pair: Pair<Rule>) -> Result<Vec<Arg>> {
     let mut args = Vec::new();
     for inner in pair.into_inner() {
         if inner.as_rule() == Rule::argument {
@@ -937,51 +908,20 @@ fn parse_args(pair: Pair<Rule>) -> Result<Vec<String>> {
     Ok(args)
 }
 
-fn parse_argument(pair: Pair<Rule>) -> Result<String> {
-    let inner = pair.into_inner().next().unwrap();
-    match inner.as_rule() {
-        Rule::quoted_string => parse_quoted_string(inner),
-        Rule::templated_arg => Ok(inner.as_str().to_string()),
-        Rule::unquoted_arg => Ok(inner.as_str().to_string()),
-        _ => unreachable!(),
+fn parse_argument(pair: Pair<Rule>) -> Result<Arg> {
+    let inner: Vec<_> = pair.into_inner().collect();
+    // Single expression — preserve as Arg::Expr for runtime evaluation
+    if inner.len() == 1 && inner[0].as_rule() == Rule::expr {
+        return Ok(Arg::Expr(parse_expr(inner.into_iter().next().unwrap())?));
     }
+    Ok(Arg::String(parse_fragments(&inner)?))
 }
 
 fn parse_quoted_string(pair: Pair<Rule>) -> Result<String> {
     let s = pair.as_str();
-    let quote = s.chars().next().unwrap();
     let content = &s[1..s.len() - 1];
-
-    // Single-quoted strings are raw literals — backslashes preserved as-is
-    if quote == '\'' {
-        return Ok(content.to_string());
-    }
-
-    // Double-quoted strings process escape sequences
-    let mut out = String::with_capacity(content.len());
-    let mut escape = false;
-    for ch in content.chars() {
-        if escape {
-            match ch {
-                'n' => out.push('\n'),
-                'r' => out.push('\r'),
-                't' => out.push('\t'),
-                '\\' => out.push('\\'),
-                '\'' => out.push('\''),
-                '"' => out.push('"'),
-                other => {
-                    out.push('\\');
-                    out.push(other);
-                }
-            }
-            escape = false;
-        } else if ch == '\\' {
-            escape = true;
-        } else {
-            out.push(ch);
-        }
-    }
-    Ok(out)
+    // Pass contents verbatim — all escape processing deferred to runtime expand_string
+    Ok(content.to_string())
 }
 
 fn parse_workspace_target(pair: Pair<Rule>) -> Result<WorkspaceTarget> {
@@ -1005,16 +945,8 @@ fn parse_env_pair(pair: Pair<Rule>) -> Result<(String, String)> {
             let value_pair = parts.next().unwrap();
             let value = match value_pair.as_rule() {
                 Rule::env_value_part => {
-                    let inner_val = value_pair.into_inner().next().unwrap();
-                    match inner_val.as_rule() {
-                        Rule::quoted_string => parse_quoted_string(inner_val)?,
-                        Rule::templated_arg => inner_val.as_str().to_string(),
-                        Rule::unquoted_env_value => inner_val.as_str().to_string(),
-                        _ => unreachable!(
-                            "unexpected rule in env_value_part: {:?}",
-                            inner_val.as_rule()
-                        ),
-                    }
+                    let fragments: Vec<_> = value_pair.into_inner().collect();
+                    parse_fragments(&fragments)?
                 }
                 _ => unreachable!("expected env_value_part"),
             };
@@ -1024,32 +956,45 @@ fn parse_env_pair(pair: Pair<Rule>) -> Result<(String, String)> {
     bail!("missing env pair")
 }
 
-fn parse_message(pair: Pair<Rule>) -> Result<String> {
+fn parse_message(pair: Pair<Rule>) -> Result<Arg> {
     for inner in pair.into_inner() {
         if inner.as_rule() == Rule::message {
-            return parse_concatenated_string(inner);
+            return parse_message_fragments(inner);
         }
     }
     bail!("missing message")
 }
 
+fn parse_message_fragments(message_pair: Pair<Rule>) -> Result<Arg> {
+    let parts: Vec<_> = message_pair.into_inner().collect();
+    if parts.len() == 1 && parts[0].as_rule() == Rule::expr {
+        return Ok(Arg::Expr(parse_expr(parts.into_iter().next().unwrap())?));
+    }
+    Ok(Arg::String(parse_fragments(&parts)?))
+}
+
 fn parse_run_args(pair: Pair<Rule>) -> Result<String> {
     for inner in pair.into_inner() {
         if inner.as_rule() == Rule::run_args {
-            return parse_smart_concatenated_string(inner);
+            return parse_concatenated_fragments(inner);
         }
     }
     bail!("missing run args")
 }
 
-fn parse_smart_concatenated_string(pair: Pair<Rule>) -> Result<String> {
+fn parse_concatenated_fragments(pair: Pair<Rule>) -> Result<String> {
     let parts: Vec<_> = pair.into_inner().collect();
+    parse_fragments(&parts)
+}
 
-    // Special case: If there is only one token and it is quoted, we assume the user
-    // quoted it to satisfy the DSL (e.g. to include semicolons) but intends for the
-    // content to be the raw command string. We unquote it unconditionally.
-    if parts.len() == 1 && parts[0].as_rule() == Rule::quoted_string {
-        return parse_quoted_string(parts[0].clone());
+/// Concatenate fragment pairs (string_literal, templated_arg, unquoted_arg, expr)
+/// into a single String. Adjacent fragments without whitespace are joined directly;
+/// fragments separated by whitespace get a space inserted.
+fn parse_fragments(parts: &[Pair<Rule>]) -> Result<String> {
+    // Single quoted string: unquote unconditionally
+    if parts.len() == 1 && parts[0].as_rule() == Rule::string_literal {
+        let s = parts[0].as_str();
+        return Ok(s[1..s.len() - 1].to_string());
     }
 
     let mut body = String::new();
@@ -1062,47 +1007,16 @@ fn parse_smart_concatenated_string(pair: Pair<Rule>) -> Result<String> {
             body.push(' ');
         }
         match part.as_rule() {
-            Rule::quoted_string => {
-                let raw = part.as_str();
-                let unquoted = parse_quoted_string(part.clone())?;
-                // Preserve quotes if the content needs them to be parsed correctly
-                // by the shell (e.g. contains spaces, semicolons, etc).
-                let needs_quotes = unquoted.is_empty()
-                    || unquoted
-                        .chars()
-                        .any(|c| c.is_whitespace() || c == ';' || c == '\n' || c == '\r')
-                    || unquoted.contains("//")
-                    || unquoted.contains("/*");
-
-                if needs_quotes {
-                    body.push_str(raw);
-                } else {
-                    body.push_str(&unquoted);
-                }
+            Rule::string_literal => {
+                let s = part.as_str();
+                let unquoted = &s[1..s.len() - 1];
+                body.push_str(unquoted);
             }
-            Rule::unquoted_msg_content | Rule::unquoted_run_content => body.push_str(part.as_str()),
-            Rule::templated_arg => body.push_str(part.as_str()),
-            _ => {}
-        }
-        last_end = Some(span.end());
-    }
-    Ok(body)
-}
-
-fn parse_concatenated_string(pair: Pair<Rule>) -> Result<String> {
-    let mut body = String::new();
-    let mut last_end = None;
-    for part in pair.into_inner() {
-        let span = part.as_span();
-        if let Some(end) = last_end
-            && span.start() > end
-        {
-            body.push(' ');
-        }
-        match part.as_rule() {
-            Rule::quoted_string => body.push_str(&parse_quoted_string(part)?),
-            Rule::unquoted_msg_content | Rule::unquoted_run_content => body.push_str(part.as_str()),
-            Rule::templated_arg => body.push_str(part.as_str()),
+            Rule::templated_arg | Rule::unquoted_arg | Rule::unquoted_env_value
+            | Rule::unquoted_msg_content | Rule::unquoted_run_content => {
+                body.push_str(part.as_str());
+            }
+            Rule::expr => body.push_str(part.as_str()),
             _ => {}
         }
         last_end = Some(span.end());

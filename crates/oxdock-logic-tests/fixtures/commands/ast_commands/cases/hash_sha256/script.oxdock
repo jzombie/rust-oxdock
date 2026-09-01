@@ -1,4 +1,4 @@
-WRITE data.txt hello
+WRITE data.txt "hello"
 HASH_SHA256 data.txt
 WITH_IO [stdout=pipe:cap_hash_txt] HASH_SHA256 data.txt
 WITH_IO [stdin=pipe:cap_hash_txt] WRITE hash.txt

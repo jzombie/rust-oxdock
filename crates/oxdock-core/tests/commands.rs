@@ -405,7 +405,7 @@ fn inherit_env_removal_blocks_host_env() {
     let script = indoc! {
         r#"
         INHERIT_ENV [SPECIAL_TOKEN]
-        WRITE seen.txt {{ env:SPECIAL_TOKEN }}
+        WRITE "seen.txt" {{ env:SPECIAL_TOKEN }}
         "#
     };
     let steps = oxdock_parser::parse_script(script).unwrap();
@@ -476,9 +476,9 @@ fn write_cmd_captures_output() {
     let root = guard_root(&temp);
     #[allow(clippy::disallowed_macros)]
     let cmd = if cfg!(windows) {
-        "RUN echo hello"
+        "RUN \"echo hello\""
     } else {
-        "RUN printf %s \"hello\""
+        "RUN \"printf %s \\\"hello\\\"\""
     };
     let capture = capture_pipeline("cap-write", "out.txt", *parse_one(cmd));
     let steps = capture.into_iter().collect::<Vec<_>>();
@@ -503,7 +503,7 @@ fn capture_echo_interpolates_env() {
     steps.extend(capture_pipeline(
         "cap-echo",
         "echo.txt",
-        *parse_one("ECHO value={{ env:FOO }}"),
+        *parse_one("ECHO \"value={{ env:FOO }}\""),
     ));
 
     run_steps(&root, &steps).unwrap();
@@ -1255,9 +1255,9 @@ fn assert_stdout_sees_streamed_child_output() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     #[cfg(unix)]
-    let script = "RUN echo child-echo-line\nASSERT_STDOUT child-echo-line\n";
+    let script = "RUN \"echo child-echo-line\"\nASSERT_STDOUT \"child-echo-line\"\n";
     #[cfg(windows)]
-    let script = "RUN cmd /c echo child-echo-line\nASSERT_STDOUT child-echo-line\n";
+    let script = "RUN \"cmd /c echo child-echo-line\"\nASSERT_STDOUT \"child-echo-line\"\n";
     run_script(&root, script).expect("child output is recorded");
 }
 

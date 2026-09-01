@@ -1094,7 +1094,6 @@ fn step_kind_name(kind: &StepKind) -> &'static str {
         StepKind::Cwd => "Cwd",
         StepKind::Read(_) => "Read",
         StepKind::Write { .. } => "Write",
-        StepKind::RawWrite { .. } => "RawWrite",
         StepKind::Append { .. } => "Append",
         StepKind::AssertFile { .. } => "AssertFile",
         StepKind::AssertDir(_) => "AssertDir",

@@ -72,8 +72,8 @@ mod tests {
         let script = format!(
             indoc!(
                 r#"
-                [env:{guard}] WRITE skipped.txt hi
-                WRITE kept.txt ok
+                [env:{guard}] WRITE "skipped.txt" "hi"
+                WRITE "kept.txt" "ok"
                 "#
             ),
             guard = guard_var
@@ -96,9 +96,9 @@ mod tests {
 
         let script = indoc!(
             r#"
-            ENV FOO=1
-            [env:FOO] WRITE hit.txt yes
-            WRITE always.txt ok
+            ENV FOO="1"
+            [env:FOO] WRITE "hit.txt" "yes"
+            WRITE "always.txt" "ok"
             "#
         );
         let steps = parse_script(script).unwrap();
@@ -119,8 +119,8 @@ mod tests {
 
         let script = indoc!(
             r#"
-            ECHO Hello, world
-            WRITE always.txt ok
+            ECHO "Hello, world"
+            WRITE "always.txt" "ok"
             "#
         );
         let steps = parse_script(script).unwrap();
@@ -137,10 +137,10 @@ mod tests {
 
         let script = indoc!(
             r#"
-            ENV FOO=1
+            ENV FOO="1"
             [env:FOO]
-            WRITE hit.txt yes
-            WRITE always.txt ok
+            WRITE "hit.txt" "yes"
+            WRITE "always.txt" "ok"
             "#
         );
         let steps = parse_script(script).unwrap();
@@ -161,8 +161,8 @@ mod tests {
 
         let script = indoc!(
             r#"
-            [!unix] WRITE platform.txt hi
-            WRITE always.txt ok
+            [!unix] WRITE "platform.txt" "hi"
+            WRITE "always.txt" "ok"
             "#
         );
         let steps = parse_script(script).unwrap();
@@ -186,12 +186,12 @@ mod tests {
 
         let script = indoc!(
             r#"
-            ENV RUN=1
+            ENV RUN="1"
             [env:RUN] {
-                ENV INNER=1
-                WRITE scoped.txt hit
+                ENV INNER="1"
+                WRITE "scoped.txt" "hit"
             }
-            [env:INNER] WRITE leak.txt nope
+            [env:INNER] WRITE "leak.txt" "nope"
             "#
         );
         let steps = parse_script(script).unwrap();
@@ -212,13 +212,13 @@ mod tests {
 
         let script = indoc!(
             r#"
-            MKDIR nested
-            ENV RUN=1
+            MKDIR "nested"
+            ENV RUN="1"
             [env:RUN] {
-                WORKDIR nested
-                WRITE inside.txt ok
+                WORKDIR "nested"
+                WRITE "inside.txt" "ok"
             }
-            WRITE outside.txt root
+            WRITE "outside.txt" "root"
             "#
         );
         let steps = parse_script(script).unwrap();
@@ -248,12 +248,12 @@ mod tests {
 
         let script = indoc!(
             r#"
-            ENV RUN=1
+            ENV RUN="1"
             [env:RUN] {
                 WORKSPACE LOCAL
-                WRITE local_only.txt inside
+                WRITE "local_only.txt" "inside"
             }
-            WRITE snapshot_only.txt outside
+            WRITE "snapshot_only.txt" "outside"
             "#
         );
         let steps = parse_script(script).unwrap();
@@ -285,8 +285,8 @@ mod tests {
         let script = format!(
             indoc!(
                 r#"
-                [env:PROFILE=={0}] WRITE hit.txt yes
-                [env:PROFILE!={0}] WRITE miss.txt no
+                [env:PROFILE=={0}] WRITE "hit.txt" "yes"
+                [env:PROFILE!={0}] WRITE "miss.txt" "no"
                 "#
             ),
             profile
@@ -316,8 +316,8 @@ mod tests {
         let script = format!(
             indoc!(
                 r#"
-                [env:{k},env:{k}==ok] WRITE hit.txt yes
-                WRITE always.txt ok
+                [env:{k},env:{k}==ok] WRITE "hit.txt" "yes"
+                WRITE "always.txt" "ok"
                 "#
             ),
             k = key
@@ -343,8 +343,8 @@ mod tests {
         let script = format!(
             indoc!(
                 r#"
-                [env:{k},env:{k}!=ok] WRITE miss.txt yes
-                WRITE always.txt ok
+                [env:{k},env:{k}!=ok] WRITE "miss.txt" "yes"
+                WRITE "always.txt" "ok"
                 "#
             ),
             k = key
@@ -370,7 +370,7 @@ mod tests {
         let root = guard_root(&temp);
 
         // Background succeeds quickly; pipeline should complete without error.
-        let script = "RUN_BG sh -c 'sleep 0.05'";
+        let script = "RUN_BG \"sh -c 'sleep 0.05'\"";
         let steps = parse_script(script).unwrap();
         let res = run_steps(&root, &steps);
         assert!(res.is_ok(), "RUN_BG success should allow clean exit");
@@ -386,7 +386,7 @@ mod tests {
         let temp = GuardedPath::tempdir().unwrap();
         let root = guard_root(&temp);
 
-        let script = "RUN_BG sh -c 'sleep 0.05; exit 7'";
+        let script = "RUN_BG \"sh -c 'sleep 0.05; exit 7'\"";
         let steps = parse_script(script).unwrap();
         let err = run_steps(&root, &steps).unwrap_err();
         let msg = err.to_string();
@@ -408,9 +408,9 @@ mod tests {
 
         let script = indoc! {
             r#"
-            RUN_BG sh -c 'sleep 0.2; echo one > one.txt'
-            RUN_BG sh -c 'sleep 0.5; echo two > two.txt'
-            WRITE done.txt ok
+            RUN_BG "sh -c 'sleep 0.2; echo one > one.txt'"
+            RUN_BG "sh -c 'sleep 0.5; echo two > two.txt'"
+            WRITE "done.txt" "ok"
             "#
         };
 
@@ -452,8 +452,8 @@ mod tests {
 
         let script = indoc! {
             r#"
-            RUN_BG sh -c 'sleep 1; echo late > late.txt'
-            RUN __oxdock_missing_command_xyz__
+            RUN_BG "sh -c 'sleep 1; echo late > late.txt'"
+            RUN "__oxdock_missing_command_xyz__"
             "#
         };
 
@@ -483,7 +483,7 @@ mod tests {
 
         let script = indoc! {
             r#"
-            RUN_BG sh -c 'sleep 1; echo late > late.txt'
+            RUN_BG "sh -c 'sleep 1; echo late > late.txt'"
             EXIT 5
             "#
         };
@@ -511,17 +511,17 @@ mod tests {
         let script = if cfg!(windows) {
             indoc! {
                 r#"
-                ENV FOO=bar
-                RUN echo %FOO% > run.txt
-                RUN_BG echo %FOO% > bg.txt
+                ENV FOO="bar"
+                RUN "echo %FOO% > run.txt"
+                RUN_BG "echo %FOO% > bg.txt"
                 "#
             }
         } else {
             indoc! {
                 r#"
-                ENV FOO=bar
-                RUN sh -c 'printf %s "$FOO" > run.txt'
-                RUN_BG sh -c 'printf %s "$FOO" > bg.txt'
+                ENV FOO="bar"
+                RUN "sh -c 'printf %s \"$FOO\" > run.txt'"
+                RUN_BG "sh -c 'printf %s \"$FOO\" > bg.txt'"
                 "#
             }
         };
@@ -542,11 +542,11 @@ mod tests {
 
         let script = indoc! {
             r#"
-            WRITE snap.txt snap
+            WRITE "snap.txt" "snap"
             WORKSPACE LOCAL
-            WRITE local.txt local
+            WRITE "local.txt" "local"
             WORKSPACE SNAPSHOT
-            WRITE snap2.txt again
+            WRITE "snap2.txt" "again"
             "#
         };
 
@@ -570,13 +570,13 @@ mod tests {
         let script = indoc! {
             r#"
             WORKSPACE LOCAL
-            WORKDIR /
-            WRITE localroot.txt one
-            WORKDIR client
-            WRITE client.txt two
+            WORKDIR "/"
+            WRITE "localroot.txt" "one"
+            WORKDIR "client"
+            WRITE "client.txt" "two"
             WORKSPACE SNAPSHOT
-            WORKDIR /
-            WRITE snaproot.txt three
+            WORKDIR "/"
+            WRITE "snaproot.txt" "three"
             "#
         };
 

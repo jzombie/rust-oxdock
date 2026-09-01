@@ -1,2 +1,2 @@
 MKDIR a/b
-WRITE a/b/../../../../outside.txt nope
+WRITE a/b/../../../../outside.txt "nope"

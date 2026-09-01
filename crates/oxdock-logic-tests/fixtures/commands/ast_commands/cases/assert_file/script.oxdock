@@ -1,2 +1,2 @@
-WRITE artifact.txt expected-body
-ASSERT_FILE artifact.txt expected-body
+WRITE artifact.txt "expected-body"
+ASSERT_FILE artifact.txt "expected-body"

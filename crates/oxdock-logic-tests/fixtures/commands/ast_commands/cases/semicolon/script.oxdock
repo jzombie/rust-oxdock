@@ -1,1 +1,1 @@
-WRITE one.txt 1; WRITE two.txt 2
+WRITE one.txt "1"; WRITE two.txt "2"

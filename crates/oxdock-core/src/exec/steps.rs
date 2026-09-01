@@ -152,24 +152,26 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
     };
     match cmd {
         StepKind::Run(arg) => {
-            let cmd = super::args::resolve_arg(arg, &cx)?;
+            let cmd = super::args::resolve_arg(arg, &mut cx)?;
+            let cmd = super::args::expand_dsl_vars(&cmd, cx.state);
             handlers::run(&mut cx, idx, &cmd)
         }
         StepKind::Echo(arg) => {
-            let msg = super::args::resolve_arg(arg, &cx)?;
+            let msg = super::args::resolve_arg(arg, &mut cx)?;
             handlers::echo(&mut cx, &msg)
         }
         StepKind::RunBg(arg) => {
-            let cmd = super::args::resolve_arg(arg, &cx)?;
+            let cmd = super::args::resolve_arg(arg, &mut cx)?;
+            let cmd = super::args::expand_dsl_vars(&cmd, cx.state);
             handlers::run_bg(&mut cx, idx, &cmd)
         }
         StepKind::Workdir(arg) => {
-            let path = super::args::resolve_arg(arg, &cx)?;
+            let path = super::args::resolve_arg(arg, &mut cx)?;
             handlers::workdir(&mut cx, idx, &path)
         }
         StepKind::Workspace(target) => handlers::workspace(&mut cx, target),
         StepKind::Env { key, value } => {
-            let resolved = super::args::resolve_arg(value, &cx)?;
+            let resolved = super::args::resolve_arg(value, &mut cx)?;
             handlers::env(&mut cx, key, &resolved)
         }
         StepKind::InheritEnv { keys } => {
@@ -191,8 +193,8 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
             from,
             to,
         } => {
-            let from_resolved = super::args::resolve_arg(from, &cx)?;
-            let to_resolved = super::args::resolve_arg(to, &cx)?;
+            let from_resolved = super::args::resolve_arg(from, &mut cx)?;
+            let to_resolved = super::args::resolve_arg(to, &mut cx)?;
             handlers::copy(
                 &mut cx,
                 idx,
@@ -207,9 +209,9 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
             to,
             include_dirty,
         } => {
-            let rev_resolved = super::args::resolve_arg(rev, &cx)?;
-            let from_resolved = super::args::resolve_arg(from, &cx)?;
-            let to_resolved = super::args::resolve_arg(to, &cx)?;
+            let rev_resolved = super::args::resolve_arg(rev, &mut cx)?;
+            let from_resolved = super::args::resolve_arg(from, &mut cx)?;
+            let to_resolved = super::args::resolve_arg(to, &mut cx)?;
             handlers::copy_git(
                 &mut cx,
                 idx,
@@ -220,48 +222,40 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
             )
         }
         StepKind::HashSha256 { path } => {
-            let path_resolved = super::args::resolve_arg(path, &cx)?;
+            let path_resolved = super::args::resolve_arg(path, &mut cx)?;
             handlers::hash_sha256(&mut cx, idx, &path_resolved)
         }
         StepKind::Symlink { from, to } => {
-            let from_resolved = super::args::resolve_arg(from, &cx)?;
-            let to_resolved = super::args::resolve_arg(to, &cx)?;
+            let from_resolved = super::args::resolve_arg(from, &mut cx)?;
+            let to_resolved = super::args::resolve_arg(to, &mut cx)?;
             handlers::symlink(&mut cx, idx, &from_resolved, &to_resolved)
         }
         StepKind::Mkdir(arg) => {
-            let path = super::args::resolve_arg(arg, &cx)?;
+            let path = super::args::resolve_arg(arg, &mut cx)?;
             handlers::mkdir(&mut cx, idx, &path)
         }
         StepKind::Ls(arg) => {
-            let resolved = super::args::resolve_arg_opt(arg, &cx)?;
+            let resolved = super::args::resolve_arg_opt(arg, &mut cx)?;
             handlers::ls(&mut cx, idx, &resolved)
         }
         StepKind::Cwd => handlers::cwd(&mut cx, idx),
         StepKind::Read(arg) => {
-            let resolved = super::args::resolve_arg_opt(arg, &cx)?;
+            let resolved = super::args::resolve_arg_opt(arg, &mut cx)?;
             handlers::read(&mut cx, idx, &resolved)
         }
         StepKind::Write { path, contents } => {
-            let path_resolved = super::args::resolve_arg(path, &cx)?;
-            let contents_resolved = super::args::resolve_arg_opt(contents, &cx)?;
+            let path_resolved = super::args::resolve_arg(path, &mut cx)?;
+            let contents_resolved = super::args::resolve_arg_opt(contents, &mut cx)?;
             handlers::write(&mut cx, idx, &path_resolved, contents_resolved.as_deref())
         }
-        StepKind::RawWrite { path, contents } => {
-            let path_resolved = super::args::resolve_arg(path, &cx)?;
-            let contents_str = match contents {
-                Arg::Literal(s) => s.clone(),
-                Arg::Template(t) => super::args::resolve_dollar_vars(&t.0, cx.state),
-            };
-            handlers::raw_write(&mut cx, idx, &path_resolved, &contents_str)
-        }
         StepKind::Append { path, contents } => {
-            let path_resolved = super::args::resolve_arg(path, &cx)?;
-            let contents_resolved = super::args::resolve_arg_opt(contents, &cx)?;
+            let path_resolved = super::args::resolve_arg(path, &mut cx)?;
+            let contents_resolved = super::args::resolve_arg_opt(contents, &mut cx)?;
             handlers::append(&mut cx, idx, &path_resolved, contents_resolved.as_deref())
         }
         StepKind::Expand { path, overrides } => {
-            let path_resolved = super::args::resolve_arg_opt(path, &cx)?;
-            let overrides_resolved = super::args::resolve_overrides(overrides, &cx)?;
+            let path_resolved = super::args::resolve_arg_opt(path, &mut cx)?;
+            let overrides_resolved = super::args::resolve_overrides(overrides, &mut cx)?;
             handlers::replace(&mut cx, idx, &path_resolved, &overrides_resolved)
         }
         StepKind::AssertFile {
@@ -269,8 +263,8 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
             path,
             contents,
         } => {
-            let path_resolved = super::args::resolve_arg(path, &cx)?;
-            let contents_resolved = super::args::resolve_arg_opt(contents, &cx)?;
+            let path_resolved = super::args::resolve_arg(path, &mut cx)?;
+            let contents_resolved = super::args::resolve_arg_opt(contents, &mut cx)?;
             handlers::assert_file(
                 &mut cx,
                 idx,
@@ -280,15 +274,15 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
             )
         }
         StepKind::AssertDir(arg) => {
-            let path = super::args::resolve_arg(arg, &cx)?;
+            let path = super::args::resolve_arg(arg, &mut cx)?;
             handlers::assert_dir(&mut cx, idx, &path)
         }
         StepKind::AssertAbsent(arg) => {
-            let path = super::args::resolve_arg(arg, &cx)?;
+            let path = super::args::resolve_arg(arg, &mut cx)?;
             handlers::assert_absent(&mut cx, idx, &path)
         }
         StepKind::AssertStdout(arg) => {
-            let needle = super::args::resolve_arg(arg, &cx)?;
+            let needle = super::args::resolve_arg(arg, &mut cx)?;
             handlers::assert_stdout(&mut cx, idx, generation, idx, &needle)
         }
         StepKind::WithIo { bindings, cmd } => {
@@ -361,26 +355,26 @@ fn execute_steps_inner<P: ProcessManager>(
                     Ok(())
                 }
                 StepKind::Workdir(arg) => {
-                    let path = super::args::resolve_arg(arg, &cx)?;
+                    let path = super::args::resolve_arg(arg, &mut cx)?;
                     handlers::workdir(&mut cx, idx, &path)
                 }
                 StepKind::Workspace(target) => handlers::workspace(&mut cx, target),
                 StepKind::Env { key, value } => {
-                    let resolved = super::args::resolve_arg(value, &cx)?;
+                    let resolved = super::args::resolve_arg(value, &mut cx)?;
                     handlers::env(&mut cx, key, &resolved)?;
                     sync_iteration_assert_needles(cx.state, steps, generation)?;
                     Ok(())
                 }
                 StepKind::Run(arg) => {
-                    let cmd = super::args::resolve_arg(arg, &cx)?;
+                    let cmd = super::args::resolve_arg(arg, &mut cx)?;
                     handlers::run(&mut cx, idx, &cmd)
                 }
                 StepKind::Echo(arg) => {
-                    let msg = super::args::resolve_arg(arg, &cx)?;
+                    let msg = super::args::resolve_arg(arg, &mut cx)?;
                     handlers::echo(&mut cx, &msg)
                 }
                 StepKind::RunBg(arg) => {
-                    let cmd = super::args::resolve_arg(arg, &cx)?;
+                    let cmd = super::args::resolve_arg(arg, &mut cx)?;
                     handlers::run_bg(&mut cx, idx, &cmd)
                 }
                 StepKind::Copy {
@@ -388,8 +382,8 @@ fn execute_steps_inner<P: ProcessManager>(
                     from,
                     to,
                 } => {
-                    let from_resolved = super::args::resolve_arg(from, &cx)?;
-                    let to_resolved = super::args::resolve_arg(to, &cx)?;
+                    let from_resolved = super::args::resolve_arg(from, &mut cx)?;
+                    let to_resolved = super::args::resolve_arg(to, &mut cx)?;
                     handlers::copy(
                         &mut cx,
                         idx,
@@ -404,9 +398,9 @@ fn execute_steps_inner<P: ProcessManager>(
                     to,
                     include_dirty,
                 } => {
-                    let rev_resolved = super::args::resolve_arg(rev, &cx)?;
-                    let from_resolved = super::args::resolve_arg(from, &cx)?;
-                    let to_resolved = super::args::resolve_arg(to, &cx)?;
+                    let rev_resolved = super::args::resolve_arg(rev, &mut cx)?;
+                    let from_resolved = super::args::resolve_arg(from, &mut cx)?;
+                    let to_resolved = super::args::resolve_arg(to, &mut cx)?;
                     handlers::copy_git(
                         &mut cx,
                         idx,
@@ -417,52 +411,40 @@ fn execute_steps_inner<P: ProcessManager>(
                     )
                 }
                 StepKind::HashSha256 { path } => {
-                    let path_resolved = super::args::resolve_arg(path, &cx)?;
+                    let path_resolved = super::args::resolve_arg(path, &mut cx)?;
                     handlers::hash_sha256(&mut cx, idx, &path_resolved)
                 }
                 StepKind::Symlink { from, to } => {
-                    let from_resolved = super::args::resolve_arg(from, &cx)?;
-                    let to_resolved = super::args::resolve_arg(to, &cx)?;
+                    let from_resolved = super::args::resolve_arg(from, &mut cx)?;
+                    let to_resolved = super::args::resolve_arg(to, &mut cx)?;
                     handlers::symlink(&mut cx, idx, &from_resolved, &to_resolved)
                 }
                 StepKind::Mkdir(arg) => {
-                    let path = super::args::resolve_arg(arg, &cx)?;
+                    let path = super::args::resolve_arg(arg, &mut cx)?;
                     handlers::mkdir(&mut cx, idx, &path)
                 }
                 StepKind::Ls(arg) => {
-                    let resolved = super::args::resolve_arg_opt(arg, &cx)?;
+                    let resolved = super::args::resolve_arg_opt(arg, &mut cx)?;
                     handlers::ls(&mut cx, idx, &resolved)
                 }
                 StepKind::Cwd => handlers::cwd(&mut cx, idx),
                 StepKind::Read(arg) => {
-                    let resolved = super::args::resolve_arg_opt(arg, &cx)?;
+                    let resolved = super::args::resolve_arg_opt(arg, &mut cx)?;
                     handlers::read(&mut cx, idx, &resolved)
                 }
                 StepKind::Write { path, contents } => {
-                    let path_resolved = super::args::resolve_arg(path, &cx)?;
-                    let contents_resolved = super::args::resolve_arg_opt(contents, &cx)?;
+                    let path_resolved = super::args::resolve_arg(path, &mut cx)?;
+                    let contents_resolved = super::args::resolve_arg_opt(contents, &mut cx)?;
                     handlers::write(&mut cx, idx, &path_resolved, contents_resolved.as_deref())
                 }
-                StepKind::RawWrite { path, contents } => {
-                    let path_resolved = super::args::resolve_arg(path, &cx)?;
-                    let contents_str = match contents {
-                        Arg::Literal(s) => s.clone(),
-                        Arg::Template(t) => {
-                            // RAW_WRITE contents bypass template expansion
-                            // but still need $variable resolution
-                            super::args::resolve_dollar_vars(&t.0, cx.state)
-                        }
-                    };
-                    handlers::raw_write(&mut cx, idx, &path_resolved, &contents_str)
-                }
                 StepKind::Append { path, contents } => {
-                    let path_resolved = super::args::resolve_arg(path, &cx)?;
-                    let contents_resolved = super::args::resolve_arg_opt(contents, &cx)?;
+                    let path_resolved = super::args::resolve_arg(path, &mut cx)?;
+                    let contents_resolved = super::args::resolve_arg_opt(contents, &mut cx)?;
                     handlers::append(&mut cx, idx, &path_resolved, contents_resolved.as_deref())
                 }
                 StepKind::Expand { path, overrides } => {
-                    let path_resolved = super::args::resolve_arg_opt(path, &cx)?;
-                    let overrides_resolved = super::args::resolve_overrides(overrides, &cx)?;
+                    let path_resolved = super::args::resolve_arg_opt(path, &mut cx)?;
+                    let overrides_resolved = super::args::resolve_overrides(overrides, &mut cx)?;
                     handlers::replace(&mut cx, idx, &path_resolved, &overrides_resolved)
                 }
                 StepKind::AssertFile {
@@ -470,8 +452,8 @@ fn execute_steps_inner<P: ProcessManager>(
                     path,
                     contents,
                 } => {
-                    let path_resolved = super::args::resolve_arg(path, &cx)?;
-                    let contents_resolved = super::args::resolve_arg_opt(contents, &cx)?;
+                    let path_resolved = super::args::resolve_arg(path, &mut cx)?;
+                    let contents_resolved = super::args::resolve_arg_opt(contents, &mut cx)?;
                     handlers::assert_file(
                         &mut cx,
                         idx,
@@ -481,15 +463,15 @@ fn execute_steps_inner<P: ProcessManager>(
                     )
                 }
                 StepKind::AssertDir(arg) => {
-                    let path = super::args::resolve_arg(arg, &cx)?;
+                    let path = super::args::resolve_arg(arg, &mut cx)?;
                     handlers::assert_dir(&mut cx, idx, &path)
                 }
                 StepKind::AssertAbsent(arg) => {
-                    let path = super::args::resolve_arg(arg, &cx)?;
+                    let path = super::args::resolve_arg(arg, &mut cx)?;
                     handlers::assert_absent(&mut cx, idx, &path)
                 }
                 StepKind::AssertStdout(arg) => {
-                    let needle = super::args::resolve_arg(arg, &cx)?;
+                    let needle = super::args::resolve_arg(arg, &mut cx)?;
                     handlers::assert_stdout(&mut cx, idx, generation, idx, &needle)
                 }
                 StepKind::WithIo { bindings, cmd } => {

@@ -1,10 +1,10 @@
-ENV FOO=bar
+ENV FOO="bar"
 [env:FOO]
 {
   WORKDIR scoped
-  WRITE inner.txt inner
-  ENV SCOPE=inner
+  WRITE inner.txt "inner"
+  ENV SCOPE="inner"
 }
-WITH_IO [stdout=pipe:cap_env_txt] ECHO scope={{ env:SCOPE }}
+WITH_IO [stdout=pipe:cap_env_txt] ECHO "scope={{ env:SCOPE }}"
 WITH_IO [stdin=pipe:cap_env_txt] WRITE env.txt
-WRITE outer.txt outer
+WRITE outer.txt "outer"

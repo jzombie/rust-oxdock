@@ -1,2 +1,2 @@
-WRITE note.txt hello
+WRITE note.txt "hello"
 READ note.txt

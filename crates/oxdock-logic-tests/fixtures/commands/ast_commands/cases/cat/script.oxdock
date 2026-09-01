@@ -1,4 +1,4 @@
-WRITE note.txt hello
+WRITE note.txt "hello"
 READ note.txt
 WITH_IO [stdout=pipe:cap_out_txt] READ note.txt
 WITH_IO [stdin=pipe:cap_out_txt] WRITE out.txt

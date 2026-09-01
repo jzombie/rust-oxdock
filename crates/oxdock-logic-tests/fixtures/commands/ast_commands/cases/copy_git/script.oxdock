@@ -1,1 +1,1 @@
-COPY_GIT HEAD hello.txt out_hello.txt
+COPY_GIT HEAD "hello.txt" "out_hello.txt"

@@ -25,11 +25,11 @@ pub fn compile(
     let out_str = output_path.display().to_string();
 
     let steps = oxdock! {
-        RAW_WRITE #out_str ""
+        WRITE #out_str ""
         LET $manifest = LOAD_JSON(#manifest_str)
 
         FOR $idx, $node IN $manifest {
-            ECHO "[$idx] $node.kind"
+            ECHO "[{{ $idx}}] {{ $node.kind }}"
             IF $node.kind == "template" {
                 WITH_IO [stdout=pipe:tmpl] EXPAND $node.path
                 WITH_IO [stdin=pipe:tmpl] APPEND #out_str

@@ -1,9 +1,9 @@
-ENV FOO=bar
-WRITE before.txt ok
+ENV FOO="bar"
+WRITE before.txt "ok"
 [env:FOO]
 {
-  WRITE nested_before.txt ok
+  WRITE nested_before.txt "ok"
   EXIT 5
-  WRITE nested_after.txt nope
+  WRITE nested_after.txt "nope"
 }
-WRITE after.txt nope
+WRITE after.txt "nope"

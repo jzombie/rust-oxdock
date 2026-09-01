@@ -106,7 +106,7 @@ let_statement = { let_keyword ~ dollar_ident ~ "=" ~ expr }
 
 else_if_clause = { else_keyword ~ if_keyword ~ expr ~ block }
 else_clause = { else_keyword ~ block }
-if_statement = { if_keyword ~ expr ~ block ~ (ws? ~ else_if_clause)* ~ ws? ~ else_clause? }
+if_statement = { if_keyword ~ expr ~ block ~ (blank* ~ else_if_clause)* ~ blank* ~ else_clause? }
 
 // Commands
 command = _{
@@ -127,7 +127,6 @@ command = _{
     cwd_command |
     read_command |
     write_command |
-    raw_write_command |
     append_command |
     expand_command |
     assert_file_command |
@@ -154,7 +153,6 @@ ls_command = ${ "LS" ~ (sep ~ argument)? }
 cwd_command = ${ "CWD" }
 read_command = ${ "READ" ~ (sep ~ argument)? }
 write_command = ${ "WRITE" ~ sep ~ argument ~ (sep ~ message)? }
-raw_write_command = ${ "RAW_WRITE" ~ sep ~ argument ~ sep ~ message }
 append_command = ${ "APPEND" ~ sep ~ argument ~ (sep ~ message)? }
 expand_command = ${ "EXPAND" ~ (sep ~ (key_value | argument) ~ (sep ~ key_value)*)? }
 key_value = ${ kv_key ~ "=" ~ argument }
@@ -175,9 +173,17 @@ inherit_env_command = ${ "INHERIT_ENV" ~ sep ~ inherit_list }
 inherit_list = { "[" ~ ws? ~ env_key ~ (ws? ~ "," ~ ws? ~ env_key)* ~ ws? ~ "]" }
 
 sep = _{ WHITESPACE+ }
-argument = { quoted_string | templated_arg | unquoted_arg }
+
+// Unquoted arguments — Docker-style bare words.
+// Leading !$ rejects tokens starting with $ (forces $var to expr).
+// Inner loop excludes { to prevent consuming {{ }} as a single token.
+unquoted_arg = @{ !"$" ~ !("{{") ~ (!WHITESPACE ~ !linebreak ~ !";" ~ !"}" ~ !"{" ~ !"//" ~ !"/*" ~ ANY)+ }
+
+// argument repeats to support contiguous fragments: dist/{{ $file }}.txt
+// Single expr fragment -> Arg::Expr; mixed/string fragments -> Arg::String.
+argument = { (string_literal | templated_arg | unquoted_arg | expr)+ }
+
 templated_arg = @{ "{{" ~ (!"}}" ~ ANY)* ~ "}}" }
-unquoted_arg = @{ (!WHITESPACE ~ !linebreak ~ !";" ~ !"}" ~ !"//" ~ !"/*" ~ ANY)+ }
 include_dirty_flag = { "--include-dirty" }
 io_flags = { "[" ~ ws? ~ io_binding ~ (ws? ~ "," ~ ws? ~ io_binding)* ~ ws? ~ "]" }
 io_binding = { io_stream ~ (ws? ~ "=" ~ ws? ~ pipe_binding)? }
@@ -188,14 +194,16 @@ pipe_name = @{ (ASCII_ALPHANUMERIC | "_" | "-")+ }
 workspace_target = { "SNAPSHOT" | "LOCAL" | "snapshot" | "local" }
 env_pair = { env_key_part ~ ws? ~ "=" ~ ws? ~ env_value_part }
 env_key_part = @{ (!"=" ~ !WHITESPACE ~ !linebreak ~ ANY)+ }
-env_value_part = { quoted_string | templated_arg | unquoted_env_value }
-unquoted_env_value = @{ (!WHITESPACE ~ !linebreak ~ !";" ~ !"}" ~ !"//" ~ !"/*" ~ ANY)+ }
 
-message = { (quoted_string | templated_arg | unquoted_msg_content)+ }
-unquoted_msg_content = { !(linebreak | ";" | "}" | "//" | "/*") ~ ANY }
+// env_value repeats to support contiguous fragments: val{{ $x }}.txt
+unquoted_env_value = @{ !"$" ~ (!WHITESPACE ~ !linebreak ~ !";" ~ !"}" ~ !"{" ~ !"//" ~ !"/*" ~ ANY)+ }
+env_value_part = { (string_literal | templated_arg | unquoted_env_value | expr)+ }
 
-run_args = { (quoted_string | templated_arg | unquoted_run_content)+ }
-unquoted_run_content = { !(linebreak | "//" | "/*" | ";" | "}") ~ ANY }
+message = { (string_literal | templated_arg | unquoted_msg_content | expr)+ }
+unquoted_msg_content = { !("$" | "{" | linebreak | ";" | "}" | "//" | "/*") ~ ANY }
+
+run_args = { (string_literal | templated_arg | unquoted_run_content | expr)+ }
+unquoted_run_content = { !("$" | "{" | linebreak | "//" | "/*" | ";" | "}") ~ ANY }
 
 exit_code = @{ ASCII_DIGIT+ }
 

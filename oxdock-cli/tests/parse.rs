@@ -12,15 +12,15 @@ fn parse_basic_script() {
     let script = indoc! {
         r#"
         # build and publish
-        WORKDIR client
-        RUN npm run build
-        WORKDIR /
-        COPY client/dist client/dist
-        SYMLINK server/dist ../client/dist
-        RUN cargo publish --workspace --locked
-        MKDIR tmp
-        LS tmp
-        WRITE tmp/file.txt hello
+        WORKDIR "client"
+        RUN "npm run build"
+        WORKDIR "/"
+        COPY "client/dist" "client/dist"
+        SYMLINK "server/dist" "../client/dist"
+        RUN "cargo publish --workspace --locked"
+        MKDIR "tmp"
+        LS "tmp"
+        WRITE "tmp/file.txt" "hello"
         "#
     };
 
@@ -50,9 +50,9 @@ fn parse_basic_script() {
 fn parse_mkdir_ls_write() {
     let script = indoc! {
         "
-        MKDIR a/b
-        LS a
-        WRITE a/b/file.txt hi
+        MKDIR \"a/b\"
+        LS \"a\"
+        WRITE \"a/b/file.txt\" \"hi\"
         "
     };
     let steps = parse_script(script).expect("parse should succeed");
@@ -70,7 +70,7 @@ fn parse_mkdir_ls_write() {
 
 #[test]
 fn parse_cat() {
-    let script = "READ path/to/file.txt";
+    let script = "READ \"path/to/file.txt\"";
     let steps = parse_script(script).expect("parse should succeed");
     assert_eq!(steps.len(), 1);
     if let Step {
@@ -138,7 +138,7 @@ fn parse_semicolon_keeps_shell_payload_together() {
 
 #[test]
 fn parse_semicolon_splits_multiple_instructions() {
-    let script = "WRITE one.txt 1; WRITE two.txt 2";
+    let script = "WRITE \"one.txt\" \"1\"; WRITE \"two.txt\" \"2\"";
     let steps = parse_script(script).expect("parse should succeed");
     assert_eq!(steps.len(), 2);
     match &steps[0].kind {
@@ -163,7 +163,7 @@ fn parse_multi_line_guard_block() {
         [ env:MODE==debug,
           linux
         ]
-        WRITE guarded.txt ok
+        WRITE "guarded.txt" "ok"
     "#};
     let steps = parse_script(script).expect("parse should succeed");
     assert_eq!(steps.len(), 1);
@@ -178,10 +178,10 @@ fn parse_multi_line_guard_block() {
 fn parse_guarded_block_applies_to_all_commands() {
     let script = indoc! {r#"
         [env:TEST==1] {
-            WRITE one.txt 1
-            WRITE two.txt 2
+            WRITE "one.txt" "1"
+            WRITE "two.txt" "2"
         }
-        WRITE three.txt 3
+        WRITE "three.txt" "3"
     "#};
     let steps = parse_script(script).expect("parse should succeed");
     assert_eq!(steps.len(), 3);

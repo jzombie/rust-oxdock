@@ -188,9 +188,6 @@ pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
                     template_keys(&mut keys, body);
                 }
             }
-            StepKind::RawWrite { path, .. } => {
-                template_keys(&mut keys, path);
-            }
             StepKind::Append { path, contents } => {
                 template_keys(&mut keys, path);
                 if let Some(body) = contents {
@@ -320,14 +317,14 @@ mod tests {
         let steps = script_steps(
             r#"
             WORKDIR {{ env:WD }}
-            RUN echo {{ env:RUNV }}
-            COPY "{{ env:COPYV }}/x" out
-            WRITE out/f.txt {{ env:BODY }}
+            RUN "echo {{ env:RUNV }}"
+            COPY "{{ env:COPYV }}/x" "out"
+            WRITE "out/f.txt" "{{ env:BODY }}"
             [env:GATE] {
-                ECHO gated
+                ECHO "gated"
             }
-            [env:A==1] ECHO eq
-            [or(env:X, env:Y)] ECHO either
+            [env:A==1] ECHO "eq"
+            [or(env:X, env:Y)] ECHO "either"
             "#,
         );
         let refs = collect_env_references(&steps);
@@ -341,12 +338,12 @@ mod tests {
 
         // The ENV step's value template is not reachable through the string
         // grammar, so exercise that traversal arm directly.
-        use oxdock_parser::{Arg, Step, TemplateString};
+        use oxdock_parser::{Arg, Step};
         let env_step = Step {
             guard: None,
             kind: StepKind::Env {
                 key: "A".into(),
-                value: Arg::Template(TemplateString("{{ env:SEED }}".into())),
+                value: Arg::String("{{ env:SEED }}".into()),
             },
             scope_enter: 0,
             scope_exit: 0,
