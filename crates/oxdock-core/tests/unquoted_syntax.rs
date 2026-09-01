@@ -6,10 +6,8 @@
 use indoc::indoc;
 use oxdock_core::{ExecIo, run_steps_with_context_result_with_io};
 use oxdock_fs::{GuardedPath, PathResolver};
-use oxdock_parser::parse_script;
-
 fn run_script(root: &GuardedPath, script: &str) -> Result<(), anyhow::Error> {
-    let steps = parse_script(script).expect("parse script");
+    let steps = oxdock_core::parse_script(script).expect("parse script");
     run_steps_with_context_result_with_io(root, root, &steps, ExecIo::new()).map(|_| ())
 }
 
@@ -257,8 +255,7 @@ fn write_unquoted_path_quoted_content() {
 fn write_quoted_path_unquoted_content_with_spaces_fails() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
-    // Unquoted content with spaces is parsed as separate arguments
-    // This should still work since message rule handles it
+    // Unquoted content with spaces is joined into a single content argument.
     run_script(&root, "WRITE out.txt hello world").unwrap();
     assert_eq!(read_trimmed(&root, "out.txt"), "hello world");
 }

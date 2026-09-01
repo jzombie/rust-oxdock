@@ -1,5 +1,6 @@
 use indoc::indoc;
-use oxdock_cli::{Options, ScriptSource, Step, StepKind, parse_script};
+use oxdock_cli::{Options, ScriptSource, Step, StepKind};
+use oxdock_core::parse_script;
 use oxdock_fs::{GuardedPath, GuardedTempDir};
 use oxdock_parser::Arg;
 

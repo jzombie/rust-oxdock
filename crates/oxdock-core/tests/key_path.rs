@@ -1,10 +1,8 @@
 use indoc::indoc;
 use oxdock_core::{ExecIo, run_steps_with_context_result_with_io};
 use oxdock_fs::{GuardedPath, PathResolver};
-use oxdock_parser::parse_script;
-
 fn run_script(root: &GuardedPath, script: &str) -> Result<(), anyhow::Error> {
-    let steps = parse_script(script).expect("parse script");
+    let steps = oxdock_core::parse_script(script).expect("parse script");
     run_steps_with_context_result_with_io(root, root, &steps, ExecIo::new()).map(|_| ())
 }
 
@@ -26,31 +24,31 @@ fn write_file(root: &GuardedPath, rel: &str, content: &[u8]) {
 
 #[test]
 fn parser_key_path_two_segments() {
-    let steps = parse_script("LET $val = $a.b").unwrap();
+    let steps = oxdock_core::parse_script("LET $val = $a.b").unwrap();
     assert_eq!(steps.len(), 1);
 }
 
 #[test]
 fn parser_key_path_three_segments() {
-    let steps = parse_script("LET $val = $a.b.c").unwrap();
+    let steps = oxdock_core::parse_script("LET $val = $a.b.c").unwrap();
     assert_eq!(steps.len(), 1);
 }
 
 #[test]
 fn parser_key_path_numeric_index() {
-    let steps = parse_script("LET $val = $items.0").unwrap();
+    let steps = oxdock_core::parse_script("LET $val = $items.0").unwrap();
     assert_eq!(steps.len(), 1);
 }
 
 #[test]
 fn parser_key_path_underscore_prefix() {
-    let steps = parse_script("LET $val = $data._private").unwrap();
+    let steps = oxdock_core::parse_script("LET $val = $data._private").unwrap();
     assert_eq!(steps.len(), 1);
 }
 
 #[test]
 fn parser_single_dollar_is_variable_not_key_path() {
-    let steps = parse_script("LET $val = $pkg").unwrap();
+    let steps = oxdock_core::parse_script("LET $val = $pkg").unwrap();
     let step = &steps[0];
     // Should be a Var, not a KeyPath
     match &step.kind {
@@ -63,13 +61,13 @@ fn parser_single_dollar_is_variable_not_key_path() {
 
 #[test]
 fn parser_load_toml_in_let() {
-    let steps = parse_script("LET $d = LOAD_TOML(\"x.toml\")").unwrap();
+    let steps = oxdock_core::parse_script("LET $d = LOAD_TOML(\"x.toml\")").unwrap();
     assert_eq!(steps.len(), 1);
 }
 
 #[test]
 fn parser_load_json_in_let() {
-    let steps = parse_script("LET $d = LOAD_JSON(\"x.json\")").unwrap();
+    let steps = oxdock_core::parse_script("LET $d = LOAD_JSON(\"x.json\")").unwrap();
     assert_eq!(steps.len(), 1);
 }
 
@@ -974,7 +972,7 @@ fn for_map_iteration_sorted_keys() {
         .as_bytes(),
     );
 
-    let steps = parse_script(indoc! {r#"
+    let steps = oxdock_core::parse_script(indoc! {r#"
         LET $d = LOAD_TOML("data.toml")
         FOR $k, $v IN $d.settings {
             WRITE "{{ $k }}.txt" "{{ $v }}"
@@ -1006,7 +1004,7 @@ fn for_map_iteration_echo_stdout() {
         .as_bytes(),
     );
 
-    let steps = parse_script(indoc! {r#"
+    let steps = oxdock_core::parse_script(indoc! {r#"
         LET $d = LOAD_TOML("data.toml")
         FOR $k, $v IN $d.settings {
             ECHO "{{ $k }} = {{ $v }}"
@@ -1052,7 +1050,7 @@ fn for_list_enumeration_echo() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
 
-    let steps = parse_script(indoc! {r#"
+    let steps = oxdock_core::parse_script(indoc! {r#"
         LET $items = ["x", "y"]
         FOR $i, $v IN $items {
             ECHO "{{ $i }}: {{ $v }}"

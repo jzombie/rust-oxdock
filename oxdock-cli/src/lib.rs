@@ -8,8 +8,8 @@ use std::io::{self, IsTerminal, Read};
 use std::sync::{Arc, Mutex};
 
 use oxdock_core::{ExecIo, run_steps_with_context_result_with_io};
-pub use oxdock_core::{run_steps, run_steps_with_context, run_steps_with_context_result};
-pub use oxdock_parser::{Guard, Step, StepKind, parse_script};
+pub use oxdock_core::{parse_script, run_steps, run_steps_with_context, run_steps_with_context_result};
+pub use oxdock_parser::{Guard, Step, StepKind};
 pub use oxdock_process::shell_program;
 
 pub fn run() -> Result<()> {

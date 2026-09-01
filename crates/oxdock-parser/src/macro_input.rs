@@ -473,9 +473,13 @@ pub fn script_from_braced_tokens(ts: &TokenStream2) -> Result<String> {
 }
 
 /// Parse a braced token stream directly into DSL steps.
-pub fn parse_braced_tokens(ts: &TokenStream2) -> Result<Vec<Step>> {
+/// Requires a lowering function — callers must provide it.
+pub fn parse_braced_tokens(
+    ts: &TokenStream2,
+    lower: impl Fn(&str, Vec<crate::Arg>) -> anyhow::Result<crate::StepKind>,
+) -> Result<Vec<Step>> {
     let script = script_from_braced_tokens(ts)?;
-    parse_script(&script)
+    parse_script(&script, lower)
 }
 
 #[cfg(test)]
@@ -484,6 +488,19 @@ mod tests {
     use crate::StepKind;
     use indoc::indoc;
     use quote::quote;
+
+    /// Mock lowering for macro_input tests.
+    fn mock_lower(name: &str, args: Vec<crate::Arg>) -> anyhow::Result<StepKind> {
+        match name {
+            "MOCK_NO_ARGS" => Ok(StepKind::Cwd),
+            "MOCK_POS" => {
+                let path = args.first().cloned().ok_or_else(|| anyhow::anyhow!("missing arg"))?;
+                let contents = args.get(1).cloned();
+                Ok(StepKind::Write { path, contents })
+            }
+            _ => anyhow::bail!("unknown mock: {name}"),
+        }
+    }
 
     #[test]
     fn parse_dsl_macro_input_literal_script() {
@@ -529,7 +546,7 @@ mod tests {
                 WRITE inner.txt inside
             }
         };
-        let steps = parse_braced_tokens(&ts).expect("parse guarded block");
+        let steps = parse_braced_tokens(&ts, mock_lower).expect("parse guarded block");
         assert_eq!(steps.len(), 1);
     }
 
@@ -547,7 +564,7 @@ mod tests {
             "template placeholder must round-trip"
         );
 
-        let steps = parse_braced_tokens(&ts).expect("parse templated script");
+        let steps = parse_braced_tokens(&ts, mock_lower).expect("parse templated script");
         match &steps[0].kind {
             StepKind::Write { path, contents } => {
                 assert_eq!(path.as_ref(), "dist/hello.txt");
@@ -568,8 +585,8 @@ mod tests {
         "#}
         .trim();
         let ts: proc_macro2::TokenStream = text.parse().expect("tokens");
-        let braced = parse_braced_tokens(&ts).expect("braced parse");
-        let string = parse_script(text).expect("string parse");
+        let braced = parse_braced_tokens(&ts, mock_lower).expect("braced parse");
+        let string = parse_script(text, mock_lower).expect("string parse");
         assert_eq!(braced, string, "template AST parity between forms");
     }
 
@@ -584,7 +601,7 @@ mod tests {
                 .unwrap_or_else(|e| panic!("render failed for {source}: {e}"));
             assert_eq!(script, source, "spacing must round-trip verbatim");
 
-            let steps = parse_braced_tokens(&ts).expect("parse");
+            let steps = parse_braced_tokens(&ts, mock_lower).expect("parse");
             match &steps[0].kind {
                 StepKind::Write { contents, .. } => {
                     assert_eq!(

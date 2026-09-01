@@ -1,3 +1,4 @@
+pub mod commands;
 pub mod exec;
 pub mod pipeline;
 pub use exec::*;
@@ -5,12 +6,21 @@ pub use oxdock_parser::{
     Arg, CommandMeta, CommandSpec, StepKind, strip_flags,
 };
 
+/// Parse a script using the production `lower_command` dispatcher.
+///
+/// This is the primary entry point for downstream crates (`oxdock-cli`,
+/// `oxdock-macros`, `oxdock-build`). It binds `commands::lower_command`
+/// to the parser so callers don't need to provide a lowering function.
+pub fn parse_script(input: &str) -> anyhow::Result<Vec<oxdock_parser::Step>> {
+    oxdock_parser::parse_script(input, commands::lower_command)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use indoc::indoc;
     use oxdock_fs::{GuardedPath, GuardedTempDir, PathResolver};
-    use oxdock_parser::{Step, StepKind, parse_script};
+    use oxdock_parser::{Step, StepKind};
     #[cfg(unix)]
     use std::time::Instant;
 
@@ -82,7 +92,7 @@ mod tests {
             ),
             guard = guard_var
         );
-        let steps = parse_script(&script).unwrap();
+        let steps = crate::parse_script(&script).unwrap();
 
         run_steps(&root, &steps).unwrap();
 
@@ -105,7 +115,7 @@ mod tests {
             WRITE "always.txt" "ok"
             "#
         );
-        let steps = parse_script(script).unwrap();
+        let steps = crate::parse_script(script).unwrap();
 
         run_steps(&root, &steps).unwrap();
 
@@ -127,7 +137,7 @@ mod tests {
             WRITE "always.txt" "ok"
             "#
         );
-        let steps = parse_script(script).unwrap();
+        let steps = crate::parse_script(script).unwrap();
 
         run_steps(&root, &steps).unwrap();
 
@@ -147,7 +157,7 @@ mod tests {
             WRITE "always.txt" "ok"
             "#
         );
-        let steps = parse_script(script).unwrap();
+        let steps = crate::parse_script(script).unwrap();
 
         run_steps(&root, &steps).unwrap();
 
@@ -169,7 +179,7 @@ mod tests {
             WRITE "always.txt" "ok"
             "#
         );
-        let steps = parse_script(script).unwrap();
+        let steps = crate::parse_script(script).unwrap();
 
         run_steps(&root, &steps).unwrap();
 
@@ -198,7 +208,7 @@ mod tests {
             [env:INNER] WRITE "leak.txt" "nope"
             "#
         );
-        let steps = parse_script(script).unwrap();
+        let steps = crate::parse_script(script).unwrap();
 
         run_steps(&root, &steps).unwrap();
 
@@ -225,7 +235,7 @@ mod tests {
             WRITE "outside.txt" "root"
             "#
         );
-        let steps = parse_script(script).unwrap();
+        let steps = crate::parse_script(script).unwrap();
 
         run_steps(&root, &steps).unwrap();
 
@@ -260,7 +270,7 @@ mod tests {
             WRITE "snapshot_only.txt" "outside"
             "#
         );
-        let steps = parse_script(script).unwrap();
+        let steps = crate::parse_script(script).unwrap();
 
         run_steps_with_context(&snapshot_root, &local_root, &steps).unwrap();
 
@@ -296,7 +306,7 @@ mod tests {
             profile
         );
 
-        let steps = parse_script(&script).unwrap();
+        let steps = crate::parse_script(&script).unwrap();
         run_steps(&root, &steps).unwrap();
 
         assert!(
@@ -326,7 +336,7 @@ mod tests {
             ),
             k = key
         );
-        let steps = parse_script(&script).unwrap();
+        let steps = crate::parse_script(&script).unwrap();
         run_steps(&root, &steps).unwrap();
 
         assert!(
@@ -353,7 +363,7 @@ mod tests {
             ),
             k = key
         );
-        let steps = parse_script(&script).unwrap();
+        let steps = crate::parse_script(&script).unwrap();
         run_steps(&root, &steps).unwrap();
 
         assert!(
@@ -375,7 +385,7 @@ mod tests {
 
         // Background succeeds quickly; pipeline should complete without error.
         let script = "RUN_BG \"sh -c 'sleep 0.05'\"";
-        let steps = parse_script(script).unwrap();
+        let steps = crate::parse_script(script).unwrap();
         let res = run_steps(&root, &steps);
         assert!(res.is_ok(), "RUN_BG success should allow clean exit");
     }
@@ -391,7 +401,7 @@ mod tests {
         let root = guard_root(&temp);
 
         let script = "RUN_BG \"sh -c 'sleep 0.05; exit 7'\"";
-        let steps = parse_script(script).unwrap();
+        let steps = crate::parse_script(script).unwrap();
         let err = run_steps(&root, &steps).unwrap_err();
         let msg = err.to_string();
         assert!(
@@ -418,7 +428,7 @@ mod tests {
             "#
         };
 
-        let steps = parse_script(script).unwrap();
+        let steps = crate::parse_script(script).unwrap();
         let start = Instant::now();
         let res = run_steps(&root, &steps);
         let elapsed = start.elapsed();
@@ -461,7 +471,7 @@ mod tests {
             "#
         };
 
-        let steps = parse_script(script).unwrap();
+        let steps = crate::parse_script(script).unwrap();
         assert!(
             run_steps(&root, &steps).is_err(),
             "pipeline should fail on the missing command"
@@ -492,7 +502,7 @@ mod tests {
             "#
         };
 
-        let steps = parse_script(script).unwrap();
+        let steps = crate::parse_script(script).unwrap();
         let err = run_steps(&root, &steps).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("EXIT requested with code 5"));
@@ -530,7 +540,7 @@ mod tests {
             }
         };
 
-        let steps = parse_script(script).unwrap();
+        let steps = crate::parse_script(script).unwrap();
         run_steps(&root, &steps).unwrap();
 
         assert_eq!(read_trimmed(&root.join("run.txt").unwrap()), "bar");
@@ -554,7 +564,7 @@ mod tests {
             "#
         };
 
-        let steps = parse_script(script).unwrap();
+        let steps = crate::parse_script(script).unwrap();
         run_steps_with_context(&snapshot_root, &local_root, &steps).unwrap();
 
         assert!(snapshot_root.join("snap.txt").unwrap().exists());
@@ -584,7 +594,7 @@ mod tests {
             "#
         };
 
-        let steps = parse_script(script).unwrap();
+        let steps = crate::parse_script(script).unwrap();
         run_steps_with_context(&snapshot_root, &local_root, &steps).unwrap();
 
         assert!(local_root.join("localroot.txt").unwrap().exists());

@@ -1,7 +1,7 @@
 use indoc::indoc;
 use oxdock_core::{run_steps_with_context_result_with_io, ExecIo};
 use oxdock_fs::GuardedPath;
-use oxdock_parser::parse_script;
+use oxdock_core::parse_script;
 use std::env;
 use std::error::Error;
 use std::fs;

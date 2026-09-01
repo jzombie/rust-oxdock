@@ -109,68 +109,27 @@ else_clause = { else_keyword ~ block }
 if_statement = { if_keyword ~ expr ~ block ~ (blank* ~ else_if_clause)* ~ blank* ~ else_clause? }
 
 // Commands
-command = _{
-    inherit_env_command |
-    workdir_command |
-    workspace_command |
-    env_command |
-    echo_command |
-    run_bg_command |
-    run_command |
-    copy_git_command |
-    copy_command |
-    with_io_command |
-    hash_sha256_command |
-    symlink_command |
-    mkdir_command |
-    ls_command |
-    cwd_command |
-    read_command |
-    write_command |
-    append_command |
-    expand_command |
-    assert_file_command |
-    assert_dir_command |
-    assert_absent_command |
-    assert_stdout_command |
-    exit_command
-}
+// Structural rules with special syntax stay as PEG rules.
+// All other commands use the generic `instruction` rule — lowering happens in Rust.
+command = _{ with_io_command | inherit_env_command | instruction_inner }
+command_inner = { inherit_env_command | instruction }
 
-workdir_command = ${ "WORKDIR" ~ sep ~ argument }
-workspace_command = ${ "WORKSPACE" ~ sep ~ workspace_target }
-env_command = ${ "ENV" ~ sep ~ env_pair }
-echo_command = ${ "ECHO" ~ sep ~ message }
-run_command = ${ "RUN" ~ sep ~ run_args }
-run_bg_command = ${ "RUN_BG" ~ sep ~ run_args }
-from_current_workspace_flag = { "--from-current-workspace" }
-copy_command = ${ "COPY" ~ sep ~ (from_current_workspace_flag ~ sep)? ~ argument ~ sep ~ argument }
 with_io_command = ${ "WITH_IO" ~ sep ~ io_flags ~ (sep ~ command)? }
-copy_git_command = ${ "COPY_GIT" ~ sep ~ (include_dirty_flag ~ sep)? ~ argument ~ sep ~ argument ~ sep ~ argument }
-hash_sha256_command = ${ "HASH_SHA256" ~ sep ~ argument }
-symlink_command = ${ "SYMLINK" ~ sep ~ argument ~ sep ~ argument }
-mkdir_command = ${ "MKDIR" ~ sep ~ argument }
-ls_command = ${ "LS" ~ (sep ~ argument)? }
-cwd_command = ${ "CWD" }
-read_command = ${ "READ" ~ (sep ~ argument)? }
-write_command = ${ "WRITE" ~ sep ~ argument ~ (sep ~ message)? }
-append_command = ${ "APPEND" ~ sep ~ argument ~ (sep ~ message)? }
-expand_command = ${ "EXPAND" ~ (sep ~ (key_value | argument) ~ (sep ~ key_value)*)? }
-key_value = ${ kv_key ~ "=" ~ argument }
-kv_key = @{ (!"=" ~ !WHITESPACE ~ !linebreak ~ ANY)+ }
-
-assert_file_command = _{ assert_file_hash_command | assert_file_content_command }
-assert_file_hash_command = ${ "ASSERT_FILE" ~ sep ~ "--hash" ~ sep ~ hash_digest ~ sep ~ argument }
-assert_file_content_command = ${ "ASSERT_FILE" ~ sep ~ !hash_flag ~ argument ~ (sep ~ message)? }
-assert_dir_command = ${ "ASSERT_DIR" ~ sep ~ argument }
-assert_absent_command = ${ "ASSERT_ABSENT" ~ sep ~ argument }
-assert_stdout_command = ${ "ASSERT_STDOUT" ~ sep ~ message }
-hash_flag = { "--hash" }
-hash_digest = @{ ASCII_HEX_DIGIT{64} }
-
-exit_command = ${ "EXIT" ~ sep ~ exit_code }
+io_flags = { "[" ~ ws? ~ io_binding ~ (ws? ~ "," ~ ws? ~ io_binding)* ~ ws? ~ "]" }
+io_binding = { io_stream ~ (ws? ~ "=" ~ ws? ~ pipe_binding)? }
+io_stream = { "stdin" | "stdout" | "stderr" }
+pipe_binding = { "pipe" ~ ":" ~ pipe_name }
+pipe_name = @{ (ASCII_ALPHANUMERIC | "_" | "-")+ }
 
 inherit_env_command = ${ "INHERIT_ENV" ~ sep ~ inherit_list }
 inherit_list = { "[" ~ ws? ~ env_key ~ (ws? ~ "," ~ ws? ~ env_key)* ~ ws? ~ "]" }
+
+// Generic instruction: uppercase command name followed by arguments.
+// instruction_inner (non-atomic) — used inside with_io_command's command rule.
+// instruction (atomic) — used at top-level in element.
+instruction_inner = ${ command_name ~ (sep ~ argument)* }
+instruction = ${ command_name ~ (sep ~ argument)* }
+command_name = @{ ASCII_ALPHA_UPPER ~ (ASCII_ALPHA_UPPER | ASCII_DIGIT | "_")* }
 
 sep = _{ WHITESPACE+ }
 
@@ -184,27 +143,5 @@ unquoted_arg = @{ !"$" ~ !("{{") ~ (!WHITESPACE ~ !linebreak ~ !";" ~ !"}" ~ !"{
 argument = { (string_literal | templated_arg | unquoted_arg | expr)+ }
 
 templated_arg = @{ "{{" ~ (!"}}" ~ ANY)* ~ "}}" }
-include_dirty_flag = { "--include-dirty" }
-io_flags = { "[" ~ ws? ~ io_binding ~ (ws? ~ "," ~ ws? ~ io_binding)* ~ ws? ~ "]" }
-io_binding = { io_stream ~ (ws? ~ "=" ~ ws? ~ pipe_binding)? }
-io_stream = { "stdin" | "stdout" | "stderr" }
-pipe_binding = { "pipe" ~ ":" ~ pipe_name }
-pipe_name = @{ (ASCII_ALPHANUMERIC | "_" | "-")+ }
-
-workspace_target = { "SNAPSHOT" | "LOCAL" | "snapshot" | "local" }
-env_pair = { env_key_part ~ ws? ~ "=" ~ ws? ~ env_value_part }
-env_key_part = @{ (!"=" ~ !WHITESPACE ~ !linebreak ~ ANY)+ }
-
-// env_value repeats to support contiguous fragments: val{{ $x }}.txt
-unquoted_env_value = @{ !"$" ~ (!WHITESPACE ~ !linebreak ~ !";" ~ !"}" ~ !"{" ~ !"//" ~ !"/*" ~ ANY)+ }
-env_value_part = { (string_literal | templated_arg | unquoted_env_value | expr)+ }
-
-message = { (string_literal | templated_arg | unquoted_msg_content | expr)+ }
-unquoted_msg_content = { !("$" | "{" | linebreak | ";" | "}" | "//" | "/*") ~ ANY }
-
-run_args = { (string_literal | templated_arg | unquoted_run_content | expr)+ }
-unquoted_run_content = { !("$" | "{" | linebreak | "//" | "/*" | ";" | "}") ~ ANY }
-
-exit_code = @{ ASCII_DIGIT+ }
 
 ws = _{ (WHITESPACE | linebreak)* }

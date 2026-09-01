@@ -1,5 +1,5 @@
 use crate::ast::{
-    Arg, Guard, GuardExpr, IoBinding, IoStream, PlatformGuard, Step, StepKind, WorkspaceTarget,
+    Arg, Guard, GuardExpr, IoBinding, IoStream, PlatformGuard, Step, StepKind,
 };
 use crate::lexer::{self, RawToken, Rule};
 use anyhow::{Result, anyhow, bail};
@@ -64,7 +64,7 @@ impl IoBindingSet {
     }
 }
 
-pub struct ScriptParser<'a> {
+pub struct ScriptParser<'a, F: Fn(&str, Vec<Arg>) -> Result<StepKind>> {
     tokens: VecDeque<RawToken<'a>>,
     steps: Vec<Step>,
     guard_stack: Vec<Option<GuardExpr>>,
@@ -76,10 +76,11 @@ pub struct ScriptParser<'a> {
     pending_io_block: Option<PendingIoBlock>,
     io_scope_stack: Vec<IoScopeFrame>,
     block_stack: Vec<BlockKind>,
+    lower: F,
 }
 
-impl<'a> ScriptParser<'a> {
-    pub fn new(input: &'a str) -> Result<Self> {
+impl<'a, F: Fn(&str, Vec<Arg>) -> Result<StepKind>> ScriptParser<'a, F> {
+    pub fn new(input: &'a str, lower: F) -> Result<Self> {
         let tokens = VecDeque::from(lexer::tokenize(input)?);
         Ok(Self {
             tokens,
@@ -93,12 +94,15 @@ impl<'a> ScriptParser<'a> {
             pending_io_block: None,
             io_scope_stack: Vec::new(),
             block_stack: Vec::new(),
+            lower,
         })
     }
 
     pub fn parse(mut self) -> Result<Vec<Step>> {
         while let Some(token) = self.tokens.pop_front() {
-            if self.pending_io_block.is_some() && !matches!(token, RawToken::BlockStart { .. }) {
+            if self.pending_io_block.is_some()
+                && !matches!(token, RawToken::BlockStart { .. } | RawToken::Command { .. } | RawToken::Instruction { .. })
+            {
                 let pending = self.pending_io_block.take().unwrap();
                 bail!(
                     "line {}: WITH_IO block must be followed by '{{'",
@@ -113,7 +117,11 @@ impl<'a> ScriptParser<'a> {
                 RawToken::BlockStart { line_no } => self.start_block(line_no)?,
                 RawToken::BlockEnd { line_no } => self.end_block(line_no)?,
                 RawToken::Command { pair, line_no } => {
-                    let kind = parse_command(pair)?;
+                    let kind = parse_structural_command_with_lower(pair, &self.lower)?;
+                    self.handle_command_token(line_no, kind)?
+                }
+                RawToken::Instruction { pair, line_no } => {
+                    let kind = self.lower_instruction(pair)?;
                     self.handle_command_token(line_no, kind)?
                 }
             }
@@ -170,6 +178,11 @@ impl<'a> ScriptParser<'a> {
         }
 
         Ok(self.steps)
+    }
+
+    fn lower_instruction(&self, pair: Pair<Rule>) -> Result<StepKind> {
+        let (name, args) = extract_instruction(pair)?;
+        (self.lower)(&name, args)
     }
 
     fn handle_guard_token(&mut self, line_end: usize, expr: GuardExpr) -> Result<()> {
@@ -403,8 +416,11 @@ impl<'a> ScriptParser<'a> {
     }
 }
 
-pub fn parse_script(input: &str) -> Result<Vec<Step>> {
-    ScriptParser::new(input)?.parse()
+pub fn parse_script(
+    input: &str,
+    lower: impl Fn(&str, Vec<Arg>) -> Result<StepKind>,
+) -> Result<Vec<Step>> {
+    ScriptParser::new(input, lower)?.parse()
 }
 
 fn and_guard_exprs(left: Option<GuardExpr>, right: Option<GuardExpr>) -> Option<GuardExpr> {
@@ -434,53 +450,25 @@ fn contains_inherit_env(kind: &StepKind) -> bool {
     }
 }
 
-fn parse_command(pair: Pair<Rule>) -> Result<StepKind> {
+fn parse_structural_command_with_lower(
+    pair: Pair<Rule>,
+    lower: &dyn Fn(&str, Vec<Arg>) -> Result<StepKind>,
+) -> Result<StepKind> {
     let kind = match pair.as_rule() {
-        Rule::workdir_command => {
-            let arg = parse_single_arg(pair)?;
-            StepKind::Workdir(arg)
-        }
-        Rule::workspace_command => {
-            let target = parse_workspace_target(pair)?;
-            StepKind::Workspace(target)
-        }
-        Rule::env_command => {
-            let (key, value) = parse_env_pair(pair)?;
-            StepKind::Env {
-                key,
-                value: value.into(),
-            }
-        }
-        Rule::echo_command => {
-            let msg = parse_message(pair)?;
-            StepKind::Echo(msg)
-        }
-        Rule::run_command => {
-            let cmd = parse_run_args(pair)?;
-            StepKind::Run(cmd.into())
-        }
-        Rule::run_bg_command => {
-            let cmd = parse_run_args(pair)?;
-            StepKind::RunBg(cmd.into())
-        }
-        Rule::copy_command => {
-            let mut args: Vec<Arg> = Vec::new();
-            let mut from_current_workspace = false;
+        Rule::inherit_env_command => {
+            let mut keys = Vec::new();
             for inner in pair.into_inner() {
-                match inner.as_rule() {
-                    Rule::from_current_workspace_flag => from_current_workspace = true,
-                    Rule::argument => args.push(parse_argument(inner)?),
-                    _ => {}
+                if inner.as_rule() == Rule::inherit_list {
+                    for key in inner.into_inner() {
+                        if key.as_rule() == Rule::env_key {
+                            keys.push(key.as_str().trim().to_string());
+                        }
+                    }
+                } else if inner.as_rule() == Rule::env_key {
+                    keys.push(inner.as_str().trim().to_string());
                 }
             }
-            if args.len() != 2 {
-                bail!("COPY expects 2 arguments (from, to)");
-            }
-            StepKind::Copy {
-                from_current_workspace,
-                from: args.remove(0),
-                to: args.remove(0),
-            }
+            StepKind::InheritEnv { keys }
         }
         Rule::with_io_command => {
             let mut bindings = Vec::new();
@@ -494,9 +482,14 @@ fn parse_command(pair: Pair<Rule>) -> Result<StepKind> {
                             }
                         }
                     }
-                    _ => {
-                        cmd = Some(Box::new(parse_command(inner)?));
+                    Rule::with_io_command => {
+                        cmd = Some(Box::new(parse_structural_command_with_lower(inner, lower)?));
                     }
+                    Rule::instruction | Rule::instruction_inner => {
+                        let (name, args) = extract_instruction(inner)?;
+                        cmd = Some(Box::new(lower(&name, args)?));
+                    }
+                    _ => {}
                 }
             }
             if let Some(cmd) = cmd {
@@ -505,153 +498,36 @@ fn parse_command(pair: Pair<Rule>) -> Result<StepKind> {
                 StepKind::WithIoBlock { bindings }
             }
         }
-        Rule::copy_git_command => {
-            let mut args: Vec<Arg> = Vec::new();
-            let mut include_dirty = false;
-            for inner in pair.into_inner() {
-                match inner.as_rule() {
-                    Rule::include_dirty_flag => include_dirty = true,
-                    Rule::argument => args.push(parse_argument(inner)?),
-                    _ => {}
-                }
-            }
-            if args.len() != 3 {
-                bail!("COPY_GIT expects 3 arguments (rev, from, to)");
-            }
-            StepKind::CopyGit {
-                rev: args.remove(0),
-                from: args.remove(0),
-                to: args.remove(0),
-                include_dirty,
-            }
-        }
-        Rule::hash_sha256_command => StepKind::HashSha256 {
-            path: parse_single_arg(pair)?,
-        },
-        Rule::inherit_env_command => {
-            let mut keys: Vec<String> = Vec::new();
-            for inner in pair.into_inner() {
-                match inner.as_rule() {
-                    Rule::inherit_list => {
-                        for key in inner.into_inner() {
-                            if key.as_rule() == Rule::env_key {
-                                keys.push(key.as_str().trim().to_string());
-                            }
-                        }
-                    }
-                    Rule::env_key => keys.push(inner.as_str().trim().to_string()),
-                    _ => {}
-                }
-            }
-            StepKind::InheritEnv { keys }
-        }
-        Rule::symlink_command => {
-            let mut args = parse_args(pair)?;
-            StepKind::Symlink {
-                from: args.remove(0),
-                to: args.remove(0),
-            }
-        }
-        Rule::mkdir_command => {
-            let arg = parse_single_arg(pair)?;
-            StepKind::Mkdir(arg)
-        }
-        Rule::ls_command => {
-            let args = parse_args(pair)?;
-            StepKind::Ls(args.into_iter().next())
-        }
-        Rule::cwd_command => StepKind::Cwd,
-        Rule::read_command => {
-            let args = parse_args(pair)?;
-            StepKind::Read(args.into_iter().next())
-        }
-        Rule::write_command => {
-            let mut path = None;
-            let mut contents = None;
-            for inner in pair.into_inner() {
-                match inner.as_rule() {
-                    Rule::argument if path.is_none() => {
-                        path = Some(parse_argument(inner)?);
-                    }
-                    Rule::message => {
-                        contents = Some(parse_message_fragments(inner)?);
-                    }
-                    _ => {}
-                }
-            }
-            StepKind::Write {
-                path: path.ok_or_else(|| anyhow!("WRITE expects a path argument"))?,
-                contents,
-            }
-        }
-        Rule::append_command => {
-            let mut path = None;
-            let mut contents = None;
-            for inner in pair.into_inner() {
-                match inner.as_rule() {
-                    Rule::argument if path.is_none() => {
-                        path = Some(parse_argument(inner)?);
-                    }
-                    Rule::message => {
-                        contents = Some(parse_message_fragments(inner)?);
-                    }
-                    _ => {}
-                }
-            }
-            StepKind::Append {
-                path: path.ok_or_else(|| anyhow!("APPEND expects a path argument"))?,
-                contents,
-            }
-        }
-        Rule::expand_command => {
-            let mut path = None;
-            let mut overrides: Vec<(String, crate::ast::Arg)> = Vec::new();
-            for inner in pair.into_inner() {
-                match inner.as_rule() {
-                    Rule::argument if path.is_none() => {
-                        path = Some(parse_argument(inner)?);
-                    }
-                    Rule::key_value => {
-                        let mut key = None;
-                        let mut value = None;
-                        for kv_part in inner.into_inner() {
-                            match kv_part.as_rule() {
-                                Rule::kv_key => {
-                                    key = Some(kv_part.as_str().to_string());
-                                }
-                                Rule::argument => {
-                                    value = Some(parse_argument(kv_part)?);
-                                }
-                                _ => {}
-                            }
-                        }
-                        if let (Some(k), Some(v)) = (key, value) {
-                            overrides.push((k, v));
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            StepKind::Expand { path, overrides }
-        }
-        Rule::assert_file_hash_command => parse_assert_file_hash(pair)?,
-        Rule::assert_file_content_command => parse_assert_file_content(pair)?,
-        Rule::assert_dir_command => StepKind::AssertDir(parse_single_arg(pair)?),
-        Rule::assert_absent_command => StepKind::AssertAbsent(parse_single_arg(pair)?),
-        Rule::assert_stdout_command => StepKind::AssertStdout(parse_message(pair)?),
-        Rule::exit_command => {
-            let code = parse_exit_code(pair)?;
-            StepKind::Exit(code)
-        }
-        Rule::for_statement => parse_for_statement_from_pair(pair)?,
+        Rule::for_statement => parse_for_statement_from_pair(pair, lower)?,
         Rule::let_statement => parse_let_statement_from_pair(pair)?,
-        Rule::if_statement => parse_if_statement_from_pair(pair)?,
-        _ => bail!("unknown command rule: {:?}", pair.as_rule()),
+        Rule::if_statement => parse_if_statement_from_pair(pair, lower)?,
+        _ => bail!("unexpected structural command rule: {:?}", pair.as_rule()),
     };
     Ok(kind)
 }
 
-fn parse_for_statement_from_pair(pair: Pair<Rule>) -> Result<StepKind> {
+fn extract_instruction(pair: Pair<Rule>) -> Result<(String, Vec<Arg>)> {
+    let mut name = None;
+    let mut args = Vec::new();
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::command_name => {
+                name = Some(inner.as_str().to_string());
+            }
+            Rule::argument => {
+                args.push(parse_argument(inner)?);
+            }
+            _ => {}
+        }
+    }
+    let name = name.ok_or_else(|| anyhow!("instruction missing command name"))?;
+    Ok((name, args))
+}
+
+fn parse_for_statement_from_pair(
+    pair: Pair<Rule>,
+    lower: &dyn Fn(&str, Vec<Arg>) -> Result<StepKind>,
+) -> Result<StepKind> {
     let mut idents = Vec::new();
     let mut in_expr = None;
     let mut body_steps = Vec::new();
@@ -664,7 +540,7 @@ fn parse_for_statement_from_pair(pair: Pair<Rule>) -> Result<StepKind> {
                 in_expr = Some(parse_expr(inner)?);
             }
             Rule::block => {
-                body_steps = parse_block_elements(inner)?;
+                body_steps = parse_block_elements_with_lower(inner, lower)?;
             }
             _ => {}
         }
@@ -705,7 +581,10 @@ fn parse_let_statement_from_pair(pair: Pair<Rule>) -> Result<StepKind> {
     })
 }
 
-fn parse_if_statement_from_pair(pair: Pair<Rule>) -> Result<StepKind> {
+fn parse_if_statement_from_pair(
+    pair: Pair<Rule>,
+    lower: &dyn Fn(&str, Vec<Arg>) -> Result<StepKind>,
+) -> Result<StepKind> {
     let mut cond = None;
     let mut then_body = Vec::new();
     let mut else_ifs = Vec::new();
@@ -720,15 +599,15 @@ fn parse_if_statement_from_pair(pair: Pair<Rule>) -> Result<StepKind> {
             }
             Rule::block => {
                 if then_body.is_empty() {
-                    then_body = parse_block_elements(inner)?;
+                    then_body = parse_block_elements_with_lower(inner, lower)?;
                 }
             }
             Rule::else_if_clause => {
-                let (eif_cond, eif_body) = parse_else_if_clause(inner)?;
+                let (eif_cond, eif_body) = parse_else_if_clause(inner, lower)?;
                 else_ifs.push((eif_cond, eif_body));
             }
             Rule::else_clause => {
-                else_body = Some(parse_else_clause(inner)?);
+                else_body = Some(parse_else_clause(inner, lower)?);
             }
             _ => {}
         }
@@ -741,13 +620,16 @@ fn parse_if_statement_from_pair(pair: Pair<Rule>) -> Result<StepKind> {
     })
 }
 
-fn parse_else_if_clause(pair: Pair<Rule>) -> Result<(Box<Expr>, Vec<Step>)> {
+fn parse_else_if_clause(
+    pair: Pair<Rule>,
+    lower: &dyn Fn(&str, Vec<Arg>) -> Result<StepKind>,
+) -> Result<(Box<Expr>, Vec<Step>)> {
     let mut cond = None;
     let mut body = Vec::new();
     for inner in pair.into_inner() {
         match inner.as_rule() {
             Rule::expr => cond = Some(parse_expr(inner)?),
-            Rule::block => body = parse_block_elements(inner)?,
+            Rule::block => body = parse_block_elements_with_lower(inner, lower)?,
             _ => {}
         }
     }
@@ -757,21 +639,27 @@ fn parse_else_if_clause(pair: Pair<Rule>) -> Result<(Box<Expr>, Vec<Step>)> {
     ))
 }
 
-fn parse_else_clause(pair: Pair<Rule>) -> Result<Vec<Step>> {
+fn parse_else_clause(
+    pair: Pair<Rule>,
+    lower: &dyn Fn(&str, Vec<Arg>) -> Result<StepKind>,
+) -> Result<Vec<Step>> {
     for inner in pair.into_inner() {
         if let Rule::block = inner.as_rule() {
-            return parse_block_elements(inner);
+            return parse_block_elements_with_lower(inner, lower);
         }
     }
     Ok(Vec::new())
 }
 
-fn parse_block_elements(block_pair: Pair<Rule>) -> Result<Vec<Step>> {
+fn parse_block_elements_with_lower(
+    block_pair: Pair<Rule>,
+    lower: &dyn Fn(&str, Vec<Arg>) -> Result<StepKind>,
+) -> Result<Vec<Step>> {
     let mut steps = Vec::new();
     for elem in block_pair.into_inner() {
         match elem.as_rule() {
             Rule::for_statement | Rule::let_statement | Rule::if_statement => {
-                let step_kind = parse_command(elem)?;
+                let step_kind = parse_structural_command_with_lower(elem, lower)?;
                 steps.push(Step {
                     guard: None,
                     kind: step_kind,
@@ -791,15 +679,25 @@ fn parse_block_elements(block_pair: Pair<Rule>) -> Result<Vec<Step>> {
                 }
                 if let (Some(gp), Some(bp)) = (guard_pair, inner_block) {
                     let guard_expr = parse_guard_line(gp)?;
-                    let mut inner_steps = parse_block_elements(bp)?;
+                    let mut inner_steps = parse_block_elements_with_lower(bp, lower)?;
                     for step in &mut inner_steps {
                         step.guard = Some(guard_expr.clone());
                     }
                     steps.extend(inner_steps);
                 }
             }
-            _ if is_command_rule(elem.as_rule()) => {
-                let step_kind = parse_command(elem)?;
+            Rule::instruction | Rule::instruction_inner => {
+                let (name, args) = extract_instruction(elem)?;
+                let kind = lower(&name, args)?;
+                steps.push(Step {
+                    guard: None,
+                    kind,
+                    scope_enter: 0,
+                    scope_exit: 0,
+                });
+            }
+            Rule::with_io_command => {
+                let step_kind = parse_structural_command_with_lower(elem, lower)?;
                 steps.push(Step {
                     guard: None,
                     kind: step_kind,
@@ -813,93 +711,6 @@ fn parse_block_elements(block_pair: Pair<Rule>) -> Result<Vec<Step>> {
     Ok(steps)
 }
 
-fn is_command_rule(rule: Rule) -> bool {
-    matches!(
-        rule,
-        Rule::workdir_command
-            | Rule::workspace_command
-            | Rule::env_command
-            | Rule::echo_command
-            | Rule::run_command
-            | Rule::run_bg_command
-            | Rule::copy_command
-            | Rule::with_io_command
-            | Rule::copy_git_command
-            | Rule::hash_sha256_command
-            | Rule::inherit_env_command
-            | Rule::symlink_command
-            | Rule::mkdir_command
-            | Rule::ls_command
-            | Rule::cwd_command
-            | Rule::read_command
-            | Rule::write_command
-            | Rule::append_command
-            | Rule::expand_command
-            | Rule::assert_file_hash_command
-            | Rule::assert_file_content_command
-            | Rule::assert_dir_command
-            | Rule::assert_absent_command
-            | Rule::assert_stdout_command
-            | Rule::exit_command
-    )
-}
-
-fn parse_assert_file_hash(pair: Pair<Rule>) -> Result<StepKind> {
-    let mut digest = None;
-    let mut path = None;
-    for part in pair.into_inner() {
-        match part.as_rule() {
-            Rule::hash_digest => digest = Some(part.as_str().to_string()),
-            Rule::argument => path = Some(parse_argument(part)?),
-            _ => {}
-        }
-    }
-    Ok(StepKind::AssertFile {
-        hash: Some(digest.ok_or_else(|| anyhow!("missing hash digest"))?),
-        path: path.ok_or_else(|| anyhow!("ASSERT_FILE --hash expects a path argument"))?,
-        contents: None,
-    })
-}
-
-fn parse_assert_file_content(pair: Pair<Rule>) -> Result<StepKind> {
-    let mut path = None;
-    let mut contents = None;
-    for part in pair.into_inner() {
-        match part.as_rule() {
-            Rule::argument if path.is_none() => {
-                path = Some(parse_argument(part)?);
-            }
-            Rule::message => {
-                contents = Some(parse_message_fragments(part)?);
-            }
-            _ => {}
-        }
-    }
-    Ok(StepKind::AssertFile {
-        hash: None,
-        path: path.ok_or_else(|| anyhow!("ASSERT_FILE expects a path argument"))?,
-        contents,
-    })
-}
-
-fn parse_single_arg(pair: Pair<Rule>) -> Result<Arg> {
-    for inner in pair.into_inner() {
-        if inner.as_rule() == Rule::argument {
-            return parse_argument(inner);
-        }
-    }
-    bail!("missing argument")
-}
-
-fn parse_args(pair: Pair<Rule>) -> Result<Vec<Arg>> {
-    let mut args = Vec::new();
-    for inner in pair.into_inner() {
-        if inner.as_rule() == Rule::argument {
-            args.push(parse_argument(inner)?);
-        }
-    }
-    Ok(args)
-}
 
 fn parse_argument(pair: Pair<Rule>) -> Result<Arg> {
     let inner: Vec<_> = pair.into_inner().collect();
@@ -915,69 +726,6 @@ fn parse_quoted_string(pair: Pair<Rule>) -> Result<String> {
     let content = &s[1..s.len() - 1];
     // Pass contents verbatim — all escape processing deferred to runtime expand_string
     Ok(content.to_string())
-}
-
-fn parse_workspace_target(pair: Pair<Rule>) -> Result<WorkspaceTarget> {
-    for inner in pair.into_inner() {
-        if inner.as_rule() == Rule::workspace_target {
-            return match inner.as_str().to_ascii_lowercase().as_str() {
-                "snapshot" => Ok(WorkspaceTarget::Snapshot),
-                "local" => Ok(WorkspaceTarget::Local),
-                _ => bail!("unknown workspace target"),
-            };
-        }
-    }
-    bail!("missing workspace target")
-}
-
-fn parse_env_pair(pair: Pair<Rule>) -> Result<(String, String)> {
-    for inner in pair.into_inner() {
-        if inner.as_rule() == Rule::env_pair {
-            let mut parts = inner.into_inner();
-            let key = parts.next().unwrap().as_str().to_string();
-            let value_pair = parts.next().unwrap();
-            let value = match value_pair.as_rule() {
-                Rule::env_value_part => {
-                    let fragments: Vec<_> = value_pair.into_inner().collect();
-                    parse_fragments(&fragments)?
-                }
-                _ => unreachable!("expected env_value_part"),
-            };
-            return Ok((key, value));
-        }
-    }
-    bail!("missing env pair")
-}
-
-fn parse_message(pair: Pair<Rule>) -> Result<Arg> {
-    for inner in pair.into_inner() {
-        if inner.as_rule() == Rule::message {
-            return parse_message_fragments(inner);
-        }
-    }
-    bail!("missing message")
-}
-
-fn parse_message_fragments(message_pair: Pair<Rule>) -> Result<Arg> {
-    let parts: Vec<_> = message_pair.into_inner().collect();
-    if parts.len() == 1 && parts[0].as_rule() == Rule::expr {
-        return Ok(Arg::Expr(parse_expr(parts.into_iter().next().unwrap())?));
-    }
-    Ok(Arg::String(parse_fragments(&parts)?))
-}
-
-fn parse_run_args(pair: Pair<Rule>) -> Result<String> {
-    for inner in pair.into_inner() {
-        if inner.as_rule() == Rule::run_args {
-            return parse_concatenated_fragments(inner);
-        }
-    }
-    bail!("missing run args")
-}
-
-fn parse_concatenated_fragments(pair: Pair<Rule>) -> Result<String> {
-    let parts: Vec<_> = pair.into_inner().collect();
-    parse_fragments(&parts)
 }
 
 /// Concatenate fragment pairs (string_literal, templated_arg, unquoted_arg, expr)
@@ -1005,11 +753,7 @@ fn parse_fragments(parts: &[Pair<Rule>]) -> Result<String> {
                 let unquoted = &s[1..s.len() - 1];
                 body.push_str(unquoted);
             }
-            Rule::templated_arg
-            | Rule::unquoted_arg
-            | Rule::unquoted_env_value
-            | Rule::unquoted_msg_content
-            | Rule::unquoted_run_content => {
+            Rule::templated_arg | Rule::unquoted_arg => {
                 body.push_str(part.as_str());
             }
             Rule::expr => body.push_str(part.as_str()),
@@ -1018,18 +762,6 @@ fn parse_fragments(parts: &[Pair<Rule>]) -> Result<String> {
         last_end = Some(span.end());
     }
     Ok(body)
-}
-
-fn parse_exit_code(pair: Pair<Rule>) -> Result<i32> {
-    for inner in pair.into_inner() {
-        if inner.as_rule() == Rule::exit_code {
-            return inner
-                .as_str()
-                .parse()
-                .map_err(|_| anyhow!("invalid exit code"));
-        }
-    }
-    bail!("missing exit code")
 }
 
 fn parse_guard_line(pair: Pair<Rule>) -> Result<GuardExpr> {

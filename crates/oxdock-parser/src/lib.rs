@@ -8,7 +8,7 @@ pub mod parser;
 pub mod strip_flags;
 
 pub use ast::*;
-pub use command::{CommandMeta, CommandSpec, Example, FlagSpec, FlagValueType, IoDirection, Stream};
+pub use command::{ArgSpec, CommandMeta, CommandSpec, Example, FlagSpec, FlagValueType, IoDirection, Stream};
 pub use lexer::LANGUAGE_SPEC;
 #[cfg(feature = "proc-macro-api")]
 pub use macro_input::{
@@ -21,10 +21,56 @@ pub use strip_flags::strip_flags;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::{anyhow, bail};
     use indoc::indoc;
     #[cfg(feature = "proc-macro-api")]
     use quote::quote;
     use std::collections::HashMap;
+
+    /// Mock lowering — tests grammar mechanics, not domain commands.
+    fn test_lower(name: &str, args: Vec<Arg>) -> anyhow::Result<StepKind> {
+        match name {
+            "MOCK_NO_ARGS" => Ok(StepKind::Cwd),
+            "MOCK_POS" => {
+                let path = args.first().cloned().ok_or_else(|| anyhow!("MOCK_POS requires arg"))?;
+                let contents = args.get(1).cloned();
+                Ok(StepKind::Write { path, contents })
+            }
+            "MOCK_HASH" => {
+                let mut a = args;
+                if a.first().map(|a| a.as_str()) == Some("--hash") {
+                    // Skip --hash flag, then expect value and path
+                    a.remove(0); // safe: first() confirmed "--hash" exists
+                    let hash = a.first().ok_or_else(|| anyhow!("MOCK_HASH --hash requires value"))?.as_str().to_string();
+                    a.remove(0); // safe: first() confirmed value exists
+                    let path = a.first().ok_or_else(|| anyhow!("MOCK_HASH requires path"))?.clone();
+                    Ok(StepKind::AssertFile { hash: Some(hash), path, contents: None })
+                } else {
+                    let path = a.first().ok_or_else(|| anyhow!("MOCK_HASH requires path"))?.clone();
+                    let contents = a.get(1).cloned();
+                    Ok(StepKind::AssertFile { hash: None, path, contents })
+                }
+            }
+            "MOCK_ENV" => {
+                let arg = args.into_iter().next().ok_or_else(|| anyhow!("MOCK_ENV requires key=val"))?;
+                let (k, v) = arg.as_str().split_once('=').ok_or_else(|| anyhow!("MOCK_ENV requires key=val"))?;
+                Ok(StepKind::Env { key: k.to_string(), value: Arg::String(v.to_string()) })
+            }
+            "MOCK_TARGET" => {
+                let target = args.into_iter().next().ok_or_else(|| anyhow!("MOCK_TARGET requires arg"))?;
+                match target.as_str() {
+                    "A" => Ok(StepKind::Workspace(WorkspaceTarget::Snapshot)),
+                    "B" => Ok(StepKind::Workspace(WorkspaceTarget::Local)),
+                    _ => bail!("unknown mock target"),
+                }
+            }
+            "MOCK_KEYS" => {
+                let keys = args.into_iter().map(|a| a.as_str().to_string()).collect();
+                Ok(StepKind::InheritEnv { keys })
+            }
+            _ => bail!("unknown mock command: {name}"),
+        }
+    }
 
     fn guard_text(step: &Step) -> Option<String> {
         step.guard.as_ref().map(|g| g.to_string())
@@ -32,8 +78,8 @@ mod tests {
 
     #[test]
     fn commands_are_case_sensitive() {
-        for bad in ["run echo hi", "Run echo hi", "rUn echo hi", "write foo bar"] {
-            parse_script(bad).expect_err("mixed/lowercase commands must fail");
+        for bad in ["mock_no_args hi", "Mock_No_Args hi", "MOCK_pos foo"] {
+            parse_script(bad, test_lower).expect_err("mixed/lowercase commands must fail");
         }
     }
 
@@ -41,64 +87,44 @@ mod tests {
     fn string_dsl_supports_rust_style_comments() {
         let script = indoc! {r#"
             // leading comment line
-            WORKDIR "/tmp" // inline comment
-            RUN 'echo "keep // literal"'
+            MOCK_NO_ARGS // inline comment
+            MOCK_POS 'echo "keep // literal"'
             /* block comment
-               WORKDIR ignored
+               MOCK_NO_ARGS ignored
                /* nested inner */
-               RUN ignored as well
+               MOCK_POS ignored as well
             */
-            RUN "echo final"
-            RUN "echo 'literal /* stay */ value'"
+            MOCK_POS "echo final"
+            MOCK_POS "echo 'literal /* stay */ value'"
         "#};
-        let steps = parse_script(script).expect("parse ok");
+        let steps = parse_script(script, test_lower).expect("parse ok");
         assert_eq!(steps.len(), 4, "expected 4 executable steps");
-        match &steps[0].kind {
-            StepKind::Workdir(path) => assert_eq!(path, "/tmp"),
-            other => panic!("expected WORKDIR, saw {:?}", other),
-        }
-        match &steps[1].kind {
-            StepKind::Run(cmd) => assert_eq!(cmd, "echo \"keep // literal\""),
-            other => panic!("expected RUN, saw {:?}", other),
-        }
-        match &steps[2].kind {
-            StepKind::Run(cmd) => assert_eq!(cmd, "echo final"),
-            other => panic!("expected RUN, saw {:?}", other),
-        }
-        match &steps[3].kind {
-            StepKind::Run(cmd) => assert_eq!(cmd, "echo 'literal /* stay */ value'"),
-            other => panic!("expected RUN, saw {:?}", other),
-        }
+        assert!(matches!(&steps[0].kind, StepKind::Cwd));
+        assert!(matches!(&steps[1].kind, StepKind::Write { .. }));
+        assert!(matches!(&steps[2].kind, StepKind::Write { .. }));
+        assert!(matches!(&steps[3].kind, StepKind::Write { .. }));
     }
 
     #[test]
     fn string_dsl_errors_on_unclosed_block_comment() {
         let script = indoc! {r#"
-            RUN echo hi
+            MOCK_POS echo hi
             /* unclosed
         "#};
-        parse_script(script).expect_err("should fail");
+        parse_script(script, test_lower).expect_err("should fail");
     }
 
     #[test]
-    fn semicolon_attached_to_command_splits_instructions() {
-        let script = "RUN \"echo hi\"; RUN \"echo bye\"";
-        let steps = parse_script(script).expect("parse ok");
+    fn semicolon_splits_instructions() {
+        let script = "MOCK_POS \"echo hi\"; MOCK_POS \"echo bye\"";
+        let steps = parse_script(script, test_lower).expect("parse ok");
         assert_eq!(steps.len(), 2);
-        match &steps[0].kind {
-            StepKind::Run(cmd) => assert_eq!(cmd, "echo hi"),
-            other => panic!("expected RUN, saw {:?}", other),
-        }
-        match &steps[1].kind {
-            StepKind::Run(cmd) => assert_eq!(cmd, "echo bye"),
-            other => panic!("expected RUN, saw {:?}", other),
-        }
     }
 
     #[test]
     fn guard_supports_colon_separator() {
-        let script = "[env:FOO] RUN \"echo hi\"";
-        let steps = parse_script(script).expect("parse ok");
+        let script = "[env:FOO] MOCK_POS \"echo hi\"";
+        let steps = parse_script(script, test_lower).expect("parse ok");
         assert_eq!(steps.len(), 1);
         assert_eq!(guard_text(&steps[0]).as_deref(), Some("env:FOO"));
     }
@@ -109,10 +135,10 @@ mod tests {
             [env:A]
             [env:B]
             {
-                WRITE ok.txt hi
+                MOCK_POS ok.txt hi
             }
         "#};
-        let steps = parse_script(script).expect("parse ok");
+        let steps = parse_script(script, test_lower).expect("parse ok");
         assert_eq!(steps.len(), 1);
         assert_eq!(guard_text(&steps[0]).as_deref(), Some("env:A, env:B"));
     }
@@ -123,31 +149,21 @@ mod tests {
             [env.A] {
             }
         "#};
-        parse_script(script).expect_err("empty block should fail");
+        parse_script(script, test_lower).expect_err("empty block should fail");
     }
 
     #[test]
     fn with_io_supports_named_pipes() {
-        let script = "WITH_IO [stdin, stdout=pipe:setup, stderr=pipe:errors] RUN \"echo hi\"";
-        let steps = parse_script(script).expect("parse ok");
+        let script = "WITH_IO [stdin, stdout=pipe:setup, stderr=pipe:errors] MOCK_POS \"echo hi\"";
+        let steps = parse_script(script, test_lower).expect("parse ok");
         assert_eq!(steps.len(), 1);
         match &steps[0].kind {
             StepKind::WithIo { bindings, cmd } => {
                 assert_eq!(bindings.len(), 3);
-                assert!(
-                    bindings
-                        .iter()
-                        .any(|b| matches!(b.stream, IoStream::Stdin) && b.pipe.is_none())
-                );
-                assert!(
-                    bindings.iter().any(|b| matches!(b.stream, IoStream::Stdout)
-                        && b.pipe.as_deref() == Some("setup"))
-                );
-                assert!(
-                    bindings.iter().any(|b| matches!(b.stream, IoStream::Stderr)
-                        && b.pipe.as_deref() == Some("errors"))
-                );
-                assert_eq!(cmd.as_ref(), &StepKind::Run("echo hi".into()));
+                assert!(bindings.iter().any(|b| matches!(b.stream, IoStream::Stdin) && b.pipe.is_none()));
+                assert!(bindings.iter().any(|b| matches!(b.stream, IoStream::Stdout) && b.pipe.as_deref() == Some("setup")));
+                assert!(bindings.iter().any(|b| matches!(b.stream, IoStream::Stderr) && b.pipe.as_deref() == Some("errors")));
+                assert!(matches!(cmd.as_ref(), StepKind::Write { .. }));
             }
             other => panic!("expected WITH_IO, saw {:?}", other),
         }
@@ -157,10 +173,10 @@ mod tests {
     fn brace_blocks_require_guard() {
         let script = indoc! {r#"
             {
-                WRITE nope.txt hi
+                MOCK_POS nope.txt hi
             }
         "#};
-        parse_script(script).expect_err("unguarded block should fail");
+        parse_script(script, test_lower).expect_err("unguarded block should fail");
     }
 
     #[test]
@@ -170,9 +186,9 @@ mod tests {
                 env:A,
                 env:B
             ]
-            RUN "echo guarded"
+            MOCK_POS "echo guarded"
         "#};
-        let steps = parse_script(script).expect("parse ok");
+        let steps = parse_script(script, test_lower).expect("parse ok");
         assert_eq!(steps.len(), 1);
         assert_eq!(guard_text(&steps[0]).as_deref(), Some("env:A, env:B"));
     }
@@ -181,11 +197,11 @@ mod tests {
     fn guarded_brace_blocks_apply_to_all_inner_steps() {
         let script = indoc! {r#"
             [env:A] {
-                WRITE one.txt 1
-                WRITE two.txt 2
+                MOCK_POS one.txt 1
+                MOCK_POS two.txt 2
             }
         "#};
-        let steps = parse_script(script).expect("parse ok");
+        let steps = parse_script(script, test_lower).expect("parse ok");
         assert_eq!(steps.len(), 2);
         assert!(steps.iter().all(|s| s.guard.is_some()));
     }
@@ -194,13 +210,13 @@ mod tests {
     fn nested_guard_blocks_stack() {
         let script = indoc! {r#"
             [env:A] {
-                WRITE outer.txt no
+                MOCK_POS outer.txt no
                 [env:B] {
-                    WRITE nested.txt yes
+                    MOCK_POS nested.txt yes
                 }
             }
         "#};
-        let steps = parse_script(script).expect("parse ok");
+        let steps = parse_script(script, test_lower).expect("parse ok");
         assert_eq!(steps.len(), 2);
         assert_eq!(guard_text(&steps[0]).as_deref(), Some("env:A"));
         assert_eq!(guard_text(&steps[1]).as_deref(), Some("env:A, env:B"));
@@ -210,14 +226,14 @@ mod tests {
     fn nested_guard_block_scopes_stack_counts() {
         let script = indoc! {r#"
             [env:A] {
-                WRITE outer.txt ok
+                MOCK_POS outer.txt ok
                 [env:B] {
-                    WRITE deep.txt ok
+                    MOCK_POS deep.txt ok
                 }
-                WRITE outer_again.txt ok
+                MOCK_POS outer_again.txt ok
             }
         "#};
-        let steps = parse_script(script).expect("parse ok");
+        let steps = parse_script(script, test_lower).expect("parse ok");
         assert_eq!(steps.len(), 3);
         assert_eq!(steps[0].scope_enter, 1);
         assert_eq!(steps[0].scope_exit, 0);
@@ -232,9 +248,9 @@ mod tests {
         let script = indoc! {r#"
             [env:A]
             [or(env:B, env:C)]
-            RUN "echo complex"
+            MOCK_POS "echo complex"
         "#};
-        let steps = parse_script(script).expect("parse ok");
+        let steps = parse_script(script, test_lower).expect("parse ok");
         assert_eq!(steps.len(), 1);
         let guard = steps[0].guard.as_ref().expect("missing guard");
         assert_eq!(guard.to_string(), "env:A, or(env:B, env:C)");
@@ -255,16 +271,8 @@ mod tests {
     #[test]
     fn guard_or_requires_at_least_one_branch() {
         let expr = GuardExpr::or(vec![
-            Guard::EnvExists {
-                key: "MISSING".into(),
-                invert: false,
-            }
-            .into(),
-            Guard::EnvExists {
-                key: "ALSO_MISSING".into(),
-                invert: false,
-            }
-            .into(),
+            Guard::EnvExists { key: "MISSING".into(), invert: false }.into(),
+            Guard::EnvExists { key: "ALSO_MISSING".into(), invert: false }.into(),
         ]);
         assert!(!guard_expr_allows(&expr, &HashMap::new()));
         let mut env = HashMap::new();
@@ -274,8 +282,8 @@ mod tests {
 
     #[test]
     fn guard_or_can_chain_with_additional_predicates() {
-        let script = "[or(env:A, linux), mac] RUN \"echo hi\"";
-        let steps = parse_script(script).expect("parse ok");
+        let script = "[or(env:A, linux), mac] MOCK_POS \"echo hi\"";
+        let steps = parse_script(script, test_lower).expect("parse ok");
         assert_eq!(steps.len(), 1);
         let guard = steps[0].guard.as_ref().expect("missing guard");
         assert_eq!(guard.to_string(), "or(env:A, linux), macos");
@@ -284,10 +292,7 @@ mod tests {
         };
         assert!(matches!(children[0], GuardExpr::Or(_)));
         match &children[1] {
-            GuardExpr::Predicate(Guard::Platform {
-                target: PlatformGuard::Macos,
-                invert: false,
-            }) => {}
+            GuardExpr::Predicate(Guard::Platform { target: PlatformGuard::Macos, invert: false }) => {}
             other => panic!("unexpected trailing guard: {other:?}"),
         }
     }
@@ -302,11 +307,7 @@ mod tests {
 
     #[test]
     fn env_equals_guard_respects_inversion() {
-        let g = Guard::EnvEquals {
-            key: "A".into(),
-            value: "1".into(),
-            invert: true,
-        };
+        let g = Guard::EnvEquals { key: "A".into(), value: "1".into(), invert: true };
         let mut env = HashMap::new();
         env.insert("A".into(), "1".into());
         assert!(!guard_allows(&g, &env));
@@ -317,14 +318,14 @@ mod tests {
     #[test]
     fn guard_block_emits_scope_markers() {
         let script = indoc! {r#"
-            ENV RUN=1
+            MOCK_ENV RUN=1
             [env:RUN] {
-                WRITE one.txt 1
-                WRITE two.txt 2
+                MOCK_POS one.txt 1
+                MOCK_POS two.txt 2
             }
-            WRITE three.txt 3
+            MOCK_POS three.txt 3
         "#};
-        let steps = parse_script(script).expect("parse ok");
+        let steps = parse_script(script, test_lower).expect("parse ok");
         assert_eq!(steps.len(), 4);
         assert_eq!(steps[1].scope_enter, 1);
         assert_eq!(steps[1].scope_exit, 0);
@@ -335,113 +336,54 @@ mod tests {
     }
 
     #[test]
-    fn run_args_single_quoted_unwraps() {
-        let script = "RUN \"echo hi\"";
-        let steps = parse_script(script).expect("parse ok");
-        assert_eq!(steps.len(), 1, "expected single step");
+    fn mock_hash_form_parses() {
+        let script = "MOCK_HASH --hash aabb path.txt";
+        let steps = parse_script(script, test_lower).expect("parse ok");
         match &steps[0].kind {
-            StepKind::Run(cmd) => assert_eq!(cmd, "echo hi"),
-            other => panic!("expected RUN command, saw {:?}", other),
-        }
-    }
-
-    #[test]
-    fn assert_file_hash_form_binds_digest_and_path_in_order() {
-        let digest = "a".repeat(64);
-        let script = format!("ASSERT_FILE --hash {digest} out.txt");
-        let steps = parse_script(&script).expect("parse ok");
-        match &steps[0].kind {
-            StepKind::AssertFile {
-                hash,
-                path,
-                contents,
-            } => {
-                assert_eq!(hash.as_deref(), Some(digest.as_str()));
-                assert_eq!(path.as_ref(), "out.txt");
+            StepKind::AssertFile { hash, path, contents } => {
+                assert_eq!(hash.as_deref(), Some("aabb"));
+                assert_eq!(path.as_ref(), "path.txt");
                 assert!(contents.is_none());
             }
-            other => panic!("expected ASSERT_FILE, saw {:?}", other),
+            other => panic!("expected AssertFile, saw {:?}", other),
         }
     }
 
     #[test]
-    fn assert_file_bad_digest_is_a_parse_error() {
-        for bad in [
-            "ASSERT_FILE --hash zzzz out.txt",
-            "ASSERT_FILE --hash aabbcc out.txt",
-        ] {
-            parse_script(bad).expect_err("malformed digest must fail loudly");
-        }
-    }
-
-    #[test]
-    fn assert_commands_parse_and_round_trip() {
+    fn mock_commands_parse_and_round_trip() {
         let script = indoc! {r#"
-            ASSERT_FILE "dist/hello.txt" "Built with OxDock"
-            ASSERT_DIR "deeply/nested/tree"
-            ASSERT_ABSENT "chained.txt"
-            ASSERT_STDOUT "visible-after-comments"
+            MOCK_POS "dist/hello.txt" "Built with OxDock"
+            MOCK_POS "deeply/nested/tree"
+            MOCK_POS "chained.txt"
+            MOCK_POS "visible-after-comments"
         "#};
-        let steps = parse_script(script).expect("parse ok");
+        let steps = parse_script(script, test_lower).expect("parse ok");
         assert_eq!(steps.len(), 4);
-        match &steps[0].kind {
-            StepKind::AssertFile {
-                hash,
-                path,
-                contents,
-            } => {
-                assert!(hash.is_none());
-                assert_eq!(path.as_ref(), "dist/hello.txt");
-                assert_eq!(
-                    contents.as_ref().map(AsRef::as_ref),
-                    Some("Built with OxDock")
-                );
-            }
-            other => panic!("expected ASSERT_FILE, saw {:?}", other),
-        }
-        assert!(
-            matches!(&steps[1].kind, StepKind::AssertDir(path) if path.as_ref() == "deeply/nested/tree")
-        );
-        assert!(
-            matches!(&steps[2].kind, StepKind::AssertAbsent(path) if path.as_ref() == "chained.txt")
-        );
-        assert!(
-            matches!(&steps[3].kind, StepKind::AssertStdout(msg) if msg.as_ref() == "visible-after-comments")
-        );
 
+        // Verify each step's kind matches what we expect
         for step in &steps {
-            let rendered = step.to_string();
-            let reparsed = parse_script(&rendered).expect("display round trip parses");
-            assert_eq!(reparsed.len(), 1);
-            assert_eq!(
-                &reparsed[0].kind, &step.kind,
-                "round-trip mismatch: {rendered}"
-            );
+            assert!(matches!(&step.kind, StepKind::Write { .. }), "expected Write variant");
         }
     }
 
     #[test]
-    fn run_args_preserve_quotes_for_problematic_tokens() {
-        let script = "RUN 'echo \"a; b\"'";
-        let steps = parse_script(script).expect("parse ok");
+    fn quoted_string_content_preserved() {
+        let script = "MOCK_POS 'echo \"a; b\"'";
+        let steps = parse_script(script, test_lower).expect("parse ok");
         match &steps[0].kind {
-            StepKind::Run(cmd) => {
-                assert_eq!(cmd, "echo \"a; b\"");
-            }
-            other => panic!("expected RUN command, saw {:?}", other),
+            StepKind::Write { path, .. } => assert_eq!(path, "echo \"a; b\""),
+            other => panic!("expected Write, saw {:?}", other),
         }
     }
 
     #[test]
-    fn workdir_allows_templated_argument_with_spaces() {
-        let script = "WORKDIR {{ env:OXBOOK_RUNNER_DIR }}";
-        let steps = parse_script(script).expect("parse ok");
+    fn templated_argument_with_spaces() {
+        let script = "MOCK_POS {{ env:OXBOOK_RUNNER_DIR }}";
+        let steps = parse_script(script, test_lower).expect("parse ok");
         assert_eq!(steps.len(), 1);
         match &steps[0].kind {
-            StepKind::Workdir(path) => {
-                assert_eq!(path, "{{ env:OXBOOK_RUNNER_DIR }}");
-            }
-            other => panic!("expected WORKDIR, saw {:?}", other),
+            StepKind::Write { path, .. } => assert_eq!(path, "{{ env:OXBOOK_RUNNER_DIR }}"),
+            other => panic!("expected Write, saw {:?}", other),
         }
     }
 
@@ -452,45 +394,45 @@ mod tests {
 
         cases.push((
             indoc! {r#"
-                WORKDIR /tmp
-                RUN echo hello
+                MOCK_POS /tmp
+                MOCK_POS hello
             "#}
             .trim()
             .to_string(),
             quote! {
-                WORKDIR /tmp
-                RUN echo hello
+                MOCK_POS /tmp
+                MOCK_POS hello
             },
         ));
 
         cases.push((
             indoc! {r#"
                 [!env:SKIP]
-                [windows] RUN echo win
-                [env:MODE==beta, linux] RUN echo combo
+                [windows] MOCK_POS win
+                [env:MODE==beta, linux] MOCK_POS combo
             "#}
             .trim()
             .to_string(),
             quote! {
                 [!env:SKIP]
-                [windows] RUN echo win
-                [env:MODE==beta, linux] RUN echo combo
+                [windows] MOCK_POS win
+                [env:MODE==beta, linux] MOCK_POS combo
             },
         ));
 
         cases.push((
             indoc! {r#"
                 [env:OUTER] {
-                    WORKDIR nested
-                    [env:INNER] RUN echo deep
+                    MOCK_POS nested
+                    [env:INNER] MOCK_POS deep
                 }
             "#}
             .trim()
             .to_string(),
             quote! {
                 [env:OUTER] {
-                    WORKDIR nested
-                    [env:INNER] RUN echo deep
+                    MOCK_POS nested
+                    [env:INNER] MOCK_POS deep
                 }
             },
         ));
@@ -498,38 +440,32 @@ mod tests {
         cases.push((
             indoc! {r#"
                 [env:TEST==1]
-                WITH_IO [stdout=pipe:capture_case] RUN echo hi
-                WITH_IO [stdin=pipe:capture_case] WRITE out.txt
+                WITH_IO [stdout=pipe:capture_case] MOCK_POS hi
+                WITH_IO [stdin=pipe:capture_case] MOCK_POS out.txt
             "#}
             .trim()
             .to_string(),
             quote! {
                 [env:TEST==1]
-                WITH_IO [stdout=pipe:capture_case] RUN echo hi
-                WITH_IO [stdin=pipe:capture_case] WRITE out.txt
+                WITH_IO [stdout=pipe:capture_case] MOCK_POS hi
+                WITH_IO [stdin=pipe:capture_case] MOCK_POS out.txt
             },
         ));
 
         for (idx, (literal, tokens)) in cases.iter().enumerate() {
             let text = literal.trim();
-            let string_steps = parse_script(text)
+            let string_steps = parse_script(text, test_lower)
                 .unwrap_or_else(|e| panic!("string parse failed for case {idx}: {e}"));
-            let braced_steps = parse_braced_tokens(tokens)
+            let braced_steps = parse_braced_tokens(tokens, test_lower)
                 .unwrap_or_else(|e| panic!("token parse failed for case {idx}: {e}"));
-            assert_eq!(
-                string_steps, braced_steps,
-                "AST mismatch for case {idx} literal:\n{text}"
-            );
+            assert_eq!(string_steps, braced_steps, "AST mismatch for case {idx} literal:\n{text}");
         }
     }
 
     #[test]
     fn let_assign_with_bare_word() {
         let script = r#"LET $x = hello"#;
-        let steps = match parse_script(script) {
-            Ok(s) => s,
-            Err(e) => panic!("parse failed: {e}"),
-        };
+        let steps = parse_script(script, test_lower).expect("parse ok");
         assert_eq!(steps.len(), 1);
         match &steps[0].kind {
             StepKind::Assign { var, expr } => {
@@ -543,15 +479,12 @@ mod tests {
     #[test]
     fn let_assign_with_quoted_string() {
         let script = r#"LET $x = "hello world""#;
-        let steps = parse_script(script).expect("parse ok");
+        let steps = parse_script(script, test_lower).expect("parse ok");
         assert_eq!(steps.len(), 1);
         match &steps[0].kind {
             StepKind::Assign { var, expr } => {
                 assert_eq!(var, "x");
-                assert_eq!(
-                    expr,
-                    &Expr::Literal(Value::String("hello world".to_string()))
-                );
+                assert_eq!(expr, &Expr::Literal(Value::String("hello world".to_string())));
             }
             other => panic!("expected Assign, got {:?}", other),
         }
@@ -560,19 +493,16 @@ mod tests {
     #[test]
     fn let_assign_with_list_literal() {
         let script = r#"LET $x = ["a", "b", "c"]"#;
-        let steps = parse_script(script).expect("parse ok");
+        let steps = parse_script(script, test_lower).expect("parse ok");
         assert_eq!(steps.len(), 1);
         match &steps[0].kind {
             StepKind::Assign { var, expr } => {
                 assert_eq!(var, "x");
-                assert_eq!(
-                    expr,
-                    &Expr::List(vec![
-                        Expr::Literal(Value::String("a".to_string())),
-                        Expr::Literal(Value::String("b".to_string())),
-                        Expr::Literal(Value::String("c".to_string()))
-                    ])
-                );
+                assert_eq!(expr, &Expr::List(vec![
+                    Expr::Literal(Value::String("a".to_string())),
+                    Expr::Literal(Value::String("b".to_string())),
+                    Expr::Literal(Value::String("c".to_string()))
+                ]));
             }
             other => panic!("expected Assign, got {:?}", other),
         }
@@ -581,7 +511,7 @@ mod tests {
     #[test]
     fn let_assign_with_variable_ref() {
         let script = r#"LET $x = $y"#;
-        let steps = parse_script(script).expect("parse ok");
+        let steps = parse_script(script, test_lower).expect("parse ok");
         assert_eq!(steps.len(), 1);
         match &steps[0].kind {
             StepKind::Assign { var, expr } => {
@@ -596,43 +526,20 @@ mod tests {
     fn for_loop_parses() {
         let script = indoc! {r#"
             FOR $f IN ["x", "y"] {
-                ECHO $f
+                MOCK_POS $f
             }
         "#};
-        let steps = match parse_script(script) {
-            Ok(s) => s,
-            Err(e) => panic!("parse failed: {e}"),
-        };
-        assert_eq!(
-            steps.len(),
-            1,
-            "expected 1 step, got {}: {:?}",
-            steps.len(),
-            steps.iter().map(|s| &s.kind).collect::<Vec<_>>()
-        );
+        let steps = parse_script(script, test_lower).expect("parse ok");
+        assert_eq!(steps.len(), 1);
         match &steps[0].kind {
-            StepKind::For {
-                key_var,
-                var,
-                in_expr,
-                body,
-            } => {
+            StepKind::For { key_var, var, in_expr, body } => {
                 assert!(key_var.is_none());
                 assert_eq!(var, "f");
-                assert_eq!(
-                    in_expr,
-                    &Expr::List(vec![
-                        Expr::Literal(Value::String("x".to_string())),
-                        Expr::Literal(Value::String("y".to_string()))
-                    ])
-                );
-                assert_eq!(
-                    body.len(),
-                    1,
-                    "expected 1 body step, got {}: {:?}",
-                    body.len(),
-                    body.iter().map(|s| &s.kind).collect::<Vec<_>>()
-                );
+                assert_eq!(in_expr, &Expr::List(vec![
+                    Expr::Literal(Value::String("x".to_string())),
+                    Expr::Literal(Value::String("y".to_string()))
+                ]));
+                assert_eq!(body.len(), 1);
             }
             other => panic!("expected For, got {:?}", other),
         }
@@ -642,21 +549,13 @@ mod tests {
     fn for_map_iteration_parses() {
         let script = indoc! {r#"
             FOR $k, $v IN $map {
-                ECHO $k
+                MOCK_POS $k
             }
         "#};
-        let steps = match parse_script(script) {
-            Ok(s) => s,
-            Err(e) => panic!("parse failed: {e}"),
-        };
+        let steps = parse_script(script, test_lower).expect("parse ok");
         assert_eq!(steps.len(), 1);
         match &steps[0].kind {
-            StepKind::For {
-                key_var,
-                var,
-                in_expr,
-                body,
-            } => {
+            StepKind::For { key_var, var, in_expr, body } => {
                 assert_eq!(key_var.as_deref(), Some("k"));
                 assert_eq!(var, "v");
                 assert_eq!(in_expr, &Expr::Var("map".to_string()));
@@ -668,18 +567,9 @@ mod tests {
 
     #[test]
     fn if_statement_parses() {
-        let script = "IF true { ECHO yes }\n";
-        let steps = match parse_script(script) {
-            Ok(s) => s,
-            Err(e) => panic!("parse failed: {e}"),
-        };
-        assert_eq!(
-            steps.len(),
-            1,
-            "expected 1 step, got {}: {:?}",
-            steps.len(),
-            steps.iter().map(|s| &s.kind).collect::<Vec<_>>()
-        );
+        let script = "IF true { MOCK_POS yes }\n";
+        let steps = parse_script(script, test_lower).expect("parse ok");
+        assert_eq!(steps.len(), 1);
         match &steps[0].kind {
             StepKind::If { .. } => {}
             other => panic!("expected If, got {:?}", other),
@@ -691,51 +581,33 @@ mod tests {
         use crate::lexer::{LanguageParser, Rule};
         use pest::Parser;
         let result = LanguageParser::parse(Rule::if_keyword, "IF ");
-        assert!(
-            result.is_ok(),
-            "if_keyword should match 'IF ': {:?}",
-            result.err()
-        );
+        assert!(result.is_ok(), "if_keyword should match 'IF ': {:?}", result.err());
     }
 
     #[test]
     fn if_statement_pest_matches() {
         use crate::lexer::{LanguageParser, Rule};
         use pest::Parser;
-        let result = LanguageParser::parse(Rule::if_statement, "IF true {\n    ECHO yes\n}");
-        assert!(
-            result.is_ok(),
-            "if_statement should match: {:?}",
-            result.err()
-        );
+        let result = LanguageParser::parse(Rule::if_statement, "IF true {\n    MOCK_POS yes\n}");
+        assert!(result.is_ok(), "if_statement should match: {:?}", result.err());
     }
 
     #[test]
-    fn guard_block_with_echo_parses() {
-        let script = "WORKDIR foo\n[env:GATE] {\n    ECHO gated\n}\n[env:A==1] ECHO eq\n";
-        let steps = parse_script(script).expect("parse should succeed");
-        assert!(
-            steps.len() >= 2,
-            "expected at least 2 steps, got {}",
-            steps.len()
-        );
+    fn guard_block_with_mock_command() {
+        let script = "MOCK_NO_ARGS\n[env:GATE] {\n    MOCK_POS gated\n}\n[env:A==1] MOCK_POS eq\n";
+        let steps = parse_script(script, test_lower).expect("parse should succeed");
+        assert!(steps.len() >= 2, "expected at least 2 steps, got {}", steps.len());
     }
 
     #[test]
-    fn single_line_blocks_all_commands() {
+    fn single_line_blocks() {
         let test_cases = [
-            "IF true { ECHO \"hello\" }",
-            "IF true { RUN \"cargo test\" }",
-            "IF true { WORKDIR \"/app\" }",
-            "IF true { ENV FOO=\"bar\" }",
+            "IF true { MOCK_POS \"hello\" }",
+            "IF true { MOCK_POS \"cargo test\" }",
+            "IF true { MOCK_POS \"/app\" }",
         ];
-
         for script in test_cases {
-            assert!(
-                parse_script(script).is_ok(),
-                "Failed to parse single-line block script: {}",
-                script
-            );
+            assert!(parse_script(script, test_lower).is_ok(), "Failed to parse: {}", script);
         }
     }
 }

@@ -10,7 +10,7 @@ use std::io::Cursor;
 use std::sync::{Arc, Mutex};
 
 fn parse_one(cmd: &str) -> Box<StepKind> {
-    let steps = oxdock_parser::parse_script(cmd).unwrap();
+    let steps = oxdock_core::parse_script(cmd).unwrap();
     Box::new(steps[0].kind.clone())
 }
 
@@ -107,7 +107,7 @@ fn workspace_local_copy_cannot_escape_workspace_root() {
     );
     let outside_str = outside_file.as_path().to_string_lossy().to_string();
     let script = script.replace("{outside}", &outside_str);
-    let steps = oxdock_parser::parse_script(&script).unwrap();
+    let steps = oxdock_core::parse_script(&script).unwrap();
 
     let result =
         run_steps_with_context_result_with_io(&snapshot, &workspace, &steps, ExecIo::new());
@@ -363,7 +363,7 @@ fn inherit_env_reads_exec_io_override() {
         WRITE seen.txt {{ env:SPECIAL_TOKEN }}
         "#
     };
-    let steps = oxdock_parser::parse_script(script).unwrap();
+    let steps = oxdock_core::parse_script(script).unwrap();
 
     let mut io_cfg = ExecIo::new();
     io_cfg.insert_inherit_env("SPECIAL_TOKEN", "from-context");
@@ -385,7 +385,7 @@ fn inherit_env_override_precedes_host_env() {
         WRITE seen.txt {{ env:SPECIAL_TOKEN }}
         "#
     };
-    let steps = oxdock_parser::parse_script(script).unwrap();
+    let steps = oxdock_core::parse_script(script).unwrap();
     let _env_guard = TestEnvGuard::set("SPECIAL_TOKEN", "from-host");
 
     let mut io_cfg = ExecIo::new();
@@ -408,7 +408,7 @@ fn inherit_env_removal_blocks_host_env() {
         WRITE "seen.txt" {{ env:SPECIAL_TOKEN }}
         "#
     };
-    let steps = oxdock_parser::parse_script(script).unwrap();
+    let steps = oxdock_core::parse_script(script).unwrap();
     let _env_guard = TestEnvGuard::set("SPECIAL_TOKEN", "from-host");
 
     let mut io_cfg = ExecIo::new();
@@ -464,7 +464,7 @@ fn accepts_semicolon_separated_commands() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = "WRITE one.txt 1; WRITE two.txt 2";
-    let steps = oxdock_parser::parse_script(script).unwrap();
+    let steps = oxdock_core::parse_script(script).unwrap();
     run_steps(&root, &steps).unwrap();
     assert_eq!(read_trimmed(&root.join("one.txt").unwrap()), "1");
     assert_eq!(read_trimmed(&root.join("two.txt").unwrap()), "2");
@@ -627,7 +627,7 @@ fn copy_git_via_script_simple() {
 
     let script = format!("COPY_GIT {} hello.txt out_hello.txt", rev);
 
-    let steps = oxdock_parser::parse_script(&script).unwrap();
+    let steps = oxdock_core::parse_script(&script).unwrap();
     // build_context is `repo` which is under `snapshot` root
     run_steps_with_context(&snapshot, &repo, &steps).unwrap();
 
@@ -673,7 +673,7 @@ fn copy_git_includes_dirty_file() {
     write_text(&hello, "dirty hello");
 
     let script = "COPY_GIT --include-dirty HEAD hello.txt out_hello.txt";
-    let steps = oxdock_parser::parse_script(script).unwrap();
+    let steps = oxdock_core::parse_script(script).unwrap();
     run_steps_with_context(&snapshot, &repo, &steps).unwrap();
 
     assert_eq!(
@@ -726,7 +726,7 @@ fn copy_git_directory_via_script() {
     let rev = String::from_utf8_lossy(&rev_out.stdout).trim().to_string();
 
     let script = format!("COPY_GIT {} assets_dir out_assets_dir", rev);
-    let steps = oxdock_parser::parse_script(&script).unwrap();
+    let steps = oxdock_core::parse_script(&script).unwrap();
     run_steps_with_context(&snapshot, &repo, &steps).unwrap();
 
     assert_eq!(
@@ -783,7 +783,7 @@ fn env_exposes_git_commit_hash() {
         .expect("git rev-parse failed");
     let rev = String::from_utf8_lossy(&rev_out.stdout).trim().to_string();
 
-    let steps = oxdock_parser::parse_script(indoc!(
+    let steps = oxdock_core::parse_script(indoc!(
         r#"
         WITH_IO [stdout=pipe:commit_capture] ECHO {{ env:WORKSPACE_GIT_COMMIT }}
         WITH_IO [stdin=pipe:commit_capture] WRITE out.txt
@@ -1129,7 +1129,7 @@ fn with_io_block_applies_defaults() {
             ECHO "beta"
         }
     "#};
-    let steps = oxdock_parser::parse_script(script).expect("parse WITH_IO block");
+    let steps = oxdock_core::parse_script(script).expect("parse WITH_IO block");
 
     let captured = Arc::new(Mutex::new(Vec::new()));
     let mut io_cfg = ExecIo::new();
@@ -1151,7 +1151,7 @@ fn with_io_routes_stdout_into_later_stdin() {
         WITH_IO [stdout=pipe:relay] ECHO streamed
         WITH_IO [stdin=pipe:relay] READ
     "#};
-    let steps = oxdock_parser::parse_script(script).expect("parse WITH_IO pipe script");
+    let steps = oxdock_core::parse_script(script).expect("parse WITH_IO pipe script");
 
     let captured = Arc::new(Mutex::new(Vec::new()));
     let mut io_cfg = ExecIo::new();
@@ -1165,7 +1165,7 @@ fn with_io_routes_stdout_into_later_stdin() {
 }
 
 fn run_script(root: &GuardedPath, script: &str) -> Result<(), anyhow::Error> {
-    let steps = oxdock_parser::parse_script(script).expect("parse script");
+    let steps = oxdock_core::parse_script(script).expect("parse script");
     run_steps_with_context_result_with_io(root, root, &steps, ExecIo::new()).map(|_| ())
 }
 

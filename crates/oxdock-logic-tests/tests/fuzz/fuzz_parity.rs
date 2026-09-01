@@ -1,5 +1,5 @@
 use oxdock_parser::ast::*;
-use oxdock_parser::{parse_braced_tokens, parse_script};
+use oxdock_parser::parse_braced_tokens;
 use proptest::prelude::*;
 use proptest::strategy::BoxedStrategy;
 use std::str::FromStr;
@@ -283,7 +283,7 @@ proptest! {
         let s = step.to_string();
 
         // 1. Parse string
-        let parsed_steps = parse_script(&s).expect("failed to parse generated string");
+        let parsed_steps = oxdock_core::parse_script(&s).expect("failed to parse generated string");
         assert_eq!(parsed_steps.len(), 1);
         let mut parsed_step = parsed_steps[0].clone();
         parsed_step.scope_enter = 0;
@@ -293,7 +293,7 @@ proptest! {
 
         // 2. Parse tokens (if feature enabled)
         let ts: proc_macro2::TokenStream = s.parse().expect("failed to tokenize string");
-        let token_steps = parse_braced_tokens(&ts).expect("failed to parse tokens");
+        let token_steps = parse_braced_tokens(&ts, oxdock_core::commands::lower_command).expect("failed to parse tokens");
 
         assert_eq!(token_steps.len(), 1);
         let mut token_step = token_steps[0].clone();

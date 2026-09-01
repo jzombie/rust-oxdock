@@ -1,3 +1,6 @@
+mod common;
+use common::mock_lower;
+
 use indoc::indoc;
 use oxdock_parser::ast::{IoStream, StepKind};
 use oxdock_parser::parse_script;
@@ -6,12 +9,12 @@ use oxdock_parser::parse_script;
 fn with_io_block_wraps_commands() {
     let script = indoc! {r#"
         WITH_IO [stdout=pipe:setup] {
-            RUN "echo alpha"
-            WITH_IO [stderr=pipe:setup] RUN "echo beta"
+            MOCK_RUN "echo alpha"
+            WITH_IO [stderr=pipe:setup] MOCK_RUN "echo beta"
         }
     "#};
 
-    let steps = parse_script(script).expect("parse WITH_IO block");
+    let steps = parse_script(script, mock_lower).expect("parse WITH_IO block");
     assert_eq!(steps.len(), 2, "expected two commands inside WITH_IO block");
 
     let first = &steps[0].kind;
@@ -55,8 +58,8 @@ fn with_io_block_wraps_commands() {
 
 #[test]
 fn with_io_block_requires_brace() {
-    let script = "WITH_IO [stdout=pipe:setup]\nRUN \"echo hi\"";
-    let err = parse_script(script).expect_err("script should reject missing block braces");
+    let script = "WITH_IO [stdout=pipe:setup]\nMOCK_RUN \"echo hi\"";
+    let err = parse_script(script, mock_lower).expect_err("script should reject missing block braces");
     let msg = format!("{err:#}");
     assert!(
         msg.contains("WITH_IO block must be followed"),

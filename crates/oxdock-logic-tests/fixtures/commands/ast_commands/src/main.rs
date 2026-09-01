@@ -503,7 +503,7 @@ fn load_case_steps(
             .with_context(|| format!("read script {}", case.script_rel))?;
         let rendered = apply_placeholders(&template, &placeholders)
             .with_context(|| format!("render script {}", case.script_rel))?;
-        let steps = oxdock_parser::parse_script(&rendered)
+        let steps = oxdock_core::parse_script(&rendered)
             .with_context(|| format!("parse script {}", case.script_rel))?;
         out.insert(case.name.clone(), steps);
     }

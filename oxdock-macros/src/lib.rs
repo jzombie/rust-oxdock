@@ -33,7 +33,7 @@ use oxdock_embed::{emit_embed_module, gather_assets, runtime_support_tokens};
 #[allow(clippy::disallowed_types)]
 use oxdock_fs::UnguardedPath;
 use oxdock_fs::{GuardedPath, PathResolver};
-use oxdock_parser::{DslMacroInput, ScriptSource, parse_script};
+use oxdock_parser::{DslMacroInput, ScriptSource};
 use oxdock_process::BuiltinEnv;
 use proc_macro::TokenStream;
 use proc_macro2::TokenTree;
@@ -183,7 +183,7 @@ fn prepare_inline_plan(input: &DslMacroInput) -> syn::Result<InlinePlan> {
         input.out_dir.span(),
     )?;
 
-    let steps = parse_script(&script_src)
+    let steps = oxdock_core::parse_script(&script_src)
         .map_err(|e| syn::Error::new(script_span, format!("parse error: {e}")))?;
     let build_context = oxdock_fs::discover_workspace_root()
         .map_err(|e| syn::Error::new(script_span, e.to_string()))?;
@@ -345,7 +345,7 @@ fn build_assets(
     let temp_root_guard = tempdir.as_guarded_path().clone();
 
     let steps =
-        parse_script(script).map_err(|e| syn::Error::new(span, format!("parse error: {e}")))?;
+        oxdock_core::parse_script(script).map_err(|e| syn::Error::new(span, format!("parse error: {e}")))?;
 
     let resolver =
         PathResolver::from_manifest_env().map_err(|e| syn::Error::new(span, e.to_string()))?;
@@ -480,7 +480,7 @@ fn expand_oxdock(input: TokenStream) -> syn::Result<TokenStream> {
         return Ok(ts_out.into());
     }
 
-    let steps = oxdock_parser::parse_script(dsl_text).map_err(|e| {
+    let steps = oxdock_core::parse_script(dsl_text).map_err(|e| {
         let msg = format!("parse error: {e}\ndsl:\n{dsl_text}");
         syn::Error::new(proc_macro2::Span::call_site(), msg)
     })?;

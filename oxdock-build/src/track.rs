@@ -279,10 +279,48 @@ pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oxdock_parser::{Step, parse_script};
+    use oxdock_parser::{Arg, Step, StepKind, parse_script};
+
+    fn test_lower(name: &str, args: Vec<Arg>) -> anyhow::Result<StepKind> {
+        match name {
+            "COPY" => {
+                let from = args.first().cloned().ok_or_else(|| anyhow::anyhow!("COPY requires source"))?;
+                let to = args.get(1).cloned().ok_or_else(|| anyhow::anyhow!("COPY requires destination"))?;
+                Ok(StepKind::Copy { from_current_workspace: false, from, to })
+            }
+            "SYMLINK" => {
+                let from = args.first().cloned().ok_or_else(|| anyhow::anyhow!("SYMLINK requires link"))?;
+                let to = args.get(1).cloned().ok_or_else(|| anyhow::anyhow!("SYMLINK requires target"))?;
+                Ok(StepKind::Symlink { from, to })
+            }
+            "ENV" => {
+                let arg = args.into_iter().next().ok_or_else(|| anyhow::anyhow!("ENV requires key=val"))?;
+                let (k, v) = arg.as_str().split_once('=').ok_or_else(|| anyhow::anyhow!("ENV requires key=val"))?;
+                Ok(StepKind::Env { key: k.to_string(), value: Arg::String(v.to_string()) })
+            }
+            "WRITE" => {
+                let path = args.first().cloned().ok_or_else(|| anyhow::anyhow!("WRITE requires path"))?;
+                let contents = args.get(1).cloned();
+                Ok(StepKind::Write { path, contents })
+            }
+            "RUN" => {
+                let cmd = args.into_iter().next().ok_or_else(|| anyhow::anyhow!("RUN requires command"))?;
+                Ok(StepKind::Run(cmd))
+            }
+            "WORKDIR" => {
+                let path = args.into_iter().next().ok_or_else(|| anyhow::anyhow!("WORKDIR requires path"))?;
+                Ok(StepKind::Workdir(path))
+            }
+            "ECHO" => {
+                let msg = args.into_iter().next().ok_or_else(|| anyhow::anyhow!("ECHO requires message"))?;
+                Ok(StepKind::Echo(msg))
+            }
+            _ => anyhow::bail!("unknown command: {name}"),
+        }
+    }
 
     fn script_steps(script: &str) -> Vec<Step> {
-        parse_script(script).expect("parse")
+        parse_script(script, test_lower).expect("parse")
     }
 
     #[test]

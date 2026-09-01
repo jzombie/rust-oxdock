@@ -2,7 +2,7 @@ use anyhow::{Context, Result, bail};
 use line_ending::LineEnding;
 use oxdock_core::{ExecIo, run_steps_with_context_result_with_io};
 use oxdock_fs::{GuardedPath, PathResolver};
-use oxdock_parser::{COMMANDS, FencedBlock, extract_fenced_blocks, parse_script};
+use oxdock_parser::{COMMANDS, FencedBlock, extract_fenced_blocks};
 
 const README_NAME: &str = "README.md";
 
@@ -60,7 +60,7 @@ fn readme_snippets_parse_and_cover_every_command() -> Result<()> {
     );
 
     for block in &blocks {
-        parse_script(&block.body).map_err(|e| {
+        oxdock_core::parse_script(&block.body).map_err(|e| {
             anyhow::anyhow!(
                 "{README_NAME}:{0}: snippet failed to parse: {e}",
                 block.line_no
@@ -189,7 +189,7 @@ fn readme_snippets_execute_as_documented() -> Result<()> {
 
 fn execute_block(block: &FencedBlock) -> Result<()> {
     let steps =
-        parse_script(&block.body).map_err(|e| anyhow::anyhow!("snippet failed to parse: {e}"))?;
+        oxdock_core::parse_script(&block.body).map_err(|e| anyhow::anyhow!("snippet failed to parse: {e}"))?;
 
     // Tempdirs must outlive execution; dropping a GuardedTempDir removes it.
     let workspace_temp = GuardedPath::tempdir().context("failed to create workspace tempdir")?;

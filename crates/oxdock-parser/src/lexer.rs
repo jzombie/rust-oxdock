@@ -21,7 +21,13 @@ pub enum RawToken<'a> {
     BlockEnd {
         line_no: usize,
     },
+    /// A structural command (WITH_IO, FOR, IF, LET) — parsed by the grammar.
     Command {
+        pair: Pair<'a, Rule>,
+        line_no: usize,
+    },
+    /// A generic instruction — command name + raw args, lowered by a function.
+    Instruction {
         pair: Pair<'a, Rule>,
         line_no: usize,
     },
@@ -45,34 +51,14 @@ pub fn tokenize(input: &str) -> Result<Vec<RawToken<'_>>> {
             }
             Rule::block_start => tokens.push(RawToken::BlockStart { line_no }),
             Rule::block_end => tokens.push(RawToken::BlockEnd { line_no }),
-            Rule::workdir_command
-            | Rule::workspace_command
-            | Rule::env_command
-            | Rule::echo_command
-            | Rule::run_command
-            | Rule::run_bg_command
-            | Rule::copy_command
-            | Rule::with_io_command
-            | Rule::copy_git_command
-            | Rule::hash_sha256_command
+            // Structural commands — parsed by grammar-specific rules
+            Rule::with_io_command
             | Rule::inherit_env_command
-            | Rule::symlink_command
-            | Rule::mkdir_command
-            | Rule::ls_command
-            | Rule::cwd_command
-            | Rule::read_command
-            | Rule::write_command
-            | Rule::append_command
-            | Rule::expand_command
-            | Rule::assert_file_hash_command
-            | Rule::assert_file_content_command
-            | Rule::assert_dir_command
-            | Rule::assert_absent_command
-            | Rule::assert_stdout_command
-            | Rule::exit_command
             | Rule::for_statement
             | Rule::let_statement
             | Rule::if_statement => tokens.push(RawToken::Command { pair, line_no }),
+            // Generic instructions — lowered by a function
+            Rule::instruction | Rule::instruction_inner => tokens.push(RawToken::Instruction { pair, line_no }),
             other => bail!("unexpected parser rule {:?}", other),
         }
     }

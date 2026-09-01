@@ -311,7 +311,7 @@ fn run_spec(
     // Directives are computed even on the skip path callers may inspect them,
     // but only the non-skip path returns them for emission.
     let steps =
-        oxdock_parser::parse_script(&text).map_err(|e| anyhow::anyhow!("parse error: {e}"))?;
+        oxdock_core::parse_script(&text).map_err(|e| anyhow::anyhow!("parse error: {e}"))?;
     let (changed, env_changed) = plan_input_directives(&steps);
 
     let mut directives: Vec<String> = Vec::new();
@@ -381,7 +381,7 @@ fn build_and_materialize(name: &str, script: &str, subdir: &str) -> Result<()> {
     let temp_root = tempdir.as_guarded_path().clone();
 
     let steps =
-        oxdock_parser::parse_script(script).map_err(|e| anyhow::anyhow!("parse error: {e}"))?;
+        oxdock_core::parse_script(script).map_err(|e| anyhow::anyhow!("parse error: {e}"))?;
     let resolver = PathResolver::from_manifest_env().context("CARGO_MANIFEST_DIR missing")?;
     let workspace_root =
         oxdock_fs::discover_workspace_root().context("failed to discover workspace root")?;
@@ -643,8 +643,33 @@ pub fn sync_tree(resolver: &PathResolver, src: &GuardedPath, dst: &GuardedPath) 
 #[cfg(test)]
 mod fingerprint_tests {
     use super::*;
-    use oxdock_parser::parse_script;
+    use oxdock_parser::{Arg, StepKind, parse_script};
     use std::collections::HashMap;
+
+    fn test_lower(name: &str, args: Vec<Arg>) -> Result<StepKind> {
+        match name {
+            "COPY" => {
+                let from = args.first().cloned().ok_or_else(|| anyhow::anyhow!("COPY requires source"))?;
+                let to = args.get(1).cloned().ok_or_else(|| anyhow::anyhow!("COPY requires destination"))?;
+                Ok(StepKind::Copy { from_current_workspace: false, from, to })
+            }
+            "WRITE" => {
+                let path = args.first().cloned().ok_or_else(|| anyhow::anyhow!("WRITE requires path"))?;
+                let contents = args.get(1).cloned();
+                Ok(StepKind::Write { path, contents })
+            }
+            "ECHO" => {
+                let msg = args.into_iter().next().ok_or_else(|| anyhow::anyhow!("ECHO requires arg"))?;
+                Ok(StepKind::Echo(msg))
+            }
+            "ENV" => {
+                let arg = args.into_iter().next().ok_or_else(|| anyhow::anyhow!("ENV requires key=val"))?;
+                let (k, v) = arg.as_str().split_once('=').ok_or_else(|| anyhow::anyhow!("ENV requires key=val"))?;
+                Ok(StepKind::Env { key: k.to_string(), value: Arg::String(v.to_string()) })
+            }
+            _ => anyhow::bail!("unknown command: {name}"),
+        }
+    }
 
     fn ctx() -> (oxdock_fs::GuardedTempDir, PathResolver) {
         let temp = GuardedPath::tempdir().expect("tempdir");
@@ -669,14 +694,14 @@ mod fingerprint_tests {
         // Hermetic: pin the process-level salt away from other parallel tests.
         let _salt = oxdock_sys_test_utils::TestEnvGuard::remove(FINGERPRINT_SALT_ENV);
         let (_t, resolver) = ctx();
-        let steps = parse_script(SCRIPT).unwrap();
+        let steps = parse_script(SCRIPT, test_lower).unwrap();
         let mut envs = HashMap::new();
 
         let a = asset_input_fingerprint(&resolver, SCRIPT, &steps, "out", &envs).unwrap();
         // Environment drift only applies to keys the script actually
         // references; use an env-referencing variant for that scenario.
         const ENV_SCRIPT: &str = "WRITE out.txt \"{{ env:TAG }}\"";
-        let env_steps = parse_script(ENV_SCRIPT).unwrap();
+        let env_steps = parse_script(ENV_SCRIPT, test_lower).unwrap();
         let base_env =
             asset_input_fingerprint(&resolver, ENV_SCRIPT, &env_steps, "out", &envs).unwrap();
         let b = asset_input_fingerprint(&resolver, SCRIPT, &steps, "out", &envs).unwrap();
@@ -716,7 +741,7 @@ mod fingerprint_tests {
     #[test]
     fn salt_changes_digest_only_when_defined() -> Result<()> {
         let (_t, resolver) = ctx();
-        let steps = parse_script(SCRIPT).unwrap();
+        let steps = parse_script(SCRIPT, test_lower).unwrap();
         let envs: HashMap<String, String> = HashMap::new();
 
         let baseline = asset_input_fingerprint(&resolver, SCRIPT, &steps, "out", &envs).unwrap();
@@ -744,7 +769,7 @@ mod fingerprint_tests {
         use oxdock_sys_test_utils::TestEnvGuard;
 
         let (_t, resolver) = ctx();
-        let steps = parse_script(SCRIPT).unwrap();
+        let steps = parse_script(SCRIPT, test_lower).unwrap();
         const SCRIPT_REF: &str = SCRIPT;
 
         let mut map_only = HashMap::new();
@@ -786,7 +811,7 @@ mod fingerprint_tests {
         // Hermetic: pin the process-level salt away from other parallel tests.
         let _salt = oxdock_sys_test_utils::TestEnvGuard::remove(FINGERPRINT_SALT_ENV);
         let (_t, resolver) = ctx();
-        let steps = parse_script("[env:MODE] ECHO on").unwrap();
+        let steps = parse_script("[env:MODE] ECHO on", test_lower).unwrap();
         let mut envs = HashMap::new();
         let unset = asset_input_fingerprint(&resolver, "", &steps, "o", &envs).unwrap();
         envs.insert("MODE".into(), "on".into());
