@@ -80,7 +80,7 @@ pub(super) fn sync_iteration_assert_needles<P: ProcessManager>(
     Ok(())
 }
 
-pub(crate) struct StepCtx<'a, P: ProcessManager> {
+pub struct StepCtx<'a, P: ProcessManager> {
     pub(super) state: &'a mut ExecState<P>,
     pub(super) process: &'a mut P,
     pub(super) snapshot_root: GuardedPath,
