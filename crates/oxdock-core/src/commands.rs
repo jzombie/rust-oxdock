@@ -2,7 +2,7 @@ use anyhow::{Result, anyhow, bail};
 use indoc::indoc;
 use oxdock_parser::{
     Arg, ArgSpec, CommandMeta, CommandSpec, Example, FlagSpec, FlagValueType, IoDirection,
-    StepKind, Stream, WorkspaceTarget, strip_flags,
+    StepKind, Stream, WorkspaceTarget,
 };
 
 /// Join multiple `Arg` tokens into a single `Arg::String` with spaces.

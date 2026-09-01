@@ -20,7 +20,7 @@ macro_rules! define_pipeline {
             match name {
                 $( s if s == <$cmd_type as $crate::CommandSpec>::NAME => {
                     let meta = <$cmd_type as $crate::CommandSpec>::metadata();
-                    let (flags, positional) = $crate::strip_flags(raw_args, &meta)?;
+                    let (flags, positional) = oxdock_parser::strip_flags(raw_args, &meta)?;
                     <$cmd_type as $crate::CommandSpec>::lower(flags, positional)
                 } )*
                 _ => ::anyhow::bail!("unknown command: {name}"),

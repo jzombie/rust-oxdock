@@ -3,10 +3,8 @@ pub mod exec;
 pub mod pipeline;
 pub use commands::*;
 pub use exec::*;
-pub use oxdock_parser::{Arg, CommandMeta, CommandSpec, StepKind, strip_flags};
+pub use oxdock_parser::{Arg, CommandMeta, CommandSpec, StepKind};
 pub use oxdock_process::ProcessManager;
-
-use commands::*;
 
 define_pipeline! {
     StepKind::Run(..) => (RunCmd, exec::dispatch_run),
