@@ -3,9 +3,8 @@ use oxdock_macros::oxdock_embed;
 oxdock_embed! {
     name: GuardedAssets,
     script: {
-        WORKDIR /
+        INHERIT_ENV [TEST_SCOPE]
 
-        // The trybuild harness sets TEST_SCOPE=1 so this block executes during the test.
         [env:TEST_SCOPE] {
             WORKDIR scoped
             WRITE inner.txt inside
