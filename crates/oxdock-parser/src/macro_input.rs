@@ -491,18 +491,7 @@ mod tests {
 
     /// Mock lowering for macro_input tests.
     fn mock_lower(name: &str, args: Vec<crate::Arg>) -> anyhow::Result<StepKind> {
-        match name {
-            "MOCK_NO_ARGS" => Ok(StepKind::Cwd),
-            "MOCK_POS" => {
-                let path = args
-                    .first()
-                    .cloned()
-                    .ok_or_else(|| anyhow::anyhow!("missing arg"))?;
-                let contents = args.get(1).cloned();
-                Ok(StepKind::Write { path, contents })
-            }
-            _ => anyhow::bail!("unknown mock: {name}"),
-        }
+        crate::test_lower_mock::lower(name, args)
     }
 
     #[test]

@@ -20,38 +20,34 @@ pub use markdown::{BlockMetadata, FencedBlock, extract_fenced_blocks};
 pub use parser::{parse_guard_expr_str, parse_script};
 pub use strip_flags::strip_flags;
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+/// Shared mock lowering for parser tests.
+/// Centralizes AST lowering so unit tests, integration tests, and macro_input tests
+/// all exercise the same command set against the same grammar.
+pub mod test_lower_mock {
+    use crate::{Arg, StepKind, WorkspaceTarget};
     use anyhow::{anyhow, bail};
-    use indoc::indoc;
-    #[cfg(feature = "proc-macro-api")]
-    use quote::quote;
-    use std::collections::HashMap;
 
-    /// Mock lowering — tests grammar mechanics, not domain commands.
-    fn test_lower(name: &str, args: Vec<Arg>) -> anyhow::Result<StepKind> {
+    pub fn lower(name: &str, args: Vec<Arg>) -> anyhow::Result<StepKind> {
         match name {
             "MOCK_NO_ARGS" => Ok(StepKind::Cwd),
-            "MOCK_POS" => {
+            "MOCK_POS" | "MOCK_WRITE" => {
                 let path = args
                     .first()
                     .cloned()
-                    .ok_or_else(|| anyhow!("MOCK_POS requires arg"))?;
+                    .ok_or_else(|| anyhow!("requires path"))?;
                 let contents = args.get(1).cloned();
                 Ok(StepKind::Write { path, contents })
             }
             "MOCK_HASH" => {
                 let mut a = args;
                 if a.first().map(|a| a.as_str()) == Some("--hash") {
-                    // Skip --hash flag, then expect value and path
-                    a.remove(0); // safe: first() confirmed "--hash" exists
+                    a.remove(0);
                     let hash = a
                         .first()
                         .ok_or_else(|| anyhow!("MOCK_HASH --hash requires value"))?
                         .as_str()
                         .to_string();
-                    a.remove(0); // safe: first() confirmed value exists
+                    a.remove(0);
                     let path = a
                         .first()
                         .ok_or_else(|| anyhow!("MOCK_HASH requires path"))?
@@ -88,23 +84,60 @@ mod tests {
                     value: Arg::String(v.to_string()),
                 })
             }
-            "MOCK_TARGET" => {
+            "MOCK_TARGET" | "MOCK_WORKSPACE" => {
                 let target = args
                     .into_iter()
                     .next()
-                    .ok_or_else(|| anyhow!("MOCK_TARGET requires arg"))?;
+                    .ok_or_else(|| anyhow!("requires target"))?;
                 match target.as_str() {
-                    "A" => Ok(StepKind::Workspace(WorkspaceTarget::Snapshot)),
-                    "B" => Ok(StepKind::Workspace(WorkspaceTarget::Local)),
+                    "SNAPSHOT" | "snapshot" | "A" => {
+                        Ok(StepKind::Workspace(WorkspaceTarget::Snapshot))
+                    }
+                    "LOCAL" | "local" | "B" => Ok(StepKind::Workspace(WorkspaceTarget::Local)),
                     _ => bail!("unknown mock target"),
                 }
             }
-            "MOCK_KEYS" => {
+            "MOCK_KEYS" | "INHERIT_ENV" => {
                 let keys = args.into_iter().map(|a| a.as_str().to_string()).collect();
                 Ok(StepKind::InheritEnv { keys })
             }
+            "MOCK_ECHO" => {
+                let msg = args
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| anyhow!("MOCK_ECHO requires arg"))?;
+                Ok(StepKind::Echo(msg))
+            }
+            "MOCK_RUN" => {
+                let cmd = args
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| anyhow!("MOCK_RUN requires arg"))?;
+                Ok(StepKind::Run(cmd))
+            }
+            "MOCK_WORKDIR" | "WORKDIR" => {
+                let path = args
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| anyhow!("requires path"))?;
+                Ok(StepKind::Workdir(path))
+            }
             _ => bail!("unknown mock command: {name}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use indoc::indoc;
+    #[cfg(feature = "proc-macro-api")]
+    use quote::quote;
+    use std::collections::HashMap;
+
+    /// Mock lowering — tests grammar mechanics, not domain commands.
+    fn test_lower(name: &str, args: Vec<Arg>) -> anyhow::Result<StepKind> {
+        crate::test_lower_mock::lower(name, args)
     }
 
     fn guard_text(step: &Step) -> Option<String> {
