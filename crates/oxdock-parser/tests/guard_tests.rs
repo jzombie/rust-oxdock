@@ -26,11 +26,7 @@ fn test_valid_guard_expressions() {
 
 #[test]
 fn test_guards_reject_dollar_sign_runtime_variables() {
-    let invalid_guards = [
-        "bool:$match",
-        "$dsl_var",
-        "eq(env:$dsl_var, val)",
-    ];
+    let invalid_guards = ["bool:$match", "$dsl_var", "eq(env:$dsl_var, val)"];
 
     for guard_str in invalid_guards {
         assert!(
@@ -90,11 +86,7 @@ fn test_eq_guard_quoted_value_with_comma() {
 
 #[test]
 fn test_eq_guard_requires_env_prefix() {
-    let invalid = [
-        "eq(STAGE, prod)",
-        "neq(STAGE, prod)",
-        "eq(A, 1)",
-    ];
+    let invalid = ["eq(STAGE, prod)", "neq(STAGE, prod)", "eq(A, 1)"];
     for guard_str in invalid {
         assert!(
             parse_guard_expr_str(guard_str).is_err(),
@@ -139,12 +131,7 @@ fn test_reject_old_equality_syntax() {
 
 #[test]
 fn test_reject_bare_operators_as_guards() {
-    let invalid = [
-        "==",
-        "!=",
-        "!",
-        "!=",
-    ];
+    let invalid = ["==", "!=", "!", "!="];
     for guard_str in invalid {
         assert!(
             parse_guard_expr_str(guard_str).is_err(),

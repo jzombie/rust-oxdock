@@ -430,7 +430,10 @@ pub fn parse_guard_expr_str(input: &str) -> Result<GuardExpr> {
     use pest::Parser;
     let pairs = lexer::LanguageParser::parse(Rule::guard_expr, input)
         .map_err(|e| anyhow!("guard parse error: {e}"))?;
-    let pair = pairs.into_iter().next().ok_or_else(|| anyhow!("empty guard"))?;
+    let pair = pairs
+        .into_iter()
+        .next()
+        .ok_or_else(|| anyhow!("empty guard"))?;
     parse_guard_expr(pair)
 }
 
@@ -957,7 +960,6 @@ fn push_guard_or_args_from_expr(expr_pair: Pair<Rule>, exprs: &mut Vec<GuardExpr
     exprs.push(parse_guard_expr(expr_pair)?);
     Ok(())
 }
-
 
 fn parse_guard_term(pair: Pair<Rule>) -> Result<GuardExpr> {
     for inner in pair.into_inner() {

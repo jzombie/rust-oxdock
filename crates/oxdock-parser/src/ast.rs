@@ -160,19 +160,10 @@ pub enum PlatformGuard {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Guard {
-    Platform {
-        target: PlatformGuard,
-    },
-    EnvExists {
-        key: String,
-    },
-    EnvEquals {
-        key: String,
-        value: String,
-    },
-    StaticBool {
-        value: String,
-    },
+    Platform { target: PlatformGuard },
+    EnvExists { key: String },
+    EnvEquals { key: String, value: String },
+    StaticBool { value: String },
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -491,10 +482,7 @@ impl EnvLookup for Arc<HashMap<String, String>> {
 pub fn guard_allows(guard: &Guard, env: &impl EnvLookup) -> bool {
     match guard {
         Guard::Platform { target } => platform_matches(*target),
-        Guard::EnvExists { key } => env
-            .get_env(key)
-            .map(|v| !v.is_empty())
-            .unwrap_or(false),
+        Guard::EnvExists { key } => env.get_env(key).map(|v| !v.is_empty()).unwrap_or(false),
         Guard::EnvEquals { key, value } => env
             .get_env(key)
             .map(|v| v == value.as_str())
@@ -512,10 +500,7 @@ pub fn guard_expr_allows(expr: &GuardExpr, env: &impl EnvLookup) -> bool {
     }
 }
 
-pub fn guard_option_allows(
-    expr: Option<&GuardExpr>,
-    env: &impl EnvLookup,
-) -> bool {
+pub fn guard_option_allows(expr: Option<&GuardExpr>, env: &impl EnvLookup) -> bool {
     match expr {
         Some(e) => guard_expr_allows(e, env),
         None => true,

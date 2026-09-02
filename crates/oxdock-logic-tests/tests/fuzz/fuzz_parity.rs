@@ -17,14 +17,9 @@ fn arb_platform_guard() -> impl Strategy<Value = PlatformGuard> {
 
 fn arb_guard() -> impl Strategy<Value = Guard> {
     prop_oneof![
-        arb_platform_guard()
-            .prop_map(|target| Guard::Platform { target }),
-        "[a-zA-Z_][a-zA-Z0-9_]*"
-            .prop_map(|key| Guard::EnvExists { key }),
-        (
-            "[a-zA-Z_][a-zA-Z0-9_]*",
-            "[a-zA-Z_][a-zA-Z0-9_]*",
-        )
+        arb_platform_guard().prop_map(|target| Guard::Platform { target }),
+        "[a-zA-Z_][a-zA-Z0-9_]*".prop_map(|key| Guard::EnvExists { key }),
+        ("[a-zA-Z_][a-zA-Z0-9_]*", "[a-zA-Z_][a-zA-Z0-9_]*",)
             .prop_map(|(key, value)| Guard::EnvEquals { key, value }),
     ]
 }

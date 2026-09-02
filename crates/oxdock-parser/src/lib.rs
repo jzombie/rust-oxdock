@@ -720,7 +720,8 @@ mod tests {
 
     #[test]
     fn guard_block_with_mock_command() {
-        let script = "MOCK_NO_ARGS\n[env:GATE] {\n    MOCK_POS gated\n}\n[eq(env:A, 1)] MOCK_POS eq\n";
+        let script =
+            "MOCK_NO_ARGS\n[env:GATE] {\n    MOCK_POS gated\n}\n[eq(env:A, 1)] MOCK_POS eq\n";
         let steps = parse_script(script, test_lower).expect("parse should succeed");
         assert!(
             steps.len() >= 2,
