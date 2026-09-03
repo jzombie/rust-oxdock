@@ -354,7 +354,7 @@ dependencies = [
  "oxdock-sys-test-utils",
  "proc-macro2",
  "sha2",
- "syn 2.0.119",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -371,7 +371,7 @@ dependencies = [
  "oxdock-sys-test-utils",
  "proc-macro2",
  "quote",
- "syn 2.0.119",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -417,7 +417,7 @@ dependencies = [
  "proc-macro2",
  "quote",
  "sha2",
- "syn 2.0.119",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -472,7 +472,7 @@ dependencies = [
  "pest_derive",
  "proc-macro2",
  "quote",
- "syn 2.0.119",
+ "syn 3.0.4",
 ]
 
 [[package]]
