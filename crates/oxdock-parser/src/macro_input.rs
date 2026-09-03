@@ -595,7 +595,8 @@ mod tests {
 
             let steps = parse_braced_tokens(&ts, mock_lower).expect("parse");
             match &steps[0].kind {
-                StepKind::Write { contents, .. } => {
+                StepKind::Write { path, contents } => {
+                    assert_eq!(path.as_ref(), "f.txt", "path must match for {source}");
                     assert_eq!(
                         contents.as_ref().map(AsRef::as_ref),
                         Some(source.strip_prefix("WRITE f.txt ").expect("prefix")),

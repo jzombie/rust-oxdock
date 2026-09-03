@@ -5,7 +5,7 @@ use oxdock_parser::{StepKind, parse_script};
 
 #[test]
 fn inherit_env_step_parses_leading_directive() {
-    let script = "INHERIT_ENV [FOO, BAR]\nMOCK_ENV BAZ=qux";
+    let script = "INHERIT_ENV [FOO, BAR]\nENV BAZ=qux";
     let steps = parse_script(script, mock_lower).expect("parse INHERIT_ENV directive");
     let StepKind::InheritEnv { keys } = &steps[0].kind else {
         panic!("expected INHERIT_ENV step");
@@ -18,7 +18,7 @@ fn inherit_env_step_parses_leading_directive() {
 
 #[test]
 fn inherit_env_must_appear_before_other_commands() {
-    let script = "MOCK_ENV FOO=1\nINHERIT_ENV [BAR]";
+    let script = "ENV FOO=1\nINHERIT_ENV [BAR]";
     let err = parse_script(script, mock_lower).expect_err("INHERIT_ENV after commands must fail");
     assert!(err.to_string().contains("before any other commands"));
 }
