@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc e8ae511a93b3e38c7a4266e4752ac3580563975bcc1f7f910e007bcda1960cb3 # shrinks to step = Step { guard: Some(All([Predicate(Platform { target: Unix }), Predicate(EnvExists { key: "ah1" }), Predicate(EnvEquals { key: "OUsl81K__2fU3g_", value: "_UGgp_UvxG_C" }), Predicate(EnvExists { key: "_d_l_f3Gx" }), Predicate(EnvExists { key: "zLo51_3s4" }), Predicate(Platform { target: Macos }), Predicate(EnvEquals { key: "a", value: "sfFPF__1mPZwjm_O5f044ij29v5__J" }), Predicate(EnvExists { key: "R76S0xdbq1L65f1wF" }), Predicate(Platform { target: Linux }), Predicate(Platform { target: Windows })])), kind: AssertFile { hash: None, path: String("--/_C__6z/_cX"), contents: Some(String("_oPl3y y 71-")) }, scope_enter: 0, scope_exit: 0 }

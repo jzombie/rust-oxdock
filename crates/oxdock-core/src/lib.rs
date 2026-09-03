@@ -1,34 +1,32 @@
-pub mod commands;
 pub mod exec;
 pub mod pipeline;
-pub use commands::*;
 pub use exec::*;
-pub use oxdock_parser::{Arg, CommandMeta, CommandSpec, StepKind};
+pub use oxdock_parser::{Arg, CommandMeta, CommandSpec, StepKind, lower_command};
 pub use oxdock_process::ProcessManager;
 
 define_pipeline! {
-    StepKind::Run(..) => (RunCmd, exec::dispatch_run),
-    StepKind::RunBg(..) => (RunBgCmd, exec::dispatch_run_bg),
-    StepKind::Echo(..) => (EchoCmd, exec::dispatch_echo),
-    StepKind::Workdir(..) => (WorkdirCmd, exec::dispatch_workdir),
-    StepKind::Workspace(..) => (WorkspaceCmd, exec::dispatch_workspace),
-    StepKind::Env { .. } => (EnvCmd, exec::dispatch_env),
-    StepKind::Copy { .. } => (CopyCmd, exec::dispatch_copy),
-    StepKind::CopyGit { .. } => (CopyGitCmd, exec::dispatch_copy_git),
-    StepKind::Symlink { .. } => (SymlinkCmd, exec::dispatch_symlink),
-    StepKind::Mkdir(..) => (MkdirCmd, exec::dispatch_mkdir),
-    StepKind::Ls(..) => (LsCmd, exec::dispatch_ls),
-    StepKind::Cwd => (CwdCmd, exec::dispatch_cwd),
-    StepKind::Read(..) => (ReadCmd, exec::dispatch_read),
-    StepKind::Write { .. } => (WriteCmd, exec::dispatch_write),
-    StepKind::Append { .. } => (AppendCmd, exec::dispatch_append),
-    StepKind::Expand { .. } => (ExpandCmd, exec::dispatch_expand),
-    StepKind::AssertFile { .. } => (AssertFileCmd, exec::dispatch_assert_file),
-    StepKind::AssertDir(..) => (AssertDirCmd, exec::dispatch_assert_dir),
-    StepKind::AssertAbsent(..) => (AssertAbsentCmd, exec::dispatch_assert_absent),
-    StepKind::AssertStdout(..) => (AssertStdoutCmd, exec::dispatch_assert_stdout),
-    StepKind::HashSha256 { .. } => (HashSha256Cmd, exec::dispatch_hash_sha256),
-    StepKind::Exit(..) => (ExitCmd, exec::dispatch_exit),
+    StepKind::Run(..) => exec::dispatch_run,
+    StepKind::RunBg(..) => exec::dispatch_run_bg,
+    StepKind::Echo(..) => exec::dispatch_echo,
+    StepKind::Workdir(..) => exec::dispatch_workdir,
+    StepKind::Workspace(..) => exec::dispatch_workspace,
+    StepKind::Env { .. } => exec::dispatch_env,
+    StepKind::Copy { .. } => exec::dispatch_copy,
+    StepKind::CopyGit { .. } => exec::dispatch_copy_git,
+    StepKind::Symlink { .. } => exec::dispatch_symlink,
+    StepKind::Mkdir(..) => exec::dispatch_mkdir,
+    StepKind::Ls(..) => exec::dispatch_ls,
+    StepKind::Cwd => exec::dispatch_cwd,
+    StepKind::Read(..) => exec::dispatch_read,
+    StepKind::Write { .. } => exec::dispatch_write,
+    StepKind::Append { .. } => exec::dispatch_append,
+    StepKind::Expand { .. } => exec::dispatch_expand,
+    StepKind::AssertFile { .. } => exec::dispatch_assert_file,
+    StepKind::AssertDir(..) => exec::dispatch_assert_dir,
+    StepKind::AssertAbsent(..) => exec::dispatch_assert_absent,
+    StepKind::AssertStdout(..) => exec::dispatch_assert_stdout,
+    StepKind::HashSha256 { .. } => exec::dispatch_hash_sha256,
+    StepKind::Exit(..) => exec::dispatch_exit,
 }
 
 /// Parse a script using the production `lower_command` dispatcher.

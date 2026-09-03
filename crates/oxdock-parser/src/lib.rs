@@ -1,3 +1,4 @@
+pub mod commands;
 pub mod ast;
 pub mod command;
 mod lexer;
@@ -8,6 +9,7 @@ pub mod parser;
 pub mod strip_flags;
 
 pub use ast::*;
+pub use commands::{lower_command, all_metadata};
 pub use command::{
     ArgSpec, CommandMeta, CommandSpec, Example, FlagSpec, FlagValueType, IoDirection, Stream,
 };

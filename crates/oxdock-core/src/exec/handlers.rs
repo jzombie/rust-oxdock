@@ -1312,3 +1312,23 @@ pub(crate) fn dispatch_assign<P: ProcessManager>(
     };
     assign(cx, var, expr)
 }
+
+pub(crate) fn dispatch_with_io<P: ProcessManager>(
+    step: &StepKind,
+    cx: &mut StepCtx<'_, P>,
+) -> Result<()> {
+    let StepKind::WithIo { bindings, cmd } = step else {
+        unreachable!()
+    };
+    with_io(cx, 0, 0, bindings, cmd)
+}
+
+pub(crate) fn dispatch_with_io_block<P: ProcessManager>(
+    step: &StepKind,
+    cx: &mut StepCtx<'_, P>,
+) -> Result<()> {
+    let StepKind::WithIoBlock { bindings } = step else {
+        unreachable!()
+    };
+    with_io_block(cx, 0, 0, bindings)
+}

@@ -13,8 +13,8 @@ pub(crate) use self::handlers::{
     dispatch_assert_stdout, dispatch_assign, dispatch_copy, dispatch_copy_git, dispatch_cwd,
     dispatch_echo, dispatch_env, dispatch_exit, dispatch_expand, dispatch_for_loop,
     dispatch_hash_sha256, dispatch_if_then, dispatch_inherit_env, dispatch_ls, dispatch_mkdir,
-    dispatch_read, dispatch_run, dispatch_run_bg, dispatch_symlink, dispatch_workdir,
-    dispatch_workspace, dispatch_write, with_io, with_io_block,
+    dispatch_read, dispatch_run, dispatch_run_bg, dispatch_symlink, dispatch_with_io,
+    dispatch_with_io_block, dispatch_workdir, dispatch_workspace, dispatch_write,
 };
 pub use self::io::ExecIo;
 pub(crate) use self::steps::StepCtx;

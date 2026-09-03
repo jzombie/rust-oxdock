@@ -627,8 +627,8 @@ const COVERAGE_IGNORED_STEP_KINDS: &[&str] = &["WithIoBlock"];
 fn step_kind_variants() -> Result<HashSet<String>> {
     let workspace_root = discover_workspace_root().context("locate workspace root")?;
     let resolver = PathResolver::new(workspace_root.as_path(), workspace_root.as_path())?;
-    let ast_path = workspace_root.join("crates/oxdock-parser/src/ast.rs")?;
-    let ast_source = resolver.read_to_string(&ast_path).context("read ast.rs")?;
+    let ast_path = workspace_root.join("crates/oxdock-parser/src/commands.rs")?;
+    let ast_source = resolver.read_to_string(&ast_path).context("read commands.rs")?;
     let filtered: HashSet<_> = extract_step_kind_variants(&ast_source)
         .into_iter()
         .filter(|name| {
@@ -638,7 +638,7 @@ fn step_kind_variants() -> Result<HashSet<String>> {
         })
         .collect();
     if filtered.is_empty() {
-        return Err(anyhow!("failed to extract StepKind variants from ast.rs"));
+        return Err(anyhow!("failed to extract StepKind variants from commands.rs"));
     }
     Ok(filtered)
 }
@@ -1047,8 +1047,9 @@ fn setup_workspace_symlink(_snapshot: &GuardedPath, local: &GuardedPath) -> Resu
 
 fn extract_step_kind_variants(source: &str) -> Vec<String> {
     let mut variants = Vec::new();
-    let mut in_enum = false;
 
+    // Strategy 1: Look for `pub enum StepKind` (hand-written enum)
+    let mut in_enum = false;
     for line in source.lines() {
         let trimmed = line.trim_start();
         if !in_enum {
@@ -1057,21 +1058,37 @@ fn extract_step_kind_variants(source: &str) -> Vec<String> {
             }
             continue;
         }
-
-        if trimmed == "}" {
-            break;
+        if trimmed == "}" { break; }
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("//") { continue; }
+        let name: String = trimmed.chars().take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_').collect();
+        if !name.is_empty() && name.chars().next().map(|ch| ch.is_ascii_uppercase()) == Some(true) {
+            variants.push(name);
         }
-        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with('/') {
+    }
+    if !variants.is_empty() { return variants; }
+
+    // Strategy 2: Look for `variant: Name` fields and structural variants in declare_commands! invocation
+    let mut in_structural = false;
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if trimmed == "structural [" { in_structural = true; continue; }
+        if in_structural && trimmed == "]" { in_structural = false; continue; }
+        if in_structural {
+            // Extract structural variant name (first identifier before `{` or `,`)
+            if let Some(name) = trimmed.split(|c: char| c == '{' || c == ',').next() {
+                let name = name.trim().to_string();
+                if !name.is_empty() && name.chars().next().map(|ch| ch.is_ascii_uppercase()) == Some(true) {
+                    variants.push(name);
+                }
+            }
             continue;
         }
-
-        let name: String = trimmed
-            .chars()
-            .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
-            .collect();
-        if !name.is_empty() && name.chars().next().map(|ch| ch.is_ascii_uppercase()) == Some(true)
-        {
-            variants.push(name);
+        if let Some(rest) = trimmed.strip_prefix("variant:") {
+            let rest = rest.trim();
+            let name: String = rest.chars().take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_').collect();
+            if !name.is_empty() && name.chars().next().map(|ch| ch.is_ascii_uppercase()) == Some(true) {
+                variants.push(name);
+            }
         }
     }
 
