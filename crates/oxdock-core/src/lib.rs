@@ -1,7 +1,7 @@
 pub mod exec;
 pub mod pipeline;
 pub use exec::*;
-pub use oxdock_parser::{Arg, CommandMeta, CommandSpec, StepKind, lower_command};
+pub use oxdock_parser::{Arg, CommandMeta, CommandSpec, StepKind, lower_command, all_metadata};
 pub use oxdock_process::ProcessManager;
 
 define_pipeline! {
