@@ -1,6 +1,6 @@
-pub mod commands;
 pub mod ast;
 pub mod command;
+pub mod commands;
 mod lexer;
 #[cfg(feature = "proc-macro-api")]
 mod macro_input;
@@ -9,10 +9,10 @@ pub mod parser;
 pub mod strip_flags;
 
 pub use ast::*;
-pub use commands::{lower_command, all_metadata};
 pub use command::{
     ArgSpec, CommandMeta, CommandSpec, Example, FlagSpec, FlagValueType, IoDirection, Stream,
 };
+pub use commands::{all_metadata, lower_command};
 pub use lexer::LANGUAGE_SPEC;
 #[cfg(feature = "proc-macro-api")]
 pub use macro_input::{
@@ -39,7 +39,11 @@ pub mod test_lower_mock {
                 let contents = if remaining.is_empty() {
                     None
                 } else {
-                    let joined = remaining.iter().map(|a| a.as_str()).collect::<Vec<_>>().join(" ");
+                    let joined = remaining
+                        .iter()
+                        .map(|a| a.as_str())
+                        .collect::<Vec<_>>()
+                        .join(" ");
                     Some(Arg::String(joined, false))
                 };
                 Ok(StepKind::Write { path, contents })
@@ -726,8 +730,7 @@ mod tests {
 
     #[test]
     fn guard_block_with_mock_command() {
-        let script =
-            "CWD\n[env:GATE] {\n    WRITE gated\n}\n[eq(env:A, 1)] WRITE eq\n";
+        let script = "CWD\n[env:GATE] {\n    WRITE gated\n}\n[eq(env:A, 1)] WRITE eq\n";
         let steps = parse_script(script, test_lower).expect("parse should succeed");
         assert!(
             steps.len() >= 2,

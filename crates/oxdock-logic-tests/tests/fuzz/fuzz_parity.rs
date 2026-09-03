@@ -226,30 +226,106 @@ fn arg_content_eq(a: &Arg, b: &Arg) -> bool {
 
 fn assert_steps_eq(left: &Step, right: &Step, msg: &str) {
     assert_eq!(left.guard, right.guard, "Guards mismatch: {}", msg);
-    assert_eq!(left.scope_enter, right.scope_enter, "Scope enter mismatch: {}", msg);
-    assert_eq!(left.scope_exit, right.scope_exit, "Scope exit mismatch: {}", msg);
+    assert_eq!(
+        left.scope_enter, right.scope_enter,
+        "Scope enter mismatch: {}",
+        msg
+    );
+    assert_eq!(
+        left.scope_exit, right.scope_exit,
+        "Scope exit mismatch: {}",
+        msg
+    );
 
     match (&left.kind, &right.kind) {
-        (StepKind::Run(l), StepKind::Run(r)) => assert_eq!(l.as_str(), r.as_str(), "Run cmd mismatch: {}", msg),
-        (StepKind::RunBg(l), StepKind::RunBg(r)) => assert_eq!(l.as_str(), r.as_str(), "RunBg cmd mismatch: {}", msg),
-        (StepKind::Workdir(l), StepKind::Workdir(r)) => assert!(arg_content_eq(l, r), "Workdir mismatch: {}", msg),
-        (StepKind::Echo(l), StepKind::Echo(r)) => assert!(arg_content_eq(l, r), "Echo mismatch: {}", msg),
-        (StepKind::Mkdir(l), StepKind::Mkdir(r)) => assert!(arg_content_eq(l, r), "Mkdir mismatch: {}", msg),
-        (StepKind::Ls(l), StepKind::Ls(r)) => assert_eq!(l.as_ref().map(|a| a.as_str()), r.as_ref().map(|a| a.as_str()), "Ls mismatch: {}", msg),
-        (StepKind::Read(l), StepKind::Read(r)) => assert_eq!(l.as_ref().map(|a| a.as_str()), r.as_ref().map(|a| a.as_str()), "Read mismatch: {}", msg),
-        (StepKind::Write { path: lp, contents: lc }, StepKind::Write { path: rp, contents: rc }) => {
+        (StepKind::Run(l), StepKind::Run(r)) => {
+            assert_eq!(l.as_str(), r.as_str(), "Run cmd mismatch: {}", msg)
+        }
+        (StepKind::RunBg(l), StepKind::RunBg(r)) => {
+            assert_eq!(l.as_str(), r.as_str(), "RunBg cmd mismatch: {}", msg)
+        }
+        (StepKind::Workdir(l), StepKind::Workdir(r)) => {
+            assert!(arg_content_eq(l, r), "Workdir mismatch: {}", msg)
+        }
+        (StepKind::Echo(l), StepKind::Echo(r)) => {
+            assert!(arg_content_eq(l, r), "Echo mismatch: {}", msg)
+        }
+        (StepKind::Mkdir(l), StepKind::Mkdir(r)) => {
+            assert!(arg_content_eq(l, r), "Mkdir mismatch: {}", msg)
+        }
+        (StepKind::Ls(l), StepKind::Ls(r)) => assert_eq!(
+            l.as_ref().map(|a| a.as_str()),
+            r.as_ref().map(|a| a.as_str()),
+            "Ls mismatch: {}",
+            msg
+        ),
+        (StepKind::Read(l), StepKind::Read(r)) => assert_eq!(
+            l.as_ref().map(|a| a.as_str()),
+            r.as_ref().map(|a| a.as_str()),
+            "Read mismatch: {}",
+            msg
+        ),
+        (
+            StepKind::Write {
+                path: lp,
+                contents: lc,
+            },
+            StepKind::Write {
+                path: rp,
+                contents: rc,
+            },
+        ) => {
             assert!(arg_content_eq(lp, rp), "Write path mismatch: {}", msg);
-            assert_eq!(lc.as_ref().map(|a| a.as_str()), rc.as_ref().map(|a| a.as_str()), "Write contents mismatch: {}", msg);
+            assert_eq!(
+                lc.as_ref().map(|a| a.as_str()),
+                rc.as_ref().map(|a| a.as_str()),
+                "Write contents mismatch: {}",
+                msg
+            );
         }
-        (StepKind::Append { path: lp, contents: lc }, StepKind::Append { path: rp, contents: rc }) => {
+        (
+            StepKind::Append {
+                path: lp,
+                contents: lc,
+            },
+            StepKind::Append {
+                path: rp,
+                contents: rc,
+            },
+        ) => {
             assert!(arg_content_eq(lp, rp), "Append path mismatch: {}", msg);
-            assert_eq!(lc.as_ref().map(|a| a.as_str()), rc.as_ref().map(|a| a.as_str()), "Append contents mismatch: {}", msg);
+            assert_eq!(
+                lc.as_ref().map(|a| a.as_str()),
+                rc.as_ref().map(|a| a.as_str()),
+                "Append contents mismatch: {}",
+                msg
+            );
         }
-        (StepKind::Copy { from: lf, to: lt, .. }, StepKind::Copy { from: rf, to: rt, .. }) => {
+        (
+            StepKind::Copy {
+                from: lf, to: lt, ..
+            },
+            StepKind::Copy {
+                from: rf, to: rt, ..
+            },
+        ) => {
             assert!(arg_content_eq(lf, rf), "Copy from mismatch: {}", msg);
             assert!(arg_content_eq(lt, rt), "Copy to mismatch: {}", msg);
         }
-        (StepKind::CopyGit { rev: lr, from: lf, to: lt, .. }, StepKind::CopyGit { rev: rr, from: rf, to: rt, .. }) => {
+        (
+            StepKind::CopyGit {
+                rev: lr,
+                from: lf,
+                to: lt,
+                ..
+            },
+            StepKind::CopyGit {
+                rev: rr,
+                from: rf,
+                to: rt,
+                ..
+            },
+        ) => {
             assert!(arg_content_eq(lr, rr), "CopyGit rev mismatch: {}", msg);
             assert!(arg_content_eq(lf, rf), "CopyGit from mismatch: {}", msg);
             assert!(arg_content_eq(lt, rt), "CopyGit to mismatch: {}", msg);
@@ -258,21 +334,68 @@ fn assert_steps_eq(left: &Step, right: &Step, msg: &str) {
             assert!(arg_content_eq(lf, rf), "Symlink from mismatch: {}", msg);
             assert!(arg_content_eq(lt, rt), "Symlink to mismatch: {}", msg);
         }
-        (StepKind::AssertFile { hash: lh, path: lp, contents: lc }, StepKind::AssertFile { hash: rh, path: rp, contents: rc }) => {
+        (
+            StepKind::AssertFile {
+                hash: lh,
+                path: lp,
+                contents: lc,
+            },
+            StepKind::AssertFile {
+                hash: rh,
+                path: rp,
+                contents: rc,
+            },
+        ) => {
             assert_eq!(lh, rh, "AssertFile hash mismatch: {}", msg);
             assert!(arg_content_eq(lp, rp), "AssertFile path mismatch: {}", msg);
-            assert_eq!(lc.as_ref().map(|a| a.as_str()), rc.as_ref().map(|a| a.as_str()), "AssertFile contents mismatch: {}", msg);
+            assert_eq!(
+                lc.as_ref().map(|a| a.as_str()),
+                rc.as_ref().map(|a| a.as_str()),
+                "AssertFile contents mismatch: {}",
+                msg
+            );
         }
-        (StepKind::AssertDir(l), StepKind::AssertDir(r)) => assert!(arg_content_eq(l, r), "AssertDir mismatch: {}", msg),
-        (StepKind::AssertAbsent(l), StepKind::AssertAbsent(r)) => assert!(arg_content_eq(l, r), "AssertAbsent mismatch: {}", msg),
-        (StepKind::AssertStdout(l), StepKind::AssertStdout(r)) => assert!(arg_content_eq(l, r), "AssertStdout mismatch: {}", msg),
-        (StepKind::HashSha256 { path: lp }, StepKind::HashSha256 { path: rp }) => assert!(arg_content_eq(lp, rp), "HashSha256 mismatch: {}", msg),
-        (StepKind::Expand { path: lp, overrides: lo }, StepKind::Expand { path: rp, overrides: ro }) => {
-            assert_eq!(lp.as_ref().map(|a| a.as_str()), rp.as_ref().map(|a| a.as_str()), "Expand path mismatch: {}", msg);
-            assert_eq!(lo.len(), ro.len(), "Expand overrides length mismatch: {}", msg);
+        (StepKind::AssertDir(l), StepKind::AssertDir(r)) => {
+            assert!(arg_content_eq(l, r), "AssertDir mismatch: {}", msg)
+        }
+        (StepKind::AssertAbsent(l), StepKind::AssertAbsent(r)) => {
+            assert!(arg_content_eq(l, r), "AssertAbsent mismatch: {}", msg)
+        }
+        (StepKind::AssertStdout(l), StepKind::AssertStdout(r)) => {
+            assert!(arg_content_eq(l, r), "AssertStdout mismatch: {}", msg)
+        }
+        (StepKind::HashSha256 { path: lp }, StepKind::HashSha256 { path: rp }) => {
+            assert!(arg_content_eq(lp, rp), "HashSha256 mismatch: {}", msg)
+        }
+        (
+            StepKind::Expand {
+                path: lp,
+                overrides: lo,
+            },
+            StepKind::Expand {
+                path: rp,
+                overrides: ro,
+            },
+        ) => {
+            assert_eq!(
+                lp.as_ref().map(|a| a.as_str()),
+                rp.as_ref().map(|a| a.as_str()),
+                "Expand path mismatch: {}",
+                msg
+            );
+            assert_eq!(
+                lo.len(),
+                ro.len(),
+                "Expand overrides length mismatch: {}",
+                msg
+            );
             for ((lk, lv), (rk, rv)) in lo.iter().zip(ro.iter()) {
                 assert_eq!(lk, rk, "Expand override key mismatch: {}", msg);
-                assert!(arg_content_eq(lv, rv), "Expand override value mismatch: {}", msg);
+                assert!(
+                    arg_content_eq(lv, rv),
+                    "Expand override value mismatch: {}",
+                    msg
+                );
             }
         }
         _ => assert_eq!(left.kind, right.kind, "Kind mismatch: {}", msg),

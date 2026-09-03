@@ -79,7 +79,10 @@ mod tests {
     #[test]
     fn no_flags_passes_through() {
         let meta = test_meta(&[]);
-        let args = vec![Arg::String("hello".into(), false), Arg::String("world".into(), false)];
+        let args = vec![
+            Arg::String("hello".into(), false),
+            Arg::String("world".into(), false),
+        ];
         let (flags, pos) = strip_flags(args, &meta).unwrap();
         assert!(flags.is_empty());
         assert_eq!(pos.len(), 2);
@@ -177,7 +180,10 @@ mod tests {
             required: false,
             description: "",
         }]);
-        let args = vec![Arg::String("--hsh".into(), false), Arg::String("val".into(), false)];
+        let args = vec![
+            Arg::String("--hsh".into(), false),
+            Arg::String("val".into(), false),
+        ];
         let result = strip_flags(args, &meta);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("unknown flag"));

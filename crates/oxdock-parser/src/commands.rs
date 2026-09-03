@@ -9,51 +9,80 @@
 
 use std::fmt;
 
-use indoc::indoc;
 use crate::ast::{Arg, Expr, IoBinding, IoStream, Step, WorkspaceTarget};
-use crate::command::{
-    ArgSpec, CommandMeta, Example, FlagSpec, FlagValueType, IoDirection, Stream,
-};
-use anyhow::{anyhow, bail, Result};
+use crate::command::{ArgSpec, CommandMeta, Example, FlagSpec, FlagValueType, IoDirection, Stream};
+use anyhow::{Result, anyhow, bail};
+use indoc::indoc;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 fn join_args(args: Vec<Arg>, cmd_name: &str) -> Result<Arg> {
-    if args.is_empty() { bail!("{cmd_name} requires at least one argument"); }
-    if args.len() == 1 { return Ok(args.into_iter().next().unwrap()); }
-    Ok(Arg::String(args.iter().map(|a| a.as_str()).collect::<Vec<_>>().join(" "), false))
+    if args.is_empty() {
+        bail!("{cmd_name} requires at least one argument");
+    }
+    if args.len() == 1 {
+        return Ok(args.into_iter().next().unwrap());
+    }
+    Ok(Arg::String(
+        args.iter()
+            .map(|a| a.as_str())
+            .collect::<Vec<_>>()
+            .join(" "),
+        false,
+    ))
 }
 
 fn quote_arg(s: &str) -> String {
     let is_safe = s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
         && !s.starts_with(|c: char| c.is_ascii_digit() || c == '-' || c == '/' || c == '.')
         && crate::Command::parse(s).is_none();
-    if is_safe && !s.is_empty() { s.to_string() }
-    else { format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")) }
+    if is_safe && !s.is_empty() {
+        s.to_string()
+    } else {
+        format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+    }
 }
 
 fn quote_msg(s: &str) -> String {
     let safe = s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
         && !s.starts_with(|c: char| c.is_ascii_digit())
         && crate::Command::parse(s).is_none();
-    if safe && !s.is_empty() { s.to_string() }
-    else { format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")) }
+    if safe && !s.is_empty() {
+        s.to_string()
+    } else {
+        format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+    }
 }
 
 fn quote_run(s: &str) -> String {
     if s.is_empty() || s.chars().any(|c| c == ';' || c == '\n') || s.contains("//") {
         return format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""));
     }
-    s.split(' ').map(|w| {
-        if w.starts_with(|c: char| c.is_ascii_digit()) || w.starts_with(['/', '.', '-', ':', '=']) {
-            format!("\"{}\"", w.replace('\\', "\\\\").replace('"', "\\\""))
-        } else { w.to_string() }
-    }).collect::<Vec<_>>().join(" ")
+    s.split(' ')
+        .map(|w| {
+            if w.starts_with(|c: char| c.is_ascii_digit())
+                || w.starts_with(['/', '.', '-', ':', '='])
+            {
+                format!("\"{}\"", w.replace('\\', "\\\\").replace('"', "\\\""))
+            } else {
+                w.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn fmt_io(b: &IoBinding) -> String {
-    let s = match b.stream { IoStream::Stdin => "stdin", IoStream::Stdout => "stdout", IoStream::Stderr => "stderr" };
-    if let Some(p) = &b.pipe { format!("{}=pipe:{}", s, p) } else { s.to_string() }
+    let s = match b.stream {
+        IoStream::Stdin => "stdin",
+        IoStream::Stdout => "stdout",
+        IoStream::Stderr => "stderr",
+    };
+    if let Some(p) = &b.pipe {
+        format!("{}=pipe:{}", s, p)
+    } else {
+        s.to_string()
+    }
 }
 
 // ── declare_commands! ──────────────────────────────────────────────────────
@@ -531,41 +560,166 @@ impl fmt::Display for StepKind {
             StepKind::Run(c) => write!(f, "RUN {}", quote_run(c.as_str())),
             StepKind::Echo(m) => write!(f, "ECHO {}", quote_msg(m.as_str())),
             StepKind::RunBg(c) => write!(f, "RUN_BG {}", quote_run(c.as_str())),
-            StepKind::Copy { from_current_workspace, from, to } => {
-                if *from_current_workspace { write!(f, "COPY --from-current-workspace {} {}", quote_arg(from.as_str()), quote_arg(to.as_str())) }
-                else { write!(f, "COPY {} {}", quote_arg(from.as_str()), quote_arg(to.as_str())) }
+            StepKind::Copy {
+                from_current_workspace,
+                from,
+                to,
+            } => {
+                if *from_current_workspace {
+                    write!(
+                        f,
+                        "COPY --from-current-workspace {} {}",
+                        quote_arg(from.as_str()),
+                        quote_arg(to.as_str())
+                    )
+                } else {
+                    write!(
+                        f,
+                        "COPY {} {}",
+                        quote_arg(from.as_str()),
+                        quote_arg(to.as_str())
+                    )
+                }
             }
-            StepKind::Symlink { from, to } => write!(f, "SYMLINK {} {}", quote_arg(from.as_str()), quote_arg(to.as_str())),
+            StepKind::Symlink { from, to } => write!(
+                f,
+                "SYMLINK {} {}",
+                quote_arg(from.as_str()),
+                quote_arg(to.as_str())
+            ),
             StepKind::Mkdir(a) => write!(f, "MKDIR {}", quote_arg(a.as_str())),
-            StepKind::Ls(a) => { write!(f, "LS")?; if let Some(x) = a { write!(f, " {}", quote_arg(x.as_str()))?; } Ok(()) }
+            StepKind::Ls(a) => {
+                write!(f, "LS")?;
+                if let Some(x) = a {
+                    write!(f, " {}", quote_arg(x.as_str()))?;
+                }
+                Ok(())
+            }
             StepKind::Cwd => write!(f, "CWD"),
-            StepKind::Read(a) => { write!(f, "READ")?; if let Some(x) = a { write!(f, " {}", quote_arg(x.as_str()))?; } Ok(()) }
-            StepKind::Write { path, contents } => { write!(f, "WRITE {}", quote_arg(path.as_str()))?; if let Some(b) = contents { write!(f, " {}", quote_msg(b.as_str()))?; } Ok(()) }
-            StepKind::Append { path, contents } => { write!(f, "APPEND {}", quote_arg(path.as_str()))?; if let Some(b) = contents { write!(f, " {}", quote_msg(b.as_str()))?; } Ok(()) }
-            StepKind::Expand { path, overrides } => { write!(f, "EXPAND")?; if let Some(p) = path { write!(f, " {}", quote_arg(p.as_str()))?; } for (k, v) in overrides { write!(f, " {}={}", k, quote_arg(v.as_str()))?; } Ok(()) }
-            StepKind::AssertFile { hash, path, contents } => {
-                if let Some(d) = hash { write!(f, "ASSERT_FILE --hash {} {}", d, quote_arg(path.as_str())) }
-                else { write!(f, "ASSERT_FILE {}", quote_arg(path.as_str()))?; if let Some(b) = contents { write!(f, " {}", quote_msg(b.as_str()))?; } Ok(()) }
+            StepKind::Read(a) => {
+                write!(f, "READ")?;
+                if let Some(x) = a {
+                    write!(f, " {}", quote_arg(x.as_str()))?;
+                }
+                Ok(())
+            }
+            StepKind::Write { path, contents } => {
+                write!(f, "WRITE {}", quote_arg(path.as_str()))?;
+                if let Some(b) = contents {
+                    write!(f, " {}", quote_msg(b.as_str()))?;
+                }
+                Ok(())
+            }
+            StepKind::Append { path, contents } => {
+                write!(f, "APPEND {}", quote_arg(path.as_str()))?;
+                if let Some(b) = contents {
+                    write!(f, " {}", quote_msg(b.as_str()))?;
+                }
+                Ok(())
+            }
+            StepKind::Expand { path, overrides } => {
+                write!(f, "EXPAND")?;
+                if let Some(p) = path {
+                    write!(f, " {}", quote_arg(p.as_str()))?;
+                }
+                for (k, v) in overrides {
+                    write!(f, " {}={}", k, quote_arg(v.as_str()))?;
+                }
+                Ok(())
+            }
+            StepKind::AssertFile {
+                hash,
+                path,
+                contents,
+            } => {
+                if let Some(d) = hash {
+                    write!(f, "ASSERT_FILE --hash {} {}", d, quote_arg(path.as_str()))
+                } else {
+                    write!(f, "ASSERT_FILE {}", quote_arg(path.as_str()))?;
+                    if let Some(b) = contents {
+                        write!(f, " {}", quote_msg(b.as_str()))?;
+                    }
+                    Ok(())
+                }
             }
             StepKind::AssertDir(a) => write!(f, "ASSERT_DIR {}", quote_arg(a.as_str())),
             StepKind::AssertAbsent(a) => write!(f, "ASSERT_ABSENT {}", quote_arg(a.as_str())),
             StepKind::AssertStdout(m) => write!(f, "ASSERT_STDOUT {}", quote_msg(m.as_str())),
-            StepKind::WithIo { bindings, cmd } => { let p: Vec<String> = bindings.iter().map(fmt_io).collect(); write!(f, "WITH_IO [{}] {}", p.join(", "), cmd) }
-            StepKind::WithIoBlock { bindings } => { let p: Vec<String> = bindings.iter().map(fmt_io).collect(); write!(f, "WITH_IO [{}] {{...}}", p.join(", ")) }
-            StepKind::CopyGit { rev, from, to, include_dirty } => {
-                if *include_dirty { write!(f, "COPY_GIT --include-dirty {} {} {}", quote_arg(rev.as_str()), quote_arg(from.as_str()), quote_arg(to.as_str())) }
-                else { write!(f, "COPY_GIT {} {} {}", quote_arg(rev.as_str()), quote_arg(from.as_str()), quote_arg(to.as_str())) }
+            StepKind::WithIo { bindings, cmd } => {
+                let p: Vec<String> = bindings.iter().map(fmt_io).collect();
+                write!(f, "WITH_IO [{}] {}", p.join(", "), cmd)
+            }
+            StepKind::WithIoBlock { bindings } => {
+                let p: Vec<String> = bindings.iter().map(fmt_io).collect();
+                write!(f, "WITH_IO [{}] {{...}}", p.join(", "))
+            }
+            StepKind::CopyGit {
+                rev,
+                from,
+                to,
+                include_dirty,
+            } => {
+                if *include_dirty {
+                    write!(
+                        f,
+                        "COPY_GIT --include-dirty {} {} {}",
+                        quote_arg(rev.as_str()),
+                        quote_arg(from.as_str()),
+                        quote_arg(to.as_str())
+                    )
+                } else {
+                    write!(
+                        f,
+                        "COPY_GIT {} {} {}",
+                        quote_arg(rev.as_str()),
+                        quote_arg(from.as_str()),
+                        quote_arg(to.as_str())
+                    )
+                }
             }
             StepKind::HashSha256 { path } => write!(f, "HASH_SHA256 {}", quote_arg(path.as_str())),
             StepKind::Exit(c) => write!(f, "EXIT {}", c),
-            StepKind::For { key_var, var, in_expr, body } => {
-                match key_var { Some(k) => write!(f, "FOR ${}, ${} IN {} {{", k, var, in_expr)?, None => write!(f, "FOR ${} IN {} {{", var, in_expr)? }
-                for s in body { write!(f, "\n    {}", s)?; } write!(f, "\n}}")
+            StepKind::For {
+                key_var,
+                var,
+                in_expr,
+                body,
+            } => {
+                match key_var {
+                    Some(k) => write!(f, "FOR ${}, ${} IN {} {{", k, var, in_expr)?,
+                    None => write!(f, "FOR ${} IN {} {{", var, in_expr)?,
+                }
+                for s in body {
+                    write!(f, "\n    {}", s)?;
+                }
+                write!(f, "\n}}")
             }
-            StepKind::If { cond, then_body, else_ifs, else_body } => {
-                write!(f, "IF {} {{", cond)?; for s in then_body { write!(f, "\n    {}", s)?; } write!(f, " }}")?;
-                for (c, b) in else_ifs { write!(f, " ELSE IF {} {{", c)?; for s in b { write!(f, "\n    {}", s)?; } write!(f, " }}")?; }
-                if let Some(b) = else_body { write!(f, " ELSE {{")?; for s in b { write!(f, "\n    {}", s)?; } write!(f, " }}")?; } Ok(())
+            StepKind::If {
+                cond,
+                then_body,
+                else_ifs,
+                else_body,
+            } => {
+                write!(f, "IF {} {{", cond)?;
+                for s in then_body {
+                    write!(f, "\n    {}", s)?;
+                }
+                write!(f, " }}")?;
+                for (c, b) in else_ifs {
+                    write!(f, " ELSE IF {} {{", c)?;
+                    for s in b {
+                        write!(f, "\n    {}", s)?;
+                    }
+                    write!(f, " }}")?;
+                }
+                if let Some(b) = else_body {
+                    write!(f, " ELSE {{")?;
+                    for s in b {
+                        write!(f, "\n    {}", s)?;
+                    }
+                    write!(f, " }}")?;
+                }
+                Ok(())
             }
             StepKind::Assign { var, expr } => write!(f, "LET ${} = {}", var, expr),
         }
