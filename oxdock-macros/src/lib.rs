@@ -591,12 +591,12 @@ fn sanitize_hash_tokens_inner(
 
 fn emit_arg(arg: &Arg, interp: &[(proc_macro2::Ident, usize)]) -> proc_macro2::TokenStream {
     match arg {
-        Arg::String(s) => {
+        Arg::String(s, _) => {
             if let Some(idx) = is_placeholder(s) {
                 let ident = &interp.iter().find(|(_, i)| *i == idx).unwrap().0;
-                quote! { Arg::String(#ident.to_string()) }
+                quote! { Arg::String(#ident.to_string(), false) }
             } else {
-                quote! { Arg::String(#s.to_string()) }
+                quote! { Arg::String(#s.to_string(), false) }
             }
         }
         Arg::Expr(e) => {

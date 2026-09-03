@@ -320,7 +320,7 @@ mod tests {
                     .ok_or_else(|| anyhow::anyhow!("ENV requires key=val"))?;
                 Ok(StepKind::Env {
                     key: k.to_string(),
-                    value: Arg::String(v.to_string()),
+                    value: Arg::String(v.to_string(), false),
                 })
             }
             "WRITE" => {
@@ -418,7 +418,7 @@ mod tests {
             guard: None,
             kind: StepKind::Env {
                 key: "A".into(),
-                value: Arg::String("{{ env:SEED }}".into()),
+                value: Arg::String("{{ env:SEED }}".to_string(), false),
             },
             scope_enter: 0,
             scope_exit: 0,

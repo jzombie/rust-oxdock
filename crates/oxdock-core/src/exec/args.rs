@@ -12,7 +12,7 @@ pub(crate) fn resolve_arg_state<P: ProcessManager>(
     state: &ExecState<P>,
 ) -> Result<String> {
     match arg {
-        Arg::String(s) => {
+        Arg::String(s, _) => {
             let ctx = state.command_ctx()?;
             Ok(expand_string(s, ctx.envs(), state)?)
         }
@@ -23,7 +23,7 @@ pub(crate) fn resolve_arg_state<P: ProcessManager>(
 /// Resolve an [`Arg`] — handles all variants.
 pub(crate) fn resolve_arg<P: ProcessManager>(arg: &Arg, cx: &mut StepCtx<'_, P>) -> Result<String> {
     match arg {
-        Arg::String(s) => Ok(expand_string(s, &cx.state.envs, cx.state)?),
+        Arg::String(s, _) => Ok(expand_string(s, &cx.state.envs, cx.state)?),
         Arg::Expr(e) => {
             let val = evaluate_expr(e, cx)?;
             Ok(format_value_for_string(&val))

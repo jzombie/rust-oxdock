@@ -235,9 +235,10 @@ impl From<Guard> for GuardExpr {
 /// A command argument — either an expandable string or an expression.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Arg {
-    /// Expandable string — `{{ $var }}` and `{{ env:KEY }}` expanded at runtime by expand_string.
-    /// Backslash escapes (`\n`, `\\`, etc.) are also processed.
-    String(String),
+    /// Expandable string. The `bool` indicates whether the argument was
+    /// quoted in the source (`true`) or unquoted (`false`). Quoted arguments
+    /// that start with `--` are positional, not flags.
+    String(String, bool),
     /// Expression — resolved at runtime via evaluate_expr.
     Expr(Expr),
 }
@@ -245,28 +246,32 @@ pub enum Arg {
 impl Arg {
     pub fn as_str(&self) -> &str {
         match self {
-            Arg::String(s) => s,
+            Arg::String(s, _) => s,
             Arg::Expr(_) => "",
         }
+    }
+
+    pub fn is_quoted(&self) -> bool {
+        matches!(self, Arg::String(_, true))
     }
 }
 
 impl From<String> for Arg {
     fn from(s: String) -> Self {
-        Arg::String(s)
+        Arg::String(s, false)
     }
 }
 
 impl From<&str> for Arg {
     fn from(s: &str) -> Self {
-        Arg::String(s.to_string())
+        Arg::String(s.to_string(), false)
     }
 }
 
 impl std::fmt::Display for Arg {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Arg::String(s) => write!(f, "{}", s),
+            Arg::String(s, _) => write!(f, "{}", s),
             Arg::Expr(e) => write!(f, "{}", e),
         }
     }

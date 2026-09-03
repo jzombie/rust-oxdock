@@ -22,11 +22,15 @@ pub fn strip_flags(args: Vec<Arg>, meta: &CommandMeta) -> Result<StrippedArgs> {
     let mut iter = args.into_iter();
     while let Some(arg) = iter.next() {
         match &arg {
-            Arg::String(s) if s == "--" => {
+            // Quoted arguments are always positional, even if they start with `--`
+            Arg::String(_, true) => {
+                positional.push(arg);
+            }
+            Arg::String(s, false) if s == "--" => {
                 positional.extend(iter);
                 break;
             }
-            Arg::String(s) if s.starts_with("--") => {
+            Arg::String(s, false) if s.starts_with("--") => {
                 let matched = meta.flags.iter().find(|f| {
                     s == f.long
                         || s.starts_with(f.long) && s.as_bytes().get(f.long.len()) == Some(&b'=')
@@ -34,9 +38,9 @@ pub fn strip_flags(args: Vec<Arg>, meta: &CommandMeta) -> Result<StrippedArgs> {
                 match matched {
                     Some(flag_meta) => {
                         let value = if let Some(eq_pos) = s.find('=') {
-                            Arg::String(s[eq_pos + 1..].to_string())
+                            Arg::String(s[eq_pos + 1..].to_string(), false)
                         } else if matches!(flag_meta.value_type, FlagValueType::Flag) {
-                            Arg::String("true".into())
+                            Arg::String("true".into(), false)
                         } else {
                             iter.next()
                                 .ok_or_else(|| anyhow!("{} requires a value", flag_meta.long))?
@@ -75,7 +79,7 @@ mod tests {
     #[test]
     fn no_flags_passes_through() {
         let meta = test_meta(&[]);
-        let args = vec![Arg::String("hello".into()), Arg::String("world".into())];
+        let args = vec![Arg::String("hello".into(), false), Arg::String("world".into(), false)];
         let (flags, pos) = strip_flags(args, &meta).unwrap();
         assert!(flags.is_empty());
         assert_eq!(pos.len(), 2);
@@ -91,9 +95,9 @@ mod tests {
             description: "",
         }]);
         let args = vec![
-            Arg::String("--".into()),
-            Arg::String("--hash".into()),
-            Arg::String("abc123".into()),
+            Arg::String("--".into(), false),
+            Arg::String("--hash".into(), false),
+            Arg::String("abc123".into(), false),
         ];
         let (flags, pos) = strip_flags(args, &meta).unwrap();
         assert!(flags.is_empty());
@@ -112,9 +116,9 @@ mod tests {
             description: "",
         }]);
         let args = vec![
-            Arg::String("--hash".into()),
-            Arg::String("abc123".into()),
-            Arg::String("path.txt".into()),
+            Arg::String("--hash".into(), false),
+            Arg::String("abc123".into(), false),
+            Arg::String("path.txt".into(), false),
         ];
         let (flags, pos) = strip_flags(args, &meta).unwrap();
         assert_eq!(flags.len(), 1);
@@ -134,8 +138,8 @@ mod tests {
             description: "",
         }]);
         let args = vec![
-            Arg::String("--hash=abc123".into()),
-            Arg::String("path.txt".into()),
+            Arg::String("--hash=abc123".into(), false),
+            Arg::String("path.txt".into(), false),
         ];
         let (flags, pos) = strip_flags(args, &meta).unwrap();
         assert_eq!(flags.len(), 1);
@@ -154,8 +158,8 @@ mod tests {
             description: "",
         }]);
         let args = vec![
-            Arg::String("--include-dirty".into()),
-            Arg::String("rev".into()),
+            Arg::String("--include-dirty".into(), false),
+            Arg::String("rev".into(), false),
         ];
         let (flags, pos) = strip_flags(args, &meta).unwrap();
         assert_eq!(flags.len(), 1);
@@ -173,7 +177,7 @@ mod tests {
             required: false,
             description: "",
         }]);
-        let args = vec![Arg::String("--hsh".into()), Arg::String("val".into())];
+        let args = vec![Arg::String("--hsh".into(), false), Arg::String("val".into(), false)];
         let result = strip_flags(args, &meta);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("unknown flag"));
@@ -188,7 +192,7 @@ mod tests {
             required: false,
             description: "",
         }]);
-        let args = vec![Arg::String("--hash".into())];
+        let args = vec![Arg::String("--hash".into(), false)];
         let result = strip_flags(args, &meta);
         assert!(result.is_err());
     }

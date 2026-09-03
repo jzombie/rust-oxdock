@@ -21,14 +21,14 @@ use anyhow::{anyhow, bail, Result};
 fn join_args(args: Vec<Arg>, cmd_name: &str) -> Result<Arg> {
     if args.is_empty() { bail!("{cmd_name} requires at least one argument"); }
     if args.len() == 1 { return Ok(args.into_iter().next().unwrap()); }
-    Ok(Arg::String(args.iter().map(|a| a.as_str()).collect::<Vec<_>>().join(" ")))
+    Ok(Arg::String(args.iter().map(|a| a.as_str()).collect::<Vec<_>>().join(" "), false))
 }
 
 fn quote_arg(s: &str) -> String {
-    let safe = s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-        && !s.starts_with(|c: char| c.is_ascii_digit())
+    let is_safe = s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && !s.starts_with(|c: char| c.is_ascii_digit() || c == '-' || c == '/' || c == '.')
         && crate::Command::parse(s).is_none();
-    if safe && !s.is_empty() { s.to_string() }
+    if is_safe && !s.is_empty() { s.to_string() }
     else { format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"")) }
 }
 
@@ -178,7 +178,7 @@ declare_commands! {
             let arg = args.into_iter().next().ok_or_else(|| anyhow!("ENV requires KEY=value"))?;
             let (k, v) = arg.as_str().split_once('=').ok_or_else(|| anyhow!("ENV requires KEY=value format"))?;
             let val = v.strip_prefix('"').and_then(|s| s.strip_suffix('"')).unwrap_or(v);
-            Ok(StepKind::Env { key: k.to_string(), value: Arg::String(val.to_string()) })
+            Ok(StepKind::Env { key: k.to_string(), value: Arg::String(val.to_string(), false) })
         },
     ],
 
@@ -419,7 +419,7 @@ declare_commands! {
                     let val = v.strip_prefix('"').and_then(|s| s.strip_suffix('"'))
                         .or_else(|| v.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
                         .unwrap_or(v);
-                    overrides.push((k.to_string(), Arg::String(val.to_string())));
+                    overrides.push((k.to_string(), Arg::String(val.to_string(), false)));
                 } else if path.is_none() { path = Some(arg); }
                 else { bail!("EXPAND accepts at most one path"); }
             }

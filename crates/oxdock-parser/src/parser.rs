@@ -734,7 +734,11 @@ fn parse_argument(pair: Pair<Rule>) -> Result<Arg> {
     if inner.len() == 1 && inner[0].as_rule() == Rule::expr {
         return Ok(Arg::Expr(parse_expr(inner.into_iter().next().unwrap())?));
     }
-    Ok(Arg::String(parse_fragments(&inner)?))
+    // Single quoted string: preserve quote status and process escapes
+    if inner.len() == 1 && inner[0].as_rule() == Rule::string_literal {
+        return Ok(Arg::String(parse_fragments(&inner)?, true));
+    }
+    Ok(Arg::String(parse_fragments(&inner)?, false))
 }
 
 fn parse_quoted_string(pair: Pair<Rule>) -> Result<String> {

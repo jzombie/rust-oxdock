@@ -83,7 +83,7 @@ pub mod test_lower_mock {
                     .ok_or_else(|| anyhow!("MOCK_ENV requires key=val"))?;
                 Ok(StepKind::Env {
                     key: k.to_string(),
-                    value: Arg::String(v.to_string()),
+                    value: Arg::String(v.to_string(), false),
                 })
             }
             "MOCK_TARGET" | "MOCK_WORKSPACE" => {

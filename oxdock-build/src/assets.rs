@@ -689,7 +689,7 @@ mod fingerprint_tests {
                     .ok_or_else(|| anyhow::anyhow!("ENV requires key=val"))?;
                 Ok(StepKind::Env {
                     key: k.to_string(),
-                    value: Arg::String(v.to_string()),
+                    value: Arg::String(v.to_string(), false),
                 })
             }
             _ => anyhow::bail!("unknown command: {name}"),
