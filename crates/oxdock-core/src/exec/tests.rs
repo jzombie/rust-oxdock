@@ -1247,6 +1247,54 @@ fn script_pipe_file_truncated_on_drain() {
     guard.read_to_end(&mut buf).unwrap();
     assert_eq!(buf.len(), size);
     assert_eq!(buf, payload);
-    // After reading all bytes, the pipe is closed and the temp file should be deleted.
-    // No assertion on file existence needed — Drop handles cleanup.
+}
+
+#[test]
+#[cfg(not(miri))]
+#[allow(clippy::disallowed_methods)]
+fn script_pipe_explicit_disk_spill_and_cleanup_verification() {
+    use super::pipe::{ScriptPipe, PIPE_SPILL_THRESHOLD};
+    use std::fs;
+
+    let pipe = ScriptPipe::new();
+    let writer = pipe.endpoint().stream_handle();
+    let reader = pipe.reader();
+
+    // 1. Trigger disk spill (9 MiB)
+    let size = PIPE_SPILL_THRESHOLD + (1024 * 1024);
+    let payload = vec![0x55u8; size];
+    writer.lock().unwrap().write_all(&payload).unwrap();
+
+    // 2. Query exact temp file path directly from the pipe instance
+    let temp_path = pipe
+        .temp_path()
+        .expect("Pipe must have transitioned to DiskBuffer");
+    assert!(
+        temp_path.exists(),
+        "Temp file {} must exist on disk while buffered",
+        temp_path.display()
+    );
+
+    // 3. Drain all bytes and verify immediate physical file truncation
+    let mut guard = reader.lock().unwrap();
+    let mut buf = vec![0u8; size];
+    guard.read_exact(&mut buf).unwrap();
+    drop(guard);
+
+    let meta = fs::metadata(&temp_path).unwrap();
+    assert_eq!(
+        meta.len(),
+        0,
+        "Physical file length must be 0 after buffer drainage"
+    );
+
+    // 4. Drop handles and verify unlinking
+    drop(writer);
+    drop(reader);
+    drop(pipe);
+
+    assert!(
+        !temp_path.exists(),
+        "Temp file must be deleted from disk upon Drop"
+    );
 }

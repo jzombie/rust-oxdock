@@ -6,7 +6,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use oxdock_process::{SharedInput, SharedOutput};
 
 /// Memory threshold before spilling to disk (8 MiB).
-const PIPE_SPILL_THRESHOLD: usize = 8 * 1024 * 1024;
+pub(super) const PIPE_SPILL_THRESHOLD: usize = 8 * 1024 * 1024;
 
 /// Maximum active backlog before returning an error (100 MiB).
 const PIPE_MAX_BACKLOG: u64 = 100 * 1024 * 1024;
@@ -64,6 +64,12 @@ impl ScriptPipe {
     pub(super) fn endpoint(&self) -> ScriptPipeEndpoint {
         ScriptPipeEndpoint::new(self.inner.clone())
     }
+
+    #[cfg(test)]
+    #[allow(clippy::disallowed_types)]
+    pub(super) fn temp_path(&self) -> Option<std::path::PathBuf> {
+        self.inner.temp_path()
+    }
 }
 
 #[derive(Clone)]
@@ -91,6 +97,17 @@ impl PipeInner {
         Self {
             state: Mutex::new(PipeState::new()),
             ready: Condvar::new(),
+        }
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::disallowed_types)]
+    fn temp_path(&self) -> Option<std::path::PathBuf> {
+        let state = self.lock_state();
+        match &state.buffer {
+            PipeBuffer::Memory(_) => None,
+            #[cfg(not(miri))]
+            PipeBuffer::Disk(disk) => Some(disk.path.clone()),
         }
     }
 
