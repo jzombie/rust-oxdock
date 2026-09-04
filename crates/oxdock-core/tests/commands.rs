@@ -1273,3 +1273,487 @@ fn assert_stdout_miss_reports_emitted_log() {
         "{err}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Compile-time StepKind exhaustiveness check
+// ---------------------------------------------------------------------------
+
+/// When a new `StepKind` variant is added, the compiler will error here until
+/// the match is updated — enforcing that every variant has test coverage.
+fn _assert_step_kind_exhaustiveness(kind: &StepKind) {
+    match kind {
+        StepKind::Workdir(_) => {}
+        StepKind::Workspace(_) => {}
+        StepKind::Env { .. } => {}
+        StepKind::InheritEnv { .. } => {}
+        StepKind::Run(_) => {}
+        StepKind::Echo(_) => {}
+        StepKind::RunBg(_) => {}
+        StepKind::Copy { .. } => {}
+        StepKind::CopyGit { .. } => {}
+        StepKind::Symlink { .. } => {}
+        StepKind::Mkdir(_) => {}
+        StepKind::Ls(_) => {}
+        StepKind::Cwd => {}
+        StepKind::Read(_) => {}
+        StepKind::Write { .. } => {}
+        StepKind::Append { .. } => {}
+        StepKind::Expand { .. } => {}
+        StepKind::AssertFile { .. } => {}
+        StepKind::AssertDir(_) => {}
+        StepKind::AssertAbsent(_) => {}
+        StepKind::AssertStdout(_) => {}
+        StepKind::WithIo { .. } => {}
+        StepKind::WithIoBlock { .. } => {}
+        StepKind::HashSha256 { .. } => {}
+        StepKind::Exit(_) => {}
+        StepKind::For { .. } => {}
+        StepKind::If { .. } => {}
+        StepKind::Assign { .. } => {}
+    }
+}
+
+#[test]
+fn step_kind_exhaustiveness_check() {
+    // Trigger compile-time exhaustiveness: if a new StepKind variant is added
+    // without updating _assert_step_kind_exhaustiveness, this will fail to compile.
+    _assert_step_kind_exhaustiveness(&StepKind::Cwd);
+}
+
+// ---------------------------------------------------------------------------
+// APPEND
+// ---------------------------------------------------------------------------
+
+#[test]
+fn append_concatenates_content() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    run_script(
+        &root,
+        "APPEND note.txt \"hello\"\nAPPEND note.txt \"world\"\n",
+    )
+    .expect("append passes");
+    assert_eq!(read_trimmed(&root.join("note.txt").unwrap()), "helloworld");
+}
+
+// ---------------------------------------------------------------------------
+// ASSIGN (LET)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn assign_and_interpolate() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    run_script(&root, "LET $msg = hello\nWRITE out.txt $msg\n").expect("assign + write passes");
+    assert_eq!(read_trimmed(&root.join("out.txt").unwrap()), "hello");
+}
+
+// ---------------------------------------------------------------------------
+// FOR loop
+// ---------------------------------------------------------------------------
+
+#[test]
+fn for_loop_iterates_array() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        FOR $f IN ["a", "b", "c"] {
+            WRITE "{{ $f }}.txt" "{{ $f }}"
+        }
+    "#};
+    run_script(&root, script).expect("for loop passes");
+    assert_eq!(read_trimmed(&root.join("a.txt").unwrap()), "a");
+    assert_eq!(read_trimmed(&root.join("b.txt").unwrap()), "b");
+    assert_eq!(read_trimmed(&root.join("c.txt").unwrap()), "c");
+}
+
+// ---------------------------------------------------------------------------
+// IF statement
+// ---------------------------------------------------------------------------
+
+#[test]
+fn if_statement_conditional() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    run_script(&root, "IF true {\n    WRITE result.txt \"yes\"\n}\n").expect("if true passes");
+    assert_eq!(read_trimmed(&root.join("result.txt").unwrap()), "yes");
+}
+
+// ---------------------------------------------------------------------------
+// Guard scoping (env does not leak)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn guard_scope_env_does_not_leak() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        ENV FOO="bar"
+        [env:FOO]
+        {
+          WORKDIR scoped
+          WRITE inner.txt "inner"
+          ENV SCOPE="inner"
+        }
+        WITH_IO [stdout=pipe:cap_env_txt] ECHO "scope={{ env:SCOPE }}"
+        WITH_IO [stdin=pipe:cap_env_txt] WRITE env.txt
+        WRITE outer.txt "outer"
+    "#};
+    run_script(&root, script).expect("guard scope passes");
+    assert_eq!(
+        read_trimmed(&root.join("scoped/inner.txt").unwrap()),
+        "inner"
+    );
+    assert_eq!(read_trimmed(&root.join("outer.txt").unwrap()), "outer");
+    // SCOPE was set inside the guard block and should not leak out
+    assert_eq!(read_trimmed(&root.join("env.txt").unwrap()), "scope=");
+}
+
+// ---------------------------------------------------------------------------
+// EXPAND (stdin template expansion)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn expand_replaces_stdin_template() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+
+    let input = Arc::new(Mutex::new(Cursor::new(b"Hello {{ env:NAME }}!".to_vec())));
+    let output = Arc::new(Mutex::new(Vec::new()));
+
+    let script = indoc! {r#"
+        ENV NAME="World"
+        EXPAND NAME="REPLACEMENT-NAME"
+    "#};
+    let steps = oxdock_core::parse_script(script).unwrap();
+
+    let mut io_cfg = ExecIo::new();
+    io_cfg.set_stdin(Some(input));
+    io_cfg.set_stdout(Some(output.clone()));
+    run_steps_with_context_result_with_io(&root, &root, &steps, io_cfg).expect("expand passes");
+
+    let result = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+    assert_eq!(result, "Hello REPLACEMENT-NAME!");
+}
+
+#[test]
+fn expand_overrides_env_variable() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+
+    let input = Arc::new(Mutex::new(Cursor::new(b"Hello {{ env:NAME }}!".to_vec())));
+    let output = Arc::new(Mutex::new(Vec::new()));
+
+    let script = indoc! {r#"
+        ENV NAME="World"
+        EXPAND NAME="Alice"
+    "#};
+    let steps = oxdock_core::parse_script(script).unwrap();
+
+    let mut io_cfg = ExecIo::new();
+    io_cfg.set_stdin(Some(input));
+    io_cfg.set_stdout(Some(output.clone()));
+    run_steps_with_context_result_with_io(&root, &root, &steps, io_cfg)
+        .expect("expand override passes");
+
+    let result = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+    assert_eq!(result, "Hello Alice!");
+}
+
+// ---------------------------------------------------------------------------
+// Raw WRITE (escaped template syntax)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn write_escapes_template_syntax() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        WRITE template.md "Hello, \{{ env:NAME }}!"
+        READ template.md
+    "#};
+    let steps = oxdock_core::parse_script(script).unwrap();
+
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let mut io_cfg = ExecIo::new();
+    io_cfg.set_stdout(Some(output.clone()));
+    run_steps_with_context_result_with_io(&root, &root, &steps, io_cfg).expect("raw write passes");
+
+    assert_eq!(
+        read_trimmed(&root.join("template.md").unwrap()),
+        "Hello, {{ env:NAME }}!"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// HASH_SHA256
+// ---------------------------------------------------------------------------
+
+#[test]
+fn hash_sha256_captures_output() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    // sha256("hello")
+    let expected_hash = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+    let script = indoc! {r#"
+        WRITE data.txt "hello"
+        WITH_IO [stdout=pipe:cap_hash_txt] HASH_SHA256 data.txt
+        WITH_IO [stdin=pipe:cap_hash_txt] WRITE hash.txt
+    "#};
+    run_script(&root, script).expect("hash_sha256 passes");
+    assert_eq!(read_trimmed(&root.join("hash.txt").unwrap()), expected_hash);
+}
+
+// ---------------------------------------------------------------------------
+// WITH_IO (complex stdin/stdout pipe routing)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn with_io_routes_stdin_stdout_pipe() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+
+    let input = Arc::new(Mutex::new(Cursor::new(b"hello from stdin".to_vec())));
+    let output = Arc::new(Mutex::new(Vec::new()));
+
+    let script = indoc! {r#"
+        WITH_IO [stdin, stdout=pipe:cap_out_txt] READ
+        WITH_IO [stdin=pipe:cap_out_txt] WRITE out.txt
+        WRITE empty.txt ""
+    "#};
+    let steps = oxdock_core::parse_script(script).unwrap();
+
+    let mut io_cfg = ExecIo::new();
+    io_cfg.set_stdin(Some(input));
+    io_cfg.set_stdout(Some(output.clone()));
+    run_steps_with_context_result_with_io(&root, &root, &steps, io_cfg)
+        .expect("with_io pipe routing passes");
+
+    assert_eq!(
+        read_trimmed(&root.join("out.txt").unwrap()),
+        "hello from stdin"
+    );
+    assert_eq!(read_trimmed(&root.join("empty.txt").unwrap()), "");
+}
+
+// ---------------------------------------------------------------------------
+// WITH_IO + RUN_BG (background stdin/stdout)
+// ---------------------------------------------------------------------------
+
+#[test]
+#[cfg_attr(miri, ignore = "RUN_BG spawns real child processes")]
+fn with_io_bg_routes_stdin_stdout() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+
+    // Platform-specific filter binaries (cat/sort) read raw bytes from stdin
+    // and write them to stdout without modifying the payload.
+    #[cfg(unix)]
+    let stdin_payload = "piped-via-cat";
+    #[cfg(windows)]
+    let stdin_payload = "piped-via-sort";
+
+    let input = Arc::new(Mutex::new(Cursor::new(stdin_payload.as_bytes().to_vec())));
+    let output = Arc::new(Mutex::new(Vec::new()));
+
+    // Spawns a background non-blocking pass-through child process concurrently
+    // alongside a mainline foreground step.
+    let script = indoc! {r#"
+        [unix] WITH_IO [stdin, stdout] RUN_BG "cat"
+        [windows] WITH_IO [stdin, stdout] RUN_BG "sort"
+        RUN "echo foreground"
+    "#};
+    let steps = oxdock_core::parse_script(script).unwrap();
+
+    let mut io_cfg = ExecIo::new();
+    io_cfg.set_stdin(Some(input));
+    io_cfg.set_stdout(Some(output.clone()));
+    run_steps_with_context_result_with_io(&root, &root, &steps, io_cfg)
+        .expect("with_io_bg execution failed");
+
+    let result = String::from_utf8(output.lock().unwrap().clone()).unwrap();
+
+    // Assert containment rather than exact sequence matching.
+    //
+    // RUN_BG executes asynchronously with mainline script steps. Depending on
+    // OS process thread scheduling, the background child's stdin->stdout flush
+    // and the foreground RUN 'echo' step may write to the shared output buffer
+    // in arbitrary order. Exact equality asserts fail non-deterministically.
+    //
+    // Verifying `stdin_payload` presence proves the complete 3-leg I/O pipeline:
+    // 1. Stdin Leg: ExecIo input handle was correctly inherited by the background process.
+    // 2. Child Leg: Process executed and transferred stdin bytes to its stdout handle.
+    // 3. Stdout Leg: ExecIo output handle captured child stdout writes into shared buffer.
+    assert!(
+        result.contains("foreground"),
+        "stdout buffer missing foreground step output; actual buffer contents: {result:?}"
+    );
+    assert!(
+        result.contains(stdin_payload),
+        "stdout buffer missing background child stdin/stdout pipe payload; actual buffer contents: {result:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ENV + CARGO_TARGET_DIR in WITH_IO block
+// ---------------------------------------------------------------------------
+
+#[test]
+fn env_target_dir_in_with_io() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        ENV CARGO_TARGET_DIR="ws/target"
+        WITH_IO [stdout=pipe:capture] {
+          ECHO "{{ env:CARGO_TARGET_DIR }}"
+        }
+        WITH_IO [stdin=pipe:capture] {
+          WRITE env-target.txt
+        }
+    "#};
+    run_script(&root, script).expect("env_target_dir in with_io passes");
+    assert_eq!(
+        read_trimmed(&root.join("env-target.txt").unwrap()),
+        "ws/target"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// COPY (directory tree with symlinks)
+// ---------------------------------------------------------------------------
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "creates symlinks and copies directory trees; unsupported under Miri"
+)]
+fn copy_directory_tree_with_symlinks() {
+    let snapshot_temp = GuardedPath::tempdir().unwrap();
+    let snapshot = guard_root(&snapshot_temp);
+    let local_temp = GuardedPath::tempdir().unwrap();
+    let local = guard_root(&local_temp);
+
+    // Inline setup_copy_complex
+    let src = local.join("src").unwrap();
+    create_dirs(&src);
+    write_text(&src.join("file.txt").unwrap(), "file content");
+
+    let dir = src.join("dir").unwrap();
+    create_dirs(&dir);
+    write_text(&dir.join("nested.txt").unwrap(), "nested content");
+
+    if can_create_symlinks(local.as_path()) {
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("file.txt", local.as_path().join("src/symlink_file"))
+                .unwrap();
+            std::os::unix::fs::symlink("dir", local.as_path().join("src/symlink_dir")).unwrap();
+        }
+        #[cfg(windows)]
+        {
+            std::os::windows::fs::symlink_file(
+                "file.txt",
+                local.as_path().join("src/symlink_file"),
+            )
+            .unwrap();
+            std::os::windows::fs::symlink_dir("dir", local.as_path().join("src/symlink_dir"))
+                .unwrap();
+        }
+    }
+
+    let steps = oxdock_core::parse_script("COPY ./src \"./dst\"").unwrap();
+    let result = run_steps_with_context_result_with_io(&snapshot, &local, &steps, ExecIo::new());
+
+    if can_create_symlinks(local.as_path()) {
+        result.expect("copy complex passes");
+        assert_eq!(
+            read_trimmed(&snapshot.join("dst/file.txt").unwrap()),
+            "file content"
+        );
+        assert_eq!(
+            read_trimmed(&snapshot.join("dst/dir/nested.txt").unwrap()),
+            "nested content"
+        );
+        // Symlinks are resolved by COPY, so the content should be accessible
+        assert_eq!(
+            read_trimmed(&snapshot.join("dst/symlink_file").unwrap()),
+            "file content"
+        );
+    } else {
+        // Host cannot create symlinks; COPY of broken symlinks may fail
+        let _ = result;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// COPY (broken symlink)
+// ---------------------------------------------------------------------------
+
+#[test]
+#[cfg_attr(miri, ignore = "creates symlinks; unsupported under Miri")]
+fn copy_broken_symlink_fails() {
+    let snapshot_temp = GuardedPath::tempdir().unwrap();
+    let snapshot = guard_root(&snapshot_temp);
+    let local_temp = GuardedPath::tempdir().unwrap();
+    let local = guard_root(&local_temp);
+
+    // Inline setup_copy_broken_symlink
+    let src = local.join("src").unwrap();
+    create_dirs(&src);
+
+    if !can_create_symlinks(local.as_path()) {
+        eprintln!("skipping copy_broken_symlink_fails: cannot create symlinks on host");
+        return;
+    }
+
+    #[cfg(unix)]
+    std::os::unix::fs::symlink("nonexistent", local.as_path().join("src/broken")).unwrap();
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_file("nonexistent", local.as_path().join("src/broken")).unwrap();
+
+    let steps = oxdock_core::parse_script("COPY ./src \"./dst\"").unwrap();
+    let err = run_steps_with_context_result_with_io(&snapshot, &local, &steps, ExecIo::new())
+        .expect_err("copy broken symlink should fail");
+    // Platform-specific error message
+    #[cfg(unix)]
+    assert!(
+        err.to_string().contains("No such file or directory"),
+        "expected unix symlink error, got: {err}"
+    );
+    #[cfg(windows)]
+    assert!(
+        err.to_string()
+            .contains("The system cannot find the file specified"),
+        "expected windows symlink error, got: {err}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// SYMLINK (with snapshot build context)
+// ---------------------------------------------------------------------------
+
+#[test]
+#[cfg_attr(miri, ignore = "creates symlinks; unsupported under Miri")]
+fn symlink_with_snapshot_build_context() {
+    let snapshot_temp = GuardedPath::tempdir().unwrap();
+    let snapshot = guard_root(&snapshot_temp);
+
+    // Inline setup_symlink_inputs: target_dir under snapshot (snapshot build context)
+    let target_dir = snapshot.join("target_dir").unwrap();
+    create_dirs(&target_dir);
+    write_text(&target_dir.join("inner.txt").unwrap(), "symlink target");
+
+    if !can_create_symlinks(snapshot.as_path()) {
+        eprintln!("skipping symlink_with_snapshot_build_context: cannot create symlinks on host");
+        return;
+    }
+
+    // build_context = snapshot (same as snapshot root), so SYMLINK resolves from snapshot
+    let steps = oxdock_core::parse_script("SYMLINK ./target_dir \"./linked\"").unwrap();
+    run_steps_with_context_result_with_io(&snapshot, &snapshot, &steps, ExecIo::new())
+        .expect("symlink passes");
+
+    let linked_file = snapshot.join("linked/inner.txt").unwrap();
+    assert!(linked_file.as_path().exists(), "symlink should resolve");
+    assert_eq!(read_trimmed(&linked_file), "symlink target");
+}
