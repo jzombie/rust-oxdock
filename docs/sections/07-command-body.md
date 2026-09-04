@@ -91,7 +91,6 @@ Sets the current working directory.
 WORKDIR project/src
 WRITE generated.txt generated-under-workdir
 ASSERT_FILE generated.txt generated-under-workdir
-
 ```
 
 
@@ -307,7 +306,6 @@ Creates symlink.
 WRITE original.txt content
 SYMLINK original.txt link.txt
 ASSERT_FILE link.txt content
-
 ```
 
 
@@ -633,3 +631,5 @@ Terminates.
 ```oxdock expect_error:"EXIT requested with code 0"
 EXIT 0
 ```
+
+
