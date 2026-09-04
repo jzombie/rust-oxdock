@@ -745,10 +745,7 @@ fn emit_stepkind(
             quote! { StepKind::Echo(#t) }
         }
         StepKind::AsyncBlock { body } => {
-            let steps: Vec<_> = body
-                .iter()
-                .map(|s| emit_step(s, interp))
-                .collect();
+            let steps: Vec<_> = body.iter().map(|s| emit_step(s, interp)).collect();
             quote! { StepKind::AsyncBlock { body: vec![#(#steps),*] } }
         }
         StepKind::Mkdir(a) => {

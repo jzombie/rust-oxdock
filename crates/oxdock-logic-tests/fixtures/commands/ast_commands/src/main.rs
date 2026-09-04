@@ -1,11 +1,11 @@
 use anyhow::{Context, Result, anyhow};
-use oxdock_core::{run_steps_with_context_result_with_io, ExecIo};
+use oxdock_core::{ExecIo, run_steps_with_context_result_with_io};
 use oxdock_fs::{
     GuardedPath, GuardedTempDir, PathResolver, discover_workspace_root, ensure_git_identity,
 };
+use oxdock_logic_tests::expectations::{self, ErrorExpectation};
 use oxdock_parser::{Step, StepKind};
 use oxdock_process::{CommandBuilder, SharedInput, SharedOutput};
-use oxdock_logic_tests::expectations::{self, ErrorExpectation};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::env;
@@ -124,8 +124,7 @@ fn run() -> Result<()> {
         let steps = case_steps
             .get(case.name.as_str())
             .ok_or_else(|| anyhow!("missing steps for case {}", case.name))?;
-        run_case(&case, steps)
-            .with_context(|| format!("case {}", case.name))?;
+        run_case(&case, steps).with_context(|| format!("case {}", case.name))?;
     }
 
     Ok(())
@@ -181,9 +180,7 @@ fn load_cases(resolver: &PathResolver) -> Result<Vec<CaseSpec>> {
     let mut cases = Vec::new();
 
     for entry in entries {
-        let file_type = entry
-            .file_type()
-            .context("read case entry type")?;
+        let file_type = entry.file_type().context("read case entry type")?;
         if !file_type.is_dir() {
             continue;
         }
@@ -225,9 +222,7 @@ fn load_case_spec(
     let contents = resolver
         .read_to_string(&case_path)
         .with_context(|| format!("read {}", case_path.display()))?;
-    let doc = contents
-        .parse::<DocumentMut>()
-        .context("parse case.toml")?;
+    let doc = contents.parse::<DocumentMut>().context("parse case.toml")?;
 
     let name = doc
         .get("name")
@@ -240,10 +235,8 @@ fn load_case_spec(
         .unwrap_or("script.oxdock");
     let script_rel = format!("cases/{}/{}", dir_name, script_name);
 
-    let build_context = parse_build_context(
-        doc.get("build_context")
-            .and_then(|item| item.as_str()),
-    )?;
+    let build_context =
+        parse_build_context(doc.get("build_context").and_then(|item| item.as_str()))?;
     let setup = doc
         .get("setup")
         .and_then(|item| item.as_str())
@@ -258,19 +251,19 @@ fn load_case_spec(
         .get("pipes")
         .and_then(|item| item.as_table())
         .map(parse_pipe_specs)
-        .transpose()? 
+        .transpose()?
         .unwrap_or_default();
     let env = doc
         .get("env")
         .and_then(|item| item.as_table())
         .map(parse_env_table)
-        .transpose()? 
+        .transpose()?
         .unwrap_or_default();
     let env_remove = doc
         .get("env_remove")
         .and_then(|item| item.as_array())
         .map(parse_string_array)
-        .transpose()? 
+        .transpose()?
         .unwrap_or_default();
 
     Ok(CaseSpec {
@@ -292,9 +285,9 @@ fn parse_build_context(value: Option<&str>) -> Result<BuildContext> {
     match value.unwrap_or("local") {
         "local" => Ok(BuildContext::Local),
         "snapshot" => Ok(BuildContext::Snapshot),
-        other if other.starts_with("local_subdir:") => {
-            Ok(BuildContext::LocalSubdir(other["local_subdir:".len()..].to_string()))
-        }
+        other if other.starts_with("local_subdir:") => Ok(BuildContext::LocalSubdir(
+            other["local_subdir:".len()..].to_string(),
+        )),
         other => Err(anyhow!("unknown build_context {other}")),
     }
 }
@@ -454,7 +447,11 @@ fn parse_ls_expect(table: &Table) -> Result<LsExpect> {
         .transpose()?
         .unwrap_or_default();
     let root = parse_root(table.get("root").and_then(|item| item.as_str()))?;
-    Ok(LsExpect { root, file, entries })
+    Ok(LsExpect {
+        root,
+        file,
+        entries,
+    })
 }
 
 fn parse_cwd_expect(table: &Table) -> Result<CwdExpect> {
@@ -510,12 +507,20 @@ fn load_case_steps(
     Ok(out)
 }
 
-fn apply_placeholders(template: &str, placeholders: &HashMap<&'static str, String>) -> Result<String> {
+fn apply_placeholders(
+    template: &str,
+    placeholders: &HashMap<&'static str, String>,
+) -> Result<String> {
     let mut rendered = template.to_string();
     for (key, value) in placeholders {
         rendered = rendered.replace(key, value);
     }
-    for key in ["@RUN_CMD@", "@ASYNC_RUN_CMD@", "@BG_WAIT_CMD@", "@CAPTURE_RUN_CMD@"] {
+    for key in [
+        "@RUN_CMD@",
+        "@ASYNC_RUN_CMD@",
+        "@BG_WAIT_CMD@",
+        "@CAPTURE_RUN_CMD@",
+    ] {
         if rendered.contains(key) {
             return Err(anyhow!("script contains unresolved placeholder {key}"));
         }
@@ -561,10 +566,7 @@ fn command_placeholders() -> HashMap<&'static str, String> {
     placeholders
 }
 
-fn assert_coverage(
-    cases: &HashMap<String, Vec<Step>>,
-    spec: &CoverageSpec,
-) -> Result<()> {
+fn assert_coverage(cases: &HashMap<String, Vec<Step>>, spec: &CoverageSpec) -> Result<()> {
     let step_kinds = step_kind_variants().context("load StepKind variants")?;
 
     let mut missing = Vec::new();
@@ -628,7 +630,9 @@ fn step_kind_variants() -> Result<HashSet<String>> {
     let workspace_root = discover_workspace_root().context("locate workspace root")?;
     let resolver = PathResolver::new(workspace_root.as_path(), workspace_root.as_path())?;
     let ast_path = workspace_root.join("crates/oxdock-parser/src/commands.rs")?;
-    let ast_source = resolver.read_to_string(&ast_path).context("read commands.rs")?;
+    let ast_source = resolver
+        .read_to_string(&ast_path)
+        .context("read commands.rs")?;
     let filtered: HashSet<_> = extract_step_kind_variants(&ast_source)
         .into_iter()
         .filter(|name| {
@@ -638,7 +642,9 @@ fn step_kind_variants() -> Result<HashSet<String>> {
         })
         .collect();
     if filtered.is_empty() {
-        return Err(anyhow!("failed to extract StepKind variants from commands.rs"));
+        return Err(anyhow!(
+            "failed to extract StepKind variants from commands.rs"
+        ));
     }
     Ok(filtered)
 }
@@ -681,7 +687,7 @@ fn run_case(case: &CaseSpec, steps: &[Step]) -> Result<()> {
         let cursor = std::io::Cursor::new(s.as_bytes().to_vec());
         Arc::new(Mutex::new(cursor)) as SharedInput
     });
-    
+
     let stdout_buf = Arc::new(Mutex::new(Vec::new()));
     let stdout: SharedOutput = stdout_buf.clone();
 
@@ -727,7 +733,11 @@ fn run_case(case: &CaseSpec, steps: &[Step]) -> Result<()> {
         let actual_bytes = stdout_buf.lock().unwrap();
         let actual_str = String::from_utf8_lossy(&actual_bytes);
         if actual_str != *expected_stdout {
-             return Err(anyhow!("stdout mismatch.\nExpected:\n{:?}\nActual:\n{:?}", expected_stdout, actual_str));
+            return Err(anyhow!(
+                "stdout mismatch.\nExpected:\n{:?}\nActual:\n{:?}",
+                expected_stdout,
+                actual_str
+            ));
         }
     }
 
@@ -785,7 +795,9 @@ fn verify_expectations(
             .to_string();
         let actual = read_trimmed_root(root, &cwd.file)?;
         if actual != expected {
-            return Err(anyhow!("CWD output mismatch: expected {expected}, got {actual}"));
+            return Err(anyhow!(
+                "CWD output mismatch: expected {expected}, got {actual}"
+            ));
         }
     }
 
@@ -868,7 +880,10 @@ fn verify_pipes(pipes: &[(String, Arc<Mutex<Vec<u8>>>, PipeSpec)]) -> Result<()>
 
 fn read_trimmed_root(root: &GuardedPath, rel: &str) -> Result<String> {
     let resolver = PathResolver::new(root.as_path(), root.as_path())?;
-    Ok(resolver.read_to_string(&root.join(rel)?)?.trim().to_string())
+    Ok(resolver
+        .read_to_string(&root.join(rel)?)?
+        .trim()
+        .to_string())
 }
 
 fn guard_root(temp: &GuardedTempDir) -> GuardedPath {
@@ -1030,8 +1045,7 @@ fn setup_symlink_escape(snapshot: &GuardedPath, _local: &GuardedPath) -> Result<
     resolver.write_file(&secret, b"top secret")?;
     let link_path = snapshot.as_path().join("leak.txt");
     #[cfg(unix)]
-    std::os::unix::fs::symlink(secret.as_path(), &link_path)
-        .context("create unix symlink")?;
+    std::os::unix::fs::symlink(secret.as_path(), &link_path).context("create unix symlink")?;
     #[cfg(windows)]
     std::os::windows::fs::symlink_file(secret.as_path(), &link_path)
         .context("create windows symlink")?;
@@ -1058,26 +1072,43 @@ fn extract_step_kind_variants(source: &str) -> Vec<String> {
             }
             continue;
         }
-        if trimmed == "}" { break; }
-        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("//") { continue; }
-        let name: String = trimmed.chars().take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_').collect();
+        if trimmed == "}" {
+            break;
+        }
+        if trimmed.is_empty() || trimmed.starts_with('#') || trimmed.starts_with("//") {
+            continue;
+        }
+        let name: String = trimmed
+            .chars()
+            .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+            .collect();
         if !name.is_empty() && name.chars().next().map(|ch| ch.is_ascii_uppercase()) == Some(true) {
             variants.push(name);
         }
     }
-    if !variants.is_empty() { return variants; }
+    if !variants.is_empty() {
+        return variants;
+    }
 
     // Strategy 2: Look for `variant: Name` fields and structural variants in declare_commands! invocation
     let mut in_structural = false;
     for line in source.lines() {
         let trimmed = line.trim();
-        if trimmed == "structural [" { in_structural = true; continue; }
-        if in_structural && trimmed == "]" { in_structural = false; continue; }
+        if trimmed == "structural [" {
+            in_structural = true;
+            continue;
+        }
+        if in_structural && trimmed == "]" {
+            in_structural = false;
+            continue;
+        }
         if in_structural {
             // Extract structural variant name (first identifier before `{` or `,`)
             if let Some(name) = trimmed.split(|c: char| c == '{' || c == ',').next() {
                 let name = name.trim().to_string();
-                if !name.is_empty() && name.chars().next().map(|ch| ch.is_ascii_uppercase()) == Some(true) {
+                if !name.is_empty()
+                    && name.chars().next().map(|ch| ch.is_ascii_uppercase()) == Some(true)
+                {
                     variants.push(name);
                 }
             }
@@ -1085,8 +1116,13 @@ fn extract_step_kind_variants(source: &str) -> Vec<String> {
         }
         if let Some(rest) = trimmed.strip_prefix("variant:") {
             let rest = rest.trim();
-            let name: String = rest.chars().take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_').collect();
-            if !name.is_empty() && name.chars().next().map(|ch| ch.is_ascii_uppercase()) == Some(true) {
+            let name: String = rest
+                .chars()
+                .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+                .collect();
+            if !name.is_empty()
+                && name.chars().next().map(|ch| ch.is_ascii_uppercase()) == Some(true)
+            {
                 variants.push(name);
             }
         }

@@ -67,7 +67,11 @@ fn generate_body() -> String {
                 let fence = example
                     .fence_meta
                     .map_or_else(|| "oxdock".to_string(), |m| format!("oxdock {m}"));
-                out.push_str(&format!("```{}\n{}\n```\n\n", fence, example.code.trim_end()));
+                out.push_str(&format!(
+                    "```{}\n{}\n```\n\n",
+                    fence,
+                    example.code.trim_end()
+                ));
             }
         }
 

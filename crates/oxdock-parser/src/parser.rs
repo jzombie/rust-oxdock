@@ -523,7 +523,9 @@ fn parse_structural_command_with_lower(
         Rule::command_inner => {
             // command_inner = { inherit_env_command | instruction }
             // Unwrap to the inner rule
-            let inner = pair.into_inner().next()
+            let inner = pair
+                .into_inner()
+                .next()
                 .ok_or_else(|| anyhow!("empty command_inner"))?;
             parse_structural_command_with_lower(inner, lower)?
         }
@@ -703,7 +705,9 @@ fn parse_async_statement_from_pair(
             }
             Rule::command_inner => {
                 // command_inner = { inherit_env_command | async_statement | async_statement_block | instruction }
-                let child = inner.into_inner().next()
+                let child = inner
+                    .into_inner()
+                    .next()
                     .ok_or_else(|| anyhow!("empty command_inner"))?;
                 match child.as_rule() {
                     Rule::inherit_env_command => {
@@ -733,7 +737,9 @@ fn parse_async_statement_from_pair(
         for step in &body {
             if !is_async_compatible_kind(&step.kind) {
                 if matches!(&step.kind, StepKind::WithIo { .. }) {
-                    bail!("WITH_IO cannot be placed inside ASYNC. Place WITH_IO outside ASYNC instead (e.g. WITH_IO [...] ASYNC RUN ...)");
+                    bail!(
+                        "WITH_IO cannot be placed inside ASYNC. Place WITH_IO outside ASYNC instead (e.g. WITH_IO [...] ASYNC RUN ...)"
+                    );
                 }
                 bail!("ASYNC block may only contain RUN or nested ASYNC commands");
             }
@@ -742,7 +748,9 @@ fn parse_async_statement_from_pair(
     } else if let Some(cmd) = inner_cmd {
         if !is_async_compatible_kind(&cmd) {
             if matches!(&cmd, StepKind::WithIo { .. }) {
-                bail!("WITH_IO cannot be placed inside ASYNC. Place WITH_IO outside ASYNC instead (e.g. WITH_IO [...] ASYNC RUN ...)");
+                bail!(
+                    "WITH_IO cannot be placed inside ASYNC. Place WITH_IO outside ASYNC instead (e.g. WITH_IO [...] ASYNC RUN ...)"
+                );
             }
             bail!("ASYNC prefix may only be used with RUN or nested ASYNC commands");
         }
@@ -776,7 +784,9 @@ fn parse_async_statement_block_from_pair(
     for step in &body {
         if !is_async_compatible_kind(&step.kind) {
             if matches!(&step.kind, StepKind::WithIo { .. }) {
-                bail!("WITH_IO cannot be placed inside ASYNC. Place WITH_IO outside ASYNC instead (e.g. WITH_IO [...] ASYNC RUN ...)");
+                bail!(
+                    "WITH_IO cannot be placed inside ASYNC. Place WITH_IO outside ASYNC instead (e.g. WITH_IO [...] ASYNC RUN ...)"
+                );
             }
             bail!("ASYNC block may only contain RUN or nested ASYNC commands");
         }
@@ -791,7 +801,11 @@ fn parse_block_elements_with_lower(
     let mut steps = Vec::new();
     for elem in block_pair.into_inner() {
         match elem.as_rule() {
-            Rule::for_statement | Rule::let_statement | Rule::if_statement | Rule::async_statement | Rule::async_statement_block => {
+            Rule::for_statement
+            | Rule::let_statement
+            | Rule::if_statement
+            | Rule::async_statement
+            | Rule::async_statement_block => {
                 let step_kind = parse_structural_command_with_lower(elem, lower)?;
                 steps.push(Step {
                     guard: None,

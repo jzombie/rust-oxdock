@@ -166,9 +166,7 @@ pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
             StepKind::Workspace(_) | StepKind::Cwd | StepKind::Exit(_) => {}
             StepKind::Env { key: _, value } => template_keys(&mut keys, value),
             StepKind::InheritEnv { keys: _ } => {}
-            StepKind::Run(t) | StepKind::Echo(t) => {
-                template_keys(&mut keys, t)
-            }
+            StepKind::Run(t) | StepKind::Echo(t) => template_keys(&mut keys, t),
             StepKind::AsyncBlock { body } => {
                 for k in collect_env_references(body) {
                     keys.insert(k);

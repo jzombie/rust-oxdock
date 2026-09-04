@@ -2,7 +2,9 @@ use anyhow::{Context, Result, anyhow, bail};
 use std::sync::Arc;
 
 use oxdock_fs::EntryKind;
-use oxdock_parser::{Expr, IoBinding, IoStream, Step, StepKind, Value, WorkspaceTarget, guard_option_allows};
+use oxdock_parser::{
+    Expr, IoBinding, IoStream, Step, StepKind, Value, WorkspaceTarget, guard_option_allows,
+};
 use oxdock_process::{
     BackgroundHandle, CommandOptions, CommandResult, CommandStderr, CommandStdout, ProcessManager,
 };
@@ -369,9 +371,7 @@ pub(super) fn read<P: ProcessManager>(
         write_stdout(cx.out.clone(), |writer| {
             let mut buf = [0u8; super::io::CHUNK_SIZE];
             loop {
-                let n = reader
-                    .read(&mut buf)
-                    .context("failed to read from file")?;
+                let n = reader.read(&mut buf).context("failed to read from file")?;
                 if n == 0 {
                     break;
                 }
@@ -394,9 +394,7 @@ pub(super) fn read<P: ProcessManager>(
                 let mut guard = input_stream
                     .lock()
                     .map_err(|_| anyhow!("failed to lock stdin for READ"))?;
-                guard
-                    .read(&mut buf)
-                    .context("failed to read from stdin")?
+                guard.read(&mut buf).context("failed to read from stdin")?
             };
             if n == 0 {
                 break;

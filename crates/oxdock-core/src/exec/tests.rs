@@ -100,7 +100,11 @@ fn run_bg_completion_short_circuits_pipeline() {
     run_steps_with_manager(fs, &steps, mock.clone(), ExecIo::new()).unwrap();
     let recorded = mock.recorded_runs();
     let runs: Vec<_> = recorded.iter().map(|r| r.script.as_str()).collect();
-    assert_eq!(runs, vec!["echo after"], "foreground should still run when ASYNC completes early");
+    assert_eq!(
+        runs,
+        vec!["echo after"],
+        "foreground should still run when ASYNC completes early"
+    );
     let spawns = mock.spawn_log();
     let spawned: Vec<_> = spawns.iter().map(|c| c.script.as_str()).collect();
     assert_eq!(spawned, vec!["(sleep)"]);
@@ -642,7 +646,11 @@ fn bg_failure_mid_pipeline_short_circuits_and_bails() {
     // Foreground runs immediately; the failure is caught by the end-of-pipeline poll-all.
     let recorded = mock.recorded_runs();
     let runs: Vec<_> = recorded.iter().map(|r| r.script.as_str()).collect();
-    assert_eq!(runs, vec!["echo never"], "foreground should still run before poll-all detects failure");
+    assert_eq!(
+        runs,
+        vec!["echo never"],
+        "foreground should still run before poll-all detects failure"
+    );
     let spawns = mock.spawn_log();
     let spawned: Vec<&str> = spawns.iter().map(|call| call.script.as_str()).collect();
     assert_eq!(spawned, vec!["(flaky-bg)"]);
@@ -681,10 +689,7 @@ fn bg_success_after_pipeline_end_waits_cleanly() {
 #[test]
 fn multi_child_teardown_kills_survivor_when_first_exits() {
     let root = GuardedPath::new_root_from_str(".").unwrap();
-    let steps = vec![
-        async_step("first-finisher"),
-        async_step("survivor"),
-    ];
+    let steps = vec![async_step("first-finisher"), async_step("survivor")];
     let mock = MockProcessManager::default();
     // First child fails on the SECOND poll (after the second ASYNC has spawned);
     // the survivor must then be torn down.
@@ -720,7 +725,10 @@ fn exit_kills_all_background_children() {
     let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
     let err = run_steps_with_manager(fs, &steps, mock.clone(), ExecIo::new()).unwrap_err();
     assert!(err.to_string().contains("EXIT requested with code 3"));
-    assert_eq!(mock.killed(), vec!["(bg-a)".to_string(), "(bg-b)".to_string()]);
+    assert_eq!(
+        mock.killed(),
+        vec!["(bg-a)".to_string(), "(bg-b)".to_string()]
+    );
 }
 
 /// Minimal stub whose foreground commands fail by script name, letting us
@@ -1123,10 +1131,7 @@ fn copy_directory_branch_recurses_into_nested_target() {
 #[test]
 fn mid_pipeline_failure_kills_background_children_via_drop() {
     let root = GuardedPath::new_root_from_str(".").unwrap();
-    let steps = vec![
-        async_step("bg-task"),
-        step(StepKind::Run("boom".into())),
-    ];
+    let steps = vec![async_step("bg-task"), step(StepKind::Run("boom".into()))];
     let runner = FailingRunner {
         fail_script: "boom".into(),
         ..Default::default()
@@ -1180,7 +1185,7 @@ fn public_entrypoint_returns_final_working_directory() {
 #[test]
 #[cfg(not(miri))]
 fn script_pipe_stays_in_memory_below_threshold() {
-    use super::pipe::{ScriptPipe, PIPE_SPILL_THRESHOLD};
+    use super::pipe::{PIPE_SPILL_THRESHOLD, ScriptPipe};
 
     let pipe = ScriptPipe::new();
     let writer = pipe.endpoint().stream_handle();
@@ -1200,7 +1205,7 @@ fn script_pipe_stays_in_memory_below_threshold() {
 #[test]
 #[cfg(not(miri))]
 fn script_pipe_spills_to_disk_above_threshold() {
-    use super::pipe::{ScriptPipe, PIPE_SPILL_THRESHOLD};
+    use super::pipe::{PIPE_SPILL_THRESHOLD, ScriptPipe};
 
     let pipe = ScriptPipe::new();
     let writer = pipe.endpoint().stream_handle();
@@ -1222,7 +1227,7 @@ fn script_pipe_spills_to_disk_above_threshold() {
 #[test]
 #[cfg(not(miri))]
 fn script_pipe_backlog_cap_exceeded_returns_error() {
-    use super::pipe::{ScriptPipe, PIPE_MAX_BACKLOG, PIPE_SPILL_THRESHOLD};
+    use super::pipe::{PIPE_MAX_BACKLOG, PIPE_SPILL_THRESHOLD, ScriptPipe};
 
     let pipe = ScriptPipe::new();
     let writer = pipe.endpoint().stream_handle();
@@ -1253,7 +1258,7 @@ fn script_pipe_backlog_cap_exceeded_returns_error() {
 #[test]
 #[cfg(not(miri))]
 fn script_pipe_file_truncated_on_drain() {
-    use super::pipe::{ScriptPipe, PIPE_SPILL_THRESHOLD};
+    use super::pipe::{PIPE_SPILL_THRESHOLD, ScriptPipe};
 
     let pipe = ScriptPipe::new();
     let writer = pipe.endpoint().stream_handle();
@@ -1277,7 +1282,7 @@ fn script_pipe_file_truncated_on_drain() {
 #[cfg(not(miri))]
 #[allow(clippy::disallowed_methods)]
 fn script_pipe_explicit_disk_spill_and_cleanup_verification() {
-    use super::pipe::{ScriptPipe, PIPE_SPILL_THRESHOLD};
+    use super::pipe::{PIPE_SPILL_THRESHOLD, ScriptPipe};
     use std::fs;
 
     let pipe = ScriptPipe::new();

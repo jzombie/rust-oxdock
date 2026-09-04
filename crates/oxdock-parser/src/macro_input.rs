@@ -207,10 +207,7 @@ fn line_expects_inner_command(line: &str) -> bool {
 }
 
 fn line_is_run_context(line: &str) -> bool {
-    matches!(
-        current_line_command(line),
-        Some(Command::Run)
-    )
+    matches!(current_line_command(line), Some(Command::Run))
 }
 
 fn walk(
