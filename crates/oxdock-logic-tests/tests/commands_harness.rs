@@ -1,3 +1,5 @@
+#![cfg(feature = "slow-integration")]
+
 #[cfg(not(miri))]
 use libtest_mimic::Arguments;
 #[cfg(not(miri))]

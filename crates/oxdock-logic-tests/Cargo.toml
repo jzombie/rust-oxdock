@@ -10,6 +10,9 @@ repository.workspace = true
 # This crate should not be published
 publish = false
 
+[features]
+slow-integration = []
+
 [dependencies]
 anyhow.workspace = true
 libtest-mimic.workspace = true
@@ -38,3 +41,4 @@ harness = false
 [[test]]
 name = "commands_harness"
 harness = false
+required-features = ["slow-integration"]
