@@ -1757,3 +1757,116 @@ fn symlink_with_snapshot_build_context() {
     assert!(linked_file.as_path().exists(), "symlink should resolve");
     assert_eq!(read_trimmed(&linked_file), "symlink target");
 }
+
+// ---------------------------------------------------------------------------
+// READ streaming tests
+// ---------------------------------------------------------------------------
+
+#[test]
+#[cfg_attr(miri, ignore = "exercises file I/O; blocked under Miri isolation")]
+fn read_large_file_streams_without_oom() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = temp.as_guarded_path().clone();
+
+    // Create a 1 MiB file
+    let content = "x".repeat(1024 * 1024);
+    let write_steps = oxdock_core::parse_script(&format!(
+        "WRITE large.txt \"{}\"",
+        content.replace('"', "\\\"")
+    ))
+    .unwrap();
+    run_steps_with_context(&root, &root, &write_steps).expect("write");
+
+    // READ the file and capture output
+    let read_steps = oxdock_core::parse_script("READ large.txt").unwrap();
+    let pipe_name = "read-capture".to_string();
+    let io_steps = vec![
+        Step {
+            guard: None,
+            kind: StepKind::WithIo {
+                bindings: vec![IoBinding {
+                    stream: IoStream::Stdout,
+                    pipe: Some(pipe_name.clone()),
+                }],
+                cmd: Box::new(read_steps[0].kind.clone()),
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+        },
+        Step {
+            guard: None,
+            kind: StepKind::WithIo {
+                bindings: vec![IoBinding {
+                    stream: IoStream::Stdin,
+                    pipe: Some(pipe_name),
+                }],
+                cmd: Box::new(StepKind::Write {
+                    path: "output.txt".into(),
+                    contents: None,
+                }),
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+        },
+    ];
+    run_steps_with_context(&root, &root, &io_steps).expect("read pipeline");
+
+    let output = read_trimmed(&root.join("output.txt").unwrap());
+    assert_eq!(output.len(), 1024 * 1024);
+    assert!(output.chars().all(|c| c == 'x'));
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "exercises file I/O; blocked under Miri isolation")]
+fn read_stdin_streaming_via_pipe() {
+    use oxdock_parser::Arg;
+
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = temp.as_guarded_path().clone();
+
+    // Create a 1 MiB payload and pipe it through WRITE -> READ -> WRITE
+    let content = "y".repeat(1024 * 1024);
+    let steps = vec![
+        Step {
+            guard: None,
+            kind: StepKind::Write {
+                path: "source.txt".into(),
+                contents: Some(Arg::String(content.clone(), true)),
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+        },
+        Step {
+            guard: None,
+            kind: StepKind::WithIo {
+                bindings: vec![IoBinding {
+                    stream: IoStream::Stdout,
+                    pipe: Some("pipe-read".to_string()),
+                }],
+                cmd: Box::new(StepKind::Read(Some("source.txt".into()))),
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+        },
+        Step {
+            guard: None,
+            kind: StepKind::WithIo {
+                bindings: vec![IoBinding {
+                    stream: IoStream::Stdin,
+                    pipe: Some("pipe-read".to_string()),
+                }],
+                cmd: Box::new(StepKind::Write {
+                    path: "dest.txt".into(),
+                    contents: None,
+                }),
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+        },
+    ];
+    run_steps_with_context(&root, &root, &steps).expect("pipe read pipeline");
+
+    let output = read_trimmed(&root.join("dest.txt").unwrap());
+    assert_eq!(output.len(), 1024 * 1024);
+    assert!(output.chars().all(|c| c == 'y'));
+}

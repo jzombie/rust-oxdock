@@ -779,21 +779,20 @@ mod tests {
             let ast = parse_script(code, lower_command)
                 .unwrap_or_else(|e| panic!("Failed to parse example for {}: {}", meta.name, e));
 
-            if let Some(first) = ast.first() {
-                let target_kind = match &first.kind {
+            let matching = ast.iter().find(|step| {
+                let kind = match &step.kind {
                     StepKind::WithIo { cmd, .. } => &**cmd,
                     other => other,
                 };
+                kind.to_string().starts_with(meta.name)
+            });
 
-                let serialized = target_kind.to_string();
-
-                assert!(
-                    serialized.starts_with(meta.name),
-                    "Display implementation mismatch!\nExpected prefix: {}\nActual serialization: {}",
-                    meta.name,
-                    serialized
-                );
-            }
+            assert!(
+                matching.is_some(),
+                "No step in example for {} produces Display starting with {}",
+                meta.name,
+                meta.name
+            );
         }
     }
 }

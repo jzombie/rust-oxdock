@@ -355,34 +355,59 @@ pub(super) fn read<P: ProcessManager>(
     idx: usize,
     path_opt: &Option<String>,
 ) -> Result<()> {
-    let data = if let Some(path) = path_opt {
+    if let Some(path) = path_opt {
         let target = cx
             .state
             .fs
             .resolve_read(&cx.state.cwd, path)
             .with_context(|| format!("step {}: READ {}", idx + 1, path))?;
-        cx.state
+        let mut reader = cx
+            .state
             .fs
-            .read_file(&target)
-            .with_context(|| format!("failed to read {}", target.display()))?
+            .open_read(&target)
+            .with_context(|| format!("failed to open {}", target.display()))?;
+        write_stdout(cx.out.clone(), |writer| {
+            let mut buf = [0u8; super::io::CHUNK_SIZE];
+            loop {
+                let n = reader
+                    .read(&mut buf)
+                    .context("failed to read from file")?;
+                if n == 0 {
+                    break;
+                }
+                writer
+                    .write_all(&buf[..n])
+                    .context("failed to write to output")?;
+            }
+            Ok(())
+        })?;
     } else {
-        let mut buf = Vec::new();
-        if let Some(input_stream) = cx.stdin.clone()
-            && let Ok(mut guard) = input_stream.lock()
-        {
-            guard
-                .read_to_end(&mut buf)
-                .context("failed to read from stdin")?;
+        let input_stream = cx.stdin.clone().ok_or_else(|| {
+            anyhow!(
+                "step {}: READ requires stdin (use WITH_IO [stdin=...] READ)",
+                idx + 1
+            )
+        })?;
+        let mut buf = [0u8; super::io::CHUNK_SIZE];
+        loop {
+            let n = {
+                let mut guard = input_stream
+                    .lock()
+                    .map_err(|_| anyhow!("failed to lock stdin for READ"))?;
+                guard
+                    .read(&mut buf)
+                    .context("failed to read from stdin")?
+            };
+            if n == 0 {
+                break;
+            }
+            write_stdout(cx.out.clone(), |writer| {
+                writer
+                    .write_all(&buf[..n])
+                    .context("failed to write to output")
+            })?;
         }
-
-        buf
-    };
-    write_stdout(cx.out.clone(), |writer| {
-        writer
-            .write_all(&data)
-            .context("failed to write to output")?;
-        Ok(())
-    })?;
+    }
     Ok(())
 }
 
