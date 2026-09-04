@@ -37,6 +37,8 @@ pub mod harness {
         pub shared_target_dir: Option<GuardedPath>,
         pub case_config: Option<CaseConfig>,
         pub name: &'static str,
+        #[allow(clippy::disallowed_types)]
+        pub precompiled_binary: Option<std::path::PathBuf>,
     }
 
     impl HarnessConfig {
@@ -49,6 +51,7 @@ pub mod harness {
                 shared_target_dir: None,
                 case_config: None,
                 name,
+                precompiled_binary: None,
             }
         }
     }
@@ -60,6 +63,7 @@ pub mod harness {
         pub case_env: String,
         pub coverage_env: Option<String>,
         pub coverage_case_name: String,
+        pub smoke_cases: Vec<String>,
     }
 
     pub fn build_trials(resolver: &PathResolver, config: &HarnessConfig) -> Result<Vec<Trial>> {
@@ -180,11 +184,22 @@ pub mod harness {
 
         cases.sort_by(|a, b| a.name.cmp(&b.name));
 
-        if let Some(coverage_env) = &case_config.coverage_env {
-            let mut coverage = FixtureCase::default_case();
-            coverage.name = case_config.coverage_case_name.clone();
-            coverage.env.push((coverage_env.clone(), "1".to_string()));
-            cases.insert(0, coverage);
+        // In smoke mode (default), run only the named representative cases.
+        // With slow-integration feature, run all cases.
+        #[allow(clippy::disallowed_macros)]
+        let is_full_suite = cfg!(feature = "slow-integration");
+        if !is_full_suite && !case_config.smoke_cases.is_empty() {
+            cases.retain(|c| case_config.smoke_cases.contains(&c.name));
+        }
+
+        #[allow(clippy::disallowed_macros, clippy::collapsible_if)]
+        if cfg!(feature = "slow-integration") {
+            if let Some(coverage_env) = &case_config.coverage_env {
+                let mut coverage = FixtureCase::default_case();
+                coverage.name = case_config.coverage_case_name.clone();
+                coverage.env.push((coverage_env.clone(), "1".to_string()));
+                cases.insert(0, coverage);
+            }
         }
 
         Ok(cases)
@@ -212,6 +227,15 @@ pub mod harness {
         spec: &FixtureSpec,
         case: &FixtureCase,
     ) -> Result<()> {
+        // Pre-compiled fast path: skip fixture copy, run binary directly
+        #[allow(clippy::collapsible_if)]
+        if let (Some(binary), Some(case_config)) = (&config.precompiled_binary, &config.case_config)
+        {
+            if spec.name == case_config.fixture_name {
+                return run_precompiled_case(config, spec, case, binary);
+            }
+        }
+
         let workspace_root =
             discover_workspace_root().context("failed to locate workspace root")?;
 
@@ -382,6 +406,123 @@ pub mod harness {
         assert_not_contains(&stderr, &case.stderr_not_contains, "stderr", spec)?;
 
         Ok(())
+    }
+
+    #[allow(clippy::disallowed_types)]
+    fn run_precompiled_case(
+        config: &HarnessConfig,
+        spec: &FixtureSpec,
+        case: &FixtureCase,
+        binary: &std::path::Path,
+    ) -> Result<()> {
+        #[allow(
+            clippy::disallowed_types,
+            clippy::disallowed_methods,
+            clippy::disallowed_macros
+        )]
+        {
+            use std::io::Write;
+            use std::process::{Command, Stdio};
+            use std::thread;
+
+            let template_path = std::path::Path::new(&spec.template);
+            let mut cmd = Command::new(binary);
+            cmd.env("CARGO_MANIFEST_DIR", template_path);
+            for (key, value) in &case.env {
+                cmd.env(key, value);
+            }
+            for key in &case.env_remove {
+                cmd.env_remove(key);
+            }
+            if let Some(target) = &config.shared_target_dir {
+                let target_dir = oxdock_fs::command_path(target).into_owned();
+                cmd.env("CARGO_TARGET_DIR", target_dir);
+            }
+
+            // Symlink capability check — independent of shared_target_dir
+            let needs_symlink = case.name.contains("symlink")
+                || case.name == "copy_broken_symlink"
+                || case.name == "copy_complex";
+            if needs_symlink && !oxdock_sys_test_utils::can_create_symlinks(template_path) {
+                eprintln!("skipping {}::{}: symlink unsupported", spec.name, case.name);
+                return Ok(());
+            }
+
+            // Only pipe stdin when the case provides input; otherwise null it
+            if case.stdin.is_some() {
+                cmd.stdin(Stdio::piped());
+            } else {
+                cmd.stdin(Stdio::null());
+            }
+            cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+            let mut child = cmd.spawn().context("failed to spawn pre-compiled binary")?;
+
+            // Write stdin on a dedicated thread to avoid pipe deadlock:
+            // child may emit stdout/stderr before reading all of stdin.
+            let stdin_handle = if let Some(stdin_content) = &case.stdin {
+                let mut stdin = child.stdin.take().expect("stdin was piped");
+                let content = stdin_content.clone();
+                Some(thread::spawn(move || {
+                    let _ = stdin.write_all(content.as_bytes());
+                }))
+            } else {
+                None
+            };
+
+            let result = child
+                .wait_with_output()
+                .context("failed to run pre-compiled binary")?;
+            if let Some(handle) = stdin_handle {
+                let _ = handle.join();
+            }
+
+            let (status, stdout_bytes, stderr_bytes) =
+                (result.status, result.stdout, result.stderr);
+            let stdout = String::from_utf8_lossy(&stdout_bytes);
+            let stderr = String::from_utf8_lossy(&stderr_bytes);
+
+            if case.expect_success && !status.success() {
+                anyhow::bail!(
+                    "fixture {}::{} failed. stdout:\n{}\nstderr:\n{}",
+                    spec.name,
+                    case.name,
+                    stdout,
+                    stderr
+                );
+            }
+            if !case.expect_success && status.success() {
+                anyhow::bail!(
+                    "fixture {}::{} unexpectedly succeeded. stdout:\n{}\nstderr:\n{}",
+                    spec.name,
+                    case.name,
+                    stdout,
+                    stderr
+                );
+            }
+
+            if let Some(expectation) = &case.error_expectation {
+                if status.success() {
+                    anyhow::bail!(
+                        "fixture {}::{} expected error, got success",
+                        spec.name,
+                        case.name
+                    );
+                }
+                super::expectations::assert_text_matches(
+                    expectation,
+                    &stderr,
+                    &format!("fixture {}::{} error output", spec.name, case.name),
+                )?;
+            }
+
+            assert_contains(&stdout, &case.stdout_contains, "stdout", spec)?;
+            assert_not_contains(&stdout, &case.stdout_not_contains, "stdout", spec)?;
+            assert_contains(&stderr, &case.stderr_contains, "stderr", spec)?;
+            assert_not_contains(&stderr, &case.stderr_not_contains, "stderr", spec)?;
+
+            Ok(())
+        }
     }
 
     impl FixtureCase {

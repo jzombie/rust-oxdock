@@ -15,6 +15,7 @@ slow-integration = []
 
 [dependencies]
 anyhow.workspace = true
+cargo_metadata = "0.19"
 libtest-mimic.workspace = true
 oxdock-fixture.workspace = true
 oxdock-fs.workspace = true
@@ -29,6 +30,7 @@ oxdock-macros.workspace = true
 oxdock-parser = { workspace = true, features = ["proc-macro-api"] }
 proc-macro2.workspace = true
 proptest.workspace = true
+serde_json.workspace = true
 
 [[test]]
 name = "integration_harness"
@@ -41,4 +43,3 @@ harness = false
 [[test]]
 name = "commands_harness"
 harness = false
-required-features = ["slow-integration"]
