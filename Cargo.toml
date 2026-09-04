@@ -13,6 +13,7 @@ members = [
     "oxdock-build",
     "oxdock-macros",
     "oxdock-cli",
+    "crates/oxdock-logic-tests/fixtures/commands/ast_commands",
 ]
 resolver = "2"
 
@@ -37,6 +38,7 @@ oxdock-core = { path = "crates/oxdock-core", version = "0.7.0-alpha" }
 oxdock-embed = { path = "crates/oxdock-embed", version = "0.7.0-alpha" }
 oxdock-fixture = { path = "crates/oxdock-fixture", version = "0.7.0-alpha" }
 oxdock-fs = { path = "crates/sys/oxdock-fs", version = "0.7.0-alpha" }
+oxdock-logic-tests = { path = "crates/oxdock-logic-tests", version = "0.7.0-alpha" }
 oxdock-parser = { path = "crates/oxdock-parser", version = "0.7.0-alpha" }
 oxdock-process = { path = "crates/sys/oxdock-process", version = "0.7.0-alpha" }
 oxdock-sys-test-utils = { path = "crates/sys/oxdock-sys-test-utils", version = "0.7.0-alpha" }

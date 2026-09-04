@@ -1,9 +1,15 @@
 [package]
 name = "fixture-ast-commands"
-version = "0.6.0-alpha"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# This crate should not be published
 publish = false
-license = "Apache-2.0"
+
+[[bin]]
+name = "ast_commands"
+path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
