@@ -5,11 +5,17 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use oxdock_process::{SharedInput, SharedOutput};
 
-/// Memory threshold before spilling to disk (8 MiB).
-pub(super) const PIPE_SPILL_THRESHOLD: usize = 8 * 1024 * 1024;
+/// Memory threshold before spilling to disk.
+#[cfg(not(test))]
+const PIPE_SPILL_THRESHOLD: usize = 8 * 1024 * 1024; // 8 MiB
+#[cfg(test)]
+pub(super) const PIPE_SPILL_THRESHOLD: usize = 1024 * 1024; // 1 MiB for tests
 
-/// Maximum active backlog before returning an error (100 MiB).
-const PIPE_MAX_BACKLOG: u64 = 100 * 1024 * 1024;
+/// Maximum active backlog before returning an error.
+#[cfg(not(test))]
+const PIPE_MAX_BACKLOG: u64 = 100 * 1024 * 1024; // 100 MiB
+#[cfg(test)]
+pub(super) const PIPE_MAX_BACKLOG: u64 = 2 * 1024 * 1024; // 2 MiB for tests
 
 /// Unique temp file naming counter.
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);

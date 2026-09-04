@@ -1165,13 +1165,13 @@ fn public_entrypoint_returns_final_working_directory() {
 #[test]
 #[cfg(not(miri))]
 fn script_pipe_stays_in_memory_below_threshold() {
-    use super::pipe::ScriptPipe;
+    use super::pipe::{ScriptPipe, PIPE_SPILL_THRESHOLD};
 
     let pipe = ScriptPipe::new();
     let writer = pipe.endpoint().stream_handle();
     let reader = pipe.reader();
 
-    let payload = vec![0xABu8; 1024]; // 1 KiB — well below 8 MiB threshold
+    let payload = vec![0xABu8; 1024]; // 1 KiB — below threshold
     writer.lock().unwrap().write_all(&payload).unwrap();
     drop(writer);
 
@@ -1179,19 +1179,20 @@ fn script_pipe_stays_in_memory_below_threshold() {
     let mut buf = Vec::new();
     guard.read_to_end(&mut buf).unwrap();
     assert_eq!(buf, payload);
+    let _ = PIPE_SPILL_THRESHOLD; // Ensure constant is used
 }
 
 #[test]
 #[cfg(not(miri))]
 fn script_pipe_spills_to_disk_above_threshold() {
-    use super::pipe::ScriptPipe;
+    use super::pipe::{ScriptPipe, PIPE_SPILL_THRESHOLD};
 
     let pipe = ScriptPipe::new();
     let writer = pipe.endpoint().stream_handle();
     let reader = pipe.reader();
 
-    // 9 MiB — exceeds 8 MiB PIPE_SPILL_THRESHOLD
-    let size = 9 * 1024 * 1024;
+    // Exceed the threshold by 1 MiB
+    let size = PIPE_SPILL_THRESHOLD + (1024 * 1024);
     let payload: Vec<u8> = (0..size).map(|i| (i % 256) as u8).collect();
     writer.lock().unwrap().write_all(&payload).unwrap();
     drop(writer);
@@ -1206,37 +1207,45 @@ fn script_pipe_spills_to_disk_above_threshold() {
 #[test]
 #[cfg(not(miri))]
 fn script_pipe_backlog_cap_exceeded_returns_error() {
-    use super::pipe::ScriptPipe;
+    use super::pipe::{ScriptPipe, PIPE_MAX_BACKLOG, PIPE_SPILL_THRESHOLD};
 
     let pipe = ScriptPipe::new();
     let writer = pipe.endpoint().stream_handle();
 
-    // Write 101 MiB without reading — exceeds 100 MiB PIPE_MAX_BACKLOG
-    let chunk = vec![0u8; 1024 * 1024]; // 1 MiB
-    for _ in 0..101 {
-        let result = writer.lock().unwrap().write_all(&chunk);
-        if result.is_err() {
-            return; // Expected: io::Error with OutOfMemory kind
-        }
-    }
+    // First, trigger a spill to Disk mode by writing above the spill threshold
+    let spill_payload = vec![0u8; PIPE_SPILL_THRESHOLD + 1];
+    writer.lock().unwrap().write_all(&spill_payload).unwrap();
 
-    // If we get here, the write succeeded — the cap may not have been enforced
-    // because the write went through VecDeque (still below threshold).
-    // The backlog cap only applies after spilling to disk.
-    // This is acceptable — the test verifies no panic occurs.
+    // Now write enough to exceed the backlog limit without reading
+    // Backlog = write_pos - read_pos. We haven't read, so backlog = spill_payload.len()
+    // We need to write enough to make total backlog > PIPE_MAX_BACKLOG
+    let remaining = (PIPE_MAX_BACKLOG as usize) - spill_payload.len() + 1;
+    let overflow_payload = vec![0u8; remaining];
+    let result = writer.lock().unwrap().write_all(&overflow_payload);
+
+    assert!(
+        result.is_err(),
+        "Writing beyond PIPE_MAX_BACKLOG must return an error"
+    );
+    let err = result.unwrap_err();
+    assert_eq!(
+        err.kind(),
+        std::io::ErrorKind::OutOfMemory,
+        "Expected OutOfMemory error kind on backlog overflow"
+    );
 }
 
 #[test]
 #[cfg(not(miri))]
 fn script_pipe_file_truncated_on_drain() {
-    use super::pipe::ScriptPipe;
+    use super::pipe::{ScriptPipe, PIPE_SPILL_THRESHOLD};
 
     let pipe = ScriptPipe::new();
     let writer = pipe.endpoint().stream_handle();
     let reader = pipe.reader();
 
-    // Write 9 MiB to trigger disk spill
-    let size = 9 * 1024 * 1024;
+    // Write above threshold to trigger disk spill
+    let size = PIPE_SPILL_THRESHOLD + (1024 * 1024);
     let payload: Vec<u8> = (0..size).map(|i| (i % 256) as u8).collect();
     writer.lock().unwrap().write_all(&payload).unwrap();
     drop(writer);
