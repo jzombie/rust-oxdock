@@ -12,6 +12,8 @@ use std::env;
 use std::sync::{Arc, Mutex};
 use toml_edit::{DocumentMut, Item, Table, Value};
 
+type PipeBuffer = (String, Arc<Mutex<Vec<u8>>>, PipeSpec);
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Root {
     Snapshot,
@@ -659,9 +661,8 @@ fn step_kinds_in_steps(steps: &[Step]) -> HashSet<String> {
 
 fn collect_step_kinds(kind: &StepKind, kinds: &mut HashSet<String>) {
     kinds.insert(step_kind_name(kind).to_string());
-    match kind {
-        StepKind::WithIo { cmd, .. } => collect_step_kinds(cmd, kinds),
-        _ => {}
+    if let StepKind::WithIo { cmd, .. } = kind {
+        collect_step_kinds(cmd, kinds);
     }
 }
 
@@ -702,7 +703,7 @@ fn run_case(case: &CaseSpec, steps: &[Step]) -> Result<()> {
         io_cfg.insert_inherit_env(key.clone(), value.clone());
     }
 
-    let mut pipe_buffers: Vec<(String, Arc<Mutex<Vec<u8>>>, PipeSpec)> = Vec::new();
+    let mut pipe_buffers: Vec<PipeBuffer> = Vec::new();
     for (name, spec) in &case.pipes {
         let buffer = Arc::new(Mutex::new(Vec::new()));
         let writer: SharedOutput = buffer.clone();
@@ -860,7 +861,7 @@ fn verify_root(expect: &RootExpect, root: &GuardedPath) -> Result<()> {
     Ok(())
 }
 
-fn verify_pipes(pipes: &[(String, Arc<Mutex<Vec<u8>>>, PipeSpec)]) -> Result<()> {
+fn verify_pipes(pipes: &[PipeBuffer]) -> Result<()> {
     for (name, buffer, spec) in pipes {
         if let Some(expected) = &spec.expect {
             let data = buffer.lock().unwrap();
@@ -1104,7 +1105,7 @@ fn extract_step_kind_variants(source: &str) -> Vec<String> {
         }
         if in_structural {
             // Extract structural variant name (first identifier before `{` or `,`)
-            if let Some(name) = trimmed.split(|c: char| c == '{' || c == ',').next() {
+            if let Some(name) = trimmed.split(['{', ',']).next() {
                 let name = name.trim().to_string();
                 if !name.is_empty()
                     && name.chars().next().map(|ch| ch.is_ascii_uppercase()) == Some(true)

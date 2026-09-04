@@ -773,11 +773,8 @@ fn parse_async_statement_block_from_pair(
 ) -> Result<StepKind> {
     let mut block_body = None;
     for inner in pair.into_inner() {
-        match inner.as_rule() {
-            Rule::block => {
-                block_body = Some(parse_block_elements_with_lower(inner, lower)?);
-            }
-            _ => {} // skip async_keyword and sep
+        if inner.as_rule() == Rule::block {
+            block_body = Some(parse_block_elements_with_lower(inner, lower)?);
         }
     }
     let body = block_body.ok_or_else(|| anyhow!("async_statement_block requires a block"))?;
