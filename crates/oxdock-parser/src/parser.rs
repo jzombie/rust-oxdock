@@ -502,6 +502,9 @@ fn parse_structural_command_with_lower(
                     Rule::inherit_env_command => {
                         cmd = Some(Box::new(parse_structural_command_with_lower(inner, lower)?));
                     }
+                    Rule::async_statement | Rule::async_statement_block => {
+                        cmd = Some(Box::new(parse_structural_command_with_lower(inner, lower)?));
+                    }
                     Rule::instruction | Rule::instruction_inner => {
                         let (name, args) = extract_instruction(inner)?;
                         cmd = Some(Box::new(lower(&name, args)?));

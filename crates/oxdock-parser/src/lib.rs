@@ -826,4 +826,17 @@ mod tests {
             other => panic!("expected outer AsyncBlock, got {:?}", other),
         }
     }
+
+    #[test]
+    fn with_io_wrapping_async_parses() {
+        let script = "WITH_IO [stdout] ASYNC RUN \"echo test\"";
+        let steps = parse_script(script, test_lower).expect("parse should succeed");
+        assert_eq!(steps.len(), 1);
+        match &steps[0].kind {
+            StepKind::WithIo { cmd, .. } => {
+                assert!(matches!(cmd.as_ref(), StepKind::AsyncBlock { .. }));
+            }
+            other => panic!("expected WithIo, got {:?}", other),
+        }
+    }
 }
