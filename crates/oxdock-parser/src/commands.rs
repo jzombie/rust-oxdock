@@ -278,7 +278,11 @@ declare_commands! {
         ],
         flags: &[ FlagSpec { name: "from_current_workspace", long: "--from-current-workspace", value_type: FlagValueType::Flag, required: false, description: "From workspace root" } ],
         default_output: None,
-        examples: &[ Example { name: "copy", fence_meta: None, code: indoc! {r#"COPY src.txt dst.txt"#} } ],
+        examples: &[ Example { name: "copy", fence_meta: Some("roots:unified"), code: indoc! {r#"
+            WRITE src.txt content
+            COPY src.txt dst.txt
+            ASSERT_FILE dst.txt content
+        "#} } ],
         lower: |flags, args| {
             let from_current_workspace = flags.iter().any(|(k, _)| k == "from_current_workspace");
             let mut it = args.into_iter();
@@ -301,7 +305,7 @@ declare_commands! {
         ],
         flags: &[ FlagSpec { name: "dirty", long: "--include-dirty", value_type: FlagValueType::Flag, required: false, description: "Include dirty" } ],
         default_output: None,
-        examples: &[ Example { name: "git copy", fence_meta: None, code: indoc! {r#"COPY_GIT HEAD src.txt dst.txt"#} } ],
+        examples: &[ Example { name: "git copy", fence_meta: Some("expect_error:\"COPY source missing\""), code: indoc! {r#"COPY_GIT HEAD src.txt dst.txt"#} } ],
         lower: |flags, args| {
             let include_dirty = flags.iter().any(|(k, _)| k == "dirty");
             let mut it = args.into_iter();
@@ -324,7 +328,11 @@ declare_commands! {
         ],
         flags: &[],
         default_output: None,
-        examples: &[ Example { name: "symlink", fence_meta: None, code: indoc! {r#"SYMLINK original.txt link.txt"#} } ],
+        examples: &[ Example { name: "symlink", fence_meta: Some("roots:unified"), code: indoc! {r#"
+            WRITE original.txt content
+            SYMLINK original.txt link.txt
+            ASSERT_FILE link.txt content
+        "#} } ],
         lower: |_flags, args| {
             let mut it = args.into_iter();
             let from = it.next().ok_or_else(|| anyhow!("SYMLINK requires a source"))?;
@@ -355,7 +363,11 @@ declare_commands! {
         args: &[ ArgSpec { name: "path", arg_type: "path", description: "Dir", io: IoDirection::Read, index: 0, required: false, fallback_stream: None } ],
         flags: &[],
         default_output: Some(Stream::Stdout),
-        examples: &[ Example { name: "ls", fence_meta: None, code: indoc! {r#"LS inventory"#} } ],
+        examples: &[ Example { name: "ls", fence_meta: None, code: indoc! {r#"
+            MKDIR inventory
+            WRITE inventory/a.txt a
+            LS inventory
+        "#} } ],
         lower: |_flags, args| Ok(StepKind::Ls(args.into_iter().next())),
     ],
 
@@ -381,7 +393,10 @@ declare_commands! {
         args: &[ ArgSpec { name: "path", arg_type: "path", description: "File", io: IoDirection::Read, index: 0, required: false, fallback_stream: None } ],
         flags: &[],
         default_output: Some(Stream::Stdout),
-        examples: &[ Example { name: "read", fence_meta: None, code: indoc! {r#"READ note.txt"#} } ],
+        examples: &[ Example { name: "read", fence_meta: None, code: indoc! {r#"
+            WRITE note.txt "hello"
+            READ note.txt
+        "#} } ],
         lower: |_flags, args| Ok(StepKind::Read(args.into_iter().next())),
     ],
 
@@ -419,7 +434,11 @@ declare_commands! {
         ],
         flags: &[],
         default_output: None,
-        examples: &[ Example { name: "append", fence_meta: None, code: indoc! {r#"APPEND log.txt line2"#} } ],
+        examples: &[ Example { name: "append", fence_meta: None, code: indoc! {r#"
+            WRITE log.txt line1
+            APPEND log.txt line2
+            ASSERT_FILE log.txt line1line2
+        "#} } ],
         lower: |_flags, args| {
             let mut it = args.into_iter();
             let path = it.next().ok_or_else(|| anyhow!("APPEND requires a path"))?;
@@ -438,7 +457,12 @@ declare_commands! {
         args: &[ ArgSpec { name: "path", arg_type: "path", description: "Template", io: IoDirection::Read, index: 0, required: false, fallback_stream: None } ],
         flags: &[],
         default_output: Some(Stream::Stdout),
-        examples: &[ Example { name: "expand", fence_meta: None, code: indoc! {r#"EXPAND template.md NAME="Alice""#} } ],
+        examples: &[ Example { name: "expand", fence_meta: None, code: indoc! {r#"
+            ENV NAME="Alice"
+            WRITE template.md "Hello {{ env:NAME }}!"
+            EXPAND template.md
+            ASSERT_STDOUT "Hello Alice!"
+        "#} } ],
         lower: |_flags, args| {
             let mut path = None;
             let mut overrides = Vec::new();
@@ -468,7 +492,10 @@ declare_commands! {
         ],
         flags: &[ FlagSpec { name: "hash", long: "--hash", value_type: FlagValueType::String, required: false, description: "SHA-256" } ],
         default_output: None,
-        examples: &[ Example { name: "assert file", fence_meta: None, code: indoc! {r#"ASSERT_FILE payload.bin stable-content"#} } ],
+        examples: &[ Example { name: "assert file", fence_meta: None, code: indoc! {r#"
+            WRITE payload.bin stable-content
+            ASSERT_FILE payload.bin stable-content
+        "#} } ],
         lower: |flags, args| {
             let hash = flags.iter().find(|(k, _)| k == "hash").map(|(_, v)| v.as_str().to_string());
             let mut it = args.into_iter();
@@ -488,7 +515,10 @@ declare_commands! {
         args: &[ ArgSpec { name: "path", arg_type: "path", description: "Dir", io: IoDirection::Read, index: 0, required: true, fallback_stream: None } ],
         flags: &[],
         default_output: None,
-        examples: &[ Example { name: "assert dir", fence_meta: None, code: indoc! {r#"ASSERT_DIR dist/assets"#} } ],
+        examples: &[ Example { name: "assert dir", fence_meta: None, code: indoc! {r#"
+            MKDIR dist/assets
+            ASSERT_DIR dist/assets
+        "#} } ],
         lower: |_flags, args| Ok(StepKind::AssertDir(args.into_iter().next().ok_or_else(|| anyhow!("ASSERT_DIR requires a path"))?)),
     ],
 
@@ -514,7 +544,10 @@ declare_commands! {
         args: &[ ArgSpec { name: "substring", arg_type: "string", description: "Substring", io: IoDirection::Read, index: 0, required: true, fallback_stream: None } ],
         flags: &[],
         default_output: None,
-        examples: &[ Example { name: "assert stdout", fence_meta: None, code: indoc! {r#"ASSERT_STDOUT build-complete"#} } ],
+        examples: &[ Example { name: "assert stdout", fence_meta: None, code: indoc! {r#"
+            ECHO build-complete
+            ASSERT_STDOUT build-complete
+        "#} } ],
         lower: |_flags, args| Ok(StepKind::AssertStdout(join_args(args, "ASSERT_STDOUT")?)),
     ],
 
@@ -527,7 +560,10 @@ declare_commands! {
         args: &[ ArgSpec { name: "path", arg_type: "path", description: "File", io: IoDirection::Read, index: 0, required: true, fallback_stream: None } ],
         flags: &[],
         default_output: Some(Stream::Stdout),
-        examples: &[ Example { name: "hash", fence_meta: None, code: indoc! {r#"HASH_SHA256 payload.txt"#} } ],
+        examples: &[ Example { name: "hash", fence_meta: None, code: indoc! {r#"
+            WRITE payload.txt hello
+            HASH_SHA256 payload.txt
+        "#} } ],
         lower: |_flags, args| Ok(StepKind::HashSha256 { path: args.into_iter().next().ok_or_else(|| anyhow!("HASH_SHA256 requires a path"))? }),
     ],
 
@@ -540,7 +576,7 @@ declare_commands! {
         args: &[ ArgSpec { name: "code", arg_type: "int", description: "Code", io: IoDirection::Write, index: 0, required: true, fallback_stream: None } ],
         flags: &[],
         default_output: None,
-        examples: &[ Example { name: "exit", fence_meta: None, code: indoc! {r#"EXIT 42"#} } ],
+        examples: &[ Example { name: "exit", fence_meta: Some("expect_error:\"EXIT requested with code 0\""), code: indoc! {r#"EXIT 0"#} } ],
         lower: |_flags, args| {
             let code = args.into_iter().next().and_then(|a| a.as_str().parse::<i32>().ok()).unwrap_or(0);
             Ok(StepKind::Exit(code))

@@ -577,8 +577,11 @@ Copies from host.
 
 **Example: copy**
 
-```oxdock
+```oxdock roots:unified
+WRITE src.txt content
 COPY src.txt dst.txt
+ASSERT_FILE dst.txt content
+
 ```
 
 
@@ -608,7 +611,7 @@ Checkout and copy.
 
 **Example: git copy**
 
-```oxdock
+```oxdock expect_error:"COPY source missing"
 COPY_GIT HEAD src.txt dst.txt
 ```
 
@@ -632,8 +635,11 @@ Creates symlink.
 
 **Example: symlink**
 
-```oxdock
+```oxdock roots:unified
+WRITE original.txt content
 SYMLINK original.txt link.txt
+ASSERT_FILE link.txt content
+
 ```
 
 
@@ -681,7 +687,10 @@ Lists entries.
 **Example: ls**
 
 ```oxdock
+MKDIR inventory
+WRITE inventory/a.txt a
 LS inventory
+
 ```
 
 
@@ -725,7 +734,9 @@ Outputs file contents.
 **Example: read**
 
 ```oxdock
+WRITE note.txt "hello"
 READ note.txt
+
 ```
 
 
@@ -773,7 +784,10 @@ Appends contents.
 **Example: append**
 
 ```oxdock
+WRITE log.txt line1
 APPEND log.txt line2
+ASSERT_FILE log.txt line1line2
+
 ```
 
 
@@ -798,7 +812,11 @@ Expands placeholders.
 **Example: expand**
 
 ```oxdock
-EXPAND template.md NAME="Alice"
+ENV NAME="Alice"
+WRITE template.md "Hello {{ env:NAME }}!"
+EXPAND template.md
+ASSERT_STDOUT "Hello Alice!"
+
 ```
 
 
@@ -828,7 +846,9 @@ Verifies file.
 **Example: assert file**
 
 ```oxdock
+WRITE payload.bin stable-content
 ASSERT_FILE payload.bin stable-content
+
 ```
 
 
@@ -851,7 +871,9 @@ Verifies dir.
 **Example: assert dir**
 
 ```oxdock
+MKDIR dist/assets
 ASSERT_DIR dist/assets
+
 ```
 
 
@@ -897,7 +919,9 @@ Verifies stdout.
 **Example: assert stdout**
 
 ```oxdock
+ECHO build-complete
 ASSERT_STDOUT build-complete
+
 ```
 
 
@@ -922,7 +946,9 @@ Computes digest.
 **Example: hash**
 
 ```oxdock
+WRITE payload.txt hello
 HASH_SHA256 payload.txt
+
 ```
 
 
@@ -944,8 +970,8 @@ Terminates.
 
 **Example: exit**
 
-```oxdock
-EXIT 42
+```oxdock expect_error:"EXIT requested with code 0"
+EXIT 0
 ```
 
 
