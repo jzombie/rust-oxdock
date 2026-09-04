@@ -6,7 +6,7 @@ pub use oxdock_process::ProcessManager;
 
 define_pipeline! {
     StepKind::Run(..) => exec::dispatch_run,
-    StepKind::RunBg(..) => exec::dispatch_run_bg,
+    StepKind::AsyncBlock { .. } => exec::dispatch_async_block,
     StepKind::Echo(..) => exec::dispatch_echo,
     StepKind::Workdir(..) => exec::dispatch_workdir,
     StepKind::Workspace(..) => exec::dispatch_workspace,
@@ -403,10 +403,10 @@ mod tests {
         let root = guard_root(&temp);
 
         // Background succeeds quickly; pipeline should complete without error.
-        let script = "RUN_BG \"sh -c 'sleep 0.05'\"";
+        let script = "ASYNC RUN \"sh -c 'sleep 0.05'\"";
         let steps = crate::parse_script(script).unwrap();
         let res = run_steps(&root, &steps);
-        assert!(res.is_ok(), "RUN_BG success should allow clean exit");
+        assert!(res.is_ok(), "ASYNC success should allow clean exit");
     }
 
     #[cfg(unix)]
@@ -419,13 +419,13 @@ mod tests {
         let temp = GuardedPath::tempdir().unwrap();
         let root = guard_root(&temp);
 
-        let script = "RUN_BG \"sh -c 'sleep 0.05; exit 7'\"";
+        let script = "ASYNC RUN \"sh -c 'sleep 0.05; exit 7'\"";
         let steps = crate::parse_script(script).unwrap();
         let err = run_steps(&root, &steps).unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("RUN_BG exited with status") || msg.contains("exit status: 7"),
-            "should surface failing RUN_BG exit code"
+            msg.contains("ASYNC process exited with status") || msg.contains("exit status: 7"),
+            "should surface failing ASYNC exit code"
         );
     }
 
@@ -441,8 +441,8 @@ mod tests {
 
         let script = indoc! {
             r#"
-            RUN_BG "sh -c 'sleep 0.2; echo one > one.txt'"
-            RUN_BG "sh -c 'sleep 0.5; echo two > two.txt'"
+            ASYNC RUN "sh -c 'sleep 0.2; echo one > one.txt'"
+            ASYNC RUN "sh -c 'sleep 0.5; echo two > two.txt'"
             WRITE "done.txt" "ok"
             "#
         };
@@ -452,7 +452,7 @@ mod tests {
         let res = run_steps(&root, &steps);
         let elapsed = start.elapsed();
 
-        assert!(res.is_ok(), "RUN_BG success should allow clean exit");
+        assert!(res.is_ok(), "ASYNC success should allow clean exit");
         assert!(
             exists(&root, "done.txt"),
             "foreground step should run after spawning backgrounds"
@@ -461,15 +461,17 @@ mod tests {
             exists(&root, "one.txt"),
             "first background should finish and emit output"
         );
+        // With the new poll-all model, both children run to completion.
+        // The second background (~0.5s) should also finish.
         assert!(
-            !exists(&root, "two.txt"),
-            "second background should be terminated once the first exits"
+            exists(&root, "two.txt"),
+            "second background should finish (poll-all waits for all)"
         );
 
-        let upper = 0.45;
+        let upper = 0.8;
         assert!(
             elapsed.as_secs_f32() < upper && elapsed.as_secs_f32() > 0.15,
-            "should wait roughly for first background (~0.2s) but not the second (~0.5s); got {elapsed:?}"
+            "should wait for both backgrounds (~0.5s); got {elapsed:?}"
         );
     }
 
@@ -485,7 +487,7 @@ mod tests {
 
         let script = indoc! {
             r#"
-            RUN_BG "sh -c 'sleep 1; echo late > late.txt'"
+            ASYNC RUN "sh -c 'sleep 1; echo late > late.txt'"
             RUN "__oxdock_missing_command_xyz__"
             "#
         };
@@ -495,7 +497,7 @@ mod tests {
             run_steps(&root, &steps).is_err(),
             "pipeline should fail on the missing command"
         );
-        // The RUN_BG handle is dropped mid-pipeline when the error propagates;
+        // The ASYNC handle is dropped mid-pipeline when the error propagates;
         // its Drop safety net must kill the writer before it can emit the
         // late artifact.
         assert!(
@@ -516,7 +518,7 @@ mod tests {
 
         let script = indoc! {
             r#"
-            RUN_BG "sh -c 'sleep 1; echo late > late.txt'"
+            ASYNC RUN "sh -c 'sleep 1; echo late > late.txt'"
             EXIT 5
             "#
         };
@@ -546,7 +548,7 @@ mod tests {
                 r#"
                 ENV FOO="bar"
                 RUN "echo %FOO% > run.txt"
-                RUN_BG "echo %FOO% > bg.txt"
+                ASYNC RUN "echo %FOO% > bg.txt"
                 "#
             }
         } else {
@@ -554,7 +556,7 @@ mod tests {
                 r#"
                 ENV FOO="bar"
                 RUN "sh -c 'printf %s \"$FOO\" > run.txt'"
-                RUN_BG "sh -c 'printf %s \"$FOO\" > bg.txt'"
+                ASYNC RUN "sh -c 'printf %s \"$FOO\" > bg.txt'"
                 "#
             }
         };

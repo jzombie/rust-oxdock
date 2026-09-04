@@ -54,6 +54,8 @@ pub fn tokenize(input: &str) -> Result<Vec<RawToken<'_>>> {
             // Structural commands — parsed by grammar-specific rules
             Rule::with_io_command
             | Rule::inherit_env_command
+            | Rule::async_statement
+            | Rule::async_statement_block
             | Rule::for_statement
             | Rule::let_statement
             | Rule::if_statement => tokens.push(RawToken::Command { pair, line_no }),

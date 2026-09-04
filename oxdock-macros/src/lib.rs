@@ -744,9 +744,12 @@ fn emit_stepkind(
             let t = emit_arg(a, interp);
             quote! { StepKind::Echo(#t) }
         }
-        StepKind::RunBg(a) => {
-            let t = emit_arg(a, interp);
-            quote! { StepKind::RunBg(#t) }
+        StepKind::AsyncBlock { body } => {
+            let steps: Vec<_> = body
+                .iter()
+                .map(|s| emit_step(s, interp))
+                .collect();
+            quote! { StepKind::AsyncBlock { body: vec![#(#steps),*] } }
         }
         StepKind::Mkdir(a) => {
             let t = emit_arg(a, interp);

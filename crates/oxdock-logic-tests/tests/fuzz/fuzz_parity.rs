@@ -153,7 +153,6 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
         }),
         safe_msg().prop_map(|s| StepKind::Run(s.into())),
         safe_msg().prop_map(|s| StepKind::Echo(s.into())),
-        safe_msg().prop_map(|s| StepKind::RunBg(s.into())),
         (safe_string(), safe_string()).prop_map(|(from, to)| StepKind::Copy {
             from_current_workspace: false,
             from: from.into(),
@@ -240,9 +239,6 @@ fn assert_steps_eq(left: &Step, right: &Step, msg: &str) {
     match (&left.kind, &right.kind) {
         (StepKind::Run(l), StepKind::Run(r)) => {
             assert_eq!(l.as_str(), r.as_str(), "Run cmd mismatch: {}", msg)
-        }
-        (StepKind::RunBg(l), StepKind::RunBg(r)) => {
-            assert_eq!(l.as_str(), r.as_str(), "RunBg cmd mismatch: {}", msg)
         }
         (StepKind::Workdir(l), StepKind::Workdir(r)) => {
             assert!(arg_content_eq(l, r), "Workdir mismatch: {}", msg)

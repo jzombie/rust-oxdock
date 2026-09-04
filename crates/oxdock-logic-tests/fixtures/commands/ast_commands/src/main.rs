@@ -515,7 +515,7 @@ fn apply_placeholders(template: &str, placeholders: &HashMap<&'static str, Strin
     for (key, value) in placeholders {
         rendered = rendered.replace(key, value);
     }
-    for key in ["@RUN_CMD@", "@RUN_BG_CMD@", "@BG_WAIT_CMD@", "@CAPTURE_RUN_CMD@"] {
+    for key in ["@RUN_CMD@", "@ASYNC_RUN_CMD@", "@BG_WAIT_CMD@", "@CAPTURE_RUN_CMD@"] {
         if rendered.contains(key) {
             return Err(anyhow!("script contains unresolved placeholder {key}"));
         }
@@ -555,7 +555,7 @@ fn command_placeholders() -> HashMap<&'static str, String> {
 
     let mut placeholders = HashMap::new();
     placeholders.insert("@RUN_CMD@", run_cmd);
-    placeholders.insert("@RUN_BG_CMD@", bg_cmd);
+    placeholders.insert("@ASYNC_RUN_CMD@", bg_cmd);
     placeholders.insert("@BG_WAIT_CMD@", bg_wait);
     placeholders.insert("@CAPTURE_RUN_CMD@", capture_run);
     placeholders
@@ -1103,7 +1103,7 @@ fn step_kind_name(kind: &StepKind) -> &'static str {
         StepKind::Env { .. } => "Env",
         StepKind::Run(_) => "Run",
         StepKind::Echo(_) => "Echo",
-        StepKind::RunBg(_) => "RunBg",
+        StepKind::AsyncBlock { .. } => "AsyncBlock",
         StepKind::Copy { .. } => "Copy",
         StepKind::Symlink { .. } => "Symlink",
         StepKind::Mkdir(_) => "Mkdir",

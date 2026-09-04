@@ -11,7 +11,7 @@ Env = ["env"]
 InheritEnv = ["inherit_env"]
 Run = ["run"]
 Echo = ["echo"]
-RunBg = ["run_bg"]
+AsyncBlock = ["async_run"]
 Copy = ["copy"]
 Symlink = ["symlink"]
 Mkdir = ["mkdir"]
@@ -49,7 +49,7 @@ cases = [
   "env_target_dir",
   "inherit_env_blocking",
   "cwd_stdout",
-  "with_io_bg",
+  "with_io_async",
   "copy_complex",
   "copy_broken_symlink",
   "with_io_block",

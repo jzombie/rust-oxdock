@@ -147,15 +147,15 @@ mod tests {
     }
 
     #[test]
-    fn script_from_braced_tokens_allows_command_like_ident_in_run_bg() {
+    fn script_from_braced_tokens_allows_command_like_ident_in_async() {
         let mut ts = TokenStream::new();
         ts.extend([
-            TokenTree::Ident(Ident::new("RUN_BG", Span::call_site())),
+            TokenTree::Ident(Ident::new("ASYNC", Span::call_site())),
             TokenTree::Ident(Ident::new("LS", Span::call_site())),
             TokenTree::Ident(Ident::new("a", Span::call_site())),
         ]);
 
-        let script = script_from_braced_tokens(&ts).expect("failed to render RUN_BG script");
-        assert_eq!(script, "RUN_BG LS a");
+        let script = script_from_braced_tokens(&ts).expect("failed to render ASYNC script");
+        assert_eq!(script, "ASYNC LS a");
     }
 }

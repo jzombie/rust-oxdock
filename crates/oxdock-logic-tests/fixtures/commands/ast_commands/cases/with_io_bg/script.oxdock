@@ -1,3 +1,0 @@
-[unix] WITH_IO [stdin, stdout] RUN_BG "cat"
-[windows] WITH_IO [stdin, stdout] RUN_BG "sort"
-RUN "echo foreground"

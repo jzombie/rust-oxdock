@@ -518,6 +518,15 @@ fn parse_structural_command_with_lower(
         Rule::for_statement => parse_for_statement_from_pair(pair, lower)?,
         Rule::let_statement => parse_let_statement_from_pair(pair)?,
         Rule::if_statement => parse_if_statement_from_pair(pair, lower)?,
+        Rule::async_statement => parse_async_statement_from_pair(pair, lower)?,
+        Rule::async_statement_block => parse_async_statement_block_from_pair(pair, lower)?,
+        Rule::command_inner => {
+            // command_inner = { inherit_env_command | instruction }
+            // Unwrap to the inner rule
+            let inner = pair.into_inner().next()
+                .ok_or_else(|| anyhow!("empty command_inner"))?;
+            parse_structural_command_with_lower(inner, lower)?
+        }
         _ => bail!("unexpected structural command rule: {:?}", pair.as_rule()),
     };
     Ok(kind)
@@ -668,6 +677,113 @@ fn parse_else_clause(
     Ok(Vec::new())
 }
 
+fn is_async_compatible_kind(kind: &StepKind) -> bool {
+    matches!(kind, StepKind::Run(_) | StepKind::AsyncBlock { .. })
+}
+
+fn parse_async_statement_from_pair(
+    pair: Pair<Rule>,
+    lower: &dyn Fn(&str, Vec<Arg>) -> Result<StepKind>,
+) -> Result<StepKind> {
+    let mut inner_cmd = None;
+    let mut block_body = None;
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::command => {
+                // command is _{} = silent, so its children aren't visible as pairs
+                // when nested inside compound-atomic async_statement.
+                // Parse the command text directly.
+                let cmd_text = inner.as_str();
+                let steps = parse_script(cmd_text, |name, args| lower(name, args))?;
+                if steps.len() == 1 {
+                    inner_cmd = Some(steps.into_iter().next().unwrap().kind);
+                } else {
+                    bail!("unexpected multiple steps in async inner command");
+                }
+            }
+            Rule::command_inner => {
+                // command_inner = { inherit_env_command | async_statement | async_statement_block | instruction }
+                let child = inner.into_inner().next()
+                    .ok_or_else(|| anyhow!("empty command_inner"))?;
+                match child.as_rule() {
+                    Rule::inherit_env_command => {
+                        inner_cmd = Some(parse_structural_command_with_lower(child, lower)?);
+                    }
+                    Rule::async_statement | Rule::async_statement_block => {
+                        inner_cmd = Some(parse_structural_command_with_lower(child, lower)?);
+                    }
+                    Rule::instruction => {
+                        let (name, args) = extract_instruction(child)?;
+                        inner_cmd = Some(lower(&name, args)?);
+                    }
+                    other => bail!("unexpected command_inner child: {:?}", other),
+                }
+            }
+            Rule::instruction | Rule::instruction_inner => {
+                let (name, args) = extract_instruction(inner)?;
+                inner_cmd = Some(lower(&name, args)?);
+            }
+            Rule::block => {
+                block_body = Some(parse_block_elements_with_lower(inner, lower)?);
+            }
+            _ => {}
+        }
+    }
+    if let Some(body) = block_body {
+        for step in &body {
+            if !is_async_compatible_kind(&step.kind) {
+                if matches!(&step.kind, StepKind::WithIo { .. }) {
+                    bail!("WITH_IO cannot be placed inside ASYNC. Place WITH_IO outside ASYNC instead (e.g. WITH_IO [...] ASYNC RUN ...)");
+                }
+                bail!("ASYNC block may only contain RUN or nested ASYNC commands");
+            }
+        }
+        Ok(StepKind::AsyncBlock { body })
+    } else if let Some(cmd) = inner_cmd {
+        if !is_async_compatible_kind(&cmd) {
+            if matches!(&cmd, StepKind::WithIo { .. }) {
+                bail!("WITH_IO cannot be placed inside ASYNC. Place WITH_IO outside ASYNC instead (e.g. WITH_IO [...] ASYNC RUN ...)");
+            }
+            bail!("ASYNC prefix may only be used with RUN or nested ASYNC commands");
+        }
+        Ok(StepKind::AsyncBlock {
+            body: vec![Step {
+                guard: None,
+                kind: cmd,
+                scope_enter: 0,
+                scope_exit: 0,
+            }],
+        })
+    } else {
+        bail!("ASYNC requires either a command or a block");
+    }
+}
+
+fn parse_async_statement_block_from_pair(
+    pair: Pair<Rule>,
+    lower: &dyn Fn(&str, Vec<Arg>) -> Result<StepKind>,
+) -> Result<StepKind> {
+    let mut block_body = None;
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::block => {
+                block_body = Some(parse_block_elements_with_lower(inner, lower)?);
+            }
+            _ => {} // skip async_keyword and sep
+        }
+    }
+    let body = block_body.ok_or_else(|| anyhow!("async_statement_block requires a block"))?;
+    for step in &body {
+        if !is_async_compatible_kind(&step.kind) {
+            if matches!(&step.kind, StepKind::WithIo { .. }) {
+                bail!("WITH_IO cannot be placed inside ASYNC. Place WITH_IO outside ASYNC instead (e.g. WITH_IO [...] ASYNC RUN ...)");
+            }
+            bail!("ASYNC block may only contain RUN or nested ASYNC commands");
+        }
+    }
+    Ok(StepKind::AsyncBlock { body })
+}
+
 fn parse_block_elements_with_lower(
     block_pair: Pair<Rule>,
     lower: &dyn Fn(&str, Vec<Arg>) -> Result<StepKind>,
@@ -675,7 +791,7 @@ fn parse_block_elements_with_lower(
     let mut steps = Vec::new();
     for elem in block_pair.into_inner() {
         match elem.as_rule() {
-            Rule::for_statement | Rule::let_statement | Rule::if_statement => {
+            Rule::for_statement | Rule::let_statement | Rule::if_statement | Rule::async_statement | Rule::async_statement_block => {
                 let step_kind = parse_structural_command_with_lower(elem, lower)?;
                 steps.push(Step {
                     guard: None,

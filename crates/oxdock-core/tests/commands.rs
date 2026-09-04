@@ -195,7 +195,14 @@ fn commands_behave_cross_platform() {
         },
         Step {
             guard: None,
-            kind: StepKind::RunBg(bg_cmd.into()),
+            kind: StepKind::AsyncBlock {
+                body: vec![Step {
+                    guard: None,
+                    kind: StepKind::Run(bg_cmd.into()),
+                    scope_enter: 0,
+                    scope_exit: 0,
+                }],
+            },
             scope_enter: 0,
             scope_exit: 0,
         },
@@ -314,7 +321,7 @@ fn commands_behave_cross_platform() {
 
     // RUN picks up ENV
     assert_eq!(read_trimmed(&snapshot.join("run.txt").unwrap()), "bar");
-    // RUN_BG picks up ENV
+    // ASYNC picks up ENV
     assert_eq!(read_trimmed(&snapshot.join("bg.txt").unwrap()), "bar");
 
     // WRITE + MKDIR
@@ -1288,7 +1295,7 @@ fn _assert_step_kind_exhaustiveness(kind: &StepKind) {
         StepKind::InheritEnv { .. } => {}
         StepKind::Run(_) => {}
         StepKind::Echo(_) => {}
-        StepKind::RunBg(_) => {}
+        StepKind::AsyncBlock { .. } => {}
         StepKind::Copy { .. } => {}
         StepKind::CopyGit { .. } => {}
         StepKind::Symlink { .. } => {}
@@ -1537,11 +1544,11 @@ fn with_io_routes_stdin_stdout_pipe() {
 }
 
 // ---------------------------------------------------------------------------
-// WITH_IO + RUN_BG (background stdin/stdout)
+// WITH_IO + ASYNC (background stdin/stdout)
 // ---------------------------------------------------------------------------
 
 #[test]
-#[cfg_attr(miri, ignore = "RUN_BG spawns real child processes")]
+#[cfg_attr(miri, ignore = "ASYNC spawns real child processes")]
 fn with_io_bg_routes_stdin_stdout() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
@@ -1559,8 +1566,8 @@ fn with_io_bg_routes_stdin_stdout() {
     // Spawns a background non-blocking pass-through child process concurrently
     // alongside a mainline foreground step.
     let script = indoc! {r#"
-        [unix] WITH_IO [stdin, stdout] RUN_BG "cat"
-        [windows] WITH_IO [stdin, stdout] RUN_BG "sort"
+        [unix] WITH_IO [stdin, stdout] ASYNC RUN "cat"
+        [windows] WITH_IO [stdin, stdout] ASYNC RUN "sort"
         RUN "echo foreground"
     "#};
     let steps = oxdock_core::parse_script(script).unwrap();
@@ -1569,13 +1576,13 @@ fn with_io_bg_routes_stdin_stdout() {
     io_cfg.set_stdin(Some(input));
     io_cfg.set_stdout(Some(output.clone()));
     run_steps_with_context_result_with_io(&root, &root, &steps, io_cfg)
-        .expect("with_io_bg execution failed");
+        .expect("with_io_async execution failed");
 
     let result = String::from_utf8(output.lock().unwrap().clone()).unwrap();
 
     // Assert containment rather than exact sequence matching.
     //
-    // RUN_BG executes asynchronously with mainline script steps. Depending on
+    // ASYNC executes asynchronously with mainline script steps. Depending on
     // OS process thread scheduling, the background child's stdin->stdout flush
     // and the foreground RUN 'echo' step may write to the shared output buffer
     // in arbitrary order. Exact equality asserts fail non-deterministically.

@@ -151,6 +151,7 @@ declare_commands! {
         For { key_var: Option<String>, var: String, in_expr: Expr, body: Vec<Step> },
         If { cond: Box<Expr>, then_body: Vec<Step>, else_ifs: Vec<(Box<Expr>, Vec<Step>)>, else_body: Option<Vec<Step>> },
         Assign { var: String, expr: Expr },
+        AsyncBlock { body: Vec<Step> },
     ]
 
     Workdir => [
@@ -251,19 +252,6 @@ declare_commands! {
         default_output: None,
         examples: &[ Example { name: "run", fence_meta: None, code: indoc! {r#"RUN echo hello"#} } ],
         lower: |_flags, args| Ok(StepKind::Run(join_args(args, "RUN")?)),
-    ],
-
-    RunBg => [
-        name: "RUN_BG",
-        variant: RunBg(Arg),
-        syntax: "RUN_BG <command...>",
-        summary: "Run in background.",
-        description: "Like RUN but background.",
-        args: &[ ArgSpec { name: "command", arg_type: "string...", description: "Command", io: IoDirection::Write, index: 0, required: true, fallback_stream: None } ],
-        flags: &[],
-        default_output: None,
-        examples: &[ Example { name: "bg", fence_meta: None, code: indoc! {r#"RUN_BG sleep 1"#} } ],
-        lower: |_flags, args| Ok(StepKind::RunBg(join_args(args, "RUN_BG")?)),
     ],
 
     Copy => [
@@ -595,7 +583,6 @@ impl fmt::Display for StepKind {
             StepKind::Env { key, value } => write!(f, "ENV {}={}", key, quote_arg(value.as_str())),
             StepKind::Run(c) => write!(f, "RUN {}", quote_run(c.as_str())),
             StepKind::Echo(m) => write!(f, "ECHO {}", quote_msg(m.as_str())),
-            StepKind::RunBg(c) => write!(f, "RUN_BG {}", quote_run(c.as_str())),
             StepKind::Copy {
                 from_current_workspace,
                 from,
@@ -758,6 +745,13 @@ impl fmt::Display for StepKind {
                 Ok(())
             }
             StepKind::Assign { var, expr } => write!(f, "LET ${} = {}", var, expr),
+            StepKind::AsyncBlock { body } => {
+                write!(f, "ASYNC {{")?;
+                for s in body {
+                    write!(f, "\n    {}", s)?;
+                }
+                write!(f, "\n}}")
+            }
         }
     }
 }

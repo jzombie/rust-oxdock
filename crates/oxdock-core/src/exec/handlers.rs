@@ -2,7 +2,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use std::sync::Arc;
 
 use oxdock_fs::EntryKind;
-use oxdock_parser::{Expr, IoBinding, IoStream, Step, StepKind, Value, WorkspaceTarget};
+use oxdock_parser::{Expr, IoBinding, IoStream, Step, StepKind, Value, WorkspaceTarget, guard_option_allows};
 use oxdock_process::{
     BackgroundHandle, CommandOptions, CommandResult, CommandStderr, CommandStdout, ProcessManager,
 };
@@ -174,18 +174,18 @@ pub(super) fn run_bg<P: ProcessManager>(
     match cx
         .process
         .run_command(&ctx, cmd, options)
-        .with_context(|| format!("step {}: RUN_BG {}", idx + 1, cmd))?
+        .with_context(|| format!("step {}: ASYNC {}", idx + 1, cmd))?
     {
         CommandResult::Background(handle) => {
             cx.state.bg_children.push(handle);
             Ok(())
         }
         CommandResult::Completed => {
-            bail!("step {}: RUN_BG {} finished synchronously", idx + 1, cmd)
+            bail!("step {}: ASYNC {} finished synchronously", idx + 1, cmd)
         }
         CommandResult::Captured(_) => {
             bail!(
-                "step {}: RUN_BG {} attempted to capture output",
+                "step {}: ASYNC {} attempted to capture output",
                 idx + 1,
                 cmd
             )
@@ -1027,16 +1027,48 @@ pub(crate) fn dispatch_run<P: ProcessManager>(
     run(cx, 0, &cmd)
 }
 
-pub(crate) fn dispatch_run_bg<P: ProcessManager>(
+fn collect_resolved_run_commands<P: ProcessManager>(
+    steps: &[Step],
+    cx: &mut StepCtx<'_, P>,
+    out: &mut Vec<String>,
+) -> Result<()> {
+    for step in steps {
+        if !guard_option_allows(step.guard.as_ref(), &cx.state.envs) {
+            continue;
+        }
+        match &step.kind {
+            StepKind::Run(arg) => {
+                let cmd = super::args::resolve_arg(arg, cx)?;
+                let cmd = super::args::expand_dsl_vars(&cmd, cx.state);
+                out.push(cmd);
+            }
+            StepKind::AsyncBlock { body } => {
+                collect_resolved_run_commands(body, cx, out)?;
+            }
+            _ => bail!("ASYNC block contains unsupported command type"),
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn dispatch_async_block<P: ProcessManager>(
     step: &StepKind,
     cx: &mut StepCtx<'_, P>,
 ) -> Result<()> {
-    let StepKind::RunBg(arg) = step else {
+    let StepKind::AsyncBlock { body } = step else {
         unreachable!()
     };
-    let cmd = super::args::resolve_arg(arg, cx)?;
-    let cmd = super::args::expand_dsl_vars(&cmd, cx.state);
-    run_bg(cx, 0, &cmd)
+    let mut resolved_cmds = Vec::new();
+    collect_resolved_run_commands(body, cx, &mut resolved_cmds)?;
+    if resolved_cmds.is_empty() {
+        return Ok(());
+    }
+    let grouped_cmds: Vec<String> = resolved_cmds
+        .into_iter()
+        .map(|cmd| format!("({cmd})"))
+        .collect();
+    let script = grouped_cmds.join(" && ");
+    super::steps::run_bg_from_str(cx, 0, &script)
 }
 
 pub(crate) fn dispatch_echo<P: ProcessManager>(

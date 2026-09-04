@@ -754,4 +754,76 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn async_run_parses() {
+        let script = "ASYNC RUN \"echo hello\"";
+        let steps = parse_script(script, test_lower).expect("parse should succeed");
+        assert_eq!(steps.len(), 1);
+        assert!(matches!(&steps[0].kind, StepKind::AsyncBlock { .. }));
+    }
+
+    #[test]
+    fn async_block_parses() {
+        let script = indoc! {r#"
+            ASYNC {
+                RUN "echo one"
+                RUN "echo two"
+            }
+        "#};
+        let steps = parse_script(script, test_lower).expect("parse should succeed");
+        assert_eq!(steps.len(), 1);
+        match &steps[0].kind {
+            StepKind::AsyncBlock { body } => {
+                assert_eq!(body.len(), 2);
+            }
+            other => panic!("expected AsyncBlock, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn nested_async_parses() {
+        let script = "ASYNC ASYNC RUN \"echo nested\"";
+        let steps = parse_script(script, test_lower).expect("parse should succeed");
+        assert_eq!(steps.len(), 1);
+        match &steps[0].kind {
+            StepKind::AsyncBlock { body } => {
+                assert_eq!(body.len(), 1);
+                match &body[0].kind {
+                    StepKind::AsyncBlock { body } => {
+                        assert_eq!(body.len(), 1);
+                        assert!(matches!(&body[0].kind, StepKind::Run(_)));
+                    }
+                    other => panic!("expected inner AsyncBlock, got {:?}", other),
+                }
+            }
+            other => panic!("expected outer AsyncBlock, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn nested_async_block_form_parses() {
+        let script = indoc! {r#"
+            ASYNC {
+                ASYNC {
+                    RUN "echo nested"
+                }
+            }
+        "#};
+        let steps = parse_script(script, test_lower).expect("parse should succeed");
+        assert_eq!(steps.len(), 1);
+        match &steps[0].kind {
+            StepKind::AsyncBlock { body } => {
+                assert_eq!(body.len(), 1);
+                match &body[0].kind {
+                    StepKind::AsyncBlock { body } => {
+                        assert_eq!(body.len(), 1);
+                        assert!(matches!(&body[0].kind, StepKind::Run(_)));
+                    }
+                    other => panic!("expected inner AsyncBlock, got {:?}", other),
+                }
+            }
+            other => panic!("expected outer AsyncBlock, got {:?}", other),
+        }
+    }
 }

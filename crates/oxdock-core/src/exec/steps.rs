@@ -1,4 +1,3 @@
-use std::process::ExitStatus;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -160,11 +159,7 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
             let msg = super::args::resolve_arg(arg, &mut cx)?;
             handlers::echo(&mut cx, &msg)
         }
-        StepKind::RunBg(arg) => {
-            let cmd = super::args::resolve_arg(arg, &mut cx)?;
-            let cmd = super::args::expand_dsl_vars(&cmd, cx.state);
-            handlers::run_bg(&mut cx, idx, &cmd)
-        }
+        StepKind::AsyncBlock { .. } => handlers::dispatch_async_block(cmd, &mut cx),
         StepKind::Workdir(arg) => {
             let path = super::args::resolve_arg(arg, &mut cx)?;
             handlers::workdir(&mut cx, idx, &path)
@@ -376,10 +371,7 @@ fn execute_steps_inner<P: ProcessManager>(
                     let msg = super::args::resolve_arg(arg, &mut cx)?;
                     handlers::echo(&mut cx, &msg)
                 }
-                StepKind::RunBg(arg) => {
-                    let cmd = super::args::resolve_arg(arg, &mut cx)?;
-                    handlers::run_bg(&mut cx, idx, &cmd)
-                }
+                StepKind::AsyncBlock { .. } => handlers::dispatch_async_block(&step.kind, &mut cx),
                 StepKind::Copy {
                     from_current_workspace,
                     from,
@@ -503,54 +495,47 @@ fn execute_steps_inner<P: ProcessManager>(
         let restore_result = restore_scopes(state, step.scope_exit);
         step_result?;
         restore_result?;
-        if let Some(status) = check_bg(&mut state.bg_children)? {
-            if status.success() {
-                return Ok(());
-            } else {
-                bail!("RUN_BG exited with status {}", status);
-            }
-        }
     }
 
     if wait_at_end && !state.bg_children.is_empty() {
-        let mut first = state.bg_children.remove(0);
-        let status = first.wait()?;
-        for child in state.bg_children.iter_mut() {
-            if child.try_wait()?.is_none() {
-                let _ = child.kill();
-                let _ = child.try_wait();
+        loop {
+            let mut i = 0;
+            while i < state.bg_children.len() {
+                match state.bg_children[i].try_wait()? {
+                    Some(status) => {
+                        if !status.success() {
+                            for survivor in state.bg_children.iter_mut() {
+                                if survivor.try_wait()?.is_none() {
+                                    let _ = survivor.kill();
+                                    let _ = survivor.try_wait();
+                                }
+                            }
+                            state.bg_children.clear();
+                            bail!("ASYNC process exited with status {}", status);
+                        }
+                        state.bg_children.swap_remove(i);
+                    }
+                    None => {
+                        i += 1;
+                    }
+                }
             }
-        }
-        state.bg_children.clear();
-        if status.success() {
-            return Ok(());
-        } else {
-            bail!("RUN_BG exited with status {}", status);
+            if state.bg_children.is_empty() {
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
     }
 
     Ok(())
 }
 
-fn check_bg<H: BackgroundHandle>(bg: &mut Vec<H>) -> Result<Option<ExitStatus>> {
-    let mut finished: Option<ExitStatus> = None;
-    for child in bg.iter_mut() {
-        if let Some(status) = child.try_wait()? {
-            finished = Some(status);
-            break;
-        }
-    }
-    if let Some(status) = finished {
-        for child in bg.iter_mut() {
-            if child.try_wait()?.is_none() {
-                let _ = child.kill();
-                let _ = child.try_wait();
-            }
-        }
-        bg.clear();
-        return Ok(Some(status));
-    }
-    Ok(None)
+pub(super) fn run_bg_from_str<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    idx: usize,
+    cmd: &str,
+) -> Result<()> {
+    handlers::run_bg(cx, idx, cmd)
 }
 
 fn restore_scopes<P: ProcessManager>(state: &mut ExecState<P>, count: usize) -> Result<()> {

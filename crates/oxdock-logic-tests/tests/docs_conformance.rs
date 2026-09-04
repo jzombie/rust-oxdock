@@ -173,7 +173,7 @@ fn readme_references_resolve() -> Result<()> {
 #[test]
 #[cfg_attr(
     miri,
-    ignore = "examples execute real processes (RUN/RUN_BG/git) against host tempdirs"
+    ignore = "examples execute real processes (RUN/ASYNC RUN/git) against host tempdirs"
 )]
 fn readme_snippets_execute_as_documented() -> Result<()> {
     for block in load_readme_blocks()? {

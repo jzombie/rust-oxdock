@@ -86,12 +86,7 @@ fn run_expands_env_values() {
 fn run_bg_completion_short_circuits_pipeline() {
     let root = GuardedPath::new_root_from_str(".").unwrap();
     let steps = vec![
-        Step {
-            guard: None,
-            kind: StepKind::RunBg("sleep".into()),
-            scope_enter: 0,
-            scope_exit: 0,
-        },
+        async_step("sleep"),
         Step {
             guard: None,
             kind: StepKind::Run("echo after".into()),
@@ -103,25 +98,19 @@ fn run_bg_completion_short_circuits_pipeline() {
     mock.push_bg_plan(0, success_status());
     let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
     run_steps_with_manager(fs, &steps, mock.clone(), ExecIo::new()).unwrap();
-    assert!(
-        mock.recorded_runs().is_empty(),
-        "foreground run should not execute when RUN_BG completes early"
-    );
+    let recorded = mock.recorded_runs();
+    let runs: Vec<_> = recorded.iter().map(|r| r.script.as_str()).collect();
+    assert_eq!(runs, vec!["echo after"], "foreground should still run when ASYNC completes early");
     let spawns = mock.spawn_log();
     let spawned: Vec<_> = spawns.iter().map(|c| c.script.as_str()).collect();
-    assert_eq!(spawned, vec!["sleep"]);
+    assert_eq!(spawned, vec!["(sleep)"]);
 }
 
 #[test]
 fn exit_kills_background_processes() {
     let root = GuardedPath::new_root_from_str(".").unwrap();
     let steps = vec![
-        Step {
-            guard: None,
-            kind: StepKind::RunBg("bg-task".into()),
-            scope_enter: 0,
-            scope_exit: 0,
-        },
+        async_step("bg-task"),
         Step {
             guard: None,
             kind: StepKind::Exit(5),
@@ -130,14 +119,14 @@ fn exit_kills_background_processes() {
         },
     ];
     let mock = MockProcessManager::default();
-    mock.push_bg_plan(usize::MAX, success_status());
+    mock.push_bg_plan(100, success_status());
     let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
     let err = run_steps_with_manager(fs, &steps, mock.clone(), ExecIo::new()).unwrap_err();
     assert!(
         err.to_string().contains("EXIT requested with code 5"),
         "unexpected error: {err}"
     );
-    assert_eq!(mock.killed(), vec!["bg-task"]);
+    assert_eq!(mock.killed(), vec!["(bg-task)"]);
 }
 
 #[test]
@@ -618,11 +607,27 @@ where
     }
 }
 
+fn async_step(cmd: &str) -> Step {
+    Step {
+        guard: None,
+        kind: StepKind::AsyncBlock {
+            body: vec![Step {
+                guard: None,
+                kind: StepKind::Run(cmd.into()),
+                scope_enter: 0,
+                scope_exit: 0,
+            }],
+        },
+        scope_enter: 0,
+        scope_exit: 0,
+    }
+}
+
 #[test]
 fn bg_failure_mid_pipeline_short_circuits_and_bails() {
     let root = GuardedPath::new_root_from_str(".").unwrap();
     let steps = vec![
-        step(StepKind::RunBg("flaky-bg".into())),
+        async_step("flaky-bg"),
         step(StepKind::Run("echo never".into())),
     ];
     let mock = MockProcessManager::default();
@@ -631,16 +636,16 @@ fn bg_failure_mid_pipeline_short_circuits_and_bails() {
     let err = run_steps_with_manager(fs, &steps, mock.clone(), ExecIo::new()).unwrap_err();
 
     assert!(
-        err.to_string().contains("RUN_BG exited with status"),
+        err.to_string().contains("ASYNC process exited with status"),
         "unexpected error: {err}"
     );
-    assert!(
-        mock.recorded_runs().is_empty(),
-        "pipeline must stop before the next RUN"
-    );
+    // Foreground runs immediately; the failure is caught by the end-of-pipeline poll-all.
+    let recorded = mock.recorded_runs();
+    let runs: Vec<_> = recorded.iter().map(|r| r.script.as_str()).collect();
+    assert_eq!(runs, vec!["echo never"], "foreground should still run before poll-all detects failure");
     let spawns = mock.spawn_log();
     let spawned: Vec<&str> = spawns.iter().map(|call| call.script.as_str()).collect();
-    assert_eq!(spawned, vec!["flaky-bg"]);
+    assert_eq!(spawned, vec!["(flaky-bg)"]);
     drop(spawns);
     // The finished child is not killed again; only survivors would be.
     assert!(mock.killed().is_empty());
@@ -649,15 +654,15 @@ fn bg_failure_mid_pipeline_short_circuits_and_bails() {
 #[test]
 fn bg_failure_after_pipeline_end_reports_status() {
     let root = GuardedPath::new_root_from_str(".").unwrap();
-    let steps = vec![step(StepKind::RunBg("late-failure".into()))];
+    let steps = vec![async_step("late-failure")];
     let mock = MockProcessManager::default();
-    // usize::MAX models a child that never polls ready; end-of-pipeline
-    // `wait()` must still surface its failing status.
-    mock.push_bg_plan(usize::MAX, failing_status());
+    // Child takes several polls before reporting failure; end-of-pipeline
+    // poll-all must surface its failing status.
+    mock.push_bg_plan(5, failing_status());
     let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
     let err = run_steps_with_manager(fs, &steps, mock.clone(), ExecIo::new()).unwrap_err();
     assert!(
-        err.to_string().contains("RUN_BG exited with status"),
+        err.to_string().contains("ASYNC process exited with status"),
         "unexpected error: {err}"
     );
 }
@@ -665,9 +670,9 @@ fn bg_failure_after_pipeline_end_reports_status() {
 #[test]
 fn bg_success_after_pipeline_end_waits_cleanly() {
     let root = GuardedPath::new_root_from_str(".").unwrap();
-    let steps = vec![step(StepKind::RunBg("late-success".into()))];
+    let steps = vec![async_step("late-success")];
     let mock = MockProcessManager::default();
-    mock.push_bg_plan(usize::MAX, success_status());
+    mock.push_bg_plan(5, success_status());
     let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
     run_steps_with_manager(fs, &steps, mock.clone(), ExecIo::new())
         .expect("successful late child must not fail the pipeline");
@@ -677,35 +682,45 @@ fn bg_success_after_pipeline_end_waits_cleanly() {
 fn multi_child_teardown_kills_survivor_when_first_exits() {
     let root = GuardedPath::new_root_from_str(".").unwrap();
     let steps = vec![
-        step(StepKind::RunBg("first-finisher".into())),
-        step(StepKind::RunBg("survivor".into())),
+        async_step("first-finisher"),
+        async_step("survivor"),
     ];
     let mock = MockProcessManager::default();
-    // First child reports finished on the SECOND poll (after the second
-    // RUN_BG has spawned); the survivor must then be torn down.
-    mock.push_bg_plan(1, success_status());
-    mock.push_bg_plan(usize::MAX, success_status());
+    // First child fails on the SECOND poll (after the second ASYNC has spawned);
+    // the survivor must then be torn down.
+    mock.push_bg_plan(1, failing_status());
+    mock.push_bg_plan(100, success_status());
     let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
-    run_steps_with_manager(fs, &steps, mock.clone(), ExecIo::new()).expect("first child succeeded");
+    let err = run_steps_with_manager(fs, &steps, mock.clone(), ExecIo::new()).unwrap_err();
+    assert!(
+        err.to_string().contains("ASYNC process exited with status"),
+        "unexpected error: {err}"
+    );
 
-    assert_eq!(mock.killed(), vec!["survivor".to_string()]);
+    let killed = mock.killed();
+    let killed_scripts: Vec<_> = killed.iter().map(|s| s.as_str()).collect();
+    assert!(
+        killed_scripts.contains(&"(survivor)"),
+        "survivor must be torn down after first child failure, killed: {:?}",
+        killed_scripts
+    );
 }
 
 #[test]
 fn exit_kills_all_background_children() {
     let root = GuardedPath::new_root_from_str(".").unwrap();
     let steps = vec![
-        step(StepKind::RunBg("bg-a".into())),
-        step(StepKind::RunBg("bg-b".into())),
+        async_step("bg-a"),
+        async_step("bg-b"),
         step(StepKind::Exit(3)),
     ];
     let mock = MockProcessManager::default();
-    mock.push_bg_plan(usize::MAX, success_status());
-    mock.push_bg_plan(usize::MAX, success_status());
+    mock.push_bg_plan(100, success_status());
+    mock.push_bg_plan(100, success_status());
     let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
     let err = run_steps_with_manager(fs, &steps, mock.clone(), ExecIo::new()).unwrap_err();
     assert!(err.to_string().contains("EXIT requested with code 3"));
-    assert_eq!(mock.killed(), vec!["bg-a".to_string(), "bg-b".to_string()]);
+    assert_eq!(mock.killed(), vec!["(bg-a)".to_string(), "(bg-b)".to_string()]);
 }
 
 /// Minimal stub whose foreground commands fail by script name, letting us
@@ -1109,14 +1124,14 @@ fn copy_directory_branch_recurses_into_nested_target() {
 fn mid_pipeline_failure_kills_background_children_via_drop() {
     let root = GuardedPath::new_root_from_str(".").unwrap();
     let steps = vec![
-        step(StepKind::RunBg("bg-task".into())),
+        async_step("bg-task"),
         step(StepKind::Run("boom".into())),
     ];
     let runner = FailingRunner {
         fail_script: "boom".into(),
         ..Default::default()
     };
-    runner.bg.push_bg_plan(usize::MAX, success_status());
+    runner.bg.push_bg_plan(100, success_status());
     let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
     let err = run_steps_with_manager(fs, &steps, runner.clone(), ExecIo::new()).unwrap_err();
     assert!(
@@ -1126,7 +1141,7 @@ fn mid_pipeline_failure_kills_background_children_via_drop() {
     );
     assert_eq!(
         runner.bg.killed(),
-        vec!["bg-task".to_string()],
+        vec!["(bg-task)".to_string()],
         "abandoned background child must be torn down via Drop"
     );
 }
@@ -1134,7 +1149,7 @@ fn mid_pipeline_failure_kills_background_children_via_drop() {
 #[test]
 fn naturally_completed_bg_not_logged_as_killed() {
     let root = GuardedPath::new_root_from_str(".").unwrap();
-    let steps = vec![step(StepKind::RunBg("finisher".into()))];
+    let steps = vec![async_step("finisher")];
     let mock = MockProcessManager::default();
     mock.push_bg_plan(0, success_status());
     let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());

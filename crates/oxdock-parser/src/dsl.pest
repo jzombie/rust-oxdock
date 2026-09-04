@@ -12,11 +12,11 @@ blank = _{ (WHITESPACE | linebreak)+ }
 script = { SOI ~ element* ~ EOI }
 
 // Structural statements MUST precede generic commands
-element = _{ blank | hash_comment | COMMENT | semicolon | guard_line | block_start | block_end | if_statement | for_statement | let_statement | command }
+element = _{ blank | hash_comment | COMMENT | semicolon | guard_line | block_start | block_end | if_statement | for_statement | let_statement | async_statement_block | async_statement | command }
 
 // Inside for/let blocks, block_start/block_end must NOT appear as elements
 // (the block's own braces handle them).  Nested guard blocks use guard_block.
-block_element = _{ blank | hash_comment | COMMENT | semicolon | guard_block | guard_line | if_statement | for_statement | let_statement | command }
+block_element = _{ blank | hash_comment | COMMENT | semicolon | guard_block | guard_line | if_statement | for_statement | let_statement | async_statement_block | async_statement | command }
 guard_block = { guard_line ~ block }
 
 block_start = { "{" }
@@ -116,8 +116,11 @@ if_statement = { if_keyword ~ expr ~ block ~ (blank* ~ else_if_clause)* ~ blank*
 // Commands
 // Structural rules with special syntax stay as PEG rules.
 // All other commands use the generic `instruction` rule — lowering happens in Rust.
-command = _{ with_io_command | inherit_env_command | instruction_inner }
-command_inner = { inherit_env_command | instruction }
+async_keyword = _{ "ASYNC" ~ !(ASCII_ALPHANUMERIC | "_") }
+async_statement = ${ async_keyword ~ sep ~ command_inner }
+async_statement_block = { async_keyword ~ sep? ~ block }
+command = _{ with_io_command | inherit_env_command | async_statement_block | async_statement | instruction_inner }
+command_inner = { inherit_env_command | async_statement | async_statement_block | instruction }
 
 with_io_command = ${ "WITH_IO" ~ sep ~ io_flags ~ (sep ~ command)? }
 io_flags = { "[" ~ ws? ~ io_binding ~ (ws? ~ "," ~ ws? ~ io_binding)* ~ ws? ~ "]" }
