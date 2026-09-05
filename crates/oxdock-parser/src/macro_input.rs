@@ -424,6 +424,7 @@ fn walk(
                     && !guard_prefix
                     && *capture_has_inner
                     && line_requires_inner
+                    && ident_text != "ASYNC"
                 {
                     finalize_line(lines, line, capture_has_inner);
                 }

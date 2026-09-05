@@ -21,7 +21,7 @@ pub(super) const PIPE_MAX_BACKLOG: u64 = 2 * 1024 * 1024; // 2 MiB for tests
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone)]
-pub(super) enum PipeEndpoint {
+pub(crate) enum PipeEndpoint {
     Stream(SharedOutput),
     Script(ScriptPipeEndpoint),
     Inherit,

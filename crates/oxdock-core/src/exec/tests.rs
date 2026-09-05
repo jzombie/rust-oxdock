@@ -278,13 +278,115 @@ fn with_io_pipe_routes_stdout_to_run_stdin() {
     assert_eq!(stdin.as_deref(), Some(b"hello\n".as_slice()));
 }
 
+/// Byte-exact regression test for piped ASYNC output.
+///
+/// Mirrors the `async_run_direct` fixture: a background `ECHO` writes into a
+/// script pipe while the foreground `WRITE` drains it to a file. The snapshot
+/// holds raw bytes (no trimming), so this asserts the engine preserves the
+/// trailing newline end to end — pipe EOF included.
+#[test]
+fn async_echo_pipe_write_preserves_exact_bytes() {
+    let steps = vec![
+        Step {
+            guard: None,
+            kind: StepKind::WithIo {
+                bindings: vec![IoBinding {
+                    stream: IoStream::Stdout,
+                    pipe: Some("async_out".into()),
+                }],
+                cmd: Box::new(StepKind::AsyncBlock {
+                    body: vec![step(StepKind::Echo("hello".into()))],
+                }),
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+        },
+        Step {
+            guard: None,
+            kind: StepKind::WithIo {
+                bindings: vec![IoBinding {
+                    stream: IoStream::Stdin,
+                    pipe: Some("async_out".into()),
+                }],
+                cmd: Box::new(StepKind::Write {
+                    path: "async_out.txt".into(),
+                    contents: None,
+                }),
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+        },
+    ];
+    let (_cwd, files) = run_with_mock_fs(&steps);
+    let raw = files
+        .iter()
+        .find(|(k, _)| k.ends_with("async_out.txt"))
+        .map(|(_, v)| v.clone());
+    assert_eq!(raw, Some(b"hello\n".to_vec()));
+}
+
+/// Deterministic concurrency proof at the engine layer.
+///
+/// Mirrors the `async_inline_direct_proof` fixture: the background `WRITE`
+/// blocks on pipe stdin until the foreground `ECHO` delivers payload and EOF.
+/// A single-threaded executor would deadlock here; `AWAIT` joins the task so
+/// the assertion below cannot race the background thread. Raw snapshot bytes
+/// prove the payload — newline included — arrives intact.
+#[test]
+fn async_stdin_pipe_unblocks_background_write() {
+    let steps = vec![
+        Step {
+            guard: None,
+            kind: StepKind::AssignAsync {
+                var: "writer".into(),
+                body: vec![Step {
+                    guard: None,
+                    kind: StepKind::WithIo {
+                        bindings: vec![IoBinding {
+                            stream: IoStream::Stdin,
+                            pipe: Some("in_chan".into()),
+                        }],
+                        cmd: Box::new(StepKind::Write {
+                            path: "inline_direct.txt".into(),
+                            contents: None,
+                        }),
+                    },
+                    scope_enter: 0,
+                    scope_exit: 0,
+                }],
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+        },
+        Step {
+            guard: None,
+            kind: StepKind::WithIo {
+                bindings: vec![IoBinding {
+                    stream: IoStream::Stdout,
+                    pipe: Some("in_chan".into()),
+                }],
+                cmd: Box::new(StepKind::Echo("unblock_inline_payload".into())),
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+        },
+        step(StepKind::Await { var: "writer".into() }),
+    ];
+    let (_cwd, files) = run_with_mock_fs(&steps);
+    let raw = files
+        .iter()
+        .find(|(k, _)| k.ends_with("inline_direct.txt"))
+        .map(|(_, v)| v.clone());
+    assert_eq!(raw, Some(b"unblock_inline_payload\n".to_vec()));
+}
+
 fn success_status() -> ExitStatus {
     exit_status_from_code(0)
 }
 
 fn create_exec_state(fs: MockFs) -> ExecState<MockProcessManager> {
     let cargo = fs.root().join(".cargo-target").unwrap();
-    ExecState {
+    let mut state = ExecState {
         fs: Box::new(fs.clone()),
         cargo_target_dir: cargo,
         cwd: fs.root().clone(),
@@ -300,7 +402,11 @@ fn create_exec_state(fs: MockFs) -> ExecState<MockProcessManager> {
         next_task_id: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         inside_async: false,
         _marker: std::marker::PhantomData,
-    }
+    };
+    // Mirror production (`run_steps_with_manager`): push a global variable
+    // scope so top-level LET assignments are captured.
+    state.push_var_scope();
+    state
 }
 
 fn run_with_mock_fs(steps: &[Step]) -> (GuardedPath, HashMap<String, Vec<u8>>) {

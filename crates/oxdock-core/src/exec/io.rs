@@ -7,6 +7,63 @@ use oxdock_process::{CommandStderr, CommandStdout, SharedInput, SharedOutput};
 
 use super::pipe::{PipeEndpoint, PipeOutputs, ScriptPipe};
 
+/// Shared pipe registry. All threads in the same execution context
+/// reference the same registry, so pipes created by the parent are
+/// visible to child threads.
+#[derive(Clone, Default)]
+pub(super) struct PipeRegistry {
+    input: Arc<Mutex<HashMap<String, SharedInput>>>,
+    output: Arc<Mutex<HashMap<String, PipeOutputs>>>,
+}
+
+impl PipeRegistry {
+    fn ensure_pipe(&self, name: &str) {
+        let mut input = self.input.lock().expect("pipe lock poisoned");
+        let mut output = self.output.lock().expect("pipe lock poisoned");
+        if input.contains_key(name) || output.contains_key(name) {
+            return;
+        }
+        let pipe = ScriptPipe::new();
+        input.insert(name.to_string(), pipe.reader());
+        let endpoint = PipeEndpoint::script(pipe.endpoint());
+        let outputs = PipeOutputs {
+            stdout: Some(endpoint.clone()),
+            stderr: Some(endpoint),
+        };
+        output.insert(name.to_string(), outputs);
+    }
+
+    fn input_pipe(&self, name: &str) -> Option<SharedInput> {
+        self.input.lock().expect("pipe lock poisoned").get(name).cloned()
+    }
+
+    fn output_pipe_stdout(&self, name: &str) -> Option<PipeEndpoint> {
+        self.output
+            .lock()
+            .expect("pipe lock poisoned")
+            .get(name)
+            .and_then(|pipe| pipe.stdout.clone())
+    }
+
+    fn output_pipe_stderr(&self, name: &str) -> Option<PipeEndpoint> {
+        self.output
+            .lock()
+            .expect("pipe lock poisoned")
+            .get(name)
+            .and_then(|pipe| pipe.stderr.clone())
+    }
+}
+
+#[derive(Clone, Default)]
+pub struct ExecIo {
+    stdin: Option<SharedInput>,
+    stdout: Option<SharedOutput>,
+    stderr: Option<SharedOutput>,
+    pipes: PipeRegistry,
+    inherit_env_overrides: HashMap<String, String>,
+    inherit_env_removed: HashSet<String>,
+}
+
 /// Standard chunk size for all I/O handlers.
 pub const CHUNK_SIZE: usize = 8192;
 
@@ -75,17 +132,6 @@ impl SlidingWindow {
     pub fn ring_buffer(&self) -> Vec<u8> {
         self.ring.iter().copied().collect()
     }
-}
-
-#[derive(Clone, Default)]
-pub struct ExecIo {
-    stdin: Option<SharedInput>,
-    stdout: Option<SharedOutput>,
-    stderr: Option<SharedOutput>,
-    input_pipes: Arc<Mutex<HashMap<String, SharedInput>>>,
-    output_pipes: Arc<Mutex<HashMap<String, PipeOutputs>>>,
-    inherit_env_overrides: HashMap<String, String>,
-    inherit_env_removed: HashSet<String>,
 }
 
 #[derive(Clone)]
@@ -225,55 +271,42 @@ impl ExecIo {
     }
 
     pub fn insert_input_pipe<S: Into<String>>(&mut self, name: S, reader: SharedInput) {
-        self.input_pipes.lock().expect("pipe lock poisoned").insert(name.into(), reader);
+        self.pipes.input.lock().expect("pipe lock poisoned").insert(name.into(), reader);
     }
 
     pub fn insert_output_pipe<S: Into<String>>(&mut self, name: S, writer: SharedOutput) {
-        let mut pipes = self.output_pipes.lock().expect("pipe lock poisoned");
-        let entry = pipes.entry(name.into()).or_default();
+        let mut output = self.pipes.output.lock().expect("pipe lock poisoned");
+        let entry = output.entry(name.into()).or_default();
         entry.stdout = Some(PipeEndpoint::stream(writer.clone()));
         entry.stderr = Some(PipeEndpoint::stream(writer));
     }
 
     pub fn insert_output_pipe_stdout<S: Into<String>>(&mut self, name: S, writer: SharedOutput) {
-        let mut pipes = self.output_pipes.lock().expect("pipe lock poisoned");
-        let entry = pipes.entry(name.into()).or_default();
+        let mut output = self.pipes.output.lock().expect("pipe lock poisoned");
+        let entry = output.entry(name.into()).or_default();
         entry.stdout = Some(PipeEndpoint::stream(writer));
     }
 
     pub fn insert_output_pipe_stderr<S: Into<String>>(&mut self, name: S, writer: SharedOutput) {
-        let mut pipes = self.output_pipes.lock().expect("pipe lock poisoned");
-        let entry = pipes.entry(name.into()).or_default();
+        let mut output = self.pipes.output.lock().expect("pipe lock poisoned");
+        let entry = output.entry(name.into()).or_default();
         entry.stderr = Some(PipeEndpoint::stream(writer));
     }
 
     pub fn insert_output_pipe_stdout_inherit<S: Into<String>>(&mut self, name: S) {
-        let mut pipes = self.output_pipes.lock().expect("pipe lock poisoned");
-        let entry = pipes.entry(name.into()).or_default();
+        let mut output = self.pipes.output.lock().expect("pipe lock poisoned");
+        let entry = output.entry(name.into()).or_default();
         entry.stdout = Some(PipeEndpoint::Inherit);
     }
 
     pub fn insert_output_pipe_stderr_inherit<S: Into<String>>(&mut self, name: S) {
-        let mut pipes = self.output_pipes.lock().expect("pipe lock poisoned");
-        let entry = pipes.entry(name.into()).or_default();
+        let mut output = self.pipes.output.lock().expect("pipe lock poisoned");
+        let entry = output.entry(name.into()).or_default();
         entry.stderr = Some(PipeEndpoint::Inherit);
     }
 
     pub(super) fn ensure_script_pipe(&mut self, name: &str) {
-        let mut input = self.input_pipes.lock().expect("pipe lock poisoned");
-        let mut output = self.output_pipes.lock().expect("pipe lock poisoned");
-        if input.contains_key(name) || output.contains_key(name) {
-            return;
-        }
-
-        let pipe = ScriptPipe::new();
-        input.insert(name.to_string(), pipe.reader());
-        let endpoint = PipeEndpoint::script(pipe.endpoint());
-        let outputs = PipeOutputs {
-            stdout: Some(endpoint.clone()),
-            stderr: Some(endpoint),
-        };
-        output.insert(name.to_string(), outputs);
+        self.pipes.ensure_pipe(name);
     }
 
     pub fn stdin(&self) -> Option<SharedInput> {
@@ -289,23 +322,15 @@ impl ExecIo {
     }
 
     pub fn input_pipe(&self, name: &str) -> Option<SharedInput> {
-        self.input_pipes.lock().expect("pipe lock poisoned").get(name).cloned()
+        self.pipes.input_pipe(name)
     }
 
     pub(super) fn output_pipe_stdout(&self, name: &str) -> Option<PipeEndpoint> {
-        self.output_pipes
-            .lock()
-            .expect("pipe lock poisoned")
-            .get(name)
-            .and_then(|pipe| pipe.stdout.clone())
+        self.pipes.output_pipe_stdout(name)
     }
 
     pub(super) fn output_pipe_stderr(&self, name: &str) -> Option<PipeEndpoint> {
-        self.output_pipes
-            .lock()
-            .expect("pipe lock poisoned")
-            .get(name)
-            .and_then(|pipe| pipe.stderr.clone())
+        self.pipes.output_pipe_stderr(name)
     }
 }
 

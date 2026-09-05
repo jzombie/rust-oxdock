@@ -647,6 +647,41 @@ fn parse_let_async_statement_from_pair(
                     scope_exit: 0,
                 }]);
             }
+            Rule::with_io_command => {
+                // LET $var = WITH_IO [flags] ASYNC <single command> binds a
+                // pipe-wired background task. The bindings apply inside the
+                // task thread — the same shape as a braced body holding one
+                // WITH_IO step, which the AssignAsync runtime path supports.
+                let kind = parse_structural_command_with_lower(inner, lower)?;
+                let StepKind::WithIo { bindings, cmd } = kind else {
+                    bail!(
+                        "LET $var = WITH_IO requires an ASYNC command (e.g. LET $t = WITH_IO [stdin=pipe:p] ASYNC WRITE \"f\")"
+                    );
+                };
+                let StepKind::AsyncBlock { body: async_body } = *cmd else {
+                    bail!(
+                        "LET $var = WITH_IO requires an ASYNC command (e.g. LET $t = WITH_IO [stdin=pipe:p] ASYNC WRITE \"f\")"
+                    );
+                };
+                if async_body.len() != 1 {
+                    bail!(
+                        "LET $var = WITH_IO [..] ASYNC accepts a single command; use LET $var = ASYNC {{ ... }} with WITH_IO inside the block for multi-step tasks"
+                    );
+                }
+                let step = async_body
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| anyhow!("LET $var = ASYNC requires a body"))?;
+                body = Some(vec![Step {
+                    guard: step.guard,
+                    kind: StepKind::WithIo {
+                        bindings,
+                        cmd: Box::new(step.kind),
+                    },
+                    scope_enter: step.scope_enter,
+                    scope_exit: step.scope_exit,
+                }]);
+            }
             _ => {}
         }
     }

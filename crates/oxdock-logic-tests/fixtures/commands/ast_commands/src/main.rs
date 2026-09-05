@@ -504,7 +504,13 @@ fn load_case_steps(
             .with_context(|| format!("render script {}", case.script_rel))?;
         let steps = oxdock_core::parse_script(&rendered)
             .with_context(|| format!("parse script {}", case.script_rel))?;
-        out.insert(case.name.clone(), steps);
+        out.insert(case.name.clone(), steps.clone());
+        // Alias by directory name: coverage.toml may reference a case by its
+        // directory when the declared `name` differs (e.g. directory
+        // `with_io_async` declares `name = "with_io_bg"`).
+        if case.dir_name != case.name {
+            out.insert(case.dir_name.clone(), steps);
+        }
     }
     Ok(out)
 }
@@ -829,13 +835,11 @@ fn verify_root(expect: &RootExpect, root: &GuardedPath) -> Result<()> {
     }
 
     for (path, expected) in &expect.files {
-        let actual = read_trimmed_root(root, path)?;
+        let actual = read_root_exact(root, path)?;
         if actual != *expected {
             return Err(anyhow!(
-                "expected {} to contain {}, got {}",
-                path,
-                expected,
-                actual
+                "expected {} to contain {:?}, got {:?}",
+                path, expected, actual
             ));
         }
     }
@@ -885,6 +889,15 @@ fn read_trimmed_root(root: &GuardedPath, rel: &str) -> Result<String> {
         .read_to_string(&root.join(rel)?)?
         .trim()
         .to_string())
+}
+
+/// Byte-exact file read for `files` assertions. Unlike `read_trimmed_root`
+/// (kept for `ls`/`cwd`/`hash`, which compare against computed strings that
+/// carry no trailing newline), file contents are verified byte-for-byte:
+/// `"payload"` and `"payload\n"` are distinct expectations.
+fn read_root_exact(root: &GuardedPath, rel: &str) -> Result<String> {
+    let resolver = PathResolver::new(root.as_path(), root.as_path())?;
+    resolver.read_to_string(&root.join(rel)?)
 }
 
 fn guard_root(temp: &GuardedTempDir) -> GuardedPath {

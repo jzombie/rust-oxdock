@@ -134,7 +134,10 @@ async_statement_block = { async_keyword ~ sep? ~ block }
 // then requires ASYNC keyword followed by block or inline command.
 // LET $var = ASYNC { ... } — spawn background task, store handle in $var
 // Implicit whitespace handles spacing between tokens in non-atomic rules.
-let_async_statement = { let_keyword ~ dollar_ident ~ "=" ~ "ASYNC" ~ (block | command_inner) }
+// LET $var = WITH_IO [flags] ASYNC <single command> binds a pipe-wired
+// background task. The bindings apply inside the task thread. Block form is
+// rejected during lowering: use LET $var = ASYNC { ... } instead.
+let_async_statement = { let_keyword ~ dollar_ident ~ "=" ~ ("ASYNC" ~ (block | command_inner) | with_io_command) }
 
 // AWAIT $var — block until task $var completes, propagate error if failed
 await_statement = { "AWAIT" ~ !(ASCII_ALPHANUMERIC | "_") ~ "$" ~ ident }

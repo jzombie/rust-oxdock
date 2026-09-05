@@ -1,4 +1,4 @@
 name = "async_proof"
 
 [expect]
-files = { "async_rec.txt" = "ping", "final_out.txt" = "pong\n" }
+files = { "async_rec.txt" = "ping\n", "final_out.txt" = "pong\n" }
