@@ -738,10 +738,6 @@ fn parse_else_clause(
     Ok(Vec::new())
 }
 
-fn is_async_compatible_kind(kind: &StepKind) -> bool {
-    matches!(kind, StepKind::Run(_) | StepKind::AsyncBlock { .. })
-}
-
 fn parse_async_statement_from_pair(
     pair: Pair<Rule>,
     lower: &dyn Fn(&str, Vec<Arg>) -> Result<StepKind>,
@@ -794,24 +790,18 @@ fn parse_async_statement_from_pair(
     }
     if let Some(body) = block_body {
         for step in &body {
-            if !is_async_compatible_kind(&step.kind) {
-                if matches!(&step.kind, StepKind::WithIo { .. }) {
-                    bail!(
-                        "WITH_IO cannot be placed inside ASYNC. Place WITH_IO outside ASYNC instead (e.g. WITH_IO [...] ASYNC RUN ...)"
-                    );
-                }
-                bail!("ASYNC block may only contain RUN or nested ASYNC commands");
-            }
-        }
-        Ok(StepKind::AsyncBlock { body })
-    } else if let Some(cmd) = inner_cmd {
-        if !is_async_compatible_kind(&cmd) {
-            if matches!(&cmd, StepKind::WithIo { .. }) {
+            if matches!(&step.kind, StepKind::WithIo { .. }) {
                 bail!(
                     "WITH_IO cannot be placed inside ASYNC. Place WITH_IO outside ASYNC instead (e.g. WITH_IO [...] ASYNC RUN ...)"
                 );
             }
-            bail!("ASYNC prefix may only be used with RUN or nested ASYNC commands");
+        }
+        Ok(StepKind::AsyncBlock { body })
+    } else if let Some(cmd) = inner_cmd {
+        if matches!(&cmd, StepKind::WithIo { .. }) {
+            bail!(
+                "WITH_IO cannot be placed inside ASYNC. Place WITH_IO outside ASYNC instead (e.g. WITH_IO [...] ASYNC RUN ...)"
+            );
         }
         Ok(StepKind::AsyncBlock {
             body: vec![Step {
@@ -838,13 +828,10 @@ fn parse_async_statement_block_from_pair(
     }
     let body = block_body.ok_or_else(|| anyhow!("async_statement_block requires a block"))?;
     for step in &body {
-        if !is_async_compatible_kind(&step.kind) {
-            if matches!(&step.kind, StepKind::WithIo { .. }) {
-                bail!(
-                    "WITH_IO cannot be placed inside ASYNC. Place WITH_IO outside ASYNC instead (e.g. WITH_IO [...] ASYNC RUN ...)"
-                );
-            }
-            bail!("ASYNC block may only contain RUN or nested ASYNC commands");
+        if matches!(&step.kind, StepKind::WithIo { .. }) {
+            bail!(
+                "WITH_IO cannot be placed inside ASYNC. Place WITH_IO outside ASYNC instead (e.g. WITH_IO [...] ASYNC RUN ...)"
+            );
         }
     }
     Ok(StepKind::AsyncBlock { body })
