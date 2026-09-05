@@ -1,0 +1,11 @@
+# Proves ASYNC is truly concurrent:
+# 1. Background task writes to pipe via ECHO
+# 2. Foreground reads from pipe and writes to file
+# 3. If ASYNC were synchronous, pipe read would deadlock
+
+LET $task = ASYNC {
+    WITH_IO [stdout=pipe:bg_out] ECHO "async_worked"
+}
+WITH_IO [stdin=pipe:bg_out] WRITE result.txt
+AWAIT $task
+READ result.txt

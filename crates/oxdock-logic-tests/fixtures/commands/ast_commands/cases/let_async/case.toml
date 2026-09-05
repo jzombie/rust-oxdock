@@ -1,0 +1,4 @@
+name = "let_async"
+
+[expect]
+files = { "result.txt" = "async_worked" }

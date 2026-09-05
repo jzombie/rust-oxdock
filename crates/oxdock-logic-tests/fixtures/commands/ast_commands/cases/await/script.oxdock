@@ -1,0 +1,18 @@
+# Proves multiple ASYNC tasks run concurrently:
+# 1. Two background tasks write to separate pipes
+# 2. Foreground reads both pipes and writes to files
+# 3. AWAIT ensures both complete
+# 4. If tasks were sequential, pipe reads would deadlock
+
+LET $task1 = ASYNC {
+    WITH_IO [stdout=pipe:pipe1] ECHO "output1"
+}
+LET $task2 = ASYNC {
+    WITH_IO [stdout=pipe:pipe2] ECHO "output2"
+}
+WITH_IO [stdin=pipe:pipe1] WRITE file1.txt
+WITH_IO [stdin=pipe:pipe2] WRITE file2.txt
+AWAIT $task1
+AWAIT $task2
+READ file1.txt
+READ file2.txt

@@ -32,6 +32,8 @@ Exit = ["exit"]
 Assign = ["assign"]
 For = ["for_loop"]
 If = ["if_statement"]
+AssignAsync = ["let_async"]
+Await = ["await"]
 
 [extras]
 cases = [
