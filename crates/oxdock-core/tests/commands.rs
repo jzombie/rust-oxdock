@@ -1317,6 +1317,8 @@ fn _assert_step_kind_exhaustiveness(kind: &StepKind) {
         StepKind::For { .. } => {}
         StepKind::If { .. } => {}
         StepKind::Assign { .. } => {}
+        StepKind::AssignAsync { .. } => {}
+        StepKind::Await { .. } => {}
     }
 }
 

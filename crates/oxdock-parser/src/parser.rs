@@ -520,6 +520,8 @@ fn parse_structural_command_with_lower(
         }
         Rule::for_statement => parse_for_statement_from_pair(pair, lower)?,
         Rule::let_statement => parse_let_statement_from_pair(pair)?,
+        Rule::let_async_statement => parse_let_async_statement_from_pair(pair, lower)?,
+        Rule::await_statement => parse_await_statement_from_pair(pair)?,
         Rule::if_statement => parse_if_statement_from_pair(pair, lower)?,
         Rule::async_statement => parse_async_statement_from_pair(pair, lower)?,
         Rule::async_statement_block => parse_async_statement_block_from_pair(pair, lower)?,
@@ -531,6 +533,10 @@ fn parse_structural_command_with_lower(
                 .next()
                 .ok_or_else(|| anyhow!("empty command_inner"))?;
             parse_structural_command_with_lower(inner, lower)?
+        }
+        Rule::instruction | Rule::instruction_inner => {
+            let (name, args) = extract_instruction(pair)?;
+            lower(&name, args)?
         }
         _ => bail!("unexpected structural command rule: {:?}", pair.as_rule()),
     };
@@ -609,6 +615,56 @@ fn parse_let_statement_from_pair(pair: Pair<Rule>) -> Result<StepKind> {
     Ok(StepKind::Assign {
         var: var.ok_or_else(|| anyhow!("LET requires a variable"))?,
         expr: expr.ok_or_else(|| anyhow!("LET requires an expression"))?,
+    })
+}
+
+fn parse_let_async_statement_from_pair(
+    pair: Pair<Rule>,
+    lower: &dyn Fn(&str, Vec<Arg>) -> Result<StepKind>,
+) -> Result<StepKind> {
+    let mut var = None;
+    let mut body = None;
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::dollar_ident => {
+                var = Some(parse_dollar_ident(inner));
+            }
+            Rule::block => {
+                body = Some(parse_block_elements_with_lower(inner, lower)?);
+            }
+            Rule::command_inner => {
+                // command_inner = { inherit_env_command | async_statement | async_statement_block | instruction }
+                // Unwrap to the inner rule
+                let inner = inner
+                    .into_inner()
+                    .next()
+                    .ok_or_else(|| anyhow!("empty command_inner"))?;
+                let step_kind = parse_structural_command_with_lower(inner, lower)?;
+                body = Some(vec![Step {
+                    guard: None,
+                    kind: step_kind,
+                    scope_enter: 0,
+                    scope_exit: 0,
+                }]);
+            }
+            _ => {}
+        }
+    }
+    Ok(StepKind::AssignAsync {
+        var: var.ok_or_else(|| anyhow!("LET $var = ASYNC requires a variable"))?,
+        body: body.ok_or_else(|| anyhow!("LET $var = ASYNC requires a body"))?,
+    })
+}
+
+fn parse_await_statement_from_pair(pair: Pair<Rule>) -> Result<StepKind> {
+    let mut var = None;
+    for inner in pair.into_inner() {
+        if inner.as_rule() == Rule::ident {
+            var = Some(inner.as_str().to_string());
+        }
+    }
+    Ok(StepKind::Await {
+        var: var.ok_or_else(|| anyhow!("AWAIT requires a variable"))?,
     })
 }
 
@@ -803,6 +859,8 @@ fn parse_block_elements_with_lower(
         match elem.as_rule() {
             Rule::for_statement
             | Rule::let_statement
+            | Rule::let_async_statement
+            | Rule::await_statement
             | Rule::if_statement
             | Rule::async_statement
             | Rule::async_statement_block => {

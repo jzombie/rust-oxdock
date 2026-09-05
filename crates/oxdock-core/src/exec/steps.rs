@@ -410,6 +410,8 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
             else_body,
         } => handlers::if_then(&mut cx, cond, then_body, else_ifs, else_body),
         StepKind::Assign { var, expr } => handlers::assign(&mut cx, var, expr),
+        StepKind::AssignAsync { var, body } => handlers::dispatch_assign_async(var, body, &mut cx),
+        StepKind::Await { var } => handlers::dispatch_await(var, &mut cx),
     }
 }
 
@@ -603,6 +605,8 @@ fn execute_steps_inner<P: ProcessManager>(
                     else_body,
                 } => handlers::if_then(&mut cx, cond, then_body, else_ifs, else_body),
                 StepKind::Assign { var, expr } => handlers::assign(&mut cx, var, expr),
+                StepKind::AssignAsync { var, body } => handlers::dispatch_assign_async(var, body, &mut cx),
+                StepKind::Await { var } => handlers::dispatch_await(var, &mut cx),
             }
         };
 

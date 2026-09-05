@@ -92,7 +92,7 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
                             .cloned()
                             .ok_or_else(|| anyhow::anyhow!("Index {} out of bounds", idx))?;
                     }
-                    Value::String(_) | Value::Bool(_) | Value::Int(_) => {
+                    Value::String(_) | Value::Bool(_) | Value::Int(_) | Value::TaskHandle(_) => {
                         bail!("Cannot traverse into scalar value at key '{}'", key);
                     }
                 }
@@ -459,5 +459,6 @@ pub(crate) fn format_value_for_string(val: &Value) -> String {
             .map(|(k, v)| format!("\"{}\": {}", k, format_value_for_string(v)))
             .collect::<Vec<_>>()
             .join(", "),
+        Value::TaskHandle(id) => format!("task#{}", id),
     }
 }

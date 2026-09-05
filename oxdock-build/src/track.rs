@@ -260,6 +260,12 @@ pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
             StepKind::Assign { .. } => {
                 // LET assignments don't contain template strings that reference env vars
             }
+            StepKind::AssignAsync { body, .. } => {
+                for k in collect_env_references(body) {
+                    keys.insert(k);
+                }
+            }
+            StepKind::Await { .. } => {}
         }
     }
 

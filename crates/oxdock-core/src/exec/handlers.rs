@@ -1377,3 +1377,118 @@ pub(crate) fn dispatch_with_io_block<P: ProcessManager>(
     };
     with_io_block(cx, 0, 0, bindings)
 }
+
+// ── AWAIT / AssignAsync handlers ─────────────────────────────────────────
+
+/// Dispatch `LET $var = ASYNC { ... }` — spawn a background task and store
+/// the handle in the variable scope.
+pub(crate) fn dispatch_assign_async<P: ProcessManager>(
+    var: &str,
+    body: &[Step],
+    cx: &mut StepCtx<'_, P>,
+) -> Result<()> {
+    // Generate a unique task ID
+    let task_id = cx.state.next_task_id.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+    // Fork the execution state for the child thread
+    let forked_state = cx.state.fork();
+    let forked_process = cx.process.clone();
+    let body = body.to_vec();
+    let stdin = cx.stdin.clone();
+    let expose_stdin = cx.expose_stdin;
+    let out = cx.out.clone();
+    let err = cx.err.clone();
+    let cancel_token = std::sync::Arc::clone(&forked_state.cancel_token);
+    let active_process = std::sync::Arc::clone(&forked_state.active_process);
+
+    // Spawn the task thread
+    let join = std::thread::spawn(move || {
+        let mut child_state = forked_state;
+        let mut child_process = forked_process;
+        super::steps::execute_steps(
+            &mut child_state,
+            &mut child_process,
+            &body,
+            stdin,
+            expose_stdin,
+            out,
+            err,
+            true,
+        )
+    });
+
+    // Create the thread handle
+    let handle = super::steps::ThreadJoinHandle::new(join, cancel_token, active_process);
+
+    // Store in named_tasks
+    {
+        let mut named = cx
+            .state
+            .named_tasks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        named.insert(task_id, Box::new(handle));
+    }
+
+    // Store the task handle in the variable scope
+    cx.state.set_var(var.to_string(), Value::TaskHandle(task_id));
+    Ok(())
+}
+
+/// Dispatch `AWAIT $var` — block until the named task completes, propagate
+/// error if it failed.
+pub(crate) fn dispatch_await<P: ProcessManager>(
+    var: &str,
+    cx: &mut StepCtx<'_, P>,
+) -> Result<()> {
+    // Resolve the variable to a TaskHandle
+    let val = cx
+        .state
+        .get_var(var)
+        .ok_or_else(|| anyhow::anyhow!("variable '${var}' is not defined"))?;
+    let Value::TaskHandle(task_id) = val else {
+        bail!("variable '${var}' is not a task handle");
+    };
+
+    // Remove the handle from named_tasks
+    let mut handle = {
+        let mut named = cx
+            .state
+            .named_tasks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        named
+            .remove(&task_id)
+            .ok_or_else(|| anyhow::anyhow!("task handle for '${var}' was not found or has already been awaited"))?
+    };
+
+    // Wait for the task to complete
+    let status = handle.wait()?;
+
+    if !status.success() {
+        bail!("AWAIT task '${var}' failed with status {status}");
+    }
+    Ok(())
+}
+
+/// Pipeline dispatch wrapper for `AssignAsync`
+pub(crate) fn dispatch_assign_async_step<P: ProcessManager>(
+    step: &StepKind,
+    cx: &mut StepCtx<'_, P>,
+) -> Result<()> {
+    let StepKind::AssignAsync { var, body } = step else {
+        unreachable!()
+    };
+    dispatch_assign_async(var, body, cx)
+}
+
+/// Pipeline dispatch wrapper for `Await`
+pub(crate) fn dispatch_await_step<P: ProcessManager>(
+    step: &StepKind,
+    cx: &mut StepCtx<'_, P>,
+) -> Result<()> {
+    let StepKind::Await { var } = step else {
+        unreachable!()
+    };
+    dispatch_await(var, cx)
+}

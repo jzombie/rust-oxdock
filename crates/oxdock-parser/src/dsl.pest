@@ -12,11 +12,11 @@ blank = _{ (WHITESPACE | linebreak)+ }
 script = { SOI ~ element* ~ EOI }
 
 // Structural statements MUST precede generic commands
-element = _{ blank | hash_comment | COMMENT | semicolon | guard_line | block_start | block_end | if_statement | for_statement | let_statement | async_statement_block | async_statement | command }
+element = _{ blank | hash_comment | COMMENT | semicolon | guard_line | block_start | block_end | if_statement | for_statement | let_async_statement | await_statement | let_statement | async_statement_block | async_statement | command }
 
 // Inside for/let blocks, block_start/block_end must NOT appear as elements
 // (the block's own braces handle them).  Nested guard blocks use guard_block.
-block_element = _{ blank | hash_comment | COMMENT | semicolon | guard_block | guard_line | if_statement | for_statement | let_statement | async_statement_block | async_statement | command }
+block_element = _{ blank | hash_comment | COMMENT | semicolon | guard_block | guard_line | if_statement | for_statement | let_async_statement | await_statement | let_statement | async_statement_block | async_statement | command }
 guard_block = { guard_line ~ block }
 
 block_start = { "{" }
@@ -119,6 +119,26 @@ if_statement = { if_keyword ~ expr ~ block ~ (blank* ~ else_if_clause)* ~ blank*
 async_keyword = _{ "ASYNC" ~ !(ASCII_ALPHANUMERIC | "_") }
 async_statement = ${ async_keyword ~ sep ~ command_inner }
 async_statement_block = { async_keyword ~ sep? ~ block }
+
+// LET $var = ASYNC { ... } — spawn background task, store handle in $var
+// NOTE: "ASYNC" is consumed here, so we inline the block/inline forms
+// instead of reusing async_statement_block/async_statement (which expect
+// their own async_keyword).
+// LET $var = ASYNC { ... } — spawn background task, store handle in $var
+// Uses let_keyword to ensure "LET" is not followed by alphanumeric/underscore.
+// LET $var = ASYNC { ... } — spawn background task, store handle in $var
+// Uses let_keyword and dollar_ident to match exactly like let_statement,
+// then requires ASYNC keyword followed by block or inline command.
+// LET $var = ASYNC { ... } — spawn background task, store handle in $var
+// Uses let_keyword and dollar_ident to match exactly like let_statement,
+// then requires ASYNC keyword followed by block or inline command.
+// LET $var = ASYNC { ... } — spawn background task, store handle in $var
+// Implicit whitespace handles spacing between tokens in non-atomic rules.
+let_async_statement = { let_keyword ~ dollar_ident ~ "=" ~ "ASYNC" ~ (block | command_inner) }
+
+// AWAIT $var — block until task $var completes, propagate error if failed
+await_statement = { "AWAIT" ~ !(ASCII_ALPHANUMERIC | "_") ~ "$" ~ ident }
+
 command = _{ with_io_command | inherit_env_command | async_statement_block | async_statement | instruction_inner }
 command_inner = { inherit_env_command | async_statement | async_statement_block | instruction }
 

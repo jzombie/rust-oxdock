@@ -350,6 +350,7 @@ fn format_value_for_string(val: &oxdock_parser::Value) -> String {
             .map(|(k, v)| format!("\"{}\": {}", k, format_value_for_string(v)))
             .collect::<Vec<_>>()
             .join(", "),
+        oxdock_parser::Value::TaskHandle(id) => format!("task#{}", id),
     }
 }
 

@@ -152,6 +152,8 @@ declare_commands! {
         If { cond: Box<Expr>, then_body: Vec<Step>, else_ifs: Vec<(Box<Expr>, Vec<Step>)>, else_body: Option<Vec<Step>> },
         Assign { var: String, expr: Expr },
         AsyncBlock { body: Vec<Step> },
+        AssignAsync { var: String, body: Vec<Step> },
+        Await { var: String },
     ]
 
     Workdir => [
@@ -752,6 +754,14 @@ impl fmt::Display for StepKind {
                 }
                 write!(f, "\n}}")
             }
+            StepKind::AssignAsync { var, body } => {
+                write!(f, "LET ${} = ASYNC {{", var)?;
+                for s in body {
+                    write!(f, "\n    {}", s)?;
+                }
+                write!(f, "\n}}")
+            }
+            StepKind::Await { var } => write!(f, "AWAIT ${}", var),
         }
     }
 }

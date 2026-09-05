@@ -839,4 +839,52 @@ mod tests {
             other => panic!("expected WithIo, got {:?}", other),
         }
     }
+
+    #[test]
+    fn let_async_block_parses() {
+        let script = indoc! {r#"
+            LET $task = ASYNC {
+                RUN "echo hello"
+            }
+        "#};
+        let steps = parse_script(script, test_lower).expect("parse should succeed");
+        assert_eq!(steps.len(), 1);
+        match &steps[0].kind {
+            StepKind::AssignAsync { var, body } => {
+                assert_eq!(var, "task");
+                assert_eq!(body.len(), 1);
+                assert!(matches!(&body[0].kind, StepKind::Run(_)));
+            }
+            other => panic!("expected AssignAsync, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn let_async_inline_parses() {
+        let script = "LET $t = ASYNC RUN \"echo hi\"";
+        let steps = parse_script(script, test_lower).expect("parse should succeed");
+        assert_eq!(steps.len(), 1);
+        match &steps[0].kind {
+            StepKind::AssignAsync { var, body } => {
+                assert_eq!(var, "t");
+                assert_eq!(body.len(), 1);
+                assert!(matches!(&body[0].kind, StepKind::Run(_)));
+            }
+            other => panic!("expected AssignAsync, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn await_parses() {
+        let script = "AWAIT $task";
+        let steps = parse_script(script, test_lower).expect("parse should succeed");
+        assert_eq!(steps.len(), 1);
+        match &steps[0].kind {
+            StepKind::Await { var } => {
+                assert_eq!(var, "task");
+            }
+            other => panic!("expected Await, got {:?}", other),
+        }
+    }
+
 }

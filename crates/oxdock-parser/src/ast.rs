@@ -310,6 +310,9 @@ pub enum Value {
     List(Vec<Value>),
     Map(std::collections::BTreeMap<String, Value>),
     Bool(bool),
+    /// Handle to a background ASYNC task. The `u64` is the task ID
+    /// used to look up the handle in `ExecState.named_tasks`.
+    TaskHandle(u64),
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -477,6 +480,7 @@ impl fmt::Display for Value {
                 write!(f, "}}")
             }
             Value::Bool(b) => write!(f, "{}", b),
+            Value::TaskHandle(id) => write!(f, "task#{}", id),
         }
     }
 }

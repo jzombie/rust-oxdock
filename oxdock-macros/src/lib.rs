@@ -724,6 +724,7 @@ fn emit_raw_value(v: &Value, interp: &[(proc_macro2::Ident, usize)]) -> proc_mac
         }
         Value::Bool(b) => quote! { Value::Bool(#b) },
         Value::Int(i) => quote! { Value::Int(#i) },
+        Value::TaskHandle(id) => quote! { Value::TaskHandle(#id) },
     }
 }
 
@@ -946,6 +947,13 @@ fn emit_stepkind(
         StepKind::Assign { var, expr } => {
             let e = emit_expr(expr, interp);
             quote! { StepKind::Assign { var: #var.to_string(), expr: #e } }
+        }
+        StepKind::AssignAsync { var, body } => {
+            let steps: Vec<_> = body.iter().map(|s| emit_step(s, interp)).collect();
+            quote! { StepKind::AssignAsync { var: #var.to_string(), body: vec![#(#steps),*] } }
+        }
+        StepKind::Await { var } => {
+            quote! { StepKind::Await { var: #var.to_string() } }
         }
     }
 }
