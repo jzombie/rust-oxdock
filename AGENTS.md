@@ -38,7 +38,7 @@ Prefer explicit, test-only skips over runtime detection.
 ## Cross-Platform Compatibility
 
 - **Consistency**: All features and DSL commands must behave identically across platforms (Linux, macOS, Windows) as much as possible.
-- **Exceptions**: Only `RUN` and `RUN_BG` commands are expected to differ, as they execute arbitrary shell commands specific to the host OS.
+- **Exceptions**: Only `RUN` and `ASYNC` commands are expected to differ, as they execute arbitrary shell commands specific to the host OS.
 - **Testing**: Tests must ensure parity. If platform-specific setup is required (e.g. creating symlinks in test fixtures), ensure both Unix and Windows paths are covered.
 
 ## Testing & Layout
