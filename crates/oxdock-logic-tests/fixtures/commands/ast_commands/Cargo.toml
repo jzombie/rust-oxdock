@@ -1,8 +1,7 @@
 [package]
 name = "fixture-ast-commands"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
+version = "0.0.0"
+edition = "2024"
 
 # This crate should not be published
 publish = false
