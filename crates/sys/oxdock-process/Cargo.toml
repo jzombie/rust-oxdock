@@ -16,3 +16,9 @@ anyhow.workspace = true
 oxdock-fs.workspace = true
 oxdock-parser.workspace = true
 oxdock-sys-test-utils.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true

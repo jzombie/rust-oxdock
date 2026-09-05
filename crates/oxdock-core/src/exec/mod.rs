@@ -156,6 +156,12 @@ fn run_steps_with_manager<P: ProcessManager>(
         io,
         assert_windows: assert_windows.clone(),
         var_scopes: Vec::new(),
+        cancel_token: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        active_process: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        named_tasks: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        next_task_id: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        inside_async: false,
+        _marker: std::marker::PhantomData,
     };
 
     // Push a global variable scope so top-level LET assignments are captured.

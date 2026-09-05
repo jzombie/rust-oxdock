@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use oxdock_fs::EntryKind;
 use oxdock_parser::{
-    Expr, IoBinding, IoStream, Step, StepKind, Value, WorkspaceTarget, guard_option_allows,
+    Expr, IoBinding, IoStream, Step, StepKind, Value, WorkspaceTarget,
 };
 use oxdock_process::{
     BackgroundHandle, CommandOptions, CommandResult, CommandStderr, CommandStdout, ProcessManager,
@@ -121,23 +121,57 @@ pub(super) fn run<P: ProcessManager>(cx: &mut StepCtx<'_, P>, idx: usize, cmd: &
             .unwrap_or(CommandStderr::Inherit)
     };
 
-    let mut options = CommandOptions::foreground();
+    let mut options = if cx.state.inside_async {
+        // Inside an ASYNC block — use background mode so we can register
+        // the handle for cancellation via active_process.
+        CommandOptions::background()
+    } else {
+        CommandOptions::foreground()
+    };
     options.stdin = step_stdin;
     options.stdout = stdout_mode;
     options.stderr = stderr_mode;
-    match cx
-        .process
-        .run_command(&ctx, cmd, options)
-        .with_context(|| format!("step {}: RUN {}", idx + 1, cmd))?
-    {
-        CommandResult::Completed => Ok(()),
+
+    // Spawn the command.
+    let mut handle = match cx.process.spawn_command(&ctx, cmd, options).with_context(|| {
+        format!("step {}: RUN {}", idx + 1, cmd)
+    })? {
+        CommandResult::Background(h) => h,
+        CommandResult::Completed => return Ok(()),
         CommandResult::Captured(_) => {
             bail!("step {}: RUN {} unexpectedly captured output", idx + 1, cmd)
         }
-        CommandResult::Background(_) => {
-            bail!("step {}: RUN {} returned background handle", idx + 1, cmd)
-        }
+    };
+
+    // Register the handle for cancellation (only meaningful for background handles).
+    {
+        let mut guard = cx
+            .state
+            .active_process
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *guard = Some(Box::new(handle.clone()));
     }
+
+    // Wait for the process to complete.
+    let status = handle.wait();
+
+    // Clear the registration BEFORE dropping the handle clone in active_process.
+    // The clone was never polled, so we must prevent Drop from logging it as killed.
+    {
+        let mut guard = cx
+            .state
+            .active_process
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *guard = None;
+    }
+
+    let status = status?;
+    if !status.success() {
+        bail!("step {}: RUN {} exited with status {}", idx + 1, cmd, status);
+    }
+    Ok(())
 }
 
 pub(super) fn echo<P: ProcessManager>(cx: &mut StepCtx<'_, P>, msg: &str) -> Result<()> {
@@ -146,53 +180,6 @@ pub(super) fn echo<P: ProcessManager>(cx: &mut StepCtx<'_, P>, msg: &str) -> Res
         Ok(())
     })?;
     Ok(())
-}
-
-pub(super) fn run_bg<P: ProcessManager>(
-    cx: &mut StepCtx<'_, P>,
-    idx: usize,
-    cmd: &str,
-) -> Result<()> {
-    let ctx = cx.state.command_ctx()?;
-    let step_stdin = if cx.expose_stdin {
-        cx.stdin.clone()
-    } else {
-        None
-    };
-    let stdout_mode = cx
-        .out
-        .clone()
-        .map(|handle| handle.to_stdout())
-        .unwrap_or(CommandStdout::Inherit);
-    let stderr_mode = cx
-        .err
-        .clone()
-        .map(|handle| handle.to_stderr())
-        .unwrap_or(CommandStderr::Inherit);
-    let mut options = CommandOptions::background();
-    options.stdin = step_stdin;
-    options.stdout = stdout_mode;
-    options.stderr = stderr_mode;
-    match cx
-        .process
-        .run_command(&ctx, cmd, options)
-        .with_context(|| format!("step {}: ASYNC {}", idx + 1, cmd))?
-    {
-        CommandResult::Background(handle) => {
-            cx.state.bg_children.push(handle);
-            Ok(())
-        }
-        CommandResult::Completed => {
-            bail!("step {}: ASYNC {} finished synchronously", idx + 1, cmd)
-        }
-        CommandResult::Captured(_) => {
-            bail!(
-                "step {}: ASYNC {} attempted to capture output",
-                idx + 1,
-                cmd
-            )
-        }
-    }
 }
 
 pub(super) fn copy<P: ProcessManager>(
@@ -849,7 +836,7 @@ pub(crate) fn with_io<P: ProcessManager>(
 
 pub(super) fn exit<P: ProcessManager>(cx: &mut StepCtx<'_, P>, code: i32) -> Result<()> {
     for child in cx.state.bg_children.iter_mut() {
-        if child.try_wait()?.is_none() {
+        if let Ok(None) = child.try_wait() {
             let _ = child.kill();
             let _ = child.try_wait();
         }
@@ -1025,30 +1012,6 @@ pub(crate) fn dispatch_run<P: ProcessManager>(
     run(cx, 0, &cmd)
 }
 
-fn collect_resolved_run_commands<P: ProcessManager>(
-    steps: &[Step],
-    cx: &mut StepCtx<'_, P>,
-    out: &mut Vec<String>,
-) -> Result<()> {
-    for step in steps {
-        if !guard_option_allows(step.guard.as_ref(), &cx.state.envs) {
-            continue;
-        }
-        match &step.kind {
-            StepKind::Run(arg) => {
-                let cmd = super::args::resolve_arg(arg, cx)?;
-                let cmd = super::args::expand_dsl_vars(&cmd, cx.state);
-                out.push(cmd);
-            }
-            StepKind::AsyncBlock { body } => {
-                collect_resolved_run_commands(body, cx, out)?;
-            }
-            _ => bail!("ASYNC block contains unsupported command type"),
-        }
-    }
-    Ok(())
-}
-
 pub(crate) fn dispatch_async_block<P: ProcessManager>(
     step: &StepKind,
     cx: &mut StepCtx<'_, P>,
@@ -1056,17 +1019,44 @@ pub(crate) fn dispatch_async_block<P: ProcessManager>(
     let StepKind::AsyncBlock { body } = step else {
         unreachable!()
     };
-    let mut resolved_cmds = Vec::new();
-    collect_resolved_run_commands(body, cx, &mut resolved_cmds)?;
-    if resolved_cmds.is_empty() {
-        return Ok(());
-    }
-    let grouped_cmds: Vec<String> = resolved_cmds
-        .into_iter()
-        .map(|cmd| format!("({cmd})"))
-        .collect();
-    let script = grouped_cmds.join(" && ");
-    super::steps::run_bg_from_str(cx, 0, &script)
+
+    // Fork the execution state for the child thread.
+    // This clones the fs (via clone_box), envs, cwd, var_scopes, etc.
+    // The child gets fresh bg_children and scope_stack.
+    let forked_state = cx.state.fork();
+    let forked_process = cx.process.clone();
+    let body = body.clone();
+    let stdin = cx.stdin.clone();
+    let expose_stdin = cx.expose_stdin;
+    let out = cx.out.clone();
+    let err = cx.err.clone();
+    let cancel_token = std::sync::Arc::clone(&forked_state.cancel_token);
+    let active_process = std::sync::Arc::clone(&forked_state.active_process);
+
+    // Spawn a thread that executes the block's steps with subshell isolation.
+    // ENV/WORKDIR/etc mutations in the block do not leak to the parent.
+    let join = std::thread::spawn(move || {
+        let mut child_state = forked_state;
+        let mut child_process = forked_process;
+        super::steps::execute_steps(
+            &mut child_state,
+            &mut child_process,
+            &body,
+            stdin,
+            expose_stdin,
+            out,
+            err,
+            true, // wait_at_end: child waits for its own bg_children
+        )
+    });
+
+    // Store the thread handle as a background handle in the parent's state.
+    cx.state
+        .bg_children
+        .push(Box::new(super::steps::ThreadJoinHandle::new(
+            join, cancel_token, active_process,
+        )));
+    Ok(())
 }
 
 pub(crate) fn dispatch_echo<P: ProcessManager>(

@@ -1,14 +1,124 @@
+use std::process::ExitStatus;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Mutex;
 
 use anyhow::{Result, bail};
 use oxdock_fs::GuardedPath;
 use oxdock_parser::{Arg, Step, StepKind, guard_option_allows};
 use oxdock_process::{BackgroundHandle, ProcessManager, SharedInput};
 
+/// Create an ExitStatus from a raw exit code. Cross-platform.
+fn exit_status_from_code(code: i32) -> ExitStatus {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        ExitStatus::from_raw(code << 8)
+    }
+    #[cfg(windows)]
+    {
+        ExitStatus::from_raw(code as u32)
+    }
+}
+
 use super::handlers;
 use super::io::{SlidingWindow, StreamHandle};
 use super::state::{ExecState, ScopeSnapshot};
+
+/// A background handle wrapping a `std::thread::JoinHandle` for ASYNC blocks
+/// that execute commands in a background thread.
+pub(super) struct ThreadJoinHandle {
+    join: Option<std::thread::JoinHandle<Result<()>>>,
+    cancel_token: Arc<AtomicBool>,
+    active_process: Arc<Mutex<Option<Box<dyn BackgroundHandle>>>>,
+    /// Preserved error from the child thread, if any.
+    thread_error: Option<anyhow::Error>,
+}
+
+impl ThreadJoinHandle {
+    pub(super) fn new(
+        join: std::thread::JoinHandle<Result<()>>,
+        cancel_token: Arc<AtomicBool>,
+        active_process: Arc<Mutex<Option<Box<dyn BackgroundHandle>>>>,
+    ) -> Self {
+        Self {
+            join: Some(join),
+            cancel_token,
+            active_process,
+            thread_error: None,
+        }
+    }
+
+    /// Reap the thread if finished, preserving any error.
+    fn reap(&mut self) {
+        if self.join.is_none() {
+            return;
+        }
+        let handle = self.join.take().unwrap();
+        match handle.join() {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                self.thread_error = Some(e);
+            }
+            Err(panic) => {
+                let msg = if let Some(s) = panic.downcast_ref::<&str>() {
+                    s.to_string()
+                } else if let Some(s) = panic.downcast_ref::<String>() {
+                    s.clone()
+                } else {
+                    "thread panicked".to_string()
+                };
+                self.thread_error = Some(anyhow::anyhow!("{msg}"));
+            }
+        }
+    }
+}
+
+impl BackgroundHandle for ThreadJoinHandle {
+    fn try_wait(&mut self) -> Result<Option<ExitStatus>> {
+        if let Some(join) = &self.join {
+            if join.is_finished() {
+                self.reap();
+            } else {
+                return Ok(None);
+            }
+        }
+        if let Some(ref err) = self.thread_error {
+            Err(anyhow::anyhow!("{err}"))
+        } else {
+            Ok(Some(exit_status_from_code(0)))
+        }
+    }
+
+    fn kill(&mut self) -> Result<()> {
+        // Signal cancellation
+        self.cancel_token.store(true, Ordering::SeqCst);
+        // Kill any active OS process to interrupt blocking wait
+        if let Ok(mut guard) = self.active_process.lock()
+            && let Some(ref mut proc) = *guard
+        {
+            let _ = proc.kill();
+        }
+        // Join the thread to ensure it completes before returning
+        self.reap();
+        Ok(())
+    }
+
+    fn wait(&mut self) -> Result<ExitStatus> {
+        self.reap();
+        if let Some(ref err) = self.thread_error {
+            Err(anyhow::anyhow!("{err}"))
+        } else {
+            Ok(exit_status_from_code(0))
+        }
+    }
+}
+
+impl Drop for ThreadJoinHandle {
+    fn drop(&mut self) {
+        let _ = self.kill();
+    }
+}
 
 /// Monotonically increasing generation counter for assert_windows key scoping.
 /// Each execute_steps invocation gets a unique generation, preventing key
@@ -322,6 +432,10 @@ fn execute_steps_inner<P: ProcessManager>(
     pre_register_assertions(state, steps, generation)?;
 
     for (idx, step) in steps.iter().enumerate() {
+        // Check for cancellation before each step
+        if state.cancel_token.load(Ordering::SeqCst) {
+            bail!("ASYNC task cancelled");
+        }
         if step.scope_enter > 0 {
             for _ in 0..step.scope_enter {
                 state.scope_stack.push(ScopeSnapshot {
@@ -497,30 +611,90 @@ fn execute_steps_inner<P: ProcessManager>(
         restore_result?;
     }
 
-    if wait_at_end && !state.bg_children.is_empty() {
+    // Poll both bg_children and named_tasks at end-of-pipeline
+    let has_bg = !state.bg_children.is_empty();
+    let has_named = !state
+        .named_tasks
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_empty();
+    if wait_at_end && (has_bg || has_named) {
         loop {
+            let mut failed_status: Option<anyhow::Error> = None;
+
+            // 1. Poll anonymous background handles
             let mut i = 0;
             while i < state.bg_children.len() {
-                match state.bg_children[i].try_wait()? {
-                    Some(status) => {
-                        if !status.success() {
-                            for survivor in state.bg_children.iter_mut() {
-                                if survivor.try_wait()?.is_none() {
-                                    let _ = survivor.kill();
-                                    let _ = survivor.try_wait();
-                                }
-                            }
-                            state.bg_children.clear();
-                            bail!("ASYNC process exited with status {}", status);
+                match state.bg_children[i].try_wait() {
+                    Ok(Some(status)) => {
+                        if !status.success() && failed_status.is_none() {
+                            failed_status =
+                                Some(anyhow::anyhow!("ASYNC process exited with status {status}"));
+                            break;
                         }
                         state.bg_children.swap_remove(i);
                     }
-                    None => {
+                    Ok(None) => {
                         i += 1;
+                    }
+                    Err(e) => {
+                        if failed_status.is_none() {
+                            failed_status = Some(e);
+                        }
+                        break;
                     }
                 }
             }
-            if state.bg_children.is_empty() {
+
+            // 2. Poll un-awaited named tasks
+            if failed_status.is_none() {
+                let mut named = state
+                    .named_tasks
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                named.retain(|id, task| match task.try_wait() {
+                    Ok(Some(status)) => {
+                        if !status.success() && failed_status.is_none() {
+                            failed_status = Some(anyhow::anyhow!(
+                                "named ASYNC task {id} exited with status {status}"
+                            ));
+                        }
+                        false // remove completed task
+                    }
+                    Ok(None) => true, // retain running task
+                    Err(e) => {
+                        if failed_status.is_none() {
+                            failed_status = Some(e);
+                        }
+                        false
+                    }
+                });
+            }
+
+            // 3. Fail-fast teardown
+            if let Some(err) = failed_status {
+                for survivor in state.bg_children.iter_mut() {
+                    let _ = survivor.kill();
+                }
+                let mut named = state
+                    .named_tasks
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                for survivor in named.values_mut() {
+                    let _ = survivor.kill();
+                }
+                state.bg_children.clear();
+                named.clear();
+                return Err(err);
+            }
+
+            let bg_empty = state.bg_children.is_empty();
+            let named_empty = state
+                .named_tasks
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty();
+            if bg_empty && named_empty {
                 return Ok(());
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
@@ -528,14 +702,6 @@ fn execute_steps_inner<P: ProcessManager>(
     }
 
     Ok(())
-}
-
-pub(super) fn run_bg_from_str<P: ProcessManager>(
-    cx: &mut StepCtx<'_, P>,
-    idx: usize,
-    cmd: &str,
-) -> Result<()> {
-    handlers::run_bg(cx, idx, cmd)
 }
 
 fn restore_scopes<P: ProcessManager>(state: &mut ExecState<P>, count: usize) -> Result<()> {

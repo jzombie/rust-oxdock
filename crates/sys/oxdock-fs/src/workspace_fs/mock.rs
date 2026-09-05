@@ -1,8 +1,7 @@
-use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 use std::path::Path;
-use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, bail};
 
@@ -14,14 +13,14 @@ use super::GuardedPath;
 
 /// Write cursor for MockFs that buffers data and flushes to in-memory state on drop.
 struct MockWriteCursor {
-    state: Rc<RefCell<MockState>>,
+    state: Arc<Mutex<MockState>>,
     rel: String,
 }
 
 impl std::io::Write for MockWriteCursor {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         // Append to mock state
-        let mut state = self.state.borrow_mut();
+        let mut state = self.state.lock().expect("mock state poisoned");
         if let Some(existing) = state.files.get_mut(&self.rel) {
             existing.extend_from_slice(buf);
         } else {
@@ -41,7 +40,7 @@ impl std::io::Write for MockWriteCursor {
 pub struct MockFs {
     root: GuardedPath,
     build_context: GuardedPath,
-    state: Rc<RefCell<MockState>>,
+    state: Arc<Mutex<MockState>>,
 }
 
 #[derive(Default)]
@@ -59,7 +58,7 @@ impl MockFs {
         Self {
             root,
             build_context,
-            state: Rc::new(RefCell::new(MockState {
+            state: Arc::new(Mutex::new(MockState {
                 files: HashMap::new(),
                 dirs,
             })),
@@ -67,7 +66,7 @@ impl MockFs {
     }
 
     pub fn snapshot(&self) -> HashMap<String, Vec<u8>> {
-        self.state.borrow().files.clone()
+        self.state.lock().expect("mock state poisoned").files.clone()
     }
 
     fn normalize_rel(&self, base: &GuardedPath, rel: &str) -> Result<String> {
@@ -159,7 +158,8 @@ impl WorkspaceFs for MockFs {
     fn read_file(&self, path: &GuardedPath) -> Result<Vec<u8>> {
         let rel = self.relative_path(path);
         self.state
-            .borrow()
+            .lock()
+            .expect("mock state poisoned")
             .files
             .get(&rel)
             .cloned()
@@ -192,7 +192,7 @@ impl WorkspaceFs for MockFs {
 
     fn write_file(&self, path: &GuardedPath, contents: &[u8]) -> Result<()> {
         let rel = self.relative_path(path);
-        self.state.borrow_mut().files.insert(rel, contents.to_vec());
+        self.state.lock().expect("mock state poisoned").files.insert(rel, contents.to_vec());
         Ok(())
     }
 
@@ -203,7 +203,7 @@ impl WorkspaceFs for MockFs {
 
     fn append_file(&self, path: &GuardedPath, contents: &[u8]) -> Result<()> {
         let rel = self.relative_path(path);
-        let mut state = self.state.borrow_mut();
+        let mut state = self.state.lock().expect("mock state poisoned");
         if let Some(existing) = state.files.get_mut(&rel) {
             existing.extend_from_slice(contents);
         } else {
@@ -217,16 +217,17 @@ impl WorkspaceFs for MockFs {
         bail!("unguarded operations not supported in mock fs");
     }
 
-    fn open_read(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Read>> {
+    fn open_read(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Read + Send>> {
         let data = self.read_file(path)?;
         Ok(Box::new(std::io::Cursor::new(data)))
     }
 
-    fn open_write(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write>> {
+    fn open_write(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write + Send>> {
         let rel = self.relative_path(path);
         // Create an empty file first
         self.state
-            .borrow_mut()
+            .lock()
+            .expect("mock state poisoned")
             .files
             .insert(rel.clone(), Vec::new());
         // Return a cursor that will be flushed on drop
@@ -234,11 +235,12 @@ impl WorkspaceFs for MockFs {
         Ok(Box::new(MockWriteCursor { state, rel }))
     }
 
-    fn open_append(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write>> {
+    fn open_append(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write + Send>> {
         let rel = self.relative_path(path);
         let _existing = self
             .state
-            .borrow()
+            .lock()
+            .expect("mock state poisoned")
             .files
             .get(&rel)
             .cloned()
@@ -249,7 +251,7 @@ impl WorkspaceFs for MockFs {
 
     fn create_dir_all(&self, path: &GuardedPath) -> Result<()> {
         let rel = self.relative_path(path);
-        let mut state = self.state.borrow_mut();
+        let mut state = self.state.lock().expect("mock state poisoned");
         state.dirs.insert(String::new());
         let mut prefix: Vec<String> = Vec::new();
         for comp in self.split_components(&rel) {
@@ -345,7 +347,7 @@ impl WorkspaceFs for MockFs {
 
     fn entry_kind(&self, path: &GuardedPath) -> Result<EntryKind> {
         let rel = self.relative_path(path);
-        let state = self.state.borrow();
+        let state = self.state.lock().expect("mock state poisoned");
         if rel.is_empty() || state.dirs.contains(&rel) {
             Ok(EntryKind::Dir)
         } else if state.files.contains_key(&rel) {
@@ -420,5 +422,9 @@ impl WorkspaceFs for MockFs {
         _include_dirty: bool,
     ) -> Result<()> {
         bail!("git copy unsupported")
+    }
+
+    fn clone_box(&self) -> Box<dyn WorkspaceFs> {
+        Box::new(self.clone())
     }
 }

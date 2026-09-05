@@ -41,7 +41,7 @@ impl PathResolver {
     }
 
     #[allow(clippy::disallowed_methods)]
-    pub fn open_read(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Read>> {
+    pub fn open_read(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Read + Send>> {
         let guarded = self
             .check_access(path.as_path(), AccessMode::Read)
             .or_else(|_| {
@@ -52,7 +52,7 @@ impl PathResolver {
     }
 
     #[allow(clippy::disallowed_methods)]
-    pub fn open_write(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write>> {
+    pub fn open_write(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write + Send>> {
         let guarded = self
             .check_access(path.as_path(), AccessMode::Write)
             .with_context(|| format!("open_write denied for {}", path.display()))?;
@@ -60,7 +60,7 @@ impl PathResolver {
     }
 
     #[allow(clippy::disallowed_methods)]
-    pub fn open_append(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write>> {
+    pub fn open_append(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write + Send>> {
         let guarded = self
             .check_access(path.as_path(), AccessMode::Write)
             .with_context(|| format!("open_append denied for {}", path.display()))?;

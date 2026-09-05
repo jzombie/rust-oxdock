@@ -79,7 +79,7 @@ pub trait PathLike: Sized + std::fmt::Display {
 /// this crate. `PathResolver` implements this trait and existing behavior is
 /// preserved; the trait exists to allow generic consumers or test doubles to
 /// depend on the abstraction rather than the concrete type.
-pub trait WorkspaceFs {
+pub trait WorkspaceFs: Send + Sync {
     fn canonicalize(&self, path: &GuardedPath) -> Result<GuardedPath>;
 
     fn metadata(&self, path: &GuardedPath) -> Result<std::fs::Metadata>;
@@ -94,9 +94,9 @@ pub trait WorkspaceFs {
     #[allow(clippy::disallowed_types)]
     fn read_file_unguarded(&self, path: &UnguardedPath) -> Result<Vec<u8>>;
 
-    fn open_read(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Read>>;
-    fn open_write(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write>>;
-    fn open_append(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write>>;
+    fn open_read(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Read + Send>>;
+    fn open_write(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write + Send>>;
+    fn open_append(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write + Send>>;
 
     fn read_to_string(&self, path: &GuardedPath) -> Result<String>;
     #[allow(clippy::disallowed_types)]
@@ -164,6 +164,11 @@ pub trait WorkspaceFs {
         to: &GuardedPath,
         include_dirty: bool,
     ) -> Result<()>;
+
+    /// Clone this filesystem handle into a boxed trait object.
+    /// For `PathResolver`, produces an independent copy with its own root setting.
+    /// For `MockFs`, produces a shared reference to the same in-memory state.
+    fn clone_box(&self) -> Box<dyn WorkspaceFs>;
 }
 
 impl WorkspaceFs for PathResolver {
@@ -202,15 +207,15 @@ impl WorkspaceFs for PathResolver {
         Ok(std::fs::read(path.as_path())?)
     }
 
-    fn open_read(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Read>> {
+    fn open_read(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Read + Send>> {
         PathResolver::open_read(self, path)
     }
 
-    fn open_write(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write>> {
+    fn open_write(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write + Send>> {
         PathResolver::open_write(self, path)
     }
 
-    fn open_append(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write>> {
+    fn open_append(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write + Send>> {
         PathResolver::open_append(self, path)
     }
 
@@ -411,5 +416,9 @@ impl WorkspaceFs for PathResolver {
         include_dirty: bool,
     ) -> Result<()> {
         PathResolver::copy_from_git(self, rev, from, to, include_dirty)
+    }
+
+    fn clone_box(&self) -> Box<dyn WorkspaceFs> {
+        Box::new(self.clone())
     }
 }

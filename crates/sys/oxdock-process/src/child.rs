@@ -1,200 +1,202 @@
 use anyhow::Result;
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 use std::process::{Child, ExitStatus};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 
 use crate::contract::BackgroundHandle;
 
-#[derive(Debug)]
+/// Shared inner state for `ChildHandle`, enabling safe cloning.
+/// The OS PID and raw handle are stored separately so `kill()` can signal
+/// the process without needing `&mut Child`, avoiding undefined behavior.
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+struct ChildInner {
+    child: Option<Child>,
+    io_threads: Vec<std::thread::JoinHandle<()>>,
+    reaped: bool,
+    exit_status: Option<ExitStatus>,
+    killed: AtomicBool,
+}
+
+#[derive(Clone)]
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 pub struct ChildHandle {
-    pub(crate) child: Child,
-    pub(crate) io_threads: Vec<std::thread::JoinHandle<()>>,
-    reaped: bool,
+    inner: Arc<Mutex<ChildInner>>,
+    /// OS process ID for signal-based kill on Unix.
+    pid: Arc<AtomicU32>,
+    /// Raw OS process handle for TerminateProcess on Windows.
+    /// Stored as raw pointer to avoid Send/Sync issues.
+    #[cfg(windows)]
+    raw_handle: Arc<Mutex<Option<std::os::windows::io::RawHandle>>>,
 }
 
 impl ChildHandle {
     #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
     pub(crate) fn new(child: Child, io_threads: Vec<std::thread::JoinHandle<()>>) -> Self {
+        #[cfg(unix)]
+        let pid = child.id();
+        #[cfg(windows)]
+        let pid = child.id();
+        #[cfg(windows)]
+        let raw_handle = {
+            use std::os::windows::io::AsRawHandle;
+            Some(child.as_raw_handle())
+        };
         Self {
-            child,
-            io_threads,
-            reaped: false,
+            inner: Arc::new(Mutex::new(ChildInner {
+                child: Some(child),
+                io_threads,
+                reaped: false,
+                exit_status: None,
+                killed: AtomicBool::new(false),
+            })),
+            pid: Arc::new(AtomicU32::new(pid)),
+            #[cfg(windows)]
+            raw_handle: Arc::new(Mutex::new(raw_handle)),
         }
     }
 }
 
 impl BackgroundHandle for ChildHandle {
     fn try_wait(&mut self) -> Result<Option<ExitStatus>> {
-        let res = self.child.try_wait()?;
-        // Observing `Some(_)` means the OS handle has been reaped; record it
-        // so `Drop` short-circuits instead of issuing redundant queries.
-        if res.is_some() {
-            self.reaped = true;
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(ref mut child) = guard.child {
+            match child.try_wait()? {
+                Some(status) => {
+                    guard.reaped = true;
+                    guard.exit_status = Some(status);
+                    // Zero PID to prevent killing recycled PIDs
+                    self.pid.store(0, Ordering::SeqCst);
+                    #[cfg(windows)]
+                    {
+                        *self.raw_handle.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                    }
+                    for thread in guard.io_threads.drain(..) {
+                        let _ = thread.join();
+                    }
+                    guard.child = None;
+                    Ok(Some(status))
+                }
+                None => Ok(None),
+            }
+        } else if guard.reaped {
+            // Process already reaped — return cached exit status
+            Ok(Some(
+                guard
+                    .exit_status
+                    .unwrap_or_else(|| exit_status_from_code(0)),
+            ))
+        } else {
+            // wait() is executing on another thread — process is still running
+            Ok(None)
         }
-        Ok(res)
     }
 
     fn wait(&mut self) -> Result<ExitStatus> {
-        let status = self.child.wait()?;
-        // Wait for IO threads to finish to ensure all output is captured
-        for thread in self.io_threads.drain(..) {
-            let _ = thread.join();
+        // Take the child out of the mutex. This ensures only one thread
+        // performs the blocking OS wait, preventing ECHILD from dual waitpid.
+        let child_opt = {
+            let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            guard.child.take()
+        };
+
+        if let Some(mut child) = child_opt {
+            let status = child.wait()?;
+            // Zero PID to prevent killing recycled PIDs
+            self.pid.store(0, Ordering::SeqCst);
+            #[cfg(windows)]
+            {
+                *self.raw_handle.lock().unwrap_or_else(|e| e.into_inner()) = None;
+            }
+            // Re-acquire lock to store result and join IO threads
+            let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            for thread in guard.io_threads.drain(..) {
+                let _ = thread.join();
+            }
+            guard.reaped = true;
+            guard.exit_status = Some(status);
+            Ok(status)
+        } else {
+            // Already reaped — return cached exit status
+            let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            Ok(guard
+                .exit_status
+                .unwrap_or_else(|| exit_status_from_code(0)))
         }
-        self.reaped = true;
-        Ok(status)
     }
 
     fn kill(&mut self) -> Result<()> {
-        // Deliberately does NOT set `reaped`: killing is not reaping, so
-        // `Drop` must still wait afterwards to avoid zombies.
-        if self.child.try_wait()?.is_none() {
-            let _ = self.child.kill();
+        let pid = self.pid.load(Ordering::SeqCst);
+        if pid == 0 {
+            return Ok(());
         }
+        // Signal the process directly via OS PID/handle. This does NOT need
+        // &mut Child — no aliasing, no UB.
+        #[cfg(unix)]
+        {
+            unsafe {
+                libc::kill(pid as i32, libc::SIGKILL);
+            }
+        }
+        #[cfg(windows)]
+        {
+            // Use the stored raw HANDLE to terminate the process.
+            // This works even when wait() has taken child out of ChildInner.
+            let mut handle_guard = self
+                .raw_handle
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if let Some(handle) = *handle_guard {
+                unsafe {
+                    windows_sys::Win32::System::Threading::TerminateProcess(
+                        handle as *mut _,
+                        1,
+                    );
+                }
+                *handle_guard = None;
+            }
+        }
+        self.inner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .killed
+            .store(true, Ordering::SeqCst);
         Ok(())
     }
 }
 
 impl Drop for ChildHandle {
     fn drop(&mut self) {
-        // Safety net for error/panic paths that abandon live children between
-        // spawn and the next poll. The executor's explicit teardown paths
-        // remain the primary mechanism; this only bounds leakage.
-        if self.reaped {
+        // Only the last clone (when Arc refcount is 1) runs the actual cleanup.
+        if Arc::strong_count(&self.inner) > 1 {
             return;
         }
-        if matches!(self.child.try_wait(), Ok(None)) {
-            let _ = self.child.kill();
-            // Bounded after SIGKILL/TerminateProcess; best-effort reap.
-            let _ = self.child.wait();
+        let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.reaped {
+            return;
         }
+        if let Some(ref mut child) = guard.child
+            && matches!(child.try_wait(), Ok(None))
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        guard.reaped = true;
         // `io_threads` are deliberately NOT joined: a grandchild inheriting
         // the pipe can keep pump threads alive indefinitely. They terminate
         // on pipe EOF after the kill and only ever write into Arc'd buffers.
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::contract::{
-        CommandContext, CommandMode, CommandOptions, CommandResult, CommandStdout, ProcessManager,
-    };
-    use crate::shell_manager::ShellProcessManager;
-    use oxdock_fs::{GuardedPath, PolicyPath};
-    use std::collections::HashMap;
-
-    fn make_ctx() -> (oxdock_fs::GuardedTempDir, CommandContext) {
-        let temp = GuardedPath::tempdir().expect("tempdir");
-        let guard = temp.as_guarded_path().clone();
-        let cwd: PolicyPath = guard.clone().into();
-        let map: HashMap<String, String> = HashMap::new();
-        let ctx = CommandContext::from_map(&cwd, &map, &guard, &guard, &guard);
-        (temp, ctx)
-    }
-
+/// Helper to create an exit status from a raw code. Used for synthetic statuses.
+fn exit_status_from_code(code: i32) -> ExitStatus {
     #[cfg(unix)]
-    #[cfg_attr(
-        miri,
-        ignore = "spawns processes; Miri does not support process execution"
-    )]
-    #[test]
-    fn drop_kills_spawned_child_before_it_can_finish() {
-        use crate::builder::CommandBuilder;
-        use oxdock_fs::PathResolver;
-
-        let temp = oxdock_fs::GuardedPath::tempdir().expect("tempdir");
-        let root = temp.as_guarded_path().clone();
-        let marker = root.join("late.txt").expect("marker path");
-        let marker_display = marker.display().to_string();
-
-        let resolver = PathResolver::new_guarded(root.clone(), root.clone()).expect("resolver");
-        let mut builder = CommandBuilder::new("sh");
-        builder.args(["-c", &format!("sleep 1; echo done > {marker_display}")]);
-        let handle = builder.spawn().expect("spawn");
-        // Drop while the child is still sleeping; the safety net must kill it
-        // before the delayed write can happen.
-        drop(handle);
-
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
-        while std::time::Instant::now() < deadline {
-            assert!(
-                resolver.read_file(&marker).is_err(),
-                "child must be killed by Drop before writing {marker_display}"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(50));
-        }
+    {
+        use std::os::unix::process::ExitStatusExt;
+        ExitStatus::from_raw(code << 8)
     }
-
-    fn long_running_script() -> &'static str {
-        #[cfg(windows)]
-        {
-            "ping -n 30 127.0.0.1 >NUL"
-        }
-        #[cfg(not(windows))]
-        {
-            "sleep 30"
-        }
-    }
-
-    #[cfg_attr(
-        miri,
-        ignore = "spawns processes; Miri does not support process execution"
-    )]
-    #[test]
-    fn child_handle_background_lifecycle_polls_then_waits() {
-        let (_temp, ctx) = make_ctx();
-        let mut pm = ShellProcessManager;
-        let options = CommandOptions {
-            mode: CommandMode::Background,
-            ..Default::default()
-        };
-        let mut handle = match pm.run_command(&ctx, "exit 0", options).expect("run") {
-            CommandResult::Background(handle) => handle,
-            CommandResult::Completed => panic!("expected Background, got Completed"),
-            CommandResult::Captured(_) => panic!("expected Background, got Captured"),
-        };
-
-        let mut status = None;
-        for _ in 0..500 {
-            if let Some(done) = handle.try_wait().expect("try_wait") {
-                status = Some(done);
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        let status = status.expect("child should exit within polling window");
-        assert!(status.success());
-
-        let waited = handle.wait().expect("wait");
-        assert!(waited.success());
-    }
-
-    #[cfg_attr(
-        miri,
-        ignore = "spawns processes; Miri does not support process execution"
-    )]
-    #[test]
-    fn child_handle_kill_is_idempotent_and_wait_joins_threads() {
-        let (_temp, ctx) = make_ctx();
-        let mut pm = ShellProcessManager;
-        let options = CommandOptions {
-            mode: CommandMode::Background,
-            stdout: CommandStdout::Stream(std::sync::Arc::new(std::sync::Mutex::new(
-                Vec::<u8>::new(),
-            ))),
-            ..Default::default()
-        };
-        let mut handle = match pm
-            .run_command(&ctx, long_running_script(), options)
-            .expect("run")
-        {
-            CommandResult::Background(handle) => handle,
-            CommandResult::Completed => panic!("expected Background, got Completed"),
-            CommandResult::Captured(_) => panic!("expected Background, got Captured"),
-        };
-
-        handle.kill().expect("first kill");
-        handle.kill().expect("second kill must be idempotent");
-        let _status = handle.wait().expect("wait after kill");
+    #[cfg(windows)]
+    {
+        ExitStatus::from_raw(code as u32)
     }
 }

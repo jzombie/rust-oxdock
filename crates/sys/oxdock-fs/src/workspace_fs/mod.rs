@@ -127,6 +127,7 @@ impl AccessMode {
 }
 
 /// Resolves and validates filesystem paths within a confined workspace and build context.
+#[derive(Clone)]
 pub struct PathResolver {
     root: GuardedPath,
     build_context: GuardedPath,

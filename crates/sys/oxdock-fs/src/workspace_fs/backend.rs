@@ -6,15 +6,15 @@ use super::{DirEntry, GuardedPath};
 /// Private trait describing the backend IO interface. Kept private to avoid
 /// expanding the public API surface; used to ensure host/miri implementations
 /// remain in sync.
-trait BackendImpl {
+trait BackendImpl: Send + Sync {
     fn create_dir_all(&self, root: &GuardedPath, path: &GuardedPath) -> Result<()>;
     fn read_dir_entries(&self, path: &GuardedPath) -> Result<Vec<DirEntry>>;
     fn read_file(&self, path: &GuardedPath) -> Result<Vec<u8>>;
     fn write_file(&self, path: &GuardedPath, contents: &[u8]) -> Result<()>;
     fn append_file(&self, path: &GuardedPath, contents: &[u8]) -> Result<()>;
-    fn open_read(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Read>>;
-    fn open_write(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write>>;
-    fn open_append(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write>>;
+    fn open_read(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Read + Send>>;
+    fn open_write(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write + Send>>;
+    fn open_append(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write + Send>>;
     fn canonicalize(&self, path: GuardedPath) -> Result<GuardedPath>;
     fn metadata(&self, path: &GuardedPath) -> Result<std::fs::Metadata>;
     fn entry_kind(&self, path: &GuardedPath) -> Result<super::EntryKind>;
@@ -26,6 +26,7 @@ trait BackendImpl {
 
 // Host implementation (used when not under Miri)
 #[cfg(not(miri))]
+#[derive(Clone, Copy)]
 pub(in crate::workspace_fs) struct HostBackend;
 
 #[cfg(not(miri))]
@@ -106,14 +107,14 @@ impl BackendImpl for HostBackend {
     }
 
     #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-    fn open_read(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Read>> {
+    fn open_read(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Read + Send>> {
         let file = fs::File::open(path.as_path())
             .with_context(|| format!("failed to open {} for reading", path.display()))?;
         Ok(Box::new(file))
     }
 
     #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-    fn open_write(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write>> {
+    fn open_write(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write + Send>> {
         if let Some(parent) = path.as_path().parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("creating dir {}", parent.display()))?;
@@ -124,7 +125,7 @@ impl BackendImpl for HostBackend {
     }
 
     #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-    fn open_append(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write>> {
+    fn open_append(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write + Send>> {
         if let Some(parent) = path.as_path().parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("creating dir {}", parent.display()))?;
@@ -258,6 +259,16 @@ mod miri_backend {
         root_path: std::path::PathBuf,
     }
 
+    impl Clone for MiriBackend {
+        fn clone(&self) -> Self {
+            Self {
+                root_state: self.root_state.as_ref().map(|s| Arc::clone(s)),
+                build_state: self.build_state.as_ref().map(|s| Arc::clone(s)),
+                root_path: self.root_path.clone(),
+            }
+        }
+    }
+
     impl MiriBackend {
         pub(super) fn new(root: &GuardedPath, build: &GuardedPath) -> Result<Self> {
             let root_state = shared_state_for(root.as_path());
@@ -355,12 +366,12 @@ mod miri_backend {
             Ok(())
         }
 
-        fn open_read(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Read>> {
+        fn open_read(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Read + Send>> {
             let data = self.read_file(path)?;
             Ok(Box::new(std::io::Cursor::new(data)))
         }
 
-        fn open_write(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write>> {
+        fn open_write(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write + Send>> {
             // Under Miri, we write to a Cursor and then flush to synthetic state
             let rel = normalize_rel(path);
             let state = self.state_for_guard_rc(path)?;
@@ -376,7 +387,7 @@ mod miri_backend {
             }))
         }
 
-        fn open_append(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write>> {
+        fn open_append(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write + Send>> {
             let rel = normalize_rel(path);
             let state = self.state_for_guard_rc(path)?;
             // Read existing content
@@ -680,6 +691,17 @@ pub(super) enum Backend {
     Miri(miri_backend::MiriBackend),
 }
 
+impl Clone for Backend {
+    fn clone(&self) -> Self {
+        match self {
+            #[cfg(not(miri))]
+            Backend::Host(h) => Backend::Host(*h),
+            #[cfg(miri)]
+            Backend::Miri(m) => Backend::Miri(m.clone()),
+        }
+    }
+}
+
 impl Backend {
     pub(super) fn new(root: &GuardedPath, build: &GuardedPath) -> Result<Self> {
         #[cfg(miri)]
@@ -721,15 +743,15 @@ impl Backend {
         self.as_impl().append_file(path, contents)
     }
 
-    pub(super) fn open_read(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Read>> {
+    pub(super) fn open_read(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Read + Send>> {
         self.as_impl().open_read(path)
     }
 
-    pub(super) fn open_write(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write>> {
+    pub(super) fn open_write(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write + Send>> {
         self.as_impl().open_write(path)
     }
 
-    pub(super) fn open_append(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write>> {
+    pub(super) fn open_append(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write + Send>> {
         self.as_impl().open_append(path)
     }
 

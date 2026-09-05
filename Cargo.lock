@@ -560,9 +560,11 @@ name = "oxdock-process"
 version = "0.7.0-alpha"
 dependencies = [
  "anyhow",
+ "libc",
  "oxdock-fs",
  "oxdock-parser",
  "oxdock-sys-test-utils",
+ "windows-sys",
 ]
 
 [[package]]

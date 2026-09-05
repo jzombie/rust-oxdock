@@ -528,29 +528,6 @@ RUN echo hello
 ```
 
 
-### RUN_BG
-
-Run in background.
-
-**Syntax:** `RUN_BG <command...>`
-
-Like RUN but background.
-
-**Arguments:**
-
-| Name | Type | Required | Description |
-| --- | --- | --- | --- |
-| `command` | `string...` | yes | Command |
-
-**Examples:**
-
-**Example: bg**
-
-```oxdock
-RUN_BG sleep 1
-```
-
-
 ### COPY
 
 Copy file into workspace.

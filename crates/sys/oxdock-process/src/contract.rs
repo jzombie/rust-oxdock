@@ -75,7 +75,7 @@ impl CommandContext {
 }
 
 /// Handle for background processes spawned by a [`ProcessManager`].
-pub trait BackgroundHandle {
+pub trait BackgroundHandle: Send {
     fn try_wait(&mut self) -> Result<Option<ExitStatus>>;
     fn kill(&mut self) -> Result<()>;
     fn wait(&mut self) -> Result<ExitStatus>;
@@ -137,8 +137,8 @@ pub enum CommandResult<H> {
 /// background. `oxdock-core` relies on this trait to decouple the executor
 /// from `std::process::Command`, which in turn enables Miri-friendly test
 /// doubles.
-pub trait ProcessManager: Clone {
-    type Handle: BackgroundHandle;
+pub trait ProcessManager: Clone + Send + 'static {
+    type Handle: BackgroundHandle + Clone + Send + 'static;
 
     fn run_command(
         &mut self,
@@ -146,4 +146,16 @@ pub trait ProcessManager: Clone {
         script: &str,
         options: CommandOptions,
     ) -> Result<CommandResult<Self::Handle>>;
+
+    /// Spawn a command without waiting for completion. Returns a background
+    /// handle that can be polled or waited on later. The default implementation
+    /// delegates to `run_command` with `CommandMode::Background`.
+    fn spawn_command(
+        &mut self,
+        ctx: &CommandContext,
+        script: &str,
+        options: CommandOptions,
+    ) -> Result<CommandResult<Self::Handle>> {
+        self.run_command(ctx, script, options)
+    }
 }
