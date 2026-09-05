@@ -83,7 +83,7 @@ fn run_expands_env_values() {
 }
 
 #[test]
-fn run_bg_completion_short_circuits_pipeline() {
+fn async_completion_short_circuits_pipeline() {
     let root = GuardedPath::new_root_from_str(".").unwrap();
     let steps = vec![
         async_step("sleep"),

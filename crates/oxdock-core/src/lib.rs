@@ -400,7 +400,7 @@ mod tests {
         ignore = "stdout streaming not supported for background command under miri"
     )]
     #[test]
-    fn run_bg_exits_success_and_stops_pipeline() {
+    fn async_exits_success_and_stops_pipeline() {
         let temp = GuardedPath::tempdir().unwrap();
         let root = guard_root(&temp);
 
@@ -417,7 +417,7 @@ mod tests {
         ignore = "stdout streaming not supported for background command under miri"
     )]
     #[test]
-    fn run_bg_failure_bubbles_status() {
+    fn async_failure_bubbles_status() {
         let temp = GuardedPath::tempdir().unwrap();
         let root = guard_root(&temp);
 
@@ -437,7 +437,7 @@ mod tests {
         ignore = "timing-sensitive background process test is unreliable under Miri"
     )]
     #[test]
-    fn run_bg_multiple_stops_on_first_exit_and_does_not_block_steps() {
+    fn async_multiple_stops_on_first_exit_and_does_not_block_steps() {
         let temp = GuardedPath::tempdir().unwrap();
         let root = guard_root(&temp);
 

@@ -1,0 +1,14 @@
+# Proves ASYNC runs concurrently via bidirectional pipe handshake:
+# Background reads from 'req' then writes to 'resp'.
+# Main writes to 'req' then reads from 'resp'.
+# Under synchronous execution, background blocks on empty 'req' before main writes.
+
+LET $task = ASYNC {
+    WITH_IO [stdin=pipe:req, stdout=pipe:resp] WRITE "async_rec.txt"
+    WITH_IO [stdout=pipe:resp] ECHO "pong"
+}
+WITH_IO [stdout=pipe:req] ECHO "ping"
+WITH_IO [stdin=pipe:resp] WRITE "final_out.txt"
+AWAIT $task
+READ "async_rec.txt"
+READ "final_out.txt"

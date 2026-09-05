@@ -106,6 +106,20 @@ fn generate_structural_section() -> String {
     out.push_str("Assigns a value to a script-local variable. Variables are usable in templates (`{{ $var }}`), guards, and expressions.\n\n");
     out.push_str("```oxdock\nLET $name = \"world\"\nECHO \"hello, {{ $name }}\"\n\nLET $items = [\"a\", \"b\"]\nLET $count = 42\n```\n\n");
 
+    out.push_str("### ASYNC\n\n");
+    out.push_str("Runs a command or block of commands in a background thread with subshell isolation. Mutations (ENV, WORKDIR) stay within the block.\n\n");
+    out.push_str("**Inline form:** `ASYNC <command...>`\n\n");
+    out.push_str("**Block form:**\n");
+    out.push_str("```oxdock\nASYNC RUN \"sleep 1\"\n\nASYNC {\n    RUN \"echo first\"\n    RUN \"echo second\"\n}\n```\n\n");
+
+    out.push_str("### LET $var = ASYNC\n\n");
+    out.push_str("Spawns a background task and stores a handle in a variable. Use `AWAIT` to wait for completion.\n\n");
+    out.push_str("```oxdock\nLET $task = ASYNC {\n    RUN \"cargo build --release\"\n}\nAWAIT $task\n```\n\n");
+
+    out.push_str("### AWAIT\n\n");
+    out.push_str("Blocks until the named task completes. Propagates errors if the task failed.\n\n");
+    out.push_str("```oxdock\nLET $task = ASYNC RUN \"echo done\"\nAWAIT $task\n```\n\n");
+
     out
 }
 
@@ -128,7 +142,7 @@ mod tests {
     #[test]
     fn body_has_structural_constructs() {
         let body = generate_body();
-        for construct in &["WITH_IO", "INHERIT_ENV", "FOR", "IF", "LET"] {
+        for construct in &["WITH_IO", "INHERIT_ENV", "FOR", "IF", "LET", "ASYNC", "LET $var = ASYNC", "AWAIT"] {
             assert!(
                 body.contains(&format!("### {construct}")),
                 "missing section for structural construct {construct}"
