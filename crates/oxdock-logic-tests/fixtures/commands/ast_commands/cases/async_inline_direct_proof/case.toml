@@ -1,0 +1,4 @@
+name = "async_inline_direct_proof"
+
+[expect]
+files = { "inline_direct.txt" = "unblock_inline_payload\n" }

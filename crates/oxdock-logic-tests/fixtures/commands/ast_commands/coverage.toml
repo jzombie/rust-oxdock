@@ -55,5 +55,9 @@ cases = [
   "copy_complex",
   "copy_broken_symlink",
   "with_io_block",
-  "write_stdin"
+  "write_stdin",
+  "async_block_direct",
+  "async_run_direct",
+  "async_inline_direct_proof",
+  "async_proof"
 ]

@@ -1,4 +1,4 @@
 name = "async_proof"
 
 [expect]
-files = { "received_stream.txt" = "stream_chunk_1\nstream_chunk_2\nstream_chunk_3" }
+files = { "async_rec.txt" = "ping", "final_out.txt" = "pong\n" }

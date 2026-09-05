@@ -1,0 +1,11 @@
+# PROOF OF UNBRACED SINGLE-COMMAND CONCURRENCY:
+# Line 1: 'ASYNC WRITE' wraps a single instruction directly (NO BRACES {}).
+# 'WRITE' consumes stdin from 'in_chan' until EOF.
+# Synchronous engines deadlock on Line 1 because Line 2 is never reached.
+WITH_IO [stdin=pipe:in_chan] ASYNC WRITE "inline_direct.txt"
+
+# Line 2: Main thread executes concurrently, sending payload and EOF to unblock Line 1.
+WITH_IO [stdout=pipe:in_chan] ECHO "unblock_inline_payload"
+
+# Line 3: Verify data written by the background thread.
+READ "inline_direct.txt"

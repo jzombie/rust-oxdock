@@ -28,6 +28,7 @@ pub enum Command {
     AssertAbsent,
     AssertStdout,
     Exit,
+    Async,
 }
 
 pub const COMMANDS: &[Command] = &[
@@ -82,6 +83,7 @@ impl Command {
             Command::AssertAbsent => "ASSERT_ABSENT",
             Command::AssertStdout => "ASSERT_STDOUT",
             Command::Exit => "EXIT",
+            Command::Async => "ASYNC",
         }
     }
 
@@ -110,11 +112,12 @@ impl Command {
             Command::AssertAbsent => "ASSERT_ABSENT <path>",
             Command::AssertStdout => "ASSERT_STDOUT <substring>",
             Command::Exit => "EXIT <code>",
+            Command::Async => "ASYNC <command...> | ASYNC { <commands> }",
         }
     }
 
     pub const fn expects_inner_command(self) -> bool {
-        matches!(self, Command::WithIo)
+        matches!(self, Command::WithIo | Command::Async)
     }
 
     pub fn parse(s: &str) -> Option<Self> {
@@ -142,6 +145,7 @@ impl Command {
             "ASSERT_ABSENT" => Some(Command::AssertAbsent),
             "ASSERT_STDOUT" => Some(Command::AssertStdout),
             "EXIT" => Some(Command::Exit),
+            "ASYNC" => Some(Command::Async),
             _ => None,
         }
     }

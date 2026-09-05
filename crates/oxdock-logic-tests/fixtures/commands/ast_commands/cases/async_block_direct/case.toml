@@ -1,0 +1,4 @@
+name = "async_block_direct"
+
+[expect]
+files = { "async_file.txt" = "async_content" }

@@ -405,7 +405,7 @@ fn walk(
                 // LET and FOR introduce new statements but aren't in the Command enum.
                 // They must still trigger line finalization so they start on a new line.
                 let is_new_statement =
-                    is_command || matches!(ident_text.as_str(), "LET" | "FOR" | "IF" | "ELSE");
+                    is_command || matches!(ident_text.as_str(), "LET" | "FOR" | "IF" | "ELSE" | "ASYNC");
                 let trimmed = line.trim();
                 let trimmed_empty = trimmed.is_empty();
                 let guard_prefix = trimmed.starts_with('[');

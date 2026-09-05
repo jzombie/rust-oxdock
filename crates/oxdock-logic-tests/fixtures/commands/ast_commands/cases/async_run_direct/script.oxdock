@@ -1,0 +1,6 @@
+# ASYNC RUN spawns a background process.
+# WITH_IO captures stdout via pipe, WRITE saves to file.
+# Proves ASYNC RUN works directly with commands.
+
+WITH_IO [stdout=pipe:async_out] ASYNC ECHO "hello"
+WITH_IO [stdin=pipe:async_out] WRITE "async_out.txt"

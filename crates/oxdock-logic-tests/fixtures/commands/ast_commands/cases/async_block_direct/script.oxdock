@@ -1,0 +1,9 @@
+# ASYNC { ... } spawns a background thread that runs the body.
+# AWAIT ensures completion before READ checks the file.
+# Proves ASYNC works directly with DSL commands.
+
+LET $task = ASYNC {
+    WRITE "async_file.txt" "async_content"
+}
+AWAIT $task
+READ "async_file.txt"
