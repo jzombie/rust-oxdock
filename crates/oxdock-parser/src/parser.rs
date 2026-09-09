@@ -1,4 +1,4 @@
-use crate::ast::{Arg, Guard, GuardExpr, IoBinding, IoStream, PlatformGuard, Step, StepKind};
+use crate::ast::{Arg, Expr, Guard, GuardExpr, IoBinding, IoStream, PlatformGuard, Step, StepKind};
 use crate::command::ArgType;
 use crate::lexer::{self, RawToken, Rule};
 use anyhow::{Result, anyhow, bail};
@@ -109,6 +109,7 @@ impl<'a, F: Fn(&str, Vec<Arg>) -> Result<StepKind>> ScriptParser<'a, F> {
                     RawToken::BlockStart { .. }
                         | RawToken::Command { .. }
                         | RawToken::Instruction { .. }
+                        | RawToken::RunExec { .. }
                 )
             {
                 let pending = self.pending_io_block.take().unwrap();
@@ -130,6 +131,10 @@ impl<'a, F: Fn(&str, Vec<Arg>) -> Result<StepKind>> ScriptParser<'a, F> {
                 }
                 RawToken::Instruction { pair, line_no } => {
                     let kind = self.lower_instruction(pair)?;
+                    self.handle_command_token(line_no, kind)?
+                }
+                RawToken::RunExec { pair, line_no } => {
+                    let kind = lower_run_exec_pair(pair, &self.lower)?;
                     self.handle_command_token(line_no, kind)?
                 }
             }
@@ -525,6 +530,9 @@ fn parse_structural_command_with_lower(
                     Rule::instruction | Rule::instruction_inner => {
                         cmd = Some(Box::new(lower_instruction_pair(inner, lower)?));
                     }
+                    Rule::run_exec_statement | Rule::run_exec_inner => {
+                        cmd = Some(Box::new(lower_run_exec_pair(inner, lower)?));
+                    }
                     _ => {}
                 }
             }
@@ -553,6 +561,7 @@ fn parse_structural_command_with_lower(
             parse_structural_command_with_lower(inner, lower)?
         }
         Rule::instruction | Rule::instruction_inner => lower_instruction_pair(pair, lower)?,
+        Rule::run_exec_statement | Rule::run_exec_inner => lower_run_exec_pair(pair, lower)?,
         _ => bail!("unexpected structural command rule: {:?}", pair.as_rule()),
     };
     Ok(kind)
@@ -612,6 +621,25 @@ fn lower_instruction_pair(
         })
         .collect();
     lower(&name, args)
+}
+
+/// Lower a `run_exec` grammar pair: the PEG engine has already validated the
+/// full `RUN [...]` span, so extract the inner `list_literal` and route the
+/// structured `Expr::List` through the injected `lower` as `RUN` with one
+/// typed argument (production `lower_command` maps it to `StepKind::RunExec`;
+/// the grammar-test mock wraps it in `StepKind::Run`).
+fn lower_run_exec_pair(
+    pair: Pair<Rule>,
+    lower: &dyn Fn(&str, Vec<Arg>) -> Result<StepKind>,
+) -> Result<StepKind> {
+    let mut list = None;
+    for inner in pair.into_inner() {
+        if inner.as_rule() == Rule::list_literal {
+            list = Some(parse_list_literal(inner)?);
+        }
+    }
+    let list = list.ok_or_else(|| anyhow!("RUN exec form missing list literal"))?;
+    lower("RUN", vec![Arg::Expr(list)])
 }
 
 /// Split one `assignment` pair into its key and lowered value.
@@ -993,6 +1021,15 @@ fn parse_timeout_statement_from_pair(
                     scope_exit: 0,
                 }]);
             }
+            Rule::run_exec_statement | Rule::run_exec_inner => {
+                let kind = lower_run_exec_pair(inner, lower)?;
+                body = Some(vec![Step {
+                    guard: None,
+                    kind,
+                    scope_enter: 0,
+                    scope_exit: 0,
+                }]);
+            }
             _ => {}
         }
     }
@@ -1111,11 +1148,17 @@ fn parse_async_statement_from_pair(
                     Rule::instruction => {
                         inner_cmd = Some(lower_instruction_pair(child, lower)?);
                     }
+                    Rule::run_exec_statement | Rule::run_exec_inner => {
+                        inner_cmd = Some(lower_run_exec_pair(child, lower)?);
+                    }
                     other => bail!("unexpected command_inner child: {:?}", other),
                 }
             }
             Rule::instruction | Rule::instruction_inner => {
                 inner_cmd = Some(lower_instruction_pair(inner, lower)?);
+            }
+            Rule::run_exec_statement | Rule::run_exec_inner => {
+                inner_cmd = Some(lower_run_exec_pair(inner, lower)?);
             }
             Rule::block => {
                 block_body = Some(parse_block_elements_with_lower(inner, lower)?);
@@ -1217,6 +1260,15 @@ fn parse_block_elements_with_lower(
             }
             Rule::instruction | Rule::instruction_inner => {
                 let kind = lower_instruction_pair(elem, lower)?;
+                steps.push(Step {
+                    guard: None,
+                    kind,
+                    scope_enter: 0,
+                    scope_exit: 0,
+                });
+            }
+            Rule::run_exec_statement | Rule::run_exec_inner => {
+                let kind = lower_run_exec_pair(elem, lower)?;
                 steps.push(Step {
                     guard: None,
                     kind,
@@ -1594,7 +1646,7 @@ fn parse_dollar_ident(pair: Pair<Rule>) -> String {
     s.strip_prefix('$').unwrap_or(s).to_string()
 }
 
-use crate::ast::{CompareOp, Expr, LogicalOp, Value};
+use crate::ast::{CompareOp, LogicalOp, Value};
 
 fn parse_expr(pair: Pair<Rule>) -> Result<Expr> {
     let inner = pair.into_inner().next().unwrap();

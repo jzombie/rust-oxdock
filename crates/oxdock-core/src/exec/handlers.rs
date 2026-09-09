@@ -2,9 +2,10 @@ use anyhow::{Context, Result, anyhow, bail};
 use std::sync::Arc;
 
 use oxdock_fs::EntryKind;
-use oxdock_parser::{Expr, IoBinding, IoStream, Step, StepKind, Value, WorkspaceTarget};
+use oxdock_parser::{Arg, Expr, IoBinding, IoStream, Step, StepKind, Value, WorkspaceTarget};
 use oxdock_process::{
-    BackgroundHandle, CommandOptions, CommandResult, CommandStderr, CommandStdout, ProcessManager,
+    BackgroundHandle, CommandOptions, CommandResult, CommandStderr, CommandStdout,
+    INHERIT_STDOUT_ENV_VAR, PROCESS_DEBUG_ENV_VAR, ProcessManager,
 };
 use sha2::{Digest, Sha256};
 
@@ -91,11 +92,11 @@ pub(super) fn run<P: ProcessManager>(cx: &mut StepCtx<'_, P>, idx: usize, cmd: &
     let inherit_override = cx
         .state
         .envs
-        .get("OXDOCK_INHERIT_STDOUT")
+        .get(INHERIT_STDOUT_ENV_VAR)
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
 
-    if std::env::var("OXBOOK_DEBUG").is_ok() {
+    if std::env::var(PROCESS_DEBUG_ENV_VAR).is_ok() {
         eprintln!(
             "DEBUG: step RUN {} inherit_override={}",
             cmd, inherit_override
@@ -175,6 +176,170 @@ pub(super) fn run<P: ProcessManager>(cx: &mut StepCtx<'_, P>, idx: usize, cmd: &
             cmd,
             status
         );
+    }
+    Ok(())
+}
+
+/// Direct-spawn counterpart of [`run`]: executes an already-resolved `argv`
+/// without any shell (`RUN ["exe", "arg", ...]`). `CommandContext` and
+/// `CommandOptions` (cwd/env, `WITH_IO` pipes, `ASYNC`/cancellable
+/// backgrounding, [`INHERIT_STDOUT_ENV_VAR`]) are built exactly like [`run`];
+/// only the spawn call differs (`spawn_argv`, no `shell_cmd`).
+pub(super) fn run_argv<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    idx: usize,
+    argv: &[String],
+) -> Result<()> {
+    let ctx = cx.state.command_ctx()?;
+    let step_stdin = if cx.expose_stdin {
+        cx.stdin.clone()
+    } else {
+        None
+    };
+
+    let inherit_override = cx
+        .state
+        .envs
+        .get(INHERIT_STDOUT_ENV_VAR)
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
+    if std::env::var(PROCESS_DEBUG_ENV_VAR).is_ok() {
+        eprintln!(
+            "DEBUG: step RUN {:?} inherit_override={}",
+            argv, inherit_override
+        );
+    }
+
+    let stdout_mode = if inherit_override {
+        CommandStdout::Inherit
+    } else {
+        cx.out
+            .clone()
+            .map(|handle| handle.to_stdout())
+            .unwrap_or(CommandStdout::Inherit)
+    };
+    let stderr_mode = if inherit_override {
+        CommandStderr::Inherit
+    } else {
+        cx.err
+            .clone()
+            .map(|handle| handle.to_stderr())
+            .unwrap_or(CommandStderr::Inherit)
+    };
+
+    let mut options = if cx.state.inside_async || cx.state.cancellable {
+        // Inside an ASYNC block — use background mode so we can register
+        // the handle for cancellation via active_process.
+        CommandOptions::background()
+    } else {
+        CommandOptions::foreground()
+    };
+    options.stdin = step_stdin;
+    options.stdout = stdout_mode;
+    options.stderr = stderr_mode;
+
+    // Spawn the executable directly (no shell).
+    let mut handle = match cx
+        .process
+        .spawn_argv(&ctx, argv, options)
+        .with_context(|| format!("step {}: RUN {argv:?}", idx + 1))?
+    {
+        CommandResult::Background(h) => h,
+        CommandResult::Completed => return Ok(()),
+        CommandResult::Captured(_) => {
+            bail!(
+                "step {}: RUN {argv:?} unexpectedly captured output",
+                idx + 1
+            )
+        }
+    };
+
+    // Register the handle for cancellation (only meaningful for background handles).
+    {
+        let mut guard = cx
+            .state
+            .active_process
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *guard = Some(Box::new(handle.clone()));
+    }
+
+    // Wait for the process to complete.
+    let status = handle.wait();
+
+    // Clear the registration BEFORE dropping the handle clone in active_process.
+    // The clone was never polled, so we must prevent Drop from logging it as killed.
+    {
+        let mut guard = cx
+            .state
+            .active_process
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *guard = None;
+    }
+
+    let status = status?;
+    if !status.success() {
+        bail!(
+            "step {}: RUN {argv:?} exited with status {}",
+            idx + 1,
+            status
+        );
+    }
+    Ok(())
+}
+
+/// Resolve exec-form (`RUN [...]`) argv elements with explicit coercion:
+/// `Arg::String`/`Arg::Parts` resolve to exactly one entry each;
+/// `Arg::Expr` evaluates and coerces by value — `String`/`Int`/`Bool` push
+/// one entry, `List` flattens recursively (each scalar becomes its own
+/// entry), `Map`/`TaskHandle` bail with a type error.
+/// Template expansion applies strictly to script-literal source text
+/// (`Arg::String`/`Arg::Parts` via `resolve_arg`, string literals inline
+/// below). Evaluated runtime values are opaque data and are never
+/// re-expanded: a variable holding `{{ ... }}` text passes through
+/// verbatim instead of leaking a second expansion pass.
+/// Never uses shell joining or `expand_dsl_vars`.
+pub(super) fn resolve_run_exec_argv<P: ProcessManager>(
+    argv: &[Arg],
+    cx: &mut StepCtx<'_, P>,
+) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    for arg in argv {
+        match arg {
+            Arg::String(_, _) | Arg::Parts(_) => {
+                out.push(super::args::resolve_arg(arg, cx)?);
+            }
+            Arg::Expr(Expr::Literal(Value::String(s))) => {
+                out.push(super::args::expand_string(s, &cx.state.envs, cx.state)?);
+            }
+            Arg::Expr(e) => {
+                let val = super::args::evaluate_expr(e, cx)?;
+                flatten_exec_value(&val, &mut out)?;
+            }
+        }
+    }
+    if out.is_empty() {
+        bail!("RUN exec form requires at least one argument");
+    }
+    Ok(out)
+}
+
+fn flatten_exec_value(val: &Value, out: &mut Vec<String>) -> Result<()> {
+    match val {
+        Value::String(s) => out.push(s.clone()),
+        Value::Int(i) => out.push(i.to_string()),
+        Value::Bool(b) => out.push(b.to_string()),
+        Value::List(items) => {
+            for item in items {
+                flatten_exec_value(item, out)?;
+            }
+        }
+        Value::Map(_) => bail!("RUN exec form element must be a string, got map"),
+        Value::TaskHandle(id) => {
+            bail!("RUN exec form element must be a string, got task handle task#{id}")
+        }
     }
     Ok(())
 }
@@ -1077,6 +1242,17 @@ pub(crate) fn dispatch_run<P: ProcessManager>(
     let cmd = super::args::resolve_arg(arg, cx)?;
     let cmd = super::args::expand_dsl_vars(&cmd, cx.state);
     run(cx, 0, &cmd)
+}
+
+pub(crate) fn dispatch_run_exec<P: ProcessManager>(
+    step: &StepKind,
+    cx: &mut StepCtx<'_, P>,
+) -> Result<()> {
+    let StepKind::RunExec { argv } = step else {
+        unreachable!()
+    };
+    let resolved = resolve_run_exec_argv(argv, cx)?;
+    run_argv(cx, 0, &resolved)
 }
 
 pub(crate) fn dispatch_async_block<P: ProcessManager>(

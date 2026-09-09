@@ -83,6 +83,186 @@ fn run_expands_env_values() {
 }
 
 #[test]
+fn run_exec_resolves_and_flattens_argv() {
+    use oxdock_parser::{Arg, Expr, Value};
+
+    let root = GuardedPath::new_root_from_str(".").unwrap();
+    let steps = vec![
+        Step {
+            guard: None,
+            kind: StepKind::Env {
+                key: "GREETING".into(),
+                value: "hi".into(),
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+        },
+        Step {
+            guard: None,
+            kind: StepKind::Assign {
+                var: "args".into(),
+                expr: Expr::List(vec![
+                    Expr::Literal(Value::String("-v".to_string())),
+                    Expr::Literal(Value::String("--all".to_string())),
+                ]),
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+        },
+        Step {
+            guard: None,
+            kind: StepKind::RunExec {
+                argv: vec![
+                    Arg::Expr(Expr::Literal(Value::String("cargo".to_string()))),
+                    Arg::Expr(Expr::Var("args".to_string())),
+                    Arg::Expr(Expr::Literal(Value::Int(3))),
+                    Arg::Expr(Expr::Literal(Value::Bool(true))),
+                    Arg::String("{{ env:GREETING }}".to_string(), false),
+                    // Escapes stay literal and pass through directly.
+                    Arg::String("\\$literal".to_string(), false),
+                    Arg::String("\\{{ env:GREETING }}".to_string(), false),
+                ],
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+        },
+    ];
+    let mock = MockProcessManager::default();
+    let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
+    run_steps_with_manager(fs, &steps, mock.clone(), ExecIo::new()).unwrap();
+    let runs = mock.recorded_argv_runs();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(
+        runs[0].argv,
+        vec![
+            "cargo",
+            "-v",
+            "--all",
+            "3",
+            "true",
+            "hi",
+            "\\$literal",
+            "{{ env:GREETING }}"
+        ]
+    );
+    // Shell dispatch must not have been used.
+    assert!(mock.recorded_runs().is_empty());
+}
+
+#[test]
+fn run_exec_rejects_map_elements_with_type_error() {
+    use oxdock_parser::{Arg, Expr, Value};
+
+    let root = GuardedPath::new_root_from_str(".").unwrap();
+    let mut map = std::collections::BTreeMap::new();
+    map.insert("k".to_string(), Value::String("v".to_string()));
+    let steps = vec![Step {
+        guard: None,
+        kind: StepKind::RunExec {
+            argv: vec![Arg::Expr(Expr::Literal(Value::Map(map)))],
+        },
+        scope_enter: 0,
+        scope_exit: 0,
+    }];
+    let mock = MockProcessManager::default();
+    let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
+    let err = run_steps_with_manager(fs, &steps, mock, ExecIo::new()).unwrap_err();
+    assert!(
+        format!("{err:#}").contains("must be a string"),
+        "unexpected error: {err:#}"
+    );
+}
+
+#[test]
+fn run_exec_expands_templates_in_literal_elements_once() {
+    use oxdock_parser::{Arg, Expr, Value};
+
+    let root = GuardedPath::new_root_from_str(".").unwrap();
+    let steps = vec![
+        Step {
+            guard: None,
+            kind: StepKind::Env {
+                key: "GREETING".into(),
+                value: "hi".into(),
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+        },
+        Step {
+            guard: None,
+            kind: StepKind::RunExec {
+                argv: vec![
+                    Arg::Expr(Expr::Literal(Value::String("echo".to_string()))),
+                    // Quoted `{{ ... }}` templates interpolate...
+                    Arg::Expr(Expr::Literal(Value::String(
+                        "{{ env:GREETING }}".to_string(),
+                    ))),
+                    // ...while `\{{ ... }}` escapes stay literal (single pass).
+                    Arg::Expr(Expr::Literal(Value::String(
+                        "\\{{ env:GREETING }}".to_string(),
+                    ))),
+                ],
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+        },
+    ];
+    let mock = MockProcessManager::default();
+    let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
+    run_steps_with_manager(fs, &steps, mock.clone(), ExecIo::new()).unwrap();
+    let runs = mock.recorded_argv_runs();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].argv, vec!["echo", "hi", "{{ env:GREETING }}"]);
+}
+
+#[test]
+fn run_exec_treats_variable_values_as_opaque() {
+    use oxdock_parser::{Arg, Expr, Value};
+
+    // A variable holding literal `{{ ... }}` text must pass through
+    // verbatim: expansion applies to script-literal source text only,
+    // never to evaluated runtime values (no second-order expansion).
+    let root = GuardedPath::new_root_from_str(".").unwrap();
+    let steps = vec![
+        Step {
+            guard: None,
+            kind: StepKind::Env {
+                key: "SECRET".into(),
+                value: "leaked".into(),
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+        },
+        Step {
+            guard: None,
+            kind: StepKind::Assign {
+                var: "data".into(),
+                expr: Expr::Literal(Value::String("\\{{ env:SECRET }}".to_string())),
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+        },
+        Step {
+            guard: None,
+            kind: StepKind::RunExec {
+                argv: vec![
+                    Arg::Expr(Expr::Literal(Value::String("echo".to_string()))),
+                    Arg::Expr(Expr::Var("data".to_string())),
+                ],
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+        },
+    ];
+    let mock = MockProcessManager::default();
+    let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
+    run_steps_with_manager(fs, &steps, mock.clone(), ExecIo::new()).unwrap();
+    let runs = mock.recorded_argv_runs();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].argv, vec!["echo", "{{ env:SECRET }}"]);
+}
+
+#[test]
 fn async_completion_short_circuits_pipeline() {
     let root = GuardedPath::new_root_from_str(".").unwrap();
     let steps = vec![
@@ -1036,7 +1216,7 @@ fn inherit_stdout_override_forces_inherit_modes() {
     let err_sink: SharedOutput = Arc::new(Mutex::new(Vec::<u8>::new()));
     let steps = vec![
         step(StepKind::Env {
-            key: "OXDOCK_INHERIT_STDOUT".into(),
+            key: oxdock_process::INHERIT_STDOUT_ENV_VAR.into(),
             value: "1".into(),
         }),
         step(StepKind::Run("captured-normally".into())),

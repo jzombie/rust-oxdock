@@ -266,6 +266,10 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
             let cmd = super::args::expand_dsl_vars(&cmd, cx.state);
             handlers::run(&mut cx, idx, &cmd)
         }
+        StepKind::RunExec { argv } => {
+            let resolved = handlers::resolve_run_exec_argv(argv, &mut cx)?;
+            handlers::run_argv(&mut cx, idx, &resolved)
+        }
         StepKind::Echo(arg) => {
             let msg = super::args::resolve_arg(arg, &mut cx)?;
             handlers::echo(&mut cx, &msg)
@@ -492,6 +496,10 @@ fn execute_steps_inner<P: ProcessManager>(
                 StepKind::Run(arg) => {
                     let cmd = super::args::resolve_arg(arg, &mut cx)?;
                     handlers::run(&mut cx, idx, &cmd)
+                }
+                StepKind::RunExec { argv } => {
+                    let resolved = handlers::resolve_run_exec_argv(argv, &mut cx)?;
+                    handlers::run_argv(&mut cx, idx, &resolved)
                 }
                 StepKind::Echo(arg) => {
                     let msg = super::args::resolve_arg(arg, &mut cx)?;

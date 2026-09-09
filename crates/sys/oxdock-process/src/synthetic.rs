@@ -156,6 +156,148 @@ impl ProcessManager for SyntheticProcessManager {
             },
         }
     }
+
+    fn run_argv(
+        &mut self,
+        ctx: &CommandContext,
+        argv: &[String],
+        options: CommandOptions,
+    ) -> Result<CommandResult<Self::Handle>> {
+        let CommandOptions {
+            mode,
+            stdin,
+            stdout,
+            stderr,
+        } = options;
+
+        if let Some(reader) = stdin
+            && let Ok(mut guard) = reader.lock()
+        {
+            let mut sink = std::io::sink();
+            let _ = std::io::copy(&mut *guard, &mut sink);
+        }
+
+        if argv.is_empty() {
+            bail!("RUN exec form requires at least one argument");
+        }
+
+        match mode {
+            CommandMode::Foreground => {
+                let needs_bytes = matches!(stdout, CommandStdout::Capture)
+                    || matches!(stdout, CommandStdout::Stream(_));
+                let (out, status) = execute_argv_sync(ctx, argv, needs_bytes)?;
+                if !status.success() {
+                    bail!("command {argv:?} failed with status {}", status);
+                }
+                if matches!(stderr, CommandStderr::Stream(_)) {
+                    // Synthetic manager does not produce stderr output.
+                }
+                match stdout {
+                    CommandStdout::Inherit => Ok(CommandResult::Completed),
+                    CommandStdout::Stream(writer) => {
+                        if needs_bytes && let Ok(mut guard) = writer.lock() {
+                            let _ = std::io::Write::write_all(&mut *guard, &out);
+                            let _ = std::io::Write::flush(&mut *guard);
+                        }
+                        Ok(CommandResult::Completed)
+                    }
+                    CommandStdout::Capture => Ok(CommandResult::Captured(out)),
+                }
+            }
+            CommandMode::Background => match stdout {
+                CommandStdout::Capture => {
+                    bail!("cannot capture stdout for background command under miri")
+                }
+                CommandStdout::Stream(_) => {
+                    bail!("stdout streaming not supported for background command under miri")
+                }
+                CommandStdout::Inherit => {
+                    if matches!(stderr, CommandStderr::Stream(_)) {
+                        bail!("stderr streaming not supported for background command under miri");
+                    }
+                    let plan = plan_argv_background(ctx, argv)?;
+                    Ok(CommandResult::Background(plan))
+                }
+            },
+        }
+    }
+}
+
+/// Direct-spawn `argv` execution for Miri: dispatches on `argv[0]` without
+/// shell parsing (`sleep`/`exit`/`echo`/`printf`, else no-op success).
+/// Stdout bytes only cover the `echo`/`printf` foreground-capture path;
+/// argv form has no shell redirections, so no file writes occur here.
+#[cfg(miri)]
+fn execute_argv_sync(
+    _ctx: &CommandContext,
+    argv: &[String],
+    capture: bool,
+) -> Result<(Vec<u8>, ExitStatus)> {
+    let mut stdout = Vec::new();
+    let mut status = exit_status_from_code(0);
+    match argv[0].as_str() {
+        "sleep" => {
+            let dur = argv
+                .get(1)
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(0.0);
+            std::thread::sleep(std::time::Duration::from_secs_f64(dur));
+        }
+        "exit" => {
+            let code = argv.get(1).and_then(|s| s.parse::<i32>().ok()).unwrap_or(0);
+            status = exit_status_from_code(code);
+        }
+        "echo" => {
+            if capture {
+                let mut data = argv[1..].join(" ").into_bytes();
+                data.push(b'\n');
+                stdout.extend_from_slice(&data);
+            }
+        }
+        "printf" => {
+            if capture {
+                let rest = if argv.get(1).is_some_and(|s| s == "%s") {
+                    &argv[2..]
+                } else {
+                    &argv[1..]
+                };
+                stdout.extend_from_slice(rest.join(" ").as_bytes());
+            }
+        }
+        _ => {}
+    }
+    Ok((stdout, status))
+}
+
+#[cfg(miri)]
+fn plan_argv_background(ctx: &CommandContext, argv: &[String]) -> Result<SyntheticBgHandle> {
+    let mut ready = std::time::Duration::ZERO;
+    let mut status = exit_status_from_code(0);
+    match argv[0].as_str() {
+        "sleep" => {
+            let dur = argv
+                .get(1)
+                .and_then(|s| s.parse::<f64>().ok())
+                .unwrap_or(0.0);
+            ready += std::time::Duration::from_secs_f64(dur);
+        }
+        "exit" => {
+            let code = argv.get(1).and_then(|s| s.parse::<i32>().ok()).unwrap_or(0);
+            status = exit_status_from_code(code);
+        }
+        _ => {}
+    }
+    let min_ready = std::time::Duration::from_millis(50);
+    ready = ready.max(min_ready);
+    Ok(SyntheticBgHandle {
+        ctx: ctx.clone(),
+        actions: Vec::new(),
+        remaining: ready,
+        last_polled: std::time::Instant::now(),
+        status,
+        applied: false,
+        killed: false,
+    })
 }
 
 #[cfg(miri)]

@@ -53,10 +53,38 @@ pub struct MockSpawnCall {
     pub stderr_mode: MockStreamMode,
 }
 
+/// Captured invocation for a foreground argv run.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(clippy::disallowed_types)]
+pub struct MockRunArgvCall {
+    pub argv: Vec<String>,
+    pub cwd: PathBuf,
+    pub envs: HashMap<String, String>,
+    pub cargo_target_dir: PathBuf,
+    pub stdin_provided: bool,
+    pub stdin: Option<Vec<u8>>,
+    pub stderr_mode: MockStreamMode,
+}
+
+/// Captured invocation for a background argv spawn.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(clippy::disallowed_types)]
+pub struct MockSpawnArgvCall {
+    pub argv: Vec<String>,
+    pub cwd: PathBuf,
+    pub envs: HashMap<String, String>,
+    pub cargo_target_dir: PathBuf,
+    pub stdin_provided: bool,
+    pub stdin: Option<Vec<u8>>,
+    pub stderr_mode: MockStreamMode,
+}
+
 #[derive(Clone, Default)]
 pub struct MockProcessManager {
     runs: Arc<Mutex<Vec<MockRunCall>>>,
     spawns: Arc<Mutex<Vec<MockSpawnCall>>>,
+    argv_runs: Arc<Mutex<Vec<MockRunArgvCall>>>,
+    argv_spawns: Arc<Mutex<Vec<MockSpawnArgvCall>>>,
     killed: Arc<Mutex<Vec<String>>>,
     plans: Arc<Mutex<VecDeque<BgPlan>>>,
 }
@@ -68,6 +96,17 @@ impl MockProcessManager {
 
     pub fn spawn_log(&self) -> Vec<MockSpawnCall> {
         self.spawns.lock().expect("mock state poisoned").clone()
+    }
+
+    pub fn recorded_argv_runs(&self) -> Vec<MockRunArgvCall> {
+        self.argv_runs.lock().expect("mock state poisoned").clone()
+    }
+
+    pub fn argv_spawn_log(&self) -> Vec<MockSpawnArgvCall> {
+        self.argv_spawns
+            .lock()
+            .expect("mock state poisoned")
+            .clone()
     }
 
     pub fn killed(&self) -> Vec<String> {
@@ -149,6 +188,77 @@ impl ProcessManager for MockProcessManager {
                     .unwrap_or_else(BgPlan::success);
                 Ok(CommandResult::Background(MockHandle {
                     script: script.to_string(),
+                    remaining: plan.ready_after,
+                    status: plan.status,
+                    killed: Arc::clone(&self.killed),
+                    reaped: false,
+                }))
+            }
+        }
+    }
+
+    fn run_argv(
+        &mut self,
+        ctx: &CommandContext,
+        argv: &[String],
+        options: CommandOptions,
+    ) -> Result<CommandResult<Self::Handle>> {
+        let CommandOptions {
+            mode,
+            stdin,
+            stdout,
+            stderr,
+        } = options;
+        let stdin_provided = stdin.is_some();
+        let captured_stdin = capture_stdin(stdin)?;
+        let recorded_stderr = stderr_mode(&stderr);
+        let label = argv.join(" ");
+
+        match mode {
+            CommandMode::Foreground => {
+                self.argv_runs
+                    .lock()
+                    .expect("mock state poisoned")
+                    .push(MockRunArgvCall {
+                        argv: argv.to_vec(),
+                        cwd: ctx.cwd().to_path_buf(),
+                        envs: (**ctx.envs()).clone(),
+                        cargo_target_dir: ctx.cargo_target_dir().to_path_buf(),
+                        stdin_provided,
+                        stdin: captured_stdin.clone(),
+                        stderr_mode: recorded_stderr,
+                    });
+                match stdout {
+                    CommandStdout::Capture => Ok(CommandResult::Captured(Vec::new())),
+                    CommandStdout::Stream(_) | CommandStdout::Inherit => {
+                        Ok(CommandResult::Completed)
+                    }
+                }
+            }
+            CommandMode::Background => {
+                if matches!(stdout, CommandStdout::Capture) {
+                    bail!("cannot capture stdout for background command");
+                }
+                self.argv_spawns
+                    .lock()
+                    .expect("mock state poisoned")
+                    .push(MockSpawnArgvCall {
+                        argv: argv.to_vec(),
+                        cwd: ctx.cwd().to_path_buf(),
+                        envs: (**ctx.envs()).clone(),
+                        cargo_target_dir: ctx.cargo_target_dir().to_path_buf(),
+                        stdin_provided,
+                        stdin: captured_stdin.clone(),
+                        stderr_mode: recorded_stderr,
+                    });
+                let plan = self
+                    .plans
+                    .lock()
+                    .expect("mock state poisoned")
+                    .pop_front()
+                    .unwrap_or_else(BgPlan::success);
+                Ok(CommandResult::Background(MockHandle {
+                    script: label,
                     remaining: plan.ready_after,
                     status: plan.status,
                     killed: Arc::clone(&self.killed),

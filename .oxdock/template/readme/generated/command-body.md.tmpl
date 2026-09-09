@@ -408,11 +408,11 @@ ASSERT_STDOUT "World"
 
 ### RUN
 
-Execute shell command.
+Execute shell command or direct executable.
 
-**Syntax:** `RUN <command...>`
+**Syntax:** `RUN <command...> | RUN ["exe", "arg", ...]`
 
-Runs command in cwd.
+Shell form (`RUN <command...>`) runs the joined command string in the system shell (`$SHELL -c` / `COMSPEC /C`). Exec form (`RUN ["exe", "arg", ...]`) spawns the executable directly with no shell, so there is no shell expansion, globbing, redirection, or pipes; use it for portable commands. Guards and wrappers (`ASYNC`, `TIMEOUT`, `WITH_IO`, `LET`) apply to both forms.
 
 **Arguments:**
 
@@ -426,6 +426,12 @@ Runs command in cwd.
 
 ```oxdock
 RUN echo hello
+```
+
+**Example: run exec form**
+
+```oxdock
+RUN ["cargo", "--version"]
 ```
 
 

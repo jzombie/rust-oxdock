@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use oxdock_fs::{GuardedPath, PolicyPath};
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 use std::process::ExitStatus;
@@ -133,6 +133,18 @@ pub enum CommandResult<H> {
     Background(H),
 }
 
+/// Host environment variable that forces spawned children to inherit the
+/// parent's stdout/stderr instead of using the executor's stream routing.
+/// Recognized values are `"1"` and case-insensitive `"true"`. Set on the
+/// script environment (an `ENV` step or host inherit), not the process
+/// environment: the executor reads it from [`CommandContext::envs`].
+pub const INHERIT_STDOUT_ENV_VAR: &str = "OXDOCK_INHERIT_STDOUT";
+
+/// Host process-environment variable enabling `eprintln!` diagnostics for
+/// every spawned command (program plus argv/script). Read from
+/// [`std::env`] at spawn time; any value (including empty) enables it.
+pub const PROCESS_DEBUG_ENV_VAR: &str = "OXBOOK_DEBUG";
+
 /// Abstraction for running shell commands both in the foreground and
 /// background. `oxdock-core` relies on this trait to decouple the executor
 /// from `std::process::Command`, which in turn enables Miri-friendly test
@@ -157,5 +169,29 @@ pub trait ProcessManager: Clone + Send + 'static {
         options: CommandOptions,
     ) -> Result<CommandResult<Self::Handle>> {
         self.run_command(ctx, script, options)
+    }
+
+    /// Run an executable directly with an argument vector (no shell).
+    /// Backs the `RUN ["exe", "arg", ...]` exec form. The default
+    /// implementation bails so existing out-of-tree managers keep
+    /// compiling; in-tree managers override this.
+    fn run_argv(
+        &mut self,
+        _ctx: &CommandContext,
+        argv: &[String],
+        _options: CommandOptions,
+    ) -> Result<CommandResult<Self::Handle>> {
+        bail!("run_argv not implemented for argv {argv:?}")
+    }
+
+    /// Spawn an argv command without waiting for completion. The default
+    /// implementation delegates to `run_argv`, mirroring `spawn_command`.
+    fn spawn_argv(
+        &mut self,
+        ctx: &CommandContext,
+        argv: &[String],
+        options: CommandOptions,
+    ) -> Result<CommandResult<Self::Handle>> {
+        self.run_argv(ctx, argv, options)
     }
 }

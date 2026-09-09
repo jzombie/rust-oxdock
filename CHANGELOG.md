@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [UNRELEASED]
+
+### Added
+
+- `RUN ["exe", "arg", ...]` exec form: spawns the executable directly with no shell, so there is no shell expansion, globbing, redirection, or pipes; use it for portable commands. Elements accept quoted strings, bare words, `$var` / `$a.b`, and `CALL()`; quoted `{{ ... }}` templates interpolate per element while `\$` / `\{{` escapes pass through literally, and `;` / `//` inside elements stay literal. Guards and wrappers (`ASYNC`, `TIMEOUT`, `WITH_IO`) apply to both forms; `RUN []` is an error and shell `RUN <command...>` behavior is unchanged
+- `ProcessManager::run_argv` / `spawn_argv` for direct executable spawning across the `Shell`, `Mock`, and Miri `Synthetic` backends, plus documented `INHERIT_STDOUT_ENV_VAR` / `PROCESS_DEBUG_ENV_VAR` constants replacing hardcoded environment variable names
+
 ## [0.10.0-alpha] - 2026-09-08
 
 ### Added

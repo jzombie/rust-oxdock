@@ -16,7 +16,8 @@ pub use builtin_env::BuiltinEnv;
 pub use child::ChildHandle;
 pub use contract::{
     BackgroundHandle, CommandContext, CommandMode, CommandOptions, CommandResult, CommandStderr,
-    CommandStdout, ProcessManager, SharedInput, SharedOutput,
+    CommandStdout, INHERIT_STDOUT_ENV_VAR, PROCESS_DEBUG_ENV_VAR, ProcessManager, SharedInput,
+    SharedOutput,
 };
 pub use expand::{StreamingExpand, expand_command_env, expand_script_env};
 pub use oxdock_sys_test_utils::TestEnvGuard;
@@ -24,7 +25,10 @@ pub use shell::{ShellLauncher, shell_program, spawn_interactive_shell};
 pub use shell_manager::ShellProcessManager;
 
 #[cfg(feature = "mock-process")]
-pub use mock::{MockHandle, MockProcessManager, MockRunCall, MockSpawnCall, MockStreamMode};
+pub use mock::{
+    MockHandle, MockProcessManager, MockRunArgvCall, MockRunCall, MockSpawnArgvCall, MockSpawnCall,
+    MockStreamMode,
+};
 
 #[cfg(miri)]
 pub use synthetic::{SyntheticBgHandle, SyntheticProcessManager};

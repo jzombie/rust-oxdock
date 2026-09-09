@@ -1,0 +1,7 @@
+# RUN exec form: direct spawn with no shell. `cargo` drives the suite
+# itself, so it exists on every platform without relying on shell
+# builtins (`echo` is not a Windows executable).
+RUN ["cargo", "--version"]
+ASSERT_STDOUT "cargo"
+WITH_IO [stdout=pipe:exec_cap] RUN ["cargo", "--version"]
+WITH_IO [stdin=pipe:exec_cap] WRITE cargo_version.txt

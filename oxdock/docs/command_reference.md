@@ -8,7 +8,7 @@
 | [`ENV`](#env) | `ENV KEY=value` |
 | [`INHERIT_ENV`](#inherit_env) | `INHERIT_ENV <key>...` |
 | [`ECHO`](#echo) | `ECHO <message>` |
-| [`RUN`](#run) | `RUN <command...>` |
+| [`RUN`](#run) | `RUN <command...> \| RUN ["exe", "arg", ...]` |
 | [`COPY`](#copy) | `COPY [--from-current-workspace] <from> <to>` |
 | [`COPY_GIT`](#copy_git) | `COPY_GIT [--include-dirty] <rev> <src> <dst>` |
 | [`SYMLINK`](#symlink) | `SYMLINK <from> <to>` |
@@ -446,11 +446,11 @@ ASSERT_STDOUT "World"
 
 ### RUN
 
-Execute shell command.
+Execute shell command or direct executable.
 
-**Syntax:** `RUN <command...>`
+**Syntax:** `RUN <command...> | RUN ["exe", "arg", ...]`
 
-Runs command in cwd.
+Shell form (`RUN <command...>`) runs the joined command string in the system shell (`$SHELL -c` / `COMSPEC /C`). Exec form (`RUN ["exe", "arg", ...]`) spawns the executable directly with no shell, so there is no shell expansion, globbing, redirection, or pipes; use it for portable commands. Guards and wrappers (`ASYNC`, `TIMEOUT`, `WITH_IO`, `LET`) apply to both forms.
 
 **Arguments:**
 
@@ -464,6 +464,12 @@ Runs command in cwd.
 
 ```oxdock
 RUN echo hello
+```
+
+**Example: run exec form**
+
+```oxdock
+RUN ["cargo", "--version"]
 ```
 
 

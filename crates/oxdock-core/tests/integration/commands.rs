@@ -1284,6 +1284,63 @@ fn assert_stdout_miss_reports_emitted_log() {
 }
 
 // ---------------------------------------------------------------------------
+// RUN exec form: `RUN ["exe", "arg", ...]` (direct spawn, no shell)
+// ---------------------------------------------------------------------------
+
+#[cfg_attr(
+    miri,
+    ignore = "spawns processes; Miri does not support process execution"
+)]
+#[test]
+fn run_exec_form_spawns_directly_and_pipes_stdout() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+
+    // `cargo` drives the test suite itself, so it exists on every platform
+    // without relying on shell builtins (`echo` is not a Windows executable).
+    let script = indoc!(
+        r#"
+        WITH_IO [stdout=pipe:cap] RUN ["cargo", "--version"]
+        WITH_IO [stdin=pipe:cap] WRITE cargo_version.txt
+        "#
+    );
+    let steps = oxdock_core::parse_script(script).unwrap();
+    assert!(
+        matches!(&steps[0].kind, StepKind::WithIo { cmd, .. } if matches!(cmd.as_ref(), StepKind::RunExec { .. })),
+        "first step must wrap RunExec, got {:?}",
+        steps[0].kind
+    );
+    run_steps(&root, &steps).unwrap();
+
+    let out = read_trimmed(&root.join("cargo_version.txt").unwrap());
+    assert!(
+        out.starts_with("cargo "),
+        "expected cargo version output, got {out:?}"
+    );
+}
+
+#[cfg_attr(
+    miri,
+    ignore = "spawns processes; Miri does not support process execution"
+)]
+#[test]
+fn run_exec_nonzero_status_bails_with_step_context() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+
+    let steps = oxdock_core::parse_script(r#"RUN ["cargo", "--invalid-oxdock-flag-xyz"]"#).unwrap();
+    let err = run_steps(&root, &steps).unwrap_err();
+    let msg = format!("{err:#}");
+    // Foreground failures surface the manager's non-zero error wrapped in
+    // step context — identical to shell `RUN` (the `exited with status`
+    // spelling is the background/ASYNC path in `run_argv`/`run`).
+    assert!(
+        msg.contains("step 1: RUN") && msg.contains("failed with status"),
+        "error must carry step index and status, got: {msg}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Compile-time StepKind exhaustiveness check
 // ---------------------------------------------------------------------------
 
@@ -1296,6 +1353,7 @@ fn _assert_step_kind_exhaustiveness(kind: &StepKind) {
         StepKind::Env { .. } => {}
         StepKind::InheritEnv { .. } => {}
         StepKind::Run(_) => {}
+        StepKind::RunExec { .. } => {}
         StepKind::Echo(_) => {}
         StepKind::AsyncBlock { .. } => {}
         StepKind::Copy { .. } => {}

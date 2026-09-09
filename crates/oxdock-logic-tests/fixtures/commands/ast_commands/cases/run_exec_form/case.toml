@@ -1,0 +1,6 @@
+name = "run_exec_form"
+
+# Output pins nothing exact: `cargo --version` varies by toolchain.
+# The script self-validates via substring ASSERT_STDOUT; the piped
+# WRITE pins WITH_IO wiring for the exec form.
+[expect]

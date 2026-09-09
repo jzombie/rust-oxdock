@@ -103,7 +103,7 @@ impl Command {
             Command::Workspace => "WORKSPACE SNAPSHOT|LOCAL",
             Command::Env => "ENV KEY=value",
             Command::Echo => "ECHO <message>",
-            Command::Run => "RUN <command...>",
+            Command::Run => "RUN <command...> | RUN [\"exe\", \"arg\", ...]",
             Command::Copy => "COPY [--from-current-workspace] <from> <to>",
             Command::CopyGit => "COPY_GIT [--include-dirty] <rev> <src> <dst>",
             Command::WithIo => "WITH_IO [bindings] [command | { block }]",

@@ -176,8 +176,8 @@ timeout_literal = @{ ASCII_DIGIT+ ~ ("ms" | "s" | "m" | "h")? }
 timeout_duration = { timeout_literal | dollar_ident | quoted_string | templated_arg }
 timeout_statement = ${ timeout_keyword ~ sep ~ timeout_duration ~ sep ~ (block | await_statement | cancel_statement | command) }
 
-command = _{ with_io_command | inherit_env_command | timeout_statement | async_statement_block | async_statement | cancel_statement | instruction_inner }
-command_inner = { inherit_env_command | timeout_statement | async_statement | async_statement_block | cancel_statement | instruction }
+command = _{ with_io_command | inherit_env_command | timeout_statement | async_statement_block | async_statement | cancel_statement | run_exec_inner | instruction_inner }
+command_inner = { inherit_env_command | timeout_statement | async_statement | async_statement_block | cancel_statement | run_exec_statement | instruction }
 
 with_io_command = ${ "WITH_IO" ~ sep ~ io_flags ~ (sep ~ command)? }
 io_flags = { "[" ~ ws? ~ io_binding ~ (ws? ~ "," ~ ws? ~ io_binding)* ~ ws? ~ "]" }
@@ -194,6 +194,13 @@ inherit_list = { "[" ~ ws? ~ env_key ~ (ws? ~ "," ~ ws? ~ env_key)* ~ ws? ~ "]" 
 // instruction (atomic) — used at top-level in element.
 // `assignment` is tried before plain `argument` so `KEY=...` tokens split into
 // (key, value) at tokenize time on raw spans; lowering never re-stitches them.
+// RUN exec form (`RUN ["exe", "arg", ...]`, direct spawn with no shell) is a
+// dedicated production ordered ahead of the generic instructions: PEG tries
+// it first, so a leading list routes here with full-span validation from the
+// grammar engine. Bracketed shell (`RUN [ -f ... ]`) is not a valid comma
+// separated list literal and falls through to the shell path unchanged.
+run_exec_statement = ${ "RUN" ~ sep ~ list_literal }
+run_exec_inner = ${ "RUN" ~ sep ~ list_literal }
 instruction_inner = ${ command_name ~ (sep ~ (assignment | argument))* }
 instruction = ${ command_name ~ (sep ~ (assignment | argument))* }
 command_name = @{ ASCII_ALPHA_UPPER ~ (ASCII_ALPHA_UPPER | ASCII_DIGIT | "_")* }
