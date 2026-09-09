@@ -4,12 +4,6 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
-## [Unreleased]
-
-### Changed
-
-- [docs-gen] READMEs are now assembled from a master template per document: the section order you see in the template file is the order you get in the README. Sections shared between documents live in one file and are pulled in by name, and a misspelled section name fails the build instead of silently rendering wrong docs. Two doc-only renames came along with it: every fragment now ends in `.md.tmpl`, and the `oxdock-build` fragment with parens in its name became `usage-build-rs.md`.
-
 ## [0.10.0-alpha] - 2026-09-08
 
 ### Added
@@ -23,7 +17,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ### Changed
 
-- READMEs and `oxdock` crate docs rewritten around a shared lead (Rust first pitch, version pinned install, `oxdock_prepare!`, `WITH_IO` pipelines, snapshot workspaces)
+- [docs-gen] READMEs are now assembled from a master template per document: the section order you see in the template file is the order you get in the README. Sections shared between documents live in one file and are pulled in by name, and a misspelled section name fails the build instead of silently rendering wrong docs. Two doc-only renames came along with it: every fragment now ends in `.md.tmpl`, and the `oxdock-build` fragment with parens in its name became `usage-build-rs.md`.
 
 ### Fixed
 
