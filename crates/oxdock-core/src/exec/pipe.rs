@@ -6,11 +6,11 @@ use oxdock_process::{SharedInput, SharedOutput};
 use super::capture::SpillBuffer;
 
 /// Memory threshold before spilling to disk (re-exported for tests).
-#[cfg(test)]
+#[cfg(all(test, not(miri)))]
 pub(super) use super::capture::SPILL_THRESHOLD as PIPE_SPILL_THRESHOLD;
 
 /// Maximum active backlog before returning an error (re-exported for tests).
-#[cfg(test)]
+#[cfg(all(test, not(miri)))]
 pub(super) use super::capture::MAX_BACKLOG as PIPE_MAX_BACKLOG;
 
 #[derive(Clone)]

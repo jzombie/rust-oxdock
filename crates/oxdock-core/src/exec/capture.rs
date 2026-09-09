@@ -7,7 +7,9 @@
 //! directory. Under Miri the buffer stays memory-only (no host I/O).
 
 use std::collections::VecDeque;
-use std::io::{self, Read, Write};
+#[cfg(not(miri))]
+use std::io::Read;
+use std::io::{self, Write};
 #[cfg(not(miri))]
 use std::io::{Seek, SeekFrom};
 use std::sync::{Arc, Mutex};

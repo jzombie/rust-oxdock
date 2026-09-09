@@ -138,19 +138,24 @@ fn let_capture_write_binds_empty() {
 fn let_capture_run() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
+    // Windows needs the `cmd /c` prefix (and its echo appends a stray
+    // trailing quote), so containment — not exact bytes — is asserted here.
+    // Exact-byte capture is pinned by `let_capture_echo_binds_exact_bytes`.
     #[cfg(unix)]
-    let script = indoc! {r#"
-        LET $x = RUN "echo run-cap"
-        WRITE out.txt "{{ $x }}"
-        ASSERT_FILE out.txt "run-cap\n"
-    "#};
+    let shell_cmd = "echo run-cap";
     #[cfg(windows)]
+    let shell_cmd = "cmd /c echo run-cap";
     let script = indoc! {r#"
-        LET $x = RUN "cmd /c echo run-cap"
+        LET $x = RUN "{CMD}"
         WRITE out.txt "{{ $x }}"
-        ASSERT_FILE out.txt "run-cap\r\n"
-    "#};
-    run_script(&root, script).expect("capture RUN");
+    "#}
+    .replace("{CMD}", shell_cmd);
+    run_script(&root, &script).expect("capture RUN");
+    let contents = read_file(&root.join("out.txt").unwrap());
+    assert!(
+        contents.contains("run-cap"),
+        "RUN capture must contain shell output, got {contents:?}"
+    );
 }
 
 #[test]
