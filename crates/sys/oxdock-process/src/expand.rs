@@ -1089,4 +1089,43 @@ mod tests {
         let result = expander.expand_string("end\\{").unwrap();
         assert_eq!(result, "end\\{");
     }
+
+    // ── Single-pass substitution tests ────────────────────────────────────
+    // Substituted values are emitted verbatim and never re-scanned for
+    // `{{ ... }}`. These pin the top-level-only behavior: a value that
+    // itself contains a placeholder stays literal instead of expanding.
+
+    #[test]
+    fn substituted_override_value_is_not_rescanned() {
+        let mut env = HashMap::new();
+        env.insert("OTHER".into(), "world".into());
+        let overrides = vec![("NAME".into(), "{{ env:OTHER }}".into())];
+        let expander = StreamingExpand::new(&overrides, &env);
+        let result = expander.expand_string("Hello {{ NAME }}").unwrap();
+        assert_eq!(result, "Hello {{ env:OTHER }}");
+    }
+
+    #[test]
+    fn substituted_env_value_is_not_rescanned() {
+        let mut env = HashMap::new();
+        env.insert("NAME".into(), "{{ env:OTHER }}".into());
+        env.insert("OTHER".into(), "world".into());
+        let expander = StreamingExpand::new(&[], &env);
+        let result = expander.expand_string("Hello {{ env:NAME }}").unwrap();
+        assert_eq!(result, "Hello {{ env:OTHER }}");
+    }
+
+    #[test]
+    fn substituted_script_var_value_is_not_rescanned() {
+        let mut vars = HashMap::new();
+        vars.insert(
+            "inner".into(),
+            oxdock_parser::Value::String("{{ env:OTHER }}".into()),
+        );
+        let mut env = HashMap::new();
+        env.insert("OTHER".into(), "world".into());
+        let expander = StreamingExpand::new(&[], &env).with_vars(&vars);
+        let result = expander.expand_string("Hello {{ $inner }}").unwrap();
+        assert_eq!(result, "Hello {{ env:OTHER }}");
+    }
 }
