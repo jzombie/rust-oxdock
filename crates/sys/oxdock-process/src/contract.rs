@@ -141,8 +141,8 @@ pub enum CommandResult<H> {
 pub const INHERIT_STDOUT_ENV_VAR: &str = "OXDOCK_INHERIT_STDOUT";
 
 /// Host process-environment variable enabling `eprintln!` diagnostics for
-/// every spawned command (program plus argv/script). Read from
-/// [`std::env`] at spawn time; any value (including empty) enables it.
+/// every spawned command (program plus argv/script). Read from the process
+/// environment at spawn time; any value (including empty) enables it.
 pub const PROCESS_DEBUG_ENV_VAR: &str = "OXBOOK_DEBUG";
 
 /// Abstraction for running shell commands both in the foreground and

@@ -254,15 +254,13 @@ fn execute_argv_sync(
                 stdout.extend_from_slice(&data);
             }
         }
-        "printf" => {
-            if capture {
-                let rest = if argv.get(1).is_some_and(|s| s == "%s") {
-                    &argv[2..]
-                } else {
-                    &argv[1..]
-                };
-                stdout.extend_from_slice(rest.join(" ").as_bytes());
-            }
+        "printf" if capture => {
+            let rest = if argv.get(1).is_some_and(|s| s == "%s") {
+                &argv[2..]
+            } else {
+                &argv[1..]
+            };
+            stdout.extend_from_slice(rest.join(" ").as_bytes());
         }
         _ => {}
     }
