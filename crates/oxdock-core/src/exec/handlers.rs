@@ -1013,6 +1013,45 @@ pub(crate) fn assign<P: ProcessManager>(
     Ok(())
 }
 
+/// Dispatch `LET $var = <sync command>` — run the command to completion with
+/// a spillable capture sink as its stdout, then bind the exact bytes as a
+/// string. Only stdout is captured (stderr keeps the parent wiring; stdin
+/// passes through so `WITH_IO [stdin=pipe:p]` still works). Captured bytes
+/// never tee into the parent `ASSERT_STDOUT` windows. On command failure
+/// nothing is bound.
+pub(crate) fn assign_capture<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    generation: usize,
+    idx: usize,
+    var: &str,
+    cmd: &StepKind,
+) -> Result<()> {
+    use std::sync::Arc;
+
+    use super::capture::SpillBuffer;
+    use super::io::StreamHandle;
+
+    let sink = Arc::new(SpillBuffer::new());
+    let capture_out = Some(StreamHandle::Stream(sink.writer()));
+    super::steps::execute_single_step_with_generation(
+        cx.state,
+        cx.process,
+        cmd,
+        generation,
+        idx,
+        cx.stdin.clone(),
+        cx.expose_stdin,
+        capture_out,
+        cx.err.clone(),
+    )?;
+    let text = sink
+        .drain_string_strict()
+        .map_err(|e| anyhow!("LET ${var} capture is not valid UTF-8: {e}"))?;
+    let clean_var = var.trim_start_matches('$').to_string();
+    cx.state.set_var(clean_var, Value::String(text));
+    Ok(())
+}
+
 pub(crate) fn if_then<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     cond: &Expr,
@@ -1479,7 +1518,11 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
     let body = body.to_vec();
     let stdin = cx.stdin.clone();
     let expose_stdin = cx.expose_stdin;
-    let out = cx.out.clone();
+    // Named tasks write stdout into a per-task spillable sink instead of
+    // sharing the parent writer. Bare `AWAIT $t` forwards it to the parent
+    // stdout; `LET $o = AWAIT $t` binds it. Stderr keeps parent wiring.
+    let sink = std::sync::Arc::new(super::capture::SpillBuffer::new());
+    let out = Some(super::io::StreamHandle::Stream(sink.writer()));
     let err = cx.err.clone();
     let cancel_token = std::sync::Arc::clone(&forked_state.cancel_token);
     let active_process = std::sync::Arc::clone(&forked_state.active_process);
@@ -1513,7 +1556,10 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
             .unwrap_or_else(|e| e.into_inner());
         named.insert(
             task_id,
-            Arc::new(super::state::TaskEntry::new(Box::new(handle))),
+            Arc::new(super::state::TaskEntry::new_with_sink(
+                Box::new(handle),
+                sink,
+            )),
         );
     }
 
@@ -1531,9 +1577,11 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
 /// `CANCEL` (or a `TIMEOUT` deadline) transitions the entry to `Cancelled`;
 /// this loop observes that within ~10ms and rendezvouses on teardown
 /// completion before reporting cancellation.
-pub(crate) fn dispatch_await<P: ProcessManager>(var: &str, cx: &mut StepCtx<'_, P>) -> Result<()> {
-    use super::state::TaskPhase;
-
+/// Resolve a task-handle variable to its shared registry entry.
+fn resolve_task_entry<P: ProcessManager>(
+    var: &str,
+    cx: &StepCtx<'_, P>,
+) -> Result<Arc<super::state::TaskEntry>> {
     // Resolve the variable to a TaskHandle
     let val = cx
         .state
@@ -1555,6 +1603,21 @@ pub(crate) fn dispatch_await<P: ProcessManager>(var: &str, cx: &mut StepCtx<'_, 
     let Some(entry) = entry else {
         bail!("task handle for '${var}' was not found or has already been awaited");
     };
+    Ok(entry)
+}
+
+/// Claim a task entry and run the bounded await poll loop to completion.
+/// Shared by bare `AWAIT` and `LET $o = AWAIT $t` so cancellation, timeout,
+/// double-await, and failure semantics never diverge. Returns the child's
+/// exit status; the caller owns output handling (forward vs bind).
+/// The child's thread is joined before returning success, so draining the
+/// task sink afterwards races with no writer.
+fn await_task_entry(
+    entry: &Arc<super::state::TaskEntry>,
+    cancel_token: &Arc<std::sync::atomic::AtomicBool>,
+    var: &str,
+) -> Result<std::process::ExitStatus> {
+    use super::state::TaskPhase;
 
     // Claim the entry for awaiting.
     {
@@ -1595,11 +1658,7 @@ pub(crate) fn dispatch_await<P: ProcessManager>(var: &str, cx: &mut StepCtx<'_, 
             let mut guard = entry.state.lock().unwrap_or_else(|e| e.into_inner());
             if matches!(guard.phase, TaskPhase::Cancelled) {
                 Decision::Cancelled
-            } else if cx
-                .state
-                .cancel_token
-                .load(std::sync::atomic::Ordering::SeqCst)
-            {
+            } else if cancel_token.load(std::sync::atomic::Ordering::SeqCst) {
                 // Parent TIMEOUT watcher fired while awaiting: the named
                 // child's OS process lives on the child's own
                 // `active_process`, unreachable from the watcher, so this
@@ -1659,10 +1718,63 @@ pub(crate) fn dispatch_await<P: ProcessManager>(var: &str, cx: &mut StepCtx<'_, 
                 if !status.success() {
                     bail!("AWAIT task '${var}' failed with status {status}");
                 }
-                return Ok(());
+                return Ok(status);
             }
         }
     }
+}
+
+/// Dispatch `AWAIT $var` — block until the named task completes, propagate
+/// error if it failed, and forward the task's captured stdout to the parent
+/// stdout.
+///
+/// State machine (`TaskEntry`): the first `AWAIT` transitions the entry
+/// `Running -> Awaiting` and owns the bounded poll loop below. A concurrent
+/// `CANCEL` (or a `TIMEOUT` deadline) transitions the entry to `Cancelled`;
+/// this loop observes that within ~10ms and rendezvouses on teardown
+/// completion before reporting cancellation.
+pub(crate) fn dispatch_await<P: ProcessManager>(var: &str, cx: &mut StepCtx<'_, P>) -> Result<()> {
+    let entry = resolve_task_entry(var, cx)?;
+    await_task_entry(&entry, &cx.state.cancel_token, var)?;
+    // Bare AWAIT keeps status-only semantics for variables but preserves the
+    // observable stream: the task's stdout flows to the parent stdout.
+    if let Some(sink) = entry.take_sink() {
+        let bytes = sink
+            .drain_bytes()
+            .map_err(|e| anyhow!("AWAIT task '${var}' output drain failed: {e}"))?;
+        if !bytes.is_empty() {
+            super::io::write_stdout(cx.out.clone(), |writer| {
+                writer
+                    .write_all(&bytes)
+                    .with_context(|| format!("AWAIT task '${var}' output forward failed"))?;
+                Ok(())
+            })?;
+        }
+    }
+    Ok(())
+}
+
+/// Dispatch `LET $out = AWAIT $task` — join like bare `AWAIT` (identical
+/// cancellation/timeout/double-await semantics via [`await_task_entry`]),
+/// then bind the task's stdout as a string instead of forwarding it.
+pub(crate) fn dispatch_await_capture<P: ProcessManager>(
+    out_var: &str,
+    task_var: &str,
+    cx: &mut StepCtx<'_, P>,
+) -> Result<()> {
+    let entry = resolve_task_entry(task_var, cx)?;
+    await_task_entry(&entry, &cx.state.cancel_token, task_var)?;
+    let text = match entry.take_sink() {
+        Some(sink) => sink.drain_string_strict().map_err(|e| {
+            anyhow!("LET ${out_var} = AWAIT ${task_var} capture is not valid UTF-8: {e}")
+        })?,
+        None => String::new(),
+    };
+    cx.state.set_var(
+        out_var.trim_start_matches('$').to_string(),
+        Value::String(text),
+    );
+    Ok(())
 }
 
 /// Dispatch `CANCEL $var` — synchronously kill a named background task.
@@ -1741,6 +1853,28 @@ pub(crate) fn dispatch_await_step<P: ProcessManager>(
         unreachable!()
     };
     dispatch_await(var, cx)
+}
+
+/// Pipeline dispatch wrapper for `AssignCapture`
+pub(crate) fn dispatch_assign_capture_step<P: ProcessManager>(
+    step: &StepKind,
+    cx: &mut StepCtx<'_, P>,
+) -> Result<()> {
+    let StepKind::AssignCapture { var, cmd } = step else {
+        unreachable!()
+    };
+    assign_capture(cx, super::steps::allocate_assert_generation(), 0, var, cmd)
+}
+
+/// Pipeline dispatch wrapper for `AwaitCapture`
+pub(crate) fn dispatch_await_capture_step<P: ProcessManager>(
+    step: &StepKind,
+    cx: &mut StepCtx<'_, P>,
+) -> Result<()> {
+    let StepKind::AwaitCapture { out_var, task_var } = step else {
+        unreachable!()
+    };
+    dispatch_await_capture(out_var, task_var, cx)
 }
 
 /// Pipeline dispatch wrapper for `Cancel`

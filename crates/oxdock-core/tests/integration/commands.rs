@@ -1320,8 +1320,10 @@ fn _assert_step_kind_exhaustiveness(kind: &StepKind) {
         StepKind::For { .. } => {}
         StepKind::If { .. } => {}
         StepKind::Assign { .. } => {}
+        StepKind::AssignCapture { .. } => {}
         StepKind::AssignAsync { .. } => {}
         StepKind::Await { .. } => {}
+        StepKind::AwaitCapture { .. } => {}
         StepKind::Cancel { .. } => {}
         StepKind::Timeout { .. } => {}
         StepKind::Sleep { .. } => {}

@@ -13,6 +13,8 @@ mod guard_isolation;
 mod incremental;
 #[path = "integration/key_path.rs"]
 mod key_path;
+#[path = "integration/let_capture.rs"]
+mod let_capture;
 #[path = "integration/phase_boundary.rs"]
 mod phase_boundary;
 #[path = "integration/unified_values.rs"]

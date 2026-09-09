@@ -217,6 +217,130 @@ impl PathResolver {
         self.backend.remove_dir_all(&guarded)
     }
 
+    /// Create a new spill file with read/write access (fails if it exists).
+    /// Backs large stdout capture / pipe backlog under a guarded tempdir.
+    /// Host only; Miri callers stay memory-only and never call this.
+    #[cfg(not(miri))]
+    #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+    pub fn create_spill_file(&self, path: &GuardedPath) -> Result<SpillFile> {
+        let guarded = self
+            .check_access(path.as_path(), AccessMode::Write)
+            .with_context(|| format!("spill create denied for {}", path.display()))?;
+        if let Some(parent) = guarded.as_path().parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating dir {}", parent.display()))?;
+        }
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(guarded.as_path())
+            .with_context(|| format!("failed to create spill {}", guarded.display()))?;
+        Ok(SpillFile { file })
+    }
+
+    /// Open an existing spill file with read/write access.
+    #[cfg(not(miri))]
+    #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+    pub fn open_spill_file(&self, path: &GuardedPath) -> Result<SpillFile> {
+        let guarded = self
+            .check_access(path.as_path(), AccessMode::Write)
+            .with_context(|| format!("spill open denied for {}", path.display()))?;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(guarded.as_path())
+            .with_context(|| format!("failed to open spill {}", guarded.display()))?;
+        Ok(SpillFile { file })
+    }
+
+    /// Truncate a spill file to `len` bytes.
+    #[cfg(not(miri))]
+    #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+    pub fn truncate_spill_file(&self, path: &GuardedPath, len: u64) -> Result<()> {
+        let guarded = self
+            .check_access(path.as_path(), AccessMode::Write)
+            .with_context(|| format!("spill truncate denied for {}", path.display()))?;
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(guarded.as_path())
+            .with_context(|| format!("failed to open spill {}", guarded.display()))?;
+        file.set_len(len)
+            .with_context(|| format!("failed to truncate spill {}", guarded.display()))?;
+        Ok(())
+    }
+
+    #[cfg(miri)]
+    pub fn create_spill_file(&self, _path: &GuardedPath) -> Result<SpillFile> {
+        bail!("spill files are not supported under Miri (memory-only)")
+    }
+
+    #[cfg(miri)]
+    pub fn open_spill_file(&self, _path: &GuardedPath) -> Result<SpillFile> {
+        bail!("spill files are not supported under Miri (memory-only)")
+    }
+
+    #[cfg(miri)]
+    pub fn truncate_spill_file(&self, _path: &GuardedPath, _len: u64) -> Result<()> {
+        bail!("spill files are not supported under Miri (memory-only)")
+    }
+}
+
+/// Read/write/seek handle for a guarded spill file (host only).
+/// Wraps `std::fs::File`; construction goes through `PathResolver`
+/// so access checks apply. Under Miri this type exists but can never
+/// be constructed (callers stay memory-only).
+#[cfg(not(miri))]
+#[allow(clippy::disallowed_types)]
+pub struct SpillFile {
+    file: std::fs::File,
+}
+
+#[cfg(not(miri))]
+#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+impl SpillFile {
+    pub fn set_len(&self, len: u64) -> Result<()> {
+        self.file
+            .set_len(len)
+            .with_context(|| "failed to truncate spill file")?;
+        Ok(())
+    }
+}
+
+#[cfg(not(miri))]
+#[allow(clippy::disallowed_types)]
+impl std::io::Read for SpillFile {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.file.read(buf)
+    }
+}
+
+#[cfg(not(miri))]
+#[allow(clippy::disallowed_types)]
+impl std::io::Write for SpillFile {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.file.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file.flush()
+    }
+}
+
+#[cfg(not(miri))]
+#[allow(clippy::disallowed_types)]
+impl std::io::Seek for SpillFile {
+    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.file.seek(pos)
+    }
+}
+
+#[cfg(miri)]
+pub struct SpillFile {
+    _private: (),
+}
+
+impl PathResolver {
     #[cfg(not(miri))]
     #[allow(clippy::disallowed_methods)]
     pub fn symlink(&self, src: &GuardedPath, dst: &GuardedPath) -> Result<()> {

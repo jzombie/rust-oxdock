@@ -1,4 +1,5 @@
 mod args;
+mod capture;
 mod fs_ops;
 mod handlers;
 mod io;
@@ -10,7 +11,8 @@ mod tests;
 
 pub(crate) use self::handlers::{
     dispatch_append, dispatch_assert_absent, dispatch_assert_dir, dispatch_assert_file,
-    dispatch_assert_stdout, dispatch_assign, dispatch_assign_async_step, dispatch_async_block,
+    dispatch_assert_stdout, dispatch_assign, dispatch_assign_async_step,
+    dispatch_assign_capture_step, dispatch_async_block, dispatch_await_capture_step,
     dispatch_await_step, dispatch_cancel_step, dispatch_copy, dispatch_copy_git, dispatch_cwd,
     dispatch_echo, dispatch_env, dispatch_exit, dispatch_expand, dispatch_for_loop,
     dispatch_hash_sha256, dispatch_if_then, dispatch_inherit_env, dispatch_ls, dispatch_mkdir,

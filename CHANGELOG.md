@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [Unreleased]
+
+### Added
+
+- Unified `LET` output capture: `LET $x = <sync command>` runs the command to completion and binds its exact stdout bytes into `$x` (no newline stripping; commands with no stdout bind `""`; non-UTF8 stdout is an error), spilling to a guarded temp file past 8 MiB instead of buffering unboundedly in memory
+- `LET $o = AWAIT $t` captures a background task's stdout into `$o`; bare `AWAIT $t` keeps its status semantics and now forwards the task's stdout to the parent stdout
+- Pipe backlog and capture share one spillable sink backed by `GuardedPath::tempdir` (PID-lock GC) instead of `std::env::temp_dir`, with the same 8 MiB spill / 100 MiB backlog-cap behavior; spills stay memory-only under Miri
+
+### Changed
+
+- `LET $x = WITH_IO [stdin=pipe:p] <sync command>` now captures instead of failing; combining capture with an explicit `WITH_IO [stdout=pipe:...]` is a parse error since the capture sink owns stdout
+- Named `ASYNC` tasks no longer share the parent stdout writer: output is buffered per task and surfaces via `AWAIT` (forward), `LET $o = AWAIT $t` (bind), or end-of-pipeline reaping for tasks that are never awaited
+
 ## [0.10.0-alpha] - 2026-09-08
 
 ### Added

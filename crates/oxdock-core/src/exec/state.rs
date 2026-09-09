@@ -8,6 +8,7 @@ use oxdock_fs::{GuardedPath, WorkspaceFs};
 use oxdock_parser::Value;
 use oxdock_process::{BackgroundHandle, CommandContext, ProcessManager};
 
+use super::capture::SpillBuffer;
 use super::io::{ExecIo, SlidingWindow};
 
 pub(super) struct ExecState<P: ProcessManager> {
@@ -78,6 +79,11 @@ pub(super) struct TaskEntryState {
     /// Threads observing `Cancelled` must wait on `done` until `reaped`
     /// before resuming, so no caller outruns OS process teardown.
     pub(super) reaped: bool,
+    /// Per-task stdout sink (`LET $t = ASYNC ...`). The child thread writes
+    /// here instead of the parent writer. Exactly one consumer takes it:
+    /// `LET $o = AWAIT $t` binds it, bare `AWAIT $t` forwards it to the
+    /// parent stdout, and end-poll reaping forwards un-awaited output.
+    pub(super) sink: Option<Arc<SpillBuffer>>,
 }
 
 /// Synchronized named-task entry shared by every scope that can observe the
@@ -90,15 +96,26 @@ pub(super) struct TaskEntry {
 }
 
 impl TaskEntry {
-    pub(super) fn new(handle: Box<dyn BackgroundHandle>) -> Self {
+    pub(super) fn new_with_sink(handle: Box<dyn BackgroundHandle>, sink: Arc<SpillBuffer>) -> Self {
         Self {
             state: Mutex::new(TaskEntryState {
                 phase: TaskPhase::Running,
                 handle: Some(handle),
                 reaped: false,
+                sink: Some(sink),
             }),
             done: Condvar::new(),
         }
+    }
+
+    /// Take the task's stdout sink exactly once. The first consumer
+    /// (awaiter or end-poll reaper) wins; later calls get `None`.
+    pub(super) fn take_sink(&self) -> Option<Arc<SpillBuffer>> {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .sink
+            .take()
     }
 
     /// Block until the teardown owner has consumed the handle and joined

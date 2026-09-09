@@ -1643,3 +1643,133 @@ fn script_pipe_explicit_disk_spill_and_cleanup_verification() {
         "Temp file must be deleted from disk upon Drop"
     );
 }
+
+// ---------------------------------------------------------------------------
+// SpillBuffer (LET-capture sink) storage tiering tests
+// ---------------------------------------------------------------------------
+
+#[test]
+#[cfg(not(miri))]
+fn spill_buffer_stays_in_memory_below_threshold() {
+    use super::capture::{SPILL_THRESHOLD, SpillBuffer};
+    use std::sync::Arc;
+
+    let buf = Arc::new(SpillBuffer::new());
+    let writer = buf.writer();
+
+    let payload = vec![0xABu8; 1024]; // 1 KiB — below threshold
+    writer.lock().unwrap().write_all(&payload).unwrap();
+    assert!(!buf.is_spilled());
+    assert_eq!(buf.drain_bytes().unwrap(), payload);
+    let _ = SPILL_THRESHOLD; // Ensure constant is used
+}
+
+#[test]
+#[cfg(not(miri))]
+fn spill_buffer_spills_to_disk_above_threshold() {
+    use super::capture::{SPILL_THRESHOLD, SpillBuffer};
+    use std::sync::Arc;
+
+    let buf = Arc::new(SpillBuffer::new());
+    let writer = buf.writer();
+
+    // Exceed the threshold by 1 MiB
+    let size = SPILL_THRESHOLD + (1024 * 1024);
+    let payload: Vec<u8> = (0..size).map(|i| (i % 256) as u8).collect();
+    writer.lock().unwrap().write_all(&payload).unwrap();
+    drop(writer);
+
+    assert!(buf.is_spilled(), "buffer must have spilled to disk");
+    assert_eq!(buf.drain_bytes().unwrap(), payload);
+}
+
+#[test]
+#[cfg(not(miri))]
+fn spill_buffer_backlog_cap_exceeded_returns_error() {
+    use super::capture::{MAX_BACKLOG, SPILL_THRESHOLD, SpillBuffer};
+    use std::sync::Arc;
+
+    let buf = Arc::new(SpillBuffer::new());
+    let writer = buf.writer();
+
+    // First, trigger a spill to Disk mode by writing above the spill threshold
+    let spill_payload = vec![0u8; SPILL_THRESHOLD + 1];
+    writer.lock().unwrap().write_all(&spill_payload).unwrap();
+
+    // Now write enough to exceed the backlog limit without reading
+    let remaining = (MAX_BACKLOG as usize) - spill_payload.len() + 1;
+    let overflow_payload = vec![0u8; remaining];
+    let result = writer.lock().unwrap().write_all(&overflow_payload);
+
+    assert!(
+        result.is_err(),
+        "Writing beyond MAX_BACKLOG must return an error"
+    );
+    let err = result.unwrap_err();
+    assert_eq!(
+        err.kind(),
+        std::io::ErrorKind::OutOfMemory,
+        "Expected OutOfMemory error kind on backlog overflow"
+    );
+}
+
+#[test]
+#[cfg(not(miri))]
+#[allow(clippy::disallowed_methods)]
+fn spill_buffer_file_truncated_on_drain_and_cleaned_on_drop() {
+    use super::capture::{SPILL_THRESHOLD, SpillBuffer};
+    use std::fs;
+    use std::sync::Arc;
+
+    let buf = Arc::new(SpillBuffer::new());
+    let writer = buf.writer();
+
+    let size = SPILL_THRESHOLD + (1024 * 1024);
+    let payload = vec![0x55u8; size];
+    writer.lock().unwrap().write_all(&payload).unwrap();
+    drop(writer);
+
+    let temp_path = buf
+        .temp_path()
+        .expect("buffer must have transitioned to disk");
+    assert!(
+        temp_path.exists(),
+        "Temp file {} must exist on disk while buffered",
+        temp_path.display()
+    );
+
+    assert_eq!(buf.drain_bytes().unwrap(), payload);
+    let meta = fs::metadata(&temp_path).unwrap();
+    assert_eq!(
+        meta.len(),
+        0,
+        "Physical file length must be 0 after buffer drainage"
+    );
+
+    drop(buf);
+    assert!(
+        !temp_path.exists(),
+        "Temp file must be deleted from disk upon Drop"
+    );
+}
+
+#[test]
+fn spill_buffer_drain_string_strict_round_trips_and_rejects_non_utf8() {
+    use super::capture::SpillBuffer;
+    use std::sync::Arc;
+
+    // Valid UTF-8 round-trips exactly (no stripping).
+    let buf = Arc::new(SpillBuffer::new());
+    buf.writer().lock().unwrap().write_all(b"hi\n").unwrap();
+    assert_eq!(buf.drain_string_strict().unwrap(), "hi\n");
+
+    // Invalid UTF-8 is a strict error, never lossy.
+    let buf = Arc::new(SpillBuffer::new());
+    buf.writer()
+        .lock()
+        .unwrap()
+        .write_all(&[0x66, 0xff, 0xfe])
+        .unwrap();
+    let err = buf.drain_string_strict().expect_err("non-UTF8 must fail");
+    assert!(err.to_string().contains("not valid UTF-8"), "{err}");
+}

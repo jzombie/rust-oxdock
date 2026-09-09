@@ -33,6 +33,8 @@ define_pipeline! {
     StepKind::Exit(..) => exec::dispatch_exit,
     StepKind::AssignAsync { .. } => exec::dispatch_assign_async_step,
     StepKind::Await { .. } => exec::dispatch_await_step,
+    StepKind::AssignCapture { .. } => exec::dispatch_assign_capture_step,
+    StepKind::AwaitCapture { .. } => exec::dispatch_await_capture_step,
     StepKind::Cancel { .. } => exec::dispatch_cancel_step,
     StepKind::Timeout { .. } => exec::dispatch_timeout_step,
     StepKind::Sleep { .. } => exec::dispatch_sleep_step,

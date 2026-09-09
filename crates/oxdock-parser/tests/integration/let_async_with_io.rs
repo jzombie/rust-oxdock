@@ -34,14 +34,46 @@ fn let_async_with_io_single_command_binds_task() {
 }
 
 #[test]
-fn let_async_with_io_rejects_non_async_command() {
+fn let_with_io_sync_command_captures() {
+    // #111: LET $x = WITH_IO (without stdout=pipe) <sync command> captures
+    // the command's stdout instead of failing.
     let script = indoc! {r#"
         LET $task = WITH_IO [stdin=pipe:in_chan] RUN "echo hi"
     "#};
 
-    let err = parse_script(script, mock_lower).expect_err("non-ASYNC LET WITH_IO must fail");
+    let steps = parse_script(script, mock_lower).expect("sync LET WITH_IO captures");
+    assert_eq!(steps.len(), 1, "expected a single AssignCapture step");
+    match &steps[0].kind {
+        StepKind::AssignCapture { var, cmd } => {
+            assert_eq!(var, "task");
+            match cmd.as_ref() {
+                StepKind::WithIo { bindings, cmd } => {
+                    assert_eq!(bindings.len(), 1);
+                    assert_eq!(bindings[0].stream, IoStream::Stdin);
+                    assert_eq!(bindings[0].pipe.as_deref(), Some("in_chan"));
+                    assert!(
+                        matches!(cmd.as_ref(), StepKind::Run(_)),
+                        "expected RUN inside WITH_IO, got {cmd:?}"
+                    );
+                }
+                other => panic!("expected WITH_IO capture body, got {other:?}"),
+            }
+        }
+        other => panic!("expected AssignCapture, got {other:?}"),
+    }
+}
+
+#[test]
+fn let_with_io_stdout_pipe_conflicts_with_capture() {
+    // #111: explicit WITH_IO [stdout=pipe:...] combined with LET-capture is
+    // a parse error — the capture sink owns stdout.
+    let script = indoc! {r#"
+        LET $task = WITH_IO [stdout=pipe:out_chan] RUN "echo hi"
+    "#};
+
+    let err = parse_script(script, mock_lower).expect_err("stdout pipe + capture must fail");
     assert!(
-        err.to_string().contains("requires an ASYNC command"),
+        err.to_string().contains("capture sink owns stdout"),
         "unexpected error: {err}"
     );
 }

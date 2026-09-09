@@ -17,6 +17,8 @@ mod inherit_env;
 mod invalid_env_inversion;
 #[path = "integration/let_async_with_io.rs"]
 mod let_async_with_io;
+#[path = "integration/let_capture.rs"]
+mod let_capture;
 #[path = "integration/macro_input_parens.rs"]
 mod macro_input_parens;
 #[path = "integration/platform_display.rs"]
