@@ -1,4 +1,4 @@
 # TIMEOUT nested inside ASYNC: the deadline fires inside the background
 # thread, and AWAIT surfaces the TIMEOUT error from the child.
-LET $t = ASYNC TIMEOUT 2s RUN @SLEEP_LONG_CMD@
+LET $t: HANDLE = ASYNC TIMEOUT 2s RUN @SLEEP_LONG_CMD@
 AWAIT $t

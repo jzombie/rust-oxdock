@@ -100,6 +100,23 @@ impl PipeRegistry {
         self.lock_inner().os.contains_key(name)
     }
 
+    pub(super) fn exists(&self, name: &str) -> bool {
+        let guard = self.lock_inner();
+        guard.input.contains_key(name)
+            || guard.output.contains_key(name)
+            || guard.inners.contains_key(name)
+            || {
+                #[cfg(not(miri))]
+                {
+                    guard.os.contains_key(name)
+                }
+                #[cfg(miri)]
+                {
+                    false
+                }
+            }
+    }
+
     /// Ensure an entry exists for this binding. Fresh names become OS
     /// kernel pairs when promotion fired, script pipes otherwise. Existing
     /// entries keep their type: first binding wins, so sequential fan in
@@ -593,6 +610,10 @@ impl ExecIo {
     /// OS kernel pairs when asked. Existing entries keep their type.
     pub(super) fn ensure_pipe_for(&self, name: &str, promote: bool) -> Result<()> {
         self.pipes.ensure_pipe_for(name, promote)
+    }
+
+    pub(super) fn pipe_exists(&self, name: &str) -> bool {
+        self.pipes.exists(name)
     }
 
     /// Pin a keeper slot on an existing script pipe. `None` for OS pipes

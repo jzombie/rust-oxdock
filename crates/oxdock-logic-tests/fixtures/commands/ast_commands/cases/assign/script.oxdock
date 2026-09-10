@@ -1,2 +1,2 @@
-LET $msg = hello
+LET $msg: STRING = hello
 WRITE out.txt $msg

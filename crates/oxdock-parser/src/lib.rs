@@ -572,11 +572,15 @@ mod tests {
 
     #[test]
     fn let_assign_with_bare_word() {
-        let script = r#"LET $x = hello"#;
+        let script = r#"LET $x: STRING = hello"#;
         let steps = parse_script(script, test_lower).expect("parse ok");
         assert_eq!(steps.len(), 1);
         match &steps[0].kind {
-            StepKind::Assign { var, expr } => {
+            StepKind::Assign {
+                var,
+                decl_type: _,
+                expr,
+            } => {
                 assert_eq!(var, "x");
                 assert_eq!(expr, &Expr::Literal(Value::String("hello".to_string())));
             }
@@ -586,11 +590,15 @@ mod tests {
 
     #[test]
     fn let_assign_with_quoted_string() {
-        let script = r#"LET $x = "hello world""#;
+        let script = r#"LET $x: STRING = "hello world""#;
         let steps = parse_script(script, test_lower).expect("parse ok");
         assert_eq!(steps.len(), 1);
         match &steps[0].kind {
-            StepKind::Assign { var, expr } => {
+            StepKind::Assign {
+                var,
+                decl_type: _,
+                expr,
+            } => {
                 assert_eq!(var, "x");
                 assert_eq!(
                     expr,
@@ -603,11 +611,15 @@ mod tests {
 
     #[test]
     fn let_assign_with_list_literal() {
-        let script = r#"LET $x = ["a", "b", "c"]"#;
+        let script = r#"LET $x: LIST = ["a", "b", "c"]"#;
         let steps = parse_script(script, test_lower).expect("parse ok");
         assert_eq!(steps.len(), 1);
         match &steps[0].kind {
-            StepKind::Assign { var, expr } => {
+            StepKind::Assign {
+                var,
+                decl_type: _,
+                expr,
+            } => {
                 assert_eq!(var, "x");
                 assert_eq!(
                     expr,
@@ -624,11 +636,15 @@ mod tests {
 
     #[test]
     fn let_assign_with_variable_ref() {
-        let script = r#"LET $x = $y"#;
+        let script = r#"LET $x: STRING = $y"#;
         let steps = parse_script(script, test_lower).expect("parse ok");
         assert_eq!(steps.len(), 1);
         match &steps[0].kind {
-            StepKind::Assign { var, expr } => {
+            StepKind::Assign {
+                var,
+                decl_type: _,
+                expr,
+            } => {
                 assert_eq!(var, "x");
                 assert_eq!(expr, &Expr::Var("y".to_string()));
             }
@@ -639,7 +655,7 @@ mod tests {
     #[test]
     fn for_loop_parses() {
         let script = indoc! {r#"
-            FOR $f IN ["x", "y"] {
+            FOR $f: STRING IN ["x", "y"] {
                 WRITE $f
             }
         "#};
@@ -651,6 +667,7 @@ mod tests {
                 var,
                 in_expr,
                 body,
+                ..
             } => {
                 assert!(key_var.is_none());
                 assert_eq!(var, "f");
@@ -670,7 +687,7 @@ mod tests {
     #[test]
     fn for_map_iteration_parses() {
         let script = indoc! {r#"
-            FOR $k, $v IN $map {
+            FOR $k: STRING, $v: STRING IN $map {
                 WRITE $k
             }
         "#};
@@ -682,6 +699,7 @@ mod tests {
                 var,
                 in_expr,
                 body,
+                ..
             } => {
                 assert_eq!(key_var.as_deref(), Some("k"));
                 assert_eq!(var, "v");
@@ -729,10 +747,14 @@ mod tests {
 
     #[test]
     fn not_expression_parses() {
-        let script = r#"LET $x = !true"#;
+        let script = r#"LET $x: BOOL = !true"#;
         let steps = parse_script(script, test_lower).expect("parse ok");
         match &steps[0].kind {
-            StepKind::Assign { var, expr } => {
+            StepKind::Assign {
+                var,
+                decl_type: _,
+                expr,
+            } => {
                 assert_eq!(var, "x");
                 assert_eq!(expr, &Expr::Not(Box::new(Expr::Literal(Value::Bool(true)))));
             }
@@ -740,7 +762,7 @@ mod tests {
         }
 
         // Double negation nests.
-        let steps = parse_script(r#"LET $x = !!false"#, test_lower).expect("parse ok");
+        let steps = parse_script(r#"LET $x: BOOL = !!false"#, test_lower).expect("parse ok");
         match &steps[0].kind {
             StepKind::Assign { expr, .. } => {
                 assert_eq!(
@@ -754,7 +776,7 @@ mod tests {
         }
 
         // `!` binds tighter than `==`: `!true == false` is `(!true) == false`.
-        let steps = parse_script(r#"LET $x = !true == false"#, test_lower).expect("parse ok");
+        let steps = parse_script(r#"LET $x: BOOL = !true == false"#, test_lower).expect("parse ok");
         match &steps[0].kind {
             StepKind::Assign { expr, .. } => {
                 assert!(matches!(expr, Expr::Compare { .. }), "got {expr:?}");
@@ -766,7 +788,8 @@ mod tests {
         }
 
         // Parentheses invert the grouping: `!(true == false)`.
-        let steps = parse_script(r#"LET $x = !(true == false)"#, test_lower).expect("parse ok");
+        let steps =
+            parse_script(r#"LET $x: BOOL = !(true == false)"#, test_lower).expect("parse ok");
         match &steps[0].kind {
             StepKind::Assign { expr, .. } => {
                 assert!(matches!(expr, Expr::Not(_)), "got {expr:?}");
@@ -778,9 +801,9 @@ mod tests {
     #[test]
     fn not_expression_display_round_trips() {
         for script in [
-            "LET $x = !true",
-            "LET $x = !!false",
-            "LET $x = !(true == false)",
+            "LET $x: BOOL = !true",
+            "LET $x: BOOL = !!false",
+            "LET $x: BOOL = !(true == false)",
             "IF !true {\n    WRITE yes\n}",
         ] {
             let steps = parse_script(script, test_lower).expect("parse");
@@ -909,7 +932,7 @@ mod tests {
         // whitespace suppressed), so nested rules carry explicit gaps.
         let script = indoc! {r#"
             WITH_IO [stdout=pipe:out] ASYNC {
-                FOR $x IN [0, 1] {
+                FOR $x: INT IN [0, 1] {
                     ECHO hi
                 }
             }
@@ -938,6 +961,44 @@ mod tests {
             }
             other => panic!("expected WithIo, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn for_int_key_parses_for_list_enumeration() {
+        let script = indoc! {r#"
+            FOR $i: INT, $v: STRING IN $items {
+                WRITE $v
+            }
+        "#};
+        let steps = parse_script(script, test_lower).expect("parse ok");
+        match &steps[0].kind {
+            StepKind::For {
+                key_var,
+                key_type,
+                var,
+                var_type,
+                ..
+            } => {
+                assert_eq!(key_var.as_deref(), Some("i"));
+                assert_eq!(*key_type, Some(crate::TypeKind::Int));
+                assert_eq!(var, "v");
+                assert_eq!(*var_type, crate::TypeKind::String);
+            }
+            other => panic!("expected For, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn for_non_index_key_type_is_rejected() {
+        let err = parse_script(
+            "FOR $k: BOOL, $v: STRING IN $map { WRITE $v }\n",
+            test_lower,
+        )
+        .expect_err("BOOL key must fail");
+        assert!(
+            err.to_string().contains("must be INT or STRING"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -976,7 +1037,7 @@ mod tests {
         // parse inside its block form.
         let script = indoc! {r#"
             TIMEOUT 30s {
-                FOR $x IN [1] {
+                FOR $x: INT IN [1] {
                     ECHO hi
                 }
             }
@@ -996,7 +1057,7 @@ mod tests {
         // LET with a spaced map literal inside a WITH_IO-wrapped block.
         let script = indoc! {r#"
             WITH_IO [stdout] ASYNC {
-                LET $m = {a: 1, b: 2}
+                LET $m: MAP = {a: 1, b: 2}
             }
         "#};
         let steps = parse_script(script, test_lower).expect("parse should succeed");
@@ -1019,7 +1080,7 @@ mod tests {
         // old non-atomic `variable` rule accepted `$   y` via implicit
         // whitespace.)
         parse_script("ECHO $   x", test_lower).expect_err("spaced sigil must fail");
-        parse_script("LET $x = $   y", test_lower).expect_err("spaced sigil must fail");
+        parse_script("LET $x: STRING = $   y", test_lower).expect_err("spaced sigil must fail");
         let steps = parse_script("ECHO $x", test_lower).expect("tight sigil parses");
         assert!(matches!(&steps[0].kind, StepKind::Echo(_)));
     }
@@ -1027,14 +1088,14 @@ mod tests {
     #[test]
     fn let_async_block_parses() {
         let script = indoc! {r#"
-            LET $task = ASYNC {
+            LET $task: HANDLE = ASYNC {
                 RUN "echo hello"
             }
         "#};
         let steps = parse_script(script, test_lower).expect("parse should succeed");
         assert_eq!(steps.len(), 1);
         match &steps[0].kind {
-            StepKind::AssignAsync { var, body } => {
+            StepKind::AssignAsync { var, body, .. } => {
                 assert_eq!(var, "task");
                 assert_eq!(body.len(), 1);
                 assert!(matches!(&body[0].kind, StepKind::Run(_)));
@@ -1045,11 +1106,11 @@ mod tests {
 
     #[test]
     fn let_async_inline_parses() {
-        let script = "LET $t = ASYNC RUN \"echo hi\"";
+        let script = "LET $t: HANDLE = ASYNC RUN \"echo hi\"";
         let steps = parse_script(script, test_lower).expect("parse should succeed");
         assert_eq!(steps.len(), 1);
         match &steps[0].kind {
-            StepKind::AssignAsync { var, body } => {
+            StepKind::AssignAsync { var, body, .. } => {
                 assert_eq!(var, "t");
                 assert_eq!(body.len(), 1);
                 assert!(matches!(&body[0].kind, StepKind::Run(_)));

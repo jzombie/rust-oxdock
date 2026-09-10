@@ -1,0 +1,13 @@
+LET $seen: STRING = ""
+FOR $x: STRING IN ["a", "b", "c"] {
+    IF $x == "a" { CONTINUE }
+    IF $x == "c" { BREAK }
+    $seen = "saw-b"
+}
+WRITE seen.txt "{{ $seen }}"
+LET $n: INT = 0
+WHILE true {
+    $n = 5
+    BREAK
+}
+WRITE n.txt "{{ $n }}"

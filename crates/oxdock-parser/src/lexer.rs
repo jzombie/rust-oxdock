@@ -21,7 +21,7 @@ pub enum RawToken<'a> {
     BlockEnd {
         line_no: usize,
     },
-    /// A structural command (WITH_IO, FOR, IF, LET) — parsed by the grammar.
+    /// A structural command (WITH_IO, FOR, IF, LET, $var mutation) — parsed by the grammar.
     Command {
         pair: Pair<'a, Rule>,
         line_no: usize,
@@ -67,9 +67,16 @@ pub fn tokenize(input: &str) -> Result<Vec<RawToken<'_>>> {
             | Rule::let_capture_statement
             | Rule::await_statement
             | Rule::cancel_statement
-            | Rule::for_statement
+            |             Rule::for_statement
             | Rule::let_statement
-            | Rule::if_statement => tokens.push(RawToken::Command { pair, line_no }),
+            | Rule::mutate_statement
+            | Rule::if_statement
+            | Rule::while_statement
+            | Rule::func_def
+            | Rule::call_statement
+            | Rule::return_statement
+            | Rule::break_statement
+            | Rule::continue_statement => tokens.push(RawToken::Command { pair, line_no }),
             // Generic instructions — lowered by a function
             Rule::instruction | Rule::instruction_inner => {
                 tokens.push(RawToken::Instruction { pair, line_no })

@@ -14,7 +14,7 @@
 
 use std::fmt;
 
-use crate::ast::{Arg, ArgPart, Expr, IoBinding, IoStream, Step, WorkspaceTarget};
+use crate::ast::{Arg, ArgPart, Expr, IoBinding, IoStream, Step, TypeKind, WorkspaceTarget};
 use crate::command::{
     ArgSpec, ArgType, CommandMeta, Example, FlagSpec, FlagValueType, IoDirection, Stream,
     split_assignment,
@@ -251,16 +251,16 @@ fn structural_hint(name: &str, received: &str) -> Option<String> {
     match name {
         "WITH_IO" => Some(with_io_hint(&got, received)),
         "AWAIT" => Some(format!(
-            "AWAIT waits for a background task variable, e.g. `LET $t = ASYNC ECHO hi` then `AWAIT $t`; got {got}."
+            "AWAIT waits for a background task variable, e.g. `LET $t: HANDLE = ASYNC ECHO hi` then `AWAIT $t`; got {got}."
         )),
         "CANCEL" => Some(format!(
-            "CANCEL stops a background task variable, e.g. `CANCEL $t` (from `LET $t = ASYNC ...`); got {got}."
+            "CANCEL stops a background task variable, e.g. `CANCEL $t` (from `LET $t: HANDLE = ASYNC ...`); got {got}."
         )),
         "ASYNC" => Some(format!(
-            "ASYNC runs a command in the background, e.g. `ASYNC RUN ...`, `ASYNC {{ ... }}`, or `LET $t = ASYNC ...`; got {got}."
+            "ASYNC runs a command in the background, e.g. `ASYNC RUN ...`, `ASYNC {{ ... }}`, or `LET $t: HANDLE = ASYNC ...`; got {got}."
         )),
         "FOR" => Some(format!(
-            "FOR loops need `FOR $item IN <expr> {{ ... }}` (or `FOR $key, $value IN <expr> {{ ... }}`); got {got}."
+            "FOR loops need `FOR $item: TYPE IN <expr> {{ ... }}` (or `FOR $key: STRING, $value: TYPE IN <expr> {{ ... }}`); got {got}."
         )),
         "IF" => Some(format!(
             "IF needs a condition and a block, e.g. `IF true {{ ECHO yes }}`; got {got}."
@@ -269,11 +269,32 @@ fn structural_hint(name: &str, received: &str) -> Option<String> {
             "ELSE must directly follow an `IF ... {{ ... }}` block, e.g. `IF true {{ ECHO yes }} ELSE {{ ECHO no }}`; got {got}."
         )),
         "LET" => Some(format!(
-            "LET assigns a variable, e.g. `LET $name = <expr>`, `LET $t = ASYNC ...`, `LET $out = <command>` (capture), or `LET $out = AWAIT $t`; got {got}."
+            "LET assigns a variable, e.g. `LET $name: STRING = <expr>`, `LET $t: HANDLE = ASYNC ...`, `LET $out: STRING = <command>` (capture), or `LET $out: STRING = AWAIT $t`; got {got}."
         )),
+        "SET" => Some(
+            "`SET` is not a keyword; mutate a declared variable with `$var = <expr>`, e.g. `$count = 2`.".to_string(),
+        ),
         "TIMEOUT" => Some(format!(
             "TIMEOUT needs a duration and a command or block, e.g. `TIMEOUT 30s RUN ...`; got {got}."
         )),
+        "FUNC" => Some(format!(
+            "FUNC defines a function, e.g. `FUNC GREET($name: STRING) {{ RETURN $name }}`; got {got}."
+        )),
+        "CALL" => Some(format!(
+            "CALL invokes a function, e.g. `CALL GREET(\"ada\")` or `LET $r: STRING = CALL GREET(\"ada\")`; got {got}."
+        )),
+        "RETURN" => Some(format!(
+            "RETURN ends a function with a value, e.g. `RETURN $x`; got {got}."
+        )),
+        "WHILE" => Some(format!(
+            "WHILE needs a Bool condition and a block, e.g. `WHILE !$done {{ ... }}`; got {got}."
+        )),
+        "BREAK" => Some(
+            "`BREAK` exits the innermost enclosing FOR/WHILE loop; it must appear inside a loop.".to_string(),
+        ),
+        "CONTINUE" => Some(
+            "`CONTINUE` skips to the next iteration of the innermost enclosing FOR/WHILE loop; it must appear inside a loop.".to_string(),
+        ),
         "INHERIT_ENV" => Some(format!(
             "INHERIT_ENV takes a key list, e.g. `INHERIT_ENV [HOME PATH]`; got {got}."
         )),
@@ -360,7 +381,7 @@ macro_rules! declare_commands {
             ]
         ),* $(,)?
     ) => {
-        #[derive(Debug, Clone, Eq, PartialEq)]
+        #[derive(Debug, Clone, PartialEq)]
         pub enum StepKind {
             $( $vname $( { $( $vfname : $vftype ),* } )? $( ( $( $ttuple ),* ) )?, )*
             $( $sname $( { $( $sfname : $sftype ),* } )?, )*
@@ -416,17 +437,24 @@ declare_commands! {
     structural [
         WithIo { bindings: Vec<IoBinding>, cmd: Box<StepKind> },
         WithIoBlock { bindings: Vec<IoBinding> },
-        For { key_var: Option<String>, var: String, in_expr: Expr, body: Vec<Step> },
+        For { key_var: Option<String>, key_type: Option<TypeKind>, var: String, var_type: TypeKind, in_expr: Expr, body: Vec<Step> },
         If { cond: Box<Expr>, then_body: Vec<Step>, else_ifs: Vec<(Box<Expr>, Vec<Step>)>, else_body: Option<Vec<Step>> },
-        Assign { var: String, expr: Expr },
-        AssignCapture { var: String, cmd: Box<StepKind> },
-        AwaitCapture { out_var: String, task_var: String },
+        Assign { var: String, decl_type: TypeKind, expr: Expr },
+        Set { var: String, expr: Expr },
+        AssignCapture { var: String, decl_type: TypeKind, cmd: Box<StepKind> },
+        AwaitCapture { out_var: String, out_type: TypeKind, task_var: String },
         AsyncBlock { body: Vec<Step> },
-        AssignAsync { var: String, body: Vec<Step> },
+        AssignAsync { var: String, decl_type: TypeKind, body: Vec<Step> },
         Await { var: String },
         Cancel { var: String },
         Timeout { duration: Arg, body: Vec<Step> },
         RunExec { argv: Vec<Arg> },
+        FuncDef { name: String, params: Vec<(String, TypeKind)>, body: Vec<Step> },
+        Call { name: String, args: Vec<Expr> },
+        Return { expr: Box<Expr> },
+        While { cond: Box<Expr>, body: Vec<Step> },
+        Break,
+        Continue,
     ]
 
     Workdir => [
@@ -475,7 +503,7 @@ declare_commands! {
         syntax: "ENV KEY=value",
         summary: "Set an environment variable.",
         description: "Inserts or updates an env var. The value uses the unified string-value rules shared by every command: `\"...\"` or `'...'` quotes keep exact bytes (spaces, tabs), a lone `$var` evaluates that variable, `{{ ... }}` placeholders interpolate, unquoted words join with single spaces, and the first `=` splits key from value (`KEY=a=b` stores `a=b`). A `$var` inside larger text stays literal — write `{{ $var }}` to interpolate there.",
-        args: &[ ArgSpec { name: "assignment", arg_type: ArgType::KeyValue, description: "KEY=value pair", io: IoDirection::Write, index: 0, required: true, fallback_stream: None } ],
+        args: &[ ArgSpec { name: "assignment", arg_type: ArgType::KeyValue, description: "KEY=value pair; the value resolves as STRING", io: IoDirection::Write, index: 0, required: true, fallback_stream: None } ],
         flags: &[],
         default_output: None,
         examples: &[
@@ -488,7 +516,7 @@ declare_commands! {
             "#} },
             Example { name: "variable value", fence_meta: None, code: indoc! {r#"
                 # a lone $var evaluates, like ECHO $var
-                LET $who = "Alice"
+                LET $who: STRING = "Alice"
                 ENV GREETING=$who
                 WRITE out.txt "{{ env:GREETING }}"
                 ASSERT_FILE out.txt "Alice"
@@ -496,7 +524,7 @@ declare_commands! {
             Example { name: "all value forms agree", fence_meta: None, code: indoc! {r#"
                 # a bare variable, a quoted literal, and a template all
                 # store plain strings through the same value rules
-                LET $x = "Ada"
+                LET $x: STRING = "Ada"
                 ENV A=$x
                 ENV B="hello world"
                 ENV C="{{ $x }} concatenated"
@@ -547,7 +575,7 @@ declare_commands! {
             Example { name: "echo", fence_meta: None, code: indoc! {r#"ECHO build-complete"#} },
             Example { name: "variables", fence_meta: None, code: indoc! {r#"
                 # a lone $x evaluates; {{ }} interpolates inside text
-                LET $x = "World"
+                LET $x: STRING = "World"
                 ECHO {{ $x }}
                 ECHO $x
                 ASSERT_STDOUT "World"
@@ -721,7 +749,7 @@ declare_commands! {
         syntax: "READ_LINE $var",
         summary: "Read one line from stdin into a variable.",
         description: "Reads bytes until newline without waiting for EOF, leaving the pipe open. Trailing newline is stripped (shell-read parity). On premature EOF assigns accumulated bytes and returns.",
-        args: &[ ArgSpec { name: "var", arg_type: ArgType::Var, description: "Variable to store the line", io: IoDirection::Write, index: 0, required: true, fallback_stream: None } ],
+        args: &[ ArgSpec { name: "var", arg_type: ArgType::Var, description: "Target variable (`$name`); the line binds as STRING", io: IoDirection::Write, index: 0, required: true, fallback_stream: None } ],
         flags: &[],
         default_output: None,
         examples: &[ Example { name: "read line", fence_meta: None, code: indoc! {r#"
@@ -819,14 +847,14 @@ declare_commands! {
             Example { name: "variable override", fence_meta: None, code: indoc! {r#"
                 # same escaping: keep the placeholder literal until EXPAND;
                 # a lone $who evaluates, like ECHO $who
-                LET $who = "Bob"
+                LET $who: STRING = "Bob"
                 WRITE template.md "Hi \{{ env:WHO }}!"
                 EXPAND template.md WHO=$who
                 ASSERT_STDOUT "Hi Bob!"
             "#} },
             Example { name: "override forms agree", fence_meta: None, code: indoc! {r#"
                 # a bare variable and a template-with-tail expand identically
-                LET $x = "Ada"
+                LET $x: STRING = "Ada"
                 WRITE template.md "Hi \{{ env:NAME }} and \{{ env:NAME2 }}!"
                 EXPAND template.md NAME=$x NAME2="{{ $x }} concatenated"
                 ASSERT_STDOUT "Hi Ada and Ada concatenated!"
@@ -989,9 +1017,9 @@ declare_commands! {
                 code: indoc! {r#"
                 # durations resolve at runtime, so variables work too —
                 # quoted or bare, both bind the same string
-                LET $pause = "100ms"
+                LET $pause: STRING = "100ms"
                 SLEEP $pause
-                LET $bare = 100ms
+                LET $bare: STRING = 100ms
                 SLEEP $bare
             "#},
             },
@@ -1042,9 +1070,9 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
         },
         CommandMeta {
             name: "FOR",
-            syntax: "FOR $item IN <expr> { <commands> } | FOR $key, $value IN <expr> { <commands> }",
+            syntax: "FOR $item: TYPE IN <expr> { <commands> } | FOR $key: STRING, $value: TYPE IN <expr> { <commands> }",
             summary: "Iterate over a list or map.",
-            description: "The loop variable receives each element (lists) or value (maps); with two variables, the first receives the key. Loop variables are scoped to the loop body and do not leak outward. The body may be a braced block or a single-line `{ ... }` command. `GLOB(\"...\")` patterns must be quoted (`*` is not a bare word, so `GLOB(*)` is a parse error); GLOB returns a root-relative sorted list, empty when nothing matches, and rejects `..` escapes.",
+            description: "The loop variable receives each element (lists) or value (maps); with two variables, the first receives the key. Loop variables are declared with explicit types and scoped per iteration via declare_var; they do not leak outward. The body may be a braced block or a single-line `{ ... }` command. `GLOB(\"...\")` patterns must be quoted (`*` is not a bare word, so `GLOB(*)` is a parse error); GLOB returns a root-relative sorted list, empty when nothing matches, and rejects `..` escapes.",
             args: &[],
             flags: &[],
             default_output: None,
@@ -1053,13 +1081,13 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     name: "for loop",
                     fence_meta: None,
                     code: indoc! {r#"
-                LET $items = ["a", "b"]
-                FOR $item IN $items {
+                LET $items: LIST = ["a", "b"]
+                FOR $item: STRING IN $items {
                   ECHO $item
                 }
 
-                LET $map = {"x": 1}
-                FOR $k, $v IN $map {
+                LET $map: MAP = {"x": 1}
+                FOR $k: STRING, $v: INT IN $map {
                   ECHO "$k=$v"
                 }
             "#},
@@ -1070,7 +1098,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     code: indoc! {r#"
                 # single-line body; $x is a template path, WHO an override
                 WRITE a.txt "hi \{{ env:WHO }}!"
-                FOR $x IN GLOB("*.txt") { EXPAND $x WHO=World }
+                FOR $x: STRING IN GLOB("*.txt") { EXPAND $x WHO=World }
                 ASSERT_STDOUT "hi World!"
             "#},
                 },
@@ -1108,9 +1136,9 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
         },
         CommandMeta {
             name: "LET",
-            syntax: "LET $var = <expr> | LET $var = ASYNC { <commands> } | LET $var = <command> | LET $var = AWAIT $task",
+            syntax: "LET $var: TYPE = <expr> | LET $var: TYPE = ASYNC { <commands> } | LET $var: TYPE = <command> | LET $var: TYPE = AWAIT $task",
             summary: "Bind script-local variables.",
-            description: "Assigns a value to a script-local variable. Variables are usable in templates (`{{ $var }}`), guards, and expressions. With `ASYNC`, spawns a background task and stores its handle (see ASYNC). The `$` sigil on the name is mandatory. The right-hand side is always an expression — literals, lists, maps, comparisons, `GLOB(\"*.md\")` — never a `{{ ... }}` template; interpolation happens in string values, not here. Bare words need no quotes: `LET $d = 30s` binds the same string as `LET $d = \"30s\"`. When the right-hand side is a synchronous command (`LET $out = ECHO hi`), the command runs to completion and its exact stdout bytes are captured into the variable as a string (no newline stripping; commands with no stdout capture as `\"\"`; non-UTF8 stdout is an error). Combining capture with an explicit `WITH_IO [stdout=pipe:...]` is a parse error. `LET $out = AWAIT $task` captures a background task's stdout the same way; bare `AWAIT $task` forwards it to the parent stdout instead.",
+            description: "Declares a script-local variable with an explicit type (STRING, INT, FLOAT, BOOL, PIPE, LIST, MAP, HANDLE, DURATION, PATH). Duplicate LET in the same scope frame is a redeclaration error; mutate with `$var = <expr>`. Variables are usable in templates (`{{ $var }}`), guards, and expressions. With `ASYNC`, spawns a background task and stores its handle (see ASYNC). The `$` sigil on the name is mandatory. The right-hand side is always an expression — literals, lists, maps, comparisons, `env:KEY` reads, `GLOB(\"*.md\")` — never a `{{ ... }}` template; interpolation happens in string values, not here. Bare words need no quotes: `LET $d: STRING = 30s` binds the same string as quoted. When the right-hand side is a synchronous command (`LET $out: STRING = ECHO hi`), the command runs to completion and its exact stdout bytes are captured into the variable as a string (no newline stripping; commands with no stdout capture as `\"\"`; non-UTF8 stdout is an error). Combining capture with an explicit `WITH_IO [stdout=pipe:...]` is a parse error. `LET $out: STRING = AWAIT $var` captures a background task's stdout the same way; bare `AWAIT $var` forwards it to the parent stdout instead. `LET $e: STRING = env:FOO` reads the script environment into a plain string.",
             args: &[],
             flags: &[],
             default_output: None,
@@ -1119,11 +1147,11 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     name: "let",
                     fence_meta: None,
                     code: indoc! {r#"
-                LET $name = "world"
+                LET $name: STRING = "world"
                 ECHO "hello, {{ $name }}"
 
-                LET $items = ["a", "b"]
-                LET $count = 42
+                LET $items: LIST = ["a", "b"]
+                LET $count: INT = 42
             "#},
                 },
                 Example {
@@ -1132,8 +1160,8 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     code: indoc! {r#"
                 # the RHS is an expression: GLOB(...) runs and binds a list
                 WRITE a.txt "x"
-                LET $files = GLOB("*.txt")
-                FOR $f IN $files { ECHO $f }
+                LET $files: LIST = GLOB("*.txt")
+                FOR $f: STRING IN $files { ECHO $f }
                 ASSERT_STDOUT "a.txt"
             "#},
                 },
@@ -1142,9 +1170,9 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     fence_meta: None,
                     code: indoc! {r#"
                 # LET inside a braced block reverts when the block exits
-                LET $a = "outer"
+                LET $a: STRING = "outer"
                 [bool:true] {
-                    LET $a = "inner"
+                    LET $a: STRING = "inner"
                     WRITE inner.txt "{{ $a }}"
                 }
                 WRITE outer.txt "{{ $a }}"
@@ -1156,7 +1184,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     name: "capture command output",
                     fence_meta: None,
                     code: indoc! {r#"
-                LET $out = ECHO hi
+                LET $out: STRING = ECHO hi
                 WRITE captured.txt "{{ $out }}"
                 ASSERT_FILE captured.txt "hi\n"
             "#},
@@ -1164,8 +1192,25 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             ],
         },
         CommandMeta {
+            name: "MUTATION",
+            syntax: "$var = <expr>",
+            summary: "Mutate a declared variable.",
+            description: "Reassigns an existing variable, validating the new value against the TypeKind bound at LET time via coerce_value with ExecState context. The leading `$` distinguishes mutation from `KEY=value` command assignments. Assigning an undeclared variable or a mismatched type is an error.",
+            args: &[],
+            flags: &[],
+            default_output: None,
+            examples: &[Example {
+                name: "mutate",
+                fence_meta: None,
+                code: indoc! {r#"
+                LET $count: INT = 1
+                $count = 2
+            "#},
+            }],
+        },
+        CommandMeta {
             name: "ASYNC",
-            syntax: "ASYNC <command...> | ASYNC { <commands> } | LET $var = ASYNC { <commands> }",
+            syntax: "ASYNC <command...> | ASYNC { <commands> } | LET $var: HANDLE = ASYNC { <commands> }",
             summary: "Run steps in a background thread.",
             description: "Runs a command or block of commands in a background thread with subshell isolation. Mutations (ENV, WORKDIR) stay within the block. With `LET`, stores a task handle for `AWAIT`.",
             args: &[],
@@ -1188,7 +1233,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     name: "async task handle",
                     fence_meta: None,
                     code: indoc! {r#"
-                    LET $task = ASYNC {
+                    LET $task: HANDLE = ASYNC {
                         ECHO "built"
                     }
                     AWAIT $task
@@ -1198,9 +1243,9 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
         },
         CommandMeta {
             name: "AWAIT",
-            syntax: "AWAIT $var | LET $out = AWAIT $var",
+            syntax: "AWAIT $var | LET $out: STRING = AWAIT $var",
             summary: "Join a background task.",
-            description: "Blocks until the named task completes. Propagates errors if the task failed. Bare `AWAIT $var` forwards the task's stdout to the parent stdout; `LET $out = AWAIT $var` captures it into `$out` instead (same UTF-8 and spilling rules as `LET $var = <command>`).",
+            description: "Blocks until the named task completes. Propagates errors if the task failed. Bare `AWAIT $var` forwards the task's stdout to the parent stdout; `LET $out: STRING = AWAIT $var` captures it into `$out` instead (same UTF-8 and spilling rules as `LET $var: STRING = <command>`).",
             args: &[],
             flags: &[],
             default_output: None,
@@ -1209,7 +1254,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     name: "await",
                     fence_meta: None,
                     code: indoc! {r#"
-                LET $task = ASYNC ECHO "done"
+                LET $task: HANDLE = ASYNC ECHO "done"
                 AWAIT $task
             "#},
                 },
@@ -1217,8 +1262,8 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     name: "await capture",
                     fence_meta: None,
                     code: indoc! {r#"
-                LET $task = ASYNC ECHO "done"
-                LET $out = AWAIT $task
+                LET $task: HANDLE = ASYNC ECHO "done"
+                LET $out: STRING = AWAIT $task
                 WRITE captured.txt "{{ $out }}"
                 ASSERT_FILE captured.txt "done\n"
             "#},
@@ -1229,7 +1274,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             name: "CANCEL",
             syntax: "CANCEL $var",
             summary: "Synchronously cancel a background task.",
-            description: "Kills the named background task spawned via LET $var = ASYNC .... Blocking: returns only after the task thread has been joined and its OS process reaped, so no residual filesystem or stream mutation follows. A later AWAIT $var reports cancellation. Only named tasks can be cancelled.",
+            description: "Kills the named background task spawned via LET $var: HANDLE = ASYNC .... Blocking: returns only after the task thread has been joined and its OS process reaped, so no residual filesystem or stream mutation follows. A later AWAIT $var reports cancellation. Only named tasks can be cancelled.",
             args: &[],
             flags: &[],
             default_output: None,
@@ -1237,7 +1282,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 name: "cancel",
                 fence_meta: None,
                 code: indoc! {r#"
-                LET $task = ASYNC SLEEP 30s
+                LET $task: HANDLE = ASYNC SLEEP 30s
                 CANCEL $task
             "#},
             }],
@@ -1271,12 +1316,135 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     fence_meta: None,
                     code: indoc! {r#"
                     # durations resolve at runtime, so variables work too
-                    LET $budget = "30s"
+                    LET $budget: DURATION = "30s"
                     TIMEOUT $budget WRITE heartbeat.txt alive
                     ASSERT_FILE heartbeat.txt alive
                 "#},
                 },
             ],
+        },
+        CommandMeta {
+            name: "FUNC",
+            syntax: "FUNC NAME($param: TYPE, ...) { <commands> }",
+            summary: "Define a user function.",
+            description: "Defines a user function with UPPERCASE name and explicitly typed parameters. Params bind by position with declare_var coercion before the body runs. Bodies run in a fresh variable scope; LETs inside do not leak. A nested FUNC definition is scoped to its block and reverts on exit. Names share one namespace with host-registered functions.",
+            args: &[],
+            flags: &[],
+            default_output: None,
+            examples: &[Example {
+                name: "func def call",
+                fence_meta: None,
+                code: indoc! {r#"
+                FUNC GREET($name: STRING) {
+                  RETURN $name
+                }
+                LET $res: STRING = CALL GREET("ada")
+                WRITE greeting.txt "{{ $res }}"
+                ASSERT_FILE greeting.txt "ada"
+            "#},
+            }],
+        },
+        CommandMeta {
+            name: "CALL",
+            syntax: "CALL NAME(<expr>, ...) | LET $var: TYPE = CALL NAME(<expr>, ...)",
+            summary: "Invoke a user or host function.",
+            description: "Invokes a FUNC-defined or host-registered function by UPPERCASE name. Bare CALL discards the return value and keeps stdout side effects. LET $var: TYPE = CALL captures the RETURN value (fallthrough without RETURN captures as \"\"), coerced to the declared type; stdout inside the callee stays observable via ASSERT_STDOUT and pipes. Combining LET-capture with WITH_IO [stdout=pipe:...] is a parse error.",
+            args: &[],
+            flags: &[],
+            default_output: None,
+            examples: &[Example {
+                name: "call",
+                fence_meta: None,
+                code: indoc! {r#"
+                FUNC SHOUT($name: STRING) {
+                  ECHO "{{ $name }}"
+                  RETURN $name
+                }
+                CALL SHOUT("ada")
+                ASSERT_STDOUT "ada"
+            "#},
+            }],
+        },
+        CommandMeta {
+            name: "RETURN",
+            syntax: "RETURN <expr>",
+            summary: "Return a value from a function.",
+            description: "Ends the nearest enclosing function call with a value. Falling off the end without RETURN yields \"\". RETURN outside a function (including at top level or across an ASYNC boundary) is an error.",
+            args: &[],
+            flags: &[],
+            default_output: None,
+            examples: &[Example {
+                name: "return",
+                fence_meta: None,
+                code: indoc! {r#"
+                FUNC PICK($flag: BOOL) {
+                  IF $flag {
+                    RETURN "yes"
+                  }
+                  RETURN "no"
+                }
+                LET $res: STRING = CALL PICK(true)
+                WRITE picked.txt "{{ $res }}"
+                ASSERT_FILE picked.txt "yes"
+            "#},
+            }],
+        },
+        CommandMeta {
+            name: "WHILE",
+            syntax: "WHILE <bool-expr> { <commands> }",
+            summary: "Loop while a condition holds.",
+            description: "Re-evaluates a Bool condition each iteration (same is_truthy rule as IF; non-Bool is a type error). Each iteration runs in a fresh scope; mutate outer state with $var = ... so the next check observes it. BREAK exits the loop; CONTINUE skips to the next check.",
+            args: &[],
+            flags: &[],
+            default_output: None,
+            examples: &[Example {
+                name: "while loop",
+                fence_meta: None,
+                code: indoc! {r#"
+                LET $done: BOOL = false
+                WHILE !$done {
+                  WRITE tick.txt "once"
+                  $done = true
+                }
+                ASSERT_FILE tick.txt "once"
+            "#},
+            }],
+        },
+        CommandMeta {
+            name: "BREAK",
+            syntax: "BREAK",
+            summary: "Exit the innermost loop.",
+            description: "Exits the innermost enclosing FOR or WHILE loop. BREAK outside a loop, or across a FUNC or ASYNC boundary, is an error.",
+            args: &[],
+            flags: &[],
+            default_output: None,
+            examples: &[Example {
+                name: "break",
+                fence_meta: None,
+                code: indoc! {r#"
+                FOR $x: STRING IN ["a", "b"] {
+                  BREAK
+                }
+            "#},
+            }],
+        },
+        CommandMeta {
+            name: "CONTINUE",
+            syntax: "CONTINUE",
+            summary: "Skip to the next loop iteration.",
+            description: "Skips the rest of the innermost enclosing FOR or WHILE body and starts the next iteration. CONTINUE outside a loop, or across a FUNC or ASYNC boundary, is an error.",
+            args: &[],
+            flags: &[],
+            default_output: None,
+            examples: &[Example {
+                name: "continue",
+                fence_meta: None,
+                code: indoc! {r#"
+                FOR $x: STRING IN ["a", "b"] {
+                  CONTINUE
+                }
+            "#},
+            }],
         },
     ]
 }
@@ -1423,13 +1591,22 @@ impl fmt::Display for StepKind {
             StepKind::Sleep { duration } => write!(f, "SLEEP {}", fmt_raw_arg(duration)),
             StepKind::For {
                 key_var,
+                key_type,
                 var,
+                var_type,
                 in_expr,
                 body,
             } => {
                 match key_var {
-                    Some(k) => write!(f, "FOR ${}, ${} IN {} {{", k, var, in_expr)?,
-                    None => write!(f, "FOR ${} IN {} {{", var, in_expr)?,
+                    Some(k) => {
+                        let kt = key_type.as_ref().map(|t| t.label()).unwrap_or("STRING");
+                        write!(
+                            f,
+                            "FOR ${}: {}, ${}: {} IN {} {{",
+                            k, kt, var, var_type, in_expr
+                        )?
+                    }
+                    None => write!(f, "FOR ${}: {} IN {} {{", var, var_type, in_expr)?,
                 }
                 for s in body {
                     write!(f, "\n    {}", s)?;
@@ -1463,8 +1640,21 @@ impl fmt::Display for StepKind {
                 }
                 Ok(())
             }
-            StepKind::Assign { var, expr } => write!(f, "LET ${} = {}", var, expr),
-            StepKind::AssignCapture { var, cmd } => write!(f, "LET ${} = {}", var, cmd),
+            StepKind::Assign {
+                var,
+                decl_type,
+                expr,
+            } => {
+                write!(f, "LET ${}: {} = {}", var, decl_type, expr)
+            }
+            StepKind::Set { var, expr } => write!(f, "${} = {}", var, expr),
+            StepKind::AssignCapture {
+                var,
+                decl_type,
+                cmd,
+            } => {
+                write!(f, "LET ${}: {} = {}", var, decl_type, cmd)
+            }
             StepKind::AsyncBlock { body } => {
                 write!(f, "ASYNC {{")?;
                 for s in body {
@@ -1472,16 +1662,24 @@ impl fmt::Display for StepKind {
                 }
                 write!(f, "\n}}")
             }
-            StepKind::AssignAsync { var, body } => {
-                write!(f, "LET ${} = ASYNC {{", var)?;
+            StepKind::AssignAsync {
+                var,
+                decl_type,
+                body,
+            } => {
+                write!(f, "LET ${}: {} = ASYNC {{", var, decl_type)?;
                 for s in body {
                     write!(f, "\n    {}", s)?;
                 }
                 write!(f, "\n}}")
             }
             StepKind::Await { var } => write!(f, "AWAIT ${}", var),
-            StepKind::AwaitCapture { out_var, task_var } => {
-                write!(f, "LET ${} = AWAIT ${}", out_var, task_var)
+            StepKind::AwaitCapture {
+                out_var,
+                out_type,
+                task_var,
+            } => {
+                write!(f, "LET ${}: {} = AWAIT ${}", out_var, out_type, task_var)
             }
             StepKind::Cancel { var } => write!(f, "CANCEL ${}", var),
             StepKind::Timeout { duration, body } => {
@@ -1496,6 +1694,31 @@ impl fmt::Display for StepKind {
                     write!(f, "\n}}")
                 }
             }
+            StepKind::FuncDef { name, params, body } => {
+                let ps: Vec<String> = params
+                    .iter()
+                    .map(|(p, t)| format!("${}: {}", p, t))
+                    .collect();
+                write!(f, "FUNC {}({}) {{", name, ps.join(", "))?;
+                for s in body {
+                    write!(f, "\n    {}", s)?;
+                }
+                write!(f, "\n}}")
+            }
+            StepKind::Call { name, args } => {
+                let ps: Vec<String> = args.iter().map(|a| format!("{}", a)).collect();
+                write!(f, "CALL {}({})", name, ps.join(", "))
+            }
+            StepKind::Return { expr } => write!(f, "RETURN {}", expr),
+            StepKind::While { cond, body } => {
+                write!(f, "WHILE {} {{", cond)?;
+                for s in body {
+                    write!(f, "\n    {}", s)?;
+                }
+                write!(f, "\n}}")
+            }
+            StepKind::Break => write!(f, "BREAK"),
+            StepKind::Continue => write!(f, "CONTINUE"),
         }
     }
 }
@@ -1528,6 +1751,39 @@ mod tests {
         assert!(!err.contains("unknown command"), "{err}");
         assert!(err.contains("AWAIT $t"), "{err}");
         assert!(err.contains("ECHO"), "{err}");
+    }
+
+    #[test]
+    fn bare_let_without_type_points_at_typed_syntax() {
+        let err = parse_err("LET $x = 1\n");
+        assert!(err.contains("invalid syntax for command LET"), "{err}");
+        assert!(err.contains("LET $name: STRING = <expr>"), "{err}");
+    }
+
+    #[test]
+    fn unknown_type_tag_names_valid_inventory() {
+        let err = parse_err("LET $x: FOO = 1\n");
+        assert!(err.contains("unknown type `FOO`"), "{err}");
+        assert!(err.contains("STRING"), "{err}");
+    }
+
+    #[test]
+    fn bare_for_without_types_is_rejected() {
+        let err = parse_err("FOR $i IN [1] { ECHO hi }\n");
+        assert!(err.contains("FOR requires explicit types"), "{err}");
+    }
+
+    #[test]
+    fn mutate_statement_parses_without_keyword() {
+        let steps = parse_script("$y = 2\n", lower_command).expect("mutation parses");
+        assert!(matches!(steps[0].kind, StepKind::Set { .. }));
+    }
+
+    #[test]
+    fn set_keyword_is_rejected_with_mutation_hint() {
+        let err = parse_err("SET $y = 2\n");
+        assert!(err.contains("not a keyword"), "{err}");
+        assert!(err.contains("$var = <expr>"), "{err}");
     }
 
     #[test]
@@ -1580,6 +1836,65 @@ mod tests {
     }
 
     #[test]
+    fn func_def_requires_typed_uppercase_name() {
+        let steps = parse_script(
+            "FUNC GREET($name: STRING) {\n  RETURN $name\n}\n",
+            lower_command,
+        )
+        .expect("func def parses");
+        let StepKind::FuncDef { name, params, body } = &steps[0].kind else {
+            panic!("expected FuncDef, got {:?}", steps[0].kind);
+        };
+        assert_eq!(name, "GREET");
+        assert_eq!(
+            params,
+            &vec![("name".to_string(), TypeKind::String)],
+            "{params:?}"
+        );
+        assert!(matches!(body[0].kind, StepKind::Return { .. }));
+    }
+
+    #[test]
+    fn lowercase_func_name_is_rejected() {
+        let err = parse_err("FUNC greet($x: STRING) {\n  RETURN $x\n}\n");
+        assert!(err.contains("FUNC"), "{err}");
+    }
+
+    #[test]
+    fn call_and_while_lower_correctly() {
+        let steps = parse_script("CALL GREET(\"ada\")\n", lower_command).expect("call parses");
+        assert!(
+            matches!(&steps[0].kind, StepKind::Call { name, .. } if name == "GREET"),
+            "{:?}",
+            steps[0].kind
+        );
+        let steps =
+            parse_script("WHILE !$done {\n  BREAK\n}\n", lower_command).expect("while parses");
+        let StepKind::While { body, .. } = &steps[0].kind else {
+            panic!("expected While, got {:?}", steps[0].kind);
+        };
+        assert!(matches!(body[0].kind, StepKind::Break));
+    }
+
+    #[test]
+    fn let_capture_call_and_async_call_lower() {
+        let steps = parse_script("LET $r: STRING = CALL GREET(\"ada\")\n", lower_command)
+            .expect("capture call parses");
+        let StepKind::AssignCapture { var, cmd, .. } = &steps[0].kind else {
+            panic!("expected AssignCapture, got {:?}", steps[0].kind);
+        };
+        assert_eq!(var, "r");
+        assert!(matches!(&**cmd, StepKind::Call { .. }), "{cmd:?}");
+        let steps = parse_script("LET $t: HANDLE = ASYNC CALL GREET(\"a\")\n", lower_command)
+            .expect("async call parses");
+        assert!(
+            matches!(&steps[0].kind, StepKind::AssignAsync { .. }),
+            "{:?}",
+            steps[0].kind
+        );
+    }
+
+    #[test]
     fn parse_duration_units() {
         use std::time::Duration;
         assert_eq!(parse_duration("500ms").unwrap(), Duration::from_millis(500));
@@ -1627,12 +1942,19 @@ mod tests {
                 StepKind::For { .. } => Some("FOR"),
                 StepKind::If { .. } => Some("IF"),
                 StepKind::Assign { .. } => Some("LET"),
+                StepKind::Set { .. } => Some("MUTATION"),
                 StepKind::AssignCapture { .. } => Some("LET"),
                 StepKind::AwaitCapture { .. } => Some("AWAIT"),
                 StepKind::AsyncBlock { .. } | StepKind::AssignAsync { .. } => Some("ASYNC"),
                 StepKind::Await { .. } => Some("AWAIT"),
                 StepKind::Cancel { .. } => Some("CANCEL"),
                 StepKind::Timeout { .. } => Some("TIMEOUT"),
+                StepKind::FuncDef { .. } => Some("FUNC"),
+                StepKind::Call { .. } => Some("CALL"),
+                StepKind::Return { .. } => Some("RETURN"),
+                StepKind::While { .. } => Some("WHILE"),
+                StepKind::Break => Some("BREAK"),
+                StepKind::Continue => Some("CONTINUE"),
                 StepKind::RunExec { .. } => None,
                 StepKind::Workdir(_)
                 | StepKind::Workspace(_)
@@ -1673,7 +1995,9 @@ mod tests {
             },
             StepKind::For {
                 key_var: None,
+                key_type: None,
                 var: "i".to_string(),
+                var_type: TypeKind::String,
                 in_expr: Expr::Literal(Value::Bool(true)),
                 body: Vec::new(),
             },
@@ -1685,10 +2009,16 @@ mod tests {
             },
             StepKind::Assign {
                 var: "v".to_string(),
+                decl_type: TypeKind::Bool,
+                expr: Expr::Literal(Value::Bool(true)),
+            },
+            StepKind::Set {
+                var: "v".to_string(),
                 expr: Expr::Literal(Value::Bool(true)),
             },
             StepKind::AssignCapture {
                 var: "v".to_string(),
+                decl_type: TypeKind::String,
                 cmd: Box::new(StepKind::Echo(crate::ast::Arg::String(
                     "x".to_string(),
                     false,
@@ -1696,11 +2026,13 @@ mod tests {
             },
             StepKind::AwaitCapture {
                 out_var: "o".to_string(),
+                out_type: TypeKind::String,
                 task_var: "t".to_string(),
             },
             StepKind::AsyncBlock { body: Vec::new() },
             StepKind::AssignAsync {
                 var: "t".to_string(),
+                decl_type: TypeKind::Handle,
                 body: Vec::new(),
             },
             StepKind::Await {
@@ -1713,6 +2045,24 @@ mod tests {
                 duration: Arg::String("1s".to_string(), false),
                 body: Vec::new(),
             },
+            StepKind::FuncDef {
+                name: "F".to_string(),
+                params: Vec::new(),
+                body: Vec::new(),
+            },
+            StepKind::Call {
+                name: "F".to_string(),
+                args: Vec::new(),
+            },
+            StepKind::Return {
+                expr: Box::new(Expr::Literal(Value::Bool(true))),
+            },
+            StepKind::While {
+                cond: Box::new(Expr::Literal(Value::Bool(true))),
+                body: Vec::new(),
+            },
+            StepKind::Break,
+            StepKind::Continue,
         ];
         let registry = all_structural_metadata();
         for kind in &dummies {
@@ -1727,6 +2077,43 @@ mod tests {
 
     #[test]
     fn verify_display_sync_with_metadata() {
+        fn step_contains_kind(kind: &StepKind, name: &str) -> bool {
+            if kind.to_string().starts_with(name) {
+                return true;
+            }
+            let bodies: Vec<&Vec<Step>> = match kind {
+                StepKind::For { body, .. }
+                | StepKind::While { body, .. }
+                | StepKind::FuncDef { body, .. }
+                | StepKind::Timeout { body, .. }
+                | StepKind::AssignAsync { body, .. }
+                | StepKind::AsyncBlock { body } => vec![body],
+                StepKind::If {
+                    then_body,
+                    else_ifs,
+                    else_body,
+                    ..
+                } => {
+                    let mut out = vec![then_body];
+                    out.extend(else_ifs.iter().map(|(_, b)| b));
+                    out.extend(else_body.iter());
+                    out
+                }
+                _ => {
+                    if let StepKind::WithIo { cmd, .. } = kind {
+                        return step_contains_kind(cmd, name);
+                    }
+                    if let StepKind::AssignCapture { cmd, .. } = kind {
+                        return step_contains_kind(cmd, name);
+                    }
+                    return false;
+                }
+            };
+            bodies
+                .iter()
+                .any(|body| body.iter().any(|s| step_contains_kind(&s.kind, name)))
+        }
+
         let registry = all_metadata();
         for meta in registry {
             if meta.examples.is_empty() {
@@ -1738,6 +2125,17 @@ mod tests {
                 .unwrap_or_else(|e| panic!("Failed to parse example for {}: {}", meta.name, e));
 
             let matching = ast.iter().find(|step| {
+                // Mutation has no keyword: its Display (`$var = ...`) cannot
+                // start with the metadata name, so match the variant directly.
+                if meta.name == "MUTATION" {
+                    return matches!(step.kind, StepKind::Set { .. });
+                }
+                // Control-flow leaves (RETURN/BREAK/CONTINUE) only occur
+                // nested inside bodies, so search recursively; everything
+                // else must appear at top level with a matching Display.
+                if matches!(meta.name, "RETURN" | "BREAK" | "CONTINUE") {
+                    return step_contains_kind(&step.kind, meta.name);
+                }
                 let kind = match &step.kind {
                     StepKind::WithIo { cmd, .. } => &**cmd,
                     other => other,

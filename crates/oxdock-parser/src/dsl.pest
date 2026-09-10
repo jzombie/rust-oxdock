@@ -12,11 +12,11 @@ blank = _{ (WHITESPACE | linebreak)+ }
 script = { SOI ~ element* ~ EOI }
 
 // Structural statements MUST precede generic commands
-element = _{ blank | hash_comment | COMMENT | semicolon | guard_line | block_start | block_end | if_statement | for_statement | let_async_statement | let_capture_statement | await_statement | cancel_statement | let_statement | timeout_statement | async_statement_block | async_statement | command }
+element = _{ blank | hash_comment | COMMENT | semicolon | guard_line | block_start | block_end | if_statement | for_statement | while_statement | func_def | call_statement | return_statement | break_statement | continue_statement | let_async_statement | let_capture_statement | await_statement | cancel_statement | let_statement | mutate_statement | timeout_statement | async_statement_block | async_statement | command }
 
 // Inside for/let blocks, block_start/block_end must NOT appear as elements
 // (the block's own braces handle them).  Nested guard blocks use guard_block.
-block_element = _{ blank | hash_comment | COMMENT | semicolon | guard_block | guard_line | if_statement | for_statement | let_async_statement | let_capture_statement | await_statement | cancel_statement | let_statement | timeout_statement | async_statement_block | async_statement | command }
+block_element = _{ blank | hash_comment | COMMENT | semicolon | guard_block | guard_line | if_statement | for_statement | while_statement | func_def | call_statement | return_statement | break_statement | continue_statement | let_async_statement | let_capture_statement | await_statement | cancel_statement | let_statement | mutate_statement | timeout_statement | async_statement_block | async_statement | command }
 guard_block = ${ guard_line ~ gap ~ block }
 
 block_start = { "{" }
@@ -74,6 +74,12 @@ quoted_string = @{
     "'" ~ ( "\\'" | (!"'" ~ ANY) )* ~ "'"
 }
 bare_word = @{ (ASCII_ALPHANUMERIC | "_" | "-" | "." | "/")+ }
+// Environment read: `env:KEY` evaluates to the script environment value.
+// Must precede `bare_word` in `expr_atom` (which would otherwise match just
+// `env` and strand `:KEY`). In argument position the `unquoted_arg` guard
+// below gives the same precedence to a leading `env:KEY` shape.
+env_read_key = @{ ASCII_ALPHA_UPPER ~ (ASCII_ALPHA_UPPER | ASCII_DIGIT | "_")* }
+env_read = { "env" ~ ":" ~ env_read_key }
 func_call = ${ ident ~ gap ~ "(" ~ gap ~ (expr ~ gap ~ ("," ~ gap ~ expr ~ gap)*)? ~ gap ~ ")" }
 variable = ${ "$" ~ ident }
 key_path_segment = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHA | "_" | ASCII_DIGIT)* | ASCII_DIGIT+ }
@@ -82,7 +88,7 @@ list_literal = ${ "[" ~ gap ~ (expr ~ gap ~ ("," ~ gap ~ expr ~ gap)*)? ~ gap ~ 
 map_entry = ${ (quoted_string | bare_word) ~ gap ~ ":" ~ gap ~ ws? ~ gap ~ expr }
 map_literal = ${ "{" ~ gap ~ ws? ~ gap ~ (map_entry ~ gap ~ (ws? ~ "," ~ ws? ~ map_entry ~ gap)*)? ~ ws? ~ gap ~ "}" }
 string_literal = { quoted_string }
-expr_atom = { parenthesized_expr | func_call | key_path | variable | list_literal | map_literal | string_literal | bare_word }
+expr_atom = { parenthesized_expr | func_call | key_path | variable | env_read | list_literal | map_literal | string_literal | bare_word }
 
 // Comparison level (==, !=) — operands are unary so `!` binds tighter
 // than equality (C-like): `!a == b` parses as `(!a) == b`.
@@ -114,12 +120,36 @@ in_keyword = @{ "IN" ~ !(ASCII_ALPHANUMERIC | "_") }
 if_keyword = @{ "IF" ~ !(ASCII_ALPHANUMERIC | "_") }
 else_keyword = @{ "ELSE" ~ !(ASCII_ALPHANUMERIC | "_") }
 
-for_statement = ${ for_keyword ~ gap ~ dollar_ident ~ gap ~ ("," ~ gap ~ dollar_ident ~ gap)? ~ in_keyword ~ gap ~ expr ~ gap ~ block }
-let_statement = ${ let_keyword ~ gap ~ dollar_ident ~ gap ~ "=" ~ gap ~ expr }
+// Open uppercase identifier for type tags. Variant mapping lives in
+// Rust via TypeKind::from_str; unknown tags become UnknownType errors.
+type_tag = @{ ASCII_ALPHA_UPPER ~ (ASCII_ALPHA_UPPER | ASCII_DIGIT | "_")* }
+
+for_statement = ${ for_keyword ~ gap ~ dollar_ident ~ gap ~ (":" ~ gap ~ type_tag ~ gap)? ~ ("," ~ gap ~ dollar_ident ~ gap ~ (":" ~ gap ~ type_tag ~ gap)?)? ~ in_keyword ~ gap ~ expr ~ gap ~ block }
+let_statement = ${ let_keyword ~ gap ~ dollar_ident ~ gap ~ ":" ~ gap ~ type_tag ~ gap ~ "=" ~ gap ~ expr }
+// Mutation is bare `$var = expr` (no keyword): the leading `$` distinguishes
+// it from `KEY=value` command assignments, which never start with `$`.
+mutate_statement = ${ dollar_ident ~ gap ~ "=" ~ gap ~ expr }
 
 else_if_clause = ${ else_keyword ~ gap ~ if_keyword ~ gap ~ expr ~ gap ~ block }
 else_clause = ${ else_keyword ~ gap ~ block }
 if_statement = ${ if_keyword ~ gap ~ expr ~ gap ~ block ~ gap ~ (blank* ~ gap ~ else_if_clause ~ gap)* ~ blank* ~ gap ~ else_clause? }
+
+// Functions + loops (#114): UPPERCASE function names only (parity with host
+// natives like GLOB/LOAD_TOML). Lowercase names fail at lex time.
+func_keyword = _{ "FUNC" ~ !(ASCII_ALPHANUMERIC | "_") }
+call_keyword = _{ "CALL" ~ !(ASCII_ALPHANUMERIC | "_") }
+return_keyword = _{ "RETURN" ~ !(ASCII_ALPHANUMERIC | "_") }
+while_keyword = _{ "WHILE" ~ !(ASCII_ALPHANUMERIC | "_") }
+break_keyword = _{ "BREAK" ~ !(ASCII_ALPHANUMERIC | "_") }
+continue_keyword = _{ "CONTINUE" ~ !(ASCII_ALPHANUMERIC | "_") }
+func_ident = @{ ASCII_ALPHA_UPPER ~ (ASCII_ALPHA_UPPER | ASCII_DIGIT | "_")* }
+func_param = ${ dollar_ident ~ gap ~ ":" ~ gap ~ type_tag }
+while_statement = ${ while_keyword ~ sep ~ expr ~ gap ~ block }
+func_def = ${ func_keyword ~ sep ~ func_ident ~ gap ~ "(" ~ gap ~ (func_param ~ gap ~ ("," ~ gap ~ func_param ~ gap)*)? ~ gap ~ ")" ~ gap ~ block }
+call_statement = ${ call_keyword ~ sep ~ func_ident ~ gap ~ "(" ~ gap ~ (expr ~ gap ~ ("," ~ gap ~ expr ~ gap)*)? ~ gap ~ ")" }
+return_statement = ${ return_keyword ~ (sep ~ expr)? }
+break_statement = ${ break_keyword }
+continue_statement = ${ continue_keyword }
 
 // Commands
 // Structural rules with special syntax stay as PEG rules.
@@ -128,8 +158,8 @@ async_keyword = _{ "ASYNC" ~ !(ASCII_ALPHANUMERIC | "_") }
 async_statement = ${ async_keyword ~ sep ~ command_inner }
 async_statement_block = { async_keyword ~ sep? ~ block }
 
-// LET $var = <sync command> — capture the command's stdout into $var
-// (spilling to disk if large), or LET $var = AWAIT $task — capture a named
+// LET $var: TYPE = <sync command> — capture the command's stdout into $var
+// (spilling to disk if large), or LET $var: TYPE = AWAIT $task — capture a named
 // task's output. PEG alternatives are shadow-safe by construction:
 // - `let_async_statement` precedes this rule and claims every ASYNC-led and
 //   WITH_IO-led line, so this rule never sees them (WITH_IO sync capture is
@@ -142,31 +172,31 @@ async_statement_block = { async_keyword ~ sep? ~ block }
 // - `await_statement`/`timeout_statement`/`instruction` can only claim the
 //   line when they run to its end (`gap ~ &(linebreak | ";" | "}" | EOI)`).
 //   Without this end-guard PEG would commit to a strict-prefix match — e.g.
-//   `instruction` matching just `LOAD_TOML` in `LET $d = LOAD_TOML("t.toml")`
+//   `instruction` matching just `LOAD_TOML` in `LET $d: STRING = LOAD_TOML("t.toml")`
 //   and stranding `("t.toml")` — instead of falling through to
 //   `let_statement`, where the RHS parses as an expression. Trailing text
 //   after a complete instruction can never be a valid expression
 //   continuation, so the guard claims no expression input.
-let_capture_statement = ${ let_keyword ~ gap ~ dollar_ident ~ gap ~ "=" ~ gap ~ (await_statement | timeout_statement | instruction) ~ gap ~ &(linebreak | ";" | "}" | EOI) }
+let_capture_statement = ${ let_keyword ~ gap ~ dollar_ident ~ gap ~ ":" ~ gap ~ type_tag ~ gap ~ "=" ~ gap ~ (call_statement | await_statement | timeout_statement | instruction) ~ gap ~ &(linebreak | ";" | "}" | EOI) }
 
-// LET $var = ASYNC { ... } — spawn background task, store handle in $var
+// LET $var: TYPE = ASYNC { ... } — spawn background task, store handle in $var
 // NOTE: "ASYNC" is consumed here, so we inline the block/inline forms
 // instead of reusing async_statement_block/async_statement (which expect
 // their own async_keyword).
-// LET $var = ASYNC { ... } — spawn background task, store handle in $var
+// LET $var: TYPE = ASYNC { ... } — spawn background task, store handle in $var
 // Uses let_keyword to ensure "LET" is not followed by alphanumeric/underscore.
-// LET $var = ASYNC { ... } — spawn background task, store handle in $var
+// LET $var: TYPE = ASYNC { ... } — spawn background task, store handle in $var
 // Uses let_keyword and dollar_ident to match exactly like let_statement,
 // then requires ASYNC keyword followed by block or inline command.
-// LET $var = ASYNC { ... } — spawn background task, store handle in $var
+// LET $var: TYPE = ASYNC { ... } — spawn background task, store handle in $var
 // Uses let_keyword and dollar_ident to match exactly like let_statement,
 // then requires ASYNC keyword followed by block or inline command.
-// LET $var = ASYNC { ... } — spawn background task, store handle in $var
+// LET $var: TYPE = ASYNC { ... } — spawn background task, store handle in $var
 // Implicit whitespace handles spacing between tokens in non-atomic rules.
-// LET $var = WITH_IO [flags] ASYNC <single command> binds a pipe-wired
+// LET $var: TYPE = WITH_IO [flags] ASYNC <single command> binds a pipe-wired
 // background task. The bindings apply inside the task thread. Block form is
-// rejected during lowering: use LET $var = ASYNC { ... } instead.
-let_async_statement = ${ let_keyword ~ gap ~ dollar_ident ~ gap ~ "=" ~ gap ~ ("ASYNC" ~ gap ~ (block | command_inner) | with_io_command) }
+// rejected during lowering: use LET $var: HANDLE = ASYNC {{ ... }} with WITH_IO inside the block for multi-step tasks.
+let_async_statement = ${ let_keyword ~ gap ~ dollar_ident ~ gap ~ ":" ~ gap ~ type_tag ~ gap ~ "=" ~ gap ~ ("ASYNC" ~ gap ~ (block | command_inner) | with_io_command) }
 
 // AWAIT $var — block until task $var completes, propagate error if failed.
 // NOTE: explicit `sep?` (not implicit whitespace) so this rule also matches
@@ -195,10 +225,10 @@ timeout_keyword = _{ "TIMEOUT" ~ !(ASCII_ALPHANUMERIC | "_") }
 // arg type instead of freezing at parse.
 timeout_literal = @{ ASCII_DIGIT+ ~ ("ms" | "s" | "m" | "h")? }
 timeout_duration = { timeout_literal | dollar_ident | quoted_string | templated_arg }
-timeout_statement = ${ timeout_keyword ~ sep ~ timeout_duration ~ sep ~ (block | await_statement | cancel_statement | command) }
+timeout_statement = ${ timeout_keyword ~ sep ~ timeout_duration ~ sep ~ (block | await_statement | cancel_statement | call_statement | while_statement | command) }
 
-command = _{ with_io_command | inherit_env_command | timeout_statement | async_statement_block | async_statement | cancel_statement | run_exec_inner | instruction_inner }
-command_inner = { inherit_env_command | timeout_statement | async_statement | async_statement_block | cancel_statement | run_exec_statement | instruction }
+command = _{ with_io_command | inherit_env_command | timeout_statement | async_statement_block | async_statement | cancel_statement | call_statement | while_statement | run_exec_inner | instruction_inner }
+command_inner = { inherit_env_command | timeout_statement | async_statement | async_statement_block | cancel_statement | call_statement | while_statement | run_exec_statement | instruction }
 
 with_io_command = ${ "WITH_IO" ~ sep ~ io_flags ~ (sep ~ command)? }
 io_flags = { "[" ~ ws? ~ io_binding ~ (ws? ~ "," ~ ws? ~ io_binding)* ~ ws? ~ "]" }
@@ -237,8 +267,12 @@ gap = _{ (WHITESPACE | COMMENT)* }
 
 // Unquoted arguments — Docker-style bare words.
 // Leading !$ rejects tokens starting with $ (forces $var to expr).
+// Leading `env:KEY` (uppercase key) is likewise reserved for the env_read
+// expression so a lone `env:FOO` argument evaluates instead of staying
+// literal; any other `env:` shape (lowercase keys, `$` tails) keeps the
+// historical literal reading.
 // Inner loop excludes { to prevent consuming {{ }} as a single token.
-unquoted_arg = @{ !"$" ~ !("{{") ~ (!WHITESPACE ~ !linebreak ~ !";" ~ !"}" ~ !"{" ~ !"//" ~ !"/*" ~ ANY)+ }
+unquoted_arg = @{ !"$" ~ !("env" ~ ":" ~ ASCII_ALPHA_UPPER) ~ !("{{") ~ (!WHITESPACE ~ !linebreak ~ !";" ~ !"}" ~ !"{" ~ !"//" ~ !"/*" ~ ANY)+ }
 
 // argument repeats to support contiguous fragments: dist/{{ $file }}.txt
 // Single expr fragment -> Arg::Expr; mixed/string fragments -> Arg::String.
@@ -259,14 +293,14 @@ assign_value = { quoted_string | assign_expr | raw_fragments }
 // `!WHITESPACE` guard would split `$x`-led values yet still glue `1`-led
 // ones into a single span).
 assignment_boundary = _{ WHITESPACE+ ~ assign_key ~ gap ~ "=" }
-// Lone `$var` / `$a.b` / `CALL(...)` values stay typed `Arg::Expr`. Each shape
+// Lone `$var` / `$a.b` / `env:KEY` / `CALL(...)` values stay typed `Arg::Expr`. Each shape
 // carries its own continuation guard: strict PEG commits per-alternative, so a
 // shared trailing guard would strand input like `$a.b` on the `variable`
 // prefix. The guard requires more value content next (`{{` or a raw char past
 // any assignment boundary); a boundary, `;`, `}`, linebreak, comment, or end
 // lets the lone expression stand, and anything else falls through to
 // `raw_fragments` as literal text.
-assign_expr = { (variable ~ !assign_expr_cont | key_path ~ !assign_expr_cont | func_call ~ !assign_expr_cont) }
+assign_expr = { (variable ~ !assign_expr_cont | key_path ~ !assign_expr_cont | env_read ~ !assign_expr_cont | func_call ~ !assign_expr_cont) }
 assign_expr_cont = _{ "{{" | (!assignment_boundary ~ raw_text_char) }
 // Bounded raw span: everything else to the instruction boundary as fragments,
 // preserving `{{ }}` templates and quoted regions with exact bytes. Stops at

@@ -4,6 +4,34 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [Unreleased]
+
+### Added
+
+- Variables now declare their type up front (#130): `LET $count: INT = 0`, with types `STRING, INT, FLOAT, BOOL, PIPE, LIST, MAP, HANDLE, DURATION, PATH` (`INT` is 64-bit, `FLOAT` is 64-bit). Declaring the same name twice in one scope is an error; change it later with bare `$count = 2`
+- Reading environment variables is explicit (#130): `LET $e: STRING = env:FOO` reads `FOO` into a plain string, while a bare `$var` never touches the environment (templates still use `{{ env:KEY }}`). There is no `ENV` type
+- Loop variables carry types too (#130): `FOR $item: STRING IN ...`, with `INT` or `STRING` keys (`INT` gives the 0-based list index; maps need `STRING` keys)
+- User-defined functions (#114): `FUNC GREET($name: STRING) { ... }` defines a reusable block (names are UPPERCASE, parameters carry types like `LET`). Run it with `CALL GREET("ada")`, or capture what it returns with `LET $r: STRING = CALL GREET("ada")`. A function without `RETURN` gives back an empty string, and anything it prints still shows up normally
+- `WHILE` loops (#114): `WHILE !$done { ... }` repeats while the condition holds (must be true/false, like `IF`). Each round gets a fresh scope, so change an outer variable (`$done = true`) to exit
+- `BREAK` and `CONTINUE` (#114): work in both `FOR` and `WHILE`, always affecting the innermost loop. Using them outside a loop, or across a function or background-task boundary, is an error
+- Background function calls (#114): `LET $t: HANDLE = ASYNC CALL WORK("job")` runs a function in the background; `LET $o: STRING = AWAIT $t` waits and gives back its return value. Calls nest at most 64 deep, and going deeper fails with an error naming the function
+- Rust embedders (#114): host-side functions can be registered under the same UPPERCASE `CALL` names that script functions use; user-facing help output for them comes later
+
+### Fixed
+
+- `$var = ...` reassignment inside `{ ... }` blocks (loop and function bodies) was silently ignored, so loop counters and `WHILE` exit flags never updated. Only top-level reassignment used to work
+
+### Changed
+
+- [breaking] `LET` requires an explicit type, so `LET $x = ...` is now a parse error; reassignment is bare `$x = ...` and there is no `SET` keyword (a `SET ...` line fails with a hint); `FOR` variables require type tags; there is no `ENV` type; bare `$var` never reads the environment (use `env:KEY` or `{{ env:KEY }}`); command-reference Type cells show real types only (`$var` / `KEY=value` shapes display as the `STRING` they bind or resolve to)
+
+### Dependencies
+
+- Bump `cargo_metadata` 0.19.2 → 0.23.1
+- Bump `pest` 2.9.0 → 2.9.1
+- Bump `syn` 3.0.4 → 3.0.5
+- Bump `toml` 1.1.4+spec-1.1.0 → 1.1.5+spec-1.1.0
+
 ## [0.11.0-alpha] - 2026-09-09
 
 ### Added

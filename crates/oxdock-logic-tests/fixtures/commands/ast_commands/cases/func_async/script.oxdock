@@ -1,0 +1,6 @@
+FUNC WORK($job: STRING) {
+    RETURN "did-{{ $job }}"
+}
+LET $t: HANDLE = ASYNC CALL WORK("job")
+LET $o: STRING = AWAIT $t
+WRITE o.txt "{{ $o }}"

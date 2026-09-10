@@ -1,0 +1,6 @@
+LET $first: STRING = ""
+FOR $x: STRING IN ["a", "b", "c"] {
+    $first = "hit"
+    BREAK
+}
+WRITE first.txt "{{ $first }}"

@@ -7,7 +7,7 @@ TIMEOUT 30s {
 }
 
 # AWAIT form bounds a task join.
-LET $quick = ASYNC {
+LET $quick: HANDLE = ASYNC {
     ECHO hi
 }
 TIMEOUT 30s AWAIT $quick
