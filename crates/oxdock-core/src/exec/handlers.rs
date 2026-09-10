@@ -1587,7 +1587,10 @@ pub(crate) fn assign_capture<P: ProcessManager>(
             );
         }
         Flow::Return { idx, .. } => {
-            bail!("step {}: RETURN outside function (cannot be captured)", idx + 1);
+            bail!(
+                "step {}: RETURN outside function (cannot be captured)",
+                idx + 1
+            );
         }
     }
     let text = sink
@@ -1827,22 +1830,13 @@ pub(crate) fn dispatch_async_block<P: ProcessManager>(
         match flow {
             Flow::Done => Ok(()),
             Flow::Break { idx } => {
-                anyhow::bail!(
-                    "step {}: BREAK cannot cross ASYNC boundary",
-                    idx + 1
-                );
+                anyhow::bail!("step {}: BREAK cannot cross ASYNC boundary", idx + 1);
             }
             Flow::Continue { idx } => {
-                anyhow::bail!(
-                    "step {}: CONTINUE cannot cross ASYNC boundary",
-                    idx + 1
-                );
+                anyhow::bail!("step {}: CONTINUE cannot cross ASYNC boundary", idx + 1);
             }
             Flow::Return { idx, .. } => {
-                anyhow::bail!(
-                    "step {}: RETURN cannot cross ASYNC boundary",
-                    idx + 1
-                );
+                anyhow::bail!("step {}: RETURN cannot cross ASYNC boundary", idx + 1);
             }
         }
     });
@@ -2319,17 +2313,11 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
     // Control flow never crosses the thread boundary: stray
     // BREAK/CONTINUE/RETURN become errors here.
     let call_task: Option<(Vec<IoBinding>, String, Vec<Expr>)> = match body.as_slice() {
-        [step] => extract_call(&step.kind).map(|(bindings, name, args)| {
-            (
-                bindings,
-                name.to_string(),
-                args.to_vec(),
-            )
-        }),
+        [step] => extract_call(&step.kind)
+            .map(|(bindings, name, args)| (bindings, name.to_string(), args.to_vec())),
         _ => None,
     };
-    let (entry_tx, entry_rx) =
-        std::sync::mpsc::channel::<Arc<super::state::TaskEntry>>();
+    let (entry_tx, entry_rx) = std::sync::mpsc::channel::<Arc<super::state::TaskEntry>>();
     let join = std::thread::spawn(move || {
         let mut child_state = forked_state;
         let mut child_process = forked_process;
@@ -2633,11 +2621,8 @@ pub(crate) fn dispatch_await_capture<P: ProcessManager>(
         .return_value
         .clone()
     {
-        cx.state.declare_var(
-            out_var.trim_start_matches('$').to_string(),
-            out_type,
-            value,
-        )?;
+        cx.state
+            .declare_var(out_var.trim_start_matches('$').to_string(), out_type, value)?;
         return Ok(());
     }
     let text = match entry.take_sink() {

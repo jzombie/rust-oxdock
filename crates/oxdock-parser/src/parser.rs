@@ -915,9 +915,7 @@ fn check_func_ident(name: &str) -> Result<()> {
             .chars()
             .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
     if !ok {
-        bail!(
-            "function names must be UPPERCASE (ASCII_ALPHA_UPPER, digits, _), got `{name}`"
-        );
+        bail!("function names must be UPPERCASE (ASCII_ALPHA_UPPER, digits, _), got `{name}`");
     }
     Ok(())
 }
@@ -976,14 +974,11 @@ fn parse_func_def_from_pair(
                         _ => {}
                     }
                 }
-                param_names.push(
-                    pname.ok_or_else(|| anyhow!("FUNC parameter requires a $variable"))?,
-                );
-                param_types.push(
-                    ptype.ok_or_else(|| {
-                        anyhow!("FUNC parameters require explicit types: FUNC NAME($p: TYPE, ...)")
-                    })?,
-                );
+                param_names
+                    .push(pname.ok_or_else(|| anyhow!("FUNC parameter requires a $variable"))?);
+                param_types.push(ptype.ok_or_else(|| {
+                    anyhow!("FUNC parameters require explicit types: FUNC NAME($p: TYPE, ...)")
+                })?);
             }
             Rule::block => {
                 body = Some(parse_block_elements_with_lower(inner, lower)?);

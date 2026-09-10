@@ -1216,10 +1216,7 @@ fn return_outside_function_is_step_numbered_error() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let err = run_script(&root, "RETURN \"x\"\n").expect_err("RETURN outside func must fail");
-    assert!(
-        err.to_string().contains("RETURN outside function"),
-        "{err}"
-    );
+    assert!(err.to_string().contains("RETURN outside function"), "{err}");
 }
 
 #[test]
@@ -1253,7 +1250,8 @@ fn recursion_depth_limit_names_function() {
     "#};
     let err = run_script(&root, script).expect_err("runaway recursion must fail");
     assert!(
-        err.to_string().contains("recursion depth limit exceeded in FUNC BOOM"),
+        err.to_string()
+            .contains("recursion depth limit exceeded in FUNC BOOM"),
         "{err}"
     );
 }

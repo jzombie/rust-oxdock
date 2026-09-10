@@ -67,7 +67,7 @@ pub fn tokenize(input: &str) -> Result<Vec<RawToken<'_>>> {
             | Rule::let_capture_statement
             | Rule::await_statement
             | Rule::cancel_statement
-            |             Rule::for_statement
+            | Rule::for_statement
             | Rule::let_statement
             | Rule::mutate_statement
             | Rule::if_statement
