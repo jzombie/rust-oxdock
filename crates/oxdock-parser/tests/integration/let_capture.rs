@@ -114,8 +114,7 @@ fn let_capture_rejects_inline_async() {
 #[test]
 fn let_async_still_binds_task_handle() {
     // No regression: ASYNC-led lines still produce AssignAsync.
-    let steps =
-        parse_script("LET $t: HANDLE = ASYNC ECHO hi\n", mock_lower).expect("parse ASYNC");
+    let steps = parse_script("LET $t: HANDLE = ASYNC ECHO hi\n", mock_lower).expect("parse ASYNC");
     assert!(
         matches!(steps[0].kind, StepKind::AssignAsync { .. }),
         "expected AssignAsync, got {:?}",

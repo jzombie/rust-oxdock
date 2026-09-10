@@ -265,12 +265,7 @@ impl<P: ProcessManager> ExecState<P> {
         self.pop_var_scope();
         Ok(())
     }
-    pub(super) fn declare_var(
-        &mut self,
-        key: String,
-        kind: TypeKind,
-        value: Value,
-    ) -> Result<()> {
+    pub(super) fn declare_var(&mut self, key: String, kind: TypeKind, value: Value) -> Result<()> {
         if self
             .var_scopes
             .last()

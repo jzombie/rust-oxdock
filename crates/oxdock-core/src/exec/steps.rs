@@ -691,17 +691,13 @@ fn execute_steps_inner<P: ProcessManager>(
                     var,
                     decl_type,
                     body,
-                } => {
-                    handlers::dispatch_assign_async(var, *decl_type, body, &mut cx)
-                }
+                } => handlers::dispatch_assign_async(var, *decl_type, body, &mut cx),
                 StepKind::Await { var } => handlers::dispatch_await(var, &mut cx),
                 StepKind::AwaitCapture {
                     out_var,
                     out_type,
                     task_var,
-                } => {
-                    handlers::dispatch_await_capture(out_var, *out_type, task_var, &mut cx)
-                }
+                } => handlers::dispatch_await_capture(out_var, *out_type, task_var, &mut cx),
                 StepKind::Cancel { var } => handlers::dispatch_cancel(var, &mut cx),
                 StepKind::Timeout { duration, body } => {
                     let duration = super::args::resolve_arg_as_duration(duration, &mut cx)?;

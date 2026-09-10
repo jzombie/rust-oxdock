@@ -33,9 +33,11 @@ pub(crate) fn coerce_value<P: ProcessManager>(
         (v @ Value::TaskHandle(_), TypeKind::Handle) => Ok(v),
         (v @ Value::Duration(_), TypeKind::Duration) => Ok(v),
         (v @ Value::Path(_), TypeKind::Path) => Ok(v),
-        (Value::String(s), TypeKind::Int) => s.trim().parse::<i64>().map(Value::Int).map_err(|_| {
-            anyhow::anyhow!("TypeMismatch: expected {expected_label}, got STRING ({s:?})")
-        }),
+        (Value::String(s), TypeKind::Int) => {
+            s.trim().parse::<i64>().map(Value::Int).map_err(|_| {
+                anyhow::anyhow!("TypeMismatch: expected {expected_label}, got STRING ({s:?})")
+            })
+        }
         (Value::String(s), TypeKind::Float) => {
             s.trim().parse::<f64>().map(Value::Float).map_err(|_| {
                 anyhow::anyhow!("TypeMismatch: expected {expected_label}, got STRING ({s:?})")
@@ -59,15 +61,11 @@ pub(crate) fn coerce_value<P: ProcessManager>(
                 ))
             }
         }
-        (Value::String(s), TypeKind::Duration) => {
-            oxdock_parser::command::parse_duration(s.trim())
-                .map(Value::Duration)
-                .map_err(|_| {
-                    anyhow::anyhow!(
-                        "TypeMismatch: expected {expected_label}, got STRING ({s:?})"
-                    )
-                })
-        }
+        (Value::String(s), TypeKind::Duration) => oxdock_parser::command::parse_duration(s.trim())
+            .map(Value::Duration)
+            .map_err(|_| {
+                anyhow::anyhow!("TypeMismatch: expected {expected_label}, got STRING ({s:?})")
+            }),
         (Value::String(s), TypeKind::Path) => {
             // Narrow exception: materializing the PATH payload. Guard checks
             // still run through oxdock-fs at use time.
@@ -100,9 +98,7 @@ pub(crate) fn coerce_value<P: ProcessManager>(
         (Value::Duration(d), TypeKind::String) => {
             Ok(Value::String(oxdock_parser::command::format_duration(&d)))
         }
-        (Value::Path(p), TypeKind::String) => {
-            Ok(Value::String(p.to_string_lossy().to_string()))
-        }
+        (Value::Path(p), TypeKind::String) => Ok(Value::String(p.to_string_lossy().to_string())),
         (Value::Pipe(n), TypeKind::String) => Ok(Value::String(n)),
         (v, _) => Err(anyhow::anyhow!(
             "TypeMismatch: expected {expected_label}, got value ({v:?})"

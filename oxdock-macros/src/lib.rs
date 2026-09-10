@@ -1019,7 +1019,11 @@ fn emit_stepkind(
                 }
             }
         }
-        StepKind::Assign { var, decl_type, expr } => {
+        StepKind::Assign {
+            var,
+            decl_type,
+            expr,
+        } => {
             let e = emit_expr(expr, interp);
             let t = emit_typekind(decl_type);
             quote! { StepKind::Assign { var: #var.to_string(), decl_type: #t, expr: #e } }
@@ -1029,7 +1033,9 @@ fn emit_stepkind(
             quote! { StepKind::Set { var: #var.to_string(), expr: #e } }
         }
         StepKind::AssignCapture {
-            var, decl_type, cmd,
+            var,
+            decl_type,
+            cmd,
         } => {
             let c = emit_stepkind(cmd, interp);
             let t = emit_typekind(decl_type);
@@ -1044,7 +1050,9 @@ fn emit_stepkind(
             quote! { StepKind::AwaitCapture { out_var: #out_var.to_string(), out_type: #t, task_var: #task_var.to_string() } }
         }
         StepKind::AssignAsync {
-            var, decl_type, body,
+            var,
+            decl_type,
+            body,
         } => {
             let steps: Vec<_> = body.iter().map(|s| emit_step(s, interp)).collect();
             let t = emit_typekind(decl_type);

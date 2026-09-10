@@ -1453,7 +1453,11 @@ impl fmt::Display for StepKind {
                 match key_var {
                     Some(k) => {
                         let kt = key_type.as_ref().map(|t| t.label()).unwrap_or("STRING");
-                        write!(f, "FOR ${}: {}, ${}: {} IN {} {{", k, kt, var, var_type, in_expr)?
+                        write!(
+                            f,
+                            "FOR ${}: {}, ${}: {} IN {} {{",
+                            k, kt, var, var_type, in_expr
+                        )?
                     }
                     None => write!(f, "FOR ${}: {} IN {} {{", var, var_type, in_expr)?,
                 }
@@ -1489,11 +1493,19 @@ impl fmt::Display for StepKind {
                 }
                 Ok(())
             }
-            StepKind::Assign { var, decl_type, expr } => {
+            StepKind::Assign {
+                var,
+                decl_type,
+                expr,
+            } => {
                 write!(f, "LET ${}: {} = {}", var, decl_type, expr)
             }
             StepKind::Set { var, expr } => write!(f, "${} = {}", var, expr),
-            StepKind::AssignCapture { var, decl_type, cmd } => {
+            StepKind::AssignCapture {
+                var,
+                decl_type,
+                cmd,
+            } => {
                 write!(f, "LET ${}: {} = {}", var, decl_type, cmd)
             }
             StepKind::AsyncBlock { body } => {
@@ -1503,7 +1515,11 @@ impl fmt::Display for StepKind {
                 }
                 write!(f, "\n}}")
             }
-            StepKind::AssignAsync { var, decl_type, body } => {
+            StepKind::AssignAsync {
+                var,
+                decl_type,
+                body,
+            } => {
                 write!(f, "LET ${}: {} = ASYNC {{", var, decl_type)?;
                 for s in body {
                     write!(f, "\n    {}", s)?;
@@ -1511,7 +1527,11 @@ impl fmt::Display for StepKind {
                 write!(f, "\n}}")
             }
             StepKind::Await { var } => write!(f, "AWAIT ${}", var),
-            StepKind::AwaitCapture { out_var, out_type, task_var } => {
+            StepKind::AwaitCapture {
+                out_var,
+                out_type,
+                task_var,
+            } => {
                 write!(f, "LET ${}: {} = AWAIT ${}", out_var, out_type, task_var)
             }
             StepKind::Cancel { var } => write!(f, "CANCEL ${}", var),

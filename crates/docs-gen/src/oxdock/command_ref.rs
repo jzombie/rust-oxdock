@@ -1,7 +1,7 @@
 use anyhow::Result;
 use oxdock_core::{ArgType, CommandMeta, all_metadata, all_structural_metadata};
-use oxdock_parser::TypeKind;
 use oxdock_fs::{GuardedPath, PathResolver};
+use oxdock_parser::TypeKind;
 use std::collections::HashSet;
 
 use crate::io::write_text;

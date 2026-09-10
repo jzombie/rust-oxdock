@@ -476,7 +476,7 @@ pub enum Value {
     List(Vec<Value>),
     Map(std::collections::BTreeMap<String, Value>),
     Bool(bool),
-    Pipe(String),     // holds pipe name; validity checked against PipeRegistry
+    Pipe(String), // holds pipe name; validity checked against PipeRegistry
     Duration(std::time::Duration),
     // Narrow exception: the PATH slot carries an already-resolved path value.
     // All guard checks still run through oxdock-fs at coercion/use time.

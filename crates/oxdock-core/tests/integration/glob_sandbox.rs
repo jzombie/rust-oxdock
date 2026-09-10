@@ -98,8 +98,8 @@ fn glob_normal_patterns_still_list_contents() {
 fn load_toml_rejects_parent_dir_escape() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
-    let err =
-        run_script(&root, r#"LET $d: MAP = LOAD_TOML("../escape.toml")"#).expect_err("escape must fail");
+    let err = run_script(&root, r#"LET $d: MAP = LOAD_TOML("../escape.toml")"#)
+        .expect_err("escape must fail");
     assert!(
         err.to_string().contains("escape"),
         "expected escape error, got {err}"

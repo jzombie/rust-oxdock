@@ -3,7 +3,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use oxdock_fs::EntryKind;
-use oxdock_parser::{Arg, Expr, IoBinding, IoStream, Step, StepKind, TypeKind, Value, WorkspaceTarget};
+use oxdock_parser::{
+    Arg, Expr, IoBinding, IoStream, Step, StepKind, TypeKind, Value, WorkspaceTarget,
+};
 use oxdock_process::{
     BackgroundHandle, CommandOptions, CommandResult, CommandStderr, CommandStdin, CommandStdout,
     INHERIT_STDOUT_ENV_VAR, PROCESS_DEBUG_ENV_VAR, ProcessManager,
@@ -649,8 +651,7 @@ pub(super) fn read_line<P: ProcessManager>(
     if cx.state.get_var_typed(&clean_var).is_some() {
         cx.state.mutate_var(&clean_var, text)?;
     } else {
-        cx.state
-            .declare_var(clean_var, TypeKind::String, text)?;
+        cx.state.declare_var(clean_var, TypeKind::String, text)?;
     }
     Ok(())
 }
@@ -1145,11 +1146,7 @@ pub(crate) fn for_loop<P: ProcessManager>(
                     cx.state.declare_var(
                         clean_idx,
                         kt,
-                        super::args::coerce_value(
-                            Value::Int(i as i64),
-                            kt,
-                            &*cx.state,
-                        )?,
+                        super::args::coerce_value(Value::Int(i as i64), kt, &*cx.state)?,
                     )?;
                 }
                 cx.state.declare_var(
@@ -1953,11 +1950,8 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
     }
 
     // Store the task handle in the variable scope
-    cx.state.declare_var(
-        var.to_string(),
-        decl_type,
-        Value::TaskHandle(task_id),
-    )?;
+    cx.state
+        .declare_var(var.to_string(), decl_type, Value::TaskHandle(task_id))?;
     Ok(())
 }
 
@@ -2233,7 +2227,9 @@ pub(crate) fn dispatch_assign_async_step<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
 ) -> Result<()> {
     let StepKind::AssignAsync {
-        var, decl_type, body,
+        var,
+        decl_type,
+        body,
     } = step
     else {
         unreachable!()
@@ -2258,7 +2254,9 @@ pub(crate) fn dispatch_assign_capture_step<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
 ) -> Result<()> {
     let StepKind::AssignCapture {
-        var, decl_type, cmd,
+        var,
+        decl_type,
+        cmd,
     } = step
     else {
         unreachable!()

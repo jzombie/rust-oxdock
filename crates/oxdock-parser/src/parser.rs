@@ -1,4 +1,6 @@
-use crate::ast::{Arg, Expr, Guard, GuardExpr, IoBinding, IoStream, PlatformGuard, Step, StepKind, TypeKind};
+use crate::ast::{
+    Arg, Expr, Guard, GuardExpr, IoBinding, IoStream, PlatformGuard, Step, StepKind, TypeKind,
+};
 use crate::command::ArgType;
 use crate::lexer::{self, RawToken, Rule};
 use anyhow::{Result, anyhow, bail};
@@ -1060,9 +1062,9 @@ fn parse_let_async_statement_from_pair(
                             );
                         }
                         reject_async_in_capture(&sync_cmd)?;
-                        let name = var
-                            .clone()
-                            .ok_or_else(|| anyhow!("LET $var: TYPE = WITH_IO requires a variable"))?;
+                        let name = var.clone().ok_or_else(|| {
+                            anyhow!("LET $var: TYPE = WITH_IO requires a variable")
+                        })?;
                         let dtype = decl_type.ok_or_else(|| {
                             anyhow!("LET requires explicit type: LET $var: TYPE = ...")
                         })?;

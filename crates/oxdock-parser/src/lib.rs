@@ -576,7 +576,11 @@ mod tests {
         let steps = parse_script(script, test_lower).expect("parse ok");
         assert_eq!(steps.len(), 1);
         match &steps[0].kind {
-            StepKind::Assign { var, decl_type: _, expr } => {
+            StepKind::Assign {
+                var,
+                decl_type: _,
+                expr,
+            } => {
                 assert_eq!(var, "x");
                 assert_eq!(expr, &Expr::Literal(Value::String("hello".to_string())));
             }
@@ -590,7 +594,11 @@ mod tests {
         let steps = parse_script(script, test_lower).expect("parse ok");
         assert_eq!(steps.len(), 1);
         match &steps[0].kind {
-            StepKind::Assign { var, decl_type: _, expr } => {
+            StepKind::Assign {
+                var,
+                decl_type: _,
+                expr,
+            } => {
                 assert_eq!(var, "x");
                 assert_eq!(
                     expr,
@@ -607,7 +615,11 @@ mod tests {
         let steps = parse_script(script, test_lower).expect("parse ok");
         assert_eq!(steps.len(), 1);
         match &steps[0].kind {
-            StepKind::Assign { var, decl_type: _, expr } => {
+            StepKind::Assign {
+                var,
+                decl_type: _,
+                expr,
+            } => {
                 assert_eq!(var, "x");
                 assert_eq!(
                     expr,
@@ -628,7 +640,11 @@ mod tests {
         let steps = parse_script(script, test_lower).expect("parse ok");
         assert_eq!(steps.len(), 1);
         match &steps[0].kind {
-            StepKind::Assign { var, decl_type: _, expr } => {
+            StepKind::Assign {
+                var,
+                decl_type: _,
+                expr,
+            } => {
                 assert_eq!(var, "x");
                 assert_eq!(expr, &Expr::Var("y".to_string()));
             }
@@ -734,7 +750,11 @@ mod tests {
         let script = r#"LET $x: BOOL = !true"#;
         let steps = parse_script(script, test_lower).expect("parse ok");
         match &steps[0].kind {
-            StepKind::Assign { var, decl_type: _, expr } => {
+            StepKind::Assign {
+                var,
+                decl_type: _,
+                expr,
+            } => {
                 assert_eq!(var, "x");
                 assert_eq!(expr, &Expr::Not(Box::new(Expr::Literal(Value::Bool(true)))));
             }
@@ -768,7 +788,8 @@ mod tests {
         }
 
         // Parentheses invert the grouping: `!(true == false)`.
-        let steps = parse_script(r#"LET $x: BOOL = !(true == false)"#, test_lower).expect("parse ok");
+        let steps =
+            parse_script(r#"LET $x: BOOL = !(true == false)"#, test_lower).expect("parse ok");
         match &steps[0].kind {
             StepKind::Assign { expr, .. } => {
                 assert!(matches!(expr, Expr::Not(_)), "got {expr:?}");

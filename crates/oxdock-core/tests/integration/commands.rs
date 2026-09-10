@@ -1441,8 +1441,11 @@ fn cancel_double_reports_already_cancelled() {
 fn cancel_previously_awaited_task_fails() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    let err = run_script(&root, "LET $t: HANDLE = ASYNC ECHO hi\nAWAIT $t\nCANCEL $t\n")
-        .expect_err("CANCEL after AWAIT must fail");
+    let err = run_script(
+        &root,
+        "LET $t: HANDLE = ASYNC ECHO hi\nAWAIT $t\nCANCEL $t\n",
+    )
+    .expect_err("CANCEL after AWAIT must fail");
     assert!(
         err.to_string()
             .contains("already been awaited or does not exist"),
@@ -1549,7 +1552,8 @@ fn append_concatenates_content() {
 fn assign_and_interpolate() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    run_script(&root, "LET $msg: STRING = hello\nWRITE out.txt $msg\n").expect("assign + write passes");
+    run_script(&root, "LET $msg: STRING = hello\nWRITE out.txt $msg\n")
+        .expect("assign + write passes");
     assert_eq!(read_trimmed(&root.join("out.txt").unwrap()), "hello");
 }
 
@@ -2417,8 +2421,11 @@ fn sleep_completes_and_is_cancellable() {
 fn sleep_accepts_variable_duration() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    run_script(&root, "LET $d: DURATION = \"50ms\"\nSLEEP $d\nWRITE awake.txt yes\n")
-        .expect("variable sleep must complete");
+    run_script(
+        &root,
+        "LET $d: DURATION = \"50ms\"\nSLEEP $d\nWRITE awake.txt yes\n",
+    )
+    .expect("variable sleep must complete");
     assert_eq!(read_trimmed(&root.join("awake.txt").unwrap()), "yes");
 }
 
@@ -2463,8 +2470,11 @@ fn exit_rejects_garbage_code_at_lower() {
 fn timeout_accepts_variable_duration() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    run_script(&root, "LET $d: DURATION = \"50ms\"\nTIMEOUT $d WRITE done.txt yes\n")
-        .expect("variable timeout must complete");
+    run_script(
+        &root,
+        "LET $d: DURATION = \"50ms\"\nTIMEOUT $d WRITE done.txt yes\n",
+    )
+    .expect("variable timeout must complete");
     assert_eq!(read_trimmed(&root.join("done.txt").unwrap()), "yes");
 }
 
