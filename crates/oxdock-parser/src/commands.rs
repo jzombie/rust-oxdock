@@ -147,6 +147,35 @@ fn quote_run(s: &str) -> String {
         .join(" ")
 }
 
+/// Render one exec-form (`RUN [...]`) argv element for `Display`:
+/// string literals print JSON-quoted; typed expressions (`$var`,
+/// `CALL()`, ints, bools, nested lists) print raw via `render` so
+/// reparsing yields the same typed element; mixed values print raw
+/// unless they hold instruction-boundary characters.
+fn fmt_exec_arg(arg: &Arg) -> String {
+    match arg {
+        Arg::String(text, _) => {
+            format!("\"{}\"", text.replace('\\', "\\\\").replace('"', "\\\""))
+        }
+        Arg::Expr(_) => arg.render(),
+        Arg::Parts(_) => {
+            let rendered = arg.render();
+            if rendered.contains(';')
+                || rendered.contains('}')
+                || rendered.contains('\n')
+                || rendered.contains('\r')
+            {
+                format!(
+                    "\"{}\"",
+                    rendered.replace('\\', "\\\\").replace('"', "\\\"")
+                )
+            } else {
+                rendered
+            }
+        }
+    }
+}
+
 /// Render an [`Arg`] for `Display`: the quoted flag drives quoting (not
 /// content sniffing — digit-leading values like `10s` or `0` must stay
 /// bare to reparse with the same flag).
@@ -397,6 +426,7 @@ declare_commands! {
         Await { var: String },
         Cancel { var: String },
         Timeout { duration: Arg, body: Vec<Step> },
+        RunExec { argv: Vec<Arg> },
     ]
 
     Workdir => [
@@ -529,14 +559,22 @@ declare_commands! {
     Run => [
         name: "RUN",
         variant: Run(Arg),
-        syntax: "RUN <command...>",
-        summary: "Execute shell command.",
-        description: "Runs command in cwd.",
+        syntax: "RUN <command...> | RUN [\"exe\", \"arg\", ...]",
+        summary: "Execute shell command or direct executable.",
+        description: "Shell form (`RUN <command...>`) runs the joined command string in the system shell (`$SHELL -c` / `COMSPEC /C`). Exec form (`RUN [\"exe\", \"arg\", ...]`) spawns the executable directly with no shell, so there is no shell expansion, globbing, redirection, or pipes; use it for portable commands. Guards and wrappers (`ASYNC`, `TIMEOUT`, `WITH_IO`, `LET`) apply to both forms.",
         args: &[ ArgSpec { name: "command", arg_type: ArgType::Rest(&ArgType::String), description: "Command", io: IoDirection::Write, index: 0, required: true, fallback_stream: None } ],
         flags: &[],
         default_output: None,
-        examples: &[ Example { name: "run", fence_meta: None, code: indoc! {r#"RUN echo hello"#} } ],
-        lower: |_flags, args| Ok(StepKind::Run(join_value(args, "RUN")?)),
+        examples: &[ Example { name: "run", fence_meta: None, code: indoc! {r#"RUN echo hello"#} }, Example { name: "run exec form", fence_meta: None, code: indoc! {r#"RUN ["cargo", "--version"]"#} } ],
+        lower: |_flags, args| match args.as_slice() {
+            [Arg::Expr(Expr::List(elems))] if elems.is_empty() => {
+                bail!("RUN requires at least one argument")
+            }
+            [Arg::Expr(Expr::List(elems))] => Ok(StepKind::RunExec {
+                argv: elems.iter().cloned().map(Arg::Expr).collect(),
+            }),
+            _ => Ok(StepKind::Run(join_value(args, "RUN")?)),
+        },
     ],
 
     Copy => [
@@ -986,7 +1024,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             name: "WITH_IO",
             syntax: "WITH_IO [bindings] <command> | WITH_IO [bindings] { <commands> }",
             summary: "Reroute standard streams.",
-            description: "Reroutes the standard streams of the next command or, in block form, of every enclosed command. Bindings map streams (`stdin`, `stdout`, `stderr`) to named pipes (`stdout=pipe:name`). Pipe names registered by the host runtime tee structured output elsewhere; a name bound as output can later feed another command's `stdin`, connecting commands without touching the terminal. Nested blocks stack defaults; inline bindings override inherited ones for their command only; closing a block restores previous wiring.",
+            description: "Reroutes the standard streams of the next command or, in block form, of every enclosed command. Bindings map streams (`stdin`, `stdout`, `stderr`) to named script pipes (`stdout=pipe:name`, `stderr=pipe:name`). Both stdout and stderr pipes capture output the same way. Pipes hold bytes in memory and spill to a temp file above 8 MiB, so a producer can finish before the consumer starts. If WITH_IO wraps an ASYNC block whose body is a single RUN, guarded or not, the pipe is a zero copy OS kernel pipe instead: pair it with a consumer that runs while the producer is alive, since output past the 64 KiB kernel buffer stalls until drained. A second producer or consumer on a live name is an explicit error. A name bound as output can later feed another command's `stdin`, connecting commands without touching the terminal. Binding `stdout` and `stderr` to the same live pipe name fails deterministically. Merge streams in shell via `2>&1` instead. Nested blocks stack defaults; inline bindings override inherited ones for their command only; closing a block restores previous wiring.",
             args: &[],
             flags: &[],
             default_output: None,
@@ -1255,6 +1293,10 @@ impl fmt::Display for StepKind {
                 write!(f, "ENV {}={}", key, fmt_value(value, quote_arg))
             }
             StepKind::Run(c) => write!(f, "RUN {}", fmt_value(c, quote_run)),
+            StepKind::RunExec { argv } => {
+                let parts: Vec<String> = argv.iter().map(fmt_exec_arg).collect();
+                write!(f, "RUN [{}]", parts.join(", "))
+            }
             StepKind::Echo(m) => write!(f, "ECHO {}", fmt_value(m, quote_msg)),
             StepKind::Copy {
                 from_current_workspace,
@@ -1591,6 +1633,7 @@ mod tests {
                 StepKind::Await { .. } => Some("AWAIT"),
                 StepKind::Cancel { .. } => Some("CANCEL"),
                 StepKind::Timeout { .. } => Some("TIMEOUT"),
+                StepKind::RunExec { .. } => None,
                 StepKind::Workdir(_)
                 | StepKind::Workspace(_)
                 | StepKind::Env { .. }

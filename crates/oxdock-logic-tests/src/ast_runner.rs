@@ -1204,6 +1204,7 @@ fn step_kind_name(kind: &StepKind) -> &'static str {
         StepKind::Workspace(_) => "Workspace",
         StepKind::Env { .. } => "Env",
         StepKind::Run(_) => "Run",
+        StepKind::RunExec { .. } => "RunExec",
         StepKind::Echo(_) => "Echo",
         StepKind::AsyncBlock { .. } => "AsyncBlock",
         StepKind::Copy { .. } => "Copy",

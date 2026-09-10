@@ -22,6 +22,19 @@ pub fn shell_program() -> String {
 }
 
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+pub(crate) fn direct_cmd(argv: &[String]) -> Result<Command> {
+    let (program, rest) = argv
+        .split_first()
+        .ok_or_else(|| anyhow::anyhow!("RUN exec form requires at least one argument"))?;
+    if program.is_empty() {
+        bail!("RUN exec form requires a non-empty executable");
+    }
+    let mut c = Command::new(program);
+    c.args(rest);
+    Ok(c)
+}
+
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 pub(crate) fn shell_cmd(cmd: &str) -> Command {
     let program = shell_program();
     let mut c = Command::new(program);
@@ -227,7 +240,7 @@ fn try_shell_command_hook(cmd: &mut CommandBuilder) -> Result<bool> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ShellLauncher, shell_cmd, shell_program};
+    use super::{ShellLauncher, direct_cmd, shell_cmd, shell_program};
     use crate::TestEnvGuard;
 
     use std::ffi::OsStr;
@@ -298,6 +311,32 @@ mod tests {
         assert_eq!(args, vec!["/C".to_string(), "echo hi".to_string()]);
         #[cfg(not(windows))]
         assert_eq!(args, vec!["-c".to_string(), "echo hi".to_string()]);
+    }
+
+    #[test]
+    fn direct_cmd_builds_program_and_args_without_shell() {
+        let argv = vec!["prog".to_string(), "a".to_string(), "b c".to_string()];
+        let cmd = direct_cmd(&argv).expect("direct_cmd");
+        assert_eq!(cmd.get_program(), OsStr::new("prog"));
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(args, vec!["a".to_string(), "b c".to_string()]);
+    }
+
+    #[test]
+    fn direct_cmd_rejects_empty_argv() {
+        let err = direct_cmd(&[]).expect_err("empty argv must fail");
+        assert!(
+            err.to_string().contains("at least one argument"),
+            "unexpected error: {err:#}"
+        );
+        let err = direct_cmd(&[String::new()]).expect_err("empty program must fail");
+        assert!(
+            err.to_string().contains("non-empty executable"),
+            "unexpected error: {err:#}"
+        );
     }
 
     #[cfg_attr(

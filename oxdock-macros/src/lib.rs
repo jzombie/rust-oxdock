@@ -1013,6 +1013,10 @@ fn emit_stepkind(
         StepKind::ReadLine { var } => {
             quote! { StepKind::ReadLine { var: #var.to_string() } }
         }
+        StepKind::RunExec { argv } => {
+            let args: Vec<_> = argv.iter().map(|a| emit_arg(a, interp)).collect();
+            quote! { StepKind::RunExec { argv: vec![#(#args),*] } }
+        }
     }
 }
 
