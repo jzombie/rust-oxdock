@@ -1025,7 +1025,7 @@ fn mock_fs_rejects_absolute_windows_paths() {
         &mut state,
         &mut proc,
         &steps,
-        None,
+        CommandStdin::Null,
         false,
         Some(StreamHandle::Stream(sink.clone())),
         Some(StreamHandle::Stream(sink)),
