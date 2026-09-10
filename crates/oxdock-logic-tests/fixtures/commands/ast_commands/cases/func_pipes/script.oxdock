@@ -1,0 +1,22 @@
+FUNC PRODUCER($msg: STRING) {
+    ECHO "{{ $msg }}"
+    RETURN $msg
+}
+
+# Pattern 1: call-site stream binding, the function's stdout flows into the pipe.
+WITH_IO [stdout=pipe:log] CALL PRODUCER("piped")
+WITH_IO [stdin=pipe:log] READ_LINE $line
+WRITE line.txt "{{ $line }}"
+
+# Pattern 2: a pipe handle passed as a typed argument (validated on entry).
+LET $p: PIPE = "log"
+FUNC USEPIPE($q: PIPE) {
+    RETURN "ok"
+}
+LET $r: STRING = CALL USEPIPE($p)
+WRITE r.txt "{{ $r }}"
+
+# Pattern 3: stdin reroute plus return capture compose.
+WITH_IO [stdout=pipe:log2] CALL PRODUCER("again")
+LET $s: STRING = WITH_IO [stdin=pipe:log2] CALL PRODUCER("back")
+WRITE s.txt "{{ $s }}"

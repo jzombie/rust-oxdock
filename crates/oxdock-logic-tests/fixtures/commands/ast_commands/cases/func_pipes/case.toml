@@ -1,0 +1,4 @@
+name = "func_pipes"
+
+[expect]
+files = { "line.txt" = "piped", "r.txt" = "ok", "s.txt" = "back" }
