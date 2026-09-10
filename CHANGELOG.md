@@ -14,6 +14,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 - [breaking] `LET` requires an explicit type, so `LET $x = ...` is now a parse error; reassignment is bare `$x = ...` and there is no `SET` keyword (a `SET ...` line fails with a hint); `FOR` variables require type tags; there is no `ENV` type; bare `$var` never reads the environment (use `env:KEY` or `{{ env:KEY }}`); command-reference Type cells show real types only (`$var` / `KEY=value` shapes display as the `STRING` they bind or resolve to)
 
+### Dependencies
+
+- Bump `cargo_metadata` 0.19.2 → 0.23.1
+- Bump `pest` 2.9.0 → 2.9.1
+- Bump `syn` 3.0.4 → 3.0.5
+- Bump `toml` 1.1.4+spec-1.1.0 → 1.1.5+spec-1.1.0
+
 ## [0.11.0-alpha] - 2026-09-09
 
 ### Added
