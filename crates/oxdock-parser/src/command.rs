@@ -34,7 +34,7 @@ pub enum ArgType {
 
 impl ArgType {
     /// Table-cell label for the argument table's Type column.
-    /// Always a real [`TypeKind`] name — never a shape. Reference and
+    /// Always a real [`crate::ast::TypeKind`] name — never a shape. Reference and
     /// assignment shapes (`$var`, `KEY=value`) display as the `STRING`
     /// values they bind or resolve to; the `$`/assignment requirement
     /// itself lives in the argument description and command syntax.
@@ -52,7 +52,7 @@ impl ArgType {
         }
     }
 
-    /// Anchor of the type's reference section, delegated to [`TypeKind`].
+    /// Anchor of the type's reference section, delegated to [`crate::ast::TypeKind`].
     /// Only types with a `TypeKind` reference section link; argument shapes
     /// (`$var`, `KEY=value`) and inline alternations render unlinked.
     pub fn anchor(&self) -> Option<String> {
@@ -313,7 +313,7 @@ pub enum FlagValueType {
 }
 
 impl FlagValueType {
-    /// Display label using the real [`TypeKind`] vocabulary. A bare `Flag`
+    /// Display label using the real [`crate::ast::TypeKind`] vocabulary. A bare `Flag`
     /// switch carries no value; `BOOL` names what its presence asserts.
     pub fn label(&self) -> &'static str {
         use crate::ast::TypeKind;
