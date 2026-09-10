@@ -2,7 +2,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 
-use anyhow::{Result, bail};
+use anyhow::Result;
+#[cfg(not(miri))]
+use anyhow::bail;
 use oxdock_process::{CommandStderr, CommandStdin, CommandStdout, SharedInput, SharedOutput};
 #[cfg(not(miri))]
 use oxdock_process::{OsPipeReader, OsPipeWriter, create_os_pipe};

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, bail};
 use oxdock_fs::{GuardedPath, PolicyPath};
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 use std::process::ExitStatus;
@@ -138,9 +138,11 @@ impl OsPipeReader {
     pub fn take(&self) -> Result<std::io::PipeReader> {
         self.inner
             .lock()
-            .map_err(|_| anyhow!("os pipe reader lock poisoned"))?
+            .map_err(|_| anyhow::anyhow!("os pipe reader lock poisoned"))?
             .take()
-            .ok_or_else(|| anyhow!("os pipe handle has already been consumed by another process"))
+            .ok_or_else(|| {
+                anyhow::anyhow!("os pipe handle has already been consumed by another process")
+            })
     }
 }
 
@@ -158,9 +160,11 @@ impl OsPipeWriter {
     pub fn take(&self) -> Result<std::io::PipeWriter> {
         self.inner
             .lock()
-            .map_err(|_| anyhow!("os pipe writer lock poisoned"))?
+            .map_err(|_| anyhow::anyhow!("os pipe writer lock poisoned"))?
             .take()
-            .ok_or_else(|| anyhow!("os pipe handle has already been consumed by another process"))
+            .ok_or_else(|| {
+                anyhow::anyhow!("os pipe handle has already been consumed by another process")
+            })
     }
 }
 
