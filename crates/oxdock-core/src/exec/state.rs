@@ -5,7 +5,7 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use anyhow::Result;
 use oxdock_fs::{GuardedPath, WorkspaceFs};
-use oxdock_parser::{Step, Value};
+use oxdock_parser::{Step, TypeKind, Value};
 use oxdock_process::{BackgroundHandle, CommandContext, ProcessManager};
 
 use super::capture::SpillBuffer;
@@ -25,7 +25,8 @@ pub(super) struct ExecState<P: ProcessManager> {
     pub(super) assert_windows: Arc<Mutex<HashMap<(usize, usize), SlidingWindow>>>,
     /// Variable scopes for $variable bindings (FOR loops, LET assignments).
     /// Innermost scope is last. Variables are looked up from innermost to outermost.
-    pub(super) var_scopes: Vec<HashMap<String, Value>>,
+    /// Each entry carries its declared TypeKind alongside the value.
+    pub(super) var_scopes: Vec<HashMap<String, (TypeKind, Value)>>,
     /// Cancellation token for background thread teardown.
     #[allow(dead_code)]
     pub(super) cancel_token: Arc<AtomicBool>,
@@ -70,7 +71,7 @@ pub(super) struct ScopeSnapshot {
     pub(super) envs: Arc<HashMap<String, String>>,
 }
 
-/// Lifecycle phase of a named background task (`LET $var = ASYNC ...`).
+/// Lifecycle phase of a named background task (`LET $var: HANDLE = ASYNC ...`).
 /// `Running` and `Awaiting` both hold the live handle inside the entry;
 /// `Cancelled` and `Completed` are terminal tombstones with no handle.
 pub(super) enum TaskPhase {
@@ -88,9 +89,9 @@ pub(super) struct TaskEntryState {
     /// Threads observing `Cancelled` must wait on `done` until `reaped`
     /// before resuming, so no caller outruns OS process teardown.
     pub(super) reaped: bool,
-    /// Per-task stdout sink (`LET $t = ASYNC ...`). The child thread writes
+    /// Per-task stdout sink (`LET $t: HANDLE = ASYNC ...`). The child thread writes
     /// here instead of the parent writer. Exactly one consumer takes it:
-    /// `LET $o = AWAIT $t` binds it, bare `AWAIT $t` forwards it to the
+    /// `LET $o: STRING = AWAIT $t` binds it, bare `AWAIT $t` forwards it to the
     /// parent stdout, and end-poll reaping forwards un-awaited output.
     pub(super) sink: Option<Arc<SpillBuffer>>,
 }
@@ -264,17 +265,68 @@ impl<P: ProcessManager> ExecState<P> {
         self.pop_var_scope();
         Ok(())
     }
-    pub(super) fn set_var(&mut self, key: String, value: Value) {
-        if let Some(scope) = self.var_scopes.last_mut() {
-            scope.insert(key, value);
+    pub(super) fn declare_var(
+        &mut self,
+        key: String,
+        kind: TypeKind,
+        value: Value,
+    ) -> Result<()> {
+        if self
+            .var_scopes
+            .last()
+            .map(|s| s.contains_key(&key))
+            .unwrap_or(false)
+        {
+            anyhow::bail!(
+                "redeclaration error: ${} already declared in this scope; use ${} = ... to mutate",
+                key,
+                key
+            );
         }
+        let coerced = super::args::coerce_value(value, kind, &*self)?;
+        let scope = self
+            .var_scopes
+            .last_mut()
+            .ok_or_else(|| anyhow::anyhow!("no variable scope for declaration"))?;
+        scope.insert(key, (kind, coerced));
+        Ok(())
+    }
+
+    pub(super) fn mutate_var(&mut self, key: &str, value: Value) -> Result<()> {
+        let kind = self
+            .var_scopes
+            .iter()
+            .rev()
+            .find_map(|s| s.get(key).map(|(k, _)| *k))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "undeclared variable ${key}: declare it first with LET ${key}: TYPE = ..."
+                )
+            })?;
+        let coerced = super::args::coerce_value(value, kind, &*self)?;
+        for scope in self.var_scopes.iter_mut().rev() {
+            if let Some(slot) = scope.get_mut(key) {
+                slot.1 = coerced;
+                return Ok(());
+            }
+        }
+        anyhow::bail!("undeclared variable ${key}");
     }
 
     pub(super) fn get_var(&self, key: &str) -> Option<Value> {
         // Walk scopes from innermost to outermost
         for scope in self.var_scopes.iter().rev() {
-            if let Some(value) = scope.get(key) {
+            if let Some((_, value)) = scope.get(key) {
                 return Some(value.clone());
+            }
+        }
+        None
+    }
+
+    pub(super) fn get_var_typed(&self, key: &str) -> Option<(TypeKind, Value)> {
+        for scope in self.var_scopes.iter().rev() {
+            if let Some(entry) = scope.get(key) {
+                return Some(entry.clone());
             }
         }
         None
@@ -285,7 +337,7 @@ impl<P: ProcessManager> ExecState<P> {
     pub(super) fn all_vars(&self) -> HashMap<String, Value> {
         let mut result = HashMap::new();
         for scope in self.var_scopes.iter().rev() {
-            for (k, v) in scope {
+            for (k, (_, v)) in scope {
                 result.entry(k.clone()).or_insert_with(|| v.clone());
             }
         }

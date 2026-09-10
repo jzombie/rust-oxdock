@@ -1,0 +1,4 @@
+name = "set_reassign"
+
+[expect]
+files = { "count.txt" = "2", "msg.txt" = "world" }

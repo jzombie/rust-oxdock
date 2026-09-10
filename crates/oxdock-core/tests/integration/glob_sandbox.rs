@@ -41,8 +41,8 @@ fn glob_parent_patterns_match_nothing() {
         &root,
         indoc! {r#"
             WRITE probe.txt "x"
-            FOR $f IN GLOB("../") { WRITE escaped.txt "leak" }
-            FOR $f IN GLOB("../*") { WRITE escaped2.txt "leak" }
+            FOR $f: STRING IN GLOB("../") { WRITE escaped.txt "leak" }
+            FOR $f: STRING IN GLOB("../*") { WRITE escaped2.txt "leak" }
             ASSERT_ABSENT escaped.txt
             ASSERT_ABSENT escaped2.txt
         "#},
@@ -66,7 +66,7 @@ fn glob_nested_parent_pattern_matches_nothing() {
         indoc! {r#"
             MKDIR a
             WRITE a/inner.txt "x"
-            FOR $f IN GLOB("a/../../*") { WRITE escaped3.txt "leak" }
+            FOR $f: STRING IN GLOB("a/../../*") { WRITE escaped3.txt "leak" }
             ASSERT_ABSENT escaped3.txt
         "#},
     )
@@ -86,7 +86,7 @@ fn glob_normal_patterns_still_list_contents() {
         &root,
         indoc! {r#"
             WRITE probe.txt "x"
-            FOR $f IN GLOB("*.txt") { WRITE seen.txt "saw" }
+            FOR $f: STRING IN GLOB("*.txt") { WRITE seen.txt "saw" }
             ASSERT_FILE seen.txt "saw"
         "#},
     )
@@ -99,7 +99,7 @@ fn load_toml_rejects_parent_dir_escape() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
     let err =
-        run_script(&root, r#"LET $d = LOAD_TOML("../escape.toml")"#).expect_err("escape must fail");
+        run_script(&root, r#"LET $d: MAP = LOAD_TOML("../escape.toml")"#).expect_err("escape must fail");
     assert!(
         err.to_string().contains("escape"),
         "expected escape error, got {err}"

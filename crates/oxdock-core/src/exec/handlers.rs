@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use oxdock_fs::EntryKind;
-use oxdock_parser::{Arg, Expr, IoBinding, IoStream, Step, StepKind, Value, WorkspaceTarget};
+use oxdock_parser::{Arg, Expr, IoBinding, IoStream, Step, StepKind, TypeKind, Value, WorkspaceTarget};
 use oxdock_process::{
     BackgroundHandle, CommandOptions, CommandResult, CommandStderr, CommandStdin, CommandStdout,
     INHERIT_STDOUT_ENV_VAR, PROCESS_DEBUG_ENV_VAR, ProcessManager,
@@ -332,7 +332,11 @@ fn flatten_exec_value(val: &Value, out: &mut Vec<String>) -> Result<()> {
     match val {
         Value::String(s) => out.push(s.clone()),
         Value::Int(i) => out.push(i.to_string()),
+        Value::Float(f) => out.push(f.to_string()),
         Value::Bool(b) => out.push(b.to_string()),
+        Value::Pipe(n) => out.push(format!("pipe:{n}")),
+        Value::Duration(d) => out.push(oxdock_parser::command::format_duration(d)),
+        Value::Path(p) => out.push(p.to_string_lossy().to_string()),
         Value::List(items) => {
             for item in items {
                 flatten_exec_value(item, out)?;
@@ -641,7 +645,13 @@ pub(super) fn read_line<P: ProcessManager>(
         .strip_suffix("\r\n")
         .or_else(|| line.strip_suffix('\n'))
         .unwrap_or(&line);
-    cx.state.set_var(clean_var, Value::String(line.to_string()));
+    let text = Value::String(line.to_string());
+    if cx.state.get_var_typed(&clean_var).is_some() {
+        cx.state.mutate_var(&clean_var, text)?;
+    } else {
+        cx.state
+            .declare_var(clean_var, TypeKind::String, text)?;
+    }
     Ok(())
 }
 
@@ -1112,10 +1122,13 @@ pub(super) fn exit<P: ProcessManager>(cx: &mut StepCtx<'_, P>, code: i32) -> Res
 pub(crate) fn for_loop<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     key_var: Option<&str>,
+    key_type: Option<TypeKind>,
     val_var: &str,
+    val_type: TypeKind,
     in_expr: &Expr,
     body: &[Step],
 ) -> Result<()> {
+    use oxdock_parser::TypeKind;
     let iterable = super::args::evaluate_expr(in_expr, cx)?;
     let clean_val_var = val_var.trim_start_matches('$').to_string();
 
@@ -1128,9 +1141,22 @@ pub(crate) fn for_loop<P: ProcessManager>(
                 cx.state.push_scope();
                 if let Some(idx_name) = key_var {
                     let clean_idx = idx_name.trim_start_matches('$').to_string();
-                    cx.state.set_var(clean_idx, Value::Int(i as i64));
+                    let kt = key_type.unwrap_or(TypeKind::Int);
+                    cx.state.declare_var(
+                        clean_idx,
+                        kt,
+                        super::args::coerce_value(
+                            Value::Int(i as i64),
+                            kt,
+                            &*cx.state,
+                        )?,
+                    )?;
                 }
-                cx.state.set_var(clean_val_var.clone(), item);
+                cx.state.declare_var(
+                    clean_val_var.clone(),
+                    val_type,
+                    super::args::coerce_value(item, val_type, &*cx.state)?,
+                )?;
 
                 let res = super::steps::execute_steps(
                     cx.state,
@@ -1149,18 +1175,32 @@ pub(crate) fn for_loop<P: ProcessManager>(
         }
         Value::Map(map) => {
             let key_name = key_var.ok_or_else(|| {
-                anyhow!("FOR loop over Map requires key and value bindings: FOR $k, $v IN $map")
+                anyhow!("FOR loop over Map requires key and value bindings: FOR $k: STRING, $v: TYPE IN $map")
             })?;
             let clean_key_var = key_name.trim_start_matches('$').to_string();
             let mut keys: Vec<_> = map.keys().cloned().collect();
             keys.sort();
 
+            // Map keys are strings: only a STRING key binding is valid here.
+            if key_type.is_some_and(|kt| kt != TypeKind::String) {
+                anyhow::bail!(
+                    "FOR loop over MAP requires a STRING key variable, got {}",
+                    key_type.map(|kt| kt.label()).unwrap_or("unknown"),
+                );
+            }
             for k in keys {
                 let v = map[&k].clone();
                 cx.state.push_scope();
-                cx.state
-                    .set_var(clean_key_var.clone(), Value::String(k.clone()));
-                cx.state.set_var(clean_val_var.clone(), v);
+                cx.state.declare_var(
+                    clean_key_var.clone(),
+                    TypeKind::String,
+                    Value::String(k.clone()),
+                )?;
+                cx.state.declare_var(
+                    clean_val_var.clone(),
+                    val_type,
+                    super::args::coerce_value(v, val_type, &*cx.state)?,
+                )?;
 
                 let res = super::steps::execute_steps(
                     cx.state,
@@ -1187,15 +1227,29 @@ pub(crate) fn for_loop<P: ProcessManager>(
 pub(crate) fn assign<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     var: &str,
+    decl_type: TypeKind,
+    expr: &Expr,
+) -> Result<()> {
+    use oxdock_parser::TypeKind;
+    let _ = TypeKind::String;
+    let value = super::args::evaluate_expr(expr, cx)?;
+    let clean_var = var.trim_start_matches('$').to_string();
+    cx.state.declare_var(clean_var, decl_type, value)?;
+    Ok(())
+}
+
+pub(crate) fn set_var_value<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    var: &str,
     expr: &Expr,
 ) -> Result<()> {
     let value = super::args::evaluate_expr(expr, cx)?;
     let clean_var = var.trim_start_matches('$').to_string();
-    cx.state.set_var(clean_var, value);
+    cx.state.mutate_var(&clean_var, value)?;
     Ok(())
 }
 
-/// Dispatch `LET $var = <sync command>` — run the command to completion with
+/// Dispatch `LET $var: STRING = <sync command>` — run the command to completion with
 /// a spillable capture sink as its stdout, then bind the exact bytes as a
 /// string. Only stdout is captured (stderr keeps the parent wiring; stdin
 /// passes through so `WITH_IO [stdin=pipe:p]` still works). Captured bytes
@@ -1206,6 +1260,7 @@ pub(crate) fn assign_capture<P: ProcessManager>(
     generation: usize,
     idx: usize,
     var: &str,
+    decl_type: TypeKind,
     cmd: &StepKind,
 ) -> Result<()> {
     use std::sync::Arc;
@@ -1230,7 +1285,8 @@ pub(crate) fn assign_capture<P: ProcessManager>(
         .drain_string_strict()
         .map_err(|e| anyhow!("LET ${var} capture is not valid UTF-8: {e}"))?;
     let clean_var = var.trim_start_matches('$').to_string();
-    cx.state.set_var(clean_var, Value::String(text));
+    cx.state
+        .declare_var(clean_var, decl_type, Value::String(text))?;
     Ok(())
 }
 
@@ -1740,14 +1796,24 @@ pub(crate) fn dispatch_for_loop<P: ProcessManager>(
 ) -> Result<()> {
     let StepKind::For {
         key_var,
+        key_type,
         var,
+        var_type,
         in_expr,
         body,
     } = step
     else {
         unreachable!()
     };
-    for_loop(cx, key_var.as_deref(), var, in_expr, body)
+    for_loop(
+        cx,
+        key_var.as_deref(),
+        *key_type,
+        var,
+        *var_type,
+        in_expr,
+        body,
+    )
 }
 
 pub(crate) fn dispatch_if_then<P: ProcessManager>(
@@ -1770,10 +1836,25 @@ pub(crate) fn dispatch_assign<P: ProcessManager>(
     step: &StepKind,
     cx: &mut StepCtx<'_, P>,
 ) -> Result<()> {
-    let StepKind::Assign { var, expr } = step else {
+    let StepKind::Assign {
+        var,
+        decl_type,
+        expr,
+    } = step
+    else {
         unreachable!()
     };
-    assign(cx, var, expr)
+    assign(cx, var, *decl_type, expr)
+}
+
+pub(crate) fn dispatch_set<P: ProcessManager>(
+    step: &StepKind,
+    cx: &mut StepCtx<'_, P>,
+) -> Result<()> {
+    let StepKind::Set { var, expr } = step else {
+        unreachable!()
+    };
+    set_var_value(cx, var, expr)
 }
 
 pub(crate) fn dispatch_with_io<P: ProcessManager>(
@@ -1798,10 +1879,11 @@ pub(crate) fn dispatch_with_io_block<P: ProcessManager>(
 
 // ── AWAIT / AssignAsync handlers ─────────────────────────────────────────
 
-/// Dispatch `LET $var = ASYNC { ... }` — spawn a background task and store
+/// Dispatch `LET $var: TYPE = ASYNC { ... }` — spawn a background task and store
 /// the handle in the variable scope.
 pub(crate) fn dispatch_assign_async<P: ProcessManager>(
     var: &str,
+    decl_type: TypeKind,
     body: &[Step],
     cx: &mut StepCtx<'_, P>,
 ) -> Result<()> {
@@ -1827,7 +1909,7 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
     let expose_stdin = cx.expose_stdin;
     // Named tasks write stdout into a per-task spillable sink instead of
     // sharing the parent writer. Bare `AWAIT $t` forwards it to the parent
-    // stdout; `LET $o = AWAIT $t` binds it. Stderr keeps parent wiring.
+    // stdout; `LET $o: STRING = AWAIT $t` binds it. Stderr keeps parent wiring.
     let sink = std::sync::Arc::new(super::capture::SpillBuffer::new());
     let out = Some(super::io::StreamHandle::Stream(sink.writer()));
     let err = cx.err.clone();
@@ -1871,8 +1953,11 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
     }
 
     // Store the task handle in the variable scope
-    cx.state
-        .set_var(var.to_string(), Value::TaskHandle(task_id));
+    cx.state.declare_var(
+        var.to_string(),
+        decl_type,
+        Value::TaskHandle(task_id),
+    )?;
     Ok(())
 }
 
@@ -1914,7 +1999,7 @@ fn resolve_task_entry<P: ProcessManager>(
 }
 
 /// Claim a task entry and run the bounded await poll loop to completion.
-/// Shared by bare `AWAIT` and `LET $o = AWAIT $t` so cancellation, timeout,
+/// Shared by bare `AWAIT` and `LET $o: STRING = AWAIT $t` so cancellation, timeout,
 /// double-await, and failure semantics never diverge. Returns the child's
 /// exit status; the caller owns output handling (forward vs bind).
 /// The child's thread is joined before returning success, so draining the
@@ -2061,11 +2146,12 @@ pub(crate) fn dispatch_await<P: ProcessManager>(var: &str, cx: &mut StepCtx<'_, 
     Ok(())
 }
 
-/// Dispatch `LET $out = AWAIT $task` — join like bare `AWAIT` (identical
+/// Dispatch `LET $out: TYPE = AWAIT $task` — join like bare `AWAIT` (identical
 /// cancellation/timeout/double-await semantics via [`await_task_entry`]),
 /// then bind the task's stdout as a string instead of forwarding it.
 pub(crate) fn dispatch_await_capture<P: ProcessManager>(
     out_var: &str,
+    out_type: TypeKind,
     task_var: &str,
     cx: &mut StepCtx<'_, P>,
 ) -> Result<()> {
@@ -2077,10 +2163,11 @@ pub(crate) fn dispatch_await_capture<P: ProcessManager>(
         })?,
         None => String::new(),
     };
-    cx.state.set_var(
+    cx.state.declare_var(
         out_var.trim_start_matches('$').to_string(),
+        out_type,
         Value::String(text),
-    );
+    )?;
     Ok(())
 }
 
@@ -2145,10 +2232,13 @@ pub(crate) fn dispatch_assign_async_step<P: ProcessManager>(
     step: &StepKind,
     cx: &mut StepCtx<'_, P>,
 ) -> Result<()> {
-    let StepKind::AssignAsync { var, body } = step else {
+    let StepKind::AssignAsync {
+        var, decl_type, body,
+    } = step
+    else {
         unreachable!()
     };
-    dispatch_assign_async(var, body, cx)
+    dispatch_assign_async(var, *decl_type, body, cx)
 }
 
 /// Pipeline dispatch wrapper for `Await`
@@ -2167,10 +2257,20 @@ pub(crate) fn dispatch_assign_capture_step<P: ProcessManager>(
     step: &StepKind,
     cx: &mut StepCtx<'_, P>,
 ) -> Result<()> {
-    let StepKind::AssignCapture { var, cmd } = step else {
+    let StepKind::AssignCapture {
+        var, decl_type, cmd,
+    } = step
+    else {
         unreachable!()
     };
-    assign_capture(cx, super::steps::allocate_assert_generation(), 0, var, cmd)
+    assign_capture(
+        cx,
+        super::steps::allocate_assert_generation(),
+        0,
+        var,
+        *decl_type,
+        cmd,
+    )
 }
 
 /// Pipeline dispatch wrapper for `AwaitCapture`
@@ -2178,10 +2278,15 @@ pub(crate) fn dispatch_await_capture_step<P: ProcessManager>(
     step: &StepKind,
     cx: &mut StepCtx<'_, P>,
 ) -> Result<()> {
-    let StepKind::AwaitCapture { out_var, task_var } = step else {
+    let StepKind::AwaitCapture {
+        out_var,
+        out_type,
+        task_var,
+    } = step
+    else {
         unreachable!()
     };
-    dispatch_await_capture(out_var, task_var, cx)
+    dispatch_await_capture(out_var, *out_type, task_var, cx)
 }
 
 /// Pipeline dispatch wrapper for `Cancel`

@@ -1,0 +1,2 @@
+LET $d: INT = 1
+LET $d: STRING = "two"

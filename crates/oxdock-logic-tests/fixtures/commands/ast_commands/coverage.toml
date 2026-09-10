@@ -32,6 +32,7 @@ CopyGit = ["copy_git"]
 HashSha256 = ["hash_sha256"]
 Exit = ["exit"]
 Assign = ["assign"]
+Set = ["set_reassign"]
 AssignCapture = ["let_capture"]
 For = ["for_loop"]
 If = ["if_statement"]
@@ -72,5 +73,10 @@ cases = [
   "cancel_double",
   "async_timeout",
   "timeout_await",
-  "env_quoted_spaces"
+  "env_quoted_spaces",
+  "let_type_mismatch",
+  "shadow_redeclare",
+  "set_undeclared",
+  "set_type_mismatch",
+  "var_env_conflation"
 ]

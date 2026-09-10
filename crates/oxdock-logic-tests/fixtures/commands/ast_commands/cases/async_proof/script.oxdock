@@ -3,7 +3,7 @@
 # Main writes to 'req' then reads from 'resp'.
 # Under synchronous execution, background blocks on empty 'req' before main writes.
 
-LET $bg_task = ASYNC {
+LET $bg_task: HANDLE = ASYNC {
     # Step 1: Only bind the read channel it actually drains
     WITH_IO [stdin=pipe:req] WRITE "async_rec.txt"
 

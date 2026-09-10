@@ -646,6 +646,9 @@ fn emit_expr(expr: &Expr, interp: &[(proc_macro2::Ident, usize)]) -> proc_macro2
                 quote! { Expr::Var(#s.to_string()) }
             }
         }
+        Expr::Env(k) => {
+            quote! { Expr::Env(#k.to_string()) }
+        }
         Expr::KeyPath { base, keys } => {
             let base_stream = if let Some(idx) = is_placeholder(base) {
                 let ident = &interp.iter().find(|(_, i)| *i == idx).unwrap().0;
@@ -757,7 +760,33 @@ fn emit_raw_value(v: &Value, interp: &[(proc_macro2::Ident, usize)]) -> proc_mac
         }
         Value::Bool(b) => quote! { Value::Bool(#b) },
         Value::Int(i) => quote! { Value::Int(#i) },
+        Value::Float(f) => quote! { Value::Float(#f) },
+        Value::Pipe(n) => quote! { Value::Pipe(#n.to_string()) },
+        Value::Duration(d) => {
+            let ms = d.as_millis() as u64;
+            quote! { Value::Duration(std::time::Duration::from_millis(#ms)) }
+        }
+        Value::Path(p) => {
+            let s = p.to_string_lossy().to_string();
+            quote! { Value::Path(std::path::PathBuf::from(#s)) }
+        }
         Value::TaskHandle(id) => quote! { Value::TaskHandle(#id) },
+    }
+}
+
+fn emit_typekind(t: &oxdock_parser::TypeKind) -> proc_macro2::TokenStream {
+    use oxdock_parser::TypeKind as TK;
+    match t {
+        TK::String => quote! { oxdock_parser::TypeKind::String },
+        TK::Int => quote! { oxdock_parser::TypeKind::Int },
+        TK::Float => quote! { oxdock_parser::TypeKind::Float },
+        TK::Bool => quote! { oxdock_parser::TypeKind::Bool },
+        TK::Pipe => quote! { oxdock_parser::TypeKind::Pipe },
+        TK::List => quote! { oxdock_parser::TypeKind::List },
+        TK::Map => quote! { oxdock_parser::TypeKind::Map },
+        TK::Handle => quote! { oxdock_parser::TypeKind::Handle },
+        TK::Duration => quote! { oxdock_parser::TypeKind::Duration },
+        TK::Path => quote! { oxdock_parser::TypeKind::Path },
     }
 }
 
@@ -936,7 +965,9 @@ fn emit_stepkind(
         }
         StepKind::For {
             key_var,
+            key_type,
             var,
+            var_type,
             in_expr,
             body,
         } => {
@@ -946,7 +977,15 @@ fn emit_stepkind(
                 Some(k) => quote! { Some(#k.to_string()) },
                 None => quote! { None },
             };
-            quote! { StepKind::For { key_var: #key_var_tokens, var: #var.to_string(), in_expr: #in_tok, body: vec![#(#body_tokens),*] } }
+            let key_type_tokens = match key_type {
+                Some(t) => {
+                    let tt = emit_typekind(t);
+                    quote! { Some(#tt) }
+                }
+                None => quote! { None },
+            };
+            let vt = emit_typekind(var_type);
+            quote! { StepKind::For { key_var: #key_var_tokens, key_type: #key_type_tokens, var: #var.to_string(), var_type: #vt, in_expr: #in_tok, body: vec![#(#body_tokens),*] } }
         }
         StepKind::If {
             cond,
@@ -980,20 +1019,36 @@ fn emit_stepkind(
                 }
             }
         }
-        StepKind::Assign { var, expr } => {
+        StepKind::Assign { var, decl_type, expr } => {
             let e = emit_expr(expr, interp);
-            quote! { StepKind::Assign { var: #var.to_string(), expr: #e } }
+            let t = emit_typekind(decl_type);
+            quote! { StepKind::Assign { var: #var.to_string(), decl_type: #t, expr: #e } }
         }
-        StepKind::AssignCapture { var, cmd } => {
+        StepKind::Set { var, expr } => {
+            let e = emit_expr(expr, interp);
+            quote! { StepKind::Set { var: #var.to_string(), expr: #e } }
+        }
+        StepKind::AssignCapture {
+            var, decl_type, cmd,
+        } => {
             let c = emit_stepkind(cmd, interp);
-            quote! { StepKind::AssignCapture { var: #var.to_string(), cmd: Box::new(#c) } }
+            let t = emit_typekind(decl_type);
+            quote! { StepKind::AssignCapture { var: #var.to_string(), decl_type: #t, cmd: Box::new(#c) } }
         }
-        StepKind::AwaitCapture { out_var, task_var } => {
-            quote! { StepKind::AwaitCapture { out_var: #out_var.to_string(), task_var: #task_var.to_string() } }
+        StepKind::AwaitCapture {
+            out_var,
+            out_type,
+            task_var,
+        } => {
+            let t = emit_typekind(out_type);
+            quote! { StepKind::AwaitCapture { out_var: #out_var.to_string(), out_type: #t, task_var: #task_var.to_string() } }
         }
-        StepKind::AssignAsync { var, body } => {
+        StepKind::AssignAsync {
+            var, decl_type, body,
+        } => {
             let steps: Vec<_> = body.iter().map(|s| emit_step(s, interp)).collect();
-            quote! { StepKind::AssignAsync { var: #var.to_string(), body: vec![#(#steps),*] } }
+            let t = emit_typekind(decl_type);
+            quote! { StepKind::AssignAsync { var: #var.to_string(), decl_type: #t, body: vec![#(#steps),*] } }
         }
         StepKind::Await { var } => {
             quote! { StepKind::Await { var: #var.to_string() } }
@@ -1332,6 +1387,7 @@ mod tests {
     fn emit_async_await_round_trip() {
         let task = StepKind::AssignAsync {
             var: "job".to_string(),
+            decl_type: oxdock_parser::TypeKind::Handle,
             body: vec![Step {
                 guard: None,
                 kind: StepKind::Echo(Arg::String("hi".to_string(), false)),

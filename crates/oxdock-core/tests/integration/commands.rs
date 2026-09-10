@@ -1378,6 +1378,7 @@ fn _assert_step_kind_exhaustiveness(kind: &StepKind) {
         StepKind::For { .. } => {}
         StepKind::If { .. } => {}
         StepKind::Assign { .. } => {}
+        StepKind::Set { .. } => {}
         StepKind::AssignCapture { .. } => {}
         StepKind::AssignAsync { .. } => {}
         StepKind::Await { .. } => {}
@@ -1405,7 +1406,7 @@ fn cancel_blocks_and_await_reports_cancelled() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        LET $t = ASYNC SLEEP 30s
+        LET $t: HANDLE = ASYNC SLEEP 30s
         CANCEL $t
         WRITE "resumed.txt" "ok"
         AWAIT $t
@@ -1427,7 +1428,7 @@ fn cancel_double_reports_already_cancelled() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        LET $t = ASYNC SLEEP 30s
+        LET $t: HANDLE = ASYNC SLEEP 30s
         CANCEL $t
         CANCEL $t
     "#};
@@ -1440,7 +1441,7 @@ fn cancel_double_reports_already_cancelled() {
 fn cancel_previously_awaited_task_fails() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    let err = run_script(&root, "LET $t = ASYNC ECHO hi\nAWAIT $t\nCANCEL $t\n")
+    let err = run_script(&root, "LET $t: HANDLE = ASYNC ECHO hi\nAWAIT $t\nCANCEL $t\n")
         .expect_err("CANCEL after AWAIT must fail");
     assert!(
         err.to_string()
@@ -1456,7 +1457,7 @@ fn timeout_preempts_hung_await() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        LET $t = ASYNC SLEEP 30s
+        LET $t: HANDLE = ASYNC SLEEP 30s
         TIMEOUT 500ms AWAIT $t
     "#};
     let start = Instant::now();
@@ -1475,7 +1476,7 @@ fn concurrent_cancel_and_await_race() {
     // A background thread CANCELs while the main thread AWAITs the same
     // task. Every outcome must report cancellation — never TaskNotFound.
     let script = indoc! {r#"
-        LET $t = ASYNC SLEEP 30s
+        LET $t: HANDLE = ASYNC SLEEP 30s
         ASYNC {
             CANCEL $t
         }
@@ -1501,7 +1502,7 @@ fn concurrent_cancel_blocks_until_dead() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        LET $t = ASYNC {
+        LET $t: HANDLE = ASYNC {
             SLEEP 5s
             WRITE "leak.txt" "leaked"
         }
@@ -1548,7 +1549,7 @@ fn append_concatenates_content() {
 fn assign_and_interpolate() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    run_script(&root, "LET $msg = hello\nWRITE out.txt $msg\n").expect("assign + write passes");
+    run_script(&root, "LET $msg: STRING = hello\nWRITE out.txt $msg\n").expect("assign + write passes");
     assert_eq!(read_trimmed(&root.join("out.txt").unwrap()), "hello");
 }
 
@@ -1561,7 +1562,7 @@ fn for_loop_iterates_array() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        FOR $f IN ["a", "b", "c"] {
+        FOR $f: STRING IN ["a", "b", "c"] {
             WRITE "{{ $f }}.txt" "{{ $f }}"
         }
     "#};
@@ -1621,11 +1622,11 @@ fn block_scopes_variables_env_and_workdir_while_leaking_files_and_pipes() {
     let script = indoc! {r#"
         MKDIR sub_outer
         MKDIR sub_outer/sub_inner
-        LET $val = "outer_val"
+        LET $val: STRING = "outer_val"
         ENV APP_ENV="outer_env"
         WORKDIR sub_outer
         [bool:true] {
-            LET $val = "inner_val"
+            LET $val: STRING = "inner_val"
             ENV APP_ENV="inner_env"
             WORKDIR sub_inner
             WRITE inner.txt $val
@@ -1636,7 +1637,7 @@ fn block_scopes_variables_env_and_workdir_while_leaking_files_and_pipes() {
         WRITE env_outer.txt "{{ env:APP_ENV }}"
         WITH_IO [stdin=pipe:inner_pipe] WRITE from_block.txt
         IF true {
-            LET $branch = "branch_val"
+            LET $branch: STRING = "branch_val"
             ENV BRANCH_ENV="branch_env"
         }
         WRITE branch_check.txt $val
@@ -1683,11 +1684,11 @@ fn for_loop_body_mutations_do_not_leak() {
     let script = indoc! {r#"
         MKDIR w
         MKDIR w/sub
-        LET $x = "outer"
+        LET $x: STRING = "outer"
         ENV LOOP_ENV="outer"
         WORKDIR w
-        FOR $f IN ["a", "b"] {
-            LET $x = "inner"
+        FOR $f: STRING IN ["a", "b"] {
+            LET $x: STRING = "inner"
             ENV LOOP_ENV="inner"
             WORKDIR sub
             WRITE "{{ $f }}.txt" "{{ $x }}-{{ env:LOOP_ENV }}"
@@ -2267,9 +2268,9 @@ fn read_line_ping_pong_proves_live_streaming() {
     // (which would surface as empty reads) are impossible; they exit via
     // one-shot control pipes at the end.
     let script = indoc! {r#"
-        LET $keep_tx = WITH_IO [stdout=pipe:tx, stdin=pipe:ctl_tx] ASYNC READ_LINE $ktx
-        LET $keep_rx = WITH_IO [stdout=pipe:rx, stdin=pipe:ctl_rx] ASYNC READ_LINE $krx
-        LET $live = ASYNC {
+        LET $keep_tx: HANDLE = WITH_IO [stdout=pipe:tx, stdin=pipe:ctl_tx] ASYNC READ_LINE $ktx
+        LET $keep_rx: HANDLE = WITH_IO [stdout=pipe:rx, stdin=pipe:ctl_rx] ASYNC READ_LINE $krx
+        LET $live: HANDLE = ASYNC {
             WITH_IO [stdin=pipe:tx] READ_LINE $a
             WITH_IO [stdout=pipe:rx] ECHO "{{ $a }}"
             WITH_IO [stdin=pipe:tx] READ_LINE $b
@@ -2312,7 +2313,7 @@ fn async_self_referential_write_then_read_sees_eof() {
     // for the whole task (which would deadlock the consumer step waiting
     // for a close that never comes).
     let script = indoc! {r#"
-        LET $t = ASYNC {
+        LET $t: HANDLE = ASYNC {
             WITH_IO [stdout=pipe:p] ECHO "hello"
             WITH_IO [stdin=pipe:p] WRITE got.txt
         }
@@ -2348,7 +2349,7 @@ fn timeout_wraps_block_and_await() {
     let root = guard_root(&temp);
     run_script(
         &root,
-        "LET $task = ASYNC {\nECHO quick\n}\nTIMEOUT 30s {\nAWAIT $task\nWRITE joined.txt yes\n}\n",
+        "LET $task: HANDLE = ASYNC {\nECHO quick\n}\nTIMEOUT 30s {\nAWAIT $task\nWRITE joined.txt yes\n}\n",
     )
     .expect("bounded await must succeed");
     assert_eq!(read_trimmed(&root.join("joined.txt").unwrap()), "yes");
@@ -2416,7 +2417,7 @@ fn sleep_completes_and_is_cancellable() {
 fn sleep_accepts_variable_duration() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    run_script(&root, "LET $d = \"50ms\"\nSLEEP $d\nWRITE awake.txt yes\n")
+    run_script(&root, "LET $d: DURATION = \"50ms\"\nSLEEP $d\nWRITE awake.txt yes\n")
         .expect("variable sleep must complete");
     assert_eq!(read_trimmed(&root.join("awake.txt").unwrap()), "yes");
 }
@@ -2438,7 +2439,7 @@ fn sleep_rejects_garbage_duration_at_lower() {
 fn exit_accepts_variable_code() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    let err = run_script(&root, "LET $c = \"3\"\nEXIT $c\n").expect_err("exit must abort");
+    let err = run_script(&root, "LET $c: INT = \"3\"\nEXIT $c\n").expect_err("exit must abort");
     assert!(
         err.to_string().contains("EXIT requested with code 3"),
         "expected exit error, got: {err:#}"
@@ -2462,7 +2463,7 @@ fn exit_rejects_garbage_code_at_lower() {
 fn timeout_accepts_variable_duration() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    run_script(&root, "LET $d = \"50ms\"\nTIMEOUT $d WRITE done.txt yes\n")
+    run_script(&root, "LET $d: DURATION = \"50ms\"\nTIMEOUT $d WRITE done.txt yes\n")
         .expect("variable timeout must complete");
     assert_eq!(read_trimmed(&root.join("done.txt").unwrap()), "yes");
 }

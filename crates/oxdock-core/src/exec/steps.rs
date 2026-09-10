@@ -197,7 +197,7 @@ pub(super) fn sync_iteration_assert_needles<P: ProcessManager>(
 /// handlers must emit stdout/stderr ONLY through `out`/`err` — via
 /// `write_stdout` or `StreamHandle::to_stdout`/`to_stderr` — and never write
 /// to host stdout directly. The step runner swaps these handles per context:
-/// `LET $x = <command>` installs a spillable capture sink, `WITH_IO`
+/// `LET $x: STRING = <command>` installs a spillable capture sink, `WITH_IO`
 /// installs named-pipe endpoints, and the root installs the `ASSERT_STDOUT`
 /// tee. A handler that bypasses its context handles silently breaks all three.
 pub struct StepCtx<'a, P: ProcessManager> {
@@ -418,25 +418,48 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
         }
         StepKind::For {
             key_var,
+            key_type,
             var,
+            var_type,
             in_expr,
             body,
-        } => handlers::for_loop(&mut cx, key_var.as_deref(), var, in_expr, body),
+        } => handlers::for_loop(
+            &mut cx,
+            key_var.as_deref(),
+            *key_type,
+            var,
+            *var_type,
+            in_expr,
+            body,
+        ),
         StepKind::If {
             cond,
             then_body,
             else_ifs,
             else_body,
         } => handlers::if_then(&mut cx, cond, then_body, else_ifs, else_body),
-        StepKind::Assign { var, expr } => handlers::assign(&mut cx, var, expr),
-        StepKind::AssignCapture { var, cmd } => {
-            handlers::assign_capture(&mut cx, generation, idx, var, cmd)
-        }
-        StepKind::AssignAsync { var, body } => handlers::dispatch_assign_async(var, body, &mut cx),
+        StepKind::Assign {
+            var,
+            decl_type,
+            expr,
+        } => handlers::assign(&mut cx, var, *decl_type, expr),
+        StepKind::Set { var, expr } => handlers::set_var_value(&mut cx, var, expr),
+        StepKind::AssignCapture {
+            var,
+            decl_type,
+            cmd,
+        } => handlers::assign_capture(&mut cx, generation, idx, var, *decl_type, cmd),
+        StepKind::AssignAsync {
+            var,
+            decl_type,
+            body,
+        } => handlers::dispatch_assign_async(var, *decl_type, body, &mut cx),
         StepKind::Await { var } => handlers::dispatch_await(var, &mut cx),
-        StepKind::AwaitCapture { out_var, task_var } => {
-            handlers::dispatch_await_capture(out_var, task_var, &mut cx)
-        }
+        StepKind::AwaitCapture {
+            out_var,
+            out_type,
+            task_var,
+        } => handlers::dispatch_await_capture(out_var, *out_type, task_var, &mut cx),
         StepKind::Cancel { var } => handlers::dispatch_cancel(var, &mut cx),
         StepKind::Timeout { duration, body } => {
             let duration = super::args::resolve_arg_as_duration(duration, &mut cx)?;
@@ -633,26 +656,51 @@ fn execute_steps_inner<P: ProcessManager>(
                 }
                 StepKind::For {
                     key_var,
+                    key_type,
                     var,
+                    var_type,
                     in_expr,
                     body,
-                } => handlers::for_loop(&mut cx, key_var.as_deref(), var, in_expr, body),
+                } => handlers::for_loop(
+                    &mut cx,
+                    key_var.as_deref(),
+                    *key_type,
+                    var,
+                    *var_type,
+                    in_expr,
+                    body,
+                ),
                 StepKind::If {
                     cond,
                     then_body,
                     else_ifs,
                     else_body,
                 } => handlers::if_then(&mut cx, cond, then_body, else_ifs, else_body),
-                StepKind::Assign { var, expr } => handlers::assign(&mut cx, var, expr),
-                StepKind::AssignCapture { var, cmd } => {
-                    handlers::assign_capture(&mut cx, generation, idx, var, cmd)
-                }
-                StepKind::AssignAsync { var, body } => {
-                    handlers::dispatch_assign_async(var, body, &mut cx)
+                StepKind::Assign {
+                    var,
+                    decl_type,
+                    expr,
+                } => handlers::assign(&mut cx, var, *decl_type, expr),
+                StepKind::Set { var, expr } => handlers::set_var_value(&mut cx, var, expr),
+                StepKind::AssignCapture {
+                    var,
+                    decl_type,
+                    cmd,
+                } => handlers::assign_capture(&mut cx, generation, idx, var, *decl_type, cmd),
+                StepKind::AssignAsync {
+                    var,
+                    decl_type,
+                    body,
+                } => {
+                    handlers::dispatch_assign_async(var, *decl_type, body, &mut cx)
                 }
                 StepKind::Await { var } => handlers::dispatch_await(var, &mut cx),
-                StepKind::AwaitCapture { out_var, task_var } => {
-                    handlers::dispatch_await_capture(out_var, task_var, &mut cx)
+                StepKind::AwaitCapture {
+                    out_var,
+                    out_type,
+                    task_var,
+                } => {
+                    handlers::dispatch_await_capture(out_var, *out_type, task_var, &mut cx)
                 }
                 StepKind::Cancel { var } => handlers::dispatch_cancel(var, &mut cx),
                 StepKind::Timeout { duration, body } => {

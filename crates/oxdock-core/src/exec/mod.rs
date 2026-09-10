@@ -16,9 +16,9 @@ pub(crate) use self::handlers::{
     dispatch_await_step, dispatch_cancel_step, dispatch_copy, dispatch_copy_git, dispatch_cwd,
     dispatch_echo, dispatch_env, dispatch_exit, dispatch_expand, dispatch_for_loop,
     dispatch_hash_sha256, dispatch_if_then, dispatch_inherit_env, dispatch_ls, dispatch_mkdir,
-    dispatch_read, dispatch_read_line, dispatch_run, dispatch_run_exec, dispatch_sleep_step,
-    dispatch_symlink, dispatch_timeout_step, dispatch_with_io, dispatch_with_io_block,
-    dispatch_workdir, dispatch_workspace, dispatch_write,
+    dispatch_read, dispatch_read_line, dispatch_run, dispatch_run_exec, dispatch_set,
+    dispatch_sleep_step, dispatch_symlink, dispatch_timeout_step, dispatch_with_io,
+    dispatch_with_io_block, dispatch_workdir, dispatch_workspace, dispatch_write,
 };
 pub use self::io::ExecIo;
 pub(crate) use self::steps::StepCtx;

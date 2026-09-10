@@ -33,6 +33,7 @@ define_pipeline! {
     StepKind::HashSha256 { .. } => exec::dispatch_hash_sha256,
     StepKind::Exit(..) => exec::dispatch_exit,
     StepKind::AssignAsync { .. } => exec::dispatch_assign_async_step,
+    StepKind::Set { .. } => exec::dispatch_set,
     StepKind::Await { .. } => exec::dispatch_await_step,
     StepKind::AssignCapture { .. } => exec::dispatch_assign_capture_step,
     StepKind::AwaitCapture { .. } => exec::dispatch_await_capture_step,
