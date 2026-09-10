@@ -9,17 +9,30 @@ use oxdock_process::{CommandStderr, CommandStdin, CommandStdout, SharedInput, Sh
 #[cfg(not(miri))]
 use oxdock_process::{OsPipeReader, OsPipeWriter, create_os_pipe};
 
-use super::pipe::{PipeEndpoint, PipeOutputs, ScriptPipe};
+use super::pipe::{KeeperGuard, PipeEndpoint, PipeInner, PipeOutputs, ScriptPipe};
 
 /// Shared pipe registry. All threads in the same execution context
 /// reference the same registry, so pipes created by the parent are
 /// visible to child threads.
+///
+/// All maps live behind a single mutex so check-then-act sequences
+/// (exists? create; create then pin) are atomic: one lock acquisition
+/// covers the whole decision, and concurrent workers can never allocate
+/// duplicate entries under the same name.
+#[derive(Default)]
+struct RegistryInner {
+    input: HashMap<String, SharedInput>,
+    output: HashMap<String, PipeOutputs>,
+    /// Live script-pipe backends keyed by pipe name. Host-injected raw
+    /// handles have no backend here; keeper pins are no-ops for them.
+    inners: HashMap<String, Arc<PipeInner>>,
+    #[cfg(not(miri))]
+    os: HashMap<String, OsPipeEntry>,
+}
+
 #[derive(Clone, Default)]
 pub(super) struct PipeRegistry {
-    input: Arc<Mutex<HashMap<String, SharedInput>>>,
-    output: Arc<Mutex<HashMap<String, PipeOutputs>>>,
-    #[cfg(not(miri))]
-    os: Arc<Mutex<HashMap<String, OsPipeEntry>>>,
+    inner: Arc<Mutex<RegistryInner>>,
 }
 
 /// One anonymous OS kernel pipe pair behind take once slots. The first
@@ -42,78 +55,71 @@ impl OsPipeEntry {
 }
 
 impl PipeRegistry {
+    fn lock_inner(&self) -> std::sync::MutexGuard<'_, RegistryInner> {
+        self.inner.lock().expect("pipe lock poisoned")
+    }
+
     fn ensure_pipe(&self, name: &str) {
-        let mut input = self.input.lock().expect("pipe lock poisoned");
-        let mut output = self.output.lock().expect("pipe lock poisoned");
-        if input.contains_key(name) || output.contains_key(name) {
+        let mut guard = self.lock_inner();
+        if guard.input.contains_key(name) || guard.output.contains_key(name) {
             return;
         }
         let pipe = ScriptPipe::new();
-        input.insert(name.to_string(), pipe.reader());
+        guard.inners.insert(name.to_string(), pipe.pipe_inner());
+        guard.input.insert(name.to_string(), pipe.reader());
         let endpoint = PipeEndpoint::script(pipe.endpoint());
         let outputs = PipeOutputs {
             stdout: Some(endpoint.clone()),
             stderr: Some(endpoint),
         };
-        output.insert(name.to_string(), outputs);
+        guard.output.insert(name.to_string(), outputs);
     }
 
     fn input_pipe(&self, name: &str) -> Option<SharedInput> {
-        self.input
-            .lock()
-            .expect("pipe lock poisoned")
-            .get(name)
-            .cloned()
+        self.lock_inner().input.get(name).cloned()
     }
 
     fn output_pipe_stdout(&self, name: &str) -> Option<PipeEndpoint> {
-        self.output
-            .lock()
-            .expect("pipe lock poisoned")
+        self.lock_inner()
+            .output
             .get(name)
             .and_then(|pipe| pipe.stdout.clone())
     }
 
     fn output_pipe_stderr(&self, name: &str) -> Option<PipeEndpoint> {
-        self.output
-            .lock()
-            .expect("pipe lock poisoned")
+        self.lock_inner()
+            .output
             .get(name)
             .and_then(|pipe| pipe.stderr.clone())
     }
 
-    /// True when any entry, script or OS, exists under this name.
-    fn has_pipe(&self, name: &str) -> bool {
-        let input = self.input.lock().expect("pipe lock poisoned");
-        let output = self.output.lock().expect("pipe lock poisoned");
-        if input.contains_key(name) || output.contains_key(name) {
-            return true;
-        }
-        #[cfg(not(miri))]
-        return self
-            .os
-            .lock()
-            .expect("pipe lock poisoned")
-            .contains_key(name);
-        #[cfg(miri)]
-        return false;
-    }
-
+    /// Whether an OS kernel pair exists under this name.
+    /// Single lock acquisition for the lookup.
     #[cfg(not(miri))]
     pub(super) fn has_os_pipe(&self, name: &str) -> bool {
-        self.os
-            .lock()
-            .expect("pipe lock poisoned")
-            .contains_key(name)
+        self.lock_inner().os.contains_key(name)
     }
 
     /// Ensure an entry exists for this binding. Fresh names become OS
     /// kernel pairs when promotion fired, script pipes otherwise. Existing
     /// entries keep their type: first binding wins, so sequential fan in
     /// and host injected pipes never change shape underfoot.
+    /// Atomic: existence check and insertion happen under one lock.
     fn ensure_pipe_for(&self, name: &str, promote: bool) -> Result<()> {
-        if self.has_pipe(name) {
-            return Ok(());
+        {
+            let guard = self.lock_inner();
+            if guard.input.contains_key(name) || guard.output.contains_key(name) || {
+                #[cfg(not(miri))]
+                {
+                    guard.os.contains_key(name)
+                }
+                #[cfg(miri)]
+                {
+                    false
+                }
+            } {
+                return Ok(());
+            }
         }
         #[cfg(not(miri))]
         if promote {
@@ -221,39 +227,35 @@ impl PipeRegistry {
     /// An existing script entry keeps store and forward semantics; an
     /// existing OS entry is reused so the second producer fails
     /// deterministically at handle take time, never by interleaving.
+    /// Atomic: the script/OS existence check and the insertion share one
+    /// lock acquisition.
     #[cfg(not(miri))]
     fn ensure_os_pipe(&self, name: &str) -> Result<()> {
-        if self.has_os_pipe(name) {
+        let mut guard = self.lock_inner();
+        if guard.os.contains_key(name) {
             return Ok(());
         }
-        {
-            let input = self.input.lock().expect("pipe lock poisoned");
-            let output = self.output.lock().expect("pipe lock poisoned");
-            if input.contains_key(name) || output.contains_key(name) {
-                bail!("pipe '{name}' is already bound as a script pipe");
-            }
+        if guard.input.contains_key(name) || guard.output.contains_key(name) {
+            bail!("pipe '{name}' is already bound as a script pipe");
         }
-        let mut os = self.os.lock().expect("pipe lock poisoned");
-        if !os.contains_key(name) {
-            os.insert(name.to_string(), OsPipeEntry::new()?);
+        if !guard.os.contains_key(name) {
+            guard.os.insert(name.to_string(), OsPipeEntry::new()?);
         }
         Ok(())
     }
 
     #[cfg(not(miri))]
     fn os_writer(&self, name: &str) -> Option<OsPipeWriter> {
-        self.os
-            .lock()
-            .expect("pipe lock poisoned")
+        self.lock_inner()
+            .os
             .get(name)
             .map(|entry| entry.writer.clone())
     }
 
     #[cfg(not(miri))]
     fn os_reader(&self, name: &str) -> Option<OsPipeReader> {
-        self.os
-            .lock()
-            .expect("pipe lock poisoned")
+        self.lock_inner()
+            .os
             .get(name)
             .map(|entry| entry.reader.clone())
     }
@@ -283,6 +285,41 @@ impl PipeRegistry {
             anyhow::anyhow!("OS pipe handle '{name}' has already been consumed by another process")
         })?;
         Ok(Arc::new(Mutex::new(owned)))
+    }
+
+    /// Pin a keeper slot on an existing script pipe so transient writer
+    /// churn can never observe zero writers. Only pins pipes that already
+    /// have a script backend; returns `None` for `OsPipeEntry` handles and
+    /// host-injected raw handles, which need no pin. Callers must route
+    /// creation through [`PipeRegistry::ensure_pipe_for`] first so OS
+    /// promotion is honored and this function never forces a script pipe
+    /// into existence.
+    pub(super) fn pin_keeper(&self, name: &str) -> Result<Option<KeeperGuard>> {
+        let inner = self.lock_inner().inners.get(name).cloned();
+        match inner {
+            Some(pipe) => Ok(Some(KeeperGuard::new(pipe))),
+            None => Ok(None),
+        }
+    }
+
+    fn insert_input(&self, name: String, reader: SharedInput) {
+        self.lock_inner().input.insert(name, reader);
+    }
+
+    fn insert_output(
+        &self,
+        name: &str,
+        stdout: Option<PipeEndpoint>,
+        stderr: Option<PipeEndpoint>,
+    ) {
+        let mut guard = self.lock_inner();
+        let entry = guard.output.entry(name.to_string()).or_default();
+        if stdout.is_some() {
+            entry.stdout = stdout;
+        }
+        if stderr.is_some() {
+            entry.stderr = stderr;
+        }
     }
 }
 
@@ -522,48 +559,47 @@ impl ExecIo {
     }
 
     pub fn insert_input_pipe<S: Into<String>>(&mut self, name: S, reader: SharedInput) {
-        self.pipes
-            .input
-            .lock()
-            .expect("pipe lock poisoned")
-            .insert(name.into(), reader);
+        self.pipes.insert_input(name.into(), reader);
     }
 
     pub fn insert_output_pipe<S: Into<String>>(&mut self, name: S, writer: SharedOutput) {
-        let mut output = self.pipes.output.lock().expect("pipe lock poisoned");
-        let entry = output.entry(name.into()).or_default();
-        entry.stdout = Some(PipeEndpoint::stream(writer.clone()));
-        entry.stderr = Some(PipeEndpoint::stream(writer));
+        let endpoint = PipeEndpoint::stream(writer.clone());
+        let endpoint2 = PipeEndpoint::stream(writer);
+        self.pipes
+            .insert_output(&name.into(), Some(endpoint), Some(endpoint2));
     }
 
     pub fn insert_output_pipe_stdout<S: Into<String>>(&mut self, name: S, writer: SharedOutput) {
-        let mut output = self.pipes.output.lock().expect("pipe lock poisoned");
-        let entry = output.entry(name.into()).or_default();
-        entry.stdout = Some(PipeEndpoint::stream(writer));
+        self.pipes
+            .insert_output(&name.into(), Some(PipeEndpoint::stream(writer)), None);
     }
 
     pub fn insert_output_pipe_stderr<S: Into<String>>(&mut self, name: S, writer: SharedOutput) {
-        let mut output = self.pipes.output.lock().expect("pipe lock poisoned");
-        let entry = output.entry(name.into()).or_default();
-        entry.stderr = Some(PipeEndpoint::stream(writer));
+        self.pipes
+            .insert_output(&name.into(), None, Some(PipeEndpoint::stream(writer)));
     }
 
     pub fn insert_output_pipe_stdout_inherit<S: Into<String>>(&mut self, name: S) {
-        let mut output = self.pipes.output.lock().expect("pipe lock poisoned");
-        let entry = output.entry(name.into()).or_default();
-        entry.stdout = Some(PipeEndpoint::Inherit);
+        self.pipes
+            .insert_output(&name.into(), Some(PipeEndpoint::Inherit), None);
     }
 
     pub fn insert_output_pipe_stderr_inherit<S: Into<String>>(&mut self, name: S) {
-        let mut output = self.pipes.output.lock().expect("pipe lock poisoned");
-        let entry = output.entry(name.into()).or_default();
-        entry.stderr = Some(PipeEndpoint::Inherit);
+        self.pipes
+            .insert_output(&name.into(), None, Some(PipeEndpoint::Inherit));
     }
 
     /// Ensure an entry exists for this binding, promoting fresh names to
     /// OS kernel pairs when asked. Existing entries keep their type.
     pub(super) fn ensure_pipe_for(&self, name: &str, promote: bool) -> Result<()> {
         self.pipes.ensure_pipe_for(name, promote)
+    }
+
+    /// Pin a keeper slot on an existing script pipe. `None` for OS pipes
+    /// and host-injected handles. Creation must go through
+    /// [`ExecIo::ensure_pipe_for`] first so OS promotion is honored.
+    pub(super) fn pin_keeper(&self, name: &str) -> Result<Option<KeeperGuard>> {
+        self.pipes.pin_keeper(name)
     }
 
     /// Resolve a stdin binding to a runnable handle.

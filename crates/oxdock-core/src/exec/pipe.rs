@@ -80,6 +80,10 @@ impl ScriptPipe {
         ScriptPipeEndpoint::new(self.inner.clone())
     }
 
+    pub(super) fn pipe_inner(&self) -> Arc<PipeInner> {
+        self.inner.clone()
+    }
+
     #[cfg(test)]
     #[cfg_attr(miri, allow(dead_code))]
     #[allow(clippy::disallowed_types)]
@@ -103,7 +107,7 @@ impl ScriptPipeEndpoint {
     }
 }
 
-struct PipeInner {
+pub(super) struct PipeInner {
     state: Mutex<PipeState>,
     ready: Condvar,
 }
@@ -137,7 +141,31 @@ impl PipeInner {
     fn detach_writer(&self) {
         let mut state = self.lock_state();
         state.writers = state.writers.saturating_sub(1);
-        if state.writers == 0 {
+        if state.writers == 0 && state.keepers == 0 {
+            state.closed = true;
+        }
+        drop(state);
+        self.ready.notify_all();
+    }
+
+    /// Pin a keeper slot so transient writer churn can never observe zero
+    /// writers. Called synchronously on the spawning thread before an
+    /// `ASYNC` worker starts; the returned guard unpins on drop when the
+    /// worker exits, restoring normal EOF semantics afterwards.
+    /// Never touches `closed`: pinning a pipe that already reached EOF
+    /// must not resurrect it into a blocking pipe.
+    pub(super) fn pin_keeper(&self) {
+        let mut state = self.lock_state();
+        state.keepers += 1;
+    }
+
+    /// Release one keeper slot. When the last transient writer and the
+    /// last keeper are both gone the pipe closes and blocked readers see
+    /// EOF.
+    pub(super) fn unpin_keeper(&self) {
+        let mut state = self.lock_state();
+        state.keepers = state.keepers.saturating_sub(1);
+        if state.writers == 0 && state.keepers == 0 {
             state.closed = true;
         }
         drop(state);
@@ -332,6 +360,7 @@ impl Drop for DiskInner {
 struct PipeState {
     buffer: PipeBuffer,
     writers: usize,
+    keepers: usize,
     closed: bool,
 }
 
@@ -340,6 +369,7 @@ impl PipeState {
         Self {
             buffer: PipeBuffer::new(),
             writers: 0,
+            keepers: 0,
             closed: false,
         }
     }
@@ -386,5 +416,27 @@ impl Write for PipeWriter {
 impl Drop for PipeWriter {
     fn drop(&mut self) {
         self.inner.detach_writer();
+    }
+}
+
+/// Pre-allocated keeper handle for `ASYNC` tasks. Created synchronously
+/// on the spawning thread before the worker starts so the pipe can never
+/// observe zero writers mid-flight; released when the worker exits.
+pub(super) struct KeeperGuard {
+    inner: Option<Arc<PipeInner>>,
+}
+
+impl KeeperGuard {
+    pub(super) fn new(inner: Arc<PipeInner>) -> Self {
+        inner.pin_keeper();
+        Self { inner: Some(inner) }
+    }
+}
+
+impl Drop for KeeperGuard {
+    fn drop(&mut self) {
+        if let Some(inner) = self.inner.take() {
+            inner.unpin_keeper();
+        }
     }
 }

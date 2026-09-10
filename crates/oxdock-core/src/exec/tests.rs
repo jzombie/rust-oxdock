@@ -757,6 +757,7 @@ fn create_exec_state(fs: MockFs) -> ExecState<MockProcessManager> {
         named_tasks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         next_task_id: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         inside_async: false,
+        keeper_expiry: None,
         cancellable: false,
         _marker: std::marker::PhantomData,
     };
