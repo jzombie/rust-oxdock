@@ -1052,23 +1052,41 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
     vec![
         CommandMeta {
             name: "WITH_IO",
-            syntax: "WITH_IO [bindings] <command> | WITH_IO [bindings] { <commands> }",
+            syntax: "WITH_IO [<stream>[=pipe:<name>|=$var], ...] <command> | WITH_IO [bindings] { <commands> }",
             summary: "Reroute standard streams.",
-            description: "Reroutes the standard streams of the next command or, in block form, of every enclosed command. Bindings map streams (`stdin`, `stdout`, `stderr`) to named script pipes (`stdout=pipe:name`, `stderr=pipe:name`) or to a PIPE-typed variable (`stdin=$p`, resolved against the live pipe registry when the step runs). Both stdout and stderr pipes capture output the same way. Pipes hold bytes in memory and spill to a temp file above 8 MiB, so a producer can finish before the consumer starts. If WITH_IO wraps an ASYNC block whose body is a single RUN, guarded or not, the pipe is a zero copy OS kernel pipe instead: pair it with a consumer that runs while the producer is alive, since output past the 64 KiB kernel buffer stalls until drained. A second producer or consumer on a live name is an explicit error. A name bound as output can later feed another command's `stdin`, connecting commands without touching the terminal. Binding `stdout` and `stderr` to the same live pipe name fails deterministically. Merge streams in shell via `2>&1` instead. Nested blocks stack defaults; inline bindings override inherited ones for their command only; closing a block restores previous wiring.",
+            description: "Reroutes the standard streams of the next command or, in block form, of every enclosed command. Bindings map streams (`stdin`, `stdout`, `stderr`) to named script pipes (`stdout=pipe:name`, `stderr=pipe:name`) or to a PIPE-typed variable (`stdin=$p`, resolved against the live pipe registry when the step runs). Both stdout and stderr pipes capture output the same way. Pipes hold bytes in memory and spill to a temp file above 8 MiB, so a producer can finish before the consumer starts. If WITH_IO wraps an ASYNC block whose body is a single RUN, guarded or not, the pipe is a zero copy OS kernel pipe instead: pair it with a consumer that runs while the producer is alive, since output past the 64 KiB kernel buffer stalls until drained. That promotion never crosses a CALL boundary: pipes created, bound, or passed by variable inside FUNC bodies are always script pipes, even when the surrounding task would otherwise promote. A second producer or consumer on a live name is an explicit error. A name bound as output can later feed another command's `stdin`, connecting commands without touching the terminal. Binding `stdout` and `stderr` to the same live pipe name fails deterministically. Merge streams in shell via `2>&1` instead. Nested blocks stack defaults; inline bindings override inherited ones for their command only; closing a block restores previous wiring.",
             args: &[],
             flags: &[],
             default_output: None,
-            examples: &[Example {
-                name: "with_io block",
-                fence_meta: None,
-                code: indoc! {r#"
+            examples: &[
+                Example {
+                    name: "with_io block",
+                    fence_meta: None,
+                    code: indoc! {r#"
                 WITH_IO [stdout=pipe:log] {
                   ECHO first
                   ECHO second
                 }
                 WITH_IO [stdin=pipe:log] WRITE captured.txt
             "#},
-            }],
+                },
+                Example {
+                    name: "variable pipe binding",
+                    fence_meta: None,
+                    code: indoc! {r#"
+                # Declare the pipe first with the explicit handle operator
+                # (like `env:KEY`): `pipe:log` names a pipe without touching
+                # a stream. A plain string here would be a TypeMismatch.
+                # `$p` (not `pipe:$p`) is the variable form; literals stay
+                # `pipe:name`.
+                LET $p: PIPE = pipe:log
+                WITH_IO [stdout=$p] ECHO hello
+                WITH_IO [stdin=$p] READ_LINE $line
+                WRITE line.txt "{{ $line }}"
+                ASSERT_FILE line.txt "hello"
+            "#},
+                },
+            ],
         },
         CommandMeta {
             name: "FOR",
@@ -1354,10 +1372,11 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             args: &[],
             flags: &[],
             default_output: None,
-            examples: &[Example {
-                name: "call",
-                fence_meta: None,
-                code: indoc! {r#"
+            examples: &[
+                Example {
+                    name: "call",
+                    fence_meta: None,
+                    code: indoc! {r#"
                 FUNC SHOUT($name: STRING) {
                   ECHO "{{ $name }}"
                   RETURN $name
@@ -1365,7 +1384,26 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 CALL SHOUT("ada")
                 ASSERT_STDOUT "ada"
             "#},
-            }],
+                },
+                Example {
+                    name: "call with pipes",
+                    fence_meta: None,
+                    code: indoc! {r#"
+                # A pipe handle travels into a function as a typed argument
+                # and is usable as a binding target in both directions.
+                # `pipe:ch` constructs the handle; `$p` passes it on.
+                FUNC DRAIN($q: PIPE) {
+                  WITH_IO [stdin=$q] READ_LINE $line
+                  RETURN $line
+                }
+                LET $p: PIPE = pipe:ch
+                WITH_IO [stdout=$p] ECHO "payload"
+                LET $got: STRING = CALL DRAIN($p)
+                WRITE got.txt "{{ $got }}"
+                ASSERT_FILE got.txt "payload"
+            "#},
+                },
+            ],
         },
         CommandMeta {
             name: "RETURN",

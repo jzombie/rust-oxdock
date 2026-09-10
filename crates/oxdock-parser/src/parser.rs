@@ -2224,6 +2224,7 @@ fn parse_expr_atom(pair: Pair<Rule>) -> Result<Expr> {
             Ok(Expr::Var(name))
         }
         Rule::env_read => parse_env_read(inner).map(Expr::Env),
+        Rule::pipe_read => parse_pipe_read(inner).map(|name| Expr::Literal(Value::Pipe(name))),
         Rule::list_literal => parse_list_literal(inner),
         Rule::map_literal => parse_map_literal(inner),
         Rule::string_literal | Rule::quoted_string => {
@@ -2249,6 +2250,15 @@ fn parse_env_read(pair: Pair<Rule>) -> Result<String> {
         }
     }
     bail!("env read requires a key: env:KEY")
+}
+
+fn parse_pipe_read(pair: Pair<Rule>) -> Result<String> {
+    for inner in pair.into_inner() {
+        if inner.as_rule() == Rule::pipe_name {
+            return Ok(inner.as_str().trim().to_string());
+        }
+    }
+    bail!("pipe read requires a name: pipe:NAME")
 }
 
 fn parse_key_path(pair: Pair<Rule>) -> Result<Expr> {

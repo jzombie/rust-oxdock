@@ -1,3 +1,10 @@
+# Pipes travel into functions as typed arguments and are usable as
+# binding targets in both directions. Two syntax rules to remember:
+#   - `pipe:NAME` is the explicit handle operator (like `env:KEY`):
+#     `LET $p: PIPE = pipe:ch` names a pipe without touching a stream.
+#     A plain string (`LET $p: PIPE = "ch"`) is a TypeMismatch error.
+#   - `$p` (not `pipe:$p`) is the variable form in bindings and calls;
+#     literals stay `pipe:name` (as in `WITH_IO` bindings below).
 FUNC FILL($q: PIPE) {
     WITH_IO [stdout=$q] ECHO "filled"
     RETURN "filled-ok"
@@ -8,22 +15,20 @@ FUNC DRAIN($q: PIPE) {
     RETURN $line
 }
 
+# A function can also hand a pipe back: the caller receives a live handle.
 FUNC MAKEPIPE($name: STRING) {
-    WITH_IO [stdout=pipe:made] ECHO "seed"
-    LET $p: PIPE = "made"
-    RETURN $p
+    LET $made: PIPE = pipe:made
+    WITH_IO [stdout=$made] ECHO "seed"
+    RETURN $made
 }
 
-# A pipe handle travels into functions as a typed argument and is usable
-# as a binding target in both directions.
-WITH_IO [stdout=pipe:ch] ECHO "primed"
-LET $p: PIPE = "ch"
-WITH_IO [stdin=pipe:ch] READ_LINE $primed
+LET $p: PIPE = pipe:ch
+WITH_IO [stdout=$p] ECHO "primed"
+WITH_IO [stdin=$p] READ_LINE $primed
 LET $fr: STRING = CALL FILL($p)
 LET $got: STRING = CALL DRAIN($p)
 WRITE got.txt "{{ $primed }}-{{ $fr }}-{{ $got }}"
 
-# And conversely a function can hand a pipe back to its caller.
 LET $q: PIPE = CALL MAKEPIPE("ignored")
 LET $back: STRING = CALL DRAIN($q)
 WRITE back.txt "{{ $back }}"

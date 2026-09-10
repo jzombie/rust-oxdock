@@ -1257,6 +1257,29 @@ fn recursion_depth_limit_names_function() {
 }
 
 #[test]
+fn pipe_declare_first_registers_for_later_bindings() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        LET $p: PIPE = pipe:chan
+        WITH_IO [stdout=$p] ECHO hello
+        WITH_IO [stdin=$p] READ_LINE $line
+        WRITE line.txt "{{ $line }}"
+    "#};
+    run_script(&root, script).expect("declare-first pipe must work");
+    assert_eq!(read_trimmed(&root.join("line.txt").unwrap()), "hello");
+}
+
+#[test]
+fn pipe_plain_string_is_type_mismatch() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let err = run_script(&root, "LET $p: PIPE = \"chan\"\n")
+        .expect_err("plain string must not coerce to PIPE");
+    assert!(err.to_string().contains("TypeMismatch"), "{err}");
+}
+
+#[test]
 fn with_io_variable_pipe_undeclared_is_step_numbered_error() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);

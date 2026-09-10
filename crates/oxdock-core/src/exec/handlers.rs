@@ -1772,15 +1772,24 @@ fn collect_dynamic_producers<P: ProcessManager>(
 ) {
     match kind {
         StepKind::WithIo { bindings, cmd } => {
+            // Same promotion analysis as the static walk so a dynamic
+            // endpoint pins the same pipe type execution will ensure.
+            let promote = promotion_trigger(cmd, true);
             for binding in bindings {
                 match binding.stream {
                     IoStream::Stdout | IoStream::Stderr => {
                         if let Some(PipeTarget::Var(var)) = &binding.pipe
                             && let Some((TypeKind::Pipe, Value::Pipe(name))) =
                                 state.get_var_typed(var)
-                            && !out.iter().any(|(n, _)| n == &name)
                         {
-                            out.push((name.clone(), false));
+                            match out.iter_mut().find(|(n, _)| n == &name) {
+                                Some(entry) => {
+                                    entry.1 = entry.1 || promote;
+                                }
+                                None => {
+                                    out.push((name.clone(), promote));
+                                }
+                            }
                         }
                     }
                     IoStream::Stdin => {}

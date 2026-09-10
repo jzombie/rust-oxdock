@@ -80,6 +80,13 @@ bare_word = @{ (ASCII_ALPHANUMERIC | "_" | "-" | "." | "/")+ }
 // below gives the same precedence to a leading `env:KEY` shape.
 env_read_key = @{ ASCII_ALPHA_UPPER ~ (ASCII_ALPHA_UPPER | ASCII_DIGIT | "_")* }
 env_read = { "env" ~ ":" ~ env_read_key }
+// Pipe handle: `pipe:NAME` evaluates to the named pipe. Must precede
+// `bare_word` in `expr_atom` (which would otherwise match just `pipe` and
+// strand `:NAME`). Deliberately NOT mirrored in `unquoted_arg`: bare command
+// arguments keep their literal reading, so existing `pipe:...` text there is
+// unaffected; the operator form lives in expression positions (LET RHS,
+// CALL args, conditions) plus `WITH_IO` bindings.
+pipe_read = { "pipe" ~ ":" ~ pipe_name }
 func_call = ${ ident ~ gap ~ "(" ~ gap ~ (expr ~ gap ~ ("," ~ gap ~ expr ~ gap)*)? ~ gap ~ ")" }
 variable = ${ "$" ~ ident }
 key_path_segment = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHA | "_" | ASCII_DIGIT)* | ASCII_DIGIT+ }
@@ -88,7 +95,7 @@ list_literal = ${ "[" ~ gap ~ (expr ~ gap ~ ("," ~ gap ~ expr ~ gap)*)? ~ gap ~ 
 map_entry = ${ (quoted_string | bare_word) ~ gap ~ ":" ~ gap ~ ws? ~ gap ~ expr }
 map_literal = ${ "{" ~ gap ~ ws? ~ gap ~ (map_entry ~ gap ~ (ws? ~ "," ~ ws? ~ map_entry ~ gap)*)? ~ ws? ~ gap ~ "}" }
 string_literal = { quoted_string }
-expr_atom = { parenthesized_expr | func_call | key_path | variable | env_read | list_literal | map_literal | string_literal | bare_word }
+expr_atom = { parenthesized_expr | func_call | key_path | variable | env_read | pipe_read | list_literal | map_literal | string_literal | bare_word }
 
 // Comparison level (==, !=) — operands are unary so `!` binds tighter
 // than equality (C-like): `!a == b` parses as `(!a) == b`.
