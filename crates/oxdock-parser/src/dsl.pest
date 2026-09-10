@@ -12,11 +12,11 @@ blank = _{ (WHITESPACE | linebreak)+ }
 script = { SOI ~ element* ~ EOI }
 
 // Structural statements MUST precede generic commands
-element = _{ blank | hash_comment | COMMENT | semicolon | guard_line | block_start | block_end | if_statement | for_statement | let_async_statement | await_statement | cancel_statement | let_statement | timeout_statement | async_statement_block | async_statement | command }
+element = _{ blank | hash_comment | COMMENT | semicolon | guard_line | block_start | block_end | if_statement | for_statement | let_async_statement | let_capture_statement | await_statement | cancel_statement | let_statement | timeout_statement | async_statement_block | async_statement | command }
 
 // Inside for/let blocks, block_start/block_end must NOT appear as elements
 // (the block's own braces handle them).  Nested guard blocks use guard_block.
-block_element = _{ blank | hash_comment | COMMENT | semicolon | guard_block | guard_line | if_statement | for_statement | let_async_statement | await_statement | cancel_statement | let_statement | timeout_statement | async_statement_block | async_statement | command }
+block_element = _{ blank | hash_comment | COMMENT | semicolon | guard_block | guard_line | if_statement | for_statement | let_async_statement | let_capture_statement | await_statement | cancel_statement | let_statement | timeout_statement | async_statement_block | async_statement | command }
 guard_block = ${ guard_line ~ gap ~ block }
 
 block_start = { "{" }
@@ -127,6 +127,27 @@ if_statement = ${ if_keyword ~ gap ~ expr ~ gap ~ block ~ gap ~ (blank* ~ gap ~ 
 async_keyword = _{ "ASYNC" ~ !(ASCII_ALPHANUMERIC | "_") }
 async_statement = ${ async_keyword ~ sep ~ command_inner }
 async_statement_block = { async_keyword ~ sep? ~ block }
+
+// LET $var = <sync command> — capture the command's stdout into $var
+// (spilling to disk if large), or LET $var = AWAIT $task — capture a named
+// task's output. PEG alternatives are shadow-safe by construction:
+// - `let_async_statement` precedes this rule and claims every ASYNC-led and
+//   WITH_IO-led line, so this rule never sees them (WITH_IO sync capture is
+//   handled in `parse_let_async_statement_from_pair`, which branches sync
+//   bodies into capture instead of bailing).
+// - Only UPPERCASE-led `instruction` lines reach the `instruction`
+//   alternative (lowercase/digits/sigils fail immediately and fall through
+//   to `let_statement`). Rust then branches on `is_known_command(lead)`:
+//   known commands lower to capture, unknown leads re-parse as expressions.
+// - `await_statement`/`timeout_statement`/`instruction` can only claim the
+//   line when they run to its end (`gap ~ &(linebreak | ";" | "}" | EOI)`).
+//   Without this end-guard PEG would commit to a strict-prefix match — e.g.
+//   `instruction` matching just `LOAD_TOML` in `LET $d = LOAD_TOML("t.toml")`
+//   and stranding `("t.toml")` — instead of falling through to
+//   `let_statement`, where the RHS parses as an expression. Trailing text
+//   after a complete instruction can never be a valid expression
+//   continuation, so the guard claims no expression input.
+let_capture_statement = ${ let_keyword ~ gap ~ dollar_ident ~ gap ~ "=" ~ gap ~ (await_statement | timeout_statement | instruction) ~ gap ~ &(linebreak | ";" | "}" | EOI) }
 
 // LET $var = ASYNC { ... } — spawn background task, store handle in $var
 // NOTE: "ASYNC" is consumed here, so we inline the block/inline forms

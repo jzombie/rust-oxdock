@@ -35,7 +35,7 @@ pub mod workspace_fs;
 pub use workspace_fs::git::{GitIdentity, current_head_commit, ensure_git_identity};
 pub use workspace_fs::policy::{GuardPolicy, PolicyPath};
 pub use workspace_fs::{DirEntry, EntryKind, GuardedPath, GuardedTempDir, PathResolver};
-pub use workspace_fs::{command_path, embed_path, normalized_path, to_forward_slashes};
+pub use workspace_fs::{SpillFile, command_path, embed_path, normalized_path, to_forward_slashes};
 
 #[allow(clippy::disallowed_types)]
 pub use workspace_fs::UnguardedPath;

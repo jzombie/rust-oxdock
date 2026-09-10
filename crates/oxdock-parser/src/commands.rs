@@ -205,7 +205,7 @@ fn fmt_io(b: &IoBinding) -> String {
 // `AWAIT`, ...). When a line starts with one of these but fails to parse as
 // such, lowering falls through here — report a committed syntax error instead
 // of an unknown command.
-fn is_known_command(name: &str) -> bool {
+pub(crate) fn is_known_command(name: &str) -> bool {
     if name == "ELSE" {
         return true;
     }
@@ -269,7 +269,7 @@ fn structural_hint(name: &str, received: &str) -> Option<String> {
             "ELSE must directly follow an `IF ... {{ ... }}` block, e.g. `IF true {{ ECHO yes }} ELSE {{ ECHO no }}`; got {got}."
         )),
         "LET" => Some(format!(
-            "LET assigns a variable, e.g. `LET $name = <expr>` or `LET $t = ASYNC ...`; got {got}."
+            "LET assigns a variable, e.g. `LET $name = <expr>`, `LET $t = ASYNC ...`, `LET $out = <command>` (capture), or `LET $out = AWAIT $t`; got {got}."
         )),
         "TIMEOUT" => Some(format!(
             "TIMEOUT needs a duration and a command or block, e.g. `TIMEOUT 30s RUN ...`; got {got}."
@@ -419,6 +419,8 @@ declare_commands! {
         For { key_var: Option<String>, var: String, in_expr: Expr, body: Vec<Step> },
         If { cond: Box<Expr>, then_body: Vec<Step>, else_ifs: Vec<(Box<Expr>, Vec<Step>)>, else_body: Option<Vec<Step>> },
         Assign { var: String, expr: Expr },
+        AssignCapture { var: String, cmd: Box<StepKind> },
+        AwaitCapture { out_var: String, task_var: String },
         AsyncBlock { body: Vec<Step> },
         AssignAsync { var: String, body: Vec<Step> },
         Await { var: String },
@@ -1106,9 +1108,9 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
         },
         CommandMeta {
             name: "LET",
-            syntax: "LET $var = <expr> | LET $var = ASYNC { <commands> }",
+            syntax: "LET $var = <expr> | LET $var = ASYNC { <commands> } | LET $var = <command> | LET $var = AWAIT $task",
             summary: "Bind script-local variables.",
-            description: "Assigns a value to a script-local variable. Variables are usable in templates (`{{ $var }}`), guards, and expressions. With `ASYNC`, spawns a background task and stores its handle (see ASYNC). The `$` sigil on the name is mandatory. The right-hand side is always an expression — literals, lists, maps, comparisons, `GLOB(\"*.md\")` — never a `{{ ... }}` template; interpolation happens in string values, not here. Bare words need no quotes: `LET $d = 30s` binds the same string as `LET $d = \"30s\"`.",
+            description: "Assigns a value to a script-local variable. Variables are usable in templates (`{{ $var }}`), guards, and expressions. With `ASYNC`, spawns a background task and stores its handle (see ASYNC). The `$` sigil on the name is mandatory. The right-hand side is always an expression — literals, lists, maps, comparisons, `GLOB(\"*.md\")` — never a `{{ ... }}` template; interpolation happens in string values, not here. Bare words need no quotes: `LET $d = 30s` binds the same string as `LET $d = \"30s\"`. When the right-hand side is a synchronous command (`LET $out = ECHO hi`), the command runs to completion and its exact stdout bytes are captured into the variable as a string (no newline stripping; commands with no stdout capture as `\"\"`; non-UTF8 stdout is an error). Combining capture with an explicit `WITH_IO [stdout=pipe:...]` is a parse error. `LET $out = AWAIT $task` captures a background task's stdout the same way; bare `AWAIT $task` forwards it to the parent stdout instead.",
             args: &[],
             flags: &[],
             default_output: None,
@@ -1150,6 +1152,15 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 ASSERT_FILE outer.txt "outer"
             "#},
                 },
+                Example {
+                    name: "capture command output",
+                    fence_meta: None,
+                    code: indoc! {r#"
+                LET $out = ECHO hi
+                WRITE captured.txt "{{ $out }}"
+                ASSERT_FILE captured.txt "hi\n"
+            "#},
+                },
             ],
         },
         CommandMeta {
@@ -1187,20 +1198,32 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
         },
         CommandMeta {
             name: "AWAIT",
-            syntax: "AWAIT $var",
+            syntax: "AWAIT $var | LET $out = AWAIT $var",
             summary: "Join a background task.",
-            description: "Blocks until the named task completes. Propagates errors if the task failed.",
+            description: "Blocks until the named task completes. Propagates errors if the task failed. Bare `AWAIT $var` forwards the task's stdout to the parent stdout; `LET $out = AWAIT $var` captures it into `$out` instead (same UTF-8 and spilling rules as `LET $var = <command>`).",
             args: &[],
             flags: &[],
             default_output: None,
-            examples: &[Example {
-                name: "await",
-                fence_meta: None,
-                code: indoc! {r#"
+            examples: &[
+                Example {
+                    name: "await",
+                    fence_meta: None,
+                    code: indoc! {r#"
                 LET $task = ASYNC ECHO "done"
                 AWAIT $task
             "#},
-            }],
+                },
+                Example {
+                    name: "await capture",
+                    fence_meta: None,
+                    code: indoc! {r#"
+                LET $task = ASYNC ECHO "done"
+                LET $out = AWAIT $task
+                WRITE captured.txt "{{ $out }}"
+                ASSERT_FILE captured.txt "done\n"
+            "#},
+                },
+            ],
         },
         CommandMeta {
             name: "CANCEL",
@@ -1441,6 +1464,7 @@ impl fmt::Display for StepKind {
                 Ok(())
             }
             StepKind::Assign { var, expr } => write!(f, "LET ${} = {}", var, expr),
+            StepKind::AssignCapture { var, cmd } => write!(f, "LET ${} = {}", var, cmd),
             StepKind::AsyncBlock { body } => {
                 write!(f, "ASYNC {{")?;
                 for s in body {
@@ -1456,6 +1480,9 @@ impl fmt::Display for StepKind {
                 write!(f, "\n}}")
             }
             StepKind::Await { var } => write!(f, "AWAIT ${}", var),
+            StepKind::AwaitCapture { out_var, task_var } => {
+                write!(f, "LET ${} = AWAIT ${}", out_var, task_var)
+            }
             StepKind::Cancel { var } => write!(f, "CANCEL ${}", var),
             StepKind::Timeout { duration, body } => {
                 let budget = fmt_raw_arg(duration);
@@ -1600,6 +1627,8 @@ mod tests {
                 StepKind::For { .. } => Some("FOR"),
                 StepKind::If { .. } => Some("IF"),
                 StepKind::Assign { .. } => Some("LET"),
+                StepKind::AssignCapture { .. } => Some("LET"),
+                StepKind::AwaitCapture { .. } => Some("AWAIT"),
                 StepKind::AsyncBlock { .. } | StepKind::AssignAsync { .. } => Some("ASYNC"),
                 StepKind::Await { .. } => Some("AWAIT"),
                 StepKind::Cancel { .. } => Some("CANCEL"),
@@ -1657,6 +1686,17 @@ mod tests {
             StepKind::Assign {
                 var: "v".to_string(),
                 expr: Expr::Literal(Value::Bool(true)),
+            },
+            StepKind::AssignCapture {
+                var: "v".to_string(),
+                cmd: Box::new(StepKind::Echo(crate::ast::Arg::String(
+                    "x".to_string(),
+                    false,
+                ))),
+            },
+            StepKind::AwaitCapture {
+                out_var: "o".to_string(),
+                task_var: "t".to_string(),
             },
             StepKind::AsyncBlock { body: Vec::new() },
             StepKind::AssignAsync {

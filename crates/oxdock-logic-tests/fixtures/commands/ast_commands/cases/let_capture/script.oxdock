@@ -1,0 +1,4 @@
+# Unified LET capture: the command runs to completion and its exact stdout
+# bytes are bound into the variable (no newline stripping).
+LET $out = ECHO captured
+WRITE result.txt "{{ $out }}"

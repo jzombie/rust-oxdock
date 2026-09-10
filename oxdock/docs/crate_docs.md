@@ -300,9 +300,9 @@ CANCEL $worker
 | [`WITH_IO`](#with_io) | `WITH_IO [bindings] <command> \| WITH_IO [bindings] { <commands> }` |
 | [`FOR`](#for) | `FOR $item IN <expr> { <commands> } \| FOR $key, $value IN <expr> { <commands> }` |
 | [`IF`](#if) | `IF <expr> { <commands> } [ELSE IF <expr> { <commands> }] [ELSE { <commands> }]` |
-| [`LET`](#let) | `LET $var = <expr> \| LET $var = ASYNC { <commands> }` |
+| [`LET`](#let) | `LET $var = <expr> \| LET $var = ASYNC { <commands> } \| LET $var = <command> \| LET $var = AWAIT $task` |
 | [`ASYNC`](#async) | `ASYNC <command...> \| ASYNC { <commands> } \| LET $var = ASYNC { <commands> }` |
-| [`AWAIT`](#await) | `AWAIT $var` |
+| [`AWAIT`](#await) | `AWAIT $var \| LET $out = AWAIT $var` |
 | [`CANCEL`](#cancel) | `CANCEL $var` |
 | [`TIMEOUT`](#timeout) | `TIMEOUT <duration> <command...> \| TIMEOUT <duration> { <commands> } \| TIMEOUT <duration> AWAIT $var` |
 
@@ -396,9 +396,9 @@ IF !false {
 
 Bind script-local variables.
 
-**Syntax:** `LET $var = <expr> | LET $var = ASYNC { <commands> }`
+**Syntax:** `LET $var = <expr> | LET $var = ASYNC { <commands> } | LET $var = <command> | LET $var = AWAIT $task`
 
-Assigns a value to a script-local variable. Variables are usable in templates (`{{ $var }}`), guards, and expressions. With `ASYNC`, spawns a background task and stores its handle (see ASYNC). The `$` sigil on the name is mandatory. The right-hand side is always an expression — literals, lists, maps, comparisons, `GLOB("*.md")` — never a `{{ ... }}` template; interpolation happens in string values, not here. Bare words need no quotes: `LET $d = 30s` binds the same string as `LET $d = "30s"`.
+Assigns a value to a script-local variable. Variables are usable in templates (`{{ $var }}`), guards, and expressions. With `ASYNC`, spawns a background task and stores its handle (see ASYNC). The `$` sigil on the name is mandatory. The right-hand side is always an expression — literals, lists, maps, comparisons, `GLOB("*.md")` — never a `{{ ... }}` template; interpolation happens in string values, not here. Bare words need no quotes: `LET $d = 30s` binds the same string as `LET $d = "30s"`. When the right-hand side is a synchronous command (`LET $out = ECHO hi`), the command runs to completion and its exact stdout bytes are captured into the variable as a string (no newline stripping; commands with no stdout capture as `""`; non-UTF8 stdout is an error). Combining capture with an explicit `WITH_IO [stdout=pipe:...]` is a parse error. `LET $out = AWAIT $task` captures a background task's stdout the same way; bare `AWAIT $task` forwards it to the parent stdout instead.
 
 **Examples:**
 
@@ -434,6 +434,14 @@ LET $a = "outer"
 WRITE outer.txt "{{ $a }}"
 ASSERT_FILE inner.txt "inner"
 ASSERT_FILE outer.txt "outer"
+```
+
+**Example: capture command output**
+
+```oxdock
+LET $out = ECHO hi
+WRITE captured.txt "{{ $out }}"
+ASSERT_FILE captured.txt "hi\n"
 ```
 
 
@@ -472,9 +480,9 @@ AWAIT $task
 
 Join a background task.
 
-**Syntax:** `AWAIT $var`
+**Syntax:** `AWAIT $var | LET $out = AWAIT $var`
 
-Blocks until the named task completes. Propagates errors if the task failed.
+Blocks until the named task completes. Propagates errors if the task failed. Bare `AWAIT $var` forwards the task's stdout to the parent stdout; `LET $out = AWAIT $var` captures it into `$out` instead (same UTF-8 and spilling rules as `LET $var = <command>`).
 
 **Examples:**
 
@@ -483,6 +491,15 @@ Blocks until the named task completes. Propagates errors if the task failed.
 ```oxdock
 LET $task = ASYNC ECHO "done"
 AWAIT $task
+```
+
+**Example: await capture**
+
+```oxdock
+LET $task = ASYNC ECHO "done"
+LET $out = AWAIT $task
+WRITE captured.txt "{{ $out }}"
+ASSERT_FILE captured.txt "done\n"
 ```
 
 

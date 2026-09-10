@@ -8,12 +8,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ### Added
 
+- Unified `LET` output capture: `LET $x = <sync command>` runs the command to completion and binds its exact stdout bytes into `$x` (no newline stripping; commands with no stdout bind `""`; non-UTF8 stdout is an error), spilling to a guarded temp file past 8 MiB instead of buffering unboundedly in memory
+- `LET $o = AWAIT $t` captures a background task's stdout into `$o`; bare `AWAIT $t` keeps its status semantics and now forwards the task's stdout to the parent stdout
+- Pipe backlog and capture share one spillable sink backed by `GuardedPath::tempdir` (PID-lock GC) instead of `std::env::temp_dir`, with the same 8 MiB spill / 100 MiB backlog-cap behavior; spills stay memory-only under Miri
 - `RUN ["exe", "arg", ...]` exec form: spawns the executable directly with no shell, so there is no shell expansion, globbing, redirection, or pipes; use it for portable commands. Elements accept quoted strings, bare words, `$var` / `$a.b`, and `CALL()`; quoted `{{ ... }}` templates interpolate per element while `\$` / `\{{` escapes pass through literally, and `;` / `//` inside elements stay literal. Guards and wrappers (`ASYNC`, `TIMEOUT`, `WITH_IO`) apply to both forms; `RUN []` is an error and shell `RUN <command...>` behavior is unchanged
 - `ProcessManager::run_argv` / `spawn_argv` for direct executable spawning across the `Shell`, `Mock`, and Miri `Synthetic` backends, plus documented `INHERIT_STDOUT_ENV_VAR` / `PROCESS_DEBUG_ENV_VAR` constants replacing hardcoded environment variable names
 - `WITH_IO` wrapping an `ASYNC` block whose body is a single `RUN`, guarded or not, now promotes the pipe to a zero copy OS kernel pipe: the producer child writes straight into the kernel and a concurrent `RUN` consumer reads straight out, with no copies through memory buffers. DSL consumers (`WRITE`, `READ`, ...) on a live name keep working through a bridged reader. All other shapes keep the in memory script pipe, so sequential fan in, keepers, DSL bodies, and host injected pipes behave exactly as before. Promotion is single producer single consumer by construction: a second producer or consumer on a live name fails deterministically instead of interleaving bytes. The consumer must run while the producer is alive, since output past the 64 KiB kernel buffer stalls until drained. Under Miri everything stays on script pipes with identical results for small payloads
 
 ### Changed
 
+- `LET $x = WITH_IO [stdin=pipe:p] <sync command>` now captures instead of failing; combining capture with an explicit `WITH_IO [stdout=pipe:...]` is a parse error since the capture sink owns stdout
+- Named `ASYNC` tasks no longer share the parent stdout writer: output is buffered per task and surfaces via `AWAIT` (forward), `LET $o = AWAIT $t` (bind), or end-of-pipeline reaping for tasks that are never awaited
 - Host Rust API only, scripts are unaffected: `CommandOptions.stdin` is now a `CommandStdin` enum instead of `Option<SharedInput>`. Rust embedders replace `stdin: Some(x)` with `stdin: CommandStdin::Stream(x)` and `stdin: None` with `stdin: CommandStdin::Null`. `CommandStdout` and `CommandStderr` gain matching host only `OsPipe` variants for direct kernel pipe handoff
 
 ### Fixed

@@ -1,33 +1,17 @@
-use std::collections::VecDeque;
 use std::io::{self, Read, Write};
-#[cfg(not(miri))]
-use std::io::{Seek, SeekFrom};
-use std::sync::atomic::AtomicU64;
-#[cfg(not(miri))]
-use std::sync::atomic::Ordering;
 use std::sync::{Arc, Condvar, Mutex};
 
 use oxdock_process::{SharedInput, SharedOutput};
 
-/// Memory threshold before spilling to disk.
-#[cfg(not(test))]
-#[cfg_attr(miri, allow(dead_code))]
-const PIPE_SPILL_THRESHOLD: usize = 8 * 1024 * 1024; // 8 MiB
-#[cfg(test)]
-#[cfg_attr(miri, allow(dead_code))]
-pub(super) const PIPE_SPILL_THRESHOLD: usize = 1024 * 1024; // 1 MiB for tests
+use super::capture::SpillBuffer;
 
-/// Maximum active backlog before returning an error.
-#[cfg(not(test))]
-#[cfg_attr(miri, allow(dead_code))]
-const PIPE_MAX_BACKLOG: u64 = 100 * 1024 * 1024; // 100 MiB
-#[cfg(test)]
-#[cfg_attr(miri, allow(dead_code))]
-pub(super) const PIPE_MAX_BACKLOG: u64 = 2 * 1024 * 1024; // 2 MiB for tests
+/// Memory threshold before spilling to disk (re-exported for tests).
+#[cfg(all(test, not(miri)))]
+pub(super) use super::capture::SPILL_THRESHOLD as PIPE_SPILL_THRESHOLD;
 
-/// Unique temp file naming counter.
-#[cfg_attr(miri, allow(dead_code))]
-static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+/// Maximum active backlog before returning an error (re-exported for tests).
+#[cfg(all(test, not(miri)))]
+pub(super) use super::capture::MAX_BACKLOG as PIPE_MAX_BACKLOG;
 
 #[derive(Clone)]
 pub(crate) enum PipeEndpoint {
@@ -112,6 +96,24 @@ pub(super) struct PipeInner {
     ready: Condvar,
 }
 
+struct PipeState {
+    buffer: SpillBuffer,
+    writers: usize,
+    keepers: usize,
+    closed: bool,
+}
+
+impl PipeState {
+    fn new() -> Self {
+        Self {
+            buffer: SpillBuffer::new(),
+            writers: 0,
+            keepers: 0,
+            closed: false,
+        }
+    }
+}
+
 impl PipeInner {
     fn new() -> Self {
         Self {
@@ -124,12 +126,7 @@ impl PipeInner {
     #[cfg_attr(miri, allow(dead_code))]
     #[allow(clippy::disallowed_types)]
     fn temp_path(&self) -> Option<std::path::PathBuf> {
-        let state = self.lock_state();
-        match &state.buffer {
-            PipeBuffer::Memory(_) => None,
-            #[cfg(not(miri))]
-            PipeBuffer::Disk(disk) => Some(disk.path.clone()),
-        }
+        self.lock_state().buffer.temp_path()
     }
 
     fn attach_writer(&self) {
@@ -173,33 +170,11 @@ impl PipeInner {
     }
 
     fn push_bytes(&self, data: &[u8]) -> io::Result<()> {
-        let mut state = self.lock_state();
-        match &mut state.buffer {
-            PipeBuffer::Memory(vec) => {
-                #[cfg(not(miri))]
-                let original_len = vec.len();
-                vec.extend(data.iter().copied());
-                #[cfg(not(miri))]
-                if vec.len() > PIPE_SPILL_THRESHOLD {
-                    match DiskInner::create_from_vec(vec) {
-                        Ok(disk) => {
-                            state.buffer = PipeBuffer::Disk(disk);
-                        }
-                        Err(e) => {
-                            vec.truncate(original_len);
-                            return Err(e);
-                        }
-                    }
-                }
-            }
-            #[cfg(not(miri))]
-            PipeBuffer::Disk(disk) => {
-                disk.write_bytes(data)?;
-            }
-        }
+        let state = self.lock_state();
+        let res = state.buffer.push_bytes(data);
         drop(state);
         self.ready.notify_all();
-        Ok(())
+        res
     }
 
     fn read_into(&self, buf: &mut [u8]) -> io::Result<usize> {
@@ -208,24 +183,9 @@ impl PipeInner {
         }
         let mut state = self.lock_state();
         loop {
-            match &mut state.buffer {
-                PipeBuffer::Memory(vec) => {
-                    if !vec.is_empty() {
-                        let mut read = 0;
-                        while read < buf.len() && !vec.is_empty() {
-                            buf[read] = vec.pop_front().unwrap();
-                            read += 1;
-                        }
-                        return Ok(read);
-                    }
-                }
-                #[cfg(not(miri))]
-                PipeBuffer::Disk(disk) => {
-                    if disk.available() > 0 {
-                        let n = disk.read_bytes(buf)?;
-                        return Ok(n);
-                    }
-                }
+            let n = state.buffer.read_into(buf)?;
+            if n > 0 {
+                return Ok(n);
             }
             if state.closed {
                 return Ok(0);
@@ -239,139 +199,6 @@ impl PipeInner {
 
     fn lock_state(&self) -> std::sync::MutexGuard<'_, PipeState> {
         self.state.lock().expect("script pipe state poisoned")
-    }
-}
-
-enum PipeBuffer {
-    Memory(VecDeque<u8>),
-    #[cfg(not(miri))]
-    Disk(DiskInner),
-}
-
-impl PipeBuffer {
-    fn new() -> Self {
-        PipeBuffer::Memory(VecDeque::new())
-    }
-}
-
-#[cfg(not(miri))]
-#[allow(clippy::disallowed_types)]
-struct DiskInner {
-    writer: Option<std::fs::File>,
-    reader: Option<std::fs::File>,
-    write_pos: u64,
-    read_pos: u64,
-    path: std::path::PathBuf,
-}
-
-#[cfg(not(miri))]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
-impl DiskInner {
-    fn write_bytes(&mut self, data: &[u8]) -> io::Result<()> {
-        let writer = self
-            .writer
-            .as_mut()
-            .ok_or_else(|| io::Error::other("disk writer closed"))?;
-        writer.seek(SeekFrom::Start(self.write_pos))?;
-        let new_backlog = (self.write_pos - self.read_pos) + data.len() as u64;
-        if new_backlog > PIPE_MAX_BACKLOG {
-            return Err(io::Error::new(
-                io::ErrorKind::OutOfMemory,
-                format!(
-                    "pipe buffer exceeded maximum active backlog ({} MiB)",
-                    PIPE_MAX_BACKLOG / (1024 * 1024)
-                ),
-            ));
-        }
-        writer.write_all(data)?;
-        self.write_pos += data.len() as u64;
-        Ok(())
-    }
-
-    fn read_bytes(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        let available = self.write_pos - self.read_pos;
-        if available == 0 {
-            return Ok(0);
-        }
-        let reader = self
-            .reader
-            .as_mut()
-            .ok_or_else(|| io::Error::other("disk reader closed"))?;
-        reader.seek(SeekFrom::Start(self.read_pos))?;
-        let to_read = (buf.len() as u64).min(available) as usize;
-        let n = reader.read(&mut buf[..to_read])?;
-        self.read_pos += n as u64;
-        if self.read_pos == self.write_pos {
-            self.read_pos = 0;
-            self.write_pos = 0;
-            if let Some(writer) = &mut self.writer {
-                writer.set_len(0)?;
-                writer.seek(SeekFrom::Start(0))?;
-            }
-            if let Some(reader) = &mut self.reader {
-                reader.seek(SeekFrom::Start(0))?;
-            }
-        }
-        Ok(n)
-    }
-
-    fn available(&self) -> u64 {
-        self.write_pos - self.read_pos
-    }
-
-    fn create_from_vec(vec: &mut VecDeque<u8>) -> io::Result<Self> {
-        let id = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let pid = std::process::id();
-        let path = std::env::temp_dir().join(format!("oxdock-pipe-{pid}-{id}.tmp"));
-
-        let mut writer = std::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(&path)?;
-
-        vec.make_contiguous();
-        let (slice, _) = vec.as_slices();
-        writer.write_all(slice)?;
-        writer.seek(SeekFrom::Start(0))?;
-
-        let reader = std::fs::File::open(&path)?;
-
-        Ok(Self {
-            writer: Some(writer),
-            reader: Some(reader),
-            write_pos: vec.len() as u64,
-            read_pos: 0,
-            path,
-        })
-    }
-}
-
-#[cfg(not(miri))]
-#[allow(clippy::disallowed_methods)]
-impl Drop for DiskInner {
-    fn drop(&mut self) {
-        self.writer.take();
-        self.reader.take();
-        let _ = std::fs::remove_file(&self.path);
-    }
-}
-
-struct PipeState {
-    buffer: PipeBuffer,
-    writers: usize,
-    keepers: usize,
-    closed: bool,
-}
-
-impl PipeState {
-    fn new() -> Self {
-        Self {
-            buffer: PipeBuffer::new(),
-            writers: 0,
-            keepers: 0,
-            closed: false,
-        }
     }
 }
 

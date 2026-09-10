@@ -717,7 +717,7 @@ fn step_kinds_in_steps(steps: &[Step]) -> HashSet<String> {
 
 fn collect_step_kinds(kind: &StepKind, kinds: &mut HashSet<String>) {
     kinds.insert(step_kind_name(kind).to_string());
-    if let StepKind::WithIo { cmd, .. } = kind {
+    if let StepKind::WithIo { cmd, .. } | StepKind::AssignCapture { cmd, .. } = kind {
         collect_step_kinds(cmd, kinds);
     }
 }
@@ -1229,8 +1229,10 @@ fn step_kind_name(kind: &StepKind) -> &'static str {
         StepKind::For { .. } => "For",
         StepKind::If { .. } => "If",
         StepKind::Assign { .. } => "Assign",
+        StepKind::AssignCapture { .. } => "AssignCapture",
         StepKind::AssignAsync { .. } => "AssignAsync",
         StepKind::Await { .. } => "Await",
+        StepKind::AwaitCapture { .. } => "AwaitCapture",
         StepKind::Cancel { .. } => "Cancel",
         StepKind::Timeout { .. } => "Timeout",
         StepKind::Sleep { .. } => "Sleep",
