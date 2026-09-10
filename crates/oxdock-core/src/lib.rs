@@ -9,6 +9,7 @@ pub use oxdock_process::ProcessManager;
 
 define_pipeline! {
     StepKind::Run(..) => exec::dispatch_run,
+    StepKind::RunExec { .. } => exec::dispatch_run_exec,
     StepKind::AsyncBlock { .. } => exec::dispatch_async_block,
     StepKind::Echo(..) => exec::dispatch_echo,
     StepKind::Workdir(..) => exec::dispatch_workdir,

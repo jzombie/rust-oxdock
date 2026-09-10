@@ -23,6 +23,8 @@ mod let_capture;
 mod macro_input_parens;
 #[path = "integration/platform_display.rs"]
 mod platform_display;
+#[path = "integration/run_exec.rs"]
+mod run_exec;
 #[path = "integration/timeout_block.rs"]
 mod timeout_block;
 #[path = "integration/unified_values.rs"]

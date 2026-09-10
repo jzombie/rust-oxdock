@@ -18,6 +18,15 @@ ASSERT_STDOUT one
 ASSERT_STDOUT two
 ```
 
+### RUN shell and exec forms
+
+Shell form (`RUN <command...>`) joins its arguments and runs the string in the system shell. Exec form (`RUN ["exe", "arg", ...]`) spawns the executable directly with no shell. Exec form has no shell expansion, globbing, redirection, or pipes. Quoted `\{{ ... }}` templates still interpolate per element, and guards and wrappers (`ASYNC`, `TIMEOUT`, `WITH_IO`) apply to both forms.
+
+```oxdock
+RUN ["cargo", "--version"]
+ASSERT_STDOUT cargo
+```
+
 ### Comments
 
 Three comment styles are supported: `//` line comments, nestable `/* ... */` block comments, and `#` comments. A `#` comment is only recognized at the start of a line (optionally indented); inside a command payload a `#` is ordinary text. Similarly, `//` ends a `RUN` argument list but survives inside quoted strings:

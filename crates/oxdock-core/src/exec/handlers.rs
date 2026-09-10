@@ -2,9 +2,10 @@ use anyhow::{Context, Result, anyhow, bail};
 use std::sync::Arc;
 
 use oxdock_fs::EntryKind;
-use oxdock_parser::{Expr, IoBinding, IoStream, Step, StepKind, Value, WorkspaceTarget};
+use oxdock_parser::{Arg, Expr, IoBinding, IoStream, Step, StepKind, Value, WorkspaceTarget};
 use oxdock_process::{
-    BackgroundHandle, CommandOptions, CommandResult, CommandStderr, CommandStdout, ProcessManager,
+    BackgroundHandle, CommandOptions, CommandResult, CommandStderr, CommandStdin, CommandStdout,
+    INHERIT_STDOUT_ENV_VAR, PROCESS_DEBUG_ENV_VAR, ProcessManager,
 };
 use sha2::{Digest, Sha256};
 
@@ -85,17 +86,17 @@ pub(super) fn run<P: ProcessManager>(cx: &mut StepCtx<'_, P>, idx: usize, cmd: &
     let step_stdin = if cx.expose_stdin {
         cx.stdin.clone()
     } else {
-        None
+        CommandStdin::Null
     };
 
     let inherit_override = cx
         .state
         .envs
-        .get("OXDOCK_INHERIT_STDOUT")
+        .get(INHERIT_STDOUT_ENV_VAR)
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
 
-    if std::env::var("OXBOOK_DEBUG").is_ok() {
+    if std::env::var(PROCESS_DEBUG_ENV_VAR).is_ok() {
         eprintln!(
             "DEBUG: step RUN {} inherit_override={}",
             cmd, inherit_override
@@ -175,6 +176,170 @@ pub(super) fn run<P: ProcessManager>(cx: &mut StepCtx<'_, P>, idx: usize, cmd: &
             cmd,
             status
         );
+    }
+    Ok(())
+}
+
+/// Direct-spawn counterpart of [`run`]: executes an already-resolved `argv`
+/// without any shell (`RUN ["exe", "arg", ...]`). `CommandContext` and
+/// `CommandOptions` (cwd/env, `WITH_IO` pipes, `ASYNC`/cancellable
+/// backgrounding, [`INHERIT_STDOUT_ENV_VAR`]) are built exactly like [`run`];
+/// only the spawn call differs (`spawn_argv`, no `shell_cmd`).
+pub(super) fn run_argv<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    idx: usize,
+    argv: &[String],
+) -> Result<()> {
+    let ctx = cx.state.command_ctx()?;
+    let step_stdin = if cx.expose_stdin {
+        cx.stdin.clone()
+    } else {
+        CommandStdin::Null
+    };
+
+    let inherit_override = cx
+        .state
+        .envs
+        .get(INHERIT_STDOUT_ENV_VAR)
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
+    if std::env::var(PROCESS_DEBUG_ENV_VAR).is_ok() {
+        eprintln!(
+            "DEBUG: step RUN {:?} inherit_override={}",
+            argv, inherit_override
+        );
+    }
+
+    let stdout_mode = if inherit_override {
+        CommandStdout::Inherit
+    } else {
+        cx.out
+            .clone()
+            .map(|handle| handle.to_stdout())
+            .unwrap_or(CommandStdout::Inherit)
+    };
+    let stderr_mode = if inherit_override {
+        CommandStderr::Inherit
+    } else {
+        cx.err
+            .clone()
+            .map(|handle| handle.to_stderr())
+            .unwrap_or(CommandStderr::Inherit)
+    };
+
+    let mut options = if cx.state.inside_async || cx.state.cancellable {
+        // Inside an ASYNC block — use background mode so we can register
+        // the handle for cancellation via active_process.
+        CommandOptions::background()
+    } else {
+        CommandOptions::foreground()
+    };
+    options.stdin = step_stdin;
+    options.stdout = stdout_mode;
+    options.stderr = stderr_mode;
+
+    // Spawn the executable directly (no shell).
+    let mut handle = match cx
+        .process
+        .spawn_argv(&ctx, argv, options)
+        .with_context(|| format!("step {}: RUN {argv:?}", idx + 1))?
+    {
+        CommandResult::Background(h) => h,
+        CommandResult::Completed => return Ok(()),
+        CommandResult::Captured(_) => {
+            bail!(
+                "step {}: RUN {argv:?} unexpectedly captured output",
+                idx + 1
+            )
+        }
+    };
+
+    // Register the handle for cancellation (only meaningful for background handles).
+    {
+        let mut guard = cx
+            .state
+            .active_process
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *guard = Some(Box::new(handle.clone()));
+    }
+
+    // Wait for the process to complete.
+    let status = handle.wait();
+
+    // Clear the registration BEFORE dropping the handle clone in active_process.
+    // The clone was never polled, so we must prevent Drop from logging it as killed.
+    {
+        let mut guard = cx
+            .state
+            .active_process
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *guard = None;
+    }
+
+    let status = status?;
+    if !status.success() {
+        bail!(
+            "step {}: RUN {argv:?} exited with status {}",
+            idx + 1,
+            status
+        );
+    }
+    Ok(())
+}
+
+/// Resolve exec-form (`RUN [...]`) argv elements with explicit coercion:
+/// `Arg::String`/`Arg::Parts` resolve to exactly one entry each;
+/// `Arg::Expr` evaluates and coerces by value — `String`/`Int`/`Bool` push
+/// one entry, `List` flattens recursively (each scalar becomes its own
+/// entry), `Map`/`TaskHandle` bail with a type error.
+/// Template expansion applies strictly to script-literal source text
+/// (`Arg::String`/`Arg::Parts` via `resolve_arg`, string literals inline
+/// below). Evaluated runtime values are opaque data and are never
+/// re-expanded: a variable holding `{{ ... }}` text passes through
+/// verbatim instead of leaking a second expansion pass.
+/// Never uses shell joining or `expand_dsl_vars`.
+pub(super) fn resolve_run_exec_argv<P: ProcessManager>(
+    argv: &[Arg],
+    cx: &mut StepCtx<'_, P>,
+) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    for arg in argv {
+        match arg {
+            Arg::String(_, _) | Arg::Parts(_) => {
+                out.push(super::args::resolve_arg(arg, cx)?);
+            }
+            Arg::Expr(Expr::Literal(Value::String(s))) => {
+                out.push(super::args::expand_string(s, &cx.state.envs, cx.state)?);
+            }
+            Arg::Expr(e) => {
+                let val = super::args::evaluate_expr(e, cx)?;
+                flatten_exec_value(&val, &mut out)?;
+            }
+        }
+    }
+    if out.is_empty() {
+        bail!("RUN exec form requires at least one argument");
+    }
+    Ok(out)
+}
+
+fn flatten_exec_value(val: &Value, out: &mut Vec<String>) -> Result<()> {
+    match val {
+        Value::String(s) => out.push(s.clone()),
+        Value::Int(i) => out.push(i.to_string()),
+        Value::Bool(b) => out.push(b.to_string()),
+        Value::List(items) => {
+            for item in items {
+                flatten_exec_value(item, out)?;
+            }
+        }
+        Value::Map(_) => bail!("RUN exec form element must be a string, got map"),
+        Value::TaskHandle(id) => {
+            bail!("RUN exec form element must be a string, got task handle task#{id}")
+        }
     }
     Ok(())
 }
@@ -413,12 +578,12 @@ pub(super) fn read<P: ProcessManager>(
             Ok(())
         })?;
     } else {
-        let input_stream = cx.stdin.clone().ok_or_else(|| {
-            anyhow!(
+        let CommandStdin::Stream(input_stream) = cx.stdin.clone() else {
+            bail!(
                 "step {}: READ requires stdin (use WITH_IO [stdin=...] READ)",
                 idx + 1
-            )
-        })?;
+            );
+        };
         let mut buf = [0u8; super::io::CHUNK_SIZE];
         loop {
             let n = {
@@ -445,12 +610,12 @@ pub(super) fn read_line<P: ProcessManager>(
     idx: usize,
     var: &str,
 ) -> Result<()> {
-    let input_stream = cx.stdin.clone().ok_or_else(|| {
-        anyhow!(
+    let CommandStdin::Stream(input_stream) = cx.stdin.clone() else {
+        bail!(
             "step {}: READ_LINE requires stdin (use WITH_IO [stdin=...] READ_LINE $var)",
             idx + 1
-        )
-    })?;
+        );
+    };
     let clean_var = var.trim_start_matches('$').to_string();
     let mut buf = Vec::new();
     let mut byte = [0u8; 1];
@@ -499,7 +664,7 @@ pub(super) fn write<P: ProcessManager>(
             .write_file(&target, body.as_bytes())
             .with_context(|| format!("failed to write {}", target.display()))?;
     } else {
-        let Some(input_stream) = cx.stdin.clone() else {
+        let CommandStdin::Stream(input_stream) = cx.stdin.clone() else {
             bail!(
                 "step {}: WRITE {} requires stdin (use WITH_IO [stdin=...] WRITE)",
                 idx + 1,
@@ -552,7 +717,7 @@ pub(super) fn append<P: ProcessManager>(
             .append_file(&target, body.as_bytes())
             .with_context(|| format!("failed to append to {}", target.display()))?;
     } else {
-        let Some(input_stream) = cx.stdin.clone() else {
+        let CommandStdin::Stream(input_stream) = cx.stdin.clone() else {
             bail!(
                 "step {}: APPEND {} requires stdin (use WITH_IO [stdin=...] APPEND)",
                 idx + 1,
@@ -621,7 +786,7 @@ pub(super) fn replace<P: ProcessManager>(
                 out_buf.clear();
             }
         } else {
-            let Some(input_stream) = cx.stdin.clone() else {
+            let CommandStdin::Stream(input_stream) = cx.stdin.clone() else {
                 bail!(
                     "step {}: EXPAND requires stdin when no file path is given \
                      (use WITH_IO [stdin=...] EXPAND)",
@@ -745,7 +910,7 @@ pub(super) fn assert_stdout<P: ProcessManager>(
     needle: &str,
 ) -> Result<()> {
     // Mode 1: Piped stdin — actively consume stream and check
-    if let Some(input_stream) = cx.stdin.clone() {
+    if let CommandStdin::Stream(input_stream) = cx.stdin.clone() {
         let mut guard = input_stream
             .lock()
             .map_err(|_| anyhow!("failed to lock stdin for ASSERT_STDOUT"))?;
@@ -815,6 +980,49 @@ pub(crate) fn with_io_block<P: ProcessManager>(
     bail!("WITH_IO block should have been expanded during parsing")
 }
 
+/// True when the wrapped command is a lone `RUN`: the only consumer or
+/// producer shape that can hold an OS handle directly.
+fn is_single_run(cmd: &StepKind) -> bool {
+    matches!(cmd, StepKind::Run(_) | StepKind::RunExec { .. })
+}
+
+/// True when the wrapped command is an `ASYNC` block or task whose body is
+/// exactly one `RUN`, guarded or not. A skipped guarded `RUN` still ends
+/// its single step worker, which closes the writer and delivers EOF, so
+/// guards do not change promotion safety. DSL bodies (`ECHO`, `READ_LINE`,
+/// `WRITE`, keepers) stay on script pipes so multi writer fan in keeps
+/// working.
+fn async_single_run_body(cmd: &StepKind) -> bool {
+    match cmd {
+        StepKind::AsyncBlock { body } | StepKind::AssignAsync { body, .. } => {
+            matches!(body.as_slice(), [step] if is_single_run(&step.kind))
+        }
+        _ => false,
+    }
+}
+
+/// Whether `WITH_IO` promotes fresh pipe names to OS kernel pairs.
+/// Fires when wrapping a single `RUN` background task (endpoints are
+/// allocated on this thread before the worker spawns) or when evaluated
+/// inside a worker thread around a single `RUN` (the `LET $t = WITH_IO
+/// [..] ASYNC RUN` lowered form). Everything else, including DSL bodies
+/// and sequential steps, keeps store and forward script pipes.
+#[cfg(not(miri))]
+fn promotion_trigger(cmd: &StepKind, inside_async: bool) -> bool {
+    async_single_run_body(cmd) || (inside_async && is_single_run(cmd))
+}
+
+#[cfg(miri)]
+fn promotion_trigger(_cmd: &StepKind, _inside_async: bool) -> bool {
+    false
+}
+
+/// Whether this binding resolves to a zero copy OS handle instead of a
+/// bridged shared handle: the ultimate consumer or producer is a `RUN`.
+fn run_terminated(cmd: &StepKind) -> bool {
+    is_single_run(cmd) || async_single_run_body(cmd)
+}
+
 pub(crate) fn with_io<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     generation: usize,
@@ -822,17 +1030,19 @@ pub(crate) fn with_io<P: ProcessManager>(
     bindings: &[IoBinding],
     cmd: &StepKind,
 ) -> Result<()> {
-    let mut step_stdin = None;
+    let mut step_stdin = CommandStdin::Null;
     let mut step_stdout = cx.out.clone();
     let mut step_stderr = cx.err.clone();
     let mut next_expose_stdin = false;
     let mut seen_stdin = false;
     let mut seen_stdout = false;
     let mut seen_stderr = false;
+    let trigger = promotion_trigger(cmd, cx.state.inside_async);
+    let direct = run_terminated(cmd);
 
     for binding in bindings {
         if let Some(pipe) = &binding.pipe {
-            cx.state.io.ensure_script_pipe(pipe);
+            cx.state.io.ensure_pipe_for(pipe, trigger)?;
         }
         match binding.stream {
             IoStream::Stdin => {
@@ -842,13 +1052,7 @@ pub(crate) fn with_io<P: ProcessManager>(
                 seen_stdin = true;
                 next_expose_stdin = true;
                 step_stdin = if let Some(pipe) = &binding.pipe {
-                    Some(cx.state.io.input_pipe(pipe).ok_or_else(|| {
-                        anyhow!(
-                            "step {}: WITH_IO stdin pipe '{}' is undefined",
-                            idx + 1,
-                            pipe
-                        )
-                    })?)
+                    cx.state.io.resolve_stdin(idx, pipe, direct)?
                 } else {
                     cx.stdin.clone()
                 };
@@ -859,19 +1063,7 @@ pub(crate) fn with_io<P: ProcessManager>(
                 }
                 seen_stdout = true;
                 step_stdout = if let Some(pipe) = &binding.pipe {
-                    Some(
-                        cx.state
-                            .io
-                            .output_pipe_stdout(pipe)
-                            .ok_or_else(|| {
-                                anyhow!(
-                                    "step {}: WITH_IO stdout pipe '{}' is undefined",
-                                    idx + 1,
-                                    pipe
-                                )
-                            })?
-                            .to_stream_handle(),
-                    )
+                    Some(cx.state.io.resolve_stdout(idx, pipe, direct)?)
                 } else {
                     cx.out.clone()
                 };
@@ -882,19 +1074,7 @@ pub(crate) fn with_io<P: ProcessManager>(
                 }
                 seen_stderr = true;
                 step_stderr = if let Some(pipe) = &binding.pipe {
-                    Some(
-                        cx.state
-                            .io
-                            .output_pipe_stderr(pipe)
-                            .ok_or_else(|| {
-                                anyhow!(
-                                    "step {}: WITH_IO stderr pipe '{}' is undefined",
-                                    idx + 1,
-                                    pipe
-                                )
-                            })?
-                            .to_stream_handle(),
-                    )
+                    Some(cx.state.io.resolve_stderr(idx, pipe, direct)?)
                 } else {
                     cx.err.clone()
                 };
@@ -1116,6 +1296,17 @@ pub(crate) fn dispatch_run<P: ProcessManager>(
     let cmd = super::args::resolve_arg(arg, cx)?;
     let cmd = super::args::expand_dsl_vars(&cmd, cx.state);
     run(cx, 0, &cmd)
+}
+
+pub(crate) fn dispatch_run_exec<P: ProcessManager>(
+    step: &StepKind,
+    cx: &mut StepCtx<'_, P>,
+) -> Result<()> {
+    let StepKind::RunExec { argv } = step else {
+        unreachable!()
+    };
+    let resolved = resolve_run_exec_argv(argv, cx)?;
+    run_argv(cx, 0, &resolved)
 }
 
 pub(crate) fn dispatch_async_block<P: ProcessManager>(

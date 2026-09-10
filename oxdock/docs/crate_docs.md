@@ -26,6 +26,15 @@ ASSERT_STDOUT one
 ASSERT_STDOUT two
 ```
 
+### RUN shell and exec forms
+
+Shell form (`RUN <command...>`) joins its arguments and runs the string in the system shell. Exec form (`RUN ["exe", "arg", ...]`) spawns the executable directly with no shell. Exec form has no shell expansion, globbing, redirection, or pipes. Quoted `{{ ... }}` templates still interpolate per element, and guards and wrappers (`ASYNC`, `TIMEOUT`, `WITH_IO`) apply to both forms.
+
+```oxdock
+RUN ["cargo", "--version"]
+ASSERT_STDOUT cargo
+```
+
 ### Comments
 
 Three comment styles are supported: `//` line comments, nestable `/* ... */` block comments, and `#` comments. A `#` comment is only recognized at the start of a line (optionally indented); inside a command payload a `#` is ordinary text. Similarly, `//` ends a `RUN` argument list but survives inside quoted strings:
@@ -269,7 +278,7 @@ CANCEL $worker
 | [`ENV`](#env) | `ENV KEY=value` |
 | [`INHERIT_ENV`](#inherit_env) | `INHERIT_ENV <key>...` |
 | [`ECHO`](#echo) | `ECHO <message>` |
-| [`RUN`](#run) | `RUN <command...>` |
+| [`RUN`](#run) | `RUN <command...> \| RUN ["exe", "arg", ...]` |
 | [`COPY`](#copy) | `COPY [--from-current-workspace] <from> <to>` |
 | [`COPY_GIT`](#copy_git) | `COPY_GIT [--include-dirty] <rev> <src> <dst>` |
 | [`SYMLINK`](#symlink) | `SYMLINK <from> <to>` |
@@ -303,7 +312,7 @@ Reroute standard streams.
 
 **Syntax:** `WITH_IO [bindings] <command> | WITH_IO [bindings] { <commands> }`
 
-Reroutes the standard streams of the next command or, in block form, of every enclosed command. Bindings map streams (`stdin`, `stdout`, `stderr`) to named pipes (`stdout=pipe:name`). Pipe names registered by the host runtime tee structured output elsewhere; a name bound as output can later feed another command's `stdin`, connecting commands without touching the terminal. Nested blocks stack defaults; inline bindings override inherited ones for their command only; closing a block restores previous wiring.
+Reroutes the standard streams of the next command or, in block form, of every enclosed command. Bindings map streams (`stdin`, `stdout`, `stderr`) to named script pipes (`stdout=pipe:name`, `stderr=pipe:name`). Both stdout and stderr pipes capture output the same way. Pipes hold bytes in memory and spill to a temp file above 8 MiB, so a producer can finish before the consumer starts. If WITH_IO wraps an ASYNC block whose body is a single RUN, guarded or not, the pipe is a zero copy OS kernel pipe instead: pair it with a consumer that runs while the producer is alive, since output past the 64 KiB kernel buffer stalls until drained. A second producer or consumer on a live name is an explicit error. A name bound as output can later feed another command's `stdin`, connecting commands without touching the terminal. Binding `stdout` and `stderr` to the same live pipe name fails deterministically. Merge streams in shell via `2>&1` instead. Nested blocks stack defaults; inline bindings override inherited ones for their command only; closing a block restores previous wiring.
 
 **Examples:**
 
@@ -724,11 +733,11 @@ ASSERT_STDOUT "World"
 
 ### RUN
 
-Execute shell command.
+Execute shell command or direct executable.
 
-**Syntax:** `RUN <command...>`
+**Syntax:** `RUN <command...> | RUN ["exe", "arg", ...]`
 
-Runs command in cwd.
+Shell form (`RUN <command...>`) runs the joined command string in the system shell (`$SHELL -c` / `COMSPEC /C`). Exec form (`RUN ["exe", "arg", ...]`) spawns the executable directly with no shell, so there is no shell expansion, globbing, redirection, or pipes; use it for portable commands. Guards and wrappers (`ASYNC`, `TIMEOUT`, `WITH_IO`, `LET`) apply to both forms.
 
 **Arguments:**
 
@@ -742,6 +751,12 @@ Runs command in cwd.
 
 ```oxdock
 RUN echo hello
+```
+
+**Example: run exec form**
+
+```oxdock
+RUN ["cargo", "--version"]
 ```
 
 
