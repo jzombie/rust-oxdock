@@ -2302,6 +2302,34 @@ fn read_line_ping_pong_proves_live_streaming() {
     ignore = "GuardedPath::tempdir relies on OS tempdirs; blocked under Miri isolation"
 )]
 #[test]
+fn async_self_referential_write_then_read_sees_eof() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+
+    // An ASYNC task that produces to a pipe and later consumes the same
+    // pipe must observe EOF once its final producer step completes: the
+    // spawn-time keeper expires at that step boundary instead of living
+    // for the whole task (which would deadlock the consumer step waiting
+    // for a close that never comes).
+    let script = indoc! {r#"
+        LET $t = ASYNC {
+            WITH_IO [stdout=pipe:p] ECHO "hello"
+            WITH_IO [stdin=pipe:p] WRITE got.txt
+        }
+        AWAIT $t
+    "#};
+    let steps = oxdock_core::parse_script(script).expect("parse self-referential script");
+    run_steps_with_context_result_with_io(&root, &root, &steps, ExecIo::new())
+        .expect("self-referential pipe must complete without deadlock");
+
+    assert_eq!(read_trimmed(&root.join("got.txt").unwrap()), "hello");
+}
+
+#[cfg_attr(
+    miri,
+    ignore = "GuardedPath::tempdir relies on OS tempdirs; blocked under Miri isolation"
+)]
+#[test]
 fn timeout_body_completes_within_deadline() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);

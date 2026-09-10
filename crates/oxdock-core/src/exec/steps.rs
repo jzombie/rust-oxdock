@@ -667,6 +667,18 @@ fn execute_steps_inner<P: ProcessManager>(
         };
 
         let restore_result = restore_scopes(state, step.scope_exit);
+        // Keeper expiry: drop spawn-time pins whose final producer step
+        // just completed, so later consumer steps in the same task observe
+        // EOF. Gated on slice identity, so nested bodies executing through
+        // this same loop never discharge the worker's top-level map.
+        let expiry_drained = if let Some(expiry) = state.keeper_expiry.as_mut() {
+            expiry.expire_step(steps, idx)
+        } else {
+            false
+        };
+        if expiry_drained {
+            state.keeper_expiry = None;
+        }
         step_result?;
         restore_result?;
     }

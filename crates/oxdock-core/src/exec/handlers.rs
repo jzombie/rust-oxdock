@@ -1,4 +1,5 @@
 use anyhow::{Context, Result, anyhow, bail};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use oxdock_fs::EntryKind;
@@ -11,6 +12,7 @@ use sha2::{Digest, Sha256};
 
 use super::fs_ops::{canonical_cwd, copy_entry, hash_path};
 use super::io::write_stdout;
+use super::pipe::KeeperGuard;
 use super::steps::StepCtx;
 
 pub(super) fn inherit_env<P: ProcessManager>(
@@ -1286,6 +1288,104 @@ pub(crate) fn if_then<P: ProcessManager>(
 // These extract fields from `StepKind` variants, resolve arguments, and
 // forward to the actual handler functions. Used by `define_pipeline!`.
 
+/// Collect the pipes a step subtree produces to (`stdout`/`stderr`
+/// bindings), same-thread only. Nested `ASYNC` bodies run on other threads
+/// with their own pins and are excluded; `Timeout`/`For`/`If`/`WithIo`
+/// bodies run inline and are included. Only producers pin: a task that
+/// only reads a pipe relies on EOF-from-detach to complete, so pinning it
+/// would deadlock. Each entry pairs the pipe name with whether OS
+/// promotion applies (OR-merged across occurrences).
+fn collect_steps_producers(steps: &[Step], out: &mut Vec<(String, bool)>) {
+    for step in steps {
+        collect_kind_producers(&step.kind, out);
+    }
+}
+
+fn collect_kind_producers(kind: &StepKind, out: &mut Vec<(String, bool)>) {
+    match kind {
+        StepKind::WithIo { bindings, cmd } => {
+            let promote = promotion_trigger(cmd, true);
+            for binding in bindings {
+                match binding.stream {
+                    IoStream::Stdout | IoStream::Stderr => {
+                        if let Some(pipe) = &binding.pipe {
+                            match out.iter_mut().find(|(name, _)| name == pipe) {
+                                Some(entry) => {
+                                    entry.1 = entry.1 || promote;
+                                }
+                                None => {
+                                    out.push((pipe.clone(), promote));
+                                }
+                            }
+                        }
+                    }
+                    IoStream::Stdin => {}
+                }
+            }
+            collect_kind_producers(cmd, out);
+        }
+        StepKind::Timeout { body, .. } => collect_steps_producers(body, out),
+        StepKind::For { body, .. } => collect_steps_producers(body, out),
+        StepKind::If {
+            then_body,
+            else_ifs,
+            else_body,
+            ..
+        } => {
+            collect_steps_producers(then_body, out);
+            for (_, branch) in else_ifs {
+                collect_steps_producers(branch, out);
+            }
+            if let Some(body) = else_body {
+                collect_steps_producers(body, out);
+            }
+        }
+        StepKind::AsyncBlock { .. } | StepKind::AssignAsync { .. } => {}
+        _ => {}
+    }
+}
+
+/// Ensure every pipe an async `body` produces to exists (honoring OS
+/// promotion) and pin a keeper slot on each script pipe, synchronously on
+/// the spawning thread. Pins group by the top-level index of the final
+/// producer step for each pipe: the worker drops a pipe's guard once that
+/// step completes, so transient gaps between producers never signal EOF
+/// while later consumer steps in the same task still observe it. Returns
+/// `None` when the body produces to no script pipe.
+fn pin_async_keepers<P: ProcessManager>(
+    cx: &StepCtx<'_, P>,
+    body: &[Step],
+) -> Result<Option<super::state::KeeperExpiry>> {
+    let mut last: HashMap<String, (bool, usize)> = HashMap::new();
+    for (idx, step) in body.iter().enumerate() {
+        let mut produced = Vec::new();
+        collect_kind_producers(&step.kind, &mut produced);
+        for (name, promote) in produced {
+            let entry = last.entry(name).or_insert((false, 0));
+            entry.0 = entry.0 || promote;
+            entry.1 = idx;
+        }
+    }
+    let mut by_index: HashMap<usize, Vec<(String, bool)>> = HashMap::new();
+    for (name, (promote, idx)) in last {
+        by_index.entry(idx).or_default().push((name, promote));
+    }
+    let mut map: HashMap<usize, Vec<KeeperGuard>> = HashMap::new();
+    for (idx, specs) in &by_index {
+        for (name, promote) in specs {
+            cx.state.io.ensure_pipe_for(name, *promote)?;
+            if let Some(guard) = cx.state.io.pin_keeper(name)? {
+                map.entry(*idx).or_default().push(guard);
+            }
+        }
+    }
+    if map.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(super::state::KeeperExpiry::new(body, map)))
+    }
+}
+
 pub(crate) fn dispatch_run<P: ProcessManager>(
     step: &StepKind,
     cx: &mut StepCtx<'_, P>,
@@ -1317,12 +1417,20 @@ pub(crate) fn dispatch_async_block<P: ProcessManager>(
         unreachable!()
     };
 
+    // Pre-allocate keeper handles synchronously on this thread, before the
+    // worker exists, so pipes the block produces to can never observe a
+    // transient-only zero-writer window. Guards expire by step index as
+    // the worker completes its final producer steps, then ride out the
+    // thread in forked state.
+    let body = body.clone();
+    let expiry = pin_async_keepers(cx, &body)?;
+
     // Fork the execution state for the child thread.
     // This clones the fs (via clone_box), envs, cwd, var_scopes, etc.
     // The child gets fresh bg_children and scope_stack.
-    let forked_state = cx.state.fork();
+    let mut forked_state = cx.state.fork();
+    forked_state.keeper_expiry = expiry;
     let forked_process = cx.process.clone();
-    let body = body.clone();
     let stdin = cx.stdin.clone();
     let expose_stdin = cx.expose_stdin;
     let out = cx.out.clone();
@@ -1703,10 +1811,18 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
         .next_task_id
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
-    // Fork the execution state for the child thread
-    let forked_state = cx.state.fork();
-    let forked_process = cx.process.clone();
+    // Pre-allocate keeper handles synchronously on this thread, before the
+    // worker exists, so pipes the task produces to (e.g. keeper
+    // `WITH_IO [stdout=pipe:tx] ASYNC ...` bindings) can never observe a
+    // transient-only zero-writer window. Guards expire by step index as
+    // the worker completes its final producer steps.
     let body = body.to_vec();
+    let expiry = pin_async_keepers(cx, &body)?;
+
+    // Fork the execution state for the child thread
+    let mut forked_state = cx.state.fork();
+    forked_state.keeper_expiry = expiry;
+    let forked_process = cx.process.clone();
     let stdin = cx.stdin.clone();
     let expose_stdin = cx.expose_stdin;
     // Named tasks write stdout into a per-task spillable sink instead of
@@ -1718,7 +1834,7 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
     let cancel_token = std::sync::Arc::clone(&forked_state.cancel_token);
     let active_process = std::sync::Arc::clone(&forked_state.active_process);
 
-    // Spawn the task thread
+    // Spawn the task thread. Leftover guards unpin at thread termination.
     let join = std::thread::spawn(move || {
         let mut child_state = forked_state;
         let mut child_process = forked_process;
