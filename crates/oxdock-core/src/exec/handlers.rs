@@ -1,15 +1,18 @@
 use anyhow::{Context, Result, anyhow, bail};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use oxdock_fs::EntryKind;
-use oxdock_parser::{Expr, IoBinding, IoStream, Step, StepKind, Value, WorkspaceTarget};
+use oxdock_parser::{Arg, Expr, IoBinding, IoStream, Step, StepKind, Value, WorkspaceTarget};
 use oxdock_process::{
-    BackgroundHandle, CommandOptions, CommandResult, CommandStderr, CommandStdout, ProcessManager,
+    BackgroundHandle, CommandOptions, CommandResult, CommandStderr, CommandStdin, CommandStdout,
+    INHERIT_STDOUT_ENV_VAR, PROCESS_DEBUG_ENV_VAR, ProcessManager,
 };
 use sha2::{Digest, Sha256};
 
 use super::fs_ops::{canonical_cwd, copy_entry, hash_path};
 use super::io::write_stdout;
+use super::pipe::KeeperGuard;
 use super::steps::StepCtx;
 
 pub(super) fn inherit_env<P: ProcessManager>(
@@ -85,17 +88,17 @@ pub(super) fn run<P: ProcessManager>(cx: &mut StepCtx<'_, P>, idx: usize, cmd: &
     let step_stdin = if cx.expose_stdin {
         cx.stdin.clone()
     } else {
-        None
+        CommandStdin::Null
     };
 
     let inherit_override = cx
         .state
         .envs
-        .get("OXDOCK_INHERIT_STDOUT")
+        .get(INHERIT_STDOUT_ENV_VAR)
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
 
-    if std::env::var("OXBOOK_DEBUG").is_ok() {
+    if std::env::var(PROCESS_DEBUG_ENV_VAR).is_ok() {
         eprintln!(
             "DEBUG: step RUN {} inherit_override={}",
             cmd, inherit_override
@@ -175,6 +178,170 @@ pub(super) fn run<P: ProcessManager>(cx: &mut StepCtx<'_, P>, idx: usize, cmd: &
             cmd,
             status
         );
+    }
+    Ok(())
+}
+
+/// Direct-spawn counterpart of [`run`]: executes an already-resolved `argv`
+/// without any shell (`RUN ["exe", "arg", ...]`). `CommandContext` and
+/// `CommandOptions` (cwd/env, `WITH_IO` pipes, `ASYNC`/cancellable
+/// backgrounding, [`INHERIT_STDOUT_ENV_VAR`]) are built exactly like [`run`];
+/// only the spawn call differs (`spawn_argv`, no `shell_cmd`).
+pub(super) fn run_argv<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    idx: usize,
+    argv: &[String],
+) -> Result<()> {
+    let ctx = cx.state.command_ctx()?;
+    let step_stdin = if cx.expose_stdin {
+        cx.stdin.clone()
+    } else {
+        CommandStdin::Null
+    };
+
+    let inherit_override = cx
+        .state
+        .envs
+        .get(INHERIT_STDOUT_ENV_VAR)
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
+    if std::env::var(PROCESS_DEBUG_ENV_VAR).is_ok() {
+        eprintln!(
+            "DEBUG: step RUN {:?} inherit_override={}",
+            argv, inherit_override
+        );
+    }
+
+    let stdout_mode = if inherit_override {
+        CommandStdout::Inherit
+    } else {
+        cx.out
+            .clone()
+            .map(|handle| handle.to_stdout())
+            .unwrap_or(CommandStdout::Inherit)
+    };
+    let stderr_mode = if inherit_override {
+        CommandStderr::Inherit
+    } else {
+        cx.err
+            .clone()
+            .map(|handle| handle.to_stderr())
+            .unwrap_or(CommandStderr::Inherit)
+    };
+
+    let mut options = if cx.state.inside_async || cx.state.cancellable {
+        // Inside an ASYNC block — use background mode so we can register
+        // the handle for cancellation via active_process.
+        CommandOptions::background()
+    } else {
+        CommandOptions::foreground()
+    };
+    options.stdin = step_stdin;
+    options.stdout = stdout_mode;
+    options.stderr = stderr_mode;
+
+    // Spawn the executable directly (no shell).
+    let mut handle = match cx
+        .process
+        .spawn_argv(&ctx, argv, options)
+        .with_context(|| format!("step {}: RUN {argv:?}", idx + 1))?
+    {
+        CommandResult::Background(h) => h,
+        CommandResult::Completed => return Ok(()),
+        CommandResult::Captured(_) => {
+            bail!(
+                "step {}: RUN {argv:?} unexpectedly captured output",
+                idx + 1
+            )
+        }
+    };
+
+    // Register the handle for cancellation (only meaningful for background handles).
+    {
+        let mut guard = cx
+            .state
+            .active_process
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *guard = Some(Box::new(handle.clone()));
+    }
+
+    // Wait for the process to complete.
+    let status = handle.wait();
+
+    // Clear the registration BEFORE dropping the handle clone in active_process.
+    // The clone was never polled, so we must prevent Drop from logging it as killed.
+    {
+        let mut guard = cx
+            .state
+            .active_process
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *guard = None;
+    }
+
+    let status = status?;
+    if !status.success() {
+        bail!(
+            "step {}: RUN {argv:?} exited with status {}",
+            idx + 1,
+            status
+        );
+    }
+    Ok(())
+}
+
+/// Resolve exec-form (`RUN [...]`) argv elements with explicit coercion:
+/// `Arg::String`/`Arg::Parts` resolve to exactly one entry each;
+/// `Arg::Expr` evaluates and coerces by value — `String`/`Int`/`Bool` push
+/// one entry, `List` flattens recursively (each scalar becomes its own
+/// entry), `Map`/`TaskHandle` bail with a type error.
+/// Template expansion applies strictly to script-literal source text
+/// (`Arg::String`/`Arg::Parts` via `resolve_arg`, string literals inline
+/// below). Evaluated runtime values are opaque data and are never
+/// re-expanded: a variable holding `{{ ... }}` text passes through
+/// verbatim instead of leaking a second expansion pass.
+/// Never uses shell joining or `expand_dsl_vars`.
+pub(super) fn resolve_run_exec_argv<P: ProcessManager>(
+    argv: &[Arg],
+    cx: &mut StepCtx<'_, P>,
+) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    for arg in argv {
+        match arg {
+            Arg::String(_, _) | Arg::Parts(_) => {
+                out.push(super::args::resolve_arg(arg, cx)?);
+            }
+            Arg::Expr(Expr::Literal(Value::String(s))) => {
+                out.push(super::args::expand_string(s, &cx.state.envs, cx.state)?);
+            }
+            Arg::Expr(e) => {
+                let val = super::args::evaluate_expr(e, cx)?;
+                flatten_exec_value(&val, &mut out)?;
+            }
+        }
+    }
+    if out.is_empty() {
+        bail!("RUN exec form requires at least one argument");
+    }
+    Ok(out)
+}
+
+fn flatten_exec_value(val: &Value, out: &mut Vec<String>) -> Result<()> {
+    match val {
+        Value::String(s) => out.push(s.clone()),
+        Value::Int(i) => out.push(i.to_string()),
+        Value::Bool(b) => out.push(b.to_string()),
+        Value::List(items) => {
+            for item in items {
+                flatten_exec_value(item, out)?;
+            }
+        }
+        Value::Map(_) => bail!("RUN exec form element must be a string, got map"),
+        Value::TaskHandle(id) => {
+            bail!("RUN exec form element must be a string, got task handle task#{id}")
+        }
     }
     Ok(())
 }
@@ -413,12 +580,12 @@ pub(super) fn read<P: ProcessManager>(
             Ok(())
         })?;
     } else {
-        let input_stream = cx.stdin.clone().ok_or_else(|| {
-            anyhow!(
+        let CommandStdin::Stream(input_stream) = cx.stdin.clone() else {
+            bail!(
                 "step {}: READ requires stdin (use WITH_IO [stdin=...] READ)",
                 idx + 1
-            )
-        })?;
+            );
+        };
         let mut buf = [0u8; super::io::CHUNK_SIZE];
         loop {
             let n = {
@@ -445,12 +612,12 @@ pub(super) fn read_line<P: ProcessManager>(
     idx: usize,
     var: &str,
 ) -> Result<()> {
-    let input_stream = cx.stdin.clone().ok_or_else(|| {
-        anyhow!(
+    let CommandStdin::Stream(input_stream) = cx.stdin.clone() else {
+        bail!(
             "step {}: READ_LINE requires stdin (use WITH_IO [stdin=...] READ_LINE $var)",
             idx + 1
-        )
-    })?;
+        );
+    };
     let clean_var = var.trim_start_matches('$').to_string();
     let mut buf = Vec::new();
     let mut byte = [0u8; 1];
@@ -499,7 +666,7 @@ pub(super) fn write<P: ProcessManager>(
             .write_file(&target, body.as_bytes())
             .with_context(|| format!("failed to write {}", target.display()))?;
     } else {
-        let Some(input_stream) = cx.stdin.clone() else {
+        let CommandStdin::Stream(input_stream) = cx.stdin.clone() else {
             bail!(
                 "step {}: WRITE {} requires stdin (use WITH_IO [stdin=...] WRITE)",
                 idx + 1,
@@ -552,7 +719,7 @@ pub(super) fn append<P: ProcessManager>(
             .append_file(&target, body.as_bytes())
             .with_context(|| format!("failed to append to {}", target.display()))?;
     } else {
-        let Some(input_stream) = cx.stdin.clone() else {
+        let CommandStdin::Stream(input_stream) = cx.stdin.clone() else {
             bail!(
                 "step {}: APPEND {} requires stdin (use WITH_IO [stdin=...] APPEND)",
                 idx + 1,
@@ -621,7 +788,7 @@ pub(super) fn replace<P: ProcessManager>(
                 out_buf.clear();
             }
         } else {
-            let Some(input_stream) = cx.stdin.clone() else {
+            let CommandStdin::Stream(input_stream) = cx.stdin.clone() else {
                 bail!(
                     "step {}: EXPAND requires stdin when no file path is given \
                      (use WITH_IO [stdin=...] EXPAND)",
@@ -745,7 +912,7 @@ pub(super) fn assert_stdout<P: ProcessManager>(
     needle: &str,
 ) -> Result<()> {
     // Mode 1: Piped stdin — actively consume stream and check
-    if let Some(input_stream) = cx.stdin.clone() {
+    if let CommandStdin::Stream(input_stream) = cx.stdin.clone() {
         let mut guard = input_stream
             .lock()
             .map_err(|_| anyhow!("failed to lock stdin for ASSERT_STDOUT"))?;
@@ -815,6 +982,49 @@ pub(crate) fn with_io_block<P: ProcessManager>(
     bail!("WITH_IO block should have been expanded during parsing")
 }
 
+/// True when the wrapped command is a lone `RUN`: the only consumer or
+/// producer shape that can hold an OS handle directly.
+fn is_single_run(cmd: &StepKind) -> bool {
+    matches!(cmd, StepKind::Run(_) | StepKind::RunExec { .. })
+}
+
+/// True when the wrapped command is an `ASYNC` block or task whose body is
+/// exactly one `RUN`, guarded or not. A skipped guarded `RUN` still ends
+/// its single step worker, which closes the writer and delivers EOF, so
+/// guards do not change promotion safety. DSL bodies (`ECHO`, `READ_LINE`,
+/// `WRITE`, keepers) stay on script pipes so multi writer fan in keeps
+/// working.
+fn async_single_run_body(cmd: &StepKind) -> bool {
+    match cmd {
+        StepKind::AsyncBlock { body } | StepKind::AssignAsync { body, .. } => {
+            matches!(body.as_slice(), [step] if is_single_run(&step.kind))
+        }
+        _ => false,
+    }
+}
+
+/// Whether `WITH_IO` promotes fresh pipe names to OS kernel pairs.
+/// Fires when wrapping a single `RUN` background task (endpoints are
+/// allocated on this thread before the worker spawns) or when evaluated
+/// inside a worker thread around a single `RUN` (the `LET $t = WITH_IO
+/// [..] ASYNC RUN` lowered form). Everything else, including DSL bodies
+/// and sequential steps, keeps store and forward script pipes.
+#[cfg(not(miri))]
+fn promotion_trigger(cmd: &StepKind, inside_async: bool) -> bool {
+    async_single_run_body(cmd) || (inside_async && is_single_run(cmd))
+}
+
+#[cfg(miri)]
+fn promotion_trigger(_cmd: &StepKind, _inside_async: bool) -> bool {
+    false
+}
+
+/// Whether this binding resolves to a zero copy OS handle instead of a
+/// bridged shared handle: the ultimate consumer or producer is a `RUN`.
+fn run_terminated(cmd: &StepKind) -> bool {
+    is_single_run(cmd) || async_single_run_body(cmd)
+}
+
 pub(crate) fn with_io<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     generation: usize,
@@ -822,17 +1032,19 @@ pub(crate) fn with_io<P: ProcessManager>(
     bindings: &[IoBinding],
     cmd: &StepKind,
 ) -> Result<()> {
-    let mut step_stdin = None;
+    let mut step_stdin = CommandStdin::Null;
     let mut step_stdout = cx.out.clone();
     let mut step_stderr = cx.err.clone();
     let mut next_expose_stdin = false;
     let mut seen_stdin = false;
     let mut seen_stdout = false;
     let mut seen_stderr = false;
+    let trigger = promotion_trigger(cmd, cx.state.inside_async);
+    let direct = run_terminated(cmd);
 
     for binding in bindings {
         if let Some(pipe) = &binding.pipe {
-            cx.state.io.ensure_script_pipe(pipe);
+            cx.state.io.ensure_pipe_for(pipe, trigger)?;
         }
         match binding.stream {
             IoStream::Stdin => {
@@ -842,13 +1054,7 @@ pub(crate) fn with_io<P: ProcessManager>(
                 seen_stdin = true;
                 next_expose_stdin = true;
                 step_stdin = if let Some(pipe) = &binding.pipe {
-                    Some(cx.state.io.input_pipe(pipe).ok_or_else(|| {
-                        anyhow!(
-                            "step {}: WITH_IO stdin pipe '{}' is undefined",
-                            idx + 1,
-                            pipe
-                        )
-                    })?)
+                    cx.state.io.resolve_stdin(idx, pipe, direct)?
                 } else {
                     cx.stdin.clone()
                 };
@@ -859,19 +1065,7 @@ pub(crate) fn with_io<P: ProcessManager>(
                 }
                 seen_stdout = true;
                 step_stdout = if let Some(pipe) = &binding.pipe {
-                    Some(
-                        cx.state
-                            .io
-                            .output_pipe_stdout(pipe)
-                            .ok_or_else(|| {
-                                anyhow!(
-                                    "step {}: WITH_IO stdout pipe '{}' is undefined",
-                                    idx + 1,
-                                    pipe
-                                )
-                            })?
-                            .to_stream_handle(),
-                    )
+                    Some(cx.state.io.resolve_stdout(idx, pipe, direct)?)
                 } else {
                     cx.out.clone()
                 };
@@ -882,19 +1076,7 @@ pub(crate) fn with_io<P: ProcessManager>(
                 }
                 seen_stderr = true;
                 step_stderr = if let Some(pipe) = &binding.pipe {
-                    Some(
-                        cx.state
-                            .io
-                            .output_pipe_stderr(pipe)
-                            .ok_or_else(|| {
-                                anyhow!(
-                                    "step {}: WITH_IO stderr pipe '{}' is undefined",
-                                    idx + 1,
-                                    pipe
-                                )
-                            })?
-                            .to_stream_handle(),
-                    )
+                    Some(cx.state.io.resolve_stderr(idx, pipe, direct)?)
                 } else {
                     cx.err.clone()
                 };
@@ -1013,6 +1195,45 @@ pub(crate) fn assign<P: ProcessManager>(
     Ok(())
 }
 
+/// Dispatch `LET $var = <sync command>` — run the command to completion with
+/// a spillable capture sink as its stdout, then bind the exact bytes as a
+/// string. Only stdout is captured (stderr keeps the parent wiring; stdin
+/// passes through so `WITH_IO [stdin=pipe:p]` still works). Captured bytes
+/// never tee into the parent `ASSERT_STDOUT` windows. On command failure
+/// nothing is bound.
+pub(crate) fn assign_capture<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    generation: usize,
+    idx: usize,
+    var: &str,
+    cmd: &StepKind,
+) -> Result<()> {
+    use std::sync::Arc;
+
+    use super::capture::SpillBuffer;
+    use super::io::StreamHandle;
+
+    let sink = Arc::new(SpillBuffer::new());
+    let capture_out = Some(StreamHandle::Stream(sink.writer()));
+    super::steps::execute_single_step_with_generation(
+        cx.state,
+        cx.process,
+        cmd,
+        generation,
+        idx,
+        cx.stdin.clone(),
+        cx.expose_stdin,
+        capture_out,
+        cx.err.clone(),
+    )?;
+    let text = sink
+        .drain_string_strict()
+        .map_err(|e| anyhow!("LET ${var} capture is not valid UTF-8: {e}"))?;
+    let clean_var = var.trim_start_matches('$').to_string();
+    cx.state.set_var(clean_var, Value::String(text));
+    Ok(())
+}
+
 pub(crate) fn if_then<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     cond: &Expr,
@@ -1067,6 +1288,104 @@ pub(crate) fn if_then<P: ProcessManager>(
 // These extract fields from `StepKind` variants, resolve arguments, and
 // forward to the actual handler functions. Used by `define_pipeline!`.
 
+/// Collect the pipes a step subtree produces to (`stdout`/`stderr`
+/// bindings), same-thread only. Nested `ASYNC` bodies run on other threads
+/// with their own pins and are excluded; `Timeout`/`For`/`If`/`WithIo`
+/// bodies run inline and are included. Only producers pin: a task that
+/// only reads a pipe relies on EOF-from-detach to complete, so pinning it
+/// would deadlock. Each entry pairs the pipe name with whether OS
+/// promotion applies (OR-merged across occurrences).
+fn collect_steps_producers(steps: &[Step], out: &mut Vec<(String, bool)>) {
+    for step in steps {
+        collect_kind_producers(&step.kind, out);
+    }
+}
+
+fn collect_kind_producers(kind: &StepKind, out: &mut Vec<(String, bool)>) {
+    match kind {
+        StepKind::WithIo { bindings, cmd } => {
+            let promote = promotion_trigger(cmd, true);
+            for binding in bindings {
+                match binding.stream {
+                    IoStream::Stdout | IoStream::Stderr => {
+                        if let Some(pipe) = &binding.pipe {
+                            match out.iter_mut().find(|(name, _)| name == pipe) {
+                                Some(entry) => {
+                                    entry.1 = entry.1 || promote;
+                                }
+                                None => {
+                                    out.push((pipe.clone(), promote));
+                                }
+                            }
+                        }
+                    }
+                    IoStream::Stdin => {}
+                }
+            }
+            collect_kind_producers(cmd, out);
+        }
+        StepKind::Timeout { body, .. } => collect_steps_producers(body, out),
+        StepKind::For { body, .. } => collect_steps_producers(body, out),
+        StepKind::If {
+            then_body,
+            else_ifs,
+            else_body,
+            ..
+        } => {
+            collect_steps_producers(then_body, out);
+            for (_, branch) in else_ifs {
+                collect_steps_producers(branch, out);
+            }
+            if let Some(body) = else_body {
+                collect_steps_producers(body, out);
+            }
+        }
+        StepKind::AsyncBlock { .. } | StepKind::AssignAsync { .. } => {}
+        _ => {}
+    }
+}
+
+/// Ensure every pipe an async `body` produces to exists (honoring OS
+/// promotion) and pin a keeper slot on each script pipe, synchronously on
+/// the spawning thread. Pins group by the top-level index of the final
+/// producer step for each pipe: the worker drops a pipe's guard once that
+/// step completes, so transient gaps between producers never signal EOF
+/// while later consumer steps in the same task still observe it. Returns
+/// `None` when the body produces to no script pipe.
+fn pin_async_keepers<P: ProcessManager>(
+    cx: &StepCtx<'_, P>,
+    body: &[Step],
+) -> Result<Option<super::state::KeeperExpiry>> {
+    let mut last: HashMap<String, (bool, usize)> = HashMap::new();
+    for (idx, step) in body.iter().enumerate() {
+        let mut produced = Vec::new();
+        collect_kind_producers(&step.kind, &mut produced);
+        for (name, promote) in produced {
+            let entry = last.entry(name).or_insert((false, 0));
+            entry.0 = entry.0 || promote;
+            entry.1 = idx;
+        }
+    }
+    let mut by_index: HashMap<usize, Vec<(String, bool)>> = HashMap::new();
+    for (name, (promote, idx)) in last {
+        by_index.entry(idx).or_default().push((name, promote));
+    }
+    let mut map: HashMap<usize, Vec<KeeperGuard>> = HashMap::new();
+    for (idx, specs) in &by_index {
+        for (name, promote) in specs {
+            cx.state.io.ensure_pipe_for(name, *promote)?;
+            if let Some(guard) = cx.state.io.pin_keeper(name)? {
+                map.entry(*idx).or_default().push(guard);
+            }
+        }
+    }
+    if map.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(super::state::KeeperExpiry::new(body, map)))
+    }
+}
+
 pub(crate) fn dispatch_run<P: ProcessManager>(
     step: &StepKind,
     cx: &mut StepCtx<'_, P>,
@@ -1079,6 +1398,17 @@ pub(crate) fn dispatch_run<P: ProcessManager>(
     run(cx, 0, &cmd)
 }
 
+pub(crate) fn dispatch_run_exec<P: ProcessManager>(
+    step: &StepKind,
+    cx: &mut StepCtx<'_, P>,
+) -> Result<()> {
+    let StepKind::RunExec { argv } = step else {
+        unreachable!()
+    };
+    let resolved = resolve_run_exec_argv(argv, cx)?;
+    run_argv(cx, 0, &resolved)
+}
+
 pub(crate) fn dispatch_async_block<P: ProcessManager>(
     step: &StepKind,
     cx: &mut StepCtx<'_, P>,
@@ -1087,12 +1417,20 @@ pub(crate) fn dispatch_async_block<P: ProcessManager>(
         unreachable!()
     };
 
+    // Pre-allocate keeper handles synchronously on this thread, before the
+    // worker exists, so pipes the block produces to can never observe a
+    // transient-only zero-writer window. Guards expire by step index as
+    // the worker completes its final producer steps, then ride out the
+    // thread in forked state.
+    let body = body.clone();
+    let expiry = pin_async_keepers(cx, &body)?;
+
     // Fork the execution state for the child thread.
     // This clones the fs (via clone_box), envs, cwd, var_scopes, etc.
     // The child gets fresh bg_children and scope_stack.
-    let forked_state = cx.state.fork();
+    let mut forked_state = cx.state.fork();
+    forked_state.keeper_expiry = expiry;
     let forked_process = cx.process.clone();
-    let body = body.clone();
     let stdin = cx.stdin.clone();
     let expose_stdin = cx.expose_stdin;
     let out = cx.out.clone();
@@ -1473,18 +1811,30 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
         .next_task_id
         .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 
-    // Fork the execution state for the child thread
-    let forked_state = cx.state.fork();
-    let forked_process = cx.process.clone();
+    // Pre-allocate keeper handles synchronously on this thread, before the
+    // worker exists, so pipes the task produces to (e.g. keeper
+    // `WITH_IO [stdout=pipe:tx] ASYNC ...` bindings) can never observe a
+    // transient-only zero-writer window. Guards expire by step index as
+    // the worker completes its final producer steps.
     let body = body.to_vec();
+    let expiry = pin_async_keepers(cx, &body)?;
+
+    // Fork the execution state for the child thread
+    let mut forked_state = cx.state.fork();
+    forked_state.keeper_expiry = expiry;
+    let forked_process = cx.process.clone();
     let stdin = cx.stdin.clone();
     let expose_stdin = cx.expose_stdin;
-    let out = cx.out.clone();
+    // Named tasks write stdout into a per-task spillable sink instead of
+    // sharing the parent writer. Bare `AWAIT $t` forwards it to the parent
+    // stdout; `LET $o = AWAIT $t` binds it. Stderr keeps parent wiring.
+    let sink = std::sync::Arc::new(super::capture::SpillBuffer::new());
+    let out = Some(super::io::StreamHandle::Stream(sink.writer()));
     let err = cx.err.clone();
     let cancel_token = std::sync::Arc::clone(&forked_state.cancel_token);
     let active_process = std::sync::Arc::clone(&forked_state.active_process);
 
-    // Spawn the task thread
+    // Spawn the task thread. Leftover guards unpin at thread termination.
     let join = std::thread::spawn(move || {
         let mut child_state = forked_state;
         let mut child_process = forked_process;
@@ -1513,7 +1863,10 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
             .unwrap_or_else(|e| e.into_inner());
         named.insert(
             task_id,
-            Arc::new(super::state::TaskEntry::new(Box::new(handle))),
+            Arc::new(super::state::TaskEntry::new_with_sink(
+                Box::new(handle),
+                sink,
+            )),
         );
     }
 
@@ -1531,9 +1884,11 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
 /// `CANCEL` (or a `TIMEOUT` deadline) transitions the entry to `Cancelled`;
 /// this loop observes that within ~10ms and rendezvouses on teardown
 /// completion before reporting cancellation.
-pub(crate) fn dispatch_await<P: ProcessManager>(var: &str, cx: &mut StepCtx<'_, P>) -> Result<()> {
-    use super::state::TaskPhase;
-
+/// Resolve a task-handle variable to its shared registry entry.
+fn resolve_task_entry<P: ProcessManager>(
+    var: &str,
+    cx: &StepCtx<'_, P>,
+) -> Result<Arc<super::state::TaskEntry>> {
     // Resolve the variable to a TaskHandle
     let val = cx
         .state
@@ -1555,6 +1910,21 @@ pub(crate) fn dispatch_await<P: ProcessManager>(var: &str, cx: &mut StepCtx<'_, 
     let Some(entry) = entry else {
         bail!("task handle for '${var}' was not found or has already been awaited");
     };
+    Ok(entry)
+}
+
+/// Claim a task entry and run the bounded await poll loop to completion.
+/// Shared by bare `AWAIT` and `LET $o = AWAIT $t` so cancellation, timeout,
+/// double-await, and failure semantics never diverge. Returns the child's
+/// exit status; the caller owns output handling (forward vs bind).
+/// The child's thread is joined before returning success, so draining the
+/// task sink afterwards races with no writer.
+fn await_task_entry(
+    entry: &Arc<super::state::TaskEntry>,
+    cancel_token: &Arc<std::sync::atomic::AtomicBool>,
+    var: &str,
+) -> Result<std::process::ExitStatus> {
+    use super::state::TaskPhase;
 
     // Claim the entry for awaiting.
     {
@@ -1595,11 +1965,7 @@ pub(crate) fn dispatch_await<P: ProcessManager>(var: &str, cx: &mut StepCtx<'_, 
             let mut guard = entry.state.lock().unwrap_or_else(|e| e.into_inner());
             if matches!(guard.phase, TaskPhase::Cancelled) {
                 Decision::Cancelled
-            } else if cx
-                .state
-                .cancel_token
-                .load(std::sync::atomic::Ordering::SeqCst)
-            {
+            } else if cancel_token.load(std::sync::atomic::Ordering::SeqCst) {
                 // Parent TIMEOUT watcher fired while awaiting: the named
                 // child's OS process lives on the child's own
                 // `active_process`, unreachable from the watcher, so this
@@ -1659,10 +2025,63 @@ pub(crate) fn dispatch_await<P: ProcessManager>(var: &str, cx: &mut StepCtx<'_, 
                 if !status.success() {
                     bail!("AWAIT task '${var}' failed with status {status}");
                 }
-                return Ok(());
+                return Ok(status);
             }
         }
     }
+}
+
+/// Dispatch `AWAIT $var` — block until the named task completes, propagate
+/// error if it failed, and forward the task's captured stdout to the parent
+/// stdout.
+///
+/// State machine (`TaskEntry`): the first `AWAIT` transitions the entry
+/// `Running -> Awaiting` and owns the bounded poll loop below. A concurrent
+/// `CANCEL` (or a `TIMEOUT` deadline) transitions the entry to `Cancelled`;
+/// this loop observes that within ~10ms and rendezvouses on teardown
+/// completion before reporting cancellation.
+pub(crate) fn dispatch_await<P: ProcessManager>(var: &str, cx: &mut StepCtx<'_, P>) -> Result<()> {
+    let entry = resolve_task_entry(var, cx)?;
+    await_task_entry(&entry, &cx.state.cancel_token, var)?;
+    // Bare AWAIT keeps status-only semantics for variables but preserves the
+    // observable stream: the task's stdout flows to the parent stdout.
+    if let Some(sink) = entry.take_sink() {
+        let bytes = sink
+            .drain_bytes()
+            .map_err(|e| anyhow!("AWAIT task '${var}' output drain failed: {e}"))?;
+        if !bytes.is_empty() {
+            super::io::write_stdout(cx.out.clone(), |writer| {
+                writer
+                    .write_all(&bytes)
+                    .with_context(|| format!("AWAIT task '${var}' output forward failed"))?;
+                Ok(())
+            })?;
+        }
+    }
+    Ok(())
+}
+
+/// Dispatch `LET $out = AWAIT $task` — join like bare `AWAIT` (identical
+/// cancellation/timeout/double-await semantics via [`await_task_entry`]),
+/// then bind the task's stdout as a string instead of forwarding it.
+pub(crate) fn dispatch_await_capture<P: ProcessManager>(
+    out_var: &str,
+    task_var: &str,
+    cx: &mut StepCtx<'_, P>,
+) -> Result<()> {
+    let entry = resolve_task_entry(task_var, cx)?;
+    await_task_entry(&entry, &cx.state.cancel_token, task_var)?;
+    let text = match entry.take_sink() {
+        Some(sink) => sink.drain_string_strict().map_err(|e| {
+            anyhow!("LET ${out_var} = AWAIT ${task_var} capture is not valid UTF-8: {e}")
+        })?,
+        None => String::new(),
+    };
+    cx.state.set_var(
+        out_var.trim_start_matches('$').to_string(),
+        Value::String(text),
+    );
+    Ok(())
 }
 
 /// Dispatch `CANCEL $var` — synchronously kill a named background task.
@@ -1741,6 +2160,28 @@ pub(crate) fn dispatch_await_step<P: ProcessManager>(
         unreachable!()
     };
     dispatch_await(var, cx)
+}
+
+/// Pipeline dispatch wrapper for `AssignCapture`
+pub(crate) fn dispatch_assign_capture_step<P: ProcessManager>(
+    step: &StepKind,
+    cx: &mut StepCtx<'_, P>,
+) -> Result<()> {
+    let StepKind::AssignCapture { var, cmd } = step else {
+        unreachable!()
+    };
+    assign_capture(cx, super::steps::allocate_assert_generation(), 0, var, cmd)
+}
+
+/// Pipeline dispatch wrapper for `AwaitCapture`
+pub(crate) fn dispatch_await_capture_step<P: ProcessManager>(
+    step: &StepKind,
+    cx: &mut StepCtx<'_, P>,
+) -> Result<()> {
+    let StepKind::AwaitCapture { out_var, task_var } = step else {
+        unreachable!()
+    };
+    dispatch_await_capture(out_var, task_var, cx)
 }
 
 /// Pipeline dispatch wrapper for `Cancel`

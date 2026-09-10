@@ -984,6 +984,13 @@ fn emit_stepkind(
             let e = emit_expr(expr, interp);
             quote! { StepKind::Assign { var: #var.to_string(), expr: #e } }
         }
+        StepKind::AssignCapture { var, cmd } => {
+            let c = emit_stepkind(cmd, interp);
+            quote! { StepKind::AssignCapture { var: #var.to_string(), cmd: Box::new(#c) } }
+        }
+        StepKind::AwaitCapture { out_var, task_var } => {
+            quote! { StepKind::AwaitCapture { out_var: #out_var.to_string(), task_var: #task_var.to_string() } }
+        }
         StepKind::AssignAsync { var, body } => {
             let steps: Vec<_> = body.iter().map(|s| emit_step(s, interp)).collect();
             quote! { StepKind::AssignAsync { var: #var.to_string(), body: vec![#(#steps),*] } }
@@ -1005,6 +1012,10 @@ fn emit_stepkind(
         }
         StepKind::ReadLine { var } => {
             quote! { StepKind::ReadLine { var: #var.to_string() } }
+        }
+        StepKind::RunExec { argv } => {
+            let args: Vec<_> = argv.iter().map(|a| emit_arg(a, interp)).collect();
+            quote! { StepKind::RunExec { argv: vec![#(#args),*] } }
         }
     }
 }

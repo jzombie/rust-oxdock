@@ -5,10 +5,12 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use anyhow::Result;
 use oxdock_fs::{GuardedPath, WorkspaceFs};
-use oxdock_parser::Value;
+use oxdock_parser::{Step, Value};
 use oxdock_process::{BackgroundHandle, CommandContext, ProcessManager};
 
+use super::capture::SpillBuffer;
 use super::io::{ExecIo, SlidingWindow};
+use super::pipe::KeeperGuard;
 
 pub(super) struct ExecState<P: ProcessManager> {
     pub(super) fs: Box<dyn WorkspaceFs>,
@@ -45,6 +47,14 @@ pub(super) struct ExecState<P: ProcessManager> {
     /// Whether we're inside an ASYNC block thread. When true, `handlers::run()`
     /// spawns in background mode so the handle can be registered for cancellation.
     pub(super) inside_async: bool,
+    /// Step-indexed keeper expiry for one `ASYNC` worker. Each guard pins a
+    /// pipe the worker produces to, bridging the spawn-to-first-attach
+    /// window and every transient gap between producer steps. Guards keyed
+    /// to step `k` drop when the worker completes its top-level step `k`
+    /// (matched by slice identity, so nested bodies never discharge them);
+    /// leftovers drop with the worker thread. Always `None` outside
+    /// workers; `fork` never inherits it.
+    pub(super) keeper_expiry: Option<KeeperExpiry>,
     /// Whether `handlers::run()` must spawn in background mode so the handle
     /// registers in `active_process` for cancellation. Set while a `TIMEOUT`
     /// body executes on the current thread so the deadline watcher can kill
@@ -78,6 +88,11 @@ pub(super) struct TaskEntryState {
     /// Threads observing `Cancelled` must wait on `done` until `reaped`
     /// before resuming, so no caller outruns OS process teardown.
     pub(super) reaped: bool,
+    /// Per-task stdout sink (`LET $t = ASYNC ...`). The child thread writes
+    /// here instead of the parent writer. Exactly one consumer takes it:
+    /// `LET $o = AWAIT $t` binds it, bare `AWAIT $t` forwards it to the
+    /// parent stdout, and end-poll reaping forwards un-awaited output.
+    pub(super) sink: Option<Arc<SpillBuffer>>,
 }
 
 /// Synchronized named-task entry shared by every scope that can observe the
@@ -90,15 +105,26 @@ pub(super) struct TaskEntry {
 }
 
 impl TaskEntry {
-    pub(super) fn new(handle: Box<dyn BackgroundHandle>) -> Self {
+    pub(super) fn new_with_sink(handle: Box<dyn BackgroundHandle>, sink: Arc<SpillBuffer>) -> Self {
         Self {
             state: Mutex::new(TaskEntryState {
                 phase: TaskPhase::Running,
                 handle: Some(handle),
                 reaped: false,
+                sink: Some(sink),
             }),
             done: Condvar::new(),
         }
+    }
+
+    /// Take the task's stdout sink exactly once. The first consumer
+    /// (awaiter or end-poll reaper) wins; later calls get `None`.
+    pub(super) fn take_sink(&self) -> Option<Arc<SpillBuffer>> {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .sink
+            .take()
     }
 
     /// Block until the teardown owner has consumed the handle and joined
@@ -118,6 +144,45 @@ impl TaskEntry {
             guard.reaped = true;
         }
         self.done.notify_all();
+    }
+}
+
+/// Step-indexed keeper expiry for one `ASYNC` worker thread. Guards are
+/// keyed by the top-level body index of the final producer step for each
+/// pipe: dropping the guards for step `k` once it completes keeps the
+/// pipe open across every transient gap between producers, then releases
+/// it so later consumer steps in the same task observe EOF.
+///
+/// Slice identity (`body_addr`/`body_len`) gates discharge: nested bodies
+/// (`FOR`/`IF`/`TIMEOUT`/inner `ASYNC`) execute through the same stepping
+/// code with different slices and must never consume the worker's
+/// top-level map.
+pub(super) struct KeeperExpiry {
+    body_addr: usize,
+    body_len: usize,
+    map: HashMap<usize, Vec<KeeperGuard>>,
+}
+
+impl KeeperExpiry {
+    pub(super) fn new(steps: &[Step], map: HashMap<usize, Vec<KeeperGuard>>) -> Self {
+        Self {
+            body_addr: steps.as_ptr() as usize,
+            body_len: steps.len(),
+            map,
+        }
+    }
+
+    pub(super) fn matches(&self, steps: &[Step]) -> bool {
+        self.body_addr == steps.as_ptr() as usize && self.body_len == steps.len()
+    }
+
+    /// Drop the guards expiring at top-level step `idx`. Returns true when
+    /// the map is drained and the expiry itself can be cleared.
+    pub(super) fn expire_step(&mut self, steps: &[Step], idx: usize) -> bool {
+        if self.matches(steps) {
+            drop(self.map.remove(&idx));
+        }
+        self.map.is_empty()
     }
 }
 
@@ -161,6 +226,7 @@ impl<P: ProcessManager> ExecState<P> {
             named_tasks: Arc::clone(&self.named_tasks),
             next_task_id: Arc::clone(&self.next_task_id),
             inside_async: true,
+            keeper_expiry: None,
             cancellable: self.cancellable,
             _marker: PhantomData,
         }

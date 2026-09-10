@@ -1,0 +1,4 @@
+name = "await_capture"
+
+[expect]
+files = { "result.txt" = "task-output\n" }

@@ -32,11 +32,11 @@ OxDock is a Dockerfile inspired build DSL for Rust. Embed scripts at compile tim
 
 Supports platform gating, async tasks, and piped workflows for custom pipelines.
 
-[Documentation](https://docs.rs/oxdock/0.10.0-alpha/oxdock/)
+[Documentation](https://docs.rs/oxdock/0.11.0-alpha/oxdock/)
 
 ## Quick start
 
-Add it to your Rust build with `cargo add oxdock@0.10.0-alpha`, or install the standalone runner with `cargo install oxdock@0.10.0-alpha`.
+Add it to your Rust build with `cargo add oxdock@0.11.0-alpha`, or install the standalone runner with `cargo install oxdock@0.11.0-alpha`.
 
 Run a script:
 
@@ -121,7 +121,7 @@ fn main() {}
 
 ### Stream bytes between steps
 
-`WITH_IO` routes stdout into named pipes and back into stdin, so steps form custom pipelines without temp files.
+`WITH_IO` routes stdout into named script pipes and back into stdin, so steps form custom pipelines. Pipes hold bytes in memory and spill to a temp file above 8 MiB. Wrapping a single RUN in ASYNC promotes the pipe to a zero copy OS kernel pipe instead; the consumer must then run while the producer is alive.
 
 ```oxdock
 WITH_IO [stdout=pipe:msg] ECHO piped-bytes
@@ -177,6 +177,15 @@ Scripts are sequences of instructions, one per line. Instructions may be prefixe
 ECHO one; ECHO two
 ASSERT_STDOUT one
 ASSERT_STDOUT two
+```
+
+### RUN shell and exec forms
+
+Shell form (`RUN <command...>`) joins its arguments and runs the string in the system shell. Exec form (`RUN ["exe", "arg", ...]`) spawns the executable directly with no shell. Exec form has no shell expansion, globbing, redirection, or pipes. Quoted `{{ ... }}` templates still interpolate per element, and guards and wrappers (`ASYNC`, `TIMEOUT`, `WITH_IO`) apply to both forms.
+
+```oxdock
+RUN ["cargo", "--version"]
+ASSERT_STDOUT cargo
 ```
 
 ### Comments
@@ -422,7 +431,7 @@ CANCEL $worker
 | [`ENV`](#env) | `ENV KEY=value` |
 | [`INHERIT_ENV`](#inherit_env) | `INHERIT_ENV <key>...` |
 | [`ECHO`](#echo) | `ECHO <message>` |
-| [`RUN`](#run) | `RUN <command...>` |
+| [`RUN`](#run) | `RUN <command...> \| RUN ["exe", "arg", ...]` |
 | [`COPY`](#copy) | `COPY [--from-current-workspace] <from> <to>` |
 | [`COPY_GIT`](#copy_git) | `COPY_GIT [--include-dirty] <rev> <src> <dst>` |
 | [`SYMLINK`](#symlink) | `SYMLINK <from> <to>` |
@@ -444,9 +453,9 @@ CANCEL $worker
 | [`WITH_IO`](#with_io) | `WITH_IO [bindings] <command> \| WITH_IO [bindings] { <commands> }` |
 | [`FOR`](#for) | `FOR $item IN <expr> { <commands> } \| FOR $key, $value IN <expr> { <commands> }` |
 | [`IF`](#if) | `IF <expr> { <commands> } [ELSE IF <expr> { <commands> }] [ELSE { <commands> }]` |
-| [`LET`](#let) | `LET $var = <expr> \| LET $var = ASYNC { <commands> }` |
+| [`LET`](#let) | `LET $var = <expr> \| LET $var = ASYNC { <commands> } \| LET $var = <command> \| LET $var = AWAIT $task` |
 | [`ASYNC`](#async) | `ASYNC <command...> \| ASYNC { <commands> } \| LET $var = ASYNC { <commands> }` |
-| [`AWAIT`](#await) | `AWAIT $var` |
+| [`AWAIT`](#await) | `AWAIT $var \| LET $out = AWAIT $var` |
 | [`CANCEL`](#cancel) | `CANCEL $var` |
 | [`TIMEOUT`](#timeout) | `TIMEOUT <duration> <command...> \| TIMEOUT <duration> { <commands> } \| TIMEOUT <duration> AWAIT $var` |
 
@@ -456,7 +465,7 @@ Reroute standard streams.
 
 **Syntax:** `WITH_IO [bindings] <command> | WITH_IO [bindings] { <commands> }`
 
-Reroutes the standard streams of the next command or, in block form, of every enclosed command. Bindings map streams (`stdin`, `stdout`, `stderr`) to named pipes (`stdout=pipe:name`). Pipe names registered by the host runtime tee structured output elsewhere; a name bound as output can later feed another command's `stdin`, connecting commands without touching the terminal. Nested blocks stack defaults; inline bindings override inherited ones for their command only; closing a block restores previous wiring.
+Reroutes the standard streams of the next command or, in block form, of every enclosed command. Bindings map streams (`stdin`, `stdout`, `stderr`) to named script pipes (`stdout=pipe:name`, `stderr=pipe:name`). Both stdout and stderr pipes capture output the same way. Pipes hold bytes in memory and spill to a temp file above 8 MiB, so a producer can finish before the consumer starts. If WITH_IO wraps an ASYNC block whose body is a single RUN, guarded or not, the pipe is a zero copy OS kernel pipe instead: pair it with a consumer that runs while the producer is alive, since output past the 64 KiB kernel buffer stalls until drained. A second producer or consumer on a live name is an explicit error. A name bound as output can later feed another command's `stdin`, connecting commands without touching the terminal. Binding `stdout` and `stderr` to the same live pipe name fails deterministically. Merge streams in shell via `2>&1` instead. Nested blocks stack defaults; inline bindings override inherited ones for their command only; closing a block restores previous wiring.
 
 **Examples:**
 
@@ -540,9 +549,9 @@ IF !false {
 
 Bind script-local variables.
 
-**Syntax:** `LET $var = <expr> | LET $var = ASYNC { <commands> }`
+**Syntax:** `LET $var = <expr> | LET $var = ASYNC { <commands> } | LET $var = <command> | LET $var = AWAIT $task`
 
-Assigns a value to a script-local variable. Variables are usable in templates (`{{ $var }}`), guards, and expressions. With `ASYNC`, spawns a background task and stores its handle (see ASYNC). The `$` sigil on the name is mandatory. The right-hand side is always an expression — literals, lists, maps, comparisons, `GLOB("*.md")` — never a `{{ ... }}` template; interpolation happens in string values, not here. Bare words need no quotes: `LET $d = 30s` binds the same string as `LET $d = "30s"`.
+Assigns a value to a script-local variable. Variables are usable in templates (`{{ $var }}`), guards, and expressions. With `ASYNC`, spawns a background task and stores its handle (see ASYNC). The `$` sigil on the name is mandatory. The right-hand side is always an expression — literals, lists, maps, comparisons, `GLOB("*.md")` — never a `{{ ... }}` template; interpolation happens in string values, not here. Bare words need no quotes: `LET $d = 30s` binds the same string as `LET $d = "30s"`. When the right-hand side is a synchronous command (`LET $out = ECHO hi`), the command runs to completion and its exact stdout bytes are captured into the variable as a string (no newline stripping; commands with no stdout capture as `""`; non-UTF8 stdout is an error). Combining capture with an explicit `WITH_IO [stdout=pipe:...]` is a parse error. `LET $out = AWAIT $task` captures a background task's stdout the same way; bare `AWAIT $task` forwards it to the parent stdout instead.
 
 **Examples:**
 
@@ -578,6 +587,14 @@ LET $a = "outer"
 WRITE outer.txt "{{ $a }}"
 ASSERT_FILE inner.txt "inner"
 ASSERT_FILE outer.txt "outer"
+```
+
+**Example: capture command output**
+
+```oxdock
+LET $out = ECHO hi
+WRITE captured.txt "{{ $out }}"
+ASSERT_FILE captured.txt "hi\n"
 ```
 
 
@@ -616,9 +633,9 @@ AWAIT $task
 
 Join a background task.
 
-**Syntax:** `AWAIT $var`
+**Syntax:** `AWAIT $var | LET $out = AWAIT $var`
 
-Blocks until the named task completes. Propagates errors if the task failed.
+Blocks until the named task completes. Propagates errors if the task failed. Bare `AWAIT $var` forwards the task's stdout to the parent stdout; `LET $out = AWAIT $var` captures it into `$out` instead (same UTF-8 and spilling rules as `LET $var = <command>`).
 
 **Examples:**
 
@@ -627,6 +644,15 @@ Blocks until the named task completes. Propagates errors if the task failed.
 ```oxdock
 LET $task = ASYNC ECHO "done"
 AWAIT $task
+```
+
+**Example: await capture**
+
+```oxdock
+LET $task = ASYNC ECHO "done"
+LET $out = AWAIT $task
+WRITE captured.txt "{{ $out }}"
+ASSERT_FILE captured.txt "done\n"
 ```
 
 
@@ -860,11 +886,11 @@ ASSERT_STDOUT "World"
 
 ### RUN
 
-Execute shell command.
+Execute shell command or direct executable.
 
-**Syntax:** `RUN <command...>`
+**Syntax:** `RUN <command...> | RUN ["exe", "arg", ...]`
 
-Runs command in cwd.
+Shell form (`RUN <command...>`) runs the joined command string in the system shell (`$SHELL -c` / `COMSPEC /C`). Exec form (`RUN ["exe", "arg", ...]`) spawns the executable directly with no shell, so there is no shell expansion, globbing, redirection, or pipes; use it for portable commands. Guards and wrappers (`ASYNC`, `TIMEOUT`, `WITH_IO`, `LET`) apply to both forms.
 
 **Arguments:**
 
@@ -878,6 +904,12 @@ Runs command in cwd.
 
 ```oxdock
 RUN echo hello
+```
+
+**Example: run exec form**
+
+```oxdock
+RUN ["cargo", "--version"]
 ```
 
 

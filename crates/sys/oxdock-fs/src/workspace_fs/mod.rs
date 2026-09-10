@@ -99,6 +99,8 @@ pub enum EntryKind {
 pub mod path;
 pub use path::{GuardedPath, GuardedTempDir};
 pub use path::{command_path, embed_path, normalized_path, to_forward_slashes};
+pub(crate) mod io;
+pub use io::SpillFile;
 
 #[allow(clippy::disallowed_types)]
 pub use path::UnguardedPath;
@@ -193,7 +195,6 @@ impl PathResolver {
 pub(crate) mod access;
 mod backend;
 mod copy;
-mod io;
 mod resolve;
 use access::guard_path;
 

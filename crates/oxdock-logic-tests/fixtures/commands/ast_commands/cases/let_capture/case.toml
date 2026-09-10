@@ -1,0 +1,4 @@
+name = "let_capture"
+
+[expect]
+files = { "result.txt" = "captured\n" }
