@@ -461,6 +461,7 @@ dependencies = [
  "oxdock-parser",
  "oxdock-process",
  "oxdock-sys-test-utils",
+ "proptest",
  "serde_json",
  "sha2",
  "toml",

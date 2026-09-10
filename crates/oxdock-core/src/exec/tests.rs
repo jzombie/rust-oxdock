@@ -83,6 +83,66 @@ fn run_expands_env_values() {
 }
 
 #[test]
+fn run_shell_routes_dollar_forms_to_dsl_or_shell() {
+    use oxdock_parser::{Expr, Value};
+
+    // `$var` maps to the DSL variable; `\$var` is routed to the shell
+    // untouched (backslash consumed, no DSL expansion); `{{ $var }}` and
+    // `{{ env:K }}` interpolate; `\{{ $var }}` stays literal braces.
+    let root = GuardedPath::new_root_from_str(".").unwrap();
+    let scripts = [
+        "RUN echo $who",
+        "RUN echo \\$who",
+        "RUN echo \"{{ $who }}\"",
+        "RUN echo \"\\{{ $who }}\"",
+        "RUN echo \"{{ env:FOO }}\"",
+        // Embedded in larger text, an undefined `$var` passes through for
+        // the shell (a lone `$undefined` instead bails as a likely typo).
+        "RUN echo hi-$undefined_var_xyz",
+    ];
+    let mut steps = vec![
+        Step {
+            guard: None,
+            kind: StepKind::Env {
+                key: "FOO".into(),
+                value: "bar".into(),
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+        },
+        Step {
+            guard: None,
+            kind: StepKind::Assign {
+                var: "who".into(),
+                expr: Expr::Literal(Value::String("world".to_string())),
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+        },
+    ];
+    for script in scripts {
+        let parsed = crate::parse_script(script).unwrap();
+        steps.extend(parsed);
+    }
+    let mock = MockProcessManager::default();
+    let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
+    run_steps_with_manager(fs, &steps, mock.clone(), ExecIo::new()).unwrap();
+    let runs = mock.recorded_runs();
+    let scripts: Vec<_> = runs.iter().map(|r| r.script.as_str()).collect();
+    assert_eq!(
+        scripts,
+        vec![
+            "echo world",
+            "echo $who",
+            "echo world",
+            "echo {{ $who }}",
+            "echo bar",
+            "echo hi-$undefined_var_xyz",
+        ]
+    );
+}
+
+#[test]
 fn run_exec_resolves_and_flattens_argv() {
     use oxdock_parser::{Arg, Expr, Value};
 
@@ -174,6 +234,79 @@ fn run_exec_rejects_map_elements_with_type_error() {
 }
 
 #[test]
+fn run_exec_resolves_every_variable_type() {
+    use oxdock_parser::{Arg, Expr, Value};
+
+    // Every localized variable type extrapolates through exec-form argv:
+    // `$var`, `$map.key`, `{{ env:K }}`, `{{ $var }}`, `{{ $map.key }}`.
+    let root = GuardedPath::new_root_from_str(".").unwrap();
+    let mut map = std::collections::BTreeMap::new();
+    map.insert("k".to_string(), Value::String("keyval".to_string()));
+    let steps = vec![
+        Step {
+            guard: None,
+            kind: StepKind::Env {
+                key: "FOO".into(),
+                value: "bar".into(),
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+        },
+        Step {
+            guard: None,
+            kind: StepKind::Assign {
+                var: "who".into(),
+                expr: Expr::Literal(Value::String("world".to_string())),
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+        },
+        Step {
+            guard: None,
+            kind: StepKind::Assign {
+                var: "m".into(),
+                expr: Expr::Map(vec![(
+                    "k".to_string(),
+                    Expr::Literal(Value::String("keyval".to_string())),
+                )]),
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+        },
+        Step {
+            guard: None,
+            kind: StepKind::RunExec {
+                argv: vec![
+                    Arg::Expr(Expr::Literal(Value::String("echo".to_string()))),
+                    // Whole-element `$var` and `$map.key` references.
+                    Arg::Expr(Expr::Var("who".to_string())),
+                    Arg::Expr(Expr::KeyPath {
+                        base: "m".to_string(),
+                        keys: vec!["k".to_string()],
+                    }),
+                    // Template placeholders in string elements.
+                    Arg::String("{{ env:FOO }}".to_string(), false),
+                    Arg::String("{{ $who }}".to_string(), false),
+                    Arg::String("{{ $m.k }}".to_string(), false),
+                    Arg::Expr(Expr::Literal(Value::String("{{ $who }}".to_string()))),
+                ],
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+        },
+    ];
+    let mock = MockProcessManager::default();
+    let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
+    run_steps_with_manager(fs, &steps, mock.clone(), ExecIo::new()).unwrap();
+    let runs = mock.recorded_argv_runs();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(
+        runs[0].argv,
+        vec!["echo", "world", "keyval", "bar", "world", "keyval", "world"]
+    );
+}
+
+#[test]
 fn run_exec_expands_templates_in_literal_elements_once() {
     use oxdock_parser::{Arg, Expr, Value};
 
@@ -213,6 +346,39 @@ fn run_exec_expands_templates_in_literal_elements_once() {
     let runs = mock.recorded_argv_runs();
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].argv, vec!["echo", "hi", "{{ env:GREETING }}"]);
+}
+
+#[test]
+fn run_exec_processes_escapes_and_keeps_metachars_literal() {
+    use oxdock_parser::{Arg, Expr, Value};
+
+    // Backslash escapes resolve exactly once (`\"` -> `"`, `\\` -> `\`,
+    // `\n` -> newline); shell metacharacters (`; $() `` > |`) are never
+    // interpreted and reach argv verbatim — there is no shell to escape for.
+    let root = GuardedPath::new_root_from_str(".").unwrap();
+    let steps = vec![Step {
+        guard: None,
+        kind: StepKind::RunExec {
+            argv: vec![
+                Arg::Expr(Expr::Literal(Value::String("echo".to_string()))),
+                Arg::Expr(Expr::Literal(Value::String("a\\\"b\\\\c\\nd".to_string()))),
+                Arg::Expr(Expr::Literal(Value::String(
+                    "a; b $(c) `d` > e | f".to_string(),
+                ))),
+            ],
+        },
+        scope_enter: 0,
+        scope_exit: 0,
+    }];
+    let mock = MockProcessManager::default();
+    let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
+    run_steps_with_manager(fs, &steps, mock.clone(), ExecIo::new()).unwrap();
+    let runs = mock.recorded_argv_runs();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(
+        runs[0].argv,
+        vec!["echo", "a\"b\\c\nd", "a; b $(c) `d` > e | f"]
+    );
 }
 
 #[test]
@@ -1822,4 +1988,108 @@ fn script_pipe_explicit_disk_spill_and_cleanup_verification() {
         !temp_path.exists(),
         "Temp file must be deleted from disk upon Drop"
     );
+}
+
+/// Property tests for shell escape/expansion invariants (`expand_string` +
+/// `expand_dsl_vars`, the exact two-pass order shell `RUN` resolution uses).
+/// String-munging is where surprises hide, so the escape hatches get
+/// randomized inputs, not just hand-picked examples: `\$` must never expand,
+/// `\{{` must never interpolate, and real placeholders must always resolve.
+mod escape_props {
+    use super::super::args::{expand_dsl_vars, expand_string};
+    use super::super::state::ExecState;
+    use super::create_exec_state;
+    use oxdock_fs::MockFs;
+    use oxdock_parser::Value;
+    use oxdock_process::MockProcessManager;
+    use proptest::prelude::*;
+    use std::sync::Arc;
+
+    fn prop_state(
+        envs: &[(String, String)],
+        vars: &[(String, Value)],
+    ) -> ExecState<MockProcessManager> {
+        let mut state = create_exec_state(MockFs::new());
+        for (k, v) in envs {
+            Arc::make_mut(&mut state.envs).insert(k.clone(), v.clone());
+        }
+        for (k, v) in vars {
+            state.set_var(k.clone(), v.clone());
+        }
+        state
+    }
+
+    /// Shell `RUN` resolution order for a free-text argument: templates and
+    /// backslash escapes first, bare `$var` second.
+    fn shell_resolve(input: &str, state: &ExecState<MockProcessManager>) -> String {
+        let expanded = expand_string(input, &state.envs, state).expect("expansion is infallible");
+        expand_dsl_vars(&expanded, state)
+    }
+
+    proptest! {
+        #[test]
+        #[cfg_attr(miri, ignore = "proptest case loops are impractical under Miri isolation")]
+        fn escaped_dollar_never_expands(
+            name in "[a-z][a-zA-Z0-9_]{0,10}",
+            value in "[a-zA-Z0-9 $\\{}/._-]{0,20}",
+        ) {
+            // Whatever the variable holds — even template-looking payloads —
+            // `\$name` routes `$name` to the shell untouched.
+            let state = prop_state(
+                &[],
+                &[(name.clone(), Value::String(value))],
+            );
+            prop_assert_eq!(shell_resolve(&format!("\\${name}"), &state), format!("${name}"));
+        }
+
+        #[test]
+        #[cfg_attr(miri, ignore = "proptest case loops are impractical under Miri isolation")]
+        fn escaped_template_never_interpolates(
+            inner in "[a-zA-Z0-9 $\\_.,/:-]{0,24}",
+            key in "[A-Z_]{1,8}",
+            val in "[a-z0-9]{0,12}",
+        ) {
+            // `\{{ ... }}` (even wrapping real placeholder syntax, with tempting
+            // environment values present) passes through byte-identical.
+            let state = prop_state(
+                &[(key, val)],
+                &[],
+            );
+            prop_assert_eq!(
+                shell_resolve(&format!("\\{{{{ {inner} }}}}"), &state),
+                format!("{{{{ {inner} }}}}")
+            );
+        }
+
+        #[test]
+        #[cfg_attr(miri, ignore = "proptest case loops are impractical under Miri isolation")]
+        fn env_template_always_interpolates(
+            key in "[A-Z_]{1,8}",
+            val in "[a-z0-9 ]{0,12}",
+        ) {
+            let state = prop_state(&[(key.clone(), val.clone())], &[]);
+            prop_assert_eq!(shell_resolve(&format!("{{{{ env:{key} }}}}"), &state), val);
+        }
+
+        #[test]
+        #[cfg_attr(miri, ignore = "proptest case loops are impractical under Miri isolation")]
+        fn dollar_template_always_interpolates(
+            name in "[a-z][a-zA-Z0-9_]{0,10}",
+            val in "[a-z0-9 ]{0,12}",
+        ) {
+            let state = prop_state(
+                &[],
+                &[(name.clone(), Value::String(val.clone()))],
+            );
+            prop_assert_eq!(shell_resolve(&format!("{{{{ ${name} }}}}"), &state), val);
+        }
+
+        #[test]
+        #[cfg_attr(miri, ignore = "proptest case loops are impractical under Miri isolation")]
+        fn plain_text_passes_through_untouched(s in "[a-zA-Z0-9 .,!?/_:@=-]{0,30}") {
+            // No `$`, `\`, or braces: both passes are the identity function.
+            let state = prop_state(&[], &[]);
+            prop_assert_eq!(shell_resolve(&s, &state), s);
+        }
+    }
 }

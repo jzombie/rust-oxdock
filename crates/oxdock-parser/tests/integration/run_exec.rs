@@ -72,6 +72,37 @@ fn run_exec_form_supports_typed_elements() {
 }
 
 #[test]
+fn run_exec_form_supports_keypath_and_call_elements() {
+    match single_kind(r#"RUN ["prog", $a.b, GLOB("*.txt")]"#) {
+        StepKind::RunExec { argv } => {
+            assert_eq!(argv.len(), 3);
+            assert!(
+                matches!(&argv[1], Arg::Expr(Expr::KeyPath { base, keys }) if base == "a" && keys == &["b".to_string()])
+            );
+            assert!(matches!(&argv[2], Arg::Expr(Expr::Call { name, .. }) if name == "GLOB"));
+        }
+        other => panic!("expected RunExec, got {other:?}"),
+    }
+}
+
+#[test]
+fn run_exec_form_preserves_backslash_escapes_verbatim() {
+    // Escape processing is deferred to runtime: the AST keeps source bytes.
+    match single_kind(r#"RUN ["a\"b\\c"]"#) {
+        StepKind::RunExec { argv } => {
+            assert_eq!(
+                argv[0],
+                Arg::Expr(Expr::Literal(Value::String("a\\\"b\\\\c".to_string())))
+            );
+        }
+        other => panic!("expected RunExec, got {other:?}"),
+    }
+    // ...so Display round-trips escaped sources byte-identical.
+    let kind = single_kind(r#"RUN ["a\"b\\c"]"#);
+    assert_eq!(single_kind(&kind.to_string()), kind);
+}
+
+#[test]
 fn run_exec_form_keeps_shell_metachars_literal() {
     // `;` and `//` inside list elements must not split steps or comments.
     let steps = parse_prod(r#"RUN ["echo", "a; b // c"]"#);
