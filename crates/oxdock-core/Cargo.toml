@@ -31,6 +31,7 @@ indoc.workspace = true
 oxdock-fs = { workspace = true, features = ["mock-fs"] }
 oxdock-process = { workspace = true, features = ["mock-process"] }
 oxdock-sys-test-utils.workspace = true
+proptest.workspace = true
 
 [lints]
 workspace = true

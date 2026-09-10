@@ -1,0 +1,6 @@
+# Concurrent kernel pipe pair: the ASYNC RUN producer promotes pipe:live
+# to an OS pipe (single RUN body), and the foreground WRITE drains it
+# through a bridged reader. Under Miri the same script falls back to a
+# script pipe with identical results.
+WITH_IO [stdout=pipe:live] ASYNC RUN "echo live-bytes"
+WITH_IO [stdin=pipe:live] WRITE live.txt

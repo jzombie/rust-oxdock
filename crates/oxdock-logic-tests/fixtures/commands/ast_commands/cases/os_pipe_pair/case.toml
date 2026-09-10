@@ -1,0 +1,9 @@
+name = "os_pipe_pair"
+
+# `echo` appends a platform newline (LF on Unix, CRLF on Windows).
+# RUN is the one DSL command allowed to differ per OS.
+[expect.platform.unix]
+files = { "live.txt" = "live-bytes\n" }
+
+[expect.platform.windows]
+files = { "live.txt" = "live-bytes\r\n" }

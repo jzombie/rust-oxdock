@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [UNRELEASED]
+
+### Added
+
+- `RUN ["exe", "arg", ...]` exec form: spawns the executable directly with no shell, so there is no shell expansion, globbing, redirection, or pipes; use it for portable commands. Elements accept quoted strings, bare words, `$var` / `$a.b`, and `CALL()`; quoted `{{ ... }}` templates interpolate per element while `\$` / `\{{` escapes pass through literally, and `;` / `//` inside elements stay literal. Guards and wrappers (`ASYNC`, `TIMEOUT`, `WITH_IO`) apply to both forms; `RUN []` is an error and shell `RUN <command...>` behavior is unchanged
+- `ProcessManager::run_argv` / `spawn_argv` for direct executable spawning across the `Shell`, `Mock`, and Miri `Synthetic` backends, plus documented `INHERIT_STDOUT_ENV_VAR` / `PROCESS_DEBUG_ENV_VAR` constants replacing hardcoded environment variable names
+- `WITH_IO` wrapping an `ASYNC` block whose body is a single `RUN`, guarded or not, now promotes the pipe to a zero copy OS kernel pipe: the producer child writes straight into the kernel and a concurrent `RUN` consumer reads straight out, with no copies through memory buffers. DSL consumers (`WRITE`, `READ`, ...) on a live name keep working through a bridged reader. All other shapes keep the in memory script pipe, so sequential fan in, keepers, DSL bodies, and host injected pipes behave exactly as before. Promotion is single producer single consumer by construction: a second producer or consumer on a live name fails deterministically instead of interleaving bytes. The consumer must run while the producer is alive, since output past the 64 KiB kernel buffer stalls until drained. Under Miri everything stays on script pipes with identical results for small payloads
+
+### Changed
+
+- Host Rust API only, scripts are unaffected: `CommandOptions.stdin` is now a `CommandStdin` enum instead of `Option<SharedInput>`. Rust embedders replace `stdin: Some(x)` with `stdin: CommandStdin::Stream(x)` and `stdin: None` with `stdin: CommandStdin::Null`. `CommandStdout` and `CommandStderr` gain matching host only `OsPipe` variants for direct kernel pipe handoff
+
+### Fixed
+
+- `WITH_IO` docs describe both pipe modes: `ASYNC` single `RUN` pipelines use zero copy OS kernel pipes, sequential steps use script pipes (memory plus 8 MiB spill). The old "named pipes" and "without temp files" wording is removed.
+
 ## [0.10.0-alpha] - 2026-09-08
 
 ### Added
