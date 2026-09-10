@@ -11,9 +11,9 @@ use oxdock_fs::PolicyPath;
 use crate::child::ChildHandle;
 use crate::contract::{
     BackgroundHandle, CommandContext, CommandMode, CommandOptions, CommandResult, CommandStderr,
-    CommandStdout, ProcessManager, SharedInput, SharedOutput,
+    CommandStdin, CommandStdout, PROCESS_DEBUG_ENV_VAR, ProcessManager, SharedInput, SharedOutput,
 };
-use crate::shell::shell_cmd;
+use crate::shell::{direct_cmd, shell_cmd};
 
 /// Default process manager that shells out using the system shell.
 #[derive(Clone, Default)]
@@ -30,7 +30,7 @@ impl ProcessManager for ShellProcessManager {
         script: &str,
         options: CommandOptions,
     ) -> Result<CommandResult<Self::Handle>> {
-        if std::env::var_os("OXBOOK_DEBUG").is_some() {
+        if std::env::var_os(PROCESS_DEBUG_ENV_VAR).is_some() {
             eprintln!("oxbook run_command: {script}");
         }
         let mut command = shell_cmd(script);
@@ -41,53 +41,115 @@ impl ProcessManager for ShellProcessManager {
             stdout,
             stderr,
         } = options;
+        run_prepared(&mut command, mode, stdin, stdout, stderr)
+    }
 
-        let (stdout_stream, capture_buf) = match stdout {
-            CommandStdout::Inherit => (None, None),
-            CommandStdout::Stream(stream) => (Some(stream), None),
-            CommandStdout::Capture => {
-                if matches!(mode, CommandMode::Background) {
-                    bail!("cannot capture stdout for background command");
-                }
-                let buf = Arc::new(Mutex::new(Vec::new()));
-                let writer: SharedOutput = buf.clone();
-                (Some(writer), Some(buf))
-            }
-        };
-
-        let stderr_stream = match stderr {
-            CommandStderr::Inherit => None,
-            CommandStderr::Stream(stream) => Some(stream),
-        };
-
-        let need_null_stdin = stdin.is_none();
-        if need_null_stdin {
-            // Do not inherit stdin by default; ensure isolation unless WITH_STDIN is used.
-            command.stdin(Stdio::null());
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    fn run_argv(
+        &mut self,
+        ctx: &CommandContext,
+        argv: &[String],
+        options: CommandOptions,
+    ) -> Result<CommandResult<Self::Handle>> {
+        if std::env::var_os(PROCESS_DEBUG_ENV_VAR).is_some() {
+            eprintln!("oxbook run_argv: {argv:?}");
         }
-        let desc = format!("{:?}", command);
+        let mut command = direct_cmd(argv)?;
+        apply_ctx(&mut command, ctx);
+        let CommandOptions {
+            mode,
+            stdin,
+            stdout,
+            stderr,
+        } = options;
+        run_prepared(&mut command, mode, stdin, stdout, stderr)
+    }
+}
 
-        match mode {
-            CommandMode::Foreground => {
-                let mut handle =
-                    spawn_child_with_streams(&mut command, stdin, stdout_stream, stderr_stream)?;
-                let status = handle
-                    .wait()
-                    .with_context(|| format!("failed to run {desc}"))?;
-                if !status.success() {
-                    bail!("command {desc} failed with status {}", status);
-                }
-                if let Some(buf) = capture_buf {
-                    let mut guard = buf.lock().map_err(|_| anyhow!("capture stdout poisoned"))?;
-                    return Ok(CommandResult::Captured(std::mem::take(&mut *guard)));
-                }
-                Ok(CommandResult::Completed)
+/// Shared foreground/background runner for an already-configured
+/// `std::process::Command`: stdio mapping, null-stdin isolation,
+/// capture semantics, and non-zero failures behave identically for
+/// shell (`run_command`) and direct-spawn (`run_argv`) paths.
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+fn run_prepared(
+    command: &mut ProcessCommand,
+    mode: CommandMode,
+    stdin: CommandStdin,
+    stdout: CommandStdout,
+    stderr: CommandStderr,
+) -> Result<CommandResult<ChildHandle>> {
+    let (stdout_stream, capture_buf) = match stdout {
+        CommandStdout::Inherit => (None, None),
+        CommandStdout::Stream(stream) => (Some(stream), None),
+        CommandStdout::Capture => {
+            if matches!(mode, CommandMode::Background) {
+                bail!("cannot capture stdout for background command");
             }
-            CommandMode::Background => {
-                let handle =
-                    spawn_child_with_streams(&mut command, stdin, stdout_stream, stderr_stream)?;
-                Ok(CommandResult::Background(handle))
+            let buf = Arc::new(Mutex::new(Vec::new()));
+            let writer: SharedOutput = buf.clone();
+            (Some(writer), Some(buf))
+        }
+        #[cfg(not(miri))]
+        CommandStdout::OsPipe(writer) => {
+            // Move the FD into the child. `take` empties the parent slot,
+            // and `options` drops at the end of this function, so no parent
+            // copy survives to starve the reader of EOF.
+            let owned = writer.take()?;
+            command.stdout(Stdio::from(owned));
+            (None, None)
+        }
+    };
+
+    let stderr_stream = match stderr {
+        CommandStderr::Inherit => None,
+        CommandStderr::Stream(stream) => Some(stream),
+        #[cfg(not(miri))]
+        CommandStderr::OsPipe(writer) => {
+            // Same move and drop discipline as stdout above.
+            let owned = writer.take()?;
+            command.stderr(Stdio::from(owned));
+            None
+        }
+    };
+
+    let stdin_stream: Option<SharedInput> = match stdin {
+        // Do not inherit stdin by default; ensure isolation unless requested.
+        CommandStdin::Null => {
+            command.stdin(Stdio::null());
+            None
+        }
+        CommandStdin::Inherit => None,
+        CommandStdin::Stream(reader) => Some(reader),
+        #[cfg(not(miri))]
+        CommandStdin::OsPipe(reader) => {
+            // Same move and drop discipline as stdout above.
+            let owned = reader.take()?;
+            command.stdin(Stdio::from(owned));
+            None
+        }
+    };
+    let desc = format!("{:?}", command);
+
+    match mode {
+        CommandMode::Foreground => {
+            let mut handle =
+                spawn_child_with_streams(command, stdin_stream, stdout_stream, stderr_stream)?;
+            let status = handle
+                .wait()
+                .with_context(|| format!("failed to run {desc}"))?;
+            if !status.success() {
+                bail!("command {desc} failed with status {}", status);
             }
+            if let Some(buf) = capture_buf {
+                let mut guard = buf.lock().map_err(|_| anyhow!("capture stdout poisoned"))?;
+                return Ok(CommandResult::Captured(std::mem::take(&mut *guard)));
+            }
+            Ok(CommandResult::Completed)
+        }
+        CommandMode::Background => {
+            let handle =
+                spawn_child_with_streams(command, stdin_stream, stdout_stream, stderr_stream)?;
+            Ok(CommandResult::Background(handle))
         }
     }
 }
@@ -271,6 +333,46 @@ mod tests {
         }
     }
 
+    #[cfg_attr(
+        miri,
+        ignore = "spawns processes; Miri does not support process execution"
+    )]
+    #[test]
+    fn run_argv_spawns_directly_without_shell() {
+        let (_temp, ctx) = make_ctx(&[]);
+        let mut pm = ShellProcessManager;
+        let options = CommandOptions {
+            stdout: CommandStdout::Capture,
+            ..Default::default()
+        };
+        // `cargo` drives the test suite itself, so it is present on every
+        // platform without relying on shell builtins (`echo` is not a
+        // Windows executable).
+        let argv = vec!["cargo".to_string(), "--version".to_string()];
+        match pm.run_argv(&ctx, &argv, options).expect("run_argv") {
+            CommandResult::Captured(bytes) => {
+                let out = String::from_utf8_lossy(&bytes);
+                assert!(out.contains("cargo"), "captured: {out}");
+            }
+            CommandResult::Completed => panic!("expected Captured, got Completed"),
+            CommandResult::Background(_) => panic!("expected Captured, got Background"),
+        }
+    }
+
+    #[test]
+    fn run_argv_rejects_empty_argv_without_spawning() {
+        let (_temp, ctx) = make_ctx(&[]);
+        let mut pm = ShellProcessManager;
+        let err = match pm.run_argv(&ctx, &[], CommandOptions::foreground()) {
+            Err(err) => err,
+            Ok(_) => panic!("empty argv must bail"),
+        };
+        assert!(
+            err.to_string().contains("at least one argument"),
+            "unexpected error: {err}"
+        );
+    }
+
     fn large_output_script() -> &'static str {
         #[cfg(windows)]
         {
@@ -319,7 +421,7 @@ mod tests {
         let payload: SharedInput =
             std::sync::Arc::new(std::sync::Mutex::new(std::io::Cursor::new(input.to_vec())));
         let options = CommandOptions {
-            stdin: Some(payload),
+            stdin: CommandStdin::Stream(payload),
             stdout: CommandStdout::Capture,
             ..Default::default()
         };
@@ -336,6 +438,68 @@ mod tests {
 
     fn windows_compatible_contains(haystack: &[u8], needle: &[u8]) -> bool {
         haystack.windows(needle.len()).any(|w| w == needle)
+    }
+
+    /// Concurrent producer and consumer wired through one kernel pipe. The
+    /// consumer (`sort`) only returns after EOF, which proves the parent
+    /// retained no writer copy after spawning the producer.
+    #[cfg(not(miri))]
+    #[test]
+    fn os_pipe_streams_producer_to_consumer_with_eof() {
+        use crate::contract::{BackgroundHandle, create_os_pipe};
+
+        let (_temp, ctx) = make_ctx(&[]);
+        let (reader, writer) = create_os_pipe().expect("os pipe");
+        let mut pm = ShellProcessManager;
+
+        let producer = match pm
+            .run_command(
+                &ctx,
+                "echo hello-os-pipe",
+                CommandOptions {
+                    mode: CommandMode::Background,
+                    stdout: CommandStdout::OsPipe(writer),
+                    ..Default::default()
+                },
+            )
+            .expect("spawn producer")
+        {
+            CommandResult::Background(handle) => handle,
+            _ => panic!("expected background producer handle"),
+        };
+
+        let options = CommandOptions {
+            stdin: CommandStdin::OsPipe(reader),
+            stdout: CommandStdout::Capture,
+            ..Default::default()
+        };
+        // `sort` reads stdin to EOF on every platform before printing.
+        let captured = match pm.run_command(&ctx, "sort", options).expect("run consumer") {
+            CommandResult::Captured(bytes) => bytes,
+            _ => panic!("expected captured consumer output"),
+        };
+        assert!(
+            windows_compatible_contains(&captured, b"hello-os-pipe"),
+            "piped output: {:?}",
+            String::from_utf8_lossy(&captured)
+        );
+
+        let mut producer = producer;
+        let status = producer.wait().expect("wait producer");
+        assert!(status.success(), "producer failed: {status:?}");
+
+        // A spent handle cannot be reused for a second spawn.
+        let (spent_reader, spent_writer) = create_os_pipe().expect("os pipe");
+        spent_reader.take().expect("first reader take");
+        assert!(
+            spent_reader.take().is_err(),
+            "reader take must be single use"
+        );
+        spent_writer.take().expect("first writer take");
+        assert!(
+            spent_writer.take().is_err(),
+            "writer take must be single use"
+        );
     }
 
     #[test]

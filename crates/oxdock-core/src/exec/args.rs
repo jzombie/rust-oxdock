@@ -478,10 +478,36 @@ pub(crate) fn expand_string<P: ProcessManager>(
 /// Expand bare `$var` references in a string using DSL scope.
 /// Used by RUN commands to expand DSL variables before passing to shell.
 /// Undefined variables are left as-is (shell will handle them).
+/// Two escape hatches pass text through to the shell untouched:
+/// `\$` emits a literal `$` (backslash consumed, no expansion), and `$`
+/// inside a `{{ ... }}` span is never expanded (such spans are literal by
+/// construction — real templates were already interpolated upstream, and
+/// `\{{` escapes arrive here with their braces intact).
+/// Note: `\\$var` (literal backslash plus interpolation) is indistinguishable
+/// from `\$var` at this stage (`expand_string` already collapsed `\\`), so it
+/// also yields a literal `$var`; prefer `{{ $var }}`-adjacent forms when a
+/// literal backslash must precede an interpolated value.
 pub(crate) fn expand_dsl_vars<P: ProcessManager>(input: &str, state: &ExecState<P>) -> String {
     let mut output = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
     while let Some(c) = chars.next() {
+        if c == '\\' && chars.peek() == Some(&'$') {
+            output.push('$');
+            chars.next();
+            continue;
+        }
+        if c == '{' && chars.peek() == Some(&'{') {
+            output.push('{');
+            output.push(chars.next().unwrap_or('{'));
+            while let Some(ch) = chars.next() {
+                output.push(ch);
+                if ch == '}' && chars.peek() == Some(&'}') {
+                    output.push(chars.next().unwrap_or('}'));
+                    break;
+                }
+            }
+            continue;
+        }
         if c == '$' {
             let mut var_name = String::new();
             while let Some(&ch) = chars.peek() {

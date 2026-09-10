@@ -1,11 +1,10 @@
-use super::pipe::PipeEndpoint;
 use super::*;
 
 use anyhow::bail;
 use oxdock_fs::{GuardedPath, MockFs, WorkspaceFs};
 use oxdock_parser::{Guard, GuardExpr, IoBinding, IoStream, StepKind};
 use oxdock_process::{
-    BackgroundHandle, CommandContext, CommandMode, CommandOptions, CommandResult,
+    BackgroundHandle, CommandContext, CommandMode, CommandOptions, CommandResult, CommandStdin,
     MockProcessManager, MockRunCall, ProcessManager,
 };
 use oxdock_sys_test_utils::exit_status_from_code;
@@ -80,6 +79,352 @@ fn run_expands_env_values() {
     let runs = mock.recorded_runs();
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].script, "echo bar");
+}
+
+#[test]
+fn run_shell_routes_dollar_forms_to_dsl_or_shell() {
+    use oxdock_parser::{Expr, Value};
+
+    // `$var` maps to the DSL variable; `\$var` is routed to the shell
+    // untouched (backslash consumed, no DSL expansion); `{{ $var }}` and
+    // `{{ env:K }}` interpolate; `\{{ $var }}` stays literal braces.
+    let root = GuardedPath::new_root_from_str(".").unwrap();
+    let scripts = [
+        "RUN echo $who",
+        "RUN echo \\$who",
+        "RUN echo \"{{ $who }}\"",
+        "RUN echo \"\\{{ $who }}\"",
+        "RUN echo \"{{ env:FOO }}\"",
+        // Embedded in larger text, an undefined `$var` passes through for
+        // the shell (a lone `$undefined` instead bails as a likely typo).
+        "RUN echo hi-$undefined_var_xyz",
+    ];
+    let mut steps = vec![
+        Step {
+            guard: None,
+            kind: StepKind::Env {
+                key: "FOO".into(),
+                value: "bar".into(),
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+        },
+        Step {
+            guard: None,
+            kind: StepKind::Assign {
+                var: "who".into(),
+                expr: Expr::Literal(Value::String("world".to_string())),
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+        },
+    ];
+    for script in scripts {
+        let parsed = crate::parse_script(script).unwrap();
+        steps.extend(parsed);
+    }
+    let mock = MockProcessManager::default();
+    let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
+    run_steps_with_manager(fs, &steps, mock.clone(), ExecIo::new()).unwrap();
+    let runs = mock.recorded_runs();
+    let scripts: Vec<_> = runs.iter().map(|r| r.script.as_str()).collect();
+    assert_eq!(
+        scripts,
+        vec![
+            "echo world",
+            "echo $who",
+            "echo world",
+            "echo {{ $who }}",
+            "echo bar",
+            "echo hi-$undefined_var_xyz",
+        ]
+    );
+}
+
+#[test]
+fn run_exec_resolves_and_flattens_argv() {
+    use oxdock_parser::{Arg, Expr, Value};
+
+    let root = GuardedPath::new_root_from_str(".").unwrap();
+    let steps = vec![
+        Step {
+            guard: None,
+            kind: StepKind::Env {
+                key: "GREETING".into(),
+                value: "hi".into(),
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+        },
+        Step {
+            guard: None,
+            kind: StepKind::Assign {
+                var: "args".into(),
+                expr: Expr::List(vec![
+                    Expr::Literal(Value::String("-v".to_string())),
+                    Expr::Literal(Value::String("--all".to_string())),
+                ]),
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+        },
+        Step {
+            guard: None,
+            kind: StepKind::RunExec {
+                argv: vec![
+                    Arg::Expr(Expr::Literal(Value::String("cargo".to_string()))),
+                    Arg::Expr(Expr::Var("args".to_string())),
+                    Arg::Expr(Expr::Literal(Value::Int(3))),
+                    Arg::Expr(Expr::Literal(Value::Bool(true))),
+                    Arg::String("{{ env:GREETING }}".to_string(), false),
+                    // Escapes stay literal and pass through directly.
+                    Arg::String("\\$literal".to_string(), false),
+                    Arg::String("\\{{ env:GREETING }}".to_string(), false),
+                ],
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+        },
+    ];
+    let mock = MockProcessManager::default();
+    let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
+    run_steps_with_manager(fs, &steps, mock.clone(), ExecIo::new()).unwrap();
+    let runs = mock.recorded_argv_runs();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(
+        runs[0].argv,
+        vec![
+            "cargo",
+            "-v",
+            "--all",
+            "3",
+            "true",
+            "hi",
+            "\\$literal",
+            "{{ env:GREETING }}"
+        ]
+    );
+    // Shell dispatch must not have been used.
+    assert!(mock.recorded_runs().is_empty());
+}
+
+#[test]
+fn run_exec_rejects_map_elements_with_type_error() {
+    use oxdock_parser::{Arg, Expr, Value};
+
+    let root = GuardedPath::new_root_from_str(".").unwrap();
+    let mut map = std::collections::BTreeMap::new();
+    map.insert("k".to_string(), Value::String("v".to_string()));
+    let steps = vec![Step {
+        guard: None,
+        kind: StepKind::RunExec {
+            argv: vec![Arg::Expr(Expr::Literal(Value::Map(map)))],
+        },
+        scope_enter: 0,
+        scope_exit: 0,
+    }];
+    let mock = MockProcessManager::default();
+    let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
+    let err = run_steps_with_manager(fs, &steps, mock, ExecIo::new()).unwrap_err();
+    assert!(
+        format!("{err:#}").contains("must be a string"),
+        "unexpected error: {err:#}"
+    );
+}
+
+#[test]
+fn run_exec_resolves_every_variable_type() {
+    use oxdock_parser::{Arg, Expr, Value};
+
+    // Every localized variable type extrapolates through exec-form argv:
+    // `$var`, `$map.key`, `{{ env:K }}`, `{{ $var }}`, `{{ $map.key }}`.
+    let root = GuardedPath::new_root_from_str(".").unwrap();
+    let mut map = std::collections::BTreeMap::new();
+    map.insert("k".to_string(), Value::String("keyval".to_string()));
+    let steps = vec![
+        Step {
+            guard: None,
+            kind: StepKind::Env {
+                key: "FOO".into(),
+                value: "bar".into(),
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+        },
+        Step {
+            guard: None,
+            kind: StepKind::Assign {
+                var: "who".into(),
+                expr: Expr::Literal(Value::String("world".to_string())),
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+        },
+        Step {
+            guard: None,
+            kind: StepKind::Assign {
+                var: "m".into(),
+                expr: Expr::Map(vec![(
+                    "k".to_string(),
+                    Expr::Literal(Value::String("keyval".to_string())),
+                )]),
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+        },
+        Step {
+            guard: None,
+            kind: StepKind::RunExec {
+                argv: vec![
+                    Arg::Expr(Expr::Literal(Value::String("echo".to_string()))),
+                    // Whole-element `$var` and `$map.key` references.
+                    Arg::Expr(Expr::Var("who".to_string())),
+                    Arg::Expr(Expr::KeyPath {
+                        base: "m".to_string(),
+                        keys: vec!["k".to_string()],
+                    }),
+                    // Template placeholders in string elements.
+                    Arg::String("{{ env:FOO }}".to_string(), false),
+                    Arg::String("{{ $who }}".to_string(), false),
+                    Arg::String("{{ $m.k }}".to_string(), false),
+                    Arg::Expr(Expr::Literal(Value::String("{{ $who }}".to_string()))),
+                ],
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+        },
+    ];
+    let mock = MockProcessManager::default();
+    let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
+    run_steps_with_manager(fs, &steps, mock.clone(), ExecIo::new()).unwrap();
+    let runs = mock.recorded_argv_runs();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(
+        runs[0].argv,
+        vec!["echo", "world", "keyval", "bar", "world", "keyval", "world"]
+    );
+}
+
+#[test]
+fn run_exec_expands_templates_in_literal_elements_once() {
+    use oxdock_parser::{Arg, Expr, Value};
+
+    let root = GuardedPath::new_root_from_str(".").unwrap();
+    let steps = vec![
+        Step {
+            guard: None,
+            kind: StepKind::Env {
+                key: "GREETING".into(),
+                value: "hi".into(),
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+        },
+        Step {
+            guard: None,
+            kind: StepKind::RunExec {
+                argv: vec![
+                    Arg::Expr(Expr::Literal(Value::String("echo".to_string()))),
+                    // Quoted `{{ ... }}` templates interpolate...
+                    Arg::Expr(Expr::Literal(Value::String(
+                        "{{ env:GREETING }}".to_string(),
+                    ))),
+                    // ...while `\{{ ... }}` escapes stay literal (single pass).
+                    Arg::Expr(Expr::Literal(Value::String(
+                        "\\{{ env:GREETING }}".to_string(),
+                    ))),
+                ],
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+        },
+    ];
+    let mock = MockProcessManager::default();
+    let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
+    run_steps_with_manager(fs, &steps, mock.clone(), ExecIo::new()).unwrap();
+    let runs = mock.recorded_argv_runs();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].argv, vec!["echo", "hi", "{{ env:GREETING }}"]);
+}
+
+#[test]
+fn run_exec_processes_escapes_and_keeps_metachars_literal() {
+    use oxdock_parser::{Arg, Expr, Value};
+
+    // Backslash escapes resolve exactly once (`\"` -> `"`, `\\` -> `\`,
+    // `\n` -> newline); shell metacharacters (`; $() `` > |`) are never
+    // interpreted and reach argv verbatim — there is no shell to escape for.
+    let root = GuardedPath::new_root_from_str(".").unwrap();
+    let steps = vec![Step {
+        guard: None,
+        kind: StepKind::RunExec {
+            argv: vec![
+                Arg::Expr(Expr::Literal(Value::String("echo".to_string()))),
+                Arg::Expr(Expr::Literal(Value::String("a\\\"b\\\\c\\nd".to_string()))),
+                Arg::Expr(Expr::Literal(Value::String(
+                    "a; b $(c) `d` > e | f".to_string(),
+                ))),
+            ],
+        },
+        scope_enter: 0,
+        scope_exit: 0,
+    }];
+    let mock = MockProcessManager::default();
+    let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
+    run_steps_with_manager(fs, &steps, mock.clone(), ExecIo::new()).unwrap();
+    let runs = mock.recorded_argv_runs();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(
+        runs[0].argv,
+        vec!["echo", "a\"b\\c\nd", "a; b $(c) `d` > e | f"]
+    );
+}
+
+#[test]
+fn run_exec_treats_variable_values_as_opaque() {
+    use oxdock_parser::{Arg, Expr, Value};
+
+    // A variable holding literal `{{ ... }}` text must pass through
+    // verbatim: expansion applies to script-literal source text only,
+    // never to evaluated runtime values (no second-order expansion).
+    let root = GuardedPath::new_root_from_str(".").unwrap();
+    let steps = vec![
+        Step {
+            guard: None,
+            kind: StepKind::Env {
+                key: "SECRET".into(),
+                value: "leaked".into(),
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+        },
+        Step {
+            guard: None,
+            kind: StepKind::Assign {
+                var: "data".into(),
+                expr: Expr::Literal(Value::String("\\{{ env:SECRET }}".to_string())),
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+        },
+        Step {
+            guard: None,
+            kind: StepKind::RunExec {
+                argv: vec![
+                    Arg::Expr(Expr::Literal(Value::String("echo".to_string()))),
+                    Arg::Expr(Expr::Var("data".to_string())),
+                ],
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+        },
+    ];
+    let mock = MockProcessManager::default();
+    let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
+    run_steps_with_manager(fs, &steps, mock.clone(), ExecIo::new()).unwrap();
+    let runs = mock.recorded_argv_runs();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].argv, vec!["echo", "{{ env:SECRET }}"]);
 }
 
 #[test]
@@ -269,8 +614,17 @@ fn with_io_pipe_routes_stdout_to_run_stdin() {
     let fs = MockFs::new();
     let mut state = create_exec_state(fs);
     let mut proc = MockProcessManager::default();
-    execute_steps(&mut state, &mut proc, &steps, None, false, None, None, true)
-        .expect("pipeline executes");
+    execute_steps(
+        &mut state,
+        &mut proc,
+        &steps,
+        CommandStdin::Null,
+        false,
+        None,
+        None,
+        true,
+    )
+    .expect("pipeline executes");
 
     let runs = proc.recorded_runs();
     assert_eq!(runs.len(), 1);
@@ -403,6 +757,7 @@ fn create_exec_state(fs: MockFs) -> ExecState<MockProcessManager> {
         named_tasks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         next_task_id: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         inside_async: false,
+        keeper_expiry: None,
         cancellable: false,
         _marker: std::marker::PhantomData,
     };
@@ -416,7 +771,17 @@ fn run_with_mock_fs(steps: &[Step]) -> (GuardedPath, HashMap<String, Vec<u8>>) {
     let fs = MockFs::new();
     let mut state = create_exec_state(fs.clone());
     let mut proc = MockProcessManager::default();
-    execute_steps(&mut state, &mut proc, steps, None, false, None, None, true).unwrap();
+    execute_steps(
+        &mut state,
+        &mut proc,
+        steps,
+        CommandStdin::Null,
+        false,
+        None,
+        None,
+        true,
+    )
+    .unwrap();
     (state.cwd, fs.snapshot())
 }
 
@@ -661,7 +1026,7 @@ fn mock_fs_rejects_absolute_windows_paths() {
         &mut state,
         &mut proc,
         &steps,
-        None,
+        CommandStdin::Null,
         false,
         Some(StreamHandle::Stream(sink.clone())),
         Some(StreamHandle::Stream(sink)),
@@ -918,8 +1283,17 @@ fn with_io_rejects_duplicate_stdout_binding() {
     let fs = MockFs::new();
     let mut state = create_exec_state(fs);
     let mut proc = MockProcessManager::default();
-    let err = execute_steps(&mut state, &mut proc, &steps, None, false, None, None, true)
-        .expect_err("duplicate stdout binding");
+    let err = execute_steps(
+        &mut state,
+        &mut proc,
+        &steps,
+        CommandStdin::Null,
+        false,
+        None,
+        None,
+        true,
+    )
+    .expect_err("duplicate stdout binding");
     assert!(
         err.to_string().contains("declared stdout more than once"),
         "unexpected: {err}"
@@ -958,13 +1332,147 @@ fn with_io_rejects_duplicate_stdin_and_stderr_bindings() {
         let fs = MockFs::new();
         let mut state = create_exec_state(fs);
         let mut proc = MockProcessManager::default();
-        let err = execute_steps(&mut state, &mut proc, &steps, None, false, None, None, true)
-            .expect_err("duplicate binding");
+        let err = execute_steps(
+            &mut state,
+            &mut proc,
+            &steps,
+            CommandStdin::Null,
+            false,
+            None,
+            None,
+            true,
+        )
+        .expect_err("duplicate binding");
         assert!(
             err.to_string().contains(fragment),
             "expected '{fragment}', got: {err}"
         );
     }
+}
+
+#[cfg(not(miri))]
+#[test]
+fn with_io_async_single_run_promotes_os_pipe() {
+    let steps = vec![Step {
+        guard: None,
+        kind: StepKind::WithIo {
+            bindings: vec![IoBinding {
+                stream: IoStream::Stdout,
+                pipe: Some("live".into()),
+            }],
+            cmd: Box::new(StepKind::AsyncBlock {
+                body: vec![Step {
+                    guard: None,
+                    kind: StepKind::Run("echo hi".into()),
+                    scope_enter: 0,
+                    scope_exit: 0,
+                }],
+            }),
+        },
+        scope_enter: 0,
+        scope_exit: 0,
+    }];
+    let fs = MockFs::new();
+    let mut state = create_exec_state(fs);
+    let mut proc = MockProcessManager::default();
+    execute_steps(
+        &mut state,
+        &mut proc,
+        &steps,
+        CommandStdin::Null,
+        false,
+        None,
+        None,
+        true,
+    )
+    .expect("run");
+    assert!(
+        matches!(
+            state.io.resolve_stdout(0, "live", true),
+            Ok(StreamHandle::Os(_))
+        ),
+        "single RUN producer must promote pipe:live to an OS pair"
+    );
+    assert!(
+        state.io.input_pipe("live").is_none(),
+        "promoted names must not also create script entries"
+    );
+}
+
+#[cfg(not(miri))]
+#[test]
+fn with_io_async_guarded_and_exec_form_single_run_promotes_os_pipe() {
+    for (script, name) in [
+        (
+            "WITH_IO [stdout=pipe:g] ASYNC { [bool:true] RUN \"echo hi\" }",
+            "g",
+        ),
+        ("WITH_IO [stdout=pipe:e] ASYNC RUN [\"echo\", \"hi\"]", "e"),
+    ] {
+        let steps = crate::parse_script(script).expect("parse fixture script");
+        let fs = MockFs::new();
+        let mut state = create_exec_state(fs);
+        let mut proc = MockProcessManager::default();
+        execute_steps(
+            &mut state,
+            &mut proc,
+            &steps,
+            CommandStdin::Null,
+            false,
+            None,
+            None,
+            true,
+        )
+        .expect("run");
+        assert!(
+            matches!(
+                state.io.resolve_stdout(0, name, true),
+                Ok(StreamHandle::Os(_))
+            ),
+            "guarded and exec form single RUN producers must promote: {script}"
+        );
+    }
+}
+
+#[test]
+fn with_io_async_dsl_body_stays_script_pipe() {
+    let steps = vec![Step {
+        guard: None,
+        kind: StepKind::WithIo {
+            bindings: vec![IoBinding {
+                stream: IoStream::Stdout,
+                pipe: Some("plain".into()),
+            }],
+            cmd: Box::new(StepKind::AsyncBlock {
+                body: vec![Step {
+                    guard: None,
+                    kind: StepKind::Echo("hi".into()),
+                    scope_enter: 0,
+                    scope_exit: 0,
+                }],
+            }),
+        },
+        scope_enter: 0,
+        scope_exit: 0,
+    }];
+    let fs = MockFs::new();
+    let mut state = create_exec_state(fs);
+    let mut proc = MockProcessManager::default();
+    execute_steps(
+        &mut state,
+        &mut proc,
+        &steps,
+        CommandStdin::Null,
+        false,
+        None,
+        None,
+        true,
+    )
+    .expect("run");
+    assert!(
+        state.io.input_pipe("plain").is_some(),
+        "DSL producers must keep store and forward script pipes"
+    );
 }
 
 #[test]
@@ -980,8 +1488,17 @@ fn with_io_block_form_bails_unexpanded() {
     let fs = MockFs::new();
     let mut state = create_exec_state(fs);
     let mut proc = MockProcessManager::default();
-    let err = execute_steps(&mut state, &mut proc, &steps, None, false, None, None, true)
-        .expect_err("unexpanded WITH_IO block");
+    let err = execute_steps(
+        &mut state,
+        &mut proc,
+        &steps,
+        CommandStdin::Null,
+        false,
+        None,
+        None,
+        true,
+    )
+    .expect_err("unexpanded WITH_IO block");
     assert!(err.to_string().contains("expanded during parsing"));
 }
 
@@ -994,8 +1511,17 @@ fn write_without_contents_or_stdin_bails() {
     let fs = MockFs::new();
     let mut state = create_exec_state(fs);
     let mut proc = MockProcessManager::default();
-    let err = execute_steps(&mut state, &mut proc, &steps, None, false, None, None, true)
-        .expect_err("write without source");
+    let err = execute_steps(
+        &mut state,
+        &mut proc,
+        &steps,
+        CommandStdin::Null,
+        false,
+        None,
+        None,
+        true,
+    )
+    .expect_err("write without source");
     assert!(
         err.to_string().contains("requires stdin"),
         "unexpected: {err}"
@@ -1013,7 +1539,7 @@ fn stderr_stream_handle_reaches_manager() {
         &mut state,
         &mut proc,
         &steps,
-        None,
+        CommandStdin::Null,
         false,
         None,
         Some(StreamHandle::Stream(sink)),
@@ -1036,7 +1562,7 @@ fn inherit_stdout_override_forces_inherit_modes() {
     let err_sink: SharedOutput = Arc::new(Mutex::new(Vec::<u8>::new()));
     let steps = vec![
         step(StepKind::Env {
-            key: "OXDOCK_INHERIT_STDOUT".into(),
+            key: oxdock_process::INHERIT_STDOUT_ENV_VAR.into(),
             value: "1".into(),
         }),
         step(StepKind::Run("captured-normally".into())),
@@ -1048,7 +1574,7 @@ fn inherit_stdout_override_forces_inherit_modes() {
         &mut state,
         &mut proc,
         &steps,
-        None,
+        CommandStdin::Null,
         false,
         Some(StreamHandle::Stream(out_sink)),
         Some(StreamHandle::Stream(err_sink)),
@@ -1113,17 +1639,13 @@ fn exec_io_pipe_endpoints_expose_streams_and_inherit() {
     io.insert_output_pipe_stdout("s-out", writer.clone());
     io.insert_output_pipe_stderr_inherit("s-inh");
 
-    match io.output_pipe_stdout("s-out") {
-        Some(PipeEndpoint::Stream(w)) => assert!(Arc::ptr_eq(&w, &writer)),
-        Some(PipeEndpoint::Script(_)) => {
-            panic!("expected streamed stdout endpoint, got script endpoint")
-        }
-        Some(PipeEndpoint::Inherit) => panic!("expected streamed stdout endpoint, got inherit"),
-        None => panic!("endpoint missing entirely"),
+    match io.resolve_stdout(0, "s-out", false) {
+        Ok(StreamHandle::Stream(w)) => assert!(Arc::ptr_eq(&w, &writer)),
+        _ => panic!("expected streamed stdout handle"),
     }
-    match io.output_pipe_stderr("s-inh") {
-        Some(PipeEndpoint::Inherit) => {}
-        _ => panic!("expected inherit stderr endpoint"),
+    match io.resolve_stderr(0, "s-inh", false) {
+        Ok(StreamHandle::Inherit) => {}
+        _ => panic!("expected inherit stderr handle"),
     }
 }
 
@@ -1150,7 +1672,7 @@ fn hash_sha256_matches_known_digest_for_file() {
         &mut state,
         &mut proc,
         &steps,
-        None,
+        CommandStdin::Null,
         false,
         Some(StreamHandle::Stream(sink.clone())),
         None,
@@ -1438,8 +1960,17 @@ fn cancelled_end_poll_reaps_and_bails() {
         .store(true, std::sync::atomic::Ordering::SeqCst);
     proc.push_bg_plan(usize::MAX, success_status());
     let steps = vec![async_step("stuck")];
-    let err =
-        execute_steps(&mut state, &mut proc, &steps, None, false, None, None, true).unwrap_err();
+    let err = execute_steps(
+        &mut state,
+        &mut proc,
+        &steps,
+        CommandStdin::Null,
+        false,
+        None,
+        None,
+        true,
+    )
+    .unwrap_err();
     assert!(
         err.to_string().contains("cancelled"),
         "expected cancellation error, got: {err:#}"
@@ -1467,7 +1998,7 @@ fn timeout_preserves_preexisting_cancellation() {
         process: &mut proc,
         snapshot_root,
         build_context,
-        stdin: None,
+        stdin: CommandStdin::Null,
         expose_stdin: false,
         out: None,
         err: None,
@@ -1642,4 +2173,108 @@ fn script_pipe_explicit_disk_spill_and_cleanup_verification() {
         !temp_path.exists(),
         "Temp file must be deleted from disk upon Drop"
     );
+}
+
+/// Property tests for shell escape/expansion invariants (`expand_string` +
+/// `expand_dsl_vars`, the exact two-pass order shell `RUN` resolution uses).
+/// String-munging is where surprises hide, so the escape hatches get
+/// randomized inputs, not just hand-picked examples: `\$` must never expand,
+/// `\{{` must never interpolate, and real placeholders must always resolve.
+mod escape_props {
+    use super::super::args::{expand_dsl_vars, expand_string};
+    use super::super::state::ExecState;
+    use super::create_exec_state;
+    use oxdock_fs::MockFs;
+    use oxdock_parser::Value;
+    use oxdock_process::MockProcessManager;
+    use proptest::prelude::*;
+    use std::sync::Arc;
+
+    fn prop_state(
+        envs: &[(String, String)],
+        vars: &[(String, Value)],
+    ) -> ExecState<MockProcessManager> {
+        let mut state = create_exec_state(MockFs::new());
+        for (k, v) in envs {
+            Arc::make_mut(&mut state.envs).insert(k.clone(), v.clone());
+        }
+        for (k, v) in vars {
+            state.set_var(k.clone(), v.clone());
+        }
+        state
+    }
+
+    /// Shell `RUN` resolution order for a free-text argument: templates and
+    /// backslash escapes first, bare `$var` second.
+    fn shell_resolve(input: &str, state: &ExecState<MockProcessManager>) -> String {
+        let expanded = expand_string(input, &state.envs, state).expect("expansion is infallible");
+        expand_dsl_vars(&expanded, state)
+    }
+
+    proptest! {
+        #[test]
+        #[cfg_attr(miri, ignore = "proptest case loops are impractical under Miri isolation")]
+        fn escaped_dollar_never_expands(
+            name in "[a-z][a-zA-Z0-9_]{0,10}",
+            value in "[a-zA-Z0-9 $\\{}/._-]{0,20}",
+        ) {
+            // Whatever the variable holds — even template-looking payloads —
+            // `\$name` routes `$name` to the shell untouched.
+            let state = prop_state(
+                &[],
+                &[(name.clone(), Value::String(value))],
+            );
+            prop_assert_eq!(shell_resolve(&format!("\\${name}"), &state), format!("${name}"));
+        }
+
+        #[test]
+        #[cfg_attr(miri, ignore = "proptest case loops are impractical under Miri isolation")]
+        fn escaped_template_never_interpolates(
+            inner in "[a-zA-Z0-9 $\\_.,/:-]{0,24}",
+            key in "[A-Z_]{1,8}",
+            val in "[a-z0-9]{0,12}",
+        ) {
+            // `\{{ ... }}` (even wrapping real placeholder syntax, with tempting
+            // environment values present) passes through byte-identical.
+            let state = prop_state(
+                &[(key, val)],
+                &[],
+            );
+            prop_assert_eq!(
+                shell_resolve(&format!("\\{{{{ {inner} }}}}"), &state),
+                format!("{{{{ {inner} }}}}")
+            );
+        }
+
+        #[test]
+        #[cfg_attr(miri, ignore = "proptest case loops are impractical under Miri isolation")]
+        fn env_template_always_interpolates(
+            key in "[A-Z_]{1,8}",
+            val in "[a-z0-9 ]{0,12}",
+        ) {
+            let state = prop_state(&[(key.clone(), val.clone())], &[]);
+            prop_assert_eq!(shell_resolve(&format!("{{{{ env:{key} }}}}"), &state), val);
+        }
+
+        #[test]
+        #[cfg_attr(miri, ignore = "proptest case loops are impractical under Miri isolation")]
+        fn dollar_template_always_interpolates(
+            name in "[a-z][a-zA-Z0-9_]{0,10}",
+            val in "[a-z0-9 ]{0,12}",
+        ) {
+            let state = prop_state(
+                &[],
+                &[(name.clone(), Value::String(val.clone()))],
+            );
+            prop_assert_eq!(shell_resolve(&format!("{{{{ ${name} }}}}"), &state), val);
+        }
+
+        #[test]
+        #[cfg_attr(miri, ignore = "proptest case loops are impractical under Miri isolation")]
+        fn plain_text_passes_through_untouched(s in "[a-zA-Z0-9 .,!?/_:@=-]{0,30}") {
+            // No `$`, `\`, or braces: both passes are the identity function.
+            let state = prop_state(&[], &[]);
+            prop_assert_eq!(shell_resolve(&s, &state), s);
+        }
+    }
 }

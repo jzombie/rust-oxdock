@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use oxdock_fs::{GuardedPath, PolicyPath};
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 use std::process::ExitStatus;
@@ -97,6 +97,106 @@ pub enum CommandStdout {
     Inherit,
     Stream(SharedOutput),
     Capture,
+    /// Direct OS kernel pipe writer for concurrent pipelines. Single use:
+    /// the handle is taken on spawn and the parent retains no copy, so the
+    /// reader observes EOF once the producer exits. Only valid with
+    /// concurrently spawned consumers (`ASYNC`); never for sequential steps.
+    #[cfg(not(miri))]
+    OsPipe(OsPipeWriter),
+}
+
+/// Owned OS kernel pipe reader half behind a single use slot. `Clone`
+/// shares the slot; `take` transfers the handle exactly once so no parent
+/// copy survives spawn to starve the consumer of EOF. Backed by
+/// `std::io::pipe` (stable since Rust 1.87): `pipe` on Unix, `CreatePipe`
+/// on Windows.
+#[cfg(not(miri))]
+#[derive(Clone)]
+pub struct OsPipeReader {
+    inner: Arc<Mutex<Option<std::io::PipeReader>>>,
+}
+
+/// Owned OS kernel pipe writer half behind a single use slot. See
+/// [`OsPipeReader`] for the shared slot semantics.
+#[cfg(not(miri))]
+#[derive(Clone)]
+pub struct OsPipeWriter {
+    inner: Arc<Mutex<Option<std::io::PipeWriter>>>,
+}
+
+#[cfg(not(miri))]
+impl OsPipeReader {
+    fn new(reader: std::io::PipeReader) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(Some(reader))),
+        }
+    }
+
+    /// Take the handle for `Stdio::from`. Bails deterministically if the
+    /// descriptor was already consumed so a second spawn can never reuse a
+    /// spent pipe or leave stdio unbound.
+    pub fn take(&self) -> Result<std::io::PipeReader> {
+        self.inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("os pipe reader lock poisoned"))?
+            .take()
+            .ok_or_else(|| {
+                anyhow::anyhow!("os pipe handle has already been consumed by another process")
+            })
+    }
+}
+
+#[cfg(not(miri))]
+impl OsPipeWriter {
+    fn new(writer: std::io::PipeWriter) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(Some(writer))),
+        }
+    }
+
+    /// Take the handle for `Stdio::from`. Bails deterministically if the
+    /// descriptor was already consumed so a second spawn can never reuse a
+    /// spent pipe or leave stdio unbound.
+    pub fn take(&self) -> Result<std::io::PipeWriter> {
+        self.inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("os pipe writer lock poisoned"))?
+            .take()
+            .ok_or_else(|| {
+                anyhow::anyhow!("os pipe handle has already been consumed by another process")
+            })
+    }
+}
+
+/// Create a cross platform anonymous OS pipe pair for concurrent `ASYNC`
+/// pipelines. The caller moves each half into a spawn and drops any other
+/// copies immediately after spawning, otherwise the reader never sees EOF.
+#[cfg(not(miri))]
+pub fn create_os_pipe() -> Result<(OsPipeReader, OsPipeWriter)> {
+    let (reader, writer) = std::io::pipe()?;
+    Ok((OsPipeReader::new(reader), OsPipeWriter::new(writer)))
+}
+
+#[derive(Clone, Default)]
+pub enum CommandStdin {
+    /// Isolated null stdin. Preserves the previous `None` behavior.
+    #[default]
+    Null,
+    Inherit,
+    Stream(SharedInput),
+    /// Direct OS kernel pipe reader for concurrent pipelines. See
+    /// [`CommandStdout::OsPipe`] for the single use contract.
+    #[cfg(not(miri))]
+    OsPipe(OsPipeReader),
+}
+
+impl From<Option<SharedInput>> for CommandStdin {
+    fn from(stdin: Option<SharedInput>) -> Self {
+        match stdin {
+            Some(reader) => CommandStdin::Stream(reader),
+            None => CommandStdin::Null,
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -104,12 +204,17 @@ pub enum CommandStderr {
     #[default]
     Inherit,
     Stream(SharedOutput),
+    /// Direct OS kernel pipe writer, mirroring [`CommandStdout::OsPipe`].
+    /// Merging stdout and stderr into one live name takes the same slot
+    /// twice, so the second take bails; merge in shell via `2>&1` instead.
+    #[cfg(not(miri))]
+    OsPipe(OsPipeWriter),
 }
 
 #[derive(Clone, Default)]
 pub struct CommandOptions {
     pub mode: CommandMode,
-    pub stdin: Option<SharedInput>,
+    pub stdin: CommandStdin,
     pub stdout: CommandStdout,
     pub stderr: CommandStderr,
 }
@@ -132,6 +237,18 @@ pub enum CommandResult<H> {
     Captured(Vec<u8>),
     Background(H),
 }
+
+/// Host environment variable that forces spawned children to inherit the
+/// parent's stdout/stderr instead of using the executor's stream routing.
+/// Recognized values are `"1"` and case-insensitive `"true"`. Set on the
+/// script environment (an `ENV` step or host inherit), not the process
+/// environment: the executor reads it from [`CommandContext::envs`].
+pub const INHERIT_STDOUT_ENV_VAR: &str = "OXDOCK_INHERIT_STDOUT";
+
+/// Host process-environment variable enabling `eprintln!` diagnostics for
+/// every spawned command (program plus argv/script). Read from the process
+/// environment at spawn time; any value (including empty) enables it.
+pub const PROCESS_DEBUG_ENV_VAR: &str = "OXBOOK_DEBUG";
 
 /// Abstraction for running shell commands both in the foreground and
 /// background. `oxdock-core` relies on this trait to decouple the executor
@@ -157,5 +274,29 @@ pub trait ProcessManager: Clone + Send + 'static {
         options: CommandOptions,
     ) -> Result<CommandResult<Self::Handle>> {
         self.run_command(ctx, script, options)
+    }
+
+    /// Run an executable directly with an argument vector (no shell).
+    /// Backs the `RUN ["exe", "arg", ...]` exec form. The default
+    /// implementation bails so existing out-of-tree managers keep
+    /// compiling; in-tree managers override this.
+    fn run_argv(
+        &mut self,
+        _ctx: &CommandContext,
+        argv: &[String],
+        _options: CommandOptions,
+    ) -> Result<CommandResult<Self::Handle>> {
+        bail!("run_argv not implemented for argv {argv:?}")
+    }
+
+    /// Spawn an argv command without waiting for completion. The default
+    /// implementation delegates to `run_argv`, mirroring `spawn_command`.
+    fn spawn_argv(
+        &mut self,
+        ctx: &CommandContext,
+        argv: &[String],
+        options: CommandOptions,
+    ) -> Result<CommandResult<Self::Handle>> {
+        self.run_argv(ctx, argv, options)
     }
 }

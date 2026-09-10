@@ -31,6 +31,12 @@ pub enum RawToken<'a> {
         pair: Pair<'a, Rule>,
         line_no: usize,
     },
+    /// A `RUN ["exe", "arg", ...]` exec-form statement — carries a structured
+    /// `list_literal` pair, lowered without shell stringification.
+    RunExec {
+        pair: Pair<'a, Rule>,
+        line_no: usize,
+    },
 }
 
 pub fn tokenize(input: &str) -> Result<Vec<RawToken<'_>>> {
@@ -66,6 +72,10 @@ pub fn tokenize(input: &str) -> Result<Vec<RawToken<'_>>> {
             // Generic instructions — lowered by a function
             Rule::instruction | Rule::instruction_inner => {
                 tokens.push(RawToken::Instruction { pair, line_no })
+            }
+            // RUN exec form — structured list lowering, never shell text
+            Rule::run_exec_statement | Rule::run_exec_inner => {
+                tokens.push(RawToken::RunExec { pair, line_no })
             }
             other => bail!("unexpected parser rule {:?}", other),
         }

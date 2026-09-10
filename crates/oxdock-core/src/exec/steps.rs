@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use anyhow::{Result, bail};
 use oxdock_fs::GuardedPath;
 use oxdock_parser::{Arg, Step, StepKind, guard_option_allows};
-use oxdock_process::{BackgroundHandle, ProcessManager, SharedInput};
+use oxdock_process::{BackgroundHandle, CommandStdin, ProcessManager};
 
 /// Create an ExitStatus from a raw exit code. Cross-platform.
 fn exit_status_from_code(code: i32) -> ExitStatus {
@@ -195,7 +195,7 @@ pub struct StepCtx<'a, P: ProcessManager> {
     pub(super) process: &'a mut P,
     pub(super) snapshot_root: GuardedPath,
     pub(super) build_context: GuardedPath,
-    pub(super) stdin: Option<SharedInput>,
+    pub(super) stdin: CommandStdin,
     pub(super) expose_stdin: bool,
     pub(super) out: Option<StreamHandle>,
     pub(super) err: Option<StreamHandle>,
@@ -206,7 +206,7 @@ pub(super) fn execute_steps<P: ProcessManager>(
     state: &mut ExecState<P>,
     process: &mut P,
     steps: &[Step],
-    stdin: Option<SharedInput>,
+    stdin: CommandStdin,
     expose_stdin: bool,
     out: Option<StreamHandle>,
     err: Option<StreamHandle>,
@@ -242,7 +242,7 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
     cmd: &StepKind,
     generation: usize,
     idx: usize,
-    stdin: Option<SharedInput>,
+    stdin: CommandStdin,
     expose_stdin: bool,
     out: Option<StreamHandle>,
     err: Option<StreamHandle>,
@@ -265,6 +265,10 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
             let cmd = super::args::resolve_arg(arg, &mut cx)?;
             let cmd = super::args::expand_dsl_vars(&cmd, cx.state);
             handlers::run(&mut cx, idx, &cmd)
+        }
+        StepKind::RunExec { argv } => {
+            let resolved = handlers::resolve_run_exec_argv(argv, &mut cx)?;
+            handlers::run_argv(&mut cx, idx, &resolved)
         }
         StepKind::Echo(arg) => {
             let msg = super::args::resolve_arg(arg, &mut cx)?;
@@ -435,7 +439,7 @@ fn execute_steps_inner<P: ProcessManager>(
     process: &mut P,
     generation: usize,
     steps: &[Step],
-    stdin: Option<SharedInput>,
+    stdin: CommandStdin,
     expose_stdin: bool,
     out: Option<StreamHandle>,
     err: Option<StreamHandle>,
@@ -491,7 +495,12 @@ fn execute_steps_inner<P: ProcessManager>(
                 }
                 StepKind::Run(arg) => {
                     let cmd = super::args::resolve_arg(arg, &mut cx)?;
+                    let cmd = super::args::expand_dsl_vars(&cmd, cx.state);
                     handlers::run(&mut cx, idx, &cmd)
+                }
+                StepKind::RunExec { argv } => {
+                    let resolved = handlers::resolve_run_exec_argv(argv, &mut cx)?;
+                    handlers::run_argv(&mut cx, idx, &resolved)
                 }
                 StepKind::Echo(arg) => {
                     let msg = super::args::resolve_arg(arg, &mut cx)?;
@@ -636,6 +645,18 @@ fn execute_steps_inner<P: ProcessManager>(
         };
 
         let restore_result = restore_scopes(state, step.scope_exit);
+        // Keeper expiry: drop spawn-time pins whose final producer step
+        // just completed, so later consumer steps in the same task observe
+        // EOF. Gated on slice identity, so nested bodies executing through
+        // this same loop never discharge the worker's top-level map.
+        let expiry_drained = if let Some(expiry) = state.keeper_expiry.as_mut() {
+            expiry.expire_step(steps, idx)
+        } else {
+            false
+        };
+        if expiry_drained {
+            state.keeper_expiry = None;
+        }
         step_result?;
         restore_result?;
     }
@@ -838,7 +859,7 @@ pub(super) fn execute_scoped_steps<P: ProcessManager>(
     state: &mut ExecState<P>,
     process: &mut P,
     steps: &[Step],
-    stdin: Option<SharedInput>,
+    stdin: CommandStdin,
     expose_stdin: bool,
     out: Option<StreamHandle>,
     err: Option<StreamHandle>,
