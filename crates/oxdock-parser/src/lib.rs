@@ -244,16 +244,40 @@ mod tests {
                 );
                 assert!(
                     bindings.iter().any(|b| matches!(b.stream, IoStream::Stdout)
-                        && b.pipe.as_deref() == Some("setup"))
+                        && b.pipe == Some(PipeTarget::Name("setup".to_string())))
                 );
                 assert!(
                     bindings.iter().any(|b| matches!(b.stream, IoStream::Stderr)
-                        && b.pipe.as_deref() == Some("errors"))
+                        && b.pipe == Some(PipeTarget::Name("errors".to_string())))
                 );
                 assert!(matches!(cmd.as_ref(), StepKind::Write { .. }));
             }
             other => panic!("expected WITH_IO, saw {:?}", other),
         }
+    }
+
+    #[test]
+    fn with_io_supports_variable_pipes() {
+        let script = "WITH_IO [stdout=$p, stdin=pipe:in] WRITE \"echo hi\"";
+        let steps = parse_script(script, test_lower).expect("parse ok");
+        assert_eq!(steps.len(), 1);
+        match &steps[0].kind {
+            StepKind::WithIo { bindings, cmd } => {
+                assert_eq!(bindings.len(), 2);
+                assert!(
+                    bindings.iter().any(|b| matches!(b.stream, IoStream::Stdout)
+                        && b.pipe == Some(PipeTarget::Var("p".to_string())))
+                );
+                assert!(
+                    bindings.iter().any(|b| matches!(b.stream, IoStream::Stdin)
+                        && b.pipe == Some(PipeTarget::Name("in".to_string())))
+                );
+                assert!(matches!(cmd.as_ref(), StepKind::Write { .. }));
+            }
+            other => panic!("expected WITH_IO, saw {:?}", other),
+        }
+        // Display round-trips the variable form.
+        assert_eq!(steps[0].kind.to_string(), "WITH_IO [stdout=$p, stdin=pipe:in] WRITE \"echo hi\"");
     }
 
     #[test]
@@ -943,7 +967,7 @@ mod tests {
             StepKind::WithIo { bindings, cmd } => {
                 assert_eq!(bindings.len(), 1);
                 assert!(matches!(bindings[0].stream, IoStream::Stdout));
-                assert_eq!(bindings[0].pipe.as_deref(), Some("out"));
+                assert_eq!(bindings[0].pipe, Some(PipeTarget::Name("out".to_string())));
                 match cmd.as_ref() {
                     StepKind::AsyncBlock { body } => {
                         assert_eq!(body.len(), 1);

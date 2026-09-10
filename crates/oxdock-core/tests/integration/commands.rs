@@ -22,7 +22,7 @@ fn capture_pipeline(pipe: &str, path: &str, cmd: StepKind) -> [Step; 2] {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdout,
-                    pipe: Some(pipe_name.clone()),
+                    pipe: Some(oxdock_parser::PipeTarget::Name(pipe_name.clone())),
                 }],
                 cmd: Box::new(cmd),
             },
@@ -34,7 +34,7 @@ fn capture_pipeline(pipe: &str, path: &str, cmd: StepKind) -> [Step; 2] {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdin,
-                    pipe: Some(pipe_name),
+                    pipe: Some(oxdock_parser::PipeTarget::Name(pipe_name)),
                 }],
                 cmd: Box::new(StepKind::Write {
                     path: path.into(),
@@ -1257,6 +1257,30 @@ fn recursion_depth_limit_names_function() {
 }
 
 #[test]
+fn with_io_variable_pipe_undeclared_is_step_numbered_error() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let err = run_script(&root, "WITH_IO [stdout=$nope] ECHO hi\n")
+        .expect_err("undeclared pipe var must fail");
+    assert!(
+        err.to_string().contains("undeclared variable $nope"),
+        "{err}"
+    );
+}
+
+#[test]
+fn with_io_variable_pipe_mistype_is_type_error() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        LET $s: STRING = "not-a-pipe"
+        WITH_IO [stdout=$s] ECHO hi
+    "#};
+    let err = run_script(&root, script).expect_err("mistyped pipe var must fail");
+    assert!(err.to_string().contains("TypeMismatch"), "{err}");
+}
+
+#[test]
 fn async_call_await_captures_return_value() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
@@ -2218,7 +2242,7 @@ fn read_large_file_streams_without_oom() {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdout,
-                    pipe: Some(pipe_name.clone()),
+                    pipe: Some(oxdock_parser::PipeTarget::Name(pipe_name.clone())),
                 }],
                 cmd: Box::new(read_steps[0].kind.clone()),
             },
@@ -2230,7 +2254,7 @@ fn read_large_file_streams_without_oom() {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdin,
-                    pipe: Some(pipe_name),
+                    pipe: Some(oxdock_parser::PipeTarget::Name(pipe_name)),
                 }],
                 cmd: Box::new(StepKind::Write {
                     path: "output.txt".into(),
@@ -2273,7 +2297,7 @@ fn read_stdin_streaming_via_pipe() {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdout,
-                    pipe: Some("pipe-read".to_string()),
+                    pipe: Some(oxdock_parser::PipeTarget::Name("pipe-read".to_string())),
                 }],
                 cmd: Box::new(StepKind::Read(Some("source.txt".into()))),
             },
@@ -2285,7 +2309,7 @@ fn read_stdin_streaming_via_pipe() {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdin,
-                    pipe: Some("pipe-read".to_string()),
+                    pipe: Some(oxdock_parser::PipeTarget::Name("pipe-read".to_string())),
                 }],
                 cmd: Box::new(StepKind::Write {
                     path: "dest.txt".into(),

@@ -234,7 +234,7 @@ with_io_command = ${ "WITH_IO" ~ sep ~ io_flags ~ (sep ~ command)? }
 io_flags = { "[" ~ ws? ~ io_binding ~ (ws? ~ "," ~ ws? ~ io_binding)* ~ ws? ~ "]" }
 io_binding = { io_stream ~ (ws? ~ "=" ~ ws? ~ pipe_binding)? }
 io_stream = { "stdin" | "stdout" | "stderr" }
-pipe_binding = { "pipe" ~ ":" ~ pipe_name }
+pipe_binding = { "pipe" ~ ":" ~ pipe_name | dollar_ident }
 pipe_name = @{ (ASCII_ALPHANUMERIC | "_" | "-")+ }
 
 inherit_env_command = ${ "INHERIT_ENV" ~ sep ~ inherit_list }

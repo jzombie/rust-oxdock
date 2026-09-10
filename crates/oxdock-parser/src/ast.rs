@@ -366,7 +366,16 @@ pub enum IoStream {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct IoBinding {
     pub stream: IoStream,
-    pub pipe: Option<String>,
+    pub pipe: Option<PipeTarget>,
+}
+
+/// A pipe endpoint for a `WITH_IO` binding: either a literal `pipe:name`
+/// or a `$var` holding a `PIPE` value, resolved against the live pipe
+/// registry when the step runs.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum PipeTarget {
+    Name(String),
+    Var(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

@@ -1118,7 +1118,15 @@ fn emit_io_bindings(bindings: &[oxdock_parser::IoBinding]) -> proc_macro2::Token
                 oxdock_parser::IoStream::Stdout => quote! { Stdout },
                 oxdock_parser::IoStream::Stderr => quote! { Stderr },
             };
-            let pipe = b.pipe.as_ref().map(|p| quote! { Some(#p.to_string()) });
+            let pipe = match &b.pipe {
+                None => quote! { None },
+                Some(oxdock_parser::PipeTarget::Name(p)) => {
+                    quote! { Some(oxdock_parser::PipeTarget::Name(#p.to_string())) }
+                }
+                Some(oxdock_parser::PipeTarget::Var(v)) => {
+                    quote! { Some(oxdock_parser::PipeTarget::Var(#v.to_string())) }
+                }
+            };
             quote! { oxdock_parser::IoBinding { stream: oxdock_parser::IoStream::#stream, pipe: #pipe } }
         })
         .collect();

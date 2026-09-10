@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use oxdock_fs::EntryKind;
 use oxdock_parser::{
-    Arg, Expr, IoBinding, IoStream, Step, StepKind, TypeKind, Value, WorkspaceTarget,
+    Arg, Expr, IoBinding, IoStream, PipeTarget, Step, StepKind, TypeKind, Value, WorkspaceTarget,
 };
 use oxdock_process::{
     BackgroundHandle, CommandOptions, CommandResult, CommandStderr, CommandStdin, CommandStdout,
@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use super::fs_ops::{canonical_cwd, copy_entry, hash_path};
 use super::io::{StreamHandle, write_stdout};
 use super::pipe::KeeperGuard;
-use super::state::{FuncDefData, MAX_CALL_DEPTH};
+use super::state::{ExecState, FuncDefData, MAX_CALL_DEPTH};
 use super::steps::{Flow, StepCtx};
 
 /// Map a Flow reaching a context-free boundary (pipeline top, thread join)
@@ -1105,8 +1105,9 @@ fn resolve_io_streams<P: ProcessManager>(
     let direct = run_terminated(cmd);
 
     for binding in bindings {
-        if let Some(pipe) = &binding.pipe {
-            cx.state.io.ensure_pipe_for(pipe, trigger)?;
+        if let Some(target) = &binding.pipe {
+            let pipe = resolve_pipe_name(cx, idx, target)?;
+            cx.state.io.ensure_pipe_for(&pipe, trigger)?;
         }
         match binding.stream {
             IoStream::Stdin => {
@@ -1115,8 +1116,9 @@ fn resolve_io_streams<P: ProcessManager>(
                 }
                 seen_stdin = true;
                 next_expose_stdin = true;
-                step_stdin = if let Some(pipe) = &binding.pipe {
-                    cx.state.io.resolve_stdin(idx, pipe, direct)?
+                step_stdin = if let Some(target) = &binding.pipe {
+                    let pipe = resolve_pipe_name(cx, idx, target)?;
+                    cx.state.io.resolve_stdin(idx, &pipe, direct)?
                 } else {
                     cx.stdin.clone()
                 };
@@ -1126,8 +1128,9 @@ fn resolve_io_streams<P: ProcessManager>(
                     bail!("step {}: WITH_IO declared stdout more than once", idx + 1);
                 }
                 seen_stdout = true;
-                step_stdout = if let Some(pipe) = &binding.pipe {
-                    Some(cx.state.io.resolve_stdout(idx, pipe, direct)?)
+                step_stdout = if let Some(target) = &binding.pipe {
+                    let pipe = resolve_pipe_name(cx, idx, target)?;
+                    Some(cx.state.io.resolve_stdout(idx, &pipe, direct)?)
                 } else {
                     cx.out.clone()
                 };
@@ -1137,8 +1140,9 @@ fn resolve_io_streams<P: ProcessManager>(
                     bail!("step {}: WITH_IO declared stderr more than once", idx + 1);
                 }
                 seen_stderr = true;
-                step_stderr = if let Some(pipe) = &binding.pipe {
-                    Some(cx.state.io.resolve_stderr(idx, pipe, direct)?)
+                step_stderr = if let Some(target) = &binding.pipe {
+                    let pipe = resolve_pipe_name(cx, idx, target)?;
+                    Some(cx.state.io.resolve_stderr(idx, &pipe, direct)?)
                 } else {
                     cx.err.clone()
                 };
@@ -1147,6 +1151,42 @@ fn resolve_io_streams<P: ProcessManager>(
     }
 
     Ok((step_stdin, next_expose_stdin, step_stdout, step_stderr))
+}
+
+/// Resolve a `WITH_IO` pipe endpoint to a live pipe name. Literals resolve
+/// directly; `$var` must hold a `PIPE` value naming a registered pipe,
+/// otherwise this is a step-numbered type error.
+fn resolve_pipe_name<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    idx: usize,
+    target: &PipeTarget,
+) -> Result<String> {
+    match target {
+        PipeTarget::Name(name) => Ok(name.clone()),
+        PipeTarget::Var(var) => match cx.state.get_var_typed(var) {
+            Some((TypeKind::Pipe, Value::Pipe(name))) => {
+                if cx.state.io.pipe_exists(&name) {
+                    Ok(name)
+                } else {
+                    bail!(
+                        "step {}: TypeMismatch: expected PIPE, got unregistered pipe ({name:?})",
+                        idx + 1
+                    );
+                }
+            }
+            Some((kind, value)) => {
+                bail!(
+                    "step {}: TypeMismatch: expected PIPE, got {} ({:?})",
+                    idx + 1,
+                    kind.label(),
+                    value
+                );
+            }
+            None => {
+                bail!("step {}: undeclared variable ${var}", idx + 1);
+            }
+        },
+    }
 }
 
 /// If `cmd` is a `CALL` possibly nested under `WITH_IO` layers, return the
@@ -1676,7 +1716,7 @@ fn collect_kind_producers(kind: &StepKind, out: &mut Vec<(String, bool)>) {
             for binding in bindings {
                 match binding.stream {
                     IoStream::Stdout | IoStream::Stderr => {
-                        if let Some(pipe) = &binding.pipe {
+                        if let Some(PipeTarget::Name(pipe)) = &binding.pipe {
                             match out.iter_mut().find(|(name, _)| name == pipe) {
                                 Some(entry) => {
                                     entry.1 = entry.1 || promote;
@@ -1686,6 +1726,9 @@ fn collect_kind_producers(kind: &StepKind, out: &mut Vec<(String, bool)>) {
                                 }
                             }
                         }
+                        // Dynamic (`$var`) endpoints resolve against live
+                        // state at pin time (see `pin_async_keepers`); they
+                        // are invisible to this static walk by design.
                     }
                     IoStream::Stdin => {}
                 }
@@ -1717,6 +1760,69 @@ fn collect_kind_producers(kind: &StepKind, out: &mut Vec<(String, bool)>) {
     }
 }
 
+/// Dynamic counterpart to `collect_kind_producers`: resolves `$var` pipe
+/// endpoints against the spawning thread's state so `ASYNC` tasks that
+/// produce to a variable-named pipe get the same keeper coverage as static
+/// ones. Unresolvable names are skipped here (execution-time resolution
+/// reports the real error); promotion never applies to dynamic endpoints.
+fn collect_dynamic_producers<P: ProcessManager>(
+    kind: &StepKind,
+    state: &ExecState<P>,
+    out: &mut Vec<(String, bool)>,
+) {
+    match kind {
+        StepKind::WithIo { bindings, cmd } => {
+            for binding in bindings {
+                match binding.stream {
+                    IoStream::Stdout | IoStream::Stderr => {
+                        if let Some(PipeTarget::Var(var)) = &binding.pipe
+                            && let Some((TypeKind::Pipe, Value::Pipe(name))) =
+                                state.get_var_typed(var)
+                            && !out.iter().any(|(n, _)| n == &name)
+                        {
+                            out.push((name.clone(), false));
+                        }
+                    }
+                    IoStream::Stdin => {}
+                }
+            }
+            collect_dynamic_producers(cmd, state, out);
+        }
+        StepKind::Timeout { body, .. }
+        | StepKind::For { body, .. }
+        | StepKind::While { body, .. } => {
+            for step in body {
+                collect_dynamic_producers(&step.kind, state, out);
+            }
+        }
+        StepKind::If {
+            then_body,
+            else_ifs,
+            else_body,
+            ..
+        } => {
+            for step in then_body {
+                collect_dynamic_producers(&step.kind, state, out);
+            }
+            for (_, branch) in else_ifs {
+                for step in branch {
+                    collect_dynamic_producers(&step.kind, state, out);
+                }
+            }
+            if let Some(body) = else_body {
+                for step in body {
+                    collect_dynamic_producers(&step.kind, state, out);
+                }
+            }
+        }
+        StepKind::FuncDef { .. }
+        | StepKind::Call { .. }
+        | StepKind::AsyncBlock { .. }
+        | StepKind::AssignAsync { .. } => {}
+        _ => {}
+    }
+}
+
 /// Ensure every pipe an async `body` produces to exists (honoring OS
 /// promotion) and pin a keeper slot on each script pipe, synchronously on
 /// the spawning thread. Pins group by the top-level index of the final
@@ -1732,6 +1838,7 @@ fn pin_async_keepers<P: ProcessManager>(
     for (idx, step) in body.iter().enumerate() {
         let mut produced = Vec::new();
         collect_kind_producers(&step.kind, &mut produced);
+        collect_dynamic_producers(&step.kind, cx.state, &mut produced);
         for (name, promote) in produced {
             let entry = last.entry(name).or_insert((false, 0));
             entry.0 = entry.0 || promote;

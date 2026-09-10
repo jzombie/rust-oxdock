@@ -14,7 +14,9 @@
 
 use std::fmt;
 
-use crate::ast::{Arg, ArgPart, Expr, IoBinding, IoStream, Step, TypeKind, WorkspaceTarget};
+use crate::ast::{
+    Arg, ArgPart, Expr, IoBinding, IoStream, PipeTarget, Step, TypeKind, WorkspaceTarget,
+};
 use crate::command::{
     ArgSpec, ArgType, CommandMeta, Example, FlagSpec, FlagValueType, IoDirection, Stream,
     split_assignment,
@@ -192,10 +194,10 @@ fn fmt_io(b: &IoBinding) -> String {
         IoStream::Stdout => "stdout",
         IoStream::Stderr => "stderr",
     };
-    if let Some(p) = &b.pipe {
-        format!("{}=pipe:{}", s, p)
-    } else {
-        s.to_string()
+    match &b.pipe {
+        Some(PipeTarget::Name(p)) => format!("{}=pipe:{}", s, p),
+        Some(PipeTarget::Var(v)) => format!("{}=${}", s, v),
+        None => s.to_string(),
     }
 }
 
@@ -307,7 +309,7 @@ fn structural_hint(name: &str, received: &str) -> Option<String> {
 fn with_io_hint(got: &str, received: &str) -> String {
     const SYNTAX: &str =
         "WITH_IO needs `WITH_IO [bindings] <command>` or `WITH_IO [bindings] { <commands> }`";
-    const BINDINGS: &str = "bindings are `stdin`, `stdout`, `stderr`, or `<stream>=pipe:<name>` (e.g. `[stdout=pipe:log]`)";
+    const BINDINGS: &str = "bindings are `stdin`, `stdout`, `stderr`, `<stream>=pipe:<name>`, or `<stream>=$var` with a PIPE-typed variable (e.g. `[stdout=pipe:log]`, `[stdin=$p]`)";
     if let Some(after_open) = received.strip_prefix('[') {
         match after_open.split_once(']') {
             None => {
@@ -1052,7 +1054,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             name: "WITH_IO",
             syntax: "WITH_IO [bindings] <command> | WITH_IO [bindings] { <commands> }",
             summary: "Reroute standard streams.",
-            description: "Reroutes the standard streams of the next command or, in block form, of every enclosed command. Bindings map streams (`stdin`, `stdout`, `stderr`) to named script pipes (`stdout=pipe:name`, `stderr=pipe:name`). Both stdout and stderr pipes capture output the same way. Pipes hold bytes in memory and spill to a temp file above 8 MiB, so a producer can finish before the consumer starts. If WITH_IO wraps an ASYNC block whose body is a single RUN, guarded or not, the pipe is a zero copy OS kernel pipe instead: pair it with a consumer that runs while the producer is alive, since output past the 64 KiB kernel buffer stalls until drained. A second producer or consumer on a live name is an explicit error. A name bound as output can later feed another command's `stdin`, connecting commands without touching the terminal. Binding `stdout` and `stderr` to the same live pipe name fails deterministically. Merge streams in shell via `2>&1` instead. Nested blocks stack defaults; inline bindings override inherited ones for their command only; closing a block restores previous wiring.",
+            description: "Reroutes the standard streams of the next command or, in block form, of every enclosed command. Bindings map streams (`stdin`, `stdout`, `stderr`) to named script pipes (`stdout=pipe:name`, `stderr=pipe:name`) or to a PIPE-typed variable (`stdin=$p`, resolved against the live pipe registry when the step runs). Both stdout and stderr pipes capture output the same way. Pipes hold bytes in memory and spill to a temp file above 8 MiB, so a producer can finish before the consumer starts. If WITH_IO wraps an ASYNC block whose body is a single RUN, guarded or not, the pipe is a zero copy OS kernel pipe instead: pair it with a consumer that runs while the producer is alive, since output past the 64 KiB kernel buffer stalls until drained. A second producer or consumer on a live name is an explicit error. A name bound as output can later feed another command's `stdin`, connecting commands without touching the terminal. Binding `stdout` and `stderr` to the same live pipe name fails deterministically. Merge streams in shell via `2>&1` instead. Nested blocks stack defaults; inline bindings override inherited ones for their command only; closing a block restores previous wiring.",
             args: &[],
             flags: &[],
             default_output: None,

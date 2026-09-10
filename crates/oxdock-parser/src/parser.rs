@@ -1,5 +1,6 @@
 use crate::ast::{
-    Arg, Expr, Guard, GuardExpr, IoBinding, IoStream, PlatformGuard, Step, StepKind, TypeKind,
+    Arg, Expr, Guard, GuardExpr, IoBinding, IoStream, PipeTarget, PlatformGuard, Step, StepKind,
+    TypeKind,
 };
 use crate::command::ArgType;
 use crate::lexer::{self, RawToken, Rule};
@@ -1882,10 +1883,14 @@ fn parse_io_stream(text: &str) -> IoStream {
     }
 }
 
-fn parse_pipe_binding(pair: Pair<Rule>) -> Result<String> {
+fn parse_pipe_binding(pair: Pair<Rule>) -> Result<PipeTarget> {
     for inner in pair.into_inner() {
-        if inner.as_rule() == Rule::pipe_name {
-            return Ok(inner.as_str().to_string());
+        match inner.as_rule() {
+            Rule::pipe_name => return Ok(PipeTarget::Name(inner.as_str().to_string())),
+            Rule::dollar_ident => {
+                return Ok(PipeTarget::Var(parse_dollar_ident(inner)));
+            }
+            _ => {}
         }
     }
     bail!("missing pipe identifier in WITH_IO binding");

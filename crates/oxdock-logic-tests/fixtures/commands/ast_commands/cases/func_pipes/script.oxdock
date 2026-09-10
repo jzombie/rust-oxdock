@@ -1,22 +1,29 @@
-FUNC PRODUCER($msg: STRING) {
-    ECHO "{{ $msg }}"
-    RETURN $msg
+FUNC FILL($q: PIPE) {
+    WITH_IO [stdout=$q] ECHO "filled"
+    RETURN "filled-ok"
 }
 
-# Pattern 1: call-site stream binding, the function's stdout flows into the pipe.
-WITH_IO [stdout=pipe:log] CALL PRODUCER("piped")
-WITH_IO [stdin=pipe:log] READ_LINE $line
-WRITE line.txt "{{ $line }}"
-
-# Pattern 2: a pipe handle passed as a typed argument (validated on entry).
-LET $p: PIPE = "log"
-FUNC USEPIPE($q: PIPE) {
-    RETURN "ok"
+FUNC DRAIN($q: PIPE) {
+    WITH_IO [stdin=$q] READ_LINE $line
+    RETURN $line
 }
-LET $r: STRING = CALL USEPIPE($p)
-WRITE r.txt "{{ $r }}"
 
-# Pattern 3: stdin reroute plus return capture compose.
-WITH_IO [stdout=pipe:log2] CALL PRODUCER("again")
-LET $s: STRING = WITH_IO [stdin=pipe:log2] CALL PRODUCER("back")
-WRITE s.txt "{{ $s }}"
+FUNC MAKEPIPE($name: STRING) {
+    WITH_IO [stdout=pipe:made] ECHO "seed"
+    LET $p: PIPE = "made"
+    RETURN $p
+}
+
+# A pipe handle travels into functions as a typed argument and is usable
+# as a binding target in both directions.
+WITH_IO [stdout=pipe:ch] ECHO "primed"
+LET $p: PIPE = "ch"
+WITH_IO [stdin=pipe:ch] READ_LINE $primed
+LET $fr: STRING = CALL FILL($p)
+LET $got: STRING = CALL DRAIN($p)
+WRITE got.txt "{{ $primed }}-{{ $fr }}-{{ $got }}"
+
+# And conversely a function can hand a pipe back to its caller.
+LET $q: PIPE = CALL MAKEPIPE("ignored")
+LET $back: STRING = CALL DRAIN($q)
+WRITE back.txt "{{ $back }}"
