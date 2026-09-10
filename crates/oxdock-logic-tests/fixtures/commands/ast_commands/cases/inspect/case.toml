@@ -1,0 +1,5 @@
+name = "inspect"
+
+[expect]
+files = { "type.txt" = "PIPE", "ospipe.txt" = "false", "buf.txt" = "8", "readers.txt" = "1", "sval.txt" = "STRING-\"hi\"" }
+missing = ["unexpected.txt"]

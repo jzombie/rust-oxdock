@@ -1280,6 +1280,60 @@ fn pipe_plain_string_is_type_mismatch() {
 }
 
 #[test]
+fn inspect_expression_returns_pipe_snapshot_map() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        LET $p: PIPE = pipe:ch
+        WITH_IO [stdout=$p] ECHO "payload"
+        LET $info: MAP = INSPECT($p)
+        WRITE snap.txt "{{ $info.type }}-{{ $info.is_os_pipe }}-{{ $info.buffer_bytes }}-{{ $info.readers }}"
+        IF $info.is_os_pipe {
+            WRITE unexpected.txt "should be a script pipe"
+        }
+    "#};
+    run_script(&root, script).expect("INSPECT must work");
+    assert_eq!(
+        read_trimmed(&root.join("snap.txt").unwrap()),
+        "PIPE-false-8-1"
+    );
+    assert!(!root.join("unexpected.txt").unwrap().exists());
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "OS promotion is disabled under Miri; every pipe stays a script pipe"
+)]
+fn inspect_reports_os_pipe_for_promoted_single_run() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    // Single-RUN background tasks promote to zero-copy OS kernel pipes.
+    // Declaring the handle *after* the promoting step keeps the OS type
+    // (first binding wins), so INSPECT must report is_os_pipe=true.
+    // `cargo --version` is the portable single-RUN producer (also used by
+    // the exec-form failure test); its tiny output never fills the pipe.
+    let script = indoc! {r#"
+        LET $t: HANDLE = WITH_IO [stdout=pipe:osp] ASYNC RUN ["cargo", "--version"]
+        AWAIT $t
+        LET $p: PIPE = pipe:osp
+        LET $info: MAP = INSPECT($p)
+        WRITE kind.txt "{{ $info.is_os_pipe }}"
+    "#};
+    run_script(&root, script).expect("INSPECT of promoted pipe must work");
+    assert_eq!(read_trimmed(&root.join("kind.txt").unwrap()), "true");
+}
+
+#[test]
+fn inspect_undeclared_variable_is_error() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let err = run_script(&root, "LET $m: MAP = INSPECT($nope)\n")
+        .expect_err("INSPECT of undeclared var must fail");
+    assert!(err.to_string().contains("not defined"), "{err}");
+}
+
+#[test]
 fn with_io_variable_pipe_undeclared_is_step_numbered_error() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);

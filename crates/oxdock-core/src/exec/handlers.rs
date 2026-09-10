@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, anyhow, bail};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use oxdock_fs::EntryKind;
@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 use super::fs_ops::{canonical_cwd, copy_entry, hash_path};
 use super::io::{StreamHandle, write_stdout};
 use super::pipe::KeeperGuard;
-use super::state::{ExecState, FuncDefData, MAX_CALL_DEPTH};
+use super::state::{ExecState, FuncDefData, MAX_CALL_DEPTH, TaskPhase};
 use super::steps::{Flow, StepCtx};
 
 /// Map a Flow reaching a context-free boundary (pipeline top, thread join)
@@ -673,6 +673,76 @@ pub(super) fn read_line<P: ProcessManager>(
         cx.state.declare_var(clean_var, TypeKind::String, text)?;
     }
     Ok(())
+}
+
+/// Structured variable snapshot backing the `INSPECT()` expression form:
+/// base keys (`type`, `variable`, `name`, `value`) plus live details —
+/// pipe backend stats for `PIPE`, task phase for `HANDLE`. Undeclared
+/// names are an error. (Expression evaluation carries no step index, so
+/// unlike statement handlers this reports no step number.)
+pub(super) fn inspect_var_map<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    var: &str,
+) -> Result<BTreeMap<String, Value>> {
+    let clean_var = var.trim_start_matches('$').to_string();
+    let Some((decl_type, value)) = cx.state.get_var_typed(&clean_var) else {
+        bail!("variable '${clean_var}' is not defined");
+    };
+    let mut map = BTreeMap::new();
+    map.insert(
+        "type".to_string(),
+        Value::String(decl_type.label().to_string()),
+    );
+    map.insert("variable".to_string(), Value::String(clean_var.clone()));
+    match (&decl_type, &value) {
+        (TypeKind::Pipe, Value::Pipe(name)) => {
+            let info = cx.state.io.inspect_pipe(name);
+            map.insert("name".to_string(), Value::String(name.clone()));
+            map.insert("value".to_string(), Value::String(name.clone()));
+            map.insert("is_os_pipe".to_string(), Value::Bool(info.kind.is_os()));
+            map.insert(
+                "pipe_kind".to_string(),
+                Value::String(info.kind.as_str().to_string()),
+            );
+            map.insert(
+                "buffer_bytes".to_string(),
+                Value::Int(info.buffered.min(i64::MAX as u64) as i64),
+            );
+            map.insert("readers".to_string(), Value::Int(info.readers as i64));
+            map.insert("writers".to_string(), Value::Int(info.writers as i64));
+        }
+        (TypeKind::Handle, Value::TaskHandle(task_id)) => {
+            map.insert("name".to_string(), Value::String(clean_var.clone()));
+            map.insert(
+                "value".to_string(),
+                Value::String(format!("task {task_id}")),
+            );
+            let phase = cx
+                .state
+                .named_tasks
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(task_id)
+                .map(|entry| {
+                    let guard = entry.state.lock().unwrap_or_else(|e| e.into_inner());
+                    match guard.phase {
+                        TaskPhase::Running => "Running",
+                        TaskPhase::Awaiting => "Awaiting",
+                        TaskPhase::Cancelled => "Cancelled",
+                        TaskPhase::Completed => "Completed",
+                    }
+                    .to_string()
+                })
+                .unwrap_or_else(|| "unknown (already awaited?)".to_string());
+            map.insert("task_id".to_string(), Value::Int(*task_id as i64));
+            map.insert("task_phase".to_string(), Value::String(phase));
+        }
+        _ => {
+            map.insert("name".to_string(), Value::String(clean_var.clone()));
+            map.insert("value".to_string(), Value::String(format!("{value}")));
+        }
+    }
+    Ok(map)
 }
 
 pub(super) fn write<P: ProcessManager>(

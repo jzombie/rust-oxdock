@@ -279,6 +279,7 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
             "GLOB" => evaluate_glob(args, cx),
             "LOAD_TOML" => evaluate_load_toml(args, cx),
             "LOAD_JSON" => evaluate_load_json(args, cx),
+            "INSPECT" => evaluate_inspect(args, cx),
             _ => bail!("unknown function {name}"),
         },
         Expr::Compare { op, left, right } => {
@@ -322,6 +323,21 @@ pub(crate) fn is_truthy(val: &Value) -> Result<bool> {
         Value::Bool(b) => Ok(*b),
         other => bail!("Type Error: condition must be a Bool, found {:?}", other),
     }
+}
+
+/// Evaluate an `INSPECT($var)` call to a MAP snapshot: declared type and
+/// value plus live details (pipe backend stats, task phase). Like
+/// `LOAD_JSON`/`LOAD_TOML`, this evaluates to a value without running
+/// script steps. The argument must be a `$variable`, not an arbitrary
+/// expression, so the snapshot can name what it describes.
+fn evaluate_inspect<P: ProcessManager>(args: &[Expr], cx: &mut StepCtx<'_, P>) -> Result<Value> {
+    let [arg] = args else {
+        bail!("INSPECT requires exactly one argument: INSPECT($var)");
+    };
+    let Expr::Var(var) = arg else {
+        bail!("INSPECT requires a $variable argument, found {arg:?}");
+    };
+    super::handlers::inspect_var_map(cx, var).map(Value::Map)
 }
 
 /// Evaluate a `GLOB()` function call.

@@ -1158,7 +1158,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             name: "LET",
             syntax: "LET $var: TYPE = <expr> | LET $var: TYPE = ASYNC { <commands> } | LET $var: TYPE = <command> | LET $var: TYPE = AWAIT $task",
             summary: "Bind script-local variables.",
-            description: "Declares a script-local variable with an explicit type (STRING, INT, FLOAT, BOOL, PIPE, LIST, MAP, HANDLE, DURATION, PATH). Duplicate LET in the same scope frame is a redeclaration error; mutate with `$var = <expr>`. Variables are usable in templates (`{{ $var }}`), guards, and expressions. With `ASYNC`, spawns a background task and stores its handle (see ASYNC). The `$` sigil on the name is mandatory. The right-hand side is always an expression — literals, lists, maps, comparisons, `env:KEY` reads, `GLOB(\"*.md\")` — never a `{{ ... }}` template; interpolation happens in string values, not here. Bare words need no quotes: `LET $d: STRING = 30s` binds the same string as quoted. When the right-hand side is a synchronous command (`LET $out: STRING = ECHO hi`), the command runs to completion and its exact stdout bytes are captured into the variable as a string (no newline stripping; commands with no stdout capture as `\"\"`; non-UTF8 stdout is an error). Combining capture with an explicit `WITH_IO [stdout=pipe:...]` is a parse error. `LET $out: STRING = AWAIT $var` captures a background task's stdout the same way; bare `AWAIT $var` forwards it to the parent stdout instead. `LET $e: STRING = env:FOO` reads the script environment into a plain string.",
+            description: "Declares a script-local variable with an explicit type (STRING, INT, FLOAT, BOOL, PIPE, LIST, MAP, HANDLE, DURATION, PATH). Duplicate LET in the same scope frame is a redeclaration error; mutate with `$var = <expr>`. Variables are usable in templates (`{{ $var }}`), guards, and expressions. With `ASYNC`, spawns a background task and stores its handle (see ASYNC). The `$` sigil on the name is mandatory. The right-hand side is always an expression — literals, lists, maps, comparisons, `env:KEY` reads, `pipe:NAME` handles, `INSPECT($var)` snapshots, `GLOB(\"*.md\")` — never a `{{ ... }}` template; interpolation happens in string values, not here. Bare words need no quotes: `LET $d: STRING = 30s` binds the same string as quoted. When the right-hand side is a synchronous command (`LET $out: STRING = ECHO hi`), the command runs to completion and its exact stdout bytes are captured into the variable as a string (no newline stripping; commands with no stdout capture as `\"\"`; non-UTF8 stdout is an error). Combining capture with an explicit `WITH_IO [stdout=pipe:...]` is a parse error. `LET $out: STRING = AWAIT $var` captures a background task's stdout the same way; bare `AWAIT $var` forwards it to the parent stdout instead. `LET $e: STRING = env:FOO` reads the script environment into a plain string.",
             args: &[],
             flags: &[],
             default_output: None,
@@ -1207,6 +1207,23 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 LET $out: STRING = ECHO hi
                 WRITE captured.txt "{{ $out }}"
                 ASSERT_FILE captured.txt "hi\n"
+            "#},
+                },
+                Example {
+                    name: "inspect a variable",
+                    fence_meta: None,
+                    code: indoc! {r#"
+                # INSPECT($var) snapshots a variable into a MAP: declared
+                # type plus live details (pipe backend stats here), so
+                # scripts can branch on engine state.
+                LET $p: PIPE = pipe:log
+                WITH_IO [stdout=$p] ECHO hello
+                LET $info: MAP = INSPECT($p)
+                IF $info.is_os_pipe {
+                    WRITE unexpected.txt "should be a script pipe"
+                }
+                WRITE kind.txt "{{ $info.type }}"
+                ASSERT_FILE kind.txt "PIPE"
             "#},
                 },
             ],

@@ -16,6 +16,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - `BREAK` and `CONTINUE` (#114): work in both `FOR` and `WHILE`, always affecting the innermost loop. Using them outside a loop, or across a function or background-task boundary, is an error
 - Background function calls (#114): `LET $t: HANDLE = ASYNC CALL WORK("job")` runs a function in the background; `LET $o: STRING = AWAIT $t` waits and gives back its return value. Calls nest at most 64 deep, and going deeper fails with an error naming the function
 - Rust embedders (#114): host-side functions can be registered under the same UPPERCASE `CALL` names that script functions use; user-facing help output for them comes later
+- Explicit pipe handles (#114): `pipe:NAME` names a pipe without touching a stream (`LET $p: PIPE = pipe:log`), mirroring `env:KEY`. A fresh name registers on first use, so pipes can be declared before any `WITH_IO` mentions them
+- Variable pipe bindings (#114): `WITH_IO [stdout=$p]` / `[stdin=$p]` resolve a PIPE-typed variable against the live pipe registry when the step runs; undeclared, mistyped, or missing names are step-numbered errors. Pipes created, bound, or passed by variable inside functions are always script pipes: OS promotion never crosses a `CALL` boundary
+- `INSPECT($var)` (#114): snapshots a variable into a MAP with its declared type plus live details — pipe backend stats (`is_os_pipe`, `buffer_bytes`, `readers`, `writers`), task phase for handles — so scripts and fixtures can assert engine state directly
 
 ### Fixed
 
@@ -24,6 +27,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 ### Changed
 
 - [breaking] `LET` requires an explicit type, so `LET $x = ...` is now a parse error; reassignment is bare `$x = ...` and there is no `SET` keyword (a `SET ...` line fails with a hint); `FOR` variables require type tags; there is no `ENV` type; bare `$var` never reads the environment (use `env:KEY` or `{{ env:KEY }}`); command-reference Type cells show real types only (`$var` / `KEY=value` shapes display as the `STRING` they bind or resolve to)
+- [breaking] plain strings no longer become pipes: `LET $p: PIPE = "log"` is now a TypeMismatch error even when a pipe of that name exists; use `pipe:log`
 
 ### Dependencies
 
