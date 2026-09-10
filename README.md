@@ -32,11 +32,11 @@ OxDock is a Dockerfile inspired build DSL for Rust. Embed scripts at compile tim
 
 Supports platform gating, async tasks, and piped workflows for custom pipelines.
 
-[Documentation](https://docs.rs/oxdock/0.10.0-alpha/oxdock/)
+[Documentation](https://docs.rs/oxdock/0.11.0-alpha/oxdock/)
 
 ## Quick start
 
-Add it to your Rust build with `cargo add oxdock@0.10.0-alpha`, or install the standalone runner with `cargo install oxdock@0.10.0-alpha`.
+Add it to your Rust build with `cargo add oxdock@0.11.0-alpha`, or install the standalone runner with `cargo install oxdock@0.11.0-alpha`.
 
 Run a script:
 

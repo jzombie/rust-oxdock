@@ -4,7 +4,7 @@ OxDock is a Dockerfile inspired build DSL for Rust. Embed scripts at compile tim
 
 Supports platform gating, async tasks, and piped workflows for custom pipelines.
 
-[Documentation](https://docs.rs/oxdock/0.10.0-alpha/oxdock/)
+[Documentation](https://docs.rs/oxdock/0.11.0-alpha/oxdock/)
 
 # DSL Reference
 
