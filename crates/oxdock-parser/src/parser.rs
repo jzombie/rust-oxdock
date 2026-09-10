@@ -1,4 +1,4 @@
-use crate::ast::{Arg, Guard, GuardExpr, IoBinding, IoStream, PlatformGuard, Step, StepKind};
+use crate::ast::{Arg, Expr, Guard, GuardExpr, IoBinding, IoStream, PlatformGuard, Step, StepKind};
 use crate::command::ArgType;
 use crate::lexer::{self, RawToken, Rule};
 use anyhow::{Result, anyhow, bail};
@@ -109,6 +109,7 @@ impl<'a, F: Fn(&str, Vec<Arg>) -> Result<StepKind>> ScriptParser<'a, F> {
                     RawToken::BlockStart { .. }
                         | RawToken::Command { .. }
                         | RawToken::Instruction { .. }
+                        | RawToken::RunExec { .. }
                 )
             {
                 let pending = self.pending_io_block.take().unwrap();
@@ -130,6 +131,10 @@ impl<'a, F: Fn(&str, Vec<Arg>) -> Result<StepKind>> ScriptParser<'a, F> {
                 }
                 RawToken::Instruction { pair, line_no } => {
                     let kind = self.lower_instruction(pair)?;
+                    self.handle_command_token(line_no, kind)?
+                }
+                RawToken::RunExec { pair, line_no } => {
+                    let kind = lower_run_exec_pair(pair, &self.lower)?;
                     self.handle_command_token(line_no, kind)?
                 }
             }
@@ -474,8 +479,78 @@ fn contains_inherit_env(kind: &StepKind) -> bool {
     match kind {
         StepKind::InheritEnv { .. } => true,
         StepKind::WithIo { cmd, .. } => contains_inherit_env(cmd),
+        StepKind::AssignCapture { cmd, .. } => contains_inherit_env(cmd),
         _ => false,
     }
+}
+
+/// True when bindings reroute stdout into a named pipe. A `LET`-capture owns
+/// the step's stdout, so combining the two is a parse error.
+fn has_stdout_pipe(bindings: &[IoBinding]) -> bool {
+    bindings
+        .iter()
+        .any(|b| b.stream == IoStream::Stdout && b.pipe.is_some())
+}
+
+/// Reject async machinery inside a capture body: background tasks are
+/// captured via `LET $o = AWAIT $t`, never inline.
+fn reject_async_in_capture(kind: &StepKind) -> Result<()> {
+    let bad = match kind {
+        StepKind::AsyncBlock { .. }
+        | StepKind::AssignAsync { .. }
+        | StepKind::Await { .. }
+        | StepKind::AwaitCapture { .. }
+        | StepKind::Cancel { .. } => true,
+        StepKind::WithIo { cmd, .. } => reject_async_in_capture(cmd).is_err(),
+        StepKind::Timeout { body, .. } => body
+            .iter()
+            .any(|s| reject_async_in_capture(&s.kind).is_err()),
+        _ => false,
+    };
+    if bad {
+        bail!(
+            "LET capture cannot run ASYNC/AWAIT/CANCEL inline; use LET $t = ASYNC ... then LET $o = AWAIT $t"
+        );
+    }
+    Ok(())
+}
+
+/// Reject `WITH_IO [stdout=pipe:...]` anywhere inside a capture body: the
+/// capture sink owns stdout.
+fn reject_pipe_stdout_in_capture(kind: &StepKind) -> Result<()> {
+    match kind {
+        StepKind::WithIo { bindings, cmd } => {
+            if has_stdout_pipe(bindings) {
+                bail!(
+                    "LET capture cannot use WITH_IO [stdout=pipe:...]; the capture sink owns stdout"
+                );
+            }
+            reject_pipe_stdout_in_capture(cmd)
+        }
+        StepKind::Timeout { body, .. } => {
+            for step in body {
+                reject_pipe_stdout_in_capture(&step.kind)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Re-parse raw RHS text as an expression (fallback when the `LET` RHS lead
+/// token is not a known command). Requires the expression to consume the
+/// full text so `LET $x = FOO bar` stays an error instead of binding `FOO`.
+fn parse_expr_str(text: &str) -> Result<Expr> {
+    use pest::Parser;
+    let mut pairs = lexer::LanguageParser::parse(Rule::expr, text)
+        .map_err(|e| anyhow!("invalid LET expression {text:?}: {e}"))?;
+    let pair = pairs
+        .next()
+        .ok_or_else(|| anyhow!("LET requires an expression"))?;
+    if pair.as_span().end() != text.len() {
+        bail!("invalid LET expression {text:?}");
+    }
+    parse_expr(pair)
 }
 
 fn parse_structural_command_with_lower(
@@ -525,6 +600,9 @@ fn parse_structural_command_with_lower(
                     Rule::instruction | Rule::instruction_inner => {
                         cmd = Some(Box::new(lower_instruction_pair(inner, lower)?));
                     }
+                    Rule::run_exec_statement | Rule::run_exec_inner => {
+                        cmd = Some(Box::new(lower_run_exec_pair(inner, lower)?));
+                    }
                     _ => {}
                 }
             }
@@ -537,6 +615,7 @@ fn parse_structural_command_with_lower(
         Rule::for_statement => parse_for_statement_from_pair(pair, lower)?,
         Rule::let_statement => parse_let_statement_from_pair(pair)?,
         Rule::let_async_statement => parse_let_async_statement_from_pair(pair, lower)?,
+        Rule::let_capture_statement => parse_let_capture_statement_from_pair(pair, lower)?,
         Rule::await_statement => parse_await_statement_from_pair(pair)?,
         Rule::cancel_statement => parse_cancel_statement_from_pair(pair)?,
         Rule::if_statement => parse_if_statement_from_pair(pair, lower)?,
@@ -553,6 +632,7 @@ fn parse_structural_command_with_lower(
             parse_structural_command_with_lower(inner, lower)?
         }
         Rule::instruction | Rule::instruction_inner => lower_instruction_pair(pair, lower)?,
+        Rule::run_exec_statement | Rule::run_exec_inner => lower_run_exec_pair(pair, lower)?,
         _ => bail!("unexpected structural command rule: {:?}", pair.as_rule()),
     };
     Ok(kind)
@@ -612,6 +692,25 @@ fn lower_instruction_pair(
         })
         .collect();
     lower(&name, args)
+}
+
+/// Lower a `run_exec` grammar pair: the PEG engine has already validated the
+/// full `RUN [...]` span, so extract the inner `list_literal` and route the
+/// structured `Expr::List` through the injected `lower` as `RUN` with one
+/// typed argument (production `lower_command` maps it to `StepKind::RunExec`;
+/// the grammar-test mock wraps it in `StepKind::Run`).
+fn lower_run_exec_pair(
+    pair: Pair<Rule>,
+    lower: &dyn Fn(&str, Vec<Arg>) -> Result<StepKind>,
+) -> Result<StepKind> {
+    let mut list = None;
+    for inner in pair.into_inner() {
+        if inner.as_rule() == Rule::list_literal {
+            list = Some(parse_list_literal(inner)?);
+        }
+    }
+    let list = list.ok_or_else(|| anyhow!("RUN exec form missing list literal"))?;
+    lower("RUN", vec![Arg::Expr(list)])
 }
 
 /// Split one `assignment` pair into its key and lowered value.
@@ -851,39 +950,61 @@ fn parse_let_async_statement_from_pair(
                 }]);
             }
             Rule::with_io_command => {
-                // LET $var = WITH_IO [flags] ASYNC <single command> binds a
-                // pipe-wired background task. The bindings apply inside the
-                // task thread — the same shape as a braced body holding one
-                // WITH_IO step, which the AssignAsync runtime path supports.
+                // LET $var = WITH_IO [flags] ... — two shapes share this rule
+                // (`let_async_statement` precedes `let_capture_statement` in
+                // the grammar, so every WITH_IO-led LET lands here):
+                // - wrapping ASYNC binds a pipe-wired background task. The
+                //   bindings apply inside the task thread — the same shape as
+                //   a braced body holding one WITH_IO step, which the
+                //   AssignAsync runtime path supports.
+                // - wrapping a synchronous command captures its stdout into
+                //   the variable (same semantics as LET $x = <command>).
                 let kind = parse_structural_command_with_lower(inner, lower)?;
                 let StepKind::WithIo { bindings, cmd } = kind else {
                     bail!(
                         "LET $var = WITH_IO requires an ASYNC command (e.g. LET $t = WITH_IO [stdin=pipe:p] ASYNC WRITE \"f\")"
                     );
                 };
-                let StepKind::AsyncBlock { body: async_body } = *cmd else {
-                    bail!(
-                        "LET $var = WITH_IO requires an ASYNC command (e.g. LET $t = WITH_IO [stdin=pipe:p] ASYNC WRITE \"f\")"
-                    );
-                };
-                if async_body.len() != 1 {
-                    bail!(
-                        "LET $var = WITH_IO [..] ASYNC accepts a single command; use LET $var = ASYNC {{ ... }} with WITH_IO inside the block for multi-step tasks"
-                    );
+                match *cmd {
+                    StepKind::AsyncBlock { body: async_body } => {
+                        if async_body.len() != 1 {
+                            bail!(
+                                "LET $var = WITH_IO [..] ASYNC accepts a single command; use LET $var = ASYNC {{ ... }} with WITH_IO inside the block for multi-step tasks"
+                            );
+                        }
+                        let step = async_body
+                            .into_iter()
+                            .next()
+                            .ok_or_else(|| anyhow!("LET $var = ASYNC requires a body"))?;
+                        body = Some(vec![Step {
+                            guard: step.guard,
+                            kind: StepKind::WithIo {
+                                bindings,
+                                cmd: Box::new(step.kind),
+                            },
+                            scope_enter: step.scope_enter,
+                            scope_exit: step.scope_exit,
+                        }]);
+                    }
+                    sync_cmd => {
+                        if has_stdout_pipe(&bindings) {
+                            bail!(
+                                "LET capture cannot use WITH_IO [stdout=pipe:...]; the capture sink owns stdout"
+                            );
+                        }
+                        reject_async_in_capture(&sync_cmd)?;
+                        let name = var
+                            .clone()
+                            .ok_or_else(|| anyhow!("LET $var = WITH_IO requires a variable"))?;
+                        return Ok(StepKind::AssignCapture {
+                            var: name,
+                            cmd: Box::new(StepKind::WithIo {
+                                bindings,
+                                cmd: Box::new(sync_cmd),
+                            }),
+                        });
+                    }
                 }
-                let step = async_body
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| anyhow!("LET $var = ASYNC requires a body"))?;
-                body = Some(vec![Step {
-                    guard: step.guard,
-                    kind: StepKind::WithIo {
-                        bindings,
-                        cmd: Box::new(step.kind),
-                    },
-                    scope_enter: step.scope_enter,
-                    scope_exit: step.scope_exit,
-                }]);
             }
             _ => {}
         }
@@ -892,6 +1013,93 @@ fn parse_let_async_statement_from_pair(
         var: var.ok_or_else(|| anyhow!("LET $var = ASYNC requires a variable"))?,
         body: body.ok_or_else(|| anyhow!("LET $var = ASYNC requires a body"))?,
     })
+}
+
+/// Lower `LET $var = <sync command>` / `LET $out = AWAIT $task`.
+///
+/// Shadow-safe by construction: the grammar only routes UPPERCASE-led
+/// `instruction` lines here (`let_async_statement` claims ASYNC-led and
+/// WITH_IO-led lines first; lowercase/digit/sigil RHSs never match). Rust
+/// then branches on the lead token: known commands lower to capture,
+/// unknown leads re-parse as plain expressions.
+fn parse_let_capture_statement_from_pair(
+    pair: Pair<Rule>,
+    lower: &dyn Fn(&str, Vec<Arg>) -> Result<StepKind>,
+) -> Result<StepKind> {
+    use pest::Parser;
+    let mut var = None;
+    let mut await_pair = None;
+    let mut timeout_pair = None;
+    let mut instruction_pair = None;
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::dollar_ident => {
+                var = Some(parse_dollar_ident(inner));
+            }
+            Rule::await_statement => {
+                await_pair = Some(inner);
+            }
+            Rule::timeout_statement => {
+                timeout_pair = Some(inner);
+            }
+            Rule::instruction => {
+                instruction_pair = Some(inner);
+            }
+            _ => {}
+        }
+    }
+    let var = var.ok_or_else(|| anyhow!("LET requires a variable"))?;
+    if let Some(awaited) = await_pair {
+        let mut task_var = None;
+        for inner in awaited.into_inner() {
+            if inner.as_rule() == Rule::ident {
+                task_var = Some(inner.as_str().to_string());
+            }
+        }
+        return Ok(StepKind::AwaitCapture {
+            out_var: var,
+            task_var: task_var
+                .ok_or_else(|| anyhow!("LET $out = AWAIT requires a task variable"))?,
+        });
+    }
+    if let Some(timeouted) = timeout_pair {
+        let kind = parse_structural_command_with_lower(timeouted, lower)?;
+        reject_async_in_capture(&kind)?;
+        reject_pipe_stdout_in_capture(&kind)?;
+        return Ok(StepKind::AssignCapture {
+            var,
+            cmd: Box::new(kind),
+        });
+    }
+    if let Some(ins) = instruction_pair {
+        let text = ins.as_str().to_string();
+        let mut lead = None;
+        for token in ins.into_inner() {
+            if token.as_rule() == Rule::command_name {
+                lead = Some(token.as_str().to_string());
+                break;
+            }
+        }
+        let lead = lead.ok_or_else(|| anyhow!("LET capture requires a command"))?;
+        if crate::commands::is_known_command(&lead) {
+            let kind = lower_instruction_pair(
+                lexer::LanguageParser::parse(Rule::instruction, &text)
+                    .map_err(|e| anyhow!("invalid LET capture {text:?}: {e}"))?
+                    .next()
+                    .ok_or_else(|| anyhow!("LET capture requires a command"))?,
+                lower,
+            )?;
+            reject_async_in_capture(&kind)?;
+            reject_pipe_stdout_in_capture(&kind)?;
+            return Ok(StepKind::AssignCapture {
+                var,
+                cmd: Box::new(kind),
+            });
+        }
+        let expr = parse_expr_str(&text)?;
+        return Ok(StepKind::Assign { var, expr });
+    }
+    bail!("LET requires a value")
 }
 
 fn parse_await_statement_from_pair(pair: Pair<Rule>) -> Result<StepKind> {
@@ -986,6 +1194,15 @@ fn parse_timeout_statement_from_pair(
             }
             Rule::instruction | Rule::instruction_inner => {
                 let kind = lower_instruction_pair(inner, lower)?;
+                body = Some(vec![Step {
+                    guard: None,
+                    kind,
+                    scope_enter: 0,
+                    scope_exit: 0,
+                }]);
+            }
+            Rule::run_exec_statement | Rule::run_exec_inner => {
+                let kind = lower_run_exec_pair(inner, lower)?;
                 body = Some(vec![Step {
                     guard: None,
                     kind,
@@ -1111,11 +1328,17 @@ fn parse_async_statement_from_pair(
                     Rule::instruction => {
                         inner_cmd = Some(lower_instruction_pair(child, lower)?);
                     }
+                    Rule::run_exec_statement | Rule::run_exec_inner => {
+                        inner_cmd = Some(lower_run_exec_pair(child, lower)?);
+                    }
                     other => bail!("unexpected command_inner child: {:?}", other),
                 }
             }
             Rule::instruction | Rule::instruction_inner => {
                 inner_cmd = Some(lower_instruction_pair(inner, lower)?);
+            }
+            Rule::run_exec_statement | Rule::run_exec_inner => {
+                inner_cmd = Some(lower_run_exec_pair(inner, lower)?);
             }
             Rule::block => {
                 block_body = Some(parse_block_elements_with_lower(inner, lower)?);
@@ -1182,6 +1405,7 @@ fn parse_block_elements_with_lower(
             Rule::for_statement
             | Rule::let_statement
             | Rule::let_async_statement
+            | Rule::let_capture_statement
             | Rule::await_statement
             | Rule::cancel_statement
             | Rule::if_statement
@@ -1217,6 +1441,15 @@ fn parse_block_elements_with_lower(
             }
             Rule::instruction | Rule::instruction_inner => {
                 let kind = lower_instruction_pair(elem, lower)?;
+                steps.push(Step {
+                    guard: None,
+                    kind,
+                    scope_enter: 0,
+                    scope_exit: 0,
+                });
+            }
+            Rule::run_exec_statement | Rule::run_exec_inner => {
+                let kind = lower_run_exec_pair(elem, lower)?;
                 steps.push(Step {
                     guard: None,
                     kind,
@@ -1594,7 +1827,7 @@ fn parse_dollar_ident(pair: Pair<Rule>) -> String {
     s.strip_prefix('$').unwrap_or(s).to_string()
 }
 
-use crate::ast::{CompareOp, Expr, LogicalOp, Value};
+use crate::ast::{CompareOp, LogicalOp, Value};
 
 fn parse_expr(pair: Pair<Rule>) -> Result<Expr> {
     let inner = pair.into_inner().next().unwrap();

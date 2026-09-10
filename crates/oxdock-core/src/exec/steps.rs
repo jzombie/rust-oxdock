@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use anyhow::{Result, bail};
 use oxdock_fs::GuardedPath;
 use oxdock_parser::{Arg, Step, StepKind, guard_option_allows};
-use oxdock_process::{BackgroundHandle, ProcessManager, SharedInput};
+use oxdock_process::{BackgroundHandle, CommandStdin, ProcessManager};
 
 /// Create an ExitStatus from a raw exit code. Cross-platform.
 fn exit_status_from_code(code: i32) -> ExitStatus {
@@ -22,6 +22,7 @@ fn exit_status_from_code(code: i32) -> ExitStatus {
     }
 }
 
+use super::capture::SpillBuffer;
 use super::handlers;
 use super::io::{SlidingWindow, StreamHandle};
 use super::state::{ExecState, TaskEntry, TaskPhase};
@@ -190,12 +191,21 @@ pub(super) fn sync_iteration_assert_needles<P: ProcessManager>(
     Ok(())
 }
 
+/// Per-step execution context handed to every command handler.
+///
+/// Output contract (load-bearing for `LET`-capture, pipes, and `ASSERT_STDOUT`):
+/// handlers must emit stdout/stderr ONLY through `out`/`err` — via
+/// `write_stdout` or `StreamHandle::to_stdout`/`to_stderr` — and never write
+/// to host stdout directly. The step runner swaps these handles per context:
+/// `LET $x = <command>` installs a spillable capture sink, `WITH_IO`
+/// installs named-pipe endpoints, and the root installs the `ASSERT_STDOUT`
+/// tee. A handler that bypasses its context handles silently breaks all three.
 pub struct StepCtx<'a, P: ProcessManager> {
     pub(super) state: &'a mut ExecState<P>,
     pub(super) process: &'a mut P,
     pub(super) snapshot_root: GuardedPath,
     pub(super) build_context: GuardedPath,
-    pub(super) stdin: Option<SharedInput>,
+    pub(super) stdin: CommandStdin,
     pub(super) expose_stdin: bool,
     pub(super) out: Option<StreamHandle>,
     pub(super) err: Option<StreamHandle>,
@@ -206,7 +216,7 @@ pub(super) fn execute_steps<P: ProcessManager>(
     state: &mut ExecState<P>,
     process: &mut P,
     steps: &[Step],
-    stdin: Option<SharedInput>,
+    stdin: CommandStdin,
     expose_stdin: bool,
     out: Option<StreamHandle>,
     err: Option<StreamHandle>,
@@ -242,7 +252,7 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
     cmd: &StepKind,
     generation: usize,
     idx: usize,
-    stdin: Option<SharedInput>,
+    stdin: CommandStdin,
     expose_stdin: bool,
     out: Option<StreamHandle>,
     err: Option<StreamHandle>,
@@ -265,6 +275,10 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
             let cmd = super::args::resolve_arg(arg, &mut cx)?;
             let cmd = super::args::expand_dsl_vars(&cmd, cx.state);
             handlers::run(&mut cx, idx, &cmd)
+        }
+        StepKind::RunExec { argv } => {
+            let resolved = handlers::resolve_run_exec_argv(argv, &mut cx)?;
+            handlers::run_argv(&mut cx, idx, &resolved)
         }
         StepKind::Echo(arg) => {
             let msg = super::args::resolve_arg(arg, &mut cx)?;
@@ -415,8 +429,14 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
             else_body,
         } => handlers::if_then(&mut cx, cond, then_body, else_ifs, else_body),
         StepKind::Assign { var, expr } => handlers::assign(&mut cx, var, expr),
+        StepKind::AssignCapture { var, cmd } => {
+            handlers::assign_capture(&mut cx, generation, idx, var, cmd)
+        }
         StepKind::AssignAsync { var, body } => handlers::dispatch_assign_async(var, body, &mut cx),
         StepKind::Await { var } => handlers::dispatch_await(var, &mut cx),
+        StepKind::AwaitCapture { out_var, task_var } => {
+            handlers::dispatch_await_capture(out_var, task_var, &mut cx)
+        }
         StepKind::Cancel { var } => handlers::dispatch_cancel(var, &mut cx),
         StepKind::Timeout { duration, body } => {
             let duration = super::args::resolve_arg_as_duration(duration, &mut cx)?;
@@ -435,7 +455,7 @@ fn execute_steps_inner<P: ProcessManager>(
     process: &mut P,
     generation: usize,
     steps: &[Step],
-    stdin: Option<SharedInput>,
+    stdin: CommandStdin,
     expose_stdin: bool,
     out: Option<StreamHandle>,
     err: Option<StreamHandle>,
@@ -491,7 +511,12 @@ fn execute_steps_inner<P: ProcessManager>(
                 }
                 StepKind::Run(arg) => {
                     let cmd = super::args::resolve_arg(arg, &mut cx)?;
+                    let cmd = super::args::expand_dsl_vars(&cmd, cx.state);
                     handlers::run(&mut cx, idx, &cmd)
+                }
+                StepKind::RunExec { argv } => {
+                    let resolved = handlers::resolve_run_exec_argv(argv, &mut cx)?;
+                    handlers::run_argv(&mut cx, idx, &resolved)
                 }
                 StepKind::Echo(arg) => {
                     let msg = super::args::resolve_arg(arg, &mut cx)?;
@@ -619,10 +644,16 @@ fn execute_steps_inner<P: ProcessManager>(
                     else_body,
                 } => handlers::if_then(&mut cx, cond, then_body, else_ifs, else_body),
                 StepKind::Assign { var, expr } => handlers::assign(&mut cx, var, expr),
+                StepKind::AssignCapture { var, cmd } => {
+                    handlers::assign_capture(&mut cx, generation, idx, var, cmd)
+                }
                 StepKind::AssignAsync { var, body } => {
                     handlers::dispatch_assign_async(var, body, &mut cx)
                 }
                 StepKind::Await { var } => handlers::dispatch_await(var, &mut cx),
+                StepKind::AwaitCapture { out_var, task_var } => {
+                    handlers::dispatch_await_capture(out_var, task_var, &mut cx)
+                }
                 StepKind::Cancel { var } => handlers::dispatch_cancel(var, &mut cx),
                 StepKind::Timeout { duration, body } => {
                     let duration = super::args::resolve_arg_as_duration(duration, &mut cx)?;
@@ -636,6 +667,18 @@ fn execute_steps_inner<P: ProcessManager>(
         };
 
         let restore_result = restore_scopes(state, step.scope_exit);
+        // Keeper expiry: drop spawn-time pins whose final producer step
+        // just completed, so later consumer steps in the same task observe
+        // EOF. Gated on slice identity, so nested bodies executing through
+        // this same loop never discharge the worker's top-level map.
+        let expiry_drained = if let Some(expiry) = state.keeper_expiry.as_mut() {
+            expiry.expire_step(steps, idx)
+        } else {
+            false
+        };
+        if expiry_drained {
+            state.keeper_expiry = None;
+        }
         step_result?;
         restore_result?;
     }
@@ -709,20 +752,26 @@ fn execute_steps_inner<P: ProcessManager>(
                 for (id, entry) in &entries {
                     enum Poll {
                         Pending,
-                        CompletedOk,
+                        CompletedOk { sink: Option<Arc<SpillBuffer>> },
                         CompletedErr(anyhow::Error),
                     }
                     let poll = {
                         let mut guard = entry.state.lock().unwrap_or_else(|e| e.into_inner());
                         match guard.phase {
                             TaskPhase::Running | TaskPhase::Awaiting => {
+                                // Only take the sink for tasks that were never
+                                // awaited (`Running`): an `Awaiting` entry has
+                                // an awaiter that owns output handling.
+                                let take_sink = matches!(guard.phase, TaskPhase::Running);
                                 match guard.handle.as_mut() {
                                     Some(handle) => match handle.try_wait() {
                                         Ok(Some(status)) => {
                                             let _ = guard.handle.take();
                                             guard.phase = TaskPhase::Completed;
+                                            let sink =
+                                                if take_sink { guard.sink.take() } else { None };
                                             if status.success() {
-                                                Poll::CompletedOk
+                                                Poll::CompletedOk { sink }
                                             } else {
                                                 Poll::CompletedErr(anyhow::anyhow!(
                                                     "named ASYNC task {id} exited with status {status}"
@@ -746,7 +795,17 @@ fn execute_steps_inner<P: ProcessManager>(
                     };
                     match poll {
                         Poll::Pending => {}
-                        Poll::CompletedOk => entry.finish_teardown(),
+                        Poll::CompletedOk { sink } => {
+                            entry.finish_teardown();
+                            if let Some(sink) = sink
+                                && let Err(e) = forward_task_sink(&sink, &out, *id)
+                            {
+                                if failed_status.is_none() {
+                                    failed_status = Some(e);
+                                }
+                                break;
+                            }
+                        }
                         Poll::CompletedErr(e) => {
                             entry.finish_teardown();
                             if failed_status.is_none() {
@@ -823,6 +882,25 @@ fn execute_steps_inner<P: ProcessManager>(
     Ok(())
 }
 
+/// Forward a finished named task's stdout sink to the parent stdout.
+/// Used by end-poll reaping for tasks that completed without ever being
+/// awaited, preserving the pre-capture behavior where their output was
+/// already streamed to the parent writer.
+fn forward_task_sink(sink: &Arc<SpillBuffer>, out: &Option<StreamHandle>, id: u64) -> Result<()> {
+    let bytes = sink
+        .drain_bytes()
+        .map_err(|e| anyhow::anyhow!("named ASYNC task {id} output drain failed: {e}"))?;
+    if !bytes.is_empty() {
+        super::io::write_stdout(out.clone(), |writer| {
+            writer
+                .write_all(&bytes)
+                .map_err(|e| anyhow::anyhow!("named ASYNC task {id} output forward failed: {e}"))?;
+            Ok(())
+        })?;
+    }
+    Ok(())
+}
+
 fn restore_scopes<P: ProcessManager>(state: &mut ExecState<P>, count: usize) -> Result<()> {
     for _ in 0..count {
         state.pop_scope()?;
@@ -838,7 +916,7 @@ pub(super) fn execute_scoped_steps<P: ProcessManager>(
     state: &mut ExecState<P>,
     process: &mut P,
     steps: &[Step],
-    stdin: Option<SharedInput>,
+    stdin: CommandStdin,
     expose_stdin: bool,
     out: Option<StreamHandle>,
     err: Option<StreamHandle>,

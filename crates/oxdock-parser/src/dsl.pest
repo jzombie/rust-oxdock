@@ -12,11 +12,11 @@ blank = _{ (WHITESPACE | linebreak)+ }
 script = { SOI ~ element* ~ EOI }
 
 // Structural statements MUST precede generic commands
-element = _{ blank | hash_comment | COMMENT | semicolon | guard_line | block_start | block_end | if_statement | for_statement | let_async_statement | await_statement | cancel_statement | let_statement | timeout_statement | async_statement_block | async_statement | command }
+element = _{ blank | hash_comment | COMMENT | semicolon | guard_line | block_start | block_end | if_statement | for_statement | let_async_statement | let_capture_statement | await_statement | cancel_statement | let_statement | timeout_statement | async_statement_block | async_statement | command }
 
 // Inside for/let blocks, block_start/block_end must NOT appear as elements
 // (the block's own braces handle them).  Nested guard blocks use guard_block.
-block_element = _{ blank | hash_comment | COMMENT | semicolon | guard_block | guard_line | if_statement | for_statement | let_async_statement | await_statement | cancel_statement | let_statement | timeout_statement | async_statement_block | async_statement | command }
+block_element = _{ blank | hash_comment | COMMENT | semicolon | guard_block | guard_line | if_statement | for_statement | let_async_statement | let_capture_statement | await_statement | cancel_statement | let_statement | timeout_statement | async_statement_block | async_statement | command }
 guard_block = ${ guard_line ~ gap ~ block }
 
 block_start = { "{" }
@@ -128,6 +128,27 @@ async_keyword = _{ "ASYNC" ~ !(ASCII_ALPHANUMERIC | "_") }
 async_statement = ${ async_keyword ~ sep ~ command_inner }
 async_statement_block = { async_keyword ~ sep? ~ block }
 
+// LET $var = <sync command> — capture the command's stdout into $var
+// (spilling to disk if large), or LET $var = AWAIT $task — capture a named
+// task's output. PEG alternatives are shadow-safe by construction:
+// - `let_async_statement` precedes this rule and claims every ASYNC-led and
+//   WITH_IO-led line, so this rule never sees them (WITH_IO sync capture is
+//   handled in `parse_let_async_statement_from_pair`, which branches sync
+//   bodies into capture instead of bailing).
+// - Only UPPERCASE-led `instruction` lines reach the `instruction`
+//   alternative (lowercase/digits/sigils fail immediately and fall through
+//   to `let_statement`). Rust then branches on `is_known_command(lead)`:
+//   known commands lower to capture, unknown leads re-parse as expressions.
+// - `await_statement`/`timeout_statement`/`instruction` can only claim the
+//   line when they run to its end (`gap ~ &(linebreak | ";" | "}" | EOI)`).
+//   Without this end-guard PEG would commit to a strict-prefix match — e.g.
+//   `instruction` matching just `LOAD_TOML` in `LET $d = LOAD_TOML("t.toml")`
+//   and stranding `("t.toml")` — instead of falling through to
+//   `let_statement`, where the RHS parses as an expression. Trailing text
+//   after a complete instruction can never be a valid expression
+//   continuation, so the guard claims no expression input.
+let_capture_statement = ${ let_keyword ~ gap ~ dollar_ident ~ gap ~ "=" ~ gap ~ (await_statement | timeout_statement | instruction) ~ gap ~ &(linebreak | ";" | "}" | EOI) }
+
 // LET $var = ASYNC { ... } — spawn background task, store handle in $var
 // NOTE: "ASYNC" is consumed here, so we inline the block/inline forms
 // instead of reusing async_statement_block/async_statement (which expect
@@ -176,8 +197,8 @@ timeout_literal = @{ ASCII_DIGIT+ ~ ("ms" | "s" | "m" | "h")? }
 timeout_duration = { timeout_literal | dollar_ident | quoted_string | templated_arg }
 timeout_statement = ${ timeout_keyword ~ sep ~ timeout_duration ~ sep ~ (block | await_statement | cancel_statement | command) }
 
-command = _{ with_io_command | inherit_env_command | timeout_statement | async_statement_block | async_statement | cancel_statement | instruction_inner }
-command_inner = { inherit_env_command | timeout_statement | async_statement | async_statement_block | cancel_statement | instruction }
+command = _{ with_io_command | inherit_env_command | timeout_statement | async_statement_block | async_statement | cancel_statement | run_exec_inner | instruction_inner }
+command_inner = { inherit_env_command | timeout_statement | async_statement | async_statement_block | cancel_statement | run_exec_statement | instruction }
 
 with_io_command = ${ "WITH_IO" ~ sep ~ io_flags ~ (sep ~ command)? }
 io_flags = { "[" ~ ws? ~ io_binding ~ (ws? ~ "," ~ ws? ~ io_binding)* ~ ws? ~ "]" }
@@ -194,6 +215,13 @@ inherit_list = { "[" ~ ws? ~ env_key ~ (ws? ~ "," ~ ws? ~ env_key)* ~ ws? ~ "]" 
 // instruction (atomic) — used at top-level in element.
 // `assignment` is tried before plain `argument` so `KEY=...` tokens split into
 // (key, value) at tokenize time on raw spans; lowering never re-stitches them.
+// RUN exec form (`RUN ["exe", "arg", ...]`, direct spawn with no shell) is a
+// dedicated production ordered ahead of the generic instructions: PEG tries
+// it first, so a leading list routes here with full-span validation from the
+// grammar engine. Bracketed shell (`RUN [ -f ... ]`) is not a valid comma
+// separated list literal and falls through to the shell path unchanged.
+run_exec_statement = ${ "RUN" ~ sep ~ list_literal }
+run_exec_inner = ${ "RUN" ~ sep ~ list_literal }
 instruction_inner = ${ command_name ~ (sep ~ (assignment | argument))* }
 instruction = ${ command_name ~ (sep ~ (assignment | argument))* }
 command_name = @{ ASCII_ALPHA_UPPER ~ (ASCII_ALPHA_UPPER | ASCII_DIGIT | "_")* }

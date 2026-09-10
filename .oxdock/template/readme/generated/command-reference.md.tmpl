@@ -8,7 +8,7 @@
 | [`ENV`](#env) | `ENV KEY=value` |
 | [`INHERIT_ENV`](#inherit_env) | `INHERIT_ENV <key>...` |
 | [`ECHO`](#echo) | `ECHO <message>` |
-| [`RUN`](#run) | `RUN <command...>` |
+| [`RUN`](#run) | `RUN <command...> \| RUN ["exe", "arg", ...]` |
 | [`COPY`](#copy) | `COPY [--from-current-workspace] <from> <to>` |
 | [`COPY_GIT`](#copy_git) | `COPY_GIT [--include-dirty] <rev> <src> <dst>` |
 | [`SYMLINK`](#symlink) | `SYMLINK <from> <to>` |
@@ -30,8 +30,8 @@
 | [`WITH_IO`](#with_io) | `WITH_IO [bindings] <command> \| WITH_IO [bindings] { <commands> }` |
 | [`FOR`](#for) | `FOR $item IN <expr> { <commands> } \| FOR $key, $value IN <expr> { <commands> }` |
 | [`IF`](#if) | `IF <expr> { <commands> } [ELSE IF <expr> { <commands> }] [ELSE { <commands> }]` |
-| [`LET`](#let) | `LET $var = <expr> \| LET $var = ASYNC { <commands> }` |
+| [`LET`](#let) | `LET $var = <expr> \| LET $var = ASYNC { <commands> } \| LET $var = <command> \| LET $var = AWAIT $task` |
 | [`ASYNC`](#async) | `ASYNC <command...> \| ASYNC { <commands> } \| LET $var = ASYNC { <commands> }` |
-| [`AWAIT`](#await) | `AWAIT $var` |
+| [`AWAIT`](#await) | `AWAIT $var \| LET $out = AWAIT $var` |
 | [`CANCEL`](#cancel) | `CANCEL $var` |
 | [`TIMEOUT`](#timeout) | `TIMEOUT <duration> <command...> \| TIMEOUT <duration> { <commands> } \| TIMEOUT <duration> AWAIT $var` |

@@ -1,4 +1,5 @@
 mod args;
+mod capture;
 mod fs_ops;
 mod handlers;
 mod io;
@@ -10,13 +11,14 @@ mod tests;
 
 pub(crate) use self::handlers::{
     dispatch_append, dispatch_assert_absent, dispatch_assert_dir, dispatch_assert_file,
-    dispatch_assert_stdout, dispatch_assign, dispatch_assign_async_step, dispatch_async_block,
+    dispatch_assert_stdout, dispatch_assign, dispatch_assign_async_step,
+    dispatch_assign_capture_step, dispatch_async_block, dispatch_await_capture_step,
     dispatch_await_step, dispatch_cancel_step, dispatch_copy, dispatch_copy_git, dispatch_cwd,
     dispatch_echo, dispatch_env, dispatch_exit, dispatch_expand, dispatch_for_loop,
     dispatch_hash_sha256, dispatch_if_then, dispatch_inherit_env, dispatch_ls, dispatch_mkdir,
-    dispatch_read, dispatch_read_line, dispatch_run, dispatch_sleep_step, dispatch_symlink,
-    dispatch_timeout_step, dispatch_with_io, dispatch_with_io_block, dispatch_workdir,
-    dispatch_workspace, dispatch_write,
+    dispatch_read, dispatch_read_line, dispatch_run, dispatch_run_exec, dispatch_sleep_step,
+    dispatch_symlink, dispatch_timeout_step, dispatch_with_io, dispatch_with_io_block,
+    dispatch_workdir, dispatch_workspace, dispatch_write,
 };
 pub use self::io::ExecIo;
 pub(crate) use self::steps::StepCtx;
@@ -163,6 +165,7 @@ fn run_steps_with_manager<P: ProcessManager>(
         named_tasks: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         next_task_id: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         inside_async: false,
+        keeper_expiry: None,
         cancellable: false,
         _marker: std::marker::PhantomData,
     };
@@ -171,7 +174,7 @@ fn run_steps_with_manager<P: ProcessManager>(
     state.push_var_scope();
 
     let _default_stdout = std::io::stdout();
-    let stdin = state.io.stdin();
+    let stdin = state.io.stdin().into();
     // Every emitted byte flows through the tee so ASSERT_STDOUT sees both
     // interpreter output and streamed child output, even when no capture
     // sink was configured (forwarding to real stdout in that case).
