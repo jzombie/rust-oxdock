@@ -242,14 +242,10 @@ mod tests {
                         .iter()
                         .any(|b| matches!(b.stream, IoStream::Stdin) && b.pipe.is_none())
                 );
-                assert!(
-                    bindings.iter().any(|b| matches!(b.stream, IoStream::Stdout)
-                        && b.pipe == Some(PipeTarget::Name("setup".to_string())))
-                );
-                assert!(
-                    bindings.iter().any(|b| matches!(b.stream, IoStream::Stderr)
-                        && b.pipe == Some(PipeTarget::Name("errors".to_string())))
-                );
+                assert!(bindings.iter().any(|b| matches!(b.stream, IoStream::Stdout)
+                    && b.pipe == Some(PipeTarget::Name("setup".to_string()))));
+                assert!(bindings.iter().any(|b| matches!(b.stream, IoStream::Stderr)
+                    && b.pipe == Some(PipeTarget::Name("errors".to_string()))));
                 assert!(matches!(cmd.as_ref(), StepKind::Write { .. }));
             }
             other => panic!("expected WITH_IO, saw {:?}", other),
@@ -264,20 +260,19 @@ mod tests {
         match &steps[0].kind {
             StepKind::WithIo { bindings, cmd } => {
                 assert_eq!(bindings.len(), 2);
-                assert!(
-                    bindings.iter().any(|b| matches!(b.stream, IoStream::Stdout)
-                        && b.pipe == Some(PipeTarget::Var("p".to_string())))
-                );
-                assert!(
-                    bindings.iter().any(|b| matches!(b.stream, IoStream::Stdin)
-                        && b.pipe == Some(PipeTarget::Name("in".to_string())))
-                );
+                assert!(bindings.iter().any(|b| matches!(b.stream, IoStream::Stdout)
+                    && b.pipe == Some(PipeTarget::Var("p".to_string()))));
+                assert!(bindings.iter().any(|b| matches!(b.stream, IoStream::Stdin)
+                    && b.pipe == Some(PipeTarget::Name("in".to_string()))));
                 assert!(matches!(cmd.as_ref(), StepKind::Write { .. }));
             }
             other => panic!("expected WITH_IO, saw {:?}", other),
         }
         // Display round-trips the variable form.
-        assert_eq!(steps[0].kind.to_string(), "WITH_IO [stdout=$p, stdin=pipe:in] WRITE \"echo hi\"");
+        assert_eq!(
+            steps[0].kind.to_string(),
+            "WITH_IO [stdout=$p, stdin=pipe:in] WRITE \"echo hi\""
+        );
     }
 
     #[test]

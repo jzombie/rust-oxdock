@@ -20,7 +20,10 @@ fn let_async_with_io_single_command_binds_task() {
                 StepKind::WithIo { bindings, cmd } => {
                     assert_eq!(bindings.len(), 1);
                     assert_eq!(bindings[0].stream, IoStream::Stdin);
-                    assert_eq!(bindings[0].pipe, Some(PipeTarget::Name("in_chan".to_string())));
+                    assert_eq!(
+                        bindings[0].pipe,
+                        Some(PipeTarget::Name("in_chan".to_string()))
+                    );
                     assert!(
                         matches!(cmd.as_ref(), StepKind::Write { .. }),
                         "expected WRITE inside WITH_IO, got {cmd:?}"
@@ -50,7 +53,10 @@ fn let_with_io_sync_command_captures() {
                 StepKind::WithIo { bindings, cmd } => {
                     assert_eq!(bindings.len(), 1);
                     assert_eq!(bindings[0].stream, IoStream::Stdin);
-                    assert_eq!(bindings[0].pipe, Some(PipeTarget::Name("in_chan".to_string())));
+                    assert_eq!(
+                        bindings[0].pipe,
+                        Some(PipeTarget::Name("in_chan".to_string()))
+                    );
                     assert!(
                         matches!(cmd.as_ref(), StepKind::Run(_)),
                         "expected RUN inside WITH_IO, got {cmd:?}"
