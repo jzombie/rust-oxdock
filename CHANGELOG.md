@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [Unreleased]
+
+### Added
+
+- Declaration-site variable type system (#130): `LET $x: TYPE = ...` with `STRING, INT, FLOAT, BOOL, PIPE, LIST, MAP, HANDLE, DURATION, PATH` (`INT` is `i64`, `FLOAT` is `f64`); duplicate `LET` in one scope is a redeclaration error; the `env:KEY` expression reads the script environment into a plain string (`LET $e: STRING = env:FOO`); `FOR` loop variables carry declared types with `INT`/`STRING` keys (`INT` binds the raw list index, map iteration requires a `STRING` key); `READ_LINE` declares `STRING` if new and mutates if already bound; a single `coerce_value` matches `(Value, TypeKind)` pairs with pipe-registry validation; `TypeKind::label()` is the single vocabulary source and the reference renders those 10 types only
+
+### Changed
+
+- [breaking] `LET` requires an explicit type, so `LET $x = ...` is now a parse error; reassignment is bare `$x = ...` and there is no `SET` keyword (a `SET ...` line fails with a hint); `FOR` variables require type tags; there is no `ENV` type; bare `$var` never reads the environment (use `env:KEY` or `{{ env:KEY }}`); command-reference Type cells show real types only (`$var` / `KEY=value` shapes display as the `STRING` they bind or resolve to)
+
 ## [0.11.0-alpha] - 2026-09-09
 
 ### Added
