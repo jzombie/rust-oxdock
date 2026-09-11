@@ -45,6 +45,43 @@ fn main() {
 
 For each artifact the macro emits a constant backed by `include_bytes!`, which bakes the file bytes into read-only binary data during compilation. At runtime `get()` scans a static table and returns a borrowed slice, so there are no file reads and no heap allocation. The support types only need `alloc::borrow::Cow` and core iterators, which is why it works in `no_std`.
 
+## Runtime architecture
+
+Three mechanisms keep script execution predictable: how bytes move between commands, how state stays isolated, and how the host stays sandboxed. Each one is shown running below.
+
+### Transport: pipes
+
+A command's standard streams can be rerouted through named pipes, so producers and consumers connect without touching the terminal or temp files. Buffers stay in memory and spill to a guarded temp file past 8 MiB, and background single command tasks can promote a pipe to a zero copy OS kernel pair instead.
+
+```oxdock
+WITH_IO [stdout=pipe:log] ECHO hello
+WITH_IO [stdin=pipe:log] READ_LINE $line
+WRITE line.txt "{{ $line }}"
+ASSERT_FILE line.txt "hello"
+```
+
+### Scope isolation
+
+State mutations stay where the script puts them. Entering a braced block or a function call snapshots variables and settings, and exiting restores all of them, so nothing leaks outward. Background tasks fork the same way, so concurrent workers cannot observe each other's half finished mutations. Only pipes and filesystem effects cross these boundaries, by design.
+
+```oxdock
+FUNC SHADOW($v: STRING) {
+    LET $inner: STRING = "inner"
+    RETURN $v
+}
+LET $out: STRING = CALL SHADOW("param")
+WRITE out.txt "{{ $out }}"
+ASSERT_FILE out.txt "param"
+```
+
+### Sandboxing
+
+Every path resolves inside a guarded workspace root, and escapes are rejected before any filesystem call. Scripts start with an empty process environment and opt into host variables explicitly.
+
+```oxdock expect_error:"escapes allowed root"
+WRITE ../escape.txt "nope"
+```
+
 ### Prepare during the build
 
 `oxdock_embed!` ships artifacts inside the binary. `oxdock_prepare!` runs the same script but emits no runtime module. Use it when assets only need to exist during the build, for codegen or `include!` workflows.
