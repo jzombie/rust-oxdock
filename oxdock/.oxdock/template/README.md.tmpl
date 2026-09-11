@@ -20,9 +20,13 @@
 
 {{ $files.guide.dsl-reference }}
 
-{{ $files.generated.command-reference }}
+## Command reference
 
-{{ $files.generated.command-body }}
+The full command reference with runnable examples lives in the
+[workspace README]({{ $docs_global.workspace_url }}#command-reference).
+It is not bundled here because in-page links cannot resolve on all
+renderers. Every example there is executed against the implementation,
+so the documented behavior is guaranteed to match.
 
 {{ $files.guide.environment }}
 
@@ -33,9 +37,5 @@
 {{ $files.local.usage }}
 
 {{ $files.local.dependency }}
-
-{{ $files.generated.command-reference }}
-
-{{ $files.generated.command-body }}
 
 {{ $files.shared.footer }}

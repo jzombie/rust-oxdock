@@ -53,19 +53,28 @@ guard_value = _{ quoted_string | bare_guard_value }
 bare_guard_value = @{ (!( "," | "|" | ")" | "]" | "$" | linebreak | "//" | "/*" ) ~ ANY)+ }
 bare_guard_ident = @{ guard_key_char+ }
 
-// Comparison operators (used by expr_comparison in LET/IF expressions)
+// Comparison and arithmetic operators (used by expression tiers in LET/IF expressions)
 eq_op = @{ "==" }
 neq_op = @{ "!=" }
+lt_op = @{ "<" }
+le_op = @{ "<=" }
+gt_op = @{ ">" }
+ge_op = @{ ">=" }
+plus_op = @{ "+" }
+minus_op = @{ "-" }
+star_op = @{ "*" }
+slash_op = @{ "/" }
 
 // Identifiers
 ident_char = _{ ASCII_ALPHANUMERIC | "_" }
 ident = @{ ident_char+ }
 dollar_ident = @{ "$" ~ ident_char+ }
 
-// Expressions — 4-tier precedence climbing (highest to lowest: atom > comparison > logical_and > logical_or)
+// Expressions — 7-tier precedence climbing (highest to lowest:
+// atom > unary (!, -) > mul/div > add/sub > ordering > equality > logical_and > logical_or)
 or_op = @{ "||" }
 and_op = @{ "&&" }
-// eq_op and neq_op already defined above in guard section
+// eq_op and neq_op already defined above in operator section
 
 parenthesized_expr = ${ "(" ~ gap ~ expr ~ gap ~ ")" }
 
@@ -74,6 +83,11 @@ quoted_string = @{
     "'" ~ ( "\\'" | (!"'" ~ ANY) )* ~ "'"
 }
 bare_word = @{ (ASCII_ALPHANUMERIC | "_" | "-" | "." | "/")+ }
+// Numeric literal: unsigned digits with optional fraction. No leading `-`
+// (negation routes through `expr_unary` + lowering-time fold, so `i64::MIN`
+// stages via `UnsignedIntBoundary`). Trailing guard keeps durations (`30s`,
+// `100ms`), paths (`123/456`), and versions (`1.0.0`) lexing as `bare_word`.
+numeric_literal = @{ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)? ~ !(ASCII_ALPHANUMERIC | "_" | "." | "/") }
 // Environment read: `env:KEY` evaluates to the script environment value.
 // Must precede `bare_word` in `expr_atom` (which would otherwise match just
 // `env` and strand `:KEY`). In argument position the `unquoted_arg` guard
@@ -95,24 +109,43 @@ list_literal = ${ "[" ~ gap ~ (expr ~ gap ~ ("," ~ gap ~ expr ~ gap)*)? ~ gap ~ 
 map_entry = ${ (quoted_string | bare_word) ~ gap ~ ":" ~ gap ~ ws? ~ gap ~ expr }
 map_literal = ${ "{" ~ gap ~ ws? ~ gap ~ (map_entry ~ gap ~ (ws? ~ "," ~ ws? ~ map_entry ~ gap)*)? ~ ws? ~ gap ~ "}" }
 string_literal = { quoted_string }
-expr_atom = { parenthesized_expr | func_call | key_path | variable | env_read | pipe_read | list_literal | map_literal | string_literal | bare_word }
+expr_atom = { parenthesized_expr | func_call | key_path | variable | env_read | pipe_read | list_literal | map_literal | string_literal | numeric_literal | bare_word }
 
-// Comparison level (==, !=) — operands are unary so `!` binds tighter
-// than equality (C-like): `!a == b` parses as `(!a) == b`.
-expr_comparison = ${ expr_unary ~ gap ~ ((eq_op | neq_op) ~ gap ~ expr_unary)? }
+// Ordering level (<, <=, >, >=) — operands are additive so `+`/`-` bind
+// tighter than comparisons: `2 + 3 > 4` parses as `(2 + 3) > 4`.
+// `gap` opens each repetition so chained ops may be spaced; ordering stays
+// a single optional comparison and rejects `a < b <= c` chains.
+expr_ordering = ${ expr_add_sub ~ (gap ~ (le_op | ge_op | lt_op | gt_op) ~ gap ~ expr_add_sub)? }
 
-// Unary NOT — one or more `!` prefixes over an atom (`!true`, `!!$flag`).
+// Equality level (==, !=) — operands are ordering so ordering binds tighter
+// than equality: `a < b == c` parses as `(a < b) == c`.
+expr_comparison = ${ expr_ordering ~ (gap ~ (eq_op | neq_op) ~ gap ~ expr_ordering)? }
+
+// Additive level (+, -) — left-associative, operands are multiplicative.
+expr_add_sub = ${ expr_mul_div ~ (gap ~ (plus_op | minus_op) ~ gap ~ expr_mul_div)* }
+
+// Multiplicative level (*, /) — left-associative, operands are unary so
+// unary `-`/`!` bind tighter: `2 * -3` parses as `2 * (-3)`.
+expr_mul_div = ${ expr_unary ~ (gap ~ (star_op | slash_op) ~ gap ~ expr_unary)* }
+
+// Unary prefix — one or more `!` / `-` prefixes over an atom
+// (`!true`, `!!$flag`, `-5`, `--5`, `2 * -3`, `!-x`). A `-` directly glued
+// to a letter/`_`/`/` stays a bare word (`-f`, `-30s`, `/etc/passwd` keep
+// their literal reading); negation applies before digits, `$`, `(`, quotes,
+// calls, and whitespace-separated operands. The gap sits behind
+// the prefix run (never leading): a leading gap would let `expr` match
+// whitespace and glue adjacent instruction arguments into one under atomic
+// parents, where only explicit gaps consume whitespace.
 not_op = { "!" }
-// The gap sits behind the optional `not_op+` (never leading): a leading gap
-// would let `expr` match whitespace and glue adjacent instruction arguments
-// into one under atomic parents, where only explicit gaps consume whitespace.
-expr_unary = ${ (not_op+ ~ gap)? ~ expr_atom }
+neg_op = ${ "-" ~ !(ASCII_ALPHA | "_" | "/") }
+expr_unary = ${ ((not_op | neg_op) ~ gap)* ~ expr_atom }
 
-// Logical AND (&&) — binds tighter than ||
-expr_logical_and = ${ expr_comparison ~ gap ~ (and_op ~ gap ~ expr_comparison)* }
+// Logical AND (&&) — binds tighter than ||; `gap` opens each repetition
+// so chained `a && b && c` may be spaced.
+expr_logical_and = ${ expr_comparison ~ (gap ~ and_op ~ gap ~ expr_comparison)* }
 
-// Logical OR (||) — binds loosest
-expr_logical_or = ${ expr_logical_and ~ gap ~ (or_op ~ gap ~ expr_logical_and)* }
+// Logical OR (||) — binds loosest; same repetition spacing.
+expr_logical_or = ${ expr_logical_and ~ (gap ~ or_op ~ gap ~ expr_logical_and)* }
 
 // Entry point for all expressions
 expr = { expr_logical_or }
@@ -257,8 +290,13 @@ inherit_list = { "[" ~ ws? ~ env_key ~ (ws? ~ "," ~ ws? ~ env_key)* ~ ws? ~ "]" 
 // it first, so a leading list routes here with full-span validation from the
 // grammar engine. Bracketed shell (`RUN [ -f ... ]`) is not a valid comma
 // separated list literal and falls through to the shell path unchanged.
-run_exec_statement = ${ "RUN" ~ sep ~ list_literal }
-run_exec_inner = ${ "RUN" ~ sep ~ list_literal }
+// Exec elements are atoms only (no binary/compare operators): spaced shell
+// words can never compile to `CompiledMath`/`Arithmetic` and flip shell
+// dispatches to exec; compute into a variable first (`LET $n = 1 + 2`).
+run_exec_arg = { parenthesized_expr | func_call | key_path | variable | env_read | pipe_read | list_literal | map_literal | string_literal | numeric_literal | bare_word }
+run_exec_list = ${ "[" ~ gap ~ (run_exec_arg ~ gap ~ ("," ~ gap ~ run_exec_arg ~ gap)*)? ~ gap ~ "]" }
+run_exec_statement = ${ "RUN" ~ sep ~ run_exec_list }
+run_exec_inner = ${ "RUN" ~ sep ~ run_exec_list }
 instruction_inner = ${ command_name ~ (sep ~ (assignment | argument))* }
 instruction = ${ command_name ~ (sep ~ (assignment | argument))* }
 command_name = @{ ASCII_ALPHA_UPPER ~ (ASCII_ALPHA_UPPER | ASCII_DIGIT | "_")* }

@@ -1,0 +1,7 @@
+# DSL arithmetic: infix ops with promotion plus INT()/FLOAT() conversions
+# over LET-captured strings (capture yields exact stdout bytes).
+LET $size_str: STRING = ECHO 14
+LET $total: INT = INT($size_str) + 1
+WRITE total.txt "{{ $total }}"
+LET $ratio: FLOAT = 1 + 2.5
+WRITE ratio.txt "{{ $ratio }}"

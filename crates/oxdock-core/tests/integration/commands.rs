@@ -1883,6 +1883,70 @@ fn block_scopes_variables_env_and_workdir_while_leaking_files_and_pipes() {
 }
 
 #[test]
+fn block_mutation_of_outer_variable_persists_across_types() {
+    // `mutate_var` writes into the frame where the variable was declared,
+    // so mutating an outer variable inside a block survives block exit.
+    // Frames are type-generic: identical semantics for every TypeKind.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        LET $n: INT = 5
+        LET $s: STRING = "outer"
+        LET $f: BOOL = false
+        LET $r: FLOAT = 1.5
+        [bool:true] {
+            $n = 10
+            $s = "inner"
+            $f = true
+            $r = 2.5
+        }
+        WRITE out.txt "{{ $n }}|{{ $s }}|{{ $f }}|{{ $r }}"
+    "#};
+    run_script(&root, script).expect("outer mutations persist");
+    assert_eq!(
+        read_trimmed(&root.join("out.txt").unwrap()),
+        "10|inner|true|2.5"
+    );
+}
+
+#[test]
+fn block_inner_let_shadows_outer_mutation() {
+    // Control case: LET inside the block declares in the inner frame, so
+    // inner mutations hit the shadow and the outer value is intact after.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        LET $x: INT = 5
+        [bool:true] {
+            LET $x: INT = 1
+            $x = 2
+            WRITE inner.txt "{{ $x }}"
+        }
+        WRITE outer.txt "{{ $x }}"
+    "#};
+    run_script(&root, script).expect("shadow control");
+    assert_eq!(read_trimmed(&root.join("inner.txt").unwrap()), "2");
+    assert_eq!(read_trimmed(&root.join("outer.txt").unwrap()), "5");
+}
+
+#[test]
+fn mutation_converts_to_declared_type() {
+    // Binding boundaries convert: the explicit type annotation authorizes
+    // string-to-number conversion (`$n = "42"` binds 42 for an INT), while
+    // a non-numeric string is an error. Expressions never convert.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        LET $n: INT = 1
+        $n = "42"
+        WRITE n.txt "{{ $n }}"
+        ASSERT_FILE n.txt "42"
+    "#};
+    run_script(&root, script).expect("mutation converts");
+    run_script(&root, "LET $m: INT = 1\n$m = \"abc\"\n").expect_err("non-numeric string must fail");
+}
+
+#[test]
 fn for_loop_body_mutations_do_not_leak() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);

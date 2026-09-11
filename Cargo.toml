@@ -23,7 +23,7 @@ resolver = "2"
 
 [workspace.package]
 authors = ["Jeremy Harris <jeremy.harris@zenosmosis.com>"]
-version = "0.12.0-alpha"
+version = "0.13.0-alpha"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/jzombie/rust-oxdock"
@@ -36,18 +36,18 @@ indoc = "2.0.7"
 libc = "0.2.189"
 libtest-mimic = "0.8.2"
 line-ending = "1.5.1"
-oxdock = { path = "oxdock", version = "0.12.0-alpha" }
-oxdock-build = { path = "oxdock-build", version = "0.12.0-alpha" }
-oxdock-cli = { path = "oxdock-cli", version = "0.12.0-alpha" }
-oxdock-core = { path = "crates/oxdock-core", version = "0.12.0-alpha" }
-oxdock-embed = { path = "crates/oxdock-embed", version = "0.12.0-alpha" }
-oxdock-fixture = { path = "crates/oxdock-fixture", version = "0.12.0-alpha" }
-oxdock-fs = { path = "crates/sys/oxdock-fs", version = "0.12.0-alpha" }
-oxdock-logic-tests = { path = "crates/oxdock-logic-tests", version = "0.12.0-alpha" }
-oxdock-macros = { path = "oxdock-macros", version = "0.12.0-alpha" }
-oxdock-parser = { path = "crates/oxdock-parser", version = "0.12.0-alpha" }
-oxdock-process = { path = "crates/sys/oxdock-process", version = "0.12.0-alpha" }
-oxdock-sys-test-utils = { path = "crates/sys/oxdock-sys-test-utils", version = "0.12.0-alpha" }
+oxdock = { path = "oxdock", version = "0.13.0-alpha" }
+oxdock-build = { path = "oxdock-build", version = "0.13.0-alpha" }
+oxdock-cli = { path = "oxdock-cli", version = "0.13.0-alpha" }
+oxdock-core = { path = "crates/oxdock-core", version = "0.13.0-alpha" }
+oxdock-embed = { path = "crates/oxdock-embed", version = "0.13.0-alpha" }
+oxdock-fixture = { path = "crates/oxdock-fixture", version = "0.13.0-alpha" }
+oxdock-fs = { path = "crates/sys/oxdock-fs", version = "0.13.0-alpha" }
+oxdock-logic-tests = { path = "crates/oxdock-logic-tests", version = "0.13.0-alpha" }
+oxdock-macros = { path = "oxdock-macros", version = "0.13.0-alpha" }
+oxdock-parser = { path = "crates/oxdock-parser", version = "0.13.0-alpha" }
+oxdock-process = { path = "crates/sys/oxdock-process", version = "0.13.0-alpha" }
+oxdock-sys-test-utils = { path = "crates/sys/oxdock-sys-test-utils", version = "0.13.0-alpha" }
 pest = { version = "2.9.0", default-features = false, features = ["std"] }
 pest_derive = "2.9.0"
 proc-macro2 = "1.0.107"
