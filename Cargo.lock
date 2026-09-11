@@ -411,7 +411,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "oxdock"
-version = "0.11.0-alpha"
+version = "0.12.0-alpha"
 dependencies = [
  "oxdock-build",
  "oxdock-cli",
@@ -424,7 +424,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-build"
-version = "0.11.0-alpha"
+version = "0.12.0-alpha"
 dependencies = [
  "anyhow",
  "oxdock-core",
@@ -440,7 +440,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-cli"
-version = "0.11.0-alpha"
+version = "0.12.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -454,7 +454,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-core"
-version = "0.11.0-alpha"
+version = "0.12.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -470,7 +470,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-doc-tests"
-version = "0.11.0-alpha"
+version = "0.12.0-alpha"
 dependencies = [
  "oxdock",
  "oxdock-fs",
@@ -479,7 +479,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-embed"
-version = "0.11.0-alpha"
+version = "0.12.0-alpha"
 dependencies = [
  "anyhow",
  "oxdock-fs",
@@ -491,7 +491,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-fixture"
-version = "0.11.0-alpha"
+version = "0.12.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -502,7 +502,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-fs"
-version = "0.11.0-alpha"
+version = "0.12.0-alpha"
 dependencies = [
  "anyhow",
  "glob",
@@ -515,7 +515,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-logic-tests"
-version = "0.11.0-alpha"
+version = "0.12.0-alpha"
 dependencies = [
  "anyhow",
  "cargo_metadata",
@@ -538,7 +538,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-macros"
-version = "0.11.0-alpha"
+version = "0.12.0-alpha"
 dependencies = [
  "anyhow",
  "oxdock-build",
@@ -555,7 +555,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-parser"
-version = "0.11.0-alpha"
+version = "0.12.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -570,7 +570,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-process"
-version = "0.11.0-alpha"
+version = "0.12.0-alpha"
 dependencies = [
  "anyhow",
  "libc",
@@ -582,7 +582,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-sys-test-utils"
-version = "0.11.0-alpha"
+version = "0.12.0-alpha"
 
 [[package]]
 name = "pest"
