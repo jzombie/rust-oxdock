@@ -464,7 +464,12 @@ declare_commands! {
         variant: Workdir(Arg),
         syntax: "WORKDIR <path>",
         summary: "Change the working directory.",
-        description: "Sets the current working directory. Relative paths resolve against the current directory; `/` resets to the workspace root. Paths cannot escape the workspace.",
+        description: indoc! {r#"
+            Sets the current working directory.
+
+            Relative paths resolve against the current directory; `/` resets to
+            the workspace root. Paths cannot escape the workspace.
+        "#},
         args: &[ ArgSpec { name: "path", arg_type: ArgType::Path, description: "Directory to change to", io: IoDirection::Write, index: 0, required: true, fallback_stream: None } ],
         flags: &[],
         default_output: None,
@@ -504,7 +509,18 @@ declare_commands! {
         variant: Env { key: String, value: Arg },
         syntax: "ENV KEY=value",
         summary: "Set an environment variable.",
-        description: "Inserts or updates an env var. The value uses the unified string-value rules shared by every command: `\"...\"` or `'...'` quotes keep exact bytes (spaces, tabs), a lone `$var` evaluates that variable, `{{ ... }}` placeholders interpolate, unquoted words join with single spaces, and the first `=` splits key from value (`KEY=a=b` stores `a=b`). A `$var` inside larger text stays literal — write `{{ $var }}` to interpolate there.",
+        description: indoc! {r#"
+            Inserts or updates an env var.
+
+            The value uses the unified string-value rules shared by every command:
+            `"..."` or `'...'` quotes keep exact bytes (spaces, tabs), a lone `$var`
+            evaluates that variable, `{{ ... }}` placeholders interpolate, unquoted
+            words join with single spaces, and the first `=` splits key from value
+            (`KEY=a=b` stores `a=b`).
+
+            A `$var` inside larger text stays literal — write `{{ $var }}` to
+            interpolate there.
+        "#},
         args: &[ ArgSpec { name: "assignment", arg_type: ArgType::KeyValue, description: "KEY=value pair; the value resolves as STRING", io: IoDirection::Write, index: 0, required: true, fallback_stream: None } ],
         flags: &[],
         default_output: None,
@@ -553,7 +569,12 @@ declare_commands! {
         variant: InheritEnv { keys: Vec<String> },
         syntax: "INHERIT_ENV <key>...",
         summary: "Inherit env vars from host.",
-        description: "Declares which host environment variables to inherit into the script. Must appear before any other commands and at most once. Without this directive, the script starts with an empty environment.",
+        description: indoc! {r#"
+            Declares which host environment variables to inherit into the script.
+
+            Must appear before any other commands and at most once. Without this
+            directive, the script starts with an empty environment.
+        "#},
         args: &[ ArgSpec { name: "keys", arg_type: ArgType::Rest(&ArgType::String), description: "Host variables to inherit", io: IoDirection::Read, index: 0, required: false, fallback_stream: None } ],
         flags: &[],
         default_output: None,
@@ -591,7 +612,17 @@ declare_commands! {
         variant: Run(Arg),
         syntax: "RUN <command...> | RUN [\"exe\", \"arg\", ...]",
         summary: "Execute shell command or direct executable.",
-        description: "Shell form (`RUN <command...>`) runs the joined command string in the system shell (`$SHELL -c` / `COMSPEC /C`). Exec form (`RUN [\"exe\", \"arg\", ...]`) spawns the executable directly with no shell, so there is no shell expansion, globbing, redirection, or pipes; use it for portable commands. Guards and wrappers (`ASYNC`, `TIMEOUT`, `WITH_IO`, `LET`) apply to both forms.",
+        description: indoc! {r#"
+            Shell form (`RUN <command...>`) runs the joined command string in the
+            system shell (`$SHELL -c` / `COMSPEC /C`).
+
+            Exec form (`RUN ["exe", "arg", ...]`) spawns the executable directly
+            with no shell, so there is no shell expansion, globbing, redirection,
+            or pipes; use it for portable commands.
+
+            Guards and wrappers (`ASYNC`, `TIMEOUT`, `WITH_IO`, `LET`) apply to
+            both forms.
+        "#},
         args: &[ ArgSpec { name: "command", arg_type: ArgType::Rest(&ArgType::String), description: "Command", io: IoDirection::Write, index: 0, required: true, fallback_stream: None } ],
         flags: &[],
         default_output: None,
@@ -750,7 +781,12 @@ declare_commands! {
         variant: ReadLine { var: String },
         syntax: "READ_LINE $var",
         summary: "Read one line from stdin into a variable.",
-        description: "Reads bytes until newline without waiting for EOF, leaving the pipe open. Trailing newline is stripped (shell-read parity). On premature EOF assigns accumulated bytes and returns.",
+        description: indoc! {r#"
+            Reads bytes until newline without waiting for EOF, leaving the pipe open.
+
+            Trailing newline is stripped (shell-read parity). On premature EOF
+            assigns accumulated bytes and returns.
+        "#},
         args: &[ ArgSpec { name: "var", arg_type: ArgType::Var, description: "Target variable (`$name`); the line binds as STRING", io: IoDirection::Write, index: 0, required: true, fallback_stream: None } ],
         flags: &[],
         default_output: None,
@@ -825,7 +861,33 @@ declare_commands! {
         variant: Expand { path: Option<Arg>, overrides: Vec<(String, Arg)> },
         syntax: "EXPAND [<path>] [<KEY=val> ...]",
         summary: "Expand a template file (or stdin) to stdout.",
-        description: "A template is any text file — or piped stdin when no path is given — containing `{{ ... }}` placeholders. EXPAND replaces each placeholder and prints the result to stdout. Placeholders: `{{ NAME }}` reads a `KEY=val` override passed on this command; `{{ env:NAME }}` reads an override, falling back to the environment; `{{ $var }}` reads a script variable (dotted paths allowed). A missing key is an error, never a silent empty. Substitution runs in a single pass. EXPAND is not recursive and does not expand nested placeholders: a value that itself contains `{{ ... }}` is inserted verbatim and never expanded again. A bare `$var` argument is a template path; `KEY=val` arguments are overrides whose values follow the unified string-value rules (same as `ENV`: quotes keep exact bytes, a lone `$var` evaluates, `{{ ... }}` interpolates). NOTE: `WRITE` interpolates `{{ ... }}` while writing, so escape it (`\\{{ ... }}`) when writing a template file for a later `EXPAND`. With no path, the template arrives on stdin through a pipe. When piping from a shell, single-quote the template (`echo '{{ $x }}'`): double quotes let the shell swallow `$x`, so oxdock receives an empty `{{ }}` placeholder and errors.",
+        description: indoc! {r#"
+            A template is any text file — or piped stdin when no path is given —
+            containing `{{ ... }}` placeholders. EXPAND replaces each placeholder
+            and prints the result to stdout.
+
+            Placeholders: `{{ NAME }}` reads a `KEY=val` override passed on this
+            command; `{{ env:NAME }}` reads an override, falling back to the
+            environment; `{{ $var }}` reads a script variable (dotted paths allowed).
+            A missing key is an error, never a silent empty.
+
+            Substitution runs in a single pass. EXPAND is not recursive and does not
+            expand nested placeholders: a value that itself contains `{{ ... }}` is
+            inserted verbatim and never expanded again.
+
+            A bare `$var` argument is a template path; `KEY=val` arguments are
+            overrides whose values follow the unified string-value rules (same as
+            `ENV`: quotes keep exact bytes, a lone `$var` evaluates,
+            `{{ ... }}` interpolates).
+
+            NOTE: `WRITE` interpolates `{{ ... }}` while writing, so escape it
+            (`\{{ ... }}`) when writing a template file for a later `EXPAND`.
+
+            With no path, the template arrives on stdin through a pipe. When piping
+            from a shell, single-quote the template (`echo '{{ $x }}'`): double
+            quotes let the shell swallow `$x`, so oxdock receives an empty `{{ }}`
+            placeholder and errors.
+        "#},
         args: &[
             ArgSpec { name: "path", arg_type: ArgType::Path, description: "Template file to expand; omit to expand stdin", io: IoDirection::Read, index: 0, required: false, fallback_stream: None },
             ArgSpec { name: "overrides", arg_type: ArgType::Rest(&ArgType::KeyValue), description: "Template overrides shadowing that key (unified string values)", io: IoDirection::Read, index: 1, required: false, fallback_stream: None },
@@ -897,7 +959,13 @@ declare_commands! {
         variant: AssertFile { hash: Option<String>, path: Arg, contents: Option<Arg> },
         syntax: "ASSERT_FILE [--hash <sha256>] <path> [<expected>]",
         summary: "Assert file exists.",
-        description: "Checks the path is a file, then optionally compares its bytes (or `--hash` SHA-256 digest) against the expectation. Any mismatch aborts the pipeline with a step-numbered error showing expected vs actual.",
+        description: indoc! {r#"
+            Checks the path is a file, then optionally compares its bytes (or
+            `--hash` SHA-256 digest) against the expectation.
+
+            Any mismatch aborts the pipeline with a step-numbered error showing
+            expected vs actual.
+        "#},
         args: &[
             ArgSpec { name: "path", arg_type: ArgType::Path, description: "File", io: IoDirection::Read, index: 0, required: true, fallback_stream: None },
             ArgSpec { name: "expected", arg_type: ArgType::Rest(&ArgType::String), description: "Expected", io: IoDirection::Read, index: 1, required: false, fallback_stream: None },
@@ -928,7 +996,10 @@ declare_commands! {
         variant: AssertDir(Arg),
         syntax: "ASSERT_DIR <path>",
         summary: "Assert dir exists.",
-        description: "Checks the path is a directory, aborting the pipeline with a step-numbered error otherwise.",
+        description: indoc! {r#"
+            Checks the path is a directory, aborting the pipeline with a
+            step-numbered error otherwise.
+        "#},
         args: &[ ArgSpec { name: "path", arg_type: ArgType::Path, description: "Dir", io: IoDirection::Read, index: 0, required: true, fallback_stream: None } ],
         flags: &[],
         default_output: None,
@@ -944,7 +1015,10 @@ declare_commands! {
         variant: AssertAbsent(Arg),
         syntax: "ASSERT_ABSENT <path>",
         summary: "Assert path absent.",
-        description: "Checks nothing exists at the path, aborting the pipeline with a step-numbered error if it does.",
+        description: indoc! {r#"
+            Checks nothing exists at the path, aborting the pipeline with a
+            step-numbered error if it does.
+        "#},
         args: &[ ArgSpec { name: "path", arg_type: ArgType::Path, description: "Path", io: IoDirection::Read, index: 0, required: true, fallback_stream: None } ],
         flags: &[],
         default_output: None,
@@ -957,7 +1031,10 @@ declare_commands! {
         variant: AssertStdout(Arg),
         syntax: "ASSERT_STDOUT <substring>",
         summary: "Assert stdout contains.",
-        description: "Checks the preceding step's stdout contains the substring, aborting the pipeline with a step-numbered error otherwise.",
+        description: indoc! {r#"
+            Checks the preceding step's stdout contains the substring, aborting the
+            pipeline with a step-numbered error otherwise.
+        "#},
         args: &[ ArgSpec { name: "substring", arg_type: ArgType::Rest(&ArgType::String), description: "Substring", io: IoDirection::Read, index: 0, required: true, fallback_stream: None } ],
         flags: &[],
         default_output: None,
@@ -989,7 +1066,14 @@ declare_commands! {
         variant: Exit(Arg),
         syntax: "EXIT <code>",
         summary: "Exit pipeline.",
-        description: "Stops the pipeline immediately with an `EXIT requested with code <code>` error; steps after it never run, at any nesting depth. Enclosing blocks still unwind their LET/ENV/WORKDIR/WORKSPACE state, anonymous background tasks are killed synchronously, and files written before the EXIT persist.",
+        description: indoc! {r#"
+            Stops the pipeline immediately with an `EXIT requested with code <code>`
+            error; steps after it never run, at any nesting depth.
+
+            Enclosing blocks still unwind their LET/ENV/WORKDIR/WORKSPACE state,
+            anonymous background tasks are killed synchronously, and files written
+            before the EXIT persist.
+        "#},
         args: &[ ArgSpec { name: "code", arg_type: ArgType::Int, description: "Code", io: IoDirection::Write, index: 0, required: true, fallback_stream: None } ],
         flags: &[],
         default_output: None,
@@ -1007,7 +1091,13 @@ declare_commands! {
         variant: Sleep { duration: Arg },
         syntax: "SLEEP <duration>",
         summary: "Pause execution for a duration.",
-        description: "Parks the step for the duration (e.g. 500ms, 10s, 2m). Cooperative: checks for cancellation so an enclosing TIMEOUT or task teardown interrupts the sleep. Cross-platform alternative to shell sleep for testing time boundaries.",
+        description: indoc! {r#"
+            Parks the step for the duration (e.g. 500ms, 10s, 2m).
+
+            Cooperative: checks for cancellation so an enclosing TIMEOUT or task
+            teardown interrupts the sleep. Cross-platform alternative to shell sleep
+            for testing time boundaries.
+        "#},
         args: &[ ArgSpec { name: "duration", arg_type: ArgType::Duration, description: "How long to sleep", io: IoDirection::Write, index: 0, required: true, fallback_stream: None } ],
         flags: &[],
         default_output: None,
@@ -1054,7 +1144,35 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             name: "WITH_IO",
             syntax: "WITH_IO [<stream>[=pipe:<name>|=$var], ...] <command> | WITH_IO [bindings] { <commands> }",
             summary: "Reroute standard streams.",
-            description: "Reroutes the standard streams of the next command or, in block form, of every enclosed command. Bindings map streams (`stdin`, `stdout`, `stderr`) to named script pipes (`stdout=pipe:name`, `stderr=pipe:name`) or to a PIPE-typed variable (`stdin=$p`, resolved against the live pipe registry when the step runs). Both stdout and stderr pipes capture output the same way. Pipes hold bytes in memory and spill to a temp file above 8 MiB, so a producer can finish before the consumer starts. If WITH_IO wraps an ASYNC block whose body is a single RUN, guarded or not, the pipe is a zero copy OS kernel pipe instead: pair it with a consumer that runs while the producer is alive, since output past the 64 KiB kernel buffer stalls until drained. That promotion never crosses a CALL boundary: pipes created, bound, or passed by variable inside FUNC bodies are always script pipes, even when the surrounding task would otherwise promote. A second producer or consumer on a live name is an explicit error. A name bound as output can later feed another command's `stdin`, connecting commands without touching the terminal. Binding `stdout` and `stderr` to the same live pipe name fails deterministically. Merge streams in shell via `2>&1` instead. Nested blocks stack defaults; inline bindings override inherited ones for their command only; closing a block restores previous wiring.",
+            description: indoc! {r#"
+                Reroutes the standard streams of the next command or, in block form,
+                of every enclosed command.
+
+                Bindings map streams (`stdin`, `stdout`, `stderr`) to named script
+                pipes (`stdout=pipe:name`, `stderr=pipe:name`) or to a PIPE-typed
+                variable (`stdin=$p`, resolved against the live pipe registry when
+                the step runs). Both stdout and stderr pipes capture output the same way.
+
+                Pipes hold bytes in memory and spill to a temp file above 8 MiB, so a
+                producer can finish before the consumer starts.
+
+                If WITH_IO wraps an ASYNC block whose body is a single RUN, guarded or
+                not, the pipe is a zero copy OS kernel pipe instead: pair it with a
+                consumer that runs while the producer is alive, since output past the
+                64 KiB kernel buffer stalls until drained. That promotion never crosses
+                a CALL boundary: pipes created, bound, or passed by variable inside FUNC
+                bodies are always script pipes, even when the surrounding task would
+                otherwise promote.
+
+                A second producer or consumer on a live name is an explicit error. A name
+                bound as output can later feed another command's `stdin`, connecting
+                commands without touching the terminal. Binding `stdout` and `stderr` to
+                the same live pipe name fails deterministically. Merge streams in shell
+                via `2>&1` instead.
+
+                Nested blocks stack defaults; inline bindings override inherited ones for
+                their command only; closing a block restores previous wiring.
+            "#},
             args: &[],
             flags: &[],
             default_output: None,
@@ -1092,7 +1210,18 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             name: "FOR",
             syntax: "FOR $item: TYPE IN <expr> { <commands> } | FOR $key: STRING, $value: TYPE IN <expr> { <commands> }",
             summary: "Iterate over a list or map.",
-            description: "The loop variable receives each element (lists) or value (maps); with two variables, the first receives the key. Loop variables are declared with explicit types and scoped per iteration via declare_var; they do not leak outward. The body may be a braced block or a single-line `{ ... }` command. `GLOB(\"...\")` patterns must be quoted (`*` is not a bare word, so `GLOB(*)` is a parse error); GLOB returns a root-relative sorted list, empty when nothing matches, and rejects `..` escapes.",
+            description: indoc! {r#"
+                The loop variable receives each element (lists) or value (maps); with
+                two variables, the first receives the key.
+
+                Loop variables are declared with explicit types and scoped per iteration
+                via declare_var; they do not leak outward. The body may be a braced block
+                or a single-line `{ ... }` command.
+
+                `GLOB("...")` patterns must be quoted (`*` is not a bare word, so
+                `GLOB(*)` is a parse error); GLOB returns a root-relative sorted list,
+                empty when nothing matches, and rejects `..` escapes.
+            "#},
             args: &[],
             flags: &[],
             default_output: None,
@@ -1128,7 +1257,12 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             name: "IF",
             syntax: "IF <expr> { <commands> } [ELSE IF <expr> { <commands> }] [ELSE { <commands> }]",
             summary: "Conditional execution.",
-            description: "The condition is evaluated as a boolean expression. Prefix `!` negates (`IF !false`); only Bool values are accepted as conditions.",
+            description: indoc! {r#"
+                The condition is evaluated as a boolean expression.
+
+                Prefix `!` negates (`IF !false`); only Bool values are accepted as
+                conditions.
+            "#},
             args: &[],
             flags: &[],
             default_output: None,
@@ -1158,7 +1292,37 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             name: "LET",
             syntax: "LET $var: TYPE = <expr> | LET $var: TYPE = ASYNC { <commands> } | LET $var: TYPE = <command> | LET $var: TYPE = AWAIT $task",
             summary: "Bind script-local variables.",
-            description: "Declares a script-local variable with an explicit type (STRING, INT, FLOAT, BOOL, PIPE, LIST, MAP, HANDLE, DURATION, PATH). Duplicate LET in the same scope frame is a redeclaration error; mutate with `$var = <expr>`. Variables are usable in templates (`{{ $var }}`), guards, and expressions. With `ASYNC`, spawns a background task and stores its handle (see ASYNC). The `$` sigil on the name is mandatory. The right-hand side is always an expression — literals, lists, maps, comparisons, `env:KEY` reads, `pipe:NAME` handles, `INSPECT($var)` snapshots, `GLOB(\"*.md\")` — never a `{{ ... }}` template; interpolation happens in string values, not here. Bare words need no quotes: `LET $d: STRING = 30s` binds the same string as quoted. When the right-hand side is a synchronous command (`LET $out: STRING = ECHO hi`), the command runs to completion and its exact stdout bytes are captured into the variable as a string (no newline stripping; commands with no stdout capture as `\"\"`; non-UTF8 stdout is an error). Combining capture with an explicit `WITH_IO [stdout=pipe:...]` is a parse error. `LET $out: STRING = AWAIT $var` captures a background task's stdout the same way; bare `AWAIT $var` forwards it to the parent stdout instead. `LET $e: STRING = env:FOO` reads the script environment into a plain string.",
+            description: indoc! {r#"
+                Declares a script-local variable with an explicit type (STRING, INT,
+                FLOAT, BOOL, PIPE, LIST, MAP, HANDLE, DURATION, PATH). Duplicate LET
+                in the same scope frame is a redeclaration error; mutate with
+                `$var = <expr>`.
+
+                Variables are usable in templates (`{{ $var }}`), guards, and
+                expressions. With `ASYNC`, spawns a background task and stores its
+                handle (see ASYNC). The `$` sigil on the name is mandatory.
+
+                The right-hand side is always an expression — literals, lists, maps,
+                comparisons, `env:KEY` reads, `pipe:NAME` handles, `INSPECT($var)`
+                snapshots, `GLOB("*.md")` — never a `{{ ... }}` template;
+                interpolation happens in string values, not here.
+
+                Bare words need no quotes: `LET $d: STRING = 30s` binds the same string
+                as quoted.
+
+                When the right-hand side is a synchronous command
+                (`LET $out: STRING = ECHO hi`), the command runs to completion and its
+                exact stdout bytes are captured into the variable as a string (no newline
+                stripping; commands with no stdout capture as `""`; non-UTF8 stdout is
+                an error). Combining capture with an explicit
+                `WITH_IO [stdout=pipe:...]` is a parse error.
+
+                `LET $out: STRING = AWAIT $var` captures a background task's stdout the
+                same way; bare `AWAIT $var` forwards it to the parent stdout instead.
+
+                `LET $e: STRING = env:FOO` reads the script environment into a plain
+                string.
+            "#},
             args: &[],
             flags: &[],
             default_output: None,
@@ -1232,7 +1396,14 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             name: "MUTATION",
             syntax: "$var = <expr>",
             summary: "Mutate a declared variable.",
-            description: "Reassigns an existing variable, validating the new value against the TypeKind bound at LET time via coerce_value with ExecState context. The leading `$` distinguishes mutation from `KEY=value` command assignments. Assigning an undeclared variable or a mismatched type is an error.",
+            description: indoc! {r#"
+                Reassigns an existing variable, validating the new value against the
+                TypeKind bound at LET time via coerce_value with ExecState context.
+
+                The leading `$` distinguishes mutation from `KEY=value` command
+                assignments. Assigning an undeclared variable or a mismatched type is
+                an error.
+            "#},
             args: &[],
             flags: &[],
             default_output: None,
@@ -1249,7 +1420,13 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             name: "ASYNC",
             syntax: "ASYNC <command...> | ASYNC { <commands> } | LET $var: HANDLE = ASYNC { <commands> }",
             summary: "Run steps in a background thread.",
-            description: "Runs a command or block of commands in a background thread with subshell isolation. Mutations (ENV, WORKDIR) stay within the block. With `LET`, stores a task handle for `AWAIT`.",
+            description: indoc! {r#"
+                Runs a command or block of commands in a background thread with
+                subshell isolation.
+
+                Mutations (ENV, WORKDIR) stay within the block. With `LET`, stores a
+                task handle for `AWAIT`.
+            "#},
             args: &[],
             flags: &[],
             default_output: None,
@@ -1282,7 +1459,13 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             name: "AWAIT",
             syntax: "AWAIT $var | LET $out: STRING = AWAIT $var",
             summary: "Join a background task.",
-            description: "Blocks until the named task completes. Propagates errors if the task failed. Bare `AWAIT $var` forwards the task's stdout to the parent stdout; `LET $out: STRING = AWAIT $var` captures it into `$out` instead (same UTF-8 and spilling rules as `LET $var: STRING = <command>`).",
+            description: indoc! {r#"
+                Blocks until the named task completes. Propagates errors if the task failed.
+
+                Bare `AWAIT $var` forwards the task's stdout to the parent stdout;
+                `LET $out: STRING = AWAIT $var` captures it into `$out` instead (same
+                UTF-8 and spilling rules as `LET $var: STRING = <command>`).
+            "#},
             args: &[],
             flags: &[],
             default_output: None,
@@ -1311,7 +1494,13 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             name: "CANCEL",
             syntax: "CANCEL $var",
             summary: "Synchronously cancel a background task.",
-            description: "Kills the named background task spawned via LET $var: HANDLE = ASYNC .... Blocking: returns only after the task thread has been joined and its OS process reaped, so no residual filesystem or stream mutation follows. A later AWAIT $var reports cancellation. Only named tasks can be cancelled.",
+            description: indoc! {r#"
+                Kills the named background task spawned via LET $var: HANDLE = ASYNC ....
+
+                Blocking: returns only after the task thread has been joined and its OS
+                process reaped, so no residual filesystem or stream mutation follows. A
+                later AWAIT $var reports cancellation. Only named tasks can be cancelled.
+            "#},
             args: &[],
             flags: &[],
             default_output: None,
@@ -1328,7 +1517,12 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             name: "TIMEOUT",
             syntax: "TIMEOUT <duration> <command...> | TIMEOUT <duration> { <commands> } | TIMEOUT <duration> AWAIT $var",
             summary: "Enforce an execution deadline.",
-            description: "Aborts the wrapped step or block with a deadline error if it exceeds the duration (e.g. 500ms, 10s, 2m; a bare number means seconds). A blocking foreground process is killed.",
+            description: indoc! {r#"
+                Aborts the wrapped step or block with a deadline error if it exceeds the
+                duration (e.g. 500ms, 10s, 2m; a bare number means seconds).
+
+                A blocking foreground process is killed.
+            "#},
             args: &[],
             flags: &[],
             default_output: None,
@@ -1364,7 +1558,15 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             name: "FUNC",
             syntax: "FUNC NAME($param: TYPE, ...) { <commands> }",
             summary: "Define a user function.",
-            description: "Defines a user function with UPPERCASE name and explicitly typed parameters. Params bind by position with declare_var coercion before the body runs. Bodies run in a fresh variable scope; LETs inside do not leak. A nested FUNC definition is scoped to its block and reverts on exit. Names share one namespace with host-registered functions.",
+            description: indoc! {r#"
+                Defines a user function with UPPERCASE name and explicitly typed
+                parameters.
+
+                Params bind by position with declare_var coercion before the body runs.
+                Bodies run in a fresh variable scope; LETs inside do not leak. A nested
+                FUNC definition is scoped to its block and reverts on exit. Names share
+                one namespace with host-registered functions.
+            "#},
             args: &[],
             flags: &[],
             default_output: None,
@@ -1385,7 +1587,16 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             name: "CALL",
             syntax: "CALL NAME(<expr>, ...) | LET $var: TYPE = CALL NAME(<expr>, ...)",
             summary: "Invoke a user or host function.",
-            description: "Invokes a FUNC-defined or host-registered function by UPPERCASE name. Bare CALL discards the return value and keeps stdout side effects. LET $var: TYPE = CALL captures the RETURN value (fallthrough without RETURN captures as \"\"), coerced to the declared type; stdout inside the callee stays observable via ASSERT_STDOUT and pipes. Combining LET-capture with WITH_IO [stdout=pipe:...] is a parse error.",
+            description: indoc! {r#"
+                Invokes a FUNC-defined or host-registered function by UPPERCASE name.
+
+                Bare CALL discards the return value and keeps stdout side effects.
+                LET $var: TYPE = CALL captures the RETURN value (fallthrough without
+                RETURN captures as ""), coerced to the declared type; stdout inside the
+                callee stays observable via ASSERT_STDOUT and pipes.
+
+                Combining LET-capture with WITH_IO [stdout=pipe:...] is a parse error.
+            "#},
             args: &[],
             flags: &[],
             default_output: None,
@@ -1426,7 +1637,12 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             name: "RETURN",
             syntax: "RETURN <expr>",
             summary: "Return a value from a function.",
-            description: "Ends the nearest enclosing function call with a value. Falling off the end without RETURN yields \"\". RETURN outside a function (including at top level or across an ASYNC boundary) is an error.",
+            description: indoc! {r#"
+                Ends the nearest enclosing function call with a value.
+
+                Falling off the end without RETURN yields "". RETURN outside a function
+                (including at top level or across an ASYNC boundary) is an error.
+            "#},
             args: &[],
             flags: &[],
             default_output: None,
@@ -1450,7 +1666,14 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             name: "WHILE",
             syntax: "WHILE <bool-expr> { <commands> }",
             summary: "Loop while a condition holds.",
-            description: "Re-evaluates a Bool condition each iteration (same is_truthy rule as IF; non-Bool is a type error). Each iteration runs in a fresh scope; mutate outer state with $var = ... so the next check observes it. BREAK exits the loop; CONTINUE skips to the next check.",
+            description: indoc! {r#"
+                Re-evaluates a Bool condition each iteration (same is_truthy rule as IF;
+                non-Bool is a type error).
+
+                Each iteration runs in a fresh scope; mutate outer state with $var = ...
+                so the next check observes it. BREAK exits the loop; CONTINUE skips to
+                the next check.
+            "#},
             args: &[],
             flags: &[],
             default_output: None,
@@ -1471,7 +1694,11 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             name: "BREAK",
             syntax: "BREAK",
             summary: "Exit the innermost loop.",
-            description: "Exits the innermost enclosing FOR or WHILE loop. BREAK outside a loop, or across a FUNC or ASYNC boundary, is an error.",
+            description: indoc! {r#"
+                Exits the innermost enclosing FOR or WHILE loop.
+
+                BREAK outside a loop, or across a FUNC or ASYNC boundary, is an error.
+            "#},
             args: &[],
             flags: &[],
             default_output: None,
@@ -1489,7 +1716,12 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             name: "CONTINUE",
             syntax: "CONTINUE",
             summary: "Skip to the next loop iteration.",
-            description: "Skips the rest of the innermost enclosing FOR or WHILE body and starts the next iteration. CONTINUE outside a loop, or across a FUNC or ASYNC boundary, is an error.",
+            description: indoc! {r#"
+                Skips the rest of the innermost enclosing FOR or WHILE body and starts
+                the next iteration.
+
+                CONTINUE outside a loop, or across a FUNC or ASYNC boundary, is an error.
+            "#},
             args: &[],
             flags: &[],
             default_output: None,

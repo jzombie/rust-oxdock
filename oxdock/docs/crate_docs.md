@@ -343,7 +343,34 @@ Reroute standard streams.
 
 **Syntax:** `WITH_IO [<stream>[=pipe:<name>|=$var], ...] <command> | WITH_IO [bindings] { <commands> }`
 
-Reroutes the standard streams of the next command or, in block form, of every enclosed command. Bindings map streams (`stdin`, `stdout`, `stderr`) to named script pipes (`stdout=pipe:name`, `stderr=pipe:name`) or to a PIPE-typed variable (`stdin=$p`, resolved against the live pipe registry when the step runs). Both stdout and stderr pipes capture output the same way. Pipes hold bytes in memory and spill to a temp file above 8 MiB, so a producer can finish before the consumer starts. If WITH_IO wraps an ASYNC block whose body is a single RUN, guarded or not, the pipe is a zero copy OS kernel pipe instead: pair it with a consumer that runs while the producer is alive, since output past the 64 KiB kernel buffer stalls until drained. That promotion never crosses a CALL boundary: pipes created, bound, or passed by variable inside FUNC bodies are always script pipes, even when the surrounding task would otherwise promote. A second producer or consumer on a live name is an explicit error. A name bound as output can later feed another command's `stdin`, connecting commands without touching the terminal. Binding `stdout` and `stderr` to the same live pipe name fails deterministically. Merge streams in shell via `2>&1` instead. Nested blocks stack defaults; inline bindings override inherited ones for their command only; closing a block restores previous wiring.
+Reroutes the standard streams of the next command or, in block form,
+of every enclosed command.
+
+Bindings map streams (`stdin`, `stdout`, `stderr`) to named script
+pipes (`stdout=pipe:name`, `stderr=pipe:name`) or to a PIPE-typed
+variable (`stdin=$p`, resolved against the live pipe registry when
+the step runs). Both stdout and stderr pipes capture output the same way.
+
+Pipes hold bytes in memory and spill to a temp file above 8 MiB, so a
+producer can finish before the consumer starts.
+
+If WITH_IO wraps an ASYNC block whose body is a single RUN, guarded or
+not, the pipe is a zero copy OS kernel pipe instead: pair it with a
+consumer that runs while the producer is alive, since output past the
+64 KiB kernel buffer stalls until drained. That promotion never crosses
+a CALL boundary: pipes created, bound, or passed by variable inside FUNC
+bodies are always script pipes, even when the surrounding task would
+otherwise promote.
+
+A second producer or consumer on a live name is an explicit error. A name
+bound as output can later feed another command's `stdin`, connecting
+commands without touching the terminal. Binding `stdout` and `stderr` to
+the same live pipe name fails deterministically. Merge streams in shell
+via `2>&1` instead.
+
+Nested blocks stack defaults; inline bindings override inherited ones for
+their command only; closing a block restores previous wiring.
+
 
 **Examples:**
 
@@ -379,7 +406,17 @@ Iterate over a list or map.
 
 **Syntax:** `FOR $item: TYPE IN <expr> { <commands> } | FOR $key: STRING, $value: TYPE IN <expr> { <commands> }`
 
-The loop variable receives each element (lists) or value (maps); with two variables, the first receives the key. Loop variables are declared with explicit types and scoped per iteration via declare_var; they do not leak outward. The body may be a braced block or a single-line `{ ... }` command. `GLOB("...")` patterns must be quoted (`*` is not a bare word, so `GLOB(*)` is a parse error); GLOB returns a root-relative sorted list, empty when nothing matches, and rejects `..` escapes.
+The loop variable receives each element (lists) or value (maps); with
+two variables, the first receives the key.
+
+Loop variables are declared with explicit types and scoped per iteration
+via declare_var; they do not leak outward. The body may be a braced block
+or a single-line `{ ... }` command.
+
+`GLOB("...")` patterns must be quoted (`*` is not a bare word, so
+`GLOB(*)` is a parse error); GLOB returns a root-relative sorted list,
+empty when nothing matches, and rejects `..` escapes.
+
 
 **Examples:**
 
@@ -413,7 +450,11 @@ Conditional execution.
 
 **Syntax:** `IF <expr> { <commands> } [ELSE IF <expr> { <commands> }] [ELSE { <commands> }]`
 
-The condition is evaluated as a boolean expression. Prefix `!` negates (`IF !false`); only Bool values are accepted as conditions.
+The condition is evaluated as a boolean expression.
+
+Prefix `!` negates (`IF !false`); only Bool values are accepted as
+conditions.
+
 
 **Examples:**
 
@@ -444,7 +485,36 @@ Bind script-local variables.
 
 **Syntax:** `LET $var: TYPE = <expr> | LET $var: TYPE = ASYNC { <commands> } | LET $var: TYPE = <command> | LET $var: TYPE = AWAIT $task`
 
-Declares a script-local variable with an explicit type (STRING, INT, FLOAT, BOOL, PIPE, LIST, MAP, HANDLE, DURATION, PATH). Duplicate LET in the same scope frame is a redeclaration error; mutate with `$var = <expr>`. Variables are usable in templates (`{{ $var }}`), guards, and expressions. With `ASYNC`, spawns a background task and stores its handle (see ASYNC). The `$` sigil on the name is mandatory. The right-hand side is always an expression — literals, lists, maps, comparisons, `env:KEY` reads, `pipe:NAME` handles, `INSPECT($var)` snapshots, `GLOB("*.md")` — never a `{{ ... }}` template; interpolation happens in string values, not here. Bare words need no quotes: `LET $d: STRING = 30s` binds the same string as quoted. When the right-hand side is a synchronous command (`LET $out: STRING = ECHO hi`), the command runs to completion and its exact stdout bytes are captured into the variable as a string (no newline stripping; commands with no stdout capture as `""`; non-UTF8 stdout is an error). Combining capture with an explicit `WITH_IO [stdout=pipe:...]` is a parse error. `LET $out: STRING = AWAIT $var` captures a background task's stdout the same way; bare `AWAIT $var` forwards it to the parent stdout instead. `LET $e: STRING = env:FOO` reads the script environment into a plain string.
+Declares a script-local variable with an explicit type (STRING, INT,
+FLOAT, BOOL, PIPE, LIST, MAP, HANDLE, DURATION, PATH). Duplicate LET
+in the same scope frame is a redeclaration error; mutate with
+`$var = <expr>`.
+
+Variables are usable in templates (`{{ $var }}`), guards, and
+expressions. With `ASYNC`, spawns a background task and stores its
+handle (see ASYNC). The `$` sigil on the name is mandatory.
+
+The right-hand side is always an expression — literals, lists, maps,
+comparisons, `env:KEY` reads, `pipe:NAME` handles, `INSPECT($var)`
+snapshots, `GLOB("*.md")` — never a `{{ ... }}` template;
+interpolation happens in string values, not here.
+
+Bare words need no quotes: `LET $d: STRING = 30s` binds the same string
+as quoted.
+
+When the right-hand side is a synchronous command
+(`LET $out: STRING = ECHO hi`), the command runs to completion and its
+exact stdout bytes are captured into the variable as a string (no newline
+stripping; commands with no stdout capture as `""`; non-UTF8 stdout is
+an error). Combining capture with an explicit
+`WITH_IO [stdout=pipe:...]` is a parse error.
+
+`LET $out: STRING = AWAIT $var` captures a background task's stdout the
+same way; bare `AWAIT $var` forwards it to the parent stdout instead.
+
+`LET $e: STRING = env:FOO` reads the script environment into a plain
+string.
+
 
 **Examples:**
 
@@ -513,7 +583,13 @@ Mutate a declared variable.
 
 **Syntax:** `$var = <expr>`
 
-Reassigns an existing variable, validating the new value against the TypeKind bound at LET time via coerce_value with ExecState context. The leading `$` distinguishes mutation from `KEY=value` command assignments. Assigning an undeclared variable or a mismatched type is an error.
+Reassigns an existing variable, validating the new value against the
+TypeKind bound at LET time via coerce_value with ExecState context.
+
+The leading `$` distinguishes mutation from `KEY=value` command
+assignments. Assigning an undeclared variable or a mismatched type is
+an error.
+
 
 **Examples:**
 
@@ -531,7 +607,12 @@ Run steps in a background thread.
 
 **Syntax:** `ASYNC <command...> | ASYNC { <commands> } | LET $var: HANDLE = ASYNC { <commands> }`
 
-Runs a command or block of commands in a background thread with subshell isolation. Mutations (ENV, WORKDIR) stay within the block. With `LET`, stores a task handle for `AWAIT`.
+Runs a command or block of commands in a background thread with
+subshell isolation.
+
+Mutations (ENV, WORKDIR) stay within the block. With `LET`, stores a
+task handle for `AWAIT`.
+
 
 **Examples:**
 
@@ -562,7 +643,12 @@ Join a background task.
 
 **Syntax:** `AWAIT $var | LET $out: STRING = AWAIT $var`
 
-Blocks until the named task completes. Propagates errors if the task failed. Bare `AWAIT $var` forwards the task's stdout to the parent stdout; `LET $out: STRING = AWAIT $var` captures it into `$out` instead (same UTF-8 and spilling rules as `LET $var: STRING = <command>`).
+Blocks until the named task completes. Propagates errors if the task failed.
+
+Bare `AWAIT $var` forwards the task's stdout to the parent stdout;
+`LET $out: STRING = AWAIT $var` captures it into `$out` instead (same
+UTF-8 and spilling rules as `LET $var: STRING = <command>`).
+
 
 **Examples:**
 
@@ -589,7 +675,12 @@ Synchronously cancel a background task.
 
 **Syntax:** `CANCEL $var`
 
-Kills the named background task spawned via LET $var: HANDLE = ASYNC .... Blocking: returns only after the task thread has been joined and its OS process reaped, so no residual filesystem or stream mutation follows. A later AWAIT $var reports cancellation. Only named tasks can be cancelled.
+Kills the named background task spawned via LET $var: HANDLE = ASYNC ....
+
+Blocking: returns only after the task thread has been joined and its OS
+process reaped, so no residual filesystem or stream mutation follows. A
+later AWAIT $var reports cancellation. Only named tasks can be cancelled.
+
 
 **Examples:**
 
@@ -607,7 +698,11 @@ Enforce an execution deadline.
 
 **Syntax:** `TIMEOUT <duration> <command...> | TIMEOUT <duration> { <commands> } | TIMEOUT <duration> AWAIT $var`
 
-Aborts the wrapped step or block with a deadline error if it exceeds the duration (e.g. 500ms, 10s, 2m; a bare number means seconds). A blocking foreground process is killed.
+Aborts the wrapped step or block with a deadline error if it exceeds the
+duration (e.g. 500ms, 10s, 2m; a bare number means seconds).
+
+A blocking foreground process is killed.
+
 
 **Examples:**
 
@@ -642,7 +737,14 @@ Define a user function.
 
 **Syntax:** `FUNC NAME($param: TYPE, ...) { <commands> }`
 
-Defines a user function with UPPERCASE name and explicitly typed parameters. Params bind by position with declare_var coercion before the body runs. Bodies run in a fresh variable scope; LETs inside do not leak. A nested FUNC definition is scoped to its block and reverts on exit. Names share one namespace with host-registered functions.
+Defines a user function with UPPERCASE name and explicitly typed
+parameters.
+
+Params bind by position with declare_var coercion before the body runs.
+Bodies run in a fresh variable scope; LETs inside do not leak. A nested
+FUNC definition is scoped to its block and reverts on exit. Names share
+one namespace with host-registered functions.
+
 
 **Examples:**
 
@@ -664,7 +766,15 @@ Invoke a user or host function.
 
 **Syntax:** `CALL NAME(<expr>, ...) | LET $var: TYPE = CALL NAME(<expr>, ...)`
 
-Invokes a FUNC-defined or host-registered function by UPPERCASE name. Bare CALL discards the return value and keeps stdout side effects. LET $var: TYPE = CALL captures the RETURN value (fallthrough without RETURN captures as ""), coerced to the declared type; stdout inside the callee stays observable via ASSERT_STDOUT and pipes. Combining LET-capture with WITH_IO [stdout=pipe:...] is a parse error.
+Invokes a FUNC-defined or host-registered function by UPPERCASE name.
+
+Bare CALL discards the return value and keeps stdout side effects.
+LET $var: TYPE = CALL captures the RETURN value (fallthrough without
+RETURN captures as ""), coerced to the declared type; stdout inside the
+callee stays observable via ASSERT_STDOUT and pipes.
+
+Combining LET-capture with WITH_IO [stdout=pipe:...] is a parse error.
+
 
 **Examples:**
 
@@ -703,7 +813,11 @@ Return a value from a function.
 
 **Syntax:** `RETURN <expr>`
 
-Ends the nearest enclosing function call with a value. Falling off the end without RETURN yields "". RETURN outside a function (including at top level or across an ASYNC boundary) is an error.
+Ends the nearest enclosing function call with a value.
+
+Falling off the end without RETURN yields "". RETURN outside a function
+(including at top level or across an ASYNC boundary) is an error.
+
 
 **Examples:**
 
@@ -728,7 +842,13 @@ Loop while a condition holds.
 
 **Syntax:** `WHILE <bool-expr> { <commands> }`
 
-Re-evaluates a Bool condition each iteration (same is_truthy rule as IF; non-Bool is a type error). Each iteration runs in a fresh scope; mutate outer state with $var = ... so the next check observes it. BREAK exits the loop; CONTINUE skips to the next check.
+Re-evaluates a Bool condition each iteration (same is_truthy rule as IF;
+non-Bool is a type error).
+
+Each iteration runs in a fresh scope; mutate outer state with $var = ...
+so the next check observes it. BREAK exits the loop; CONTINUE skips to
+the next check.
+
 
 **Examples:**
 
@@ -750,7 +870,10 @@ Exit the innermost loop.
 
 **Syntax:** `BREAK`
 
-Exits the innermost enclosing FOR or WHILE loop. BREAK outside a loop, or across a FUNC or ASYNC boundary, is an error.
+Exits the innermost enclosing FOR or WHILE loop.
+
+BREAK outside a loop, or across a FUNC or ASYNC boundary, is an error.
+
 
 **Examples:**
 
@@ -769,7 +892,11 @@ Skip to the next loop iteration.
 
 **Syntax:** `CONTINUE`
 
-Skips the rest of the innermost enclosing FOR or WHILE body and starts the next iteration. CONTINUE outside a loop, or across a FUNC or ASYNC boundary, is an error.
+Skips the rest of the innermost enclosing FOR or WHILE body and starts
+the next iteration.
+
+CONTINUE outside a loop, or across a FUNC or ASYNC boundary, is an error.
+
 
 **Examples:**
 
@@ -788,7 +915,11 @@ Change the working directory.
 
 **Syntax:** `WORKDIR <path>`
 
-Sets the current working directory. Relative paths resolve against the current directory; `/` resets to the workspace root. Paths cannot escape the workspace.
+Sets the current working directory.
+
+Relative paths resolve against the current directory; `/` resets to
+the workspace root. Paths cannot escape the workspace.
+
 
 **Arguments:**
 
@@ -836,7 +967,17 @@ Set an environment variable.
 
 **Syntax:** `ENV KEY=value`
 
-Inserts or updates an env var. The value uses the unified string-value rules shared by every command: `"..."` or `'...'` quotes keep exact bytes (spaces, tabs), a lone `$var` evaluates that variable, `{{ ... }}` placeholders interpolate, unquoted words join with single spaces, and the first `=` splits key from value (`KEY=a=b` stores `a=b`). A `$var` inside larger text stays literal — write `{{ $var }}` to interpolate there.
+Inserts or updates an env var.
+
+The value uses the unified string-value rules shared by every command:
+`"..."` or `'...'` quotes keep exact bytes (spaces, tabs), a lone `$var`
+evaluates that variable, `{{ ... }}` placeholders interpolate, unquoted
+words join with single spaces, and the first `=` splits key from value
+(`KEY=a=b` stores `a=b`).
+
+A `$var` inside larger text stays literal — write `{{ $var }}` to
+interpolate there.
+
 
 **Arguments:**
 
@@ -905,7 +1046,11 @@ Inherit env vars from host.
 
 **Syntax:** `INHERIT_ENV <key>...`
 
-Declares which host environment variables to inherit into the script. Must appear before any other commands and at most once. Without this directive, the script starts with an empty environment.
+Declares which host environment variables to inherit into the script.
+
+Must appear before any other commands and at most once. Without this
+directive, the script starts with an empty environment.
+
 
 **Arguments:**
 
@@ -963,7 +1108,16 @@ Execute shell command or direct executable.
 
 **Syntax:** `RUN <command...> | RUN ["exe", "arg", ...]`
 
-Shell form (`RUN <command...>`) runs the joined command string in the system shell (`$SHELL -c` / `COMSPEC /C`). Exec form (`RUN ["exe", "arg", ...]`) spawns the executable directly with no shell, so there is no shell expansion, globbing, redirection, or pipes; use it for portable commands. Guards and wrappers (`ASYNC`, `TIMEOUT`, `WITH_IO`, `LET`) apply to both forms.
+Shell form (`RUN <command...>`) runs the joined command string in the
+system shell (`$SHELL -c` / `COMSPEC /C`).
+
+Exec form (`RUN ["exe", "arg", ...]`) spawns the executable directly
+with no shell, so there is no shell expansion, globbing, redirection,
+or pipes; use it for portable commands.
+
+Guards and wrappers (`ASYNC`, `TIMEOUT`, `WITH_IO`, `LET`) apply to
+both forms.
+
 
 **Arguments:**
 
@@ -1184,7 +1338,11 @@ Read one line from stdin into a variable.
 
 **Syntax:** `READ_LINE $var`
 
-Reads bytes until newline without waiting for EOF, leaving the pipe open. Trailing newline is stripped (shell-read parity). On premature EOF assigns accumulated bytes and returns.
+Reads bytes until newline without waiting for EOF, leaving the pipe open.
+
+Trailing newline is stripped (shell-read parity). On premature EOF
+assigns accumulated bytes and returns.
+
 
 **Arguments:**
 
@@ -1258,7 +1416,32 @@ Expand a template file (or stdin) to stdout.
 
 **Syntax:** `EXPAND [<path>] [<KEY=val> ...]`
 
-A template is any text file — or piped stdin when no path is given — containing `{{ ... }}` placeholders. EXPAND replaces each placeholder and prints the result to stdout. Placeholders: `{{ NAME }}` reads a `KEY=val` override passed on this command; `{{ env:NAME }}` reads an override, falling back to the environment; `{{ $var }}` reads a script variable (dotted paths allowed). A missing key is an error, never a silent empty. Substitution runs in a single pass. EXPAND is not recursive and does not expand nested placeholders: a value that itself contains `{{ ... }}` is inserted verbatim and never expanded again. A bare `$var` argument is a template path; `KEY=val` arguments are overrides whose values follow the unified string-value rules (same as `ENV`: quotes keep exact bytes, a lone `$var` evaluates, `{{ ... }}` interpolates). NOTE: `WRITE` interpolates `{{ ... }}` while writing, so escape it (`\{{ ... }}`) when writing a template file for a later `EXPAND`. With no path, the template arrives on stdin through a pipe. When piping from a shell, single-quote the template (`echo '{{ $x }}'`): double quotes let the shell swallow `$x`, so oxdock receives an empty `{{ }}` placeholder and errors.
+A template is any text file — or piped stdin when no path is given —
+containing `{{ ... }}` placeholders. EXPAND replaces each placeholder
+and prints the result to stdout.
+
+Placeholders: `{{ NAME }}` reads a `KEY=val` override passed on this
+command; `{{ env:NAME }}` reads an override, falling back to the
+environment; `{{ $var }}` reads a script variable (dotted paths allowed).
+A missing key is an error, never a silent empty.
+
+Substitution runs in a single pass. EXPAND is not recursive and does not
+expand nested placeholders: a value that itself contains `{{ ... }}` is
+inserted verbatim and never expanded again.
+
+A bare `$var` argument is a template path; `KEY=val` arguments are
+overrides whose values follow the unified string-value rules (same as
+`ENV`: quotes keep exact bytes, a lone `$var` evaluates,
+`{{ ... }}` interpolates).
+
+NOTE: `WRITE` interpolates `{{ ... }}` while writing, so escape it
+(`\{{ ... }}`) when writing a template file for a later `EXPAND`.
+
+With no path, the template arrives on stdin through a pipe. When piping
+from a shell, single-quote the template (`echo '{{ $x }}'`): double
+quotes let the shell swallow `$x`, so oxdock receives an empty `{{ }}`
+placeholder and errors.
+
 
 **Arguments:**
 
@@ -1340,7 +1523,12 @@ Assert file exists.
 
 **Syntax:** `ASSERT_FILE [--hash <sha256>] <path> [<expected>]`
 
-Checks the path is a file, then optionally compares its bytes (or `--hash` SHA-256 digest) against the expectation. Any mismatch aborts the pipeline with a step-numbered error showing expected vs actual.
+Checks the path is a file, then optionally compares its bytes (or
+`--hash` SHA-256 digest) against the expectation.
+
+Any mismatch aborts the pipeline with a step-numbered error showing
+expected vs actual.
+
 
 **Arguments:**
 
@@ -1379,7 +1567,9 @@ Assert dir exists.
 
 **Syntax:** `ASSERT_DIR <path>`
 
-Checks the path is a directory, aborting the pipeline with a step-numbered error otherwise.
+Checks the path is a directory, aborting the pipeline with a
+step-numbered error otherwise.
+
 
 **Arguments:**
 
@@ -1403,7 +1593,9 @@ Assert path absent.
 
 **Syntax:** `ASSERT_ABSENT <path>`
 
-Checks nothing exists at the path, aborting the pipeline with a step-numbered error if it does.
+Checks nothing exists at the path, aborting the pipeline with a
+step-numbered error if it does.
+
 
 **Arguments:**
 
@@ -1426,7 +1618,9 @@ Assert stdout contains.
 
 **Syntax:** `ASSERT_STDOUT <substring>`
 
-Checks the preceding step's stdout contains the substring, aborting the pipeline with a step-numbered error otherwise.
+Checks the preceding step's stdout contains the substring, aborting the
+pipeline with a step-numbered error otherwise.
+
 
 **Arguments:**
 
@@ -1476,7 +1670,13 @@ Exit pipeline.
 
 **Syntax:** `EXIT <code>`
 
-Stops the pipeline immediately with an `EXIT requested with code <code>` error; steps after it never run, at any nesting depth. Enclosing blocks still unwind their LET/ENV/WORKDIR/WORKSPACE state, anonymous background tasks are killed synchronously, and files written before the EXIT persist.
+Stops the pipeline immediately with an `EXIT requested with code <code>`
+error; steps after it never run, at any nesting depth.
+
+Enclosing blocks still unwind their LET/ENV/WORKDIR/WORKSPACE state,
+anonymous background tasks are killed synchronously, and files written
+before the EXIT persist.
+
 
 **Arguments:**
 
@@ -1499,7 +1699,12 @@ Pause execution for a duration.
 
 **Syntax:** `SLEEP <duration>`
 
-Parks the step for the duration (e.g. 500ms, 10s, 2m). Cooperative: checks for cancellation so an enclosing TIMEOUT or task teardown interrupts the sleep. Cross-platform alternative to shell sleep for testing time boundaries.
+Parks the step for the duration (e.g. 500ms, 10s, 2m).
+
+Cooperative: checks for cancellation so an enclosing TIMEOUT or task
+teardown interrupts the sleep. Cross-platform alternative to shell sleep
+for testing time boundaries.
+
 
 **Arguments:**
 
