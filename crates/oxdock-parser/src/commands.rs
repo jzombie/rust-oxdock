@@ -1519,6 +1519,13 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 The leading `$` distinguishes mutation from `KEY=value` command
                 assignments. Assigning an undeclared variable or a mismatched type is
                 an error.
+
+                Mutation writes through to the scope where the variable was
+                declared, so it survives block exit: `LET $x` outside a block
+                followed by `$x = ...` inside still reads back the new value
+                afterwards, for every type. This is the counterpart to LET
+                shadowing, where `LET $x` *inside* the block declares a
+                separate inner variable that reverts on exit.
             "#},
             args: &[],
             flags: &[],
