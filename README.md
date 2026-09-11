@@ -32,11 +32,11 @@ OxDock is a Dockerfile inspired build DSL for Rust. Embed scripts at compile tim
 
 Supports platform gating, async tasks, and piped workflows for custom pipelines.
 
-[Documentation](https://docs.rs/oxdock/0.12.0-alpha/oxdock/)
+[Documentation](https://docs.rs/oxdock/0.13.0-alpha/oxdock/)
 
 ## Quick start
 
-Add it to your Rust build with `cargo add oxdock@0.12.0-alpha`, or install the standalone runner with `cargo install oxdock@0.12.0-alpha`.
+Add it to your Rust build with `cargo add oxdock@0.13.0-alpha`, or install the standalone runner with `cargo install oxdock@0.13.0-alpha`.
 
 Run a script:
 
@@ -120,8 +120,8 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     }
     LET $picked: STRING = CALL PICK(true)
     WRITE dist/picked.txt {{ $picked }}
-    ASSERT_FILE dist/alpha.txt "alpha OxDock 0.12.0-alpha"
-    ASSERT_FILE dist/beta.txt "beta OxDock 0.12.0-alpha"
+    ASSERT_FILE dist/alpha.txt "alpha OxDock 0.13.0-alpha"
+    ASSERT_FILE dist/beta.txt "beta OxDock 0.13.0-alpha"
     ASSERT_FILE dist/picked.txt "alpha"
 };
 
@@ -133,7 +133,7 @@ let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolve
 let out = root.join("dist/alpha.txt").expect("out path");
 assert_eq!(
     resolver.read_to_string(&out).expect("read out"),
-    "alpha OxDock 0.12.0-alpha"
+    "alpha OxDock 0.13.0-alpha"
 );
 ```
 
