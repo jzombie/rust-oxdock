@@ -115,8 +115,8 @@ Iterate over a list or map.
 The loop variable receives each element (lists) or value (maps); with
 two variables, the first receives the key.
 
-Loop variables are declared with explicit types and scoped per iteration
-via declare_var; they do not leak outward. The body may be a braced block
+Loop variables are declared with explicit types and scoped per iteration;
+they do not leak outward. The body may be a braced block
 or a single-line `{ ... }` command.
 
 `GLOB("...")` patterns must be quoted (`*` is not a bare word, so
@@ -399,8 +399,12 @@ Mutate a declared variable.
 
 **Syntax:** `$var = <expr>`
 
-Reassigns an existing variable, validating the new value against the
-TypeKind bound at LET time via coerce_value with ExecState context.
+Reassigns an existing variable, converting the new value to
+the type declared at LET time. The explicit annotation is
+what authorizes string-to-number conversion here (`$n = "42"`
+binds 42 for an INT); a non-numeric string is an error.
+Expressions never convert: `"100" + 1` is a Type Error, use
+`INT()` / `FLOAT()` to cross that boundary explicitly.
 
 The leading `$` distinguishes mutation from `KEY=value` command
 assignments. Assigning an undeclared variable or a mismatched type is
@@ -421,6 +425,27 @@ separate inner variable that reverts on exit.
 ```oxdock
 LET $count: INT = 1
 $count = 2
+WRITE count.txt "{{ $count }}"
+ASSERT_FILE count.txt "2"
+```
+
+**Example: convert before math**
+
+```oxdock
+# Captured output is a string: `"100" + 1` is a Type Error.
+# Convert explicitly, then mutate with arithmetic.
+LET $raw: STRING = ECHO 100
+LET $n: INT = INT($raw)
+$n = $n + 1
+# The declared type also converts plain strings on assignment.
+$n = "42"
+# Same crossing for decimals via FLOAT().
+LET $frac_str: STRING = ECHO 2.5
+LET $f: FLOAT = FLOAT($frac_str) + 0.25
+WRITE n.txt "{{ $n }}"
+WRITE f.txt "{{ $f }}"
+ASSERT_FILE n.txt "42"
+ASSERT_FILE f.txt "2.75"
 ```
 
 
@@ -563,7 +588,8 @@ Define a user function.
 Defines a user function with UPPERCASE name and explicitly typed
 parameters.
 
-Params bind by position with declare_var coercion before the body runs.
+Params bind by position, converting each argument to its
+declared parameter type before the body runs.
 Bodies run in a fresh variable scope; LETs inside do not leak. A nested
 FUNC definition is scoped to its block and reverts on exit. Names share
 one namespace with host-registered functions.

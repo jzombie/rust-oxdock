@@ -1930,6 +1930,23 @@ fn block_inner_let_shadows_outer_mutation() {
 }
 
 #[test]
+fn mutation_converts_to_declared_type() {
+    // Binding boundaries convert: the explicit type annotation authorizes
+    // string-to-number conversion (`$n = "42"` binds 42 for an INT), while
+    // a non-numeric string is an error. Expressions never convert.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        LET $n: INT = 1
+        $n = "42"
+        WRITE n.txt "{{ $n }}"
+        ASSERT_FILE n.txt "42"
+    "#};
+    run_script(&root, script).expect("mutation converts");
+    run_script(&root, "LET $m: INT = 1\n$m = \"abc\"\n").expect_err("non-numeric string must fail");
+}
+
+#[test]
 fn for_loop_body_mutations_do_not_leak() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);

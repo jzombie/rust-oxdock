@@ -165,6 +165,16 @@ fn div_zero_and_overflow_fail() {
 }
 
 #[test]
+fn string_operands_never_convert_implicitly() {
+    // The reference promises this: `"100" + 1` is a Type Error, not 101.
+    // Cross the boundary explicitly with INT() / FLOAT() instead.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    run_script(&root, "LET $x: INT = \"100\" + 1\n").expect_err("string math must fail");
+    run_script(&root, "LET $x: BOOL = \"3.14\" > 2.0\n").expect_err("string ordering must fail");
+}
+
+#[test]
 fn ordering_on_non_numerics_fails() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
