@@ -6,9 +6,6 @@ Supports platform gating, async tasks, and piped workflows for custom pipelines.
 
 [Documentation](https://docs.rs/oxdock/0.13.0-alpha/oxdock/)
 
-Jump to the [command reference](#command-reference) below for the full
-command list with runnable examples.
-
 ## Embed at compile time
 
 Scripts run during `rustc`, and their artifacts ship inside the binary with zero heap allocation, `no_std` included:

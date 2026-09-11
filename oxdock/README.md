@@ -8,9 +8,6 @@ Supports platform gating, async tasks, and piped workflows for custom pipelines.
 
 [Documentation](https://docs.rs/oxdock/0.13.0-alpha/oxdock/)
 
-Jump to the [command reference](#command-reference) below for the full
-command list with runnable examples.
-
 Add it to your Rust build with `cargo add oxdock@0.13.0-alpha`, or install the standalone runner with `cargo install oxdock@0.13.0-alpha`.
 
 Run a script:
