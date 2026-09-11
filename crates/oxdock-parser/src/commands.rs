@@ -1386,6 +1386,16 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 an error). Combining capture with an explicit
                 `WITH_IO [stdout=pipe:...]` is a parse error.
 
+                Coming from Bash, the capture line looks familiar but behaves
+                strictly:
+
+                | | Bash `output=$(...)` | OxDock `LET $out: STRING = ...` |
+                | --- | --- | --- |
+                | Trailing newlines | Stripped (all of them) | Preserved byte-exact |
+                | Variable type | Always an untyped string | Declared: STRING, INT, FLOAT, ... |
+                | Math on output | Implicit: `$((var + 1))` | Explicit: `INT($out) + 1` |
+                | Failing command | Continues with empty output unless `set -e` | Step fails immediately, binds nothing |
+
                 `LET $out: STRING = AWAIT $var` captures a background task's stdout the
                 same way; bare `AWAIT $var` forwards it to the parent stdout instead.
 
