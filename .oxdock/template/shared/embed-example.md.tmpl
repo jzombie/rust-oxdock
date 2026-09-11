@@ -14,17 +14,17 @@ oxdock_embed! {
         // include_bytes!.
         ENV PROJECT=OxDock
         MKDIR dist
-        FUNC PAGE($name: STRING) {
-            WRITE dist/\{{ $name }}.txt \{{ env:PROJECT }} \{{ $name }}
-            RETURN $name
-        }
-        FOR $page: STRING IN ["index", "about"] {
-            CALL PAGE($page)
-        }
-        WRITE dist/manifest.txt index about
-        ASSERT_FILE dist/index.txt "OxDock index"
-        ASSERT_FILE dist/about.txt "OxDock about"
-        ASSERT_FILE dist/manifest.txt "index about"
+        // Provenance comes from the shell: only the matching gate runs,
+        // so this stays green on every OS in CI.
+        [unix] LET $os: STRING = RUN uname -srm
+        [windows] LET $os: STRING = RUN ver
+        LET $toolchain: STRING = RUN cargo --version
+        WRITE dist/os.txt "\{{ $os }}"
+        WRITE dist/toolchain.txt "\{{ $toolchain }}"
+        WRITE dist/manifest.txt "os toolchain"
+        ASSERT_FILE dist/os.txt
+        ASSERT_FILE dist/toolchain.txt
+        ASSERT_FILE dist/manifest.txt "os toolchain"
     },
     // Generated assets land under target/, keeping the source tree clean
     out_dir: "target/prebuilt",
@@ -32,10 +32,12 @@ oxdock_embed! {
 
 fn main() {
     // Verify we can read the resources we just created
-    let index = SiteAssets::get("dist/index.txt").expect("dist/index.txt must be embedded");
-    assert_eq!(index.data.as_ref(), b"OxDock index");
     let manifest = SiteAssets::get("dist/manifest.txt").expect("manifest must be embedded");
-    assert_eq!(manifest.data.as_ref(), b"index about");
+    assert_eq!(manifest.data.as_ref(), b"os toolchain");
+    let toolchain = SiteAssets::get("dist/toolchain.txt").expect("toolchain must be embedded");
+    assert!(toolchain.data.starts_with(b"cargo "));
+    let os = SiteAssets::get("dist/os.txt").expect("os must be embedded");
+    assert!(!os.data.is_empty());
 }
 ```
 

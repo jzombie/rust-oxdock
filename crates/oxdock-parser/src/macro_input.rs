@@ -228,6 +228,19 @@ fn walk(
         let gap_space = last_span_end
             .map(|prev| span_gap_requires_space(prev, span.start()))
             .unwrap_or(false);
+        // A RUN step consumes the rest of its source line as shell text
+        // (`RUN echo && ls` stays one step), but any token opening on a later
+        // line starts a new statement: without this, `RUN echo hi` followed by
+        // `WRITE x` — or by a punctuation-led statement like `$count = 1` —
+        // would glue into a single shell command. Punctuation must participate
+        // too: `$`/`#` would otherwise advance `last_span_end` and blind the
+        // check for the tokens that follow them on the same line.
+        if last_span_end.is_some_and(|prev| span.start().line > prev.line)
+            && !line.trim().is_empty()
+            && line_is_run_context(line.trim())
+        {
+            finalize_line(lines, line, capture_has_inner);
+        }
         match tt {
             TokenTree::Group(g) => {
                 if let Some((open, close)) = delim_pair(g.delimiter()) {
@@ -416,6 +429,11 @@ fn walk(
                     idx += 1;
                     continue;
                 }
+                // A RUN step consumes the rest of its source line as shell
+                // text, but an ident opening on a later line starts a new
+                // statement: the hoisted check at the top of the loop already
+                // finalized the RUN line, so statement detection below sees a
+                // fresh line.
                 let is_command = super::Command::parse(&ident_text).is_some();
                 // LET and FOR introduce new statements but aren't in the Command enum.
                 // They must still trigger line finalization so they start on a new line.
@@ -707,6 +725,41 @@ mod tests {
         let steps = parse_braced_tokens(&ts, mock_lower).expect("map literal parses");
         assert_eq!(steps.len(), 1, "got: {steps:?}");
         assert!(matches!(steps[0].kind, StepKind::Assign { .. }));
+    }
+
+    #[test]
+    fn braced_run_ends_at_source_line_break() {
+        // Shell text stays on one step (`RUN echo && ls`), but a step opening
+        // on a later source line must not glue onto the RUN command.
+        let ts: proc_macro2::TokenStream = indoc! {r#"
+            RUN echo hi
+            WRITE out.txt hi
+            RUN echo again
+        "#}
+        .parse()
+        .expect("tokens");
+        let steps = parse_braced_tokens(&ts, mock_lower).expect("run lines parse");
+        assert_eq!(steps.len(), 3, "got: {steps:?}");
+    }
+
+    #[test]
+    fn braced_run_followed_by_mutation_or_interpolation_ends_line() {
+        // Punctuation-led statements (`$count = 1`, `#cmd`) open with `$`/`#`,
+        // not an Ident: the RUN line break must fire for any token type, or the
+        // `$` would merely advance the span cursor and blind the check for the
+        // tokens that follow it on the same line. (`#cmd` is a DSL comment, so
+        // only the RUN and the mutation survive as steps.)
+        let ts: proc_macro2::TokenStream = indoc! {r#"
+            RUN echo hi
+            $count = 1
+            #cmd
+        "#}
+        .parse()
+        .expect("tokens");
+        let steps = parse_braced_tokens(&ts, mock_lower).expect("post-RUN lines parse");
+        assert_eq!(steps.len(), 2, "got: {steps:?}");
+        assert!(matches!(steps[0].kind, StepKind::Run(_)));
+        assert!(matches!(steps[1].kind, StepKind::Set { .. }));
     }
 
     #[test]
