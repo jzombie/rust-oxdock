@@ -1274,20 +1274,25 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     fence_meta: None,
                     code: indoc! {r#"
                 IF true {
-                  ECHO yes
+                  WRITE yes.txt taken
                 } ELSE {
-                  ECHO no
+                  WRITE yes.txt skipped
                 }
 
                 IF false {
-                  ECHO skipped
+                  WRITE skipped.txt no
                 } ELSE IF true {
-                  ECHO fallback
+                  WRITE fallback.txt taken
                 }
 
+                # !false evaluates to true, so this branch runs.
                 IF !false {
-                  ECHO inverted
+                  WRITE negated.txt taken
                 }
+                ASSERT_FILE yes.txt "taken"
+                ASSERT_FILE fallback.txt "taken"
+                ASSERT_FILE negated.txt "taken"
+                ASSERT_ABSENT skipped.txt
             "#},
                 },
                 Example {
