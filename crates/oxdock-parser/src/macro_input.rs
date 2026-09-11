@@ -300,9 +300,24 @@ fn walk(
                             }
                         }
                         Delimiter::Bracket => {
-                            if *last_was_command {
+                            // A `[` group continues the current statement when it
+                            // reads as an expression: argv/bindings right after a
+                            // command (`RUN [...]`, `WITH_IO [...]`), or a list
+                            // literal after `=`, `IN`, `(`, `[`, `,`. Otherwise
+                            // it starts a guard on a new line. This is purely
+                            // syntactic so it also holds for synthetic spans
+                            // (e.g. `quote!`), where line numbers carry no signal.
+                            let trimmed_here = line.trim_end();
+                            let continues_expr = trimmed_here.ends_with('=')
+                                || trimmed_here.ends_with(':')
+                                || trimmed_here.ends_with('(')
+                                || trimmed_here.ends_with('[')
+                                || trimmed_here.ends_with(',')
+                                || trimmed_here.split_whitespace().last() == Some("IN");
+                            if *last_was_command || continues_expr {
                                 // First bracket group after a command: attach to the command
                                 // (e.g., INHERIT_ENV [keys], WITH_IO [bindings]).
+                                // Same-line groups elsewhere attach as expressions.
                                 push_fragment(line, &open.to_string(), gap_space);
                                 let mut inner_span_end = None;
                                 walk(
@@ -404,18 +419,46 @@ fn walk(
                 let is_command = super::Command::parse(&ident_text).is_some();
                 // LET and FOR introduce new statements but aren't in the Command enum.
                 // They must still trigger line finalization so they start on a new line.
+                // The same holds for the other structural statements parsed by PEG
+                // rules rather than plain-command lowering (AWAIT, CANCEL, FUNC,
+                // CALL, RETURN, WHILE, BREAK, CONTINUE): without this, `FUNC`
+                // after `MKDIR dist` would glue onto the same line.
                 let is_new_statement = is_command
-                    || matches!(ident_text.as_str(), "LET" | "FOR" | "IF" | "ELSE" | "ASYNC");
+                    || matches!(
+                        ident_text.as_str(),
+                        "LET"
+                            | "FOR"
+                            | "IF"
+                            | "ELSE"
+                            | "ASYNC"
+                            | "AWAIT"
+                            | "CANCEL"
+                            | "FUNC"
+                            | "CALL"
+                            | "RETURN"
+                            | "WHILE"
+                            | "BREAK"
+                            | "CONTINUE"
+                    );
                 let trimmed = line.trim();
                 let trimmed_empty = trimmed.is_empty();
                 let guard_prefix = trimmed.starts_with('[');
                 let line_requires_inner = line_expects_inner_command(trimmed);
+                // A line ending in `=` (or the `IN` of a FOR header) expects an
+                // expression next: `LET $o: STRING = ECHO hi`,
+                // `LET $r: STRING = CALL F()`,
+                // `LET $t: HANDLE = ASYNC ...`, `FOR $x: STRING IN [...]`.
+                // A statement keyword there continues the line instead of
+                // starting a new one.
+                let trimmed_end = trimmed.trim_end();
+                let expects_expr = trimmed_end.ends_with('=')
+                    || trimmed_end.split_whitespace().last() == Some("IN");
                 let mut should_finalize = false;
                 // ELSE always appends to current line — grammar handles } \n ELSE via blank*
                 // IF after ELSE stays on same line (ELSE IF clause)
                 if ident_text == "ELSE" || (ident_text == "IF" && trimmed.ends_with("ELSE")) {
                     should_finalize = false;
-                } else if is_new_statement && !trimmed_empty && !guard_prefix {
+                } else if is_new_statement && !trimmed_empty && !guard_prefix && !expects_expr {
                     let current_expects_inner = line_expects_inner_command(trimmed);
                     should_finalize = !line_is_run_context(trimmed) && !current_expects_inner;
                 }
@@ -604,5 +647,81 @@ mod tests {
                 other => panic!("expected WRITE, saw {:?}", other),
             }
         }
+    }
+
+    #[test]
+    fn braced_structural_statements_start_new_lines() {
+        // FUNC, CALL, WHILE (and friends) are parsed by PEG rules rather than
+        // plain-command lowering, so the token walker must still recognize them
+        // as statement starters instead of gluing them onto the previous line.
+        let ts: proc_macro2::TokenStream = indoc! {r#"
+            WRITE a.txt hi
+            FUNC GREET($name: STRING) {
+                RETURN $name
+            }
+            CALL GREET("ada")
+            WHILE $flag {
+                BREAK
+            }
+        "#}
+        .parse()
+        .expect("tokens");
+        let steps = parse_braced_tokens(&ts, mock_lower).expect("structural statements parse");
+        assert_eq!(steps.len(), 4, "got: {steps:?}");
+        assert!(matches!(steps[0].kind, StepKind::Write { .. }));
+        assert!(matches!(steps[1].kind, StepKind::FuncDef { .. }));
+        assert!(matches!(steps[2].kind, StepKind::Call { .. }));
+        assert!(matches!(steps[3].kind, StepKind::While { .. }));
+    }
+
+    #[test]
+    fn braced_expression_continuations_stay_on_one_line() {
+        // A statement keyword after `=` or `IN` continues the line: LET-capture
+        // (`= ECHO ...`, `= CALL ...`) and list literals (`= [...]`,
+        // `IN [...]`) must not split.
+        let ts: proc_macro2::TokenStream = indoc! {r#"
+            LET $names: LIST = ["alpha", "beta"]
+            FOR $n: STRING IN ["alpha", "beta"] {
+                WRITE out.txt hi
+            }
+            LET $echo: STRING = ECHO hi
+        "#}
+        .parse()
+        .expect("tokens");
+        let steps = parse_braced_tokens(&ts, mock_lower).expect("continuations parse");
+        assert_eq!(steps.len(), 3, "got: {steps:?}");
+        assert!(matches!(steps[0].kind, StepKind::Assign { .. }));
+        assert!(matches!(steps[1].kind, StepKind::For { .. }));
+        assert!(matches!(steps[2].kind, StepKind::AssignCapture { .. }));
+    }
+
+    #[test]
+    fn braced_map_literal_with_list_value_parses() {
+        // A list literal after a map entry colon (`{ key: [...] }`) is an
+        // expression fragment, not a guard: it must not split onto a new line.
+        let ts: proc_macro2::TokenStream = indoc! {r#"
+            LET $m: MAP = {"key": ["a", "b"]}
+        "#}
+        .parse()
+        .expect("tokens");
+        let steps = parse_braced_tokens(&ts, mock_lower).expect("map literal parses");
+        assert_eq!(steps.len(), 1, "got: {steps:?}");
+        assert!(matches!(steps[0].kind, StepKind::Assign { .. }));
+    }
+
+    #[test]
+    fn braced_guards_still_start_new_lines() {
+        // A `[` group on a fresh line is a guard, even though same-line
+        // brackets attach as expressions.
+        let ts: proc_macro2::TokenStream = indoc! {r#"
+            WRITE a.txt hi
+            [bool:true] WRITE b.txt yo
+        "#}
+        .parse()
+        .expect("tokens");
+        let steps = parse_braced_tokens(&ts, mock_lower).expect("guarded lines parse");
+        assert_eq!(steps.len(), 2, "got: {steps:?}");
+        assert!(matches!(steps[0].kind, StepKind::Write { .. }));
+        assert!(matches!(steps[1].kind, StepKind::Write { .. }));
     }
 }

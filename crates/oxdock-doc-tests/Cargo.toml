@@ -13,6 +13,7 @@ development = ["oxdock-macros", "oxdock"]
 
 [dev-dependencies]
 oxdock.workspace = true
+oxdock-fs.workspace = true
 oxdock-macros.workspace = true
 
 [lints]

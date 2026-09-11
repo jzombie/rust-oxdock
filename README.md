@@ -50,26 +50,127 @@ Scripts run during `rustc`, and their artifacts ship inside the binary with zero
 use oxdock_macros::oxdock_embed;
 
 oxdock_embed! {
-    // Embedded resources are mapped to `HelloAssets::get(resource)`
-    name: HelloAssets,
+    // Embedded resources are mapped to `SiteAssets::get(resource)`
+    name: SiteAssets,
     script: {
+        // Scripts run in an ephemeral snapshot workspace: every command
+        // sees an isolated temp dir, so the local checkout stays untouched
+        // unless the script opts in with WORKSPACE LOCAL. Finished assets
+        // are staged to out_dir below, where rustc scoops them up with
+        // include_bytes!.
         ENV PROJECT=OxDock
         MKDIR dist
-        WRITE dist/hello.txt Built with {{ env:PROJECT }}
-        ASSERT_FILE dist/hello.txt Built with {{ env:PROJECT }}
+        FUNC PAGE($name: STRING) {
+            WRITE dist/{{ $name }}.txt {{ env:PROJECT }} {{ $name }}
+            RETURN $name
+        }
+        FOR $page: STRING IN ["index", "about"] {
+            CALL PAGE($page)
+        }
+        WRITE dist/manifest.txt index about
+        ASSERT_FILE dist/index.txt "OxDock index"
+        ASSERT_FILE dist/about.txt "OxDock about"
+        ASSERT_FILE dist/manifest.txt "index about"
     },
     // Generated assets land under target/, keeping the source tree clean
     out_dir: "target/prebuilt",
 }
 
 fn main() {
-    // Verify we can read the resource we just created
-    let file = HelloAssets::get("dist/hello.txt").expect("dist/hello.txt must be embedded");
-    assert_eq!(file.data.as_ref(), b"Built with OxDock");
+    // Verify we can read the resources we just created
+    let index = SiteAssets::get("dist/index.txt").expect("dist/index.txt must be embedded");
+    assert_eq!(index.data.as_ref(), b"OxDock index");
+    let manifest = SiteAssets::get("dist/manifest.txt").expect("manifest must be embedded");
+    assert_eq!(manifest.data.as_ref(), b"index about");
 }
 ```
 
 For each artifact the macro emits a constant backed by `include_bytes!`, which bakes the file bytes into read-only binary data during compilation. At runtime `get()` scans a static table and returns a borrowed slice, so there are no file reads and no heap allocation. The support types only need `alloc::borrow::Cow` and core iterators, which is why it works in `no_std`.
+
+### Run scripts inline
+
+The `oxdock!` macro builds the same DSL into a `Vec<Step>` at compile time, so tests and tools can run scripts without a file. Pass the steps to a `run_steps_*` runner with a guarded root. The root types live in `oxdock-fs`, so add both crates: `cargo add oxdock oxdock-fs`. Only portable commands are used below, so the script behaves identically on every OS.
+
+```rust
+use oxdock::{oxdock, oxdock_parser, run_steps_with_context};
+use oxdock_fs::{GuardedPath, PathResolver};
+
+// A version stamping pipeline: variables, a function, a loop over a list,
+// a conditional call, templates, and native assertions. The version comes
+// from Cargo at compile time, never a literal.
+let crate_version = env!("CARGO_PKG_VERSION");
+let steps: Vec<oxdock_parser::Step> = oxdock! {
+    ENV PROJECT=OxDock
+    LET $version: STRING = #crate_version
+    MKDIR dist
+    FUNC STAMP($name: STRING) {
+        WRITE dist/{{ $name }}.txt {{ $name }} {{ env:PROJECT }} {{ $version }}
+        RETURN $name
+    }
+    FOR $name: STRING IN ["alpha", "beta"] {
+        CALL STAMP($name)
+    }
+    FUNC PICK($flag: BOOL) {
+        IF $flag {
+            RETURN "alpha"
+        }
+        RETURN "beta"
+    }
+    LET $picked: STRING = CALL PICK(true)
+    WRITE dist/picked.txt {{ $picked }}
+    ASSERT_FILE dist/alpha.txt "alpha OxDock 0.11.0-alpha"
+    ASSERT_FILE dist/beta.txt "beta OxDock 0.11.0-alpha"
+    ASSERT_FILE dist/picked.txt "alpha"
+};
+
+let temp = GuardedPath::tempdir().expect("tempdir");
+let root = temp.as_guarded_path().clone();
+run_steps_with_context(&root, &root, &steps).expect("run script");
+
+let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolver");
+let out = root.join("dist/alpha.txt").expect("out path");
+assert_eq!(
+    resolver.read_to_string(&out).expect("read out"),
+    "alpha OxDock 0.11.0-alpha"
+);
+```
+
+Use `#var` to inject Rust values into the script (any value that implements `Display`). DSL variables keep their `$var` form and are unaffected. Guards accept injected values too, so Rust flags can gate steps. The script below wires a pipe between steps, reads one line back into a variable, and expands every generated file.
+
+```rust
+use oxdock::{oxdock, oxdock_parser, run_steps_with_context};
+use oxdock_fs::{GuardedPath, PathResolver};
+
+let project = "OxDock";
+let verbose = true;
+let steps: Vec<oxdock_parser::Step> = oxdock! {
+    ENV PROJECT=#project
+    MKDIR dist
+    [bool:#verbose] WRITE dist/verbose.log "verbose on"
+    WITH_IO [stdout=pipe:log] ECHO "built {{ env:PROJECT }}"
+    WITH_IO [stdin=pipe:log] READ_LINE $line
+    WRITE dist/build.txt "{{ $line }}"
+    FOR $f: STRING IN GLOB("dist/*.txt") {
+        EXPAND $f
+    }
+    ASSERT_STDOUT "built OxDock"
+    ASSERT_FILE dist/build.txt "built OxDock"
+    ASSERT_FILE dist/verbose.log "verbose on"
+};
+
+let temp = GuardedPath::tempdir().expect("tempdir");
+let root = temp.as_guarded_path().clone();
+run_steps_with_context(&root, &root, &steps).expect("run script");
+
+let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolver");
+let out = root.join("dist/build.txt").expect("out path");
+assert_eq!(
+    resolver.read_to_string(&out).expect("read out"),
+    "built OxDock"
+);
+```
+
+The top level runners need the default `cli` feature. With `--no-default-features`, run the same steps through `oxdock::oxdock_core::run_steps_*` instead.
 
 The same script also runs standalone through the CLI. It builds artifacts **and verifies them** with native assertions. Every fenced `oxdock` example in this README is executed against the implementation by [`crates/oxdock-logic-tests/tests/docs_conformance.rs`](./crates/oxdock-logic-tests/tests/docs_conformance.rs), so what you read here is guaranteed to match what the DSL actually does:
 
