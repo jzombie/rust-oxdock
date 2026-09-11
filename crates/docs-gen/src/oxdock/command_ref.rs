@@ -1,6 +1,7 @@
 use anyhow::Result;
 use oxdock_core::{ArgType, CommandMeta, all_metadata, all_structural_metadata};
 use oxdock_fs::{GuardedPath, PathResolver};
+use oxdock_parser::TypeKind;
 use std::collections::HashSet;
 
 use crate::io::write_text;
@@ -94,19 +95,21 @@ fn render_arg_type(arg_type: &ArgType) -> String {
     }
 }
 
-/// Value type reference, generated from the same `ArgType` enum the
-/// registry is declared with, so the vocabulary cannot drift from its
-/// documentation.
+/// Value type reference, generated from the `TypeKind` declaration-site
+/// vocabulary, so the documented types cannot drift from the type system.
+/// Argument shapes (`$var`, `KEY=value`) are not value types: they render
+/// unlinked in argument tables (like inline `OneOf` alternations) and are
+/// documented where they are used (LET, MUTATION, ENV).
 fn render_value_types() -> String {
     let mut out = String::new();
     out.push_str("## Value types\n\n");
-    for arg_type in ArgType::CANONICAL {
-        let Some((title, body)) = arg_type.doc() else {
+    for kind in TypeKind::CANONICAL {
+        let Some((title, body)) = kind.doc() else {
             continue;
         };
         out.push_str(&format!(
             "### {}\n\n{}\n\n",
-            escape_placeholders(title),
+            escape_placeholders(&title),
             escape_placeholders(body)
         ));
     }
@@ -151,9 +154,9 @@ fn render_meta(meta: &CommandMeta) -> String {
         out.push_str("| --- | --- | --- |\n");
         for flag in meta.flags {
             out.push_str(&format!(
-                "| `{}` | {:?} | {} |\n",
+                "| `{}` | `{}` | {} |\n",
                 escape_table_cell(flag.long),
-                flag.value_type,
+                flag.value_type.label(),
                 escape_table_cell(&escape_placeholders(flag.description))
             ));
         }

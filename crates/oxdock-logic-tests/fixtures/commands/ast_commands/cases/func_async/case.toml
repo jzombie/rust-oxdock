@@ -1,0 +1,4 @@
+name = "func_async"
+
+[expect]
+files = { "o.txt" = "did-job" }

@@ -12,6 +12,12 @@
         "shared": [
           ".oxdock/template/shared/*"
         ],
+        "guide": [
+          ".oxdock/template/readme/fragments/dsl-reference.md.tmpl",
+          ".oxdock/template/readme/fragments/environment.md.tmpl",
+          ".oxdock/template/readme/fragments/path-separators.md.tmpl",
+          ".oxdock/template/readme/fragments/workspaces.md.tmpl"
+        ],
         "generated": [
           ".oxdock/template/readme/generated/*"
         ]
@@ -35,7 +41,9 @@
       "template": "oxdock/.oxdock/template/crate_docs.md.tmpl",
       "fragments": {
         "shared": [
-          ".oxdock/template/shared/intro.md.tmpl"
+          ".oxdock/template/shared/intro.md.tmpl",
+          ".oxdock/template/shared/embed-example.md.tmpl",
+          ".oxdock/template/shared/inline-macro.md.tmpl"
         ],
         "guide": [
           ".oxdock/template/readme/fragments/dsl-reference.md.tmpl"

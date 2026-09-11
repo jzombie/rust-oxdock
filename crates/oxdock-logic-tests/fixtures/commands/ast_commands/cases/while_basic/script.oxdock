@@ -1,0 +1,7 @@
+LET $done: BOOL = false
+LET $count: INT = 0
+WHILE !$done {
+    $count = 7
+    $done = true
+}
+WRITE count.txt "{{ $count }}"

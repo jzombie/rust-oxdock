@@ -1,0 +1,17 @@
+# INSPECT($var) snapshots a variable into a MAP: declared type and value
+# plus live details for handle-likes. Pipe maps carry the backend kind
+# (`is_os_pipe`), buffered bytes, and reader/writer counts, so scripts
+# and fixtures can assert engine invariants directly.
+LET $p: PIPE = pipe:ch
+WITH_IO [stdout=$p] ECHO "payload"
+LET $info: MAP = INSPECT($p)
+WRITE type.txt "{{ $info.type }}"
+WRITE ospipe.txt "{{ $info.is_os_pipe }}"
+WRITE buf.txt "{{ $info.buffer_bytes }}"
+WRITE readers.txt "{{ $info.readers }}"
+IF $info.is_os_pipe {
+    WRITE unexpected.txt "should be a script pipe"
+}
+LET $s: STRING = "hi"
+LET $si: MAP = INSPECT($s)
+WRITE sval.txt "{{ $si.type }}-{{ $si.value }}"

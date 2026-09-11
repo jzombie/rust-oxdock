@@ -1,4 +1,4 @@
-//! Unified `LET` capture (#111): `LET $x = <command>` and `LET $o = AWAIT $t`.
+//! Unified `LET` capture (#111): `LET $x: STRING = <command>` and `LET $o: STRING = AWAIT $t`.
 
 use indoc::indoc;
 use oxdock_core::{ExecIo, run_steps_with_context_result_with_io};
@@ -24,7 +24,7 @@ fn let_capture_echo_binds_exact_bytes() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        LET $x = ECHO hi
+        LET $x: STRING = ECHO hi
         WRITE captured.txt "{{ $x }}"
         ASSERT_FILE captured.txt "hi\n"
     "#};
@@ -41,7 +41,7 @@ fn let_capture_empty_stdout_binds_empty_string() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        LET $x = MKDIR emptydir
+        LET $x: STRING = MKDIR emptydir
         WRITE marker.txt "done-{{ $x }}!"
         ASSERT_FILE marker.txt "done-!"
     "#};
@@ -58,7 +58,7 @@ fn let_capture_hash_sha256() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         WRITE data.txt payload
-        LET $sha = HASH_SHA256 data.txt
+        LET $sha: STRING = HASH_SHA256 data.txt
         WRITE sha.txt "{{ $sha }}"
     "#};
     run_script(&root, script).expect("capture HASH_SHA256");
@@ -80,7 +80,7 @@ fn let_capture_ls() {
     let script = indoc! {r#"
         MKDIR sub
         WRITE sub/only.txt x
-        LET $listing = LS sub
+        LET $listing: STRING = LS sub
         WRITE out.txt "{{ $listing }}"
     "#};
     run_script(&root, script).expect("capture LS");
@@ -101,7 +101,7 @@ fn let_capture_read_file() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         WRITE data.txt "file-bytes\n"
-        LET $x = READ data.txt
+        LET $x: STRING = READ data.txt
         WRITE out.txt "{{ $x }}"
         ASSERT_FILE out.txt "file-bytes\n"
     "#};
@@ -114,7 +114,7 @@ fn let_capture_expand() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         WRITE tmpl.txt "hello \{{ env:WHO }}"
-        LET $x = EXPAND tmpl.txt WHO=World
+        LET $x: STRING = EXPAND tmpl.txt WHO=World
         WRITE out.txt "{{ $x }}"
         ASSERT_FILE out.txt "hello World"
     "#};
@@ -126,7 +126,7 @@ fn let_capture_write_binds_empty() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        LET $x = WRITE empty.txt content
+        LET $x: STRING = WRITE empty.txt content
         WRITE marker.txt "done-{{ $x }}!"
         ASSERT_FILE marker.txt "done-!"
         ASSERT_FILE empty.txt content
@@ -146,7 +146,7 @@ fn let_capture_run() {
     #[cfg(windows)]
     let shell_cmd = "cmd /c echo run-cap";
     let script = indoc! {r#"
-        LET $x = RUN "{CMD}"
+        LET $x: STRING = RUN "{CMD}"
         WRITE out.txt "{{ $x }}"
     "#}
     .replace("{CMD}", shell_cmd);
@@ -163,7 +163,7 @@ fn let_capture_command_failure_binds_nothing() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        LET $x = ASSERT_FILE missing.txt
+        LET $x: STRING = ASSERT_FILE missing.txt
     "#};
     let err = run_script(&root, script).expect_err("failing capture must fail");
     assert!(
@@ -178,7 +178,7 @@ fn let_capture_with_stdin_pipe() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         WITH_IO [stdout=pipe:relay] ECHO piped
-        LET $x = WITH_IO [stdin=pipe:relay] READ
+        LET $x: STRING = WITH_IO [stdin=pipe:relay] READ
         WRITE out.txt "{{ $x }}"
         ASSERT_FILE out.txt "piped\n"
     "#};
@@ -191,7 +191,7 @@ fn let_capture_does_not_leak_into_parent_assert_stdout() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        LET $x = ECHO hi
+        LET $x: STRING = ECHO hi
         ASSERT_STDOUT hi
     "#};
     let err =
@@ -208,12 +208,12 @@ fn let_await_capture_binds_task_output() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        LET $t = ASYNC ECHO "task-hi"
-        LET $o = AWAIT $t
+        LET $t: HANDLE = ASYNC ECHO "task-hi"
+        LET $o: STRING = AWAIT $t
         WRITE out.txt "{{ $o }}"
         ASSERT_FILE out.txt "task-hi\n"
     "#};
-    run_script(&root, script).expect("LET $o = AWAIT $t");
+    run_script(&root, script).expect("LET $o: STRING = AWAIT $t");
 }
 
 #[test]
@@ -222,7 +222,7 @@ fn bare_await_forwards_task_output_to_parent() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        LET $t = ASYNC ECHO fwd-hi
+        LET $t: HANDLE = ASYNC ECHO fwd-hi
         AWAIT $t
     "#};
     let steps = oxdock_core::parse_script(script).expect("parse script");
@@ -240,8 +240,8 @@ fn await_capture_then_bare_await_still_double_await_errors() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        LET $t = ASYNC ECHO hi
-        LET $o = AWAIT $t
+        LET $t: HANDLE = ASYNC ECHO hi
+        LET $o: STRING = AWAIT $t
         AWAIT $t
     "#};
     let err = run_script(&root, script).expect_err("second AWAIT must fail");
@@ -257,9 +257,9 @@ fn bare_await_then_capture_still_double_await_errors() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        LET $t = ASYNC ECHO hi
+        LET $t: HANDLE = ASYNC ECHO hi
         AWAIT $t
-        LET $o = AWAIT $t
+        LET $o: STRING = AWAIT $t
     "#};
     let err = run_script(&root, script).expect_err("second AWAIT must fail");
     assert!(
@@ -274,8 +274,8 @@ fn await_capture_of_failing_task_propagates_error() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        LET $t = ASYNC ASSERT_FILE missing.txt
-        LET $o = AWAIT $t
+        LET $t: HANDLE = ASYNC ASSERT_FILE missing.txt
+        LET $o: STRING = AWAIT $t
     "#};
     let err = run_script(&root, script).expect_err("capture of failing task must fail");
     assert!(
@@ -290,9 +290,9 @@ fn await_capture_after_cancel_reports_cancelled() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        LET $t = ASYNC SLEEP 30s
+        LET $t: HANDLE = ASYNC SLEEP 30s
         CANCEL $t
-        LET $o = AWAIT $t
+        LET $o: STRING = AWAIT $t
     "#};
     let err = run_script(&root, script).expect_err("AWAIT after CANCEL must fail");
     assert!(err.to_string().contains("cancelled"), "{err}");

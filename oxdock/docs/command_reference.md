@@ -27,22 +27,56 @@
 | [`HASH_SHA256`](#hash_sha256) | `HASH_SHA256 <path>` |
 | [`EXIT`](#exit) | `EXIT <code>` |
 | [`SLEEP`](#sleep) | `SLEEP <duration>` |
-| [`WITH_IO`](#with_io) | `WITH_IO [bindings] <command> \| WITH_IO [bindings] { <commands> }` |
-| [`FOR`](#for) | `FOR $item IN <expr> { <commands> } \| FOR $key, $value IN <expr> { <commands> }` |
+| [`WITH_IO`](#with_io) | `WITH_IO [<stream>[=pipe:<name>\|=$var], ...] <command> \| WITH_IO [bindings] { <commands> }` |
+| [`FOR`](#for) | `FOR $item: TYPE IN <expr> { <commands> } \| FOR $key: STRING, $value: TYPE IN <expr> { <commands> }` |
 | [`IF`](#if) | `IF <expr> { <commands> } [ELSE IF <expr> { <commands> }] [ELSE { <commands> }]` |
-| [`LET`](#let) | `LET $var = <expr> \| LET $var = ASYNC { <commands> } \| LET $var = <command> \| LET $var = AWAIT $task` |
-| [`ASYNC`](#async) | `ASYNC <command...> \| ASYNC { <commands> } \| LET $var = ASYNC { <commands> }` |
-| [`AWAIT`](#await) | `AWAIT $var \| LET $out = AWAIT $var` |
+| [`LET`](#let) | `LET $var: TYPE = <expr> \| LET $var: TYPE = ASYNC { <commands> } \| LET $var: TYPE = <command> \| LET $var: TYPE = AWAIT $task` |
+| [`MUTATION`](#mutation) | `$var = <expr>` |
+| [`ASYNC`](#async) | `ASYNC <command...> \| ASYNC { <commands> } \| LET $var: HANDLE = ASYNC { <commands> }` |
+| [`AWAIT`](#await) | `AWAIT $var \| LET $out: STRING = AWAIT $var` |
 | [`CANCEL`](#cancel) | `CANCEL $var` |
 | [`TIMEOUT`](#timeout) | `TIMEOUT <duration> <command...> \| TIMEOUT <duration> { <commands> } \| TIMEOUT <duration> AWAIT $var` |
+| [`FUNC`](#func) | `FUNC NAME($param: TYPE, ...) { <commands> }` |
+| [`CALL`](#call) | `CALL NAME(<expr>, ...) \| LET $var: TYPE = CALL NAME(<expr>, ...)` |
+| [`RETURN`](#return) | `RETURN <expr>` |
+| [`WHILE`](#while) | `WHILE <bool-expr> { <commands> }` |
+| [`BREAK`](#break) | `BREAK` |
+| [`CONTINUE`](#continue) | `CONTINUE` |
 
 ### WITH_IO
 
 Reroute standard streams.
 
-**Syntax:** `WITH_IO [bindings] <command> | WITH_IO [bindings] { <commands> }`
+**Syntax:** `WITH_IO [<stream>[=pipe:<name>|=$var], ...] <command> | WITH_IO [bindings] { <commands> }`
 
-Reroutes the standard streams of the next command or, in block form, of every enclosed command. Bindings map streams (`stdin`, `stdout`, `stderr`) to named script pipes (`stdout=pipe:name`, `stderr=pipe:name`). Both stdout and stderr pipes capture output the same way. Pipes hold bytes in memory and spill to a temp file above 8 MiB, so a producer can finish before the consumer starts. If WITH_IO wraps an ASYNC block whose body is a single RUN, guarded or not, the pipe is a zero copy OS kernel pipe instead: pair it with a consumer that runs while the producer is alive, since output past the 64 KiB kernel buffer stalls until drained. A second producer or consumer on a live name is an explicit error. A name bound as output can later feed another command's `stdin`, connecting commands without touching the terminal. Binding `stdout` and `stderr` to the same live pipe name fails deterministically. Merge streams in shell via `2>&1` instead. Nested blocks stack defaults; inline bindings override inherited ones for their command only; closing a block restores previous wiring.
+Reroutes the standard streams of the next command or, in block form,
+of every enclosed command.
+
+Bindings map streams (`stdin`, `stdout`, `stderr`) to named script
+pipes (`stdout=pipe:name`, `stderr=pipe:name`) or to a PIPE-typed
+variable (`stdin=$p`, resolved against the live pipe registry when
+the step runs). Both stdout and stderr pipes capture output the same way.
+
+Pipes hold bytes in memory and spill to a temp file above 8 MiB, so a
+producer can finish before the consumer starts.
+
+If WITH_IO wraps an ASYNC block whose body is a single RUN, guarded or
+not, the pipe is a zero copy OS kernel pipe instead: pair it with a
+consumer that runs while the producer is alive, since output past the
+64 KiB kernel buffer stalls until drained. That promotion never crosses
+a CALL boundary: pipes created, bound, or passed by variable inside FUNC
+bodies are always script pipes, even when the surrounding task would
+otherwise promote.
+
+A second producer or consumer on a live name is an explicit error. A name
+bound as output can later feed another command's `stdin`, connecting
+commands without touching the terminal. Binding `stdout` and `stderr` to
+the same live pipe name fails deterministically. Merge streams in shell
+via `2>&1` instead.
+
+Nested blocks stack defaults; inline bindings override inherited ones for
+their command only; closing a block restores previous wiring.
+
 
 **Examples:**
 
@@ -56,27 +90,52 @@ WITH_IO [stdout=pipe:log] {
 WITH_IO [stdin=pipe:log] WRITE captured.txt
 ```
 
+**Example: variable pipe binding**
+
+```oxdock
+# Declare the pipe first with the explicit handle operator
+# (like `env:KEY`): `pipe:log` names a pipe without touching
+# a stream. A plain string here would be a TypeMismatch.
+# `$p` (not `pipe:$p`) is the variable form; literals stay
+# `pipe:name`.
+LET $p: PIPE = pipe:log
+WITH_IO [stdout=$p] ECHO hello
+WITH_IO [stdin=$p] READ_LINE $line
+WRITE line.txt "{{ $line }}"
+ASSERT_FILE line.txt "hello"
+```
+
 
 ### FOR
 
 Iterate over a list or map.
 
-**Syntax:** `FOR $item IN <expr> { <commands> } | FOR $key, $value IN <expr> { <commands> }`
+**Syntax:** `FOR $item: TYPE IN <expr> { <commands> } | FOR $key: STRING, $value: TYPE IN <expr> { <commands> }`
 
-The loop variable receives each element (lists) or value (maps); with two variables, the first receives the key. Loop variables are scoped to the loop body and do not leak outward. The body may be a braced block or a single-line `{ ... }` command. `GLOB("...")` patterns must be quoted (`*` is not a bare word, so `GLOB(*)` is a parse error); GLOB returns a root-relative sorted list, empty when nothing matches, and rejects `..` escapes.
+The loop variable receives each element (lists) or value (maps); with
+two variables, the first receives the key.
+
+Loop variables are declared with explicit types and scoped per iteration
+via declare_var; they do not leak outward. The body may be a braced block
+or a single-line `{ ... }` command.
+
+`GLOB("...")` patterns must be quoted (`*` is not a bare word, so
+`GLOB(*)` is a parse error); GLOB returns a root-relative sorted list,
+empty when nothing matches, and rejects `..` escapes.
+
 
 **Examples:**
 
 **Example: for loop**
 
 ```oxdock
-LET $items = ["a", "b"]
-FOR $item IN $items {
+LET $items: LIST = ["a", "b"]
+FOR $item: STRING IN $items {
   ECHO $item
 }
 
-LET $map = {"x": 1}
-FOR $k, $v IN $map {
+LET $map: MAP = {"x": 1}
+FOR $k: STRING, $v: INT IN $map {
   ECHO "$k=$v"
 }
 ```
@@ -86,7 +145,7 @@ FOR $k, $v IN $map {
 ```oxdock
 # single-line body; $x is a template path, WHO an override
 WRITE a.txt "hi \{{ env:WHO }}!"
-FOR $x IN GLOB("*.txt") { EXPAND $x WHO=World }
+FOR $x: STRING IN GLOB("*.txt") { EXPAND $x WHO=World }
 ASSERT_STDOUT "hi World!"
 ```
 
@@ -97,7 +156,11 @@ Conditional execution.
 
 **Syntax:** `IF <expr> { <commands> } [ELSE IF <expr> { <commands> }] [ELSE { <commands> }]`
 
-The condition is evaluated as a boolean expression. Prefix `!` negates (`IF !false`); only Bool values are accepted as conditions.
+The condition is evaluated as a boolean expression.
+
+Prefix `!` negates (`IF !false`); only Bool values are accepted as
+conditions.
+
 
 **Examples:**
 
@@ -126,20 +189,49 @@ IF !false {
 
 Bind script-local variables.
 
-**Syntax:** `LET $var = <expr> | LET $var = ASYNC { <commands> } | LET $var = <command> | LET $var = AWAIT $task`
+**Syntax:** `LET $var: TYPE = <expr> | LET $var: TYPE = ASYNC { <commands> } | LET $var: TYPE = <command> | LET $var: TYPE = AWAIT $task`
 
-Assigns a value to a script-local variable. Variables are usable in templates (`{{ $var }}`), guards, and expressions. With `ASYNC`, spawns a background task and stores its handle (see ASYNC). The `$` sigil on the name is mandatory. The right-hand side is always an expression — literals, lists, maps, comparisons, `GLOB("*.md")` — never a `{{ ... }}` template; interpolation happens in string values, not here. Bare words need no quotes: `LET $d = 30s` binds the same string as `LET $d = "30s"`. When the right-hand side is a synchronous command (`LET $out = ECHO hi`), the command runs to completion and its exact stdout bytes are captured into the variable as a string (no newline stripping; commands with no stdout capture as `""`; non-UTF8 stdout is an error). Combining capture with an explicit `WITH_IO [stdout=pipe:...]` is a parse error. `LET $out = AWAIT $task` captures a background task's stdout the same way; bare `AWAIT $task` forwards it to the parent stdout instead.
+Declares a script-local variable with an explicit type (STRING, INT,
+FLOAT, BOOL, PIPE, LIST, MAP, HANDLE, DURATION, PATH). Duplicate LET
+in the same scope frame is a redeclaration error; mutate with
+`$var = <expr>`.
+
+Variables are usable in templates (`{{ $var }}`), guards, and
+expressions. With `ASYNC`, spawns a background task and stores its
+handle (see ASYNC). The `$` sigil on the name is mandatory.
+
+The right-hand side is always an expression — literals, lists, maps,
+comparisons, `env:KEY` reads, `pipe:NAME` handles, `INSPECT($var)`
+snapshots, `GLOB("*.md")` — never a `{{ ... }}` template;
+interpolation happens in string values, not here.
+
+Bare words need no quotes: `LET $d: STRING = 30s` binds the same string
+as quoted.
+
+When the right-hand side is a synchronous command
+(`LET $out: STRING = ECHO hi`), the command runs to completion and its
+exact stdout bytes are captured into the variable as a string (no newline
+stripping; commands with no stdout capture as `""`; non-UTF8 stdout is
+an error). Combining capture with an explicit
+`WITH_IO [stdout=pipe:...]` is a parse error.
+
+`LET $out: STRING = AWAIT $var` captures a background task's stdout the
+same way; bare `AWAIT $var` forwards it to the parent stdout instead.
+
+`LET $e: STRING = env:FOO` reads the script environment into a plain
+string.
+
 
 **Examples:**
 
 **Example: let**
 
 ```oxdock
-LET $name = "world"
+LET $name: STRING = "world"
 ECHO "hello, {{ $name }}"
 
-LET $items = ["a", "b"]
-LET $count = 42
+LET $items: LIST = ["a", "b"]
+LET $count: INT = 42
 ```
 
 **Example: glob binding**
@@ -147,8 +239,8 @@ LET $count = 42
 ```oxdock
 # the RHS is an expression: GLOB(...) runs and binds a list
 WRITE a.txt "x"
-LET $files = GLOB("*.txt")
-FOR $f IN $files { ECHO $f }
+LET $files: LIST = GLOB("*.txt")
+FOR $f: STRING IN $files { ECHO $f }
 ASSERT_STDOUT "a.txt"
 ```
 
@@ -156,9 +248,9 @@ ASSERT_STDOUT "a.txt"
 
 ```oxdock
 # LET inside a braced block reverts when the block exits
-LET $a = "outer"
+LET $a: STRING = "outer"
 [bool:true] {
-    LET $a = "inner"
+    LET $a: STRING = "inner"
     WRITE inner.txt "{{ $a }}"
 }
 WRITE outer.txt "{{ $a }}"
@@ -169,9 +261,49 @@ ASSERT_FILE outer.txt "outer"
 **Example: capture command output**
 
 ```oxdock
-LET $out = ECHO hi
+LET $out: STRING = ECHO hi
 WRITE captured.txt "{{ $out }}"
 ASSERT_FILE captured.txt "hi\n"
+```
+
+**Example: inspect a variable**
+
+```oxdock
+# INSPECT($var) snapshots a variable into a MAP: declared
+# type plus live details (pipe backend stats here), so
+# scripts can branch on engine state.
+LET $p: PIPE = pipe:log
+WITH_IO [stdout=$p] ECHO hello
+LET $info: MAP = INSPECT($p)
+IF $info.is_os_pipe {
+    WRITE unexpected.txt "should be a script pipe"
+}
+WRITE kind.txt "{{ $info.type }}"
+ASSERT_FILE kind.txt "PIPE"
+```
+
+
+### MUTATION
+
+Mutate a declared variable.
+
+**Syntax:** `$var = <expr>`
+
+Reassigns an existing variable, validating the new value against the
+TypeKind bound at LET time via coerce_value with ExecState context.
+
+The leading `$` distinguishes mutation from `KEY=value` command
+assignments. Assigning an undeclared variable or a mismatched type is
+an error.
+
+
+**Examples:**
+
+**Example: mutate**
+
+```oxdock
+LET $count: INT = 1
+$count = 2
 ```
 
 
@@ -179,9 +311,14 @@ ASSERT_FILE captured.txt "hi\n"
 
 Run steps in a background thread.
 
-**Syntax:** `ASYNC <command...> | ASYNC { <commands> } | LET $var = ASYNC { <commands> }`
+**Syntax:** `ASYNC <command...> | ASYNC { <commands> } | LET $var: HANDLE = ASYNC { <commands> }`
 
-Runs a command or block of commands in a background thread with subshell isolation. Mutations (ENV, WORKDIR) stay within the block. With `LET`, stores a task handle for `AWAIT`.
+Runs a command or block of commands in a background thread with
+subshell isolation.
+
+Mutations (ENV, WORKDIR) stay within the block. With `LET`, stores a
+task handle for `AWAIT`.
+
 
 **Examples:**
 
@@ -199,7 +336,7 @@ ASYNC {
 **Example: async task handle**
 
 ```oxdock
-LET $task = ASYNC {
+LET $task: HANDLE = ASYNC {
     ECHO "built"
 }
 AWAIT $task
@@ -210,24 +347,29 @@ AWAIT $task
 
 Join a background task.
 
-**Syntax:** `AWAIT $var | LET $out = AWAIT $var`
+**Syntax:** `AWAIT $var | LET $out: STRING = AWAIT $var`
 
-Blocks until the named task completes. Propagates errors if the task failed. Bare `AWAIT $var` forwards the task's stdout to the parent stdout; `LET $out = AWAIT $var` captures it into `$out` instead (same UTF-8 and spilling rules as `LET $var = <command>`).
+Blocks until the named task completes. Propagates errors if the task failed.
+
+Bare `AWAIT $var` forwards the task's stdout to the parent stdout;
+`LET $out: STRING = AWAIT $var` captures it into `$out` instead (same
+UTF-8 and spilling rules as `LET $var: STRING = <command>`).
+
 
 **Examples:**
 
 **Example: await**
 
 ```oxdock
-LET $task = ASYNC ECHO "done"
+LET $task: HANDLE = ASYNC ECHO "done"
 AWAIT $task
 ```
 
 **Example: await capture**
 
 ```oxdock
-LET $task = ASYNC ECHO "done"
-LET $out = AWAIT $task
+LET $task: HANDLE = ASYNC ECHO "done"
+LET $out: STRING = AWAIT $task
 WRITE captured.txt "{{ $out }}"
 ASSERT_FILE captured.txt "done\n"
 ```
@@ -239,14 +381,19 @@ Synchronously cancel a background task.
 
 **Syntax:** `CANCEL $var`
 
-Kills the named background task spawned via LET $var = ASYNC .... Blocking: returns only after the task thread has been joined and its OS process reaped, so no residual filesystem or stream mutation follows. A later AWAIT $var reports cancellation. Only named tasks can be cancelled.
+Kills the named background task spawned via LET $var: HANDLE = ASYNC ....
+
+Blocking: returns only after the task thread has been joined and its OS
+process reaped, so no residual filesystem or stream mutation follows. A
+later AWAIT $var reports cancellation. Only named tasks can be cancelled.
+
 
 **Examples:**
 
 **Example: cancel**
 
 ```oxdock
-LET $task = ASYNC SLEEP 30s
+LET $task: HANDLE = ASYNC SLEEP 30s
 CANCEL $task
 ```
 
@@ -257,7 +404,11 @@ Enforce an execution deadline.
 
 **Syntax:** `TIMEOUT <duration> <command...> | TIMEOUT <duration> { <commands> } | TIMEOUT <duration> AWAIT $var`
 
-Aborts the wrapped step or block with a deadline error if it exceeds the duration (e.g. 500ms, 10s, 2m; a bare number means seconds). A blocking foreground process is killed.
+Aborts the wrapped step or block with a deadline error if it exceeds the
+duration (e.g. 500ms, 10s, 2m; a bare number means seconds).
+
+A blocking foreground process is killed.
+
 
 **Examples:**
 
@@ -280,9 +431,187 @@ TIMEOUT 30s {
 
 ```oxdock
 # durations resolve at runtime, so variables work too
-LET $budget = "30s"
+LET $budget: DURATION = "30s"
 TIMEOUT $budget WRITE heartbeat.txt alive
 ASSERT_FILE heartbeat.txt alive
+```
+
+
+### FUNC
+
+Define a user function.
+
+**Syntax:** `FUNC NAME($param: TYPE, ...) { <commands> }`
+
+Defines a user function with UPPERCASE name and explicitly typed
+parameters.
+
+Params bind by position with declare_var coercion before the body runs.
+Bodies run in a fresh variable scope; LETs inside do not leak. A nested
+FUNC definition is scoped to its block and reverts on exit. Names share
+one namespace with host-registered functions.
+
+
+**Examples:**
+
+**Example: func def call**
+
+```oxdock
+FUNC GREET($name: STRING) {
+  RETURN $name
+}
+LET $res: STRING = CALL GREET("ada")
+WRITE greeting.txt "{{ $res }}"
+ASSERT_FILE greeting.txt "ada"
+```
+
+
+### CALL
+
+Invoke a user or host function.
+
+**Syntax:** `CALL NAME(<expr>, ...) | LET $var: TYPE = CALL NAME(<expr>, ...)`
+
+Invokes a FUNC-defined or host-registered function by UPPERCASE name.
+
+Bare CALL discards the return value and keeps stdout side effects.
+LET $var: TYPE = CALL captures the RETURN value (fallthrough without
+RETURN captures as ""), coerced to the declared type; stdout inside the
+callee stays observable via ASSERT_STDOUT and pipes.
+
+Combining LET-capture with WITH_IO [stdout=pipe:...] is a parse error.
+
+
+**Examples:**
+
+**Example: call**
+
+```oxdock
+FUNC SHOUT($name: STRING) {
+  ECHO "{{ $name }}"
+  RETURN $name
+}
+CALL SHOUT("ada")
+ASSERT_STDOUT "ada"
+```
+
+**Example: call with pipes**
+
+```oxdock
+# A pipe handle travels into a function as a typed argument
+# and is usable as a binding target in both directions.
+# `pipe:ch` constructs the handle; `$p` passes it on.
+FUNC DRAIN($q: PIPE) {
+  WITH_IO [stdin=$q] READ_LINE $line
+  RETURN $line
+}
+LET $p: PIPE = pipe:ch
+WITH_IO [stdout=$p] ECHO "payload"
+LET $got: STRING = CALL DRAIN($p)
+WRITE got.txt "{{ $got }}"
+ASSERT_FILE got.txt "payload"
+```
+
+
+### RETURN
+
+Return a value from a function.
+
+**Syntax:** `RETURN <expr>`
+
+Ends the nearest enclosing function call with a value.
+
+Falling off the end without RETURN yields "". RETURN outside a function
+(including at top level or across an ASYNC boundary) is an error.
+
+
+**Examples:**
+
+**Example: return**
+
+```oxdock
+FUNC PICK($flag: BOOL) {
+  IF $flag {
+    RETURN "yes"
+  }
+  RETURN "no"
+}
+LET $res: STRING = CALL PICK(true)
+WRITE picked.txt "{{ $res }}"
+ASSERT_FILE picked.txt "yes"
+```
+
+
+### WHILE
+
+Loop while a condition holds.
+
+**Syntax:** `WHILE <bool-expr> { <commands> }`
+
+Re-evaluates a Bool condition each iteration (same is_truthy rule as IF;
+non-Bool is a type error).
+
+Each iteration runs in a fresh scope; mutate outer state with $var = ...
+so the next check observes it. BREAK exits the loop; CONTINUE skips to
+the next check.
+
+
+**Examples:**
+
+**Example: while loop**
+
+```oxdock
+LET $done: BOOL = false
+WHILE !$done {
+  WRITE tick.txt "once"
+  $done = true
+}
+ASSERT_FILE tick.txt "once"
+```
+
+
+### BREAK
+
+Exit the innermost loop.
+
+**Syntax:** `BREAK`
+
+Exits the innermost enclosing FOR or WHILE loop.
+
+BREAK outside a loop, or across a FUNC or ASYNC boundary, is an error.
+
+
+**Examples:**
+
+**Example: break**
+
+```oxdock
+FOR $x: STRING IN ["a", "b"] {
+  BREAK
+}
+```
+
+
+### CONTINUE
+
+Skip to the next loop iteration.
+
+**Syntax:** `CONTINUE`
+
+Skips the rest of the innermost enclosing FOR or WHILE body and starts
+the next iteration.
+
+CONTINUE outside a loop, or across a FUNC or ASYNC boundary, is an error.
+
+
+**Examples:**
+
+**Example: continue**
+
+```oxdock
+FOR $x: STRING IN ["a", "b"] {
+  CONTINUE
+}
 ```
 
 
@@ -292,13 +621,17 @@ Change the working directory.
 
 **Syntax:** `WORKDIR <path>`
 
-Sets the current working directory. Relative paths resolve against the current directory; `/` resets to the workspace root. Paths cannot escape the workspace.
+Sets the current working directory.
+
+Relative paths resolve against the current directory; `/` resets to
+the workspace root. Paths cannot escape the workspace.
+
 
 **Arguments:**
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
-| `path` | [`path`](#value-type-path) | yes | Directory to change to |
+| `path` | [`PATH`](#value-type-path) | yes | Directory to change to |
 
 **Examples:**
 
@@ -340,13 +673,23 @@ Set an environment variable.
 
 **Syntax:** `ENV KEY=value`
 
-Inserts or updates an env var. The value uses the unified string-value rules shared by every command: `"..."` or `'...'` quotes keep exact bytes (spaces, tabs), a lone `$var` evaluates that variable, `{{ ... }}` placeholders interpolate, unquoted words join with single spaces, and the first `=` splits key from value (`KEY=a=b` stores `a=b`). A `$var` inside larger text stays literal — write `{{ $var }}` to interpolate there.
+Inserts or updates an env var.
+
+The value uses the unified string-value rules shared by every command:
+`"..."` or `'...'` quotes keep exact bytes (spaces, tabs), a lone `$var`
+evaluates that variable, `{{ ... }}` placeholders interpolate, unquoted
+words join with single spaces, and the first `=` splits key from value
+(`KEY=a=b` stores `a=b`).
+
+A `$var` inside larger text stays literal — write `{{ $var }}` to
+interpolate there.
+
 
 **Arguments:**
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
-| `assignment` | [`KEY=value`](#value-type-keyvalue) | yes | KEY=value pair |
+| `assignment` | `STRING` | yes | KEY=value pair; the value resolves as STRING |
 
 **Examples:**
 
@@ -369,7 +712,7 @@ ASSERT_FILE out.txt "outer scope"
 
 ```oxdock
 # a lone $var evaluates, like ECHO $var
-LET $who = "Alice"
+LET $who: STRING = "Alice"
 ENV GREETING=$who
 WRITE out.txt "{{ env:GREETING }}"
 ASSERT_FILE out.txt "Alice"
@@ -380,7 +723,7 @@ ASSERT_FILE out.txt "Alice"
 ```oxdock
 # a bare variable, a quoted literal, and a template all
 # store plain strings through the same value rules
-LET $x = "Ada"
+LET $x: STRING = "Ada"
 ENV A=$x
 ENV B="hello world"
 ENV C="{{ $x }} concatenated"
@@ -409,13 +752,17 @@ Inherit env vars from host.
 
 **Syntax:** `INHERIT_ENV <key>...`
 
-Declares which host environment variables to inherit into the script. Must appear before any other commands and at most once. Without this directive, the script starts with an empty environment.
+Declares which host environment variables to inherit into the script.
+
+Must appear before any other commands and at most once. Without this
+directive, the script starts with an empty environment.
+
 
 **Arguments:**
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
-| `keys` | [`string...`](#value-type-string) | no | Host variables to inherit |
+| `keys` | [`STRING...`](#value-type-string) | no | Host variables to inherit |
 
 **Examples:**
 
@@ -438,7 +785,7 @@ Outputs message to stdout.
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
-| `message` | [`string...`](#value-type-string) | yes | Text |
+| `message` | [`STRING...`](#value-type-string) | yes | Text |
 
 **Output:** Stdout
 
@@ -454,7 +801,7 @@ ECHO build-complete
 
 ```oxdock
 # a lone $x evaluates; {{ }} interpolates inside text
-LET $x = "World"
+LET $x: STRING = "World"
 ECHO {{ $x }}
 ECHO $x
 ASSERT_STDOUT "World"
@@ -467,13 +814,22 @@ Execute shell command or direct executable.
 
 **Syntax:** `RUN <command...> | RUN ["exe", "arg", ...]`
 
-Shell form (`RUN <command...>`) runs the joined command string in the system shell (`$SHELL -c` / `COMSPEC /C`). Exec form (`RUN ["exe", "arg", ...]`) spawns the executable directly with no shell, so there is no shell expansion, globbing, redirection, or pipes; use it for portable commands. Guards and wrappers (`ASYNC`, `TIMEOUT`, `WITH_IO`, `LET`) apply to both forms.
+Shell form (`RUN <command...>`) runs the joined command string in the
+system shell (`$SHELL -c` / `COMSPEC /C`).
+
+Exec form (`RUN ["exe", "arg", ...]`) spawns the executable directly
+with no shell, so there is no shell expansion, globbing, redirection,
+or pipes; use it for portable commands.
+
+Guards and wrappers (`ASYNC`, `TIMEOUT`, `WITH_IO`, `LET`) apply to
+both forms.
+
 
 **Arguments:**
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
-| `command` | [`string...`](#value-type-string) | yes | Command |
+| `command` | [`STRING...`](#value-type-string) | yes | Command |
 
 **Examples:**
 
@@ -502,14 +858,14 @@ Copies from host.
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
-| `from` | [`path`](#value-type-path) | yes | Source |
-| `to` | [`path`](#value-type-path) | yes | Dest |
+| `from` | [`PATH`](#value-type-path) | yes | Source |
+| `to` | [`PATH`](#value-type-path) | yes | Dest |
 
 **Flags:**
 
 | Flag | Type | Description |
 | --- | --- | --- |
-| `--from-current-workspace` | Flag | Copy from workspace instead of build context |
+| `--from-current-workspace` | `BOOL` | Copy from workspace instead of build context |
 
 **Examples:**
 
@@ -542,15 +898,15 @@ Checkout and copy.
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
-| `rev` | [`string`](#value-type-string) | yes | Rev |
-| `src` | [`path`](#value-type-path) | yes | Src |
-| `dst` | [`path`](#value-type-path) | yes | Dst |
+| `rev` | [`STRING`](#value-type-string) | yes | Rev |
+| `src` | [`PATH`](#value-type-path) | yes | Src |
+| `dst` | [`PATH`](#value-type-path) | yes | Dst |
 
 **Flags:**
 
 | Flag | Type | Description |
 | --- | --- | --- |
-| `--include-dirty` | Flag | Include dirty |
+| `--include-dirty` | `BOOL` | Include dirty |
 
 **Examples:**
 
@@ -573,8 +929,8 @@ Creates symlink.
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
-| `from` | [`path`](#value-type-path) | yes | Target |
-| `to` | [`path`](#value-type-path) | yes | Link |
+| `from` | [`PATH`](#value-type-path) | yes | Target |
+| `to` | [`PATH`](#value-type-path) | yes | Link |
 
 **Examples:**
 
@@ -599,7 +955,7 @@ Creates dir with parents.
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
-| `path` | [`path`](#value-type-path) | yes | Dir path |
+| `path` | [`PATH`](#value-type-path) | yes | Dir path |
 
 **Examples:**
 
@@ -622,7 +978,7 @@ Lists entries.
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
-| `path` | [`path`](#value-type-path) | no | Dir |
+| `path` | [`PATH`](#value-type-path) | no | Dir |
 
 **Output:** Stdout
 
@@ -668,7 +1024,7 @@ Outputs file contents.
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
-| `path` | [`path`](#value-type-path) | no | File |
+| `path` | [`PATH`](#value-type-path) | no | File |
 
 **Output:** Stdout
 
@@ -688,13 +1044,17 @@ Read one line from stdin into a variable.
 
 **Syntax:** `READ_LINE $var`
 
-Reads bytes until newline without waiting for EOF, leaving the pipe open. Trailing newline is stripped (shell-read parity). On premature EOF assigns accumulated bytes and returns.
+Reads bytes until newline without waiting for EOF, leaving the pipe open.
+
+Trailing newline is stripped (shell-read parity). On premature EOF
+assigns accumulated bytes and returns.
+
 
 **Arguments:**
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
-| `var` | [`$var`](#value-type-var) | yes | Variable to store the line |
+| `var` | `STRING` | yes | Target variable (`$name`); the line binds as STRING |
 
 **Examples:**
 
@@ -718,8 +1078,8 @@ Writes contents.
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
-| `path` | [`path`](#value-type-path) | yes | File |
-| `contents` | [`string...`](#value-type-string) | no | Content |
+| `path` | [`PATH`](#value-type-path) | yes | File |
+| `contents` | [`STRING...`](#value-type-string) | no | Content |
 
 **Examples:**
 
@@ -742,8 +1102,8 @@ Appends contents.
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
-| `path` | [`path`](#value-type-path) | yes | File |
-| `contents` | [`string...`](#value-type-string) | no | Content |
+| `path` | [`PATH`](#value-type-path) | yes | File |
+| `contents` | [`STRING...`](#value-type-string) | no | Content |
 
 **Examples:**
 
@@ -762,14 +1122,39 @@ Expand a template file (or stdin) to stdout.
 
 **Syntax:** `EXPAND [<path>] [<KEY=val> ...]`
 
-A template is any text file — or piped stdin when no path is given — containing `{{ ... }}` placeholders. EXPAND replaces each placeholder and prints the result to stdout. Placeholders: `{{ NAME }}` reads a `KEY=val` override passed on this command; `{{ env:NAME }}` reads an override, falling back to the environment; `{{ $var }}` reads a script variable (dotted paths allowed). A missing key is an error, never a silent empty. Substitution runs in a single pass. EXPAND is not recursive and does not expand nested placeholders: a value that itself contains `{{ ... }}` is inserted verbatim and never expanded again. A bare `$var` argument is a template path; `KEY=val` arguments are overrides whose values follow the unified string-value rules (same as `ENV`: quotes keep exact bytes, a lone `$var` evaluates, `{{ ... }}` interpolates). NOTE: `WRITE` interpolates `{{ ... }}` while writing, so escape it (`\{{ ... }}`) when writing a template file for a later `EXPAND`. With no path, the template arrives on stdin through a pipe. When piping from a shell, single-quote the template (`echo '{{ $x }}'`): double quotes let the shell swallow `$x`, so oxdock receives an empty `{{ }}` placeholder and errors.
+A template is any text file — or piped stdin when no path is given —
+containing `{{ ... }}` placeholders. EXPAND replaces each placeholder
+and prints the result to stdout.
+
+Placeholders: `{{ NAME }}` reads a `KEY=val` override passed on this
+command; `{{ env:NAME }}` reads an override, falling back to the
+environment; `{{ $var }}` reads a script variable (dotted paths allowed).
+A missing key is an error, never a silent empty.
+
+Substitution runs in a single pass. EXPAND is not recursive and does not
+expand nested placeholders: a value that itself contains `{{ ... }}` is
+inserted verbatim and never expanded again.
+
+A bare `$var` argument is a template path; `KEY=val` arguments are
+overrides whose values follow the unified string-value rules (same as
+`ENV`: quotes keep exact bytes, a lone `$var` evaluates,
+`{{ ... }}` interpolates).
+
+NOTE: `WRITE` interpolates `{{ ... }}` while writing, so escape it
+(`\{{ ... }}`) when writing a template file for a later `EXPAND`.
+
+With no path, the template arrives on stdin through a pipe. When piping
+from a shell, single-quote the template (`echo '{{ $x }}'`): double
+quotes let the shell swallow `$x`, so oxdock receives an empty `{{ }}`
+placeholder and errors.
+
 
 **Arguments:**
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
-| `path` | [`path`](#value-type-path) | no | Template file to expand; omit to expand stdin |
-| `overrides` | [`KEY=value...`](#value-type-keyvalue) | no | Template overrides shadowing that key (unified string values) |
+| `path` | [`PATH`](#value-type-path) | no | Template file to expand; omit to expand stdin |
+| `overrides` | `STRING...` | no | Template overrides shadowing that key (unified string values) |
 
 **Output:** Stdout
 
@@ -799,7 +1184,7 @@ ASSERT_STDOUT "Hello Alice Smith!"
 ```oxdock
 # same escaping: keep the placeholder literal until EXPAND;
 # a lone $who evaluates, like ECHO $who
-LET $who = "Bob"
+LET $who: STRING = "Bob"
 WRITE template.md "Hi \{{ env:WHO }}!"
 EXPAND template.md WHO=$who
 ASSERT_STDOUT "Hi Bob!"
@@ -809,7 +1194,7 @@ ASSERT_STDOUT "Hi Bob!"
 
 ```oxdock
 # a bare variable and a template-with-tail expand identically
-LET $x = "Ada"
+LET $x: STRING = "Ada"
 WRITE template.md "Hi \{{ env:NAME }} and \{{ env:NAME2 }}!"
 EXPAND template.md NAME=$x NAME2="{{ $x }} concatenated"
 ASSERT_STDOUT "Hi Ada and Ada concatenated!"
@@ -844,20 +1229,25 @@ Assert file exists.
 
 **Syntax:** `ASSERT_FILE [--hash <sha256>] <path> [<expected>]`
 
-Checks the path is a file, then optionally compares its bytes (or `--hash` SHA-256 digest) against the expectation. Any mismatch aborts the pipeline with a step-numbered error showing expected vs actual.
+Checks the path is a file, then optionally compares its bytes (or
+`--hash` SHA-256 digest) against the expectation.
+
+Any mismatch aborts the pipeline with a step-numbered error showing
+expected vs actual.
+
 
 **Arguments:**
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
-| `path` | [`path`](#value-type-path) | yes | File |
-| `expected` | [`string...`](#value-type-string) | no | Expected |
+| `path` | [`PATH`](#value-type-path) | yes | File |
+| `expected` | [`STRING...`](#value-type-string) | no | Expected |
 
 **Flags:**
 
 | Flag | Type | Description |
 | --- | --- | --- |
-| `--hash` | String | SHA-256 |
+| `--hash` | `STRING` | SHA-256 |
 
 **Examples:**
 
@@ -883,13 +1273,15 @@ Assert dir exists.
 
 **Syntax:** `ASSERT_DIR <path>`
 
-Checks the path is a directory, aborting the pipeline with a step-numbered error otherwise.
+Checks the path is a directory, aborting the pipeline with a
+step-numbered error otherwise.
+
 
 **Arguments:**
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
-| `path` | [`path`](#value-type-path) | yes | Dir |
+| `path` | [`PATH`](#value-type-path) | yes | Dir |
 
 **Examples:**
 
@@ -907,13 +1299,15 @@ Assert path absent.
 
 **Syntax:** `ASSERT_ABSENT <path>`
 
-Checks nothing exists at the path, aborting the pipeline with a step-numbered error if it does.
+Checks nothing exists at the path, aborting the pipeline with a
+step-numbered error if it does.
+
 
 **Arguments:**
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
-| `path` | [`path`](#value-type-path) | yes | Path |
+| `path` | [`PATH`](#value-type-path) | yes | Path |
 
 **Examples:**
 
@@ -930,13 +1324,15 @@ Assert stdout contains.
 
 **Syntax:** `ASSERT_STDOUT <substring>`
 
-Checks the preceding step's stdout contains the substring, aborting the pipeline with a step-numbered error otherwise.
+Checks the preceding step's stdout contains the substring, aborting the
+pipeline with a step-numbered error otherwise.
+
 
 **Arguments:**
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
-| `substring` | [`string...`](#value-type-string) | yes | Substring |
+| `substring` | [`STRING...`](#value-type-string) | yes | Substring |
 
 **Examples:**
 
@@ -960,7 +1356,7 @@ Computes digest.
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
-| `path` | [`path`](#value-type-path) | yes | File |
+| `path` | [`PATH`](#value-type-path) | yes | File |
 
 **Output:** Stdout
 
@@ -980,13 +1376,19 @@ Exit pipeline.
 
 **Syntax:** `EXIT <code>`
 
-Stops the pipeline immediately with an `EXIT requested with code <code>` error; steps after it never run, at any nesting depth. Enclosing blocks still unwind their LET/ENV/WORKDIR/WORKSPACE state, anonymous background tasks are killed synchronously, and files written before the EXIT persist.
+Stops the pipeline immediately with an `EXIT requested with code <code>`
+error; steps after it never run, at any nesting depth.
+
+Enclosing blocks still unwind their LET/ENV/WORKDIR/WORKSPACE state,
+anonymous background tasks are killed synchronously, and files written
+before the EXIT persist.
+
 
 **Arguments:**
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
-| `code` | [`int`](#value-type-int) | yes | Code |
+| `code` | [`INT`](#value-type-int) | yes | Code |
 
 **Examples:**
 
@@ -1003,13 +1405,18 @@ Pause execution for a duration.
 
 **Syntax:** `SLEEP <duration>`
 
-Parks the step for the duration (e.g. 500ms, 10s, 2m). Cooperative: checks for cancellation so an enclosing TIMEOUT or task teardown interrupts the sleep. Cross-platform alternative to shell sleep for testing time boundaries.
+Parks the step for the duration (e.g. 500ms, 10s, 2m).
+
+Cooperative: checks for cancellation so an enclosing TIMEOUT or task
+teardown interrupts the sleep. Cross-platform alternative to shell sleep
+for testing time boundaries.
+
 
 **Arguments:**
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
-| `duration` | [`duration`](#value-type-duration) | yes | How long to sleep |
+| `duration` | [`DURATION`](#value-type-duration) | yes | How long to sleep |
 
 **Examples:**
 
@@ -1024,35 +1431,51 @@ SLEEP 100ms
 ```oxdock
 # durations resolve at runtime, so variables work too —
 # quoted or bare, both bind the same string
-LET $pause = "100ms"
+LET $pause: STRING = "100ms"
 SLEEP $pause
-LET $bare = 100ms
+LET $bare: STRING = 100ms
 SLEEP $bare
 ```
 
 
 ## Value types
 
-### Value type: string
+### Value type: STRING
 
-Arbitrary text under the unified string-value rules: quotes keep exact bytes, a lone `$var` evaluates, and `{{ ... }}` placeholders interpolate.
+Arbitrary text. Quotes keep exact bytes, lone `$var` evaluates, `{{ ... }}` interpolates.
 
-### Value type: path
+### Value type: INT
 
-Workspace path, resolved against the current working directory and guarded against escaping the workspace.
+64-bit signed integer, e.g. an exit code.
 
-### Value type: int
+### Value type: FLOAT
 
-Integer, e.g. an exit code.
+64-bit float, e.g. a ratio.
 
-### Value type: duration
+### Value type: BOOL
 
-Positive time span: a number with an `ms`, `s`, `m`, or `h` suffix — a bare number means seconds — e.g. `500ms`, `10s`, `2m`.
+Boolean `true` or `false`.
 
-### Value type: $var
+### Value type: PIPE
 
-Script variable reference. The `$` sigil is mandatory.
+Named script pipe. Validity is checked against the pipe registry at coercion time.
 
-### Value type: KEY=value
+### Value type: LIST
 
-`KEY=value` assignment splitting on the first `=` (`KEY=a=b` stores `a=b`). Values follow the unified string-value rules.
+Ordered list of values.
+
+### Value type: MAP
+
+String-keyed map of values.
+
+### Value type: HANDLE
+
+Background ASYNC task handle for AWAIT/CANCEL.
+
+### Value type: DURATION
+
+Positive time span: `500ms`, `10s`, `2m`, `1h`; bare number means seconds.
+
+### Value type: PATH
+
+Workspace path, resolved against cwd and guarded against escape.

@@ -1,0 +1,10 @@
+FUNC MAKE($who: STRING) {
+    LET $greet: STRING = ECHO "hey {{ $who }}"
+    WRITE "{{ $who }}.txt" "{{ $greet }}"
+    ECHO "loud {{ $who }}"
+    RETURN $who
+}
+LET $r: STRING = CALL MAKE("ada")
+WRITE r.txt "{{ $r }}"
+CALL MAKE("bex")
+ASSERT_STDOUT "loud bex"

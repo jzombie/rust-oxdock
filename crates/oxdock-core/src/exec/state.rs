@@ -5,12 +5,28 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use anyhow::Result;
 use oxdock_fs::{GuardedPath, WorkspaceFs};
-use oxdock_parser::{Step, Value};
+use oxdock_parser::{Step, TypeKind, Value};
 use oxdock_process::{BackgroundHandle, CommandContext, ProcessManager};
 
 use super::capture::SpillBuffer;
 use super::io::{ExecIo, SlidingWindow};
 use super::pipe::KeeperGuard;
+
+/// Maximum nested `CALL` depth. Guards the host thread stack against
+/// runaway recursion; the error names the function that overflowed.
+pub(super) const MAX_CALL_DEPTH: usize = 64;
+
+/// One user-defined function body (`FUNC NAME($p: TYPE, ...) { ... }`).
+#[derive(Debug, Clone)]
+pub(super) struct FuncDefData {
+    pub(super) params: Vec<(String, TypeKind)>,
+    pub(super) body: Vec<Step>,
+}
+
+/// Host-registered callable for the FFI hook (deferred full registry).
+/// DSL `CALL NAME(...)` dispatches to `funcs` first, then `host_funcs`,
+/// so a future `register_fn` plugs in without changing the call path.
+pub type HostFn = std::sync::Arc<dyn Fn(Vec<Value>) -> Result<Value> + Send + Sync>;
 
 pub(super) struct ExecState<P: ProcessManager> {
     pub(super) fs: Box<dyn WorkspaceFs>,
@@ -25,7 +41,8 @@ pub(super) struct ExecState<P: ProcessManager> {
     pub(super) assert_windows: Arc<Mutex<HashMap<(usize, usize), SlidingWindow>>>,
     /// Variable scopes for $variable bindings (FOR loops, LET assignments).
     /// Innermost scope is last. Variables are looked up from innermost to outermost.
-    pub(super) var_scopes: Vec<HashMap<String, Value>>,
+    /// Each entry carries its declared TypeKind alongside the value.
+    pub(super) var_scopes: Vec<HashMap<String, (TypeKind, Value)>>,
     /// Cancellation token for background thread teardown.
     #[allow(dead_code)]
     pub(super) cancel_token: Arc<AtomicBool>,
@@ -61,6 +78,17 @@ pub(super) struct ExecState<P: ProcessManager> {
     /// a blocking foreground process. Unlike `inside_async`, this does not
     /// affect end-of-pipeline named-task reaping.
     pub(super) cancellable: bool,
+    /// User-defined function registry (`FUNC`). Shared across `fork()` via
+    /// Arc like `named_tasks`; a `FUNC` inside a scoped block snapshots and
+    /// restores through `push_scope`/`pop_scope`.
+    pub(super) funcs: Arc<HashMap<String, FuncDefData>>,
+    /// Host-registered callables (FFI hook). Shared across `fork()`; never
+    /// scoped (hosts register once at startup, not via the DSL).
+    pub(super) host_funcs: Arc<HashMap<String, HostFn>>,
+    /// Current nested `CALL` depth on this thread. Enforced against
+    /// `MAX_CALL_DEPTH`; cloned (not reset) by `fork()` so async children
+    /// inherit the caller's depth budget.
+    pub(super) call_depth: usize,
     pub(super) _marker: PhantomData<P>,
 }
 
@@ -68,9 +96,10 @@ pub(super) struct ScopeSnapshot {
     pub(super) cwd: GuardedPath,
     pub(super) root: GuardedPath,
     pub(super) envs: Arc<HashMap<String, String>>,
+    pub(super) funcs: Arc<HashMap<String, FuncDefData>>,
 }
 
-/// Lifecycle phase of a named background task (`LET $var = ASYNC ...`).
+/// Lifecycle phase of a named background task (`LET $var: HANDLE = ASYNC ...`).
 /// `Running` and `Awaiting` both hold the live handle inside the entry;
 /// `Cancelled` and `Completed` are terminal tombstones with no handle.
 pub(super) enum TaskPhase {
@@ -88,11 +117,16 @@ pub(super) struct TaskEntryState {
     /// Threads observing `Cancelled` must wait on `done` until `reaped`
     /// before resuming, so no caller outruns OS process teardown.
     pub(super) reaped: bool,
-    /// Per-task stdout sink (`LET $t = ASYNC ...`). The child thread writes
+    /// Per-task stdout sink (`LET $t: HANDLE = ASYNC ...`). The child thread writes
     /// here instead of the parent writer. Exactly one consumer takes it:
-    /// `LET $o = AWAIT $t` binds it, bare `AWAIT $t` forwards it to the
+    /// `LET $o: STRING = AWAIT $t` binds it, bare `AWAIT $t` forwards it to the
     /// parent stdout, and end-poll reaping forwards un-awaited output.
     pub(super) sink: Option<Arc<SpillBuffer>>,
+    /// Return value of a background `CALL` task (`LET $t: HANDLE = ASYNC CALL
+    /// FOO(...)`). Set under the entry lock before `done.notify_all()`; read
+    /// by `LET $o: TYPE = AWAIT $t` when the task body was a single `Call`.
+    /// `None` for block tasks and for tasks that have not finished.
+    pub(super) return_value: Option<Value>,
 }
 
 /// Synchronized named-task entry shared by every scope that can observe the
@@ -112,6 +146,7 @@ impl TaskEntry {
                 handle: Some(handle),
                 reaped: false,
                 sink: Some(sink),
+                return_value: None,
             }),
             done: Condvar::new(),
         }
@@ -228,6 +263,9 @@ impl<P: ProcessManager> ExecState<P> {
             inside_async: true,
             keeper_expiry: None,
             cancellable: self.cancellable,
+            funcs: Arc::clone(&self.funcs),
+            host_funcs: Arc::clone(&self.host_funcs),
+            call_depth: self.call_depth,
             _marker: PhantomData,
         }
     }
@@ -248,6 +286,7 @@ impl<P: ProcessManager> ExecState<P> {
             cwd: self.cwd.clone(),
             root: self.fs.root().clone(),
             envs: Arc::clone(&self.envs),
+            funcs: Arc::clone(&self.funcs),
         });
         self.push_var_scope();
     }
@@ -261,20 +300,67 @@ impl<P: ProcessManager> ExecState<P> {
         self.fs.set_root(&snapshot.root);
         self.cwd = snapshot.cwd;
         self.envs = snapshot.envs;
+        self.funcs = snapshot.funcs;
         self.pop_var_scope();
         Ok(())
     }
-    pub(super) fn set_var(&mut self, key: String, value: Value) {
-        if let Some(scope) = self.var_scopes.last_mut() {
-            scope.insert(key, value);
+    pub(super) fn declare_var(&mut self, key: String, kind: TypeKind, value: Value) -> Result<()> {
+        if self
+            .var_scopes
+            .last()
+            .map(|s| s.contains_key(&key))
+            .unwrap_or(false)
+        {
+            anyhow::bail!(
+                "redeclaration error: ${} already declared in this scope; use ${} = ... to mutate",
+                key,
+                key
+            );
         }
+        let coerced = super::args::coerce_value(value, kind, &*self)?;
+        let scope = self
+            .var_scopes
+            .last_mut()
+            .ok_or_else(|| anyhow::anyhow!("no variable scope for declaration"))?;
+        scope.insert(key, (kind, coerced));
+        Ok(())
+    }
+
+    pub(super) fn mutate_var(&mut self, key: &str, value: Value) -> Result<()> {
+        let kind = self
+            .var_scopes
+            .iter()
+            .rev()
+            .find_map(|s| s.get(key).map(|(k, _)| *k))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "undeclared variable ${key}: declare it first with LET ${key}: TYPE = ..."
+                )
+            })?;
+        let coerced = super::args::coerce_value(value, kind, &*self)?;
+        for scope in self.var_scopes.iter_mut().rev() {
+            if let Some(slot) = scope.get_mut(key) {
+                slot.1 = coerced;
+                return Ok(());
+            }
+        }
+        anyhow::bail!("undeclared variable ${key}");
     }
 
     pub(super) fn get_var(&self, key: &str) -> Option<Value> {
         // Walk scopes from innermost to outermost
         for scope in self.var_scopes.iter().rev() {
-            if let Some(value) = scope.get(key) {
+            if let Some((_, value)) = scope.get(key) {
                 return Some(value.clone());
+            }
+        }
+        None
+    }
+
+    pub(super) fn get_var_typed(&self, key: &str) -> Option<(TypeKind, Value)> {
+        for scope in self.var_scopes.iter().rev() {
+            if let Some(entry) = scope.get(key) {
+                return Some(entry.clone());
             }
         }
         None
@@ -285,7 +371,7 @@ impl<P: ProcessManager> ExecState<P> {
     pub(super) fn all_vars(&self) -> HashMap<String, Value> {
         let mut result = HashMap::new();
         for scope in self.var_scopes.iter().rev() {
-            for (k, v) in scope {
+            for (k, (_, v)) in scope {
                 result.entry(k.clone()).or_insert_with(|| v.clone());
             }
         }

@@ -37,15 +37,15 @@ pub fn run(repo_root: &Path) -> Result<()> {
     write_manifests(&root, &resolver, &version)?;
 
     let steps: Vec<oxdock_parser::Step> = oxdock! {
-        LET $cfg = LOAD_JSON("docs-gen.json")
-        LET $docs_global = LOAD_JSON($cfg.global_values)
-        FOR $scope IN $cfg.scopes {
-            FOR $tj IN GLOB("{{ $scope }}/**/target.json") {
-                LET $file = LOAD_JSON($tj)
-                FOR $t IN $file.targets {
+        LET $cfg: MAP = LOAD_JSON("docs-gen.json")
+        LET $docs_global: MAP = LOAD_JSON($cfg.global_values)
+        FOR $scope: STRING IN $cfg.scopes {
+            FOR $tj: STRING IN GLOB("{{ $scope }}/**/target.json") {
+                LET $file: MAP = LOAD_JSON($tj)
+                FOR $t: MAP IN $file.targets {
                     ECHO "rendering {{ $t.name }} -> {{ $t.out }}"
-                    LET $docs_ctx = LOAD_JSON($t.values)
-                    LET $files = LOAD_JSON("target/oxdock-docs/{{ $t.name }}.json")
+                    LET $docs_ctx: MAP = LOAD_JSON($t.values)
+                    LET $files: MAP = LOAD_JSON("target/oxdock-docs/{{ $t.name }}.json")
                     WRITE $t.out ""
                     WITH_IO [stdout=pipe:render] EXPAND $t.template
                     WITH_IO [stdin=pipe:render] APPEND $t.out

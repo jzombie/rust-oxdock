@@ -1,5 +1,5 @@
-# Async capture: LET $out = AWAIT $task binds the task's stdout instead of
+# Async capture: LET $out: STRING = AWAIT $task binds the task's stdout instead of
 # forwarding it to the parent stdout (bare AWAIT keeps forwarding).
-LET $task = ASYNC ECHO "task-output"
-LET $out = AWAIT $task
+LET $task: HANDLE = ASYNC ECHO "task-output"
+LET $out: STRING = AWAIT $task
 WRITE result.txt "{{ $out }}"

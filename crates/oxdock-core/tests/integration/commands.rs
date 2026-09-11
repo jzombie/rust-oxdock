@@ -22,7 +22,7 @@ fn capture_pipeline(pipe: &str, path: &str, cmd: StepKind) -> [Step; 2] {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdout,
-                    pipe: Some(pipe_name.clone()),
+                    pipe: Some(oxdock_parser::PipeTarget::Name(pipe_name.clone())),
                 }],
                 cmd: Box::new(cmd),
             },
@@ -34,7 +34,7 @@ fn capture_pipeline(pipe: &str, path: &str, cmd: StepKind) -> [Step; 2] {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdin,
-                    pipe: Some(pipe_name),
+                    pipe: Some(oxdock_parser::PipeTarget::Name(pipe_name)),
                 }],
                 cmd: Box::new(StepKind::Write {
                     path: path.into(),
@@ -1178,6 +1178,201 @@ fn run_script(root: &GuardedPath, script: &str) -> Result<(), anyhow::Error> {
     run_steps_with_context_result_with_io(root, root, &steps, ExecIo::new()).map(|_| ())
 }
 
+// ---------------------------------------------------------------------------
+// FUNC / WHILE / BREAK / CONTINUE (#114)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn func_return_capture_and_while_loop() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        FUNC DOUBLE($n: INT) {
+            RETURN $n
+        }
+        LET $r: INT = CALL DOUBLE(21)
+        WRITE r.txt "{{ $r }}"
+        LET $done: BOOL = false
+        WHILE !$done {
+            $done = true
+        }
+        WRITE done.txt "{{ $r }}"
+    "#};
+    run_script(&root, script).expect("func + while runs");
+    assert_eq!(read_trimmed(&root.join("r.txt").unwrap()), "21");
+    assert_eq!(read_trimmed(&root.join("done.txt").unwrap()), "21");
+}
+
+#[test]
+fn break_outside_loop_is_step_numbered_error() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let err = run_script(&root, "BREAK\n").expect_err("BREAK outside loop must fail");
+    assert!(err.to_string().contains("BREAK outside loop"), "{err}");
+}
+
+#[test]
+fn return_outside_function_is_step_numbered_error() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let err = run_script(&root, "RETURN \"x\"\n").expect_err("RETURN outside func must fail");
+    assert!(err.to_string().contains("RETURN outside function"), "{err}");
+}
+
+#[test]
+fn break_cannot_cross_function_boundary() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        FOR $x: STRING IN ["a"] {
+            FUNC FOO($y: STRING) {
+                BREAK
+            }
+            CALL FOO("a")
+        }
+    "#};
+    let err = run_script(&root, script).expect_err("BREAK across FUNC must fail");
+    assert!(
+        err.to_string().contains("cannot cross function boundary"),
+        "{err}"
+    );
+}
+
+#[test]
+fn recursion_depth_limit_names_function() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        FUNC BOOM($n: INT) {
+            CALL BOOM($n)
+        }
+        CALL BOOM(1)
+    "#};
+    let err = run_script(&root, script).expect_err("runaway recursion must fail");
+    assert!(
+        err.to_string()
+            .contains("recursion depth limit exceeded in FUNC BOOM"),
+        "{err}"
+    );
+}
+
+#[test]
+fn pipe_declare_first_registers_for_later_bindings() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        LET $p: PIPE = pipe:chan
+        WITH_IO [stdout=$p] ECHO hello
+        WITH_IO [stdin=$p] READ_LINE $line
+        WRITE line.txt "{{ $line }}"
+    "#};
+    run_script(&root, script).expect("declare-first pipe must work");
+    assert_eq!(read_trimmed(&root.join("line.txt").unwrap()), "hello");
+}
+
+#[test]
+fn pipe_plain_string_is_type_mismatch() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let err = run_script(&root, "LET $p: PIPE = \"chan\"\n")
+        .expect_err("plain string must not coerce to PIPE");
+    assert!(err.to_string().contains("TypeMismatch"), "{err}");
+}
+
+#[test]
+fn inspect_expression_returns_pipe_snapshot_map() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        LET $p: PIPE = pipe:ch
+        WITH_IO [stdout=$p] ECHO "payload"
+        LET $info: MAP = INSPECT($p)
+        WRITE snap.txt "{{ $info.type }}-{{ $info.is_os_pipe }}-{{ $info.buffer_bytes }}-{{ $info.readers }}"
+        IF $info.is_os_pipe {
+            WRITE unexpected.txt "should be a script pipe"
+        }
+    "#};
+    run_script(&root, script).expect("INSPECT must work");
+    assert_eq!(
+        read_trimmed(&root.join("snap.txt").unwrap()),
+        "PIPE-false-8-1"
+    );
+    assert!(!root.join("unexpected.txt").unwrap().exists());
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "OS promotion is disabled under Miri; every pipe stays a script pipe"
+)]
+fn inspect_reports_os_pipe_for_promoted_single_run() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    // Single-RUN background tasks promote to zero-copy OS kernel pipes.
+    // Declaring the handle *after* the promoting step keeps the OS type
+    // (first binding wins), so INSPECT must report is_os_pipe=true.
+    // `cargo --version` is the portable single-RUN producer (also used by
+    // the exec-form failure test); its tiny output never fills the pipe.
+    let script = indoc! {r#"
+        LET $t: HANDLE = WITH_IO [stdout=pipe:osp] ASYNC RUN ["cargo", "--version"]
+        AWAIT $t
+        LET $p: PIPE = pipe:osp
+        LET $info: MAP = INSPECT($p)
+        WRITE kind.txt "{{ $info.is_os_pipe }}"
+    "#};
+    run_script(&root, script).expect("INSPECT of promoted pipe must work");
+    assert_eq!(read_trimmed(&root.join("kind.txt").unwrap()), "true");
+}
+
+#[test]
+fn inspect_undeclared_variable_is_error() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let err = run_script(&root, "LET $m: MAP = INSPECT($nope)\n")
+        .expect_err("INSPECT of undeclared var must fail");
+    assert!(err.to_string().contains("not defined"), "{err}");
+}
+
+#[test]
+fn with_io_variable_pipe_undeclared_is_step_numbered_error() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let err = run_script(&root, "WITH_IO [stdout=$nope] ECHO hi\n")
+        .expect_err("undeclared pipe var must fail");
+    assert!(
+        err.to_string().contains("undeclared variable $nope"),
+        "{err}"
+    );
+}
+
+#[test]
+fn with_io_variable_pipe_mistype_is_type_error() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        LET $s: STRING = "not-a-pipe"
+        WITH_IO [stdout=$s] ECHO hi
+    "#};
+    let err = run_script(&root, script).expect_err("mistyped pipe var must fail");
+    assert!(err.to_string().contains("TypeMismatch"), "{err}");
+}
+
+#[test]
+fn async_call_await_captures_return_value() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        FUNC WORK($job: STRING) {
+            RETURN "did-{{ $job }}"
+        }
+        LET $t: HANDLE = ASYNC CALL WORK("job")
+        LET $o: STRING = AWAIT $t
+        WRITE o.txt "{{ $o }}"
+    "#};
+    run_script(&root, script).expect("async call + await runs");
+    assert_eq!(read_trimmed(&root.join("o.txt").unwrap()), "did-job");
+}
+
 #[test]
 fn assert_file_accepts_matching_content() {
     let temp = GuardedPath::tempdir().unwrap();
@@ -1378,6 +1573,7 @@ fn _assert_step_kind_exhaustiveness(kind: &StepKind) {
         StepKind::For { .. } => {}
         StepKind::If { .. } => {}
         StepKind::Assign { .. } => {}
+        StepKind::Set { .. } => {}
         StepKind::AssignCapture { .. } => {}
         StepKind::AssignAsync { .. } => {}
         StepKind::Await { .. } => {}
@@ -1385,6 +1581,12 @@ fn _assert_step_kind_exhaustiveness(kind: &StepKind) {
         StepKind::Cancel { .. } => {}
         StepKind::Timeout { .. } => {}
         StepKind::Sleep { .. } => {}
+        StepKind::FuncDef { .. } => {}
+        StepKind::Call { .. } => {}
+        StepKind::Return { .. } => {}
+        StepKind::While { .. } => {}
+        StepKind::Break => {}
+        StepKind::Continue => {}
     }
 }
 
@@ -1405,7 +1607,7 @@ fn cancel_blocks_and_await_reports_cancelled() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        LET $t = ASYNC SLEEP 30s
+        LET $t: HANDLE = ASYNC SLEEP 30s
         CANCEL $t
         WRITE "resumed.txt" "ok"
         AWAIT $t
@@ -1427,7 +1629,7 @@ fn cancel_double_reports_already_cancelled() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        LET $t = ASYNC SLEEP 30s
+        LET $t: HANDLE = ASYNC SLEEP 30s
         CANCEL $t
         CANCEL $t
     "#};
@@ -1440,8 +1642,11 @@ fn cancel_double_reports_already_cancelled() {
 fn cancel_previously_awaited_task_fails() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    let err = run_script(&root, "LET $t = ASYNC ECHO hi\nAWAIT $t\nCANCEL $t\n")
-        .expect_err("CANCEL after AWAIT must fail");
+    let err = run_script(
+        &root,
+        "LET $t: HANDLE = ASYNC ECHO hi\nAWAIT $t\nCANCEL $t\n",
+    )
+    .expect_err("CANCEL after AWAIT must fail");
     assert!(
         err.to_string()
             .contains("already been awaited or does not exist"),
@@ -1456,7 +1661,7 @@ fn timeout_preempts_hung_await() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        LET $t = ASYNC SLEEP 30s
+        LET $t: HANDLE = ASYNC SLEEP 30s
         TIMEOUT 500ms AWAIT $t
     "#};
     let start = Instant::now();
@@ -1475,7 +1680,7 @@ fn concurrent_cancel_and_await_race() {
     // A background thread CANCELs while the main thread AWAITs the same
     // task. Every outcome must report cancellation — never TaskNotFound.
     let script = indoc! {r#"
-        LET $t = ASYNC SLEEP 30s
+        LET $t: HANDLE = ASYNC SLEEP 30s
         ASYNC {
             CANCEL $t
         }
@@ -1501,7 +1706,7 @@ fn concurrent_cancel_blocks_until_dead() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        LET $t = ASYNC {
+        LET $t: HANDLE = ASYNC {
             SLEEP 5s
             WRITE "leak.txt" "leaked"
         }
@@ -1548,7 +1753,8 @@ fn append_concatenates_content() {
 fn assign_and_interpolate() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    run_script(&root, "LET $msg = hello\nWRITE out.txt $msg\n").expect("assign + write passes");
+    run_script(&root, "LET $msg: STRING = hello\nWRITE out.txt $msg\n")
+        .expect("assign + write passes");
     assert_eq!(read_trimmed(&root.join("out.txt").unwrap()), "hello");
 }
 
@@ -1561,7 +1767,7 @@ fn for_loop_iterates_array() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        FOR $f IN ["a", "b", "c"] {
+        FOR $f: STRING IN ["a", "b", "c"] {
             WRITE "{{ $f }}.txt" "{{ $f }}"
         }
     "#};
@@ -1621,11 +1827,11 @@ fn block_scopes_variables_env_and_workdir_while_leaking_files_and_pipes() {
     let script = indoc! {r#"
         MKDIR sub_outer
         MKDIR sub_outer/sub_inner
-        LET $val = "outer_val"
+        LET $val: STRING = "outer_val"
         ENV APP_ENV="outer_env"
         WORKDIR sub_outer
         [bool:true] {
-            LET $val = "inner_val"
+            LET $val: STRING = "inner_val"
             ENV APP_ENV="inner_env"
             WORKDIR sub_inner
             WRITE inner.txt $val
@@ -1636,7 +1842,7 @@ fn block_scopes_variables_env_and_workdir_while_leaking_files_and_pipes() {
         WRITE env_outer.txt "{{ env:APP_ENV }}"
         WITH_IO [stdin=pipe:inner_pipe] WRITE from_block.txt
         IF true {
-            LET $branch = "branch_val"
+            LET $branch: STRING = "branch_val"
             ENV BRANCH_ENV="branch_env"
         }
         WRITE branch_check.txt $val
@@ -1683,11 +1889,11 @@ fn for_loop_body_mutations_do_not_leak() {
     let script = indoc! {r#"
         MKDIR w
         MKDIR w/sub
-        LET $x = "outer"
+        LET $x: STRING = "outer"
         ENV LOOP_ENV="outer"
         WORKDIR w
-        FOR $f IN ["a", "b"] {
-            LET $x = "inner"
+        FOR $f: STRING IN ["a", "b"] {
+            LET $x: STRING = "inner"
             ENV LOOP_ENV="inner"
             WORKDIR sub
             WRITE "{{ $f }}.txt" "{{ $x }}-{{ env:LOOP_ENV }}"
@@ -2113,7 +2319,7 @@ fn read_large_file_streams_without_oom() {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdout,
-                    pipe: Some(pipe_name.clone()),
+                    pipe: Some(oxdock_parser::PipeTarget::Name(pipe_name.clone())),
                 }],
                 cmd: Box::new(read_steps[0].kind.clone()),
             },
@@ -2125,7 +2331,7 @@ fn read_large_file_streams_without_oom() {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdin,
-                    pipe: Some(pipe_name),
+                    pipe: Some(oxdock_parser::PipeTarget::Name(pipe_name)),
                 }],
                 cmd: Box::new(StepKind::Write {
                     path: "output.txt".into(),
@@ -2168,7 +2374,7 @@ fn read_stdin_streaming_via_pipe() {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdout,
-                    pipe: Some("pipe-read".to_string()),
+                    pipe: Some(oxdock_parser::PipeTarget::Name("pipe-read".to_string())),
                 }],
                 cmd: Box::new(StepKind::Read(Some("source.txt".into()))),
             },
@@ -2180,7 +2386,7 @@ fn read_stdin_streaming_via_pipe() {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdin,
-                    pipe: Some("pipe-read".to_string()),
+                    pipe: Some(oxdock_parser::PipeTarget::Name("pipe-read".to_string())),
                 }],
                 cmd: Box::new(StepKind::Write {
                     path: "dest.txt".into(),
@@ -2267,9 +2473,9 @@ fn read_line_ping_pong_proves_live_streaming() {
     // (which would surface as empty reads) are impossible; they exit via
     // one-shot control pipes at the end.
     let script = indoc! {r#"
-        LET $keep_tx = WITH_IO [stdout=pipe:tx, stdin=pipe:ctl_tx] ASYNC READ_LINE $ktx
-        LET $keep_rx = WITH_IO [stdout=pipe:rx, stdin=pipe:ctl_rx] ASYNC READ_LINE $krx
-        LET $live = ASYNC {
+        LET $keep_tx: HANDLE = WITH_IO [stdout=pipe:tx, stdin=pipe:ctl_tx] ASYNC READ_LINE $ktx
+        LET $keep_rx: HANDLE = WITH_IO [stdout=pipe:rx, stdin=pipe:ctl_rx] ASYNC READ_LINE $krx
+        LET $live: HANDLE = ASYNC {
             WITH_IO [stdin=pipe:tx] READ_LINE $a
             WITH_IO [stdout=pipe:rx] ECHO "{{ $a }}"
             WITH_IO [stdin=pipe:tx] READ_LINE $b
@@ -2312,7 +2518,7 @@ fn async_self_referential_write_then_read_sees_eof() {
     // for the whole task (which would deadlock the consumer step waiting
     // for a close that never comes).
     let script = indoc! {r#"
-        LET $t = ASYNC {
+        LET $t: HANDLE = ASYNC {
             WITH_IO [stdout=pipe:p] ECHO "hello"
             WITH_IO [stdin=pipe:p] WRITE got.txt
         }
@@ -2348,7 +2554,7 @@ fn timeout_wraps_block_and_await() {
     let root = guard_root(&temp);
     run_script(
         &root,
-        "LET $task = ASYNC {\nECHO quick\n}\nTIMEOUT 30s {\nAWAIT $task\nWRITE joined.txt yes\n}\n",
+        "LET $task: HANDLE = ASYNC {\nECHO quick\n}\nTIMEOUT 30s {\nAWAIT $task\nWRITE joined.txt yes\n}\n",
     )
     .expect("bounded await must succeed");
     assert_eq!(read_trimmed(&root.join("joined.txt").unwrap()), "yes");
@@ -2416,8 +2622,11 @@ fn sleep_completes_and_is_cancellable() {
 fn sleep_accepts_variable_duration() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    run_script(&root, "LET $d = \"50ms\"\nSLEEP $d\nWRITE awake.txt yes\n")
-        .expect("variable sleep must complete");
+    run_script(
+        &root,
+        "LET $d: DURATION = \"50ms\"\nSLEEP $d\nWRITE awake.txt yes\n",
+    )
+    .expect("variable sleep must complete");
     assert_eq!(read_trimmed(&root.join("awake.txt").unwrap()), "yes");
 }
 
@@ -2438,7 +2647,7 @@ fn sleep_rejects_garbage_duration_at_lower() {
 fn exit_accepts_variable_code() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    let err = run_script(&root, "LET $c = \"3\"\nEXIT $c\n").expect_err("exit must abort");
+    let err = run_script(&root, "LET $c: INT = \"3\"\nEXIT $c\n").expect_err("exit must abort");
     assert!(
         err.to_string().contains("EXIT requested with code 3"),
         "expected exit error, got: {err:#}"
@@ -2462,8 +2671,11 @@ fn exit_rejects_garbage_code_at_lower() {
 fn timeout_accepts_variable_duration() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    run_script(&root, "LET $d = \"50ms\"\nTIMEOUT $d WRITE done.txt yes\n")
-        .expect("variable timeout must complete");
+    run_script(
+        &root,
+        "LET $d: DURATION = \"50ms\"\nTIMEOUT $d WRITE done.txt yes\n",
+    )
+    .expect("variable timeout must complete");
     assert_eq!(read_trimmed(&root.join("done.txt").unwrap()), "yes");
 }
 

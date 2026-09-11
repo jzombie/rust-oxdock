@@ -4,22 +4,40 @@ Scripts run during `rustc`, and their artifacts ship inside the binary with zero
 use oxdock_macros::oxdock_embed;
 
 oxdock_embed! {
-    // Embedded resources are mapped to `HelloAssets::get(resource)`
-    name: HelloAssets,
+    // Embedded resources are mapped to `SiteAssets::get(resource)`
+    name: SiteAssets,
     script: {
+        // Scripts run in an ephemeral snapshot workspace: every command
+        // sees an isolated temp dir, so the local checkout stays untouched
+        // unless the script opts in with WORKSPACE LOCAL. Finished assets
+        // are staged to out_dir below, where rustc scoops them up with
+        // include_bytes!.
         ENV PROJECT=OxDock
         MKDIR dist
-        WRITE dist/hello.txt Built with \{{ env:PROJECT }}
-        ASSERT_FILE dist/hello.txt Built with \{{ env:PROJECT }}
+        // Provenance comes from the shell: only the matching gate runs,
+        // so this stays green on every OS in CI.
+        [unix] LET $os: STRING = RUN uname -srm
+        [windows] LET $os: STRING = RUN ver
+        LET $toolchain: STRING = RUN cargo --version
+        WRITE dist/os.txt "\{{ $os }}"
+        WRITE dist/toolchain.txt "\{{ $toolchain }}"
+        WRITE dist/manifest.txt "os toolchain"
+        ASSERT_FILE dist/os.txt
+        ASSERT_FILE dist/toolchain.txt
+        ASSERT_FILE dist/manifest.txt "os toolchain"
     },
     // Generated assets land under target/, keeping the source tree clean
     out_dir: "target/prebuilt",
 }
 
 fn main() {
-    // Verify we can read the resource we just created
-    let file = HelloAssets::get("dist/hello.txt").expect("dist/hello.txt must be embedded");
-    assert_eq!(file.data.as_ref(), b"Built with OxDock");
+    // Verify we can read the resources we just created
+    let manifest = SiteAssets::get("dist/manifest.txt").expect("manifest must be embedded");
+    assert_eq!(manifest.data.as_ref(), b"os toolchain");
+    let toolchain = SiteAssets::get("dist/toolchain.txt").expect("toolchain must be embedded");
+    assert!(toolchain.data.starts_with(b"cargo "));
+    let os = SiteAssets::get("dist/os.txt").expect("os must be embedded");
+    assert!(!os.data.is_empty());
 }
 ```
 

@@ -1,9 +1,107 @@
 use anyhow::{Result, bail};
-use oxdock_parser::{Arg, ArgPart, CompareOp, Expr, LogicalOp, Value};
+use oxdock_parser::{Arg, ArgPart, CompareOp, Expr, LogicalOp, TypeKind, Value};
 use oxdock_process::ProcessManager;
 
 use super::state::ExecState;
 use super::steps::StepCtx;
+
+/// Coerce a runtime Value into a declared TypeKind. Single coercion point.
+/// Pipe targets validate against the live PipeRegistry via ExecState.
+pub(crate) fn coerce_value<P: ProcessManager>(
+    value: Value,
+    expected: TypeKind,
+    state: &ExecState<P>,
+) -> Result<Value> {
+    let expected_label = expected.label();
+    match (value, expected) {
+        (v @ Value::String(_), TypeKind::String) => Ok(v),
+        (v @ Value::Int(_), TypeKind::Int) => Ok(v),
+        (v @ Value::Float(_), TypeKind::Float) => Ok(v),
+        (v @ Value::Bool(_), TypeKind::Bool) => Ok(v),
+        (Value::Pipe(n), TypeKind::Pipe) => {
+            // The `pipe:NAME` operator is the explicit handle constructor:
+            // a fresh name registers on first use (existing entries keep
+            // their type), so pipes can be declared before any `WITH_IO`
+            // mentions them.
+            if !state.io.pipe_exists(&n) {
+                state.io.ensure_pipe_for(&n, false)?;
+            }
+            Ok(Value::Pipe(n))
+        }
+        (v @ Value::List(_), TypeKind::List) => Ok(v),
+        (v @ Value::Map(_), TypeKind::Map) => Ok(v),
+        (v @ Value::TaskHandle(_), TypeKind::Handle) => Ok(v),
+        (v @ Value::Duration(_), TypeKind::Duration) => Ok(v),
+        (v @ Value::Path(_), TypeKind::Path) => Ok(v),
+        (Value::String(s), TypeKind::Int) => {
+            s.trim().parse::<i64>().map(Value::Int).map_err(|_| {
+                anyhow::anyhow!("TypeMismatch: expected {expected_label}, got STRING ({s:?})")
+            })
+        }
+        (Value::String(s), TypeKind::Float) => {
+            s.trim().parse::<f64>().map(Value::Float).map_err(|_| {
+                anyhow::anyhow!("TypeMismatch: expected {expected_label}, got STRING ({s:?})")
+            })
+        }
+        (Value::String(s), TypeKind::Bool) => match s.trim() {
+            "true" => Ok(Value::Bool(true)),
+            "false" => Ok(Value::Bool(false)),
+            _ => Err(anyhow::anyhow!(
+                "TypeMismatch: expected {expected_label}, got STRING ({s:?})"
+            )),
+        },
+        (Value::String(s), TypeKind::Pipe) => {
+            // Strict: plain strings never coerce to pipes, so a handle is
+            // always created explicitly via the `pipe:NAME` operator
+            // (`LET $p: PIPE = pipe:log`). Anything else is a TypeMismatch.
+            Err(anyhow::anyhow!(
+                "TypeMismatch: expected {expected_label}, got STRING ({s:?}); use pipe:NAME to name a pipe"
+            ))
+        }
+        (Value::String(s), TypeKind::Duration) => oxdock_parser::command::parse_duration(s.trim())
+            .map(Value::Duration)
+            .map_err(|_| {
+                anyhow::anyhow!("TypeMismatch: expected {expected_label}, got STRING ({s:?})")
+            }),
+        (Value::String(s), TypeKind::Path) => {
+            // Narrow exception: materializing the PATH payload. Guard checks
+            // still run through oxdock-fs at use time.
+            #[allow(clippy::disallowed_types)]
+            let path = std::path::PathBuf::from(s.trim());
+            Ok(Value::Path(path))
+        }
+        (Value::String(s), TypeKind::List) => Err(anyhow::anyhow!(
+            "TypeMismatch: expected {expected_label}, got STRING ({s:?})"
+        )),
+        (Value::String(s), TypeKind::Map) => Err(anyhow::anyhow!(
+            "TypeMismatch: expected {expected_label}, got STRING ({s:?})"
+        )),
+        (Value::String(s), TypeKind::Handle) => Err(anyhow::anyhow!(
+            "TypeMismatch: expected {expected_label}, got STRING ({s:?})"
+        )),
+        (Value::Int(n), TypeKind::String) => Ok(Value::String(n.to_string())),
+        (Value::Float(f), TypeKind::String) => Ok(Value::String(f.to_string())),
+        (Value::Bool(b), TypeKind::String) => Ok(Value::String(b.to_string())),
+        (Value::Int(n), TypeKind::Float) => Ok(Value::Float(n as f64)),
+        (Value::Float(f), TypeKind::Int) => {
+            if f.fract() == 0.0 && f.is_finite() {
+                Ok(Value::Int(f as i64))
+            } else {
+                Err(anyhow::anyhow!(
+                    "TypeMismatch: expected {expected_label}, got FLOAT ({f:?})"
+                ))
+            }
+        }
+        (Value::Duration(d), TypeKind::String) => {
+            Ok(Value::String(oxdock_parser::command::format_duration(&d)))
+        }
+        (Value::Path(p), TypeKind::String) => Ok(Value::String(p.to_string_lossy().to_string())),
+        (Value::Pipe(n), TypeKind::String) => Ok(Value::String(n)),
+        (v, _) => Err(anyhow::anyhow!(
+            "TypeMismatch: expected {expected_label}, got value ({v:?})"
+        )),
+    }
+}
 
 /// Resolve an [`Arg`] using an [`ExecState`] directly (no [`StepCtx`] needed).
 /// Handles `Arg::String` and all-`Text` `Arg::Parts` — `Arg::Expr` requires a
@@ -121,13 +219,15 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
         Expr::Var(name) => cx
             .state
             .get_var(name)
-            .or_else(|| cx.state.envs.get(name).map(|v| Value::String(v.clone())))
             .ok_or_else(|| anyhow::anyhow!("undefined variable ${name}")),
+        Expr::Env(key) => match cx.state.envs.get(key) {
+            Some(v) => Ok(Value::String(v.clone())),
+            None => anyhow::bail!("undefined environment variable `env:{key}`"),
+        },
         Expr::KeyPath { base, keys } => {
             let mut current = cx
                 .state
                 .get_var(base)
-                .or_else(|| cx.state.envs.get(base).map(|v| Value::String(v.clone())))
                 .ok_or_else(|| anyhow::anyhow!("undefined variable ${base}"))?;
             for key in keys {
                 match current {
@@ -146,7 +246,14 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
                             .cloned()
                             .ok_or_else(|| anyhow::anyhow!("Index {} out of bounds", idx))?;
                     }
-                    Value::String(_) | Value::Bool(_) | Value::Int(_) | Value::TaskHandle(_) => {
+                    Value::String(_)
+                    | Value::Bool(_)
+                    | Value::Int(_)
+                    | Value::Float(_)
+                    | Value::Pipe(_)
+                    | Value::Duration(_)
+                    | Value::Path(_)
+                    | Value::TaskHandle(_) => {
                         bail!("Cannot traverse into scalar value at key '{}'", key);
                     }
                 }
@@ -172,6 +279,7 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
             "GLOB" => evaluate_glob(args, cx),
             "LOAD_TOML" => evaluate_load_toml(args, cx),
             "LOAD_JSON" => evaluate_load_json(args, cx),
+            "INSPECT" => evaluate_inspect(args, cx),
             _ => bail!("unknown function {name}"),
         },
         Expr::Compare { op, left, right } => {
@@ -215,6 +323,21 @@ pub(crate) fn is_truthy(val: &Value) -> Result<bool> {
         Value::Bool(b) => Ok(*b),
         other => bail!("Type Error: condition must be a Bool, found {:?}", other),
     }
+}
+
+/// Evaluate an `INSPECT($var)` call to a MAP snapshot: declared type and
+/// value plus live details (pipe backend stats, task phase). Like
+/// `LOAD_JSON`/`LOAD_TOML`, this evaluates to a value without running
+/// script steps. The argument must be a `$variable`, not an arbitrary
+/// expression, so the snapshot can name what it describes.
+fn evaluate_inspect<P: ProcessManager>(args: &[Expr], cx: &mut StepCtx<'_, P>) -> Result<Value> {
+    let [arg] = args else {
+        bail!("INSPECT requires exactly one argument: INSPECT($var)");
+    };
+    let Expr::Var(var) = arg else {
+        bail!("INSPECT requires a $variable argument, found {arg:?}");
+    };
+    super::handlers::inspect_var_map(cx, var).map(Value::Map)
 }
 
 /// Evaluate a `GLOB()` function call.
@@ -329,7 +452,7 @@ fn json_to_value(v: serde_json::Value) -> Value {
             if let Some(i) = n.as_i64() {
                 Value::Int(i)
             } else if let Some(f) = n.as_f64() {
-                Value::String(f.to_string())
+                Value::Float(f)
             } else {
                 Value::String(n.to_string())
             }
@@ -419,12 +542,11 @@ pub(crate) fn expand_string<P: ProcessManager>(
                         // {{ $var }} or {{ $var.path.0 }} — look up in scope chain.
                         // Parse key-path from the extracted string, NOT from chars.
                         // Trim whitespace from segments to tolerate spaces around dots.
+                        // Bare $var never reads the environment; use {{ env:KEY }}.
                         let mut parts = var_expr.split('.');
                         if let Some(base_var) = parts.next() {
                             let base_trim = base_var.trim();
-                            let mut current = state
-                                .get_var(base_trim)
-                                .or_else(|| env.get(base_trim).map(|v| Value::String(v.clone())));
+                            let mut current = state.get_var(base_trim);
                             for part in parts {
                                 let part_trim = part.trim();
                                 current = match current {
@@ -540,7 +662,11 @@ pub(crate) fn format_value_for_string(val: &Value) -> String {
     match val {
         Value::String(s) => s.clone(),
         Value::Int(i) => i.to_string(),
+        Value::Float(f) => f.to_string(),
         Value::Bool(b) => b.to_string(),
+        Value::Pipe(n) => format!("pipe:{n}"),
+        Value::Duration(d) => oxdock_parser::command::format_duration(d),
+        Value::Path(p) => p.to_string_lossy().to_string(),
         Value::List(items) => items
             .iter()
             .map(format_value_for_string)

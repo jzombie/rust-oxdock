@@ -113,6 +113,7 @@ fn run_shell_routes_dollar_forms_to_dsl_or_shell() {
             guard: None,
             kind: StepKind::Assign {
                 var: "who".into(),
+                decl_type: oxdock_parser::TypeKind::String,
                 expr: Expr::Literal(Value::String("world".to_string())),
             },
             scope_enter: 0,
@@ -160,6 +161,7 @@ fn run_exec_resolves_and_flattens_argv() {
             guard: None,
             kind: StepKind::Assign {
                 var: "args".into(),
+                decl_type: oxdock_parser::TypeKind::List,
                 expr: Expr::List(vec![
                     Expr::Literal(Value::String("-v".to_string())),
                     Expr::Literal(Value::String("--all".to_string())),
@@ -255,6 +257,7 @@ fn run_exec_resolves_every_variable_type() {
             guard: None,
             kind: StepKind::Assign {
                 var: "who".into(),
+                decl_type: oxdock_parser::TypeKind::String,
                 expr: Expr::Literal(Value::String("world".to_string())),
             },
             scope_enter: 0,
@@ -264,6 +267,7 @@ fn run_exec_resolves_every_variable_type() {
             guard: None,
             kind: StepKind::Assign {
                 var: "m".into(),
+                decl_type: oxdock_parser::TypeKind::Map,
                 expr: Expr::Map(vec![(
                     "k".to_string(),
                     Expr::Literal(Value::String("keyval".to_string())),
@@ -402,6 +406,7 @@ fn run_exec_treats_variable_values_as_opaque() {
             guard: None,
             kind: StepKind::Assign {
                 var: "data".into(),
+                decl_type: oxdock_parser::TypeKind::String,
                 expr: Expr::Literal(Value::String("\\{{ env:SECRET }}".to_string())),
             },
             scope_enter: 0,
@@ -590,7 +595,7 @@ fn with_io_pipe_routes_stdout_to_run_stdin() {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdout,
-                    pipe: Some("shared".into()),
+                    pipe: Some(oxdock_parser::PipeTarget::Name("shared".into())),
                 }],
                 cmd: Box::new(StepKind::Echo("hello".into())),
             },
@@ -602,7 +607,7 @@ fn with_io_pipe_routes_stdout_to_run_stdin() {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdin,
-                    pipe: Some("shared".into()),
+                    pipe: Some(oxdock_parser::PipeTarget::Name("shared".into())),
                 }],
                 cmd: Box::new(StepKind::Run("cat".into())),
             },
@@ -646,7 +651,7 @@ fn async_echo_pipe_write_preserves_exact_bytes() {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdout,
-                    pipe: Some("async_out".into()),
+                    pipe: Some(oxdock_parser::PipeTarget::Name("async_out".into())),
                 }],
                 cmd: Box::new(StepKind::AsyncBlock {
                     body: vec![step(StepKind::Echo("hello".into()))],
@@ -660,7 +665,7 @@ fn async_echo_pipe_write_preserves_exact_bytes() {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdin,
-                    pipe: Some("async_out".into()),
+                    pipe: Some(oxdock_parser::PipeTarget::Name("async_out".into())),
                 }],
                 cmd: Box::new(StepKind::Write {
                     path: "async_out.txt".into(),
@@ -693,12 +698,13 @@ fn async_stdin_pipe_unblocks_background_write() {
             guard: None,
             kind: StepKind::AssignAsync {
                 var: "writer".into(),
+                decl_type: oxdock_parser::TypeKind::Handle,
                 body: vec![Step {
                     guard: None,
                     kind: StepKind::WithIo {
                         bindings: vec![IoBinding {
                             stream: IoStream::Stdin,
-                            pipe: Some("in_chan".into()),
+                            pipe: Some(oxdock_parser::PipeTarget::Name("in_chan".into())),
                         }],
                         cmd: Box::new(StepKind::Write {
                             path: "inline_direct.txt".into(),
@@ -717,7 +723,7 @@ fn async_stdin_pipe_unblocks_background_write() {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdout,
-                    pipe: Some("in_chan".into()),
+                    pipe: Some(oxdock_parser::PipeTarget::Name("in_chan".into())),
                 }],
                 cmd: Box::new(StepKind::Echo("unblock_inline_payload".into())),
             },
@@ -759,6 +765,9 @@ fn create_exec_state(fs: MockFs) -> ExecState<MockProcessManager> {
         inside_async: false,
         keeper_expiry: None,
         cancellable: false,
+        funcs: Arc::new(std::collections::HashMap::new()),
+        host_funcs: Arc::new(std::collections::HashMap::new()),
+        call_depth: 0,
         _marker: std::marker::PhantomData,
     };
     // Mirror production (`run_steps_with_manager`): push a global variable
@@ -863,6 +872,92 @@ fn write_interpolates_env_values() {
     assert_eq!(written, Some("val bar-baz".into()));
 }
 
+#[test]
+fn for_int_key_binds_list_indices() {
+    let steps = crate::parse_script(
+        "LET $items: LIST = [\"a\", \"b\"]\nFOR $i: INT, $v: STRING IN $items {\nWRITE \"{{ $v }}.txt\" \"{{ $i }}\"\n}\n",
+    )
+    .expect("parse typed loop");
+    let (_cwd, files) = run_with_mock_fs(&steps);
+    let content = |name: &str| {
+        files
+            .iter()
+            .find(|(k, _)| k.ends_with(name))
+            .map(|(_, v)| String::from_utf8_lossy(v).to_string())
+    };
+    assert_eq!(content("a.txt"), Some("0".to_string()));
+    assert_eq!(content("b.txt"), Some("1".to_string()));
+
+    // Map iteration with an INT key is rejected: map keys are strings.
+    let steps = crate::parse_script(
+        "LET $m: MAP = {\"k\": \"v\"}\nFOR $k: INT, $v: STRING IN $m {\nWRITE x.txt \"hi\"\n}\n",
+    )
+    .expect("parse");
+    let fs = MockFs::new();
+    let mut state = create_exec_state(fs.clone());
+    let mut proc = MockProcessManager::default();
+    let err = execute_steps(
+        &mut state,
+        &mut proc,
+        &steps,
+        CommandStdin::Null,
+        false,
+        None,
+        None,
+        true,
+    )
+    .expect_err("INT key over MAP must fail");
+    assert!(
+        format!("{err:#}").contains("requires a STRING key"),
+        "unexpected error: {err:#}"
+    );
+}
+
+#[test]
+fn declared_bool_vs_string_treatment_differs() {
+    // Same source text `!true` means different things per declared type:
+    // BOOL evaluates the expression to false; quoted STRING stays literal.
+    let steps = crate::parse_script(
+        "LET $b: BOOL = !true\nLET $s: STRING = \"!true\"\nWRITE b.txt \"{{ $b }}\"\nWRITE s.txt \"{{ $s }}\"\nIF $b {\nWRITE wrong.txt \"bool was truthy\"\n}\n",
+    )
+    .expect("parse typed declarations");
+    let (_cwd, files) = run_with_mock_fs(&steps);
+    let content = |name: &str| {
+        files
+            .iter()
+            .find(|(k, _)| k.ends_with(name))
+            .map(|(_, v)| String::from_utf8_lossy(v).to_string())
+    };
+    assert_eq!(content("b.txt"), Some("false".to_string()));
+    assert_eq!(content("s.txt"), Some("!true".to_string()));
+    assert!(
+        content("wrong.txt").is_none(),
+        "BOOL false must skip the IF branch"
+    );
+
+    // A STRING variable is not a valid condition.
+    let steps = crate::parse_script("LET $s: STRING = \"!true\"\nIF $s {\nWRITE x.txt \"hi\"\n}\n")
+        .expect("parse");
+    let fs = MockFs::new();
+    let mut state = create_exec_state(fs.clone());
+    let mut proc = MockProcessManager::default();
+    let err = execute_steps(
+        &mut state,
+        &mut proc,
+        &steps,
+        CommandStdin::Null,
+        false,
+        None,
+        None,
+        true,
+    )
+    .expect_err("STRING condition must fail");
+    assert!(
+        format!("{err:#}").contains("must be a Bool"),
+        "unexpected error: {err:#}"
+    );
+}
+
 #[cfg_attr(
     miri,
     ignore = "GuardedPath::tempdir relies on OS tempdirs; blocked under Miri isolation"
@@ -904,7 +999,7 @@ fn cat_and_capture_expand_env_paths() {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdout,
-                    pipe: Some("cap-cat".to_string()),
+                    pipe: Some(oxdock_parser::PipeTarget::Name("cap-cat".to_string())),
                 }],
                 cmd: Box::new(StepKind::Read(Some("{{ env:SNIPPET }}".into()))),
             },
@@ -916,7 +1011,7 @@ fn cat_and_capture_expand_env_paths() {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdin,
-                    pipe: Some("cap-cat".to_string()),
+                    pipe: Some(oxdock_parser::PipeTarget::Name("cap-cat".to_string())),
                 }],
                 cmd: Box::new(StepKind::Write {
                     path: "{{ env:OUT_FILE }}".into(),
@@ -1268,11 +1363,11 @@ fn with_io_rejects_duplicate_stdout_binding() {
             bindings: vec![
                 IoBinding {
                     stream: IoStream::Stdout,
-                    pipe: Some("p".into()),
+                    pipe: Some(oxdock_parser::PipeTarget::Name("p".into())),
                 },
                 IoBinding {
                     stream: IoStream::Stdout,
-                    pipe: Some("p".into()),
+                    pipe: Some(oxdock_parser::PipeTarget::Name("p".into())),
                 },
             ],
             cmd: Box::new(StepKind::Echo("x".into())),
@@ -1317,11 +1412,11 @@ fn with_io_rejects_duplicate_stdin_and_stderr_bindings() {
                 bindings: vec![
                     IoBinding {
                         stream: stream_a,
-                        pipe: Some("p".into()),
+                        pipe: Some(oxdock_parser::PipeTarget::Name("p".into())),
                     },
                     IoBinding {
                         stream: stream_b,
-                        pipe: Some("p".into()),
+                        pipe: Some(oxdock_parser::PipeTarget::Name("p".into())),
                     },
                 ],
                 cmd: Box::new(StepKind::Echo("x".into())),
@@ -1358,7 +1453,7 @@ fn with_io_async_single_run_promotes_os_pipe() {
         kind: StepKind::WithIo {
             bindings: vec![IoBinding {
                 stream: IoStream::Stdout,
-                pipe: Some("live".into()),
+                pipe: Some(oxdock_parser::PipeTarget::Name("live".into())),
             }],
             cmd: Box::new(StepKind::AsyncBlock {
                 body: vec![Step {
@@ -1441,7 +1536,7 @@ fn with_io_async_dsl_body_stays_script_pipe() {
         kind: StepKind::WithIo {
             bindings: vec![IoBinding {
                 stream: IoStream::Stdout,
-                pipe: Some("plain".into()),
+                pipe: Some(oxdock_parser::PipeTarget::Name("plain".into())),
             }],
             cmd: Box::new(StepKind::AsyncBlock {
                 body: vec![Step {
@@ -2194,12 +2289,25 @@ mod escape_props {
         envs: &[(String, String)],
         vars: &[(String, Value)],
     ) -> ExecState<MockProcessManager> {
+        use oxdock_parser::TypeKind;
         let mut state = create_exec_state(MockFs::new());
         for (k, v) in envs {
             Arc::make_mut(&mut state.envs).insert(k.clone(), v.clone());
         }
         for (k, v) in vars {
-            state.set_var(k.clone(), v.clone());
+            let kind = match v {
+                Value::String(_) => TypeKind::String,
+                Value::Int(_) => TypeKind::Int,
+                Value::Float(_) => TypeKind::Float,
+                Value::Bool(_) => TypeKind::Bool,
+                Value::Pipe(_) => TypeKind::Pipe,
+                Value::List(_) => TypeKind::List,
+                Value::Map(_) => TypeKind::Map,
+                Value::Duration(_) => TypeKind::Duration,
+                Value::Path(_) => TypeKind::Path,
+                Value::TaskHandle(_) => TypeKind::Handle,
+            };
+            let _ = state.declare_var(k.clone(), kind, v.clone());
         }
         state
     }
