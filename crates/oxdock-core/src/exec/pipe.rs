@@ -264,7 +264,9 @@ pub(super) enum PipeKindDesc {
     Script,
     /// Zero-copy OS kernel pair. Kernel-side bytes are invisible, so
     /// buffered counts stay 0 and reader/writer counts report pair
-    /// presence, not live takes.
+    /// presence, not live takes. Never constructed under Miri, where
+    /// promotion is compiled out.
+    #[cfg_attr(miri, allow(dead_code))]
     Os,
     /// Host-injected raw handle with no script backend.
     External,
