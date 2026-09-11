@@ -691,6 +691,10 @@ fn emit_expr(expr: &Expr, interp: &[(proc_macro2::Ident, usize)]) -> proc_macro2
             let op_token = match op {
                 oxdock_parser::ast::CompareOp::Eq => quote! { oxdock_parser::ast::CompareOp::Eq },
                 oxdock_parser::ast::CompareOp::Ne => quote! { oxdock_parser::ast::CompareOp::Ne },
+                oxdock_parser::ast::CompareOp::Lt => quote! { oxdock_parser::ast::CompareOp::Lt },
+                oxdock_parser::ast::CompareOp::Le => quote! { oxdock_parser::ast::CompareOp::Le },
+                oxdock_parser::ast::CompareOp::Gt => quote! { oxdock_parser::ast::CompareOp::Gt },
+                oxdock_parser::ast::CompareOp::Ge => quote! { oxdock_parser::ast::CompareOp::Ge },
             };
             let left_tokens = emit_expr(left, interp);
             let right_tokens = emit_expr(right, interp);
@@ -701,6 +705,30 @@ fn emit_expr(expr: &Expr, interp: &[(proc_macro2::Ident, usize)]) -> proc_macro2
                     right: Box::new(#right_tokens),
                 }
             }
+        }
+        Expr::Arithmetic { op, left, right } => {
+            let op_token = match op {
+                oxdock_parser::ast::ArithOp::Add => quote! { oxdock_parser::ast::ArithOp::Add },
+                oxdock_parser::ast::ArithOp::Sub => quote! { oxdock_parser::ast::ArithOp::Sub },
+                oxdock_parser::ast::ArithOp::Mul => quote! { oxdock_parser::ast::ArithOp::Mul },
+                oxdock_parser::ast::ArithOp::Div => quote! { oxdock_parser::ast::ArithOp::Div },
+            };
+            let left_tokens = emit_expr(left, interp);
+            let right_tokens = emit_expr(right, interp);
+            quote! {
+                oxdock_parser::ast::Expr::Arithmetic {
+                    op: #op_token,
+                    left: Box::new(#left_tokens),
+                    right: Box::new(#right_tokens),
+                }
+            }
+        }
+        Expr::CompiledMath(ops) => {
+            let op_tokens: Vec<_> = ops.iter().map(emit_math_op).collect();
+            quote! { oxdock_parser::ast::Expr::CompiledMath(vec![#(#op_tokens),*]) }
+        }
+        Expr::UnsignedIntBoundary(_) => {
+            panic!("internal error: UnsignedIntBoundary must not survive lowering")
         }
         Expr::Logical { op, left, right } => {
             let op_token = match op {
@@ -721,6 +749,36 @@ fn emit_expr(expr: &Expr, interp: &[(proc_macro2::Ident, usize)]) -> proc_macro2
             let inner_tokens = emit_expr(inner, interp);
             quote! { oxdock_parser::ast::Expr::Not(Box::new(#inner_tokens)) }
         }
+    }
+}
+
+fn emit_math_op(op: &oxdock_parser::ast::MathOp) -> proc_macro2::TokenStream {
+    use oxdock_parser::ast::MathOp as M;
+    match op {
+        M::PushConst(v) => {
+            let raw = emit_raw_value(v, &[]);
+            quote! { oxdock_parser::ast::MathOp::PushConst(#raw) }
+        }
+        M::LoadVar(s) => quote! { oxdock_parser::ast::MathOp::LoadVar(#s.to_string()) },
+        M::LoadEnv(k) => quote! { oxdock_parser::ast::MathOp::LoadEnv(#k.to_string()) },
+        M::LoadKeyPath { base, keys } => {
+            quote! { oxdock_parser::ast::MathOp::LoadKeyPath { base: #base.to_string(), keys: vec![#(#keys.to_string()),*] } }
+        }
+        M::Call { name, arity } => {
+            quote! { oxdock_parser::ast::MathOp::Call { name: #name.to_string(), arity: #arity } }
+        }
+        M::Inspect(name) => quote! { oxdock_parser::ast::MathOp::Inspect(#name.to_string()) },
+        M::Neg => quote! { oxdock_parser::ast::MathOp::Neg },
+        M::Add => quote! { oxdock_parser::ast::MathOp::Add },
+        M::Sub => quote! { oxdock_parser::ast::MathOp::Sub },
+        M::Mul => quote! { oxdock_parser::ast::MathOp::Mul },
+        M::Div => quote! { oxdock_parser::ast::MathOp::Div },
+        M::Lt => quote! { oxdock_parser::ast::MathOp::Lt },
+        M::Le => quote! { oxdock_parser::ast::MathOp::Le },
+        M::Gt => quote! { oxdock_parser::ast::MathOp::Gt },
+        M::Ge => quote! { oxdock_parser::ast::MathOp::Ge },
+        M::Eq => quote! { oxdock_parser::ast::MathOp::Eq },
+        M::Ne => quote! { oxdock_parser::ast::MathOp::Ne },
     }
 }
 

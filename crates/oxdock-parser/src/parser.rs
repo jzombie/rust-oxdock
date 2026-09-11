@@ -743,12 +743,63 @@ fn lower_run_exec_pair(
 ) -> Result<StepKind> {
     let mut list = None;
     for inner in pair.into_inner() {
-        if inner.as_rule() == Rule::list_literal {
-            list = Some(parse_list_literal(inner)?);
+        if inner.as_rule() == Rule::run_exec_list {
+            list = Some(parse_run_exec_list(inner)?);
         }
     }
     let list = list.ok_or_else(|| anyhow!("RUN exec form missing list literal"))?;
     lower("RUN", vec![Arg::Expr(list)])
+}
+
+/// Lower a `run_exec_list` pair: like `parse_list_literal` but elements are
+/// atoms only (see `run_exec_arg` in the grammar), so shell bracket content
+/// never parses here. Numeric atoms lower exactly like expression atoms
+/// (including the `i64::MIN` boundary rejection).
+fn parse_run_exec_list(pair: Pair<Rule>) -> Result<Expr> {
+    let mut items = Vec::new();
+    for inner in pair.into_inner() {
+        if inner.as_rule() == Rule::run_exec_arg {
+            let item = parse_run_exec_arg(inner)?;
+            reject_boundary(&item)?;
+            items.push(item);
+        }
+    }
+    Ok(Expr::List(items))
+}
+
+fn parse_run_exec_arg(pair: Pair<Rule>) -> Result<Expr> {
+    let inner = pair
+        .into_inner()
+        .next()
+        .ok_or_else(|| anyhow!("RUN exec argument is empty"))?;
+    match inner.as_rule() {
+        Rule::parenthesized_expr => parse_expr_inner(inner.into_inner().next().unwrap()),
+        Rule::func_call => parse_func_call(inner),
+        Rule::key_path => parse_key_path(inner),
+        Rule::variable => {
+            let name = inner.as_str();
+            let name = name.strip_prefix('$').unwrap_or(name).to_string();
+            Ok(Expr::Var(name))
+        }
+        Rule::env_read => parse_env_read(inner).map(Expr::Env),
+        Rule::pipe_read => parse_pipe_read(inner).map(|name| Expr::Literal(Value::Pipe(name))),
+        Rule::list_literal => parse_list_literal(inner),
+        Rule::map_literal => parse_map_literal(inner),
+        Rule::string_literal | Rule::quoted_string => {
+            let s = parse_quoted_string(inner)?;
+            Ok(Expr::Literal(Value::String(s)))
+        }
+        Rule::numeric_literal => parse_numeric_literal(inner),
+        Rule::bare_word => {
+            let s = inner.as_str().to_string();
+            match s.as_str() {
+                "true" => Ok(Expr::Literal(Value::Bool(true))),
+                "false" => Ok(Expr::Literal(Value::Bool(false))),
+                _ => Ok(Expr::Literal(Value::String(s))),
+            }
+        }
+        _ => bail!("unexpected RUN exec argument rule: {:?}", inner.as_rule()),
+    }
 }
 
 /// Split one `assignment` pair into its key and lowered value.
@@ -2126,9 +2177,17 @@ fn parse_dollar_ident(pair: Pair<Rule>) -> String {
     s.strip_prefix('$').unwrap_or(s).to_string()
 }
 
-use crate::ast::{CompareOp, LogicalOp, Value};
+use crate::ast::{ArithOp, CompareOp, LogicalOp, MathOp, Value};
 
 fn parse_expr(pair: Pair<Rule>) -> Result<Expr> {
+    let expr = parse_expr_inner(pair)?;
+    if matches!(expr, Expr::UnsignedIntBoundary(_)) {
+        bail!("integer overflow: 9223372036854775808 exceeds i64::MAX");
+    }
+    Ok(expr)
+}
+
+fn parse_expr_inner(pair: Pair<Rule>) -> Result<Expr> {
     let inner = pair.into_inner().next().unwrap();
     match inner.as_rule() {
         Rule::expr_logical_or => parse_expr_logical_or(inner),
@@ -2166,6 +2225,8 @@ fn parse_expr_logical_and(pair: Pair<Rule>) -> Result<Expr> {
             ),
         };
         let right = parse_expr_comparison(inner.next().unwrap())?;
+        reject_boundary(&left)?;
+        reject_boundary(&right)?;
         left = Expr::Logical {
             op,
             left: Box::new(left),
@@ -2177,45 +2238,350 @@ fn parse_expr_logical_and(pair: Pair<Rule>) -> Result<Expr> {
 
 fn parse_expr_comparison(pair: Pair<Rule>) -> Result<Expr> {
     let mut inner = pair.into_inner();
-    let left = parse_expr_unary(inner.next().unwrap())?;
+    let left = parse_expr_ordering(inner.next().unwrap())?;
     if let Some(op_pair) = inner.next() {
         let op = match op_pair.as_rule() {
             Rule::eq_op => CompareOp::Eq,
             Rule::neq_op => CompareOp::Ne,
             _ => bail!("unexpected comparison operator: {:?}", op_pair.as_rule()),
         };
-        let right = parse_expr_unary(inner.next().unwrap())?;
-        Ok(Expr::Compare {
-            op,
-            left: Box::new(left),
-            right: Box::new(right),
-        })
-    } else {
-        Ok(left)
+        let right = parse_expr_ordering(inner.next().unwrap())?;
+        return make_compare(op, left, right);
     }
+    Ok(left)
+}
+
+fn parse_expr_ordering(pair: Pair<Rule>) -> Result<Expr> {
+    let mut inner = pair.into_inner();
+    let left = parse_expr_add_sub(inner.next().unwrap())?;
+    if let Some(op_pair) = inner.next() {
+        let op = match op_pair.as_rule() {
+            Rule::lt_op => CompareOp::Lt,
+            Rule::le_op => CompareOp::Le,
+            Rule::gt_op => CompareOp::Gt,
+            Rule::ge_op => CompareOp::Ge,
+            _ => bail!("unexpected ordering operator: {:?}", op_pair.as_rule()),
+        };
+        let right = parse_expr_add_sub(inner.next().unwrap())?;
+        return make_compare(op, left, right);
+    }
+    Ok(left)
+}
+
+fn parse_expr_add_sub(pair: Pair<Rule>) -> Result<Expr> {
+    let mut inner = pair.into_inner();
+    let mut left = parse_expr_mul_div(inner.next().unwrap())?;
+    while let Some(op_pair) = inner.next() {
+        let op = match op_pair.as_rule() {
+            Rule::plus_op => ArithOp::Add,
+            Rule::minus_op => ArithOp::Sub,
+            _ => bail!("unexpected additive operator: {:?}", op_pair.as_rule()),
+        };
+        let right = parse_expr_mul_div(inner.next().unwrap())?;
+        left = make_arith(op, left, right)?;
+    }
+    Ok(left)
+}
+
+fn parse_expr_mul_div(pair: Pair<Rule>) -> Result<Expr> {
+    let mut inner = pair.into_inner();
+    let mut left = parse_expr_unary(inner.next().unwrap())?;
+    while let Some(op_pair) = inner.next() {
+        let op = match op_pair.as_rule() {
+            Rule::star_op => ArithOp::Mul,
+            Rule::slash_op => ArithOp::Div,
+            _ => bail!(
+                "unexpected multiplicative operator: {:?}",
+                op_pair.as_rule()
+            ),
+        };
+        let right = parse_expr_unary(inner.next().unwrap())?;
+        left = make_arith(op, left, right)?;
+    }
+    Ok(left)
 }
 
 fn parse_expr_unary(pair: Pair<Rule>) -> Result<Expr> {
-    let mut bangs = 0u32;
+    let mut prefixes = Vec::new();
     let mut atom = None;
     for inner in pair.into_inner() {
         match inner.as_rule() {
-            Rule::not_op => bangs += 1,
+            Rule::not_op => prefixes.push(false),
+            Rule::neg_op => prefixes.push(true),
             Rule::expr_atom => atom = Some(parse_expr_atom(inner)?),
             _ => bail!("unexpected unary operand rule: {:?}", inner.as_rule()),
         }
     }
-    let mut expr = atom.ok_or_else(|| anyhow!("'!' requires an expression operand"))?;
-    for _ in 0..bangs {
-        expr = Expr::Not(Box::new(expr));
+    let mut expr = atom.ok_or_else(|| anyhow!("'!'/'-' requires an expression operand"))?;
+    // Innermost prefix is closest to the atom: apply in reverse order.
+    for is_neg in prefixes.into_iter().rev() {
+        if is_neg {
+            expr = apply_unary_neg(expr)?;
+        } else {
+            reject_boundary(&expr)?;
+            expr = Expr::Not(Box::new(expr));
+        }
     }
     Ok(expr)
+}
+
+/// Reject a staged `UnsignedIntBoundary` in any position where unary `-`
+/// cannot consume it (every composite constructor calls this on children).
+fn reject_boundary(expr: &Expr) -> Result<()> {
+    if matches!(expr, Expr::UnsignedIntBoundary(_)) {
+        bail!("integer overflow: 9223372036854775808 exceeds i64::MAX");
+    }
+    Ok(())
+}
+
+/// Apply unary `-`: fold literals, consume the `i64::MIN` boundary, else
+/// compile to RPN `Neg` (or AST `0 - x` fallback for non-math operands).
+fn apply_unary_neg(expr: Expr) -> Result<Expr> {
+    match expr {
+        Expr::Literal(Value::Int(n)) => match n.checked_neg() {
+            Some(v) => Ok(Expr::Literal(Value::Int(v))),
+            None => Ok(Expr::CompiledMath(vec![
+                MathOp::PushConst(Value::Int(n)),
+                MathOp::Neg,
+            ])),
+        },
+        Expr::Literal(Value::Float(f)) => Ok(Expr::Literal(Value::Float(-f))),
+        Expr::UnsignedIntBoundary(n) => {
+            if n == i64::MAX as u64 + 1 {
+                Ok(Expr::Literal(Value::Int(i64::MIN)))
+            } else {
+                bail!("integer overflow: {} exceeds i64::MAX", n);
+            }
+        }
+        other => {
+            if let Some(mut ops) = expr_to_rpn(&other) {
+                ops.push(MathOp::Neg);
+                Ok(Expr::CompiledMath(ops))
+            } else {
+                // Non-math operand (list/map/logical): `0 - x` evaluates via
+                // the shared arithmetic helper to a runtime Type Error.
+                Ok(Expr::Arithmetic {
+                    op: ArithOp::Sub,
+                    left: Box::new(Expr::Literal(Value::Int(0))),
+                    right: Box::new(other),
+                })
+            }
+        }
+    }
+}
+
+/// Try parse-time constant folding for binary arithmetic/comparison.
+/// Returns `Some(literal)` on success, `None` when not both literals or
+/// when the op would error at runtime (div-zero/overflow/non-finite:
+/// leave for the RPN evaluator so the error surfaces at runtime).
+fn try_fold_arith(op: ArithOp, left: &Expr, right: &Expr) -> Option<Expr> {
+    let (Expr::Literal(lv), Expr::Literal(rv)) = (left, right) else {
+        return None;
+    };
+    fold_arith_values(op, lv, rv).map(Expr::Literal)
+}
+
+fn fold_arith_values(op: ArithOp, left: &Value, right: &Value) -> Option<Value> {
+    match (left, right) {
+        (Value::Int(a), Value::Int(b)) => {
+            let v = match op {
+                ArithOp::Add => a.checked_add(*b)?,
+                ArithOp::Sub => a.checked_sub(*b)?,
+                ArithOp::Mul => a.checked_mul(*b)?,
+                ArithOp::Div => a.checked_div(*b)?,
+            };
+            Some(Value::Int(v))
+        }
+        (Value::Int(a), Value::Float(b)) => fold_float(op, *a as f64, *b),
+        (Value::Float(a), Value::Int(b)) => fold_float(op, *a, *b as f64),
+        (Value::Float(a), Value::Float(b)) => fold_float(op, *a, *b),
+        _ => None,
+    }
+}
+
+fn fold_float(op: ArithOp, a: f64, b: f64) -> Option<Value> {
+    if !a.is_finite() || !b.is_finite() {
+        return None;
+    }
+    let v = match op {
+        ArithOp::Add => a + b,
+        ArithOp::Sub => a - b,
+        ArithOp::Mul => a * b,
+        ArithOp::Div => {
+            if b == 0.0 {
+                return None;
+            }
+            a / b
+        }
+    };
+    if v.is_finite() {
+        Some(Value::Float(v))
+    } else {
+        None
+    }
+}
+
+fn try_fold_compare(op: CompareOp, left: &Expr, right: &Expr) -> Option<Expr> {
+    let (Expr::Literal(lv), Expr::Literal(rv)) = (left, right) else {
+        return None;
+    };
+    match (lv, rv) {
+        (Value::Int(a), Value::Int(b)) => {
+            let r = match op {
+                CompareOp::Eq => a == b,
+                CompareOp::Ne => a != b,
+                CompareOp::Lt => a < b,
+                CompareOp::Le => a <= b,
+                CompareOp::Gt => a > b,
+                CompareOp::Ge => a >= b,
+            };
+            Some(Expr::Literal(Value::Bool(r)))
+        }
+        (Value::Int(_), Value::Float(_))
+        | (Value::Float(_), Value::Int(_))
+        | (Value::Float(_), Value::Float(_)) => {
+            let (af, bf) = (as_f64(lv)?, as_f64(rv)?);
+            let r = match op {
+                CompareOp::Eq => af == bf,
+                CompareOp::Ne => af != bf,
+                CompareOp::Lt => af < bf,
+                CompareOp::Le => af <= bf,
+                CompareOp::Gt => af > bf,
+                CompareOp::Ge => af >= bf,
+            };
+            Some(Expr::Literal(Value::Bool(r)))
+        }
+        (Value::Bool(a), Value::Bool(b)) => match op {
+            CompareOp::Eq => Some(Expr::Literal(Value::Bool(a == b))),
+            CompareOp::Ne => Some(Expr::Literal(Value::Bool(a != b))),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn as_f64(v: &Value) -> Option<f64> {
+    match v {
+        Value::Int(n) => Some(*n as f64),
+        Value::Float(f) if f.is_finite() => Some(*f),
+        _ => None,
+    }
+}
+
+fn make_arith(op: ArithOp, left: Expr, right: Expr) -> Result<Expr> {
+    reject_boundary(&left)?;
+    reject_boundary(&right)?;
+    if let Some(folded) = try_fold_arith(op, &left, &right) {
+        return Ok(folded);
+    }
+    if let (Some(mut lops), Some(mut rops)) = (expr_to_rpn(&left), expr_to_rpn(&right)) {
+        lops.append(&mut rops);
+        lops.push(match op {
+            ArithOp::Add => MathOp::Add,
+            ArithOp::Sub => MathOp::Sub,
+            ArithOp::Mul => MathOp::Mul,
+            ArithOp::Div => MathOp::Div,
+        });
+        return Ok(Expr::CompiledMath(lops));
+    }
+    Ok(Expr::Arithmetic {
+        op,
+        left: Box::new(left),
+        right: Box::new(right),
+    })
+}
+
+fn make_compare(op: CompareOp, left: Expr, right: Expr) -> Result<Expr> {
+    reject_boundary(&left)?;
+    reject_boundary(&right)?;
+    if let Some(folded) = try_fold_compare(op, &left, &right) {
+        return Ok(folded);
+    }
+    if let (Some(mut lops), Some(mut rops)) = (expr_to_rpn(&left), expr_to_rpn(&right)) {
+        lops.append(&mut rops);
+        lops.push(match op {
+            CompareOp::Eq => MathOp::Eq,
+            CompareOp::Ne => MathOp::Ne,
+            CompareOp::Lt => MathOp::Lt,
+            CompareOp::Le => MathOp::Le,
+            CompareOp::Gt => MathOp::Gt,
+            CompareOp::Ge => MathOp::Ge,
+        });
+        return Ok(Expr::CompiledMath(lops));
+    }
+    Ok(Expr::Compare {
+        op,
+        left: Box::new(left),
+        right: Box::new(right),
+    })
+}
+
+/// Convert an operand subtree to flat RPN. Returns `None` for shapes with
+/// no RPN encoding (`Not`/`Logical`/`List`/`Map`/stray boundary): callers
+/// fall back to AST nodes evaluated recursively.
+fn expr_to_rpn(expr: &Expr) -> Option<Vec<MathOp>> {
+    match expr {
+        Expr::Literal(v) => Some(vec![MathOp::PushConst(v.clone())]),
+        Expr::Var(name) => Some(vec![MathOp::LoadVar(name.clone())]),
+        Expr::Env(key) => Some(vec![MathOp::LoadEnv(key.clone())]),
+        Expr::KeyPath { base, keys } => Some(vec![MathOp::LoadKeyPath {
+            base: base.clone(),
+            keys: keys.clone(),
+        }]),
+        Expr::Call { name, args } => {
+            if name == "INSPECT" {
+                let [arg] = args.as_slice() else {
+                    return None;
+                };
+                if let Expr::Var(var) = arg {
+                    return Some(vec![MathOp::Inspect(var.clone())]);
+                }
+                return None;
+            }
+            let mut ops = Vec::new();
+            for arg in args {
+                ops.extend(expr_to_rpn(arg)?);
+            }
+            ops.push(MathOp::Call {
+                name: name.clone(),
+                arity: args.len(),
+            });
+            Some(ops)
+        }
+        Expr::Arithmetic { op, left, right } => {
+            let mut ops = expr_to_rpn(left)?;
+            ops.extend(expr_to_rpn(right)?);
+            ops.push(match op {
+                ArithOp::Add => MathOp::Add,
+                ArithOp::Sub => MathOp::Sub,
+                ArithOp::Mul => MathOp::Mul,
+                ArithOp::Div => MathOp::Div,
+            });
+            Some(ops)
+        }
+        Expr::Compare { op, left, right } => {
+            let mut ops = expr_to_rpn(left)?;
+            ops.extend(expr_to_rpn(right)?);
+            ops.push(match op {
+                CompareOp::Eq => MathOp::Eq,
+                CompareOp::Ne => MathOp::Ne,
+                CompareOp::Lt => MathOp::Lt,
+                CompareOp::Le => MathOp::Le,
+                CompareOp::Gt => MathOp::Gt,
+                CompareOp::Ge => MathOp::Ge,
+            });
+            Some(ops)
+        }
+        Expr::CompiledMath(ops) => Some(ops.clone()),
+        Expr::Not(_) | Expr::Logical { .. } | Expr::List(_) | Expr::Map(_) => None,
+        Expr::UnsignedIntBoundary(_) => None,
+    }
 }
 
 fn parse_expr_atom(pair: Pair<Rule>) -> Result<Expr> {
     let inner = pair.into_inner().next().unwrap();
     match inner.as_rule() {
-        Rule::parenthesized_expr => parse_expr(inner.into_inner().next().unwrap()),
+        Rule::parenthesized_expr => parse_expr_inner(inner.into_inner().next().unwrap()),
         Rule::func_call => parse_func_call(inner),
         Rule::key_path => parse_key_path(inner),
         Rule::variable => {
@@ -2231,6 +2597,7 @@ fn parse_expr_atom(pair: Pair<Rule>) -> Result<Expr> {
             let s = parse_quoted_string(inner)?;
             Ok(Expr::Literal(Value::String(s)))
         }
+        Rule::numeric_literal => parse_numeric_literal(inner),
         Rule::bare_word => {
             let s = inner.as_str().to_string();
             match s.as_str() {
@@ -2240,6 +2607,33 @@ fn parse_expr_atom(pair: Pair<Rule>) -> Result<Expr> {
             }
         }
         _ => bail!("unexpected expression atom rule: {:?}", inner.as_rule()),
+    }
+}
+
+/// Lower an unsigned `numeric_literal` token. Floats (containing `.`) parse
+/// as `f64` (non-finite/overflow bails); integers parse as `u64` so the
+/// unsigned half of `i64::MIN` (`9223372036854775808`) stages as
+/// `UnsignedIntBoundary` for unary `-` to consume. Larger values bail.
+fn parse_numeric_literal(pair: Pair<Rule>) -> Result<Expr> {
+    let text = pair.as_str();
+    if text.contains('.') {
+        let parsed: f64 = text
+            .parse()
+            .map_err(|_| anyhow!("invalid float literal {text:?}"))?;
+        if !parsed.is_finite() {
+            bail!("invalid float literal {text:?}");
+        }
+        return Ok(Expr::Literal(Value::Float(parsed)));
+    }
+    let digits: u64 = text
+        .parse()
+        .map_err(|_| anyhow!("integer overflow: {text:?} exceeds i64::MAX"))?;
+    if digits <= i64::MAX as u64 {
+        Ok(Expr::Literal(Value::Int(digits as i64)))
+    } else if digits == i64::MAX as u64 + 1 {
+        Ok(Expr::UnsignedIntBoundary(digits))
+    } else {
+        bail!("integer overflow: {text:?} exceeds i64::MAX");
     }
 }
 
@@ -2292,7 +2686,9 @@ fn parse_func_call(pair: Pair<Rule>) -> Result<Expr> {
                 name = Some(inner.as_str().to_string());
             }
             Rule::expr => {
-                args.push(parse_expr(inner)?);
+                let arg = parse_expr_inner(inner)?;
+                reject_boundary(&arg)?;
+                args.push(arg);
             }
             _ => {}
         }
@@ -2307,7 +2703,9 @@ fn parse_list_literal(pair: Pair<Rule>) -> Result<Expr> {
     let mut items = Vec::new();
     for inner in pair.into_inner() {
         if inner.as_rule() == Rule::expr {
-            items.push(parse_expr(inner)?);
+            let item = parse_expr_inner(inner)?;
+            reject_boundary(&item)?;
+            items.push(item);
         }
     }
     Ok(Expr::List(items))
@@ -2328,7 +2726,9 @@ fn parse_map_literal(pair: Pair<Rule>) -> Result<Expr> {
                         key = entry_inner.as_str().to_string();
                     }
                     Rule::expr => {
-                        value = Some(parse_expr(entry_inner)?);
+                        let val = parse_expr_inner(entry_inner)?;
+                        reject_boundary(&val)?;
+                        value = Some(val);
                     }
                     _ => {}
                 }

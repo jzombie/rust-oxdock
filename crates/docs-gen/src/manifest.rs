@@ -213,10 +213,15 @@ fn json_to_value(value: &serde_json::Value) -> Result<oxdock_parser::Value> {
     match value {
         serde_json::Value::String(s) => Ok(oxdock_parser::Value::String(s.clone())),
         serde_json::Value::Bool(b) => Ok(oxdock_parser::Value::Bool(*b)),
-        serde_json::Value::Number(n) => n
-            .as_i64()
-            .map(oxdock_parser::Value::Int)
-            .context("only integer numbers survive into templates"),
+        serde_json::Value::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Ok(oxdock_parser::Value::Int(i))
+            } else if let Some(f) = n.as_f64() {
+                Ok(oxdock_parser::Value::Float(f))
+            } else {
+                bail!("number {n} survives into templates as nothing; drop the key")
+            }
+        }
         serde_json::Value::Array(items) => items
             .iter()
             .map(json_to_value)

@@ -500,6 +500,47 @@ pub enum Value {
 pub enum CompareOp {
     Eq,
     Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum ArithOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+}
+
+/// Flat stack-machine op for expression-local arithmetic/comparison.
+///
+/// Lowering folds constant subtrees to `Expr::Literal` and compiles dynamic
+/// arithmetic/comparison subtrees to post-order `Vec<MathOp>` so the runtime
+/// executes a single instruction loop instead of recursive `Box` walking.
+/// `Call` covers value-semantics functions only (`INT`, `FLOAT`, `GLOB`,
+/// `LOAD_TOML`, `LOAD_JSON`); `INSPECT($var)` uses `Inspect` to preserve the
+/// variable identifier (pre-evaluating to `Value` would lose the name).
+#[derive(Debug, Clone, PartialEq)]
+pub enum MathOp {
+    PushConst(Value),
+    LoadVar(String),
+    LoadEnv(String),
+    LoadKeyPath { base: String, keys: Vec<String> },
+    Call { name: String, arity: usize },
+    Inspect(String),
+    Neg,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    Eq,
+    Ne,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -530,6 +571,18 @@ pub enum Expr {
         left: Box<Expr>,
         right: Box<Expr>,
     },
+    Arithmetic {
+        op: ArithOp,
+        left: Box<Expr>,
+        right: Box<Expr>,
+    },
+    /// Lowering-optimized form: folded literals stay `Literal`, dynamic
+    /// arithmetic/comparison subtrees arrive here as flat RPN.
+    CompiledMath(Vec<MathOp>),
+    /// Lowering-only intermediate staging `9223372036854775808` (the unsigned
+    /// half of `i64::MIN`). Valid only as the direct child of unary `-`;
+    /// any instance reaching lowering completion bails integer overflow.
+    UnsignedIntBoundary(u64),
     Not(Box<Expr>),
     Logical {
         op: LogicalOp,
@@ -720,11 +773,20 @@ impl fmt::Display for Expr {
             Expr::Compare { op, left, right } => {
                 write!(f, "{} {} {}", left, op, right)
             }
+            Expr::Arithmetic { op, left, right } => {
+                write!(f, "({} {} {})", left, op, right)
+            }
+            Expr::CompiledMath(ops) => {
+                write!(f, "{}", format_compiled_math(ops))
+            }
+            Expr::UnsignedIntBoundary(n) => write!(f, "{}", n),
             Expr::Not(inner) => {
                 // Parenthesize compound operands so Display round-trips:
                 // `!(a == b)` must not render as `!a == b` (= `(!a) == b`).
                 match inner.as_ref() {
-                    Expr::Compare { .. } => write!(f, "!({})", inner),
+                    Expr::Compare { .. } | Expr::Arithmetic { .. } | Expr::CompiledMath(_) => {
+                        write!(f, "!({})", inner)
+                    }
                     _ => write!(f, "!{}", inner),
                 }
             }
@@ -740,8 +802,81 @@ impl fmt::Display for CompareOp {
         match self {
             CompareOp::Eq => write!(f, "=="),
             CompareOp::Ne => write!(f, "!="),
+            CompareOp::Lt => write!(f, "<"),
+            CompareOp::Le => write!(f, "<="),
+            CompareOp::Gt => write!(f, ">"),
+            CompareOp::Ge => write!(f, ">="),
         }
     }
+}
+
+impl fmt::Display for ArithOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ArithOp::Add => write!(f, "+"),
+            ArithOp::Sub => write!(f, "-"),
+            ArithOp::Mul => write!(f, "*"),
+            ArithOp::Div => write!(f, "/"),
+        }
+    }
+}
+
+/// Render flat RPN back to parenthesized infix so `Display` round-trips
+/// through the parser with identical semantics. Parentheses are emitted
+/// unconditionally around binary/unary ops; redundant parens parse to the
+/// same tree, which is what round-trip requires.
+fn format_compiled_math(ops: &[MathOp]) -> String {
+    let mut stack: Vec<String> = Vec::new();
+    for op in ops {
+        match op {
+            MathOp::PushConst(v) => stack.push(format!("{}", v)),
+            MathOp::LoadVar(name) => stack.push(format!("${}", name)),
+            MathOp::LoadEnv(key) => stack.push(format!("env:{}", key)),
+            MathOp::LoadKeyPath { base, keys } => {
+                let mut s = format!("${}", base);
+                for key in keys {
+                    s.push('.');
+                    s.push_str(key);
+                }
+                stack.push(s);
+            }
+            MathOp::Call { name, arity } => {
+                let mut args = Vec::new();
+                for _ in 0..*arity {
+                    args.push(stack.pop().unwrap_or_else(|| "<underflow>".to_string()));
+                }
+                args.reverse();
+                stack.push(format!("{}({})", name, args.join(", ")));
+            }
+            MathOp::Inspect(name) => stack.push(format!("INSPECT(${})", name)),
+            MathOp::Neg => {
+                let inner = stack.pop().unwrap_or_else(|| "<underflow>".to_string());
+                stack.push(format!("(-{})", inner));
+            }
+            MathOp::Add => push_bin(&mut stack, "+"),
+            MathOp::Sub => push_bin(&mut stack, "-"),
+            MathOp::Mul => push_bin(&mut stack, "*"),
+            MathOp::Div => push_bin(&mut stack, "/"),
+            MathOp::Lt => push_bin(&mut stack, "<"),
+            MathOp::Le => push_bin(&mut stack, "<="),
+            MathOp::Gt => push_bin(&mut stack, ">"),
+            MathOp::Ge => push_bin(&mut stack, ">="),
+            MathOp::Eq => push_bin(&mut stack, "=="),
+            MathOp::Ne => push_bin(&mut stack, "!="),
+        }
+    }
+    if stack.len() == 1 {
+        let mut items = stack;
+        items.pop().unwrap_or_else(|| "<empty>".to_string())
+    } else {
+        stack.join(" ")
+    }
+}
+
+fn push_bin(stack: &mut Vec<String>, op: &str) {
+    let right = stack.pop().unwrap_or_else(|| "<underflow>".to_string());
+    let left = stack.pop().unwrap_or_else(|| "<underflow>".to_string());
+    stack.push(format!("({} {} {})", left, op, right));
 }
 
 impl fmt::Display for LogicalOp {

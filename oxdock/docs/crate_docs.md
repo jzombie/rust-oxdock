@@ -584,8 +584,10 @@ Conditional execution.
 
 The condition is evaluated as a boolean expression.
 
-Prefix `!` negates (`IF !false`); only Bool values are accepted as
-conditions.
+Prefix `!` negates (`IF !false`); `&&` binds tighter than
+`||`, and both short-circuit, so `IF true || $missing`
+never evaluates the right side. Only Bool values are
+accepted as conditions.
 
 
 **Examples:**
@@ -610,6 +612,32 @@ IF !false {
 }
 ```
 
+**Example: logical condition composition**
+
+```oxdock
+LET $role: STRING = "admin"
+LET $level: INT = 3
+# || is true when either side holds; && needs both.
+IF $role == "owner" || $level >= 5 {
+    WRITE unexpected.txt no
+} ELSE {
+    WRITE fallback.txt or-false
+}
+IF $role == "admin" || $level >= 5 {
+    WRITE chosen.txt or-true
+}
+IF $role == "admin" && $level >= 5 {
+    WRITE unexpected-too.txt no
+} ELSE {
+    WRITE and.txt and-false
+}
+ASSERT_FILE fallback.txt "or-false"
+ASSERT_FILE chosen.txt "or-true"
+ASSERT_FILE and.txt "and-false"
+ASSERT_ABSENT unexpected.txt
+ASSERT_ABSENT unexpected-too.txt
+```
+
 
 ### LET
 
@@ -627,9 +655,47 @@ expressions. With `ASYNC`, spawns a background task and stores its
 handle (see ASYNC). The `$` sigil on the name is mandatory.
 
 The right-hand side is always an expression — literals, lists, maps,
-comparisons, `env:KEY` reads, `pipe:NAME` handles, `INSPECT($var)`
-snapshots, `GLOB("*.md")` — never a `{{ ... }}` template;
+arithmetic (`+ - * /` with `*`/`/` binding tighter, unary `-`,
+parentheses), comparisons (`< <= > >=` binding tighter than
+`== !=`), logical `&&` (tighter) and `||` with short-circuit,
+`!` negation, `env:KEY` reads, `pipe:NAME` handles,
+`INSPECT($var)` snapshots, `GLOB("*.md")`, `INT(x)` /
+`FLOAT(x)` conversions — never a `{{ ... }}` template;
 interpolation happens in string values, not here.
+
+Numbers are numeric literals: `42` binds `INT`, `3.14` binds
+`FLOAT`. `Int x Int` stays `INT` (checked, integer division,
+so `7 / 2` is `3`); any `Float` operand promotes to `FLOAT`.
+Division by zero, overflow, and non-finite results are errors.
+Both numeric sides compare numerically (`1 == 1.0` is true);
+otherwise `==`/`!=` compare rendered strings and ordering on
+non-numerics is a Type Error. Constant subtrees fold at parse
+time and dynamic arithmetic compiles to flat RPN with
+identical semantics.
+
+Float equality is exact with no epsilon. Floats store decimals
+in binary, so a value is exact only when its reduced fraction
+has a power-of-2 denominator: 0.5 (1/2), 0.25 (1/4), 0.75
+(3/4) are exact, while 0.1 (1/10), 0.2 (1/5), 0.3 (3/10)
+repeat forever in binary (like 1/3 in decimal) and truncate,
+so `0.1 + 0.2 == 0.3` is false (the sum is
+`0.30000000000000004`). Rule of thumb: endings .5, .25, .75,
+.125, .625, .875 are exact; .1, .2, .3 and similar are
+approximations. Bound approximations instead of comparing
+them: `IF $sum > 0.299999 && $sum < 0.300001`.
+
+Comparisons do not chain: `a < b < c` is a parse error, not
+`(a < b) < c`. Chaining would compare a `BOOL` against a
+number (a runtime Type Error in C-style parsing) or evaluate
+the middle term twice (Python-style chaining), so the grammar
+accepts exactly one comparison operator per level. Write the
+conjunction explicitly: `$a < $b && $b < $c`. The same holds
+for equality (`$a == $b == $c` is rejected).
+
+Captured command output is a string, so convert before math:
+`LET $total: INT = $total + INT($size_str)` (`INT` trims ASCII
+whitespace; `FLOAT` accepts int strings and rejects
+non-finite).
 
 Bare words need no quotes: `LET $d: STRING = 30s` binds the same string
 as quoted.
@@ -690,6 +756,50 @@ ASSERT_FILE outer.txt "outer"
 LET $out: STRING = ECHO hi
 WRITE captured.txt "{{ $out }}"
 ASSERT_FILE captured.txt "hi\n"
+```
+
+**Example: arithmetic over captured output**
+
+```oxdock
+LET $size_str: STRING = ECHO 41
+LET $total: INT = INT($size_str) + 1
+LET $ratio: FLOAT = 1 + 2.5
+# Int x Int stays INT: integer division truncates.
+LET $half: INT = 7 / 2
+WRITE total.txt "{{ $total }}"
+WRITE ratio.txt "{{ $ratio }}"
+WRITE half.txt "{{ $half }}"
+ASSERT_FILE total.txt "42"
+ASSERT_FILE ratio.txt "3.5"
+ASSERT_FILE half.txt "3"
+```
+
+**Example: float equality is exact**
+
+```oxdock
+# Binary fractions compare cleanly; decimal fractions may not:
+# 0.1 + 0.2 is 0.30000000000000004, so == is false.
+LET $exact: BOOL = 0.5 + 0.25 == 0.75
+LET $decimal: BOOL = 0.1 + 0.2 == 0.3
+IF $exact {
+    WRITE exact.txt yes
+}
+IF $decimal {
+    WRITE unexpected.txt no
+}
+ASSERT_FILE exact.txt "yes"
+ASSERT_ABSENT unexpected.txt
+```
+
+**Example: bound inexact decimals**
+
+```oxdock
+# Never test inexact decimals for equality; bound them.
+LET $sum: FLOAT = 0.1 + 0.2
+IF $sum > 0.299999 && $sum < 0.300001 {
+    WRITE bounded.txt yes
+}
+ASSERT_FILE bounded.txt "yes"
 ```
 
 **Example: inspect a variable**

@@ -1,0 +1,4 @@
+# Both entry points (dsl.txt, tokens.rs) must fail parsing. `contains`
+# keeps this robust against grammar error-message evolution.
+[expect.error]
+contains = "parse error"

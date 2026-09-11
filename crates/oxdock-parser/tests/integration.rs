@@ -3,6 +3,8 @@
 // links its test dependencies once instead of once per file. No test was
 // added, removed, or altered in the move — each module is byte-identical
 // to its original file, except `mod common;` collapsing to this root.
+#[path = "integration/arithmetic.rs"]
+mod arithmetic;
 #[path = "integration/cancel.rs"]
 mod cancel;
 #[path = "integration/common/mod.rs"]
