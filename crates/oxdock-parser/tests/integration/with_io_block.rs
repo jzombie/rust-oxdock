@@ -1,7 +1,7 @@
 use crate::common::mock_lower;
 
 use indoc::indoc;
-use oxdock_parser::ast::{IoStream, StepKind};
+use oxdock_parser::ast::{IoStream, PipeTarget, StepKind};
 use oxdock_parser::parse_script;
 
 #[test]
@@ -25,7 +25,10 @@ fn with_io_block_wraps_commands() {
                 "stdout default should be applied exactly once"
             );
             assert_eq!(bindings[0].stream, IoStream::Stdout);
-            assert_eq!(bindings[0].pipe.as_deref(), Some("setup"));
+            assert_eq!(
+                bindings[0].pipe,
+                Some(PipeTarget::Name("setup".to_string()))
+            );
             match cmd.as_ref() {
                 StepKind::Run(rendered) => {
                     assert_eq!(rendered.as_ref(), "echo alpha");
@@ -41,9 +44,15 @@ fn with_io_block_wraps_commands() {
         StepKind::WithIo { bindings, cmd } => {
             assert_eq!(bindings.len(), 2, "default stdout plus stderr override");
             assert_eq!(bindings[0].stream, IoStream::Stdout);
-            assert_eq!(bindings[0].pipe.as_deref(), Some("setup"));
+            assert_eq!(
+                bindings[0].pipe,
+                Some(PipeTarget::Name("setup".to_string()))
+            );
             assert_eq!(bindings[1].stream, IoStream::Stderr);
-            assert_eq!(bindings[1].pipe.as_deref(), Some("setup"));
+            assert_eq!(
+                bindings[1].pipe,
+                Some(PipeTarget::Name("setup".to_string()))
+            );
             match cmd.as_ref() {
                 StepKind::Run(rendered) => {
                     assert_eq!(rendered.as_ref(), "echo beta");

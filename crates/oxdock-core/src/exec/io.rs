@@ -117,6 +117,50 @@ impl PipeRegistry {
             }
     }
 
+    /// Snapshot one pipe backend for `INSPECT()` diagnostics. Clones what
+    /// is needed under one registry lock, then queries backend state after
+    /// releasing it, so lock order always stays registry-before-inner.
+    pub(super) fn inspect_pipe(&self, name: &str) -> super::pipe::PipeInfo {
+        use super::pipe::{PipeInfo, PipeKindDesc};
+        #[cfg(not(miri))]
+        if self.lock_inner().os.contains_key(name) {
+            return PipeInfo {
+                kind: PipeKindDesc::Os,
+                buffered: 0,
+                readers: 1,
+                writers: 1,
+            };
+        }
+        let (backend, has_reader, has_output) = {
+            let guard = self.lock_inner();
+            (
+                guard.inners.get(name).cloned(),
+                guard.input.contains_key(name),
+                guard.output.contains_key(name),
+            )
+        };
+        match (backend, has_reader, has_output) {
+            (Some(inner), has_reader, _) => PipeInfo {
+                kind: PipeKindDesc::Script,
+                buffered: inner.buffered_bytes(),
+                readers: usize::from(has_reader),
+                writers: inner.writer_count(),
+            },
+            (None, has_reader, has_output) if has_reader || has_output => PipeInfo {
+                kind: PipeKindDesc::External,
+                buffered: 0,
+                readers: usize::from(has_reader),
+                writers: 0,
+            },
+            (None, _, _) => PipeInfo {
+                kind: PipeKindDesc::Missing,
+                buffered: 0,
+                readers: 0,
+                writers: 0,
+            },
+        }
+    }
+
     /// Ensure an entry exists for this binding. Fresh names become OS
     /// kernel pairs when promotion fired, script pipes otherwise. Existing
     /// entries keep their type: first binding wins, so sequential fan in
@@ -614,6 +658,13 @@ impl ExecIo {
 
     pub(super) fn pipe_exists(&self, name: &str) -> bool {
         self.pipes.exists(name)
+    }
+
+    /// Snapshot of one pipe for `INSPECT()` diagnostics. Single lock
+    /// acquisition for the lookup; backend stats are cloned out from under
+    /// their own lock (same lock order as every other registry path).
+    pub(super) fn inspect_pipe(&self, name: &str) -> super::pipe::PipeInfo {
+        self.pipes.inspect_pipe(name)
     }
 
     /// Pin a keeper slot on an existing script pipe. `None` for OS pipes

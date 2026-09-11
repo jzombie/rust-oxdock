@@ -1,0 +1,4 @@
+name = "func_scope_isolation"
+
+[expect]
+files = { "res.txt" = "param-outer-fresh" }

@@ -19,14 +19,14 @@ pub(crate) fn coerce_value<P: ProcessManager>(
         (v @ Value::Float(_), TypeKind::Float) => Ok(v),
         (v @ Value::Bool(_), TypeKind::Bool) => Ok(v),
         (Value::Pipe(n), TypeKind::Pipe) => {
-            if state.io.pipe_exists(&n) {
-                Ok(Value::Pipe(n))
-            } else {
-                Err(anyhow::anyhow!(
-                    "TypeMismatch: expected {}, got unregistered pipe ({n:?})",
-                    expected_label,
-                ))
+            // The `pipe:NAME` operator is the explicit handle constructor:
+            // a fresh name registers on first use (existing entries keep
+            // their type), so pipes can be declared before any `WITH_IO`
+            // mentions them.
+            if !state.io.pipe_exists(&n) {
+                state.io.ensure_pipe_for(&n, false)?;
             }
+            Ok(Value::Pipe(n))
         }
         (v @ Value::List(_), TypeKind::List) => Ok(v),
         (v @ Value::Map(_), TypeKind::Map) => Ok(v),
@@ -51,15 +51,12 @@ pub(crate) fn coerce_value<P: ProcessManager>(
             )),
         },
         (Value::String(s), TypeKind::Pipe) => {
-            let name = s.trim().to_string();
-            if state.io.pipe_exists(&name) {
-                Ok(Value::Pipe(name))
-            } else {
-                Err(anyhow::anyhow!(
-                    "TypeMismatch: expected {}, got unregistered pipe ({name:?})",
-                    expected_label,
-                ))
-            }
+            // Strict: plain strings never coerce to pipes, so a handle is
+            // always created explicitly via the `pipe:NAME` operator
+            // (`LET $p: PIPE = pipe:log`). Anything else is a TypeMismatch.
+            Err(anyhow::anyhow!(
+                "TypeMismatch: expected {expected_label}, got STRING ({s:?}); use pipe:NAME to name a pipe"
+            ))
         }
         (Value::String(s), TypeKind::Duration) => oxdock_parser::command::parse_duration(s.trim())
             .map(Value::Duration)
@@ -282,6 +279,7 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
             "GLOB" => evaluate_glob(args, cx),
             "LOAD_TOML" => evaluate_load_toml(args, cx),
             "LOAD_JSON" => evaluate_load_json(args, cx),
+            "INSPECT" => evaluate_inspect(args, cx),
             _ => bail!("unknown function {name}"),
         },
         Expr::Compare { op, left, right } => {
@@ -325,6 +323,21 @@ pub(crate) fn is_truthy(val: &Value) -> Result<bool> {
         Value::Bool(b) => Ok(*b),
         other => bail!("Type Error: condition must be a Bool, found {:?}", other),
     }
+}
+
+/// Evaluate an `INSPECT($var)` call to a MAP snapshot: declared type and
+/// value plus live details (pipe backend stats, task phase). Like
+/// `LOAD_JSON`/`LOAD_TOML`, this evaluates to a value without running
+/// script steps. The argument must be a `$variable`, not an arbitrary
+/// expression, so the snapshot can name what it describes.
+fn evaluate_inspect<P: ProcessManager>(args: &[Expr], cx: &mut StepCtx<'_, P>) -> Result<Value> {
+    let [arg] = args else {
+        bail!("INSPECT requires exactly one argument: INSPECT($var)");
+    };
+    let Expr::Var(var) = arg else {
+        bail!("INSPECT requires a $variable argument, found {arg:?}");
+    };
+    super::handlers::inspect_var_map(cx, var).map(Value::Map)
 }
 
 /// Evaluate a `GLOB()` function call.

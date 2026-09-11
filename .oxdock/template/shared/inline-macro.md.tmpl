@@ -1,0 +1,84 @@
+### Run scripts inline
+
+The `oxdock!` macro builds the same DSL into a `Vec<Step>` at compile time, so tests and tools can run scripts without a file. Pass the steps to a `run_steps_*` runner with a guarded root. The root types live in `oxdock-fs`, so add both crates: `cargo add oxdock oxdock-fs`. Only portable commands are used below, so the script behaves identically on every OS.
+
+```rust
+use oxdock::{oxdock, oxdock_parser, run_steps_with_context};
+use oxdock_fs::{GuardedPath, PathResolver};
+
+// A version stamping pipeline: variables, a function, a loop over a list,
+// a conditional call, templates, and native assertions. The version comes
+// from Cargo at compile time, never a literal.
+let crate_version = env!("CARGO_PKG_VERSION");
+let steps: Vec<oxdock_parser::Step> = oxdock! {
+    ENV PROJECT=OxDock
+    LET $version: STRING = #crate_version
+    MKDIR dist
+    FUNC STAMP($name: STRING) {
+        WRITE dist/\{{ $name }}.txt \{{ $name }} \{{ env:PROJECT }} \{{ $version }}
+        RETURN $name
+    }
+    FOR $name: STRING IN ["alpha", "beta"] {
+        CALL STAMP($name)
+    }
+    FUNC PICK($flag: BOOL) {
+        IF $flag {
+            RETURN "alpha"
+        }
+        RETURN "beta"
+    }
+    LET $picked: STRING = CALL PICK(true)
+    WRITE dist/picked.txt \{{ $picked }}
+    ASSERT_FILE dist/alpha.txt "alpha OxDock {{ env:CRATE_VERSION }}"
+    ASSERT_FILE dist/beta.txt "beta OxDock {{ env:CRATE_VERSION }}"
+    ASSERT_FILE dist/picked.txt "alpha"
+};
+
+let temp = GuardedPath::tempdir().expect("tempdir");
+let root = temp.as_guarded_path().clone();
+run_steps_with_context(&root, &root, &steps).expect("run script");
+
+let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolver");
+let out = root.join("dist/alpha.txt").expect("out path");
+assert_eq!(
+    resolver.read_to_string(&out).expect("read out"),
+    "alpha OxDock {{ env:CRATE_VERSION }}"
+);
+```
+
+Use `#var` to inject Rust values into the script (any value that implements `Display`). DSL variables keep their `$var` form and are unaffected. Guards accept injected values too, so Rust flags can gate steps. The script below wires a pipe between steps, reads one line back into a variable, and expands every generated file.
+
+```rust
+use oxdock::{oxdock, oxdock_parser, run_steps_with_context};
+use oxdock_fs::{GuardedPath, PathResolver};
+
+let project = "OxDock";
+let verbose = true;
+let steps: Vec<oxdock_parser::Step> = oxdock! {
+    ENV PROJECT=#project
+    MKDIR dist
+    [bool:#verbose] WRITE dist/verbose.log "verbose on"
+    WITH_IO [stdout=pipe:log] ECHO "built \{{ env:PROJECT }}"
+    WITH_IO [stdin=pipe:log] READ_LINE $line
+    WRITE dist/build.txt "\{{ $line }}"
+    FOR $f: STRING IN GLOB("dist/*.txt") {
+        EXPAND $f
+    }
+    ASSERT_STDOUT "built OxDock"
+    ASSERT_FILE dist/build.txt "built OxDock"
+    ASSERT_FILE dist/verbose.log "verbose on"
+};
+
+let temp = GuardedPath::tempdir().expect("tempdir");
+let root = temp.as_guarded_path().clone();
+run_steps_with_context(&root, &root, &steps).expect("run script");
+
+let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolver");
+let out = root.join("dist/build.txt").expect("out path");
+assert_eq!(
+    resolver.read_to_string(&out).expect("read out"),
+    "built OxDock"
+);
+```
+
+The top level runners need the default `cli` feature. With `--no-default-features`, run the same steps through `oxdock::oxdock_core::run_steps_*` instead.

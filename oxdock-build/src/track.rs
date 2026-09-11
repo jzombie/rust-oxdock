@@ -287,6 +287,16 @@ pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
             StepKind::Cancel { .. } => {}
             StepKind::Sleep { duration } => template_keys(&mut keys, duration),
             StepKind::ReadLine { .. } => {}
+            StepKind::FuncDef { body, .. } | StepKind::While { body, .. } => {
+                for k in collect_env_references(body) {
+                    keys.insert(k);
+                }
+            }
+            StepKind::Call { .. } | StepKind::Return { .. } => {
+                // Call args / return exprs are expressions like LET RHS,
+                // which this walk ignores by design (see Assign above).
+            }
+            StepKind::Break | StepKind::Continue => {}
         }
     }
 

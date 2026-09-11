@@ -40,6 +40,12 @@ define_pipeline! {
     StepKind::Cancel { .. } => exec::dispatch_cancel_step,
     StepKind::Timeout { .. } => exec::dispatch_timeout_step,
     StepKind::Sleep { .. } => exec::dispatch_sleep_step,
+    StepKind::FuncDef { .. } => exec::dispatch_func_def,
+    StepKind::Call { .. } => exec::dispatch_call,
+    StepKind::Return { .. } => exec::dispatch_return,
+    StepKind::While { .. } => exec::dispatch_while_loop,
+    StepKind::Break => exec::dispatch_break,
+    StepKind::Continue => exec::dispatch_continue,
 }
 
 /// Parse a script using the production `lower_command` dispatcher.

@@ -27,7 +27,7 @@
 | [`HASH_SHA256`](#hash_sha256) | `HASH_SHA256 <path>` |
 | [`EXIT`](#exit) | `EXIT <code>` |
 | [`SLEEP`](#sleep) | `SLEEP <duration>` |
-| [`WITH_IO`](#with_io) | `WITH_IO [bindings] <command> \| WITH_IO [bindings] { <commands> }` |
+| [`WITH_IO`](#with_io) | `WITH_IO [<stream>[=pipe:<name>\|=$var], ...] <command> \| WITH_IO [bindings] { <commands> }` |
 | [`FOR`](#for) | `FOR $item: TYPE IN <expr> { <commands> } \| FOR $key: STRING, $value: TYPE IN <expr> { <commands> }` |
 | [`IF`](#if) | `IF <expr> { <commands> } [ELSE IF <expr> { <commands> }] [ELSE { <commands> }]` |
 | [`LET`](#let) | `LET $var: TYPE = <expr> \| LET $var: TYPE = ASYNC { <commands> } \| LET $var: TYPE = <command> \| LET $var: TYPE = AWAIT $task` |
@@ -36,3 +36,9 @@
 | [`AWAIT`](#await) | `AWAIT $var \| LET $out: STRING = AWAIT $var` |
 | [`CANCEL`](#cancel) | `CANCEL $var` |
 | [`TIMEOUT`](#timeout) | `TIMEOUT <duration> <command...> \| TIMEOUT <duration> { <commands> } \| TIMEOUT <duration> AWAIT $var` |
+| [`FUNC`](#func) | `FUNC NAME($param: TYPE, ...) { <commands> }` |
+| [`CALL`](#call) | `CALL NAME(<expr>, ...) \| LET $var: TYPE = CALL NAME(<expr>, ...)` |
+| [`RETURN`](#return) | `RETURN <expr>` |
+| [`WHILE`](#while) | `WHILE <bool-expr> { <commands> }` |
+| [`BREAK`](#break) | `BREAK` |
+| [`CONTINUE`](#continue) | `CONTINUE` |

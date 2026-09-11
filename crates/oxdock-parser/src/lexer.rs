@@ -70,7 +70,13 @@ pub fn tokenize(input: &str) -> Result<Vec<RawToken<'_>>> {
             | Rule::for_statement
             | Rule::let_statement
             | Rule::mutate_statement
-            | Rule::if_statement => tokens.push(RawToken::Command { pair, line_no }),
+            | Rule::if_statement
+            | Rule::while_statement
+            | Rule::func_def
+            | Rule::call_statement
+            | Rule::return_statement
+            | Rule::break_statement
+            | Rule::continue_statement => tokens.push(RawToken::Command { pair, line_no }),
             // Generic instructions — lowered by a function
             Rule::instruction | Rule::instruction_inner => {
                 tokens.push(RawToken::Instruction { pair, line_no })

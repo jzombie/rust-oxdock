@@ -1080,6 +1080,32 @@ fn emit_stepkind(
             let args: Vec<_> = argv.iter().map(|a| emit_arg(a, interp)).collect();
             quote! { StepKind::RunExec { argv: vec![#(#args),*] } }
         }
+        StepKind::FuncDef { name, params, body } => {
+            let steps: Vec<_> = body.iter().map(|s| emit_step(s, interp)).collect();
+            let ps: Vec<_> = params
+                .iter()
+                .map(|(p, t)| {
+                    let tt = emit_typekind(t);
+                    quote! { (#p.to_string(), #tt) }
+                })
+                .collect();
+            quote! { StepKind::FuncDef { name: #name.to_string(), params: vec![#(#ps),*], body: vec![#(#steps),*] } }
+        }
+        StepKind::Call { name, args } => {
+            let toks: Vec<_> = args.iter().map(|a| emit_expr(a, interp)).collect();
+            quote! { StepKind::Call { name: #name.to_string(), args: vec![#(#toks),*] } }
+        }
+        StepKind::Return { expr } => {
+            let e = emit_expr(expr, interp);
+            quote! { StepKind::Return { expr: Box::new(#e) } }
+        }
+        StepKind::While { cond, body } => {
+            let c = emit_expr(cond, interp);
+            let steps: Vec<_> = body.iter().map(|s| emit_step(s, interp)).collect();
+            quote! { StepKind::While { cond: Box::new(#c), body: vec![#(#steps),*] } }
+        }
+        StepKind::Break => quote! { StepKind::Break },
+        StepKind::Continue => quote! { StepKind::Continue },
     }
 }
 
@@ -1092,7 +1118,15 @@ fn emit_io_bindings(bindings: &[oxdock_parser::IoBinding]) -> proc_macro2::Token
                 oxdock_parser::IoStream::Stdout => quote! { Stdout },
                 oxdock_parser::IoStream::Stderr => quote! { Stderr },
             };
-            let pipe = b.pipe.as_ref().map(|p| quote! { Some(#p.to_string()) });
+            let pipe = match &b.pipe {
+                None => quote! { None },
+                Some(oxdock_parser::PipeTarget::Name(p)) => {
+                    quote! { Some(oxdock_parser::PipeTarget::Name(#p.to_string())) }
+                }
+                Some(oxdock_parser::PipeTarget::Var(v)) => {
+                    quote! { Some(oxdock_parser::PipeTarget::Var(#v.to_string())) }
+                }
+            };
             quote! { oxdock_parser::IoBinding { stream: oxdock_parser::IoStream::#stream, pipe: #pipe } }
         })
         .collect();

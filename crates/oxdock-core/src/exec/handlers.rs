@@ -1,10 +1,10 @@
 use anyhow::{Context, Result, anyhow, bail};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use oxdock_fs::EntryKind;
 use oxdock_parser::{
-    Arg, Expr, IoBinding, IoStream, Step, StepKind, TypeKind, Value, WorkspaceTarget,
+    Arg, Expr, IoBinding, IoStream, PipeTarget, Step, StepKind, TypeKind, Value, WorkspaceTarget,
 };
 use oxdock_process::{
     BackgroundHandle, CommandOptions, CommandResult, CommandStderr, CommandStdin, CommandStdout,
@@ -13,9 +13,28 @@ use oxdock_process::{
 use sha2::{Digest, Sha256};
 
 use super::fs_ops::{canonical_cwd, copy_entry, hash_path};
-use super::io::write_stdout;
+use super::io::{StreamHandle, write_stdout};
 use super::pipe::KeeperGuard;
-use super::steps::StepCtx;
+use super::state::{ExecState, FuncDefData, MAX_CALL_DEPTH, TaskPhase};
+use super::steps::{Flow, StepCtx};
+
+/// Map a Flow reaching a context-free boundary (pipeline top, thread join)
+/// into status. Only Done passes; anything else is a step-numbered error
+/// naming the originating step in its own body.
+fn top_level_flow(flow: Flow) -> Result<()> {
+    match flow {
+        Flow::Done => Ok(()),
+        Flow::Break { idx } => {
+            bail!("step {}: BREAK outside loop", idx + 1);
+        }
+        Flow::Continue { idx } => {
+            bail!("step {}: CONTINUE outside loop", idx + 1);
+        }
+        Flow::Return { idx, .. } => {
+            bail!("step {}: RETURN outside function", idx + 1);
+        }
+    }
+}
 
 pub(super) fn inherit_env<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
@@ -656,6 +675,76 @@ pub(super) fn read_line<P: ProcessManager>(
     Ok(())
 }
 
+/// Structured variable snapshot backing the `INSPECT()` expression form:
+/// base keys (`type`, `variable`, `name`, `value`) plus live details —
+/// pipe backend stats for `PIPE`, task phase for `HANDLE`. Undeclared
+/// names are an error. (Expression evaluation carries no step index, so
+/// unlike statement handlers this reports no step number.)
+pub(super) fn inspect_var_map<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    var: &str,
+) -> Result<BTreeMap<String, Value>> {
+    let clean_var = var.trim_start_matches('$').to_string();
+    let Some((decl_type, value)) = cx.state.get_var_typed(&clean_var) else {
+        bail!("variable '${clean_var}' is not defined");
+    };
+    let mut map = BTreeMap::new();
+    map.insert(
+        "type".to_string(),
+        Value::String(decl_type.label().to_string()),
+    );
+    map.insert("variable".to_string(), Value::String(clean_var.clone()));
+    match (&decl_type, &value) {
+        (TypeKind::Pipe, Value::Pipe(name)) => {
+            let info = cx.state.io.inspect_pipe(name);
+            map.insert("name".to_string(), Value::String(name.clone()));
+            map.insert("value".to_string(), Value::String(name.clone()));
+            map.insert("is_os_pipe".to_string(), Value::Bool(info.kind.is_os()));
+            map.insert(
+                "pipe_kind".to_string(),
+                Value::String(info.kind.as_str().to_string()),
+            );
+            map.insert(
+                "buffer_bytes".to_string(),
+                Value::Int(info.buffered.min(i64::MAX as u64) as i64),
+            );
+            map.insert("readers".to_string(), Value::Int(info.readers as i64));
+            map.insert("writers".to_string(), Value::Int(info.writers as i64));
+        }
+        (TypeKind::Handle, Value::TaskHandle(task_id)) => {
+            map.insert("name".to_string(), Value::String(clean_var.clone()));
+            map.insert(
+                "value".to_string(),
+                Value::String(format!("task {task_id}")),
+            );
+            let phase = cx
+                .state
+                .named_tasks
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(task_id)
+                .map(|entry| {
+                    let guard = entry.state.lock().unwrap_or_else(|e| e.into_inner());
+                    match guard.phase {
+                        TaskPhase::Running => "Running",
+                        TaskPhase::Awaiting => "Awaiting",
+                        TaskPhase::Cancelled => "Cancelled",
+                        TaskPhase::Completed => "Completed",
+                    }
+                    .to_string()
+                })
+                .unwrap_or_else(|| "unknown (already awaited?)".to_string());
+            map.insert("task_id".to_string(), Value::Int(*task_id as i64));
+            map.insert("task_phase".to_string(), Value::String(phase));
+        }
+        _ => {
+            map.insert("name".to_string(), Value::String(clean_var.clone()));
+            map.insert("value".to_string(), Value::String(format!("{value}")));
+        }
+    }
+    Ok(map)
+}
+
 pub(super) fn write<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     idx: usize,
@@ -1042,58 +1131,9 @@ pub(crate) fn with_io<P: ProcessManager>(
     idx: usize,
     bindings: &[IoBinding],
     cmd: &StepKind,
-) -> Result<()> {
-    let mut step_stdin = CommandStdin::Null;
-    let mut step_stdout = cx.out.clone();
-    let mut step_stderr = cx.err.clone();
-    let mut next_expose_stdin = false;
-    let mut seen_stdin = false;
-    let mut seen_stdout = false;
-    let mut seen_stderr = false;
-    let trigger = promotion_trigger(cmd, cx.state.inside_async);
-    let direct = run_terminated(cmd);
-
-    for binding in bindings {
-        if let Some(pipe) = &binding.pipe {
-            cx.state.io.ensure_pipe_for(pipe, trigger)?;
-        }
-        match binding.stream {
-            IoStream::Stdin => {
-                if seen_stdin {
-                    bail!("step {}: WITH_IO declared stdin more than once", idx + 1);
-                }
-                seen_stdin = true;
-                next_expose_stdin = true;
-                step_stdin = if let Some(pipe) = &binding.pipe {
-                    cx.state.io.resolve_stdin(idx, pipe, direct)?
-                } else {
-                    cx.stdin.clone()
-                };
-            }
-            IoStream::Stdout => {
-                if seen_stdout {
-                    bail!("step {}: WITH_IO declared stdout more than once", idx + 1);
-                }
-                seen_stdout = true;
-                step_stdout = if let Some(pipe) = &binding.pipe {
-                    Some(cx.state.io.resolve_stdout(idx, pipe, direct)?)
-                } else {
-                    cx.out.clone()
-                };
-            }
-            IoStream::Stderr => {
-                if seen_stderr {
-                    bail!("step {}: WITH_IO declared stderr more than once", idx + 1);
-                }
-                seen_stderr = true;
-                step_stderr = if let Some(pipe) = &binding.pipe {
-                    Some(cx.state.io.resolve_stderr(idx, pipe, direct)?)
-                } else {
-                    cx.err.clone()
-                };
-            }
-        }
-    }
+) -> Result<Flow> {
+    let (step_stdin, next_expose_stdin, step_stdout, step_stderr) =
+        resolve_io_streams(cx, idx, bindings, cmd)?;
 
     super::steps::execute_single_step_with_generation(
         cx.state,
@@ -1105,8 +1145,149 @@ pub(crate) fn with_io<P: ProcessManager>(
         next_expose_stdin,
         step_stdout,
         step_stderr,
-    )?;
-    Ok(())
+    )
+}
+
+/// Resolve `WITH_IO` bindings against the active context handles, shared by
+/// `with_io` and the `CALL` fast paths (`LET`-capture / `ASYNC` tasks) so a
+/// `CALL` under `WITH_IO` layers observes identical stream wiring whether
+/// it runs inline or for its return value.
+#[allow(clippy::type_complexity)]
+fn resolve_io_streams<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    idx: usize,
+    bindings: &[IoBinding],
+    cmd: &StepKind,
+) -> Result<(
+    CommandStdin,
+    bool,
+    Option<StreamHandle>,
+    Option<StreamHandle>,
+)> {
+    let mut step_stdin = CommandStdin::Null;
+    let mut step_stdout = cx.out.clone();
+    let mut step_stderr = cx.err.clone();
+    let mut next_expose_stdin = false;
+    let mut seen_stdin = false;
+    let mut seen_stdout = false;
+    let mut seen_stderr = false;
+    let trigger = promotion_trigger(cmd, cx.state.inside_async);
+    let direct = run_terminated(cmd);
+
+    for binding in bindings {
+        if let Some(target) = &binding.pipe {
+            let pipe = resolve_pipe_name(cx, idx, target)?;
+            cx.state.io.ensure_pipe_for(&pipe, trigger)?;
+        }
+        match binding.stream {
+            IoStream::Stdin => {
+                if seen_stdin {
+                    bail!("step {}: WITH_IO declared stdin more than once", idx + 1);
+                }
+                seen_stdin = true;
+                next_expose_stdin = true;
+                step_stdin = if let Some(target) = &binding.pipe {
+                    let pipe = resolve_pipe_name(cx, idx, target)?;
+                    cx.state.io.resolve_stdin(idx, &pipe, direct)?
+                } else {
+                    cx.stdin.clone()
+                };
+            }
+            IoStream::Stdout => {
+                if seen_stdout {
+                    bail!("step {}: WITH_IO declared stdout more than once", idx + 1);
+                }
+                seen_stdout = true;
+                step_stdout = if let Some(target) = &binding.pipe {
+                    let pipe = resolve_pipe_name(cx, idx, target)?;
+                    Some(cx.state.io.resolve_stdout(idx, &pipe, direct)?)
+                } else {
+                    cx.out.clone()
+                };
+            }
+            IoStream::Stderr => {
+                if seen_stderr {
+                    bail!("step {}: WITH_IO declared stderr more than once", idx + 1);
+                }
+                seen_stderr = true;
+                step_stderr = if let Some(target) = &binding.pipe {
+                    let pipe = resolve_pipe_name(cx, idx, target)?;
+                    Some(cx.state.io.resolve_stderr(idx, &pipe, direct)?)
+                } else {
+                    cx.err.clone()
+                };
+            }
+        }
+    }
+
+    Ok((step_stdin, next_expose_stdin, step_stdout, step_stderr))
+}
+
+/// Resolve a `WITH_IO` pipe endpoint to a live pipe name. Literals resolve
+/// directly; `$var` must hold a `PIPE` value naming a registered pipe,
+/// otherwise this is a step-numbered type error.
+fn resolve_pipe_name<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    idx: usize,
+    target: &PipeTarget,
+) -> Result<String> {
+    match target {
+        PipeTarget::Name(name) => Ok(name.clone()),
+        PipeTarget::Var(var) => match cx.state.get_var_typed(var) {
+            Some((TypeKind::Pipe, Value::Pipe(name))) => {
+                if cx.state.io.pipe_exists(&name) {
+                    Ok(name)
+                } else {
+                    bail!(
+                        "step {}: TypeMismatch: expected PIPE, got unregistered pipe ({name:?})",
+                        idx + 1
+                    );
+                }
+            }
+            Some((kind, value)) => {
+                bail!(
+                    "step {}: TypeMismatch: expected PIPE, got {} ({:?})",
+                    idx + 1,
+                    kind.label(),
+                    value
+                );
+            }
+            None => {
+                bail!("step {}: undeclared variable ${var}", idx + 1);
+            }
+        },
+    }
+}
+
+/// If `cmd` is a `CALL` possibly nested under `WITH_IO` layers, return the
+/// merged bindings (outermost first, inner wins per stream) plus the call
+/// name and args. Used by `LET`-capture and `ASYNC` fast paths so
+/// `WITH_IO [stdin=pipe:tx] CALL FOO()` binds the `RETURN` value instead
+/// of swallowing stdout into a capture sink.
+fn extract_call(cmd: &StepKind) -> Option<(Vec<IoBinding>, &str, &[Expr])> {
+    let mut layers: Vec<&Vec<IoBinding>> = Vec::new();
+    let mut current = cmd;
+    loop {
+        match current {
+            StepKind::Call { name, args } => {
+                let mut merged: Vec<IoBinding> = Vec::new();
+                for layer in &layers {
+                    for binding in layer.iter() {
+                        match merged.iter_mut().find(|m| m.stream == binding.stream) {
+                            Some(slot) => *slot = binding.clone(),
+                            None => merged.push(binding.clone()),
+                        }
+                    }
+                }
+                return Some((merged, name, args));
+            }
+            StepKind::WithIo { bindings, cmd } => {
+                layers.push(bindings);
+                current = cmd;
+            }
+            _ => return None,
+        }
+    }
 }
 
 pub(super) fn exit<P: ProcessManager>(cx: &mut StepCtx<'_, P>, code: i32) -> Result<()> {
@@ -1128,7 +1309,7 @@ pub(crate) fn for_loop<P: ProcessManager>(
     val_type: TypeKind,
     in_expr: &Expr,
     body: &[Step],
-) -> Result<()> {
+) -> Result<Flow> {
     use oxdock_parser::TypeKind;
     let iterable = super::args::evaluate_expr(in_expr, cx)?;
     let clean_val_var = val_var.trim_start_matches('$').to_string();
@@ -1166,9 +1347,18 @@ pub(crate) fn for_loop<P: ProcessManager>(
                     false,
                 );
                 let pop_res = cx.state.pop_scope();
-                res.and(pop_res)?;
+                let flow = match (res, pop_res) {
+                    (Ok(flow), Ok(())) => flow,
+                    (Err(e), _) => return Err(e),
+                    (Ok(_), Err(e)) => return Err(e),
+                };
+                match flow {
+                    Flow::Done | Flow::Continue { .. } => {}
+                    Flow::Break { .. } => return Ok(Flow::Done),
+                    Flow::Return { .. } => return Ok(flow),
+                }
             }
-            Ok(())
+            Ok(Flow::Done)
         }
         Value::Map(map) => {
             let key_name = key_var.ok_or_else(|| {
@@ -1210,14 +1400,185 @@ pub(crate) fn for_loop<P: ProcessManager>(
                     false,
                 );
                 let pop_res = cx.state.pop_scope();
-                res.and(pop_res)?;
+                let flow = match (res, pop_res) {
+                    (Ok(flow), Ok(())) => flow,
+                    (Err(e), _) => return Err(e),
+                    (Ok(_), Err(e)) => return Err(e),
+                };
+                match flow {
+                    Flow::Done | Flow::Continue { .. } => {}
+                    Flow::Break { .. } => return Ok(Flow::Done),
+                    Flow::Return { .. } => return Ok(flow),
+                }
             }
-            Ok(())
+            Ok(Flow::Done)
         }
         other => bail!(
             "FOR loop requires a List or Map iterable, found {:?}",
             other
         ),
+    }
+}
+
+/// Define a user function (`FUNC NAME($p: TYPE, ...) { ... }}).
+/// Copy-on-write into a fresh registry Arc so `fork()` sharers keep the
+/// old view, while `push_scope`/`pop_scope` snapshots revert nested
+/// definitions on block exit.
+pub(crate) fn define_func<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    name: &str,
+    params: &[(String, TypeKind)],
+    body: &[Step],
+) -> Result<()> {
+    let data = FuncDefData {
+        params: params.to_vec(),
+        body: body.to_vec(),
+    };
+    let mut next = (*cx.state.funcs).clone();
+    next.insert(name.to_string(), data);
+    cx.state.funcs = Arc::new(next);
+    Ok(())
+}
+
+/// Invoke a function by UPPERCASE name and return its value.
+/// Dispatch order: DSL `funcs` first, then `host_funcs` (FFI hook),
+/// else `unknown function`. Args evaluate in the caller scope; params bind
+/// with `declare_var` coercion before one body step runs. The body runs in
+/// a fresh lexical scope (LET/ENV/WORKDIR revert; pipes and files persist).
+/// `RETURN` inside yields the value; fallthrough yields `""`;
+/// `BREAK`/`CONTINUE` escaping the body are boundary errors (they must not
+/// reach a caller loop).
+pub(crate) fn call_func_value<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    idx: usize,
+    name: &str,
+    args: &[Expr],
+) -> Result<Value> {
+    let mut arg_vals = Vec::with_capacity(args.len());
+    for arg in args {
+        arg_vals.push(super::args::evaluate_expr(arg, cx)?);
+    }
+    let Some(func) = cx.state.funcs.get(name).cloned() else {
+        if let Some(host) = cx.state.host_funcs.get(name).cloned() {
+            return host(arg_vals)
+                .with_context(|| format!("step {}: host function `{name}` failed", idx + 1));
+        }
+        bail!("step {}: unknown function `{name}`", idx + 1);
+    };
+    if arg_vals.len() != func.params.len() {
+        bail!(
+            "step {}: CALL {name} expects {} argument(s), got {}",
+            idx + 1,
+            func.params.len(),
+            arg_vals.len()
+        );
+    }
+    if cx.state.call_depth >= MAX_CALL_DEPTH {
+        bail!(
+            "step {}: recursion depth limit exceeded in FUNC {name}",
+            idx + 1
+        );
+    }
+    cx.state.call_depth += 1;
+    cx.state.push_scope();
+    let outcome: Result<Value> = (|| {
+        for ((pname, ptype), pval) in func.params.iter().zip(arg_vals) {
+            cx.state.declare_var(pname.clone(), *ptype, pval)?;
+        }
+        let flow = super::steps::execute_steps(
+            cx.state,
+            cx.process,
+            &func.body,
+            cx.stdin.clone(),
+            false,
+            cx.out.clone(),
+            cx.err.clone(),
+            false,
+        )?;
+        match flow {
+            Flow::Done => Ok(Value::String(String::new())),
+            Flow::Return { value, .. } => Ok(value),
+            Flow::Break { idx } => {
+                bail!(
+                    "step {}: BREAK cannot cross function boundary (in CALL {name})",
+                    idx + 1
+                );
+            }
+            Flow::Continue { idx } => {
+                bail!(
+                    "step {}: CONTINUE cannot cross function boundary (in CALL {name})",
+                    idx + 1
+                );
+            }
+        }
+    })();
+    let pop_res = cx.state.pop_scope();
+    cx.state.call_depth -= 1;
+    match (outcome, pop_res) {
+        (Ok(value), Ok(())) => Ok(value),
+        (Err(e), _) => Err(e),
+        (Ok(_), Err(e)) => Err(e),
+    }
+}
+
+/// Evaluate `RETURN <expr>` inside a function call. Outside any call
+/// (including at top level or with no `CALL` frame on this thread) it is a
+/// step-numbered error. Crossing an `ASYNC` thread boundary is rejected
+/// where the thread joins, not here.
+pub(crate) fn handle_return<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    idx: usize,
+    expr: &Expr,
+) -> Result<Flow> {
+    if cx.state.call_depth == 0 {
+        bail!("step {}: RETURN outside function", idx + 1);
+    }
+    let value = super::args::evaluate_expr(expr, cx)?;
+    Ok(Flow::Return { idx, value })
+}
+
+/// Run `WHILE <bool-expr> { ... }`: re-evaluate the condition in the
+/// current scope each iteration (Bool-only, same `is_truthy` rule as `IF`),
+/// execute the body in a fresh per-iteration scope, and honor
+/// `BREAK`/`CONTINUE`. A `RETURN` inside propagates to the enclosing
+/// `call_func`; anything else yields Done.
+pub(crate) fn while_loop<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    idx: usize,
+    cond: &Expr,
+    body: &[Step],
+) -> Result<Flow> {
+    use std::sync::atomic::Ordering;
+    loop {
+        if cx.state.cancel_token.load(Ordering::SeqCst) {
+            bail!("step {}: ASYNC task cancelled", idx + 1);
+        }
+        let val = super::args::evaluate_expr(cond, cx)?;
+        if !super::args::is_truthy(&val)? {
+            return Ok(Flow::Done);
+        }
+        cx.state.push_scope();
+        let res = super::steps::execute_steps(
+            cx.state,
+            cx.process,
+            body,
+            cx.stdin.clone(),
+            false,
+            cx.out.clone(),
+            cx.err.clone(),
+            false,
+        );
+        let pop_res = cx.state.pop_scope();
+        let flow = match (res, pop_res) {
+            (Ok(flow), Ok(())) => flow,
+            (Err(e), _) => return Err(e),
+            (Ok(_), Err(e)) => return Err(e),
+        };
+        match flow {
+            Flow::Done | Flow::Continue { .. } => {}
+            Flow::Break { .. } => return Ok(Flow::Done),
+            Flow::Return { .. } => return Ok(flow),
+        }
     }
 }
 
@@ -1252,6 +1613,11 @@ pub(crate) fn set_var_value<P: ProcessManager>(
 /// passes through so `WITH_IO [stdin=pipe:p]` still works). Captured bytes
 /// never tee into the parent `ASSERT_STDOUT` windows. On command failure
 /// nothing is bound.
+///
+/// When the captured command is `CALL NAME(...)`, no sink is installed:
+/// the callee's stdout keeps the active routing (observable via
+/// `ASSERT_STDOUT`/pipes) and the bound value is the function's `RETURN`
+/// payload (or `""` on fallthrough), coerced to the declared type.
 pub(crate) fn assign_capture<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     generation: usize,
@@ -1259,15 +1625,56 @@ pub(crate) fn assign_capture<P: ProcessManager>(
     var: &str,
     decl_type: TypeKind,
     cmd: &StepKind,
-) -> Result<()> {
+) -> Result<Flow> {
     use std::sync::Arc;
 
     use super::capture::SpillBuffer;
-    use super::io::StreamHandle;
 
+    if let Some((bindings, name, args)) = extract_call(cmd) {
+        // `CALL` (possibly under `WITH_IO` layers): no capture sink. The
+        // callee's stdout keeps its routed streams (observable via
+        // `ASSERT_STDOUT`/pipes); the bound value is the `RETURN` payload.
+        if bindings
+            .iter()
+            .any(|b| b.stream == IoStream::Stdout && b.pipe.is_some())
+        {
+            bail!(
+                "step {}: LET capture cannot use WITH_IO [stdout=pipe:...]; the capture binds the RETURN value",
+                idx + 1
+            );
+        }
+        if bindings.is_empty() {
+            let value = call_func_value(cx, idx, name, args)?;
+            let clean_var = var.trim_start_matches('$').to_string();
+            cx.state.declare_var(clean_var, decl_type, value)?;
+            return Ok(Flow::Done);
+        }
+        let (step_stdin, expose_stdin, step_stdout, step_stderr) =
+            resolve_io_streams(cx, idx, &bindings, cmd)?;
+        let snapshot_root = cx.state.fs.root().clone();
+        let build_context = cx.state.fs.build_context().clone();
+        // Reborrow state/process for the sub-context; `cx` is unused below.
+        let state = &mut *cx.state;
+        let process = &mut *cx.process;
+        let mut sub_cx = super::steps::StepCtx {
+            state,
+            process,
+            snapshot_root,
+            build_context,
+            stdin: step_stdin,
+            expose_stdin,
+            out: step_stdout,
+            err: step_stderr,
+        };
+        let value = call_func_value(&mut sub_cx, idx, name, args)?;
+        sub_cx
+            .state
+            .declare_var(var.trim_start_matches('$').to_string(), decl_type, value)?;
+        return Ok(Flow::Done);
+    }
     let sink = Arc::new(SpillBuffer::new());
     let capture_out = Some(StreamHandle::Stream(sink.writer()));
-    super::steps::execute_single_step_with_generation(
+    let flow = super::steps::execute_single_step_with_generation(
         cx.state,
         cx.process,
         cmd,
@@ -1278,13 +1685,31 @@ pub(crate) fn assign_capture<P: ProcessManager>(
         capture_out,
         cx.err.clone(),
     )?;
+    match flow {
+        Flow::Done => {}
+        Flow::Break { idx } => {
+            bail!("step {}: BREAK outside loop (cannot be captured)", idx + 1);
+        }
+        Flow::Continue { idx } => {
+            bail!(
+                "step {}: CONTINUE outside loop (cannot be captured)",
+                idx + 1
+            );
+        }
+        Flow::Return { idx, .. } => {
+            bail!(
+                "step {}: RETURN outside function (cannot be captured)",
+                idx + 1
+            );
+        }
+    }
     let text = sink
         .drain_string_strict()
         .map_err(|e| anyhow!("LET ${var} capture is not valid UTF-8: {e}"))?;
     let clean_var = var.trim_start_matches('$').to_string();
     cx.state
         .declare_var(clean_var, decl_type, Value::String(text))?;
-    Ok(())
+    Ok(Flow::Done)
 }
 
 pub(crate) fn if_then<P: ProcessManager>(
@@ -1293,7 +1718,7 @@ pub(crate) fn if_then<P: ProcessManager>(
     then_body: &[Step],
     else_ifs: &[(Box<Expr>, Vec<Step>)],
     else_body: &Option<Vec<Step>>,
-) -> Result<()> {
+) -> Result<Flow> {
     let val = super::args::evaluate_expr(cond, cx)?;
     if super::args::is_truthy(&val)? {
         return super::steps::execute_scoped_steps(
@@ -1323,7 +1748,7 @@ pub(crate) fn if_then<P: ProcessManager>(
         }
     }
     if let Some(body) = else_body {
-        super::steps::execute_scoped_steps(
+        return super::steps::execute_scoped_steps(
             cx.state,
             cx.process,
             body,
@@ -1332,9 +1757,9 @@ pub(crate) fn if_then<P: ProcessManager>(
             cx.out.clone(),
             cx.err.clone(),
             false,
-        )?;
+        );
     }
-    Ok(())
+    Ok(Flow::Done)
 }
 
 // ── Dispatch functions ──────────────────────────────────────────────────────
@@ -1361,7 +1786,7 @@ fn collect_kind_producers(kind: &StepKind, out: &mut Vec<(String, bool)>) {
             for binding in bindings {
                 match binding.stream {
                     IoStream::Stdout | IoStream::Stderr => {
-                        if let Some(pipe) = &binding.pipe {
+                        if let Some(PipeTarget::Name(pipe)) = &binding.pipe {
                             match out.iter_mut().find(|(name, _)| name == pipe) {
                                 Some(entry) => {
                                     entry.1 = entry.1 || promote;
@@ -1371,6 +1796,9 @@ fn collect_kind_producers(kind: &StepKind, out: &mut Vec<(String, bool)>) {
                                 }
                             }
                         }
+                        // Dynamic (`$var`) endpoints resolve against live
+                        // state at pin time (see `pin_async_keepers`); they
+                        // are invisible to this static walk by design.
                     }
                     IoStream::Stdin => {}
                 }
@@ -1379,6 +1807,10 @@ fn collect_kind_producers(kind: &StepKind, out: &mut Vec<(String, bool)>) {
         }
         StepKind::Timeout { body, .. } => collect_steps_producers(body, out),
         StepKind::For { body, .. } => collect_steps_producers(body, out),
+        StepKind::While { body, .. } => collect_steps_producers(body, out),
+        // Deferred (FUNC bodies) or dynamic (CALL targets unknown
+        // statically) bodies run elsewhere or later with their own pins.
+        StepKind::FuncDef { .. } | StepKind::Call { .. } => {}
         StepKind::If {
             then_body,
             else_ifs,
@@ -1398,6 +1830,78 @@ fn collect_kind_producers(kind: &StepKind, out: &mut Vec<(String, bool)>) {
     }
 }
 
+/// Dynamic counterpart to `collect_kind_producers`: resolves `$var` pipe
+/// endpoints against the spawning thread's state so `ASYNC` tasks that
+/// produce to a variable-named pipe get the same keeper coverage as static
+/// ones. Unresolvable names are skipped here (execution-time resolution
+/// reports the real error); promotion never applies to dynamic endpoints.
+fn collect_dynamic_producers<P: ProcessManager>(
+    kind: &StepKind,
+    state: &ExecState<P>,
+    out: &mut Vec<(String, bool)>,
+) {
+    match kind {
+        StepKind::WithIo { bindings, cmd } => {
+            // Same promotion analysis as the static walk so a dynamic
+            // endpoint pins the same pipe type execution will ensure.
+            let promote = promotion_trigger(cmd, true);
+            for binding in bindings {
+                match binding.stream {
+                    IoStream::Stdout | IoStream::Stderr => {
+                        if let Some(PipeTarget::Var(var)) = &binding.pipe
+                            && let Some((TypeKind::Pipe, Value::Pipe(name))) =
+                                state.get_var_typed(var)
+                        {
+                            match out.iter_mut().find(|(n, _)| n == &name) {
+                                Some(entry) => {
+                                    entry.1 = entry.1 || promote;
+                                }
+                                None => {
+                                    out.push((name.clone(), promote));
+                                }
+                            }
+                        }
+                    }
+                    IoStream::Stdin => {}
+                }
+            }
+            collect_dynamic_producers(cmd, state, out);
+        }
+        StepKind::Timeout { body, .. }
+        | StepKind::For { body, .. }
+        | StepKind::While { body, .. } => {
+            for step in body {
+                collect_dynamic_producers(&step.kind, state, out);
+            }
+        }
+        StepKind::If {
+            then_body,
+            else_ifs,
+            else_body,
+            ..
+        } => {
+            for step in then_body {
+                collect_dynamic_producers(&step.kind, state, out);
+            }
+            for (_, branch) in else_ifs {
+                for step in branch {
+                    collect_dynamic_producers(&step.kind, state, out);
+                }
+            }
+            if let Some(body) = else_body {
+                for step in body {
+                    collect_dynamic_producers(&step.kind, state, out);
+                }
+            }
+        }
+        StepKind::FuncDef { .. }
+        | StepKind::Call { .. }
+        | StepKind::AsyncBlock { .. }
+        | StepKind::AssignAsync { .. } => {}
+        _ => {}
+    }
+}
+
 /// Ensure every pipe an async `body` produces to exists (honoring OS
 /// promotion) and pin a keeper slot on each script pipe, synchronously on
 /// the spawning thread. Pins group by the top-level index of the final
@@ -1413,6 +1917,7 @@ fn pin_async_keepers<P: ProcessManager>(
     for (idx, step) in body.iter().enumerate() {
         let mut produced = Vec::new();
         collect_kind_producers(&step.kind, &mut produced);
+        collect_dynamic_producers(&step.kind, cx.state, &mut produced);
         for (name, promote) in produced {
             let entry = last.entry(name).or_insert((false, 0));
             entry.0 = entry.0 || promote;
@@ -1493,10 +1998,12 @@ pub(crate) fn dispatch_async_block<P: ProcessManager>(
 
     // Spawn a thread that executes the block's steps with subshell isolation.
     // ENV/WORKDIR/etc mutations in the block do not leak to the parent.
+    // Control flow never crosses the thread boundary: a stray BREAK,
+    // CONTINUE, or RETURN becomes a step-numbered error here.
     let join = std::thread::spawn(move || {
         let mut child_state = forked_state;
         let mut child_process = forked_process;
-        super::steps::execute_steps(
+        let flow = super::steps::execute_steps(
             &mut child_state,
             &mut child_process,
             &body,
@@ -1505,7 +2012,19 @@ pub(crate) fn dispatch_async_block<P: ProcessManager>(
             out,
             err,
             true, // wait_at_end: child waits for its own bg_children
-        )
+        )?;
+        match flow {
+            Flow::Done => Ok(()),
+            Flow::Break { idx } => {
+                anyhow::bail!("step {}: BREAK cannot cross ASYNC boundary", idx + 1);
+            }
+            Flow::Continue { idx } => {
+                anyhow::bail!("step {}: CONTINUE cannot cross ASYNC boundary", idx + 1);
+            }
+            Flow::Return { idx, .. } => {
+                anyhow::bail!("step {}: RETURN cannot cross ASYNC boundary", idx + 1);
+            }
+        }
     });
 
     // Store the thread handle as a background handle in the parent's state.
@@ -1802,7 +2321,7 @@ pub(crate) fn dispatch_for_loop<P: ProcessManager>(
     else {
         unreachable!()
     };
-    for_loop(
+    top_level_flow(for_loop(
         cx,
         key_var.as_deref(),
         *key_type,
@@ -1810,7 +2329,7 @@ pub(crate) fn dispatch_for_loop<P: ProcessManager>(
         *var_type,
         in_expr,
         body,
-    )
+    )?)
 }
 
 pub(crate) fn dispatch_if_then<P: ProcessManager>(
@@ -1826,7 +2345,7 @@ pub(crate) fn dispatch_if_then<P: ProcessManager>(
     else {
         unreachable!()
     };
-    if_then(cx, cond, then_body, else_ifs, else_body)
+    top_level_flow(if_then(cx, cond, then_body, else_ifs, else_body)?)
 }
 
 pub(crate) fn dispatch_assign<P: ProcessManager>(
@@ -1861,7 +2380,7 @@ pub(crate) fn dispatch_with_io<P: ProcessManager>(
     let StepKind::WithIo { bindings, cmd } = step else {
         unreachable!()
     };
-    with_io(cx, 0, 0, bindings, cmd)
+    top_level_flow(with_io(cx, 0, 0, bindings, cmd)?)
 }
 
 pub(crate) fn dispatch_with_io_block<P: ProcessManager>(
@@ -1872,6 +2391,66 @@ pub(crate) fn dispatch_with_io_block<P: ProcessManager>(
         unreachable!()
     };
     with_io_block(cx, 0, 0, bindings)
+}
+
+pub(crate) fn dispatch_func_def<P: ProcessManager>(
+    step: &StepKind,
+    cx: &mut StepCtx<'_, P>,
+) -> Result<()> {
+    let StepKind::FuncDef { name, params, body } = step else {
+        unreachable!()
+    };
+    define_func(cx, name, params, body)
+}
+
+pub(crate) fn dispatch_call<P: ProcessManager>(
+    step: &StepKind,
+    cx: &mut StepCtx<'_, P>,
+) -> Result<()> {
+    let StepKind::Call { name, args } = step else {
+        unreachable!()
+    };
+    call_func_value(cx, 0, name, args).map(|_| ())
+}
+
+pub(crate) fn dispatch_return<P: ProcessManager>(
+    step: &StepKind,
+    cx: &mut StepCtx<'_, P>,
+) -> Result<()> {
+    let StepKind::Return { expr } = step else {
+        unreachable!()
+    };
+    top_level_flow(handle_return(cx, 0, expr)?)
+}
+
+pub(crate) fn dispatch_while_loop<P: ProcessManager>(
+    step: &StepKind,
+    cx: &mut StepCtx<'_, P>,
+) -> Result<()> {
+    let StepKind::While { cond, body } = step else {
+        unreachable!()
+    };
+    top_level_flow(while_loop(cx, 0, cond, body)?)
+}
+
+pub(crate) fn dispatch_break<P: ProcessManager>(
+    step: &StepKind,
+    _cx: &mut StepCtx<'_, P>,
+) -> Result<()> {
+    let StepKind::Break = step else {
+        unreachable!()
+    };
+    bail!("BREAK outside loop");
+}
+
+pub(crate) fn dispatch_continue<P: ProcessManager>(
+    step: &StepKind,
+    _cx: &mut StepCtx<'_, P>,
+) -> Result<()> {
+    let StepKind::Continue = step else {
+        unreachable!()
+    };
+    bail!("CONTINUE outside loop");
 }
 
 // ── AWAIT / AssignAsync handlers ─────────────────────────────────────────
@@ -1914,10 +2493,65 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
     let active_process = std::sync::Arc::clone(&forked_state.active_process);
 
     // Spawn the task thread. Leftover guards unpin at thread termination.
+    // A single-`CALL` body (possibly under `WITH_IO` layers) runs as a
+    // function invocation whose `RETURN` value is published into the entry
+    // for `LET $o = AWAIT $t`; block bodies keep stdout-sink semantics.
+    // Control flow never crosses the thread boundary: stray
+    // BREAK/CONTINUE/RETURN become errors here.
+    let call_task: Option<(Vec<IoBinding>, String, Vec<Expr>)> = match body.as_slice() {
+        [step] => extract_call(&step.kind)
+            .map(|(bindings, name, args)| (bindings, name.to_string(), args.to_vec())),
+        _ => None,
+    };
+    let (entry_tx, entry_rx) = std::sync::mpsc::channel::<Arc<super::state::TaskEntry>>();
     let join = std::thread::spawn(move || {
         let mut child_state = forked_state;
         let mut child_process = forked_process;
-        super::steps::execute_steps(
+        if let Some((bindings, name, args)) = call_task {
+            let entry = entry_rx
+                .recv()
+                .map_err(|_| anyhow::anyhow!("ASYNC task entry unavailable"))?;
+            let snapshot_root = child_state.fs.root().clone();
+            let build_context = child_state.fs.build_context().clone();
+            let mut child_cx = super::steps::StepCtx {
+                state: &mut child_state,
+                process: &mut child_process,
+                snapshot_root,
+                build_context,
+                stdin,
+                expose_stdin,
+                out,
+                err,
+            };
+            // Apply call-site bindings (e.g. stdin pipes) like the inline
+            // path; stdout keeps the task sink (parse rejects stdout pipes).
+            let value = if bindings.is_empty() {
+                call_func_value(&mut child_cx, 0, &name, &args)?
+            } else {
+                let (task_stdin, task_expose, task_out, task_err) =
+                    resolve_io_streams(&mut child_cx, 0, &bindings, &body[0].kind)?;
+                let state = &mut *child_cx.state;
+                let process = &mut *child_cx.process;
+                let mut sub_cx = super::steps::StepCtx {
+                    state,
+                    process,
+                    snapshot_root: child_cx.snapshot_root.clone(),
+                    build_context: child_cx.build_context.clone(),
+                    stdin: task_stdin,
+                    expose_stdin: task_expose,
+                    out: task_out,
+                    err: task_err,
+                };
+                call_func_value(&mut sub_cx, 0, &name, &args)?
+            };
+            entry
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .return_value = Some(value);
+            return Ok(());
+        }
+        let flow = super::steps::execute_steps(
             &mut child_state,
             &mut child_process,
             &body,
@@ -1926,7 +2560,19 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
             out,
             err,
             true,
-        )
+        )?;
+        match flow {
+            Flow::Done => Ok(()),
+            Flow::Break { idx } => {
+                anyhow::bail!("step {}: BREAK cannot cross ASYNC boundary", idx + 1);
+            }
+            Flow::Continue { idx } => {
+                anyhow::bail!("step {}: CONTINUE cannot cross ASYNC boundary", idx + 1);
+            }
+            Flow::Return { idx, .. } => {
+                anyhow::bail!("step {}: RETURN cannot cross ASYNC boundary", idx + 1);
+            }
+        }
     });
 
     // Create the thread handle
@@ -1934,19 +2580,20 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
 
     // Store in named_tasks as a synchronized entry. The handle lives inside
     // the entry so CANCEL can tear it down even under concurrent AWAIT.
+    // Published to the child above so single-CALL tasks can store their
+    // RETURN value under the entry lock.
     {
         let mut named = cx
             .state
             .named_tasks
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        named.insert(
-            task_id,
-            Arc::new(super::state::TaskEntry::new_with_sink(
-                Box::new(handle),
-                sink,
-            )),
-        );
+        let entry = Arc::new(super::state::TaskEntry::new_with_sink(
+            Box::new(handle),
+            sink,
+        ));
+        named.insert(task_id, Arc::clone(&entry));
+        let _ = entry_tx.send(entry);
     }
 
     // Store the task handle in the variable scope
@@ -2142,7 +2789,9 @@ pub(crate) fn dispatch_await<P: ProcessManager>(var: &str, cx: &mut StepCtx<'_, 
 
 /// Dispatch `LET $out: TYPE = AWAIT $task` — join like bare `AWAIT` (identical
 /// cancellation/timeout/double-await semantics via [`await_task_entry`]),
-/// then bind the task's stdout as a string instead of forwarding it.
+/// then bind the task's output: for a single-`CALL` task the function's
+/// `RETURN` value (coerced to the declared type), otherwise the task's
+/// stdout as a string.
 pub(crate) fn dispatch_await_capture<P: ProcessManager>(
     out_var: &str,
     out_type: TypeKind,
@@ -2151,6 +2800,17 @@ pub(crate) fn dispatch_await_capture<P: ProcessManager>(
 ) -> Result<()> {
     let entry = resolve_task_entry(task_var, cx)?;
     await_task_entry(&entry, &cx.state.cancel_token, task_var)?;
+    if let Some(value) = entry
+        .state
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .return_value
+        .clone()
+    {
+        cx.state
+            .declare_var(out_var.trim_start_matches('$').to_string(), out_type, value)?;
+        return Ok(());
+    }
     let text = match entry.take_sink() {
         Some(sink) => sink.drain_string_strict().map_err(|e| {
             anyhow!("LET ${out_var} = AWAIT ${task_var} capture is not valid UTF-8: {e}")
@@ -2261,14 +2921,14 @@ pub(crate) fn dispatch_assign_capture_step<P: ProcessManager>(
     else {
         unreachable!()
     };
-    assign_capture(
+    top_level_flow(assign_capture(
         cx,
         super::steps::allocate_assert_generation(),
         0,
         var,
         *decl_type,
         cmd,
-    )
+    )?)
 }
 
 /// Pipeline dispatch wrapper for `AwaitCapture`
@@ -2307,7 +2967,7 @@ pub(crate) fn dispatch_timeout_step<P: ProcessManager>(
         unreachable!()
     };
     let duration = super::args::resolve_arg_as_duration(duration, cx)?;
-    timeout(cx, 0, &duration, body)
+    top_level_flow(timeout(cx, 0, &duration, body)?)
 }
 
 /// Dispatch `TIMEOUT <duration> <body>` — run `body` on the current thread
@@ -2321,7 +2981,7 @@ pub(crate) fn timeout<P: ProcessManager>(
     idx: usize,
     duration: &std::time::Duration,
     body: &[Step],
-) -> Result<()> {
+) -> Result<Flow> {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::{Duration, Instant};
 
@@ -2386,7 +3046,7 @@ pub(crate) fn timeout<P: ProcessManager>(
 
     let budget = oxdock_parser::command::format_duration(duration);
     match result {
-        Ok(()) => {
+        Ok(Flow::Done) => {
             if fired.load(Ordering::SeqCst) {
                 bail!(
                     "step {}: TIMEOUT after {} — deadline exceeded",
@@ -2394,7 +3054,17 @@ pub(crate) fn timeout<P: ProcessManager>(
                     budget
                 );
             }
-            Ok(())
+            Ok(Flow::Done)
+        }
+        Ok(flow) => {
+            if fired.load(Ordering::SeqCst) {
+                bail!(
+                    "step {}: TIMEOUT after {} — deadline exceeded",
+                    idx + 1,
+                    budget
+                );
+            }
+            Ok(flow)
         }
         Err(err) => {
             if fired.load(Ordering::SeqCst) {

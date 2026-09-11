@@ -42,6 +42,12 @@ AwaitCapture = ["await_capture"]
 Cancel = ["cancel"]
 Timeout = ["timeout"]
 Sleep = ["sleep"]
+FuncDef = ["func_def_call"]
+Call = ["func_def_call"]
+Return = ["func_return"]
+While = ["while_basic"]
+Break = ["break_in_for"]
+Continue = ["while_break_continue"]
 
 [extras]
 cases = [

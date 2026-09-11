@@ -720,6 +720,33 @@ fn collect_step_kinds(kind: &StepKind, kinds: &mut HashSet<String>) {
     if let StepKind::WithIo { cmd, .. } | StepKind::AssignCapture { cmd, .. } = kind {
         collect_step_kinds(cmd, kinds);
     }
+    // Control-flow bodies nest kinds (RETURN inside FUNC, BREAK inside
+    // loops) that can never appear at top level of a passing case.
+    let bodies: Vec<&Vec<Step>> = match kind {
+        StepKind::For { body, .. }
+        | StepKind::While { body, .. }
+        | StepKind::FuncDef { body, .. }
+        | StepKind::Timeout { body, .. }
+        | StepKind::AssignAsync { body, .. }
+        | StepKind::AsyncBlock { body } => vec![body],
+        StepKind::If {
+            then_body,
+            else_ifs,
+            else_body,
+            ..
+        } => {
+            let mut out = vec![then_body];
+            out.extend(else_ifs.iter().map(|(_, b)| b));
+            out.extend(else_body.iter());
+            out
+        }
+        _ => Vec::new(),
+    };
+    for body in bodies {
+        for step in body {
+            collect_step_kinds(&step.kind, kinds);
+        }
+    }
 }
 
 fn run_case(case: &CaseSpec, steps: &[Step]) -> Result<()> {
@@ -1237,5 +1264,11 @@ fn step_kind_name(kind: &StepKind) -> &'static str {
         StepKind::Cancel { .. } => "Cancel",
         StepKind::Timeout { .. } => "Timeout",
         StepKind::Sleep { .. } => "Sleep",
+        StepKind::FuncDef { .. } => "FuncDef",
+        StepKind::Call { .. } => "Call",
+        StepKind::Return { .. } => "Return",
+        StepKind::While { .. } => "While",
+        StepKind::Break => "Break",
+        StepKind::Continue => "Continue",
     }
 }

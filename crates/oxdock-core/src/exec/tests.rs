@@ -595,7 +595,7 @@ fn with_io_pipe_routes_stdout_to_run_stdin() {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdout,
-                    pipe: Some("shared".into()),
+                    pipe: Some(oxdock_parser::PipeTarget::Name("shared".into())),
                 }],
                 cmd: Box::new(StepKind::Echo("hello".into())),
             },
@@ -607,7 +607,7 @@ fn with_io_pipe_routes_stdout_to_run_stdin() {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdin,
-                    pipe: Some("shared".into()),
+                    pipe: Some(oxdock_parser::PipeTarget::Name("shared".into())),
                 }],
                 cmd: Box::new(StepKind::Run("cat".into())),
             },
@@ -651,7 +651,7 @@ fn async_echo_pipe_write_preserves_exact_bytes() {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdout,
-                    pipe: Some("async_out".into()),
+                    pipe: Some(oxdock_parser::PipeTarget::Name("async_out".into())),
                 }],
                 cmd: Box::new(StepKind::AsyncBlock {
                     body: vec![step(StepKind::Echo("hello".into()))],
@@ -665,7 +665,7 @@ fn async_echo_pipe_write_preserves_exact_bytes() {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdin,
-                    pipe: Some("async_out".into()),
+                    pipe: Some(oxdock_parser::PipeTarget::Name("async_out".into())),
                 }],
                 cmd: Box::new(StepKind::Write {
                     path: "async_out.txt".into(),
@@ -704,7 +704,7 @@ fn async_stdin_pipe_unblocks_background_write() {
                     kind: StepKind::WithIo {
                         bindings: vec![IoBinding {
                             stream: IoStream::Stdin,
-                            pipe: Some("in_chan".into()),
+                            pipe: Some(oxdock_parser::PipeTarget::Name("in_chan".into())),
                         }],
                         cmd: Box::new(StepKind::Write {
                             path: "inline_direct.txt".into(),
@@ -723,7 +723,7 @@ fn async_stdin_pipe_unblocks_background_write() {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdout,
-                    pipe: Some("in_chan".into()),
+                    pipe: Some(oxdock_parser::PipeTarget::Name("in_chan".into())),
                 }],
                 cmd: Box::new(StepKind::Echo("unblock_inline_payload".into())),
             },
@@ -765,6 +765,9 @@ fn create_exec_state(fs: MockFs) -> ExecState<MockProcessManager> {
         inside_async: false,
         keeper_expiry: None,
         cancellable: false,
+        funcs: Arc::new(std::collections::HashMap::new()),
+        host_funcs: Arc::new(std::collections::HashMap::new()),
+        call_depth: 0,
         _marker: std::marker::PhantomData,
     };
     // Mirror production (`run_steps_with_manager`): push a global variable
@@ -996,7 +999,7 @@ fn cat_and_capture_expand_env_paths() {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdout,
-                    pipe: Some("cap-cat".to_string()),
+                    pipe: Some(oxdock_parser::PipeTarget::Name("cap-cat".to_string())),
                 }],
                 cmd: Box::new(StepKind::Read(Some("{{ env:SNIPPET }}".into()))),
             },
@@ -1008,7 +1011,7 @@ fn cat_and_capture_expand_env_paths() {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdin,
-                    pipe: Some("cap-cat".to_string()),
+                    pipe: Some(oxdock_parser::PipeTarget::Name("cap-cat".to_string())),
                 }],
                 cmd: Box::new(StepKind::Write {
                     path: "{{ env:OUT_FILE }}".into(),
@@ -1360,11 +1363,11 @@ fn with_io_rejects_duplicate_stdout_binding() {
             bindings: vec![
                 IoBinding {
                     stream: IoStream::Stdout,
-                    pipe: Some("p".into()),
+                    pipe: Some(oxdock_parser::PipeTarget::Name("p".into())),
                 },
                 IoBinding {
                     stream: IoStream::Stdout,
-                    pipe: Some("p".into()),
+                    pipe: Some(oxdock_parser::PipeTarget::Name("p".into())),
                 },
             ],
             cmd: Box::new(StepKind::Echo("x".into())),
@@ -1409,11 +1412,11 @@ fn with_io_rejects_duplicate_stdin_and_stderr_bindings() {
                 bindings: vec![
                     IoBinding {
                         stream: stream_a,
-                        pipe: Some("p".into()),
+                        pipe: Some(oxdock_parser::PipeTarget::Name("p".into())),
                     },
                     IoBinding {
                         stream: stream_b,
-                        pipe: Some("p".into()),
+                        pipe: Some(oxdock_parser::PipeTarget::Name("p".into())),
                     },
                 ],
                 cmd: Box::new(StepKind::Echo("x".into())),
@@ -1450,7 +1453,7 @@ fn with_io_async_single_run_promotes_os_pipe() {
         kind: StepKind::WithIo {
             bindings: vec![IoBinding {
                 stream: IoStream::Stdout,
-                pipe: Some("live".into()),
+                pipe: Some(oxdock_parser::PipeTarget::Name("live".into())),
             }],
             cmd: Box::new(StepKind::AsyncBlock {
                 body: vec![Step {
@@ -1533,7 +1536,7 @@ fn with_io_async_dsl_body_stays_script_pipe() {
         kind: StepKind::WithIo {
             bindings: vec![IoBinding {
                 stream: IoStream::Stdout,
-                pipe: Some("plain".into()),
+                pipe: Some(oxdock_parser::PipeTarget::Name("plain".into())),
             }],
             cmd: Box::new(StepKind::AsyncBlock {
                 body: vec![Step {

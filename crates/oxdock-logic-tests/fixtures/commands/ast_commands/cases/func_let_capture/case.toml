@@ -1,0 +1,4 @@
+name = "func_let_capture"
+
+[expect]
+files = { "r.txt" = "ada", "ada.txt" = "hey ada\n", "bex.txt" = "hey bex\n" }
