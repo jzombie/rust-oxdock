@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [UNRELEASED]
+
+### Added
+
+- DSL arithmetic with full numeric support (#112): `LET $x: INT = 2 + 3 * 4` binds `14`, with `*`/`/` binding tighter than `+`/`-`, unary minus (`-5`, `2 * -3`), and parentheses nesting arbitrarily (`2 * (2 * (2 + 3)) * 4`). `42` is an `INT` literal and `3.14` a `FLOAT` literal; bare words that merely start with digits keep their literal reading (`30s`, `100ms`, `123/456`, `1.0.0`, `-f` stay strings)
+- Numeric semantics (#112): `Int x Int` stays `INT` (checked math, truncating integer division, so `7 / 2` is `3`); any `Float` operand promotes the result to `FLOAT` (`1 + 2.5` is `3.5`). Division by zero, overflow, and non-finite results are runtime errors rather than stored values
+- Ordering comparisons (#112): `< <= > >=` alongside the existing `== !=`, with numeric semantics when both sides are numbers (`1 == 1.0` is true). `==`/`!=` on anything else keep comparing rendered strings, and ordering non-numerics is a Type Error. Chained comparisons are a parse error (`$a < $b < $c` is rejected); write the conjunction explicitly (`$a < $b && $b < $c`)
+- `INT()` / `FLOAT()` conversions (#112): the explicit bridge from captured command output (which is always a string) to numbers, so `LET $total: INT = $total + INT($size_str)` accumulates. `INT` trims ASCII whitespace and rejects non-integers; `FLOAT` accepts int strings and rejects non-finite input. Plain string operands never convert implicitly: `"100" + 1` is a Type Error
+- Float equality documented with runnable examples (#112): equality is exact with no epsilon, so binary fractions compare cleanly (`0.5 + 0.25 == 0.75` is true) while decimal fractions may not (`0.1 + 0.2 == 0.3` is false, the sum is `0.30000000000000004`). The reference explains why (power-of-2 denominators) and shows bounding instead (`IF $sum > 0.299999 && $sum < 0.300001`)
+- Logical operators documented with examples: `&&` binds tighter than `||`, both short-circuit (`IF true || $missing` never touches the right side), and only `Bool` conditions are accepted
+- Bash comparison table in the `LET` reference: capture looks like `output=$(...)` but keeps exact bytes (Bash strips all trailing newlines), stays explicitly typed, converts only via `INT()`/`FLOAT()`, and fails the step immediately when the captured command fails
+- Scope semantics documented and pinned: mutating an outer variable inside a block persists after exit for every type (`LET $x` outside, `$x = ...` inside), while `LET` inside a block declares a shadow that reverts. Binding and mutation convert to the declared type (`$n = "42"` binds `42` for an `INT`)
+
+### Fixed
+
+- Spaced `&&` / `||` chains failed to parse (`a && b && c`): whitespace is now accepted around every chained operator, not just the first. (The flaw predates arithmetic; the new arithmetic tiers ship with the corrected shape, so `100 / 10 / 2` chains too)
+- Reference pages no longer leak internal identifiers (`coerce_value`, `ExecState`, `declare_var`); user docs say "convert to the declared type"
+
+### Changed
+
+- Bare `1/0`-style words now parse as arithmetic: previously `LET $x: STRING = 1/0` bound the string `"1/0"` because no `/` operator existed; now that `/` is division, `LET $x: INT = 1/0` is a division-by-zero error. Quoted strings are unaffected
+
 ## [0.12.0-alpha] - 2026-09-11
 
 ### Added
