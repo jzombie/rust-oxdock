@@ -34,14 +34,14 @@ Supports platform gating, async tasks, and piped workflows for custom pipelines.
 
 **Prototype status**: OxDock is still being prototyped. DSL syntax and Rust APIs may change without deprecation warnings until the first stable release.
 
-[Documentation](https://docs.rs/oxdock/0.13.0-alpha/oxdock/)
+[Documentation](https://docs.rs/oxdock/0.14.0-alpha/oxdock/)
 
 Jump to the [command reference](#command-reference) below for the full
 command list with runnable examples.
 
 ## Quick start
 
-Add it to your Rust build with `cargo add oxdock@0.13.0-alpha`, or install the standalone runner with `cargo install oxdock@0.13.0-alpha`.
+Add it to your Rust build with `cargo add oxdock@0.14.0-alpha`, or install the standalone runner with `cargo install oxdock@0.14.0-alpha`.
 
 Run a script:
 
@@ -125,8 +125,8 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     LET $a: STRING = READ dist/alpha.txt
     LET $b: STRING = READ dist/beta.txt
     LET $p: STRING = READ dist/picked.txt
-    ASSERT_EQ $a "alpha OxDock 0.13.0-alpha"
-    ASSERT_EQ $b "beta OxDock 0.13.0-alpha"
+    ASSERT_EQ $a "alpha OxDock 0.14.0-alpha"
+    ASSERT_EQ $b "beta OxDock 0.14.0-alpha"
     ASSERT_EQ $p "alpha"
 };
 
@@ -138,7 +138,7 @@ let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolve
 let out = root.join("dist/alpha.txt").expect("out path");
 assert_eq!(
     resolver.read_to_string(&out).expect("read out"),
-    "alpha OxDock 0.13.0-alpha"
+    "alpha OxDock 0.14.0-alpha"
 );
 ```
 
