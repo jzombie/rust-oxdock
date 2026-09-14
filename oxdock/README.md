@@ -6,8 +6,6 @@ OxDock is a Dockerfile inspired build DSL for Rust. Embed scripts at compile tim
 
 Supports platform gating, async tasks, and piped workflows for custom pipelines.
 
-**Prototype status**: OxDock is still being prototyped. DSL syntax and Rust APIs may change without deprecation warnings until the first stable release.
-
 [Documentation](https://docs.rs/oxdock/0.14.0-alpha/oxdock/)
 
 Add it to your Rust build with `cargo add oxdock@0.14.0-alpha`, or install the standalone runner with `cargo install oxdock@0.14.0-alpha`.
@@ -245,6 +243,8 @@ ever depend on `oxdock`.
 One language for the whole build: farm steps out to npm, bundlers, or code generators and pull their artifacts back under cargo's control. Pipe bytes between steps without buffering whole outputs, fan work out with `ASYNC`, or skip embedding entirely and run the same scripts as standalone CLI processes.
 
 # DSL Reference
+
+> **Prototype status**: OxDock is still being prototyped. DSL syntax and Rust APIs may change without deprecation warnings until the first stable release.
 
 Scripts are sequences of instructions, one per line. Instructions may be prefixed with **guards** (`[...]`) that decide whether they run, and grouped into **scoped blocks** (`{ ... }`). The authoritative grammar is [`crates/oxdock-parser/src/dsl.pest`](https://github.com/jzombie/rust-oxdock/blob/main/crates/oxdock-parser/src/dsl.pest), which is also embedded in the parser crate as the `LANGUAGE_SPEC` constant for tooling.
 
