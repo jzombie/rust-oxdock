@@ -1,0 +1,4 @@
+name = "break_in_for"
+
+[expect]
+files = { "first.txt" = "hit" }

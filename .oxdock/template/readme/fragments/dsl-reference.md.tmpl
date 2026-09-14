@@ -1,6 +1,6 @@
 # DSL Reference
 
-Scripts are sequences of instructions, one per line. Instructions may be prefixed with **guards** (`[...]`) that decide whether they run, and grouped into **scoped blocks** (`{ ... }`). The authoritative grammar is [`crates/oxdock-parser/src/dsl.pest`](./crates/oxdock-parser/src/dsl.pest), which is also embedded in the parser crate as the `LANGUAGE_SPEC` constant for tooling.
+Scripts are sequences of instructions, one per line. Instructions may be prefixed with **guards** (`[...]`) that decide whether they run, and grouped into **scoped blocks** (`{ ... }`). The authoritative grammar is [`crates/oxdock-parser/src/dsl.pest`]({{ $docs_global.workspace_url }}/blob/main/crates/oxdock-parser/src/dsl.pest), which is also embedded in the parser crate as the `LANGUAGE_SPEC` constant for tooling.
 
 ## Lexical structure
 
@@ -8,6 +8,30 @@ Scripts are sequences of instructions, one per line. Instructions may be prefixe
 - One instruction per line; a semicolon (`;`) splits multiple instructions on a single line.
 - Paths and arguments use forward slashes (`/`) for portability (see [Path Separators](#path-separators)).
 - Scripts do **not** inherit your shell environment unless `INHERIT_ENV` opts specific keys in (see [Selective environment inheritance](#selective-environment-inheritance)).
+
+### Declared variable types
+
+Every variable binding declares its type at the binding site. `LET $name: TYPE = ...` creates the binding, `$name = ...` mutates it, and bodies use the bare `$name` reference. The leading `$` keeps mutation distinct from `KEY=value` command assignments. Repeating `LET` for the same name in the same scope is a redeclaration error. Loop variables are declared the same way: `FOR $item: STRING IN ...`. Valid types: `STRING`, `INT`, `FLOAT`, `BOOL`, `PIPE`, `LIST`, `MAP`, `HANDLE`, `DURATION`, `PATH`.
+
+```oxdock
+LET $count: INT = 1
+$count = 2
+LET $msg: STRING = hello
+FOR $item: STRING IN ["a", "b"] {
+    ECHO "\{{ $item }}"
+}
+WRITE count.txt "\{{ $count }}"
+ASSERT_FILE count.txt "2"
+```
+
+The `env:KEY` expression reads the script environment into a plain value. A `$var` reference never reads the environment, even when the names match:
+
+```oxdock
+ENV FOO="bar"
+LET $e: STRING = env:FOO
+WRITE env.txt "\{{ $e }}"
+ASSERT_FILE env.txt "bar"
+```
 
 ### Statements and semicolons
 
@@ -181,7 +205,7 @@ ASSERT_ABSENT chained.txt
 Braced blocks scope everything: `LET` variables, `ENV` values, `WORKDIR`, and `WORKSPACE` all revert when the block exits. Files created inside a block persist on disk, and pipes registered with `WITH_IO` stay open — those are the only things that cross a scope boundary. (A bare `{ ... }` needs an always-true guard: `[bool:true]`. Single commands, including single `WITH_IO` lines like `READ_LINE`, never open a scope.)
 
 ```oxdock
-LET $a = "some_value"
+LET $a: STRING = "some_value"
 ENV MODE="production"
 MKDIR scoped_area
 WORKDIR scoped_area
@@ -189,7 +213,7 @@ WORKDIR scoped_area
 // Guarded block: LET, ENV, and WORKDIR below are scoped and revert
 // when the block closes.
 [bool:true] {
-    LET $a = "inner_value"
+    LET $a: STRING = "inner_value"
     ENV MODE="staging"
     WRITE inner.txt "\{{ $a }}-\{{ env:MODE }}"
 }
@@ -234,17 +258,17 @@ ASSERT_FILE a.txt one
 ASSERT_FILE b.txt two
 
 // AWAIT form bounds a task join.
-LET $quick = ASYNC {
+LET $quick: HANDLE = ASYNC {
     ECHO hi
 }
 TIMEOUT 30s AWAIT $quick
 ```
 
-`ASYNC` wraps any command or block — including `TIMEOUT`, `CANCEL`, `SLEEP`, and nested `ASYNC` — in either nesting order with the same deadline semantics. `LET $task = ASYNC TIMEOUT 30s RUN "build"` enforces the deadline inside the background thread (a later `AWAIT $task` surfaces the `TIMEOUT` error), while `TIMEOUT 30s AWAIT $task` preempts a hung task from the awaiting side:
+`ASYNC` wraps any command or block — including `TIMEOUT`, `CANCEL`, `SLEEP`, and nested `ASYNC` — in either nesting order with the same deadline semantics. `LET $task: HANDLE = ASYNC TIMEOUT 30s RUN "build"` enforces the deadline inside the background thread (a later `AWAIT $task` surfaces the `TIMEOUT` error), while `TIMEOUT 30s AWAIT $task` preempts a hung task from the awaiting side:
 
 ```oxdock
 // ASYNC wraps TIMEOUT: the deadline fires inside the background thread.
-LET $bounded = ASYNC TIMEOUT 30s ECHO "bounded"
+LET $bounded: HANDLE = ASYNC TIMEOUT 30s ECHO "bounded"
 AWAIT $bounded
 ```
 
@@ -252,10 +276,10 @@ The one structural exception is `WITH_IO`, which must wrap `ASYNC` from the outs
 
 ## Cancelling tasks with CANCEL
 
-`CANCEL $task` synchronously stops a named background task spawned via `LET $task = ASYNC ...`. It is blocking: when the statement returns, the task thread has been joined and its OS process reaped, so no residual filesystem or stream mutation can follow and the next step runs in a quiet workspace. Only named tasks can be cancelled; a later `AWAIT $task` fails with a cancellation error, and a second `CANCEL $task` fails as already cancelled.
+`CANCEL $task` synchronously stops a named background task spawned via `LET $task: HANDLE = ASYNC ...`. It is blocking: when the statement returns, the task thread has been joined and its OS process reaped, so no residual filesystem or stream mutation can follow and the next step runs in a quiet workspace. Only named tasks can be cancelled; a later `AWAIT $task` fails with a cancellation error, and a second `CANCEL $task` fails as already cancelled.
 
 ```oxdock
 // CANCEL form stops a named background task synchronously.
-LET $worker = ASYNC SLEEP 30s
+LET $worker: HANDLE = ASYNC SLEEP 30s
 CANCEL $worker
 ```

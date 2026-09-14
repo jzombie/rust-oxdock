@@ -172,7 +172,7 @@ fn write_unquoted_template_in_path() {
     run_script(
         &root,
         indoc! {r#"
-        LET $name = "output"
+        LET $name: STRING = "output"
         WRITE "{{ $name }}.txt" "content"
     "#},
     )
@@ -187,7 +187,7 @@ fn workdir_unquoted_template() {
     run_script(
         &root,
         indoc! {r#"
-        LET $dir = "target"
+        LET $dir: STRING = "target"
         MKDIR "{{ $dir }}"
         WORKDIR "{{ $dir }}"
     "#},
@@ -203,7 +203,7 @@ fn write_unquoted_template_with_suffix() {
     run_script(
         &root,
         indoc! {r#"
-        LET $pkg = "mylib"
+        LET $pkg: STRING = "mylib"
         WRITE "src/{{ $pkg }}/mod.rs" "// module"
     "#},
     )
@@ -237,7 +237,7 @@ fn run_unquoted_command_with_env_expansion() {
         &root,
         indoc! {r#"
         ENV GREETING="hello"
-        RUN echo $GREETING
+        RUN echo {{ env:GREETING }}
     "#},
     )
     .unwrap();

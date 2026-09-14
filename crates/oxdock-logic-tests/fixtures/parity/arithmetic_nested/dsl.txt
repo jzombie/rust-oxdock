@@ -1,0 +1,13 @@
+# Parity fixture: this file is DSL text, parsed directly. Its twin
+# tokens.rs is NOT compiled as Rust. It is lexed into Rust tokens,
+# rendered back to DSL, and both ASTs must match exactly.
+LET $x: INT = 2 * (2 * (2 + 3)) * 4
+LET $t: INT = $total + INT($size_str)
+LET $f: FLOAT = FLOAT("2.5") + 1
+LET $ok: BOOL = $a < $b && $b < $c || $d == 1.0
+LET $same: BOOL = INSPECT($p) == INSPECT($p)
+LET $n: INT = -$v * 2
+$total = $t * 2 - 1
+IF $t >= 10 && $ok || $same {
+    ECHO big
+}

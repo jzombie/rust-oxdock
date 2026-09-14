@@ -1,0 +1,9 @@
+FUNC PICK($flag: BOOL) {
+    IF $flag {
+        RETURN "yes"
+    }
+    RETURN "no"
+}
+LET $a: STRING = CALL PICK(true)
+LET $b: STRING = CALL PICK(false)
+WRITE picked.txt "{{ $a }}-{{ $b }}"

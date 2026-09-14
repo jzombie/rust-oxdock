@@ -169,6 +169,17 @@ impl SpillBuffer {
             .map_err(|e| anyhow::anyhow!("captured stdout is not valid UTF-8: {e}"))
     }
 
+    /// Bytes currently held (memory plus unread spill-file backlog).
+    /// Used for `INSPECT()` diagnostics; never blocks.
+    pub(super) fn buffered_bytes(&self) -> u64 {
+        let inner = self.lock_inner();
+        match &*inner {
+            SpillInner::Memory(vec) => vec.len() as u64,
+            #[cfg(not(miri))]
+            SpillInner::Disk(disk) => disk.write_pos.saturating_sub(disk.read_pos),
+        }
+    }
+
     #[cfg(test)]
     #[cfg_attr(miri, allow(dead_code))]
     pub(super) fn is_spilled(&self) -> bool {

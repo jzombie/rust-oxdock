@@ -39,7 +39,7 @@ fn env_bare_variable_evaluates() {
     run_script(
         &root,
         indoc! {r#"
-            LET $who = "Alice"
+            LET $who: STRING = "Alice"
             ENV GREETING=$who
             WRITE out.txt "{{ env:GREETING }}"
         "#},
@@ -55,7 +55,7 @@ fn env_template_value_interpolates() {
     run_script(
         &root,
         indoc! {r#"
-            LET $who = "Alice Smith"
+            LET $who: STRING = "Alice Smith"
             ENV GREETING="{{ $who }}!"
             WRITE out.txt "{{ env:GREETING }}"
         "#},
@@ -71,7 +71,7 @@ fn env_preserves_non_string_expr_types() {
     run_script(
         &root,
         indoc! {r#"
-            LET $pair = [1, 2]
+            LET $pair: LIST = [1, 2]
             ENV PAIR=$pair
             WRITE out.txt "{{ env:PAIR }}"
         "#},
@@ -87,7 +87,7 @@ fn echo_mixed_variable_keeps_value() {
     run_script(
         &root,
         indoc! {r#"
-            LET $who = "Alice"
+            LET $who: STRING = "Alice"
             ECHO $who hello
             ASSERT_STDOUT "Alice hello"
         "#},
@@ -117,7 +117,7 @@ fn expand_bare_variable_override() {
     run_script(
         &root,
         indoc! {r#"
-            LET $who = "Bob"
+            LET $who: STRING = "Bob"
             WRITE template.md "Hi \{{ env:WHO }}!"
             EXPAND template.md WHO=$who
             ASSERT_STDOUT "Hi Bob!"
@@ -133,7 +133,7 @@ fn expand_template_override() {
     run_script(
         &root,
         indoc! {r#"
-            LET $who = "Carol"
+            LET $who: STRING = "Carol"
             WRITE template.md "Hi \{{ env:WHO }}!"
             EXPAND template.md WHO="{{ $who }}!!"
             ASSERT_STDOUT "Hi Carol!!"
@@ -149,8 +149,8 @@ fn expand_multi_assignment_overrides_resolve() {
     run_script(
         &root,
         indoc! {r#"
-            LET $first = "Ada"
-            LET $last = "Lovelace"
+            LET $first: STRING = "Ada"
+            LET $last: STRING = "Lovelace"
             WRITE template.md "Hi \{{ env:FIRST }} \{{ env:LAST }}!"
             EXPAND template.md FIRST=$first LAST=$last
             ASSERT_STDOUT "Hi Ada Lovelace!"

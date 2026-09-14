@@ -1,0 +1,34 @@
+# Pipes travel into functions as typed arguments and are usable as
+# binding targets in both directions. Two syntax rules to remember:
+#   - `pipe:NAME` is the explicit handle operator (like `env:KEY`):
+#     `LET $p: PIPE = pipe:ch` names a pipe without touching a stream.
+#     A plain string (`LET $p: PIPE = "ch"`) is a TypeMismatch error.
+#   - `$p` (not `pipe:$p`) is the variable form in bindings and calls;
+#     literals stay `pipe:name` (as in `WITH_IO` bindings below).
+FUNC FILL($q: PIPE) {
+    WITH_IO [stdout=$q] ECHO "filled"
+    RETURN "filled-ok"
+}
+
+FUNC DRAIN($q: PIPE) {
+    WITH_IO [stdin=$q] READ_LINE $line
+    RETURN $line
+}
+
+# A function can also hand a pipe back: the caller receives a live handle.
+FUNC MAKEPIPE($name: STRING) {
+    LET $made: PIPE = pipe:made
+    WITH_IO [stdout=$made] ECHO "seed"
+    RETURN $made
+}
+
+LET $p: PIPE = pipe:ch
+WITH_IO [stdout=$p] ECHO "primed"
+WITH_IO [stdin=$p] READ_LINE $primed
+LET $fr: STRING = CALL FILL($p)
+LET $got: STRING = CALL DRAIN($p)
+WRITE got.txt "{{ $primed }}-{{ $fr }}-{{ $got }}"
+
+LET $q: PIPE = CALL MAKEPIPE("ignored")
+LET $back: STRING = CALL DRAIN($q)
+WRITE back.txt "{{ $back }}"

@@ -1,0 +1,8 @@
+LET $outer: STRING = "outer"
+FUNC SHADOW($outer: STRING) {
+    LET $inner: STRING = "inner"
+    RETURN $outer
+}
+LET $res: STRING = CALL SHADOW("param")
+LET $inner: STRING = "fresh"
+WRITE res.txt "{{ $res }}-{{ $outer }}-{{ $inner }}"

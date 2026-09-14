@@ -1,5 +1,5 @@
 # A second CANCEL on the same task must fail distinctly: the tombstone
 # reports "already cancelled", not success and not TaskNotFound.
-LET $t = ASYNC SLEEP 30s
+LET $t: HANDLE = ASYNC SLEEP 30s
 CANCEL $t
 CANCEL $t

@@ -1,4 +1,4 @@
 # TIMEOUT around AWAIT: the deadline must preempt the hung background
 # task (bounded ~2s), not hang until the task finishes naturally.
-LET $t = ASYNC RUN @SLEEP_LONG_CMD@
+LET $t: HANDLE = ASYNC RUN @SLEEP_LONG_CMD@
 TIMEOUT 2s AWAIT $t

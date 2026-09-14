@@ -1,0 +1,4 @@
+# Parity fixture: chained comparisons are rejected. Both entry points
+# (DSL text here, Rust tokens in tokens.rs) must fail with the same
+# parse error, pinned by case.toml.
+LET $x: BOOL = $a < $b < $c

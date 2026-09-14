@@ -1,0 +1,4 @@
+name = "arithmetic"
+
+[expect]
+files = { "total.txt" = "15", "ratio.txt" = "3.5" }

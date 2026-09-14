@@ -1,0 +1,3 @@
+name = "set_undeclared"
+
+expect_error_contains = "undeclared"

@@ -9,10 +9,11 @@ repository.workspace = true
 publish = false
 
 [package.metadata.cargo-udeps.ignore]
-development = ["oxdock-macros", "oxdock"]
+development = ["oxdock-macros", "oxdock", "oxdock-fs"]
 
 [dev-dependencies]
 oxdock.workspace = true
+oxdock-fs.workspace = true
 oxdock-macros.workspace = true
 
 [lints]

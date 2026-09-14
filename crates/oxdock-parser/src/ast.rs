@@ -249,7 +249,7 @@ impl From<Guard> for GuardExpr {
 }
 
 /// A command argument — either an expandable string or an expression.
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Arg {
     /// Expandable string. The `bool` indicates whether the argument was
     /// quoted in the source (`true`) or unquoted (`false`). Quoted arguments
@@ -264,7 +264,7 @@ pub enum Arg {
 }
 
 /// One fragment of a mixed [`Arg::Parts`] value.
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ArgPart {
     /// Literal text. The `bool` marks source-quoted regions (exact bytes);
     /// unquoted text carries single-space-normalized gaps.
@@ -356,7 +356,7 @@ impl PartialEq<&str> for Arg {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum IoStream {
     Stdin,
     Stdout,
@@ -366,16 +366,131 @@ pub enum IoStream {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct IoBinding {
     pub stream: IoStream,
-    pub pipe: Option<String>,
+    pub pipe: Option<PipeTarget>,
 }
 
+/// A pipe endpoint for a `WITH_IO` binding: either a literal `pipe:name`
+/// or a `$var` holding a `PIPE` value, resolved against the live pipe
+/// registry when the step runs.
 #[derive(Debug, Clone, Eq, PartialEq)]
+pub enum PipeTarget {
+    Name(String),
+    Var(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TypeKind {
+    String,
+    Int,
+    Float,
+    Bool,
+    Pipe,
+    List,
+    Map,
+    Handle,
+    Duration,
+    Path,
+}
+
+impl TypeKind {
+    pub const CANONICAL: &[TypeKind] = &[
+        TypeKind::String,
+        TypeKind::Int,
+        TypeKind::Float,
+        TypeKind::Bool,
+        TypeKind::Pipe,
+        TypeKind::List,
+        TypeKind::Map,
+        TypeKind::Handle,
+        TypeKind::Duration,
+        TypeKind::Path,
+    ];
+
+    /// Canonical display name. This is the single source of truth for the
+    /// type vocabulary: anchors, doc titles, `FromStr`, and the `ArgType` /
+    /// `FlagValueType` display labels all derive from these strings.
+    pub fn label(&self) -> &'static str {
+        match self {
+            TypeKind::String => "STRING",
+            TypeKind::Int => "INT",
+            TypeKind::Float => "FLOAT",
+            TypeKind::Bool => "BOOL",
+            TypeKind::Pipe => "PIPE",
+            TypeKind::List => "LIST",
+            TypeKind::Map => "MAP",
+            TypeKind::Handle => "HANDLE",
+            TypeKind::Duration => "DURATION",
+            TypeKind::Path => "PATH",
+        }
+    }
+
+    /// Reference body for the canonical types. The title derives from
+    /// [`label`](Self::label); only the prose body is stored per variant.
+    pub fn doc(&self) -> Option<(String, &'static str)> {
+        let body = match self {
+            TypeKind::String => {
+                "Arbitrary text. Quotes keep exact bytes, lone `$var` evaluates, `{{ ... }}` interpolates."
+            }
+            TypeKind::Int => "64-bit signed integer, e.g. an exit code.",
+            TypeKind::Float => "64-bit float, e.g. a ratio.",
+            TypeKind::Bool => "Boolean `true` or `false`.",
+            TypeKind::Pipe => {
+                "Named script pipe. Validity is checked against the pipe registry at coercion time."
+            }
+            TypeKind::List => "Ordered list of values.",
+            TypeKind::Map => "String-keyed map of values.",
+            TypeKind::Handle => "Background ASYNC task handle for AWAIT/CANCEL.",
+            TypeKind::Duration => {
+                "Positive time span: `500ms`, `10s`, `2m`, `1h`; bare number means seconds."
+            }
+            TypeKind::Path => "Workspace path, resolved against cwd and guarded against escape.",
+        };
+        Some((format!("Value type: {}", self.label()), body))
+    }
+
+    /// Anchor of the type's reference section, derived from
+    /// [`label`](Self::label) the way the Markdown slugger would derive it
+    /// from the doc title.
+    pub fn anchor(&self) -> String {
+        format!("value-type-{}", self.label().to_lowercase())
+    }
+}
+
+impl std::str::FromStr for TypeKind {
+    type Err = anyhow::Error;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        if let Some(kind) = Self::CANONICAL.iter().find(|k| k.label() == s) {
+            return Ok(*kind);
+        }
+        let inventory = Self::CANONICAL
+            .iter()
+            .map(|k| k.label())
+            .collect::<Vec<_>>()
+            .join(", ");
+        anyhow::bail!("unknown type `{s}`; expected one of {inventory}")
+    }
+}
+
+impl std::fmt::Display for TypeKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.label())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum Value {
     String(String),
     Int(i64),
+    Float(f64),
     List(Vec<Value>),
     Map(std::collections::BTreeMap<String, Value>),
     Bool(bool),
+    Pipe(String), // holds pipe name; validity checked against PipeRegistry
+    Duration(std::time::Duration),
+    // Narrow exception: the PATH slot carries an already-resolved path value.
+    // All guard checks still run through oxdock-fs at coercion/use time.
+    #[allow(clippy::disallowed_types)]
+    Path(std::path::PathBuf),
     /// Handle to a background ASYNC task. The `u64` is the task ID
     /// used to look up the handle in `ExecState.named_tasks`.
     TaskHandle(u64),
@@ -383,6 +498,47 @@ pub enum Value {
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum CompareOp {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum ArithOp {
+    Add,
+    Sub,
+    Mul,
+    Div,
+}
+
+/// Flat stack-machine op for expression-local arithmetic/comparison.
+///
+/// Lowering folds constant subtrees to `Expr::Literal` and compiles dynamic
+/// arithmetic/comparison subtrees to post-order `Vec<MathOp>` so the runtime
+/// executes a single instruction loop instead of recursive `Box` walking.
+/// `Call` covers value-semantics functions only (`INT`, `FLOAT`, `GLOB`,
+/// `LOAD_TOML`, `LOAD_JSON`); `INSPECT($var)` uses `Inspect` to preserve the
+/// variable identifier (pre-evaluating to `Value` would lose the name).
+#[derive(Debug, Clone, PartialEq)]
+pub enum MathOp {
+    PushConst(Value),
+    LoadVar(String),
+    LoadEnv(String),
+    LoadKeyPath { base: String, keys: Vec<String> },
+    Call { name: String, arity: usize },
+    Inspect(String),
+    Neg,
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Lt,
+    Le,
+    Gt,
+    Ge,
     Eq,
     Ne,
 }
@@ -393,10 +549,13 @@ pub enum LogicalOp {
     Or,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
     Literal(Value),
     Var(String),
+    /// Environment read (`env:KEY`): resolves against the script
+    /// environment at evaluation time.
+    Env(String),
     KeyPath {
         base: String,
         keys: Vec<String>,
@@ -412,6 +571,18 @@ pub enum Expr {
         left: Box<Expr>,
         right: Box<Expr>,
     },
+    Arithmetic {
+        op: ArithOp,
+        left: Box<Expr>,
+        right: Box<Expr>,
+    },
+    /// Lowering-optimized form: folded literals stay `Literal`, dynamic
+    /// arithmetic/comparison subtrees arrive here as flat RPN.
+    CompiledMath(Vec<MathOp>),
+    /// Lowering-only intermediate staging `9223372036854775808` (the unsigned
+    /// half of `i64::MIN`). Valid only as the direct child of unary `-`;
+    /// any instance reaching lowering completion bails integer overflow.
+    UnsignedIntBoundary(u64),
     Not(Box<Expr>),
     Logical {
         op: LogicalOp,
@@ -420,7 +591,7 @@ pub enum Expr {
     },
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Step {
     pub guard: Option<GuardExpr>,
     pub kind: StepKind,
@@ -526,6 +697,10 @@ impl fmt::Display for Value {
         match self {
             Value::String(s) => write!(f, "\"{}\"", s),
             Value::Int(i) => write!(f, "{}", i),
+            Value::Float(v) => write!(f, "{}", v),
+            Value::Pipe(n) => write!(f, "pipe:{}", n),
+            Value::Duration(d) => write!(f, "{}", crate::command::format_duration(d)),
+            Value::Path(p) => write!(f, "{}", p.display()),
             Value::List(items) => {
                 write!(f, "[")?;
                 for (i, item) in items.iter().enumerate() {
@@ -557,6 +732,7 @@ impl fmt::Display for Expr {
         match self {
             Expr::Literal(v) => write!(f, "{}", v),
             Expr::Var(name) => write!(f, "${}", name),
+            Expr::Env(key) => write!(f, "env:{}", key),
             Expr::KeyPath { base, keys } => {
                 write!(f, "${}", base)?;
                 for key in keys {
@@ -597,11 +773,20 @@ impl fmt::Display for Expr {
             Expr::Compare { op, left, right } => {
                 write!(f, "{} {} {}", left, op, right)
             }
+            Expr::Arithmetic { op, left, right } => {
+                write!(f, "({} {} {})", left, op, right)
+            }
+            Expr::CompiledMath(ops) => {
+                write!(f, "{}", format_compiled_math(ops))
+            }
+            Expr::UnsignedIntBoundary(n) => write!(f, "{}", n),
             Expr::Not(inner) => {
                 // Parenthesize compound operands so Display round-trips:
                 // `!(a == b)` must not render as `!a == b` (= `(!a) == b`).
                 match inner.as_ref() {
-                    Expr::Compare { .. } => write!(f, "!({})", inner),
+                    Expr::Compare { .. } | Expr::Arithmetic { .. } | Expr::CompiledMath(_) => {
+                        write!(f, "!({})", inner)
+                    }
                     _ => write!(f, "!{}", inner),
                 }
             }
@@ -617,8 +802,81 @@ impl fmt::Display for CompareOp {
         match self {
             CompareOp::Eq => write!(f, "=="),
             CompareOp::Ne => write!(f, "!="),
+            CompareOp::Lt => write!(f, "<"),
+            CompareOp::Le => write!(f, "<="),
+            CompareOp::Gt => write!(f, ">"),
+            CompareOp::Ge => write!(f, ">="),
         }
     }
+}
+
+impl fmt::Display for ArithOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ArithOp::Add => write!(f, "+"),
+            ArithOp::Sub => write!(f, "-"),
+            ArithOp::Mul => write!(f, "*"),
+            ArithOp::Div => write!(f, "/"),
+        }
+    }
+}
+
+/// Render flat RPN back to parenthesized infix so `Display` round-trips
+/// through the parser with identical semantics. Parentheses are emitted
+/// unconditionally around binary/unary ops; redundant parens parse to the
+/// same tree, which is what round-trip requires.
+fn format_compiled_math(ops: &[MathOp]) -> String {
+    let mut stack: Vec<String> = Vec::new();
+    for op in ops {
+        match op {
+            MathOp::PushConst(v) => stack.push(format!("{}", v)),
+            MathOp::LoadVar(name) => stack.push(format!("${}", name)),
+            MathOp::LoadEnv(key) => stack.push(format!("env:{}", key)),
+            MathOp::LoadKeyPath { base, keys } => {
+                let mut s = format!("${}", base);
+                for key in keys {
+                    s.push('.');
+                    s.push_str(key);
+                }
+                stack.push(s);
+            }
+            MathOp::Call { name, arity } => {
+                let mut args = Vec::new();
+                for _ in 0..*arity {
+                    args.push(stack.pop().unwrap_or_else(|| "<underflow>".to_string()));
+                }
+                args.reverse();
+                stack.push(format!("{}({})", name, args.join(", ")));
+            }
+            MathOp::Inspect(name) => stack.push(format!("INSPECT(${})", name)),
+            MathOp::Neg => {
+                let inner = stack.pop().unwrap_or_else(|| "<underflow>".to_string());
+                stack.push(format!("(-{})", inner));
+            }
+            MathOp::Add => push_bin(&mut stack, "+"),
+            MathOp::Sub => push_bin(&mut stack, "-"),
+            MathOp::Mul => push_bin(&mut stack, "*"),
+            MathOp::Div => push_bin(&mut stack, "/"),
+            MathOp::Lt => push_bin(&mut stack, "<"),
+            MathOp::Le => push_bin(&mut stack, "<="),
+            MathOp::Gt => push_bin(&mut stack, ">"),
+            MathOp::Ge => push_bin(&mut stack, ">="),
+            MathOp::Eq => push_bin(&mut stack, "=="),
+            MathOp::Ne => push_bin(&mut stack, "!="),
+        }
+    }
+    if stack.len() == 1 {
+        let mut items = stack;
+        items.pop().unwrap_or_else(|| "<empty>".to_string())
+    } else {
+        stack.join(" ")
+    }
+}
+
+fn push_bin(stack: &mut Vec<String>, op: &str) {
+    let right = stack.pop().unwrap_or_else(|| "<underflow>".to_string());
+    let left = stack.pop().unwrap_or_else(|| "<underflow>".to_string());
+    stack.push(format!("({} {} {})", left, op, right));
 }
 
 impl fmt::Display for LogicalOp {

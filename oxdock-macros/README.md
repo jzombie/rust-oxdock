@@ -4,7 +4,9 @@ Proc macros for OxDock: compile-time embedding, runtime AST construction, and DS
 
 > Part of the [OxDock](https://github.com/jzombie/rust-oxdock) workspace.
 
-See the parent repository for the DSL reference and examples: the macro runs the same OxDock DSL used by the `oxdock` CLI.
+Three macros cover the three ways to use the DSL: `oxdock_embed!` runs a script at compile time and ships the artifacts inside the binary, `oxdock_prepare!` runs the same script without emitting a runtime module, and `oxdock!` builds an inline script into a `Vec<Step>` for runners like `run_steps_with_context_result`. Use `#var` in `oxdock!` to inject Rust values. DSL variables keep their `$var` form.
+
+See the parent repository for the DSL reference and examples: the macros run the same OxDock DSL used by the `oxdock` CLI.
 
 ## License
 

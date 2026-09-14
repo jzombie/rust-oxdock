@@ -35,31 +35,31 @@ fn assert_absent(root: &GuardedPath, rel: &str) {
 
 #[test]
 fn parser_key_path_two_segments() {
-    let steps = oxdock_core::parse_script("LET $val = $a.b").unwrap();
+    let steps = oxdock_core::parse_script("LET $val: STRING = $a.b").unwrap();
     assert_eq!(steps.len(), 1);
 }
 
 #[test]
 fn parser_key_path_three_segments() {
-    let steps = oxdock_core::parse_script("LET $val = $a.b.c").unwrap();
+    let steps = oxdock_core::parse_script("LET $val: STRING = $a.b.c").unwrap();
     assert_eq!(steps.len(), 1);
 }
 
 #[test]
 fn parser_key_path_numeric_index() {
-    let steps = oxdock_core::parse_script("LET $val = $items.0").unwrap();
+    let steps = oxdock_core::parse_script("LET $val: STRING = $items.0").unwrap();
     assert_eq!(steps.len(), 1);
 }
 
 #[test]
 fn parser_key_path_underscore_prefix() {
-    let steps = oxdock_core::parse_script("LET $val = $data._private").unwrap();
+    let steps = oxdock_core::parse_script("LET $val: STRING = $data._private").unwrap();
     assert_eq!(steps.len(), 1);
 }
 
 #[test]
 fn parser_single_dollar_is_variable_not_key_path() {
-    let steps = oxdock_core::parse_script("LET $val = $pkg").unwrap();
+    let steps = oxdock_core::parse_script("LET $val: STRING = $pkg").unwrap();
     let step = &steps[0];
     // Should be a Var, not a KeyPath
     match &step.kind {
@@ -72,13 +72,13 @@ fn parser_single_dollar_is_variable_not_key_path() {
 
 #[test]
 fn parser_load_toml_in_let() {
-    let steps = oxdock_core::parse_script("LET $d = LOAD_TOML(\"x.toml\")").unwrap();
+    let steps = oxdock_core::parse_script("LET $d: MAP = LOAD_TOML(\"x.toml\")").unwrap();
     assert_eq!(steps.len(), 1);
 }
 
 #[test]
 fn parser_load_json_in_let() {
-    let steps = oxdock_core::parse_script("LET $d = LOAD_JSON(\"x.json\")").unwrap();
+    let steps = oxdock_core::parse_script("LET $d: MAP = LOAD_JSON(\"x.json\")").unwrap();
     assert_eq!(steps.len(), 1);
 }
 
@@ -95,7 +95,7 @@ fn load_toml_flat_keys() {
     run_script(
         &root,
         indoc! {r#"
-        LET $d = LOAD_TOML("t.toml")
+        LET $d: MAP = LOAD_TOML("t.toml")
         WRITE "out.txt" "{{ $d.a }} {{ $d.b }}"
     "#},
     )
@@ -112,7 +112,7 @@ fn load_toml_nested_tables() {
     run_script(
         &root,
         indoc! {r#"
-        LET $d = LOAD_TOML("t.toml")
+        LET $d: MAP = LOAD_TOML("t.toml")
         WRITE "out.txt" "{{ $d.a.b }}"
     "#},
     )
@@ -129,7 +129,7 @@ fn load_toml_array_of_strings() {
     run_script(
         &root,
         indoc! {r#"
-        LET $d = LOAD_TOML("t.toml")
+        LET $d: MAP = LOAD_TOML("t.toml")
         WRITE "out.txt" "{{ $d.x.0 }} {{ $d.x.1 }} {{ $d.x.2 }}"
     "#},
     )
@@ -146,7 +146,7 @@ fn load_toml_integer_becomes_string() {
     run_script(
         &root,
         indoc! {r#"
-        LET $d = LOAD_TOML("t.toml")
+        LET $d: MAP = LOAD_TOML("t.toml")
         WRITE "out.txt" "{{ $d.count }}"
     "#},
     )
@@ -163,7 +163,7 @@ fn load_toml_boolean_becomes_string() {
     run_script(
         &root,
         indoc! {r#"
-        LET $d = LOAD_TOML("t.toml")
+        LET $d: MAP = LOAD_TOML("t.toml")
         WRITE "out.txt" "{{ $d.flag }}"
     "#},
     )
@@ -180,7 +180,7 @@ fn load_toml_empty_table() {
     run_script(
         &root,
         indoc! {r#"
-        LET $d = LOAD_TOML("t.toml")
+        LET $d: MAP = LOAD_TOML("t.toml")
         WRITE "out.txt" "{{ $d.empty }}"
     "#},
     )
@@ -194,7 +194,7 @@ fn load_toml_empty_table() {
 fn load_toml_error_not_found() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
-    let err = run_script(&root, "LET $d = LOAD_TOML(\"nope.toml\")").unwrap_err();
+    let err = run_script(&root, "LET $d: MAP = LOAD_TOML(\"nope.toml\")").unwrap_err();
     assert!(err.to_string().contains("nope.toml"), "{err}");
 }
 
@@ -203,7 +203,7 @@ fn load_toml_error_invalid_syntax() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
     write_file(&root, "bad.toml", b"{{{{invalid}}}}");
-    let err = run_script(&root, "LET $d = LOAD_TOML(\"bad.toml\")").unwrap_err();
+    let err = run_script(&root, "LET $d: MAP = LOAD_TOML(\"bad.toml\")").unwrap_err();
     assert!(err.to_string().contains("TOML parse error"), "{err}");
 }
 
@@ -220,7 +220,7 @@ fn load_json_flat_object() {
     run_script(
         &root,
         indoc! {r#"
-        LET $d = LOAD_JSON("t.json")
+        LET $d: MAP = LOAD_JSON("t.json")
         WRITE "out.txt" "{{ $d.key }}"
     "#},
     )
@@ -237,7 +237,7 @@ fn load_json_nested_object() {
     run_script(
         &root,
         indoc! {r#"
-        LET $d = LOAD_JSON("t.json")
+        LET $d: MAP = LOAD_JSON("t.json")
         WRITE out.txt "{{ $d.a.b }}"
     "#},
     )
@@ -254,7 +254,7 @@ fn load_json_array() {
     run_script(
         &root,
         indoc! {r#"
-        LET $d = LOAD_JSON("t.json")
+        LET $d: MAP = LOAD_JSON("t.json")
         WRITE out.txt "{{ $d.arr.0 }} {{ $d.arr.1 }} {{ $d.arr.2 }}"
     "#},
     )
@@ -271,7 +271,7 @@ fn load_json_boolean() {
     run_script(
         &root,
         indoc! {r#"
-        LET $d = LOAD_JSON("t.json")
+        LET $d: MAP = LOAD_JSON("t.json")
         WRITE "out.txt" "{{ $d.ok }}"
     "#},
     )
@@ -288,7 +288,7 @@ fn load_json_null_becomes_empty_string() {
     run_script(
         &root,
         indoc! {r#"
-        LET $d = LOAD_JSON("t.json")
+        LET $d: MAP = LOAD_JSON("t.json")
         WRITE "out.txt" "{{ $d.n }}"
     "#},
     )
@@ -300,7 +300,7 @@ fn load_json_null_becomes_empty_string() {
 fn load_json_error_not_found() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
-    let err = run_script(&root, "LET $d = LOAD_JSON(\"nope.json\")").unwrap_err();
+    let err = run_script(&root, "LET $d: MAP = LOAD_JSON(\"nope.json\")").unwrap_err();
     assert!(err.to_string().contains("nope.json"), "{err}");
 }
 
@@ -309,7 +309,7 @@ fn load_json_error_invalid_syntax() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
     write_file(&root, "bad.json", b"{not json}");
-    let err = run_script(&root, "LET $d = LOAD_JSON(\"bad.json\")").unwrap_err();
+    let err = run_script(&root, "LET $d: MAP = LOAD_JSON(\"bad.json\")").unwrap_err();
     assert!(err.to_string().contains("JSON parse error"), "{err}");
 }
 
@@ -326,7 +326,7 @@ fn key_path_resolves_top_level_field() {
     run_script(
         &root,
         indoc! {r#"
-        LET $d = LOAD_TOML("t.toml")
+        LET $d: MAP = LOAD_TOML("t.toml")
         WRITE "out.txt" "{{ $d.name }}"
     "#},
     )
@@ -343,7 +343,7 @@ fn key_path_resolves_nested_field() {
     run_script(
         &root,
         indoc! {r#"
-        LET $d = LOAD_TOML("t.toml")
+        LET $d: MAP = LOAD_TOML("t.toml")
         WRITE "out.txt" "{{ $d.a.b }}"
     "#},
     )
@@ -360,7 +360,7 @@ fn key_path_deeply_nested() {
     run_script(
         &root,
         indoc! {r#"
-        LET $d = LOAD_TOML("t.toml")
+        LET $d: MAP = LOAD_TOML("t.toml")
         WRITE "out.txt" "{{ $d.a.b.c }}"
     "#},
     )
@@ -377,7 +377,7 @@ fn key_path_array_index() {
     run_script(
         &root,
         indoc! {r#"
-        LET $d = LOAD_TOML("t.toml")
+        LET $d: MAP = LOAD_TOML("t.toml")
         WRITE "out.txt" "{{ $d.items.0 }} {{ $d.items.2 }}"
     "#},
     )
@@ -394,8 +394,8 @@ fn key_path_out_of_bounds_index_errors() {
     let err = run_script(
         &root,
         indoc! {r#"
-        LET $d = LOAD_TOML("t.toml")
-        LET $v = $d.items.99
+        LET $d: MAP = LOAD_TOML("t.toml")
+        LET $v: STRING = $d.items.99
         WRITE "out.txt" $v
     "#},
     )
@@ -412,8 +412,8 @@ fn key_path_non_numeric_index_errors() {
     let err = run_script(
         &root,
         indoc! {r#"
-        LET $d = LOAD_TOML("t.toml")
-        LET $v = $d.items.foo
+        LET $d: MAP = LOAD_TOML("t.toml")
+        LET $v: STRING = $d.items.foo
         WRITE "out.txt" $v
     "#},
     )
@@ -430,8 +430,8 @@ fn key_path_missing_key_errors() {
     let err = run_script(
         &root,
         indoc! {r#"
-        LET $d = LOAD_TOML("t.toml")
-        LET $v = $d.nonexistent
+        LET $d: MAP = LOAD_TOML("t.toml")
+        LET $v: STRING = $d.nonexistent
         WRITE "out.txt" $v
     "#},
     )
@@ -448,8 +448,8 @@ fn key_path_traverse_into_string_errors() {
     let err = run_script(
         &root,
         indoc! {r#"
-        LET $d = LOAD_TOML("t.toml")
-        LET $v = $d.a.b
+        LET $d: MAP = LOAD_TOML("t.toml")
+        LET $v: STRING = $d.a.b
         WRITE "out.txt" $v
     "#},
     )
@@ -466,7 +466,7 @@ fn key_path_with_underscore_key() {
     run_script(
         &root,
         indoc! {r#"
-        LET $d = LOAD_TOML("t.toml")
+        LET $d: MAP = LOAD_TOML("t.toml")
         WRITE "out.txt" "{{ $d._hidden }}"
     "#},
     )
@@ -488,7 +488,7 @@ fn missing_key_in_string_interpolation_does_not_dump_parent_map() {
     run_script(
         &root,
         indoc! {r#"
-        LET $pkg = LOAD_TOML("t.toml")
+        LET $pkg: MAP = LOAD_TOML("t.toml")
         WRITE "out.txt" "docs/$pkg.missing/README.md"
     "#},
     )
@@ -507,7 +507,7 @@ fn missing_key_after_successful_traversal_does_not_dump() {
     let err = run_script(
         &root,
         indoc! {r#"
-        LET $d = LOAD_TOML("t.toml")
+        LET $d: MAP = LOAD_TOML("t.toml")
         WRITE "out.txt" $d.package.nope.txt
     "#},
     )
@@ -528,7 +528,7 @@ fn out_of_bounds_index_in_string_interpolation_does_not_dump_list() {
     let err = run_script(
         &root,
         indoc! {r#"
-        LET $d = LOAD_TOML("t.toml")
+        LET $d: MAP = LOAD_TOML("t.toml")
         WRITE "out.txt" $d.items.99.suffix
     "#},
     )
@@ -549,7 +549,7 @@ fn non_numeric_index_in_string_interpolation_does_not_dump() {
     let err = run_script(
         &root,
         indoc! {r#"
-        LET $d = LOAD_TOML("t.toml")
+        LET $d: MAP = LOAD_TOML("t.toml")
         WRITE "out.txt" $d.items.foo
     "#},
     )
@@ -570,7 +570,7 @@ fn traverse_into_scalar_emits_value_and_literal_suffix() {
     run_script(
         &root,
         indoc! {r#"
-        LET $d = LOAD_TOML("t.toml")
+        LET $d: MAP = LOAD_TOML("t.toml")
         WRITE "out.txt" "{{ $d.name }}.x"
     "#},
     )
@@ -591,7 +591,7 @@ fn dollar_var_resolves_string() {
     run_script(
         &root,
         indoc! {r#"
-        LET $name = "world"
+        LET $name: STRING = "world"
         WRITE out.txt "hello-{{ $name }}"
     "#},
     )
@@ -607,7 +607,7 @@ fn dollar_var_with_trailing_dot_not_consumed() {
     run_script(
         &root,
         indoc! {r#"
-        LET $name = "hello"
+        LET $name: STRING = "hello"
         WRITE out.txt "{{ $name }}."
     "#},
     )
@@ -624,7 +624,7 @@ fn dollar_var_with_suffix_after_scalar() {
     run_script(
         &root,
         indoc! {r#"
-        LET $d = LOAD_TOML("t.toml")
+        LET $d: MAP = LOAD_TOML("t.toml")
         WRITE "out.txt" "{{ $d.name }}.dock"
     "#},
     )
@@ -658,8 +658,8 @@ fn multiple_dollar_vars_in_string() {
     run_script(
         &root,
         indoc! {r#"
-        LET $a = "hello"
-        LET $b = "world"
+        LET $a: STRING = "hello"
+        LET $b: STRING = "world"
         WRITE out.txt "{{ $a }} {{ $b }}"
     "#},
     )
@@ -699,7 +699,7 @@ fn expand_resolves_bare_key_path_tag() {
     run_script(
         &root,
         indoc! {r#"
-        LET $d = LOAD_TOML("t.toml")
+        LET $d: MAP = LOAD_TOML("t.toml")
         WITH_IO [stdout=pipe:t] EXPAND tmpl.txt
         WITH_IO [stdin=pipe:t] WRITE out.txt
     "#},
@@ -718,7 +718,7 @@ fn expand_resolves_nested_key_path_tag() {
     run_script(
         &root,
         indoc! {r#"
-        LET $d = LOAD_TOML("t.toml")
+        LET $d: MAP = LOAD_TOML("t.toml")
         WITH_IO [stdout=pipe:t] EXPAND tmpl.txt
         WITH_IO [stdin=pipe:t] WRITE out.txt
     "#},
@@ -760,7 +760,7 @@ fn expand_mixed_env_and_key_path_tags() {
         &root,
         indoc! {r#"
         ENV HOST=from-var
-        LET $d = LOAD_TOML("t.toml")
+        LET $d: MAP = LOAD_TOML("t.toml")
         WITH_IO [stdout=pipe:t] EXPAND tmpl.txt
         WITH_IO [stdin=pipe:t] WRITE out.txt
     "#},
@@ -779,7 +779,7 @@ fn expand_resolves_script_var_key_path() {
     run_script(
         &root,
         indoc! {r#"
-        LET $d = LOAD_TOML("t.toml")
+        LET $d: MAP = LOAD_TOML("t.toml")
         WITH_IO [stdout=pipe:t] EXPAND tmpl.txt
         WITH_IO [stdin=pipe:t] WRITE out.txt
     "#},
@@ -819,8 +819,8 @@ fn for_loop_over_key_path_array() {
     run_script(
         &root,
         indoc! {r#"
-        LET $d = LOAD_TOML("t.toml")
-        FOR $x IN $d.items {
+        LET $d: MAP = LOAD_TOML("t.toml")
+        FOR $x: STRING IN $d.items {
             WRITE "{{ $x }}.txt" "{{ $x }}"
         }
     "#},
@@ -839,8 +839,8 @@ fn for_loop_body_has_loop_var() {
     run_script(
         &root,
         indoc! {r#"
-        LET $items = ["x", "y"]
-        FOR $i IN $items {
+        LET $items: LIST = ["x", "y"]
+        FOR $i: STRING IN $items {
             WRITE "{{ $i }}.txt" "{{ $i }}"
         }
     "#},
@@ -864,7 +864,7 @@ fn load_toml_then_use_in_template() {
     run_script(
         &root,
         indoc! {r#"
-        LET $d = LOAD_TOML("crate.toml")
+        LET $d: MAP = LOAD_TOML("crate.toml")
         WITH_IO [stdout=pipe:t] EXPAND header.txt
         WITH_IO [stdin=pipe:t] WRITE out.txt
     "#},
@@ -882,8 +882,8 @@ fn for_loop_writes_multiple_files_from_loaded_data() {
     run_script(
         &root,
         indoc! {r#"
-        LET $d = LOAD_TOML("members.toml")
-        FOR $m IN $d.members {
+        LET $d: MAP = LOAD_TOML("members.toml")
+        FOR $m: STRING IN $d.members {
             WRITE "{{ $m }}.txt" "{{ $m }}"
         }
     "#},
@@ -907,9 +907,9 @@ fn for_loop_var_shadows_outer_var_in_template() {
     run_script(
         &root,
         indoc! {r#"
-        LET $name = "outer"
-        LET $items = ["first", "second"]
-        FOR $name IN $items {
+        LET $name: STRING = "outer"
+        LET $items: LIST = ["first", "second"]
+        FOR $name: STRING IN $items {
             WITH_IO [stdout=pipe:t] EXPAND tmpl.txt
             WITH_IO [stdin=pipe:t]             WRITE "{{ $name }}.txt"
         }
@@ -929,9 +929,9 @@ fn for_loop_var_shadows_outer_var_in_command_args() {
     run_script(
         &root,
         indoc! {r#"
-        LET $x = "outer"
-        LET $items = ["a", "b"]
-        FOR $x IN $items {
+        LET $x: STRING = "outer"
+        LET $items: LIST = ["a", "b"]
+        FOR $x: STRING IN $items {
             WRITE "{{ $x }}.txt" "{{ $x }}"
         }
     "#},
@@ -953,11 +953,11 @@ fn nested_for_loops_inner_shadows_outer() {
     run_script(
         &root,
         indoc! {r#"
-        LET $x = "global"
-        LET $outer = ["o1", "o2"]
-        FOR $x IN $outer {
-            LET $inner = ["i1", "i2"]
-            FOR $x IN $inner {
+        LET $x: STRING = "global"
+        LET $outer: LIST = ["o1", "o2"]
+        FOR $x: STRING IN $outer {
+            LET $inner: LIST = ["i1", "i2"]
+            FOR $x: STRING IN $inner {
             WRITE "{{ $x }}.txt" "{{ $x }}"
             }
         }
@@ -988,8 +988,8 @@ fn for_map_iteration_sorted_keys() {
     );
 
     let steps = oxdock_core::parse_script(indoc! {r#"
-        LET $d = LOAD_TOML("data.toml")
-        FOR $k, $v IN $d.settings {
+        LET $d: MAP = LOAD_TOML("data.toml")
+        FOR $k: STRING, $v: STRING IN $d.settings {
             WRITE "{{ $k }}.txt" "{{ $v }}"
         }
     "#})
@@ -1020,8 +1020,8 @@ fn for_map_iteration_echo_stdout() {
     );
 
     let steps = oxdock_core::parse_script(indoc! {r#"
-        LET $d = LOAD_TOML("data.toml")
-        FOR $k, $v IN $d.settings {
+        LET $d: MAP = LOAD_TOML("data.toml")
+        FOR $k: STRING, $v: STRING IN $d.settings {
             ECHO "{{ $k }} = {{ $v }}"
         }
     "#})
@@ -1048,8 +1048,8 @@ fn for_list_enumeration() {
     run_script(
         &root,
         indoc! {r#"
-        LET $items = ["a", "b", "c"]
-        FOR $i, $v IN $items {
+        LET $items: LIST = ["a", "b", "c"]
+        FOR $i: STRING, $v: STRING IN $items {
             WRITE "{{ $v }}.txt" "{{ $i }}"
         }
     "#},
@@ -1066,8 +1066,8 @@ fn for_list_enumeration_echo() {
     let root = temp.as_guarded_path().clone();
 
     let steps = oxdock_core::parse_script(indoc! {r#"
-        LET $items = ["x", "y"]
-        FOR $i, $v IN $items {
+        LET $items: LIST = ["x", "y"]
+        FOR $i: STRING, $v: STRING IN $items {
             ECHO "{{ $i }}: {{ $v }}"
         }
     "#})
@@ -1097,8 +1097,8 @@ fn comparison_equal_produces_bool() {
     run_script(
         &root,
         indoc! {r#"
-        LET $x = "hello"
-        LET $eq = $x == "hello"
+        LET $x: STRING = "hello"
+        LET $eq: BOOL = $x == "hello"
         IF $eq { WRITE "out.txt" "yes" }
     "#},
     )
@@ -1113,8 +1113,8 @@ fn comparison_not_equal_produces_bool() {
     run_script(
         &root,
         indoc! {r#"
-        LET $x = "hello"
-        LET $ne = $x != "foo"
+        LET $x: STRING = "hello"
+        LET $ne: BOOL = $x != "foo"
         IF $ne { WRITE "out.txt" "yes" }
     "#},
     )
@@ -1131,7 +1131,7 @@ fn comparison_key_path() {
     run_script(
         &root,
         indoc! {r#"
-        LET $d = LOAD_TOML("t.toml")
+        LET $d: MAP = LOAD_TOML("t.toml")
         IF $d.name == "test" { WRITE "out.txt" "yes" }
     "#},
     )
@@ -1146,8 +1146,8 @@ fn comparison_false_is_falsy() {
     run_script(
         &root,
         indoc! {r#"
-        LET $x = "hello"
-        LET $eq = $x == "nope"
+        LET $x: STRING = "hello"
+        LET $eq: BOOL = $x == "nope"
         IF $eq { WRITE "out.txt" "should-not-exist" }
     "#},
     )
@@ -1166,9 +1166,9 @@ fn logical_and_short_circuit() {
     run_script(
         &root,
         indoc! {r#"
-        LET $a = true
-        LET $b = false
-        LET $both = $a && $b
+        LET $a: BOOL = true
+        LET $b: BOOL = false
+        LET $both: BOOL = $a && $b
         IF $both { WRITE "out.txt" "should-not-exist" }
     "#},
     )
@@ -1183,9 +1183,9 @@ fn logical_or_short_circuit() {
     run_script(
         &root,
         indoc! {r#"
-        LET $a = true
-        LET $b = false
-        LET $either = $a || $b
+        LET $a: BOOL = true
+        LET $b: BOOL = false
+        LET $either: BOOL = $a || $b
         IF $either { WRITE "out.txt" "yes" }
     "#},
     )
@@ -1200,9 +1200,9 @@ fn logical_or_right_side_evaluated_when_left_false() {
     run_script(
         &root,
         indoc! {r#"
-        LET $a = false
-        LET $b = true
-        LET $either = $a || $b
+        LET $a: BOOL = false
+        LET $b: BOOL = true
+        LET $either: BOOL = $a || $b
         IF $either { WRITE "out.txt" "yes" }
     "#},
     )
@@ -1221,7 +1221,7 @@ fn if_then_branch() {
     run_script(
         &root,
         indoc! {r#"
-        LET $x = "hello"
+        LET $x: STRING = "hello"
         IF $x == "hello" { WRITE "out.txt" "yes" }
     "#},
     )
@@ -1236,7 +1236,7 @@ fn if_else_branch() {
     run_script(
         &root,
         indoc! {r#"
-        LET $x = "hello"
+        LET $x: STRING = "hello"
         IF $x == "nope" { WRITE "out.txt" "wrong" } ELSE { WRITE "out.txt" "correct" }
     "#},
     )
@@ -1249,7 +1249,7 @@ fn if_else_if_chain() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
     run_script(&root, indoc! {r#"
-        LET $x = "2"
+        LET $x: STRING = "2"
         IF $x == "1" { WRITE "out.txt" "1" } ELSE IF $x == "2" { WRITE "out.txt" "2" } ELSE { WRITE "out.txt" "3" }
     "#}).unwrap();
     assert_eq!(read_trimmed(&root, "out.txt"), "2");
@@ -1262,8 +1262,8 @@ fn if_compound_condition() {
     run_script(
         &root,
         indoc! {r#"
-        LET $a = "1"
-        LET $b = "2"
+        LET $a: STRING = "1"
+        LET $b: STRING = "2"
         IF $a == "1" && $b == "2" { WRITE "out.txt" "combined" }
     "#},
     )
@@ -1278,8 +1278,8 @@ fn if_precedence_override() {
     run_script(
         &root,
         indoc! {r#"
-        LET $a = "1"
-        LET $b = "3"
+        LET $a: STRING = "1"
+        LET $b: STRING = "3"
         IF ($a == "1" || $a == "2") && $b == "3" { WRITE "out.txt" "precedence" }
     "#},
     )
@@ -1296,8 +1296,8 @@ fn if_nested_inside_for() {
     run_script(
         &root,
         indoc! {r#"
-        LET $d = LOAD_TOML("t.toml")
-        FOR $x IN $d.items {
+        LET $d: MAP = LOAD_TOML("t.toml")
+        FOR $x: STRING IN $d.items {
             IF $x == "b" { WRITE "{{ $x }}.txt" "found" }
         }
     "#},
@@ -1319,7 +1319,7 @@ fn if_string_condition_raises_type_error() {
     let err = run_script(
         &root,
         indoc! {r#"
-        LET $path = "docs/readme.md"
+        LET $path: STRING = "docs/readme.md"
         IF $path { WRITE "out.txt" "should-not-exist" }
     "#},
     )
@@ -1364,7 +1364,7 @@ fn if_bool_from_json_is_native() {
     run_script(
         &root,
         indoc! {r#"
-        LET $d = LOAD_JSON("t.json")
+        LET $d: MAP = LOAD_JSON("t.json")
         IF $d.active { WRITE "out.txt" "yes" }
     "#},
     )
@@ -1381,7 +1381,7 @@ fn if_bool_from_toml_is_native() {
     run_script(
         &root,
         indoc! {r#"
-        LET $d = LOAD_TOML("t.toml")
+        LET $d: MAP = LOAD_TOML("t.toml")
         IF $d.active { WRITE "out.txt" "yes" }
     "#},
     )

@@ -1,0 +1,4 @@
+ENV FOO="bar"
+LET $e: STRING = env:FOO
+WRITE env.txt "{{ $e }}"
+WRITE bare.txt "{{ $NOPE }}"

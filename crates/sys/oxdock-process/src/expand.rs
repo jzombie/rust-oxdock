@@ -423,7 +423,11 @@ fn format_value_for_string(val: &oxdock_parser::Value) -> String {
     match val {
         oxdock_parser::Value::String(s) => s.clone(),
         oxdock_parser::Value::Int(i) => i.to_string(),
+        oxdock_parser::Value::Float(f) => f.to_string(),
         oxdock_parser::Value::Bool(b) => b.to_string(),
+        oxdock_parser::Value::Pipe(n) => format!("pipe:{n}"),
+        oxdock_parser::Value::Duration(d) => oxdock_parser::command::format_duration(d),
+        oxdock_parser::Value::Path(p) => p.to_string_lossy().to_string(),
         oxdock_parser::Value::List(items) => items
             .iter()
             .map(format_value_for_string)

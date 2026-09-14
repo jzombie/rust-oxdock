@@ -1,0 +1,4 @@
+name = "while_break_continue"
+
+[expect]
+files = { "seen.txt" = "saw-b", "n.txt" = "5" }

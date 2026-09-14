@@ -1,0 +1,4 @@
+name = "var_env_conflation"
+
+[expect]
+files = { "env.txt" = "bar", "bare.txt" = "" }

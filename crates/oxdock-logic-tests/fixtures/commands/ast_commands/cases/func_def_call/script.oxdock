@@ -1,0 +1,6 @@
+FUNC GREET($name: STRING) {
+    ECHO "hi {{ $name }}"
+    RETURN $name
+}
+CALL GREET("ada")
+ASSERT_STDOUT "hi ada"

@@ -1,0 +1,3 @@
+name = "shadow_redeclare"
+
+expect_error_contains = "redeclaration"

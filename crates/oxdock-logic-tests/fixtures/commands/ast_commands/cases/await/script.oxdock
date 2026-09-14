@@ -4,10 +4,10 @@
 # 3. AWAIT ensures both complete
 # 4. If tasks were sequential, pipe reads would deadlock
 
-LET $task1 = ASYNC {
+LET $task1: HANDLE = ASYNC {
     WITH_IO [stdout=pipe:pipe1] ECHO "output1"
 }
-LET $task2 = ASYNC {
+LET $task2: HANDLE = ASYNC {
     WITH_IO [stdout=pipe:pipe2] ECHO "output2"
 }
 WITH_IO [stdin=pipe:pipe1] WRITE file1.txt

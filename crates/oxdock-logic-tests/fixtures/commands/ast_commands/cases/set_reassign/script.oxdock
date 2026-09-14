@@ -1,0 +1,6 @@
+LET $count: INT = 1
+$count = 2
+LET $msg: STRING = hello
+$msg = world
+WRITE count.txt "{{ $count }}"
+WRITE msg.txt "{{ $msg }}"

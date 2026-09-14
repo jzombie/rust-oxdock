@@ -1,0 +1,4 @@
+name = "while_basic"
+
+[expect]
+files = { "count.txt" = "7" }

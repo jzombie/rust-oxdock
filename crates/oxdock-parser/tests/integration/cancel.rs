@@ -82,11 +82,11 @@ fn cancel_inside_timeout_block() {
 
 #[test]
 fn let_async_wraps_cancel_and_timeout() {
-    let steps =
-        parse_script("LET $a = ASYNC CANCEL $b", mock_lower).expect("parse LET ASYNC CANCEL");
+    let steps = parse_script("LET $a: HANDLE = ASYNC CANCEL $b", mock_lower)
+        .expect("parse LET ASYNC CANCEL");
     assert_eq!(steps.len(), 1);
     match &steps[0].kind {
-        StepKind::AssignAsync { var, body } => {
+        StepKind::AssignAsync { var, body, .. } => {
             assert_eq!(var, "a");
             assert_eq!(body.len(), 1);
             assert!(matches!(&body[0].kind, StepKind::Cancel { .. }));
@@ -94,10 +94,13 @@ fn let_async_wraps_cancel_and_timeout() {
         other => panic!("expected AssignAsync, got {other:?}"),
     }
 
-    let steps = parse_script("LET $a = ASYNC TIMEOUT 5s RUN \"echo hi\"", mock_lower)
-        .expect("parse LET ASYNC TIMEOUT");
+    let steps = parse_script(
+        "LET $a: HANDLE = ASYNC TIMEOUT 5s RUN \"echo hi\"",
+        mock_lower,
+    )
+    .expect("parse LET ASYNC TIMEOUT");
     match &steps[0].kind {
-        StepKind::AssignAsync { var, body } => {
+        StepKind::AssignAsync { var, body, .. } => {
             assert_eq!(var, "a");
             assert_eq!(body.len(), 1);
             assert!(matches!(&body[0].kind, StepKind::Timeout { .. }));

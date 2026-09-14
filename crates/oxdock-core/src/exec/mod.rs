@@ -13,12 +13,13 @@ pub(crate) use self::handlers::{
     dispatch_append, dispatch_assert_absent, dispatch_assert_dir, dispatch_assert_file,
     dispatch_assert_stdout, dispatch_assign, dispatch_assign_async_step,
     dispatch_assign_capture_step, dispatch_async_block, dispatch_await_capture_step,
-    dispatch_await_step, dispatch_cancel_step, dispatch_copy, dispatch_copy_git, dispatch_cwd,
-    dispatch_echo, dispatch_env, dispatch_exit, dispatch_expand, dispatch_for_loop,
-    dispatch_hash_sha256, dispatch_if_then, dispatch_inherit_env, dispatch_ls, dispatch_mkdir,
-    dispatch_read, dispatch_read_line, dispatch_run, dispatch_run_exec, dispatch_sleep_step,
-    dispatch_symlink, dispatch_timeout_step, dispatch_with_io, dispatch_with_io_block,
-    dispatch_workdir, dispatch_workspace, dispatch_write,
+    dispatch_await_step, dispatch_break, dispatch_call, dispatch_cancel_step, dispatch_continue,
+    dispatch_copy, dispatch_copy_git, dispatch_cwd, dispatch_echo, dispatch_env, dispatch_exit,
+    dispatch_expand, dispatch_for_loop, dispatch_func_def, dispatch_hash_sha256, dispatch_if_then,
+    dispatch_inherit_env, dispatch_ls, dispatch_mkdir, dispatch_read, dispatch_read_line,
+    dispatch_return, dispatch_run, dispatch_run_exec, dispatch_set, dispatch_sleep_step,
+    dispatch_symlink, dispatch_timeout_step, dispatch_while_loop, dispatch_with_io,
+    dispatch_with_io_block, dispatch_workdir, dispatch_workspace, dispatch_write,
 };
 pub use self::io::ExecIo;
 pub(crate) use self::steps::StepCtx;
@@ -167,6 +168,9 @@ fn run_steps_with_manager<P: ProcessManager>(
         inside_async: false,
         keeper_expiry: None,
         cancellable: false,
+        funcs: std::sync::Arc::new(std::collections::HashMap::new()),
+        host_funcs: std::sync::Arc::new(std::collections::HashMap::new()),
+        call_depth: 0,
         _marker: std::marker::PhantomData,
     };
 
@@ -184,7 +188,7 @@ fn run_steps_with_manager<P: ProcessManager>(
     )));
     let stderr = state.io.stderr().map(StreamHandle::Stream);
     let mut proc_mgr = process;
-    execute_steps(
+    let flow = execute_steps(
         &mut state,
         &mut proc_mgr,
         steps,
@@ -194,6 +198,16 @@ fn run_steps_with_manager<P: ProcessManager>(
         stderr,
         true,
     )?;
-
-    Ok(state.cwd)
+    match flow {
+        self::steps::Flow::Done => Ok(state.cwd),
+        self::steps::Flow::Break { idx } => {
+            anyhow::bail!("step {}: BREAK outside loop", idx + 1)
+        }
+        self::steps::Flow::Continue { idx } => {
+            anyhow::bail!("step {}: CONTINUE outside loop", idx + 1)
+        }
+        self::steps::Flow::Return { idx, .. } => {
+            anyhow::bail!("step {}: RETURN outside function", idx + 1)
+        }
+    }
 }

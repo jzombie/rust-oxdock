@@ -1,0 +1,4 @@
+name = "func_pipes"
+
+[expect]
+files = { "got.txt" = "primed-filled-ok-filled", "back.txt" = "seed" }

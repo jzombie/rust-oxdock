@@ -4,6 +4,60 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [0.13.0-alpha] - 2026-09-11
+
+### Added
+
+- DSL arithmetic with full numeric support (#112): `LET $x: INT = 2 + 3 * 4` binds `14`, with `*`/`/` binding tighter than `+`/`-`, unary minus (`-5`, `2 * -3`), and parentheses nesting arbitrarily (`2 * (2 * (2 + 3)) * 4`). `42` is an `INT` literal and `3.14` a `FLOAT` literal; bare words that merely start with digits keep their literal reading (`30s`, `100ms`, `123/456`, `1.0.0`, `-f` stay strings)
+- Numeric semantics (#112): `Int x Int` stays `INT` (checked math, truncating integer division, so `7 / 2` is `3`); any `Float` operand promotes the result to `FLOAT` (`1 + 2.5` is `3.5`). Division by zero, overflow, and non-finite results are runtime errors rather than stored values
+- Ordering comparisons (#112): `< <= > >=` alongside the existing `== !=`, with numeric semantics when both sides are numbers (`1 == 1.0` is true). `==`/`!=` on anything else keep comparing rendered strings, and ordering non-numerics is a Type Error. Chained comparisons are a parse error (`$a < $b < $c` is rejected); write the conjunction explicitly (`$a < $b && $b < $c`)
+- `INT()` / `FLOAT()` conversions (#112): the explicit bridge from captured command output (which is always a string) to numbers, so `LET $total: INT = $total + INT($size_str)` accumulates. `INT` trims ASCII whitespace and rejects non-integers; `FLOAT` accepts int strings and rejects non-finite input. Plain string operands never convert implicitly: `"100" + 1` is a Type Error
+- Float equality documented with runnable examples (#112): equality is exact with no epsilon, so binary fractions compare cleanly (`0.5 + 0.25 == 0.75` is true) while decimal fractions may not (`0.1 + 0.2 == 0.3` is false, the sum is `0.30000000000000004`). The reference explains why (power-of-2 denominators) and shows bounding instead (`IF $sum > 0.299999 && $sum < 0.300001`)
+- Logical operators documented with examples: `&&` binds tighter than `||`, both short-circuit (`IF true || $missing` never touches the right side), and only `Bool` conditions are accepted
+- Bash comparison table in the `LET` reference: capture looks like `output=$(...)` but keeps exact bytes (Bash strips all trailing newlines), stays explicitly typed, converts only via `INT()`/`FLOAT()`, and fails the step immediately when the captured command fails
+- Scope semantics documented and pinned: mutating an outer variable inside a block persists after exit for every type (`LET $x` outside, `$x = ...` inside), while `LET` inside a block declares a shadow that reverts. Binding and mutation convert to the declared type (`$n = "42"` binds `42` for an `INT`)
+
+### Fixed
+
+- Spaced `&&` / `||` chains failed to parse (`a && b && c`): whitespace is now accepted around every chained operator, not just the first. (The flaw predates arithmetic; the new arithmetic tiers ship with the corrected shape, so `100 / 10 / 2` chains too)
+- Reference pages no longer leak internal identifiers (`coerce_value`, `ExecState`, `declare_var`); user docs say "convert to the declared type"
+
+### Changed
+
+- Bare `1/0`-style words now parse as arithmetic: previously `LET $x: STRING = 1/0` bound the string `"1/0"` because no `/` operator existed; now that `/` is division, `LET $x: INT = 1/0` is a division-by-zero error. Quoted strings are unaffected
+
+## [0.12.0-alpha] - 2026-09-11
+
+### Added
+
+- Variables now declare their type up front (#130): `LET $count: INT = 0`, with types `STRING, INT, FLOAT, BOOL, PIPE, LIST, MAP, HANDLE, DURATION, PATH` (`INT` is 64-bit, `FLOAT` is 64-bit). Declaring the same name twice in one scope is an error; change it later with bare `$count = 2`
+- Reading environment variables is explicit (#130): `LET $e: STRING = env:FOO` reads `FOO` into a plain string, while a bare `$var` never touches the environment (templates still use `{{ env:KEY }}`). There is no `ENV` type
+- Loop variables carry types too (#130): `FOR $item: STRING IN ...`, with `INT` or `STRING` keys (`INT` gives the 0-based list index; maps need `STRING` keys)
+- User-defined functions (#114): `FUNC GREET($name: STRING) { ... }` defines a reusable block (names are UPPERCASE, parameters carry types like `LET`). Run it with `CALL GREET("ada")`, or capture what it returns with `LET $r: STRING = CALL GREET("ada")`. A function without `RETURN` gives back an empty string, and anything it prints still shows up normally
+- `WHILE` loops (#114): `WHILE !$done { ... }` repeats while the condition holds (must be true/false, like `IF`). Each round gets a fresh scope, so change an outer variable (`$done = true`) to exit
+- `BREAK` and `CONTINUE` (#114): work in both `FOR` and `WHILE`, always affecting the innermost loop. Using them outside a loop, or across a function or background-task boundary, is an error
+- Background function calls (#114): `LET $t: HANDLE = ASYNC CALL WORK("job")` runs a function in the background; `LET $o: STRING = AWAIT $t` waits and gives back its return value. Calls nest at most 64 deep, and going deeper fails with an error naming the function
+- Rust embedders (#114): host-side functions can be registered under the same UPPERCASE `CALL` names that script functions use; user-facing help output for them comes later
+- Explicit pipe handles (#114): `pipe:NAME` names a pipe without touching a stream (`LET $p: PIPE = pipe:log`), mirroring `env:KEY`. A fresh name registers on first use, so pipes can be declared before any `WITH_IO` mentions them
+- Variable pipe bindings (#114): `WITH_IO [stdout=$p]` / `[stdin=$p]` resolve a PIPE-typed variable against the live pipe registry when the step runs; undeclared, mistyped, or missing names are step-numbered errors. Pipes created, bound, or passed by variable inside functions are always script pipes: OS promotion never crosses a `CALL` boundary
+- `INSPECT($var)` (#114): snapshots a variable into a MAP with its declared type plus live details — pipe backend stats (`is_os_pipe`, `buffer_bytes`, `readers`, `writers`), task phase for handles — so scripts and fixtures can assert engine state directly
+
+### Fixed
+
+- `$var = ...` reassignment inside `{ ... }` blocks (loop and function bodies) was silently ignored, so loop counters and `WHILE` exit flags never updated. Only top-level reassignment used to work
+
+### Changed
+
+- [breaking] `LET` requires an explicit type, so `LET $x = ...` is now a parse error; reassignment is bare `$x = ...` and there is no `SET` keyword (a `SET ...` line fails with a hint); `FOR` variables require type tags; there is no `ENV` type; bare `$var` never reads the environment (use `env:KEY` or `{{ env:KEY }}`); command-reference Type cells show real types only (`$var` / `KEY=value` shapes display as the `STRING` they bind or resolve to)
+- [breaking] plain strings no longer become pipes: `LET $p: PIPE = "log"` is now a TypeMismatch error even when a pipe of that name exists; use `pipe:log`
+
+### Dependencies
+
+- Bump `cargo_metadata` 0.19.2 → 0.23.1
+- Bump `pest` 2.9.0 → 2.9.1
+- Bump `syn` 3.0.4 → 3.0.5
+- Bump `toml` 1.1.4+spec-1.1.0 → 1.1.5+spec-1.1.0
+
 ## [0.11.0-alpha] - 2026-09-09
 
 ### Added

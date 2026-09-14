@@ -51,16 +51,14 @@ fn run_exec_form_allows_no_spaces_and_single_quotes() {
 
 #[test]
 fn run_exec_form_supports_typed_elements() {
-    // Bare words stay strings (only `true`/`false` become bools); `$var`
+    // Bare words stay strings (only `true`/`false` become bools);
+    // numeric literals bind Int/Float; `$var`
     // and templates keep their typed/deferred forms for runtime coercion.
     match single_kind(r#"RUN ["prog", $name, 3, true, "{{ env:FOO }}"]"#) {
         StepKind::RunExec { argv } => {
             assert_eq!(argv.len(), 5);
             assert!(matches!(&argv[1], Arg::Expr(Expr::Var(name)) if name == "name"));
-            assert_eq!(
-                argv[2],
-                Arg::Expr(Expr::Literal(Value::String("3".to_string())))
-            );
+            assert_eq!(argv[2], Arg::Expr(Expr::Literal(Value::Int(3))));
             assert_eq!(argv[3], Arg::Expr(Expr::Literal(Value::Bool(true))));
             assert_eq!(
                 argv[4],

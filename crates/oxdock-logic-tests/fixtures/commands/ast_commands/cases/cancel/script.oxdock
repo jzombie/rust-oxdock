@@ -1,5 +1,5 @@
 # Blocking CANCEL: the background SLEEP is killed synchronously, so the
 # later AWAIT must fail with a cancellation error (not hang, not succeed).
-LET $t = ASYNC SLEEP 30s
+LET $t: HANDLE = ASYNC SLEEP 30s
 CANCEL $t
 AWAIT $t

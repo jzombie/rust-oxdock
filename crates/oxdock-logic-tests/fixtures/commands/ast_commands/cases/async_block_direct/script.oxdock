@@ -2,7 +2,7 @@
 # AWAIT ensures completion before READ checks the file.
 # Proves ASYNC works directly with DSL commands.
 
-LET $task = ASYNC {
+LET $task: HANDLE = ASYNC {
     WRITE "async_file.txt" "async_content"
 }
 AWAIT $task

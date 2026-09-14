@@ -33,72 +33,39 @@ pub enum ArgType {
 }
 
 impl ArgType {
-    /// The documented types, in reference-section order.
-    pub const CANONICAL: &[ArgType] = &[
-        ArgType::String,
-        ArgType::Path,
-        ArgType::Int,
-        ArgType::Duration,
-        ArgType::Var,
-        ArgType::KeyValue,
-    ];
-
-    /// Table-cell label, e.g. `duration` or `SNAPSHOT|LOCAL`.
+    /// Table-cell label for the argument table's Type column.
+    /// Always a real [`crate::ast::TypeKind`] name — never a shape. Reference and
+    /// assignment shapes (`$var`, `KEY=value`) display as the `STRING`
+    /// values they bind or resolve to; the `$`/assignment requirement
+    /// itself lives in the argument description and command syntax.
     pub fn label(&self) -> String {
+        use crate::ast::TypeKind;
         match self {
-            ArgType::String => "string".to_string(),
-            ArgType::Path => "path".to_string(),
-            ArgType::Int => "int".to_string(),
-            ArgType::Duration => "duration".to_string(),
-            ArgType::Var => "$var".to_string(),
-            ArgType::KeyValue => "KEY=value".to_string(),
+            ArgType::String => TypeKind::String.label().to_string(),
+            ArgType::Path => TypeKind::Path.label().to_string(),
+            ArgType::Int => TypeKind::Int.label().to_string(),
+            ArgType::Duration => TypeKind::Duration.label().to_string(),
+            ArgType::Var => TypeKind::String.label().to_string(),
+            ArgType::KeyValue => TypeKind::String.label().to_string(),
             ArgType::OneOf(options) => options.join("|"),
             ArgType::Rest(inner) => format!("{}...", inner.label()),
         }
     }
 
-    /// Anchor of the type's reference section (`### Value type: <label>`),
-    /// or `None` for self-describing inline alternations.
-    pub fn anchor(&self) -> Option<&'static str> {
+    /// Anchor of the type's reference section, delegated to [`crate::ast::TypeKind`].
+    /// Only types with a `TypeKind` reference section link; argument shapes
+    /// (`$var`, `KEY=value`) and inline alternations render unlinked.
+    pub fn anchor(&self) -> Option<String> {
+        use crate::ast::TypeKind;
         match self {
-            ArgType::String => Some("value-type-string"),
-            ArgType::Path => Some("value-type-path"),
-            ArgType::Int => Some("value-type-int"),
-            ArgType::Duration => Some("value-type-duration"),
-            ArgType::Var => Some("value-type-var"),
-            // Slugger strips `=` rather than hyphenating it: the heading
-            // `### Value type: KEY=value` anchors as `value-type-keyvalue`.
-            ArgType::KeyValue => Some("value-type-keyvalue"),
+            ArgType::String => Some(TypeKind::String.anchor()),
+            ArgType::Path => Some(TypeKind::Path.anchor()),
+            ArgType::Int => Some(TypeKind::Int.anchor()),
+            ArgType::Duration => Some(TypeKind::Duration.anchor()),
+            ArgType::Var => None,
+            ArgType::KeyValue => None,
             ArgType::OneOf(_) => None,
             ArgType::Rest(inner) => inner.anchor(),
-        }
-    }
-
-    /// Reference-section (title, body) for the canonical types.
-    pub fn doc(&self) -> Option<(&'static str, &'static str)> {
-        match self {
-            ArgType::String => Some((
-                "Value type: string",
-                "Arbitrary text under the unified string-value rules: quotes keep exact bytes, a lone `$var` evaluates, and `{{ ... }}` placeholders interpolate.",
-            )),
-            ArgType::Path => Some((
-                "Value type: path",
-                "Workspace path, resolved against the current working directory and guarded against escaping the workspace.",
-            )),
-            ArgType::Int => Some(("Value type: int", "Integer, e.g. an exit code.")),
-            ArgType::Duration => Some((
-                "Value type: duration",
-                "Positive time span: a number with an `ms`, `s`, `m`, or `h` suffix — a bare number means seconds — e.g. `500ms`, `10s`, `2m`.",
-            )),
-            ArgType::Var => Some((
-                "Value type: $var",
-                "Script variable reference. The `$` sigil is mandatory.",
-            )),
-            ArgType::KeyValue => Some((
-                "Value type: KEY=value",
-                "`KEY=value` assignment splitting on the first `=` (`KEY=a=b` stores `a=b`). Values follow the unified string-value rules.",
-            )),
-            ArgType::OneOf(_) | ArgType::Rest(_) => None,
         }
     }
 
@@ -343,6 +310,19 @@ pub enum FlagValueType {
     String,
     /// Integer-valued flag.
     Int,
+}
+
+impl FlagValueType {
+    /// Display label using the real [`crate::ast::TypeKind`] vocabulary. A bare `Flag`
+    /// switch carries no value; `BOOL` names what its presence asserts.
+    pub fn label(&self) -> &'static str {
+        use crate::ast::TypeKind;
+        match self {
+            FlagValueType::Flag => TypeKind::Bool.label(),
+            FlagValueType::String => TypeKind::String.label(),
+            FlagValueType::Int => TypeKind::Int.label(),
+        }
+    }
 }
 
 /// Complete metadata for a command.
