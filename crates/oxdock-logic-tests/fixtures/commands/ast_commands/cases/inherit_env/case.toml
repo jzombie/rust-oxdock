@@ -6,4 +6,4 @@ OXDOCK_AST_INHERIT_TWO = "from-host-2"
 OXBOOK_RUNNER_DIR = "/runner"
 
 [expect]
-files = { "one.txt" = "one=from-host-1", "two.txt" = "two=from-host-2", "runner.txt" = "runner=/runner" }
+stdout = "one=from-host-1\ntwo=from-host-2\nrunner=/runner\n"

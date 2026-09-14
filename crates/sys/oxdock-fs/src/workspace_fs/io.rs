@@ -141,6 +141,12 @@ impl PathResolver {
         self.backend.entry_kind(path)
     }
 
+    /// No-follow variant of [`Self::entry_kind`]: reports symlinks as
+    /// [`super::EntryKind::Symlink`] instead of resolving through them.
+    pub fn entry_kind_no_follow(&self, path: &GuardedPath) -> Result<super::EntryKind> {
+        self.backend.entry_kind_no_follow(path)
+    }
+
     /// Lightweight existence check that avoids host `stat` calls under Miri.
     pub fn exists(&self, path: &GuardedPath) -> bool {
         self.backend.entry_kind(path).is_ok()

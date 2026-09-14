@@ -12,6 +12,8 @@ pub(super) fn copy_entry(fs: &dyn WorkspaceFs, src: &GuardedPath, dst: &GuardedP
             fs.ensure_parent_dir(dst)?;
             fs.copy_file(src, dst)?;
         }
+        // Following inspection resolves through links.
+        EntryKind::Symlink => unreachable!("following entry_kind never reports symlinks"),
     }
     Ok(())
 }
@@ -140,6 +142,8 @@ pub(super) fn hash_path(
                 hasher.update(&buf[..n]);
             }
         }
+        // Following inspection resolves through links.
+        EntryKind::Symlink => unreachable!("following entry_kind never reports symlinks"),
     }
     Ok(())
 }

@@ -1,2 +1,0 @@
-MKDIR scratch
-ASSERT_ABSENT never-created.txt

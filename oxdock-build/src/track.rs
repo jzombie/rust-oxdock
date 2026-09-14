@@ -12,7 +12,7 @@
 
 use std::collections::{BTreeSet, HashSet};
 
-use oxdock_parser::{Arg, GuardExpr, Step, StepKind};
+use oxdock_parser::{Arg, AssertTarget, GuardExpr, Step, StepKind};
 
 /// Extract `{{ env:KEY }}` placeholder names from a template string.
 fn env_placeholders(template: &str) -> Vec<String> {
@@ -133,6 +133,12 @@ pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
         out.extend(env_placeholders(t.as_str()));
     }
 
+    fn template_keys_target(out: &mut BTreeSet<String>, t: &AssertTarget) {
+        if let AssertTarget::Value(arg) = t {
+            template_keys(out, arg);
+        }
+    }
+
     fn walk_guard(out: &mut BTreeSet<String>, expr: &GuardExpr) {
         match expr {
             GuardExpr::Predicate(predicate) => match predicate {
@@ -211,18 +217,20 @@ pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
                     template_keys(&mut keys, value);
                 }
             }
-            StepKind::AssertFile {
+            StepKind::AssertEq {
                 hash: _,
-                path,
-                contents,
+                actual,
+                expected,
             } => {
-                template_keys(&mut keys, path);
-                if let Some(body) = contents {
-                    template_keys(&mut keys, body);
+                template_keys_target(&mut keys, actual);
+                if let Some(e) = expected {
+                    template_keys(&mut keys, e);
                 }
             }
-            StepKind::AssertDir(t) | StepKind::AssertAbsent(t) => template_keys(&mut keys, t),
-            StepKind::AssertStdout(t) => template_keys(&mut keys, t),
+            StepKind::AssertContains { haystack, needle } => {
+                template_keys_target(&mut keys, haystack);
+                template_keys(&mut keys, needle);
+            }
             StepKind::WithIo { cmd, .. } => {
                 // WITH_IO wraps exactly one inner command; its templates are
                 // reached when the parser expands blocks, but keep a defensive

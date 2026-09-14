@@ -43,8 +43,10 @@ fn glob_parent_patterns_match_nothing() {
             WRITE probe.txt "x"
             FOR $f: STRING IN GLOB("../") { WRITE escaped.txt "leak" }
             FOR $f: STRING IN GLOB("../*") { WRITE escaped2.txt "leak" }
-            ASSERT_ABSENT escaped.txt
-            ASSERT_ABSENT escaped2.txt
+            LET $t1: STRING = PATH_TYPE("escaped.txt")
+            LET $t2: STRING = PATH_TYPE("escaped2.txt")
+            ASSERT_EQ $t1 "absent"
+            ASSERT_EQ $t2 "absent"
         "#},
     )
     .unwrap();
@@ -67,7 +69,8 @@ fn glob_nested_parent_pattern_matches_nothing() {
             MKDIR a
             WRITE a/inner.txt "x"
             FOR $f: STRING IN GLOB("a/../../*") { WRITE escaped3.txt "leak" }
-            ASSERT_ABSENT escaped3.txt
+            LET $t: STRING = PATH_TYPE("escaped3.txt")
+            ASSERT_EQ $t "absent"
         "#},
     )
     .unwrap();
@@ -87,7 +90,8 @@ fn glob_normal_patterns_still_list_contents() {
         indoc! {r#"
             WRITE probe.txt "x"
             FOR $f: STRING IN GLOB("*.txt") { WRITE seen.txt "saw" }
-            ASSERT_FILE seen.txt "saw"
+            LET $s: STRING = READ seen.txt
+            ASSERT_EQ $s "saw"
         "#},
     )
     .unwrap();

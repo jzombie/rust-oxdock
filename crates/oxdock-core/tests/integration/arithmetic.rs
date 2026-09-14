@@ -3,7 +3,7 @@
 
 use indoc::indoc;
 use oxdock_core::{ExecIo, run_steps_with_context_result_with_io};
-use oxdock_fs::{GuardedPath, GuardedTempDir, PathResolver};
+use oxdock_fs::{GuardedPath, GuardedTempDir};
 
 fn guard_root(temp: &GuardedTempDir) -> GuardedPath {
     temp.as_guarded_path().clone()
@@ -14,11 +14,6 @@ fn run_script(root: &GuardedPath, script: &str) -> Result<(), anyhow::Error> {
     run_steps_with_context_result_with_io(root, root, &steps, ExecIo::new()).map(|_| ())
 }
 
-fn read_file(path: &GuardedPath) -> String {
-    let resolver = PathResolver::new(path.root(), path.root()).unwrap();
-    resolver.read_to_string(path).unwrap()
-}
-
 #[test]
 fn arithmetic_over_captured_strings() {
     // The #112 bridge: capture yields `"41\n"`, `INT()` trims, `+ 1` promotes.
@@ -27,11 +22,9 @@ fn arithmetic_over_captured_strings() {
     let script = indoc! {r#"
         LET $size_str: STRING = ECHO 41
         LET $total: INT = INT($size_str) + 1
-        WRITE total.txt "{{ $total }}"
-        ASSERT_FILE total.txt "42"
+        ASSERT_EQ $total 42
     "#};
     run_script(&root, script).expect("captured arithmetic");
-    assert_eq!(read_file(&root.join("total.txt").unwrap()), "42");
 }
 
 #[test]
@@ -44,8 +37,9 @@ fn logical_operators_short_circuit() {
         LET $a: BOOL = true || $missing
         LET $b: BOOL = false && $missing
         LET $c: BOOL = $a && $b == false
-        WRITE out.txt "{{ $a }}|{{ $b }}|{{ $c }}"
-        ASSERT_FILE out.txt "true|false|true"
+        ASSERT_EQ $a true
+        ASSERT_EQ $b false
+        ASSERT_EQ $c true
     "#};
     run_script(&root, script).expect("short-circuit");
 }
@@ -74,9 +68,12 @@ fn float_equality_is_exact_without_epsilon() {
         IF $e + $f == $g {
             WRITE exact.txt yes
         }
-        ASSERT_FILE bounded.txt "yes"
-        ASSERT_FILE exact.txt "yes"
-        ASSERT_ABSENT unexpected.txt
+        LET $ok: STRING = READ bounded.txt
+        LET $exact_ok: STRING = READ exact.txt
+        ASSERT_EQ $ok "yes"
+        ASSERT_EQ $exact_ok "yes"
+        LET $t: STRING = PATH_TYPE("unexpected.txt")
+        ASSERT_EQ $t "absent"
     "#};
     run_script(&root, script).expect("float equality");
 }
@@ -87,8 +84,7 @@ fn float_promotion_and_ordering() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         LET $ratio: FLOAT = 1 + 2.5
-        WRITE ratio.txt "{{ $ratio }}"
-        ASSERT_FILE ratio.txt "3.5"
+        ASSERT_EQ $ratio 3.5
         IF $ratio > 3.0 {
             WRITE big.txt yes
         }
@@ -98,9 +94,12 @@ fn float_promotion_and_ordering() {
         IF 3 < 4.5 {
             WRITE lt.txt yes
         }
-        ASSERT_FILE big.txt "yes"
-        ASSERT_FILE eq.txt "yes"
-        ASSERT_FILE lt.txt "yes"
+        LET $big: STRING = READ big.txt
+        LET $eq: STRING = READ eq.txt
+        LET $lt: STRING = READ lt.txt
+        ASSERT_EQ $big "yes"
+        ASSERT_EQ $eq "yes"
+        ASSERT_EQ $lt "yes"
     "#};
     run_script(&root, script).expect("float promotion");
 }
@@ -115,8 +114,7 @@ fn running_total_accumulates() {
         $total = $total + INT($a)
         LET $b: STRING = ECHO 8
         $total = $total + INT($b)
-        WRITE total.txt "{{ $total }}"
-        ASSERT_FILE total.txt "15"
+        ASSERT_EQ $total 15
     "#};
     run_script(&root, script).expect("running total");
 }
@@ -129,8 +127,9 @@ fn int_float_conversions_valid() {
         LET $n: INT = INT("  123  ")
         LET $f: FLOAT = FLOAT($n)
         LET $g: FLOAT = FLOAT("2.5")
-        WRITE out.txt "{{ $n }}|{{ $f }}|{{ $g }}"
-        ASSERT_FILE out.txt "123|123|2.5"
+        ASSERT_EQ $n 123
+        ASSERT_EQ $f 123.0
+        ASSERT_EQ $g 2.5
     "#};
     run_script(&root, script).expect("conversions");
 }
@@ -191,7 +190,8 @@ fn inspect_equality_through_rpn() {
         IF INSPECT($p) == INSPECT($p) {
             WRITE same.txt yes
         }
-        ASSERT_FILE same.txt "yes"
+        LET $ok: STRING = READ same.txt
+        ASSERT_EQ $ok "yes"
     "#};
     run_script(&root, script).expect("inspect compare");
 }
@@ -205,10 +205,81 @@ fn subtraction_operand_order() {
         LET $a: INT = 5
         LET $b: INT = 3
         LET $d: INT = $a - $b
-        WRITE d.txt "{{ $d }}"
-        ASSERT_FILE d.txt "2"
+        ASSERT_EQ $d 2
     "#};
     run_script(&root, script).expect("subtraction order");
+}
+
+#[test]
+fn negative_literal_binds() {
+    // Negative literals bind directly. Note: `ASSERT_EQ $neg -5` would
+    // parse `- 5` as subtraction of the first argument, so the expected
+    // value is bound separately; both routes must yield Int(-5).
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        LET $neg: INT = -5
+        LET $e: INT = 0 - 5
+        ASSERT_EQ $neg $e
+    "#};
+    run_script(&root, script).expect("negative literal");
+}
+
+#[test]
+fn subtraction_yields_negative() {
+    // `3 - 8` is -5, pinning signed results (nothing covered these before).
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        LET $d: INT = 3 - 8
+        LET $e: INT = 0 - 5
+        ASSERT_EQ $d $e
+    "#};
+    run_script(&root, script).expect("negative subtraction");
+}
+
+#[test]
+fn negative_multiplication() {
+    // Sign handling across multiplication: `-3 * 4` and `3 * -4` are -12.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        LET $a: INT = -3 * 4
+        LET $b: INT = 3 * -4
+        LET $e: INT = 0 - 12
+        ASSERT_EQ $a $e
+        ASSERT_EQ $b $e
+    "#};
+    run_script(&root, script).expect("negative multiplication");
+}
+
+#[test]
+fn negative_division_truncates_toward_zero() {
+    // Integer division truncates toward zero: `-7 / 2` is -3 (not floored -4).
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        LET $x: INT = 0 - 7
+        LET $q: INT = $x / 2
+        LET $r: INT = 7 / (0 - 2)
+        LET $e: INT = 0 - 3
+        ASSERT_EQ $q $e
+        ASSERT_EQ $r $e
+    "#};
+    run_script(&root, script).expect("negative division");
+}
+
+#[test]
+fn negative_float_division() {
+    // Float division keeps the sign and fraction: `-7.0 / 2` is -3.5.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        LET $f: FLOAT = -7.0 / 2
+        LET $e: FLOAT = 0.0 - 3.5
+        ASSERT_EQ $f $e
+    "#};
+    run_script(&root, script).expect("negative float division");
 }
 
 #[test]
@@ -222,8 +293,7 @@ fn deep_dynamic_nesting_evaluates() {
         LET $c: INT = 2
         LET $d: INT = 3
         LET $x: INT = $a * ($b * ($c + $d))
-        WRITE x.txt "{{ $x }}"
-        ASSERT_FILE x.txt "20"
+        ASSERT_EQ $x 20
     "#};
     run_script(&root, script).expect("deep nesting");
 }
@@ -238,8 +308,7 @@ fn right_nested_division_order() {
         LET $y: INT = 10
         LET $z: INT = 2
         LET $q: INT = $x / ($y / $z)
-        WRITE q.txt "{{ $q }}"
-        ASSERT_FILE q.txt "20"
+        ASSERT_EQ $q 20
     "#};
     run_script(&root, script).expect("division order");
 }
@@ -252,8 +321,7 @@ fn call_embedded_in_nested_arithmetic_evaluates() {
     let script = indoc! {r#"
         LET $s: STRING = "  12  "
         LET $x: INT = 10 + (3 * (INT($s) + 2))
-        WRITE x.txt "{{ $x }}"
-        ASSERT_FILE x.txt "52"
+        ASSERT_EQ $x 52
     "#};
     run_script(&root, script).expect("nested call");
 }
@@ -270,8 +338,7 @@ fn mixed_promotion_dynamic() {
         LET $k: INT = 4
         LET $l: INT = 2
         LET $x: FLOAT = $h + ($i * ($j - ($k / $l)))
-        WRITE x.txt "{{ $x }}"
-        ASSERT_FILE x.txt "4"
+        ASSERT_EQ $x 4.0
     "#};
     run_script(&root, script).expect("mixed promotion");
 }
@@ -291,7 +358,8 @@ fn ordering_over_complex_dynamic_subtrees() {
         IF ($a * ($b + $c)) <= ($d - ($e * $f)) {
             WRITE ok.txt yes
         }
-        ASSERT_FILE ok.txt "yes"
+        LET $ok: STRING = READ ok.txt
+        ASSERT_EQ $ok "yes"
     "#};
     run_script(&root, script).expect("complex ordering");
 }
@@ -306,8 +374,7 @@ fn unary_interleaved_dynamic() {
         LET $b: INT = 3
         LET $c: INT = 14
         LET $x: INT = -$a * -($b + $c)
-        WRITE x.txt "{{ $x }}"
-        ASSERT_FILE x.txt "34"
+        ASSERT_EQ $x 34
     "#};
     run_script(&root, script).expect("unary interleaved");
 }

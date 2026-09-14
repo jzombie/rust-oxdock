@@ -2,4 +2,3 @@ WORKDIR /
 SYMLINK client "client"
 WORKDIR client
 WITH_IO [stdout=pipe:cap_seen_txt] READ version.txt
-WITH_IO [stdin=pipe:cap_seen_txt] WRITE seen.txt

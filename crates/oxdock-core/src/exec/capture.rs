@@ -125,6 +125,20 @@ impl SpillBuffer {
         }
     }
 
+    /// Non-destructive snapshot of buffered bytes for pipe-content
+    /// assertions. Returns what is buffered right now without consuming
+    /// anything or waiting for producers; assert after the producer
+    /// completes. Disk-backed content is re-read without disturbing the
+    /// reader position.
+    pub(super) fn peek_bytes(&self) -> io::Result<Vec<u8>> {
+        let mut inner = self.lock_inner();
+        match &mut *inner {
+            SpillInner::Memory(vec) => Ok(vec.iter().copied().collect()),
+            #[cfg(not(miri))]
+            SpillInner::Disk(disk) => disk.peek_bytes(),
+        }
+    }
+
     /// Non-blocking read of buffered bytes (up to `buf.len()`). Returns
     /// `Ok(0)` when empty. Truncates the spill file when fully drained.
     pub(super) fn read_into(&self, buf: &mut [u8]) -> io::Result<usize> {
@@ -241,6 +255,18 @@ impl DiskSpill {
             self.reader.seek(SeekFrom::Start(0))?;
         }
         Ok(n)
+    }
+
+    /// Re-read everything written so far without moving `read_pos`.
+    /// Used for non-destructive pipe-content assertions.
+    fn peek_bytes(&mut self) -> io::Result<Vec<u8>> {
+        let mut out = Vec::new();
+        self.reader.seek(SeekFrom::Start(0))?;
+        (&mut self.reader)
+            .take(self.write_pos)
+            .read_to_end(&mut out)?;
+        self.reader.seek(SeekFrom::Start(self.read_pos))?;
+        Ok(out)
     }
 
     fn create_from_vec(vec: &mut VecDeque<u8>) -> io::Result<Self> {

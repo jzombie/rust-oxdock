@@ -1,3 +1,2 @@
 WITH_IO [stdin, stdout=pipe:cap_out_txt] READ
-WITH_IO [stdin=pipe:cap_out_txt] WRITE out.txt
 WRITE empty.txt ""

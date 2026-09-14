@@ -186,24 +186,24 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
             }
         }),
         safe_string().prop_map(|path| StepKind::HashSha256 { path: path.into() }),
-        // The grammar defines ASSERT_FILE's hash form without trailing
-        // contents, so generators must preserve that invariant for
-        // Display round-trips.
-        ("[0-9a-f]{64}", safe_string()).prop_map(|(digest, path)| StepKind::AssertFile {
-            hash: Some(digest),
-            path: path.into(),
-            contents: None,
-        }),
-        (safe_string(), prop::option::of(safe_msg())).prop_map(|(path, contents)| {
-            StepKind::AssertFile {
-                hash: None,
-                path: path.into(),
-                contents: contents.map(Into::into),
+        // The grammar defines ASSERT_EQ's hash form with a value actual,
+        // so generators must preserve that shape for Display round-trips.
+        ("[0-9a-f]{64}", safe_string()).prop_map(|(digest, actual)| {
+            StepKind::AssertEq {
+                hash: Some(digest),
+                actual: AssertTarget::Value(actual.into()),
+                expected: None,
             }
         }),
-        safe_string().prop_map(|s| StepKind::AssertDir(s.into())),
-        safe_string().prop_map(|s| StepKind::AssertAbsent(s.into())),
-        safe_msg().prop_map(|s| StepKind::AssertStdout(s.into())),
+        (safe_string(), safe_msg()).prop_map(|(actual, expected)| StepKind::AssertEq {
+            hash: None,
+            actual: AssertTarget::Value(actual.into()),
+            expected: Some(expected.into()),
+        }),
+        (safe_string(), safe_msg()).prop_map(|(haystack, needle)| StepKind::AssertContains {
+            haystack: AssertTarget::Value(haystack.into()),
+            needle: needle.into(),
+        }),
         (0i32..255).prop_map(|i| StepKind::Exit(Arg::String(i.to_string(), false))),
     ]
 }
@@ -228,6 +228,15 @@ fn arb_step() -> impl Strategy<Value = Step> {
 
 fn arg_content_eq(a: &Arg, b: &Arg) -> bool {
     a.as_str() == b.as_str()
+}
+
+fn assert_target_eq(l: &AssertTarget, r: &AssertTarget, what: &str, msg: &str) {
+    match (l, r) {
+        (AssertTarget::Value(la), AssertTarget::Value(ra)) => {
+            assert!(arg_content_eq(la, ra), "{what}: {msg}")
+        }
+        _ => assert_eq!(l, r, "{what}: {msg}"),
+    }
 }
 
 fn assert_steps_eq(left: &Step, right: &Step, msg: &str) {
@@ -347,34 +356,42 @@ fn assert_steps_eq(left: &Step, right: &Step, msg: &str) {
             assert!(arg_content_eq(lt, rt), "Symlink to mismatch: {}", msg);
         }
         (
-            StepKind::AssertFile {
+            StepKind::AssertEq {
                 hash: lh,
-                path: lp,
-                contents: lc,
+                actual: la,
+                expected: le,
             },
-            StepKind::AssertFile {
+            StepKind::AssertEq {
                 hash: rh,
-                path: rp,
-                contents: rc,
+                actual: ra,
+                expected: re,
             },
         ) => {
-            assert_eq!(lh, rh, "AssertFile hash mismatch: {}", msg);
-            assert!(arg_content_eq(lp, rp), "AssertFile path mismatch: {}", msg);
+            assert_eq!(lh, rh, "AssertEq hash mismatch: {}", msg);
+            assert_target_eq(la, ra, "AssertEq actual mismatch", msg);
             assert_eq!(
-                lc.as_ref().map(|a| a.as_str()),
-                rc.as_ref().map(|a| a.as_str()),
-                "AssertFile contents mismatch: {}",
+                le.as_ref().map(|a| a.as_str()),
+                re.as_ref().map(|a| a.as_str()),
+                "AssertEq expected mismatch: {}",
                 msg
             );
         }
-        (StepKind::AssertDir(l), StepKind::AssertDir(r)) => {
-            assert!(arg_content_eq(l, r), "AssertDir mismatch: {}", msg)
-        }
-        (StepKind::AssertAbsent(l), StepKind::AssertAbsent(r)) => {
-            assert!(arg_content_eq(l, r), "AssertAbsent mismatch: {}", msg)
-        }
-        (StepKind::AssertStdout(l), StepKind::AssertStdout(r)) => {
-            assert!(arg_content_eq(l, r), "AssertStdout mismatch: {}", msg)
+        (
+            StepKind::AssertContains {
+                haystack: lh,
+                needle: ln,
+            },
+            StepKind::AssertContains {
+                haystack: rh,
+                needle: rn,
+            },
+        ) => {
+            assert_target_eq(lh, rh, "AssertContains haystack mismatch", msg);
+            assert!(
+                arg_content_eq(ln, rn),
+                "AssertContains needle mismatch: {}",
+                msg
+            );
         }
         (StepKind::HashSha256 { path: lp }, StepKind::HashSha256 { path: rp }) => {
             assert!(arg_content_eq(lp, rp), "HashSha256 mismatch: {}", msg)

@@ -7,4 +7,4 @@ FUNC MAKE($who: STRING) {
 LET $r: STRING = CALL MAKE("ada")
 WRITE r.txt "{{ $r }}"
 CALL MAKE("bex")
-ASSERT_STDOUT "loud bex"
+ASSERT_CONTAINS stdout "loud bex"

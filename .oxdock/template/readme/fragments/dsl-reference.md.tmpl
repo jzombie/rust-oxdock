@@ -21,7 +21,8 @@ FOR $item: STRING IN ["a", "b"] {
     ECHO "\{{ $item }}"
 }
 WRITE count.txt "\{{ $count }}"
-ASSERT_FILE count.txt "2"
+LET $c: STRING = READ count.txt
+ASSERT_EQ $c "2"
 ```
 
 The `env:KEY` expression reads the script environment into a plain value. A `$var` reference never reads the environment, even when the names match:
@@ -30,7 +31,8 @@ The `env:KEY` expression reads the script environment into a plain value. A `$va
 ENV FOO="bar"
 LET $e: STRING = env:FOO
 WRITE env.txt "\{{ $e }}"
-ASSERT_FILE env.txt "bar"
+LET $v: STRING = READ env.txt
+ASSERT_EQ $v "bar"
 ```
 
 ### Statements and semicolons
@@ -38,8 +40,8 @@ ASSERT_FILE env.txt "bar"
 ```oxdock
 // One line, two instructions: the semicolon splits them.
 ECHO one; ECHO two
-ASSERT_STDOUT one
-ASSERT_STDOUT two
+ASSERT_CONTAINS stdout "one"
+ASSERT_CONTAINS stdout "two"
 ```
 
 ### RUN shell and exec forms
@@ -48,7 +50,7 @@ Shell form (`RUN <command...>`) joins its arguments and runs the string in the s
 
 ```oxdock
 RUN ["cargo", "--version"]
-ASSERT_STDOUT cargo
+ASSERT_CONTAINS stdout "cargo"
 ```
 
 ### Comments
@@ -63,14 +65,14 @@ Three comment styles are supported: `//` line comments, nestable `/* ... */` blo
    /* nest */
    like this */
 ECHO visible-after-comments
-ASSERT_STDOUT visible-after-comments
+ASSERT_CONTAINS stdout "visible-after-comments"
 ```
 
 ```oxdock
 ECHO hash-mid-line # stays-in-payload
 RUN echo run-args-stop-at-slashes // removed-as-comment
-ASSERT_STDOUT hash-mid-line # stays-in-payload
-ASSERT_STDOUT run-args-stop-at-slashes
+ASSERT_CONTAINS stdout "hash-mid-line # stays-in-payload"
+ASSERT_CONTAINS stdout "run-args-stop-at-slashes"
 ```
 
 Comment markers inside quoted strings are always preserved.
@@ -86,9 +88,9 @@ ECHO "double quotes"
 
 // \" embeds a quote; the backslash itself is consumed.
 ECHO "escaped \" quote"
-ASSERT_STDOUT single quotes
-ASSERT_STDOUT double quotes
-ASSERT_STDOUT escaped " quote
+ASSERT_CONTAINS stdout "single quotes"
+ASSERT_CONTAINS stdout "double quotes"
+ASSERT_CONTAINS stdout 'escaped " quote'
 ```
 
 ## Templates
@@ -103,15 +105,15 @@ ECHO <\{{ env:GREETING }}>
 
 // Bare braces are not a template: they expand to empty.
 ECHO <\{{ GREETING }}>
-ASSERT_STDOUT <hello-world>
-ASSERT_STDOUT <>
+ASSERT_CONTAINS stdout "<hello-world>"
+ASSERT_CONTAINS stdout "<>"
 ```
 
 ## Guards and scoped blocks
 
 A guard is a bracketed expression that gates the instruction or block that follows it. Inside the brackets:
 
-- `env:KEY` passes when variable `KEY` exists and is non-empty; `eq(env:KEY, value)` and `neq(env:KEY, value)` compare values.
+- `env:KEY` passes when variable `KEY` exists and is non-empty; `eq(env:KEY, value)` and `ne(env:KEY, value)` compare values.
 - Bare platform tags pass based on the host: `linux`, `macos` (alias `mac`), `windows`, `unix`. Tags are case-insensitive.
 - A comma-separated list means **AND**: `[env:A, linux]`.
 - Disjunction is expressed as a call — `any(expr, expr, ...)` with at least two branches — not an infix operator.
@@ -136,10 +138,10 @@ INHERIT_ENV [DEPLOY_TARGET]
 [eq(env:DEPLOY_TARGET, staging)] ECHO deploying-to-staging
 
 // Inequality: skipped below, because DEPLOY_TARGET IS staging.
-[neq(env:DEPLOY_TARGET, staging)] ECHO deploying-elsewhere
+[ne(env:DEPLOY_TARGET, staging)] ECHO deploying-elsewhere
 
-ASSERT_STDOUT deploy-target-visible
-ASSERT_STDOUT deploying-to-staging
+ASSERT_CONTAINS stdout "deploy-target-visible"
+ASSERT_CONTAINS stdout "deploying-to-staging"
 ```
 
 ### Platform guards
@@ -150,14 +152,16 @@ ASSERT_STDOUT deploying-to-staging
 [windows] {
   WRITE os-report.txt windows
   ECHO windows-detected
-  ASSERT_FILE os-report.txt windows
-  ASSERT_STDOUT windows-detected
+  LET $rep: STRING = READ os-report.txt
+  ASSERT_EQ $rep "windows"
+  ASSERT_CONTAINS stdout "windows-detected"
 }
 [unix] {
   WRITE os-report.txt unix-family
   ECHO unix-detected
-  ASSERT_FILE os-report.txt unix-family
-  ASSERT_STDOUT unix-detected
+  LET $rep: STRING = READ os-report.txt
+  ASSERT_EQ $rep "unix-family"
+  ASSERT_CONTAINS stdout "unix-detected"
 }
 ```
 
@@ -176,9 +180,9 @@ INHERIT_ENV [OXDOCK_DOC_FEATURE_A]
 // Comma composes with AND: (A or linux) AND A — true here on every OS.
 [any(env:OXDOCK_DOC_FEATURE_A, linux), env:OXDOCK_DOC_FEATURE_A] ECHO composed-and-or-guard
 
-ASSERT_STDOUT negation-passes-for-undefined
-ASSERT_STDOUT or-matched-a-branch
-ASSERT_STDOUT composed-and-or-guard
+ASSERT_CONTAINS stdout "negation-passes-for-undefined"
+ASSERT_CONTAINS stdout "or-matched-a-branch"
+ASSERT_CONTAINS stdout "composed-and-or-guard"
 ```
 
 ### Multi-line guards
@@ -197,7 +201,8 @@ Bracket expressions may span lines. Chained guard lines apply conjunctively to t
 WRITE chained.txt applied
 
 // The artifact was never created.
-ASSERT_ABSENT chained.txt
+LET $t: STRING = PATH_TYPE("chained.txt")
+ASSERT_EQ $t "absent"
 ```
 
 ### Scoped blocks
@@ -220,9 +225,11 @@ WORKDIR scoped_area
 
 // $a is back to "some_value", MODE is back to "production",
 // and cwd is back at scoped_area — but files persist.
-ASSERT_FILE inner.txt "inner_value-staging"
+LET $in_body: STRING = READ inner.txt
+ASSERT_EQ $in_body "inner_value-staging"
 WRITE outer.txt "\{{ $a }}-\{{ env:MODE }}"
-ASSERT_FILE outer.txt "some_value-production"
+LET $out_body: STRING = READ outer.txt
+ASSERT_EQ $out_body "some_value-production"
 ```
 
 `IF`/`ELSE` branches, `FOR` loop bodies, `TIMEOUT` bodies, `ASYNC` bodies, and `WITH_IO [..] { ... }` blocks are all scopes under the same rule: only files and pipes leak out.
@@ -233,7 +240,8 @@ ASSERT_FILE outer.txt "some_value-production"
 
 ```oxdock expect_error:"EXIT requested with code 3"
 WRITE before.txt "persisted"
-ASSERT_FILE before.txt "persisted"
+LET $b: STRING = READ before.txt
+ASSERT_EQ $b "persisted"
 [bool:true] {
     EXIT 3
     WRITE unreachable.txt "never"
@@ -247,15 +255,18 @@ ASSERT_FILE before.txt "persisted"
 ```oxdock
 // Inline form bounds a single command.
 TIMEOUT 30s WRITE heartbeat.txt alive
-ASSERT_FILE heartbeat.txt alive
+LET $beat: STRING = READ heartbeat.txt
+ASSERT_EQ $beat "alive"
 
 // Block form bounds multiple steps.
 TIMEOUT 30s {
     WRITE a.txt one
     WRITE b.txt two
 }
-ASSERT_FILE a.txt one
-ASSERT_FILE b.txt two
+LET $a: STRING = READ a.txt
+LET $b: STRING = READ b.txt
+ASSERT_EQ $a "one"
+ASSERT_EQ $b "two"
 
 // AWAIT form bounds a task join.
 LET $quick: HANDLE = ASYNC {

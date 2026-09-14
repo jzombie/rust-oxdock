@@ -14,8 +14,10 @@ use oxdock_core::{ExecIo, run_steps_with_lazy_snapshot};
 pub use oxdock_core::{
     parse_script, run_steps, run_steps_with_context, run_steps_with_context_result,
 };
+use oxdock_parser::Value;
 pub use oxdock_parser::{Guard, Step, StepKind};
 pub use oxdock_process::shell_program;
+use std::collections::BTreeMap;
 
 pub fn run() -> Result<()> {
     init_temp_gc();
@@ -144,6 +146,10 @@ pub struct ExecutionResult {
     /// Actual final cwd: inside the snapshot when materialized, otherwise
     /// under the workspace/local root.
     pub final_cwd: GuardedPath,
+    /// Top-level script variable bindings captured at completion, keyed by
+    /// variable name. Empty when the script is empty. Populated exclusively
+    /// by [`execute_with_result`]; `--shell` runs never produce one.
+    pub bindings: BTreeMap<String, Value>,
 }
 
 impl ExecutionResult {
@@ -176,12 +182,14 @@ pub fn execute_with_result(opts: Options, workspace_root: GuardedPath) -> Result
         return Ok(ExecutionResult {
             snapshot: output.snapshot,
             final_cwd,
+            bindings: output.bindings,
         });
     }
 
     Ok(ExecutionResult {
         snapshot,
         final_cwd,
+        bindings: BTreeMap::new(),
     })
 }
 

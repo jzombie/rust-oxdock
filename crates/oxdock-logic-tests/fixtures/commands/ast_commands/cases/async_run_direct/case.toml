@@ -1,4 +1,4 @@
 name = "async_run_direct"
 
-[expect]
-files = { "async_out.txt" = "hello\n" }
+[pipes.async_out]
+expect = "hello\n"

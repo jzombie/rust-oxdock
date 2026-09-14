@@ -29,9 +29,12 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     }
     LET $picked: STRING = CALL PICK(true)
     WRITE dist/picked.txt \{{ $picked }}
-    ASSERT_FILE dist/alpha.txt "alpha OxDock {{ env:CRATE_VERSION }}"
-    ASSERT_FILE dist/beta.txt "beta OxDock {{ env:CRATE_VERSION }}"
-    ASSERT_FILE dist/picked.txt "alpha"
+    LET $a: STRING = READ dist/alpha.txt
+    LET $b: STRING = READ dist/beta.txt
+    LET $p: STRING = READ dist/picked.txt
+    ASSERT_EQ $a "alpha OxDock {{ env:CRATE_VERSION }}"
+    ASSERT_EQ $b "beta OxDock {{ env:CRATE_VERSION }}"
+    ASSERT_EQ $p "alpha"
 };
 
 let temp = GuardedPath::tempdir().expect("tempdir");
@@ -64,9 +67,11 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     FOR $f: STRING IN GLOB("dist/*.txt") {
         EXPAND $f
     }
-    ASSERT_STDOUT "built OxDock"
-    ASSERT_FILE dist/build.txt "built OxDock"
-    ASSERT_FILE dist/verbose.log "verbose on"
+    ASSERT_CONTAINS stdout "built OxDock"
+    LET $build: STRING = READ dist/build.txt
+    LET $verbose: STRING = READ dist/verbose.log
+    ASSERT_EQ $build "built OxDock"
+    ASSERT_EQ $verbose "verbose on"
 };
 
 let temp = GuardedPath::tempdir().expect("tempdir");

@@ -439,7 +439,7 @@ fn ensure_out_dir(
 // oxdock! — runtime AST construction macro with #var interpolation
 // ---------------------------------------------------------------------------
 
-use oxdock_parser::{Arg, ArgPart, Expr, Step, StepKind, Value};
+use oxdock_parser::{Arg, ArgPart, AssertTarget, Expr, Step, StepKind, Value};
 
 const INJECT_PREFIX: &str = "__OXDOCK_INJECT_";
 const INJECT_SUFFIX: &str = "__";
@@ -496,7 +496,7 @@ fn expand_oxdock(input: TokenStream) -> syn::Result<TokenStream> {
 
     let ts_out = quote! {
         {
-            use oxdock_parser::{Arg, ArgPart, Expr, Step, StepKind, Value,
+            use oxdock_parser::{Arg, ArgPart, AssertTarget, Expr, Step, StepKind, Value,
                 IoBinding, IoStream, WorkspaceTarget, GuardExpr, Guard, PlatformGuard};
             vec![#(#step_tokens),*]
         }
@@ -850,6 +850,21 @@ fn emit_typekind(t: &oxdock_parser::TypeKind) -> proc_macro2::TokenStream {
     }
 }
 
+fn emit_assert_target(
+    target: &AssertTarget,
+    interp: &[(proc_macro2::Ident, usize)],
+) -> proc_macro2::TokenStream {
+    match target {
+        AssertTarget::Value(arg) => {
+            let t = emit_arg(arg, interp);
+            quote! { AssertTarget::Value(#t) }
+        }
+        AssertTarget::Stdout => quote! { AssertTarget::Stdout },
+        AssertTarget::Stderr => quote! { AssertTarget::Stderr },
+        AssertTarget::Pipe(name) => quote! { AssertTarget::Pipe(#name.to_string()) },
+    }
+}
+
 fn emit_stepkind(
     kind: &StepKind,
     interp: &[(proc_macro2::Ident, usize)],
@@ -876,17 +891,32 @@ fn emit_stepkind(
             quote! { StepKind::Mkdir(#t) }
         }
         StepKind::Cwd => quote! { StepKind::Cwd },
-        StepKind::AssertDir(a) => {
-            let t = emit_arg(a, interp);
-            quote! { StepKind::AssertDir(#t) }
+        StepKind::AssertEq {
+            hash,
+            actual,
+            expected,
+        } => {
+            let a = emit_assert_target(actual, interp);
+            let e = match expected {
+                Some(v) => {
+                    let t = emit_arg(v, interp);
+                    quote! { Some(#t) }
+                }
+                None => quote! { None },
+            };
+            match hash {
+                Some(h) => {
+                    quote! { StepKind::AssertEq { hash: Some(#h.to_string()), actual: #a, expected: #e } }
+                }
+                None => {
+                    quote! { StepKind::AssertEq { hash: None, actual: #a, expected: #e } }
+                }
+            }
         }
-        StepKind::AssertAbsent(a) => {
-            let t = emit_arg(a, interp);
-            quote! { StepKind::AssertAbsent(#t) }
-        }
-        StepKind::AssertStdout(a) => {
-            let t = emit_arg(a, interp);
-            quote! { StepKind::AssertStdout(#t) }
+        StepKind::AssertContains { haystack, needle } => {
+            let h = emit_assert_target(haystack, interp);
+            let n = emit_arg(needle, interp);
+            quote! { StepKind::AssertContains { haystack: #h, needle: #n } }
         }
         StepKind::Ls(opt) => match opt {
             Some(a) => {
@@ -973,28 +1003,6 @@ fn emit_stepkind(
                 quote! { StepKind::Expand { path: None, overrides: vec![#(#over),*] } }
             }
         },
-        StepKind::AssertFile {
-            hash,
-            path,
-            contents,
-        } => {
-            let p = emit_arg(path, interp);
-            match (hash, contents) {
-                (Some(h), None) => {
-                    quote! { StepKind::AssertFile { hash: Some(#h.to_string()), path: #p, contents: None } }
-                }
-                (None, Some(a)) => {
-                    let c = emit_arg(a, interp);
-                    quote! { StepKind::AssertFile { hash: None, path: #p, contents: Some(#c) } }
-                }
-                (None, None) => {
-                    quote! { StepKind::AssertFile { hash: None, path: #p, contents: None } }
-                }
-                (Some(_), Some(_)) => {
-                    unreachable!("grammar guarantees hash and contents are mutually exclusive")
-                }
-            }
-        }
         StepKind::WithIo { bindings, cmd } => {
             let bindings_tokens = emit_io_bindings(bindings);
             let cmd_token = emit_stepkind(cmd, interp);

@@ -18,6 +18,7 @@ trait BackendImpl: Send + Sync {
     fn canonicalize(&self, path: GuardedPath) -> Result<GuardedPath>;
     fn metadata(&self, path: &GuardedPath) -> Result<std::fs::Metadata>;
     fn entry_kind(&self, path: &GuardedPath) -> Result<super::EntryKind>;
+    fn entry_kind_no_follow(&self, path: &GuardedPath) -> Result<super::EntryKind>;
     fn resolve_workdir(&self, resolved: GuardedPath) -> Result<GuardedPath>;
     fn resolve_copy_source(&self, guarded: GuardedPath) -> Result<GuardedPath>;
     fn remove_file(&self, path: &GuardedPath) -> Result<()>;
@@ -153,6 +154,22 @@ impl BackendImpl for HostBackend {
         if meta.is_dir() {
             Ok(super::EntryKind::Dir)
         } else if meta.is_file() {
+            Ok(super::EntryKind::File)
+        } else {
+            bail!("unsupported file type: {}", path.display());
+        }
+    }
+
+    #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+    fn entry_kind_no_follow(&self, path: &GuardedPath) -> Result<super::EntryKind> {
+        let meta = fs::symlink_metadata(path.as_path())
+            .with_context(|| format!("failed to stat {}", path.display()))?;
+        let file_type = meta.file_type();
+        if file_type.is_symlink() {
+            Ok(super::EntryKind::Symlink)
+        } else if file_type.is_dir() {
+            Ok(super::EntryKind::Dir)
+        } else if file_type.is_file() {
             Ok(super::EntryKind::File)
         } else {
             bail!("unsupported file type: {}", path.display());
@@ -423,6 +440,12 @@ mod miri_backend {
             state
                 .entry_kind(&rel)
                 .ok_or_else(|| anyhow::anyhow!("missing entry kind for {}", path.display()))
+        }
+
+        fn entry_kind_no_follow(&self, path: &GuardedPath) -> Result<EntryKind> {
+            // The synthetic Miri filesystem has no symlinks, so no-follow
+            // inspection coincides with following inspection.
+            self.entry_kind(path)
         }
 
         fn resolve_workdir(&self, resolved: GuardedPath) -> Result<GuardedPath> {
@@ -765,6 +788,10 @@ impl Backend {
 
     pub(super) fn entry_kind(&self, path: &GuardedPath) -> Result<super::EntryKind> {
         self.as_impl().entry_kind(path)
+    }
+
+    pub(super) fn entry_kind_no_follow(&self, path: &GuardedPath) -> Result<super::EntryKind> {
+        self.as_impl().entry_kind_no_follow(path)
     }
 
     pub(super) fn resolve_workdir(&self, resolved: GuardedPath) -> Result<GuardedPath> {

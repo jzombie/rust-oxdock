@@ -8,83 +8,90 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ### Added
 
-- Lazily-created snapshot workspace (#131): the snapshot temp directory is no longer created up front. Scripts that only use `WORKSPACE LOCAL` (or run empty) never create a snapshot directory at all; everything else materializes it exactly once, on first snapshot use. `WORKSPACE SNAPSHOT` alone only selects without creating, and `RUN` under `WORKSPACE LOCAL` executes against the live tree without materializing
-- `CARGO_TARGET_DIR` isolation (#131): `RUN` steps now point `CARGO_TARGET_DIR` at a reserved scratch location instead of `<snapshot>/.cargo-target`, so nested `cargo` invocations can no longer write into the snapshot workdir or the live workspace tree. The scratch name is reserved but never created by the host; `cargo` creates it on demand
+- Lazily-created snapshot workspace (#131): the snapshot temp directory is no longer created up front. Scripts that only use `WORKSPACE LOCAL` (or run empty) never create a snapshot directory at all; everything else materializes it exactly once, on first snapshot use. `WORKSPACE SNAPSHOT` alone only selects without creating, and `RUN` under `WORKSPACE LOCAL` executes against the live tree without materializing.
+- `CARGO_TARGET_DIR` isolation (#131): `RUN` steps now point `CARGO_TARGET_DIR` at a reserved scratch location instead of `<snapshot>/.cargo-target`, so nested `cargo` invocations can no longer write into the snapshot workdir or the live workspace tree. The scratch name is reserved but never created by the host; `cargo` creates it on demand.
+- Host-side variable bindings export (#140): `LazyRunOutput` now carries `bindings: BTreeMap<String, Value>` with the top-level script variables captured at completion (function, loop, and background scopes are excluded; nothing is exported on failure). `ExecutionResult` forwards the same map, and `run_steps_with_manager` is public for hosts that run against their own filesystem handle and need the bindings alongside the final cwd.
 
 ### Changed
 
-- [breaking] Host Rust API only, scripts are unaffected: `ExecutionResult::tempdir: GuardedTempDir` is now `ExecutionResult::snapshot: Arc<LazyGuardedTempDir>` with `has_snapshot()` / `snapshot_path()` helpers, and `final_cwd` points under the workspace root when no snapshot was created. `oxdock-build` / `oxdock-macros` emit an empty output dir for `WORKSPACE LOCAL`-only scripts instead of syncing from a snapshot
+- Test suite audit from file-backed to memory-resident assertions (#140): pipe-drain `WRITE` steps in `ast_commands` fixtures now assert exact `[pipes.*] expect` values or `expect.stdout`, and pure value-expression integration tests assert run bindings or captured output instead of writing files and re-reading them. No DSL or engine behavior changed.
+- [breaking] Host Rust API only, scripts are unaffected: `ExecutionResult::tempdir: GuardedTempDir` is now `ExecutionResult::snapshot: Arc<LazyGuardedTempDir>` with `has_snapshot()` / `snapshot_path()` helpers, and `final_cwd` points under the workspace root when no snapshot was created. `oxdock-build` / `oxdock-macros` emit an empty output dir for `WORKSPACE LOCAL`-only scripts instead of syncing from a snapshot.
+- [breaking] Renamed the guard predicate `neq(...)` to `ne(...)` (#140) for a single spelling consistent with the `Ne` comparison family; the old spelling no longer parses.
+
+### Removed
+
+- [breaking] `ASSERT_FILE`, `ASSERT_STDOUT`, `ASSERT_DIR`, and `ASSERT_ABSENT` are removed in favor of `ASSERT_EQ`, `ASSERT_CONTAINS`, and the `PATH_TYPE("path")` query expression. Assertions now operate purely on evaluated values with no implicit I/O: `ASSERT_EQ $status 200` compares typed values with no coercion, `ASSERT_CONTAINS stdout "error"` checks stream buffers, and file content enters through explicit reads (`LET $content: STRING = READ "config.txt"` plus `ASSERT_EQ $content ...`). Metadata checks become queries (`ASSERT_EQ PATH_TYPE("src") "dir"`, `ASSERT_EQ PATH_TYPE("tmp") "absent"`). Bare `stdout` / `stderr` / `pipe:NAME` in first-argument position observe stream and pipe buffers; quoting stays interchangeable everywhere. `EntryKind` gains a `Symlink` variant reported only by the new no-follow inspection. See the command reference for the full syntax matrix.
 
 ## [0.13.0-alpha] - 2026-09-11
 
 ### Added
 
-- DSL arithmetic with full numeric support (#112): `LET $x: INT = 2 + 3 * 4` binds `14`, with `*`/`/` binding tighter than `+`/`-`, unary minus (`-5`, `2 * -3`), and parentheses nesting arbitrarily (`2 * (2 * (2 + 3)) * 4`). `42` is an `INT` literal and `3.14` a `FLOAT` literal; bare words that merely start with digits keep their literal reading (`30s`, `100ms`, `123/456`, `1.0.0`, `-f` stay strings)
-- Numeric semantics (#112): `Int x Int` stays `INT` (checked math, truncating integer division, so `7 / 2` is `3`); any `Float` operand promotes the result to `FLOAT` (`1 + 2.5` is `3.5`). Division by zero, overflow, and non-finite results are runtime errors rather than stored values
-- Ordering comparisons (#112): `< <= > >=` alongside the existing `== !=`, with numeric semantics when both sides are numbers (`1 == 1.0` is true). `==`/`!=` on anything else keep comparing rendered strings, and ordering non-numerics is a Type Error. Chained comparisons are a parse error (`$a < $b < $c` is rejected); write the conjunction explicitly (`$a < $b && $b < $c`)
-- `INT()` / `FLOAT()` conversions (#112): the explicit bridge from captured command output (which is always a string) to numbers, so `LET $total: INT = $total + INT($size_str)` accumulates. `INT` trims ASCII whitespace and rejects non-integers; `FLOAT` accepts int strings and rejects non-finite input. Plain string operands never convert implicitly: `"100" + 1` is a Type Error
-- Float equality documented with runnable examples (#112): equality is exact with no epsilon, so binary fractions compare cleanly (`0.5 + 0.25 == 0.75` is true) while decimal fractions may not (`0.1 + 0.2 == 0.3` is false, the sum is `0.30000000000000004`). The reference explains why (power-of-2 denominators) and shows bounding instead (`IF $sum > 0.299999 && $sum < 0.300001`)
-- Logical operators documented with examples: `&&` binds tighter than `||`, both short-circuit (`IF true || $missing` never touches the right side), and only `Bool` conditions are accepted
-- Bash comparison table in the `LET` reference: capture looks like `output=$(...)` but keeps exact bytes (Bash strips all trailing newlines), stays explicitly typed, converts only via `INT()`/`FLOAT()`, and fails the step immediately when the captured command fails
-- Scope semantics documented and pinned: mutating an outer variable inside a block persists after exit for every type (`LET $x` outside, `$x = ...` inside), while `LET` inside a block declares a shadow that reverts. Binding and mutation convert to the declared type (`$n = "42"` binds `42` for an `INT`)
+- DSL arithmetic with full numeric support (#112): `LET $x: INT = 2 + 3 * 4` binds `14`, with `*`/`/` binding tighter than `+`/`-`, unary minus (`-5`, `2 * -3`), and parentheses nesting arbitrarily (`2 * (2 * (2 + 3)) * 4`). `42` is an `INT` literal and `3.14` a `FLOAT` literal; bare words that merely start with digits keep their literal reading (`30s`, `100ms`, `123/456`, `1.0.0`, `-f` stay strings).
+- Numeric semantics (#112): `Int x Int` stays `INT` (checked math, truncating integer division, so `7 / 2` is `3`); any `Float` operand promotes the result to `FLOAT` (`1 + 2.5` is `3.5`). Division by zero, overflow, and non-finite results are runtime errors rather than stored values.
+- Ordering comparisons (#112): `< <= > >=` alongside the existing `== !=`, with numeric semantics when both sides are numbers (`1 == 1.0` is true). `==`/`!=` on anything else keep comparing rendered strings, and ordering non-numerics is a Type Error. Chained comparisons are a parse error (`$a < $b < $c` is rejected); write the conjunction explicitly (`$a < $b && $b < $c`).
+- `INT()` / `FLOAT()` conversions (#112): the explicit bridge from captured command output (which is always a string) to numbers, so `LET $total: INT = $total + INT($size_str)` accumulates. `INT` trims ASCII whitespace and rejects non-integers; `FLOAT` accepts int strings and rejects non-finite input. Plain string operands never convert implicitly: `"100" + 1` is a Type Error.
+- Float equality documented with runnable examples (#112): equality is exact with no epsilon, so binary fractions compare cleanly (`0.5 + 0.25 == 0.75` is true) while decimal fractions may not (`0.1 + 0.2 == 0.3` is false, the sum is `0.30000000000000004`). The reference explains why (power-of-2 denominators) and shows bounding instead (`IF $sum > 0.299999 && $sum < 0.300001`).
+- Logical operators documented with examples: `&&` binds tighter than `||`, both short-circuit (`IF true || $missing` never touches the right side), and only `Bool` conditions are accepted.
+- Bash comparison table in the `LET` reference: capture looks like `output=$(...)` but keeps exact bytes (Bash strips all trailing newlines), stays explicitly typed, converts only via `INT()`/`FLOAT()`, and fails the step immediately when the captured command fails.
+- Scope semantics documented and pinned: mutating an outer variable inside a block persists after exit for every type (`LET $x` outside, `$x = ...` inside), while `LET` inside a block declares a shadow that reverts. Binding and mutation convert to the declared type (`$n = "42"` binds `42` for an `INT`).
 
 ### Fixed
 
-- Spaced `&&` / `||` chains failed to parse (`a && b && c`): whitespace is now accepted around every chained operator, not just the first. (The flaw predates arithmetic; the new arithmetic tiers ship with the corrected shape, so `100 / 10 / 2` chains too)
-- Reference pages no longer leak internal identifiers (`coerce_value`, `ExecState`, `declare_var`); user docs say "convert to the declared type"
+- Spaced `&&` / `||` chains failed to parse (`a && b && c`): whitespace is now accepted around every chained operator, not just the first. (The flaw predates arithmetic; the new arithmetic tiers ship with the corrected shape, so `100 / 10 / 2` chains too).
+- Reference pages no longer leak internal identifiers (`coerce_value`, `ExecState`, `declare_var`); user docs say "convert to the declared type".
 
 ### Changed
 
-- Bare `1/0`-style words now parse as arithmetic: previously `LET $x: STRING = 1/0` bound the string `"1/0"` because no `/` operator existed; now that `/` is division, `LET $x: INT = 1/0` is a division-by-zero error. Quoted strings are unaffected
+- Bare `1/0`-style words now parse as arithmetic: previously `LET $x: STRING = 1/0` bound the string `"1/0"` because no `/` operator existed; now that `/` is division, `LET $x: INT = 1/0` is a division-by-zero error. Quoted strings are unaffected.
 
 ## [0.12.0-alpha] - 2026-09-11
 
 ### Added
 
-- Variables now declare their type up front (#130): `LET $count: INT = 0`, with types `STRING, INT, FLOAT, BOOL, PIPE, LIST, MAP, HANDLE, DURATION, PATH` (`INT` is 64-bit, `FLOAT` is 64-bit). Declaring the same name twice in one scope is an error; change it later with bare `$count = 2`
-- Reading environment variables is explicit (#130): `LET $e: STRING = env:FOO` reads `FOO` into a plain string, while a bare `$var` never touches the environment (templates still use `{{ env:KEY }}`). There is no `ENV` type
-- Loop variables carry types too (#130): `FOR $item: STRING IN ...`, with `INT` or `STRING` keys (`INT` gives the 0-based list index; maps need `STRING` keys)
-- User-defined functions (#114): `FUNC GREET($name: STRING) { ... }` defines a reusable block (names are UPPERCASE, parameters carry types like `LET`). Run it with `CALL GREET("ada")`, or capture what it returns with `LET $r: STRING = CALL GREET("ada")`. A function without `RETURN` gives back an empty string, and anything it prints still shows up normally
-- `WHILE` loops (#114): `WHILE !$done { ... }` repeats while the condition holds (must be true/false, like `IF`). Each round gets a fresh scope, so change an outer variable (`$done = true`) to exit
-- `BREAK` and `CONTINUE` (#114): work in both `FOR` and `WHILE`, always affecting the innermost loop. Using them outside a loop, or across a function or background-task boundary, is an error
-- Background function calls (#114): `LET $t: HANDLE = ASYNC CALL WORK("job")` runs a function in the background; `LET $o: STRING = AWAIT $t` waits and gives back its return value. Calls nest at most 64 deep, and going deeper fails with an error naming the function
-- Rust embedders (#114): host-side functions can be registered under the same UPPERCASE `CALL` names that script functions use; user-facing help output for them comes later
-- Explicit pipe handles (#114): `pipe:NAME` names a pipe without touching a stream (`LET $p: PIPE = pipe:log`), mirroring `env:KEY`. A fresh name registers on first use, so pipes can be declared before any `WITH_IO` mentions them
-- Variable pipe bindings (#114): `WITH_IO [stdout=$p]` / `[stdin=$p]` resolve a PIPE-typed variable against the live pipe registry when the step runs; undeclared, mistyped, or missing names are step-numbered errors. Pipes created, bound, or passed by variable inside functions are always script pipes: OS promotion never crosses a `CALL` boundary
-- `INSPECT($var)` (#114): snapshots a variable into a MAP with its declared type plus live details — pipe backend stats (`is_os_pipe`, `buffer_bytes`, `readers`, `writers`), task phase for handles — so scripts and fixtures can assert engine state directly
+- Variables now declare their type up front (#130): `LET $count: INT = 0`, with types `STRING, INT, FLOAT, BOOL, PIPE, LIST, MAP, HANDLE, DURATION, PATH` (`INT` is 64-bit, `FLOAT` is 64-bit). Declaring the same name twice in one scope is an error; change it later with bare `$count = 2`.
+- Reading environment variables is explicit (#130): `LET $e: STRING = env:FOO` reads `FOO` into a plain string, while a bare `$var` never touches the environment (templates still use `{{ env:KEY }}`). There is no `ENV` type.
+- Loop variables carry types too (#130): `FOR $item: STRING IN ...`, with `INT` or `STRING` keys (`INT` gives the 0-based list index; maps need `STRING` keys).
+- User-defined functions (#114): `FUNC GREET($name: STRING) { ... }` defines a reusable block (names are UPPERCASE, parameters carry types like `LET`). Run it with `CALL GREET("ada")`, or capture what it returns with `LET $r: STRING = CALL GREET("ada")`. A function without `RETURN` gives back an empty string, and anything it prints still shows up normally.
+- `WHILE` loops (#114): `WHILE !$done { ... }` repeats while the condition holds (must be true/false, like `IF`). Each round gets a fresh scope, so change an outer variable (`$done = true`) to exit.
+- `BREAK` and `CONTINUE` (#114): work in both `FOR` and `WHILE`, always affecting the innermost loop. Using them outside a loop, or across a function or background-task boundary, is an error.
+- Background function calls (#114): `LET $t: HANDLE = ASYNC CALL WORK("job")` runs a function in the background; `LET $o: STRING = AWAIT $t` waits and gives back its return value. Calls nest at most 64 deep, and going deeper fails with an error naming the function.
+- Rust embedders (#114): host-side functions can be registered under the same UPPERCASE `CALL` names that script functions use; user-facing help output for them comes later.
+- Explicit pipe handles (#114): `pipe:NAME` names a pipe without touching a stream (`LET $p: PIPE = pipe:log`), mirroring `env:KEY`. A fresh name registers on first use, so pipes can be declared before any `WITH_IO` mentions them.
+- Variable pipe bindings (#114): `WITH_IO [stdout=$p]` / `[stdin=$p]` resolve a PIPE-typed variable against the live pipe registry when the step runs; undeclared, mistyped, or missing names are step-numbered errors. Pipes created, bound, or passed by variable inside functions are always script pipes: OS promotion never crosses a `CALL` boundary.
+- `INSPECT($var)` (#114): snapshots a variable into a MAP with its declared type plus live details — pipe backend stats (`is_os_pipe`, `buffer_bytes`, `readers`, `writers`), task phase for handles — so scripts and fixtures can assert engine state directly.
 
 ### Fixed
 
-- `$var = ...` reassignment inside `{ ... }` blocks (loop and function bodies) was silently ignored, so loop counters and `WHILE` exit flags never updated. Only top-level reassignment used to work
+- `$var = ...` reassignment inside `{ ... }` blocks (loop and function bodies) was silently ignored, so loop counters and `WHILE` exit flags never updated. Only top-level reassignment used to work.
 
 ### Changed
 
-- [breaking] `LET` requires an explicit type, so `LET $x = ...` is now a parse error; reassignment is bare `$x = ...` and there is no `SET` keyword (a `SET ...` line fails with a hint); `FOR` variables require type tags; there is no `ENV` type; bare `$var` never reads the environment (use `env:KEY` or `{{ env:KEY }}`); command-reference Type cells show real types only (`$var` / `KEY=value` shapes display as the `STRING` they bind or resolve to)
-- [breaking] plain strings no longer become pipes: `LET $p: PIPE = "log"` is now a TypeMismatch error even when a pipe of that name exists; use `pipe:log`
+- [breaking] `LET` requires an explicit type, so `LET $x = ...` is now a parse error; reassignment is bare `$x = ...` and there is no `SET` keyword (a `SET ...` line fails with a hint); `FOR` variables require type tags; there is no `ENV` type; bare `$var` never reads the environment (use `env:KEY` or `{{ env:KEY }}`); command-reference Type cells show real types only (`$var` / `KEY=value` shapes display as the `STRING` they bind or resolve to).
+- [breaking] plain strings no longer become pipes: `LET $p: PIPE = "log"` is now a TypeMismatch error even when a pipe of that name exists; use `pipe:log`.
 
 ### Dependencies
 
-- Bump `cargo_metadata` 0.19.2 → 0.23.1
-- Bump `pest` 2.9.0 → 2.9.1
-- Bump `syn` 3.0.4 → 3.0.5
-- Bump `toml` 1.1.4+spec-1.1.0 → 1.1.5+spec-1.1.0
+- Bump `cargo_metadata` 0.19.2 → 0.23.1.
+- Bump `pest` 2.9.0 → 2.9.1.
+- Bump `syn` 3.0.4 → 3.0.5.
+- Bump `toml` 1.1.4+spec-1.1.0 → 1.1.5+spec-1.1.0.
 
 ## [0.11.0-alpha] - 2026-09-09
 
 ### Added
 
-- Unified `LET` output capture: `LET $x = <sync command>` runs the command to completion and binds its exact stdout bytes into `$x` (no newline stripping; commands with no stdout bind `""`; non-UTF8 stdout is an error), spilling to a guarded temp file past 8 MiB instead of buffering unboundedly in memory
-- `LET $o = AWAIT $t` captures a background task's stdout into `$o`; bare `AWAIT $t` keeps its status semantics and now forwards the task's stdout to the parent stdout
-- Pipe backlog and capture share one spillable sink backed by `GuardedPath::tempdir` (PID-lock GC) instead of `std::env::temp_dir`, with the same 8 MiB spill / 100 MiB backlog-cap behavior; spills stay memory-only under Miri
-- `RUN ["exe", "arg", ...]` exec form: spawns the executable directly with no shell, so there is no shell expansion, globbing, redirection, or pipes; use it for portable commands. Elements accept quoted strings, bare words, `$var` / `$a.b`, and `CALL()`; quoted `{{ ... }}` templates interpolate per element while `\$` / `\{{` escapes pass through literally, and `;` / `//` inside elements stay literal. Guards and wrappers (`ASYNC`, `TIMEOUT`, `WITH_IO`) apply to both forms; `RUN []` is an error and shell `RUN <command...>` behavior is unchanged
-- `ProcessManager::run_argv` / `spawn_argv` for direct executable spawning across the `Shell`, `Mock`, and Miri `Synthetic` backends, plus documented `INHERIT_STDOUT_ENV_VAR` / `PROCESS_DEBUG_ENV_VAR` constants replacing hardcoded environment variable names
-- `WITH_IO` wrapping an `ASYNC` block whose body is a single `RUN`, guarded or not, now promotes the pipe to a zero copy OS kernel pipe: the producer child writes straight into the kernel and a concurrent `RUN` consumer reads straight out, with no copies through memory buffers. DSL consumers (`WRITE`, `READ`, ...) on a live name keep working through a bridged reader. All other shapes keep the in memory script pipe, so sequential fan in, keepers, DSL bodies, and host injected pipes behave exactly as before. Promotion is single producer single consumer by construction: a second producer or consumer on a live name fails deterministically instead of interleaving bytes. The consumer must run while the producer is alive, since output past the 64 KiB kernel buffer stalls until drained. Under Miri everything stays on script pipes with identical results for small payloads
+- Unified `LET` output capture: `LET $x = <sync command>` runs the command to completion and binds its exact stdout bytes into `$x` (no newline stripping; commands with no stdout bind `""`; non-UTF8 stdout is an error), spilling to a guarded temp file past 8 MiB instead of buffering unboundedly in memory.
+- `LET $o = AWAIT $t` captures a background task's stdout into `$o`; bare `AWAIT $t` keeps its status semantics and now forwards the task's stdout to the parent stdout.
+- Pipe backlog and capture share one spillable sink backed by `GuardedPath::tempdir` (PID-lock GC) instead of `std::env::temp_dir`, with the same 8 MiB spill / 100 MiB backlog-cap behavior; spills stay memory-only under Miri.
+- `RUN ["exe", "arg", ...]` exec form: spawns the executable directly with no shell, so there is no shell expansion, globbing, redirection, or pipes; use it for portable commands. Elements accept quoted strings, bare words, `$var` / `$a.b`, and `CALL()`; quoted `{{ ... }}` templates interpolate per element while `\$` / `\{{` escapes pass through literally, and `;` / `//` inside elements stay literal. Guards and wrappers (`ASYNC`, `TIMEOUT`, `WITH_IO`) apply to both forms; `RUN []` is an error and shell `RUN <command...>` behavior is unchanged.
+- `ProcessManager::run_argv` / `spawn_argv` for direct executable spawning across the `Shell`, `Mock`, and Miri `Synthetic` backends, plus documented `INHERIT_STDOUT_ENV_VAR` / `PROCESS_DEBUG_ENV_VAR` constants replacing hardcoded environment variable names.
+- `WITH_IO` wrapping an `ASYNC` block whose body is a single `RUN`, guarded or not, now promotes the pipe to a zero copy OS kernel pipe: the producer child writes straight into the kernel and a concurrent `RUN` consumer reads straight out, with no copies through memory buffers. DSL consumers (`WRITE`, `READ`, ...) on a live name keep working through a bridged reader. All other shapes keep the in memory script pipe, so sequential fan in, keepers, DSL bodies, and host injected pipes behave exactly as before. Promotion is single producer single consumer by construction: a second producer or consumer on a live name fails deterministically instead of interleaving bytes. The consumer must run while the producer is alive, since output past the 64 KiB kernel buffer stalls until drained. Under Miri everything stays on script pipes with identical results for small payloads.
 
 ### Changed
 
-- `LET $x = WITH_IO [stdin=pipe:p] <sync command>` now captures instead of failing; combining capture with an explicit `WITH_IO [stdout=pipe:...]` is a parse error since the capture sink owns stdout
-- Named `ASYNC` tasks no longer share the parent stdout writer: output is buffered per task and surfaces via `AWAIT` (forward), `LET $o = AWAIT $t` (bind), or end-of-pipeline reaping for tasks that are never awaited
-- Host Rust API only, scripts are unaffected: `CommandOptions.stdin` is now a `CommandStdin` enum instead of `Option<SharedInput>`. Rust embedders replace `stdin: Some(x)` with `stdin: CommandStdin::Stream(x)` and `stdin: None` with `stdin: CommandStdin::Null`. `CommandStdout` and `CommandStderr` gain matching host only `OsPipe` variants for direct kernel pipe handoff
+- `LET $x = WITH_IO [stdin=pipe:p] <sync command>` now captures instead of failing; combining capture with an explicit `WITH_IO [stdout=pipe:...]` is a parse error since the capture sink owns stdout.
+- Named `ASYNC` tasks no longer share the parent stdout writer: output is buffered per task and surfaces via `AWAIT` (forward), `LET $o = AWAIT $t` (bind), or end-of-pipeline reaping for tasks that are never awaited.
+- Host Rust API only, scripts are unaffected: `CommandOptions.stdin` is now a `CommandStdin` enum instead of `Option<SharedInput>`. Rust embedders replace `stdin: Some(x)` with `stdin: CommandStdin::Stream(x)` and `stdin: None` with `stdin: CommandStdin::Null`. `CommandStdout` and `CommandStderr` gain matching host only `OsPipe` variants for direct kernel pipe handoff.
 
 ### Fixed
 
@@ -94,12 +101,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ### Added
 
-- Command reference examples demonstrating variable scoping: `ENV` and `LET` assignments inside a braced block revert when the block exits, and `EXPAND` `KEY=val` overrides shadow the environment for that call only
-- `WORKDIR` description now documents relative-to-current-directory resolution, `/` reset to the workspace root, and the sandbox guarantee
-- `ASSERT_*` descriptions now document abort-on-mismatch failure semantics, plus a new `ASSERT_FILE --hash` example
-- Declared argument types are mechanically enforced: static literals type-check at lower time and variables/templates validate on their resolved values at runtime. `SLEEP`/`TIMEOUT` accept dynamic durations (`SLEEP $d`, `TIMEOUT $d`) instead of freezing literals at parse
-- `COPY --from-current-workspace` reference example
-- docs-gen exits non-zero when any target fails to render, with a regression test pinning the behavior
+- Command reference examples demonstrating variable scoping: `ENV` and `LET` assignments inside a braced block revert when the block exits, and `EXPAND` `KEY=val` overrides shadow the environment for that call only.
+- `WORKDIR` description now documents relative-to-current-directory resolution, `/` reset to the workspace root, and the sandbox guarantee.
+- `ASSERT_*` descriptions now document abort-on-mismatch failure semantics, plus a new `ASSERT_FILE --hash` example.
+- Declared argument types are mechanically enforced: static literals type-check at lower time and variables/templates validate on their resolved values at runtime. `SLEEP`/`TIMEOUT` accept dynamic durations (`SLEEP $d`, `TIMEOUT $d`) instead of freezing literals at parse.
+- `COPY --from-current-workspace` reference example.
+- docs-gen exits non-zero when any target fails to render, with a regression test pinning the behavior.
 
 ### Changed
 
@@ -107,117 +114,117 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ### Fixed
 
-- `EXIT` with a non-integer code is now an error instead of silently exiting 0
-- Trailing positionals beyond a command's declared arity fail lowering instead of being silently discarded; tail-joining commands (`ECHO`, `WRITE`/`APPEND` contents, `ASSERT_FILE` expected text, `ASSERT_STDOUT`, `EXPAND` overrides, `INHERIT_ENV` keys) declare variadic `Rest` args so legitimate multi-word use keeps working
-- Command reference argument/flag tables escape `|` in type strings (e.g. `SNAPSHOT|LOCAL`), which previously split the WORKSPACE row into extra columns on strict Markdown renderers
-- `SLEEP` summary reworded from "Sleep without spawning a shell" to "Pause execution for a duration"
+- `EXIT` with a non-integer code is now an error instead of silently exiting 0.
+- Trailing positionals beyond a command's declared arity fail lowering instead of being silently discarded; tail-joining commands (`ECHO`, `WRITE`/`APPEND` contents, `ASSERT_FILE` expected text, `ASSERT_STDOUT`, `EXPAND` overrides, `INHERIT_ENV` keys) declare variadic `Rest` args so legitimate multi-word use keeps working.
+- Command reference argument/flag tables escape `|` in type strings (e.g. `SNAPSHOT|LOCAL`), which previously split the WORKSPACE row into extra columns on strict Markdown renderers.
+- `SLEEP` summary reworded from "Sleep without spawning a shell" to "Pause execution for a duration".
 
 ## [0.9.0-alpha] - 2026-09-07
 
 ### Added
 
-- `docs-gen` rebuilt as a general-purpose doc engine: ordered `template` / `read` / `glob` / `text` stages executed as pure OxDock DSL (`$var` bindings only, no hand-built AST), config-driven targets discovered from each crate's `.oxdock/template` directory, and plugin data providers (`command-ref`, `cargo-metadata`) with per-target value overrides
-- Sparse `target.json` files (just `name`/`out`) synthesize stages from the target directory layout (`header.tmpl`, verbatim `fragments/*.md`, expanded `fragments/*.tmpl`, `footer.tmpl`); bespoke targets declare full stages
-- Generated command reference shared three ways from one provider: root README, `oxdock` README, and rustdoc includes (`oxdock/docs/command_reference.md`, `crates/oxdock-parser/docs/command_reference.md`)
-- Shared embed example consumed by both the root and `oxdock` READMEs from a single canonical file
-- Master-template targets: order comes from `{{> path }}` positions in an `output.tmpl` document instead of a managed JSON stage list (verbatim unless `.tmpl`, which expands); literal document prose expands with the values context
+- `docs-gen` rebuilt as a general-purpose doc engine: ordered `template` / `read` / `glob` / `text` stages executed as pure OxDock DSL (`$var` bindings only, no hand-built AST), config-driven targets discovered from each crate's `.oxdock/template` directory, and plugin data providers (`command-ref`, `cargo-metadata`) with per-target value overrides.
+- Sparse `target.json` files (just `name`/`out`) synthesize stages from the target directory layout (`header.tmpl`, verbatim `fragments/*.md`, expanded `fragments/*.tmpl`, `footer.tmpl`); bespoke targets declare full stages.
+- Generated command reference shared three ways from one provider: root README, `oxdock` README, and rustdoc includes (`oxdock/docs/command_reference.md`, `crates/oxdock-parser/docs/command_reference.md`).
+- Shared embed example consumed by both the root and `oxdock` READMEs from a single canonical file.
+- Master-template targets: order comes from `{{> path }}` positions in an `output.tmpl` document instead of a managed JSON stage list (verbatim unless `.tmpl`, which expands); literal document prose expands with the values context.
 
 ### Fixed
 
-- Quoted values with spaces parse identically in every command: `ENV SET_FORTH="outer scope"` stores `outer scope` instead of truncating, and `EXPAND tmpl KEY="a b"` no longer fails with "accepts at most one path"
-- `KEY=$var` env values and `EXPAND` overrides evaluate the variable (parity with `ECHO $var`); `KEY="{{ $var }} tail"` interpolates with the literal tail kept
-- Multi-assignment lines split uniformly (`EXPAND K1=$x K2=$y` yields two overrides); `ENV` with more than one assignment is a precise error instead of silently merging or dropping values
-- `$var` mixed into `ECHO` / `RUN` / `WRITE` tails is preserved instead of silently dropped (`ECHO $x hello` keeps the value)
-- Both `"` and `'` quotes strip in `ENV` values (previously `"` only), and values split on the first `=` (`KEY=a=b` stores `a=b`)
-- `GLOB()` patterns containing `..` match nothing instead of traversing outside the sandbox root; every glob result is validated against the workspace boundary
-- `GLOB()` lists sandbox contents on Windows (verbatim `\\?\`-prefixed roots no longer yield empty results)
-- Windows PID liveness probe treats `ERROR_ACCESS_DENIED` as alive (parity with Unix `EPERM`), so tempdir cleanup never reaps another live process's directories
+- Quoted values with spaces parse identically in every command: `ENV SET_FORTH="outer scope"` stores `outer scope` instead of truncating, and `EXPAND tmpl KEY="a b"` no longer fails with "accepts at most one path".
+- `KEY=$var` env values and `EXPAND` overrides evaluate the variable (parity with `ECHO $var`); `KEY="{{ $var }} tail"` interpolates with the literal tail kept.
+- Multi-assignment lines split uniformly (`EXPAND K1=$x K2=$y` yields two overrides); `ENV` with more than one assignment is a precise error instead of silently merging or dropping values.
+- `$var` mixed into `ECHO` / `RUN` / `WRITE` tails is preserved instead of silently dropped (`ECHO $x hello` keeps the value).
+- Both `"` and `'` quotes strip in `ENV` values (previously `"` only), and values split on the first `=` (`KEY=a=b` stores `a=b`).
+- `GLOB()` patterns containing `..` match nothing instead of traversing outside the sandbox root; every glob result is validated against the workspace boundary.
+- `GLOB()` lists sandbox contents on Windows (verbatim `\\?\`-prefixed roots no longer yield empty results).
+- Windows PID liveness probe treats `ERROR_ACCESS_DENIED` as alive (parity with Unix `EPERM`), so tempdir cleanup never reaps another live process's directories.
 
 ### Changed
 
-- `ENV` / `EXPAND` reference docs rewritten: what a template is, placeholder namespaces and precedence, override value rules, and runnable proof examples for every value form
-- `FOR` / `LET` / `ECHO` reference docs enriched (`GLOB("*")` quoting rule and end-to-end example, expression-only `LET` right-hand side, variable `ECHO` forms, piped-stdin `EXPAND`)
+- `ENV` / `EXPAND` reference docs rewritten: what a template is, placeholder namespaces and precedence, override value rules, and runnable proof examples for every value form.
+- `FOR` / `LET` / `ECHO` reference docs enriched (`GLOB("*")` quoting rule and end-to-end example, expression-only `LET` right-hand side, variable `ECHO` forms, piped-stdin `EXPAND`).
 
 ## [0.8.0-alpha] - 2026-09-05
 
 ### Added
 
-- `EXPAND` command for template expansion of a file or stdin to stdout, with `KEY=val` overrides alongside `{{ env:KEY }}` interpolation
-- `ASYNC` / `AWAIT` / `CANCEL` for background tasks, including block form and `LET $t = ASYNC { ... }` handles
-- `TIMEOUT <duration> <command|block>` and `SLEEP <duration>` for deadline control and delays
-- `READ_LINE $var` for line-oriented reads into a variable
-- `FOR` (value and key-value forms), `IF` / `ELSE IF` / `ELSE`, and `LET` / `ASSIGN` with expression support (`==` / `!=`, `!` negation, `&&` / `||`, `GLOB(...)`)
-- Guard expressions: `!` / `not(...)`, `any(...)` / `all(...)`, `eq(...)` / `neq(...)`, `bool:<val>`; `[guard]` prefixes on `LET` / `ENV` / `WORKDIR` / `WORKSPACE` blocks
-- Unified block scoping for braced blocks (`IF`, `FOR`, `TIMEOUT`, `ASYNC`, `WITH_IO`) with scope unwind on nested `EXIT`
-- `oxdock` facade crate as the canonical entry point; bare `cargo run` launches the CLI
-- CLI `--help` / `-h` usage output, positional script paths, and `-` / `--script -` stdin handling
-- `oxdock!` proc-macro for inline DSL with `#var` host interpolation, including `FOR` / `LET` blocks and `GLOB(#var)`
-- `WorkspaceFs::open_read` / `open_write` / `open_append` streaming file I/O across Host, Miri, and Mock backends
+- `EXPAND` command for template expansion of a file or stdin to stdout, with `KEY=val` overrides alongside `{{ env:KEY }}` interpolation.
+- `ASYNC` / `AWAIT` / `CANCEL` for background tasks, including block form and `LET $t = ASYNC { ... }` handles.
+- `TIMEOUT <duration> <command|block>` and `SLEEP <duration>` for deadline control and delays.
+- `READ_LINE $var` for line-oriented reads into a variable.
+- `FOR` (value and key-value forms), `IF` / `ELSE IF` / `ELSE`, and `LET` / `ASSIGN` with expression support (`==` / `!=`, `!` negation, `&&` / `||`, `GLOB(...)`).
+- Guard expressions: `!` / `not(...)`, `any(...)` / `all(...)`, `eq(...)` / `neq(...)`, `bool:<val>`; `[guard]` prefixes on `LET` / `ENV` / `WORKDIR` / `WORKSPACE` blocks.
+- Unified block scoping for braced blocks (`IF`, `FOR`, `TIMEOUT`, `ASYNC`, `WITH_IO`) with scope unwind on nested `EXIT`.
+- `oxdock` facade crate as the canonical entry point; bare `cargo run` launches the CLI.
+- CLI `--help` / `-h` usage output, positional script paths, and `-` / `--script -` stdin handling.
+- `oxdock!` proc-macro for inline DSL with `#var` host interpolation, including `FOR` / `LET` blocks and `GLOB(#var)`.
+- `WorkspaceFs::open_read` / `open_write` / `open_append` streaming file I/O across Host, Miri, and Mock backends.
 
 ### Changed
 
-- Data pipeline handlers (`WRITE` / `APPEND`, `EXPAND`, `HASH_SHA256`, `ASSERT_STDOUT`) stream in fixed-size chunks instead of buffering whole inputs
-- `ASSERT_STDOUT` uses bounded per-step matching instead of an unbounded stdout log; windows are re-expanded on `ENV` / `INHERIT_ENV` mutations
-- `RUN_BG` semantics superseded by `ASYNC` task handles with `AWAIT` / `CANCEL`; `RAW_WRITE` superseded by `{{ env:KEY }}` interpolation
-- Per-arg quoting tracked via `Arg::String` / `Arg::Expr` (quoted `--flags` stay positional)
-- `Guard` inversion replaced by composable `not()` / `!` and `eq` / `neq` / `bool` guards
-- Single-site command registry generating step kinds, lowering, and metadata; unknown-command errors include structural and casing hints
-- Crate renames: `oxdock-buildtime-helpers` to `oxdock-build`, `oxdock-buildtime-macros` to `oxdock-macros`; `embed!` / `prepare!` to `oxdock_embed!` / `oxdock_prepare!`
-- Docs generated from the command registry; `pulldown-cmark` replaces the custom markdown parser
-- `spawn_interactive_shell` moved to `oxdock-process`; CLI runner is a thin delegate
-- Test layout collapsed to single integration binaries per crate with a `slow-integration` feature gate
-- `oxdock-fs` path handling normalized for Windows CI parity
-- Bump `syn` 2.0.119 → 3.0.4
+- Data pipeline handlers (`WRITE` / `APPEND`, `EXPAND`, `HASH_SHA256`, `ASSERT_STDOUT`) stream in fixed-size chunks instead of buffering whole inputs.
+- `ASSERT_STDOUT` uses bounded per-step matching instead of an unbounded stdout log; windows are re-expanded on `ENV` / `INHERIT_ENV` mutations.
+- `RUN_BG` semantics superseded by `ASYNC` task handles with `AWAIT` / `CANCEL`; `RAW_WRITE` superseded by `{{ env:KEY }}` interpolation.
+- Per-arg quoting tracked via `Arg::String` / `Arg::Expr` (quoted `--flags` stay positional).
+- `Guard` inversion replaced by composable `not()` / `!` and `eq` / `neq` / `bool` guards.
+- Single-site command registry generating step kinds, lowering, and metadata; unknown-command errors include structural and casing hints.
+- Crate renames: `oxdock-buildtime-helpers` to `oxdock-build`, `oxdock-buildtime-macros` to `oxdock-macros`; `embed!` / `prepare!` to `oxdock_embed!` / `oxdock_prepare!`.
+- Docs generated from the command registry; `pulldown-cmark` replaces the custom markdown parser.
+- `spawn_interactive_shell` moved to `oxdock-process`; CLI runner is a thin delegate.
+- Test layout collapsed to single integration binaries per crate with a `slow-integration` feature gate.
+- `oxdock-fs` path handling normalized for Windows CI parity.
+- Bump `syn` 2.0.119 → 3.0.4.
 
 ### Removed
 
-- `RUN_BG` command (use `ASYNC`); `RAW_WRITE` command (use interpolation)
-- Old `oxdock-buildtime-helpers` / `oxdock-buildtime-macros` crate names and bare `embed!` / `prepare!` macro names
-- Unbounded `ExecState::stdout_log`; legacy `expand_with_lookup`; custom markdown parser; `DocSpec` in `docs-gen`; orphaned `oxdock-process` `test_utils` module
+- `RUN_BG` command (use `ASYNC`); `RAW_WRITE` command (use interpolation).
+- Old `oxdock-buildtime-helpers` / `oxdock-buildtime-macros` crate names and bare `embed!` / `prepare!` macro names.
+- Unbounded `ExecState::stdout_log`; legacy `expand_with_lookup`; custom markdown parser; `DocSpec` in `docs-gen`; orphaned `oxdock-process` `test_utils` module.
 
 ### Fixed
 
-- Template `}}` split across chunk boundaries is detected; empty input preserves pending expansion state
-- `open_append` on the Miri backend appends instead of overwriting from position 0
-- `ASSERT_STDOUT` falls through to step-scope matching only on empty stdin; error output includes buffered content for debugging
-- Long-needle assertions no longer truncate history prematurely
-- Unknown-command diagnostics suggest structural statements and correct casing
-- Nested `EXIT` unwinds `LET` / `ENV` / `WORKDIR` / `WORKSPACE` scopes without leaking
-- `CANCEL` on completed tasks and double-`CANCEL` succeed without affecting unrelated tasks; `TIMEOUT` kills only the timed-out task
+- Template `}}` split across chunk boundaries is detected; empty input preserves pending expansion state.
+- `open_append` on the Miri backend appends instead of overwriting from position 0.
+- `ASSERT_STDOUT` falls through to step-scope matching only on empty stdin; error output includes buffered content for debugging.
+- Long-needle assertions no longer truncate history prematurely.
+- Unknown-command diagnostics suggest structural statements and correct casing.
+- Nested `EXIT` unwinds `LET` / `ENV` / `WORKDIR` / `WORKSPACE` scopes without leaking.
+- `CANCEL` on completed tasks and double-`CANCEL` succeed without affecting unrelated tasks; `TIMEOUT` kills only the timed-out task.
 
 ## [0.7.0-alpha] - 2026-08-27
 
 ### Refactoring
 
-- **oxdock-core**: Split `exec.rs` into focused modules: `handlers`, `fs_ops`, `io`, `pipe`, `state`, `steps`, and `tests` for better maintainability
-- **oxdock-process**: Decomposed `lib.rs` into `builder`, `shell`, `child`, `contract`, `expand`, `shell_manager`, `synthetic`, and `builtin_env` modules
+- **oxdock-core**: Split `exec.rs` into focused modules: `handlers`, `fs_ops`, `io`, `pipe`, `state`, `steps`, and `tests` for better maintainability.
+- **oxdock-process**: Decomposed `lib.rs` into `builder`, `shell`, `child`, `contract`, `expand`, `shell_manager`, `synthetic`, and `builtin_env` modules.
 
 ### Added
 
-- `APPEND` command for cross-platform append-only file writes (ideal for GitHub Actions `$GITHUB_OUTPUT`, `$GITHUB_ENV`, `$GITHUB_STEP_SUMMARY`)
-- GitHub Actions Integration section in README documenting `ECHO`, `RUN`, and `APPEND` patterns for workflow commands
-- Markdown DSL parsing support (`oxdock-parser/src/markdown.rs`)
-- `OXDOCK_EMBED_FINGERPRINT_SALT` environment variable for cache busting
-- `ASSERT_STDOUT` and `ASSERT_ABSENT` command prototypes
-- Docs conformance tests and packaging invariant tests
-- Expanded README with comprehensive documentation
+- `APPEND` command for cross-platform append-only file writes (ideal for GitHub Actions `$GITHUB_OUTPUT`, `$GITHUB_ENV`, `$GITHUB_STEP_SUMMARY`).
+- GitHub Actions Integration section in README documenting `ECHO`, `RUN`, and `APPEND` patterns for workflow commands.
+- Markdown DSL parsing support (`oxdock-parser/src/markdown.rs`).
+- `OXDOCK_EMBED_FINGERPRINT_SALT` environment variable for cache busting.
+- `ASSERT_STDOUT` and `ASSERT_ABSENT` command prototypes.
+- Docs conformance tests and packaging invariant tests.
+- Expanded README with comprehensive documentation.
 
 ### Fixed
 
-- Fuzz parity test failure: filter out strings that fail `proc_macro2` lexing instead of panicking
+- Fuzz parity test failure: filter out strings that fail `proc_macro2` lexing instead of panicking.
 
 ### Dependencies
 
-- Bump `anyhow` 1.0.100 → 1.0.104
-- Bump `libc` 0.2.178 → 0.2.189
-- Bump `libtest-mimic` 0.8.1 → 0.8.2
-- Bump `line-ending` 1.5 → 1.5.1
-- Bump `pest`/`pest_derive` 2.8.4 → 2.9.0
-- Bump `proc-macro2` 1.0.103 → 1.0.107
-- Bump `proptest` 1.9.0 → 1.11.0
-- Bump `quote` 1.0.42 → 1.0.47
-- Bump `sha2` 0.10.9 → 0.11.0 (with API migration)
-- Bump `syn` 2.0 → 2.0.119
-- Bump `tempfile` 3.24.0 → 3.27.0
-- Bump `toml_edit` 0.24.0 → 0.25.13
-- Update all transitive dependencies via `cargo update`
+- Bump `anyhow` 1.0.100 → 1.0.104.
+- Bump `libc` 0.2.178 → 0.2.189.
+- Bump `libtest-mimic` 0.8.1 → 0.8.2.
+- Bump `line-ending` 1.5 → 1.5.1.
+- Bump `pest`/`pest_derive` 2.8.4 → 2.9.0.
+- Bump `proc-macro2` 1.0.103 → 1.0.107.
+- Bump `proptest` 1.9.0 → 1.11.0.
+- Bump `quote` 1.0.42 → 1.0.47.
+- Bump `sha2` 0.10.9 → 0.11.0 (with API migration).
+- Bump `syn` 2.0 → 2.0.119.
+- Bump `tempfile` 3.24.0 → 3.27.0.
+- Bump `toml_edit` 0.24.0 → 0.25.13.
+- Update all transitive dependencies via `cargo update`.

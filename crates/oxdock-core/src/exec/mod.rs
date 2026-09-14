@@ -10,16 +10,16 @@ mod steps;
 mod tests;
 
 pub(crate) use self::handlers::{
-    dispatch_append, dispatch_assert_absent, dispatch_assert_dir, dispatch_assert_file,
-    dispatch_assert_stdout, dispatch_assign, dispatch_assign_async_step,
-    dispatch_assign_capture_step, dispatch_async_block, dispatch_await_capture_step,
-    dispatch_await_step, dispatch_break, dispatch_call, dispatch_cancel_step, dispatch_continue,
-    dispatch_copy, dispatch_copy_git, dispatch_cwd, dispatch_echo, dispatch_env, dispatch_exit,
-    dispatch_expand, dispatch_for_loop, dispatch_func_def, dispatch_hash_sha256, dispatch_if_then,
-    dispatch_inherit_env, dispatch_ls, dispatch_mkdir, dispatch_read, dispatch_read_line,
-    dispatch_return, dispatch_run, dispatch_run_exec, dispatch_set, dispatch_sleep_step,
-    dispatch_symlink, dispatch_timeout_step, dispatch_while_loop, dispatch_with_io,
-    dispatch_with_io_block, dispatch_workdir, dispatch_workspace, dispatch_write,
+    dispatch_append, dispatch_assert_contains, dispatch_assert_eq, dispatch_assign,
+    dispatch_assign_async_step, dispatch_assign_capture_step, dispatch_async_block,
+    dispatch_await_capture_step, dispatch_await_step, dispatch_break, dispatch_call,
+    dispatch_cancel_step, dispatch_continue, dispatch_copy, dispatch_copy_git, dispatch_cwd,
+    dispatch_echo, dispatch_env, dispatch_exit, dispatch_expand, dispatch_for_loop,
+    dispatch_func_def, dispatch_hash_sha256, dispatch_if_then, dispatch_inherit_env, dispatch_ls,
+    dispatch_mkdir, dispatch_read, dispatch_read_line, dispatch_return, dispatch_run,
+    dispatch_run_exec, dispatch_set, dispatch_sleep_step, dispatch_symlink, dispatch_timeout_step,
+    dispatch_while_loop, dispatch_with_io, dispatch_with_io_block, dispatch_workdir,
+    dispatch_workspace, dispatch_write,
 };
 pub use self::io::ExecIo;
 pub(crate) use self::steps::StepCtx;
@@ -28,15 +28,16 @@ use anyhow::Result;
 use oxdock_fs::{
     GuardedPath, LazyGuardedTempDir, PathResolver, WorkspaceFs, reserve_cargo_scratch,
 };
-use oxdock_parser::Step;
+use oxdock_parser::{Step, Value};
 use oxdock_process::{
     BuiltinEnv, ProcessManager, SharedInput, SharedOutput, default_process_manager,
 };
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use self::fs_ops::describe_dir;
-use self::io::{StreamHandle, assemble_default_io, teed_stdout};
+use self::io::{StreamHandle, assemble_default_io, teed_stderr, teed_stdout};
 use self::state::ExecState;
 use self::steps::execute_steps;
 
@@ -146,6 +147,11 @@ pub struct LazyRunOutput {
     pub final_cwd: GuardedPath,
     pub snapshot: Arc<LazyGuardedTempDir>,
     pub fs: Box<dyn WorkspaceFs>,
+    /// Top-level script variable bindings captured at `Flow::Done`, keyed by
+    /// variable name with deterministic ordering. Read-only introspection for
+    /// hosts that assert on in-memory evaluation without file round trips.
+    /// Ephemeral block scopes are excluded; see `run_steps_with_manager`.
+    pub bindings: BTreeMap<String, Value>,
 }
 
 /// Execute the DSL against a lazily-created snapshot: no temporary directory
@@ -161,10 +167,11 @@ pub fn run_steps_with_lazy_snapshot(
     let snapshot = resolver.snapshot_handle();
     let fs: Box<dyn WorkspaceFs> = Box::new(resolver);
     match run_steps_with_manager(fs, steps, default_process_manager(), io) {
-        Ok((final_cwd, fs)) => Ok(LazyRunOutput {
+        Ok((final_cwd, fs, bindings)) => Ok(LazyRunOutput {
             final_cwd,
             snapshot,
             fs,
+            bindings,
         }),
         Err(err) => Err(enrich_lazy_error(&snapshot, build_context, err)),
     }
@@ -216,15 +223,23 @@ pub fn run_steps_with_fs_with_io(
     steps: &[Step],
     io: ExecIo,
 ) -> Result<GuardedPath> {
-    run_steps_with_manager(fs, steps, default_process_manager(), io).map(|(cwd, _)| cwd)
+    run_steps_with_manager(fs, steps, default_process_manager(), io).map(|(cwd, _, _)| cwd)
 }
 
-fn run_steps_with_manager<P: ProcessManager>(
+/// Host introspection entry point: execute the DSL against a caller-provided
+/// filesystem and return the final working directory, the filesystem handle,
+/// and the top-level script variable bindings captured at `Flow::Done`.
+/// Bindings are read from the root variable scope only, so ephemeral
+/// variables from `FUNC` bodies, `FOR`/`WHILE` iterations, and `ASYNC` blocks
+/// are excluded. On script failure the scope is discarded with the error and
+/// no bindings are returned.
+#[allow(clippy::type_complexity)]
+pub fn run_steps_with_manager<P: ProcessManager>(
     fs: Box<dyn WorkspaceFs>,
     steps: &[Step],
     process: P,
     io: ExecIo,
-) -> Result<(GuardedPath, Box<dyn WorkspaceFs>)> {
+) -> Result<(GuardedPath, Box<dyn WorkspaceFs>, BTreeMap<String, Value>)> {
     let cwd = fs.root().clone();
     let build_context = fs.build_context().clone();
     let mut envs = BuiltinEnv::collect(&build_context).into_envs();
@@ -233,6 +248,8 @@ fn run_steps_with_manager<P: ProcessManager>(
     }
     let envs = Arc::new(envs);
     let assert_windows = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    let assert_windows_stderr = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    let exact_stdout = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
     let mut state = ExecState {
         fs,
         cargo_scratch: reserve_cargo_scratch()?,
@@ -242,6 +259,8 @@ fn run_steps_with_manager<P: ProcessManager>(
         scope_stack: Vec::new(),
         io,
         assert_windows: assert_windows.clone(),
+        assert_windows_stderr: assert_windows_stderr.clone(),
+        exact_stdout: exact_stdout.clone(),
         var_scopes: Vec::new(),
         cancel_token: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         active_process: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -261,14 +280,18 @@ fn run_steps_with_manager<P: ProcessManager>(
 
     let _default_stdout = std::io::stdout();
     let stdin = state.io.stdin().into();
-    // Every emitted byte flows through the tee so ASSERT_STDOUT sees both
+    // Every emitted byte flows through the tee so stream assertions see both
     // interpreter output and streamed child output, even when no capture
     // sink was configured (forwarding to real stdout in that case).
     let stdout = Some(StreamHandle::Stream(teed_stdout(
         state.io.stdout(),
         assert_windows,
+        exact_stdout,
     )));
-    let stderr = state.io.stderr().map(StreamHandle::Stream);
+    let stderr = state
+        .io
+        .stderr()
+        .map(|sink| StreamHandle::Stream(teed_stderr(Some(sink), assert_windows_stderr)));
     let mut proc_mgr = process;
     let flow = execute_steps(
         &mut state,
@@ -285,7 +308,23 @@ fn run_steps_with_manager<P: ProcessManager>(
         // the reported final directory (shell entry / OUT_DIR sync need real
         // paths; a pending run reports the local root or concretizes after
         // shell-entry materialization through the returned fs handle).
-        self::steps::Flow::Done => Ok((state.fs.concretize_cwd(&state.cwd), state.fs)),
+        self::steps::Flow::Done => {
+            // Root-scope isolation: at Done all blocks have popped, so the
+            // first scope is the global one. Read it explicitly (rather than
+            // a flattened all-scopes view) and strip TypeKind so hosts see
+            // plain values.
+            let bindings: BTreeMap<String, Value> = state
+                .var_scopes
+                .first()
+                .map(|scope| {
+                    scope
+                        .iter()
+                        .map(|(k, (_, v))| (k.clone(), v.clone()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            Ok((state.fs.concretize_cwd(&state.cwd), state.fs, bindings))
+        }
         self::steps::Flow::Break { idx } => {
             anyhow::bail!("step {}: BREAK outside loop", idx + 1)
         }

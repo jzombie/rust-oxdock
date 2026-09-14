@@ -4,7 +4,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use anyhow::{Result, bail};
-use oxdock_parser::{Arg, Step, StepKind, Value, guard_option_allows};
+use oxdock_parser::{Arg, AssertTarget, Step, StepKind, Value, guard_option_allows};
 use oxdock_process::{BackgroundHandle, CommandStdin, ProcessManager};
 
 /// Create an ExitStatus from a raw exit code. Cross-platform.
@@ -23,7 +23,7 @@ fn exit_status_from_code(code: i32) -> ExitStatus {
 
 use super::capture::SpillBuffer;
 use super::handlers;
-use super::io::{SlidingWindow, StreamHandle};
+use super::io::{ExactCapture, SlidingWindow, StreamHandle};
 use super::state::{ExecState, TaskEntry, TaskPhase};
 
 /// A background handle wrapping a `std::thread::JoinHandle` for ASYNC blocks
@@ -144,23 +144,84 @@ pub(super) fn allocate_assert_generation() -> usize {
     ASSERT_GENERATION.fetch_add(1, Ordering::Relaxed)
 }
 
-/// Extract the AssertStdout needle from a StepKind, handling both top-level
-/// and WITH_IO-wrapped variants.
-fn extract_assert_stdout_needle(kind: &StepKind) -> Option<&Arg> {
-    match kind {
-        StepKind::AssertStdout(needle) => Some(needle),
-        StepKind::WithIo { cmd, .. } => match cmd.as_ref() {
-            StepKind::AssertStdout(needle) => Some(needle),
+/// Which stream a stream-targeted assertion observes.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum AssertStream {
+    Stdout,
+    Stderr,
+}
+
+/// Extract the substring needle from a step asserting over a stream:
+/// `ASSERT_CONTAINS stdout|stderr`, handling both top-level and
+/// WITH_IO-wrapped variants. Returns the observed stream and the needle.
+fn extract_stream_needle(kind: &StepKind) -> Option<(AssertStream, &Arg)> {
+    let step = match kind {
+        StepKind::WithIo { cmd, .. } => cmd.as_ref(),
+        other => other,
+    };
+    match step {
+        StepKind::AssertContains { haystack, needle } => match haystack {
+            AssertTarget::Stdout => Some((AssertStream::Stdout, needle)),
+            AssertTarget::Stderr => Some((AssertStream::Stderr, needle)),
             _ => None,
         },
         _ => None,
     }
 }
 
-/// Pre-register `ASSERT_STDOUT` window observers so the tee writer can feed
-/// them data before the step executes. Uses `args::resolve_arg_state` for
+/// Whether the step needs the exact-match stdout accumulator:
+/// `ASSERT_EQ stdout`, top-level or WITH_IO-wrapped.
+fn needs_exact_stdout(kind: &StepKind) -> bool {
+    let step = match kind {
+        StepKind::WithIo { cmd, .. } => cmd.as_ref(),
+        other => other,
+    };
+    matches!(
+        step,
+        StepKind::AssertEq {
+            actual: AssertTarget::Stdout,
+            ..
+        }
+    )
+}
+
+/// An assertion first argument evaluated far enough to check:
+/// values stay typed, streams stay references to live buffers.
+pub(super) enum ResolvedAssertTarget {
+    Value(Value),
+    Stdout,
+    Stderr,
+    Pipe(Vec<u8>),
+}
+
+/// Evaluate an assertion target. `Arg::Expr` evaluates typed;
+/// strings, templates, and parts render to `String`; stream markers
+/// and pipe names resolve to live buffers (peeked, never consumed).
+pub(super) fn resolve_assert_target<P: ProcessManager>(
+    target: &AssertTarget,
+    cx: &mut StepCtx<'_, P>,
+) -> Result<ResolvedAssertTarget> {
+    match target {
+        AssertTarget::Value(arg) => Ok(ResolvedAssertTarget::Value(
+            super::args::evaluate_assert_operand(arg, cx)?,
+        )),
+        AssertTarget::Stdout => Ok(ResolvedAssertTarget::Stdout),
+        AssertTarget::Stderr => Ok(ResolvedAssertTarget::Stderr),
+        AssertTarget::Pipe(name) => {
+            let bytes = cx.state.io.peek_pipe_content(name).map_err(|e| {
+                anyhow::anyhow!("step pipe assertion cannot read pipe {name:?}: {e}")
+            })?;
+            Ok(ResolvedAssertTarget::Pipe(bytes))
+        }
+    }
+}
+
+/// Pre-register stream assertion observers so tees feed them data before
+/// the steps execute. Substring needles (`ASSERT_CONTAINS stdout|stderr`)
+/// get per-step `SlidingWindow`s; `ASSERT_EQ stdout` allocates the
+/// generation's exact accumulator. Uses `args::resolve_arg_state` for
 /// actual template expansion. Handles both top-level and WITH_IO-wrapped
-/// assertions via `extract_assert_stdout_needle`.
+/// assertions via `extract_stream_needle` / `needs_exact_stdout`.
 pub(super) fn pre_register_assertions<P: ProcessManager>(
     state: &mut ExecState<P>,
     steps: &[Step],
@@ -170,19 +231,35 @@ pub(super) fn pre_register_assertions<P: ProcessManager>(
         Ok(guard) => guard,
         Err(_) => bail!("assert_windows poisoned"),
     };
+    let mut stderr_windows = match state.assert_windows_stderr.lock() {
+        Ok(guard) => guard,
+        Err(_) => bail!("assert_windows_stderr poisoned"),
+    };
+    let mut exact = match state.exact_stdout.lock() {
+        Ok(guard) => guard,
+        Err(_) => bail!("exact_stdout poisoned"),
+    };
     for (idx, step) in steps.iter().enumerate() {
-        if let Some(arg) = extract_assert_stdout_needle(&step.kind) {
+        if let Some((stream, arg)) = extract_stream_needle(&step.kind) {
             let resolved = super::args::resolve_arg_state(arg, state)?;
-            windows.insert((generation, idx), SlidingWindow::new(resolved.into_bytes()));
+            let map = match stream {
+                AssertStream::Stdout => &mut windows,
+                AssertStream::Stderr => &mut stderr_windows,
+            };
+            map.insert((generation, idx), SlidingWindow::new(resolved.into_bytes()));
+        }
+        if needs_exact_stdout(&step.kind) {
+            exact.entry(generation).or_insert_with(ExactCapture::new);
         }
     }
     Ok(())
 }
 
-/// After an environment mutation (ENV or INHERIT_ENV), re-expand all assertion
-/// window needles for the current generation to reflect new env values.
-/// Preserves ring buffer history via `update_needle`. Handles both top-level
-/// and WITH_IO-wrapped assertions.
+/// After an environment mutation (ENV or INHERIT_ENV), re-expand all
+/// substring assertion needles for the current generation to reflect new
+/// env values. Preserves ring buffer history via `update_needle`. Handles
+/// both top-level and WITH_IO-wrapped assertions. Exact accumulators hold
+/// no needle and need no sync.
 #[allow(clippy::collapsible_if)]
 pub(super) fn sync_iteration_assert_needles<P: ProcessManager>(
     state: &ExecState<P>,
@@ -193,9 +270,17 @@ pub(super) fn sync_iteration_assert_needles<P: ProcessManager>(
         Ok(guard) => guard,
         Err(_) => bail!("assert_windows poisoned"),
     };
+    let mut stderr_windows = match state.assert_windows_stderr.lock() {
+        Ok(guard) => guard,
+        Err(_) => bail!("assert_windows_stderr poisoned"),
+    };
     for (idx, step) in steps.iter().enumerate() {
-        if let Some(arg) = extract_assert_stdout_needle(&step.kind) {
-            if let Some(w) = windows.get_mut(&(generation, idx)) {
+        if let Some((stream, arg)) = extract_stream_needle(&step.kind) {
+            let map = match stream {
+                AssertStream::Stdout => &mut windows,
+                AssertStream::Stderr => &mut stderr_windows,
+            };
+            if let Some(w) = map.get_mut(&(generation, idx)) {
                 let resolved = super::args::resolve_arg_state(arg, state)?;
                 w.update_needle(resolved.into_bytes());
             }
@@ -206,13 +291,12 @@ pub(super) fn sync_iteration_assert_needles<P: ProcessManager>(
 
 /// Per-step execution context handed to every command handler.
 ///
-/// Output contract (load-bearing for `LET`-capture, pipes, and `ASSERT_STDOUT`):
+/// Output contract (load-bearing for `LET`-capture, pipes, and stream assertions):
 /// handlers must emit stdout/stderr ONLY through `out`/`err` — via
 /// `write_stdout` or `StreamHandle::to_stdout`/`to_stderr` — and never write
 /// to host stdout directly. The step runner swaps these handles per context:
 /// `LET $x: STRING = <command>` installs a spillable capture sink, `WITH_IO`
-/// installs named-pipe endpoints, and the root installs the `ASSERT_STDOUT`
-/// tee. A handler that bypasses its context handles silently breaks all three.
+/// installs named-pipe endpoints, and the root installs the assertion tee. A handler that bypasses its context handles silently breaks all three.
 pub struct StepCtx<'a, P: ProcessManager> {
     pub(super) state: &'a mut ExecState<P>,
     pub(super) process: &'a mut P,
@@ -245,12 +329,22 @@ pub(super) fn execute_steps<P: ProcessManager>(
         err,
         wait_at_end,
     )?;
-    // Cleanup: remove all windows for this generation
+    // Cleanup: remove all assertion state for this generation
     let mut windows = match state.assert_windows.lock() {
         Ok(guard) => guard,
         Err(_) => bail!("assert_windows poisoned"),
     };
     windows.retain(|(g, _), _| *g != generation);
+    let mut stderr_windows = match state.assert_windows_stderr.lock() {
+        Ok(guard) => guard,
+        Err(_) => bail!("assert_windows_stderr poisoned"),
+    };
+    stderr_windows.retain(|(g, _), _| *g != generation);
+    let mut exact = match state.exact_stdout.lock() {
+        Ok(guard) => guard,
+        Err(_) => bail!("exact_stdout poisoned"),
+    };
+    exact.retain(|g, _| *g != generation);
     Ok(flow)
 }
 
@@ -404,32 +498,29 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
             let overrides_resolved = super::args::resolve_overrides(overrides, &mut cx)?;
             handlers::replace(&mut cx, idx, &path_resolved, &overrides_resolved)
         }
-        StepKind::AssertFile {
+        StepKind::AssertEq {
             hash,
-            path,
-            contents,
+            actual,
+            expected,
         } => {
-            let path_resolved = super::args::resolve_arg(path, &mut cx)?;
-            let contents_resolved = super::args::resolve_arg_opt(contents, &mut cx)?;
-            handlers::assert_file(
+            let target = resolve_assert_target(actual, &mut cx)?;
+            let expected_resolved = match expected {
+                Some(e) => Some(super::args::evaluate_assert_operand(e, &mut cx)?),
+                None => None,
+            };
+            handlers::assert_eq(
                 &mut cx,
                 idx,
+                generation,
+                idx,
                 hash,
-                &path_resolved,
-                contents_resolved.as_deref(),
+                &target,
+                expected_resolved.as_ref(),
             )
         }
-        StepKind::AssertDir(arg) => {
-            let path = super::args::resolve_arg(arg, &mut cx)?;
-            handlers::assert_dir(&mut cx, idx, &path)
-        }
-        StepKind::AssertAbsent(arg) => {
-            let path = super::args::resolve_arg(arg, &mut cx)?;
-            handlers::assert_absent(&mut cx, idx, &path)
-        }
-        StepKind::AssertStdout(arg) => {
-            let needle = super::args::resolve_arg(arg, &mut cx)?;
-            handlers::assert_stdout(&mut cx, idx, generation, idx, &needle)
+        StepKind::AssertContains { haystack, needle } => {
+            let target = resolve_assert_target(haystack, &mut cx)?;
+            handlers::assert_contains(&mut cx, idx, generation, idx, &target, needle)
         }
         StepKind::WithIoBlock { .. } => {
             bail!("WITH_IO block should have been expanded during parsing")
@@ -649,33 +740,31 @@ fn execute_steps_inner<P: ProcessManager>(
                                 super::args::resolve_overrides(overrides, &mut cx)?;
                             handlers::replace(&mut cx, idx, &path_resolved, &overrides_resolved)
                         }
-                        StepKind::AssertFile {
+                        StepKind::AssertEq {
                             hash,
-                            path,
-                            contents,
+                            actual,
+                            expected,
                         } => {
-                            let path_resolved = super::args::resolve_arg(path, &mut cx)?;
-                            let contents_resolved =
-                                super::args::resolve_arg_opt(contents, &mut cx)?;
-                            handlers::assert_file(
+                            let target = resolve_assert_target(actual, &mut cx)?;
+                            let expected_resolved = match expected {
+                                Some(e) => Some(super::args::evaluate_assert_operand(e, &mut cx)?),
+                                None => None,
+                            };
+                            handlers::assert_eq(
                                 &mut cx,
                                 idx,
+                                generation,
+                                idx,
                                 hash,
-                                &path_resolved,
-                                contents_resolved.as_deref(),
+                                &target,
+                                expected_resolved.as_ref(),
                             )
                         }
-                        StepKind::AssertDir(arg) => {
-                            let path = super::args::resolve_arg(arg, &mut cx)?;
-                            handlers::assert_dir(&mut cx, idx, &path)
-                        }
-                        StepKind::AssertAbsent(arg) => {
-                            let path = super::args::resolve_arg(arg, &mut cx)?;
-                            handlers::assert_absent(&mut cx, idx, &path)
-                        }
-                        StepKind::AssertStdout(arg) => {
-                            let needle = super::args::resolve_arg(arg, &mut cx)?;
-                            handlers::assert_stdout(&mut cx, idx, generation, idx, &needle)
+                        StepKind::AssertContains { haystack, needle } => {
+                            let target = resolve_assert_target(haystack, &mut cx)?;
+                            handlers::assert_contains(
+                                &mut cx, idx, generation, idx, &target, needle,
+                            )
                         }
                         StepKind::WithIoBlock { .. } => {
                             bail!("WITH_IO block should have been expanded during parsing")

@@ -3,4 +3,4 @@ FUNC GREET($name: STRING) {
     RETURN $name
 }
 CALL GREET("ada")
-ASSERT_STDOUT "hi ada"
+ASSERT_CONTAINS stdout "hi ada"

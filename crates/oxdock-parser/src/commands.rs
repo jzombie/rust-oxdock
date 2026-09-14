@@ -15,7 +15,7 @@
 use std::fmt;
 
 use crate::ast::{
-    Arg, ArgPart, Expr, IoBinding, IoStream, PipeTarget, Step, TypeKind, WorkspaceTarget,
+    Arg, ArgPart, Expr, IoBinding, IoStream, PipeTarget, Step, TypeKind, Value, WorkspaceTarget,
 };
 use crate::command::{
     ArgSpec, ArgType, CommandMeta, Example, FlagSpec, FlagValueType, IoDirection, Stream,
@@ -84,6 +84,15 @@ pub fn lower_env_assignment(args: Vec<Arg>) -> Result<StepKind> {
 /// `expand_string`, and `RUN`'s own post-pass expands bare `$var`.
 pub(crate) fn canonical_assignment_arg(key: &str, value: &Arg) -> Arg {
     Arg::String(format!("{key}={}", value.render()), false)
+}
+
+/// Render an [`AssertTarget`] for `Display`: stream markers print bare
+/// (`stdout` reparses to the marker); values print like other args.
+fn fmt_assert_target(target: &AssertTarget) -> String {
+    match target {
+        AssertTarget::Value(arg) => fmt_value(arg, quote_msg),
+        _ => target.render(),
+    }
 }
 
 /// Render one `Arg` for `Display`: expressions print raw (`$x` must never be
@@ -435,6 +444,85 @@ macro_rules! declare_commands {
     };
 }
 
+/// First-argument target for `ASSERT_EQ` / `ASSERT_CONTAINS`.
+///
+/// Values (`Arg`) evaluate in memory and never touch disk. The `Stdout`,
+/// `Stderr`, and `Pipe` markers observe stream buffers. Bare `stdout` /
+/// `stderr` / `pipe:NAME` spellings lower to markers; quoted spellings stay
+/// literal string values, so quoting remains interchangeable everywhere.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AssertTarget {
+    Value(Arg),
+    Stdout,
+    Stderr,
+    Pipe(String),
+}
+
+impl AssertTarget {
+    pub fn render(&self) -> String {
+        match self {
+            AssertTarget::Value(arg) => arg.render(),
+            AssertTarget::Stdout => "stdout".to_string(),
+            AssertTarget::Stderr => "stderr".to_string(),
+            AssertTarget::Pipe(name) => format!("pipe:{name}"),
+        }
+    }
+}
+
+/// Lower the first positional of `ASSERT_EQ` / `ASSERT_CONTAINS`.
+///
+/// `Arg::Expr` (variables, key-paths, calls) is always a value. Bare
+/// (unquoted) `stdout` / `stderr` / `pipe:NAME` spellings become stream
+/// markers; every other spelling, quoted or not, stays a literal value.
+/// In particular a `$var` holding a path never reads disk, and quoted
+/// `"stdout"` names the seven-character string, not the stream.
+fn lower_assert_target(arg: Arg, cmd_name: &str) -> Result<AssertTarget> {
+    match arg {
+        Arg::Expr(_) => Ok(AssertTarget::Value(arg)),
+        Arg::String(text, quoted) if !quoted => match text.as_str() {
+            "stdout" => Ok(AssertTarget::Stdout),
+            "stderr" => Ok(AssertTarget::Stderr),
+            _ => match text.strip_prefix("pipe:") {
+                Some(name) if !name.is_empty() => Ok(AssertTarget::Pipe(name.to_string())),
+                Some(_) => bail!("{cmd_name} pipe target needs a name, got {text:?}"),
+                None => Ok(AssertTarget::Value(lower_assert_operand(Arg::String(
+                    text, false,
+                )))),
+            },
+        },
+        other => Ok(AssertTarget::Value(lower_assert_operand(other))),
+    }
+}
+
+/// Give bare (unquoted, template-free) assertion operands the same typing
+/// they carry in expression positions, so `ASSERT_EQ $status 200` compares
+/// `Int(200)` rather than the string `"200"`. Signed integers (`-5` in
+/// first position), decimals (`3.5`), and `true`/`false` all convert;
+/// everything else, including quoted strings, stays a string. Note a
+/// grammar property, not a limitation of this helper: `$x -5` in argument
+/// position parses as subtraction (`expr_add_sub`), so negative expected
+/// values must be bound first (`LET $e: INT = 0 - 5`).
+fn lower_assert_operand(arg: Arg) -> Arg {
+    match arg {
+        Arg::String(text, false) => {
+            if let Ok(i) = text.parse::<i64>() {
+                Arg::Expr(Expr::Literal(Value::Int(i)))
+            } else if text.contains('.') && text.parse::<f64>().is_ok() {
+                Arg::Expr(Expr::Literal(Value::Float(
+                    text.parse::<f64>().unwrap_or(f64::NAN),
+                )))
+            } else if text == "true" {
+                Arg::Expr(Expr::Literal(Value::Bool(true)))
+            } else if text == "false" {
+                Arg::Expr(Expr::Literal(Value::Bool(false)))
+            } else {
+                Arg::String(text, false)
+            }
+        }
+        other => other,
+    }
+}
+
 declare_commands! {
     structural [
         WithIo { bindings: Vec<IoBinding>, cmd: Box<StepKind> },
@@ -476,7 +564,8 @@ declare_commands! {
         examples: &[ Example { name: "change working directory", fence_meta: None, code: indoc! {r#"
             WORKDIR project/src
             WRITE generated.txt generated-under-workdir
-            ASSERT_FILE generated.txt generated-under-workdir
+            LET $body: STRING = READ generated.txt
+            ASSERT_EQ $body "generated-under-workdir"
         "#} } ],
         lower: |_flags, args| {
             let path = args.into_iter().next().ok_or_else(|| anyhow!("WORKDIR requires a path"))?;
@@ -530,14 +619,16 @@ declare_commands! {
                 # quotes keep the space: SET_FORTH stores `outer scope`
                 ENV SET_FORTH="outer scope"
                 WRITE out.txt "{{ env:SET_FORTH }}"
-                ASSERT_FILE out.txt "outer scope"
+                LET $body: STRING = READ out.txt
+                ASSERT_EQ $body "outer scope"
             "#} },
             Example { name: "variable value", fence_meta: None, code: indoc! {r#"
                 # a lone $var evaluates, like ECHO $var
                 LET $who: STRING = "Alice"
                 ENV GREETING=$who
                 WRITE out.txt "{{ env:GREETING }}"
-                ASSERT_FILE out.txt "Alice"
+                LET $body: STRING = READ out.txt
+                ASSERT_EQ $body "Alice"
             "#} },
             Example { name: "all value forms agree", fence_meta: None, code: indoc! {r#"
                 # a bare variable, a quoted literal, and a template all
@@ -547,7 +638,8 @@ declare_commands! {
                 ENV B="hello world"
                 ENV C="{{ $x }} concatenated"
                 WRITE check.txt "{{ env:A }}|{{ env:B }}|{{ env:C }}"
-                ASSERT_FILE check.txt "Ada|hello world|Ada concatenated"
+                LET $body: STRING = READ check.txt
+                ASSERT_EQ $body "Ada|hello world|Ada concatenated"
             "#} },
             Example { name: "scoped env reverts", fence_meta: None, code: indoc! {r#"
                 # ENV inside a braced block reverts when the block exits
@@ -557,8 +649,10 @@ declare_commands! {
                     WRITE inner.txt "{{ env:MODE }}"
                 }
                 WRITE outer.txt "{{ env:MODE }}"
-                ASSERT_FILE inner.txt "staging"
-                ASSERT_FILE outer.txt "production"
+                LET $inner_body: STRING = READ inner.txt
+                LET $outer_body: STRING = READ outer.txt
+                ASSERT_EQ $inner_body "staging"
+                ASSERT_EQ $outer_body "production"
             "#} },
         ],
         lower: |_flags, args| lower_env_assignment(args),
@@ -601,7 +695,7 @@ declare_commands! {
                 LET $x: STRING = "World"
                 ECHO {{ $x }}
                 ECHO $x
-                ASSERT_STDOUT "World"
+                ASSERT_CONTAINS stdout "World"
             "#} },
         ],
         lower: |_flags, args| Ok(StepKind::Echo(join_value(args, "ECHO")?)),
@@ -653,11 +747,13 @@ declare_commands! {
         examples: &[ Example { name: "copy", fence_meta: Some("roots:unified"), code: indoc! {r#"
             WRITE src.txt content
             COPY src.txt dst.txt
-            ASSERT_FILE dst.txt content
+            LET $body: STRING = READ dst.txt
+            ASSERT_EQ $body "content"
         "#} }, Example { name: "copy from workspace", fence_meta: Some("roots:unified"), code: indoc! {r#"
             WRITE ws-src.txt ws-content
             COPY --from-current-workspace ws-src.txt ws-copy.txt
-            ASSERT_FILE ws-copy.txt ws-content
+            LET $body: STRING = READ ws-copy.txt
+            ASSERT_EQ $body "ws-content"
         "#} } ],
         lower: |flags, args| {
             let from_current_workspace = flags.iter().any(|(k, _)| k == "from_current_workspace");
@@ -707,7 +803,8 @@ declare_commands! {
         examples: &[ Example { name: "symlink", fence_meta: Some("roots:unified"), code: indoc! {r#"
             WRITE original.txt content
             SYMLINK original.txt link.txt
-            ASSERT_FILE link.txt content
+            LET $body: STRING = READ link.txt
+            ASSERT_EQ $body "content"
         "#} } ],
         lower: |_flags, args| {
             let mut it = args.into_iter();
@@ -845,7 +942,8 @@ declare_commands! {
         examples: &[ Example { name: "append", fence_meta: None, code: indoc! {r#"
             WRITE log.txt line1
             APPEND log.txt line2
-            ASSERT_FILE log.txt line1line2
+            LET $all: STRING = READ log.txt
+            ASSERT_EQ $all "line1line2"
         "#} } ],
         lower: |_flags, args| {
             let mut it = args.into_iter();
@@ -899,14 +997,14 @@ declare_commands! {
                 ENV NAME="Alice"
                 WRITE template.md "Hello {{ env:NAME }}!"
                 EXPAND template.md
-                ASSERT_STDOUT "Hello Alice!"
+                ASSERT_CONTAINS stdout "Hello Alice!"
             "#} },
             Example { name: "override with spaces", fence_meta: None, code: indoc! {r#"
                 # WRITE would interpolate {{ }} right away, so escape it:
                 # the file must literally contain {{ env:NAME }} for EXPAND
                 WRITE template.md "Hello \{{ env:NAME }}!"
                 EXPAND template.md NAME="Alice Smith"
-                ASSERT_STDOUT "Hello Alice Smith!"
+                ASSERT_CONTAINS stdout "Hello Alice Smith!"
             "#} },
             Example { name: "variable override", fence_meta: None, code: indoc! {r#"
                 # same escaping: keep the placeholder literal until EXPAND;
@@ -914,20 +1012,20 @@ declare_commands! {
                 LET $who: STRING = "Bob"
                 WRITE template.md "Hi \{{ env:WHO }}!"
                 EXPAND template.md WHO=$who
-                ASSERT_STDOUT "Hi Bob!"
+                ASSERT_CONTAINS stdout "Hi Bob!"
             "#} },
             Example { name: "override forms agree", fence_meta: None, code: indoc! {r#"
                 # a bare variable and a template-with-tail expand identically
                 LET $x: STRING = "Ada"
                 WRITE template.md "Hi \{{ env:NAME }} and \{{ env:NAME2 }}!"
                 EXPAND template.md NAME=$x NAME2="{{ $x }} concatenated"
-                ASSERT_STDOUT "Hi Ada and Ada concatenated!"
+                ASSERT_CONTAINS stdout "Hi Ada and Ada concatenated!"
             "#} },
             Example { name: "expand stdin", fence_meta: None, code: indoc! {r#"
                 # no path: the template arrives on stdin through a pipe
                 WITH_IO [stdout=pipe:tpl] ECHO "Hello \{{ env:NAME }}!"
                 WITH_IO [stdin=pipe:tpl] EXPAND NAME=Alice
-                ASSERT_STDOUT "Hello Alice!"
+                ASSERT_CONTAINS stdout "Hello Alice!"
             "#} },
             Example { name: "override does not leak", fence_meta: None, code: indoc! {r#"
                 # KEY=val overrides shadow env for that EXPAND only —
@@ -935,9 +1033,9 @@ declare_commands! {
                 ENV NAME="Alice"
                 WRITE template.md "Hi \{{ env:NAME }}!"
                 EXPAND template.md NAME="Bob"
-                ASSERT_STDOUT "Hi Bob!"
+                ASSERT_CONTAINS stdout "Hi Bob!"
                 EXPAND template.md
-                ASSERT_STDOUT "Hi Alice!"
+                ASSERT_CONTAINS stdout "Hi Alice!"
             "#} },
         ],
         lower: |_flags, args| {
@@ -954,95 +1052,106 @@ declare_commands! {
         },
     ],
 
-    AssertFile => [
-        name: "ASSERT_FILE",
-        variant: AssertFile { hash: Option<String>, path: Arg, contents: Option<Arg> },
-        syntax: "ASSERT_FILE [--hash <sha256>] <path> [<expected>]",
-        summary: "Assert file exists.",
+    AssertEq => [
+        name: "ASSERT_EQ",
+        variant: AssertEq { hash: Option<String>, actual: AssertTarget, expected: Option<Arg> },
+        syntax: "ASSERT_EQ [--hash <sha256>] <actual> <expected>",
+        summary: "Assert strict equality.",
         description: indoc! {r#"
-            Checks the path is a file, then optionally compares its bytes (or
-            `--hash` SHA-256 digest) against the expectation.
+            Compares two evaluated values with typed equality (no coercion:
+            `Int(42)` never equals `String("42")`), aborting the pipeline
+            with a step-numbered error showing expected vs actual otherwise.
 
-            Any mismatch aborts the pipeline with a step-numbered error showing
-            expected vs actual.
+            Both sides are values: `$var`, literals, templates, and calls
+            evaluate in memory and never touch disk. Read files explicitly
+            first (`LET $text: STRING = READ "out.txt"`, then
+            `ASSERT_EQ $text ...`).
+            Bare `stdout` / `stderr` observe stream buffers; `pipe:NAME`
+            observes a pipe buffer. `--hash` compares the SHA-256 of the
+            actual's string bytes instead of the bytes themselves.
         "#},
         args: &[
-            ArgSpec { name: "path", arg_type: ArgType::Path, description: "File", io: IoDirection::Read, index: 0, required: true, fallback_stream: None },
-            ArgSpec { name: "expected", arg_type: ArgType::Rest(&ArgType::String), description: "Expected", io: IoDirection::Read, index: 1, required: false, fallback_stream: None },
+            ArgSpec { name: "actual", arg_type: ArgType::String, description: "Value, stdout, stderr, or pipe:NAME", io: IoDirection::Read, index: 0, required: true, fallback_stream: None },
+            ArgSpec { name: "expected", arg_type: ArgType::Rest(&ArgType::String), description: "Expected (required unless --hash)", io: IoDirection::Read, index: 1, required: false, fallback_stream: None },
         ],
         flags: &[ FlagSpec { name: "hash", long: "--hash", value_type: FlagValueType::String, required: false, description: "SHA-256" } ],
         default_output: None,
-        examples: &[ Example { name: "assert file", fence_meta: None, code: indoc! {r#"
-            WRITE payload.bin stable-content
-            ASSERT_FILE payload.bin stable-content
+        examples: &[ Example { name: "assert eq", fence_meta: None, code: indoc! {r#"
+            LET $status: INT = 200
+            ASSERT_EQ $status 200
         "#} },
-        Example { name: "assert file hash", fence_meta: None, code: indoc! {r#"
+        Example { name: "assert eq file", fence_meta: None, code: indoc! {r#"
+            WRITE payload.bin stable-content
+            LET $body: STRING = READ payload.bin
+            ASSERT_EQ $body "stable-content"
+        "#} },
+        Example { name: "assert eq hash", fence_meta: None, code: indoc! {r#"
             # --hash compares the SHA-256 digest instead of raw bytes
             WRITE payload.bin stable-content
-            ASSERT_FILE --hash 08135c1b6349b0e4f894c36221952f0de00e6b4d82f80895abf359755e77103c payload.bin
+            LET $body: STRING = READ payload.bin
+            ASSERT_EQ --hash 08135c1b6349b0e4f894c36221952f0de00e6b4d82f80895abf359755e77103c $body
         "#} } ],
         lower: |flags, args| {
             let hash = flags.iter().find(|(k, _)| k == "hash").map(|(_, v)| v.as_str().to_string());
             let mut it = args.into_iter();
-            let path = it.next().ok_or_else(|| anyhow!("ASSERT_FILE requires a path"))?;
-            let remaining: Vec<Arg> = it.collect();
-            let contents = if remaining.is_empty() { None } else { Some(join_value(remaining, "ASSERT_FILE")?) };
-            Ok(StepKind::AssertFile { hash, path, contents })
+            let actual = lower_assert_target(it.next().ok_or_else(|| anyhow!("ASSERT_EQ requires a value"))?, "ASSERT_EQ")?;
+            let remaining: Vec<Arg> = it
+                .map(lower_assert_operand)
+                .collect::<Vec<Arg>>();
+            // Exactly two operands, except --hash carries its expectation
+            // in the flag and takes none positionally.
+            let expected = if remaining.is_empty() {
+                if hash.is_some() {
+                    None
+                } else {
+                    bail!("ASSERT_EQ requires an expected value");
+                }
+            } else {
+                Some(join_value(remaining, "ASSERT_EQ")?)
+            };
+            Ok(StepKind::AssertEq { hash, actual, expected })
         },
     ],
 
-    AssertDir => [
-        name: "ASSERT_DIR",
-        variant: AssertDir(Arg),
-        syntax: "ASSERT_DIR <path>",
-        summary: "Assert dir exists.",
+    AssertContains => [
+        name: "ASSERT_CONTAINS",
+        variant: AssertContains { haystack: AssertTarget, needle: Arg },
+        syntax: "ASSERT_CONTAINS <haystack> <needle>",
+        summary: "Assert containment.",
         description: indoc! {r#"
-            Checks the path is a directory, aborting the pipeline with a
-            step-numbered error otherwise.
-        "#},
-        args: &[ ArgSpec { name: "path", arg_type: ArgType::Path, description: "Dir", io: IoDirection::Read, index: 0, required: true, fallback_stream: None } ],
-        flags: &[],
-        default_output: None,
-        examples: &[ Example { name: "assert dir", fence_meta: None, code: indoc! {r#"
-            MKDIR dist/assets
-            ASSERT_DIR dist/assets
-        "#} } ],
-        lower: |_flags, args| Ok(StepKind::AssertDir(args.into_iter().next().ok_or_else(|| anyhow!("ASSERT_DIR requires a path"))?)),
-    ],
+            Checks containment and aborts the pipeline with a step-numbered
+            error otherwise: substring for strings, element match for lists,
+            key presence for maps, substring over stream and pipe buffers.
 
-    AssertAbsent => [
-        name: "ASSERT_ABSENT",
-        variant: AssertAbsent(Arg),
-        syntax: "ASSERT_ABSENT <path>",
-        summary: "Assert path absent.",
-        description: indoc! {r#"
-            Checks nothing exists at the path, aborting the pipeline with a
-            step-numbered error if it does.
+            Like `ASSERT_EQ`, both sides are values read without implicit
+            I/O; read files explicitly first
+            (`LET $text: STRING = READ "cfg.txt"`).
+            Bare `stdout` / `stderr` observe stream buffers; `pipe:NAME`
+            observes a pipe buffer.
         "#},
-        args: &[ ArgSpec { name: "path", arg_type: ArgType::Path, description: "Path", io: IoDirection::Read, index: 0, required: true, fallback_stream: None } ],
+        args: &[
+            ArgSpec { name: "haystack", arg_type: ArgType::String, description: "Value, stdout, stderr, or pipe:NAME", io: IoDirection::Read, index: 0, required: true, fallback_stream: None },
+            ArgSpec { name: "needle", arg_type: ArgType::Rest(&ArgType::String), description: "Substring, element, or key", io: IoDirection::Read, index: 1, required: true, fallback_stream: None },
+        ],
         flags: &[],
         default_output: None,
-        examples: &[ Example { name: "assert absent", fence_meta: None, code: indoc! {r#"ASSERT_ABSENT missing.txt"#} } ],
-        lower: |_flags, args| Ok(StepKind::AssertAbsent(args.into_iter().next().ok_or_else(|| anyhow!("ASSERT_ABSENT requires a path"))?)),
-    ],
-
-    AssertStdout => [
-        name: "ASSERT_STDOUT",
-        variant: AssertStdout(Arg),
-        syntax: "ASSERT_STDOUT <substring>",
-        summary: "Assert stdout contains.",
-        description: indoc! {r#"
-            Checks the preceding step's stdout contains the substring, aborting the
-            pipeline with a step-numbered error otherwise.
-        "#},
-        args: &[ ArgSpec { name: "substring", arg_type: ArgType::Rest(&ArgType::String), description: "Substring", io: IoDirection::Read, index: 0, required: true, fallback_stream: None } ],
-        flags: &[],
-        default_output: None,
-        examples: &[ Example { name: "assert stdout", fence_meta: None, code: indoc! {r#"
+        examples: &[ Example { name: "assert contains", fence_meta: None, code: indoc! {r#"
             ECHO build-complete
-            ASSERT_STDOUT build-complete
+            ASSERT_CONTAINS stdout "build-complete"
         "#} } ],
-        lower: |_flags, args| Ok(StepKind::AssertStdout(join_value(args, "ASSERT_STDOUT")?)),
+        lower: |flags, args| {
+            let _ = flags;
+            let mut it = args.into_iter();
+            let haystack = lower_assert_target(it.next().ok_or_else(|| anyhow!("ASSERT_CONTAINS requires a value"))?, "ASSERT_CONTAINS")?;
+            let remaining: Vec<Arg> = it
+                .map(lower_assert_operand)
+                .collect::<Vec<Arg>>();
+            if remaining.is_empty() {
+                bail!("ASSERT_CONTAINS requires a needle");
+            }
+            let needle = join_value(remaining, "ASSERT_CONTAINS")?;
+            Ok(StepKind::AssertContains { haystack, needle })
+        },
     ],
 
     HashSha256 => [
@@ -1200,8 +1309,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 LET $p: PIPE = pipe:log
                 WITH_IO [stdout=$p] ECHO hello
                 WITH_IO [stdin=$p] READ_LINE $line
-                WRITE line.txt "{{ $line }}"
-                ASSERT_FILE line.txt "hello"
+                ASSERT_EQ $line "hello"
             "#},
                 },
             ],
@@ -1248,7 +1356,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 # single-line body; $x is a template path, WHO an override
                 WRITE a.txt "hi \{{ env:WHO }}!"
                 FOR $x: STRING IN GLOB("*.txt") { EXPAND $x WHO=World }
-                ASSERT_STDOUT "hi World!"
+                ASSERT_CONTAINS stdout "hi World!"
             "#},
                 },
             ],
@@ -1289,10 +1397,14 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 IF !false {
                   WRITE negated.txt taken
                 }
-                ASSERT_FILE yes.txt "taken"
-                ASSERT_FILE fallback.txt "taken"
-                ASSERT_FILE negated.txt "taken"
-                ASSERT_ABSENT skipped.txt
+                LET $yes_body: STRING = READ yes.txt
+                LET $fallback_body: STRING = READ fallback.txt
+                LET $negated_body: STRING = READ negated.txt
+                ASSERT_EQ $yes_body "taken"
+                ASSERT_EQ $fallback_body "taken"
+                ASSERT_EQ $negated_body "taken"
+                LET $t: STRING = PATH_TYPE("skipped.txt")
+                ASSERT_EQ $t "absent"
             "#},
                 },
                 Example {
@@ -1315,11 +1427,16 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 } ELSE {
                     WRITE and.txt and-false
                 }
-                ASSERT_FILE fallback.txt "or-false"
-                ASSERT_FILE chosen.txt "or-true"
-                ASSERT_FILE and.txt "and-false"
-                ASSERT_ABSENT unexpected.txt
-                ASSERT_ABSENT unexpected-too.txt
+                LET $fb: STRING = READ fallback.txt
+                LET $ch: STRING = READ chosen.txt
+                LET $an: STRING = READ and.txt
+                ASSERT_EQ $fb "or-false"
+                ASSERT_EQ $ch "or-true"
+                ASSERT_EQ $an "and-false"
+                LET $t1: STRING = PATH_TYPE("unexpected.txt")
+                LET $t2: STRING = PATH_TYPE("unexpected-too.txt")
+                ASSERT_EQ $t1 "absent"
+                ASSERT_EQ $t2 "absent"
             "#},
                 },
             ],
@@ -1430,7 +1547,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 WRITE a.txt "x"
                 LET $files: LIST = GLOB("*.txt")
                 FOR $f: STRING IN $files { ECHO $f }
-                ASSERT_STDOUT "a.txt"
+                ASSERT_CONTAINS stdout "a.txt"
             "#},
                 },
                 Example {
@@ -1444,8 +1561,10 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     WRITE inner.txt "{{ $a }}"
                 }
                 WRITE outer.txt "{{ $a }}"
-                ASSERT_FILE inner.txt "inner"
-                ASSERT_FILE outer.txt "outer"
+                LET $in_body: STRING = READ inner.txt
+                LET $out_body: STRING = READ outer.txt
+                ASSERT_EQ $in_body "inner"
+                ASSERT_EQ $out_body "outer"
             "#},
                 },
                 Example {
@@ -1453,8 +1572,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     fence_meta: None,
                     code: indoc! {r#"
                 LET $out: STRING = ECHO hi
-                WRITE captured.txt "{{ $out }}"
-                ASSERT_FILE captured.txt "hi\n"
+                ASSERT_EQ $out "hi\n"
             "#},
                 },
                 Example {
@@ -1466,12 +1584,9 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 LET $ratio: FLOAT = 1 + 2.5
                 # Int x Int stays INT: integer division truncates.
                 LET $half: INT = 7 / 2
-                WRITE total.txt "{{ $total }}"
-                WRITE ratio.txt "{{ $ratio }}"
-                WRITE half.txt "{{ $half }}"
-                ASSERT_FILE total.txt "42"
-                ASSERT_FILE ratio.txt "3.5"
-                ASSERT_FILE half.txt "3"
+                ASSERT_EQ $total 42
+                ASSERT_EQ $ratio 3.5
+                ASSERT_EQ $half 3
             "#},
                 },
                 Example {
@@ -1488,8 +1603,10 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 IF $decimal {
                     WRITE unexpected.txt no
                 }
-                ASSERT_FILE exact.txt "yes"
-                ASSERT_ABSENT unexpected.txt
+                LET $ok: STRING = READ exact.txt
+                ASSERT_EQ $ok "yes"
+                LET $t: STRING = PATH_TYPE("unexpected.txt")
+                ASSERT_EQ $t "absent"
             "#},
                 },
                 Example {
@@ -1501,7 +1618,8 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 IF $sum > 0.299999 && $sum < 0.300001 {
                     WRITE bounded.txt yes
                 }
-                ASSERT_FILE bounded.txt "yes"
+                LET $ok: STRING = READ bounded.txt
+                ASSERT_EQ $ok "yes"
             "#},
                 },
                 Example {
@@ -1517,8 +1635,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 IF $info.is_os_pipe {
                     WRITE unexpected.txt "should be a script pipe"
                 }
-                WRITE kind.txt "{{ $info.type }}"
-                ASSERT_FILE kind.txt "PIPE"
+                ASSERT_EQ $info.type "PIPE"
             "#},
                 },
             ],
@@ -1556,8 +1673,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     code: indoc! {r#"
                 LET $count: INT = 1
                 $count = 2
-                WRITE count.txt "{{ $count }}"
-                ASSERT_FILE count.txt "2"
+                ASSERT_EQ $count 2
             "#},
                 },
                 Example {
@@ -1574,10 +1690,8 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 # Same crossing for decimals via FLOAT().
                 LET $frac_str: STRING = ECHO 2.5
                 LET $f: FLOAT = FLOAT($frac_str) + 0.25
-                WRITE n.txt "{{ $n }}"
-                WRITE f.txt "{{ $f }}"
-                ASSERT_FILE n.txt "42"
-                ASSERT_FILE f.txt "2.75"
+                ASSERT_EQ $n 42
+                ASSERT_EQ $f 2.75
             "#},
                 },
             ],
@@ -1650,8 +1764,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     code: indoc! {r#"
                 LET $task: HANDLE = ASYNC ECHO "done"
                 LET $out: STRING = AWAIT $task
-                WRITE captured.txt "{{ $out }}"
-                ASSERT_FILE captured.txt "done\n"
+                ASSERT_EQ $out "done\n"
             "#},
                 },
             ],
@@ -1715,7 +1828,8 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     # durations resolve at runtime, so variables work too
                     LET $budget: DURATION = "30s"
                     TIMEOUT $budget WRITE heartbeat.txt alive
-                    ASSERT_FILE heartbeat.txt alive
+                    LET $beat: STRING = READ heartbeat.txt
+                    ASSERT_EQ $beat "alive"
                 "#},
                 },
             ],
@@ -1745,8 +1859,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                   RETURN $name
                 }
                 LET $res: STRING = CALL GREET("ada")
-                WRITE greeting.txt "{{ $res }}"
-                ASSERT_FILE greeting.txt "ada"
+                ASSERT_EQ $res "ada"
             "#},
             }],
         },
@@ -1760,7 +1873,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 Bare CALL discards the return value and keeps stdout side effects.
                 LET $var: TYPE = CALL captures the RETURN value (fallthrough without
                 RETURN captures as ""), coerced to the declared type; stdout inside the
-                callee stays observable via ASSERT_STDOUT and pipes.
+                callee stays observable via ASSERT_CONTAINS stdout and pipes.
 
                 Combining LET-capture with WITH_IO [stdout=pipe:...] is a parse error.
             "#},
@@ -1777,7 +1890,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                   RETURN $name
                 }
                 CALL SHOUT("ada")
-                ASSERT_STDOUT "ada"
+                ASSERT_CONTAINS stdout "ada"
             "#},
                 },
                 Example {
@@ -1794,8 +1907,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 LET $p: PIPE = pipe:ch
                 WITH_IO [stdout=$p] ECHO "payload"
                 LET $got: STRING = CALL DRAIN($p)
-                WRITE got.txt "{{ $got }}"
-                ASSERT_FILE got.txt "payload"
+                ASSERT_EQ $got "payload"
             "#},
                 },
             ],
@@ -1824,8 +1936,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                   RETURN "no"
                 }
                 LET $res: STRING = CALL PICK(true)
-                WRITE picked.txt "{{ $res }}"
-                ASSERT_FILE picked.txt "yes"
+                ASSERT_EQ $res "yes"
             "#},
             }],
         },
@@ -1853,7 +1964,8 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                   WRITE tick.txt "once"
                   $done = true
                 }
-                ASSERT_FILE tick.txt "once"
+                LET $tick: STRING = READ tick.txt
+                ASSERT_EQ $tick "once"
             "#},
             }],
         },
@@ -1990,24 +2102,34 @@ impl fmt::Display for StepKind {
                 }
                 Ok(())
             }
-            StepKind::AssertFile {
+            StepKind::AssertEq {
                 hash,
-                path,
-                contents,
+                actual,
+                expected,
             } => {
                 if let Some(d) = hash {
-                    write!(f, "ASSERT_FILE --hash {} {}", d, fmt_value(path, quote_arg))
+                    write!(f, "ASSERT_EQ --hash {d} {}", fmt_assert_target(actual))?;
                 } else {
-                    write!(f, "ASSERT_FILE {}", fmt_value(path, quote_arg))?;
-                    if let Some(b) = contents {
-                        write!(f, " {}", fmt_value(b, quote_msg))?;
-                    }
-                    Ok(())
+                    write!(
+                        f,
+                        "ASSERT_EQ {} {}",
+                        fmt_assert_target(actual),
+                        fmt_value(
+                            expected
+                                .as_ref()
+                                .expect("Display of ASSERT_EQ without --hash needs expected"),
+                            quote_msg
+                        )
+                    )?;
                 }
+                Ok(())
             }
-            StepKind::AssertDir(a) => write!(f, "ASSERT_DIR {}", fmt_value(a, quote_arg)),
-            StepKind::AssertAbsent(a) => write!(f, "ASSERT_ABSENT {}", fmt_value(a, quote_arg)),
-            StepKind::AssertStdout(m) => write!(f, "ASSERT_STDOUT {}", fmt_value(m, quote_msg)),
+            StepKind::AssertContains { haystack, needle } => write!(
+                f,
+                "ASSERT_CONTAINS {} {}",
+                fmt_assert_target(haystack),
+                fmt_value(needle, quote_msg)
+            ),
             StepKind::WithIo { bindings, cmd } => {
                 let p: Vec<String> = bindings.iter().map(fmt_io).collect();
                 write!(f, "WITH_IO [{}] {}", p.join(", "), cmd)
@@ -2428,10 +2550,8 @@ mod tests {
                 | StepKind::Write { .. }
                 | StepKind::Append { .. }
                 | StepKind::Expand { .. }
-                | StepKind::AssertFile { .. }
-                | StepKind::AssertDir(_)
-                | StepKind::AssertAbsent(_)
-                | StepKind::AssertStdout(_)
+                | StepKind::AssertEq { .. }
+                | StepKind::AssertContains { .. }
                 | StepKind::CopyGit { .. }
                 | StepKind::HashSha256 { .. }
                 | StepKind::Exit(_)

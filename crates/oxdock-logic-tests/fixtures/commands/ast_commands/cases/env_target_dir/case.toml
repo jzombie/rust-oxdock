@@ -1,4 +1,4 @@
 name = "env_target_dir"
 
-[expect]
-files = { "env-target.txt" = "ws/target\n" }
+[pipes.capture]
+expect = "ws/target\n"

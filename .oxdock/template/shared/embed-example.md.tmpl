@@ -22,9 +22,6 @@ oxdock_embed! {
         WRITE dist/os.txt "\{{ $os }}"
         WRITE dist/toolchain.txt "\{{ $toolchain }}"
         WRITE dist/manifest.txt "os toolchain"
-        ASSERT_FILE dist/os.txt
-        ASSERT_FILE dist/toolchain.txt
-        ASSERT_FILE dist/manifest.txt "os toolchain"
     },
     // Generated assets land under target/, keeping the source tree clean
     out_dir: "target/prebuilt",

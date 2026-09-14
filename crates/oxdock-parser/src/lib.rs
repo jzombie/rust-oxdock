@@ -38,7 +38,7 @@ pub use strip_flags::strip_flags;
 /// Centralizes AST lowering so unit tests, integration tests, and macro_input tests
 /// all exercise the same command set against the same grammar.
 pub mod test_lower_mock {
-    use crate::{Arg, StepKind, WorkspaceTarget};
+    use crate::{Arg, AssertTarget, StepKind, WorkspaceTarget};
     use anyhow::{anyhow, bail};
 
     pub fn lower(name: &str, args: Vec<Arg>) -> anyhow::Result<StepKind> {
@@ -74,10 +74,10 @@ pub mod test_lower_mock {
                         .first()
                         .ok_or_else(|| anyhow!("HASH_SHA256 requires path"))?
                         .clone();
-                    Ok(StepKind::AssertFile {
+                    Ok(StepKind::AssertEq {
                         hash: Some(hash),
-                        path,
-                        contents: None,
+                        actual: AssertTarget::Value(path),
+                        expected: None,
                     })
                 } else {
                     let path = a
@@ -85,10 +85,10 @@ pub mod test_lower_mock {
                         .ok_or_else(|| anyhow!("HASH_SHA256 requires path"))?
                         .clone();
                     let contents = a.get(1).cloned();
-                    Ok(StepKind::AssertFile {
+                    Ok(StepKind::AssertEq {
                         hash: None,
-                        path,
-                        contents,
+                        actual: AssertTarget::Value(path),
+                        expected: contents,
                     })
                 }
             }
@@ -457,16 +457,19 @@ mod tests {
         let script = "HASH_SHA256 --hash aabb path.txt";
         let steps = parse_script(script, test_lower).expect("parse ok");
         match &steps[0].kind {
-            StepKind::AssertFile {
+            StepKind::AssertEq {
                 hash,
-                path,
-                contents,
+                actual,
+                expected,
             } => {
                 assert_eq!(hash.as_deref(), Some("aabb"));
-                assert_eq!(path.as_ref(), "path.txt");
-                assert!(contents.is_none());
+                assert_eq!(
+                    actual,
+                    &AssertTarget::Value(Arg::String("path.txt".to_string(), false))
+                );
+                assert_eq!(expected, &None);
             }
-            other => panic!("expected AssertFile, saw {:?}", other),
+            other => panic!("expected AssertEq, saw {:?}", other),
         }
     }
 

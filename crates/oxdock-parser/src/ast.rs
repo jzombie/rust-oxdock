@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-pub use crate::commands::StepKind;
+pub use crate::commands::{AssertTarget, StepKind};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Command {
@@ -24,10 +24,8 @@ pub enum Command {
     Write,
     Append,
     Expand,
-    AssertFile,
-    AssertDir,
-    AssertAbsent,
-    AssertStdout,
+    AssertEq,
+    AssertContains,
     Exit,
     Async,
     Timeout,
@@ -54,10 +52,8 @@ pub const COMMANDS: &[Command] = &[
     Command::Write,
     Command::Append,
     Command::Expand,
-    Command::AssertFile,
-    Command::AssertDir,
-    Command::AssertAbsent,
-    Command::AssertStdout,
+    Command::AssertEq,
+    Command::AssertContains,
     Command::Exit,
     Command::Timeout,
     Command::Sleep,
@@ -85,10 +81,8 @@ impl Command {
             Command::Write => "WRITE",
             Command::Append => "APPEND",
             Command::Expand => "EXPAND",
-            Command::AssertFile => "ASSERT_FILE",
-            Command::AssertDir => "ASSERT_DIR",
-            Command::AssertAbsent => "ASSERT_ABSENT",
-            Command::AssertStdout => "ASSERT_STDOUT",
+            Command::AssertEq => "ASSERT_EQ",
+            Command::AssertContains => "ASSERT_CONTAINS",
             Command::Exit => "EXIT",
             Command::Async => "ASYNC",
             Command::Timeout => "TIMEOUT",
@@ -117,10 +111,8 @@ impl Command {
             Command::Write => "WRITE <path> [<contents>]",
             Command::Append => "APPEND <path> [<contents>]",
             Command::Expand => "EXPAND [<path>] [<KEY=val> ...]",
-            Command::AssertFile => "ASSERT_FILE [--hash <sha256>] <path> [<expected>]",
-            Command::AssertDir => "ASSERT_DIR <path>",
-            Command::AssertAbsent => "ASSERT_ABSENT <path>",
-            Command::AssertStdout => "ASSERT_STDOUT <substring>",
+            Command::AssertEq => "ASSERT_EQ [--hash <sha256>] <actual> <expected>",
+            Command::AssertContains => "ASSERT_CONTAINS <haystack> <needle>",
             Command::Exit => "EXIT <code>",
             Command::Async => "ASYNC <command...> | ASYNC { <commands> }",
             Command::Timeout => {
@@ -155,10 +147,8 @@ impl Command {
             "WRITE" => Some(Command::Write),
             "APPEND" => Some(Command::Append),
             "EXPAND" => Some(Command::Expand),
-            "ASSERT_FILE" => Some(Command::AssertFile),
-            "ASSERT_DIR" => Some(Command::AssertDir),
-            "ASSERT_ABSENT" => Some(Command::AssertAbsent),
-            "ASSERT_STDOUT" => Some(Command::AssertStdout),
+            "ASSERT_EQ" => Some(Command::AssertEq),
+            "ASSERT_CONTAINS" => Some(Command::AssertContains),
             "EXIT" => Some(Command::Exit),
             "ASYNC" => Some(Command::Async),
             "TIMEOUT" => Some(Command::Timeout),

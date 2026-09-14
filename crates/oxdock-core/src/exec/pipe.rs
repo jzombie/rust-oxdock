@@ -146,6 +146,12 @@ impl PipeInner {
         self.lock_state().buffer.buffered_bytes()
     }
 
+    /// Non-destructive snapshot of buffered bytes for pipe-content
+    /// assertions. Never waits: returns what is buffered right now.
+    pub(super) fn peek_bytes(&self) -> io::Result<Vec<u8>> {
+        self.lock_state().buffer.peek_bytes()
+    }
+
     fn detach_writer(&self) {
         let mut state = self.lock_state();
         state.writers = state.writers.saturating_sub(1);

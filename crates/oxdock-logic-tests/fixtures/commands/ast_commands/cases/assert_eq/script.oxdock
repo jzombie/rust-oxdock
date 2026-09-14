@@ -1,0 +1,14 @@
+LET $status: INT = 200
+ASSERT_EQ $status 200
+WRITE payload.bin stable-content
+LET $body: STRING = READ payload.bin
+ASSERT_EQ $body "stable-content"
+ASSERT_EQ --hash 08135c1b6349b0e4f894c36221952f0de00e6b4d82f80895abf359755e77103c $body
+MKDIR empty_dir
+LET $t: STRING = PATH_TYPE("empty_dir")
+ASSERT_EQ $t "dir"
+LET $m: STRING = PATH_TYPE("missing.txt")
+ASSERT_EQ $m "absent"
+WRITE probe.txt "x"
+LET $f: STRING = PATH_TYPE("probe.txt")
+ASSERT_EQ $f "file"

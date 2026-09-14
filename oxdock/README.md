@@ -6,6 +6,8 @@ OxDock is a Dockerfile inspired build DSL for Rust. Embed scripts at compile tim
 
 Supports platform gating, async tasks, and piped workflows for custom pipelines.
 
+**Prototype status**: OxDock is still being prototyped. DSL syntax and Rust APIs may change without deprecation warnings until the first stable release.
+
 [Documentation](https://docs.rs/oxdock/0.13.0-alpha/oxdock/)
 
 Add it to your Rust build with `cargo add oxdock@0.13.0-alpha`, or install the standalone runner with `cargo install oxdock@0.13.0-alpha`.
@@ -42,9 +44,6 @@ oxdock_embed! {
         WRITE dist/os.txt "{{ $os }}"
         WRITE dist/toolchain.txt "{{ $toolchain }}"
         WRITE dist/manifest.txt "os toolchain"
-        ASSERT_FILE dist/os.txt
-        ASSERT_FILE dist/toolchain.txt
-        ASSERT_FILE dist/manifest.txt "os toolchain"
     },
     // Generated assets land under target/, keeping the source tree clean
     out_dir: "target/prebuilt",
@@ -94,9 +93,12 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     }
     LET $picked: STRING = CALL PICK(true)
     WRITE dist/picked.txt {{ $picked }}
-    ASSERT_FILE dist/alpha.txt "alpha OxDock 0.13.0-alpha"
-    ASSERT_FILE dist/beta.txt "beta OxDock 0.13.0-alpha"
-    ASSERT_FILE dist/picked.txt "alpha"
+    LET $a: STRING = READ dist/alpha.txt
+    LET $b: STRING = READ dist/beta.txt
+    LET $p: STRING = READ dist/picked.txt
+    ASSERT_EQ $a "alpha OxDock 0.13.0-alpha"
+    ASSERT_EQ $b "beta OxDock 0.13.0-alpha"
+    ASSERT_EQ $p "alpha"
 };
 
 let temp = GuardedPath::tempdir().expect("tempdir");
@@ -129,9 +131,11 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     FOR $f: STRING IN GLOB("dist/*.txt") {
         EXPAND $f
     }
-    ASSERT_STDOUT "built OxDock"
-    ASSERT_FILE dist/build.txt "built OxDock"
-    ASSERT_FILE dist/verbose.log "verbose on"
+    ASSERT_CONTAINS stdout "built OxDock"
+    LET $build: STRING = READ dist/build.txt
+    LET $verbose: STRING = READ dist/verbose.log
+    ASSERT_EQ $build "built OxDock"
+    ASSERT_EQ $verbose "verbose on"
 };
 
 let temp = GuardedPath::tempdir().expect("tempdir");
@@ -159,8 +163,7 @@ A command's standard streams can be rerouted through named pipes, so producers a
 ```oxdock
 WITH_IO [stdout=pipe:log] ECHO hello
 WITH_IO [stdin=pipe:log] READ_LINE $line
-WRITE line.txt "{{ $line }}"
-ASSERT_FILE line.txt "hello"
+ASSERT_EQ $line "hello"
 ```
 
 ### Scope isolation
@@ -173,8 +176,7 @@ FUNC SHADOW($v: STRING) {
     RETURN $v
 }
 LET $out: STRING = CALL SHADOW("param")
-WRITE out.txt "{{ $out }}"
-ASSERT_FILE out.txt "param"
+ASSERT_EQ $out "param"
 ```
 
 ### Sandboxing
@@ -197,7 +199,8 @@ oxdock_prepare! {
     script: {
         MKDIR gen
         WRITE gen/out.txt generated
-        ASSERT_FILE gen/out.txt generated
+        LET $o: STRING = READ gen/out.txt
+        ASSERT_EQ $o "generated"
     },
     out_dir: "target/prebuilt_prepare",
 }
@@ -213,7 +216,7 @@ fn main() {}
 WITH_IO [stdout=pipe:msg] ECHO piped-bytes
 WITH_IO [stdin=pipe:msg] WRITE piped.txt
 READ piped.txt
-ASSERT_STDOUT piped-bytes
+ASSERT_CONTAINS stdout "piped-bytes"
 ```
 
 ### Workspaces start ephemeral
@@ -222,10 +225,12 @@ Scripts start in an ephemeral snapshot workspace, an isolated temp dir that leav
 
 ```oxdock
 WRITE snap.txt from-snapshot
-ASSERT_FILE snap.txt from-snapshot
+LET $s: STRING = READ snap.txt
+ASSERT_EQ $s "from-snapshot"
 WORKSPACE LOCAL
 WRITE local.txt from-local
-ASSERT_FILE local.txt from-local
+LET $l: STRING = READ local.txt
+ASSERT_EQ $l "from-local"
 ```
 
 OxDock scripts automate build-time work: creating files, snapshotting
@@ -262,7 +267,8 @@ FOR $item: STRING IN ["a", "b"] {
     ECHO "{{ $item }}"
 }
 WRITE count.txt "{{ $count }}"
-ASSERT_FILE count.txt "2"
+LET $c: STRING = READ count.txt
+ASSERT_EQ $c "2"
 ```
 
 The `env:KEY` expression reads the script environment into a plain value. A `$var` reference never reads the environment, even when the names match:
@@ -271,7 +277,8 @@ The `env:KEY` expression reads the script environment into a plain value. A `$va
 ENV FOO="bar"
 LET $e: STRING = env:FOO
 WRITE env.txt "{{ $e }}"
-ASSERT_FILE env.txt "bar"
+LET $v: STRING = READ env.txt
+ASSERT_EQ $v "bar"
 ```
 
 ### Statements and semicolons
@@ -279,8 +286,8 @@ ASSERT_FILE env.txt "bar"
 ```oxdock
 // One line, two instructions: the semicolon splits them.
 ECHO one; ECHO two
-ASSERT_STDOUT one
-ASSERT_STDOUT two
+ASSERT_CONTAINS stdout "one"
+ASSERT_CONTAINS stdout "two"
 ```
 
 ### RUN shell and exec forms
@@ -289,7 +296,7 @@ Shell form (`RUN <command...>`) joins its arguments and runs the string in the s
 
 ```oxdock
 RUN ["cargo", "--version"]
-ASSERT_STDOUT cargo
+ASSERT_CONTAINS stdout "cargo"
 ```
 
 ### Comments
@@ -304,14 +311,14 @@ Three comment styles are supported: `//` line comments, nestable `/* ... */` blo
    /* nest */
    like this */
 ECHO visible-after-comments
-ASSERT_STDOUT visible-after-comments
+ASSERT_CONTAINS stdout "visible-after-comments"
 ```
 
 ```oxdock
 ECHO hash-mid-line # stays-in-payload
 RUN echo run-args-stop-at-slashes // removed-as-comment
-ASSERT_STDOUT hash-mid-line # stays-in-payload
-ASSERT_STDOUT run-args-stop-at-slashes
+ASSERT_CONTAINS stdout "hash-mid-line # stays-in-payload"
+ASSERT_CONTAINS stdout "run-args-stop-at-slashes"
 ```
 
 Comment markers inside quoted strings are always preserved.
@@ -327,9 +334,9 @@ ECHO "double quotes"
 
 // \" embeds a quote; the backslash itself is consumed.
 ECHO "escaped \" quote"
-ASSERT_STDOUT single quotes
-ASSERT_STDOUT double quotes
-ASSERT_STDOUT escaped " quote
+ASSERT_CONTAINS stdout "single quotes"
+ASSERT_CONTAINS stdout "double quotes"
+ASSERT_CONTAINS stdout 'escaped " quote'
 ```
 
 ## Templates
@@ -344,15 +351,15 @@ ECHO <{{ env:GREETING }}>
 
 // Bare braces are not a template: they expand to empty.
 ECHO <{{ GREETING }}>
-ASSERT_STDOUT <hello-world>
-ASSERT_STDOUT <>
+ASSERT_CONTAINS stdout "<hello-world>"
+ASSERT_CONTAINS stdout "<>"
 ```
 
 ## Guards and scoped blocks
 
 A guard is a bracketed expression that gates the instruction or block that follows it. Inside the brackets:
 
-- `env:KEY` passes when variable `KEY` exists and is non-empty; `eq(env:KEY, value)` and `neq(env:KEY, value)` compare values.
+- `env:KEY` passes when variable `KEY` exists and is non-empty; `eq(env:KEY, value)` and `ne(env:KEY, value)` compare values.
 - Bare platform tags pass based on the host: `linux`, `macos` (alias `mac`), `windows`, `unix`. Tags are case-insensitive.
 - A comma-separated list means **AND**: `[env:A, linux]`.
 - Disjunction is expressed as a call — `any(expr, expr, ...)` with at least two branches — not an infix operator.
@@ -377,10 +384,10 @@ INHERIT_ENV [DEPLOY_TARGET]
 [eq(env:DEPLOY_TARGET, staging)] ECHO deploying-to-staging
 
 // Inequality: skipped below, because DEPLOY_TARGET IS staging.
-[neq(env:DEPLOY_TARGET, staging)] ECHO deploying-elsewhere
+[ne(env:DEPLOY_TARGET, staging)] ECHO deploying-elsewhere
 
-ASSERT_STDOUT deploy-target-visible
-ASSERT_STDOUT deploying-to-staging
+ASSERT_CONTAINS stdout "deploy-target-visible"
+ASSERT_CONTAINS stdout "deploying-to-staging"
 ```
 
 ### Platform guards
@@ -391,14 +398,16 @@ ASSERT_STDOUT deploying-to-staging
 [windows] {
   WRITE os-report.txt windows
   ECHO windows-detected
-  ASSERT_FILE os-report.txt windows
-  ASSERT_STDOUT windows-detected
+  LET $rep: STRING = READ os-report.txt
+  ASSERT_EQ $rep "windows"
+  ASSERT_CONTAINS stdout "windows-detected"
 }
 [unix] {
   WRITE os-report.txt unix-family
   ECHO unix-detected
-  ASSERT_FILE os-report.txt unix-family
-  ASSERT_STDOUT unix-detected
+  LET $rep: STRING = READ os-report.txt
+  ASSERT_EQ $rep "unix-family"
+  ASSERT_CONTAINS stdout "unix-detected"
 }
 ```
 
@@ -417,9 +426,9 @@ INHERIT_ENV [OXDOCK_DOC_FEATURE_A]
 // Comma composes with AND: (A or linux) AND A — true here on every OS.
 [any(env:OXDOCK_DOC_FEATURE_A, linux), env:OXDOCK_DOC_FEATURE_A] ECHO composed-and-or-guard
 
-ASSERT_STDOUT negation-passes-for-undefined
-ASSERT_STDOUT or-matched-a-branch
-ASSERT_STDOUT composed-and-or-guard
+ASSERT_CONTAINS stdout "negation-passes-for-undefined"
+ASSERT_CONTAINS stdout "or-matched-a-branch"
+ASSERT_CONTAINS stdout "composed-and-or-guard"
 ```
 
 ### Multi-line guards
@@ -438,7 +447,8 @@ Bracket expressions may span lines. Chained guard lines apply conjunctively to t
 WRITE chained.txt applied
 
 // The artifact was never created.
-ASSERT_ABSENT chained.txt
+LET $t: STRING = PATH_TYPE("chained.txt")
+ASSERT_EQ $t "absent"
 ```
 
 ### Scoped blocks
@@ -461,9 +471,11 @@ WORKDIR scoped_area
 
 // $a is back to "some_value", MODE is back to "production",
 // and cwd is back at scoped_area — but files persist.
-ASSERT_FILE inner.txt "inner_value-staging"
+LET $in_body: STRING = READ inner.txt
+ASSERT_EQ $in_body "inner_value-staging"
 WRITE outer.txt "{{ $a }}-{{ env:MODE }}"
-ASSERT_FILE outer.txt "some_value-production"
+LET $out_body: STRING = READ outer.txt
+ASSERT_EQ $out_body "some_value-production"
 ```
 
 `IF`/`ELSE` branches, `FOR` loop bodies, `TIMEOUT` bodies, `ASYNC` bodies, and `WITH_IO [..] { ... }` blocks are all scopes under the same rule: only files and pipes leak out.
@@ -474,7 +486,8 @@ ASSERT_FILE outer.txt "some_value-production"
 
 ```oxdock expect_error:"EXIT requested with code 3"
 WRITE before.txt "persisted"
-ASSERT_FILE before.txt "persisted"
+LET $b: STRING = READ before.txt
+ASSERT_EQ $b "persisted"
 [bool:true] {
     EXIT 3
     WRITE unreachable.txt "never"
@@ -488,15 +501,18 @@ ASSERT_FILE before.txt "persisted"
 ```oxdock
 // Inline form bounds a single command.
 TIMEOUT 30s WRITE heartbeat.txt alive
-ASSERT_FILE heartbeat.txt alive
+LET $beat: STRING = READ heartbeat.txt
+ASSERT_EQ $beat "alive"
 
 // Block form bounds multiple steps.
 TIMEOUT 30s {
     WRITE a.txt one
     WRITE b.txt two
 }
-ASSERT_FILE a.txt one
-ASSERT_FILE b.txt two
+LET $a: STRING = READ a.txt
+LET $b: STRING = READ b.txt
+ASSERT_EQ $a "one"
+ASSERT_EQ $b "two"
 
 // AWAIT form bounds a task join.
 LET $quick: HANDLE = ASYNC {

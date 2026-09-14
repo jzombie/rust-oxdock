@@ -176,6 +176,10 @@ pub trait WorkspaceFs: Send + Sync {
     #[allow(clippy::disallowed_types)]
     fn entry_kind_unguarded(&self, path: &UnguardedPath) -> Result<EntryKind>;
 
+    /// No-follow variant of [`Self::entry_kind`]: reports symlinks as
+    /// [`EntryKind::Symlink`] instead of resolving through them.
+    fn entry_kind_no_follow(&self, path: &GuardedPath) -> Result<EntryKind>;
+
     fn copy_from_git(
         &self,
         rev: &str,
@@ -430,6 +434,10 @@ impl WorkspaceFs for PathResolver {
 
     fn entry_kind(&self, path: &GuardedPath) -> Result<EntryKind> {
         PathResolver::entry_kind(self, path)
+    }
+
+    fn entry_kind_no_follow(&self, path: &GuardedPath) -> Result<EntryKind> {
+        PathResolver::entry_kind_no_follow(self, path)
     }
 
     #[allow(clippy::disallowed_types)]

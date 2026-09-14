@@ -20,10 +20,8 @@
 | [`WRITE`](#write) | `WRITE <path> [<contents>]` |
 | [`APPEND`](#append) | `APPEND <path> [<contents>]` |
 | [`EXPAND`](#expand) | `EXPAND [<path>] [<KEY=val> ...]` |
-| [`ASSERT_FILE`](#assert_file) | `ASSERT_FILE [--hash <sha256>] <path> [<expected>]` |
-| [`ASSERT_DIR`](#assert_dir) | `ASSERT_DIR <path>` |
-| [`ASSERT_ABSENT`](#assert_absent) | `ASSERT_ABSENT <path>` |
-| [`ASSERT_STDOUT`](#assert_stdout) | `ASSERT_STDOUT <substring>` |
+| [`ASSERT_EQ`](#assert_eq) | `ASSERT_EQ [--hash <sha256>] <actual> <expected>` |
+| [`ASSERT_CONTAINS`](#assert_contains) | `ASSERT_CONTAINS <haystack> <needle>` |
 | [`HASH_SHA256`](#hash_sha256) | `HASH_SHA256 <path>` |
 | [`EXIT`](#exit) | `EXIT <code>` |
 | [`SLEEP`](#sleep) | `SLEEP <duration>` |

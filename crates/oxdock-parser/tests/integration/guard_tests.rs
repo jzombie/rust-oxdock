@@ -5,7 +5,7 @@ fn test_valid_guard_expressions() {
     let valid_guards = [
         "env:FOO",
         "eq(env:FOO, bar)",
-        "neq(env:FOO, bar)",
+        "ne(env:FOO, bar)",
         "bool:true",
         "linux",
         "not(windows)",
@@ -37,7 +37,7 @@ fn test_guards_reject_dollar_sign_runtime_variables() {
 }
 
 #[test]
-fn test_eq_neq_guard_parsing() {
+fn test_eq_ne_guard_parsing() {
     // eq() produces GuardExpr::Predicate(EnvEquals)
     let expr = parse_guard_expr_str("eq(env:STAGE, prod)").unwrap();
     match &expr {
@@ -48,8 +48,8 @@ fn test_eq_neq_guard_parsing() {
         other => panic!("expected EnvEquals, got {other:?}"),
     }
 
-    // neq() produces GuardExpr::Not(Predicate(EnvEquals))
-    let expr = parse_guard_expr_str("neq(env:STAGE, prod)").unwrap();
+    // ne() produces GuardExpr::Not(Predicate(EnvEquals))
+    let expr = parse_guard_expr_str("ne(env:STAGE, prod)").unwrap();
     match &expr {
         GuardExpr::Not(inner) => match inner.as_ref() {
             GuardExpr::Predicate(Guard::EnvEquals { key, value }) => {
@@ -86,11 +86,11 @@ fn test_eq_guard_quoted_value_with_comma() {
 
 #[test]
 fn test_eq_guard_requires_env_prefix() {
-    let invalid = ["eq(STAGE, prod)", "neq(STAGE, prod)", "eq(A, 1)"];
+    let invalid = ["eq(STAGE, prod)", "ne(STAGE, prod)", "eq(A, 1)"];
     for guard_str in invalid {
         assert!(
             parse_guard_expr_str(guard_str).is_err(),
-            "eq()/neq() must require env: prefix: {guard_str}"
+            "eq()/ne() must require env: prefix: {guard_str}"
         );
     }
 }
@@ -103,7 +103,7 @@ fn test_eq_guard_display_roundtrip() {
     };
     assert_eq!(guard.to_string(), "eq(env:STAGE, prod)");
 
-    // neq() displays as not(eq(...))
+    // ne() displays as not(eq(...))
     let expr = GuardExpr::Not(Box::new(GuardExpr::Predicate(Guard::EnvEquals {
         key: "STAGE".into(),
         value: "prod".into(),

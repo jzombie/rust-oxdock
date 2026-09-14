@@ -1,4 +1,7 @@
 name = "echo"
 
+[pipes.cap_echo_txt]
+expect = "hello\n"
+
 [expect]
-files = { "echo.txt" = "hello\n" }
+stdout = "hello\n"

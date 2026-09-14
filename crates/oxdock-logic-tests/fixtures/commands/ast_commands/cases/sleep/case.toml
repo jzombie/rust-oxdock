@@ -1,4 +1,4 @@
 name = "sleep"
 
 [expect]
-files = { "awake.txt" = "yes" }
+stdout = "yes\n"

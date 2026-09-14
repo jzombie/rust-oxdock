@@ -10,7 +10,8 @@ oxdock_prepare! {
     script: {
         MKDIR gen
         WRITE gen/out.txt generated
-        ASSERT_FILE gen/out.txt generated
+        LET $o: STRING = READ gen/out.txt
+        ASSERT_EQ $o "generated"
     },
     out_dir: "target/prebuilt_prepare",
 }
@@ -26,7 +27,7 @@ fn main() {}
 WITH_IO [stdout=pipe:msg] ECHO piped-bytes
 WITH_IO [stdin=pipe:msg] WRITE piped.txt
 READ piped.txt
-ASSERT_STDOUT piped-bytes
+ASSERT_CONTAINS stdout "piped-bytes"
 ```
 
 ### Workspaces start ephemeral
@@ -35,8 +36,10 @@ Scripts start in an ephemeral snapshot workspace, an isolated temp dir that leav
 
 ```oxdock
 WRITE snap.txt from-snapshot
-ASSERT_FILE snap.txt from-snapshot
+LET $s: STRING = READ snap.txt
+ASSERT_EQ $s "from-snapshot"
 WORKSPACE LOCAL
 WRITE local.txt from-local
-ASSERT_FILE local.txt from-local
+LET $l: STRING = READ local.txt
+ASSERT_EQ $l "from-local"
 ```

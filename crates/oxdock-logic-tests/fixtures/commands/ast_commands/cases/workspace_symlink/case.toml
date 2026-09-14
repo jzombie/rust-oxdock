@@ -1,5 +1,5 @@
 name = "workspace_symlink"
 setup = "workspace_symlink"
 
-[expect.local]
-files = { "client/seen.txt" = "1.2.3" }
+[pipes.cap_seen_txt]
+expect = "1.2.3"

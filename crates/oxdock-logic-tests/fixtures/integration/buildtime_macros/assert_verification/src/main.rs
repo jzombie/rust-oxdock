@@ -8,9 +8,10 @@ oxdock_embed! {
         ENV PROJECT=OxDock
         MKDIR dist
         WRITE dist/hello.txt Built with {{ env:PROJECT }}
-        ASSERT_FILE dist/hello.txt Built with {{ env:PROJECT }}
+        LET $body: STRING = READ dist/hello.txt
+        ASSERT_EQ $body "Built with OxDock"
         ECHO building-dist
-        ASSERT_STDOUT building-dist
+        ASSERT_CONTAINS stdout "building-dist"
     },
     out_dir: "prebuilt",
 }
