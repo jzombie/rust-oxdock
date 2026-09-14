@@ -103,6 +103,10 @@ impl PathResolver {
                 super::EntryKind::File => {
                     self.copy_file(&source, to)?;
                 }
+                // Following inspection resolves through links.
+                super::EntryKind::Symlink => {
+                    unreachable!("following entry_kind never reports symlinks")
+                }
             }
             return Ok(());
         }
