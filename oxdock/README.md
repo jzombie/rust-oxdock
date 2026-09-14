@@ -281,6 +281,18 @@ LET $v: STRING = READ env.txt
 ASSERT_EQ $v "bar"
 ```
 
+### Functions and commands
+
+Parentheses mark the boundary between computing a value and running a pipeline step. Builtin functions (`INSPECT`, `LOAD_TOML`, `LOAD_JSON`, `GLOB`, `INT`, `FLOAT`, `PATH_TYPE`) evaluate to an in-memory value and never write to standard output. They compute or query (`Value::Map`, `Value::String`, `Value::Int`, `Value::Float`, `Value::List`) with zero stream side effects, so they appear only where values are expected: on the right-hand side of `LET`, inside `IF` conditions, or nested in other calls. Commands (`READ`, `ECHO`, `RUN`, `WRITE`, `ASSERT_EQ`) are line-starting statements with space-separated arguments. They drive the I/O pipeline, streaming bytes to stdout or mutating state, which makes their output available to pipes and `LET` capture. When a function evaluates, process stdout stays completely untouched. When a command runs, streaming bytes is the payload:
+
+```oxdock
+// Functions compute values; stdout stays untouched.
+LET $t: STRING = PATH_TYPE("missing.txt")
+LET $n: INT = INT("41") + 1
+ASSERT_EQ $t "absent"
+ASSERT_EQ $n 42
+```
+
 ### Statements and semicolons
 
 ```oxdock
