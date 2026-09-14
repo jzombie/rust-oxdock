@@ -12,6 +12,7 @@ use oxdock_process::{
 };
 use sha2::{Digest, Sha256};
 
+use super::SNAPSHOT_PENDING_DISPLAY;
 use super::fs_ops::{canonical_cwd, copy_entry, hash_path};
 use super::io::{StreamHandle, write_stdout};
 use super::pipe::KeeperGuard;
@@ -573,7 +574,7 @@ pub(super) fn cwd<P: ProcessManager>(cx: &mut StepCtx<'_, P>, idx: usize) -> Res
     // sentinel instead of a local path or a fabricated location (issue #131).
     if cx.state.fs.is_snapshot_pending() {
         return write_stdout(cx.out.clone(), |writer| {
-            writeln!(writer, "<snapshot:pending>")?;
+            writeln!(writer, "{SNAPSHOT_PENDING_DISPLAY}")?;
             Ok(())
         });
     }

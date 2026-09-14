@@ -1,4 +1,6 @@
 name = "workspace_pending"
 
 [expect]
-stdout = "<snapshot:pending>\n"
+# Token resolved by the harness to oxdock_core::SNAPSHOT_PENDING_DISPLAY,
+# so this expectation tracks the constant instead of duplicating it.
+stdout = "@SNAPSHOT_PENDING@\n"

@@ -101,7 +101,8 @@ pub trait WorkspaceFs: Send + Sync {
     /// touches the snapshot handle.
     fn switch_to_local(&mut self);
     /// True while snapshot-selected but not yet materialized (drives the
-    /// `<snapshot:pending>` display sentinel).
+    /// pending display sentinel defined as
+    /// `oxdock_core::SNAPSHOT_PENDING_DISPLAY`).
     fn is_snapshot_pending(&self) -> bool;
     /// Map a possibly anchor-rooted path onto the shared concrete root when
     /// materialized; otherwise return it unchanged. Best-effort convergence

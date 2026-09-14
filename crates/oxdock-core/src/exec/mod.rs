@@ -40,6 +40,17 @@ use self::io::{StreamHandle, assemble_default_io, teed_stdout};
 use self::state::ExecState;
 use self::steps::execute_steps;
 
+/// Display text emitted by `CWD` while the snapshot root is selected but not
+/// yet materialized (issue #131). Single source of truth: the `cwd` handler
+/// prints this value, and the logic-test harness resolves the same value
+/// from `@SNAPSHOT_PENDING@` fixture tokens.
+pub const SNAPSHOT_PENDING_DISPLAY: &str = "<snapshot:pending>";
+
+/// Fallback tree body used when a materialized snapshot cannot be described
+/// while composing a run error (issue #131). Single source of truth for the
+/// lazy error path.
+pub const SNAPSHOT_TREE_UNAVAILABLE: &str = "<unavailable>";
+
 pub fn run_steps(fs_root: &GuardedPath, steps: &[Step]) -> Result<()> {
     run_steps_with_context(fs_root, fs_root, steps)
 }
@@ -172,7 +183,7 @@ pub fn enrich_lazy_error(
         Some(concrete) => {
             let tree = match PathResolver::new(concrete.as_path(), build_context.as_path()) {
                 Ok(describe_fs) => describe_dir(&describe_fs, concrete, 2, 24),
-                Err(_) => String::from("<unavailable>"),
+                Err(_) => String::from(SNAPSHOT_TREE_UNAVAILABLE),
             };
             let snapshot_msg = format!(
                 "filesystem snapshot (root {}):\n{}",

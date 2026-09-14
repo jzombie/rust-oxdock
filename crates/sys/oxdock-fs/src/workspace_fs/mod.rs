@@ -390,7 +390,8 @@ impl PathResolver {
     }
 
     /// True while snapshot-selected but with no concrete root published yet
-    /// (drives the `<snapshot:pending>` display sentinel). Keyed off the
+    /// (drives the pending display sentinel defined as
+    /// `oxdock_core::SNAPSHOT_PENDING_DISPLAY`). Keyed off the
     /// shared concrete publication. Eager constructors pre-publish their
     /// root, so they never read pending. Never off the lazy flag alone.
     pub fn is_snapshot_pending(&self) -> bool {
@@ -457,7 +458,8 @@ impl PathResolver {
 /// Display-only lexical base for the pending snapshot root (native only).
 /// Never created, opened, or followed: it feeds purely in-memory joins until
 /// the choke point swaps in the atomically-created concrete root, and
-/// pending-state display renders `<snapshot:pending>` instead of this value.
+/// pending-state display renders the `oxdock_core::SNAPSHOT_PENDING_DISPLAY`
+/// sentinel instead of this value.
 /// Squatting it gains an attacker nothing. No syscall of ours ever names it.
 #[cfg(not(miri))]
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]

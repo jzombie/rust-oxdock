@@ -8,7 +8,7 @@
 //! per trial.
 use crate::expectations::{self, ErrorExpectation};
 use anyhow::{Context, Result, anyhow};
-use oxdock_core::{ExecIo, enrich_lazy_error, run_steps_with_fs_with_io};
+use oxdock_core::{ExecIo, SNAPSHOT_PENDING_DISPLAY, enrich_lazy_error, run_steps_with_fs_with_io};
 use oxdock_fs::{
     GuardedPath, GuardedTempDir, PathResolver, WorkspaceFs, discover_workspace_root,
     ensure_git_identity,
@@ -841,12 +841,15 @@ fn run_case(case: &CaseSpec, steps: &[Step]) -> Result<()> {
     }
 
     if let Some(expected_stdout) = &case.expectations.stdout {
+        // Fixtures name the pending snapshot sentinel symbolically so the
+        // expectation cannot drift from `SNAPSHOT_PENDING_DISPLAY`.
+        let expected = expected_stdout.replace("@SNAPSHOT_PENDING@", SNAPSHOT_PENDING_DISPLAY);
         let actual_bytes = stdout_buf.lock().unwrap();
-        let actual_str = String::from_utf8_lossy(&actual_bytes);
-        if actual_str != *expected_stdout {
+        let actual_str = String::from_utf8_lossy(&actual_bytes).into_owned();
+        if actual_str != expected {
             return Err(anyhow!(
                 "stdout mismatch.\nExpected:\n{:?}\nActual:\n{:?}",
-                expected_stdout,
+                expected,
                 actual_str
             ));
         }
