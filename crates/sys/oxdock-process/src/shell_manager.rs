@@ -182,7 +182,7 @@ fn apply_ctx(command: &mut ProcessCommand, ctx: &CommandContext) {
     } else {
         command.env(
             "CARGO_TARGET_DIR",
-            oxdock_fs::command_path(ctx.cargo_target_dir()).into_owned(),
+            ctx.cargo_target_dir().command_path().into_owned(),
         );
     }
 }
@@ -285,7 +285,8 @@ mod tests {
             .iter()
             .map(|(key, value)| (key.to_string(), value.to_string()))
             .collect();
-        let ctx = CommandContext::from_map(&cwd, &map, &guard, &guard, &guard);
+        let scratch = oxdock_fs::reserve_cargo_scratch().expect("scratch");
+        let ctx = CommandContext::from_map(&cwd, &map, &scratch, &guard, &guard);
         (temp, ctx)
     }
 
@@ -508,7 +509,9 @@ mod tests {
         // Default branch: executor-provided cargo target dir wins when the
         // env map has no explicit override.
         let (temp_a, ctx_a) = make_ctx(&[]);
-        let expected_default = oxdock_fs::command_path(ctx_a.cargo_target_dir())
+        let expected_default = ctx_a
+            .cargo_target_dir()
+            .command_path()
             .to_string_lossy()
             .into_owned();
         let mut cmd = ProcessCommand::new("prog");

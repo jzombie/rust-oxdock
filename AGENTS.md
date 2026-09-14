@@ -46,6 +46,10 @@ Prefer explicit, test-only skips over runtime detection.
 - **Testing**: Prefer `cargo test --workspace --tests` to cover all crates; fixtures for the macros live under `crates/oxdock-logic-tests/fixtures/integration/buildtime_macros`.
 - **Workspace layout**: Internal crates live under `crates`; the CLI & build-time macros sit at the workspace root.
 
+## Code Style
+
+- **Punctuation**: do not use em dashes or en dashes as punctuation in code comments, doc comments, or any other prose. Use periods or colons instead. Hyphens inside code, identifiers, crate names, CLI flags, and versions remain allowed. This extends the README prose-style rule below to all written text in the repo.
+
 ## Documentation (generated READMEs)
 
 - **Do not edit `README.md` files by hand.** All READMEs are rendered by the native OxDock pipeline in `crates/docs-gen/src/main.rs` (`cargo run -p docs-gen` uses the workspace version; `CRATE_VERSION=<version>` overrides it); any manual additions will be overwritten on the next run. Each `target.json` declares its `out` path, `values` file, master `template`, and grouped `fragments` discovery patterns (discovered via the `scopes` in `docs-gen.json`); order lives in the master template as `{{ $files.group.stem }}` placeholders. See `crates/docs-gen/README.md` for the pipeline.

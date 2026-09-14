@@ -85,7 +85,7 @@ mod tests {
     }
 
     #[test]
-    fn run_sets_cargo_target_dir_to_fs_root() {
+    fn run_isolates_cargo_target_dir_from_workspace() {
         let temp = GuardedPath::tempdir().unwrap();
         let root = guard_root(&temp);
 
@@ -106,13 +106,49 @@ mod tests {
         run_steps(&root, &steps).unwrap();
 
         let seen = read_trimmed(&root.join("seen.txt").unwrap());
-        let expected = root.join(".cargo-target").unwrap();
+        let legacy = root.join(".cargo-target").unwrap();
 
-        assert_eq!(
+        assert_ne!(
             seen.trim(),
-            expected.display().to_string(),
-            "CARGO_TARGET_DIR should be scoped"
+            legacy.display().to_string(),
+            "CARGO_TARGET_DIR must not target the workspace tree"
         );
+        assert!(
+            seen.trim().contains("oxdock-cargo-"),
+            "CARGO_TARGET_DIR must point at the isolated scratch location, got {seen:?}"
+        );
+    }
+
+    #[test]
+    fn lazy_snapshot_run_materializes_but_local_run_does_not() {
+        let temp = GuardedPath::tempdir().unwrap();
+        let root = guard_root(&temp);
+
+        // Snapshot-rooted RUN executes against the snapshot workdir.
+        let steps = parse_script("RUN echo hi").unwrap();
+        let output = run_steps_with_lazy_snapshot(&root, &steps, ExecIo::new()).unwrap();
+        assert!(
+            output.snapshot.is_materialized(),
+            "snapshot-rooted RUN must materialize the snapshot"
+        );
+
+        // LOCAL-rooted RUN executes against the live tree.
+        let steps = parse_script("WORKSPACE LOCAL\nRUN echo hi").unwrap();
+        let output = run_steps_with_lazy_snapshot(&root, &steps, ExecIo::new()).unwrap();
+        assert!(
+            !output.snapshot.is_materialized(),
+            "LOCAL-rooted RUN must never materialize the snapshot"
+        );
+    }
+
+    #[test]
+    fn lazy_empty_run_creates_nothing() {
+        let temp = GuardedPath::tempdir().unwrap();
+        let root = guard_root(&temp);
+
+        let output = run_steps_with_lazy_snapshot(&root, &[], ExecIo::new()).unwrap();
+        assert!(!output.snapshot.is_materialized());
+        assert!(output.snapshot.get().is_none());
     }
 
     #[test]

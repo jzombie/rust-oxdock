@@ -16,7 +16,7 @@ use std::collections::BTreeSet;
 use std::collections::HashMap;
 
 use anyhow::{Context, Result, bail};
-use oxdock_core::{ExecIo, run_steps_with_context_result_with_io};
+use oxdock_core::{ExecIo, run_steps_with_lazy_snapshot};
 use oxdock_embed::{emit_embed_module, gather_assets, runtime_support_tokens};
 #[allow(clippy::disallowed_types)]
 use oxdock_fs::UnguardedPath;
@@ -372,43 +372,34 @@ fn join_manifest(manifest: &str, rel: &str) -> String {
     format!("{manifest}/{rel}")
 }
 
-/// Execute the DSL in a tempdir sandbox and copy the final workdir contents
-/// into `$OUT_DIR/<subdir>` after clearing stale entries (no merge-with-stale).
+/// Execute the DSL in a lazily-created sandbox and copy the final workdir
+/// contents into `$OUT_DIR/<subdir>` after clearing stale entries
+/// (no merge-with-stale).
+///
+/// The snapshot directory is created only on first snapshot-targeted use
+/// (issue #131): `WORKSPACE LOCAL`-only scripts never create one. LOCKED
+/// contract for such runs: `ensure()` is prohibited here. The output dir is
+/// emitted EMPTY directly, without syncing from any snapshot or (worse) the
+/// live workspace tree.
 fn build_and_materialize(name: &str, script: &str, subdir: &str) -> Result<()> {
     let debug = debug_enabled_from(std::env::var("OXDOCK_EMBED_DEBUG").ok());
 
-    let tempdir = GuardedPath::tempdir().context("failed to create sandbox tempdir")?;
-    let temp_root = tempdir.as_guarded_path().clone();
-
+    // Parse first so LOCAL-only scripts never create a snapshot directory.
     let steps =
         oxdock_core::parse_script(script).map_err(|e| anyhow::anyhow!("parse error: {e}"))?;
     let resolver = PathResolver::from_manifest_env().context("CARGO_MANIFEST_DIR missing")?;
     let workspace_root =
         oxdock_fs::discover_workspace_root().context("failed to discover workspace root")?;
 
-    let final_cwd =
-        run_steps_with_context_result_with_io(&temp_root, &workspace_root, &steps, ExecIo::new())
-            .map_err(|e| {
+    let output =
+        run_steps_with_lazy_snapshot(&workspace_root, &steps, ExecIo::new()).map_err(|e| {
             // Alternate formatting keeps the full chain + filesystem snapshot.
             anyhow::anyhow!("execution error: {e:#}")
         })?;
+    let final_cwd = output.final_cwd;
 
     if debug {
         eprintln!("oxdock: [{name}] final_cwd={}", final_cwd.display());
-    }
-
-    // Narrow allowance: crossing into OUT_DIR requires the audited
-    // unguarded escape hatch, exactly as in the historical proc-macro flow.
-    #[allow(clippy::disallowed_types)]
-    let final_external = UnguardedPath::external(final_cwd.as_path().to_path_buf());
-    let meta = resolver.metadata_unguarded(&final_external).map_err(|e| {
-        anyhow::anyhow!(
-            "final workdir missing after build: {} ({e})",
-            final_cwd.display()
-        )
-    })?;
-    if !meta.is_dir() {
-        bail!("final workdir is not a directory: {}", final_cwd.display());
     }
 
     let out_dir = out_dir_root()?;
@@ -419,7 +410,25 @@ fn build_and_materialize(name: &str, script: &str, subdir: &str) -> Result<()> {
     };
 
     ensure_materialize_dir(&resolver, &target)?;
-    stage_materialize(&resolver, &final_external, &target)?;
+    if !output.snapshot.is_materialized() {
+        clear_materialize_dir(&resolver, &target)?;
+    } else {
+        // Narrow allowance: crossing into OUT_DIR requires the audited
+        // unguarded escape hatch, exactly as in the historical proc-macro flow.
+        #[allow(clippy::disallowed_types)]
+        let final_external = UnguardedPath::external(final_cwd.as_path().to_path_buf());
+        let meta = resolver.metadata_unguarded(&final_external).map_err(|e| {
+            anyhow::anyhow!(
+                "final workdir missing after build: {} ({e})",
+                final_cwd.display()
+            )
+        })?;
+        if !meta.is_dir() {
+            bail!("final workdir is not a directory: {}", final_cwd.display());
+        }
+
+        stage_materialize(&resolver, &final_external, &target)?;
+    }
 
     if debug {
         eprintln!(
@@ -427,6 +436,30 @@ fn build_and_materialize(name: &str, script: &str, subdir: &str) -> Result<()> {
             target.display(),
             resolver.read_dir_entries(&target).ok().map(|v| v.len())
         );
+    }
+    Ok(())
+}
+
+/// Empty a materialize target without a snapshot source: remove every entry
+/// except the `.oxdock_hash` cache marker (mirrors `sync_tree`'s stale-entry
+/// removal with an empty source set). Used for `WORKSPACE LOCAL`-only runs,
+/// where `ensure()` is prohibited and no snapshot exists to sync from.
+pub fn clear_materialize_dir(resolver: &PathResolver, target: &GuardedPath) -> Result<()> {
+    for entry in resolver.read_dir_entries(target)? {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name == ".oxdock_hash" {
+            continue;
+        }
+        let child = target.join(&name)?;
+        match resolver.entry_kind(&child) {
+            Ok(EntryKind::Dir) => {
+                let _ = resolver.remove_dir_all(&child);
+            }
+            Ok(EntryKind::File) => {
+                let _ = resolver.remove_file(&child);
+            }
+            Err(_) => {}
+        }
     }
     Ok(())
 }
@@ -700,6 +733,30 @@ mod fingerprint_tests {
     }
 
     const SCRIPT: &str = "COPY in.txt out.txt";
+
+    /// LOCKED contract (issue #131): LOCAL-only runs emit an EMPTY output dir
+    /// without any snapshot. Stale entries are cleared, the `.oxdock_hash`
+    /// cache marker is preserved.
+    #[test]
+    fn clear_materialize_dir_empties_target_but_keeps_hash() -> Result<()> {
+        let (_t, resolver) = ctx();
+        let ctx_root = resolver.root().clone();
+        let target = ctx_root.join("out-target").unwrap();
+        resolver.create_dir_all(&target)?;
+        resolver.write_file(&target.join("stale.txt").unwrap(), b"stale")?;
+        resolver.create_dir_all(&target.join("stale-dir").unwrap())?;
+        resolver.write_file(&target.join(".oxdock_hash").unwrap(), b"hash")?;
+
+        super::clear_materialize_dir(&resolver, &target)?;
+
+        let names: Vec<String> = resolver
+            .read_dir_entries(&target)?
+            .iter()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec![".oxdock_hash".to_string()]);
+        Ok(())
+    }
 
     #[test]
     fn fingerprint_is_deterministic_and_sensitive() -> Result<()> {

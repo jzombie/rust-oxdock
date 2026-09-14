@@ -197,7 +197,7 @@ impl PathResolver {
             Err(primary) => {
                 #[cfg(not(miri))]
                 {
-                    if root.as_path() == self.root.as_path()
+                    if root.as_path() == self.effective_root().as_path()
                         && let Some(workspace_root) = &self.workspace_root
                         && let Ok(root_abs) = std::fs::canonicalize(root.as_path())
                         && let Ok(canon) = normalize_candidate(&root_abs, candidate)
@@ -216,7 +216,18 @@ impl PathResolver {
 
     #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
     pub(crate) fn check_access(&self, candidate: &Path, mode: AccessMode) -> Result<GuardedPath> {
-        self.check_access_with_root(&self.root, candidate, mode)
+        // Fail closed (issue #131): the never-created virtual anchor must not
+        // reach `guard_path` (which would create it). Snapshot-targeted
+        // callers materialize through the resolve choke points first, so an
+        // anchor-rooted candidate arriving here while still pending bypassed
+        // them. Bail instead of creating.
+        if self.is_snapshot_pending() && candidate.starts_with(self.anchor_path()) {
+            bail!(
+                "snapshot root not materialized; resolve through the snapshot choke point first: {}",
+                candidate.display()
+            );
+        }
+        self.check_access_with_root(self.effective_root(), candidate, mode)
     }
 }
 

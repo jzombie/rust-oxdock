@@ -29,17 +29,12 @@ fn facade_execute_with_result_runs_script() {
         shell: false,
     };
     let result = execute_with_result(opts, workspace_root).expect("execute");
-    assert_eq!(result.tempdir.as_guarded_path(), &result.final_cwd);
-    let temp_resolver = PathResolver::new(
-        result.tempdir.as_guarded_path().root(),
-        result.tempdir.as_guarded_path().root(),
-    )
-    .expect("resolver");
-    let out = result
-        .tempdir
-        .as_guarded_path()
-        .join("out.txt")
-        .expect("out path");
+    let snapshot = result
+        .snapshot_path()
+        .expect("default WRITE materializes the snapshot");
+    assert_eq!(snapshot, &result.final_cwd);
+    let temp_resolver = PathResolver::new(snapshot.root(), snapshot.root()).expect("resolver");
+    let out = snapshot.join("out.txt").expect("out path");
     let contents = temp_resolver.read_to_string(&out).expect("read out");
     assert_eq!(contents.trim(), "hi");
 }

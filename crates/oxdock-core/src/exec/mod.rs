@@ -25,7 +25,9 @@ pub use self::io::ExecIo;
 pub(crate) use self::steps::StepCtx;
 
 use anyhow::Result;
-use oxdock_fs::{GuardedPath, PathResolver, WorkspaceFs};
+use oxdock_fs::{
+    GuardedPath, LazyGuardedTempDir, PathResolver, WorkspaceFs, reserve_cargo_scratch,
+};
 use oxdock_parser::Step;
 use oxdock_process::{
     BuiltinEnv, ProcessManager, SharedInput, SharedOutput, default_process_manager,
@@ -37,6 +39,17 @@ use self::fs_ops::describe_dir;
 use self::io::{StreamHandle, assemble_default_io, teed_stdout};
 use self::state::ExecState;
 use self::steps::execute_steps;
+
+/// Display text emitted by `CWD` while the snapshot root is selected but not
+/// yet materialized (issue #131). Single source of truth: the `cwd` handler
+/// prints this value, and the logic-test harness resolves the same value
+/// from `@SNAPSHOT_PENDING@` fixture tokens.
+pub const SNAPSHOT_PENDING_DISPLAY: &str = "<snapshot:pending>";
+
+/// Fallback tree body used when a materialized snapshot cannot be described
+/// while composing a run error (issue #131). Single source of truth for the
+/// lazy error path.
+pub const SNAPSHOT_TREE_UNAVAILABLE: &str = "<unavailable>";
 
 pub fn run_steps(fs_root: &GuardedPath, steps: &[Step]) -> Result<()> {
     run_steps_with_context(fs_root, fs_root, steps)
@@ -71,29 +84,6 @@ pub fn run_steps_with_context_result_with_io(
     match run_steps_inner(fs_root, build_context, steps, io) {
         Ok(final_cwd) => Ok(final_cwd),
         Err(err) => {
-            // Compose a single error message with the top cause plus a compact fs snapshot.
-            let chain = err.chain().map(|e| e.to_string()).collect::<Vec<_>>();
-            let mut primary = chain
-                .first()
-                .cloned()
-                .unwrap_or_else(|| "unknown error".into());
-            let rest = if chain.len() > 1 {
-                let first_cause = chain[1].clone();
-                primary = format!("{primary} ({first_cause})");
-                if chain.len() > 2 {
-                    let causes = chain
-                        .iter()
-                        .skip(2)
-                        .map(|s| s.as_str())
-                        .collect::<Vec<_>>()
-                        .join("\n  ");
-                    format!("\ncauses:\n  {}", causes)
-                } else {
-                    String::new()
-                }
-            } else {
-                String::new()
-            };
             let fs = PathResolver::new(fs_root.as_path(), build_context.as_path())?;
             let tree = describe_dir(&fs, fs_root, 2, 24);
             let snapshot = format!(
@@ -101,10 +91,40 @@ pub fn run_steps_with_context_result_with_io(
                 fs_root.display(),
                 tree
             );
-            let msg = format!("{}{}\n{}", primary, rest, snapshot);
-            Err(anyhow::anyhow!(msg))
+            Err(compose_error_with_snapshot(err, snapshot))
         }
     }
+}
+
+/// Compose a single error message with the top cause plus a caller-provided
+/// filesystem-snapshot section. Shared by the eager and lazy runners so both
+/// render identical chains and only differ in the snapshot section.
+fn compose_error_with_snapshot(err: anyhow::Error, snapshot_section: String) -> anyhow::Error {
+    // Compose a single error message with the top cause plus a compact fs snapshot.
+    let chain = err.chain().map(|e| e.to_string()).collect::<Vec<_>>();
+    let mut primary = chain
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "unknown error".into());
+    let rest = if chain.len() > 1 {
+        let first_cause = chain[1].clone();
+        primary = format!("{primary} ({first_cause})");
+        if chain.len() > 2 {
+            let causes = chain
+                .iter()
+                .skip(2)
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join("\n  ");
+            format!("\ncauses:\n  {}", causes)
+        } else {
+            String::new()
+        }
+    } else {
+        String::new()
+    };
+    let msg = format!("{}{}\n{}", primary, rest, snapshot_section);
+    anyhow::anyhow!(msg)
 }
 
 fn run_steps_inner(
@@ -116,6 +136,69 @@ fn run_steps_inner(
     let mut resolver = PathResolver::new_guarded(fs_root.clone(), build_context.clone())?;
     resolver.set_workspace_root(build_context.clone());
     run_steps_with_fs_with_io(Box::new(resolver), steps, io)
+}
+
+/// Output of a lazily-executed run (issue #131): the final working directory
+/// (concretized as of return), shared ownership of the snapshot backing dir,
+/// and the filesystem handle for post-hoc convergence (e.g. concretizing the
+/// cwd after shell-entry materialization).
+pub struct LazyRunOutput {
+    pub final_cwd: GuardedPath,
+    pub snapshot: Arc<LazyGuardedTempDir>,
+    pub fs: Box<dyn WorkspaceFs>,
+}
+
+/// Execute the DSL against a lazily-created snapshot: no temporary directory
+/// exists until the first snapshot-targeted resolution. The snapshot handle
+/// is shared with the resolver, so all clones observe the same directory.
+pub fn run_steps_with_lazy_snapshot(
+    build_context: &GuardedPath,
+    steps: &[Step],
+    io: ExecIo,
+) -> Result<LazyRunOutput> {
+    let mut resolver = PathResolver::new_lazy(build_context.clone())?;
+    resolver.set_workspace_root(build_context.clone());
+    let snapshot = resolver.snapshot_handle();
+    let fs: Box<dyn WorkspaceFs> = Box::new(resolver);
+    match run_steps_with_manager(fs, steps, default_process_manager(), io) {
+        Ok((final_cwd, fs)) => Ok(LazyRunOutput {
+            final_cwd,
+            snapshot,
+            fs,
+        }),
+        Err(err) => Err(enrich_lazy_error(&snapshot, build_context, err)),
+    }
+}
+
+/// Error enrichment for lazy runs: a materialized snapshot gets the same
+/// filesystem-snapshot treatment as eager runs; a pending one reports that
+/// no snapshot directory was ever created instead of describing a tree.
+/// Chain rendering is identical to the eager path (shared composer).
+pub fn enrich_lazy_error(
+    snapshot: &Arc<LazyGuardedTempDir>,
+    build_context: &GuardedPath,
+    err: anyhow::Error,
+) -> anyhow::Error {
+    match snapshot.get() {
+        Some(concrete) => {
+            let tree = match PathResolver::new(concrete.as_path(), build_context.as_path()) {
+                Ok(describe_fs) => describe_dir(&describe_fs, concrete, 2, 24),
+                Err(_) => String::from(SNAPSHOT_TREE_UNAVAILABLE),
+            };
+            let snapshot_msg = format!(
+                "filesystem snapshot (root {}):\n{}",
+                concrete.display(),
+                tree
+            );
+            compose_error_with_snapshot(err, snapshot_msg)
+        }
+        None => compose_error_with_snapshot(
+            err,
+            String::from(
+                "filesystem snapshot: never materialized (no snapshot directory was created)",
+            ),
+        ),
+    }
 }
 
 pub fn run_steps_with_fs(
@@ -133,7 +216,7 @@ pub fn run_steps_with_fs_with_io(
     steps: &[Step],
     io: ExecIo,
 ) -> Result<GuardedPath> {
-    run_steps_with_manager(fs, steps, default_process_manager(), io)
+    run_steps_with_manager(fs, steps, default_process_manager(), io).map(|(cwd, _)| cwd)
 }
 
 fn run_steps_with_manager<P: ProcessManager>(
@@ -141,8 +224,7 @@ fn run_steps_with_manager<P: ProcessManager>(
     steps: &[Step],
     process: P,
     io: ExecIo,
-) -> Result<GuardedPath> {
-    let fs_root = fs.root().clone();
+) -> Result<(GuardedPath, Box<dyn WorkspaceFs>)> {
     let cwd = fs.root().clone();
     let build_context = fs.build_context().clone();
     let mut envs = BuiltinEnv::collect(&build_context).into_envs();
@@ -153,7 +235,7 @@ fn run_steps_with_manager<P: ProcessManager>(
     let assert_windows = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
     let mut state = ExecState {
         fs,
-        cargo_target_dir: fs_root.join(".cargo-target")?,
+        cargo_scratch: reserve_cargo_scratch()?,
         cwd,
         envs,
         bg_children: Vec::new(),
@@ -199,7 +281,11 @@ fn run_steps_with_manager<P: ProcessManager>(
         true,
     )?;
     match flow {
-        self::steps::Flow::Done => Ok(state.cwd),
+        // Concretize on the way out so a bare pending anchor never escapes as
+        // the reported final directory (shell entry / OUT_DIR sync need real
+        // paths; a pending run reports the local root or concretizes after
+        // shell-entry materialization through the returned fs handle).
+        self::steps::Flow::Done => Ok((state.fs.concretize_cwd(&state.cwd), state.fs)),
         self::steps::Flow::Break { idx } => {
             anyhow::bail!("step {}: BREAK outside loop", idx + 1)
         }

@@ -709,7 +709,8 @@ mod synthetic_backend_tests {
             .iter()
             .map(|(key, value)| (key.to_string(), value.to_string()))
             .collect();
-        let ctx = CommandContext::from_map(&cwd, &map, &guard, &guard, &guard);
+        let scratch = oxdock_fs::reserve_cargo_scratch().expect("scratch");
+        let ctx = CommandContext::from_map(&cwd, &map, &scratch, &guard, &guard);
         (guard, ctx)
     }
 

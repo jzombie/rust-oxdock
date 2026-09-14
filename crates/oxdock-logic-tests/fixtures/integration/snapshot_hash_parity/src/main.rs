@@ -1,5 +1,5 @@
 use oxdock_macros::{oxdock_embed, oxdock_prepare};
-use oxdock_cli::{ExecutionResult, Options, ScriptSource, execute_with_result};
+use oxdock_cli::{Options, ScriptSource, execute_with_result};
 use oxdock_core::{ExecIo, run_steps_with_context_result_with_io};
 use oxdock_fs::{GuardedPath, PathResolver};
 use oxdock_core::parse_script;
@@ -107,11 +107,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         shell: false,
     };
 
-    let ExecutionResult { tempdir, final_cwd } = execute_with_result(opts, workspace_root.clone())?;
+    let result = execute_with_result(opts, workspace_root.clone())?;
+    let snapshot = result
+        .snapshot_path()
+        .expect("snapshot-backed script materializes the snapshot");
     let cli_resolver =
-        PathResolver::new_guarded(tempdir.as_guarded_path().clone(), workspace_root.clone())?;
-    let cli_hash = read_dir_hash(&cli_resolver, &final_cwd)?;
-    let cli_file_hash = read_file_hash(&cli_resolver, &final_cwd)?;
+        PathResolver::new_guarded(snapshot.clone(), workspace_root.clone())?;
+    let cli_hash = read_dir_hash(&cli_resolver, &result.final_cwd)?;
+    let cli_file_hash = read_file_hash(&cli_resolver, &result.final_cwd)?;
 
     let core_temp = GuardedPath::tempdir()?;
     let core_root = core_temp.as_guarded_path().clone();

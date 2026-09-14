@@ -15,7 +15,7 @@ impl PathResolver {
         let guarded = self
             .check_access(path.as_path(), AccessMode::Write)
             .with_context(|| format!("create_dir_all denied for {}", path.display()))?;
-        self.backend.create_dir_all(&self.root, &guarded)
+        self.backend.create_dir_all(self.effective_root(), &guarded)
     }
 
     #[allow(clippy::disallowed_methods)]
@@ -109,7 +109,8 @@ impl PathResolver {
                     self.check_access_with_root(&self.build_context, parent, AccessMode::Write)
                 })
                 .with_context(|| format!("parent {} escapes root", parent.display()))?;
-            self.backend.create_dir_all(&self.root, &parent_guard)?;
+            self.backend
+                .create_dir_all(self.effective_root(), &parent_guard)?;
         }
         Ok(())
     }
@@ -417,10 +418,10 @@ impl PathResolver {
     #[cfg(miri)]
     pub fn symlink(&self, src: &GuardedPath, dst: &GuardedPath) -> Result<()> {
         let guarded_src = self
-            .check_access_with_root(&self.root, src.as_path(), AccessMode::Read)
+            .check_access_with_root(self.effective_root(), src.as_path(), AccessMode::Read)
             .with_context(|| format!("symlink source denied for {}", src.display()))?;
         let guarded_dst = self
-            .check_access_with_root(&self.root, dst.as_path(), AccessMode::Write)
+            .check_access_with_root(self.effective_root(), dst.as_path(), AccessMode::Write)
             .with_context(|| format!("symlink destination denied for {}", dst.display()))?;
 
         if self.entry_kind(&guarded_dst).is_ok() {
