@@ -1,0 +1,4 @@
+name = "workspace_pending"
+
+[expect]
+stdout = "<snapshot:pending>\n"

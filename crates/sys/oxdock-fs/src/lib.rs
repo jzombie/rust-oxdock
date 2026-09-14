@@ -34,7 +34,10 @@ pub fn discover_workspace_root() -> Result<GuardedPath> {
 pub mod workspace_fs;
 pub use workspace_fs::git::{GitIdentity, current_head_commit, ensure_git_identity};
 pub use workspace_fs::policy::{GuardPolicy, PolicyPath};
-pub use workspace_fs::{DirEntry, EntryKind, GuardedPath, GuardedTempDir, PathResolver};
+pub use workspace_fs::{
+    CargoScratch, DirEntry, EntryKind, GuardedPath, GuardedTempDir, LazyGuardedTempDir,
+    PathResolver, reserve_cargo_scratch,
+};
 pub use workspace_fs::{SpillFile, command_path, embed_path, normalized_path, to_forward_slashes};
 
 #[allow(clippy::disallowed_types)]
@@ -89,6 +92,21 @@ pub trait WorkspaceFs: Send + Sync {
     fn root(&self) -> &GuardedPath;
     fn build_context(&self) -> &GuardedPath;
     fn set_root(&mut self, root: &GuardedPath);
+
+    /// Select the snapshot root without touching the disk (`WORKSPACE
+    /// SNAPSHOT`). The pending anchor serves lexical joins until the first
+    /// snapshot-targeted choke point swaps in the concrete root.
+    fn switch_to_snapshot(&mut self);
+    /// Select the local (build-context) root (`WORKSPACE LOCAL`). Never
+    /// touches the snapshot handle.
+    fn switch_to_local(&mut self);
+    /// True while snapshot-selected but not yet materialized (drives the
+    /// `<snapshot:pending>` display sentinel).
+    fn is_snapshot_pending(&self) -> bool;
+    /// Map a possibly anchor-rooted path onto the shared concrete root when
+    /// materialized; otherwise return it unchanged. Best-effort convergence
+    /// for final-cwd reporting and display. Never creates.
+    fn concretize_cwd(&self, cwd: &GuardedPath) -> GuardedPath;
 
     fn read_file(&self, path: &GuardedPath) -> Result<Vec<u8>>;
     #[allow(clippy::disallowed_types)]
@@ -195,6 +213,22 @@ impl WorkspaceFs for PathResolver {
 
     fn set_root(&mut self, root: &GuardedPath) {
         PathResolver::set_root(self, root)
+    }
+
+    fn switch_to_snapshot(&mut self) {
+        PathResolver::switch_to_snapshot(self)
+    }
+
+    fn switch_to_local(&mut self) {
+        PathResolver::switch_to_local(self)
+    }
+
+    fn is_snapshot_pending(&self) -> bool {
+        PathResolver::is_snapshot_pending(self)
+    }
+
+    fn concretize_cwd(&self, cwd: &GuardedPath) -> GuardedPath {
+        PathResolver::concretize_cwd(self, cwd)
     }
 
     fn read_file(&self, path: &GuardedPath) -> Result<Vec<u8>> {

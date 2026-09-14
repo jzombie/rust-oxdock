@@ -30,10 +30,10 @@
 //! module.
 
 use oxdock_build::{
-    asset_input_fingerprint, embed_debug_enabled, embed_force_rebuild, execution_is_skipped,
-    stage_materialize,
+    asset_input_fingerprint, clear_materialize_dir, embed_debug_enabled, embed_force_rebuild,
+    execution_is_skipped, stage_materialize,
 };
-use oxdock_core::{ExecIo, run_steps_with_context_result_with_io};
+use oxdock_core::{ExecIo, run_steps_with_lazy_snapshot};
 use oxdock_embed::{emit_embed_module, gather_assets, runtime_support_tokens};
 #[allow(clippy::disallowed_types)]
 use oxdock_fs::UnguardedPath;
@@ -344,11 +344,8 @@ fn build_assets(
 ) -> syn::Result<GuardedPath> {
     let debug_embed = embed_debug_enabled();
 
-    // Build in a temp dir; only the final workdir gets materialized into out_dir.
-    let tempdir = GuardedPath::tempdir()
-        .map_err(|e| syn::Error::new(span, format!("failed to create temp dir: {e}")))?;
-    let temp_root_guard = tempdir.as_guarded_path().clone();
-
+    // Parse first so LOCAL-only scripts never create a snapshot directory;
+    // the snapshot materializes lazily on first snapshot-targeted use.
     let steps = oxdock_core::parse_script(script)
         .map_err(|e| syn::Error::new(span, format!("parse error: {e}")))?;
 
@@ -357,18 +354,13 @@ fn build_assets(
     let workspace_root =
         oxdock_fs::discover_workspace_root().map_err(|e| syn::Error::new(span, e.to_string()))?;
 
-    let final_cwd = catch_engine_panics(span, || {
-        run_steps_with_context_result_with_io(
-            &temp_root_guard,
-            &workspace_root,
-            &steps,
-            ExecIo::new(),
-        )
-        .map_err(|e| {
+    let output = catch_engine_panics(span, || {
+        run_steps_with_lazy_snapshot(&workspace_root, &steps, ExecIo::new()).map_err(|e| {
             // IMPORTANT: Use alternate formatting to include the full error chain and filesystem snapshot.
             syn::Error::new(span, format!("execution error: {e:#}"))
         })
     })?;
+    let final_cwd = output.final_cwd;
 
     if debug_embed {
         eprintln!(
@@ -376,6 +368,17 @@ fn build_assets(
             final_cwd.display(),
             out_dir.display()
         );
+    }
+
+    // Ensure destination exists in both branches below.
+    ensure_out_dir(&resolver, out_dir, span)?;
+    if !output.snapshot.is_materialized() {
+        // LOCKED contract (issue #131): LOCAL-only scripts yield an EMPTY
+        // output dir. `ensure()` is prohibited here. Clear directly instead
+        // of syncing from any snapshot or the live workspace tree.
+        clear_materialize_dir(&resolver, out_dir)
+            .map_err(|e| syn::Error::new(span, format!("failed to clear out_dir: {e:#}")))?;
+        return Ok(final_cwd);
     }
 
     #[allow(clippy::disallowed_types)]
@@ -399,9 +402,8 @@ fn build_assets(
         ));
     }
 
-    // Ensure destination exists, then atomically stage-and-sync the new output
-    // over the live directory (no destructive wipe window).
-    ensure_out_dir(&resolver, out_dir, span)?;
+    // Atomically stage-and-sync the new output over the live directory
+    // (no destructive wipe window).
     stage_materialize(&resolver, &final_cwd_external, out_dir)
         .map_err(|e| syn::Error::new(span, format!("failed to materialize into out_dir: {e:#}")))?;
 

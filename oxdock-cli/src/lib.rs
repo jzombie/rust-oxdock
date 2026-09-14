@@ -1,5 +1,8 @@
 use anyhow::{Context, Result, bail};
-use oxdock_fs::{GuardedPath, GuardedTempDir, PathResolver, discover_workspace_root, init_temp_gc};
+use oxdock_fs::{
+    GuardedPath, LazyGuardedTempDir, PathResolver, WorkspaceFs, discover_workspace_root,
+    init_temp_gc,
+};
 #[cfg(windows)]
 use oxdock_process::CommandBuilder;
 use oxdock_process::SharedInput;
@@ -7,7 +10,7 @@ use std::env;
 use std::io::{self, IsTerminal, Read};
 use std::sync::{Arc, Mutex};
 
-use oxdock_core::{ExecIo, run_steps_with_context_result_with_io};
+use oxdock_core::{ExecIo, run_steps_with_lazy_snapshot};
 pub use oxdock_core::{
     parse_script, run_steps, run_steps_with_context, run_steps_with_context_result,
 };
@@ -126,9 +129,33 @@ pub fn execute(opts: Options, workspace_root: GuardedPath) -> Result<()> {
     execute_with_shell_runner(opts, workspace_root, run_shell, true)
 }
 
+/// Output of a script execution (issue #131).
+///
+/// The snapshot directory is created lazily: [`ExecutionResult::snapshot`]
+/// stays unmaterialized when the script never touches snapshot-rooted state
+/// (e.g. `WORKSPACE LOCAL`-only or empty scripts), in which case
+/// [`ExecutionResult::has_snapshot`] is false and `final_cwd` points under
+/// the workspace root.
 pub struct ExecutionResult {
-    pub tempdir: GuardedTempDir,
+    /// Shared ownership of the snapshot backing dir. The physical directory
+    /// lives exactly as long as the last surviving clone (normally this
+    /// struct, since execution-internal clones are dropped before return).
+    pub snapshot: Arc<LazyGuardedTempDir>,
+    /// Actual final cwd: inside the snapshot when materialized, otherwise
+    /// under the workspace/local root.
     pub final_cwd: GuardedPath,
+}
+
+impl ExecutionResult {
+    /// Whether the run materialized the snapshot tempdir.
+    pub fn has_snapshot(&self) -> bool {
+        self.snapshot.is_materialized()
+    }
+
+    /// Borrow the snapshot root iff materialized.
+    pub fn snapshot_path(&self) -> Option<&GuardedPath> {
+        self.snapshot.get()
+    }
 }
 
 pub fn execute_with_result(opts: Options, workspace_root: GuardedPath) -> Result<ExecutionResult> {
@@ -136,15 +163,36 @@ pub fn execute_with_result(opts: Options, workspace_root: GuardedPath) -> Result
         bail!("execute_with_result does not support --shell");
     }
 
-    let tempdir = GuardedPath::tempdir().context("failed to create temp dir")?;
-    let temp_root = tempdir.as_guarded_path().clone();
+    // Read + parse BEFORE any tempdir exists so LOCAL-only scripts never
+    // create a snapshot directory they never use (issue #131).
+    let script = read_script(&opts.script, &workspace_root)?;
 
-    let script = match &opts.script {
+    let mut final_cwd = workspace_root.clone();
+    let snapshot = Arc::new(LazyGuardedTempDir::new());
+    if !script.trim().is_empty() {
+        let steps = parse_script(&script)?;
+        let output = run_steps_with_lazy_snapshot(&workspace_root, &steps, ExecIo::new())?;
+        final_cwd = output.final_cwd;
+        return Ok(ExecutionResult {
+            snapshot: output.snapshot,
+            final_cwd,
+        });
+    }
+
+    Ok(ExecutionResult {
+        snapshot,
+        final_cwd,
+    })
+}
+
+/// Read the script source without creating any execution state.
+fn read_script(source: &ScriptSource, workspace_root: &GuardedPath) -> Result<String> {
+    match source {
         ScriptSource::Path(path) => {
             let resolver = PathResolver::new(workspace_root.as_path(), workspace_root.as_path())?;
             resolver
                 .read_to_string(path)
-                .with_context(|| format!("failed to read script at {}", path.display()))?
+                .with_context(|| format!("failed to read script at {}", path.display()))
         }
         ScriptSource::Stdin => {
             let mut buf = String::new();
@@ -152,22 +200,9 @@ pub fn execute_with_result(opts: Options, workspace_root: GuardedPath) -> Result
                 .lock()
                 .read_to_string(&mut buf)
                 .context("failed to read script from stdin")?;
-            buf
+            Ok(buf)
         }
-    };
-
-    let mut final_cwd = temp_root.clone();
-    if !script.trim().is_empty() {
-        let steps = parse_script(&script)?;
-        final_cwd = run_steps_with_context_result_with_io(
-            &temp_root,
-            &workspace_root,
-            &steps,
-            ExecIo::new(),
-        )?;
     }
-
-    Ok(ExecutionResult { tempdir, final_cwd })
 }
 
 fn execute_with_shell_runner<F>(
@@ -182,10 +217,9 @@ where
     #[cfg(windows)]
     maybe_reexec_shell_to_temp(&opts)?;
 
-    let tempdir = GuardedPath::tempdir().context("failed to create temp dir")?;
-    let temp_root = tempdir.as_guarded_path().clone();
-
-    // Interpret a tiny Dockerfile-ish script
+    // Interpret a tiny Dockerfile-ish script. No tempdir exists yet: the
+    // snapshot materializes lazily on first snapshot-targeted step, so an
+    // empty non-shell run creates nothing at all (issue #131).
     let script = match &opts.script {
         ScriptSource::Path(path) => {
             // Read script path via PathResolver rooted at the workspace so
@@ -222,13 +256,15 @@ where
 
     // Parse and run steps if we have a non-empty script. Empty scripts are
     // valid when `--shell` is requested and the caller didn't pipe a script.
-    let mut final_cwd = temp_root.clone();
+    // Use the caller's workspace as the build context so WORKSPACE LOCAL can
+    // hop back and so COPY can source from the original tree if needed.
+    // Capture the final working directory so shells inherit whatever WORKDIR
+    // the script ended on.
+    let mut final_cwd = workspace_root.clone();
+    let mut snapshot = Arc::new(LazyGuardedTempDir::new());
+    let mut fs: Option<Box<dyn WorkspaceFs>> = None;
     if !script.trim().is_empty() {
         let steps = parse_script(&script)?;
-        // Use the caller's workspace as the build context so WORKSPACE LOCAL can hop back and so COPY
-        // can source from the original tree if needed. Capture the final working directory so shells
-        // inherit whatever WORKDIR the script ended on.
-
         // If we are running a script from a file, we might have stdin available for the script itself.
         // If we read the script from stdin, then stdin is consumed.
         // But if opts.script is ScriptSource::Path, stdin is still available.
@@ -248,14 +284,39 @@ where
 
         let mut io_cfg = ExecIo::new();
         io_cfg.set_stdin(stdin_handle);
-        final_cwd =
-            run_steps_with_context_result_with_io(&temp_root, &workspace_root, &steps, io_cfg)?;
+        let output = run_steps_with_lazy_snapshot(&workspace_root, &steps, io_cfg)?;
+        final_cwd = output.final_cwd;
+        snapshot = output.snapshot;
+        fs = Some(output.fs);
     }
 
     // If requested, drop into an interactive shell after running the script.
     if opts.shell {
         if require_tty && !has_controlling_tty() {
             bail!("--shell requires a tty (no controlling tty available)");
+        }
+        // The shell needs a concrete directory: materialize here at shell
+        // entry (not at startup) when the script left the snapshot pending,
+        // then converge the cwd onto the shared concrete root. An empty
+        // script starts the shell in a fresh snapshot directory.
+        match fs.as_ref() {
+            Some(fs) => {
+                if fs.is_snapshot_pending() {
+                    snapshot
+                        .materialize()
+                        .context("failed to create shell temp dir")?;
+                }
+                final_cwd = fs.concretize_cwd(&final_cwd);
+            }
+            None => {
+                snapshot
+                    .materialize()
+                    .context("failed to create shell temp dir")?;
+                final_cwd = snapshot
+                    .get()
+                    .cloned()
+                    .expect("shell snapshot materialized above");
+            }
         }
         return shell_runner(&final_cwd, &workspace_root);
     }
@@ -591,17 +652,73 @@ mod tests {
             script: ScriptSource::Path(script_path),
             shell: false,
         };
-        let ExecutionResult { tempdir, final_cwd } =
-            execute_with_result(opts, workspace_root).expect("execute");
-        assert_eq!(tempdir.as_guarded_path(), &final_cwd);
-        let temp_resolver = PathResolver::new(
-            tempdir.as_guarded_path().root(),
-            tempdir.as_guarded_path().root(),
-        )
-        .expect("resolver");
-        let out = tempdir.as_guarded_path().join("out.txt").expect("out path");
+        let result = execute_with_result(opts, workspace_root).expect("execute");
+        let snapshot = result
+            .snapshot_path()
+            .expect("default WRITE materializes the snapshot");
+        assert_eq!(snapshot, &result.final_cwd);
+        let temp_resolver = PathResolver::new(snapshot.root(), snapshot.root()).expect("resolver");
+        let out = snapshot.join("out.txt").expect("out path");
         let contents = temp_resolver.read_to_string(&out).expect("read out");
         assert_eq!(contents.trim(), "hi");
+    }
+
+    #[cfg_attr(
+        miri,
+        ignore = "GuardedPath::tempdir relies on OS tempdirs; blocked under Miri isolation"
+    )]
+    #[test]
+    fn execute_with_result_local_only_creates_no_snapshot() {
+        let workspace = GuardedPath::tempdir().expect("tempdir");
+        let workspace_root = workspace.as_guarded_path().clone();
+        let script_path = workspace_root.join("script.txt").expect("script path");
+        let resolver = PathResolver::new(workspace_root.as_path(), workspace_root.as_path())
+            .expect("resolver");
+        resolver
+            .write_file(&script_path, b"WORKSPACE LOCAL\nWRITE out.txt hi")
+            .expect("write script");
+        let opts = Options {
+            script: ScriptSource::Path(script_path),
+            shell: false,
+        };
+        let result = execute_with_result(opts, workspace_root.clone()).expect("execute");
+        assert!(
+            !result.has_snapshot(),
+            "WORKSPACE LOCAL-only script must not create a snapshot tempdir"
+        );
+        assert!(result.snapshot_path().is_none());
+        // The write landed in the live workspace tree instead.
+        let out = workspace_root.join("out.txt").expect("out path");
+        let contents = resolver.read_to_string(&out).expect("read out");
+        assert_eq!(contents.trim(), "hi");
+        // The reported cwd stays under the workspace root.
+        assert_eq!(result.final_cwd.root(), workspace_root.as_path());
+    }
+
+    #[cfg_attr(
+        miri,
+        ignore = "GuardedPath::tempdir relies on OS tempdirs; blocked under Miri isolation"
+    )]
+    #[test]
+    fn execute_with_result_empty_script_creates_no_snapshot() {
+        let workspace = GuardedPath::tempdir().expect("tempdir");
+        let workspace_root = workspace.as_guarded_path().clone();
+        let script_path = workspace_root.join("empty.txt").expect("script path");
+        let resolver = PathResolver::new(workspace_root.as_path(), workspace_root.as_path())
+            .expect("resolver");
+        resolver
+            .write_file(&script_path, b"")
+            .expect("write script");
+        let opts = Options {
+            script: ScriptSource::Path(script_path),
+            shell: false,
+        };
+        let result = execute_with_result(opts, workspace_root.clone()).expect("execute");
+        assert!(
+            !result.has_snapshot(),
+            "empty script must not create a snapshot tempdir"
+        );
+        assert_eq!(result.final_cwd, workspace_root);
     }
 
     #[cfg_attr(
@@ -622,6 +739,13 @@ mod tests {
         let called = RefCell::new(None::<(String, String)>);
         execute_for_test(opts, workspace_root.clone(), |cwd, workspace| {
             called.replace(Some((cwd.display(), workspace.display())));
+            // Shell entry converges onto a concrete, existing directory even
+            // when the script never touched the snapshot (issue #131).
+            assert!(
+                cwd.exists(),
+                "shell cwd must exist on disk, got {}",
+                cwd.display()
+            );
             Ok(())
         })?;
         let seen = called.borrow().clone().expect("shell runner called");

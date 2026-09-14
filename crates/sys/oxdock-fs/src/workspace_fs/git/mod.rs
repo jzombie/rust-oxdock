@@ -129,7 +129,7 @@ impl PathResolver {
             };
 
             let _ = self
-                .check_access_with_root(&self.root, to.as_path(), AccessMode::Write)
+                .check_access_with_root(self.effective_root(), to.as_path(), AccessMode::Write)
                 .with_context(|| format!("destination {} escapes allowed root", to.display()))?;
 
             let _ = self

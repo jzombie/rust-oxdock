@@ -4,7 +4,6 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use anyhow::{Result, bail};
-use oxdock_fs::GuardedPath;
 use oxdock_parser::{Arg, Step, StepKind, Value, guard_option_allows};
 use oxdock_process::{BackgroundHandle, CommandStdin, ProcessManager};
 
@@ -217,8 +216,6 @@ pub(super) fn sync_iteration_assert_needles<P: ProcessManager>(
 pub struct StepCtx<'a, P: ProcessManager> {
     pub(super) state: &'a mut ExecState<P>,
     pub(super) process: &'a mut P,
-    pub(super) snapshot_root: GuardedPath,
-    pub(super) build_context: GuardedPath,
     pub(super) stdin: CommandStdin,
     pub(super) expose_stdin: bool,
     pub(super) out: Option<StreamHandle>,
@@ -271,14 +268,9 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
     out: Option<StreamHandle>,
     err: Option<StreamHandle>,
 ) -> Result<Flow> {
-    let snapshot_root = state.fs.root().clone();
-    let build_context = state.fs.build_context().clone();
-
     let mut cx = StepCtx {
         state,
         process,
-        snapshot_root,
-        build_context,
         stdin,
         expose_stdin,
         out,
@@ -497,9 +489,6 @@ fn execute_steps_inner<P: ProcessManager>(
     err: Option<StreamHandle>,
     wait_at_end: bool,
 ) -> Result<Flow> {
-    let snapshot_root = state.fs.root().clone();
-    let build_context = state.fs.build_context().clone();
-
     // Pre-register assertion windows for this generation
     pre_register_assertions(state, steps, generation)?;
 
@@ -521,8 +510,6 @@ fn execute_steps_inner<P: ProcessManager>(
             let mut cx = StepCtx {
                 state,
                 process,
-                snapshot_root: snapshot_root.clone(),
-                build_context: build_context.clone(),
                 stdin: stdin.clone(),
                 expose_stdin,
                 out: out.clone(),

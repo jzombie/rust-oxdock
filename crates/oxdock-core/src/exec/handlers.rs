@@ -82,13 +82,15 @@ pub(super) fn workspace<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     target: &WorkspaceTarget,
 ) -> Result<()> {
+    // Selection only, no disk I/O. The snapshot side stays pending until the
+    // first snapshot-targeted choke point materializes it (issue #131).
     match target {
         WorkspaceTarget::Snapshot => {
-            cx.state.fs.set_root(&cx.snapshot_root);
+            cx.state.fs.switch_to_snapshot();
             cx.state.cwd = cx.state.fs.root().clone();
         }
         WorkspaceTarget::Local => {
-            cx.state.fs.set_root(&cx.build_context);
+            cx.state.fs.switch_to_local();
             cx.state.cwd = cx.state.fs.root().clone();
         }
     }
@@ -542,7 +544,13 @@ pub(super) fn ls<P: ProcessManager>(
             .resolve_read(&cx.state.cwd, p)
             .with_context(|| format!("step {}: LS {}", idx + 1, p))?
     } else {
-        cx.state.cwd.clone()
+        // Bare `LS` lists the current directory: ride the choke point so a
+        // pending snapshot materializes (a snapshot read), matching the
+        // explicit-path branch above. Local roots resolve with zero I/O.
+        cx.state
+            .fs
+            .resolve_read(&cx.state.cwd, ".")
+            .with_context(|| format!("step {}: LS", idx + 1))?
     };
     let mut entries = cx
         .state
@@ -561,11 +569,20 @@ pub(super) fn ls<P: ProcessManager>(
 }
 
 pub(super) fn cwd<P: ProcessManager>(cx: &mut StepCtx<'_, P>, idx: usize) -> Result<()> {
-    let real = canonical_cwd(cx.state.fs.as_ref(), &cx.state.cwd).with_context(|| {
+    // A pending snapshot has no concrete directory yet: report the stable
+    // sentinel instead of a local path or a fabricated location (issue #131).
+    if cx.state.fs.is_snapshot_pending() {
+        return write_stdout(cx.out.clone(), |writer| {
+            writeln!(writer, "<snapshot:pending>")?;
+            Ok(())
+        });
+    }
+    let concrete = cx.state.fs.concretize_cwd(&cx.state.cwd);
+    let real = canonical_cwd(cx.state.fs.as_ref(), &concrete).with_context(|| {
         format!(
             "step {}: CWD failed to canonicalize {}",
             idx + 1,
-            cx.state.cwd.display()
+            concrete.display()
         )
     })?;
     write_stdout(cx.out.clone(), |writer| {
@@ -1651,16 +1668,12 @@ pub(crate) fn assign_capture<P: ProcessManager>(
         }
         let (step_stdin, expose_stdin, step_stdout, step_stderr) =
             resolve_io_streams(cx, idx, &bindings, cmd)?;
-        let snapshot_root = cx.state.fs.root().clone();
-        let build_context = cx.state.fs.build_context().clone();
         // Reborrow state/process for the sub-context; `cx` is unused below.
         let state = &mut *cx.state;
         let process = &mut *cx.process;
         let mut sub_cx = super::steps::StepCtx {
             state,
             process,
-            snapshot_root,
-            build_context,
             stdin: step_stdin,
             expose_stdin,
             out: step_stdout,
@@ -2511,13 +2524,9 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
             let entry = entry_rx
                 .recv()
                 .map_err(|_| anyhow::anyhow!("ASYNC task entry unavailable"))?;
-            let snapshot_root = child_state.fs.root().clone();
-            let build_context = child_state.fs.build_context().clone();
             let mut child_cx = super::steps::StepCtx {
                 state: &mut child_state,
                 process: &mut child_process,
-                snapshot_root,
-                build_context,
                 stdin,
                 expose_stdin,
                 out,
@@ -2535,8 +2544,6 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
                 let mut sub_cx = super::steps::StepCtx {
                     state,
                     process,
-                    snapshot_root: child_cx.snapshot_root.clone(),
-                    build_context: child_cx.build_context.clone(),
                     stdin: task_stdin,
                     expose_stdin: task_expose,
                     out: task_out,

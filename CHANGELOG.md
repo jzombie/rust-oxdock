@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [UNRELEASED]
+
+### Added
+
+- Lazily-created snapshot workspace (#131): the snapshot temp directory is no longer created up front. Scripts that only use `WORKSPACE LOCAL` (or run empty) never create a snapshot directory at all; everything else materializes it exactly once, on first snapshot use. `WORKSPACE SNAPSHOT` alone only selects without creating, and `RUN` under `WORKSPACE LOCAL` executes against the live tree without materializing
+- `CARGO_TARGET_DIR` isolation (#131): `RUN` steps now point `CARGO_TARGET_DIR` at a reserved scratch location instead of `<snapshot>/.cargo-target`, so nested `cargo` invocations can no longer write into the snapshot workdir or the live workspace tree. The scratch name is reserved but never created by the host; `cargo` creates it on demand
+
+### Changed
+
+- [breaking] Host Rust API only, scripts are unaffected: `ExecutionResult::tempdir: GuardedTempDir` is now `ExecutionResult::snapshot: Arc<LazyGuardedTempDir>` with `has_snapshot()` / `snapshot_path()` helpers, and `final_cwd` points under the workspace root when no snapshot was created. `oxdock-build` / `oxdock-macros` emit an empty output dir for `WORKSPACE LOCAL`-only scripts instead of syncing from a snapshot
+
 ## [0.13.0-alpha] - 2026-09-11
 
 ### Added

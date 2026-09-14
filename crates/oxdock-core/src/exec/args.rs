@@ -702,6 +702,11 @@ fn glob_from_value<P: ProcessManager>(args: &[Value], cx: &mut StepCtx<'_, P>) -
         return Ok(Value::List(Vec::new()));
     }
 
+    // GLOB lists the current root: ride the snapshot choke point so a
+    // pending snapshot materializes here (a snapshot read), while local
+    // roots resolve with zero I/O. The listing below then runs on concrete
+    // paths in both cases.
+    let _ = cx.state.fs.resolve_read(&cx.state.cwd, ".")?;
     let root = cx.state.fs.root().clone();
     let root_path = root.as_path().to_path_buf();
     let mut entries: Vec<Value> = root

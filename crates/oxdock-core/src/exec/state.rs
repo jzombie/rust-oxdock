@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Condvar, Mutex};
 
 use anyhow::Result;
-use oxdock_fs::{GuardedPath, WorkspaceFs};
+use oxdock_fs::{CargoScratch, GuardedPath, WorkspaceFs};
 use oxdock_parser::{Step, TypeKind, Value};
 use oxdock_process::{BackgroundHandle, CommandContext, ProcessManager};
 
@@ -30,7 +30,11 @@ pub type HostFn = std::sync::Arc<dyn Fn(Vec<Value>) -> Result<Value> + Send + Sy
 
 pub(super) struct ExecState<P: ProcessManager> {
     pub(super) fs: Box<dyn WorkspaceFs>,
-    pub(super) cargo_target_dir: GuardedPath,
+    /// Pre-reserved guarded scratch name for `CARGO_TARGET_DIR` (issue #131).
+    /// Opaque [`CargoScratch`]: renderable for the child environment but not
+    /// nameable as a `&GuardedPath`, so host code cannot `ensure()` or
+    /// `create_dir_all` it. The child `cargo` creates it on demand.
+    pub(super) cargo_scratch: CargoScratch,
     pub(super) cwd: GuardedPath,
     pub(super) envs: Arc<HashMap<String, String>>,
     pub(super) bg_children: Vec<Box<dyn BackgroundHandle>>,
@@ -223,22 +227,25 @@ impl KeeperExpiry {
 
 impl<P: ProcessManager> ExecState<P> {
     pub(super) fn command_ctx(&self) -> Result<CommandContext> {
-        // Build a CommandContext snapshot for this step. The `cargo_target_dir`
-        // here is the executor default; if callers want to override it they
-        // must do so via the env map (e.g. ENV CARGO_TARGET_DIR=...), which
+        // Resolve the working directory through the snapshot choke point: a
+        // snapshot-rooted cwd materializes here (so `RUN` executes against a
+        // real directory) while a local cwd resolves purely lexically with
+        // zero I/O. `CARGO_TARGET_DIR` is the pre-reserved scratch name (never
+        // ensured by us); callers may still override it via the env map, which
         // apply_ctx respects when spawning processes.
+        let cwd = self.fs.resolve_write(&self.cwd, ".")?;
         Ok(CommandContext::new(
-            &self.cwd.clone().into(),
+            &cwd.into(),
             Arc::clone(&self.envs),
-            &self.cargo_target_dir,
+            &self.cargo_scratch,
             self.fs.root(),
             self.fs.build_context(),
         ))
     }
 
     /// Fork the execution state for a child thread. The child gets:
-    /// - A cloned filesystem handle (independent root setting, shared I/O)
-    /// - Cloned envs, cwd, cargo_target_dir, var_scopes
+    /// - A cloned filesystem handle (shared snapshot backing, independent root selection)
+    /// - Cloned envs, cwd, cargo scratch name, var_scopes
     /// - Fresh bg_children, scope_stack (empty -- child manages its own)
     /// - Shared assert_windows (Arc clone)
     /// - Cloned io configuration
@@ -248,7 +255,7 @@ impl<P: ProcessManager> ExecState<P> {
     pub(super) fn fork(&self) -> Self {
         Self {
             fs: self.fs.clone_box(),
-            cargo_target_dir: self.cargo_target_dir.clone(),
+            cargo_scratch: self.cargo_scratch.clone(),
             cwd: self.cwd.clone(),
             envs: Arc::clone(&self.envs),
             bg_children: Vec::new(),

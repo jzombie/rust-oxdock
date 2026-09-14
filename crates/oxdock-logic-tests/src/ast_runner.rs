@@ -8,9 +8,10 @@
 //! per trial.
 use crate::expectations::{self, ErrorExpectation};
 use anyhow::{Context, Result, anyhow};
-use oxdock_core::{ExecIo, run_steps_with_context_result_with_io};
+use oxdock_core::{ExecIo, enrich_lazy_error, run_steps_with_fs_with_io};
 use oxdock_fs::{
-    GuardedPath, GuardedTempDir, PathResolver, discover_workspace_root, ensure_git_identity,
+    GuardedPath, GuardedTempDir, PathResolver, WorkspaceFs, discover_workspace_root,
+    ensure_git_identity,
 };
 use oxdock_parser::{Step, StepKind};
 use oxdock_process::{CommandBuilder, SharedInput, SharedOutput};
@@ -750,22 +751,43 @@ fn collect_step_kinds(kind: &StepKind, kinds: &mut HashSet<String>) {
 }
 
 fn run_case(case: &CaseSpec, steps: &[Step]) -> Result<()> {
-    let snapshot_temp = GuardedPath::tempdir().context("create snapshot tempdir")?;
-    let snapshot = guard_root(&snapshot_temp);
+    // The local tempdir stays eager (it backs the build context). The
+    // snapshot side starts pending and materializes on first
+    // snapshot-targeted use. Cases that need it up front (setup seeds
+    // files into it, or it serves as the build context for COPY sources)
+    // materialize it explicitly below (issue #131).
     let local_temp = GuardedPath::tempdir().context("create local tempdir")?;
     let local = guard_root(&local_temp);
 
+    let mut resolver = PathResolver::new_lazy(local.clone())?;
+    let snapshot_handle = resolver.snapshot_handle();
+    if case.setup.is_some() || matches!(case.build_context, BuildContext::Snapshot) {
+        snapshot_handle
+            .materialize()
+            .context("create snapshot tempdir")?;
+    }
+    // Pre-run view: `Some` only when the case demanded the snapshot up front
+    // (setup seeds or snapshot build context). Lazily-created snapshots
+    // appear in the post-run re-read below.
+    let pre_snapshot = snapshot_handle.get().cloned();
+
     if let Some(setup) = &case.setup {
-        run_setup(setup, &case.name, &snapshot, &local)?;
+        let snapshot = pre_snapshot.as_ref().expect(
+            "case setup seeds files into the snapshot, which must be materialized up front",
+        );
+        run_setup(setup, &case.name, snapshot, &local)?;
     }
 
     let build_context = match &case.build_context {
         BuildContext::Local => local.clone(),
-        BuildContext::Snapshot => snapshot.clone(),
+        BuildContext::Snapshot => pre_snapshot
+            .clone()
+            .expect("snapshot build context requires a materialized snapshot tempdir"),
         BuildContext::LocalSubdir(rel) => local
             .join(rel)
             .with_context(|| format!("resolve build context {}", rel))?,
     };
+    resolver.set_build_context(build_context.clone());
 
     let stdin: Option<SharedInput> = case.stdin.as_ref().map(|s| {
         let cursor = std::io::Cursor::new(s.as_bytes().to_vec());
@@ -794,8 +816,13 @@ fn run_case(case: &CaseSpec, steps: &[Step]) -> Result<()> {
         pipe_buffers.push((name.clone(), buffer, spec.clone()));
     }
 
-    let result =
-        run_steps_with_context_result_with_io(&snapshot, &build_context, steps, io_cfg).map(|_| ());
+    resolver.set_workspace_root(build_context.clone());
+    let fs: Box<dyn WorkspaceFs> = Box::new(resolver);
+    // Enrich exactly like the eager runner (chain inlined at top level plus
+    // the snapshot section) so error-text expectations keep matching.
+    let result = run_steps_with_fs_with_io(fs, steps, io_cfg)
+        .map(|_| ())
+        .map_err(|err| enrich_lazy_error(&snapshot_handle, &build_context, err));
     match (&case.expect_error, result) {
         (Some(expectation), Err(err)) => {
             expectations::assert_error_matches(
@@ -825,10 +852,24 @@ fn run_case(case: &CaseSpec, steps: &[Step]) -> Result<()> {
         }
     }
 
-    verify_expectations(&case.expectations, &snapshot, &local)?;
+    match snapshot_handle.get() {
+        Some(snapshot) => {
+            verify_expectations(&case.expectations, snapshot, &local)?;
+        }
+        None => {
+            // No snapshot directory was ever created: snapshot expectations
+            // must be empty (any snapshot write would have materialized it).
+            // Local expectations still verify normally.
+            verify_expectations_empty_snapshot(&case.expectations, &case.name)?;
+            verify_expectations_local(&case.expectations, &local)?;
+        }
+    }
     verify_pipes(&pipe_buffers)?;
     if let Some(setup) = &case.setup {
-        run_cleanup(setup, &snapshot, &local)?;
+        let snapshot = snapshot_handle
+            .get()
+            .expect("case cleanup runs only for setups, which materialize the snapshot up front");
+        run_cleanup(setup, snapshot, &local)?;
     }
     Ok(())
 }
@@ -891,6 +932,82 @@ fn verify_expectations(
             Root::Local => local,
         };
         let actual = read_trimmed_root(root, &hash.file)?;
+        let mut hasher = Sha256::new();
+        hasher.update(hash.source.as_bytes());
+        let digest = hasher.finalize();
+        let bytes: &[u8] = digest.as_ref();
+        let expected: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        if actual != expected {
+            return Err(anyhow!(
+                "HASH_SHA256 output mismatch: expected {expected}, got {actual}"
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Guard for unmaterialized runs (issue #131): when no snapshot directory was
+/// ever created, no expectation may target the snapshot root. Any snapshot
+/// write would have materialized it, so demanding snapshot-rooted state here
+/// is a case-definition bug, not a pass.
+fn verify_expectations_empty_snapshot(expect: &Expectations, case_name: &str) -> Result<()> {
+    let snapshot_targeted = !expect.snapshot.files.is_empty()
+        || !expect.snapshot.missing.is_empty()
+        || !expect.snapshot.dirs.is_empty()
+        || expect.platform.is_some()
+        || matches!(&expect.ls, Some(ls) if ls.root == Root::Snapshot)
+        || matches!(&expect.cwd, Some(cwd) if cwd.root == Root::Snapshot)
+        || matches!(&expect.hash, Some(hash) if hash.root == Root::Snapshot);
+    if snapshot_targeted {
+        return Err(anyhow!(
+            "case {case_name} expects snapshot-rooted state but the snapshot was never materialized"
+        ));
+    }
+    Ok(())
+}
+
+/// Verify the local half of expectations when the snapshot was never
+/// materialized. Snapshot-rooted `ls`/`cwd`/`hash` variants are rejected by
+/// [`verify_expectations_empty_snapshot`] before this runs.
+fn verify_expectations_local(expect: &Expectations, local: &GuardedPath) -> Result<()> {
+    verify_root(&expect.local, local)?;
+
+    if let Some(ls) = &expect.ls
+        && ls.root == Root::Local
+    {
+        let content = read_trimmed_root(local, &ls.file)?;
+        let mut lines: Vec<_> = content.lines().map(str::to_string).collect();
+        if lines.is_empty() {
+            return Err(anyhow!("LS output missing header"));
+        }
+        lines.remove(0);
+        for entry in &ls.entries {
+            if !lines.contains(entry) {
+                return Err(anyhow!("LS output missing {}", entry));
+            }
+        }
+    }
+
+    if let Some(cwd) = &expect.cwd
+        && cwd.root == Root::Local
+    {
+        let expected = PathResolver::new(local.as_path(), local.as_path())?
+            .canonicalize(&local.join(&cwd.dir)?)?
+            .display()
+            .to_string();
+        let actual = read_trimmed_root(local, &cwd.file)?;
+        if actual != expected {
+            return Err(anyhow!(
+                "CWD output mismatch: expected {expected}, got {actual}"
+            ));
+        }
+    }
+
+    if let Some(hash) = &expect.hash
+        && hash.root == Root::Local
+    {
+        let actual = read_trimmed_root(local, &hash.file)?;
         let mut hasher = Sha256::new();
         hasher.update(hash.source.as_bytes());
         let digest = hasher.finalize();

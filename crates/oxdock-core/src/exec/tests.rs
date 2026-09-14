@@ -12,6 +12,18 @@ use std::collections::HashMap;
 use std::process::ExitStatus;
 use std::sync::{Arc, Mutex};
 
+/// Run steps expecting failure: discards the success payload (which now
+/// carries the filesystem handle back) so error assertions stay ergonomic.
+fn run_expect_err<P: ProcessManager>(
+    fs: Box<dyn WorkspaceFs>,
+    steps: &[Step],
+    process: P,
+) -> anyhow::Error {
+    run_steps_with_manager(fs, steps, process, ExecIo::new())
+        .map(|_| ())
+        .unwrap_err()
+}
+
 #[test]
 fn run_records_env_and_cwd() {
     let root = GuardedPath::new_root_from_str(".").unwrap();
@@ -46,9 +58,10 @@ fn run_records_env_and_cwd() {
     } = &runs[0];
     assert_eq!(script, "echo hi");
     assert_eq!(cwd, root.as_path());
-    assert_eq!(
+    assert_ne!(
         cargo_target_dir,
-        &root.join(".cargo-target").unwrap().to_path_buf()
+        &root.join(".cargo-target").unwrap().to_path_buf(),
+        "cargo outputs must stay out of the workspace tree (isolated scratch)"
     );
     assert_eq!(envs.get("FOO"), Some(&"bar".into()));
 }
@@ -227,7 +240,7 @@ fn run_exec_rejects_map_elements_with_type_error() {
     }];
     let mock = MockProcessManager::default();
     let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
-    let err = run_steps_with_manager(fs, &steps, mock, ExecIo::new()).unwrap_err();
+    let err = run_expect_err(fs, &steps, mock);
     assert!(
         format!("{err:#}").contains("must be a string"),
         "unexpected error: {err:#}"
@@ -473,7 +486,7 @@ fn exit_kills_background_processes() {
     let mock = MockProcessManager::default();
     mock.push_bg_plan(100, success_status());
     let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
-    let err = run_steps_with_manager(fs, &steps, mock.clone(), ExecIo::new()).unwrap_err();
+    let err = run_expect_err(fs, &steps, mock.clone());
     assert!(
         err.to_string().contains("EXIT requested with code 5"),
         "unexpected error: {err}"
@@ -746,11 +759,68 @@ fn success_status() -> ExitStatus {
     exit_status_from_code(0)
 }
 
+/// Choke-point boundary (issue #131): AST handler modules must never
+/// materialize, select, or fabricate execution roots directly. All snapshot
+/// demand flows structurally through `PathResolver::resolve_read` /
+/// `resolve_write` / `resolve_workdir` (plus `command_ctx()`, which resolves
+/// its workdir through them). Any new handler that needs a concrete path
+/// inherits laziness by resolving. There is nothing to register.
+///
+/// Enforced by scanning the handler sources at compile time via
+/// `include_str!` (no filesystem I/O, so no abstraction-lint concerns):
+/// - `.ensure()` / `.materialize()`: direct lazy-holder creation. (Unrelated
+///   `ensure_parent_dir` / `ensure_pipe_for` do not match `.ensure()`.)
+/// - `snapshot_handle` / `LazyGuardedTempDir`: direct handle plumbing.
+/// - `GuardedPath::tempdir` / `tempdir_with`: eager tempdir creation.
+///   (`capture.rs` is exempt: its >8MiB pipe-spill tempdir is pre-existing
+///   capture behavior, not an execution root.)
+/// - `set_root(`: legacy direct root flipping in handler/arg code. Root
+///   selection goes through `switch_to_snapshot` / `switch_to_local`
+///   (`state.rs` scope restore keeps using `set_root` and is not scanned).
+/// - `anchor_path`: the never-created virtual anchor must never be named
+///   outside `workspace_fs`.
+#[test]
+fn ast_handlers_route_snapshot_demand_through_resolve_choke_points() {
+    const HANDLER_SOURCES: &[(&str, &str)] = &[
+        ("handlers.rs", include_str!("handlers.rs")),
+        ("args.rs", include_str!("args.rs")),
+        ("steps.rs", include_str!("steps.rs")),
+        ("state.rs", include_str!("state.rs")),
+        ("fs_ops.rs", include_str!("fs_ops.rs")),
+        ("pipe.rs", include_str!("pipe.rs")),
+        ("io.rs", include_str!("io.rs")),
+    ];
+    const FORBIDDEN: &[&str] = &[
+        ".ensure()",
+        ".materialize()",
+        "snapshot_handle",
+        "LazyGuardedTempDir",
+        "GuardedPath::tempdir",
+        "tempdir_with",
+        "anchor_path",
+    ];
+    let mut violations = Vec::new();
+    for (file, source) in HANDLER_SOURCES {
+        for needle in FORBIDDEN {
+            if source.contains(needle) {
+                violations.push(format!("{file} contains forbidden {needle}"));
+            }
+        }
+        if (*file == "handlers.rs" || *file == "args.rs") && source.contains("set_root(") {
+            violations.push(format!("{file} contains forbidden set_root("));
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "choke-point boundary violated:\n{}",
+        violations.join("\n")
+    );
+}
+
 fn create_exec_state(fs: MockFs) -> ExecState<MockProcessManager> {
-    let cargo = fs.root().join(".cargo-target").unwrap();
     let mut state = ExecState {
         fs: Box::new(fs.clone()),
-        cargo_target_dir: cargo,
+        cargo_scratch: oxdock_fs::reserve_cargo_scratch().unwrap(),
         cwd: fs.root().clone(),
         envs: Arc::new(HashMap::new()),
         bg_children: Vec::new(),
@@ -1213,7 +1283,7 @@ fn bg_failure_mid_pipeline_short_circuits_and_bails() {
     };
     let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap())
         as Box<dyn WorkspaceFs>;
-    let err = run_steps_with_manager(fs, &steps, runner.clone(), ExecIo::new()).unwrap_err();
+    let err = run_expect_err(fs, &steps, runner.clone());
 
     assert!(
         err.chain()
@@ -1234,7 +1304,7 @@ fn bg_failure_after_pipeline_end_reports_status() {
     };
     let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap())
         as Box<dyn WorkspaceFs>;
-    let err = run_steps_with_manager(fs, &steps, runner, ExecIo::new()).unwrap_err();
+    let err = run_expect_err(fs, &steps, runner);
     assert!(
         err.chain()
             .any(|c| c.to_string().contains("simulated failure"))
@@ -1265,7 +1335,7 @@ fn multi_child_teardown_kills_survivor_when_first_exits() {
     };
     let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap())
         as Box<dyn WorkspaceFs>;
-    let err = run_steps_with_manager(fs, &steps, runner, ExecIo::new()).unwrap_err();
+    let err = run_expect_err(fs, &steps, runner);
     assert!(
         err.chain()
             .any(|c| c.to_string().contains("simulated failure"))
@@ -1290,7 +1360,7 @@ fn exit_kills_all_background_children() {
     mock.push_bg_plan(100, success_status());
     mock.push_bg_plan(100, success_status());
     let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
-    let err = run_steps_with_manager(fs, &steps, mock.clone(), ExecIo::new()).unwrap_err();
+    let err = run_expect_err(fs, &steps, mock.clone());
     assert!(err.to_string().contains("EXIT requested with code 3"));
 }
 
@@ -1342,7 +1412,7 @@ fn failing_foreground_run_aborts_with_step_context() {
         step(StepKind::Run("never-reached".into())),
     ];
     let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
-    let err = run_steps_with_manager(fs, &steps, runner, ExecIo::new()).unwrap_err();
+    let err = run_expect_err(fs, &steps, runner);
 
     let msg = format!("{err:#}");
     assert!(
@@ -1861,7 +1931,7 @@ fn mid_pipeline_failure_kills_background_children_via_drop() {
     };
     runner.bg.push_bg_plan(100, success_status());
     let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
-    let err = run_steps_with_manager(fs, &steps, runner.clone(), ExecIo::new()).unwrap_err();
+    let err = run_expect_err(fs, &steps, runner.clone());
     assert!(
         err.chain()
             .any(|c| c.to_string().contains("simulated failure")),
@@ -1931,8 +2001,7 @@ fn timeout_body_error_passes_through_without_firing() {
     )];
     let fs = MockFs::new();
     let fs = Box::new(fs) as Box<dyn WorkspaceFs>;
-    let err = run_steps_with_manager(fs, &steps, MockProcessManager::default(), ExecIo::new())
-        .unwrap_err();
+    let err = run_expect_err(fs, &steps, MockProcessManager::default());
     assert!(
         err.to_string().contains("EXIT requested with code 3"),
         "unexpected error: {err:#}"
@@ -2030,7 +2099,7 @@ fn timeout_fires_and_kills_blocking_command() {
     let fs = MockFs::new();
     let fs = Box::new(fs) as Box<dyn WorkspaceFs>;
     let runner = BlockingRunner::default();
-    let err = run_steps_with_manager(fs, &steps, runner.clone(), ExecIo::new()).unwrap_err();
+    let err = run_expect_err(fs, &steps, runner.clone());
     assert!(
         err.to_string().contains("TIMEOUT"),
         "expected deadline error, got: {err:#}"
@@ -2086,13 +2155,9 @@ fn timeout_preserves_preexisting_cancellation() {
     state
         .cancel_token
         .store(true, std::sync::atomic::Ordering::SeqCst);
-    let snapshot_root = state.fs.root().clone();
-    let build_context = state.fs.build_context().clone();
     let mut cx = StepCtx {
         state: &mut state,
         process: &mut proc,
-        snapshot_root,
-        build_context,
         stdin: CommandStdin::Null,
         expose_stdin: false,
         out: None,

@@ -40,6 +40,10 @@ impl std::io::Write for MockWriteCursor {
 pub struct MockFs {
     root: GuardedPath,
     build_context: GuardedPath,
+    /// Snapshot root remembered across `switch_to_local`, restored by
+    /// `switch_to_snapshot` (mirrors the resolver's selection semantics
+    /// without any laziness: mock paths are in-memory).
+    snapshot_root: Option<GuardedPath>,
     state: Arc<Mutex<MockState>>,
 }
 
@@ -58,6 +62,7 @@ impl MockFs {
         Self {
             root,
             build_context,
+            snapshot_root: None,
             state: Arc::new(Mutex::new(MockState {
                 files: HashMap::new(),
                 dirs,
@@ -157,6 +162,27 @@ impl WorkspaceFs for MockFs {
 
     fn set_root(&mut self, root: &GuardedPath) {
         self.root = root.clone();
+    }
+
+    fn switch_to_snapshot(&mut self) {
+        if let Some(saved) = self.snapshot_root.clone() {
+            self.root = saved;
+        }
+    }
+
+    fn switch_to_local(&mut self) {
+        if self.snapshot_root.is_none() {
+            self.snapshot_root = Some(self.root.clone());
+        }
+        self.root = self.build_context.clone();
+    }
+
+    fn is_snapshot_pending(&self) -> bool {
+        false
+    }
+
+    fn concretize_cwd(&self, cwd: &GuardedPath) -> GuardedPath {
+        cwd.clone()
     }
 
     fn read_file(&self, path: &GuardedPath) -> Result<Vec<u8>> {

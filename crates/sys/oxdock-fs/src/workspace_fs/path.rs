@@ -417,6 +417,133 @@ impl std::fmt::Display for GuardedTempDir {
     }
 }
 
+/// Lazily-created guarded temporary directory backing the execution snapshot
+/// (issue #131).
+///
+/// Construction performs no filesystem I/O on native targets: the directory is
+/// allocated atomically (via `tempfile::Builder`, marker/lock order preserved)
+/// on the first `ensure()` call. Under Miri a synthetic id is reserved at
+/// construction so deterministic numbering is unaffected by laziness.
+///
+/// Ownership is unified: the single `OnceLock<GuardedTempDir>` cell owns the
+/// directory guard AND its `GuardedPath`, so a path reference can never
+/// outlive its backing directory. There is deliberately no extraction API;
+/// consumers share ownership through `Arc` and the directory lives exactly as
+/// long as the last clone.
+pub struct LazyGuardedTempDir {
+    cell: Box<std::sync::OnceLock<GuardedTempDir>>,
+    init_lock: std::sync::Mutex<()>,
+    materialized: std::sync::atomic::AtomicBool,
+}
+
+impl Default for LazyGuardedTempDir {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl LazyGuardedTempDir {
+    /// Reserve the lazy holder. No filesystem I/O on native targets. Under
+    /// Miri the synthetic path is reserved (and boxed) synchronously so
+    /// deterministic numbering follows instantiation order, while the
+    /// materialized flag still flips only in `ensure()`.
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    pub fn new() -> Self {
+        #[cfg(not(miri))]
+        {
+            Self {
+                cell: Box::new(std::sync::OnceLock::new()),
+                init_lock: std::sync::Mutex::new(()),
+                materialized: std::sync::atomic::AtomicBool::new(false),
+            }
+        }
+        #[cfg(miri)]
+        {
+            let id = TEMP_COUNTER.fetch_add(1, Ordering::SeqCst);
+            let path = PathBuf::from(format!("/miri/tempdir-{id}"));
+            let seeded = GuardedTempDir::new(
+                GuardedPath {
+                    root: path.clone(),
+                    path,
+                },
+                None,
+                None,
+            );
+            let cell = Box::new(std::sync::OnceLock::new());
+            let _ = cell.set(seeded);
+            Self {
+                cell,
+                init_lock: std::sync::Mutex::new(()),
+                materialized: std::sync::atomic::AtomicBool::new(false),
+            }
+        }
+    }
+
+    /// Miri-only: the reserved synthetic path, regardless of materialization.
+    /// Never touches the host filesystem. Native targets have no reserved
+    /// identity (the directory is allocated atomically at `ensure()` time).
+    #[cfg(miri)]
+    pub(crate) fn reserved_path(&self) -> Option<GuardedPath> {
+        self.cell.get().map(|dir| dir.as_guarded_path().clone())
+    }
+
+    /// Whether the directory has been physically created (flag flip on Miri).
+    pub fn is_materialized(&self) -> bool {
+        self.materialized.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Borrow the guarded path iff materialized, `None` otherwise. This holds
+    /// even when the cell is populated (Miri reserves its synthetic path up
+    /// front, so the flag is the sole source of truth, never the cell state).
+    pub fn get(&self) -> Option<&GuardedPath> {
+        if !self.is_materialized() {
+            return None;
+        }
+        self.cell.get().map(GuardedTempDir::as_guarded_path)
+    }
+
+    /// Create the directory on first call and return its guarded path.
+    /// Idempotent and thread-safe: concurrent first touches serialize on the
+    /// init lock while steady-state reads stay lock-free. Crate-internal by
+    /// design. Product code reaches this only through the `PathResolver`
+    /// choke points (`resolve_read`/`resolve_write`/`resolve_workdir`).
+    pub(crate) fn ensure(&self) -> Result<&GuardedPath> {
+        if let Some(path) = self.get() {
+            return Ok(path);
+        }
+        let _init_guard = self
+            .init_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(path) = self.get() {
+            return Ok(path);
+        }
+        // Native: atomic `tempfile` allocation (marker/lock order preserved by
+        // the shared constructor). Miri: the cell was seeded at construction;
+        // only the flag flips here so the store below runs on both targets.
+        #[cfg(not(miri))]
+        {
+            let tmp = GuardedPath::tempdir()?;
+            let _ = self.cell.set(tmp);
+        }
+        self.materialized
+            .store(true, std::sync::atomic::Ordering::Release);
+        Ok(self
+            .cell
+            .get()
+            .map(GuardedTempDir::as_guarded_path)
+            .expect("lazy tempdir cell populated by ensure"))
+    }
+
+    /// Force physical creation without borrowing the path. Composition roots
+    /// only (e.g. interactive shell entry, which must hand a concrete
+    /// directory to an external consumer). Step handlers must resolve through
+    /// `PathResolver` instead of calling this.
+    pub fn materialize(&self) -> Result<()> {
+        self.ensure().map(|_| ())
+    }
+}
+
 /// Path wrapper that intentionally skips guard checks. Use only for paths that
 /// originate outside the guarded workspace (e.g., external file handles).
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1156,5 +1283,38 @@ mod tests {
         assert_eq!(strip_verbatim_prefix("//?/_:/a"), "//?/_:/a");
         assert_eq!(strip_verbatim_prefix("//?/1:/a"), "//?/1:/a");
         assert_eq!(strip_verbatim_prefix("//?/:/a"), "//?/:/a");
+    }
+
+    /// The lazy holder reserves nothing observable until `ensure()`: the flag
+    /// stays false and `get()` stays `None` across both targets.
+    #[test]
+    fn lazy_tempdir_defers_creation_until_ensure() {
+        let lazy = LazyGuardedTempDir::new();
+        assert!(!lazy.is_materialized());
+        assert!(lazy.get().is_none());
+    }
+
+    /// First `ensure()` materializes exactly once with a stable path; later
+    /// calls (and `get()`) observe the same directory. Safe under Miri: the
+    /// synthetic path flips from unmaterialized to materialized with no host
+    /// filesystem interaction.
+    #[test]
+    fn lazy_tempdir_ensure_is_idempotent_with_stable_path() {
+        let lazy = LazyGuardedTempDir::new();
+        let first = lazy.ensure().expect("ensure").clone();
+        assert!(lazy.is_materialized());
+        assert_eq!(lazy.get(), Some(&first));
+        let second = lazy.ensure().expect("re-ensure").clone();
+        assert_eq!(first.as_path(), second.as_path());
+    }
+
+    /// Native `ensure()` really creates the directory on disk (marker/lock
+    /// written by the shared `tempdir` constructor).
+    #[cfg(not(miri))]
+    #[test]
+    fn lazy_tempdir_ensure_creates_directory_on_disk() {
+        let lazy = LazyGuardedTempDir::new();
+        let path = lazy.ensure().expect("ensure").clone();
+        assert!(path.exists(), "materialized snapshot root must exist");
     }
 }

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use anyhow::{Result, bail};
-use oxdock_fs::{GuardedPath, PolicyPath};
+use oxdock_fs::{CargoScratch, GuardedPath, PolicyPath};
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 use std::process::ExitStatus;
 
@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 pub struct CommandContext {
     cwd: PolicyPath,
     envs: Arc<HashMap<String, String>>,
-    cargo_target_dir: GuardedPath,
+    cargo_target_dir: CargoScratch,
     workspace_root: GuardedPath,
     build_context: GuardedPath,
 }
@@ -23,7 +23,7 @@ impl CommandContext {
     pub fn new(
         cwd: &PolicyPath,
         envs: Arc<HashMap<String, String>>,
-        cargo_target_dir: &GuardedPath,
+        cargo_target_dir: &CargoScratch,
         workspace_root: &GuardedPath,
         build_context: &GuardedPath,
     ) -> Self {
@@ -40,7 +40,7 @@ impl CommandContext {
     pub fn from_map(
         cwd: &PolicyPath,
         envs: &HashMap<String, String>,
-        cargo_target_dir: &GuardedPath,
+        cargo_target_dir: &CargoScratch,
         workspace_root: &GuardedPath,
         build_context: &GuardedPath,
     ) -> Self {
@@ -61,7 +61,7 @@ impl CommandContext {
         &self.envs
     }
 
-    pub fn cargo_target_dir(&self) -> &GuardedPath {
+    pub fn cargo_target_dir(&self) -> &CargoScratch {
         &self.cargo_target_dir
     }
 
