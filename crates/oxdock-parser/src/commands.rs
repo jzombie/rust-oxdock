@@ -121,7 +121,7 @@ fn fmt_value(arg: &Arg, quote: fn(&str) -> String) -> String {
 fn quote_arg(s: &str) -> String {
     let is_safe = s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
         && !s.starts_with(|c: char| c.is_ascii_digit() || c == '-' || c == '/' || c == '.')
-        && crate::Command::parse(s).is_none();
+        && !crate::Command::is_statement_keyword(s);
     if is_safe && !s.is_empty() {
         s.to_string()
     } else {
@@ -132,7 +132,7 @@ fn quote_arg(s: &str) -> String {
 fn quote_msg(s: &str) -> String {
     let safe = s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
         && !s.starts_with(|c: char| c.is_ascii_digit())
-        && crate::Command::parse(s).is_none();
+        && !crate::Command::is_statement_keyword(s);
     if safe && !s.is_empty() {
         s.to_string()
     } else {

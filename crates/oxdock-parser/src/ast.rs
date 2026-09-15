@@ -156,7 +156,25 @@ impl Command {
             _ => None,
         }
     }
+
+    /// Whether a bare word opens a new statement in either parse pathway.
+    /// Covers plain commands plus [`STRUCTURAL_KEYWORDS`]. Single source
+    /// of truth for `Display` quoting and token-stream line splitting, which
+    /// must agree or round-trips break.
+    pub(crate) fn is_statement_keyword(s: &str) -> bool {
+        Command::parse(s).is_some() || STRUCTURAL_KEYWORDS.contains(&s)
+    }
 }
+
+/// Statement starters parsed by PEG rules rather than command lowering
+/// (`dsl.pest`, token-walker branches), living outside the [`Command`]
+/// enum. Canonical registry backing [`Command::is_statement_keyword`];
+/// iterate this (plus [`crate::all_metadata`] names) instead of
+/// hardcoding keyword lists elsewhere.
+pub const STRUCTURAL_KEYWORDS: &[&str] = &[
+    "LET", "FOR", "IF", "ELSE", "ASYNC", "AWAIT", "CANCEL", "FUNC", "CALL", "RETURN", "WHILE",
+    "BREAK", "CONTINUE",
+];
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum PlatformGuard {
