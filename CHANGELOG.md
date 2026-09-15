@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [0.14.1-alpha] - 2026-09-15
+
+### Fixed
+
+- Lazy snapshot materialized by assertion-needle pre-registration (#131): `resolve_arg_state` built a full command context just to read environment bindings, and constructing the context resolved the working directory through the snapshot choke point, creating the `oxdock-XXXX` temp directory before the first step ran. Needle expansion now reads `state.envs` directly without touching the filesystem, so `ECHO` / `ASSERT_CONTAINS`-only scripts leave the snapshot pending under both `WORKSPACE LOCAL` and the default snapshot root, and their failures report `never materialized` instead of dumping a marker-only tree.
+
 ## [0.14.0-alpha] - 2026-09-14
 
 ### Added

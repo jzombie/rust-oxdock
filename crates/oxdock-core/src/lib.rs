@@ -150,6 +150,129 @@ mod tests {
     }
 
     #[test]
+    fn lazy_local_echo_assert_failure_never_materializes_snapshot() {
+        let temp = GuardedPath::tempdir().unwrap();
+        let root = guard_root(&temp);
+
+        let script = indoc!(
+            r#"
+            WORKSPACE LOCAL
+            ECHO playground pid is 41067
+            ASSERT_CONTAINS stdout "playground pid i!!"
+            "#
+        );
+        let steps = parse_script(script).unwrap();
+
+        // Retain the snapshot handle across the failing run: the lazy
+        // convenience wrapper discards it on error, so drive the manager
+        // directly to pin the unmaterialized invariant (issue #131).
+        let mut resolver = PathResolver::new_lazy(root.clone()).unwrap();
+        resolver.set_workspace_root(root.clone());
+        let snapshot = resolver.snapshot_handle();
+        let fs: Box<dyn oxdock_fs::WorkspaceFs> = Box::new(resolver);
+        let result = run_steps_with_manager(
+            fs,
+            &steps,
+            oxdock_process::default_process_manager(),
+            ExecIo::new(),
+        );
+        assert!(result.is_err(), "mismatched ASSERT_CONTAINS must fail");
+        let err = result.err().unwrap();
+        assert!(!snapshot.is_materialized());
+        assert!(snapshot.get().is_none());
+
+        let enriched = enrich_lazy_error(&snapshot, &root, err);
+        let msg = enriched.to_string();
+        assert!(
+            msg.contains("did not contain 'playground pid i!!'"),
+            "{msg}"
+        );
+        assert!(msg.contains("never materialized"), "{msg}");
+        assert!(!msg.contains("filesystem snapshot (root"), "{msg}");
+    }
+
+    #[test]
+    fn lazy_local_echo_assert_success_leaves_snapshot_pending() {
+        let temp = GuardedPath::tempdir().unwrap();
+        let root = guard_root(&temp);
+
+        let script = indoc!(
+            r#"
+            WORKSPACE LOCAL
+            ECHO playground pid is 41067
+            ASSERT_CONTAINS stdout "playground pid is 41067"
+            "#
+        );
+        let steps = parse_script(script).unwrap();
+
+        let output = run_steps_with_lazy_snapshot(&root, &steps, ExecIo::new()).unwrap();
+        assert!(!output.snapshot.is_materialized());
+        assert!(output.snapshot.get().is_none());
+    }
+
+    #[test]
+    fn lazy_default_mode_echo_assert_failure_keeps_snapshot_pending() {
+        let temp = GuardedPath::tempdir().unwrap();
+        let root = guard_root(&temp);
+
+        // Same conditions as the LOCAL failure test, minus the WORKSPACE
+        // statement: the implicit default is snapshot mode, but the
+        // non-mutating steps must still leave it pending (issue #131).
+        let script = indoc!(
+            r#"
+            ECHO playground pid is 41067
+            ASSERT_CONTAINS stdout "playground pid i!!"
+            "#
+        );
+        let steps = parse_script(script).unwrap();
+
+        // Retain the snapshot handle across the failing run: the lazy
+        // convenience wrapper discards it on error, so drive the manager
+        // directly to pin the unmaterialized invariant (issue #131).
+        let mut resolver = PathResolver::new_lazy(root.clone()).unwrap();
+        resolver.set_workspace_root(root.clone());
+        let snapshot = resolver.snapshot_handle();
+        let fs: Box<dyn oxdock_fs::WorkspaceFs> = Box::new(resolver);
+        let result = run_steps_with_manager(
+            fs,
+            &steps,
+            oxdock_process::default_process_manager(),
+            ExecIo::new(),
+        );
+        assert!(result.is_err(), "mismatched ASSERT_CONTAINS must fail");
+        let err = result.err().unwrap();
+        assert!(!snapshot.is_materialized());
+        assert!(snapshot.get().is_none());
+
+        let enriched = enrich_lazy_error(&snapshot, &root, err);
+        let msg = enriched.to_string();
+        assert!(
+            msg.contains("did not contain 'playground pid i!!'"),
+            "{msg}"
+        );
+        assert!(msg.contains("never materialized"), "{msg}");
+        assert!(!msg.contains("filesystem snapshot (root"), "{msg}");
+    }
+
+    #[test]
+    fn lazy_default_mode_write_materializes_snapshot() {
+        let temp = GuardedPath::tempdir().unwrap();
+        let root = guard_root(&temp);
+
+        // No WORKSPACE statement: a snapshot-targeted WRITE must transition
+        // the lazy handle to materialized (issue #131).
+        let steps = parse_script("WRITE \"snap.txt\" \"snap\"").unwrap();
+
+        let output = run_steps_with_lazy_snapshot(&root, &steps, ExecIo::new()).unwrap();
+        assert!(output.snapshot.is_materialized());
+        let snapshot_root = output.snapshot.get().expect("snapshot must be published");
+        assert!(
+            exists(snapshot_root, "snap.txt"),
+            "WRITE must land inside the materialized snapshot"
+        );
+    }
+
+    #[test]
     fn guard_skips_when_env_missing() {
         let temp = GuardedPath::tempdir().unwrap();
         let root = guard_root(&temp);
