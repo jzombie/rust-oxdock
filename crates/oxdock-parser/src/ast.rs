@@ -168,7 +168,7 @@ impl Command {
 
 /// Statement starters parsed by PEG rules rather than command lowering
 /// (`dsl.pest`, token-walker branches), living outside the [`Command`]
-/// enum. Canonical registry backing [`Command::is_statement_keyword`];
+/// enum. Canonical registry backing `Command::is_statement_keyword`;
 /// iterate this (plus [`crate::all_metadata`] names) instead of
 /// hardcoding keyword lists elsewhere.
 pub const STRUCTURAL_KEYWORDS: &[&str] = &[
