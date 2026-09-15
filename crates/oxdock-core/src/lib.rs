@@ -26,10 +26,8 @@ define_pipeline! {
     StepKind::Write { .. } => exec::dispatch_write,
     StepKind::Append { .. } => exec::dispatch_append,
     StepKind::Expand { .. } => exec::dispatch_expand,
-    StepKind::AssertFile { .. } => exec::dispatch_assert_file,
-    StepKind::AssertDir(..) => exec::dispatch_assert_dir,
-    StepKind::AssertAbsent(..) => exec::dispatch_assert_absent,
-    StepKind::AssertStdout(..) => exec::dispatch_assert_stdout,
+    StepKind::AssertEq { .. } => exec::dispatch_assert_eq,
+    StepKind::AssertContains { .. } => exec::dispatch_assert_contains,
     StepKind::HashSha256 { .. } => exec::dispatch_hash_sha256,
     StepKind::Exit(..) => exec::dispatch_exit,
     StepKind::AssignAsync { .. } => exec::dispatch_assign_async_step,
@@ -374,7 +372,7 @@ mod tests {
                 r#"
                 ENV PROFILE={0}
                 [eq(env:PROFILE, {0})] WRITE "hit.txt" "yes"
-                [neq(env:PROFILE, {0})] WRITE "miss.txt" "no"
+                [ne(env:PROFILE, {0})] WRITE "miss.txt" "no"
                 "#
             ),
             profile
@@ -431,7 +429,7 @@ mod tests {
             indoc!(
                 r#"
                 ENV {k}=ok
-                [env:{k},neq(env:{k}, ok)] WRITE "miss.txt" "yes"
+                [env:{k},ne(env:{k}, ok)] WRITE "miss.txt" "yes"
                 WRITE "always.txt" "ok"
                 "#
             ),

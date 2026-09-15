@@ -391,6 +391,12 @@ impl WorkspaceFs for MockFs {
         }
     }
 
+    fn entry_kind_no_follow(&self, path: &GuardedPath) -> Result<EntryKind> {
+        // The mock filesystem has no symlinks, so no-follow inspection
+        // coincides with following inspection.
+        self.entry_kind(path)
+    }
+
     #[allow(clippy::disallowed_types)]
     fn entry_kind_unguarded(&self, _path: &UnguardedPath) -> Result<EntryKind> {
         bail!("unguarded operations not supported in mock fs");

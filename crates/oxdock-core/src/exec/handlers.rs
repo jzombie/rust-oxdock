@@ -2,13 +2,12 @@ use anyhow::{Context, Result, anyhow, bail};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use oxdock_fs::EntryKind;
 use oxdock_parser::{
     Arg, Expr, IoBinding, IoStream, PipeTarget, Step, StepKind, TypeKind, Value, WorkspaceTarget,
 };
 use oxdock_process::{
     BackgroundHandle, CommandOptions, CommandResult, CommandStderr, CommandStdin, CommandStdout,
-    INHERIT_STDOUT_ENV_VAR, PROCESS_DEBUG_ENV_VAR, ProcessManager,
+    INHERIT_STDOUT_ENV_VAR, PROCESS_DEBUG_ENV_VAR, ProcessManager, SharedInput,
 };
 use sha2::{Digest, Sha256};
 
@@ -940,154 +939,368 @@ pub(super) fn replace<P: ProcessManager>(
     Ok(())
 }
 
-pub(super) fn assert_file<P: ProcessManager>(
-    cx: &mut StepCtx<'_, P>,
-    idx: usize,
-    hash: &Option<String>,
-    path: &str,
-    contents: Option<&str>,
-) -> Result<()> {
-    let target = cx
-        .state
-        .fs
-        .resolve_read(&cx.state.cwd, path)
-        .with_context(|| format!("step {}: ASSERT_FILE {}", idx + 1, path))?;
-    if !matches!(cx.state.fs.entry_kind(&target)?, EntryKind::File) {
-        bail!("step {}: ASSERT_FILE {} is not a file", idx + 1, path);
-    }
-    if let Some(expected) = hash {
-        let mut hasher = Sha256::new();
-        hash_path(cx.state.fs.as_ref(), &target, "", &mut hasher)?;
-        let digest = hasher.finalize();
-        let bytes: &[u8] = digest.as_ref();
-        let actual: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-        if !actual.eq_ignore_ascii_case(expected) {
-            bail!(
-                "step {}: ASSERT_FILE --hash mismatch for {}: expected {}, computed {}",
-                idx + 1,
-                path,
-                expected,
-                actual
-            );
-        }
-        return Ok(());
-    }
-    if let Some(expected_body) = contents {
-        let actual =
-            cx.state.fs.read_file(&target).with_context(|| {
-                format!("step {}: ASSERT_FILE {} could not be read", idx + 1, path)
-            })?;
-        if actual != expected_body.as_bytes() {
-            bail!(
-                "step {}: ASSERT_FILE content mismatch for {}\nexpected: {:?}\nactual:   {:?}",
-                idx + 1,
-                path,
-                expected_body,
-                String::from_utf8_lossy(&actual)
-            );
-        }
-    }
-    Ok(())
-}
-
-pub(super) fn assert_dir<P: ProcessManager>(
-    cx: &mut StepCtx<'_, P>,
-    idx: usize,
-    path: &str,
-) -> Result<()> {
-    let target = cx
-        .state
-        .fs
-        .resolve_read(&cx.state.cwd, path)
-        .with_context(|| format!("step {}: ASSERT_DIR {}", idx + 1, path))?;
-    if !matches!(cx.state.fs.entry_kind(&target)?, EntryKind::Dir) {
-        bail!("step {}: ASSERT_DIR {} is not a directory", idx + 1, path);
-    }
-    Ok(())
-}
-
-pub(super) fn assert_absent<P: ProcessManager>(
-    cx: &mut StepCtx<'_, P>,
-    idx: usize,
-    path: &str,
-) -> Result<()> {
-    let target = cx
-        .state
-        .fs
-        .resolve_write(&cx.state.cwd, path)
-        .with_context(|| format!("step {}: ASSERT_ABSENT {}", idx + 1, path))?;
-    if cx.state.fs.entry_kind(&target).is_ok() {
-        bail!("step {}: ASSERT_ABSENT {} exists", idx + 1, path);
-    }
-    Ok(())
-}
-
-pub(super) fn assert_stdout<P: ProcessManager>(
+/// Strict equality assertion over evaluated values, stream buffers, and
+/// pipe buffers. Typed `Value` comparison with no coercion; files never
+/// appear here (read them into variables first). `--hash` compares the
+/// SHA-256 of a string actual instead of the bytes themselves.
+pub(super) fn assert_eq<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     idx: usize,
     generation: usize,
     idx_step: usize,
-    needle: &str,
+    hash: &Option<String>,
+    actual: &super::steps::ResolvedAssertTarget,
+    expected: Option<&Value>,
 ) -> Result<()> {
-    // Mode 1: Piped stdin — actively consume stream and check
-    if let CommandStdin::Stream(input_stream) = cx.stdin.clone() {
-        let mut guard = input_stream
-            .lock()
-            .map_err(|_| anyhow!("failed to lock stdin for ASSERT_STDOUT"))?;
-        let mut window = super::io::SlidingWindow::new(needle.as_bytes().to_vec());
-        let mut buf = [0u8; super::io::CHUNK_SIZE];
-        let mut read_any = false;
-        loop {
-            let n = guard
-                .read(&mut buf)
-                .context("failed to read from stdin for ASSERT_STDOUT")?;
-            if n == 0 {
-                break;
-            }
-            read_any = true;
-            window.push_chunk(&buf[..n]);
-            super::io::write_stdout(cx.out.clone(), |w| {
-                w.write_all(&buf[..n])?;
-                Ok(())
-            })?;
-        }
-        if read_any {
-            if window.matched {
-                return Ok(());
-            }
-            let emitted = String::from_utf8_lossy(&window.ring_buffer()).into_owned();
+    use super::steps::ResolvedAssertTarget;
+    // Exact stdout accumulators are generation-scoped (trial-cumulative),
+    // unlike per-step substring windows, so the step index is unused here.
+    let _ = idx_step;
+    // Mode 1: exact stdout with piped stdin consumes the stream, mirroring
+    // the legacy substring behavior, but compares exact bytes.
+    if let ResolvedAssertTarget::Stdout = actual
+        && let CommandStdin::Stream(input_stream) = cx.stdin.clone()
+    {
+        let drained = drain_stdin_bounded(idx, input_stream, "ASSERT_EQ")?;
+        super::io::write_stdout(cx.out.clone(), |w| {
+            w.write_all(&drained)?;
+            Ok(())
+        })?;
+        let Some(Value::String(want)) = expected else {
             bail!(
-                "step {}: ASSERT_STDOUT did not contain '{}'; emitted:\n{}",
+                "step {}: ASSERT_EQ stream mismatch\nexpected: {:?}\nactual:   {:?}",
                 idx + 1,
-                needle,
-                emitted.trim_end()
+                expected,
+                String::from_utf8_lossy(&drained)
+            );
+        };
+        if drained != want.as_bytes() {
+            bail!(
+                "step {}: ASSERT_EQ stream mismatch\nexpected: {:?}\nactual:   {:?}",
+                idx + 1,
+                want,
+                String::from_utf8_lossy(&drained)
             );
         }
+        return Ok(());
     }
-
-    // Mode 2: Step scope — check pre-registered window
-    let windows = cx
-        .state
-        .assert_windows
-        .lock()
-        .map_err(|_| anyhow!("assert_windows poisoned"))?;
-    let key = (generation, idx_step);
-    match windows.get(&key) {
-        Some(w) if w.matched => Ok(()),
-        Some(w) => {
-            let emitted = String::from_utf8_lossy(&w.ring_buffer()).into_owned();
+    if let Some(sha) = hash {
+        let actual_bytes: Vec<u8> = match actual {
+            ResolvedAssertTarget::Value(Value::String(s)) => s.as_bytes().to_vec(),
+            ResolvedAssertTarget::Pipe(bytes) => bytes.clone(),
+            ResolvedAssertTarget::Value(other) => {
+                bail!(
+                    "step {}: ASSERT_EQ --hash needs a string actual, found {:?}",
+                    idx + 1,
+                    other
+                );
+            }
+            ResolvedAssertTarget::Stdout => exact_stdout_bytes(cx, idx, generation)?,
+            ResolvedAssertTarget::Stderr => {
+                bail!(
+                    "step {}: ASSERT_EQ over stderr is not supported; use ASSERT_CONTAINS stderr ...",
+                    idx + 1
+                );
+            }
+        };
+        let mut hasher = Sha256::new();
+        hasher.update(&actual_bytes);
+        let digest = hasher.finalize();
+        let bytes: &[u8] = digest.as_ref();
+        let computed: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        if !computed.eq_ignore_ascii_case(sha) {
             bail!(
-                "step {}: ASSERT_STDOUT did not contain '{}'; emitted:\n{}",
+                "step {}: ASSERT_EQ --hash mismatch: expected {}, computed {}",
                 idx + 1,
-                needle,
-                emitted.trim_end()
-            )
+                sha,
+                computed
+            );
         }
-        _ => bail!(
-            "step {}: ASSERT_STDOUT did not contain '{}'",
-            idx + 1,
-            needle
+        return Ok(());
+    }
+    match actual {
+        ResolvedAssertTarget::Value(got) => {
+            let Some(want) = expected else {
+                bail!("step {}: ASSERT_EQ requires an expected value", idx + 1);
+            };
+            if got == want {
+                Ok(())
+            } else {
+                bail!(
+                    "step {}: ASSERT_EQ mismatch\nexpected: {:?}\nactual:   {:?}",
+                    idx + 1,
+                    want,
+                    got
+                );
+            }
+        }
+        ResolvedAssertTarget::Stdout => {
+            let bytes = exact_stdout_bytes(cx, idx, generation)?;
+            let Some(Value::String(want)) = expected else {
+                bail!(
+                    "step {}: ASSERT_EQ stream mismatch\nexpected: {:?}\nactual:   {:?}",
+                    idx + 1,
+                    expected,
+                    String::from_utf8_lossy(&bytes)
+                );
+            };
+            if bytes != want.as_bytes() {
+                bail!(
+                    "step {}: ASSERT_EQ stream mismatch\nexpected: {:?}\nactual:   {:?}",
+                    idx + 1,
+                    want,
+                    String::from_utf8_lossy(&bytes)
+                );
+            }
+            Ok(())
+        }
+        ResolvedAssertTarget::Stderr => {
+            bail!(
+                "step {}: ASSERT_EQ over stderr is not supported; use ASSERT_CONTAINS stderr ...",
+                idx + 1
+            );
+        }
+        ResolvedAssertTarget::Pipe(bytes) => {
+            let actual_str = String::from_utf8(bytes.clone()).with_context(|| {
+                format!("step {}: ASSERT_EQ pipe content is not UTF-8", idx + 1)
+            })?;
+            let Some(Value::String(want)) = expected else {
+                bail!(
+                    "step {}: ASSERT_EQ pipe mismatch\nexpected: {:?}\nactual:   {:?}",
+                    idx + 1,
+                    expected,
+                    actual_str
+                );
+            };
+            if actual_str.as_str() != want.as_str() {
+                bail!(
+                    "step {}: ASSERT_EQ pipe mismatch\nexpected: {:?}\nactual:   {:?}",
+                    idx + 1,
+                    want,
+                    actual_str
+                );
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Drain a piped stdin fully while enforcing the exact-match byte cap.
+/// Shared by `ASSERT_EQ stdout` Mode 1.
+fn drain_stdin_bounded(idx: usize, input_stream: SharedInput, verb: &str) -> Result<Vec<u8>> {
+    let mut guard = input_stream
+        .lock()
+        .map_err(|_| anyhow!("failed to lock stdin for {verb}"))?;
+    let mut out = Vec::new();
+    let mut buf = [0u8; super::io::CHUNK_SIZE];
+    loop {
+        let n = guard
+            .read(&mut buf)
+            .with_context(|| format!("failed to read from stdin for {verb}"))?;
+        if n == 0 {
+            break;
+        }
+        if out.len() + n > super::io::EXACT_STDOUT_CAP {
+            bail!(
+                "step {}: {verb} stdin exceeded the 8 MiB exact buffer; assert via pipe targets or harness expect.stdout",
+                idx + 1
+            );
+        }
+        out.extend_from_slice(&buf[..n]);
+    }
+    Ok(out)
+}
+
+/// Read the trial-cumulative exact stdout bytes for this generation,
+/// or bail with remediation guidance on overflow / missing capture.
+fn exact_stdout_bytes<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    idx: usize,
+    generation: usize,
+) -> Result<Vec<u8>> {
+    let captures = cx
+        .state
+        .exact_stdout
+        .lock()
+        .map_err(|_| anyhow!("exact_stdout poisoned"))?;
+    match captures.get(&generation) {
+        Some(entry) if entry.overflowed => bail!(
+            "step {}: ASSERT_EQ stdout overflowed the 8 MiB exact buffer; assert via pipe targets or harness expect.stdout",
+            idx + 1
         ),
+        Some(entry) => Ok(entry.bytes.clone()),
+        None => bail!(
+            "step {}: ASSERT_EQ stdout has no exact capture registered",
+            idx + 1
+        ),
+    }
+}
+
+/// Containment assertion over values, streams, and pipes: substring for
+/// strings, exact-element match for lists, key presence for maps,
+/// substring over stream and pipe buffers. Like `assert_eq`, files never
+/// appear here; read them into variables first.
+pub(super) fn assert_contains<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    idx: usize,
+    generation: usize,
+    idx_step: usize,
+    haystack: &super::steps::ResolvedAssertTarget,
+    needle: &Arg,
+) -> Result<()> {
+    use super::steps::ResolvedAssertTarget;
+    let needle_str = super::args::resolve_arg(needle, cx)?;
+    match haystack {
+        ResolvedAssertTarget::Value(Value::String(hay)) => {
+            if hay.contains(needle_str.as_str()) {
+                Ok(())
+            } else {
+                bail!(
+                    "step {}: ASSERT_CONTAINS did not contain '{}'; actual: {:?}",
+                    idx + 1,
+                    needle_str,
+                    hay
+                );
+            }
+        }
+        ResolvedAssertTarget::Value(Value::List(items)) => {
+            if items
+                .iter()
+                .any(|e| e == &Value::String(needle_str.clone()))
+            {
+                Ok(())
+            } else {
+                bail!(
+                    "step {}: ASSERT_CONTAINS did not contain '{}'; actual: {:?}",
+                    idx + 1,
+                    needle_str,
+                    Value::List(items.clone())
+                );
+            }
+        }
+        ResolvedAssertTarget::Value(Value::Map(map)) => {
+            if map.contains_key(needle_str.as_str()) {
+                Ok(())
+            } else {
+                bail!(
+                    "step {}: ASSERT_CONTAINS did not contain '{}'",
+                    idx + 1,
+                    needle_str
+                );
+            }
+        }
+        ResolvedAssertTarget::Value(other) => {
+            bail!(
+                "step {}: ASSERT_CONTAINS needs a string, list, or map haystack, found {:?}",
+                idx + 1,
+                other
+            );
+        }
+        ResolvedAssertTarget::Stdout => {
+            // Mode 1: piped stdin is consumed through a local window and
+            // forwarded, exactly like the legacy substring check.
+            if let CommandStdin::Stream(input_stream) = cx.stdin.clone() {
+                let mut guard = input_stream
+                    .lock()
+                    .map_err(|_| anyhow!("failed to lock stdin for ASSERT_CONTAINS"))?;
+                let mut window = super::io::SlidingWindow::new(needle_str.as_bytes().to_vec());
+                let mut buf = [0u8; super::io::CHUNK_SIZE];
+                let mut read_any = false;
+                loop {
+                    let n = guard
+                        .read(&mut buf)
+                        .context("failed to read from stdin for ASSERT_CONTAINS")?;
+                    if n == 0 {
+                        break;
+                    }
+                    read_any = true;
+                    window.push_chunk(&buf[..n]);
+                    super::io::write_stdout(cx.out.clone(), |w| {
+                        w.write_all(&buf[..n])?;
+                        Ok(())
+                    })?;
+                }
+                if read_any {
+                    if window.matched {
+                        return Ok(());
+                    }
+                    let emitted = String::from_utf8_lossy(&window.ring_buffer()).into_owned();
+                    bail!(
+                        "step {}: ASSERT_CONTAINS did not contain '{}'; emitted:\n{}",
+                        idx + 1,
+                        needle_str,
+                        emitted.trim_end()
+                    );
+                }
+            }
+            // Mode 2: pre-registered stdout window for this step.
+            let windows = cx
+                .state
+                .assert_windows
+                .lock()
+                .map_err(|_| anyhow!("assert_windows poisoned"))?;
+            match windows.get(&(generation, idx_step)) {
+                Some(w) if w.matched => Ok(()),
+                Some(w) => {
+                    let emitted = String::from_utf8_lossy(&w.ring_buffer()).into_owned();
+                    bail!(
+                        "step {}: ASSERT_CONTAINS did not contain '{}'; emitted:\n{}",
+                        idx + 1,
+                        needle_str,
+                        emitted.trim_end()
+                    )
+                }
+                _ => bail!(
+                    "step {}: ASSERT_CONTAINS did not contain '{}'",
+                    idx + 1,
+                    needle_str
+                ),
+            }
+        }
+        ResolvedAssertTarget::Stderr => {
+            // Stderr has no piped-stdin consumption mode: stdin bytes
+            // belong to a different stream and are left alone.
+            let windows = cx
+                .state
+                .assert_windows_stderr
+                .lock()
+                .map_err(|_| anyhow!("assert_windows_stderr poisoned"))?;
+            match windows.get(&(generation, idx_step)) {
+                Some(w) if w.matched => Ok(()),
+                Some(w) => {
+                    let emitted = String::from_utf8_lossy(&w.ring_buffer()).into_owned();
+                    bail!(
+                        "step {}: ASSERT_CONTAINS did not contain '{}'; emitted:\n{}",
+                        idx + 1,
+                        needle_str,
+                        emitted.trim_end()
+                    )
+                }
+                _ => bail!(
+                    "step {}: ASSERT_CONTAINS did not contain '{}'",
+                    idx + 1,
+                    needle_str
+                ),
+            }
+        }
+        ResolvedAssertTarget::Pipe(bytes) => {
+            let hay = String::from_utf8(bytes.clone()).with_context(|| {
+                format!(
+                    "step {}: ASSERT_CONTAINS pipe content is not UTF-8",
+                    idx + 1
+                )
+            })?;
+            if hay.contains(needle_str.as_str()) {
+                Ok(())
+            } else {
+                bail!(
+                    "step {}: ASSERT_CONTAINS did not contain '{}'; pipe held {:?}",
+                    idx + 1,
+                    needle_str,
+                    hay
+                );
+            }
+        }
     }
 }
 
@@ -1629,12 +1842,12 @@ pub(crate) fn set_var_value<P: ProcessManager>(
 /// a spillable capture sink as its stdout, then bind the exact bytes as a
 /// string. Only stdout is captured (stderr keeps the parent wiring; stdin
 /// passes through so `WITH_IO [stdin=pipe:p]` still works). Captured bytes
-/// never tee into the parent `ASSERT_STDOUT` windows. On command failure
+/// never tee into the parent assertion windows. On command failure
 /// nothing is bound.
 ///
 /// When the captured command is `CALL NAME(...)`, no sink is installed:
 /// the callee's stdout keeps the active routing (observable via
-/// `ASSERT_STDOUT`/pipes) and the bound value is the function's `RETURN`
+/// `ASSERT_CONTAINS stdout`/pipes) and the bound value is the function's `RETURN`
 /// payload (or `""` on fallthrough), coerced to the declared type.
 pub(crate) fn assign_capture<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
@@ -1651,7 +1864,7 @@ pub(crate) fn assign_capture<P: ProcessManager>(
     if let Some((bindings, name, args)) = extract_call(cmd) {
         // `CALL` (possibly under `WITH_IO` layers): no capture sink. The
         // callee's stdout keeps its routed streams (observable via
-        // `ASSERT_STDOUT`/pipes); the bound value is the `RETURN` payload.
+        // `ASSERT_CONTAINS stdout`/pipes); the bound value is the `RETURN` payload.
         if bindings
             .iter()
             .any(|b| b.stream == IoStream::Stdout && b.pipe.is_some())
@@ -2236,54 +2449,35 @@ pub(crate) fn dispatch_expand<P: ProcessManager>(
     replace(cx, 0, &path_resolved, &overrides_resolved)
 }
 
-pub(crate) fn dispatch_assert_file<P: ProcessManager>(
+pub(crate) fn dispatch_assert_eq<P: ProcessManager>(
     step: &StepKind,
     cx: &mut StepCtx<'_, P>,
 ) -> Result<()> {
-    let StepKind::AssertFile {
+    let StepKind::AssertEq {
         hash,
-        path,
-        contents,
+        actual,
+        expected,
     } = step
     else {
         unreachable!()
     };
-    let path_resolved = super::args::resolve_arg(path, cx)?;
-    let contents_resolved = super::args::resolve_arg_opt(contents, cx)?;
-    assert_file(cx, 0, hash, &path_resolved, contents_resolved.as_deref())
+    let target = super::steps::resolve_assert_target(actual, cx)?;
+    let expected_val = match expected {
+        Some(e) => Some(super::args::evaluate_assert_operand(e, cx)?),
+        None => None,
+    };
+    assert_eq(cx, 0, 0, 0, hash, &target, expected_val.as_ref())
 }
 
-pub(crate) fn dispatch_assert_dir<P: ProcessManager>(
+pub(crate) fn dispatch_assert_contains<P: ProcessManager>(
     step: &StepKind,
     cx: &mut StepCtx<'_, P>,
 ) -> Result<()> {
-    let StepKind::AssertDir(arg) = step else {
+    let StepKind::AssertContains { haystack, needle } = step else {
         unreachable!()
     };
-    let path = super::args::resolve_arg(arg, cx)?;
-    assert_dir(cx, 0, &path)
-}
-
-pub(crate) fn dispatch_assert_absent<P: ProcessManager>(
-    step: &StepKind,
-    cx: &mut StepCtx<'_, P>,
-) -> Result<()> {
-    let StepKind::AssertAbsent(arg) = step else {
-        unreachable!()
-    };
-    let path = super::args::resolve_arg(arg, cx)?;
-    assert_absent(cx, 0, &path)
-}
-
-pub(crate) fn dispatch_assert_stdout<P: ProcessManager>(
-    step: &StepKind,
-    cx: &mut StepCtx<'_, P>,
-) -> Result<()> {
-    let StepKind::AssertStdout(arg) = step else {
-        unreachable!()
-    };
-    let needle = super::args::resolve_arg(arg, cx)?;
-    assert_stdout(cx, 0, 0, 0, &needle)
+    let target = super::steps::resolve_assert_target(haystack, cx)?;
+    assert_contains(cx, 0, 0, 0, &target, needle)
 }
 
 pub(crate) fn dispatch_hash_sha256<P: ProcessManager>(

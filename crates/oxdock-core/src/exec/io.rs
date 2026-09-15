@@ -117,6 +117,30 @@ impl PipeRegistry {
             }
     }
 
+    /// Non-destructive snapshot of a script pipe's buffered bytes for
+    /// pipe-content assertions. OS-promoted pipes hold kernel bytes this
+    /// cannot see, and host-injected or missing pipes have no script
+    /// backend: both bail with a message directing to drains or harness
+    /// pipe assertions instead of silently yielding empty content.
+    pub(super) fn peek_pipe_content(&self, name: &str) -> Result<Vec<u8>> {
+        #[cfg(not(miri))]
+        if self.lock_inner().os.contains_key(name) {
+            return Err(anyhow::anyhow!(
+                "cannot peek OS-promoted pipe {name:?}: drain it or assert via harness pipe buffers"
+            ));
+        }
+        let backend = {
+            let guard = self.lock_inner();
+            guard.inners.get(name).cloned()
+        };
+        match backend {
+            Some(inner) => inner
+                .peek_bytes()
+                .map_err(|e| anyhow::anyhow!("failed to peek pipe {name:?}: {e}")),
+            None => Err(anyhow::anyhow!("no script pipe backend for {name:?}")),
+        }
+    }
+
     /// Snapshot one pipe backend for `INSPECT()` diagnostics. Clones what
     /// is needed under one registry lock, then queries backend state after
     /// releasing it, so lock order always stays registry-before-inner.
@@ -400,7 +424,7 @@ pub const CHUNK_SIZE: usize = 8192;
 /// Minimum ring buffer capacity. Actual capacity scales with needle length.
 const MIN_RING_CAPACITY: usize = 1024;
 
-/// Sliding window for streaming pattern matching in ASSERT_STDOUT.
+/// Sliding window for streaming pattern matching in stream assertions.
 /// Maintains a ring buffer and detects matches inline as chunks pass through.
 pub(crate) struct SlidingWindow {
     pub(crate) needle: Vec<u8>,
@@ -520,13 +544,56 @@ where
     }
 }
 
+/// Hard cap for `ASSERT_EQ stdout` exact accumulators, mirroring the
+/// `SpillBuffer` spill threshold: exact stream matching is a test-time
+/// opt-in, and unbounded trials must use pipe targets or harness captures.
+pub(crate) const EXACT_STDOUT_CAP: usize = 8 * 1024 * 1024;
+
+/// Cumulative stdout record for one execution generation backing
+/// `ASSERT_EQ stdout`. Unlike `SlidingWindow` nothing is ever evicted;
+/// once the cap is exceeded the entry latches `overflowed` and stops
+/// growing, and the asserting step reports it with remediation guidance.
+pub(crate) struct ExactCapture {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) overflowed: bool,
+}
+
+impl ExactCapture {
+    pub fn new() -> Self {
+        Self {
+            bytes: Vec::new(),
+            overflowed: false,
+        }
+    }
+
+    pub fn push_chunk(&mut self, chunk: &[u8]) {
+        if self.overflowed {
+            return;
+        }
+        if self.bytes.len() + chunk.len() > EXACT_STDOUT_CAP {
+            self.overflowed = true;
+            return;
+        }
+        self.bytes.extend_from_slice(chunk);
+    }
+}
+
+/// Which host stream a tee forwards to when no capture sink is configured.
+#[derive(Clone, Copy)]
+enum TeeStream {
+    Stdout,
+    Stderr,
+}
+
 /// Wraps the configured stdout sink so every byte written to it is also
-/// pushed to all registered SlidingWindow observers for `ASSERT_STDOUT`.
+/// pushed to all registered SlidingWindow observers for stream assertions.
 /// When no sink is configured (`inner` is `None`) bytes are forwarded to
 /// real stdout so interactive CLI output still reaches the terminal.
 struct TeeWriter {
     inner: Option<SharedOutput>,
+    stream: TeeStream,
     windows: Arc<Mutex<HashMap<(usize, usize), SlidingWindow>>>,
+    exact: Arc<Mutex<HashMap<usize, ExactCapture>>>,
 }
 
 impl Write for TeeWriter {
@@ -539,12 +606,20 @@ impl Write for TeeWriter {
                     .map_err(|_| io::Error::other("stdout sink poisoned"))?;
                 guard.write_all(buf)?;
             }
-            None => io::stdout().write_all(buf)?,
+            None => match self.stream {
+                TeeStream::Stdout => io::stdout().write_all(buf)?,
+                TeeStream::Stderr => io::stderr().write_all(buf)?,
+            },
         }
         // Push to ALL registered assertion windows (O(1) per byte per window)
         if let Ok(mut windows) = self.windows.lock() {
             for window in windows.values_mut() {
                 window.push_chunk(buf);
+            }
+        }
+        if let Ok(mut exact) = self.exact.lock() {
+            for capture in exact.values_mut() {
+                capture.push_chunk(buf);
             }
         }
         Ok(buf.len())
@@ -558,7 +633,10 @@ impl Write for TeeWriter {
                     .map_err(|_| io::Error::other("stdout sink poisoned"))?;
                 guard.flush()?;
             }
-            None => io::stdout().flush()?,
+            None => match self.stream {
+                TeeStream::Stdout => io::stdout().flush()?,
+                TeeStream::Stderr => io::stderr().flush()?,
+            },
         }
         Ok(())
     }
@@ -568,10 +646,28 @@ impl Write for TeeWriter {
 pub(crate) fn teed_stdout(
     sink: Option<SharedOutput>,
     windows: Arc<Mutex<HashMap<(usize, usize), SlidingWindow>>>,
+    exact: Arc<Mutex<HashMap<usize, ExactCapture>>>,
 ) -> SharedOutput {
     Arc::new(Mutex::new(TeeWriter {
         inner: sink,
+        stream: TeeStream::Stdout,
         windows,
+        exact,
+    }))
+}
+
+/// Installs the tee around `sink` (or real stderr when absent) for
+/// `ASSERT_CONTAINS stderr` substring observers. Exact matching is not
+/// offered over stderr; use pipe targets or harness captures for that.
+pub(crate) fn teed_stderr(
+    sink: Option<SharedOutput>,
+    windows: Arc<Mutex<HashMap<(usize, usize), SlidingWindow>>>,
+) -> SharedOutput {
+    Arc::new(Mutex::new(TeeWriter {
+        inner: sink,
+        stream: TeeStream::Stderr,
+        windows,
+        exact: Arc::new(Mutex::new(HashMap::new())),
     }))
 }
 
@@ -665,6 +761,13 @@ impl ExecIo {
     /// their own lock (same lock order as every other registry path).
     pub(super) fn inspect_pipe(&self, name: &str) -> super::pipe::PipeInfo {
         self.pipes.inspect_pipe(name)
+    }
+
+    /// Non-destructive snapshot of a script pipe's buffered bytes for
+    /// pipe-content assertions. Single lock acquisition for the lookup;
+    /// content is cloned out from under its own lock.
+    pub(super) fn peek_pipe_content(&self, name: &str) -> Result<Vec<u8>> {
+        self.pipes.peek_pipe_content(name)
     }
 
     /// Pin a keeper slot on an existing script pipe. `None` for OS pipes

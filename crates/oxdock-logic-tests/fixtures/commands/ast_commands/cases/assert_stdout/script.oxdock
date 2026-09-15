@@ -1,2 +1,0 @@
-ECHO "verification-marker"
-ASSERT_STDOUT "verification-marker"

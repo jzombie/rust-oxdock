@@ -1,4 +1,0 @@
-name = "assert_dir"
-
-[expect]
-dirs = ["out/inner"]

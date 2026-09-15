@@ -1,4 +1,7 @@
 name = "scopes"
 
+[pipes.cap_env_txt]
+expect = "scope=\n"
+
 [expect]
-files = { "scoped/inner.txt" = "inner", "outer.txt" = "outer", "env.txt" = "scope=\n" }
+files = { "scoped/inner.txt" = "inner", "outer.txt" = "outer" }

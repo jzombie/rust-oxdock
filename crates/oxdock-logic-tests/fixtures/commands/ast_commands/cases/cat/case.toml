@@ -1,4 +1,7 @@
 name = "read"
 
+[pipes.cap_out_txt]
+expect = "hello"
+
 [expect]
-files = { "out.txt" = "hello" }
+stdout = "hello"

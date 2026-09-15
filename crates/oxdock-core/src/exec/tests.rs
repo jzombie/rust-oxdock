@@ -827,6 +827,8 @@ fn create_exec_state(fs: MockFs) -> ExecState<MockProcessManager> {
         scope_stack: Vec::new(),
         io: ExecIo::new(),
         assert_windows: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        assert_windows_stderr: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        exact_stdout: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         var_scopes: Vec::new(),
         cancel_token: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         active_process: Arc::new(std::sync::Mutex::new(None)),

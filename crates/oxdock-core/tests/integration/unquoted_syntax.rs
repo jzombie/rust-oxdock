@@ -109,26 +109,38 @@ fn hash_sha256_unquoted_path() {
 }
 
 #[test]
-fn assert_file_unquoted_path() {
+fn assert_eq_unquoted_path() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
     run_script(&root, "WRITE check.txt 'verified'").unwrap();
-    run_script(&root, "ASSERT_FILE check.txt 'verified'").unwrap();
+    run_script(
+        &root,
+        "LET $v: STRING = READ check.txt\nASSERT_EQ $v 'verified'",
+    )
+    .unwrap();
 }
 
 #[test]
-fn assert_dir_unquoted_path() {
+fn path_type_unquoted_path_reports_dir() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
     run_script(&root, "MKDIR mydir").unwrap();
-    run_script(&root, "ASSERT_DIR mydir").unwrap();
+    run_script(
+        &root,
+        "LET $t: STRING = PATH_TYPE(mydir)\nASSERT_EQ $t \"dir\"",
+    )
+    .unwrap();
 }
 
 #[test]
-fn assert_absent_unquoted_path() {
+fn path_type_unquoted_path_reports_absent() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
-    run_script(&root, "ASSERT_ABSENT nofile.txt").unwrap();
+    run_script(
+        &root,
+        "LET $t: STRING = PATH_TYPE(nofile.txt)\nASSERT_EQ $t \"absent\"",
+    )
+    .unwrap();
 }
 
 // ============================================================================

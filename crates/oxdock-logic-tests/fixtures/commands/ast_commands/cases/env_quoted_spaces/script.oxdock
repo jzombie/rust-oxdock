@@ -1,3 +1,2 @@
 ENV SET_FORTH="outer scope"
 WITH_IO [stdout=pipe:cap_out_txt] ECHO "value={{ env:SET_FORTH }}"
-WITH_IO [stdin=pipe:cap_out_txt] WRITE out.txt

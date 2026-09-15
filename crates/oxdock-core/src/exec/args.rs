@@ -1,4 +1,5 @@
 use anyhow::{Result, bail};
+use oxdock_fs::EntryKind;
 use oxdock_parser::{Arg, ArgPart, ArithOp, CompareOp, Expr, LogicalOp, MathOp, TypeKind, Value};
 use oxdock_process::ProcessManager;
 
@@ -171,6 +172,20 @@ pub(crate) fn resolve_arg_opt<P: ProcessManager>(
     }
 }
 
+/// Evaluate an assertion operand to a typed [`Value`]: expressions
+/// evaluate (variables, key-paths, calls, pre-typed literals); strings,
+/// templates, and parts render to `String`. This is what makes
+/// `ASSERT_EQ` strict: no coercion happens here.
+pub(crate) fn evaluate_assert_operand<P: ProcessManager>(
+    arg: &Arg,
+    cx: &mut StepCtx<'_, P>,
+) -> Result<Value> {
+    match arg {
+        Arg::Expr(expr) => evaluate_expr(expr, cx),
+        _ => Ok(Value::String(resolve_arg(arg, cx)?)),
+    }
+}
+
 /// Resolve a list of `(name, Arg)` override pairs.
 pub(crate) fn resolve_overrides<P: ProcessManager>(
     overrides: &[(String, Arg)],
@@ -245,6 +260,7 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
             "LOAD_TOML" => evaluate_load_toml(args, cx),
             "LOAD_JSON" => evaluate_load_json(args, cx),
             "INSPECT" => evaluate_inspect(args, cx),
+            "PATH_TYPE" => evaluate_path_type(args, cx),
             "INT" => evaluate_int(args, cx),
             "FLOAT" => evaluate_float(args, cx),
             _ => bail!("unknown function {name}"),
@@ -308,6 +324,34 @@ fn evaluate_inspect<P: ProcessManager>(args: &[Expr], cx: &mut StepCtx<'_, P>) -
         bail!("INSPECT requires a $variable argument, found {arg:?}");
     };
     super::handlers::inspect_var_map(cx, var).map(Value::Map)
+}
+
+/// Evaluate a `PATH_TYPE()` query to a filesystem entry description:
+/// `"file"`, `"dir"`, `"symlink"` (no-follow, including broken links), or
+/// `"absent"` for anything unstatable. Resolution mirrors `ASSERT_ABSENT`
+/// (`resolve_write`): guard escapes still error, but pending snapshots
+/// never materialize and missing paths report absent instead of failing.
+fn evaluate_path_type<P: ProcessManager>(args: &[Expr], cx: &mut StepCtx<'_, P>) -> Result<Value> {
+    if args.is_empty() {
+        bail!("PATH_TYPE requires a path argument");
+    }
+    let path_val = evaluate_expr(&args[0], cx)?;
+    let path_str = match path_val {
+        Value::String(s) => s,
+        _ => bail!("PATH_TYPE path argument must evaluate to a string"),
+    };
+    let target = cx
+        .state
+        .fs
+        .resolve_write(&cx.state.cwd, &path_str)
+        .map_err(|e| anyhow::anyhow!("failed to resolve path '{}': {}", path_str, e))?;
+    let kind = match cx.state.fs.entry_kind_no_follow(&target) {
+        Ok(EntryKind::Symlink) => "symlink",
+        Ok(EntryKind::File) => "file",
+        Ok(EntryKind::Dir) => "dir",
+        Err(_) => "absent",
+    };
+    Ok(Value::String(kind.to_string()))
 }
 
 /// Pop one operand off the RPN stack with a structured error instead of a

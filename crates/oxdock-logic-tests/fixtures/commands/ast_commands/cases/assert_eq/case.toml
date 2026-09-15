@@ -1,0 +1,5 @@
+name = "assert_eq"
+
+[expect]
+dirs = ["empty_dir"]
+files = { "payload.bin" = "stable-content", "probe.txt" = "x" }

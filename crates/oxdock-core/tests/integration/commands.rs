@@ -4,8 +4,9 @@ use oxdock_core::{
     run_steps_with_fs,
 };
 use oxdock_fs::{GuardedPath, GuardedTempDir, PathResolver, ensure_git_identity};
-use oxdock_parser::{IoBinding, IoStream, Step, StepKind, WorkspaceTarget};
+use oxdock_parser::{IoBinding, IoStream, Step, StepKind, Value, WorkspaceTarget};
 use oxdock_process::CommandBuilder;
+use std::collections::BTreeMap;
 use std::io::Cursor;
 use std::sync::{Arc, Mutex};
 
@@ -367,19 +368,19 @@ fn inherit_env_reads_exec_io_override() {
     let script = indoc! {
         r#"
         INHERIT_ENV [SPECIAL_TOKEN]
-        WRITE seen.txt {{ env:SPECIAL_TOKEN }}
+        ECHO {{ env:SPECIAL_TOKEN }}
         "#
     };
     let steps = oxdock_core::parse_script(script).unwrap();
 
+    let captured = Arc::new(Mutex::new(Vec::new()));
     let mut io_cfg = ExecIo::new();
     io_cfg.insert_inherit_env("SPECIAL_TOKEN", "from-context");
+    io_cfg.set_stdout(Some(captured.clone()));
     run_steps_with_context_result_with_io(&root, &root, &steps, io_cfg).unwrap();
 
-    assert_eq!(
-        read_trimmed(&root.join("seen.txt").unwrap()),
-        "from-context"
-    );
+    let out = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
+    assert_eq!(out, "from-context\n");
 }
 
 #[test]
@@ -389,20 +390,20 @@ fn inherit_env_override_precedes_host_env() {
     let script = indoc! {
         r#"
         INHERIT_ENV [SPECIAL_TOKEN]
-        WRITE seen.txt {{ env:SPECIAL_TOKEN }}
+        ECHO {{ env:SPECIAL_TOKEN }}
         "#
     };
     let steps = oxdock_core::parse_script(script).unwrap();
     let _env_guard = TestEnvGuard::set("SPECIAL_TOKEN", "from-host");
 
+    let captured = Arc::new(Mutex::new(Vec::new()));
     let mut io_cfg = ExecIo::new();
     io_cfg.insert_inherit_env("SPECIAL_TOKEN", "from-context");
+    io_cfg.set_stdout(Some(captured.clone()));
     run_steps_with_context_result_with_io(&root, &root, &steps, io_cfg).unwrap();
 
-    assert_eq!(
-        read_trimmed(&root.join("seen.txt").unwrap()),
-        "from-context"
-    );
+    let out = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
+    assert_eq!(out, "from-context\n");
 }
 
 #[test]
@@ -412,17 +413,20 @@ fn inherit_env_removal_blocks_host_env() {
     let script = indoc! {
         r#"
         INHERIT_ENV [SPECIAL_TOKEN]
-        WRITE "seen.txt" {{ env:SPECIAL_TOKEN }}
+        ECHO {{ env:SPECIAL_TOKEN }}
         "#
     };
     let steps = oxdock_core::parse_script(script).unwrap();
     let _env_guard = TestEnvGuard::set("SPECIAL_TOKEN", "from-host");
 
+    let captured = Arc::new(Mutex::new(Vec::new()));
     let mut io_cfg = ExecIo::new();
     io_cfg.remove_inherit_env("SPECIAL_TOKEN");
+    io_cfg.set_stdout(Some(captured.clone()));
     run_steps_with_context_result_with_io(&root, &root, &steps, io_cfg).unwrap();
 
-    assert_eq!(read_trimmed(&root.join("seen.txt").unwrap()), "");
+    let out = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
+    assert_eq!(out, "\n");
 }
 
 #[test]
@@ -1178,6 +1182,21 @@ fn run_script(root: &GuardedPath, script: &str) -> Result<(), anyhow::Error> {
     run_steps_with_context_result_with_io(root, root, &steps, ExecIo::new()).map(|_| ())
 }
 
+fn run_script_with_scope(
+    root: &GuardedPath,
+    script: &str,
+) -> Result<BTreeMap<String, Value>, anyhow::Error> {
+    let steps = oxdock_core::parse_script(script).expect("parse script");
+    let resolver = PathResolver::new_guarded(root.clone(), root.clone())?;
+    let (_cwd, _fs, bindings) = oxdock_core::run_steps_with_manager(
+        Box::new(resolver),
+        &steps,
+        oxdock_process::default_process_manager(),
+        ExecIo::new(),
+    )?;
+    Ok(bindings)
+}
+
 // ---------------------------------------------------------------------------
 // FUNC / WHILE / BREAK / CONTINUE (#114)
 // ---------------------------------------------------------------------------
@@ -1264,10 +1283,9 @@ fn pipe_declare_first_registers_for_later_bindings() {
         LET $p: PIPE = pipe:chan
         WITH_IO [stdout=$p] ECHO hello
         WITH_IO [stdin=$p] READ_LINE $line
-        WRITE line.txt "{{ $line }}"
     "#};
-    run_script(&root, script).expect("declare-first pipe must work");
-    assert_eq!(read_trimmed(&root.join("line.txt").unwrap()), "hello");
+    let scope = run_script_with_scope(&root, script).expect("declare-first pipe must work");
+    assert_eq!(scope["line"], Value::String("hello".to_string()));
 }
 
 #[test]
@@ -1287,16 +1305,13 @@ fn inspect_expression_returns_pipe_snapshot_map() {
         LET $p: PIPE = pipe:ch
         WITH_IO [stdout=$p] ECHO "payload"
         LET $info: MAP = INSPECT($p)
-        WRITE snap.txt "{{ $info.type }}-{{ $info.is_os_pipe }}-{{ $info.buffer_bytes }}-{{ $info.readers }}"
+        LET $snap: STRING = "{{ $info.type }}-{{ $info.is_os_pipe }}-{{ $info.buffer_bytes }}-{{ $info.readers }}"
         IF $info.is_os_pipe {
             WRITE unexpected.txt "should be a script pipe"
         }
     "#};
-    run_script(&root, script).expect("INSPECT must work");
-    assert_eq!(
-        read_trimmed(&root.join("snap.txt").unwrap()),
-        "PIPE-false-8-1"
-    );
+    let scope = run_script_with_scope(&root, script).expect("INSPECT must work");
+    assert_eq!(scope["snap"], Value::String("PIPE-false-8-1".to_string()));
     assert!(!root.join("unexpected.txt").unwrap().exists());
 }
 
@@ -1318,10 +1333,10 @@ fn inspect_reports_os_pipe_for_promoted_single_run() {
         AWAIT $t
         LET $p: PIPE = pipe:osp
         LET $info: MAP = INSPECT($p)
-        WRITE kind.txt "{{ $info.is_os_pipe }}"
+        LET $v: BOOL = $info.is_os_pipe
     "#};
-    run_script(&root, script).expect("INSPECT of promoted pipe must work");
-    assert_eq!(read_trimmed(&root.join("kind.txt").unwrap()), "true");
+    let scope = run_script_with_scope(&root, script).expect("INSPECT of promoted pipe must work");
+    assert_eq!(scope["v"], Value::Bool(true));
 }
 
 #[test]
@@ -1374,103 +1389,109 @@ fn async_call_await_captures_return_value() {
 }
 
 #[test]
-fn assert_file_accepts_matching_content() {
+fn assert_eq_accepts_matching_content() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     run_script(
         &root,
-        "WRITE out.txt payload\nASSERT_FILE out.txt payload\n",
+        "WRITE out.txt payload\nLET $b: STRING = READ out.txt\nASSERT_EQ $b \"payload\"\n",
     )
     .expect("matching content passes");
 }
 
 #[test]
-fn assert_file_rejects_content_mismatch() {
+fn assert_eq_rejects_content_mismatch() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let err = run_script(
         &root,
-        "WRITE out.txt actual\nASSERT_FILE out.txt expected\n",
+        "WRITE out.txt actual\nLET $b: STRING = READ out.txt\nASSERT_EQ $b \"expected\"\n",
     )
     .expect_err("mismatch must fail");
-    assert!(err.to_string().contains("content mismatch"), "{err}");
+    assert!(err.to_string().contains("mismatch"), "{err}");
 }
 
 #[test]
-fn assert_file_requires_existing_file() {
+fn assert_eq_path_type_reports_absent() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    let err = run_script(&root, "ASSERT_FILE missing.txt\n").expect_err("missing must fail");
-    assert!(err.to_string().contains("missing.txt"), "{err}");
+    run_script(
+        &root,
+        "LET $t: STRING = PATH_TYPE(\"missing.txt\")\nASSERT_EQ $t \"absent\"\n",
+    )
+    .expect("absent path reports absent");
 }
 
 #[test]
-fn assert_file_hash_mode_matches_and_rejects() {
+fn assert_eq_hash_mode_matches_and_rejects() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     // sha256("stable-content")
     let digest = "08135c1b6349b0e4f894c36221952f0de00e6b4d82f80895abf359755e77103c";
     run_script(
         &root,
-        &format!("WRITE payload.bin stable-content\nASSERT_FILE --hash {digest} payload.bin\n"),
+        &format!("WRITE payload.bin stable-content\nLET $b: STRING = READ payload.bin\nASSERT_EQ --hash {digest} $b\n"),
     )
     .expect("hash match passes");
 
     let err = run_script(
         &root,
-        "WRITE payload.bin stable-content\nASSERT_FILE --hash 1111111111111111111111111111111111111111111111111111111111111111 payload.bin\n",
+        "WRITE payload.bin stable-content\nLET $b: STRING = READ payload.bin\nASSERT_EQ --hash 1111111111111111111111111111111111111111111111111111111111111111 $b\n",
     )
     .expect_err("hash mismatch must fail");
     assert!(err.to_string().contains("--hash mismatch"), "{err}");
 }
 
 #[test]
-fn assert_dir_and_absent_cover_both_outcomes() {
+fn assert_eq_path_type_covers_file_dir_absent() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     run_script(
         &root,
-        "MKDIR tree/deep\nASSERT_DIR tree/deep\nASSERT_ABSENT nope.txt\n",
+        "MKDIR tree/deep\nWRITE file.txt x\nLET $d: STRING = PATH_TYPE(\"tree/deep\")\nLET $f: STRING = PATH_TYPE(\"file.txt\")\nLET $n: STRING = PATH_TYPE(\"nope.txt\")\nASSERT_EQ $d \"dir\"\nASSERT_EQ $f \"file\"\nASSERT_EQ $n \"absent\"\n",
     )
-    .expect("positive assertions pass");
+    .expect("path type rows pass");
 
-    let dir_err = run_script(&root, "WRITE file.txt x\nASSERT_DIR file.txt\n")
-        .expect_err("file-as-dir must fail");
-    assert!(
-        dir_err.to_string().contains("is not a directory"),
-        "{dir_err}"
-    );
-
-    let absent_err = run_script(&root, "WRITE file.txt x\nASSERT_ABSENT file.txt\n")
-        .expect_err("present path must fail");
-    assert!(absent_err.to_string().contains("exists"), "{absent_err}");
+    let dir_err = run_script(
+        &root,
+        "WRITE file.txt x\nLET $t: STRING = PATH_TYPE(\"file.txt\")\nASSERT_EQ $t \"dir\"\n",
+    )
+    .expect_err("file-as-dir must fail");
+    assert!(dir_err.to_string().contains("mismatch"), "{dir_err}");
 }
 
 #[test]
-fn assert_stdout_sees_interpreter_output_without_capture_sink() {
+fn assert_contains_sees_interpreter_output_without_capture_sink() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    run_script(&root, "ECHO banner-line\nASSERT_STDOUT banner-line\n")
-        .expect("interpreter output is recorded even with no configured sink");
+    run_script(
+        &root,
+        "ECHO banner-line\nASSERT_CONTAINS stdout banner-line\n",
+    )
+    .expect("interpreter output is recorded even with no configured sink");
 }
 
 #[test]
-fn assert_stdout_sees_streamed_child_output() {
+fn assert_contains_sees_streamed_child_output() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     #[cfg(unix)]
-    let script = "RUN \"echo child-echo-line\"\nASSERT_STDOUT \"child-echo-line\"\n";
+    let script = "RUN \"echo child-echo-line\"\nASSERT_CONTAINS stdout \"child-echo-line\"\n";
     #[cfg(windows)]
-    let script = "RUN \"cmd /c echo child-echo-line\"\nASSERT_STDOUT \"child-echo-line\"\n";
+    let script =
+        "RUN \"cmd /c echo child-echo-line\"\nASSERT_CONTAINS stdout \"child-echo-line\"\n";
     run_script(&root, script).expect("child output is recorded");
 }
 
 #[test]
-fn assert_stdout_miss_reports_emitted_log() {
+fn assert_contains_miss_reports_emitted_log() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    let err = run_script(&root, "ECHO present-line\nASSERT_STDOUT absent-line\n")
-        .expect_err("miss must fail");
+    let err = run_script(
+        &root,
+        "ECHO present-line\nASSERT_CONTAINS stdout absent-line\n",
+    )
+    .expect_err("miss must fail");
     assert!(
         err.to_string().contains("did not contain 'absent-line'")
             && err.to_string().contains("present-line"),
@@ -1496,7 +1517,6 @@ fn run_exec_form_spawns_directly_and_pipes_stdout() {
     let script = indoc!(
         r#"
         WITH_IO [stdout=pipe:cap] RUN ["cargo", "--version"]
-        WITH_IO [stdin=pipe:cap] WRITE cargo_version.txt
         "#
     );
     let steps = oxdock_core::parse_script(script).unwrap();
@@ -1505,9 +1525,12 @@ fn run_exec_form_spawns_directly_and_pipes_stdout() {
         "first step must wrap RunExec, got {:?}",
         steps[0].kind
     );
-    run_steps(&root, &steps).unwrap();
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let mut io_cfg = ExecIo::new();
+    io_cfg.insert_output_pipe("cap", captured.clone());
+    run_steps_with_context_result_with_io(&root, &root, &steps, io_cfg).unwrap();
 
-    let out = read_trimmed(&root.join("cargo_version.txt").unwrap());
+    let out = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
     assert!(
         out.starts_with("cargo "),
         "expected cargo version output, got {out:?}"
@@ -1562,10 +1585,8 @@ fn _assert_step_kind_exhaustiveness(kind: &StepKind) {
         StepKind::Write { .. } => {}
         StepKind::Append { .. } => {}
         StepKind::Expand { .. } => {}
-        StepKind::AssertFile { .. } => {}
-        StepKind::AssertDir(_) => {}
-        StepKind::AssertAbsent(_) => {}
-        StepKind::AssertStdout(_) => {}
+        StepKind::AssertEq { .. } => {}
+        StepKind::AssertContains { .. } => {}
         StepKind::WithIo { .. } => {}
         StepKind::WithIoBlock { .. } => {}
         StepKind::HashSha256 { .. } => {}
@@ -1753,9 +1774,8 @@ fn append_concatenates_content() {
 fn assign_and_interpolate() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    run_script(&root, "LET $msg: STRING = hello\nWRITE out.txt $msg\n")
-        .expect("assign + write passes");
-    assert_eq!(read_trimmed(&root.join("out.txt").unwrap()), "hello");
+    let scope = run_script_with_scope(&root, "LET $msg: STRING = hello\n").expect("assign passes");
+    assert_eq!(scope["msg"], Value::String("hello".to_string()));
 }
 
 // ---------------------------------------------------------------------------
@@ -1939,8 +1959,7 @@ fn mutation_converts_to_declared_type() {
     let script = indoc! {r#"
         LET $n: INT = 1
         $n = "42"
-        WRITE n.txt "{{ $n }}"
-        ASSERT_FILE n.txt "42"
+        ASSERT_EQ $n 42
     "#};
     run_script(&root, script).expect("mutation converts");
     run_script(&root, "LET $m: INT = 1\n$m = \"abc\"\n").expect_err("non-numeric string must fail");

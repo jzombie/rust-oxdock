@@ -95,6 +95,9 @@ pub use synthetic_entry::{DirEntry, FileType};
 pub enum EntryKind {
     File,
     Dir,
+    /// Link itself, never the target: only returned by no-follow inspection
+    /// (`entry_kind_no_follow`). Following `entry_kind` never yields this.
+    Symlink,
 }
 
 /// Reserved `CARGO_TARGET_DIR` location (issue #131).

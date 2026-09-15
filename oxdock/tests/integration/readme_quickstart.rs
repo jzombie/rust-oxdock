@@ -42,7 +42,7 @@ fn readme_quickstart_runs_through_the_real_cli() {
     assert!(
         output.success(),
         "quick-start snippet must succeed via CLI (the snippet's own \
-         ASSERT_FILE/ASSERT_STDOUT verify artifacts inside the CLI workspace)"
+         ASSERT_EQ/ASSERT_CONTAINS verify artifacts inside the CLI workspace)"
     );
 
     // The snippet's LS step lists the dist directory it built.

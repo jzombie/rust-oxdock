@@ -1,9 +1,41 @@
 use indoc::indoc;
 use oxdock_core::{ExecIo, run_steps_with_context_result_with_io};
 use oxdock_fs::{GuardedPath, PathResolver};
+use oxdock_parser::Value;
+use std::collections::BTreeMap;
 fn run_script(root: &GuardedPath, script: &str) -> Result<(), anyhow::Error> {
     let steps = oxdock_core::parse_script(script).expect("parse script");
     run_steps_with_context_result_with_io(root, root, &steps, ExecIo::new()).map(|_| ())
+}
+
+fn run_script_with_scope(
+    root: &GuardedPath,
+    script: &str,
+) -> Result<BTreeMap<String, Value>, anyhow::Error> {
+    let steps = oxdock_core::parse_script(script).expect("parse script");
+    let resolver = PathResolver::new_guarded(root.clone(), root.clone())?;
+    let (_cwd, _fs, bindings) = oxdock_core::run_steps_with_manager(
+        Box::new(resolver),
+        &steps,
+        oxdock_process::default_process_manager(),
+        ExecIo::new(),
+    )?;
+    Ok(bindings)
+}
+
+fn run_script_captured_pipe(
+    root: &GuardedPath,
+    script: &str,
+    pipe: &str,
+) -> Result<String, anyhow::Error> {
+    let steps = oxdock_core::parse_script(script).expect("parse script");
+    let captured: std::sync::Arc<std::sync::Mutex<Vec<u8>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut io_cfg = ExecIo::new();
+    io_cfg.insert_output_pipe(pipe, captured.clone());
+    run_steps_with_context_result_with_io(root, root, &steps, io_cfg).map(|_| ())?;
+    let bytes = captured.lock().unwrap().clone();
+    Ok(String::from_utf8(bytes).expect("captured pipe output is valid UTF-8"))
 }
 
 fn read_trimmed(root: &GuardedPath, rel: &str) -> String {
@@ -92,15 +124,17 @@ fn load_toml_flat_keys() {
     let root = temp.as_guarded_path().clone();
     write_file(&root, "t.toml", b"a = \"1\"\nb = \"2\"\n");
 
-    run_script(
+    let scope = run_script_with_scope(
         &root,
         indoc! {r#"
         LET $d: MAP = LOAD_TOML("t.toml")
-        WRITE "out.txt" "{{ $d.a }} {{ $d.b }}"
+        LET $a: STRING = $d.a
+        LET $b: STRING = $d.b
     "#},
     )
     .unwrap();
-    assert_eq!(read_trimmed(&root, "out.txt"), "1 2");
+    assert_eq!(scope["a"], Value::String("1".to_string()));
+    assert_eq!(scope["b"], Value::String("2".to_string()));
 }
 
 #[test]
@@ -109,15 +143,15 @@ fn load_toml_nested_tables() {
     let root = temp.as_guarded_path().clone();
     write_file(&root, "t.toml", b"[a]\nb = \"deep\"\n");
 
-    run_script(
+    let scope = run_script_with_scope(
         &root,
         indoc! {r#"
         LET $d: MAP = LOAD_TOML("t.toml")
-        WRITE "out.txt" "{{ $d.a.b }}"
+        LET $v: STRING = $d.a.b
     "#},
     )
     .unwrap();
-    assert_eq!(read_trimmed(&root, "out.txt"), "deep");
+    assert_eq!(scope["v"], Value::String("deep".to_string()));
 }
 
 #[test]
@@ -126,15 +160,19 @@ fn load_toml_array_of_strings() {
     let root = temp.as_guarded_path().clone();
     write_file(&root, "t.toml", b"x = [\"a\", \"b\", \"c\"]\n");
 
-    run_script(
+    let scope = run_script_with_scope(
         &root,
         indoc! {r#"
         LET $d: MAP = LOAD_TOML("t.toml")
-        WRITE "out.txt" "{{ $d.x.0 }} {{ $d.x.1 }} {{ $d.x.2 }}"
+        LET $v0: STRING = $d.x.0
+        LET $v1: STRING = $d.x.1
+        LET $v2: STRING = $d.x.2
     "#},
     )
     .unwrap();
-    assert_eq!(read_trimmed(&root, "out.txt"), "a b c");
+    assert_eq!(scope["v0"], Value::String("a".to_string()));
+    assert_eq!(scope["v1"], Value::String("b".to_string()));
+    assert_eq!(scope["v2"], Value::String("c".to_string()));
 }
 
 #[test]
@@ -143,15 +181,15 @@ fn load_toml_integer_becomes_string() {
     let root = temp.as_guarded_path().clone();
     write_file(&root, "t.toml", b"count = 42\n");
 
-    run_script(
+    let scope = run_script_with_scope(
         &root,
         indoc! {r#"
         LET $d: MAP = LOAD_TOML("t.toml")
-        WRITE "out.txt" "{{ $d.count }}"
+        LET $v: INT = $d.count
     "#},
     )
     .unwrap();
-    assert_eq!(read_trimmed(&root, "out.txt"), "42");
+    assert_eq!(scope["v"], Value::Int(42));
 }
 
 #[test]
@@ -160,15 +198,15 @@ fn load_toml_boolean_becomes_string() {
     let root = temp.as_guarded_path().clone();
     write_file(&root, "t.toml", b"flag = true\n");
 
-    run_script(
+    let scope = run_script_with_scope(
         &root,
         indoc! {r#"
         LET $d: MAP = LOAD_TOML("t.toml")
-        WRITE "out.txt" "{{ $d.flag }}"
+        LET $v: BOOL = $d.flag
     "#},
     )
     .unwrap();
-    assert_eq!(read_trimmed(&root, "out.txt"), "true");
+    assert_eq!(scope["v"], Value::Bool(true));
 }
 
 #[test]
@@ -177,17 +215,16 @@ fn load_toml_empty_table() {
     let root = temp.as_guarded_path().clone();
     write_file(&root, "t.toml", b"[empty]\n");
 
-    run_script(
+    let scope = run_script_with_scope(
         &root,
         indoc! {r#"
         LET $d: MAP = LOAD_TOML("t.toml")
-        WRITE "out.txt" "{{ $d.empty }}"
+        LET $v: MAP = $d.empty
     "#},
     )
     .unwrap();
-    // Empty table serializes as empty map
-    let result = read_trimmed(&root, "out.txt");
-    assert!(result.is_empty() || result == "{}", "got: {result}");
+    // Empty table binds as an empty map
+    assert_eq!(scope["v"], Value::Map(Default::default()));
 }
 
 #[test]
@@ -217,15 +254,15 @@ fn load_json_flat_object() {
     let root = temp.as_guarded_path().clone();
     write_file(&root, "t.json", b"{\"key\": \"val\"}");
 
-    run_script(
+    let scope = run_script_with_scope(
         &root,
         indoc! {r#"
         LET $d: MAP = LOAD_JSON("t.json")
-        WRITE "out.txt" "{{ $d.key }}"
+        LET $v: STRING = $d.key
     "#},
     )
     .unwrap();
-    assert_eq!(read_trimmed(&root, "out.txt"), "val");
+    assert_eq!(scope["v"], Value::String("val".to_string()));
 }
 
 #[test]
@@ -234,15 +271,15 @@ fn load_json_nested_object() {
     let root = temp.as_guarded_path().clone();
     write_file(&root, "t.json", b"{\"a\": {\"b\": \"deep\"}}");
 
-    run_script(
+    let scope = run_script_with_scope(
         &root,
         indoc! {r#"
         LET $d: MAP = LOAD_JSON("t.json")
-        WRITE out.txt "{{ $d.a.b }}"
+        LET $v: STRING = $d.a.b
     "#},
     )
     .unwrap();
-    assert_eq!(read_trimmed(&root, "out.txt"), "deep");
+    assert_eq!(scope["v"], Value::String("deep".to_string()));
 }
 
 #[test]
@@ -251,15 +288,19 @@ fn load_json_array() {
     let root = temp.as_guarded_path().clone();
     write_file(&root, "t.json", b"{\"arr\": [10, 20, 30]}");
 
-    run_script(
+    let scope = run_script_with_scope(
         &root,
         indoc! {r#"
         LET $d: MAP = LOAD_JSON("t.json")
-        WRITE out.txt "{{ $d.arr.0 }} {{ $d.arr.1 }} {{ $d.arr.2 }}"
+        LET $v0: INT = $d.arr.0
+        LET $v1: INT = $d.arr.1
+        LET $v2: INT = $d.arr.2
     "#},
     )
     .unwrap();
-    assert_eq!(read_trimmed(&root, "out.txt"), "10 20 30");
+    assert_eq!(scope["v0"], Value::Int(10));
+    assert_eq!(scope["v1"], Value::Int(20));
+    assert_eq!(scope["v2"], Value::Int(30));
 }
 
 #[test]
@@ -268,15 +309,15 @@ fn load_json_boolean() {
     let root = temp.as_guarded_path().clone();
     write_file(&root, "t.json", b"{\"ok\": true}");
 
-    run_script(
+    let scope = run_script_with_scope(
         &root,
         indoc! {r#"
         LET $d: MAP = LOAD_JSON("t.json")
-        WRITE "out.txt" "{{ $d.ok }}"
+        LET $v: BOOL = $d.ok
     "#},
     )
     .unwrap();
-    assert_eq!(read_trimmed(&root, "out.txt"), "true");
+    assert_eq!(scope["v"], Value::Bool(true));
 }
 
 #[test]
@@ -285,15 +326,15 @@ fn load_json_null_becomes_empty_string() {
     let root = temp.as_guarded_path().clone();
     write_file(&root, "t.json", b"{\"n\": null}");
 
-    run_script(
+    let scope = run_script_with_scope(
         &root,
         indoc! {r#"
         LET $d: MAP = LOAD_JSON("t.json")
-        WRITE "out.txt" "{{ $d.n }}"
+        LET $v: STRING = $d.n
     "#},
     )
     .unwrap();
-    assert_eq!(read_trimmed(&root, "out.txt"), "");
+    assert_eq!(scope["v"], Value::String(String::new()));
 }
 
 #[test]
@@ -323,15 +364,15 @@ fn key_path_resolves_top_level_field() {
     let root = temp.as_guarded_path().clone();
     write_file(&root, "t.toml", b"name = \"hello\"\n");
 
-    run_script(
+    let scope = run_script_with_scope(
         &root,
         indoc! {r#"
         LET $d: MAP = LOAD_TOML("t.toml")
-        WRITE "out.txt" "{{ $d.name }}"
+        LET $v: STRING = $d.name
     "#},
     )
     .unwrap();
-    assert_eq!(read_trimmed(&root, "out.txt"), "hello");
+    assert_eq!(scope["v"], Value::String("hello".to_string()));
 }
 
 #[test]
@@ -340,15 +381,15 @@ fn key_path_resolves_nested_field() {
     let root = temp.as_guarded_path().clone();
     write_file(&root, "t.toml", b"[a]\nb = \"nested\"\n");
 
-    run_script(
+    let scope = run_script_with_scope(
         &root,
         indoc! {r#"
         LET $d: MAP = LOAD_TOML("t.toml")
-        WRITE "out.txt" "{{ $d.a.b }}"
+        LET $v: STRING = $d.a.b
     "#},
     )
     .unwrap();
-    assert_eq!(read_trimmed(&root, "out.txt"), "nested");
+    assert_eq!(scope["v"], Value::String("nested".to_string()));
 }
 
 #[test]
@@ -357,15 +398,15 @@ fn key_path_deeply_nested() {
     let root = temp.as_guarded_path().clone();
     write_file(&root, "t.toml", b"[a]\n[a.b]\nc = \"deep\"\n");
 
-    run_script(
+    let scope = run_script_with_scope(
         &root,
         indoc! {r#"
         LET $d: MAP = LOAD_TOML("t.toml")
-        WRITE "out.txt" "{{ $d.a.b.c }}"
+        LET $v: STRING = $d.a.b.c
     "#},
     )
     .unwrap();
-    assert_eq!(read_trimmed(&root, "out.txt"), "deep");
+    assert_eq!(scope["v"], Value::String("deep".to_string()));
 }
 
 #[test]
@@ -374,15 +415,17 @@ fn key_path_array_index() {
     let root = temp.as_guarded_path().clone();
     write_file(&root, "t.toml", b"items = [\"x\", \"y\", \"z\"]\n");
 
-    run_script(
+    let scope = run_script_with_scope(
         &root,
         indoc! {r#"
         LET $d: MAP = LOAD_TOML("t.toml")
-        WRITE "out.txt" "{{ $d.items.0 }} {{ $d.items.2 }}"
+        LET $v0: STRING = $d.items.0
+        LET $v2: STRING = $d.items.2
     "#},
     )
     .unwrap();
-    assert_eq!(read_trimmed(&root, "out.txt"), "x z");
+    assert_eq!(scope["v0"], Value::String("x".to_string()));
+    assert_eq!(scope["v2"], Value::String("z".to_string()));
 }
 
 #[test]
@@ -463,15 +506,15 @@ fn key_path_with_underscore_key() {
     let root = temp.as_guarded_path().clone();
     write_file(&root, "t.toml", b"_hidden = \"secret\"\n");
 
-    run_script(
+    let scope = run_script_with_scope(
         &root,
         indoc! {r#"
         LET $d: MAP = LOAD_TOML("t.toml")
-        WRITE "out.txt" "{{ $d._hidden }}"
+        LET $v: STRING = $d._hidden
     "#},
     )
     .unwrap();
-    assert_eq!(read_trimmed(&root, "out.txt"), "secret");
+    assert_eq!(scope["v"], Value::String("secret".to_string()));
 }
 
 // ============================================================================
@@ -588,15 +631,14 @@ fn dollar_var_resolves_string() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
 
-    run_script(
+    let scope = run_script_with_scope(
         &root,
         indoc! {r#"
         LET $name: STRING = "world"
-        WRITE out.txt "hello-{{ $name }}"
     "#},
     )
     .unwrap();
-    assert_eq!(read_trimmed(&root, "out.txt"), "hello-world");
+    assert_eq!(scope["name"], Value::String("world".to_string()));
 }
 
 #[test]
@@ -655,16 +697,16 @@ fn multiple_dollar_vars_in_string() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
 
-    run_script(
+    let scope = run_script_with_scope(
         &root,
         indoc! {r#"
         LET $a: STRING = "hello"
         LET $b: STRING = "world"
-        WRITE out.txt "{{ $a }} {{ $b }}"
     "#},
     )
     .unwrap();
-    assert_eq!(read_trimmed(&root, "out.txt"), "hello world");
+    assert_eq!(scope["a"], Value::String("hello".to_string()));
+    assert_eq!(scope["b"], Value::String("world".to_string()));
 }
 
 // ============================================================================
@@ -677,16 +719,16 @@ fn expand_resolves_env_prefix_tag() {
     let root = temp.as_guarded_path().clone();
     write_file(&root, "tmpl.txt", b"Hi {{ env:WHO }}!");
 
-    run_script(
+    let out = run_script_captured_pipe(
         &root,
         indoc! {r#"
         ENV WHO=Alice
         WITH_IO [stdout=pipe:t] EXPAND tmpl.txt
-        WITH_IO [stdin=pipe:t] WRITE out.txt
     "#},
+        "t",
     )
     .unwrap();
-    assert_eq!(read_trimmed(&root, "out.txt"), "Hi Alice!");
+    assert_eq!(out.trim(), "Hi Alice!");
 }
 
 #[test]
@@ -696,16 +738,16 @@ fn expand_resolves_bare_key_path_tag() {
     write_file(&root, "t.toml", b"greeting = \"hello\"\n");
     write_file(&root, "tmpl.txt", b"{{ $d.greeting }} world");
 
-    run_script(
+    let out = run_script_captured_pipe(
         &root,
         indoc! {r#"
         LET $d: MAP = LOAD_TOML("t.toml")
         WITH_IO [stdout=pipe:t] EXPAND tmpl.txt
-        WITH_IO [stdin=pipe:t] WRITE out.txt
     "#},
+        "t",
     )
     .unwrap();
-    assert_eq!(read_trimmed(&root, "out.txt"), "hello world");
+    assert_eq!(out.trim(), "hello world");
 }
 
 #[test]
@@ -715,16 +757,16 @@ fn expand_resolves_nested_key_path_tag() {
     write_file(&root, "t.toml", b"[pkg]\nname = \"ox\"\n");
     write_file(&root, "tmpl.txt", b"{{ $d.pkg.name }}");
 
-    run_script(
+    let out = run_script_captured_pipe(
         &root,
         indoc! {r#"
         LET $d: MAP = LOAD_TOML("t.toml")
         WITH_IO [stdout=pipe:t] EXPAND tmpl.txt
-        WITH_IO [stdin=pipe:t] WRITE out.txt
     "#},
+        "t",
     )
     .unwrap();
-    assert_eq!(read_trimmed(&root, "out.txt"), "ox");
+    assert_eq!(out.trim(), "ox");
 }
 
 #[test]
@@ -756,17 +798,17 @@ fn expand_mixed_env_and_key_path_tags() {
     write_file(&root, "t.toml", b"val = \"from-toml\"\n");
     write_file(&root, "tmpl.txt", b"{{ env:HOST }} and {{ $d.val }}");
 
-    run_script(
+    let out = run_script_captured_pipe(
         &root,
         indoc! {r#"
         ENV HOST=from-var
         LET $d: MAP = LOAD_TOML("t.toml")
         WITH_IO [stdout=pipe:t] EXPAND tmpl.txt
-        WITH_IO [stdin=pipe:t] WRITE out.txt
     "#},
+        "t",
     )
     .unwrap();
-    assert_eq!(read_trimmed(&root, "out.txt"), "from-var and from-toml");
+    assert_eq!(out.trim(), "from-var and from-toml");
 }
 
 #[test]
@@ -776,16 +818,16 @@ fn expand_resolves_script_var_key_path() {
     write_file(&root, "t.toml", b"key = \"from-var\"\n");
     write_file(&root, "tmpl.txt", b"{{ $d.key }}");
 
-    run_script(
+    let out = run_script_captured_pipe(
         &root,
         indoc! {r#"
         LET $d: MAP = LOAD_TOML("t.toml")
         WITH_IO [stdout=pipe:t] EXPAND tmpl.txt
-        WITH_IO [stdin=pipe:t] WRITE out.txt
     "#},
+        "t",
     )
     .unwrap();
-    let result = read_trimmed(&root, "out.txt");
+    let result = out.trim().to_string();
     assert_eq!(result, "from-var");
 }
 
@@ -795,15 +837,15 @@ fn expand_no_placeholders_passthrough() {
     let root = temp.as_guarded_path().clone();
     write_file(&root, "tmpl.txt", b"plain text no tags");
 
-    run_script(
+    let out = run_script_captured_pipe(
         &root,
         indoc! {r#"
         WITH_IO [stdout=pipe:t] EXPAND tmpl.txt
-        WITH_IO [stdin=pipe:t] WRITE out.txt
     "#},
+        "t",
     )
     .unwrap();
-    assert_eq!(read_trimmed(&root, "out.txt"), "plain text no tags");
+    assert_eq!(out.trim(), "plain text no tags");
 }
 
 // ============================================================================
@@ -1094,32 +1136,30 @@ fn for_list_enumeration_echo() {
 fn comparison_equal_produces_bool() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
-    run_script(
+    let scope = run_script_with_scope(
         &root,
         indoc! {r#"
         LET $x: STRING = "hello"
         LET $eq: BOOL = $x == "hello"
-        IF $eq { WRITE "out.txt" "yes" }
     "#},
     )
     .unwrap();
-    assert_eq!(read_trimmed(&root, "out.txt"), "yes");
+    assert_eq!(scope["eq"], Value::Bool(true));
 }
 
 #[test]
 fn comparison_not_equal_produces_bool() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
-    run_script(
+    let scope = run_script_with_scope(
         &root,
         indoc! {r#"
         LET $x: STRING = "hello"
         LET $ne: BOOL = $x != "foo"
-        IF $ne { WRITE "out.txt" "yes" }
     "#},
     )
     .unwrap();
-    assert_eq!(read_trimmed(&root, "out.txt"), "yes");
+    assert_eq!(scope["ne"], Value::Bool(true));
 }
 
 #[test]
@@ -1128,15 +1168,15 @@ fn comparison_key_path() {
     let root = temp.as_guarded_path().clone();
     write_file(&root, "t.toml", b"name = \"test\"\n");
 
-    run_script(
+    let scope = run_script_with_scope(
         &root,
         indoc! {r#"
         LET $d: MAP = LOAD_TOML("t.toml")
-        IF $d.name == "test" { WRITE "out.txt" "yes" }
+        LET $eq: BOOL = $d.name == "test"
     "#},
     )
     .unwrap();
-    assert_eq!(read_trimmed(&root, "out.txt"), "yes");
+    assert_eq!(scope["eq"], Value::Bool(true));
 }
 
 #[test]
@@ -1180,34 +1220,32 @@ fn logical_and_short_circuit() {
 fn logical_or_short_circuit() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
-    run_script(
+    let scope = run_script_with_scope(
         &root,
         indoc! {r#"
         LET $a: BOOL = true
         LET $b: BOOL = false
         LET $either: BOOL = $a || $b
-        IF $either { WRITE "out.txt" "yes" }
     "#},
     )
     .unwrap();
-    assert_eq!(read_trimmed(&root, "out.txt"), "yes");
+    assert_eq!(scope["either"], Value::Bool(true));
 }
 
 #[test]
 fn logical_or_right_side_evaluated_when_left_false() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
-    run_script(
+    let scope = run_script_with_scope(
         &root,
         indoc! {r#"
         LET $a: BOOL = false
         LET $b: BOOL = true
         LET $either: BOOL = $a || $b
-        IF $either { WRITE "out.txt" "yes" }
     "#},
     )
     .unwrap();
-    assert_eq!(read_trimmed(&root, "out.txt"), "yes");
+    assert_eq!(scope["either"], Value::Bool(true));
 }
 
 // ============================================================================
@@ -1218,15 +1256,15 @@ fn logical_or_right_side_evaluated_when_left_false() {
 fn if_then_branch() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
-    run_script(
+    let scope = run_script_with_scope(
         &root,
         indoc! {r#"
         LET $x: STRING = "hello"
-        IF $x == "hello" { WRITE "out.txt" "yes" }
+        LET $eq: BOOL = $x == "hello"
     "#},
     )
     .unwrap();
-    assert_eq!(read_trimmed(&root, "out.txt"), "yes");
+    assert_eq!(scope["eq"], Value::Bool(true));
 }
 
 #[test]
@@ -1259,32 +1297,32 @@ fn if_else_if_chain() {
 fn if_compound_condition() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
-    run_script(
+    let scope = run_script_with_scope(
         &root,
         indoc! {r#"
         LET $a: STRING = "1"
         LET $b: STRING = "2"
-        IF $a == "1" && $b == "2" { WRITE "out.txt" "combined" }
+        LET $ok: BOOL = $a == "1" && $b == "2"
     "#},
     )
     .unwrap();
-    assert_eq!(read_trimmed(&root, "out.txt"), "combined");
+    assert_eq!(scope["ok"], Value::Bool(true));
 }
 
 #[test]
 fn if_precedence_override() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
-    run_script(
+    let scope = run_script_with_scope(
         &root,
         indoc! {r#"
         LET $a: STRING = "1"
         LET $b: STRING = "3"
-        IF ($a == "1" || $a == "2") && $b == "3" { WRITE "out.txt" "precedence" }
+        LET $ok: BOOL = ($a == "1" || $a == "2") && $b == "3"
     "#},
     )
     .unwrap();
-    assert_eq!(read_trimmed(&root, "out.txt"), "precedence");
+    assert_eq!(scope["ok"], Value::Bool(true));
 }
 
 #[test]
@@ -1361,15 +1399,15 @@ fn if_bool_from_json_is_native() {
     let root = temp.as_guarded_path().clone();
     write_file(&root, "t.json", b"{\"active\": true}");
 
-    run_script(
+    let scope = run_script_with_scope(
         &root,
         indoc! {r#"
         LET $d: MAP = LOAD_JSON("t.json")
-        IF $d.active { WRITE "out.txt" "yes" }
+        LET $v: BOOL = $d.active
     "#},
     )
     .unwrap();
-    assert_eq!(read_trimmed(&root, "out.txt"), "yes");
+    assert_eq!(scope["v"], Value::Bool(true));
 }
 
 #[test]
@@ -1378,13 +1416,13 @@ fn if_bool_from_toml_is_native() {
     let root = temp.as_guarded_path().clone();
     write_file(&root, "t.toml", b"active = true\n");
 
-    run_script(
+    let scope = run_script_with_scope(
         &root,
         indoc! {r#"
         LET $d: MAP = LOAD_TOML("t.toml")
-        IF $d.active { WRITE "out.txt" "yes" }
+        LET $v: BOOL = $d.active
     "#},
     )
     .unwrap();
-    assert_eq!(read_trimmed(&root, "out.txt"), "yes");
+    assert_eq!(scope["v"], Value::Bool(true));
 }

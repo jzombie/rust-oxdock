@@ -455,7 +455,7 @@ pub fn clear_materialize_dir(resolver: &PathResolver, target: &GuardedPath) -> R
             Ok(EntryKind::Dir) => {
                 let _ = resolver.remove_dir_all(&child);
             }
-            Ok(EntryKind::File) => {
+            Ok(EntryKind::File) | Ok(EntryKind::Symlink) => {
                 let _ = resolver.remove_file(&child);
             }
             Err(_) => {}
@@ -556,7 +556,9 @@ fn hash_input_path(
 ) -> Result<()> {
     let guarded = root.join(rel)?;
     match resolver.entry_kind(&guarded) {
-        Ok(EntryKind::File) => {
+        // Following inspection resolves links to their targets, so a
+        // symlink hashes exactly like the file it points at.
+        Ok(EntryKind::File) | Ok(EntryKind::Symlink) => {
             hasher.update(b"F\0");
             hasher.update(rel.as_bytes());
             hasher.update(b"\0");
@@ -664,7 +666,7 @@ pub fn sync_tree(resolver: &PathResolver, src: &GuardedPath, dst: &GuardedPath) 
             Ok(EntryKind::Dir) => {
                 let _ = resolver.remove_dir_all(&dst_child);
             }
-            Ok(EntryKind::File) => {
+            Ok(EntryKind::File) | Ok(EntryKind::Symlink) => {
                 let _ = resolver.remove_file(&dst_child);
             }
             Err(_) => {}

@@ -1,4 +1,4 @@
 name = "env_quoted_spaces"
 
-[expect]
-files = { "out.txt" = "value=outer scope\n" }
+[pipes.cap_out_txt]
+expect = "value=outer scope\n"

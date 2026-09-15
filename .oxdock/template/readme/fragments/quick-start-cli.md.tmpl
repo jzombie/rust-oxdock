@@ -11,13 +11,14 @@ MKDIR dist
 WRITE dist/hello.txt Built with \{{ env:PROJECT }}
 
 // Fail the script unless the artifact exists with exactly these bytes.
-ASSERT_FILE dist/hello.txt Built with \{{ env:PROJECT }}
+LET $body: STRING = READ dist/hello.txt
+ASSERT_EQ $body "Built with OxDock"
 
 // LS prints "<dir>:" then the entry names, sorted.
 LS dist
 
-// Assert stdout buffer of previous LS command is "hello.txt"
-ASSERT_STDOUT hello.txt
+// Assert the LS output contains "hello.txt".
+ASSERT_CONTAINS stdout "hello.txt"
 ```
 
 Save the script above as `./build.oxfile` and run it by path (install once, see above):

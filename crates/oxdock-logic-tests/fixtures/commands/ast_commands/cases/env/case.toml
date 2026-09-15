@@ -1,4 +1,4 @@
 name = "env"
 
-[expect]
-files = { "env.txt" = "value=bar\n" }
+[pipes.cap_env_txt]
+expect = "value=bar\n"

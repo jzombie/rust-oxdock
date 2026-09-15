@@ -9,7 +9,7 @@ use oxdock_parser::{Step, TypeKind, Value};
 use oxdock_process::{BackgroundHandle, CommandContext, ProcessManager};
 
 use super::capture::SpillBuffer;
-use super::io::{ExecIo, SlidingWindow};
+use super::io::{ExactCapture, ExecIo, SlidingWindow};
 use super::pipe::KeeperGuard;
 
 /// Maximum nested `CALL` depth. Guards the host thread stack against
@@ -40,9 +40,16 @@ pub(super) struct ExecState<P: ProcessManager> {
     pub(super) bg_children: Vec<Box<dyn BackgroundHandle>>,
     pub(super) scope_stack: Vec<ScopeSnapshot>,
     pub(super) io: ExecIo,
-    /// Pre-registered SlidingWindow observers for ASSERT_STDOUT steps.
+    /// Pre-registered SlidingWindow observers for stream assertion steps.
     /// Keyed by (generation, step index). TeeWriter pushes every chunk to all windows.
     pub(super) assert_windows: Arc<Mutex<HashMap<(usize, usize), SlidingWindow>>>,
+    /// Same observer map fed by the stderr tee for `ASSERT_CONTAINS stderr`.
+    pub(super) assert_windows_stderr: Arc<Mutex<HashMap<(usize, usize), SlidingWindow>>>,
+    /// Exact-match stdout accumulators for `ASSERT_EQ stdout`, keyed by
+    /// generation and fed by the same tee. Entries allocated during
+    /// pre-registration observe bytes from scope entry; the common
+    /// top-level case therefore sees trial-cumulative output.
+    pub(super) exact_stdout: Arc<Mutex<HashMap<usize, ExactCapture>>>,
     /// Variable scopes for $variable bindings (FOR loops, LET assignments).
     /// Innermost scope is last. Variables are looked up from innermost to outermost.
     /// Each entry carries its declared TypeKind alongside the value.
@@ -247,7 +254,7 @@ impl<P: ProcessManager> ExecState<P> {
     /// - A cloned filesystem handle (shared snapshot backing, independent root selection)
     /// - Cloned envs, cwd, cargo scratch name, var_scopes
     /// - Fresh bg_children, scope_stack (empty -- child manages its own)
-    /// - Shared assert_windows (Arc clone)
+    /// - Shared assert_windows, assert_windows_stderr, exact_stdout (Arc clones)
     /// - Cloned io configuration
     /// - Independent cancel_token, active_process (child manages its own)
     /// - Shared named_tasks and next_task_id (via Arc clone)
@@ -262,6 +269,8 @@ impl<P: ProcessManager> ExecState<P> {
             scope_stack: Vec::new(),
             io: self.io.clone(),
             assert_windows: Arc::clone(&self.assert_windows),
+            assert_windows_stderr: Arc::clone(&self.assert_windows_stderr),
+            exact_stdout: Arc::clone(&self.exact_stdout),
             var_scopes: self.var_scopes.clone(),
             cancel_token: Arc::new(AtomicBool::new(false)),
             active_process: Arc::new(Mutex::new(None)),

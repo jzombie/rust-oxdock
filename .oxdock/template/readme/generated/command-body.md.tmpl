@@ -56,8 +56,7 @@ WITH_IO [stdin=pipe:log] WRITE captured.txt
 LET $p: PIPE = pipe:log
 WITH_IO [stdout=$p] ECHO hello
 WITH_IO [stdin=$p] READ_LINE $line
-WRITE line.txt "\{{ $line }}"
-ASSERT_FILE line.txt "hello"
+ASSERT_EQ $line "hello"
 ```
 
 
@@ -101,7 +100,7 @@ FOR $k: STRING, $v: INT IN $map {
 # single-line body; $x is a template path, WHO an override
 WRITE a.txt "hi \\\{{ env:WHO }}!"
 FOR $x: STRING IN GLOB("*.txt") { EXPAND $x WHO=World }
-ASSERT_STDOUT "hi World!"
+ASSERT_CONTAINS stdout "hi World!"
 ```
 
 
@@ -140,10 +139,14 @@ IF false {
 IF !false {
   WRITE negated.txt taken
 }
-ASSERT_FILE yes.txt "taken"
-ASSERT_FILE fallback.txt "taken"
-ASSERT_FILE negated.txt "taken"
-ASSERT_ABSENT skipped.txt
+LET $yes_body: STRING = READ yes.txt
+LET $fallback_body: STRING = READ fallback.txt
+LET $negated_body: STRING = READ negated.txt
+ASSERT_EQ $yes_body "taken"
+ASSERT_EQ $fallback_body "taken"
+ASSERT_EQ $negated_body "taken"
+LET $t: STRING = PATH_TYPE("skipped.txt")
+ASSERT_EQ $t "absent"
 ```
 
 **Example: logical condition composition**
@@ -165,11 +168,16 @@ IF $role == "admin" && $level >= 5 {
 } ELSE {
     WRITE and.txt and-false
 }
-ASSERT_FILE fallback.txt "or-false"
-ASSERT_FILE chosen.txt "or-true"
-ASSERT_FILE and.txt "and-false"
-ASSERT_ABSENT unexpected.txt
-ASSERT_ABSENT unexpected-too.txt
+LET $fb: STRING = READ fallback.txt
+LET $ch: STRING = READ chosen.txt
+LET $an: STRING = READ and.txt
+ASSERT_EQ $fb "or-false"
+ASSERT_EQ $ch "or-true"
+ASSERT_EQ $an "and-false"
+LET $t1: STRING = PATH_TYPE("unexpected.txt")
+LET $t2: STRING = PATH_TYPE("unexpected-too.txt")
+ASSERT_EQ $t1 "absent"
+ASSERT_EQ $t2 "absent"
 ```
 
 
@@ -277,7 +285,7 @@ LET $count: INT = 42
 WRITE a.txt "x"
 LET $files: LIST = GLOB("*.txt")
 FOR $f: STRING IN $files { ECHO $f }
-ASSERT_STDOUT "a.txt"
+ASSERT_CONTAINS stdout "a.txt"
 ```
 
 **Example: scoped variable reverts**
@@ -290,16 +298,17 @@ LET $a: STRING = "outer"
     WRITE inner.txt "\{{ $a }}"
 }
 WRITE outer.txt "\{{ $a }}"
-ASSERT_FILE inner.txt "inner"
-ASSERT_FILE outer.txt "outer"
+LET $in_body: STRING = READ inner.txt
+LET $out_body: STRING = READ outer.txt
+ASSERT_EQ $in_body "inner"
+ASSERT_EQ $out_body "outer"
 ```
 
 **Example: capture command output**
 
 ```oxdock
 LET $out: STRING = ECHO hi
-WRITE captured.txt "\{{ $out }}"
-ASSERT_FILE captured.txt "hi\n"
+ASSERT_EQ $out "hi\n"
 ```
 
 **Example: arithmetic over captured output**
@@ -310,12 +319,9 @@ LET $total: INT = INT($size_str) + 1
 LET $ratio: FLOAT = 1 + 2.5
 # Int x Int stays INT: integer division truncates.
 LET $half: INT = 7 / 2
-WRITE total.txt "\{{ $total }}"
-WRITE ratio.txt "\{{ $ratio }}"
-WRITE half.txt "\{{ $half }}"
-ASSERT_FILE total.txt "42"
-ASSERT_FILE ratio.txt "3.5"
-ASSERT_FILE half.txt "3"
+ASSERT_EQ $total 42
+ASSERT_EQ $ratio 3.5
+ASSERT_EQ $half 3
 ```
 
 **Example: float equality is exact**
@@ -331,8 +337,10 @@ IF $exact {
 IF $decimal {
     WRITE unexpected.txt no
 }
-ASSERT_FILE exact.txt "yes"
-ASSERT_ABSENT unexpected.txt
+LET $ok: STRING = READ exact.txt
+ASSERT_EQ $ok "yes"
+LET $t: STRING = PATH_TYPE("unexpected.txt")
+ASSERT_EQ $t "absent"
 ```
 
 **Example: bound inexact decimals**
@@ -343,7 +351,8 @@ LET $sum: FLOAT = 0.1 + 0.2
 IF $sum > 0.299999 && $sum < 0.300001 {
     WRITE bounded.txt yes
 }
-ASSERT_FILE bounded.txt "yes"
+LET $ok: STRING = READ bounded.txt
+ASSERT_EQ $ok "yes"
 ```
 
 **Example: inspect a variable**
@@ -358,8 +367,7 @@ LET $info: MAP = INSPECT($p)
 IF $info.is_os_pipe {
     WRITE unexpected.txt "should be a script pipe"
 }
-WRITE kind.txt "\{{ $info.type }}"
-ASSERT_FILE kind.txt "PIPE"
+ASSERT_EQ $info.type "PIPE"
 ```
 
 
@@ -395,8 +403,7 @@ separate inner variable that reverts on exit.
 ```oxdock
 LET $count: INT = 1
 $count = 2
-WRITE count.txt "\{{ $count }}"
-ASSERT_FILE count.txt "2"
+ASSERT_EQ $count 2
 ```
 
 **Example: convert before math**
@@ -412,10 +419,8 @@ $n = "42"
 # Same crossing for decimals via FLOAT().
 LET $frac_str: STRING = ECHO 2.5
 LET $f: FLOAT = FLOAT($frac_str) + 0.25
-WRITE n.txt "\{{ $n }}"
-WRITE f.txt "\{{ $f }}"
-ASSERT_FILE n.txt "42"
-ASSERT_FILE f.txt "2.75"
+ASSERT_EQ $n 42
+ASSERT_EQ $f 2.75
 ```
 
 
@@ -482,8 +487,7 @@ AWAIT $task
 ```oxdock
 LET $task: HANDLE = ASYNC ECHO "done"
 LET $out: STRING = AWAIT $task
-WRITE captured.txt "\{{ $out }}"
-ASSERT_FILE captured.txt "done\n"
+ASSERT_EQ $out "done\n"
 ```
 
 
@@ -545,7 +549,8 @@ TIMEOUT 30s {
 # durations resolve at runtime, so variables work too
 LET $budget: DURATION = "30s"
 TIMEOUT $budget WRITE heartbeat.txt alive
-ASSERT_FILE heartbeat.txt alive
+LET $beat: STRING = READ heartbeat.txt
+ASSERT_EQ $beat "alive"
 ```
 
 
@@ -574,8 +579,7 @@ FUNC GREET($name: STRING) {
   RETURN $name
 }
 LET $res: STRING = CALL GREET("ada")
-WRITE greeting.txt "\{{ $res }}"
-ASSERT_FILE greeting.txt "ada"
+ASSERT_EQ $res "ada"
 ```
 
 
@@ -590,7 +594,7 @@ Invokes a FUNC-defined or host-registered function by UPPERCASE name.
 Bare CALL discards the return value and keeps stdout side effects.
 LET $var: TYPE = CALL captures the RETURN value (fallthrough without
 RETURN captures as ""), coerced to the declared type; stdout inside the
-callee stays observable via ASSERT_STDOUT and pipes.
+callee stays observable via ASSERT_CONTAINS stdout and pipes.
 
 Combining LET-capture with WITH_IO [stdout=pipe:...] is a parse error.
 
@@ -605,7 +609,7 @@ FUNC SHOUT($name: STRING) {
   RETURN $name
 }
 CALL SHOUT("ada")
-ASSERT_STDOUT "ada"
+ASSERT_CONTAINS stdout "ada"
 ```
 
 **Example: call with pipes**
@@ -621,8 +625,7 @@ FUNC DRAIN($q: PIPE) {
 LET $p: PIPE = pipe:ch
 WITH_IO [stdout=$p] ECHO "payload"
 LET $got: STRING = CALL DRAIN($p)
-WRITE got.txt "\{{ $got }}"
-ASSERT_FILE got.txt "payload"
+ASSERT_EQ $got "payload"
 ```
 
 
@@ -650,8 +653,7 @@ FUNC PICK($flag: BOOL) {
   RETURN "no"
 }
 LET $res: STRING = CALL PICK(true)
-WRITE picked.txt "\{{ $res }}"
-ASSERT_FILE picked.txt "yes"
+ASSERT_EQ $res "yes"
 ```
 
 
@@ -679,7 +681,8 @@ WHILE !$done {
   WRITE tick.txt "once"
   $done = true
 }
-ASSERT_FILE tick.txt "once"
+LET $tick: STRING = READ tick.txt
+ASSERT_EQ $tick "once"
 ```
 
 
@@ -753,7 +756,8 @@ the workspace root. Paths cannot escape the workspace.
 ```oxdock
 WORKDIR project/src
 WRITE generated.txt generated-under-workdir
-ASSERT_FILE generated.txt generated-under-workdir
+LET $body: STRING = READ generated.txt
+ASSERT_EQ $body "generated-under-workdir"
 ```
 
 
@@ -818,7 +822,8 @@ ENV APP_MODE=production
 # quotes keep the space: SET_FORTH stores `outer scope`
 ENV SET_FORTH="outer scope"
 WRITE out.txt "\{{ env:SET_FORTH }}"
-ASSERT_FILE out.txt "outer scope"
+LET $body: STRING = READ out.txt
+ASSERT_EQ $body "outer scope"
 ```
 
 **Example: variable value**
@@ -828,7 +833,8 @@ ASSERT_FILE out.txt "outer scope"
 LET $who: STRING = "Alice"
 ENV GREETING=$who
 WRITE out.txt "\{{ env:GREETING }}"
-ASSERT_FILE out.txt "Alice"
+LET $body: STRING = READ out.txt
+ASSERT_EQ $body "Alice"
 ```
 
 **Example: all value forms agree**
@@ -841,7 +847,8 @@ ENV A=$x
 ENV B="hello world"
 ENV C="\{{ $x }} concatenated"
 WRITE check.txt "\{{ env:A }}|\{{ env:B }}|\{{ env:C }}"
-ASSERT_FILE check.txt "Ada|hello world|Ada concatenated"
+LET $body: STRING = READ check.txt
+ASSERT_EQ $body "Ada|hello world|Ada concatenated"
 ```
 
 **Example: scoped env reverts**
@@ -854,8 +861,10 @@ ENV MODE=production
     WRITE inner.txt "\{{ env:MODE }}"
 }
 WRITE outer.txt "\{{ env:MODE }}"
-ASSERT_FILE inner.txt "staging"
-ASSERT_FILE outer.txt "production"
+LET $inner_body: STRING = READ inner.txt
+LET $outer_body: STRING = READ outer.txt
+ASSERT_EQ $inner_body "staging"
+ASSERT_EQ $outer_body "production"
 ```
 
 
@@ -917,7 +926,7 @@ ECHO build-complete
 LET $x: STRING = "World"
 ECHO \{{ $x }}
 ECHO $x
-ASSERT_STDOUT "World"
+ASSERT_CONTAINS stdout "World"
 ```
 
 
@@ -987,7 +996,8 @@ Copies from host.
 ```oxdock roots:unified
 WRITE src.txt content
 COPY src.txt dst.txt
-ASSERT_FILE dst.txt content
+LET $body: STRING = READ dst.txt
+ASSERT_EQ $body "content"
 ```
 
 **Example: copy from workspace**
@@ -995,7 +1005,8 @@ ASSERT_FILE dst.txt content
 ```oxdock roots:unified
 WRITE ws-src.txt ws-content
 COPY --from-current-workspace ws-src.txt ws-copy.txt
-ASSERT_FILE ws-copy.txt ws-content
+LET $body: STRING = READ ws-copy.txt
+ASSERT_EQ $body "ws-content"
 ```
 
 
@@ -1052,7 +1063,8 @@ Creates symlink.
 ```oxdock roots:unified
 WRITE original.txt content
 SYMLINK original.txt link.txt
-ASSERT_FILE link.txt content
+LET $body: STRING = READ link.txt
+ASSERT_EQ $body "content"
 ```
 
 
@@ -1225,7 +1237,8 @@ Appends contents.
 ```oxdock
 WRITE log.txt line1
 APPEND log.txt line2
-ASSERT_FILE log.txt line1line2
+LET $all: STRING = READ log.txt
+ASSERT_EQ $all "line1line2"
 ```
 
 
@@ -1279,7 +1292,7 @@ placeholder and errors.
 ENV NAME="Alice"
 WRITE template.md "Hello \{{ env:NAME }}!"
 EXPAND template.md
-ASSERT_STDOUT "Hello Alice!"
+ASSERT_CONTAINS stdout "Hello Alice!"
 ```
 
 **Example: override with spaces**
@@ -1289,7 +1302,7 @@ ASSERT_STDOUT "Hello Alice!"
 # the file must literally contain \{{ env:NAME }} for EXPAND
 WRITE template.md "Hello \\\{{ env:NAME }}!"
 EXPAND template.md NAME="Alice Smith"
-ASSERT_STDOUT "Hello Alice Smith!"
+ASSERT_CONTAINS stdout "Hello Alice Smith!"
 ```
 
 **Example: variable override**
@@ -1300,7 +1313,7 @@ ASSERT_STDOUT "Hello Alice Smith!"
 LET $who: STRING = "Bob"
 WRITE template.md "Hi \\\{{ env:WHO }}!"
 EXPAND template.md WHO=$who
-ASSERT_STDOUT "Hi Bob!"
+ASSERT_CONTAINS stdout "Hi Bob!"
 ```
 
 **Example: override forms agree**
@@ -1310,7 +1323,7 @@ ASSERT_STDOUT "Hi Bob!"
 LET $x: STRING = "Ada"
 WRITE template.md "Hi \\\{{ env:NAME }} and \\\{{ env:NAME2 }}!"
 EXPAND template.md NAME=$x NAME2="\{{ $x }} concatenated"
-ASSERT_STDOUT "Hi Ada and Ada concatenated!"
+ASSERT_CONTAINS stdout "Hi Ada and Ada concatenated!"
 ```
 
 **Example: expand stdin**
@@ -1319,7 +1332,7 @@ ASSERT_STDOUT "Hi Ada and Ada concatenated!"
 # no path: the template arrives on stdin through a pipe
 WITH_IO [stdout=pipe:tpl] ECHO "Hello \\\{{ env:NAME }}!"
 WITH_IO [stdin=pipe:tpl] EXPAND NAME=Alice
-ASSERT_STDOUT "Hello Alice!"
+ASSERT_CONTAINS stdout "Hello Alice!"
 ```
 
 **Example: override does not leak**
@@ -1330,31 +1343,37 @@ ASSERT_STDOUT "Hello Alice!"
 ENV NAME="Alice"
 WRITE template.md "Hi \\\{{ env:NAME }}!"
 EXPAND template.md NAME="Bob"
-ASSERT_STDOUT "Hi Bob!"
+ASSERT_CONTAINS stdout "Hi Bob!"
 EXPAND template.md
-ASSERT_STDOUT "Hi Alice!"
+ASSERT_CONTAINS stdout "Hi Alice!"
 ```
 
 
-### ASSERT_FILE
+### ASSERT_EQ
 
-Assert file exists.
+Assert strict equality.
 
-**Syntax:** `ASSERT_FILE [--hash <sha256>] <path> [<expected>]`
+**Syntax:** `ASSERT_EQ [--hash <sha256>] <actual> <expected>`
 
-Checks the path is a file, then optionally compares its bytes (or
-`--hash` SHA-256 digest) against the expectation.
+Compares two evaluated values with typed equality (no coercion:
+`Int(42)` never equals `String("42")`), aborting the pipeline
+with a step-numbered error showing expected vs actual otherwise.
 
-Any mismatch aborts the pipeline with a step-numbered error showing
-expected vs actual.
+Both sides are values: `$var`, literals, templates, and calls
+evaluate in memory and never touch disk. Read files explicitly
+first (`LET $text: STRING = READ "out.txt"`, then
+`ASSERT_EQ $text ...`).
+Bare `stdout` / `stderr` observe stream buffers; `pipe:NAME`
+observes a pipe buffer. `--hash` compares the SHA-256 of the
+actual's string bytes instead of the bytes themselves.
 
 
 **Arguments:**
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
-| `path` | [`PATH`](#value-type-path) | yes | File |
-| `expected` | [`STRING...`](#value-type-string) | no | Expected |
+| `actual` | `ANY` | yes | Value, stdout, stderr, or pipe:NAME |
+| `expected` | `ANY...` | no | Expected (required unless --hash) |
 
 **Flags:**
 
@@ -1364,96 +1383,62 @@ expected vs actual.
 
 **Examples:**
 
-**Example: assert file**
+**Example: assert eq**
+
+```oxdock
+LET $status: INT = 200
+ASSERT_EQ $status 200
+```
+
+**Example: assert eq file**
 
 ```oxdock
 WRITE payload.bin stable-content
-ASSERT_FILE payload.bin stable-content
+LET $body: STRING = READ payload.bin
+ASSERT_EQ $body "stable-content"
 ```
 
-**Example: assert file hash**
+**Example: assert eq hash**
 
 ```oxdock
 # --hash compares the SHA-256 digest instead of raw bytes
 WRITE payload.bin stable-content
-ASSERT_FILE --hash 08135c1b6349b0e4f894c36221952f0de00e6b4d82f80895abf359755e77103c payload.bin
+LET $body: STRING = READ payload.bin
+ASSERT_EQ --hash 08135c1b6349b0e4f894c36221952f0de00e6b4d82f80895abf359755e77103c $body
 ```
 
 
-### ASSERT_DIR
+### ASSERT_CONTAINS
 
-Assert dir exists.
+Assert containment.
 
-**Syntax:** `ASSERT_DIR <path>`
+**Syntax:** `ASSERT_CONTAINS <haystack> <needle>`
 
-Checks the path is a directory, aborting the pipeline with a
-step-numbered error otherwise.
+Checks containment and aborts the pipeline with a step-numbered
+error otherwise: substring for strings, element match for lists,
+key presence for maps, substring over stream and pipe buffers.
+
+Like `ASSERT_EQ`, both sides are values read without implicit
+I/O; read files explicitly first
+(`LET $text: STRING = READ "cfg.txt"`).
+Bare `stdout` / `stderr` observe stream buffers; `pipe:NAME`
+observes a pipe buffer.
 
 
 **Arguments:**
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
-| `path` | [`PATH`](#value-type-path) | yes | Dir |
+| `haystack` | `ANY` | yes | Value, stdout, stderr, or pipe:NAME |
+| `needle` | `ANY...` | yes | Substring, element, or key |
 
 **Examples:**
 
-**Example: assert dir**
-
-```oxdock
-MKDIR dist/assets
-ASSERT_DIR dist/assets
-```
-
-
-### ASSERT_ABSENT
-
-Assert path absent.
-
-**Syntax:** `ASSERT_ABSENT <path>`
-
-Checks nothing exists at the path, aborting the pipeline with a
-step-numbered error if it does.
-
-
-**Arguments:**
-
-| Name | Type | Required | Description |
-| --- | --- | --- | --- |
-| `path` | [`PATH`](#value-type-path) | yes | Path |
-
-**Examples:**
-
-**Example: assert absent**
-
-```oxdock
-ASSERT_ABSENT missing.txt
-```
-
-
-### ASSERT_STDOUT
-
-Assert stdout contains.
-
-**Syntax:** `ASSERT_STDOUT <substring>`
-
-Checks the preceding step's stdout contains the substring, aborting the
-pipeline with a step-numbered error otherwise.
-
-
-**Arguments:**
-
-| Name | Type | Required | Description |
-| --- | --- | --- | --- |
-| `substring` | [`STRING...`](#value-type-string) | yes | Substring |
-
-**Examples:**
-
-**Example: assert stdout**
+**Example: assert contains**
 
 ```oxdock
 ECHO build-complete
-ASSERT_STDOUT build-complete
+ASSERT_CONTAINS stdout "build-complete"
 ```
 
 

@@ -25,15 +25,9 @@ fn let_capture_echo_binds_exact_bytes() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         LET $x: STRING = ECHO hi
-        WRITE captured.txt "{{ $x }}"
-        ASSERT_FILE captured.txt "hi\n"
+        ASSERT_EQ $x "hi\n"
     "#};
     run_script(&root, script).expect("capture ECHO");
-    assert_eq!(
-        read_file(&root.join("captured.txt").unwrap()),
-        "hi\n",
-        "capture must preserve the trailing newline exactly"
-    );
 }
 
 #[test]
@@ -42,8 +36,7 @@ fn let_capture_empty_stdout_binds_empty_string() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         LET $x: STRING = MKDIR emptydir
-        WRITE marker.txt "done-{{ $x }}!"
-        ASSERT_FILE marker.txt "done-!"
+        ASSERT_EQ $x ""
     "#};
     run_script(&root, script).expect("capture MKDIR");
     assert!(
@@ -102,8 +95,7 @@ fn let_capture_read_file() {
     let script = indoc! {r#"
         WRITE data.txt "file-bytes\n"
         LET $x: STRING = READ data.txt
-        WRITE out.txt "{{ $x }}"
-        ASSERT_FILE out.txt "file-bytes\n"
+        ASSERT_EQ $x "file-bytes\n"
     "#};
     run_script(&root, script).expect("capture READ file");
 }
@@ -115,8 +107,7 @@ fn let_capture_expand() {
     let script = indoc! {r#"
         WRITE tmpl.txt "hello \{{ env:WHO }}"
         LET $x: STRING = EXPAND tmpl.txt WHO=World
-        WRITE out.txt "{{ $x }}"
-        ASSERT_FILE out.txt "hello World"
+        ASSERT_EQ $x "hello World"
     "#};
     run_script(&root, script).expect("capture EXPAND");
 }
@@ -127,9 +118,9 @@ fn let_capture_write_binds_empty() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         LET $x: STRING = WRITE empty.txt content
-        WRITE marker.txt "done-{{ $x }}!"
-        ASSERT_FILE marker.txt "done-!"
-        ASSERT_FILE empty.txt content
+        ASSERT_EQ $x ""
+        LET $e: STRING = READ empty.txt
+        ASSERT_EQ $e "content"
     "#};
     run_script(&root, script).expect("capture WRITE");
 }
@@ -147,15 +138,10 @@ fn let_capture_run() {
     let shell_cmd = "cmd /c echo run-cap";
     let script = indoc! {r#"
         LET $x: STRING = RUN "{CMD}"
-        WRITE out.txt "{{ $x }}"
+        ASSERT_CONTAINS $x "run-cap"
     "#}
     .replace("{CMD}", shell_cmd);
     run_script(&root, &script).expect("capture RUN");
-    let contents = read_file(&root.join("out.txt").unwrap());
-    assert!(
-        contents.contains("run-cap"),
-        "RUN capture must contain shell output, got {contents:?}"
-    );
 }
 
 #[test]
@@ -163,7 +149,7 @@ fn let_capture_command_failure_binds_nothing() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        LET $x: STRING = ASSERT_FILE missing.txt
+        LET $x: STRING = READ "missing.txt"
     "#};
     let err = run_script(&root, script).expect_err("failing capture must fail");
     assert!(
@@ -179,23 +165,21 @@ fn let_capture_with_stdin_pipe() {
     let script = indoc! {r#"
         WITH_IO [stdout=pipe:relay] ECHO piped
         LET $x: STRING = WITH_IO [stdin=pipe:relay] READ
-        WRITE out.txt "{{ $x }}"
-        ASSERT_FILE out.txt "piped\n"
+        ASSERT_EQ $x "piped\n"
     "#};
     run_script(&root, script).expect("capture with stdin pipe");
 }
 
 #[test]
 fn let_capture_does_not_leak_into_parent_assert_stdout() {
-    // Captured bytes must not tee into the parent ASSERT_STDOUT windows.
+    // Captured bytes must not tee into the parent stdout windows.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
         LET $x: STRING = ECHO hi
-        ASSERT_STDOUT hi
+        ASSERT_CONTAINS stdout "hi"
     "#};
-    let err =
-        run_script(&root, script).expect_err("parent ASSERT_STDOUT must not see captured bytes");
+    let err = run_script(&root, script).expect_err("parent stdout must not see captured bytes");
     assert!(
         err.to_string().contains("did not contain"),
         "unexpected error: {err}"
@@ -210,8 +194,7 @@ fn let_await_capture_binds_task_output() {
     let script = indoc! {r#"
         LET $t: HANDLE = ASYNC ECHO "task-hi"
         LET $o: STRING = AWAIT $t
-        WRITE out.txt "{{ $o }}"
-        ASSERT_FILE out.txt "task-hi\n"
+        ASSERT_EQ $o "task-hi\n"
     "#};
     run_script(&root, script).expect("LET $o: STRING = AWAIT $t");
 }
@@ -274,7 +257,7 @@ fn await_capture_of_failing_task_propagates_error() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        LET $t: HANDLE = ASYNC ASSERT_FILE missing.txt
+        LET $t: HANDLE = ASYNC READ "missing.txt"
         LET $o: STRING = AWAIT $t
     "#};
     let err = run_script(&root, script).expect_err("capture of failing task must fail");

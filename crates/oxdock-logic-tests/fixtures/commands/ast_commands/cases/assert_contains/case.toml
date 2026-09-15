@@ -1,0 +1,5 @@
+name = "assert_contains"
+
+[expect]
+stdout = "build-complete\n"
+files = { "config.txt" = "key=val" }

@@ -1,11 +1,8 @@
 name = "with_io"
 stdin = "hello from stdin"
 
+[pipes.cap_out_txt]
+expect = "hello from stdin"
+
 [expect]
 files = { "empty.txt" = "" }
-
-[expect.platform.unix]
-files = { "out.txt" = "hello from stdin" }
-
-[expect.platform.windows]
-files = { "out.txt" = "hello from stdin" }
