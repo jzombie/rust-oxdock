@@ -562,6 +562,7 @@ dependencies = [
  "line-ending",
  "pest",
  "pest_derive",
+ "pest_meta",
  "proc-macro2",
  "pulldown-cmark",
  "quote",
@@ -619,9 +620,9 @@ dependencies = [
 
 [[package]]
 name = "pest_meta"
-version = "2.9.0"
+version = "2.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e04d3a0849e241d7dfce834c83b1c5edc8622009e8dd51a12ba1927c32f05496"
+checksum = "adba4db388f687393c18c51348d44a41d870ca9df71a2c98172ea3035dc6936e"
 dependencies = [
  "pest",
 ]
