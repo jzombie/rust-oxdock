@@ -25,6 +25,9 @@ pub enum ArgType {
     Duration,
     Var,
     KeyValue,
+    /// Any evaluated value (plus stream markers like `stdout` where the
+    /// command accepts them). Renders unlinked as `ANY`.
+    Any,
     /// Inline alternation for one-off enums (e.g. `SNAPSHOT|LOCAL`).
     /// Self-describing, so it renders unlinked.
     OneOf(&'static [&'static str]),
@@ -34,10 +37,12 @@ pub enum ArgType {
 
 impl ArgType {
     /// Table-cell label for the argument table's Type column.
-    /// Always a real [`crate::ast::TypeKind`] name — never a shape. Reference and
-    /// assignment shapes (`$var`, `KEY=value`) display as the `STRING`
-    /// values they bind or resolve to; the `$`/assignment requirement
-    /// itself lives in the argument description and command syntax.
+    /// Canonical value types use a real [`crate::ast::TypeKind`] name.
+    /// Reference and assignment shapes (`$var`, `KEY=value`), inline
+    /// alternations, and `ANY` render unlinked. Reference and assignment
+    /// shapes display as the `STRING` values they bind or resolve to;
+    /// the `$`/assignment requirement itself lives in the argument
+    /// description and command syntax.
     pub fn label(&self) -> String {
         use crate::ast::TypeKind;
         match self {
@@ -47,6 +52,7 @@ impl ArgType {
             ArgType::Duration => TypeKind::Duration.label().to_string(),
             ArgType::Var => TypeKind::String.label().to_string(),
             ArgType::KeyValue => TypeKind::String.label().to_string(),
+            ArgType::Any => "ANY".to_string(),
             ArgType::OneOf(options) => options.join("|"),
             ArgType::Rest(inner) => format!("{}...", inner.label()),
         }
@@ -54,7 +60,7 @@ impl ArgType {
 
     /// Anchor of the type's reference section, delegated to [`crate::ast::TypeKind`].
     /// Only types with a `TypeKind` reference section link; argument shapes
-    /// (`$var`, `KEY=value`) and inline alternations render unlinked.
+    /// (`$var`, `KEY=value`), inline alternations, and `ANY` render unlinked.
     pub fn anchor(&self) -> Option<String> {
         use crate::ast::TypeKind;
         match self {
@@ -64,6 +70,7 @@ impl ArgType {
             ArgType::Duration => Some(TypeKind::Duration.anchor()),
             ArgType::Var => None,
             ArgType::KeyValue => None,
+            ArgType::Any => None,
             ArgType::OneOf(_) => None,
             ArgType::Rest(inner) => inner.anchor(),
         }
@@ -73,7 +80,7 @@ impl ArgType {
     /// Templates and variables are never passed here — see `check_arg`.
     pub fn validate_literal(&self, literal: &str) -> Result<()> {
         match self {
-            ArgType::String | ArgType::Path => Ok(()),
+            ArgType::String | ArgType::Path | ArgType::Any => Ok(()),
             ArgType::Int => literal
                 .parse::<i32>()
                 .map(|_| ())

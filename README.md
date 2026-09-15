@@ -2034,8 +2034,8 @@ actual's string bytes instead of the bytes themselves.
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
-| `actual` | [`STRING`](#value-type-string) | yes | Value, stdout, stderr, or pipe:NAME |
-| `expected` | [`STRING...`](#value-type-string) | no | Expected (required unless --hash) |
+| `actual` | `ANY` | yes | Value, stdout, stderr, or pipe:NAME |
+| `expected` | `ANY...` | no | Expected (required unless --hash) |
 
 **Flags:**
 
@@ -2091,8 +2091,8 @@ observes a pipe buffer.
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
-| `haystack` | [`STRING`](#value-type-string) | yes | Value, stdout, stderr, or pipe:NAME |
-| `needle` | [`STRING...`](#value-type-string) | yes | Substring, element, or key |
+| `haystack` | `ANY` | yes | Value, stdout, stderr, or pipe:NAME |
+| `needle` | `ANY...` | yes | Substring, element, or key |
 
 **Examples:**
 

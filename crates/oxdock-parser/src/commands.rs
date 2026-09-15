@@ -1071,8 +1071,8 @@ declare_commands! {
             actual's string bytes instead of the bytes themselves.
         "#},
         args: &[
-            ArgSpec { name: "actual", arg_type: ArgType::String, description: "Value, stdout, stderr, or pipe:NAME", io: IoDirection::Read, index: 0, required: true, fallback_stream: None },
-            ArgSpec { name: "expected", arg_type: ArgType::Rest(&ArgType::String), description: "Expected (required unless --hash)", io: IoDirection::Read, index: 1, required: false, fallback_stream: None },
+            ArgSpec { name: "actual", arg_type: ArgType::Any, description: "Value, stdout, stderr, or pipe:NAME", io: IoDirection::Read, index: 0, required: true, fallback_stream: None },
+            ArgSpec { name: "expected", arg_type: ArgType::Rest(&ArgType::Any), description: "Expected (required unless --hash)", io: IoDirection::Read, index: 1, required: false, fallback_stream: None },
         ],
         flags: &[ FlagSpec { name: "hash", long: "--hash", value_type: FlagValueType::String, required: false, description: "SHA-256" } ],
         default_output: None,
@@ -1130,8 +1130,8 @@ declare_commands! {
             observes a pipe buffer.
         "#},
         args: &[
-            ArgSpec { name: "haystack", arg_type: ArgType::String, description: "Value, stdout, stderr, or pipe:NAME", io: IoDirection::Read, index: 0, required: true, fallback_stream: None },
-            ArgSpec { name: "needle", arg_type: ArgType::Rest(&ArgType::String), description: "Substring, element, or key", io: IoDirection::Read, index: 1, required: true, fallback_stream: None },
+            ArgSpec { name: "haystack", arg_type: ArgType::Any, description: "Value, stdout, stderr, or pipe:NAME", io: IoDirection::Read, index: 0, required: true, fallback_stream: None },
+            ArgSpec { name: "needle", arg_type: ArgType::Rest(&ArgType::Any), description: "Substring, element, or key", io: IoDirection::Read, index: 1, required: true, fallback_stream: None },
         ],
         flags: &[],
         default_output: None,
