@@ -464,3 +464,53 @@ proptest! {
         assert_steps_eq(&token_step, &step, &format!("Token parse mismatch: {}", s));
     }
 }
+
+/// Regression test for the CI failure with minimal input
+/// `Write { path: "a", contents: "IF" }`: bare statement keywords as arg
+/// values must render quoted so both parse pathways round-trip them as
+/// values instead of splitting them into new statements. Iterates the
+/// canonical [`STRUCTURAL_KEYWORDS`] registry plus every registered command
+/// name so coverage cannot rot when keywords are added.
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "requires real TokenStream/proc-macro parsing to validate API parity"
+)]
+fn keyword_args_round_trip_through_both_pathways() {
+    let mut keywords: Vec<&str> = STRUCTURAL_KEYWORDS.to_vec();
+    keywords.extend(oxdock_parser::all_metadata().iter().map(|m| m.name));
+    keywords.sort_unstable();
+    keywords.dedup();
+    for kw in keywords {
+        let cases = [
+            StepKind::Write {
+                path: "a".into(),
+                contents: Some(kw.into()),
+            },
+            StepKind::Write {
+                path: kw.into(),
+                contents: Some("v".into()),
+            },
+            StepKind::Echo(kw.into()),
+        ];
+        for kind in cases {
+            let step = Step {
+                guard: None,
+                kind,
+                scope_enter: 0,
+                scope_exit: 0,
+            };
+            let s = step.to_string();
+
+            let parsed_steps = oxdock_core::parse_script(&s).expect("string parse must round-trip");
+            assert_eq!(parsed_steps.len(), 1, "string split lines: {s}");
+            assert_steps_eq(&parsed_steps[0], &step, &format!("String mismatch: {s}"));
+
+            let ts: proc_macro2::TokenStream = s.parse().expect("rendered step must tokenize");
+            let token_steps = parse_braced_tokens(&ts, oxdock_core::lower_command)
+                .expect("token parse must round-trip");
+            assert_eq!(token_steps.len(), 1, "token walk split lines: {s}");
+            assert_steps_eq(&token_steps[0], &step, &format!("Token mismatch: {s}"));
+        }
+    }
+}

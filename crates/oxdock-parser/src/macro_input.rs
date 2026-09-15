@@ -441,23 +441,7 @@ fn walk(
                 // rules rather than plain-command lowering (AWAIT, CANCEL, FUNC,
                 // CALL, RETURN, WHILE, BREAK, CONTINUE): without this, `FUNC`
                 // after `MKDIR dist` would glue onto the same line.
-                let is_new_statement = is_command
-                    || matches!(
-                        ident_text.as_str(),
-                        "LET"
-                            | "FOR"
-                            | "IF"
-                            | "ELSE"
-                            | "ASYNC"
-                            | "AWAIT"
-                            | "CANCEL"
-                            | "FUNC"
-                            | "CALL"
-                            | "RETURN"
-                            | "WHILE"
-                            | "BREAK"
-                            | "CONTINUE"
-                    );
+                let is_new_statement = super::Command::is_statement_keyword(&ident_text);
                 let trimmed = line.trim();
                 let trimmed_empty = trimmed.is_empty();
                 let guard_prefix = trimmed.starts_with('[');

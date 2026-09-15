@@ -106,24 +106,23 @@ pub(crate) fn coerce_value<P: ProcessManager>(
 
 /// Resolve an [`Arg`] using an [`ExecState`] directly (no [`StepCtx`] needed).
 /// Handles `Arg::String` and all-`Text` `Arg::Parts` — `Arg::Expr` requires a
-/// `StepCtx` and must go through `resolve_arg`.
+/// `StepCtx` and must go through `resolve_arg`. Filesystem-free by design
+/// (issue #131): assertion-needle pre-registration runs before step dispatch
+/// while the snapshot is still pending, so this must never touch the snapshot
+/// choke point (`command_ctx` / `resolve_write` would materialize it).
 pub(crate) fn resolve_arg_state<P: ProcessManager>(
     arg: &Arg,
     state: &ExecState<P>,
 ) -> Result<String> {
     match arg {
-        Arg::String(s, _) => {
-            let ctx = state.command_ctx()?;
-            Ok(expand_string(s, ctx.envs(), state)?)
-        }
+        Arg::String(s, _) => Ok(expand_string(s, &state.envs, state)?),
         Arg::Expr(e) => bail!("Arg::Expr cannot be resolved without StepCtx: {:?}", e),
         Arg::Parts(parts) => {
-            let ctx = state.command_ctx()?;
             let mut out = String::new();
             for part in parts {
                 match part {
                     ArgPart::Text(s, _) => {
-                        out.push_str(&expand_string(s, ctx.envs(), state)?);
+                        out.push_str(&expand_string(s, &state.envs, state)?);
                     }
                     ArgPart::Expr(e) => {
                         bail!("Arg::Expr cannot be resolved without StepCtx: {:?}", e)

@@ -26,6 +26,7 @@ quote = { workspace = true, optional = true }
 syn = { workspace = true, optional = true }
 
 [dev-dependencies]
+pest_meta = "2.9.1"
 
 [lints]
 workspace = true

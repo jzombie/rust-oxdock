@@ -4,7 +4,7 @@ OxDock is a Dockerfile inspired build DSL for Rust. Embed scripts at compile tim
 
 Supports platform gating, async tasks, and piped workflows for custom pipelines.
 
-[Documentation](https://docs.rs/oxdock/0.14.0-alpha/oxdock/)
+[Documentation](https://docs.rs/oxdock/0.14.1-alpha/oxdock/)
 
 ## Embed at compile time
 
@@ -84,8 +84,8 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     LET $a: STRING = READ dist/alpha.txt
     LET $b: STRING = READ dist/beta.txt
     LET $p: STRING = READ dist/picked.txt
-    ASSERT_EQ $a "alpha OxDock 0.14.0-alpha"
-    ASSERT_EQ $b "beta OxDock 0.14.0-alpha"
+    ASSERT_EQ $a "alpha OxDock 0.14.1-alpha"
+    ASSERT_EQ $b "beta OxDock 0.14.1-alpha"
     ASSERT_EQ $p "alpha"
 };
 
@@ -97,7 +97,7 @@ let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolve
 let out = root.join("dist/alpha.txt").expect("out path");
 assert_eq!(
     resolver.read_to_string(&out).expect("read out"),
-    "alpha OxDock 0.14.0-alpha"
+    "alpha OxDock 0.14.1-alpha"
 );
 ```
 

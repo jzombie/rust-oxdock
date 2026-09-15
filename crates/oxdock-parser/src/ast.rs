@@ -156,7 +156,31 @@ impl Command {
             _ => None,
         }
     }
+
+    /// Whether a bare word opens a new statement in either parse pathway.
+    /// Covers plain commands plus [`STRUCTURAL_KEYWORDS`]. Single source
+    /// of truth for `Display` quoting and token-stream line splitting, which
+    /// must agree or round-trips break.
+    pub(crate) fn is_statement_keyword(s: &str) -> bool {
+        Command::parse(s).is_some() || STRUCTURAL_KEYWORDS.contains(&s)
+    }
 }
+
+/// Statement starters parsed by PEG rules rather than command lowering
+/// (`dsl.pest`, token-walker branches), living outside the [`Command`]
+/// enum. Canonical registry backing `Command::is_statement_keyword`;
+/// iterate this (plus [`crate::all_metadata`] names) instead of
+/// hardcoding keyword lists elsewhere.
+pub const STRUCTURAL_KEYWORDS: &[&str] = &[
+    "LET", "FOR", "IF", "ELSE", "ASYNC", "AWAIT", "CANCEL", "FUNC", "CALL", "RETURN", "WHILE",
+    "BREAK", "CONTINUE",
+];
+
+/// Clause keywords that open no statement and need no `Display` quoting
+/// (`IN` only heads `FOR` iterations). Declared alongside
+/// [`STRUCTURAL_KEYWORDS`] so grammar-conformance tests never hardcode
+/// exception lists of their own.
+pub const CLAUSE_KEYWORDS: &[&str] = &["IN"];
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum PlatformGuard {
@@ -939,5 +963,88 @@ impl fmt::Display for Step {
             write!(f, "[{}] ", expr)?;
         }
         write!(f, "{}", self.kind)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    /// Bidirectional lock between `dsl.pest` and the keyword registry.
+    /// Fails CI if a statement keyword is renamed or deleted on either side.
+    /// The grammar is parsed with `pest_meta` (no line-format or rule-name
+    /// conventions): every [`STRUCTURAL_KEYWORDS`] entry must occur as a
+    /// string literal somewhere in the grammar, and every uppercase literal
+    /// reachable from the top-level instruction rules (`element`,
+    /// `block_element`, following rule references transitively) must
+    /// classify as a statement starter ([`Command::is_statement_keyword`])
+    /// or a clause keyword ([`CLAUSE_KEYWORDS`]). Type tags, argument
+    /// enums, and value-level function names validate at lowering time via
+    /// generic ident rules, so they are outside this test's scope by design
+    /// rather than via synthetic registries.
+    #[test]
+    fn statement_keywords_match_pest_grammar() {
+        use pest_meta::{ast::Expr, parser};
+        use std::collections::{HashMap, HashSet};
+
+        let pest_src = include_str!("dsl.pest");
+        let pairs = parser::parse(parser::Rule::grammar_rules, pest_src)
+            .expect("dsl.pest must parse as a pest grammar");
+        let rules = parser::consume_rules(pairs).expect("dsl.pest rules must consume");
+        let by_name: HashMap<&str, &Expr> = rules
+            .iter()
+            .map(|rule| (rule.name.as_str(), &rule.expr))
+            .collect();
+
+        let mut all_literals = HashSet::new();
+        for rule in &rules {
+            for node in rule.expr.iter_top_down() {
+                match node {
+                    Expr::Str(literal) | Expr::Insens(literal) => {
+                        all_literals.insert(literal.clone());
+                    }
+                    _ => {}
+                }
+            }
+        }
+        for kw in STRUCTURAL_KEYWORDS {
+            assert!(
+                all_literals.contains(*kw),
+                "keyword {kw} in STRUCTURAL_KEYWORDS missing from dsl.pest"
+            );
+        }
+
+        let mut seen = HashSet::new();
+        let mut stack = vec!["element".to_string(), "block_element".to_string()];
+        let mut stmt_literals = HashSet::new();
+        while let Some(name) = stack.pop() {
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            let Some(expr) = by_name.get(name.as_str()) else {
+                continue;
+            };
+            for node in expr.iter_top_down() {
+                match node {
+                    Expr::Str(literal) | Expr::Insens(literal) => {
+                        stmt_literals.insert(literal.clone());
+                    }
+                    Expr::Ident(dependency) => stack.push(dependency.clone()),
+                    _ => {}
+                }
+            }
+        }
+        assert!(
+            seen.contains("element") && seen.contains("block_element"),
+            "grammar must define element and block_element instruction rules"
+        );
+        for kw in stmt_literals {
+            if kw.len() > 1 && kw.chars().all(|c| c.is_ascii_uppercase()) {
+                assert!(
+                    crate::Command::is_statement_keyword(&kw)
+                        || CLAUSE_KEYWORDS.contains(&kw.as_str()),
+                    "uppercase literal \"{kw}\" reachable from dsl.pest instruction rules is not a registered statement or clause keyword"
+                );
+            }
+        }
     }
 }
