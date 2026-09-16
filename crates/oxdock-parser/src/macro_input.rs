@@ -519,10 +519,28 @@ pub fn script_from_braced_tokens(ts: &TokenStream2) -> Result<String> {
 /// Requires a lowering function — callers must provide it.
 pub fn parse_braced_tokens(
     ts: &TokenStream2,
-    lower: impl Fn(&str, Vec<crate::Arg>) -> anyhow::Result<crate::StepKind>,
+    lower: impl Fn(&str, Vec<crate::Arg>) -> crate::ParseResult<crate::StepKind>,
 ) -> Result<Vec<Step>> {
     let script = script_from_braced_tokens(ts)?;
-    parse_script(&script, lower)
+    // The string rebuild loses per token positions. Forward the head
+    // token coordinates so failures still carry a macro position; the
+    // caller keeps its own span handle for `syn::Error` squiggles.
+    let head_ctx = ts.clone().into_iter().next().map(|t| {
+        let start = t.span().start();
+        crate::SpanContext::from_compiler_span(
+            start.line.max(1),
+            Some(start.column.saturating_add(1)),
+            Some(start.column.saturating_add(1)),
+            t.span(),
+        )
+    });
+    parse_script(&script, lower).map_err(|e| {
+        let e = match &head_ctx {
+            Some(ctx) => e.with_span(ctx),
+            None => e,
+        };
+        anyhow::Error::from(e)
+    })
 }
 
 #[cfg(test)]
@@ -533,7 +551,7 @@ mod tests {
     use quote::quote;
 
     /// Mock lowering for macro_input tests.
-    fn mock_lower(name: &str, args: Vec<crate::Arg>) -> anyhow::Result<StepKind> {
+    fn mock_lower(name: &str, args: Vec<crate::Arg>) -> crate::ParseResult<StepKind> {
         crate::test_lower_mock::lower(name, args)
     }
 

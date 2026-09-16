@@ -681,17 +681,23 @@ mod fingerprint_tests {
     use oxdock_parser::{Arg, StepKind, parse_script};
     use std::collections::HashMap;
 
-    fn test_lower(name: &str, args: Vec<Arg>) -> Result<StepKind> {
+    fn test_lower(name: &str, args: Vec<Arg>) -> oxdock_parser::ParseResult<StepKind> {
         match name {
             "COPY" => {
-                let from = args
-                    .first()
-                    .cloned()
-                    .ok_or_else(|| anyhow::anyhow!("COPY requires source"))?;
-                let to = args
-                    .get(1)
-                    .cloned()
-                    .ok_or_else(|| anyhow::anyhow!("COPY requires destination"))?;
+                let from = args.first().cloned().ok_or_else(|| {
+                    oxdock_parser::ParseError::validation(
+                        "COPY",
+                        "COPY requires source".to_string(),
+                        &oxdock_parser::SpanContext::line_only(0),
+                    )
+                })?;
+                let to = args.get(1).cloned().ok_or_else(|| {
+                    oxdock_parser::ParseError::validation(
+                        "COPY",
+                        "COPY requires destination".to_string(),
+                        &oxdock_parser::SpanContext::line_only(0),
+                    )
+                })?;
                 Ok(StepKind::Copy {
                     from_current_workspace: false,
                     from,
@@ -699,22 +705,33 @@ mod fingerprint_tests {
                 })
             }
             "WRITE" => {
-                let path = args
-                    .first()
-                    .cloned()
-                    .ok_or_else(|| anyhow::anyhow!("WRITE requires path"))?;
+                let path = args.first().cloned().ok_or_else(|| {
+                    oxdock_parser::ParseError::validation(
+                        "WRITE",
+                        "WRITE requires path".to_string(),
+                        &oxdock_parser::SpanContext::line_only(0),
+                    )
+                })?;
                 let contents = args.get(1).cloned();
                 Ok(StepKind::Write { path, contents })
             }
             "ECHO" => {
-                let msg = args
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| anyhow::anyhow!("ECHO requires arg"))?;
+                let msg = args.into_iter().next().ok_or_else(|| {
+                    oxdock_parser::ParseError::validation(
+                        "ECHO",
+                        "ECHO requires arg".to_string(),
+                        &oxdock_parser::SpanContext::line_only(0),
+                    )
+                })?;
                 Ok(StepKind::Echo(msg))
             }
-            "ENV" => oxdock_parser::commands::lower_env_assignment(args),
-            _ => anyhow::bail!("unknown command: {name}"),
+            "ENV" => Ok(oxdock_parser::commands::lower_env_assignment(args)?),
+            _ => Err(oxdock_parser::ParseError::unknown_command(
+                name,
+                format!("unknown command: {name}"),
+                None,
+                &oxdock_parser::SpanContext::line_only(0),
+            )),
         }
     }
 

@@ -11,6 +11,8 @@ mod cancel;
 mod common;
 #[path = "integration/env_display.rs"]
 mod env_display;
+#[path = "integration/error_kinds.rs"]
+mod error_kinds;
 #[path = "integration/guard_tests.rs"]
 mod guard_tests;
 #[path = "integration/inherit_env.rs"]

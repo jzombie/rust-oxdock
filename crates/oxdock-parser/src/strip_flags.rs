@@ -1,6 +1,6 @@
 use crate::ast::Arg;
 use crate::command::{CommandMeta, FlagValueType};
-use anyhow::{Result, anyhow};
+use crate::error::{ParseError, SpanContext};
 
 /// Result of flag stripping: (extracted_flags, remaining_positional_args).
 pub type StrippedArgs = (Vec<(String, Arg)>, Vec<Arg>);
@@ -12,7 +12,7 @@ pub type StrippedArgs = (Vec<(String, Arg)>, Vec<Arg>);
 /// - `--flag val` and `--flag=val` forms
 /// - Unknown flags are rejected when the command has registered flags
 /// - Unrecognized `--` on flag-less commands falls through as positional
-pub fn strip_flags(args: Vec<Arg>, meta: &CommandMeta) -> Result<StrippedArgs> {
+pub fn strip_flags(args: Vec<Arg>, meta: &CommandMeta) -> Result<StrippedArgs, ParseError> {
     if meta.flags.is_empty() {
         return Ok((Vec::new(), args));
     }
@@ -47,20 +47,26 @@ pub fn strip_flags(args: Vec<Arg>, meta: &CommandMeta) -> Result<StrippedArgs> {
                             Arg::String("true".into(), false)
                         } else {
                             iter.next().ok_or_else(|| {
-                                anyhow!(
-                                    "invalid syntax for command {}: {} requires a value",
+                                ParseError::validation(
                                     meta.name,
-                                    flag_meta.long
+                                    format!(
+                                        "invalid syntax for command {}: {} requires a value",
+                                        meta.name, flag_meta.long
+                                    ),
+                                    &SpanContext::line_only(0),
                                 )
                             })?
                         };
                         flags.push((flag_meta.name.to_string(), value));
                     }
                     None => {
-                        return Err(anyhow!(
-                            "invalid syntax for command {}: unknown flag {}",
+                        return Err(ParseError::validation(
                             meta.name,
-                            s
+                            format!(
+                                "invalid syntax for command {}: unknown flag {}",
+                                meta.name, s
+                            ),
+                            &SpanContext::line_only(0),
                         ));
                     }
                 }

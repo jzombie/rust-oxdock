@@ -47,8 +47,10 @@ define_pipeline! {
 }
 
 /// Parse a script using the production `lower_command` dispatcher.
+/// The typed `ParseError` converts into `anyhow::Error` at this boundary
+/// with no intermediate `.context()` wrapping, so the message survives.
 pub fn parse_script(input: &str) -> anyhow::Result<Vec<oxdock_parser::Step>> {
-    oxdock_parser::parse_script(input, lower_command)
+    Ok(oxdock_parser::parse_script(input, lower_command)?)
 }
 
 #[cfg(test)]

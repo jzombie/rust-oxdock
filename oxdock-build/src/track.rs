@@ -329,17 +329,23 @@ mod tests {
     use super::*;
     use oxdock_parser::{Arg, Step, StepKind, parse_script};
 
-    fn test_lower(name: &str, args: Vec<Arg>) -> anyhow::Result<StepKind> {
+    fn test_lower(name: &str, args: Vec<Arg>) -> oxdock_parser::ParseResult<StepKind> {
         match name {
             "COPY" => {
-                let from = args
-                    .first()
-                    .cloned()
-                    .ok_or_else(|| anyhow::anyhow!("COPY requires source"))?;
-                let to = args
-                    .get(1)
-                    .cloned()
-                    .ok_or_else(|| anyhow::anyhow!("COPY requires destination"))?;
+                let from = args.first().cloned().ok_or_else(|| {
+                    oxdock_parser::ParseError::validation(
+                        "COPY",
+                        "COPY requires source".to_string(),
+                        &oxdock_parser::SpanContext::line_only(0),
+                    )
+                })?;
+                let to = args.get(1).cloned().ok_or_else(|| {
+                    oxdock_parser::ParseError::validation(
+                        "COPY",
+                        "COPY requires destination".to_string(),
+                        &oxdock_parser::SpanContext::line_only(0),
+                    )
+                })?;
                 Ok(StepKind::Copy {
                     from_current_workspace: false,
                     from,
@@ -347,47 +353,70 @@ mod tests {
                 })
             }
             "SYMLINK" => {
-                let from = args
-                    .first()
-                    .cloned()
-                    .ok_or_else(|| anyhow::anyhow!("SYMLINK requires link"))?;
-                let to = args
-                    .get(1)
-                    .cloned()
-                    .ok_or_else(|| anyhow::anyhow!("SYMLINK requires target"))?;
+                let from = args.first().cloned().ok_or_else(|| {
+                    oxdock_parser::ParseError::validation(
+                        "SYMLINK",
+                        "SYMLINK requires link".to_string(),
+                        &oxdock_parser::SpanContext::line_only(0),
+                    )
+                })?;
+                let to = args.get(1).cloned().ok_or_else(|| {
+                    oxdock_parser::ParseError::validation(
+                        "SYMLINK",
+                        "SYMLINK requires target".to_string(),
+                        &oxdock_parser::SpanContext::line_only(0),
+                    )
+                })?;
                 Ok(StepKind::Symlink { from, to })
             }
-            "ENV" => oxdock_parser::commands::lower_env_assignment(args),
+            "ENV" => Ok(oxdock_parser::commands::lower_env_assignment(args)?),
             "WRITE" => {
-                let path = args
-                    .first()
-                    .cloned()
-                    .ok_or_else(|| anyhow::anyhow!("WRITE requires path"))?;
+                let path = args.first().cloned().ok_or_else(|| {
+                    oxdock_parser::ParseError::validation(
+                        "WRITE",
+                        "WRITE requires path".to_string(),
+                        &oxdock_parser::SpanContext::line_only(0),
+                    )
+                })?;
                 let contents = args.get(1).cloned();
                 Ok(StepKind::Write { path, contents })
             }
             "RUN" => {
-                let cmd = args
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| anyhow::anyhow!("RUN requires command"))?;
+                let cmd = args.into_iter().next().ok_or_else(|| {
+                    oxdock_parser::ParseError::validation(
+                        "RUN",
+                        "RUN requires command".to_string(),
+                        &oxdock_parser::SpanContext::line_only(0),
+                    )
+                })?;
                 Ok(StepKind::Run(cmd))
             }
             "WORKDIR" => {
-                let path = args
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| anyhow::anyhow!("WORKDIR requires path"))?;
+                let path = args.into_iter().next().ok_or_else(|| {
+                    oxdock_parser::ParseError::validation(
+                        "WORKDIR",
+                        "WORKDIR requires path".to_string(),
+                        &oxdock_parser::SpanContext::line_only(0),
+                    )
+                })?;
                 Ok(StepKind::Workdir(path))
             }
             "ECHO" => {
-                let msg = args
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| anyhow::anyhow!("ECHO requires message"))?;
+                let msg = args.into_iter().next().ok_or_else(|| {
+                    oxdock_parser::ParseError::validation(
+                        "ECHO",
+                        "ECHO requires message".to_string(),
+                        &oxdock_parser::SpanContext::line_only(0),
+                    )
+                })?;
                 Ok(StepKind::Echo(msg))
             }
-            _ => anyhow::bail!("unknown command: {name}"),
+            _ => Err(oxdock_parser::ParseError::unknown_command(
+                name,
+                format!("unknown command: {name}"),
+                None,
+                &oxdock_parser::SpanContext::line_only(0),
+            )),
         }
     }
 

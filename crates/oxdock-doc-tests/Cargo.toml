@@ -12,6 +12,7 @@ publish = false
 development = ["oxdock-macros", "oxdock", "oxdock-fs"]
 
 [dev-dependencies]
+indoc.workspace = true
 oxdock.workspace = true
 oxdock-fs.workspace = true
 oxdock-macros.workspace = true
