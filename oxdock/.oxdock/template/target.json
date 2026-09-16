@@ -43,7 +43,8 @@
         "shared": [
           ".oxdock/template/shared/intro.md.tmpl",
           ".oxdock/template/shared/embed-example.md.tmpl",
-          ".oxdock/template/shared/inline-macro.md.tmpl"
+          ".oxdock/template/shared/inline-macro.md.tmpl",
+          ".oxdock/template/shared/error-handling.md.tmpl"
         ],
         "guide": [
           ".oxdock/template/readme/fragments/dsl-reference.md.tmpl"

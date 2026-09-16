@@ -1,5 +1,5 @@
 use crate::ast::COMMANDS;
-use anyhow::{Result, anyhow, bail};
+use crate::error::{ParseError, SpanContext};
 use pest::{Parser, iterators::Pair};
 use pest_derive::Parser;
 
@@ -14,49 +14,126 @@ pub enum RawToken<'a> {
     Guard {
         pair: Pair<'a, Rule>,
         line_end: usize,
+        span: SpanContext<'a>,
     },
     BlockStart {
         line_no: usize,
+        span: SpanContext<'a>,
     },
     BlockEnd {
         line_no: usize,
+        span: SpanContext<'a>,
     },
     /// A structural command (WITH_IO, FOR, IF, LET, $var mutation) — parsed by the grammar.
     Command {
         pair: Pair<'a, Rule>,
         line_no: usize,
+        span: SpanContext<'a>,
     },
     /// A generic instruction — command name + raw args, lowered by a function.
     Instruction {
         pair: Pair<'a, Rule>,
         line_no: usize,
+        span: SpanContext<'a>,
     },
     /// A `RUN ["exe", "arg", ...]` exec-form statement — carries a structured
     /// `list_literal` pair, lowered without shell stringification.
     RunExec {
         pair: Pair<'a, Rule>,
         line_no: usize,
+        span: SpanContext<'a>,
     },
 }
 
-pub fn tokenize(input: &str) -> Result<Vec<RawToken<'_>>> {
+/// Build a string path span context from a pest pair and the full input.
+/// Multi-line spans clamp to the start line, matching the pest error rule.
+pub fn span_of<'a>(pair: &Pair<Rule>, input: &'a str) -> SpanContext<'a> {
+    let span = pair.as_span();
+    let (line, col_start) = span.start_pos().line_col();
+    let (end_line, end_col) = span.end_pos().line_col();
+    let col_end = if end_line == line {
+        end_col.saturating_sub(1).max(col_start)
+    } else {
+        col_start
+    };
+    let source_line = input
+        .lines()
+        .nth(line.saturating_sub(1))
+        .unwrap_or("")
+        .to_string();
+    SpanContext::full(line, col_start, col_end, source_line).with_source(input)
+}
+
+/// Refine a statement level span to the exact sub-expression pair.
+/// Coordinates come from the pair and the source line is resolved from
+/// the shared script text, so multi-line bodies keep exact carets.
+/// Falls back to the parent line text only when no shared text exists.
+pub fn refine_span<'a>(ctx: &SpanContext<'a>, pair: &Pair<Rule>) -> SpanContext<'a> {
+    let span = pair.as_span();
+    let (line, col_start) = span.start_pos().line_col();
+    let (end_line, end_col) = span.end_pos().line_col();
+    let col_end = if end_line == line {
+        end_col.saturating_sub(1).max(col_start)
+    } else {
+        col_start
+    };
+    let source_line = ctx
+        .source
+        .and_then(|text| text.lines().nth(line.saturating_sub(1)).map(str::to_string))
+        .or_else(|| {
+            if line == ctx.line {
+                ctx.source_line.clone()
+            } else {
+                None
+            }
+        });
+    SpanContext {
+        line,
+        col_start: Some(col_start),
+        col_end: Some(col_end),
+        source_line,
+        source: ctx.source,
+        #[cfg(feature = "proc-macro-api")]
+        compiler_span: ctx.compiler_span,
+        step_index: ctx.step_index,
+    }
+}
+/// Span context for a bare line number (fallback for end of script errors).
+pub fn span_for_line(input: &str, line_no: usize) -> SpanContext<'_> {
+    let source_line = input
+        .lines()
+        .nth(line_no.saturating_sub(1))
+        .unwrap_or("")
+        .to_string();
+    if source_line.is_empty() {
+        SpanContext::line_only(line_no)
+    } else {
+        SpanContext::full(line_no, 1, 1, source_line)
+    }
+}
+
+pub fn tokenize(input: &str) -> Result<Vec<RawToken<'_>>, ParseError> {
     let mut tokens = Vec::new();
-    let mut pairs = LanguageParser::parse(Rule::script, input)
-        .map_err(|err| anyhow!(format_pest_error(err)))?;
+    let mut pairs = LanguageParser::parse(Rule::script, input).map_err(parse_pest_error)?;
     let Some(root) = pairs.next() else {
         return Ok(tokens);
     };
 
     for pair in root.into_inner() {
         let line_no = pair.as_span().start_pos().line_col().0;
+        let span = span_of(&pair, input);
         match pair.as_rule() {
             Rule::blank | Rule::hash_comment | Rule::semicolon | Rule::EOI | Rule::COMMENT => {}
             Rule::guard_line => {
                 let (line_end, _) = pair.as_span().end_pos().line_col();
-                tokens.push(RawToken::Guard { pair, line_end });
+                tokens.push(RawToken::Guard {
+                    pair,
+                    line_end,
+                    span,
+                });
             }
-            Rule::block_start => tokens.push(RawToken::BlockStart { line_no }),
-            Rule::block_end => tokens.push(RawToken::BlockEnd { line_no }),
+            Rule::block_start => tokens.push(RawToken::BlockStart { line_no, span }),
+            Rule::block_end => tokens.push(RawToken::BlockEnd { line_no, span }),
             // Structural commands — parsed by grammar-specific rules
             Rule::with_io_command
             | Rule::inherit_env_command
@@ -76,22 +153,40 @@ pub fn tokenize(input: &str) -> Result<Vec<RawToken<'_>>> {
             | Rule::call_statement
             | Rule::return_statement
             | Rule::break_statement
-            | Rule::continue_statement => tokens.push(RawToken::Command { pair, line_no }),
+            | Rule::continue_statement => tokens.push(RawToken::Command {
+                pair,
+                line_no,
+                span,
+            }),
             // Generic instructions — lowered by a function
-            Rule::instruction | Rule::instruction_inner => {
-                tokens.push(RawToken::Instruction { pair, line_no })
-            }
+            Rule::instruction | Rule::instruction_inner => tokens.push(RawToken::Instruction {
+                pair,
+                line_no,
+                span,
+            }),
             // RUN exec form — structured list lowering, never shell text
-            Rule::run_exec_statement | Rule::run_exec_inner => {
-                tokens.push(RawToken::RunExec { pair, line_no })
+            Rule::run_exec_statement | Rule::run_exec_inner => tokens.push(RawToken::RunExec {
+                pair,
+                line_no,
+                span,
+            }),
+            other => {
+                return Err(ParseError::structural(
+                    "parser",
+                    format!("unexpected parser rule {other:?}"),
+                    &span,
+                ));
             }
-            other => bail!("unexpected parser rule {:?}", other),
         }
     }
     Ok(tokens)
 }
 
-fn format_pest_error(err: pest::error::Error<Rule>) -> String {
+/// Convert a pest failure into a typed error, preserving the exact
+/// legacy message (header, uppercase note, caret block) and exposing
+/// the expected sets and hint as structured fields. Shared by script
+/// tokenizing and snippet expression parsing.
+pub fn parse_pest_error(err: pest::error::Error<Rule>) -> ParseError {
     use pest::error::{ErrorVariant, LineColLocation};
 
     let (line_no, col_start, col_end) = match err.line_col {
@@ -106,6 +201,7 @@ fn format_pest_error(err: pest::error::Error<Rule>) -> String {
         }
     };
 
+    let mut expected: Vec<String> = Vec::new();
     let mut msg = String::new();
     match &err.variant {
         ErrorVariant::ParsingError {
@@ -114,17 +210,18 @@ fn format_pest_error(err: pest::error::Error<Rule>) -> String {
         } => {
             msg.push_str("parse error");
             if !positives.is_empty() {
-                let expected = positives
+                let list = positives
                     .iter()
-                    .map(|r| format!("{:?}", r))
+                    .map(|r| format!("{r:?}"))
                     .collect::<Vec<_>>()
                     .join(", ");
-                msg.push_str(&format!(" (expected: {expected})"));
+                expected = positives.iter().map(|r| format!("{r:?}")).collect();
+                msg.push_str(&format!(" (expected: {list})"));
             }
             if !negatives.is_empty() {
                 let unexpected = negatives
                     .iter()
-                    .map(|r| format!("{:?}", r))
+                    .map(|r| format!("{r:?}"))
                     .collect::<Vec<_>>()
                     .join(", ");
                 msg.push_str(&format!(" (unexpected: {unexpected})"));
@@ -140,7 +237,8 @@ fn format_pest_error(err: pest::error::Error<Rule>) -> String {
     let caret_pad = " ".repeat(col_start.saturating_sub(1));
     let caret_mark = "^".repeat(caret_len);
 
-    if let Some(note) = detect_case_error(line) {
+    let note = detect_case_error(line);
+    if let Some(note) = &note {
         msg.push_str(&format!("\nnote: {note}"));
     }
 
@@ -154,7 +252,8 @@ fn format_pest_error(err: pest::error::Error<Rule>) -> String {
         caret = caret_mark
     ));
 
-    msg
+    let ctx = SpanContext::full(line_no, col_start, col_end, line.to_string());
+    ParseError::pest(msg, expected, note, &ctx)
 }
 
 fn detect_case_error(line: &str) -> Option<String> {

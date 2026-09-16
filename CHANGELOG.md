@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [0.15.0-alpha] - 2026-09-16
+
+### Added
+
+- Typed parse errors (#143): `oxdock-parser` now returns `ParseError` / `ParseErrorKind` (`PestParse`, `InvalidSyntax`, `UnknownCommand`, `Structural`, `Validation`) instead of untyped strings, with a 1-based line number, column span, source line, caret block, expected syntax, and hint on every string path error. Sub-expression spans are refined to the offending token (for example the `BOOL` in a bad `FOR` key type), and multi-line bodies resolve source lines from the shared script text.
+- Error handling documentation with executing examples (#143): the workspace README gains a "When a script fails to parse" section whose `rust` doctests run the real parser and pin the exact output, plus a parser README section describing the error model. Exact outputs are also pinned in `error_kinds.rs` integration tests.
+
+### Fixed
+
+- Syntax errors no longer surface as `unknown command` (#143): any line starting with a known command or structural keyword (`WITH_IO`, `LET`, `FOR`, `IF`, and the rest) always fails as `invalid syntax for command X` with the expected syntax and a concrete example; only truly unknown names report `unknown command`, with a `did you mean` hint when only the case is wrong. Malformed `WITH_IO` bindings explain the binding rules, and lowercase commands keep the uppercase correction note with a caret.
+- CLI renders parse errors with `Display` (`{err:#}`) instead of `Debug`, preserving the multi-line caret block.
+
+### Changed
+
+- [breaking] Host Rust API only, scripts are unaffected: `oxdock-parser` entrypoints (`parse_script`, `lower_command`, and the structural lowerers) return `Result<T, ParseError>` instead of `anyhow::Result<T>`. Downstream crates convert into their own error types at the outer boundary; message text is unchanged so substring assertions keep passing.
+
 ## [0.14.1-alpha] - 2026-09-15
 
 ### Fixed

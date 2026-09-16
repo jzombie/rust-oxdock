@@ -1,4 +1,5 @@
 use crate::ast::{Arg, Expr, StepKind};
+use crate::error::{ParseError, SpanContext};
 use anyhow::{Result, anyhow, bail};
 
 /// Metadata for a single command argument.
@@ -162,17 +163,21 @@ pub fn validate_positionals_against_meta(
     cmd_name: &str,
     specs: &[ArgSpec],
     args: &[Arg],
-) -> Result<()> {
+) -> Result<(), ParseError> {
     let has_rest = specs
         .last()
         .is_some_and(|s| matches!(s.arg_type, ArgType::Rest(_)));
 
     if !has_rest && args.len() > specs.len() {
-        bail!(
-            "invalid syntax for command {cmd_name}: expects at most {} positional argument(s), got {}",
-            specs.len(),
-            args.len()
-        );
+        return Err(ParseError::validation(
+            cmd_name,
+            format!(
+                "invalid syntax for command {cmd_name}: expects at most {} positional argument(s), got {}",
+                specs.len(),
+                args.len()
+            ),
+            &SpanContext::line_only(0),
+        ));
     }
 
     for spec in specs {
@@ -181,10 +186,14 @@ pub fn validate_positionals_against_meta(
             // the inner type, not just the first.
             let tail = args.get(spec.index..).unwrap_or(&[]);
             if tail.is_empty() && spec.required {
-                bail!(
-                    "invalid syntax for command {cmd_name}: requires argument `{}`",
-                    spec.name
-                )
+                return Err(ParseError::validation(
+                    cmd_name,
+                    format!(
+                        "invalid syntax for command {cmd_name}: requires argument `{}`",
+                        spec.name
+                    ),
+                    &SpanContext::line_only(0),
+                ));
             }
             for arg in tail {
                 check_one(cmd_name, spec, inner, arg)?;
@@ -194,10 +203,14 @@ pub fn validate_positionals_against_meta(
         match args.get(spec.index) {
             Some(arg) => check_one(cmd_name, spec, &spec.arg_type, arg)?,
             None if spec.required => {
-                bail!(
-                    "invalid syntax for command {cmd_name}: requires argument `{}`",
-                    spec.name
-                )
+                return Err(ParseError::validation(
+                    cmd_name,
+                    format!(
+                        "invalid syntax for command {cmd_name}: requires argument `{}`",
+                        spec.name
+                    ),
+                    &SpanContext::line_only(0),
+                ));
             }
             None => {}
         }
@@ -205,14 +218,23 @@ pub fn validate_positionals_against_meta(
     Ok(())
 }
 
-fn check_one(cmd_name: &str, spec: &ArgSpec, arg_type: &ArgType, arg: &Arg) -> Result<()> {
+fn check_one(
+    cmd_name: &str,
+    spec: &ArgSpec,
+    arg_type: &ArgType,
+    arg: &Arg,
+) -> Result<(), ParseError> {
     match arg_type.check_arg(arg) {
         Ok(_) => Ok(()),
-        Err(e) => bail!(
-            "invalid syntax for command {cmd_name}: argument `{}` got {} — {e:#}",
-            spec.name,
-            arg.render()
-        ),
+        Err(e) => Err(ParseError::validation(
+            cmd_name,
+            format!(
+                "invalid syntax for command {cmd_name}: argument `{}` got {} — {e:#}",
+                spec.name,
+                arg.render()
+            ),
+            &SpanContext::line_only(0),
+        )),
     }
 }
 

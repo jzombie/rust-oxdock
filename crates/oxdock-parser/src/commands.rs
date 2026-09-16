@@ -21,7 +21,7 @@ use crate::command::{
     ArgSpec, ArgType, CommandMeta, Example, FlagSpec, FlagValueType, IoDirection, Stream,
     split_assignment,
 };
-use anyhow::{Result, anyhow, bail};
+use crate::error::{ParseError, ParseResult, SpanContext};
 use indoc::indoc;
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -34,9 +34,13 @@ use indoc::indoc;
 /// untouched (preserving `Arg::Expr`); all-`String` tails join exactly like the
 /// historical `join_args`; tails containing expressions become `Arg::Parts`
 /// with single-space separators so `$x` is never silently dropped.
-fn join_value(args: Vec<Arg>, cmd_name: &str) -> Result<Arg> {
+fn join_value(args: Vec<Arg>, cmd_name: &str) -> ParseResult<Arg> {
     if args.is_empty() {
-        bail!("{cmd_name} requires at least one argument");
+        return Err(ParseError::validation(
+            cmd_name,
+            format!("{cmd_name} requires at least one argument"),
+            &SpanContext::line_only(0),
+        ));
     }
     if args.len() == 1 {
         return Ok(args.into_iter().next().unwrap());
@@ -67,13 +71,22 @@ fn join_value(args: Vec<Arg>, cmd_name: &str) -> Result<Arg> {
 /// Canonical `lower_command` entry for direct callers holding one pre-joined
 /// `KEY=value` token. Script parsing never reaches this — the grammar splits
 /// assignments on raw spans first (see `lower_env_command` in parser.rs).
-pub fn lower_env_assignment(args: Vec<Arg>) -> Result<StepKind> {
-    let arg = args
-        .into_iter()
-        .next()
-        .ok_or_else(|| anyhow!("ENV requires KEY=value"))?;
-    let Some((key, value)) = split_assignment(arg.as_str())? else {
-        bail!("ENV requires KEY=value format")
+pub fn lower_env_assignment(args: Vec<Arg>) -> ParseResult<StepKind> {
+    let arg = args.into_iter().next().ok_or_else(|| {
+        ParseError::validation(
+            "ENV",
+            "ENV requires KEY=value".to_string(),
+            &SpanContext::line_only(0),
+        )
+    })?;
+    let Some((key, value)) = split_assignment(arg.as_str())
+        .map_err(|e| ParseError::validation("ENV", e.to_string(), &SpanContext::line_only(0)))?
+    else {
+        return Err(ParseError::validation(
+            "ENV",
+            "ENV requires KEY=value format".to_string(),
+            &SpanContext::line_only(0),
+        ));
     };
     Ok(StepKind::Env { key, value })
 }
@@ -223,7 +236,7 @@ pub(crate) fn is_known_command(name: &str) -> bool {
     all_metadata().iter().any(|meta| meta.name == name)
 }
 
-pub(crate) fn invalid_syntax_error(name: &str, raw_args: &[Arg]) -> anyhow::Error {
+pub(crate) fn invalid_syntax_error(name: &str, raw_args: &[Arg]) -> ParseError {
     let received = raw_args
         .iter()
         .map(Arg::render)
@@ -234,22 +247,66 @@ pub(crate) fn invalid_syntax_error(name: &str, raw_args: &[Arg]) -> anyhow::Erro
     } else {
         format!("`{received}`")
     };
+    let found = if received.is_empty() {
+        None
+    } else {
+        Some(received.clone())
+    };
+    let expected = all_metadata()
+        .iter()
+        .find(|meta| meta.name == name)
+        .map(|meta| vec![meta.syntax.to_string()])
+        .unwrap_or_default();
+    let ctx = SpanContext::line_only(0);
     match structural_hint(name, &received) {
-        Some(hint) => anyhow!("invalid syntax for command {name}: {hint}"),
-        None => anyhow!("invalid syntax for command {name}: got {got}."),
+        Some(hint) => ParseError::invalid_syntax(
+            name,
+            format!("invalid syntax for command {name}: {hint}"),
+            found,
+            expected,
+            Some(hint),
+            &ctx,
+        ),
+        None => ParseError::invalid_syntax(
+            name,
+            format!("invalid syntax for command {name}: got {got}."),
+            found,
+            expected,
+            None,
+            &ctx,
+        ),
     }
 }
 
-fn unknown_command_error(name: &str, raw_args: &[Arg]) -> anyhow::Error {
+fn unknown_command_error(name: &str, raw_args: &[Arg]) -> ParseError {
     let received = raw_args
         .iter()
         .map(Arg::render)
         .collect::<Vec<_>>()
         .join(" ");
     let hint = structural_hint(name, &received).or_else(|| case_hint(name));
+    let ctx = SpanContext::line_only(0);
     match hint {
-        Some(hint) => anyhow!("unknown command: {name}\n{hint}"),
-        None => anyhow!("unknown command: {name}"),
+        Some(hint) => ParseError::unknown_command(
+            name,
+            format!("unknown command: {name}\n{hint}"),
+            Some(hint),
+            &ctx,
+        ),
+        None => ParseError::unknown_command(name, format!("unknown command: {name}"), None, &ctx),
+    }
+}
+
+/// Single decision function for the lowering fallback: keyword led lines
+/// (structural statements, `ELSE`, every registered command) are committed
+/// syntax errors, never unknown commands. Only truly unknown names fall
+/// through to `unknown_command_error`. Callers enrich the result with the
+/// token span via `ParseError::with_span`.
+pub(crate) fn classify(name: &str, raw_args: &[Arg]) -> ParseError {
+    if is_known_command(name) {
+        invalid_syntax_error(name, raw_args)
+    } else {
+        unknown_command_error(name, raw_args)
     }
 }
 
@@ -398,7 +455,7 @@ macro_rules! declare_commands {
             $( $sname $( { $( $sfname : $sftype ),* } )?, )*
         }
 
-        pub fn lower_command(name: &str, raw_args: Vec<Arg>) -> Result<StepKind> {
+        pub fn lower_command(name: &str, raw_args: Vec<Arg>) -> ParseResult<StepKind> {
             match name {
                 $(
                     s if s == $name => {
@@ -413,16 +470,12 @@ macro_rules! declare_commands {
                             &meta.args,
                             &positional,
                         )?;
-                        let lower_fn: fn(Vec<(String, Arg)>, Vec<Arg>) -> Result<StepKind> = $lower;
+                        let lower_fn: fn(Vec<(String, Arg)>, Vec<Arg>) -> ParseResult<StepKind> = $lower;
                         lower_fn(flags, positional)
                     }
                 )*
                 _ => {
-                    if is_known_command(name) {
-                        Err(invalid_syntax_error(name, &raw_args))
-                    } else {
-                        Err(unknown_command_error(name, &raw_args))
-                    }
+                    Err(classify(name, &raw_args))
                 }
             }
         }
@@ -476,7 +529,7 @@ impl AssertTarget {
 /// markers; every other spelling, quoted or not, stays a literal value.
 /// In particular a `$var` holding a path never reads disk, and quoted
 /// `"stdout"` names the seven-character string, not the stream.
-fn lower_assert_target(arg: Arg, cmd_name: &str) -> Result<AssertTarget> {
+fn lower_assert_target(arg: Arg, cmd_name: &str) -> ParseResult<AssertTarget> {
     match arg {
         Arg::Expr(_) => Ok(AssertTarget::Value(arg)),
         Arg::String(text, quoted) if !quoted => match text.as_str() {
@@ -484,7 +537,11 @@ fn lower_assert_target(arg: Arg, cmd_name: &str) -> Result<AssertTarget> {
             "stderr" => Ok(AssertTarget::Stderr),
             _ => match text.strip_prefix("pipe:") {
                 Some(name) if !name.is_empty() => Ok(AssertTarget::Pipe(name.to_string())),
-                Some(_) => bail!("{cmd_name} pipe target needs a name, got {text:?}"),
+                Some(_) => Err(ParseError::validation(
+                    cmd_name,
+                    format!("{cmd_name} pipe target needs a name, got {text:?}"),
+                    &SpanContext::line_only(0),
+                )),
                 None => Ok(AssertTarget::Value(lower_assert_operand(Arg::String(
                     text, false,
                 )))),
@@ -568,7 +625,7 @@ declare_commands! {
             ASSERT_EQ $body "generated-under-workdir"
         "#} } ],
         lower: |_flags, args| {
-            let path = args.into_iter().next().ok_or_else(|| anyhow!("WORKDIR requires a path"))?;
+            let path = args.into_iter().next().ok_or_else(|| ParseError::validation("WORKDIR", "WORKDIR requires a path".to_string(), &SpanContext::line_only(0)))?;
             Ok(StepKind::Workdir(path))
         },
     ],
@@ -584,11 +641,11 @@ declare_commands! {
         default_output: None,
         examples: &[ Example { name: "switch roots", fence_meta: None, code: indoc! {r#"WORKSPACE LOCAL"#} } ],
         lower: |_flags, args| {
-            let target = args.into_iter().next().ok_or_else(|| anyhow!("WORKSPACE requires a target"))?;
+            let target = args.into_iter().next().ok_or_else(|| ParseError::validation("WORKSPACE", "WORKSPACE requires a target".to_string(), &SpanContext::line_only(0)))?;
             match target.as_str() {
                 "SNAPSHOT" | "snapshot" => Ok(StepKind::Workspace(WorkspaceTarget::Snapshot)),
                 "LOCAL" | "local" => Ok(StepKind::Workspace(WorkspaceTarget::Local)),
-                other => bail!("unknown workspace target: {other}"),
+                other => Err(ParseError::validation("WORKSPACE", format!("unknown workspace target: {other}"), &SpanContext::line_only(0))),
             }
         },
     ],
@@ -723,7 +780,7 @@ declare_commands! {
         examples: &[ Example { name: "run", fence_meta: None, code: indoc! {r#"RUN echo hello"#} }, Example { name: "run exec form", fence_meta: None, code: indoc! {r#"RUN ["cargo", "--version"]"#} } ],
         lower: |_flags, args| match args.as_slice() {
             [Arg::Expr(Expr::List(elems))] if elems.is_empty() => {
-                bail!("RUN requires at least one argument")
+                Err(ParseError::validation("RUN", "RUN requires at least one argument".to_string(), &SpanContext::line_only(0)))
             }
             [Arg::Expr(Expr::List(elems))] => Ok(StepKind::RunExec {
                 argv: elems.iter().cloned().map(Arg::Expr).collect(),
@@ -758,8 +815,8 @@ declare_commands! {
         lower: |flags, args| {
             let from_current_workspace = flags.iter().any(|(k, _)| k == "from_current_workspace");
             let mut it = args.into_iter();
-            let from = it.next().ok_or_else(|| anyhow!("COPY requires a source"))?;
-            let to = it.next().ok_or_else(|| anyhow!("COPY requires a destination"))?;
+            let from = it.next().ok_or_else(|| ParseError::validation("COPY", "COPY requires a source".to_string(), &SpanContext::line_only(0)))?;
+            let to = it.next().ok_or_else(|| ParseError::validation("COPY", "COPY requires a destination".to_string(), &SpanContext::line_only(0)))?;
             Ok(StepKind::Copy { from_current_workspace, from, to })
         },
     ],
@@ -781,9 +838,9 @@ declare_commands! {
         lower: |flags, args| {
             let include_dirty = flags.iter().any(|(k, _)| k == "dirty");
             let mut it = args.into_iter();
-            let rev = it.next().ok_or_else(|| anyhow!("COPY_GIT requires a revision"))?;
-            let from = it.next().ok_or_else(|| anyhow!("COPY_GIT requires a source"))?;
-            let to = it.next().ok_or_else(|| anyhow!("COPY_GIT requires a destination"))?;
+            let rev = it.next().ok_or_else(|| ParseError::validation("COPY_GIT", "COPY_GIT requires a revision".to_string(), &SpanContext::line_only(0)))?;
+            let from = it.next().ok_or_else(|| ParseError::validation("COPY_GIT", "COPY_GIT requires a source".to_string(), &SpanContext::line_only(0)))?;
+            let to = it.next().ok_or_else(|| ParseError::validation("COPY_GIT", "COPY_GIT requires a destination".to_string(), &SpanContext::line_only(0)))?;
             Ok(StepKind::CopyGit { rev, from, to, include_dirty })
         },
     ],
@@ -808,8 +865,8 @@ declare_commands! {
         "#} } ],
         lower: |_flags, args| {
             let mut it = args.into_iter();
-            let from = it.next().ok_or_else(|| anyhow!("SYMLINK requires a source"))?;
-            let to = it.next().ok_or_else(|| anyhow!("SYMLINK requires a target"))?;
+            let from = it.next().ok_or_else(|| ParseError::validation("SYMLINK", "SYMLINK requires a source".to_string(), &SpanContext::line_only(0)))?;
+            let to = it.next().ok_or_else(|| ParseError::validation("SYMLINK", "SYMLINK requires a target".to_string(), &SpanContext::line_only(0)))?;
             Ok(StepKind::Symlink { from, to })
         },
     ],
@@ -824,7 +881,7 @@ declare_commands! {
         flags: &[],
         default_output: None,
         examples: &[ Example { name: "mkdir", fence_meta: None, code: indoc! {r#"MKDIR deeply/nested/tree"#} } ],
-        lower: |_flags, args| Ok(StepKind::Mkdir(args.into_iter().next().ok_or_else(|| anyhow!("MKDIR requires a path"))?)),
+        lower: |_flags, args| Ok(StepKind::Mkdir(args.into_iter().next().ok_or_else(|| ParseError::validation("MKDIR", "MKDIR requires a path".to_string(), &SpanContext::line_only(0)))?)),
     ],
 
     Ls => [
@@ -892,14 +949,14 @@ declare_commands! {
             WITH_IO [stdin=pipe:lines] READ_LINE $reply
         "#} } ],
         lower: |_flags, args| {
-            let arg = args.into_iter().next().ok_or_else(|| anyhow!("READ_LINE requires a variable"))?;
+            let arg = args.into_iter().next().ok_or_else(|| ParseError::validation("READ_LINE", "READ_LINE requires a variable".to_string(), &SpanContext::line_only(0)))?;
             let var = match arg {
                 Arg::Expr(Expr::Var(name)) => name,
                 Arg::String(s, _) => s.trim_start_matches('$').to_string(),
-                other => bail!("READ_LINE requires a $variable, found {:?}", other),
+                other => return Err(ParseError::validation("READ_LINE", format!("READ_LINE requires a $variable, found {:?}", other), &SpanContext::line_only(0))),
             };
             if var.is_empty() {
-                bail!("READ_LINE requires a variable");
+                return Err(ParseError::validation("READ_LINE", "READ_LINE requires a variable".to_string(), &SpanContext::line_only(0)))
             }
             Ok(StepKind::ReadLine { var })
         },
@@ -920,7 +977,7 @@ declare_commands! {
         examples: &[ Example { name: "write", fence_meta: None, code: indoc! {r#"WRITE output.txt hello-world"#} } ],
         lower: |_flags, args| {
             let mut it = args.into_iter();
-            let path = it.next().ok_or_else(|| anyhow!("WRITE requires a path"))?;
+            let path = it.next().ok_or_else(|| ParseError::validation("WRITE", "WRITE requires a path".to_string(), &SpanContext::line_only(0)))?;
             let remaining: Vec<Arg> = it.collect();
             let contents = if remaining.is_empty() { None } else { Some(join_value(remaining, "WRITE")?) };
             Ok(StepKind::Write { path, contents })
@@ -947,7 +1004,7 @@ declare_commands! {
         "#} } ],
         lower: |_flags, args| {
             let mut it = args.into_iter();
-            let path = it.next().ok_or_else(|| anyhow!("APPEND requires a path"))?;
+            let path = it.next().ok_or_else(|| ParseError::validation("APPEND", "APPEND requires a path".to_string(), &SpanContext::line_only(0)))?;
             let remaining: Vec<Arg> = it.collect();
             let contents = if remaining.is_empty() { None } else { Some(join_value(remaining, "APPEND")?) };
             Ok(StepKind::Append { path, contents })
@@ -1043,10 +1100,10 @@ declare_commands! {
             let mut overrides = Vec::new();
             for arg in args {
                 let text = arg.as_str();
-                if let Some((key, value)) = split_assignment(text)? {
+                if let Some((key, value)) = split_assignment(text).map_err(|e| ParseError::validation("EXPAND", e.to_string(), &SpanContext::line_only(0)))? {
                     overrides.push((key, value));
                 } else if path.is_none() { path = Some(arg); }
-                else { bail!("EXPAND accepts at most one path"); }
+                else { return Err(ParseError::validation("EXPAND", "EXPAND accepts at most one path".to_string(), &SpanContext::line_only(0))) }
             }
             Ok(StepKind::Expand { path, overrides })
         },
@@ -1094,7 +1151,7 @@ declare_commands! {
         lower: |flags, args| {
             let hash = flags.iter().find(|(k, _)| k == "hash").map(|(_, v)| v.as_str().to_string());
             let mut it = args.into_iter();
-            let actual = lower_assert_target(it.next().ok_or_else(|| anyhow!("ASSERT_EQ requires a value"))?, "ASSERT_EQ")?;
+            let actual = lower_assert_target(it.next().ok_or_else(|| ParseError::validation("ASSERT_EQ", "ASSERT_EQ requires a value".to_string(), &SpanContext::line_only(0)))?, "ASSERT_EQ")?;
             let remaining: Vec<Arg> = it
                 .map(lower_assert_operand)
                 .collect::<Vec<Arg>>();
@@ -1104,7 +1161,7 @@ declare_commands! {
                 if hash.is_some() {
                     None
                 } else {
-                    bail!("ASSERT_EQ requires an expected value");
+                    return Err(ParseError::validation("ASSERT_EQ", "ASSERT_EQ requires an expected value".to_string(), &SpanContext::line_only(0)))
                 }
             } else {
                 Some(join_value(remaining, "ASSERT_EQ")?)
@@ -1142,12 +1199,12 @@ declare_commands! {
         lower: |flags, args| {
             let _ = flags;
             let mut it = args.into_iter();
-            let haystack = lower_assert_target(it.next().ok_or_else(|| anyhow!("ASSERT_CONTAINS requires a value"))?, "ASSERT_CONTAINS")?;
+            let haystack = lower_assert_target(it.next().ok_or_else(|| ParseError::validation("ASSERT_CONTAINS", "ASSERT_CONTAINS requires a value".to_string(), &SpanContext::line_only(0)))?, "ASSERT_CONTAINS")?;
             let remaining: Vec<Arg> = it
                 .map(lower_assert_operand)
                 .collect::<Vec<Arg>>();
             if remaining.is_empty() {
-                bail!("ASSERT_CONTAINS requires a needle");
+                return Err(ParseError::validation("ASSERT_CONTAINS", "ASSERT_CONTAINS requires a needle".to_string(), &SpanContext::line_only(0)))
             }
             let needle = join_value(remaining, "ASSERT_CONTAINS")?;
             Ok(StepKind::AssertContains { haystack, needle })
@@ -1167,7 +1224,7 @@ declare_commands! {
             WRITE payload.txt hello
             HASH_SHA256 payload.txt
         "#} } ],
-        lower: |_flags, args| Ok(StepKind::HashSha256 { path: args.into_iter().next().ok_or_else(|| anyhow!("HASH_SHA256 requires a path"))? }),
+        lower: |_flags, args| Ok(StepKind::HashSha256 { path: args.into_iter().next().ok_or_else(|| ParseError::validation("HASH_SHA256", "HASH_SHA256 requires a path".to_string(), &SpanContext::line_only(0)))? }),
     ],
 
     Exit => [
@@ -1190,7 +1247,7 @@ declare_commands! {
         lower: |_flags, args| {
             // Static literals were already Int-checked by the central
             // validator; dynamics resolve (and validate) at runtime.
-            let code = args.into_iter().next().ok_or_else(|| anyhow!("EXIT requires a code"))?;
+            let code = args.into_iter().next().ok_or_else(|| ParseError::validation("EXIT", "EXIT requires a code".to_string(), &SpanContext::line_only(0)))?;
             Ok(StepKind::Exit(code))
         },
     ],
@@ -1229,9 +1286,9 @@ declare_commands! {
             let mut it = args.into_iter();
             let raw = it
                 .next()
-                .ok_or_else(|| anyhow!("SLEEP requires a duration (e.g. SLEEP 500ms)"))?;
+                .ok_or_else(|| ParseError::validation("SLEEP", "SLEEP requires a duration (e.g. SLEEP 500ms)".to_string(), &SpanContext::line_only(0)))?;
             if it.next().is_some() {
-                bail!("SLEEP takes exactly one duration argument");
+                return Err(ParseError::validation("SLEEP", "SLEEP takes exactly one duration argument".to_string(), &SpanContext::line_only(0)))
             }
             // Static literals were Duration-checked by the central
             // validator; dynamics ($var, templates) resolve at runtime.
