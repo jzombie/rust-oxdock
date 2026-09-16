@@ -1,4 +1,4 @@
-//! OxDock's primary user-facing contract: declarative build scripts written
+//! [OxDock](https://github.com/jzombie/rust-oxdock)'s primary user-facing contract: declarative build scripts written
 //! inline, directly alongside Rust code.
 //!
 //! ```rust
