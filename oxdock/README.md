@@ -1031,4 +1031,4 @@ oxdock = { version = "0.16.0-alpha", default-features = false }
 
 ## License
 
-`OxDock` is distributed under the terms of the Apache License (Version 2.0).
+`OxDock` is distributed under the terms of the [Apache License (Version 2.0)](https://github.com/jzombie/rust-oxdock/blob/main/LICENSE).

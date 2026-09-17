@@ -10,4 +10,4 @@ paths at runtime so the fixture builds against the current checkout.
 
 ## License
 
-`oxdock-fixture` is distributed under the terms of the Apache License (Version 2.0).
+`oxdock-fixture` is distributed under the terms of the [Apache License (Version 2.0)](https://github.com/jzombie/rust-oxdock/blob/main/LICENSE).

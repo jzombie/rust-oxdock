@@ -13,4 +13,4 @@ tests stay hermetic.
 
 ## License
 
-`oxdock-process` is distributed under the terms of the Apache License (Version 2.0).
+`oxdock-process` is distributed under the terms of the [Apache License (Version 2.0)](https://github.com/jzombie/rust-oxdock/blob/main/LICENSE).

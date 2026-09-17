@@ -97,4 +97,4 @@ can read them and pass them into the OxDock environment (via `BuiltinEnv`).
 
 ## License
 
-`oxdock-build` is distributed under the terms of the Apache License (Version 2.0).
+`oxdock-build` is distributed under the terms of the [Apache License (Version 2.0)](https://github.com/jzombie/rust-oxdock/blob/main/LICENSE).

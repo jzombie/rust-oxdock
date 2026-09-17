@@ -14,4 +14,4 @@ See the [runnable example](https://github.com/jzombie/rust-oxdock/blob/main/crat
 
 ## License
 
-`oxdock-func-macro` is distributed under the terms of the Apache License (Version 2.0).
+`oxdock-func-macro` is distributed under the terms of the [Apache License (Version 2.0)](https://github.com/jzombie/rust-oxdock/blob/main/LICENSE).
