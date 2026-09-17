@@ -19,7 +19,7 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
         RETURN $name
     }
     FOR $name: STRING IN ["alpha", "beta"] {
-        CALL STAMP($name)
+        STAMP($name)
     }
     FUNC PICK($flag: BOOL) {
         IF $flag {
@@ -27,7 +27,7 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
         }
         RETURN "beta"
     }
-    LET $picked: STRING = CALL PICK(true)
+    LET $picked: STRING = PICK(true)
     WRITE dist/picked.txt \{{ $picked }}
     LET $a: STRING = READ dist/alpha.txt
     LET $b: STRING = READ dist/beta.txt

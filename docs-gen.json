@@ -1,1 +1,1 @@
-{"global_values": ".oxdock/template/_global/values.json", "scopes": [".oxdock", "crates", "oxdock", "oxdock-build", "oxdock-cli", "oxdock-macros"]}
+{"global_values": ".oxdock/template/_global/values.json", "scopes": [".oxdock", "crates", "oxdock", "oxdock-build", "oxdock-cli", "oxdock-macros"], "generated": {"command_index": ".oxdock/template/readme/generated/command-reference.md.tmpl", "command_body": ".oxdock/template/readme/generated/command-body.md.tmpl", "function_reference": ".oxdock/template/readme/generated/function-reference.md.tmpl"}}

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::Arc;
 
 pub use crate::commands::{AssertTarget, StepKind};
@@ -172,8 +173,8 @@ impl Command {
 /// iterate this (plus [`crate::all_metadata`] names) instead of
 /// hardcoding keyword lists elsewhere.
 pub const STRUCTURAL_KEYWORDS: &[&str] = &[
-    "LET", "FOR", "IF", "ELSE", "ASYNC", "AWAIT", "CANCEL", "FUNC", "CALL", "RETURN", "WHILE",
-    "BREAK", "CONTINUE",
+    "LET", "FOR", "IF", "ELSE", "ASYNC", "AWAIT", "CANCEL", "FUNC", "RETURN", "WHILE", "BREAK",
+    "CONTINUE",
 ];
 
 /// Clause keywords that open no statement and need no `Display` quoting
@@ -392,123 +393,14 @@ pub enum PipeTarget {
     Var(String),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum TypeKind {
-    String,
-    Int,
-    Float,
-    Bool,
-    Pipe,
-    List,
-    Map,
-    Handle,
-    Duration,
-    Path,
-}
-
-impl TypeKind {
-    pub const CANONICAL: &[TypeKind] = &[
-        TypeKind::String,
-        TypeKind::Int,
-        TypeKind::Float,
-        TypeKind::Bool,
-        TypeKind::Pipe,
-        TypeKind::List,
-        TypeKind::Map,
-        TypeKind::Handle,
-        TypeKind::Duration,
-        TypeKind::Path,
-    ];
-
-    /// Canonical display name. This is the single source of truth for the
-    /// type vocabulary: anchors, doc titles, `FromStr`, and the `ArgType` /
-    /// `FlagValueType` display labels all derive from these strings.
-    pub fn label(&self) -> &'static str {
-        match self {
-            TypeKind::String => "STRING",
-            TypeKind::Int => "INT",
-            TypeKind::Float => "FLOAT",
-            TypeKind::Bool => "BOOL",
-            TypeKind::Pipe => "PIPE",
-            TypeKind::List => "LIST",
-            TypeKind::Map => "MAP",
-            TypeKind::Handle => "HANDLE",
-            TypeKind::Duration => "DURATION",
-            TypeKind::Path => "PATH",
-        }
-    }
-
-    /// Reference body for the canonical types. The title derives from
-    /// [`label`](Self::label); only the prose body is stored per variant.
-    pub fn doc(&self) -> Option<(String, &'static str)> {
-        let body = match self {
-            TypeKind::String => {
-                "Arbitrary text. Quotes keep exact bytes, lone `$var` evaluates, `{{ ... }}` interpolates."
-            }
-            TypeKind::Int => "64-bit signed integer, e.g. an exit code.",
-            TypeKind::Float => "64-bit float, e.g. a ratio.",
-            TypeKind::Bool => "Boolean `true` or `false`.",
-            TypeKind::Pipe => {
-                "Named script pipe. Validity is checked against the pipe registry at coercion time."
-            }
-            TypeKind::List => "Ordered list of values.",
-            TypeKind::Map => "String-keyed map of values.",
-            TypeKind::Handle => "Background ASYNC task handle for AWAIT/CANCEL.",
-            TypeKind::Duration => {
-                "Positive time span: `500ms`, `10s`, `2m`, `1h`; bare number means seconds."
-            }
-            TypeKind::Path => "Workspace path, resolved against cwd and guarded against escape.",
-        };
-        Some((format!("Value type: {}", self.label()), body))
-    }
-
-    /// Anchor of the type's reference section, derived from
-    /// [`label`](Self::label) the way the Markdown slugger would derive it
-    /// from the doc title.
-    pub fn anchor(&self) -> String {
-        format!("value-type-{}", self.label().to_lowercase())
-    }
-}
-
-impl std::str::FromStr for TypeKind {
-    type Err = anyhow::Error;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        if let Some(kind) = Self::CANONICAL.iter().find(|k| k.label() == s) {
-            return Ok(*kind);
-        }
-        let inventory = Self::CANONICAL
-            .iter()
-            .map(|k| k.label())
-            .collect::<Vec<_>>()
-            .join(", ");
-        anyhow::bail!("unknown type `{s}`; expected one of {inventory}")
-    }
-}
-
-impl std::fmt::Display for TypeKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.label())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum Value {
-    String(String),
-    Int(i64),
-    Float(f64),
-    List(Vec<Value>),
-    Map(std::collections::BTreeMap<String, Value>),
-    Bool(bool),
-    Pipe(String), // holds pipe name; validity checked against PipeRegistry
-    Duration(std::time::Duration),
-    // Narrow exception: the PATH slot carries an already-resolved path value.
-    // All guard checks still run through oxdock-fs at coercion/use time.
-    #[allow(clippy::disallowed_types)]
-    Path(std::path::PathBuf),
-    /// Handle to a background ASYNC task. The `u64` is the task ID
-    /// used to look up the handle in `ExecState.named_tasks`.
-    TaskHandle(u64),
-}
+/// Value-model re-exports: the word, its payload, type descriptors, and the
+/// export hook live in [`crate::value`], the single representation for
+/// every type.
+pub use crate::value::{
+    OxDockType, TypeDescriptor, Value, ValuePayload, clone_boxed, clone_copy, drop_boxed,
+    drop_noop, eq_boxed, eq_inline, fmt_boxed, fmt_inline, load_inline, startup_descriptors,
+    store_inline, type_anchor,
+};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum CompareOp {
@@ -580,6 +472,11 @@ pub enum Expr {
         name: String,
         args: Vec<Expr>,
     },
+    /// Variable inspection (`INSPECT($var)`): carries the variable name
+    /// unevaluated so evaluation can snapshot the binding. Produced only by
+    /// the parser for the exact `INSPECT` name; evaluators match on this
+    /// variant and never on a function-name string.
+    Inspect(String),
     Compare {
         op: CompareOp,
         left: Box<Expr>,
@@ -673,8 +570,6 @@ pub fn guard_option_allows(expr: Option<&GuardExpr>, env: &impl EnvLookup) -> bo
     }
 }
 
-use std::fmt;
-
 impl fmt::Display for PlatformGuard {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -706,41 +601,6 @@ impl fmt::Display for WorkspaceTarget {
     }
 }
 
-impl fmt::Display for Value {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Value::String(s) => write!(f, "\"{}\"", s),
-            Value::Int(i) => write!(f, "{}", i),
-            Value::Float(v) => write!(f, "{}", v),
-            Value::Pipe(n) => write!(f, "pipe:{}", n),
-            Value::Duration(d) => write!(f, "{}", crate::command::format_duration(d)),
-            Value::Path(p) => write!(f, "{}", p.display()),
-            Value::List(items) => {
-                write!(f, "[")?;
-                for (i, item) in items.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}", item)?;
-                }
-                write!(f, "]")
-            }
-            Value::Map(map) => {
-                write!(f, "{{")?;
-                for (i, (k, v)) in map.iter().enumerate() {
-                    if i > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{}: {}", k, v)?;
-                }
-                write!(f, "}}")
-            }
-            Value::Bool(b) => write!(f, "{}", b),
-            Value::TaskHandle(id) => write!(f, "task#{}", id),
-        }
-    }
-}
-
 impl fmt::Display for Expr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -764,6 +624,7 @@ impl fmt::Display for Expr {
                 }
                 write!(f, ")")
             }
+            Expr::Inspect(var) => write!(f, "INSPECT(${})", var),
             Expr::List(items) => {
                 write!(f, "[")?;
                 for (i, item) in items.iter().enumerate() {

@@ -1,0 +1,30 @@
+[package]
+name = "oxdock-func-macro"
+description = "Host export attribute macros for OxDock DSL native and host functions and types."
+categories = ["development-tools::procedural-macro-helpers"]
+keywords = ["macros", "oxdock", "marshaling"]
+authors.workspace = true
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[package.metadata.cargo-udeps.ignore]
+development = ["anyhow", "oxdock-core", "oxdock-process"]
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2.workspace = true
+quote.workspace = true
+syn.workspace = true
+
+[dev-dependencies]
+anyhow.workspace = true
+oxdock-core.workspace = true
+oxdock-process.workspace = true
+
+[lints]
+workspace = true

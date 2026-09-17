@@ -44,15 +44,16 @@ Multiple cases can be defined under `cases/` as either `cases/<case>.toml` or
 
 Non-parity fixtures live under `fixtures/integration/`, for example:
 
-- `fixtures/integration/build_from_manifest/`
+- `fixtures/integration/buildtime_macros/build_from_manifest/`
 - `fixtures/integration/buildtime_macros/<name>/`
 
 Workspace-level fixtures and a [libtest-mimic](https://crates.io/crates/libtest-mimic) harness.
 
 - Fixtures live under `fixtures/` as standalone Cargo projects (including nested subdirectories).
 - The harness auto-discovers directories with `Cargo.toml` and runs each
-  trial at the fastest execution tier preserving its semantics (in-process
-  by default; see `test-execution-tiers.md`).
+  trial at the fastest execution tier preserving its semantics (per-trial
+  `cargo` unless allowlisted for an in-process tier; see
+  `test-execution-tiers.md`).
 - Workspace dependencies are patched to local paths at runtime.
 
 To add a fixture, create a new `fixtures/<name>/` (or nested) folder with a `Cargo.toml` and source files.
@@ -63,12 +64,13 @@ Trials run at one of three tiers (fastest first). The harness picks the
 fastest tier that preserves the fixture's semantics; no per-trial `cargo`
 invocation happens outside Tier 3.
 
-- **Tier 1 — in-process (default, parallel).** `ast_commands` cases execute
+- **Tier 1 — in-process (parallel, allowlisted only).** `ast_commands` cases execute
   via the shared `ast_runner` (`parse_script` +
-  `run_steps_with_context_result_with_io` against isolated
+  `run_steps_with_fs_with_io` against isolated
   `GuardedPath::tempdir` roots, `PathResolver` filesystem fidelity — no
   mocks). Script fixtures listed in `IN_PROCESS_SCRIPT_FIXTURES`
-  (`src/lib.rs`) run their `script.oxfile` the same way. Engine errors are
+  (`src/lib.rs`) run their `script.oxfile` the same way, through
+  `run_steps_with_context_result_with_io`. Engine errors are
   formatted with `format_fixture_stderr` so assertions match the text the
   fixture binaries print on stderr.
 - **Tier 2 — pre-compiled binary (parallel).** Fixtures listed in

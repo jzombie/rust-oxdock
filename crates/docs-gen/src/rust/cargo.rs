@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use oxdock_fs::{GuardedPath, PathResolver};
 
-use crate::io::{read_text, write_text};
+use crate::io::read_text;
 
 /// Workspace member list from the root manifest.
 #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
@@ -20,8 +20,9 @@ pub fn workspace_members(root: &GuardedPath, resolver: &PathResolver) -> Result<
 }
 
 /// Package name/description from a member manifest. Returns `None` when
-/// there is no manifest or no `[package]` name, in which case the
-/// committed values.json is static data and left untouched.
+/// there is no manifest or no `[package]` name, in which case the DSL
+/// skips the member and the committed values.json is static data left
+/// untouched.
 #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 pub fn cargo_package(
     root: &GuardedPath,
@@ -48,50 +49,6 @@ pub fn cargo_package(
         .and_then(|v| v.as_str())
         .unwrap_or("No description provided.");
     Ok(Some((name.to_string(), description.to_string())))
-}
-
-/// Sync one member's values.json from its manifest, writing back only on
-/// change. The manifest is the source of truth for every key EXCEPT
-/// `name`, which the committed file may override (display names such as
-/// `OxDock` vs the package name `oxdock`). Fixed key order keeps output
-/// stable, so manifest edits (descriptions included) always flow through
-/// on the next run instead of being shadowed by stale copies.
-pub fn sync_package_values(
-    root: &GuardedPath,
-    resolver: &PathResolver,
-    member: &str,
-) -> Result<()> {
-    let Some((name, description)) = cargo_package(root, resolver, member)? else {
-        return Ok(());
-    };
-    let rel = format!("{member}/.oxdock/template/values.json");
-    let path = root.join(&rel)?;
-    let mut merged: Vec<(String, String)> = vec![
-        ("name".to_string(), name),
-        ("description".to_string(), description),
-    ];
-    if resolver.entry_kind(&path).is_ok() {
-        let text = read_text(resolver, root, &rel)?;
-        let parsed: serde_json::Value =
-            serde_json::from_str(&text).with_context(|| format!("parse {rel}"))?;
-        if let Some(map) = parsed.as_object()
-            && let Some(override_name) = map.get("name").and_then(|v| v.as_str())
-            && let Some(slot) = merged.iter_mut().find(|(k, _)| k == "name")
-        {
-            slot.1 = override_name.to_string();
-        }
-    }
-    let mut out = String::from("{");
-    for (idx, (key, value)) in merged.iter().enumerate() {
-        if idx > 0 {
-            out.push_str(", ");
-        }
-        out.push_str(&serde_json::to_string(key)?);
-        out.push_str(": ");
-        out.push_str(&serde_json::to_string(value)?);
-    }
-    out.push_str("}\n");
-    write_text(resolver, root, &rel, &out)
 }
 
 #[cfg(test)]
@@ -134,45 +91,14 @@ mod tests {
         miri,
         ignore = "fixture needs host tempdir and file IO, blocked by Miri isolation"
     )]
-    fn manifest_description_edits_flow_through_on_resync() {
-        // Regression test: a description change in the member manifest
-        // must reach values.json on the next sync (previously the
-        // committed copy shadowed it forever), while a committed `name`
-        // override keeps winning.
+    fn package_reads_name_and_description() {
         let (_temp, root, resolver) = fixture_root();
         write_manifest(&resolver, &root, "demo", "first description");
-        let values = root
-            .join("demo/.oxdock/template/values.json")
-            .expect("join");
-        resolver
-            .write_file(
-                &values,
-                b"{\"name\": \"Display\", \"description\": \"stale copy\"}",
-            )
-            .expect("write values");
-
-        sync_package_values(&root, &resolver, "demo").expect("sync");
-        let after = resolver.read_to_string(&values).expect("read");
-        assert!(
-            after.contains("\"description\": \"first description\""),
-            "manifest description must flow through, got: {after}"
-        );
-        assert!(
-            after.contains("\"name\": \"Display\""),
-            "committed name override must win, got: {after}"
-        );
-
-        write_manifest(&resolver, &root, "demo", "second description");
-        sync_package_values(&root, &resolver, "demo").expect("resync");
-        let resynced = resolver.read_to_string(&values).expect("read");
-        assert!(
-            resynced.contains("\"description\": \"second description\""),
-            "edited manifest description must flow through, got: {resynced}"
-        );
-        assert!(
-            resynced.contains("\"name\": \"Display\""),
-            "committed name override must survive resync, got: {resynced}"
-        );
+        let (name, description) = cargo_package(&root, &resolver, "demo")
+            .expect("package")
+            .expect("found");
+        assert_eq!(name, "demo-pkg");
+        assert_eq!(description, "first description");
     }
 
     #[test]
@@ -180,15 +106,13 @@ mod tests {
         miri,
         ignore = "fixture needs host tempdir and file IO, blocked by Miri isolation"
     )]
-    fn missing_manifest_leaves_values_untouched() {
+    fn missing_manifest_returns_none() {
         let (_temp, root, resolver) = fixture_root();
-        sync_package_values(&root, &resolver, "ghost").expect("sync");
-        let values = root
-            .join("ghost/.oxdock/template/values.json")
-            .expect("join");
         assert!(
-            resolver.entry_kind(&values).is_err(),
-            "no manifest must mean no values file is created"
+            cargo_package(&root, &resolver, "ghost")
+                .expect("package")
+                .is_none(),
+            "no manifest must mean no package"
         );
     }
 }

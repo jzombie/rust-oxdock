@@ -1,0 +1,13 @@
+FUNC FOO($x: STRING) {
+    RETURN "outer-{{ $x }}"
+}
+LET $go: BOOL = true
+IF $go {
+    FUNC FOO($x: STRING) {
+        RETURN "inner-{{ $x }}"
+    }
+    LET $inner: STRING = FOO("in")
+    WRITE inner.txt "{{ $inner }}"
+}
+LET $outer: STRING = FOO("out")
+WRITE outer.txt "{{ $outer }}"

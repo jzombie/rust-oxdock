@@ -153,14 +153,79 @@ fn int_float_conversions_invalid_fail() {
 fn div_zero_and_overflow_fail() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    for script in [
-        "LET $x: INT = 1 / 0\n",
-        "LET $a: INT = 5\nLET $x: INT = $a / 0\n",
-        "LET $x: FLOAT = 1.0 / 0.0\n",
-        "LET $a: INT = 9223372036854775807\nLET $x: INT = $a + 1\n",
+    for (script, needle) in [
+        (
+            "LET $x: INT = 1 / 0\n",
+            "arithmetic error: integer overflow or division by zero",
+        ),
+        (
+            "LET $a: INT = 5\nLET $x: INT = $a / 0\n",
+            "arithmetic error: integer overflow or division by zero",
+        ),
+        (
+            "LET $x: FLOAT = 1.0 / 0.0\n",
+            "arithmetic error: float division by zero",
+        ),
+        (
+            "LET $a: INT = 9223372036854775807\nLET $x: INT = $a + 1\n",
+            "arithmetic error: integer overflow or division by zero",
+        ),
     ] {
-        run_script(&root, script).expect_err("arithmetic error must fail");
+        let err = run_script(&root, script).expect_err("arithmetic error must fail");
+        assert!(
+            err.to_string().contains(needle),
+            "wrong error for {script:?}, got: {err:#}"
+        );
     }
+}
+
+#[test]
+fn every_int_op_overflows_loudly() {
+    // Add is pinned above; Sub/Mul/Div/Neg share the checked path but each
+    // gets its own pin so a future shortcut on one op cannot slip through.
+    // All operands ride variables so the overflow surfaces at runtime.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    for (script, needle) in [
+        (
+            "LET $m: INT = -9223372036854775808\nLET $x: INT = $m - 1\n",
+            "arithmetic error: integer overflow or division by zero",
+        ),
+        (
+            "LET $a: INT = 9223372036854775807\nLET $x: INT = $a * 2\n",
+            "arithmetic error: integer overflow or division by zero",
+        ),
+        (
+            "LET $m: INT = -9223372036854775808\nLET $n: INT = 0 - 1\nLET $x: INT = $m / $n\n",
+            "arithmetic error: integer overflow or division by zero",
+        ),
+        (
+            "LET $m: INT = -9223372036854775808\nLET $x: INT = -$m\n",
+            "arithmetic error: integer overflow",
+        ),
+    ] {
+        let err = run_script(&root, script).expect_err("int overflow must fail");
+        assert!(
+            err.to_string().contains(needle),
+            "wrong error for {script:?}, got: {err:#}"
+        );
+    }
+}
+
+#[test]
+fn float_overflow_to_infinity_fails() {
+    // Numeric literals have no exponent syntax, so enter through
+    // `FLOAT("1e308")`: ten times that is +inf, which bails instead of
+    // storing a non-finite value.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = "LET $big: FLOAT = FLOAT(\"1e308\")\nLET $x: FLOAT = $big * 10.0\n";
+    let err = run_script(&root, script).expect_err("float overflow must fail");
+    assert!(
+        err.to_string()
+            .contains("arithmetic error: non-finite float result"),
+        "wrong error, got: {err:#}"
+    );
 }
 
 #[test]

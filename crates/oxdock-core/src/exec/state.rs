@@ -5,30 +5,22 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use anyhow::Result;
 use oxdock_fs::{CargoScratch, GuardedPath, WorkspaceFs};
-use oxdock_parser::{Step, TypeKind, Value};
+use oxdock_parser::{Step, TypeDescriptor, Value};
 use oxdock_process::{BackgroundHandle, CommandContext, ProcessManager};
 
 use super::capture::SpillBuffer;
 use super::io::{ExactCapture, ExecIo, SlidingWindow};
+use super::native::FunctionRegistry;
 use super::pipe::KeeperGuard;
 
-/// Maximum nested `CALL` depth. Guards the host thread stack against
+/// Maximum nested function-call depth. Guards the host thread stack against
 /// runaway recursion; the error names the function that overflowed.
 pub(super) const MAX_CALL_DEPTH: usize = 64;
 
-/// One user-defined function body (`FUNC NAME($p: TYPE, ...) { ... }`).
-#[derive(Debug, Clone)]
-pub(super) struct FuncDefData {
-    pub(super) params: Vec<(String, TypeKind)>,
-    pub(super) body: Vec<Step>,
-}
-
-/// Host-registered callable for the FFI hook (deferred full registry).
-/// DSL `CALL NAME(...)` dispatches to `funcs` first, then `host_funcs`,
-/// so a future `register_fn` plugs in without changing the call path.
-pub type HostFn = std::sync::Arc<dyn Fn(Vec<Value>) -> Result<Value> + Send + Sync>;
-
-pub(super) struct ExecState<P: ProcessManager> {
+/// Execution state for one script run. Public so hosts can register
+/// functions and introspect listings; all fields stay crate-private so the
+/// scope, recursion-budget, and task invariants cannot be broken from outside.
+pub struct ExecState<P: ProcessManager> {
     pub(super) fs: Box<dyn WorkspaceFs>,
     /// Pre-reserved guarded scratch name for `CARGO_TARGET_DIR` (issue #131).
     /// Opaque [`CargoScratch`]: renderable for the child environment but not
@@ -52,8 +44,12 @@ pub(super) struct ExecState<P: ProcessManager> {
     pub(super) exact_stdout: Arc<Mutex<HashMap<usize, ExactCapture>>>,
     /// Variable scopes for $variable bindings (FOR loops, LET assignments).
     /// Innermost scope is last. Variables are looked up from innermost to outermost.
-    /// Each entry carries its declared TypeKind alongside the value.
-    pub(super) var_scopes: Vec<HashMap<String, (TypeKind, Value)>>,
+    /// Each entry carries its declared type name alongside the value.
+    pub(super) var_scopes: Vec<HashMap<String, (String, Value)>>,
+    /// Name directory for type resolution: startup descriptors plus the
+    /// run's host descriptors. Words carry their own vtables, so this map
+    /// serves only name queries (declarations, `TYPES()`, `TYPE_DESCRIBE`).
+    pub(super) types: HashMap<String, &'static TypeDescriptor>,
     /// Cancellation token for background thread teardown.
     #[allow(dead_code)]
     pub(super) cancel_token: Arc<AtomicBool>,
@@ -89,14 +85,12 @@ pub(super) struct ExecState<P: ProcessManager> {
     /// a blocking foreground process. Unlike `inside_async`, this does not
     /// affect end-of-pipeline named-task reaping.
     pub(super) cancellable: bool,
-    /// User-defined function registry (`FUNC`). Shared across `fork()` via
-    /// Arc like `named_tasks`; a `FUNC` inside a scoped block snapshots and
-    /// restores through `push_scope`/`pop_scope`.
-    pub(super) funcs: Arc<HashMap<String, FuncDefData>>,
-    /// Host-registered callables (FFI hook). Shared across `fork()`; never
-    /// scoped (hosts register once at startup, not via the DSL).
-    pub(super) host_funcs: Arc<HashMap<String, HostFn>>,
-    /// Current nested `CALL` depth on this thread. Enforced against
+    /// The single function registry: DSL `FUNC` definitions, builtins, and
+    /// host extensions. Script entries scope lexically through the
+    /// registry's own frames (managed by `push_scope`/`pop_scope`);
+    /// native entries persist. Shared across `fork()` via clone.
+    pub(super) functions: FunctionRegistry<P>,
+    /// Current nested function-call depth on this thread. Enforced against
     /// `MAX_CALL_DEPTH`; cloned (not reset) by `fork()` so async children
     /// inherit the caller's depth budget.
     pub(super) call_depth: usize,
@@ -107,7 +101,6 @@ pub(super) struct ScopeSnapshot {
     pub(super) cwd: GuardedPath,
     pub(super) root: GuardedPath,
     pub(super) envs: Arc<HashMap<String, String>>,
-    pub(super) funcs: Arc<HashMap<String, FuncDefData>>,
 }
 
 /// Lifecycle phase of a named background task (`LET $var: HANDLE = ASYNC ...`).
@@ -279,8 +272,8 @@ impl<P: ProcessManager> ExecState<P> {
             inside_async: true,
             keeper_expiry: None,
             cancellable: self.cancellable,
-            funcs: Arc::clone(&self.funcs),
-            host_funcs: Arc::clone(&self.host_funcs),
+            functions: self.functions.clone(),
+            types: self.types.clone(),
             call_depth: self.call_depth,
             _marker: PhantomData,
         }
@@ -297,13 +290,14 @@ impl<P: ProcessManager> ExecState<P> {
     /// Enter a lexical scope: snapshot cwd/root/envs and open a fresh
     /// variable scope. Blocks scope everything (LET/ENV/WORKDIR/WORKSPACE);
     /// only pipes (ExecIo) and filesystem effects cross scope boundaries.
+    /// Function definitions scope through the registry's own frames.
     pub(super) fn push_scope(&mut self) {
         self.scope_stack.push(ScopeSnapshot {
             cwd: self.cwd.clone(),
             root: self.fs.root().clone(),
             envs: Arc::clone(&self.envs),
-            funcs: Arc::clone(&self.funcs),
         });
+        self.functions.push_scope();
         self.push_var_scope();
     }
 
@@ -316,11 +310,11 @@ impl<P: ProcessManager> ExecState<P> {
         self.fs.set_root(&snapshot.root);
         self.cwd = snapshot.cwd;
         self.envs = snapshot.envs;
-        self.funcs = snapshot.funcs;
+        self.functions.pop_scope();
         self.pop_var_scope();
         Ok(())
     }
-    pub(super) fn declare_var(&mut self, key: String, kind: TypeKind, value: Value) -> Result<()> {
+    pub(super) fn declare_var(&mut self, key: String, kind: String, value: Value) -> Result<()> {
         if self
             .var_scopes
             .last()
@@ -333,7 +327,7 @@ impl<P: ProcessManager> ExecState<P> {
                 key
             );
         }
-        let coerced = super::args::coerce_value(value, kind, &*self)?;
+        let coerced = super::args::coerce_value(value, &kind, &*self)?;
         let scope = self
             .var_scopes
             .last_mut()
@@ -347,13 +341,13 @@ impl<P: ProcessManager> ExecState<P> {
             .var_scopes
             .iter()
             .rev()
-            .find_map(|s| s.get(key).map(|(k, _)| *k))
+            .find_map(|s| s.get(key).map(|(k, _)| k.clone()))
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "undeclared variable ${key}: declare it first with LET ${key}: TYPE = ..."
                 )
             })?;
-        let coerced = super::args::coerce_value(value, kind, &*self)?;
+        let coerced = super::args::coerce_value(value, &kind, &*self)?;
         for scope in self.var_scopes.iter_mut().rev() {
             if let Some(slot) = scope.get_mut(key) {
                 slot.1 = coerced;
@@ -373,7 +367,7 @@ impl<P: ProcessManager> ExecState<P> {
         None
     }
 
-    pub(super) fn get_var_typed(&self, key: &str) -> Option<(TypeKind, Value)> {
+    pub(super) fn get_var_typed(&self, key: &str) -> Option<(String, Value)> {
         for scope in self.var_scopes.iter().rev() {
             if let Some(entry) = scope.get(key) {
                 return Some(entry.clone());

@@ -4,6 +4,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use anyhow::{Result, bail};
+use oxdock_fs::GuardedPath;
 use oxdock_parser::{Arg, AssertTarget, Step, StepKind, Value, guard_option_allows};
 use oxdock_process::{BackgroundHandle, CommandStdin, ProcessManager};
 
@@ -291,6 +292,10 @@ pub(super) fn sync_iteration_assert_needles<P: ProcessManager>(
 
 /// Per-step execution context handed to every command handler.
 ///
+/// Host-registered functions receive this context: read script state through
+/// the public accessors (`get_var`, `get_env`, `cwd`) and return a `Value`.
+/// The fields stay crate-private so execution invariants hold for hosts.
+///
 /// Output contract (load-bearing for `LET`-capture, pipes, and stream assertions):
 /// handlers must emit stdout/stderr ONLY through `out`/`err` — via
 /// `write_stdout` or `StreamHandle::to_stdout`/`to_stderr` — and never write
@@ -304,6 +309,23 @@ pub struct StepCtx<'a, P: ProcessManager> {
     pub(super) expose_stdin: bool,
     pub(super) out: Option<StreamHandle>,
     pub(super) err: Option<StreamHandle>,
+}
+
+impl<'a, P: ProcessManager> StepCtx<'a, P> {
+    /// Look up a script variable by name (innermost scope first).
+    pub fn get_var(&self, key: &str) -> Option<Value> {
+        self.state.get_var(key)
+    }
+
+    /// Look up an environment variable visible to the script.
+    pub fn get_env(&self, key: &str) -> Option<String> {
+        self.state.envs.get(key).cloned()
+    }
+
+    /// Current working directory (guarded; stays inside the workspace).
+    pub fn cwd(&self) -> &GuardedPath {
+        &self.state.cwd
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -533,19 +555,19 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
             var,
             decl_type,
             expr,
-        } => handlers::assign(&mut cx, var, *decl_type, expr),
+        } => handlers::assign(&mut cx, var, decl_type.clone(), expr),
         StepKind::Set { var, expr } => handlers::set_var_value(&mut cx, var, expr),
         StepKind::AssignAsync {
             var,
             decl_type,
             body,
-        } => handlers::dispatch_assign_async(var, *decl_type, body, &mut cx),
+        } => handlers::dispatch_assign_async(var, decl_type.clone(), body, &mut cx),
         StepKind::Await { var } => handlers::dispatch_await(var, &mut cx),
         StepKind::AwaitCapture {
             out_var,
             out_type,
             task_var,
-        } => handlers::dispatch_await_capture(out_var, *out_type, task_var, &mut cx),
+        } => handlers::dispatch_await_capture(out_var, out_type.clone(), task_var, &mut cx),
         StepKind::Cancel { var } => handlers::dispatch_cancel(var, &mut cx),
         StepKind::Sleep { duration } => {
             let duration = super::args::resolve_arg_as_duration(duration, &mut cx)?;
@@ -777,21 +799,24 @@ fn execute_steps_inner<P: ProcessManager>(
                             var,
                             decl_type,
                             expr,
-                        } => handlers::assign(&mut cx, var, *decl_type, expr),
+                        } => handlers::assign(&mut cx, var, decl_type.clone(), expr),
                         StepKind::Set { var, expr } => handlers::set_var_value(&mut cx, var, expr),
                         StepKind::AssignAsync {
                             var,
                             decl_type,
                             body,
-                        } => handlers::dispatch_assign_async(var, *decl_type, body, &mut cx),
+                        } => handlers::dispatch_assign_async(var, decl_type.clone(), body, &mut cx),
                         StepKind::Await { var } => handlers::dispatch_await(var, &mut cx),
                         StepKind::AwaitCapture {
                             out_var,
                             out_type,
                             task_var,
-                        } => {
-                            handlers::dispatch_await_capture(out_var, *out_type, task_var, &mut cx)
-                        }
+                        } => handlers::dispatch_await_capture(
+                            out_var,
+                            out_type.clone(),
+                            task_var,
+                            &mut cx,
+                        ),
                         StepKind::Cancel { var } => handlers::dispatch_cancel(var, &mut cx),
                         StepKind::Sleep { duration } => {
                             let duration = super::args::resolve_arg_as_duration(duration, &mut cx)?;
@@ -1133,9 +1158,9 @@ fn dispatch_flow_step<P: ProcessManager>(
         } => handlers::for_loop(
             cx,
             key_var.as_deref(),
-            *key_type,
+            key_type.clone(),
             var,
-            *var_type,
+            var_type.clone(),
             in_expr,
             body,
         ),
@@ -1154,7 +1179,7 @@ fn dispatch_flow_step<P: ProcessManager>(
             var,
             decl_type,
             cmd,
-        } => handlers::assign_capture(cx, generation, idx, var, *decl_type, cmd),
+        } => handlers::assign_capture(cx, generation, idx, var, decl_type.clone(), cmd),
         _ => {
             unreachable!("dispatch_flow_step handles only compound steps")
         }

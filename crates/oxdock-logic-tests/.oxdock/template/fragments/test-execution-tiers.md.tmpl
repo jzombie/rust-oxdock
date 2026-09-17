@@ -4,12 +4,13 @@ Trials run at one of three tiers (fastest first). The harness picks the
 fastest tier that preserves the fixture's semantics; no per-trial `cargo`
 invocation happens outside Tier 3.
 
-- **Tier 1 — in-process (default, parallel).** `ast_commands` cases execute
+- **Tier 1 — in-process (parallel, allowlisted only).** `ast_commands` cases execute
   via the shared `ast_runner` (`parse_script` +
-  `run_steps_with_context_result_with_io` against isolated
+  `run_steps_with_fs_with_io` against isolated
   `GuardedPath::tempdir` roots, `PathResolver` filesystem fidelity — no
   mocks). Script fixtures listed in `IN_PROCESS_SCRIPT_FIXTURES`
-  (`src/lib.rs`) run their `script.oxfile` the same way. Engine errors are
+  (`src/lib.rs`) run their `script.oxfile` the same way, through
+  `run_steps_with_context_result_with_io`. Engine errors are
   formatted with `format_fixture_stderr` so assertions match the text the
   fixture binaries print on stderr.
 - **Tier 2 — pre-compiled binary (parallel).** Fixtures listed in

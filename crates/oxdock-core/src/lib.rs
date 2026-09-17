@@ -1,3 +1,5 @@
+extern crate self as oxdock_core;
+
 pub mod exec;
 pub mod pipeline;
 pub use exec::*;
@@ -49,8 +51,26 @@ define_pipeline! {
 /// Parse a script using the production `lower_command` dispatcher.
 /// The typed `ParseError` converts into `anyhow::Error` at this boundary
 /// with no intermediate `.context()` wrapping, so the message survives.
+/// Builtin function names seed the reserved set, so `FUNC` shadowing a
+/// native fails here; hosts unknown at parse time fall back to the runtime
+/// `define_func` guard.
 pub fn parse_script(input: &str) -> anyhow::Result<Vec<oxdock_parser::Step>> {
-    Ok(oxdock_parser::parse_script(input, lower_command)?)
+    parse_script_with_hosts(input, builtin_function_names())
+}
+
+/// Parse with caller-known host names added to the reserved set, so `FUNC`
+/// shadowing a host fails at parse time instead of at runtime.
+pub fn parse_script_with_hosts(
+    input: &str,
+    host_names: std::collections::HashSet<String>,
+) -> anyhow::Result<Vec<oxdock_parser::Step>> {
+    let mut reserved = builtin_function_names();
+    reserved.extend(host_names);
+    Ok(oxdock_parser::parse_script_with_hosts(
+        input,
+        lower_command,
+        reserved,
+    )?)
 }
 
 #[cfg(test)]

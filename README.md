@@ -32,14 +32,14 @@ OxDock is a Dockerfile inspired build DSL for Rust. Embed scripts at compile tim
 
 Supports platform gating, async tasks, and piped workflows for custom pipelines.
 
-[Documentation](https://docs.rs/oxdock/0.15.0-alpha/oxdock/)
+[Documentation](https://docs.rs/oxdock/0.16.0-alpha/oxdock/)
 
 Jump to the [command reference](#command-reference) below for the full
 command list with runnable examples.
 
 ## Quick start
 
-Add it to your Rust build with `cargo add oxdock@0.15.0-alpha`, or install the standalone runner with `cargo install oxdock@0.15.0-alpha`.
+Add it to your Rust build with `cargo add oxdock@0.16.0-alpha`, or install the standalone runner with `cargo install oxdock@0.16.0-alpha`.
 
 Run a script:
 
@@ -110,7 +110,7 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
         RETURN $name
     }
     FOR $name: STRING IN ["alpha", "beta"] {
-        CALL STAMP($name)
+        STAMP($name)
     }
     FUNC PICK($flag: BOOL) {
         IF $flag {
@@ -118,13 +118,13 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
         }
         RETURN "beta"
     }
-    LET $picked: STRING = CALL PICK(true)
+    LET $picked: STRING = PICK(true)
     WRITE dist/picked.txt {{ $picked }}
     LET $a: STRING = READ dist/alpha.txt
     LET $b: STRING = READ dist/beta.txt
     LET $p: STRING = READ dist/picked.txt
-    ASSERT_EQ $a "alpha OxDock 0.15.0-alpha"
-    ASSERT_EQ $b "beta OxDock 0.15.0-alpha"
+    ASSERT_EQ $a "alpha OxDock 0.16.0-alpha"
+    ASSERT_EQ $b "beta OxDock 0.16.0-alpha"
     ASSERT_EQ $p "alpha"
 };
 
@@ -136,7 +136,7 @@ let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolve
 let out = root.join("dist/alpha.txt").expect("out path");
 assert_eq!(
     resolver.read_to_string(&out).expect("read out"),
-    "alpha OxDock 0.15.0-alpha"
+    "alpha OxDock 0.16.0-alpha"
 );
 ```
 
@@ -179,6 +179,69 @@ assert_eq!(
 
 The top level runners need the default `cli` feature. With `--no-default-features`, run the same steps through `oxdock::oxdock_core::run_steps_*` instead.
 
+## Extend the language
+
+New types and functions take two attributes and three calls. Small
+`Copy` scalars can ride inline on the stack with zero allocation
+instead of heap boxing; both forms, with stateful functions, live under
+[Extending OxDock from Rust](#extending-oxdock-from-rust) below.
+
+```rust
+use oxdock::{Engine, OxDockType, Value, oxdock_func, oxdock_type};
+use std::fmt;
+
+/// Word count summary: computed in Rust, carried as one script value.
+#[oxdock_type(name = "STATS")]
+#[derive(Debug, Clone, PartialEq)]
+struct Stats {
+    words: usize,
+    chars: usize,
+}
+
+impl fmt::Display for Stats {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{} words, {} chars", self.words, self.chars)
+    }
+}
+
+/// Summarize a string: `STATS("hello brave world")` carries its counts.
+#[oxdock_func(pure, name = "STATS")]
+fn summarize(text: String) -> anyhow::Result<Value> {
+    let words = text.split_whitespace().count();
+    let chars = text.chars().count();
+    Ok(Value::mint_heap(
+        Stats::descriptor(),
+        Stats { words, chars },
+    ))
+}
+
+/// Read the word count back out: `WORD_COUNT($s)` is an `INT`.
+#[oxdock_func(pure, returns = "INT")]
+fn word_count(summary: Value) -> anyhow::Result<Value> {
+    let Some(stats) = summary.read_heap::<Stats>(Stats::descriptor()) else {
+        anyhow::bail!("WORD_COUNT() expects a STATS value");
+    };
+    Ok(Value::int(stats.words as i64))
+}
+
+fn main() -> anyhow::Result<()> {
+    let mut engine = Engine::new();
+    engine.register_type::<Stats>();
+    engine.register_fn(Summarize);
+    engine.register_fn(WordCount);
+    let temp = oxdock_fs::GuardedPath::tempdir().unwrap();
+    let root = temp.as_guarded_path().clone();
+    let steps: Vec<oxdock::oxdock_parser::Step> = oxdock::oxdock! {
+        LET $s: STATS = STATS("hello brave world")
+        LET $n: INT = WORD_COUNT($s)
+        ASSERT_EQ $n 3
+    };
+    let run = engine.run_steps(&root, &steps)?;
+    assert_eq!(format!("{}", run.bindings["s"]), "3 words, 17 chars");
+    Ok(())
+}
+```
+
 The same script also runs standalone through the CLI. It builds artifacts **and verifies them** with native assertions. Every fenced `oxdock` example in this README is executed against the implementation by [`crates/oxdock-logic-tests/tests/docs_conformance.rs`](./crates/oxdock-logic-tests/tests/docs_conformance.rs), so what you read here is guaranteed to match what the DSL actually does:
 
 ```oxdock
@@ -210,7 +273,32 @@ oxdock ./build.oxfile
 
 ## Runtime architecture
 
-Three mechanisms keep script execution predictable: how bytes move between commands, how state stays isolated, and how the host stays sandboxed. Each one is shown running below.
+Four mechanisms keep script execution predictable: how values are stored, how bytes move between commands, how state stays isolated, and how the host stays sandboxed. Each one is shown running below.
+
+### Values: words, not objects
+
+Every script value is a fixed 128 bit word that lives on the stack: a static type descriptor pointer plus a 64 bit payload. Only payload contents may live on the heap, never the word itself.
+
+Scalars that fit (`INT`, `FLOAT`, `BOOL`, handles) ride inline, copied into the payload byte for byte with zero allocation, so arithmetic and loop counters run at register speed and never touch the allocator. Larger values (`STRING`, `LIST`, `MAP`, host types) ride behind a thin pointer to a single owned box holding the concrete Rust type. The pointer stays thin because every payload type is sized, so there are no fat pointers and no trait objects anywhere in the path.
+
+A naive tagged enum needs 32 bytes per value (a 24 byte payload plus tag and padding), so the word form holds four values per 64 byte cache line instead of two.
+
+Type checks compare one descriptor address, and operations (`clone`, `drop`, equality, formatting) call the descriptor directly, with no registry lookup and no lock. Each type owns one compile time descriptor singleton, so identity is pointer equality that fails closed. Host types extend the same path: `#[oxdock_type]` derives a static descriptor for the payload struct, and `inline` selects the zero allocation form for small `Copy` scalars.
+
+There is no garbage collector because values form trees, not graphs. Each heap word owns its box exactly once: cloning allocates a fresh box with a deep copy, dropping frees it. A `LIST` owns its items and a `MAP` owns its entries.
+
+Nothing is aliased, shared, or mutably borrowed from two places, so cycles cannot form and plain deterministic cleanup suffices. Pointer casts always round trip through the same concrete box type, and inline words never enter the pointer domain, which keeps provenance intact. The lifecycle is checked under Miri.
+
+No pauses, no write barriers, no background collector. Python, JavaScript, and Lua permit aliasing and cycles and need tracing collectors to reclaim them; here there is nothing to trace.
+
+| Design | Stack word | Scalar allocs | Cache density | Host extensibility |
+| --- | --- | --- | --- | --- |
+| Tagged Rust enum | 32 bytes | 0 | 2 values per line | Closed |
+| Boxed trait objects | 16 byte fat pointer | 1 per scalar | Medium | Open |
+| 16 byte word (this design) | 16 bytes | 0 | 4 values per line | Open, static descriptors |
+| NaN boxing (LuaJIT, V8) | 8 bytes | 0 | 8 values per line | Constrained |
+
+Two trade offs come with the form. Cloning a container deep copies it, since there is no reference counting or copy on write. And 16 bytes is roomier than 8 byte NaN boxing, which buys clean 64 bit integer and float storage plus safe abstraction boundaries without pointer masking.
 
 ### Transport: pipes
 
@@ -231,7 +319,7 @@ FUNC SHADOW($v: STRING) {
     LET $inner: STRING = "inner"
     RETURN $v
 }
-LET $out: STRING = CALL SHADOW("param")
+LET $out: STRING = SHADOW("param")
 ASSERT_EQ $out "param"
 ```
 
@@ -288,6 +376,272 @@ WRITE local.txt from-local
 LET $l: STRING = READ local.txt
 ASSERT_EQ $l "from-local"
 ```
+
+## Extending OxDock from Rust
+
+Scripts call host functions and custom types that Rust code registers.
+Registration is two calls on one facade. This example runs as written:
+the shape first, the definitions it names right below it.
+
+### Complete example: define a type, define functions, run a script
+
+```rust
+use oxdock::{Engine, OxDockType, oxdock_func, oxdock_type};
+use std::fmt;
+
+// The script below is the DSL itself, not a string: the `oxdock!` macro
+// builds it into steps at compile time.
+
+fn main() -> anyhow::Result<()> {
+    let mut engine = Engine::new();
+    engine.register_type::<Tag>();
+    engine.register_fn(MakeTag);
+    engine.register_fn(ReadTag);
+
+    let temp = oxdock_fs::GuardedPath::tempdir().unwrap();
+    let root_path = temp.as_guarded_path().clone();
+    let steps: Vec<oxdock::oxdock_parser::Step> = oxdock::oxdock! {
+        LET $t: TAG = MAKE_TAG()
+        LET $s: STRING = READ_TAG($t)
+        ASSERT_EQ $s "demo"
+        WRITE tag.txt "{{ $s }}::{{ $t }}"
+    };
+    let run = engine.run_steps(&root_path, &steps)?;
+    assert!(run.bindings.contains_key("s"));
+
+    let reader = oxdock_fs::PathResolver::new(root_path.root(), root_path.root()).unwrap();
+    let written = reader
+        .read_to_string(&root_path.join("tag.txt").unwrap())
+        .expect("script writes tag.txt");
+    assert_eq!(written.trim(), "demo::tag:demo");
+    Ok(())
+}
+
+// The type. `#[oxdock_type]` implements `OxDockType` on the payload struct
+// itself. The default is the heap path: the word holds a thin pointer to
+// an owned box. Heap payloads require `Clone + PartialEq + Display +
+// Debug + Send + Sync`.
+
+/// Opaque label type.
+#[oxdock_type(name = "TAG")]
+#[derive(Debug, Clone, PartialEq)]
+struct Tag(String);
+
+impl fmt::Display for Tag {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "tag:{}", self.0)
+    }
+}
+
+// The functions. `#[oxdock_func(pure)]` implements `OxDockFn` on a
+// registration marker named after the function (`make_tag` becomes
+// `MakeTag`). The DSL name defaults to the uppercased Rust name.
+// `Value::mint_heap` with the payload type's own descriptor mints a word
+// of the registered type, and `read_heap` with that descriptor reads it
+// back. No name lookup runs anywhere on this path.
+
+/// Mint one opaque label.
+#[oxdock_func(pure)]
+fn make_tag() -> anyhow::Result<oxdock::Value> {
+    Ok(oxdock::Value::mint_heap(Tag::descriptor(), Tag("demo".into())))
+}
+
+/// Read the payload back out through a descriptor-checked typed read.
+#[oxdock_func(pure, returns = "STRING")]
+fn read_tag(val: oxdock::Value) -> anyhow::Result<oxdock::Value> {
+    let Some(tag) = val.read_heap::<Tag>(Tag::descriptor()) else {
+        anyhow::bail!("READ_TAG() expects a TAG value");
+    };
+    Ok(oxdock::Value::string(tag.0.clone()))
+}
+```
+
+The shape is always the same. `LET $t: TAG = MAKE_TAG()` calls a host
+function like any native one: arity, depth budget, and the declared `TAG`
+coercion apply uniformly. `READ_TAG($t)` reclaims the payload through an
+id checked read. `{{ $t }}` renders the custom value through its
+`Display`, so interpolation, `WRITE`, and equality treat host values like
+native ones. `TYPES()` lists every registered name and
+`TYPE_DESCRIBE("TAG")` returns its summary and docs, so scripts introspect
+host surface exactly like native surface. Host types stay opaque:
+literal syntax, `$var.key` traversal, and `FOR` iteration remain `LIST`
+and `MAP` only, so queryable containers expose host accessor functions
+(`MATRIX_GET($m, $row, $col)`) instead of new syntax.
+
+### Reference: stateful functions
+
+Without `pure`, the first parameter must be `cx: &mut StepCtx<P>`, which
+exposes variables, environment, pipes, and IO. Override the DSL name and
+the declared return type explicitly when the defaults do not fit:
+
+```rust
+use oxdock::{StepCtx, oxdock_func};
+use oxdock::oxdock_core::ProcessManager;
+
+/// Read an environment variable, defaulting to empty.
+#[oxdock_func(name = "ENV_OR", returns = "STRING")]
+fn env_or<P: ProcessManager>(
+    cx: &mut StepCtx<P>,
+    key: String,
+) -> anyhow::Result<oxdock::Value> {
+    Ok(oxdock::Value::string(cx.get_env(&key).unwrap_or_default()))
+}
+
+fn main() {
+    let mut engine = oxdock::Engine::new();
+    engine.register_fn(EnvOr);
+}
+```
+
+Parameters accept `Value`, `String`, `i64`, `f64`, and `bool`, in either
+form. Stateful markers register exactly like pure ones. Pure functions run
+on the compiled math path too; stateful ones stay on the AST path unless
+they opt in with `#[oxdock_func(rpn)]` (as `GLOB` does).
+
+### Reference: inline types
+
+`#[oxdock_type(inline)]` selects the zero allocation path for `Copy`
+scalars that fit in 64 bits: the word holds the value bytes directly. This
+is the same derivation the startup integer, float, boolean, and handle
+types use:
+
+```rust
+use oxdock::{OxDockType, oxdock_type};
+use std::fmt;
+
+/// Entity handle.
+#[oxdock_type(name = "ENTITY", inline)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct EntityId(u64);
+
+impl fmt::Display for EntityId {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "entity#{}", self.0)
+    }
+}
+
+fn main() {
+    let mut engine = oxdock::Engine::new();
+    engine.register_type::<EntityId>();
+    let val = oxdock::Value::mint_inline(EntityId::descriptor(), EntityId(7));
+    assert_eq!(val.inline_bits(), 7);
+    assert_eq!(format!("{val}"), "entity#7");
+    assert_eq!(val.clone(), val);
+}
+```
+
+Four limits decide what can ride inline:
+
+1. **Fixed 64 bit slot.** Anything larger panics at mint time (a runtime
+   check, not a compile time one).
+2. **`Copy` payloads only.** Inline clones copy bits and drops do
+   nothing, which resource owning types cannot satisfy.
+3. **No variable length data.** `STRING`, `LIST`, and `MAP` can never fit
+   a fixed slot and stay behind the pointer.
+4. **Widening punishes everything.** A bigger slot means fewer words per
+   cache line and costlier moves for the scalars that dominate scripts.
+
+One boundary to keep straight: words stored inside a `LIST` or `MAP`
+live in that container's heap buffer, so inline describes the payload
+encoding, not a promise that every word sits on the stack.
+
+### Reference: queryable containers
+
+Opaque types can still answer queries: pair the payload with host
+accessor functions and scripts read cells, lengths, and keys through
+ordinary calls, with no new syntax. The example below mints a grid and
+reads one cell through its accessor; from a script the same call spells
+`LET $c: INT = MATRIX_GET($m, 0, 1)`. Key paths and `FOR` iteration stay
+unavailable by the boundary above.
+
+```rust
+use oxdock::{OxDockType, Value, oxdock_func, oxdock_type};
+use std::fmt;
+
+/// Integer grid with no literal syntax: scripts query it through functions.
+#[oxdock_type(name = "MATRIX")]
+#[derive(Debug, Clone, PartialEq)]
+struct Matrix(Vec<Vec<i64>>);
+
+impl fmt::Display for Matrix {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "matrix[{}x{}]", self.0.len(), self.0.first().map_or(0, Vec::len))
+    }
+}
+
+/// Mint a fixed 1x2 grid.
+#[oxdock_func(pure)]
+fn make_matrix() -> anyhow::Result<Value> {
+    Ok(Value::mint_heap(
+        Matrix::descriptor(),
+        Matrix(vec![vec![1, 2]]),
+    ))
+}
+
+/// Read one cell by row and column.
+#[oxdock_func(pure, returns = "INT")]
+fn matrix_get(board: Value, row: i64, col: i64) -> anyhow::Result<Value> {
+    let Some(grid) = board.read_heap::<Matrix>(Matrix::descriptor()) else {
+        anyhow::bail!("MATRIX_GET() expects a MATRIX value");
+    };
+    let cell = usize::try_from(row)
+        .ok()
+        .and_then(|r| grid.0.get(r))
+        .and_then(|r| usize::try_from(col).ok().and_then(|c| r.get(c)))
+        .copied()
+        .ok_or_else(|| anyhow::anyhow!("index out of bounds"))?;
+    Ok(Value::int(cell))
+}
+
+fn main() -> anyhow::Result<()> {
+    let word = Value::mint_heap(Matrix::descriptor(), Matrix(vec![vec![1, 2]]));
+    let cell = matrix_get(word, 0, 1).unwrap();
+    assert_eq!(cell.as_i64(), Some(2));
+
+    let mut engine = oxdock::Engine::new();
+    engine.register_type::<Matrix>();
+    engine.register_fn(MakeMatrix);
+    engine.register_fn(MatrixGet);
+    let temp = oxdock_fs::GuardedPath::tempdir().unwrap();
+    let root = temp.as_guarded_path().clone();
+    let run = engine.run_script(
+        &root,
+        "LET $m: MATRIX = MAKE_MATRIX()\nLET $c: INT = MATRIX_GET($m, 0, 1)\n",
+    )?;
+    assert_eq!(run.bindings["c"].as_i64(), Some(2));
+    Ok(())
+}
+```
+
+### Reference: evaluation paths and the `rpn` flag
+
+Two evaluators run scripts, and the distinction decides where a host
+function may run. The AST evaluator walks the parsed tree one step at a
+time. Every step knows its line number, so failures name it (`step 1:
+INT() expects 1 argument(s), got 2`). Scopes, pipes, declarations, and
+every statement form live here. The RPN evaluator runs arithmetic and
+comparison expressions compiled to a flat stack-machine program
+(`PushConst`, `LoadVar`, `Call`, `Add`, ...). A stack program carries
+values only: no statements, no scopes, no pipes, and no step numbers, so
+a failing call inside math reports the bare error (`INT() expects 1
+argument(s), got 2`).
+
+The tradeoff is expressiveness against compactness, not speed. The tree
+can say anything the language can say, with errors that point at the
+script. The stack program can only compute values, which is exactly what
+math needs and nothing more. That is why not everything runs on RPN:
+statements, declarations, scoping, and IO orchestration have no stack
+encoding, and step-numbered errors require the tree.
+
+For host functions the rule follows from that split. Pure functions take
+only values and touch nothing, so they run on both paths with no flag.
+Stateful functions default to AST-only. Opt in with
+`#[oxdock_func(rpn)]` only for read-only queries that stay meaningful
+inside math (`GLOB`, `LOAD_TOML`, `LOAD_JSON` do this): the function
+still receives full step context, but its failures lose their step
+numbers. Side-effecting stateful functions stay out, since stack-order
+execution with step-less errors is the worst place for an effect to go
+wrong.
 
 One language for the whole build: farm steps out to npm, bundlers, or code generators and pull their artifacts back under cargo's control. Pipe bytes between steps without buffering whole outputs, fan work out with `ASYNC`, or skip embedding entirely and run the same scripts as standalone CLI processes.
 
@@ -625,9 +979,9 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | Command | Syntax |
 | --- | --- |
 | [`WORKDIR`](#workdir) | `WORKDIR <path>` |
-| [`WORKSPACE`](#workspace) | `WORKSPACE SNAPSHOT\|LOCAL` |
+| [`WORKSPACE`](#workspace) | `WORKSPACE (SNAPSHOT\|LOCAL, case-insensitive)` |
 | [`ENV`](#env) | `ENV KEY=value` |
-| [`INHERIT_ENV`](#inherit_env) | `INHERIT_ENV <key>...` |
+| [`INHERIT_ENV`](#inherit_env) | `INHERIT_ENV [<key>, ...]` |
 | [`ECHO`](#echo) | `ECHO <message>` |
 | [`RUN`](#run) | `RUN <command...> \| RUN ["exe", "arg", ...]` |
 | [`COPY`](#copy) | `COPY [--from-current-workspace] <from> <to>` |
@@ -641,23 +995,22 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | [`WRITE`](#write) | `WRITE <path> [<contents>]` |
 | [`APPEND`](#append) | `APPEND <path> [<contents>]` |
 | [`EXPAND`](#expand) | `EXPAND [<path>] [<KEY=val> ...]` |
-| [`ASSERT_EQ`](#assert_eq) | `ASSERT_EQ [--hash <sha256>] <actual> <expected>` |
+| [`ASSERT_EQ`](#assert_eq) | `ASSERT_EQ <actual> <expected> \| ASSERT_EQ --hash <sha256> <actual>` |
 | [`ASSERT_CONTAINS`](#assert_contains) | `ASSERT_CONTAINS <haystack> <needle>` |
 | [`HASH_SHA256`](#hash_sha256) | `HASH_SHA256 <path>` |
 | [`EXIT`](#exit) | `EXIT <code>` |
 | [`SLEEP`](#sleep) | `SLEEP <duration>` |
 | [`WITH_IO`](#with_io) | `WITH_IO [<stream>[=pipe:<name>\|=$var], ...] <command> \| WITH_IO [bindings] { <commands> }` |
 | [`FOR`](#for) | `FOR $item: TYPE IN <expr> { <commands> } \| FOR $key: STRING, $value: TYPE IN <expr> { <commands> }` |
-| [`IF`](#if) | `IF <expr> { <commands> } [ELSE IF <expr> { <commands> }] [ELSE { <commands> }]` |
+| [`IF`](#if) | `IF <expr> { <commands> } [ELSE IF <expr> { <commands> } ...] [ELSE { <commands> }]` |
 | [`LET`](#let) | `LET $var: TYPE = <expr> \| LET $var: TYPE = ASYNC { <commands> } \| LET $var: TYPE = <command> \| LET $var: TYPE = AWAIT $task` |
 | [`MUTATION`](#mutation) | `$var = <expr>` |
 | [`ASYNC`](#async) | `ASYNC <command...> \| ASYNC { <commands> } \| LET $var: HANDLE = ASYNC { <commands> }` |
 | [`AWAIT`](#await) | `AWAIT $var \| LET $out: STRING = AWAIT $var` |
 | [`CANCEL`](#cancel) | `CANCEL $var` |
 | [`TIMEOUT`](#timeout) | `TIMEOUT <duration> <command...> \| TIMEOUT <duration> { <commands> } \| TIMEOUT <duration> AWAIT $var` |
-| [`FUNC`](#func) | `FUNC NAME($param: TYPE, ...) { <commands> }` |
-| [`CALL`](#call) | `CALL NAME(<expr>, ...) \| LET $var: TYPE = CALL NAME(<expr>, ...)` |
-| [`RETURN`](#return) | `RETURN <expr>` |
+| [`FUNC`](#func) | `FUNC NAME([$param: TYPE, ...]) { <commands> }` |
+| [`RETURN`](#return) | `RETURN [<expr>]` |
 | [`WHILE`](#while) | `WHILE <bool-expr> { <commands> }` |
 | [`BREAK`](#break) | `BREAK` |
 | [`CONTINUE`](#continue) | `CONTINUE` |
@@ -683,7 +1036,7 @@ If WITH_IO wraps an ASYNC block whose body is a single RUN, guarded or
 not, the pipe is a zero copy OS kernel pipe instead: pair it with a
 consumer that runs while the producer is alive, since output past the
 64 KiB kernel buffer stalls until drained. That promotion never crosses
-a CALL boundary: pipes created, bound, or passed by variable inside FUNC
+a function boundary: pipes created, bound, or passed by variable inside FUNC
 bodies are always script pipes, even when the surrounding task would
 otherwise promote.
 
@@ -772,7 +1125,7 @@ ASSERT_CONTAINS stdout "hi World!"
 
 Conditional execution.
 
-**Syntax:** `IF <expr> { <commands> } [ELSE IF <expr> { <commands> }] [ELSE { <commands> }]`
+**Syntax:** `IF <expr> { <commands> } [ELSE IF <expr> { <commands> } ...] [ELSE { <commands> }]`
 
 The condition is evaluated as a boolean expression.
 
@@ -860,6 +1213,14 @@ Variables are usable in templates (`{{ $var }}`), guards, and
 expressions. With `ASYNC`, spawns a background task and stores its
 handle (see ASYNC). The `$` sigil on the name is mandatory.
 
+No hoisting: a variable exists only after its LET runs, in
+execution order. Reading `$var` before its LET (or after the
+block that declared it exits) fails with
+`undefined variable $var`. Scopes are a stack of frames and
+resolution walks innermost outward, so nothing pre-declares
+names. Function bodies read outer variables through the same
+walk, but their own LETs never leak out (see FUNC).
+
 The right-hand side is always an expression — literals, lists, maps,
 arithmetic (`+ - * /` with `*`/`/` binding tighter, unary `-`,
 parentheses), comparisons (`< <= > >=` binding tighter than
@@ -941,6 +1302,16 @@ ECHO "hello, {{ $name }}"
 LET $items: LIST = ["a", "b"]
 LET $count: INT = 42
 ```
+
+**Example: no hoisting**
+
+```oxdock expect_error:"undefined variable"
+# reading before the LET runs is an error, not an empty value
+ECHO $too_early
+LET $too_early: STRING = "too late"
+```
+
+**Expected error:** `undefined variable`
 
 **Example: glob binding**
 
@@ -1222,7 +1593,7 @@ ASSERT_EQ $beat "alive"
 
 Define a user function.
 
-**Syntax:** `FUNC NAME($param: TYPE, ...) { <commands> }`
+**Syntax:** `FUNC NAME([$param: TYPE, ...]) { <commands> }`
 
 Defines a user function with UPPERCASE name and explicitly typed
 parameters.
@@ -1231,7 +1602,12 @@ Params bind by position, converting each argument to its
 declared parameter type before the body runs.
 Bodies run in a fresh variable scope; LETs inside do not leak. A nested
 FUNC definition is scoped to its block and reverts on exit. Names share
-one namespace with host-registered functions.
+one namespace with native and host-registered functions, which a FUNC
+may never shadow.
+
+Invoke any function with one syntax: `NAME(...)` as a statement
+(discarding the value) or `LET $var: TYPE = NAME(...)` to capture
+the RETURN value (fallthrough without RETURN captures as "").
 
 
 **Examples:**
@@ -1242,38 +1618,8 @@ one namespace with host-registered functions.
 FUNC GREET($name: STRING) {
   RETURN $name
 }
-LET $res: STRING = CALL GREET("ada")
+LET $res: STRING = GREET("ada")
 ASSERT_EQ $res "ada"
-```
-
-
-### CALL
-
-Invoke a user or host function.
-
-**Syntax:** `CALL NAME(<expr>, ...) | LET $var: TYPE = CALL NAME(<expr>, ...)`
-
-Invokes a FUNC-defined or host-registered function by UPPERCASE name.
-
-Bare CALL discards the return value and keeps stdout side effects.
-LET $var: TYPE = CALL captures the RETURN value (fallthrough without
-RETURN captures as ""), coerced to the declared type; stdout inside the
-callee stays observable via ASSERT_CONTAINS stdout and pipes.
-
-Combining LET-capture with WITH_IO [stdout=pipe:...] is a parse error.
-
-
-**Examples:**
-
-**Example: call**
-
-```oxdock
-FUNC SHOUT($name: STRING) {
-  ECHO "{{ $name }}"
-  RETURN $name
-}
-CALL SHOUT("ada")
-ASSERT_CONTAINS stdout "ada"
 ```
 
 **Example: call with pipes**
@@ -1288,7 +1634,7 @@ FUNC DRAIN($q: PIPE) {
 }
 LET $p: PIPE = pipe:ch
 WITH_IO [stdout=$p] ECHO "payload"
-LET $got: STRING = CALL DRAIN($p)
+LET $got: STRING = DRAIN($p)
 ASSERT_EQ $got "payload"
 ```
 
@@ -1297,9 +1643,10 @@ ASSERT_EQ $got "payload"
 
 Return a value from a function.
 
-**Syntax:** `RETURN <expr>`
+**Syntax:** `RETURN [<expr>]`
 
 Ends the nearest enclosing function call with a value.
+Bare `RETURN` with no expression yields `""`.
 
 Falling off the end without RETURN yields "". RETURN outside a function
 (including at top level or across an ASYNC boundary) is an error.
@@ -1316,7 +1663,7 @@ FUNC PICK($flag: BOOL) {
   }
   RETURN "no"
 }
-LET $res: STRING = CALL PICK(true)
+LET $res: STRING = PICK(true)
 ASSERT_EQ $res "yes"
 ```
 
@@ -1429,7 +1776,7 @@ ASSERT_EQ $body "generated-under-workdir"
 
 Switch workspace roots.
 
-**Syntax:** `WORKSPACE SNAPSHOT|LOCAL`
+**Syntax:** `WORKSPACE (SNAPSHOT|LOCAL, case-insensitive)`
 
 SNAPSHOT or LOCAL root.
 
@@ -1536,7 +1883,7 @@ ASSERT_EQ $outer_body "production"
 
 Inherit env vars from host.
 
-**Syntax:** `INHERIT_ENV <key>...`
+**Syntax:** `INHERIT_ENV [<key>, ...]`
 
 Declares which host environment variables to inherit into the script.
 
@@ -1703,6 +2050,8 @@ Checkout and copy.
 ```oxdock expect_error:"COPY source missing"
 COPY_GIT HEAD src.txt dst.txt
 ```
+
+**Expected error:** `COPY source missing`
 
 
 ### SYMLINK
@@ -2017,10 +2366,10 @@ ASSERT_CONTAINS stdout "Hi Alice!"
 
 Assert strict equality.
 
-**Syntax:** `ASSERT_EQ [--hash <sha256>] <actual> <expected>`
+**Syntax:** `ASSERT_EQ <actual> <expected> | ASSERT_EQ --hash <sha256> <actual>`
 
 Compares two evaluated values with typed equality (no coercion:
-`Int(42)` never equals `String("42")`), aborting the pipeline
+`INT(42)` never equals `STRING("42")`), aborting the pipeline
 with a step-numbered error showing expected vs actual otherwise.
 
 Both sides are values: `$var`, literals, templates, and calls
@@ -2028,8 +2377,9 @@ evaluate in memory and never touch disk. Read files explicitly
 first (`LET $text: STRING = READ "out.txt"`, then
 `ASSERT_EQ $text ...`).
 Bare `stdout` / `stderr` observe stream buffers; `pipe:NAME`
-observes a pipe buffer. `--hash` compares the SHA-256 of the
-actual's string bytes instead of the bytes themselves.
+observes a pipe buffer. `--hash` compares the SHA-256 of a
+string, pipe, or captured-stdout actual instead of the raw
+bytes (`stderr` is unsupported).
 
 
 **Arguments:**
@@ -2160,6 +2510,8 @@ before the EXIT persist.
 EXIT 0
 ```
 
+**Expected error:** `EXIT requested with code 0`
+
 
 ### SLEEP
 
@@ -2202,10 +2554,6 @@ SLEEP $bare
 
 ## Value types
 
-### Value type: STRING
-
-Arbitrary text. Quotes keep exact bytes, lone `$var` evaluates, `{{ ... }}` interpolates.
-
 ### Value type: INT
 
 64-bit signed integer, e.g. an exit code.
@@ -2214,13 +2562,13 @@ Arbitrary text. Quotes keep exact bytes, lone `$var` evaluates, `{{ ... }}` inte
 
 64-bit float, e.g. a ratio.
 
+### Value type: STRING
+
+Arbitrary text. Quotes keep exact bytes, lone `$var` evaluates, `{{ ... }}` interpolates.
+
 ### Value type: BOOL
 
 Boolean `true` or `false`.
-
-### Value type: PIPE
-
-Named script pipe. Validity is checked against the pipe registry at coercion time.
 
 ### Value type: LIST
 
@@ -2230,17 +2578,132 @@ Ordered list of values.
 
 String-keyed map of values.
 
-### Value type: HANDLE
+### Value type: PATH
 
-Background ASYNC task handle for AWAIT/CANCEL.
+Workspace path, resolved against cwd and guarded against escape.
 
 ### Value type: DURATION
 
 Positive time span: `500ms`, `10s`, `2m`, `1h`; bare number means seconds.
 
-### Value type: PATH
+### Value type: PIPE
 
-Workspace path, resolved against cwd and guarded against escape.
+Named script pipe. Validity is checked against the pipe registry at coercion time.
+
+### Value type: HANDLE
+
+Background ASYNC task handle for AWAIT/CANCEL.
+
+<!-- GENERATED by docs-gen from oxdock-core function metadata. Do not edit by hand. -->
+## Functions
+
+Callable as `NAME(...)` in expressions. Introspectable from scripts with `FUNCTIONS()` and `DESCRIBE(name)`.
+
+### DESCRIBE
+
+**Signature:** `DESCRIBE($name: STRING) -> MAP`
+
+**Contexts:** AST only
+
+Describe one function by name.
+
+Returns a MAP with name, kind, params, returns, and summary. Errors on
+unknown function.
+
+### FLOAT
+
+**Signature:** `FLOAT($val) -> FLOAT`
+
+**Contexts:** AST, RPN
+
+Convert a value to FLOAT.
+
+Parses f64 (accepts int strings), bails on non-finite or non-numeric.
+
+### FUNCTIONS
+
+**Signature:** `FUNCTIONS() -> LIST`
+
+**Contexts:** AST only
+
+List all visible function names.
+
+Sorted LIST of DSL-defined plus native plus host-registered names.
+
+### GLOB
+
+**Signature:** `GLOB($pattern: STRING) -> LIST`
+
+**Contexts:** AST, RPN
+
+List workspace paths matching a glob pattern.
+
+Sorted, root-relative LIST; empty on no match or `..` escape.
+
+### INT
+
+**Signature:** `INT($val) -> INT`
+
+**Contexts:** AST, RPN
+
+Convert a value to INT.
+
+Trims ASCII whitespace and parses i64. Passes Int through; Float only
+when integral and finite.
+
+### LOAD_JSON
+
+**Signature:** `LOAD_JSON($path: STRING) -> MAP`
+
+**Contexts:** AST, RPN
+
+Load and parse a JSON file.
+
+Reads a workspace file and parses JSON into a DSL value.
+
+### LOAD_TOML
+
+**Signature:** `LOAD_TOML($path: STRING) -> MAP`
+
+**Contexts:** AST, RPN
+
+Load and parse a TOML file.
+
+Reads a workspace file and parses TOML into a DSL value.
+
+### PATH_TYPE
+
+**Signature:** `PATH_TYPE($path: STRING) -> STRING`
+
+**Contexts:** AST only
+
+Describe a filesystem entry.
+
+Reports file, dir, symlink (no-follow), or absent. AST-only by design;
+there is no RPN arm for filesystem IO.
+
+### TYPES
+
+**Signature:** `TYPES() -> LIST`
+
+**Contexts:** AST only
+
+List all known type names.
+
+Sorted LIST of startup plus host-registered type descriptors. Reads the
+run's name directory, so it runs on the AST path like the other
+introspection functions.
+
+### TYPE_DESCRIBE
+
+**Signature:** `TYPE_DESCRIBE($name: STRING) -> MAP`
+
+**Contexts:** AST only
+
+Describe one type by name.
+
+Returns a MAP with name, summary, and docs. Errors on unknown type.
+Reads the run's name directory, so it runs on the AST path.
 
 ## When a script fails to parse
 
@@ -2506,6 +2969,20 @@ If you run new tests under Miri locally, you can sanity-check parity with CI via
 cargo +nightly miri setup
 cargo +nightly miri test --workspace --all-features --lib --tests
 ```
+
+## Glossary
+
+- **AST**: The parsed tree of a script. Statements, declarations, and IO walk this tree one step at a time.
+- **Descriptor**: One type's static singleton: its name, docs, and the vtable every value of that type carries.
+- **Fat pointer**: A pointer that carries metadata alongside the address. Words avoid them: every payload type is sized, so payload pointers stay thin.
+- **Heap**: Memory for data that outgrows the stack. Container contents and non-inline payloads live here, each owned by exactly one word.
+- **Inline**: Payload bytes carried inside the word itself, with zero allocation. Available to `Copy` scalars that fit in 64 bits.
+- **NaN boxing**: A technique that packs values into 64 bits by reusing NaN float patterns. Denser than 16 byte words at the cost of pointer masking and constrained host values.
+- **Payload**: The 64 bit data half of a word: either inline bytes or a pointer to one owned box.
+- **Provenance**: The recorded origin of a pointer, which Rust uses to judge whether a memory access is valid. Round tripping through the same box type preserves it.
+- **RPN**: Reverse Polish Notation: arithmetic compiled to a flat stack program instead of tree walking.
+- **Vtable**: The operations half of a descriptor: function pointers that clone, drop, compare, and render values of that type.
+- **Word**: The fixed 128 bit unit of every script value: a descriptor pointer plus a payload.
 
 ## License
 

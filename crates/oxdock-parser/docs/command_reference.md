@@ -6,9 +6,9 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | Command | Syntax |
 | --- | --- |
 | [`WORKDIR`](#workdir) | `WORKDIR <path>` |
-| [`WORKSPACE`](#workspace) | `WORKSPACE SNAPSHOT\|LOCAL` |
+| [`WORKSPACE`](#workspace) | `WORKSPACE (SNAPSHOT\|LOCAL, case-insensitive)` |
 | [`ENV`](#env) | `ENV KEY=value` |
-| [`INHERIT_ENV`](#inherit_env) | `INHERIT_ENV <key>...` |
+| [`INHERIT_ENV`](#inherit_env) | `INHERIT_ENV [<key>, ...]` |
 | [`ECHO`](#echo) | `ECHO <message>` |
 | [`RUN`](#run) | `RUN <command...> \| RUN ["exe", "arg", ...]` |
 | [`COPY`](#copy) | `COPY [--from-current-workspace] <from> <to>` |
@@ -22,23 +22,22 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | [`WRITE`](#write) | `WRITE <path> [<contents>]` |
 | [`APPEND`](#append) | `APPEND <path> [<contents>]` |
 | [`EXPAND`](#expand) | `EXPAND [<path>] [<KEY=val> ...]` |
-| [`ASSERT_EQ`](#assert_eq) | `ASSERT_EQ [--hash <sha256>] <actual> <expected>` |
+| [`ASSERT_EQ`](#assert_eq) | `ASSERT_EQ <actual> <expected> \| ASSERT_EQ --hash <sha256> <actual>` |
 | [`ASSERT_CONTAINS`](#assert_contains) | `ASSERT_CONTAINS <haystack> <needle>` |
 | [`HASH_SHA256`](#hash_sha256) | `HASH_SHA256 <path>` |
 | [`EXIT`](#exit) | `EXIT <code>` |
 | [`SLEEP`](#sleep) | `SLEEP <duration>` |
 | [`WITH_IO`](#with_io) | `WITH_IO [<stream>[=pipe:<name>\|=$var], ...] <command> \| WITH_IO [bindings] { <commands> }` |
 | [`FOR`](#for) | `FOR $item: TYPE IN <expr> { <commands> } \| FOR $key: STRING, $value: TYPE IN <expr> { <commands> }` |
-| [`IF`](#if) | `IF <expr> { <commands> } [ELSE IF <expr> { <commands> }] [ELSE { <commands> }]` |
+| [`IF`](#if) | `IF <expr> { <commands> } [ELSE IF <expr> { <commands> } ...] [ELSE { <commands> }]` |
 | [`LET`](#let) | `LET $var: TYPE = <expr> \| LET $var: TYPE = ASYNC { <commands> } \| LET $var: TYPE = <command> \| LET $var: TYPE = AWAIT $task` |
 | [`MUTATION`](#mutation) | `$var = <expr>` |
 | [`ASYNC`](#async) | `ASYNC <command...> \| ASYNC { <commands> } \| LET $var: HANDLE = ASYNC { <commands> }` |
 | [`AWAIT`](#await) | `AWAIT $var \| LET $out: STRING = AWAIT $var` |
 | [`CANCEL`](#cancel) | `CANCEL $var` |
 | [`TIMEOUT`](#timeout) | `TIMEOUT <duration> <command...> \| TIMEOUT <duration> { <commands> } \| TIMEOUT <duration> AWAIT $var` |
-| [`FUNC`](#func) | `FUNC NAME($param: TYPE, ...) { <commands> }` |
-| [`CALL`](#call) | `CALL NAME(<expr>, ...) \| LET $var: TYPE = CALL NAME(<expr>, ...)` |
-| [`RETURN`](#return) | `RETURN <expr>` |
+| [`FUNC`](#func) | `FUNC NAME([$param: TYPE, ...]) { <commands> }` |
+| [`RETURN`](#return) | `RETURN [<expr>]` |
 | [`WHILE`](#while) | `WHILE <bool-expr> { <commands> }` |
 | [`BREAK`](#break) | `BREAK` |
 | [`CONTINUE`](#continue) | `CONTINUE` |
@@ -64,7 +63,7 @@ If WITH_IO wraps an ASYNC block whose body is a single RUN, guarded or
 not, the pipe is a zero copy OS kernel pipe instead: pair it with a
 consumer that runs while the producer is alive, since output past the
 64 KiB kernel buffer stalls until drained. That promotion never crosses
-a CALL boundary: pipes created, bound, or passed by variable inside FUNC
+a function boundary: pipes created, bound, or passed by variable inside FUNC
 bodies are always script pipes, even when the surrounding task would
 otherwise promote.
 
@@ -153,7 +152,7 @@ ASSERT_CONTAINS stdout "hi World!"
 
 Conditional execution.
 
-**Syntax:** `IF <expr> { <commands> } [ELSE IF <expr> { <commands> }] [ELSE { <commands> }]`
+**Syntax:** `IF <expr> { <commands> } [ELSE IF <expr> { <commands> } ...] [ELSE { <commands> }]`
 
 The condition is evaluated as a boolean expression.
 
@@ -241,6 +240,14 @@ Variables are usable in templates (`{{ $var }}`), guards, and
 expressions. With `ASYNC`, spawns a background task and stores its
 handle (see ASYNC). The `$` sigil on the name is mandatory.
 
+No hoisting: a variable exists only after its LET runs, in
+execution order. Reading `$var` before its LET (or after the
+block that declared it exits) fails with
+`undefined variable $var`. Scopes are a stack of frames and
+resolution walks innermost outward, so nothing pre-declares
+names. Function bodies read outer variables through the same
+walk, but their own LETs never leak out (see FUNC).
+
 The right-hand side is always an expression — literals, lists, maps,
 arithmetic (`+ - * /` with `*`/`/` binding tighter, unary `-`,
 parentheses), comparisons (`< <= > >=` binding tighter than
@@ -322,6 +329,16 @@ ECHO "hello, {{ $name }}"
 LET $items: LIST = ["a", "b"]
 LET $count: INT = 42
 ```
+
+**Example: no hoisting**
+
+```oxdock expect_error:"undefined variable"
+# reading before the LET runs is an error, not an empty value
+ECHO $too_early
+LET $too_early: STRING = "too late"
+```
+
+**Expected error:** `undefined variable`
 
 **Example: glob binding**
 
@@ -603,7 +620,7 @@ ASSERT_EQ $beat "alive"
 
 Define a user function.
 
-**Syntax:** `FUNC NAME($param: TYPE, ...) { <commands> }`
+**Syntax:** `FUNC NAME([$param: TYPE, ...]) { <commands> }`
 
 Defines a user function with UPPERCASE name and explicitly typed
 parameters.
@@ -612,7 +629,12 @@ Params bind by position, converting each argument to its
 declared parameter type before the body runs.
 Bodies run in a fresh variable scope; LETs inside do not leak. A nested
 FUNC definition is scoped to its block and reverts on exit. Names share
-one namespace with host-registered functions.
+one namespace with native and host-registered functions, which a FUNC
+may never shadow.
+
+Invoke any function with one syntax: `NAME(...)` as a statement
+(discarding the value) or `LET $var: TYPE = NAME(...)` to capture
+the RETURN value (fallthrough without RETURN captures as "").
 
 
 **Examples:**
@@ -623,38 +645,8 @@ one namespace with host-registered functions.
 FUNC GREET($name: STRING) {
   RETURN $name
 }
-LET $res: STRING = CALL GREET("ada")
+LET $res: STRING = GREET("ada")
 ASSERT_EQ $res "ada"
-```
-
-
-### CALL
-
-Invoke a user or host function.
-
-**Syntax:** `CALL NAME(<expr>, ...) | LET $var: TYPE = CALL NAME(<expr>, ...)`
-
-Invokes a FUNC-defined or host-registered function by UPPERCASE name.
-
-Bare CALL discards the return value and keeps stdout side effects.
-LET $var: TYPE = CALL captures the RETURN value (fallthrough without
-RETURN captures as ""), coerced to the declared type; stdout inside the
-callee stays observable via ASSERT_CONTAINS stdout and pipes.
-
-Combining LET-capture with WITH_IO [stdout=pipe:...] is a parse error.
-
-
-**Examples:**
-
-**Example: call**
-
-```oxdock
-FUNC SHOUT($name: STRING) {
-  ECHO "{{ $name }}"
-  RETURN $name
-}
-CALL SHOUT("ada")
-ASSERT_CONTAINS stdout "ada"
 ```
 
 **Example: call with pipes**
@@ -669,7 +661,7 @@ FUNC DRAIN($q: PIPE) {
 }
 LET $p: PIPE = pipe:ch
 WITH_IO [stdout=$p] ECHO "payload"
-LET $got: STRING = CALL DRAIN($p)
+LET $got: STRING = DRAIN($p)
 ASSERT_EQ $got "payload"
 ```
 
@@ -678,9 +670,10 @@ ASSERT_EQ $got "payload"
 
 Return a value from a function.
 
-**Syntax:** `RETURN <expr>`
+**Syntax:** `RETURN [<expr>]`
 
 Ends the nearest enclosing function call with a value.
+Bare `RETURN` with no expression yields `""`.
 
 Falling off the end without RETURN yields "". RETURN outside a function
 (including at top level or across an ASYNC boundary) is an error.
@@ -697,7 +690,7 @@ FUNC PICK($flag: BOOL) {
   }
   RETURN "no"
 }
-LET $res: STRING = CALL PICK(true)
+LET $res: STRING = PICK(true)
 ASSERT_EQ $res "yes"
 ```
 
@@ -810,7 +803,7 @@ ASSERT_EQ $body "generated-under-workdir"
 
 Switch workspace roots.
 
-**Syntax:** `WORKSPACE SNAPSHOT|LOCAL`
+**Syntax:** `WORKSPACE (SNAPSHOT|LOCAL, case-insensitive)`
 
 SNAPSHOT or LOCAL root.
 
@@ -917,7 +910,7 @@ ASSERT_EQ $outer_body "production"
 
 Inherit env vars from host.
 
-**Syntax:** `INHERIT_ENV <key>...`
+**Syntax:** `INHERIT_ENV [<key>, ...]`
 
 Declares which host environment variables to inherit into the script.
 
@@ -1084,6 +1077,8 @@ Checkout and copy.
 ```oxdock expect_error:"COPY source missing"
 COPY_GIT HEAD src.txt dst.txt
 ```
+
+**Expected error:** `COPY source missing`
 
 
 ### SYMLINK
@@ -1398,10 +1393,10 @@ ASSERT_CONTAINS stdout "Hi Alice!"
 
 Assert strict equality.
 
-**Syntax:** `ASSERT_EQ [--hash <sha256>] <actual> <expected>`
+**Syntax:** `ASSERT_EQ <actual> <expected> | ASSERT_EQ --hash <sha256> <actual>`
 
 Compares two evaluated values with typed equality (no coercion:
-`Int(42)` never equals `String("42")`), aborting the pipeline
+`INT(42)` never equals `STRING("42")`), aborting the pipeline
 with a step-numbered error showing expected vs actual otherwise.
 
 Both sides are values: `$var`, literals, templates, and calls
@@ -1409,8 +1404,9 @@ evaluate in memory and never touch disk. Read files explicitly
 first (`LET $text: STRING = READ "out.txt"`, then
 `ASSERT_EQ $text ...`).
 Bare `stdout` / `stderr` observe stream buffers; `pipe:NAME`
-observes a pipe buffer. `--hash` compares the SHA-256 of the
-actual's string bytes instead of the bytes themselves.
+observes a pipe buffer. `--hash` compares the SHA-256 of a
+string, pipe, or captured-stdout actual instead of the raw
+bytes (`stderr` is unsupported).
 
 
 **Arguments:**
@@ -1541,6 +1537,8 @@ before the EXIT persist.
 EXIT 0
 ```
 
+**Expected error:** `EXIT requested with code 0`
+
 
 ### SLEEP
 
@@ -1583,10 +1581,6 @@ SLEEP $bare
 
 ## Value types
 
-### Value type: STRING
-
-Arbitrary text. Quotes keep exact bytes, lone `$var` evaluates, `{{ ... }}` interpolates.
-
 ### Value type: INT
 
 64-bit signed integer, e.g. an exit code.
@@ -1595,13 +1589,13 @@ Arbitrary text. Quotes keep exact bytes, lone `$var` evaluates, `{{ ... }}` inte
 
 64-bit float, e.g. a ratio.
 
+### Value type: STRING
+
+Arbitrary text. Quotes keep exact bytes, lone `$var` evaluates, `{{ ... }}` interpolates.
+
 ### Value type: BOOL
 
 Boolean `true` or `false`.
-
-### Value type: PIPE
-
-Named script pipe. Validity is checked against the pipe registry at coercion time.
 
 ### Value type: LIST
 
@@ -1611,14 +1605,129 @@ Ordered list of values.
 
 String-keyed map of values.
 
-### Value type: HANDLE
+### Value type: PATH
 
-Background ASYNC task handle for AWAIT/CANCEL.
+Workspace path, resolved against cwd and guarded against escape.
 
 ### Value type: DURATION
 
 Positive time span: `500ms`, `10s`, `2m`, `1h`; bare number means seconds.
 
-### Value type: PATH
+### Value type: PIPE
 
-Workspace path, resolved against cwd and guarded against escape.
+Named script pipe. Validity is checked against the pipe registry at coercion time.
+
+### Value type: HANDLE
+
+Background ASYNC task handle for AWAIT/CANCEL.
+
+<!-- GENERATED by docs-gen from oxdock-core function metadata. Do not edit by hand. -->
+## Functions
+
+Callable as `NAME(...)` in expressions. Introspectable from scripts with `FUNCTIONS()` and `DESCRIBE(name)`.
+
+### DESCRIBE
+
+**Signature:** `DESCRIBE($name: STRING) -> MAP`
+
+**Contexts:** AST only
+
+Describe one function by name.
+
+Returns a MAP with name, kind, params, returns, and summary. Errors on
+unknown function.
+
+### FLOAT
+
+**Signature:** `FLOAT($val) -> FLOAT`
+
+**Contexts:** AST, RPN
+
+Convert a value to FLOAT.
+
+Parses f64 (accepts int strings), bails on non-finite or non-numeric.
+
+### FUNCTIONS
+
+**Signature:** `FUNCTIONS() -> LIST`
+
+**Contexts:** AST only
+
+List all visible function names.
+
+Sorted LIST of DSL-defined plus native plus host-registered names.
+
+### GLOB
+
+**Signature:** `GLOB($pattern: STRING) -> LIST`
+
+**Contexts:** AST, RPN
+
+List workspace paths matching a glob pattern.
+
+Sorted, root-relative LIST; empty on no match or `..` escape.
+
+### INT
+
+**Signature:** `INT($val) -> INT`
+
+**Contexts:** AST, RPN
+
+Convert a value to INT.
+
+Trims ASCII whitespace and parses i64. Passes Int through; Float only
+when integral and finite.
+
+### LOAD_JSON
+
+**Signature:** `LOAD_JSON($path: STRING) -> MAP`
+
+**Contexts:** AST, RPN
+
+Load and parse a JSON file.
+
+Reads a workspace file and parses JSON into a DSL value.
+
+### LOAD_TOML
+
+**Signature:** `LOAD_TOML($path: STRING) -> MAP`
+
+**Contexts:** AST, RPN
+
+Load and parse a TOML file.
+
+Reads a workspace file and parses TOML into a DSL value.
+
+### PATH_TYPE
+
+**Signature:** `PATH_TYPE($path: STRING) -> STRING`
+
+**Contexts:** AST only
+
+Describe a filesystem entry.
+
+Reports file, dir, symlink (no-follow), or absent. AST-only by design;
+there is no RPN arm for filesystem IO.
+
+### TYPES
+
+**Signature:** `TYPES() -> LIST`
+
+**Contexts:** AST only
+
+List all known type names.
+
+Sorted LIST of startup plus host-registered type descriptors. Reads the
+run's name directory, so it runs on the AST path like the other
+introspection functions.
+
+### TYPE_DESCRIBE
+
+**Signature:** `TYPE_DESCRIBE($name: STRING) -> MAP`
+
+**Contexts:** AST only
+
+Describe one type by name.
+
+Returns a MAP with name, summary, and docs. Errors on unknown type.
+Reads the run's name directory, so it runs on the AST path.

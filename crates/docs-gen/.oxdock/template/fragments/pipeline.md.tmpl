@@ -2,22 +2,28 @@
 
 Each run performs the same steps, in order:
 
-1. Load `docs-gen.json` (global values file, doc root scopes).
-2. Render the `oxdock-parser` command registry into the committed
-   command reference inputs, so generated content is shareable
-   instead of trapped in one document.
+1. Load `docs-gen.json` (global values file, doc root scopes, generated
+   input destinations).
+2. Render the command metadata (index and body from `oxdock-parser`) and
+   the function registry (function reference from `builtin_function_metas`)
+   into the three generated inputs declared by `docs-gen.json`, so
+   generated content is shareable instead of trapped in one document.
+   The script only knows the three logical inputs; the config owns the
+   paths, so the pipeline works for any workspace layout.
 3. Sync each member's `values.json` from its manifest (see below).
 4. Assemble one `$files` manifest per target: glob every `fragments`
    pattern, expand each match once, and write the group-to-content map
    for the pipeline to `LOAD_JSON` (see below).
-5. Render every target: the inline pipeline reads each `target.json`,
+5. Render every target: the `RENDER_TARGET` stage reads each `target.json`,
    loads its values and `$files` manifest, and expands the master
    template once through native `EXPAND` piped to `APPEND`.
 
 The pipeline itself is OxDock, embedded in `src/lib.rs` via `oxdock!`
-and parsed by the production dispatcher. No template logic lives in
-Rust; the surrounding helpers only bridge host data the DSL cannot
-reach (process env, manifests, registry, fragment contents).
+and parsed by the production dispatcher. Sequencing and all writes live
+in the DSL as named `FUNC` stages; rendering, expansion, and encoding
+helpers live in Rust only where the DSL has no primitives (registry
+rendering, TOML metadata, strict JSON encoding, placeholder-safe
+stems).
 
 ## Values
 

@@ -12,11 +12,11 @@ blank = _{ (WHITESPACE | linebreak)+ }
 script = { SOI ~ element* ~ EOI }
 
 // Structural statements MUST precede generic commands
-element = _{ blank | hash_comment | COMMENT | semicolon | guard_line | block_start | block_end | if_statement | for_statement | while_statement | func_def | call_statement | return_statement | break_statement | continue_statement | let_async_statement | let_capture_statement | await_statement | cancel_statement | let_statement | mutate_statement | timeout_statement | async_statement_block | async_statement | command }
+element = _{ blank | hash_comment | COMMENT | semicolon | guard_line | block_start | block_end | if_statement | for_statement | while_statement | func_def | bare_call_statement | return_statement | break_statement | continue_statement | let_async_statement | let_capture_statement | await_statement | cancel_statement | let_statement | mutate_statement | timeout_statement | async_statement_block | async_statement | command }
 
 // Inside for/let blocks, block_start/block_end must NOT appear as elements
 // (the block's own braces handle them).  Nested guard blocks use guard_block.
-block_element = _{ blank | hash_comment | COMMENT | semicolon | guard_block | guard_line | if_statement | for_statement | while_statement | func_def | call_statement | return_statement | break_statement | continue_statement | let_async_statement | let_capture_statement | await_statement | cancel_statement | let_statement | mutate_statement | timeout_statement | async_statement_block | async_statement | command }
+block_element = _{ blank | hash_comment | COMMENT | semicolon | guard_block | guard_line | if_statement | for_statement | while_statement | func_def | bare_call_statement | return_statement | break_statement | continue_statement | let_async_statement | let_capture_statement | await_statement | cancel_statement | let_statement | mutate_statement | timeout_statement | async_statement_block | async_statement | command }
 guard_block = ${ guard_line ~ gap ~ block }
 
 block_start = { "{" }
@@ -99,7 +99,7 @@ env_read = { "env" ~ ":" ~ env_read_key }
 // strand `:NAME`). Deliberately NOT mirrored in `unquoted_arg`: bare command
 // arguments keep their literal reading, so existing `pipe:...` text there is
 // unaffected; the operator form lives in expression positions (LET RHS,
-// CALL args, conditions) plus `WITH_IO` bindings.
+// call args, conditions) plus `WITH_IO` bindings.
 pipe_read = { "pipe" ~ ":" ~ pipe_name }
 func_call = ${ ident ~ gap ~ "(" ~ gap ~ (expr ~ gap ~ ("," ~ gap ~ expr ~ gap)*)? ~ gap ~ ")" }
 variable = ${ "$" ~ ident }
@@ -160,8 +160,9 @@ in_keyword = @{ "IN" ~ !(ASCII_ALPHANUMERIC | "_") }
 if_keyword = @{ "IF" ~ !(ASCII_ALPHANUMERIC | "_") }
 else_keyword = @{ "ELSE" ~ !(ASCII_ALPHANUMERIC | "_") }
 
-// Open uppercase identifier for type tags. Variant mapping lives in
-// Rust via TypeKind::from_str; unknown tags become UnknownType errors.
+// Open uppercase identifier for type tags. Tags stay plain names and
+// resolve against the descriptor table at runtime, so host types parse
+// without grammar changes; unregistered names fail at first coercion.
 type_tag = @{ ASCII_ALPHA_UPPER ~ (ASCII_ALPHA_UPPER | ASCII_DIGIT | "_")* }
 
 for_statement = ${ for_keyword ~ gap ~ dollar_ident ~ gap ~ (":" ~ gap ~ type_tag ~ gap)? ~ ("," ~ gap ~ dollar_ident ~ gap ~ (":" ~ gap ~ type_tag ~ gap)?)? ~ in_keyword ~ gap ~ expr ~ gap ~ block }
@@ -174,19 +175,30 @@ else_if_clause = ${ else_keyword ~ gap ~ if_keyword ~ gap ~ expr ~ gap ~ block }
 else_clause = ${ else_keyword ~ gap ~ block }
 if_statement = ${ if_keyword ~ gap ~ expr ~ gap ~ block ~ gap ~ (blank* ~ gap ~ else_if_clause ~ gap)* ~ blank* ~ gap ~ else_clause? }
 
-// Functions + loops (#114): UPPERCASE function names only (parity with host
-// natives like GLOB/LOAD_TOML). Lowercase names fail at lex time.
+// Functions + loops (#114, #146): UPPERCASE function names only (parity with
+// host natives like GLOB/LOAD_TOML). Lowercase names fail at lex time.
+// Bare `NAME(...)` statements invoke DSL, native, and host functions with one
+// syntax; the `CALL` keyword was removed (hard break, no alias).
 func_keyword = _{ "FUNC" ~ !(ASCII_ALPHANUMERIC | "_") }
-call_keyword = _{ "CALL" ~ !(ASCII_ALPHANUMERIC | "_") }
 return_keyword = _{ "RETURN" ~ !(ASCII_ALPHANUMERIC | "_") }
 while_keyword = _{ "WHILE" ~ !(ASCII_ALPHANUMERIC | "_") }
 break_keyword = _{ "BREAK" ~ !(ASCII_ALPHANUMERIC | "_") }
 continue_keyword = _{ "CONTINUE" ~ !(ASCII_ALPHANUMERIC | "_") }
 func_ident = @{ ASCII_ALPHA_UPPER ~ (ASCII_ALPHA_UPPER | ASCII_DIGIT | "_")* }
+func_call_head = @{ ASCII_ALPHA_UPPER ~ (ASCII_ALPHA_UPPER | ASCII_DIGIT | "_")* }
 func_param = ${ dollar_ident ~ gap ~ ":" ~ gap ~ type_tag }
 while_statement = ${ while_keyword ~ sep ~ expr ~ gap ~ block }
 func_def = ${ func_keyword ~ sep ~ func_ident ~ gap ~ "(" ~ gap ~ (func_param ~ gap ~ ("," ~ gap ~ func_param ~ gap)*)? ~ gap ~ ")" ~ gap ~ block }
-call_statement = ${ call_keyword ~ sep ~ func_ident ~ gap ~ "(" ~ gap ~ (expr ~ gap ~ ("," ~ gap ~ expr ~ gap)*)? ~ gap ~ ")" }
+// Non-atomic on purpose: implicit whitespace applies at top level, while the
+// explicit `gap` terms keep calls working inside compound-atomic parents
+// (TIMEOUT, WITH_IO, ASYNC, LET-capture) where implicit skipping is off.
+// The head and `(` ride one atomic token (`call_head_paren`), so no
+// whitespace can intervene: `FOO (` stays an instruction, and
+// `ECHO (1 + 2)` keeps its parenthesized argument instead of mis-parsing
+// as a call to `ECHO`. Ordered before `instruction` so `FOO(...)` never lexes
+// as a command.
+call_head_paren = @{ func_call_head ~ "(" }
+bare_call_statement = { call_head_paren ~ gap ~ (expr ~ gap ~ ("," ~ gap ~ expr ~ gap)*)? ~ gap ~ ")" }
 return_statement = ${ return_keyword ~ (sep ~ expr)? }
 break_statement = ${ break_keyword }
 continue_statement = ${ continue_keyword }
@@ -217,7 +229,7 @@ async_statement_block = { async_keyword ~ sep? ~ block }
 //   `let_statement`, where the RHS parses as an expression. Trailing text
 //   after a complete instruction can never be a valid expression
 //   continuation, so the guard claims no expression input.
-let_capture_statement = ${ let_keyword ~ gap ~ dollar_ident ~ gap ~ ":" ~ gap ~ type_tag ~ gap ~ "=" ~ gap ~ (call_statement | await_statement | timeout_statement | instruction) ~ gap ~ &(linebreak | ";" | "}" | EOI) }
+let_capture_statement = ${ let_keyword ~ gap ~ dollar_ident ~ gap ~ ":" ~ gap ~ type_tag ~ gap ~ "=" ~ gap ~ (await_statement | timeout_statement | instruction) ~ gap ~ &(linebreak | ";" | "}" | EOI) }
 
 // LET $var: TYPE = ASYNC { ... } — spawn background task, store handle in $var
 // NOTE: "ASYNC" is consumed here, so we inline the block/inline forms
@@ -265,10 +277,10 @@ timeout_keyword = _{ "TIMEOUT" ~ !(ASCII_ALPHANUMERIC | "_") }
 // arg type instead of freezing at parse.
 timeout_literal = @{ ASCII_DIGIT+ ~ ("ms" | "s" | "m" | "h")? }
 timeout_duration = { timeout_literal | dollar_ident | quoted_string | templated_arg }
-timeout_statement = ${ timeout_keyword ~ sep ~ timeout_duration ~ sep ~ (block | await_statement | cancel_statement | call_statement | while_statement | command) }
+timeout_statement = ${ timeout_keyword ~ sep ~ timeout_duration ~ sep ~ (block | await_statement | cancel_statement | bare_call_statement | while_statement | command) }
 
-command = _{ with_io_command | inherit_env_command | timeout_statement | async_statement_block | async_statement | cancel_statement | call_statement | while_statement | run_exec_inner | instruction_inner }
-command_inner = { inherit_env_command | timeout_statement | async_statement | async_statement_block | cancel_statement | call_statement | while_statement | run_exec_statement | instruction }
+command = _{ with_io_command | inherit_env_command | timeout_statement | async_statement_block | async_statement | cancel_statement | bare_call_statement | while_statement | run_exec_inner | instruction_inner }
+command_inner = { inherit_env_command | timeout_statement | async_statement | async_statement_block | cancel_statement | bare_call_statement | while_statement | run_exec_statement | instruction }
 
 with_io_command = ${ "WITH_IO" ~ sep ~ io_flags ~ (sep ~ command)? }
 io_flags = { "[" ~ ws? ~ io_binding ~ (ws? ~ "," ~ ws? ~ io_binding)* ~ ws? ~ "]" }
@@ -299,7 +311,11 @@ run_exec_statement = ${ "RUN" ~ sep ~ run_exec_list }
 run_exec_inner = ${ "RUN" ~ sep ~ run_exec_list }
 instruction_inner = ${ command_name ~ (sep ~ (assignment | argument))* }
 instruction = ${ command_name ~ (sep ~ (assignment | argument))* }
-command_name = @{ ASCII_ALPHA_UPPER ~ (ASCII_ALPHA_UPPER | ASCII_DIGIT | "_")* }
+// Negative lookahead keeps `NAME(...)` calls out of the instruction path:
+// `FOO(` always routes to `bare_call_statement` (ordered first), while
+// `FOO bar` still lexes as a command. `FOO (` with a space stays an
+// instruction and fails later as UnknownCommand.
+command_name = @{ ASCII_ALPHA_UPPER ~ (ASCII_ALPHA_UPPER | ASCII_DIGIT | "_")* ~ !("(" | "$") }
 
 sep = _{ WHITESPACE+ }
 
@@ -338,7 +354,7 @@ assign_value = { quoted_string | assign_expr | raw_fragments }
 // `!WHITESPACE` guard would split `$x`-led values yet still glue `1`-led
 // ones into a single span).
 assignment_boundary = _{ WHITESPACE+ ~ assign_key ~ gap ~ "=" }
-// Lone `$var` / `$a.b` / `env:KEY` / `CALL(...)` values stay typed `Arg::Expr`. Each shape
+// Lone `$var` / `$a.b` / `env:KEY` / `F(...)` values stay typed `Arg::Expr`. Each shape
 // carries its own continuation guard: strict PEG commits per-alternative, so a
 // shared trailing guard would strand input like `$a.b` on the `variable`
 // prefix. The guard requires more value content next (`{{` or a raw char past

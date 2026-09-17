@@ -17,15 +17,15 @@ fn parse_assign_expr(script: &str) -> Expr {
 fn int_and_float_literals_bind() {
     assert_eq!(
         parse_assign_expr("LET $a: INT = 42\n"),
-        Expr::Literal(Value::Int(42))
+        Expr::Literal(Value::int(42))
     );
     assert_eq!(
         parse_assign_expr("LET $f: FLOAT = 3.14\n"),
-        Expr::Literal(Value::Float(3.14))
+        Expr::Literal(Value::float(3.14))
     );
     assert_eq!(
         parse_assign_expr("LET $f: FLOAT = 2.0\n"),
-        Expr::Literal(Value::Float(2.0))
+        Expr::Literal(Value::float(2.0))
     );
 }
 
@@ -35,7 +35,7 @@ fn bare_word_boundaries_keep_literal_reading() {
     for word in ["30s", "100ms", "123/456", "1.0.0", "-f"] {
         assert_eq!(
             parse_assign_expr(&format!("LET $x: STRING = {word}\n")),
-            Expr::Literal(Value::String(word.to_string())),
+            Expr::Literal(Value::string(word.to_string())),
             "bare word {word:?} must stay a string"
         );
     }
@@ -46,15 +46,15 @@ fn precedence_folds_constants() {
     // `2 + 3 * 4` folds fully; `==` folds the comparison too.
     assert_eq!(
         parse_assign_expr("LET $x: INT = 2 + 3 * 4\n"),
-        Expr::Literal(Value::Int(14))
+        Expr::Literal(Value::int(14))
     );
     assert_eq!(
         parse_assign_expr("LET $x: BOOL = 2+3*4==14\n"),
-        Expr::Literal(Value::Bool(true))
+        Expr::Literal(Value::bool(true))
     );
     assert_eq!(
         parse_assign_expr("LET $x: INT = (2 + 3) * 4\n"),
-        Expr::Literal(Value::Int(20))
+        Expr::Literal(Value::int(20))
     );
 }
 
@@ -63,15 +63,15 @@ fn nesting_folds_at_any_depth() {
     // Parens nest arbitrarily; everything folds when operands are literals.
     assert_eq!(
         parse_assign_expr("LET $x: INT = 2 * (2 * (2 + 3)) * 4\n"),
-        Expr::Literal(Value::Int(80))
+        Expr::Literal(Value::int(80))
     );
     assert_eq!(
         parse_assign_expr("LET $x: INT = ((2 + 3) * (4 - 1))\n"),
-        Expr::Literal(Value::Int(15))
+        Expr::Literal(Value::int(15))
     );
     assert_eq!(
         parse_assign_expr("LET $x: INT = (1 + 2) * (3 + 4) - (10 / (2 + 3))\n"),
-        Expr::Literal(Value::Int(19))
+        Expr::Literal(Value::int(19))
     );
 }
 
@@ -80,19 +80,19 @@ fn additive_and_multiplicative_chains_are_left_associative() {
     // `100 - 30 - 5` is `(100 - 30) - 5`, not `100 - (30 - 5)`.
     assert_eq!(
         parse_assign_expr("LET $x: INT = 100 - 30 - 5\n"),
-        Expr::Literal(Value::Int(65))
+        Expr::Literal(Value::int(65))
     );
     assert_eq!(
         parse_assign_expr("LET $x: INT = 100 / 10 / 2\n"),
-        Expr::Literal(Value::Int(5))
+        Expr::Literal(Value::int(5))
     );
     assert_eq!(
         parse_assign_expr("LET $x: INT = 2 + 3 * 4 - 10 / 2\n"),
-        Expr::Literal(Value::Int(9))
+        Expr::Literal(Value::int(9))
     );
     assert_eq!(
         parse_assign_expr("LET $x: INT = 2 * (3 + 4)\n"),
-        Expr::Literal(Value::Int(14))
+        Expr::Literal(Value::int(14))
     );
 }
 
@@ -100,19 +100,19 @@ fn additive_and_multiplicative_chains_are_left_associative() {
 fn unary_minus_binds_tighter_than_mul() {
     assert_eq!(
         parse_assign_expr("LET $x: INT = 2 * -3\n"),
-        Expr::Literal(Value::Int(-6))
+        Expr::Literal(Value::int(-6))
     );
     assert_eq!(
         parse_assign_expr("LET $x: INT = -2 * 3\n"),
-        Expr::Literal(Value::Int(-6))
+        Expr::Literal(Value::int(-6))
     );
     assert_eq!(
         parse_assign_expr("LET $x: INT = -(2 + 3)\n"),
-        Expr::Literal(Value::Int(-5))
+        Expr::Literal(Value::int(-5))
     );
     assert_eq!(
         parse_assign_expr("LET $x: INT = -9223372036854775808 + 1\n"),
-        Expr::Literal(Value::Int(i64::MIN + 1))
+        Expr::Literal(Value::int(i64::MIN + 1))
     );
 }
 
@@ -120,19 +120,19 @@ fn unary_minus_binds_tighter_than_mul() {
 fn comparisons_fold_over_arithmetic() {
     assert_eq!(
         parse_assign_expr("LET $x: BOOL = 2 + 3 > 4\n"),
-        Expr::Literal(Value::Bool(true))
+        Expr::Literal(Value::bool(true))
     );
     assert_eq!(
         parse_assign_expr("LET $x: BOOL = 2 * 3 <= 6\n"),
-        Expr::Literal(Value::Bool(true))
+        Expr::Literal(Value::bool(true))
     );
     assert_eq!(
         parse_assign_expr("LET $x: BOOL = 10 - 4 >= 7\n"),
-        Expr::Literal(Value::Bool(false))
+        Expr::Literal(Value::bool(false))
     );
     assert_eq!(
         parse_assign_expr("LET $x: BOOL = 1 + 1 == 2\n"),
-        Expr::Literal(Value::Bool(true))
+        Expr::Literal(Value::bool(true))
     );
 }
 
@@ -140,16 +140,16 @@ fn comparisons_fold_over_arithmetic() {
 fn float_chains_and_int_division() {
     assert_eq!(
         parse_assign_expr("LET $x: FLOAT = 0.5 * 4 + 1.5\n"),
-        Expr::Literal(Value::Float(3.5))
+        Expr::Literal(Value::float(3.5))
     );
     assert_eq!(
         parse_assign_expr("LET $x: FLOAT = 10.0 / 4\n"),
-        Expr::Literal(Value::Float(2.5))
+        Expr::Literal(Value::float(2.5))
     );
     // Integer division truncates toward zero; it never promotes.
     assert_eq!(
         parse_assign_expr("LET $x: INT = 7 / 2\n"),
-        Expr::Literal(Value::Int(3))
+        Expr::Literal(Value::int(3))
     );
 }
 
@@ -189,19 +189,19 @@ fn dynamic_subtrees_compile_to_rpn() {
 fn unary_minus_folds_literals() {
     assert_eq!(
         parse_assign_expr("LET $x: INT = -5\n"),
-        Expr::Literal(Value::Int(-5))
+        Expr::Literal(Value::int(-5))
     );
     assert_eq!(
         parse_assign_expr("LET $x: INT = --5\n"),
-        Expr::Literal(Value::Int(5))
+        Expr::Literal(Value::int(5))
     );
     assert_eq!(
         parse_assign_expr("LET $x: FLOAT = -3.14\n"),
-        Expr::Literal(Value::Float(-3.14))
+        Expr::Literal(Value::float(-3.14))
     );
     assert_eq!(
         parse_assign_expr("LET $x: INT = -9223372036854775808\n"),
-        Expr::Literal(Value::Int(i64::MIN))
+        Expr::Literal(Value::int(i64::MIN))
     );
     match parse_assign_expr("LET $x: INT = -$v\n") {
         Expr::CompiledMath(ops) => {
@@ -220,41 +220,46 @@ fn unary_minus_folds_literals() {
 #[test]
 fn integer_boundary_overflow_bails() {
     // Bare `2^63` exceeds `i64::MAX` and is only valid under unary `-`.
-    parse_script("LET $x: INT = 9223372036854775808\n", mock_lower)
-        .expect_err("bare 2^63 must overflow");
-    parse_script("LET $x: INT = 9223372036854775808 + 1\n", mock_lower)
-        .expect_err("boundary in arithmetic must overflow");
-    parse_script("LET $x: INT = 99999999999999999999999\n", mock_lower)
-        .expect_err("huge literal must overflow");
+    for script in [
+        "LET $x: INT = 9223372036854775808\n",
+        "LET $x: INT = 9223372036854775808 + 1\n",
+        "LET $x: INT = 99999999999999999999999\n",
+    ] {
+        let err = parse_script(script, mock_lower).expect_err("literal must overflow");
+        assert!(
+            err.to_string().contains("integer overflow"),
+            "wrong error for {script:?}, got: {err}"
+        );
+    }
 }
 
 #[test]
 fn promotion_and_ordering_fold() {
     assert_eq!(
         parse_assign_expr("LET $x: FLOAT = 1 + 2.5\n"),
-        Expr::Literal(Value::Float(3.5))
+        Expr::Literal(Value::float(3.5))
     );
     assert_eq!(
         parse_assign_expr("LET $x: BOOL = 3 < 4.5\n"),
-        Expr::Literal(Value::Bool(true))
+        Expr::Literal(Value::bool(true))
     );
     assert_eq!(
         parse_assign_expr("LET $x: BOOL = 2 >= 2\n"),
-        Expr::Literal(Value::Bool(true))
+        Expr::Literal(Value::bool(true))
     );
     assert_eq!(
         parse_assign_expr("LET $x: BOOL = 1 == 1.0\n"),
-        Expr::Literal(Value::Bool(true))
+        Expr::Literal(Value::bool(true))
     );
     // Exact float equality, no epsilon: binary fractions compare cleanly,
     // decimal fractions may not (0.1 + 0.2 is 0.30000000000000004).
     assert_eq!(
         parse_assign_expr("LET $x: BOOL = 0.5 + 0.25 == 0.75\n"),
-        Expr::Literal(Value::Bool(true))
+        Expr::Literal(Value::bool(true))
     );
     assert_eq!(
         parse_assign_expr("LET $x: BOOL = 0.1 + 0.2 == 0.3\n"),
-        Expr::Literal(Value::Bool(false))
+        Expr::Literal(Value::bool(false))
     );
 }
 
@@ -348,11 +353,11 @@ fn right_nested_division_keeps_operand_order() {
     // is 20, while `(100 / 10) / 2` is 5.
     assert_eq!(
         parse_assign_expr("LET $x: INT = 100 / (10 / (4 / 2))\n"),
-        Expr::Literal(Value::Int(20))
+        Expr::Literal(Value::int(20))
     );
     assert_eq!(
         parse_assign_expr("LET $x: INT = (100 / 10) / (4 / 2)\n"),
-        Expr::Literal(Value::Int(5))
+        Expr::Literal(Value::int(5))
     );
 }
 
@@ -361,7 +366,7 @@ fn unary_negation_interleaved_with_nested_parens() {
     // `-2 * -(3 + -(4 * 5))` folds prefix chains through parens to -34.
     assert_eq!(
         parse_assign_expr("LET $x: INT = -2 * -(3 + -(4 * 5))\n"),
-        Expr::Literal(Value::Int(-34))
+        Expr::Literal(Value::int(-34))
     );
 }
 
@@ -370,7 +375,7 @@ fn mixed_promotion_across_subtrees() {
     // Integer division at the leaf, Float promotion outward: 4.0.
     assert_eq!(
         parse_assign_expr("LET $x: FLOAT = 1 + (2 * (3.5 - (4 / 2)))\n"),
-        Expr::Literal(Value::Float(4.0))
+        Expr::Literal(Value::float(4.0))
     );
 }
 
@@ -379,7 +384,7 @@ fn complex_subtrees_on_both_sides_of_ordering() {
     // RPN must emit post-order ops for both sides: 8 <= 8 is true.
     assert_eq!(
         parse_assign_expr("LET $x: BOOL = (2 * (3 + 1)) <= (10 - (1 * 2))\n"),
-        Expr::Literal(Value::Bool(true))
+        Expr::Literal(Value::bool(true))
     );
 }
 
@@ -403,7 +408,7 @@ fn boundary_negation_across_parens() {
     // to MAX instead of tripping a premature overflow.
     assert_eq!(
         parse_assign_expr("LET $x: INT = -(-9223372036854775808 + 1)\n"),
-        Expr::Literal(Value::Int(i64::MAX))
+        Expr::Literal(Value::int(i64::MAX))
     );
 }
 
@@ -442,10 +447,10 @@ fn chained_logical_operators_with_spaces() {
             op: oxdock_parser::ast::LogicalOp::Or,
             left: Box::new(Expr::Logical {
                 op: oxdock_parser::ast::LogicalOp::Or,
-                left: Box::new(Expr::Literal(Value::Bool(false))),
-                right: Box::new(Expr::Literal(Value::Bool(false))),
+                left: Box::new(Expr::Literal(Value::bool(false))),
+                right: Box::new(Expr::Literal(Value::bool(false))),
             }),
-            right: Box::new(Expr::Literal(Value::Bool(true))),
+            right: Box::new(Expr::Literal(Value::bool(true))),
         }
     );
     assert_eq!(
@@ -454,10 +459,10 @@ fn chained_logical_operators_with_spaces() {
             op: oxdock_parser::ast::LogicalOp::And,
             left: Box::new(Expr::Logical {
                 op: oxdock_parser::ast::LogicalOp::And,
-                left: Box::new(Expr::Literal(Value::Bool(true))),
-                right: Box::new(Expr::Literal(Value::Bool(true))),
+                left: Box::new(Expr::Literal(Value::bool(true))),
+                right: Box::new(Expr::Literal(Value::bool(true))),
             }),
-            right: Box::new(Expr::Literal(Value::Bool(false))),
+            right: Box::new(Expr::Literal(Value::bool(false))),
         }
     );
 }

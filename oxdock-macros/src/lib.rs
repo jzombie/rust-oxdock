@@ -689,6 +689,9 @@ fn emit_expr(expr: &Expr, interp: &[(proc_macro2::Ident, usize)]) -> proc_macro2
             let arg_tokens: Vec<_> = args.iter().map(|e| emit_expr(e, interp)).collect();
             quote! { Expr::Call { name: #name.to_string(), args: vec![#(#arg_tokens),*] } }
         }
+        Expr::Inspect(var) => {
+            quote! { Expr::Inspect(#var.to_string()) }
+        }
         Expr::Compare { op, left, right } => {
             let op_token = match op {
                 oxdock_parser::ast::CompareOp::Eq => quote! { oxdock_parser::ast::CompareOp::Eq },
@@ -790,64 +793,63 @@ fn emit_value(v: &Value, interp: &[(proc_macro2::Ident, usize)]) -> proc_macro2:
 }
 
 fn emit_raw_value(v: &Value, interp: &[(proc_macro2::Ident, usize)]) -> proc_macro2::TokenStream {
-    match v {
-        Value::String(s) => {
-            if let Some(idx) = is_placeholder(s) {
-                let ident = &interp.iter().find(|(_, i)| *i == idx).unwrap().0;
-                quote! { Value::String(#ident.to_string()) }
-            } else {
-                quote! { Value::String(#s.to_string()) }
-            }
+    if let Some(s) = v.as_str() {
+        if let Some(idx) = is_placeholder(s) {
+            let ident = &interp.iter().find(|(_, i)| *i == idx).unwrap().0;
+            return quote! { Value::string(#ident.to_string()) };
         }
-        Value::List(items) => {
-            let item_tokens: Vec<_> = items
-                .iter()
-                .map(|item| emit_raw_value(item, interp))
-                .collect();
-            quote! { Value::List(vec![#(#item_tokens),*]) }
-        }
-        Value::Map(map) => {
-            let mut pairs: Vec<_> = map.iter().collect();
-            pairs.sort_by_key(|(k, _)| k.to_owned());
-            let kv_tokens: Vec<_> = pairs
-                .iter()
-                .map(|(k, v)| {
-                    let val_tokens = emit_raw_value(v, interp);
-                    quote! { (#k.to_string(), #val_tokens) }
-                })
-                .collect();
-            quote! { Value::Map(vec![#(#kv_tokens),*].into_iter().collect()) }
-        }
-        Value::Bool(b) => quote! { Value::Bool(#b) },
-        Value::Int(i) => quote! { Value::Int(#i) },
-        Value::Float(f) => quote! { Value::Float(#f) },
-        Value::Pipe(n) => quote! { Value::Pipe(#n.to_string()) },
-        Value::Duration(d) => {
-            let ms = d.as_millis() as u64;
-            quote! { Value::Duration(std::time::Duration::from_millis(#ms)) }
-        }
-        Value::Path(p) => {
-            let s = p.to_string_lossy().to_string();
-            quote! { Value::Path(std::path::PathBuf::from(#s)) }
-        }
-        Value::TaskHandle(id) => quote! { Value::TaskHandle(#id) },
+        return quote! { Value::string(#s.to_string()) };
     }
+    if let Some(items) = v.as_list() {
+        let item_tokens: Vec<_> = items
+            .iter()
+            .map(|item| emit_raw_value(item, interp))
+            .collect();
+        return quote! { Value::list(vec![#(#item_tokens),*]) };
+    }
+    if let Some(map) = v.as_map() {
+        let mut pairs: Vec<_> = map.iter().collect();
+        pairs.sort_by_key(|(k, _)| k.to_owned());
+        let kv_tokens: Vec<_> = pairs
+            .iter()
+            .map(|(k, v)| {
+                let val_tokens = emit_raw_value(v, interp);
+                quote! { (#k.to_string(), #val_tokens) }
+            })
+            .collect();
+        return quote! { Value::map(vec![#(#kv_tokens),*].into_iter().collect()) };
+    }
+    if let Some(b) = v.as_bool() {
+        return quote! { Value::bool(#b) };
+    }
+    if let Some(i) = v.as_i64() {
+        return quote! { Value::int(#i) };
+    }
+    if let Some(f) = v.as_f64() {
+        return quote! { Value::float(#f) };
+    }
+    if let Some(n) = v.as_pipe_name() {
+        return quote! { Value::pipe(#n.to_string()) };
+    }
+    if let Some(d) = v.as_duration() {
+        let ms = d.as_millis() as u64;
+        return quote! { Value::duration(std::time::Duration::from_millis(#ms)) };
+    }
+    if let Some(p) = v.as_path() {
+        let s = p.to_string_lossy().to_string();
+        return quote! { Value::path(std::path::PathBuf::from(#s)) };
+    }
+    if let Some(id) = v.as_handle() {
+        return quote! { Value::handle(#id) };
+    }
+    // Opaque host payloads only exist at runtime (host functions return
+    // them); parsed literals never produce them, so generated code has
+    // no way to reconstruct one.
+    quote! { compile_error!("custom values cannot appear as literals in macro scripts") }
 }
 
-fn emit_typekind(t: &oxdock_parser::TypeKind) -> proc_macro2::TokenStream {
-    use oxdock_parser::TypeKind as TK;
-    match t {
-        TK::String => quote! { oxdock_parser::TypeKind::String },
-        TK::Int => quote! { oxdock_parser::TypeKind::Int },
-        TK::Float => quote! { oxdock_parser::TypeKind::Float },
-        TK::Bool => quote! { oxdock_parser::TypeKind::Bool },
-        TK::Pipe => quote! { oxdock_parser::TypeKind::Pipe },
-        TK::List => quote! { oxdock_parser::TypeKind::List },
-        TK::Map => quote! { oxdock_parser::TypeKind::Map },
-        TK::Handle => quote! { oxdock_parser::TypeKind::Handle },
-        TK::Duration => quote! { oxdock_parser::TypeKind::Duration },
-        TK::Path => quote! { oxdock_parser::TypeKind::Path },
-    }
+fn emit_typekind(t: &str) -> proc_macro2::TokenStream {
+    quote! { #t.to_string() }
 }
 
 fn emit_assert_target(
@@ -1497,7 +1499,7 @@ mod tests {
     fn emit_async_await_round_trip() {
         let task = StepKind::AssignAsync {
             var: "job".to_string(),
-            decl_type: oxdock_parser::TypeKind::Handle,
+            decl_type: "HANDLE".to_string(),
             body: vec![Step {
                 guard: None,
                 kind: StepKind::Echo(Arg::String("hi".to_string(), false)),

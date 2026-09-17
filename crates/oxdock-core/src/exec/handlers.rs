@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use oxdock_parser::{
-    Arg, Expr, IoBinding, IoStream, PipeTarget, Step, StepKind, TypeKind, Value, WorkspaceTarget,
+    Arg, Expr, IoBinding, IoStream, PipeTarget, Step, StepKind, Value, WorkspaceTarget,
 };
 use oxdock_process::{
     BackgroundHandle, CommandOptions, CommandResult, CommandStderr, CommandStdin, CommandStdout,
@@ -14,8 +14,9 @@ use sha2::{Digest, Sha256};
 use super::SNAPSHOT_PENDING_DISPLAY;
 use super::fs_ops::{canonical_cwd, copy_entry, hash_path};
 use super::io::{StreamHandle, write_stdout};
+use super::native::FuncBody;
 use super::pipe::KeeperGuard;
-use super::state::{ExecState, FuncDefData, MAX_CALL_DEPTH, TaskPhase};
+use super::state::{ExecState, MAX_CALL_DEPTH, TaskPhase};
 use super::steps::{Flow, StepCtx};
 
 /// Map a Flow reaching a context-free boundary (pipeline top, thread join)
@@ -336,8 +337,9 @@ pub(super) fn resolve_run_exec_argv<P: ProcessManager>(
             Arg::String(_, _) | Arg::Parts(_) => {
                 out.push(super::args::resolve_arg(arg, cx)?);
             }
-            Arg::Expr(Expr::Literal(Value::String(s))) => {
-                out.push(super::args::expand_string(s, &cx.state.envs, cx.state)?);
+            Arg::Expr(Expr::Literal(v)) if v.as_str().is_some() => {
+                let s = v.as_str().unwrap_or_default().to_string();
+                out.push(super::args::expand_string(&s, &cx.state.envs, cx.state)?);
             }
             Arg::Expr(e) => {
                 let val = super::args::evaluate_expr(e, cx)?;
@@ -352,24 +354,49 @@ pub(super) fn resolve_run_exec_argv<P: ProcessManager>(
 }
 
 fn flatten_exec_value(val: &Value, out: &mut Vec<String>) -> Result<()> {
-    match val {
-        Value::String(s) => out.push(s.clone()),
-        Value::Int(i) => out.push(i.to_string()),
-        Value::Float(f) => out.push(f.to_string()),
-        Value::Bool(b) => out.push(b.to_string()),
-        Value::Pipe(n) => out.push(format!("pipe:{n}")),
-        Value::Duration(d) => out.push(oxdock_parser::command::format_duration(d)),
-        Value::Path(p) => out.push(p.to_string_lossy().to_string()),
-        Value::List(items) => {
-            for item in items {
-                flatten_exec_value(item, out)?;
-            }
-        }
-        Value::Map(_) => bail!("RUN exec form element must be a string, got map"),
-        Value::TaskHandle(id) => {
-            bail!("RUN exec form element must be a string, got task handle task#{id}")
-        }
+    if let Some(s) = val.as_str() {
+        out.push(s.to_string());
+        return Ok(());
     }
+    if let Some(i) = val.as_i64() {
+        out.push(i.to_string());
+        return Ok(());
+    }
+    if let Some(f) = val.as_f64() {
+        out.push(f.to_string());
+        return Ok(());
+    }
+    if let Some(b) = val.as_bool() {
+        out.push(b.to_string());
+        return Ok(());
+    }
+    if let Some(n) = val.as_pipe_name() {
+        out.push(format!("pipe:{n}"));
+        return Ok(());
+    }
+    if let Some(d) = val.as_duration() {
+        out.push(oxdock_parser::command::format_duration(&d));
+        return Ok(());
+    }
+    if let Some(p) = val.as_path() {
+        out.push(p.to_string_lossy().to_string());
+        return Ok(());
+    }
+    if let Some(items) = val.as_list() {
+        for item in items {
+            flatten_exec_value(item, out)?;
+        }
+        return Ok(());
+    }
+    if val.as_map().is_some() {
+        bail!("RUN exec form element must be a string, got map");
+    }
+    if let Some(id) = val.as_handle() {
+        bail!("RUN exec form element must be a string, got task handle task#{id}");
+    }
+    // Every other type stringifies through its descriptor rendering
+    // (host values through their `Display`).
+    out.push(format!("{val}"));
     Ok(())
 }
 
@@ -683,11 +710,12 @@ pub(super) fn read_line<P: ProcessManager>(
         .strip_suffix("\r\n")
         .or_else(|| line.strip_suffix('\n'))
         .unwrap_or(&line);
-    let text = Value::String(line.to_string());
+    let text = Value::string(line.to_string());
     if cx.state.get_var_typed(&clean_var).is_some() {
         cx.state.mutate_var(&clean_var, text)?;
     } else {
-        cx.state.declare_var(clean_var, TypeKind::String, text)?;
+        cx.state
+            .declare_var(clean_var, "STRING".to_string(), text)?;
     }
     Ok(())
 }
@@ -706,57 +734,59 @@ pub(super) fn inspect_var_map<P: ProcessManager>(
         bail!("variable '${clean_var}' is not defined");
     };
     let mut map = BTreeMap::new();
-    map.insert(
-        "type".to_string(),
-        Value::String(decl_type.label().to_string()),
-    );
-    map.insert("variable".to_string(), Value::String(clean_var.clone()));
-    match (&decl_type, &value) {
-        (TypeKind::Pipe, Value::Pipe(name)) => {
+    map.insert("type".to_string(), Value::string(decl_type.clone()));
+    map.insert("variable".to_string(), Value::string(clean_var.clone()));
+    match (decl_type.as_str(), value.as_pipe_name()) {
+        ("PIPE", Some(name)) => {
             let info = cx.state.io.inspect_pipe(name);
-            map.insert("name".to_string(), Value::String(name.clone()));
-            map.insert("value".to_string(), Value::String(name.clone()));
-            map.insert("is_os_pipe".to_string(), Value::Bool(info.kind.is_os()));
+            map.insert("name".to_string(), Value::string(name.to_string()));
+            map.insert("value".to_string(), Value::string(name.to_string()));
+            map.insert("is_os_pipe".to_string(), Value::bool(info.kind.is_os()));
             map.insert(
                 "pipe_kind".to_string(),
-                Value::String(info.kind.as_str().to_string()),
+                Value::string(info.kind.as_str().to_string()),
             );
             map.insert(
                 "buffer_bytes".to_string(),
-                Value::Int(info.buffered.min(i64::MAX as u64) as i64),
+                Value::int(info.buffered.min(i64::MAX as u64) as i64),
             );
-            map.insert("readers".to_string(), Value::Int(info.readers as i64));
-            map.insert("writers".to_string(), Value::Int(info.writers as i64));
+            map.insert("readers".to_string(), Value::int(info.readers as i64));
+            map.insert("writers".to_string(), Value::int(info.writers as i64));
         }
-        (TypeKind::Handle, Value::TaskHandle(task_id)) => {
-            map.insert("name".to_string(), Value::String(clean_var.clone()));
-            map.insert(
-                "value".to_string(),
-                Value::String(format!("task {task_id}")),
-            );
-            let phase = cx
-                .state
-                .named_tasks
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .get(task_id)
-                .map(|entry| {
-                    let guard = entry.state.lock().unwrap_or_else(|e| e.into_inner());
-                    match guard.phase {
-                        TaskPhase::Running => "Running",
-                        TaskPhase::Awaiting => "Awaiting",
-                        TaskPhase::Cancelled => "Cancelled",
-                        TaskPhase::Completed => "Completed",
-                    }
-                    .to_string()
-                })
-                .unwrap_or_else(|| "unknown (already awaited?)".to_string());
-            map.insert("task_id".to_string(), Value::Int(*task_id as i64));
-            map.insert("task_phase".to_string(), Value::String(phase));
+        ("HANDLE", _) => {
+            if let Some(task_id) = value.as_handle() {
+                map.insert("name".to_string(), Value::string(clean_var.clone()));
+                map.insert(
+                    "value".to_string(),
+                    Value::string(format!("task {task_id}")),
+                );
+                let phase = cx
+                    .state
+                    .named_tasks
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(&task_id)
+                    .map(|entry| {
+                        let guard = entry.state.lock().unwrap_or_else(|e| e.into_inner());
+                        match guard.phase {
+                            TaskPhase::Running => "Running",
+                            TaskPhase::Awaiting => "Awaiting",
+                            TaskPhase::Cancelled => "Cancelled",
+                            TaskPhase::Completed => "Completed",
+                        }
+                        .to_string()
+                    })
+                    .unwrap_or_else(|| "unknown (already awaited?)".to_string());
+                map.insert("task_id".to_string(), Value::int(task_id as i64));
+                map.insert("task_phase".to_string(), Value::string(phase));
+            } else {
+                map.insert("name".to_string(), Value::string(clean_var.clone()));
+                map.insert("value".to_string(), Value::string(format!("{value}")));
+            }
         }
         _ => {
-            map.insert("name".to_string(), Value::String(clean_var.clone()));
-            map.insert("value".to_string(), Value::String(format!("{value}")));
+            map.insert("name".to_string(), Value::string(clean_var.clone()));
+            map.insert("value".to_string(), Value::string(format!("{value}")));
         }
     }
     Ok(map)
@@ -942,7 +972,8 @@ pub(super) fn replace<P: ProcessManager>(
 /// Strict equality assertion over evaluated values, stream buffers, and
 /// pipe buffers. Typed `Value` comparison with no coercion; files never
 /// appear here (read them into variables first). `--hash` compares the
-/// SHA-256 of a string actual instead of the bytes themselves.
+/// SHA-256 of a string, pipe, or captured-stdout actual instead of the
+/// raw bytes (`stderr` is unsupported).
 pub(super) fn assert_eq<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     idx: usize,
@@ -966,7 +997,7 @@ pub(super) fn assert_eq<P: ProcessManager>(
             w.write_all(&drained)?;
             Ok(())
         })?;
-        let Some(Value::String(want)) = expected else {
+        let Some(want) = expected.and_then(|v| v.as_str()) else {
             bail!(
                 "step {}: ASSERT_EQ stream mismatch\nexpected: {:?}\nactual:   {:?}",
                 idx + 1,
@@ -986,15 +1017,17 @@ pub(super) fn assert_eq<P: ProcessManager>(
     }
     if let Some(sha) = hash {
         let actual_bytes: Vec<u8> = match actual {
-            ResolvedAssertTarget::Value(Value::String(s)) => s.as_bytes().to_vec(),
+            ResolvedAssertTarget::Value(v) => match v.as_str() {
+                Some(s) => s.as_bytes().to_vec(),
+                None => {
+                    bail!(
+                        "step {}: ASSERT_EQ --hash needs a string actual, found {:?}",
+                        idx + 1,
+                        v
+                    );
+                }
+            },
             ResolvedAssertTarget::Pipe(bytes) => bytes.clone(),
-            ResolvedAssertTarget::Value(other) => {
-                bail!(
-                    "step {}: ASSERT_EQ --hash needs a string actual, found {:?}",
-                    idx + 1,
-                    other
-                );
-            }
             ResolvedAssertTarget::Stdout => exact_stdout_bytes(cx, idx, generation)?,
             ResolvedAssertTarget::Stderr => {
                 bail!(
@@ -1036,7 +1069,7 @@ pub(super) fn assert_eq<P: ProcessManager>(
         }
         ResolvedAssertTarget::Stdout => {
             let bytes = exact_stdout_bytes(cx, idx, generation)?;
-            let Some(Value::String(want)) = expected else {
+            let Some(want) = expected.and_then(|v| v.as_str()) else {
                 bail!(
                     "step {}: ASSERT_EQ stream mismatch\nexpected: {:?}\nactual:   {:?}",
                     idx + 1,
@@ -1064,7 +1097,7 @@ pub(super) fn assert_eq<P: ProcessManager>(
             let actual_str = String::from_utf8(bytes.clone()).with_context(|| {
                 format!("step {}: ASSERT_EQ pipe content is not UTF-8", idx + 1)
             })?;
-            let Some(Value::String(want)) = expected else {
+            let Some(want) = expected.and_then(|v| v.as_str()) else {
                 bail!(
                     "step {}: ASSERT_EQ pipe mismatch\nexpected: {:?}\nactual:   {:?}",
                     idx + 1,
@@ -1072,7 +1105,7 @@ pub(super) fn assert_eq<P: ProcessManager>(
                     actual_str
                 );
             };
-            if actual_str.as_str() != want.as_str() {
+            if actual_str != want {
                 bail!(
                     "step {}: ASSERT_EQ pipe mismatch\nexpected: {:?}\nactual:   {:?}",
                     idx + 1,
@@ -1151,10 +1184,11 @@ pub(super) fn assert_contains<P: ProcessManager>(
     use super::steps::ResolvedAssertTarget;
     let needle_str = super::args::resolve_arg(needle, cx)?;
     match haystack {
-        ResolvedAssertTarget::Value(Value::String(hay)) => {
-            if hay.contains(needle_str.as_str()) {
-                Ok(())
-            } else {
+        ResolvedAssertTarget::Value(v) => {
+            if let Some(hay) = v.as_str() {
+                if hay.contains(needle_str.as_str()) {
+                    return Ok(());
+                }
                 bail!(
                     "step {}: ASSERT_CONTAINS did not contain '{}'; actual: {:?}",
                     idx + 1,
@@ -1162,38 +1196,34 @@ pub(super) fn assert_contains<P: ProcessManager>(
                     hay
                 );
             }
-        }
-        ResolvedAssertTarget::Value(Value::List(items)) => {
-            if items
-                .iter()
-                .any(|e| e == &Value::String(needle_str.clone()))
-            {
-                Ok(())
-            } else {
+            if let Some(items) = v.as_list() {
+                if items
+                    .iter()
+                    .any(|e| e.as_str() == Some(needle_str.as_str()))
+                {
+                    return Ok(());
+                }
                 bail!(
                     "step {}: ASSERT_CONTAINS did not contain '{}'; actual: {:?}",
                     idx + 1,
                     needle_str,
-                    Value::List(items.clone())
+                    v
                 );
             }
-        }
-        ResolvedAssertTarget::Value(Value::Map(map)) => {
-            if map.contains_key(needle_str.as_str()) {
-                Ok(())
-            } else {
+            if let Some(map) = v.as_map() {
+                if map.contains_key(needle_str.as_str()) {
+                    return Ok(());
+                }
                 bail!(
                     "step {}: ASSERT_CONTAINS did not contain '{}'",
                     idx + 1,
                     needle_str
                 );
             }
-        }
-        ResolvedAssertTarget::Value(other) => {
             bail!(
                 "step {}: ASSERT_CONTAINS needs a string, list, or map haystack, found {:?}",
                 idx + 1,
-                other
+                v
             );
         }
         ResolvedAssertTarget::Stdout => {
@@ -1465,9 +1495,17 @@ fn resolve_pipe_name<P: ProcessManager>(
     match target {
         PipeTarget::Name(name) => Ok(name.clone()),
         PipeTarget::Var(var) => match cx.state.get_var_typed(var) {
-            Some((TypeKind::Pipe, Value::Pipe(name))) => {
-                if cx.state.io.pipe_exists(&name) {
-                    Ok(name)
+            Some((kind, value)) if kind == "PIPE" => {
+                let Some(name) = value.as_pipe_name() else {
+                    bail!(
+                        "step {}: TypeMismatch: expected PIPE, got {} ({:?})",
+                        idx + 1,
+                        kind,
+                        value
+                    );
+                };
+                if cx.state.io.pipe_exists(name) {
+                    Ok(name.to_string())
                 } else {
                     bail!(
                         "step {}: TypeMismatch: expected PIPE, got unregistered pipe ({name:?})",
@@ -1479,7 +1517,7 @@ fn resolve_pipe_name<P: ProcessManager>(
                 bail!(
                     "step {}: TypeMismatch: expected PIPE, got {} ({:?})",
                     idx + 1,
-                    kind.label(),
+                    kind,
                     value
                 );
             }
@@ -1490,10 +1528,10 @@ fn resolve_pipe_name<P: ProcessManager>(
     }
 }
 
-/// If `cmd` is a `CALL` possibly nested under `WITH_IO` layers, return the
+/// If `cmd` is a bare `NAME(...)` call possibly nested under `WITH_IO` layers, return the
 /// merged bindings (outermost first, inner wins per stream) plus the call
 /// name and args. Used by `LET`-capture and `ASYNC` fast paths so
-/// `WITH_IO [stdin=pipe:tx] CALL FOO()` binds the `RETURN` value instead
+/// `WITH_IO [stdin=pipe:tx] FOO()` binds the `RETURN` value instead
 /// of swallowing stdout into a capture sink.
 fn extract_call(cmd: &StepKind) -> Option<(Vec<IoBinding>, &str, &[Expr])> {
     let mut layers: Vec<&Vec<IoBinding>> = Vec::new();
@@ -1521,7 +1559,7 @@ fn extract_call(cmd: &StepKind) -> Option<(Vec<IoBinding>, &str, &[Expr])> {
     }
 }
 
-pub(super) fn exit<P: ProcessManager>(cx: &mut StepCtx<'_, P>, code: i32) -> Result<()> {
+pub(super) fn exit<P: ProcessManager>(cx: &mut StepCtx<'_, P>, code: i64) -> Result<()> {
     for child in cx.state.bg_children.iter_mut() {
         if let Ok(None) = child.try_wait() {
             let _ = child.kill();
@@ -1535,120 +1573,117 @@ pub(super) fn exit<P: ProcessManager>(cx: &mut StepCtx<'_, P>, code: i32) -> Res
 pub(crate) fn for_loop<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     key_var: Option<&str>,
-    key_type: Option<TypeKind>,
+    key_type: Option<String>,
     val_var: &str,
-    val_type: TypeKind,
+    val_type: String,
     in_expr: &Expr,
     body: &[Step],
 ) -> Result<Flow> {
-    use oxdock_parser::TypeKind;
     let iterable = super::args::evaluate_expr(in_expr, cx)?;
     let clean_val_var = val_var.trim_start_matches('$').to_string();
 
-    match iterable {
-        Value::List(items) => {
-            for (i, item) in items.into_iter().enumerate() {
-                // Each iteration is a scope (same rule as every other
-                // block): loop vars live inside it, and ENV/WORKDIR/
-                // WORKSPACE mutations revert on every iteration boundary.
-                cx.state.push_scope();
-                if let Some(idx_name) = key_var {
-                    let clean_idx = idx_name.trim_start_matches('$').to_string();
-                    let kt = key_type.unwrap_or(TypeKind::Int);
-                    cx.state.declare_var(
-                        clean_idx,
-                        kt,
-                        super::args::coerce_value(Value::Int(i as i64), kt, &*cx.state)?,
-                    )?;
-                }
+    if let Some(items) = iterable.as_list() {
+        for (i, item) in items.iter().enumerate() {
+            // Each iteration is a scope (same rule as every other
+            // block): loop vars live inside it, and ENV/WORKDIR/
+            // WORKSPACE mutations revert on every iteration boundary.
+            cx.state.push_scope();
+            if let Some(idx_name) = key_var {
+                let clean_idx = idx_name.trim_start_matches('$').to_string();
+                let kt = key_type.clone().unwrap_or("INT".to_string());
                 cx.state.declare_var(
-                    clean_val_var.clone(),
-                    val_type,
-                    super::args::coerce_value(item, val_type, &*cx.state)?,
+                    clean_idx,
+                    kt.clone(),
+                    super::args::coerce_value(Value::int(i as i64), &kt, &*cx.state)?,
                 )?;
-
-                let res = super::steps::execute_steps(
-                    cx.state,
-                    cx.process,
-                    body,
-                    cx.stdin.clone(),
-                    false,
-                    cx.out.clone(),
-                    cx.err.clone(),
-                    false,
-                );
-                let pop_res = cx.state.pop_scope();
-                let flow = match (res, pop_res) {
-                    (Ok(flow), Ok(())) => flow,
-                    (Err(e), _) => return Err(e),
-                    (Ok(_), Err(e)) => return Err(e),
-                };
-                match flow {
-                    Flow::Done | Flow::Continue { .. } => {}
-                    Flow::Break { .. } => return Ok(Flow::Done),
-                    Flow::Return { .. } => return Ok(flow),
-                }
             }
-            Ok(Flow::Done)
+            cx.state.declare_var(
+                clean_val_var.clone(),
+                val_type.clone(),
+                super::args::coerce_value(item.clone(), &val_type, &*cx.state)?,
+            )?;
+
+            let res = super::steps::execute_steps(
+                cx.state,
+                cx.process,
+                body,
+                cx.stdin.clone(),
+                false,
+                cx.out.clone(),
+                cx.err.clone(),
+                false,
+            );
+            let pop_res = cx.state.pop_scope();
+            let flow = match (res, pop_res) {
+                (Ok(flow), Ok(())) => flow,
+                (Err(e), _) => return Err(e),
+                (Ok(_), Err(e)) => return Err(e),
+            };
+            match flow {
+                Flow::Done | Flow::Continue { .. } => {}
+                Flow::Break { .. } => return Ok(Flow::Done),
+                Flow::Return { .. } => return Ok(flow),
+            }
         }
-        Value::Map(map) => {
-            let key_name = key_var.ok_or_else(|| {
-                anyhow!("FOR loop over Map requires key and value bindings: FOR $k: STRING, $v: TYPE IN $map")
-            })?;
-            let clean_key_var = key_name.trim_start_matches('$').to_string();
-            let mut keys: Vec<_> = map.keys().cloned().collect();
-            keys.sort();
-
-            // Map keys are strings: only a STRING key binding is valid here.
-            if key_type.is_some_and(|kt| kt != TypeKind::String) {
-                anyhow::bail!(
-                    "FOR loop over MAP requires a STRING key variable, got {}",
-                    key_type.map(|kt| kt.label()).unwrap_or("unknown"),
-                );
-            }
-            for k in keys {
-                let v = map[&k].clone();
-                cx.state.push_scope();
-                cx.state.declare_var(
-                    clean_key_var.clone(),
-                    TypeKind::String,
-                    Value::String(k.clone()),
-                )?;
-                cx.state.declare_var(
-                    clean_val_var.clone(),
-                    val_type,
-                    super::args::coerce_value(v, val_type, &*cx.state)?,
-                )?;
-
-                let res = super::steps::execute_steps(
-                    cx.state,
-                    cx.process,
-                    body,
-                    cx.stdin.clone(),
-                    false,
-                    cx.out.clone(),
-                    cx.err.clone(),
-                    false,
-                );
-                let pop_res = cx.state.pop_scope();
-                let flow = match (res, pop_res) {
-                    (Ok(flow), Ok(())) => flow,
-                    (Err(e), _) => return Err(e),
-                    (Ok(_), Err(e)) => return Err(e),
-                };
-                match flow {
-                    Flow::Done | Flow::Continue { .. } => {}
-                    Flow::Break { .. } => return Ok(Flow::Done),
-                    Flow::Return { .. } => return Ok(flow),
-                }
-            }
-            Ok(Flow::Done)
-        }
-        other => bail!(
-            "FOR loop requires a List or Map iterable, found {:?}",
-            other
-        ),
+        return Ok(Flow::Done);
     }
+    if let Some(map) = iterable.as_map() {
+        let key_name = key_var.ok_or_else(|| {
+            anyhow!("FOR loop over Map requires key and value bindings: FOR $k: STRING, $v: TYPE IN $map")
+        })?;
+        let clean_key_var = key_name.trim_start_matches('$').to_string();
+        let mut keys: Vec<_> = map.keys().cloned().collect();
+        keys.sort();
+
+        // Map keys are strings: only a STRING key binding is valid here.
+        if key_type.clone().is_some_and(|kt| kt != "STRING") {
+            anyhow::bail!(
+                "FOR loop over MAP requires a STRING key variable, got {}",
+                key_type.clone().unwrap_or("unknown".to_string()),
+            );
+        }
+        for k in keys {
+            let v = map[&k].clone();
+            cx.state.push_scope();
+            cx.state.declare_var(
+                clean_key_var.clone(),
+                "STRING".to_string(),
+                Value::string(k.clone()),
+            )?;
+            cx.state.declare_var(
+                clean_val_var.clone(),
+                val_type.clone(),
+                super::args::coerce_value(v, &val_type, &*cx.state)?,
+            )?;
+
+            let res = super::steps::execute_steps(
+                cx.state,
+                cx.process,
+                body,
+                cx.stdin.clone(),
+                false,
+                cx.out.clone(),
+                cx.err.clone(),
+                false,
+            );
+            let pop_res = cx.state.pop_scope();
+            let flow = match (res, pop_res) {
+                (Ok(flow), Ok(())) => flow,
+                (Err(e), _) => return Err(e),
+                (Ok(_), Err(e)) => return Err(e),
+            };
+            match flow {
+                Flow::Done | Flow::Continue { .. } => {}
+                Flow::Break { .. } => return Ok(Flow::Done),
+                Flow::Return { .. } => return Ok(flow),
+            }
+        }
+        return Ok(Flow::Done);
+    }
+    bail!(
+        "FOR loop requires a List or Map iterable, found {:?}",
+        iterable
+    )
 }
 
 /// Define a user function (`FUNC NAME($p: TYPE, ...) { ... }}).
@@ -1658,102 +1693,109 @@ pub(crate) fn for_loop<P: ProcessManager>(
 pub(crate) fn define_func<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     name: &str,
-    params: &[(String, TypeKind)],
+    params: &[(String, String)],
     body: &[Step],
 ) -> Result<()> {
-    let data = FuncDefData {
-        params: params.to_vec(),
-        body: body.to_vec(),
-    };
-    let mut next = (*cx.state.funcs).clone();
-    next.insert(name.to_string(), data);
-    cx.state.funcs = Arc::new(next);
-    Ok(())
+    // Runtime counterpart of the parse-time scope validation; the single
+    // registry owns the reserved, duplicate, and shadowing rules.
+    cx.state.functions.define_script(name, params, body)
 }
 
-/// Invoke a function by UPPERCASE name and return its value.
-/// Dispatch order: DSL `funcs` first, then `host_funcs` (FFI hook),
-/// else `unknown function`. Args evaluate in the caller scope; params bind
-/// with `declare_var` coercion before one body step runs. The body runs in
-/// a fresh lexical scope (LET/ENV/WORKDIR revert; pipes and files persist).
-/// `RETURN` inside yields the value; fallthrough yields `""`;
-/// `BREAK`/`CONTINUE` escaping the body are boundary errors (they must not
-/// reach a caller loop).
+/// Invoke a function by UPPERCASE name and return its value. One lookup
+/// against the unified registry, then gates, then effects: depth budget
+/// and arity (mandatory metadata on every entry) validate before any
+/// argument evaluates. Script bodies run in a fresh lexical scope
+/// (LET/ENV/WORKDIR revert; pipes and files persist) with `declare_var`
+/// coercion on parameter binding; `RETURN` inside yields the value and
+/// fallthrough yields `""`. `BREAK`/`CONTINUE` escaping the body are
+/// boundary errors (they must not reach a caller loop).
 pub(crate) fn call_func_value<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     idx: usize,
     name: &str,
     args: &[Expr],
 ) -> Result<Value> {
-    let mut arg_vals = Vec::with_capacity(args.len());
-    for arg in args {
-        arg_vals.push(super::args::evaluate_expr(arg, cx)?);
-    }
-    let Some(func) = cx.state.funcs.get(name).cloned() else {
-        if let Some(host) = cx.state.host_funcs.get(name).cloned() {
-            return host(arg_vals)
-                .with_context(|| format!("step {}: host function `{name}` failed", idx + 1));
-        }
+    // 1. Registry lookup: the single source for every callable.
+    let Some(entry) = cx.state.functions.get(name) else {
         bail!("step {}: unknown function `{name}`", idx + 1);
     };
-    if arg_vals.len() != func.params.len() {
-        bail!(
-            "step {}: CALL {name} expects {} argument(s), got {}",
-            idx + 1,
-            func.params.len(),
-            arg_vals.len()
-        );
-    }
+    // 2. Global recursion check.
     if cx.state.call_depth >= MAX_CALL_DEPTH {
         bail!(
             "step {}: recursion depth limit exceeded in FUNC {name}",
             idx + 1
         );
     }
-    cx.state.call_depth += 1;
-    cx.state.push_scope();
-    let outcome: Result<Value> = (|| {
-        for ((pname, ptype), pval) in func.params.iter().zip(arg_vals) {
-            cx.state.declare_var(pname.clone(), *ptype, pval)?;
-        }
-        let flow = super::steps::execute_steps(
-            cx.state,
-            cx.process,
-            &func.body,
-            cx.stdin.clone(),
-            false,
-            cx.out.clone(),
-            cx.err.clone(),
-            false,
-        )?;
-        match flow {
-            Flow::Done => Ok(Value::String(String::new())),
-            Flow::Return { value, .. } => Ok(value),
-            Flow::Break { idx } => {
-                bail!(
-                    "step {}: BREAK cannot cross function boundary (in CALL {name})",
-                    idx + 1
-                );
+    // 3. Pre-evaluation arity gate from the entry metadata.
+    if let Some(params) = entry.meta.params.as_deref()
+        && params.len() != args.len()
+    {
+        bail!(
+            "step {}: {name}() expects {} argument(s), got {}",
+            idx + 1,
+            params.len(),
+            args.len()
+        );
+    }
+    // 4. Argument evaluation: only reachable for a valid invocation.
+    let mut arg_vals = Vec::with_capacity(args.len());
+    for arg in args {
+        arg_vals.push(super::args::evaluate_expr(arg, cx)?);
+    }
+    // 5. Execution by body kind.
+    match entry.body {
+        FuncBody::Script(def) => {
+            cx.state.call_depth += 1;
+            cx.state.push_scope();
+            let outcome: Result<Value> = (|| {
+                for ((pname, ptype), pval) in def.params.iter().zip(arg_vals) {
+                    cx.state.declare_var(pname.clone(), ptype.clone(), pval)?;
+                }
+                let flow = super::steps::execute_steps(
+                    cx.state,
+                    cx.process,
+                    &def.body,
+                    cx.stdin.clone(),
+                    false,
+                    cx.out.clone(),
+                    cx.err.clone(),
+                    false,
+                )?;
+                match flow {
+                    Flow::Done => Ok(Value::string(String::new())),
+                    Flow::Return { value, .. } => Ok(value),
+                    Flow::Break { idx } => {
+                        bail!(
+                            "step {}: BREAK cannot cross function boundary (in {name}())",
+                            idx + 1
+                        );
+                    }
+                    Flow::Continue { idx } => {
+                        bail!(
+                            "step {}: CONTINUE cannot cross function boundary (in {name}())",
+                            idx + 1
+                        );
+                    }
+                }
+            })();
+            let pop_res = cx.state.pop_scope();
+            cx.state.call_depth -= 1;
+            match (outcome, pop_res) {
+                (Ok(value), Ok(())) => Ok(value),
+                (Err(e), _) => Err(e),
+                (Ok(_), Err(e)) => Err(e),
             }
-            Flow::Continue { idx } => {
-                bail!(
-                    "step {}: CONTINUE cannot cross function boundary (in CALL {name})",
-                    idx + 1
-                );
-            }
         }
-    })();
-    let pop_res = cx.state.pop_scope();
-    cx.state.call_depth -= 1;
-    match (outcome, pop_res) {
-        (Ok(value), Ok(())) => Ok(value),
-        (Err(e), _) => Err(e),
-        (Ok(_), Err(e)) => Err(e),
+        FuncBody::Pure(func) => {
+            func(arg_vals).with_context(|| format!("step {}: function `{name}` failed", idx + 1))
+        }
+        FuncBody::Ctx(func) => func(cx, arg_vals)
+            .with_context(|| format!("step {}: function `{name}` failed", idx + 1)),
     }
 }
 
 /// Evaluate `RETURN <expr>` inside a function call. Outside any call
-/// (including at top level or with no `CALL` frame on this thread) it is a
+/// (including at top level or with no function frame on this thread) it is a
 /// step-numbered error. Crossing an `ASYNC` thread boundary is rejected
 /// where the thread joins, not here.
 pub(crate) fn handle_return<P: ProcessManager>(
@@ -1816,11 +1858,9 @@ pub(crate) fn while_loop<P: ProcessManager>(
 pub(crate) fn assign<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     var: &str,
-    decl_type: TypeKind,
+    decl_type: String,
     expr: &Expr,
 ) -> Result<()> {
-    use oxdock_parser::TypeKind;
-    let _ = TypeKind::String;
     let value = super::args::evaluate_expr(expr, cx)?;
     let clean_var = var.trim_start_matches('$').to_string();
     cx.state.declare_var(clean_var, decl_type, value)?;
@@ -1845,7 +1885,7 @@ pub(crate) fn set_var_value<P: ProcessManager>(
 /// never tee into the parent assertion windows. On command failure
 /// nothing is bound.
 ///
-/// When the captured command is `CALL NAME(...)`, no sink is installed:
+/// When the captured command is `NAME(...)`, no sink is installed:
 /// the callee's stdout keeps the active routing (observable via
 /// `ASSERT_CONTAINS stdout`/pipes) and the bound value is the function's `RETURN`
 /// payload (or `""` on fallthrough), coerced to the declared type.
@@ -1854,7 +1894,7 @@ pub(crate) fn assign_capture<P: ProcessManager>(
     generation: usize,
     idx: usize,
     var: &str,
-    decl_type: TypeKind,
+    decl_type: String,
     cmd: &StepKind,
 ) -> Result<Flow> {
     use std::sync::Arc;
@@ -1935,7 +1975,7 @@ pub(crate) fn assign_capture<P: ProcessManager>(
         .map_err(|e| anyhow!("LET ${var} capture is not valid UTF-8: {e}"))?;
     let clean_var = var.trim_start_matches('$').to_string();
     cx.state
-        .declare_var(clean_var, decl_type, Value::String(text))?;
+        .declare_var(clean_var, decl_type, Value::string(text))?;
     Ok(Flow::Done)
 }
 
@@ -2035,7 +2075,7 @@ fn collect_kind_producers(kind: &StepKind, out: &mut Vec<(String, bool)>) {
         StepKind::Timeout { body, .. } => collect_steps_producers(body, out),
         StepKind::For { body, .. } => collect_steps_producers(body, out),
         StepKind::While { body, .. } => collect_steps_producers(body, out),
-        // Deferred (FUNC bodies) or dynamic (CALL targets unknown
+        // Deferred (FUNC bodies) or dynamic (call targets unknown
         // statically) bodies run elsewhere or later with their own pins.
         StepKind::FuncDef { .. } | StepKind::Call { .. } => {}
         StepKind::If {
@@ -2076,15 +2116,16 @@ fn collect_dynamic_producers<P: ProcessManager>(
                 match binding.stream {
                     IoStream::Stdout | IoStream::Stderr => {
                         if let Some(PipeTarget::Var(var)) = &binding.pipe
-                            && let Some((TypeKind::Pipe, Value::Pipe(name))) =
-                                state.get_var_typed(var)
+                            && let Some((kind, value)) = state.get_var_typed(var)
+                            && kind == "PIPE"
+                            && let Some(name) = value.as_pipe_name()
                         {
-                            match out.iter_mut().find(|(n, _)| n == &name) {
+                            match out.iter_mut().find(|(n, _)| n == name) {
                                 Some(entry) => {
                                     entry.1 = entry.1 || promote;
                                 }
                                 None => {
-                                    out.push((name.clone(), promote));
+                                    out.push((name.to_string(), promote));
                                 }
                             }
                         }
@@ -2532,9 +2573,9 @@ pub(crate) fn dispatch_for_loop<P: ProcessManager>(
     top_level_flow(for_loop(
         cx,
         key_var.as_deref(),
-        *key_type,
+        key_type.clone(),
         var,
-        *var_type,
+        var_type.clone(),
         in_expr,
         body,
     )?)
@@ -2568,7 +2609,7 @@ pub(crate) fn dispatch_assign<P: ProcessManager>(
     else {
         unreachable!()
     };
-    assign(cx, var, *decl_type, expr)
+    assign(cx, var, decl_type.clone(), expr)
 }
 
 pub(crate) fn dispatch_set<P: ProcessManager>(
@@ -2667,7 +2708,7 @@ pub(crate) fn dispatch_continue<P: ProcessManager>(
 /// the handle in the variable scope.
 pub(crate) fn dispatch_assign_async<P: ProcessManager>(
     var: &str,
-    decl_type: TypeKind,
+    decl_type: String,
     body: &[Step],
     cx: &mut StepCtx<'_, P>,
 ) -> Result<()> {
@@ -2782,7 +2823,7 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
 
     // Store in named_tasks as a synchronized entry. The handle lives inside
     // the entry so CANCEL can tear it down even under concurrent AWAIT.
-    // Published to the child above so single-CALL tasks can store their
+    // Published to the child above so single-call tasks can store their
     // RETURN value under the entry lock.
     {
         let mut named = cx
@@ -2800,7 +2841,7 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
 
     // Store the task handle in the variable scope
     cx.state
-        .declare_var(var.to_string(), decl_type, Value::TaskHandle(task_id))?;
+        .declare_var(var.to_string(), decl_type, Value::handle(task_id))?;
     Ok(())
 }
 
@@ -2822,7 +2863,7 @@ fn resolve_task_entry<P: ProcessManager>(
         .state
         .get_var(var)
         .ok_or_else(|| anyhow::anyhow!("variable '${var}' is not defined"))?;
-    let Value::TaskHandle(task_id) = val else {
+    let Some(task_id) = val.as_handle() else {
         bail!("variable '${var}' is not a task handle");
     };
 
@@ -2996,7 +3037,7 @@ pub(crate) fn dispatch_await<P: ProcessManager>(var: &str, cx: &mut StepCtx<'_, 
 /// stdout as a string.
 pub(crate) fn dispatch_await_capture<P: ProcessManager>(
     out_var: &str,
-    out_type: TypeKind,
+    out_type: String,
     task_var: &str,
     cx: &mut StepCtx<'_, P>,
 ) -> Result<()> {
@@ -3009,8 +3050,11 @@ pub(crate) fn dispatch_await_capture<P: ProcessManager>(
         .return_value
         .clone()
     {
-        cx.state
-            .declare_var(out_var.trim_start_matches('$').to_string(), out_type, value)?;
+        cx.state.declare_var(
+            out_var.trim_start_matches('$').to_string(),
+            out_type.clone(),
+            value,
+        )?;
         return Ok(());
     }
     let text = match entry.take_sink() {
@@ -3022,7 +3066,7 @@ pub(crate) fn dispatch_await_capture<P: ProcessManager>(
     cx.state.declare_var(
         out_var.trim_start_matches('$').to_string(),
         out_type,
-        Value::String(text),
+        Value::string(text),
     )?;
     Ok(())
 }
@@ -3041,7 +3085,7 @@ pub(crate) fn dispatch_cancel<P: ProcessManager>(var: &str, cx: &mut StepCtx<'_,
         .state
         .get_var(var)
         .ok_or_else(|| anyhow::anyhow!("variable '${var}' is not defined"))?;
-    let Value::TaskHandle(task_id) = val else {
+    let Some(task_id) = val.as_handle() else {
         bail!("variable '${var}' is not a task handle");
     };
 
@@ -3096,7 +3140,7 @@ pub(crate) fn dispatch_assign_async_step<P: ProcessManager>(
     else {
         unreachable!()
     };
-    dispatch_assign_async(var, *decl_type, body, cx)
+    dispatch_assign_async(var, decl_type.clone(), body, cx)
 }
 
 /// Pipeline dispatch wrapper for `Await`
@@ -3128,7 +3172,7 @@ pub(crate) fn dispatch_assign_capture_step<P: ProcessManager>(
         super::steps::allocate_assert_generation(),
         0,
         var,
-        *decl_type,
+        decl_type.clone(),
         cmd,
     )?)
 }
@@ -3146,7 +3190,7 @@ pub(crate) fn dispatch_await_capture_step<P: ProcessManager>(
     else {
         unreachable!()
     };
-    dispatch_await_capture(out_var, *out_type, task_var, cx)
+    dispatch_await_capture(out_var, out_type.clone(), task_var, cx)
 }
 
 /// Pipeline dispatch wrapper for `Cancel`
@@ -3172,10 +3216,11 @@ pub(crate) fn dispatch_timeout_step<P: ProcessManager>(
     top_level_flow(timeout(cx, 0, &duration, body)?)
 }
 
-/// Dispatch `TIMEOUT <duration> <body>` — run `body` on the current thread
+/// Dispatch `TIMEOUT <duration> <body>`: run `body` on the current thread
 /// with a deadline. If the deadline elapses first, cancel the state,
-/// SIGKILL the active foreground process (when one is registered), and
-/// return a deadline error wrapping any body error.
+/// `kill()` the active foreground process (when one is registered), and
+/// return a deadline error wrapping the body result; a body error with
+/// time still left returns unwrapped.
 ///
 /// `idx` is the 0-based step index used for error attribution.
 pub(crate) fn timeout<P: ProcessManager>(

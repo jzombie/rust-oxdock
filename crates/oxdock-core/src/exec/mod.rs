@@ -1,14 +1,18 @@
 mod args;
 mod capture;
+mod engine;
 mod fs_ops;
 mod handlers;
 mod io;
+mod native;
 mod pipe;
 mod state;
 mod steps;
 #[cfg(test)]
 mod tests;
+mod typing;
 
+pub use self::engine::{Engine, EngineOutput};
 pub(crate) use self::handlers::{
     dispatch_append, dispatch_assert_contains, dispatch_assert_eq, dispatch_assign,
     dispatch_assign_async_step, dispatch_assign_capture_step, dispatch_async_block,
@@ -22,13 +26,23 @@ pub(crate) use self::handlers::{
     dispatch_workspace, dispatch_write,
 };
 pub use self::io::ExecIo;
-pub(crate) use self::steps::StepCtx;
+pub use self::native::{
+    FuncKind, FuncMeta, FuncParam, FunctionRegistry, HostRegistration, NativeFn, OxDockFn, PureFn,
+    builtin_function_metas, builtin_function_names,
+};
+pub use self::state::ExecState;
+pub use self::steps::StepCtx;
+pub use self::typing::{
+    OxDockType, TypeDescriptor, Value, ValuePayload, clone_boxed, clone_copy, drop_boxed,
+    drop_noop, eq_boxed, eq_inline, fmt_boxed, fmt_inline, load_inline, startup_descriptors,
+    store_inline, type_anchor,
+};
 
 use anyhow::Result;
 use oxdock_fs::{
     GuardedPath, LazyGuardedTempDir, PathResolver, WorkspaceFs, reserve_cargo_scratch,
 };
-use oxdock_parser::{Step, Value};
+use oxdock_parser::Step;
 use oxdock_process::{
     BuiltinEnv, ProcessManager, SharedInput, SharedOutput, default_process_manager,
 };
@@ -38,7 +52,6 @@ use std::sync::Arc;
 
 use self::fs_ops::describe_dir;
 use self::io::{StreamHandle, assemble_default_io, teed_stderr, teed_stdout};
-use self::state::ExecState;
 use self::steps::execute_steps;
 
 /// Display text emitted by `CWD` while the snapshot root is selected but not
@@ -240,6 +253,36 @@ pub fn run_steps_with_manager<P: ProcessManager>(
     process: P,
     io: ExecIo,
 ) -> Result<(GuardedPath, Box<dyn WorkspaceFs>, BTreeMap<String, Value>)> {
+    run_steps_with_manager_with_hosts(fs, steps, process, io, Vec::new(), Vec::new())
+}
+
+/// Same as [`run_steps_with_manager`], plus host-registered functions and
+/// types. Each function entry becomes callable from the DSL as `NAME(...)`
+/// with full step context; each type descriptor becomes visible to `TYPES()`
+/// and valid for `LET $x: NAME` declarations carrying same-named opaque
+/// payloads. Names share one namespace with DSL and native entries.
+/// Authors should derive entries with `#[oxdock_func]` / `#[oxdock_type]`
+/// (see `oxdock-func-macro`) instead of hand-writing metadata and glue.
+#[allow(clippy::type_complexity)]
+pub fn run_steps_with_manager_with_hosts<P: ProcessManager>(
+    fs: Box<dyn WorkspaceFs>,
+    steps: &[Step],
+    process: P,
+    io: ExecIo,
+    hosts: Vec<HostRegistration<P>>,
+    types: Vec<&'static self::typing::TypeDescriptor>,
+) -> Result<(GuardedPath, Box<dyn WorkspaceFs>, BTreeMap<String, Value>)> {
+    let mut state = new_state(fs, io)?;
+    for host in hosts {
+        state.register_host(host);
+    }
+    for descriptor in types {
+        state.register_type(descriptor);
+    }
+    finish_run(state, process, steps)
+}
+
+fn new_state<P: ProcessManager>(fs: Box<dyn WorkspaceFs>, io: ExecIo) -> Result<ExecState<P>> {
     let cwd = fs.root().clone();
     let build_context = fs.build_context().clone();
     let mut envs = BuiltinEnv::collect(&build_context).into_envs();
@@ -269,8 +312,8 @@ pub fn run_steps_with_manager<P: ProcessManager>(
         inside_async: false,
         keeper_expiry: None,
         cancellable: false,
-        funcs: std::sync::Arc::new(std::collections::HashMap::new()),
-        host_funcs: std::sync::Arc::new(std::collections::HashMap::new()),
+        functions: self::native::FunctionRegistry::with_builtins(),
+        types: self::typing::startup_type_map(),
         call_depth: 0,
         _marker: std::marker::PhantomData,
     };
@@ -278,6 +321,18 @@ pub fn run_steps_with_manager<P: ProcessManager>(
     // Push a global variable scope so top-level LET assignments are captured.
     state.push_var_scope();
 
+    Ok(state)
+}
+
+#[allow(clippy::type_complexity)]
+fn finish_run<P: ProcessManager>(
+    mut state: ExecState<P>,
+    process: P,
+    steps: &[Step],
+) -> Result<(GuardedPath, Box<dyn WorkspaceFs>, BTreeMap<String, Value>)> {
+    let assert_windows = Arc::clone(&state.assert_windows);
+    let assert_windows_stderr = Arc::clone(&state.assert_windows_stderr);
+    let exact_stdout = Arc::clone(&state.exact_stdout);
     let _default_stdout = std::io::stdout();
     let stdin = state.io.stdin().into();
     // Every emitted byte flows through the tee so stream assertions see both
@@ -311,8 +366,8 @@ pub fn run_steps_with_manager<P: ProcessManager>(
         self::steps::Flow::Done => {
             // Root-scope isolation: at Done all blocks have popped, so the
             // first scope is the global one. Read it explicitly (rather than
-            // a flattened all-scopes view) and strip TypeKind so hosts see
-            // plain values.
+            // a flattened all-scopes view) and strip declared types so hosts
+            // see plain values.
             let bindings: BTreeMap<String, Value> = state
                 .var_scopes
                 .first()

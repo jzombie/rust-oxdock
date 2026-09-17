@@ -1,0 +1,11 @@
+FUNC HELLO($name: STRING) {
+    RETURN $name
+}
+LET $names: LIST = FUNCTIONS()
+ECHO "{{ $names }}"
+ASSERT_CONTAINS stdout "GLOB"
+ASSERT_CONTAINS stdout "HELLO"
+LET $d: MAP = DESCRIBE("GLOB")
+WRITE kind.txt "{{ $d.kind }}"
+LET $h: MAP = DESCRIBE("HELLO")
+WRITE hello-kind.txt "{{ $h.kind }}"

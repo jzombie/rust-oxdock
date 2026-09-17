@@ -1,6 +1,6 @@
 //! Build-script asset pipeline: executes an OxDock DSL script in a tempdir
 //! sandbox, materializes the final workdir under `$OUT_DIR`, and emits the
-//! typed module consumed by `oxdock_macros::embed!`.
+//! typed module consumed by `oxdock_macros::oxdock_embed!`.
 //!
 //! Contract:
 //! - IDE/miri skip predicates write a placeholder module (typed surface,
@@ -591,9 +591,10 @@ const SANDBOX_MARKERS: [&str; 2] = [".oxdock-tempdir", ".oxdock-tempdir.lock"];
 /// Atomically-ish materialize `final_external` into `target`.
 ///
 /// Copies the built tree into `<target>/.oxdock-staging` first, then syncs it
-/// into `target` file-by-file (overwrite-copy — no destructive wipe of the
+/// into `target` file-by-file (overwrite-copy: no destructive wipe of the
 /// live directory, no exclusive-handle renames), removes top-level entries
-/// that are no longer part of the build output, and finally deletes the
+/// that are no longer part of the build output (except `.oxdock_hash`,
+/// which is always preserved), and finally deletes the
 /// staging directory. Windows-safe by construction: no remove-then-rename
 /// races against AV/indexer handle locks.
 #[allow(clippy::disallowed_types)]
@@ -629,7 +630,8 @@ pub fn stage_materialize(
 
 /// Overwrite-copy merge of `src` into `dst`: files are copied over existing
 /// destinations, directories are created as needed and recursed, and entries
-/// present in `dst` but absent from `src` are removed (best-effort) so the
+/// present in `dst` but absent from `src` are removed (best-effort, except
+/// `.oxdock_hash`, which is always preserved) so the
 /// destination never accumulates stale artifacts.
 pub fn sync_tree(resolver: &PathResolver, src: &GuardedPath, dst: &GuardedPath) -> Result<()> {
     resolver.create_dir_all(dst)?;

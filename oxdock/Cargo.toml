@@ -27,10 +27,12 @@ cli = ["dep:oxdock-cli"]
 oxdock-build.workspace = true
 oxdock-cli = { workspace = true, optional = true }
 oxdock-core.workspace = true
+oxdock-func-macro.workspace = true
 oxdock-macros.workspace = true
 oxdock-parser.workspace = true
 
 [dev-dependencies]
+anyhow.workspace = true
 indoc.workspace = true
 oxdock-fs.workspace = true
 oxdock-process.workspace = true

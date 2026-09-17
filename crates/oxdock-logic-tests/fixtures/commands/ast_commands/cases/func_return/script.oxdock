@@ -4,6 +4,6 @@ FUNC PICK($flag: BOOL) {
     }
     RETURN "no"
 }
-LET $a: STRING = CALL PICK(true)
-LET $b: STRING = CALL PICK(false)
+LET $a: STRING = PICK(true)
+LET $b: STRING = PICK(false)
 WRITE picked.txt "{{ $a }}-{{ $b }}"

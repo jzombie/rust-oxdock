@@ -4,6 +4,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [Unreleased]
+
+### Dependencies
+
+- Bump `toml_edit` 0.25.13+spec-1.1.0 → 0.25.15+spec-1.1.0 (#150).
+- Bump `pest_derive` / `pest_generator` 2.9.0 → 2.9.1 (#149).
+- Bump `toml` 1.1.5+spec-1.1.0 → 1.1.6+spec-1.1.0 (#148).
+
+## [0.16.0-alpha] - 2026-09-17
+
+### Added
+
+- Unified function registry with `#[oxdock_func]` host export macros (#146): all functions (DSL `FUNC`, natives, host-registered) invoke as `NAME(...)` as statement and expression through `FunctionRegistry` lookups with depth and arity gates before any argument evaluates. New `oxdock-func-macro` crate derives a registration marker (`CamelCase` of the function name) implementing `OxDockFn` from Rust signatures and doc comments (`#[oxdock_func]` / `#[oxdock_func(pure)]`); every builtin dogfoods it. `FUNCTIONS()` and `DESCRIBE(name)` introspect the registry from the DSL, and `FuncKind` distinguishes `Script` / `HostCtx` / `HostPure` (both host kinds render as `host`).
+- Engine facade for host extensions (#146): `Engine::new()` plus `register_type::<T>()`, `register_fn(marker)`, and `run_script` / `run_steps` encapsulate filesystem, process, and IO plumbing. `Extending OxDock from Rust` in the READMEs builds one complete `TAG` extension and runs a script against it, with every example executing as a doctest.
+- Extensible type system on pointer vtables (#146): every DSL value is a 128-bit word (a `&'static TypeDescriptor` plus 64-bit payload) with zero-allocation inline storage for `Copy` scalars and thin-pointer boxes for heap types, and no registry of any kind on the lifecycle path. New `#[oxdock_type]` macro (plus `inline` mode) implements `OxDockType` on the payload struct with a canonical descriptor singleton; hosts mint with `Value::mint_heap` / `mint_inline` and read back with id-checked `read_heap` / `read_inline`. Per-state name directories back declarations, `TYPES()`, and `TYPE_DESCRIBE()`.
+- Static function reference in generated docs (#146): docs-gen renders every `#[oxdock_func]` entry (signature, evaluation contexts, summary, docs) into a `Functions` section staged in the workspace README, the `oxdock` reference, and the docs.rs crate docs, alongside the existing command and value-type references. Pure functions and `rpn`-opted-in stateful functions (`GLOB`, `LOAD_TOML`, `LOAD_JSON`) run on the compiled math path; everything else is AST-only, and `DESCRIBE()` reports the same flag per function.
+
+### Changed
+
+- [breaking] `CALL` removed with no alias (#146): bare `NAME(...)` statements replace `CALL NAME(...)`; `LET $x: T = FOO(...)` stays an expression assignment. The call head and `(` must be contiguous (`ECHO (1 + 2)` stays an instruction). Same-scope `FUNC` redefinition and shadowing a reserved (native/host) name fail at parse time at the definition line, with a runtime guard for dynamic redefinitions. `INSPECT($var)` lowers to a dedicated AST node carrying the variable unevaluated. `PATH_TYPE` is AST-only by design.
+- [breaking] Host Rust API only, scripts are unaffected (#146): `Engine` is generic over the process manager (`Engine<P: ProcessManager = DefaultProcessManager>`) and covers the former power-path-only surface: `with_io` stages custom IO, `register_host(s)` stages prebuilt registrations, `run_script_on` / `run_steps_on` run on caller-built filesystems with any manager, and every run returns the final cwd, filesystem handle, and top-level variable bindings. `run_script` / `run_steps` keep their default-plumbing shapes but return the run output instead of `()`. First-party hosts (docs-gen) run through the facade.
+- [breaking] Host Rust API only, scripts are unaffected (#146): `Value` and `ValuePayload` fields are private, so safe code can no longer forge words with struct literals. Read the descriptor via `Value::descriptor()` / `Value::type_name()` and peek at payload bits via `Value::inline_bits()` / `Value::heap_ptr()`; construction still flows through `Value::mint_heap` / `mint_inline` and the typed constructors.
+- [breaking] Host Rust API only, scripts are unaffected (#146): the value-word model carries vtables instead of integer ids, so `TypeId`, the `TYPE_*` constants, the descriptor table functions, `make_custom_value` / `make_inline_value`, and the `ExecState::register_type` id return are gone; mint through `Value::mint_heap` / `mint_inline` with `T::descriptor()`, read back with `read_heap` / `read_inline` against a descriptor, and pass `&'static TypeDescriptor` to `register_type` / `run_steps_with_manager_with_hosts`. `TYPES()` and `TYPE_DESCRIBE()` read the run's name directory on the AST path. The legacy untyped `host_funcs` map and `HostFn` are deleted: every callable registers through `HostRegistration` into the single registry.
+
+### Removed
+
+- [breaking] `TypeKind` / `Value` enums and the descriptor table: type references in scripts are plain names resolved against the run's name directory at coercion time (unknown names fail there, not at parse); values are constructed via `Value::int/float/string/...` and read via `as_*` accessors. `TypeKind::Custom` / `Value::Custom` enum variants are gone.
+- [breaking] `NativeRegistry` is now `FunctionRegistry`, unifying DSL `FUNC` definitions (scoped, shadowing restores on scope exit) with native and host entries. `RUN` exec-form elements reject task handles with a type error instead of stringifying them.
+
 ## [0.15.0-alpha] - 2026-09-16
 
 ### Added

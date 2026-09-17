@@ -1,13 +1,68 @@
 use crate::ast::{
     Arg, Expr, Guard, GuardExpr, IoBinding, IoStream, PipeTarget, PlatformGuard, Step, StepKind,
-    TypeKind,
 };
 use crate::command::ArgType;
 use crate::error::{ParseError, ParseResult, SpanContext};
 use crate::lexer::{self, RawToken, Rule, parse_pest_error, refine_span, span_for_line, span_of};
 use pest::iterators::Pair;
-use std::collections::VecDeque;
-use std::str::FromStr;
+use std::cell::RefCell;
+use std::collections::{HashSet, VecDeque};
+
+/// Lowering context threaded through every grammar rule that can contain a
+/// block or a `FUNC` definition (issue #146).
+///
+/// This replaces the bare `lower: &dyn Fn` parameter the free lowering
+/// functions used to take. Bundling matters: `FUNC` duplicate and shadow
+/// validation needs the exact pest `SpanContext` at the definition site
+/// (post-parse AST walks only see the end of file), so the per-scope
+/// `FUNC` names ride alongside the dispatcher instead of a second pass.
+pub(super) struct LowerCtx<'a> {
+    /// Production command dispatcher (`lower_command`).
+    pub lower: &'a dyn Fn(&str, Vec<Arg>) -> ParseResult<StepKind>,
+    /// Host-registered function names for parse-time shadow rejection.
+    /// Empty when hosts are unknown at parse time; the runtime
+    /// `define_func` guard still rejects those redefinitions.
+    pub reserved_names: &'a HashSet<String>,
+    /// Shared per-scope defined `FUNC` names. The `RefCell` lets every free
+    /// lowering function share one scope stack through plain `&LowerCtx`
+    /// references: `parse()` owns the stack plus the top-level scope, and
+    /// each `LowerCtx` is built fresh per statement so no `&self` borrow is
+    /// ever held across a `&mut self` call.
+    func_scopes: &'a RefCell<Vec<HashSet<String>>>,
+}
+
+impl<'a> LowerCtx<'a> {
+    pub(super) fn new(
+        lower: &'a dyn Fn(&str, Vec<Arg>) -> ParseResult<StepKind>,
+        reserved_names: &'a HashSet<String>,
+        func_scopes: &'a RefCell<Vec<HashSet<String>>>,
+    ) -> Self {
+        Self {
+            lower,
+            reserved_names,
+            func_scopes,
+        }
+    }
+
+    pub(super) fn enter_scope(&self) {
+        self.func_scopes.borrow_mut().push(HashSet::new());
+    }
+
+    pub(super) fn exit_scope(&self) {
+        self.func_scopes.borrow_mut().pop();
+    }
+
+    /// Record a `FUNC` name in the innermost scope. Returns false when the
+    /// name was already defined in that same scope (nested shadowing of an
+    /// outer DSL name stays allowed).
+    pub(super) fn declare_func(&self, name: &str) -> bool {
+        let mut scopes = self.func_scopes.borrow_mut();
+        match scopes.last_mut() {
+            Some(current) => current.insert(name.to_string()),
+            None => true,
+        }
+    }
+}
 
 #[derive(Clone)]
 struct ScopeFrame {
@@ -86,10 +141,23 @@ pub struct ScriptParser<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> {
     io_scope_stack: Vec<IoScopeFrame>,
     block_stack: Vec<BlockKind>,
     lower: F,
+    /// Host-registered function names, consulted by the post-parse scope
+    /// validation so `FUNC` cannot shadow runtime hosts. Empty when hosts
+    /// are unknown at parse time (e.g. compile-time macros); the runtime
+    /// `define_func` guard still rejects those redefinitions.
+    reserved_names: HashSet<String>,
 }
 
 impl<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> ScriptParser<'a, F> {
     pub fn new(input: &'a str, lower: F) -> ParseResult<Self> {
+        Self::new_with_hosts(input, lower, HashSet::new())
+    }
+
+    pub fn new_with_hosts(
+        input: &'a str,
+        lower: F,
+        reserved_names: HashSet<String>,
+    ) -> ParseResult<Self> {
         let tokens = VecDeque::from(lexer::tokenize(input)?);
         Ok(Self {
             input,
@@ -105,6 +173,7 @@ impl<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> ScriptParser<'a, F> {
             io_scope_stack: Vec::new(),
             block_stack: Vec::new(),
             lower,
+            reserved_names,
         })
     }
 
@@ -115,6 +184,15 @@ impl<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> ScriptParser<'a, F> {
     }
 
     pub fn parse(mut self) -> ParseResult<Vec<Step>> {
+        // Function scope tracking rides alongside lowering (issue #146).
+        // `func_scopes` is a parse-local stack: the bottom is the top-level
+        // scope, `{`/`}` toggle nested ones below, and braced statement
+        // bodies push their own in `parse_block_elements_with_lower`. This
+        // mirrors the runtime `push_scope`/`pop_scope` boundaries, so
+        // duplicate and shadow errors fire at the definition line instead of
+        // end of file. Each `LowerCtx` is built fresh per statement from
+        // short borrows, so no `&self` borrow crosses a `&mut self` call.
+        let func_scopes: RefCell<Vec<HashSet<String>>> = RefCell::new(vec![HashSet::new()]);
         while let Some(token) = self.tokens.pop_front() {
             let step_index = self.steps.len();
             if self.pending_io_block.is_some()
@@ -149,10 +227,12 @@ impl<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> ScriptParser<'a, F> {
                 RawToken::BlockStart { line_no, span } => {
                     let span = span.with_step(step_index);
                     self.start_block(&span, line_no)?;
+                    LowerCtx::new(&self.lower, &self.reserved_names, &func_scopes).enter_scope();
                 }
                 RawToken::BlockEnd { line_no, span } => {
                     let span = span.with_step(step_index);
                     self.end_block(&span, line_no)?;
+                    LowerCtx::new(&self.lower, &self.reserved_names, &func_scopes).exit_scope();
                 }
                 RawToken::Command {
                     pair,
@@ -160,7 +240,8 @@ impl<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> ScriptParser<'a, F> {
                     span,
                 } => {
                     let span = span.with_step(step_index);
-                    let kind = parse_structural_command_with_lower(&span, pair, &self.lower)?;
+                    let lctx = LowerCtx::new(&self.lower, &self.reserved_names, &func_scopes);
+                    let kind = parse_structural_command_with_lower(&span, pair, &lctx)?;
                     self.handle_command_token(&span, line_no, kind)?;
                 }
                 RawToken::Instruction {
@@ -169,8 +250,9 @@ impl<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> ScriptParser<'a, F> {
                     span,
                 } => {
                     let span = span.with_step(step_index);
+                    let lctx = LowerCtx::new(&self.lower, &self.reserved_names, &func_scopes);
                     let kind = self
-                        .lower_instruction(&span, pair)
+                        .lower_instruction(&span, pair, &lctx)
                         .map_err(|e| e.with_span(&span))?;
                     self.handle_command_token(&span, line_no, kind)?;
                 }
@@ -180,7 +262,8 @@ impl<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> ScriptParser<'a, F> {
                     span,
                 } => {
                     let span = span.with_step(step_index);
-                    let kind = lower_run_exec_pair(&span, pair, &self.lower)?;
+                    let lctx = LowerCtx::new(&self.lower, &self.reserved_names, &func_scopes);
+                    let kind = lower_run_exec_pair(&span, pair, &lctx)?;
                     self.handle_command_token(&span, line_no, kind)?;
                 }
             }
@@ -275,8 +358,13 @@ impl<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> ScriptParser<'a, F> {
         Ok(self.steps)
     }
 
-    fn lower_instruction(&self, ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<StepKind> {
-        lower_instruction_pair(ctx, pair, &self.lower)
+    fn lower_instruction(
+        &self,
+        ctx: &SpanContext,
+        pair: Pair<Rule>,
+        lctx: &LowerCtx,
+    ) -> ParseResult<StepKind> {
+        lower_instruction_pair(ctx, pair, lctx)
     }
 
     fn handle_guard_token(&mut self, line_end: usize, expr: GuardExpr) -> ParseResult<()> {
@@ -567,6 +655,16 @@ pub fn parse_script(
     ScriptParser::new(input, lower)?.parse()
 }
 
+/// Parse with a known set of host-registered function names so `FUNC`
+/// shadowing a host fails at parse time instead of at runtime.
+pub fn parse_script_with_hosts(
+    input: &str,
+    lower: impl Fn(&str, Vec<Arg>) -> ParseResult<StepKind>,
+    reserved_names: HashSet<String>,
+) -> ParseResult<Vec<Step>> {
+    ScriptParser::new_with_hosts(input, lower, reserved_names)?.parse()
+}
+
 pub fn parse_guard_expr_str(input: &str) -> ParseResult<GuardExpr> {
     use pest::Parser;
     let pairs = lexer::LanguageParser::parse(Rule::guard_expr, input).map_err(parse_pest_error)?;
@@ -691,7 +789,7 @@ fn parse_expr_str(ctx: &SpanContext, text: &str) -> ParseResult<Expr> {
 fn parse_structural_command_with_lower(
     ctx: &SpanContext,
     pair: Pair<Rule>,
-    lower: &dyn Fn(&str, Vec<Arg>) -> ParseResult<StepKind>,
+    lctx: &LowerCtx,
 ) -> ParseResult<StepKind> {
     let span = refine_span(ctx, &pair);
     let kind = match pair.as_rule() {
@@ -724,27 +822,27 @@ fn parse_structural_command_with_lower(
                     }
                     Rule::with_io_command => {
                         cmd = Some(Box::new(parse_structural_command_with_lower(
-                            ctx, inner, lower,
+                            ctx, inner, lctx,
                         )?));
                     }
                     Rule::inherit_env_command => {
                         cmd = Some(Box::new(parse_structural_command_with_lower(
-                            ctx, inner, lower,
+                            ctx, inner, lctx,
                         )?));
                     }
                     Rule::async_statement | Rule::async_statement_block => {
                         cmd = Some(Box::new(parse_structural_command_with_lower(
-                            ctx, inner, lower,
+                            ctx, inner, lctx,
                         )?));
                     }
                     Rule::timeout_statement | Rule::cancel_statement => {
                         cmd = Some(Box::new(parse_structural_command_with_lower(
-                            ctx, inner, lower,
+                            ctx, inner, lctx,
                         )?));
                     }
-                    Rule::call_statement | Rule::while_statement => {
+                    Rule::bare_call_statement | Rule::while_statement => {
                         cmd = Some(Box::new(parse_structural_command_with_lower(
-                            ctx, inner, lower,
+                            ctx, inner, lctx,
                         )?));
                     }
                     Rule::func_def
@@ -761,10 +859,10 @@ fn parse_structural_command_with_lower(
                         ));
                     }
                     Rule::instruction | Rule::instruction_inner => {
-                        cmd = Some(Box::new(lower_instruction_pair(ctx, inner, lower)?));
+                        cmd = Some(Box::new(lower_instruction_pair(ctx, inner, lctx)?));
                     }
                     Rule::run_exec_statement | Rule::run_exec_inner => {
-                        cmd = Some(Box::new(lower_run_exec_pair(ctx, inner, lower)?));
+                        cmd = Some(Box::new(lower_run_exec_pair(ctx, inner, lctx)?));
                     }
                     _ => {}
                 }
@@ -775,33 +873,33 @@ fn parse_structural_command_with_lower(
                 StepKind::WithIoBlock { bindings }
             }
         }
-        Rule::for_statement => parse_for_statement_from_pair(ctx, pair, lower)?,
-        Rule::while_statement => parse_while_statement_from_pair(ctx, pair, lower)?,
-        Rule::func_def => parse_func_def_from_pair(ctx, pair, lower)?,
-        Rule::call_statement => parse_call_statement_from_pair(ctx, pair)?,
+        Rule::for_statement => parse_for_statement_from_pair(ctx, pair, lctx)?,
+        Rule::while_statement => parse_while_statement_from_pair(ctx, pair, lctx)?,
+        Rule::func_def => parse_func_def_from_pair(ctx, pair, lctx)?,
+        Rule::bare_call_statement => parse_bare_call_from_pair(ctx, pair)?,
         Rule::return_statement => parse_return_statement_from_pair(ctx, pair)?,
         Rule::break_statement => StepKind::Break,
         Rule::continue_statement => StepKind::Continue,
         Rule::let_statement => parse_let_statement_from_pair(ctx, pair)?,
         Rule::mutate_statement => parse_mutate_statement_from_pair(ctx, pair)?,
-        Rule::let_async_statement => parse_let_async_statement_from_pair(ctx, pair, lower)?,
-        Rule::let_capture_statement => parse_let_capture_statement_from_pair(ctx, pair, lower)?,
+        Rule::let_async_statement => parse_let_async_statement_from_pair(ctx, pair, lctx)?,
+        Rule::let_capture_statement => parse_let_capture_statement_from_pair(ctx, pair, lctx)?,
         Rule::await_statement => parse_await_statement_from_pair(ctx, pair)?,
         Rule::cancel_statement => parse_cancel_statement_from_pair(ctx, pair)?,
-        Rule::if_statement => parse_if_statement_from_pair(ctx, pair, lower)?,
-        Rule::async_statement => parse_async_statement_from_pair(ctx, pair, lower)?,
-        Rule::async_statement_block => parse_async_statement_block_from_pair(ctx, pair, lower)?,
-        Rule::timeout_statement => parse_timeout_statement_from_pair(ctx, pair, lower)?,
+        Rule::if_statement => parse_if_statement_from_pair(ctx, pair, lctx)?,
+        Rule::async_statement => parse_async_statement_from_pair(ctx, pair, lctx)?,
+        Rule::async_statement_block => parse_async_statement_block_from_pair(ctx, pair, lctx)?,
+        Rule::timeout_statement => parse_timeout_statement_from_pair(ctx, pair, lctx)?,
         Rule::command_inner => {
             // command_inner = { inherit_env_command | instruction }
             // Unwrap to the inner rule
             let inner = pair.into_inner().next().ok_or_else(|| {
                 ParseError::structural("parser", "empty command_inner".to_string(), &span)
             })?;
-            parse_structural_command_with_lower(ctx, inner, lower)?
+            parse_structural_command_with_lower(ctx, inner, lctx)?
         }
-        Rule::instruction | Rule::instruction_inner => lower_instruction_pair(ctx, pair, lower)?,
-        Rule::run_exec_statement | Rule::run_exec_inner => lower_run_exec_pair(ctx, pair, lower)?,
+        Rule::instruction | Rule::instruction_inner => lower_instruction_pair(ctx, pair, lctx)?,
+        Rule::run_exec_statement | Rule::run_exec_inner => lower_run_exec_pair(ctx, pair, lctx)?,
         _ => {
             return Err(ParseError::structural(
                 "parser",
@@ -861,7 +959,7 @@ enum InsToken {
 fn lower_instruction_pair(
     ctx: &SpanContext,
     pair: Pair<Rule>,
-    lower: &dyn Fn(&str, Vec<Arg>) -> ParseResult<StepKind>,
+    lctx: &LowerCtx,
 ) -> ParseResult<StepKind> {
     let span = refine_span(ctx, &pair);
     let (name, tokens) = extract_instruction(ctx, pair)?;
@@ -878,7 +976,7 @@ fn lower_instruction_pair(
             InsToken::Assign(key, value) => crate::commands::canonical_assignment_arg(&key, &value),
         })
         .collect();
-    lower(&name, args).map_err(|e| e.with_span(&span))
+    (lctx.lower)(&name, args).map_err(|e| e.with_span(&span))
 }
 
 /// Lower a `run_exec` grammar pair: the PEG engine has already validated the
@@ -889,7 +987,7 @@ fn lower_instruction_pair(
 fn lower_run_exec_pair(
     ctx: &SpanContext,
     pair: Pair<Rule>,
-    lower: &dyn Fn(&str, Vec<Arg>) -> ParseResult<StepKind>,
+    lctx: &LowerCtx,
 ) -> ParseResult<StepKind> {
     let span = refine_span(ctx, &pair);
     let mut list = None;
@@ -905,7 +1003,7 @@ fn lower_run_exec_pair(
             &span,
         )
     })?;
-    lower("RUN", vec![Arg::Expr(list)]).map_err(|e| e.with_span(&span))
+    (lctx.lower)("RUN", vec![Arg::Expr(list)]).map_err(|e| e.with_span(&span))
 }
 
 /// Lower a `run_exec_list` pair: like `parse_list_literal` but elements are
@@ -939,20 +1037,20 @@ fn parse_run_exec_arg(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Expr> 
             Ok(Expr::Var(name))
         }
         Rule::env_read => parse_env_read(ctx, inner).map(Expr::Env),
-        Rule::pipe_read => parse_pipe_read(ctx, inner).map(|name| Expr::Literal(Value::Pipe(name))),
+        Rule::pipe_read => parse_pipe_read(ctx, inner).map(|name| Expr::Literal(Value::pipe(name))),
         Rule::list_literal => parse_list_literal(ctx, inner),
         Rule::map_literal => parse_map_literal(ctx, inner),
         Rule::string_literal | Rule::quoted_string => {
             let s = parse_quoted_string(inner)?;
-            Ok(Expr::Literal(Value::String(s)))
+            Ok(Expr::Literal(Value::string(s)))
         }
         Rule::numeric_literal => parse_numeric_literal(ctx, inner),
         Rule::bare_word => {
             let s = inner.as_str().to_string();
             match s.as_str() {
-                "true" => Ok(Expr::Literal(Value::Bool(true))),
-                "false" => Ok(Expr::Literal(Value::Bool(false))),
-                _ => Ok(Expr::Literal(Value::String(s))),
+                "true" => Ok(Expr::Literal(Value::bool(true))),
+                "false" => Ok(Expr::Literal(Value::bool(false))),
+                _ => Ok(Expr::Literal(Value::string(s))),
             }
         }
         _ => Err(ParseError::structural(
@@ -994,7 +1092,7 @@ fn parse_assignment(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<(String,
 }
 
 /// Single unified value lowering: every command's free-text value flows through
-/// here on raw pest spans. Quoted bytes stay exact, lone `$var`/`$a.b`/`CALL()`
+/// here on raw pest spans. Quoted bytes stay exact, lone `$var`/`$a.b`/`F()`
 /// stay typed `Arg::Expr`, and anything else becomes literal text with only
 /// `{{ }}` as the interpolation trigger. No heuristic rewriting, ever.
 fn lower_command_value(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Arg> {
@@ -1172,10 +1270,10 @@ fn lower_expand_command(ctx: &SpanContext, tokens: Vec<InsToken>) -> ParseResult
     Ok(StepKind::Expand { path, overrides })
 }
 
-fn parse_type_tag(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<TypeKind> {
-    let span = refine_span(ctx, &pair);
-    TypeKind::from_str(pair.as_str().trim())
-        .map_err(|e| ParseError::structural("type", e.to_string(), &span))
+fn parse_type_tag(pair: Pair<Rule>) -> String {
+    // The open `type_tag` rule accepts any uppercase identifier; tags are
+    // plain names here and resolve against the descriptor table at runtime.
+    pair.as_str().trim().to_string()
 }
 
 fn check_func_ident(ctx: &SpanContext, name: &str) -> ParseResult<()> {
@@ -1202,7 +1300,7 @@ fn check_func_ident(ctx: &SpanContext, name: &str) -> ParseResult<()> {
 fn parse_while_statement_from_pair(
     ctx: &SpanContext,
     pair: Pair<Rule>,
-    lower: &dyn Fn(&str, Vec<Arg>) -> ParseResult<StepKind>,
+    lctx: &LowerCtx,
 ) -> ParseResult<StepKind> {
     let span = refine_span(ctx, &pair);
     let mut cond = None;
@@ -1215,7 +1313,7 @@ fn parse_while_statement_from_pair(
                 }
             }
             Rule::block => {
-                body = Some(parse_block_elements_with_lower(ctx, inner, lower)?);
+                body = Some(parse_block_elements_with_lower(ctx, inner, lctx)?);
             }
             _ => {}
         }
@@ -1233,12 +1331,12 @@ fn parse_while_statement_from_pair(
 fn parse_func_def_from_pair(
     ctx: &SpanContext,
     pair: Pair<Rule>,
-    lower: &dyn Fn(&str, Vec<Arg>) -> ParseResult<StepKind>,
+    lctx: &LowerCtx,
 ) -> ParseResult<StepKind> {
     let span = refine_span(ctx, &pair);
     let mut name: Option<String> = None;
     let mut param_names: Vec<String> = Vec::new();
-    let mut param_types: Vec<TypeKind> = Vec::new();
+    let mut param_types: Vec<String> = Vec::new();
     let mut body = None;
     for inner in pair.into_inner() {
         match inner.as_rule() {
@@ -1256,7 +1354,7 @@ fn parse_func_def_from_pair(
                             pname = Some(parse_dollar_ident(part));
                         }
                         Rule::type_tag => {
-                            ptype = Some(parse_type_tag(ctx, part)?);
+                            ptype = Some(parse_type_tag(part));
                         }
                         _ => {}
                     }
@@ -1278,7 +1376,7 @@ fn parse_func_def_from_pair(
                 })?);
             }
             Rule::block => {
-                body = Some(parse_block_elements_with_lower(ctx, inner, lower)?);
+                body = Some(parse_block_elements_with_lower(ctx, inner, lctx)?);
             }
             _ => {}
         }
@@ -1286,6 +1384,24 @@ fn parse_func_def_from_pair(
     let name = name
         .ok_or_else(|| ParseError::validation("FUNC", "FUNC requires a name".to_string(), &span))?;
     check_func_ident(ctx, &name)?;
+    // Same-scope duplicates and reserved-name shadows fail here, at the
+    // definition line: the post-parse AST keeps no spans, so a later walk
+    // could only point at end of file. Nested shadowing of an outer DSL
+    // name stays allowed and reverts on scope exit at runtime.
+    if lctx.reserved_names.contains(&name) {
+        return Err(ParseError::validation(
+            "FUNC",
+            format!("FUNC {name} cannot shadow reserved function `{name}`"),
+            &span,
+        ));
+    }
+    if !lctx.declare_func(&name) {
+        return Err(ParseError::validation(
+            "FUNC",
+            format!("duplicate function `{name}` in same scope"),
+            &span,
+        ));
+    }
     if param_names.len() != param_types.len() {
         return Err(ParseError::validation(
             "FUNC",
@@ -1312,13 +1428,22 @@ fn parse_func_def_from_pair(
     })
 }
 
-fn parse_call_statement_from_pair(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<StepKind> {
+fn parse_bare_call_from_pair(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<StepKind> {
     let span = refine_span(ctx, &pair);
     let mut name: Option<String> = None;
     let mut args = Vec::new();
+    // The head arrives wrapped in the atomic `call_head_paren` token (which
+    // is what forbids whitespace before `(`). Atomic tokens produce no
+    // inner pairs, so the name comes from the token text minus its `(`.
     for inner in pair.into_inner() {
         match inner.as_rule() {
-            Rule::func_ident => {
+            Rule::call_head_paren => {
+                if name.is_none() {
+                    let text = inner.as_str();
+                    name = Some(text.strip_suffix('(').unwrap_or(text).to_string());
+                }
+            }
+            Rule::func_call_head => {
                 if name.is_none() {
                     name = Some(inner.as_str().to_string());
                 }
@@ -1330,7 +1455,11 @@ fn parse_call_statement_from_pair(ctx: &SpanContext, pair: Pair<Rule>) -> ParseR
         }
     }
     let name = name.ok_or_else(|| {
-        ParseError::validation("CALL", "CALL requires a function name".to_string(), &span)
+        ParseError::validation(
+            "FUNC",
+            "function call requires a function name".to_string(),
+            &span,
+        )
     })?;
     check_func_ident(ctx, &name)?;
     Ok(StepKind::Call { name, args })
@@ -1346,18 +1475,18 @@ fn parse_return_statement_from_pair(ctx: &SpanContext, pair: Pair<Rule>) -> Pars
         }
     }
     Ok(StepKind::Return {
-        expr: Box::new(Expr::Literal(Value::String(String::new()))),
+        expr: Box::new(Expr::Literal(Value::string(String::new()))),
     })
 }
 
 fn parse_for_statement_from_pair(
     ctx: &SpanContext,
     pair: Pair<Rule>,
-    lower: &dyn Fn(&str, Vec<Arg>) -> ParseResult<StepKind>,
+    lctx: &LowerCtx,
 ) -> ParseResult<StepKind> {
     let span = refine_span(ctx, &pair);
     let mut idents: Vec<String> = Vec::new();
-    let mut types: Vec<TypeKind> = Vec::new();
+    let mut types: Vec<String> = Vec::new();
     let mut type_spans: Vec<SpanContext> = Vec::new();
     let mut in_expr = None;
     let mut body_steps = Vec::new();
@@ -1368,13 +1497,13 @@ fn parse_for_statement_from_pair(
             }
             Rule::type_tag => {
                 type_spans.push(refine_span(ctx, &inner));
-                types.push(parse_type_tag(ctx, inner)?);
+                types.push(parse_type_tag(inner));
             }
             Rule::expr => {
                 in_expr = Some(parse_expr(ctx, inner)?);
             }
             Rule::block => {
-                body_steps = parse_block_elements_with_lower(ctx, inner, lower)?;
+                body_steps = parse_block_elements_with_lower(ctx, inner, lctx)?;
             }
             _ => {}
         }
@@ -1416,8 +1545,8 @@ fn parse_for_statement_from_pair(
         }
     };
     if let Some(kt) = &key_type
-        && *kt != TypeKind::String
-        && *kt != TypeKind::Int
+        && kt != "STRING"
+        && kt != "INT"
     {
         // Pinpoint the offending key type tag rather than the statement.
         let at = type_spans.first().unwrap_or(&span);
@@ -1454,7 +1583,7 @@ fn parse_let_statement_from_pair(ctx: &SpanContext, pair: Pair<Rule>) -> ParseRe
                 var = Some(parse_dollar_ident(inner));
             }
             Rule::type_tag => {
-                decl_type = Some(parse_type_tag(ctx, inner)?);
+                decl_type = Some(parse_type_tag(inner));
             }
             Rule::expr => {
                 expr = Some(parse_expr(ctx, inner)?);
@@ -1515,11 +1644,11 @@ fn parse_mutate_statement_from_pair(ctx: &SpanContext, pair: Pair<Rule>) -> Pars
 fn parse_let_async_statement_from_pair(
     ctx: &SpanContext,
     pair: Pair<Rule>,
-    lower: &dyn Fn(&str, Vec<Arg>) -> ParseResult<StepKind>,
+    lctx: &LowerCtx,
 ) -> ParseResult<StepKind> {
     let span = refine_span(ctx, &pair);
     let mut var = None;
-    let mut decl_type: Option<TypeKind> = None;
+    let mut decl_type: Option<String> = None;
     let mut body = None;
     for inner in pair.into_inner() {
         match inner.as_rule() {
@@ -1527,10 +1656,10 @@ fn parse_let_async_statement_from_pair(
                 var = Some(parse_dollar_ident(inner));
             }
             Rule::type_tag => {
-                decl_type = Some(parse_type_tag(ctx, inner)?);
+                decl_type = Some(parse_type_tag(inner));
             }
             Rule::block => {
-                body = Some(parse_block_elements_with_lower(ctx, inner, lower)?);
+                body = Some(parse_block_elements_with_lower(ctx, inner, lctx)?);
             }
             Rule::command_inner => {
                 // command_inner = { inherit_env_command | async_statement | async_statement_block | instruction }
@@ -1538,7 +1667,7 @@ fn parse_let_async_statement_from_pair(
                 let inner = inner.into_inner().next().ok_or_else(|| {
                     ParseError::structural("let", "empty command_inner".to_string(), &span)
                 })?;
-                let step_kind = parse_structural_command_with_lower(ctx, inner, lower)?;
+                let step_kind = parse_structural_command_with_lower(ctx, inner, lctx)?;
                 body = Some(vec![Step {
                     guard: None,
                     kind: step_kind,
@@ -1556,7 +1685,7 @@ fn parse_let_async_statement_from_pair(
                 //   AssignAsync runtime path supports.
                 // - wrapping a synchronous command captures its stdout into
                 //   the variable (same semantics as LET $x: STRING = <command>).
-                let kind = parse_structural_command_with_lower(ctx, inner, lower)?;
+                let kind = parse_structural_command_with_lower(ctx, inner, lctx)?;
                 let StepKind::WithIo { bindings, cmd } = kind else {
                     return Err(ParseError::validation("LET", "LET $var: TYPE = WITH_IO requires an ASYNC command (e.g. LET $t = WITH_IO [stdin=pipe:p] ASYNC WRITE \"f\")".to_string(), &span));
                 };
@@ -1650,15 +1779,14 @@ fn parse_let_async_statement_from_pair(
 fn parse_let_capture_statement_from_pair(
     ctx: &SpanContext,
     pair: Pair<Rule>,
-    lower: &dyn Fn(&str, Vec<Arg>) -> ParseResult<StepKind>,
+    lctx: &LowerCtx,
 ) -> ParseResult<StepKind> {
     let span = refine_span(ctx, &pair);
     use pest::Parser;
     let mut var = None;
-    let mut decl_type: Option<TypeKind> = None;
+    let mut decl_type: Option<String> = None;
     let mut await_pair = None;
     let mut timeout_pair = None;
-    let mut call_pair = None;
     let mut instruction_pair = None;
     for inner in pair.into_inner() {
         match inner.as_rule() {
@@ -1666,16 +1794,13 @@ fn parse_let_capture_statement_from_pair(
                 var = Some(parse_dollar_ident(inner));
             }
             Rule::type_tag => {
-                decl_type = Some(parse_type_tag(ctx, inner)?);
+                decl_type = Some(parse_type_tag(inner));
             }
             Rule::await_statement => {
                 await_pair = Some(inner);
             }
             Rule::timeout_statement => {
                 timeout_pair = Some(inner);
-            }
-            Rule::call_statement => {
-                call_pair = Some(inner);
             }
             Rule::instruction => {
                 instruction_pair = Some(inner);
@@ -1686,7 +1811,7 @@ fn parse_let_capture_statement_from_pair(
     let var = var.ok_or_else(|| {
         ParseError::validation("LET", "LET requires a variable".to_string(), &span)
     })?;
-    let dtype: TypeKind = decl_type.ok_or_else(|| {
+    let dtype: String = decl_type.ok_or_else(|| {
         ParseError::validation(
             "LET",
             "LET requires explicit type: LET $var: TYPE = ...".to_string(),
@@ -1713,17 +1838,7 @@ fn parse_let_capture_statement_from_pair(
         });
     }
     if let Some(timeouted) = timeout_pair {
-        let kind = parse_structural_command_with_lower(ctx, timeouted, lower)?;
-        reject_async_in_capture(ctx, &kind)?;
-        reject_pipe_stdout_in_capture(ctx, &kind)?;
-        return Ok(StepKind::AssignCapture {
-            var,
-            decl_type: dtype,
-            cmd: Box::new(kind),
-        });
-    }
-    if let Some(called) = call_pair {
-        let kind = parse_call_statement_from_pair(ctx, called)?;
+        let kind = parse_structural_command_with_lower(ctx, timeouted, lctx)?;
         reject_async_in_capture(ctx, &kind)?;
         reject_pipe_stdout_in_capture(ctx, &kind)?;
         return Ok(StepKind::AssignCapture {
@@ -1757,7 +1872,7 @@ fn parse_let_capture_statement_from_pair(
                             &span,
                         )
                     })?,
-                lower,
+                lctx,
             )?;
             reject_async_in_capture(ctx, &kind)?;
             reject_pipe_stdout_in_capture(ctx, &kind)?;
@@ -1842,7 +1957,7 @@ fn parse_timeout_duration_arg(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResul
 fn parse_timeout_statement_from_pair(
     ctx: &SpanContext,
     pair: Pair<Rule>,
-    lower: &dyn Fn(&str, Vec<Arg>) -> ParseResult<StepKind>,
+    lctx: &LowerCtx,
 ) -> ParseResult<StepKind> {
     let span = refine_span(ctx, &pair);
     let mut duration: Option<Arg> = None;
@@ -1853,7 +1968,7 @@ fn parse_timeout_statement_from_pair(
                 duration = Some(parse_timeout_duration_arg(ctx, inner)?);
             }
             Rule::block => {
-                body = Some(parse_block_elements_with_lower(ctx, inner, lower)?);
+                body = Some(parse_block_elements_with_lower(ctx, inner, lctx)?);
             }
             Rule::await_statement => {
                 let kind = parse_await_statement_from_pair(ctx, inner)?;
@@ -1877,14 +1992,14 @@ fn parse_timeout_statement_from_pair(
             | Rule::inherit_env_command
             | Rule::async_statement
             | Rule::async_statement_block
-            | Rule::call_statement
+            | Rule::bare_call_statement
             | Rule::while_statement
             | Rule::func_def
             | Rule::return_statement
             | Rule::break_statement
             | Rule::continue_statement
             | Rule::timeout_statement => {
-                let kind = parse_structural_command_with_lower(ctx, inner, lower)?;
+                let kind = parse_structural_command_with_lower(ctx, inner, lctx)?;
                 body = Some(vec![Step {
                     guard: None,
                     kind,
@@ -1893,7 +2008,7 @@ fn parse_timeout_statement_from_pair(
                 }]);
             }
             Rule::instruction | Rule::instruction_inner => {
-                let kind = lower_instruction_pair(ctx, inner, lower)?;
+                let kind = lower_instruction_pair(ctx, inner, lctx)?;
                 body = Some(vec![Step {
                     guard: None,
                     kind,
@@ -1902,7 +2017,7 @@ fn parse_timeout_statement_from_pair(
                 }]);
             }
             Rule::run_exec_statement | Rule::run_exec_inner => {
-                let kind = lower_run_exec_pair(ctx, inner, lower)?;
+                let kind = lower_run_exec_pair(ctx, inner, lctx)?;
                 body = Some(vec![Step {
                     guard: None,
                     kind,
@@ -1930,7 +2045,7 @@ fn parse_timeout_statement_from_pair(
 fn parse_if_statement_from_pair(
     ctx: &SpanContext,
     pair: Pair<Rule>,
-    lower: &dyn Fn(&str, Vec<Arg>) -> ParseResult<StepKind>,
+    lctx: &LowerCtx,
 ) -> ParseResult<StepKind> {
     let span = refine_span(ctx, &pair);
     let mut cond = None;
@@ -1947,15 +2062,15 @@ fn parse_if_statement_from_pair(
             }
             Rule::block => {
                 if then_body.is_empty() {
-                    then_body = parse_block_elements_with_lower(ctx, inner, lower)?;
+                    then_body = parse_block_elements_with_lower(ctx, inner, lctx)?;
                 }
             }
             Rule::else_if_clause => {
-                let (eif_cond, eif_body) = parse_else_if_clause(ctx, inner, lower)?;
+                let (eif_cond, eif_body) = parse_else_if_clause(ctx, inner, lctx)?;
                 else_ifs.push((eif_cond, eif_body));
             }
             Rule::else_clause => {
-                else_body = Some(parse_else_clause(ctx, inner, lower)?);
+                else_body = Some(parse_else_clause(ctx, inner, lctx)?);
             }
             _ => {}
         }
@@ -1973,7 +2088,7 @@ fn parse_if_statement_from_pair(
 fn parse_else_if_clause(
     ctx: &SpanContext,
     pair: Pair<Rule>,
-    lower: &dyn Fn(&str, Vec<Arg>) -> ParseResult<StepKind>,
+    lctx: &LowerCtx,
 ) -> ParseResult<(Box<Expr>, Vec<Step>)> {
     let span = refine_span(ctx, &pair);
     let mut cond = None;
@@ -1981,7 +2096,7 @@ fn parse_else_if_clause(
     for inner in pair.into_inner() {
         match inner.as_rule() {
             Rule::expr => cond = Some(parse_expr(ctx, inner)?),
-            Rule::block => body = parse_block_elements_with_lower(ctx, inner, lower)?,
+            Rule::block => body = parse_block_elements_with_lower(ctx, inner, lctx)?,
             _ => {}
         }
     }
@@ -1996,11 +2111,11 @@ fn parse_else_if_clause(
 fn parse_else_clause(
     ctx: &SpanContext,
     pair: Pair<Rule>,
-    lower: &dyn Fn(&str, Vec<Arg>) -> ParseResult<StepKind>,
+    lctx: &LowerCtx,
 ) -> ParseResult<Vec<Step>> {
     for inner in pair.into_inner() {
         if let Rule::block = inner.as_rule() {
-            return parse_block_elements_with_lower(ctx, inner, lower);
+            return parse_block_elements_with_lower(ctx, inner, lctx);
         }
     }
     Ok(Vec::new())
@@ -2009,7 +2124,7 @@ fn parse_else_clause(
 fn parse_async_statement_from_pair(
     ctx: &SpanContext,
     pair: Pair<Rule>,
-    lower: &dyn Fn(&str, Vec<Arg>) -> ParseResult<StepKind>,
+    lctx: &LowerCtx,
 ) -> ParseResult<StepKind> {
     let span = refine_span(ctx, &pair);
     let mut inner_cmd = None;
@@ -2021,7 +2136,7 @@ fn parse_async_statement_from_pair(
                 // when nested inside compound-atomic async_statement.
                 // Parse the command text directly.
                 let cmd_text = inner.as_str();
-                let steps = parse_script(cmd_text, |name, args| lower(name, args))?;
+                let steps = parse_script(cmd_text, |name, args| (lctx.lower)(name, args))?;
                 if steps.len() == 1 {
                     inner_cmd = Some(steps.into_iter().next().unwrap().kind);
                 } else {
@@ -2039,16 +2154,16 @@ fn parse_async_statement_from_pair(
                 })?;
                 match child.as_rule() {
                     Rule::inherit_env_command => {
-                        inner_cmd = Some(parse_structural_command_with_lower(ctx, child, lower)?);
+                        inner_cmd = Some(parse_structural_command_with_lower(ctx, child, lctx)?);
                     }
                     Rule::async_statement | Rule::async_statement_block => {
-                        inner_cmd = Some(parse_structural_command_with_lower(ctx, child, lower)?);
+                        inner_cmd = Some(parse_structural_command_with_lower(ctx, child, lctx)?);
                     }
                     Rule::timeout_statement | Rule::cancel_statement => {
-                        inner_cmd = Some(parse_structural_command_with_lower(ctx, child, lower)?);
+                        inner_cmd = Some(parse_structural_command_with_lower(ctx, child, lctx)?);
                     }
-                    Rule::call_statement | Rule::while_statement => {
-                        inner_cmd = Some(parse_structural_command_with_lower(ctx, child, lower)?);
+                    Rule::bare_call_statement | Rule::while_statement => {
+                        inner_cmd = Some(parse_structural_command_with_lower(ctx, child, lctx)?);
                     }
                     Rule::func_def
                     | Rule::return_statement
@@ -2064,10 +2179,10 @@ fn parse_async_statement_from_pair(
                         ));
                     }
                     Rule::instruction => {
-                        inner_cmd = Some(lower_instruction_pair(ctx, child, lower)?);
+                        inner_cmd = Some(lower_instruction_pair(ctx, child, lctx)?);
                     }
                     Rule::run_exec_statement | Rule::run_exec_inner => {
-                        inner_cmd = Some(lower_run_exec_pair(ctx, child, lower)?);
+                        inner_cmd = Some(lower_run_exec_pair(ctx, child, lctx)?);
                     }
                     other => {
                         return Err(ParseError::structural(
@@ -2079,13 +2194,13 @@ fn parse_async_statement_from_pair(
                 }
             }
             Rule::instruction | Rule::instruction_inner => {
-                inner_cmd = Some(lower_instruction_pair(ctx, inner, lower)?);
+                inner_cmd = Some(lower_instruction_pair(ctx, inner, lctx)?);
             }
             Rule::run_exec_statement | Rule::run_exec_inner => {
-                inner_cmd = Some(lower_run_exec_pair(ctx, inner, lower)?);
+                inner_cmd = Some(lower_run_exec_pair(ctx, inner, lctx)?);
             }
             Rule::block => {
-                block_body = Some(parse_block_elements_with_lower(ctx, inner, lower)?);
+                block_body = Some(parse_block_elements_with_lower(ctx, inner, lctx)?);
             }
             _ => {}
         }
@@ -2121,13 +2236,13 @@ fn parse_async_statement_from_pair(
 fn parse_async_statement_block_from_pair(
     ctx: &SpanContext,
     pair: Pair<Rule>,
-    lower: &dyn Fn(&str, Vec<Arg>) -> ParseResult<StepKind>,
+    lctx: &LowerCtx,
 ) -> ParseResult<StepKind> {
     let span = refine_span(ctx, &pair);
     let mut block_body = None;
     for inner in pair.into_inner() {
         if inner.as_rule() == Rule::block {
-            block_body = Some(parse_block_elements_with_lower(ctx, inner, lower)?);
+            block_body = Some(parse_block_elements_with_lower(ctx, inner, lctx)?);
         }
     }
     let body = block_body.ok_or_else(|| {
@@ -2148,15 +2263,19 @@ fn parse_async_statement_block_from_pair(
 fn parse_block_elements_with_lower(
     ctx: &SpanContext,
     block_pair: Pair<Rule>,
-    lower: &dyn Fn(&str, Vec<Arg>) -> ParseResult<StepKind>,
+    lctx: &LowerCtx,
 ) -> ParseResult<Vec<Step>> {
+    // One function scope per braced body, mirroring the runtime
+    // `push_scope`/`pop_scope` boundary: same-block `FUNC` redefinition
+    // errors, nested shadowing stays allowed.
+    lctx.enter_scope();
     let mut steps = Vec::new();
     for elem in block_pair.into_inner() {
         match elem.as_rule() {
             Rule::for_statement
             | Rule::while_statement
             | Rule::func_def
-            | Rule::call_statement
+            | Rule::bare_call_statement
             | Rule::return_statement
             | Rule::break_statement
             | Rule::continue_statement
@@ -2170,7 +2289,7 @@ fn parse_block_elements_with_lower(
             | Rule::async_statement
             | Rule::timeout_statement
             | Rule::async_statement_block => {
-                let step_kind = parse_structural_command_with_lower(ctx, elem, lower)?;
+                let step_kind = parse_structural_command_with_lower(ctx, elem, lctx)?;
                 steps.push(Step {
                     guard: None,
                     kind: step_kind,
@@ -2190,7 +2309,7 @@ fn parse_block_elements_with_lower(
                 }
                 if let (Some(gp), Some(bp)) = (guard_pair, inner_block) {
                     let guard_expr = parse_guard_line(ctx, gp)?;
-                    let mut inner_steps = parse_block_elements_with_lower(ctx, bp, lower)?;
+                    let mut inner_steps = parse_block_elements_with_lower(ctx, bp, lctx)?;
                     for step in &mut inner_steps {
                         step.guard = Some(guard_expr.clone());
                     }
@@ -2198,7 +2317,7 @@ fn parse_block_elements_with_lower(
                 }
             }
             Rule::instruction | Rule::instruction_inner => {
-                let kind = lower_instruction_pair(ctx, elem, lower)?;
+                let kind = lower_instruction_pair(ctx, elem, lctx)?;
                 steps.push(Step {
                     guard: None,
                     kind,
@@ -2207,7 +2326,7 @@ fn parse_block_elements_with_lower(
                 });
             }
             Rule::run_exec_statement | Rule::run_exec_inner => {
-                let kind = lower_run_exec_pair(ctx, elem, lower)?;
+                let kind = lower_run_exec_pair(ctx, elem, lctx)?;
                 steps.push(Step {
                     guard: None,
                     kind,
@@ -2216,7 +2335,7 @@ fn parse_block_elements_with_lower(
                 });
             }
             Rule::with_io_command => {
-                let step_kind = parse_structural_command_with_lower(ctx, elem, lower)?;
+                let step_kind = parse_structural_command_with_lower(ctx, elem, lctx)?;
                 steps.push(Step {
                     guard: None,
                     kind: step_kind,
@@ -2227,6 +2346,7 @@ fn parse_block_elements_with_lower(
             _ => {} // blank, hash_comment, semicolon, block_start, block_end, etc.
         }
     }
+    lctx.exit_scope();
     Ok(steps)
 }
 
@@ -2889,17 +3009,31 @@ fn reject_boundary(ctx: &SpanContext, expr: &Expr) -> ParseResult<()> {
 /// compile to RPN `Neg` (or AST `0 - x` fallback for non-math operands).
 fn apply_unary_neg(ctx: &SpanContext, expr: Expr) -> ParseResult<Expr> {
     match expr {
-        Expr::Literal(Value::Int(n)) => match n.checked_neg() {
-            Some(v) => Ok(Expr::Literal(Value::Int(v))),
-            None => Ok(Expr::CompiledMath(vec![
-                MathOp::PushConst(Value::Int(n)),
-                MathOp::Neg,
-            ])),
+        Expr::Literal(v) => match (v.as_i64(), v.as_f64()) {
+            (Some(n), _) => match n.checked_neg() {
+                Some(neg) => Ok(Expr::Literal(Value::int(neg))),
+                None => Ok(Expr::CompiledMath(vec![MathOp::PushConst(v), MathOp::Neg])),
+            },
+            (None, Some(f)) => Ok(Expr::Literal(Value::float(-f))),
+            (None, None) => {
+                let other = Expr::Literal(v);
+                if let Some(mut ops) = expr_to_rpn(&other) {
+                    ops.push(MathOp::Neg);
+                    Ok(Expr::CompiledMath(ops))
+                } else {
+                    // Non-math operand (list/map/logical): `0 - x` evaluates via
+                    // the shared arithmetic helper to a runtime Type Error.
+                    Ok(Expr::Arithmetic {
+                        op: ArithOp::Sub,
+                        left: Box::new(Expr::Literal(Value::int(0))),
+                        right: Box::new(other),
+                    })
+                }
+            }
         },
-        Expr::Literal(Value::Float(f)) => Ok(Expr::Literal(Value::Float(-f))),
         Expr::UnsignedIntBoundary(n) => {
             if n == i64::MAX as u64 + 1 {
-                Ok(Expr::Literal(Value::Int(i64::MIN)))
+                Ok(Expr::Literal(Value::int(i64::MIN)))
             } else {
                 Err(ParseError::structural(
                     "expr",
@@ -2917,7 +3051,7 @@ fn apply_unary_neg(ctx: &SpanContext, expr: Expr) -> ParseResult<Expr> {
                 // the shared arithmetic helper to a runtime Type Error.
                 Ok(Expr::Arithmetic {
                     op: ArithOp::Sub,
-                    left: Box::new(Expr::Literal(Value::Int(0))),
+                    left: Box::new(Expr::Literal(Value::int(0))),
                     right: Box::new(other),
                 })
             }
@@ -2937,20 +3071,20 @@ fn try_fold_arith(op: ArithOp, left: &Expr, right: &Expr) -> Option<Expr> {
 }
 
 fn fold_arith_values(op: ArithOp, left: &Value, right: &Value) -> Option<Value> {
-    match (left, right) {
-        (Value::Int(a), Value::Int(b)) => {
+    match (left.as_i64(), right.as_i64()) {
+        (Some(a), Some(b)) => {
             let v = match op {
-                ArithOp::Add => a.checked_add(*b)?,
-                ArithOp::Sub => a.checked_sub(*b)?,
-                ArithOp::Mul => a.checked_mul(*b)?,
-                ArithOp::Div => a.checked_div(*b)?,
+                ArithOp::Add => a.checked_add(b)?,
+                ArithOp::Sub => a.checked_sub(b)?,
+                ArithOp::Mul => a.checked_mul(b)?,
+                ArithOp::Div => a.checked_div(b)?,
             };
-            Some(Value::Int(v))
+            Some(Value::int(v))
         }
-        (Value::Int(a), Value::Float(b)) => fold_float(op, *a as f64, *b),
-        (Value::Float(a), Value::Int(b)) => fold_float(op, *a, *b as f64),
-        (Value::Float(a), Value::Float(b)) => fold_float(op, *a, *b),
-        _ => None,
+        _ => {
+            let (af, bf) = (as_f64(left)?, as_f64(right)?);
+            fold_float(op, af, bf)
+        }
     }
 }
 
@@ -2970,7 +3104,7 @@ fn fold_float(op: ArithOp, a: f64, b: f64) -> Option<Value> {
         }
     };
     if v.is_finite() {
-        Some(Value::Float(v))
+        Some(Value::float(v))
     } else {
         None
     }
@@ -2980,8 +3114,8 @@ fn try_fold_compare(op: CompareOp, left: &Expr, right: &Expr) -> Option<Expr> {
     let (Expr::Literal(lv), Expr::Literal(rv)) = (left, right) else {
         return None;
     };
-    match (lv, rv) {
-        (Value::Int(a), Value::Int(b)) => {
+    match (lv.as_i64(), rv.as_i64()) {
+        (Some(a), Some(b)) => {
             let r = match op {
                 CompareOp::Eq => a == b,
                 CompareOp::Ne => a != b,
@@ -2990,11 +3124,16 @@ fn try_fold_compare(op: CompareOp, left: &Expr, right: &Expr) -> Option<Expr> {
                 CompareOp::Gt => a > b,
                 CompareOp::Ge => a >= b,
             };
-            Some(Expr::Literal(Value::Bool(r)))
+            Some(Expr::Literal(Value::bool(r)))
         }
-        (Value::Int(_), Value::Float(_))
-        | (Value::Float(_), Value::Int(_))
-        | (Value::Float(_), Value::Float(_)) => {
+        _ => {
+            if let (Some(a), Some(b)) = (lv.as_bool(), rv.as_bool()) {
+                return match op {
+                    CompareOp::Eq => Some(Expr::Literal(Value::bool(a == b))),
+                    CompareOp::Ne => Some(Expr::Literal(Value::bool(a != b))),
+                    _ => None,
+                };
+            }
             let (af, bf) = (as_f64(lv)?, as_f64(rv)?);
             let r = match op {
                 CompareOp::Eq => af == bf,
@@ -3004,21 +3143,17 @@ fn try_fold_compare(op: CompareOp, left: &Expr, right: &Expr) -> Option<Expr> {
                 CompareOp::Gt => af > bf,
                 CompareOp::Ge => af >= bf,
             };
-            Some(Expr::Literal(Value::Bool(r)))
+            Some(Expr::Literal(Value::bool(r)))
         }
-        (Value::Bool(a), Value::Bool(b)) => match op {
-            CompareOp::Eq => Some(Expr::Literal(Value::Bool(a == b))),
-            CompareOp::Ne => Some(Expr::Literal(Value::Bool(a != b))),
-            _ => None,
-        },
-        _ => None,
     }
 }
 
 fn as_f64(v: &Value) -> Option<f64> {
-    match v {
-        Value::Int(n) => Some(*n as f64),
-        Value::Float(f) if f.is_finite() => Some(*f),
+    if let Some(n) = v.as_i64() {
+        return Some(n as f64);
+    }
+    match v.as_f64() {
+        Some(f) if f.is_finite() => Some(f),
         _ => None,
     }
 }
@@ -3084,15 +3219,6 @@ fn expr_to_rpn(expr: &Expr) -> Option<Vec<MathOp>> {
             keys: keys.clone(),
         }]),
         Expr::Call { name, args } => {
-            if name == "INSPECT" {
-                let [arg] = args.as_slice() else {
-                    return None;
-                };
-                if let Expr::Var(var) = arg {
-                    return Some(vec![MathOp::Inspect(var.clone())]);
-                }
-                return None;
-            }
             let mut ops = Vec::new();
             for arg in args {
                 ops.extend(expr_to_rpn(arg)?);
@@ -3103,6 +3229,7 @@ fn expr_to_rpn(expr: &Expr) -> Option<Vec<MathOp>> {
             });
             Some(ops)
         }
+        Expr::Inspect(var) => Some(vec![MathOp::Inspect(var.clone())]),
         Expr::Arithmetic { op, left, right } => {
             let mut ops = expr_to_rpn(left)?;
             ops.extend(expr_to_rpn(right)?);
@@ -3146,20 +3273,20 @@ fn parse_expr_atom(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Expr> {
             Ok(Expr::Var(name))
         }
         Rule::env_read => parse_env_read(ctx, inner).map(Expr::Env),
-        Rule::pipe_read => parse_pipe_read(ctx, inner).map(|name| Expr::Literal(Value::Pipe(name))),
+        Rule::pipe_read => parse_pipe_read(ctx, inner).map(|name| Expr::Literal(Value::pipe(name))),
         Rule::list_literal => parse_list_literal(ctx, inner),
         Rule::map_literal => parse_map_literal(ctx, inner),
         Rule::string_literal | Rule::quoted_string => {
             let s = parse_quoted_string(inner)?;
-            Ok(Expr::Literal(Value::String(s)))
+            Ok(Expr::Literal(Value::string(s)))
         }
         Rule::numeric_literal => parse_numeric_literal(ctx, inner),
         Rule::bare_word => {
             let s = inner.as_str().to_string();
             match s.as_str() {
-                "true" => Ok(Expr::Literal(Value::Bool(true))),
-                "false" => Ok(Expr::Literal(Value::Bool(false))),
-                _ => Ok(Expr::Literal(Value::String(s))),
+                "true" => Ok(Expr::Literal(Value::bool(true))),
+                "false" => Ok(Expr::Literal(Value::bool(false))),
+                _ => Ok(Expr::Literal(Value::string(s))),
             }
         }
         _ => Err(ParseError::structural(
@@ -3188,7 +3315,7 @@ fn parse_numeric_literal(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Exp
                 &span,
             ));
         }
-        return Ok(Expr::Literal(Value::Float(parsed)));
+        return Ok(Expr::Literal(Value::float(parsed)));
     }
     let digits: u64 = text.parse().map_err(|_| {
         ParseError::structural(
@@ -3198,7 +3325,7 @@ fn parse_numeric_literal(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Exp
         )
     })?;
     if digits <= i64::MAX as u64 {
-        Ok(Expr::Literal(Value::Int(digits as i64)))
+        Ok(Expr::Literal(Value::int(digits as i64)))
     } else if digits == i64::MAX as u64 + 1 {
         Ok(Expr::UnsignedIntBoundary(digits))
     } else {
@@ -3284,12 +3411,30 @@ fn parse_func_call(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Expr> {
             _ => {}
         }
     }
-    Ok(Expr::Call {
-        name: name.ok_or_else(|| {
-            ParseError::structural("expr", "function call requires a name".to_string(), &span)
-        })?,
-        args,
-    })
+    let name = name.ok_or_else(|| {
+        ParseError::structural("expr", "function call requires a name".to_string(), &span)
+    })?;
+    // `INSPECT` lowers to its own node carrying the variable unevaluated:
+    // pre-evaluating to a `Value` would lose the binding name. Anything else
+    // stays a generic call dispatched by the runtime registry.
+    if name == "INSPECT" {
+        let [arg] = args.as_slice() else {
+            return Err(ParseError::structural(
+                "expr",
+                "INSPECT requires exactly one argument: INSPECT($var)".to_string(),
+                &span,
+            ));
+        };
+        if let Expr::Var(var) = arg {
+            return Ok(Expr::Inspect(var.clone()));
+        }
+        return Err(ParseError::structural(
+            "expr",
+            format!("INSPECT requires a $variable argument, found {arg:?}"),
+            &span,
+        ));
+    }
+    Ok(Expr::Call { name, args })
 }
 
 fn parse_list_literal(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Expr> {

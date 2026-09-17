@@ -142,6 +142,29 @@ fn current_line_command(line: &str) -> Option<Command> {
     Command::parse(head)
 }
 
+/// True for UPPERCASE function heads (`GREET`, `LOAD_TOML`): the token-level
+/// mirror of the `func_call_head` grammar rule.
+fn is_upper_func_head(text: &str) -> bool {
+    let mut chars = text.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_uppercase() => (),
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// True when the current line ends with a bare-call head: an uppercase
+/// identifier that is neither a known command nor a statement keyword.
+/// Used to attach `(` contiguously (see the parenthesis group handling).
+fn trailing_call_head(line: &str) -> bool {
+    let Some(token) = line.split_whitespace().last() else {
+        return false;
+    };
+    is_upper_func_head(token)
+        && Command::parse(token).is_none()
+        && !Command::is_statement_keyword(token)
+}
+
 /// Check if a brace group is a `{{ ... }}` template placeholder.
 /// Rust lexes `{{ env:KEY }}` as a brace group containing a single nested brace group.
 fn is_template_group(g: &proc_macro2::Group) -> bool {
@@ -368,7 +391,29 @@ fn walk(
                             }
                         }
                         _ => {
-                            push_fragment(line, &open.to_string(), *last_was_command || gap_space);
+                            // A `(` group after an uppercase non-command head
+                            // is a bare call: push it contiguously so the
+                            // string grammar routes `FOO(...)` to
+                            // `bare_call_statement`, except when source spans
+                            // show a real gap (`FOO (` stays an instruction).
+                            // Commands keep existing spacing (`ECHO (1 + 2)`).
+                            // Note: this bypasses `push_fragment`, whose
+                            // `needs_space` heuristic would re-insert the
+                            // space we are deliberately dropping.
+                            let attach_call = open == '('
+                                && trailing_call_head(line)
+                                && last_span_end
+                                    .map(|prev| prev == span.start())
+                                    .unwrap_or(true);
+                            if attach_call {
+                                line.push(open);
+                            } else {
+                                push_fragment(
+                                    line,
+                                    &open.to_string(),
+                                    *last_was_command || gap_space,
+                                );
+                            }
                             *last_was_command = false;
                             let mut inner_span_end = None;
                             walk(
@@ -439,16 +484,42 @@ fn walk(
                 // They must still trigger line finalization so they start on a new line.
                 // The same holds for the other structural statements parsed by PEG
                 // rules rather than plain-command lowering (AWAIT, CANCEL, FUNC,
-                // CALL, RETURN, WHILE, BREAK, CONTINUE): without this, `FUNC`
+                // RETURN, WHILE, BREAK, CONTINUE): without this, `FUNC`
                 // after `MKDIR dist` would glue onto the same line.
                 let is_new_statement = super::Command::is_statement_keyword(&ident_text);
+                // A bare `NAME(...)` call opens a statement when it starts a
+                // new source line with an empty continuation state. This
+                // mirrors the string grammar, where statement calls begin
+                // lines: `GREET("ada")` after `WRITE a.txt hi` must split,
+                // while `ECHO GREET("ada")` (same line, argument position)
+                // and `LET $r: STRING = GREET("ada")` (after `=`) stay glued.
+                // `FOO (` with a space is not a call (see `dsl.pest`), so a
+                // gap between the head and the paren group opts out.
+                let is_bare_call_start = !is_command
+                    && is_upper_func_head(&ident_text)
+                    && matches!(
+                        next,
+                        Some(TokenTree::Group(g))
+                            if g.delimiter() == Delimiter::Parenthesis
+                    )
+                    && {
+                        let head_end = span.end();
+                        match next {
+                            Some(TokenTree::Group(g)) => {
+                                let paren_start = g.span().start();
+                                paren_start.line == head_end.line
+                                    && paren_start.column == head_end.column
+                            }
+                            _ => false,
+                        }
+                    };
                 let trimmed = line.trim();
                 let trimmed_empty = trimmed.is_empty();
                 let guard_prefix = trimmed.starts_with('[');
                 let line_requires_inner = line_expects_inner_command(trimmed);
                 // A line ending in `=` (or the `IN` of a FOR header) expects an
                 // expression next: `LET $o: STRING = ECHO hi`,
-                // `LET $r: STRING = CALL F()`,
+                // `LET $r: STRING = F()`,
                 // `LET $t: HANDLE = ASYNC ...`, `FOR $x: STRING IN [...]`.
                 // A statement keyword there continues the line instead of
                 // starting a new one.
@@ -463,6 +534,18 @@ fn walk(
                 } else if is_new_statement && !trimmed_empty && !guard_prefix && !expects_expr {
                     let current_expects_inner = line_expects_inner_command(trimmed);
                     should_finalize = !line_is_run_context(trimmed) && !current_expects_inner;
+                }
+                // Bare calls split like keywords when they open a new source
+                // line after a complete statement. Same-line occurrences
+                // (command arguments, parenthesized groups) attach instead.
+                if is_bare_call_start
+                    && !trimmed_empty
+                    && !guard_prefix
+                    && !expects_expr
+                    && !line_is_run_context(trimmed)
+                    && last_span_end.is_some_and(|prev| span.start().line > prev.line)
+                {
+                    should_finalize = true;
                 }
                 if is_command
                     && !trimmed_empty
@@ -671,15 +754,16 @@ mod tests {
 
     #[test]
     fn braced_structural_statements_start_new_lines() {
-        // FUNC, CALL, WHILE (and friends) are parsed by PEG rules rather than
-        // plain-command lowering, so the token walker must still recognize them
-        // as statement starters instead of gluing them onto the previous line.
+        // FUNC, bare calls, WHILE (and friends) are parsed by PEG rules
+        // rather than plain-command lowering, so the token walker must still
+        // recognize them as statement starters instead of gluing them onto
+        // the previous line.
         let ts: proc_macro2::TokenStream = indoc! {r#"
             WRITE a.txt hi
             FUNC GREET($name: STRING) {
                 RETURN $name
             }
-            CALL GREET("ada")
+            GREET("ada")
             WHILE $flag {
                 BREAK
             }
@@ -697,7 +781,7 @@ mod tests {
     #[test]
     fn braced_expression_continuations_stay_on_one_line() {
         // A statement keyword after `=` or `IN` continues the line: LET-capture
-        // (`= ECHO ...`, `= CALL ...`) and list literals (`= [...]`,
+        // (`= ECHO ...`, `= F(...)`) and list literals (`= [...]`,
         // `IN [...]`) must not split.
         let ts: proc_macro2::TokenStream = indoc! {r#"
             LET $names: LIST = ["alpha", "beta"]
