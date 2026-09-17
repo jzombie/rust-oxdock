@@ -1,12 +1,12 @@
 ## Extend the language
 
-New types and functions take two attributes and three calls. Small
+New types and functions take two attributes, a type registration, and a function module. Small
 `Copy` scalars can ride inline on the stack with zero allocation
 instead of heap boxing; both forms, with stateful functions, live under
 [Extending OxDock from Rust](#extending-oxdock-from-rust) below.
 
 ```rust
-use oxdock::{Engine, OxDockType, Value, oxdock_func, oxdock_type};
+use oxdock::{Engine, HostModule, OxDockFn, OxDockType, Value, oxdock_func, oxdock_type};
 use std::fmt;
 
 /// Word count summary: computed in Rust, carried as one script value.
@@ -46,11 +46,16 @@ fn word_count(summary: Value) -> anyhow::Result<Value> {
 fn main() -> anyhow::Result<()> {
     let mut engine = Engine::new();
     engine.register_type::<Stats>();
-    engine.register_fn(Summarize);
-    engine.register_fn(WordCount);
+    engine.register_module(HostModule {
+        name: "DEMO".to_string(),
+        funcs: vec![Summarize::registration(), WordCount::registration()],
+        types: vec![],
+    });
     let temp = oxdock_fs::GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
     let steps: Vec<oxdock::oxdock_parser::Step> = oxdock::oxdock! {
+        modules: [DEMO],
+        IMPORT [DEMO]
         LET $s: STATS = STATS("hello brave world")
         LET $n: INT = WORD_COUNT($s)
         ASSERT_EQ $n 3

@@ -1,13 +1,15 @@
 ## Extending OxDock from Rust
 
-Scripts call host functions and custom types that Rust code registers.
-Registration is two calls on one facade. This example runs as written:
-the shape first, the definitions it names right below it.
+Scripts call host functions and custom types that Rust code registers
+under a module. Registration is a type plus a module on one facade, and
+scripts name the module: `IMPORT [DEMO]` lets the rest call
+`MAKE_TAG()` bare, or qualify as `DEMO::MAKE_TAG()`. This example runs as
+written: the shape first, the definitions it names right below it.
 
 ### Complete example: define a type, define functions, run a script
 
 ```rust
-use oxdock::{Engine, OxDockType, oxdock_func, oxdock_type};
+use oxdock::{Engine, HostModule, OxDockFn, OxDockType, oxdock_func, oxdock_type};
 use std::fmt;
 
 // The script below is the DSL itself, not a string: the `oxdock!` macro
@@ -16,12 +18,17 @@ use std::fmt;
 fn main() -> anyhow::Result<()> {
     let mut engine = Engine::new();
     engine.register_type::<Tag>();
-    engine.register_fn(MakeTag);
-    engine.register_fn(ReadTag);
+    engine.register_module(HostModule {
+        name: "DEMO".to_string(),
+        funcs: vec![MakeTag::registration(), ReadTag::registration()],
+        types: vec![],
+    });
 
     let temp = oxdock_fs::GuardedPath::tempdir().unwrap();
     let root_path = temp.as_guarded_path().clone();
     let steps: Vec<oxdock::oxdock_parser::Step> = oxdock::oxdock! {
+        modules: [DEMO],
+        IMPORT [DEMO]
         LET $t: TAG = MAKE_TAG()
         LET $s: STRING = READ_TAG($t)
         ASSERT_EQ $s "demo"
@@ -96,7 +103,7 @@ exposes variables, environment, pipes, and IO. Override the DSL name and
 the declared return type explicitly when the defaults do not fit:
 
 ```rust
-use oxdock::{StepCtx, oxdock_func};
+use oxdock::{HostModule, OxDockFn, StepCtx, oxdock_func};
 use oxdock::oxdock_core::ProcessManager;
 
 /// Read an environment variable, defaulting to empty.
@@ -110,7 +117,11 @@ fn env_or<P: ProcessManager>(
 
 fn main() {
     let mut engine = oxdock::Engine::new();
-    engine.register_fn(EnvOr);
+    engine.register_module(HostModule {
+        name: "DEMO".to_string(),
+        funcs: vec![EnvOr::registration()],
+        types: vec![],
+    });
 }
 ```
 
@@ -176,7 +187,7 @@ reads one cell through its accessor; from a script the same call spells
 unavailable by the boundary above.
 
 ```rust
-use oxdock::{OxDockType, Value, oxdock_func, oxdock_type};
+use oxdock::{HostModule, OxDockFn, OxDockType, Value, oxdock_func, oxdock_type};
 use std::fmt;
 
 /// Integer grid with no literal syntax: scripts query it through functions.
@@ -221,13 +232,19 @@ fn main() -> anyhow::Result<()> {
 
     let mut engine = oxdock::Engine::new();
     engine.register_type::<Matrix>();
-    engine.register_fn(MakeMatrix);
-    engine.register_fn(MatrixGet);
+    engine.register_module(HostModule {
+        name: "DEMO".to_string(),
+        funcs: vec![
+            MakeMatrix::registration(),
+            MatrixGet::registration(),
+        ],
+        types: vec![],
+    });
     let temp = oxdock_fs::GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
     let run = engine.run_script(
         &root,
-        "LET $m: MATRIX = MAKE_MATRIX()\nLET $c: INT = MATRIX_GET($m, 0, 1)\n",
+        "IMPORT [DEMO]\nLET $m: MATRIX = MAKE_MATRIX()\nLET $c: INT = MATRIX_GET($m, 0, 1)\n",
     )?;
     assert_eq!(run.bindings["c"].as_i64(), Some(2));
     Ok(())

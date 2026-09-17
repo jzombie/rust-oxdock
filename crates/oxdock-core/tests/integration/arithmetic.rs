@@ -10,7 +10,10 @@ fn guard_root(temp: &GuardedTempDir) -> GuardedPath {
 }
 
 fn run_script(root: &GuardedPath, script: &str) -> Result<(), anyhow::Error> {
-    let steps = oxdock_core::parse_script(script).expect("parse script");
+    // File-local scripts call `STD` builtins; the import is fixture,
+    // not subject: `IMPORT` semantics are covered in `import.rs`.
+    let steps =
+        oxdock_core::parse_script(&format!("IMPORT [STD]\n{script}")).expect("parse script");
     run_steps_with_context_result_with_io(root, root, &steps, ExecIo::new()).map(|_| ())
 }
 

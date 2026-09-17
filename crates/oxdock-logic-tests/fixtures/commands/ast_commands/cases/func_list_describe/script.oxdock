@@ -1,3 +1,4 @@
+IMPORT [STD]
 FUNC HELLO($name: STRING) {
     RETURN $name
 }
@@ -5,7 +6,7 @@ LET $names: LIST = FUNCTIONS()
 ECHO "{{ $names }}"
 ASSERT_CONTAINS stdout "GLOB"
 ASSERT_CONTAINS stdout "HELLO"
-LET $d: MAP = DESCRIBE("GLOB")
+LET $d: MAP = DESCRIBE("STD::GLOB")
 WRITE kind.txt "{{ $d.kind }}"
-LET $h: MAP = DESCRIBE("HELLO")
+LET $h: MAP = DESCRIBE("SCRIPT::HELLO")
 WRITE hello-kind.txt "{{ $h.kind }}"

@@ -26,7 +26,9 @@ pub fn run(repo_root: &Path) -> Result<()> {
     let root = GuardedPath::new_root(repo_root)?;
 
     let steps: Vec<oxdock_parser::Step> = oxdock! {
+        modules: [DOCS],
         INHERIT_ENV [CRATE_VERSION]
+        IMPORT [STD, DOCS]
 
         // Version for every expansion scope below.
         LET $version: STRING = WORKSPACE_VERSION()
@@ -39,13 +41,13 @@ pub fn run(repo_root: &Path) -> Result<()> {
 
         // Registry-derived inputs declared by the config.
         FUNC REFRESH_GENERATED($gen: MAP) {
-            LET $index: STRING = COMMAND_INDEX()
+            LET $index: STRING = DOCS::COMMAND_INDEX()
             WRITE $gen.command_index $index
 
-            LET $body: STRING = COMMAND_BODY()
+            LET $body: STRING = DOCS::COMMAND_BODY()
             WRITE $gen.command_body $body
 
-            LET $funcref: STRING = FUNCTION_REFERENCE()
+            LET $funcref: STRING = DOCS::FUNCTION_REFERENCE()
             WRITE $gen.function_reference $funcref
         }
         REFRESH_GENERATED($gen)
@@ -54,32 +56,32 @@ pub fn run(repo_root: &Path) -> Result<()> {
         FUNC SYNC_MEMBER($member: STRING) {
             ECHO "syncing values for {{ $member }}"
 
-            LET $pkg: MAP = CARGO_PACKAGE($member)
+            LET $pkg: MAP = DOCS::CARGO_PACKAGE($member)
             IF $pkg.name != "" {
                 LET $values_path: STRING = "{{ $member }}/.oxdock/template/values.json"
                 LET $pt: STRING = PATH_TYPE($values_path)
                 IF $pt == "file" {
                     LET $existing: MAP = LOAD_JSON($values_path)
-                    LET $json: STRING = PACKAGE_VALUES_JSON($pkg, $existing)
+                    LET $json: STRING = DOCS::PACKAGE_VALUES_JSON($pkg, $existing)
                     WRITE $values_path $json
                 } ELSE {
                     LET $empty: MAP = {}
-                    LET $fresh: STRING = PACKAGE_VALUES_JSON($pkg, $empty)
+                    LET $fresh: STRING = DOCS::PACKAGE_VALUES_JSON($pkg, $empty)
                     WRITE $values_path $fresh
                 }
             }
         }
-        FOR $member: STRING IN WORKSPACE_MEMBERS() {
+        FOR $member: STRING IN DOCS::WORKSPACE_MEMBERS() {
             SYNC_MEMBER($member)
         }
 
         // Track one target name, failing on duplicates.
         FUNC NOTE_TARGET($seen: MAP, $name: STRING, $tj: STRING) {
-            IF HAS_KEY($seen, $name) {
+            IF DOCS::HAS_KEY($seen, $name) {
                 ECHO "duplicate target name '{{ $name }}' (in {{ $tj }})"
                 EXIT 1
             }
-            RETURN MAP_SET($seen, $name, $tj)
+            RETURN DOCS::MAP_SET($seen, $name, $tj)
         }
 
         // One target manifest as JSON: expand every fragment once.
@@ -89,17 +91,17 @@ pub fn run(repo_root: &Path) -> Result<()> {
                 LET $group_map: MAP = {}
                 FOR $pattern: STRING IN $patterns {
                     FOR $file_rel: STRING IN GLOB($pattern) {
-                        LET $stem: STRING = FILE_STEM($file_rel)
+                        LET $stem: STRING = DOCS::FILE_STEM($file_rel)
                         IF HAS_KEY($group_map, $stem) {
                             ECHO "target '{{ $t.name }}': '{{ $stem }}' matches more than one file; placeholders must resolve to exactly one"
                             EXIT 1
                         }
                         LET $raw: STRING = READ $file_rel
                         LET $expanded: STRING = EXPAND_FRAGMENT($raw, $docs_global, $docs_ctx, $version)
-                        $group_map = MAP_SET($group_map, $stem, $expanded)
+                        $group_map = DOCS::MAP_SET($group_map, $stem, $expanded)
                     }
                 }
-                $manifest = MAP_SET($manifest, $group, $group_map)
+                $manifest = DOCS::MAP_SET($manifest, $group, $group_map)
             }
             RETURN TO_JSON($manifest)
         }
@@ -109,7 +111,7 @@ pub fn run(repo_root: &Path) -> Result<()> {
                 LET $file: MAP = LOAD_JSON($tj)
                 FOR $t: MAP IN $file.targets {
                     $seen = NOTE_TARGET($seen, $t.name, $tj)
-                    IF HAS_KEY($t, "globs") {
+                    IF DOCS::HAS_KEY($t, "globs") {
                         ECHO "target '{{ $t.name }}' still uses 'globs'; declare 'template' and grouped 'fragments' patterns instead"
                         EXIT 1
                     }
@@ -144,7 +146,7 @@ pub fn run(repo_root: &Path) -> Result<()> {
     fs_resolver.set_workspace_root(root.clone());
     let fs: Box<dyn WorkspaceFs> = Box::new(fs_resolver);
     let mut engine = Engine::new().with_io(ExecIo::new());
-    engine.register_hosts(host::registrations());
+    engine.register_module(host::module());
     engine
         .run_steps_on(fs, &steps, default_process_manager())
         .context("render documents")?;

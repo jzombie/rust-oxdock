@@ -1,11 +1,10 @@
-use crate::common::mock_lower;
+use crate::common::{mock_lower, parse_with_math};
 
 use indoc::indoc;
 use oxdock_parser::ast::StepKind;
-use oxdock_parser::parse_script;
 
 fn parse_one(script: &str) -> StepKind {
-    let steps = parse_script(script, mock_lower).expect("parse LET capture");
+    let steps = parse_with_math(script, mock_lower).expect("parse LET capture");
     assert_eq!(steps.len(), 1, "expected one step, got {steps:?}");
     steps.into_iter().next().unwrap().kind
 }
@@ -69,7 +68,7 @@ fn let_capture_func_call_stays_expression() {
 
 #[test]
 fn let_capture_unknown_command_with_args_stays_error() {
-    let err = parse_script("LET $x: STRING = FROBNICATE hi\n", mock_lower)
+    let err = parse_with_math("LET $x: STRING = FROBNICATE hi\n", mock_lower)
         .expect_err("unknown command with args must fail");
     assert!(
         err.to_string().contains("FROBNICATE"),
@@ -106,7 +105,7 @@ fn let_capture_timeout_wrapper() {
 
 #[test]
 fn let_capture_rejects_inline_async() {
-    let err = parse_script("LET $x: STRING = TIMEOUT 5s ASYNC ECHO hi\n", mock_lower)
+    let err = parse_with_math("LET $x: STRING = TIMEOUT 5s ASYNC ECHO hi\n", mock_lower)
         .expect_err("inline ASYNC in capture must fail");
     assert!(err.to_string().contains("ASYNC"), "unexpected error: {err}");
 }
@@ -114,7 +113,8 @@ fn let_capture_rejects_inline_async() {
 #[test]
 fn let_async_still_binds_task_handle() {
     // No regression: ASYNC-led lines still produce AssignAsync.
-    let steps = parse_script("LET $t: HANDLE = ASYNC ECHO hi\n", mock_lower).expect("parse ASYNC");
+    let steps =
+        parse_with_math("LET $t: HANDLE = ASYNC ECHO hi\n", mock_lower).expect("parse ASYNC");
     assert!(
         matches!(steps[0].kind, StepKind::AssignAsync { .. }),
         "expected AssignAsync, got {:?}",
@@ -129,13 +129,13 @@ fn let_capture_display_round_trip() {
         "LET $o: STRING = AWAIT $t\n",
         "LET $x: STRING = TIMEOUT 5s ECHO hi\n",
     ] {
-        let steps = parse_script(script, mock_lower).expect("parse");
+        let steps = parse_with_math(script, mock_lower).expect("parse");
         let rendered = steps
             .iter()
             .map(|s| s.to_string())
             .collect::<Vec<_>>()
             .join("\n");
-        let reparsed = parse_script(&rendered, mock_lower).expect("reparse");
+        let reparsed = parse_with_math(&rendered, mock_lower).expect("reparse");
         assert_eq!(steps, reparsed, "round-trip failed for {script}");
     }
 }
@@ -148,7 +148,7 @@ fn let_capture_example_block() {
         LET $t: HANDLE = ASYNC ECHO done
         LET $o: STRING = AWAIT $t
     "#};
-    let steps = parse_script(script, mock_lower).expect("parse mixed block");
+    let steps = parse_with_math(script, mock_lower).expect("parse mixed block");
     assert_eq!(steps.len(), 4);
     assert!(matches!(steps[0].kind, StepKind::Assign { .. }));
     assert!(matches!(steps[1].kind, StepKind::AssignCapture { .. }));

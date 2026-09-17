@@ -55,21 +55,26 @@ define_pipeline! {
 /// native fails here; hosts unknown at parse time fall back to the runtime
 /// `define_func` guard.
 pub fn parse_script(input: &str) -> anyhow::Result<Vec<oxdock_parser::Step>> {
-    parse_script_with_hosts(input, builtin_function_names())
+    parse_script_with_modules(input, std_module_table())
 }
 
-/// Parse with caller-known host names added to the reserved set, so `FUNC`
-/// shadowing a host fails at parse time instead of at runtime.
-pub fn parse_script_with_hosts(
+/// Parse with a module provenance table so calls resolve statically:
+/// qualified `MODULE::NAME` checks membership, bare `NAME` resolves through
+/// `SCRIPT` definitions and `IMPORT`ed modules. Reserved covers builtins
+/// plus every table module, so `FUNC` shadowing any of them fails here;
+/// hosts unknown at parse time fall back to the runtime `define_func`
+/// guard.
+pub fn parse_script_with_modules(
     input: &str,
-    host_names: std::collections::HashSet<String>,
+    modules: oxdock_parser::ModuleTable,
 ) -> anyhow::Result<Vec<oxdock_parser::Step>> {
     let mut reserved = builtin_function_names();
-    reserved.extend(host_names);
-    Ok(oxdock_parser::parse_script_with_hosts(
+    reserved.extend(modules.reserved_base_names());
+    Ok(oxdock_parser::parse_script_with_modules(
         input,
         lower_command,
         reserved,
+        modules,
     )?)
 }
 

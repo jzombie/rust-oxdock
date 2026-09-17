@@ -112,7 +112,7 @@
 //! and unit testable) and emits one sibling next to it: a registration
 //! marker struct named after the function in `UpperCamelCase` (`make_tag`
 //! becomes `MakeTag`) implementing `::oxdock_core::OxDockFn`. Pass the
-//! marker to `Engine::register_fn`. Generated code names `::oxdock_core::`
+//! marker into a `HostModule` for `Engine::register_module`. Generated code names `::oxdock_core::`
 //! and `::anyhow::` paths, so using crates need both as direct
 //! dependencies.
 //!
@@ -133,7 +133,7 @@ use syn::{FnArg, ItemFn, Lit, Meta, Pat, Token, Type};
 /// `cx: &mut StepCtx<P>` first, `#[oxdock_func(pure)]` for pure scalar
 /// functions. Derives a registration marker (`UpperCamelCase` of the function
 /// name: `workspace_members` becomes `WorkspaceMembers`) implementing
-/// `OxDockFn`: pass it to `Engine::register_fn`.
+/// `OxDockFn`: group its marker into a `HostModule` for `Engine::register_module`.
 #[proc_macro_attribute]
 pub fn oxdock_func(attr: TokenStream, item: TokenStream) -> TokenStream {
     match expand_oxdock_func(attr, item) {
@@ -481,10 +481,9 @@ fn expand_func(options: FuncOptions, func: ItemFn) -> syn::Result<TokenStream2> 
     }
     // Registration marker: a unit struct in the type namespace (no collision
     // with the function itself), deriving its name from the Rust identifier.
-    // Users pass it to `Engine::register_fn` and never name an internal.
+    // Users group it into a `HostModule` and never name an internal.
     let marker_ident = format_ident!("{}", to_upper_camel_case(&ident.to_string()));
-    let marker_docs =
-        format!("Registration marker for `{dsl_name}`: pass to `Engine::register_fn`.");
+    let marker_docs = format!("Registration marker for `{dsl_name}`: group into a `HostModule`.");
     let (impl_generics, _, _) = func.sig.generics.split_for_impl();
 
     // Split the context parameter (when present) from DSL parameters.
@@ -637,6 +636,9 @@ fn expand_func(options: FuncOptions, func: ItemFn) -> syn::Result<TokenStream2> 
     let meta = quote! {
         ::oxdock_core::FuncMeta {
             name: #dsl_name.to_string(),
+            // Assigned at registration (`register_module` / builtins):
+            // markers never know their module.
+            module: String::new(),
             kind: #kind,
             params: Some(vec![#(#param_metas),*]),
             returns: #returns,

@@ -27,8 +27,8 @@ pub(crate) use self::handlers::{
 };
 pub use self::io::ExecIo;
 pub use self::native::{
-    FuncKind, FuncMeta, FuncParam, FunctionRegistry, HostRegistration, NativeFn, OxDockFn, PureFn,
-    builtin_function_metas, builtin_function_names,
+    FuncKind, FuncMeta, FuncParam, FunctionRegistry, HostModule, HostRegistration, NativeFn,
+    OxDockFn, PureFn, builtin_function_metas, builtin_function_names, std_module_table,
 };
 pub use self::state::ExecState;
 pub use self::steps::StepCtx;
@@ -239,6 +239,12 @@ pub fn run_steps_with_fs_with_io(
     run_steps_with_manager(fs, steps, default_process_manager(), io).map(|(cwd, _, _)| cwd)
 }
 
+/// Base name of a qualified `MODULE::NAME` reference for human-facing
+/// errors. Single source lives in `oxdock-parser`; listings (`FUNCTIONS()`,
+/// `DESCRIBE`) keep the qualified form while step errors name the callable
+/// as written.
+pub(crate) use oxdock_parser::base_name;
+
 /// Host introspection entry point: execute the DSL against a caller-provided
 /// filesystem and return the final working directory, the filesystem handle,
 /// and the top-level script variable bindings captured at `Flow::Done`.
@@ -253,28 +259,28 @@ pub fn run_steps_with_manager<P: ProcessManager>(
     process: P,
     io: ExecIo,
 ) -> Result<(GuardedPath, Box<dyn WorkspaceFs>, BTreeMap<String, Value>)> {
-    run_steps_with_manager_with_hosts(fs, steps, process, io, Vec::new(), Vec::new())
+    run_steps_with_manager_with_modules(fs, steps, process, io, Vec::new(), Vec::new())
 }
 
-/// Same as [`run_steps_with_manager`], plus host-registered functions and
-/// types. Each function entry becomes callable from the DSL as `NAME(...)`
-/// with full step context; each type descriptor becomes visible to `TYPES()`
-/// and valid for `LET $x: NAME` declarations carrying same-named opaque
-/// payloads. Names share one namespace with DSL and native entries.
+/// Same as [`run_steps_with_manager`], plus host modules and types. Each
+/// module's functions become callable as `MODULE::NAME` with full step
+/// context; each type descriptor becomes visible to `TYPES()` and valid for
+/// `LET $x: NAME` declarations carrying same-named opaque payloads.
 /// Authors should derive entries with `#[oxdock_func]` / `#[oxdock_type]`
-/// (see `oxdock-func-macro`) instead of hand-writing metadata and glue.
+/// (see `oxdock-func-macro`) and group them into [`HostModule`] instead of
+/// hand-writing metadata and glue.
 #[allow(clippy::type_complexity)]
-pub fn run_steps_with_manager_with_hosts<P: ProcessManager>(
+pub fn run_steps_with_manager_with_modules<P: ProcessManager>(
     fs: Box<dyn WorkspaceFs>,
     steps: &[Step],
     process: P,
     io: ExecIo,
-    hosts: Vec<HostRegistration<P>>,
+    modules: Vec<HostModule<P>>,
     types: Vec<&'static self::typing::TypeDescriptor>,
 ) -> Result<(GuardedPath, Box<dyn WorkspaceFs>, BTreeMap<String, Value>)> {
     let mut state = new_state(fs, io)?;
-    for host in hosts {
-        state.register_host(host);
+    for module in modules {
+        state.register_module(module);
     }
     for descriptor in types {
         state.register_type(descriptor);

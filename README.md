@@ -89,6 +89,8 @@ fn main() {
 
 For each artifact the macro emits a constant backed by `include_bytes!`, which bakes the file bytes into read-only binary data during compilation. At runtime `get()` scans a static table and returns a borrowed slice, so there are no file reads and no heap allocation. The support types only need `alloc::borrow::Cow` and core iterators, which is why it works in `no_std`.
 
+Asset scripts resolve `STD` (via `IMPORT [STD]`) and `SCRIPT` functions only. There is no `modules:` prefix here, and that is structural, not missing: opaque modules defer membership to runtime, but asset scripts execute at compile time with no `Engine` to resolve against. Scripts needing host functions belong in `build.rs` through the `Engine` facade instead.
+
 ### Run scripts inline
 
 The `oxdock!` macro builds the same DSL into a `Vec<Step>` at compile time, so tests and tools can run scripts without a file. Pass the steps to a `run_steps_*` runner with a guarded root. The root types live in `oxdock-fs`, so add both crates: `cargo add oxdock oxdock-fs`. Only portable commands are used below, so the script behaves identically on every OS.
@@ -155,6 +157,7 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     WITH_IO [stdout=pipe:log] ECHO "built {{ env:PROJECT }}"
     WITH_IO [stdin=pipe:log] READ_LINE $line
     WRITE dist/build.txt "{{ $line }}"
+    IMPORT [STD]
     FOR $f: STRING IN GLOB("dist/*.txt") {
         EXPAND $f
     }
@@ -179,15 +182,17 @@ assert_eq!(
 
 The top level runners need the default `cli` feature. With `--no-default-features`, run the same steps through `oxdock::oxdock_core::run_steps_*` instead.
 
+Scripts that call host functions declare their modules up front: the macro parses at compile time with only `STD` known, so `modules: [DEMO],` as the first line makes `IMPORT [DEMO]` and `DEMO::...` calls resolve (membership is checked at runtime). Scripts using only `STD` and `SCRIPT` functions omit it. See [Extending OxDock from Rust](#extending-oxdock-from-rust) for the complete example.
+
 ## Extend the language
 
-New types and functions take two attributes and three calls. Small
+New types and functions take two attributes, a type registration, and a function module. Small
 `Copy` scalars can ride inline on the stack with zero allocation
 instead of heap boxing; both forms, with stateful functions, live under
 [Extending OxDock from Rust](#extending-oxdock-from-rust) below.
 
 ```rust
-use oxdock::{Engine, OxDockType, Value, oxdock_func, oxdock_type};
+use oxdock::{Engine, HostModule, OxDockFn, OxDockType, Value, oxdock_func, oxdock_type};
 use std::fmt;
 
 /// Word count summary: computed in Rust, carried as one script value.
@@ -227,11 +232,16 @@ fn word_count(summary: Value) -> anyhow::Result<Value> {
 fn main() -> anyhow::Result<()> {
     let mut engine = Engine::new();
     engine.register_type::<Stats>();
-    engine.register_fn(Summarize);
-    engine.register_fn(WordCount);
+    engine.register_module(HostModule {
+        name: "DEMO".to_string(),
+        funcs: vec![Summarize::registration(), WordCount::registration()],
+        types: vec![],
+    });
     let temp = oxdock_fs::GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
     let steps: Vec<oxdock::oxdock_parser::Step> = oxdock::oxdock! {
+        modules: [DEMO],
+        IMPORT [DEMO]
         LET $s: STATS = STATS("hello brave world")
         LET $n: INT = WORD_COUNT($s)
         ASSERT_EQ $n 3
@@ -379,14 +389,16 @@ ASSERT_EQ $l "from-local"
 
 ## Extending OxDock from Rust
 
-Scripts call host functions and custom types that Rust code registers.
-Registration is two calls on one facade. This example runs as written:
-the shape first, the definitions it names right below it.
+Scripts call host functions and custom types that Rust code registers
+under a module. Registration is a type plus a module on one facade, and
+scripts name the module: `IMPORT [DEMO]` lets the rest call
+`MAKE_TAG()` bare, or qualify as `DEMO::MAKE_TAG()`. This example runs as
+written: the shape first, the definitions it names right below it.
 
 ### Complete example: define a type, define functions, run a script
 
 ```rust
-use oxdock::{Engine, OxDockType, oxdock_func, oxdock_type};
+use oxdock::{Engine, HostModule, OxDockFn, OxDockType, oxdock_func, oxdock_type};
 use std::fmt;
 
 // The script below is the DSL itself, not a string: the `oxdock!` macro
@@ -395,12 +407,17 @@ use std::fmt;
 fn main() -> anyhow::Result<()> {
     let mut engine = Engine::new();
     engine.register_type::<Tag>();
-    engine.register_fn(MakeTag);
-    engine.register_fn(ReadTag);
+    engine.register_module(HostModule {
+        name: "DEMO".to_string(),
+        funcs: vec![MakeTag::registration(), ReadTag::registration()],
+        types: vec![],
+    });
 
     let temp = oxdock_fs::GuardedPath::tempdir().unwrap();
     let root_path = temp.as_guarded_path().clone();
     let steps: Vec<oxdock::oxdock_parser::Step> = oxdock::oxdock! {
+        modules: [DEMO],
+        IMPORT [DEMO]
         LET $t: TAG = MAKE_TAG()
         LET $s: STRING = READ_TAG($t)
         ASSERT_EQ $s "demo"
@@ -475,7 +492,7 @@ exposes variables, environment, pipes, and IO. Override the DSL name and
 the declared return type explicitly when the defaults do not fit:
 
 ```rust
-use oxdock::{StepCtx, oxdock_func};
+use oxdock::{HostModule, OxDockFn, StepCtx, oxdock_func};
 use oxdock::oxdock_core::ProcessManager;
 
 /// Read an environment variable, defaulting to empty.
@@ -489,7 +506,11 @@ fn env_or<P: ProcessManager>(
 
 fn main() {
     let mut engine = oxdock::Engine::new();
-    engine.register_fn(EnvOr);
+    engine.register_module(HostModule {
+        name: "DEMO".to_string(),
+        funcs: vec![EnvOr::registration()],
+        types: vec![],
+    });
 }
 ```
 
@@ -555,7 +576,7 @@ reads one cell through its accessor; from a script the same call spells
 unavailable by the boundary above.
 
 ```rust
-use oxdock::{OxDockType, Value, oxdock_func, oxdock_type};
+use oxdock::{HostModule, OxDockFn, OxDockType, Value, oxdock_func, oxdock_type};
 use std::fmt;
 
 /// Integer grid with no literal syntax: scripts query it through functions.
@@ -600,13 +621,19 @@ fn main() -> anyhow::Result<()> {
 
     let mut engine = oxdock::Engine::new();
     engine.register_type::<Matrix>();
-    engine.register_fn(MakeMatrix);
-    engine.register_fn(MatrixGet);
+    engine.register_module(HostModule {
+        name: "DEMO".to_string(),
+        funcs: vec![
+            MakeMatrix::registration(),
+            MatrixGet::registration(),
+        ],
+        types: vec![],
+    });
     let temp = oxdock_fs::GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
     let run = engine.run_script(
         &root,
-        "LET $m: MATRIX = MAKE_MATRIX()\nLET $c: INT = MATRIX_GET($m, 0, 1)\n",
+        "IMPORT [DEMO]\nLET $m: MATRIX = MAKE_MATRIX()\nLET $c: INT = MATRIX_GET($m, 0, 1)\n",
     )?;
     assert_eq!(run.bindings["c"].as_i64(), Some(2));
     Ok(())
@@ -705,6 +732,7 @@ Parentheses mark the boundary between computing a value and running a pipeline s
 
 ```oxdock
 // Functions compute values; stdout stays untouched.
+IMPORT [STD]
 LET $t: STRING = PATH_TYPE("missing.txt")
 LET $n: INT = INT("41") + 1
 ASSERT_EQ $t "absent"
@@ -877,6 +905,7 @@ Bracket expressions may span lines. Chained guard lines apply conjunctively to t
 WRITE chained.txt applied
 
 // The artifact was never created.
+IMPORT [STD]
 LET $t: STRING = PATH_TYPE("chained.txt")
 ASSERT_EQ $t "absent"
 ```
@@ -1014,6 +1043,7 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | [`WHILE`](#while) | `WHILE <bool-expr> { <commands> }` |
 | [`BREAK`](#break) | `BREAK` |
 | [`CONTINUE`](#continue) | `CONTINUE` |
+| [`IMPORT`](#import) | `IMPORT [<module>, ...] \| IMPORT <module>` |
 
 ### WITH_IO
 
@@ -1116,6 +1146,7 @@ FOR $k: STRING, $v: INT IN $map {
 ```oxdock
 # single-line body; $x is a template path, WHO an override
 WRITE a.txt "hi \{{ env:WHO }}!"
+IMPORT [STD]
 FOR $x: STRING IN GLOB("*.txt") { EXPAND $x WHO=World }
 ASSERT_CONTAINS stdout "hi World!"
 ```
@@ -1140,6 +1171,7 @@ accepted as conditions.
 **Example: if else**
 
 ```oxdock
+IMPORT [STD]
 IF true {
   WRITE yes.txt taken
 } ELSE {
@@ -1169,6 +1201,7 @@ ASSERT_EQ $t "absent"
 **Example: logical condition composition**
 
 ```oxdock
+IMPORT [STD]
 LET $role: STRING = "admin"
 LET $level: INT = 3
 # || is true when either side holds; && needs both.
@@ -1318,6 +1351,7 @@ LET $too_early: STRING = "too late"
 ```oxdock
 # the RHS is an expression: GLOB(...) runs and binds a list
 WRITE a.txt "x"
+IMPORT [STD]
 LET $files: LIST = GLOB("*.txt")
 FOR $f: STRING IN $files { ECHO $f }
 ASSERT_CONTAINS stdout "a.txt"
@@ -1350,6 +1384,7 @@ ASSERT_EQ $out "hi\n"
 
 ```oxdock
 LET $size_str: STRING = ECHO 41
+IMPORT [STD]
 LET $total: INT = INT($size_str) + 1
 LET $ratio: FLOAT = 1 + 2.5
 # Int x Int stays INT: integer division truncates.
@@ -1364,6 +1399,7 @@ ASSERT_EQ $half 3
 ```oxdock
 # Binary fractions compare cleanly; decimal fractions may not:
 # 0.1 + 0.2 is 0.30000000000000004, so == is false.
+IMPORT [STD]
 LET $exact: BOOL = 0.5 + 0.25 == 0.75
 LET $decimal: BOOL = 0.1 + 0.2 == 0.3
 IF $exact {
@@ -1447,6 +1483,7 @@ ASSERT_EQ $count 2
 # Captured output is a string: `"100" + 1` is a Type Error.
 # Convert explicitly, then mutate with arithmetic.
 LET $raw: STRING = ECHO 100
+IMPORT [STD]
 LET $n: INT = INT($raw)
 $n = $n + 1
 # The declared type also converts plain strings on assignment.
@@ -1605,6 +1642,12 @@ FUNC definition is scoped to its block and reverts on exit. Names share
 one namespace with native and host-registered functions, which a FUNC
 may never shadow.
 
+Functions resolve like variables: a name is visible from its
+definition line, so recursion works but mutual recursion does
+not (the second name does not exist while the first body
+lowers). Calls name their module (`STD::GLOB(...)`) unless
+imported; see IMPORT.
+
 Invoke any function with one syntax: `NAME(...)` as a statement
 (discarding the value) or `LET $var: TYPE = NAME(...)` to capture
 the RETURN value (fallthrough without RETURN captures as "").
@@ -1739,6 +1782,42 @@ CONTINUE outside a loop, or across a FUNC or ASYNC boundary, is an error.
 FOR $x: STRING IN ["a", "b"] {
   CONTINUE
 }
+```
+
+
+### IMPORT
+
+Bring module functions into bare-call scope.
+
+**Syntax:** `IMPORT [<module>, ...] | IMPORT <module>`
+
+Every function call names its module (`STD::GLOB(...)`,
+`POLARS::READ_CSV(...)`) unless the module is imported:
+`IMPORT [STD]` lets the rest of the scope call `GLOB(...)`
+bare. Calls resolve at parse time against `SCRIPT`
+definitions first, then imported modules; unknown modules,
+unknown functions, and unimported bare calls are parse
+errors, never runtime surprises.
+
+IMPORT is a lowering directive, not a step: it applies from
+its line to the enclosing block exit, then reverts, exactly
+like `LET` scoping but with no runtime footprint. Guards do
+not apply to it. Two imported modules exporting one name is
+an ambiguity error: qualify the call instead.
+
+`EXPORT` is reserved for future script-module support and
+cannot be used yet.
+
+
+**Examples:**
+
+**Example: import**
+
+```oxdock
+WRITE a.txt "hi \{{ env:WHO }}!"
+IMPORT [STD]
+FOR $x: STRING IN GLOB("*.txt") { EXPAND $x WHO=World }
+ASSERT_CONTAINS stdout "hi World!"
 ```
 
 
@@ -2597,22 +2676,24 @@ Background ASYNC task handle for AWAIT/CANCEL.
 <!-- GENERATED by docs-gen from oxdock-core function metadata. Do not edit by hand. -->
 ## Functions
 
-Callable as `NAME(...)` in expressions. Introspectable from scripts with `FUNCTIONS()` and `DESCRIBE(name)`.
+Callable as `MODULE::NAME(...)` in expressions (or bare `NAME(...)` with the module imported via `IMPORT`). Introspectable from scripts with `FUNCTIONS()` and `DESCRIBE(name)`.
 
-### DESCRIBE
+### STD::DESCRIBE
 
-**Signature:** `DESCRIBE($name: STRING) -> MAP`
+**Signature:** `STD::DESCRIBE($name: STRING) -> MAP`
 
 **Contexts:** AST only
 
-Describe one function by name.
+Describe one function by qualified name.
 
-Returns a MAP with name, kind, params, returns, and summary. Errors on
+Returns a MAP with name, module, kind, params, returns, and summary.
+Bare names fail closed: `DESCRIBE` requires the qualified form (except
+`INSPECT`, which is syntax rather than a registry entry). Errors on
 unknown function.
 
-### FLOAT
+### STD::FLOAT
 
-**Signature:** `FLOAT($val) -> FLOAT`
+**Signature:** `STD::FLOAT($val) -> FLOAT`
 
 **Contexts:** AST, RPN
 
@@ -2620,19 +2701,20 @@ Convert a value to FLOAT.
 
 Parses f64 (accepts int strings), bails on non-finite or non-numeric.
 
-### FUNCTIONS
+### STD::FUNCTIONS
 
-**Signature:** `FUNCTIONS() -> LIST`
+**Signature:** `STD::FUNCTIONS() -> LIST`
 
 **Contexts:** AST only
 
 List all visible function names.
 
-Sorted LIST of DSL-defined plus native plus host-registered names.
+Sorted LIST of qualified `MODULE::NAME` entries: DSL-defined plus native
+plus host-registered names.
 
-### GLOB
+### STD::GLOB
 
-**Signature:** `GLOB($pattern: STRING) -> LIST`
+**Signature:** `STD::GLOB($pattern: STRING) -> LIST`
 
 **Contexts:** AST, RPN
 
@@ -2640,9 +2722,9 @@ List workspace paths matching a glob pattern.
 
 Sorted, root-relative LIST; empty on no match or `..` escape.
 
-### INT
+### STD::INT
 
-**Signature:** `INT($val) -> INT`
+**Signature:** `STD::INT($val) -> INT`
 
 **Contexts:** AST, RPN
 
@@ -2651,9 +2733,9 @@ Convert a value to INT.
 Trims ASCII whitespace and parses i64. Passes Int through; Float only
 when integral and finite.
 
-### LOAD_JSON
+### STD::LOAD_JSON
 
-**Signature:** `LOAD_JSON($path: STRING) -> MAP`
+**Signature:** `STD::LOAD_JSON($path: STRING) -> MAP`
 
 **Contexts:** AST, RPN
 
@@ -2661,9 +2743,9 @@ Load and parse a JSON file.
 
 Reads a workspace file and parses JSON into a DSL value.
 
-### LOAD_TOML
+### STD::LOAD_TOML
 
-**Signature:** `LOAD_TOML($path: STRING) -> MAP`
+**Signature:** `STD::LOAD_TOML($path: STRING) -> MAP`
 
 **Contexts:** AST, RPN
 
@@ -2671,9 +2753,9 @@ Load and parse a TOML file.
 
 Reads a workspace file and parses TOML into a DSL value.
 
-### PATH_TYPE
+### STD::PATH_TYPE
 
-**Signature:** `PATH_TYPE($path: STRING) -> STRING`
+**Signature:** `STD::PATH_TYPE($path: STRING) -> STRING`
 
 **Contexts:** AST only
 
@@ -2682,9 +2764,9 @@ Describe a filesystem entry.
 Reports file, dir, symlink (no-follow), or absent. AST-only by design;
 there is no RPN arm for filesystem IO.
 
-### TYPES
+### STD::TYPES
 
-**Signature:** `TYPES() -> LIST`
+**Signature:** `STD::TYPES() -> LIST`
 
 **Contexts:** AST only
 
@@ -2694,9 +2776,9 @@ Sorted LIST of startup plus host-registered type descriptors. Reads the
 run's name directory, so it runs on the AST path like the other
 introspection functions.
 
-### TYPE_DESCRIBE
+### STD::TYPE_DESCRIBE
 
-**Signature:** `TYPE_DESCRIBE($name: STRING) -> MAP`
+**Signature:** `STD::TYPE_DESCRIBE($name: STRING) -> MAP`
 
 **Contexts:** AST only
 

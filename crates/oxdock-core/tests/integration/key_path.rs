@@ -4,7 +4,10 @@ use oxdock_fs::{GuardedPath, PathResolver};
 use oxdock_parser::Value;
 use std::collections::BTreeMap;
 fn run_script(root: &GuardedPath, script: &str) -> Result<(), anyhow::Error> {
-    let steps = oxdock_core::parse_script(script).expect("parse script");
+    // File-local scripts call `STD` builtins; the import is fixture,
+    // not subject: `IMPORT` semantics are covered in `import.rs`.
+    let steps =
+        oxdock_core::parse_script(&format!("IMPORT [STD]\n{script}")).expect("parse script");
     run_steps_with_context_result_with_io(root, root, &steps, ExecIo::new()).map(|_| ())
 }
 
@@ -12,7 +15,10 @@ fn run_script_with_scope(
     root: &GuardedPath,
     script: &str,
 ) -> Result<BTreeMap<String, Value>, anyhow::Error> {
-    let steps = oxdock_core::parse_script(script).expect("parse script");
+    // File-local scripts call `STD` builtins; the import is fixture,
+    // not subject: `IMPORT` semantics are covered in `import.rs`.
+    let steps =
+        oxdock_core::parse_script(&format!("IMPORT [STD]\n{script}")).expect("parse script");
     let resolver = PathResolver::new_guarded(root.clone(), root.clone())?;
     let (_cwd, _fs, bindings) = oxdock_core::run_steps_with_manager(
         Box::new(resolver),
@@ -28,7 +34,10 @@ fn run_script_captured_pipe(
     script: &str,
     pipe: &str,
 ) -> Result<String, anyhow::Error> {
-    let steps = oxdock_core::parse_script(script).expect("parse script");
+    // File-local scripts call `STD` builtins; the import is fixture,
+    // not subject: `IMPORT` semantics are covered in `import.rs`.
+    let steps =
+        oxdock_core::parse_script(&format!("IMPORT [STD]\n{script}")).expect("parse script");
     let captured: std::sync::Arc<std::sync::Mutex<Vec<u8>>> =
         std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let mut io_cfg = ExecIo::new();
@@ -104,13 +113,15 @@ fn parser_single_dollar_is_variable_not_key_path() {
 
 #[test]
 fn parser_load_toml_in_let() {
-    let steps = oxdock_core::parse_script("LET $d: MAP = LOAD_TOML(\"x.toml\")").unwrap();
+    let steps =
+        oxdock_core::parse_script("IMPORT [STD]\nLET $d: MAP = LOAD_TOML(\"x.toml\")").unwrap();
     assert_eq!(steps.len(), 1);
 }
 
 #[test]
 fn parser_load_json_in_let() {
-    let steps = oxdock_core::parse_script("LET $d: MAP = LOAD_JSON(\"x.json\")").unwrap();
+    let steps =
+        oxdock_core::parse_script("IMPORT [STD]\nLET $d: MAP = LOAD_JSON(\"x.json\")").unwrap();
     assert_eq!(steps.len(), 1);
 }
 
@@ -1030,6 +1041,7 @@ fn for_map_iteration_sorted_keys() {
     );
 
     let steps = oxdock_core::parse_script(indoc! {r#"
+        IMPORT [STD]
         LET $d: MAP = LOAD_TOML("data.toml")
         FOR $k: STRING, $v: STRING IN $d.settings {
             WRITE "{{ $k }}.txt" "{{ $v }}"
@@ -1062,6 +1074,7 @@ fn for_map_iteration_echo_stdout() {
     );
 
     let steps = oxdock_core::parse_script(indoc! {r#"
+        IMPORT [STD]
         LET $d: MAP = LOAD_TOML("data.toml")
         FOR $k: STRING, $v: STRING IN $d.settings {
             ECHO "{{ $k }} = {{ $v }}"

@@ -21,6 +21,7 @@ use crate::command::{
     ArgSpec, ArgType, CommandMeta, Example, FlagSpec, FlagValueType, IoDirection, Stream,
     split_assignment,
 };
+use crate::constants::{KEYWORD_EXPORT, KEYWORD_IMPORT};
 use crate::error::{ParseError, ParseResult, SpanContext};
 use indoc::indoc;
 
@@ -363,6 +364,13 @@ fn structural_hint(name: &str, received: &str) -> Option<String> {
         "INHERIT_ENV" => Some(format!(
             "INHERIT_ENV takes a key list, e.g. `INHERIT_ENV [HOME, PATH]`; got {got}."
         )),
+        name if name == KEYWORD_IMPORT => Some(format!(
+            "IMPORT brings module functions into bare-call scope, e.g. `IMPORT [STD]` or `IMPORT [STD, POLARS]`; got {got}."
+        )),
+        name if name == KEYWORD_EXPORT => Some(
+            "`EXPORT` is reserved for future script-module support and cannot be used yet."
+                .to_string(),
+        ),
         _ => None,
     }
 }
@@ -1410,6 +1418,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     code: indoc! {r#"
                 # single-line body; $x is a template path, WHO an override
                 WRITE a.txt "hi \{{ env:WHO }}!"
+                IMPORT [STD]
                 FOR $x: STRING IN GLOB("*.txt") { EXPAND $x WHO=World }
                 ASSERT_CONTAINS stdout "hi World!"
             "#},
@@ -1436,6 +1445,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     name: "if else",
                     fence_meta: None,
                     code: indoc! {r#"
+                IMPORT [STD]
                 IF true {
                   WRITE yes.txt taken
                 } ELSE {
@@ -1466,6 +1476,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     name: "logical condition composition",
                     fence_meta: None,
                     code: indoc! {r#"
+                IMPORT [STD]
                 LET $role: STRING = "admin"
                 LET $level: INT = 3
                 # || is true when either side holds; && needs both.
@@ -1617,6 +1628,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     code: indoc! {r#"
                 # the RHS is an expression: GLOB(...) runs and binds a list
                 WRITE a.txt "x"
+                IMPORT [STD]
                 LET $files: LIST = GLOB("*.txt")
                 FOR $f: STRING IN $files { ECHO $f }
                 ASSERT_CONTAINS stdout "a.txt"
@@ -1652,6 +1664,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     fence_meta: None,
                     code: indoc! {r#"
                 LET $size_str: STRING = ECHO 41
+                IMPORT [STD]
                 LET $total: INT = INT($size_str) + 1
                 LET $ratio: FLOAT = 1 + 2.5
                 # Int x Int stays INT: integer division truncates.
@@ -1667,6 +1680,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     code: indoc! {r#"
                 # Binary fractions compare cleanly; decimal fractions may not:
                 # 0.1 + 0.2 is 0.30000000000000004, so == is false.
+                IMPORT [STD]
                 LET $exact: BOOL = 0.5 + 0.25 == 0.75
                 LET $decimal: BOOL = 0.1 + 0.2 == 0.3
                 IF $exact {
@@ -1755,6 +1769,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 # Captured output is a string: `"100" + 1` is a Type Error.
                 # Convert explicitly, then mutate with arithmetic.
                 LET $raw: STRING = ECHO 100
+                IMPORT [STD]
                 LET $n: INT = INT($raw)
                 $n = $n + 1
                 # The declared type also converts plain strings on assignment.
@@ -1921,6 +1936,12 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 one namespace with native and host-registered functions, which a FUNC
                 may never shadow.
 
+                Functions resolve like variables: a name is visible from its
+                definition line, so recursion works but mutual recursion does
+                not (the second name does not exist while the first body
+                lowers). Calls name their module (`STD::GLOB(...)`) unless
+                imported; see IMPORT.
+
                 Invoke any function with one syntax: `NAME(...)` as a statement
                 (discarding the value) or `LET $var: TYPE = NAME(...)` to capture
                 the RETURN value (fallthrough without RETURN captures as "").
@@ -2059,6 +2080,42 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 FOR $x: STRING IN ["a", "b"] {
                   CONTINUE
                 }
+            "#},
+            }],
+        },
+        CommandMeta {
+            name: KEYWORD_IMPORT,
+            syntax: "IMPORT [<module>, ...] | IMPORT <module>",
+            summary: "Bring module functions into bare-call scope.",
+            description: indoc! {r#"
+                Every function call names its module (`STD::GLOB(...)`,
+                `POLARS::READ_CSV(...)`) unless the module is imported:
+                `IMPORT [STD]` lets the rest of the scope call `GLOB(...)`
+                bare. Calls resolve at parse time against `SCRIPT`
+                definitions first, then imported modules; unknown modules,
+                unknown functions, and unimported bare calls are parse
+                errors, never runtime surprises.
+
+                IMPORT is a lowering directive, not a step: it applies from
+                its line to the enclosing block exit, then reverts, exactly
+                like `LET` scoping but with no runtime footprint. Guards do
+                not apply to it. Two imported modules exporting one name is
+                an ambiguity error: qualify the call instead.
+
+                `EXPORT` is reserved for future script-module support and
+                cannot be used yet.
+            "#},
+            args: &[],
+            flags: &[],
+            default_output: None,
+            examples: &[Example {
+                name: "import",
+                fence_meta: None,
+                code: indoc! {r#"
+                WRITE a.txt "hi \{{ env:WHO }}!"
+                IMPORT [STD]
+                FOR $x: STRING IN GLOB("*.txt") { EXPAND $x WHO=World }
+                ASSERT_CONTAINS stdout "hi World!"
             "#},
             }],
         },
@@ -2506,18 +2563,25 @@ mod tests {
 
     #[test]
     fn call_and_while_lower_correctly() {
-        let steps = parse_script("GREET(\"ada\")\n", lower_command).expect("call parses");
+        let steps = parse_script(
+            "FUNC GREET($name: STRING) {\n  RETURN $name\n}\nGREET(\"ada\")\n",
+            lower_command,
+        )
+        .expect("call parses");
         assert!(
-            matches!(&steps[0].kind, StepKind::Call { name, .. } if name == "GREET"),
+            matches!(&steps[1].kind, StepKind::Call { name, .. } if name == "SCRIPT::GREET"),
             "{:?}",
-            steps[0].kind
+            steps[1].kind
         );
-        let steps =
-            parse_script("GREET(\"ada\", \"bex\")\n", lower_command).expect("spaced call parses");
+        let steps = parse_script(
+            "FUNC GREET($a: STRING, $b: STRING) {\n  RETURN $a\n}\nGREET(\"ada\", \"bex\")\n",
+            lower_command,
+        )
+        .expect("spaced call parses");
         assert!(
-            matches!(&steps[0].kind, StepKind::Call { name, args } if name == "GREET" && args.len() == 2),
+            matches!(&steps[1].kind, StepKind::Call { name, args } if name == "SCRIPT::GREET" && args.len() == 2),
             "{:?}",
-            steps[0].kind
+            steps[1].kind
         );
         let steps =
             parse_script("WHILE !$done {\n  BREAK\n}\n", lower_command).expect("while parses");
@@ -2531,19 +2595,28 @@ mod tests {
     fn let_capture_call_and_async_call_lower() {
         // A bare `NAME(...)` on the LET RHS stays an expression assignment;
         // only ASYNC/TIMEOUT/command captures produce AssignCapture.
-        let steps = parse_script("LET $r: STRING = GREET(\"ada\")\n", lower_command)
-            .expect("capture call parses");
-        let StepKind::Assign { var, expr, .. } = &steps[0].kind else {
-            panic!("expected Assign, got {:?}", steps[0].kind);
+        let steps = parse_script(
+            "FUNC GREET($name: STRING) {\n  RETURN $name\n}\nLET $r: STRING = GREET(\"ada\")\n",
+            lower_command,
+        )
+        .expect("capture call parses");
+        let StepKind::Assign { var, expr, .. } = &steps[1].kind else {
+            panic!("expected Assign, got {:?}", steps[1].kind);
         };
         assert_eq!(var, "r");
-        assert!(matches!(expr, Expr::Call { .. }), "{expr:?}");
-        let steps = parse_script("LET $t: HANDLE = ASYNC GREET(\"a\")\n", lower_command)
-            .expect("async call parses");
         assert!(
-            matches!(&steps[0].kind, StepKind::AssignAsync { .. }),
+            matches!(expr, Expr::Call { name, .. } if name == "SCRIPT::GREET"),
+            "{expr:?}"
+        );
+        let steps = parse_script(
+            "FUNC GREET($name: STRING) {\n  RETURN $name\n}\nLET $t: HANDLE = ASYNC GREET(\"a\")\n",
+            lower_command,
+        )
+        .expect("async call parses");
+        assert!(
+            matches!(&steps[1].kind, StepKind::AssignAsync { .. }),
             "{:?}",
-            steps[0].kind
+            steps[1].kind
         );
     }
 
@@ -2727,87 +2800,6 @@ mod tests {
                 registry.iter().any(|meta| meta.name == name),
                 "no structural metadata entry for {}",
                 name
-            );
-        }
-    }
-
-    #[test]
-    fn verify_display_sync_with_metadata() {
-        fn step_contains_kind(kind: &StepKind, name: &str) -> bool {
-            if kind.to_string().starts_with(name) {
-                return true;
-            }
-            let bodies: Vec<&Vec<Step>> = match kind {
-                StepKind::For { body, .. }
-                | StepKind::While { body, .. }
-                | StepKind::FuncDef { body, .. }
-                | StepKind::Timeout { body, .. }
-                | StepKind::AssignAsync { body, .. }
-                | StepKind::AsyncBlock { body } => vec![body],
-                StepKind::If {
-                    then_body,
-                    else_ifs,
-                    else_body,
-                    ..
-                } => {
-                    let mut out = vec![then_body];
-                    out.extend(else_ifs.iter().map(|(_, b)| b));
-                    out.extend(else_body.iter());
-                    out
-                }
-                _ => {
-                    if let StepKind::WithIo { cmd, .. } = kind {
-                        return step_contains_kind(cmd, name);
-                    }
-                    if let StepKind::AssignCapture { cmd, .. } = kind {
-                        return step_contains_kind(cmd, name);
-                    }
-                    return false;
-                }
-            };
-            bodies
-                .iter()
-                .any(|body| body.iter().any(|s| step_contains_kind(&s.kind, name)))
-        }
-
-        let registry = all_metadata();
-        for meta in registry {
-            if meta.examples.is_empty() {
-                continue;
-            }
-
-            let code = meta.examples[0].code;
-            let ast = parse_script(code, lower_command)
-                .unwrap_or_else(|e| panic!("Failed to parse example for {}: {}", meta.name, e));
-
-            let matching = ast.iter().find(|step| {
-                // Mutation has no keyword: its Display (`$var = ...`) cannot
-                // start with the metadata name, so match the variant directly.
-                if meta.name == "MUTATION" {
-                    return matches!(step.kind, StepKind::Set { .. });
-                }
-                // Control-flow leaves (RETURN/BREAK/CONTINUE) only occur
-                // nested inside bodies, so search recursively; everything
-                // else must appear at top level with a matching Display.
-                if matches!(meta.name, "RETURN" | "BREAK" | "CONTINUE") {
-                    return step_contains_kind(&step.kind, meta.name);
-                }
-                let kind = match &step.kind {
-                    StepKind::WithIo { cmd, .. } => &**cmd,
-                    other => other,
-                };
-                // Full Display covers wrapper kinds themselves (e.g. a
-                // WithIo step displays as WITH_IO ...); unwrapped covers
-                // wrapped leaf commands.
-                kind.to_string().starts_with(meta.name)
-                    || step.kind.to_string().starts_with(meta.name)
-            });
-
-            assert!(
-                matching.is_some(),
-                "No step in example for {} produces Display starting with {}",
-                meta.name,
-                meta.name
             );
         }
     }

@@ -3,11 +3,15 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use oxdock_func_macro::oxdock_func;
-use oxdock_parser::{Step, Value};
+use oxdock_parser::{
+    KEYWORD_INSPECT, SCRIPT_MODULE_NAME, STD_MODULE_NAME, Step, Value, base_name, qualify,
+    split_qualified,
+};
 use oxdock_process::{DefaultProcessManager, ProcessManager};
 
 use super::state::ExecState;
 use super::steps::StepCtx;
+use super::typing::TypeDescriptor;
 
 /// Origin of a callable in the unified function registry. `Script` is an
 /// interpreted `FUNC` body; `HostCtx` and `HostPure` are compiled Rust
@@ -46,6 +50,10 @@ pub struct FuncParam {
 #[derive(Debug, Clone)]
 pub struct FuncMeta {
     pub name: String,
+    /// Owning module (`STD` for builtins, `SCRIPT` for DSL definitions,
+    /// the host module name otherwise). `name` is always the qualified
+    /// `MODULE::BASE` form, so listings and `DESCRIBE` never lose origin.
+    pub module: String,
     pub kind: FuncKind,
     pub params: Option<Vec<FuncParam>>,
     pub returns: Option<String>,
@@ -70,9 +78,9 @@ pub trait OxDockFn<P: ProcessManager> {
     fn registration() -> HostRegistration<P>;
 }
 
-/// One host-registered function passed to `run_steps_with_manager_with_hosts`.
-/// Build the entry with the `#[oxdock_func]`-generated registration marker
-/// (passed to `Engine::register_fn`), or by hand. `Pure` entries run
+/// One host-registered function, grouped into a [`HostModule`] and passed
+/// to `Engine::register_module`. Build the entry with the `#[oxdock_func]`-
+/// generated registration marker, or by hand. `Pure` entries run
 /// on both the AST and the compiled RPN math paths; `Stateful` entries run
 /// on the AST path with full step context.
 pub enum HostRegistration<P: ProcessManager> {
@@ -177,10 +185,6 @@ impl<P: ProcessManager> Clone for ScopeFrame<P> {
 pub struct FunctionRegistry<P: ProcessManager> {
     entries: HashMap<String, FuncEntry<P>>,
     scopes: Vec<ScopeFrame<P>>,
-    /// Names registered at runtime via `register_host_fn`. Builtins and
-    /// hosts share the host kinds; this set answers which names arrived
-    /// after startup (for parse-time reserved-name seeding by hosts).
-    host_names: HashSet<String>,
 }
 
 impl<P: ProcessManager> FunctionRegistry<P> {
@@ -191,17 +195,17 @@ impl<P: ProcessManager> FunctionRegistry<P> {
                 defined: HashSet::new(),
                 shadowed: Vec::new(),
             }],
-            host_names: HashSet::new(),
         };
         // Every builtin registers through the same `HostRegistration`
         // entries hosts use: no separate authoring path for engine natives.
+        // Builtins land in the `STD` module, exactly like a host module.
         for host in Self::builtin_registrations() {
             match host {
                 HostRegistration::Stateful { name, meta, func } => {
-                    reg.insert_native(name, meta, FuncBody::Ctx(func));
+                    reg.insert_qualified(STD_MODULE_NAME, name, meta, FuncBody::Ctx(func));
                 }
                 HostRegistration::Pure { name, meta, func } => {
-                    reg.insert_native(name, meta, FuncBody::Pure(func));
+                    reg.insert_qualified(STD_MODULE_NAME, name, meta, FuncBody::Pure(func));
                 }
             }
         }
@@ -242,48 +246,87 @@ impl<P: ProcessManager> FunctionRegistry<P> {
         self.entries.insert(name, FuncEntry { meta, body });
     }
 
-    pub(super) fn register_host(&mut self, name: String, mut meta: FuncMeta, func: NativeFn<P>) {
-        meta.name = name.clone();
+    /// Insert under `MODULE::BASE`, stamping provenance on the metadata.
+    /// The single choke point for every registry entry: builtins pass
+    /// `STD`, hosts pass their module, scripts pass `SCRIPT`.
+    fn insert_qualified(
+        &mut self,
+        module: &str,
+        base: String,
+        mut meta: FuncMeta,
+        body: FuncBody<P>,
+    ) {
+        meta.name = qualify(module, &base);
+        meta.module = module.to_string();
+        // Last-write-wins would silently reroute calls, so a repeated
+        // qualified name is a programmer error, never a shadow: panic like
+        // conflicting type registrations do. `SCRIPT` definitions bypass
+        // this path (`define_script` owns their scoped shadowing).
+        if self.entries.contains_key(&meta.name) {
+            panic!("duplicate function registration `{}`", meta.name);
+        }
+        self.insert_native(meta.name.clone(), meta, body);
+    }
+
+    pub(super) fn register_host(
+        &mut self,
+        module: &str,
+        name: String,
+        mut meta: FuncMeta,
+        func: NativeFn<P>,
+    ) {
         meta.kind = FuncKind::HostCtx;
-        self.insert_native(name.clone(), meta, FuncBody::Ctx(func));
-        self.host_names.insert(name);
+        self.insert_qualified(module, name, meta, FuncBody::Ctx(func));
     }
 
-    pub(super) fn register_pure_host(&mut self, name: String, mut meta: FuncMeta, func: PureFn) {
-        meta.name = name.clone();
+    pub(super) fn register_pure_host(
+        &mut self,
+        module: &str,
+        name: String,
+        mut meta: FuncMeta,
+        func: PureFn,
+    ) {
         meta.kind = FuncKind::HostPure;
-        self.insert_native(name.clone(), meta, FuncBody::Pure(func));
-        self.host_names.insert(name);
+        self.insert_qualified(module, name, meta, FuncBody::Pure(func));
     }
 
-    /// Define a DSL `FUNC`: native and host names cannot shadow, same-scope
-    /// duplicates cannot redefine, and nested shadowing of an outer script
-    /// definition restores on scope exit.
+    /// Define a DSL `FUNC`: names colliding with any known base name cannot
+    /// shadow, same-scope duplicates cannot redefine, and nested shadowing
+    /// of an outer script definition restores on scope exit. Stored as
+    /// `SCRIPT::NAME`, exactly like every other qualified entry.
     pub(super) fn define_script(
         &mut self,
         name: &str,
         params: &[(String, String)],
         body: &[Step],
     ) -> Result<()> {
+        let qualified = qualify(SCRIPT_MODULE_NAME, name);
         let shadowable = matches!(
-            self.entries.get(name).map(|entry| &entry.body),
+            self.entries.get(&qualified).map(|entry| &entry.body),
             Some(FuncBody::Script(_))
         );
-        if self.entries.contains_key(name) && !shadowable {
+        // Reserved spans every module: compare base names so the message
+        // keeps naming the bare script identifier.
+        let reserved = self
+            .entries
+            .keys()
+            .any(|key| split_qualified(key).is_some_and(|(_, base)| base == name));
+        if reserved && !shadowable {
             anyhow::bail!("cannot shadow reserved function `{name}`");
         }
         if self
             .scopes
             .last()
-            .is_some_and(|frame| frame.defined.contains(name))
+            .is_some_and(|frame| frame.defined.contains(&qualified))
         {
             anyhow::bail!("duplicate function `{name}` in same scope");
         }
         let old = self.entries.insert(
-            name.to_string(),
+            qualified.clone(),
             FuncEntry {
                 meta: FuncMeta {
-                    name: name.to_string(),
+                    name: qualified.clone(),
+                    module: SCRIPT_MODULE_NAME.to_string(),
                     kind: FuncKind::Script,
                     params: Some(
                         params
@@ -306,9 +349,9 @@ impl<P: ProcessManager> FunctionRegistry<P> {
             },
         );
         if let Some(frame) = self.scopes.last_mut() {
-            frame.defined.insert(name.to_string());
+            frame.defined.insert(qualified.clone());
             if let Some(old) = old {
-                frame.shadowed.push((name.to_string(), old));
+                frame.shadowed.push((qualified, old));
             }
         }
         Ok(())
@@ -391,10 +434,6 @@ impl<P: ProcessManager> FunctionRegistry<P> {
         out.sort_by(|a, b| a.name.cmp(&b.name));
         out
     }
-
-    fn host_names(&self) -> HashSet<String> {
-        self.host_names.clone()
-    }
 }
 
 impl<P: ProcessManager> Clone for FunctionRegistry<P> {
@@ -402,7 +441,6 @@ impl<P: ProcessManager> Clone for FunctionRegistry<P> {
         Self {
             entries: self.entries.clone(),
             scopes: self.scopes.clone(),
-            host_names: self.host_names.clone(),
         }
     }
 }
@@ -415,7 +453,7 @@ impl<P: ProcessManager> Clone for FunctionRegistry<P> {
 /// compile-time knowledge of builtin names.
 pub fn builtin_function_names() -> HashSet<String> {
     let mut names = FunctionRegistry::<DefaultProcessManager>::with_builtins().keys();
-    names.insert("INSPECT".to_string());
+    names.insert(KEYWORD_INSPECT.to_string());
     names
 }
 
@@ -424,6 +462,24 @@ pub fn builtin_function_names() -> HashSet<String> {
 /// the `#[oxdock_func]` annotations, never a parallel list.
 pub fn builtin_function_metas() -> Vec<FuncMeta> {
     FunctionRegistry::<DefaultProcessManager>::with_builtins().native_metas()
+}
+
+/// Stock `STD` module table derived from the `#[oxdock_func]` builtins:
+/// the single source of truth for builtin membership and RPN eligibility.
+/// Seeds parse-time module resolution, so the parser crate keeps zero
+/// compile-time knowledge of builtin names.
+pub fn std_module_table() -> oxdock_parser::ModuleTable {
+    // Registry names are qualified (`STD::GLOB`); the table holds bases.
+    let functions: HashSet<String> = builtin_function_metas()
+        .into_iter()
+        .map(|meta| base_name(&meta.name).to_string())
+        .collect();
+    oxdock_parser::ModuleTable {
+        modules: HashMap::from([(
+            STD_MODULE_NAME.to_string(),
+            Some(oxdock_parser::ModuleFuncs { functions }),
+        )]),
+    }
 }
 
 // Builtins below use the `#[oxdock_func]` host export macro, the exact same authoring
@@ -485,7 +541,8 @@ fn path_type<P: ProcessManager>(cx: &mut StepCtx<P>, path: String) -> Result<Val
 
 /// List all visible function names.
 ///
-/// Sorted LIST of DSL-defined plus native plus host-registered names.
+/// Sorted LIST of qualified `MODULE::NAME` entries: DSL-defined plus native
+/// plus host-registered names.
 #[oxdock_func(returns = "LIST")]
 fn functions<P: ProcessManager>(cx: &mut StepCtx<P>) -> Result<Value> {
     let mut names: Vec<String> = cx
@@ -499,12 +556,19 @@ fn functions<P: ProcessManager>(cx: &mut StepCtx<P>) -> Result<Value> {
     Ok(Value::list(names.into_iter().map(Value::string).collect()))
 }
 
-/// Describe one function by name.
+/// Describe one function by qualified name.
 ///
-/// Returns a MAP with name, kind, params, returns, and summary. Errors on
+/// Returns a MAP with name, module, kind, params, returns, and summary.
+/// Bare names fail closed: `DESCRIBE` requires the qualified form (except
+/// `INSPECT`, which is syntax rather than a registry entry). Errors on
 /// unknown function.
 #[oxdock_func(returns = "MAP")]
 fn describe<P: ProcessManager>(cx: &mut StepCtx<P>, name: String) -> Result<Value> {
+    if split_qualified(&name).is_none() && name != KEYWORD_INSPECT {
+        anyhow::bail!(
+            "unknown function `{name}`: DESCRIBE requires a qualified name (e.g. `STD::{name}`)"
+        );
+    }
     cx.state
         .describe_function(&name)
         .ok_or_else(|| anyhow::anyhow!("unknown function {name}"))
@@ -556,6 +620,7 @@ fn type_describe<P: ProcessManager>(cx: &mut StepCtx<P>, name: String) -> Result
 fn meta_to_value(meta: &FuncMeta) -> Value {
     let mut map = BTreeMap::new();
     map.insert("name".to_string(), Value::string(meta.name.clone()));
+    map.insert("module".to_string(), Value::string(meta.module.clone()));
     map.insert(
         "kind".to_string(),
         Value::string(meta.kind.label().to_string()),
@@ -590,31 +655,44 @@ fn meta_to_value(meta: &FuncMeta) -> Value {
     Value::map(map)
 }
 
-impl<P: ProcessManager> ExecState<P> {
-    /// Register a host/Rust function callable from the DSL as `NAME(...)`.
-    /// Host names share one namespace with DSL and native functions.
-    pub fn register_host_fn(&mut self, name: String, meta: FuncMeta, func: NativeFn<P>) {
-        self.functions.register_host(name, meta, func);
-    }
+/// One host library: functions and types registered under a single module
+/// name. `Engine::register_module` stages these; runs expose them as
+/// `MODULE::NAME` calls with `MODULE` provenance on every entry.
+#[derive(Clone)]
+pub struct HostModule<P: ProcessManager> {
+    pub name: String,
+    pub funcs: Vec<HostRegistration<P>>,
+    pub types: Vec<&'static TypeDescriptor>,
+}
 
-    /// Register one [`HostRegistration`] entry (either flavor).
-    pub fn register_host(&mut self, registration: HostRegistration<P>) {
-        match registration {
-            HostRegistration::Stateful { name, meta, func } => {
-                self.register_host_fn(name, meta, func);
+impl<P: ProcessManager> ExecState<P> {
+    /// Register one [`HostModule`]: every function becomes callable as
+    /// `MODULE::NAME`, every type joins the run's name directory.
+    pub fn register_module(&mut self, module: HostModule<P>) {
+        for registration in module.funcs {
+            match registration {
+                HostRegistration::Stateful { name, meta, func } => {
+                    self.functions.register_host(&module.name, name, meta, func);
+                }
+                HostRegistration::Pure { name, meta, func } => {
+                    self.functions
+                        .register_pure_host(&module.name, name, meta, func);
+                }
             }
-            HostRegistration::Pure { name, meta, func } => {
-                self.functions.register_pure_host(name, meta, func);
-            }
+        }
+        for descriptor in module.types {
+            self.register_type(descriptor);
         }
     }
 
     /// All visible functions: natives plus hosts plus current DSL definitions.
     pub fn list_functions(&self) -> Vec<FuncMeta> {
         let mut out: Vec<FuncMeta> = self.functions.entries_metas().into_iter().collect();
-        if !out.iter().any(|m| m.name == "INSPECT") {
+        // TODO: Make a "virtual function" and don't hardcode
+        if !out.iter().any(|m| m.name == KEYWORD_INSPECT) {
             out.push(FuncMeta {
-                name: "INSPECT".to_string(),
+                name: KEYWORD_INSPECT.to_string(),
+                module: STD_MODULE_NAME.to_string(),
                 kind: FuncKind::HostCtx,
                 params: None,
                 returns: Some("MAP".to_string()),
@@ -632,9 +710,11 @@ impl<P: ProcessManager> ExecState<P> {
         if let Some(meta) = self.functions.meta(name) {
             return Some(meta_to_value(&meta));
         }
-        if name == "INSPECT" {
+        // TODO: Make a "virtual function" and don't hardcode
+        if name == KEYWORD_INSPECT {
             return Some(meta_to_value(&FuncMeta {
-                name: "INSPECT".to_string(),
+                name: KEYWORD_INSPECT.to_string(),
+                module: STD_MODULE_NAME.to_string(),
                 kind: FuncKind::HostCtx,
                 params: None,
                 returns: Some("MAP".to_string()),
@@ -644,11 +724,6 @@ impl<P: ProcessManager> ExecState<P> {
             }));
         }
         None
-    }
-
-    /// Names of host-registered functions, for parse-time shadow checks.
-    pub fn registered_host_names(&self) -> HashSet<String> {
-        self.functions.host_names()
     }
 
     pub(super) fn clone_native_pure(&self, name: &str) -> Option<PureFn> {

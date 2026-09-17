@@ -247,7 +247,8 @@ pub(crate) fn render_function_reference() -> String {
     );
     out.push_str("## Functions\n\n");
     out.push_str(
-        "Callable as `NAME(...)` in expressions. Introspectable from scripts \
+        "Callable as `MODULE::NAME(...)` in expressions (or bare `NAME(...)` \
+         with the module imported via `IMPORT`). Introspectable from scripts \
          with `FUNCTIONS()` and `DESCRIBE(name)`.\n\n",
     );
     for meta in builtin_function_metas() {
@@ -386,14 +387,20 @@ mod tests {
                 meta.name
             );
         }
-        for name in ["TYPES", "TYPE_DESCRIBE", "FUNCTIONS", "DESCRIBE", "GLOB"] {
+        for name in [
+            "STD::TYPES",
+            "STD::TYPE_DESCRIBE",
+            "STD::FUNCTIONS",
+            "STD::DESCRIBE",
+            "STD::GLOB",
+        ] {
             assert!(
                 reference.contains(&format!("### {name}")),
                 "function reference must document {name}",
             );
         }
         let glob = reference
-            .split("### GLOB")
+            .split("### STD::GLOB")
             .nth(1)
             .expect("GLOB section renders");
         assert!(
@@ -401,7 +408,7 @@ mod tests {
             "RPN-capable functions must render both contexts",
         );
         let types = reference
-            .split("### TYPES\n")
+            .split("### STD::TYPES\n")
             .nth(1)
             .expect("TYPES section renders");
         assert!(

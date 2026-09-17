@@ -60,6 +60,8 @@ fn main() {
 
 For each artifact the macro emits a constant backed by `include_bytes!`, which bakes the file bytes into read-only binary data during compilation. At runtime `get()` scans a static table and returns a borrowed slice, so there are no file reads and no heap allocation. The support types only need `alloc::borrow::Cow` and core iterators, which is why it works in `no_std`.
 
+Asset scripts resolve `STD` (via `IMPORT [STD]`) and `SCRIPT` functions only. There is no `modules:` prefix here, and that is structural, not missing: opaque modules defer membership to runtime, but asset scripts execute at compile time with no `Engine` to resolve against. Scripts needing host functions belong in `build.rs` through the `Engine` facade instead.
+
 ### Run scripts inline
 
 The `oxdock!` macro builds the same DSL into a `Vec<Step>` at compile time, so tests and tools can run scripts without a file. Pass the steps to a `run_steps_*` runner with a guarded root. The root types live in `oxdock-fs`, so add both crates: `cargo add oxdock oxdock-fs`. Only portable commands are used below, so the script behaves identically on every OS.
@@ -126,6 +128,7 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     WITH_IO [stdout=pipe:log] ECHO "built {{ env:PROJECT }}"
     WITH_IO [stdin=pipe:log] READ_LINE $line
     WRITE dist/build.txt "{{ $line }}"
+    IMPORT [STD]
     FOR $f: STRING IN GLOB("dist/*.txt") {
         EXPAND $f
     }
@@ -150,15 +153,17 @@ assert_eq!(
 
 The top level runners need the default `cli` feature. With `--no-default-features`, run the same steps through `oxdock::oxdock_core::run_steps_*` instead.
 
+Scripts that call host functions declare their modules up front: the macro parses at compile time with only `STD` known, so `modules: [DEMO],` as the first line makes `IMPORT [DEMO]` and `DEMO::...` calls resolve (membership is checked at runtime). Scripts using only `STD` and `SCRIPT` functions omit it. See [Extending OxDock from Rust](#extending-oxdock-from-rust) for the complete example.
+
 ## Extend the language
 
-New types and functions take two attributes and three calls. Small
+New types and functions take two attributes, a type registration, and a function module. Small
 `Copy` scalars can ride inline on the stack with zero allocation
 instead of heap boxing; both forms, with stateful functions, live under
 [Extending OxDock from Rust](#extending-oxdock-from-rust) below.
 
 ```rust
-use oxdock::{Engine, OxDockType, Value, oxdock_func, oxdock_type};
+use oxdock::{Engine, HostModule, OxDockFn, OxDockType, Value, oxdock_func, oxdock_type};
 use std::fmt;
 
 /// Word count summary: computed in Rust, carried as one script value.
@@ -198,11 +203,16 @@ fn word_count(summary: Value) -> anyhow::Result<Value> {
 fn main() -> anyhow::Result<()> {
     let mut engine = Engine::new();
     engine.register_type::<Stats>();
-    engine.register_fn(Summarize);
-    engine.register_fn(WordCount);
+    engine.register_module(HostModule {
+        name: "DEMO".to_string(),
+        funcs: vec![Summarize::registration(), WordCount::registration()],
+        types: vec![],
+    });
     let temp = oxdock_fs::GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
     let steps: Vec<oxdock::oxdock_parser::Step> = oxdock::oxdock! {
+        modules: [DEMO],
+        IMPORT [DEMO]
         LET $s: STATS = STATS("hello brave world")
         LET $n: INT = WORD_COUNT($s)
         ASSERT_EQ $n 3
@@ -375,6 +385,7 @@ Parentheses mark the boundary between computing a value and running a pipeline s
 
 ```oxdock
 // Functions compute values; stdout stays untouched.
+IMPORT [STD]
 LET $t: STRING = PATH_TYPE("missing.txt")
 LET $n: INT = INT("41") + 1
 ASSERT_EQ $t "absent"
@@ -547,6 +558,7 @@ Bracket expressions may span lines. Chained guard lines apply conjunctively to t
 WRITE chained.txt applied
 
 // The artifact was never created.
+IMPORT [STD]
 LET $t: STRING = PATH_TYPE("chained.txt")
 ASSERT_EQ $t "absent"
 ```
@@ -709,14 +721,16 @@ oxdock --help
 
 ## Extending OxDock from Rust
 
-Scripts call host functions and custom types that Rust code registers.
-Registration is two calls on one facade. This example runs as written:
-the shape first, the definitions it names right below it.
+Scripts call host functions and custom types that Rust code registers
+under a module. Registration is a type plus a module on one facade, and
+scripts name the module: `IMPORT [DEMO]` lets the rest call
+`MAKE_TAG()` bare, or qualify as `DEMO::MAKE_TAG()`. This example runs as
+written: the shape first, the definitions it names right below it.
 
 ### Complete example: define a type, define functions, run a script
 
 ```rust
-use oxdock::{Engine, OxDockType, oxdock_func, oxdock_type};
+use oxdock::{Engine, HostModule, OxDockFn, OxDockType, oxdock_func, oxdock_type};
 use std::fmt;
 
 // The script below is the DSL itself, not a string: the `oxdock!` macro
@@ -725,12 +739,17 @@ use std::fmt;
 fn main() -> anyhow::Result<()> {
     let mut engine = Engine::new();
     engine.register_type::<Tag>();
-    engine.register_fn(MakeTag);
-    engine.register_fn(ReadTag);
+    engine.register_module(HostModule {
+        name: "DEMO".to_string(),
+        funcs: vec![MakeTag::registration(), ReadTag::registration()],
+        types: vec![],
+    });
 
     let temp = oxdock_fs::GuardedPath::tempdir().unwrap();
     let root_path = temp.as_guarded_path().clone();
     let steps: Vec<oxdock::oxdock_parser::Step> = oxdock::oxdock! {
+        modules: [DEMO],
+        IMPORT [DEMO]
         LET $t: TAG = MAKE_TAG()
         LET $s: STRING = READ_TAG($t)
         ASSERT_EQ $s "demo"
@@ -805,7 +824,7 @@ exposes variables, environment, pipes, and IO. Override the DSL name and
 the declared return type explicitly when the defaults do not fit:
 
 ```rust
-use oxdock::{StepCtx, oxdock_func};
+use oxdock::{HostModule, OxDockFn, StepCtx, oxdock_func};
 use oxdock::oxdock_core::ProcessManager;
 
 /// Read an environment variable, defaulting to empty.
@@ -819,7 +838,11 @@ fn env_or<P: ProcessManager>(
 
 fn main() {
     let mut engine = oxdock::Engine::new();
-    engine.register_fn(EnvOr);
+    engine.register_module(HostModule {
+        name: "DEMO".to_string(),
+        funcs: vec![EnvOr::registration()],
+        types: vec![],
+    });
 }
 ```
 
@@ -885,7 +908,7 @@ reads one cell through its accessor; from a script the same call spells
 unavailable by the boundary above.
 
 ```rust
-use oxdock::{OxDockType, Value, oxdock_func, oxdock_type};
+use oxdock::{HostModule, OxDockFn, OxDockType, Value, oxdock_func, oxdock_type};
 use std::fmt;
 
 /// Integer grid with no literal syntax: scripts query it through functions.
@@ -930,13 +953,19 @@ fn main() -> anyhow::Result<()> {
 
     let mut engine = oxdock::Engine::new();
     engine.register_type::<Matrix>();
-    engine.register_fn(MakeMatrix);
-    engine.register_fn(MatrixGet);
+    engine.register_module(HostModule {
+        name: "DEMO".to_string(),
+        funcs: vec![
+            MakeMatrix::registration(),
+            MatrixGet::registration(),
+        ],
+        types: vec![],
+    });
     let temp = oxdock_fs::GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
     let run = engine.run_script(
         &root,
-        "LET $m: MATRIX = MAKE_MATRIX()\nLET $c: INT = MATRIX_GET($m, 0, 1)\n",
+        "IMPORT [DEMO]\nLET $m: MATRIX = MAKE_MATRIX()\nLET $c: INT = MATRIX_GET($m, 0, 1)\n",
     )?;
     assert_eq!(run.bindings["c"].as_i64(), Some(2));
     Ok(())

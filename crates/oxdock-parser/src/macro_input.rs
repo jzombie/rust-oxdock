@@ -9,6 +9,7 @@
 //! `ENV FOO=bar` or `RUN echo && ls` to look exactly like the string DSL,
 //! keeping both pathways unified.
 
+use super::constants::MODULE_SEPARATOR;
 use super::{Command, Step, parse_script};
 use anyhow::Result;
 use proc_macro2::{Delimiter, LineColumn, Spacing, TokenStream as TokenStream2, TokenTree};
@@ -153,6 +154,33 @@ fn is_upper_func_head(text: &str) -> bool {
     chars.all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_')
 }
 
+/// True for a call-head token, plain (`GREET`) or module-qualified
+/// (`POLARS::READ_CSV`): every `::` segment is non-empty, leading segments
+/// are UPPERCASE, and the tail is identifier-shaped. The tail stays
+/// case-open so `STD::glob(` attaches contiguously and fails at lowering
+/// with a span-accurate UPPERCASE error; the grammar still rejects it.
+/// Lets the `(` attach contiguously so the string grammar routes `M::F(...)`
+/// to `bare_call_statement`; deeper paths (`A::B::F`) still fail at parse
+/// time.
+fn is_call_head_token(token: &str) -> bool {
+    match token.rsplit_once(MODULE_SEPARATOR) {
+        // Qualified: every leading segment is a non-empty UPPERCASE
+        // identifier and the tail is identifier-shaped (case checked at
+        // lowering, so `STD::glob(` still attaches and fails with a span).
+        Some((head, tail)) => {
+            !tail.is_empty()
+                && tail.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                && !head.is_empty()
+                && head
+                    .split(MODULE_SEPARATOR)
+                    .all(|part| !part.is_empty() && is_upper_func_head(part))
+        }
+        // Plain: exactly the old rule, so bare lowercase heads keep falling
+        // through to the unknown-command path with its did-you-mean hint.
+        None => is_upper_func_head(token),
+    }
+}
+
 /// True when the current line ends with a bare-call head: an uppercase
 /// identifier that is neither a known command nor a statement keyword.
 /// Used to attach `(` contiguously (see the parenthesis group handling).
@@ -160,7 +188,7 @@ fn trailing_call_head(line: &str) -> bool {
     let Some(token) = line.split_whitespace().last() else {
         return false;
     };
-    is_upper_func_head(token)
+    is_call_head_token(token)
         && Command::parse(token).is_none()
         && !Command::is_statement_keyword(token)
 }
@@ -513,6 +541,21 @@ fn walk(
                             _ => false,
                         }
                     };
+                // A qualified `MODULE::NAME(...)` call opens a statement
+                // under the same conditions: the head starts at the module
+                // identifier, so look ahead over `::`, the name, and the
+                // paren group. Without this, `POLARS::READ_CSV(..)` after a
+                // complete statement glues onto its line (the module ident
+                // alone matches neither the keyword nor the bare-call rule).
+                let is_qualified_call_start = is_upper_func_head(&ident_text)
+                    && matches!(next, Some(TokenTree::Punct(p)) if p.as_char() == ':')
+                    && matches!(tokens.get(idx + 2), Some(TokenTree::Punct(p)) if p.as_char() == ':')
+                    && matches!(tokens.get(idx + 3), Some(TokenTree::Ident(_)))
+                    && matches!(
+                        tokens.get(idx + 4),
+                        Some(TokenTree::Group(g))
+                            if g.delimiter() == Delimiter::Parenthesis
+                    );
                 let trimmed = line.trim();
                 let trimmed_empty = trimmed.is_empty();
                 let guard_prefix = trimmed.starts_with('[');
@@ -535,14 +578,18 @@ fn walk(
                     let current_expects_inner = line_expects_inner_command(trimmed);
                     should_finalize = !line_is_run_context(trimmed) && !current_expects_inner;
                 }
-                // Bare calls split like keywords when they open a new source
-                // line after a complete statement. Same-line occurrences
-                // (command arguments, parenthesized groups) attach instead.
-                if is_bare_call_start
+                // Bare and qualified calls split like keywords when they open
+                // a new source line after a complete statement. Same-line
+                // occurrences (command arguments, parenthesized groups)
+                // attach instead. A head continuing a `MODULE::` qualifier
+                // never splits: `POLARS::` plus `READ_CSV(` is one call head
+                // (the split, if any, already happened at the module ident).
+                if (is_bare_call_start || is_qualified_call_start)
                     && !trimmed_empty
                     && !guard_prefix
                     && !expects_expr
                     && !line_is_run_context(trimmed)
+                    && !trimmed_end.ends_with(MODULE_SEPARATOR)
                     && last_span_end.is_some_and(|prev| span.start().line > prev.line)
                 {
                     should_finalize = true;
@@ -576,6 +623,48 @@ fn walk(
         idx += 1;
     }
     Ok(())
+}
+
+/// Split an optional leading `modules: [A, B]` prefix off a braced macro
+/// token stream. The names declare opaque modules (membership unknown at
+/// compile time) for the `oxdock!` parse; the remainder walks as DSL.
+/// Returns no names when the stream opens with anything else, so plain
+/// scripts pass through untouched.
+pub fn split_modules_prefix(ts: &TokenStream2) -> Result<(Vec<String>, TokenStream2)> {
+    use std::iter::FromIterator;
+    let mut tokens: Vec<TokenTree> = ts.clone().into_iter().collect();
+    let prefix = match tokens.as_slice() {
+        [
+            TokenTree::Ident(head),
+            TokenTree::Punct(colon),
+            TokenTree::Group(list),
+            ..,
+        ] if head == "modules"
+            && colon.as_char() == ':'
+            && list.delimiter() == Delimiter::Bracket =>
+        {
+            let mut names = Vec::new();
+            for item in list.stream().into_iter() {
+                match item {
+                    TokenTree::Ident(name) => names.push(name.to_string()),
+                    TokenTree::Punct(comma) if comma.as_char() == ',' => {}
+                    other => {
+                        anyhow::bail!("modules: prefix holds module names, found `{other}`");
+                    }
+                }
+            }
+            names
+        }
+        _ => return Ok((Vec::new(), ts.clone())),
+    };
+    tokens.drain(..3);
+    // An optional comma separates the prefix from the script body.
+    if let Some(TokenTree::Punct(comma)) = tokens.first()
+        && comma.as_char() == ','
+    {
+        tokens.drain(..1);
+    }
+    Ok((prefix, TokenStream2::from_iter(tokens)))
 }
 
 /// Convert a braced Rust token stream into textual DSL lines.
@@ -862,5 +951,74 @@ mod tests {
         assert_eq!(steps.len(), 2, "got: {steps:?}");
         assert!(matches!(steps[0].kind, StepKind::Write { .. }));
         assert!(matches!(steps[1].kind, StepKind::Write { .. }));
+    }
+
+    #[test]
+    fn qualified_call_never_splits_at_double_colon() {
+        // `POLARS::READ_CSV(...)` lexes as Ident Punct Punct Ident Group:
+        // the statement split happens at the module ident (own line), and
+        // the walker must not split again between `::` and the name.
+        // Intra-line spacing is cosmetic; line structure is what's pinned.
+        // Real spans required: `quote!` stamps every token line 1, which
+        // disables line-driven splitting by design.
+        let ts: proc_macro2::TokenStream = indoc! {r#"
+            WRITE a.txt hi
+            POLARS::READ_CSV("a")
+        "#}
+        .parse()
+        .expect("tokens");
+        let script = script_from_braced_tokens(&ts).expect("render braced script");
+        let lines: Vec<&str> = script.lines().collect();
+        assert_eq!(lines.len(), 2, "got: {script}");
+        assert_eq!(lines[0], "WRITE a.txt hi", "got: {script}");
+        assert_eq!(
+            lines[1].replace(' ', ""),
+            "POLARS::READ_CSV(\"a\")",
+            "got: {script}"
+        );
+    }
+
+    #[test]
+    fn qualified_call_in_expression_position_stays_glued() {
+        let ts = quote! {
+            LET $x: STRING = STD::INT("2")
+        };
+        let script = script_from_braced_tokens(&ts).expect("render braced script");
+        assert_eq!(
+            script.replace(' ', ""),
+            "LET$x:STRING=STD::INT(\"2\")",
+            "got: {script}"
+        );
+    }
+
+    #[test]
+    fn modules_prefix_splits_off_and_leaves_script() {
+        let ts = quote! {
+            modules: [DOCS]
+            IMPORT [STD, DOCS]
+        };
+        let (names, rest) = split_modules_prefix(&ts).expect("split prefix");
+        assert_eq!(names, vec!["DOCS".to_string()]);
+        let script = script_from_braced_tokens(&rest).expect("render rest");
+        assert_eq!(script.replace(' ', ""), "IMPORT[STD,DOCS]", "got: {script}");
+    }
+
+    #[test]
+    fn modules_prefix_absent_passes_through() {
+        let ts = quote! {
+            WRITE a.txt hi
+        };
+        let (names, rest) = split_modules_prefix(&ts).expect("split prefix");
+        assert!(names.is_empty());
+        let script = script_from_braced_tokens(&rest).expect("render rest");
+        assert_eq!(script.trim(), "WRITE a.txt hi", "got: {script}");
+    }
+
+    #[test]
+    fn modules_prefix_rejects_non_ident_entries() {
+        let ts = quote! {
+            modules: [42]
+        };
+        assert!(split_modules_prefix(&ts).is_err());
     }
 }

@@ -18,6 +18,7 @@ extern crate self as oxdock_parser;
 pub mod ast;
 pub mod command;
 pub mod commands;
+pub mod constants;
 pub mod error;
 mod lexer;
 #[cfg(feature = "proc-macro-api")]
@@ -33,14 +34,18 @@ pub use command::{
     Stream,
 };
 pub use commands::{all_metadata, all_structural_metadata, lower_command};
+pub use constants::*;
 pub use error::{ParseError, ParseErrorKind, ParseResult, SpanContext};
 pub use lexer::LANGUAGE_SPEC;
 #[cfg(feature = "proc-macro-api")]
 pub use macro_input::{
     DslMacroInput, ScriptSource, parse_braced_tokens, script_from_braced_tokens,
+    split_modules_prefix,
 };
 pub use markdown::{BlockMetadata, FencedBlock, expect_error_from_info, extract_fenced_blocks};
-pub use parser::{parse_guard_expr_str, parse_script, parse_script_with_hosts};
+pub use parser::{
+    parse_guard_expr_str, parse_script, parse_script_with_modules, parse_script_with_preseed,
+};
 pub use strip_flags::strip_flags;
 
 /// Shared mock lowering for parser tests.

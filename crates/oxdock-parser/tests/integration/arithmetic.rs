@@ -1,10 +1,9 @@
-use crate::common::mock_lower;
+use crate::common::{mock_lower, parse_with_math};
 
 use oxdock_parser::ast::{Expr, StepKind, Value};
-use oxdock_parser::parse_script;
 
 fn parse_assign_expr(script: &str) -> Expr {
-    let steps = parse_script(script, mock_lower).expect("parse arithmetic");
+    let steps = parse_with_math(script, mock_lower).expect("parse arithmetic");
     assert_eq!(steps.len(), 1, "expected one step, got {steps:?}");
     match steps.into_iter().next().unwrap().kind {
         StepKind::Assign { expr, .. } => expr,
@@ -225,7 +224,7 @@ fn integer_boundary_overflow_bails() {
         "LET $x: INT = 9223372036854775808 + 1\n",
         "LET $x: INT = 99999999999999999999999\n",
     ] {
-        let err = parse_script(script, mock_lower).expect_err("literal must overflow");
+        let err = parse_with_math(script, mock_lower).expect_err("literal must overflow");
         assert!(
             err.to_string().contains("integer overflow"),
             "wrong error for {script:?}, got: {err}"
@@ -301,11 +300,11 @@ fn call_arg_order_pushes_left_to_right() {
                     oxdock_parser::ast::MathOp::LoadVar(a),
                     oxdock_parser::ast::MathOp::LoadVar(b),
                     oxdock_parser::ast::MathOp::Call { name, arity: 2 }
-                ] if a == "a" && b == "b" && name == "FOO"
+                ] if a == "a" && b == "b" && name == "MATH::FOO"
             ));
         }
         Expr::Call { name, args } => {
-            assert_eq!(name, "FOO");
+            assert_eq!(name, "MATH::FOO");
             assert_eq!(args.len(), 2);
         }
         other => panic!("expected call RPN, got {other:?}"),
@@ -424,7 +423,7 @@ fn chained_comparisons_are_rejected() {
         "LET $x: BOOL = $a == $b == $c\n",
         "LET $x: BOOL = $a != $b != $c\n",
     ] {
-        parse_script(script, mock_lower).expect_err("chained comparison must fail");
+        parse_with_math(script, mock_lower).expect_err("chained comparison must fail");
     }
     // The explicit form parses to a conjunction of two comparisons.
     match parse_assign_expr("LET $x: BOOL = $a < $b && $b < $c\n") {

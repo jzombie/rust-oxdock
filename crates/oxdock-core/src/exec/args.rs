@@ -303,13 +303,17 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
                 bail!("unknown function {name}");
             };
             if cx.state.call_depth >= super::state::MAX_CALL_DEPTH {
-                bail!("recursion depth limit exceeded in FUNC {name}");
+                bail!(
+                    "recursion depth limit exceeded in FUNC {}",
+                    super::base_name(name)
+                );
             }
             if let Some(params) = &meta.params
                 && params.len() != args.len()
             {
                 bail!(
-                    "{name}() expects {} argument(s), got {}",
+                    "{}() expects {} argument(s), got {}",
+                    super::base_name(name),
                     params.len(),
                     args.len()
                 );

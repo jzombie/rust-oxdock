@@ -21,6 +21,8 @@ mod key_path;
 mod let_capture;
 #[path = "integration/phase_boundary.rs"]
 mod phase_boundary;
+#[path = "integration/reference_examples.rs"]
+mod reference_examples;
 #[path = "integration/unified_values.rs"]
 mod unified_values;
 #[path = "integration/unquoted_syntax.rs"]

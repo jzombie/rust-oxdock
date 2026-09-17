@@ -1,7 +1,12 @@
 use crate::ast::{
-    Arg, Expr, Guard, GuardExpr, IoBinding, IoStream, PipeTarget, PlatformGuard, Step, StepKind,
+    Arg, Expr, Guard, GuardExpr, IoBinding, IoStream, ModuleTable, PipeTarget, PlatformGuard, Step,
+    StepKind,
 };
 use crate::command::ArgType;
+use crate::constants::{
+    KEYWORD_EXPORT, KEYWORD_IMPORT, KEYWORD_INSPECT, MODULE_SEPARATOR, SCRIPT_MODULE_NAME, qualify,
+    split_qualified,
+};
 use crate::error::{ParseError, ParseResult, SpanContext};
 use crate::lexer::{self, RawToken, Rule, parse_pest_error, refine_span, span_for_line, span_of};
 use pest::iterators::Pair;
@@ -29,6 +34,12 @@ pub(super) struct LowerCtx<'a> {
     /// each `LowerCtx` is built fresh per statement so no `&self` borrow is
     /// ever held across a `&mut self` call.
     func_scopes: &'a RefCell<Vec<HashSet<String>>>,
+    /// Module provenance table for static call resolution.
+    modules: &'a ModuleTable,
+    /// Import frames mirroring scope structure, each holding imported
+    /// module names in `IMPORT` order. Chained lookup like var scopes:
+    /// inner frames see outer imports, frames drop on scope exit.
+    import_scopes: &'a RefCell<Vec<Vec<String>>>,
 }
 
 impl<'a> LowerCtx<'a> {
@@ -36,20 +47,26 @@ impl<'a> LowerCtx<'a> {
         lower: &'a dyn Fn(&str, Vec<Arg>) -> ParseResult<StepKind>,
         reserved_names: &'a HashSet<String>,
         func_scopes: &'a RefCell<Vec<HashSet<String>>>,
+        modules: &'a ModuleTable,
+        import_scopes: &'a RefCell<Vec<Vec<String>>>,
     ) -> Self {
         Self {
             lower,
             reserved_names,
             func_scopes,
+            modules,
+            import_scopes,
         }
     }
 
     pub(super) fn enter_scope(&self) {
         self.func_scopes.borrow_mut().push(HashSet::new());
+        self.import_scopes.borrow_mut().push(Vec::new());
     }
 
     pub(super) fn exit_scope(&self) {
         self.func_scopes.borrow_mut().pop();
+        self.import_scopes.borrow_mut().pop();
     }
 
     /// Record a `FUNC` name in the innermost scope. Returns false when the
@@ -61,6 +78,201 @@ impl<'a> LowerCtx<'a> {
             Some(current) => current.insert(name.to_string()),
             None => true,
         }
+    }
+
+    /// Record `IMPORT`ed modules in the innermost import frame.
+    pub(super) fn import_modules(&self, ctx: &SpanContext, modules: &[String]) -> ParseResult<()> {
+        let mut known: Vec<String> = self.modules.modules.keys().cloned().collect();
+        known.sort();
+        for module in modules {
+            if !self.modules.modules.contains_key(module) {
+                return Err(ParseError::validation(
+                    KEYWORD_IMPORT,
+                    format!(
+                        "unknown module `{module}`; known modules: {}",
+                        known.join(", ")
+                    ),
+                    ctx,
+                ));
+            }
+            let mut frames = self.import_scopes.borrow_mut();
+            match frames.last_mut() {
+                Some(frame) => {
+                    if !frame.contains(module) {
+                        frame.push(module.clone());
+                    }
+                }
+                None => {
+                    frames.push(vec![module.clone()]);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Resolve a call name to its qualified `MODULE::NAME` form.
+    ///
+    /// Qualified names check module membership directly (opaque modules pass
+    /// through for runtime checking). Bare names resolve to `SCRIPT` defs
+    /// first, then to exactly one exporting module across all visible
+    /// import frames; zero or several matches fail. `INSPECT` passes
+    /// through untouched: it is a dedicated AST node, not a registry entry.
+    pub(super) fn resolve_call(&self, ctx: &SpanContext, name: &str) -> ParseResult<String> {
+        if let Some((module, base)) = split_qualified(name) {
+            if base == KEYWORD_INSPECT {
+                return Err(ParseError::validation(
+                    "FUNC",
+                    "INSPECT is a builtin keyword and cannot be module-qualified".to_string(),
+                    ctx,
+                ));
+            }
+            check_func_ident(ctx, module)?;
+            check_func_ident(ctx, base)?;
+            match self.modules.modules.get(module) {
+                None => {
+                    let mut known: Vec<String> = self.modules.modules.keys().cloned().collect();
+                    known.sort();
+                    Err(ParseError::validation(
+                        "FUNC",
+                        format!(
+                            "unknown module `{module}`; known modules: {}",
+                            known.join(", ")
+                        ),
+                        ctx,
+                    ))
+                }
+                Some(None) => Ok(name.to_string()),
+                Some(Some(funcs)) => {
+                    if funcs.functions.contains(base) {
+                        Ok(qualify(module, base))
+                    } else {
+                        Err(ParseError::validation(
+                            "FUNC",
+                            format!("unknown function `{module}::{base}`"),
+                            ctx,
+                        ))
+                    }
+                }
+            }
+        } else {
+            if name == KEYWORD_IMPORT || name == KEYWORD_EXPORT {
+                return Err(ParseError::validation(
+                    "FUNC",
+                    format!("`{name}` is a directive, not a function"),
+                    ctx,
+                ));
+            }
+            if name == KEYWORD_INSPECT {
+                return Ok(name.to_string());
+            }
+            let scopes = self.func_scopes.borrow();
+            if scopes.iter().rev().any(|scope| scope.contains(name)) {
+                return Ok(qualify(SCRIPT_MODULE_NAME, name));
+            }
+            drop(scopes);
+            // Distinct exporting modules across all visible import frames.
+            // Several matches fail instead of shadowing silently: qualify it.
+            let frames = self.import_scopes.borrow();
+            let mut known_matches: Vec<String> = Vec::new();
+            let mut opaque_matches: Vec<String> = Vec::new();
+            for frame in frames.iter() {
+                for module in frame {
+                    match self.modules.modules.get(module) {
+                        Some(Some(funcs)) => {
+                            if funcs.functions.contains(name) && !known_matches.contains(module) {
+                                known_matches.push(module.clone());
+                            }
+                        }
+                        Some(None) if !opaque_matches.contains(module) => {
+                            opaque_matches.push(module.clone());
+                        }
+                        Some(None) | None => {}
+                    }
+                }
+            }
+            drop(frames);
+            if known_matches.len() > 1 {
+                known_matches.sort();
+                return Err(ParseError::validation(
+                    "FUNC",
+                    format!(
+                        "ambiguous function `{name}`: exported by {}; qualify it (e.g. `{}::{name}`)",
+                        known_matches.join(", "),
+                        known_matches[0],
+                    ),
+                    ctx,
+                ));
+            }
+            if let Some(module) = known_matches.pop() {
+                return Ok(qualify(&module, name));
+            }
+            if opaque_matches.len() > 1 {
+                opaque_matches.sort();
+                return Err(ParseError::validation(
+                    "FUNC",
+                    format!(
+                        "ambiguous function `{name}`: imported opaque modules {}; qualify it",
+                        opaque_matches.join(", "),
+                    ),
+                    ctx,
+                ));
+            }
+            if let Some(module) = opaque_matches.pop() {
+                return Ok(qualify(&module, name));
+            }
+            // Nothing in scope: point at the fix when a known module
+            // exports the name but was never imported.
+            let mut exporters: Vec<String> = self
+                .modules
+                .modules
+                .iter()
+                .filter_map(|(module, funcs)| match funcs {
+                    Some(funcs) if funcs.functions.contains(name) => Some(module.clone()),
+                    _ => None,
+                })
+                .collect();
+            exporters.sort();
+            if let Some(first) = exporters.first() {
+                return Err(ParseError::validation(
+                    "FUNC",
+                    format!(
+                        "unknown function `{name}`; qualify it (`{first}::{name}`) or add `IMPORT [{first}]`"
+                    ),
+                    ctx,
+                ));
+            }
+            Err(ParseError::validation(
+                "FUNC",
+                format!("unknown function `{name}`"),
+                ctx,
+            ))
+        }
+    }
+
+    /// Base names exported by every known module. Backs the `FUNC` shadow
+    /// check alongside the flat reserved set.
+    pub(super) fn module_base_names(&self) -> HashSet<String> {
+        self.modules.reserved_base_names()
+    }
+
+    /// Snapshot of everything visible at this point: `FUNC` names unioned
+    /// across frames plus imports flattened outer-to-inner. Snippet
+    /// re-parses (async inner commands) seed their base frames with this so
+    /// lookup behaves identically; snippets never define, only read.
+    fn visible_snapshot(&self) -> (HashSet<String>, Vec<String>) {
+        let mut funcs = HashSet::new();
+        for scope in self.func_scopes.borrow().iter() {
+            funcs.extend(scope.iter().cloned());
+        }
+        let mut imports = Vec::new();
+        for frame in self.import_scopes.borrow().iter() {
+            for module in frame {
+                if !imports.contains(module) {
+                    imports.push(module.clone());
+                }
+            }
+        }
+        (funcs, imports)
     }
 }
 
@@ -146,6 +358,16 @@ pub struct ScriptParser<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> {
     /// are unknown at parse time (e.g. compile-time macros); the runtime
     /// `define_func` guard still rejects those redefinitions.
     reserved_names: HashSet<String>,
+    /// Module provenance table for static call resolution. Empty when
+    /// modules are unknown at parse time; resolved calls stay qualified
+    /// only against this table.
+    modules: ModuleTable,
+    /// Seed for the base import frame, from an enclosing parse's visible
+    /// imports (snippet re-parses). Empty for top-level parses.
+    preseed_imports: Vec<String>,
+    /// Seed for the base `FUNC` scope, from an enclosing parse's visible
+    /// definitions (snippet re-parses). Empty for top-level parses.
+    preseed_funcs: HashSet<String>,
 }
 
 impl<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> ScriptParser<'a, F> {
@@ -157,6 +379,33 @@ impl<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> ScriptParser<'a, F> {
         input: &'a str,
         lower: F,
         reserved_names: HashSet<String>,
+    ) -> ParseResult<Self> {
+        Self::new_with_modules(input, lower, reserved_names, ModuleTable::default())
+    }
+
+    pub fn new_with_modules(
+        input: &'a str,
+        lower: F,
+        reserved_names: HashSet<String>,
+        modules: ModuleTable,
+    ) -> ParseResult<Self> {
+        Self::new_with_preseed(
+            input,
+            lower,
+            reserved_names,
+            modules,
+            HashSet::new(),
+            Vec::new(),
+        )
+    }
+
+    pub fn new_with_preseed(
+        input: &'a str,
+        lower: F,
+        reserved_names: HashSet<String>,
+        modules: ModuleTable,
+        preseed_funcs: HashSet<String>,
+        preseed_imports: Vec<String>,
     ) -> ParseResult<Self> {
         let tokens = VecDeque::from(lexer::tokenize(input)?);
         Ok(Self {
@@ -174,6 +423,9 @@ impl<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> ScriptParser<'a, F> {
             block_stack: Vec::new(),
             lower,
             reserved_names,
+            modules,
+            preseed_imports,
+            preseed_funcs,
         })
     }
 
@@ -193,6 +445,14 @@ impl<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> ScriptParser<'a, F> {
         // end of file. Each `LowerCtx` is built fresh per statement from
         // short borrows, so no `&self` borrow crosses a `&mut self` call.
         let func_scopes: RefCell<Vec<HashSet<String>>> = RefCell::new(vec![HashSet::new()]);
+        // Import frames ride the same boundaries: the bottom is the top-level
+        // scope, blocks and `FUNC` bodies push their own, and exit drops
+        // them, so `IMPORT` applies from its line to the enclosing block end.
+        let import_scopes: RefCell<Vec<Vec<String>>> = RefCell::new(vec![Vec::new()]);
+        // Snippet re-parses seed their base frames with the enclosing
+        // parse's visible state so lookup behaves identically.
+        func_scopes.borrow_mut()[0].extend(self.preseed_funcs.iter().cloned());
+        import_scopes.borrow_mut()[0].extend(self.preseed_imports.iter().cloned());
         while let Some(token) = self.tokens.pop_front() {
             let step_index = self.steps.len();
             if self.pending_io_block.is_some()
@@ -227,12 +487,26 @@ impl<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> ScriptParser<'a, F> {
                 RawToken::BlockStart { line_no, span } => {
                     let span = span.with_step(step_index);
                     self.start_block(&span, line_no)?;
-                    LowerCtx::new(&self.lower, &self.reserved_names, &func_scopes).enter_scope();
+                    LowerCtx::new(
+                        &self.lower,
+                        &self.reserved_names,
+                        &func_scopes,
+                        &self.modules,
+                        &import_scopes,
+                    )
+                    .enter_scope();
                 }
                 RawToken::BlockEnd { line_no, span } => {
                     let span = span.with_step(step_index);
                     self.end_block(&span, line_no)?;
-                    LowerCtx::new(&self.lower, &self.reserved_names, &func_scopes).exit_scope();
+                    LowerCtx::new(
+                        &self.lower,
+                        &self.reserved_names,
+                        &func_scopes,
+                        &self.modules,
+                        &import_scopes,
+                    )
+                    .exit_scope();
                 }
                 RawToken::Command {
                     pair,
@@ -240,7 +514,35 @@ impl<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> ScriptParser<'a, F> {
                     span,
                 } => {
                     let span = span.with_step(step_index);
-                    let lctx = LowerCtx::new(&self.lower, &self.reserved_names, &func_scopes);
+                    let lctx = LowerCtx::new(
+                        &self.lower,
+                        &self.reserved_names,
+                        &func_scopes,
+                        &self.modules,
+                        &import_scopes,
+                    );
+                    // IMPORT/EXPORT are lowering directives, not steps:
+                    // IMPORT updates the import frames, EXPORT is reserved.
+                    // Both emit zero runtime steps. Neither may be guarded:
+                    // a guard here would leak onto the following statement.
+                    if pair.as_rule() == Rule::import_statement {
+                        if self.pending_guards.is_some() || self.pending_inline_guards.is_some() {
+                            return Err(ParseError::structural(
+                                KEYWORD_IMPORT,
+                                "IMPORT cannot be guarded".to_string(),
+                                &span,
+                            ));
+                        }
+                        self.lower_import(&span, pair, &lctx)?;
+                        continue;
+                    }
+                    if pair.as_rule() == Rule::export_statement {
+                        return Err(ParseError::validation(
+                            KEYWORD_EXPORT,
+                            "`EXPORT` is reserved for future script-module support and cannot be used yet.".to_string(),
+                            &span,
+                        ));
+                    }
                     let kind = parse_structural_command_with_lower(&span, pair, &lctx)?;
                     self.handle_command_token(&span, line_no, kind)?;
                 }
@@ -250,7 +552,13 @@ impl<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> ScriptParser<'a, F> {
                     span,
                 } => {
                     let span = span.with_step(step_index);
-                    let lctx = LowerCtx::new(&self.lower, &self.reserved_names, &func_scopes);
+                    let lctx = LowerCtx::new(
+                        &self.lower,
+                        &self.reserved_names,
+                        &func_scopes,
+                        &self.modules,
+                        &import_scopes,
+                    );
                     let kind = self
                         .lower_instruction(&span, pair, &lctx)
                         .map_err(|e| e.with_span(&span))?;
@@ -262,7 +570,13 @@ impl<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> ScriptParser<'a, F> {
                     span,
                 } => {
                     let span = span.with_step(step_index);
-                    let lctx = LowerCtx::new(&self.lower, &self.reserved_names, &func_scopes);
+                    let lctx = LowerCtx::new(
+                        &self.lower,
+                        &self.reserved_names,
+                        &func_scopes,
+                        &self.modules,
+                        &import_scopes,
+                    );
                     let kind = lower_run_exec_pair(&span, pair, &lctx)?;
                     self.handle_command_token(&span, line_no, kind)?;
                 }
@@ -365,6 +679,18 @@ impl<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> ScriptParser<'a, F> {
         lctx: &LowerCtx,
     ) -> ParseResult<StepKind> {
         lower_instruction_pair(ctx, pair, lctx)
+    }
+
+    /// Lower an `IMPORT` statement: update the import frames, emit nothing.
+    /// Guards are rejected by the caller: with zero steps there is nothing
+    /// to attach them to, so they would leak onto the next statement.
+    fn lower_import(
+        &self,
+        ctx: &SpanContext,
+        pair: Pair<Rule>,
+        lctx: &LowerCtx,
+    ) -> ParseResult<()> {
+        lower_import_statement(ctx, pair, lctx)
     }
 
     fn handle_guard_token(&mut self, line_end: usize, expr: GuardExpr) -> ParseResult<()> {
@@ -655,14 +981,39 @@ pub fn parse_script(
     ScriptParser::new(input, lower)?.parse()
 }
 
-/// Parse with a known set of host-registered function names so `FUNC`
-/// shadowing a host fails at parse time instead of at runtime.
-pub fn parse_script_with_hosts(
+/// Parse a snippet with an enclosing parse's visible scope state, so
+/// re-parsed inner commands (async bodies) resolve calls identically.
+/// The snippet never defines, only reads: seeds affect lookup alone.
+pub fn parse_script_with_preseed(
     input: &str,
     lower: impl Fn(&str, Vec<Arg>) -> ParseResult<StepKind>,
     reserved_names: HashSet<String>,
+    modules: ModuleTable,
+    preseed_funcs: HashSet<String>,
+    preseed_imports: Vec<String>,
 ) -> ParseResult<Vec<Step>> {
-    ScriptParser::new_with_hosts(input, lower, reserved_names)?.parse()
+    ScriptParser::new_with_preseed(
+        input,
+        lower,
+        reserved_names,
+        modules,
+        preseed_funcs,
+        preseed_imports,
+    )?
+    .parse()
+}
+
+/// Parse with a module provenance table so calls resolve statically:
+/// qualified `MODULE::NAME` checks membership, bare `NAME` resolves through
+/// `SCRIPT` definitions and `IMPORT`ed modules, and anything else fails at
+/// parse time instead of at runtime.
+pub fn parse_script_with_modules(
+    input: &str,
+    lower: impl Fn(&str, Vec<Arg>) -> ParseResult<StepKind>,
+    reserved_names: HashSet<String>,
+    modules: ModuleTable,
+) -> ParseResult<Vec<Step>> {
+    ScriptParser::new_with_modules(input, lower, reserved_names, modules)?.parse()
 }
 
 pub fn parse_guard_expr_str(input: &str) -> ParseResult<GuardExpr> {
@@ -770,7 +1121,7 @@ fn reject_pipe_stdout_in_capture(ctx: &SpanContext, kind: &StepKind) -> ParseRes
 /// Re-parse raw RHS text as an expression (fallback when the `LET` RHS lead
 /// token is not a known command). Requires the expression to consume the
 /// full text so `LET $x: STRING = FOO bar` stays an error instead of binding `FOO`.
-fn parse_expr_str(ctx: &SpanContext, text: &str) -> ParseResult<Expr> {
+fn parse_expr_str(ctx: &SpanContext, lctx: &LowerCtx, text: &str) -> ParseResult<Expr> {
     use pest::Parser;
     let mut pairs = lexer::LanguageParser::parse(Rule::expr, text).map_err(parse_pest_error)?;
     let pair = pairs.next().ok_or_else(|| {
@@ -783,7 +1134,7 @@ fn parse_expr_str(ctx: &SpanContext, text: &str) -> ParseResult<Expr> {
             ctx,
         ));
     }
-    parse_expr(ctx, pair)
+    parse_expr(ctx, lctx, pair)
 }
 
 fn parse_structural_command_with_lower(
@@ -876,12 +1227,12 @@ fn parse_structural_command_with_lower(
         Rule::for_statement => parse_for_statement_from_pair(ctx, pair, lctx)?,
         Rule::while_statement => parse_while_statement_from_pair(ctx, pair, lctx)?,
         Rule::func_def => parse_func_def_from_pair(ctx, pair, lctx)?,
-        Rule::bare_call_statement => parse_bare_call_from_pair(ctx, pair)?,
-        Rule::return_statement => parse_return_statement_from_pair(ctx, pair)?,
+        Rule::bare_call_statement => parse_bare_call_from_pair(ctx, lctx, pair)?,
+        Rule::return_statement => parse_return_statement_from_pair(ctx, lctx, pair)?,
         Rule::break_statement => StepKind::Break,
         Rule::continue_statement => StepKind::Continue,
-        Rule::let_statement => parse_let_statement_from_pair(ctx, pair)?,
-        Rule::mutate_statement => parse_mutate_statement_from_pair(ctx, pair)?,
+        Rule::let_statement => parse_let_statement_from_pair(ctx, lctx, pair)?,
+        Rule::mutate_statement => parse_mutate_statement_from_pair(ctx, lctx, pair)?,
         Rule::let_async_statement => parse_let_async_statement_from_pair(ctx, pair, lctx)?,
         Rule::let_capture_statement => parse_let_capture_statement_from_pair(ctx, pair, lctx)?,
         Rule::await_statement => parse_await_statement_from_pair(ctx, pair)?,
@@ -914,6 +1265,7 @@ fn parse_structural_command_with_lower(
 fn extract_instruction(
     ctx: &SpanContext,
     pair: Pair<Rule>,
+    lctx: &LowerCtx,
 ) -> ParseResult<(String, Vec<InsToken>)> {
     let span = refine_span(ctx, &pair);
     let mut name = None;
@@ -924,10 +1276,14 @@ fn extract_instruction(
                 name = Some(inner.as_str().to_string());
             }
             Rule::argument => {
-                args.extend(parse_argument(ctx, inner)?.into_iter().map(InsToken::Pos));
+                args.extend(
+                    parse_argument(ctx, lctx, inner)?
+                        .into_iter()
+                        .map(InsToken::Pos),
+                );
             }
             Rule::assignment => {
-                let (key, value) = parse_assignment(ctx, inner)?;
+                let (key, value) = parse_assignment(ctx, lctx, inner)?;
                 args.push(InsToken::Assign(key, value));
             }
             _ => {}
@@ -962,7 +1318,7 @@ fn lower_instruction_pair(
     lctx: &LowerCtx,
 ) -> ParseResult<StepKind> {
     let span = refine_span(ctx, &pair);
-    let (name, tokens) = extract_instruction(ctx, pair)?;
+    let (name, tokens) = extract_instruction(ctx, pair, lctx)?;
     if name == "ENV" {
         return lower_env_command(ctx, tokens);
     }
@@ -993,7 +1349,7 @@ fn lower_run_exec_pair(
     let mut list = None;
     for inner in pair.into_inner() {
         if inner.as_rule() == Rule::run_exec_list {
-            list = Some(parse_run_exec_list(ctx, inner)?);
+            list = Some(parse_run_exec_list(ctx, lctx, inner)?);
         }
     }
     let list = list.ok_or_else(|| {
@@ -1010,11 +1366,11 @@ fn lower_run_exec_pair(
 /// atoms only (see `run_exec_arg` in the grammar), so shell bracket content
 /// never parses here. Numeric atoms lower exactly like expression atoms
 /// (including the `i64::MIN` boundary rejection).
-fn parse_run_exec_list(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Expr> {
+fn parse_run_exec_list(ctx: &SpanContext, lctx: &LowerCtx, pair: Pair<Rule>) -> ParseResult<Expr> {
     let mut items = Vec::new();
     for inner in pair.into_inner() {
         if inner.as_rule() == Rule::run_exec_arg {
-            let item = parse_run_exec_arg(ctx, inner)?;
+            let item = parse_run_exec_arg(ctx, lctx, inner)?;
             reject_boundary(ctx, &item)?;
             items.push(item);
         }
@@ -1022,14 +1378,14 @@ fn parse_run_exec_list(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Expr>
     Ok(Expr::List(items))
 }
 
-fn parse_run_exec_arg(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Expr> {
+fn parse_run_exec_arg(ctx: &SpanContext, lctx: &LowerCtx, pair: Pair<Rule>) -> ParseResult<Expr> {
     let span = refine_span(ctx, &pair);
     let inner = pair.into_inner().next().ok_or_else(|| {
         ParseError::structural("run_exec", "RUN exec argument is empty".to_string(), &span)
     })?;
     match inner.as_rule() {
-        Rule::parenthesized_expr => parse_expr_inner(ctx, inner.into_inner().next().unwrap()),
-        Rule::func_call => parse_func_call(ctx, inner),
+        Rule::parenthesized_expr => parse_expr_inner(ctx, lctx, inner.into_inner().next().unwrap()),
+        Rule::func_call => parse_func_call(ctx, lctx, inner),
         Rule::key_path => parse_key_path(ctx, inner),
         Rule::variable => {
             let name = inner.as_str();
@@ -1038,8 +1394,8 @@ fn parse_run_exec_arg(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Expr> 
         }
         Rule::env_read => parse_env_read(ctx, inner).map(Expr::Env),
         Rule::pipe_read => parse_pipe_read(ctx, inner).map(|name| Expr::Literal(Value::pipe(name))),
-        Rule::list_literal => parse_list_literal(ctx, inner),
-        Rule::map_literal => parse_map_literal(ctx, inner),
+        Rule::list_literal => parse_list_literal(ctx, lctx, inner),
+        Rule::map_literal => parse_map_literal(ctx, lctx, inner),
         Rule::string_literal | Rule::quoted_string => {
             let s = parse_quoted_string(inner)?;
             Ok(Expr::Literal(Value::string(s)))
@@ -1062,7 +1418,11 @@ fn parse_run_exec_arg(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Expr> 
 }
 
 /// Split one `assignment` pair into its key and lowered value.
-fn parse_assignment(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<(String, Arg)> {
+fn parse_assignment(
+    ctx: &SpanContext,
+    lctx: &LowerCtx,
+    pair: Pair<Rule>,
+) -> ParseResult<(String, Arg)> {
     let span = refine_span(ctx, &pair);
     let mut key = None;
     let mut value = None;
@@ -1072,7 +1432,7 @@ fn parse_assignment(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<(String,
                 key = Some(inner.as_str().to_string());
             }
             Rule::assign_value => {
-                value = Some(lower_command_value(ctx, inner)?);
+                value = Some(lower_command_value(ctx, lctx, inner)?);
             }
             _ => {
                 return Err(ParseError::structural(
@@ -1095,7 +1455,7 @@ fn parse_assignment(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<(String,
 /// here on raw pest spans. Quoted bytes stay exact, lone `$var`/`$a.b`/`F()`
 /// stay typed `Arg::Expr`, and anything else becomes literal text with only
 /// `{{ }}` as the interpolation trigger. No heuristic rewriting, ever.
-fn lower_command_value(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Arg> {
+fn lower_command_value(ctx: &SpanContext, lctx: &LowerCtx, pair: Pair<Rule>) -> ParseResult<Arg> {
     let span = refine_span(ctx, &pair);
     let inner = pair.into_inner().next().ok_or_else(|| {
         ParseError::structural("assignment", "assignment value is empty".to_string(), &span)
@@ -1114,7 +1474,7 @@ fn lower_command_value(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Arg> 
                 Rule::variable => Ok(Arg::Expr(Expr::Var(parse_dollar_ident(shape)))),
                 Rule::key_path => Ok(Arg::Expr(parse_key_path(ctx, shape)?)),
                 Rule::env_read => Ok(Arg::Expr(Expr::Env(parse_env_read(ctx, shape)?))),
-                Rule::func_call => Ok(Arg::Expr(parse_func_call(ctx, shape)?)),
+                Rule::func_call => Ok(Arg::Expr(parse_func_call(ctx, lctx, shape)?)),
                 other => Err(ParseError::structural(
                     "assignment",
                     format!("unexpected assignment expression shape: {:?}", other),
@@ -1309,7 +1669,7 @@ fn parse_while_statement_from_pair(
         match inner.as_rule() {
             Rule::expr => {
                 if cond.is_none() {
-                    cond = Some(parse_expr(ctx, inner)?);
+                    cond = Some(parse_expr(ctx, lctx, inner)?);
                 }
             }
             Rule::block => {
@@ -1334,6 +1694,37 @@ fn parse_func_def_from_pair(
     lctx: &LowerCtx,
 ) -> ParseResult<StepKind> {
     let span = refine_span(ctx, &pair);
+    // Declare before lowering the body so recursive self-calls resolve:
+    // the name is visible from its definition line, in execution order,
+    // exactly like `LET`. (Mutual recursion stays unsupported: the second
+    // name does not exist while the first body lowers.)
+    let def_name = pair
+        .clone()
+        .into_inner()
+        .find(|inner| inner.as_rule() == Rule::func_ident)
+        .map(|inner| inner.as_str().to_string())
+        .ok_or_else(|| ParseError::validation("FUNC", "FUNC requires a name".to_string(), &span))?;
+    check_func_ident(ctx, &def_name)?;
+    // Same-scope duplicates and reserved-name shadows fail here, at the
+    // definition line: the post-parse AST keeps no spans, so a later walk
+    // could only point at end of file. Nested shadowing of an outer DSL
+    // name stays allowed and reverts on scope exit at runtime. Reserved
+    // covers the flat host set plus every module's base names: a `FUNC`
+    // defines `SCRIPT::NAME`, which would collide on bare resolution.
+    if lctx.reserved_names.contains(&def_name) || lctx.module_base_names().contains(&def_name) {
+        return Err(ParseError::validation(
+            "FUNC",
+            format!("FUNC {def_name} cannot shadow reserved function `{def_name}`"),
+            &span,
+        ));
+    }
+    if !lctx.declare_func(&def_name) {
+        return Err(ParseError::validation(
+            "FUNC",
+            format!("duplicate function `{def_name}` in same scope"),
+            &span,
+        ));
+    }
     let mut name: Option<String> = None;
     let mut param_names: Vec<String> = Vec::new();
     let mut param_types: Vec<String> = Vec::new();
@@ -1384,24 +1775,6 @@ fn parse_func_def_from_pair(
     let name = name
         .ok_or_else(|| ParseError::validation("FUNC", "FUNC requires a name".to_string(), &span))?;
     check_func_ident(ctx, &name)?;
-    // Same-scope duplicates and reserved-name shadows fail here, at the
-    // definition line: the post-parse AST keeps no spans, so a later walk
-    // could only point at end of file. Nested shadowing of an outer DSL
-    // name stays allowed and reverts on scope exit at runtime.
-    if lctx.reserved_names.contains(&name) {
-        return Err(ParseError::validation(
-            "FUNC",
-            format!("FUNC {name} cannot shadow reserved function `{name}`"),
-            &span,
-        ));
-    }
-    if !lctx.declare_func(&name) {
-        return Err(ParseError::validation(
-            "FUNC",
-            format!("duplicate function `{name}` in same scope"),
-            &span,
-        ));
-    }
     if param_names.len() != param_types.len() {
         return Err(ParseError::validation(
             "FUNC",
@@ -1428,7 +1801,11 @@ fn parse_func_def_from_pair(
     })
 }
 
-fn parse_bare_call_from_pair(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<StepKind> {
+fn parse_bare_call_from_pair(
+    ctx: &SpanContext,
+    lctx: &LowerCtx,
+    pair: Pair<Rule>,
+) -> ParseResult<StepKind> {
     let span = refine_span(ctx, &pair);
     let mut name: Option<String> = None;
     let mut args = Vec::new();
@@ -1449,7 +1826,7 @@ fn parse_bare_call_from_pair(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult
                 }
             }
             Rule::expr => {
-                args.push(parse_expr(ctx, inner)?);
+                args.push(parse_expr(ctx, lctx, inner)?);
             }
             _ => {}
         }
@@ -1461,16 +1838,28 @@ fn parse_bare_call_from_pair(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult
             &span,
         )
     })?;
-    check_func_ident(ctx, &name)?;
-    Ok(StepKind::Call { name, args })
+    // Bare heads keep the legacy UPPERCASE check; qualified heads validate
+    // per part inside resolution. Either way the emitted call is qualified.
+    if !name.contains(MODULE_SEPARATOR) {
+        check_func_ident(ctx, &name)?;
+    }
+    let qualified = lctx.resolve_call(&span, &name)?;
+    Ok(StepKind::Call {
+        name: qualified,
+        args,
+    })
 }
 
-fn parse_return_statement_from_pair(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<StepKind> {
+fn parse_return_statement_from_pair(
+    ctx: &SpanContext,
+    lctx: &LowerCtx,
+    pair: Pair<Rule>,
+) -> ParseResult<StepKind> {
     use crate::ast::Value;
     for inner in pair.into_inner() {
         if inner.as_rule() == Rule::expr {
             return Ok(StepKind::Return {
-                expr: Box::new(parse_expr(ctx, inner)?),
+                expr: Box::new(parse_expr(ctx, lctx, inner)?),
             });
         }
     }
@@ -1500,7 +1889,7 @@ fn parse_for_statement_from_pair(
                 types.push(parse_type_tag(inner));
             }
             Rule::expr => {
-                in_expr = Some(parse_expr(ctx, inner)?);
+                in_expr = Some(parse_expr(ctx, lctx, inner)?);
             }
             Rule::block => {
                 body_steps = parse_block_elements_with_lower(ctx, inner, lctx)?;
@@ -1572,7 +1961,11 @@ fn parse_for_statement_from_pair(
     })
 }
 
-fn parse_let_statement_from_pair(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<StepKind> {
+fn parse_let_statement_from_pair(
+    ctx: &SpanContext,
+    lctx: &LowerCtx,
+    pair: Pair<Rule>,
+) -> ParseResult<StepKind> {
     let span = refine_span(ctx, &pair);
     let mut var = None;
     let mut decl_type = None;
@@ -1586,7 +1979,7 @@ fn parse_let_statement_from_pair(ctx: &SpanContext, pair: Pair<Rule>) -> ParseRe
                 decl_type = Some(parse_type_tag(inner));
             }
             Rule::expr => {
-                expr = Some(parse_expr(ctx, inner)?);
+                expr = Some(parse_expr(ctx, lctx, inner)?);
             }
             _ => {}
         }
@@ -1608,7 +2001,11 @@ fn parse_let_statement_from_pair(ctx: &SpanContext, pair: Pair<Rule>) -> ParseRe
     })
 }
 
-fn parse_mutate_statement_from_pair(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<StepKind> {
+fn parse_mutate_statement_from_pair(
+    ctx: &SpanContext,
+    lctx: &LowerCtx,
+    pair: Pair<Rule>,
+) -> ParseResult<StepKind> {
     let span = refine_span(ctx, &pair);
     let mut var = None;
     let mut expr = None;
@@ -1618,7 +2015,7 @@ fn parse_mutate_statement_from_pair(ctx: &SpanContext, pair: Pair<Rule>) -> Pars
                 var = Some(parse_dollar_ident(inner));
             }
             Rule::expr => {
-                expr = Some(parse_expr(ctx, inner)?);
+                expr = Some(parse_expr(ctx, lctx, inner)?);
             }
             _ => {}
         }
@@ -1882,7 +2279,7 @@ fn parse_let_capture_statement_from_pair(
                 cmd: Box::new(kind),
             });
         }
-        let expr = parse_expr_str(&span, &text)?;
+        let expr = parse_expr_str(&span, lctx, &text)?;
         return Ok(StepKind::Assign {
             var,
             decl_type: dtype,
@@ -2057,7 +2454,7 @@ fn parse_if_statement_from_pair(
         match inner.as_rule() {
             Rule::expr => {
                 if cond.is_none() {
-                    cond = Some(parse_expr(ctx, inner)?);
+                    cond = Some(parse_expr(ctx, lctx, inner)?);
                 }
             }
             Rule::block => {
@@ -2095,7 +2492,7 @@ fn parse_else_if_clause(
     let mut body = Vec::new();
     for inner in pair.into_inner() {
         match inner.as_rule() {
-            Rule::expr => cond = Some(parse_expr(ctx, inner)?),
+            Rule::expr => cond = Some(parse_expr(ctx, lctx, inner)?),
             Rule::block => body = parse_block_elements_with_lower(ctx, inner, lctx)?,
             _ => {}
         }
@@ -2134,9 +2531,18 @@ fn parse_async_statement_from_pair(
             Rule::command => {
                 // command is _{} = silent, so its children aren't visible as pairs
                 // when nested inside compound-atomic async_statement.
-                // Parse the command text directly.
+                // Parse the command text directly, seeding the snippet with
+                // this point's visible scope so calls resolve identically.
                 let cmd_text = inner.as_str();
-                let steps = parse_script(cmd_text, |name, args| (lctx.lower)(name, args))?;
+                let (preseed_funcs, preseed_imports) = lctx.visible_snapshot();
+                let steps = parse_script_with_preseed(
+                    cmd_text,
+                    |name, args| (lctx.lower)(name, args),
+                    lctx.reserved_names.clone(),
+                    lctx.modules.clone(),
+                    preseed_funcs,
+                    preseed_imports,
+                )?;
                 if steps.len() == 1 {
                     inner_cmd = Some(steps.into_iter().next().unwrap().kind);
                 } else {
@@ -2260,6 +2666,25 @@ fn parse_async_statement_block_from_pair(
     Ok(StepKind::AsyncBlock { body })
 }
 
+/// Lower an `IMPORT` statement: update the import frames, emit nothing.
+fn lower_import_statement(ctx: &SpanContext, pair: Pair<Rule>, lctx: &LowerCtx) -> ParseResult<()> {
+    let mut modules = Vec::new();
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::import_list => {
+                for module in inner.into_inner() {
+                    if module.as_rule() == Rule::import_module {
+                        modules.push(module.as_str().to_string());
+                    }
+                }
+            }
+            Rule::import_module => modules.push(inner.as_str().to_string()),
+            _ => {}
+        }
+    }
+    lctx.import_modules(ctx, &modules)
+}
+
 fn parse_block_elements_with_lower(
     ctx: &SpanContext,
     block_pair: Pair<Rule>,
@@ -2343,6 +2768,20 @@ fn parse_block_elements_with_lower(
                     scope_exit: 0,
                 });
             }
+            Rule::import_statement => {
+                // Lowering directive: updates import frames, emits no step.
+                // A guard block wrapping only IMPORTs yields no steps, so
+                // its guard binds nothing; IMPORT itself stays static.
+                lower_import_statement(ctx, elem, lctx)?;
+            }
+            Rule::export_statement => {
+                return Err(ParseError::validation(
+                    KEYWORD_EXPORT,
+                    "`EXPORT` is reserved for future script-module support and cannot be used yet."
+                        .to_string(),
+                    ctx,
+                ));
+            }
             _ => {} // blank, hash_comment, semicolon, block_start, block_end, etc.
         }
     }
@@ -2350,7 +2789,7 @@ fn parse_block_elements_with_lower(
     Ok(steps)
 }
 
-fn parse_argument(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Vec<Arg>> {
+fn parse_argument(ctx: &SpanContext, lctx: &LowerCtx, pair: Pair<Rule>) -> ParseResult<Vec<Arg>> {
     let inners: Vec<_> = pair.into_inner().collect();
     // An `expr` fragment can swallow its trailing separator through inner
     // `gap` rules, gluing following text into one argument pair
@@ -2378,6 +2817,7 @@ fn parse_argument(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Vec<Arg>> 
         if group.len() == 1 && group[0].as_rule() == Rule::expr {
             args.push(Arg::Expr(parse_expr(
                 ctx,
+                lctx,
                 group.into_iter().next().expect("group holds one pair"),
             )?));
             continue;
@@ -2781,9 +3221,9 @@ fn parse_dollar_ident(pair: Pair<Rule>) -> String {
 
 use crate::ast::{ArithOp, CompareOp, LogicalOp, MathOp, Value};
 
-fn parse_expr(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Expr> {
+fn parse_expr(ctx: &SpanContext, lctx: &LowerCtx, pair: Pair<Rule>) -> ParseResult<Expr> {
     let span = refine_span(ctx, &pair);
-    let expr = parse_expr_inner(ctx, pair)?;
+    let expr = parse_expr_inner(ctx, lctx, pair)?;
     if matches!(expr, Expr::UnsignedIntBoundary(_)) {
         return Err(ParseError::structural(
             "expr",
@@ -2794,11 +3234,11 @@ fn parse_expr(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Expr> {
     Ok(expr)
 }
 
-fn parse_expr_inner(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Expr> {
+fn parse_expr_inner(ctx: &SpanContext, lctx: &LowerCtx, pair: Pair<Rule>) -> ParseResult<Expr> {
     let span = refine_span(ctx, &pair);
     let inner = pair.into_inner().next().unwrap();
     match inner.as_rule() {
-        Rule::expr_logical_or => parse_expr_logical_or(ctx, inner),
+        Rule::expr_logical_or => parse_expr_logical_or(ctx, lctx, inner),
         _ => Err(ParseError::structural(
             "expr",
             format!("unexpected expr rule: {:?}", inner.as_rule()),
@@ -2807,10 +3247,14 @@ fn parse_expr_inner(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Expr> {
     }
 }
 
-fn parse_expr_logical_or(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Expr> {
+fn parse_expr_logical_or(
+    ctx: &SpanContext,
+    lctx: &LowerCtx,
+    pair: Pair<Rule>,
+) -> ParseResult<Expr> {
     let span = refine_span(ctx, &pair);
     let mut inner = pair.into_inner();
-    let mut left = parse_expr_logical_and(ctx, inner.next().unwrap())?;
+    let mut left = parse_expr_logical_and(ctx, lctx, inner.next().unwrap())?;
     while let Some(op_pair) = inner.next() {
         let op = match op_pair.as_rule() {
             Rule::or_op => LogicalOp::Or,
@@ -2822,7 +3266,7 @@ fn parse_expr_logical_or(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Exp
                 ));
             }
         };
-        let right = parse_expr_logical_and(ctx, inner.next().unwrap())?;
+        let right = parse_expr_logical_and(ctx, lctx, inner.next().unwrap())?;
         left = Expr::Logical {
             op,
             left: Box::new(left),
@@ -2832,10 +3276,14 @@ fn parse_expr_logical_or(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Exp
     Ok(left)
 }
 
-fn parse_expr_logical_and(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Expr> {
+fn parse_expr_logical_and(
+    ctx: &SpanContext,
+    lctx: &LowerCtx,
+    pair: Pair<Rule>,
+) -> ParseResult<Expr> {
     let span = refine_span(ctx, &pair);
     let mut inner = pair.into_inner();
-    let mut left = parse_expr_comparison(ctx, inner.next().unwrap())?;
+    let mut left = parse_expr_comparison(ctx, lctx, inner.next().unwrap())?;
     while let Some(op_pair) = inner.next() {
         let op = match op_pair.as_rule() {
             Rule::and_op => LogicalOp::And,
@@ -2850,7 +3298,7 @@ fn parse_expr_logical_and(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Ex
                 ));
             }
         };
-        let right = parse_expr_comparison(ctx, inner.next().unwrap())?;
+        let right = parse_expr_comparison(ctx, lctx, inner.next().unwrap())?;
         reject_boundary(ctx, &left)?;
         reject_boundary(ctx, &right)?;
         left = Expr::Logical {
@@ -2862,10 +3310,14 @@ fn parse_expr_logical_and(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Ex
     Ok(left)
 }
 
-fn parse_expr_comparison(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Expr> {
+fn parse_expr_comparison(
+    ctx: &SpanContext,
+    lctx: &LowerCtx,
+    pair: Pair<Rule>,
+) -> ParseResult<Expr> {
     let span = refine_span(ctx, &pair);
     let mut inner = pair.into_inner();
-    let left = parse_expr_ordering(ctx, inner.next().unwrap())?;
+    let left = parse_expr_ordering(ctx, lctx, inner.next().unwrap())?;
     if let Some(op_pair) = inner.next() {
         let op = match op_pair.as_rule() {
             Rule::eq_op => CompareOp::Eq,
@@ -2878,16 +3330,16 @@ fn parse_expr_comparison(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Exp
                 ));
             }
         };
-        let right = parse_expr_ordering(ctx, inner.next().unwrap())?;
+        let right = parse_expr_ordering(ctx, lctx, inner.next().unwrap())?;
         return make_compare(ctx, op, left, right);
     }
     Ok(left)
 }
 
-fn parse_expr_ordering(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Expr> {
+fn parse_expr_ordering(ctx: &SpanContext, lctx: &LowerCtx, pair: Pair<Rule>) -> ParseResult<Expr> {
     let span = refine_span(ctx, &pair);
     let mut inner = pair.into_inner();
-    let left = parse_expr_add_sub(ctx, inner.next().unwrap())?;
+    let left = parse_expr_add_sub(ctx, lctx, inner.next().unwrap())?;
     if let Some(op_pair) = inner.next() {
         let op = match op_pair.as_rule() {
             Rule::lt_op => CompareOp::Lt,
@@ -2902,16 +3354,16 @@ fn parse_expr_ordering(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Expr>
                 ));
             }
         };
-        let right = parse_expr_add_sub(ctx, inner.next().unwrap())?;
+        let right = parse_expr_add_sub(ctx, lctx, inner.next().unwrap())?;
         return make_compare(ctx, op, left, right);
     }
     Ok(left)
 }
 
-fn parse_expr_add_sub(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Expr> {
+fn parse_expr_add_sub(ctx: &SpanContext, lctx: &LowerCtx, pair: Pair<Rule>) -> ParseResult<Expr> {
     let span = refine_span(ctx, &pair);
     let mut inner = pair.into_inner();
-    let mut left = parse_expr_mul_div(ctx, inner.next().unwrap())?;
+    let mut left = parse_expr_mul_div(ctx, lctx, inner.next().unwrap())?;
     while let Some(op_pair) = inner.next() {
         let op = match op_pair.as_rule() {
             Rule::plus_op => ArithOp::Add,
@@ -2924,16 +3376,16 @@ fn parse_expr_add_sub(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Expr> 
                 ));
             }
         };
-        let right = parse_expr_mul_div(ctx, inner.next().unwrap())?;
+        let right = parse_expr_mul_div(ctx, lctx, inner.next().unwrap())?;
         left = make_arith(ctx, op, left, right)?;
     }
     Ok(left)
 }
 
-fn parse_expr_mul_div(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Expr> {
+fn parse_expr_mul_div(ctx: &SpanContext, lctx: &LowerCtx, pair: Pair<Rule>) -> ParseResult<Expr> {
     let span = refine_span(ctx, &pair);
     let mut inner = pair.into_inner();
-    let mut left = parse_expr_unary(ctx, inner.next().unwrap())?;
+    let mut left = parse_expr_unary(ctx, lctx, inner.next().unwrap())?;
     while let Some(op_pair) = inner.next() {
         let op = match op_pair.as_rule() {
             Rule::star_op => ArithOp::Mul,
@@ -2949,13 +3401,13 @@ fn parse_expr_mul_div(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Expr> 
                 ));
             }
         };
-        let right = parse_expr_unary(ctx, inner.next().unwrap())?;
+        let right = parse_expr_unary(ctx, lctx, inner.next().unwrap())?;
         left = make_arith(ctx, op, left, right)?;
     }
     Ok(left)
 }
 
-fn parse_expr_unary(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Expr> {
+fn parse_expr_unary(ctx: &SpanContext, lctx: &LowerCtx, pair: Pair<Rule>) -> ParseResult<Expr> {
     let span = refine_span(ctx, &pair);
     let mut prefixes = Vec::new();
     let mut atom = None;
@@ -2963,7 +3415,7 @@ fn parse_expr_unary(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Expr> {
         match inner.as_rule() {
             Rule::not_op => prefixes.push(false),
             Rule::neg_op => prefixes.push(true),
-            Rule::expr_atom => atom = Some(parse_expr_atom(ctx, inner)?),
+            Rule::expr_atom => atom = Some(parse_expr_atom(ctx, lctx, inner)?),
             _ => {
                 return Err(ParseError::structural(
                     "expr",
@@ -3260,12 +3712,12 @@ fn expr_to_rpn(expr: &Expr) -> Option<Vec<MathOp>> {
     }
 }
 
-fn parse_expr_atom(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Expr> {
+fn parse_expr_atom(ctx: &SpanContext, lctx: &LowerCtx, pair: Pair<Rule>) -> ParseResult<Expr> {
     let span = refine_span(ctx, &pair);
     let inner = pair.into_inner().next().unwrap();
     match inner.as_rule() {
-        Rule::parenthesized_expr => parse_expr_inner(ctx, inner.into_inner().next().unwrap()),
-        Rule::func_call => parse_func_call(ctx, inner),
+        Rule::parenthesized_expr => parse_expr_inner(ctx, lctx, inner.into_inner().next().unwrap()),
+        Rule::func_call => parse_func_call(ctx, lctx, inner),
         Rule::key_path => parse_key_path(ctx, inner),
         Rule::variable => {
             let name = inner.as_str();
@@ -3274,8 +3726,8 @@ fn parse_expr_atom(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Expr> {
         }
         Rule::env_read => parse_env_read(ctx, inner).map(Expr::Env),
         Rule::pipe_read => parse_pipe_read(ctx, inner).map(|name| Expr::Literal(Value::pipe(name))),
-        Rule::list_literal => parse_list_literal(ctx, inner),
-        Rule::map_literal => parse_map_literal(ctx, inner),
+        Rule::list_literal => parse_list_literal(ctx, lctx, inner),
+        Rule::map_literal => parse_map_literal(ctx, lctx, inner),
         Rule::string_literal | Rule::quoted_string => {
             let s = parse_quoted_string(inner)?;
             Ok(Expr::Literal(Value::string(s)))
@@ -3394,17 +3846,17 @@ fn parse_key_path(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Expr> {
     })
 }
 
-fn parse_func_call(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Expr> {
+fn parse_func_call(ctx: &SpanContext, lctx: &LowerCtx, pair: Pair<Rule>) -> ParseResult<Expr> {
     let span = refine_span(ctx, &pair);
     let mut name = None;
     let mut args = Vec::new();
     for inner in pair.into_inner() {
         match inner.as_rule() {
-            Rule::ident => {
+            Rule::qualified_func_name => {
                 name = Some(inner.as_str().to_string());
             }
             Rule::expr => {
-                let arg = parse_expr_inner(ctx, inner)?;
+                let arg = parse_expr_inner(ctx, lctx, inner)?;
                 reject_boundary(ctx, &arg)?;
                 args.push(arg);
             }
@@ -3416,8 +3868,9 @@ fn parse_func_call(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Expr> {
     })?;
     // `INSPECT` lowers to its own node carrying the variable unevaluated:
     // pre-evaluating to a `Value` would lose the binding name. Anything else
-    // stays a generic call dispatched by the runtime registry.
-    if name == "INSPECT" {
+    // resolves statically to `MODULE::NAME` against SCRIPT definitions and
+    // `IMPORT`ed modules; the runtime registry is keyed the same way.
+    if name == KEYWORD_INSPECT {
         let [arg] = args.as_slice() else {
             return Err(ParseError::structural(
                 "expr",
@@ -3434,14 +3887,18 @@ fn parse_func_call(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Expr> {
             &span,
         ));
     }
-    Ok(Expr::Call { name, args })
+    let qualified = lctx.resolve_call(&span, &name)?;
+    Ok(Expr::Call {
+        name: qualified,
+        args,
+    })
 }
 
-fn parse_list_literal(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Expr> {
+fn parse_list_literal(ctx: &SpanContext, lctx: &LowerCtx, pair: Pair<Rule>) -> ParseResult<Expr> {
     let mut items = Vec::new();
     for inner in pair.into_inner() {
         if inner.as_rule() == Rule::expr {
-            let item = parse_expr_inner(ctx, inner)?;
+            let item = parse_expr_inner(ctx, lctx, inner)?;
             reject_boundary(ctx, &item)?;
             items.push(item);
         }
@@ -3449,7 +3906,7 @@ fn parse_list_literal(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Expr> 
     Ok(Expr::List(items))
 }
 
-fn parse_map_literal(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Expr> {
+fn parse_map_literal(ctx: &SpanContext, lctx: &LowerCtx, pair: Pair<Rule>) -> ParseResult<Expr> {
     let span = refine_span(ctx, &pair);
     let mut entries = Vec::new();
     for inner in pair.into_inner() {
@@ -3465,7 +3922,7 @@ fn parse_map_literal(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Expr> {
                         key = entry_inner.as_str().to_string();
                     }
                     Rule::expr => {
-                        let val = parse_expr_inner(ctx, entry_inner)?;
+                        let val = parse_expr_inner(ctx, lctx, entry_inner)?;
                         reject_boundary(ctx, &val)?;
                         value = Some(val);
                     }

@@ -1,8 +1,44 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::Arc;
 
 pub use crate::commands::{AssertTarget, StepKind};
+use crate::constants::{
+    KEYWORD_ASYNC, KEYWORD_AWAIT, KEYWORD_BREAK, KEYWORD_CANCEL, KEYWORD_CONTINUE, KEYWORD_ELSE,
+    KEYWORD_EXPORT, KEYWORD_FOR, KEYWORD_FUNC, KEYWORD_IF, KEYWORD_IMPORT, KEYWORD_LET,
+    KEYWORD_RETURN, KEYWORD_WHILE,
+};
+
+/// One module's function surface for parse-time call resolution: the base
+/// names it exports. RPN eligibility needs no table: calls compile
+/// generically and the runtime registry gates evaluation per entry.
+#[derive(Debug, Clone, Default)]
+pub struct ModuleFuncs {
+    /// Base function names exported by the module.
+    pub functions: HashSet<String>,
+}
+
+/// Parse-time function provenance: module name to surface. A `None` entry
+/// marks an opaque module (declared but membership unknown, e.g. the
+/// `oxdock!` macro's `modules:` prefix): qualified calls pass through for
+/// runtime checking, and a lone opaque import determines bare-call targets.
+#[derive(Debug, Clone, Default)]
+pub struct ModuleTable {
+    pub modules: HashMap<String, Option<ModuleFuncs>>,
+}
+
+impl ModuleTable {
+    /// Base names exported by every known (non-opaque) module. Backs the
+    /// `FUNC` shadow check: a script definition colliding with any of these
+    /// fails at parse time, exactly like the old flat reserved set.
+    pub fn reserved_base_names(&self) -> HashSet<String> {
+        let mut out = HashSet::new();
+        for funcs in self.modules.values().flatten() {
+            out.extend(funcs.functions.iter().cloned());
+        }
+        out
+    }
+}
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Command {
@@ -173,8 +209,20 @@ impl Command {
 /// iterate this (plus [`crate::all_metadata`] names) instead of
 /// hardcoding keyword lists elsewhere.
 pub const STRUCTURAL_KEYWORDS: &[&str] = &[
-    "LET", "FOR", "IF", "ELSE", "ASYNC", "AWAIT", "CANCEL", "FUNC", "RETURN", "WHILE", "BREAK",
-    "CONTINUE",
+    KEYWORD_LET,
+    KEYWORD_FOR,
+    KEYWORD_IF,
+    KEYWORD_ELSE,
+    KEYWORD_ASYNC,
+    KEYWORD_AWAIT,
+    KEYWORD_CANCEL,
+    KEYWORD_FUNC,
+    KEYWORD_RETURN,
+    KEYWORD_WHILE,
+    KEYWORD_BREAK,
+    KEYWORD_CONTINUE,
+    KEYWORD_IMPORT,
+    KEYWORD_EXPORT,
 ];
 
 /// Clause keywords that open no statement and need no `Display` quoting

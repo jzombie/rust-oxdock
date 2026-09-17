@@ -5,7 +5,7 @@ use oxdock_parser::{lower_command, parse_script};
 use crate::common::mock_lower;
 
 fn parse_prod(script: &str) -> Vec<oxdock_parser::Step> {
-    parse_script(script, lower_command).expect("parse with production lower")
+    crate::common::parse_with_math(script, lower_command).expect("parse with production lower")
 }
 
 fn single_kind(script: &str) -> StepKind {
@@ -77,7 +77,7 @@ fn run_exec_form_supports_keypath_and_call_elements() {
             assert!(
                 matches!(&argv[1], Arg::Expr(Expr::KeyPath { base, keys }) if base == "a" && keys == &["b".to_string()])
             );
-            assert!(matches!(&argv[2], Arg::Expr(Expr::Call { name, .. }) if name == "GLOB"));
+            assert!(matches!(&argv[2], Arg::Expr(Expr::Call { name, .. }) if name == "MATH::GLOB"));
         }
         other => panic!("expected RunExec, got {other:?}"),
     }

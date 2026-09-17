@@ -5,7 +5,7 @@
 //! `TYPES()`.
 
 use indoc::indoc;
-use oxdock_core::{Engine, EngineOutput, OxDockType, Value};
+use oxdock_core::{Engine, EngineOutput, HostModule, OxDockFn, OxDockType, Value};
 use oxdock_fs::{GuardedPath, GuardedTempDir, PathResolver, WorkspaceFs};
 use oxdock_func_macro::{oxdock_func, oxdock_type};
 use oxdock_process::MockProcessManager;
@@ -43,8 +43,11 @@ fn read_tag(val: Value) -> anyhow::Result<Value> {
 fn run_with_tag_hosts(root: &GuardedPath, script: &str) -> Result<(), anyhow::Error> {
     let mut engine = Engine::new();
     engine.register_type::<Tag>();
-    engine.register_fn(MakeTag);
-    engine.register_fn(ReadTag);
+    engine.register_module(HostModule {
+        name: "TEST".to_string(),
+        funcs: vec![MakeTag::registration(), ReadTag::registration()],
+        types: vec![],
+    });
     engine.run_script(root, script).map(|_| ())
 }
 
@@ -66,6 +69,7 @@ fn custom_type_flows_through_declare_and_hosts() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
+        IMPORT [STD, TEST]
         LET $t: TAG = MAKE_TAG()
         LET $s: STRING = READ_TAG($t)
         WRITE tag.txt "{{ $s }}::{{ $t }}"
@@ -93,7 +97,7 @@ fn custom_type_flows_through_declare_and_hosts() {
 fn unregistered_custom_type_fails_at_coercion() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    let err = run_with_tag_hosts(&root, "LET $x: NOPE = MAKE_TAG()\n")
+    let err = run_with_tag_hosts(&root, "IMPORT [STD, TEST]\nLET $x: NOPE = MAKE_TAG()\n")
         .expect_err("unknown custom type must fail");
     assert!(err.to_string().contains("unknown type `NOPE`"), "{err}");
 }
@@ -102,7 +106,7 @@ fn unregistered_custom_type_fails_at_coercion() {
 fn custom_value_rejected_by_builtin_declaration() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    let err = run_with_tag_hosts(&root, "LET $x: STRING = MAKE_TAG()\n")
+    let err = run_with_tag_hosts(&root, "IMPORT [STD, TEST]\nLET $x: STRING = MAKE_TAG()\n")
         .expect_err("custom value must not coerce to STRING");
     assert!(err.to_string().contains("TypeMismatch"), "{err}");
 }
@@ -118,12 +122,15 @@ fn engine_runs_with_custom_process_manager() {
     let fs: Box<dyn WorkspaceFs> = Box::new(resolver);
     let mut engine = Engine::<MockProcessManager>::new_custom();
     engine.register_type::<Tag>();
-    engine.register_fn(MakeTag);
-    engine.register_fn(ReadTag);
+    engine.register_module(HostModule {
+        name: "TEST".to_string(),
+        funcs: vec![MakeTag::registration(), ReadTag::registration()],
+        types: vec![],
+    });
     let run = engine
         .run_script_on(
             fs,
-            "LET $t: TAG = MAKE_TAG()\n",
+            "IMPORT [STD, TEST]\nLET $t: TAG = MAKE_TAG()\n",
             MockProcessManager::default(),
         )
         .expect("custom manager runs");
@@ -136,6 +143,7 @@ fn queryable_container_reads_through_host_accessors() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
+        IMPORT [STD, TEST]
         LET $m: MATRIX = MAKE_MATRIX()
         LET $cell: INT = MATRIX_GET($m, 0, 1)
         ASSERT_EQ $cell 2
@@ -153,13 +161,13 @@ fn container_accessors_reject_bad_reads() {
     let root = guard_root(&temp);
     let err = run_with_matrix_hosts(
         &root,
-        "LET $m: MATRIX = MAKE_MATRIX()\nLET $cell: INT = MATRIX_GET($m, 9, 9)\n",
+        "IMPORT [STD, TEST]\nLET $m: MATRIX = MAKE_MATRIX()\nLET $cell: INT = MATRIX_GET($m, 9, 9)\n",
     )
     .expect_err("out-of-bounds cell must fail");
     assert!(err.to_string().contains("out of bounds"), "{err}");
     let err = run_with_matrix_hosts(
         &root,
-        "LET $w: STRING = \"hi\"\nLET $cell: INT = MATRIX_GET($w, 0, 0)\n",
+        "IMPORT [STD, TEST]\nLET $w: STRING = \"hi\"\nLET $cell: INT = MATRIX_GET($w, 0, 0)\n",
     )
     .expect_err("foreign value must fail");
     assert!(err.to_string().contains("expects a MATRIX value"), "{err}");
@@ -171,7 +179,7 @@ fn custom_type_rejects_key_path_traversal() {
     let root = guard_root(&temp);
     let err = run_with_tag_hosts(
         &root,
-        "LET $t: TAG = MAKE_TAG()\nLET $x: STRING = $t.label\n",
+        "IMPORT [STD, TEST]\nLET $t: TAG = MAKE_TAG()\nLET $x: STRING = $t.label\n",
     )
     .expect_err("key path into opaque type must fail");
     assert!(
@@ -186,7 +194,7 @@ fn custom_type_rejects_for_iteration() {
     let root = guard_root(&temp);
     let err = run_with_tag_hosts(
         &root,
-        "LET $t: TAG = MAKE_TAG()\nFOR $x: TAG IN $t { ECHO hi }\n",
+        "IMPORT [STD, TEST]\nLET $t: TAG = MAKE_TAG()\nFOR $x: TAG IN $t { ECHO hi }\n",
     )
     .expect_err("iteration over opaque type must fail");
     assert!(
@@ -250,9 +258,15 @@ fn matrix_rows(board: Value) -> anyhow::Result<Value> {
 fn run_with_matrix_hosts(root: &GuardedPath, script: &str) -> Result<EngineOutput, anyhow::Error> {
     let mut engine = Engine::new();
     engine.register_type::<Matrix>();
-    engine.register_fn(MakeMatrix);
-    engine.register_fn(MatrixGet);
-    engine.register_fn(MatrixRows);
+    engine.register_module(HostModule {
+        name: "TEST".to_string(),
+        funcs: vec![
+            MakeMatrix::registration(),
+            MatrixGet::registration(),
+            MatrixRows::registration(),
+        ],
+        types: vec![],
+    });
     engine.run_script(root, script)
 }
 
@@ -269,16 +283,91 @@ impl std::fmt::Display for ImpostorTag {
 }
 
 #[test]
+#[should_panic(expected = "duplicate function registration `TEST::MAKE_TAG`")]
+fn duplicate_qualified_registration_panics() {
+    let mut engine = Engine::new();
+    let module = || HostModule {
+        name: "TEST".to_string(),
+        funcs: vec![MakeTag::registration()],
+        types: vec![],
+    };
+    engine.register_module(module());
+    engine.register_module(module());
+}
+
+#[test]
+#[should_panic(expected = "duplicate function registration `STD::GLOB`")]
+fn host_module_cannot_reclaim_std_name() {
+    use oxdock_core::{FuncMeta, FuncParam, HostRegistration};
+    use std::sync::Arc;
+    let mut engine = Engine::new();
+    engine.register_module(HostModule {
+        name: "STD".to_string(),
+        funcs: vec![HostRegistration::Pure {
+            name: "GLOB".to_string(),
+            meta: FuncMeta {
+                name: "GLOB".to_string(),
+                module: String::new(),
+                kind: oxdock_core::FuncKind::HostPure,
+                params: Some(vec![FuncParam {
+                    name: "pattern".to_string(),
+                    param_type: Some("STRING".to_string()),
+                }]),
+                returns: Some("LIST".to_string()),
+                rpn: false,
+                summary: "Shadow attempt.",
+                docs: "Must never replace the builtin.",
+            },
+            func: Arc::new(|_| Ok(Value::string(String::new()))),
+        }],
+        types: vec![],
+    });
+}
+
+#[test]
+fn same_base_name_in_different_modules_coexists() {
+    // `TEST::MAKE_TAG` and `OTHER::MAKE_TAG` are distinct entries: modules
+    // isolate, so only the qualified name must be unique.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let mut engine = Engine::new();
+    engine.register_type::<Tag>();
+    engine.register_module(HostModule {
+        name: "TEST".to_string(),
+        funcs: vec![MakeTag::registration(), ReadTag::registration()],
+        types: vec![],
+    });
+    engine.register_module(HostModule {
+        name: "OTHER".to_string(),
+        funcs: vec![MakeTag::registration()],
+        types: vec![],
+    });
+    engine
+        .run_script(
+            &root,
+            "IMPORT [TEST]\nLET $t: TAG = MAKE_TAG()\nLET $o: TAG = OTHER::MAKE_TAG()\nWRITE both.txt \"{{ $t }}::{{ $o }}\"\n",
+        )
+        .expect("distinct qualified names coexist");
+    assert_eq!(
+        read_trimmed(&root.join("both.txt").unwrap()),
+        "tag:demo::tag:demo"
+    );
+}
+
+#[test]
 #[should_panic(expected = "already registered for a different descriptor")]
 fn conflicting_payload_type_for_live_name_panics() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let mut engine = Engine::new();
     engine.register_type::<Tag>();
-    engine.register_fn(MakeTag);
-    engine.register_fn(ReadTag);
+    engine.register_module(HostModule {
+        name: "TEST".to_string(),
+        funcs: vec![MakeTag::registration(), ReadTag::registration()],
+        types: vec![],
+    });
     engine.register_type::<ImpostorTag>();
     engine
-        .run_script(&root, "LET $t: TAG = MAKE_TAG()\n")
+        .run_script(&root, "IMPORT [STD, TEST]\nLET $t: TAG = MAKE_TAG()\n")
         .unwrap();
 }

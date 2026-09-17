@@ -473,9 +473,15 @@ fn expand_oxdock(input: TokenStream) -> syn::Result<TokenStream> {
     let ts: proc_macro2::TokenStream = input.into();
     let interp = collect_hash_idents(ts.clone())?;
 
+    // Opaque host modules (membership unknown at compile time) declared up
+    // front: `modules: [DOCS]` lets the script `IMPORT [DOCS]` and call
+    // `DOCS::F(...)` or unambiguous bare names, checked at runtime.
+    let (opaque_modules, script_ts) = oxdock_parser::split_modules_prefix(&ts)
+        .map_err(|e| syn::Error::new(proc_macro2::Span::call_site(), format!("{e:#}")))?;
+
     // Preprocess: remove `#` tokens and replace ident tokens with placeholders
     // so script_from_braced_tokens never sees the `#` sigil.
-    let sanitized = sanitize_hash_tokens(ts, &interp)?;
+    let sanitized = sanitize_hash_tokens(script_ts, &interp)?;
 
     let dsl_text = oxdock_parser::script_from_braced_tokens(&sanitized).map_err(|e| {
         syn::Error::new(proc_macro2::Span::call_site(), format!("parse error: {e}"))
@@ -487,7 +493,11 @@ fn expand_oxdock(input: TokenStream) -> syn::Result<TokenStream> {
         return Ok(ts_out.into());
     }
 
-    let steps = oxdock_core::parse_script(dsl_text).map_err(|e| {
+    let mut table = oxdock_core::std_module_table();
+    for module in opaque_modules {
+        table.modules.insert(module, None);
+    }
+    let steps = oxdock_core::parse_script_with_modules(dsl_text, table).map_err(|e| {
         let msg = format!("parse error: {e}\ndsl:\n{dsl_text}");
         syn::Error::new(proc_macro2::Span::call_site(), msg)
     })?;

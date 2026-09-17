@@ -99,6 +99,7 @@ FOR $k: STRING, $v: INT IN $map {
 ```oxdock
 # single-line body; $x is a template path, WHO an override
 WRITE a.txt "hi \\\{{ env:WHO }}!"
+IMPORT [STD]
 FOR $x: STRING IN GLOB("*.txt") { EXPAND $x WHO=World }
 ASSERT_CONTAINS stdout "hi World!"
 ```
@@ -123,6 +124,7 @@ accepted as conditions.
 **Example: if else**
 
 ```oxdock
+IMPORT [STD]
 IF true {
   WRITE yes.txt taken
 } ELSE {
@@ -152,6 +154,7 @@ ASSERT_EQ $t "absent"
 **Example: logical condition composition**
 
 ```oxdock
+IMPORT [STD]
 LET $role: STRING = "admin"
 LET $level: INT = 3
 # || is true when either side holds; && needs both.
@@ -301,6 +304,7 @@ LET $too_early: STRING = "too late"
 ```oxdock
 # the RHS is an expression: GLOB(...) runs and binds a list
 WRITE a.txt "x"
+IMPORT [STD]
 LET $files: LIST = GLOB("*.txt")
 FOR $f: STRING IN $files { ECHO $f }
 ASSERT_CONTAINS stdout "a.txt"
@@ -333,6 +337,7 @@ ASSERT_EQ $out "hi\n"
 
 ```oxdock
 LET $size_str: STRING = ECHO 41
+IMPORT [STD]
 LET $total: INT = INT($size_str) + 1
 LET $ratio: FLOAT = 1 + 2.5
 # Int x Int stays INT: integer division truncates.
@@ -347,6 +352,7 @@ ASSERT_EQ $half 3
 ```oxdock
 # Binary fractions compare cleanly; decimal fractions may not:
 # 0.1 + 0.2 is 0.30000000000000004, so == is false.
+IMPORT [STD]
 LET $exact: BOOL = 0.5 + 0.25 == 0.75
 LET $decimal: BOOL = 0.1 + 0.2 == 0.3
 IF $exact {
@@ -430,6 +436,7 @@ ASSERT_EQ $count 2
 # Captured output is a string: `"100" + 1` is a Type Error.
 # Convert explicitly, then mutate with arithmetic.
 LET $raw: STRING = ECHO 100
+IMPORT [STD]
 LET $n: INT = INT($raw)
 $n = $n + 1
 # The declared type also converts plain strings on assignment.
@@ -588,6 +595,12 @@ FUNC definition is scoped to its block and reverts on exit. Names share
 one namespace with native and host-registered functions, which a FUNC
 may never shadow.
 
+Functions resolve like variables: a name is visible from its
+definition line, so recursion works but mutual recursion does
+not (the second name does not exist while the first body
+lowers). Calls name their module (`STD::GLOB(...)`) unless
+imported; see IMPORT.
+
 Invoke any function with one syntax: `NAME(...)` as a statement
 (discarding the value) or `LET $var: TYPE = NAME(...)` to capture
 the RETURN value (fallthrough without RETURN captures as "").
@@ -722,6 +735,42 @@ CONTINUE outside a loop, or across a FUNC or ASYNC boundary, is an error.
 FOR $x: STRING IN ["a", "b"] {
   CONTINUE
 }
+```
+
+
+### IMPORT
+
+Bring module functions into bare-call scope.
+
+**Syntax:** `IMPORT [<module>, ...] | IMPORT <module>`
+
+Every function call names its module (`STD::GLOB(...)`,
+`POLARS::READ_CSV(...)`) unless the module is imported:
+`IMPORT [STD]` lets the rest of the scope call `GLOB(...)`
+bare. Calls resolve at parse time against `SCRIPT`
+definitions first, then imported modules; unknown modules,
+unknown functions, and unimported bare calls are parse
+errors, never runtime surprises.
+
+IMPORT is a lowering directive, not a step: it applies from
+its line to the enclosing block exit, then reverts, exactly
+like `LET` scoping but with no runtime footprint. Guards do
+not apply to it. Two imported modules exporting one name is
+an ambiguity error: qualify the call instead.
+
+`EXPORT` is reserved for future script-module support and
+cannot be used yet.
+
+
+**Examples:**
+
+**Example: import**
+
+```oxdock
+WRITE a.txt "hi \\\{{ env:WHO }}!"
+IMPORT [STD]
+FOR $x: STRING IN GLOB("*.txt") { EXPAND $x WHO=World }
+ASSERT_CONTAINS stdout "hi World!"
 ```
 
 

@@ -4,7 +4,7 @@
 //! assembly) lives here, so downstream integrations never touch it:
 //!
 //! ```rust
-//! use oxdock_core::{Engine, OxDockType, Value};
+//! use oxdock_core::{Engine, OxDockFn, OxDockType, Value};
 //! use oxdock_func_macro::{oxdock_func, oxdock_type};
 //! use std::fmt;
 //!
@@ -30,9 +30,16 @@
 //!     let root = temp.as_guarded_path().clone();
 //!     let mut engine = Engine::new();
 //!     engine.register_type::<EngineTag>();
-//!     engine.register_fn(EngineMakeTag);
+//!     engine.register_module(oxdock_core::HostModule {
+//!         name: "DEMO".to_string(),
+//!         funcs: vec![EngineMakeTag::registration()],
+//!         types: vec![],
+//!     });
 //!     let run = engine
-//!         .run_script(&root, "LET $t: ENGINE_DOCTEST_TAG = ENGINE_MAKE_TAG()\n")
+//!         .run_script(
+//!             &root,
+//!             "IMPORT [DEMO]\nLET $t: ENGINE_DOCTEST_TAG = ENGINE_MAKE_TAG()\n",
+//!         )
 //!         .expect("script runs");
 //!     assert!(run.bindings.contains_key("t"));
 //! }
@@ -42,7 +49,7 @@
 //! caller-built filesystem, custom IO) stay on the same facade: pick the
 //! manager as the type parameter, stage IO with [`Engine::with_io`], and run
 //! with [`Engine::run_steps_on`] or [`Engine::run_script_on`]. The free
-//! [`run_steps_with_manager_with_hosts`](super::run_steps_with_manager_with_hosts)
+//! [`run_steps_with_manager_with_modules`](super::run_steps_with_manager_with_modules)
 //! function remains for callers that never stage host surface at all.
 
 use std::collections::BTreeMap;
@@ -54,7 +61,7 @@ use oxdock_parser::{Step, Value};
 use oxdock_process::{DefaultProcessManager, ProcessManager, default_process_manager};
 
 use super::io::ExecIo;
-use super::native::{HostRegistration, OxDockFn};
+use super::native::{HostModule, HostRegistration, std_module_table};
 use super::typing::{OxDockType, TypeDescriptor};
 
 /// Output of one [`Engine`] run: the final working directory, the filesystem
@@ -88,7 +95,7 @@ impl fmt::Debug for EngineOutput {
 /// Staged IO applies to every run; the process manager and the filesystem
 /// are chosen per run, so one engine serves many roots.
 pub struct Engine<P: ProcessManager = DefaultProcessManager> {
-    funcs: Vec<HostRegistration<P>>,
+    modules: Vec<HostModule<P>>,
     types: Vec<&'static TypeDescriptor>,
     io: ExecIo,
 }
@@ -101,7 +108,7 @@ impl<P: ProcessManager> Engine<P> {
     /// `Engine::<P>::default()` works the same way.
     pub fn new_custom() -> Self {
         Self {
-            funcs: Vec::new(),
+            modules: Vec::new(),
             types: Vec::new(),
             io: ExecIo::new(),
         }
@@ -114,13 +121,27 @@ impl<P: ProcessManager> Engine<P> {
         self
     }
 
-    /// Register a `#[oxdock_func]` marker (for example `MakeTag` for
-    /// `make_tag`). Chainable.
-    pub fn register_fn<F>(&mut self, _func: F) -> &mut Self
-    where
-        F: OxDockFn<P>,
-    {
-        self.funcs.push(F::registration());
+    /// Register a host library module: its functions become callable as
+    /// `MODULE::NAME`, its types join the run's name directory. Chainable.
+    /// Group `#[oxdock_func]` markers (for example `MakeTag` for
+    /// `make_tag`) with their `#[oxdock_type]` payloads here. Panics on a
+    /// duplicate qualified name, including collisions with `STD` builtins;
+    /// the registry re-checks at run time for direct state users.
+    pub fn register_module(&mut self, module: HostModule<P>) -> &mut Self {
+        let mut seen: std::collections::HashSet<String> = super::builtin_function_names();
+        for staged in self.modules.iter().chain(std::iter::once(&module)) {
+            for registration in &staged.funcs {
+                let base = match registration {
+                    HostRegistration::Stateful { name, .. }
+                    | HostRegistration::Pure { name, .. } => name,
+                };
+                let qualified = format!("{}::{base}", staged.name);
+                if !seen.insert(qualified.clone()) {
+                    panic!("duplicate function registration `{qualified}`");
+                }
+            }
+        }
+        self.modules.push(module);
         self
     }
 
@@ -135,18 +156,27 @@ impl<P: ProcessManager> Engine<P> {
         self
     }
 
-    /// Register one prebuilt [`HostRegistration`] entry (either flavor).
-    /// Chainable. This is how callers stage entries built outside marker
-    /// reach, such as a `registrations()` vector.
-    pub fn register_host(&mut self, registration: HostRegistration<P>) -> &mut Self {
-        self.funcs.push(registration);
-        self
-    }
-
-    /// Register many prebuilt entries at once. Chainable.
-    pub fn register_hosts(&mut self, registrations: Vec<HostRegistration<P>>) -> &mut Self {
-        self.funcs.extend(registrations);
-        self
+    /// Parse-time module table for this engine: stock `STD` builtins plus
+    /// every staged host module (function names and RPN eligibility).
+    /// Unknown modules stay unknown: the `oxdock!` macro declares its own
+    /// opaque modules via the `modules:` prefix instead.
+    pub fn module_table(&self) -> oxdock_parser::ModuleTable {
+        let mut table = std_module_table();
+        for module in &self.modules {
+            let mut functions = std::collections::HashSet::new();
+            for registration in &module.funcs {
+                let name = match registration {
+                    HostRegistration::Stateful { name, .. } => name,
+                    HostRegistration::Pure { name, .. } => name,
+                };
+                functions.insert(name.clone());
+            }
+            table.modules.insert(
+                module.name.clone(),
+                Some(oxdock_parser::ModuleFuncs { functions }),
+            );
+        }
+        table
     }
 
     /// Parse and run `script` on a caller-built filesystem with `process`
@@ -157,7 +187,7 @@ impl<P: ProcessManager> Engine<P> {
         script: &str,
         process: P,
     ) -> Result<EngineOutput> {
-        let steps = crate::parse_script(script)?;
+        let steps = crate::parse_script_with_modules(script, self.module_table())?;
         self.run_steps_on(fs, &steps, process)
     }
 
@@ -171,12 +201,12 @@ impl<P: ProcessManager> Engine<P> {
         steps: &[Step],
         process: P,
     ) -> Result<EngineOutput> {
-        let (cwd, fs, bindings) = super::run_steps_with_manager_with_hosts(
+        let (cwd, fs, bindings) = super::run_steps_with_manager_with_modules(
             fs,
             steps,
             process,
             self.io.clone(),
-            self.funcs.clone(),
+            self.modules.clone(),
             self.types.clone(),
         )?;
         Ok(EngineOutput { cwd, fs, bindings })
@@ -189,7 +219,7 @@ impl Engine<DefaultProcessManager> {
     /// annotation; custom managers use `Engine::<P>::new_custom()`.
     pub fn new() -> Self {
         Self {
-            funcs: Vec::new(),
+            modules: Vec::new(),
             types: Vec::new(),
             io: ExecIo::new(),
         }
@@ -199,7 +229,7 @@ impl Engine<DefaultProcessManager> {
     /// registered host surface available. Uses the default process manager
     /// and a resolver built from `root`.
     pub fn run_script(&self, root: &GuardedPath, script: &str) -> Result<EngineOutput> {
-        let steps = crate::parse_script(script)?;
+        let steps = crate::parse_script_with_modules(script, self.module_table())?;
         self.run_steps(root, &steps)
     }
 

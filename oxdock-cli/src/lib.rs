@@ -11,10 +11,10 @@ use std::io::{self, IsTerminal, Read};
 use std::sync::{Arc, Mutex};
 
 pub use oxdock_core::{
-    Engine, EngineOutput, ExecState, FuncKind, FuncMeta, FuncParam, HostRegistration, NativeFn,
-    OxDockFn, OxDockType, PureFn, StepCtx, TypeDescriptor, Value, parse_script,
-    parse_script_with_hosts, run_steps, run_steps_with_context, run_steps_with_context_result,
-    run_steps_with_manager_with_hosts,
+    Engine, EngineOutput, ExecState, FuncKind, FuncMeta, FuncParam, HostModule, HostRegistration,
+    NativeFn, OxDockFn, OxDockType, PureFn, StepCtx, TypeDescriptor, Value, parse_script,
+    parse_script_with_modules, run_steps, run_steps_with_context, run_steps_with_context_result,
+    run_steps_with_manager_with_modules,
 };
 use oxdock_core::{ExecIo, run_steps_with_lazy_snapshot};
 pub use oxdock_parser::{Guard, Step, StepKind};

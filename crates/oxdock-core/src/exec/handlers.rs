@@ -1722,8 +1722,9 @@ pub(crate) fn call_func_value<P: ProcessManager>(
     // 2. Global recursion check.
     if cx.state.call_depth >= MAX_CALL_DEPTH {
         bail!(
-            "step {}: recursion depth limit exceeded in FUNC {name}",
-            idx + 1
+            "step {}: recursion depth limit exceeded in FUNC {}",
+            idx + 1,
+            super::base_name(name)
         );
     }
     // 3. Pre-evaluation arity gate from the entry metadata.
@@ -1731,8 +1732,9 @@ pub(crate) fn call_func_value<P: ProcessManager>(
         && params.len() != args.len()
     {
         bail!(
-            "step {}: {name}() expects {} argument(s), got {}",
+            "step {}: {}() expects {} argument(s), got {}",
             idx + 1,
+            super::base_name(name),
             params.len(),
             args.len()
         );

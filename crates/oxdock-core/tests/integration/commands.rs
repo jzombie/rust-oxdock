@@ -1264,6 +1264,7 @@ fn native_arity_failure_precedes_argument_evaluation() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
+        IMPORT [STD]
         LET $x: INT = INT(1, $nope)
     "#};
     let err = run_script(&root, script).expect_err("arity mismatch must fail");
@@ -1285,6 +1286,7 @@ fn rpn_errors_carry_no_step_number() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
+        IMPORT [STD]
         LET $n: INT = 1 + INT("a", "b")
     "#};
     let err = run_script(&root, script).expect_err("arity mismatch must fail");
@@ -1304,6 +1306,7 @@ fn statement_position_errors_carry_step_numbers() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
+        IMPORT [STD]
         INT("a", "b")
     "#};
     let err = run_script(&root, script).expect_err("arity mismatch must fail");
@@ -1336,15 +1339,12 @@ fn run_exec_form_rejects_task_handles() {
 
 #[test]
 fn unknown_function_fails_before_argument_evaluation() {
-    // `$nope` would fail lookup if evaluated, so the unknown-function
-    // error proves the gate runs first, in expression position too.
-    let temp = GuardedPath::tempdir().unwrap();
-    let root = guard_root(&temp);
-    let script = indoc! {r#"
-        LET $x: INT = NOPE($nope)
-    "#};
-    let err = run_script(&root, script).expect_err("unknown function must fail");
-    assert!(err.to_string().contains("unknown function NOPE"), "{err}");
+    // `$nope` would fail lookup if evaluated, so the parse-time gate
+    // firing first proves existence checks precede argument evaluation,
+    // in expression position too.
+    let err = oxdock_core::parse_script("LET $x: INT = NOPE($nope)\n")
+        .expect_err("unknown function must fail at parse");
+    assert!(err.to_string().contains("unknown function `NOPE`"), "{err}");
     assert!(
         !err.to_string().contains("undefined variable"),
         "arguments must not evaluate before the existence gate: {err}"
@@ -1352,17 +1352,12 @@ fn unknown_function_fails_before_argument_evaluation() {
 }
 
 #[test]
-fn unknown_function_statement_names_its_step() {
-    let temp = GuardedPath::tempdir().unwrap();
-    let root = guard_root(&temp);
-    let script = indoc! {r#"
-        NOPE(1)
-    "#};
-    let err = run_script(&root, script).expect_err("unknown function must fail");
-    assert!(
-        err.to_string().contains("step 1: unknown function `NOPE`"),
-        "{err}"
-    );
+fn unknown_function_statement_fails_at_parse() {
+    // No step number survives: genuinely unknown calls fail at parse time,
+    // before steps exist.
+    let err = oxdock_core::parse_script("NOPE(1)\n").expect_err("unknown function must fail");
+    assert!(err.to_string().contains("unknown function `NOPE`"), "{err}");
+    assert!(!err.to_string().contains("step 1"), "{err}");
 }
 
 #[test]
@@ -1373,6 +1368,7 @@ fn rpn_math_position_runs_rpn_capable_calls() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
+        IMPORT [STD]
         WRITE witness.txt "hi"
         IF GLOB("*.txt") == "witness.txt" {
             WRITE hit.txt "yes"
@@ -1545,7 +1541,7 @@ fn assert_eq_path_type_reports_absent() {
     let root = guard_root(&temp);
     run_script(
         &root,
-        "LET $t: STRING = PATH_TYPE(\"missing.txt\")\nASSERT_EQ $t \"absent\"\n",
+        "IMPORT [STD]\nLET $t: STRING = PATH_TYPE(\"missing.txt\")\nASSERT_EQ $t \"absent\"\n",
     )
     .expect("absent path reports absent");
 }
@@ -1576,13 +1572,13 @@ fn assert_eq_path_type_covers_file_dir_absent() {
     let root = guard_root(&temp);
     run_script(
         &root,
-        "MKDIR tree/deep\nWRITE file.txt x\nLET $d: STRING = PATH_TYPE(\"tree/deep\")\nLET $f: STRING = PATH_TYPE(\"file.txt\")\nLET $n: STRING = PATH_TYPE(\"nope.txt\")\nASSERT_EQ $d \"dir\"\nASSERT_EQ $f \"file\"\nASSERT_EQ $n \"absent\"\n",
+        "IMPORT [STD]\nMKDIR tree/deep\nWRITE file.txt x\nLET $d: STRING = PATH_TYPE(\"tree/deep\")\nLET $f: STRING = PATH_TYPE(\"file.txt\")\nLET $n: STRING = PATH_TYPE(\"nope.txt\")\nASSERT_EQ $d \"dir\"\nASSERT_EQ $f \"file\"\nASSERT_EQ $n \"absent\"\n",
     )
     .expect("path type rows pass");
 
     let dir_err = run_script(
         &root,
-        "WRITE file.txt x\nLET $t: STRING = PATH_TYPE(\"file.txt\")\nASSERT_EQ $t \"dir\"\n",
+        "IMPORT [STD]\nWRITE file.txt x\nLET $t: STRING = PATH_TYPE(\"file.txt\")\nASSERT_EQ $t \"dir\"\n",
     )
     .expect_err("file-as-dir must fail");
     assert!(dir_err.to_string().contains("mismatch"), "{dir_err}");

@@ -10,7 +10,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use anyhow::{Context, Result, bail};
-use oxdock_core::{HostRegistration, OxDockFn, StepCtx, Value};
+use oxdock_core::{HostModule, OxDockFn, StepCtx, Value};
 use oxdock_fs::{GuardedPath, PathResolver};
 use oxdock_func_macro::oxdock_func;
 use oxdock_process::ProcessManager;
@@ -228,22 +228,26 @@ fn function_reference() -> Result<Value> {
     ))
 }
 
-/// Every docs-gen host registration for the render engine.
-pub fn registrations<P: ProcessManager>() -> Vec<HostRegistration<P>> {
-    vec![
-        WorkspaceMembers::registration(),
-        WorkspaceVersion::registration(),
-        CargoPackage::registration(),
-        FileStem::registration(),
-        HasKey::registration(),
-        MapSet::registration(),
-        ToJson::registration(),
-        ExpandFragment::registration(),
-        PackageValuesJson::registration(),
-        CommandIndex::registration(),
-        CommandBody::registration(),
-        FunctionReference::registration(),
-    ]
+/// The docs-gen host module for the render engine.
+pub fn module<P: ProcessManager>() -> HostModule<P> {
+    HostModule {
+        name: "DOCS".to_string(),
+        funcs: vec![
+            WorkspaceMembers::registration(),
+            WorkspaceVersion::registration(),
+            CargoPackage::registration(),
+            FileStem::registration(),
+            HasKey::registration(),
+            MapSet::registration(),
+            ToJson::registration(),
+            ExpandFragment::registration(),
+            PackageValuesJson::registration(),
+            CommandIndex::registration(),
+            CommandBody::registration(),
+            FunctionReference::registration(),
+        ],
+        types: vec![],
+    }
 }
 
 /// Script values to JSON. Maps stay sorted (the word holds a BTreeMap);
