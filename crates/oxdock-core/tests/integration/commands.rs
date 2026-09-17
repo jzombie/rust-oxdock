@@ -1361,10 +1361,27 @@ fn unknown_function_statement_fails_at_parse() {
 }
 
 #[test]
-fn rpn_math_position_runs_rpn_capable_calls() {
+fn rpn_math_position_runs_pure_calls() {
+    // `INT(...)` in arithmetic lowers to RPN `Call`: this passes only if
+    // the math path dispatches pure functions. Miri-clean: no filesystem.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD]
+        LET $n: INT = 1 + INT("2")
+        ASSERT_EQ $n 3
+    "#};
+    run_script(&root, script).expect("math-position calls run");
+}
+
+#[cfg_attr(
+    miri,
+    ignore = "GLOB iteration needs host filesystem traversal; blocked under Miri isolation"
+)]
+#[test]
+fn rpn_math_position_runs_rpn_capable_stateful_calls() {
     // `GLOB(...)` inside a comparison lowers to RPN `Call`: this passes
-    // only if the math path dispatches flagged stateful functions. `INT`
-    // in arithmetic exercises the pure path the same way.
+    // only if the math path dispatches flagged stateful functions.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
@@ -1375,8 +1392,6 @@ fn rpn_math_position_runs_rpn_capable_calls() {
         }
         LET $h: STRING = READ hit.txt
         ASSERT_EQ $h "yes"
-        LET $n: INT = 1 + INT("2")
-        ASSERT_EQ $n 3
     "#};
     run_script(&root, script).expect("math-position calls run");
 }
