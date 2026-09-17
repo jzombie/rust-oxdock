@@ -221,6 +221,7 @@ dependencies = [
  "anyhow",
  "oxdock-core",
  "oxdock-fs",
+ "oxdock-func-macro",
  "oxdock-macros",
  "oxdock-parser",
  "oxdock-process",
@@ -411,13 +412,15 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "oxdock"
-version = "0.15.0-alpha"
+version = "0.16.0-alpha"
 dependencies = [
+ "anyhow",
  "indoc",
  "oxdock-build",
  "oxdock-cli",
  "oxdock-core",
  "oxdock-fs",
+ "oxdock-func-macro",
  "oxdock-macros",
  "oxdock-parser",
  "oxdock-process",
@@ -425,7 +428,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-build"
-version = "0.15.0-alpha"
+version = "0.16.0-alpha"
 dependencies = [
  "anyhow",
  "oxdock-core",
@@ -441,7 +444,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-cli"
-version = "0.15.0-alpha"
+version = "0.16.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -455,11 +458,12 @@ dependencies = [
 
 [[package]]
 name = "oxdock-core"
-version = "0.15.0-alpha"
+version = "0.16.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
  "oxdock-fs",
+ "oxdock-func-macro",
  "oxdock-parser",
  "oxdock-process",
  "oxdock-sys-test-utils",
@@ -471,17 +475,21 @@ dependencies = [
 
 [[package]]
 name = "oxdock-doc-tests"
-version = "0.15.0-alpha"
+version = "0.16.0-alpha"
 dependencies = [
+ "anyhow",
  "indoc",
  "oxdock",
+ "oxdock-core",
  "oxdock-fs",
  "oxdock-macros",
+ "oxdock-parser",
+ "oxdock-process",
 ]
 
 [[package]]
 name = "oxdock-embed"
-version = "0.15.0-alpha"
+version = "0.16.0-alpha"
 dependencies = [
  "anyhow",
  "oxdock-fs",
@@ -493,7 +501,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-fixture"
-version = "0.15.0-alpha"
+version = "0.16.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -504,7 +512,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-fs"
-version = "0.15.0-alpha"
+version = "0.16.0-alpha"
 dependencies = [
  "anyhow",
  "glob",
@@ -516,8 +524,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxdock-func-macro"
+version = "0.16.0-alpha"
+dependencies = [
+ "anyhow",
+ "oxdock-core",
+ "oxdock-process",
+ "proc-macro2",
+ "quote",
+ "syn 3.0.5",
+]
+
+[[package]]
 name = "oxdock-logic-tests"
-version = "0.15.0-alpha"
+version = "0.16.0-alpha"
 dependencies = [
  "anyhow",
  "cargo_metadata",
@@ -540,7 +560,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-macros"
-version = "0.15.0-alpha"
+version = "0.16.0-alpha"
 dependencies = [
  "anyhow",
  "oxdock-build",
@@ -557,11 +577,12 @@ dependencies = [
 
 [[package]]
 name = "oxdock-parser"
-version = "0.15.0-alpha"
+version = "0.16.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
  "line-ending",
+ "oxdock-func-macro",
  "pest",
  "pest_derive",
  "pest_meta",
@@ -573,7 +594,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-process"
-version = "0.15.0-alpha"
+version = "0.16.0-alpha"
 dependencies = [
  "anyhow",
  "libc",
@@ -585,7 +606,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-sys-test-utils"
-version = "0.15.0-alpha"
+version = "0.16.0-alpha"
 
 [[package]]
 name = "pest"
@@ -599,9 +620,9 @@ dependencies = [
 
 [[package]]
 name = "pest_derive"
-version = "2.9.0"
+version = "2.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b3a83744a5c8455b8b3e0dc5031362780a347c878bdd11584d1a8984228cc88d"
+checksum = "89cc5a242e25ed4e7704d0be240f2cfbe20a8c27e7e252d94835be93d92dc39f"
 dependencies = [
  "pest",
  "pest_generator",
@@ -609,9 +630,9 @@ dependencies = [
 
 [[package]]
 name = "pest_generator"
-version = "2.9.0"
+version = "2.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e0cd3451aa3de60d4b9a1e736885e4dea6b31617598026f12256ad566d63304a"
+checksum = "7abf21475cc3820fe4b2ca2dc2142902f67a02189f3b5b3a229f4febc01a43e5"
 dependencies = [
  "pest",
  "pest_meta",
@@ -921,9 +942,9 @@ dependencies = [
 
 [[package]]
 name = "toml"
-version = "1.1.5+spec-1.1.0"
+version = "1.1.6+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "12c0ba9680044b4ce98d391a62094047eada0d64860b80166c39f4a6b5640785"
+checksum = "920602543f0911ab71da12c50d59701da54c196d1a2bf5cb4b75667f137a406a"
 dependencies = [
  "indexmap",
  "serde_core",
@@ -945,9 +966,9 @@ dependencies = [
 
 [[package]]
 name = "toml_edit"
-version = "0.25.13+spec-1.1.0"
+version = "0.25.15+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6975367e4d2ef766d86af01ffad14b622fecc8d4357a998fbc4deb6e9bacaf9b"
+checksum = "1340ea94a5856333492c9064b02c778b191dd2c853778d9609debdcdfea3a614"
 dependencies = [
  "indexmap",
  "toml_datetime",

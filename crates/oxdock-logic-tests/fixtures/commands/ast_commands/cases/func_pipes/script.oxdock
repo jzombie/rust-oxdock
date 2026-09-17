@@ -25,10 +25,10 @@ FUNC MAKEPIPE($name: STRING) {
 LET $p: PIPE = pipe:ch
 WITH_IO [stdout=$p] ECHO "primed"
 WITH_IO [stdin=$p] READ_LINE $primed
-LET $fr: STRING = CALL FILL($p)
-LET $got: STRING = CALL DRAIN($p)
+LET $fr: STRING = FILL($p)
+LET $got: STRING = DRAIN($p)
 WRITE got.txt "{{ $primed }}-{{ $fr }}-{{ $got }}"
 
-LET $q: PIPE = CALL MAKEPIPE("ignored")
-LET $back: STRING = CALL DRAIN($q)
+LET $q: PIPE = MAKEPIPE("ignored")
+LET $back: STRING = DRAIN($q)
 WRITE back.txt "{{ $back }}"

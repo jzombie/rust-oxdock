@@ -1,107 +1,139 @@
 use anyhow::{Result, bail};
 use oxdock_fs::EntryKind;
-use oxdock_parser::{Arg, ArgPart, ArithOp, CompareOp, Expr, LogicalOp, MathOp, TypeKind, Value};
+use oxdock_parser::{Arg, ArgPart, ArithOp, CompareOp, Expr, LogicalOp, MathOp, Value};
 use oxdock_process::ProcessManager;
 
 use super::state::ExecState;
 use super::steps::StepCtx;
 
-/// Coerce a runtime Value into a declared TypeKind. Single coercion point.
-/// Pipe targets validate against the live PipeRegistry via ExecState.
+/// Coerce a runtime [`Value`] word into a declared type name. Single
+/// coercion point. Type references are plain names resolved against the
+/// run's name directory here (not at parse time, where host descriptors
+/// are not visible). Pipe targets validate against the live PipeRegistry
+/// via ExecState.
 pub(crate) fn coerce_value<P: ProcessManager>(
     value: Value,
-    expected: TypeKind,
+    expected: &str,
     state: &ExecState<P>,
 ) -> Result<Value> {
-    let expected_label = expected.label();
-    match (value, expected) {
-        (v @ Value::String(_), TypeKind::String) => Ok(v),
-        (v @ Value::Int(_), TypeKind::Int) => Ok(v),
-        (v @ Value::Float(_), TypeKind::Float) => Ok(v),
-        (v @ Value::Bool(_), TypeKind::Bool) => Ok(v),
-        (Value::Pipe(n), TypeKind::Pipe) => {
+    if !state.is_known_type(expected) {
+        return Err(anyhow::anyhow!(
+            "unknown type `{expected}`: no descriptor registered (expected one of {})",
+            state.type_names().join(", "),
+        ));
+    }
+    // Same-type passthrough for every type: the word carries its own
+    // vtable, so descriptor-name equality is type equality.
+    if value.type_name() == expected {
+        if expected == "PIPE" {
             // The `pipe:NAME` operator is the explicit handle constructor:
             // a fresh name registers on first use (existing entries keep
             // their type), so pipes can be declared before any `WITH_IO`
             // mentions them.
-            if !state.io.pipe_exists(&n) {
-                state.io.ensure_pipe_for(&n, false)?;
+            let name = value.as_pipe_name().unwrap_or_default().to_string();
+            if !state.io.pipe_exists(&name) {
+                state.io.ensure_pipe_for(&name, false)?;
             }
-            Ok(Value::Pipe(n))
         }
-        (v @ Value::List(_), TypeKind::List) => Ok(v),
-        (v @ Value::Map(_), TypeKind::Map) => Ok(v),
-        (v @ Value::TaskHandle(_), TypeKind::Handle) => Ok(v),
-        (v @ Value::Duration(_), TypeKind::Duration) => Ok(v),
-        (v @ Value::Path(_), TypeKind::Path) => Ok(v),
-        (Value::String(s), TypeKind::Int) => {
-            s.trim().parse::<i64>().map(Value::Int).map_err(|_| {
-                anyhow::anyhow!("TypeMismatch: expected {expected_label}, got STRING ({s:?})")
+        return Ok(value);
+    }
+    // Values of other registered types never cross-coerce; the mismatch
+    // below reports both names through the descriptor.
+    match (value.as_str(), expected) {
+        (Some(s), "INT") => {
+            s.trim().parse::<i64>().map(Value::int).map_err(|_| {
+                anyhow::anyhow!("TypeMismatch: expected {expected}, got STRING ({s:?})")
             })
         }
-        (Value::String(s), TypeKind::Float) => {
-            s.trim().parse::<f64>().map(Value::Float).map_err(|_| {
-                anyhow::anyhow!("TypeMismatch: expected {expected_label}, got STRING ({s:?})")
+        (Some(s), "FLOAT") => {
+            s.trim().parse::<f64>().map(Value::float).map_err(|_| {
+                anyhow::anyhow!("TypeMismatch: expected {expected}, got STRING ({s:?})")
             })
         }
-        (Value::String(s), TypeKind::Bool) => match s.trim() {
-            "true" => Ok(Value::Bool(true)),
-            "false" => Ok(Value::Bool(false)),
+        (Some(s), "BOOL") => match s.trim() {
+            "true" => Ok(Value::bool(true)),
+            "false" => Ok(Value::bool(false)),
             _ => Err(anyhow::anyhow!(
-                "TypeMismatch: expected {expected_label}, got STRING ({s:?})"
+                "TypeMismatch: expected {expected}, got STRING ({s:?})"
             )),
         },
-        (Value::String(s), TypeKind::Pipe) => {
+        (Some(s), "PIPE") => {
             // Strict: plain strings never coerce to pipes, so a handle is
             // always created explicitly via the `pipe:NAME` operator
             // (`LET $p: PIPE = pipe:log`). Anything else is a TypeMismatch.
             Err(anyhow::anyhow!(
-                "TypeMismatch: expected {expected_label}, got STRING ({s:?}); use pipe:NAME to name a pipe"
+                "TypeMismatch: expected {expected}, got STRING ({s:?}); use pipe:NAME to name a pipe"
             ))
         }
-        (Value::String(s), TypeKind::Duration) => oxdock_parser::command::parse_duration(s.trim())
-            .map(Value::Duration)
-            .map_err(|_| {
-                anyhow::anyhow!("TypeMismatch: expected {expected_label}, got STRING ({s:?})")
-            }),
-        (Value::String(s), TypeKind::Path) => {
+        (Some(s), "DURATION") => oxdock_parser::command::parse_duration(s.trim())
+            .map(Value::duration)
+            .map_err(|_| anyhow::anyhow!("TypeMismatch: expected {expected}, got STRING ({s:?})")),
+        (Some(s), "PATH") => {
             // Narrow exception: materializing the PATH payload. Guard checks
             // still run through oxdock-fs at use time.
             #[allow(clippy::disallowed_types)]
             let path = std::path::PathBuf::from(s.trim());
-            Ok(Value::Path(path))
+            Ok(Value::path(path))
         }
-        (Value::String(s), TypeKind::List) => Err(anyhow::anyhow!(
-            "TypeMismatch: expected {expected_label}, got STRING ({s:?})"
+        (Some(s), "LIST") => Err(anyhow::anyhow!(
+            "TypeMismatch: expected {expected}, got STRING ({s:?})"
         )),
-        (Value::String(s), TypeKind::Map) => Err(anyhow::anyhow!(
-            "TypeMismatch: expected {expected_label}, got STRING ({s:?})"
+        (Some(s), "MAP") => Err(anyhow::anyhow!(
+            "TypeMismatch: expected {expected}, got STRING ({s:?})"
         )),
-        (Value::String(s), TypeKind::Handle) => Err(anyhow::anyhow!(
-            "TypeMismatch: expected {expected_label}, got STRING ({s:?})"
+        (Some(s), "HANDLE") => Err(anyhow::anyhow!(
+            "TypeMismatch: expected {expected}, got STRING ({s:?})"
         )),
-        (Value::Int(n), TypeKind::String) => Ok(Value::String(n.to_string())),
-        (Value::Float(f), TypeKind::String) => Ok(Value::String(f.to_string())),
-        (Value::Bool(b), TypeKind::String) => Ok(Value::String(b.to_string())),
-        (Value::Int(n), TypeKind::Float) => Ok(Value::Float(n as f64)),
-        (Value::Float(f), TypeKind::Int) => {
-            if f.fract() == 0.0 && f.is_finite() {
-                Ok(Value::Int(f as i64))
-            } else {
-                Err(anyhow::anyhow!(
-                    "TypeMismatch: expected {expected_label}, got FLOAT ({f:?})"
-                ))
-            }
-        }
-        (Value::Duration(d), TypeKind::String) => {
-            Ok(Value::String(oxdock_parser::command::format_duration(&d)))
-        }
-        (Value::Path(p), TypeKind::String) => Ok(Value::String(p.to_string_lossy().to_string())),
-        (Value::Pipe(n), TypeKind::String) => Ok(Value::String(n)),
-        (v, _) => Err(anyhow::anyhow!(
-            "TypeMismatch: expected {expected_label}, got value ({v:?})"
-        )),
+        _ => coerce_scalar(&value, expected),
     }
+}
+
+/// Scalar cross-coercions between numeric, boolean, duration, path, and
+/// pipe-name words. Anything else is a `TypeMismatch`.
+fn coerce_scalar(value: &Value, expected: &str) -> Result<Value> {
+    if let Some(n) = value.as_i64() {
+        return match expected {
+            "STRING" => Ok(Value::string(n.to_string())),
+            "FLOAT" => Ok(Value::float(n as f64)),
+            _ => Err(mismatch(expected, value)),
+        };
+    }
+    if let Some(f) = value.as_f64() {
+        return match expected {
+            "STRING" => Ok(Value::string(f.to_string())),
+            "INT" if f.fract() == 0.0 && f.is_finite() => Ok(Value::int(f as i64)),
+            _ => Err(mismatch(expected, value)),
+        };
+    }
+    if let Some(b) = value.as_bool() {
+        return match expected {
+            "STRING" => Ok(Value::string(b.to_string())),
+            _ => Err(mismatch(expected, value)),
+        };
+    }
+    if let Some(d) = value.as_duration() {
+        return match expected {
+            "STRING" => Ok(Value::string(oxdock_parser::command::format_duration(&d))),
+            _ => Err(mismatch(expected, value)),
+        };
+    }
+    if let Some(p) = value.as_path() {
+        return match expected {
+            "STRING" => Ok(Value::string(p.to_string_lossy().to_string())),
+            _ => Err(mismatch(expected, value)),
+        };
+    }
+    if let Some(n) = value.as_pipe_name() {
+        return match expected {
+            "STRING" => Ok(Value::string(n.to_string())),
+            _ => Err(mismatch(expected, value)),
+        };
+    }
+    Err(mismatch(expected, value))
+}
+
+fn mismatch(expected: &str, value: &Value) -> anyhow::Error {
+    anyhow::anyhow!("TypeMismatch: expected {expected}, got value ({value:?})")
 }
 
 /// Resolve an [`Arg`] using an [`ExecState`] directly (no [`StepCtx`] needed).
@@ -181,7 +213,7 @@ pub(crate) fn evaluate_assert_operand<P: ProcessManager>(
 ) -> Result<Value> {
     match arg {
         Arg::Expr(expr) => evaluate_expr(expr, cx),
-        _ => Ok(Value::String(resolve_arg(arg, cx)?)),
+        _ => Ok(Value::string(resolve_arg(arg, cx)?)),
     }
 }
 
@@ -202,10 +234,10 @@ pub(crate) fn resolve_overrides<P: ProcessManager>(
 pub(crate) fn resolve_arg_as_int<P: ProcessManager>(
     arg: &Arg,
     cx: &mut StepCtx<'_, P>,
-) -> Result<i32> {
+) -> Result<i64> {
     let resolved = resolve_arg(arg, cx)?;
     resolved
-        .parse::<i32>()
+        .parse::<i64>()
         .map_err(|_| anyhow::anyhow!("expected int, got {resolved:?}"))
 }
 
@@ -225,17 +257,19 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
 ) -> Result<Value> {
     match expr {
-        Expr::Literal(Value::String(s)) => {
-            // Expand {{ $var }} and {{ env:KEY }} in string literals
-            Ok(Value::String(expand_string(s, &cx.state.envs, cx.state)?))
+        Expr::Literal(v) => {
+            if let Some(s) = v.as_str() {
+                // Expand {{ $var }} and {{ env:KEY }} in string literals
+                return Ok(Value::string(expand_string(s, &cx.state.envs, cx.state)?));
+            }
+            Ok(v.clone())
         }
-        Expr::Literal(v) => Ok(v.clone()),
         Expr::Var(name) => cx
             .state
             .get_var(name)
             .ok_or_else(|| anyhow::anyhow!("undefined variable ${name}")),
         Expr::Env(key) => match cx.state.envs.get(key) {
-            Some(v) => Ok(Value::String(v.clone())),
+            Some(v) => Ok(Value::string(v.clone())),
             None => anyhow::bail!("undefined environment variable `env:{key}`"),
         },
         Expr::KeyPath { base, keys } => resolve_key_path_value(cx, base, keys),
@@ -244,7 +278,7 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
             for item in items {
                 result.push(evaluate_expr(item, cx)?);
             }
-            Ok(Value::List(result))
+            Ok(Value::list(result))
         }
         Expr::Map(entries) => {
             let mut result = std::collections::BTreeMap::new();
@@ -252,18 +286,55 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
                 let val = evaluate_expr(val_expr, cx)?;
                 result.insert(key.clone(), val);
             }
-            Ok(Value::Map(result))
+            Ok(Value::map(result))
         }
-        Expr::Call { name, args } => match name.as_str() {
-            "GLOB" => evaluate_glob(args, cx),
-            "LOAD_TOML" => evaluate_load_toml(args, cx),
-            "LOAD_JSON" => evaluate_load_json(args, cx),
-            "INSPECT" => evaluate_inspect(args, cx),
-            "PATH_TYPE" => evaluate_path_type(args, cx),
-            "INT" => evaluate_int(args, cx),
-            "FLOAT" => evaluate_float(args, cx),
-            _ => bail!("unknown function {name}"),
-        },
+        Expr::Call { name, args } => {
+            // DSL-defined functions run through the call path so arity,
+            // depth budget, and scoping apply uniformly.
+            if cx.state.functions.contains_script(name.as_str()) {
+                return super::handlers::call_func_value(cx, 0, name, args);
+            }
+            // Native entries gate before effects too: existence, the depth
+            // budget, and the registry arity are all known without
+            // evaluating anything. Messages match the wrapper format (no
+            // step context exists at this layer); DSL-routed calls above
+            // keep their step prefix.
+            let Some(meta) = cx.state.native_meta(name.as_str()) else {
+                bail!("unknown function {name}");
+            };
+            if cx.state.call_depth >= super::state::MAX_CALL_DEPTH {
+                bail!(
+                    "recursion depth limit exceeded in FUNC {}",
+                    super::base_name(name)
+                );
+            }
+            if let Some(params) = &meta.params
+                && params.len() != args.len()
+            {
+                bail!(
+                    "{}() expects {} argument(s), got {}",
+                    super::base_name(name),
+                    params.len(),
+                    args.len()
+                );
+            }
+            let mut vals = Vec::with_capacity(args.len());
+            for arg in args {
+                vals.push(evaluate_expr(arg, cx)?);
+            }
+            // Pure scalar fns first (no context needed), then stateful/IO fns.
+            // Each clone ends the registry borrow before invoking user code.
+            if let Some(func) = cx.state.clone_native_pure(name.as_str()) {
+                func(vals)
+            } else if let Some(func) = cx.state.clone_native_ctx(name.as_str()) {
+                func(cx, vals)
+            } else {
+                bail!("unknown function {name}")
+            }
+        }
+        // Variable inspection carries the binding name unevaluated (see
+        // `Expr::Inspect`): no function-name matching happens here.
+        Expr::Inspect(var) => evaluate_inspect_var(var, cx),
         Expr::Arithmetic { op, left, right } => {
             let left_val = evaluate_expr(left, cx)?;
             let right_val = evaluate_expr(right, cx)?;
@@ -284,60 +355,53 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
             match op {
                 LogicalOp::Or => {
                     if left_truthy {
-                        Ok(Value::Bool(true))
+                        Ok(Value::bool(true))
                     } else {
-                        Ok(Value::Bool(is_truthy(&evaluate_expr(right, cx)?)?))
+                        Ok(Value::bool(is_truthy(&evaluate_expr(right, cx)?)?))
                     }
                 }
                 LogicalOp::And => {
                     if !left_truthy {
-                        Ok(Value::Bool(false))
+                        Ok(Value::bool(false))
                     } else {
-                        Ok(Value::Bool(is_truthy(&evaluate_expr(right, cx)?)?))
+                        Ok(Value::bool(is_truthy(&evaluate_expr(right, cx)?)?))
                     }
                 }
             }
         }
-        Expr::Not(inner) => Ok(Value::Bool(!is_truthy(&evaluate_expr(inner, cx)?)?)),
+        Expr::Not(inner) => Ok(Value::bool(!is_truthy(&evaluate_expr(inner, cx)?)?)),
     }
 }
 
-/// Check if a value is truthy. Only `Value::Bool` is accepted; all other types produce a TypeError.
+/// Check if a value is truthy. Only `BOOL` words are accepted; all other types produce a TypeError.
 pub(crate) fn is_truthy(val: &Value) -> Result<bool> {
-    match val {
-        Value::Bool(b) => Ok(*b),
-        other => bail!("Type Error: condition must be a Bool, found {:?}", other),
+    match val.as_bool() {
+        Some(b) => Ok(b),
+        None => bail!("Type Error: condition must be a Bool, found {:?}", val),
     }
 }
 
-/// Evaluate an `INSPECT($var)` call to a MAP snapshot: declared type and
+/// Evaluate an `INSPECT($var)` node to a MAP snapshot: declared type and
 /// value plus live details (pipe backend stats, task phase). Like
 /// `LOAD_JSON`/`LOAD_TOML`, this evaluates to a value without running
-/// script steps. The argument must be a `$variable`, not an arbitrary
-/// expression, so the snapshot can name what it describes.
-fn evaluate_inspect<P: ProcessManager>(args: &[Expr], cx: &mut StepCtx<'_, P>) -> Result<Value> {
-    let [arg] = args else {
-        bail!("INSPECT requires exactly one argument: INSPECT($var)");
-    };
-    let Expr::Var(var) = arg else {
-        bail!("INSPECT requires a $variable argument, found {arg:?}");
-    };
-    super::handlers::inspect_var_map(cx, var).map(Value::Map)
+/// script steps. The parser guarantees the argument is a `$variable`, so
+/// the snapshot can name what it describes.
+fn evaluate_inspect_var<P: ProcessManager>(var: &str, cx: &mut StepCtx<'_, P>) -> Result<Value> {
+    super::handlers::inspect_var_map(cx, var).map(Value::map)
 }
 
-/// Evaluate a `PATH_TYPE()` query to a filesystem entry description:
-/// `"file"`, `"dir"`, `"symlink"` (no-follow, including broken links), or
-/// `"absent"` for anything unstatable. Resolution mirrors `ASSERT_ABSENT`
-/// (`resolve_write`): guard escapes still error, but pending snapshots
-/// never materialize and missing paths report absent instead of failing.
-fn evaluate_path_type<P: ProcessManager>(args: &[Expr], cx: &mut StepCtx<'_, P>) -> Result<Value> {
-    if args.is_empty() {
-        bail!("PATH_TYPE requires a path argument");
-    }
-    let path_val = evaluate_expr(&args[0], cx)?;
-    let path_str = match path_val {
-        Value::String(s) => s,
-        _ => bail!("PATH_TYPE path argument must evaluate to a string"),
+/// Value-semantics core of `PATH_TYPE()`: operates on an already-evaluated
+/// path value so the registry can dispatch without re-evaluating.
+pub(crate) fn path_type_from_value<P: ProcessManager>(
+    args: &[Value],
+    cx: &mut StepCtx<'_, P>,
+) -> Result<Value> {
+    let path_val = args
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("PATH_TYPE requires a path argument"))?;
+    let path_str = match path_val.as_str() {
+        Some(s) => s.to_string(),
+        None => bail!("PATH_TYPE path argument must evaluate to a string"),
     };
     let target = cx
         .state
@@ -350,7 +414,7 @@ fn evaluate_path_type<P: ProcessManager>(args: &[Expr], cx: &mut StepCtx<'_, P>)
         Ok(EntryKind::Dir) => "dir",
         Err(_) => "absent",
     };
-    Ok(Value::String(kind.to_string()))
+    Ok(Value::string(kind.to_string()))
 }
 
 /// Pop one operand off the RPN stack with a structured error instead of a
@@ -362,9 +426,11 @@ fn pop_stack(stack: &mut Vec<Value>) -> Result<Value> {
 }
 
 fn as_f64_value(val: &Value) -> Option<f64> {
-    match val {
-        Value::Int(n) => Some(*n as f64),
-        Value::Float(f) if f.is_finite() => Some(*f),
+    if let Some(n) = val.as_i64() {
+        return Some(n as f64);
+    }
+    match val.as_f64() {
+        Some(f) if f.is_finite() => Some(f),
         _ => None,
     }
 }
@@ -374,55 +440,52 @@ fn as_f64_value(val: &Value) -> Option<f64> {
 /// (`Int as f64`) to `Float`; float div-by-zero bails; non-finite results
 /// bail rather than storing; anything else is a Type Error.
 fn apply_arith(op: ArithOp, left: Value, right: Value) -> Result<Value> {
-    match (&left, &right) {
-        (Value::Int(a), Value::Int(b)) => {
-            let v = match op {
-                ArithOp::Add => a.checked_add(*b),
-                ArithOp::Sub => a.checked_sub(*b),
-                ArithOp::Mul => a.checked_mul(*b),
-                ArithOp::Div => a.checked_div(*b),
-            };
-            v.map(Value::Int).ok_or_else(|| {
-                anyhow::anyhow!("arithmetic error: integer overflow or division by zero")
-            })
+    if let (Some(a), Some(b)) = (left.as_i64(), right.as_i64()) {
+        let v = match op {
+            ArithOp::Add => a.checked_add(b),
+            ArithOp::Sub => a.checked_sub(b),
+            ArithOp::Mul => a.checked_mul(b),
+            ArithOp::Div => a.checked_div(b),
+        };
+        return v.map(Value::int).ok_or_else(|| {
+            anyhow::anyhow!("arithmetic error: integer overflow or division by zero")
+        });
+    }
+    {
+        let (Some(a), Some(b)) = (as_f64_value(&left), as_f64_value(&right)) else {
+            bail!("Type Error: arithmetic requires Int or Float, found {left:?} and {right:?}");
+        };
+        if matches!(op, ArithOp::Div) && b == 0.0 {
+            bail!("arithmetic error: float division by zero");
         }
-        _ => {
-            let (Some(a), Some(b)) = (as_f64_value(&left), as_f64_value(&right)) else {
-                bail!("Type Error: arithmetic requires Int or Float, found {left:?} and {right:?}");
-            };
-            if matches!(op, ArithOp::Div) && b == 0.0 {
-                bail!("arithmetic error: float division by zero");
-            }
-            let v = match op {
-                ArithOp::Add => a + b,
-                ArithOp::Sub => a - b,
-                ArithOp::Mul => a * b,
-                ArithOp::Div => a / b,
-            };
-            if v.is_finite() {
-                Ok(Value::Float(v))
-            } else {
-                bail!("arithmetic error: non-finite float result")
-            }
+        let v = match op {
+            ArithOp::Add => a + b,
+            ArithOp::Sub => a - b,
+            ArithOp::Mul => a * b,
+            ArithOp::Div => a / b,
+        };
+        if v.is_finite() {
+            Ok(Value::float(v))
+        } else {
+            bail!("arithmetic error: non-finite float result")
         }
     }
 }
 
 fn apply_neg(val: Value) -> Result<Value> {
-    match val {
-        Value::Int(n) => n
+    if let Some(n) = val.as_i64() {
+        return n
             .checked_neg()
-            .map(Value::Int)
-            .ok_or_else(|| anyhow::anyhow!("arithmetic error: integer overflow")),
-        Value::Float(f) => {
-            if f.is_finite() {
-                Ok(Value::Float(-f))
-            } else {
-                bail!("arithmetic error: non-finite float result");
-            }
-        }
-        other => bail!("Type Error: unary '-' requires Int or Float, found {other:?}"),
+            .map(Value::int)
+            .ok_or_else(|| anyhow::anyhow!("arithmetic error: integer overflow"));
     }
+    if let Some(f) = val.as_f64() {
+        if f.is_finite() {
+            return Ok(Value::float(-f));
+        }
+        bail!("arithmetic error: non-finite float result");
+    }
+    bail!("Type Error: unary '-' requires Int or Float, found {val:?}")
 }
 
 /// Shared comparison: both `Int`/`Float` compare numerically (`1 == 1.0` is
@@ -435,11 +498,8 @@ fn apply_neg(val: Value) -> Result<Value> {
 fn apply_compare(op: CompareOp, left: &Value, right: &Value) -> Result<Value> {
     if let (Some(a), Some(b)) = (as_f64_value(left), as_f64_value(right)) {
         // Both numeric (finite floats; ints always qualify).
-        let both_int = matches!(left, Value::Int(_)) && matches!(right, Value::Int(_));
-        if both_int {
-            let (Value::Int(a), Value::Int(b)) = (left, right) else {
-                bail!("internal error: int comparison shape");
-            };
+        if left.as_i64().is_some() && right.as_i64().is_some() {
+            let (a, b) = (left.as_i64().unwrap_or(0), right.as_i64().unwrap_or(0));
             let result = match op {
                 CompareOp::Eq => a == b,
                 CompareOp::Ne => a != b,
@@ -448,7 +508,7 @@ fn apply_compare(op: CompareOp, left: &Value, right: &Value) -> Result<Value> {
                 CompareOp::Gt => a > b,
                 CompareOp::Ge => a >= b,
             };
-            return Ok(Value::Bool(result));
+            return Ok(Value::bool(result));
         }
         let result = match op {
             CompareOp::Eq => a == b,
@@ -458,7 +518,7 @@ fn apply_compare(op: CompareOp, left: &Value, right: &Value) -> Result<Value> {
             CompareOp::Gt => a > b,
             CompareOp::Ge => a >= b,
         };
-        return Ok(Value::Bool(result));
+        return Ok(Value::bool(result));
     }
     match op {
         CompareOp::Eq | CompareOp::Ne => {
@@ -469,7 +529,7 @@ fn apply_compare(op: CompareOp, left: &Value, right: &Value) -> Result<Value> {
                 CompareOp::Ne => ls != rs,
                 _ => bail!("internal error: equality shape"),
             };
-            Ok(Value::Bool(result))
+            Ok(Value::bool(result))
         }
         CompareOp::Lt | CompareOp::Le | CompareOp::Gt | CompareOp::Ge => {
             bail!(
@@ -485,68 +545,49 @@ fn trim_ascii(s: &str) -> &str {
 
 /// `INT(x)`: trims ASCII whitespace and parses `i64`. Passes `Int` through;
 /// `Float` only when integral and finite; anything else bails.
-fn int_from_value(val: Value) -> Result<Value> {
-    match val {
-        Value::Int(_) => Ok(val),
-        Value::Float(f) => {
-            if f.is_finite() && f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
-                Ok(Value::Int(f as i64))
-            } else {
-                bail!("INT() requires an integer value, found FLOAT ({f:?})");
-            }
-        }
-        Value::String(s) => {
-            let trimmed = trim_ascii(&s);
-            trimmed
-                .parse::<i64>()
-                .map(Value::Int)
-                .map_err(|_| anyhow::anyhow!("INT() requires an integer string, found {s:?}"))
-        }
-        other => bail!("INT() requires an Int, Float, or String, found {other:?}"),
+pub(crate) fn int_from_value(val: Value) -> Result<Value> {
+    if val.as_i64().is_some() {
+        return Ok(val);
     }
+    if let Some(f) = val.as_f64() {
+        if f.is_finite() && f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
+            return Ok(Value::int(f as i64));
+        }
+        bail!("INT() requires an integer value, found FLOAT ({f:?})");
+    }
+    if let Some(s) = val.as_str() {
+        let trimmed = trim_ascii(s);
+        return trimmed
+            .parse::<i64>()
+            .map(Value::int)
+            .map_err(|_| anyhow::anyhow!("INT() requires an integer string, found {s:?}"));
+    }
+    bail!("INT() requires an Int, Float, or String, found {val:?}")
 }
 
 /// `FLOAT(x)`: parses `f64` (accepts int strings), bails on non-finite or
 /// non-numeric. Passes `Float`/`Int as f64` through.
-fn float_from_value(val: Value) -> Result<Value> {
-    match val {
-        Value::Float(f) => {
-            if f.is_finite() {
-                Ok(Value::Float(f))
-            } else {
-                bail!("FLOAT() requires a finite value, found FLOAT ({f:?})");
-            }
+pub(crate) fn float_from_value(val: Value) -> Result<Value> {
+    if let Some(f) = val.as_f64() {
+        if f.is_finite() {
+            return Ok(Value::float(f));
         }
-        Value::Int(n) => Ok(Value::Float(n as f64)),
-        Value::String(s) => {
-            let trimmed = trim_ascii(&s);
-            let parsed: f64 = trimmed
-                .parse()
-                .map_err(|_| anyhow::anyhow!("FLOAT() requires a numeric string, found {s:?}"))?;
-            if parsed.is_finite() {
-                Ok(Value::Float(parsed))
-            } else {
-                bail!("FLOAT() requires a finite value, found {s:?}");
-            }
-        }
-        other => bail!("FLOAT() requires an Int, Float, or String, found {other:?}"),
+        bail!("FLOAT() requires a finite value, found FLOAT ({f:?})");
     }
-}
-
-fn evaluate_int<P: ProcessManager>(args: &[Expr], cx: &mut StepCtx<'_, P>) -> Result<Value> {
-    let [arg] = args else {
-        bail!("INT requires exactly one argument: INT($var)");
-    };
-    let val = evaluate_expr(arg, cx)?;
-    int_from_value(val)
-}
-
-fn evaluate_float<P: ProcessManager>(args: &[Expr], cx: &mut StepCtx<'_, P>) -> Result<Value> {
-    let [arg] = args else {
-        bail!("FLOAT requires exactly one argument: FLOAT($var)");
-    };
-    let val = evaluate_expr(arg, cx)?;
-    float_from_value(val)
+    if let Some(n) = val.as_i64() {
+        return Ok(Value::float(n as f64));
+    }
+    if let Some(s) = val.as_str() {
+        let trimmed = trim_ascii(s);
+        let parsed: f64 = trimmed
+            .parse()
+            .map_err(|_| anyhow::anyhow!("FLOAT() requires a numeric string, found {s:?}"))?;
+        if parsed.is_finite() {
+            return Ok(Value::float(parsed));
+        }
+        bail!("FLOAT() requires a finite value, found {s:?}");
+    }
+    bail!("FLOAT() requires an Int, Float, or String, found {val:?}")
 }
 
 /// Resolve `$base.key...` against the scope chain (shared by the AST
@@ -561,32 +602,21 @@ fn resolve_key_path_value<P: ProcessManager>(
         .get_var(base)
         .ok_or_else(|| anyhow::anyhow!("undefined variable ${base}"))?;
     for key in keys {
-        match current {
-            Value::Map(map) => {
-                current = map
-                    .get(key)
-                    .cloned()
-                    .ok_or_else(|| anyhow::anyhow!("Key '{}' not found in map", key))?;
-            }
-            Value::List(list) => {
-                let idx: usize = key
-                    .parse()
-                    .map_err(|_| anyhow::anyhow!("Invalid array index '{}'", key))?;
-                current = list
-                    .get(idx)
-                    .cloned()
-                    .ok_or_else(|| anyhow::anyhow!("Index {} out of bounds", idx))?;
-            }
-            Value::String(_)
-            | Value::Bool(_)
-            | Value::Int(_)
-            | Value::Float(_)
-            | Value::Pipe(_)
-            | Value::Duration(_)
-            | Value::Path(_)
-            | Value::TaskHandle(_) => {
-                bail!("Cannot traverse into scalar value at key '{}'", key);
-            }
+        if let Some(map) = current.as_map() {
+            current = map
+                .get(key)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("Key '{}' not found in map", key))?;
+        } else if let Some(list) = current.as_list() {
+            let idx: usize = key
+                .parse()
+                .map_err(|_| anyhow::anyhow!("Invalid array index '{}'", key))?;
+            current = list
+                .get(idx)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("Index {} out of bounds", idx))?;
+        } else {
+            bail!("Cannot traverse into scalar value at key '{}'", key);
         }
     }
     Ok(current)
@@ -602,12 +632,13 @@ fn evaluate_compiled_math<P: ProcessManager>(
     let mut stack: Vec<Value> = Vec::with_capacity(8);
     for op in ops {
         match op {
-            MathOp::PushConst(v) => match v {
-                Value::String(s) => {
-                    stack.push(Value::String(expand_string(s, &cx.state.envs, cx.state)?));
+            MathOp::PushConst(v) => {
+                if let Some(s) = v.as_str() {
+                    stack.push(Value::string(expand_string(s, &cx.state.envs, cx.state)?));
+                } else {
+                    stack.push(v.clone());
                 }
-                other => stack.push(other.clone()),
-            },
+            }
             MathOp::LoadVar(name) => {
                 let val = cx
                     .state
@@ -616,7 +647,7 @@ fn evaluate_compiled_math<P: ProcessManager>(
                 stack.push(val);
             }
             MathOp::LoadEnv(key) => match cx.state.envs.get(key) {
-                Some(v) => stack.push(Value::String(v.clone())),
+                Some(v) => stack.push(Value::string(v.clone())),
                 None => anyhow::bail!("undefined environment variable `env:{key}`"),
             },
             MathOp::LoadKeyPath { base, keys } => {
@@ -628,28 +659,26 @@ fn evaluate_compiled_math<P: ProcessManager>(
                     args.push(pop_stack(&mut stack)?);
                 }
                 args.reverse();
-                let val = match name.as_str() {
-                    "INT" => {
-                        let [arg] = args.as_slice() else {
-                            bail!("INT requires exactly one argument: INT($var)");
-                        };
-                        int_from_value(arg.clone())?
-                    }
-                    "FLOAT" => {
-                        let [arg] = args.as_slice() else {
-                            bail!("FLOAT requires exactly one argument: FLOAT($var)");
-                        };
-                        float_from_value(arg.clone())?
-                    }
-                    "GLOB" => glob_from_value(args.as_slice(), cx)?,
-                    "LOAD_TOML" => load_toml_from_value(args.as_slice(), cx)?,
-                    "LOAD_JSON" => load_json_from_value(args.as_slice(), cx)?,
-                    _ => bail!("unknown function {name}"),
+                // RPN math path: pure scalar fns plus stateful fns opted
+                // into `rpn` run through the registry; anything else
+                // (PATH_TYPE, FUNCTIONS, DESCRIBE, TYPES, TYPE_DESCRIBE)
+                // is AST-only by design.
+                let val = if let Some(func) = cx.state.clone_native_pure(name.as_str()) {
+                    func(args)?
+                } else if cx
+                    .state
+                    .native_meta(name.as_str())
+                    .is_some_and(|meta| meta.rpn)
+                    && let Some(func) = cx.state.clone_native_ctx(name.as_str())
+                {
+                    func(cx, args)?
+                } else {
+                    bail!("unknown function {name}")
                 };
                 stack.push(val);
             }
             MathOp::Inspect(name) => {
-                stack.push(Value::Map(super::handlers::inspect_var_map(cx, name)?));
+                stack.push(Value::map(super::handlers::inspect_var_map(cx, name)?));
             }
             MathOp::Neg => {
                 let val = pop_stack(&mut stack)?;
@@ -713,26 +742,19 @@ fn evaluate_compiled_math<P: ProcessManager>(
     pop_stack(&mut stack)
 }
 
-/// Evaluate a `GLOB()` function call.
-fn evaluate_glob<P: ProcessManager>(args: &[Expr], cx: &mut StepCtx<'_, P>) -> Result<Value> {
-    if args.is_empty() {
-        bail!("GLOB requires a pattern argument");
-    }
-
-    let pattern_val = evaluate_expr(&args[0], cx)?;
-    glob_from_value(std::slice::from_ref(&pattern_val), cx)
-}
-
 /// Value-semantics core of `GLOB()`: operates on an already-evaluated
 /// pattern value so both the AST and RPN paths share one implementation.
-fn glob_from_value<P: ProcessManager>(args: &[Value], cx: &mut StepCtx<'_, P>) -> Result<Value> {
+pub(crate) fn glob_from_value<P: ProcessManager>(
+    args: &[Value],
+    cx: &mut StepCtx<'_, P>,
+) -> Result<Value> {
     let pattern_val = args
         .first()
         .ok_or_else(|| anyhow::anyhow!("GLOB requires a pattern argument"))?;
-    let raw_pattern = match pattern_val {
-        Value::String(s) => s.clone(),
-        _ => bail!("GLOB pattern argument must evaluate to a string"),
+    let Some(raw_pattern) = pattern_val.as_str() else {
+        bail!("GLOB pattern argument must evaluate to a string");
     };
+    let raw_pattern = raw_pattern.to_string();
 
     // Up-front sandbox gate (mirrors `GuardedPath::glob_paths`): patterns are
     // sandbox-root-relative, so any `..` component escapes. Return empty
@@ -742,7 +764,7 @@ fn glob_from_value<P: ProcessManager>(args: &[Value], cx: &mut StepCtx<'_, P>) -
         .split('/')
         .any(|seg| seg == "..")
     {
-        return Ok(Value::List(Vec::new()));
+        return Ok(Value::list(Vec::new()));
     }
 
     // GLOB lists the current root: ride the snapshot choke point so a
@@ -758,35 +780,26 @@ fn glob_from_value<P: ProcessManager>(args: &[Value], cx: &mut StepCtx<'_, P>) -
         .filter_map(|p| {
             p.strip_prefix(&root_path)
                 .ok()
-                .map(|rel| Value::String(rel.to_string_lossy().replace('\\', "/")))
+                .map(|rel| Value::string(rel.to_string_lossy().replace('\\', "/")))
         })
         .collect();
 
     entries.sort_by(|a, b| format!("{}", a).cmp(&format!("{}", b)));
-    Ok(Value::List(entries))
-}
-
-/// Evaluate a `LOAD_TOML()` function call.
-fn evaluate_load_toml<P: ProcessManager>(args: &[Expr], cx: &mut StepCtx<'_, P>) -> Result<Value> {
-    if args.is_empty() {
-        bail!("LOAD_TOML requires a path argument");
-    }
-    let path_val = evaluate_expr(&args[0], cx)?;
-    load_toml_from_value(std::slice::from_ref(&path_val), cx)
+    Ok(Value::list(entries))
 }
 
 /// Value-semantics core of `LOAD_TOML()`.
-fn load_toml_from_value<P: ProcessManager>(
+pub(crate) fn load_toml_from_value<P: ProcessManager>(
     args: &[Value],
     cx: &mut StepCtx<'_, P>,
 ) -> Result<Value> {
     let path_val = args
         .first()
         .ok_or_else(|| anyhow::anyhow!("LOAD_TOML requires a path argument"))?;
-    let path_str = match path_val {
-        Value::String(s) => s.clone(),
-        _ => bail!("LOAD_TOML path argument must evaluate to a string"),
+    let Some(path_str) = path_val.as_str() else {
+        bail!("LOAD_TOML path argument must evaluate to a string");
     };
+    let path_str = path_str.to_string();
     let target = cx
         .state
         .fs
@@ -802,27 +815,18 @@ fn load_toml_from_value<P: ProcessManager>(
     load_toml_value(content_str)
 }
 
-/// Evaluate a `LOAD_JSON()` function call.
-fn evaluate_load_json<P: ProcessManager>(args: &[Expr], cx: &mut StepCtx<'_, P>) -> Result<Value> {
-    if args.is_empty() {
-        bail!("LOAD_JSON requires a path argument");
-    }
-    let path_val = evaluate_expr(&args[0], cx)?;
-    load_json_from_value(std::slice::from_ref(&path_val), cx)
-}
-
 /// Value-semantics core of `LOAD_JSON()`.
-fn load_json_from_value<P: ProcessManager>(
+pub(crate) fn load_json_from_value<P: ProcessManager>(
     args: &[Value],
     cx: &mut StepCtx<'_, P>,
 ) -> Result<Value> {
     let path_val = args
         .first()
         .ok_or_else(|| anyhow::anyhow!("LOAD_JSON requires a path argument"))?;
-    let path_str = match path_val {
-        Value::String(s) => s.clone(),
-        _ => bail!("LOAD_JSON path argument must evaluate to a string"),
+    let Some(path_str) = path_val.as_str() else {
+        bail!("LOAD_JSON path argument must evaluate to a string");
     };
+    let path_str = path_str.to_string();
     let target = cx
         .state
         .fs
@@ -855,24 +859,24 @@ pub fn load_json_value(content: &str) -> Result<Value> {
 /// Convert a `serde_json::Value` to a DSL `Value`.
 fn json_to_value(v: serde_json::Value) -> Value {
     match v {
-        serde_json::Value::String(s) => Value::String(s),
-        serde_json::Value::Bool(b) => Value::Bool(b),
+        serde_json::Value::String(s) => Value::string(s),
+        serde_json::Value::Bool(b) => Value::bool(b),
         serde_json::Value::Number(n) => {
             if let Some(i) = n.as_i64() {
-                Value::Int(i)
+                Value::int(i)
             } else if let Some(f) = n.as_f64() {
-                Value::Float(f)
+                Value::float(f)
             } else {
-                Value::String(n.to_string())
+                Value::string(n.to_string())
             }
         }
-        serde_json::Value::Array(arr) => Value::List(arr.into_iter().map(json_to_value).collect()),
-        serde_json::Value::Object(map) => Value::Map(
+        serde_json::Value::Array(arr) => Value::list(arr.into_iter().map(json_to_value).collect()),
+        serde_json::Value::Object(map) => Value::map(
             map.into_iter()
                 .map(|(k, v)| (k, json_to_value(v)))
                 .collect(),
         ),
-        serde_json::Value::Null => Value::String(String::new()),
+        serde_json::Value::Null => Value::string(String::new()),
     }
 }
 
@@ -959,12 +963,19 @@ pub(crate) fn expand_string<P: ProcessManager>(
                             for part in parts {
                                 let part_trim = part.trim();
                                 current = match current {
-                                    Some(Value::Map(map)) => map.get(part_trim).cloned(),
-                                    Some(Value::List(list)) => part_trim
-                                        .parse::<usize>()
-                                        .ok()
-                                        .and_then(|idx| list.get(idx).cloned()),
-                                    _ => None,
+                                    Some(v) => {
+                                        if let Some(map) = v.as_map() {
+                                            map.get(part_trim).cloned()
+                                        } else if let Some(list) = v.as_list() {
+                                            part_trim
+                                                .parse::<usize>()
+                                                .ok()
+                                                .and_then(|idx| list.get(idx).cloned())
+                                        } else {
+                                            None
+                                        }
+                                    }
+                                    None => None,
                                 };
                                 if current.is_none() {
                                     break;
@@ -1074,26 +1085,45 @@ pub(crate) fn expand_dsl_vars<P: ProcessManager>(input: &str, state: &ExecState<
 /// extra dependency. This rendering also feeds the `==`/`!=` string
 /// fallback for non-numeric operands.
 pub(crate) fn format_value_for_string(val: &Value) -> String {
-    match val {
-        Value::String(s) => s.clone(),
-        Value::Int(i) => i.to_string(),
-        Value::Float(f) => f.to_string(),
-        Value::Bool(b) => b.to_string(),
-        Value::Pipe(n) => format!("pipe:{n}"),
-        Value::Duration(d) => oxdock_parser::command::format_duration(d),
-        Value::Path(p) => p.to_string_lossy().to_string(),
-        Value::List(items) => items
+    if let Some(s) = val.as_str() {
+        return s.to_string();
+    }
+    if let Some(i) = val.as_i64() {
+        return i.to_string();
+    }
+    if let Some(f) = val.as_f64() {
+        return f.to_string();
+    }
+    if let Some(b) = val.as_bool() {
+        return b.to_string();
+    }
+    if let Some(n) = val.as_pipe_name() {
+        return format!("pipe:{n}");
+    }
+    if let Some(d) = val.as_duration() {
+        return oxdock_parser::command::format_duration(&d);
+    }
+    if let Some(p) = val.as_path() {
+        return p.to_string_lossy().to_string();
+    }
+    if let Some(items) = val.as_list() {
+        return items
             .iter()
             .map(format_value_for_string)
             .collect::<Vec<_>>()
-            .join(" "),
-        Value::Map(map) => map
+            .join(" ");
+    }
+    if let Some(map) = val.as_map() {
+        return map
             .iter()
             .map(|(k, v)| format!("\"{}\": {}", k, format_value_for_string(v)))
             .collect::<Vec<_>>()
-            .join(", "),
-        Value::TaskHandle(id) => format!("task#{}", id),
+            .join(", ");
     }
+    if let Some(id) = val.as_handle() {
+        return format!("task#{}", id);
+    }
+    format!("{}", val)
 }
 
 #[cfg(test)]
@@ -1107,62 +1137,62 @@ mod tests {
             pop_stack(&mut stack).is_err(),
             "empty pop must error, not panic"
         );
-        stack.push(Value::Int(1));
-        assert_eq!(pop_stack(&mut stack).unwrap(), Value::Int(1));
+        stack.push(Value::int(1));
+        assert_eq!(pop_stack(&mut stack).unwrap(), Value::int(1));
         assert!(pop_stack(&mut stack).is_err());
     }
 
     #[test]
     fn apply_arith_int_and_errors() {
         assert_eq!(
-            apply_arith(ArithOp::Add, Value::Int(2), Value::Int(3)).unwrap(),
-            Value::Int(5)
+            apply_arith(ArithOp::Add, Value::int(2), Value::int(3)).unwrap(),
+            Value::int(5)
         );
-        assert!(apply_arith(ArithOp::Div, Value::Int(1), Value::Int(0)).is_err());
+        assert!(apply_arith(ArithOp::Div, Value::int(1), Value::int(0)).is_err());
         assert!(
-            apply_arith(ArithOp::Add, Value::Int(i64::MAX), Value::Int(1)).is_err(),
+            apply_arith(ArithOp::Add, Value::int(i64::MAX), Value::int(1)).is_err(),
             "int overflow must bail"
         );
         assert!(
-            apply_arith(ArithOp::Add, Value::String("a".to_string()), Value::Int(1)).is_err(),
+            apply_arith(ArithOp::Add, Value::string("a".to_string()), Value::int(1)).is_err(),
             "string arithmetic must be a Type Error"
         );
-        assert!(apply_neg(Value::Int(i64::MIN)).is_err());
+        assert!(apply_neg(Value::int(i64::MIN)).is_err());
     }
 
     #[test]
     fn apply_arith_float_promotion() {
         assert_eq!(
-            apply_arith(ArithOp::Add, Value::Int(1), Value::Float(2.5)).unwrap(),
-            Value::Float(3.5)
+            apply_arith(ArithOp::Add, Value::int(1), Value::float(2.5)).unwrap(),
+            Value::float(3.5)
         );
-        assert!(apply_arith(ArithOp::Div, Value::Float(1.0), Value::Float(0.0)).is_err());
+        assert!(apply_arith(ArithOp::Div, Value::float(1.0), Value::float(0.0)).is_err());
     }
 
     #[test]
     fn apply_compare_numeric_and_fallback() {
         assert_eq!(
-            apply_compare(CompareOp::Eq, &Value::Int(1), &Value::Float(1.0)).unwrap(),
-            Value::Bool(true)
+            apply_compare(CompareOp::Eq, &Value::int(1), &Value::float(1.0)).unwrap(),
+            Value::bool(true)
         );
         assert_eq!(
-            apply_compare(CompareOp::Lt, &Value::Int(3), &Value::Float(4.5)).unwrap(),
-            Value::Bool(true)
+            apply_compare(CompareOp::Lt, &Value::int(3), &Value::float(4.5)).unwrap(),
+            Value::bool(true)
         );
         assert_eq!(
             apply_compare(
                 CompareOp::Eq,
-                &Value::String("a".to_string()),
-                &Value::String("a".to_string())
+                &Value::string("a".to_string()),
+                &Value::string("a".to_string())
             )
             .unwrap(),
-            Value::Bool(true)
+            Value::bool(true)
         );
         assert!(
             apply_compare(
                 CompareOp::Lt,
-                &Value::String("a".to_string()),
-                &Value::String("b".to_string())
+                &Value::string("a".to_string()),
+                &Value::string("b".to_string())
             )
             .is_err(),
             "ordering on strings must bail"
@@ -1172,20 +1202,20 @@ mod tests {
     #[test]
     fn int_float_conversions() {
         assert_eq!(
-            int_from_value(Value::String("  123\n".to_string())).unwrap(),
-            Value::Int(123)
+            int_from_value(Value::string("  123\n".to_string())).unwrap(),
+            Value::int(123)
         );
-        assert_eq!(int_from_value(Value::Float(3.0)).unwrap(), Value::Int(3));
-        assert!(int_from_value(Value::Float(3.5)).is_err());
-        assert!(int_from_value(Value::String("abc".to_string())).is_err());
+        assert_eq!(int_from_value(Value::float(3.0)).unwrap(), Value::int(3));
+        assert!(int_from_value(Value::float(3.5)).is_err());
+        assert!(int_from_value(Value::string("abc".to_string())).is_err());
         assert_eq!(
-            float_from_value(Value::String("2.5".to_string())).unwrap(),
-            Value::Float(2.5)
+            float_from_value(Value::string("2.5".to_string())).unwrap(),
+            Value::float(2.5)
         );
-        assert_eq!(float_from_value(Value::Int(3)).unwrap(), Value::Float(3.0));
+        assert_eq!(float_from_value(Value::int(3)).unwrap(), Value::float(3.0));
         for bad in ["nan", "inf", "-inf", "abc"] {
             assert!(
-                float_from_value(Value::String(bad.to_string())).is_err(),
+                float_from_value(Value::string(bad.to_string())).is_err(),
                 "{bad:?} must fail"
             );
         }

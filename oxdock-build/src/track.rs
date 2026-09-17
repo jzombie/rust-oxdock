@@ -12,7 +12,7 @@
 
 use std::collections::{BTreeSet, HashSet};
 
-use oxdock_parser::{Arg, AssertTarget, GuardExpr, Step, StepKind};
+use oxdock_parser::{Arg, ArgPart, AssertTarget, Expr, GuardExpr, MathOp, Step, StepKind};
 
 /// Extract `{{ env:KEY }}` placeholder names from a template string.
 fn env_placeholders(template: &str) -> Vec<String> {
@@ -121,16 +121,93 @@ fn collect_env_keys(out: &mut BTreeSet<String>, template: &str, assigned: &HashS
     }
 }
 
-/// Collect every environment variable name the script references — through
-/// `{{ env:KEY }}` placeholders in ANY template field of ANY step, and through
-/// `[env:KEY]` guard expressions (including nested `all`/`or`/`not` groups).
+/// Collect environment variable names referenced through `{{ env:KEY }}`
+/// placeholders in command template fields and expression string literals,
+/// through `env:KEY` expression reads, through `[env:KEY]` guard
+/// expressions (including nested `all`/`or`/`not` groups), and through
+/// `INHERIT_ENV` keys.
 ///
 /// Used by fingerprinting so environment drift invalidates cached assets.
 pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
     let mut keys = BTreeSet::new();
 
+    fn walk_expr(out: &mut BTreeSet<String>, expr: &Expr) {
+        match expr {
+            Expr::Literal(value) => {
+                if let Some(text) = value.as_str() {
+                    out.extend(env_placeholders(text));
+                }
+            }
+            Expr::Var(_) => {}
+            Expr::Env(key) => {
+                out.insert(key.clone());
+            }
+            Expr::KeyPath { .. } => {}
+            Expr::List(items) => {
+                for item in items {
+                    walk_expr(out, item);
+                }
+            }
+            Expr::Map(entries) => {
+                for (_, value) in entries {
+                    walk_expr(out, value);
+                }
+            }
+            Expr::Call { args, .. } => {
+                for arg in args {
+                    walk_expr(out, arg);
+                }
+            }
+            Expr::Inspect(_) => {}
+            Expr::Compare { left, right, .. } => {
+                walk_expr(out, left);
+                walk_expr(out, right);
+            }
+            Expr::Arithmetic { left, right, .. } => {
+                walk_expr(out, left);
+                walk_expr(out, right);
+            }
+            Expr::CompiledMath(ops) => {
+                for op in ops {
+                    match op {
+                        MathOp::PushConst(value) => {
+                            if let Some(text) = value.as_str() {
+                                out.extend(env_placeholders(text));
+                            }
+                        }
+                        MathOp::LoadEnv(key) => {
+                            out.insert(key.clone());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Expr::UnsignedIntBoundary(_) => {}
+            Expr::Not(inner) => walk_expr(out, inner),
+            Expr::Logical { left, right, .. } => {
+                walk_expr(out, left);
+                walk_expr(out, right);
+            }
+        }
+    }
+
     fn template_keys(out: &mut BTreeSet<String>, t: &Arg) {
-        out.extend(env_placeholders(t.as_str()));
+        match t {
+            Arg::String(text, _) => {
+                out.extend(env_placeholders(text));
+            }
+            Arg::Expr(expr) => walk_expr(out, expr),
+            Arg::Parts(parts) => {
+                for part in parts {
+                    match part {
+                        ArgPart::Text(text, _) => {
+                            out.extend(env_placeholders(text));
+                        }
+                        ArgPart::Expr(expr) => walk_expr(out, expr),
+                    }
+                }
+            }
+        }
     }
 
     fn template_keys_target(out: &mut BTreeSet<String>, t: &AssertTarget) {
@@ -172,7 +249,9 @@ pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
             StepKind::Workspace(_) | StepKind::Cwd => {}
             StepKind::Exit(code) => template_keys(&mut keys, code),
             StepKind::Env { key: _, value } => template_keys(&mut keys, value),
-            StepKind::InheritEnv { keys: _ } => {}
+            StepKind::InheritEnv { keys: inherit } => {
+                keys.extend(inherit.iter().cloned());
+            }
             StepKind::Run(t) | StepKind::Echo(t) => template_keys(&mut keys, t),
             StepKind::RunExec { argv } => {
                 for arg in argv {
@@ -244,23 +323,27 @@ pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
                 template_keys(&mut keys, to);
             }
             StepKind::HashSha256 { path } => template_keys(&mut keys, path),
-            StepKind::For { body, .. } => {
+            StepKind::For { in_expr, body, .. } => {
+                walk_expr(&mut keys, in_expr);
                 // Recursively collect env references from the loop body
                 for k in collect_env_references(body) {
                     keys.insert(k);
                 }
             }
             StepKind::If {
+                cond,
                 then_body,
                 else_ifs,
                 else_body,
                 ..
             } => {
+                walk_expr(&mut keys, cond);
                 // Recursively collect env references from all branches
                 for k in collect_env_references(then_body) {
                     keys.insert(k);
                 }
-                for (_, body) in else_ifs {
+                for (else_cond, body) in else_ifs {
+                    walk_expr(&mut keys, else_cond);
                     for k in collect_env_references(body) {
                         keys.insert(k);
                     }
@@ -271,10 +354,9 @@ pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
                     }
                 }
             }
-            StepKind::Assign { .. } => {
-                // LET assignments don't contain template strings that reference env vars
+            StepKind::Assign { expr, .. } | StepKind::Set { expr, .. } => {
+                walk_expr(&mut keys, expr);
             }
-            StepKind::Set { .. } => {}
             StepKind::AssignCapture { cmd, .. } => {
                 collect_env_references_inner(&mut keys, cmd);
             }
@@ -295,14 +377,24 @@ pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
             StepKind::Cancel { .. } => {}
             StepKind::Sleep { duration } => template_keys(&mut keys, duration),
             StepKind::ReadLine { .. } => {}
-            StepKind::FuncDef { body, .. } | StepKind::While { body, .. } => {
+            StepKind::FuncDef { body, .. } => {
                 for k in collect_env_references(body) {
                     keys.insert(k);
                 }
             }
-            StepKind::Call { .. } | StepKind::Return { .. } => {
-                // Call args / return exprs are expressions like LET RHS,
-                // which this walk ignores by design (see Assign above).
+            StepKind::While { cond, body, .. } => {
+                walk_expr(&mut keys, cond);
+                for k in collect_env_references(body) {
+                    keys.insert(k);
+                }
+            }
+            StepKind::Call { args, .. } => {
+                for arg in args {
+                    walk_expr(&mut keys, arg);
+                }
+            }
+            StepKind::Return { expr } => {
+                walk_expr(&mut keys, expr);
             }
             StepKind::Break | StepKind::Continue => {}
         }
@@ -497,5 +589,32 @@ mod tests {
         let (changed, env) = plan_input_directives(&steps);
         assert!(changed.is_empty());
         assert!(env.is_empty());
+    }
+
+    #[test]
+    fn env_reads_in_expressions_are_tracked() {
+        let steps = parse_script("LET $e: STRING = env:FOO\n", oxdock_parser::lower_command)
+            .expect("parse");
+        let refs = collect_env_references(&steps);
+        assert!(refs.contains("FOO"), "{refs:?}");
+    }
+
+    #[test]
+    fn inherit_env_keys_are_tracked() {
+        let steps =
+            parse_script("INHERIT_ENV [HOST_KEY]\n", oxdock_parser::lower_command).expect("parse");
+        let refs = collect_env_references(&steps);
+        assert!(refs.contains("HOST_KEY"), "{refs:?}");
+    }
+
+    #[test]
+    fn condition_and_call_exprs_are_tracked() {
+        let steps = parse_script(
+            "IF env:FLAG == \"on\" {\nECHO hi\n}\n",
+            oxdock_parser::lower_command,
+        )
+        .expect("parse");
+        let refs = collect_env_references(&steps);
+        assert!(refs.contains("FLAG"), "{refs:?}");
     }
 }

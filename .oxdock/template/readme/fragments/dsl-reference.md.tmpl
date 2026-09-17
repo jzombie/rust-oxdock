@@ -43,6 +43,7 @@ Parentheses mark the boundary between computing a value and running a pipeline s
 
 ```oxdock
 // Functions compute values; stdout stays untouched.
+IMPORT [STD]
 LET $t: STRING = PATH_TYPE("missing.txt")
 LET $n: INT = INT("41") + 1
 ASSERT_EQ $t "absent"
@@ -215,6 +216,7 @@ Bracket expressions may span lines. Chained guard lines apply conjunctively to t
 WRITE chained.txt applied
 
 // The artifact was never created.
+IMPORT [STD]
 LET $t: STRING = PATH_TYPE("chained.txt")
 ASSERT_EQ $t "absent"
 ```

@@ -155,7 +155,7 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
         prop::collection::vec(safe_string(), 1..3).prop_map(|items| StepKind::RunExec {
             argv: items
                 .into_iter()
-                .map(|s| Arg::Expr(Expr::Literal(Value::String(s))))
+                .map(|s| Arg::Expr(Expr::Literal(Value::string(s))))
                 .collect(),
         }),
         safe_msg().prop_map(|s| StepKind::Echo(s.into())),

@@ -126,8 +126,8 @@ fn run_shell_routes_dollar_forms_to_dsl_or_shell() {
             guard: None,
             kind: StepKind::Assign {
                 var: "who".into(),
-                decl_type: oxdock_parser::TypeKind::String,
-                expr: Expr::Literal(Value::String("world".to_string())),
+                decl_type: "STRING".to_string(),
+                expr: Expr::Literal(Value::string("world".to_string())),
             },
             scope_enter: 0,
             scope_exit: 0,
@@ -174,10 +174,10 @@ fn run_exec_resolves_and_flattens_argv() {
             guard: None,
             kind: StepKind::Assign {
                 var: "args".into(),
-                decl_type: oxdock_parser::TypeKind::List,
+                decl_type: "LIST".to_string(),
                 expr: Expr::List(vec![
-                    Expr::Literal(Value::String("-v".to_string())),
-                    Expr::Literal(Value::String("--all".to_string())),
+                    Expr::Literal(Value::string("-v".to_string())),
+                    Expr::Literal(Value::string("--all".to_string())),
                 ]),
             },
             scope_enter: 0,
@@ -187,10 +187,10 @@ fn run_exec_resolves_and_flattens_argv() {
             guard: None,
             kind: StepKind::RunExec {
                 argv: vec![
-                    Arg::Expr(Expr::Literal(Value::String("cargo".to_string()))),
+                    Arg::Expr(Expr::Literal(Value::string("cargo".to_string()))),
                     Arg::Expr(Expr::Var("args".to_string())),
-                    Arg::Expr(Expr::Literal(Value::Int(3))),
-                    Arg::Expr(Expr::Literal(Value::Bool(true))),
+                    Arg::Expr(Expr::Literal(Value::int(3))),
+                    Arg::Expr(Expr::Literal(Value::bool(true))),
                     Arg::String("{{ env:GREETING }}".to_string(), false),
                     // Escapes stay literal and pass through directly.
                     Arg::String("\\$literal".to_string(), false),
@@ -229,11 +229,11 @@ fn run_exec_rejects_map_elements_with_type_error() {
 
     let root = GuardedPath::new_root_from_str(".").unwrap();
     let mut map = std::collections::BTreeMap::new();
-    map.insert("k".to_string(), Value::String("v".to_string()));
+    map.insert("k".to_string(), Value::string("v".to_string()));
     let steps = vec![Step {
         guard: None,
         kind: StepKind::RunExec {
-            argv: vec![Arg::Expr(Expr::Literal(Value::Map(map)))],
+            argv: vec![Arg::Expr(Expr::Literal(Value::map(map)))],
         },
         scope_enter: 0,
         scope_exit: 0,
@@ -255,7 +255,7 @@ fn run_exec_resolves_every_variable_type() {
     // `$var`, `$map.key`, `{{ env:K }}`, `{{ $var }}`, `{{ $map.key }}`.
     let root = GuardedPath::new_root_from_str(".").unwrap();
     let mut map = std::collections::BTreeMap::new();
-    map.insert("k".to_string(), Value::String("keyval".to_string()));
+    map.insert("k".to_string(), Value::string("keyval".to_string()));
     let steps = vec![
         Step {
             guard: None,
@@ -270,8 +270,8 @@ fn run_exec_resolves_every_variable_type() {
             guard: None,
             kind: StepKind::Assign {
                 var: "who".into(),
-                decl_type: oxdock_parser::TypeKind::String,
-                expr: Expr::Literal(Value::String("world".to_string())),
+                decl_type: "STRING".to_string(),
+                expr: Expr::Literal(Value::string("world".to_string())),
             },
             scope_enter: 0,
             scope_exit: 0,
@@ -280,10 +280,10 @@ fn run_exec_resolves_every_variable_type() {
             guard: None,
             kind: StepKind::Assign {
                 var: "m".into(),
-                decl_type: oxdock_parser::TypeKind::Map,
+                decl_type: "MAP".to_string(),
                 expr: Expr::Map(vec![(
                     "k".to_string(),
-                    Expr::Literal(Value::String("keyval".to_string())),
+                    Expr::Literal(Value::string("keyval".to_string())),
                 )]),
             },
             scope_enter: 0,
@@ -293,7 +293,7 @@ fn run_exec_resolves_every_variable_type() {
             guard: None,
             kind: StepKind::RunExec {
                 argv: vec![
-                    Arg::Expr(Expr::Literal(Value::String("echo".to_string()))),
+                    Arg::Expr(Expr::Literal(Value::string("echo".to_string()))),
                     // Whole-element `$var` and `$map.key` references.
                     Arg::Expr(Expr::Var("who".to_string())),
                     Arg::Expr(Expr::KeyPath {
@@ -304,7 +304,7 @@ fn run_exec_resolves_every_variable_type() {
                     Arg::String("{{ env:FOO }}".to_string(), false),
                     Arg::String("{{ $who }}".to_string(), false),
                     Arg::String("{{ $m.k }}".to_string(), false),
-                    Arg::Expr(Expr::Literal(Value::String("{{ $who }}".to_string()))),
+                    Arg::Expr(Expr::Literal(Value::string("{{ $who }}".to_string()))),
                 ],
             },
             scope_enter: 0,
@@ -341,13 +341,13 @@ fn run_exec_expands_templates_in_literal_elements_once() {
             guard: None,
             kind: StepKind::RunExec {
                 argv: vec![
-                    Arg::Expr(Expr::Literal(Value::String("echo".to_string()))),
+                    Arg::Expr(Expr::Literal(Value::string("echo".to_string()))),
                     // Quoted `{{ ... }}` templates interpolate...
-                    Arg::Expr(Expr::Literal(Value::String(
+                    Arg::Expr(Expr::Literal(Value::string(
                         "{{ env:GREETING }}".to_string(),
                     ))),
                     // ...while `\{{ ... }}` escapes stay literal (single pass).
-                    Arg::Expr(Expr::Literal(Value::String(
+                    Arg::Expr(Expr::Literal(Value::string(
                         "\\{{ env:GREETING }}".to_string(),
                     ))),
                 ],
@@ -376,9 +376,9 @@ fn run_exec_processes_escapes_and_keeps_metachars_literal() {
         guard: None,
         kind: StepKind::RunExec {
             argv: vec![
-                Arg::Expr(Expr::Literal(Value::String("echo".to_string()))),
-                Arg::Expr(Expr::Literal(Value::String("a\\\"b\\\\c\\nd".to_string()))),
-                Arg::Expr(Expr::Literal(Value::String(
+                Arg::Expr(Expr::Literal(Value::string("echo".to_string()))),
+                Arg::Expr(Expr::Literal(Value::string("a\\\"b\\\\c\\nd".to_string()))),
+                Arg::Expr(Expr::Literal(Value::string(
                     "a; b $(c) `d` > e | f".to_string(),
                 ))),
             ],
@@ -419,8 +419,8 @@ fn run_exec_treats_variable_values_as_opaque() {
             guard: None,
             kind: StepKind::Assign {
                 var: "data".into(),
-                decl_type: oxdock_parser::TypeKind::String,
-                expr: Expr::Literal(Value::String("\\{{ env:SECRET }}".to_string())),
+                decl_type: "STRING".to_string(),
+                expr: Expr::Literal(Value::string("\\{{ env:SECRET }}".to_string())),
             },
             scope_enter: 0,
             scope_exit: 0,
@@ -429,7 +429,7 @@ fn run_exec_treats_variable_values_as_opaque() {
             guard: None,
             kind: StepKind::RunExec {
                 argv: vec![
-                    Arg::Expr(Expr::Literal(Value::String("echo".to_string()))),
+                    Arg::Expr(Expr::Literal(Value::string("echo".to_string()))),
                     Arg::Expr(Expr::Var("data".to_string())),
                 ],
             },
@@ -711,7 +711,7 @@ fn async_stdin_pipe_unblocks_background_write() {
             guard: None,
             kind: StepKind::AssignAsync {
                 var: "writer".into(),
-                decl_type: oxdock_parser::TypeKind::Handle,
+                decl_type: "HANDLE".to_string(),
                 body: vec![Step {
                     guard: None,
                     kind: StepKind::WithIo {
@@ -837,8 +837,8 @@ fn create_exec_state(fs: MockFs) -> ExecState<MockProcessManager> {
         inside_async: false,
         keeper_expiry: None,
         cancellable: false,
-        funcs: Arc::new(std::collections::HashMap::new()),
-        host_funcs: Arc::new(std::collections::HashMap::new()),
+        functions: super::native::FunctionRegistry::with_builtins(),
+        types: super::typing::startup_type_map(),
         call_depth: 0,
         _marker: std::marker::PhantomData,
     };
@@ -2356,24 +2356,14 @@ mod escape_props {
         envs: &[(String, String)],
         vars: &[(String, Value)],
     ) -> ExecState<MockProcessManager> {
-        use oxdock_parser::TypeKind;
         let mut state = create_exec_state(MockFs::new());
         for (k, v) in envs {
             Arc::make_mut(&mut state.envs).insert(k.clone(), v.clone());
         }
         for (k, v) in vars {
-            let kind = match v {
-                Value::String(_) => TypeKind::String,
-                Value::Int(_) => TypeKind::Int,
-                Value::Float(_) => TypeKind::Float,
-                Value::Bool(_) => TypeKind::Bool,
-                Value::Pipe(_) => TypeKind::Pipe,
-                Value::List(_) => TypeKind::List,
-                Value::Map(_) => TypeKind::Map,
-                Value::Duration(_) => TypeKind::Duration,
-                Value::Path(_) => TypeKind::Path,
-                Value::TaskHandle(_) => TypeKind::Handle,
-            };
+            // Declared type always matches the value's descriptor: the
+            // property under test is expansion, not coercion.
+            let kind = v.type_name().to_string();
             let _ = state.declare_var(k.clone(), kind, v.clone());
         }
         state
@@ -2397,7 +2387,7 @@ mod escape_props {
             // `\$name` routes `$name` to the shell untouched.
             let state = prop_state(
                 &[],
-                &[(name.clone(), Value::String(value))],
+                &[(name.clone(), Value::string(value))],
             );
             prop_assert_eq!(shell_resolve(&format!("\\${name}"), &state), format!("${name}"));
         }
@@ -2439,7 +2429,7 @@ mod escape_props {
         ) {
             let state = prop_state(
                 &[],
-                &[(name.clone(), Value::String(val.clone()))],
+                &[(name.clone(), Value::string(val.clone()))],
             );
             prop_assert_eq!(shell_resolve(&format!("{{{{ ${name} }}}}"), &state), val);
         }

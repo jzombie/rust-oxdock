@@ -6,9 +6,9 @@ See the [changelog]({{ $docs_global.changelog_url }}) for what changed in each r
 | Command | Syntax |
 | --- | --- |
 | [`WORKDIR`](#workdir) | `WORKDIR <path>` |
-| [`WORKSPACE`](#workspace) | `WORKSPACE SNAPSHOT\|LOCAL` |
+| [`WORKSPACE`](#workspace) | `WORKSPACE (SNAPSHOT\|LOCAL, case-insensitive)` |
 | [`ENV`](#env) | `ENV KEY=value` |
-| [`INHERIT_ENV`](#inherit_env) | `INHERIT_ENV <key>...` |
+| [`INHERIT_ENV`](#inherit_env) | `INHERIT_ENV [<key>, ...]` |
 | [`ECHO`](#echo) | `ECHO <message>` |
 | [`RUN`](#run) | `RUN <command...> \| RUN ["exe", "arg", ...]` |
 | [`COPY`](#copy) | `COPY [--from-current-workspace] <from> <to>` |
@@ -22,23 +22,23 @@ See the [changelog]({{ $docs_global.changelog_url }}) for what changed in each r
 | [`WRITE`](#write) | `WRITE <path> [<contents>]` |
 | [`APPEND`](#append) | `APPEND <path> [<contents>]` |
 | [`EXPAND`](#expand) | `EXPAND [<path>] [<KEY=val> ...]` |
-| [`ASSERT_EQ`](#assert_eq) | `ASSERT_EQ [--hash <sha256>] <actual> <expected>` |
+| [`ASSERT_EQ`](#assert_eq) | `ASSERT_EQ <actual> <expected> \| ASSERT_EQ --hash <sha256> <actual>` |
 | [`ASSERT_CONTAINS`](#assert_contains) | `ASSERT_CONTAINS <haystack> <needle>` |
 | [`HASH_SHA256`](#hash_sha256) | `HASH_SHA256 <path>` |
 | [`EXIT`](#exit) | `EXIT <code>` |
 | [`SLEEP`](#sleep) | `SLEEP <duration>` |
 | [`WITH_IO`](#with_io) | `WITH_IO [<stream>[=pipe:<name>\|=$var], ...] <command> \| WITH_IO [bindings] { <commands> }` |
 | [`FOR`](#for) | `FOR $item: TYPE IN <expr> { <commands> } \| FOR $key: STRING, $value: TYPE IN <expr> { <commands> }` |
-| [`IF`](#if) | `IF <expr> { <commands> } [ELSE IF <expr> { <commands> }] [ELSE { <commands> }]` |
+| [`IF`](#if) | `IF <expr> { <commands> } [ELSE IF <expr> { <commands> } ...] [ELSE { <commands> }]` |
 | [`LET`](#let) | `LET $var: TYPE = <expr> \| LET $var: TYPE = ASYNC { <commands> } \| LET $var: TYPE = <command> \| LET $var: TYPE = AWAIT $task` |
 | [`MUTATION`](#mutation) | `$var = <expr>` |
 | [`ASYNC`](#async) | `ASYNC <command...> \| ASYNC { <commands> } \| LET $var: HANDLE = ASYNC { <commands> }` |
 | [`AWAIT`](#await) | `AWAIT $var \| LET $out: STRING = AWAIT $var` |
 | [`CANCEL`](#cancel) | `CANCEL $var` |
 | [`TIMEOUT`](#timeout) | `TIMEOUT <duration> <command...> \| TIMEOUT <duration> { <commands> } \| TIMEOUT <duration> AWAIT $var` |
-| [`FUNC`](#func) | `FUNC NAME($param: TYPE, ...) { <commands> }` |
-| [`CALL`](#call) | `CALL NAME(<expr>, ...) \| LET $var: TYPE = CALL NAME(<expr>, ...)` |
-| [`RETURN`](#return) | `RETURN <expr>` |
+| [`FUNC`](#func) | `FUNC NAME([$param: TYPE, ...]) { <commands> }` |
+| [`RETURN`](#return) | `RETURN [<expr>]` |
 | [`WHILE`](#while) | `WHILE <bool-expr> { <commands> }` |
 | [`BREAK`](#break) | `BREAK` |
 | [`CONTINUE`](#continue) | `CONTINUE` |
+| [`IMPORT`](#import) | `IMPORT [<module>, ...] \| IMPORT <module>` |

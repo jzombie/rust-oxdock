@@ -1,0 +1,4 @@
+name = "func_nested_shadow"
+
+[expect]
+files = { "inner.txt" = "inner-in", "outer.txt" = "outer-out" }

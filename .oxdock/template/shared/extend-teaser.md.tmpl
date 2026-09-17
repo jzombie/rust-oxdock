@@ -1,0 +1,67 @@
+## Extend the language
+
+New types and functions take two attributes, a type registration, and a function module. Small
+`Copy` scalars can ride inline on the stack with zero allocation
+instead of heap boxing; both forms, with stateful functions, live under
+[Extending OxDock from Rust](#extending-oxdock-from-rust) below.
+
+```rust
+use oxdock::{Engine, HostModule, OxDockFn, OxDockType, Value, oxdock_func, oxdock_type};
+use std::fmt;
+
+/// Word count summary: computed in Rust, carried as one script value.
+#[oxdock_type(name = "STATS")]
+#[derive(Debug, Clone, PartialEq)]
+struct Stats {
+    words: usize,
+    chars: usize,
+}
+
+impl fmt::Display for Stats {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{} words, {} chars", self.words, self.chars)
+    }
+}
+
+/// Summarize a string: `STATS("hello brave world")` carries its counts.
+#[oxdock_func(pure, name = "STATS")]
+fn summarize(text: String) -> anyhow::Result<Value> {
+    let words = text.split_whitespace().count();
+    let chars = text.chars().count();
+    Ok(Value::mint_heap(
+        Stats::descriptor(),
+        Stats { words, chars },
+    ))
+}
+
+/// Read the word count back out: `WORD_COUNT($s)` is an `INT`.
+#[oxdock_func(pure, returns = "INT")]
+fn word_count(summary: Value) -> anyhow::Result<Value> {
+    let Some(stats) = summary.read_heap::<Stats>(Stats::descriptor()) else {
+        anyhow::bail!("WORD_COUNT() expects a STATS value");
+    };
+    Ok(Value::int(stats.words as i64))
+}
+
+fn main() -> anyhow::Result<()> {
+    let mut engine = Engine::new();
+    engine.register_type::<Stats>();
+    engine.register_module(HostModule {
+        name: "DEMO".to_string(),
+        funcs: vec![Summarize::registration(), WordCount::registration()],
+        types: vec![],
+    });
+    let temp = oxdock_fs::GuardedPath::tempdir().unwrap();
+    let root = temp.as_guarded_path().clone();
+    let steps: Vec<oxdock::oxdock_parser::Step> = oxdock::oxdock! {
+        modules: [DEMO],
+        IMPORT [DEMO]
+        LET $s: STATS = STATS("hello brave world")
+        LET $n: INT = WORD_COUNT($s)
+        ASSERT_EQ $n 3
+    };
+    let run = engine.run_steps(&root, &steps)?;
+    assert_eq!(format!("{}", run.bindings["s"]), "3 words, 17 chars");
+    Ok(())
+}
+```

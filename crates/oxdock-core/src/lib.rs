@@ -1,3 +1,5 @@
+extern crate self as oxdock_core;
+
 pub mod exec;
 pub mod pipeline;
 pub use exec::*;
@@ -49,8 +51,31 @@ define_pipeline! {
 /// Parse a script using the production `lower_command` dispatcher.
 /// The typed `ParseError` converts into `anyhow::Error` at this boundary
 /// with no intermediate `.context()` wrapping, so the message survives.
+/// Builtin function names seed the reserved set, so `FUNC` shadowing a
+/// native fails here; hosts unknown at parse time fall back to the runtime
+/// `define_func` guard.
 pub fn parse_script(input: &str) -> anyhow::Result<Vec<oxdock_parser::Step>> {
-    Ok(oxdock_parser::parse_script(input, lower_command)?)
+    parse_script_with_modules(input, std_module_table())
+}
+
+/// Parse with a module provenance table so calls resolve statically:
+/// qualified `MODULE::NAME` checks membership, bare `NAME` resolves through
+/// `SCRIPT` definitions and `IMPORT`ed modules. Reserved covers builtins
+/// plus every table module, so `FUNC` shadowing any of them fails here;
+/// hosts unknown at parse time fall back to the runtime `define_func`
+/// guard.
+pub fn parse_script_with_modules(
+    input: &str,
+    modules: oxdock_parser::ModuleTable,
+) -> anyhow::Result<Vec<oxdock_parser::Step>> {
+    let mut reserved = builtin_function_names();
+    reserved.extend(modules.reserved_base_names());
+    Ok(oxdock_parser::parse_script_with_modules(
+        input,
+        lower_command,
+        reserved,
+        modules,
+    )?)
 }
 
 #[cfg(test)]

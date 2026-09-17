@@ -134,10 +134,31 @@ pub fn run_ast_suites(
         let steps = case_steps
             .get(case.name.as_str())
             .ok_or_else(|| anyhow!("missing steps for case {}", case.name))?;
-        run_case(&case, steps).with_context(|| format!("case {}", case.name))?;
+        run_parsed_case(&case, steps).with_context(|| format!("case {}", case.name))?;
     }
 
     Ok(())
+}
+
+/// Run one loaded case: execute parsed steps, or match a recorded
+/// parse failure against `expect_error_contains`.
+fn run_parsed_case(case: &CaseSpec, steps: &CaseSteps) -> Result<()> {
+    match steps {
+        CaseSteps::Parsed(steps) => run_case(case, steps),
+        CaseSteps::ParseFailed(text) => match &case.expect_error {
+            Some(expectation) => {
+                let err = anyhow!("{text}");
+                expectations::assert_error_matches(
+                    expectation,
+                    &err,
+                    &format!("AST case {} parse error", case.name),
+                )
+            }
+            None => {
+                Err(anyhow!("{text}")).with_context(|| format!("parse script {}", case.script_rel))
+            }
+        },
+    }
 }
 
 /// Run a single `ast_commands` case in-process.
@@ -155,7 +176,7 @@ pub fn run_ast_case(template_root: &GuardedPath, case_name: &str) -> Result<()> 
         let steps = case_steps
             .get(case.name.as_str())
             .ok_or_else(|| anyhow!("missing steps for case {}", case.name))?;
-        run_case(case, steps).with_context(|| format!("case {}", case.name))?;
+        run_parsed_case(case, steps).with_context(|| format!("case {}", case.name))?;
     }
 
     Ok(())
@@ -529,7 +550,7 @@ fn parse_hash_expect(table: &Table) -> Result<HashExpect> {
 fn load_case_steps(
     resolver: &PathResolver,
     cases: &[CaseSpec],
-) -> Result<HashMap<String, Vec<Step>>> {
+) -> Result<HashMap<String, CaseSteps>> {
     let mut out = HashMap::new();
     let placeholders = command_placeholders();
     for case in cases {
@@ -542,8 +563,12 @@ fn load_case_steps(
             .with_context(|| format!("read script {}", case.script_rel))?;
         let rendered = apply_placeholders(&template, &placeholders)
             .with_context(|| format!("render script {}", case.script_rel))?;
-        let steps = oxdock_core::parse_script(&rendered)
-            .with_context(|| format!("parse script {}", case.script_rel))?;
+        let steps = match oxdock_core::parse_script(&rendered) {
+            Ok(steps) => CaseSteps::Parsed(steps),
+            Err(err) => {
+                CaseSteps::ParseFailed(format!("parse script {}: {err:#}", case.script_rel))
+            }
+        };
         out.insert(case.name.clone(), steps.clone());
         // Alias by directory name: coverage.toml may reference a case by its
         // directory when the declared `name` differs (e.g. directory
@@ -553,6 +578,15 @@ fn load_case_steps(
         }
     }
     Ok(out)
+}
+
+/// Parsed steps for one case, or the rendered parse-failure text when the
+/// script does not parse. Parse failures match `expect_error_contains`
+/// instead of running.
+#[derive(Clone)]
+enum CaseSteps {
+    Parsed(Vec<Step>),
+    ParseFailed(String),
 }
 
 fn apply_placeholders(
@@ -625,7 +659,7 @@ fn command_placeholders() -> HashMap<&'static str, String> {
     placeholders
 }
 
-fn assert_coverage(cases: &HashMap<String, Vec<Step>>, spec: &CoverageSpec) -> Result<()> {
+fn assert_coverage(cases: &HashMap<String, CaseSteps>, spec: &CoverageSpec) -> Result<()> {
     let step_kinds = step_kind_variants().context("load StepKind variants")?;
 
     let mut missing = Vec::new();
@@ -657,7 +691,12 @@ fn assert_coverage(cases: &HashMap<String, Vec<Step>>, spec: &CoverageSpec) -> R
             let steps = cases
                 .get(case_name)
                 .ok_or_else(|| anyhow!("coverage references unknown case {}", case_name))?;
-            let script_kinds = step_kinds_in_steps(steps);
+            // Cases that fail to parse cover no StepKinds; referencing one
+            // from a coverage entry is a coverage error, reported below.
+            let script_kinds = match steps {
+                CaseSteps::Parsed(steps) => step_kinds_in_steps(steps),
+                CaseSteps::ParseFailed(_) => HashSet::new(),
+            };
             if !script_kinds.contains(kind) {
                 return Err(anyhow!(
                     "coverage case {} expects {}, but script does not include it",

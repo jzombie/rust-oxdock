@@ -2,6 +2,7 @@
 # into Rust tokens, rendered back to DSL text, and its AST must match
 # the twin dsl.txt exactly. Keep every line lexable as Rust tokens:
 # no backticks, balanced quotes and brackets.
+IMPORT [STD]
 LET $x: INT = 2 * (2 * (2 + 3)) * 4
 LET $t: INT = $total + INT($size_str)
 LET $f: FLOAT = FLOAT("2.5") + 1

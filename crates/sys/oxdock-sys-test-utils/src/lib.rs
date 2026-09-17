@@ -106,9 +106,10 @@ impl Drop for TestEnvGuard {
 #[allow(clippy::disallowed_types)]
 use std::path::Path;
 
-/// Detect whether the current process can create filesystem symlinks under
-/// the provided target directory. Accepts a `&Path` to avoid depending on
-/// `oxdock-fs` and creating a circular crate dependency.
+/// Detect whether the current process can create filesystem symlinks.
+/// On Unix always returns true without probing; on Windows probes symlink
+/// creation under the provided target directory. Accepts a `&Path` to avoid
+/// depending on `oxdock-fs` and creating a circular crate dependency.
 #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 pub fn can_create_symlinks(target: &Path) -> bool {
     #[cfg(unix)]
@@ -140,8 +141,10 @@ pub fn can_create_symlinks(target: &Path) -> bool {
 
 /// Build a process [`std::process::ExitStatus`] from a raw exit code.
 ///
-/// Single definition shared by the mock manager, the Miri synthetic backend,
-/// and executor tests (all need to fabricate statuses without spawning).
+/// Canonical shared definition used by the mock manager, the Miri synthetic
+/// backend, and most executor tests (all need to fabricate statuses without
+/// spawning). Note: `ChildHandle` and `exec::steps` retain small local
+/// duplicates.
 #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
 pub fn exit_status_from_code(code: i32) -> std::process::ExitStatus {
     #[cfg(unix)]

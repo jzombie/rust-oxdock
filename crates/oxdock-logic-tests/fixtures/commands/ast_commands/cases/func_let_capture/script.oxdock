@@ -4,7 +4,7 @@ FUNC MAKE($who: STRING) {
     ECHO "loud {{ $who }}"
     RETURN $who
 }
-LET $r: STRING = CALL MAKE("ada")
+LET $r: STRING = MAKE("ada")
 WRITE r.txt "{{ $r }}"
-CALL MAKE("bex")
+MAKE("bex")
 ASSERT_CONTAINS stdout "loud bex"

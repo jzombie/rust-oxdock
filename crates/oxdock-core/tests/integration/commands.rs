@@ -1209,7 +1209,7 @@ fn func_return_capture_and_while_loop() {
         FUNC DOUBLE($n: INT) {
             RETURN $n
         }
-        LET $r: INT = CALL DOUBLE(21)
+        LET $r: INT = DOUBLE(21)
         WRITE r.txt "{{ $r }}"
         LET $done: BOOL = false
         WHILE !$done {
@@ -1247,7 +1247,7 @@ fn break_cannot_cross_function_boundary() {
             FUNC FOO($y: STRING) {
                 BREAK
             }
-            CALL FOO("a")
+            FOO("a")
         }
     "#};
     let err = run_script(&root, script).expect_err("BREAK across FUNC must fail");
@@ -1258,14 +1258,153 @@ fn break_cannot_cross_function_boundary() {
 }
 
 #[test]
+fn native_arity_failure_precedes_argument_evaluation() {
+    // Gates before effects: `$nope` would fail lookup if evaluated, so the
+    // arity error proves the arguments never ran.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD]
+        LET $x: INT = INT(1, $nope)
+    "#};
+    let err = run_script(&root, script).expect_err("arity mismatch must fail");
+    assert!(
+        err.to_string()
+            .contains("INT() expects 1 argument(s), got 2"),
+        "{err}"
+    );
+    assert!(
+        !err.to_string().contains("undefined variable"),
+        "arguments must not evaluate before the arity gate: {err}"
+    );
+}
+
+#[test]
+fn rpn_errors_carry_no_step_number() {
+    // The math path evaluates a flat value stack with no step context, so
+    // a failing call inside arithmetic reports the bare wrapper error.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD]
+        LET $n: INT = 1 + INT("a", "b")
+    "#};
+    let err = run_script(&root, script).expect_err("arity mismatch must fail");
+    let first = err
+        .to_string()
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    assert_eq!(first, "INT() expects 1 argument(s), got 2", "{err}");
+}
+
+#[test]
+fn statement_position_errors_carry_step_numbers() {
+    // The same failing call as a statement runs on the AST path, where
+    // every error names its step.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD]
+        INT("a", "b")
+    "#};
+    let err = run_script(&root, script).expect_err("arity mismatch must fail");
+    let first = err
+        .to_string()
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    assert_eq!(first, "step 1: INT() expects 1 argument(s), got 2", "{err}");
+}
+
+#[test]
+fn run_exec_form_rejects_task_handles() {
+    // Handles never stringify into argv: the exec form fails with a type
+    // error instead of passing `task#N` to the subprocess.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        LET $t: HANDLE = ASYNC ECHO hi
+        RUN ["cargo", $t]
+    "#};
+    let err = run_script(&root, script).expect_err("handle argv must fail");
+    assert!(
+        err.to_string()
+            .contains("must be a string, got task handle"),
+        "{err}"
+    );
+}
+
+#[test]
+fn unknown_function_fails_before_argument_evaluation() {
+    // `$nope` would fail lookup if evaluated, so the parse-time gate
+    // firing first proves existence checks precede argument evaluation,
+    // in expression position too.
+    let err = oxdock_core::parse_script("LET $x: INT = NOPE($nope)\n")
+        .expect_err("unknown function must fail at parse");
+    assert!(err.to_string().contains("unknown function `NOPE`"), "{err}");
+    assert!(
+        !err.to_string().contains("undefined variable"),
+        "arguments must not evaluate before the existence gate: {err}"
+    );
+}
+
+#[test]
+fn unknown_function_statement_fails_at_parse() {
+    // No step number survives: genuinely unknown calls fail at parse time,
+    // before steps exist.
+    let err = oxdock_core::parse_script("NOPE(1)\n").expect_err("unknown function must fail");
+    assert!(err.to_string().contains("unknown function `NOPE`"), "{err}");
+    assert!(!err.to_string().contains("step 1"), "{err}");
+}
+
+#[test]
+fn rpn_math_position_runs_pure_calls() {
+    // `INT(...)` in arithmetic lowers to RPN `Call`: this passes only if
+    // the math path dispatches pure functions. Miri-clean: no filesystem.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD]
+        LET $n: INT = 1 + INT("2")
+        ASSERT_EQ $n 3
+    "#};
+    run_script(&root, script).expect("math-position calls run");
+}
+
+#[cfg_attr(
+    miri,
+    ignore = "GLOB iteration needs host filesystem traversal; blocked under Miri isolation"
+)]
+#[test]
+fn rpn_math_position_runs_rpn_capable_stateful_calls() {
+    // `GLOB(...)` inside a comparison lowers to RPN `Call`: this passes
+    // only if the math path dispatches flagged stateful functions.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD]
+        WRITE witness.txt "hi"
+        IF GLOB("*.txt") == "witness.txt" {
+            WRITE hit.txt "yes"
+        }
+        LET $h: STRING = READ hit.txt
+        ASSERT_EQ $h "yes"
+    "#};
+    run_script(&root, script).expect("math-position calls run");
+}
+
+#[test]
 fn recursion_depth_limit_names_function() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
         FUNC BOOM($n: INT) {
-            CALL BOOM($n)
+            BOOM($n)
         }
-        CALL BOOM(1)
+        BOOM(1)
     "#};
     let err = run_script(&root, script).expect_err("runaway recursion must fail");
     assert!(
@@ -1285,7 +1424,7 @@ fn pipe_declare_first_registers_for_later_bindings() {
         WITH_IO [stdin=$p] READ_LINE $line
     "#};
     let scope = run_script_with_scope(&root, script).expect("declare-first pipe must work");
-    assert_eq!(scope["line"], Value::String("hello".to_string()));
+    assert_eq!(scope["line"], Value::string("hello".to_string()));
 }
 
 #[test]
@@ -1311,7 +1450,7 @@ fn inspect_expression_returns_pipe_snapshot_map() {
         }
     "#};
     let scope = run_script_with_scope(&root, script).expect("INSPECT must work");
-    assert_eq!(scope["snap"], Value::String("PIPE-false-8-1".to_string()));
+    assert_eq!(scope["snap"], Value::string("PIPE-false-8-1".to_string()));
     assert!(!root.join("unexpected.txt").unwrap().exists());
 }
 
@@ -1336,7 +1475,7 @@ fn inspect_reports_os_pipe_for_promoted_single_run() {
         LET $v: BOOL = $info.is_os_pipe
     "#};
     let scope = run_script_with_scope(&root, script).expect("INSPECT of promoted pipe must work");
-    assert_eq!(scope["v"], Value::Bool(true));
+    assert_eq!(scope["v"], Value::bool(true));
 }
 
 #[test]
@@ -1380,7 +1519,7 @@ fn async_call_await_captures_return_value() {
         FUNC WORK($job: STRING) {
             RETURN "did-{{ $job }}"
         }
-        LET $t: HANDLE = ASYNC CALL WORK("job")
+        LET $t: HANDLE = ASYNC WORK("job")
         LET $o: STRING = AWAIT $t
         WRITE o.txt "{{ $o }}"
     "#};
@@ -1417,7 +1556,7 @@ fn assert_eq_path_type_reports_absent() {
     let root = guard_root(&temp);
     run_script(
         &root,
-        "LET $t: STRING = PATH_TYPE(\"missing.txt\")\nASSERT_EQ $t \"absent\"\n",
+        "IMPORT [STD]\nLET $t: STRING = PATH_TYPE(\"missing.txt\")\nASSERT_EQ $t \"absent\"\n",
     )
     .expect("absent path reports absent");
 }
@@ -1448,13 +1587,13 @@ fn assert_eq_path_type_covers_file_dir_absent() {
     let root = guard_root(&temp);
     run_script(
         &root,
-        "MKDIR tree/deep\nWRITE file.txt x\nLET $d: STRING = PATH_TYPE(\"tree/deep\")\nLET $f: STRING = PATH_TYPE(\"file.txt\")\nLET $n: STRING = PATH_TYPE(\"nope.txt\")\nASSERT_EQ $d \"dir\"\nASSERT_EQ $f \"file\"\nASSERT_EQ $n \"absent\"\n",
+        "IMPORT [STD]\nMKDIR tree/deep\nWRITE file.txt x\nLET $d: STRING = PATH_TYPE(\"tree/deep\")\nLET $f: STRING = PATH_TYPE(\"file.txt\")\nLET $n: STRING = PATH_TYPE(\"nope.txt\")\nASSERT_EQ $d \"dir\"\nASSERT_EQ $f \"file\"\nASSERT_EQ $n \"absent\"\n",
     )
     .expect("path type rows pass");
 
     let dir_err = run_script(
         &root,
-        "WRITE file.txt x\nLET $t: STRING = PATH_TYPE(\"file.txt\")\nASSERT_EQ $t \"dir\"\n",
+        "IMPORT [STD]\nWRITE file.txt x\nLET $t: STRING = PATH_TYPE(\"file.txt\")\nASSERT_EQ $t \"dir\"\n",
     )
     .expect_err("file-as-dir must fail");
     assert!(dir_err.to_string().contains("mismatch"), "{dir_err}");
@@ -1775,7 +1914,7 @@ fn assign_and_interpolate() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let scope = run_script_with_scope(&root, "LET $msg: STRING = hello\n").expect("assign passes");
-    assert_eq!(scope["msg"], Value::String("hello".to_string()));
+    assert_eq!(scope["msg"], Value::string("hello".to_string()));
 }
 
 // ---------------------------------------------------------------------------
@@ -1906,7 +2045,7 @@ fn block_scopes_variables_env_and_workdir_while_leaking_files_and_pipes() {
 fn block_mutation_of_outer_variable_persists_across_types() {
     // `mutate_var` writes into the frame where the variable was declared,
     // so mutating an outer variable inside a block survives block exit.
-    // Frames are type-generic: identical semantics for every TypeKind.
+    // Frames are type-generic: identical semantics for every type.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
@@ -2742,6 +2881,19 @@ fn exit_rejects_garbage_code_at_lower() {
     let err = oxdock_core::parse_script("EXIT banana\n").expect_err("garbage must fail");
     assert!(
         err.to_string().contains("banana"),
+        "expected int error, got: {err:#}"
+    );
+}
+
+#[test]
+fn exit_accepts_full_int64_range_at_lower() {
+    // Regression: lower-time Int validation used i32, rejecting valid INT
+    // literals such as 3000000000.
+    oxdock_core::parse_script("EXIT 3000000000\n").expect("i64 literal must lower");
+    oxdock_core::parse_script("EXIT 9223372036854775807\n").expect("i64::MAX must lower");
+    let err = oxdock_core::parse_script("EXIT 9223372036854775808\n").expect_err("i64 overflow");
+    assert!(
+        err.to_string().contains("9223372036854775808"),
         "expected int error, got: {err:#}"
     );
 }

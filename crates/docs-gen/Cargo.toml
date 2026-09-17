@@ -20,6 +20,7 @@ path = "src/main.rs"
 anyhow.workspace = true
 oxdock-core.workspace = true
 oxdock-fs.workspace = true
+oxdock-func-macro.workspace = true
 oxdock-macros.workspace = true
 oxdock-parser.workspace = true
 oxdock-process.workspace = true

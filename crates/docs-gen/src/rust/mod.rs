@@ -5,11 +5,17 @@ use oxdock_fs::{GuardedPath, PathResolver};
 
 use crate::io::read_text;
 
-/// Resolve a version string: explicit process env wins, otherwise fall
+/// Resolve a version string: explicit env wins, otherwise fall
 /// back to the workspace manifest. The source is always logged so the
-/// choice is visible, never magic.
-pub fn crate_version(root: &GuardedPath, resolver: &PathResolver) -> Result<String> {
-    if let Ok(value) = std::env::var("CRATE_VERSION")
+/// choice is visible, never magic. Callers pass the script-visible
+/// `CRATE_VERSION` (already inherited from the host); `None` or empty
+/// means unset and falls back to the manifest.
+pub fn crate_version_with_env(
+    root: &GuardedPath,
+    resolver: &PathResolver,
+    env_version: Option<String>,
+) -> Result<String> {
+    if let Some(value) = env_version
         && !value.is_empty()
     {
         eprintln!("using CRATE_VERSION={value} from the environment");
@@ -31,43 +37,6 @@ pub fn crate_version(root: &GuardedPath, resolver: &PathResolver) -> Result<Stri
 mod tests {
     use super::*;
 
-    /// Save/remove/restore one process variable around a test. Only this
-    /// module's test touches `CRATE_VERSION`, so no cross-test
-    /// serialization is needed.
-    struct EnvGuard {
-        key: &'static str,
-        previous: Option<String>,
-    }
-
-    impl EnvGuard {
-        fn remove(key: &'static str) -> Self {
-            let previous = std::env::var(key).ok();
-            unsafe {
-                std::env::remove_var(key);
-            }
-            Self { key, previous }
-        }
-
-        fn set(key: &'static str, value: &str) -> Self {
-            let previous = std::env::var(key).ok();
-            unsafe {
-                std::env::set_var(key, value);
-            }
-            Self { key, previous }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            unsafe {
-                match &self.previous {
-                    Some(value) => std::env::set_var(self.key, value),
-                    None => std::env::remove_var(self.key),
-                }
-            }
-        }
-    }
-
     #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
     fn fixture_root(manifest: &str) -> (oxdock_fs::GuardedTempDir, GuardedPath, PathResolver) {
         let temp = GuardedPath::tempdir().expect("tempdir");
@@ -86,23 +55,20 @@ mod tests {
         ignore = "fixture needs host tempdir and file IO, blocked by Miri isolation"
     )]
     fn env_value_wins_then_falls_back_to_manifest() {
-        // Single test (not two) so no parallel thread can race it on the
-        // shared process variable; the guard restores ambient state after.
         let (_temp, root, resolver) =
             fixture_root("[workspace.package]\nversion = \"0.10.0-alpha\"\n");
-        {
-            let _guard = EnvGuard::set("CRATE_VERSION", "9.9.9-test");
-            assert_eq!(
-                crate_version(&root, &resolver).expect("version"),
-                "9.9.9-test"
-            );
-        }
-        {
-            let _guard = EnvGuard::remove("CRATE_VERSION");
-            assert_eq!(
-                crate_version(&root, &resolver).expect("version"),
-                "0.10.0-alpha"
-            );
-        }
+        assert_eq!(
+            crate_version_with_env(&root, &resolver, Some("9.9.9-test".to_string()))
+                .expect("version"),
+            "9.9.9-test"
+        );
+        assert_eq!(
+            crate_version_with_env(&root, &resolver, None).expect("version"),
+            "0.10.0-alpha"
+        );
+        assert_eq!(
+            crate_version_with_env(&root, &resolver, Some(String::new())).expect("version"),
+            "0.10.0-alpha"
+        );
     }
 }

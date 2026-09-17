@@ -1,3 +1,4 @@
+IMPORT [STD]
 LET $status: INT = 200
 ASSERT_EQ $status 200
 WRITE payload.bin stable-content

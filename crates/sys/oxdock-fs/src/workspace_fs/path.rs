@@ -193,7 +193,8 @@ impl GuardedPath {
     }
 
     /// Evaluate a glob pattern against the sandbox root.
-    /// Normalizes backslashes, escapes the root path, and returns workspace-relative paths.
+    /// Normalizes backslashes, escapes the root path, and returns absolute
+    /// paths joined onto the guard root.
     /// Patterns are sandbox-root-relative; any `..` component is rejected
     /// up front (empty result, no filesystem traversal) so iteration can
     /// never start outside the root.

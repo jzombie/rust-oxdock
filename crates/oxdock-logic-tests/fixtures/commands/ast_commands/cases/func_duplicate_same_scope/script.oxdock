@@ -1,0 +1,6 @@
+FUNC DUP($x: STRING) {
+    RETURN $x
+}
+FUNC DUP($x: STRING) {
+    RETURN $x
+}

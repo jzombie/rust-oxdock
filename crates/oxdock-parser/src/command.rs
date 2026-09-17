@@ -38,37 +38,35 @@ pub enum ArgType {
 
 impl ArgType {
     /// Table-cell label for the argument table's Type column.
-    /// Canonical value types use a real [`crate::ast::TypeKind`] name.
+    /// Canonical value types use their descriptor names.
     /// Reference and assignment shapes (`$var`, `KEY=value`), inline
     /// alternations, and `ANY` render unlinked. Reference and assignment
     /// shapes display as the `STRING` values they bind or resolve to;
     /// the `$`/assignment requirement itself lives in the argument
     /// description and command syntax.
     pub fn label(&self) -> String {
-        use crate::ast::TypeKind;
         match self {
-            ArgType::String => TypeKind::String.label().to_string(),
-            ArgType::Path => TypeKind::Path.label().to_string(),
-            ArgType::Int => TypeKind::Int.label().to_string(),
-            ArgType::Duration => TypeKind::Duration.label().to_string(),
-            ArgType::Var => TypeKind::String.label().to_string(),
-            ArgType::KeyValue => TypeKind::String.label().to_string(),
+            ArgType::String => "STRING".to_string(),
+            ArgType::Path => "PATH".to_string(),
+            ArgType::Int => "INT".to_string(),
+            ArgType::Duration => "DURATION".to_string(),
+            ArgType::Var => "STRING".to_string(),
+            ArgType::KeyValue => "STRING".to_string(),
             ArgType::Any => "ANY".to_string(),
             ArgType::OneOf(options) => options.join("|"),
             ArgType::Rest(inner) => format!("{}...", inner.label()),
         }
     }
 
-    /// Anchor of the type's reference section, delegated to [`crate::ast::TypeKind`].
-    /// Only types with a `TypeKind` reference section link; argument shapes
-    /// (`$var`, `KEY=value`), inline alternations, and `ANY` render unlinked.
+    /// Anchor of the type's reference section. Only types with a value-type
+    /// reference section link; argument shapes (`$var`, `KEY=value`), inline
+    /// alternations, and `ANY` render unlinked.
     pub fn anchor(&self) -> Option<String> {
-        use crate::ast::TypeKind;
         match self {
-            ArgType::String => Some(TypeKind::String.anchor()),
-            ArgType::Path => Some(TypeKind::Path.anchor()),
-            ArgType::Int => Some(TypeKind::Int.anchor()),
-            ArgType::Duration => Some(TypeKind::Duration.anchor()),
+            ArgType::String => Some(crate::value::type_anchor("STRING")),
+            ArgType::Path => Some(crate::value::type_anchor("PATH")),
+            ArgType::Int => Some(crate::value::type_anchor("INT")),
+            ArgType::Duration => Some(crate::value::type_anchor("DURATION")),
             ArgType::Var => None,
             ArgType::KeyValue => None,
             ArgType::Any => None,
@@ -83,7 +81,7 @@ impl ArgType {
         match self {
             ArgType::String | ArgType::Path | ArgType::Any => Ok(()),
             ArgType::Int => literal
-                .parse::<i32>()
+                .parse::<i64>()
                 .map(|_| ())
                 .map_err(|_| anyhow!("expected int, got {literal:?}")),
             ArgType::Duration => parse_duration(literal).map(|_| ()),
@@ -342,14 +340,13 @@ pub enum FlagValueType {
 }
 
 impl FlagValueType {
-    /// Display label using the real [`crate::ast::TypeKind`] vocabulary. A bare `Flag`
+    /// Display label using the type vocabulary. A bare `Flag`
     /// switch carries no value; `BOOL` names what its presence asserts.
     pub fn label(&self) -> &'static str {
-        use crate::ast::TypeKind;
         match self {
-            FlagValueType::Flag => TypeKind::Bool.label(),
-            FlagValueType::String => TypeKind::String.label(),
-            FlagValueType::Int => TypeKind::Int.label(),
+            FlagValueType::Flag => "BOOL",
+            FlagValueType::String => "STRING",
+            FlagValueType::Int => "INT",
         }
     }
 }

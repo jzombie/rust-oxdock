@@ -4,7 +4,10 @@ use oxdock_fs::{GuardedPath, PathResolver};
 use oxdock_parser::Value;
 use std::collections::BTreeMap;
 fn run_script(root: &GuardedPath, script: &str) -> Result<(), anyhow::Error> {
-    let steps = oxdock_core::parse_script(script).expect("parse script");
+    // File-local scripts call `STD` builtins; the import is fixture,
+    // not subject: `IMPORT` semantics are covered in `import.rs`.
+    let steps =
+        oxdock_core::parse_script(&format!("IMPORT [STD]\n{script}")).expect("parse script");
     run_steps_with_context_result_with_io(root, root, &steps, ExecIo::new()).map(|_| ())
 }
 
@@ -12,7 +15,10 @@ fn run_script_with_scope(
     root: &GuardedPath,
     script: &str,
 ) -> Result<BTreeMap<String, Value>, anyhow::Error> {
-    let steps = oxdock_core::parse_script(script).expect("parse script");
+    // File-local scripts call `STD` builtins; the import is fixture,
+    // not subject: `IMPORT` semantics are covered in `import.rs`.
+    let steps =
+        oxdock_core::parse_script(&format!("IMPORT [STD]\n{script}")).expect("parse script");
     let resolver = PathResolver::new_guarded(root.clone(), root.clone())?;
     let (_cwd, _fs, bindings) = oxdock_core::run_steps_with_manager(
         Box::new(resolver),
@@ -28,7 +34,10 @@ fn run_script_captured_pipe(
     script: &str,
     pipe: &str,
 ) -> Result<String, anyhow::Error> {
-    let steps = oxdock_core::parse_script(script).expect("parse script");
+    // File-local scripts call `STD` builtins; the import is fixture,
+    // not subject: `IMPORT` semantics are covered in `import.rs`.
+    let steps =
+        oxdock_core::parse_script(&format!("IMPORT [STD]\n{script}")).expect("parse script");
     let captured: std::sync::Arc<std::sync::Mutex<Vec<u8>>> =
         std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let mut io_cfg = ExecIo::new();
@@ -104,13 +113,15 @@ fn parser_single_dollar_is_variable_not_key_path() {
 
 #[test]
 fn parser_load_toml_in_let() {
-    let steps = oxdock_core::parse_script("LET $d: MAP = LOAD_TOML(\"x.toml\")").unwrap();
+    let steps =
+        oxdock_core::parse_script("IMPORT [STD]\nLET $d: MAP = LOAD_TOML(\"x.toml\")").unwrap();
     assert_eq!(steps.len(), 1);
 }
 
 #[test]
 fn parser_load_json_in_let() {
-    let steps = oxdock_core::parse_script("LET $d: MAP = LOAD_JSON(\"x.json\")").unwrap();
+    let steps =
+        oxdock_core::parse_script("IMPORT [STD]\nLET $d: MAP = LOAD_JSON(\"x.json\")").unwrap();
     assert_eq!(steps.len(), 1);
 }
 
@@ -133,8 +144,8 @@ fn load_toml_flat_keys() {
     "#},
     )
     .unwrap();
-    assert_eq!(scope["a"], Value::String("1".to_string()));
-    assert_eq!(scope["b"], Value::String("2".to_string()));
+    assert_eq!(scope["a"], Value::string("1".to_string()));
+    assert_eq!(scope["b"], Value::string("2".to_string()));
 }
 
 #[test]
@@ -151,7 +162,7 @@ fn load_toml_nested_tables() {
     "#},
     )
     .unwrap();
-    assert_eq!(scope["v"], Value::String("deep".to_string()));
+    assert_eq!(scope["v"], Value::string("deep".to_string()));
 }
 
 #[test]
@@ -170,9 +181,9 @@ fn load_toml_array_of_strings() {
     "#},
     )
     .unwrap();
-    assert_eq!(scope["v0"], Value::String("a".to_string()));
-    assert_eq!(scope["v1"], Value::String("b".to_string()));
-    assert_eq!(scope["v2"], Value::String("c".to_string()));
+    assert_eq!(scope["v0"], Value::string("a".to_string()));
+    assert_eq!(scope["v1"], Value::string("b".to_string()));
+    assert_eq!(scope["v2"], Value::string("c".to_string()));
 }
 
 #[test]
@@ -189,7 +200,7 @@ fn load_toml_integer_becomes_string() {
     "#},
     )
     .unwrap();
-    assert_eq!(scope["v"], Value::Int(42));
+    assert_eq!(scope["v"], Value::int(42));
 }
 
 #[test]
@@ -206,7 +217,7 @@ fn load_toml_boolean_becomes_string() {
     "#},
     )
     .unwrap();
-    assert_eq!(scope["v"], Value::Bool(true));
+    assert_eq!(scope["v"], Value::bool(true));
 }
 
 #[test]
@@ -224,7 +235,7 @@ fn load_toml_empty_table() {
     )
     .unwrap();
     // Empty table binds as an empty map
-    assert_eq!(scope["v"], Value::Map(Default::default()));
+    assert_eq!(scope["v"], Value::map(Default::default()));
 }
 
 #[test]
@@ -262,7 +273,7 @@ fn load_json_flat_object() {
     "#},
     )
     .unwrap();
-    assert_eq!(scope["v"], Value::String("val".to_string()));
+    assert_eq!(scope["v"], Value::string("val".to_string()));
 }
 
 #[test]
@@ -279,7 +290,7 @@ fn load_json_nested_object() {
     "#},
     )
     .unwrap();
-    assert_eq!(scope["v"], Value::String("deep".to_string()));
+    assert_eq!(scope["v"], Value::string("deep".to_string()));
 }
 
 #[test]
@@ -298,9 +309,9 @@ fn load_json_array() {
     "#},
     )
     .unwrap();
-    assert_eq!(scope["v0"], Value::Int(10));
-    assert_eq!(scope["v1"], Value::Int(20));
-    assert_eq!(scope["v2"], Value::Int(30));
+    assert_eq!(scope["v0"], Value::int(10));
+    assert_eq!(scope["v1"], Value::int(20));
+    assert_eq!(scope["v2"], Value::int(30));
 }
 
 #[test]
@@ -317,7 +328,7 @@ fn load_json_boolean() {
     "#},
     )
     .unwrap();
-    assert_eq!(scope["v"], Value::Bool(true));
+    assert_eq!(scope["v"], Value::bool(true));
 }
 
 #[test]
@@ -334,7 +345,7 @@ fn load_json_null_becomes_empty_string() {
     "#},
     )
     .unwrap();
-    assert_eq!(scope["v"], Value::String(String::new()));
+    assert_eq!(scope["v"], Value::string(String::new()));
 }
 
 #[test]
@@ -372,7 +383,7 @@ fn key_path_resolves_top_level_field() {
     "#},
     )
     .unwrap();
-    assert_eq!(scope["v"], Value::String("hello".to_string()));
+    assert_eq!(scope["v"], Value::string("hello".to_string()));
 }
 
 #[test]
@@ -389,7 +400,7 @@ fn key_path_resolves_nested_field() {
     "#},
     )
     .unwrap();
-    assert_eq!(scope["v"], Value::String("nested".to_string()));
+    assert_eq!(scope["v"], Value::string("nested".to_string()));
 }
 
 #[test]
@@ -406,7 +417,7 @@ fn key_path_deeply_nested() {
     "#},
     )
     .unwrap();
-    assert_eq!(scope["v"], Value::String("deep".to_string()));
+    assert_eq!(scope["v"], Value::string("deep".to_string()));
 }
 
 #[test]
@@ -424,8 +435,8 @@ fn key_path_array_index() {
     "#},
     )
     .unwrap();
-    assert_eq!(scope["v0"], Value::String("x".to_string()));
-    assert_eq!(scope["v2"], Value::String("z".to_string()));
+    assert_eq!(scope["v0"], Value::string("x".to_string()));
+    assert_eq!(scope["v2"], Value::string("z".to_string()));
 }
 
 #[test]
@@ -514,7 +525,7 @@ fn key_path_with_underscore_key() {
     "#},
     )
     .unwrap();
-    assert_eq!(scope["v"], Value::String("secret".to_string()));
+    assert_eq!(scope["v"], Value::string("secret".to_string()));
 }
 
 // ============================================================================
@@ -638,7 +649,7 @@ fn dollar_var_resolves_string() {
     "#},
     )
     .unwrap();
-    assert_eq!(scope["name"], Value::String("world".to_string()));
+    assert_eq!(scope["name"], Value::string("world".to_string()));
 }
 
 #[test]
@@ -705,8 +716,8 @@ fn multiple_dollar_vars_in_string() {
     "#},
     )
     .unwrap();
-    assert_eq!(scope["a"], Value::String("hello".to_string()));
-    assert_eq!(scope["b"], Value::String("world".to_string()));
+    assert_eq!(scope["a"], Value::string("hello".to_string()));
+    assert_eq!(scope["b"], Value::string("world".to_string()));
 }
 
 // ============================================================================
@@ -1030,6 +1041,7 @@ fn for_map_iteration_sorted_keys() {
     );
 
     let steps = oxdock_core::parse_script(indoc! {r#"
+        IMPORT [STD]
         LET $d: MAP = LOAD_TOML("data.toml")
         FOR $k: STRING, $v: STRING IN $d.settings {
             WRITE "{{ $k }}.txt" "{{ $v }}"
@@ -1062,6 +1074,7 @@ fn for_map_iteration_echo_stdout() {
     );
 
     let steps = oxdock_core::parse_script(indoc! {r#"
+        IMPORT [STD]
         LET $d: MAP = LOAD_TOML("data.toml")
         FOR $k: STRING, $v: STRING IN $d.settings {
             ECHO "{{ $k }} = {{ $v }}"
@@ -1144,7 +1157,7 @@ fn comparison_equal_produces_bool() {
     "#},
     )
     .unwrap();
-    assert_eq!(scope["eq"], Value::Bool(true));
+    assert_eq!(scope["eq"], Value::bool(true));
 }
 
 #[test]
@@ -1159,7 +1172,7 @@ fn comparison_not_equal_produces_bool() {
     "#},
     )
     .unwrap();
-    assert_eq!(scope["ne"], Value::Bool(true));
+    assert_eq!(scope["ne"], Value::bool(true));
 }
 
 #[test]
@@ -1176,7 +1189,7 @@ fn comparison_key_path() {
     "#},
     )
     .unwrap();
-    assert_eq!(scope["eq"], Value::Bool(true));
+    assert_eq!(scope["eq"], Value::bool(true));
 }
 
 #[test]
@@ -1229,7 +1242,7 @@ fn logical_or_short_circuit() {
     "#},
     )
     .unwrap();
-    assert_eq!(scope["either"], Value::Bool(true));
+    assert_eq!(scope["either"], Value::bool(true));
 }
 
 #[test]
@@ -1245,7 +1258,7 @@ fn logical_or_right_side_evaluated_when_left_false() {
     "#},
     )
     .unwrap();
-    assert_eq!(scope["either"], Value::Bool(true));
+    assert_eq!(scope["either"], Value::bool(true));
 }
 
 // ============================================================================
@@ -1264,7 +1277,7 @@ fn if_then_branch() {
     "#},
     )
     .unwrap();
-    assert_eq!(scope["eq"], Value::Bool(true));
+    assert_eq!(scope["eq"], Value::bool(true));
 }
 
 #[test]
@@ -1306,7 +1319,7 @@ fn if_compound_condition() {
     "#},
     )
     .unwrap();
-    assert_eq!(scope["ok"], Value::Bool(true));
+    assert_eq!(scope["ok"], Value::bool(true));
 }
 
 #[test]
@@ -1322,7 +1335,7 @@ fn if_precedence_override() {
     "#},
     )
     .unwrap();
-    assert_eq!(scope["ok"], Value::Bool(true));
+    assert_eq!(scope["ok"], Value::bool(true));
 }
 
 #[test]
@@ -1407,7 +1420,7 @@ fn if_bool_from_json_is_native() {
     "#},
     )
     .unwrap();
-    assert_eq!(scope["v"], Value::Bool(true));
+    assert_eq!(scope["v"], Value::bool(true));
 }
 
 #[test]
@@ -1424,5 +1437,5 @@ fn if_bool_from_toml_is_native() {
     "#},
     )
     .unwrap();
-    assert_eq!(scope["v"], Value::Bool(true));
+    assert_eq!(scope["v"], Value::bool(true));
 }

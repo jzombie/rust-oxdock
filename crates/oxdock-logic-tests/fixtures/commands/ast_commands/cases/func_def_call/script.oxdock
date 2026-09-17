@@ -2,5 +2,5 @@ FUNC GREET($name: STRING) {
     ECHO "hi {{ $name }}"
     RETURN $name
 }
-CALL GREET("ada")
+GREET("ada")
 ASSERT_CONTAINS stdout "hi ada"

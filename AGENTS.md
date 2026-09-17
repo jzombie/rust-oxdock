@@ -64,3 +64,5 @@ Prefer explicit, test-only skips over runtime detection.
 
 - **Autonomy**: When test failures are reported or observed, proceed to investigate and fix them without asking for confirmation unless there are multiple viable options or the change is risky/behavior-altering.
 - **Formatting**: Use `indoc` for multi-line Rust string literals in tests or fixtures when formatting clarity matters.
+- **Doc examples execute**: every Rust fence in templates must compile and run as a doctest. Never mark a fence `ignore`/`text` to dodge a non-compiling sketch. If an example cannot stand alone, inline what it needs or delete it.
+- **DSL scripts read as DSL**: runnable doc examples build scripts with the `oxdock!` macro (compile-time DSL tokens), never `\n`-joined string continuations. Exceptions, each with a reason: `oxdock-core`'s own doctests cannot use `oxdock!` (dependency cycle: the macro crate depends on core), and parse-error demos must feed strings to the parser (a compile-time macro cannot produce a runtime parse failure). Everywhere else, multi-line strings go in `indoc` raw blocks (`indoc::indoc! {r#"..."#}`).

@@ -29,6 +29,7 @@ fn macro_nested_arithmetic_folds_and_runs() {
 fn macro_dynamic_rpn_matches_runtime() {
     // RPN path through `emit_math_op`: vars, call, ordering, Inspect op.
     let steps = oxdock! {
+        IMPORT [STD]
         LET $size_str: STRING = ECHO 14
         LET $total: INT = INT($size_str) + 1
         LET $ratio: FLOAT = 1 + ($total * (2.5 - (4 / 2)))
@@ -53,6 +54,7 @@ fn macro_emitted_steps_equal_parsed_steps() {
     // Emit fidelity: macro expansion must equal runtime parsing, including
     // CompiledMath, Arithmetic fallback, calls, and Inspect ops.
     let via_macro = oxdock! {
+        IMPORT [STD]
         LET $t: INT = $total + INT($size_str)
         LET $ok: BOOL = INSPECT($p) == INSPECT($p)
         LET $n: INT = -$v * 2
@@ -61,7 +63,7 @@ fn macro_emitted_steps_equal_parsed_steps() {
         }
     };
     let via_parse = oxdock_core::parse_script(
-        "LET $t: INT = $total + INT($size_str)\nLET $ok: BOOL = INSPECT($p) == INSPECT($p)\nLET $n: INT = -$v * 2\nIF $t >= 10 {\nECHO big\n}\n",
+        "IMPORT [STD]\nLET $t: INT = $total + INT($size_str)\nLET $ok: BOOL = INSPECT($p) == INSPECT($p)\nLET $n: INT = -$v * 2\nIF $t >= 10 {\nECHO big\n}\n",
     )
     .unwrap();
     assert_eq!(via_macro, via_parse);

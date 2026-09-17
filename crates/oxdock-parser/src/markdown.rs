@@ -88,6 +88,14 @@ pub fn extract_fenced_blocks(markdown: &str, lang: &str) -> Result<Vec<FencedBlo
     Ok(blocks)
 }
 
+/// Extract the `expect_error` needle from a fence info string such as
+/// `oxdock expect_error:"boom"`. Returns `None` when the key is absent.
+/// Malformed metadata errors, exactly like fenced-block extraction, so
+/// generators and runners agree on what a fence means.
+pub fn expect_error_from_info(info: &str) -> Result<Option<String>> {
+    Ok(parse_metadata(info, 0)?.expect_error)
+}
+
 fn skip_token(info: &str) -> &str {
     let first = info.split_whitespace().next().unwrap_or("");
     info.trim_start()[first.len()..].trim_start()
@@ -266,6 +274,23 @@ mod tests {
         let err =
             extract_fenced_blocks("```oxdock\nECHO x\n", "oxdock").expect_err("unclosed fence");
         assert!(err.to_string().contains("never closed"));
+    }
+
+    #[test]
+    fn expect_error_needle_reads_from_info_string() {
+        assert_eq!(
+            expect_error_from_info("oxdock expect_error:\"undefined variable\"")
+                .expect("parse")
+                .as_deref(),
+            Some("undefined variable")
+        );
+        assert_eq!(
+            expect_error_from_info("oxdock roots:unified")
+                .expect("parse")
+                .as_deref(),
+            None
+        );
+        assert!(expect_error_from_info("oxdock expect_error").is_err());
     }
 
     #[test]

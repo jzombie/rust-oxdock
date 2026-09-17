@@ -5,7 +5,7 @@ use oxdock_parser::{lower_command, parse_script};
 use crate::common::mock_lower;
 
 fn parse_prod(script: &str) -> Vec<oxdock_parser::Step> {
-    parse_script(script, lower_command).expect("parse with production lower")
+    crate::common::parse_with_math(script, lower_command).expect("parse with production lower")
 }
 
 fn single_kind(script: &str) -> StepKind {
@@ -21,11 +21,11 @@ fn run_exec_form_parses_quoted_list() {
             assert_eq!(argv.len(), 2);
             assert_eq!(
                 argv[0],
-                Arg::Expr(Expr::Literal(Value::String("echo".to_string())))
+                Arg::Expr(Expr::Literal(Value::string("echo".to_string())))
             );
             assert_eq!(
                 argv[1],
-                Arg::Expr(Expr::Literal(Value::String("hi".to_string())))
+                Arg::Expr(Expr::Literal(Value::string("hi".to_string())))
             );
         }
         other => panic!("expected RunExec, got {other:?}"),
@@ -42,7 +42,7 @@ fn run_exec_form_allows_no_spaces_and_single_quotes() {
         StepKind::RunExec { argv } => {
             assert_eq!(
                 argv[0],
-                Arg::Expr(Expr::Literal(Value::String("echo".to_string())))
+                Arg::Expr(Expr::Literal(Value::string("echo".to_string())))
             );
         }
         other => panic!("expected RunExec, got {other:?}"),
@@ -58,11 +58,11 @@ fn run_exec_form_supports_typed_elements() {
         StepKind::RunExec { argv } => {
             assert_eq!(argv.len(), 5);
             assert!(matches!(&argv[1], Arg::Expr(Expr::Var(name)) if name == "name"));
-            assert_eq!(argv[2], Arg::Expr(Expr::Literal(Value::Int(3))));
-            assert_eq!(argv[3], Arg::Expr(Expr::Literal(Value::Bool(true))));
+            assert_eq!(argv[2], Arg::Expr(Expr::Literal(Value::int(3))));
+            assert_eq!(argv[3], Arg::Expr(Expr::Literal(Value::bool(true))));
             assert_eq!(
                 argv[4],
-                Arg::Expr(Expr::Literal(Value::String("{{ env:FOO }}".to_string())))
+                Arg::Expr(Expr::Literal(Value::string("{{ env:FOO }}".to_string())))
             );
         }
         other => panic!("expected RunExec, got {other:?}"),
@@ -77,7 +77,7 @@ fn run_exec_form_supports_keypath_and_call_elements() {
             assert!(
                 matches!(&argv[1], Arg::Expr(Expr::KeyPath { base, keys }) if base == "a" && keys == &["b".to_string()])
             );
-            assert!(matches!(&argv[2], Arg::Expr(Expr::Call { name, .. }) if name == "GLOB"));
+            assert!(matches!(&argv[2], Arg::Expr(Expr::Call { name, .. }) if name == "MATH::GLOB"));
         }
         other => panic!("expected RunExec, got {other:?}"),
     }
@@ -90,7 +90,7 @@ fn run_exec_form_preserves_backslash_escapes_verbatim() {
         StepKind::RunExec { argv } => {
             assert_eq!(
                 argv[0],
-                Arg::Expr(Expr::Literal(Value::String("a\\\"b\\\\c".to_string())))
+                Arg::Expr(Expr::Literal(Value::string("a\\\"b\\\\c".to_string())))
             );
         }
         other => panic!("expected RunExec, got {other:?}"),
@@ -109,7 +109,7 @@ fn run_exec_form_keeps_shell_metachars_literal() {
         StepKind::RunExec { argv } => {
             assert_eq!(
                 argv[1],
-                Arg::Expr(Expr::Literal(Value::String("a; b // c".to_string())))
+                Arg::Expr(Expr::Literal(Value::string("a; b // c".to_string())))
             );
         }
         other => panic!("expected RunExec, got {other:?}"),

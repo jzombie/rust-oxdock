@@ -19,7 +19,7 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
         RETURN $name
     }
     FOR $name: STRING IN ["alpha", "beta"] {
-        CALL STAMP($name)
+        STAMP($name)
     }
     FUNC PICK($flag: BOOL) {
         IF $flag {
@@ -27,7 +27,7 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
         }
         RETURN "beta"
     }
-    LET $picked: STRING = CALL PICK(true)
+    LET $picked: STRING = PICK(true)
     WRITE dist/picked.txt \{{ $picked }}
     LET $a: STRING = READ dist/alpha.txt
     LET $b: STRING = READ dist/beta.txt
@@ -64,6 +64,7 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     WITH_IO [stdout=pipe:log] ECHO "built \{{ env:PROJECT }}"
     WITH_IO [stdin=pipe:log] READ_LINE $line
     WRITE dist/build.txt "\{{ $line }}"
+    IMPORT [STD]
     FOR $f: STRING IN GLOB("dist/*.txt") {
         EXPAND $f
     }
@@ -87,3 +88,5 @@ assert_eq!(
 ```
 
 The top level runners need the default `cli` feature. With `--no-default-features`, run the same steps through `oxdock::oxdock_core::run_steps_*` instead.
+
+Scripts that call host functions declare their modules up front: the macro parses at compile time with only `STD` known, so `modules: [DEMO],` as the first line makes `IMPORT [DEMO]` and `DEMO::...` calls resolve (membership is checked at runtime). Scripts using only `STD` and `SCRIPT` functions omit it. See [Extending OxDock from Rust](#extending-oxdock-from-rust) for the complete example.

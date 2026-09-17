@@ -6,12 +6,19 @@
 //! The reference's fenced examples use `oxdock …` info strings consumed
 //! by the docs-conformance harness (not Rust code), which rustdoc
 //! legitimately flags — hence the targeted allow below.
+//!
+//! The `oxdock_parser` self-alias lets `#[oxdock_type]`-generated code
+//! inside this crate resolve `::oxdock_parser::` paths exactly like
+//! downstream crates do.
 #![allow(rustdoc::invalid_codeblock_attributes)]
 #![doc = include_str!("../docs/command_reference.md")]
+
+extern crate self as oxdock_parser;
 
 pub mod ast;
 pub mod command;
 pub mod commands;
+pub mod constants;
 pub mod error;
 mod lexer;
 #[cfg(feature = "proc-macro-api")]
@@ -19,6 +26,7 @@ mod macro_input;
 pub mod markdown;
 pub mod parser;
 pub mod strip_flags;
+pub mod value;
 
 pub use ast::*;
 pub use command::{
@@ -26,14 +34,18 @@ pub use command::{
     Stream,
 };
 pub use commands::{all_metadata, all_structural_metadata, lower_command};
+pub use constants::*;
 pub use error::{ParseError, ParseErrorKind, ParseResult, SpanContext};
 pub use lexer::LANGUAGE_SPEC;
 #[cfg(feature = "proc-macro-api")]
 pub use macro_input::{
     DslMacroInput, ScriptSource, parse_braced_tokens, script_from_braced_tokens,
+    split_modules_prefix,
 };
-pub use markdown::{BlockMetadata, FencedBlock, extract_fenced_blocks};
-pub use parser::{parse_guard_expr_str, parse_script};
+pub use markdown::{BlockMetadata, FencedBlock, expect_error_from_info, extract_fenced_blocks};
+pub use parser::{
+    parse_guard_expr_str, parse_script, parse_script_with_modules, parse_script_with_preseed,
+};
 pub use strip_flags::strip_flags;
 
 /// Shared mock lowering for parser tests.
@@ -618,7 +630,7 @@ mod tests {
                 expr,
             } => {
                 assert_eq!(var, "x");
-                assert_eq!(expr, &Expr::Literal(Value::String("hello".to_string())));
+                assert_eq!(expr, &Expr::Literal(Value::string("hello".to_string())));
             }
             other => panic!("expected Assign, got {:?}", other),
         }
@@ -638,7 +650,7 @@ mod tests {
                 assert_eq!(var, "x");
                 assert_eq!(
                     expr,
-                    &Expr::Literal(Value::String("hello world".to_string()))
+                    &Expr::Literal(Value::string("hello world".to_string()))
                 );
             }
             other => panic!("expected Assign, got {:?}", other),
@@ -660,9 +672,9 @@ mod tests {
                 assert_eq!(
                     expr,
                     &Expr::List(vec![
-                        Expr::Literal(Value::String("a".to_string())),
-                        Expr::Literal(Value::String("b".to_string())),
-                        Expr::Literal(Value::String("c".to_string()))
+                        Expr::Literal(Value::string("a".to_string())),
+                        Expr::Literal(Value::string("b".to_string())),
+                        Expr::Literal(Value::string("c".to_string()))
                     ])
                 );
             }
@@ -710,8 +722,8 @@ mod tests {
                 assert_eq!(
                     in_expr,
                     &Expr::List(vec![
-                        Expr::Literal(Value::String("x".to_string())),
-                        Expr::Literal(Value::String("y".to_string()))
+                        Expr::Literal(Value::string("x".to_string())),
+                        Expr::Literal(Value::string("y".to_string()))
                     ])
                 );
                 assert_eq!(body.len(), 1);
@@ -792,7 +804,7 @@ mod tests {
                 expr,
             } => {
                 assert_eq!(var, "x");
-                assert_eq!(expr, &Expr::Not(Box::new(Expr::Literal(Value::Bool(true)))));
+                assert_eq!(expr, &Expr::Not(Box::new(Expr::Literal(Value::bool(true)))));
             }
             other => panic!("expected Assign, got {:?}", other),
         }
@@ -803,7 +815,7 @@ mod tests {
             StepKind::Assign { expr, .. } => {
                 assert_eq!(
                     expr,
-                    &Expr::Not(Box::new(Expr::Not(Box::new(Expr::Literal(Value::Bool(
+                    &Expr::Not(Box::new(Expr::Not(Box::new(Expr::Literal(Value::bool(
                         false
                     ))))))
                 );
@@ -1016,9 +1028,9 @@ mod tests {
                 ..
             } => {
                 assert_eq!(key_var.as_deref(), Some("i"));
-                assert_eq!(*key_type, Some(crate::TypeKind::Int));
+                assert_eq!(*key_type, Some("INT".to_string()));
                 assert_eq!(var, "v");
-                assert_eq!(*var_type, crate::TypeKind::String);
+                assert_eq!(*var_type, "STRING".to_string());
             }
             other => panic!("expected For, got {:?}", other),
         }

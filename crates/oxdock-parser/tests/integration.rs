@@ -15,6 +15,8 @@ mod env_display;
 mod error_kinds;
 #[path = "integration/guard_tests.rs"]
 mod guard_tests;
+#[path = "integration/import.rs"]
+mod import;
 #[path = "integration/inherit_env.rs"]
 mod inherit_env;
 #[path = "integration/invalid_env_inversion.rs"]

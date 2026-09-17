@@ -7,6 +7,8 @@
 mod arithmetic;
 #[path = "integration/commands.rs"]
 mod commands;
+#[path = "integration/custom_types.rs"]
+mod custom_types;
 #[path = "integration/glob_sandbox.rs"]
 mod glob_sandbox;
 #[path = "integration/guard_isolation.rs"]
@@ -19,6 +21,8 @@ mod key_path;
 mod let_capture;
 #[path = "integration/phase_boundary.rs"]
 mod phase_boundary;
+#[path = "integration/reference_examples.rs"]
+mod reference_examples;
 #[path = "integration/unified_values.rs"]
 mod unified_values;
 #[path = "integration/unquoted_syntax.rs"]

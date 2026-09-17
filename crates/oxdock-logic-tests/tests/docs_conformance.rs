@@ -3,27 +3,44 @@ use line_ending::LineEnding;
 use oxdock_core::{ExecIo, run_steps_with_context_result_with_io};
 use oxdock_fs::{GuardedPath, PathResolver};
 use oxdock_parser::{COMMANDS, FencedBlock, extract_fenced_blocks};
+use std::collections::HashSet;
 
 const README_NAME: &str = "README.md";
+const OXDOCK_README_NAME: &str = "oxdock/README.md";
+const CRATE_DOCS_NAME: &str = "oxdock/docs/crate_docs.md";
 
-fn load_readme_markdown() -> Result<String> {
+/// Documents under conformance: the workspace README carries the full
+/// command reference, the `oxdock` README mirrors the shared sections
+/// without bundling it, and the crate docs feed rustdoc.
+const FENCE_DOCUMENTS: &[&str] = &[README_NAME, OXDOCK_README_NAME];
+const ANCHOR_DOCUMENTS: &[&str] = &[README_NAME, OXDOCK_README_NAME, CRATE_DOCS_NAME];
+
+fn repo_root() -> Result<String> {
     // Normalize separators first: Windows CARGO_MANIFEST_DIR uses backslashes.
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
         .context("CARGO_MANIFEST_DIR missing")?
         .replace('\\', "/");
-    let repo_root = manifest_dir
+    Ok(manifest_dir
         .strip_suffix("crates/oxdock-logic-tests")
         .context("test must live under crates/oxdock-logic-tests")?
         .trim_end_matches('/')
-        .to_string();
+        .to_string())
+}
+
+fn load_markdown(name: &str) -> Result<String> {
+    let repo_root = repo_root()?;
     let root = GuardedPath::new_root_from_str(&repo_root)?;
     let resolver = PathResolver::new_guarded(root.clone(), root)?;
-    let readme_path = resolver.root().join(README_NAME)?;
+    let readme_path = resolver.root().join(name)?;
     resolver.read_to_string(&readme_path)
 }
 
+fn load_blocks(name: &str) -> Result<Vec<FencedBlock>> {
+    extract_fenced_blocks(&load_markdown(name)?, "oxdock")
+}
+
 fn load_readme_blocks() -> Result<Vec<FencedBlock>> {
-    extract_fenced_blocks(&load_readme_markdown()?, "oxdock")
+    load_blocks(README_NAME)
 }
 
 /// True when `keyword` occurs in `haystack` with non-identifier boundaries.
@@ -44,6 +61,70 @@ fn contains_keyword(haystack: &str, keyword: &str) -> bool {
         start = abs + 1;
     }
     false
+}
+
+/// Lines outside fenced blocks: headings and links inside fences are
+/// examples, not document structure.
+fn prose_lines(markdown: &str) -> Vec<(usize, &str)> {
+    let mut out = Vec::new();
+    let mut fenced = false;
+    for (idx, line) in markdown.lines().enumerate() {
+        if line.trim_start().starts_with("```") {
+            fenced = !fenced;
+            continue;
+        }
+        if !fenced {
+            out.push((idx + 1, line));
+        }
+    }
+    out
+}
+
+/// GitHub-style heading slug: lowercase, punctuation dropped (underscores
+/// kept), spaces become hyphens.
+fn slugify(heading: &str) -> String {
+    heading
+        .trim()
+        .trim_end_matches('#')
+        .trim()
+        .to_lowercase()
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == ' ' || *c == '-' || *c == '_')
+        .collect::<String>()
+        .replace(' ', "-")
+}
+
+fn heading_slugs(markdown: &str) -> HashSet<String> {
+    prose_lines(markdown)
+        .into_iter()
+        .filter_map(|(_, line)| {
+            let hashes = line.trim_start().chars().take_while(|c| *c == '#').count();
+            let rest = &line.trim_start()[hashes.min(line.trim_start().len())..];
+            if (1..=6).contains(&hashes) && rest.starts_with(' ') {
+                Some(slugify(rest))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Pure in-page anchor targets (`](#slug)`), with 1-based line numbers.
+fn anchor_targets(markdown: &str) -> Vec<(usize, String)> {
+    let mut out = Vec::new();
+    for (line_no, line) in prose_lines(markdown) {
+        let mut scanned = line;
+        while let Some(pos) = scanned.find("](#") {
+            let after = &scanned[pos + 3..];
+            if let Some(close) = after.find(')') {
+                out.push((line_no, after[..close].to_string()));
+                scanned = &after[close..];
+            } else {
+                break;
+            }
+        }
+    }
+    out
 }
 
 #[test]
@@ -91,80 +172,119 @@ fn readme_snippets_parse_and_cover_every_command() -> Result<()> {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "requires CARGO_MANIFEST_DIR and host filesystem for README resolution"
+)]
+fn oxdock_readme_snippets_parse() -> Result<()> {
+    // The `oxdock` README mirrors the shared sections without bundling the
+    // full command reference, so per-command coverage stays workspace-only;
+    // every snippet here must still parse.
+    let blocks = load_blocks(OXDOCK_README_NAME)?;
+    assert!(
+        blocks.len() >= 10,
+        "expected ```oxdock examples in {OXDOCK_README_NAME}, found {}",
+        blocks.len()
+    );
+
+    for block in &blocks {
+        oxdock_core::parse_script(&block.body).map_err(|e| {
+            anyhow::anyhow!(
+                "{OXDOCK_README_NAME}:{0}: snippet failed to parse: {e}",
+                block.line_no
+            )
+        })?;
+    }
+    Ok(())
+}
+
+#[test]
 #[cfg_attr(miri, ignore = "requires the repository checkout layout")]
 fn readme_references_resolve() -> Result<()> {
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
-        .context("CARGO_MANIFEST_DIR missing")?
-        .replace('\\', "/");
-    let repo_root_str = manifest_dir
-        .strip_suffix("crates/oxdock-logic-tests")
-        .context("test must live under crates/oxdock-logic-tests")?
-        .trim_end_matches('/')
-        .to_string();
+    let repo_root_str = repo_root()?;
     let root = GuardedPath::new_root_from_str(&repo_root_str)?;
     let resolver = PathResolver::new_guarded(root.clone(), root.clone())?;
-    let markdown = load_readme_markdown()?;
+    for name in FENCE_DOCUMENTS {
+        let markdown = load_markdown(name)?;
 
-    // Every relative Markdown link target must exist on disk. Anchors are
-    // stripped first; targets that are pure anchors are skipped.
-    let mut scanned = &markdown[..];
-    while let Some(pos) = scanned.find("](") {
-        let after = &scanned[pos + 2..];
-        let Some(close) = after.find(')') else {
-            bail!("unterminated link target near: {after:.60}");
-        };
-        let raw_target = &after[..close];
-        scanned = &after[close..];
+        // Every relative Markdown link target must exist on disk. Anchors are
+        // stripped first; targets that are pure anchors are skipped here and
+        // pinned by `readme_anchors_resolve` instead.
+        let mut scanned = &markdown[..];
+        while let Some(pos) = scanned.find("](") {
+            let after = &scanned[pos + 2..];
+            let Some(close) = after.find(')') else {
+                bail!("unterminated link target near: {after:.60}");
+            };
+            let raw_target = &after[..close];
+            scanned = &after[close..];
 
-        if raw_target.starts_with("http://")
-            || raw_target.starts_with("https://")
-            || raw_target.starts_with("mailto:")
-        {
-            continue;
+            if raw_target.starts_with("http://")
+                || raw_target.starts_with("https://")
+                || raw_target.starts_with("mailto:")
+            {
+                continue;
+            }
+            // Drop Markdown title attributes, then anchors, then ./ prefixes.
+            let raw_path = raw_target.split_whitespace().next().unwrap_or_default();
+            let target = raw_path
+                .split('#')
+                .next()
+                .unwrap_or_default()
+                .trim_start_matches("./");
+            if target.is_empty() {
+                continue;
+            }
+            let candidate = root
+                .join(target)
+                .with_context(|| format!("link target '{raw_target}'"))?;
+            assert!(
+                resolver.entry_kind(&candidate).is_ok(),
+                "{name}: broken relative link '{raw_target}' (resolved {candidate})",
+                candidate = candidate.display()
+            );
         }
-        // Drop Markdown title attributes, then anchors, then ./ prefixes.
-        let raw_path = raw_target.split_whitespace().next().unwrap_or_default();
-        let target = raw_path
-            .split('#')
-            .next()
-            .unwrap_or_default()
-            .trim_start_matches("./");
-        if target.is_empty() {
-            continue;
+
+        // Bash fences: referenced repo scripts and --path packages must exist.
+        for block in extract_fenced_blocks(&markdown, "bash")? {
+            let mut previous: Option<&str> = None;
+            for raw_token in block.body.split_whitespace() {
+                // Strip trailing shell syntax before path checks.
+                let token = raw_token.trim_matches(|c| matches!(c, ';' | ')' | '"' | '\''));
+                if let Some(script_rel) = token.strip_prefix("scripts/") {
+                    let candidate = root.join("scripts/")?.join(script_rel)?;
+                    assert!(
+                        resolver.entry_kind(&candidate).is_ok(),
+                        "{name}: bash fence references missing script '{}'",
+                        candidate.display()
+                    );
+                }
+                if previous == Some("--path") && !token.starts_with('$') {
+                    let candidate = root.join(token)?;
+                    assert!(
+                        resolver.entry_kind(&candidate).is_ok(),
+                        "{name}: bash fence references missing package path '{}'",
+                        candidate.display()
+                    );
+                }
+                previous = Some(token);
+            }
         }
-        let candidate = root
-            .join(target)
-            .with_context(|| format!("link target '{raw_target}'"))?;
-        assert!(
-            resolver.entry_kind(&candidate).is_ok(),
-            "{README_NAME}: broken relative link '{raw_target}' (resolved {candidate})",
-            candidate = candidate.display()
-        );
     }
+    Ok(())
+}
 
-    // Bash fences: referenced repo scripts and --path packages must exist.
-    for block in extract_fenced_blocks(&markdown, "bash")? {
-        let mut previous: Option<&str> = None;
-        for raw_token in block.body.split_whitespace() {
-            // Strip trailing shell syntax before path checks.
-            let token = raw_token.trim_matches(|c| matches!(c, ';' | ')' | '"' | '\''));
-            if let Some(script_rel) = token.strip_prefix("scripts/") {
-                let candidate = root.join("scripts/")?.join(script_rel)?;
-                assert!(
-                    resolver.entry_kind(&candidate).is_ok(),
-                    "{README_NAME}: bash fence references missing script '{}'",
-                    candidate.display()
-                );
-            }
-            if previous == Some("--path") && !token.starts_with('$') {
-                let candidate = root.join(token)?;
-                assert!(
-                    resolver.entry_kind(&candidate).is_ok(),
-                    "{README_NAME}: bash fence references missing package path '{}'",
-                    candidate.display()
-                );
-            }
-            previous = Some(token);
+#[test]
+#[cfg_attr(miri, ignore = "requires the repository checkout layout")]
+fn readme_anchors_resolve() -> Result<()> {
+    for name in ANCHOR_DOCUMENTS {
+        let markdown = load_markdown(name)?;
+        let slugs = heading_slugs(&markdown);
+        for (line_no, anchor) in anchor_targets(&markdown) {
+            assert!(
+                slugs.contains(&anchor),
+                "{name}:{line_no}: anchor '#{anchor}' matches no heading"
+            );
         }
     }
     Ok(())
@@ -176,20 +296,22 @@ fn readme_references_resolve() -> Result<()> {
     ignore = "examples execute real processes (RUN/ASYNC RUN/git) against host tempdirs"
 )]
 fn readme_snippets_execute_as_documented() -> Result<()> {
-    for block in load_readme_blocks()? {
-        execute_block(&block).with_context(|| {
-            format!(
-                "{README_NAME}: while executing example opened at line {}",
-                block.line_no
-            )
-        })?;
+    for name in FENCE_DOCUMENTS {
+        for block in load_blocks(name)? {
+            execute_block(&block, name).with_context(|| {
+                format!(
+                    "{name}: while executing example opened at line {}",
+                    block.line_no
+                )
+            })?;
+        }
     }
     Ok(())
 }
 
-fn execute_block(block: &FencedBlock) -> Result<()> {
+fn execute_block(block: &FencedBlock, name: &str) -> Result<()> {
     let steps = oxdock_core::parse_script(&block.body)
-        .map_err(|e| anyhow::anyhow!("snippet failed to parse: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("{name}: snippet failed to parse: {e}"))?;
 
     // Tempdirs must outlive execution; dropping a GuardedTempDir removes it.
     let workspace_temp = GuardedPath::tempdir().context("failed to create workspace tempdir")?;
@@ -214,15 +336,15 @@ fn execute_block(block: &FencedBlock) -> Result<()> {
     match (&execution, &block.metadata.expect_error) {
         (Ok(_), None) => {}
         (Ok(_), Some(expected)) => {
-            bail!("snippet was expected to fail with '{expected}' but succeeded")
+            bail!("{name}: snippet was expected to fail with '{expected}' but succeeded")
         }
         (Err(err), Some(expected)) => {
             let rendered = LineEnding::normalize(&format!("{err:#}"));
             if !rendered.contains(expected.as_str()) {
-                bail!("error message did not contain '{expected}'; got: {rendered}");
+                bail!("{name}: error message did not contain '{expected}'; got: {rendered}");
             }
         }
-        (Err(err), None) => bail!("snippet failed unexpectedly: {err:#}"),
+        (Err(err), None) => bail!("{name}: snippet failed unexpectedly: {err:#}"),
     }
     Ok(())
 }

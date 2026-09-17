@@ -1,0 +1,3 @@
+name = "func_duplicate_same_scope"
+
+expect_error_contains = "duplicate function `DUP` in same scope"

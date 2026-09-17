@@ -1,5 +1,5 @@
 //! Shared filename contract between the build-script helper and the
-//! consumer-side `embed!` macro.
+//! consumer-side `oxdock_embed!` macro.
 
 /// The `$OUT_DIR`-relative file name of the generated module for `name`.
 pub fn module_file_name(name: &str) -> String {

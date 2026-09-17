@@ -15,8 +15,9 @@ Concretely, each run:
   source (`CRATE_VERSION`, overridable per run),
 - regenerates the command reference from the parser command registry,
   so the docs can never list a removed command or miss a new one,
-- re-derives each document display name and description from its
-  `Cargo.toml`,
+- re-derives each member document display name and description from that
+  member's `Cargo.toml` (documents without a member manifest keep static
+  values files),
 - and fails the whole run on a misspelled section or unknown value
   instead of rendering wrong docs.
 

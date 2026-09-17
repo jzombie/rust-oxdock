@@ -394,24 +394,22 @@ fn resolve_key_path_strict(
         .ok_or_else(|| anyhow!("undefined script variable: '${root_key}'"))?;
 
     for &segment in &parts[1..] {
-        match current {
-            oxdock_parser::Value::Map(map) => {
-                current = map.get(segment).ok_or_else(|| {
-                    anyhow!("property '{segment}' not found on object '${root_key}'")
-                })?;
-            }
-            oxdock_parser::Value::List(list) => {
-                let idx: usize = segment.parse().map_err(|_| {
-                    anyhow!("invalid array index '{segment}' on list '${root_key}'")
-                })?;
-                current = list.get(idx).ok_or_else(|| {
-                    anyhow!(
-                        "index {idx} out of bounds for list '${root_key}' (len: {})",
-                        list.len()
-                    )
-                })?;
-            }
-            _ => bail!("cannot access property '{segment}' on primitive value of '${root_key}'"),
+        if let Some(map) = current.as_map() {
+            current = map
+                .get(segment)
+                .ok_or_else(|| anyhow!("property '{segment}' not found on object '${root_key}'"))?;
+        } else if let Some(list) = current.as_list() {
+            let idx: usize = segment
+                .parse()
+                .map_err(|_| anyhow!("invalid array index '{segment}' on list '${root_key}'"))?;
+            current = list.get(idx).ok_or_else(|| {
+                anyhow!(
+                    "index {idx} out of bounds for list '${root_key}' (len: {})",
+                    list.len()
+                )
+            })?;
+        } else {
+            bail!("cannot access property '{segment}' on primitive value of '${root_key}'")
         }
     }
 
@@ -420,26 +418,45 @@ fn resolve_key_path_strict(
 
 /// Format a Value as a string for inline interpolation.
 fn format_value_for_string(val: &oxdock_parser::Value) -> String {
-    match val {
-        oxdock_parser::Value::String(s) => s.clone(),
-        oxdock_parser::Value::Int(i) => i.to_string(),
-        oxdock_parser::Value::Float(f) => f.to_string(),
-        oxdock_parser::Value::Bool(b) => b.to_string(),
-        oxdock_parser::Value::Pipe(n) => format!("pipe:{n}"),
-        oxdock_parser::Value::Duration(d) => oxdock_parser::command::format_duration(d),
-        oxdock_parser::Value::Path(p) => p.to_string_lossy().to_string(),
-        oxdock_parser::Value::List(items) => items
+    if let Some(s) = val.as_str() {
+        return s.to_string();
+    }
+    if let Some(i) = val.as_i64() {
+        return i.to_string();
+    }
+    if let Some(f) = val.as_f64() {
+        return f.to_string();
+    }
+    if let Some(b) = val.as_bool() {
+        return b.to_string();
+    }
+    if let Some(n) = val.as_pipe_name() {
+        return format!("pipe:{n}");
+    }
+    if let Some(d) = val.as_duration() {
+        return oxdock_parser::command::format_duration(&d);
+    }
+    if let Some(p) = val.as_path() {
+        return p.to_string_lossy().to_string();
+    }
+    if let Some(items) = val.as_list() {
+        return items
             .iter()
             .map(format_value_for_string)
             .collect::<Vec<_>>()
-            .join(" "),
-        oxdock_parser::Value::Map(map) => map
+            .join(" ");
+    }
+    if let Some(map) = val.as_map() {
+        return map
             .iter()
             .map(|(k, v)| format!("\"{}\": {}", k, format_value_for_string(v)))
             .collect::<Vec<_>>()
-            .join(", "),
-        oxdock_parser::Value::TaskHandle(id) => format!("task#{}", id),
+            .join(", ");
     }
+    if let Some(id) = val.as_handle() {
+        return format!("task#{}", id);
+    }
+    format!("{}", val)
 }
 
 // Legacy functions for backward compatibility
@@ -850,11 +867,11 @@ mod tests {
         let mut vars = HashMap::new();
         vars.insert(
             "cfg".into(),
-            oxdock_parser::Value::Map(std::collections::BTreeMap::from([(
+            oxdock_parser::Value::map(std::collections::BTreeMap::from([(
                 "server".into(),
-                oxdock_parser::Value::Map(std::collections::BTreeMap::from([(
+                oxdock_parser::Value::map(std::collections::BTreeMap::from([(
                     "port".into(),
-                    oxdock_parser::Value::Int(8080),
+                    oxdock_parser::Value::int(8080),
                 )])),
             )])),
         );
@@ -873,7 +890,7 @@ mod tests {
         let mut vars = HashMap::new();
         vars.insert(
             "arr".into(),
-            oxdock_parser::Value::List(vec![oxdock_parser::Value::String("a".into())]),
+            oxdock_parser::Value::list(vec![oxdock_parser::Value::string("a".into())]),
         );
         let expander = StreamingExpand::new(&[], &HashMap::new()).with_vars(&vars);
         let result = expander.expand_string("{{ $arr.5 }}");
@@ -885,7 +902,7 @@ mod tests {
     #[test]
     fn type_mismatch_navigation_errors() {
         let mut vars = HashMap::new();
-        vars.insert("name".into(), oxdock_parser::Value::String("alice".into()));
+        vars.insert("name".into(), oxdock_parser::Value::string("alice".into()));
         let expander = StreamingExpand::new(&[], &HashMap::new()).with_vars(&vars);
         let result = expander.expand_string("{{ $name.sub_field }}");
         assert!(result.is_err());
@@ -929,7 +946,7 @@ mod tests {
         let mut vars = HashMap::new();
         vars.insert(
             "HOST".into(),
-            oxdock_parser::Value::String("from-var".into()),
+            oxdock_parser::Value::string("from-var".into()),
         );
         let expander = StreamingExpand::new(&[], &HashMap::new()).with_vars(&vars);
         // env:HOST queries env, NOT vars — should error even though vars has HOST
@@ -946,7 +963,7 @@ mod tests {
     #[test]
     fn step_override_does_not_fall_back_to_vars() {
         let mut vars = HashMap::new();
-        vars.insert("PORT".into(), oxdock_parser::Value::Int(8080));
+        vars.insert("PORT".into(), oxdock_parser::Value::int(8080));
         let expander = StreamingExpand::new(&[], &HashMap::new()).with_vars(&vars);
         // PORT (bare) queries overrides, NOT vars — should error
         let result = expander.expand_string("{{ PORT }}");
@@ -962,7 +979,7 @@ mod tests {
     #[test]
     fn env_prefix_isolated_from_script_vars() {
         let mut vars = HashMap::new();
-        vars.insert("MODE".into(), oxdock_parser::Value::String("dev".into()));
+        vars.insert("MODE".into(), oxdock_parser::Value::string("dev".into()));
         let expander = StreamingExpand::new(&[], &HashMap::new()).with_vars(&vars);
         // env:MODE looks in env, not vars — should error
         let result = expander.expand_string("{{ env:MODE }}");
@@ -1124,7 +1141,7 @@ mod tests {
         let mut vars = HashMap::new();
         vars.insert(
             "inner".into(),
-            oxdock_parser::Value::String("{{ env:OTHER }}".into()),
+            oxdock_parser::Value::string("{{ env:OTHER }}".into()),
         );
         let mut env = HashMap::new();
         env.insert("OTHER".into(), "world".into());

@@ -1,27 +1,8 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
+use oxdock_core::startup_descriptors;
 use oxdock_core::{ArgType, CommandMeta, all_metadata, all_structural_metadata};
-use oxdock_fs::{GuardedPath, PathResolver};
-use oxdock_parser::TypeKind;
+use oxdock_core::{FuncMeta, FuncParam, builtin_function_metas};
 use std::collections::HashSet;
-
-use crate::io::write_text;
-
-/// Refresh the committed command-reference inputs from the parser
-/// registry, so generated docs can never list a removed command.
-pub(crate) fn sync_command_ref(root: &GuardedPath, resolver: &PathResolver) -> Result<()> {
-    write_text(
-        resolver,
-        root,
-        ".oxdock/template/readme/generated/command-reference.md.tmpl",
-        &render_index(),
-    )?;
-    write_text(
-        resolver,
-        root,
-        ".oxdock/template/readme/generated/command-body.md.tmpl",
-        &render_body(),
-    )
-}
 
 /// GitHub heading anchor for a `### NAME` section: lowercase. Command names
 /// are `[A-Z_]+`, so lowercasing is the whole transformation.
@@ -98,29 +79,26 @@ fn render_arg_type(arg_type: &ArgType) -> String {
     }
 }
 
-/// Value type reference, generated from the `TypeKind` declaration-site
-/// vocabulary, so the documented types cannot drift from the type system.
+/// Value type reference, generated from the startup descriptors, so the
+/// documented types cannot drift from the type system.
 /// Argument shapes (`$var`, `KEY=value`) are not value types: they render
 /// unlinked in argument tables (like inline `OneOf` alternations) and are
 /// documented where they are used (LET, MUTATION, ENV).
 fn render_value_types() -> String {
     let mut out = String::new();
     out.push_str("## Value types\n\n");
-    for kind in TypeKind::CANONICAL {
-        let Some((title, body)) = kind.doc() else {
-            continue;
-        };
+    for (name, descriptor) in startup_descriptors() {
         out.push_str(&format!(
             "### {}\n\n{}\n\n",
-            escape_placeholders(&title),
-            escape_placeholders(body)
+            escape_placeholders(&format!("Value type: {name}")),
+            escape_placeholders(descriptor.docs),
         ));
     }
     out.push('\n');
     out
 }
 
-fn render_meta(meta: &CommandMeta) -> String {
+fn render_meta(meta: &CommandMeta) -> Result<String> {
     let mut out = String::new();
     out.push_str(&format!("### {}\n\n", meta.name));
     out.push_str(&format!("{}\n\n", escape_placeholders(meta.summary)));
@@ -182,14 +160,29 @@ fn render_meta(meta: &CommandMeta) -> String {
                 fence,
                 escape_placeholders(example.code.trim_end())
             ));
+            // Fences that must fail carry their needle in the info string
+            // (invisible once rendered), so print it as prose: readers see
+            // the expected error, and the conformance runner pins it.
+            if let Some(fence_meta) = example.fence_meta {
+                let needle = oxdock_parser::expect_error_from_info(&format!("oxdock {fence_meta}"))
+                    .with_context(|| {
+                        format!("example '{}' has malformed fence metadata", example.name)
+                    })?;
+                if let Some(needle) = needle {
+                    out.push_str(&format!(
+                        "**Expected error:** `{}`\n\n",
+                        escape_placeholders(&needle)
+                    ));
+                }
+            }
         }
     }
 
     out.push('\n');
-    out
+    Ok(out)
 }
 
-pub(crate) fn render_body() -> String {
+pub(crate) fn render_body() -> Result<String> {
     let mut out = String::new();
 
     // Structural constructs (parsed by PEG rules, documented via the
@@ -197,7 +190,7 @@ pub(crate) fn render_body() -> String {
     let structural = all_structural_metadata();
     let structural_names: HashSet<&str> = structural.iter().map(|meta| meta.name).collect();
     for meta in &structural {
-        out.push_str(&render_meta(meta));
+        out.push_str(&render_meta(meta).with_context(|| format!("render {}", meta.name))?);
     }
 
     // Leaf commands (from declare_commands! metadata), excluding anything
@@ -206,10 +199,81 @@ pub(crate) fn render_body() -> String {
         if structural_names.contains(meta.name) {
             continue;
         }
-        out.push_str(&render_meta(&meta));
+        out.push_str(&render_meta(&meta).with_context(|| format!("render {}", meta.name))?);
     }
 
     out.push_str(&render_value_types());
+    while out.ends_with('\n') {
+        out.pop();
+    }
+    out.push('\n');
+    Ok(out)
+}
+
+/// Render one function signature from its derived metadata:
+/// `NAME($param: TYPE, ...) -> RET`. Unconstrained `Value` parameters
+/// render bare; absent return types render no arrow.
+fn render_signature(meta: &FuncMeta) -> String {
+    let params = meta
+        .params
+        .as_deref()
+        .unwrap_or(&[])
+        .iter()
+        .map(
+            |FuncParam { name, param_type }: &FuncParam| match param_type {
+                Some(label) => format!("${name}: {label}"),
+                None => format!("${name}"),
+            },
+        )
+        .collect::<Vec<_>>()
+        .join(", ");
+    let returns = meta
+        .returns
+        .as_deref()
+        .map(|label| format!(" -> {label}"))
+        .unwrap_or_default();
+    format!("{}({}){}", meta.name, params, returns)
+}
+
+/// Function reference, generated from the `#[oxdock_func]` registry, so
+/// the documented functions cannot drift from the implementation. Staged
+/// as its own fragment and pinned into the command outputs through the
+/// `function-reference` placeholder, so builtins share one
+/// static surface with the runtime `FUNCTIONS()` / `DESCRIBE()` surface.
+pub(crate) fn render_function_reference() -> String {
+    let mut out = String::new();
+    out.push_str(
+        "<!-- GENERATED by docs-gen from oxdock-core function metadata. Do not edit by hand. -->\n",
+    );
+    out.push_str("## Functions\n\n");
+    out.push_str(
+        "Callable as `MODULE::NAME(...)` in expressions (or bare `NAME(...)` \
+         with the module imported via `IMPORT`). Introspectable from scripts \
+         with `FUNCTIONS()` and `DESCRIBE(name)`.\n\n",
+    );
+    for meta in builtin_function_metas() {
+        out.push_str(&format!("### {}\n\n", meta.name));
+        out.push_str(&format!(
+            "**Signature:** `{}`\n\n",
+            escape_table_cell(&render_signature(&meta)),
+        ));
+        out.push_str(&format!(
+            "**Contexts:** {}\n\n",
+            if meta.rpn { "AST, RPN" } else { "AST only" },
+        ));
+        // The full docs already open with the summary line: print whichever
+        // carries more, never both stacked.
+        if meta.docs.starts_with(meta.summary) && !meta.summary.is_empty() {
+            out.push_str(&escape_placeholders(&format!("{}\n\n", meta.docs)));
+        } else {
+            if !meta.summary.is_empty() {
+                out.push_str(&escape_placeholders(&format!("{}\n\n", meta.summary)));
+            }
+            if !meta.docs.is_empty() {
+                out.push_str(&escape_placeholders(&format!("{}\n\n", meta.docs)));
+            }
+        }
+    }
     while out.ends_with('\n') {
         out.pop();
     }
@@ -223,7 +287,7 @@ mod tests {
 
     #[test]
     fn body_has_all_commands() {
-        let body = render_body();
+        let body = render_body().expect("render");
         for meta in all_metadata() {
             assert!(
                 body.contains(&format!("### {}", meta.name)),
@@ -237,7 +301,7 @@ mod tests {
     fn body_has_structural_constructs() {
         // Derived from the registry — not a hardcoded list — so adding a
         // structural entry automatically extends this check.
-        let body = render_body();
+        let body = render_body().expect("render");
         for meta in all_structural_metadata() {
             assert!(
                 body.contains(&format!("### {}", meta.name)),
@@ -245,6 +309,21 @@ mod tests {
                 meta.name
             );
         }
+    }
+
+    #[test]
+    fn failing_examples_render_their_expected_error() {
+        // Fences that must fail carry the needle only in the info string,
+        // which renderers hide: the prose line below is what readers see.
+        let body = render_body().expect("render");
+        assert!(
+            body.contains("**Expected error:** `undefined variable`"),
+            "LET no-hoisting example must print its needle"
+        );
+        assert!(
+            body.contains("**Expected error:** `EXIT requested with code 0`"),
+            "EXIT example must print its needle"
+        );
     }
 
     #[test]
@@ -288,6 +367,53 @@ mod tests {
         assert!(
             !body.contains("RUN_BG"),
             "index must not contain removed commands"
+        );
+    }
+
+    #[test]
+    fn function_reference_covers_every_builtin() {
+        // Derived from the `#[oxdock_func]` registry, not a hardcoded
+        // list, so adding a builtin automatically extends this check.
+        let reference = render_function_reference();
+        for meta in builtin_function_metas() {
+            assert!(
+                reference.contains(&format!("### {}", meta.name)),
+                "missing section for function {}",
+                meta.name
+            );
+            assert!(
+                reference.contains(&render_signature(&meta)),
+                "missing signature for function {}",
+                meta.name
+            );
+        }
+        for name in [
+            "STD::TYPES",
+            "STD::TYPE_DESCRIBE",
+            "STD::FUNCTIONS",
+            "STD::DESCRIBE",
+            "STD::GLOB",
+        ] {
+            assert!(
+                reference.contains(&format!("### {name}")),
+                "function reference must document {name}",
+            );
+        }
+        let glob = reference
+            .split("### STD::GLOB")
+            .nth(1)
+            .expect("GLOB section renders");
+        assert!(
+            glob.contains("**Contexts:** AST, RPN"),
+            "RPN-capable functions must render both contexts",
+        );
+        let types = reference
+            .split("### STD::TYPES\n")
+            .nth(1)
+            .expect("TYPES section renders");
+        assert!(
+            types.contains("**Contexts:** AST only"),
+            "AST-only functions must render their restriction",
         );
     }
 }

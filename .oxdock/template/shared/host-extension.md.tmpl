@@ -1,0 +1,282 @@
+## Extending OxDock from Rust
+
+Scripts call host functions and custom types that Rust code registers
+under a module. Registration is a type plus a module on one facade, and
+scripts name the module: `IMPORT [DEMO]` lets the rest call
+`MAKE_TAG()` bare, or qualify as `DEMO::MAKE_TAG()`. This example runs as
+written: the shape first, the definitions it names right below it.
+
+### Complete example: define a type, define functions, run a script
+
+```rust
+use oxdock::{Engine, HostModule, OxDockFn, OxDockType, oxdock_func, oxdock_type};
+use std::fmt;
+
+// The script below is the DSL itself, not a string: the `oxdock!` macro
+// builds it into steps at compile time.
+
+fn main() -> anyhow::Result<()> {
+    let mut engine = Engine::new();
+    engine.register_type::<Tag>();
+    engine.register_module(HostModule {
+        name: "DEMO".to_string(),
+        funcs: vec![MakeTag::registration(), ReadTag::registration()],
+        types: vec![],
+    });
+
+    let temp = oxdock_fs::GuardedPath::tempdir().unwrap();
+    let root_path = temp.as_guarded_path().clone();
+    let steps: Vec<oxdock::oxdock_parser::Step> = oxdock::oxdock! {
+        modules: [DEMO],
+        IMPORT [DEMO]
+        LET $t: TAG = MAKE_TAG()
+        LET $s: STRING = READ_TAG($t)
+        ASSERT_EQ $s "demo"
+        WRITE tag.txt "\{{ $s }}::\{{ $t }}"
+    };
+    let run = engine.run_steps(&root_path, &steps)?;
+    assert!(run.bindings.contains_key("s"));
+
+    let reader = oxdock_fs::PathResolver::new(root_path.root(), root_path.root()).unwrap();
+    let written = reader
+        .read_to_string(&root_path.join("tag.txt").unwrap())
+        .expect("script writes tag.txt");
+    assert_eq!(written.trim(), "demo::tag:demo");
+    Ok(())
+}
+
+// The type. `#[oxdock_type]` implements `OxDockType` on the payload struct
+// itself. The default is the heap path: the word holds a thin pointer to
+// an owned box. Heap payloads require `Clone + PartialEq + Display +
+// Debug + Send + Sync`.
+
+/// Opaque label type.
+#[oxdock_type(name = "TAG")]
+#[derive(Debug, Clone, PartialEq)]
+struct Tag(String);
+
+impl fmt::Display for Tag {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "tag:{}", self.0)
+    }
+}
+
+// The functions. `#[oxdock_func(pure)]` implements `OxDockFn` on a
+// registration marker named after the function (`make_tag` becomes
+// `MakeTag`). The DSL name defaults to the uppercased Rust name.
+// `Value::mint_heap` with the payload type's own descriptor mints a word
+// of the registered type, and `read_heap` with that descriptor reads it
+// back. No name lookup runs anywhere on this path.
+
+/// Mint one opaque label.
+#[oxdock_func(pure)]
+fn make_tag() -> anyhow::Result<oxdock::Value> {
+    Ok(oxdock::Value::mint_heap(Tag::descriptor(), Tag("demo".into())))
+}
+
+/// Read the payload back out through a descriptor-checked typed read.
+#[oxdock_func(pure, returns = "STRING")]
+fn read_tag(val: oxdock::Value) -> anyhow::Result<oxdock::Value> {
+    let Some(tag) = val.read_heap::<Tag>(Tag::descriptor()) else {
+        anyhow::bail!("READ_TAG() expects a TAG value");
+    };
+    Ok(oxdock::Value::string(tag.0.clone()))
+}
+```
+
+The shape is always the same. `LET $t: TAG = MAKE_TAG()` calls a host
+function like any native one: arity, depth budget, and the declared `TAG`
+coercion apply uniformly. `READ_TAG($t)` reclaims the payload through an
+id checked read. `\{{ $t }}` renders the custom value through its
+`Display`, so interpolation, `WRITE`, and equality treat host values like
+native ones. `TYPES()` lists every registered name and
+`TYPE_DESCRIBE("TAG")` returns its summary and docs, so scripts introspect
+host surface exactly like native surface. Host types stay opaque:
+literal syntax, `$var.key` traversal, and `FOR` iteration remain `LIST`
+and `MAP` only, so queryable containers expose host accessor functions
+(`MATRIX_GET($m, $row, $col)`) instead of new syntax.
+
+### Reference: stateful functions
+
+Without `pure`, the first parameter must be `cx: &mut StepCtx<P>`, which
+exposes variables, environment, pipes, and IO. Override the DSL name and
+the declared return type explicitly when the defaults do not fit:
+
+```rust
+use oxdock::{HostModule, OxDockFn, StepCtx, oxdock_func};
+use oxdock::oxdock_core::ProcessManager;
+
+/// Read an environment variable, defaulting to empty.
+#[oxdock_func(name = "ENV_OR", returns = "STRING")]
+fn env_or<P: ProcessManager>(
+    cx: &mut StepCtx<P>,
+    key: String,
+) -> anyhow::Result<oxdock::Value> {
+    Ok(oxdock::Value::string(cx.get_env(&key).unwrap_or_default()))
+}
+
+fn main() {
+    let mut engine = oxdock::Engine::new();
+    engine.register_module(HostModule {
+        name: "DEMO".to_string(),
+        funcs: vec![EnvOr::registration()],
+        types: vec![],
+    });
+}
+```
+
+Parameters accept `Value`, `String`, `i64`, `f64`, and `bool`, in either
+form. Stateful markers register exactly like pure ones. Pure functions run
+on the compiled math path too; stateful ones stay on the AST path unless
+they opt in with `#[oxdock_func(rpn)]` (as `GLOB` does).
+
+### Reference: inline types
+
+`#[oxdock_type(inline)]` selects the zero allocation path for `Copy`
+scalars that fit in 64 bits: the word holds the value bytes directly. This
+is the same derivation the startup integer, float, boolean, and handle
+types use:
+
+```rust
+use oxdock::{OxDockType, oxdock_type};
+use std::fmt;
+
+/// Entity handle.
+#[oxdock_type(name = "ENTITY", inline)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct EntityId(u64);
+
+impl fmt::Display for EntityId {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "entity#{}", self.0)
+    }
+}
+
+fn main() {
+    let mut engine = oxdock::Engine::new();
+    engine.register_type::<EntityId>();
+    let val = oxdock::Value::mint_inline(EntityId::descriptor(), EntityId(7));
+    assert_eq!(val.inline_bits(), 7);
+    assert_eq!(format!("{val}"), "entity#7");
+    assert_eq!(val.clone(), val);
+}
+```
+
+Four limits decide what can ride inline:
+
+1. **Fixed 64 bit slot.** Anything larger panics at mint time (a runtime
+   check, not a compile time one).
+2. **`Copy` payloads only.** Inline clones copy bits and drops do
+   nothing, which resource owning types cannot satisfy.
+3. **No variable length data.** `STRING`, `LIST`, and `MAP` can never fit
+   a fixed slot and stay behind the pointer.
+4. **Widening punishes everything.** A bigger slot means fewer words per
+   cache line and costlier moves for the scalars that dominate scripts.
+
+One boundary to keep straight: words stored inside a `LIST` or `MAP`
+live in that container's heap buffer, so inline describes the payload
+encoding, not a promise that every word sits on the stack.
+
+### Reference: queryable containers
+
+Opaque types can still answer queries: pair the payload with host
+accessor functions and scripts read cells, lengths, and keys through
+ordinary calls, with no new syntax. The example below mints a grid and
+reads one cell through its accessor; from a script the same call spells
+`LET $c: INT = MATRIX_GET($m, 0, 1)`. Key paths and `FOR` iteration stay
+unavailable by the boundary above.
+
+```rust
+use oxdock::{HostModule, OxDockFn, OxDockType, Value, oxdock_func, oxdock_type};
+use std::fmt;
+
+/// Integer grid with no literal syntax: scripts query it through functions.
+#[oxdock_type(name = "MATRIX")]
+#[derive(Debug, Clone, PartialEq)]
+struct Matrix(Vec<Vec<i64>>);
+
+impl fmt::Display for Matrix {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "matrix[{}x{}]", self.0.len(), self.0.first().map_or(0, Vec::len))
+    }
+}
+
+/// Mint a fixed 1x2 grid.
+#[oxdock_func(pure)]
+fn make_matrix() -> anyhow::Result<Value> {
+    Ok(Value::mint_heap(
+        Matrix::descriptor(),
+        Matrix(vec![vec![1, 2]]),
+    ))
+}
+
+/// Read one cell by row and column.
+#[oxdock_func(pure, returns = "INT")]
+fn matrix_get(board: Value, row: i64, col: i64) -> anyhow::Result<Value> {
+    let Some(grid) = board.read_heap::<Matrix>(Matrix::descriptor()) else {
+        anyhow::bail!("MATRIX_GET() expects a MATRIX value");
+    };
+    let cell = usize::try_from(row)
+        .ok()
+        .and_then(|r| grid.0.get(r))
+        .and_then(|r| usize::try_from(col).ok().and_then(|c| r.get(c)))
+        .copied()
+        .ok_or_else(|| anyhow::anyhow!("index out of bounds"))?;
+    Ok(Value::int(cell))
+}
+
+fn main() -> anyhow::Result<()> {
+    let word = Value::mint_heap(Matrix::descriptor(), Matrix(vec![vec![1, 2]]));
+    let cell = matrix_get(word, 0, 1).unwrap();
+    assert_eq!(cell.as_i64(), Some(2));
+
+    let mut engine = oxdock::Engine::new();
+    engine.register_type::<Matrix>();
+    engine.register_module(HostModule {
+        name: "DEMO".to_string(),
+        funcs: vec![
+            MakeMatrix::registration(),
+            MatrixGet::registration(),
+        ],
+        types: vec![],
+    });
+    let temp = oxdock_fs::GuardedPath::tempdir().unwrap();
+    let root = temp.as_guarded_path().clone();
+    let run = engine.run_script(
+        &root,
+        "IMPORT [DEMO]\nLET $m: MATRIX = MAKE_MATRIX()\nLET $c: INT = MATRIX_GET($m, 0, 1)\n",
+    )?;
+    assert_eq!(run.bindings["c"].as_i64(), Some(2));
+    Ok(())
+}
+```
+
+### Reference: evaluation paths and the `rpn` flag
+
+Two evaluators run scripts, and the distinction decides where a host
+function may run. The AST evaluator walks the parsed tree one step at a
+time. Every step knows its line number, so failures name it (`step 1:
+INT() expects 1 argument(s), got 2`). Scopes, pipes, declarations, and
+every statement form live here. The RPN evaluator runs arithmetic and
+comparison expressions compiled to a flat stack-machine program
+(`PushConst`, `LoadVar`, `Call`, `Add`, ...). A stack program carries
+values only: no statements, no scopes, no pipes, and no step numbers, so
+a failing call inside math reports the bare error (`INT() expects 1
+argument(s), got 2`).
+
+The tradeoff is expressiveness against compactness, not speed. The tree
+can say anything the language can say, with errors that point at the
+script. The stack program can only compute values, which is exactly what
+math needs and nothing more. That is why not everything runs on RPN:
+statements, declarations, scoping, and IO orchestration have no stack
+encoding, and step-numbered errors require the tree.
+
+For host functions the rule follows from that split. Pure functions take
+only values and touch nothing, so they run on both paths with no flag.
+Stateful functions default to AST-only. Opt in with
+`#[oxdock_func(rpn)]` only for read-only queries that stay meaningful
+inside math (`GLOB`, `LOAD_TOML`, `LOAD_JSON` do this): the function
+still receives full step context, but its failures lose their step
+numbers. Side-effecting stateful functions stay out, since stack-order
+execution with step-less errors is the worst place for an effect to go
+wrong.

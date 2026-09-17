@@ -155,10 +155,11 @@ impl CargoScratch {
 ///
 /// Pure name reservation: containment is verified against the real temp root,
 /// but the directory is created on demand by the child `cargo` invocation
-/// itself. Never by us. Plain `RUN` steps therefore perform zero filesystem
-/// I/O for this while build outputs stay a managed, guarded location instead
-/// of an arbitrary relative string (or the live workspace tree). The
-/// high-entropy leaf makes the name unguessable; since we never create or
+/// itself. Never by us. Reservation performs only root canonicalization and
+/// stat I/O (no leaf creation and no leaf reads); build outputs stay a
+/// managed, guarded location instead of an arbitrary relative string (or
+/// the live workspace tree). The counter plus elapsed-nanos leaf makes the
+/// name unique per process, not unguessable; since we never create or
 /// follow it, reservation alone presents no TOCTOU surface.
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 pub fn reserve_cargo_scratch() -> Result<CargoScratch> {
@@ -168,8 +169,9 @@ pub fn reserve_cargo_scratch() -> Result<CargoScratch> {
     static SCRATCH_EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
     let id = SCRATCH_COUNTER.fetch_add(1, Ordering::Relaxed);
     // Monotonic clock: available under Miri isolation (unlike wall-clock
-    // time), unique per process via the counter, unguessable enough that a
-    // reserved-but-never-created name presents no TOCTOU surface.
+    // time), unique per process via the counter. Uniqueness (not secrecy)
+    // is what matters here: a reserved-but-never-created name presents no
+    // TOCTOU surface.
     let nanos = SCRATCH_EPOCH.get_or_init(Instant::now).elapsed().as_nanos();
     let leaf = format!("oxdock-cargo-{id}-{nanos:x}");
     let temp_root = std::env::temp_dir();

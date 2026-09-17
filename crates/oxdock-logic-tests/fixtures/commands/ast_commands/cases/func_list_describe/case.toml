@@ -1,0 +1,4 @@
+name = "func_list_describe"
+
+[expect]
+files = { "kind.txt" = "host", "hello-kind.txt" = "script" }
