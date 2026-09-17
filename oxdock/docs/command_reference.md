@@ -1649,11 +1649,11 @@ Boolean `true` or `false`.
 
 ### Value type: LIST
 
-Ordered list of values.
+Ordered list of values. Shared heap: cloning bumps a refcount.
 
 ### Value type: MAP
 
-String-keyed map of values.
+String-keyed map of values. Shared heap: cloning bumps a refcount.
 
 ### Value type: PATH
 

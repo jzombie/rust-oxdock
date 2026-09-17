@@ -69,18 +69,6 @@ fn heap_words_clone_independently_then_drop() {
     assert_eq!(format!("{clone}"), "\"hello\"");
     drop(clone);
 
-    let mut entries = BTreeMap::new();
-    entries.insert("k".to_string(), Value::int(1));
-    let map = Value::map(entries);
-    let map_clone = map.clone();
-    drop(map);
-    assert_eq!(format!("{map_clone}"), "{k: 1}");
-
-    let list = Value::list(vec![Value::int(1), Value::string("x".to_string())]);
-    let list_clone = list.clone();
-    drop(list);
-    assert_eq!(format!("{list_clone}"), "[1, \"x\"]");
-
     let path = {
         #[allow(clippy::disallowed_types)]
         let buf = std::path::PathBuf::from("a/b");
@@ -100,9 +88,95 @@ fn heap_words_clone_independently_then_drop() {
 }
 
 #[test]
+fn shared_containers_share_buffers_then_drop() {
+    // `LIST` and `MAP` are shared heaps (issue #152): cloning bumps the
+    // strong count in O(1) with no allocation, so clones point at the same
+    // buffer and stay usable after the original drops. Exclusive heaps
+    // (`STRING`) still deep-copy: pointers differ.
+    let text = Value::string("hello".to_string());
+    let text_clone = text.clone();
+    assert_ne!(text.heap_ptr(), text_clone.heap_ptr());
+    drop(text);
+    drop(text_clone);
+
+    let list = Value::list(vec![Value::int(1), Value::string("x".to_string())]);
+    let list_clone = list.clone();
+    assert_eq!(list.heap_ptr(), list_clone.heap_ptr());
+    assert_eq!(&list_clone, &list);
+    drop(list);
+    assert_eq!(format!("{list_clone}"), "[1, \"x\"]");
+    drop(list_clone);
+
+    let mut entries = BTreeMap::new();
+    entries.insert("k".to_string(), Value::int(1));
+    let map = Value::map(entries);
+    let map_clone = map.clone();
+    assert_eq!(map.heap_ptr(), map_clone.heap_ptr());
+    drop(map);
+    assert_eq!(format!("{map_clone}"), "{k: 1}");
+    drop(map_clone);
+}
+
+#[test]
+fn shared_mutation_detaches_clones() {
+    // Copy-on-write through the only mutable choke point
+    // (`as_list_mut` / `as_map_mut`): mutating a shared word clones the
+    // buffer first, so siblings never observe the write.
+    let mut original = Value::list(vec![Value::int(1)]);
+    let clone = original.clone();
+    assert_eq!(original.heap_ptr(), clone.heap_ptr());
+    original.as_list_mut().expect("list").push(Value::int(2));
+    assert_eq!(format!("{original}"), "[1, 2]");
+    assert_eq!(format!("{clone}"), "[1]");
+    assert_ne!(original.heap_ptr(), clone.heap_ptr());
+    drop(original);
+    drop(clone);
+
+    let mut entries = BTreeMap::new();
+    entries.insert("k".to_string(), Value::int(1));
+    let mut original = Value::map(entries);
+    let clone = original.clone();
+    original
+        .as_map_mut()
+        .expect("map")
+        .insert("j".to_string(), Value::int(2));
+    assert_eq!(format!("{original}"), "{j: 2, k: 1}");
+    assert_eq!(format!("{clone}"), "{k: 1}");
+    drop(original);
+    drop(clone);
+}
+
+#[test]
+fn unique_mutation_stays_in_place() {
+    // Strong count 1: `unshare` hands out the live buffer with no copy.
+    let mut solo = Value::list(vec![Value::int(1)]);
+    let before = solo.heap_ptr();
+    solo.as_list_mut().expect("list").push(Value::int(2));
+    assert_eq!(solo.heap_ptr(), before);
+    assert_eq!(format!("{solo}"), "[1, 2]");
+
+    let mut widget = make_widget("gear");
+    let before = widget.heap_ptr();
+    widget
+        .read_heap_mut::<Widget>(Widget::descriptor())
+        .expect("widget")
+        .mass = 10;
+    assert_eq!(widget.heap_ptr(), before);
+    assert_eq!(format!("{widget}"), "widget(gear:10)");
+}
+
+#[test]
+#[should_panic(expected = "no heap buffer")]
+fn inline_read_heap_mut_panics() {
+    let mut entity = Value::mint_inline(EntityId::descriptor(), EntityId(1));
+    let _ = entity.read_heap_mut::<EntityId>(EntityId::descriptor());
+}
+
+#[test]
 fn nested_heap_churn() {
-    // Lists of maps of lists: recursive drop must free every box exactly
-    // once, and clones must deep-copy the whole tree.
+    // Lists of maps of lists: recursive drop must free every buffer exactly
+    // once. Container clones share the outer buffer (issue #152); dropping
+    // the root first leaves every clone usable.
     let mut inner = BTreeMap::new();
     inner.insert("v".to_string(), Value::int(3));
     let root = Value::list(vec![Value::map(inner), Value::string("tail".to_string())]);

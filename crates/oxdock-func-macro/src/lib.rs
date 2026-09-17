@@ -147,9 +147,13 @@ pub fn oxdock_func(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// an `OxDockType` implementation holding the `TypeDescriptor` from the name
 /// plus doc comments. `#[oxdock_type(name = "ENTITY", inline)]` selects the
 /// zero-allocation payload path for `Copy` scalars that fit in 64 bits.
+/// `#[oxdock_type(name = "LIST", shared)]` selects the shared `Arc` path:
+/// clones bump a refcount instead of deep-copying (for immutable container
+/// payloads; mint with `Value::mint_heap_shared`).
 /// Register with `Engine::register_type::<Payload>()`. Values ride words
-/// minted with `Value::mint_heap` / `Value::mint_inline`, and are
-/// read back with `Value::read_heap` / `Value::read_inline`.
+/// minted with `Value::mint_heap` / `Value::mint_heap_shared` /
+/// `Value::mint_inline`, and are read back with `Value::read_heap` /
+/// `Value::read_inline`.
 #[proc_macro_attribute]
 pub fn oxdock_type(attr: TokenStream, item: TokenStream) -> TokenStream {
     match expand_oxdock_type(attr, item) {
@@ -732,6 +736,7 @@ struct TypeOptions {
     summary: Option<String>,
     crate_path: syn::Path,
     inline: bool,
+    shared: bool,
 }
 
 impl Parse for TypeOptions {
@@ -740,15 +745,18 @@ impl Parse for TypeOptions {
         let mut summary: Option<String> = None;
         let mut crate_path: Option<syn::Path> = None;
         let mut inline = false;
+        let mut shared = false;
         while !input.is_empty() {
             if input.peek(syn::Ident) && !peek_key_value(input) {
                 let flag: syn::Ident = input.parse()?;
                 if flag == "inline" {
                     inline = true;
+                } else if flag == "shared" {
+                    shared = true;
                 } else {
                     return Err(syn::Error::new(
                         flag.span(),
-                        "unknown oxdock_type flag; expected inline",
+                        "unknown oxdock_type flag; expected inline or shared",
                     ));
                 }
                 if input.peek(Token![,]) {
@@ -775,7 +783,7 @@ impl Parse for TypeOptions {
                 } else {
                     return Err(syn::Error::new(
                         key.span(),
-                        "unknown oxdock_type option; expected crate_path, name, inline, or summary",
+                        "unknown oxdock_type option; expected crate_path, name, inline, shared, or summary",
                     ));
                 }
             }
@@ -799,11 +807,18 @@ impl Parse for TypeOptions {
         // to `::oxdock_core` (re-exported there); code expanded inside
         // `oxdock-parser` itself passes `crate_path = "::oxdock_parser"`.
         let default_root: syn::Path = syn::parse_str("::oxdock_core").expect("valid path");
+        if inline && shared {
+            return Err(syn::Error::new(
+                input.span(),
+                "oxdock_type cannot be both inline and shared",
+            ));
+        }
         Ok(TypeOptions {
             name,
             summary,
             crate_path: crate_path.unwrap_or(default_root),
             inline,
+            shared,
         })
     }
 }
@@ -852,14 +867,27 @@ fn expand_type(options: TypeOptions, target: syn::ItemStruct) -> syn::Result<Tok
     let name = options.name;
     let crate_path = options.crate_path;
     // Storage mode selects the vtable: inline payloads copy bytes with no
-    // finalizer, heap payloads deep-copy and free an owned box. Both are
+    // finalizer, exclusive heaps deep-copy and free an owned box, shared
+    // heaps bump and release an `Arc` buffer with no copying. All three are
     // monomorphic over the annotated payload struct: no trait objects.
-    let (clone_hook, drop_hook, eq_hook, fmt_hook) = if options.inline {
+    // `unshare` is the copy-on-write gate used by `Value::read_heap_mut`:
+    // exclusive heaps hand out their box, shared heaps detach when the
+    // strong count exceeds 1, inline payloads panic (no heap buffer).
+    let (clone_hook, drop_hook, eq_hook, fmt_hook, unshare_hook) = if options.inline {
         (
             quote! { #crate_path::clone_copy },
             quote! { #crate_path::drop_noop },
             quote! { #crate_path::eq_inline::<#struct_ident> },
             quote! { #crate_path::fmt_inline::<#struct_ident> },
+            quote! { #crate_path::unshare_inline },
+        )
+    } else if options.shared {
+        (
+            quote! { #crate_path::clone_shared::<#struct_ident> },
+            quote! { #crate_path::drop_shared::<#struct_ident> },
+            quote! { #crate_path::eq_shared::<#struct_ident> },
+            quote! { #crate_path::fmt_shared::<#struct_ident> },
+            quote! { #crate_path::unshare_shared::<#struct_ident> },
         )
     } else {
         (
@@ -867,6 +895,7 @@ fn expand_type(options: TypeOptions, target: syn::ItemStruct) -> syn::Result<Tok
             quote! { #crate_path::drop_boxed::<#struct_ident> },
             quote! { #crate_path::eq_boxed::<#struct_ident> },
             quote! { #crate_path::fmt_boxed::<#struct_ident> },
+            quote! { #crate_path::unshare_boxed::<#struct_ident> },
         )
     };
 
@@ -883,6 +912,7 @@ fn expand_type(options: TypeOptions, target: syn::ItemStruct) -> syn::Result<Tok
                     drop: #drop_hook,
                     eq: #eq_hook,
                     fmt: #fmt_hook,
+                    unshare: #unshare_hook,
                 };
                 &DESCRIPTOR
             }

@@ -289,15 +289,15 @@ Four mechanisms keep script execution predictable: how values are stored, how by
 
 Every script value is a fixed 128 bit word that lives on the stack: a static type descriptor pointer plus a 64 bit payload. Only payload contents may live on the heap, never the word itself.
 
-Scalars that fit (`INT`, `FLOAT`, `BOOL`, handles) ride inline, copied into the payload byte for byte with zero allocation, so arithmetic and loop counters run at register speed and never touch the allocator. Larger values (`STRING`, `LIST`, `MAP`, host types) ride behind a thin pointer to a single owned box holding the concrete Rust type. The pointer stays thin because every payload type is sized, so there are no fat pointers and no trait objects anywhere in the path.
+Scalars that fit (`INT`, `FLOAT`, `BOOL`, handles) ride inline, copied into the payload byte for byte with zero allocation, so arithmetic and loop counters run at register speed and never touch the allocator. Strings and host types ride behind a thin pointer to a single owned box holding the concrete Rust type, while containers (`LIST`, `MAP`) ride behind a thin pointer to a shared reference counted buffer. The pointer stays thin because every payload type is sized, so there are no fat pointers and no trait objects anywhere in the path.
 
 A naive tagged enum needs 32 bytes per value (a 24 byte payload plus tag and padding), so the word form holds four values per 64 byte cache line instead of two.
 
 Type checks compare one descriptor address, and operations (`clone`, `drop`, equality, formatting) call the descriptor directly, with no registry lookup and no lock. Each type owns one compile time descriptor singleton, so identity is pointer equality that fails closed. Host types extend the same path: `#[oxdock_type]` derives a static descriptor for the payload struct, and `inline` selects the zero allocation form for small `Copy` scalars.
 
-There is no garbage collector because values form trees, not graphs. Each heap word owns its box exactly once: cloning allocates a fresh box with a deep copy, dropping frees it. A `LIST` owns its items and a `MAP` owns its entries.
+There is no garbage collector because values form trees, not graphs. Each exclusive heap word owns its box exactly once: cloning allocates a fresh box with a deep copy, dropping frees it. Each container word co-owns its buffer instead: cloning a `LIST` or `MAP` bumps a reference count in constant time with no allocation, dropping releases one count. A `LIST` owns its items and a `MAP` owns its entries.
 
-Nothing is aliased, shared, or mutably borrowed from two places, so cycles cannot form and plain deterministic cleanup suffices. Pointer casts always round trip through the same concrete box type, and inline words never enter the pointer domain, which keeps provenance intact. The lifecycle is checked under Miri.
+Nothing is mutably borrowed from two places, so cycles cannot form and plain deterministic cleanup suffices. Pointer casts always round trip through the same concrete box or buffer type, and inline words never enter the pointer domain, which keeps provenance intact. The lifecycle is checked under Miri.
 
 No pauses, no write barriers, no background collector. Python, JavaScript, and Lua permit aliasing and cycles and need tracing collectors to reclaim them; here there is nothing to trace.
 
@@ -308,7 +308,7 @@ No pauses, no write barriers, no background collector. Python, JavaScript, and L
 | 16 byte word (this design) | 16 bytes | 0 | 4 values per line | Open, static descriptors |
 | NaN boxing (LuaJIT, V8) | 8 bytes | 0 | 8 values per line | Constrained |
 
-Two trade offs come with the form. Cloning a container deep copies it, since there is no reference counting or copy on write. And 16 bytes is roomier than 8 byte NaN boxing, which buys clean 64 bit integer and float storage plus safe abstraction boundaries without pointer masking.
+Two trade offs come with the form. Cloning a string still deep copies it, since only containers share buffers. And 16 bytes is roomier than 8 byte NaN boxing, which buys clean 64 bit integer and float storage plus safe abstraction boundaries without pointer masking.
 
 ### Transport: pipes
 
@@ -2651,11 +2651,11 @@ Boolean `true` or `false`.
 
 ### Value type: LIST
 
-Ordered list of values.
+Ordered list of values. Shared heap: cloning bumps a refcount.
 
 ### Value type: MAP
 
-String-keyed map of values.
+String-keyed map of values. Shared heap: cloning bumps a refcount.
 
 ### Value type: PATH
 

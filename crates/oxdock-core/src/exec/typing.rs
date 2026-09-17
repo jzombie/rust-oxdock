@@ -7,9 +7,10 @@
 //! checking, `TYPES()`, `TYPE_DESCRIBE`) reads the state map.
 
 pub use oxdock_parser::{
-    OxDockType, TypeDescriptor, Value, ValuePayload, clone_boxed, clone_copy, drop_boxed,
-    drop_noop, eq_boxed, eq_inline, fmt_boxed, fmt_inline, load_inline, startup_descriptors,
-    store_inline, type_anchor,
+    OxDockType, TypeDescriptor, Value, ValuePayload, clone_boxed, clone_copy, clone_shared,
+    drop_boxed, drop_noop, drop_shared, eq_boxed, eq_inline, eq_shared, fmt_boxed, fmt_inline,
+    fmt_shared, load_inline, startup_descriptors, store_inline, type_anchor, unshare_boxed,
+    unshare_inline, unshare_shared,
 };
 
 use std::collections::HashMap;
