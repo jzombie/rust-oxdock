@@ -183,7 +183,7 @@ if_statement = ${ if_keyword ~ gap ~ expr ~ gap ~ block ~ gap ~ (blank* ~ gap ~ 
 // Bare `NAME(...)` statements invoke DSL, native, and host functions with one
 // syntax; the `CALL` keyword was removed (hard break, no alias).
 // Static module qualification (#146 follow-up): calls may name their module
-// explicitly (`STD::GLOB(...)`, `POLARS::READ_CSV(...)`); bare `NAME(...)`
+// explicitly (`STD::GLOB(...)`, `MOCK::READ_CSV(...)`); bare `NAME(...)`
 // resolves through `SCRIPT` definitions and `IMPORT`ed modules at lowering
 // time (see IMPORT).
 func_keyword = _{ "FUNC" ~ !(ASCII_ALPHANUMERIC | "_") }
@@ -306,7 +306,7 @@ pipe_name = @{ (ASCII_ALPHANUMERIC | "_" | "-")+ }
 inherit_env_command = ${ "INHERIT_ENV" ~ sep ~ inherit_list }
 inherit_list = { "[" ~ ws? ~ env_key ~ (ws? ~ "," ~ ws? ~ env_key)* ~ ws? ~ "]" }
 
-// IMPORT [STD, POLARS] / IMPORT POLARS — bring module functions into bare-call
+// IMPORT [STD, MOCK] / IMPORT MOCK — bring module functions into bare-call
 // scope from this point to the enclosing block exit. A pure lowering
 // directive: updates LowerCtx import frames, emits zero runtime steps.
 // EXPORT is reserved for future script imports and rejected at lowering.

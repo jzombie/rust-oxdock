@@ -745,7 +745,7 @@ Bring module functions into bare-call scope.
 **Syntax:** `IMPORT [<module>, ...] | IMPORT <module>`
 
 Every function call names its module (`STD::GLOB(...)`,
-`POLARS::READ_CSV(...)`) unless the module is imported:
+`MOCK::READ_CSV(...)`) unless the module is imported:
 `IMPORT [STD]` lets the rest of the scope call `GLOB(...)`
 bare. Calls resolve at parse time against `SCRIPT`
 definitions first, then imported modules; unknown modules,

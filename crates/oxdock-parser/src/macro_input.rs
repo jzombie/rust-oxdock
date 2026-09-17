@@ -155,7 +155,7 @@ fn is_upper_func_head(text: &str) -> bool {
 }
 
 /// True for a call-head token, plain (`GREET`) or module-qualified
-/// (`POLARS::READ_CSV`): every `::` segment is non-empty, leading segments
+/// (`MOCK::READ_CSV`): every `::` segment is non-empty, leading segments
 /// are UPPERCASE, and the tail is identifier-shaped. The tail stays
 /// case-open so `STD::glob(` attaches contiguously and fails at lowering
 /// with a span-accurate UPPERCASE error; the grammar still rejects it.
@@ -544,7 +544,7 @@ fn walk(
                 // A qualified `MODULE::NAME(...)` call opens a statement
                 // under the same conditions: the head starts at the module
                 // identifier, so look ahead over `::`, the name, and the
-                // paren group. Without this, `POLARS::READ_CSV(..)` after a
+                // paren group. Without this, `MOCK::READ_CSV(..)` after a
                 // complete statement glues onto its line (the module ident
                 // alone matches neither the keyword nor the bare-call rule).
                 let is_qualified_call_start = is_upper_func_head(&ident_text)
@@ -582,7 +582,7 @@ fn walk(
                 // a new source line after a complete statement. Same-line
                 // occurrences (command arguments, parenthesized groups)
                 // attach instead. A head continuing a `MODULE::` qualifier
-                // never splits: `POLARS::` plus `READ_CSV(` is one call head
+                // never splits: `MOCK::` plus `READ_CSV(` is one call head
                 // (the split, if any, already happened at the module ident).
                 if (is_bare_call_start || is_qualified_call_start)
                     && !trimmed_empty
@@ -955,7 +955,7 @@ mod tests {
 
     #[test]
     fn qualified_call_never_splits_at_double_colon() {
-        // `POLARS::READ_CSV(...)` lexes as Ident Punct Punct Ident Group:
+        // `MOCK::READ_CSV(...)` lexes as Ident Punct Punct Ident Group:
         // the statement split happens at the module ident (own line), and
         // the walker must not split again between `::` and the name.
         // Intra-line spacing is cosmetic; line structure is what's pinned.
@@ -963,7 +963,7 @@ mod tests {
         // disables line-driven splitting by design.
         let ts: proc_macro2::TokenStream = indoc! {r#"
             WRITE a.txt hi
-            POLARS::READ_CSV("a")
+            MOCK::READ_CSV("a")
         "#}
         .parse()
         .expect("tokens");
@@ -973,7 +973,7 @@ mod tests {
         assert_eq!(lines[0], "WRITE a.txt hi", "got: {script}");
         assert_eq!(
             lines[1].replace(' ', ""),
-            "POLARS::READ_CSV(\"a\")",
+            "MOCK::READ_CSV(\"a\")",
             "got: {script}"
         );
     }

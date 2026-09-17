@@ -365,7 +365,7 @@ fn structural_hint(name: &str, received: &str) -> Option<String> {
             "INHERIT_ENV takes a key list, e.g. `INHERIT_ENV [HOME, PATH]`; got {got}."
         )),
         name if name == KEYWORD_IMPORT => Some(format!(
-            "IMPORT brings module functions into bare-call scope, e.g. `IMPORT [STD]` or `IMPORT [STD, POLARS]`; got {got}."
+            "IMPORT brings module functions into bare-call scope, e.g. `IMPORT [STD]` or `IMPORT [STD, MOCK]`; got {got}."
         )),
         name if name == KEYWORD_EXPORT => Some(
             "`EXPORT` is reserved for future script-module support and cannot be used yet."
@@ -2089,7 +2089,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             summary: "Bring module functions into bare-call scope.",
             description: indoc! {r#"
                 Every function call names its module (`STD::GLOB(...)`,
-                `POLARS::READ_CSV(...)`) unless the module is imported:
+                `MOCK::READ_CSV(...)`) unless the module is imported:
                 `IMPORT [STD]` lets the rest of the scope call `GLOB(...)`
                 bare. Calls resolve at parse time against `SCRIPT`
                 definitions first, then imported modules; unknown modules,
