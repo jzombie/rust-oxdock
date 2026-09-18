@@ -2985,6 +2985,76 @@ fn bridge_no_half_close_defers_fin() {
     miri,
     ignore = "uses real loopback sockets, which die under Miri isolation"
 )]
+fn bridge_listen_refuses_while_serving() {
+    // Accept-one means the listener drops after the first accept: a second
+    // dial while one client is served must refuse, never backlog-and-hang.
+    use std::sync::mpsc::RecvTimeoutError;
+    let steps = crate::parse_script(indoc! {r#"
+        LET $ls: HANDLE = ASYNC {
+          WITH_IO [stdin=pipe:req, stdout=pipe:resp] LISTEN 127.0.0.1:{{ env:BRIDGE_PORT }}
+        }
+        WITH_IO [stdout=pipe:req] ECHO "back"
+        WITH_IO [stdin=pipe:resp] READ_LINE $got
+        AWAIT $ls
+        WRITE out.txt "{{ $got }}"
+    "#})
+    .expect("parse ok");
+    for _ in 0..10 {
+        let port = TcpListener::bind("127.0.0.1:0")
+            .expect("reserve candidate")
+            .local_addr()
+            .expect("candidate addr")
+            .port();
+        let port_text = port.to_string();
+        let attempt = steps.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(run_bridge_steps(
+                &attempt,
+                vec![("BRIDGE_PORT".to_string(), port_text)],
+            ));
+        });
+        match rx.recv_timeout(Duration::from_millis(500)) {
+            // Fast bind failure: stolen port, retry with a fresh candidate.
+            Ok(Err(err)) if format!("{err:#}").contains("bind failed") => continue,
+            Ok(Err(err)) => panic!("bridge script failed: {err:#}"),
+            Ok(Ok(_)) => panic!("script completed without clients"),
+            Err(RecvTimeoutError::Disconnected) => panic!("bridge script thread panicked"),
+            Err(RecvTimeoutError::Timeout) => {
+                // Listener is up (bind is synchronous at task start).
+                let mut first = connect_retry(port);
+                first.write_all(b"hello\n").expect("write hello");
+                // Drain the greeting: dropping with unread bytes pending
+                // would RST instead of FIN and fail the pump read below.
+                let greeting = read_line_deadline(&mut first, "back line");
+                assert_eq!(greeting, b"back\n");
+                std::thread::sleep(Duration::from_millis(500));
+                let dial_addr: std::net::SocketAddr =
+                    format!("127.0.0.1:{port}").parse().expect("addr");
+                match TcpStream::connect_timeout(&dial_addr, Duration::from_secs(2)) {
+                    Err(err) if err.kind() == std::io::ErrorKind::ConnectionRefused => {}
+                    other => panic!("second client must refuse while serving, got {other:?}"),
+                }
+                drop(first);
+                match rx.recv_timeout(Duration::from_secs(15)) {
+                    Ok(Ok(files)) => {
+                        assert_eq!(file_content(&files, "out.txt"), b"hello");
+                        return;
+                    }
+                    Ok(Err(err)) => panic!("bridge script failed: {err:#}"),
+                    Err(_) => panic!("bridge script did not finish after client close"),
+                }
+            }
+        }
+    }
+    panic!("bridge script kept hitting held ports");
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "uses real loopback sockets, which die under Miri isolation"
+)]
 fn bridge_peer_fin_then_late_producer_completes() {
     // The server half-closes immediately; the task must survive the silent
     // period (no premature exit on socket EOF) and still deliver bytes the

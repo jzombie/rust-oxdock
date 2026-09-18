@@ -455,6 +455,11 @@ pub(crate) fn listen<P: ProcessManager>(
             }
         }
     };
+    // Accept-one: drop the listener now that a client is served. Leaving it
+    // open would let the kernel complete further handshakes into the backlog
+    // that nobody will ever accept, so late clients would connect and then
+    // hang instead of being refused.
+    drop(listener);
     stream
         .set_nonblocking(false)
         .with_context(|| format!("step {}: LISTEN failed to configure stream", idx + 1))?;
