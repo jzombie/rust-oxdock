@@ -51,6 +51,83 @@
 //! with [`Engine::run_steps_on`] or [`Engine::run_script_on`]. The free
 //! [`run_steps_with_manager_with_modules`](super::run_steps_with_manager_with_modules)
 //! function remains for callers that never stage host surface at all.
+//!
+//! Registration shapes behind the macros (pure vs stateful functions,
+//! heap vs inline types):
+//!
+//! ```rust
+//! use oxdock_func_macro::{oxdock_func, oxdock_type};
+//! use ::oxdock_core::{OxDockFn, OxDockType};
+//! use ::oxdock_process::DefaultProcessManager;
+//!
+//! /// Echo one value back.
+//! #[oxdock_func(pure, name = "ECHO_VAL")]
+//! fn echo_val(val: ::oxdock_core::Value) -> ::anyhow::Result<::oxdock_core::Value> {
+//!     Ok(val)
+//! }
+//!
+//! /// Read an environment variable, defaulting to empty.
+//! #[oxdock_func(name = "ENV_OR", returns = "STRING")]
+//! fn env_or<P: ::oxdock_core::ProcessManager>(
+//!     cx: &mut ::oxdock_core::StepCtx<P>,
+//!     key: String,
+//! ) -> ::anyhow::Result<::oxdock_core::Value> {
+//!     Ok(::oxdock_core::Value::string(cx.get_env(&key).unwrap_or_default()))
+//! }
+//!
+//! /// Dense vector embedding.
+//! ///
+//! /// Heap type: one box allocation per word.
+//! #[oxdock_type(name = "EMBEDDING")]
+//! #[derive(Debug, Clone, PartialEq)]
+//! struct Embedding(Vec<f32>);
+//!
+//! impl ::std::fmt::Display for Embedding {
+//!     fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
+//!         write!(f, "embedding[{}]", self.0.len())
+//!     }
+//! }
+//!
+//! /// Entity handle.
+//! ///
+//! /// Inline type: zero allocation, rides in the payload.
+//! #[oxdock_type(name = "ENTITY", inline)]
+//! #[derive(Clone, Copy, PartialEq)]
+//! struct EntityId(u64);
+//!
+//! impl ::std::fmt::Display for EntityId {
+//!     fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
+//!         write!(f, "entity#{}", self.0)
+//!     }
+//! }
+//! impl ::std::fmt::Debug for EntityId {
+//!     fn fmt(&self, f: &mut ::std::fmt::Formatter) -> ::std::fmt::Result {
+//!         write!(f, "EntityId({})", self.0)
+//!     }
+//! }
+//!
+//! fn main() {
+//!     let entry: ::oxdock_core::HostRegistration<::oxdock_process::DefaultProcessManager> =
+//!         EchoVal::registration();
+//!     let ::oxdock_core::HostRegistration::Pure { meta, .. } = entry else {
+//!         panic!("pure functions register Pure entries");
+//!     };
+//!     assert_eq!(meta.name, "ECHO_VAL");
+//!     assert_eq!(meta.summary, "Echo one value back.");
+//!     assert_eq!(meta.params.expect("one param").len(), 1);
+//!
+//!     let stateful =
+//!         <EnvOr as OxDockFn<DefaultProcessManager>>::registration();
+//!     let ::oxdock_core::HostRegistration::Stateful { meta, .. } = stateful else {
+//!         panic!("context functions register Stateful entries");
+//!     };
+//!     assert_eq!(meta.name, "ENV_OR");
+//!
+//!     let descriptor = Embedding::descriptor();
+//!     assert_eq!(descriptor.name, "EMBEDDING");
+//!     assert_eq!(descriptor.summary, "Dense vector embedding.");
+//! }
+//! ```
 
 use std::collections::BTreeMap;
 use std::fmt;

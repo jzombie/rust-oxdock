@@ -527,9 +527,6 @@ dependencies = [
 name = "oxdock-func-macro"
 version = "0.16.0-alpha"
 dependencies = [
- "anyhow",
- "oxdock-core",
- "oxdock-process",
  "proc-macro2",
  "quote",
  "syn 3.0.5",

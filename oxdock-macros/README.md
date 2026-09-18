@@ -10,4 +10,4 @@ See the parent repository for the DSL reference and examples: the macros run the
 
 ## License
 
-`oxdock-macros` is distributed under the terms of the Apache License (Version 2.0).
+`oxdock-macros` is distributed under the terms of the [Apache License (Version 2.0)](https://github.com/jzombie/rust-oxdock/blob/main/LICENSE).
