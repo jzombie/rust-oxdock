@@ -1432,7 +1432,7 @@ pub(crate) fn with_io<P: ProcessManager>(
     bindings: &[IoBinding],
     cmd: &StepKind,
 ) -> Result<Flow> {
-    let (step_stdin, next_expose_stdin, step_stdout, step_stderr) =
+    let (step_stdin, next_expose_stdin, step_stdout, step_stderr, out_pipe_name) =
         resolve_io_streams(cx, idx, bindings, cmd)?;
 
     super::steps::execute_single_step_with_generation(
@@ -1445,6 +1445,7 @@ pub(crate) fn with_io<P: ProcessManager>(
         next_expose_stdin,
         step_stdout,
         step_stderr,
+        out_pipe_name,
     )
 }
 
@@ -1463,10 +1464,12 @@ fn resolve_io_streams<P: ProcessManager>(
     bool,
     Option<StreamHandle>,
     Option<StreamHandle>,
+    Option<String>,
 )> {
     let mut step_stdin = CommandStdin::Null;
     let mut step_stdout = cx.out.clone();
     let mut step_stderr = cx.err.clone();
+    let mut out_pipe_name = cx.out_pipe_name.clone();
     let mut next_expose_stdin = false;
     let mut seen_stdin = false;
     let mut seen_stdout = false;
@@ -1498,11 +1501,14 @@ fn resolve_io_streams<P: ProcessManager>(
                     bail!("step {}: WITH_IO declared stdout more than once", idx + 1);
                 }
                 seen_stdout = true;
-                step_stdout = if let Some(target) = &binding.pipe {
+                (step_stdout, out_pipe_name) = if let Some(target) = &binding.pipe {
                     let pipe = resolve_pipe_name(cx, idx, target)?;
-                    Some(cx.state.io.resolve_stdout(idx, &pipe, direct)?)
+                    (
+                        Some(cx.state.io.resolve_stdout(idx, &pipe, direct)?),
+                        Some(pipe),
+                    )
                 } else {
-                    cx.out.clone()
+                    (cx.out.clone(), cx.out_pipe_name.clone())
                 };
             }
             IoStream::Stderr => {
@@ -1520,7 +1526,13 @@ fn resolve_io_streams<P: ProcessManager>(
         }
     }
 
-    Ok((step_stdin, next_expose_stdin, step_stdout, step_stderr))
+    Ok((
+        step_stdin,
+        next_expose_stdin,
+        step_stdout,
+        step_stderr,
+        out_pipe_name,
+    ))
 }
 
 /// Resolve a `WITH_IO` pipe endpoint to a live pipe name. Literals resolve
@@ -1961,7 +1973,7 @@ pub(crate) fn assign_capture<P: ProcessManager>(
             cx.state.declare_var(clean_var, decl_type, value)?;
             return Ok(Flow::Done);
         }
-        let (step_stdin, expose_stdin, step_stdout, step_stderr) =
+        let (step_stdin, expose_stdin, step_stdout, step_stderr, out_pipe_name) =
             resolve_io_streams(cx, idx, &bindings, cmd)?;
         // Reborrow state/process for the sub-context; `cx` is unused below.
         let state = &mut *cx.state;
@@ -1973,6 +1985,7 @@ pub(crate) fn assign_capture<P: ProcessManager>(
             expose_stdin,
             out: step_stdout,
             err: step_stderr,
+            out_pipe_name,
         };
         let value = call_func_value(&mut sub_cx, idx, name, args)?;
         sub_cx
@@ -1992,6 +2005,9 @@ pub(crate) fn assign_capture<P: ProcessManager>(
         cx.expose_stdin,
         capture_out,
         cx.err.clone(),
+        // Capture owns stdout (parse rejects stdout pipes here), so there
+        // is no pipe name to carry.
+        None,
     )?;
     match flow {
         Flow::Done => {}
@@ -2087,47 +2103,28 @@ fn collect_steps_producers(steps: &[Step], out: &mut Vec<(String, bool)>) {
     }
 }
 
-/// Whether a `WITH_IO` body is ultimately a network bridge pump, seen
-/// through nested `WITH_IO` layers. Bridge pumps own their stdout writer
-/// lifetime, so keeper pins must skip them (see below).
-fn is_bridge_command(cmd: &StepKind) -> bool {
-    match cmd {
-        StepKind::WithIo { cmd, .. } => is_bridge_command(cmd),
-        StepKind::Connect { .. } | StepKind::Listen { .. } => true,
-        _ => false,
-    }
-}
-
 fn collect_kind_producers(kind: &StepKind, out: &mut Vec<(String, bool)>) {
     match kind {
         StepKind::WithIo { bindings, cmd } => {
-            // Bridge pumps own their stdout writer lifetime (taken from the
-            // step context and dropped when the socket direction ends, so
-            // downstream EOF tracks the socket instead of thread lifetime).
-            // Pinning a keeper here would wed EOF to thread end and deadlock
-            // pump-to-pump pipe sharing; the spawn gap is already safe
-            // because fresh pipes block instead of EOFing.
-            if !is_bridge_command(cmd) {
-                let promote = promotion_trigger(cmd, true);
-                for binding in bindings {
-                    match binding.stream {
-                        IoStream::Stdout | IoStream::Stderr => {
-                            if let Some(PipeTarget::Name(pipe)) = &binding.pipe {
-                                match out.iter_mut().find(|(name, _)| name == pipe) {
-                                    Some(entry) => {
-                                        entry.1 = entry.1 || promote;
-                                    }
-                                    None => {
-                                        out.push((pipe.clone(), promote));
-                                    }
+            let promote = promotion_trigger(cmd, true);
+            for binding in bindings {
+                match binding.stream {
+                    IoStream::Stdout | IoStream::Stderr => {
+                        if let Some(PipeTarget::Name(pipe)) = &binding.pipe {
+                            match out.iter_mut().find(|(name, _)| name == pipe) {
+                                Some(entry) => {
+                                    entry.1 = entry.1 || promote;
+                                }
+                                None => {
+                                    out.push((pipe.clone(), promote));
                                 }
                             }
-                            // Dynamic (`$var`) endpoints resolve against live
-                            // state at pin time (see `pin_async_keepers`); they
-                            // are invisible to this static walk by design.
                         }
-                        IoStream::Stdin => {}
+                        // Dynamic (`$var`) endpoints resolve against live
+                        // state at pin time (see `pin_async_keepers`); they
+                        // are invisible to this static walk by design.
                     }
+                    IoStream::Stdin => {}
                 }
             }
             collect_kind_producers(cmd, out);
@@ -2171,29 +2168,26 @@ fn collect_dynamic_producers<P: ProcessManager>(
         StepKind::WithIo { bindings, cmd } => {
             // Same promotion analysis as the static walk so a dynamic
             // endpoint pins the same pipe type execution will ensure.
-            // Bridge bodies are skipped like above: no keeper pins.
-            if !is_bridge_command(cmd) {
-                let promote = promotion_trigger(cmd, true);
-                for binding in bindings {
-                    match binding.stream {
-                        IoStream::Stdout | IoStream::Stderr => {
-                            if let Some(PipeTarget::Var(var)) = &binding.pipe
-                                && let Some((kind, value)) = state.get_var_typed(var)
-                                && kind == "PIPE"
-                                && let Some(name) = value.as_pipe_name()
-                            {
-                                match out.iter_mut().find(|(n, _)| n == name) {
-                                    Some(entry) => {
-                                        entry.1 = entry.1 || promote;
-                                    }
-                                    None => {
-                                        out.push((name.to_string(), promote));
-                                    }
+            let promote = promotion_trigger(cmd, true);
+            for binding in bindings {
+                match binding.stream {
+                    IoStream::Stdout | IoStream::Stderr => {
+                        if let Some(PipeTarget::Var(var)) = &binding.pipe
+                            && let Some((kind, value)) = state.get_var_typed(var)
+                            && kind == "PIPE"
+                            && let Some(name) = value.as_pipe_name()
+                        {
+                            match out.iter_mut().find(|(n, _)| n == name) {
+                                Some(entry) => {
+                                    entry.1 = entry.1 || promote;
+                                }
+                                None => {
+                                    out.push((name.to_string(), promote));
                                 }
                             }
                         }
-                        IoStream::Stdin => {}
                     }
+                    IoStream::Stdin => {}
                 }
             }
             collect_dynamic_producers(cmd, state, out);
@@ -2830,13 +2824,14 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
                 expose_stdin,
                 out,
                 err,
+                out_pipe_name: None,
             };
             // Apply call-site bindings (e.g. stdin pipes) like the inline
             // path; stdout keeps the task sink (parse rejects stdout pipes).
             let value = if bindings.is_empty() {
                 call_func_value(&mut child_cx, 0, &name, &args)?
             } else {
-                let (task_stdin, task_expose, task_out, task_err) =
+                let (task_stdin, task_expose, task_out, task_err, _) =
                     resolve_io_streams(&mut child_cx, 0, &bindings, &body[0].kind)?;
                 let state = &mut *child_cx.state;
                 let process = &mut *child_cx.process;
@@ -2847,6 +2842,7 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
                     expose_stdin: task_expose,
                     out: task_out,
                     err: task_err,
+                    out_pipe_name: None,
                 };
                 call_func_value(&mut sub_cx, 0, &name, &args)?
             };

@@ -139,6 +139,12 @@ impl PipeRegistry {
         guard.inners.get(&name).cloned()
     }
 
+    /// Script-pipe backend by name, if one exists. Single lock acquisition
+    /// for the lookup; the caller acts after releasing it.
+    pub(super) fn pipe_backend(&self, name: &str) -> Option<Arc<PipeInner>> {
+        self.lock_inner().inners.get(name).cloned()
+    }
+
     /// Non-destructive snapshot of a script pipe's buffered bytes for
     /// pipe-content assertions. OS-promoted pipes hold kernel bytes this
     /// cannot see, and host-injected or missing pipes have no script
@@ -802,6 +808,12 @@ impl ExecIo {
     /// only by the network bridge for timeout-bounded reads.
     pub(super) fn stdin_pipe_inner(&self, reader: &SharedInput) -> Option<Arc<PipeInner>> {
         self.pipes.inner_for_reader(reader)
+    }
+
+    /// Script-pipe backend by name, if one exists. Used only by the
+    /// network bridge to close its stdout pipe on socket EOF.
+    pub(super) fn pipe_backend(&self, name: &str) -> Option<Arc<PipeInner>> {
+        self.pipes.pipe_backend(name)
     }
 
     /// Snapshot of one pipe for `INSPECT()` diagnostics. Single lock

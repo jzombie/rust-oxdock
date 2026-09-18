@@ -2168,6 +2168,7 @@ fn timeout_preserves_preexisting_cancellation() {
         expose_stdin: false,
         out: None,
         err: None,
+        out_pipe_name: None,
     };
     super::handlers::timeout(&mut cx, 0, &std::time::Duration::from_secs(30), &[])
         .expect("empty body must succeed");
@@ -2759,7 +2760,6 @@ fn bridge_validation_and_gating_need_no_sockets() {
         assert!(msg.contains(needle), "script {script:?}: {msg}");
     }
 }
-
 #[test]
 fn bridge_inner_for_reader_finds_script_backends() {
     let io = ExecIo::new();
@@ -2771,6 +2771,33 @@ fn bridge_inner_for_reader_finds_script_backends() {
     let foreign: oxdock_process::SharedInput =
         Arc::new(Mutex::new(std::io::Cursor::new(Vec::new())));
     assert!(io.stdin_pipe_inner(&foreign).is_none());
+}
+
+#[test]
+fn bridge_force_close_eofs_despite_writer_and_keeper() {
+    let io = ExecIo::new();
+    io.ensure_pipe_for("p", false).expect("ensure");
+    // Attach a live writer and pin a keeper: without force_close neither
+    // lets readers observe EOF.
+    let CommandStdin::Stream(reader) = io.resolve_stdin(0, "p", false).expect("resolve") else {
+        panic!("expected stream stdin");
+    };
+    let writer = match io.resolve_stdout(0, "p", false).expect("resolve") {
+        super::io::StreamHandle::Stream(writer) => writer,
+        _ => panic!("expected stream stdout"),
+    };
+    let _keeper = io.pin_keeper("p").expect("pin").expect("keeper");
+    let backend = io.pipe_backend("p").expect("backend");
+    assert!(io.pipe_backend("missing").is_none());
+    backend.force_close();
+    let mut buf = [0u8; 8];
+    let n = reader
+        .lock()
+        .expect("lock")
+        .read(&mut buf)
+        .expect("read after force_close");
+    assert_eq!(n, 0, "closed pipe reads EOF with writer and keeper live");
+    drop(writer);
 }
 
 #[test]

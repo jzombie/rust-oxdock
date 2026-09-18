@@ -156,12 +156,6 @@ fn resolve_listen_addr(idx: usize, host: &str, port: u16) -> Result<SocketAddr> 
 /// task completion itself reports disconnects with no producer choreography.
 /// Anything else (inherit, OS handles, missing stdout) bails with the
 /// wrapping pattern spelled out.
-///
-/// The stdout writer is TAKEN out of the step context (not cloned): when
-/// the socket direction ends, dropping it signals EOF downstream promptly.
-/// Holding it for the whole step would wed EOF to thread lifetime and,
-/// together with keeper pins, deadlock pump-to-pump sharing (each task
-/// holding the other's stdin open forever).
 fn bridge_streams<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     idx: usize,
@@ -175,7 +169,7 @@ fn bridge_streams<P: ProcessManager>(
             idx + 1
         ),
     };
-    let Some(StreamHandle::Stream(writer)) = cx.out.take() else {
+    let Some(StreamHandle::Stream(writer)) = cx.out.clone() else {
         bail!(
             "step {}: {cmd} requires WITH_IO [..., stdout=pipe:...] bindings",
             idx + 1
@@ -273,13 +267,29 @@ fn pump_in(
 }
 
 /// `socket -> stdout-pipe` direction. Socket EOF ends the direction; the
-/// writer drops on thread exit, signalling EOF downstream once the last
-/// writer and keeper release. Cancellation exits at the next tick.
+/// backend is force-closed so downstream observes EOF promptly instead of
+/// waiting out unrelated writer and keeper lifetimes. Cancellation exits
+/// at the next tick.
 fn pump_out(
     idx: usize,
     cmd: &str,
     writer: SharedOutput,
+    out_inner: Option<Arc<PipeInner>>,
     mut stream: TcpStream,
+    cancel: &AtomicBool,
+) -> Result<()> {
+    let result = pump_out_loop(idx, cmd, &writer, &mut stream, cancel);
+    if let Some(inner) = out_inner {
+        inner.force_close();
+    }
+    result
+}
+
+fn pump_out_loop(
+    idx: usize,
+    cmd: &str,
+    writer: &SharedOutput,
+    stream: &mut TcpStream,
     cancel: &AtomicBool,
 ) -> Result<()> {
     let mut buf = [0u8; CHUNK];
@@ -314,11 +324,13 @@ fn pump_out(
 /// direction runs. Worker errors cascade through the task token so siblings
 /// release promptly; the first error wins for `AWAIT`, external cancellation
 /// reports as cancelled.
+#[allow(clippy::too_many_arguments)]
 fn pump(
     idx: usize,
     cmd: &str,
     input: Option<(SharedInput, Option<Arc<PipeInner>>)>,
     writer: SharedOutput,
+    out_inner: Option<Arc<PipeInner>>,
     stream: TcpStream,
     cancel: &AtomicBool,
     half_close: bool,
@@ -339,7 +351,8 @@ fn pump(
         let mut t_in = input.map(|(reader, inner)| {
             s.spawn(move || pump_in(idx, cmd, reader, inner, sock_in, cancel, half_close))
         });
-        let mut t_out = Some(s.spawn(move || pump_out(idx, cmd, writer, sock_out, cancel)));
+        let mut t_out =
+            Some(s.spawn(move || pump_out(idx, cmd, writer, out_inner, sock_out, cancel)));
         let mut failed: Option<anyhow::Error> = None;
         // Reap finished workers without ever block-joining a live one.
         // External cancellation and observed worker errors both funnel
@@ -418,11 +431,16 @@ pub(crate) fn connect<P: ProcessManager>(
         }
         None => None,
     };
+    let out_inner = cx
+        .out_pipe_name
+        .as_deref()
+        .and_then(|name| cx.state.io.pipe_backend(name));
     pump(
         idx,
         "CONNECT",
         input,
         writer,
+        out_inner,
         stream,
         &cx.state.cancel_token,
         half_close,
@@ -476,7 +494,13 @@ pub(crate) fn listen<P: ProcessManager>(
         }
         None => None,
     };
-    pump(idx, "LISTEN", input, writer, stream, cancel, half_close)
+    let out_inner = cx
+        .out_pipe_name
+        .as_deref()
+        .and_then(|name| cx.state.io.pipe_backend(name));
+    pump(
+        idx, "LISTEN", input, writer, out_inner, stream, cancel, half_close,
+    )
 }
 
 #[cfg(test)]

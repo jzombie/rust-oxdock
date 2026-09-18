@@ -309,6 +309,11 @@ pub struct StepCtx<'a, P: ProcessManager> {
     pub(super) expose_stdin: bool,
     pub(super) out: Option<StreamHandle>,
     pub(super) err: Option<StreamHandle>,
+    /// Pipe name backing `out`, when a `WITH_IO` binding resolved one.
+    /// Uniform context enrichment (populated for every command, read only
+    /// by consumers that need the backend, like the network bridge).
+    /// `None` for inherited, captured, and tee outputs.
+    pub(super) out_pipe_name: Option<String>,
 }
 
 impl<'a, P: ProcessManager> StepCtx<'a, P> {
@@ -383,6 +388,7 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
     expose_stdin: bool,
     out: Option<StreamHandle>,
     err: Option<StreamHandle>,
+    out_pipe_name: Option<String>,
 ) -> Result<Flow> {
     let mut cx = StepCtx {
         state,
@@ -391,6 +397,7 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
         expose_stdin,
         out,
         err,
+        out_pipe_name,
     };
     // Compound steps (loops, functions, scoped wrappers) participate in
     // Flow and dispatch through the Flow path; every other variant runs
@@ -652,6 +659,7 @@ fn execute_steps_inner<P: ProcessManager>(
                 expose_stdin,
                 out: out.clone(),
                 err: err.clone(),
+                out_pipe_name: None,
             };
             // Function/loop control steps dispatch through the Flow path;
             // every other variant runs the leaf pipeline and yields Done.

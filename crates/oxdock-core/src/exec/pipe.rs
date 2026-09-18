@@ -163,6 +163,19 @@ impl PipeInner {
         self.ready.notify_all();
     }
 
+    /// Explicitly close the pipe: readers drain buffered bytes, then observe
+    /// EOF regardless of live writers or keeper pins. General primitive
+    /// (sockets have `shutdown`, files have `close`); pipes previously had
+    /// detach-only EOF. A later writer attachment resurrects the pipe per
+    /// standard attach semantics, so callers must not reuse closed pipes
+    /// for new sessions.
+    pub(super) fn force_close(&self) {
+        let mut state = self.lock_state();
+        state.closed = true;
+        drop(state);
+        self.ready.notify_all();
+    }
+
     /// Pin a keeper slot so transient writer churn can never observe zero
     /// writers. Called synchronously on the spawning thread before an
     /// `ASYNC` worker starts; the returned guard unpins on drop when the
