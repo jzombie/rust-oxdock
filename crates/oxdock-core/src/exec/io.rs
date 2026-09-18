@@ -117,6 +117,21 @@ impl PipeRegistry {
             }
     }
 
+    /// Backend behind a resolved stdin reader, matched by pointer identity
+    /// against registered script-pipe inputs. Lets bridge workers run
+    /// timeout-bounded reads without touching shared pipe semantics.
+    /// Returns `None` for OS-promoted pairs, host-injected handles, and
+    /// unknown readers (those fall back to blocking reads).
+    pub(super) fn inner_for_reader(&self, reader: &SharedInput) -> Option<Arc<PipeInner>> {
+        let guard = self.lock_inner();
+        let name = guard
+            .input
+            .iter()
+            .find(|(_, existing)| Arc::ptr_eq(existing, reader))
+            .map(|(name, _)| name.clone())?;
+        guard.inners.get(&name).cloned()
+    }
+
     /// Non-destructive snapshot of a script pipe's buffered bytes for
     /// pipe-content assertions. OS-promoted pipes hold kernel bytes this
     /// cannot see, and host-injected or missing pipes have no script
@@ -754,6 +769,12 @@ impl ExecIo {
 
     pub(super) fn pipe_exists(&self, name: &str) -> bool {
         self.pipes.exists(name)
+    }
+
+    /// Script-pipe backend behind a resolved stdin reader, if any. Used
+    /// only by the network bridge for timeout-bounded reads.
+    pub(super) fn stdin_pipe_inner(&self, reader: &SharedInput) -> Option<Arc<PipeInner>> {
+        self.pipes.inner_for_reader(reader)
     }
 
     /// Snapshot of one pipe for `INSPECT()` diagnostics. Single lock

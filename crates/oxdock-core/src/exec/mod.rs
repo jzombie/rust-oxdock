@@ -5,6 +5,7 @@ mod fs_ops;
 mod handlers;
 mod io;
 mod native;
+mod net_bridge;
 mod pipe;
 mod state;
 mod steps;
@@ -17,13 +18,13 @@ pub(crate) use self::handlers::{
     dispatch_append, dispatch_assert_contains, dispatch_assert_eq, dispatch_assign,
     dispatch_assign_async_step, dispatch_assign_capture_step, dispatch_async_block,
     dispatch_await_capture_step, dispatch_await_step, dispatch_break, dispatch_call,
-    dispatch_cancel_step, dispatch_continue, dispatch_copy, dispatch_copy_git, dispatch_cwd,
-    dispatch_echo, dispatch_env, dispatch_exit, dispatch_expand, dispatch_for_loop,
-    dispatch_func_def, dispatch_hash_sha256, dispatch_if_then, dispatch_inherit_env, dispatch_ls,
-    dispatch_mkdir, dispatch_read, dispatch_read_line, dispatch_return, dispatch_run,
-    dispatch_run_exec, dispatch_set, dispatch_sleep_step, dispatch_symlink, dispatch_timeout_step,
-    dispatch_while_loop, dispatch_with_io, dispatch_with_io_block, dispatch_workdir,
-    dispatch_workspace, dispatch_write,
+    dispatch_cancel_step, dispatch_connect_step, dispatch_continue, dispatch_copy,
+    dispatch_copy_git, dispatch_cwd, dispatch_echo, dispatch_env, dispatch_exit, dispatch_expand,
+    dispatch_for_loop, dispatch_func_def, dispatch_hash_sha256, dispatch_if_then,
+    dispatch_inherit_env, dispatch_listen_step, dispatch_ls, dispatch_mkdir, dispatch_read,
+    dispatch_read_line, dispatch_return, dispatch_run, dispatch_run_exec, dispatch_set,
+    dispatch_sleep_step, dispatch_symlink, dispatch_timeout_step, dispatch_while_loop,
+    dispatch_with_io, dispatch_with_io_block, dispatch_workdir, dispatch_workspace, dispatch_write,
 };
 pub use self::io::ExecIo;
 pub use self::native::{

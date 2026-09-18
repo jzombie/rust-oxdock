@@ -1,0 +1,18 @@
+# Graceful teardown sequencing: the dialer completes first (its stdin EOFs
+# and the listener half-closes), then the listener drains to EOF and
+# completes. Both AWAITs returning proves close maps to EOF with no hangs.
+LET $ls: HANDLE = ASYNC {
+  WITH_IO [stdin=pipe:req, stdout=pipe:resp] LISTEN 127.0.0.1:{{ env:BRIDGE_PORT }}
+}
+SLEEP 1s
+LET $t: HANDLE = ASYNC {
+  WITH_IO [stdin=pipe:req2, stdout=pipe:resp2] CONNECT 127.0.0.1:{{ env:BRIDGE_PORT }}
+}
+WITH_IO [stdout=pipe:req2] ECHO "hi"
+WITH_IO [stdin=pipe:resp] READ_LINE $got
+WITH_IO [stdout=pipe:req] ECHO "bye"
+WITH_IO [stdin=pipe:resp2] READ_LINE $back
+AWAIT $t
+AWAIT $ls
+WRITE "got.txt" "{{ $got }}"
+WRITE "back.txt" "{{ $back }}"

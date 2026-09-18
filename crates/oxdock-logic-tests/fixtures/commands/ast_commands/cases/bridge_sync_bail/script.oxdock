@@ -1,0 +1,3 @@
+# Bridge steps on the main sequential flow bail instead of hanging: the
+# pump would block on stdin while this producer step waits behind it.
+WITH_IO [stdin=pipe:req, stdout=pipe:resp] CONNECT 127.0.0.1:9

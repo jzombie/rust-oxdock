@@ -1,0 +1,6 @@
+name = "listen_explicit"
+bridge_port = true
+
+[expect]
+files = { "got.txt" = "ping" }
+

@@ -1,0 +1,3 @@
+# Non-loopback binds are rejected at validation time: no socket is ever
+# created, so this needs no network and fails deterministically.
+WITH_IO [stdin=pipe:req, stdout=pipe:resp] LISTEN 0.0.0.0:9

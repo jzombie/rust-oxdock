@@ -1,0 +1,6 @@
+name = "connect_roundtrip"
+bridge_port = true
+
+[expect]
+files = { "got.txt" = "hello", "back.txt" = "back" }
+

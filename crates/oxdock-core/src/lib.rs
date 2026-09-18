@@ -40,6 +40,8 @@ define_pipeline! {
     StepKind::Cancel { .. } => exec::dispatch_cancel_step,
     StepKind::Timeout { .. } => exec::dispatch_timeout_step,
     StepKind::Sleep { .. } => exec::dispatch_sleep_step,
+    StepKind::Connect { .. } => exec::dispatch_connect_step,
+    StepKind::Listen { .. } => exec::dispatch_listen_step,
     StepKind::FuncDef { .. } => exec::dispatch_func_def,
     StepKind::Call { .. } => exec::dispatch_call,
     StepKind::Return { .. } => exec::dispatch_return,

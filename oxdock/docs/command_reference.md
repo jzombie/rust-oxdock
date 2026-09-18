@@ -27,6 +27,8 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | [`HASH_SHA256`](#hash_sha256) | `HASH_SHA256 <path>` |
 | [`EXIT`](#exit) | `EXIT <code>` |
 | [`SLEEP`](#sleep) | `SLEEP <duration>` |
+| [`CONNECT`](#connect) | `CONNECT <host:port> [--timeout <duration>]` |
+| [`LISTEN`](#listen) | `LISTEN [host:]port` |
 | [`WITH_IO`](#with_io) | `WITH_IO [<stream>[=pipe:<name>\|=$var], ...] <command> \| WITH_IO [bindings] { <commands> }` |
 | [`FOR`](#for) | `FOR $item: TYPE IN <expr> { <commands> } \| FOR $key: STRING, $value: TYPE IN <expr> { <commands> }` |
 | [`IF`](#if) | `IF <expr> { <commands> } [ELSE IF <expr> { <commands> } ...] [ELSE { <commands> }]` |
@@ -1629,6 +1631,102 @@ SLEEP $pause
 LET $bare: STRING = 100ms
 SLEEP $bare
 ```
+
+
+### CONNECT
+
+Dial a TCP endpoint and pump it through pipes.
+
+**Syntax:** `CONNECT <host:port> [--timeout <duration>]`
+
+Dials `host:port` and pumps bytes bidirectionally between the
+socket and the ambient `WITH_IO` pipe bindings: socket bytes go
+to bound stdout, bound stdin bytes go to the socket. Pipes stay
+protocol-illiterate byte streams; framing is the script's job.
+
+Must run inside `ASYNC` (a synchronous pump on the main flow
+would block forever waiting for producer steps that run after
+it). Requires `WITH_IO` stdin and stdout pipe bindings; the
+endpoint resolves at runtime, so variables and templates work.
+
+Socket close maps to pipe EOF; stdin EOF half-closes the socket
+write side while the read side continues. Outbound dialing may
+target any host; `LISTEN` binds are loopback-only.
+
+
+**Arguments:**
+
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| `endpoint` | [`STRING`](#value-type-string) | yes | Host and port (`host:port`) |
+
+**Flags:**
+
+| Flag | Type | Description |
+| --- | --- | --- |
+| `--timeout` | `STRING` | Dial timeout (e.g. 5s); defaults to 10s |
+
+**Examples:**
+
+**Example: connect requires async**
+
+```oxdock expect_error:"requires ASYNC"
+WITH_IO [stdin=pipe:req, stdout=pipe:resp] CONNECT 127.0.0.1:8080
+```
+
+**Expected error:** `requires ASYNC`
+
+**Example: connect validates endpoint**
+
+```oxdock expect_error:"invalid endpoint"
+WITH_IO [stdin=pipe:req, stdout=pipe:resp] CONNECT not-an-endpoint
+```
+
+**Expected error:** `invalid endpoint`
+
+
+### LISTEN
+
+Bind a loopback port and pump one connection through pipes.
+
+**Syntax:** `LISTEN [host:]port`
+
+Binds an explicit loopback port and pumps a single accepted
+connection bidirectionally through the ambient `WITH_IO` pipe
+bindings, exactly like `CONNECT` after dialing. Pipes stay
+protocol-illiterate byte streams.
+
+Must run inside `ASYNC`, with the same background-only rule as
+`CONNECT`. Binds are loopback-only with explicit ports: an
+omitted host defaults to `127.0.0.1`, while `0.0.0.0`,
+non-loopback hosts, and ephemeral (`0`) or omitted ports are
+rejected. Ephemeral ports return only with native task-handle
+metadata in a follow-up.
+
+
+**Arguments:**
+
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| `bind` | [`STRING`](#value-type-string) | yes | Loopback bind (`[host:]port`, e.g. 127.0.0.1:8080) |
+
+**Examples:**
+
+**Example: listen rejects non-loopback**
+
+```oxdock expect_error:"loopback"
+WITH_IO [stdin=pipe:req, stdout=pipe:resp] LISTEN 0.0.0.0:8080
+```
+
+**Expected error:** `loopback`
+
+**Example: listen rejects ephemeral**
+
+```oxdock expect_error:"ephemeral"
+WITH_IO [stdin=pipe:req, stdout=pipe:resp] LISTEN 127.0.0.1:0
+```
+
+**Expected error:** `ephemeral`
 
 
 ## Value types

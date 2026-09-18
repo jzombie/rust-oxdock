@@ -1,5 +1,6 @@
 use std::io::{self, Read, Write};
 use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 
 use oxdock_process::{SharedInput, SharedOutput};
 
@@ -211,6 +212,39 @@ impl PipeInner {
                 .ready
                 .wait(state)
                 .map_err(|_| io::Error::other("pipe wait poisoned"))?;
+        }
+    }
+
+    /// Timeout-bounded variant of [`PipeInner::read_into`] for bridge worker
+    /// loops: returns `Ok(None)` when the backstop elapses with no data and
+    /// no close, so cancellation resolves on a tick instead of hanging on a
+    /// condvar. Bridge-only caller; every DSL reader keeps blocking
+    /// `read_into` with unchanged semantics.
+    pub(super) fn read_into_timeout(
+        &self,
+        buf: &mut [u8],
+        backstop: Duration,
+    ) -> io::Result<Option<usize>> {
+        if buf.is_empty() {
+            return Ok(Some(0));
+        }
+        let mut state = self.lock_state();
+        loop {
+            let n = state.buffer.read_into(buf)?;
+            if n > 0 {
+                return Ok(Some(n));
+            }
+            if state.closed {
+                return Ok(Some(0));
+            }
+            let (guard, waited) = self
+                .ready
+                .wait_timeout(state, backstop)
+                .map_err(|_| io::Error::other("pipe wait poisoned"))?;
+            state = guard;
+            if waited.timed_out() {
+                return Ok(None);
+            }
         }
     }
 

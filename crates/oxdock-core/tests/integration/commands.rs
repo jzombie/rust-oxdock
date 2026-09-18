@@ -1741,6 +1741,8 @@ fn _assert_step_kind_exhaustiveness(kind: &StepKind) {
         StepKind::Cancel { .. } => {}
         StepKind::Timeout { .. } => {}
         StepKind::Sleep { .. } => {}
+        StepKind::Connect { .. } => {}
+        StepKind::Listen { .. } => {}
         StepKind::FuncDef { .. } => {}
         StepKind::Call { .. } => {}
         StepKind::Return { .. } => {}

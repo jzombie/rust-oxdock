@@ -1,0 +1,9 @@
+name = "listen_bind_conflict"
+bridge_port = true
+
+[expect]
+status = "failure"
+
+[expect.error]
+contains = "bind failed"
+

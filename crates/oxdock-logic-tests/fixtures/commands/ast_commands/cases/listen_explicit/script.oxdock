@@ -1,0 +1,15 @@
+# Explicit-port listener with a dial-back client: asserts the listener
+# observes the client's bytes. The session ends via CANCEL (the listener's
+# stdin pipe has no writer by design), which also exercises cancel teardown.
+LET $ls: HANDLE = ASYNC {
+  WITH_IO [stdin=pipe:req, stdout=pipe:resp] LISTEN 127.0.0.1:{{ env:BRIDGE_PORT }}
+}
+SLEEP 1s
+LET $t: HANDLE = ASYNC {
+  WITH_IO [stdin=pipe:req2, stdout=pipe:resp2] CONNECT 127.0.0.1:{{ env:BRIDGE_PORT }}
+}
+WITH_IO [stdout=pipe:req2] ECHO "ping"
+WITH_IO [stdin=pipe:resp] READ_LINE $got
+CANCEL $ls
+AWAIT $t
+WRITE "got.txt" "{{ $got }}"

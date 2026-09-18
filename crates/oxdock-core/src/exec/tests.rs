@@ -1,6 +1,7 @@
 use super::*;
 
 use anyhow::bail;
+use indoc::indoc;
 use oxdock_fs::{GuardedPath, MockFs, WorkspaceFs};
 use oxdock_parser::{Guard, GuardExpr, IoBinding, IoStream, StepKind};
 use oxdock_process::{
@@ -9,8 +10,11 @@ use oxdock_process::{
 };
 use oxdock_sys_test_utils::exit_status_from_code;
 use std::collections::HashMap;
+use std::io::{Read, Write};
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::process::ExitStatus;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 /// Run steps expecting failure: discards the success payload (which now
 /// carries the filesystem handle back) so error assertions stay ergonomic.
@@ -2572,4 +2576,369 @@ fn spill_buffer_drain_string_strict_round_trips_and_rejects_non_utf8() {
         .unwrap();
     let err = buf.drain_string_strict().expect_err("non-UTF8 must fail");
     assert!(err.to_string().contains("not valid UTF-8"), "{err}");
+}
+
+// ── Network bridge (LISTEN / CONNECT) ────────────────────────────────────
+//
+// Scripts under test stay `indoc` literals and read their port from
+// `{{ env:BRIDGE_PORT }}`: no `format!`-built scripts, no `\n`-joined
+// continuations, no ad-hoc substitution. Runners supply a fresh port per
+// attempt through the run helpers below.
+
+/// Connect with a deadline: the listener task binds synchronously at spawn,
+/// but thread scheduling means the test must tolerate a slow start.
+#[cfg(not(miri))]
+fn connect_retry(port: u16) -> TcpStream {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        match TcpStream::connect(format!("127.0.0.1:{port}")) {
+            Ok(stream) => return stream,
+            Err(err) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(10));
+                let _ = err;
+            }
+            Err(err) => panic!("connect to test listener failed: {err}"),
+        }
+    }
+}
+
+/// Read one `\n`-terminated line with a deadline so helper failures error
+/// instead of hanging the suite.
+#[cfg(not(miri))]
+fn read_line_deadline(stream: &mut TcpStream, what: &str) -> Vec<u8> {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("set timeout");
+    let mut out = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        match stream.read(&mut byte) {
+            Ok(0) => panic!("EOF waiting for {what}"),
+            Ok(_) => {
+                out.push(byte[0]);
+                if byte[0] == b'\n' {
+                    return out;
+                }
+            }
+            Err(err) => panic!("read waiting for {what} failed: {err}"),
+        }
+    }
+}
+
+/// Run parsed steps on a mock filesystem with a watchdog: socket tests must
+/// fail on a hang, never freeze the suite. `env` seeds `{{ env:... }}`
+/// lookups (fresh `ExecIo` is bypassed here, so entries go straight into
+/// the run state, which is uniquely owned at this point).
+fn run_bridge_steps(
+    steps: &[Step],
+    env: Vec<(String, String)>,
+) -> anyhow::Result<HashMap<String, Vec<u8>>> {
+    let fs = MockFs::new();
+    let mut state = create_exec_state(fs.clone());
+    let state_envs = Arc::get_mut(&mut state.envs).expect("fresh state envs are owned");
+    for (key, value) in env {
+        state_envs.insert(key, value);
+    }
+    let mut proc = MockProcessManager::default();
+    execute_steps(
+        &mut state,
+        &mut proc,
+        steps,
+        CommandStdin::Null,
+        false,
+        None,
+        None,
+        true,
+    )?;
+    Ok(fs.snapshot())
+}
+
+fn run_bridge_script_inner(
+    steps: Vec<Step>,
+    env: Vec<(String, String)>,
+    limit: Duration,
+) -> Result<HashMap<String, Vec<u8>>, String> {
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = done_tx.send(run_bridge_steps(&steps, env));
+    });
+    match done_rx.recv_timeout(limit) {
+        Ok(Ok(files)) => Ok(files),
+        Ok(Err(err)) => Err(format!("{err:#}")),
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            Err(format!("bridge script did not complete within {limit:?}"))
+        }
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            Err("bridge script thread panicked".to_string())
+        }
+    }
+}
+
+fn run_bridge_script(
+    steps: Vec<Step>,
+    env: Vec<(String, String)>,
+    limit: Duration,
+) -> HashMap<String, Vec<u8>> {
+    run_bridge_script_inner(steps, env, limit).unwrap_or_else(|err| panic!("{err}"))
+}
+
+/// Run with a fresh ephemeral candidate per attempt. The candidate is
+/// released immediately, so a stolen port surfaces as a fast, deterministic
+/// bind failure and retries exact (no TOCTOU flake): conflicts fail at bind
+/// time with "bind failed", never mid-run.
+fn run_bridge_script_bind_retry(steps: &[Step], limit: Duration) -> HashMap<String, Vec<u8>> {
+    let mut last = String::new();
+    for _ in 0..10 {
+        let port = TcpListener::bind("127.0.0.1:0")
+            .expect("reserve candidate")
+            .local_addr()
+            .expect("candidate addr")
+            .port();
+        let port_text = port.to_string();
+        match run_bridge_script_inner(
+            steps.to_vec(),
+            vec![("BRIDGE_PORT".to_string(), port_text)],
+            limit,
+        ) {
+            Ok(files) => return files,
+            Err(err) if err.contains("bind failed") => {
+                last = err;
+            }
+            Err(err) => panic!("bridge script failed: {err}"),
+        }
+    }
+    panic!("bridge script kept hitting held ports: {last}");
+}
+
+#[cfg(not(miri))]
+fn file_content(files: &HashMap<String, Vec<u8>>, name: &str) -> Vec<u8> {
+    files
+        .iter()
+        .find(|(path, _)| path.ends_with(name))
+        .map(|(_, bytes)| bytes.clone())
+        .unwrap_or_else(|| panic!("expected file {name}, got {:?}", files.keys()))
+}
+
+#[test]
+fn bridge_validation_and_gating_need_no_sockets() {
+    // Misuse and policy rejection happen before any socket call, so these
+    // run everywhere including Miri.
+    let cases = [
+        (
+            "WITH_IO [stdin=pipe:req, stdout=pipe:resp] CONNECT 127.0.0.1:9\n",
+            "requires ASYNC",
+        ),
+        (
+            "WITH_IO [stdin=pipe:req, stdout=pipe:resp] LISTEN 127.0.0.1:9\n",
+            "requires ASYNC",
+        ),
+        ("CONNECT 127.0.0.1:9\n", "requires WITH_IO"),
+        (
+            "WITH_IO [stdin=pipe:req, stdout=pipe:resp] CONNECT not-an-endpoint\n",
+            "invalid endpoint",
+        ),
+        (
+            "WITH_IO [stdin=pipe:req, stdout=pipe:resp] LISTEN 0.0.0.0:9\n",
+            "loopback",
+        ),
+        (
+            "WITH_IO [stdin=pipe:req, stdout=pipe:resp] LISTEN 127.0.0.1:0\n",
+            "ephemeral",
+        ),
+    ];
+    for (script, needle) in cases {
+        let steps = crate::parse_script(script).expect("parse ok");
+        let err = run_expect_err(
+            Box::new(MockFs::new()),
+            &steps,
+            MockProcessManager::default(),
+        );
+        let msg = format!("{err:#}");
+        assert!(msg.contains(needle), "script {script:?}: {msg}");
+    }
+}
+
+#[test]
+fn bridge_inner_for_reader_finds_script_backends() {
+    let io = ExecIo::new();
+    io.ensure_pipe_for("live", false).expect("ensure");
+    let CommandStdin::Stream(reader) = io.resolve_stdin(0, "live", false).expect("resolve") else {
+        panic!("expected stream stdin");
+    };
+    assert!(io.stdin_pipe_inner(&reader).is_some());
+    let foreign: oxdock_process::SharedInput =
+        Arc::new(Mutex::new(std::io::Cursor::new(Vec::new())));
+    assert!(io.stdin_pipe_inner(&foreign).is_none());
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "uses real loopback sockets, which die under Miri isolation"
+)]
+fn bridge_connect_roundtrip_over_script_pipes() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let server = std::thread::spawn(move || {
+        let (mut conn, _) = listener.accept().expect("accept");
+        conn.set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("timeout");
+        // Read the request line, answer, half-close, then drain to EOF so
+        // the client pump terminates cleanly.
+        let mut request = Vec::new();
+        let mut byte = [0u8; 1];
+        loop {
+            match conn.read(&mut byte).expect("read request") {
+                0 => break,
+                _ => {
+                    request.push(byte[0]);
+                    if byte[0] == b'\n' {
+                        break;
+                    }
+                }
+            }
+        }
+        assert_eq!(request, b"hello\n");
+        conn.write_all(b"world\n").expect("write response");
+        conn.shutdown(Shutdown::Write).expect("half-close");
+        let mut rest = Vec::new();
+        conn.read_to_end(&mut rest).expect("drain");
+    });
+    let steps = crate::parse_script(indoc! {r#"
+        LET $t: HANDLE = ASYNC {
+          WITH_IO [stdin=pipe:req, stdout=pipe:resp] CONNECT 127.0.0.1:{{ env:BRIDGE_PORT }}
+        }
+        WITH_IO [stdout=pipe:req] ECHO "hello"
+        WITH_IO [stdin=pipe:resp] READ_LINE $got
+        AWAIT $t
+        WRITE out.txt "{{ $got }}"
+    "#})
+    .expect("parse ok");
+    let port_text = port.to_string();
+    let files = run_bridge_script(
+        steps,
+        vec![("BRIDGE_PORT".to_string(), port_text)],
+        Duration::from_secs(15),
+    );
+    assert_eq!(file_content(&files, "out.txt"), b"world");
+    server.join().expect("server thread");
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "uses real loopback sockets, which die under Miri isolation"
+)]
+fn bridge_listen_explicit_full_duplex() {
+    use std::sync::mpsc::RecvTimeoutError;
+    let steps = crate::parse_script(indoc! {r#"
+        LET $ls: HANDLE = ASYNC {
+          WITH_IO [stdin=pipe:req, stdout=pipe:resp] LISTEN 127.0.0.1:{{ env:BRIDGE_PORT }}
+        }
+        WITH_IO [stdout=pipe:req] ECHO "back"
+        WITH_IO [stdin=pipe:resp] READ_LINE $got
+        AWAIT $ls
+        WRITE out.txt "{{ $got }}"
+    "#})
+    .expect("parse ok");
+    for _ in 0..10 {
+        let port = TcpListener::bind("127.0.0.1:0")
+            .expect("reserve candidate")
+            .local_addr()
+            .expect("candidate addr")
+            .port();
+        let port_text = port.to_string();
+        let attempt = steps.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(run_bridge_steps(
+                &attempt,
+                vec![("BRIDGE_PORT".to_string(), port_text)],
+            ));
+        });
+        match rx.recv_timeout(Duration::from_millis(500)) {
+            // Fast bind failure: stolen port, retry with a fresh candidate.
+            Ok(Err(err)) if format!("{err:#}").contains("bind failed") => continue,
+            Ok(Err(err)) => panic!("bridge script failed: {err:#}"),
+            Ok(Ok(_)) => panic!("script completed without a client"),
+            Err(RecvTimeoutError::Disconnected) => panic!("bridge script thread panicked"),
+            Err(RecvTimeoutError::Timeout) => {
+                // Listener is up (bind is synchronous at task start).
+                let mut client = connect_retry(port);
+                client.write_all(b"hello\n").expect("write hello");
+                let reply = read_line_deadline(&mut client, "back line");
+                assert_eq!(reply, b"back\n");
+                drop(client);
+                match rx.recv_timeout(Duration::from_secs(15)) {
+                    Ok(Ok(files)) => {
+                        assert_eq!(file_content(&files, "out.txt"), b"hello");
+                        return;
+                    }
+                    Ok(Err(err)) => panic!("bridge script failed: {err:#}"),
+                    Err(_) => panic!("bridge script did not finish after client close"),
+                }
+            }
+        }
+    }
+    panic!("bridge script kept hitting held ports");
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "uses real loopback sockets, which die under Miri isolation"
+)]
+fn bridge_peer_fin_then_late_producer_completes() {
+    // The server half-closes immediately; the task must survive the silent
+    // period (no premature exit on socket EOF) and still deliver bytes the
+    // script produces afterwards.
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let server = std::thread::spawn(move || {
+        let (mut conn, _) = listener.accept().expect("accept");
+        conn.set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("timeout");
+        conn.shutdown(Shutdown::Write).expect("half-close");
+        let mut rest = Vec::new();
+        conn.read_to_end(&mut rest).expect("drain");
+        assert_eq!(rest, b"late\n");
+    });
+    let steps = crate::parse_script(indoc! {r#"
+        LET $t: HANDLE = ASYNC {
+          WITH_IO [stdin=pipe:req, stdout=pipe:resp] CONNECT 127.0.0.1:{{ env:BRIDGE_PORT }}
+        }
+        SLEEP 300ms
+        WITH_IO [stdout=pipe:req] ECHO "late"
+        AWAIT $t
+    "#})
+    .expect("parse ok");
+    let port_text = port.to_string();
+    run_bridge_script(
+        steps,
+        vec![("BRIDGE_PORT".to_string(), port_text)],
+        Duration::from_secs(15),
+    );
+    server.join().expect("server thread");
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "uses real loopback sockets, which die under Miri isolation"
+)]
+fn bridge_cancel_accept_blocked_listener() {
+    let steps = crate::parse_script(indoc! {r#"
+        LET $ls: HANDLE = ASYNC {
+          WITH_IO [stdin=pipe:req, stdout=pipe:resp] LISTEN 127.0.0.1:{{ env:BRIDGE_PORT }}
+        }
+        CANCEL $ls
+    "#})
+    .expect("parse ok");
+    let start = std::time::Instant::now();
+    let files = run_bridge_script_bind_retry(&steps, Duration::from_secs(15));
+    assert!(
+        start.elapsed() < Duration::from_secs(5),
+        "CANCEL of an accept-blocked LISTEN must return promptly"
+    );
+    drop(files);
 }

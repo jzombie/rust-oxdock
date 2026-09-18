@@ -1,0 +1,6 @@
+name = "bridge_close_eof"
+bridge_port = true
+
+[expect]
+files = { "got.txt" = "hi", "back.txt" = "bye" }
+

@@ -1,0 +1,7 @@
+name = "bridge_privileged_reject"
+
+[expect]
+status = "failure"
+
+[expect.error]
+contains = "loopback"

@@ -1,0 +1,6 @@
+name = "bridge_cancel"
+bridge_port = true
+
+[expect]
+files = { "done.txt" = "cancelled" }
+

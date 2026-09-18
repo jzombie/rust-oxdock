@@ -1,0 +1,11 @@
+# Second bind on a held explicit port fails deterministically: the first
+# listener holds 127.0.0.1:{{ env:BRIDGE_PORT }} accept-blocked while the second bind runs.
+# AWAIT surfaces the root-cause bind error directly (no discovery involved).
+LET $a: HANDLE = ASYNC {
+  WITH_IO [stdin=pipe:r1, stdout=pipe:w1] LISTEN 127.0.0.1:{{ env:BRIDGE_PORT }}
+}
+SLEEP 1s
+LET $b: HANDLE = ASYNC {
+  WITH_IO [stdin=pipe:r2, stdout=pipe:w2] LISTEN 127.0.0.1:{{ env:BRIDGE_PORT }}
+}
+AWAIT $b

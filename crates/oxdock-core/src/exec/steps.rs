@@ -573,6 +573,18 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
             let duration = super::args::resolve_arg_as_duration(duration, &mut cx)?;
             handlers::sleep(&mut cx, idx, &duration)
         }
+        StepKind::Connect { endpoint, timeout } => {
+            let endpoint_resolved = super::args::resolve_arg(endpoint, &mut cx)?;
+            let timeout_resolved = timeout
+                .as_ref()
+                .map(|flag| super::args::resolve_arg_as_duration(flag, &mut cx))
+                .transpose()?;
+            super::net_bridge::connect(&mut cx, idx, &endpoint_resolved, timeout_resolved)
+        }
+        StepKind::Listen { bind } => {
+            let bind_resolved = super::args::resolve_arg(bind, &mut cx)?;
+            super::net_bridge::listen(&mut cx, idx, &bind_resolved)
+        }
         StepKind::FuncDef { .. }
         | StepKind::Call { .. }
         | StepKind::Return { .. }
@@ -821,6 +833,23 @@ fn execute_steps_inner<P: ProcessManager>(
                         StepKind::Sleep { duration } => {
                             let duration = super::args::resolve_arg_as_duration(duration, &mut cx)?;
                             handlers::sleep(&mut cx, idx, &duration)
+                        }
+                        StepKind::Connect { endpoint, timeout } => {
+                            let endpoint_resolved = super::args::resolve_arg(endpoint, &mut cx)?;
+                            let timeout_resolved = timeout
+                                .as_ref()
+                                .map(|flag| super::args::resolve_arg_as_duration(flag, &mut cx))
+                                .transpose()?;
+                            super::net_bridge::connect(
+                                &mut cx,
+                                idx,
+                                &endpoint_resolved,
+                                timeout_resolved,
+                            )
+                        }
+                        StepKind::Listen { bind } => {
+                            let bind_resolved = super::args::resolve_arg(bind, &mut cx)?;
+                            super::net_bridge::listen(&mut cx, idx, &bind_resolved)
                         }
                         StepKind::FuncDef { .. }
                         | StepKind::Call { .. }

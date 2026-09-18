@@ -420,6 +420,36 @@ pub(crate) fn dispatch_sleep_step<P: ProcessManager>(
     sleep(cx, 0, &duration)
 }
 
+/// Pipeline dispatch wrapper for `Connect`. Used by the generated pipeline;
+/// the inline steps matches resolve with the real step index instead.
+pub(crate) fn dispatch_connect_step<P: ProcessManager>(
+    step: &StepKind,
+    cx: &mut StepCtx<'_, P>,
+) -> Result<()> {
+    let StepKind::Connect { endpoint, timeout } = step else {
+        unreachable!()
+    };
+    let endpoint = super::args::resolve_arg(endpoint, cx)?;
+    let timeout = timeout
+        .as_ref()
+        .map(|flag| super::args::resolve_arg_as_duration(flag, cx))
+        .transpose()?;
+    super::net_bridge::connect(cx, 0, &endpoint, timeout)
+}
+
+/// Pipeline dispatch wrapper for `Listen`. Used by the generated pipeline;
+/// the inline steps matches resolve with the real step index instead.
+pub(crate) fn dispatch_listen_step<P: ProcessManager>(
+    step: &StepKind,
+    cx: &mut StepCtx<'_, P>,
+) -> Result<()> {
+    let StepKind::Listen { bind } = step else {
+        unreachable!()
+    };
+    let bind = super::args::resolve_arg(bind, cx)?;
+    super::net_bridge::listen(cx, 0, &bind)
+}
+
 /// Dispatch `SLEEP <duration>` — park the step without spawning a shell.
 ///
 /// Cooperative: sleeps in bounded chunks and checks the cancellation token

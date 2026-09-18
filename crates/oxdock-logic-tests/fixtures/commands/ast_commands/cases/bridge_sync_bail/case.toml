@@ -1,0 +1,7 @@
+name = "bridge_sync_bail"
+
+[expect]
+status = "failure"
+
+[expect.error]
+contains = "requires ASYNC"

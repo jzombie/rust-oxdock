@@ -85,6 +85,10 @@ struct CaseSpec {
     stdin: Option<String>,
     env: Vec<(String, String)>,
     env_remove: Vec<String>,
+    /// Opt-in dynamic loopback port: when true, the runner injects a fresh
+    /// `BRIDGE_PORT` env entry per trial (pid-scrambled base, atomic offsets
+    /// within the process), so bridge fixtures bind without hardcoded ports.
+    bridge_port: bool,
     expect_error: Option<ErrorExpectation>,
     expectations: Expectations,
     pipes: BTreeMap<String, PipeSpec>,
@@ -328,6 +332,10 @@ fn load_case_spec(
         .map(parse_string_array)
         .transpose()?
         .unwrap_or_default();
+    let bridge_port = doc
+        .get("bridge_port")
+        .and_then(|item| item.as_bool())
+        .unwrap_or(false);
 
     Ok(CaseSpec {
         name,
@@ -338,10 +346,22 @@ fn load_case_spec(
         stdin,
         env,
         env_remove,
+        bridge_port,
         expect_error,
         expectations,
         pipes,
     })
+}
+
+/// Fresh loopback port per bridge trial: a pid-scrambled base keeps
+/// concurrent suite runs on one host apart, while the atomic counter keeps
+/// parallel trials in one process apart. Ports bind at case-run time, so
+/// there is no reserve-then-release TOCTOU window.
+fn allocate_bridge_port() -> u16 {
+    use std::sync::atomic::{AtomicU16, Ordering};
+    static NEXT_OFFSET: AtomicU16 = AtomicU16::new(0);
+    let base = 20000 + (std::process::id() % 2000) as u16;
+    base + NEXT_OFFSET.fetch_add(1, Ordering::SeqCst) % 500
 }
 
 fn parse_build_context(value: Option<&str>) -> Result<BuildContext> {
@@ -845,6 +865,9 @@ fn run_case(case: &CaseSpec, steps: &[Step]) -> Result<()> {
     }
     for (key, value) in &case.env {
         io_cfg.insert_inherit_env(key.clone(), value.clone());
+    }
+    if case.bridge_port {
+        io_cfg.insert_inherit_env("BRIDGE_PORT", allocate_bridge_port().to_string());
     }
 
     let mut pipe_buffers: Vec<PipeBuffer> = Vec::new();
@@ -1421,6 +1444,8 @@ fn step_kind_name(kind: &StepKind) -> &'static str {
         StepKind::Cancel { .. } => "Cancel",
         StepKind::Timeout { .. } => "Timeout",
         StepKind::Sleep { .. } => "Sleep",
+        StepKind::Connect { .. } => "Connect",
+        StepKind::Listen { .. } => "Listen",
         StepKind::FuncDef { .. } => "FuncDef",
         StepKind::Call { .. } => "Call",
         StepKind::Return { .. } => "Return",

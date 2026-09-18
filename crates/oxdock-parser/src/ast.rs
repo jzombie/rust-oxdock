@@ -67,6 +67,8 @@ pub enum Command {
     Async,
     Timeout,
     Sleep,
+    Connect,
+    Listen,
 }
 
 pub const COMMANDS: &[Command] = &[
@@ -94,6 +96,8 @@ pub const COMMANDS: &[Command] = &[
     Command::Exit,
     Command::Timeout,
     Command::Sleep,
+    Command::Connect,
+    Command::Listen,
 ];
 
 impl Command {
@@ -124,6 +128,8 @@ impl Command {
             Command::Async => "ASYNC",
             Command::Timeout => "TIMEOUT",
             Command::Sleep => "SLEEP",
+            Command::Connect => "CONNECT",
+            Command::Listen => "LISTEN",
         }
     }
 
@@ -156,6 +162,8 @@ impl Command {
                 "TIMEOUT <duration> <command...> | TIMEOUT <duration> { <commands> }"
             }
             Command::Sleep => "SLEEP <duration>",
+            Command::Connect => "CONNECT <host:port> [--timeout <duration>]",
+            Command::Listen => "LISTEN [host:]port",
         }
     }
 
@@ -190,6 +198,8 @@ impl Command {
             "ASYNC" => Some(Command::Async),
             "TIMEOUT" => Some(Command::Timeout),
             "SLEEP" => Some(Command::Sleep),
+            "CONNECT" => Some(Command::Connect),
+            "LISTEN" => Some(Command::Listen),
             _ => None,
         }
     }

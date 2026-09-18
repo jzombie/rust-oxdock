@@ -1,0 +1,8 @@
+# CANCEL of an accept-blocked listener returns promptly: no client ever
+# connects, so the acceptor only ever sees the cancellation token.
+LET $ls: HANDLE = ASYNC {
+  WITH_IO [stdin=pipe:req, stdout=pipe:resp] LISTEN 127.0.0.1:{{ env:BRIDGE_PORT }}
+}
+SLEEP 500ms
+CANCEL $ls
+WRITE "done.txt" "cancelled"

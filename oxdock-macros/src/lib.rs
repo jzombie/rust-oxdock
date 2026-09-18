@@ -1186,6 +1186,20 @@ fn emit_stepkind(
         }
         StepKind::Break => quote! { StepKind::Break },
         StepKind::Continue => quote! { StepKind::Continue },
+        StepKind::Connect { endpoint, timeout } => {
+            let e = emit_arg(endpoint, interp);
+            match timeout {
+                Some(t) => {
+                    let d = emit_arg(t, interp);
+                    quote! { StepKind::Connect { endpoint: #e, timeout: Some(#d) } }
+                }
+                None => quote! { StepKind::Connect { endpoint: #e, timeout: None } },
+            }
+        }
+        StepKind::Listen { bind } => {
+            let b = emit_arg(bind, interp);
+            quote! { StepKind::Listen { bind: #b } }
+        }
     }
 }
 
