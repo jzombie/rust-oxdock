@@ -7,6 +7,8 @@
 # Stop it:  Ctrl-C, or just disconnect the client: with nothing left to
 #           send, the session ends and the script notices on its own.
 #
+# Note: If debugging with local Orbstack, the default orb_port is 32222.
+#
 # --no-half-close keeps the write side open after the greeting: without it
 # the greeting's EOF would FIN the socket and interactive clients like nc
 # would drop immediately.
