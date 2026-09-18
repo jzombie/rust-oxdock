@@ -230,9 +230,9 @@ fn teardown_wakes_blocked_accept() {
     "#};
     let start = Instant::now();
     let err = run_script(&root, script).expect_err("ACCEPT must fail after close");
-    // Note: ASYNC task errors surface stringified (the cause chain does
-    // not cross the task boundary), so only the wrapper text is visible.
-    assert!(format!("{err:#}").contains("SSH_ACCEPT"), "{err:#}");
+    // ASYNC task errors now carry the full causal chain across the task
+    // boundary, so the inner close reason is visible end to end.
+    assert!(format!("{err:#}").contains("closed"), "{err:#}");
     assert!(
         start.elapsed() < Duration::from_secs(15),
         "close must wake the waiter promptly"

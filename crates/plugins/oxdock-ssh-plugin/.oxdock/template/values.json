@@ -1,0 +1,1 @@
+{"name": "oxdock-ssh-plugin", "description": "Ephemeral user-space SSH server and client for OxDock scripts, bridged to stdio pipelines through the Engine facade."}

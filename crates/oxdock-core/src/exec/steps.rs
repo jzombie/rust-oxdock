@@ -86,8 +86,13 @@ impl BackgroundHandle for ThreadJoinHandle {
                 return Ok(None);
             }
         }
+        // anyhow::Error is not Clone and this method may run repeatedly,
+        // so the preserved error is re-emitted rather than moved. The
+        // alternate display (`{err:#}`) flattens the full causal chain
+        // into the new message: `{err}` alone would drop every
+        // `Caused by` layer at the ASYNC task boundary.
         if let Some(ref err) = self.thread_error {
-            Err(anyhow::anyhow!("{err}"))
+            Err(anyhow::anyhow!("{err:#}"))
         } else {
             Ok(Some(exit_status_from_code(0)))
         }
@@ -109,8 +114,9 @@ impl BackgroundHandle for ThreadJoinHandle {
 
     fn wait(&mut self) -> Result<ExitStatus> {
         self.reap();
+        // Same chain-preserving re-emit as `try_wait` above.
         if let Some(ref err) = self.thread_error {
-            Err(anyhow::anyhow!("{err}"))
+            Err(anyhow::anyhow!("{err:#}"))
         } else {
             Ok(exit_status_from_code(0))
         }

@@ -1848,6 +1848,37 @@ fn timeout_preempts_hung_await() {
 }
 
 #[test]
+fn async_task_failure_preserves_error_chain() {
+    // The same failure must render the same causal chain on the main flow
+    // and across an ASYNC boundary: the task join re-emits the preserved
+    // error, it must not amputate `Caused by` layers.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let direct = run_script(&root, "READ missing.txt\n").expect_err("missing file must fail");
+    let direct_chain = format!("{direct:#}");
+    #[cfg(unix)]
+    let os_layer = "No such file or directory";
+    #[cfg(windows)]
+    let os_layer = "cannot find the file";
+    assert!(
+        direct_chain.contains("failed to open") && direct_chain.contains(os_layer),
+        "direct failure must carry a two-layer chain, got: {direct_chain}"
+    );
+    let via_task = run_script(&root, "LET $t: HANDLE = ASYNC READ missing.txt\nAWAIT $t\n")
+        .expect_err("task failure must propagate");
+    // The join re-emits the preserved error flattened into one message,
+    // so every causal layer must appear inline (no `causes:` structure
+    // survives, but no layer may go missing either).
+    let task_chain = format!("{via_task:#}");
+    assert!(
+        task_chain.contains("failed to open")
+            && task_chain.contains("for reading")
+            && task_chain.contains(os_layer),
+        "task boundary must preserve every causal layer.\ndirect: {direct_chain}\ntask:   {task_chain}"
+    );
+}
+
+#[test]
 #[cfg_attr(miri, ignore = "concurrent CANCEL/AWAIT Zhang real background threads")]
 fn concurrent_cancel_and_await_race() {
     // A background thread CANCELs while the main thread AWAITs the same
