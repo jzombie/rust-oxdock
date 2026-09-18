@@ -2732,7 +2732,9 @@ fn bridge_validation_and_gating_need_no_sockets() {
             "WITH_IO [stdin=pipe:req, stdout=pipe:resp] LISTEN 127.0.0.1:9\n",
             "requires ASYNC",
         ),
-        ("CONNECT 127.0.0.1:9\n", "requires WITH_IO"),
+        // Bare CONNECT passes bindings now (null stdin means half-closed),
+        // so it fails at the same ASYNC gate.
+        ("CONNECT 127.0.0.1:9\n", "requires ASYNC"),
         (
             "WITH_IO [stdin=pipe:req, stdout=pipe:resp] CONNECT not-an-endpoint\n",
             "invalid endpoint",
@@ -2881,6 +2883,42 @@ fn bridge_listen_explicit_full_duplex() {
         }
     }
     panic!("bridge script kept hitting held ports");
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "uses real loopback sockets, which die under Miri isolation"
+)]
+fn bridge_read_only_pump_completes_on_disconnect() {
+    // No stdin binding anywhere: the pump starts half-closed, delivers
+    // socket bytes, and the task completes on disconnect with nothing to
+    // choreograph. This is disconnect detection without producer steps.
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let server = std::thread::spawn(move || {
+        let (mut conn, _) = listener.accept().expect("accept");
+        conn.set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("timeout");
+        conn.write_all(b"hi\n").expect("write");
+    });
+    let steps = crate::parse_script(indoc! {r#"
+        LET $t: HANDLE = ASYNC {
+          WITH_IO [stdout=pipe:resp] CONNECT 127.0.0.1:{{ env:BRIDGE_PORT }}
+        }
+        WITH_IO [stdin=pipe:resp] READ_LINE $got
+        AWAIT $t
+        WRITE out.txt "{{ $got }}"
+    "#})
+    .expect("parse ok");
+    let port_text = port.to_string();
+    let files = run_bridge_script(
+        steps,
+        vec![("BRIDGE_PORT".to_string(), port_text)],
+        Duration::from_secs(15),
+    );
+    assert_eq!(file_content(&files, "out.txt"), b"hi");
+    server.join().expect("server thread");
 }
 
 #[test]

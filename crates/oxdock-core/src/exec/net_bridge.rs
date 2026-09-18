@@ -150,19 +150,24 @@ fn resolve_listen_addr(idx: usize, host: &str, port: u16) -> Result<SocketAddr> 
         .ok_or_else(|| anyhow!("step {}: LISTEN binds loopback-only; got {host}", idx + 1))
 }
 
-/// Require ambient `WITH_IO` pipe bindings: a stream stdin and a stream
-/// stdout. Anything else (null, inherit, OS handles, missing) bails with
-/// the wrapping pattern spelled out.
+/// Require ambient `WITH_IO` pipe bindings: a stream stdout, and either a
+/// stream stdin or none at all. A missing stdin (`Null`) is not an error:
+/// the pump starts half-closed and carries socket bytes to stdout only, so
+/// task completion itself reports disconnects with no producer choreography.
+/// Anything else (inherit, OS handles, missing stdout) bails with the
+/// wrapping pattern spelled out.
 fn bridge_streams<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     idx: usize,
     cmd: &str,
-) -> Result<(SharedInput, SharedOutput)> {
-    let CommandStdin::Stream(reader) = cx.stdin.clone() else {
-        bail!(
-            "step {}: {cmd} requires WITH_IO [stdin=pipe:...] bindings",
+) -> Result<(Option<SharedInput>, SharedOutput)> {
+    let reader = match cx.stdin.clone() {
+        CommandStdin::Stream(reader) => Some(reader),
+        CommandStdin::Null => None,
+        _ => bail!(
+            "step {}: {cmd} requires WITH_IO [stdin=pipe:...] bindings for input",
             idx + 1
-        );
+        ),
     };
     let Some(StreamHandle::Stream(writer)) = cx.out.clone() else {
         bail!(
@@ -293,19 +298,26 @@ fn pump_out(
 }
 
 /// Pump bytes bidirectionally on the calling (supervisor) thread: spawn one
-/// worker per direction, then tick supervisor duties (completion vs the
-/// task cancellation token) until both workers are reaped. Worker errors
-/// cascade through the task token so siblings release promptly; the first
-/// error wins for `AWAIT`, external cancellation reports as cancelled.
+/// worker per bound direction, then tick supervisor duties (completion vs the
+/// task cancellation token) until every worker is reaped. With no stdin
+/// reader the socket write-half closes up front and only the socket
+/// direction runs. Worker errors cascade through the task token so siblings
+/// release promptly; the first error wins for `AWAIT`, external cancellation
+/// reports as cancelled.
 fn pump(
     idx: usize,
     cmd: &str,
-    reader: SharedInput,
-    inner: Option<Arc<PipeInner>>,
+    input: Option<(SharedInput, Option<Arc<PipeInner>>)>,
     writer: SharedOutput,
     stream: TcpStream,
     cancel: &AtomicBool,
 ) -> Result<()> {
+    if input.is_none() {
+        // Half-closed from the start: no stdin will ever arrive. A fresh
+        // socket cannot be peer-gone yet; anything odd surfaces through the
+        // pump threads below.
+        let _ = suppress_peer_gone(stream.shutdown(Shutdown::Write));
+    }
     let sock_in = stream
         .try_clone()
         .with_context(|| format!("step {}: {cmd} failed to clone socket", idx + 1))?;
@@ -313,8 +325,10 @@ fn pump(
         .try_clone()
         .with_context(|| format!("step {}: {cmd} failed to clone socket", idx + 1))?;
     std::thread::scope(|s| {
-        let mut t_in = Some(s.spawn(|| pump_in(idx, cmd, reader, inner, sock_in, cancel)));
-        let mut t_out = Some(s.spawn(|| pump_out(idx, cmd, writer, sock_out, cancel)));
+        let mut t_in = input.map(|(reader, inner)| {
+            s.spawn(move || pump_in(idx, cmd, reader, inner, sock_in, cancel))
+        });
+        let mut t_out = Some(s.spawn(move || pump_out(idx, cmd, writer, sock_out, cancel)));
         let mut failed: Option<anyhow::Error> = None;
         // Reap finished workers without ever block-joining a live one.
         // External cancellation and observed worker errors both funnel
@@ -385,12 +399,17 @@ pub(crate) fn connect<P: ProcessManager>(
         .ok_or_else(|| anyhow!("step {}: CONNECT {endpoint:?} did not resolve", idx + 1))?;
     let stream = TcpStream::connect_timeout(&addr, timeout.unwrap_or(DEFAULT_DIAL_TIMEOUT))
         .with_context(|| format!("step {}: CONNECT {endpoint:?} dial failed", idx + 1))?;
-    let inner = cx.state.io.stdin_pipe_inner(&reader);
+    let input = match reader {
+        Some(reader) => {
+            let inner = cx.state.io.stdin_pipe_inner(&reader);
+            Some((reader, inner))
+        }
+        None => None,
+    };
     pump(
         idx,
         "CONNECT",
-        reader,
-        inner,
+        input,
         writer,
         stream,
         &cx.state.cancel_token,
@@ -431,8 +450,14 @@ pub(crate) fn listen<P: ProcessManager>(
     stream
         .set_nonblocking(false)
         .with_context(|| format!("step {}: LISTEN failed to configure stream", idx + 1))?;
-    let inner = cx.state.io.stdin_pipe_inner(&reader);
-    pump(idx, "LISTEN", reader, inner, writer, stream, cancel)
+    let input = match reader {
+        Some(reader) => {
+            let inner = cx.state.io.stdin_pipe_inner(&reader);
+            Some((reader, inner))
+        }
+        None => None,
+    };
+    pump(idx, "LISTEN", input, writer, stream, cancel)
 }
 
 #[cfg(test)]

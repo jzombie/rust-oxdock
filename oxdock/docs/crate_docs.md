@@ -2547,8 +2547,11 @@ protocol-illiterate byte streams; framing is the script's job.
 
 Must run inside `ASYNC` (a synchronous pump on the main flow
 would block forever waiting for producer steps that run after
-it). Requires `WITH_IO` stdin and stdout pipe bindings; the
-endpoint resolves at runtime, so variables and templates work.
+it). Requires a `WITH_IO` stdout pipe binding; stdin may be
+omitted, in which case the socket write-half closes immediately
+and the pump only carries socket bytes to stdout, so task
+completion itself reports disconnects. The endpoint resolves at
+runtime, so variables and templates work.
 
 Socket close maps to pipe EOF; stdin EOF half-closes the socket
 write side while the read side continues. Outbound dialing may
@@ -2598,7 +2601,8 @@ bindings, exactly like `CONNECT` after dialing. Pipes stay
 protocol-illiterate byte streams.
 
 Must run inside `ASYNC`, with the same background-only rule as
-`CONNECT`. Binds are loopback-only with explicit ports: an
+`CONNECT` (stdin may likewise be omitted for a read-only pump).
+Binds are loopback-only with explicit ports: an
 omitted host defaults to `127.0.0.1`, while `0.0.0.0`,
 non-loopback hosts, and ephemeral (`0`) or omitted ports are
 rejected. Ephemeral ports return only with native task-handle
