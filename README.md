@@ -1693,6 +1693,8 @@ FUNC GREET($name: STRING) {
 }
 LET $res: STRING = GREET("ada")
 ASSERT_EQ $res "ada"
+# Statement form: parens stay, the value drops.
+GREET("bex")
 ```
 
 **Example: call with pipes**

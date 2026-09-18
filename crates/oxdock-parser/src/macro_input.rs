@@ -160,7 +160,7 @@ fn is_upper_func_head(text: &str) -> bool {
 /// case-open so `STD::glob(` attaches contiguously and fails at lowering
 /// with a span-accurate UPPERCASE error; the grammar still rejects it.
 /// Lets the `(` attach contiguously so the string grammar routes `M::F(...)`
-/// to `bare_call_statement`; deeper paths (`A::B::F`) still fail at parse
+/// to `call_statement`; deeper paths (`A::B::F`) still fail at parse
 /// time.
 fn is_call_head_token(token: &str) -> bool {
     match token.rsplit_once(MODULE_SEPARATOR) {
@@ -422,7 +422,7 @@ fn walk(
                             // A `(` group after an uppercase non-command head
                             // is a bare call: push it contiguously so the
                             // string grammar routes `FOO(...)` to
-                            // `bare_call_statement`, except when source spans
+                            // `call_statement`, except when source spans
                             // show a real gap (`FOO (` stays an instruction).
                             // Commands keep existing spacing (`ECHO (1 + 2)`).
                             // Note: this bypasses `push_fragment`, whose
@@ -523,7 +523,7 @@ fn walk(
                 // and `LET $r: STRING = GREET("ada")` (after `=`) stay glued.
                 // `FOO (` with a space is not a call (see `dsl.pest`), so a
                 // gap between the head and the paren group opts out.
-                let is_bare_call_start = !is_command
+                let is_call_statement_start = !is_command
                     && is_upper_func_head(&ident_text)
                     && matches!(
                         next,
@@ -584,7 +584,7 @@ fn walk(
                 // attach instead. A head continuing a `MODULE::` qualifier
                 // never splits: `MOCK::` plus `READ_CSV(` is one call head
                 // (the split, if any, already happened at the module ident).
-                if (is_bare_call_start || is_qualified_call_start)
+                if (is_call_statement_start || is_qualified_call_start)
                     && !trimmed_empty
                     && !guard_prefix
                     && !expects_expr

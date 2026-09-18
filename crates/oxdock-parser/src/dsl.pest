@@ -12,11 +12,11 @@ blank = _{ (WHITESPACE | linebreak)+ }
 script = { SOI ~ element* ~ EOI }
 
 // Structural statements MUST precede generic commands
-element = _{ blank | hash_comment | COMMENT | semicolon | guard_line | block_start | block_end | if_statement | for_statement | while_statement | func_def | import_statement | export_statement | bare_call_statement | return_statement | break_statement | continue_statement | let_async_statement | let_capture_statement | await_statement | cancel_statement | let_statement | mutate_statement | timeout_statement | async_statement_block | async_statement | command }
+element = _{ blank | hash_comment | COMMENT | semicolon | guard_line | block_start | block_end | if_statement | for_statement | while_statement | func_def | import_statement | export_statement | call_statement | return_statement | break_statement | continue_statement | let_async_statement | let_capture_statement | await_statement | cancel_statement | let_statement | mutate_statement | timeout_statement | async_statement_block | async_statement | command }
 
 // Inside for/let blocks, block_start/block_end must NOT appear as elements
 // (the block's own braces handle them).  Nested guard blocks use guard_block.
-block_element = _{ blank | hash_comment | COMMENT | semicolon | guard_block | guard_line | if_statement | for_statement | while_statement | func_def | import_statement | export_statement | bare_call_statement | return_statement | break_statement | continue_statement | let_async_statement | let_capture_statement | await_statement | cancel_statement | let_statement | mutate_statement | timeout_statement | async_statement_block | async_statement | command }
+block_element = _{ blank | hash_comment | COMMENT | semicolon | guard_block | guard_line | if_statement | for_statement | while_statement | func_def | import_statement | export_statement | call_statement | return_statement | break_statement | continue_statement | let_async_statement | let_capture_statement | await_statement | cancel_statement | let_statement | mutate_statement | timeout_statement | async_statement_block | async_statement | command }
 guard_block = ${ guard_line ~ gap ~ block }
 
 block_start = { "{" }
@@ -212,7 +212,7 @@ func_def = ${ func_keyword ~ sep ~ func_ident ~ gap ~ "(" ~ gap ~ (func_param ~ 
 // as a call to `ECHO`. Ordered before `instruction` so `FOO(...)` never lexes
 // as a command.
 call_head_paren = @{ func_call_head ~ "(" }
-bare_call_statement = { call_head_paren ~ gap ~ (expr ~ gap ~ ("," ~ gap ~ expr ~ gap)*)? ~ gap ~ ")" }
+call_statement = { call_head_paren ~ gap ~ (expr ~ gap ~ ("," ~ gap ~ expr ~ gap)*)? ~ gap ~ ")" }
 return_statement = ${ return_keyword ~ (sep ~ expr)? }
 break_statement = ${ break_keyword }
 continue_statement = ${ continue_keyword }
@@ -291,10 +291,10 @@ timeout_keyword = _{ "TIMEOUT" ~ !(ASCII_ALPHANUMERIC | "_") }
 // arg type instead of freezing at parse.
 timeout_literal = @{ ASCII_DIGIT+ ~ ("ms" | "s" | "m" | "h")? }
 timeout_duration = { timeout_literal | dollar_ident | quoted_string | templated_arg }
-timeout_statement = ${ timeout_keyword ~ sep ~ timeout_duration ~ sep ~ (block | await_statement | cancel_statement | bare_call_statement | while_statement | command) }
+timeout_statement = ${ timeout_keyword ~ sep ~ timeout_duration ~ sep ~ (block | await_statement | cancel_statement | call_statement | while_statement | command) }
 
-command = _{ with_io_command | inherit_env_command | timeout_statement | async_statement_block | async_statement | cancel_statement | bare_call_statement | while_statement | run_exec_inner | instruction_inner }
-command_inner = { inherit_env_command | timeout_statement | async_statement | async_statement_block | cancel_statement | bare_call_statement | while_statement | run_exec_statement | instruction }
+command = _{ with_io_command | inherit_env_command | timeout_statement | async_statement_block | async_statement | cancel_statement | call_statement | while_statement | run_exec_inner | instruction_inner }
+command_inner = { inherit_env_command | timeout_statement | async_statement | async_statement_block | cancel_statement | call_statement | while_statement | run_exec_statement | instruction }
 
 with_io_command = ${ "WITH_IO" ~ sep ~ io_flags ~ (sep ~ command)? }
 io_flags = { "[" ~ ws? ~ io_binding ~ (ws? ~ "," ~ ws? ~ io_binding)* ~ ws? ~ "]" }
@@ -335,7 +335,7 @@ run_exec_inner = ${ "RUN" ~ sep ~ run_exec_list }
 instruction_inner = ${ command_name ~ (sep ~ (assignment | argument))* }
 instruction = ${ command_name ~ (sep ~ (assignment | argument))* }
 // Negative lookahead keeps `NAME(...)` calls out of the instruction path:
-// `FOO(` always routes to `bare_call_statement` (ordered first), while
+// `FOO(` always routes to `call_statement` (ordered first), while
 // `FOO bar` still lexes as a command. `FOO (` with a space stays an
 // instruction and fails later as UnknownCommand.
 command_name = @{ ASCII_ALPHA_UPPER ~ (ASCII_ALPHA_UPPER | ASCII_DIGIT | "_")* ~ !("(" | "$") }

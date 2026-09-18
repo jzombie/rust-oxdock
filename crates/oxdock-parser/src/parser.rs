@@ -1191,7 +1191,7 @@ fn parse_structural_command_with_lower(
                             ctx, inner, lctx,
                         )?));
                     }
-                    Rule::bare_call_statement | Rule::while_statement => {
+                    Rule::call_statement | Rule::while_statement => {
                         cmd = Some(Box::new(parse_structural_command_with_lower(
                             ctx, inner, lctx,
                         )?));
@@ -1227,7 +1227,7 @@ fn parse_structural_command_with_lower(
         Rule::for_statement => parse_for_statement_from_pair(ctx, pair, lctx)?,
         Rule::while_statement => parse_while_statement_from_pair(ctx, pair, lctx)?,
         Rule::func_def => parse_func_def_from_pair(ctx, pair, lctx)?,
-        Rule::bare_call_statement => parse_bare_call_from_pair(ctx, lctx, pair)?,
+        Rule::call_statement => parse_call_statement_from_pair(ctx, lctx, pair)?,
         Rule::return_statement => parse_return_statement_from_pair(ctx, lctx, pair)?,
         Rule::break_statement => StepKind::Break,
         Rule::continue_statement => StepKind::Continue,
@@ -1801,7 +1801,7 @@ fn parse_func_def_from_pair(
     })
 }
 
-fn parse_bare_call_from_pair(
+fn parse_call_statement_from_pair(
     ctx: &SpanContext,
     lctx: &LowerCtx,
     pair: Pair<Rule>,
@@ -2389,7 +2389,7 @@ fn parse_timeout_statement_from_pair(
             | Rule::inherit_env_command
             | Rule::async_statement
             | Rule::async_statement_block
-            | Rule::bare_call_statement
+            | Rule::call_statement
             | Rule::while_statement
             | Rule::func_def
             | Rule::return_statement
@@ -2568,7 +2568,7 @@ fn parse_async_statement_from_pair(
                     Rule::timeout_statement | Rule::cancel_statement => {
                         inner_cmd = Some(parse_structural_command_with_lower(ctx, child, lctx)?);
                     }
-                    Rule::bare_call_statement | Rule::while_statement => {
+                    Rule::call_statement | Rule::while_statement => {
                         inner_cmd = Some(parse_structural_command_with_lower(ctx, child, lctx)?);
                     }
                     Rule::func_def
@@ -2700,7 +2700,7 @@ fn parse_block_elements_with_lower(
             Rule::for_statement
             | Rule::while_statement
             | Rule::func_def
-            | Rule::bare_call_statement
+            | Rule::call_statement
             | Rule::return_statement
             | Rule::break_statement
             | Rule::continue_statement
