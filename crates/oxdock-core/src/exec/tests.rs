@@ -2761,6 +2761,52 @@ fn bridge_validation_and_gating_need_no_sockets() {
     }
 }
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "OS promotion is compiled out under Miri, so pipe kind differs by platform"
+)]
+fn bridge_spawn_manifest_ensures_consumed_pipes() {
+    // A task that only READS a fresh pipe must still find the decided
+    // backend the moment spawning returns: pinning runs synchronously in
+    // LET, so no worker scheduling is involved and no sleep is needed.
+    // A `RUN` consumer means an OS pair; anything else would be "missing".
+    // The command never executes (mock manager records it), so no platform
+    // binary is required and the test is cross-platform.
+    let steps = crate::parse_script(indoc! {r#"
+        LET $t: HANDLE = ASYNC {
+          WITH_IO [stdin=pipe:fresh] RUN ["stub-never-executed"]
+        }
+        LET $p: PIPE = pipe:fresh
+        LET $info: MAP = INSPECT($p)
+        WRITE kind.txt "{{ $info.pipe_kind }}"
+    "#})
+    .expect("parse ok");
+    let files = run_bridge_script(steps, vec![], Duration::from_secs(15));
+    assert_eq!(file_content(&files, "kind.txt"), b"os");
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "OS promotion is compiled out under Miri, so pipe kind differs by platform"
+)]
+fn bridge_spawn_manifest_ensures_consumed_variable_pipes() {
+    // Same guarantee through a `PIPE`-typed variable endpoint: promotion
+    // analysis applies to dynamic endpoints exactly like literals.
+    let steps = crate::parse_script(indoc! {r#"
+        LET $p: PIPE = pipe:dynfresh
+        LET $t: HANDLE = ASYNC {
+          WITH_IO [stdin=$p] RUN ["stub-never-executed"]
+        }
+        LET $info: MAP = INSPECT($p)
+        WRITE kind.txt "{{ $info.pipe_kind }}"
+    "#})
+    .expect("parse ok");
+    let files = run_bridge_script(steps, vec![], Duration::from_secs(15));
+    assert_eq!(file_content(&files, "kind.txt"), b"os");
+}
+
+#[test]
 fn bridge_inner_for_reader_finds_script_backends() {
     let io = ExecIo::new();
     io.ensure_pipe_for("live", false).expect("ensure");

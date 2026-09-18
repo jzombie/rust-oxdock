@@ -25,16 +25,11 @@ pub(crate) fn coerce_value<P: ProcessManager>(
     // Same-type passthrough for every type: the word carries its own
     // vtable, so descriptor-name equality is type equality.
     if value.type_name() == expected {
-        if expected == "PIPE" {
-            // The `pipe:NAME` operator is the explicit handle constructor:
-            // a fresh name registers on first use (existing entries keep
-            // their type), so pipes can be declared before any `WITH_IO`
-            // mentions them.
-            let name = value.as_pipe_name().unwrap_or_default().to_string();
-            if !state.io.pipe_exists(&name) {
-                state.io.ensure_pipe_for(&name, false)?;
-            }
-        }
+        // NOTE: naming a pipe must not instantiate backend state. Entry
+        // creation happens only at binding sites (`WITH_IO` resolution,
+        // spawn-time pins), so a bare `LET $p: PIPE = pipe:name` can never
+        // conjure a globally visible channel as a side effect, and backend
+        // choice never depends on who named it first.
         return Ok(value);
     }
     // Values of other registered types never cross-coerce; the mismatch

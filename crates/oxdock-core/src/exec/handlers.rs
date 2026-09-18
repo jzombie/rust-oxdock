@@ -1536,8 +1536,9 @@ fn resolve_io_streams<P: ProcessManager>(
 }
 
 /// Resolve a `WITH_IO` pipe endpoint to a live pipe name. Literals resolve
-/// directly; `$var` must hold a `PIPE` value naming a registered pipe,
-/// otherwise this is a step-numbered type error.
+/// directly; `$var` must hold a `PIPE` value, whose name resolves the same
+/// way: the caller ensures the entry immediately after, so declaration
+/// never needs to pre-register anything.
 fn resolve_pipe_name<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     idx: usize,
@@ -1555,14 +1556,7 @@ fn resolve_pipe_name<P: ProcessManager>(
                         value
                     );
                 };
-                if cx.state.io.pipe_exists(name) {
-                    Ok(name.to_string())
-                } else {
-                    bail!(
-                        "step {}: TypeMismatch: expected PIPE, got unregistered pipe ({name:?})",
-                        idx + 1
-                    );
-                }
+                Ok(name.to_string())
             }
             Some((kind, value)) => {
                 bail!(
@@ -2227,6 +2221,92 @@ fn collect_dynamic_producers<P: ProcessManager>(
     }
 }
 
+/// Ensure every pipe an async `body` READS from exists, without pinning
+/// keepers: consumers rely on EOF-from-detach to complete, so pinning them
+/// would deadlock. Runs synchronously on the spawning thread right after
+/// producer pins, so a consumer arriving before any producer still finds
+/// the decided backend instead of racing the producer's setup. Same
+/// promotion analysis as producers, for literal and variable endpoints
+/// alike: a mismatched backend would still function (resolution adapters
+/// cover every combination), but uniformity keeps the decision
+/// deterministic and unsurprising.
+fn ensure_consumed_pipes<P: ProcessManager>(cx: &StepCtx<'_, P>, body: &[Step]) -> Result<()> {
+    fn collect_consumed<P: ProcessManager>(
+        cx: &StepCtx<'_, P>,
+        kind: &StepKind,
+        out: &mut Vec<(String, bool)>,
+    ) {
+        match kind {
+            StepKind::WithIo { bindings, cmd } => {
+                let promote = promotion_trigger(cmd, true);
+                for binding in bindings {
+                    if !matches!(binding.stream, IoStream::Stdin) {
+                        continue;
+                    }
+                    match &binding.pipe {
+                        Some(PipeTarget::Name(name)) => {
+                            if !out.iter().any(|(n, _)| n == name) {
+                                out.push((name.clone(), promote));
+                            }
+                        }
+                        Some(PipeTarget::Var(var)) => {
+                            if let Some((kind, value)) = cx.state.get_var_typed(var)
+                                && kind == "PIPE"
+                                && let Some(name) = value.as_pipe_name()
+                                && !out.iter().any(|(n, _)| n == name)
+                            {
+                                out.push((name.to_string(), promote));
+                            }
+                        }
+                        None => {}
+                    }
+                }
+                collect_consumed(cx, cmd, out);
+            }
+            StepKind::Timeout { body, .. }
+            | StepKind::For { body, .. }
+            | StepKind::While { body, .. } => {
+                for step in body {
+                    collect_consumed(cx, &step.kind, out);
+                }
+            }
+            StepKind::If {
+                then_body,
+                else_ifs,
+                else_body,
+                ..
+            } => {
+                for step in then_body {
+                    collect_consumed(cx, &step.kind, out);
+                }
+                for (_, branch) in else_ifs {
+                    for step in branch {
+                        collect_consumed(cx, &step.kind, out);
+                    }
+                }
+                if let Some(body) = else_body {
+                    for step in body {
+                        collect_consumed(cx, &step.kind, out);
+                    }
+                }
+            }
+            StepKind::FuncDef { .. }
+            | StepKind::Call { .. }
+            | StepKind::AsyncBlock { .. }
+            | StepKind::AssignAsync { .. } => {}
+            _ => {}
+        }
+    }
+    for step in body {
+        let mut consumed = Vec::new();
+        collect_consumed(cx, &step.kind, &mut consumed);
+        for (name, promote) in consumed {
+            cx.state.io.ensure_pipe_for(&name, promote)?;
+        }
+    }
+    Ok(())
+}
+
 /// Ensure every pipe an async `body` produces to exists (honoring OS
 /// promotion) and pin a keeper slot on each script pipe, synchronously on
 /// the spawning thread. Pins group by the top-level index of the final
@@ -2234,6 +2314,10 @@ fn collect_dynamic_producers<P: ProcessManager>(
 /// step completes, so transient gaps between producers never signal EOF
 /// while later consumer steps in the same task still observe it. Returns
 /// `None` when the body produces to no script pipe.
+///
+/// Consumed pipes are ensured separately by
+/// [`ensure_consumed_pipes`] (no keepers); both run before the worker
+/// spawns, so backend decisions never depend on thread scheduling.
 fn pin_async_keepers<P: ProcessManager>(
     cx: &StepCtx<'_, P>,
     body: &[Step],
@@ -2262,6 +2346,9 @@ fn pin_async_keepers<P: ProcessManager>(
             }
         }
     }
+    // Consumed pipes last (producers win ties): same spawn-thread moment,
+    // so backend choice never depends on which thread binds first.
+    ensure_consumed_pipes(cx, body)?;
     if map.is_empty() {
         Ok(None)
     } else {

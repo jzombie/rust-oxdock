@@ -107,23 +107,6 @@ impl PipeRegistry {
         self.lock_inner().os.contains_key(name)
     }
 
-    pub(super) fn exists(&self, name: &str) -> bool {
-        let guard = self.lock_inner();
-        guard.input.contains_key(name)
-            || guard.output.contains_key(name)
-            || guard.inners.contains_key(name)
-            || {
-                #[cfg(not(miri))]
-                {
-                    guard.os.contains_key(name)
-                }
-                #[cfg(miri)]
-                {
-                    false
-                }
-            }
-    }
-
     /// Backend behind a resolved stdin reader, matched by pointer identity
     /// against registered script-pipe inputs. Lets bridge workers run
     /// timeout-bounded reads without touching shared pipe semantics.
@@ -798,10 +781,6 @@ impl ExecIo {
     /// OS kernel pairs when asked. Existing entries keep their type.
     pub(super) fn ensure_pipe_for(&self, name: &str, promote: bool) -> Result<()> {
         self.pipes.ensure_pipe_for(name, promote)
-    }
-
-    pub(super) fn pipe_exists(&self, name: &str) -> bool {
-        self.pipes.exists(name)
     }
 
     /// Script-pipe backend behind a resolved stdin reader, if any. Used
