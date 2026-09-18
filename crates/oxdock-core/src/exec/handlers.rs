@@ -1940,7 +1940,7 @@ pub(crate) fn set_var_value<P: ProcessManager>(
 /// Dispatch `LET $var: STRING = <sync command>` — run the command to completion with
 /// a spillable capture sink as its stdout, then bind the exact bytes as a
 /// string. Only stdout is captured (stderr keeps the parent wiring; stdin
-/// passes through so `WITH_IO [stdin=pipe:p]` still works). Captured bytes
+/// passes through so `WITH_IO [stdin=$p]` still works). Captured bytes
 /// never tee into the parent assertion windows. On command failure
 /// nothing is bound.
 ///
@@ -2781,7 +2781,7 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
 
     // Pre-allocate keeper handles synchronously on this thread, before the
     // worker exists, so pipes the task produces to (e.g. keeper
-    // `WITH_IO [stdout=pipe:tx] ASYNC ...` bindings) can never observe a
+    // `WITH_IO [stdout=$tx] ASYNC ...` bindings) can never observe a
     // transient-only zero-writer window. Guards expire by step index as
     // the worker completes its final producer steps.
     let body = body.to_vec();

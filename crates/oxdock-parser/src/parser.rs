@@ -2106,7 +2106,7 @@ fn parse_let_async_statement_from_pair(
                 //   the variable (same semantics as LET $x: STRING = <command>).
                 let kind = parse_structural_command_with_lower(ctx, inner, lctx)?;
                 let StepKind::WithIo { bindings, cmd } = kind else {
-                    return Err(ParseError::validation("LET", "LET $var: TYPE = WITH_IO requires an ASYNC command (e.g. LET $t = WITH_IO [stdin=pipe:p] ASYNC WRITE \"f\")".to_string(), &span));
+                    return Err(ParseError::validation("LET", "LET $var: TYPE = WITH_IO requires an ASYNC command (e.g. LET $t = WITH_IO [stdin=$p] ASYNC WRITE \"f\")".to_string(), &span));
                 };
                 match *cmd {
                     StepKind::AsyncBlock { body: async_body } => {
@@ -2132,7 +2132,7 @@ fn parse_let_async_statement_from_pair(
                     }
                     sync_cmd => {
                         if has_stdout_pipe(&bindings) {
-                            return Err(ParseError::structural("let", "LET capture cannot use WITH_IO [stdout=pipe:...]; the capture sink owns stdout".to_string(), &span));
+                            return Err(ParseError::structural("let", "LET capture cannot use WITH_IO [stdout=$var]; the capture sink owns stdout".to_string(), &span));
                         }
                         reject_async_in_capture(ctx, &sync_cmd)?;
                         let name = var.clone().ok_or_else(|| {
