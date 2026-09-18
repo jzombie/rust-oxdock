@@ -1,0 +1,30 @@
+# Echo server: greet the client on 127.0.0.1:18080, then print everything
+# it types to this terminal.
+# Try it:   nc 127.0.0.1 18080
+# Stop it:  Ctrl-C, or just disconnect the client: with nothing left to
+#           send, the session ends and the script notices on its own.
+#
+# --no-half-close keeps the write side open after the greeting: without it
+# the greeting's EOF would FIN the socket and interactive clients like nc
+# would drop immediately.
+
+WORKSPACE LOCAL
+
+LET $listen_port: INT = 18080
+LET $orb_port: INT = 32222
+
+WHILE true {
+    ECHO "proxy listening on 127.0.0.1:{{ $listen_port }}"
+
+    LET $ls: HANDLE = ASYNC {
+        WITH_IO [stdin=pipe:req, stdout=pipe:resp] LISTEN 127.0.0.1:{{ $listen_port }} --no-half-close
+    }
+
+    // Netcat forwards raw SSH stdio bytes directly to OrbStack's listener
+    WITH_IO [stdin=pipe:resp, stdout=pipe:req] ASYNC RUN nc 127.0.0.1 {{ $orb_port }}
+
+    AWAIT $ls
+    ECHO "client disconnected"
+
+    SLEEP 2
+}
