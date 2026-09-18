@@ -2587,7 +2587,7 @@ fn spill_buffer_drain_string_strict_round_trips_and_rejects_non_utf8() {
 
 /// Connect with a deadline: the listener task binds synchronously at spawn,
 /// but thread scheduling means the test must tolerate a slow start.
-#[cfg(not(miri))]
+/// Compiled everywhere (execution is gated by the callers' Miri ignores).
 fn connect_retry(port: u16) -> TcpStream {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
@@ -2603,8 +2603,8 @@ fn connect_retry(port: u16) -> TcpStream {
 }
 
 /// Read one `\n`-terminated line with a deadline so helper failures error
-/// instead of hanging the suite.
-#[cfg(not(miri))]
+/// instead of hanging the suite. Compiled everywhere; only called from
+/// Miri-ignored tests.
 fn read_line_deadline(stream: &mut TcpStream, what: &str) -> Vec<u8> {
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
@@ -2710,7 +2710,7 @@ fn run_bridge_script_bind_retry(steps: &[Step], limit: Duration) -> HashMap<Stri
     panic!("bridge script kept hitting held ports: {last}");
 }
 
-#[cfg(not(miri))]
+/// Compiled everywhere; only called from Miri-ignored tests.
 fn file_content(files: &HashMap<String, Vec<u8>>, name: &str) -> Vec<u8> {
     files
         .iter()
