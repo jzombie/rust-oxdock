@@ -3021,7 +3021,7 @@ let script = indoc! {"
 let err = oxdock_parser::parse_script(script, oxdock_parser::lower_command)
     .expect_err("must fail");
 let expected = indoc! {"
-    invalid syntax for command WITH_IO: WITH_IO needs `WITH_IO [bindings] <command>` or `WITH_IO [bindings] { <commands> }`: invalid binding `stdout=discard`; bindings are `stdin`, `stdout`, `stderr`, or `<stream>=$var` with a PIPE-typed variable (e.g. `[stdout=$p]`, `[stdin=$p]`). `pipe:name` was removed; declare LET $x: PIPE and pass $x; got `[stdout=discard] ECHO hi`.
+    invalid syntax for command WITH_IO: WITH_IO needs `WITH_IO [bindings] <command>` or `WITH_IO [bindings] { <commands> }`: invalid binding `stdout=discard`; bindings are `stdin`, `stdout`, `stderr`, or `<stream>=$var` with a PIPE-typed variable (e.g. `[stdout=$p]`, `[stdin=$p]`); got `[stdout=discard] ECHO hi`.
       --> line 1, col 1-32
       1 | WITH_IO [stdout=discard] ECHO hi
         | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ### Changed
 
+- [breaking] Pipes are anonymous handles (#159): `LET $p: PIPE` mints a fresh backend owned through the variable (no initializers, no shared names), `WITH_IO [stdin=$p]` / `[stdout=$p]` bind it, and `LET $q: PIPE = $p` shares it. The backend materializes lazily on first binding — script pipes by default, zero-copy OS kernel pairs for pure single-`RUN` background pipelines — and mismatched later bindings adapt instead of failing. A second take on one OS end is a step-numbered error. `INSPECT($p)` reports `unbound` before first binding. Host functions gain pipe byte access on the step context (`pipe_reader` / `pipe_writer` / `new_pipe` / `close_pipe`) plus `PipeStream` slice-based `Read`/`Write` adapters.
 - `FUNC` reference documents the statement-call form (`GREET("bex")` discards the value); the internal `bare_call_statement` grammar rule is renamed to `call_statement` with no syntax change.
 - READMEs compare Rust host embedding against embedding Rust in Python.
 

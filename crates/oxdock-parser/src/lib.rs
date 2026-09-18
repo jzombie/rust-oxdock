@@ -256,18 +256,18 @@ mod tests {
     }
 
     #[test]
-    fn with_io_rejects_named_pipe_literals() {
-        // `pipe:name` was removed: bindings are `$var`-only, and the
-        // literal fails with the migration error naming the exact span.
+    fn with_io_rejects_non_variable_bindings() {
+        // Bindings are `$var`-only: anything else fails naming the
+        // binding and the line.
         let err = parse_script(
             "WITH_IO [stdin, stdout=pipe:setup, stderr=pipe:errors] WRITE \"echo hi\"",
             test_lower,
         )
-        .expect_err("named pipes must fail");
+        .expect_err("non-variable bindings must fail");
         let msg = err.to_string();
         assert!(
-            msg.contains("pipe:name was removed; declare LET $x: PIPE and pass $x"),
-            "unexpected error: {msg}"
+            msg.contains("pipe:setup"),
+            "error must name the bad binding: {msg}"
         );
         assert_eq!(err.line(), 1, "error must name the failing line");
     }
@@ -296,31 +296,33 @@ mod tests {
     }
 
     #[test]
-    fn pipe_literal_in_expression_is_a_pointed_error() {
-        // `LET $p: PIPE = pipe:ch` no longer names a pipe: the expression
-        // position rejects the literal with the migration error and line.
+    fn colon_text_in_expression_fails() {
+        // `pipe:ch` is not expression syntax: `pipe` lexes as a bare word
+        // and `:ch` strands, so the whole RHS fails on line 1.
         let err = parse_script("LET $p: PIPE = pipe:ch", test_lower)
-            .expect_err("pipe: expression must fail");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("pipe:name was removed; declare LET $x: PIPE and pass $x"),
-            "unexpected error: {msg}"
-        );
+            .expect_err("colon text in expression must fail");
         assert_eq!(err.line(), 1, "error must name the failing line");
     }
 
     #[test]
-    fn pipe_literal_in_assert_is_a_pointed_error() {
-        // `ASSERT_EQ pipe:ch "..."` likewise fails with the migration
-        // error instead of observing a buffer. The mock lower knows no
-        // commands, so this goes through the real dispatcher.
-        let err = parse_script("ASSERT_EQ pipe:ch \"x\"", crate::commands::lower_command)
-            .expect_err("pipe: assert target must fail");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("pipe:name was removed; declare LET $x: PIPE and pass $x"),
-            "unexpected error: {msg}"
-        );
+    fn colon_text_in_assert_is_a_plain_value() {
+        // Bare `pipe:ch` in argument position keeps its literal reading:
+        // it lowers to a plain string value, never a stream marker. The
+        // mock lower knows no commands, so this goes through the real
+        // dispatcher.
+        let steps = parse_script("ASSERT_EQ pipe:ch \"x\"", crate::commands::lower_command)
+            .expect("colon text parses as a literal");
+        assert_eq!(steps.len(), 1);
+        match &steps[0].kind {
+            StepKind::AssertEq { actual, .. } => {
+                assert_eq!(
+                    actual,
+                    &AssertTarget::Value(Arg::String("pipe:ch".to_string(), false)),
+                    "colon text must stay a literal value, got {actual:?}"
+                );
+            }
+            other => panic!("expected AssertEq, got {other:?}"),
+        }
     }
 
     #[test]

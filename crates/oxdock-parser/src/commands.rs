@@ -379,7 +379,7 @@ fn structural_hint(name: &str, received: &str) -> Option<String> {
 fn with_io_hint(got: &str, received: &str) -> String {
     const SYNTAX: &str =
         "WITH_IO needs `WITH_IO [bindings] <command>` or `WITH_IO [bindings] { <commands> }`";
-    const BINDINGS: &str = "bindings are `stdin`, `stdout`, `stderr`, or `<stream>=$var` with a PIPE-typed variable (e.g. `[stdout=$p]`, `[stdin=$p]`). `pipe:name` was removed; declare LET $x: PIPE and pass $x";
+    const BINDINGS: &str = "bindings are `stdin`, `stdout`, `stderr`, or `<stream>=$var` with a PIPE-typed variable (e.g. `[stdout=$p]`, `[stdin=$p]`)";
     if let Some(after_open) = received.strip_prefix('[') {
         match after_open.split_once(']') {
             None => {
@@ -417,18 +417,6 @@ fn with_io_hint(got: &str, received: &str) -> String {
         }
     }
     format!("{SYNTAX}; got {got}. {BINDINGS}.")
-}
-
-/// Pointed error for removed `pipe:name` literals in bindings, expressions,
-/// and assert targets: names the migration instead of failing generically.
-/// The grammar still recognizes the literal shape so the error carries the
-/// exact span; lowering rejects it here.
-pub(crate) fn pipe_literal_removed_error(tag: &str, ctx: &SpanContext) -> ParseError {
-    ParseError::validation(
-        tag,
-        "pipe:name was removed; declare LET $x: PIPE and pass $x".to_string(),
-        ctx,
-    )
 }
 
 /// `echo hi` is almost certainly `ECHO hi`: commands are uppercase.
@@ -545,18 +533,13 @@ impl AssertTarget {
 /// `stdout` / `stderr` spellings become stream markers; every other
 /// spelling, quoted or not, stays a literal value. In particular a `$var`
 /// holding a path never reads disk, and quoted `"stdout"` names the
-/// seven-character string, not the stream. Bare `pipe:NAME` is a removed
-/// literal and fails with the migration error.
-fn lower_assert_target(arg: Arg, cmd_name: &str) -> ParseResult<AssertTarget> {
+/// seven-character string, not the stream.
+fn lower_assert_target(arg: Arg) -> ParseResult<AssertTarget> {
     match arg {
         Arg::Expr(_) => Ok(AssertTarget::Value(arg)),
         Arg::String(text, quoted) if !quoted => match text.as_str() {
             "stdout" => Ok(AssertTarget::Stdout),
             "stderr" => Ok(AssertTarget::Stderr),
-            _ if text.starts_with("pipe:") => Err(pipe_literal_removed_error(
-                cmd_name,
-                &SpanContext::line_only(0),
-            )),
             _ => Ok(AssertTarget::Value(lower_assert_operand(Arg::String(
                 text, false,
             )))),
@@ -1168,7 +1151,7 @@ declare_commands! {
         lower: |flags, args| {
             let hash = flags.iter().find(|(k, _)| k == "hash").map(|(_, v)| v.as_str().to_string());
             let mut it = args.into_iter();
-            let actual = lower_assert_target(it.next().ok_or_else(|| ParseError::validation("ASSERT_EQ", "ASSERT_EQ requires a value".to_string(), &SpanContext::line_only(0)))?, "ASSERT_EQ")?;
+            let actual = lower_assert_target(it.next().ok_or_else(|| ParseError::validation("ASSERT_EQ", "ASSERT_EQ requires a value".to_string(), &SpanContext::line_only(0)))?)?;
             let remaining: Vec<Arg> = it
                 .map(lower_assert_operand)
                 .collect::<Vec<Arg>>();
@@ -1216,7 +1199,7 @@ declare_commands! {
         lower: |flags, args| {
             let _ = flags;
             let mut it = args.into_iter();
-            let haystack = lower_assert_target(it.next().ok_or_else(|| ParseError::validation("ASSERT_CONTAINS", "ASSERT_CONTAINS requires a value".to_string(), &SpanContext::line_only(0)))?, "ASSERT_CONTAINS")?;
+            let haystack = lower_assert_target(it.next().ok_or_else(|| ParseError::validation("ASSERT_CONTAINS", "ASSERT_CONTAINS requires a value".to_string(), &SpanContext::line_only(0)))?)?;
             let remaining: Vec<Arg> = it
                 .map(lower_assert_operand)
                 .collect::<Vec<Arg>>();
@@ -2600,7 +2583,7 @@ mod tests {
         assert!(err.contains("invalid syntax for command WITH_IO"), "{err}");
         assert!(!err.contains("unknown command"), "{err}");
         assert!(err.contains("stdout=discard"), "{err}");
-        assert!(err.contains("declare LET $x: PIPE and pass $x"), "{err}");
+        assert!(err.contains("[stdout=$p]"), "{err}");
     }
 
     #[test]

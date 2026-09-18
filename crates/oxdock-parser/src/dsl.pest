@@ -94,14 +94,6 @@ numeric_literal = @{ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)? ~ !(ASCII_ALPHANUMERIC
 // below gives the same precedence to a leading `env:KEY` shape.
 env_read_key = @{ ASCII_ALPHA_UPPER ~ (ASCII_ALPHA_UPPER | ASCII_DIGIT | "_")* }
 env_read = { "env" ~ ":" ~ env_read_key }
-// Removed pipe literal (kept as a recognition trap): `pipe:NAME` no longer
-// names a channel. The rule still matches so lowering can reject it with a
-// span-accurate migration error (`declare LET $x: PIPE and pass $x`) instead
-// of a generic grammar failure. Must precede `bare_word` in `expr_atom`
-// (which would otherwise match just `pipe` and strand `:NAME`).
-// Deliberately NOT mirrored in `unquoted_arg`: bare command arguments keep
-// their literal reading.
-pipe_read = { "pipe" ~ ":" ~ pipe_name }
 // Static module qualification: `MODULE::NAME` in call position. At most one
 // `::`; the parts are validated UPPERCASE at lowering time with span errors.
 qualified_func_name = @{ ident ~ ("::" ~ ident)? }
@@ -113,7 +105,7 @@ list_literal = ${ "[" ~ gap ~ (expr ~ gap ~ ("," ~ gap ~ expr ~ gap)*)? ~ gap ~ 
 map_entry = ${ (quoted_string | bare_word) ~ gap ~ ":" ~ gap ~ ws? ~ gap ~ expr }
 map_literal = ${ "{" ~ gap ~ ws? ~ gap ~ (map_entry ~ gap ~ (ws? ~ "," ~ ws? ~ map_entry ~ gap)*)? ~ ws? ~ gap ~ "}" }
 string_literal = { quoted_string }
-expr_atom = { parenthesized_expr | func_call | key_path | variable | env_read | pipe_read | list_literal | map_literal | string_literal | numeric_literal | bare_word }
+expr_atom = { parenthesized_expr | func_call | key_path | variable | env_read | list_literal | map_literal | string_literal | numeric_literal | bare_word }
 
 // Ordering level (<, <=, >, >=) — operands are additive so `+`/`-` bind
 // tighter than comparisons: `2 + 3 > 4` parses as `(2 + 3) > 4`.
@@ -304,11 +296,8 @@ with_io_command = ${ "WITH_IO" ~ sep ~ io_flags ~ (sep ~ command)? }
 io_flags = { "[" ~ ws? ~ io_binding ~ (ws? ~ "," ~ ws? ~ io_binding)* ~ ws? ~ "]" }
 io_binding = { io_stream ~ (ws? ~ "=" ~ ws? ~ pipe_binding)? }
 io_stream = { "stdin" | "stdout" | "stderr" }
-// Binding endpoints are `$var`-only. The literal shape still matches so
-// lowering rejects it with a span-accurate migration error instead of a
-// generic grammar failure (see `pipe_read` above).
-pipe_binding = { "pipe" ~ ":" ~ pipe_name | dollar_ident }
-pipe_name = @{ (ASCII_ALPHANUMERIC | "_" | "-")+ }
+// Binding endpoints are `$var` references to PIPE-typed variables.
+pipe_binding = { dollar_ident }
 
 inherit_env_command = ${ "INHERIT_ENV" ~ sep ~ inherit_list }
 inherit_list = { "[" ~ ws? ~ env_key ~ (ws? ~ "," ~ ws? ~ env_key)* ~ ws? ~ "]" }
@@ -335,7 +324,7 @@ export_statement = ${ export_keyword ~ sep ~ (!linebreak ~ !";" ~ ANY)* }
 // Exec elements are atoms only (no binary/compare operators): spaced shell
 // words can never compile to `CompiledMath`/`Arithmetic` and flip shell
 // dispatches to exec; compute into a variable first (`LET $n = 1 + 2`).
-run_exec_arg = { parenthesized_expr | func_call | key_path | variable | env_read | pipe_read | list_literal | map_literal | string_literal | numeric_literal | bare_word }
+run_exec_arg = { parenthesized_expr | func_call | key_path | variable | env_read | list_literal | map_literal | string_literal | numeric_literal | bare_word }
 run_exec_list = ${ "[" ~ gap ~ (run_exec_arg ~ gap ~ ("," ~ gap ~ run_exec_arg ~ gap)*)? ~ gap ~ "]" }
 run_exec_statement = ${ "RUN" ~ sep ~ run_exec_list }
 run_exec_inner = ${ "RUN" ~ sep ~ run_exec_list }
