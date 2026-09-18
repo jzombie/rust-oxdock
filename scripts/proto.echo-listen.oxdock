@@ -1,40 +1,45 @@
-# Echo server: greet the client on 127.0.0.1:$ECHO_LISTEN_PORT, then print
-# everything it types to this terminal.
-# Ports come from the environment, nothing is hardcoded: export
-# ECHO_LISTEN_PORT (client-facing) and ECHO_ORB_PORT (upstream) first.
-# Try it:   ECHO_LISTEN_PORT=<port> ECHO_ORB_PORT=<port> oxdock scripts/proto.echo-listen.oxdock
-#           (in another terminal) nc 127.0.0.1 <port>
-# Stop it:  Ctrl-C, or just disconnect the client: with nothing left to
-#           send, the session ends and the script notices on its own.
+# SSH echo proxy: serve SSH on 127.0.0.1:2222 with login test / test123,
+# then bridge each client straight into `ssh orb` (OrbStack machine over
+# the host SSH config: key auth, no password needed).
+# Nothing is dynamic: fixed port, fixed credentials, fixed upstream.
+# Try it:   cargo run --features ssh -- scripts/proto.echo-listen.oxdock
+#           (in another terminal) ssh -p 2222 test@127.0.0.1
+#           log in with password test123, type a command, hit Enter.
+# Stop it:  Ctrl-C. The listener is user-space only: no system users, no
+#           sshd_config, nothing left behind when the process dies.
 #
-# Note: If debugging with local Orbstack, the default orb_port is 32222.
+# Requires the `ssh` feature: the base CLI parses STD only, and SSH names
+# stay unknown without it (by design, so scripts never silently change
+# meaning between builds).
 #
-# --no-half-close keeps the write side open after the greeting: without it
-# the greeting's EOF would FIN the socket and interactive clients like nc
-# would drop immediately.
+# No PTY anywhere on purpose: the inner `ssh` runs with pipes, so orb
+# starts a non-interactive shell (no prompt, no echo, no line editing).
+# Type blind, hit Enter, output comes back. Do NOT add -t/-tt here: with
+# piped stdin the remote pty handshake against orb hangs instead.
+# BatchMode keeps inner failures fast instead of hanging on prompts.
 #
-# Per-iteration pipe declarations: each loop turn mints a fresh session
-# pair, so a previous connection never shares a channel with the next.
+# Serial sessions: one client at a time. Each loop turn mints a fresh
+# pipe pair, so a previous connection never shares a channel with the
+# next. If the orb side ends first (remote logout), the trailing AWAIT
+# still waits for the outer client to disconnect.
 
-INHERIT_ENV [ECHO_LISTEN_PORT, ECHO_ORB_PORT]
+IMPORT [STD, SSH]
 WORKSPACE LOCAL
 
-LET $listen_port: INT = env:ECHO_LISTEN_PORT
-LET $orb_port: INT = env:ECHO_ORB_PORT
+LET $m: MAP = SSH_SERVE("127.0.0.1:2227", "test", "test123")
+ECHO "ssh proxy listening on {{ $m.addr }} (login test)"
 
 WHILE true {
-    ECHO "proxy listening on 127.0.0.1:{{ $listen_port }}"
+    LET $c_in: PIPE
+    LET $c_out: PIPE
+    LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $c_in, $c_out) }
 
-    LET $req: PIPE
-    LET $resp: PIPE
-    LET $ls: HANDLE = ASYNC {
-        WITH_IO [stdin=$req, stdout=$resp] LISTEN 127.0.0.1:{{ $listen_port }} --no-half-close
-    }
+    # This doesn't show a prompt
+    WITH_IO [stdin=$c_out, stdout=$c_in] RUN ["ssh", "-o", "BatchMode=yes", "orb"]
 
-    WITH_IO [stdin=$resp, stdout=$req] ASYNC CONNECT 127.0.0.1:{{ $orb_port }}
+    # This works, but doesn't close the connection when exited
+    # WITH_IO [stdin=$c_out, stdout=$c_in] RUN nano
 
-    AWAIT $ls
+    AWAIT $acc
     ECHO "client disconnected"
-
-    SLEEP 2
 }
