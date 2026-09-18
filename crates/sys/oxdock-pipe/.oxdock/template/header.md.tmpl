@@ -1,0 +1,10 @@
+# {{ $docs_ctx.name }}
+
+{{ $docs_ctx.description }}
+
+> Part of the [{{ $docs_global.workspace }}]({{ $docs_global.workspace_url }}) workspace.
+
+Anonymous pipe backends. Handles start unbound and materialize lazily on
+first binding (script buffers by default, OS kernel pairs for pure
+single-`RUN` pipelines); cloning a handle shares the backend, and the last
+drop closes. Under Miri everything stays on script pipes.
