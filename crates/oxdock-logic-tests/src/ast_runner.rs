@@ -810,6 +810,25 @@ fn collect_step_kinds(kind: &StepKind, kinds: &mut HashSet<String>) {
 }
 
 fn run_case(case: &CaseSpec, steps: &[Step]) -> Result<()> {
+    // Bridge cases bind real loopback ports against a shared host: a stolen
+    // candidate fails fast and deterministically at bind time, so retry with
+    // a fresh allocation (bounded). Every attempt runs in isolated tempdirs.
+    // Anything else fails immediately.
+    let attempts = if case.bridge_port { 8 } else { 1 };
+    let mut last: Option<anyhow::Error> = None;
+    for _ in 0..attempts {
+        match run_case_once(case, steps) {
+            Ok(()) => return Ok(()),
+            Err(err) if case.bridge_port && format!("{err:#}").contains("bind failed") => {
+                last = Some(err);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Err(last.unwrap_or_else(|| anyhow!("bridge case produced no attempts")))
+}
+
+fn run_case_once(case: &CaseSpec, steps: &[Step]) -> Result<()> {
     // The local tempdir stays eager (it backs the build context). The
     // snapshot side starts pending and materializes on first
     // snapshot-targeted use. Cases that need it up front (setup seeds
