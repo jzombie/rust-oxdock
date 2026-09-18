@@ -876,7 +876,6 @@ fn emit_assert_target(
         }
         AssertTarget::Stdout => quote! { AssertTarget::Stdout },
         AssertTarget::Stderr => quote! { AssertTarget::Stderr },
-        AssertTarget::Pipe(name) => quote! { AssertTarget::Pipe(#name.to_string()) },
     }
 }
 
@@ -1225,9 +1224,6 @@ fn emit_io_bindings(bindings: &[oxdock_parser::IoBinding]) -> proc_macro2::Token
             };
             let pipe = match &b.pipe {
                 None => quote! { None },
-                Some(oxdock_parser::PipeTarget::Name(p)) => {
-                    quote! { Some(oxdock_parser::PipeTarget::Name(#p.to_string())) }
-                }
                 Some(oxdock_parser::PipeTarget::Var(v)) => {
                     quote! { Some(oxdock_parser::PipeTarget::Var(#v.to_string())) }
                 }

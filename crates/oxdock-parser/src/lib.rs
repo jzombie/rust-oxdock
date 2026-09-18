@@ -256,31 +256,25 @@ mod tests {
     }
 
     #[test]
-    fn with_io_supports_named_pipes() {
-        let script = "WITH_IO [stdin, stdout=pipe:setup, stderr=pipe:errors] WRITE \"echo hi\"";
-        let steps = parse_script(script, test_lower).expect("parse ok");
-        assert_eq!(steps.len(), 1);
-        match &steps[0].kind {
-            StepKind::WithIo { bindings, cmd } => {
-                assert_eq!(bindings.len(), 3);
-                assert!(
-                    bindings
-                        .iter()
-                        .any(|b| matches!(b.stream, IoStream::Stdin) && b.pipe.is_none())
-                );
-                assert!(bindings.iter().any(|b| matches!(b.stream, IoStream::Stdout)
-                    && b.pipe == Some(PipeTarget::Name("setup".to_string()))));
-                assert!(bindings.iter().any(|b| matches!(b.stream, IoStream::Stderr)
-                    && b.pipe == Some(PipeTarget::Name("errors".to_string()))));
-                assert!(matches!(cmd.as_ref(), StepKind::Write { .. }));
-            }
-            other => panic!("expected WITH_IO, saw {:?}", other),
-        }
+    fn with_io_rejects_named_pipe_literals() {
+        // `pipe:name` was removed: bindings are `$var`-only, and the
+        // literal fails with the migration error naming the exact span.
+        let err = parse_script(
+            "WITH_IO [stdin, stdout=pipe:setup, stderr=pipe:errors] WRITE \"echo hi\"",
+            test_lower,
+        )
+        .expect_err("named pipes must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("pipe:name was removed; declare LET $x: PIPE and pass $x"),
+            "unexpected error: {msg}"
+        );
+        assert_eq!(err.line(), 1, "error must name the failing line");
     }
 
     #[test]
     fn with_io_supports_variable_pipes() {
-        let script = "WITH_IO [stdout=$p, stdin=pipe:in] WRITE \"echo hi\"";
+        let script = "WITH_IO [stdout=$p, stdin=$q] WRITE \"echo hi\"";
         let steps = parse_script(script, test_lower).expect("parse ok");
         assert_eq!(steps.len(), 1);
         match &steps[0].kind {
@@ -289,7 +283,7 @@ mod tests {
                 assert!(bindings.iter().any(|b| matches!(b.stream, IoStream::Stdout)
                     && b.pipe == Some(PipeTarget::Var("p".to_string()))));
                 assert!(bindings.iter().any(|b| matches!(b.stream, IoStream::Stdin)
-                    && b.pipe == Some(PipeTarget::Name("in".to_string()))));
+                    && b.pipe == Some(PipeTarget::Var("q".to_string()))));
                 assert!(matches!(cmd.as_ref(), StepKind::Write { .. }));
             }
             other => panic!("expected WITH_IO, saw {:?}", other),
@@ -297,7 +291,35 @@ mod tests {
         // Display round-trips the variable form.
         assert_eq!(
             steps[0].kind.to_string(),
-            "WITH_IO [stdout=$p, stdin=pipe:in] WRITE \"echo hi\""
+            "WITH_IO [stdout=$p, stdin=$q] WRITE \"echo hi\""
+        );
+    }
+
+    #[test]
+    fn pipe_literal_in_expression_is_a_pointed_error() {
+        // `LET $p: PIPE = pipe:ch` no longer names a pipe: the expression
+        // position rejects the literal with the migration error and line.
+        let err = parse_script("LET $p: PIPE = pipe:ch", test_lower)
+            .expect_err("pipe: expression must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("pipe:name was removed; declare LET $x: PIPE and pass $x"),
+            "unexpected error: {msg}"
+        );
+        assert_eq!(err.line(), 1, "error must name the failing line");
+    }
+
+    #[test]
+    fn pipe_literal_in_assert_is_a_pointed_error() {
+        // `ASSERT_EQ pipe:ch "..."` likewise fails with the migration
+        // error instead of observing a buffer. The mock lower knows no
+        // commands, so this goes through the real dispatcher.
+        let err = parse_script("ASSERT_EQ pipe:ch \"x\"", crate::commands::lower_command)
+            .expect_err("pipe: assert target must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("pipe:name was removed; declare LET $x: PIPE and pass $x"),
+            "unexpected error: {msg}"
         );
     }
 
@@ -625,15 +647,15 @@ mod tests {
         cases.push((
             indoc! {r#"
                 [eq(env:TEST, 1)]
-                WITH_IO [stdout=pipe:capture_case] WRITE hi
-                WITH_IO [stdin=pipe:capture_case] WRITE out.txt
+                WITH_IO [stdout=$capture_case] WRITE hi
+                WITH_IO [stdin=$capture_case] WRITE out.txt
             "#}
             .trim()
             .to_string(),
             quote! {
                 [eq(env:TEST, 1)]
-                WITH_IO [stdout=pipe:capture_case] WRITE hi
-                WITH_IO [stdin=pipe:capture_case] WRITE out.txt
+                WITH_IO [stdout=$capture_case] WRITE hi
+                WITH_IO [stdin=$capture_case] WRITE out.txt
             },
         ));
 
@@ -1011,7 +1033,7 @@ mod tests {
         // ASYNC block must parse. WITH_IO is compound-atomic (implicit
         // whitespace suppressed), so nested rules carry explicit gaps.
         let script = indoc! {r#"
-            WITH_IO [stdout=pipe:out] ASYNC {
+            WITH_IO [stdout=$out] ASYNC {
                 FOR $x: INT IN [0, 1] {
                     ECHO hi
                 }
@@ -1023,7 +1045,7 @@ mod tests {
             StepKind::WithIo { bindings, cmd } => {
                 assert_eq!(bindings.len(), 1);
                 assert!(matches!(bindings[0].stream, IoStream::Stdout));
-                assert_eq!(bindings[0].pipe, Some(PipeTarget::Name("out".to_string())));
+                assert_eq!(bindings[0].pipe, Some(PipeTarget::Var("out".to_string())));
                 match cmd.as_ref() {
                     StepKind::AsyncBlock { body } => {
                         assert_eq!(body.len(), 1);
@@ -1085,7 +1107,7 @@ mod tests {
     fn with_io_async_block_nested_if_else_parses() {
         // Spaced comparison and ELSE chain inside a WITH_IO-wrapped block.
         let script = indoc! {r#"
-            WITH_IO [stdout=pipe:out] ASYNC {
+            WITH_IO [stdout=$out] ASYNC {
                 IF $a == $b {
                     ECHO yes
                 } ELSE {

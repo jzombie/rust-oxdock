@@ -1,7 +1,9 @@
-WITH_IO [stdout=pipe:block_outer] {
+LET $block_outer: PIPE
+LET $block_inner: PIPE
+WITH_IO [stdout=$block_outer] {
     ECHO "outer-1"
     WITH_IO [stdout] ECHO "override-stdout"
-    WITH_IO [stdout=pipe:block_inner] {
+    WITH_IO [stdout=$block_inner] {
         ECHO "inner-2"
     }
     ECHO "outer-3"

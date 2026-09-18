@@ -21,8 +21,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use oxdock_process::{CommandStdin, ProcessManager, SharedInput, SharedOutput};
 
 use super::io::StreamHandle;
-use super::pipe::PipeInner;
 use super::steps::StepCtx;
+use oxdock_pipe::PipeInner;
 
 /// Default dial timeout for `CONNECT` without `--timeout`.
 pub(crate) const DEFAULT_DIAL_TIMEOUT: Duration = Duration::from_secs(10);

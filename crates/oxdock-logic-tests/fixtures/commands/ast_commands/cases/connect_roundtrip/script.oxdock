@@ -1,19 +1,23 @@
 # Full-duplex loopback round-trip through two bridges: dialer and listener
 # pump in opposite directions across two pipe pairs. Asserts byte identity
 # both ways; both AWAITs returning proves graceful close mapping.
+LET $req: PIPE
+LET $resp: PIPE
+LET $req2: PIPE
+LET $resp2: PIPE
 LET $ls: HANDLE = ASYNC {
-  WITH_IO [stdin=pipe:req, stdout=pipe:resp] LISTEN 127.0.0.1:{{ env:BRIDGE_PORT }}
+  WITH_IO [stdin=$req, stdout=$resp] LISTEN 127.0.0.1:{{ env:BRIDGE_PORT }}
 }
 # The listener binds synchronously at task start, but thread scheduling
 # means the dial may otherwise win the race and refuse: wait it out.
 SLEEP 1s
 LET $t: HANDLE = ASYNC {
-  WITH_IO [stdin=pipe:req2, stdout=pipe:resp2] CONNECT 127.0.0.1:{{ env:BRIDGE_PORT }}
+  WITH_IO [stdin=$req2, stdout=$resp2] CONNECT 127.0.0.1:{{ env:BRIDGE_PORT }}
 }
-WITH_IO [stdout=pipe:req2] ECHO "hello"
-WITH_IO [stdin=pipe:resp] READ_LINE $got
-WITH_IO [stdout=pipe:req] ECHO "back"
-WITH_IO [stdin=pipe:resp2] READ_LINE $back
+WITH_IO [stdout=$req2] ECHO "hello"
+WITH_IO [stdin=$resp] READ_LINE $got
+WITH_IO [stdout=$req] ECHO "back"
+WITH_IO [stdin=$resp2] READ_LINE $back
 AWAIT $t
 AWAIT $ls
 WRITE "got.txt" "{{ $got }}"

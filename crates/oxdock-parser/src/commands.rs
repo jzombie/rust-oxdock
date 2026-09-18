@@ -218,7 +218,6 @@ fn fmt_io(b: &IoBinding) -> String {
         IoStream::Stderr => "stderr",
     };
     match &b.pipe {
-        Some(PipeTarget::Name(p)) => format!("{}=pipe:{}", s, p),
         Some(PipeTarget::Var(v)) => format!("{}=${}", s, v),
         None => s.to_string(),
     }
@@ -376,11 +375,11 @@ fn structural_hint(name: &str, received: &str) -> Option<String> {
 }
 
 /// Diagnose a `WITH_IO` line that failed to parse: most often a malformed
-/// binding list (bindings are bare streams or `<stream>=pipe:<name>`).
+/// binding list (bindings are bare streams or `<stream>=$var`).
 fn with_io_hint(got: &str, received: &str) -> String {
     const SYNTAX: &str =
         "WITH_IO needs `WITH_IO [bindings] <command>` or `WITH_IO [bindings] { <commands> }`";
-    const BINDINGS: &str = "bindings are `stdin`, `stdout`, `stderr`, `<stream>=pipe:<name>`, or `<stream>=$var` with a PIPE-typed variable (e.g. `[stdout=pipe:log]`, `[stdin=$p]`)";
+    const BINDINGS: &str = "bindings are `stdin`, `stdout`, `stderr`, or `<stream>=$var` with a PIPE-typed variable (e.g. `[stdout=$p]`, `[stdin=$p]`). `pipe:name` was removed; declare LET $x: PIPE and pass $x";
     if let Some(after_open) = received.strip_prefix('[') {
         match after_open.split_once(']') {
             None => {
@@ -403,10 +402,10 @@ fn with_io_hint(got: &str, received: &str) -> String {
                     }
                     let valid = match binding {
                         None => true,
-                        Some(value) => value
-                            .strip_prefix("pipe:")
-                            .map(|pipe| !pipe.trim().is_empty())
-                            .unwrap_or(false),
+                        Some(value) => value.strip_prefix('$').is_some_and(|var| {
+                            !var.trim().is_empty()
+                                && var.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                        }),
                     };
                     if !valid {
                         return format!(
@@ -418,6 +417,18 @@ fn with_io_hint(got: &str, received: &str) -> String {
         }
     }
     format!("{SYNTAX}; got {got}. {BINDINGS}.")
+}
+
+/// Pointed error for removed `pipe:name` literals in bindings, expressions,
+/// and assert targets: names the migration instead of failing generically.
+/// The grammar still recognizes the literal shape so the error carries the
+/// exact span; lowering rejects it here.
+pub(crate) fn pipe_literal_removed_error(tag: &str, ctx: &SpanContext) -> ParseError {
+    ParseError::validation(
+        tag,
+        "pipe:name was removed; declare LET $x: PIPE and pass $x".to_string(),
+        ctx,
+    )
 }
 
 /// `echo hi` is almost certainly `ECHO hi`: commands are uppercase.
@@ -504,16 +515,17 @@ macro_rules! declare_commands {
 
 /// First-argument target for `ASSERT_EQ` / `ASSERT_CONTAINS`.
 ///
-/// Values (`Arg`) evaluate in memory and never touch disk. The `Stdout`,
-/// `Stderr`, and `Pipe` markers observe stream buffers. Bare `stdout` /
-/// `stderr` / `pipe:NAME` spellings lower to markers; quoted spellings stay
-/// literal string values, so quoting remains interchangeable everywhere.
+/// Values (`Arg`) evaluate in memory and never touch disk. The `Stdout`
+/// and `Stderr` markers observe stream buffers. Pipes are asserted through
+/// plain variables: a `$var` holding a `PIPE` peeks its backend bytes at
+/// runtime, so no pipe marker variant exists. Bare `stdout` / `stderr`
+/// spellings lower to markers; quoted spellings stay literal string
+/// values, so quoting remains interchangeable everywhere.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AssertTarget {
     Value(Arg),
     Stdout,
     Stderr,
-    Pipe(String),
 }
 
 impl AssertTarget {
@@ -522,35 +534,32 @@ impl AssertTarget {
             AssertTarget::Value(arg) => arg.render(),
             AssertTarget::Stdout => "stdout".to_string(),
             AssertTarget::Stderr => "stderr".to_string(),
-            AssertTarget::Pipe(name) => format!("pipe:{name}"),
         }
     }
 }
 
 /// Lower the first positional of `ASSERT_EQ` / `ASSERT_CONTAINS`.
 ///
-/// `Arg::Expr` (variables, key-paths, calls) is always a value. Bare
-/// (unquoted) `stdout` / `stderr` / `pipe:NAME` spellings become stream
-/// markers; every other spelling, quoted or not, stays a literal value.
-/// In particular a `$var` holding a path never reads disk, and quoted
-/// `"stdout"` names the seven-character string, not the stream.
+/// `Arg::Expr` (variables, key-paths, calls) is always a value — a `$var`
+/// holding a `PIPE` peeks its backend bytes at runtime. Bare (unquoted)
+/// `stdout` / `stderr` spellings become stream markers; every other
+/// spelling, quoted or not, stays a literal value. In particular a `$var`
+/// holding a path never reads disk, and quoted `"stdout"` names the
+/// seven-character string, not the stream. Bare `pipe:NAME` is a removed
+/// literal and fails with the migration error.
 fn lower_assert_target(arg: Arg, cmd_name: &str) -> ParseResult<AssertTarget> {
     match arg {
         Arg::Expr(_) => Ok(AssertTarget::Value(arg)),
         Arg::String(text, quoted) if !quoted => match text.as_str() {
             "stdout" => Ok(AssertTarget::Stdout),
             "stderr" => Ok(AssertTarget::Stderr),
-            _ => match text.strip_prefix("pipe:") {
-                Some(name) if !name.is_empty() => Ok(AssertTarget::Pipe(name.to_string())),
-                Some(_) => Err(ParseError::validation(
-                    cmd_name,
-                    format!("{cmd_name} pipe target needs a name, got {text:?}"),
-                    &SpanContext::line_only(0),
-                )),
-                None => Ok(AssertTarget::Value(lower_assert_operand(Arg::String(
-                    text, false,
-                )))),
-            },
+            _ if text.starts_with("pipe:") => Err(pipe_literal_removed_error(
+                cmd_name,
+                &SpanContext::line_only(0),
+            )),
+            _ => Ok(AssertTarget::Value(lower_assert_operand(Arg::String(
+                text, false,
+            )))),
         },
         other => Ok(AssertTarget::Value(lower_assert_operand(other))),
     }
@@ -950,8 +959,9 @@ declare_commands! {
         flags: &[],
         default_output: None,
         examples: &[ Example { name: "read line", fence_meta: None, code: indoc! {r#"
-            WITH_IO [stdout=pipe:lines] ECHO "first"
-            WITH_IO [stdin=pipe:lines] READ_LINE $reply
+            LET $lines: PIPE
+            WITH_IO [stdout=$lines] ECHO "first"
+            WITH_IO [stdin=$lines] READ_LINE $reply
         "#} } ],
         lower: |_flags, args| {
             let arg = args.into_iter().next().ok_or_else(|| ParseError::validation("READ_LINE", "READ_LINE requires a variable".to_string(), &SpanContext::line_only(0)))?;
@@ -1085,8 +1095,9 @@ declare_commands! {
             "#} },
             Example { name: "expand stdin", fence_meta: None, code: indoc! {r#"
                 # no path: the template arrives on stdin through a pipe
-                WITH_IO [stdout=pipe:tpl] ECHO "Hello \{{ env:NAME }}!"
-                WITH_IO [stdin=pipe:tpl] EXPAND NAME=Alice
+                LET $tpl: PIPE
+                WITH_IO [stdout=$tpl] ECHO "Hello \{{ env:NAME }}!"
+                WITH_IO [stdin=$tpl] EXPAND NAME=Alice
                 ASSERT_CONTAINS stdout "Hello Alice!"
             "#} },
             Example { name: "override does not leak", fence_meta: None, code: indoc! {r#"
@@ -1128,13 +1139,13 @@ declare_commands! {
             evaluate in memory and never touch disk. Read files explicitly
             first (`LET $text: STRING = READ "out.txt"`, then
             `ASSERT_EQ $text ...`).
-            Bare `stdout` / `stderr` observe stream buffers; `pipe:NAME`
-            observes a pipe buffer. `--hash` compares the SHA-256 of a
-            string, pipe, or captured-stdout actual instead of the raw
-            bytes (`stderr` is unsupported).
+            Bare `stdout` / `stderr` observe stream buffers; a `$var`
+            holding a `PIPE` observes its backend bytes. `--hash` compares
+            the SHA-256 of a string, pipe, or captured-stdout actual
+            instead of the raw bytes (`stderr` is unsupported).
         "#},
         args: &[
-            ArgSpec { name: "actual", arg_type: ArgType::Any, description: "Value, stdout, stderr, or pipe:NAME", io: IoDirection::Read, index: 0, required: true, fallback_stream: None },
+            ArgSpec { name: "actual", arg_type: ArgType::Any, description: "Value, stdout, stderr, or a $var holding a PIPE", io: IoDirection::Read, index: 0, required: true, fallback_stream: None },
             ArgSpec { name: "expected", arg_type: ArgType::Rest(&ArgType::Any), description: "Expected (required unless --hash)", io: IoDirection::Read, index: 1, required: false, fallback_stream: None },
         ],
         flags: &[ FlagSpec { name: "hash", long: "--hash", value_type: FlagValueType::String, required: false, description: "SHA-256" } ],
@@ -1189,11 +1200,11 @@ declare_commands! {
             Like `ASSERT_EQ`, both sides are values read without implicit
             I/O; read files explicitly first
             (`LET $text: STRING = READ "cfg.txt"`).
-            Bare `stdout` / `stderr` observe stream buffers; `pipe:NAME`
-            observes a pipe buffer.
+            Bare `stdout` / `stderr` observe stream buffers; a `$var`
+            holding a `PIPE` observes its backend bytes.
         "#},
         args: &[
-            ArgSpec { name: "haystack", arg_type: ArgType::Any, description: "Value, stdout, stderr, or pipe:NAME", io: IoDirection::Read, index: 0, required: true, fallback_stream: None },
+            ArgSpec { name: "haystack", arg_type: ArgType::Any, description: "Value, stdout, stderr, or a $var holding a PIPE", io: IoDirection::Read, index: 0, required: true, fallback_stream: None },
             ArgSpec { name: "needle", arg_type: ArgType::Rest(&ArgType::Any), description: "Substring, element, or key", io: IoDirection::Read, index: 1, required: true, fallback_stream: None },
         ],
         flags: &[],
@@ -1338,10 +1349,14 @@ declare_commands! {
         default_output: None,
         examples: &[
             Example { name: "connect requires async", fence_meta: Some("expect_error:\"requires ASYNC\""), code: indoc! {r#"
-                WITH_IO [stdin=pipe:req, stdout=pipe:resp] CONNECT 127.0.0.1:8080
+                LET $req: PIPE
+                LET $resp: PIPE
+                WITH_IO [stdin=$req, stdout=$resp] CONNECT 127.0.0.1:8080
             "#} },
             Example { name: "connect validates endpoint", fence_meta: Some("expect_error:\"invalid endpoint\""), code: indoc! {r#"
-                WITH_IO [stdin=pipe:req, stdout=pipe:resp] CONNECT not-an-endpoint
+                LET $req: PIPE
+                LET $resp: PIPE
+                WITH_IO [stdin=$req, stdout=$resp] CONNECT not-an-endpoint
             "#} },
         ],
         lower: |flags, args| {
@@ -1402,10 +1417,14 @@ declare_commands! {
         default_output: None,
         examples: &[
             Example { name: "listen rejects non-loopback", fence_meta: Some("expect_error:\"loopback\""), code: indoc! {r#"
-                WITH_IO [stdin=pipe:req, stdout=pipe:resp] LISTEN 0.0.0.0:8080
+                LET $req: PIPE
+                LET $resp: PIPE
+                WITH_IO [stdin=$req, stdout=$resp] LISTEN 0.0.0.0:8080
             "#} },
             Example { name: "listen rejects ephemeral", fence_meta: Some("expect_error:\"ephemeral\""), code: indoc! {r#"
-                WITH_IO [stdin=pipe:req, stdout=pipe:resp] LISTEN 127.0.0.1:0
+                LET $req: PIPE
+                LET $resp: PIPE
+                WITH_IO [stdin=$req, stdout=$resp] LISTEN 127.0.0.1:0
             "#} },
         ],
         lower: |flags, args| {
@@ -1436,16 +1455,16 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
     vec![
         CommandMeta {
             name: "WITH_IO",
-            syntax: "WITH_IO [<stream>[=pipe:<name>|=$var], ...] <command> | WITH_IO [bindings] { <commands> }",
+            syntax: "WITH_IO [<stream>[=$var], ...] <command> | WITH_IO [bindings] { <commands> }",
             summary: "Reroute standard streams.",
             description: indoc! {r#"
                 Reroutes the standard streams of the next command or, in block form,
                 of every enclosed command.
 
-                Bindings map streams (`stdin`, `stdout`, `stderr`) to named script
-                pipes (`stdout=pipe:name`, `stderr=pipe:name`) or to a PIPE-typed
-                variable (`stdin=$p`, resolved against the live pipe registry when
-                the step runs). Both stdout and stderr pipes capture output the same way.
+                Bindings map streams (`stdin`, `stdout`, `stderr`) to a PIPE-typed
+                variable (`stdout=$p`, `stdin=$p`), resolved from the variable
+                when the step runs. Both stdout and stderr pipes capture output
+                the same way. Declare the handle first with `LET $p: PIPE`.
 
                 Pipes hold bytes in memory and spill to a temp file above 8 MiB, so a
                 producer can finish before the consumer starts.
@@ -1458,10 +1477,11 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 bodies are always script pipes, even when the surrounding task would
                 otherwise promote.
 
-                A second producer or consumer on a live name is an explicit error. A name
-                bound as output can later feed another command's `stdin`, connecting
-                commands without touching the terminal. Binding `stdout` and `stderr` to
-                the same live pipe name fails deterministically. Merge streams in shell
+                A second producer or consumer on a live handle is an explicit
+                error. A handle bound as output can later feed another
+                command's `stdin`, connecting commands without touching the
+                terminal. Binding `stdout` and `stderr` to the same live
+                handle fails deterministically. Merge streams in shell
                 via `2>&1` instead.
 
                 Nested blocks stack defaults; inline bindings override inherited ones for
@@ -1475,23 +1495,22 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     name: "with_io block",
                     fence_meta: None,
                     code: indoc! {r#"
-                WITH_IO [stdout=pipe:log] {
+                LET $log: PIPE
+                WITH_IO [stdout=$log] {
                   ECHO first
                   ECHO second
                 }
-                WITH_IO [stdin=pipe:log] WRITE captured.txt
+                WITH_IO [stdin=$log] WRITE captured.txt
             "#},
                 },
                 Example {
                     name: "variable pipe binding",
                     fence_meta: None,
                     code: indoc! {r#"
-                # Declare the pipe first with the explicit handle operator
-                # (like `env:KEY`): `pipe:log` names a pipe without touching
-                # a stream. A plain string here would be a TypeMismatch.
-                # `$p` (not `pipe:$p`) is the variable form; literals stay
-                # `pipe:name`.
-                LET $p: PIPE = pipe:log
+                # Declare the pipe first: `LET $p: PIPE` mints a fresh
+                # backend without touching a stream. A plain string here
+                # would be a TypeMismatch.
+                LET $p: PIPE
                 WITH_IO [stdout=$p] ECHO hello
                 WITH_IO [stdin=$p] READ_LINE $line
                 ASSERT_EQ $line "hello"
@@ -1655,10 +1674,10 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 arithmetic (`+ - * /` with `*`/`/` binding tighter, unary `-`,
                 parentheses), comparisons (`< <= > >=` binding tighter than
                 `== !=`), logical `&&` (tighter) and `||` with short-circuit,
-                `!` negation, `env:KEY` reads, `pipe:NAME` handles,
-                `INSPECT($var)` snapshots, `GLOB("*.md")`, `INT(x)` /
-                `FLOAT(x)` conversions — never a `{{ ... }}` template;
-                interpolation happens in string values, not here.
+                `!` negation, `env:KEY` reads, `INSPECT($var)` snapshots,
+                `GLOB("*.md")`, `INT(x)` / `FLOAT(x)` conversions — never a
+                `{{ ... }}` template; interpolation happens in string values,
+                not here.
                 The one exception is pipes: `LET $p: PIPE` with no `=`
                 and no initializer mints a fresh anonymous backend,
                 lazily materialized at first binding, so two declarations
@@ -1706,7 +1725,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 exact stdout bytes are captured into the variable as a string (no newline
                 stripping; commands with no stdout capture as `""`; non-UTF8 stdout is
                 an error). Combining capture with an explicit
-                `WITH_IO [stdout=pipe:...]` is a parse error.
+                `WITH_IO [stdout=$var]` is a parse error.
 
                 Coming from Bash, the capture line looks familiar but behaves
                 strictly:
@@ -1841,7 +1860,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 # INSPECT($var) snapshots a variable into a MAP: declared
                 # type plus live details (pipe backend stats here), so
                 # scripts can branch on engine state.
-                LET $p: PIPE = pipe:log
+                LET $p: PIPE
                 WITH_IO [stdout=$p] ECHO hello
                 LET $info: MAP = INSPECT($p)
                 IF $info.is_os_pipe {
@@ -2095,12 +2114,12 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     code: indoc! {r#"
                 # A pipe handle travels into a function as a typed argument
                 # and is usable as a binding target in both directions.
-                # `pipe:ch` constructs the handle; `$p` passes it on.
+                # `LET $p: PIPE` mints the handle; `$p` passes it on.
                 FUNC DRAIN($q: PIPE) {
                   WITH_IO [stdin=$q] READ_LINE $line
                   RETURN $line
                 }
-                LET $p: PIPE = pipe:ch
+                LET $p: PIPE
                 WITH_IO [stdout=$p] ECHO "payload"
                 LET $got: STRING = DRAIN($p)
                 ASSERT_EQ $got "payload"
@@ -2581,7 +2600,7 @@ mod tests {
         assert!(err.contains("invalid syntax for command WITH_IO"), "{err}");
         assert!(!err.contains("unknown command"), "{err}");
         assert!(err.contains("stdout=discard"), "{err}");
-        assert!(err.contains("pipe:<name>"), "{err}");
+        assert!(err.contains("declare LET $x: PIPE and pass $x"), "{err}");
     }
 
     #[test]

@@ -54,10 +54,10 @@ pub(crate) fn coerce_value<P: ProcessManager>(
         },
         (Some(s), "PIPE") => {
             // Strict: plain strings never coerce to pipes, so a handle is
-            // always created explicitly via the `pipe:NAME` operator
-            // (`LET $p: PIPE = pipe:log`). Anything else is a TypeMismatch.
+            // always created explicitly via `LET $p: PIPE`. Anything else
+            // is a TypeMismatch.
             Err(anyhow::anyhow!(
-                "TypeMismatch: expected {expected}, got STRING ({s:?}); use pipe:NAME to name a pipe"
+                "TypeMismatch: expected {expected}, got STRING ({s:?}); declare LET $x: PIPE and pass $x"
             ))
         }
         (Some(s), "DURATION") => oxdock_parser::command::parse_duration(s.trim())

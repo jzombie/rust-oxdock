@@ -1,4 +1,5 @@
 ENV CARGO_TARGET_DIR="ws/target"
-WITH_IO [stdout=pipe:capture] {
+LET $capture: PIPE
+WITH_IO [stdout=$capture] {
   ECHO "{{ env:CARGO_TARGET_DIR }}"
 }

@@ -11,7 +11,7 @@ use oxdock_process::{BackgroundHandle, CommandContext, ProcessManager};
 use super::capture::SpillBuffer;
 use super::io::{ExactCapture, ExecIo, SlidingWindow};
 use super::native::FunctionRegistry;
-use super::pipe::KeeperGuard;
+use oxdock_pipe::KeeperGuard;
 
 /// Maximum nested function-call depth. Guards the host thread stack against
 /// runaway recursion; the error names the function that overflowed.

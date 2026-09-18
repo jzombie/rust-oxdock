@@ -5,7 +5,7 @@ mod demo_assets {
 
     oxdock_embed! {
         name: DemoAssets,
-        script: "WITH_IO [stdout=pipe:cap_env_txt] ECHO {{ env:CARGO_FEATURE_OXDOCK_TEST }}:{{ env:CARGO_CFG_TARGET_OS }}; WITH_IO [stdin=pipe:cap_env_txt] WRITE env.txt",
+        script: "LET $cap_env_txt: PIPE; WITH_IO [stdout=$cap_env_txt] ECHO {{ env:CARGO_FEATURE_OXDOCK_TEST }}:{{ env:CARGO_CFG_TARGET_OS }}; WITH_IO [stdin=$cap_env_txt] WRITE env.txt",
         out_dir: "prebuilt",
     }
 }

@@ -1,3 +1,5 @@
 # Non-loopback binds are rejected at validation time: no socket is ever
 # created, so this needs no network and fails deterministically.
-WITH_IO [stdin=pipe:req, stdout=pipe:resp] LISTEN 0.0.0.0:9
+LET $req: PIPE
+LET $resp: PIPE
+WITH_IO [stdin=$req, stdout=$resp] LISTEN 0.0.0.0:9

@@ -5,11 +5,14 @@ use std::sync::{Arc, Mutex};
 use anyhow::Result;
 #[cfg(not(miri))]
 use anyhow::bail;
+#[cfg(not(miri))]
+use oxdock_pipe::OsPipeEntry;
+use oxdock_pipe::{KeeperGuard, PipeInner, ScriptPipe};
 use oxdock_process::{CommandStderr, CommandStdin, CommandStdout, SharedInput, SharedOutput};
 #[cfg(not(miri))]
-use oxdock_process::{OsPipeReader, OsPipeWriter, create_os_pipe};
+use oxdock_process::{OsPipeReader, OsPipeWriter};
 
-use super::pipe::{KeeperGuard, PipeEndpoint, PipeInner, PipeOutputs, ScriptPipe};
+use super::pipe::{PipeEndpoint, PipeOutputs};
 
 /// Shared pipe registry. All threads in the same execution context
 /// reference the same registry, so pipes created by the parent are
@@ -33,32 +36,6 @@ struct RegistryInner {
 #[derive(Clone, Default)]
 pub(super) struct PipeRegistry {
     inner: Arc<Mutex<RegistryInner>>,
-}
-
-/// One anonymous OS kernel pipe pair behind take once slots. The first
-/// producer and the first consumer each take their half; any further
-/// binding to the same name bails deterministically instead of
-/// interleaving bytes or stealing the descriptor.
-#[cfg(not(miri))]
-#[derive(Clone)]
-pub(super) struct OsPipeEntry {
-    writer: OsPipeWriter,
-    reader: OsPipeReader,
-}
-
-#[cfg(not(miri))]
-impl OsPipeEntry {
-    fn new() -> Result<Self> {
-        let (reader, writer) = create_os_pipe()?;
-        Ok(Self { writer, reader })
-    }
-
-    /// Both halves taken. The takers hold raw descriptors outside the
-    /// registry, so a spent entry can never serve another resolve; it is
-    /// either replaced on next ensure or left for the loud take error.
-    fn is_spent(&self) -> bool {
-        self.reader.is_consumed() && self.writer.is_consumed()
-    }
 }
 
 impl PipeRegistry {
@@ -805,7 +782,13 @@ impl ExecIo {
     /// Non-destructive snapshot of a script pipe's buffered bytes for
     /// pipe-content assertions. Single lock acquisition for the lookup;
     /// content is cloned out from under its own lock.
-    pub(super) fn peek_pipe_content(&self, name: &str) -> Result<Vec<u8>> {
+    ///
+    /// Public so out-of-crate harnesses can assert on script-owned pipes
+    /// after a run completes: `ExecIo` clones share the live registry,
+    /// so a clone retained across the run observes every backend the
+    /// script materialized. Only meaningful once all writers detached
+    /// (post-run); OS-promoted pipes bail, directing to drains instead.
+    pub fn peek_pipe_content(&self, name: &str) -> Result<Vec<u8>> {
         self.pipes.peek_pipe_content(name)
     }
 

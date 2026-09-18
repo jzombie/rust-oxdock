@@ -115,8 +115,9 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     ENV PROJECT=#project
     MKDIR dist
     [bool:#verbose] WRITE dist/verbose.log "verbose on"
-    WITH_IO [stdout=pipe:log] ECHO "built {{ env:PROJECT }}"
-    WITH_IO [stdin=pipe:log] READ_LINE $line
+    LET $log: PIPE
+    WITH_IO [stdout=$log] ECHO "built {{ env:PROJECT }}"
+    WITH_IO [stdin=$log] READ_LINE $line
     WRITE dist/build.txt "{{ $line }}"
     IMPORT [STD]
     FOR $f: STRING IN GLOB("dist/*.txt") {
@@ -244,11 +245,12 @@ Two trade offs come with the form. Cloning a string still deep copies it, since 
 
 ### Transport: pipes
 
-A command's standard streams can be rerouted through named pipes, so producers and consumers connect without touching the terminal or temp files. Buffers stay in memory and spill to a guarded temp file past 8 MiB, and background single command tasks can promote a pipe to a zero copy OS kernel pair instead.
+A command's standard streams can be rerouted through pipes declared with `LET $p: PIPE`, so producers and consumers connect without touching the terminal or temp files. Buffers stay in memory and spill to a guarded temp file past 8 MiB, and background single command tasks can promote a pipe to a zero copy OS kernel pair instead.
 
 ```oxdock
-WITH_IO [stdout=pipe:log] ECHO hello
-WITH_IO [stdin=pipe:log] READ_LINE $line
+LET $log: PIPE
+WITH_IO [stdout=$log] ECHO hello
+WITH_IO [stdin=$log] READ_LINE $line
 ASSERT_EQ $line "hello"
 ```
 
@@ -887,7 +889,7 @@ LET $bounded: HANDLE = ASYNC TIMEOUT 30s ECHO "bounded"
 AWAIT $bounded
 ```
 
-The one structural exception is `WITH_IO`, which must wrap `ASYNC` from the outside (`WITH_IO [stdout=pipe:p] ASYNC ...`) so pipe endpoints are allocated synchronously on the main thread before the worker spawns. Placing `WITH_IO` directly inside `ASYNC` is rejected at parse time.
+The one structural exception is `WITH_IO`, which must wrap `ASYNC` from the outside (`LET $p: PIPE` first, then `WITH_IO [stdout=$p] ASYNC ...`) so pipe endpoints are allocated synchronously on the main thread before the worker spawns. Placing `WITH_IO` directly inside `ASYNC` is rejected at parse time.
 
 ## Cancelling tasks with CANCEL
 
@@ -930,7 +932,7 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | [`SLEEP`](#sleep) | `SLEEP <duration>` |
 | [`CONNECT`](#connect) | `CONNECT <host:port> [--timeout <duration>] [--no-half-close]` |
 | [`LISTEN`](#listen) | `LISTEN [host:]port [--no-half-close]` |
-| [`WITH_IO`](#with_io) | `WITH_IO [<stream>[=pipe:<name>\|=$var], ...] <command> \| WITH_IO [bindings] { <commands> }` |
+| [`WITH_IO`](#with_io) | `WITH_IO [<stream>[=$var], ...] <command> \| WITH_IO [bindings] { <commands> }` |
 | [`FOR`](#for) | `FOR $item: TYPE IN <expr> { <commands> } \| FOR $key: STRING, $value: TYPE IN <expr> { <commands> }` |
 | [`IF`](#if) | `IF <expr> { <commands> } [ELSE IF <expr> { <commands> } ...] [ELSE { <commands> }]` |
 | [`LET`](#let) | `LET $var: TYPE = <expr> \| LET $p: PIPE \| LET $var: TYPE = ASYNC { <commands> } \| LET $var: TYPE = <command> \| LET $var: TYPE = AWAIT $task` |
@@ -950,15 +952,15 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 
 Reroute standard streams.
 
-**Syntax:** `WITH_IO [<stream>[=pipe:<name>|=$var], ...] <command> | WITH_IO [bindings] { <commands> }`
+**Syntax:** `WITH_IO [<stream>[=$var], ...] <command> | WITH_IO [bindings] { <commands> }`
 
 Reroutes the standard streams of the next command or, in block form,
 of every enclosed command.
 
-Bindings map streams (`stdin`, `stdout`, `stderr`) to named script
-pipes (`stdout=pipe:name`, `stderr=pipe:name`) or to a PIPE-typed
-variable (`stdin=$p`, resolved against the live pipe registry when
-the step runs). Both stdout and stderr pipes capture output the same way.
+Bindings map streams (`stdin`, `stdout`, `stderr`) to a PIPE-typed
+variable (`stdout=$p`, `stdin=$p`), resolved from the variable
+when the step runs. Both stdout and stderr pipes capture output
+the same way. Declare the handle first with `LET $p: PIPE`.
 
 Pipes hold bytes in memory and spill to a temp file above 8 MiB, so a
 producer can finish before the consumer starts.
@@ -971,10 +973,11 @@ a function boundary: pipes created, bound, or passed by variable inside FUNC
 bodies are always script pipes, even when the surrounding task would
 otherwise promote.
 
-A second producer or consumer on a live name is an explicit error. A name
-bound as output can later feed another command's `stdin`, connecting
-commands without touching the terminal. Binding `stdout` and `stderr` to
-the same live pipe name fails deterministically. Merge streams in shell
+A second producer or consumer on a live handle is an explicit
+error. A handle bound as output can later feed another
+command's `stdin`, connecting commands without touching the
+terminal. Binding `stdout` and `stderr` to the same live
+handle fails deterministically. Merge streams in shell
 via `2>&1` instead.
 
 Nested blocks stack defaults; inline bindings override inherited ones for
@@ -986,22 +989,21 @@ their command only; closing a block restores previous wiring.
 **Example: with_io block**
 
 ```oxdock
-WITH_IO [stdout=pipe:log] {
+LET $log: PIPE
+WITH_IO [stdout=$log] {
   ECHO first
   ECHO second
 }
-WITH_IO [stdin=pipe:log] WRITE captured.txt
+WITH_IO [stdin=$log] WRITE captured.txt
 ```
 
 **Example: variable pipe binding**
 
 ```oxdock
-# Declare the pipe first with the explicit handle operator
-# (like `env:KEY`): `pipe:log` names a pipe without touching
-# a stream. A plain string here would be a TypeMismatch.
-# `$p` (not `pipe:$p`) is the variable form; literals stay
-# `pipe:name`.
-LET $p: PIPE = pipe:log
+# Declare the pipe first: `LET $p: PIPE` mints a fresh
+# backend without touching a stream. A plain string here
+# would be a TypeMismatch.
+LET $p: PIPE
 WITH_IO [stdout=$p] ECHO hello
 WITH_IO [stdin=$p] READ_LINE $line
 ASSERT_EQ $line "hello"
@@ -1159,10 +1161,10 @@ The right-hand side is always an expression — literals, lists, maps,
 arithmetic (`+ - * /` with `*`/`/` binding tighter, unary `-`,
 parentheses), comparisons (`< <= > >=` binding tighter than
 `== !=`), logical `&&` (tighter) and `||` with short-circuit,
-`!` negation, `env:KEY` reads, `pipe:NAME` handles,
-`INSPECT($var)` snapshots, `GLOB("*.md")`, `INT(x)` /
-`FLOAT(x)` conversions — never a `{{ ... }}` template;
-interpolation happens in string values, not here.
+`!` negation, `env:KEY` reads, `INSPECT($var)` snapshots,
+`GLOB("*.md")`, `INT(x)` / `FLOAT(x)` conversions — never a
+`{{ ... }}` template; interpolation happens in string values,
+not here.
 The one exception is pipes: `LET $p: PIPE` with no `=`
 and no initializer mints a fresh anonymous backend,
 lazily materialized at first binding, so two declarations
@@ -1210,7 +1212,7 @@ When the right-hand side is a synchronous command
 exact stdout bytes are captured into the variable as a string (no newline
 stripping; commands with no stdout capture as `""`; non-UTF8 stdout is
 an error). Combining capture with an explicit
-`WITH_IO [stdout=pipe:...]` is a parse error.
+`WITH_IO [stdout=$var]` is a parse error.
 
 Coming from Bash, the capture line looks familiar but behaves
 strictly:
@@ -1337,7 +1339,7 @@ ASSERT_EQ $ok "yes"
 # INSPECT($var) snapshots a variable into a MAP: declared
 # type plus live details (pipe backend stats here), so
 # scripts can branch on engine state.
-LET $p: PIPE = pipe:log
+LET $p: PIPE
 WITH_IO [stdout=$p] ECHO hello
 LET $info: MAP = INSPECT($p)
 IF $info.is_os_pipe {
@@ -1577,12 +1579,12 @@ GREET("bex")
 ```oxdock
 # A pipe handle travels into a function as a typed argument
 # and is usable as a binding target in both directions.
-# `pipe:ch` constructs the handle; `$p` passes it on.
+# `LET $p: PIPE` mints the handle; `$p` passes it on.
 FUNC DRAIN($q: PIPE) {
   WITH_IO [stdin=$q] READ_LINE $line
   RETURN $line
 }
-LET $p: PIPE = pipe:ch
+LET $p: PIPE
 WITH_IO [stdout=$p] ECHO "payload"
 LET $got: STRING = DRAIN($p)
 ASSERT_EQ $got "payload"
@@ -2185,8 +2187,9 @@ assigns accumulated bytes and returns.
 **Example: read line**
 
 ```oxdock
-WITH_IO [stdout=pipe:lines] ECHO "first"
-WITH_IO [stdin=pipe:lines] READ_LINE $reply
+LET $lines: PIPE
+WITH_IO [stdout=$lines] ECHO "first"
+WITH_IO [stdin=$lines] READ_LINE $reply
 ```
 
 
@@ -2329,8 +2332,9 @@ ASSERT_CONTAINS stdout "Hi Ada and Ada concatenated!"
 
 ```oxdock
 # no path: the template arrives on stdin through a pipe
-WITH_IO [stdout=pipe:tpl] ECHO "Hello \{{ env:NAME }}!"
-WITH_IO [stdin=pipe:tpl] EXPAND NAME=Alice
+LET $tpl: PIPE
+WITH_IO [stdout=$tpl] ECHO "Hello \{{ env:NAME }}!"
+WITH_IO [stdin=$tpl] EXPAND NAME=Alice
 ASSERT_CONTAINS stdout "Hello Alice!"
 ```
 
@@ -2362,17 +2366,17 @@ Both sides are values: `$var`, literals, templates, and calls
 evaluate in memory and never touch disk. Read files explicitly
 first (`LET $text: STRING = READ "out.txt"`, then
 `ASSERT_EQ $text ...`).
-Bare `stdout` / `stderr` observe stream buffers; `pipe:NAME`
-observes a pipe buffer. `--hash` compares the SHA-256 of a
-string, pipe, or captured-stdout actual instead of the raw
-bytes (`stderr` is unsupported).
+Bare `stdout` / `stderr` observe stream buffers; a `$var`
+holding a `PIPE` observes its backend bytes. `--hash` compares
+the SHA-256 of a string, pipe, or captured-stdout actual
+instead of the raw bytes (`stderr` is unsupported).
 
 
 **Arguments:**
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
-| `actual` | `ANY` | yes | Value, stdout, stderr, or pipe:NAME |
+| `actual` | `ANY` | yes | Value, stdout, stderr, or a $var holding a PIPE |
 | `expected` | `ANY...` | no | Expected (required unless --hash) |
 
 **Flags:**
@@ -2421,15 +2425,15 @@ key presence for maps, substring over stream and pipe buffers.
 Like `ASSERT_EQ`, both sides are values read without implicit
 I/O; read files explicitly first
 (`LET $text: STRING = READ "cfg.txt"`).
-Bare `stdout` / `stderr` observe stream buffers; `pipe:NAME`
-observes a pipe buffer.
+Bare `stdout` / `stderr` observe stream buffers; a `$var`
+holding a `PIPE` observes its backend bytes.
 
 
 **Arguments:**
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
-| `haystack` | `ANY` | yes | Value, stdout, stderr, or pipe:NAME |
+| `haystack` | `ANY` | yes | Value, stdout, stderr, or a $var holding a PIPE |
 | `needle` | `ANY...` | yes | Substring, element, or key |
 
 **Examples:**
@@ -2585,7 +2589,9 @@ loopback-only.
 **Example: connect requires async**
 
 ```oxdock expect_error:"requires ASYNC"
-WITH_IO [stdin=pipe:req, stdout=pipe:resp] CONNECT 127.0.0.1:8080
+LET $req: PIPE
+LET $resp: PIPE
+WITH_IO [stdin=$req, stdout=$resp] CONNECT 127.0.0.1:8080
 ```
 
 **Expected error:** `requires ASYNC`
@@ -2593,7 +2599,9 @@ WITH_IO [stdin=pipe:req, stdout=pipe:resp] CONNECT 127.0.0.1:8080
 **Example: connect validates endpoint**
 
 ```oxdock expect_error:"invalid endpoint"
-WITH_IO [stdin=pipe:req, stdout=pipe:resp] CONNECT not-an-endpoint
+LET $req: PIPE
+LET $resp: PIPE
+WITH_IO [stdin=$req, stdout=$resp] CONNECT not-an-endpoint
 ```
 
 **Expected error:** `invalid endpoint`
@@ -2641,7 +2649,9 @@ disconnect, `CANCEL`, or `TIMEOUT`).
 **Example: listen rejects non-loopback**
 
 ```oxdock expect_error:"loopback"
-WITH_IO [stdin=pipe:req, stdout=pipe:resp] LISTEN 0.0.0.0:8080
+LET $req: PIPE
+LET $resp: PIPE
+WITH_IO [stdin=$req, stdout=$resp] LISTEN 0.0.0.0:8080
 ```
 
 **Expected error:** `loopback`
@@ -2649,7 +2659,9 @@ WITH_IO [stdin=pipe:req, stdout=pipe:resp] LISTEN 0.0.0.0:8080
 **Example: listen rejects ephemeral**
 
 ```oxdock expect_error:"ephemeral"
-WITH_IO [stdin=pipe:req, stdout=pipe:resp] LISTEN 127.0.0.1:0
+LET $req: PIPE
+LET $resp: PIPE
+WITH_IO [stdin=$req, stdout=$resp] LISTEN 127.0.0.1:0
 ```
 
 **Expected error:** `ephemeral`
@@ -2874,7 +2886,7 @@ let script = indoc! {"
 let err = oxdock_parser::parse_script(script, oxdock_parser::lower_command)
     .expect_err("must fail");
 let expected = indoc! {"
-    invalid syntax for command WITH_IO: WITH_IO needs `WITH_IO [bindings] <command>` or `WITH_IO [bindings] { <commands> }`: invalid binding `stdout=discard`; bindings are `stdin`, `stdout`, `stderr`, `<stream>=pipe:<name>`, or `<stream>=$var` with a PIPE-typed variable (e.g. `[stdout=pipe:log]`, `[stdin=$p]`); got `[stdout=discard] ECHO hi`.
+    invalid syntax for command WITH_IO: WITH_IO needs `WITH_IO [bindings] <command>` or `WITH_IO [bindings] { <commands> }`: invalid binding `stdout=discard`; bindings are `stdin`, `stdout`, `stderr`, or `<stream>=$var` with a PIPE-typed variable (e.g. `[stdout=$p]`, `[stdin=$p]`). `pipe:name` was removed; declare LET $x: PIPE and pass $x; got `[stdout=discard] ECHO hi`.
       --> line 1, col 1-32
       1 | WITH_IO [stdout=discard] ECHO hi
         | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

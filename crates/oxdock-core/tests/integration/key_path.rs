@@ -32,18 +32,32 @@ fn run_script_with_scope(
 fn run_script_captured_pipe(
     root: &GuardedPath,
     script: &str,
-    pipe: &str,
+    var: &str,
 ) -> Result<String, anyhow::Error> {
     // File-local scripts call `STD` builtins; the import is fixture,
     // not subject: `IMPORT` semantics are covered in `import.rs`.
+    // The script declares its own `$var` pipe; its backend bytes are
+    // snapshotted post-run through the retained registry probe. Nothing
+    // is pre-injected: there are no named pipes left for the host to
+    // address. All call sites capture write-only pipes, so the buffer
+    // still holds every byte after the run completes.
     let steps =
         oxdock_core::parse_script(&format!("IMPORT [STD]\n{script}")).expect("parse script");
-    let captured: std::sync::Arc<std::sync::Mutex<Vec<u8>>> =
-        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let mut io_cfg = ExecIo::new();
-    io_cfg.insert_output_pipe(pipe, captured.clone());
-    run_steps_with_context_result_with_io(root, root, &steps, io_cfg).map(|_| ())?;
-    let bytes = captured.lock().unwrap().clone();
+    let resolver = PathResolver::new_guarded(root.clone(), root.clone())?;
+    let io_probe = ExecIo::new();
+    let (_cwd, _fs, bindings) = oxdock_core::run_steps_with_manager(
+        Box::new(resolver),
+        &steps,
+        oxdock_process::default_process_manager(),
+        io_probe.clone(),
+    )?;
+    let value = bindings
+        .get(var)
+        .ok_or_else(|| anyhow::anyhow!("no top-level ${var} variable"))?;
+    let pipe_name = value
+        .as_pipe_name()
+        .ok_or_else(|| anyhow::anyhow!("${var} is not a PIPE"))?;
+    let bytes = io_probe.peek_pipe_content(pipe_name)?;
     Ok(String::from_utf8(bytes).expect("captured pipe output is valid UTF-8"))
 }
 
@@ -733,8 +747,9 @@ fn expand_resolves_env_prefix_tag() {
     let out = run_script_captured_pipe(
         &root,
         indoc! {r#"
+        LET $t: PIPE
         ENV WHO=Alice
-        WITH_IO [stdout=pipe:t] EXPAND tmpl.txt
+        WITH_IO [stdout=$t] EXPAND tmpl.txt
     "#},
         "t",
     )
@@ -752,8 +767,9 @@ fn expand_resolves_bare_key_path_tag() {
     let out = run_script_captured_pipe(
         &root,
         indoc! {r#"
+        LET $t: PIPE
         LET $d: MAP = LOAD_TOML("t.toml")
-        WITH_IO [stdout=pipe:t] EXPAND tmpl.txt
+        WITH_IO [stdout=$t] EXPAND tmpl.txt
     "#},
         "t",
     )
@@ -771,8 +787,9 @@ fn expand_resolves_nested_key_path_tag() {
     let out = run_script_captured_pipe(
         &root,
         indoc! {r#"
+        LET $t: PIPE
         LET $d: MAP = LOAD_TOML("t.toml")
-        WITH_IO [stdout=pipe:t] EXPAND tmpl.txt
+        WITH_IO [stdout=$t] EXPAND tmpl.txt
     "#},
         "t",
     )
@@ -789,8 +806,9 @@ fn expand_missing_tag_resolves_to_empty() {
     let err = run_script(
         &root,
         indoc! {r#"
-        WITH_IO [stdout=pipe:t] EXPAND tmpl.txt
-        WITH_IO [stdin=pipe:t] WRITE out.txt
+        LET $t: PIPE
+        WITH_IO [stdout=$t] EXPAND tmpl.txt
+        WITH_IO [stdin=$t] WRITE out.txt
     "#},
     );
     assert!(err.is_err(), "undefined variable in template should error");
@@ -812,9 +830,10 @@ fn expand_mixed_env_and_key_path_tags() {
     let out = run_script_captured_pipe(
         &root,
         indoc! {r#"
+        LET $t: PIPE
         ENV HOST=from-var
         LET $d: MAP = LOAD_TOML("t.toml")
-        WITH_IO [stdout=pipe:t] EXPAND tmpl.txt
+        WITH_IO [stdout=$t] EXPAND tmpl.txt
     "#},
         "t",
     )
@@ -832,8 +851,9 @@ fn expand_resolves_script_var_key_path() {
     let out = run_script_captured_pipe(
         &root,
         indoc! {r#"
+        LET $t: PIPE
         LET $d: MAP = LOAD_TOML("t.toml")
-        WITH_IO [stdout=pipe:t] EXPAND tmpl.txt
+        WITH_IO [stdout=$t] EXPAND tmpl.txt
     "#},
         "t",
     )
@@ -851,7 +871,8 @@ fn expand_no_placeholders_passthrough() {
     let out = run_script_captured_pipe(
         &root,
         indoc! {r#"
-        WITH_IO [stdout=pipe:t] EXPAND tmpl.txt
+        LET $t: PIPE
+        WITH_IO [stdout=$t] EXPAND tmpl.txt
     "#},
         "t",
     )
@@ -917,9 +938,10 @@ fn load_toml_then_use_in_template() {
     run_script(
         &root,
         indoc! {r#"
+        LET $t: PIPE
         LET $d: MAP = LOAD_TOML("crate.toml")
-        WITH_IO [stdout=pipe:t] EXPAND header.txt
-        WITH_IO [stdin=pipe:t] WRITE out.txt
+        WITH_IO [stdout=$t] EXPAND header.txt
+        WITH_IO [stdin=$t] WRITE out.txt
     "#},
     )
     .unwrap();
@@ -960,11 +982,12 @@ fn for_loop_var_shadows_outer_var_in_template() {
     run_script(
         &root,
         indoc! {r#"
+        LET $t: PIPE
         LET $name: STRING = "outer"
         LET $items: LIST = ["first", "second"]
         FOR $name: STRING IN $items {
-            WITH_IO [stdout=pipe:t] EXPAND tmpl.txt
-            WITH_IO [stdin=pipe:t]             WRITE "{{ $name }}.txt"
+            WITH_IO [stdout=$t] EXPAND tmpl.txt
+            WITH_IO [stdin=$t]             WRITE "{{ $name }}.txt"
         }
     "#},
     )

@@ -34,24 +34,29 @@ fn bare_let_pipe_shape_and_round_trip() {
 // composition from `scripts/proto.echo-listen.oxdock` parses with the
 // real command set. A bare mock lower cannot see CONNECT/LISTEN, so this
 // pins the valid nested `WITH_IO`+`ASYNC` forms end to end: four
-// top-level steps, with the bridge lines nested inside the loop body.
+// top-level steps, with the bridge lines nested inside the loop body
+// alongside per-iteration pipe declarations.
 #[test]
 fn proto_echo_listen_bridge_composition_parses() {
     let script = indoc! {r#"
         WORKSPACE LOCAL
 
-        # TODO: DO *NOT* hardcode these ports
-        LET $listen_port: INT = 18080
-        LET $orb_port: INT = 32222
+        // Dummy ports: this test only parses and never executes, so no
+        // socket is ever opened and nothing connects anywhere. Do not
+        // copy real environment ports (e.g. container forwards) in here.
+        LET $listen_port: INT = 19191
+        LET $orb_port: INT = 29292
 
         WHILE true {
             ECHO "proxy listening on 127.0.0.1:{{ $listen_port }}"
 
+            LET $req: PIPE
+            LET $resp: PIPE
             LET $ls: HANDLE = ASYNC {
-                WITH_IO [stdin=pipe:req, stdout=pipe:resp] LISTEN 127.0.0.1:{{ $listen_port }} --no-half-close
+                WITH_IO [stdin=$req, stdout=$resp] LISTEN 127.0.0.1:{{ $listen_port }} --no-half-close
             }
 
-            WITH_IO [stdin=pipe:resp, stdout=pipe:req] ASYNC CONNECT 127.0.0.1:{{ $orb_port }}
+            WITH_IO [stdin=$resp, stdout=$req] ASYNC CONNECT 127.0.0.1:{{ $orb_port }}
 
             AWAIT $ls
             ECHO "client disconnected"
@@ -63,7 +68,7 @@ fn proto_echo_listen_bridge_composition_parses() {
     assert_eq!(steps.len(), 4, "expected 4 top-level steps, got {steps:?}");
     match &steps[3].kind {
         StepKind::While { body, .. } => {
-            assert_eq!(body.len(), 6, "expected 6 loop-body steps, got {body:?}");
+            assert_eq!(body.len(), 8, "expected 8 loop-body steps, got {body:?}");
         }
         other => panic!("expected WHILE, got {other:?}"),
     }

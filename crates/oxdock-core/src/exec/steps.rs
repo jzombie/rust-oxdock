@@ -197,23 +197,26 @@ pub(super) enum ResolvedAssertTarget {
 
 /// Evaluate an assertion target. `Arg::Expr` evaluates typed;
 /// strings, templates, and parts render to `String`; stream markers
-/// and pipe names resolve to live buffers (peeked, never consumed).
+/// resolve to live buffers (peeked, never consumed). A `$var` holding a
+/// `PIPE` likewise peeks its backend bytes: lowering cannot know variable
+/// types, so the pipe dispatch lives here where the value exists.
 pub(super) fn resolve_assert_target<P: ProcessManager>(
     target: &AssertTarget,
     cx: &mut StepCtx<'_, P>,
 ) -> Result<ResolvedAssertTarget> {
     match target {
-        AssertTarget::Value(arg) => Ok(ResolvedAssertTarget::Value(
-            super::args::evaluate_assert_operand(arg, cx)?,
-        )),
+        AssertTarget::Value(arg) => {
+            let value = super::args::evaluate_assert_operand(arg, cx)?;
+            if let Some(name) = value.as_pipe_name() {
+                let bytes = cx.state.io.peek_pipe_content(name).map_err(|e| {
+                    anyhow::anyhow!("step pipe assertion cannot read pipe {name:?}: {e}")
+                })?;
+                return Ok(ResolvedAssertTarget::Pipe(bytes));
+            }
+            Ok(ResolvedAssertTarget::Value(value))
+        }
         AssertTarget::Stdout => Ok(ResolvedAssertTarget::Stdout),
         AssertTarget::Stderr => Ok(ResolvedAssertTarget::Stderr),
-        AssertTarget::Pipe(name) => {
-            let bytes = cx.state.io.peek_pipe_content(name).map_err(|e| {
-                anyhow::anyhow!("step pipe assertion cannot read pipe {name:?}: {e}")
-            })?;
-            Ok(ResolvedAssertTarget::Pipe(bytes))
-        }
     }
 }
 

@@ -10,6 +10,7 @@ members = [
     "crates/oxdock-logic-tests/fixtures/commands/ast_commands",
     "crates/oxdock-parser",
     "crates/sys/oxdock-fs",
+    "crates/sys/oxdock-pipe",
     "crates/sys/oxdock-process",
     "crates/sys/oxdock-sys-test-utils",
     "oxdock",
@@ -48,6 +49,7 @@ oxdock-func-macro = { path = "crates/oxdock-func-macro", version = "0.16.0-alpha
 oxdock-logic-tests = { path = "crates/oxdock-logic-tests", version = "0.16.0-alpha" }
 oxdock-macros = { path = "oxdock-macros", version = "0.16.0-alpha" }
 oxdock-parser = { path = "crates/oxdock-parser", version = "0.16.0-alpha" }
+oxdock-pipe = { path = "crates/sys/oxdock-pipe", version = "0.16.0-alpha" }
 oxdock-process = { path = "crates/sys/oxdock-process", version = "0.16.0-alpha" }
 oxdock-sys-test-utils = { path = "crates/sys/oxdock-sys-test-utils", version = "0.16.0-alpha" }
 pest = { version = "2.9.0", default-features = false, features = ["std"] }

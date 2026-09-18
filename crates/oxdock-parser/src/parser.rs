@@ -1092,13 +1092,18 @@ fn reject_async_in_capture(ctx: &SpanContext, kind: &StepKind) -> ParseResult<()
     Ok(())
 }
 
-/// Reject `WITH_IO [stdout=pipe:...]` anywhere inside a capture body: the
+/// Reject `WITH_IO [stdout=$var]` anywhere inside a capture body: the
 /// capture sink owns stdout.
 fn reject_pipe_stdout_in_capture(ctx: &SpanContext, kind: &StepKind) -> ParseResult<()> {
     match kind {
         StepKind::WithIo { bindings, cmd } => {
             if has_stdout_pipe(bindings) {
-                return Err(ParseError::structural("let", "LET capture cannot use WITH_IO [stdout=pipe:...]; the capture sink owns stdout".to_string(), ctx));
+                return Err(ParseError::structural(
+                    "let",
+                    "LET capture cannot use WITH_IO [stdout=$var]; the capture sink owns stdout"
+                        .to_string(),
+                    ctx,
+                ));
             }
             reject_pipe_stdout_in_capture(ctx, cmd)
         }
@@ -1393,7 +1398,11 @@ fn parse_run_exec_arg(ctx: &SpanContext, lctx: &LowerCtx, pair: Pair<Rule>) -> P
             Ok(Expr::Var(name))
         }
         Rule::env_read => parse_env_read(ctx, inner).map(Expr::Env),
-        Rule::pipe_read => parse_pipe_read(ctx, inner).map(|name| Expr::Literal(Value::pipe(name))),
+        // Removed literal: recognized only for the span-accurate rejection.
+        Rule::pipe_read => Err(crate::commands::pipe_literal_removed_error(
+            "run_exec",
+            &refine_span(ctx, &inner),
+        )),
         Rule::list_literal => parse_list_literal(ctx, lctx, inner),
         Rule::map_literal => parse_map_literal(ctx, lctx, inner),
         Rule::string_literal | Rule::quoted_string => {
@@ -2932,7 +2941,13 @@ fn parse_pipe_binding(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<PipeTa
     let span = refine_span(ctx, &pair);
     for inner in pair.into_inner() {
         match inner.as_rule() {
-            Rule::pipe_name => return Ok(PipeTarget::Name(inner.as_str().to_string())),
+            // The literal shape is recognized by the grammar only so this
+            // rejection carries the exact span; `pipe:name` names nothing.
+            Rule::pipe_name => {
+                return Err(crate::commands::pipe_literal_removed_error(
+                    "WITH_IO", &span,
+                ));
+            }
             Rule::dollar_ident => {
                 return Ok(PipeTarget::Var(parse_dollar_ident(inner)));
             }
@@ -3739,7 +3754,11 @@ fn parse_expr_atom(ctx: &SpanContext, lctx: &LowerCtx, pair: Pair<Rule>) -> Pars
             Ok(Expr::Var(name))
         }
         Rule::env_read => parse_env_read(ctx, inner).map(Expr::Env),
-        Rule::pipe_read => parse_pipe_read(ctx, inner).map(|name| Expr::Literal(Value::pipe(name))),
+        // Removed literal: recognized only for the span-accurate rejection.
+        Rule::pipe_read => Err(crate::commands::pipe_literal_removed_error(
+            "expr",
+            &refine_span(ctx, &inner),
+        )),
         Rule::list_literal => parse_list_literal(ctx, lctx, inner),
         Rule::map_literal => parse_map_literal(ctx, lctx, inner),
         Rule::string_literal | Rule::quoted_string => {
@@ -3813,20 +3832,6 @@ fn parse_env_read(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<String> {
     Err(ParseError::structural(
         "expr",
         "env read requires a key: env:KEY".to_string(),
-        &span,
-    ))
-}
-
-fn parse_pipe_read(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<String> {
-    let span = refine_span(ctx, &pair);
-    for inner in pair.into_inner() {
-        if inner.as_rule() == Rule::pipe_name {
-            return Ok(inner.as_str().trim().to_string());
-        }
-    }
-    Err(ParseError::structural(
-        "expr",
-        "pipe read requires a name: pipe:NAME".to_string(),
         &span,
     ))
 }

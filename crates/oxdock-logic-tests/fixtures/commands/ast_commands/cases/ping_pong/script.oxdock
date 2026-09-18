@@ -5,23 +5,27 @@
 # streams until EOF, the first READ_LINE would block forever (the
 # background task holds its stdout open while waiting for chunk_2),
 # deadlocking Exchange 1 deterministically.
-LET $keep_tx: HANDLE = WITH_IO [stdout=pipe:tx, stdin=pipe:ctl_tx] ASYNC READ_LINE $ktx
-LET $keep_rx: HANDLE = WITH_IO [stdout=pipe:rx, stdin=pipe:ctl_rx] ASYNC READ_LINE $krx
+LET $tx: PIPE
+LET $ctl_tx: PIPE
+LET $rx: PIPE
+LET $ctl_rx: PIPE
+LET $keep_tx: HANDLE = WITH_IO [stdout=$tx, stdin=$ctl_tx] ASYNC READ_LINE $ktx
+LET $keep_rx: HANDLE = WITH_IO [stdout=$rx, stdin=$ctl_rx] ASYNC READ_LINE $krx
 LET $live: HANDLE = ASYNC {
-    WITH_IO [stdin=pipe:tx] READ_LINE $a
-    WITH_IO [stdout=pipe:rx] ECHO "{{ $a }}"
-    WITH_IO [stdin=pipe:tx] READ_LINE $b
-    WITH_IO [stdout=pipe:rx] ECHO "{{ $b }}"
-    WITH_IO [stdin=pipe:tx] READ_LINE $c
+    WITH_IO [stdin=$tx] READ_LINE $a
+    WITH_IO [stdout=$rx] ECHO "{{ $a }}"
+    WITH_IO [stdin=$tx] READ_LINE $b
+    WITH_IO [stdout=$rx] ECHO "{{ $b }}"
+    WITH_IO [stdin=$tx] READ_LINE $c
 }
-WITH_IO [stdout=pipe:tx] ECHO "chunk_1"
-WITH_IO [stdin=pipe:rx] READ_LINE $reply_1
-WITH_IO [stdout=pipe:tx] ECHO "chunk_2"
-WITH_IO [stdin=pipe:rx] READ_LINE $reply_2
-WITH_IO [stdout=pipe:tx] ECHO "EXIT"
+WITH_IO [stdout=$tx] ECHO "chunk_1"
+WITH_IO [stdin=$rx] READ_LINE $reply_1
+WITH_IO [stdout=$tx] ECHO "chunk_2"
+WITH_IO [stdin=$rx] READ_LINE $reply_2
+WITH_IO [stdout=$tx] ECHO "EXIT"
 AWAIT $live
-WITH_IO [stdout=pipe:ctl_tx] ECHO "done"
-WITH_IO [stdout=pipe:ctl_rx] ECHO "done"
+WITH_IO [stdout=$ctl_tx] ECHO "done"
+WITH_IO [stdout=$ctl_rx] ECHO "done"
 AWAIT $keep_tx
 AWAIT $keep_rx
 WRITE "reply_1.txt" "{{ $reply_1 }}"

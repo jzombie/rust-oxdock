@@ -465,6 +465,7 @@ dependencies = [
  "oxdock-fs",
  "oxdock-func-macro",
  "oxdock-parser",
+ "oxdock-pipe",
  "oxdock-process",
  "oxdock-sys-test-utils",
  "proptest",
@@ -587,6 +588,15 @@ dependencies = [
  "pulldown-cmark",
  "quote",
  "syn 3.0.5",
+]
+
+[[package]]
+name = "oxdock-pipe"
+version = "0.16.0-alpha"
+dependencies = [
+ "anyhow",
+ "oxdock-fs",
+ "oxdock-process",
 ]
 
 [[package]]

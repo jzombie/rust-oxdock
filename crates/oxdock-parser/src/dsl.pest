@@ -94,12 +94,13 @@ numeric_literal = @{ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)? ~ !(ASCII_ALPHANUMERIC
 // below gives the same precedence to a leading `env:KEY` shape.
 env_read_key = @{ ASCII_ALPHA_UPPER ~ (ASCII_ALPHA_UPPER | ASCII_DIGIT | "_")* }
 env_read = { "env" ~ ":" ~ env_read_key }
-// Pipe handle: `pipe:NAME` evaluates to the named pipe. Must precede
-// `bare_word` in `expr_atom` (which would otherwise match just `pipe` and
-// strand `:NAME`). Deliberately NOT mirrored in `unquoted_arg`: bare command
-// arguments keep their literal reading, so existing `pipe:...` text there is
-// unaffected; the operator form lives in expression positions (LET RHS,
-// call args, conditions) plus `WITH_IO` bindings.
+// Removed pipe literal (kept as a recognition trap): `pipe:NAME` no longer
+// names a channel. The rule still matches so lowering can reject it with a
+// span-accurate migration error (`declare LET $x: PIPE and pass $x`) instead
+// of a generic grammar failure. Must precede `bare_word` in `expr_atom`
+// (which would otherwise match just `pipe` and strand `:NAME`).
+// Deliberately NOT mirrored in `unquoted_arg`: bare command arguments keep
+// their literal reading.
 pipe_read = { "pipe" ~ ":" ~ pipe_name }
 // Static module qualification: `MODULE::NAME` in call position. At most one
 // `::`; the parts are validated UPPERCASE at lowering time with span errors.
@@ -303,6 +304,9 @@ with_io_command = ${ "WITH_IO" ~ sep ~ io_flags ~ (sep ~ command)? }
 io_flags = { "[" ~ ws? ~ io_binding ~ (ws? ~ "," ~ ws? ~ io_binding)* ~ ws? ~ "]" }
 io_binding = { io_stream ~ (ws? ~ "=" ~ ws? ~ pipe_binding)? }
 io_stream = { "stdin" | "stdout" | "stderr" }
+// Binding endpoints are `$var`-only. The literal shape still matches so
+// lowering rejects it with a span-accurate migration error instead of a
+// generic grammar failure (see `pipe_read` above).
 pipe_binding = { "pipe" ~ ":" ~ pipe_name | dollar_ident }
 pipe_name = @{ (ASCII_ALPHANUMERIC | "_" | "-")+ }
 

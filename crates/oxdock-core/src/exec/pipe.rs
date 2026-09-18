@@ -1,19 +1,12 @@
-use std::io::{self, Read, Write};
-use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
+use oxdock_pipe::ScriptPipeEndpoint;
+use oxdock_process::SharedOutput;
 
-use oxdock_process::{SharedInput, SharedOutput};
+use super::io::StreamHandle;
 
-use super::capture::SpillBuffer;
-
-/// Memory threshold before spilling to disk (re-exported for tests).
-#[cfg(all(test, not(miri)))]
-pub(super) use super::capture::SPILL_THRESHOLD as PIPE_SPILL_THRESHOLD;
-
-/// Maximum active backlog before returning an error (re-exported for tests).
-#[cfg(all(test, not(miri)))]
-pub(super) use super::capture::MAX_BACKLOG as PIPE_MAX_BACKLOG;
-
+/// Backend home: the script-pipe backend lives in `oxdock-pipe` so `PIPE`
+/// values can own handles without a dependency cycle. Resolution, keepers,
+/// and diagnostics below operate on those backends; this module keeps only
+/// the core-side endpoint and inspect types.
 #[derive(Clone)]
 pub(crate) enum PipeEndpoint {
     Stream(SharedOutput),
@@ -30,11 +23,11 @@ impl PipeEndpoint {
         PipeEndpoint::Script(endpoint)
     }
 
-    pub(super) fn to_stream_handle(&self) -> super::StreamHandle {
+    pub(super) fn to_stream_handle(&self) -> StreamHandle {
         match self {
-            PipeEndpoint::Stream(writer) => super::StreamHandle::Stream(writer.clone()),
-            PipeEndpoint::Script(endpoint) => super::StreamHandle::Stream(endpoint.stream_handle()),
-            PipeEndpoint::Inherit => super::StreamHandle::Inherit,
+            PipeEndpoint::Stream(writer) => StreamHandle::Stream(writer.clone()),
+            PipeEndpoint::Script(endpoint) => StreamHandle::Stream(endpoint.stream_handle()),
+            PipeEndpoint::Inherit => StreamHandle::Inherit,
         }
     }
 }
@@ -43,271 +36,6 @@ impl PipeEndpoint {
 pub(super) struct PipeOutputs {
     pub(super) stdout: Option<PipeEndpoint>,
     pub(super) stderr: Option<PipeEndpoint>,
-}
-
-pub(super) struct ScriptPipe {
-    inner: Arc<PipeInner>,
-    reader: SharedInput,
-}
-
-impl ScriptPipe {
-    pub(super) fn new() -> Self {
-        let inner = Arc::new(PipeInner::new());
-        let reader: SharedInput = Arc::new(Mutex::new(PipeReader::new(inner.clone())));
-        Self { inner, reader }
-    }
-
-    pub(super) fn reader(&self) -> SharedInput {
-        self.reader.clone()
-    }
-
-    pub(super) fn endpoint(&self) -> ScriptPipeEndpoint {
-        ScriptPipeEndpoint::new(self.inner.clone())
-    }
-
-    pub(super) fn pipe_inner(&self) -> Arc<PipeInner> {
-        self.inner.clone()
-    }
-
-    #[cfg(test)]
-    #[cfg_attr(miri, allow(dead_code))]
-    #[allow(clippy::disallowed_types)]
-    pub(super) fn temp_path(&self) -> Option<std::path::PathBuf> {
-        self.inner.temp_path()
-    }
-}
-
-#[derive(Clone)]
-pub(super) struct ScriptPipeEndpoint {
-    inner: Arc<PipeInner>,
-}
-
-impl ScriptPipeEndpoint {
-    fn new(inner: Arc<PipeInner>) -> Self {
-        Self { inner }
-    }
-
-    pub(super) fn stream_handle(&self) -> SharedOutput {
-        Arc::new(Mutex::new(PipeWriter::new(self.inner.clone())))
-    }
-}
-
-pub(super) struct PipeInner {
-    state: Mutex<PipeState>,
-    ready: Condvar,
-}
-
-struct PipeState {
-    buffer: SpillBuffer,
-    writers: usize,
-    keepers: usize,
-    closed: bool,
-}
-
-impl PipeState {
-    fn new() -> Self {
-        Self {
-            buffer: SpillBuffer::new(),
-            writers: 0,
-            keepers: 0,
-            closed: false,
-        }
-    }
-}
-
-impl PipeInner {
-    fn new() -> Self {
-        Self {
-            state: Mutex::new(PipeState::new()),
-            ready: Condvar::new(),
-        }
-    }
-
-    #[cfg(test)]
-    #[cfg_attr(miri, allow(dead_code))]
-    #[allow(clippy::disallowed_types)]
-    fn temp_path(&self) -> Option<std::path::PathBuf> {
-        self.lock_state().buffer.temp_path()
-    }
-
-    fn attach_writer(&self) {
-        let mut state = self.lock_state();
-        state.writers += 1;
-        state.closed = false;
-    }
-
-    /// Live data-writer attachments (excludes keeper pins). Used for
-    /// `INSPECT()` diagnostics; never blocks.
-    pub(super) fn writer_count(&self) -> usize {
-        self.lock_state().writers
-    }
-
-    /// Bytes currently buffered for readers. Used for diagnostics.
-    pub(super) fn buffered_bytes(&self) -> u64 {
-        self.lock_state().buffer.buffered_bytes()
-    }
-
-    /// Non-destructive snapshot of buffered bytes for pipe-content
-    /// assertions. Never waits: returns what is buffered right now.
-    pub(super) fn peek_bytes(&self) -> io::Result<Vec<u8>> {
-        self.lock_state().buffer.peek_bytes()
-    }
-
-    fn detach_writer(&self) {
-        let mut state = self.lock_state();
-        state.writers = state.writers.saturating_sub(1);
-        if state.writers == 0 && state.keepers == 0 {
-            state.closed = true;
-        }
-        drop(state);
-        self.ready.notify_all();
-    }
-
-    /// Explicitly close the pipe: readers drain buffered bytes, then observe
-    /// EOF regardless of live writers or keeper pins. General primitive
-    /// (sockets have `shutdown`, files have `close`); pipes previously had
-    /// detach-only EOF. A later writer attachment resurrects the pipe per
-    /// standard attach semantics, so callers must not reuse closed pipes
-    /// for new sessions.
-    pub(super) fn force_close(&self) {
-        let mut state = self.lock_state();
-        state.closed = true;
-        drop(state);
-        self.ready.notify_all();
-    }
-
-    /// Pin a keeper slot so transient writer churn can never observe zero
-    /// writers. Called synchronously on the spawning thread before an
-    /// `ASYNC` worker starts; the returned guard unpins on drop when the
-    /// worker exits, restoring normal EOF semantics afterwards.
-    /// Never touches `closed`: pinning a pipe that already reached EOF
-    /// must not resurrect it into a blocking pipe.
-    pub(super) fn pin_keeper(&self) {
-        let mut state = self.lock_state();
-        state.keepers += 1;
-    }
-
-    /// Release one keeper slot. When the last transient writer and the
-    /// last keeper are both gone the pipe closes and blocked readers see
-    /// EOF.
-    pub(super) fn unpin_keeper(&self) {
-        let mut state = self.lock_state();
-        state.keepers = state.keepers.saturating_sub(1);
-        if state.writers == 0 && state.keepers == 0 {
-            state.closed = true;
-        }
-        drop(state);
-        self.ready.notify_all();
-    }
-
-    fn push_bytes(&self, data: &[u8]) -> io::Result<()> {
-        let state = self.lock_state();
-        let res = state.buffer.push_bytes(data);
-        drop(state);
-        self.ready.notify_all();
-        res
-    }
-
-    fn read_into(&self, buf: &mut [u8]) -> io::Result<usize> {
-        if buf.is_empty() {
-            return Ok(0);
-        }
-        let mut state = self.lock_state();
-        loop {
-            let n = state.buffer.read_into(buf)?;
-            if n > 0 {
-                return Ok(n);
-            }
-            if state.closed {
-                return Ok(0);
-            }
-            state = self
-                .ready
-                .wait(state)
-                .map_err(|_| io::Error::other("pipe wait poisoned"))?;
-        }
-    }
-
-    /// Timeout-bounded variant of [`PipeInner::read_into`] for bridge worker
-    /// loops: returns `Ok(None)` when the backstop elapses with no data and
-    /// no close, so cancellation resolves on a tick instead of hanging on a
-    /// condvar. Bridge-only caller; every DSL reader keeps blocking
-    /// `read_into` with unchanged semantics.
-    pub(super) fn read_into_timeout(
-        &self,
-        buf: &mut [u8],
-        backstop: Duration,
-    ) -> io::Result<Option<usize>> {
-        if buf.is_empty() {
-            return Ok(Some(0));
-        }
-        let mut state = self.lock_state();
-        loop {
-            let n = state.buffer.read_into(buf)?;
-            if n > 0 {
-                return Ok(Some(n));
-            }
-            if state.closed {
-                return Ok(Some(0));
-            }
-            let (guard, waited) = self
-                .ready
-                .wait_timeout(state, backstop)
-                .map_err(|_| io::Error::other("pipe wait poisoned"))?;
-            state = guard;
-            if waited.timed_out() {
-                return Ok(None);
-            }
-        }
-    }
-
-    fn lock_state(&self) -> std::sync::MutexGuard<'_, PipeState> {
-        self.state.lock().expect("script pipe state poisoned")
-    }
-}
-
-struct PipeReader {
-    inner: Arc<PipeInner>,
-}
-
-impl PipeReader {
-    fn new(inner: Arc<PipeInner>) -> Self {
-        Self { inner }
-    }
-}
-
-impl Read for PipeReader {
-    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.inner.read_into(buf)
-    }
-}
-
-struct PipeWriter {
-    inner: Arc<PipeInner>,
-}
-
-impl PipeWriter {
-    fn new(inner: Arc<PipeInner>) -> Self {
-        inner.attach_writer();
-        Self { inner }
-    }
-}
-
-impl Write for PipeWriter {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.inner.push_bytes(buf)?;
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-impl Drop for PipeWriter {
-    fn drop(&mut self) {
-        self.inner.detach_writer();
-    }
 }
 
 /// Snapshot of one pipe backend for `INSPECT()` diagnostics.
@@ -356,26 +84,4 @@ pub(super) struct PipeInfo {
     /// Live data-writer attachments for script pipes (keeper pins excluded);
     /// OS pairs report presence, not live takes.
     pub(super) writers: usize,
-}
-
-/// Pre-allocated keeper handle for `ASYNC` tasks. Created synchronously
-/// on the spawning thread before the worker starts so the pipe can never
-/// observe zero writers mid-flight; released when the worker exits.
-pub(super) struct KeeperGuard {
-    inner: Option<Arc<PipeInner>>,
-}
-
-impl KeeperGuard {
-    pub(super) fn new(inner: Arc<PipeInner>) -> Self {
-        inner.pin_keeper();
-        Self { inner: Some(inner) }
-    }
-}
-
-impl Drop for KeeperGuard {
-    fn drop(&mut self) {
-        if let Some(inner) = self.inner.take() {
-            inner.unpin_keeper();
-        }
-    }
 }

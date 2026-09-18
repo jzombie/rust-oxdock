@@ -15,15 +15,27 @@ fn parse_one(cmd: &str) -> Box<StepKind> {
     Box::new(steps[0].kind.clone())
 }
 
-fn capture_pipeline(pipe: &str, path: &str, cmd: StepKind) -> [Step; 2] {
-    let pipe_name = pipe.to_string();
-    [
+fn capture_pipeline(pipe: &str, path: &str, cmd: StepKind) -> Vec<Step> {
+    // Hyphenated helper names are not valid `$var` idents; the variable is
+    // internal to the test, so underscores stand in.
+    let var = pipe.replace('-', "_");
+    vec![
+        Step {
+            guard: None,
+            kind: StepKind::Assign {
+                var: var.clone(),
+                decl_type: "PIPE".to_string(),
+                expr: oxdock_parser::Expr::FreshPipe,
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+        },
         Step {
             guard: None,
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdout,
-                    pipe: Some(oxdock_parser::PipeTarget::Name(pipe_name.clone())),
+                    pipe: Some(oxdock_parser::PipeTarget::Var(var.clone())),
                 }],
                 cmd: Box::new(cmd),
             },
@@ -35,7 +47,7 @@ fn capture_pipeline(pipe: &str, path: &str, cmd: StepKind) -> [Step; 2] {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdin,
-                    pipe: Some(oxdock_parser::PipeTarget::Name(pipe_name)),
+                    pipe: Some(oxdock_parser::PipeTarget::Var(var)),
                 }],
                 cmd: Box::new(StepKind::Write {
                     path: path.into(),
@@ -796,8 +808,9 @@ fn env_exposes_git_commit_hash() {
 
     let steps = oxdock_core::parse_script(indoc!(
         r#"
-        WITH_IO [stdout=pipe:commit_capture] ECHO {{ env:WORKSPACE_GIT_COMMIT }}
-        WITH_IO [stdin=pipe:commit_capture] WRITE out.txt
+        LET $commit_capture: PIPE
+        WITH_IO [stdout=$commit_capture] ECHO {{ env:WORKSPACE_GIT_COMMIT }}
+        WITH_IO [stdin=$commit_capture] WRITE out.txt
         "#
     ))
     .unwrap();
@@ -1137,22 +1150,19 @@ fn with_io_block_applies_defaults() {
     let root = guard_root(&temp);
 
     let script = indoc! {r#"
-        WITH_IO [stdout=pipe:snippet] {
+        LET $snippet: PIPE
+        WITH_IO [stdout=$snippet] {
             ECHO "alpha"
             ECHO "beta"
         }
+        WITH_IO [stdin=$snippet] WRITE out.txt
     "#};
     let steps = oxdock_core::parse_script(script).expect("parse WITH_IO block");
 
-    let captured = Arc::new(Mutex::new(Vec::new()));
-    let mut io_cfg = ExecIo::new();
-    io_cfg.insert_output_pipe("snippet", captured.clone());
-
-    run_steps_with_context_result_with_io(&root, &root, &steps, io_cfg)
+    run_steps_with_context_result_with_io(&root, &root, &steps, ExecIo::new())
         .expect("execute WITH_IO block");
 
-    let contents = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
-    assert_eq!(contents, "alpha\nbeta\n");
+    assert_eq!(read_trimmed(&root.join("out.txt").unwrap()), "alpha\nbeta");
 }
 
 #[test]
@@ -1161,8 +1171,9 @@ fn with_io_routes_stdout_into_later_stdin() {
     let root = guard_root(&temp);
 
     let script = indoc! {r#"
-        WITH_IO [stdout=pipe:relay] ECHO streamed
-        WITH_IO [stdin=pipe:relay] READ
+        LET $relay: PIPE
+        WITH_IO [stdout=$relay] ECHO streamed
+        WITH_IO [stdin=$relay] READ
     "#};
     let steps = oxdock_core::parse_script(script).expect("parse WITH_IO pipe script");
 
@@ -1419,7 +1430,7 @@ fn pipe_declare_first_registers_for_later_bindings() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        LET $p: PIPE = pipe:chan
+        LET $p: PIPE
         WITH_IO [stdout=$p] ECHO hello
         WITH_IO [stdin=$p] READ_LINE $line
     "#};
@@ -1441,7 +1452,7 @@ fn inspect_expression_returns_pipe_snapshot_map() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        LET $p: PIPE = pipe:ch
+        LET $p: PIPE
         WITH_IO [stdout=$p] ECHO "payload"
         LET $info: MAP = INSPECT($p)
         LET $snap: STRING = "{{ $info.type }}-{{ $info.is_os_pipe }}-{{ $info.buffer_bytes }}-{{ $info.readers }}"
@@ -1463,15 +1474,16 @@ fn inspect_reports_os_pipe_for_promoted_single_run() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     // Single-RUN background tasks promote to zero-copy OS kernel pipes.
-    // Declaring the handle *after* the promoting step keeps the OS type
-    // (first binding wins), so INSPECT must report is_os_pipe=true.
-    // `cargo --version` is the portable single-RUN producer (also used by
-    // the exec-form failure test); its tiny output never fills the pipe.
+    // The handle is declared up front; the spawn-time pin walk resolves
+    // the variable and promotes before the worker binds, so INSPECT must
+    // report is_os_pipe=true. `cargo --version` is the portable
+    // single-RUN producer (also used by the exec-form failure test); its
+    // tiny output never fills the pipe.
     let script = indoc! {r#"
-        LET $t: HANDLE = WITH_IO [stdout=pipe:osp] ASYNC RUN ["cargo", "--version"]
+        LET $osp: PIPE
+        LET $t: HANDLE = WITH_IO [stdout=$osp] ASYNC RUN ["cargo", "--version"]
         AWAIT $t
-        LET $p: PIPE = pipe:osp
-        LET $info: MAP = INSPECT($p)
+        LET $info: MAP = INSPECT($osp)
         LET $v: BOOL = $info.is_os_pipe
     "#};
     let scope = run_script_with_scope(&root, script).expect("INSPECT of promoted pipe must work");
@@ -1655,21 +1667,20 @@ fn run_exec_form_spawns_directly_and_pipes_stdout() {
     // without relying on shell builtins (`echo` is not a Windows executable).
     let script = indoc!(
         r#"
-        WITH_IO [stdout=pipe:cap] RUN ["cargo", "--version"]
+        LET $cap: PIPE
+        WITH_IO [stdout=$cap] RUN ["cargo", "--version"]
+        WITH_IO [stdin=$cap] WRITE out.txt
         "#
     );
     let steps = oxdock_core::parse_script(script).unwrap();
     assert!(
-        matches!(&steps[0].kind, StepKind::WithIo { cmd, .. } if matches!(cmd.as_ref(), StepKind::RunExec { .. })),
-        "first step must wrap RunExec, got {:?}",
-        steps[0].kind
+        matches!(&steps[1].kind, StepKind::WithIo { cmd, .. } if matches!(cmd.as_ref(), StepKind::RunExec { .. })),
+        "second step must wrap RunExec, got {:?}",
+        steps[1].kind
     );
-    let captured = Arc::new(Mutex::new(Vec::new()));
-    let mut io_cfg = ExecIo::new();
-    io_cfg.insert_output_pipe("cap", captured.clone());
-    run_steps_with_context_result_with_io(&root, &root, &steps, io_cfg).unwrap();
+    run_steps_with_context_result_with_io(&root, &root, &steps, ExecIo::new()).unwrap();
 
-    let out = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
+    let out = read_trimmed(&root.join("out.txt").unwrap());
     assert!(
         out.starts_with("cargo "),
         "expected cargo version output, got {out:?}"
@@ -1989,6 +2000,7 @@ fn block_scopes_variables_env_and_workdir_while_leaking_files_and_pipes() {
         MKDIR sub_outer
         MKDIR sub_outer/sub_inner
         LET $val: STRING = "outer_val"
+        LET $inner_pipe: PIPE
         ENV APP_ENV="outer_env"
         WORKDIR sub_outer
         [bool:true] {
@@ -1997,11 +2009,11 @@ fn block_scopes_variables_env_and_workdir_while_leaking_files_and_pipes() {
             WORKDIR sub_inner
             WRITE inner.txt $val
             WRITE env_inner.txt "{{ env:APP_ENV }}"
-            WITH_IO [stdout=pipe:inner_pipe] ECHO "from-block"
+            WITH_IO [stdout=$inner_pipe] ECHO "from-block"
         }
         WRITE outer.txt $val
         WRITE env_outer.txt "{{ env:APP_ENV }}"
-        WITH_IO [stdin=pipe:inner_pipe] WRITE from_block.txt
+        WITH_IO [stdin=$inner_pipe] WRITE from_block.txt
         IF true {
             LET $branch: STRING = "branch_val"
             ENV BRANCH_ENV="branch_env"
@@ -2145,6 +2157,7 @@ fn guard_scope_env_does_not_leak() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
+        LET $cap_env_txt: PIPE
         ENV FOO="bar"
         [env:FOO]
         {
@@ -2152,8 +2165,8 @@ fn guard_scope_env_does_not_leak() {
           WRITE inner.txt "inner"
           ENV SCOPE="inner"
         }
-        WITH_IO [stdout=pipe:cap_env_txt] ECHO "scope={{ env:SCOPE }}"
-        WITH_IO [stdin=pipe:cap_env_txt] WRITE env.txt
+        WITH_IO [stdout=$cap_env_txt] ECHO "scope={{ env:SCOPE }}"
+        WITH_IO [stdin=$cap_env_txt] WRITE env.txt
         WRITE outer.txt "outer"
     "#};
     run_script(&root, script).expect("guard scope passes");
@@ -2254,8 +2267,9 @@ fn hash_sha256_captures_output() {
     let expected_hash = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
     let script = indoc! {r#"
         WRITE data.txt "hello"
-        WITH_IO [stdout=pipe:cap_hash_txt] HASH_SHA256 data.txt
-        WITH_IO [stdin=pipe:cap_hash_txt] WRITE hash.txt
+        LET $cap_hash_txt: PIPE
+        WITH_IO [stdout=$cap_hash_txt] HASH_SHA256 data.txt
+        WITH_IO [stdin=$cap_hash_txt] WRITE hash.txt
     "#};
     run_script(&root, script).expect("hash_sha256 passes");
     assert_eq!(read_trimmed(&root.join("hash.txt").unwrap()), expected_hash);
@@ -2274,8 +2288,9 @@ fn with_io_routes_stdin_stdout_pipe() {
     let output = Arc::new(Mutex::new(Vec::new()));
 
     let script = indoc! {r#"
-        WITH_IO [stdin, stdout=pipe:cap_out_txt] READ
-        WITH_IO [stdin=pipe:cap_out_txt] WRITE out.txt
+        LET $cap_out_txt: PIPE
+        WITH_IO [stdin, stdout=$cap_out_txt] READ
+        WITH_IO [stdin=$cap_out_txt] WRITE out.txt
         WRITE empty.txt ""
     "#};
     let steps = oxdock_core::parse_script(script).unwrap();
@@ -2361,10 +2376,11 @@ fn env_target_dir_in_with_io() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         ENV CARGO_TARGET_DIR="ws/target"
-        WITH_IO [stdout=pipe:capture] {
+        LET $capture: PIPE
+        WITH_IO [stdout=$capture] {
           ECHO "{{ env:CARGO_TARGET_DIR }}"
         }
-        WITH_IO [stdin=pipe:capture] {
+        WITH_IO [stdin=$capture] {
           WRITE env-target.txt
         }
     "#};
@@ -2536,14 +2552,24 @@ fn read_large_file_streams_without_oom() {
 
     // READ the file and capture output
     let read_steps = oxdock_core::parse_script("READ large.txt").unwrap();
-    let pipe_name = "read-capture".to_string();
+    let pipe_var = "read_capture".to_string();
     let io_steps = vec![
+        Step {
+            guard: None,
+            kind: StepKind::Assign {
+                var: pipe_var.clone(),
+                decl_type: "PIPE".to_string(),
+                expr: oxdock_parser::Expr::FreshPipe,
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+        },
         Step {
             guard: None,
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdout,
-                    pipe: Some(oxdock_parser::PipeTarget::Name(pipe_name.clone())),
+                    pipe: Some(oxdock_parser::PipeTarget::Var(pipe_var.clone())),
                 }],
                 cmd: Box::new(read_steps[0].kind.clone()),
             },
@@ -2555,7 +2581,7 @@ fn read_large_file_streams_without_oom() {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdin,
-                    pipe: Some(oxdock_parser::PipeTarget::Name(pipe_name)),
+                    pipe: Some(oxdock_parser::PipeTarget::Var(pipe_var)),
                 }],
                 cmd: Box::new(StepKind::Write {
                     path: "output.txt".into(),
@@ -2595,10 +2621,20 @@ fn read_stdin_streaming_via_pipe() {
         },
         Step {
             guard: None,
+            kind: StepKind::Assign {
+                var: "pipe_read".into(),
+                decl_type: "PIPE".to_string(),
+                expr: oxdock_parser::Expr::FreshPipe,
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+        },
+        Step {
+            guard: None,
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdout,
-                    pipe: Some(oxdock_parser::PipeTarget::Name("pipe-read".to_string())),
+                    pipe: Some(oxdock_parser::PipeTarget::Var("pipe_read".to_string())),
                 }],
                 cmd: Box::new(StepKind::Read(Some("source.txt".into()))),
             },
@@ -2610,7 +2646,7 @@ fn read_stdin_streaming_via_pipe() {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdin,
-                    pipe: Some(oxdock_parser::PipeTarget::Name("pipe-read".to_string())),
+                    pipe: Some(oxdock_parser::PipeTarget::Var("pipe_read".to_string())),
                 }],
                 cmd: Box::new(StepKind::Write {
                     path: "dest.txt".into(),
@@ -2691,29 +2727,33 @@ fn read_line_ping_pong_proves_live_streaming() {
     // READ_LINE would block forever (background holds its stdout open while
     // waiting for chunk_2), deadlocking Exchange 1 deterministically.
     //
-    // Keeper tasks: each `WITH_IO [stdout=pipe:X] <step>` transiently
+    // Keeper tasks: each `WITH_IO [stdout=$X] <step>` transiently
     // attaches/detaches that pipe's writer, signalling EOF on detach. The
     // keepers hold one writer per pipe for the whole test so mid-test EOFs
     // (which would surface as empty reads) are impossible; they exit via
     // one-shot control pipes at the end.
     let script = indoc! {r#"
-        LET $keep_tx: HANDLE = WITH_IO [stdout=pipe:tx, stdin=pipe:ctl_tx] ASYNC READ_LINE $ktx
-        LET $keep_rx: HANDLE = WITH_IO [stdout=pipe:rx, stdin=pipe:ctl_rx] ASYNC READ_LINE $krx
+        LET $tx: PIPE
+        LET $ctl_tx: PIPE
+        LET $rx: PIPE
+        LET $ctl_rx: PIPE
+        LET $keep_tx: HANDLE = WITH_IO [stdout=$tx, stdin=$ctl_tx] ASYNC READ_LINE $ktx
+        LET $keep_rx: HANDLE = WITH_IO [stdout=$rx, stdin=$ctl_rx] ASYNC READ_LINE $krx
         LET $live: HANDLE = ASYNC {
-            WITH_IO [stdin=pipe:tx] READ_LINE $a
-            WITH_IO [stdout=pipe:rx] ECHO "{{ $a }}"
-            WITH_IO [stdin=pipe:tx] READ_LINE $b
-            WITH_IO [stdout=pipe:rx] ECHO "{{ $b }}"
-            WITH_IO [stdin=pipe:tx] READ_LINE $c
+            WITH_IO [stdin=$tx] READ_LINE $a
+            WITH_IO [stdout=$rx] ECHO "{{ $a }}"
+            WITH_IO [stdin=$tx] READ_LINE $b
+            WITH_IO [stdout=$rx] ECHO "{{ $b }}"
+            WITH_IO [stdin=$tx] READ_LINE $c
         }
-        WITH_IO [stdout=pipe:tx] ECHO "chunk_1"
-        WITH_IO [stdin=pipe:rx] READ_LINE $reply_1
-        WITH_IO [stdout=pipe:tx] ECHO "chunk_2"
-        WITH_IO [stdin=pipe:rx] READ_LINE $reply_2
-        WITH_IO [stdout=pipe:tx] ECHO "EXIT"
+        WITH_IO [stdout=$tx] ECHO "chunk_1"
+        WITH_IO [stdin=$rx] READ_LINE $reply_1
+        WITH_IO [stdout=$tx] ECHO "chunk_2"
+        WITH_IO [stdin=$rx] READ_LINE $reply_2
+        WITH_IO [stdout=$tx] ECHO "EXIT"
         AWAIT $live
-        WITH_IO [stdout=pipe:ctl_tx] ECHO "done"
-        WITH_IO [stdout=pipe:ctl_rx] ECHO "done"
+        WITH_IO [stdout=$ctl_tx] ECHO "done"
+        WITH_IO [stdout=$ctl_rx] ECHO "done"
         AWAIT $keep_tx
         AWAIT $keep_rx
         WRITE "reply_1.txt" "{{ $reply_1 }}"
@@ -2742,9 +2782,10 @@ fn async_self_referential_write_then_read_sees_eof() {
     // for the whole task (which would deadlock the consumer step waiting
     // for a close that never comes).
     let script = indoc! {r#"
+        LET $p: PIPE
         LET $t: HANDLE = ASYNC {
-            WITH_IO [stdout=pipe:p] ECHO "hello"
-            WITH_IO [stdin=pipe:p] WRITE got.txt
+            WITH_IO [stdout=$p] ECHO "hello"
+            WITH_IO [stdin=$p] WRITE got.txt
         }
         AWAIT $t
     "#};

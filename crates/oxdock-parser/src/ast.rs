@@ -442,12 +442,11 @@ pub struct IoBinding {
     pub pipe: Option<PipeTarget>,
 }
 
-/// A pipe endpoint for a `WITH_IO` binding: either a literal `pipe:name`
-/// or a `$var` holding a `PIPE` value, resolved against the live pipe
-/// registry when the step runs.
+/// A pipe endpoint for a `WITH_IO` binding: a `$var` holding a `PIPE`
+/// value, resolved against the live variable scope when the step runs.
+/// Named-pipe literals (`pipe:name`) were removed; only variables remain.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum PipeTarget {
-    Name(String),
     Var(String),
 }
 

@@ -77,7 +77,7 @@ fn timeout_wraps_await() {
 #[test]
 fn timeout_nests_inside_async_and_with_io() {
     let steps = parse_script(
-        "WITH_IO [stdout=pipe:p] ASYNC TIMEOUT 5s RUN \"echo x\"",
+        "WITH_IO [stdout=$p] ASYNC TIMEOUT 5s RUN \"echo x\"",
         mock_lower,
     )
     .expect("parse nested TIMEOUT");

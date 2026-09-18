@@ -15,9 +15,9 @@ use super::SNAPSHOT_PENDING_DISPLAY;
 use super::fs_ops::{canonical_cwd, copy_entry, hash_path};
 use super::io::{StreamHandle, write_stdout};
 use super::native::FuncBody;
-use super::pipe::KeeperGuard;
 use super::state::{ExecState, MAX_CALL_DEPTH, TaskPhase};
 use super::steps::{Flow, StepCtx};
+use oxdock_pipe::KeeperGuard;
 
 /// Map a Flow reaching a context-free boundary (pipeline top, thread join)
 /// into status. Only Done passes; anything else is a step-numbered error
@@ -1535,48 +1535,45 @@ fn resolve_io_streams<P: ProcessManager>(
     ))
 }
 
-/// Resolve a `WITH_IO` pipe endpoint to a live pipe name. Literals resolve
-/// directly; `$var` must hold a `PIPE` value, whose name resolves the same
-/// way: the caller ensures the entry immediately after, so declaration
-/// never needs to pre-register anything.
+/// Resolve a `WITH_IO` pipe endpoint to a live pipe name. The endpoint is
+/// always a `$var` holding a `PIPE` value; the caller ensures the entry
+/// immediately after, so declaration never needs to pre-register anything.
 fn resolve_pipe_name<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     idx: usize,
     target: &PipeTarget,
 ) -> Result<String> {
-    match target {
-        PipeTarget::Name(name) => Ok(name.clone()),
-        PipeTarget::Var(var) => match cx.state.get_var_typed(var) {
-            Some((kind, value)) if kind == "PIPE" => {
-                let Some(name) = value.as_pipe_name() else {
-                    bail!(
-                        "step {}: TypeMismatch: expected PIPE, got {} ({:?})",
-                        idx + 1,
-                        kind,
-                        value
-                    );
-                };
-                Ok(name.to_string())
-            }
-            Some((kind, value)) => {
+    let PipeTarget::Var(var) = target;
+    match cx.state.get_var_typed(var) {
+        Some((kind, value)) if kind == "PIPE" => {
+            let Some(name) = value.as_pipe_name() else {
                 bail!(
                     "step {}: TypeMismatch: expected PIPE, got {} ({:?})",
                     idx + 1,
                     kind,
                     value
                 );
-            }
-            None => {
-                bail!("step {}: undeclared variable ${var}", idx + 1);
-            }
-        },
+            };
+            Ok(name.to_string())
+        }
+        Some((kind, value)) => {
+            bail!(
+                "step {}: TypeMismatch: expected PIPE, got {} ({:?})",
+                idx + 1,
+                kind,
+                value
+            );
+        }
+        None => {
+            bail!("step {}: undeclared variable ${var}", idx + 1);
+        }
     }
 }
 
 /// If `cmd` is a bare `NAME(...)` call possibly nested under `WITH_IO` layers, return the
 /// merged bindings (outermost first, inner wins per stream) plus the call
 /// name and args. Used by `LET`-capture and `ASYNC` fast paths so
-/// `WITH_IO [stdin=pipe:tx] FOO()` binds the `RETURN` value instead
+/// `WITH_IO [stdin=$tx] FOO()` binds the `RETURN` value instead
 /// of swallowing stdout into a capture sink.
 fn extract_call(cmd: &StepKind) -> Option<(Vec<IoBinding>, &str, &[Expr])> {
     let mut layers: Vec<&Vec<IoBinding>> = Vec::new();
@@ -1946,8 +1943,6 @@ pub(crate) fn assign_capture<P: ProcessManager>(
 ) -> Result<Flow> {
     use std::sync::Arc;
 
-    use super::capture::SpillBuffer;
-
     if let Some((bindings, name, args)) = extract_call(cmd) {
         // `CALL` (possibly under `WITH_IO` layers): no capture sink. The
         // callee's stdout keeps its routed streams (observable via
@@ -1987,7 +1982,7 @@ pub(crate) fn assign_capture<P: ProcessManager>(
             .declare_var(var.trim_start_matches('$').to_string(), decl_type, value)?;
         return Ok(Flow::Done);
     }
-    let sink = Arc::new(SpillBuffer::new());
+    let sink = Arc::new(super::capture::new_spill_buffer());
     let capture_out = Some(StreamHandle::Stream(sink.writer()));
     let flow = super::steps::execute_single_step_with_generation(
         cx.state,
@@ -2085,74 +2080,17 @@ pub(crate) fn if_then<P: ProcessManager>(
 // forward to the actual handler functions. Used by `define_pipeline!`.
 
 /// Collect the pipes a step subtree produces to (`stdout`/`stderr`
-/// bindings), same-thread only. Nested `ASYNC` bodies run on other threads
-/// with their own pins and are excluded; `Timeout`/`For`/`If`/`WithIo`
-/// bodies run inline and are included. Only producers pin: a task that
-/// only reads a pipe relies on EOF-from-detach to complete, so pinning it
-/// would deadlock. Each entry pairs the pipe name with whether OS
-/// promotion applies (OR-merged across occurrences).
-fn collect_steps_producers(steps: &[Step], out: &mut Vec<(String, bool)>) {
-    for step in steps {
-        collect_kind_producers(&step.kind, out);
-    }
-}
-
-fn collect_kind_producers(kind: &StepKind, out: &mut Vec<(String, bool)>) {
-    match kind {
-        StepKind::WithIo { bindings, cmd } => {
-            let promote = promotion_trigger(cmd, true);
-            for binding in bindings {
-                match binding.stream {
-                    IoStream::Stdout | IoStream::Stderr => {
-                        if let Some(PipeTarget::Name(pipe)) = &binding.pipe {
-                            match out.iter_mut().find(|(name, _)| name == pipe) {
-                                Some(entry) => {
-                                    entry.1 = entry.1 || promote;
-                                }
-                                None => {
-                                    out.push((pipe.clone(), promote));
-                                }
-                            }
-                        }
-                        // Dynamic (`$var`) endpoints resolve against live
-                        // state at pin time (see `pin_async_keepers`); they
-                        // are invisible to this static walk by design.
-                    }
-                    IoStream::Stdin => {}
-                }
-            }
-            collect_kind_producers(cmd, out);
-        }
-        StepKind::Timeout { body, .. } => collect_steps_producers(body, out),
-        StepKind::For { body, .. } => collect_steps_producers(body, out),
-        StepKind::While { body, .. } => collect_steps_producers(body, out),
-        // Deferred (FUNC bodies) or dynamic (call targets unknown
-        // statically) bodies run elsewhere or later with their own pins.
-        StepKind::FuncDef { .. } | StepKind::Call { .. } => {}
-        StepKind::If {
-            then_body,
-            else_ifs,
-            else_body,
-            ..
-        } => {
-            collect_steps_producers(then_body, out);
-            for (_, branch) in else_ifs {
-                collect_steps_producers(branch, out);
-            }
-            if let Some(body) = else_body {
-                collect_steps_producers(body, out);
-            }
-        }
-        StepKind::AsyncBlock { .. } | StepKind::AssignAsync { .. } => {}
-        _ => {}
-    }
-}
-
-/// Dynamic counterpart to `collect_kind_producers`: resolves `$var` pipe
-/// endpoints against the spawning thread's state so `ASYNC` tasks that
-/// produce to a variable-named pipe get the same keeper coverage as static
-/// ones. Unresolvable names are skipped here (execution-time resolution
-/// reports the real error); promotion never applies to dynamic endpoints.
+/// bindings), same-thread only. Endpoints are always `$var`, so every
+/// producer resolves against live state at pin time; no static walk exists
+/// by design — with no literals left to name, there is nothing to collect
+/// without state. Nested `ASYNC` bodies run on other threads with their
+/// own pins and are excluded; `Timeout`/`For`/`If`/`WithIo` bodies run
+/// inline and are included. Only producers pin: a task that only reads a
+/// pipe relies on EOF-from-detach to complete, so pinning it would
+/// deadlock. Each entry pairs the pipe name with whether OS promotion
+/// applies (OR-merged across occurrences). Unresolvable names are skipped
+/// here (execution-time resolution reports the real error); promotion never
+/// applies to dynamic endpoints.
 fn collect_dynamic_producers<P: ProcessManager>(
     kind: &StepKind,
     state: &ExecState<P>,
@@ -2160,7 +2098,7 @@ fn collect_dynamic_producers<P: ProcessManager>(
 ) {
     match kind {
         StepKind::WithIo { bindings, cmd } => {
-            // Same promotion analysis as the static walk so a dynamic
+            // Same promotion analysis as binding time, so a dynamic
             // endpoint pins the same pipe type execution will ensure.
             let promote = promotion_trigger(cmd, true);
             for binding in bindings {
@@ -2244,11 +2182,6 @@ fn ensure_consumed_pipes<P: ProcessManager>(cx: &StepCtx<'_, P>, body: &[Step]) 
                         continue;
                     }
                     match &binding.pipe {
-                        Some(PipeTarget::Name(name)) => {
-                            if !out.iter().any(|(n, _)| n == name) {
-                                out.push((name.clone(), promote));
-                            }
-                        }
                         Some(PipeTarget::Var(var)) => {
                             if let Some((kind, value)) = cx.state.get_var_typed(var)
                                 && kind == "PIPE"
@@ -2325,7 +2258,6 @@ fn pin_async_keepers<P: ProcessManager>(
     let mut last: HashMap<String, (bool, usize)> = HashMap::new();
     for (idx, step) in body.iter().enumerate() {
         let mut produced = Vec::new();
-        collect_kind_producers(&step.kind, &mut produced);
         collect_dynamic_producers(&step.kind, cx.state, &mut produced);
         for (name, promote) in produced {
             let entry = last.entry(name).or_insert((false, 0));
@@ -2879,7 +2811,7 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
     // Named tasks write stdout into a per-task spillable sink instead of
     // sharing the parent writer. Bare `AWAIT $t` forwards it to the parent
     // stdout; `LET $o: STRING = AWAIT $t` binds it. Stderr keeps parent wiring.
-    let sink = std::sync::Arc::new(super::capture::SpillBuffer::new());
+    let sink = std::sync::Arc::new(super::capture::new_spill_buffer());
     let out = Some(super::io::StreamHandle::Stream(sink.writer()));
     let err = cx.err.clone();
     let cancel_token = std::sync::Arc::clone(&forked_state.cancel_token);

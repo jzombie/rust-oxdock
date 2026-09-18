@@ -163,8 +163,9 @@ fn let_capture_with_stdin_pipe() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        WITH_IO [stdout=pipe:relay] ECHO piped
-        LET $x: STRING = WITH_IO [stdin=pipe:relay] READ
+        LET $relay: PIPE
+        WITH_IO [stdout=$relay] ECHO piped
+        LET $x: STRING = WITH_IO [stdin=$relay] READ
         ASSERT_EQ $x "piped\n"
     "#};
     run_script(&root, script).expect("capture with stdin pipe");

@@ -3,15 +3,17 @@
 # Main writes to 'req' then reads from 'resp'.
 # Under synchronous execution, background blocks on empty 'req' before main writes.
 
+LET $req: PIPE
+LET $resp: PIPE
 LET $bg_task: HANDLE = ASYNC {
     # Step 1: Only bind the read channel it actually drains
-    WITH_IO [stdin=pipe:req] WRITE "async_rec.txt"
+    WITH_IO [stdin=$req] WRITE "async_rec.txt"
 
     # Step 2: Bind the write channel when it is actually time to emit data
-    WITH_IO [stdout=pipe:resp] ECHO "pong"
+    WITH_IO [stdout=$resp] ECHO "pong"
 }
-WITH_IO [stdout=pipe:req] ECHO "ping"
-WITH_IO [stdin=pipe:resp] WRITE "final_out.txt"
+WITH_IO [stdout=$req] ECHO "ping"
+WITH_IO [stdin=$resp] WRITE "final_out.txt"
 AWAIT $bg_task
 READ "async_rec.txt"
 READ "final_out.txt"
