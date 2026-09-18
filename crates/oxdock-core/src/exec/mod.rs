@@ -46,7 +46,8 @@ use oxdock_fs::{
 };
 use oxdock_parser::Step;
 use oxdock_process::{
-    BuiltinEnv, ProcessManager, SharedInput, SharedOutput, default_process_manager,
+    BuiltinEnv, DefaultProcessManager, ProcessManager, SharedInput, SharedOutput,
+    default_process_manager,
 };
 
 use std::collections::BTreeMap;
@@ -177,11 +178,32 @@ pub fn run_steps_with_lazy_snapshot(
     steps: &[Step],
     io: ExecIo,
 ) -> Result<LazyRunOutput> {
+    run_steps_with_lazy_snapshot_and_modules(build_context, steps, io, Vec::new(), Vec::new())
+}
+
+/// Same as [`run_steps_with_lazy_snapshot`], plus host modules and types
+/// (see [`run_steps_with_manager_with_modules`]). Lets binary hosts that
+/// run on the lazy snapshot path expose plugin surface without changing
+/// CLI semantics.
+pub fn run_steps_with_lazy_snapshot_and_modules(
+    build_context: &GuardedPath,
+    steps: &[Step],
+    io: ExecIo,
+    modules: Vec<HostModule<DefaultProcessManager>>,
+    types: Vec<&'static TypeDescriptor>,
+) -> Result<LazyRunOutput> {
     let mut resolver = PathResolver::new_lazy(build_context.clone())?;
     resolver.set_workspace_root(build_context.clone());
     let snapshot = resolver.snapshot_handle();
     let fs: Box<dyn WorkspaceFs> = Box::new(resolver);
-    match run_steps_with_manager(fs, steps, default_process_manager(), io) {
+    match run_steps_with_manager_with_modules(
+        fs,
+        steps,
+        default_process_manager(),
+        io,
+        modules,
+        types,
+    ) {
         Ok((final_cwd, fs, bindings)) => Ok(LazyRunOutput {
             final_cwd,
             snapshot,

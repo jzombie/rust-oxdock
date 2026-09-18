@@ -1231,6 +1231,7 @@ dependencies = [
  "oxdock-fs",
  "oxdock-parser",
  "oxdock-process",
+ "oxdock-ssh-plugin",
  "oxdock-sys-test-utils",
  "tempfile",
 ]

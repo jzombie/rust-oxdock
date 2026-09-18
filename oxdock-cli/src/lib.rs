@@ -5,7 +5,7 @@ use oxdock_fs::{
 };
 #[cfg(windows)]
 use oxdock_process::CommandBuilder;
-use oxdock_process::SharedInput;
+use oxdock_process::{DefaultProcessManager, SharedInput};
 use std::env;
 use std::io::{self, IsTerminal, Read};
 use std::sync::{Arc, Mutex};
@@ -16,10 +16,53 @@ pub use oxdock_core::{
     parse_script_with_modules, run_steps, run_steps_with_context, run_steps_with_context_result,
     run_steps_with_manager_with_modules,
 };
-use oxdock_core::{ExecIo, run_steps_with_lazy_snapshot};
+use oxdock_core::{ExecIo, run_steps_with_lazy_snapshot_and_modules};
 pub use oxdock_parser::{Guard, Step, StepKind};
 pub use oxdock_process::shell_program;
 use std::collections::BTreeMap;
+
+/// Host modules bundled into the CLI runner. The base build exposes STD
+/// only; `--features ssh` additionally registers the ephemeral SSH server
+/// and client (`SSH_SERVE`, `SSH_ACCEPT`, `SSH_CLOSE`, `SSH_CONNECT`,
+/// `SSH_PUMP`) from oxdock-ssh-plugin.
+#[cfg(feature = "ssh")]
+fn cli_host_modules() -> Vec<HostModule<DefaultProcessManager>> {
+    vec![oxdock_ssh_plugin::module()]
+}
+
+/// Host modules bundled into the CLI runner (base build: STD only).
+#[cfg(not(feature = "ssh"))]
+fn cli_host_modules() -> Vec<HostModule<DefaultProcessManager>> {
+    Vec::new()
+}
+
+/// Host types bundled into the CLI runner alongside [`cli_host_modules`].
+#[cfg(feature = "ssh")]
+fn cli_host_types() -> Vec<&'static TypeDescriptor> {
+    vec![oxdock_ssh_plugin::SshServerTag::descriptor()]
+}
+
+/// Host types bundled into the CLI runner (base build: none).
+#[cfg(not(feature = "ssh"))]
+fn cli_host_types() -> Vec<&'static TypeDescriptor> {
+    Vec::new()
+}
+
+/// Parse a CLI script against STD plus any bundled host modules. Without
+/// extra modules this is exactly `parse_script`, so base-build behavior
+/// never changes.
+fn parse_cli_script(script: &str) -> Result<Vec<Step>> {
+    let modules = cli_host_modules();
+    if modules.is_empty() {
+        parse_script(script)
+    } else {
+        let mut engine = Engine::new();
+        for module in modules {
+            engine.register_module(module);
+        }
+        parse_script_with_modules(script, engine.module_table())
+    }
+}
 
 pub fn run() -> Result<()> {
     init_temp_gc();
@@ -178,8 +221,14 @@ pub fn execute_with_result(opts: Options, workspace_root: GuardedPath) -> Result
     let mut final_cwd = workspace_root.clone();
     let snapshot = Arc::new(LazyGuardedTempDir::new());
     if !script.trim().is_empty() {
-        let steps = parse_script(&script)?;
-        let output = run_steps_with_lazy_snapshot(&workspace_root, &steps, ExecIo::new())?;
+        let steps = parse_cli_script(&script)?;
+        let output = run_steps_with_lazy_snapshot_and_modules(
+            &workspace_root,
+            &steps,
+            ExecIo::new(),
+            cli_host_modules(),
+            cli_host_types(),
+        )?;
         final_cwd = output.final_cwd;
         return Ok(ExecutionResult {
             snapshot: output.snapshot,
@@ -274,7 +323,7 @@ where
     let mut snapshot = Arc::new(LazyGuardedTempDir::new());
     let mut fs: Option<Box<dyn WorkspaceFs>> = None;
     if !script.trim().is_empty() {
-        let steps = parse_script(&script)?;
+        let steps = parse_cli_script(&script)?;
         // If we are running a script from a file, we might have stdin available for the script itself.
         // If we read the script from stdin, then stdin is consumed.
         // But if opts.script is ScriptSource::Path, stdin is still available.
@@ -294,7 +343,13 @@ where
 
         let mut io_cfg = ExecIo::new();
         io_cfg.set_stdin(stdin_handle);
-        let output = run_steps_with_lazy_snapshot(&workspace_root, &steps, io_cfg)?;
+        let output = run_steps_with_lazy_snapshot_and_modules(
+            &workspace_root,
+            &steps,
+            io_cfg,
+            cli_host_modules(),
+            cli_host_types(),
+        )?;
         final_cwd = output.final_cwd;
         snapshot = output.snapshot;
         fs = Some(output.fs);
@@ -760,6 +815,65 @@ mod tests {
         })?;
         let seen = called.borrow().clone().expect("shell runner called");
         assert_eq!(seen.1, workspace_root.display());
+        Ok(())
+    }
+
+    /// The `ssh` feature wires the SSH host module into the real CLI
+    /// runner: serve an ephemeral server and close it through
+    /// `execute_with_result`, no client needed.
+    #[cfg(feature = "ssh")]
+    #[cfg_attr(
+        miri,
+        ignore = "loopback TCP plus threads plus a Tokio runtime; also GuardedPath::tempdir"
+    )]
+    #[test]
+    fn ssh_feature_serves_and_closes() -> Result<()> {
+        let workspace = GuardedPath::tempdir()?;
+        let workspace_root = workspace.as_guarded_path().clone();
+        let script_path = workspace_root.join("ssh-serve.ox")?;
+        let resolver = PathResolver::new(workspace_root.as_path(), workspace_root.as_path())?;
+        let script = indoc! {"
+            IMPORT [STD, SSH]
+            LET $m: MAP = SSH_SERVE(\"127.0.0.1:0\", \"test\", \"test123\")
+            SSH_CLOSE($m.server)
+        "};
+        resolver.write_file(&script_path, script.as_bytes())?;
+        let opts = Options {
+            script: ScriptSource::Path(script_path),
+            shell: false,
+        };
+        execute_with_result(opts, workspace_root)?;
+        Ok(())
+    }
+
+    /// Without the `ssh` feature the same script must fail to parse:
+    /// SSH names stay unknown instead of silently changing meaning.
+    #[cfg(not(feature = "ssh"))]
+    #[cfg_attr(
+        miri,
+        ignore = "GuardedPath::tempdir relies on OS tempdirs; blocked under Miri isolation"
+    )]
+    #[test]
+    fn ssh_scripts_rejected_without_feature() -> Result<()> {
+        let workspace = GuardedPath::tempdir()?;
+        let workspace_root = workspace.as_guarded_path().clone();
+        let script_path = workspace_root.join("ssh-serve.ox")?;
+        let resolver = PathResolver::new(workspace_root.as_path(), workspace_root.as_path())?;
+        let script = indoc! {"
+            IMPORT [STD, SSH]
+            LET $m: MAP = SSH_SERVE(\"127.0.0.1:0\", \"test\", \"test123\")
+            SSH_CLOSE($m.server)
+        "};
+        resolver.write_file(&script_path, script.as_bytes())?;
+        let opts = Options {
+            script: ScriptSource::Path(script_path),
+            shell: false,
+        };
+        let err = match execute_with_result(opts, workspace_root) {
+            Ok(_) => panic!("SSH names must be unknown without the feature"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("SSH"), "{err}");
         Ok(())
     }
 }
