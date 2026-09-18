@@ -425,6 +425,34 @@ impl<'a, P: ProcessManager> StepCtx<'a, P> {
         backend.force_close();
         Ok(())
     }
+
+    /// Whether the current task was cancelled (`CANCEL`/`TIMEOUT`). For
+    /// external host modules running blocking pumps: poll each tick so
+    /// silent-but-open pipes cannot strand the task thread.
+    pub fn is_cancelled(&self) -> bool {
+        self.state
+            .cancel_token
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Whether this step runs on an `ASYNC` task thread. Blocking pumps
+    /// must refuse the main sequential flow, mirroring the in-crate
+    /// `net_bridge::require_async` gate (which reads the same flag
+    /// directly).
+    pub fn is_async_task(&self) -> bool {
+        self.state.inside_async
+    }
+
+    /// Resolve an explicitly passed `PIPE` value to its script backend for
+    /// timeout-bounded reads (`read_into_timeout`). This is value-based on
+    /// purpose: the ambient `out_pipe`/`stdin_pipe` fields only populate via
+    /// engine-level `WITH_IO` resolution, which never runs for host function
+    /// calls. Returns `None` for unbound and OS-materialized handles, which
+    /// fall back to blocking reads.
+    pub fn pipe_backend(&self, value: &Value) -> Option<Arc<PipeInner>> {
+        let handle = value.as_pipe_handle()?;
+        oxdock_pipe::script_backend(&handle)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
