@@ -1959,6 +1959,8 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 }
                 LET $res: STRING = GREET("ada")
                 ASSERT_EQ $res "ada"
+                # Statement form: parens stay, the value drops.
+                GREET("bex")
             "#},
                 },
                 Example {

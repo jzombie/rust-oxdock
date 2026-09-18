@@ -152,7 +152,7 @@ pub fn tokenize(input: &str) -> Result<Vec<RawToken<'_>>, ParseError> {
             | Rule::if_statement
             | Rule::while_statement
             | Rule::func_def
-            | Rule::bare_call_statement
+            | Rule::call_statement
             | Rule::return_statement
             | Rule::break_statement
             | Rule::continue_statement => tokens.push(RawToken::Command {

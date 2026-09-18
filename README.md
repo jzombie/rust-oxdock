@@ -670,6 +670,36 @@ numbers. Side-effecting stateful functions stay out, since stack-order
 execution with step-less errors is the worst place for an effect to go
 wrong.
 
+### Why embedding Rust here stays simple
+
+Compared against embedding Rust in Python, there are three structural
+reasons the host boundary stays small, and none of them are API polish.
+
+#### No foreign runtime to host
+
+Embedding Rust in Python means linking an interpreter, managing the
+GIL, and marshaling across two object models with different lifetimes.
+OxDock functions are plain Rust functions returning `Result<Value>`:
+the VM is just the calling convention, and values are fixed size words
+with deterministic lifetimes, so there is nothing to pin, nothing
+reference counted, and nothing kept alive across the boundary.
+
+#### No binding layer
+
+The Python path needs module registration plus type conversions
+negotiated with dynamic types. `#[oxdock_func]` derives the
+registration marker, the arity gate, and the `String`, `i64`, `f64`,
+`bool`, and `Value` extraction from the signature, and doc comments
+become introspectable metadata for free.
+
+#### No build system dance
+
+No maturin, no ABI tags, and no wheels built per interpreter. The host
+crate depends on `oxdock-core` and calls `Engine::register_module`.
+The one thing Python still wins is its C ABI as a stable interop target
+for other languages. The OxDock boundary is Rust only, which is exactly
+what keeps it cheap.
+
 One language for the whole build: farm steps out to npm, bundlers, or code generators and pull their artifacts back under cargo's control. Pipe bytes between steps without buffering whole outputs, fan work out with `ASYNC`, or skip embedding entirely and run the same scripts as standalone CLI processes.
 
 ## Variants
@@ -1663,6 +1693,8 @@ FUNC GREET($name: STRING) {
 }
 LET $res: STRING = GREET("ada")
 ASSERT_EQ $res "ada"
+# Statement form: parens stay, the value drops.
+GREET("bex")
 ```
 
 **Example: call with pipes**
