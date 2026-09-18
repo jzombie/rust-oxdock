@@ -1,26 +1,35 @@
-# Echo server: greet the client on 127.0.0.1:18080, then print everything
-# it types to this terminal.
-# Try it:   nc 127.0.0.1 18080
+# Echo server: greet the client on 127.0.0.1:$ECHO_LISTEN_PORT, then print
+# everything it types to this terminal.
+# Ports come from the environment, nothing is hardcoded: export
+# ECHO_LISTEN_PORT (client-facing) and ECHO_ORB_PORT (upstream) first.
+# Try it:   ECHO_LISTEN_PORT=<port> ECHO_ORB_PORT=<port> oxdock scripts/proto.echo-listen.oxdock
+#           (in another terminal) nc 127.0.0.1 <port>
 # Stop it:  Ctrl-C, or just disconnect the client: with nothing left to
 #           send, the session ends and the script notices on its own.
 #
 # --no-half-close keeps the write side open after the greeting: without it
 # the greeting's EOF would FIN the socket and interactive clients like nc
 # would drop immediately.
+#
+# Per-iteration pipe declarations: each loop turn mints a fresh session
+# pair, so a previous connection never shares a channel with the next.
 
+INHERIT_ENV [ECHO_LISTEN_PORT, ECHO_ORB_PORT]
 WORKSPACE LOCAL
 
-LET $listen_port: INT = 18080
-LET $orb_port: INT = 32222
+LET $listen_port: INT = env:ECHO_LISTEN_PORT
+LET $orb_port: INT = env:ECHO_ORB_PORT
 
 WHILE true {
     ECHO "proxy listening on 127.0.0.1:{{ $listen_port }}"
 
+    LET $req: PIPE
+    LET $resp: PIPE
     LET $ls: HANDLE = ASYNC {
-        WITH_IO [stdin=pipe:req, stdout=pipe:resp] LISTEN 127.0.0.1:{{ $listen_port }} --no-half-close
+        WITH_IO [stdin=$req, stdout=$resp] LISTEN 127.0.0.1:{{ $listen_port }} --no-half-close
     }
 
-    WITH_IO [stdin=pipe:resp, stdout=pipe:req] ASYNC CONNECT 127.0.0.1:{{ $orb_port }}
+    WITH_IO [stdin=$resp, stdout=$req] ASYNC CONNECT 127.0.0.1:{{ $orb_port }}
 
     AWAIT $ls
     ECHO "client disconnected"

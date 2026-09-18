@@ -841,8 +841,10 @@ fn emit_raw_value(v: &Value, interp: &[(proc_macro2::Ident, usize)]) -> proc_mac
     if let Some(f) = v.as_f64() {
         return quote! { Value::float(#f) };
     }
-    if let Some(n) = v.as_pipe_name() {
-        return quote! { Value::pipe(#n.to_string()) };
+    // PIPE words hold runtime-owned backends: generated code mints a
+    // fresh unbound handle (same shape as bare `LET $p: PIPE`).
+    if v.as_pipe_handle().is_some() {
+        return quote! { Value::pipe_fresh() };
     }
     if let Some(d) = v.as_duration() {
         let ms = d.as_millis() as u64;

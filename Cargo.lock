@@ -581,6 +581,7 @@ dependencies = [
  "indoc",
  "line-ending",
  "oxdock-func-macro",
+ "oxdock-pipe",
  "pest",
  "pest_derive",
  "pest_meta",
@@ -596,7 +597,6 @@ version = "0.16.0-alpha"
 dependencies = [
  "anyhow",
  "oxdock-fs",
- "oxdock-process",
 ]
 
 [[package]]
@@ -607,6 +607,7 @@ dependencies = [
  "libc",
  "oxdock-fs",
  "oxdock-parser",
+ "oxdock-pipe",
  "oxdock-sys-test-utils",
  "windows-sys",
 ]

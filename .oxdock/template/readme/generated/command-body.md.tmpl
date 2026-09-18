@@ -1753,7 +1753,10 @@ Positive time span: `500ms`, `10s`, `2m`, `1h`; bare number means seconds.
 
 ### Value type: PIPE
 
-Named script pipe. Validity is checked against the pipe registry at coercion time.
+Anonymous pipe handle. The backend materializes lazily on first
+binding (never eagerly at declaration), so the choice always has full
+usage context. Cloning shares the backend (explicit-sharing fan-out);
+equality is handle identity, never byte comparison.
 
 ### Value type: HANDLE
 

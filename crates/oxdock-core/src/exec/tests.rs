@@ -806,7 +806,6 @@ fn ast_handlers_route_snapshot_demand_through_resolve_choke_points() {
         ("steps.rs", include_str!("steps.rs")),
         ("state.rs", include_str!("state.rs")),
         ("fs_ops.rs", include_str!("fs_ops.rs")),
-        ("pipe.rs", include_str!("pipe.rs")),
         ("io.rs", include_str!("io.rs")),
     ];
     const FORBIDDEN: &[&str] = &[
@@ -853,7 +852,6 @@ fn create_exec_state(fs: MockFs) -> ExecState<MockProcessManager> {
         active_process: Arc::new(std::sync::Mutex::new(None)),
         named_tasks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         next_task_id: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-        next_pipe_id: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         inside_async: false,
         keeper_expiry: None,
         cancellable: false,
@@ -1599,22 +1597,21 @@ fn with_io_async_single_run_promotes_os_pipe() {
         true,
     )
     .expect("run");
-    let backend = state
+    let handle = state
         .get_var("live")
         .expect("var live")
-        .as_pipe_name()
-        .expect("pipe live")
-        .to_string();
+        .as_pipe_handle()
+        .expect("pipe live");
     assert!(
         matches!(
-            state.io.resolve_stdout(0, &backend, true),
-            Ok(StreamHandle::Os(_))
+            state.io.resolve_stdout(0, &handle, true, true),
+            Ok((StreamHandle::Os(_), _))
         ),
         "single RUN producer must promote $live to an OS pair"
     );
     assert!(
-        state.io.input_pipe(&backend).is_none(),
-        "promoted backends must not also create script entries"
+        state.io.inspect_pipe(&handle).kind.is_os(),
+        "promoted handle must inspect as an OS pair"
     );
 }
 
@@ -1646,16 +1643,15 @@ fn with_io_async_guarded_and_exec_form_single_run_promotes_os_pipe() {
             true,
         )
         .expect("run");
-        let backend = state
+        let handle = state
             .get_var(var)
             .unwrap_or_else(|| panic!("var {var}"))
-            .as_pipe_name()
-            .unwrap_or_else(|| panic!("pipe {var}"))
-            .to_string();
+            .as_pipe_handle()
+            .unwrap_or_else(|| panic!("pipe {var}"));
         assert!(
             matches!(
-                state.io.resolve_stdout(0, &backend, true),
-                Ok(StreamHandle::Os(_))
+                state.io.resolve_stdout(0, &handle, true, true),
+                Ok((StreamHandle::Os(_), _))
             ),
             "guarded and exec form single RUN producers must promote: {script}"
         );
@@ -1704,14 +1700,13 @@ fn with_io_async_dsl_body_stays_script_pipe() {
         true,
     )
     .expect("run");
-    let backend = state
+    let handle = state
         .get_var("plain")
         .expect("var plain")
-        .as_pipe_name()
-        .expect("pipe plain")
-        .to_string();
+        .as_pipe_handle()
+        .expect("pipe plain");
     assert!(
-        state.io.input_pipe(&backend).is_some(),
+        !state.io.inspect_pipe(&handle).kind.is_os(),
         "DSL producers must keep store and forward script pipes"
     );
 }
@@ -1873,21 +1868,29 @@ fn exec_io_inherit_env_state_machine_round_trips() {
 }
 
 #[test]
-fn exec_io_pipe_endpoints_expose_streams_and_inherit() {
-    let mut io = ExecIo::new();
-    let writer: SharedOutput = Arc::new(Mutex::new(Vec::<u8>::new()));
+fn exec_io_pipe_endpoints_resolve_through_handles() {
+    use oxdock_parser::Value;
+    let io = ExecIo::new();
+    let handle = Value::pipe_fresh().as_pipe_handle().expect("fresh handle");
 
-    io.insert_output_pipe_stdout("s-out", writer.clone());
-    io.insert_output_pipe_stderr_inherit("s-inh");
-
-    match io.resolve_stdout(0, "s-out", false) {
-        Ok(StreamHandle::Stream(w)) => assert!(Arc::ptr_eq(&w, &writer)),
-        _ => panic!("expected streamed stdout handle"),
-    }
-    match io.resolve_stderr(0, "s-inh", false) {
-        Ok(StreamHandle::Inherit) => {}
-        _ => panic!("expected inherit stderr handle"),
-    }
+    // Script resolution hands out live stream halves plus the backend.
+    let (stdin, stdin_backend) = io
+        .resolve_stdin(0, &handle, false, false)
+        .expect("resolve stdin");
+    assert!(matches!(stdin, CommandStdin::Stream(_)));
+    assert!(stdin_backend.is_some());
+    let (stdout, stdout_backend) = io
+        .resolve_stdout(0, &handle, false, false)
+        .expect("resolve stdout");
+    assert!(matches!(stdout, StreamHandle::Stream(_)));
+    assert!(stdout_backend.is_some());
+    assert!(matches!(
+        io.resolve_stderr(0, &handle, false, false),
+        Ok(StreamHandle::Stream(_))
+    ));
+    // Repeat reads share the backend: same channel, first-binding-wins.
+    let info = io.inspect_pipe(&handle);
+    assert!(!info.kind.is_os());
 }
 
 #[test]
@@ -2238,7 +2241,8 @@ fn timeout_preserves_preexisting_cancellation() {
         expose_stdin: false,
         out: None,
         err: None,
-        out_pipe_name: None,
+        out_pipe: None,
+        stdin_pipe: None,
     };
     super::handlers::timeout(&mut cx, 0, &std::time::Duration::from_secs(30), &[])
         .expect("empty body must succeed");
@@ -2891,6 +2895,248 @@ fn bare_let_pipe_copies_share_one_backend() {
 }
 
 #[test]
+fn loop_body_declarations_mint_per_iteration() {
+    // Per-iteration freshness comes free from declaration placement: a
+    // `LET` inside the loop body mints an independent channel per turn
+    // (fresh per-iteration scope), so no generation observes another's
+    // bytes.
+    let steps = crate::parse_script(indoc! {r#"
+        LET $items: LIST = ["a", "b"]
+        FOR $x: STRING IN $items {
+            LET $p: PIPE
+            WITH_IO [stdout=$p] ECHO "{{ $x }}"
+            WITH_IO [stdin=$p] READ_LINE $got
+            WRITE "{{ $x }}.txt" "{{ $got }}"
+        }
+    "#})
+    .expect("parse ok");
+    let files = run_bridge_steps(&steps, vec![]).expect("loop generations run");
+    assert_eq!(file_content(&files, "a.txt"), b"a");
+    assert_eq!(file_content(&files, "b.txt"), b"b");
+}
+
+#[test]
+fn mixed_task_body_pins_script_and_run_adapts() {
+    // Strict promotion: a RUN producer sharing a handle with a DSL
+    // consumer pins script (not every binding is RUN-terminated). The RUN
+    // side adapts through the shared path with existing feeder machinery;
+    // repeat DSL access and host-facing reads all keep working there.
+    let steps = crate::parse_script(indoc! {r#"
+        LET $p: PIPE
+        LET $t: HANDLE = ASYNC {
+            WITH_IO [stdout=$p] RUN ["stub-never-executed"]
+            WITH_IO [stdout=$p] ECHO "from-task"
+        }
+        WITH_IO [stdin=$p] READ_LINE $a
+        AWAIT $t
+        LET $info: MAP = INSPECT($p)
+        WRITE out.txt "{{ $a }}"
+        WRITE kind.txt "{{ $info.pipe_kind }}"
+    "#})
+    .expect("parse ok");
+    let files = run_bridge_script(steps, vec![], Duration::from_secs(15));
+    assert_eq!(file_content(&files, "out.txt"), b"from-task");
+    assert_eq!(file_content(&files, "kind.txt"), b"script");
+}
+
+#[test]
+fn host_round_trip_through_adapters() {
+    // Host functions move bytes with slice I/O on caller-owned buffers:
+    // read DSL-produced bytes, write bytes the DSL reads, and return a
+    // freshly minted handle the DSL can bind. Canonical reference shape
+    // is `io::copy` between adapters (stack buffer, zero per-chunk
+    // allocation); the minted handle is seeded through a second adapter.
+    use std::io::Write;
+    fn test_meta(name: &str) -> FuncMeta {
+        FuncMeta {
+            name: name.to_string(),
+            module: "T".to_string(),
+            kind: FuncKind::HostCtx,
+            params: None,
+            returns: Some("PIPE".to_string()),
+            rpn: false,
+            summary: "test-only host pipe relay",
+            docs: "test-only",
+        }
+    }
+    let relay: NativeFn<MockProcessManager> = Arc::new(|cx, vals| {
+        let mut src = PipeStream::reader(cx.pipe_reader(&vals[0])?);
+        let mut dst = PipeStream::writer(cx.pipe_writer(&vals[1])?);
+        std::io::copy(&mut src, &mut dst)?;
+        dst.flush()?;
+        let minted = cx.new_pipe();
+        let mut seed = PipeStream::writer(cx.pipe_writer(&minted)?);
+        seed.write_all(b"seed\n")?;
+        seed.flush()?;
+        Ok(minted)
+    });
+    let module = HostModule {
+        name: "T".to_string(),
+        funcs: vec![HostRegistration::Stateful {
+            name: "RELAY".to_string(),
+            meta: test_meta("RELAY"),
+            func: relay,
+        }],
+        types: vec![],
+    };
+    let table = oxdock_parser::ModuleTable {
+        modules: std::collections::HashMap::from([(
+            "T".to_string(),
+            Some(oxdock_parser::ModuleFuncs {
+                functions: std::collections::HashSet::from(["RELAY".to_string()]),
+            }),
+        )]),
+    };
+    let steps = crate::parse_script_with_modules(
+        indoc! {r#"
+        LET $in: PIPE
+        LET $out: PIPE
+        WITH_IO [stdout=$in] ECHO "hello host"
+        LET $made: PIPE = T::RELAY($in, $out)
+        WITH_IO [stdin=$out] READ_LINE $got
+        WITH_IO [stdin=$made] READ_LINE $seed
+        WRITE out.txt "{{ $got }}-{{ $seed }}"
+    "#},
+        table,
+    )
+    .expect("parse ok");
+    let fs = MockFs::new();
+    let mut state = create_exec_state(fs.clone());
+    state.register_module(module);
+    let mut proc = MockProcessManager::default();
+    execute_steps(
+        &mut state,
+        &mut proc,
+        &steps,
+        CommandStdin::Null,
+        false,
+        None,
+        None,
+        true,
+    )
+    .expect("host round-trip runs");
+    let files = fs.snapshot();
+    assert_eq!(file_content(&files, "out.txt"), b"hello host-seed");
+}
+
+#[cfg(not(miri))]
+#[test]
+fn os_rebind_take_twice_bails_with_fresh_declaration_remedy() {
+    // No rebind rule exists by design: a second take on one OS end bails
+    // loudly naming the remedy (fresh `LET`), never a silent fresh pair.
+    // Pre-decided OS via a pure-RUN task (mock spawns take nothing, so
+    // the first *bridged* take wins deterministically); two sequential
+    // DSL binds then fail on the second resolve.
+    let steps = crate::parse_script(indoc! {r#"
+        LET $p: PIPE
+        LET $t1: HANDLE = ASYNC {
+            WITH_IO [stdin=$p] RUN ["stub-one"]
+            WITH_IO [stdout=$p] RUN ["stub-two"]
+        }
+        AWAIT $t1
+        LET $t2: HANDLE = ASYNC {
+            WITH_IO [stdin=$p] ECHO "first"
+            WITH_IO [stdin=$p] ECHO "second"
+        }
+        AWAIT $t2
+    "#})
+    .expect("parse ok");
+    let err = run_bridge_steps(&steps, vec![]).expect_err("second take must fail");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("already been consumed"),
+        "unexpected error: {msg}"
+    );
+    assert!(
+        msg.contains("fresh LET $x: PIPE"),
+        "error must name the remedy: {msg}"
+    );
+}
+
+#[cfg(not(miri))]
+#[test]
+fn host_take_twice_on_os_bails() {
+    // Take-once applies to host bridged takes exactly like DSL consumers:
+    // the first `pipe_reader` takes, the repeat bails with the same
+    // remedy. The host surfaces the message as a string so the script
+    // asserts it without depending on error-wrapping paths.
+    fn test_meta(name: &str) -> FuncMeta {
+        FuncMeta {
+            name: name.to_string(),
+            module: "T".to_string(),
+            kind: FuncKind::HostCtx,
+            params: None,
+            returns: Some("STRING".to_string()),
+            rpn: false,
+            summary: "test-only host take-twice probe",
+            docs: "test-only",
+        }
+    }
+    let probe: NativeFn<MockProcessManager> = Arc::new(|cx, vals| {
+        let _first = cx.pipe_reader(&vals[0])?;
+        match cx.pipe_reader(&vals[0]) {
+            Ok(_) => anyhow::bail!("second take must fail"),
+            Err(err) => Ok(Value::string(format!("{err:#}"))),
+        }
+    });
+    let module = HostModule {
+        name: "T".to_string(),
+        funcs: vec![HostRegistration::Stateful {
+            name: "TAKE_TWICE".to_string(),
+            meta: test_meta("TAKE_TWICE"),
+            func: probe,
+        }],
+        types: vec![],
+    };
+    let table = oxdock_parser::ModuleTable {
+        modules: std::collections::HashMap::from([(
+            "T".to_string(),
+            Some(oxdock_parser::ModuleFuncs {
+                functions: std::collections::HashSet::from(["TAKE_TWICE".to_string()]),
+            }),
+        )]),
+    };
+    let steps = crate::parse_script_with_modules(
+        indoc! {r#"
+        LET $p: PIPE
+        LET $t1: HANDLE = ASYNC {
+            WITH_IO [stdout=$p] RUN ["stub"]
+        }
+        AWAIT $t1
+        LET $report: STRING = T::TAKE_TWICE($p)
+        WRITE out.txt "{{ $report }}"
+    "#},
+        table,
+    )
+    .expect("parse ok");
+    let fs = MockFs::new();
+    let mut state = create_exec_state(fs.clone());
+    state.register_module(module);
+    let mut proc = MockProcessManager::default();
+    execute_steps(
+        &mut state,
+        &mut proc,
+        &steps,
+        CommandStdin::Null,
+        false,
+        None,
+        None,
+        true,
+    )
+    .expect("host take-twice probe runs");
+    let files = fs.snapshot();
+    let report = String::from_utf8(file_content(&files, "out.txt")).expect("utf8");
+    assert!(
+        report.contains("already been consumed"),
+        "unexpected report: {report}"
+    );
+    assert!(
+        report.contains("fresh LET $x: PIPE"),
+        "report must name the remedy: {report}"
+    );
+}
+
+#[test]
 fn bare_let_pipe_mints_distinct_unspellable_names() {
     // Transitional name backing: every bare declaration mints a key no
     // `pipe:` literal can spell (it contains a space), so anonymous
@@ -2910,59 +3156,65 @@ fn bare_let_pipe_mints_distinct_unspellable_names() {
         true,
     )
     .expect("bare declarations run");
-    let name_a = state
+    let handle_a = state
         .get_var("a")
         .expect("var a")
-        .as_pipe_name()
-        .expect("pipe a")
-        .to_string();
-    let name_b = state
+        .as_pipe_handle()
+        .expect("pipe a");
+    let handle_b = state
         .get_var("b")
         .expect("var b")
-        .as_pipe_name()
-        .expect("pipe b")
-        .to_string();
-    assert_ne!(
-        name_a, name_b,
+        .as_pipe_handle()
+        .expect("pipe b");
+    assert!(
+        !std::sync::Arc::ptr_eq(&handle_a, &handle_b),
         "bare declarations must mint distinct backends"
     );
-    for name in [&name_a, &name_b] {
-        assert!(
-            name.contains(' '),
-            "anonymous pipe key {name:?} must be unspellable as a pipe: literal"
+    // Handles are opaque cells, not names: nothing textual can alias them.
+    for handle in [&handle_a, &handle_b] {
+        let info = state.io.inspect_pipe(handle);
+        assert_eq!(
+            info.kind.as_str(),
+            "unbound",
+            "never-bound handles inspect as unbound"
         );
     }
 }
 
 #[test]
-fn bridge_inner_for_reader_finds_script_backends() {
+fn bridge_stdin_resolve_carries_script_backend() {
+    use oxdock_parser::Value;
     let io = ExecIo::new();
-    io.ensure_pipe_for("live", false).expect("ensure");
-    let CommandStdin::Stream(reader) = io.resolve_stdin(0, "live", false).expect("resolve") else {
-        panic!("expected stream stdin");
-    };
-    assert!(io.stdin_pipe_inner(&reader).is_some());
-    let foreign: oxdock_process::SharedInput =
-        Arc::new(Mutex::new(std::io::Cursor::new(Vec::new())));
-    assert!(io.stdin_pipe_inner(&foreign).is_none());
+    let handle = Value::pipe_fresh().as_pipe_handle().expect("fresh handle");
+    io.ensure_handle(&handle, false).expect("ensure");
+    let (stdin, backend) = io.resolve_stdin(0, &handle, false, false).expect("resolve");
+    assert!(matches!(stdin, CommandStdin::Stream(_)));
+    assert!(
+        backend.is_some(),
+        "script stdin resolve carries the backend for timeout-bounded bridge reads"
+    );
 }
 
 #[test]
 fn bridge_force_close_eofs_despite_writer_and_keeper() {
+    use oxdock_parser::Value;
     let io = ExecIo::new();
-    io.ensure_pipe_for("p", false).expect("ensure");
+    let handle = Value::pipe_fresh().as_pipe_handle().expect("fresh handle");
+    io.ensure_handle(&handle, false).expect("ensure");
     // Attach a live writer and pin a keeper: without force_close neither
     // lets readers observe EOF.
-    let CommandStdin::Stream(reader) = io.resolve_stdin(0, "p", false).expect("resolve") else {
+    let (stdin, _) = io.resolve_stdin(0, &handle, false, false).expect("resolve");
+    let CommandStdin::Stream(reader) = stdin else {
         panic!("expected stream stdin");
     };
-    let writer = match io.resolve_stdout(0, "p", false).expect("resolve") {
-        super::io::StreamHandle::Stream(writer) => writer,
-        _ => panic!("expected stream stdout"),
+    let (stdout, backend) = io
+        .resolve_stdout(0, &handle, false, false)
+        .expect("resolve");
+    let super::io::StreamHandle::Stream(writer) = stdout else {
+        panic!("expected stream stdout");
     };
-    let _keeper = io.pin_keeper("p").expect("pin").expect("keeper");
-    let backend = io.pipe_backend("p").expect("backend");
-    assert!(io.pipe_backend("missing").is_none());
+    let _keeper = io.pin_keeper(&handle).expect("pin").expect("keeper");
+    let backend = backend.expect("script backend");
     backend.force_close();
     let mut buf = [0u8; 8];
     let n = reader
@@ -3384,8 +3636,9 @@ fn bridge_os_pipe_fresh_handles_across_sessions() {
     // RUN-promoted OS pairs: the second session mints a fresh handle, so
     // it never observes the first session's consumed descriptors. No
     // timing involved: AWAIT joins each session before the next begins.
-    // (Transitional: name-based recycling is retired with `pipe:`; the
-    // spent-handle loud error lands with the handle rekey.)
+    // (Handle identity replaces name-based recycling: rebinding a spent
+    // handle is a loud error, so per-session freshness comes from
+    // declaring a fresh `LET` per run.)
     use oxdock_fs::PathResolver;
     let temp = GuardedPath::tempdir().expect("tempdir");
     let root = temp.as_guarded_path().clone();

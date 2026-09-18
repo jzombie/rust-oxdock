@@ -54,10 +54,10 @@ fn run_script_captured_pipe(
     let value = bindings
         .get(var)
         .ok_or_else(|| anyhow::anyhow!("no top-level ${var} variable"))?;
-    let pipe_name = value
-        .as_pipe_name()
+    let handle = value
+        .as_pipe_handle()
         .ok_or_else(|| anyhow::anyhow!("${var} is not a PIPE"))?;
-    let bytes = io_probe.peek_pipe_content(pipe_name)?;
+    let bytes = io_probe.peek_pipe_content(&handle)?;
     Ok(String::from_utf8(bytes).expect("captured pipe output is valid UTF-8"))
 }
 

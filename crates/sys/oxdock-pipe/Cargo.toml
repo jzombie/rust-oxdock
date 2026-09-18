@@ -13,7 +13,6 @@ publish.workspace = true
 [dependencies]
 anyhow.workspace = true
 oxdock-fs.workspace = true
-oxdock-process.workspace = true
 
 [lints]
 workspace = true

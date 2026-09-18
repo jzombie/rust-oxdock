@@ -23,13 +23,11 @@ pub(crate) fn coerce_value<P: ProcessManager>(
         ));
     }
     // Same-type passthrough for every type: the word carries its own
-    // vtable, so descriptor-name equality is type equality.
+    // vtable, so descriptor-name equality is type equality. Pipe handles
+    // are already owned values: passing one through never instantiates
+    // backend state (materialization happens only at binding sites), and
+    // `LET $q: PIPE = $p` shares the backend by cloning the handle.
     if value.type_name() == expected {
-        // NOTE: naming a pipe must not instantiate backend state. Entry
-        // creation happens only at binding sites (`WITH_IO` resolution,
-        // spawn-time pins), so a bare `LET $p: PIPE = pipe:name` can never
-        // conjure a globally visible channel as a side effect, and backend
-        // choice never depends on who named it first.
         return Ok(value);
     }
     // Values of other registered types never cross-coerce; the mismatch
@@ -118,9 +116,11 @@ fn coerce_scalar(value: &Value, expected: &str) -> Result<Value> {
             _ => Err(mismatch(expected, value)),
         };
     }
-    if let Some(n) = value.as_pipe_name() {
+    if value.as_pipe_handle().is_some() {
         return match expected {
-            "STRING" => Ok(Value::string(n.to_string())),
+            // Opaque rendering: stringifying a handle was already
+            // meaningless with names; `<pipe>` keeps the totality.
+            "STRING" => Ok(Value::string(format!("{value}"))),
             _ => Err(mismatch(expected, value)),
         };
     }
@@ -330,14 +330,10 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
         // Variable inspection carries the binding name unevaluated (see
         // `Expr::Inspect`): no function-name matching happens here.
         Expr::Inspect(var) => evaluate_inspect_var(var, cx),
-        // Bare `LET $p: PIPE`: mint a fresh anonymous backend key. The
-        // counter is shared across forks (Arc), so workers never re-mint
-        // a name, and the key spells nothing a `pipe:` literal can name.
-        Expr::FreshPipe => {
-            use std::sync::atomic::Ordering;
-            let id = cx.state.next_pipe_id.fetch_add(1, Ordering::SeqCst);
-            Ok(Value::pipe_anonymous(id))
-        }
+        // Bare `LET $p: PIPE`: mint a fresh unbound handle. Backends
+        // materialize lazily on first binding, so declaration never
+        // pre-commits a backend type with zero usage context.
+        Expr::FreshPipe => Ok(Value::pipe_fresh()),
         Expr::Arithmetic { op, left, right } => {
             let left_val = evaluate_expr(left, cx)?;
             let right_val = evaluate_expr(right, cx)?;
@@ -1100,9 +1096,8 @@ pub(crate) fn format_value_for_string(val: &Value) -> String {
     if let Some(b) = val.as_bool() {
         return b.to_string();
     }
-    if let Some(n) = val.as_pipe_name() {
-        return format!("pipe:{n}");
-    }
+    // Pipes render through `Display` (`<pipe>`) via the fallthrough below;
+    // handles are opaque and have no string form to spell.
     if let Some(d) = val.as_duration() {
         return oxdock_parser::command::format_duration(&d);
     }

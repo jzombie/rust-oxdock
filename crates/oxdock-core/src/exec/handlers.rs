@@ -17,7 +17,7 @@ use super::io::{StreamHandle, write_stdout};
 use super::native::FuncBody;
 use super::state::{ExecState, MAX_CALL_DEPTH, TaskPhase};
 use super::steps::{Flow, StepCtx};
-use oxdock_pipe::KeeperGuard;
+use oxdock_pipe::{KeeperGuard, PipeHandle, PipeInner};
 
 /// Map a Flow reaching a context-free boundary (pipeline top, thread join)
 /// into status. Only Done passes; anything else is a step-numbered error
@@ -370,8 +370,10 @@ fn flatten_exec_value(val: &Value, out: &mut Vec<String>) -> Result<()> {
         out.push(b.to_string());
         return Ok(());
     }
-    if let Some(n) = val.as_pipe_name() {
-        out.push(format!("pipe:{n}"));
+    if val.as_pipe_handle().is_some() {
+        // Opaque rendering: a handle in argv position stringifies like
+        // anywhere else (`<pipe>`).
+        out.push(format!("{val}"));
         return Ok(());
     }
     if let Some(d) = val.as_duration() {
@@ -775,11 +777,11 @@ pub(super) fn inspect_var_map<P: ProcessManager>(
     let mut map = BTreeMap::new();
     map.insert("type".to_string(), Value::string(decl_type.clone()));
     map.insert("variable".to_string(), Value::string(clean_var.clone()));
-    match (decl_type.as_str(), value.as_pipe_name()) {
-        ("PIPE", Some(name)) => {
-            let info = cx.state.io.inspect_pipe(name);
-            map.insert("name".to_string(), Value::string(name.to_string()));
-            map.insert("value".to_string(), Value::string(name.to_string()));
+    match (decl_type.as_str(), value.as_pipe_handle()) {
+        ("PIPE", Some(handle)) => {
+            let info = cx.state.io.inspect_pipe(&handle);
+            map.insert("name".to_string(), Value::string(clean_var.clone()));
+            map.insert("value".to_string(), Value::string(format!("{value}")));
             map.insert("is_os_pipe".to_string(), Value::bool(info.kind.is_os()));
             map.insert(
                 "pipe_kind".to_string(),
@@ -1432,7 +1434,7 @@ pub(crate) fn with_io<P: ProcessManager>(
     bindings: &[IoBinding],
     cmd: &StepKind,
 ) -> Result<Flow> {
-    let (step_stdin, next_expose_stdin, step_stdout, step_stderr, out_pipe_name) =
+    let (step_stdin, next_expose_stdin, step_stdout, step_stderr, out_pipe, stdin_pipe) =
         resolve_io_streams(cx, idx, bindings, cmd)?;
 
     super::steps::execute_single_step_with_generation(
@@ -1445,7 +1447,8 @@ pub(crate) fn with_io<P: ProcessManager>(
         next_expose_stdin,
         step_stdout,
         step_stderr,
-        out_pipe_name,
+        out_pipe,
+        stdin_pipe,
     )
 }
 
@@ -1453,6 +1456,11 @@ pub(crate) fn with_io<P: ProcessManager>(
 /// `with_io` and the `CALL` fast paths (`LET`-capture / `ASYNC` tasks) so a
 /// `CALL` under `WITH_IO` layers observes identical stream wiring whether
 /// it runs inline or for its return value.
+///
+/// Besides the runnable streams this returns the script backends behind
+/// the stdin/stdout bindings (`None` for OS pairs and unbound bindings),
+/// which enrich the step context for timeout-bounded bridge reads and the
+/// socket-EOF force-close.
 #[allow(clippy::type_complexity)]
 fn resolve_io_streams<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
@@ -1464,12 +1472,14 @@ fn resolve_io_streams<P: ProcessManager>(
     bool,
     Option<StreamHandle>,
     Option<StreamHandle>,
-    Option<String>,
+    Option<Arc<PipeInner>>,
+    Option<Arc<PipeInner>>,
 )> {
     let mut step_stdin = CommandStdin::Null;
     let mut step_stdout = cx.out.clone();
     let mut step_stderr = cx.err.clone();
-    let mut out_pipe_name = cx.out_pipe_name.clone();
+    let mut out_pipe = cx.out_pipe.clone();
+    let mut stdin_pipe = cx.stdin_pipe.clone();
     let mut next_expose_stdin = false;
     let mut seen_stdin = false;
     let mut seen_stdout = false;
@@ -1479,8 +1489,11 @@ fn resolve_io_streams<P: ProcessManager>(
 
     for binding in bindings {
         if let Some(target) = &binding.pipe {
-            let pipe = resolve_pipe_name(cx, idx, target)?;
-            cx.state.io.ensure_pipe_for(&pipe, trigger)?;
+            let handle = resolve_pipe_handle(cx, idx, target)?;
+            // Main-flow bindings decide here with the per-step trigger
+            // (verbatim semantics); task-body bindings were pre-decided by
+            // the spawn-time pin walk, making this a no-op there.
+            cx.state.io.ensure_handle(&handle, trigger)?;
         }
         match binding.stream {
             IoStream::Stdin => {
@@ -1489,11 +1502,13 @@ fn resolve_io_streams<P: ProcessManager>(
                 }
                 seen_stdin = true;
                 next_expose_stdin = true;
-                step_stdin = if let Some(target) = &binding.pipe {
-                    let pipe = resolve_pipe_name(cx, idx, target)?;
-                    cx.state.io.resolve_stdin(idx, &pipe, direct)?
+                (step_stdin, stdin_pipe) = if let Some(target) = &binding.pipe {
+                    let handle = resolve_pipe_handle(cx, idx, target)?;
+                    let (stdin, backend) =
+                        cx.state.io.resolve_stdin(idx, &handle, direct, trigger)?;
+                    (stdin, backend)
                 } else {
-                    cx.stdin.clone()
+                    (cx.stdin.clone(), None)
                 };
             }
             IoStream::Stdout => {
@@ -1501,14 +1516,13 @@ fn resolve_io_streams<P: ProcessManager>(
                     bail!("step {}: WITH_IO declared stdout more than once", idx + 1);
                 }
                 seen_stdout = true;
-                (step_stdout, out_pipe_name) = if let Some(target) = &binding.pipe {
-                    let pipe = resolve_pipe_name(cx, idx, target)?;
-                    (
-                        Some(cx.state.io.resolve_stdout(idx, &pipe, direct)?),
-                        Some(pipe),
-                    )
+                (step_stdout, out_pipe) = if let Some(target) = &binding.pipe {
+                    let handle = resolve_pipe_handle(cx, idx, target)?;
+                    let (stdout, backend) =
+                        cx.state.io.resolve_stdout(idx, &handle, direct, trigger)?;
+                    (Some(stdout), backend)
                 } else {
-                    (cx.out.clone(), cx.out_pipe_name.clone())
+                    (cx.out.clone(), cx.out_pipe.clone())
                 };
             }
             IoStream::Stderr => {
@@ -1517,8 +1531,8 @@ fn resolve_io_streams<P: ProcessManager>(
                 }
                 seen_stderr = true;
                 step_stderr = if let Some(target) = &binding.pipe {
-                    let pipe = resolve_pipe_name(cx, idx, target)?;
-                    Some(cx.state.io.resolve_stderr(idx, &pipe, direct)?)
+                    let handle = resolve_pipe_handle(cx, idx, target)?;
+                    Some(cx.state.io.resolve_stderr(idx, &handle, direct, trigger)?)
                 } else {
                     cx.err.clone()
                 };
@@ -1531,22 +1545,23 @@ fn resolve_io_streams<P: ProcessManager>(
         next_expose_stdin,
         step_stdout,
         step_stderr,
-        out_pipe_name,
+        out_pipe,
+        stdin_pipe,
     ))
 }
 
-/// Resolve a `WITH_IO` pipe endpoint to a live pipe name. The endpoint is
-/// always a `$var` holding a `PIPE` value; the caller ensures the entry
-/// immediately after, so declaration never needs to pre-register anything.
-fn resolve_pipe_name<P: ProcessManager>(
+/// Resolve a `WITH_IO` pipe endpoint to the owned backend cell. The
+/// endpoint is always a `$var` holding a `PIPE` value; declaration never
+/// pre-registers anything, and materialization happens at binding sites.
+fn resolve_pipe_handle<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     idx: usize,
     target: &PipeTarget,
-) -> Result<String> {
+) -> Result<PipeHandle> {
     let PipeTarget::Var(var) = target;
     match cx.state.get_var_typed(var) {
         Some((kind, value)) if kind == "PIPE" => {
-            let Some(name) = value.as_pipe_name() else {
+            let Some(handle) = value.as_pipe_handle() else {
                 bail!(
                     "step {}: TypeMismatch: expected PIPE, got {} ({:?})",
                     idx + 1,
@@ -1554,7 +1569,7 @@ fn resolve_pipe_name<P: ProcessManager>(
                     value
                 );
             };
-            Ok(name.to_string())
+            Ok(handle)
         }
         Some((kind, value)) => {
             bail!(
@@ -1952,7 +1967,7 @@ pub(crate) fn assign_capture<P: ProcessManager>(
             .any(|b| b.stream == IoStream::Stdout && b.pipe.is_some())
         {
             bail!(
-                "step {}: LET capture cannot use WITH_IO [stdout=pipe:...]; the capture binds the RETURN value",
+                "step {}: LET capture cannot use WITH_IO [stdout=$var]; the capture binds the RETURN value",
                 idx + 1
             );
         }
@@ -1962,7 +1977,7 @@ pub(crate) fn assign_capture<P: ProcessManager>(
             cx.state.declare_var(clean_var, decl_type, value)?;
             return Ok(Flow::Done);
         }
-        let (step_stdin, expose_stdin, step_stdout, step_stderr, out_pipe_name) =
+        let (step_stdin, expose_stdin, step_stdout, step_stderr, out_pipe, stdin_pipe) =
             resolve_io_streams(cx, idx, &bindings, cmd)?;
         // Reborrow state/process for the sub-context; `cx` is unused below.
         let state = &mut *cx.state;
@@ -1974,7 +1989,8 @@ pub(crate) fn assign_capture<P: ProcessManager>(
             expose_stdin,
             out: step_stdout,
             err: step_stderr,
-            out_pipe_name,
+            out_pipe,
+            stdin_pipe,
         };
         let value = call_func_value(&mut sub_cx, idx, name, args)?;
         sub_cx
@@ -1995,7 +2011,8 @@ pub(crate) fn assign_capture<P: ProcessManager>(
         capture_out,
         cx.err.clone(),
         // Capture owns stdout (parse rejects stdout pipes here), so there
-        // is no pipe name to carry.
+        // is no backend to carry.
+        None,
         None,
     )?;
     match flow {
@@ -2091,44 +2108,74 @@ pub(crate) fn if_then<P: ProcessManager>(
 /// applies (OR-merged across occurrences). Unresolvable names are skipped
 /// here (execution-time resolution reports the real error); promotion never
 /// applies to dynamic endpoints.
-fn collect_dynamic_producers<P: ProcessManager>(
+/// One pipe binding sighted in an async body: the owned handle, whether
+/// its ultimate consumer/producer is RUN-terminated, and whether this
+/// occurrence produces (`stdout`/`stderr`) rather than consumes (`stdin`).
+struct BodyBinding {
+    handle: PipeHandle,
+    run_terminated: bool,
+    produces: bool,
+}
+
+/// Drill through `WITH_IO` layers to the ultimate command: a binding's
+/// bytes terminate there, so that command decides RUN-termination for the
+/// whole-body promotion rule below.
+fn leaf_command(kind: &StepKind) -> &StepKind {
+    let mut current = kind;
+    while let StepKind::WithIo { cmd, .. } = current {
+        current = cmd;
+    }
+    current
+}
+
+/// Resolve one binding endpoint to its handle, skipping unresolvable
+/// variables here: execution-time resolution reports the real error.
+fn binding_handle<P: ProcessManager>(
+    state: &ExecState<P>,
+    target: &PipeTarget,
+) -> Option<PipeHandle> {
+    let PipeTarget::Var(var) = target;
+    match state.get_var_typed(var) {
+        Some((kind, value)) if kind == "PIPE" => value.as_pipe_handle(),
+        _ => None,
+    }
+}
+
+/// Collect every pipe binding in a step subtree: producers and consumers
+/// alike, same-thread inline bodies only. Nested `ASYNC` bodies run on
+/// other threads with their own pins and are excluded, as are deferred
+/// `FUNC` bodies and dynamic `Call` targets (they resolve where they run).
+/// Unresolvable endpoints are skipped (execution reports the real error).
+fn collect_body_bindings<P: ProcessManager>(
     kind: &StepKind,
     state: &ExecState<P>,
-    out: &mut Vec<(String, bool)>,
+    out: &mut Vec<BodyBinding>,
 ) {
     match kind {
         StepKind::WithIo { bindings, cmd } => {
-            // Same promotion analysis as binding time, so a dynamic
-            // endpoint pins the same pipe type execution will ensure.
-            let promote = promotion_trigger(cmd, true);
+            // Whole-body input for the strict promotion rule: each
+            // binding is judged by its ultimate command, not its layer.
+            let run_terminated = run_terminated(leaf_command(cmd));
             for binding in bindings {
-                match binding.stream {
-                    IoStream::Stdout | IoStream::Stderr => {
-                        if let Some(PipeTarget::Var(var)) = &binding.pipe
-                            && let Some((kind, value)) = state.get_var_typed(var)
-                            && kind == "PIPE"
-                            && let Some(name) = value.as_pipe_name()
-                        {
-                            match out.iter_mut().find(|(n, _)| n == name) {
-                                Some(entry) => {
-                                    entry.1 = entry.1 || promote;
-                                }
-                                None => {
-                                    out.push((name.to_string(), promote));
-                                }
-                            }
-                        }
-                    }
-                    IoStream::Stdin => {}
-                }
+                let Some(target) = &binding.pipe else {
+                    continue;
+                };
+                let Some(handle) = binding_handle(state, target) else {
+                    continue;
+                };
+                out.push(BodyBinding {
+                    handle,
+                    run_terminated,
+                    produces: !matches!(binding.stream, IoStream::Stdin),
+                });
             }
-            collect_dynamic_producers(cmd, state, out);
+            collect_body_bindings(cmd, state, out);
         }
         StepKind::Timeout { body, .. }
         | StepKind::For { body, .. }
         | StepKind::While { body, .. } => {
             for step in body {
-                collect_dynamic_producers(&step.kind, state, out);
+                collect_body_bindings(&step.kind, state, out);
             }
         }
         StepKind::If {
@@ -2138,16 +2185,16 @@ fn collect_dynamic_producers<P: ProcessManager>(
             ..
         } => {
             for step in then_body {
-                collect_dynamic_producers(&step.kind, state, out);
+                collect_body_bindings(&step.kind, state, out);
             }
             for (_, branch) in else_ifs {
                 for step in branch {
-                    collect_dynamic_producers(&step.kind, state, out);
+                    collect_body_bindings(&step.kind, state, out);
                 }
             }
             if let Some(body) = else_body {
                 for step in body {
-                    collect_dynamic_producers(&step.kind, state, out);
+                    collect_body_bindings(&step.kind, state, out);
                 }
             }
         }
@@ -2159,128 +2206,66 @@ fn collect_dynamic_producers<P: ProcessManager>(
     }
 }
 
-/// Ensure every pipe an async `body` READS from exists, without pinning
-/// keepers: consumers rely on EOF-from-detach to complete, so pinning them
-/// would deadlock. Runs synchronously on the spawning thread right after
-/// producer pins, so a consumer arriving before any producer still finds
-/// the decided backend instead of racing the producer's setup. Same
-/// promotion analysis as producers, for literal and variable endpoints
-/// alike: a mismatched backend would still function (resolution adapters
-/// cover every combination), but uniformity keeps the decision
-/// deterministic and unsurprising.
-fn ensure_consumed_pipes<P: ProcessManager>(cx: &StepCtx<'_, P>, body: &[Step]) -> Result<()> {
-    fn collect_consumed<P: ProcessManager>(
-        cx: &StepCtx<'_, P>,
-        kind: &StepKind,
-        out: &mut Vec<(String, bool)>,
-    ) {
-        match kind {
-            StepKind::WithIo { bindings, cmd } => {
-                let promote = promotion_trigger(cmd, true);
-                for binding in bindings {
-                    if !matches!(binding.stream, IoStream::Stdin) {
-                        continue;
-                    }
-                    match &binding.pipe {
-                        Some(PipeTarget::Var(var)) => {
-                            if let Some((kind, value)) = cx.state.get_var_typed(var)
-                                && kind == "PIPE"
-                                && let Some(name) = value.as_pipe_name()
-                                && !out.iter().any(|(n, _)| n == name)
-                            {
-                                out.push((name.to_string(), promote));
-                            }
-                        }
-                        None => {}
-                    }
-                }
-                collect_consumed(cx, cmd, out);
-            }
-            StepKind::Timeout { body, .. }
-            | StepKind::For { body, .. }
-            | StepKind::While { body, .. } => {
-                for step in body {
-                    collect_consumed(cx, &step.kind, out);
-                }
-            }
-            StepKind::If {
-                then_body,
-                else_ifs,
-                else_body,
-                ..
-            } => {
-                for step in then_body {
-                    collect_consumed(cx, &step.kind, out);
-                }
-                for (_, branch) in else_ifs {
-                    for step in branch {
-                        collect_consumed(cx, &step.kind, out);
-                    }
-                }
-                if let Some(body) = else_body {
-                    for step in body {
-                        collect_consumed(cx, &step.kind, out);
-                    }
-                }
-            }
-            StepKind::FuncDef { .. }
-            | StepKind::Call { .. }
-            | StepKind::AsyncBlock { .. }
-            | StepKind::AssignAsync { .. } => {}
-            _ => {}
-        }
-    }
-    for step in body {
-        let mut consumed = Vec::new();
-        collect_consumed(cx, &step.kind, &mut consumed);
-        for (name, promote) in consumed {
-            cx.state.io.ensure_pipe_for(&name, promote)?;
-        }
-    }
-    Ok(())
-}
-
-/// Ensure every pipe an async `body` produces to exists (honoring OS
-/// promotion) and pin a keeper slot on each script pipe, synchronously on
-/// the spawning thread. Pins group by the top-level index of the final
-/// producer step for each pipe: the worker drops a pipe's guard once that
-/// step completes, so transient gaps between producers never signal EOF
-/// while later consumer steps in the same task still observe it. Returns
-/// `None` when the body produces to no script pipe.
+/// Ensure every pipe an async `body` binds (producers and consumers) is
+/// materialized with the whole-body promotion decision, and pin a keeper
+/// slot on each produced script pipe — all synchronously on the spawning
+/// thread, so backend decisions never depend on thread scheduling.
 ///
-/// Consumed pipes are ensured separately by
-/// [`ensure_consumed_pipes`] (no keepers); both run before the worker
-/// spawns, so backend decisions never depend on thread scheduling.
+/// Promotion is strict: OS iff EVERY binding on the handle in the body is
+/// RUN-terminated (pure RUN pipelines, the only shape where both ends can
+/// hold raw fds); any mixed scope (RUN+DSL, RUN+host, RUN+bridge) pins
+/// script, with the RUN side adapting through the existing feeder/shared
+/// paths. Pins group by the top-level index of the final producer step
+/// for each handle: the worker drops a handle's guard once that step
+/// completes, so transient gaps between producers never signal EOF while
+/// later consumer steps in the same task still observe it. Returns `None`
+/// when the body produces to no script pipe. A task that only reads a
+/// pipe gets existence without a pin (consumers rely on EOF-from-detach,
+/// so pinning them would deadlock).
 fn pin_async_keepers<P: ProcessManager>(
     cx: &StepCtx<'_, P>,
     body: &[Step],
 ) -> Result<Option<super::state::KeeperExpiry>> {
-    let mut last: HashMap<String, (bool, usize)> = HashMap::new();
+    struct Acc {
+        handle: PipeHandle,
+        run_and: bool,
+        last_producer: Option<usize>,
+    }
+    let mut accs: Vec<Acc> = Vec::new();
     for (idx, step) in body.iter().enumerate() {
-        let mut produced = Vec::new();
-        collect_dynamic_producers(&step.kind, cx.state, &mut produced);
-        for (name, promote) in produced {
-            let entry = last.entry(name).or_insert((false, 0));
-            entry.0 = entry.0 || promote;
-            entry.1 = idx;
-        }
-    }
-    let mut by_index: HashMap<usize, Vec<(String, bool)>> = HashMap::new();
-    for (name, (promote, idx)) in last {
-        by_index.entry(idx).or_default().push((name, promote));
-    }
-    let mut map: HashMap<usize, Vec<KeeperGuard>> = HashMap::new();
-    for (idx, specs) in &by_index {
-        for (name, promote) in specs {
-            cx.state.io.ensure_pipe_for(name, *promote)?;
-            if let Some(guard) = cx.state.io.pin_keeper(name)? {
-                map.entry(*idx).or_default().push(guard);
+        let mut found = Vec::new();
+        collect_body_bindings(&step.kind, cx.state, &mut found);
+        for b in found {
+            match accs.iter_mut().find(|a| Arc::ptr_eq(&a.handle, &b.handle)) {
+                Some(a) => {
+                    a.run_and &= b.run_terminated;
+                    if b.produces {
+                        a.last_producer = Some(idx);
+                    }
+                }
+                None => accs.push(Acc {
+                    handle: b.handle,
+                    run_and: b.run_terminated,
+                    last_producer: b.produces.then_some(idx),
+                }),
             }
         }
     }
-    // Consumed pipes last (producers win ties): same spawn-thread moment,
-    // so backend choice never depends on which thread binds first.
-    ensure_consumed_pipes(cx, body)?;
+    // Decide every sighted handle first (consumers included: a consumer
+    // arriving before any producer still finds the decided backend
+    // instead of racing the producer's setup). One flag per handle makes
+    // ensure order irrelevant.
+    for a in &accs {
+        cx.state.io.ensure_handle(&a.handle, a.run_and)?;
+    }
+    let mut map: HashMap<usize, Vec<KeeperGuard>> = HashMap::new();
+    for a in &accs {
+        if let Some(idx) = a.last_producer
+            && let Some(guard) = cx.state.io.pin_keeper(&a.handle)?
+        {
+            map.entry(idx).or_default().push(guard);
+        }
+    }
     if map.is_empty() {
         Ok(None)
     } else {
@@ -2843,14 +2828,15 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
                 expose_stdin,
                 out,
                 err,
-                out_pipe_name: None,
+                out_pipe: None,
+                stdin_pipe: None,
             };
             // Apply call-site bindings (e.g. stdin pipes) like the inline
             // path; stdout keeps the task sink (parse rejects stdout pipes).
             let value = if bindings.is_empty() {
                 call_func_value(&mut child_cx, 0, &name, &args)?
             } else {
-                let (task_stdin, task_expose, task_out, task_err, _) =
+                let (task_stdin, task_expose, task_out, task_err, _, _) =
                     resolve_io_streams(&mut child_cx, 0, &bindings, &body[0].kind)?;
                 let state = &mut *child_cx.state;
                 let process = &mut *child_cx.process;
@@ -2861,7 +2847,8 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
                     expose_stdin: task_expose,
                     out: task_out,
                     err: task_err,
-                    out_pipe_name: None,
+                    out_pipe: None,
+                    stdin_pipe: None,
                 };
                 call_func_value(&mut sub_cx, 0, &name, &args)?
             };

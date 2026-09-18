@@ -1144,10 +1144,10 @@ fn verify_root(expect: &RootExpect, root: &GuardedPath) -> Result<()> {
 
 /// Post-run `[pipes.*]` verification against the script's own pipe
 /// variables. Each key names a top-level `$var` the script declared; the
-/// backend it materialized is snapshotted non-destructively through the
-/// retained registry probe. No spec without `expect` is checked; a missing
-/// variable or a non-`PIPE` binding is a hard error so typo'd keys cannot
-/// pass silently.
+/// handle's backend is snapshotted non-destructively through the probe
+/// (handles are owned by the bindings, so no registry lookup is needed).
+/// No spec without `expect` is checked; a missing variable or a non-`PIPE`
+/// binding is a hard error so typo'd keys cannot pass silently.
 fn verify_script_pipes(
     specs: &BTreeMap<String, PipeSpec>,
     bindings: Option<&BTreeMap<String, oxdock_parser::Value>>,
@@ -1164,14 +1164,14 @@ fn verify_script_pipes(
         let value = bindings.get(name).ok_or_else(|| {
             anyhow!("case {case_name}: pipe {name} names no top-level ${name} variable")
         })?;
-        let pipe_name = value.as_pipe_name().ok_or_else(|| {
+        let handle = value.as_pipe_handle().ok_or_else(|| {
             anyhow!(
                 "case {case_name}: ${name} is not a PIPE (got {})",
                 value.type_name()
             )
         })?;
         let bytes = io_probe
-            .peek_pipe_content(pipe_name)
+            .peek_pipe_content(&handle)
             .with_context(|| format!("case {case_name}: peek pipe ${name}"))?;
         let actual = String::from_utf8(bytes)
             .with_context(|| format!("pipe {name} output is not valid UTF-8"))?;

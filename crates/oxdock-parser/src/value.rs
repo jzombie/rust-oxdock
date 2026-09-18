@@ -55,6 +55,7 @@ use std::fmt;
 use std::time::Duration;
 
 use oxdock_func_macro::oxdock_type;
+use oxdock_pipe::{PipeHandle, new_handle};
 
 /// Anchor of a type's reference section, derived from its name the way the
 /// Markdown slugger derives it from the doc title.
@@ -137,14 +138,27 @@ struct PathValue(#[allow(clippy::disallowed_types)] pub std::path::PathBuf);
 #[derive(Debug, Clone, PartialEq)]
 struct DurationValue(pub Duration);
 
-/// Named script pipe. Validity is checked against the pipe registry at coercion time.
+/// Anonymous pipe handle. The backend materializes lazily on first
+/// binding (never eagerly at declaration), so the choice always has full
+/// usage context. Cloning shares the backend (explicit-sharing fan-out);
+/// equality is handle identity, never byte comparison.
 #[oxdock_type(
     crate_path = "::oxdock_parser",
     name = "PIPE",
-    summary = "Named script pipe."
+    summary = "Anonymous pipe handle.",
+    shared
 )]
-#[derive(Debug, Clone, PartialEq)]
-struct PipeValue(pub String);
+#[derive(Debug, Clone)]
+struct PipeValue(pub PipeHandle);
+
+impl PartialEq for PipeValue {
+    /// Handle identity: two words name the same channel iff they share
+    /// the cell. Never compares bytes (backends may be unbound, and
+    /// locking two cells in `eq` risks ordering deadlocks).
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
 
 /// Background ASYNC task handle for AWAIT/CANCEL.
 #[oxdock_type(crate_path = "::oxdock_parser", name = "HANDLE", inline)]
@@ -221,7 +235,7 @@ impl fmt::Display for PathValue {
 
 impl fmt::Display for PipeValue {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "pipe:{}", self.0)
+        write!(f, "<pipe>")
     }
 }
 
@@ -434,17 +448,15 @@ impl Value {
         Self::mint_heap(DurationValue::descriptor(), DurationValue(d))
     }
 
-    /// Construct a pipe-name word.
-    pub fn pipe(name: String) -> Self {
-        Self::mint_heap(PipeValue::descriptor(), PipeValue(name))
+    /// Construct a fresh unbound pipe handle (`LET $p: PIPE`, host
+    /// `new_pipe()`). Materializes lazily on first binding.
+    pub fn pipe_fresh() -> Self {
+        Self::mint_heap_shared(PipeValue::descriptor(), PipeValue(new_handle()))
     }
 
-    /// Construct an anonymous pipe-name word for bare `LET $p: PIPE`.
-    /// The key embeds a space no `pipe:` literal can spell, so generated
-    /// names never collide with user-named pipes. Transitional: names
-    /// stand in for owned handles until the backend rekey lands.
-    pub fn pipe_anonymous(id: u64) -> Self {
-        Self::pipe(format!("anon pipe #{id}"))
+    /// Wrap an existing handle as a `PIPE` word. Clones share the backend.
+    pub fn pipe_handle(handle: PipeHandle) -> Self {
+        Self::mint_heap_shared(PipeValue::descriptor(), PipeValue(handle))
     }
 
     /// Read an integer payload. Returns `None` for non-`INT` words.
@@ -505,10 +517,11 @@ impl Value {
             .map(|v| &mut v.0)
     }
 
-    /// Borrow a pipe-name payload. Returns `None` for non-`PIPE` words.
-    pub fn as_pipe_name(&self) -> Option<&str> {
+    /// Clone the pipe handle out of a `PIPE` word. Returns `None` for
+    /// non-`PIPE` words. The clone shares the backend cell.
+    pub fn as_pipe_handle(&self) -> Option<PipeHandle> {
         self.read_heap::<PipeValue>(PipeValue::descriptor())
-            .map(|v| v.0.as_str())
+            .map(|v| v.0.clone())
     }
 
     /// Read a duration payload. Returns `None` for non-`DURATION` words.

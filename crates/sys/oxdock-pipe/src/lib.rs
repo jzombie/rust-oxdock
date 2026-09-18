@@ -11,8 +11,13 @@ pub mod backend;
 pub mod slot;
 pub mod spill;
 
-pub use backend::{KeeperGuard, PipeInner, ScriptPipe, ScriptPipeEndpoint};
+pub use backend::{
+    KeeperGuard, PipeInfo, PipeInner, PipeKindDesc, ScriptPipe, ScriptPipeEndpoint, inspect, peek,
+    script_backend,
+};
+pub use slot::{
+    Materialized, PipeHandle, SharedInput, SharedOutput, Slot, materialize, new_handle,
+};
 #[cfg(not(miri))]
-pub use slot::OsPipeEntry;
-pub use slot::{PipeHandle, Slot, new_handle};
+pub use slot::{OsPipeEntry, OsPipeReader, OsPipeWriter, create_os_pipe};
 pub use spill::{DEFAULT_MAX_BACKLOG, DEFAULT_SPILL_THRESHOLD, SpillBuffer};

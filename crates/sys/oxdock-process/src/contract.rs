@@ -5,7 +5,15 @@ use oxdock_fs::{CargoScratch, GuardedPath, PolicyPath};
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 use std::process::ExitStatus;
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+
+// Shared-IO handles and take-once OS pipe halves live in `oxdock-pipe`
+// (leaf crate, no cycle); re-exported here so every existing
+// `oxdock_process::` path keeps resolving. The OS items keep their
+// `not(miri)` gates: kernel pipes are compiled out under Miri isolation.
+#[cfg(not(miri))]
+pub use oxdock_pipe::{OsPipeReader, OsPipeWriter, create_os_pipe};
+pub use oxdock_pipe::{SharedInput, SharedOutput};
 
 /// Context passed to process managers describing the current execution
 /// environment. Clones are cheap and explicit so background handles can own
@@ -81,9 +89,6 @@ pub trait BackgroundHandle: Send {
     fn wait(&mut self) -> Result<ExitStatus>;
 }
 
-pub type SharedInput = Arc<Mutex<dyn std::io::Read + Send>>;
-pub type SharedOutput = Arc<Mutex<dyn std::io::Write + Send>>;
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum CommandMode {
     #[default]
@@ -103,90 +108,6 @@ pub enum CommandStdout {
     /// concurrently spawned consumers (`ASYNC`); never for sequential steps.
     #[cfg(not(miri))]
     OsPipe(OsPipeWriter),
-}
-
-/// Owned OS kernel pipe reader half behind a single use slot. `Clone`
-/// shares the slot; `take` transfers the handle exactly once so no parent
-/// copy survives spawn to starve the consumer of EOF. Backed by
-/// `std::io::pipe` (stable since Rust 1.87): `pipe` on Unix, `CreatePipe`
-/// on Windows.
-#[cfg(not(miri))]
-#[derive(Clone)]
-pub struct OsPipeReader {
-    inner: Arc<Mutex<Option<std::io::PipeReader>>>,
-}
-
-/// Owned OS kernel pipe writer half behind a single use slot. See
-/// [`OsPipeReader`] for the shared slot semantics.
-#[cfg(not(miri))]
-#[derive(Clone)]
-pub struct OsPipeWriter {
-    inner: Arc<Mutex<Option<std::io::PipeWriter>>>,
-}
-
-#[cfg(not(miri))]
-impl OsPipeReader {
-    fn new(reader: std::io::PipeReader) -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(Some(reader))),
-        }
-    }
-
-    /// Take the handle for `Stdio::from`. Bails deterministically if the
-    /// descriptor was already consumed so a second spawn can never reuse a
-    /// spent pipe or leave stdio unbound.
-    pub fn take(&self) -> Result<std::io::PipeReader> {
-        self.inner
-            .lock()
-            .map_err(|_| anyhow::anyhow!("os pipe reader lock poisoned"))?
-            .take()
-            .ok_or_else(|| {
-                anyhow::anyhow!("os pipe handle has already been consumed by another process")
-            })
-    }
-
-    /// Whether this half was already taken. A poisoned slot reports live
-    /// so callers never recycle what they cannot inspect.
-    pub fn is_consumed(&self) -> bool {
-        self.inner.lock().map(|g| g.is_none()).unwrap_or(false)
-    }
-}
-
-#[cfg(not(miri))]
-impl OsPipeWriter {
-    fn new(writer: std::io::PipeWriter) -> Self {
-        Self {
-            inner: Arc::new(Mutex::new(Some(writer))),
-        }
-    }
-
-    /// Take the handle for `Stdio::from`. Bails deterministically if the
-    /// descriptor was already consumed so a second spawn can never reuse a
-    /// spent pipe or leave stdio unbound.
-    pub fn take(&self) -> Result<std::io::PipeWriter> {
-        self.inner
-            .lock()
-            .map_err(|_| anyhow::anyhow!("os pipe writer lock poisoned"))?
-            .take()
-            .ok_or_else(|| {
-                anyhow::anyhow!("os pipe handle has already been consumed by another process")
-            })
-    }
-
-    /// Whether this half was already taken. A poisoned slot reports live
-    /// so callers never recycle what they cannot inspect.
-    pub fn is_consumed(&self) -> bool {
-        self.inner.lock().map(|g| g.is_none()).unwrap_or(false)
-    }
-}
-
-/// Create a cross platform anonymous OS pipe pair for concurrent `ASYNC`
-/// pipelines. The caller moves each half into a spawn and drops any other
-/// copies immediately after spawning, otherwise the reader never sees EOF.
-#[cfg(not(miri))]
-pub fn create_os_pipe() -> Result<(OsPipeReader, OsPipeWriter)> {
-    let (reader, writer) = std::io::pipe()?;
-    Ok((OsPipeReader::new(reader), OsPipeWriter::new(writer)))
 }
 
 #[derive(Clone, Default)]

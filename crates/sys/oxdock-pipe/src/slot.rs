@@ -9,10 +9,103 @@
 
 use std::sync::{Arc, Mutex};
 
-#[cfg(not(miri))]
-use oxdock_process::{OsPipeReader, OsPipeWriter, create_os_pipe};
+use anyhow::Result;
 
-use crate::backend::PipeInner;
+use crate::backend::{PipeInner, ScriptPipe};
+
+/// Shared reader half: mutex-guarded `Read` behind an `Arc`, so every
+/// binding aliases one channel.
+pub type SharedInput = Arc<Mutex<dyn std::io::Read + Send>>;
+
+/// Shared writer half: mutex-guarded `Write` behind an `Arc`.
+pub type SharedOutput = Arc<Mutex<dyn std::io::Write + Send>>;
+
+/// Owned OS kernel pipe reader half behind a single use slot. `Clone`
+/// shares the slot; `take` transfers the handle exactly once so no parent
+/// copy survives spawn to starve the consumer of EOF. Backed by
+/// `std::io::pipe` (stable since Rust 1.87): `pipe` on Unix, `CreatePipe`
+/// on Windows. Moved verbatim from `oxdock-process` so handle slots can
+/// own kernel pairs without a dependency cycle; behavior is unchanged.
+#[cfg(not(miri))]
+#[derive(Clone)]
+pub struct OsPipeReader {
+    inner: Arc<Mutex<Option<std::io::PipeReader>>>,
+}
+
+/// Owned OS kernel pipe writer half behind a single use slot. See
+/// [`OsPipeReader`] for the shared slot semantics. Moved verbatim from
+/// `oxdock-process`; behavior is unchanged.
+#[cfg(not(miri))]
+#[derive(Clone)]
+pub struct OsPipeWriter {
+    inner: Arc<Mutex<Option<std::io::PipeWriter>>>,
+}
+
+#[cfg(not(miri))]
+impl OsPipeReader {
+    fn new(reader: std::io::PipeReader) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(Some(reader))),
+        }
+    }
+
+    /// Take the handle for `Stdio::from`. Bails deterministically if the
+    /// descriptor was already consumed so a second spawn can never reuse a
+    /// spent pipe or leave stdio unbound.
+    pub fn take(&self) -> Result<std::io::PipeReader> {
+        self.inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("os pipe reader lock poisoned"))?
+            .take()
+            .ok_or_else(|| {
+                anyhow::anyhow!("os pipe handle has already been consumed by another process")
+            })
+    }
+
+    /// Whether this half was already taken. A poisoned slot reports live
+    /// so callers never recycle what they cannot inspect.
+    pub fn is_consumed(&self) -> bool {
+        self.inner.lock().map(|g| g.is_none()).unwrap_or(false)
+    }
+}
+
+#[cfg(not(miri))]
+impl OsPipeWriter {
+    fn new(writer: std::io::PipeWriter) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(Some(writer))),
+        }
+    }
+
+    /// Take the handle for `Stdio::from`. Bails deterministically if the
+    /// descriptor was already consumed so a second spawn can never reuse a
+    /// spent pipe or leave stdio unbound.
+    pub fn take(&self) -> Result<std::io::PipeWriter> {
+        self.inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("os pipe writer lock poisoned"))?
+            .take()
+            .ok_or_else(|| {
+                anyhow::anyhow!("os pipe handle has already been consumed by another process")
+            })
+    }
+
+    /// Whether this half was already taken. A poisoned slot reports live
+    /// so callers never recycle what they cannot inspect.
+    pub fn is_consumed(&self) -> bool {
+        self.inner.lock().map(|g| g.is_none()).unwrap_or(false)
+    }
+}
+
+/// Create a cross platform anonymous OS pipe pair for concurrent `ASYNC`
+/// pipelines. The caller moves each half into a spawn and drops any other
+/// copies immediately after spawning, otherwise the reader never sees EOF.
+/// Moved verbatim from `oxdock-process`; behavior is unchanged.
+#[cfg(not(miri))]
+pub fn create_os_pipe() -> Result<(OsPipeReader, OsPipeWriter)> {
+    let (reader, writer) = std::io::pipe()?;
+    Ok((OsPipeReader::new(reader), OsPipeWriter::new(writer)))
+}
 
 /// One anonymous OS kernel pipe pair behind take-once slots. The first
 /// producer and the first consumer each take their half; any further
@@ -84,4 +177,48 @@ pub type PipeHandle = Arc<Mutex<Slot>>;
 /// Mint a fresh unbound handle, like bare `LET $p: PIPE`.
 pub fn new_handle() -> PipeHandle {
     Arc::new(Mutex::new(Slot::Unbound))
+}
+
+/// Decided backend cloned out from under the cell lock. OS entries clone
+/// their take-once slots (takes still race deterministically at take
+/// time); script backends clone their `Arc`.
+pub enum Materialized {
+    /// Store-and-forward backend.
+    Script(Arc<PipeInner>),
+    /// Kernel pair behind take-once slots.
+    #[cfg(not(miri))]
+    Os(OsPipeEntry),
+}
+
+/// First-binding-wins materialization under the cell lock: an unbound
+/// handle decides its kind from `promote` (the caller supplies full usage
+/// context — RUN-terminated ⇒ OS, else script); a decided handle returns
+/// its kind unchanged. Later bindings with different needs adapt through
+/// the caller's resolution machinery instead of failing or upgrading here.
+pub fn materialize(handle: &PipeHandle, promote: bool) -> anyhow::Result<Materialized> {
+    let mut guard = handle
+        .lock()
+        .map_err(|_| anyhow::anyhow!("pipe handle lock poisoned"))?;
+    match &*guard {
+        Slot::Script { backend } => Ok(Materialized::Script(Arc::clone(backend))),
+        #[cfg(not(miri))]
+        Slot::Os { entry } => Ok(Materialized::Os(entry.clone())),
+        Slot::Unbound => {
+            #[cfg(not(miri))]
+            if promote {
+                let entry = OsPipeEntry::new()?;
+                let out = entry.clone();
+                *guard = Slot::Os { entry };
+                return Ok(Materialized::Os(out));
+            }
+            #[cfg(miri)]
+            let _ = promote;
+            let pipe = ScriptPipe::new();
+            let backend = pipe.pipe_inner();
+            *guard = Slot::Script {
+                backend: Arc::clone(&backend),
+            };
+            Ok(Materialized::Script(backend))
+        }
+    }
 }

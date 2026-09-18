@@ -82,9 +82,19 @@ fn heap_words_clone_independently_then_drop() {
     assert_eq!(format!("{duration}"), "90s");
     drop(duration);
 
-    let pipe = Value::pipe("ch".to_string());
-    assert_eq!(format!("{pipe}"), "pipe:ch");
+    let pipe = Value::pipe_fresh();
+    assert_eq!(format!("{pipe}"), "<pipe>");
+    // Handles share the backend cell: clones stay usable after the
+    // original drops, and equality is handle identity.
+    let pipe_clone = pipe.clone();
+    assert_eq!(&pipe_clone, &pipe);
     drop(pipe);
+    assert_eq!(format!("{pipe_clone}"), "<pipe>");
+    let other = Value::pipe_fresh();
+    // Distinct declarations never alias: identity, not byte comparison.
+    assert_ne!(&other, &pipe_clone);
+    drop(other);
+    drop(pipe_clone);
 }
 
 #[test]

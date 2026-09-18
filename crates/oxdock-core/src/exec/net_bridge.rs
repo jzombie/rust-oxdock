@@ -165,13 +165,13 @@ fn bridge_streams<P: ProcessManager>(
         CommandStdin::Stream(reader) => Some(reader),
         CommandStdin::Null => None,
         _ => bail!(
-            "step {}: {cmd} requires WITH_IO [stdin=pipe:...] bindings for input",
+            "step {}: {cmd} requires WITH_IO [stdin=$var] bindings for input",
             idx + 1
         ),
     };
     let Some(StreamHandle::Stream(writer)) = cx.out.clone() else {
         bail!(
-            "step {}: {cmd} requires WITH_IO [..., stdout=pipe:...] bindings",
+            "step {}: {cmd} requires WITH_IO [..., stdout=$var] bindings",
             idx + 1
         );
     };
@@ -425,16 +425,10 @@ pub(crate) fn connect<P: ProcessManager>(
     let stream = TcpStream::connect_timeout(&addr, timeout.unwrap_or(DEFAULT_DIAL_TIMEOUT))
         .with_context(|| format!("step {}: CONNECT {endpoint:?} dial failed", idx + 1))?;
     let input = match reader {
-        Some(reader) => {
-            let inner = cx.state.io.stdin_pipe_inner(&reader);
-            Some((reader, inner))
-        }
+        Some(reader) => Some((reader, cx.stdin_pipe.clone())),
         None => None,
     };
-    let out_inner = cx
-        .out_pipe_name
-        .as_deref()
-        .and_then(|name| cx.state.io.pipe_backend(name));
+    let out_inner = cx.out_pipe.clone();
     pump(
         idx,
         "CONNECT",
@@ -488,16 +482,10 @@ pub(crate) fn listen<P: ProcessManager>(
         .set_nonblocking(false)
         .with_context(|| format!("step {}: LISTEN failed to configure stream", idx + 1))?;
     let input = match reader {
-        Some(reader) => {
-            let inner = cx.state.io.stdin_pipe_inner(&reader);
-            Some((reader, inner))
-        }
+        Some(reader) => Some((reader, cx.stdin_pipe.clone())),
         None => None,
     };
-    let out_inner = cx
-        .out_pipe_name
-        .as_deref()
-        .and_then(|name| cx.state.io.pipe_backend(name));
+    let out_inner = cx.out_pipe.clone();
     pump(
         idx, "LISTEN", input, writer, out_inner, stream, cancel, half_close,
     )

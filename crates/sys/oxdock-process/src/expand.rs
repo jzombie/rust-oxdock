@@ -430,9 +430,8 @@ fn format_value_for_string(val: &oxdock_parser::Value) -> String {
     if let Some(b) = val.as_bool() {
         return b.to_string();
     }
-    if let Some(n) = val.as_pipe_name() {
-        return format!("pipe:{n}");
-    }
+    // Pipes render through `Display` (`<pipe>`) via the fallthrough below;
+    // handles are opaque and have no string form to spell.
     if let Some(d) = val.as_duration() {
         return oxdock_parser::command::format_duration(&d);
     }

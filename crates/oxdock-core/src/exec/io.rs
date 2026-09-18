@@ -6,412 +6,151 @@ use anyhow::Result;
 #[cfg(not(miri))]
 use anyhow::bail;
 #[cfg(not(miri))]
-use oxdock_pipe::OsPipeEntry;
-use oxdock_pipe::{KeeperGuard, PipeInner, ScriptPipe};
-use oxdock_process::{CommandStderr, CommandStdin, CommandStdout, SharedInput, SharedOutput};
-#[cfg(not(miri))]
-use oxdock_process::{OsPipeReader, OsPipeWriter};
+use oxdock_pipe::OsPipeWriter;
+use oxdock_pipe::{
+    KeeperGuard, Materialized, PipeHandle, PipeInfo, PipeInner, SharedInput, SharedOutput,
+    inspect as inspect_handle, materialize, peek as peek_handle, script_backend,
+};
+use oxdock_process::{CommandStderr, CommandStdin, CommandStdout};
 
-use super::pipe::{PipeEndpoint, PipeOutputs};
-
-/// Shared pipe registry. All threads in the same execution context
-/// reference the same registry, so pipes created by the parent are
-/// visible to child threads.
-///
-/// All maps live behind a single mutex so check-then-act sequences
-/// (exists? create; create then pin) are atomic: one lock acquisition
-/// covers the whole decision, and concurrent workers can never allocate
-/// duplicate entries under the same name.
-#[derive(Default)]
-struct RegistryInner {
-    input: HashMap<String, SharedInput>,
-    output: HashMap<String, PipeOutputs>,
-    /// Live script-pipe backends keyed by pipe name. Host-injected raw
-    /// handles have no backend here; keeper pins are no-ops for them.
-    inners: HashMap<String, Arc<PipeInner>>,
-    #[cfg(not(miri))]
-    os: HashMap<String, OsPipeEntry>,
-}
-
+/// Handle-scoped pipe resolution. No central index exists: every method
+/// below takes the `PIPE` value's backend cell, materializing it on first
+/// binding (first-binding-wins under the cell lock) and adapting later
+/// bindings through the existing machinery. The `ExecIo` receiver carries
+/// no pipe state; methods live here (rather than as free functions) so
+/// call sites keep their `cx.state.io.*` shape.
 #[derive(Clone, Default)]
-pub(super) struct PipeRegistry {
-    inner: Arc<Mutex<RegistryInner>>,
+pub(super) struct PipeRegistry;
+
+/// Loud take-twice error for OS handles: a second consumer or producer on
+/// one end can never steal the descriptor, and (unlike the old recycling
+/// behavior) never silently receives a fresh pair either — the remedy is a
+/// fresh declaration. No rebind rule exists by design: no rule can tell
+/// sequential loop reuse apart from concurrent fan-in sharing.
+#[cfg(not(miri))]
+fn spent_handle(idx: usize) -> anyhow::Error {
+    anyhow::anyhow!(
+        "step {}: OS pipe handle has already been consumed by another binding; declare a fresh LET $x: PIPE for a new session",
+        idx + 1,
+    )
 }
 
 impl PipeRegistry {
-    fn lock_inner(&self) -> std::sync::MutexGuard<'_, RegistryInner> {
-        self.inner.lock().expect("pipe lock poisoned")
-    }
-
-    fn ensure_pipe(&self, name: &str) {
-        let mut guard = self.lock_inner();
-        if guard.input.contains_key(name) || guard.output.contains_key(name) {
-            return;
-        }
-        let pipe = ScriptPipe::new();
-        guard.inners.insert(name.to_string(), pipe.pipe_inner());
-        guard.input.insert(name.to_string(), pipe.reader());
-        let endpoint = PipeEndpoint::script(pipe.endpoint());
-        let outputs = PipeOutputs {
-            stdout: Some(endpoint.clone()),
-            stderr: Some(endpoint),
-        };
-        guard.output.insert(name.to_string(), outputs);
-    }
-
-    fn input_pipe(&self, name: &str) -> Option<SharedInput> {
-        self.lock_inner().input.get(name).cloned()
-    }
-
-    fn output_pipe_stdout(&self, name: &str) -> Option<PipeEndpoint> {
-        self.lock_inner()
-            .output
-            .get(name)
-            .and_then(|pipe| pipe.stdout.clone())
-    }
-
-    fn output_pipe_stderr(&self, name: &str) -> Option<PipeEndpoint> {
-        self.lock_inner()
-            .output
-            .get(name)
-            .and_then(|pipe| pipe.stderr.clone())
-    }
-
-    /// Whether an OS kernel pair exists under this name.
-    /// Single lock acquisition for the lookup.
-    #[cfg(not(miri))]
-    pub(super) fn has_os_pipe(&self, name: &str) -> bool {
-        self.lock_inner().os.contains_key(name)
-    }
-
-    /// Backend behind a resolved stdin reader, matched by pointer identity
-    /// against registered script-pipe inputs. Lets bridge workers run
-    /// timeout-bounded reads without touching shared pipe semantics.
-    /// Returns `None` for OS-promoted pairs, host-injected handles, and
-    /// unknown readers (those fall back to blocking reads).
-    pub(super) fn inner_for_reader(&self, reader: &SharedInput) -> Option<Arc<PipeInner>> {
-        let guard = self.lock_inner();
-        let name = guard
-            .input
-            .iter()
-            .find(|(_, existing)| Arc::ptr_eq(existing, reader))
-            .map(|(name, _)| name.clone())?;
-        guard.inners.get(&name).cloned()
-    }
-
-    /// Script-pipe backend by name, if one exists. Single lock acquisition
-    /// for the lookup; the caller acts after releasing it.
-    pub(super) fn pipe_backend(&self, name: &str) -> Option<Arc<PipeInner>> {
-        self.lock_inner().inners.get(name).cloned()
-    }
-
-    /// Non-destructive snapshot of a script pipe's buffered bytes for
-    /// pipe-content assertions. OS-promoted pipes hold kernel bytes this
-    /// cannot see, and host-injected or missing pipes have no script
-    /// backend: both bail with a message directing to drains or harness
-    /// pipe assertions instead of silently yielding empty content.
-    pub(super) fn peek_pipe_content(&self, name: &str) -> Result<Vec<u8>> {
-        #[cfg(not(miri))]
-        if self.lock_inner().os.contains_key(name) {
-            return Err(anyhow::anyhow!(
-                "cannot peek OS-promoted pipe {name:?}: drain it or assert via harness pipe buffers"
-            ));
-        }
-        let backend = {
-            let guard = self.lock_inner();
-            guard.inners.get(name).cloned()
-        };
-        match backend {
-            Some(inner) => inner
-                .peek_bytes()
-                .map_err(|e| anyhow::anyhow!("failed to peek pipe {name:?}: {e}")),
-            None => Err(anyhow::anyhow!("no script pipe backend for {name:?}")),
-        }
-    }
-
-    /// Snapshot one pipe backend for `INSPECT()` diagnostics. Clones what
-    /// is needed under one registry lock, then queries backend state after
-    /// releasing it, so lock order always stays registry-before-inner.
-    pub(super) fn inspect_pipe(&self, name: &str) -> super::pipe::PipeInfo {
-        use super::pipe::{PipeInfo, PipeKindDesc};
-        #[cfg(not(miri))]
-        if self.lock_inner().os.contains_key(name) {
-            return PipeInfo {
-                kind: PipeKindDesc::Os,
-                buffered: 0,
-                readers: 1,
-                writers: 1,
-            };
-        }
-        let (backend, has_reader, has_output) = {
-            let guard = self.lock_inner();
-            (
-                guard.inners.get(name).cloned(),
-                guard.input.contains_key(name),
-                guard.output.contains_key(name),
-            )
-        };
-        match (backend, has_reader, has_output) {
-            (Some(inner), has_reader, _) => PipeInfo {
-                kind: PipeKindDesc::Script,
-                buffered: inner.buffered_bytes(),
-                readers: usize::from(has_reader),
-                writers: inner.writer_count(),
-            },
-            (None, has_reader, has_output) if has_reader || has_output => PipeInfo {
-                kind: PipeKindDesc::External,
-                buffered: 0,
-                readers: usize::from(has_reader),
-                writers: 0,
-            },
-            (None, _, _) => PipeInfo {
-                kind: PipeKindDesc::Missing,
-                buffered: 0,
-                readers: 0,
-                writers: 0,
-            },
-        }
-    }
-
-    /// Ensure an entry exists for this binding. Fresh names become OS
-    /// kernel pairs when promotion fired, script pipes otherwise. Existing
-    /// script entries keep their type: first binding wins, so sequential
-    /// fan in and host injected pipes never change shape underfoot.
-    /// Existing OS entries are kept while live and recycled once spent
-    /// (see [`PipeRegistry::ensure_os_pipe`]).
-    /// Atomic: existence check and insertion happen under one lock.
-    fn ensure_pipe_for(&self, name: &str, promote: bool) -> Result<()> {
-        {
-            let guard = self.lock_inner();
-            if guard.input.contains_key(name) || guard.output.contains_key(name) {
-                return Ok(());
-            }
-        }
-        #[cfg(not(miri))]
-        if promote {
-            return self.ensure_os_pipe(name);
-        }
-        #[cfg(not(miri))]
-        if self.lock_inner().os.contains_key(name) {
-            return self.refresh_os_pipe(name);
-        }
-        #[cfg(miri)]
-        let _ = promote;
-        self.ensure_pipe(name);
+    /// First-binding-wins materialization for one binding site: an unbound
+    /// handle decides its kind from `promote` (the caller supplies full
+    /// usage context); a decided handle is returned unchanged. Callers
+    /// adapt mismatches through resolution below, never here.
+    pub(super) fn ensure_handle(handle: &PipeHandle, promote: bool) -> Result<()> {
+        materialize(handle, promote)?;
         Ok(())
     }
 
-    /// Resolve a stdin binding. OS entries hand the reader to `RUN`
-    /// directly and bridge it to a shared handle for DSL commands; script
-    /// entries keep the existing lookup. Either way a second consumer of
-    /// a live pair bails instead of stealing the descriptor.
-    fn resolve_stdin(&self, idx: usize, name: &str, direct: bool) -> Result<CommandStdin> {
-        #[cfg(not(miri))]
-        if self.has_os_pipe(name) {
-            if direct {
-                let reader = self.os_reader(name).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "step {}: WITH_IO stdin pipe '{}' is undefined",
-                        idx + 1,
-                        name
-                    )
-                })?;
-                return Ok(CommandStdin::OsPipe(reader));
+    /// Non-destructive snapshot of a script handle's buffered bytes for
+    /// pipe-content assertions. Delegates to the backend without creating:
+    /// unbound handles and OS pairs bail loudly instead of yielding empty
+    /// content.
+    ///
+    /// Public so out-of-crate harnesses can assert on script-owned pipes
+    /// after a run completes, via the `PIPE` values in the returned
+    /// bindings. Only meaningful once writers detached (post-run).
+    pub fn peek_pipe_content(handle: &PipeHandle) -> Result<Vec<u8>> {
+        peek_handle(handle)
+    }
+
+    /// Snapshot one handle for `INSPECT()` diagnostics.
+    pub(super) fn inspect_pipe(handle: &PipeHandle) -> PipeInfo {
+        inspect_handle(handle)
+    }
+
+    /// Pin a keeper slot on a script backend so transient writer churn can
+    /// never observe zero writers. Returns `None` for OS-materialized and
+    /// unbound handles, which need no pin. Callers ensure the handle
+    /// first so OS promotion is honored and this never forces a script
+    /// backend into existence.
+    pub(super) fn pin_keeper(handle: &PipeHandle) -> Result<Option<KeeperGuard>> {
+        Ok(script_backend(handle).map(KeeperGuard::new))
+    }
+
+    /// Resolve a stdin binding against a decided handle. Script backends
+    /// hand out a shared reader (plus the backend for timeout-bounded
+    /// bridge reads); OS pairs hand the take-once reader to `RUN` directly
+    /// and bridge it to a shared handle for DSL commands. A second take
+    /// on one end bails loudly with the fresh-declaration remedy instead
+    /// of stealing the descriptor.
+    pub(super) fn resolve_stdin(
+        idx: usize,
+        handle: &PipeHandle,
+        direct: bool,
+        promote: bool,
+    ) -> Result<(CommandStdin, Option<Arc<PipeInner>>)> {
+        match materialize(handle, promote)? {
+            Materialized::Script(backend) => {
+                Ok((CommandStdin::Stream(backend.reader_handle()), Some(backend)))
             }
-            return Ok(CommandStdin::Stream(self.bridge_os_reader(name)?));
-        }
-        #[cfg(miri)]
-        let _ = direct;
-        let reader = self.input_pipe(name).ok_or_else(|| {
-            anyhow::anyhow!(
-                "step {}: WITH_IO stdin pipe '{}' is undefined",
-                idx + 1,
-                name
-            )
-        })?;
-        Ok(CommandStdin::Stream(reader))
-    }
-
-    /// Resolve a stdout binding. Mirrors [`ExecIo::resolve_stdin`] with
-    /// `StreamHandle` outputs so `RUN` keeps zero copy `Stdio` handoff.
-    fn resolve_stdout(&self, idx: usize, name: &str, direct: bool) -> Result<StreamHandle> {
-        #[cfg(not(miri))]
-        if self.has_os_pipe(name) {
-            if direct {
-                let writer = self.os_writer(name).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "step {}: WITH_IO stdout pipe '{}' is undefined",
-                        idx + 1,
-                        name
-                    )
-                })?;
-                return Ok(StreamHandle::Os(writer));
+            #[cfg(not(miri))]
+            Materialized::Os(entry) => {
+                if direct {
+                    return Ok((CommandStdin::OsPipe(entry.reader.clone()), None));
+                }
+                let owned = entry.reader.take().map_err(|_| spent_handle(idx))?;
+                Ok((
+                    CommandStdin::Stream(Arc::new(std::sync::Mutex::new(owned))),
+                    None,
+                ))
             }
-            return Ok(StreamHandle::Stream(self.bridge_os_writer(name)?));
         }
-        #[cfg(miri)]
-        let _ = direct;
-        let endpoint = self.output_pipe_stdout(name).ok_or_else(|| {
-            anyhow::anyhow!(
-                "step {}: WITH_IO stdout pipe '{}' is undefined",
-                idx + 1,
-                name
-            )
-        })?;
-        Ok(endpoint.to_stream_handle())
     }
 
-    /// Resolve a stderr binding. Mirrors [`ExecIo::resolve_stdout`]:
-    /// `RUN` keeps zero copy handoff, DSL commands get a bridged shared
-    /// handle. Binding `stdout` and `stderr` to one live name takes the
-    /// same slot twice, so the second take bails deterministically; merge
-    /// in shell via `2>&1` instead.
-    fn resolve_stderr(&self, idx: usize, name: &str, direct: bool) -> Result<StreamHandle> {
-        #[cfg(not(miri))]
-        if self.has_os_pipe(name) {
-            if direct {
-                let writer = self.os_writer(name).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "step {}: WITH_IO stderr pipe '{}' is undefined",
-                        idx + 1,
-                        name
-                    )
-                })?;
-                return Ok(StreamHandle::Os(writer));
+    /// Resolve a stdout binding. Mirrors
+    /// [`PipeRegistry::resolve_stdin`] with `StreamHandle` outputs so
+    /// `RUN` keeps zero copy `Stdio` handoff, plus the script backend for
+    /// the bridge's socket-EOF force-close.
+    pub(super) fn resolve_stdout(
+        idx: usize,
+        handle: &PipeHandle,
+        direct: bool,
+        promote: bool,
+    ) -> Result<(StreamHandle, Option<Arc<PipeInner>>)> {
+        match materialize(handle, promote)? {
+            Materialized::Script(backend) => {
+                Ok((StreamHandle::Stream(backend.writer_handle()), Some(backend)))
             }
-            return Ok(StreamHandle::Stream(self.bridge_os_writer(name)?));
-        }
-        #[cfg(miri)]
-        let _ = direct;
-        let endpoint = self.output_pipe_stderr(name).ok_or_else(|| {
-            anyhow::anyhow!(
-                "step {}: WITH_IO stderr pipe '{}' is undefined",
-                idx + 1,
-                name
-            )
-        })?;
-        Ok(endpoint.to_stream_handle())
-    }
-
-    /// Create the OS pair for this name unless any entry already exists.
-    /// An existing script entry keeps store and forward semantics. An
-    /// existing live OS entry is reused so a concurrent second take on one
-    /// end still fails deterministically at handle take time. An existing
-    /// SPENT entry (both ends taken) is replaced with a fresh pair: the old
-    /// kernel objects live on only in their takers, disjoint from the new
-    /// pair, so replacement cannot corrupt a live session — and loop
-    /// iterations rebind instead of failing on consumed handles. The
-    /// documented trade: a third concurrent binding mid-session previously
-    /// bailed loudly and now receives a fresh disconnected pair instead.
-    /// Atomic: the check and the insertion share one lock acquisition.
-    #[cfg(not(miri))]
-    fn ensure_os_pipe(&self, name: &str) -> Result<()> {
-        let mut guard = self.lock_inner();
-        if let Some(spent) = guard.os.get(name).map(|entry| entry.is_spent()) {
-            if spent {
-                guard.os.insert(name.to_string(), OsPipeEntry::new()?);
+            #[cfg(not(miri))]
+            Materialized::Os(entry) => {
+                if direct {
+                    return Ok((StreamHandle::Os(entry.writer.clone()), None));
+                }
+                let owned = entry.writer.take().map_err(|_| spent_handle(idx))?;
+                Ok((
+                    StreamHandle::Stream(Arc::new(std::sync::Mutex::new(owned))),
+                    None,
+                ))
             }
-            return Ok(());
-        }
-        if guard.input.contains_key(name) || guard.output.contains_key(name) {
-            bail!("pipe '{name}' is already bound as a script pipe");
-        }
-        guard.os.insert(name.to_string(), OsPipeEntry::new()?);
-        Ok(())
-    }
-
-    /// Share-or-recycle for non-promoting bindings atop an OS entry: live
-    /// pairs are kept (bridge reuse), spent pairs are replaced exactly like
-    /// [`PipeRegistry::ensure_os_pipe`] so loop iterations rebind.
-    #[cfg(not(miri))]
-    fn refresh_os_pipe(&self, name: &str) -> Result<()> {
-        let mut guard = self.lock_inner();
-        if guard
-            .os
-            .get(name)
-            .map(|entry| entry.is_spent())
-            .unwrap_or(false)
-        {
-            guard.os.insert(name.to_string(), OsPipeEntry::new()?);
-        }
-        Ok(())
-    }
-
-    #[cfg(not(miri))]
-    fn os_writer(&self, name: &str) -> Option<OsPipeWriter> {
-        self.lock_inner()
-            .os
-            .get(name)
-            .map(|entry| entry.writer.clone())
-    }
-
-    #[cfg(not(miri))]
-    fn os_reader(&self, name: &str) -> Option<OsPipeReader> {
-        self.lock_inner()
-            .os
-            .get(name)
-            .map(|entry| entry.reader.clone())
-    }
-
-    /// Bridge the OS reader into a shared handle for DSL commands by
-    /// taking it out of the slot exactly once. A later `RUN` consumer
-    /// bails deterministically instead of reading a stolen descriptor.
-    #[cfg(not(miri))]
-    fn bridge_os_reader(&self, name: &str) -> Result<SharedInput> {
-        let reader = self.os_reader(name).ok_or_else(|| {
-            anyhow::anyhow!("OS pipe handle '{name}' has already been consumed by another process")
-        })?;
-        let owned = reader.take().map_err(|_| {
-            anyhow::anyhow!("OS pipe handle '{name}' has already been consumed by another process")
-        })?;
-        Ok(Arc::new(Mutex::new(owned)))
-    }
-
-    /// Bridge the OS writer into a shared handle for DSL commands.
-    /// Same single take contract as [`PipeRegistry::bridge_os_reader`].
-    #[cfg(not(miri))]
-    fn bridge_os_writer(&self, name: &str) -> Result<SharedOutput> {
-        let writer = self.os_writer(name).ok_or_else(|| {
-            anyhow::anyhow!("OS pipe handle '{name}' has already been consumed by another process")
-        })?;
-        let owned = writer.take().map_err(|_| {
-            anyhow::anyhow!("OS pipe handle '{name}' has already been consumed by another process")
-        })?;
-        Ok(Arc::new(Mutex::new(owned)))
-    }
-
-    /// Pin a keeper slot on an existing script pipe so transient writer
-    /// churn can never observe zero writers. Only pins pipes that already
-    /// have a script backend; returns `None` for `OsPipeEntry` handles and
-    /// host-injected raw handles, which need no pin. Callers must route
-    /// creation through [`PipeRegistry::ensure_pipe_for`] first so OS
-    /// promotion is honored and this function never forces a script pipe
-    /// into existence.
-    pub(super) fn pin_keeper(&self, name: &str) -> Result<Option<KeeperGuard>> {
-        let inner = self.lock_inner().inners.get(name).cloned();
-        match inner {
-            Some(pipe) => Ok(Some(KeeperGuard::new(pipe))),
-            None => Ok(None),
         }
     }
 
-    fn insert_input(&self, name: String, reader: SharedInput) {
-        self.lock_inner().input.insert(name, reader);
-    }
-
-    fn insert_output(
-        &self,
-        name: &str,
-        stdout: Option<PipeEndpoint>,
-        stderr: Option<PipeEndpoint>,
-    ) {
-        let mut guard = self.lock_inner();
-        let entry = guard.output.entry(name.to_string()).or_default();
-        if stdout.is_some() {
-            entry.stdout = stdout;
-        }
-        if stderr.is_some() {
-            entry.stderr = stderr;
+    /// Resolve a stderr binding. Mirrors
+    /// [`PipeRegistry::resolve_stdout`]: `RUN` keeps zero copy handoff,
+    /// DSL commands get a bridged shared handle. Binding `stdout` and
+    /// `stderr` to one live OS handle takes the same slot twice, so the
+    /// second take bails deterministically; merge in shell via `2>&1`
+    /// instead.
+    pub(super) fn resolve_stderr(
+        idx: usize,
+        handle: &PipeHandle,
+        direct: bool,
+        promote: bool,
+    ) -> Result<StreamHandle> {
+        match materialize(handle, promote)? {
+            Materialized::Script(backend) => Ok(StreamHandle::Stream(backend.writer_handle())),
+            #[cfg(not(miri))]
+            Materialized::Os(entry) => {
+                if direct {
+                    return Ok(StreamHandle::Os(entry.writer.clone()));
+                }
+                let owned = entry.writer.take().map_err(|_| spent_handle(idx))?;
+                Ok(StreamHandle::Stream(Arc::new(std::sync::Mutex::new(owned))))
+            }
         }
     }
 }
@@ -421,7 +160,6 @@ pub struct ExecIo {
     stdin: Option<SharedInput>,
     stdout: Option<SharedOutput>,
     stderr: Option<SharedOutput>,
-    pipes: PipeRegistry,
     inherit_env_overrides: HashMap<String, String>,
     inherit_env_removed: HashSet<String>,
 }
@@ -498,7 +236,6 @@ impl SlidingWindow {
 
 #[derive(Clone)]
 pub(super) enum StreamHandle {
-    Inherit,
     Stream(SharedOutput),
     /// Live OS kernel pipe writer handed to one concurrent producer.
     /// Only `RUN` consumes this directly; DSL commands never observe it
@@ -511,7 +248,6 @@ impl StreamHandle {
     pub(super) fn to_stdout(&self) -> CommandStdout {
         match self {
             StreamHandle::Stream(writer) => CommandStdout::Stream(writer.clone()),
-            StreamHandle::Inherit => CommandStdout::Inherit,
             #[cfg(not(miri))]
             StreamHandle::Os(writer) => CommandStdout::OsPipe(writer.clone()),
         }
@@ -520,7 +256,6 @@ impl StreamHandle {
     pub(super) fn to_stderr(&self) -> CommandStderr {
         match self {
             StreamHandle::Stream(writer) => CommandStderr::Stream(writer.clone()),
-            StreamHandle::Inherit => CommandStderr::Inherit,
             #[cfg(not(miri))]
             StreamHandle::Os(writer) => CommandStderr::OsPipe(writer.clone()),
         }
@@ -545,10 +280,100 @@ where
         Some(StreamHandle::Os(_)) => {
             bail!("cannot write DSL output to a live OS pipe")
         }
-        Some(StreamHandle::Inherit) | None => {
+        // `None` inherits host stdout: only explicit `Stream` bindings
+        // reroute DSL output.
+        None => {
             let mut stdout = io::stdout();
             op(&mut stdout)
         }
+    }
+}
+
+/// Slice-based byte adapter over pipe halves for host (`#[oxdock_func]`)
+///
+/// stateful functions. All byte movement goes through the standard traits
+/// on caller-owned buffers — `Read::read(&mut [u8])` and
+/// `Write::write(&[u8])` — so hosts can hand pipes directly to `serde_json`,
+/// `flate2`, `tar`, and friends with a single reused stack buffer and zero
+/// per-chunk allocation. `0` read means EOF exactly like `std::io`; never
+/// slurp a stream into one `Vec` (unbounded memory growth — stream it).
+/// `flush()` delegates to backend flush semantics, which for script pipes
+/// is a no-op that loses nothing: every `write()` wakes readers itself.
+///
+/// A host read blocks the calling task thread exactly like a DSL reader;
+/// EOF and half-close map identically to DSL consumers. Take-once applies
+/// like everywhere else: bridging an OS backend takes once, repeats bail.
+pub struct PipeStream {
+    reader: Option<SharedInput>,
+    writer: Option<SharedOutput>,
+}
+
+impl PipeStream {
+    /// Read-half adapter (e.g. over [`StepCtx::pipe_reader`]).
+    pub fn reader(reader: SharedInput) -> Self {
+        Self {
+            reader: Some(reader),
+            writer: None,
+        }
+    }
+
+    /// Write-half adapter (e.g. over [`StepCtx::pipe_writer`]).
+    pub fn writer(writer: SharedOutput) -> Self {
+        Self {
+            reader: None,
+            writer: Some(writer),
+        }
+    }
+
+    /// Both halves (e.g. a filter with separate in/out pipes).
+    pub fn pair(reader: SharedInput, writer: SharedOutput) -> Self {
+        Self {
+            reader: Some(reader),
+            writer: Some(writer),
+        }
+    }
+}
+
+impl std::io::Read for PipeStream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let Some(reader) = &self.reader else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "pipe stream has no reader half",
+            ));
+        };
+        let mut guard = reader
+            .lock()
+            .map_err(|_| std::io::Error::other("pipe reader lock poisoned"))?;
+        guard.read(buf)
+    }
+}
+
+impl std::io::Write for PipeStream {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let Some(writer) = &self.writer else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "pipe stream has no writer half",
+            ));
+        };
+        let mut guard = writer
+            .lock()
+            .map_err(|_| std::io::Error::other("pipe writer lock poisoned"))?;
+        guard.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        let Some(writer) = &self.writer else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "pipe stream has no writer half",
+            ));
+        };
+        let mut guard = writer
+            .lock()
+            .map_err(|_| std::io::Error::other("pipe writer lock poisoned"))?;
+        guard.flush()
     }
 }
 
@@ -723,110 +548,71 @@ impl ExecIo {
         &self.inherit_env_overrides
     }
 
-    pub fn insert_input_pipe<S: Into<String>>(&mut self, name: S, reader: SharedInput) {
-        self.pipes.insert_input(name.into(), reader);
+    /// Ensure a handle is materialized for one binding site (see
+    /// [`PipeRegistry::ensure_handle`]). Main-flow bindings call this with
+    /// the per-step trigger; task bodies are pre-decided by the spawn-time
+    /// pin walk, making this a no-op there.
+    pub(super) fn ensure_handle(&self, handle: &PipeHandle, promote: bool) -> Result<()> {
+        PipeRegistry::ensure_handle(handle, promote)
     }
 
-    pub fn insert_output_pipe<S: Into<String>>(&mut self, name: S, writer: SharedOutput) {
-        let endpoint = PipeEndpoint::stream(writer.clone());
-        let endpoint2 = PipeEndpoint::stream(writer);
-        self.pipes
-            .insert_output(&name.into(), Some(endpoint), Some(endpoint2));
+    /// Snapshot of one handle for `INSPECT()` diagnostics.
+    pub(super) fn inspect_pipe(&self, handle: &PipeHandle) -> PipeInfo {
+        PipeRegistry::inspect_pipe(handle)
     }
 
-    pub fn insert_output_pipe_stdout<S: Into<String>>(&mut self, name: S, writer: SharedOutput) {
-        self.pipes
-            .insert_output(&name.into(), Some(PipeEndpoint::stream(writer)), None);
-    }
-
-    pub fn insert_output_pipe_stderr<S: Into<String>>(&mut self, name: S, writer: SharedOutput) {
-        self.pipes
-            .insert_output(&name.into(), None, Some(PipeEndpoint::stream(writer)));
-    }
-
-    pub fn insert_output_pipe_stdout_inherit<S: Into<String>>(&mut self, name: S) {
-        self.pipes
-            .insert_output(&name.into(), Some(PipeEndpoint::Inherit), None);
-    }
-
-    pub fn insert_output_pipe_stderr_inherit<S: Into<String>>(&mut self, name: S) {
-        self.pipes
-            .insert_output(&name.into(), None, Some(PipeEndpoint::Inherit));
-    }
-
-    /// Ensure an entry exists for this binding, promoting fresh names to
-    /// OS kernel pairs when asked. Existing entries keep their type.
-    pub(super) fn ensure_pipe_for(&self, name: &str, promote: bool) -> Result<()> {
-        self.pipes.ensure_pipe_for(name, promote)
-    }
-
-    /// Script-pipe backend behind a resolved stdin reader, if any. Used
-    /// only by the network bridge for timeout-bounded reads.
-    pub(super) fn stdin_pipe_inner(&self, reader: &SharedInput) -> Option<Arc<PipeInner>> {
-        self.pipes.inner_for_reader(reader)
-    }
-
-    /// Script-pipe backend by name, if one exists. Used only by the
-    /// network bridge to close its stdout pipe on socket EOF.
-    pub(super) fn pipe_backend(&self, name: &str) -> Option<Arc<PipeInner>> {
-        self.pipes.pipe_backend(name)
-    }
-
-    /// Snapshot of one pipe for `INSPECT()` diagnostics. Single lock
-    /// acquisition for the lookup; backend stats are cloned out from under
-    /// their own lock (same lock order as every other registry path).
-    pub(super) fn inspect_pipe(&self, name: &str) -> super::pipe::PipeInfo {
-        self.pipes.inspect_pipe(name)
-    }
-
-    /// Non-destructive snapshot of a script pipe's buffered bytes for
-    /// pipe-content assertions. Single lock acquisition for the lookup;
-    /// content is cloned out from under its own lock.
+    /// Non-destructive snapshot of a script handle's buffered bytes for
+    /// pipe-content assertions.
     ///
     /// Public so out-of-crate harnesses can assert on script-owned pipes
-    /// after a run completes: `ExecIo` clones share the live registry,
-    /// so a clone retained across the run observes every backend the
-    /// script materialized. Only meaningful once all writers detached
-    /// (post-run); OS-promoted pipes bail, directing to drains instead.
-    pub fn peek_pipe_content(&self, name: &str) -> Result<Vec<u8>> {
-        self.pipes.peek_pipe_content(name)
+    /// after a run completes, via the `PIPE` values in the returned
+    /// bindings. Only meaningful once writers detached (post-run);
+    /// unbound handles and OS pairs bail loudly.
+    pub fn peek_pipe_content(&self, handle: &PipeHandle) -> Result<Vec<u8>> {
+        PipeRegistry::peek_pipe_content(handle)
     }
 
-    /// Pin a keeper slot on an existing script pipe. `None` for OS pipes
-    /// and host-injected handles. Creation must go through
-    /// [`ExecIo::ensure_pipe_for`] first so OS promotion is honored.
-    pub(super) fn pin_keeper(&self, name: &str) -> Result<Option<KeeperGuard>> {
-        self.pipes.pin_keeper(name)
+    /// Pin a keeper slot on a script backend. `None` for OS-materialized
+    /// and unbound handles. Callers ensure the handle first so OS
+    /// promotion is honored and this never forces a backend into
+    /// existence.
+    pub(super) fn pin_keeper(&self, handle: &PipeHandle) -> Result<Option<KeeperGuard>> {
+        PipeRegistry::pin_keeper(handle)
     }
 
-    /// Resolve a stdin binding to a runnable handle.
+    /// Resolve a stdin binding to a runnable handle plus the script
+    /// backend (for timeout-bounded bridge reads; `None` for OS pairs).
     pub(super) fn resolve_stdin(
         &self,
         idx: usize,
-        name: &str,
+        handle: &PipeHandle,
         direct: bool,
-    ) -> Result<CommandStdin> {
-        self.pipes.resolve_stdin(idx, name, direct)
+        promote: bool,
+    ) -> Result<(CommandStdin, Option<Arc<PipeInner>>)> {
+        PipeRegistry::resolve_stdin(idx, handle, direct, promote)
     }
 
-    /// Resolve a stdout binding to a runnable handle.
+    /// Resolve a stdout binding to a runnable handle plus the script
+    /// backend (for the bridge's socket-EOF force-close).
     pub(super) fn resolve_stdout(
         &self,
         idx: usize,
-        name: &str,
+        handle: &PipeHandle,
         direct: bool,
-    ) -> Result<StreamHandle> {
-        self.pipes.resolve_stdout(idx, name, direct)
+        promote: bool,
+    ) -> Result<(StreamHandle, Option<Arc<PipeInner>>)> {
+        PipeRegistry::resolve_stdout(idx, handle, direct, promote)
     }
 
     /// Resolve a stderr binding to a runnable handle.
     pub(super) fn resolve_stderr(
         &self,
         idx: usize,
-        name: &str,
+        handle: &PipeHandle,
         direct: bool,
+        promote: bool,
     ) -> Result<StreamHandle> {
-        self.pipes.resolve_stderr(idx, name, direct)
+        PipeRegistry::resolve_stderr(idx, handle, direct, promote)
     }
 
     pub fn stdin(&self) -> Option<SharedInput> {
@@ -839,10 +625,6 @@ impl ExecIo {
 
     pub fn stderr(&self) -> Option<SharedOutput> {
         self.stderr.clone().or_else(|| self.stdout.clone())
-    }
-
-    pub fn input_pipe(&self, name: &str) -> Option<SharedInput> {
-        self.pipes.input_pipe(name)
     }
 }
 

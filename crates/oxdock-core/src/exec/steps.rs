@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use anyhow::{Result, bail};
 use oxdock_fs::GuardedPath;
 use oxdock_parser::{Arg, AssertTarget, Step, StepKind, Value, guard_option_allows};
-use oxdock_process::{BackgroundHandle, CommandStdin, ProcessManager};
+use oxdock_process::{BackgroundHandle, CommandStdin, ProcessManager, SharedInput, SharedOutput};
 
 /// Create an ExitStatus from a raw exit code. Cross-platform.
 fn exit_status_from_code(code: i32) -> ExitStatus {
@@ -26,6 +26,7 @@ use super::capture::SpillBuffer;
 use super::handlers;
 use super::io::{ExactCapture, SlidingWindow, StreamHandle};
 use super::state::{ExecState, TaskEntry, TaskPhase};
+use oxdock_pipe::PipeInner;
 
 /// A background handle wrapping a `std::thread::JoinHandle` for ASYNC blocks
 /// that execute commands in a background thread.
@@ -207,10 +208,11 @@ pub(super) fn resolve_assert_target<P: ProcessManager>(
     match target {
         AssertTarget::Value(arg) => {
             let value = super::args::evaluate_assert_operand(arg, cx)?;
-            if let Some(name) = value.as_pipe_name() {
-                let bytes = cx.state.io.peek_pipe_content(name).map_err(|e| {
-                    anyhow::anyhow!("step pipe assertion cannot read pipe {name:?}: {e}")
-                })?;
+            if let Some(handle) = value.as_pipe_handle() {
+                let bytes =
+                    cx.state.io.peek_pipe_content(&handle).map_err(|e| {
+                        anyhow::anyhow!("step pipe assertion cannot read pipe: {e}")
+                    })?;
                 return Ok(ResolvedAssertTarget::Pipe(bytes));
             }
             Ok(ResolvedAssertTarget::Value(value))
@@ -312,11 +314,17 @@ pub struct StepCtx<'a, P: ProcessManager> {
     pub(super) expose_stdin: bool,
     pub(super) out: Option<StreamHandle>,
     pub(super) err: Option<StreamHandle>,
-    /// Pipe name backing `out`, when a `WITH_IO` binding resolved one.
-    /// Uniform context enrichment (populated for every command, read only
-    /// by consumers that need the backend, like the network bridge).
-    /// `None` for inherited, captured, and tee outputs.
-    pub(super) out_pipe_name: Option<String>,
+    /// Pipe backend backing `out`, when a `WITH_IO` stdout binding resolved
+    /// to a script pipe. Uniform context enrichment (populated for every
+    /// command, read only by consumers that need the backend, like the
+    /// network bridge). `None` for inherited, captured, and tee outputs,
+    /// and for OS pairs (kernel bytes are invisible).
+    pub(super) out_pipe: Option<Arc<PipeInner>>,
+    /// Pipe backend backing `stdin`, when a `WITH_IO` stdin binding
+    /// resolved to a script pipe. Lets bridge workers run timeout-bounded
+    /// reads without touching shared pipe semantics (`None` for OS pairs,
+    /// which fall back to blocking reads).
+    pub(super) stdin_pipe: Option<Arc<PipeInner>>,
 }
 
 impl<'a, P: ProcessManager> StepCtx<'a, P> {
@@ -333,6 +341,89 @@ impl<'a, P: ProcessManager> StepCtx<'a, P> {
     /// Current working directory (guarded; stays inside the workspace).
     pub fn cwd(&self) -> &GuardedPath {
         &self.state.cwd
+    }
+
+    /// Mint a fresh unbound pipe handle, like bare `LET $p: PIPE`. The
+    /// backend materializes lazily on first binding; return it from a
+    /// host function to hand the DSL a pipe it can bind.
+    pub fn new_pipe(&self) -> Value {
+        Value::pipe_fresh()
+    }
+
+    /// Borrow the read half of a `PIPE` value for byte streaming (see
+    /// [`PipeStream`]). Unbound handles materialize as script pipes —
+    /// hosts cannot spawn `RUN`, so script is the only sensible kind,
+    /// and a later `RUN` binding adapts through the shared path. DSL,
+    /// bridge, and host bindings on an OS-materialized handle resolve
+    /// through the single-take bridge: the first call takes, repeats bail
+    /// loudly (same contract as DSL consumers; use script-backed pipes
+    /// for repeat or multi access).
+    pub fn pipe_reader(&self, value: &Value) -> Result<SharedInput> {
+        use oxdock_pipe::{Materialized, materialize};
+        let Some(handle) = value.as_pipe_handle() else {
+            anyhow::bail!(
+                "host pipe_reader needs a PIPE value, got {}",
+                value.type_name()
+            );
+        };
+        match materialize(&handle, false)? {
+            Materialized::Script(backend) => Ok(backend.reader_handle()),
+            #[cfg(not(miri))]
+            Materialized::Os(entry) => {
+                let owned = entry.reader.take().map_err(|_| {
+                    anyhow::anyhow!(
+                        "OS pipe handle has already been consumed by another binding; declare a fresh LET $x: PIPE for a new session"
+                    )
+                })?;
+                Ok(Arc::new(Mutex::new(owned)))
+            }
+        }
+    }
+
+    /// Borrow the write half of a `PIPE` value for byte streaming (see
+    /// [`PipeStream`]). Same materialization and take-once contract as
+    /// [`StepCtx::pipe_reader`].
+    pub fn pipe_writer(&self, value: &Value) -> Result<SharedOutput> {
+        use oxdock_pipe::{Materialized, materialize};
+        let Some(handle) = value.as_pipe_handle() else {
+            anyhow::bail!(
+                "host pipe_writer needs a PIPE value, got {}",
+                value.type_name()
+            );
+        };
+        match materialize(&handle, false)? {
+            Materialized::Script(backend) => Ok(backend.writer_handle()),
+            #[cfg(not(miri))]
+            Materialized::Os(entry) => {
+                let owned = entry.writer.take().map_err(|_| {
+                    anyhow::anyhow!(
+                        "OS pipe handle has already been consumed by another binding; declare a fresh LET $x: PIPE for a new session"
+                    )
+                })?;
+                Ok(Arc::new(Mutex::new(owned)))
+            }
+        }
+    }
+
+    /// Explicitly close a script pipe: readers drain buffered bytes, then
+    /// observe EOF regardless of live writers or keeper pins. Unbound
+    /// handles bail (closing a never-bound pipe is a caller bug), and
+    /// OS-materialized handles bail (kernel pairs close by dropping their
+    /// taken halves — drop the value instead).
+    pub fn close_pipe(&self, value: &Value) -> Result<()> {
+        let Some(handle) = value.as_pipe_handle() else {
+            anyhow::bail!(
+                "host close_pipe needs a PIPE value, got {}",
+                value.type_name()
+            );
+        };
+        let Some(backend) = oxdock_pipe::script_backend(&handle) else {
+            anyhow::bail!(
+                "host close_pipe needs a script-materialized pipe (unbound and OS handles cannot be force-closed)"
+            );
+        };
+        backend.force_close();
+        Ok(())
     }
 }
 
@@ -391,7 +482,8 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
     expose_stdin: bool,
     out: Option<StreamHandle>,
     err: Option<StreamHandle>,
-    out_pipe_name: Option<String>,
+    out_pipe: Option<Arc<PipeInner>>,
+    stdin_pipe: Option<Arc<PipeInner>>,
 ) -> Result<Flow> {
     let mut cx = StepCtx {
         state,
@@ -400,7 +492,8 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
         expose_stdin,
         out,
         err,
-        out_pipe_name,
+        out_pipe,
+        stdin_pipe,
     };
     // Compound steps (loops, functions, scoped wrappers) participate in
     // Flow and dispatch through the Flow path; every other variant runs
@@ -662,7 +755,8 @@ fn execute_steps_inner<P: ProcessManager>(
                 expose_stdin,
                 out: out.clone(),
                 err: err.clone(),
-                out_pipe_name: None,
+                out_pipe: None,
+                stdin_pipe: None,
             };
             // Function/loop control steps dispatch through the Flow path;
             // every other variant runs the leaf pipeline and yields Done.

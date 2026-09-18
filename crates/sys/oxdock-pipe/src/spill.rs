@@ -83,7 +83,7 @@ impl SpillBuffer {
     }
 
     /// A `SharedOutput` sink that appends every written byte to this buffer.
-    pub fn writer(self: &Arc<Self>) -> oxdock_process::SharedOutput {
+    pub fn writer(self: &Arc<Self>) -> crate::slot::SharedOutput {
         Arc::new(Mutex::new(SpillWriter {
             buf: Arc::clone(self),
         }))
@@ -210,6 +210,12 @@ impl SpillBuffer {
             #[cfg(not(miri))]
             SpillInner::Disk(disk) => Some(disk.spill_path.clone()),
         }
+    }
+}
+
+impl Default for SpillBuffer {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
