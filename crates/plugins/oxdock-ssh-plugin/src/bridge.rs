@@ -23,7 +23,7 @@ use oxdock_pipe::PipeInner;
 use oxdock_process::{ProcessManager, SharedInput, SharedOutput};
 use tokio::sync::mpsc;
 
-use crate::state::DownMsg;
+use crate::state::{DownMsg, UpMsg};
 
 /// Copy buffer size, matching `net_bridge::CHUNK`.
 const CHUNK: usize = 8192;
@@ -55,14 +55,20 @@ struct PumpHandles {
     reader: SharedInput,
     backend: Option<Arc<PipeInner>>,
     writer: SharedOutput,
-    up_rx: mpsc::Receiver<Bytes>,
+    up_rx: mpsc::Receiver<UpMsg>,
     down_tx: mpsc::Sender<DownMsg>,
 }
 
-/// Pump `up_rx -> writer` until the wire ends.
+/// Pump `up_rx -> writer` until the wire half-closes. The bounded queue
+/// is FIFO, so an [`UpMsg::Eof`] always arrives after every byte sent
+/// before it: return without waiting for the sender to drop (it stays
+/// alive until the channel itself closes, which this return helps cause
+/// via the supervisor's force-close — waiting for it would deadlock).
+/// The supervisor force-closes the output pipe right after this worker
+/// is reaped, so downstream observes EOF promptly.
 fn pump_out(
     writer: &SharedOutput,
-    up_rx: &mut mpsc::Receiver<Bytes>,
+    up_rx: &mut mpsc::Receiver<UpMsg>,
     cancel: &AtomicBool,
 ) -> Result<()> {
     loop {
@@ -70,7 +76,7 @@ fn pump_out(
             break;
         }
         match up_rx.blocking_recv() {
-            Some(bytes) => {
+            Some(UpMsg::Data(bytes)) => {
                 let mut guard = writer
                     .lock()
                     .map_err(|_| anyhow::anyhow!("SSH pump output lock poisoned"))?;
@@ -79,7 +85,7 @@ fn pump_out(
                     .context("SSH pump output pipe write failed")?;
                 guard.flush().context("SSH pump output pipe flush failed")?;
             }
-            None => break,
+            Some(UpMsg::Eof) | None => break,
         }
     }
     Ok(())
@@ -154,7 +160,7 @@ pub fn pump_session<P: ProcessManager>(
     cx: &StepCtx<P>,
     in_pipe: &Value,
     out_pipe: &Value,
-    up_rx: mpsc::Receiver<Bytes>,
+    up_rx: mpsc::Receiver<UpMsg>,
     down_tx: mpsc::Sender<DownMsg>,
     cancel: &AtomicBool,
 ) -> Result<()> {

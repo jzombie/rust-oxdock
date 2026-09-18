@@ -15,7 +15,7 @@ use russh::keys::{Algorithm, PrivateKey};
 use tokio::sync::mpsc;
 
 use crate::auth::ServerFactory;
-use crate::state::{CHANNEL_CAPACITY, DownMsg, SessionQueue, ShutdownSignal};
+use crate::state::{CHANNEL_CAPACITY, DownMsg, SessionQueue, ShutdownSignal, UpMsg};
 use russh::server::Server as _;
 
 /// Inactivity timeout for idle SSH sessions.
@@ -103,7 +103,7 @@ impl russh::client::Handler for AcceptAnyHostKey {
 /// attach to, plus the client handle for teardown. The tasks driving the
 /// queues live on the caller's runtime, which must outlive the pump.
 pub struct OutboundSession {
-    pub up_rx: mpsc::Receiver<Bytes>,
+    pub up_rx: mpsc::Receiver<UpMsg>,
     pub down_tx: mpsc::Sender<DownMsg>,
     pub(crate) handle: russh::client::Handle<AcceptAnyHostKey>,
 }
@@ -157,17 +157,26 @@ pub async fn connect_session(
     let (up_tx, up_rx) = mpsc::channel(CHANNEL_CAPACITY);
     let (down_tx, mut down_rx) = mpsc::channel::<DownMsg>(CHANNEL_CAPACITY);
 
-    // Wire bytes toward the pump. Ends (dropping the sender) on EOF or
-    // close so the pump observes it by drain.
+    // Wire bytes toward the pump. A channel EOF half-closes the pump
+    // (it may still flush its own output); a close ends the queue by
+    // dropping the sender.
     tokio::spawn(async move {
         while let Some(message) = reader.wait().await {
             match message {
                 russh::ChannelMsg::Data { data } => {
-                    if up_tx.send(Bytes::copy_from_slice(&data)).await.is_err() {
+                    if up_tx
+                        .send(UpMsg::Data(Bytes::copy_from_slice(&data)))
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }
-                russh::ChannelMsg::Eof | russh::ChannelMsg::Close => break,
+                russh::ChannelMsg::Eof => {
+                    let _ = up_tx.send(UpMsg::Eof).await;
+                    break;
+                }
+                russh::ChannelMsg::Close => break,
                 _ => {}
             }
         }

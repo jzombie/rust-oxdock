@@ -15,16 +15,16 @@ use russh::server::{Auth, Handler, Msg, Session};
 use russh::{Channel, ChannelId};
 use tokio::sync::mpsc;
 
-use crate::state::{CHANNEL_CAPACITY, DownMsg, PendingSession, SessionQueue};
+use crate::state::{CHANNEL_CAPACITY, DownMsg, PendingSession, SessionQueue, UpMsg};
 
 /// Per-channel wire state on one connection.
 struct ChannelState {
     /// Wire bytes toward the pump. Dropped on channel close so the pump
     /// observes EOF by drain.
-    up_tx: mpsc::Sender<Bytes>,
+    up_tx: mpsc::Sender<UpMsg>,
     /// Moved into the queued session once the channel becomes a byte
     /// stream (shell/exec request).
-    up_rx: Option<mpsc::Receiver<Bytes>>,
+    up_rx: Option<mpsc::Receiver<UpMsg>>,
     /// Pump-to-wire receiver, moved into the wire-writer task at announce.
     down_rx: Option<mpsc::Receiver<DownMsg>>,
     /// Pump-to-wire sender, moved into the queued session at announce.
@@ -133,25 +133,33 @@ impl Handler for EphemeralHandler {
         };
         state
             .up_tx
-            .send(Bytes::copy_from_slice(data))
+            .send(UpMsg::Data(Bytes::copy_from_slice(data)))
             .await
             .map_err(|_| anyhow::anyhow!("pump went away"))?;
         Ok(())
     }
 
     /// A byte-pump channel has no process that could produce output
-    /// after stdin EOF (unlike a real shell), so EOF closes the channel
-    /// outright. Without this, an EOF from one leg would never become a
-    /// close on the other, and proxy cascades would stall until the
-    /// inactivity timeout. Buffered bytes still drain first: the pump
-    /// reads the queue FIFO before observing the sender drop.
+    /// after stdin EOF (unlike a real shell), so the EOF half-closes the
+    /// pump instead: signal [`UpMsg::Eof`] and let the cascade drain. The
+    /// bounded queue is FIFO, so bytes sent before the EOF still flush
+    /// first, and closing eagerly here would win a race against them
+    /// (instant-EOF clients like `printf ... | ssh` would lose their
+    /// reply). The channel itself closes when the pump finishes and its
+    /// wire-writer task ends. If the pump is already gone, close now.
     async fn channel_eof(&mut self, channel: ChannelId, session: &mut Session) -> Result<()> {
-        session
-            .handle()
-            .close(channel)
-            .await
-            .map_err(|_| anyhow::anyhow!("wire gone during EOF close"))?;
-        self.channels.remove(&channel);
+        let eof_delivered = match self.channels.get(&channel) {
+            Some(state) => state.up_tx.send(UpMsg::Eof).await.is_ok(),
+            None => false,
+        };
+        if !eof_delivered {
+            session
+                .handle()
+                .close(channel)
+                .await
+                .map_err(|_| anyhow::anyhow!("wire gone during EOF close"))?;
+            self.channels.remove(&channel);
+        }
         Ok(())
     }
 

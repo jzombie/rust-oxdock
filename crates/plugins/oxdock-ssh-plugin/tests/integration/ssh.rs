@@ -261,6 +261,76 @@ fn cancel_mid_pump_terminates() {
 }
 
 #[test]
+#[cfg(unix)]
+#[cfg_attr(
+    miri,
+    ignore = "needs loopback TCP plus threads plus a Tokio runtime plus subprocesses"
+)]
+fn real_openssh_client_echo_roundtrip() {
+    // The real `ssh` binary (password via SSH_ASKPASS, no tty anywhere)
+    // through ACCEPT plus an echo PUMP: pins the diagnosis that an
+    // interactive password prompt on a synthetic pty is the only
+    // openssh configuration that stalls, client-side and pre-auth.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r##"
+        IMPORT [STD, SSH]
+        WRITE askpass.sh "#!/bin/sh\necho test123\n"
+        RUN ["chmod", "+x", "askpass.sh"]
+        LET $m: MAP = SSH_SERVE("127.0.0.1:0", "test", "test123")
+        WRITE addr.txt "{{ $m.addr }}"
+        LET $in: PIPE
+        LET $out: PIPE
+        LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
+        LET $echo: HANDLE = ASYNC { SSH_PUMP($out, $in) }
+        AWAIT $acc
+        AWAIT $echo
+        SSH_CLOSE($m.server)
+    "##};
+    let handle = std::thread::spawn(move || run_script(&root, script));
+    let addr_path = temp.as_guarded_path().join("addr.txt").unwrap();
+    let addr = loop {
+        std::thread::sleep(Duration::from_millis(100));
+        let text = read_trimmed(&addr_path);
+        if !text.is_empty() {
+            break text;
+        }
+    };
+    let askpass = temp
+        .as_guarded_path()
+        .join("askpass.sh")
+        .unwrap()
+        .as_path()
+        .display()
+        .to_string();
+    let shell_command = format!(
+        "printf 'hello-openssh' | SSH_ASKPASS=\"{askpass}\" SSH_ASKPASS_REQUIRE=force ssh -T -p {} -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o PreferredAuthentications=password -o PubkeyAuthentication=no -o LogLevel=ERROR test@{}",
+        addr.trim()
+            .rsplit_once(':')
+            .map(|(_, port)| port)
+            .unwrap_or("0"),
+        addr.trim()
+            .rsplit_once(':')
+            .map(|(host, _)| host)
+            .unwrap_or("127.0.0.1"),
+    );
+    let mut cmd = oxdock_process::CommandBuilder::new("sh");
+    cmd.args(["-c".to_string(), shell_command]);
+    cmd.current_dir(temp.as_guarded_path().as_path());
+    let output = cmd.output().expect("run outer ssh");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("hello-openssh"),
+        "real ssh must round-trip through cat, got: {stdout:?} stderr: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    handle
+        .join()
+        .expect("script thread joins")
+        .expect("script completes after disconnect");
+}
+
+#[test]
 #[cfg_attr(miri, ignore = "needs loopback TCP plus threads plus a Tokio runtime")]
 fn proxy_outer_to_inner_roundtrip() {
     let temp = GuardedPath::tempdir().unwrap();

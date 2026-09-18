@@ -28,6 +28,16 @@ pub enum DownMsg {
     Eof,
 }
 
+/// Wire bytes toward the DSL pipes. `Eof` is a half-close: no more bytes
+/// will arrive, but the channel itself stays open until the pump drains
+/// and tears down. Queued before any later messages (FIFO), so bytes
+/// sent before the EOF still flush first.
+#[derive(Debug)]
+pub enum UpMsg {
+    Data(Bytes),
+    Eof,
+}
+
 /// A freshly authenticated channel waiting for an `SSH_ACCEPT` call.
 /// The wire-writer task is already spawned; the pump side of the queue
 /// pairs it with explicit DSL pipes.
@@ -38,8 +48,8 @@ pub struct PendingSession {
     /// Wire bytes toward the DSL pipes. Bounded ([`CHANNEL_CAPACITY`]):
     /// the async sender applies SSH backpressure instead of growing a
     /// queue. Closed by the wire side when the channel goes away, so the
-    /// pump observes EOF by drain.
-    pub up_rx: mpsc::Receiver<Bytes>,
+    /// pump observes the end by drain.
+    pub up_rx: mpsc::Receiver<UpMsg>,
     /// DSL bytes toward the wire. The pump sends [`DownMsg::Eof`] on
     /// stdin EOF, then drops the sender.
     pub down_tx: mpsc::Sender<DownMsg>,
