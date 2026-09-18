@@ -2087,28 +2087,47 @@ fn collect_steps_producers(steps: &[Step], out: &mut Vec<(String, bool)>) {
     }
 }
 
+/// Whether a `WITH_IO` body is ultimately a network bridge pump, seen
+/// through nested `WITH_IO` layers. Bridge pumps own their stdout writer
+/// lifetime, so keeper pins must skip them (see below).
+fn is_bridge_command(cmd: &StepKind) -> bool {
+    match cmd {
+        StepKind::WithIo { cmd, .. } => is_bridge_command(cmd),
+        StepKind::Connect { .. } | StepKind::Listen { .. } => true,
+        _ => false,
+    }
+}
+
 fn collect_kind_producers(kind: &StepKind, out: &mut Vec<(String, bool)>) {
     match kind {
         StepKind::WithIo { bindings, cmd } => {
-            let promote = promotion_trigger(cmd, true);
-            for binding in bindings {
-                match binding.stream {
-                    IoStream::Stdout | IoStream::Stderr => {
-                        if let Some(PipeTarget::Name(pipe)) = &binding.pipe {
-                            match out.iter_mut().find(|(name, _)| name == pipe) {
-                                Some(entry) => {
-                                    entry.1 = entry.1 || promote;
-                                }
-                                None => {
-                                    out.push((pipe.clone(), promote));
+            // Bridge pumps own their stdout writer lifetime (taken from the
+            // step context and dropped when the socket direction ends, so
+            // downstream EOF tracks the socket instead of thread lifetime).
+            // Pinning a keeper here would wed EOF to thread end and deadlock
+            // pump-to-pump pipe sharing; the spawn gap is already safe
+            // because fresh pipes block instead of EOFing.
+            if !is_bridge_command(cmd) {
+                let promote = promotion_trigger(cmd, true);
+                for binding in bindings {
+                    match binding.stream {
+                        IoStream::Stdout | IoStream::Stderr => {
+                            if let Some(PipeTarget::Name(pipe)) = &binding.pipe {
+                                match out.iter_mut().find(|(name, _)| name == pipe) {
+                                    Some(entry) => {
+                                        entry.1 = entry.1 || promote;
+                                    }
+                                    None => {
+                                        out.push((pipe.clone(), promote));
+                                    }
                                 }
                             }
+                            // Dynamic (`$var`) endpoints resolve against live
+                            // state at pin time (see `pin_async_keepers`); they
+                            // are invisible to this static walk by design.
                         }
-                        // Dynamic (`$var`) endpoints resolve against live
-                        // state at pin time (see `pin_async_keepers`); they
-                        // are invisible to this static walk by design.
+                        IoStream::Stdin => {}
                     }
-                    IoStream::Stdin => {}
                 }
             }
             collect_kind_producers(cmd, out);
@@ -2152,26 +2171,29 @@ fn collect_dynamic_producers<P: ProcessManager>(
         StepKind::WithIo { bindings, cmd } => {
             // Same promotion analysis as the static walk so a dynamic
             // endpoint pins the same pipe type execution will ensure.
-            let promote = promotion_trigger(cmd, true);
-            for binding in bindings {
-                match binding.stream {
-                    IoStream::Stdout | IoStream::Stderr => {
-                        if let Some(PipeTarget::Var(var)) = &binding.pipe
-                            && let Some((kind, value)) = state.get_var_typed(var)
-                            && kind == "PIPE"
-                            && let Some(name) = value.as_pipe_name()
-                        {
-                            match out.iter_mut().find(|(n, _)| n == name) {
-                                Some(entry) => {
-                                    entry.1 = entry.1 || promote;
-                                }
-                                None => {
-                                    out.push((name.to_string(), promote));
+            // Bridge bodies are skipped like above: no keeper pins.
+            if !is_bridge_command(cmd) {
+                let promote = promotion_trigger(cmd, true);
+                for binding in bindings {
+                    match binding.stream {
+                        IoStream::Stdout | IoStream::Stderr => {
+                            if let Some(PipeTarget::Var(var)) = &binding.pipe
+                                && let Some((kind, value)) = state.get_var_typed(var)
+                                && kind == "PIPE"
+                                && let Some(name) = value.as_pipe_name()
+                            {
+                                match out.iter_mut().find(|(n, _)| n == name) {
+                                    Some(entry) => {
+                                        entry.1 = entry.1 || promote;
+                                    }
+                                    None => {
+                                        out.push((name.to_string(), promote));
+                                    }
                                 }
                             }
                         }
+                        IoStream::Stdin => {}
                     }
-                    IoStream::Stdin => {}
                 }
             }
             collect_dynamic_producers(cmd, state, out);

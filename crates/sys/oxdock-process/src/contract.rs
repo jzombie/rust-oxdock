@@ -144,6 +144,12 @@ impl OsPipeReader {
                 anyhow::anyhow!("os pipe handle has already been consumed by another process")
             })
     }
+
+    /// Whether this half was already taken. A poisoned slot reports live
+    /// so callers never recycle what they cannot inspect.
+    pub fn is_consumed(&self) -> bool {
+        self.inner.lock().map(|g| g.is_none()).unwrap_or(false)
+    }
 }
 
 #[cfg(not(miri))]
@@ -165,6 +171,12 @@ impl OsPipeWriter {
             .ok_or_else(|| {
                 anyhow::anyhow!("os pipe handle has already been consumed by another process")
             })
+    }
+
+    /// Whether this half was already taken. A poisoned slot reports live
+    /// so callers never recycle what they cannot inspect.
+    pub fn is_consumed(&self) -> bool {
+        self.inner.lock().map(|g| g.is_none()).unwrap_or(false)
     }
 }
 

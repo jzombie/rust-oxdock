@@ -156,6 +156,12 @@ fn resolve_listen_addr(idx: usize, host: &str, port: u16) -> Result<SocketAddr> 
 /// task completion itself reports disconnects with no producer choreography.
 /// Anything else (inherit, OS handles, missing stdout) bails with the
 /// wrapping pattern spelled out.
+///
+/// The stdout writer is TAKEN out of the step context (not cloned): when
+/// the socket direction ends, dropping it signals EOF downstream promptly.
+/// Holding it for the whole step would wed EOF to thread lifetime and,
+/// together with keeper pins, deadlock pump-to-pump sharing (each task
+/// holding the other's stdin open forever).
 fn bridge_streams<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     idx: usize,
@@ -169,7 +175,7 @@ fn bridge_streams<P: ProcessManager>(
             idx + 1
         ),
     };
-    let Some(StreamHandle::Stream(writer)) = cx.out.clone() else {
+    let Some(StreamHandle::Stream(writer)) = cx.out.take() else {
         bail!(
             "step {}: {cmd} requires WITH_IO [..., stdout=pipe:...] bindings",
             idx + 1

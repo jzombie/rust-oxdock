@@ -52,6 +52,13 @@ impl OsPipeEntry {
         let (reader, writer) = create_os_pipe()?;
         Ok(Self { writer, reader })
     }
+
+    /// Both halves taken. The takers hold raw descriptors outside the
+    /// registry, so a spent entry can never serve another resolve; it is
+    /// either replaced on next ensure or left for the loud take error.
+    fn is_spent(&self) -> bool {
+        self.reader.is_consumed() && self.writer.is_consumed()
+    }
 }
 
 impl PipeRegistry {
@@ -202,28 +209,25 @@ impl PipeRegistry {
 
     /// Ensure an entry exists for this binding. Fresh names become OS
     /// kernel pairs when promotion fired, script pipes otherwise. Existing
-    /// entries keep their type: first binding wins, so sequential fan in
-    /// and host injected pipes never change shape underfoot.
+    /// script entries keep their type: first binding wins, so sequential
+    /// fan in and host injected pipes never change shape underfoot.
+    /// Existing OS entries are kept while live and recycled once spent
+    /// (see [`PipeRegistry::ensure_os_pipe`]).
     /// Atomic: existence check and insertion happen under one lock.
     fn ensure_pipe_for(&self, name: &str, promote: bool) -> Result<()> {
         {
             let guard = self.lock_inner();
-            if guard.input.contains_key(name) || guard.output.contains_key(name) || {
-                #[cfg(not(miri))]
-                {
-                    guard.os.contains_key(name)
-                }
-                #[cfg(miri)]
-                {
-                    false
-                }
-            } {
+            if guard.input.contains_key(name) || guard.output.contains_key(name) {
                 return Ok(());
             }
         }
         #[cfg(not(miri))]
         if promote {
             return self.ensure_os_pipe(name);
+        }
+        #[cfg(not(miri))]
+        if self.lock_inner().os.contains_key(name) {
+            return self.refresh_os_pipe(name);
         }
         #[cfg(miri)]
         let _ = promote;
@@ -324,21 +328,44 @@ impl PipeRegistry {
     }
 
     /// Create the OS pair for this name unless any entry already exists.
-    /// An existing script entry keeps store and forward semantics; an
-    /// existing OS entry is reused so the second producer fails
-    /// deterministically at handle take time, never by interleaving.
-    /// Atomic: the script/OS existence check and the insertion share one
-    /// lock acquisition.
+    /// An existing script entry keeps store and forward semantics. An
+    /// existing live OS entry is reused so a concurrent second take on one
+    /// end still fails deterministically at handle take time. An existing
+    /// SPENT entry (both ends taken) is replaced with a fresh pair: the old
+    /// kernel objects live on only in their takers, disjoint from the new
+    /// pair, so replacement cannot corrupt a live session — and loop
+    /// iterations rebind instead of failing on consumed handles. The
+    /// documented trade: a third concurrent binding mid-session previously
+    /// bailed loudly and now receives a fresh disconnected pair instead.
+    /// Atomic: the check and the insertion share one lock acquisition.
     #[cfg(not(miri))]
     fn ensure_os_pipe(&self, name: &str) -> Result<()> {
         let mut guard = self.lock_inner();
-        if guard.os.contains_key(name) {
+        if let Some(spent) = guard.os.get(name).map(|entry| entry.is_spent()) {
+            if spent {
+                guard.os.insert(name.to_string(), OsPipeEntry::new()?);
+            }
             return Ok(());
         }
         if guard.input.contains_key(name) || guard.output.contains_key(name) {
             bail!("pipe '{name}' is already bound as a script pipe");
         }
-        if !guard.os.contains_key(name) {
+        guard.os.insert(name.to_string(), OsPipeEntry::new()?);
+        Ok(())
+    }
+
+    /// Share-or-recycle for non-promoting bindings atop an OS entry: live
+    /// pairs are kept (bridge reuse), spent pairs are replaced exactly like
+    /// [`PipeRegistry::ensure_os_pipe`] so loop iterations rebind.
+    #[cfg(not(miri))]
+    fn refresh_os_pipe(&self, name: &str) -> Result<()> {
+        let mut guard = self.lock_inner();
+        if guard
+            .os
+            .get(name)
+            .map(|entry| entry.is_spent())
+            .unwrap_or(false)
+        {
             guard.os.insert(name.to_string(), OsPipeEntry::new()?);
         }
         Ok(())

@@ -3162,6 +3162,44 @@ fn bridge_shared_pair_proxy_terminates() {
 }
 
 #[test]
+#[cfg(unix)]
+#[cfg_attr(
+    miri,
+    ignore = "spawns real OS processes and kernel pipes, which die under Miri isolation"
+)]
+fn bridge_os_pipe_names_recycle_across_sessions() {
+    // Two sequential sessions reusing one pipe name through RUN-promoted OS
+    // pairs: the second session must get a fresh pair, not a
+    // consumed-handle error. No timing involved: AWAIT joins each session
+    // before the next begins.
+    use oxdock_fs::PathResolver;
+    let temp = GuardedPath::tempdir().expect("tempdir");
+    let root = temp.as_guarded_path().clone();
+    let steps = crate::parse_script(indoc! {r#"
+        WITH_IO [stdout=pipe:x] ASYNC RUN "echo one"
+        WITH_IO [stdin=pipe:x] WRITE f1.txt
+    "#})
+    .expect("parse ok");
+    let io = ExecIo::new();
+    for _ in 0..2 {
+        let resolver = PathResolver::new_guarded(root.clone(), root.clone()).expect("resolver");
+        let fs: Box<dyn WorkspaceFs> = Box::new(resolver);
+        run_steps_with_manager(
+            fs,
+            &steps,
+            oxdock_process::default_process_manager(),
+            io.clone(),
+        )
+        .unwrap_or_else(|err| panic!("session runs: {err:#}"));
+        let check = PathResolver::new(root.as_path(), root.as_path()).expect("resolver");
+        let content = check
+            .read_to_string(&root.join("f1.txt").expect("join"))
+            .expect("read file");
+        assert_eq!(content, "one\n");
+    }
+}
+
+#[test]
 #[cfg_attr(
     miri,
     ignore = "uses real loopback sockets, which die under Miri isolation"
