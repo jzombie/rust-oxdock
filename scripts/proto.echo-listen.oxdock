@@ -20,8 +20,7 @@ WHILE true {
         WITH_IO [stdin=pipe:req, stdout=pipe:resp] LISTEN 127.0.0.1:{{ $listen_port }} --no-half-close
     }
 
-    // Netcat forwards raw SSH stdio bytes directly to OrbStack's listener
-    WITH_IO [stdin=pipe:resp, stdout=pipe:req] ASYNC RUN nc 127.0.0.1 {{ $orb_port }}
+    WITH_IO [stdin=pipe:resp, stdout=pipe:req] ASYNC CONNECT 127.0.0.1:{{ $orb_port }}
 
     AWAIT $ls
     ECHO "client disconnected"
