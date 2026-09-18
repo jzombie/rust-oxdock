@@ -30,6 +30,12 @@ pub fn run(repo_root: &Path) -> Result<()> {
         INHERIT_ENV [CRATE_VERSION]
         IMPORT [STD, DOCS]
 
+        // Live-tree invariant: every WRITE below must land in the real
+        // repo, so pin resolution to the build context up front. Without
+        // this, a snapshot-backed resolver would silently materialize a
+        // tempdir and the render would succeed while updating nothing.
+        WORKSPACE LOCAL
+
         // Version for every expansion scope below.
         LET $version: STRING = WORKSPACE_VERSION()
         ENV CRATE_VERSION=$version
