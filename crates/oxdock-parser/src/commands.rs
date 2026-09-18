@@ -1304,8 +1304,8 @@ declare_commands! {
 
     Connect => [
         name: "CONNECT",
-        variant: Connect { endpoint: Arg, timeout: Option<Arg> },
-        syntax: "CONNECT <host:port> [--timeout <duration>]",
+        variant: Connect { endpoint: Arg, timeout: Option<Arg>, no_half_close: bool },
+        syntax: "CONNECT <host:port> [--timeout <duration>] [--no-half-close]",
         summary: "Dial a TCP endpoint and pump it through pipes.",
         description: indoc! {r#"
             Dials `host:port` and pumps bytes bidirectionally between the
@@ -1322,11 +1322,19 @@ declare_commands! {
             runtime, so variables and templates work.
 
             Socket close maps to pipe EOF; stdin EOF half-closes the socket
-            write side while the read side continues. Outbound dialing may
-            target any host; `LISTEN` binds are loopback-only.
+            write side while the read side continues, so sessions terminate
+            once both directions drain. Pass `--no-half-close` for
+            interactive peers instead: the write side stays open after
+            stdin EOF (no FIN for the peer to quit on), at the cost that
+            only socket close, `CANCEL`, or `TIMEOUT` ends the session.
+            Outbound dialing may target any host; `LISTEN` binds are
+            loopback-only.
         "#},
         args: &[ ArgSpec { name: "endpoint", arg_type: ArgType::String, description: "Host and port (`host:port`)", io: IoDirection::Write, index: 0, required: true, fallback_stream: None } ],
-        flags: &[ FlagSpec { name: "timeout", long: "--timeout", value_type: FlagValueType::String, required: false, description: "Dial timeout (e.g. 5s); defaults to 10s" } ],
+        flags: &[
+            FlagSpec { name: "timeout", long: "--timeout", value_type: FlagValueType::String, required: false, description: "Dial timeout (e.g. 5s); defaults to 10s" },
+            FlagSpec { name: "no_half_close", long: "--no-half-close", value_type: FlagValueType::Flag, required: false, description: "Keep the socket write side open after stdin EOF" },
+        ],
         default_output: None,
         examples: &[
             Example { name: "connect requires async", fence_meta: Some("expect_error:\"requires ASYNC\""), code: indoc! {r#"
@@ -1343,25 +1351,30 @@ declare_commands! {
                 return Err(ParseError::validation("CONNECT", "CONNECT takes exactly one endpoint argument".to_string(), &SpanContext::line_only(0)));
             }
             let mut timeout = None;
+            let mut no_half_close = false;
             for (name, value) in flags {
-                if name != "timeout" {
+                if name != "timeout" && name != "no_half_close" {
                     continue;
                 }
-                if let Arg::String(text, _) = &value
-                    && crate::command::parse_duration(text).is_err()
-                {
-                    return Err(ParseError::validation("CONNECT", format!("CONNECT --timeout requires a duration (e.g. 5s), got {text:?}"), &SpanContext::line_only(0)));
+                if name == "timeout" {
+                    if let Arg::String(text, _) = &value
+                        && crate::command::parse_duration(text).is_err()
+                    {
+                        return Err(ParseError::validation("CONNECT", format!("CONNECT --timeout requires a duration (e.g. 5s), got {text:?}"), &SpanContext::line_only(0)));
+                    }
+                    timeout = Some(value);
+                } else {
+                    no_half_close = true;
                 }
-                timeout = Some(value);
             }
-            Ok(StepKind::Connect { endpoint, timeout })
+            Ok(StepKind::Connect { endpoint, timeout, no_half_close })
         },
     ],
 
     Listen => [
         name: "LISTEN",
-        variant: Listen { bind: Arg },
-        syntax: "LISTEN [host:]port",
+        variant: Listen { bind: Arg, no_half_close: bool },
+        syntax: "LISTEN [host:]port [--no-half-close]",
         summary: "Bind a loopback port and pump one connection through pipes.",
         description: indoc! {r#"
             Binds an explicit loopback port and pumps a single accepted
@@ -1376,9 +1389,16 @@ declare_commands! {
             non-loopback hosts, and ephemeral (`0`) or omitted ports are
             rejected. Ephemeral ports return only with native task-handle
             metadata in a follow-up.
+
+            Like `CONNECT`, stdin EOF half-closes the socket write side;
+            pass `--no-half-close` to keep interactive clients connected
+            after the script stops producing (session then ends on client
+            disconnect, `CANCEL`, or `TIMEOUT`).
         "#},
         args: &[ ArgSpec { name: "bind", arg_type: ArgType::String, description: "Loopback bind (`[host:]port`, e.g. 127.0.0.1:8080)", io: IoDirection::Write, index: 0, required: true, fallback_stream: None } ],
-        flags: &[],
+        flags: &[
+            FlagSpec { name: "no_half_close", long: "--no-half-close", value_type: FlagValueType::Flag, required: false, description: "Keep the socket write side open after stdin EOF" },
+        ],
         default_output: None,
         examples: &[
             Example { name: "listen rejects non-loopback", fence_meta: Some("expect_error:\"loopback\""), code: indoc! {r#"
@@ -1388,13 +1408,19 @@ declare_commands! {
                 WITH_IO [stdin=pipe:req, stdout=pipe:resp] LISTEN 127.0.0.1:0
             "#} },
         ],
-        lower: |_flags, args| {
+        lower: |flags, args| {
             let mut it = args.into_iter();
             let bind = it.next().ok_or_else(|| ParseError::validation("LISTEN", "LISTEN requires a bind address (e.g. LISTEN 127.0.0.1:8080)".to_string(), &SpanContext::line_only(0)))?;
             if it.next().is_some() {
                 return Err(ParseError::validation("LISTEN", "LISTEN takes exactly one bind address".to_string(), &SpanContext::line_only(0)));
             }
-            Ok(StepKind::Listen { bind })
+            let mut no_half_close = false;
+            for (name, _) in flags {
+                if name == "no_half_close" {
+                    no_half_close = true;
+                }
+            }
+            Ok(StepKind::Listen { bind, no_half_close })
         },
     ],
 }
@@ -2370,14 +2396,30 @@ impl fmt::Display for StepKind {
             }
             StepKind::Exit(code) => write!(f, "EXIT {}", fmt_raw_arg(code)),
             StepKind::Sleep { duration } => write!(f, "SLEEP {}", fmt_raw_arg(duration)),
-            StepKind::Connect { endpoint, timeout } => {
+            StepKind::Connect {
+                endpoint,
+                timeout,
+                no_half_close,
+            } => {
                 write!(f, "CONNECT {}", fmt_raw_arg(endpoint))?;
                 if let Some(t) = timeout {
                     write!(f, " --timeout {}", fmt_raw_arg(t))?;
                 }
+                if *no_half_close {
+                    write!(f, " --no-half-close")?;
+                }
                 Ok(())
             }
-            StepKind::Listen { bind } => write!(f, "LISTEN {}", fmt_raw_arg(bind)),
+            StepKind::Listen {
+                bind,
+                no_half_close,
+            } => {
+                write!(f, "LISTEN {}", fmt_raw_arg(bind))?;
+                if *no_half_close {
+                    write!(f, " --no-half-close")?;
+                }
+                Ok(())
+            }
             StepKind::For {
                 key_var,
                 key_type,
@@ -2539,16 +2581,35 @@ mod tests {
             parse_script("CONNECT 127.0.0.1:8080 --timeout 5s\n", lower_command).expect("parse ok");
         assert_eq!(steps.len(), 1);
         match &steps[0].kind {
-            StepKind::Connect { endpoint, timeout } => {
+            StepKind::Connect {
+                endpoint,
+                timeout,
+                no_half_close,
+            } => {
                 assert_eq!(endpoint.render(), "127.0.0.1:8080");
                 let flag = timeout.as_ref().expect("timeout flag kept");
                 assert_eq!(flag.render(), "5s");
+                assert!(!no_half_close);
             }
             other => panic!("expected CONNECT, saw {other:?}"),
         }
         // Display round-trips through the parser unchanged.
         let rendered = steps[0].kind.to_string();
         assert_eq!(rendered, "CONNECT 127.0.0.1:8080 --timeout 5s");
+        let again = parse_script(&rendered, lower_command).expect("reparse ok");
+        assert_eq!(again[0].kind, steps[0].kind);
+    }
+
+    #[test]
+    fn connect_no_half_close_flag_round_trips() {
+        let steps = parse_script("CONNECT 127.0.0.1:8080 --no-half-close\n", lower_command)
+            .expect("parse ok");
+        match &steps[0].kind {
+            StepKind::Connect { no_half_close, .. } => assert!(no_half_close),
+            other => panic!("expected CONNECT, saw {other:?}"),
+        }
+        let rendered = steps[0].kind.to_string();
+        assert_eq!(rendered, "CONNECT 127.0.0.1:8080 --no-half-close");
         let again = parse_script(&rendered, lower_command).expect("reparse ok");
         assert_eq!(again[0].kind, steps[0].kind);
     }
@@ -2562,13 +2623,18 @@ mod tests {
         let err = parse_err("CONNECT 127.0.0.1:8080 --timeout soon\n");
         assert!(err.contains("requires a duration"), "{err}");
     }
-
     #[test]
     fn listen_lowers_bind_and_round_trips() {
         let steps = parse_script("LISTEN 127.0.0.1:8080\n", lower_command).expect("parse ok");
         assert_eq!(steps.len(), 1);
         match &steps[0].kind {
-            StepKind::Listen { bind } => assert_eq!(bind.render(), "127.0.0.1:8080"),
+            StepKind::Listen {
+                bind,
+                no_half_close,
+            } => {
+                assert_eq!(bind.render(), "127.0.0.1:8080");
+                assert!(!no_half_close);
+            }
             other => panic!("expected LISTEN, saw {other:?}"),
         }
         let rendered = steps[0].kind.to_string();

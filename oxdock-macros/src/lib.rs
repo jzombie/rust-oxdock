@@ -1186,19 +1186,27 @@ fn emit_stepkind(
         }
         StepKind::Break => quote! { StepKind::Break },
         StepKind::Continue => quote! { StepKind::Continue },
-        StepKind::Connect { endpoint, timeout } => {
+        StepKind::Connect {
+            endpoint,
+            timeout,
+            no_half_close,
+        } => {
             let e = emit_arg(endpoint, interp);
-            match timeout {
+            let t = match timeout {
                 Some(t) => {
                     let d = emit_arg(t, interp);
-                    quote! { StepKind::Connect { endpoint: #e, timeout: Some(#d) } }
+                    quote! { Some(#d) }
                 }
-                None => quote! { StepKind::Connect { endpoint: #e, timeout: None } },
-            }
+                None => quote! { None },
+            };
+            quote! { StepKind::Connect { endpoint: #e, timeout: #t, no_half_close: #no_half_close } }
         }
-        StepKind::Listen { bind } => {
+        StepKind::Listen {
+            bind,
+            no_half_close,
+        } => {
             let b = emit_arg(bind, interp);
-            quote! { StepKind::Listen { bind: #b } }
+            quote! { StepKind::Listen { bind: #b, no_half_close: #no_half_close } }
         }
     }
 }

@@ -573,17 +573,30 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
             let duration = super::args::resolve_arg_as_duration(duration, &mut cx)?;
             handlers::sleep(&mut cx, idx, &duration)
         }
-        StepKind::Connect { endpoint, timeout } => {
+        StepKind::Connect {
+            endpoint,
+            timeout,
+            no_half_close,
+        } => {
             let endpoint_resolved = super::args::resolve_arg(endpoint, &mut cx)?;
             let timeout_resolved = timeout
                 .as_ref()
                 .map(|flag| super::args::resolve_arg_as_duration(flag, &mut cx))
                 .transpose()?;
-            super::net_bridge::connect(&mut cx, idx, &endpoint_resolved, timeout_resolved)
+            super::net_bridge::connect(
+                &mut cx,
+                idx,
+                &endpoint_resolved,
+                timeout_resolved,
+                !no_half_close,
+            )
         }
-        StepKind::Listen { bind } => {
+        StepKind::Listen {
+            bind,
+            no_half_close,
+        } => {
             let bind_resolved = super::args::resolve_arg(bind, &mut cx)?;
-            super::net_bridge::listen(&mut cx, idx, &bind_resolved)
+            super::net_bridge::listen(&mut cx, idx, &bind_resolved, !no_half_close)
         }
         StepKind::FuncDef { .. }
         | StepKind::Call { .. }
@@ -834,7 +847,11 @@ fn execute_steps_inner<P: ProcessManager>(
                             let duration = super::args::resolve_arg_as_duration(duration, &mut cx)?;
                             handlers::sleep(&mut cx, idx, &duration)
                         }
-                        StepKind::Connect { endpoint, timeout } => {
+                        StepKind::Connect {
+                            endpoint,
+                            timeout,
+                            no_half_close,
+                        } => {
                             let endpoint_resolved = super::args::resolve_arg(endpoint, &mut cx)?;
                             let timeout_resolved = timeout
                                 .as_ref()
@@ -845,11 +862,15 @@ fn execute_steps_inner<P: ProcessManager>(
                                 idx,
                                 &endpoint_resolved,
                                 timeout_resolved,
+                                !no_half_close,
                             )
                         }
-                        StepKind::Listen { bind } => {
+                        StepKind::Listen {
+                            bind,
+                            no_half_close,
+                        } => {
                             let bind_resolved = super::args::resolve_arg(bind, &mut cx)?;
-                            super::net_bridge::listen(&mut cx, idx, &bind_resolved)
+                            super::net_bridge::listen(&mut cx, idx, &bind_resolved, !no_half_close)
                         }
                         StepKind::FuncDef { .. }
                         | StepKind::Call { .. }

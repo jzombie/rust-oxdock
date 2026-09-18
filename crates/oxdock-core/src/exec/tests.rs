@@ -2926,6 +2926,65 @@ fn bridge_read_only_pump_completes_on_disconnect() {
     miri,
     ignore = "uses real loopback sockets, which die under Miri isolation"
 )]
+fn bridge_no_half_close_defers_fin() {
+    // With --no-half-close the server must observe no FIN while the session
+    // idles (a timed read times out instead of returning EOF), then still
+    // receive bytes produced afterwards, then see a clean close.
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let server = std::thread::spawn(move || {
+        let (mut conn, _) = listener.accept().expect("accept");
+        conn.set_read_timeout(Some(Duration::from_millis(500)))
+            .expect("timeout");
+        let mut byte = [0u8; 1];
+        match conn.read(&mut byte) {
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) => {}
+            Ok(0) => panic!("unexpected FIN during idle window"),
+            other => panic!("unexpected read outcome during idle window: {other:?}"),
+        }
+        conn.set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("timeout");
+        let mut line = Vec::new();
+        loop {
+            match conn.read(&mut byte).expect("read late line") {
+                0 => break,
+                _ => {
+                    line.push(byte[0]);
+                    if byte[0] == b'\n' {
+                        break;
+                    }
+                }
+            }
+        }
+        assert_eq!(line, b"late\n");
+    });
+    let steps = crate::parse_script(indoc! {r#"
+        LET $t: HANDLE = ASYNC {
+          WITH_IO [stdin=pipe:req, stdout=pipe:resp] CONNECT 127.0.0.1:{{ env:BRIDGE_PORT }} --no-half-close
+        }
+        SLEEP 1s
+        WITH_IO [stdout=pipe:req] ECHO "late"
+        AWAIT $t
+    "#})
+    .expect("parse ok");
+    let port_text = port.to_string();
+    run_bridge_script(
+        steps,
+        vec![("BRIDGE_PORT".to_string(), port_text)],
+        Duration::from_secs(15),
+    );
+    server.join().expect("server thread");
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "uses real loopback sockets, which die under Miri isolation"
+)]
 fn bridge_peer_fin_then_late_producer_completes() {
     // The server half-closes immediately; the task must survive the silent
     // period (no premature exit on socket EOF) and still deliver bytes the

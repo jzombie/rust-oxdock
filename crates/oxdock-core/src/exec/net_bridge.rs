@@ -229,9 +229,10 @@ fn read_pipe(
     }
 }
 
-/// `stdin-pipe -> socket` direction. Stdin EOF half-closes the socket and
-/// ends the direction; the task continues the socket direction until the
-/// socket closes. Cancellation exits at the next tick.
+/// `stdin-pipe -> socket` direction. Stdin EOF ends the direction; with
+/// half-close enabled it also shuts down the socket write side first (the
+/// peer sees request EOF), otherwise the socket stays fully open.
+/// Cancellation exits at the next tick.
 fn pump_in(
     idx: usize,
     cmd: &str,
@@ -239,6 +240,7 @@ fn pump_in(
     inner: Option<Arc<PipeInner>>,
     mut stream: TcpStream,
     cancel: &AtomicBool,
+    half_close: bool,
 ) -> Result<()> {
     let mut buf = [0u8; CHUNK];
     loop {
@@ -250,9 +252,11 @@ fn pump_in(
         {
             None => continue,
             Some(0) => {
-                suppress_peer_gone(stream.shutdown(Shutdown::Write)).map_err(|err| {
-                    anyhow!("step {}: {cmd} socket shutdown failed: {err}", idx + 1)
-                })?;
+                if half_close {
+                    suppress_peer_gone(stream.shutdown(Shutdown::Write)).map_err(|err| {
+                        anyhow!("step {}: {cmd} socket shutdown failed: {err}", idx + 1)
+                    })?;
+                }
                 return Ok(());
             }
             Some(n) => stream
@@ -311,6 +315,7 @@ fn pump(
     writer: SharedOutput,
     stream: TcpStream,
     cancel: &AtomicBool,
+    half_close: bool,
 ) -> Result<()> {
     if input.is_none() {
         // Half-closed from the start: no stdin will ever arrive. A fresh
@@ -326,7 +331,7 @@ fn pump(
         .with_context(|| format!("step {}: {cmd} failed to clone socket", idx + 1))?;
     std::thread::scope(|s| {
         let mut t_in = input.map(|(reader, inner)| {
-            s.spawn(move || pump_in(idx, cmd, reader, inner, sock_in, cancel))
+            s.spawn(move || pump_in(idx, cmd, reader, inner, sock_in, cancel, half_close))
         });
         let mut t_out = Some(s.spawn(move || pump_out(idx, cmd, writer, sock_out, cancel)));
         let mut failed: Option<anyhow::Error> = None;
@@ -388,6 +393,7 @@ pub(crate) fn connect<P: ProcessManager>(
     idx: usize,
     endpoint: &str,
     timeout: Option<Duration>,
+    half_close: bool,
 ) -> Result<()> {
     let (reader, writer) = bridge_streams(cx, idx, "CONNECT")?;
     let (host, port) = parse_connect_endpoint(idx, endpoint)?;
@@ -413,6 +419,7 @@ pub(crate) fn connect<P: ProcessManager>(
         writer,
         stream,
         &cx.state.cancel_token,
+        half_close,
     )
 }
 
@@ -422,6 +429,7 @@ pub(crate) fn listen<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     idx: usize,
     bind: &str,
+    half_close: bool,
 ) -> Result<()> {
     let (reader, writer) = bridge_streams(cx, idx, "LISTEN")?;
     let (host, port) = parse_listen_bind(idx, bind)?;
@@ -457,7 +465,7 @@ pub(crate) fn listen<P: ProcessManager>(
         }
         None => None,
     };
-    pump(idx, "LISTEN", input, writer, stream, cancel)
+    pump(idx, "LISTEN", input, writer, stream, cancel, half_close)
 }
 
 #[cfg(test)]

@@ -376,13 +376,15 @@ pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
             StepKind::Await { .. } => {}
             StepKind::Cancel { .. } => {}
             StepKind::Sleep { duration } => template_keys(&mut keys, duration),
-            StepKind::Connect { endpoint, timeout } => {
+            StepKind::Connect {
+                endpoint, timeout, ..
+            } => {
                 template_keys(&mut keys, endpoint);
                 if let Some(flag) = timeout {
                     template_keys(&mut keys, flag);
                 }
             }
-            StepKind::Listen { bind } => template_keys(&mut keys, bind),
+            StepKind::Listen { bind, .. } => template_keys(&mut keys, bind),
             StepKind::ReadLine { .. } => {}
             StepKind::FuncDef { body, .. } => {
                 for k in collect_env_references(body) {

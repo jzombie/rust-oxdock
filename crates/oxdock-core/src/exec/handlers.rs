@@ -426,7 +426,12 @@ pub(crate) fn dispatch_connect_step<P: ProcessManager>(
     step: &StepKind,
     cx: &mut StepCtx<'_, P>,
 ) -> Result<()> {
-    let StepKind::Connect { endpoint, timeout } = step else {
+    let StepKind::Connect {
+        endpoint,
+        timeout,
+        no_half_close,
+    } = step
+    else {
         unreachable!()
     };
     let endpoint = super::args::resolve_arg(endpoint, cx)?;
@@ -434,7 +439,7 @@ pub(crate) fn dispatch_connect_step<P: ProcessManager>(
         .as_ref()
         .map(|flag| super::args::resolve_arg_as_duration(flag, cx))
         .transpose()?;
-    super::net_bridge::connect(cx, 0, &endpoint, timeout)
+    super::net_bridge::connect(cx, 0, &endpoint, timeout, !no_half_close)
 }
 
 /// Pipeline dispatch wrapper for `Listen`. Used by the generated pipeline;
@@ -443,11 +448,15 @@ pub(crate) fn dispatch_listen_step<P: ProcessManager>(
     step: &StepKind,
     cx: &mut StepCtx<'_, P>,
 ) -> Result<()> {
-    let StepKind::Listen { bind } = step else {
+    let StepKind::Listen {
+        bind,
+        no_half_close,
+    } = step
+    else {
         unreachable!()
     };
     let bind = super::args::resolve_arg(bind, cx)?;
-    super::net_bridge::listen(cx, 0, &bind)
+    super::net_bridge::listen(cx, 0, &bind, !no_half_close)
 }
 
 /// Dispatch `SLEEP <duration>` — park the step without spawning a shell.

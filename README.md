@@ -1059,8 +1059,8 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | [`HASH_SHA256`](#hash_sha256) | `HASH_SHA256 <path>` |
 | [`EXIT`](#exit) | `EXIT <code>` |
 | [`SLEEP`](#sleep) | `SLEEP <duration>` |
-| [`CONNECT`](#connect) | `CONNECT <host:port> [--timeout <duration>]` |
-| [`LISTEN`](#listen) | `LISTEN [host:]port` |
+| [`CONNECT`](#connect) | `CONNECT <host:port> [--timeout <duration>] [--no-half-close]` |
+| [`LISTEN`](#listen) | `LISTEN [host:]port [--no-half-close]` |
 | [`WITH_IO`](#with_io) | `WITH_IO [<stream>[=pipe:<name>\|=$var], ...] <command> \| WITH_IO [bindings] { <commands> }` |
 | [`FOR`](#for) | `FOR $item: TYPE IN <expr> { <commands> } \| FOR $key: STRING, $value: TYPE IN <expr> { <commands> }` |
 | [`IF`](#if) | `IF <expr> { <commands> } [ELSE IF <expr> { <commands> } ...] [ELSE { <commands> }]` |
@@ -2669,7 +2669,7 @@ SLEEP $bare
 
 Dial a TCP endpoint and pump it through pipes.
 
-**Syntax:** `CONNECT <host:port> [--timeout <duration>]`
+**Syntax:** `CONNECT <host:port> [--timeout <duration>] [--no-half-close]`
 
 Dials `host:port` and pumps bytes bidirectionally between the
 socket and the ambient `WITH_IO` pipe bindings: socket bytes go
@@ -2685,8 +2685,13 @@ completion itself reports disconnects. The endpoint resolves at
 runtime, so variables and templates work.
 
 Socket close maps to pipe EOF; stdin EOF half-closes the socket
-write side while the read side continues. Outbound dialing may
-target any host; `LISTEN` binds are loopback-only.
+write side while the read side continues, so sessions terminate
+once both directions drain. Pass `--no-half-close` for
+interactive peers instead: the write side stays open after
+stdin EOF (no FIN for the peer to quit on), at the cost that
+only socket close, `CANCEL`, or `TIMEOUT` ends the session.
+Outbound dialing may target any host; `LISTEN` binds are
+loopback-only.
 
 
 **Arguments:**
@@ -2700,6 +2705,7 @@ target any host; `LISTEN` binds are loopback-only.
 | Flag | Type | Description |
 | --- | --- | --- |
 | `--timeout` | `STRING` | Dial timeout (e.g. 5s); defaults to 10s |
+| `--no-half-close` | `BOOL` | Keep the socket write side open after stdin EOF |
 
 **Examples:**
 
@@ -2724,7 +2730,7 @@ WITH_IO [stdin=pipe:req, stdout=pipe:resp] CONNECT not-an-endpoint
 
 Bind a loopback port and pump one connection through pipes.
 
-**Syntax:** `LISTEN [host:]port`
+**Syntax:** `LISTEN [host:]port [--no-half-close]`
 
 Binds an explicit loopback port and pumps a single accepted
 connection bidirectionally through the ambient `WITH_IO` pipe
@@ -2739,12 +2745,23 @@ non-loopback hosts, and ephemeral (`0`) or omitted ports are
 rejected. Ephemeral ports return only with native task-handle
 metadata in a follow-up.
 
+Like `CONNECT`, stdin EOF half-closes the socket write side;
+pass `--no-half-close` to keep interactive clients connected
+after the script stops producing (session then ends on client
+disconnect, `CANCEL`, or `TIMEOUT`).
+
 
 **Arguments:**
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
 | `bind` | [`STRING`](#value-type-string) | yes | Loopback bind (`[host:]port`, e.g. 127.0.0.1:8080) |
+
+**Flags:**
+
+| Flag | Type | Description |
+| --- | --- | --- |
+| `--no-half-close` | `BOOL` | Keep the socket write side open after stdin EOF |
 
 **Examples:**
 
