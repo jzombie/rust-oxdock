@@ -330,6 +330,14 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
         // Variable inspection carries the binding name unevaluated (see
         // `Expr::Inspect`): no function-name matching happens here.
         Expr::Inspect(var) => evaluate_inspect_var(var, cx),
+        // Bare `LET $p: PIPE`: mint a fresh anonymous backend key. The
+        // counter is shared across forks (Arc), so workers never re-mint
+        // a name, and the key spells nothing a `pipe:` literal can name.
+        Expr::FreshPipe => {
+            use std::sync::atomic::Ordering;
+            let id = cx.state.next_pipe_id.fetch_add(1, Ordering::SeqCst);
+            Ok(Value::pipe_anonymous(id))
+        }
         Expr::Arithmetic { op, left, right } => {
             let left_val = evaluate_expr(left, cx)?;
             let right_val = evaluate_expr(right, cx)?;

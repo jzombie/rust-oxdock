@@ -169,7 +169,10 @@ else_keyword = @{ "ELSE" ~ !(ASCII_ALPHANUMERIC | "_") }
 type_tag = @{ ASCII_ALPHA_UPPER ~ (ASCII_ALPHA_UPPER | ASCII_DIGIT | "_")* }
 
 for_statement = ${ for_keyword ~ gap ~ dollar_ident ~ gap ~ (":" ~ gap ~ type_tag ~ gap)? ~ ("," ~ gap ~ dollar_ident ~ gap ~ (":" ~ gap ~ type_tag ~ gap)?)? ~ in_keyword ~ gap ~ expr ~ gap ~ block }
-let_statement = ${ let_keyword ~ gap ~ dollar_ident ~ gap ~ ":" ~ gap ~ type_tag ~ gap ~ "=" ~ gap ~ expr }
+// Bare `LET $p: PIPE` (no `=`, no initializer) mints a fresh anonymous
+// pipe backend lazily at first binding. All other types still require
+// an initializer; the parser rejects those with a span error.
+let_statement = ${ let_keyword ~ gap ~ dollar_ident ~ gap ~ ":" ~ gap ~ type_tag ~ gap ~ ("=" ~ gap ~ expr)? }
 // Mutation is bare `$var = expr` (no keyword): the leading `$` distinguishes
 // it from `KEY=value` command assignments, which never start with `$`.
 mutate_statement = ${ dollar_ident ~ gap ~ "=" ~ gap ~ expr }

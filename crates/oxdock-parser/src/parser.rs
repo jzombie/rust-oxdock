@@ -1984,20 +1984,33 @@ fn parse_let_statement_from_pair(
             _ => {}
         }
     }
-    Ok(StepKind::Assign {
-        var: var.ok_or_else(|| {
-            ParseError::validation("LET", "LET requires a variable".to_string(), &span)
-        })?,
-        decl_type: decl_type.ok_or_else(|| {
-            ParseError::validation(
+    let var = var.ok_or_else(|| {
+        ParseError::validation("LET", "LET requires a variable".to_string(), &span)
+    })?;
+    let decl_type = decl_type.ok_or_else(|| {
+        ParseError::validation(
+            "LET",
+            "LET requires explicit type: LET $var: TYPE = <expr>".to_string(),
+            &span,
+        )
+    })?;
+    // Bare `LET $p: PIPE` (no initializer) mints a fresh anonymous pipe.
+    // Every other type still requires `= <expr>`.
+    let expr = match expr {
+        Some(e) => e,
+        None if decl_type == "PIPE" => Expr::FreshPipe,
+        None => {
+            return Err(ParseError::validation(
                 "LET",
-                "LET requires explicit type: LET $var: TYPE = <expr>".to_string(),
+                "LET requires an expression: LET $var: TYPE = <expr> (only LET $p: PIPE omits the initializer)".to_string(),
                 &span,
-            )
-        })?,
-        expr: expr.ok_or_else(|| {
-            ParseError::validation("LET", "LET requires an expression".to_string(), &span)
-        })?,
+            ));
+        }
+    };
+    Ok(StepKind::Assign {
+        var,
+        decl_type,
+        expr,
     })
 }
 
@@ -3659,7 +3672,7 @@ fn make_compare(ctx: &SpanContext, op: CompareOp, left: Expr, right: Expr) -> Pa
 }
 
 /// Convert an operand subtree to flat RPN. Returns `None` for shapes with
-/// no RPN encoding (`Not`/`Logical`/`List`/`Map`/stray boundary): callers
+/// no RPN encoding (`Not`/`Logical`/`List`/`Map`/`FreshPipe`/stray boundary): callers
 /// fall back to AST nodes evaluated recursively.
 fn expr_to_rpn(expr: &Expr) -> Option<Vec<MathOp>> {
     match expr {
@@ -3707,6 +3720,7 @@ fn expr_to_rpn(expr: &Expr) -> Option<Vec<MathOp>> {
             Some(ops)
         }
         Expr::CompiledMath(ops) => Some(ops.clone()),
+        Expr::FreshPipe => None,
         Expr::Not(_) | Expr::Logical { .. } | Expr::List(_) | Expr::Map(_) => None,
         Expr::UnsignedIntBoundary(_) => None,
     }

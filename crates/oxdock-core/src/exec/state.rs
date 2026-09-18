@@ -68,6 +68,11 @@ pub struct ExecState<P: ProcessManager> {
     /// Counter for generating unique task IDs. Shared across subscopes via Arc.
     #[allow(dead_code)]
     pub(super) next_task_id: Arc<AtomicU64>,
+    /// Counter for anonymous pipe backends minted by bare `LET $p: PIPE`.
+    /// Shared across subscopes via Arc so forked workers never re-mint a
+    /// name; the key contains a space no `pipe:` literal can spell, so
+    /// generated names never collide with user-named pipes.
+    pub(super) next_pipe_id: Arc<AtomicU64>,
     /// Whether we're inside an ASYNC block thread. When true, `handlers::run()`
     /// spawns in background mode so the handle can be registered for cancellation.
     pub(super) inside_async: bool,
@@ -250,7 +255,7 @@ impl<P: ProcessManager> ExecState<P> {
     /// - Shared assert_windows, assert_windows_stderr, exact_stdout (Arc clones)
     /// - Cloned io configuration
     /// - Independent cancel_token, active_process (child manages its own)
-    /// - Shared named_tasks and next_task_id (via Arc clone)
+    /// - Shared named_tasks, next_task_id, and next_pipe_id (via Arc clone)
     #[allow(dead_code)]
     pub(super) fn fork(&self) -> Self {
         Self {
@@ -269,6 +274,7 @@ impl<P: ProcessManager> ExecState<P> {
             active_process: Arc::new(Mutex::new(None)),
             named_tasks: Arc::clone(&self.named_tasks),
             next_task_id: Arc::clone(&self.next_task_id),
+            next_pipe_id: Arc::clone(&self.next_pipe_id),
             inside_async: true,
             keeper_expiry: None,
             cancellable: self.cancellable,

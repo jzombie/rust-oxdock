@@ -317,6 +317,7 @@ fn new_state<P: ProcessManager>(fs: Box<dyn WorkspaceFs>, io: ExecIo) -> Result<
         active_process: std::sync::Arc::new(std::sync::Mutex::new(None)),
         named_tasks: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         next_task_id: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        next_pipe_id: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         inside_async: false,
         keeper_expiry: None,
         cancellable: false,

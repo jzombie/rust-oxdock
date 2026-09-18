@@ -742,6 +742,9 @@ fn emit_expr(expr: &Expr, interp: &[(proc_macro2::Ident, usize)]) -> proc_macro2
             let op_tokens: Vec<_> = ops.iter().map(emit_math_op).collect();
             quote! { oxdock_parser::ast::Expr::CompiledMath(vec![#(#op_tokens),*]) }
         }
+        Expr::FreshPipe => {
+            quote! { oxdock_parser::ast::Expr::FreshPipe }
+        }
         Expr::UnsignedIntBoundary(_) => {
             panic!("internal error: UnsignedIntBoundary must not survive lowering")
         }

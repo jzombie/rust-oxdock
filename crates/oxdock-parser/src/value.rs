@@ -439,6 +439,14 @@ impl Value {
         Self::mint_heap(PipeValue::descriptor(), PipeValue(name))
     }
 
+    /// Construct an anonymous pipe-name word for bare `LET $p: PIPE`.
+    /// The key embeds a space no `pipe:` literal can spell, so generated
+    /// names never collide with user-named pipes. Transitional: names
+    /// stand in for owned handles until the backend rekey lands.
+    pub fn pipe_anonymous(id: u64) -> Self {
+        Self::pipe(format!("anon pipe #{id}"))
+    }
+
     /// Read an integer payload. Returns `None` for non-`INT` words.
     pub fn as_i64(&self) -> Option<i64> {
         self.read_inline::<IntValue>(IntValue::descriptor())

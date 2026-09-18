@@ -838,6 +838,7 @@ fn create_exec_state(fs: MockFs) -> ExecState<MockProcessManager> {
         active_process: Arc::new(std::sync::Mutex::new(None)),
         named_tasks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         next_task_id: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        next_pipe_id: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         inside_async: false,
         keeper_expiry: None,
         cancellable: false,
@@ -2804,6 +2805,85 @@ fn bridge_spawn_manifest_ensures_consumed_variable_pipes() {
     .expect("parse ok");
     let files = run_bridge_script(steps, vec![], Duration::from_secs(15));
     assert_eq!(file_content(&files, "kind.txt"), b"os");
+}
+
+#[test]
+fn bare_let_pipe_declarations_are_isolated_channels() {
+    // Two bare declarations must never share a channel: the cross-read
+    // below returns each pipe's own bytes. If both names aliased one
+    // backend, FIFO order would surface "from-a" on the $b read instead.
+    let steps = crate::parse_script(indoc! {r#"
+        LET $a: PIPE
+        LET $b: PIPE
+        WITH_IO [stdout=$a] ECHO "from-a"
+        WITH_IO [stdout=$b] ECHO "from-b"
+        WITH_IO [stdin=$b] READ_LINE $second
+        WITH_IO [stdin=$a] READ_LINE $first
+        WRITE out.txt "{{ $first }}-{{ $second }}"
+    "#})
+    .expect("parse ok");
+    let files = run_bridge_steps(&steps, vec![]).expect("bare pipes round-trip");
+    assert_eq!(file_content(&files, "out.txt"), b"from-a-from-b");
+}
+
+#[test]
+fn bare_let_pipe_copies_share_one_backend() {
+    // `LET $q: PIPE = $p` clones the handle: producer on `$p`, consumer
+    // on `$q`, same channel (explicit-sharing fan-out per the plan).
+    let steps = crate::parse_script(indoc! {r#"
+        LET $p: PIPE
+        LET $q: PIPE = $p
+        WITH_IO [stdout=$p] ECHO "shared"
+        WITH_IO [stdin=$q] READ_LINE $got
+        WRITE out.txt "{{ $got }}"
+    "#})
+    .expect("parse ok");
+    let files = run_bridge_steps(&steps, vec![]).expect("aliased pipes round-trip");
+    assert_eq!(file_content(&files, "out.txt"), b"shared");
+}
+
+#[test]
+fn bare_let_pipe_mints_distinct_unspellable_names() {
+    // Transitional name backing: every bare declaration mints a key no
+    // `pipe:` literal can spell (it contains a space), so anonymous
+    // backends never collide with user-named pipes.
+    let steps = crate::parse_script("LET $a: PIPE\nLET $b: PIPE\n").expect("parse ok");
+    let fs = MockFs::new();
+    let mut state = create_exec_state(fs.clone());
+    let mut proc = MockProcessManager::default();
+    execute_steps(
+        &mut state,
+        &mut proc,
+        &steps,
+        CommandStdin::Null,
+        false,
+        None,
+        None,
+        true,
+    )
+    .expect("bare declarations run");
+    let name_a = state
+        .get_var("a")
+        .expect("var a")
+        .as_pipe_name()
+        .expect("pipe a")
+        .to_string();
+    let name_b = state
+        .get_var("b")
+        .expect("var b")
+        .as_pipe_name()
+        .expect("pipe b")
+        .to_string();
+    assert_ne!(
+        name_a, name_b,
+        "bare declarations must mint distinct backends"
+    );
+    for name in [&name_a, &name_b] {
+        assert!(
+            name.contains(' '),
+            "anonymous pipe key {name:?} must be unspellable as a pipe: literal"
+        );
+    }
 }
 
 #[test]

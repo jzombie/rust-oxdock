@@ -1631,7 +1631,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
         },
         CommandMeta {
             name: "LET",
-            syntax: "LET $var: TYPE = <expr> | LET $var: TYPE = ASYNC { <commands> } | LET $var: TYPE = <command> | LET $var: TYPE = AWAIT $task",
+            syntax: "LET $var: TYPE = <expr> | LET $p: PIPE | LET $var: TYPE = ASYNC { <commands> } | LET $var: TYPE = <command> | LET $var: TYPE = AWAIT $task",
             summary: "Bind script-local variables.",
             description: indoc! {r#"
                 Declares a script-local variable with an explicit type (STRING, INT,
@@ -1659,6 +1659,10 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 `INSPECT($var)` snapshots, `GLOB("*.md")`, `INT(x)` /
                 `FLOAT(x)` conversions — never a `{{ ... }}` template;
                 interpolation happens in string values, not here.
+                The one exception is pipes: `LET $p: PIPE` with no `=`
+                and no initializer mints a fresh anonymous backend,
+                lazily materialized at first binding, so two declarations
+                never share a channel.
 
                 Numbers are numeric literals: `42` binds `INT`, `3.14` binds
                 `FLOAT`. `Int x Int` stays `INT` (checked, integer division,
@@ -2476,7 +2480,12 @@ impl fmt::Display for StepKind {
                 decl_type,
                 expr,
             } => {
-                write!(f, "LET ${}: {} = {}", var, decl_type, expr)
+                // Bare pipe declarations round-trip without an initializer.
+                if matches!(expr, Expr::FreshPipe) {
+                    write!(f, "LET ${}: {}", var, decl_type)
+                } else {
+                    write!(f, "LET ${}: {} = {}", var, decl_type, expr)
+                }
             }
             StepKind::Set { var, expr } => write!(f, "${} = {}", var, expr),
             StepKind::AssignCapture {

@@ -302,6 +302,38 @@ mod tests {
     }
 
     #[test]
+    fn bare_let_pipe_declares_fresh_backend() {
+        let steps = parse_script("LET $p: PIPE", test_lower).expect("bare LET $p: PIPE parses");
+        assert_eq!(steps.len(), 1);
+        match &steps[0].kind {
+            StepKind::Assign {
+                var,
+                decl_type,
+                expr,
+            } => {
+                assert_eq!(var, "p");
+                assert_eq!(decl_type, "PIPE");
+                assert!(
+                    matches!(expr, Expr::FreshPipe),
+                    "expected FreshPipe, got {expr:?}"
+                );
+            }
+            other => panic!("expected Assign, got {other:?}"),
+        }
+        // Display round-trips the bare form (no initializer).
+        assert_eq!(steps[0].kind.to_string(), "LET $p: PIPE");
+        let again =
+            parse_script(&steps[0].kind.to_string(), test_lower).expect("Display round-trips");
+        assert_eq!(again, steps);
+        // Every other type still requires an initializer.
+        let err = parse_script("LET $x: STRING", test_lower).expect_err("bare STRING must fail");
+        assert!(
+            err.to_string().contains("requires an expression"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn brace_blocks_require_guard() {
         let script = indoc! {r#"
             {

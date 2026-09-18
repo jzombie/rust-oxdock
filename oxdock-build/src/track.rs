@@ -159,6 +159,8 @@ pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
                 }
             }
             Expr::Inspect(_) => {}
+            // Fresh pipe backends carry no env references.
+            Expr::FreshPipe => {}
             Expr::Compare { left, right, .. } => {
                 walk_expr(out, left);
                 walk_expr(out, right);

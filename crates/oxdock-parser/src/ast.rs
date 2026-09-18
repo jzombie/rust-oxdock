@@ -549,6 +549,12 @@ pub enum Expr {
     /// Lowering-optimized form: folded literals stay `Literal`, dynamic
     /// arithmetic/comparison subtrees arrive here as flat RPN.
     CompiledMath(Vec<MathOp>),
+    /// Fresh anonymous pipe backend (`LET $p: PIPE` with no initializer).
+    /// Evaluates to a pipe value keyed by a generated name that no
+    /// `pipe:` literal can spell, so bare declarations never collide
+    /// with named pipes. Transitional representation until backends
+    /// become owned handles.
+    FreshPipe,
     /// Lowering-only intermediate staging `9223372036854775808` (the unsigned
     /// half of `i64::MIN`). Valid only as the direct child of unary `-`;
     /// any instance reaching lowering completion bails integer overflow.
@@ -713,6 +719,10 @@ impl fmt::Display for Expr {
             Expr::CompiledMath(ops) => {
                 write!(f, "{}", format_compiled_math(ops))
             }
+            // No expression syntax produces this (bare `LET` is a
+            // statement): render loudly non-round-trippable so a stray
+            // use fails at re-parse instead of aliasing a named pipe.
+            Expr::FreshPipe => write!(f, "<fresh pipe>"),
             Expr::UnsignedIntBoundary(n) => write!(f, "{}", n),
             Expr::Not(inner) => {
                 // Parenthesize compound operands so Display round-trips:

@@ -1064,7 +1064,7 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | [`WITH_IO`](#with_io) | `WITH_IO [<stream>[=pipe:<name>\|=$var], ...] <command> \| WITH_IO [bindings] { <commands> }` |
 | [`FOR`](#for) | `FOR $item: TYPE IN <expr> { <commands> } \| FOR $key: STRING, $value: TYPE IN <expr> { <commands> }` |
 | [`IF`](#if) | `IF <expr> { <commands> } [ELSE IF <expr> { <commands> } ...] [ELSE { <commands> }]` |
-| [`LET`](#let) | `LET $var: TYPE = <expr> \| LET $var: TYPE = ASYNC { <commands> } \| LET $var: TYPE = <command> \| LET $var: TYPE = AWAIT $task` |
+| [`LET`](#let) | `LET $var: TYPE = <expr> \| LET $p: PIPE \| LET $var: TYPE = ASYNC { <commands> } \| LET $var: TYPE = <command> \| LET $var: TYPE = AWAIT $task` |
 | [`MUTATION`](#mutation) | `$var = <expr>` |
 | [`ASYNC`](#async) | `ASYNC <command...> \| ASYNC { <commands> } \| LET $var: HANDLE = ASYNC { <commands> }` |
 | [`AWAIT`](#await) | `AWAIT $var \| LET $out: STRING = AWAIT $var` |
@@ -1267,7 +1267,7 @@ ASSERT_EQ $t2 "absent"
 
 Bind script-local variables.
 
-**Syntax:** `LET $var: TYPE = <expr> | LET $var: TYPE = ASYNC { <commands> } | LET $var: TYPE = <command> | LET $var: TYPE = AWAIT $task`
+**Syntax:** `LET $var: TYPE = <expr> | LET $p: PIPE | LET $var: TYPE = ASYNC { <commands> } | LET $var: TYPE = <command> | LET $var: TYPE = AWAIT $task`
 
 Declares a script-local variable with an explicit type (STRING, INT,
 FLOAT, BOOL, PIPE, LIST, MAP, HANDLE, DURATION, PATH). Duplicate LET
@@ -1294,6 +1294,10 @@ parentheses), comparisons (`< <= > >=` binding tighter than
 `INSPECT($var)` snapshots, `GLOB("*.md")`, `INT(x)` /
 `FLOAT(x)` conversions — never a `{{ ... }}` template;
 interpolation happens in string values, not here.
+The one exception is pipes: `LET $p: PIPE` with no `=`
+and no initializer mints a fresh anonymous backend,
+lazily materialized at first binding, so two declarations
+never share a channel.
 
 Numbers are numeric literals: `42` binds `INT`, `3.14` binds
 `FLOAT`. `Int x Int` stays `INT` (checked, integer division,
