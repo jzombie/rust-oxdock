@@ -3055,6 +3055,117 @@ fn bridge_listen_refuses_while_serving() {
     miri,
     ignore = "uses real loopback sockets, which die under Miri isolation"
 )]
+fn bridge_shared_pair_proxy_terminates() {
+    // Two pumps sharing one pipe pair (the transparent-proxy topology):
+    // client bytes flow up, upstream bytes flow down, and a client
+    // disconnect cascades through both tasks so both AWAITs return.
+    // Upstream is held by the test; the client side is the script listener.
+    let upstream = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let upstream_port = upstream.local_addr().expect("addr").port();
+    let upstream_text = upstream_port.to_string();
+    let helper = std::thread::spawn(move || {
+        // Serve dials until one full exchange completes. Dials from failed
+        // bind-retry attempts resolve fast (their scripts are already dead,
+        // so EOF arrives promptly); only the live attempt sends data. The
+        // timeout is a pathological backstop and must comfortably exceed
+        // the probe-plus-dial latency of the live path.
+        loop {
+            let (mut conn, _) = upstream.accept().expect("accept");
+            conn.set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("timeout");
+            let mut line = Vec::new();
+            let mut byte = [0u8; 1];
+            let got = loop {
+                match conn.read(&mut byte) {
+                    Ok(0) => break None,
+                    Ok(_) => {
+                        line.push(byte[0]);
+                        if byte[0] == b'\n' {
+                            break Some(line);
+                        }
+                    }
+                    Err(_) => break None,
+                }
+            };
+            match got {
+                Some(line) => {
+                    assert_eq!(line, b"ping\n");
+                    conn.set_read_timeout(Some(Duration::from_secs(5)))
+                        .expect("timeout");
+                    conn.write_all(b"pong\n").expect("write reply");
+                    return;
+                }
+                None => continue,
+            }
+        }
+    });
+    let steps = crate::parse_script(indoc! {r#"
+        LET $ls: HANDLE = ASYNC {
+          WITH_IO [stdin=pipe:s2c, stdout=pipe:c2s] LISTEN 127.0.0.1:{{ env:BRIDGE_PORT }}
+        }
+        LET $up: HANDLE = ASYNC {
+          WITH_IO [stdin=pipe:c2s, stdout=pipe:s2c] CONNECT 127.0.0.1:{{ env:UPSTREAM_PORT }}
+        }
+        AWAIT $up
+        AWAIT $ls
+        WRITE done.txt "both-tasks-completed"
+    "#})
+    .expect("parse ok");
+    for _ in 0..10 {
+        let port = TcpListener::bind("127.0.0.1:0")
+            .expect("reserve candidate")
+            .local_addr()
+            .expect("candidate addr")
+            .port();
+        let port_text = port.to_string();
+        let attempt = steps.clone();
+        let upstream_text = upstream_text.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(run_bridge_steps(
+                &attempt,
+                vec![
+                    ("BRIDGE_PORT".to_string(), port_text),
+                    ("UPSTREAM_PORT".to_string(), upstream_text),
+                ],
+            ));
+        });
+        match rx.recv_timeout(Duration::from_millis(500)) {
+            // Fast bind failure: stolen port, retry with a fresh candidate.
+            Ok(Err(err)) if format!("{err:#}").contains("bind failed") => continue,
+            Ok(Err(err)) => panic!("bridge script failed: {err:#}"),
+            Ok(Ok(_)) => panic!("script completed without clients"),
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("bridge script thread panicked")
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                // Both bridges are up; drive one exchange, then disconnect
+                // and require both tasks to finish.
+                let mut client = connect_retry(port);
+                client.write_all(b"ping\n").expect("write ping");
+                let reply = read_line_deadline(&mut client, "pong line");
+                assert_eq!(reply, b"pong\n");
+                drop(client);
+                match rx.recv_timeout(Duration::from_secs(15)) {
+                    Ok(Ok(files)) => {
+                        assert_eq!(file_content(&files, "done.txt"), b"both-tasks-completed");
+                        helper.join().expect("upstream thread");
+                        return;
+                    }
+                    Ok(Err(err)) => panic!("bridge script failed: {err:#}"),
+                    Err(_) => panic!("bridge tasks did not finish after client close"),
+                }
+            }
+        }
+    }
+    panic!("bridge script kept hitting held ports");
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "uses real loopback sockets, which die under Miri isolation"
+)]
 fn bridge_peer_fin_then_late_producer_completes() {
     // The server half-closes immediately; the task must survive the silent
     // period (no premature exit on socket EOF) and still deliver bytes the
