@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [Unreleased]
+
+### Changed
+
+- `FUNC` reference documents the statement-call form (`GREET("bex")` discards the value); the internal `bare_call_statement` grammar rule is renamed to `call_statement` with no syntax change.
+- READMEs compare Rust host embedding against embedding Rust in Python.
+
 ## [0.16.0-alpha] - 2026-09-17
 
 ### Added
