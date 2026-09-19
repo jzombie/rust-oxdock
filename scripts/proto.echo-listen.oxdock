@@ -5,7 +5,8 @@ LET $server: MAP = SSH_SERVE(
     "127.0.0.1:2251",
     "test",
     "test123", {
-        key_path: "test_key"
+        // "/temp" relative to workspace, not filesystem
+        key_path: "/temp/test_key"
     }
 )
 
