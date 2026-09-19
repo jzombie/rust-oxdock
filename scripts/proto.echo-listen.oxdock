@@ -37,6 +37,8 @@ WHILE true {
     LET $c_in: PIPE
     LET $c_out: PIPE
     LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $c_in, $c_out) }
+
+    # TODO: Can this work without shelling-out to host's SSH?
     LET $pty: HANDLE = ASYNC { SSH_PTY_RUN($m.server, ["ssh", "-tt", "-o", "BatchMode=yes", "orb"], 0, 0, $c_out, $c_in) }
 
     AWAIT $acc
