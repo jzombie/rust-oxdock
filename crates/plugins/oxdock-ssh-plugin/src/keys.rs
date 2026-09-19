@@ -64,20 +64,34 @@ pub fn load_or_create_host_key<P: ProcessManager>(
 }
 
 /// Bounded re-read for every host-key load: the winner's PEM bytes land
-/// microseconds after the file appears, so a parse failure may be
+/// microseconds after the file appears, so a read or parse failure may be
 /// transient regardless of which path the caller took (lost `create_new`
-/// race, or `exists()` already true mid-write). Retry briefly, then
-/// surface the last error unchanged (deterministic errors such as bad
-/// permissions are still reported, just ~50ms later).
+/// race, or `exists()` already true mid-write). Only the byte read plus
+/// OpenSSH parse retries; the metadata and permission gate runs once up
+/// front and the key-type check runs on the success path, so deterministic
+/// failures (bad permissions, non-Ed25519 key) fast-fail with no sleep.
 fn read_existing_key_retry(
     resolver: &PathResolver,
     guarded: &GuardedPath,
     func: &str,
 ) -> Result<Option<PrivateKey>> {
+    let meta = resolver
+        .metadata(guarded)
+        .with_context(|| format!("cannot stat host key {}", guarded.display()))?;
+    assert_safe_mode(guarded, &meta, func)?;
     let mut attempts = 0;
     loop {
-        match read_existing_key(resolver, guarded, func) {
-            Ok(key) => return Ok(key),
+        match read_and_parse_key(resolver, guarded, func) {
+            Ok(key) => {
+                if key.algorithm() != Algorithm::Ed25519 {
+                    bail!(
+                        "{func} host key {} must be Ed25519, found {:?}",
+                        guarded.display(),
+                        key.algorithm()
+                    );
+                }
+                return Ok(Some(key));
+            }
             Err(_) if attempts < 5 => {
                 attempts += 1;
                 std::thread::sleep(std::time::Duration::from_millis(10));
@@ -87,29 +101,18 @@ fn read_existing_key_retry(
     }
 }
 
-/// Validate permissions and parse a pre-existing host key file.
-fn read_existing_key(
+/// Read and OpenSSH-parse a pre-existing host key file: the only stage
+/// subject to first-start partial writes, hence the only stage retried.
+fn read_and_parse_key(
     resolver: &PathResolver,
     guarded: &GuardedPath,
     func: &str,
-) -> Result<Option<PrivateKey>> {
-    let meta = resolver
-        .metadata(guarded)
-        .with_context(|| format!("cannot stat host key {}", guarded.display()))?;
-    assert_safe_mode(guarded, &meta, func)?;
+) -> Result<PrivateKey> {
     let bytes = resolver
         .read_file(guarded)
-        .with_context(|| format!("cannot read host key {}", guarded.display()))?;
-    let key = PrivateKey::from_openssh(&bytes)
-        .with_context(|| format!("cannot parse host key {}", guarded.display()))?;
-    if key.algorithm() != Algorithm::Ed25519 {
-        bail!(
-            "{func} host key {} must be Ed25519, found {:?}",
-            guarded.display(),
-            key.algorithm()
-        );
-    }
-    Ok(Some(key))
+        .with_context(|| format!("{func} cannot read host key {}", guarded.display()))?;
+    PrivateKey::from_openssh(&bytes)
+        .with_context(|| format!("{func} cannot parse host key {}", guarded.display()))
 }
 
 /// Bail when group or world have any access to a pre-existing key file
