@@ -834,7 +834,7 @@ mod tests {
         let resolver = PathResolver::new(workspace_root.as_path(), workspace_root.as_path())?;
         let script = indoc! {"
             IMPORT [STD, SSH]
-            LET $m: MAP = SSH_SERVE(\"127.0.0.1:0\", \"test\", \"test123\")
+            LET $m: MAP = SSH_SERVE(\"127.0.0.1:0\", \"test\", \"test123\", {})
             SSH_CLOSE($m.server)
         "};
         resolver.write_file(&script_path, script.as_bytes())?;
@@ -861,7 +861,7 @@ mod tests {
         let resolver = PathResolver::new(workspace_root.as_path(), workspace_root.as_path())?;
         let script = indoc! {"
             IMPORT [STD, SSH]
-            LET $m: MAP = SSH_SERVE(\"127.0.0.1:0\", \"test\", \"test123\")
+            LET $m: MAP = SSH_SERVE(\"127.0.0.1:0\", \"test\", \"test123\", {})
             SSH_CLOSE($m.server)
         "};
         resolver.write_file(&script_path, script.as_bytes())?;

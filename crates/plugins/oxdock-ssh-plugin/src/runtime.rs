@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use bytes::Bytes;
-use russh::keys::{Algorithm, PrivateKey};
+use russh::keys::PrivateKey;
 use tokio::sync::mpsc;
 
 use crate::auth::ServerFactory;
@@ -23,9 +23,11 @@ const INACTIVITY_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Drive one `SSH_SERVE` listener until shutdown. Owns the current-thread
 /// runtime; returns when the listener closes (shutdown or fatal accept
-/// error). Connected sessions drain independently.
+/// error). Connected sessions drain independently. The host key arrives
+/// fully resolved (ephemeral or stable); this module never touches disk.
 pub fn serve(
     listener: std::net::TcpListener,
+    key: PrivateKey,
     user: String,
     password: String,
     queue: Arc<SessionQueue>,
@@ -40,7 +42,7 @@ pub fn serve(
         Err(_) => return,
     };
     runtime.block_on(async move {
-        serve_async(listener, user, password, queue, pty_size, shutdown_rx)
+        serve_async(listener, key, user, password, queue, pty_size, shutdown_rx)
             .await
             .map(|_| ())
             .unwrap_or(());
@@ -49,14 +51,13 @@ pub fn serve(
 
 async fn serve_async(
     listener: std::net::TcpListener,
+    key: PrivateKey,
     user: String,
     password: String,
     queue: Arc<SessionQueue>,
     pty_size: SharedPtySize,
     shutdown_rx: std::sync::mpsc::Receiver<ShutdownSignal>,
 ) -> Result<()> {
-    let key = PrivateKey::random(&mut rand10::rng(), Algorithm::Ed25519)
-        .context("generate ephemeral Ed25519 host key")?;
     let config = Arc::new(russh::server::Config {
         inactivity_timeout: Some(INACTIVITY_TIMEOUT),
         auth_rejection_time: Duration::from_secs(1),

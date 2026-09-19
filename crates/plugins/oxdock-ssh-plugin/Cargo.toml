@@ -14,6 +14,7 @@ publish.workspace = true
 anyhow.workspace = true
 bytes.workspace = true
 oxdock-core.workspace = true
+oxdock-fs.workspace = true
 oxdock-func-macro.workspace = true
 oxdock-pipe.workspace = true
 oxdock-process.workspace = true
@@ -25,7 +26,6 @@ tokio.workspace = true
 
 [dev-dependencies]
 indoc.workspace = true
-oxdock-fs.workspace = true
 oxdock-sys-test-utils.workspace = true
 tokio.workspace = true
 

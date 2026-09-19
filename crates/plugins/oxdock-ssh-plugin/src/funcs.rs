@@ -14,8 +14,10 @@ use anyhow::{Context, Result, bail};
 use oxdock_core::{HostModule, OxDockFn, OxDockType, StepCtx, Value};
 use oxdock_func_macro::oxdock_func;
 use oxdock_process::ProcessManager;
+use russh::keys::{Algorithm, PrivateKey};
 
 use crate::bridge::{pump_pipe_to_pipe, pump_session};
+use crate::keys::load_or_create_host_key;
 use crate::runtime::{connect_runtime, connect_session};
 use crate::state::{CLOSE_JOIN_TIMEOUT, Dequeue, ServerState, SessionQueue, ShutdownSignal};
 use crate::types::SshServerTag;
@@ -56,20 +58,70 @@ fn argv_list(value: &Value, func: &str) -> Result<Vec<String>> {
         .collect()
 }
 
+/// Read the options MAP for `SSH_SERVE`. The 4th argument must be a MAP;
+/// unknown keys bail so script typos fail fast instead of silently ignored.
+fn serve_options(options: &Value) -> Result<&BTreeMap<String, Value>> {
+    options.as_map().ok_or_else(|| {
+        anyhow::anyhow!(
+            "SSH_SERVE options must be a MAP, got {}",
+            options.type_name()
+        )
+    })
+}
+
+/// Read an optional STRING key from the options MAP. Missing, empty, or
+/// whitespace-only binds `None`; present non-strings bail.
+fn optional_string(map: &BTreeMap<String, Value>, func: &str, key: &str) -> Result<Option<String>> {
+    let Some(value) = map.get(key) else {
+        return Ok(None);
+    };
+    let Some(s) = value.as_str() else {
+        bail!(
+            "{func} option '{key}' must be a STRING, got {}",
+            value.type_name()
+        );
+    };
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(s.to_string()))
+}
+
 /// Spin up an ephemeral loopback SSH server with the given credentials.
-/// An empty password generates a random one. Non-blocking: returns a MAP
-/// with `server` (SSH_SERVER), `addr` (STRING `host:port`), `username`
-/// and `password` (STRINGs).
-#[oxdock_func(pure, returns = "MAP", summary = "Serve ephemeral SSH on loopback.")]
-fn ssh_serve(bind: String, username: String, password: String) -> Result<Value> {
+/// An empty password generates a random one. `options` is a MAP with the
+/// optional `key_path` STRING (workspace-relative OpenSSH Ed25519 file,
+/// load-or-create; absent or blank keeps the ephemeral in-memory key).
+/// Non-blocking: returns a MAP with `server` (SSH_SERVER),
+/// `addr` (STRING `host:port`), `username` and `password` (STRINGs).
+#[oxdock_func(returns = "MAP", summary = "Serve ephemeral SSH on loopback.")]
+fn ssh_serve<P: ProcessManager>(
+    cx: &mut StepCtx<P>,
+    bind: String,
+    username: String,
+    password: String,
+    options: Value,
+) -> Result<Value> {
     if username.is_empty() {
         bail!("SSH_SERVE username must not be empty");
     }
+    let map = serve_options(&options)?;
+    for key in map.keys() {
+        if key != "key_path" {
+            bail!("SSH_SERVE() unknown option '{key}' (expected: key_path)");
+        }
+    }
+    let key_path = optional_string(map, "SSH_SERVE", "key_path")?;
     let (host, port) = parse_serve_bind(&bind)?;
     let password = if password.is_empty() {
         ephemeral_password()
     } else {
         password
+    };
+    let host_key = match load_or_create_host_key(cx, "SSH_SERVE", key_path)? {
+        Some(key) => key,
+        None => PrivateKey::random(&mut rand10::rng(), Algorithm::Ed25519)
+            .context("generate ephemeral Ed25519 host key")?,
     };
     let bind_host = if host.is_empty() {
         "127.0.0.1"
@@ -90,11 +142,13 @@ fn ssh_serve(bind: String, username: String, password: String) -> Result<Value> 
     let thread_pty_size = Arc::clone(&pty_size);
     let thread_user = username.clone();
     let thread_pass = password.clone();
+    let thread_key = host_key;
     let thread = std::thread::Builder::new()
         .name(id.clone())
         .spawn(move || {
             crate::runtime::serve(
                 listener,
+                thread_key,
                 thread_user,
                 thread_pass,
                 thread_queue,

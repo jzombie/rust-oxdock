@@ -291,6 +291,40 @@ impl PathResolver {
     pub fn truncate_spill_file(&self, _path: &GuardedPath, _len: u64) -> Result<()> {
         bail!("spill files are not supported under Miri (memory-only)")
     }
+
+    /// Write a secret file with `0600` enforced at open time (never
+    /// write-then-chmod): `create_new` plus `mode(0o600)` on Unix, so key
+    /// bytes never land under default umask permissions. Fails when the
+    /// file already exists; callers fall back to validating and reading
+    /// the existing file. Host only; Miri callers bail.
+    #[cfg(not(miri))]
+    #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+    pub fn write_private_file(&self, path: &GuardedPath, contents: &[u8]) -> Result<()> {
+        let guarded = self
+            .check_access(path.as_path(), AccessMode::Write)
+            .with_context(|| format!("private write denied for {}", path.display()))?;
+        if let Some(parent) = guarded.as_path().parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("creating dir {}", parent.display()))?;
+        }
+        #[cfg(unix)]
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options
+            .open(guarded.as_path())
+            .with_context(|| format!("failed to create private {}", guarded.display()))?;
+        std::io::Write::write_all(&mut file, contents)
+            .with_context(|| format!("failed to write private {}", guarded.display()))?;
+        Ok(())
+    }
+
+    #[cfg(miri)]
+    pub fn write_private_file(&self, _path: &GuardedPath, _contents: &[u8]) -> Result<()> {
+        bail!("private files are not supported under Miri (memory-only)")
+    }
 }
 
 /// Read/write/seek handle for a guarded spill file (host only).

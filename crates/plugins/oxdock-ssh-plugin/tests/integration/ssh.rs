@@ -173,7 +173,7 @@ fn serve_and_close_roundtrip() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: MAP = SSH_SERVE("127.0.0.1:0", "guest", "")
+        LET $m: MAP = SSH_SERVE("127.0.0.1:0", "guest", "", {})
         WRITE addr.txt "{{ $m.addr }}"
         LET $closed: BOOL = SSH_CLOSE($m.server)
         WRITE closed.txt "{{ $closed }}"
@@ -192,7 +192,7 @@ fn wrong_password_rejected() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: MAP = SSH_SERVE("127.0.0.1:23221", "guest", "right-pass")
+        LET $m: MAP = SSH_SERVE("127.0.0.1:23221", "guest", "right-pass", {})
         SLEEP 8s
         SSH_CLOSE($m.server)
     "#};
@@ -216,7 +216,7 @@ fn accept_echo_roundtrip() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: MAP = SSH_SERVE("127.0.0.1:23222", "guest", "echo-pass")
+        LET $m: MAP = SSH_SERVE("127.0.0.1:23222", "guest", "echo-pass", {})
         LET $in: PIPE
         LET $out: PIPE
         LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
@@ -254,7 +254,7 @@ fn pty_request_accepted_echo_roundtrip() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: MAP = SSH_SERVE("127.0.0.1:23225", "guest", "pty-pass")
+        LET $m: MAP = SSH_SERVE("127.0.0.1:23225", "guest", "pty-pass", {})
         LET $in: PIPE
         LET $out: PIPE
         LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
@@ -309,7 +309,7 @@ fn pty_explicit_size_unix() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: MAP = SSH_SERVE("127.0.0.1:0", "u", "p")
+        LET $m: MAP = SSH_SERVE("127.0.0.1:0", "u", "p", {})
         LET $in: PIPE
         LET $out: PIPE
         LET $t: HANDLE = ASYNC { SSH_PTY_RUN($m.server, ["sh", "-c", "stty size"], 40, 100, $in, $out) }
@@ -332,7 +332,7 @@ fn pty_explicit_size_windows() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: MAP = SSH_SERVE("127.0.0.1:0", "u", "p")
+        LET $m: MAP = SSH_SERVE("127.0.0.1:0", "u", "p", {})
         LET $in: PIPE
         LET $out: PIPE
         LET $t: HANDLE = ASYNC { SSH_PTY_RUN($m.server, ["cmd", "/c", "mode con"], 40, 100, $in, $out) }
@@ -359,7 +359,7 @@ fn pty_live_resize_unix() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: MAP = SSH_SERVE("127.0.0.1:0", "u", "p")
+        LET $m: MAP = SSH_SERVE("127.0.0.1:0", "u", "p", {})
         WRITE addr.txt "{{ $m.addr }}"
         LET $in: PIPE
         LET $out: PIPE
@@ -398,7 +398,7 @@ fn pty_live_resize_windows() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: MAP = SSH_SERVE("127.0.0.1:0", "u", "p")
+        LET $m: MAP = SSH_SERVE("127.0.0.1:0", "u", "p", {})
         WRITE addr.txt "{{ $m.addr }}"
         LET $in: PIPE
         LET $out: PIPE
@@ -433,7 +433,7 @@ fn main_thread_accept_bails() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: MAP = SSH_SERVE("127.0.0.1:0", "guest", "pass")
+        LET $m: MAP = SSH_SERVE("127.0.0.1:0", "guest", "pass", {})
         LET $in: PIPE
         LET $out: PIPE
         SSH_ACCEPT($m.server, $in, $out)
@@ -449,7 +449,7 @@ fn teardown_wakes_blocked_accept() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: MAP = SSH_SERVE("127.0.0.1:0", "guest", "pass")
+        LET $m: MAP = SSH_SERVE("127.0.0.1:0", "guest", "pass", {})
         LET $in: PIPE
         LET $out: PIPE
         LET $t: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
@@ -504,7 +504,7 @@ fn inner_exit_closes_outer_session() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: MAP = SSH_SERVE("127.0.0.1:0", "test", "test123")
+        LET $m: MAP = SSH_SERVE("127.0.0.1:0", "test", "test123", {})
         WRITE addr.txt "{{ $m.addr }}"
         LET $c_in: PIPE
         LET $c_out: PIPE
@@ -564,7 +564,7 @@ fn real_openssh_client_echo_roundtrip() {
         IMPORT [STD, SSH]
         WRITE askpass.sh "#!/bin/sh\necho test123\n"
         RUN ["chmod", "+x", "askpass.sh"]
-        LET $m: MAP = SSH_SERVE("127.0.0.1:0", "test", "test123")
+        LET $m: MAP = SSH_SERVE("127.0.0.1:0", "test", "test123", {})
         WRITE addr.txt "{{ $m.addr }}"
         LET $in: PIPE
         LET $out: PIPE
@@ -624,8 +624,8 @@ fn proxy_outer_to_inner_roundtrip() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $o: MAP = SSH_SERVE("127.0.0.1:23223", "outer", "outer-pass")
-        LET $i: MAP = SSH_SERVE("127.0.0.1:23224", "inner", "inner-pass")
+        LET $o: MAP = SSH_SERVE("127.0.0.1:23223", "outer", "outer-pass", {})
+        LET $i: MAP = SSH_SERVE("127.0.0.1:23224", "inner", "inner-pass", {})
         LET $j_in: PIPE
         LET $j_out: PIPE
         LET $h_inner: HANDLE = ASYNC { SSH_ACCEPT($i.server, $j_in, $j_out) }
@@ -665,4 +665,266 @@ fn proxy_outer_to_inner_roundtrip() {
         .join()
         .expect("script thread joins")
         .expect("proxy script completes after disconnect");
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "needs loopback TCP plus threads plus a Tokio runtime")]
+fn unknown_serve_option_bails() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let err = run_script(
+        &root,
+        indoc! {r#"
+            IMPORT [STD, SSH]
+            LET $m: MAP = SSH_SERVE("127.0.0.1:0", "guest", "pass", {frobnicate: 1})
+            SSH_CLOSE($m.server)
+        "#},
+    )
+    .expect_err("unknown option must fail");
+    assert!(
+        err.to_string().contains("unknown option 'frobnicate'"),
+        "{err:#}"
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "needs loopback TCP plus threads plus a Tokio runtime")]
+fn non_map_serve_options_bails() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let err = run_script(
+        &root,
+        indoc! {r#"
+            IMPORT [STD, SSH]
+            LET $m: MAP = SSH_SERVE("127.0.0.1:0", "guest", "pass", "nope")
+            SSH_CLOSE($m.server)
+        "#},
+    )
+    .expect_err("non-map options must fail");
+    assert!(err.to_string().contains("options must be a MAP"), "{err:#}");
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "needs loopback TCP plus threads plus a Tokio runtime")]
+fn non_string_key_path_bails() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let err = run_script(
+        &root,
+        indoc! {r#"
+            IMPORT [STD, SSH]
+            LET $m: MAP = SSH_SERVE("127.0.0.1:0", "guest", "pass", {key_path: 1})
+            SSH_CLOSE($m.server)
+        "#},
+    )
+    .expect_err("non-string key_path must fail");
+    assert!(err.to_string().contains("must be a STRING"), "{err:#}");
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "needs loopback TCP plus threads plus a Tokio runtime")]
+fn stable_host_key_reused_across_restarts() {
+    use oxdock_fs::PathResolver;
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let serve_first = indoc! {r#"
+        IMPORT [STD, SSH]
+        LET $m: MAP = SSH_SERVE("127.0.0.1:23311", "guest", "key-pass", {key_path: "ssh_host_key"})
+        SSH_CLOSE($m.server)
+    "#};
+    let serve_second = indoc! {r#"
+        IMPORT [STD, SSH]
+        LET $m: MAP = SSH_SERVE("127.0.0.1:23312", "guest", "key-pass", {key_path: "ssh_host_key"})
+        SSH_CLOSE($m.server)
+    "#};
+    run_script(&root, serve_first).expect("first boot creates the key");
+    let resolver = PathResolver::new(root.root(), root.root()).unwrap();
+    let key_path = root.join("ssh_host_key").unwrap();
+    let first = resolver.read_file(&key_path).expect("key file exists");
+    assert!(
+        first.starts_with(b"-----BEGIN OPENSSH PRIVATE KEY-----"),
+        "key file is OpenSSH PEM"
+    );
+    run_script(&root, serve_second).expect("second boot loads the key");
+    let second = resolver.read_file(&key_path).expect("key file still there");
+    assert_eq!(first, second, "restart must reuse the key, not regenerate");
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "needs loopback TCP plus threads plus a Tokio runtime")]
+fn loaded_host_key_serves_clients() {
+    // Behavioral proof the loaded key is a working host key: create it on
+    // one boot, then run a full echo roundtrip on the next.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    run_script(
+        &root,
+        indoc! {r#"
+            IMPORT [STD, SSH]
+            LET $m: MAP = SSH_SERVE("127.0.0.1:23313", "guest", "key-pass", {key_path: "ssh_host_key"})
+            SSH_CLOSE($m.server)
+        "#},
+    )
+    .expect("first boot creates the key");
+    let script = indoc! {r#"
+        IMPORT [STD, SSH]
+        LET $m: MAP = SSH_SERVE("127.0.0.1:23314", "guest", "key-pass", {key_path: "ssh_host_key"})
+        LET $in: PIPE
+        LET $out: PIPE
+        LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
+        LET $echo: HANDLE = ASYNC { SSH_PUMP($out, $in) }
+        AWAIT $acc
+        AWAIT $echo
+        SSH_CLOSE($m.server)
+    "#};
+    let handle = std::thread::spawn(move || run_script(&root, script));
+    std::thread::sleep(Duration::from_secs(2));
+    let addr: SocketAddr = "127.0.0.1:23314".parse().unwrap();
+    let mut client = TestClient::connect(addr, "guest", "key-pass").expect("client connects");
+    client.send(b"stable-key-echo").expect("client sends");
+    let echoed = client
+        .read_until(b"stable-key-echo", Duration::from_secs(10))
+        .expect("echo returns");
+    assert!(
+        echoed
+            .windows(15)
+            .any(|window| window == b"stable-key-echo"),
+        "echoed bytes must round-trip on the loaded key"
+    );
+    client.close();
+    handle
+        .join()
+        .expect("script thread joins")
+        .expect("script completes after disconnect");
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "needs loopback TCP plus threads plus a Tokio runtime")]
+#[cfg(unix)]
+fn created_host_key_has_owner_only_permissions() {
+    use oxdock_fs::PathResolver;
+    use std::os::unix::fs::PermissionsExt;
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    run_script(
+        &root,
+        indoc! {r#"
+            IMPORT [STD, SSH]
+            LET $m: MAP = SSH_SERVE("127.0.0.1:23315", "guest", "key-pass", {key_path: "ssh_host_key"})
+            SSH_CLOSE($m.server)
+        "#},
+    )
+    .expect("boot creates the key");
+    let resolver = PathResolver::new(root.root(), root.root()).unwrap();
+    let key_path = root.join("ssh_host_key").unwrap();
+    let mode = resolver
+        .metadata(&key_path)
+        .expect("key stat")
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o600, "created key must be owner-only, got 0{mode:o}");
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "needs loopback TCP plus threads plus a Tokio runtime")]
+fn invalid_host_key_file_bails() {
+    use oxdock_fs::PathResolver;
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let resolver = PathResolver::new(root.root(), root.root()).unwrap();
+    let key_path = root.join("ssh_host_key").unwrap();
+    resolver.write_file(&key_path, b"not-a-key").unwrap();
+    // Owner-only permissions so the test reaches the parse stage (the
+    // permission gate runs first on Unix).
+    resolver
+        .set_permissions_mode_unix(&key_path, 0o600)
+        .unwrap();
+    let err = run_script(
+        &root,
+        indoc! {r#"
+            IMPORT [STD, SSH]
+            LET $m: MAP = SSH_SERVE("127.0.0.1:23316", "guest", "key-pass", {key_path: "ssh_host_key"})
+            SSH_CLOSE($m.server)
+        "#},
+    )
+    .expect_err("invalid key must fail");
+    assert!(err.to_string().contains("cannot parse host key"), "{err:#}");
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "needs loopback TCP plus threads plus a Tokio runtime")]
+#[cfg(unix)]
+fn world_readable_host_key_bails() {
+    use oxdock_fs::PathResolver;
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let resolver = PathResolver::new(root.root(), root.root()).unwrap();
+    let key_path = root.join("ssh_host_key").unwrap();
+    run_script(
+        &root,
+        indoc! {r#"
+            IMPORT [STD, SSH]
+            LET $m: MAP = SSH_SERVE("127.0.0.1:23317", "guest", "key-pass", {key_path: "ssh_host_key"})
+            SSH_CLOSE($m.server)
+        "#},
+    )
+    .expect("first boot creates the key");
+    resolver
+        .set_permissions_mode_unix(&key_path, 0o644)
+        .unwrap();
+    let err = run_script(
+        &root,
+        indoc! {r#"
+            IMPORT [STD, SSH]
+            LET $m: MAP = SSH_SERVE("127.0.0.1:23318", "guest", "key-pass", {key_path: "ssh_host_key"})
+            SSH_CLOSE($m.server)
+        "#},
+    )
+    .expect_err("world-readable key must fail");
+    let text = format!("{err:#}");
+    assert!(
+        text.contains("insecure permissions on host key file"),
+        "{text}"
+    );
+    assert!(text.contains("expected 0600"), "{text}");
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "needs loopback TCP plus threads plus a Tokio runtime")]
+fn blank_key_path_keeps_ephemeral_key() {
+    use oxdock_fs::PathResolver;
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    run_script(
+        &root,
+        indoc! {r#"
+            IMPORT [STD, SSH]
+            LET $m: MAP = SSH_SERVE("127.0.0.1:23319", "guest", "key-pass", {key_path: ""})
+            SSH_CLOSE($m.server)
+        "#},
+    )
+    .expect("blank key_path serves");
+    let resolver = PathResolver::new(root.root(), root.root()).unwrap();
+    assert!(
+        !resolver.exists(&root.join("ssh_host_key").unwrap()),
+        "blank key_path must leave no trace"
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "needs loopback TCP plus threads plus a Tokio runtime")]
+fn escaping_key_path_bails() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let err = run_script(
+        &root,
+        indoc! {r#"
+            IMPORT [STD, SSH]
+            LET $m: MAP = SSH_SERVE("127.0.0.1:23320", "guest", "key-pass", {key_path: "../escape_key"})
+            SSH_CLOSE($m.server)
+        "#},
+    )
+    .expect_err("escaping key_path must fail");
+    assert!(err.to_string().contains("escapes the workspace"), "{err:#}");
 }

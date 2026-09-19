@@ -30,7 +30,7 @@
 IMPORT [STD, SSH]
 WORKSPACE LOCAL
 
-LET $m: MAP = SSH_SERVE("127.0.0.1:2240", "test", "test123")
+LET $m: MAP = SSH_SERVE("127.0.0.1:2240", "test", "test123", {})
 ECHO "ssh proxy listening on {{ $m.addr }} (login test)"
 
 WHILE true {
