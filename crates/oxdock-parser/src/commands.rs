@@ -2856,6 +2856,56 @@ mod tests {
     }
 
     #[test]
+    fn multiline_call_args_span_lines() {
+        // Regression: long invocations (e.g. 4-arg SSH_SERVE with an
+        // options map) may put one argument per line. Bracket interiors
+        // tolerate linebreaks while statement structure stays single-line.
+        let steps = parse_script(
+            "FUNC SERVE($b: STRING, $u: STRING, $p: STRING, $o: MAP) {\n  RETURN $b\n}\nLET $m: MAP = SERVE(\n  \"127.0.0.1:2241\",\n  \"test\",\n  \"test123\", {\n    key_path: \"test_key\"\n  }\n)\n",
+            lower_command,
+        )
+        .expect("multiline call parses");
+        let StepKind::Assign { expr, .. } = &steps[1].kind else {
+            panic!("expected Assign, got {:?}", steps[1].kind);
+        };
+        let Expr::Call { name, args } = expr else {
+            panic!("expected Call expr, got {expr:?}");
+        };
+        assert_eq!(name, "SCRIPT::SERVE");
+        assert_eq!(args.len(), 4);
+        assert!(matches!(&args[3], Expr::Map(entries) if entries.len() == 1));
+        // Display stays single-line; reparsing the same text is identical.
+        let rendered = steps[1].to_string();
+        assert!(!rendered.contains('\n'), "{rendered}");
+        let script = "FUNC SERVE($b: STRING, $u: STRING, $p: STRING, $o: MAP) {\n  RETURN $b\n}\nLET $m: MAP = SERVE(\n  \"127.0.0.1:2241\",\n  \"test\",\n  \"test123\", {\n    key_path: \"test_key\"\n  }\n)\n";
+        let again = parse_script(script, lower_command).expect("reparse ok");
+        assert_eq!(again, steps);
+    }
+
+    #[test]
+    fn multiline_bare_call_and_list_span_lines() {
+        let steps = parse_script(
+            "FUNC GREET($a: STRING) {\n  RETURN $a\n}\nGREET(\n  \"ada\"\n)\n",
+            lower_command,
+        )
+        .expect("multiline bare call parses");
+        let StepKind::Call { name, args } = &steps[1].kind else {
+            panic!("expected Call, got {:?}", steps[1].kind);
+        };
+        assert_eq!(name, "SCRIPT::GREET");
+        assert_eq!(args.len(), 1);
+        let steps = parse_script("LET $l: LIST = [\n  \"a\",\n  \"b\"\n]\n", lower_command)
+            .expect("multiline list parses");
+        let StepKind::Assign { expr, .. } = &steps[0].kind else {
+            panic!("expected Assign, got {:?}", steps[0].kind);
+        };
+        assert!(
+            matches!(expr, Expr::List(items) if items.len() == 2),
+            "{expr:?}"
+        );
+    }
+
+    #[test]
     fn parse_duration_units() {
         use std::time::Duration;
         assert_eq!(parse_duration("500ms").unwrap(), Duration::from_millis(500));
