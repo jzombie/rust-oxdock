@@ -12,6 +12,7 @@
 mod auth;
 mod bridge;
 mod funcs;
+mod pty;
 mod runtime;
 mod state;
 mod types;

@@ -38,6 +38,24 @@ fn server_state(value: &Value, func: &str) -> Result<Arc<ServerState>> {
     Ok(Arc::clone(tag.state()))
 }
 
+/// Read a flat string list (an argv vector) out of a DSL value.
+fn argv_list(value: &Value, func: &str) -> Result<Vec<String>> {
+    let Some(items) = value.as_list() else {
+        bail!("{func} argv must be a LIST of strings");
+    };
+    if items.is_empty() {
+        bail!("{func} argv must not be empty");
+    }
+    items
+        .iter()
+        .map(|item| {
+            item.as_str().map(str::to_string).ok_or_else(|| {
+                anyhow::anyhow!("{func} argv must be strings, got {}", item.type_name())
+            })
+        })
+        .collect()
+}
+
 /// Spin up an ephemeral loopback SSH server with the given credentials.
 /// An empty password generates a random one. Non-blocking: returns a MAP
 /// with `server` (SSH_SERVER), `addr` (STRING `host:port`), `username`
@@ -66,8 +84,10 @@ fn ssh_serve(bind: String, username: String, password: String) -> Result<Value> 
     let id = SERVER_IDS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let id = format!("ssh-{pid}-{id}", pid = std::process::id());
     let queue = Arc::new(SessionQueue::new());
+    let pty_size = crate::state::shared_pty_size();
     let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel::<ShutdownSignal>();
     let thread_queue = Arc::clone(&queue);
+    let thread_pty_size = Arc::clone(&pty_size);
     let thread_user = username.clone();
     let thread_pass = password.clone();
     let thread = std::thread::Builder::new()
@@ -78,11 +98,19 @@ fn ssh_serve(bind: String, username: String, password: String) -> Result<Value> 
                 thread_user,
                 thread_pass,
                 thread_queue,
+                thread_pty_size,
                 shutdown_rx,
             )
         })
         .context("SSH_SERVE cannot spawn the server thread")?;
-    let state = Arc::new(ServerState::new(id, local_addr, queue, shutdown_tx, thread));
+    let state = Arc::new(ServerState::new(
+        id,
+        local_addr,
+        queue,
+        pty_size,
+        shutdown_tx,
+        thread,
+    ));
     let mut map = BTreeMap::new();
     map.insert(
         "server".to_string(),
@@ -210,6 +238,50 @@ fn ssh_pump<P: ProcessManager>(
     Ok(Value::int(total))
 }
 
+/// Run `argv` under a local pseudo-terminal sized from the outer session
+/// and pump it through explicit pipes until the child exits. `rows`/`cols`
+/// seed the initial size when positive; non-positive falls back to the
+/// latest size any outer session requested (24x80 default). Outer
+/// window-change requests resize the terminal live. Must run inside
+/// `ASYNC`. Returns the INT exit code. Environment is inherited from the
+/// host process and the working directory comes from the script; script
+/// `ENV` overrides do not apply (unlike `RUN`).
+#[oxdock_func(
+    returns = "INT",
+    summary = "Run a command under a sized local terminal into pipes."
+)]
+fn ssh_pty_run<P: ProcessManager>(
+    cx: &mut StepCtx<P>,
+    server: Value,
+    argv: Value,
+    rows: i64,
+    cols: i64,
+    in_pipe: Value,
+    out_pipe: Value,
+) -> Result<Value> {
+    if !cx.is_async_task() {
+        bail!("SSH_PTY_RUN requires ASYNC: run it in its own task beside the SSH_ACCEPT task");
+    }
+    let state = server_state(&server, "SSH_PTY_RUN")?;
+    let argv = argv_list(&argv, "SSH_PTY_RUN")?;
+    let initial = if rows > 0 && cols > 0 {
+        crate::state::PtySize::new(rows as u32, cols as u32)
+    } else {
+        state.pty_size()
+    };
+    let cancel = AtomicBool::new(false);
+    let code = crate::pty::pump_pty_session(
+        cx,
+        &argv,
+        initial,
+        &state.pty_size_handle(),
+        &in_pipe,
+        &out_pipe,
+        &cancel,
+    )?;
+    Ok(Value::int(code))
+}
+
 /// The `SSH` host module: ephemeral server plus client, bridged to DSL
 /// pipes. Generic over the process manager like every host module.
 pub fn module_with<P: ProcessManager>() -> HostModule<P> {
@@ -221,6 +293,7 @@ pub fn module_with<P: ProcessManager>() -> HostModule<P> {
             SshClose::registration(),
             SshConnect::registration(),
             SshPump::registration(),
+            SshPtyRun::registration(),
         ],
         types: vec![SshServerTag::descriptor()],
     }

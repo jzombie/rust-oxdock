@@ -26,15 +26,15 @@ use tokio::sync::mpsc;
 use crate::state::{DownMsg, UpMsg};
 
 /// Copy buffer size, matching `net_bridge::CHUNK`.
-const CHUNK: usize = 8192;
+pub(crate) const CHUNK: usize = 8192;
 /// Supervisor/cancel poll interval, matching `SUPERVISOR_TICK`.
-const TICK: Duration = Duration::from_millis(10);
+pub(crate) const TICK: Duration = Duration::from_millis(10);
 /// Timeout-bounded pipe read backstop, matching `WORKER_BACKSTOP`.
-const BACKSTOP: Duration = Duration::from_millis(10);
+pub(crate) const BACKSTOP: Duration = Duration::from_millis(10);
 
 /// Read one chunk from a pipe: timeout-bounded for script backends (so
 /// cancellation always wins within a tick), blocking otherwise.
-fn read_pipe(
+pub(crate) fn read_pipe(
     reader: &SharedInput,
     backend: Option<&Arc<PipeInner>>,
     buffer: &mut [u8],

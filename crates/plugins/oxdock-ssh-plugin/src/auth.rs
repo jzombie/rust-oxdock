@@ -15,7 +15,10 @@ use russh::server::{Auth, Handler, Msg, Session};
 use russh::{Channel, ChannelId};
 use tokio::sync::mpsc;
 
-use crate::state::{CHANNEL_CAPACITY, DownMsg, PendingSession, SessionQueue, UpMsg};
+use crate::state::{
+    CHANNEL_CAPACITY, DownMsg, PendingSession, PtySize, SessionQueue, SharedPtySize, UpMsg,
+    set_shared_pty_size,
+};
 
 /// Per-channel wire state on one connection.
 struct ChannelState {
@@ -72,6 +75,7 @@ pub struct EphemeralHandler {
     expected_user: Arc<String>,
     expected_pass: Arc<String>,
     queue: Arc<SessionQueue>,
+    pty_size: SharedPtySize,
     channels: HashMap<ChannelId, ChannelState>,
 }
 
@@ -170,21 +174,42 @@ impl Handler for EphemeralHandler {
 
     /// Accept pseudo-terminal requests without allocating one: this server
     /// is a byte pump, not a terminal emulator, so dimensions and modes
-    /// are recorded nowhere. The explicit reply is the point — leaving a
-    /// `want_reply` request unanswered stalls strict clients before they
-    /// ever forward stdin.
+    /// are recorded nowhere.
+    ///
+    /// The requested size IS recorded on the shared server state, where
+    /// pty pumps pick it up to size their local terminal. The explicit
+    /// reply is equally load-bearing — leaving a `want_reply` request
+    /// unanswered stalls strict clients before they ever forward stdin.
     async fn pty_request(
         &mut self,
         channel: ChannelId,
         _term: &str,
-        _col_width: u32,
-        _row_height: u32,
+        col_width: u32,
+        row_height: u32,
         _pix_width: u32,
         _pix_height: u32,
         _modes: &[(russh::Pty, u32)],
         session: &mut Session,
     ) -> Result<()> {
+        self.queue_size(row_height, col_width);
         let _ = session.channel_success(channel);
+        Ok(())
+    }
+
+    /// Record live window changes on the shared server state so pty pumps
+    /// resize their local terminal (the kernel SIGWINCHes the child,
+    /// which forwards it to the remote end). No reply: the protocol
+    /// sends none for window-change.
+    async fn window_change_request(
+        &mut self,
+        _channel: ChannelId,
+        col_width: u32,
+        row_height: u32,
+        _pix_width: u32,
+        _pix_height: u32,
+        _session: &mut Session,
+    ) -> Result<()> {
+        self.queue_size(row_height, col_width);
         Ok(())
     }
 
@@ -204,6 +229,11 @@ impl Handler for EphemeralHandler {
 }
 
 impl EphemeralHandler {
+    /// Record terminal dimensions (see [`PtySize`]).
+    fn queue_size(&self, rows: u32, cols: u32) {
+        set_shared_pty_size(&self.pty_size, PtySize::new(rows, cols));
+    }
+
     /// Publish a channel to the session queue once it becomes a byte
     /// stream, and spawn its wire-writer task. Idempotent per channel:
     /// only the first of shell/exec wins.
@@ -245,14 +275,21 @@ pub struct ServerFactory {
     expected_user: Arc<String>,
     expected_pass: Arc<String>,
     queue: Arc<SessionQueue>,
+    pty_size: SharedPtySize,
 }
 
 impl ServerFactory {
-    pub fn new(user: String, password: String, queue: Arc<SessionQueue>) -> Self {
+    pub fn new(
+        user: String,
+        password: String,
+        queue: Arc<SessionQueue>,
+        pty_size: SharedPtySize,
+    ) -> Self {
         Self {
             expected_user: Arc::new(user),
             expected_pass: Arc::new(password),
             queue,
+            pty_size,
         }
     }
 }
@@ -265,6 +302,7 @@ impl russh::server::Server for ServerFactory {
             expected_user: Arc::clone(&self.expected_user),
             expected_pass: Arc::clone(&self.expected_pass),
             queue: Arc::clone(&self.queue),
+            pty_size: Arc::clone(&self.pty_size),
             channels: HashMap::new(),
         }
     }

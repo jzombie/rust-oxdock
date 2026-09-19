@@ -164,12 +164,97 @@ pub enum ShutdownSignal {
     Close,
 }
 
+/// Terminal dimensions shared per server: the latest size any outer
+/// session requested. Last-writer-wins across concurrent sessions (the
+/// serial proxy shape this plugin targets has exactly one at a time).
+/// Zero rows/cols (clients that report none) clamp to the 24x80 default
+/// at apply time, never stored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PtySize {
+    pub rows: u16,
+    pub cols: u16,
+}
+
+impl PtySize {
+    pub fn new(rows: u32, cols: u32) -> Self {
+        Self {
+            rows: rows.try_into().unwrap_or(u16::MAX),
+            cols: cols.try_into().unwrap_or(u16::MAX),
+        }
+    }
+
+    /// Kernel-ready size: zeros fall back to 24x80 since a 0x0 pty
+    /// breaks fullscreen apps (they lay out for a nonexistent screen).
+    pub fn effective(&self) -> (u16, u16) {
+        (
+            if self.rows == 0 { 24 } else { self.rows },
+            if self.cols == 0 { 80 } else { self.cols },
+        )
+    }
+}
+
+impl Default for PtySize {
+    fn default() -> Self {
+        Self { rows: 24, cols: 80 }
+    }
+}
+
+/// Shareable terminal-size cell: one instance lives in [`ServerState`]
+/// while the russh handler factory holds a clone, so outer pty and
+/// window-change requests land where pty pumps poll.
+///
+/// The sequence number distinguishes "outer requested this" from "nobody
+/// asked yet": a pump that opened on explicit dimensions must not have
+/// them clobbered by a stale default on its first poll.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PtySizeStamp {
+    pub size: PtySize,
+    pub(crate) seq: u64,
+}
+
+impl PtySizeStamp {
+    fn bump(&mut self, size: PtySize) {
+        self.size = size;
+        self.seq = self.seq.wrapping_add(1);
+    }
+}
+
+pub type SharedPtySize = Arc<Mutex<PtySizeStamp>>;
+
+/// Fresh size cell at the default dimensions, sequence zero.
+pub fn shared_pty_size() -> SharedPtySize {
+    Arc::new(Mutex::new(PtySizeStamp {
+        size: PtySize::default(),
+        seq: 0,
+    }))
+}
+
+/// Record dimensions on a shared cell (poison-tolerant).
+pub fn set_shared_pty_size(cell: &SharedPtySize, size: PtySize) {
+    if let Ok(mut slot) = cell.lock() {
+        slot.bump(size);
+    }
+}
+
+/// Snapshot a shared cell with its sequence (poison-tolerant).
+pub fn snapshot_pty_size(cell: &SharedPtySize) -> PtySizeStamp {
+    cell.lock()
+        .map(|slot| *slot)
+        .unwrap_or_else(|poison| *poison.into_inner())
+}
+
 /// Lifetime state behind one `SSH_SERVER` value.
 #[derive(Debug)]
 pub struct ServerState {
     id: String,
     local_addr: SocketAddr,
     queue: Arc<SessionQueue>,
+    /// Latest terminal size requested by any outer session (see
+    /// [`PtySize`]). Read by pty pumps to size and resize their local
+    /// terminal; written by the russh handler on pty and window-change
+    /// requests. Shared (not owned) so the handler factory, which is
+    /// built before this state, can write it.
+    pty_size: SharedPtySize,
     /// Signal to the runtime thread. `None` once consumed by `SSH_CLOSE`.
     /// Plain std channel: `Sender` is `Send + Sync` and `send` never blocks.
     shutdown_tx: Mutex<Option<std::sync::mpsc::Sender<ShutdownSignal>>>,
@@ -184,6 +269,7 @@ impl ServerState {
         id: String,
         local_addr: SocketAddr,
         queue: Arc<SessionQueue>,
+        pty_size: SharedPtySize,
         shutdown_tx: std::sync::mpsc::Sender<ShutdownSignal>,
         thread: std::thread::JoinHandle<()>,
     ) -> Self {
@@ -191,6 +277,7 @@ impl ServerState {
             id,
             local_addr,
             queue,
+            pty_size,
             shutdown_tx: Mutex::new(Some(shutdown_tx)),
             thread: Mutex::new(Some(thread)),
         }
@@ -206,6 +293,22 @@ impl ServerState {
 
     pub fn queue(&self) -> &Arc<SessionQueue> {
         &self.queue
+    }
+
+    /// Record terminal dimensions from an outer pty or window-change
+    /// request. Last-writer-wins; pty pumps poll this.
+    pub fn set_pty_size(&self, size: PtySize) {
+        set_shared_pty_size(&self.pty_size, size);
+    }
+
+    /// Snapshot the latest requested terminal dimensions.
+    pub fn pty_size(&self) -> PtySize {
+        snapshot_pty_size(&self.pty_size).size
+    }
+
+    /// Shareable handle to the size cell, for pump threads.
+    pub fn pty_size_handle(&self) -> SharedPtySize {
+        Arc::clone(&self.pty_size)
     }
 
     /// Best-effort shutdown: wake queue waiters and nudge the runtime

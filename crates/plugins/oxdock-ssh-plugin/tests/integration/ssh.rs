@@ -54,20 +54,39 @@ struct TestClient {
 
 impl TestClient {
     fn connect(addr: SocketAddr, user: &str, password: &str) -> anyhow::Result<Self> {
-        Self::connect_impl(addr, user, password, false)
+        Self::connect_impl(addr, user, password, None)
     }
 
     /// Connect requesting a pseudo-terminal first, like interactive
     /// clients do. The server answers without allocating one.
     fn connect_with_pty(addr: SocketAddr, user: &str, password: &str) -> anyhow::Result<Self> {
-        Self::connect_impl(addr, user, password, true)
+        Self::connect_impl(addr, user, password, Some((80, 24)))
+    }
+
+    /// Connect with explicit pty dimensions (cols, rows).
+    fn connect_with_pty_dims(
+        addr: SocketAddr,
+        user: &str,
+        password: &str,
+        cols: u16,
+        rows: u16,
+    ) -> anyhow::Result<Self> {
+        Self::connect_impl(addr, user, password, Some((cols, rows)))
+    }
+
+    /// Send a live window-change for the open channel.
+    fn window_change(&mut self, cols: u32, rows: u32) -> anyhow::Result<()> {
+        self.runtime
+            .block_on(self.writer.window_change(cols, rows, 0, 0))
+            .map_err(|err| anyhow::anyhow!("window_change failed: {err}"))?;
+        Ok(())
     }
 
     fn connect_impl(
         addr: SocketAddr,
         user: &str,
         password: &str,
-        pty: bool,
+        pty_dims: Option<(u16, u16)>,
     ) -> anyhow::Result<Self> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
@@ -81,9 +100,17 @@ impl TestClient {
                 anyhow::bail!("test client authentication rejected");
             }
             let channel = session.channel_open_session().await?;
-            if pty {
+            if let Some((cols, rows)) = pty_dims {
                 channel
-                    .request_pty(true, "xterm-256color", 24, 80, 0, 0, &[])
+                    .request_pty(
+                        true,
+                        "xterm-256color",
+                        u32::from(cols),
+                        u32::from(rows),
+                        0,
+                        0,
+                        &[],
+                    )
                     .await?;
             }
             channel.request_shell(true).await?;
@@ -254,6 +281,149 @@ fn pty_request_accepted_echo_roundtrip() {
         .join()
         .expect("script thread joins")
         .expect("script completes after disconnect");
+}
+
+/// Drive an outer session that resizes mid-stream, then give the
+/// change time to flush through TCP and the poll loop before dropping:
+/// `block_on` returns after queueing, not after delivery.
+fn drive_outer_resize(addr: SocketAddr, cols: u16, rows: u16) {
+    let mut client =
+        TestClient::connect_with_pty_dims(addr, "u", "p", 90, 30).expect("client connects");
+    std::thread::sleep(Duration::from_secs(1));
+    client
+        .window_change(u32::from(cols), u32::from(rows))
+        .expect("resize sends");
+    std::thread::sleep(Duration::from_secs(2));
+}
+
+#[test]
+#[cfg(unix)]
+#[cfg_attr(
+    miri,
+    ignore = "needs loopback TCP plus threads plus forkpty plus subprocesses"
+)]
+fn pty_explicit_size_unix() {
+    // A pty sized explicitly must report exactly that size: `stty size`
+    // prints "rows cols".
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD, SSH]
+        LET $m: MAP = SSH_SERVE("127.0.0.1:0", "u", "p")
+        LET $in: PIPE
+        LET $out: PIPE
+        LET $t: HANDLE = ASYNC { SSH_PTY_RUN($m.server, ["sh", "-c", "stty size"], 40, 100, $in, $out) }
+        AWAIT $t
+        ASSERT_CONTAINS $out "40 100"
+        SSH_CLOSE($m.server)
+    "#};
+    run_script(&root, script).expect("explicit pty size runs");
+}
+
+#[test]
+#[cfg(windows)]
+#[cfg_attr(
+    miri,
+    ignore = "needs loopback TCP plus threads plus ConPTY plus subprocesses"
+)]
+fn pty_explicit_size_windows() {
+    // Same contract through ConPTY: `mode con` reports the sized buffer.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD, SSH]
+        LET $m: MAP = SSH_SERVE("127.0.0.1:0", "u", "p")
+        LET $in: PIPE
+        LET $out: PIPE
+        LET $t: HANDLE = ASYNC { SSH_PTY_RUN($m.server, ["cmd", "/c", "mode con"], 40, 100, $in, $out) }
+        AWAIT $t
+        ASSERT_CONTAINS $out "Lines:"
+        ASSERT_CONTAINS $out "40"
+        ASSERT_CONTAINS $out "Columns:"
+        ASSERT_CONTAINS $out "100"
+        SSH_CLOSE($m.server)
+    "#};
+    run_script(&root, script).expect("explicit pty size runs");
+}
+
+#[test]
+#[cfg(unix)]
+#[cfg_attr(
+    miri,
+    ignore = "needs loopback TCP plus threads plus forkpty plus subprocesses"
+)]
+fn pty_live_resize_unix() {
+    // An outer window-change mid-session must resize the local terminal:
+    // `stty size` read after the change reports the new dimensions.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD, SSH]
+        LET $m: MAP = SSH_SERVE("127.0.0.1:0", "u", "p")
+        WRITE addr.txt "{{ $m.addr }}"
+        LET $in: PIPE
+        LET $out: PIPE
+        LET $t: HANDLE = ASYNC { SSH_PTY_RUN($m.server, ["sh", "-c", "sleep 4; stty size"], 0, 0, $in, $out) }
+        AWAIT $t
+        ASSERT_CONTAINS $out "50 120"
+        SSH_CLOSE($m.server)
+    "#};
+    let handle = std::thread::spawn(move || run_script(&root, script));
+    let addr_path = temp.as_guarded_path().join("addr.txt").unwrap();
+    let addr: SocketAddr = loop {
+        std::thread::sleep(Duration::from_millis(100));
+        let text = read_trimmed(&addr_path);
+        if !text.is_empty() {
+            break text.parse().expect("addr parses");
+        }
+    };
+    drive_outer_resize(addr, 120, 50);
+    handle
+        .join()
+        .expect("script thread joins")
+        .expect("resize script completes");
+}
+
+#[test]
+#[cfg(windows)]
+#[cfg_attr(
+    miri,
+    ignore = "needs loopback TCP plus threads plus ConPTY plus subprocesses"
+)]
+fn pty_live_resize_windows() {
+    // Same contract through ConPTY: `mode con` read after the change
+    // reports the new buffer. `ping` is the delay hack (`timeout` can
+    // interact with stdin).
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD, SSH]
+        LET $m: MAP = SSH_SERVE("127.0.0.1:0", "u", "p")
+        WRITE addr.txt "{{ $m.addr }}"
+        LET $in: PIPE
+        LET $out: PIPE
+        LET $t: HANDLE = ASYNC { SSH_PTY_RUN($m.server, ["cmd", "/c", "ping -n 5 127.0.0.1 >nul & mode con"], 0, 0, $in, $out) }
+        AWAIT $t
+        ASSERT_CONTAINS $out "Lines:"
+        ASSERT_CONTAINS $out "50"
+        ASSERT_CONTAINS $out "Columns:"
+        ASSERT_CONTAINS $out "120"
+        SSH_CLOSE($m.server)
+    "#};
+    let handle = std::thread::spawn(move || run_script(&root, script));
+    let addr_path = temp.as_guarded_path().join("addr.txt").unwrap();
+    let addr: SocketAddr = loop {
+        std::thread::sleep(Duration::from_millis(100));
+        let text = read_trimmed(&addr_path);
+        if !text.is_empty() {
+            break text.parse().expect("addr parses");
+        }
+    };
+    drive_outer_resize(addr, 120, 50);
+    handle
+        .join()
+        .expect("script thread joins")
+        .expect("resize script completes");
 }
 
 #[test]

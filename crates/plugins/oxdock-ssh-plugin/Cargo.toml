@@ -17,6 +17,7 @@ oxdock-core.workspace = true
 oxdock-func-macro.workspace = true
 oxdock-pipe.workspace = true
 oxdock-process.workspace = true
+portable-pty.workspace = true
 rand.workspace = true
 rand10.workspace = true
 russh.workspace = true

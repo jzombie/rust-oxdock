@@ -15,7 +15,7 @@ use russh::keys::{Algorithm, PrivateKey};
 use tokio::sync::mpsc;
 
 use crate::auth::ServerFactory;
-use crate::state::{CHANNEL_CAPACITY, DownMsg, SessionQueue, ShutdownSignal, UpMsg};
+use crate::state::{CHANNEL_CAPACITY, DownMsg, SessionQueue, SharedPtySize, ShutdownSignal, UpMsg};
 use russh::server::Server as _;
 
 /// Inactivity timeout for idle SSH sessions.
@@ -29,6 +29,7 @@ pub fn serve(
     user: String,
     password: String,
     queue: Arc<SessionQueue>,
+    pty_size: SharedPtySize,
     shutdown_rx: std::sync::mpsc::Receiver<ShutdownSignal>,
 ) {
     let runtime = match tokio::runtime::Builder::new_current_thread()
@@ -39,7 +40,7 @@ pub fn serve(
         Err(_) => return,
     };
     runtime.block_on(async move {
-        serve_async(listener, user, password, queue, shutdown_rx)
+        serve_async(listener, user, password, queue, pty_size, shutdown_rx)
             .await
             .map(|_| ())
             .unwrap_or(());
@@ -51,6 +52,7 @@ async fn serve_async(
     user: String,
     password: String,
     queue: Arc<SessionQueue>,
+    pty_size: SharedPtySize,
     shutdown_rx: std::sync::mpsc::Receiver<ShutdownSignal>,
 ) -> Result<()> {
     let key = PrivateKey::random(&mut rand10::rng(), Algorithm::Ed25519)
@@ -61,7 +63,7 @@ async fn serve_async(
         keys: vec![key],
         ..Default::default()
     });
-    let mut factory = ServerFactory::new(user, password, queue);
+    let mut factory = ServerFactory::new(user, password, queue, pty_size);
     listener
         .set_nonblocking(true)
         .context("prepare listener for the runtime")?;
