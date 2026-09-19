@@ -928,3 +928,232 @@ fn escaping_key_path_bails() {
     .expect_err("escaping key_path must fail");
     assert!(err.to_string().contains("escapes the workspace"), "{err:#}");
 }
+
+#[test]
+fn worker_pool_script_parses() {
+    // The multi-connection proto shape (PUSH handles in a WHILE loop, one
+    // group AWAIT) must parse with the SSH module registered. Parse-only:
+    // the script itself runs forever by design.
+    let mut engine = Engine::new();
+    engine.register_module(oxdock_ssh_plugin::module());
+    let table = engine.module_table();
+    let script = indoc! {r#"
+        IMPORT [STD, SSH]
+        WORKSPACE LOCAL
+
+        LET $server: MAP = SSH_SERVE(
+            "127.0.0.1:2241",
+            "test",
+            "test123", {
+                key_path: "test_key"
+            }
+        )
+
+        ECHO "ssh proxy listening on {{ $server.addr }} (login test)"
+
+        LET $workers: LIST = []
+        LET $w: INT = 0
+        WHILE $w < 4 {
+            LET $h: HANDLE = ASYNC {
+                LET $run: BOOL = true
+                WHILE $run {
+                    LET $c_in: PIPE
+                    LET $c_out: PIPE
+                    LET $acc: HANDLE = ASYNC { SSH_ACCEPT($server.server, $c_in, $c_out) }
+
+                    LET $proc: HANDLE = ASYNC {
+                        WITH_IO [stdin=$c_out, stdout=$c_in] RUN ["ssh", "-o", "BatchMode=yes", "orb"]
+                    }
+
+                    AWAIT $acc
+                    AWAIT $proc
+                }
+            }
+            $workers = PUSH($workers, $h)
+            $w = $w + 1
+        }
+
+        # Block main thread so background workers run indefinitely
+        AWAIT $workers
+    "#};
+    let steps = oxdock_core::parse_script_with_modules(script, table).expect("pool parses");
+    // IMPORT is a directive, not a step: WORKSPACE, LET, ECHO, LET, LET,
+    // WHILE, AWAIT.
+    assert_eq!(steps.len(), 7, "all pool steps lower");
+    assert!(
+        matches!(&steps[6].kind, oxdock_core::StepKind::Await { var } if var == "workers"),
+        "pool ends with the group await, got {:?}",
+        steps[6].kind
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "needs loopback TCP plus threads plus a Tokio runtime")]
+fn finite_worker_pool_runs_to_completion() {
+    // Same constructs as the infinite proto pool, but workers exit so the
+    // group AWAIT terminates: proves PUSH-in-loop plus LIST AWAIT with the
+    // SSH module registered.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    run_script(
+        &root,
+        indoc! {r#"
+            IMPORT [STD, SSH]
+            LET $workers: LIST = []
+            LET $w: INT = 0
+            WHILE $w < 4 {
+                LET $h: HANDLE = ASYNC { ECHO "w{{ $w }}" }
+                $workers = PUSH($workers, $h)
+                $w = $w + 1
+            }
+            AWAIT $workers
+            WRITE done.txt "ok"
+        "#},
+    )
+    .expect("finite pool runs");
+    assert_eq!(read_trimmed(&root.join("done.txt").unwrap()), "ok");
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "needs loopback TCP plus threads plus a Tokio runtime")]
+fn pool_accept_round_robins_across_workers() {
+    // Multi-connection shape: 4 workers ACCEPTing on one server, joined by
+    // one group AWAIT. Four sequential clients must all round-trip; every
+    // leg here is a DSL pump (script pipes), so teardown propagates EOF.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD, SSH]
+        LET $m: MAP = SSH_SERVE("127.0.0.1:0", "test", "test123", {})
+        WRITE addr.txt "{{ $m.addr }}"
+        LET $workers: LIST = []
+        LET $w: INT = 0
+        WHILE $w < 4 {
+            LET $h: HANDLE = ASYNC {
+                LET $in: PIPE
+                LET $out: PIPE
+                LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
+                LET $echo: HANDLE = ASYNC { SSH_PUMP($out, $in) }
+                AWAIT $acc
+                AWAIT $echo
+            }
+            $workers = PUSH($workers, $h)
+            $w = $w + 1
+        }
+        AWAIT $workers
+        SSH_CLOSE($m.server)
+    "#};
+    let handle = std::thread::spawn(move || run_script(&root, script));
+    let addr_path = temp.as_guarded_path().join("addr.txt").unwrap();
+    let addr_str = {
+        use oxdock_fs::PathResolver;
+        let resolver = PathResolver::new(addr_path.root(), addr_path.root()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            if let Ok(s) = resolver.read_to_string(&addr_path) {
+                let s = s.trim().to_string();
+                if !s.is_empty() {
+                    break s;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "server never wrote its addr (script hung before serving?)"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    let addr: SocketAddr = addr_str.parse().expect("addr parses");
+    for i in 0..4 {
+        let needle = format!("echo4-ping-{i}");
+        let mut client =
+            TestClient::connect(addr, "test", "test123").expect("pool client connects");
+        client.send(needle.as_bytes()).expect("client sends");
+        let echoed = client
+            .read_until(needle.as_bytes(), Duration::from_secs(15))
+            .expect("pool echo returns");
+        assert!(
+            echoed.windows(needle.len()).any(|w| w == needle.as_bytes()),
+            "session {i} must round-trip"
+        );
+        client.close();
+    }
+    handle
+        .join()
+        .expect("script thread joins")
+        .expect("pool script completes after 4 sessions");
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "needs loopback TCP plus threads plus a Tokio runtime")]
+#[cfg(unix)]
+fn pool_pty_run_companions_terminate() {
+    // The supported multi-connection companion shape: per-session work
+    // goes through the native PTY runner, never WITH_IO RUN. Every leg
+    // stays a script-backed DSL pump, so session teardown propagates EOF
+    // and the group AWAIT joins. (Pairing ACCEPT with WITH_IO RUN over
+    // the same pipes OS-promotes them: force-close stops working and
+    // teardown hangs. That engine trap is tracked separately.)
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD, SSH]
+        LET $m: MAP = SSH_SERVE("127.0.0.1:0", "test", "test123", {})
+        WRITE addr.txt "{{ $m.addr }}"
+        LET $workers: LIST = []
+        LET $w: INT = 0
+        WHILE $w < 2 {
+            LET $h: HANDLE = ASYNC {
+                LET $c_in: PIPE
+                LET $c_out: PIPE
+                LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $c_in, $c_out) }
+                LET $pty: HANDLE = ASYNC { SSH_PTY_RUN($m.server, ["cat"], 0, 0, $c_out, $c_in) }
+                AWAIT $acc
+                AWAIT $pty
+            }
+            $workers = PUSH($workers, $h)
+            $w = $w + 1
+        }
+        AWAIT $workers
+        SSH_CLOSE($m.server)
+    "#};
+    let handle = std::thread::spawn(move || run_script(&root, script));
+    let addr_path = temp.as_guarded_path().join("addr.txt").unwrap();
+    let addr_str = {
+        use oxdock_fs::PathResolver;
+        let resolver = PathResolver::new(addr_path.root(), addr_path.root()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            if let Ok(s) = resolver.read_to_string(&addr_path) {
+                let s = s.trim().to_string();
+                if !s.is_empty() {
+                    break s;
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "server never wrote its addr (script hung before serving?)"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
+    let addr: SocketAddr = addr_str.parse().expect("addr parses");
+    for i in 0..2 {
+        let needle = format!("pty-ping-{i}");
+        let mut client =
+            TestClient::connect(addr, "test", "test123").expect("pool client connects");
+        client.send(needle.as_bytes()).expect("client sends");
+        let echoed = client
+            .read_until(needle.as_bytes(), Duration::from_secs(15))
+            .expect("pool echo returns");
+        assert!(
+            echoed.windows(needle.len()).any(|w| w == needle.as_bytes()),
+            "session {i} must round-trip"
+        );
+        client.close();
+    }
+    handle
+        .join()
+        .expect("script thread joins")
+        .expect("pty pool script completes after 2 sessions");
+}

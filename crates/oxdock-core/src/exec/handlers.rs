@@ -2931,7 +2931,17 @@ fn resolve_task_entry<P: ProcessManager>(
     let Some(task_id) = val.as_handle() else {
         bail!("variable '${var}' is not a task handle");
     };
+    resolve_task_entry_by_id(task_id, &format!("${var}"), cx)
+}
 
+/// Resolve a task id to its shared registry entry. Backs single-handle
+/// AWAIT plus the per-member path of LIST AWAIT so double-await and
+/// already-reaped reporting never diverge.
+fn resolve_task_entry_by_id<P: ProcessManager>(
+    task_id: u64,
+    label: &str,
+    cx: &StepCtx<'_, P>,
+) -> Result<Arc<super::state::TaskEntry>> {
     // Clone the shared entry under a short map lock.
     let entry = {
         let named = cx
@@ -2942,9 +2952,33 @@ fn resolve_task_entry<P: ProcessManager>(
         named.get(&task_id).cloned()
     };
     let Some(entry) = entry else {
-        bail!("task handle for '${var}' was not found or has already been awaited");
+        bail!("task handle for '{label}' was not found or has already been awaited");
     };
     Ok(entry)
+}
+
+/// Forward one awaited task's captured stdout to the parent stdout.
+/// Shared by single-handle and LIST AWAIT so group joins stream each
+/// member's output identically.
+fn forward_task_sink<P: ProcessManager>(
+    entry: &Arc<super::state::TaskEntry>,
+    label: &str,
+    cx: &mut StepCtx<'_, P>,
+) -> Result<()> {
+    if let Some(sink) = entry.take_sink() {
+        let bytes = sink
+            .drain_bytes()
+            .map_err(|e| anyhow!("AWAIT task '{label}' output drain failed: {e}"))?;
+        if !bytes.is_empty() {
+            super::io::write_stdout(cx.out.clone(), |writer| {
+                writer
+                    .write_all(&bytes)
+                    .with_context(|| format!("AWAIT task '{label}' output forward failed"))?;
+                Ok(())
+            })?;
+        }
+    }
+    Ok(())
 }
 
 /// Claim a task entry and run the bounded await poll loop to completion.
@@ -3075,23 +3109,39 @@ fn await_task_entry(
 /// this loop observes that within ~10ms and rendezvouses on teardown
 /// completion before reporting cancellation.
 pub(crate) fn dispatch_await<P: ProcessManager>(var: &str, cx: &mut StepCtx<'_, P>) -> Result<()> {
+    let val = cx
+        .state
+        .get_var(var)
+        .ok_or_else(|| anyhow::anyhow!("variable '${var}' is not defined"))?;
+    // A LIST of HANDLEs awaits every member in order, so worker pools
+    // collected with PUSH join as a group; an empty LIST is a no-op. The
+    // first failing member bails like sequential single AWAITs would.
+    // `LET $o = AWAIT $t` stays single-handle: capture needs one output.
+    if let Some(items) = val.as_list().cloned() {
+        for (idx, item) in items.iter().enumerate() {
+            // `member` feeds callees whose templates add the `$`
+            // themselves (`await_task_entry`); `label` feeds this
+            // function's own `'{label}'` messages. Splitting the two
+            // keeps every rendering at exactly one `$`.
+            let member = format!("{var}[{idx}]");
+            let label = format!("${member}");
+            let Some(task_id) = item.as_handle() else {
+                bail!(
+                    "AWAIT '{label}' is not a task handle, got {}",
+                    item.type_name()
+                );
+            };
+            let entry = resolve_task_entry_by_id(task_id, &label, cx)?;
+            await_task_entry(&entry, &cx.state.cancel_token, &member)?;
+            forward_task_sink(&entry, &label, cx)?;
+        }
+        return Ok(());
+    }
     let entry = resolve_task_entry(var, cx)?;
     await_task_entry(&entry, &cx.state.cancel_token, var)?;
     // Bare AWAIT keeps status-only semantics for variables but preserves the
     // observable stream: the task's stdout flows to the parent stdout.
-    if let Some(sink) = entry.take_sink() {
-        let bytes = sink
-            .drain_bytes()
-            .map_err(|e| anyhow!("AWAIT task '${var}' output drain failed: {e}"))?;
-        if !bytes.is_empty() {
-            super::io::write_stdout(cx.out.clone(), |writer| {
-                writer
-                    .write_all(&bytes)
-                    .with_context(|| format!("AWAIT task '${var}' output forward failed"))?;
-                Ok(())
-            })?;
-        }
-    }
+    forward_task_sink(&entry, &format!("${var}"), cx)?;
     Ok(())
 }
 

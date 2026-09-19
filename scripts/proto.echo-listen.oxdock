@@ -2,7 +2,7 @@ IMPORT [STD, SSH]
 WORKSPACE LOCAL
 
 LET $server: MAP = SSH_SERVE(
-    "127.0.0.1:2250",
+    "127.0.0.1:2251",
     "test",
     "test123", {
         key_path: "test_key"
@@ -21,12 +21,10 @@ WHILE $w < 4 {
             LET $c_out: PIPE
             LET $acc: HANDLE = ASYNC { SSH_ACCEPT($server.server, $c_in, $c_out) }
 
-            LET $proc: HANDLE = ASYNC {
-                WITH_IO [stdin=$c_out, stdout=$c_in] RUN ["ssh", "-o", "BatchMode=yes", "orb"]
-            }
+            LET $pty: HANDLE = ASYNC { SSH_PTY_RUN($server.server, ["ssh", "-o", "BatchMode=yes", "orb"], 0, 0, $c_out, $c_in) }
 
             AWAIT $acc
-            AWAIT $proc
+            AWAIT $pty
         }
     }
     $workers = PUSH($workers, $h)
