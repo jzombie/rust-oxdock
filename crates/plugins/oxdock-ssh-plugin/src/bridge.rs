@@ -66,17 +66,24 @@ struct PumpHandles {
 /// via the supervisor's force-close — waiting for it would deadlock).
 /// The supervisor force-closes the output pipe right after this worker
 /// is reaped, so downstream observes EOF promptly.
+/// Also ends when the stdin direction finishes first (`peer_done`): the
+/// response producers are gone, so anything still arriving has nowhere
+/// to go — this is what releases a pump whose inner leg (a `RUN`
+/// subprocess, an exited remote) died while the outer client idles.
+/// Queued bytes still flush first; only the wait ends.
 fn pump_out(
     writer: &SharedOutput,
     up_rx: &mut mpsc::Receiver<UpMsg>,
     cancel: &AtomicBool,
+    peer_done: &AtomicBool,
 ) -> Result<()> {
+    use tokio::sync::mpsc::error::TryRecvError;
     loop {
         if cancel.load(Ordering::SeqCst) {
             break;
         }
-        match up_rx.blocking_recv() {
-            Some(UpMsg::Data(bytes)) => {
+        match up_rx.try_recv() {
+            Ok(UpMsg::Data(bytes)) => {
                 let mut guard = writer
                     .lock()
                     .map_err(|_| anyhow::anyhow!("SSH pump output lock poisoned"))?;
@@ -85,7 +92,13 @@ fn pump_out(
                     .context("SSH pump output pipe write failed")?;
                 guard.flush().context("SSH pump output pipe flush failed")?;
             }
-            Some(UpMsg::Eof) | None => break,
+            Ok(UpMsg::Eof) | Err(TryRecvError::Disconnected) => break,
+            Err(TryRecvError::Empty) => {
+                if peer_done.load(Ordering::SeqCst) {
+                    break;
+                }
+                std::thread::sleep(TICK);
+            }
         }
     }
     Ok(())
@@ -187,10 +200,17 @@ pub fn pump_session<P: ProcessManager>(
     } = handles;
     let mut failed: Option<anyhow::Error> = None;
     let mut out_closed = false;
+    let peer_done = AtomicBool::new(false);
     std::thread::scope(|scope| {
-        let mut worker_in =
-            Some(scope.spawn(|| pump_in(&reader, backend.as_ref(), &down_tx, cancel)));
-        let mut worker_out = Some(scope.spawn(|| pump_out(&writer, &mut up_rx, cancel)));
+        let mut worker_in = Some(scope.spawn(|| {
+            let result = pump_in(&reader, backend.as_ref(), &down_tx, cancel);
+            if result.is_ok() {
+                peer_done.store(true, Ordering::SeqCst);
+            }
+            result
+        }));
+        let mut worker_out =
+            Some(scope.spawn(|| pump_out(&writer, &mut up_rx, cancel, &peer_done)));
         loop {
             reap(&mut worker_in, &mut failed);
             let out_was_live = worker_out.is_some();

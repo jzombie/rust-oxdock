@@ -54,6 +54,21 @@ struct TestClient {
 
 impl TestClient {
     fn connect(addr: SocketAddr, user: &str, password: &str) -> anyhow::Result<Self> {
+        Self::connect_impl(addr, user, password, false)
+    }
+
+    /// Connect requesting a pseudo-terminal first, like interactive
+    /// clients do. The server answers without allocating one.
+    fn connect_with_pty(addr: SocketAddr, user: &str, password: &str) -> anyhow::Result<Self> {
+        Self::connect_impl(addr, user, password, true)
+    }
+
+    fn connect_impl(
+        addr: SocketAddr,
+        user: &str,
+        password: &str,
+        pty: bool,
+    ) -> anyhow::Result<Self> {
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .enable_all()
@@ -66,6 +81,11 @@ impl TestClient {
                 anyhow::bail!("test client authentication rejected");
             }
             let channel = session.channel_open_session().await?;
+            if pty {
+                channel
+                    .request_pty(true, "xterm-256color", 24, 80, 0, 0, &[])
+                    .await?;
+            }
             channel.request_shell(true).await?;
             let (reader, writer) = channel.split();
             Ok::<_, anyhow::Error>((session, reader, writer))
@@ -199,6 +219,45 @@ fn accept_echo_roundtrip() {
 
 #[test]
 #[cfg_attr(miri, ignore = "needs loopback TCP plus threads plus a Tokio runtime")]
+fn pty_request_accepted_echo_roundtrip() {
+    // Interactive shape: pty request, then shell, then bytes. The server
+    // answers the pty request without allocating a terminal, and the
+    // session must proceed to full duplex like a pty-less one.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD, SSH]
+        LET $m: MAP = SSH_SERVE("127.0.0.1:23225", "guest", "pty-pass")
+        LET $in: PIPE
+        LET $out: PIPE
+        LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
+        LET $echo: HANDLE = ASYNC { SSH_PUMP($out, $in) }
+        AWAIT $acc
+        AWAIT $echo
+        SSH_CLOSE($m.server)
+    "#};
+    let handle = std::thread::spawn(move || run_script(&root, script));
+    std::thread::sleep(Duration::from_secs(2));
+    let addr: SocketAddr = "127.0.0.1:23225".parse().unwrap();
+    let mut client =
+        TestClient::connect_with_pty(addr, "guest", "pty-pass").expect("pty client connects");
+    client.send(b"hello-pty").expect("client sends");
+    let echoed = client
+        .read_until(b"hello-pty", Duration::from_secs(10))
+        .expect("echo returns");
+    assert!(
+        echoed.windows(9).any(|window| window == b"hello-pty"),
+        "echoed bytes must round-trip"
+    );
+    client.close();
+    handle
+        .join()
+        .expect("script thread joins")
+        .expect("script completes after disconnect");
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "needs loopback TCP plus threads plus a Tokio runtime")]
 fn main_thread_accept_bails() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
@@ -258,6 +317,64 @@ fn cancel_mid_pump_terminates() {
         start.elapsed() < Duration::from_secs(10),
         "pump must not outlive its timeout"
     );
+}
+
+#[test]
+#[cfg(unix)]
+#[cfg_attr(
+    miri,
+    ignore = "needs loopback TCP plus threads plus a Tokio runtime plus subprocesses"
+)]
+fn inner_exit_closes_outer_session() {
+    // Nano analog: the RUN leg produces output and exits while the outer
+    // client stays connected. The inner death must propagate outer-ward
+    // (response flushes, then the channel closes) instead of stranding
+    // ACCEPT in its pump with the client hanging.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD, SSH]
+        LET $m: MAP = SSH_SERVE("127.0.0.1:0", "test", "test123")
+        WRITE addr.txt "{{ $m.addr }}"
+        LET $c_in: PIPE
+        LET $c_out: PIPE
+        LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $c_in, $c_out) }
+        WITH_IO [stdin=$c_out, stdout=$c_in] RUN ["sh", "-c", "echo canned-response"]
+        AWAIT $acc
+        SSH_CLOSE($m.server)
+    "#};
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        let result = run_script(&root, script);
+        let _ = done_tx.send(());
+        result
+    });
+    let addr_path = temp.as_guarded_path().join("addr.txt").unwrap();
+    let addr: SocketAddr = loop {
+        std::thread::sleep(Duration::from_millis(100));
+        let text = read_trimmed(&addr_path);
+        if !text.is_empty() {
+            break text.parse().expect("addr parses");
+        }
+    };
+    let start = Instant::now();
+    let mut client = TestClient::connect(addr, "test", "test123").expect("client connects");
+    client
+        .read_until(b"canned-response", Duration::from_secs(10))
+        .expect("inner output arrives");
+    // Stay connected: the script must still finish on its own once the
+    // inner leg is gone, and the client must observe the close.
+    let closed = done_rx.recv_timeout(Duration::from_secs(15)).is_ok();
+    assert!(closed, "script must complete after inner exit");
+    assert!(
+        start.elapsed() < Duration::from_secs(25),
+        "teardown must not stall"
+    );
+    drop(client);
+    handle
+        .join()
+        .expect("script thread joins")
+        .expect("script completes");
 }
 
 #[test]

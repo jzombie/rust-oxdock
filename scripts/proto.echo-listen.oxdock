@@ -1,10 +1,11 @@
-# SSH echo proxy: serve SSH on 127.0.0.1:2222 with login test / test123,
-# then bridge each client straight into `ssh orb` (OrbStack machine over
-# the host SSH config: key auth, no password needed).
+# SSH proxy: serve SSH on 127.0.0.1:2222 with login test / test123,
+# then bridge each client straight into `ssh -tt orb` (OrbStack machine
+# over the host SSH config: key auth, no password needed).
 # Nothing is dynamic: fixed port, fixed credentials, fixed upstream.
 # Try it:   cargo run --features ssh -- scripts/proto.echo-listen.oxdock
 #           (in another terminal) ssh -p 2222 test@127.0.0.1
-#           log in with password test123, type a command, hit Enter.
+#           log in with password test123, and you land in an orb shell
+#           with prompt, echo, and line editing.
 # Stop it:  Ctrl-C. The listener is user-space only: no system users, no
 #           sshd_config, nothing left behind when the process dies.
 #
@@ -12,10 +13,11 @@
 # stay unknown without it (by design, so scripts never silently change
 # meaning between builds).
 #
-# No PTY anywhere on purpose: the inner `ssh` runs with pipes, so orb
-# starts a non-interactive shell (no prompt, no echo, no line editing).
-# Type blind, hit Enter, output comes back. Do NOT add -t/-tt here: with
-# piped stdin the remote pty handshake against orb hangs instead.
+# The double -tt matters: stdin/stdout here are pipes, not a tty, and a
+# single -t is silently ignored for non-tty stdio (the remote shell then
+# runs non-interactively: commands execute, but no prompt or echo). -tt
+# forces the remote pty so the session is genuinely interactive. Window
+# size is not forwarded yet (remote defaults apply).
 # BatchMode keeps inner failures fast instead of hanging on prompts.
 #
 # Serial sessions: one client at a time. Each loop turn mints a fresh
@@ -26,7 +28,7 @@
 IMPORT [STD, SSH]
 WORKSPACE LOCAL
 
-LET $m: MAP = SSH_SERVE("127.0.0.1:2227", "test", "test123")
+LET $m: MAP = SSH_SERVE("127.0.0.1:2231", "test", "test123")
 ECHO "ssh proxy listening on {{ $m.addr }} (login test)"
 
 WHILE true {
@@ -34,10 +36,9 @@ WHILE true {
     LET $c_out: PIPE
     LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $c_in, $c_out) }
 
-    # This doesn't show a prompt
-    WITH_IO [stdin=$c_out, stdout=$c_in] RUN ["ssh", "-o", "BatchMode=yes", "orb"]
+    # WITH_IO [stdin=$c_out, stdout=$c_in] RUN ["ssh", "-tt", "-o", "BatchMode=yes", "orb"]
 
-    # This works, but doesn't close the connection when exited
+    # This should close the connection when exited
     # WITH_IO [stdin=$c_out, stdout=$c_in] RUN nano
 
     AWAIT $acc

@@ -167,6 +167,40 @@ impl Handler for EphemeralHandler {
         self.channels.remove(&channel);
         Ok(())
     }
+
+    /// Accept pseudo-terminal requests without allocating one: this server
+    /// is a byte pump, not a terminal emulator, so dimensions and modes
+    /// are recorded nowhere. The explicit reply is the point — leaving a
+    /// `want_reply` request unanswered stalls strict clients before they
+    /// ever forward stdin.
+    async fn pty_request(
+        &mut self,
+        channel: ChannelId,
+        _term: &str,
+        _col_width: u32,
+        _row_height: u32,
+        _pix_width: u32,
+        _pix_height: u32,
+        _modes: &[(russh::Pty, u32)],
+        session: &mut Session,
+    ) -> Result<()> {
+        let _ = session.channel_success(channel);
+        Ok(())
+    }
+
+    /// Accept (and ignore) environment requests: values have no process
+    /// to apply to on a byte pump, but the reply keeps clients moving
+    /// for the same reason as [`Handler::pty_request`].
+    async fn env_request(
+        &mut self,
+        channel: ChannelId,
+        _variable_name: &str,
+        _variable_value: &str,
+        session: &mut Session,
+    ) -> Result<()> {
+        let _ = session.channel_success(channel);
+        Ok(())
+    }
 }
 
 impl EphemeralHandler {
