@@ -1,36 +1,14 @@
-# SSH proxy: serve SSH on 127.0.0.1:2222 with login test / test123,
-# then bridge each client straight into `ssh -tt orb` (OrbStack machine
-# over the host SSH config: key auth, no password needed) running under
-# a local terminal sized from the outer session, with live resize.
-# Nothing is dynamic: fixed port, fixed credentials, fixed upstream.
-# Try it:   cargo run --features ssh -- scripts/proto.echo-listen.oxdock
-#           (in another terminal) ssh -p 2222 test@127.0.0.1
-#           log in with password test123, and you land in an orb shell
-#           with prompt, echo, line editing, and a correctly sized
-#           screen that follows your terminal resizes.
-# Stop it:  Ctrl-C. The listener is user-space only: no system users, no
-#           sshd_config, nothing left behind when the process dies.
-#
-# Requires the `ssh` feature: the base CLI parses STD only, and SSH names
-# stay unknown without it (by design, so scripts never silently change
-# meaning between builds).
-#
-# How sizing works: the outer pty request seeds the local terminal and
-# every outer window-change resizes it live (the kernel SIGWINCHes the
-# inner ssh, which forwards it to orb itself). Without this, the inner
-# ssh would size its remote pty from a sizeless pipe (0x0) and every
-# fullscreen app would lay out for a nonexistent screen.
-# BatchMode keeps inner failures fast instead of hanging on prompts.
-#
-# Serial sessions: one client at a time. Each loop turn mints a fresh
-# pipe pair, so a previous connection never shares a channel with the
-# next. If the orb side ends first (remote logout), the trailing AWAIT
-# still waits for the outer client to disconnect.
-
 IMPORT [STD, SSH]
 WORKSPACE LOCAL
 
-LET $m: MAP = SSH_SERVE("127.0.0.1:2240", "test", "test123", {})
+LET $m: MAP = SSH_SERVE(
+    "127.0.0.1:2241",
+    "test",
+    "test123", {
+        key_path: "test_key"
+    }
+)
+
 ECHO "ssh proxy listening on {{ $m.addr }} (login test)"
 
 WHILE true {
