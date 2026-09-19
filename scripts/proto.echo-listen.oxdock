@@ -1,25 +1,37 @@
 IMPORT [STD, SSH]
 WORKSPACE LOCAL
 
-LET $m: MAP = SSH_SERVE(
-    "127.0.0.1:2241",
+LET $server: MAP = SSH_SERVE(
+    "127.0.0.1:2250",
     "test",
     "test123", {
         key_path: "test_key"
     }
 )
 
-ECHO "ssh proxy listening on {{ $m.addr }} (login test)"
+ECHO "ssh proxy listening on {{ $server.addr }} (login test)"
 
-WHILE true {
-    LET $c_in: PIPE
-    LET $c_out: PIPE
-    LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $c_in, $c_out) }
+LET $workers: LIST = []
+LET $w: INT = 0
+WHILE $w < 4 {
+    LET $h: HANDLE = ASYNC {
+        LET $run: BOOL = true
+        WHILE $run {
+            LET $c_in: PIPE
+            LET $c_out: PIPE
+            LET $acc: HANDLE = ASYNC { SSH_ACCEPT($server.server, $c_in, $c_out) }
 
-    # TODO: Can this work without shelling-out to host's SSH?
-    LET $pty: HANDLE = ASYNC { SSH_PTY_RUN($m.server, ["ssh", "-tt", "-o", "BatchMode=yes", "orb"], 0, 0, $c_out, $c_in) }
+            LET $proc: HANDLE = ASYNC {
+                WITH_IO [stdin=$c_out, stdout=$c_in] RUN ["ssh", "-o", "BatchMode=yes", "orb"]
+            }
 
-    AWAIT $acc
-    AWAIT $pty
-    ECHO "client disconnected"
+            AWAIT $acc
+            AWAIT $proc
+        }
+    }
+    $workers = PUSH($workers, $h)
+    $w = $w + 1
 }
+
+# Block main thread so background workers run indefinitely
+AWAIT $workers
