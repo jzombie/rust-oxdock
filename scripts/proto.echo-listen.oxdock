@@ -28,7 +28,7 @@
 IMPORT [STD, SSH]
 WORKSPACE LOCAL
 
-LET $m: MAP = SSH_SERVE("127.0.0.1:2231", "test", "test123")
+LET $m: MAP = SSH_SERVE("127.0.0.1:2222", "test", "test123")
 ECHO "ssh proxy listening on {{ $m.addr }} (login test)"
 
 WHILE true {
@@ -36,7 +36,7 @@ WHILE true {
     LET $c_out: PIPE
     LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $c_in, $c_out) }
 
-    # WITH_IO [stdin=$c_out, stdout=$c_in] RUN ["ssh", "-tt", "-o", "BatchMode=yes", "orb"]
+    WITH_IO [stdin=$c_out, stdout=$c_in] RUN ["ssh", "-tt", "-o", "BatchMode=yes", "orb"]
 
     # This should close the connection when exited
     # WITH_IO [stdin=$c_out, stdout=$c_in] RUN nano
