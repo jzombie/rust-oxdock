@@ -2803,6 +2803,19 @@ Describe a filesystem entry.
 Reports file, dir, symlink (no-follow), or absent. AST-only by design;
 there is no RPN arm for filesystem IO.
 
+### STD::PUSH
+
+**Signature:** `STD::PUSH($list, $item) -> LIST`
+
+**Contexts:** AST, RPN
+
+Append one value to a LIST, returning the extended LIST.
+
+Functional append: the input list is never mutated, so worker pools
+collect handles with `$workers = PUSH($workers, $h)`. The item keeps
+its type, so a LIST of HANDLEs awaits as a group. Errors when the
+first argument is not a LIST.
+
 ### STD::TYPES
 
 **Signature:** `STD::TYPES() -> LIST`

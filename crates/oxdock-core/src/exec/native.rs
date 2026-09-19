@@ -228,6 +228,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
             PathType::registration(),
             Functions::registration(),
             Describe::registration(),
+            Push::registration(),
         ]
     }
 
@@ -615,6 +616,25 @@ fn type_describe<P: ProcessManager>(cx: &mut StepCtx<P>, name: String) -> Result
             Value::map(map)
         })
         .ok_or_else(|| anyhow::anyhow!("unknown type {name}"))
+}
+
+/// Append one value to a LIST, returning the extended LIST.
+///
+/// Functional append: the input list is never mutated, so worker pools
+/// collect handles with `$workers = PUSH($workers, $h)`. The item keeps
+/// its type, so a LIST of HANDLEs awaits as a group. Errors when the
+/// first argument is not a LIST.
+#[oxdock_func(pure, returns = "LIST")]
+fn push(list: Value, item: Value) -> Result<Value> {
+    let Some(items) = list.as_list() else {
+        anyhow::bail!(
+            "PUSH expects a LIST as its first argument, got {}",
+            list.type_name()
+        );
+    };
+    let mut out = items.clone();
+    out.push(item);
+    Ok(Value::list(out))
 }
 
 fn meta_to_value(meta: &FuncMeta) -> Value {

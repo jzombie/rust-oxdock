@@ -1827,6 +1827,129 @@ fn cancel_previously_awaited_task_fails() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// PUSH plus AWAIT on a LIST of HANDLEs (worker pools)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn push_appends_without_mutating_input() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD]
+        LET $a: LIST = [1]
+        LET $b: LIST = PUSH($a, 2)
+        LET $want_a: LIST = [1]
+        LET $want_b: LIST = [1, 2]
+        ASSERT_EQ $a $want_a
+        ASSERT_EQ $b $want_b
+        LET $e: LIST = PUSH([], "hi")
+        LET $want_e: LIST = ["hi"]
+        ASSERT_EQ $e $want_e
+    "#};
+    run_script(&root, script).expect("push appends functionally");
+}
+
+#[test]
+fn push_rejects_non_list_first_argument() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD]
+        LET $b: LIST = PUSH("nope", 1)
+    "#};
+    let err = run_script(&root, script).expect_err("non-list push must fail");
+    assert!(err.to_string().contains("expects a LIST"), "{err}");
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "AWAIT joins real background threads")]
+fn await_list_joins_worker_pool() {
+    // The proto multi-connection shape: collect ASYNC handles with PUSH in
+    // a loop, then join the group with one AWAIT. Task outputs stream to
+    // the parent in completion order, so the assertion sorts first.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD]
+        LET $workers: LIST = []
+        LET $w: INT = 0
+        WHILE $w < 3 {
+            LET $h: HANDLE = ASYNC { ECHO "worker {{ $w }}" }
+            $workers = PUSH($workers, $h)
+            $w = $w + 1
+        }
+        AWAIT $workers
+    "#};
+    let steps = oxdock_core::parse_script(script).unwrap();
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let mut io_cfg = oxdock_core::ExecIo::new();
+    io_cfg.set_stdout(Some(captured.clone()));
+    run_steps_with_context_result_with_io(&root, &root, &steps, io_cfg).unwrap();
+    let mut lines: Vec<String> = String::from_utf8(captured.lock().unwrap().clone())
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect();
+    lines.sort();
+    assert_eq!(lines, vec!["worker 0", "worker 1", "worker 2"]);
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "AWAIT joins real background threads")]
+fn await_empty_list_is_noop() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD]
+        LET $workers: LIST = []
+        AWAIT $workers
+        WRITE "resumed.txt" "ok"
+    "#};
+    run_script(&root, script).expect("empty await runs");
+    assert_eq!(read_trimmed(&root.join("resumed.txt").unwrap()), "ok");
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "AWAIT joins real background threads")]
+fn await_list_rejects_non_handle_member() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD]
+        LET $t: HANDLE = ASYNC ECHO hi
+        LET $workers: LIST = PUSH([], $t)
+        LET $bad: LIST = PUSH($workers, 1)
+        AWAIT $bad
+    "#};
+    let err = run_script(&root, script).expect_err("non-handle member must fail");
+    assert!(err.to_string().contains("is not a task handle"), "{err}");
+}
+
+#[test]
+fn await_scalar_non_handle_still_bails() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let err = run_script(&root, "LET $n: INT = 1\nAWAIT $n\n").expect_err("scalar await must fail");
+    assert!(err.to_string().contains("is not a task handle"), "{err}");
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "AWAIT joins real background threads")]
+fn await_list_twice_reports_already_awaited() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD]
+        LET $t: HANDLE = ASYNC ECHO hi
+        LET $workers: LIST = PUSH([], $t)
+        AWAIT $workers
+        AWAIT $workers
+    "#};
+    let err = run_script(&root, script).expect_err("second group await must fail");
+    assert!(err.to_string().contains("already been awaited"), "{err}");
+}
+
 #[test]
 #[cfg_attr(miri, ignore = "TIMEOUT preemption Zhang real background threads")]
 fn timeout_preempts_hung_await() {
