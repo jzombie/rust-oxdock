@@ -31,7 +31,7 @@ pub fn load_or_create_host_key<P: ProcessManager>(
     let resolver =
         PathResolver::new(root, root).context("SSH_SERVE cannot open the workspace resolver")?;
     if !resolver.exists(&guarded) {
-        let key = PrivateKey::random(&mut rand10::rng(), Algorithm::Ed25519)
+        let key = PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519)
             .context("generate Ed25519 host key")?;
         let pem = key
             .to_openssh(russh::keys::ssh_key::LineEnding::LF)

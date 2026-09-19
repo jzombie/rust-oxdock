@@ -120,7 +120,7 @@ fn ssh_serve<P: ProcessManager>(
     };
     let host_key = match load_or_create_host_key(cx, "SSH_SERVE", key_path)? {
         Some(key) => key,
-        None => PrivateKey::random(&mut rand10::rng(), Algorithm::Ed25519)
+        None => PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519)
             .context("generate ephemeral Ed25519 host key")?,
     };
     let bind_host = if host.is_empty() {

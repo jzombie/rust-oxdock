@@ -86,7 +86,7 @@ pub fn parse_connect_target(raw: &str) -> Result<(String, u16)> {
 /// [`GENERATED_PASSWORD_LEN`] characters.
 pub fn ephemeral_password() -> String {
     const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-    use rand::Rng as _;
+    use rand::RngExt as _;
     let mut rng = rand::rng();
     (0..GENERATED_PASSWORD_LEN)
         .map(|_| {
