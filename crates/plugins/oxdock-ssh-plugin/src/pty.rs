@@ -31,7 +31,10 @@ use crate::state::{PtySize, SharedPtySize, snapshot_pty_size};
 
 /// Pump master-terminal output into the `out_pipe` writer. Ends on
 /// master EOF (child and its children are gone; `portable-pty`
-/// normalizes the platform EIO-into-EOF kink for us).
+/// normalizes the platform EIO-into-EOF kink for us) or on console
+/// teardown (the supervisor releases the master once the child is
+/// observed gone, which closes a ConPTY output pipe that would
+/// otherwise stay open).
 fn pump_master_out(
     reader: &mut Box<dyn Read + Send>,
     writer: &SharedOutput,
@@ -43,6 +46,10 @@ fn pump_master_out(
             break;
         }
         match reader.read(&mut buffer) {
+            // Windows reports a torn-down ConPTY pipe as broken rather
+            // than clean EOF, depending on read versus teardown timing.
+            // Either way no more bytes will ever arrive, so drain ends.
+            Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => break,
             Err(err) => bail!("SSH pty master read failed: {err}"),
             Ok(0) => break,
             Ok(count) => {
@@ -168,6 +175,15 @@ pub fn pump_pty_session<P: ProcessManager>(
         .master
         .take_writer()
         .context("SSH pty master writer failed")?;
+    // Console teardown handle. Released once the child is observed
+    // gone (see the supervisor loop): ConPTY keeps the output pipe
+    // open until ClosePseudoConsole runs, which lives in this handle,
+    // so holding it to function end strands the output worker in its
+    // blocking read after the child exits (EOF waits for teardown,
+    // teardown waits for the scope join, the join waits for the
+    // worker). Unix reports child death as master EOF either way, so
+    // the early release changes nothing there.
+    let mut master_opt = Some(pair.master);
 
     let mut builder = portable_pty::CommandBuilder::new(&argv[0]);
     builder.args(&argv[1..]);
@@ -221,7 +237,11 @@ pub fn pump_pty_session<P: ProcessManager>(
             if current.seq != applied_seq.seq {
                 applied = current.size;
                 applied_seq = current;
-                let _ = pair.master.resize(to_portable_size(applied));
+                // The master is gone once the child exits (see below):
+                // a dead child has no terminal left to resize.
+                if let Some(master) = master_opt.as_ref() {
+                    let _ = master.resize(to_portable_size(applied));
+                }
             }
             match child.try_wait() {
                 Ok(Some(status)) => {
@@ -229,10 +249,20 @@ pub fn pump_pty_session<P: ProcessManager>(
                     if exit_code.is_none() {
                         exit_code = Some(i64::from(status.exit_code()));
                     }
+                    // The child is gone: tear down the console now so the
+                    // output worker's blocking read observes EOF. Deferred
+                    // to function end this deadlocks on Windows, where the
+                    // ConPTY host holds the output pipe open until
+                    // ClosePseudoConsole runs.
+                    master_opt = None;
                 }
                 Ok(None) => {}
                 Err(_) => {
                     peer_done.store(true, Ordering::SeqCst);
+                    // The wait handle is broken: no exit will ever be
+                    // observed, so release the console the same way.
+                    // Workers drain to EOF and the reaper below reports.
+                    master_opt = None;
                 }
             }
             if cx.is_cancelled() {
