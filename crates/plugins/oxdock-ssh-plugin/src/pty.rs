@@ -29,6 +29,10 @@ use oxdock_process::{ProcessManager, SharedInput, SharedOutput};
 use crate::bridge::{CHUNK, TICK, read_pipe};
 use crate::state::{PtySize, SharedPtySize, snapshot_pty_size};
 
+// TEMP-DIAG: Windows ConPTY hang diagnosis. Remove after root cause is fixed.
+#[cfg(windows)]
+static DIAG_OUT_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Pump master-terminal output into the `out_pipe` writer. Ends on
 /// master EOF (child and its children are gone; `portable-pty`
 /// normalizes the platform EIO-into-EOF kink for us) or on console
@@ -53,6 +57,9 @@ fn pump_master_out(
             Err(err) => bail!("SSH pty master read failed: {err}"),
             Ok(0) => break,
             Ok(count) => {
+                // TEMP-DIAG: Windows ConPTY hang diagnosis.
+                #[cfg(windows)]
+                DIAG_OUT_BYTES.fetch_add(count as u64, Ordering::SeqCst);
                 let mut guard = writer
                     .lock()
                     .map_err(|_| anyhow::anyhow!("SSH pty output lock poisoned"))?;
@@ -154,6 +161,15 @@ pub fn pump_pty_session<P: ProcessManager>(
     if argv.is_empty() {
         bail!("SSH_PTY_RUN needs at least a program");
     }
+    // TEMP-DIAG: Windows ConPTY hang diagnosis. Remove after root cause is fixed.
+    #[cfg(windows)]
+    let diag_tag: String = argv.join(" ");
+    #[cfg(windows)]
+    let diag_start = std::time::Instant::now();
+    #[cfg(windows)]
+    let mut diag_last = diag_start;
+    #[cfg(windows)]
+    eprintln!("[pty-diag {}] enter", diag_tag);
     let reader = cx
         .pipe_reader(in_pipe)
         .context("SSH pty cannot borrow the input pipe")?;
@@ -167,6 +183,9 @@ pub fn pump_pty_session<P: ProcessManager>(
     let pair = portable_pty::native_pty_system()
         .openpty(to_portable_size(applied))
         .context("SSH pty allocation failed")?;
+    // TEMP-DIAG: Windows ConPTY hang diagnosis.
+    #[cfg(windows)]
+    eprintln!("[pty-diag {}] openpty ok", diag_tag);
     let mut master_reader = pair
         .master
         .try_clone_reader()
@@ -199,6 +218,9 @@ pub fn pump_pty_session<P: ProcessManager>(
         .spawn_command(builder)
         .context("SSH pty spawn failed")?;
     drop(pair.slave);
+    // TEMP-DIAG: Windows ConPTY hang diagnosis.
+    #[cfg(windows)]
+    eprintln!("[pty-diag {}] spawn ok", diag_tag);
 
     let mut failed: Option<anyhow::Error> = None;
     let mut out_closed = false;
@@ -222,6 +244,26 @@ pub fn pump_pty_session<P: ProcessManager>(
             result
         }));
         loop {
+            // TEMP-DIAG: Windows ConPTY hang diagnosis.
+            #[cfg(windows)]
+            if diag_last.elapsed() > std::time::Duration::from_secs(5) {
+                diag_last = std::time::Instant::now();
+                eprintln!(
+                    "[pty-diag {}] t={}s exit_seen={} in_alive={} out_alive={} out_bytes={}",
+                    diag_tag,
+                    diag_start.elapsed().as_secs(),
+                    exit_code.is_some(),
+                    worker_in.is_some(),
+                    worker_out.is_some(),
+                    DIAG_OUT_BYTES.load(Ordering::SeqCst),
+                );
+            }
+            // TEMP-DIAG: fail fast with state instead of hanging CI forever.
+            #[cfg(windows)]
+            if diag_start.elapsed() > std::time::Duration::from_secs(120) {
+                eprintln!("[pty-diag {}] WATCHDOG exit(42)", diag_tag);
+                std::process::exit(42);
+            }
             reap(&mut worker_in, &mut failed);
             let out_was_live = worker_out.is_some();
             reap(&mut worker_out, &mut failed);
@@ -254,7 +296,13 @@ pub fn pump_pty_session<P: ProcessManager>(
                     // to function end this deadlocks on Windows, where the
                     // ConPTY host holds the output pipe open until
                     // ClosePseudoConsole runs.
+                    // TEMP-DIAG: Windows ConPTY hang diagnosis.
+                    #[cfg(windows)]
+                    eprintln!("[pty-diag {}] teardown start", diag_tag);
                     master_opt = None;
+                    // TEMP-DIAG: Windows ConPTY hang diagnosis.
+                    #[cfg(windows)]
+                    eprintln!("[pty-diag {}] teardown done", diag_tag);
                 }
                 Ok(None) => {}
                 Err(_) => {
@@ -262,6 +310,9 @@ pub fn pump_pty_session<P: ProcessManager>(
                     // The wait handle is broken: no exit will ever be
                     // observed, so release the console the same way.
                     // Workers drain to EOF and the reaper below reports.
+                    // TEMP-DIAG: Windows ConPTY hang diagnosis.
+                    #[cfg(windows)]
+                    eprintln!("[pty-diag {}] wait-err teardown", diag_tag);
                     master_opt = None;
                 }
             }
@@ -275,6 +326,9 @@ pub fn pump_pty_session<P: ProcessManager>(
             std::thread::sleep(TICK);
         }
     });
+    // TEMP-DIAG: Windows ConPTY hang diagnosis.
+    #[cfg(windows)]
+    eprintln!("[pty-diag {}] scope joined", diag_tag);
     if let Some(err) = failed {
         return Err(err);
     }
