@@ -116,6 +116,17 @@ impl<P: ProcessManager> Clone for HostRegistration<P> {
     }
 }
 
+impl<P: ProcessManager> HostRegistration<P> {
+    /// Introspectable metadata for this entry, for documentation tooling
+    /// that reads modules without registering them.
+    pub fn meta(&self) -> &FuncMeta {
+        match self {
+            HostRegistration::Stateful { meta, .. } => meta,
+            HostRegistration::Pure { meta, .. } => meta,
+        }
+    }
+}
+
 /// One user-defined function body (`FUNC NAME($p: TYPE, ...) { ... }`).
 #[derive(Debug, Clone)]
 pub(super) struct FuncDefData {

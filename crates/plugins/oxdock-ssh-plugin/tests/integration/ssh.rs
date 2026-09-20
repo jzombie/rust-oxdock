@@ -1932,3 +1932,100 @@ fn concurrent_guests_keep_their_own_pty_size() {
     client_a.close();
     client_b.close();
 }
+
+#[test]
+#[cfg_attr(miri, ignore = "needs loopback TCP plus threads plus a Tokio runtime")]
+fn logical_port_connect_roundtrip() {
+    // Pattern 1: the client dials the logical port, never a physical
+    // address. Unmapped ports default to loopback, so no `127.0.0.1`
+    // appears anywhere in this script. The server sends first: the
+    // client side never EOFs its input, so the reply cannot race
+    // teardown.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD, SSH]
+        LET $m: MAP = SSH_SERVE("23541", {username: "guest", password: "echo-pass"})
+        LET $in: PIPE
+        LET $out: PIPE
+        LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
+        LET $cin: PIPE
+        LET $cout: PIPE
+        LET $c: HANDLE = ASYNC { SSH_CONNECT("23541", "guest", "echo-pass", $cin, $cout) }
+        WITH_IO [stdout=$in] ECHO "server-greeting"
+        LET $info: MAP = INSPECT($cout)
+        LET $empty: BOOL = $info.buffer_bytes == 0
+        LET $tries: INT = 0
+        WHILE $empty {
+            SLEEP 100ms
+            $info = INSPECT($cout)
+            $empty = $info.buffer_bytes == 0
+            $tries = $tries + 1
+            IF $tries > 100 {
+                EXIT 1
+            }
+        }
+        ASSERT_CONTAINS $cout "server-greeting"
+        AWAIT $acc
+        CANCEL $c
+        SSH_CLOSE($m.server)
+    "#};
+    let handle = std::thread::spawn(move || run_script(&root, script));
+    handle
+        .join()
+        .expect("script thread joins")
+        .expect("logical connect script completes end to end");
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "needs loopback TCP plus threads plus a Tokio runtime")]
+fn mapped_name_connect_roundtrip() {
+    // Pattern 1 with a CLI-style mapping: the service name resolves to
+    // a pre-bound ephemeral socket, so neither side names a physical
+    // address or port. The connect side proves the TcpBound arm.
+    let registry = Arc::new(oxdock_net_plugin::EndpointRegistry::new(false));
+    registry
+        .add_mapping(
+            &oxdock_net_plugin::VirtualEndpoint::Name("doc-demo".to_string()),
+            oxdock_net_plugin::BindingSpec::Exposed {
+                addr: "127.0.0.1:0".parse().expect("loopback ephemeral"),
+            },
+        )
+        .expect("mapping");
+    registry.bind_all().expect("bind_all resolves ephemeral");
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD, SSH]
+        LET $m: MAP = SSH_SERVE("doc-demo", {username: "guest", password: "echo-pass"})
+        LET $in: PIPE
+        LET $out: PIPE
+        LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
+        LET $cin: PIPE
+        LET $cout: PIPE
+        LET $c: HANDLE = ASYNC { SSH_CONNECT("doc-demo", "guest", "echo-pass", $cin, $cout) }
+        WITH_IO [stdout=$in] ECHO "server-greeting"
+        LET $info: MAP = INSPECT($cout)
+        LET $empty: BOOL = $info.buffer_bytes == 0
+        LET $tries: INT = 0
+        WHILE $empty {
+            SLEEP 100ms
+            $info = INSPECT($cout)
+            $empty = $info.buffer_bytes == 0
+            $tries = $tries + 1
+            IF $tries > 100 {
+                EXIT 1
+            }
+        }
+        ASSERT_CONTAINS $cout "server-greeting"
+        AWAIT $acc
+        CANCEL $c
+        SSH_CLOSE($m.server)
+    "#};
+    let probe = root.clone();
+    let handle = std::thread::spawn(move || run_script_with(registry, &probe, script));
+    handle
+        .join()
+        .expect("script thread joins")
+        .expect("mapped connect script completes end to end");
+}

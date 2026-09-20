@@ -187,7 +187,34 @@ fn net_listen<P: ProcessManager>(
 /// closes. Must run inside `ASYNC`. `options` holds optional
 /// `no_half_close` BOOL. Memory listeners pop a queued pipe pair instead
 /// of accepting a socket; offline listeners wait for close/cancel. Returns
-/// a MAP with `closed` (BOOL).
+/// a MAP with `closed` (BOOL); the example below asserts the key on the
+/// awaited result. The server sends first: the client side never EOFs
+/// its input, so the reply cannot race teardown. This complete program
+/// runs end to end under the docs conformance suite.
+///
+/// ```oxdock
+/// IMPORT [STD, NET]
+/// LET $l: MAP = NET_LISTEN("doc-net-demo", {})
+/// LET $in: PIPE
+/// LET $out: PIPE
+/// LET $acc: HANDLE = ASYNC { NET_ACCEPT($l.listener, $in, $out, {}) }
+/// LET $cin: PIPE
+/// LET $cout: PIPE
+/// LET $c: HANDLE = ASYNC { NET_CONNECT("doc-net-demo", $cin, $cout, {}) }
+/// WITH_IO [stdout=$in] ECHO "server-greeting"
+/// LET $info: MAP = INSPECT($cout)
+/// LET $empty: BOOL = $info.buffer_bytes == 0
+/// WHILE $empty {
+///     SLEEP 100ms
+///     $info = INSPECT($cout)
+///     $empty = $info.buffer_bytes == 0
+/// }
+/// ASSERT_CONTAINS $cout "server-greeting"
+/// CANCEL $c
+/// LET $done: MAP = AWAIT $acc
+/// ASSERT_CONTAINS $done "closed"
+/// NET_CLOSE($l.listener)
+/// ```
 #[oxdock_func(returns = "MAP", summary = "Accept one connection into pipes.")]
 fn net_accept<P: ProcessManager>(
     cx: &mut StepCtx<P>,

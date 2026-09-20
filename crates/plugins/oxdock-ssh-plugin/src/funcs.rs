@@ -6,7 +6,6 @@
 //! carries bytes consumed by the wire side (the DSL writes them).
 
 use std::collections::BTreeMap;
-use std::net::ToSocketAddrs;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
@@ -28,7 +27,7 @@ use crate::state::{
     CLOSE_JOIN_TIMEOUT, Dequeue, PendingSession, ServerState, SessionQueue, ShutdownSignal,
 };
 use crate::types::{SshServerTag, SshSessionTag};
-use crate::validate::{parse_connect_target, parse_serve_endpoint};
+use crate::validate::parse_serve_endpoint;
 
 /// Unique server ids per process.
 static SERVER_IDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -88,14 +87,40 @@ fn dequeue_session<P: ProcessManager>(
 /// `session` (SSH_SESSION), `command` (STRING, empty for shells),
 /// `username` and `addr` (STRINGs, empty when unknown).
 ///
-/// ```text
-/// LET $sess: MAP = SSH_DEQUEUE($server.server)
-/// IF $sess.command == "health-check" {
-///     LET $in: PIPE
-///     LET $out: PIPE
-///     ASYNC { WITH_IO [stdout=$in] ECHO "OK" }
+/// Routing shape: compare the dequeued command against known commands,
+/// build a fresh pipe pair per session, and pump a synthetic reply with
+/// `SSH_PUMP_CHANNEL`. The server sends first: the client side never
+/// EOFs its input, so the reply cannot race teardown. This complete
+/// program runs end to end under the docs conformance suite.
+///
+/// ```oxdock
+/// IMPORT [STD, SSH]
+/// LET $m: MAP = SSH_SERVE("doc-ssh-demo", {username: "u", password: "p"})
+/// LET $in: PIPE
+/// LET $out: PIPE
+/// LET $w: HANDLE = ASYNC {
+///     LET $sess: MAP = SSH_DEQUEUE($m.server)
+///     ASSERT_CONTAINS $sess "session"
+///     ASSERT_CONTAINS $sess "command"
+///     ASSERT_CONTAINS $sess "username"
+///     ASSERT_CONTAINS $sess "addr"
 ///     SSH_PUMP_CHANNEL($sess.session, $in, $out)
 /// }
+/// LET $cin: PIPE
+/// LET $cout: PIPE
+/// LET $c: HANDLE = ASYNC { SSH_CONNECT("doc-ssh-demo", "u", "p", $cin, $cout) }
+/// WITH_IO [stdout=$in] ECHO "server-greeting"
+/// LET $info: MAP = INSPECT($cout)
+/// LET $empty: BOOL = $info.buffer_bytes == 0
+/// WHILE $empty {
+///     SLEEP 100ms
+///     $info = INSPECT($cout)
+///     $empty = $info.buffer_bytes == 0
+/// }
+/// ASSERT_CONTAINS $cout "server-greeting"
+/// AWAIT $w
+/// CANCEL $c
+/// SSH_CLOSE($m.server)
 /// ```
 #[oxdock_func(
     returns = "MAP",
@@ -312,7 +337,36 @@ fn ssh_serve<P: ProcessManager>(
 /// MAP with `closed` (BOOL) and `command` (STRING, empty for shells).
 /// Thin wrapper over `SSH_DEQUEUE` + `SSH_PUMP_CHANNEL` for worker loops
 /// that need no pre-pump inspection; use those directly to route on
-/// session metadata first.
+/// session metadata first. Returns a MAP with `closed` (BOOL) and
+/// `command` (STRING, empty for shells); the example below asserts both
+/// keys on the awaited result. The server sends first: the client side
+/// never EOFs its input, so the reply cannot race teardown. This
+/// complete program runs end to end under the docs conformance suite.
+///
+/// ```oxdock
+/// IMPORT [STD, SSH]
+/// LET $m: MAP = SSH_SERVE("doc-ssh-demo", {username: "u", password: "p"})
+/// LET $in: PIPE
+/// LET $out: PIPE
+/// LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
+/// LET $cin: PIPE
+/// LET $cout: PIPE
+/// LET $c: HANDLE = ASYNC { SSH_CONNECT("doc-ssh-demo", "u", "p", $cin, $cout) }
+/// WITH_IO [stdout=$in] ECHO "server-greeting"
+/// LET $info: MAP = INSPECT($cout)
+/// LET $empty: BOOL = $info.buffer_bytes == 0
+/// WHILE $empty {
+///     SLEEP 100ms
+///     $info = INSPECT($cout)
+///     $empty = $info.buffer_bytes == 0
+/// }
+/// ASSERT_CONTAINS $cout "server-greeting"
+/// LET $done: MAP = AWAIT $acc
+/// ASSERT_CONTAINS $done "closed"
+/// ASSERT_CONTAINS $done "command"
+/// CANCEL $c
+/// SSH_CLOSE($m.server)
+/// ```
 #[oxdock_func(returns = "MAP", summary = "Accept one SSH session into pipes.")]
 fn ssh_accept<P: ProcessManager>(
     cx: &mut StepCtx<P>,
@@ -384,8 +438,11 @@ fn ssh_close<P: ProcessManager>(cx: &mut StepCtx<P>, server: Value) -> Result<Va
 /// Connect to an SSH server with distinct inner credentials and pump the
 /// shell channel through explicit pipes until it closes. Must run inside
 /// `ASYNC`, concurrently with the `SSH_PUMP` tasks (never before them).
-/// Under `--offline` the dial bails before any DNS or socket work.
-/// Returns a MAP with `closed` (BOOL).
+/// `target` is a logical port (`"2251"`: CLI-mapped address or loopback
+/// default), a service name (CLI-mapped address only; unmapped names are
+/// memory services and SSH needs TCP), a served address (`$m.addr`), or
+/// a `host:port` dial. Under `--offline` the dial bails before any DNS
+/// or socket work. Returns a MAP with `closed` (BOOL).
 fn ssh_connect<P: ProcessManager>(
     cx: &mut StepCtx<P>,
     registry: &Arc<EndpointRegistry>,
@@ -405,12 +462,7 @@ fn ssh_connect<P: ProcessManager>(
     if username.is_empty() {
         bail!("SSH_CONNECT username must not be empty");
     }
-    let (host, port) = parse_connect_target(&target)?;
-    let addr = format!("{host}:{port}")
-        .to_socket_addrs()
-        .with_context(|| format!("SSH_CONNECT cannot resolve {host}:{port}"))?
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("SSH_CONNECT cannot resolve {host}:{port}"))?;
+    let addr = crate::validate::resolve_connect_addr(registry, &target)?;
     let runtime = connect_runtime()?;
     let session = runtime
         .block_on(connect_session(&addr, &username, &password))
@@ -620,7 +672,7 @@ fn ssh_connect_registration<P: ProcessManager>(
             returns: Some("MAP".to_string()),
             rpn: false,
             summary: "Open an SSH client session into pipes.",
-            docs: "Open an SSH client session into pipes.",
+            docs: "Open an SSH client session into pipes. Target shapes: a logical port (CLI-mapped address or loopback default), a service name (CLI-mapped address only), a served address, or a host:port dial.",
         },
         func,
     }

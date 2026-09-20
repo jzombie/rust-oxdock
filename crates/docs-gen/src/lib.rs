@@ -55,6 +55,18 @@ pub fn run(repo_root: &Path) -> Result<()> {
 
             LET $funcref: STRING = DOCS::FUNCTION_REFERENCE()
             WRITE $gen.function_reference $funcref
+
+            LET $sshfuncref: STRING = DOCS::PLUGIN_FUNCTION_REFERENCE("SSH")
+            WRITE $gen.ssh_function_reference $sshfuncref
+
+            LET $sshtypes: STRING = DOCS::PLUGIN_TYPE_REFERENCE("SSH")
+            WRITE $gen.ssh_type_reference $sshtypes
+
+            LET $netfuncref: STRING = DOCS::PLUGIN_FUNCTION_REFERENCE("NET")
+            WRITE $gen.net_function_reference $netfuncref
+
+            LET $nettypes: STRING = DOCS::PLUGIN_TYPE_REFERENCE("NET")
+            WRITE $gen.net_type_reference $nettypes
         }
         REFRESH_GENERATED($gen)
 

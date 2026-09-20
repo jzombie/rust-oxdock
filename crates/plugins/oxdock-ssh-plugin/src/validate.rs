@@ -5,8 +5,11 @@
 //! gate live in `oxdock-net-plugin` (shared, no duplication); only the
 //! serve/connect wrappers with their SSH-specific messages stay here.
 
-use anyhow::{Result, bail};
+use std::net::ToSocketAddrs;
+
+use anyhow::{Context, Result, bail};
 use oxdock_net_plugin::validate as net_validate;
+use oxdock_net_plugin::{EndpointRegistry, SlotKind, VirtualEndpoint};
 
 /// Split `host:port` (or `[v6]:port`) with an SSH-context prefix.
 /// Pure string validation: no DNS, Miri-safe. Shape and port rules come
@@ -45,6 +48,57 @@ pub fn parse_connect_target(raw: &str) -> Result<(String, u16)> {
     Ok((host, port))
 }
 
+/// Resolve an `SSH_CONNECT` target to a dial address. Logical endpoints
+/// go through the registry so CLI mappings (`-p`/`--listen`) behave
+/// like the serve side; anything else dials directly. Mirrors
+/// `NET_CONNECT` resolution, except SSH cannot ride memory queues, so
+/// those arms bail with the map hint instead of rendezvousing. Reads
+/// registry slots only, never binds or dials.
+pub fn resolve_connect_addr(
+    registry: &EndpointRegistry,
+    target: &str,
+) -> Result<std::net::SocketAddr> {
+    if let Ok(endpoint) = net_validate::parse_virtual_endpoint(target, "SSH_CONNECT") {
+        return match &endpoint {
+            VirtualEndpoint::Port(port) => match registry.slot_kind(&endpoint) {
+                SlotKind::Memory => {
+                    bail!(
+                        "SSH_CONNECT: '{endpoint}' is a memory service (SSH needs a TCP socket; map it with -p/--listen)"
+                    )
+                }
+                SlotKind::TcpBound(addr) => Ok(addr),
+                SlotKind::TcpUnbound => {
+                    bail!(
+                        "SSH_CONNECT: '{endpoint}' was never bound (the runner must call bind_all)"
+                    )
+                }
+                SlotKind::Offline => bail!("SSH_CONNECT: '{endpoint}' is offline"),
+                SlotKind::Unmapped => Ok(std::net::SocketAddr::from(([127, 0, 0, 1], *port))),
+            },
+            VirtualEndpoint::Name(_) => match registry.slot_kind(&endpoint) {
+                SlotKind::TcpBound(addr) => Ok(addr),
+                SlotKind::TcpUnbound => {
+                    bail!(
+                        "SSH_CONNECT: '{endpoint}' was never bound (the runner must call bind_all)"
+                    )
+                }
+                SlotKind::Memory | SlotKind::Unmapped => {
+                    bail!(
+                        "SSH_CONNECT: '{endpoint}' is a memory service (SSH needs a TCP socket; map it with -p/--listen)"
+                    )
+                }
+                SlotKind::Offline => bail!("SSH_CONNECT: '{endpoint}' is offline"),
+            },
+        };
+    }
+    let (host, port) = parse_connect_target(target)?;
+    format!("{host}:{port}")
+        .to_socket_addrs()
+        .with_context(|| format!("SSH_CONNECT cannot resolve {host}:{port}"))?
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("SSH_CONNECT cannot resolve {host}:{port}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -80,5 +134,55 @@ mod tests {
             "SSH_CONNECT invalid target \"127.0.0.1:0\": port must be 1-65535"
         );
         parse_connect_target("").expect_err("empty target must fail");
+    }
+
+    fn fresh_registry() -> EndpointRegistry {
+        EndpointRegistry::new(false)
+    }
+
+    #[test]
+    fn resolve_unmapped_port_dials_loopback() {
+        let addr = resolve_connect_addr(&fresh_registry(), "23471").expect("loopback default");
+        assert_eq!(addr, std::net::SocketAddr::from(([127, 0, 0, 1], 23471)));
+    }
+
+    #[test]
+    fn resolve_unmapped_name_is_memory() {
+        // Virtual-first precedence: a bare single-label name classifies
+        // as a service, never as a port-22 host. SSH cannot ride memory
+        // queues, so it bails with the map hint; write `name:22` for a
+        // literal single-label host dial.
+        let err = resolve_connect_addr(&fresh_registry(), "demo-proxy").expect_err("memory bails");
+        assert!(err.to_string().contains("memory service"), "{err:#}");
+        let err = resolve_connect_addr(&fresh_registry(), "myhost").expect_err("memory bails");
+        assert!(err.to_string().contains("memory service"), "{err:#}");
+    }
+
+    #[test]
+    fn resolve_memory_mapped_port_bails() {
+        use oxdock_net_plugin::BindingSpec;
+        let registry = fresh_registry();
+        registry
+            .add_mapping(&VirtualEndpoint::Port(23472), BindingSpec::Memory)
+            .expect("mapping");
+        let err = resolve_connect_addr(&registry, "23472").expect_err("memory bails");
+        assert!(err.to_string().contains("memory service"), "{err:#}");
+    }
+
+    #[test]
+    fn resolve_offline_mapped_port_bails() {
+        use oxdock_net_plugin::BindingSpec;
+        let registry = fresh_registry();
+        registry
+            .add_mapping(&VirtualEndpoint::Port(23473), BindingSpec::Offline)
+            .expect("mapping");
+        let err = resolve_connect_addr(&registry, "23473").expect_err("offline bails");
+        assert!(err.to_string().contains("offline"), "{err:#}");
+    }
+
+    #[test]
+    fn resolve_physical_target_still_dials() {
+        let addr = resolve_connect_addr(&fresh_registry(), "127.0.0.1:2222").expect("resolves");
+        assert_eq!(addr, std::net::SocketAddr::from(([127, 0, 0, 1], 2222)));
     }
 }

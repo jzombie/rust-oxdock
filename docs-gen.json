@@ -1,1 +1,13 @@
-{"global_values": ".oxdock/template/_global/values.json", "scopes": [".oxdock", "crates", "oxdock", "oxdock-build", "oxdock-cli", "oxdock-macros"], "generated": {"command_index": ".oxdock/template/readme/generated/command-reference.md.tmpl", "command_body": ".oxdock/template/readme/generated/command-body.md.tmpl", "function_reference": ".oxdock/template/readme/generated/function-reference.md.tmpl"}}
+{
+  "global_values": ".oxdock/template/_global/values.json",
+  "scopes": [".oxdock", "crates", "oxdock", "oxdock-build", "oxdock-cli", "oxdock-macros"],
+  "generated": {
+    "command_index": ".oxdock/template/readme/generated/command-reference.md.tmpl",
+    "command_body": ".oxdock/template/readme/generated/command-body.md.tmpl",
+    "function_reference": ".oxdock/template/readme/generated/function-reference.md.tmpl",
+    "ssh_function_reference": "crates/plugins/oxdock-ssh-plugin/.oxdock/template/generated/ssh-function-reference.md.tmpl",
+    "ssh_type_reference": "crates/plugins/oxdock-ssh-plugin/.oxdock/template/generated/ssh-type-reference.md.tmpl",
+    "net_function_reference": "crates/plugins/oxdock-net-plugin/.oxdock/template/generated/net-function-reference.md.tmpl",
+    "net_type_reference": "crates/plugins/oxdock-net-plugin/.oxdock/template/generated/net-type-reference.md.tmpl"
+  }
+}
