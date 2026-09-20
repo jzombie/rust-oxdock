@@ -34,6 +34,14 @@ pub(super) struct ThreadJoinHandle {
     join: Option<std::thread::JoinHandle<Result<()>>>,
     cancel_token: Arc<AtomicBool>,
     active_process: Arc<Mutex<Option<Box<dyn BackgroundHandle>>>>,
+    /// Identity of the worker thread, published by the child on entry.
+    /// Forked worker state shares the parent task registry via `Arc`, so a
+    /// parent that errors out can drop its registry reference while the
+    /// worker is still alive. The worker then becomes the last registry
+    /// owner and would drop (and join) its own handle on thread exit, which
+    /// is undefined behavior (`pthread_join` on self). Detect that case and
+    /// detach instead of joining.
+    worker: Arc<Mutex<Option<std::thread::ThreadId>>>,
     /// Preserved error from the child thread, if any.
     thread_error: Option<anyhow::Error>,
 }
@@ -43,18 +51,33 @@ impl ThreadJoinHandle {
         join: std::thread::JoinHandle<Result<()>>,
         cancel_token: Arc<AtomicBool>,
         active_process: Arc<Mutex<Option<Box<dyn BackgroundHandle>>>>,
+        worker: Arc<Mutex<Option<std::thread::ThreadId>>>,
     ) -> Self {
         Self {
             join: Some(join),
             cancel_token,
             active_process,
+            worker,
             thread_error: None,
         }
+    }
+
+    /// Whether the caller is the worker thread owned by this handle.
+    fn is_self(&self) -> bool {
+        let guard = self.worker.lock().unwrap_or_else(|e| e.into_inner());
+        guard.is_some_and(|id| id == std::thread::current().id())
     }
 
     /// Reap the thread if finished, preserving any error.
     fn reap(&mut self) {
         if self.join.is_none() {
+            return;
+        }
+        if self.is_self() {
+            // The worker is dropping the last registry reference on its own
+            // exit path (parent already tore down or errored out). Detach
+            // instead of joining self, which is undefined behavior.
+            let _ = self.join.take();
             return;
         }
         let handle = self.join.take().unwrap();
@@ -482,7 +505,7 @@ pub(super) fn execute_steps<P: ProcessManager>(
     wait_at_end: bool,
 ) -> Result<Flow> {
     let generation = allocate_assert_generation();
-    let flow = execute_steps_inner(
+    let flow = match execute_steps_inner(
         state,
         process,
         generation,
@@ -492,8 +515,30 @@ pub(super) fn execute_steps<P: ProcessManager>(
         out,
         err,
         wait_at_end,
-    )?;
+    ) {
+        Ok(flow) => flow,
+        Err(e) => {
+            // A step failed before end-of-pipeline reaping ran. Join
+            // background work now so the parent owns teardown: otherwise the
+            // parent drops its task-registry reference while a worker still
+            // lives, leaving the worker as the last registry owner to drop
+            // (and join) its own handle on thread exit.
+            teardown_tasks_on_error(state);
+            cleanup_assertion_generation(state, generation)?;
+            return Err(e);
+        }
+    };
     // Cleanup: remove all assertion state for this generation
+    cleanup_assertion_generation(state, generation)?;
+    Ok(flow)
+}
+
+/// Remove per-generation assertion observers. Runs on success and on step
+/// failure so a failed pipeline never leaks windows into later runs.
+fn cleanup_assertion_generation<P: ProcessManager>(
+    state: &mut ExecState<P>,
+    generation: usize,
+) -> Result<()> {
     let mut windows = match state.assert_windows.lock() {
         Ok(guard) => guard,
         Err(_) => bail!("assert_windows poisoned"),
@@ -509,7 +554,45 @@ pub(super) fn execute_steps<P: ProcessManager>(
         Err(_) => bail!("exact_stdout poisoned"),
     };
     exact.retain(|g, _| *g != generation);
-    Ok(flow)
+    Ok(())
+}
+
+/// Join background work after a step failure, mirroring the end-of-pipeline
+/// fail-fast teardown. Anonymous handles always belong to the current
+/// thread. Named entries are root-owned: worker threads must never block on
+/// sibling tasks, which may depend on the worker via AWAIT.
+fn teardown_tasks_on_error<P: ProcessManager>(state: &mut ExecState<P>) {
+    for survivor in state.bg_children.iter_mut() {
+        let _ = survivor.kill();
+    }
+    state.bg_children.clear();
+    if state.inside_async {
+        return;
+    }
+    let entries: Vec<Arc<TaskEntry>> = {
+        let named = state
+            .named_tasks
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        named.values().cloned().collect()
+    };
+    let mut to_kill: Vec<(Arc<TaskEntry>, Box<dyn BackgroundHandle>)> = Vec::new();
+    for entry in &entries {
+        let mut guard = entry.state.lock().unwrap_or_else(|e| e.into_inner());
+        match guard.phase {
+            TaskPhase::Running | TaskPhase::Awaiting => {
+                guard.phase = TaskPhase::Cancelled;
+                if let Some(handle) = guard.handle.take() {
+                    to_kill.push((Arc::clone(entry), handle));
+                }
+            }
+            TaskPhase::Cancelled | TaskPhase::Completed => {}
+        }
+    }
+    for (entry, mut handle) in to_kill {
+        let _ = handle.kill();
+        entry.finish_teardown();
+    }
 }
 
 /// Execute a single step with an explicit generation and index.

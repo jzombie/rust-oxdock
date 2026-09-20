@@ -2524,12 +2524,17 @@ fn async_task_failure_preserves_error_chain() {
     let root = guard_root(&temp);
     let direct = run_script(&root, "READ missing.txt\n").expect_err("missing file must fail");
     let direct_chain = format!("{direct:#}");
-    #[cfg(unix)]
-    let os_layer = "No such file or directory";
-    #[cfg(windows)]
-    let os_layer = "cannot find the file";
+    // Under Miri the workspace uses a synthetic snapshot filesystem, so a
+    // missing file surfaces as `missing file <rel>` with no OS `ENOENT`
+    // layer and no `for reading` open context.
+    #[cfg(miri)]
+    let leaf = "missing file";
+    #[cfg(all(unix, not(miri)))]
+    let leaf = "No such file or directory";
+    #[cfg(all(windows, not(miri)))]
+    let leaf = "cannot find the file";
     assert!(
-        direct_chain.contains("failed to open") && direct_chain.contains(os_layer),
+        direct_chain.contains("failed to open") && direct_chain.contains(leaf),
         "direct failure must carry a two-layer chain, got: {direct_chain}"
     );
     let via_task = run_script(&root, "LET $t: HANDLE = ASYNC READ missing.txt\nAWAIT $t\n")
@@ -2538,10 +2543,16 @@ fn async_task_failure_preserves_error_chain() {
     // so every causal layer must appear inline (no `causes:` structure
     // survives, but no layer may go missing either).
     let task_chain = format!("{via_task:#}");
+    #[cfg(miri)]
+    assert!(
+        task_chain.contains("failed to open") && task_chain.contains(leaf),
+        "task boundary must preserve every causal layer.\ndirect: {direct_chain}\ntask:   {task_chain}"
+    );
+    #[cfg(not(miri))]
     assert!(
         task_chain.contains("failed to open")
             && task_chain.contains("for reading")
-            && task_chain.contains(os_layer),
+            && task_chain.contains(leaf),
         "task boundary must preserve every causal layer.\ndirect: {direct_chain}\ntask:   {task_chain}"
     );
 }

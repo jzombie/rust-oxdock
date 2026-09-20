@@ -2313,12 +2313,18 @@ pub(crate) fn dispatch_async_block<P: ProcessManager>(
     let err = cx.err.clone();
     let cancel_token = std::sync::Arc::clone(&forked_state.cancel_token);
     let active_process = std::sync::Arc::clone(&forked_state.active_process);
+    let worker: std::sync::Arc<std::sync::Mutex<Option<std::thread::ThreadId>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
+    let worker_child = std::sync::Arc::clone(&worker);
 
     // Spawn a thread that executes the block's steps with subshell isolation.
     // ENV/WORKDIR/etc mutations in the block do not leak to the parent.
     // Control flow never crosses the thread boundary: a stray BREAK,
     // CONTINUE, or RETURN becomes a step-numbered error here.
     let join = std::thread::spawn(move || {
+        *worker_child
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(std::thread::current().id());
         let mut child_state = forked_state;
         let mut child_process = forked_process;
         let flow = super::steps::execute_steps(
@@ -2352,6 +2358,7 @@ pub(crate) fn dispatch_async_block<P: ProcessManager>(
             join,
             cancel_token,
             active_process,
+            worker,
         )));
     Ok(())
 }
@@ -2862,6 +2869,9 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
     let err = cx.err.clone();
     let cancel_token = std::sync::Arc::clone(&forked_state.cancel_token);
     let active_process = std::sync::Arc::clone(&forked_state.active_process);
+    let worker: std::sync::Arc<std::sync::Mutex<Option<std::thread::ThreadId>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
+    let worker_child = std::sync::Arc::clone(&worker);
 
     // Spawn the task thread. Leftover guards unpin at thread termination.
     // A single-`CALL` body (possibly under `WITH_IO` layers) runs as a
@@ -2881,6 +2891,9 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
     let returns_value = call_task.is_some() || body_returns_value(&body);
     let (entry_tx, entry_rx) = std::sync::mpsc::channel::<Arc<super::state::TaskEntry>>();
     let join = std::thread::spawn(move || {
+        *worker_child
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(std::thread::current().id());
         let mut child_state = forked_state;
         let mut child_process = forked_process;
         let entry = entry_rx
@@ -2958,7 +2971,8 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
     });
 
     // Create the thread handle
-    let handle = super::steps::ThreadJoinHandle::new(join, cancel_token, active_process);
+    let handle =
+        super::steps::ThreadJoinHandle::new(join, cancel_token, active_process, worker);
 
     // Store in named_tasks as a synchronized entry. The handle lives inside
     // the entry so CANCEL can tear it down even under concurrent AWAIT.
