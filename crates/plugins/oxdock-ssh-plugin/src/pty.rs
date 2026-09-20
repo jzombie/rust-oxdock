@@ -19,6 +19,7 @@
 
 use std::io::{Read, Write};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result, bail};
@@ -29,22 +30,74 @@ use oxdock_process::{ProcessManager, SharedInput, SharedOutput};
 use crate::bridge::{CHUNK, TICK, read_pipe};
 use crate::state::{PtySize, SharedPtySize, snapshot_pty_size};
 
-// TEMP-DIAG: Windows ConPTY hang diagnosis. Remove after root cause is fixed.
-#[cfg(windows)]
-static DIAG_OUT_BYTES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// ConPTY console-setup handshake. portable-pty builds the console with
+/// `PSEUDOCONSOLE_INHERIT_CURSOR`, so when the parent has no console of
+/// its own (CI runners, services) conhost emits a cursor-position query
+/// and stalls console setup, and the client with it, until the query is
+/// answered. A terminal emulator answers in band as part of VT handling;
+/// this pump is the only reader, so the output worker answers on its
+/// behalf. Query bytes are still forwarded untouched: they are genuine
+/// console output and substring assertions must observe the full stream.
+/// The reply reports a fresh 1,1 cursor. Only conhost can emit this
+/// sequence toward us (a child cursor query travels the opposite
+/// direction, into conhost), so answering never injects stray input into
+/// the child. Unix ptys never emit the query, so this is inert there.
+const CONHOST_DSR_QUERY: &[u8] = b"\x1b[6n";
+const CONHOST_CPR_REPLY: &[u8] = b"\x1b[1;1R";
+
+/// Answer every ConPTY cursor query in `chunk`, carrying a short tail
+/// across reads so a query split over two reads still matches. The reply
+/// is best effort: setup may complete, or teardown race, concurrently.
+fn answer_conhost_queries(
+    chunk: &[u8],
+    tail: &mut [u8; 3],
+    tail_len: &mut usize,
+    master_in: &Arc<Mutex<Box<dyn Write + Send>>>,
+) {
+    let mut probe = Vec::with_capacity(*tail_len + chunk.len());
+    probe.extend_from_slice(&tail[..*tail_len]);
+    probe.extend_from_slice(chunk);
+    // Answer matches that involve new bytes; matches fully inside the
+    // old tail were answered on the previous call.
+    let mut answers = 0;
+    let mut idx = 0;
+    while idx + CONHOST_DSR_QUERY.len() <= probe.len() {
+        if &probe[idx..idx + CONHOST_DSR_QUERY.len()] == CONHOST_DSR_QUERY
+            && idx + CONHOST_DSR_QUERY.len() > *tail_len
+        {
+            answers += 1;
+            idx += CONHOST_DSR_QUERY.len();
+        } else {
+            idx += 1;
+        }
+    }
+    if answers > 0
+        && let Ok(mut guard) = master_in.lock()
+    {
+        for _ in 0..answers {
+            let _ = guard.write_all(CONHOST_CPR_REPLY);
+        }
+        let _ = guard.flush();
+    }
+    *tail_len = (*tail_len + chunk.len()).min(tail.len());
+    tail[..*tail_len].copy_from_slice(&probe[probe.len() - *tail_len..]);
+}
 
 /// Pump master-terminal output into the `out_pipe` writer. Ends on
 /// master EOF (child and its children are gone; `portable-pty`
 /// normalizes the platform EIO-into-EOF kink for us) or on console
 /// teardown (the supervisor releases the master once the child is
 /// observed gone, which closes a ConPTY output pipe that would
-/// otherwise stay open).
+/// otherwise stay open). Also answers ConPTY setup queries in band.
 fn pump_master_out(
     reader: &mut Box<dyn Read + Send>,
     writer: &SharedOutput,
+    master_in: &Arc<Mutex<Box<dyn Write + Send>>>,
     cancel: &AtomicBool,
 ) -> Result<()> {
     let mut buffer = [0u8; CHUNK];
+    let mut query_tail = [0u8; 3];
+    let mut query_tail_len = 0usize;
     loop {
         if cancel.load(Ordering::SeqCst) {
             break;
@@ -57,9 +110,12 @@ fn pump_master_out(
             Err(err) => bail!("SSH pty master read failed: {err}"),
             Ok(0) => break,
             Ok(count) => {
-                // TEMP-DIAG: Windows ConPTY hang diagnosis.
-                #[cfg(windows)]
-                DIAG_OUT_BYTES.fetch_add(count as u64, Ordering::SeqCst);
+                answer_conhost_queries(
+                    &buffer[..count],
+                    &mut query_tail,
+                    &mut query_tail_len,
+                    master_in,
+                );
                 let mut guard = writer
                     .lock()
                     .map_err(|_| anyhow::anyhow!("SSH pty output lock poisoned"))?;
@@ -73,16 +129,51 @@ fn pump_master_out(
     Ok(())
 }
 
+/// Release nudge replicating portable-pty's Unix master-writer drop:
+/// newline plus EOT so a stdin-blocked child observes EOF and exits.
+/// Upstream only has this behavior on Unix (its Windows writer drop
+/// just closes the handle), so this is unix-only too: Windows console
+/// children must never observe stray input bytes.
+fn send_release_nudge(writer: &Arc<Mutex<Box<dyn Write + Send>>>) {
+    #[cfg(unix)]
+    if let Ok(mut guard) = writer.lock() {
+        // Default termios VEOF (^D): our ptys never customize it, and
+        // the fd is hidden behind the trait object, so the byte is
+        // fixed here instead of read back like upstream does.
+        let _ = guard.write_all(b"\n\x04");
+        let _ = guard.flush();
+    }
+    #[cfg(not(unix))]
+    let _ = writer;
+}
+
+/// Sends [`send_release_nudge`] when the input pump ends, on every exit
+/// path. The shared writer outlives this pump (the output worker keeps
+/// a clone for ConPTY answers), so without this guard a stdin-driven
+/// child like `cat` never observes EOF after its pipe closes and the
+/// session strands.
+struct ReleaseNudge<'a> {
+    writer: &'a Arc<Mutex<Box<dyn Write + Send>>>,
+}
+
+impl Drop for ReleaseNudge<'_> {
+    fn drop(&mut self) {
+        send_release_nudge(self.writer);
+    }
+}
+
 /// Pump `in_pipe` bytes into the master side (toward the child). Ends on
 /// pipe EOF, cancellation, or `peer_done` (child gone: bytes would have
-/// nowhere to go).
+/// nowhere to go). The master writer is shared with the output worker,
+/// which uses it to answer ConPTY setup queries.
 fn pump_master_in(
     reader: &SharedInput,
     backend: Option<&Arc<PipeInner>>,
-    writer: &mut Box<dyn Write + Send>,
+    writer: &Arc<Mutex<Box<dyn Write + Send>>>,
     cancel: &AtomicBool,
     peer_done: &AtomicBool,
 ) -> Result<()> {
+    let _nudge = ReleaseNudge { writer };
     let mut buffer = [0u8; CHUNK];
     loop {
         if cancel.load(Ordering::SeqCst) || peer_done.load(Ordering::SeqCst) {
@@ -95,10 +186,13 @@ fn pump_master_in(
                 break;
             }
             Ok(Some(count)) => {
-                if writer.write_all(&buffer[..count]).is_err() {
+                let mut guard = writer
+                    .lock()
+                    .map_err(|_| anyhow::anyhow!("SSH pty master lock poisoned"))?;
+                if guard.write_all(&buffer[..count]).is_err() {
                     break;
                 }
-                if writer.flush().is_err() {
+                if guard.flush().is_err() {
                     break;
                 }
             }
@@ -161,15 +255,6 @@ pub fn pump_pty_session<P: ProcessManager>(
     if argv.is_empty() {
         bail!("SSH_PTY_RUN needs at least a program");
     }
-    // TEMP-DIAG: Windows ConPTY hang diagnosis. Remove after root cause is fixed.
-    #[cfg(windows)]
-    let diag_tag: String = argv.join(" ");
-    #[cfg(windows)]
-    let diag_start = std::time::Instant::now();
-    #[cfg(windows)]
-    let mut diag_last = diag_start;
-    #[cfg(windows)]
-    eprintln!("[pty-diag {}] enter", diag_tag);
     let reader = cx
         .pipe_reader(in_pipe)
         .context("SSH pty cannot borrow the input pipe")?;
@@ -183,17 +268,17 @@ pub fn pump_pty_session<P: ProcessManager>(
     let pair = portable_pty::native_pty_system()
         .openpty(to_portable_size(applied))
         .context("SSH pty allocation failed")?;
-    // TEMP-DIAG: Windows ConPTY hang diagnosis.
-    #[cfg(windows)]
-    eprintln!("[pty-diag {}] openpty ok", diag_tag);
     let mut master_reader = pair
         .master
         .try_clone_reader()
         .context("SSH pty master reader failed")?;
-    let mut master_writer = pair
-        .master
-        .take_writer()
-        .context("SSH pty master writer failed")?;
+    // Shared with the output worker, which answers ConPTY setup
+    // queries through it while the input worker pumps pipe bytes.
+    let master_writer = Arc::new(Mutex::new(
+        pair.master
+            .take_writer()
+            .context("SSH pty master writer failed")?,
+    ));
     // Console teardown handle. Released once the child is observed
     // gone (see the supervisor loop): ConPTY keeps the output pipe
     // open until ClosePseudoConsole runs, which lives in this handle,
@@ -218,9 +303,6 @@ pub fn pump_pty_session<P: ProcessManager>(
         .spawn_command(builder)
         .context("SSH pty spawn failed")?;
     drop(pair.slave);
-    // TEMP-DIAG: Windows ConPTY hang diagnosis.
-    #[cfg(windows)]
-    eprintln!("[pty-diag {}] spawn ok", diag_tag);
 
     let mut failed: Option<anyhow::Error> = None;
     let mut out_closed = false;
@@ -228,42 +310,20 @@ pub fn pump_pty_session<P: ProcessManager>(
     let mut exit_code: Option<i64> = None;
     std::thread::scope(|scope| {
         let mut worker_in = Some(scope.spawn(|| {
-            let result = pump_master_in(
+            pump_master_in(
                 &reader,
                 backend.as_ref(),
-                &mut master_writer,
+                &master_writer,
                 cancel,
                 &peer_done,
-            );
-            drop(master_writer);
-            result
+            )
         }));
         let mut worker_out = Some(scope.spawn(|| {
-            let result = pump_master_out(&mut master_reader, &writer, cancel);
+            let result = pump_master_out(&mut master_reader, &writer, &master_writer, cancel);
             peer_done.store(true, Ordering::SeqCst);
             result
         }));
         loop {
-            // TEMP-DIAG: Windows ConPTY hang diagnosis.
-            #[cfg(windows)]
-            if diag_last.elapsed() > std::time::Duration::from_secs(5) {
-                diag_last = std::time::Instant::now();
-                eprintln!(
-                    "[pty-diag {}] t={}s exit_seen={} in_alive={} out_alive={} out_bytes={}",
-                    diag_tag,
-                    diag_start.elapsed().as_secs(),
-                    exit_code.is_some(),
-                    worker_in.is_some(),
-                    worker_out.is_some(),
-                    DIAG_OUT_BYTES.load(Ordering::SeqCst),
-                );
-            }
-            // TEMP-DIAG: fail fast with state instead of hanging CI forever.
-            #[cfg(windows)]
-            if diag_start.elapsed() > std::time::Duration::from_secs(120) {
-                eprintln!("[pty-diag {}] WATCHDOG exit(42)", diag_tag);
-                std::process::exit(42);
-            }
             reap(&mut worker_in, &mut failed);
             let out_was_live = worker_out.is_some();
             reap(&mut worker_out, &mut failed);
@@ -296,13 +356,7 @@ pub fn pump_pty_session<P: ProcessManager>(
                     // to function end this deadlocks on Windows, where the
                     // ConPTY host holds the output pipe open until
                     // ClosePseudoConsole runs.
-                    // TEMP-DIAG: Windows ConPTY hang diagnosis.
-                    #[cfg(windows)]
-                    eprintln!("[pty-diag {}] teardown start", diag_tag);
                     master_opt = None;
-                    // TEMP-DIAG: Windows ConPTY hang diagnosis.
-                    #[cfg(windows)]
-                    eprintln!("[pty-diag {}] teardown done", diag_tag);
                 }
                 Ok(None) => {}
                 Err(_) => {
@@ -310,9 +364,6 @@ pub fn pump_pty_session<P: ProcessManager>(
                     // The wait handle is broken: no exit will ever be
                     // observed, so release the console the same way.
                     // Workers drain to EOF and the reaper below reports.
-                    // TEMP-DIAG: Windows ConPTY hang diagnosis.
-                    #[cfg(windows)]
-                    eprintln!("[pty-diag {}] wait-err teardown", diag_tag);
                     master_opt = None;
                 }
             }
@@ -326,9 +377,6 @@ pub fn pump_pty_session<P: ProcessManager>(
             std::thread::sleep(TICK);
         }
     });
-    // TEMP-DIAG: Windows ConPTY hang diagnosis.
-    #[cfg(windows)]
-    eprintln!("[pty-diag {}] scope joined", diag_tag);
     if let Some(err) = failed {
         return Err(err);
     }
@@ -342,5 +390,69 @@ pub fn pump_pty_session<P: ProcessManager>(
                 Err(err) => bail!("SSH pty reaped with error: {err}"),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    type SharedWriter = Arc<Mutex<Box<dyn Write + Send>>>;
+    type SeenBytes = Arc<Mutex<Vec<u8>>>;
+
+    struct Sink(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for Sink {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("sink lock unpoisoned")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn harness() -> (SharedWriter, SeenBytes) {
+        let seen: SeenBytes = Arc::new(Mutex::new(Vec::new()));
+        let writer: Box<dyn Write + Send> = Box::new(Sink(Arc::clone(&seen)));
+        (Arc::new(Mutex::new(writer)), seen)
+    }
+
+    #[test]
+    fn answers_split_query_once() {
+        let (master_in, seen) = harness();
+        let mut tail = [0u8; 3];
+        let mut tail_len = 0;
+        answer_conhost_queries(b"abc\x1b[", &mut tail, &mut tail_len, &master_in);
+        assert!(seen.lock().expect("sink readable").is_empty());
+        answer_conhost_queries(b"6nrest", &mut tail, &mut tail_len, &master_in);
+        assert_eq!(
+            seen.lock().expect("sink readable").as_slice(),
+            b"\x1b[1;1R".as_slice()
+        );
+        // Replaying the boundary afterwards must not double answer.
+        answer_conhost_queries(b"more", &mut tail, &mut tail_len, &master_in);
+        assert_eq!(
+            seen.lock().expect("sink readable").as_slice(),
+            b"\x1b[1;1R".as_slice()
+        );
+    }
+
+    #[test]
+    fn silent_without_query() {
+        let (master_in, seen) = harness();
+        let mut tail = [0u8; 3];
+        let mut tail_len = 0;
+        answer_conhost_queries(
+            b"plain output, no query",
+            &mut tail,
+            &mut tail_len,
+            &master_in,
+        );
+        assert!(seen.lock().expect("sink readable").is_empty());
     }
 }

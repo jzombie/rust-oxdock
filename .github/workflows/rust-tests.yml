@@ -77,10 +77,8 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-${{ steps.rustc.outputs.hash }}-${{ steps.lockfile.outputs.hash }}-
 
-      # TEMP-DIAG: focused Windows ConPTY hang diagnosis. Revert to the full
-      # workspace suite once the pty hang is root-caused.
       - name: Test
-        run: cargo test -p oxdock-ssh-plugin --test integration --all-features ssh::pty -- --include-ignored --nocapture
+        run: cargo test --workspace --all-features --lib --bins --tests --examples -- --include-ignored
 
       - name: README doctests
         run: cargo test -p oxdock-doc-tests --doc --all-features
