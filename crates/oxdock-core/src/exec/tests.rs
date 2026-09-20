@@ -2279,10 +2279,14 @@ fn public_entrypoint_returns_final_working_directory() {
 
 /// Small spill/backlog thresholds so backend tests exercise the disk path
 /// without multi-megabyte payloads (mirrors the production ratio).
+/// Disk spilling is compiled out under Miri, with the tests using these.
+#[cfg(not(miri))]
 const TEST_SPILL_THRESHOLD: usize = 1024 * 1024;
+#[cfg(not(miri))]
 const TEST_MAX_BACKLOG: u64 = 2 * 1024 * 1024;
 
 /// Test backend with small thresholds (see above).
+#[cfg(not(miri))]
 fn test_script_pipe() -> oxdock_pipe::ScriptPipe {
     oxdock_pipe::ScriptPipe::with_thresholds(TEST_SPILL_THRESHOLD, TEST_MAX_BACKLOG)
 }
@@ -3148,9 +3152,14 @@ fn force_close_eofs_despite_writer_and_keeper() {
     let (stdout, backend) = io
         .resolve_stdout(0, &handle, false, false)
         .expect("resolve");
+    // The OS-writer variant is compiled out under Miri, making the
+    // destructure irrefutable there (a match would trip single-match).
+    #[cfg(not(miri))]
     let super::io::StreamHandle::Stream(writer) = stdout else {
-        panic!("expected stream stdout");
+        panic!("expected stream stdout")
     };
+    #[cfg(miri)]
+    let super::io::StreamHandle::Stream(writer) = stdout;
     let _keeper = io.pin_keeper(&handle).expect("pin").expect("keeper");
     let backend = backend.expect("script backend");
     backend.force_close();

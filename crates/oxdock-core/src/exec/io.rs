@@ -83,6 +83,10 @@ impl PipeRegistry {
         direct: bool,
         promote: bool,
     ) -> Result<(CommandStdin, Option<Arc<PipeInner>>)> {
+        // `idx` and `direct` serve only the OS-pipe arms below, which are
+        // compiled out under Miri.
+        let _ = idx;
+        let _ = direct;
         match materialize(handle, promote)? {
             Materialized::Script(backend) => {
                 Ok((CommandStdin::Stream(backend.reader_handle()), Some(backend)))
@@ -111,6 +115,10 @@ impl PipeRegistry {
         direct: bool,
         promote: bool,
     ) -> Result<(StreamHandle, Option<Arc<PipeInner>>)> {
+        // `idx` and `direct` serve only the OS-pipe arms below, which are
+        // compiled out under Miri.
+        let _ = idx;
+        let _ = direct;
         match materialize(handle, promote)? {
             Materialized::Script(backend) => {
                 Ok((StreamHandle::Stream(backend.writer_handle()), Some(backend)))
@@ -141,6 +149,10 @@ impl PipeRegistry {
         direct: bool,
         promote: bool,
     ) -> Result<StreamHandle> {
+        // `idx` and `direct` serve only the OS-pipe arms below, which are
+        // compiled out under Miri.
+        let _ = idx;
+        let _ = direct;
         match materialize(handle, promote)? {
             Materialized::Script(backend) => Ok(StreamHandle::Stream(backend.writer_handle())),
             #[cfg(not(miri))]
@@ -309,7 +321,7 @@ pub struct PipeStream {
 }
 
 impl PipeStream {
-    /// Read-half adapter (e.g. over [`StepCtx::pipe_reader`]).
+    /// Read-half adapter (e.g. over [`StepCtx::pipe_reader`](super::steps::StepCtx::pipe_reader)).
     pub fn reader(reader: SharedInput) -> Self {
         Self {
             reader: Some(reader),
@@ -317,7 +329,7 @@ impl PipeStream {
         }
     }
 
-    /// Write-half adapter (e.g. over [`StepCtx::pipe_writer`]).
+    /// Write-half adapter (e.g. over [`StepCtx::pipe_writer`](super::steps::StepCtx::pipe_writer)).
     pub fn writer(writer: SharedOutput) -> Self {
         Self {
             reader: None,

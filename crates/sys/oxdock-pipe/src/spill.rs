@@ -7,9 +7,17 @@
 //! compiled out under Miri (memory-only there).
 
 use std::collections::VecDeque;
-use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 
+// Disk-spill file IO is compiled out under Miri (memory-only there),
+// so these names go quiet in that configuration.
+#[cfg_attr(miri, allow(unused_imports))]
+use std::io::{Read, Seek, SeekFrom};
+
+// Same disk-spill story: the guarded-filesystem surface is only
+// referenced from `DiskSpill`, which does not exist under Miri.
+#[cfg_attr(miri, allow(unused_imports))]
 use oxdock_fs::{GuardedPath, GuardedTempDir, PathResolver, SpillFile};
 
 /// Memory threshold before spilling to disk in production.
@@ -22,7 +30,10 @@ pub const DEFAULT_MAX_BACKLOG: u64 = 100 * 1024 * 1024; // 100 MiB
 /// [`SpillBuffer::writer`]; drain once the producer has finished.
 pub struct SpillBuffer {
     inner: Mutex<SpillInner>,
+    // Consulted only on the disk-spill path, compiled out under Miri.
+    #[cfg_attr(miri, allow(dead_code))]
     spill_threshold: usize,
+    #[cfg_attr(miri, allow(dead_code))]
     max_backlog: u64,
 }
 

@@ -215,7 +215,7 @@ impl SemaphoreState {
         use std::sync::atomic::Ordering;
         let _ = self
             .held
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |held| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |held| {
                 held.checked_sub(1)
             });
     }

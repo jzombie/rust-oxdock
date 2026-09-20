@@ -368,7 +368,7 @@ impl<'a, P: ProcessManager> StepCtx<'a, P> {
     }
 
     /// Borrow the read half of a `PIPE` value for byte streaming (see
-    /// [`PipeStream`]). Unbound handles materialize as script pipes —
+    /// [`PipeStream`](super::PipeStream)). Unbound handles materialize as script pipes —
     /// hosts cannot spawn `RUN`, so script is the only sensible kind,
     /// and a later `RUN` binding adapts through the shared path. DSL,
     /// bridge, and host bindings on an OS-materialized handle resolve
@@ -398,7 +398,7 @@ impl<'a, P: ProcessManager> StepCtx<'a, P> {
     }
 
     /// Borrow the write half of a `PIPE` value for byte streaming (see
-    /// [`PipeStream`]). Same materialization and take-once contract as
+    /// [`PipeStream`](super::PipeStream)). Same materialization and take-once contract as
     /// [`StepCtx::pipe_reader`].
     pub fn pipe_writer(&self, value: &Value) -> Result<SharedOutput> {
         use oxdock_pipe::{Materialized, materialize};

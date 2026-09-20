@@ -12,6 +12,9 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+// `Result` threads through the OS-pipe take-once slots, which are
+// compiled out under Miri.
+#[cfg_attr(miri, allow(unused_imports))]
 use anyhow::Result;
 
 use crate::backend::{PipeInner, ScriptPipe};

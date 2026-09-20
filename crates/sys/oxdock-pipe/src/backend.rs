@@ -65,7 +65,7 @@ impl Default for ScriptPipe {
 }
 
 /// Writer-side endpoint of a [`ScriptPipe`]. Resolving it to a stream
-/// attaches one writer (see [`PipeWriter`]); dropping the stream detaches.
+/// attaches one writer; dropping the stream detaches.
 #[derive(Clone)]
 pub struct ScriptPipeEndpoint {
     inner: Arc<PipeInner>,
@@ -247,11 +247,11 @@ impl PipeInner {
         }
     }
 
-    /// Timeout-bounded variant of [`PipeInner::read_into`] for bridge worker
-    /// loops: returns `Ok(None)` when the backstop elapses with no data and
-    /// no close, so cancellation resolves on a tick instead of hanging on a
-    /// condvar. Bridge-only caller; every DSL reader keeps blocking
-    /// `read_into` with unchanged semantics.
+    /// Timeout-bounded variant of the blocking buffer read for bridge
+    /// worker loops: returns `Ok(None)` when the backstop elapses with no
+    /// data and no close, so cancellation resolves on a tick instead of
+    /// hanging on a condvar. Bridge-only caller; every DSL reader keeps
+    /// the blocking read with unchanged semantics.
     pub fn read_into_timeout(
         &self,
         buf: &mut [u8],
