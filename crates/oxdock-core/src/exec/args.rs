@@ -23,18 +23,11 @@ pub(crate) fn coerce_value<P: ProcessManager>(
         ));
     }
     // Same-type passthrough for every type: the word carries its own
-    // vtable, so descriptor-name equality is type equality.
+    // vtable, so descriptor-name equality is type equality. Pipe handles
+    // are already owned values: passing one through never instantiates
+    // backend state (materialization happens only at binding sites), and
+    // `LET $q: PIPE = $p` shares the backend by cloning the handle.
     if value.type_name() == expected {
-        if expected == "PIPE" {
-            // The `pipe:NAME` operator is the explicit handle constructor:
-            // a fresh name registers on first use (existing entries keep
-            // their type), so pipes can be declared before any `WITH_IO`
-            // mentions them.
-            let name = value.as_pipe_name().unwrap_or_default().to_string();
-            if !state.io.pipe_exists(&name) {
-                state.io.ensure_pipe_for(&name, false)?;
-            }
-        }
         return Ok(value);
     }
     // Values of other registered types never cross-coerce; the mismatch
@@ -59,10 +52,10 @@ pub(crate) fn coerce_value<P: ProcessManager>(
         },
         (Some(s), "PIPE") => {
             // Strict: plain strings never coerce to pipes, so a handle is
-            // always created explicitly via the `pipe:NAME` operator
-            // (`LET $p: PIPE = pipe:log`). Anything else is a TypeMismatch.
+            // always created explicitly via `LET $p: PIPE`. Anything else
+            // is a TypeMismatch.
             Err(anyhow::anyhow!(
-                "TypeMismatch: expected {expected}, got STRING ({s:?}); use pipe:NAME to name a pipe"
+                "TypeMismatch: expected {expected}, got STRING ({s:?}); declare LET $x: PIPE and pass $x"
             ))
         }
         (Some(s), "DURATION") => oxdock_parser::command::parse_duration(s.trim())
@@ -123,9 +116,11 @@ fn coerce_scalar(value: &Value, expected: &str) -> Result<Value> {
             _ => Err(mismatch(expected, value)),
         };
     }
-    if let Some(n) = value.as_pipe_name() {
+    if value.as_pipe_handle().is_some() {
         return match expected {
-            "STRING" => Ok(Value::string(n.to_string())),
+            // Opaque rendering: stringifying a handle was already
+            // meaningless with names; `<pipe>` keeps the totality.
+            "STRING" => Ok(Value::string(format!("{value}"))),
             _ => Err(mismatch(expected, value)),
         };
     }
@@ -288,6 +283,10 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
             }
             Ok(Value::map(result))
         }
+        // Inline block (`LET $a: STRING = { ... }`): run the steps in a
+        // fresh scope and yield the boundary value, mirroring a zero-arg
+        // function body (see `handlers::block_value`).
+        Expr::Block(body) => super::handlers::block_value(cx, body),
         Expr::Call { name, args } => {
             // DSL-defined functions run through the call path so arity,
             // depth budget, and scoping apply uniformly.
@@ -335,6 +334,11 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
         // Variable inspection carries the binding name unevaluated (see
         // `Expr::Inspect`): no function-name matching happens here.
         Expr::Inspect(var) => evaluate_inspect_var(var, cx),
+        // Bare `LET $p: PIPE`: mint a fresh unbound handle tagged with
+        // the declaring task. Backends materialize lazily on first
+        // binding, so declaration never pre-commits a backend type with
+        // zero usage context.
+        Expr::FreshPipe => Ok(Value::pipe_fresh_in_task(cx.state.task_id)),
         Expr::Arithmetic { op, left, right } => {
             let left_val = evaluate_expr(left, cx)?;
             let right_val = evaluate_expr(right, cx)?;
@@ -1097,9 +1101,8 @@ pub(crate) fn format_value_for_string(val: &Value) -> String {
     if let Some(b) = val.as_bool() {
         return b.to_string();
     }
-    if let Some(n) = val.as_pipe_name() {
-        return format!("pipe:{n}");
-    }
+    // Pipes render through `Display` (`<pipe>`) via the fallthrough below;
+    // handles are opaque and have no string form to spell.
     if let Some(d) = val.as_duration() {
         return oxdock_parser::command::format_duration(&d);
     }

@@ -1,4 +1,4 @@
 name = "await_capture"
 
 [expect]
-files = { "result.txt" = "task-output\n" }
+files = { "result.txt" = "0-explicit" }

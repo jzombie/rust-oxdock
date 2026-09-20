@@ -3,4 +3,5 @@
 # builtins (`echo` is not a Windows executable).
 RUN ["cargo", "--version"]
 ASSERT_CONTAINS stdout "cargo"
-WITH_IO [stdout=pipe:exec_cap] RUN ["cargo", "--version"]
+LET $exec_cap: PIPE
+WITH_IO [stdout=$exec_cap] RUN ["cargo", "--version"]

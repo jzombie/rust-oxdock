@@ -125,8 +125,9 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     ENV PROJECT=#project
     MKDIR dist
     [bool:#verbose] WRITE dist/verbose.log "verbose on"
-    WITH_IO [stdout=pipe:log] ECHO "built {{ env:PROJECT }}"
-    WITH_IO [stdin=pipe:log] READ_LINE $line
+    LET $log: PIPE
+    WITH_IO [stdout=$log] ECHO "built {{ env:PROJECT }}"
+    WITH_IO [stdin=$log] READ_LINE $line
     WRITE dist/build.txt "{{ $line }}"
     IMPORT [STD]
     FOR $f: STRING IN GLOB("dist/*.txt") {
@@ -254,11 +255,12 @@ Two trade offs come with the form. Cloning a string still deep copies it, since 
 
 ### Transport: pipes
 
-A command's standard streams can be rerouted through named pipes, so producers and consumers connect without touching the terminal or temp files. Buffers stay in memory and spill to a guarded temp file past 8 MiB, and background single command tasks can promote a pipe to a zero copy OS kernel pair instead.
+A command's standard streams can be rerouted through pipes declared with `LET $p: PIPE`, so producers and consumers connect without touching the terminal or temp files. Buffers stay in memory and spill to a guarded temp file past 8 MiB, and background single command tasks can promote a pipe to a zero copy OS kernel pair instead.
 
 ```oxdock
-WITH_IO [stdout=pipe:log] ECHO hello
-WITH_IO [stdin=pipe:log] READ_LINE $line
+LET $log: PIPE
+WITH_IO [stdout=$log] ECHO hello
+WITH_IO [stdin=$log] READ_LINE $line
 ASSERT_EQ $line "hello"
 ```
 
@@ -306,11 +308,12 @@ fn main() {}
 
 ### Stream bytes between steps
 
-`WITH_IO` routes stdout into named script pipes and back into stdin, so steps form custom pipelines. Pipes hold bytes in memory and spill to a temp file above 8 MiB. Wrapping a single RUN in ASYNC promotes the pipe to a zero copy OS kernel pipe instead; the consumer must then run while the producer is alive.
+`WITH_IO` routes stdout into script pipes declared with `LET $p: PIPE` and back into stdin, so steps form custom pipelines. Pipes hold bytes in memory and spill to a temp file above 8 MiB. Wrapping a single RUN in ASYNC promotes the pipe to a zero copy OS kernel pipe instead; the consumer must then run while the producer is alive.
 
 ```oxdock
-WITH_IO [stdout=pipe:msg] ECHO piped-bytes
-WITH_IO [stdin=pipe:msg] WRITE piped.txt
+LET $msg: PIPE
+WITH_IO [stdout=$msg] ECHO piped-bytes
+WITH_IO [stdin=$msg] WRITE piped.txt
 READ piped.txt
 ASSERT_CONTAINS stdout "piped-bytes"
 ```
@@ -412,7 +415,7 @@ ASSERT_CONTAINS stdout "cargo"
 
 ### Comments
 
-Three comment styles are supported: `//` line comments, nestable `/* ... */` block comments, and `#` comments. A `#` comment is only recognized at the start of a line (optionally indented); inside a command payload a `#` is ordinary text. Similarly, `//` ends a `RUN` argument list but survives inside quoted strings:
+Three comment styles are supported: `//` line comments, nestable `/* ... */` block comments, and `#` comments. A `#` comment occupies a whole line (optionally indented) and may also trail values inside multi-line `()`, `[]`, and `{}` brackets; inside a command payload a `#` is ordinary text. Similarly, `//` ends a `RUN` argument list but survives inside quoted strings:
 
 ```oxdock
 // slash comment at end of line
@@ -641,7 +644,7 @@ LET $bounded: HANDLE = ASYNC TIMEOUT 30s ECHO "bounded"
 AWAIT $bounded
 ```
 
-The one structural exception is `WITH_IO`, which must wrap `ASYNC` from the outside (`WITH_IO [stdout=pipe:p] ASYNC ...`) so pipe endpoints are allocated synchronously on the main thread before the worker spawns. Placing `WITH_IO` directly inside `ASYNC` is rejected at parse time.
+The one structural exception is `WITH_IO`, which must wrap `ASYNC` from the outside (`LET $p: PIPE` first, then `WITH_IO [stdout=$p] ASYNC ...`) so pipe endpoints are allocated synchronously on the main thread before the worker spawns. Placing `WITH_IO` directly inside `ASYNC` is rejected at parse time.
 
 ## Cancelling tasks with CANCEL
 

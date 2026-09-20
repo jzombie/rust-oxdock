@@ -695,6 +695,10 @@ fn emit_expr(expr: &Expr, interp: &[(proc_macro2::Ident, usize)]) -> proc_macro2
                 .collect();
             quote! { Expr::Map(vec![#(#entry_tokens),*]) }
         }
+        Expr::Block(steps) => {
+            let step_tokens: Vec<_> = steps.iter().map(|s| emit_step(s, interp)).collect();
+            quote! { Expr::Block(vec![#(#step_tokens),*]) }
+        }
         Expr::Call { name, args } => {
             let arg_tokens: Vec<_> = args.iter().map(|e| emit_expr(e, interp)).collect();
             quote! { Expr::Call { name: #name.to_string(), args: vec![#(#arg_tokens),*] } }
@@ -741,6 +745,9 @@ fn emit_expr(expr: &Expr, interp: &[(proc_macro2::Ident, usize)]) -> proc_macro2
         Expr::CompiledMath(ops) => {
             let op_tokens: Vec<_> = ops.iter().map(emit_math_op).collect();
             quote! { oxdock_parser::ast::Expr::CompiledMath(vec![#(#op_tokens),*]) }
+        }
+        Expr::FreshPipe => {
+            quote! { oxdock_parser::ast::Expr::FreshPipe }
         }
         Expr::UnsignedIntBoundary(_) => {
             panic!("internal error: UnsignedIntBoundary must not survive lowering")
@@ -838,8 +845,10 @@ fn emit_raw_value(v: &Value, interp: &[(proc_macro2::Ident, usize)]) -> proc_mac
     if let Some(f) = v.as_f64() {
         return quote! { Value::float(#f) };
     }
-    if let Some(n) = v.as_pipe_name() {
-        return quote! { Value::pipe(#n.to_string()) };
+    // PIPE words hold runtime-owned backends: generated code mints a
+    // fresh unbound handle (same shape as bare `LET $p: PIPE`).
+    if v.as_pipe_handle().is_some() {
+        return quote! { Value::pipe_fresh() };
     }
     if let Some(d) = v.as_duration() {
         let ms = d.as_millis() as u64;
@@ -873,7 +882,6 @@ fn emit_assert_target(
         }
         AssertTarget::Stdout => quote! { AssertTarget::Stdout },
         AssertTarget::Stderr => quote! { AssertTarget::Stderr },
-        AssertTarget::Pipe(name) => quote! { AssertTarget::Pipe(#name.to_string()) },
     }
 }
 
@@ -1156,6 +1164,10 @@ fn emit_stepkind(
         StepKind::ReadLine { var } => {
             quote! { StepKind::ReadLine { var: #var.to_string() } }
         }
+        StepKind::ListAppend { list, item } => {
+            let it = emit_arg(item, interp);
+            quote! { StepKind::ListAppend { list: #list.to_string(), item: #it } }
+        }
         StepKind::RunExec { argv } => {
             let args: Vec<_> = argv.iter().map(|a| emit_arg(a, interp)).collect();
             quote! { StepKind::RunExec { argv: vec![#(#args),*] } }
@@ -1200,9 +1212,6 @@ fn emit_io_bindings(bindings: &[oxdock_parser::IoBinding]) -> proc_macro2::Token
             };
             let pipe = match &b.pipe {
                 None => quote! { None },
-                Some(oxdock_parser::PipeTarget::Name(p)) => {
-                    quote! { Some(oxdock_parser::PipeTarget::Name(#p.to_string())) }
-                }
                 Some(oxdock_parser::PipeTarget::Var(v)) => {
                     quote! { Some(oxdock_parser::PipeTarget::Var(#v.to_string())) }
                 }

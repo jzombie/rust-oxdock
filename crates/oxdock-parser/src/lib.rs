@@ -256,31 +256,25 @@ mod tests {
     }
 
     #[test]
-    fn with_io_supports_named_pipes() {
-        let script = "WITH_IO [stdin, stdout=pipe:setup, stderr=pipe:errors] WRITE \"echo hi\"";
-        let steps = parse_script(script, test_lower).expect("parse ok");
-        assert_eq!(steps.len(), 1);
-        match &steps[0].kind {
-            StepKind::WithIo { bindings, cmd } => {
-                assert_eq!(bindings.len(), 3);
-                assert!(
-                    bindings
-                        .iter()
-                        .any(|b| matches!(b.stream, IoStream::Stdin) && b.pipe.is_none())
-                );
-                assert!(bindings.iter().any(|b| matches!(b.stream, IoStream::Stdout)
-                    && b.pipe == Some(PipeTarget::Name("setup".to_string()))));
-                assert!(bindings.iter().any(|b| matches!(b.stream, IoStream::Stderr)
-                    && b.pipe == Some(PipeTarget::Name("errors".to_string()))));
-                assert!(matches!(cmd.as_ref(), StepKind::Write { .. }));
-            }
-            other => panic!("expected WITH_IO, saw {:?}", other),
-        }
+    fn with_io_rejects_non_variable_bindings() {
+        // Bindings are `$var`-only: anything else fails naming the
+        // binding and the line.
+        let err = parse_script(
+            "WITH_IO [stdin, stdout=pipe:setup, stderr=pipe:errors] WRITE \"echo hi\"",
+            test_lower,
+        )
+        .expect_err("non-variable bindings must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("pipe:setup"),
+            "error must name the bad binding: {msg}"
+        );
+        assert_eq!(err.line(), 1, "error must name the failing line");
     }
 
     #[test]
     fn with_io_supports_variable_pipes() {
-        let script = "WITH_IO [stdout=$p, stdin=pipe:in] WRITE \"echo hi\"";
+        let script = "WITH_IO [stdout=$p, stdin=$q] WRITE \"echo hi\"";
         let steps = parse_script(script, test_lower).expect("parse ok");
         assert_eq!(steps.len(), 1);
         match &steps[0].kind {
@@ -289,7 +283,7 @@ mod tests {
                 assert!(bindings.iter().any(|b| matches!(b.stream, IoStream::Stdout)
                     && b.pipe == Some(PipeTarget::Var("p".to_string()))));
                 assert!(bindings.iter().any(|b| matches!(b.stream, IoStream::Stdin)
-                    && b.pipe == Some(PipeTarget::Name("in".to_string()))));
+                    && b.pipe == Some(PipeTarget::Var("q".to_string()))));
                 assert!(matches!(cmd.as_ref(), StepKind::Write { .. }));
             }
             other => panic!("expected WITH_IO, saw {:?}", other),
@@ -297,7 +291,69 @@ mod tests {
         // Display round-trips the variable form.
         assert_eq!(
             steps[0].kind.to_string(),
-            "WITH_IO [stdout=$p, stdin=pipe:in] WRITE \"echo hi\""
+            "WITH_IO [stdout=$p, stdin=$q] WRITE \"echo hi\""
+        );
+    }
+
+    #[test]
+    fn colon_text_in_expression_fails() {
+        // `pipe:ch` is not expression syntax: `pipe` lexes as a bare word
+        // and `:ch` strands, so the whole RHS fails on line 1.
+        let err = parse_script("LET $p: PIPE = pipe:ch", test_lower)
+            .expect_err("colon text in expression must fail");
+        assert_eq!(err.line(), 1, "error must name the failing line");
+    }
+
+    #[test]
+    fn colon_text_in_assert_is_a_plain_value() {
+        // Bare `pipe:ch` in argument position keeps its literal reading:
+        // it lowers to a plain string value, never a stream marker. The
+        // mock lower knows no commands, so this goes through the real
+        // dispatcher.
+        let steps = parse_script("ASSERT_EQ pipe:ch \"x\"", crate::commands::lower_command)
+            .expect("colon text parses as a literal");
+        assert_eq!(steps.len(), 1);
+        match &steps[0].kind {
+            StepKind::AssertEq { actual, .. } => {
+                assert_eq!(
+                    actual,
+                    &AssertTarget::Value(Arg::String("pipe:ch".to_string(), false)),
+                    "colon text must stay a literal value, got {actual:?}"
+                );
+            }
+            other => panic!("expected AssertEq, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bare_let_pipe_declares_fresh_backend() {
+        let steps = parse_script("LET $p: PIPE", test_lower).expect("bare LET $p: PIPE parses");
+        assert_eq!(steps.len(), 1);
+        match &steps[0].kind {
+            StepKind::Assign {
+                var,
+                decl_type,
+                expr,
+            } => {
+                assert_eq!(var, "p");
+                assert_eq!(decl_type, "PIPE");
+                assert!(
+                    matches!(expr, Expr::FreshPipe),
+                    "expected FreshPipe, got {expr:?}"
+                );
+            }
+            other => panic!("expected Assign, got {other:?}"),
+        }
+        // Display round-trips the bare form (no initializer).
+        assert_eq!(steps[0].kind.to_string(), "LET $p: PIPE");
+        let again =
+            parse_script(&steps[0].kind.to_string(), test_lower).expect("Display round-trips");
+        assert_eq!(again, steps);
+        // Every other type still requires an initializer.
+        let err = parse_script("LET $x: STRING", test_lower).expect_err("bare STRING must fail");
+        assert!(
+            err.to_string().contains("requires an expression"),
+            "unexpected error: {err}"
         );
     }
 
@@ -593,15 +649,15 @@ mod tests {
         cases.push((
             indoc! {r#"
                 [eq(env:TEST, 1)]
-                WITH_IO [stdout=pipe:capture_case] WRITE hi
-                WITH_IO [stdin=pipe:capture_case] WRITE out.txt
+                WITH_IO [stdout=$capture_case] WRITE hi
+                WITH_IO [stdin=$capture_case] WRITE out.txt
             "#}
             .trim()
             .to_string(),
             quote! {
                 [eq(env:TEST, 1)]
-                WITH_IO [stdout=pipe:capture_case] WRITE hi
-                WITH_IO [stdin=pipe:capture_case] WRITE out.txt
+                WITH_IO [stdout=$capture_case] WRITE hi
+                WITH_IO [stdin=$capture_case] WRITE out.txt
             },
         ));
 
@@ -696,6 +752,171 @@ mod tests {
                 assert_eq!(var, "x");
                 assert_eq!(expr, &Expr::Var("y".to_string()));
             }
+            other => panic!("expected Assign, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn let_assign_with_block() {
+        let script = r#"LET $a: STRING = { RETURN "hello" }"#;
+        let steps = parse_script(script, test_lower).expect("parse ok");
+        assert_eq!(steps.len(), 1);
+        match &steps[0].kind {
+            StepKind::Assign { var, expr, .. } => {
+                assert_eq!(var, "a");
+                match expr {
+                    Expr::Block(body) => {
+                        assert_eq!(body.len(), 1);
+                        assert!(matches!(body[0].kind, StepKind::Return { .. }));
+                    }
+                    other => panic!("expected Block, got {:?}", other),
+                }
+            }
+            other => panic!("expected Assign, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn let_assign_multiline_block_with_nesting() {
+        let script = indoc! {r#"
+            LET $a: STRING = {
+            LET $b: STRING = { RETURN "hi" }
+            RETURN $b
+            }
+        "#};
+        let steps = parse_script(script, test_lower).expect("parse ok");
+        assert_eq!(steps.len(), 1);
+        match &steps[0].kind {
+            StepKind::Assign { expr, .. } => match expr {
+                Expr::Block(body) => {
+                    assert_eq!(body.len(), 2);
+                    assert!(matches!(body[0].kind, StepKind::Assign { .. }));
+                    assert!(matches!(body[1].kind, StepKind::Return { .. }));
+                    let StepKind::Assign { expr: inner, .. } = &body[0].kind else {
+                        panic!("expected inner Assign");
+                    };
+                    assert!(matches!(inner, Expr::Block(_)));
+                }
+                other => panic!("expected Block, got {:?}", other),
+            },
+            other => panic!("expected Assign, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn let_assign_map_literal_stays_map() {
+        let script = r#"LET $m: MAP = {a: 1, b: 2}"#;
+        let steps = parse_script(script, test_lower).expect("parse ok");
+        match &steps[0].kind {
+            StepKind::Assign { expr, .. } => {
+                assert!(matches!(expr, Expr::Map(entries) if entries.len() == 2));
+            }
+            other => panic!("expected Assign, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn map_literal_spans_lines_with_comments() {
+        let script = indoc! {r#"
+            LET $m: MAP = {
+            // leading comment
+            "a": 1, /* trailing */
+            // own line
+            b: 2
+            }
+        "#};
+        let steps = parse_script(script, test_lower).expect("parse ok");
+        match &steps[0].kind {
+            StepKind::Assign { expr, .. } => match expr {
+                Expr::Map(entries) => {
+                    assert_eq!(entries.len(), 2);
+                    assert_eq!(entries[0].0, "a");
+                    assert_eq!(entries[1].0, "b");
+                }
+                other => panic!("expected Map, got {:?}", other),
+            },
+            other => panic!("expected Assign, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn call_args_accept_comments_between_lines() {
+        let script = indoc! {r#"
+            FUNC SERVE($h: STRING, $u: STRING, $p: STRING, $o: MAP) {
+            RETURN $h
+            }
+            LET $s: STRING = SERVE(
+            // host port
+            "127.0.0.1:2251",
+            "test",
+            "test123", {
+            // workspace-relative key
+            key_path: "/temp/test_key"
+            }
+            )
+        "#};
+        let steps = parse_script(script, test_lower).expect("parse ok");
+        assert_eq!(steps.len(), 2);
+        match &steps[1].kind {
+            StepKind::Assign { expr, .. } => match expr {
+                Expr::Call { name, args } => {
+                    assert_eq!(name, "SCRIPT::SERVE");
+                    assert_eq!(args.len(), 4);
+                    assert!(matches!(&args[3], Expr::Map(entries) if entries.len() == 1));
+                }
+                other => panic!("expected Call, got {:?}", other),
+            },
+            other => panic!("expected Assign, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn hash_comments_trail_map_entries() {
+        let script = indoc! {r#"
+            # 1. Ephemeral server setup
+            LET $m: MAP = {
+            key_path: "temp/test_key"  # Fixed: Relative workspace pathing
+            }
+        "#};
+        let steps = parse_script(script, test_lower).expect("parse ok");
+        match &steps[0].kind {
+            StepKind::Assign { expr, .. } => match expr {
+                Expr::Map(entries) => {
+                    assert_eq!(entries.len(), 1);
+                    assert_eq!(entries[0].0, "key_path");
+                }
+                other => panic!("expected Map, got {:?}", other),
+            },
+            other => panic!("expected Assign, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn hash_comments_span_call_args_like_slash_comments() {
+        let script = indoc! {r#"
+            FUNC SERVE($h: STRING, $o: MAP) {
+            RETURN $h
+            }
+            # leading hash comment
+            LET $s: STRING = SERVE(
+            # host port
+            "127.0.0.1:2251", {
+            # workspace-relative key
+            key_path: "temp/test_key"  # trailing hash comment
+            }
+            )
+        "#};
+        let steps = parse_script(script, test_lower).expect("parse ok");
+        assert_eq!(steps.len(), 2);
+        match &steps[1].kind {
+            StepKind::Assign { expr, .. } => match expr {
+                Expr::Call { name, args } => {
+                    assert_eq!(name, "SCRIPT::SERVE");
+                    assert_eq!(args.len(), 2);
+                    assert!(matches!(&args[1], Expr::Map(entries) if entries.len() == 1));
+                }
+                other => panic!("expected Call, got {:?}", other),
+            },
             other => panic!("expected Assign, got {:?}", other),
         }
     }
@@ -979,7 +1200,7 @@ mod tests {
         // ASYNC block must parse. WITH_IO is compound-atomic (implicit
         // whitespace suppressed), so nested rules carry explicit gaps.
         let script = indoc! {r#"
-            WITH_IO [stdout=pipe:out] ASYNC {
+            WITH_IO [stdout=$out] ASYNC {
                 FOR $x: INT IN [0, 1] {
                     ECHO hi
                 }
@@ -991,7 +1212,7 @@ mod tests {
             StepKind::WithIo { bindings, cmd } => {
                 assert_eq!(bindings.len(), 1);
                 assert!(matches!(bindings[0].stream, IoStream::Stdout));
-                assert_eq!(bindings[0].pipe, Some(PipeTarget::Name("out".to_string())));
+                assert_eq!(bindings[0].pipe, Some(PipeTarget::Var("out".to_string())));
                 match cmd.as_ref() {
                     StepKind::AsyncBlock { body } => {
                         assert_eq!(body.len(), 1);
@@ -1053,7 +1274,7 @@ mod tests {
     fn with_io_async_block_nested_if_else_parses() {
         // Spaced comparison and ELSE chain inside a WITH_IO-wrapped block.
         let script = indoc! {r#"
-            WITH_IO [stdout=pipe:out] ASYNC {
+            WITH_IO [stdout=$out] ASYNC {
                 IF $a == $b {
                     ECHO yes
                 } ELSE {

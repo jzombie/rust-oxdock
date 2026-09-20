@@ -4,7 +4,9 @@ COMMENT    = _{ line_comment | block_comment }
 line_comment = _{ "//" ~ (!linebreak ~ ANY)* }
 block_comment = _{ "/*" ~ (block_comment | !"*/" ~ ANY)* ~ "*/" }
 
-// Hash comments are only valid at the start of a line (possibly indented)
+// Hash comments occupy a whole line (possibly indented) as `element`s,
+// and may also trail values inside `gap`/`gap_nl` bracket interiors.
+// Inside command payloads (unquoted args) a `#` stays ordinary text.
 hash_comment = _{ "#" ~ (!linebreak ~ ANY)* }
 
 blank = _{ (WHITESPACE | linebreak)+ }
@@ -76,7 +78,7 @@ or_op = @{ "||" }
 and_op = @{ "&&" }
 // eq_op and neq_op already defined above in operator section
 
-parenthesized_expr = ${ "(" ~ gap ~ expr ~ gap ~ ")" }
+parenthesized_expr = ${ "(" ~ gap_nl ~ expr ~ gap_nl ~ ")" }
 
 quoted_string = @{
     "\"" ~ ( "\\\"" | (!"\"" ~ ANY) )* ~ "\"" |
@@ -94,25 +96,21 @@ numeric_literal = @{ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)? ~ !(ASCII_ALPHANUMERIC
 // below gives the same precedence to a leading `env:KEY` shape.
 env_read_key = @{ ASCII_ALPHA_UPPER ~ (ASCII_ALPHA_UPPER | ASCII_DIGIT | "_")* }
 env_read = { "env" ~ ":" ~ env_read_key }
-// Pipe handle: `pipe:NAME` evaluates to the named pipe. Must precede
-// `bare_word` in `expr_atom` (which would otherwise match just `pipe` and
-// strand `:NAME`). Deliberately NOT mirrored in `unquoted_arg`: bare command
-// arguments keep their literal reading, so existing `pipe:...` text there is
-// unaffected; the operator form lives in expression positions (LET RHS,
-// call args, conditions) plus `WITH_IO` bindings.
-pipe_read = { "pipe" ~ ":" ~ pipe_name }
 // Static module qualification: `MODULE::NAME` in call position. At most one
 // `::`; the parts are validated UPPERCASE at lowering time with span errors.
 qualified_func_name = @{ ident ~ ("::" ~ ident)? }
-func_call = ${ qualified_func_name ~ gap ~ "(" ~ gap ~ (expr ~ gap ~ ("," ~ gap ~ expr ~ gap)*)? ~ gap ~ ")" }
+func_call = ${ qualified_func_name ~ gap ~ "(" ~ gap_nl ~ (expr ~ gap_nl ~ ("," ~ gap_nl ~ expr ~ gap_nl)*)? ~ ")" }
 variable = ${ "$" ~ ident }
 key_path_segment = @{ (ASCII_ALPHA | "_") ~ (ASCII_ALPHA | "_" | ASCII_DIGIT)* | ASCII_DIGIT+ }
 key_path = ${ "$" ~ ident ~ ("." ~ key_path_segment)+ }
-list_literal = ${ "[" ~ gap ~ (expr ~ gap ~ ("," ~ gap ~ expr ~ gap)*)? ~ gap ~ "]" }
+list_literal = ${ "[" ~ gap_nl ~ (expr ~ gap_nl ~ ("," ~ gap_nl ~ expr ~ gap_nl)*)? ~ "]" }
 map_entry = ${ (quoted_string | bare_word) ~ gap ~ ":" ~ gap ~ ws? ~ gap ~ expr }
-map_literal = ${ "{" ~ gap ~ ws? ~ gap ~ (map_entry ~ gap ~ (ws? ~ "," ~ ws? ~ map_entry ~ gap)*)? ~ ws? ~ gap ~ "}" }
+// Maps span lines and take comments like call args and lists: entries stay
+// single-line (`key: value`), but anything between entries or braces may
+// hold newlines and `//` / `/* */` comments.
+map_literal = ${ "{" ~ gap_nl ~ (map_entry ~ gap_nl ~ ("," ~ gap_nl ~ map_entry ~ gap_nl)*)? ~ "}" }
 string_literal = { quoted_string }
-expr_atom = { parenthesized_expr | func_call | key_path | variable | env_read | pipe_read | list_literal | map_literal | string_literal | numeric_literal | bare_word }
+expr_atom = { parenthesized_expr | func_call | key_path | variable | env_read | list_literal | map_literal | block | string_literal | numeric_literal | bare_word }
 
 // Ordering level (<, <=, >, >=) — operands are additive so `+`/`-` bind
 // tighter than comparisons: `2 + 3 > 4` parses as `(2 + 3) > 4`.
@@ -169,7 +167,10 @@ else_keyword = @{ "ELSE" ~ !(ASCII_ALPHANUMERIC | "_") }
 type_tag = @{ ASCII_ALPHA_UPPER ~ (ASCII_ALPHA_UPPER | ASCII_DIGIT | "_")* }
 
 for_statement = ${ for_keyword ~ gap ~ dollar_ident ~ gap ~ (":" ~ gap ~ type_tag ~ gap)? ~ ("," ~ gap ~ dollar_ident ~ gap ~ (":" ~ gap ~ type_tag ~ gap)?)? ~ in_keyword ~ gap ~ expr ~ gap ~ block }
-let_statement = ${ let_keyword ~ gap ~ dollar_ident ~ gap ~ ":" ~ gap ~ type_tag ~ gap ~ "=" ~ gap ~ expr }
+// Bare `LET $p: PIPE` (no `=`, no initializer) mints a fresh anonymous
+// pipe backend lazily at first binding. All other types still require
+// an initializer; the parser rejects those with a span error.
+let_statement = ${ let_keyword ~ gap ~ dollar_ident ~ gap ~ ":" ~ gap ~ type_tag ~ gap ~ ("=" ~ gap ~ expr)? }
 // Mutation is bare `$var = expr` (no keyword): the leading `$` distinguishes
 // it from `KEY=value` command assignments, which never start with `$`.
 mutate_statement = ${ dollar_ident ~ gap ~ "=" ~ gap ~ expr }
@@ -212,7 +213,7 @@ func_def = ${ func_keyword ~ sep ~ func_ident ~ gap ~ "(" ~ gap ~ (func_param ~ 
 // as a call to `ECHO`. Ordered before `instruction` so `FOO(...)` never lexes
 // as a command.
 call_head_paren = @{ func_call_head ~ "(" }
-call_statement = { call_head_paren ~ gap ~ (expr ~ gap ~ ("," ~ gap ~ expr ~ gap)*)? ~ gap ~ ")" }
+call_statement = { call_head_paren ~ gap_nl ~ (expr ~ gap_nl ~ ("," ~ gap_nl ~ expr ~ gap_nl)*)? ~ ")" }
 return_statement = ${ return_keyword ~ (sep ~ expr)? }
 break_statement = ${ break_keyword }
 continue_statement = ${ continue_keyword }
@@ -300,8 +301,8 @@ with_io_command = ${ "WITH_IO" ~ sep ~ io_flags ~ (sep ~ command)? }
 io_flags = { "[" ~ ws? ~ io_binding ~ (ws? ~ "," ~ ws? ~ io_binding)* ~ ws? ~ "]" }
 io_binding = { io_stream ~ (ws? ~ "=" ~ ws? ~ pipe_binding)? }
 io_stream = { "stdin" | "stdout" | "stderr" }
-pipe_binding = { "pipe" ~ ":" ~ pipe_name | dollar_ident }
-pipe_name = @{ (ASCII_ALPHANUMERIC | "_" | "-")+ }
+// Binding endpoints are `$var` references to PIPE-typed variables.
+pipe_binding = { dollar_ident }
 
 inherit_env_command = ${ "INHERIT_ENV" ~ sep ~ inherit_list }
 inherit_list = { "[" ~ ws? ~ env_key ~ (ws? ~ "," ~ ws? ~ env_key)* ~ ws? ~ "]" }
@@ -328,7 +329,7 @@ export_statement = ${ export_keyword ~ sep ~ (!linebreak ~ !";" ~ ANY)* }
 // Exec elements are atoms only (no binary/compare operators): spaced shell
 // words can never compile to `CompiledMath`/`Arithmetic` and flip shell
 // dispatches to exec; compute into a variable first (`LET $n = 1 + 2`).
-run_exec_arg = { parenthesized_expr | func_call | key_path | variable | env_read | pipe_read | list_literal | map_literal | string_literal | numeric_literal | bare_word }
+run_exec_arg = { parenthesized_expr | func_call | key_path | variable | env_read | list_literal | map_literal | string_literal | numeric_literal | bare_word }
 run_exec_list = ${ "[" ~ gap ~ (run_exec_arg ~ gap ~ ("," ~ gap ~ run_exec_arg ~ gap)*)? ~ gap ~ "]" }
 run_exec_statement = ${ "RUN" ~ sep ~ run_exec_list }
 run_exec_inner = ${ "RUN" ~ sep ~ run_exec_list }
@@ -343,11 +344,19 @@ command_name = @{ ASCII_ALPHA_UPPER ~ (ASCII_ALPHA_UPPER | ASCII_DIGIT | "_")* ~
 sep = _{ WHITESPACE+ }
 
 // Explicit whitespace for compound-atomic rules, replicating exactly what
-// implicit matching (WHITESPACE | COMMENT) accepts at top level. Atomic
+// implicit matching (WHITESPACE | COMMENT) accepts at top level, plus `#`
+// line comments (which are explicit elements, never implicit). Atomic
 // parents (WITH_IO, TIMEOUT, ASYNC bodies) suppress implicit whitespace, so
 // nestable rules carry their own gaps and behave identically in both contexts.
 // `gap` intentionally excludes linebreaks, matching implicit matching.
-gap = _{ (WHITESPACE | COMMENT)* }
+gap = _{ (WHITESPACE | COMMENT | hash_comment)* }
+
+// Newline-tolerant gap for bracket interiors only (call args, list items,
+// parenthesized exprs, map entries): long invocations may span lines, one
+// arg per line, with `//`, `/* */`, or `#` comments between entries.
+// Statement structure and operators stay single-line; only text inside
+// matched `()`, `[]`, `{}` may cross a linebreak.
+gap_nl = _{ (WHITESPACE | linebreak | COMMENT | hash_comment)* }
 
 // Unquoted arguments — Docker-style bare words.
 // Leading !$ rejects tokens starting with $ (forces $var to expr).

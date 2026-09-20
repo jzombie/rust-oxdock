@@ -29,7 +29,20 @@ pub struct ChildHandle {
 
 impl ChildHandle {
     #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-    pub(crate) fn new(child: Child, io_threads: Vec<std::thread::JoinHandle<()>>) -> Self {
+    pub(crate) fn new(
+        child: Child,
+        stdin_thread: Option<std::thread::JoinHandle<()>>,
+        io_threads: Vec<std::thread::JoinHandle<()>>,
+    ) -> Self {
+        // The stdin feeder is deliberately detached, never joined (see
+        // below): it blocks reading the producer pipe, whose writers may
+        // legitimately outlive a short-lived child (a session pump feeding
+        // the next command), so joining would hang `wait()` forever — the
+        // same reason `Drop` below never joins pump threads. The detached
+        // thread ends on pipe EOF or write failure and releases its
+        // handles then; it holds no lock anyone else needs (fresh reader
+        // handle per spawn).
+        let _ = stdin_thread;
         #[cfg(unix)]
         let pid = child.id();
         #[cfg(windows)]
@@ -57,6 +70,9 @@ impl BackgroundHandle for ChildHandle {
                     guard.exit_status = Some(status);
                     // Zero PID to prevent killing recycled PIDs
                     self.pid.store(0, Ordering::SeqCst);
+                    // Join output pumps only: their EOF is guaranteed by
+                    // child exit, while the stdin feeder may legitimately
+                    // outlive it (the stdin feeder is detached in `new`).
                     for thread in guard.io_threads.drain(..) {
                         let _ = thread.join();
                     }
@@ -90,7 +106,9 @@ impl BackgroundHandle for ChildHandle {
             let status = child.wait()?;
             // Zero PID to prevent killing recycled PIDs
             self.pid.store(0, Ordering::SeqCst);
-            // Re-acquire lock to store result and join IO threads
+            // Re-acquire lock to store result and join IO threads.
+            // Output pumps only: the stdin feeder is detached in `new`
+            // since its producer may outlive the child.
             let mut guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             for thread in guard.io_threads.drain(..) {
                 let _ = thread.join();

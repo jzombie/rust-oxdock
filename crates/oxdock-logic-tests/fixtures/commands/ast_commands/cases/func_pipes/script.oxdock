@@ -1,10 +1,10 @@
 # Pipes travel into functions as typed arguments and are usable as
 # binding targets in both directions. Two syntax rules to remember:
-#   - `pipe:NAME` is the explicit handle operator (like `env:KEY`):
-#     `LET $p: PIPE = pipe:ch` names a pipe without touching a stream.
-#     A plain string (`LET $p: PIPE = "ch"`) is a TypeMismatch error.
-#   - `$p` (not `pipe:$p`) is the variable form in bindings and calls;
-#     literals stay `pipe:name` (as in `WITH_IO` bindings below).
+#   - `LET $p: PIPE` mints a fresh anonymous backend without touching
+#     a stream. A plain string (`LET $p: PIPE = "ch"`) is a TypeMismatch
+#     error.
+#   - `$p` is the variable form in bindings and calls; there are no
+#     named-pipe literals.
 FUNC FILL($q: PIPE) {
     WITH_IO [stdout=$q] ECHO "filled"
     RETURN "filled-ok"
@@ -17,12 +17,12 @@ FUNC DRAIN($q: PIPE) {
 
 # A function can also hand a pipe back: the caller receives a live handle.
 FUNC MAKEPIPE($name: STRING) {
-    LET $made: PIPE = pipe:made
+    LET $made: PIPE
     WITH_IO [stdout=$made] ECHO "seed"
     RETURN $made
 }
 
-LET $p: PIPE = pipe:ch
+LET $p: PIPE
 WITH_IO [stdout=$p] ECHO "primed"
 WITH_IO [stdin=$p] READ_LINE $primed
 LET $fr: STRING = FILL($p)

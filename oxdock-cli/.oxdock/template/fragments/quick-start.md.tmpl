@@ -21,3 +21,18 @@ Drop into a shell inside the temporary workspace (interactive):
 ```sh
 oxdock --shell
 ```
+
+Expose a script service port on all interfaces:
+```sh
+oxdock --listen 0.0.0.0:2251 ./proxy.oxfile
+```
+
+Map an outer port to an inner service port or name:
+```sh
+oxdock -p 2222:2251 ./proxy.oxfile
+```
+
+Run with no sockets at all (services stay handle-only):
+```sh
+oxdock --offline ./proxy.oxfile
+```

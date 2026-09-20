@@ -1,4 +1,5 @@
 WORKDIR a/b
 CWD
-WITH_IO [stdout=pipe:cap_pwd_txt] CWD
-WITH_IO [stdin=pipe:cap_pwd_txt] WRITE pwd.txt
+LET $cap_pwd_txt: PIPE
+WITH_IO [stdout=$cap_pwd_txt] CWD
+WITH_IO [stdin=$cap_pwd_txt] WRITE pwd.txt

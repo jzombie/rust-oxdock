@@ -1,2 +1,3 @@
-WITH_IO [stdout=pipe:cap_out_txt] RUN @CAPTURE_RUN_CMD@
-WITH_IO [stdin=pipe:cap_out_txt] WRITE out.txt
+LET $cap_out_txt: PIPE
+WITH_IO [stdout=$cap_out_txt] RUN @CAPTURE_RUN_CMD@
+WITH_IO [stdin=$cap_out_txt] WRITE out.txt

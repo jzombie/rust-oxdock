@@ -1,0 +1,7 @@
+# In-place list growth: no copy, no rebind, aliases detach.
+LET $items: LIST = []
+LIST_APPEND $items "first"
+LIST_APPEND $items "second"
+LET $want: LIST = ["first", "second"]
+ASSERT_EQ $items $want
+ECHO "appended"

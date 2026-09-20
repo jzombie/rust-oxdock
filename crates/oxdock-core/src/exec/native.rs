@@ -7,8 +7,9 @@ use oxdock_parser::{
     KEYWORD_INSPECT, SCRIPT_MODULE_NAME, STD_MODULE_NAME, Step, Value, base_name, qualify,
     split_qualified,
 };
-use oxdock_process::{DefaultProcessManager, ProcessManager};
+use oxdock_process::{CommandStdin, DefaultProcessManager, ProcessManager};
 
+use super::io::StreamHandle;
 use super::state::ExecState;
 use super::steps::StepCtx;
 use super::typing::TypeDescriptor;
@@ -228,6 +229,10 @@ impl<P: ProcessManager> FunctionRegistry<P> {
             PathType::registration(),
             Functions::registration(),
             Describe::registration(),
+            IsTerminal::registration(),
+            SemaphoreNew::registration(),
+            SemaphoreTryAcquire::registration(),
+            SemaphoreAvailable::registration(),
         ]
     }
 
@@ -615,6 +620,167 @@ fn type_describe<P: ProcessManager>(cx: &mut StepCtx<P>, name: String) -> Result
             Value::map(map)
         })
         .ok_or_else(|| anyhow::anyhow!("unknown type {name}"))
+}
+
+/// Report whether a standard stream is a terminal.
+///
+/// `IS_TERMINAL("stdin")`, `IS_TERMINAL("stdout")`, or `IS_TERMINAL("stderr")`
+/// answers for the step's stream as currently bound, so scripts can adapt
+/// prompts, colors, and progress output. Anything diverted from the
+/// terminal reports false without touching host handles: `WITH_IO` pipe
+/// bindings (script backends and OS pairs), `LET`-capture sinks, staged
+/// runner sinks, and any materialized stdin stream (only a directly
+/// inherited fd falls back to the process check). A transparent root tee
+/// still answers the session question via the process check. The name
+/// matches exactly (no case folding): anything else bails. AST-only:
+/// reads the step context like the other introspection functions.
+#[oxdock_func(returns = "BOOL")]
+fn is_terminal<P: ProcessManager>(cx: &mut StepCtx<P>, stream: String) -> Result<Value> {
+    use std::io::IsTerminal;
+    let terminal = match stream.as_str() {
+        "stdin" => {
+            // A script-pipe backend is definitive; Null is /dev/null.
+            // Only a directly inherited fd answers the process check: a
+            // materialized Stream is always a binding (staged input,
+            // WITH_IO pipe, or OS half), never the raw fd.
+            if cx.stdin_pipe.is_some() {
+                false
+            } else {
+                match &cx.stdin {
+                    CommandStdin::Null => false,
+                    #[cfg(not(miri))]
+                    CommandStdin::OsPipe(_) => false,
+                    CommandStdin::Stream(_) => false,
+                    CommandStdin::Inherit => std::io::stdin().is_terminal(),
+                }
+            }
+        }
+        "stdout" => {
+            if cx.out_pipe.is_some() {
+                // WITH_IO script-pipe binding: never a terminal.
+                false
+            } else if cx.state.io.stdout().is_some() {
+                // Staged runner sink: the root tee diverts bytes to the
+                // sink only, never to real stdout.
+                false
+            } else {
+                match &cx.out {
+                    // Unbound: inherited straight through.
+                    None => std::io::stdout().is_terminal(),
+                    // OS kernel pipe: never a terminal.
+                    #[cfg(not(miri))]
+                    Some(StreamHandle::Os(_)) => false,
+                    // Root tee (transparent: forwards to real stdout when
+                    // unstaged, so terminal-ness survives) versus a genuine
+                    // diversion. WITH_IO bindings never reach here (script
+                    // pipes trip out_pipe, OS pipes trip Os, staged sinks
+                    // trip above). LET-capture cannot reach here either:
+                    // assign_capture installs no sink for a bare NAME(...)
+                    // call, so a direct query always observes the ambient
+                    // routing. The process check answers the session
+                    // question.
+                    Some(StreamHandle::Stream(_)) => std::io::stdout().is_terminal(),
+                }
+            }
+        }
+        "stderr" => {
+            if cx.state.io.stderr().is_some() {
+                // Staged runner sink: diverted, never a terminal.
+                false
+            } else {
+                match &cx.err {
+                    // Unbound: inherited straight through.
+                    None => std::io::stderr().is_terminal(),
+                    // OS kernel pipe: never a terminal.
+                    #[cfg(not(miri))]
+                    Some(StreamHandle::Os(_)) => false,
+                    // Root never tees stderr and LET never captures it,
+                    // so a bound handle here is always a WITH_IO binding.
+                    Some(StreamHandle::Stream(_)) => false,
+                }
+            }
+        }
+        _ => anyhow::bail!(
+            "IS_TERMINAL expects \"stdin\", \"stdout\", or \"stderr\", got {stream:?}"
+        ),
+    };
+    Ok(Value::bool(terminal))
+}
+
+/// Create a counting semaphore admitting at most `max` concurrent holders.
+///
+/// Non-positive maxima bail. The word names a shared backend: every clone
+/// observes the same count, and admission runs through
+/// `SEMAPHORE_TRY_ACQUIRE`, never through the `SEMAPHORE_AVAILABLE`
+/// readout.
+///
+/// ```text
+/// LET $sem: SEMAPHORE = SEMAPHORE_NEW(10)
+/// ```
+#[oxdock_func(returns = "SEMAPHORE")]
+fn semaphore_new<P: ProcessManager>(cx: &mut StepCtx<P>, max: i64) -> Result<Value> {
+    let _ = cx;
+    if max <= 0 {
+        return Err(anyhow::anyhow!(
+            "SEMAPHORE_NEW() requires a positive max, got {max}"
+        ));
+    }
+    Ok(Value::semaphore(max as usize))
+}
+
+/// Attempt one non-blocking acquire, always answering a MAP.
+///
+/// `held` is `1` with the permit under the `permit` key, or `0` with no
+/// `permit` key: branch on `$m.held` (the DSL has no null, so the absent
+/// key is the miss shape, and missing-key access already bails strictly).
+/// Never waits, so no wait can wedge.
+///
+/// ```text
+/// LET $acq: MAP = SEMAPHORE_TRY_ACQUIRE($sem)
+/// IF $acq.held == 0 {
+///   ECHO "at cap, rejecting"
+/// } ELSE {
+///   LET $permit: PERMIT = $acq.permit
+///   ASYNC { session work }
+/// }
+/// ```
+#[oxdock_func(returns = "MAP")]
+fn semaphore_try_acquire<P: ProcessManager>(cx: &mut StepCtx<P>, sem: Value) -> Result<Value> {
+    let _ = cx;
+    let Some(sem) = sem.as_semaphore() else {
+        return Err(anyhow::anyhow!(
+            "SEMAPHORE_TRY_ACQUIRE() argument `$sem` must be a SEMAPHORE, got {}",
+            sem.type_name(),
+        ));
+    };
+    let mut map = BTreeMap::new();
+    if sem.try_acquire() {
+        map.insert("held".to_string(), Value::int(1));
+        map.insert("permit".to_string(), Value::permit(&sem));
+    } else {
+        map.insert("held".to_string(), Value::int(0));
+    }
+    Ok(Value::map(map))
+}
+
+/// Read free permits under the lock, with no mutation.
+///
+/// Observability only (audit lines, healthchecks: `active = max - free`).
+/// Exact at read time and stale the instant the caller acts on it, so it
+/// must never drive admission: that is `SEMAPHORE_TRY_ACQUIRE`'s job.
+///
+/// ```text
+/// LET $free: INT = SEMAPHORE_AVAILABLE($sem)
+/// ```
+#[oxdock_func(pure, returns = "INT")]
+fn semaphore_available(sem: Value) -> Result<Value> {
+    let Some(sem) = sem.as_semaphore() else {
+        return Err(anyhow::anyhow!(
+            "SEMAPHORE_AVAILABLE() argument `$sem` must be a SEMAPHORE, got {}",
+            sem.type_name(),
+        ));
+    };
+    Ok(Value::int(sem.available() as i64))
 }
 
 fn meta_to_value(meta: &FuncMeta) -> Value {

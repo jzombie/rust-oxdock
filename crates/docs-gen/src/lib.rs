@@ -136,8 +136,9 @@ pub fn run(repo_root: &Path) -> Result<()> {
             LET $files: MAP = LOAD_JSON("target/oxdock-docs/{{ $t.name }}.json")
 
             WRITE $t.out ""
-            WITH_IO [stdout=pipe:render] EXPAND $t.template
-            WITH_IO [stdin=pipe:render] APPEND $t.out
+            LET $render: PIPE
+            WITH_IO [stdout=$render] EXPAND $t.template
+            WITH_IO [stdin=$render] APPEND $t.out
         }
         FOR $rscope: STRING IN $cfg.scopes {
             FOR $rtj: STRING IN GLOB("{{ $rscope }}/**/target.json") {

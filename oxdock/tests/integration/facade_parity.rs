@@ -4,7 +4,7 @@
 //! dependency in the consumer.
 
 #[cfg(feature = "cli")]
-use oxdock::{Options, ScriptSource, execute_with_result};
+use oxdock::{EndpointFlags, Options, ScriptSource, execute_with_result};
 use oxdock::{oxdock, oxdock_parser};
 #[cfg(feature = "cli")]
 use oxdock_fs::{GuardedPath, PathResolver};
@@ -27,6 +27,7 @@ fn facade_execute_with_result_runs_script() {
     let opts = Options {
         script: ScriptSource::Path(script_path),
         shell: false,
+        endpoints: EndpointFlags::default(),
     };
     let result = execute_with_result(opts, workspace_root).expect("execute");
     let snapshot = result

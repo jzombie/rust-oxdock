@@ -163,7 +163,7 @@ fn peek_key_value(input: ParseStream) -> bool {
 fn type_label_to_string(lit: &syn::LitStr) -> syn::Result<String> {
     match lit.value().as_str() {
         "STRING" | "INT" | "FLOAT" | "BOOL" | "PIPE" | "LIST" | "MAP" | "HANDLE" | "DURATION"
-        | "PATH" => Ok(lit.value()),
+        | "PATH" | "SEMAPHORE" | "PERMIT" => Ok(lit.value()),
         other => Err(syn::Error::new(
             lit.span(),
             format!(

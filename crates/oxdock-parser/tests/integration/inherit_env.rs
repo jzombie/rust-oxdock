@@ -39,7 +39,7 @@ fn inherit_env_cannot_be_guarded_or_nested() {
 
 #[test]
 fn inherit_env_cannot_appear_inside_with_io() {
-    let script = "WITH_IO [stdout=pipe:cap] INHERIT_ENV [BAR]";
+    let script = "WITH_IO [stdout=$cap] INHERIT_ENV [BAR]";
     let err = parse_script(script, mock_lower).expect_err("nested INHERIT_ENV must fail");
     assert!(err.to_string().contains("cannot be nested"));
 }
@@ -57,7 +57,7 @@ fn inherit_env_cannot_be_inside_guard_block_braces() {
 
 #[test]
 fn inherit_env_cannot_be_inside_with_io_block_braces() {
-    let script = "WITH_IO [stdout=pipe:cap] { INHERIT_ENV [BAR] }";
+    let script = "WITH_IO [stdout=$cap] { INHERIT_ENV [BAR] }";
     let err =
         parse_script(script, mock_lower).expect_err("INHERIT_ENV inside WITH_IO block must fail");
     assert!(err.to_string().contains("cannot be nested"));
@@ -65,7 +65,7 @@ fn inherit_env_cannot_be_inside_with_io_block_braces() {
 
 #[test]
 fn inherit_env_cannot_be_deeply_nested_under_guards_and_io() {
-    let script = "[env:FOO] { WITH_IO [stdout=pipe:cap] { INHERIT_ENV [BAR] } }";
+    let script = "[env:FOO] { WITH_IO [stdout=$cap] { INHERIT_ENV [BAR] } }";
     let err = parse_script(script, mock_lower).expect_err("deeply nested INHERIT_ENV must fail");
     assert!(
         err.to_string().contains("cannot be guarded")

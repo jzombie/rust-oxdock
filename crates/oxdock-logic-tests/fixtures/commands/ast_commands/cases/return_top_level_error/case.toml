@@ -1,0 +1,3 @@
+name = "return_top_level_error"
+
+expect_error_contains = "RETURN outside function, ASYNC task, or LET block"

@@ -208,6 +208,7 @@ fn spawn_child_with_streams(
         .spawn()
         .with_context(|| format!("failed to spawn {:?}", cmd))?;
     let mut io_threads = Vec::new();
+    let mut stdin_thread = None;
 
     if let Some(stdin_stream) = stdin
         && let Some(mut child_stdin) = child.stdin.take()
@@ -217,7 +218,7 @@ fn spawn_child_with_streams(
                 let _ = std::io::copy(&mut *guard, &mut child_stdin);
             }
         });
-        io_threads.push(thread);
+        stdin_thread = Some(thread);
     }
 
     if let Some(stdout_stream) = stdout
@@ -268,7 +269,7 @@ fn spawn_child_with_streams(
         io_threads.push(thread);
     }
 
-    Ok(ChildHandle::new(child, io_threads))
+    Ok(ChildHandle::new(child, stdin_thread, io_threads))
 }
 
 #[cfg(test)]

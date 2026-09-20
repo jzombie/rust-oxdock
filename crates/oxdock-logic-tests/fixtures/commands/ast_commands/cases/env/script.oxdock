@@ -1,2 +1,3 @@
 ENV FOO="bar"
-WITH_IO [stdout=pipe:cap_env_txt] ECHO "value={{ env:FOO }}"
+LET $cap_env_txt: PIPE
+WITH_IO [stdout=$cap_env_txt] ECHO "value={{ env:FOO }}"

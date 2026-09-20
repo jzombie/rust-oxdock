@@ -218,7 +218,6 @@ fn fmt_io(b: &IoBinding) -> String {
         IoStream::Stderr => "stderr",
     };
     match &b.pipe {
-        Some(PipeTarget::Name(p)) => format!("{}=pipe:{}", s, p),
         Some(PipeTarget::Var(v)) => format!("{}=${}", s, v),
         None => s.to_string(),
     }
@@ -338,7 +337,7 @@ fn structural_hint(name: &str, received: &str) -> Option<String> {
             "ELSE must directly follow an `IF ... {{ ... }}` block, e.g. `IF true {{ ECHO yes }} ELSE {{ ECHO no }}`; got {got}."
         )),
         "LET" => Some(format!(
-            "LET assigns a variable, e.g. `LET $name: STRING = <expr>`, `LET $t: HANDLE = ASYNC ...`, `LET $out: STRING = <command>` (capture), or `LET $out: STRING = AWAIT $t`; got {got}."
+            "LET assigns a variable, e.g. `LET $name: STRING = <expr>`, `LET $t: HANDLE = ASYNC ...`, `LET $out: STRING = <command>` (capture), `LET $out: STRING = AWAIT $t`, or `LET $var: TYPE = {{ ... }}` (inline block); got {got}."
         )),
         "SET" => Some(
             "`SET` is not a keyword; mutate a declared variable with `$var = <expr>`, e.g. `$count = 2`.".to_string(),
@@ -350,7 +349,7 @@ fn structural_hint(name: &str, received: &str) -> Option<String> {
             "FUNC defines a function, e.g. `FUNC GREET($name: STRING) {{ RETURN $name }}`; got {got}."
         )),
         "RETURN" => Some(format!(
-            "RETURN ends a function with a value, e.g. `RETURN $x`; got {got}."
+            "RETURN ends the nearest function, ASYNC task, or inline LET block with a value, e.g. `RETURN $x`; got {got}."
         )),
         "WHILE" => Some(format!(
             "WHILE needs a Bool condition and a block, e.g. `WHILE !$done {{ ... }}`; got {got}."
@@ -376,11 +375,11 @@ fn structural_hint(name: &str, received: &str) -> Option<String> {
 }
 
 /// Diagnose a `WITH_IO` line that failed to parse: most often a malformed
-/// binding list (bindings are bare streams or `<stream>=pipe:<name>`).
+/// binding list (bindings are bare streams or `<stream>=$var`).
 fn with_io_hint(got: &str, received: &str) -> String {
     const SYNTAX: &str =
         "WITH_IO needs `WITH_IO [bindings] <command>` or `WITH_IO [bindings] { <commands> }`";
-    const BINDINGS: &str = "bindings are `stdin`, `stdout`, `stderr`, `<stream>=pipe:<name>`, or `<stream>=$var` with a PIPE-typed variable (e.g. `[stdout=pipe:log]`, `[stdin=$p]`)";
+    const BINDINGS: &str = "bindings are `stdin`, `stdout`, `stderr`, or `<stream>=$var` with a PIPE-typed variable (e.g. `[stdout=$p]`, `[stdin=$p]`)";
     if let Some(after_open) = received.strip_prefix('[') {
         match after_open.split_once(']') {
             None => {
@@ -403,10 +402,10 @@ fn with_io_hint(got: &str, received: &str) -> String {
                     }
                     let valid = match binding {
                         None => true,
-                        Some(value) => value
-                            .strip_prefix("pipe:")
-                            .map(|pipe| !pipe.trim().is_empty())
-                            .unwrap_or(false),
+                        Some(value) => value.strip_prefix('$').is_some_and(|var| {
+                            !var.trim().is_empty()
+                                && var.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                        }),
                     };
                     if !valid {
                         return format!(
@@ -504,16 +503,17 @@ macro_rules! declare_commands {
 
 /// First-argument target for `ASSERT_EQ` / `ASSERT_CONTAINS`.
 ///
-/// Values (`Arg`) evaluate in memory and never touch disk. The `Stdout`,
-/// `Stderr`, and `Pipe` markers observe stream buffers. Bare `stdout` /
-/// `stderr` / `pipe:NAME` spellings lower to markers; quoted spellings stay
-/// literal string values, so quoting remains interchangeable everywhere.
+/// Values (`Arg`) evaluate in memory and never touch disk. The `Stdout`
+/// and `Stderr` markers observe stream buffers. Pipes are asserted through
+/// plain variables: a `$var` holding a `PIPE` peeks its backend bytes at
+/// runtime, so no pipe marker variant exists. Bare `stdout` / `stderr`
+/// spellings lower to markers; quoted spellings stay literal string
+/// values, so quoting remains interchangeable everywhere.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AssertTarget {
     Value(Arg),
     Stdout,
     Stderr,
-    Pipe(String),
 }
 
 impl AssertTarget {
@@ -522,35 +522,27 @@ impl AssertTarget {
             AssertTarget::Value(arg) => arg.render(),
             AssertTarget::Stdout => "stdout".to_string(),
             AssertTarget::Stderr => "stderr".to_string(),
-            AssertTarget::Pipe(name) => format!("pipe:{name}"),
         }
     }
 }
 
 /// Lower the first positional of `ASSERT_EQ` / `ASSERT_CONTAINS`.
 ///
-/// `Arg::Expr` (variables, key-paths, calls) is always a value. Bare
-/// (unquoted) `stdout` / `stderr` / `pipe:NAME` spellings become stream
-/// markers; every other spelling, quoted or not, stays a literal value.
-/// In particular a `$var` holding a path never reads disk, and quoted
-/// `"stdout"` names the seven-character string, not the stream.
-fn lower_assert_target(arg: Arg, cmd_name: &str) -> ParseResult<AssertTarget> {
+/// `Arg::Expr` (variables, key-paths, calls) is always a value — a `$var`
+/// holding a `PIPE` peeks its backend bytes at runtime. Bare (unquoted)
+/// `stdout` / `stderr` spellings become stream markers; every other
+/// spelling, quoted or not, stays a literal value. In particular a `$var`
+/// holding a path never reads disk, and quoted `"stdout"` names the
+/// seven-character string, not the stream.
+fn lower_assert_target(arg: Arg) -> ParseResult<AssertTarget> {
     match arg {
         Arg::Expr(_) => Ok(AssertTarget::Value(arg)),
         Arg::String(text, quoted) if !quoted => match text.as_str() {
             "stdout" => Ok(AssertTarget::Stdout),
             "stderr" => Ok(AssertTarget::Stderr),
-            _ => match text.strip_prefix("pipe:") {
-                Some(name) if !name.is_empty() => Ok(AssertTarget::Pipe(name.to_string())),
-                Some(_) => Err(ParseError::validation(
-                    cmd_name,
-                    format!("{cmd_name} pipe target needs a name, got {text:?}"),
-                    &SpanContext::line_only(0),
-                )),
-                None => Ok(AssertTarget::Value(lower_assert_operand(Arg::String(
-                    text, false,
-                )))),
-            },
+            _ => Ok(AssertTarget::Value(lower_assert_operand(Arg::String(
+                text, false,
+            )))),
         },
         other => Ok(AssertTarget::Value(lower_assert_operand(other))),
     }
@@ -672,7 +664,7 @@ declare_commands! {
             A `$var` inside larger text stays literal — write `{{ $var }}` to
             interpolate there.
         "#},
-        args: &[ ArgSpec { name: "assignment", arg_type: ArgType::KeyValue, description: "KEY=value pair; the value resolves as STRING", io: IoDirection::Write, index: 0, required: true, fallback_stream: None } ],
+        args: &[ ArgSpec { name: "assignment", arg_type: ArgType::String, description: "KEY=value pair; the value resolves as STRING", io: IoDirection::Write, index: 0, required: true, fallback_stream: None } ],
         flags: &[],
         default_output: None,
         examples: &[
@@ -946,18 +938,21 @@ declare_commands! {
             Trailing newline is stripped (shell-read parity). On premature EOF
             assigns accumulated bytes and returns.
         "#},
-        args: &[ ArgSpec { name: "var", arg_type: ArgType::Var, description: "Target variable (`$name`); the line binds as STRING", io: IoDirection::Write, index: 0, required: true, fallback_stream: None } ],
+        args: &[ ArgSpec { name: "var", arg_type: ArgType::String, description: "Target variable (`$name`); the line binds as STRING", io: IoDirection::Write, index: 0, required: true, fallback_stream: None } ],
         flags: &[],
         default_output: None,
         examples: &[ Example { name: "read line", fence_meta: None, code: indoc! {r#"
-            WITH_IO [stdout=pipe:lines] ECHO "first"
-            WITH_IO [stdin=pipe:lines] READ_LINE $reply
+            LET $lines: PIPE
+            WITH_IO [stdout=$lines] ECHO "first"
+            WITH_IO [stdin=$lines] READ_LINE $reply
         "#} } ],
         lower: |_flags, args| {
             let arg = args.into_iter().next().ok_or_else(|| ParseError::validation("READ_LINE", "READ_LINE requires a variable".to_string(), &SpanContext::line_only(0)))?;
             let var = match arg {
                 Arg::Expr(Expr::Var(name)) => name,
-                Arg::String(s, _) => s.trim_start_matches('$').to_string(),
+                // Quoted "$var" keeps its sigil through the generic string
+                // path; templates defer untouched exactly as before.
+                Arg::String(s, _) if s.starts_with('$') || s.contains("{{") => s.trim_start_matches('$').to_string(),
                 other => return Err(ParseError::validation("READ_LINE", format!("READ_LINE requires a $variable, found {:?}", other), &SpanContext::line_only(0))),
             };
             if var.is_empty() {
@@ -1050,7 +1045,7 @@ declare_commands! {
         "#},
         args: &[
             ArgSpec { name: "path", arg_type: ArgType::Path, description: "Template file to expand; omit to expand stdin", io: IoDirection::Read, index: 0, required: false, fallback_stream: None },
-            ArgSpec { name: "overrides", arg_type: ArgType::Rest(&ArgType::KeyValue), description: "Template overrides shadowing that key (unified string values)", io: IoDirection::Read, index: 1, required: false, fallback_stream: None },
+            ArgSpec { name: "overrides", arg_type: ArgType::Rest(&ArgType::String), description: "Template overrides shadowing that key (unified string values)", io: IoDirection::Read, index: 1, required: false, fallback_stream: None },
         ],
         flags: &[],
         default_output: Some(Stream::Stdout),
@@ -1085,8 +1080,9 @@ declare_commands! {
             "#} },
             Example { name: "expand stdin", fence_meta: None, code: indoc! {r#"
                 # no path: the template arrives on stdin through a pipe
-                WITH_IO [stdout=pipe:tpl] ECHO "Hello \{{ env:NAME }}!"
-                WITH_IO [stdin=pipe:tpl] EXPAND NAME=Alice
+                LET $tpl: PIPE
+                WITH_IO [stdout=$tpl] ECHO "Hello \{{ env:NAME }}!"
+                WITH_IO [stdin=$tpl] EXPAND NAME=Alice
                 ASSERT_CONTAINS stdout "Hello Alice!"
             "#} },
             Example { name: "override does not leak", fence_meta: None, code: indoc! {r#"
@@ -1128,13 +1124,13 @@ declare_commands! {
             evaluate in memory and never touch disk. Read files explicitly
             first (`LET $text: STRING = READ "out.txt"`, then
             `ASSERT_EQ $text ...`).
-            Bare `stdout` / `stderr` observe stream buffers; `pipe:NAME`
-            observes a pipe buffer. `--hash` compares the SHA-256 of a
-            string, pipe, or captured-stdout actual instead of the raw
-            bytes (`stderr` is unsupported).
+            Bare `stdout` / `stderr` observe stream buffers; a `$var`
+            holding a `PIPE` observes its backend bytes. `--hash` compares
+            the SHA-256 of a string, pipe, or captured-stdout actual
+            instead of the raw bytes (`stderr` is unsupported).
         "#},
         args: &[
-            ArgSpec { name: "actual", arg_type: ArgType::Any, description: "Value, stdout, stderr, or pipe:NAME", io: IoDirection::Read, index: 0, required: true, fallback_stream: None },
+            ArgSpec { name: "actual", arg_type: ArgType::Any, description: "Value, stdout, stderr, or a $var holding a PIPE", io: IoDirection::Read, index: 0, required: true, fallback_stream: None },
             ArgSpec { name: "expected", arg_type: ArgType::Rest(&ArgType::Any), description: "Expected (required unless --hash)", io: IoDirection::Read, index: 1, required: false, fallback_stream: None },
         ],
         flags: &[ FlagSpec { name: "hash", long: "--hash", value_type: FlagValueType::String, required: false, description: "SHA-256" } ],
@@ -1157,7 +1153,7 @@ declare_commands! {
         lower: |flags, args| {
             let hash = flags.iter().find(|(k, _)| k == "hash").map(|(_, v)| v.as_str().to_string());
             let mut it = args.into_iter();
-            let actual = lower_assert_target(it.next().ok_or_else(|| ParseError::validation("ASSERT_EQ", "ASSERT_EQ requires a value".to_string(), &SpanContext::line_only(0)))?, "ASSERT_EQ")?;
+            let actual = lower_assert_target(it.next().ok_or_else(|| ParseError::validation("ASSERT_EQ", "ASSERT_EQ requires a value".to_string(), &SpanContext::line_only(0)))?)?;
             let remaining: Vec<Arg> = it
                 .map(lower_assert_operand)
                 .collect::<Vec<Arg>>();
@@ -1189,11 +1185,11 @@ declare_commands! {
             Like `ASSERT_EQ`, both sides are values read without implicit
             I/O; read files explicitly first
             (`LET $text: STRING = READ "cfg.txt"`).
-            Bare `stdout` / `stderr` observe stream buffers; `pipe:NAME`
-            observes a pipe buffer.
+            Bare `stdout` / `stderr` observe stream buffers; a `$var`
+            holding a `PIPE` observes its backend bytes.
         "#},
         args: &[
-            ArgSpec { name: "haystack", arg_type: ArgType::Any, description: "Value, stdout, stderr, or pipe:NAME", io: IoDirection::Read, index: 0, required: true, fallback_stream: None },
+            ArgSpec { name: "haystack", arg_type: ArgType::Any, description: "Value, stdout, stderr, or a $var holding a PIPE", io: IoDirection::Read, index: 0, required: true, fallback_stream: None },
             ArgSpec { name: "needle", arg_type: ArgType::Rest(&ArgType::Any), description: "Substring, element, or key", io: IoDirection::Read, index: 1, required: true, fallback_stream: None },
         ],
         flags: &[],
@@ -1205,7 +1201,7 @@ declare_commands! {
         lower: |flags, args| {
             let _ = flags;
             let mut it = args.into_iter();
-            let haystack = lower_assert_target(it.next().ok_or_else(|| ParseError::validation("ASSERT_CONTAINS", "ASSERT_CONTAINS requires a value".to_string(), &SpanContext::line_only(0)))?, "ASSERT_CONTAINS")?;
+            let haystack = lower_assert_target(it.next().ok_or_else(|| ParseError::validation("ASSERT_CONTAINS", "ASSERT_CONTAINS requires a value".to_string(), &SpanContext::line_only(0)))?)?;
             let remaining: Vec<Arg> = it
                 .map(lower_assert_operand)
                 .collect::<Vec<Arg>>();
@@ -1301,6 +1297,54 @@ declare_commands! {
             Ok(StepKind::Sleep { duration: raw })
         },
     ],
+
+    ListAppend => [
+        name: "LIST_APPEND",
+        variant: ListAppend { list: String, item: Arg },
+        syntax: "LIST_APPEND $list <item>",
+        summary: "Append an item to a LIST variable in place.",
+        description: indoc! {r#"
+            Appends the item to the LIST variable in place.
+
+            When the binding holds the only reference the push runs in
+            amortized constant time. Aliased buffers detach first, so
+            other holders keep their contents.
+        "#},
+        args: &[
+            ArgSpec { name: "list", arg_type: ArgType::List, description: "Target LIST variable (`$name`)", io: IoDirection::Write, index: 0, required: true, fallback_stream: None },
+            ArgSpec { name: "item", arg_type: ArgType::Any, description: "Item to append (any value)", io: IoDirection::Write, index: 1, required: true, fallback_stream: None },
+        ],
+        flags: &[],
+        default_output: None,
+        examples: &[ Example { name: "list append", fence_meta: None, code: indoc! {r#"
+            LET $items: LIST = []
+            LIST_APPEND $items "first"
+            LIST_APPEND $items "second"
+            LET $want: LIST = ["first", "second"]
+            ASSERT_EQ $items $want
+        "#} } ],
+        lower: |_flags, args| {
+            let mut it = args.into_iter();
+            let raw_list = it
+                .next()
+                .ok_or_else(|| ParseError::validation("LIST_APPEND", "LIST_APPEND requires a LIST variable (e.g. LIST_APPEND $items $x)".to_string(), &SpanContext::line_only(0)))?;
+            let list = match raw_list {
+                Arg::Expr(Expr::Var(name)) => name,
+                Arg::String(s, _) => s.trim_start_matches('$').to_string(),
+                other => return Err(ParseError::validation("LIST_APPEND", format!("LIST_APPEND requires a $variable, found {:?}", other), &SpanContext::line_only(0))),
+            };
+            if list.is_empty() {
+                return Err(ParseError::validation("LIST_APPEND", "LIST_APPEND requires a LIST variable (e.g. LIST_APPEND $items $x)".to_string(), &SpanContext::line_only(0)))
+            }
+            let item = it
+                .next()
+                .ok_or_else(|| ParseError::validation("LIST_APPEND", "LIST_APPEND requires an item to append (e.g. LIST_APPEND $items $x)".to_string(), &SpanContext::line_only(0)))?;
+            if it.next().is_some() {
+                return Err(ParseError::validation("LIST_APPEND", "LIST_APPEND takes exactly two arguments: LIST_APPEND $list <item>".to_string(), &SpanContext::line_only(0)))
+            }
+            Ok(StepKind::ListAppend { list, item })
+        },
+    ],
 }
 
 // ── Structural metadata ──────────────────────────────────────────────────
@@ -1314,16 +1358,16 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
     vec![
         CommandMeta {
             name: "WITH_IO",
-            syntax: "WITH_IO [<stream>[=pipe:<name>|=$var], ...] <command> | WITH_IO [bindings] { <commands> }",
+            syntax: "WITH_IO [<stream>[=$var], ...] <command> | WITH_IO [bindings] { <commands> }",
             summary: "Reroute standard streams.",
             description: indoc! {r#"
                 Reroutes the standard streams of the next command or, in block form,
                 of every enclosed command.
 
-                Bindings map streams (`stdin`, `stdout`, `stderr`) to named script
-                pipes (`stdout=pipe:name`, `stderr=pipe:name`) or to a PIPE-typed
-                variable (`stdin=$p`, resolved against the live pipe registry when
-                the step runs). Both stdout and stderr pipes capture output the same way.
+                Bindings map streams (`stdin`, `stdout`, `stderr`) to a PIPE-typed
+                variable (`stdout=$p`, `stdin=$p`), resolved from the variable
+                when the step runs. Both stdout and stderr pipes capture output
+                the same way. Declare the handle first with `LET $p: PIPE`.
 
                 Pipes hold bytes in memory and spill to a temp file above 8 MiB, so a
                 producer can finish before the consumer starts.
@@ -1336,10 +1380,11 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 bodies are always script pipes, even when the surrounding task would
                 otherwise promote.
 
-                A second producer or consumer on a live name is an explicit error. A name
-                bound as output can later feed another command's `stdin`, connecting
-                commands without touching the terminal. Binding `stdout` and `stderr` to
-                the same live pipe name fails deterministically. Merge streams in shell
+                A second producer or consumer on a live handle is an explicit
+                error. A handle bound as output can later feed another
+                command's `stdin`, connecting commands without touching the
+                terminal. Binding `stdout` and `stderr` to the same live
+                handle fails deterministically. Merge streams in shell
                 via `2>&1` instead.
 
                 Nested blocks stack defaults; inline bindings override inherited ones for
@@ -1353,23 +1398,22 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     name: "with_io block",
                     fence_meta: None,
                     code: indoc! {r#"
-                WITH_IO [stdout=pipe:log] {
+                LET $log: PIPE
+                WITH_IO [stdout=$log] {
                   ECHO first
                   ECHO second
                 }
-                WITH_IO [stdin=pipe:log] WRITE captured.txt
+                WITH_IO [stdin=$log] WRITE captured.txt
             "#},
                 },
                 Example {
                     name: "variable pipe binding",
                     fence_meta: None,
                     code: indoc! {r#"
-                # Declare the pipe first with the explicit handle operator
-                # (like `env:KEY`): `pipe:log` names a pipe without touching
-                # a stream. A plain string here would be a TypeMismatch.
-                # `$p` (not `pipe:$p`) is the variable form; literals stay
-                # `pipe:name`.
-                LET $p: PIPE = pipe:log
+                # Declare the pipe first: `LET $p: PIPE` mints a fresh
+                # backend without touching a stream. A plain string here
+                # would be a TypeMismatch.
+                LET $p: PIPE
                 WITH_IO [stdout=$p] ECHO hello
                 WITH_IO [stdin=$p] READ_LINE $line
                 ASSERT_EQ $line "hello"
@@ -1509,7 +1553,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
         },
         CommandMeta {
             name: "LET",
-            syntax: "LET $var: TYPE = <expr> | LET $var: TYPE = ASYNC { <commands> } | LET $var: TYPE = <command> | LET $var: TYPE = AWAIT $task",
+            syntax: "LET $var: TYPE = <expr> | LET $p: PIPE | LET $var: TYPE = ASYNC { <commands> } | LET $var: TYPE = <command> | LET $var: TYPE = AWAIT $task | LET $var: TYPE = { <commands> }",
             summary: "Bind script-local variables.",
             description: indoc! {r#"
                 Declares a script-local variable with an explicit type (STRING, INT,
@@ -1533,10 +1577,14 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 arithmetic (`+ - * /` with `*`/`/` binding tighter, unary `-`,
                 parentheses), comparisons (`< <= > >=` binding tighter than
                 `== !=`), logical `&&` (tighter) and `||` with short-circuit,
-                `!` negation, `env:KEY` reads, `pipe:NAME` handles,
-                `INSPECT($var)` snapshots, `GLOB("*.md")`, `INT(x)` /
-                `FLOAT(x)` conversions — never a `{{ ... }}` template;
-                interpolation happens in string values, not here.
+                `!` negation, `env:KEY` reads, `INSPECT($var)` snapshots,
+                `GLOB("*.md")`, `INT(x)` / `FLOAT(x)` conversions — never a
+                `{{ ... }}` template; interpolation happens in string values,
+                not here.
+                The one exception is pipes: `LET $p: PIPE` with no `=`
+                and no initializer mints a fresh anonymous backend,
+                lazily materialized at first binding, so two declarations
+                never share a channel.
 
                 Numbers are numeric literals: `42` binds `INT`, `3.14` binds
                 `FLOAT`. `Int x Int` stays `INT` (checked, integer division,
@@ -1580,7 +1628,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 exact stdout bytes are captured into the variable as a string (no newline
                 stripping; commands with no stdout capture as `""`; non-UTF8 stdout is
                 an error). Combining capture with an explicit
-                `WITH_IO [stdout=pipe:...]` is a parse error.
+                `WITH_IO [stdout=$var]` is a parse error.
 
                 Coming from Bash, the capture line looks familiar but behaves
                 strictly:
@@ -1592,8 +1640,25 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 | Math on output | Implicit: `$((var + 1))` | Explicit: `INT($out) + 1` |
                 | Failing command | Continues with empty output unless `set -e` | Step fails immediately, binds nothing |
 
-                `LET $out: STRING = AWAIT $var` captures a background task's stdout the
-                same way; bare `AWAIT $var` forwards it to the parent stdout instead.
+                `LET $out: TYPE = AWAIT $var` binds the background task's
+                explicit `RETURN` value instead (tasks stream their stdout
+                live, so there is no output left to capture); a task that
+                succeeded without `RETURN` yields `INT` 0, like a process
+                exit status.
+
+                An inline block (`LET $var: TYPE = { <commands> }`) runs its
+                steps in a fresh scope and binds the nearest `RETURN` value,
+                like a zero-arg function body: fallthrough without `RETURN`
+                binds `""`, and `BREAK`/`CONTINUE` escaping the block are
+                errors. The block reads outer variables but its own LETs
+                never leak out. A `{k: v}` shape still parses as a map
+                literal; anything else in braces is a block.
+
+                The split is deliberate: synchronous commands capture
+                stdout because they run inline to completion on the same
+                thread; background tasks never capture stdout because
+                concurrent output has no well-defined value. Task results
+                travel only through `RETURN` (or `INT` 0 for void tasks).
 
                 `LET $e: STRING = env:FOO` reads the script environment into a plain
                 string.
@@ -1660,6 +1725,23 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             "#},
                 },
                 Example {
+                    name: "inline block",
+                    fence_meta: None,
+                    code: indoc! {r#"
+                LET $who: STRING = "ada"
+                LET $res: STRING = {
+                    LET $loud: STRING = "{{ $who }}!"
+                    RETURN $loud
+                }
+                ASSERT_EQ $res "ada!"
+                # Any declared type works: the block value checks like any RHS.
+                LET $n: INT = {
+                    RETURN 40 + 2
+                }
+                ASSERT_EQ $n 42
+            "#},
+                },
+                Example {
                     name: "arithmetic over captured output",
                     fence_meta: None,
                     code: indoc! {r#"
@@ -1715,7 +1797,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 # INSPECT($var) snapshots a variable into a MAP: declared
                 # type plus live details (pipe backend stats here), so
                 # scripts can branch on engine state.
-                LET $p: PIPE = pipe:log
+                LET $p: PIPE
                 WITH_IO [stdout=$p] ECHO hello
                 LET $info: MAP = INSPECT($p)
                 IF $info.is_os_pipe {
@@ -1792,7 +1874,9 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 subshell isolation.
 
                 Mutations (ENV, WORKDIR) stay within the block. With `LET`, stores a
-                task handle for `AWAIT`.
+                task handle for `AWAIT`. Task output streams live to the parent
+                stdout; a task publishes a value with an explicit `RETURN`,
+                which `LET $out: TYPE = AWAIT $task` binds.
             "#},
             args: &[],
             flags: &[],
@@ -1829,9 +1913,11 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             description: indoc! {r#"
                 Blocks until the named task completes. Propagates errors if the task failed.
 
-                Bare `AWAIT $var` forwards the task's stdout to the parent stdout;
-                `LET $out: STRING = AWAIT $var` captures it into `$out` instead (same
-                UTF-8 and spilling rules as `LET $var: STRING = <command>`).
+                Task output streams live during the run; joining binds nothing by
+                itself. `LET $out: TYPE = AWAIT $var` binds the task's explicit
+                `RETURN` value instead, or `INT` 0 when the task succeeded
+                without one (add `RETURN <expr>` to the task body to yield
+                a value).
             "#},
             args: &[],
             flags: &[],
@@ -1849,9 +1935,12 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     name: "await capture",
                     fence_meta: None,
                     code: indoc! {r#"
-                LET $task: HANDLE = ASYNC ECHO "done"
+                LET $task: HANDLE = ASYNC {
+                    ECHO "logged"
+                    RETURN "returned"
+                }
                 LET $out: STRING = AWAIT $task
-                ASSERT_EQ $out "done\n"
+                ASSERT_EQ $out "returned"
             "#},
                 },
             ],
@@ -1969,12 +2058,12 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     code: indoc! {r#"
                 # A pipe handle travels into a function as a typed argument
                 # and is usable as a binding target in both directions.
-                # `pipe:ch` constructs the handle; `$p` passes it on.
+                # `LET $p: PIPE` mints the handle; `$p` passes it on.
                 FUNC DRAIN($q: PIPE) {
                   WITH_IO [stdin=$q] READ_LINE $line
                   RETURN $line
                 }
-                LET $p: PIPE = pipe:ch
+                LET $p: PIPE
                 WITH_IO [stdout=$p] ECHO "payload"
                 LET $got: STRING = DRAIN($p)
                 ASSERT_EQ $got "payload"
@@ -1985,13 +2074,16 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
         CommandMeta {
             name: "RETURN",
             syntax: "RETURN [<expr>]",
-            summary: "Return a value from a function.",
+            summary: "Return a value from a function, task, or inline block.",
             description: indoc! {r#"
-                Ends the nearest enclosing function call with a value.
-                Bare `RETURN` with no expression yields `""`.
+                Ends the nearest enclosing boundary with a value: a function
+                call, an `ASYNC` task (bound by `LET $o = AWAIT $t`), or an
+                inline `LET` block. Bare `RETURN` with no expression yields
+                `""`.
 
-                Falling off the end without RETURN yields "". RETURN outside a function
-                (including at top level or across an ASYNC boundary) is an error.
+                Falling off the end without RETURN yields "". RETURN with no
+                enclosing boundary (including at top level) is an error; use
+                EXIT or ECHO there.
             "#},
             args: &[],
             flags: &[],
@@ -2274,6 +2366,9 @@ impl fmt::Display for StepKind {
             }
             StepKind::Exit(code) => write!(f, "EXIT {}", fmt_raw_arg(code)),
             StepKind::Sleep { duration } => write!(f, "SLEEP {}", fmt_raw_arg(duration)),
+            StepKind::ListAppend { list, item } => {
+                write!(f, "LIST_APPEND ${} {}", list, fmt_raw_arg(item))
+            }
             StepKind::For {
                 key_var,
                 key_type,
@@ -2330,7 +2425,12 @@ impl fmt::Display for StepKind {
                 decl_type,
                 expr,
             } => {
-                write!(f, "LET ${}: {} = {}", var, decl_type, expr)
+                // Bare pipe declarations round-trip without an initializer.
+                if matches!(expr, Expr::FreshPipe) {
+                    write!(f, "LET ${}: {}", var, decl_type)
+                } else {
+                    write!(f, "LET ${}: {} = {}", var, decl_type, expr)
+                }
             }
             StepKind::Set { var, expr } => write!(f, "${} = {}", var, expr),
             StepKind::AssignCapture {
@@ -2426,7 +2526,25 @@ mod tests {
         assert!(err.contains("invalid syntax for command WITH_IO"), "{err}");
         assert!(!err.contains("unknown command"), "{err}");
         assert!(err.contains("stdout=discard"), "{err}");
-        assert!(err.contains("pipe:<name>"), "{err}");
+        assert!(err.contains("[stdout=$p]"), "{err}");
+    }
+
+    #[test]
+    fn connect_is_unknown_command() {
+        // `CONNECT` left core for the NET plugin: the builtin name no
+        // longer resolves. Use `NET_CONNECT` with explicit pipes.
+        let err = parse_err("CONNECT 127.0.0.1:8080\n");
+        assert!(err.contains("unknown command"), "{err}");
+        assert!(err.contains("CONNECT"), "{err}");
+    }
+
+    #[test]
+    fn listen_is_unknown_command() {
+        // `LISTEN` left core for the NET plugin: the builtin name no
+        // longer resolves. Use `NET_LISTEN` for a listener handle.
+        let err = parse_err("LISTEN 127.0.0.1:8080\n");
+        assert!(err.contains("unknown command"), "{err}");
+        assert!(err.contains("LISTEN"), "{err}");
     }
 
     #[test]
@@ -2516,6 +2634,53 @@ mod tests {
     fn leaf_arity_errors_carry_invalid_syntax_prefix() {
         let err = parse_err("SLEEP 1s 2s\n");
         assert!(err.contains("invalid syntax for command SLEEP"), "{err}");
+        assert!(!err.contains("unknown command"), "{err}");
+    }
+
+    #[test]
+    fn list_append_lowers_variable_and_item() {
+        let steps = parse_script("LIST_APPEND $items \"hi\"\n", lower_command).expect("parses");
+        let StepKind::ListAppend { list, item } = &steps[0].kind else {
+            panic!("expected ListAppend, got {:?}", steps[0].kind);
+        };
+        assert_eq!(list, "items");
+        assert!(matches!(item, Arg::String(s, _) if s == "hi"));
+        assert_eq!(steps[0].kind.to_string(), "LIST_APPEND $items \"hi\"");
+    }
+
+    #[test]
+    fn list_append_rejects_wrong_arity() {
+        for script in [
+            "LIST_APPEND\n",
+            "LIST_APPEND $items\n",
+            "LIST_APPEND $items \"a\" \"b\"\n",
+        ] {
+            let err = parse_err(script);
+            assert!(
+                err.contains("invalid syntax for command LIST_APPEND"),
+                "{script}: {err}"
+            );
+            assert!(!err.contains("unknown command"), "{script}: {err}");
+        }
+    }
+
+    #[test]
+    fn list_append_rejects_non_variable_target() {
+        let err = parse_err("LIST_APPEND items \"a\"\n");
+        assert!(
+            err.contains("invalid syntax for command LIST_APPEND"),
+            "{err}"
+        );
+        assert!(!err.contains("unknown command"), "{err}");
+    }
+
+    #[test]
+    fn read_line_rejects_bare_word_target() {
+        // The `$var` shape lives in the lower function now that the
+        // central vocabulary holds value types only: a missing sigil
+        // fails lowering with the command-specific error.
+        let err = parse_err("READ_LINE reply\n");
+        assert!(err.contains("READ_LINE requires a $variable"), "{err}");
         assert!(!err.contains("unknown command"), "{err}");
     }
 
@@ -2623,6 +2788,56 @@ mod tests {
     }
 
     #[test]
+    fn multiline_call_args_span_lines() {
+        // Regression: long invocations (e.g. 4-arg SSH_SERVE with an
+        // options map) may put one argument per line. Bracket interiors
+        // tolerate linebreaks while statement structure stays single-line.
+        let steps = parse_script(
+            "FUNC SERVE($b: STRING, $u: STRING, $p: STRING, $o: MAP) {\n  RETURN $b\n}\nLET $m: MAP = SERVE(\n  \"127.0.0.1:2241\",\n  \"test\",\n  \"test123\", {\n    key_path: \"test_key\"\n  }\n)\n",
+            lower_command,
+        )
+        .expect("multiline call parses");
+        let StepKind::Assign { expr, .. } = &steps[1].kind else {
+            panic!("expected Assign, got {:?}", steps[1].kind);
+        };
+        let Expr::Call { name, args } = expr else {
+            panic!("expected Call expr, got {expr:?}");
+        };
+        assert_eq!(name, "SCRIPT::SERVE");
+        assert_eq!(args.len(), 4);
+        assert!(matches!(&args[3], Expr::Map(entries) if entries.len() == 1));
+        // Display stays single-line; reparsing the same text is identical.
+        let rendered = steps[1].to_string();
+        assert!(!rendered.contains('\n'), "{rendered}");
+        let script = "FUNC SERVE($b: STRING, $u: STRING, $p: STRING, $o: MAP) {\n  RETURN $b\n}\nLET $m: MAP = SERVE(\n  \"127.0.0.1:2241\",\n  \"test\",\n  \"test123\", {\n    key_path: \"test_key\"\n  }\n)\n";
+        let again = parse_script(script, lower_command).expect("reparse ok");
+        assert_eq!(again, steps);
+    }
+
+    #[test]
+    fn multiline_bare_call_and_list_span_lines() {
+        let steps = parse_script(
+            "FUNC GREET($a: STRING) {\n  RETURN $a\n}\nGREET(\n  \"ada\"\n)\n",
+            lower_command,
+        )
+        .expect("multiline bare call parses");
+        let StepKind::Call { name, args } = &steps[1].kind else {
+            panic!("expected Call, got {:?}", steps[1].kind);
+        };
+        assert_eq!(name, "SCRIPT::GREET");
+        assert_eq!(args.len(), 1);
+        let steps = parse_script("LET $l: LIST = [\n  \"a\",\n  \"b\"\n]\n", lower_command)
+            .expect("multiline list parses");
+        let StepKind::Assign { expr, .. } = &steps[0].kind else {
+            panic!("expected Assign, got {:?}", steps[0].kind);
+        };
+        assert!(
+            matches!(expr, Expr::List(items) if items.len() == 2),
+            "{expr:?}"
+        );
+    }
+
+    #[test]
     fn parse_duration_units() {
         use std::time::Duration;
         assert_eq!(parse_duration("500ms").unwrap(), Duration::from_millis(500));
@@ -2707,7 +2922,8 @@ mod tests {
                 | StepKind::CopyGit { .. }
                 | StepKind::HashSha256 { .. }
                 | StepKind::Exit(_)
-                | StepKind::Sleep { .. } => None,
+                | StepKind::Sleep { .. }
+                | StepKind::ListAppend { .. } => None,
             }
         }
 

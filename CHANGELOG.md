@@ -6,10 +6,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ## [Unreleased]
 
+### Added
+
+- `NET` host plugin (new `oxdock-net-plugin` crate, registered by the CLI in every build): scripts `IMPORT [NET]` and pump TCP through explicit pipes. `NET_LISTEN(endpoint)` binds a logical endpoint and returns a MAP with `listener` (`NET_LISTENER`), `addr`, and `virtual` echo; `NET_ACCEPT` accepts one connection into pipes under `ASYNC`; `NET_CONNECT(endpoint, ...)` dials one connection through pipes under `ASYNC`; `NET_CLOSE` shuts down. Pumps are always full duplex over caller provided pipes.
+- `SSH` host plugin (new `oxdock-ssh-plugin` crate, CLI `--features ssh`): scripts `IMPORT [SSH]` for an ephemeral user space server and client. `SSH_SERVE(endpoint, {username, password, key_path?})` returns a MAP with `server` (`SSH_SERVER`), `addr`, credentials, and `virtual` echo; `SSH_DEQUEUE($server)` under `ASYNC` returns `{session (SSH_SESSION), command, username, addr}`; `SSH_PUMP_CHANNEL($session, $in, $out)`, `SSH_CONNECT` / `SSH_PUMP`, and `SSH_CLOSE` bridge bytes through pipes; `SSH_PTY_RUN($session, argv, rows, cols, in, out)` runs under `ASYNC` with per session terminal sizes and the script environment layered over the host environment (relay per session identity with `ENV SSH_USER/SSH_CLIENT/SSH_SERVER/SSH_COMMAND` from the dequeue map; `scripts/proto.echo-listen.oxdock` demonstrates the semaphore reservation pattern). `key_path` loads or creates a host key with `0600` (a leading `/` anchors to the workspace root, blank keeps the ephemeral key). Memory services bail since SSH needs a TCP socket. Hosts gain `StepCtx::env_snapshot` for the same layering.
+- Virtual service endpoints for `NET` / `SSH`: scripts declare logical endpoints (`NET_LISTEN("2251")`, `SSH_SERVE("demo-proxy")`) while the host runner maps them to physical interfaces. New CLI flags `--listen <addr>` (expose a logical port, the only place wildcards may appear), `-p <outer:inner>` (map an outer port to an inner port or name, outer `0` takes an ephemeral port), and `--offline` (open no sockets at all; every dial bails before DNS). Unmapped bare ports bind loopback, unmapped names open in-process memory rendezvous with zero sockets (`NET_CONNECT` joins them from either side, client-before-server included), and pre-bound sockets are claimed (shared backlog) rather than taken so close-and-rebind loops keep working. Memory session queues cap at 64 pending per service. Both result MAPs gain a `virtual` echo key; `addr` reports the physical bind, or the virtual echo when socketless.
+- New `oxdock-pipe` crate (#159): anonymous pipe backends (spillable script buffers, take-once OS kernel pairs, lazily-materializing owned handle slots), relocated out of `oxdock-core` so `PIPE` values can own handles without a dependency cycle. `SharedInput` / `SharedOutput` and the take-once OS halves move there too, re-exported from `oxdock-process` with no API change.
+- New `LIST_APPEND $list <item>` command: appends to a `LIST` binding in place through the copy-on-write gate (sole owners mutate with no copy, shared buffers detach so aliases keep their contents). Multi-word command names now group by domain prefix (`CATEGORY_ACTION`); new categories register in `COMMAND_CATEGORIES`.
+- `SEMAPHORE` admission control: `SEMAPHORE_NEW(max)` builds a counting semaphore, `SEMAPHORE_TRY_ACQUIRE($sem)` answers `{held, permit?}` without ever waiting (misses carry no `permit` key, so branch on `$m.held`), and `SEMAPHORE_AVAILABLE($sem)` reads free permits for observability only (audit lines, `active = max - free`). `PERMIT` words release exactly once on last drop, so permits bound in an iteration scope (or held by an `ASYNC` worker) return through ordinary frame teardown on every exit path with no DSL cleanup code. No blocking acquire exists, so the primitive adds no new wait surface.
+- `STD::IS_TERMINAL(stream)`: reports whether `stdin`, `stdout`, or `stderr` is a terminal for the step as currently bound. Anything diverted reports false without touching host handles: `WITH_IO` pipe bindings, `LET` capture sinks, staged runner sinks, and materialized stdin streams. Only a directly inherited fd falls back to the process check. The name matches exactly with no case folding; anything else bails.
+- Inline `LET` blocks: `LET $x: TYPE = { ... }` evaluates a block as an expression. `RETURN` ends the nearest function, `ASYNC` task, or inline block (bare `RETURN` yields `""`; falling off the end yields `""`); blocks nest.
+- Multiline bracket interiors in scripts: call arguments, list literals, map literals, and parenthesized expressions may span lines with one entry per line, with `//`, `/* */`, and trailing `#` comments between entries. Statement structure and operators stay single line.
+
 ### Changed
 
+- CLI argument parsing moves to `lexopt`: `--flag=value` equals forms, attached short values (`-p2222:2251`), and the `--` positional separator now parse; every flag, error message, and the usage text keep their existing shapes.
+- [breaking] Pipes are anonymous handles (#159): `LET $p: PIPE` mints a fresh backend owned through the variable (no initializers, no shared names), `WITH_IO [stdin=$p]` / `[stdout=$p]` bind it, `LET $q: PIPE = $p` shares it, and a `$var` holding a `PIPE` in assertion position peeks its backend bytes. The backend materializes lazily on first binding: script pipes by default, zero-copy OS kernel pairs for pure single-`RUN` background pipelines. Mismatched later bindings adapt instead of failing. A second take on one OS end is a step-numbered error. `INSPECT($p)` reports `unbound` before first binding. Host functions gain pipe byte access on the step context (`pipe_reader` / `pipe_writer` / `new_pipe` / `close_pipe`) plus `PipeStream` slice-based `Read`/`Write` adapters.
+- [breaking] Host Rust API only, scripts are unaffected (#159): pipe plumbing is handle-keyed instead of name-keyed. `Value::pipe(name)` / `Value::pipe_anonymous` are `Value::pipe_fresh()` / `Value::pipe_handle(handle)`; `as_pipe_name()` is `as_pipe_handle()`; `ExecIo::insert_*_pipe`, `input_pipe`, `stdin_pipe_inner`, and `pipe_backend` are gone and `ensure_pipe_for` is `ensure_handle`, with `resolve_stdin` / `resolve_stdout` / `resolve_stderr`, `peek_pipe_content`, `inspect_pipe`, and `pin_keeper` all taking `&PipeHandle`; `StepCtx::out_pipe_name` is `out_pipe` / `stdin_pipe` backends; `StreamHandle::Inherit`, `AssertTarget::Pipe`, and `PipeTarget::Name` are deleted.
+- [breaking] `ASYNC` / `AWAIT` value semantics: a task publishes a value with an explicit `RETURN`, and `LET $out: TYPE = AWAIT $t` binds that value (or `INT` 0 when the task succeeded without one). Task output streams are live during the run; joining binds nothing by itself and no longer captures stdout. Add `RETURN <expr>` to the task body to yield a value.
 - `FUNC` reference documents the statement-call form (`GREET("bex")` discards the value); the internal `bare_call_statement` grammar rule is renamed to `call_statement` with no syntax change.
 - READMEs compare Rust host embedding against embedding Rust in Python.
+
+### Fixed
+
+- `ASYNC` task failures preserve the full causal chain across the task boundary instead of dropping every `Caused by` layer.
+
+### Dependencies
+
+- Add `bytes` 1 (SSH byte buffers; lock 1.12.1).
+- Add `lexopt` 0.3.2 (CLI argument parsing).
+- Add `portable-pty` 0.9.0 (local PTY runner for `SSH_PTY_RUN`).
+- Add `rand` 0.10 (ephemeral SSH host keys; lock 0.10.2 alongside the pre-existing transitive 0.9.5).
+- Add `russh` 0.63.3 with `aws-lc-rs` (ephemeral user space SSH server and client).
+- Add `tokio` 1 with `rt`, `net`, `sync`, `time`, `io-util` (SSH runtime; lock 1.53.1).
 
 ## [0.16.0-alpha] - 2026-09-17
 

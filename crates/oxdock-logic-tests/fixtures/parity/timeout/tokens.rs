@@ -5,5 +5,6 @@ TIMEOUT 2m {
     ECHO done
 }
 TIMEOUT 30s AWAIT $task
-WITH_IO [stdout=pipe:p] TIMEOUT 5s RUN "echo x"
+LET $p: PIPE
+WITH_IO [stdout=$p] TIMEOUT 5s RUN "echo x"
 SLEEP 100ms

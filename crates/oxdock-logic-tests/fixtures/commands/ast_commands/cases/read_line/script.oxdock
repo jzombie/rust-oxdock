@@ -1,8 +1,9 @@
 # Bounded line reads: each READ_LINE returns at the next newline and leaves
 # the pipe open for subsequent reads (no EOF required).
-WITH_IO [stdout=pipe:lines] ECHO "first"
-WITH_IO [stdout=pipe:lines] ECHO "second"
-WITH_IO [stdin=pipe:lines] READ_LINE $a
-WITH_IO [stdin=pipe:lines] READ_LINE $b
+LET $lines: PIPE
+WITH_IO [stdout=$lines] ECHO "first"
+WITH_IO [stdout=$lines] ECHO "second"
+WITH_IO [stdin=$lines] READ_LINE $a
+WITH_IO [stdin=$lines] READ_LINE $b
 WRITE "a.txt" "{{ $a }}"
 WRITE "b.txt" "{{ $b }}"
