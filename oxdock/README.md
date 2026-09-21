@@ -6,9 +6,9 @@ OxDock is a Dockerfile inspired build DSL for Rust. Embed scripts at compile tim
 
 Supports platform gating, async tasks, and piped workflows for custom pipelines.
 
-[Documentation](https://docs.rs/oxdock/0.16.0-alpha/oxdock/)
+[Documentation](https://docs.rs/oxdock/0.17.0-alpha/oxdock/)
 
-Add it to your Rust build with `cargo add oxdock@0.16.0-alpha`, or install the standalone runner with `cargo install oxdock@0.16.0-alpha`.
+Add it to your Rust build with `cargo add oxdock@0.17.0-alpha`, or install the standalone runner with `cargo install oxdock@0.17.0-alpha`.
 
 Run a script:
 
@@ -96,8 +96,8 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     LET $a: STRING = READ dist/alpha.txt
     LET $b: STRING = READ dist/beta.txt
     LET $p: STRING = READ dist/picked.txt
-    ASSERT_EQ $a "alpha OxDock 0.16.0-alpha"
-    ASSERT_EQ $b "beta OxDock 0.16.0-alpha"
+    ASSERT_EQ $a "alpha OxDock 0.17.0-alpha"
+    ASSERT_EQ $b "beta OxDock 0.17.0-alpha"
     ASSERT_EQ $p "alpha"
 };
 
@@ -109,7 +109,7 @@ let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolve
 let out = root.join("dist/alpha.txt").expect("out path");
 assert_eq!(
     resolver.read_to_string(&out).expect("read out"),
-    "alpha OxDock 0.16.0-alpha"
+    "alpha OxDock 0.17.0-alpha"
 );
 ```
 
@@ -706,7 +706,7 @@ Keeping inheritance selective avoids leaking secrets by default while still allo
 Install the binary from the registry:
 
 ```sh
-cargo install oxdock@0.16.0-alpha
+cargo install oxdock@0.17.0-alpha
 ```
 
 Run a script file:
@@ -1045,7 +1045,7 @@ Or pin the version in `Cargo.toml`:
 
 ```toml
 [dependencies]
-oxdock = { version = "0.16.0-alpha", default-features = false }
+oxdock = { version = "0.17.0-alpha", default-features = false }
 ```
 
 ## Glossary
