@@ -2322,9 +2322,7 @@ pub(crate) fn dispatch_async_block<P: ProcessManager>(
     // Control flow never crosses the thread boundary: a stray BREAK,
     // CONTINUE, or RETURN becomes a step-numbered error here.
     let join = std::thread::spawn(move || {
-        *worker_child
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(std::thread::current().id());
+        *worker_child.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::thread::current().id());
         let mut child_state = forked_state;
         let mut child_process = forked_process;
         let flow = super::steps::execute_steps(
@@ -2891,9 +2889,7 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
     let returns_value = call_task.is_some() || body_returns_value(&body);
     let (entry_tx, entry_rx) = std::sync::mpsc::channel::<Arc<super::state::TaskEntry>>();
     let join = std::thread::spawn(move || {
-        *worker_child
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(std::thread::current().id());
+        *worker_child.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::thread::current().id());
         let mut child_state = forked_state;
         let mut child_process = forked_process;
         let entry = entry_rx
@@ -2971,8 +2967,7 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
     });
 
     // Create the thread handle
-    let handle =
-        super::steps::ThreadJoinHandle::new(join, cancel_token, active_process, worker);
+    let handle = super::steps::ThreadJoinHandle::new(join, cancel_token, active_process, worker);
 
     // Store in named_tasks as a synchronized entry. The handle lives inside
     // the entry so CANCEL can tear it down even under concurrent AWAIT.

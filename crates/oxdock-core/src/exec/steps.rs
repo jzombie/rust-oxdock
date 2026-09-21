@@ -570,10 +570,7 @@ fn teardown_tasks_on_error<P: ProcessManager>(state: &mut ExecState<P>) {
         return;
     }
     let entries: Vec<Arc<TaskEntry>> = {
-        let named = state
-            .named_tasks
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let named = state.named_tasks.lock().unwrap_or_else(|e| e.into_inner());
         named.values().cloned().collect()
     };
     let mut to_kill: Vec<(Arc<TaskEntry>, Box<dyn BackgroundHandle>)> = Vec::new();
