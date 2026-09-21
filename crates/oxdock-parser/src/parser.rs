@@ -1092,13 +1092,18 @@ fn reject_async_in_capture(ctx: &SpanContext, kind: &StepKind) -> ParseResult<()
     Ok(())
 }
 
-/// Reject `WITH_IO [stdout=pipe:...]` anywhere inside a capture body: the
+/// Reject `WITH_IO [stdout=$var]` anywhere inside a capture body: the
 /// capture sink owns stdout.
 fn reject_pipe_stdout_in_capture(ctx: &SpanContext, kind: &StepKind) -> ParseResult<()> {
     match kind {
         StepKind::WithIo { bindings, cmd } => {
             if has_stdout_pipe(bindings) {
-                return Err(ParseError::structural("let", "LET capture cannot use WITH_IO [stdout=pipe:...]; the capture sink owns stdout".to_string(), ctx));
+                return Err(ParseError::structural(
+                    "let",
+                    "LET capture cannot use WITH_IO [stdout=$var]; the capture sink owns stdout"
+                        .to_string(),
+                    ctx,
+                ));
             }
             reject_pipe_stdout_in_capture(ctx, cmd)
         }
@@ -1393,9 +1398,11 @@ fn parse_run_exec_arg(ctx: &SpanContext, lctx: &LowerCtx, pair: Pair<Rule>) -> P
             Ok(Expr::Var(name))
         }
         Rule::env_read => parse_env_read(ctx, inner).map(Expr::Env),
-        Rule::pipe_read => parse_pipe_read(ctx, inner).map(|name| Expr::Literal(Value::pipe(name))),
         Rule::list_literal => parse_list_literal(ctx, lctx, inner),
         Rule::map_literal => parse_map_literal(ctx, lctx, inner),
+        Rule::block => Ok(Expr::Block(parse_block_elements_with_lower(
+            ctx, inner, lctx,
+        )?)),
         Rule::string_literal | Rule::quoted_string => {
             let s = parse_quoted_string(inner)?;
             Ok(Expr::Literal(Value::string(s)))
@@ -1548,11 +1555,18 @@ fn lower_env_command(ctx: &SpanContext, tokens: Vec<InsToken>) -> ParseResult<St
     }
     match tokens.as_slice() {
         [InsToken::Assign(key, value)] => {
-            // Same KeyValue check the central validator applies on the
+            // Same KEY=value check the ENV lower applies on the
             // `lower_command` path, over the joined assignment form.
-            ArgType::KeyValue
-                .check_arg(&Arg::String(format!("{key}={}", value.render()), false))
-                .map_err(|e| ParseError::validation("ENV", e.to_string(), ctx))?;
+            if crate::command::split_assignment(&format!("{key}={}", value.render()))
+                .map_err(|e| ParseError::validation("ENV", e.to_string(), ctx))?
+                .is_none()
+            {
+                return Err(ParseError::validation(
+                    "ENV",
+                    "ENV requires KEY=value format".to_string(),
+                    ctx,
+                ));
+            }
             Ok(StepKind::Env {
                 key: key.clone(),
                 value: value.clone(),
@@ -1984,20 +1998,33 @@ fn parse_let_statement_from_pair(
             _ => {}
         }
     }
-    Ok(StepKind::Assign {
-        var: var.ok_or_else(|| {
-            ParseError::validation("LET", "LET requires a variable".to_string(), &span)
-        })?,
-        decl_type: decl_type.ok_or_else(|| {
-            ParseError::validation(
+    let var = var.ok_or_else(|| {
+        ParseError::validation("LET", "LET requires a variable".to_string(), &span)
+    })?;
+    let decl_type = decl_type.ok_or_else(|| {
+        ParseError::validation(
+            "LET",
+            "LET requires explicit type: LET $var: TYPE = <expr>".to_string(),
+            &span,
+        )
+    })?;
+    // Bare `LET $p: PIPE` (no initializer) mints a fresh anonymous pipe.
+    // Every other type still requires `= <expr>`.
+    let expr = match expr {
+        Some(e) => e,
+        None if decl_type == "PIPE" => Expr::FreshPipe,
+        None => {
+            return Err(ParseError::validation(
                 "LET",
-                "LET requires explicit type: LET $var: TYPE = <expr>".to_string(),
+                "LET requires an expression: LET $var: TYPE = <expr> (only LET $p: PIPE omits the initializer)".to_string(),
                 &span,
-            )
-        })?,
-        expr: expr.ok_or_else(|| {
-            ParseError::validation("LET", "LET requires an expression".to_string(), &span)
-        })?,
+            ));
+        }
+    };
+    Ok(StepKind::Assign {
+        var,
+        decl_type,
+        expr,
     })
 }
 
@@ -2084,7 +2111,7 @@ fn parse_let_async_statement_from_pair(
                 //   the variable (same semantics as LET $x: STRING = <command>).
                 let kind = parse_structural_command_with_lower(ctx, inner, lctx)?;
                 let StepKind::WithIo { bindings, cmd } = kind else {
-                    return Err(ParseError::validation("LET", "LET $var: TYPE = WITH_IO requires an ASYNC command (e.g. LET $t = WITH_IO [stdin=pipe:p] ASYNC WRITE \"f\")".to_string(), &span));
+                    return Err(ParseError::validation("LET", "LET $var: TYPE = WITH_IO requires an ASYNC command (e.g. LET $t = WITH_IO [stdin=$p] ASYNC WRITE \"f\")".to_string(), &span));
                 };
                 match *cmd {
                     StepKind::AsyncBlock { body: async_body } => {
@@ -2110,7 +2137,7 @@ fn parse_let_async_statement_from_pair(
                     }
                     sync_cmd => {
                         if has_stdout_pipe(&bindings) {
-                            return Err(ParseError::structural("let", "LET capture cannot use WITH_IO [stdout=pipe:...]; the capture sink owns stdout".to_string(), &span));
+                            return Err(ParseError::structural("let", "LET capture cannot use WITH_IO [stdout=$var]; the capture sink owns stdout".to_string(), &span));
                         }
                         reject_async_in_capture(ctx, &sync_cmd)?;
                         let name = var.clone().ok_or_else(|| {
@@ -2918,12 +2945,8 @@ fn parse_io_stream(text: &str) -> IoStream {
 fn parse_pipe_binding(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<PipeTarget> {
     let span = refine_span(ctx, &pair);
     for inner in pair.into_inner() {
-        match inner.as_rule() {
-            Rule::pipe_name => return Ok(PipeTarget::Name(inner.as_str().to_string())),
-            Rule::dollar_ident => {
-                return Ok(PipeTarget::Var(parse_dollar_ident(inner)));
-            }
-            _ => {}
+        if inner.as_rule() == Rule::dollar_ident {
+            return Ok(PipeTarget::Var(parse_dollar_ident(inner)));
         }
     }
     Err(ParseError::structural(
@@ -3659,7 +3682,7 @@ fn make_compare(ctx: &SpanContext, op: CompareOp, left: Expr, right: Expr) -> Pa
 }
 
 /// Convert an operand subtree to flat RPN. Returns `None` for shapes with
-/// no RPN encoding (`Not`/`Logical`/`List`/`Map`/stray boundary): callers
+/// no RPN encoding (`Not`/`Logical`/`List`/`Map`/`FreshPipe`/stray boundary): callers
 /// fall back to AST nodes evaluated recursively.
 fn expr_to_rpn(expr: &Expr) -> Option<Vec<MathOp>> {
     match expr {
@@ -3707,7 +3730,8 @@ fn expr_to_rpn(expr: &Expr) -> Option<Vec<MathOp>> {
             Some(ops)
         }
         Expr::CompiledMath(ops) => Some(ops.clone()),
-        Expr::Not(_) | Expr::Logical { .. } | Expr::List(_) | Expr::Map(_) => None,
+        Expr::FreshPipe => None,
+        Expr::Not(_) | Expr::Logical { .. } | Expr::List(_) | Expr::Map(_) | Expr::Block(_) => None,
         Expr::UnsignedIntBoundary(_) => None,
     }
 }
@@ -3725,9 +3749,11 @@ fn parse_expr_atom(ctx: &SpanContext, lctx: &LowerCtx, pair: Pair<Rule>) -> Pars
             Ok(Expr::Var(name))
         }
         Rule::env_read => parse_env_read(ctx, inner).map(Expr::Env),
-        Rule::pipe_read => parse_pipe_read(ctx, inner).map(|name| Expr::Literal(Value::pipe(name))),
         Rule::list_literal => parse_list_literal(ctx, lctx, inner),
         Rule::map_literal => parse_map_literal(ctx, lctx, inner),
+        Rule::block => Ok(Expr::Block(parse_block_elements_with_lower(
+            ctx, inner, lctx,
+        )?)),
         Rule::string_literal | Rule::quoted_string => {
             let s = parse_quoted_string(inner)?;
             Ok(Expr::Literal(Value::string(s)))
@@ -3799,20 +3825,6 @@ fn parse_env_read(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<String> {
     Err(ParseError::structural(
         "expr",
         "env read requires a key: env:KEY".to_string(),
-        &span,
-    ))
-}
-
-fn parse_pipe_read(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<String> {
-    let span = refine_span(ctx, &pair);
-    for inner in pair.into_inner() {
-        if inner.as_rule() == Rule::pipe_name {
-            return Ok(inner.as_str().trim().to_string());
-        }
-    }
-    Err(ParseError::structural(
-        "expr",
-        "pipe read requires a name: pipe:NAME".to_string(),
         &span,
     ))
 }

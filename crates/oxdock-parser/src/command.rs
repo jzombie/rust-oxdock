@@ -13,21 +13,27 @@ pub struct ArgSpec {
     pub fallback_stream: Option<Stream>,
 }
 
-/// Closed vocabulary for argument value types.
-///
-/// The closed enum keeps the vocabulary compiler-checked and lets
-/// docs-gen link each type cell to its reference section instead of
-/// printing bare words like `duration` with no explanation.
+/// Closed vocabulary for argument value types: every variant names a
+/// type explicitly present in the app, so the reference table never
+/// lists a type that does not exist. Shapes (`$var` targets, `KEY=value`
+/// pairs) are not types: the central validator only checks value types
+/// and arity, while each command's `lower` enforces its own shapes with
+/// command-specific errors.
+/// [`ArgType::Any`] is the single exception: it renders as `<any>`,
+/// visibly a placeholder rather than a type name.
+/// [`ArgType::OneOf`] renders its inline options, likewise self-describing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArgType {
     String,
     Path,
     Int,
     Duration,
-    Var,
-    KeyValue,
+    /// A `$variable` that must hold a LIST at runtime. Non-variable
+    /// expressions fail at lower time; renders linked as `LIST`.
+    List,
     /// Any evaluated value (plus stream markers like `stdout` where the
-    /// command accepts them). Renders unlinked as `ANY`.
+    /// command accepts them). Renders unlinked as `<any>`, visibly a
+    /// placeholder rather than a type name.
     Any,
     /// Inline alternation for one-off enums (e.g. `SNAPSHOT|LOCAL`).
     /// Self-describing, so it renders unlinked.
@@ -38,37 +44,35 @@ pub enum ArgType {
 
 impl ArgType {
     /// Table-cell label for the argument table's Type column.
-    /// Canonical value types use their descriptor names.
-    /// Reference and assignment shapes (`$var`, `KEY=value`), inline
-    /// alternations, and `ANY` render unlinked. Reference and assignment
-    /// shapes display as the `STRING` values they bind or resolve to;
-    /// the `$`/assignment requirement itself lives in the argument
-    /// description and command syntax.
+    /// Canonical value types use their descriptor names; `ANY` renders
+    /// as `<any>` and inline alternations render their options, so
+    /// neither reads as a standalone type. Shapes (`$var` targets,
+    /// `KEY=value` pairs) are validated in each command's `lower`, and
+    /// the shape requirement lives in the argument description and
+    /// command syntax.
     pub fn label(&self) -> String {
         match self {
             ArgType::String => "STRING".to_string(),
             ArgType::Path => "PATH".to_string(),
             ArgType::Int => "INT".to_string(),
             ArgType::Duration => "DURATION".to_string(),
-            ArgType::Var => "STRING".to_string(),
-            ArgType::KeyValue => "STRING".to_string(),
-            ArgType::Any => "ANY".to_string(),
+            ArgType::List => "LIST".to_string(),
+            ArgType::Any => "<any>".to_string(),
             ArgType::OneOf(options) => options.join("|"),
             ArgType::Rest(inner) => format!("{}...", inner.label()),
         }
     }
 
     /// Anchor of the type's reference section. Only types with a value-type
-    /// reference section link; argument shapes (`$var`, `KEY=value`), inline
-    /// alternations, and `ANY` render unlinked.
+    /// reference section link; `<any>` and inline alternations render
+    /// unlinked.
     pub fn anchor(&self) -> Option<String> {
         match self {
             ArgType::String => Some(crate::value::type_anchor("STRING")),
             ArgType::Path => Some(crate::value::type_anchor("PATH")),
             ArgType::Int => Some(crate::value::type_anchor("INT")),
             ArgType::Duration => Some(crate::value::type_anchor("DURATION")),
-            ArgType::Var => None,
-            ArgType::KeyValue => None,
+            ArgType::List => Some(crate::value::type_anchor("LIST")),
             ArgType::Any => None,
             ArgType::OneOf(_) => None,
             ArgType::Rest(inner) => inner.anchor(),
@@ -85,17 +89,13 @@ impl ArgType {
                 .map(|_| ())
                 .map_err(|_| anyhow!("expected int, got {literal:?}")),
             ArgType::Duration => parse_duration(literal).map(|_| ()),
-            ArgType::Var => {
+            ArgType::List => {
                 if literal.starts_with('$') {
                     Ok(())
                 } else {
                     bail!("expected $var, got {literal:?}")
                 }
             }
-            ArgType::KeyValue => match split_assignment(literal)? {
-                Some(_) => Ok(()),
-                None => bail!("expected KEY=value, got {literal:?}"),
-            },
             ArgType::OneOf(options) => {
                 // Match the lower-time normalization: bare lowercase
                 // spellings are accepted alongside exact options.
@@ -114,7 +114,7 @@ impl ArgType {
 
     /// Classify one positional arg for lower-time checking.
     /// `Static` literals validate now; templates, variables (except a
-    /// `$var` where `Var` is required), and mixed fragments defer to the
+    /// `$var` where `List` is required), and mixed fragments defer to the
     /// runtime resolvers, which see interpolated values.
     pub fn check_arg(&self, arg: &Arg) -> Result<CheckOutcome> {
         match arg {
@@ -125,14 +125,14 @@ impl ArgType {
             Arg::String(_, _) => Ok(CheckOutcome::Deferred),
             Arg::Parts(_) => Ok(CheckOutcome::Deferred),
             Arg::Expr(Expr::Var(_)) => {
-                if *self == ArgType::Var {
+                if matches!(*self, ArgType::List) {
                     Ok(CheckOutcome::Static)
                 } else {
                     Ok(CheckOutcome::Deferred)
                 }
             }
             Arg::Expr(_) => {
-                if *self == ArgType::Var {
+                if matches!(*self, ArgType::List) {
                     bail!("expected $var, got expression {}", arg.render())
                 } else {
                     Ok(CheckOutcome::Deferred)
@@ -405,12 +405,10 @@ mod tests {
         ArgType::Duration.check_arg(&lit("30")).unwrap();
         assert!(ArgType::Duration.check_arg(&lit("banana")).is_err());
         assert!(ArgType::Duration.check_arg(&lit("0s")).is_err());
-        ArgType::Var.check_arg(&lit("$x")).unwrap();
-        assert!(ArgType::Var.check_arg(&lit("x")).is_err());
-        ArgType::KeyValue.check_arg(&lit("K=v")).unwrap();
-        ArgType::KeyValue.check_arg(&lit("K=a=b")).unwrap();
-        assert!(ArgType::KeyValue.check_arg(&lit("no-equals")).is_err());
-        assert!(ArgType::KeyValue.check_arg(&lit("=v")).is_err());
+        ArgType::List.check_arg(&lit("$x")).unwrap();
+        assert!(ArgType::List.check_arg(&lit("x")).is_err());
+        // Only app types plus the visibly-marked placeholder remain.
+        assert_eq!(ArgType::Any.label(), "<any>");
         ArgType::OneOf(&["SNAPSHOT", "LOCAL"])
             .check_arg(&lit("LOCAL"))
             .unwrap();
@@ -432,21 +430,28 @@ mod tests {
             ArgType::Duration.check_arg(&lit("{{ $d }}")).unwrap(),
             CheckOutcome::Deferred
         );
-        // Variables satisfy Var statically and defer for everything else.
+        // Variables satisfy List statically and defer for everything else.
         assert_eq!(
-            ArgType::Var.check_arg(&var("x")).unwrap(),
+            ArgType::List.check_arg(&var("x")).unwrap(),
             CheckOutcome::Static
         );
         assert_eq!(
             ArgType::Duration.check_arg(&var("d")).unwrap(),
             CheckOutcome::Deferred
         );
-        // Non-variable expressions where Var is required fail at lower.
+        // Non-variable expressions where a $var is required fail at lower.
         let list = Arg::Expr(Expr::List(vec![]));
-        assert!(ArgType::Var.check_arg(&list).is_err());
+        assert!(ArgType::List.check_arg(&list).is_err());
         assert_eq!(
             ArgType::String.check_arg(&list).unwrap(),
             CheckOutcome::Deferred
+        );
+        assert_eq!(ArgType::List.label(), "LIST");
+        // `$var` shapes are enforced per command in `lower`, not here:
+        // a bare word passes the String check and fails lowering.
+        assert_eq!(
+            ArgType::String.check_arg(&lit("x")).unwrap(),
+            CheckOutcome::Static
         );
     }
 

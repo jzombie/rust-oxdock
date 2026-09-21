@@ -254,7 +254,7 @@ fn inspect_equality_through_rpn() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        LET $p: PIPE = pipe:log
+        LET $p: PIPE
         IF INSPECT($p) == INSPECT($p) {
             WRITE same.txt yes
         }

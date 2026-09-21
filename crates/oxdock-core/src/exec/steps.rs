@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::process::ExitStatus;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -6,7 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use anyhow::{Result, bail};
 use oxdock_fs::GuardedPath;
 use oxdock_parser::{Arg, AssertTarget, Step, StepKind, Value, guard_option_allows};
-use oxdock_process::{BackgroundHandle, CommandStdin, ProcessManager};
+use oxdock_process::{BackgroundHandle, CommandStdin, ProcessManager, SharedInput, SharedOutput};
 
 /// Create an ExitStatus from a raw exit code. Cross-platform.
 fn exit_status_from_code(code: i32) -> ExitStatus {
@@ -22,10 +23,10 @@ fn exit_status_from_code(code: i32) -> ExitStatus {
     }
 }
 
-use super::capture::SpillBuffer;
 use super::handlers;
 use super::io::{ExactCapture, SlidingWindow, StreamHandle};
 use super::state::{ExecState, TaskEntry, TaskPhase};
+use oxdock_pipe::PipeInner;
 
 /// A background handle wrapping a `std::thread::JoinHandle` for ASYNC blocks
 /// that execute commands in a background thread.
@@ -33,6 +34,14 @@ pub(super) struct ThreadJoinHandle {
     join: Option<std::thread::JoinHandle<Result<()>>>,
     cancel_token: Arc<AtomicBool>,
     active_process: Arc<Mutex<Option<Box<dyn BackgroundHandle>>>>,
+    /// Identity of the worker thread, published by the child on entry.
+    /// Forked worker state shares the parent task registry via `Arc`, so a
+    /// parent that errors out can drop its registry reference while the
+    /// worker is still alive. The worker then becomes the last registry
+    /// owner and would drop (and join) its own handle on thread exit, which
+    /// is undefined behavior (`pthread_join` on self). Detect that case and
+    /// detach instead of joining.
+    worker: Arc<Mutex<Option<std::thread::ThreadId>>>,
     /// Preserved error from the child thread, if any.
     thread_error: Option<anyhow::Error>,
 }
@@ -42,18 +51,33 @@ impl ThreadJoinHandle {
         join: std::thread::JoinHandle<Result<()>>,
         cancel_token: Arc<AtomicBool>,
         active_process: Arc<Mutex<Option<Box<dyn BackgroundHandle>>>>,
+        worker: Arc<Mutex<Option<std::thread::ThreadId>>>,
     ) -> Self {
         Self {
             join: Some(join),
             cancel_token,
             active_process,
+            worker,
             thread_error: None,
         }
+    }
+
+    /// Whether the caller is the worker thread owned by this handle.
+    fn is_self(&self) -> bool {
+        let guard = self.worker.lock().unwrap_or_else(|e| e.into_inner());
+        guard.is_some_and(|id| id == std::thread::current().id())
     }
 
     /// Reap the thread if finished, preserving any error.
     fn reap(&mut self) {
         if self.join.is_none() {
+            return;
+        }
+        if self.is_self() {
+            // The worker is dropping the last registry reference on its own
+            // exit path (parent already tore down or errored out). Detach
+            // instead of joining self, which is undefined behavior.
+            let _ = self.join.take();
             return;
         }
         let handle = self.join.take().unwrap();
@@ -85,8 +109,13 @@ impl BackgroundHandle for ThreadJoinHandle {
                 return Ok(None);
             }
         }
+        // anyhow::Error is not Clone and this method may run repeatedly,
+        // so the preserved error is re-emitted rather than moved. The
+        // alternate display (`{err:#}`) flattens the full causal chain
+        // into the new message: `{err}` alone would drop every
+        // `Caused by` layer at the ASYNC task boundary.
         if let Some(ref err) = self.thread_error {
-            Err(anyhow::anyhow!("{err}"))
+            Err(anyhow::anyhow!("{err:#}"))
         } else {
             Ok(Some(exit_status_from_code(0)))
         }
@@ -108,8 +137,9 @@ impl BackgroundHandle for ThreadJoinHandle {
 
     fn wait(&mut self) -> Result<ExitStatus> {
         self.reap();
+        // Same chain-preserving re-emit as `try_wait` above.
         if let Some(ref err) = self.thread_error {
-            Err(anyhow::anyhow!("{err}"))
+            Err(anyhow::anyhow!("{err:#}"))
         } else {
             Ok(exit_status_from_code(0))
         }
@@ -197,23 +227,27 @@ pub(super) enum ResolvedAssertTarget {
 
 /// Evaluate an assertion target. `Arg::Expr` evaluates typed;
 /// strings, templates, and parts render to `String`; stream markers
-/// and pipe names resolve to live buffers (peeked, never consumed).
+/// resolve to live buffers (peeked, never consumed). A `$var` holding a
+/// `PIPE` likewise peeks its backend bytes: lowering cannot know variable
+/// types, so the pipe dispatch lives here where the value exists.
 pub(super) fn resolve_assert_target<P: ProcessManager>(
     target: &AssertTarget,
     cx: &mut StepCtx<'_, P>,
 ) -> Result<ResolvedAssertTarget> {
     match target {
-        AssertTarget::Value(arg) => Ok(ResolvedAssertTarget::Value(
-            super::args::evaluate_assert_operand(arg, cx)?,
-        )),
+        AssertTarget::Value(arg) => {
+            let value = super::args::evaluate_assert_operand(arg, cx)?;
+            if let Some(handle) = value.as_pipe_handle() {
+                let bytes =
+                    cx.state.io.peek_pipe_content(&handle).map_err(|e| {
+                        anyhow::anyhow!("step pipe assertion cannot read pipe: {e}")
+                    })?;
+                return Ok(ResolvedAssertTarget::Pipe(bytes));
+            }
+            Ok(ResolvedAssertTarget::Value(value))
+        }
         AssertTarget::Stdout => Ok(ResolvedAssertTarget::Stdout),
         AssertTarget::Stderr => Ok(ResolvedAssertTarget::Stderr),
-        AssertTarget::Pipe(name) => {
-            let bytes = cx.state.io.peek_pipe_content(name).map_err(|e| {
-                anyhow::anyhow!("step pipe assertion cannot read pipe {name:?}: {e}")
-            })?;
-            Ok(ResolvedAssertTarget::Pipe(bytes))
-        }
     }
 }
 
@@ -309,6 +343,17 @@ pub struct StepCtx<'a, P: ProcessManager> {
     pub(super) expose_stdin: bool,
     pub(super) out: Option<StreamHandle>,
     pub(super) err: Option<StreamHandle>,
+    /// Pipe backend backing `out`, when a `WITH_IO` stdout binding resolved
+    /// to a script pipe. Uniform context enrichment (populated for every
+    /// command, read only by consumers that need the backend, like the
+    /// network bridge). `None` for inherited, captured, and tee outputs,
+    /// and for OS pairs (kernel bytes are invisible).
+    pub(super) out_pipe: Option<Arc<PipeInner>>,
+    /// Pipe backend backing `stdin`, when a `WITH_IO` stdin binding
+    /// resolved to a script pipe. Lets bridge workers run timeout-bounded
+    /// reads without touching shared pipe semantics (`None` for OS pairs,
+    /// which fall back to blocking reads).
+    pub(super) stdin_pipe: Option<Arc<PipeInner>>,
 }
 
 impl<'a, P: ProcessManager> StepCtx<'a, P> {
@@ -322,9 +367,129 @@ impl<'a, P: ProcessManager> StepCtx<'a, P> {
         self.state.envs.get(key).cloned()
     }
 
+    /// Snapshot of the script-visible environment: `ENV` assignments
+    /// layered over inherited entries, as currently scoped. Hosts staging
+    /// child processes layer this over the host environment (the same
+    /// contract `RUN` honors through `CommandContext`), so block-scoped
+    /// `ENV` reaches the child and reverts at scope exit with no extra
+    /// machinery.
+    pub fn env_snapshot(&self) -> HashMap<String, String> {
+        self.state.envs.as_ref().clone()
+    }
+
     /// Current working directory (guarded; stays inside the workspace).
     pub fn cwd(&self) -> &GuardedPath {
         &self.state.cwd
+    }
+
+    /// Mint a fresh unbound pipe handle, like bare `LET $p: PIPE`. The
+    /// backend materializes lazily on first binding; return it from a
+    /// host function to hand the DSL a pipe it can bind. Tagged with the
+    /// current task so promotion checks see the declaration origin.
+    pub fn new_pipe(&self) -> Value {
+        Value::pipe_fresh_in_task(self.state.task_id)
+    }
+
+    /// Borrow the read half of a `PIPE` value for byte streaming (see
+    /// [`PipeStream`](super::PipeStream)). Unbound handles materialize as script pipes —
+    /// hosts cannot spawn `RUN`, so script is the only sensible kind,
+    /// and a later `RUN` binding adapts through the shared path. DSL,
+    /// bridge, and host bindings on an OS-materialized handle resolve
+    /// through the single-take bridge: the first call takes, repeats bail
+    /// loudly (same contract as DSL consumers; use script-backed pipes
+    /// for repeat or multi access).
+    pub fn pipe_reader(&self, value: &Value) -> Result<SharedInput> {
+        use oxdock_pipe::{Materialized, materialize};
+        let Some(handle) = value.as_pipe_handle() else {
+            anyhow::bail!(
+                "host pipe_reader needs a PIPE value, got {}",
+                value.type_name()
+            );
+        };
+        match materialize(&handle, false)? {
+            Materialized::Script(backend) => Ok(backend.reader_handle()),
+            #[cfg(not(miri))]
+            Materialized::Os(entry) => {
+                let owned = entry.reader.take().map_err(|_| {
+                    anyhow::anyhow!(
+                        "OS pipe handle has already been consumed by another binding; declare a fresh LET $x: PIPE for a new session"
+                    )
+                })?;
+                Ok(Arc::new(Mutex::new(owned)))
+            }
+        }
+    }
+
+    /// Borrow the write half of a `PIPE` value for byte streaming (see
+    /// [`PipeStream`](super::PipeStream)). Same materialization and take-once contract as
+    /// [`StepCtx::pipe_reader`].
+    pub fn pipe_writer(&self, value: &Value) -> Result<SharedOutput> {
+        use oxdock_pipe::{Materialized, materialize};
+        let Some(handle) = value.as_pipe_handle() else {
+            anyhow::bail!(
+                "host pipe_writer needs a PIPE value, got {}",
+                value.type_name()
+            );
+        };
+        match materialize(&handle, false)? {
+            Materialized::Script(backend) => Ok(backend.writer_handle()),
+            #[cfg(not(miri))]
+            Materialized::Os(entry) => {
+                let owned = entry.writer.take().map_err(|_| {
+                    anyhow::anyhow!(
+                        "OS pipe handle has already been consumed by another binding; declare a fresh LET $x: PIPE for a new session"
+                    )
+                })?;
+                Ok(Arc::new(Mutex::new(owned)))
+            }
+        }
+    }
+
+    /// Explicitly close a script pipe: readers drain buffered bytes, then
+    /// observe EOF regardless of live writers or keeper pins. Unbound
+    /// handles bail (closing a never-bound pipe is a caller bug), and
+    /// OS-materialized handles bail (kernel pairs close by dropping their
+    /// taken halves — drop the value instead).
+    pub fn close_pipe(&self, value: &Value) -> Result<()> {
+        let Some(handle) = value.as_pipe_handle() else {
+            anyhow::bail!(
+                "host close_pipe needs a PIPE value, got {}",
+                value.type_name()
+            );
+        };
+        let Some(backend) = oxdock_pipe::script_backend(&handle) else {
+            anyhow::bail!(
+                "host close_pipe needs a script-materialized pipe (unbound and OS handles cannot be force-closed)"
+            );
+        };
+        backend.force_close();
+        Ok(())
+    }
+
+    /// Whether the current task was cancelled (`CANCEL`/`TIMEOUT`). For
+    /// external host modules running blocking pumps: poll each tick so
+    /// silent-but-open pipes cannot strand the task thread.
+    pub fn is_cancelled(&self) -> bool {
+        self.state
+            .cancel_token
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Whether this step runs on an `ASYNC` task thread. Blocking pumps
+    /// must refuse the main sequential flow.
+    pub fn is_async_task(&self) -> bool {
+        self.state.inside_async
+    }
+
+    /// Resolve an explicitly passed `PIPE` value to its script backend for
+    /// timeout-bounded reads (`read_into_timeout`). This is value-based on
+    /// purpose: the ambient `out_pipe`/`stdin_pipe` fields only populate via
+    /// engine-level `WITH_IO` resolution, which never runs for host function
+    /// calls. Returns `None` for unbound and OS-materialized handles, which
+    /// fall back to blocking reads.
+    pub fn pipe_backend(&self, value: &Value) -> Option<Arc<PipeInner>> {
+        let handle = value.as_pipe_handle()?;
+        oxdock_pipe::script_backend(&handle)
     }
 }
 
@@ -340,7 +505,7 @@ pub(super) fn execute_steps<P: ProcessManager>(
     wait_at_end: bool,
 ) -> Result<Flow> {
     let generation = allocate_assert_generation();
-    let flow = execute_steps_inner(
+    let flow = match execute_steps_inner(
         state,
         process,
         generation,
@@ -350,8 +515,30 @@ pub(super) fn execute_steps<P: ProcessManager>(
         out,
         err,
         wait_at_end,
-    )?;
+    ) {
+        Ok(flow) => flow,
+        Err(e) => {
+            // A step failed before end-of-pipeline reaping ran. Join
+            // background work now so the parent owns teardown: otherwise the
+            // parent drops its task-registry reference while a worker still
+            // lives, leaving the worker as the last registry owner to drop
+            // (and join) its own handle on thread exit.
+            teardown_tasks_on_error(state);
+            cleanup_assertion_generation(state, generation)?;
+            return Err(e);
+        }
+    };
     // Cleanup: remove all assertion state for this generation
+    cleanup_assertion_generation(state, generation)?;
+    Ok(flow)
+}
+
+/// Remove per-generation assertion observers. Runs on success and on step
+/// failure so a failed pipeline never leaks windows into later runs.
+fn cleanup_assertion_generation<P: ProcessManager>(
+    state: &mut ExecState<P>,
+    generation: usize,
+) -> Result<()> {
     let mut windows = match state.assert_windows.lock() {
         Ok(guard) => guard,
         Err(_) => bail!("assert_windows poisoned"),
@@ -367,7 +554,42 @@ pub(super) fn execute_steps<P: ProcessManager>(
         Err(_) => bail!("exact_stdout poisoned"),
     };
     exact.retain(|g, _| *g != generation);
-    Ok(flow)
+    Ok(())
+}
+
+/// Join background work after a step failure, mirroring the end-of-pipeline
+/// fail-fast teardown. Anonymous handles always belong to the current
+/// thread. Named entries are root-owned: worker threads must never block on
+/// sibling tasks, which may depend on the worker via AWAIT.
+fn teardown_tasks_on_error<P: ProcessManager>(state: &mut ExecState<P>) {
+    for survivor in state.bg_children.iter_mut() {
+        let _ = survivor.kill();
+    }
+    state.bg_children.clear();
+    if state.inside_async {
+        return;
+    }
+    let entries: Vec<Arc<TaskEntry>> = {
+        let named = state.named_tasks.lock().unwrap_or_else(|e| e.into_inner());
+        named.values().cloned().collect()
+    };
+    let mut to_kill: Vec<(Arc<TaskEntry>, Box<dyn BackgroundHandle>)> = Vec::new();
+    for entry in &entries {
+        let mut guard = entry.state.lock().unwrap_or_else(|e| e.into_inner());
+        match guard.phase {
+            TaskPhase::Running | TaskPhase::Awaiting => {
+                guard.phase = TaskPhase::Cancelled;
+                if let Some(handle) = guard.handle.take() {
+                    to_kill.push((Arc::clone(entry), handle));
+                }
+            }
+            TaskPhase::Cancelled | TaskPhase::Completed => {}
+        }
+    }
+    for (entry, mut handle) in to_kill {
+        let _ = handle.kill();
+        entry.finish_teardown();
+    }
 }
 
 /// Execute a single step with an explicit generation and index.
@@ -383,6 +605,8 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
     expose_stdin: bool,
     out: Option<StreamHandle>,
     err: Option<StreamHandle>,
+    out_pipe: Option<Arc<PipeInner>>,
+    stdin_pipe: Option<Arc<PipeInner>>,
 ) -> Result<Flow> {
     let mut cx = StepCtx {
         state,
@@ -391,6 +615,8 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
         expose_stdin,
         out,
         err,
+        out_pipe,
+        stdin_pipe,
     };
     // Compound steps (loops, functions, scoped wrappers) participate in
     // Flow and dispatch through the Flow path; every other variant runs
@@ -505,6 +731,10 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
             handlers::read(&mut cx, idx, &resolved)
         }
         StepKind::ReadLine { var } => handlers::read_line(&mut cx, idx, var),
+        StepKind::ListAppend { list, item } => {
+            let value = super::args::evaluate_assert_operand(item, &mut cx)?;
+            handlers::push_into(&mut cx, idx, list, value)
+        }
         StepKind::Write { path, contents } => {
             let path_resolved = super::args::resolve_arg(path, &mut cx)?;
             let contents_resolved = super::args::resolve_arg_opt(contents, &mut cx)?;
@@ -627,6 +857,8 @@ fn execute_steps_inner<P: ProcessManager>(
                 expose_stdin,
                 out: out.clone(),
                 err: err.clone(),
+                out_pipe: None,
+                stdin_pipe: None,
             };
             // Function/loop control steps dispatch through the Flow path;
             // every other variant runs the leaf pipeline and yields Done.
@@ -734,6 +966,10 @@ fn execute_steps_inner<P: ProcessManager>(
                             handlers::read(&mut cx, idx, &resolved)
                         }
                         StepKind::ReadLine { var } => handlers::read_line(&mut cx, idx, var),
+                        StepKind::ListAppend { list, item } => {
+                            let value = super::args::evaluate_assert_operand(item, &mut cx)?;
+                            handlers::push_into(&mut cx, idx, list, value)
+                        }
                         StepKind::Write { path, contents } => {
                             let path_resolved = super::args::resolve_arg(path, &mut cx)?;
                             let contents_resolved =
@@ -934,26 +1170,20 @@ fn execute_steps_inner<P: ProcessManager>(
                 for (id, entry) in &entries {
                     enum Poll {
                         Pending,
-                        CompletedOk { sink: Option<Arc<SpillBuffer>> },
+                        CompletedOk,
                         CompletedErr(anyhow::Error),
                     }
                     let poll = {
                         let mut guard = entry.state.lock().unwrap_or_else(|e| e.into_inner());
                         match guard.phase {
                             TaskPhase::Running | TaskPhase::Awaiting => {
-                                // Only take the sink for tasks that were never
-                                // awaited (`Running`): an `Awaiting` entry has
-                                // an awaiter that owns output handling.
-                                let take_sink = matches!(guard.phase, TaskPhase::Running);
                                 match guard.handle.as_mut() {
                                     Some(handle) => match handle.try_wait() {
                                         Ok(Some(status)) => {
                                             let _ = guard.handle.take();
                                             guard.phase = TaskPhase::Completed;
-                                            let sink =
-                                                if take_sink { guard.sink.take() } else { None };
                                             if status.success() {
-                                                Poll::CompletedOk { sink }
+                                                Poll::CompletedOk
                                             } else {
                                                 Poll::CompletedErr(anyhow::anyhow!(
                                                     "named ASYNC task {id} exited with status {status}"
@@ -977,16 +1207,8 @@ fn execute_steps_inner<P: ProcessManager>(
                     };
                     match poll {
                         Poll::Pending => {}
-                        Poll::CompletedOk { sink } => {
+                        Poll::CompletedOk => {
                             entry.finish_teardown();
-                            if let Some(sink) = sink
-                                && let Err(e) = forward_task_sink(&sink, &out, *id)
-                            {
-                                if failed_status.is_none() {
-                                    failed_status = Some(e);
-                                }
-                                break;
-                            }
                         }
                         Poll::CompletedErr(e) => {
                             entry.finish_teardown();
@@ -1062,25 +1284,6 @@ fn execute_steps_inner<P: ProcessManager>(
     }
 
     Ok(Flow::Done)
-}
-
-/// Forward a finished named task's stdout sink to the parent stdout.
-/// Used by end-poll reaping for tasks that completed without ever being
-/// awaited, preserving the pre-capture behavior where their output was
-/// already streamed to the parent writer.
-fn forward_task_sink(sink: &Arc<SpillBuffer>, out: &Option<StreamHandle>, id: u64) -> Result<()> {
-    let bytes = sink
-        .drain_bytes()
-        .map_err(|e| anyhow::anyhow!("named ASYNC task {id} output drain failed: {e}"))?;
-    if !bytes.is_empty() {
-        super::io::write_stdout(out.clone(), |writer| {
-            writer
-                .write_all(&bytes)
-                .map_err(|e| anyhow::anyhow!("named ASYNC task {id} output forward failed: {e}"))?;
-            Ok(())
-        })?;
-    }
-    Ok(())
 }
 
 fn restore_scopes<P: ProcessManager>(state: &mut ExecState<P>, count: usize) -> Result<()> {

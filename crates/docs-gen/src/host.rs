@@ -8,12 +8,13 @@
 //! metadata, strict JSON encoding, placeholder-safe stems).
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::OnceLock;
 
 use anyhow::{Context, Result, bail};
-use oxdock_core::{HostModule, OxDockFn, StepCtx, Value};
+use oxdock_core::{FuncMeta, HostModule, OxDockFn, StepCtx, TypeDescriptor, Value};
 use oxdock_fs::{GuardedPath, PathResolver};
 use oxdock_func_macro::oxdock_func;
-use oxdock_process::ProcessManager;
+use oxdock_process::{DefaultProcessManager, ProcessManager};
 
 fn docs_resolver(cx: &StepCtx<impl ProcessManager>) -> Result<(GuardedPath, PathResolver)> {
     // docs-gen always runs the script with cwd at the repo root, so stage
@@ -228,6 +229,79 @@ fn function_reference() -> Result<Value> {
     ))
 }
 
+/// Documented plugin modules, read live from each plugin's `HostModule`
+/// (the single source scripts register) instead of a parallel registry.
+/// Construction binds nothing: both modules build over a fresh virtual
+/// endpoint registry with no sockets.
+struct PluginDocs {
+    metas: Vec<FuncMeta>,
+    types: Vec<&'static TypeDescriptor>,
+}
+
+fn plugin_docs() -> &'static HashMap<String, PluginDocs> {
+    static DOCS: OnceLock<HashMap<String, PluginDocs>> = OnceLock::new();
+    DOCS.get_or_init(|| {
+        let mut map = HashMap::new();
+        let modules: Vec<HostModule<DefaultProcessManager>> =
+            vec![oxdock_ssh_plugin::module(), oxdock_net_plugin::module()];
+        for module in modules {
+            let name = module.name.clone();
+            let mut metas: Vec<FuncMeta> = module
+                .funcs
+                .iter()
+                .map(|registration| {
+                    let mut meta = registration.meta().clone();
+                    // Raw metas leave `module` empty for registration-time
+                    // stamping; stamp it here from the owning module.
+                    meta.module = name.clone();
+                    meta
+                })
+                .collect();
+            metas.sort_by(|left, right| left.name.cmp(&right.name));
+            map.insert(
+                name,
+                PluginDocs {
+                    metas,
+                    types: module.types,
+                },
+            );
+        }
+        map
+    })
+}
+
+/// Look up one plugin's docs by module name, bailing with the known
+/// names so a renamed module fails the run instead of rendering empty.
+fn plugin_entry(module: &str) -> Result<&'static PluginDocs> {
+    let docs = plugin_docs();
+    docs.get(module).ok_or_else(|| {
+        let mut known: Vec<&str> = docs.keys().map(String::as_str).collect();
+        known.sort_unstable();
+        anyhow::anyhow!(
+            "unknown plugin module '{module}'; known modules: {}",
+            known.join(", ")
+        )
+    })
+}
+
+/// Generated function reference for one plugin module.
+#[oxdock_func(pure, returns = "STRING")]
+fn plugin_function_reference(module: String) -> Result<Value> {
+    let entry = plugin_entry(&module)?;
+    Ok(Value::string(
+        crate::oxdock::command_ref::render_plugin_reference(&entry.metas, &module),
+    ))
+}
+
+/// Generated value-type reference for one plugin module's handle types.
+#[oxdock_func(pure, returns = "STRING")]
+fn plugin_type_reference(module: String) -> Result<Value> {
+    let entry = plugin_entry(&module)?;
+    Ok(Value::string(
+        crate::oxdock::command_ref::render_plugin_types(&entry.types),
+    ))
+}
+
 /// The docs-gen host module for the render engine.
 pub fn module<P: ProcessManager>() -> HostModule<P> {
     HostModule {
@@ -245,6 +319,8 @@ pub fn module<P: ProcessManager>() -> HostModule<P> {
             CommandIndex::registration(),
             CommandBody::registration(),
             FunctionReference::registration(),
+            PluginFunctionReference::registration(),
+            PluginTypeReference::registration(),
         ],
         types: vec![],
     }
@@ -462,6 +538,114 @@ mod tests {
             out,
             "{\"name\": \"demo\", \"description\": \"says \\\"hi\\\"\"}\n"
         );
+    }
+
+    #[test]
+    fn plugin_reference_covers_each_module() {
+        let ssh = plugin_function_reference("SSH".to_string())
+            .expect("ssh reference")
+            .as_str()
+            .expect("string")
+            .to_string();
+        for name in [
+            "SSH_SERVE",
+            "SSH_ACCEPT",
+            "SSH_DEQUEUE",
+            "SSH_PUMP_CHANNEL",
+            "SSH_CLOSE",
+            "SSH_CONNECT",
+            "SSH_PUMP",
+            "SSH_PTY_RUN",
+        ] {
+            assert!(
+                ssh.contains(&format!("### {name}")),
+                "SSH reference must document {name}",
+            );
+        }
+        assert!(
+            !ssh.contains("STD::GLOB"),
+            "SSH reference must not contain STD entries",
+        );
+        assert!(
+            !ssh.contains("NET_LISTEN"),
+            "SSH reference must not contain NET entries",
+        );
+        let net = plugin_function_reference("NET".to_string())
+            .expect("net reference")
+            .as_str()
+            .expect("string")
+            .to_string();
+        for name in ["NET_LISTEN", "NET_ACCEPT", "NET_CLOSE", "NET_CONNECT"] {
+            assert!(
+                net.contains(&format!("### {name}")),
+                "NET reference must document {name}",
+            );
+        }
+        assert!(
+            !net.contains("SSH_SERVE"),
+            "NET reference must not contain SSH entries",
+        );
+    }
+
+    #[test]
+    fn plugin_reference_rejects_unknown_modules() {
+        let err = plugin_function_reference("NOPE".to_string()).expect_err("unknown must fail");
+        let text = format!("{err:#}");
+        assert!(text.contains("NOPE"), "error names the module: {text}");
+        assert!(text.contains("SSH"), "error lists SSH: {text}");
+        assert!(text.contains("NET"), "error lists NET: {text}");
+    }
+
+    #[test]
+    fn plugin_type_reference_names_handle_types() {
+        let ssh = plugin_type_reference("SSH".to_string())
+            .expect("ssh types")
+            .as_str()
+            .expect("string")
+            .to_string();
+        assert!(
+            ssh.contains("SSH_SERVER"),
+            "SSH types name the server: {ssh}"
+        );
+        assert!(
+            ssh.contains("SSH_SESSION"),
+            "SSH types name the session: {ssh}"
+        );
+        let net = plugin_type_reference("NET".to_string())
+            .expect("net types")
+            .as_str()
+            .expect("string")
+            .to_string();
+        assert!(
+            net.contains("NET_LISTENER"),
+            "NET types name the listener: {net}"
+        );
+    }
+
+    #[test]
+    fn plugin_returns_stay_within_known_types() {
+        // `returns` labels render verbatim, so every label must name a
+        // startup type or the module's own handle type. This documents
+        // the limitation rather than enforcing it in the engine.
+        let startup: std::collections::HashSet<&str> = oxdock_core::startup_descriptors()
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        for (module, entry) in plugin_docs() {
+            let mut known = startup.clone();
+            for descriptor in &entry.types {
+                known.insert(descriptor.name);
+            }
+            for meta in &entry.metas {
+                if let Some(returns) = meta.returns.as_deref() {
+                    assert!(
+                        known.contains(returns),
+                        "{module}::{} returns unknown type '{returns}'",
+                        meta.name,
+                    );
+                }
+            }
+        }
     }
 
     #[test]

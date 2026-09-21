@@ -185,7 +185,7 @@ fn documented_outputs_match_byte_for_byte() {
                 LET $x = 1
             "},
             indoc! {"
-                invalid syntax for command LET: LET assigns a variable, e.g. `LET $name: STRING = <expr>`, `LET $t: HANDLE = ASYNC ...`, `LET $out: STRING = <command>` (capture), or `LET $out: STRING = AWAIT $t`; got `$x = 1`.
+                invalid syntax for command LET: LET assigns a variable, e.g. `LET $name: STRING = <expr>`, `LET $t: HANDLE = ASYNC ...`, `LET $out: STRING = <command>` (capture), `LET $out: STRING = AWAIT $t`, or `LET $var: TYPE = { ... }` (inline block); got `$x = 1`.
                   --> line 1, col 1-10
                   1 | LET $x = 1
                     | ^^^^^^^^^^
@@ -208,7 +208,7 @@ fn documented_outputs_match_byte_for_byte() {
                 WITH_IO [stdout=discard] ECHO hi
             "},
             indoc! {"
-                invalid syntax for command WITH_IO: WITH_IO needs `WITH_IO [bindings] <command>` or `WITH_IO [bindings] { <commands> }`: invalid binding `stdout=discard`; bindings are `stdin`, `stdout`, `stderr`, `<stream>=pipe:<name>`, or `<stream>=$var` with a PIPE-typed variable (e.g. `[stdout=pipe:log]`, `[stdin=$p]`); got `[stdout=discard] ECHO hi`.
+                invalid syntax for command WITH_IO: WITH_IO needs `WITH_IO [bindings] <command>` or `WITH_IO [bindings] { <commands> }`: invalid binding `stdout=discard`; bindings are `stdin`, `stdout`, `stderr`, or `<stream>=$var` with a PIPE-typed variable (e.g. `[stdout=$p]`, `[stdin=$p]`); got `[stdout=discard] ECHO hi`.
                   --> line 1, col 1-32
                   1 | WITH_IO [stdout=discard] ECHO hi
                     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

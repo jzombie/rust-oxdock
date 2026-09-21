@@ -1,0 +1,17 @@
+## Value types
+
+### Value type: SSH_SERVER
+
+Handle to one ephemeral SSH server instance.
+
+Minted by `SSH_SERVE`, consumed by `SSH_ACCEPT` and `SSH_CLOSE`.
+Cloning the value shares the server; dropping the last clone
+signals shutdown.
+
+### Value type: SSH_SESSION
+
+Handle to one dequeued SSH session instance.
+
+Minted by `SSH_DEQUEUE`, consumed once by `SSH_PUMP_CHANNEL`. Cloning
+the value shares the session; metadata reads never consume. Display
+shows id and peer only: the command string may carry secrets.

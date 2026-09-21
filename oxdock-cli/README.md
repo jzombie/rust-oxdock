@@ -9,6 +9,7 @@ CLI tooling for executing OxDock's Dockerfile-inspired DSL on native platforms.
 - Create an isolated, temporary workspace and run a script inside it.
 - Drop into an interactive shell inside the temporary workspace with `oxdock --shell` (requires a TTY).
 - Run a DSL script via `--script <path>` or by piping a script into stdin.
+- Map virtual service endpoints to physical interfaces: scripts declare logical ports or names (`NET_LISTEN("2251")`), and `--listen`, `-p`, or `--offline` decide what they bind to (defaults to loopback).
 - Expose the real workspace to scripts via `WORKSPACE LOCAL` / `WORKSPACE SNAPSHOT` so steps can target either the temporary workspace or the live repo.
 
 ## Notes
@@ -49,6 +50,21 @@ cat my-script.oxfile | oxdock
 Drop into a shell inside the temporary workspace (interactive):
 ```sh
 oxdock --shell
+```
+
+Expose a script service port on all interfaces:
+```sh
+oxdock --listen 0.0.0.0:2251 ./proxy.oxfile
+```
+
+Map an outer port to an inner service port or name:
+```sh
+oxdock -p 2222:2251 ./proxy.oxfile
+```
+
+Run with no sockets at all (services stay handle-only):
+```sh
+oxdock --offline ./proxy.oxfile
 ```
 
 ## License

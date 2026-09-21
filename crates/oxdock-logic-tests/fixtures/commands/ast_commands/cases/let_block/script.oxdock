@@ -1,0 +1,14 @@
+LET $a: STRING = { RETURN "hello" }
+LET $b: STRING = {
+    LET $inner: STRING = { RETURN "in" }
+    RETURN "out-{{ $inner }}"
+}
+LET $c: STRING = { ECHO hi }
+LET $flag: BOOL = true
+LET $d: STRING = {
+    IF $flag {
+        RETURN "yes"
+    }
+    RETURN "no"
+}
+WRITE picked.txt "{{ $a }}-{{ $b }}-{{ $c }}-{{ $d }}"

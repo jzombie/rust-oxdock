@@ -1,4 +1,5 @@
 WORKDIR /
 SYMLINK client "client"
 WORKDIR client
-WITH_IO [stdout=pipe:cap_seen_txt] READ version.txt
+LET $cap_seen_txt: PIPE
+WITH_IO [stdout=$cap_seen_txt] READ version.txt

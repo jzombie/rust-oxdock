@@ -27,10 +27,11 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | [`HASH_SHA256`](#hash_sha256) | `HASH_SHA256 <path>` |
 | [`EXIT`](#exit) | `EXIT <code>` |
 | [`SLEEP`](#sleep) | `SLEEP <duration>` |
-| [`WITH_IO`](#with_io) | `WITH_IO [<stream>[=pipe:<name>\|=$var], ...] <command> \| WITH_IO [bindings] { <commands> }` |
+| [`LIST_APPEND`](#list_append) | `LIST_APPEND $list <item>` |
+| [`WITH_IO`](#with_io) | `WITH_IO [<stream>[=$var], ...] <command> \| WITH_IO [bindings] { <commands> }` |
 | [`FOR`](#for) | `FOR $item: TYPE IN <expr> { <commands> } \| FOR $key: STRING, $value: TYPE IN <expr> { <commands> }` |
 | [`IF`](#if) | `IF <expr> { <commands> } [ELSE IF <expr> { <commands> } ...] [ELSE { <commands> }]` |
-| [`LET`](#let) | `LET $var: TYPE = <expr> \| LET $var: TYPE = ASYNC { <commands> } \| LET $var: TYPE = <command> \| LET $var: TYPE = AWAIT $task` |
+| [`LET`](#let) | `LET $var: TYPE = <expr> \| LET $p: PIPE \| LET $var: TYPE = ASYNC { <commands> } \| LET $var: TYPE = <command> \| LET $var: TYPE = AWAIT $task \| LET $var: TYPE = { <commands> }` |
 | [`MUTATION`](#mutation) | `$var = <expr>` |
 | [`ASYNC`](#async) | `ASYNC <command...> \| ASYNC { <commands> } \| LET $var: HANDLE = ASYNC { <commands> }` |
 | [`AWAIT`](#await) | `AWAIT $var \| LET $out: STRING = AWAIT $var` |
@@ -47,15 +48,15 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 
 Reroute standard streams.
 
-**Syntax:** `WITH_IO [<stream>[=pipe:<name>|=$var], ...] <command> | WITH_IO [bindings] { <commands> }`
+**Syntax:** `WITH_IO [<stream>[=$var], ...] <command> | WITH_IO [bindings] { <commands> }`
 
 Reroutes the standard streams of the next command or, in block form,
 of every enclosed command.
 
-Bindings map streams (`stdin`, `stdout`, `stderr`) to named script
-pipes (`stdout=pipe:name`, `stderr=pipe:name`) or to a PIPE-typed
-variable (`stdin=$p`, resolved against the live pipe registry when
-the step runs). Both stdout and stderr pipes capture output the same way.
+Bindings map streams (`stdin`, `stdout`, `stderr`) to a PIPE-typed
+variable (`stdout=$p`, `stdin=$p`), resolved from the variable
+when the step runs. Both stdout and stderr pipes capture output
+the same way. Declare the handle first with `LET $p: PIPE`.
 
 Pipes hold bytes in memory and spill to a temp file above 8 MiB, so a
 producer can finish before the consumer starts.
@@ -68,10 +69,11 @@ a function boundary: pipes created, bound, or passed by variable inside FUNC
 bodies are always script pipes, even when the surrounding task would
 otherwise promote.
 
-A second producer or consumer on a live name is an explicit error. A name
-bound as output can later feed another command's `stdin`, connecting
-commands without touching the terminal. Binding `stdout` and `stderr` to
-the same live pipe name fails deterministically. Merge streams in shell
+A second producer or consumer on a live handle is an explicit
+error. A handle bound as output can later feed another
+command's `stdin`, connecting commands without touching the
+terminal. Binding `stdout` and `stderr` to the same live
+handle fails deterministically. Merge streams in shell
 via `2>&1` instead.
 
 Nested blocks stack defaults; inline bindings override inherited ones for
@@ -83,22 +85,21 @@ their command only; closing a block restores previous wiring.
 **Example: with_io block**
 
 ```oxdock
-WITH_IO [stdout=pipe:log] {
+LET $log: PIPE
+WITH_IO [stdout=$log] {
   ECHO first
   ECHO second
 }
-WITH_IO [stdin=pipe:log] WRITE captured.txt
+WITH_IO [stdin=$log] WRITE captured.txt
 ```
 
 **Example: variable pipe binding**
 
 ```oxdock
-# Declare the pipe first with the explicit handle operator
-# (like `env:KEY`): `pipe:log` names a pipe without touching
-# a stream. A plain string here would be a TypeMismatch.
-# `$p` (not `pipe:$p`) is the variable form; literals stay
-# `pipe:name`.
-LET $p: PIPE = pipe:log
+# Declare the pipe first: `LET $p: PIPE` mints a fresh
+# backend without touching a stream. A plain string here
+# would be a TypeMismatch.
+LET $p: PIPE
 WITH_IO [stdout=$p] ECHO hello
 WITH_IO [stdin=$p] READ_LINE $line
 ASSERT_EQ $line "hello"
@@ -233,7 +234,7 @@ ASSERT_EQ $t2 "absent"
 
 Bind script-local variables.
 
-**Syntax:** `LET $var: TYPE = <expr> | LET $var: TYPE = ASYNC { <commands> } | LET $var: TYPE = <command> | LET $var: TYPE = AWAIT $task`
+**Syntax:** `LET $var: TYPE = <expr> | LET $p: PIPE | LET $var: TYPE = ASYNC { <commands> } | LET $var: TYPE = <command> | LET $var: TYPE = AWAIT $task | LET $var: TYPE = { <commands> }`
 
 Declares a script-local variable with an explicit type (STRING, INT,
 FLOAT, BOOL, PIPE, LIST, MAP, HANDLE, DURATION, PATH). Duplicate LET
@@ -256,10 +257,14 @@ The right-hand side is always an expression — literals, lists, maps,
 arithmetic (`+ - * /` with `*`/`/` binding tighter, unary `-`,
 parentheses), comparisons (`< <= > >=` binding tighter than
 `== !=`), logical `&&` (tighter) and `||` with short-circuit,
-`!` negation, `env:KEY` reads, `pipe:NAME` handles,
-`INSPECT($var)` snapshots, `GLOB("*.md")`, `INT(x)` /
-`FLOAT(x)` conversions — never a `{{ ... }}` template;
-interpolation happens in string values, not here.
+`!` negation, `env:KEY` reads, `INSPECT($var)` snapshots,
+`GLOB("*.md")`, `INT(x)` / `FLOAT(x)` conversions — never a
+`{{ ... }}` template; interpolation happens in string values,
+not here.
+The one exception is pipes: `LET $p: PIPE` with no `=`
+and no initializer mints a fresh anonymous backend,
+lazily materialized at first binding, so two declarations
+never share a channel.
 
 Numbers are numeric literals: `42` binds `INT`, `3.14` binds
 `FLOAT`. `Int x Int` stays `INT` (checked, integer division,
@@ -303,7 +308,7 @@ When the right-hand side is a synchronous command
 exact stdout bytes are captured into the variable as a string (no newline
 stripping; commands with no stdout capture as `""`; non-UTF8 stdout is
 an error). Combining capture with an explicit
-`WITH_IO [stdout=pipe:...]` is a parse error.
+`WITH_IO [stdout=$var]` is a parse error.
 
 Coming from Bash, the capture line looks familiar but behaves
 strictly:
@@ -315,8 +320,25 @@ strictly:
 | Math on output | Implicit: `$((var + 1))` | Explicit: `INT($out) + 1` |
 | Failing command | Continues with empty output unless `set -e` | Step fails immediately, binds nothing |
 
-`LET $out: STRING = AWAIT $var` captures a background task's stdout the
-same way; bare `AWAIT $var` forwards it to the parent stdout instead.
+`LET $out: TYPE = AWAIT $var` binds the background task's
+explicit `RETURN` value instead (tasks stream their stdout
+live, so there is no output left to capture); a task that
+succeeded without `RETURN` yields `INT` 0, like a process
+exit status.
+
+An inline block (`LET $var: TYPE = { <commands> }`) runs its
+steps in a fresh scope and binds the nearest `RETURN` value,
+like a zero-arg function body: fallthrough without `RETURN`
+binds `""`, and `BREAK`/`CONTINUE` escaping the block are
+errors. The block reads outer variables but its own LETs
+never leak out. A `{k: v}` shape still parses as a map
+literal; anything else in braces is a block.
+
+The split is deliberate: synchronous commands capture
+stdout because they run inline to completion on the same
+thread; background tasks never capture stdout because
+concurrent output has no well-defined value. Task results
+travel only through `RETURN` (or `INT` 0 for void tasks).
 
 `LET $e: STRING = env:FOO` reads the script environment into a plain
 string.
@@ -378,6 +400,22 @@ LET $out: STRING = ECHO hi
 ASSERT_EQ $out "hi\n"
 ```
 
+**Example: inline block**
+
+```oxdock
+LET $who: STRING = "ada"
+LET $res: STRING = {
+    LET $loud: STRING = "{{ $who }}!"
+    RETURN $loud
+}
+ASSERT_EQ $res "ada!"
+# Any declared type works: the block value checks like any RHS.
+LET $n: INT = {
+    RETURN 40 + 2
+}
+ASSERT_EQ $n 42
+```
+
 **Example: arithmetic over captured output**
 
 ```oxdock
@@ -430,7 +468,7 @@ ASSERT_EQ $ok "yes"
 # INSPECT($var) snapshots a variable into a MAP: declared
 # type plus live details (pipe backend stats here), so
 # scripts can branch on engine state.
-LET $p: PIPE = pipe:log
+LET $p: PIPE
 WITH_IO [stdout=$p] ECHO hello
 LET $info: MAP = INSPECT($p)
 IF $info.is_os_pipe {
@@ -504,7 +542,9 @@ Runs a command or block of commands in a background thread with
 subshell isolation.
 
 Mutations (ENV, WORKDIR) stay within the block. With `LET`, stores a
-task handle for `AWAIT`.
+task handle for `AWAIT`. Task output streams live to the parent
+stdout; a task publishes a value with an explicit `RETURN`,
+which `LET $out: TYPE = AWAIT $task` binds.
 
 
 **Examples:**
@@ -538,9 +578,11 @@ Join a background task.
 
 Blocks until the named task completes. Propagates errors if the task failed.
 
-Bare `AWAIT $var` forwards the task's stdout to the parent stdout;
-`LET $out: STRING = AWAIT $var` captures it into `$out` instead (same
-UTF-8 and spilling rules as `LET $var: STRING = <command>`).
+Task output streams live during the run; joining binds nothing by
+itself. `LET $out: TYPE = AWAIT $var` binds the task's explicit
+`RETURN` value instead, or `INT` 0 when the task succeeded
+without one (add `RETURN <expr>` to the task body to yield
+a value).
 
 
 **Examples:**
@@ -555,9 +597,12 @@ AWAIT $task
 **Example: await capture**
 
 ```oxdock
-LET $task: HANDLE = ASYNC ECHO "done"
+LET $task: HANDLE = ASYNC {
+    ECHO "logged"
+    RETURN "returned"
+}
 LET $out: STRING = AWAIT $task
-ASSERT_EQ $out "done\n"
+ASSERT_EQ $out "returned"
 ```
 
 
@@ -670,12 +715,12 @@ GREET("bex")
 ```oxdock
 # A pipe handle travels into a function as a typed argument
 # and is usable as a binding target in both directions.
-# `pipe:ch` constructs the handle; `$p` passes it on.
+# `LET $p: PIPE` mints the handle; `$p` passes it on.
 FUNC DRAIN($q: PIPE) {
   WITH_IO [stdin=$q] READ_LINE $line
   RETURN $line
 }
-LET $p: PIPE = pipe:ch
+LET $p: PIPE
 WITH_IO [stdout=$p] ECHO "payload"
 LET $got: STRING = DRAIN($p)
 ASSERT_EQ $got "payload"
@@ -684,15 +729,18 @@ ASSERT_EQ $got "payload"
 
 ### RETURN
 
-Return a value from a function.
+Return a value from a function, task, or inline block.
 
 **Syntax:** `RETURN [<expr>]`
 
-Ends the nearest enclosing function call with a value.
-Bare `RETURN` with no expression yields `""`.
+Ends the nearest enclosing boundary with a value: a function
+call, an `ASYNC` task (bound by `LET $o = AWAIT $t`), or an
+inline `LET` block. Bare `RETURN` with no expression yields
+`""`.
 
-Falling off the end without RETURN yields "". RETURN outside a function
-(including at top level or across an ASYNC boundary) is an error.
+Falling off the end without RETURN yields "". RETURN with no
+enclosing boundary (including at top level) is an error; use
+EXIT or ECHO there.
 
 
 **Examples:**
@@ -896,7 +944,7 @@ interpolate there.
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
-| `assignment` | `STRING` | yes | KEY=value pair; the value resolves as STRING |
+| `assignment` | [`STRING`](#value-type-string) | yes | KEY=value pair; the value resolves as STRING |
 
 **Examples:**
 
@@ -1271,15 +1319,16 @@ assigns accumulated bytes and returns.
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
-| `var` | `STRING` | yes | Target variable (`$name`); the line binds as STRING |
+| `var` | [`STRING`](#value-type-string) | yes | Target variable (`$name`); the line binds as STRING |
 
 **Examples:**
 
 **Example: read line**
 
 ```oxdock
-WITH_IO [stdout=pipe:lines] ECHO "first"
-WITH_IO [stdin=pipe:lines] READ_LINE $reply
+LET $lines: PIPE
+WITH_IO [stdout=$lines] ECHO "first"
+WITH_IO [stdin=$lines] READ_LINE $reply
 ```
 
 
@@ -1372,7 +1421,7 @@ placeholder and errors.
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
 | `path` | [`PATH`](#value-type-path) | no | Template file to expand; omit to expand stdin |
-| `overrides` | `STRING...` | no | Template overrides shadowing that key (unified string values) |
+| `overrides` | [`STRING...`](#value-type-string) | no | Template overrides shadowing that key (unified string values) |
 
 **Output:** Stdout
 
@@ -1422,8 +1471,9 @@ ASSERT_CONTAINS stdout "Hi Ada and Ada concatenated!"
 
 ```oxdock
 # no path: the template arrives on stdin through a pipe
-WITH_IO [stdout=pipe:tpl] ECHO "Hello \{{ env:NAME }}!"
-WITH_IO [stdin=pipe:tpl] EXPAND NAME=Alice
+LET $tpl: PIPE
+WITH_IO [stdout=$tpl] ECHO "Hello \{{ env:NAME }}!"
+WITH_IO [stdin=$tpl] EXPAND NAME=Alice
 ASSERT_CONTAINS stdout "Hello Alice!"
 ```
 
@@ -1455,18 +1505,18 @@ Both sides are values: `$var`, literals, templates, and calls
 evaluate in memory and never touch disk. Read files explicitly
 first (`LET $text: STRING = READ "out.txt"`, then
 `ASSERT_EQ $text ...`).
-Bare `stdout` / `stderr` observe stream buffers; `pipe:NAME`
-observes a pipe buffer. `--hash` compares the SHA-256 of a
-string, pipe, or captured-stdout actual instead of the raw
-bytes (`stderr` is unsupported).
+Bare `stdout` / `stderr` observe stream buffers; a `$var`
+holding a `PIPE` observes its backend bytes. `--hash` compares
+the SHA-256 of a string, pipe, or captured-stdout actual
+instead of the raw bytes (`stderr` is unsupported).
 
 
 **Arguments:**
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
-| `actual` | `ANY` | yes | Value, stdout, stderr, or pipe:NAME |
-| `expected` | `ANY...` | no | Expected (required unless --hash) |
+| `actual` | `<any>` | yes | Value, stdout, stderr, or a $var holding a PIPE |
+| `expected` | `<any>...` | no | Expected (required unless --hash) |
 
 **Flags:**
 
@@ -1514,16 +1564,16 @@ key presence for maps, substring over stream and pipe buffers.
 Like `ASSERT_EQ`, both sides are values read without implicit
 I/O; read files explicitly first
 (`LET $text: STRING = READ "cfg.txt"`).
-Bare `stdout` / `stderr` observe stream buffers; `pipe:NAME`
-observes a pipe buffer.
+Bare `stdout` / `stderr` observe stream buffers; a `$var`
+holding a `PIPE` observes its backend bytes.
 
 
 **Arguments:**
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
-| `haystack` | `ANY` | yes | Value, stdout, stderr, or pipe:NAME |
-| `needle` | `ANY...` | yes | Substring, element, or key |
+| `haystack` | `<any>` | yes | Value, stdout, stderr, or a $var holding a PIPE |
+| `needle` | `<any>...` | yes | Substring, element, or key |
 
 **Examples:**
 
@@ -1631,6 +1681,39 @@ SLEEP $bare
 ```
 
 
+### LIST_APPEND
+
+Append an item to a LIST variable in place.
+
+**Syntax:** `LIST_APPEND $list <item>`
+
+Appends the item to the LIST variable in place.
+
+When the binding holds the only reference the push runs in
+amortized constant time. Aliased buffers detach first, so
+other holders keep their contents.
+
+
+**Arguments:**
+
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| `list` | [`LIST`](#value-type-list) | yes | Target LIST variable (`$name`) |
+| `item` | `<any>` | yes | Item to append (any value) |
+
+**Examples:**
+
+**Example: list append**
+
+```oxdock
+LET $items: LIST = []
+LIST_APPEND $items "first"
+LIST_APPEND $items "second"
+LET $want: LIST = ["first", "second"]
+ASSERT_EQ $items $want
+```
+
+
 ## Value types
 
 ### Value type: INT
@@ -1667,13 +1750,28 @@ Positive time span: `500ms`, `10s`, `2m`, `1h`; bare number means seconds.
 
 ### Value type: PIPE
 
-Named script pipe. Validity is checked against the pipe registry at coercion time.
+Anonymous pipe handle. The backend materializes lazily on first
+binding (never eagerly at declaration), so the choice always has full
+usage context. Cloning shares the backend (explicit-sharing fan-out);
+equality is handle identity, never byte comparison.
 
 ### Value type: HANDLE
 
 Background ASYNC task handle for AWAIT/CANCEL.
 
-<!-- GENERATED by docs-gen from oxdock-core function metadata. Do not edit by hand. -->
+### Value type: SEMAPHORE
+
+Counting semaphore for admission control. Cloning shares the backend
+(explicit-sharing fan-out); equality is handle identity, never the
+count.
+
+### Value type: PERMIT
+
+Opaque admission permit minted by `SEMAPHORE_TRY_ACQUIRE`. Cloning
+shares the release obligation (first drops release nothing, the last
+releases once); equality is handle identity.
+
+<!-- GENERATED by docs-gen from STD function metadata. Do not edit by hand. -->
 ## Functions
 
 Callable as `MODULE::NAME(...)` in expressions (or bare `NAME(...)` with the module imported via `IMPORT`). Introspectable from scripts with `FUNCTIONS()` and `DESCRIBE(name)`.
@@ -1733,6 +1831,25 @@ Convert a value to INT.
 Trims ASCII whitespace and parses i64. Passes Int through; Float only
 when integral and finite.
 
+### STD::IS_TERMINAL
+
+**Signature:** `STD::IS_TERMINAL($stream: STRING) -> BOOL`
+
+**Contexts:** AST only
+
+Report whether a standard stream is a terminal.
+
+`IS_TERMINAL("stdin")`, `IS_TERMINAL("stdout")`, or `IS_TERMINAL("stderr")`
+answers for the step's stream as currently bound, so scripts can adapt
+prompts, colors, and progress output. Anything diverted from the
+terminal reports false without touching host handles: `WITH_IO` pipe
+bindings (script backends and OS pairs), `LET`-capture sinks, staged
+runner sinks, and any materialized stdin stream (only a directly
+inherited fd falls back to the process check). A transparent root tee
+still answers the session question via the process check. The name
+matches exactly (no case folding): anything else bails. AST-only:
+reads the step context like the other introspection functions.
+
 ### STD::LOAD_JSON
 
 **Signature:** `STD::LOAD_JSON($path: STRING) -> MAP`
@@ -1763,6 +1880,62 @@ Describe a filesystem entry.
 
 Reports file, dir, symlink (no-follow), or absent. AST-only by design;
 there is no RPN arm for filesystem IO.
+
+### STD::SEMAPHORE_AVAILABLE
+
+**Signature:** `STD::SEMAPHORE_AVAILABLE($sem) -> INT`
+
+**Contexts:** AST, RPN
+
+Read free permits under the lock, with no mutation.
+
+Observability only (audit lines, healthchecks: `active = max - free`).
+Exact at read time and stale the instant the caller acts on it, so it
+must never drive admission: that is `SEMAPHORE_TRY_ACQUIRE`'s job.
+
+```text
+LET $free: INT = SEMAPHORE_AVAILABLE($sem)
+```
+
+### STD::SEMAPHORE_NEW
+
+**Signature:** `STD::SEMAPHORE_NEW($max: INT) -> SEMAPHORE`
+
+**Contexts:** AST only
+
+Create a counting semaphore admitting at most `max` concurrent holders.
+
+Non-positive maxima bail. The word names a shared backend: every clone
+observes the same count, and admission runs through
+`SEMAPHORE_TRY_ACQUIRE`, never through the `SEMAPHORE_AVAILABLE`
+readout.
+
+```text
+LET $sem: SEMAPHORE = SEMAPHORE_NEW(10)
+```
+
+### STD::SEMAPHORE_TRY_ACQUIRE
+
+**Signature:** `STD::SEMAPHORE_TRY_ACQUIRE($sem) -> MAP`
+
+**Contexts:** AST only
+
+Attempt one non-blocking acquire, always answering a MAP.
+
+`held` is `1` with the permit under the `permit` key, or `0` with no
+`permit` key: branch on `$m.held` (the DSL has no null, so the absent
+key is the miss shape, and missing-key access already bails strictly).
+Never waits, so no wait can wedge.
+
+```text
+LET $acq: MAP = SEMAPHORE_TRY_ACQUIRE($sem)
+IF $acq.held == 0 {
+  ECHO "at cap, rejecting"
+} ELSE {
+  LET $permit: PERMIT = $acq.permit
+  ASYNC { session work }
+}
+```
 
 ### STD::TYPES
 

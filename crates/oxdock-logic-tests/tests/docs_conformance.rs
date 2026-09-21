@@ -198,6 +198,123 @@ fn oxdock_readme_snippets_parse() -> Result<()> {
     Ok(())
 }
 
+/// Plugin READMEs under conformance: every ```oxdock snippet in the
+/// generated plugin references executes end to end, not just parses.
+/// Session flows need live servers and clients, so these run against
+/// loopback with the plugin modules registered (miri-ignored like all
+/// socket tests). Kept separate from FENCE_DOCUMENTS: that list feeds
+/// the module-unaware STD-only executor, while plugin fences need their
+/// modules and network.
+const PLUGIN_FENCE_DOCUMENTS: &[&str] = &[
+    "crates/plugins/oxdock-ssh-plugin/README.md",
+    "crates/plugins/oxdock-net-plugin/README.md",
+];
+
+fn plugin_module_table() -> oxdock_parser::ModuleTable {
+    let mut engine = oxdock_core::Engine::new();
+    engine.register_module(oxdock_ssh_plugin::module());
+    engine.register_module(oxdock_net_plugin::module());
+    engine.module_table()
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "needs loopback TCP plus threads plus a Tokio runtime for plugin fences"
+)]
+fn plugin_readme_snippets_execute() -> Result<()> {
+    for name in PLUGIN_FENCE_DOCUMENTS {
+        for block in load_blocks(name)? {
+            execute_plugin_block(&block, name)?;
+        }
+    }
+    Ok(())
+}
+
+/// Execute one plugin fence end to end with the plugin modules
+/// registered, mirroring `execute_block` (tempdir isolation, fence
+/// metadata, expected-error matching). A join timeout fails loudly
+/// instead of hanging the suite if an example ever strands.
+fn execute_plugin_block(block: &FencedBlock, name: &str) -> Result<()> {
+    use std::time::Duration;
+
+    let table = plugin_module_table();
+    let steps = oxdock_core::parse_script_with_modules(&block.body, table)
+        .map_err(|e| anyhow::anyhow!("{name}:{0}: snippet failed to parse: {e}", block.line_no))?;
+
+    let workspace_temp = GuardedPath::tempdir().context("failed to create workspace tempdir")?;
+    let context_temp = if block.metadata.unified_roots {
+        None
+    } else {
+        Some(GuardedPath::tempdir().context("failed to create context tempdir")?)
+    };
+    let fs_root = workspace_temp.as_guarded_path().clone();
+    let context_root = match &context_temp {
+        Some(temp) => temp.as_guarded_path().clone(),
+        None => fs_root.clone(),
+    };
+
+    let mut io = ExecIo::new();
+    for (key, value) in &block.metadata.env {
+        io.insert_inherit_env(key.clone(), value.clone());
+    }
+
+    let mut resolver =
+        PathResolver::new_guarded(fs_root.clone(), context_root.clone()).context("fs setup")?;
+    resolver.set_workspace_root(context_root.clone());
+    let fs: Box<dyn oxdock_fs::WorkspaceFs> = Box::new(resolver);
+    // Doc fences name logical services, never physical addresses, so
+    // the harness maps them the way a CLI runner would: ephemeral
+    // loopback binds resolved through the registry. Unmapped names
+    // would fall back to memory rendezvous, which SSH rejects.
+    let ssh_registry = std::sync::Arc::new(oxdock_net_plugin::EndpointRegistry::new(false));
+    ssh_registry
+        .add_mapping(
+            &oxdock_net_plugin::VirtualEndpoint::Name("doc-ssh-demo".to_string()),
+            oxdock_net_plugin::BindingSpec::Loopback { port: 0 },
+        )
+        .context("map doc service")?;
+    ssh_registry.bind_all().context("bind doc service")?;
+    let modules = vec![
+        oxdock_ssh_plugin::module_with_endpoints(ssh_registry),
+        oxdock_net_plugin::module(),
+    ];
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let execution = oxdock_core::run_steps_with_manager_with_modules(
+            fs,
+            &steps,
+            oxdock_process::default_process_manager(),
+            io,
+            modules,
+            Vec::new(),
+        );
+        let _ = done_tx.send(execution.map(|_| ()).map_err(|err| format!("{err:#}")));
+    });
+    let execution: Result<()> = match done_rx.recv_timeout(Duration::from_secs(120)) {
+        Ok(result) => result.map_err(|text| anyhow::anyhow!("{text}")),
+        Err(_) => Err(anyhow::anyhow!(
+            "{name}: snippet opened at line {} hung past 120s",
+            block.line_no
+        )),
+    };
+
+    match (&execution, &block.metadata.expect_error) {
+        (Ok(_), None) => {}
+        (Ok(_), Some(expected)) => {
+            bail!("{name}: snippet was expected to fail with '{expected}' but succeeded")
+        }
+        (Err(err), Some(expected)) => {
+            let rendered = LineEnding::normalize(&format!("{err:#}"));
+            if !rendered.contains(expected.as_str()) {
+                bail!("{name}: error message did not contain '{expected}'; got: {rendered}");
+            }
+        }
+        (Err(err), None) => bail!("{name}: snippet failed unexpectedly: {err:#}"),
+    }
+    Ok(())
+}
+
 #[test]
 #[cfg_attr(miri, ignore = "requires the repository checkout layout")]
 fn readme_references_resolve() -> Result<()> {

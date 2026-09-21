@@ -1,0 +1,19 @@
+{
+  "targets": [
+    {
+      "name": "oxdock-pipe-readme",
+      "out": "crates/sys/oxdock-pipe/README.md",
+      "values": "crates/sys/oxdock-pipe/.oxdock/template/values.json",
+      "template": "crates/sys/oxdock-pipe/.oxdock/template/README.md.tmpl",
+      "fragments": {
+        "local": [
+          "crates/sys/oxdock-pipe/.oxdock/template/header.md.tmpl",
+          "crates/sys/oxdock-pipe/.oxdock/template/fragments/*"
+        ],
+        "shared": [
+          ".oxdock/template/shared/footer.md.tmpl"
+        ]
+      }
+    }
+  ]
+}

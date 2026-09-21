@@ -1,0 +1,4 @@
+name = "list_append"
+
+[expect]
+stdout = "appended\n"

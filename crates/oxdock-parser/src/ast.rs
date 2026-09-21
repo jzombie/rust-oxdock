@@ -40,6 +40,13 @@ impl ModuleTable {
     }
 }
 
+/// Core command vocabulary: every statement keyword the grammar accepts.
+/// Multi-word commands group by domain prefix (`CATEGORY_ACTION`):
+/// `LIST_APPEND`, `READ_LINE`, `ASSERT_EQ`, `COPY_GIT`. The first
+/// underscore-separated segment is the category; introducing a command
+/// under a new category means adding its prefix to
+/// `COMMAND_CATEGORIES` below, so new groupings stay deliberate.
+/// Single-word commands carry no category. Frozen names never change.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Command {
     InheritEnv,
@@ -67,6 +74,7 @@ pub enum Command {
     Async,
     Timeout,
     Sleep,
+    ListAppend,
 }
 
 pub const COMMANDS: &[Command] = &[
@@ -94,7 +102,15 @@ pub const COMMANDS: &[Command] = &[
     Command::Exit,
     Command::Timeout,
     Command::Sleep,
+    Command::ListAppend,
 ];
+
+/// Registered multi-word command categories (first underscore-separated
+/// segment). A new `CATEGORY_ACTION` command registers its prefix here;
+/// reusing an existing category needs no change. Single-word commands
+/// carry no category and are unaffected.
+pub const COMMAND_CATEGORIES: &[&str] =
+    &["INHERIT", "WITH", "COPY", "HASH", "READ", "ASSERT", "LIST"];
 
 impl Command {
     pub const fn as_str(self) -> &'static str {
@@ -124,6 +140,7 @@ impl Command {
             Command::Async => "ASYNC",
             Command::Timeout => "TIMEOUT",
             Command::Sleep => "SLEEP",
+            Command::ListAppend => "LIST_APPEND",
         }
     }
 
@@ -156,6 +173,7 @@ impl Command {
                 "TIMEOUT <duration> <command...> | TIMEOUT <duration> { <commands> }"
             }
             Command::Sleep => "SLEEP <duration>",
+            Command::ListAppend => "LIST_APPEND $list <item>",
         }
     }
 
@@ -190,6 +208,7 @@ impl Command {
             "ASYNC" => Some(Command::Async),
             "TIMEOUT" => Some(Command::Timeout),
             "SLEEP" => Some(Command::Sleep),
+            "LIST_APPEND" => Some(Command::ListAppend),
             _ => None,
         }
     }
@@ -432,12 +451,10 @@ pub struct IoBinding {
     pub pipe: Option<PipeTarget>,
 }
 
-/// A pipe endpoint for a `WITH_IO` binding: either a literal `pipe:name`
-/// or a `$var` holding a `PIPE` value, resolved against the live pipe
-/// registry when the step runs.
+/// A pipe endpoint for a `WITH_IO` binding: a `$var` holding a `PIPE`
+/// value, resolved against the live variable scope when the step runs.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum PipeTarget {
-    Name(String),
     Var(String),
 }
 
@@ -517,6 +534,11 @@ pub enum Expr {
     },
     List(Vec<Expr>),
     Map(Vec<(String, Expr)>),
+    /// Inline block (`LET $a: STRING = { RETURN "hi" }`): runs its steps in
+    /// a fresh scope when evaluated and yields the `RETURN` value
+    /// (fallthrough yields `""`, mirroring a zero-arg function body).
+    /// Parsed only where `map_literal` fails, so `{k: v}` stays a map.
+    Block(Vec<Step>),
     Call {
         name: String,
         args: Vec<Expr>,
@@ -539,6 +561,12 @@ pub enum Expr {
     /// Lowering-optimized form: folded literals stay `Literal`, dynamic
     /// arithmetic/comparison subtrees arrive here as flat RPN.
     CompiledMath(Vec<MathOp>),
+    /// Fresh anonymous pipe backend (`LET $p: PIPE` with no initializer).
+    /// Evaluates to a pipe value keyed by a generated name that no
+    /// `pipe:` literal can spell, so bare declarations never collide
+    /// with named pipes. Transitional representation until backends
+    /// become owned handles.
+    FreshPipe,
     /// Lowering-only intermediate staging `9223372036854775808` (the unsigned
     /// half of `i64::MIN`). Valid only as the direct child of unary `-`;
     /// any instance reaching lowering completion bails integer overflow.
@@ -694,6 +722,16 @@ impl fmt::Display for Expr {
                 }
                 write!(f, "}}")
             }
+            Expr::Block(steps) => {
+                write!(f, "{{ ")?;
+                for (i, step) in steps.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, "; ")?;
+                    }
+                    write!(f, "{}", step.kind)?;
+                }
+                write!(f, " }}")
+            }
             Expr::Compare { op, left, right } => {
                 write!(f, "{} {} {}", left, op, right)
             }
@@ -703,6 +741,10 @@ impl fmt::Display for Expr {
             Expr::CompiledMath(ops) => {
                 write!(f, "{}", format_compiled_math(ops))
             }
+            // No expression syntax produces this (bare `LET` is a
+            // statement): render loudly non-round-trippable so a stray
+            // use fails at re-parse instead of aliasing a named pipe.
+            Expr::FreshPipe => write!(f, "<fresh pipe>"),
             Expr::UnsignedIntBoundary(n) => write!(f, "{}", n),
             Expr::Not(inner) => {
                 // Parenthesize compound operands so Display round-trips:
@@ -955,6 +997,23 @@ mod tests {
                     "uppercase literal \"{kw}\" reachable from dsl.pest instruction rules is not a registered statement or clause keyword"
                 );
             }
+        }
+    }
+
+    /// Category convention lock: every multi-word command groups under a
+    /// registered `COMMAND_CATEGORIES` prefix. Adding a command under a
+    /// new category fails here until the prefix registers (one line).
+    #[test]
+    fn command_names_group_by_category() {
+        for command in COMMANDS {
+            let name = command.as_str();
+            let Some((prefix, _)) = name.split_once('_') else {
+                continue;
+            };
+            assert!(
+                COMMAND_CATEGORIES.contains(&prefix),
+                "command {name} introduces unregistered category {prefix}; add it to COMMAND_CATEGORIES"
+            );
         }
     }
 }

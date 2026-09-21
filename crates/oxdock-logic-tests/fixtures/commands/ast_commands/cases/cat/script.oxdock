@@ -1,3 +1,4 @@
 WRITE note.txt "hello"
 READ note.txt
-WITH_IO [stdout=pipe:cap_out_txt] READ note.txt
+LET $cap_out_txt: PIPE
+WITH_IO [stdout=$cap_out_txt] READ note.txt

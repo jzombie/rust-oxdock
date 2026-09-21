@@ -16,13 +16,19 @@ normal = ["tracing"]
 development = []
 build = []
 
+[features]
+ssh = ["dep:oxdock-ssh-plugin"]
+
 [dependencies]
 anyhow.workspace = true
 indoc.workspace = true
+lexopt.workspace = true
 oxdock-core.workspace = true
 oxdock-fs.workspace = true
+oxdock-net-plugin.workspace = true
 oxdock-parser.workspace = true
 oxdock-process.workspace = true
+oxdock-ssh-plugin = { workspace = true, optional = true }
 tempfile.workspace = true
 
 [dev-dependencies]

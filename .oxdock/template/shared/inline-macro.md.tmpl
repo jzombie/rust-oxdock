@@ -61,8 +61,9 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     ENV PROJECT=#project
     MKDIR dist
     [bool:#verbose] WRITE dist/verbose.log "verbose on"
-    WITH_IO [stdout=pipe:log] ECHO "built \{{ env:PROJECT }}"
-    WITH_IO [stdin=pipe:log] READ_LINE $line
+    LET $log: PIPE
+    WITH_IO [stdout=$log] ECHO "built \{{ env:PROJECT }}"
+    WITH_IO [stdin=$log] READ_LINE $line
     WRITE dist/build.txt "\{{ $line }}"
     IMPORT [STD]
     FOR $f: STRING IN GLOB("dist/*.txt") {

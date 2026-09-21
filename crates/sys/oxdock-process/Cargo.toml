@@ -23,6 +23,7 @@ mock-process = []
 anyhow.workspace = true
 oxdock-fs.workspace = true
 oxdock-parser.workspace = true
+oxdock-pipe.workspace = true
 oxdock-sys-test-utils.workspace = true
 
 [lints]

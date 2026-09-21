@@ -6,7 +6,7 @@
 // Run and drop into the temp workspace once the script finishes:
 //   cargo run -p oxdock-cli --example tree_shell -- --shell
 
-use oxdock_cli::{Options, ScriptSource, execute};
+use oxdock_cli::{EndpointFlags, Options, ScriptSource, execute};
 use oxdock_fs::{GuardedPath, PathResolver};
 
 const SCRIPT: &str = r#"
@@ -41,6 +41,7 @@ fn main() -> anyhow::Result<()> {
         Options {
             script: ScriptSource::Path(script_path),
             shell,
+            endpoints: EndpointFlags::default(),
         },
         root,
     )

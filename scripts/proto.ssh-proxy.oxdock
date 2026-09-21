@@ -1,0 +1,93 @@
+# TODO: This is a throwaway script to validate SSH proxying.
+# It should be turned into an example.
+
+IMPORT [STD, SSH]
+WORKSPACE LOCAL
+
+# 1. Ephemeral server setup
+LET $server: MAP = SSH_SERVE(
+    "ssh-server", {
+        username: "test",
+        password: "test123",
+        key_path: "temp/test_key"  # Fixed: Relative workspace pathing
+    }
+)
+
+ECHO "SSH proxy listening on {{ $server.addr }}"
+
+# Admission control: a counting semaphore replaces the racy
+# check-then-act counter. Permits release on worker return through
+# ordinary scope teardown, so no decrement code exists or is needed.
+# Never CANCEL/TIMEOUT a permit-holding worker: surviving the worker
+# is the only slow-leak path, and the TIMEOUT below stays commented.
+LET $max_conns: INT = 10
+LET $sem: SEMAPHORE = SEMAPHORE_NEW($max_conns)
+
+# 2. Master Accept Loop
+LET $run: BOOL = true
+WHILE $run {
+    # Dequeue authenticated session metadata
+    LET $deq_task: HANDLE = ASYNC { SSH_DEQUEUE($server.server) }
+    LET $sess: MAP = AWAIT $deq_task
+
+    # Non-blocking admission: a miss carries no permit key, so branch
+    # on held. Counts below derive from the semaphore (observability
+    # only); nothing here checks then acts.
+    LET $acq: MAP = SEMAPHORE_TRY_ACQUIRE($sem)
+    IF $acq.held == 0 {
+        LET $avail: INT = SEMAPHORE_AVAILABLE($sem)
+        LET $active: INT = $max_conns - $avail
+        ECHO "[REJECT] Capacity reached ({{ $active }}/{{ $max_conns }}). Dropping connection from {{ $sess.addr }}"
+        # Dropping $sess without invoking SSH_PUMP_CHANNEL closes the channel wire cleanly
+    } ELSE {
+        LET $permit: PERMIT = $acq.permit
+
+        # Spawn isolated handler task per active session. The permit
+        # rides scope capture into the worker; the parent's clone drops
+        # at this iteration's end, the worker's on task return.
+        ASYNC {
+            # Relay session identity to the child: block-scoped ENV
+            # rides into SSH_PTY_RUN's spawn and reverts at block exit.
+            # (ENV must sit in this scope: an IF branch would revert it
+            # on exit.)
+            ENV SSH_USER="{{ $sess.username }}"
+            ENV SSH_CLIENT="{{ $sess.addr }}"
+            ENV SSH_SERVER="{{ $server.addr }}"
+
+            # Note: SSH command is currently commented-out as there is not currently
+            # a possible way to determin the the command is available before setting
+            # it, in which case it would be empty. Setting it in an IF condition
+            # would only scope it to that.
+            # An alternative approach could be to use a [] guard, but as they currently
+            # do not work with variables, would need to use a sentinel env variable.
+            # ENV SSH_COMMAND="{{ $sess.command }}"
+
+            LET $avail: INT = SEMAPHORE_AVAILABLE($sem)
+            LET $active: INT = $max_conns - $avail
+            ECHO "[AUDIT] Connected: {{ $sess.username }} from {{ $sess.addr }} (active: {{ $active }}/{{ $max_conns }})"
+
+            LET $c_in: PIPE   # Bytes from PTY -> Wire
+            LET $c_out: PIPE  # Bytes from Wire -> PTY
+
+            # Spawns child process inside a real master/slave PTY device
+            LET $pty: HANDLE = ASYNC {
+                SSH_PTY_RUN($sess.session, ["ssh", "-o", "BatchMode=yes", "orb"], 0, 0, $c_out, $c_in)
+            }
+
+            LET $pump: HANDLE = ASYNC {
+                # Enforces a 30-minute max session limit to reap idle or abandoned connections
+                # [INTENTIONALLY-COMMENTED-OUT] TIMEOUT 1800s {
+                    SSH_PUMP_CHANNEL($sess.session, $c_in, $c_out)
+                # }
+            }
+
+            # Wait for session teardown or timeout
+            AWAIT $pty
+            AWAIT $pump
+
+            LET $avail_end: INT = SEMAPHORE_AVAILABLE($sem)
+            LET $active_end: INT = ($max_conns - $avail_end) - 1
+            ECHO "[AUDIT] Disconnected: {{ $sess.username }} from {{ $sess.addr }} (active: {{ $active_end }}/{{ $max_conns }})"
+        }
+    }
+}

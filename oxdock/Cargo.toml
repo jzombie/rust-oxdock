@@ -22,6 +22,8 @@ required-features = ["cli"]
 [features]
 default = ["cli"]
 cli = ["dep:oxdock-cli"]
+# Ephemeral SSH server/client in the CLI runner (oxdock-ssh-plugin).
+ssh = ["cli", "oxdock-cli/ssh"]
 
 [dependencies]
 oxdock-build.workspace = true

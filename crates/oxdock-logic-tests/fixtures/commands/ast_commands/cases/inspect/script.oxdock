@@ -2,7 +2,7 @@
 # plus live details for handle-likes. Pipe maps carry the backend kind
 # (`is_os_pipe`), buffered bytes, and reader/writer counts, so scripts
 # and fixtures can assert engine invariants directly.
-LET $p: PIPE = pipe:ch
+LET $p: PIPE
 WITH_IO [stdout=$p] ECHO "payload"
 LET $info: MAP = INSPECT($p)
 WRITE type.txt "{{ $info.type }}"

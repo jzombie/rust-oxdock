@@ -8,10 +8,9 @@ use oxdock_fs::{CargoScratch, GuardedPath, WorkspaceFs};
 use oxdock_parser::{Step, TypeDescriptor, Value};
 use oxdock_process::{BackgroundHandle, CommandContext, ProcessManager};
 
-use super::capture::SpillBuffer;
 use super::io::{ExactCapture, ExecIo, SlidingWindow};
 use super::native::FunctionRegistry;
-use super::pipe::KeeperGuard;
+use oxdock_pipe::KeeperGuard;
 
 /// Maximum nested function-call depth. Guards the host thread stack against
 /// runaway recursion; the error names the function that overflowed.
@@ -94,6 +93,10 @@ pub struct ExecState<P: ProcessManager> {
     /// `MAX_CALL_DEPTH`; cloned (not reset) by `fork()` so async children
     /// inherit the caller's depth budget.
     pub(super) call_depth: usize,
+    /// Identity of the task this state executes (`0` = root flow).
+    /// Stamped onto pipe handles minted here and compared by the promotion
+    /// check: only the declaring task may promote its own pipes.
+    pub(super) task_id: u64,
     pub(super) _marker: PhantomData<P>,
 }
 
@@ -121,16 +124,18 @@ pub(super) struct TaskEntryState {
     /// Threads observing `Cancelled` must wait on `done` until `reaped`
     /// before resuming, so no caller outruns OS process teardown.
     pub(super) reaped: bool,
-    /// Per-task stdout sink (`LET $t: HANDLE = ASYNC ...`). The child thread writes
-    /// here instead of the parent writer. Exactly one consumer takes it:
-    /// `LET $o: STRING = AWAIT $t` binds it, bare `AWAIT $t` forwards it to the
-    /// parent stdout, and end-poll reaping forwards un-awaited output.
-    pub(super) sink: Option<Arc<SpillBuffer>>,
-    /// Return value of a background `CALL` task (`LET $t: HANDLE = ASYNC CALL
-    /// FOO(...)`). Set under the entry lock before `done.notify_all()`; read
-    /// by `LET $o: TYPE = AWAIT $t` when the task body was a single `Call`.
-    /// `None` for block tasks and for tasks that have not finished.
+    /// Explicit result of a background task, published by `RETURN` (block
+    /// bodies) or the function call itself (single-`CALL` bodies). Set
+    /// under the entry lock before `done.notify_all()`; read by
+    /// `LET $o: TYPE = AWAIT $t`. `None` for tasks that returned nothing
+    /// or have not finished. Task stdout is never captured: it streams
+    /// live to the shared parent writer.
     pub(super) return_value: Option<Value>,
+    /// Whether this task's body can publish a value: single-`CALL` bodies
+    /// always can; block bodies can iff they contain a `RETURN` in their
+    /// own scope. A task that can return but falls off the end fails its
+    /// capture loudly; a task that cannot return yields `INT` 0.
+    pub(super) returns_value: bool,
 }
 
 /// Synchronized named-task entry shared by every scope that can observe the
@@ -143,27 +148,17 @@ pub(super) struct TaskEntry {
 }
 
 impl TaskEntry {
-    pub(super) fn new_with_sink(handle: Box<dyn BackgroundHandle>, sink: Arc<SpillBuffer>) -> Self {
+    pub(super) fn new(handle: Box<dyn BackgroundHandle>, returns_value: bool) -> Self {
         Self {
             state: Mutex::new(TaskEntryState {
                 phase: TaskPhase::Running,
                 handle: Some(handle),
                 reaped: false,
-                sink: Some(sink),
                 return_value: None,
+                returns_value,
             }),
             done: Condvar::new(),
         }
-    }
-
-    /// Take the task's stdout sink exactly once. The first consumer
-    /// (awaiter or end-poll reaper) wins; later calls get `None`.
-    pub(super) fn take_sink(&self) -> Option<Arc<SpillBuffer>> {
-        self.state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .sink
-            .take()
     }
 
     /// Block until the teardown owner has consumed the handle and joined
@@ -275,7 +270,38 @@ impl<P: ProcessManager> ExecState<P> {
             functions: self.functions.clone(),
             types: self.types.clone(),
             call_depth: self.call_depth,
+            task_id: self.task_id,
             _marker: PhantomData,
+        }
+    }
+
+    /// Whether `pipe` may promote to an OS kernel pair on behalf of
+    /// `task_id`: only when it was declared by that same task and no
+    /// spawned child can observe it. Anything else stays script-backed, so
+    /// concurrent tasks can never disagree about EOF propagation.
+    /// Spawning tasks pass their worker id (not the spawner's): promotion
+    /// is judged from the worker's perspective, since it is the worker's
+    /// bindings that will hold raw descriptors.
+    pub(super) fn can_promote_in_task(pipe: &oxdock_pipe::PipeHandle, task_id: u64) -> bool {
+        pipe.declaring_task() == task_id && !pipe.has_escaped()
+    }
+
+    /// Whether `pipe` may promote on the current thread (main flow and
+    /// inline resolves).
+    pub(super) fn can_promote_to_os(&self, pipe: &oxdock_pipe::PipeHandle) -> bool {
+        Self::can_promote_in_task(pipe, self.task_id)
+    }
+
+    /// Mark every pipe visible in scope as shared-with-a-child. Called
+    /// synchronously on the spawner before a worker thread starts: forking
+    /// copies the whole environment, so every visible pipe is capturable
+    /// whether or not the child body names it. Over-marking only costs
+    /// zero-copy opportunities, never correctness.
+    pub(super) fn mark_captured_pipes_escaped(&self) {
+        for scope in self.var_scopes.iter() {
+            for (_, value) in scope.values() {
+                mark_value_pipes_escaped(value);
+            }
         }
     }
 
@@ -357,6 +383,36 @@ impl<P: ProcessManager> ExecState<P> {
         anyhow::bail!("undeclared variable ${key}");
     }
 
+    /// Append `item` to the LIST binding `key` in place. Copy-on-write:
+    /// the buffer detaches only when shared, so aliases keep their
+    /// contents; the sole owner mutates with no copy. Bails for
+    /// undeclared names and non-LIST bindings.
+    pub(super) fn push_into_list(&mut self, key: &str, item: Value) -> Result<()> {
+        let kind = self
+            .var_scopes
+            .iter()
+            .rev()
+            .find_map(|s| s.get(key).map(|(k, _)| k.clone()))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "undeclared variable ${key}: declare it first with LET ${key}: LIST = ..."
+                )
+            })?;
+        if kind != "LIST" {
+            anyhow::bail!("LIST_APPEND ${key}: variable is {kind}, not LIST");
+        }
+        for scope in self.var_scopes.iter_mut().rev() {
+            if let Some(slot) = scope.get_mut(key) {
+                let list = slot.1.as_list_mut().ok_or_else(|| {
+                    anyhow::anyhow!("LIST_APPEND ${key}: variable is not a LIST value")
+                })?;
+                list.push(item);
+                return Ok(());
+            }
+        }
+        anyhow::bail!("undeclared variable ${key}");
+    }
+
     pub(super) fn get_var(&self, key: &str) -> Option<Value> {
         // Walk scopes from innermost to outermost
         for scope in self.var_scopes.iter().rev() {
@@ -386,5 +442,27 @@ impl<P: ProcessManager> ExecState<P> {
             }
         }
         result
+    }
+}
+
+/// Mark every pipe handle reachable from `value` as shared-with-a-child.
+/// Pipes travel inside lists and maps (`LET $bag: LIST = [$p]`), so a
+/// shallow top-level check would miss them and let a later promotion
+/// corrupt the shared EOF contract. Values form a tree, so recursion
+/// terminates; host-opaque payloads cannot carry handles.
+fn mark_value_pipes_escaped(value: &Value) {
+    if let Some(handle) = value.as_pipe_handle() {
+        handle.mark_escaped();
+        return;
+    }
+    if let Some(items) = value.as_list() {
+        for item in items {
+            mark_value_pipes_escaped(item);
+        }
+    }
+    if let Some(entries) = value.as_map() {
+        for item in entries.values() {
+            mark_value_pipes_escaped(item);
+        }
     }
 }

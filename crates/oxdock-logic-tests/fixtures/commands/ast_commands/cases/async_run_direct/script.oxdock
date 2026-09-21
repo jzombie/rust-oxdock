@@ -2,4 +2,5 @@
 # WITH_IO captures stdout via pipe, asserted byte-exact in case.toml.
 # Proves ASYNC RUN works directly with commands.
 
-WITH_IO [stdout=pipe:async_out] ASYNC ECHO "hello"
+LET $async_out: PIPE
+WITH_IO [stdout=$async_out] ASYNC ECHO "hello"

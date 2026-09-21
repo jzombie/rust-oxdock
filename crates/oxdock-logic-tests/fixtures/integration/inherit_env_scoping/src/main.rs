@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use oxdock_fs::PathResolver;
-use oxdock_cli::{execute_with_result, Options, ScriptSource};
+use oxdock_cli::{EndpointFlags, execute_with_result, Options, ScriptSource};
 
 fn main() {
     if let Err(err) = run() {
@@ -12,7 +12,7 @@ fn main() {
 fn run() -> Result<()> {
     let resolver = PathResolver::from_manifest_env().context("resolve fixture manifest dir")?;
     let script = resolver.root().join("script.oxfile")?;
-    let opts = Options { script: ScriptSource::Path(script), shell: false };
+    let opts = Options { script: ScriptSource::Path(script), shell: false, endpoints: EndpointFlags::default() };
     execute_with_result(opts, resolver.root().clone())?;
     Ok(())
 }

@@ -14,7 +14,7 @@ use std::fmt;
 use std::time::Duration;
 
 #[test]
-fn startup_descriptors_cover_ten_types() {
+fn startup_descriptors_cover_startup_types() {
     // The startup directory is fixed and self-describing: names in order,
     // each entry its payload type's own singleton.
     let descriptors = startup_descriptors();
@@ -22,7 +22,18 @@ fn startup_descriptors_cover_ten_types() {
     assert_eq!(
         names,
         [
-            "INT", "FLOAT", "STRING", "BOOL", "LIST", "MAP", "PATH", "DURATION", "PIPE", "HANDLE",
+            "INT",
+            "FLOAT",
+            "STRING",
+            "BOOL",
+            "LIST",
+            "MAP",
+            "PATH",
+            "DURATION",
+            "PIPE",
+            "HANDLE",
+            "SEMAPHORE",
+            "PERMIT",
         ]
     );
     for (name, descriptor) in &descriptors {
@@ -82,9 +93,29 @@ fn heap_words_clone_independently_then_drop() {
     assert_eq!(format!("{duration}"), "90s");
     drop(duration);
 
-    let pipe = Value::pipe("ch".to_string());
-    assert_eq!(format!("{pipe}"), "pipe:ch");
+    let pipe = Value::pipe_fresh();
+    assert_eq!(format!("{pipe}"), "<pipe>");
+    // Handles share the backend cell: clones stay usable after the
+    // original drops, and equality is handle identity.
+    let pipe_clone = pipe.clone();
+    assert_eq!(&pipe_clone, &pipe);
     drop(pipe);
+    assert_eq!(format!("{pipe_clone}"), "<pipe>");
+    let other = Value::pipe_fresh();
+    // Distinct declarations never alias: identity, not byte comparison.
+    assert_ne!(&other, &pipe_clone);
+    drop(other);
+    drop(pipe_clone);
+
+    let sem = Value::semaphore(2);
+    assert_eq!(format!("{sem}"), "<semaphore>");
+    // Semaphore words share the backend cell like pipe handles: clones
+    // name the same counter, and equality is handle identity.
+    let sem_clone = sem.clone();
+    assert_eq!(&sem_clone, &sem);
+    assert_ne!(Value::semaphore(2), sem);
+    drop(sem);
+    drop(sem_clone);
 }
 
 #[test]
@@ -291,7 +322,7 @@ impl fmt::Display for EntityId {
 }
 
 #[test]
-fn startup_directory_lists_ten_types() {
+fn startup_directory_lists_startup_types() {
     // No registry query: the startup directory is a fixed static list.
     let names: Vec<&str> = startup_descriptors()
         .iter()
@@ -300,7 +331,18 @@ fn startup_directory_lists_ten_types() {
     assert_eq!(
         names,
         [
-            "INT", "FLOAT", "STRING", "BOOL", "LIST", "MAP", "PATH", "DURATION", "PIPE", "HANDLE",
+            "INT",
+            "FLOAT",
+            "STRING",
+            "BOOL",
+            "LIST",
+            "MAP",
+            "PATH",
+            "DURATION",
+            "PIPE",
+            "HANDLE",
+            "SEMAPHORE",
+            "PERMIT",
         ]
     );
 }

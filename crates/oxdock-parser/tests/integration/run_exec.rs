@@ -209,7 +209,7 @@ fn run_exec_shell_display_round_trips() {
 #[test]
 fn run_exec_wraps_in_structural_commands() {
     let script = indoc! {r#"
-        WITH_IO [stdout=pipe:cap] RUN ["cargo", "--version"]
+        WITH_IO [stdout=$cap] RUN ["cargo", "--version"]
     "#};
     let steps = parse_prod(script);
     match &steps[0].kind {

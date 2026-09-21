@@ -5,7 +5,7 @@ use oxdock_fs::{
 };
 #[cfg(windows)]
 use oxdock_process::CommandBuilder;
-use oxdock_process::SharedInput;
+use oxdock_process::{DefaultProcessManager, SharedInput};
 use std::env;
 use std::io::{self, IsTerminal, Read};
 use std::sync::{Arc, Mutex};
@@ -16,10 +16,86 @@ pub use oxdock_core::{
     parse_script_with_modules, run_steps, run_steps_with_context, run_steps_with_context_result,
     run_steps_with_manager_with_modules,
 };
-use oxdock_core::{ExecIo, run_steps_with_lazy_snapshot};
+use oxdock_core::{ExecIo, run_steps_with_lazy_snapshot_and_modules};
 pub use oxdock_parser::{Guard, Step, StepKind};
 pub use oxdock_process::shell_program;
 use std::collections::BTreeMap;
+
+mod endpoints;
+pub use endpoints::{EndpointFlags, build_registry};
+use oxdock_net_plugin::EndpointRegistry;
+
+/// Host modules bundled into the CLI runner. The base build exposes STD
+/// plus the NET virtual-endpoint toolkit (`NET_LISTEN`, `NET_ACCEPT`,
+/// `NET_CLOSE`, `NET_CONNECT`); `--features ssh` additionally registers
+/// the SSH server and client (`SSH_SERVE`, `SSH_ACCEPT`, `SSH_DEQUEUE`,
+/// `SSH_PUMP_CHANNEL`, `SSH_CLOSE`, `SSH_CONNECT`, `SSH_PUMP`) from
+/// oxdock-ssh-plugin.
+#[cfg(feature = "ssh")]
+fn cli_host_modules() -> Vec<HostModule<DefaultProcessManager>> {
+    cli_host_modules_with(&Arc::new(EndpointRegistry::new(false)))
+}
+
+/// Host modules bundled into the CLI runner (base build: STD and NET).
+#[cfg(not(feature = "ssh"))]
+fn cli_host_modules() -> Vec<HostModule<DefaultProcessManager>> {
+    cli_host_modules_with(&Arc::new(EndpointRegistry::new(false)))
+}
+
+/// Host modules resolving virtual endpoints through `registry`: the CLI
+/// builds it from `--listen`/`-p`/`--offline` before parsing so bind
+/// conflicts fail fast.
+#[cfg(feature = "ssh")]
+fn cli_host_modules_with(
+    registry: &Arc<EndpointRegistry>,
+) -> Vec<HostModule<DefaultProcessManager>> {
+    vec![
+        oxdock_net_plugin::module_with_endpoints(Arc::clone(registry)),
+        oxdock_ssh_plugin::module_with_endpoints(Arc::clone(registry)),
+    ]
+}
+
+/// Host modules bundled into the CLI runner (base build: STD and NET).
+#[cfg(not(feature = "ssh"))]
+fn cli_host_modules_with(
+    registry: &Arc<EndpointRegistry>,
+) -> Vec<HostModule<DefaultProcessManager>> {
+    vec![oxdock_net_plugin::module_with_endpoints(Arc::clone(
+        registry,
+    ))]
+}
+
+/// Host types bundled into the CLI runner alongside [`cli_host_modules`].
+#[cfg(feature = "ssh")]
+fn cli_host_types() -> Vec<&'static TypeDescriptor> {
+    vec![
+        oxdock_net_plugin::NetListenerTag::descriptor(),
+        oxdock_ssh_plugin::SshServerTag::descriptor(),
+        oxdock_ssh_plugin::SshSessionTag::descriptor(),
+    ]
+}
+
+/// Host types bundled into the CLI runner (base build: NET only).
+#[cfg(not(feature = "ssh"))]
+fn cli_host_types() -> Vec<&'static TypeDescriptor> {
+    vec![oxdock_net_plugin::NetListenerTag::descriptor()]
+}
+
+/// Parse a CLI script against STD plus any bundled host modules. Without
+/// extra modules this is exactly `parse_script`, so base-build behavior
+/// never changes.
+fn parse_cli_script(script: &str) -> Result<Vec<Step>> {
+    let modules = cli_host_modules();
+    if modules.is_empty() {
+        parse_script(script)
+    } else {
+        let mut engine = Engine::new();
+        for module in modules {
+            engine.register_module(module);
+        }
+        parse_script_with_modules(script, engine.module_table())
+    }
+}
 
 pub fn run() -> Result<()> {
     init_temp_gc();
@@ -50,6 +126,7 @@ pub enum ScriptSource {
 pub struct Options {
     pub script: ScriptSource,
     pub shell: bool,
+    pub endpoints: EndpointFlags,
 }
 
 impl Options {
@@ -57,8 +134,11 @@ impl Options {
         args: &mut impl Iterator<Item = String>,
         workspace_root: &GuardedPath,
     ) -> Result<Self> {
+        use lexopt::Arg::{Long, Short, Value};
+
         let mut script: Option<ScriptSource> = None;
         let mut shell = false;
+        let mut endpoints = EndpointFlags::default();
         let mut set_script = |source: ScriptSource, origin: &str| -> Result<()> {
             if script.is_some() {
                 bail!("script given multiple times ({origin})");
@@ -66,51 +146,101 @@ impl Options {
             script = Some(source);
             Ok(())
         };
-        while let Some(arg) = args.next() {
-            if arg.is_empty() {
-                continue;
-            }
-            match arg.as_str() {
-                "--script" => {
-                    let p = args
-                        .next()
-                        .ok_or_else(|| anyhow::anyhow!("--script requires a path"))?;
-                    if p == "-" {
+        // Pass the stream unfiltered: an explicit empty value (for
+        // example `--script ""`) is a real token boundary, so stripping
+        // empties up front would shift every following value. Bare empty
+        // positionals are skipped in the `Value` arm instead.
+        let mut parser = lexopt::Parser::from_args(args.by_ref());
+        while let Some(arg) = parser.next()? {
+            match arg {
+                Long("script") => {
+                    let path = value_string(
+                        parser
+                            .value()
+                            .map_err(|_| anyhow::anyhow!("--script requires a path"))?,
+                    )?;
+                    if path.is_empty() {
+                        bail!("--script requires a path");
+                    }
+                    if path == "-" {
                         set_script(ScriptSource::Stdin, "--script -")?;
                     } else {
                         set_script(
                             ScriptSource::Path(
                                 workspace_root
-                                    .join(&p)
-                                    .with_context(|| format!("guard script path {p}"))?,
+                                    .join(&path)
+                                    .with_context(|| format!("guard script path {path}"))?,
                             ),
                             "--script",
                         )?;
                     }
                 }
-                "--shell" => {
+                Long("shell") => {
                     shell = true;
                 }
-                "--help" | "-h" => {
+                Long("listen") => {
+                    let raw = value_string(
+                        parser
+                            .value()
+                            .map_err(|_| anyhow::anyhow!("--listen requires an address"))?,
+                    )?;
+                    endpoints.listens.push(endpoints::parse_listen_arg(&raw)?);
+                }
+                Short('p') => {
+                    let raw = value_string(
+                        parser
+                            .value()
+                            .map_err(|_| anyhow::anyhow!("-p requires outer:inner"))?,
+                    )?;
+                    endpoints
+                        .publishes
+                        .push(endpoints::parse_publish_arg(&raw)?);
+                }
+                Long("offline") => {
+                    endpoints.offline = true;
+                }
+                Long("help") | Short('h') => {
                     bail!("{}", usage());
                 }
-                "-" => set_script(ScriptSource::Stdin, "positional `-`")?,
-                other if other.starts_with('-') => bail!("unexpected flag: {}", other),
-                other => set_script(
-                    ScriptSource::Path(
-                        workspace_root
-                            .join(other)
-                            .with_context(|| format!("guard script path {other}"))?,
-                    ),
-                    "positional argument",
-                )?,
+                Value(value) => {
+                    let text = value_string(value)?;
+                    if text.is_empty() {
+                        continue;
+                    }
+                    if text == "-" {
+                        set_script(ScriptSource::Stdin, "positional `-`")?;
+                    } else {
+                        set_script(
+                            ScriptSource::Path(
+                                workspace_root
+                                    .join(&text)
+                                    .with_context(|| format!("guard script path {text}"))?,
+                            ),
+                            "positional argument",
+                        )?;
+                    }
+                }
+                Long(other) => bail!("unexpected flag: --{other}"),
+                Short(other) => bail!("unexpected flag: -{other}"),
             }
         }
 
         let script = script.unwrap_or(ScriptSource::Stdin);
 
-        Ok(Self { script, shell })
+        Ok(Self {
+            script,
+            shell,
+            endpoints,
+        })
     }
+}
+
+/// Option/positional text out of a lexopt value. Inputs arrive as
+/// `String`, so non-UTF8 is unreachable in practice; fail loudly anyway.
+fn value_string(value: std::ffi::OsString) -> Result<String> {
+    value
+        .into_string()
+        .map_err(|_| anyhow::anyhow!("argument must be UTF-8"))
 }
 
 /// Human-readable CLI usage, printed for `--help`/`-h`.
@@ -123,8 +253,12 @@ pub fn usage() -> String {
           SCRIPT             script file path (same as `--script <file>`); `-` reads stdin
           --script <file|->  script file under the workspace root, or `-` for stdin
           --shell            run the script, then drop into an interactive shell (requires a TTY)
+          --listen <addr>    expose a logical service port ([host:]port, repeatable)
+          -p <[host:]outer:inner>  map outer port to an inner service port or name (repeatable; outer 0 is ephemeral)
+          --offline          open no sockets (conflicts with --listen/-p)
           --help, -h         print this help and exit
         With no script given, reads the script from stdin (must be piped unless `--shell`).
+        Scripts declare logical endpoints (a port like 2251); the flags above map them to interfaces.
     "}
 }
 
@@ -178,8 +312,17 @@ pub fn execute_with_result(opts: Options, workspace_root: GuardedPath) -> Result
     let mut final_cwd = workspace_root.clone();
     let snapshot = Arc::new(LazyGuardedTempDir::new());
     if !script.trim().is_empty() {
-        let steps = parse_script(&script)?;
-        let output = run_steps_with_lazy_snapshot(&workspace_root, &steps, ExecIo::new())?;
+        // Bind endpoint sockets before parsing: conflicts fail fast,
+        // never parse-then-fail-on-bind.
+        let endpoints = build_registry(&opts.endpoints)?;
+        let steps = parse_cli_script(&script)?;
+        let output = run_steps_with_lazy_snapshot_and_modules(
+            &workspace_root,
+            &steps,
+            ExecIo::new(),
+            cli_host_modules_with(&endpoints),
+            cli_host_types(),
+        )?;
         final_cwd = output.final_cwd;
         return Ok(ExecutionResult {
             snapshot: output.snapshot,
@@ -193,6 +336,21 @@ pub fn execute_with_result(opts: Options, workspace_root: GuardedPath) -> Result
         final_cwd,
         bindings: BTreeMap::new(),
     })
+}
+
+/// Report ephemeral outer resolutions (`-p 0:<inner>`) to stderr so the
+/// runner learns the real ports. Fixed mappings need no report: the flags
+/// already name them.
+fn report_ephemeral_publishes(flags: &EndpointFlags, registry: &Arc<EndpointRegistry>) {
+    for (outer, inner) in &flags.publishes {
+        if outer.port() != 0 {
+            continue;
+        }
+        match registry.bound_addr(inner) {
+            Some(addr) => eprintln!("oxdock: published {addr} -> {inner}"),
+            None => eprintln!("oxdock: published <unbound> -> {inner}"),
+        }
+    }
 }
 
 /// Read the script source without creating any execution state.
@@ -274,7 +432,11 @@ where
     let mut snapshot = Arc::new(LazyGuardedTempDir::new());
     let mut fs: Option<Box<dyn WorkspaceFs>> = None;
     if !script.trim().is_empty() {
-        let steps = parse_script(&script)?;
+        // Bind endpoint sockets before parsing: conflicts fail fast,
+        // never parse-then-fail-on-bind.
+        let endpoints = build_registry(&opts.endpoints)?;
+        report_ephemeral_publishes(&opts.endpoints, &endpoints);
+        let steps = parse_cli_script(&script)?;
         // If we are running a script from a file, we might have stdin available for the script itself.
         // If we read the script from stdin, then stdin is consumed.
         // But if opts.script is ScriptSource::Path, stdin is still available.
@@ -294,7 +456,13 @@ where
 
         let mut io_cfg = ExecIo::new();
         io_cfg.set_stdin(stdin_handle);
-        let output = run_steps_with_lazy_snapshot(&workspace_root, &steps, io_cfg)?;
+        let output = run_steps_with_lazy_snapshot_and_modules(
+            &workspace_root,
+            &steps,
+            io_cfg,
+            cli_host_modules_with(&endpoints),
+            cli_host_types(),
+        )?;
         final_cwd = output.final_cwd;
         snapshot = output.snapshot;
         fs = Some(output.fs);
@@ -470,6 +638,7 @@ mod tests {
         let opts = Options {
             script: ScriptSource::Path(script_path),
             shell: true,
+            endpoints: EndpointFlags::default(),
         };
 
         let observed = Cell::new(false);
@@ -623,8 +792,124 @@ mod tests {
         assert!(text.contains("SCRIPT"), "{text}");
         assert!(text.contains("--script"), "{text}");
         assert!(text.contains("--help"), "{text}");
+        assert!(text.contains("--listen"), "{text}");
+        assert!(text.contains("-p <[host:]outer:inner>"), "{text}");
+        assert!(text.contains("--offline"), "{text}");
         // Tagline is single-sourced from the package manifest, not hardcoded.
         assert!(text.contains(env!("CARGO_PKG_DESCRIPTION")), "{text}");
+    }
+
+    #[cfg_attr(
+        miri,
+        ignore = "GuardedPath::tempdir relies on OS tempdirs; blocked under Miri isolation"
+    )]
+    #[test]
+    fn options_parse_endpoint_flags() {
+        // Pure flag parsing: no sockets open, but tempdir keeps the
+        // ignore uniform with the neighboring parse tests.
+        let workspace = GuardedPath::tempdir().expect("tempdir");
+        let mut args = vec![
+            "--listen".to_string(),
+            "0.0.0.0:2251".to_string(),
+            "-p".to_string(),
+            "2222:demo-proxy".to_string(),
+            "-p".to_string(),
+            "0:2252".to_string(),
+            "-".to_string(),
+        ]
+        .into_iter();
+        let opts = Options::parse(&mut args, workspace.as_guarded_path()).expect("parse");
+        assert_eq!(opts.endpoints.listens.len(), 1);
+        assert_eq!(opts.endpoints.publishes.len(), 2);
+        assert!(!opts.endpoints.offline);
+        assert!(matches!(opts.script, ScriptSource::Stdin));
+    }
+
+    #[cfg_attr(
+        miri,
+        ignore = "GuardedPath::tempdir relies on OS tempdirs; blocked under Miri isolation"
+    )]
+    #[test]
+    fn options_parse_offline_flag() {
+        let workspace = GuardedPath::tempdir().expect("tempdir");
+        let mut args = vec!["--offline".to_string(), "-".to_string()].into_iter();
+        let opts = Options::parse(&mut args, workspace.as_guarded_path()).expect("parse");
+        assert!(opts.endpoints.offline);
+    }
+
+    #[cfg_attr(
+        miri,
+        ignore = "GuardedPath::tempdir relies on OS tempdirs; blocked under Miri isolation"
+    )]
+    #[test]
+    fn options_parse_rejects_bad_endpoint_flags() {
+        let workspace = GuardedPath::tempdir().expect("tempdir");
+        for args in [
+            vec!["--listen"],
+            vec!["--listen", "0.0.0.0:0"],
+            vec!["-p"],
+            vec!["-p", "2222"],
+            vec!["-p", "2222:0"],
+        ] {
+            let mut args = args.into_iter().map(str::to_string);
+            Options::parse(&mut args, workspace.as_guarded_path())
+                .expect_err("bad endpoint flag must fail");
+        }
+    }
+
+    #[cfg_attr(
+        miri,
+        ignore = "GuardedPath::tempdir relies on OS tempdirs; blocked under Miri isolation"
+    )]
+    #[test]
+    fn options_parse_empty_values_hold_token_boundaries() {
+        // Regression: explicit empty values must not shift the stream.
+        // `--script ""` bails instead of consuming the next token, and a
+        // bare empty positional is skipped like before.
+        let workspace = GuardedPath::tempdir().expect("tempdir");
+        let mut args = vec![
+            "--script".to_string(),
+            "".to_string(),
+            "--shell".to_string(),
+        ]
+        .into_iter();
+        let err = Options::parse(&mut args, workspace.as_guarded_path())
+            .expect_err("empty script path must fail");
+        assert!(
+            err.to_string().contains("--script requires a path"),
+            "{err:?}"
+        );
+        let mut args = vec!["".to_string(), "-".to_string()].into_iter();
+        let opts = Options::parse(&mut args, workspace.as_guarded_path()).expect("parse");
+        assert!(matches!(opts.script, ScriptSource::Stdin));
+    }
+
+    #[cfg_attr(
+        miri,
+        ignore = "GuardedPath::tempdir relies on OS tempdirs; blocked under Miri isolation"
+    )]
+    #[test]
+    fn options_parse_accepts_equals_and_attached_forms() {
+        // lexopt-native spellings: `--flag=value`, attached short values,
+        // and `--` separating positionals.
+        let workspace = GuardedPath::tempdir().expect("tempdir");
+        let workspace_root = workspace.as_guarded_path().clone();
+        let mut args = vec![
+            "--listen=0.0.0.0:2251".to_string(),
+            "-p2222:demo-proxy".to_string(),
+            "--".to_string(),
+            "script.ox".to_string(),
+        ]
+        .into_iter();
+        let opts = Options::parse(&mut args, &workspace_root).expect("parse");
+        assert_eq!(opts.endpoints.listens.len(), 1);
+        assert_eq!(opts.endpoints.publishes.len(), 1);
+        match opts.script {
+            ScriptSource::Path(path) => {
+                assert_eq!(path, workspace_root.join("script.ox").expect("script path"))
+            }
+            ScriptSource::Stdin => panic!("expected path script after --"),
+        }
     }
 
     #[cfg_attr(
@@ -661,6 +946,7 @@ mod tests {
         let opts = Options {
             script: ScriptSource::Path(script_path),
             shell: false,
+            endpoints: EndpointFlags::default(),
         };
         let result = execute_with_result(opts, workspace_root).expect("execute");
         let snapshot = result
@@ -690,6 +976,7 @@ mod tests {
         let opts = Options {
             script: ScriptSource::Path(script_path),
             shell: false,
+            endpoints: EndpointFlags::default(),
         };
         let result = execute_with_result(opts, workspace_root.clone()).expect("execute");
         assert!(
@@ -722,6 +1009,7 @@ mod tests {
         let opts = Options {
             script: ScriptSource::Path(script_path),
             shell: false,
+            endpoints: EndpointFlags::default(),
         };
         let result = execute_with_result(opts, workspace_root.clone()).expect("execute");
         assert!(
@@ -745,6 +1033,7 @@ mod tests {
         let opts = Options {
             script: ScriptSource::Path(script_path),
             shell: true,
+            endpoints: EndpointFlags::default(),
         };
         let called = RefCell::new(None::<(String, String)>);
         execute_for_test(opts, workspace_root.clone(), |cwd, workspace| {
@@ -760,6 +1049,95 @@ mod tests {
         })?;
         let seen = called.borrow().clone().expect("shell runner called");
         assert_eq!(seen.1, workspace_root.display());
+        Ok(())
+    }
+
+    /// The `ssh` feature wires the SSH host module into the real CLI
+    /// runner: serve an ephemeral server and close it through
+    /// `execute_with_result`, no client needed.
+    #[cfg(feature = "ssh")]
+    #[cfg_attr(
+        miri,
+        ignore = "loopback TCP plus threads plus a Tokio runtime; also GuardedPath::tempdir"
+    )]
+    #[test]
+    fn ssh_feature_serves_and_closes() -> Result<()> {
+        let workspace = GuardedPath::tempdir()?;
+        let workspace_root = workspace.as_guarded_path().clone();
+        let script_path = workspace_root.join("ssh-serve.ox")?;
+        let resolver = PathResolver::new(workspace_root.as_path(), workspace_root.as_path())?;
+        let script = indoc! {"
+            IMPORT [STD, SSH]
+            LET $m: MAP = SSH_SERVE(\"23301\", {username: \"test\", password: \"test123\"})
+            SSH_CLOSE($m.server)
+        "};
+        resolver.write_file(&script_path, script.as_bytes())?;
+        let opts = Options {
+            script: ScriptSource::Path(script_path),
+            shell: false,
+            endpoints: EndpointFlags::default(),
+        };
+        execute_with_result(opts, workspace_root)?;
+        Ok(())
+    }
+
+    /// The NET module ships in every CLI build: bind an ephemeral
+    /// loopback port and close it through `execute_with_result`, no
+    /// client needed.
+    #[cfg_attr(
+        miri,
+        ignore = "loopback TCP plus GuardedPath::tempdir; blocked under Miri isolation"
+    )]
+    #[test]
+    fn net_module_listens_and_closes() -> Result<()> {
+        let workspace = GuardedPath::tempdir()?;
+        let workspace_root = workspace.as_guarded_path().clone();
+        let script_path = workspace_root.join("net-listen.ox")?;
+        let resolver = PathResolver::new(workspace_root.as_path(), workspace_root.as_path())?;
+        let script = indoc! {"
+            IMPORT [STD, NET]
+            LET $l: MAP = NET_LISTEN(\"23501\", {})
+            NET_CLOSE($l.listener)
+        "};
+        resolver.write_file(&script_path, script.as_bytes())?;
+        let opts = Options {
+            script: ScriptSource::Path(script_path),
+            shell: false,
+            endpoints: EndpointFlags::default(),
+        };
+        execute_with_result(opts, workspace_root)?;
+        Ok(())
+    }
+
+    /// Without the `ssh` feature the same script must fail to parse:
+    /// SSH names stay unknown instead of silently changing meaning.
+    #[cfg(not(feature = "ssh"))]
+    #[cfg_attr(
+        miri,
+        ignore = "GuardedPath::tempdir relies on OS tempdirs; blocked under Miri isolation"
+    )]
+    #[test]
+    fn ssh_scripts_rejected_without_feature() -> Result<()> {
+        let workspace = GuardedPath::tempdir()?;
+        let workspace_root = workspace.as_guarded_path().clone();
+        let script_path = workspace_root.join("ssh-serve.ox")?;
+        let resolver = PathResolver::new(workspace_root.as_path(), workspace_root.as_path())?;
+        let script = indoc! {"
+            IMPORT [STD, SSH]
+            LET $m: MAP = SSH_SERVE(\"23301\", {username: \"test\", password: \"test123\"})
+            SSH_CLOSE($m.server)
+        "};
+        resolver.write_file(&script_path, script.as_bytes())?;
+        let opts = Options {
+            script: ScriptSource::Path(script_path),
+            shell: false,
+            endpoints: EndpointFlags::default(),
+        };
+        let err = match execute_with_result(opts, workspace_root) {
+            Ok(_) => panic!("SSH names must be unknown without the feature"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("SSH"), "{err}");
         Ok(())
     }
 }

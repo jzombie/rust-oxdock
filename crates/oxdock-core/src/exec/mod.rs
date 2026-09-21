@@ -5,7 +5,6 @@ mod fs_ops;
 mod handlers;
 mod io;
 mod native;
-mod pipe;
 mod state;
 mod steps;
 #[cfg(test)]
@@ -20,12 +19,13 @@ pub(crate) use self::handlers::{
     dispatch_cancel_step, dispatch_continue, dispatch_copy, dispatch_copy_git, dispatch_cwd,
     dispatch_echo, dispatch_env, dispatch_exit, dispatch_expand, dispatch_for_loop,
     dispatch_func_def, dispatch_hash_sha256, dispatch_if_then, dispatch_inherit_env, dispatch_ls,
-    dispatch_mkdir, dispatch_read, dispatch_read_line, dispatch_return, dispatch_run,
-    dispatch_run_exec, dispatch_set, dispatch_sleep_step, dispatch_symlink, dispatch_timeout_step,
-    dispatch_while_loop, dispatch_with_io, dispatch_with_io_block, dispatch_workdir,
-    dispatch_workspace, dispatch_write,
+    dispatch_mkdir, dispatch_push_into_step, dispatch_read, dispatch_read_line, dispatch_return,
+    dispatch_run, dispatch_run_exec, dispatch_set, dispatch_sleep_step, dispatch_symlink,
+    dispatch_timeout_step, dispatch_while_loop, dispatch_with_io, dispatch_with_io_block,
+    dispatch_workdir, dispatch_workspace, dispatch_write,
 };
 pub use self::io::ExecIo;
+pub use self::io::PipeStream;
 pub use self::native::{
     FuncKind, FuncMeta, FuncParam, FunctionRegistry, HostModule, HostRegistration, NativeFn,
     OxDockFn, PureFn, builtin_function_metas, builtin_function_names, std_module_table,
@@ -45,7 +45,8 @@ use oxdock_fs::{
 };
 use oxdock_parser::Step;
 use oxdock_process::{
-    BuiltinEnv, ProcessManager, SharedInput, SharedOutput, default_process_manager,
+    BuiltinEnv, DefaultProcessManager, ProcessManager, SharedInput, SharedOutput,
+    default_process_manager,
 };
 
 use std::collections::BTreeMap;
@@ -176,11 +177,32 @@ pub fn run_steps_with_lazy_snapshot(
     steps: &[Step],
     io: ExecIo,
 ) -> Result<LazyRunOutput> {
+    run_steps_with_lazy_snapshot_and_modules(build_context, steps, io, Vec::new(), Vec::new())
+}
+
+/// Same as [`run_steps_with_lazy_snapshot`], plus host modules and types
+/// (see [`run_steps_with_manager_with_modules`]). Lets binary hosts that
+/// run on the lazy snapshot path expose plugin surface without changing
+/// CLI semantics.
+pub fn run_steps_with_lazy_snapshot_and_modules(
+    build_context: &GuardedPath,
+    steps: &[Step],
+    io: ExecIo,
+    modules: Vec<HostModule<DefaultProcessManager>>,
+    types: Vec<&'static TypeDescriptor>,
+) -> Result<LazyRunOutput> {
     let mut resolver = PathResolver::new_lazy(build_context.clone())?;
     resolver.set_workspace_root(build_context.clone());
     let snapshot = resolver.snapshot_handle();
     let fs: Box<dyn WorkspaceFs> = Box::new(resolver);
-    match run_steps_with_manager(fs, steps, default_process_manager(), io) {
+    match run_steps_with_manager_with_modules(
+        fs,
+        steps,
+        default_process_manager(),
+        io,
+        modules,
+        types,
+    ) {
         Ok((final_cwd, fs, bindings)) => Ok(LazyRunOutput {
             final_cwd,
             snapshot,
@@ -315,13 +337,15 @@ fn new_state<P: ProcessManager>(fs: Box<dyn WorkspaceFs>, io: ExecIo) -> Result<
         cancel_token: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         active_process: std::sync::Arc::new(std::sync::Mutex::new(None)),
         named_tasks: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-        next_task_id: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        next_task_id: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
         inside_async: false,
         keeper_expiry: None,
         cancellable: false,
         functions: self::native::FunctionRegistry::with_builtins(),
         types: self::typing::startup_type_map(),
         call_depth: 0,
+        // Root flow is task 0; worker ids start at 1 (see next_task_id).
+        task_id: 0,
         _marker: std::marker::PhantomData,
     };
 
@@ -394,7 +418,13 @@ fn finish_run<P: ProcessManager>(
             anyhow::bail!("step {}: CONTINUE outside loop", idx + 1)
         }
         self::steps::Flow::Return { idx, .. } => {
-            anyhow::bail!("step {}: RETURN outside function", idx + 1)
+            // Values only cross a boundary: a function call, an ASYNC
+            // task, or an inline LET block. With none enclosing, the
+            // pipeline top rejects it like any other escaped flow.
+            anyhow::bail!(
+                "step {}: RETURN outside function, ASYNC task, or LET block",
+                idx + 1
+            )
         }
     }
 }

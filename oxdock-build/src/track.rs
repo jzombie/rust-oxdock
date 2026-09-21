@@ -153,12 +153,21 @@ pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
                     walk_expr(out, value);
                 }
             }
+            // Inline blocks run steps when evaluated, so their env
+            // references count exactly like any nested body.
+            Expr::Block(body) => {
+                for k in collect_env_references(body) {
+                    out.insert(k);
+                }
+            }
             Expr::Call { args, .. } => {
                 for arg in args {
                     walk_expr(out, arg);
                 }
             }
             Expr::Inspect(_) => {}
+            // Fresh pipe backends carry no env references.
+            Expr::FreshPipe => {}
             Expr::Compare { left, right, .. } => {
                 walk_expr(out, left);
                 walk_expr(out, right);
@@ -376,6 +385,7 @@ pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
             StepKind::Await { .. } => {}
             StepKind::Cancel { .. } => {}
             StepKind::Sleep { duration } => template_keys(&mut keys, duration),
+            StepKind::ListAppend { item, .. } => template_keys(&mut keys, item),
             StepKind::ReadLine { .. } => {}
             StepKind::FuncDef { body, .. } => {
                 for k in collect_env_references(body) {

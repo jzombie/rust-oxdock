@@ -1,0 +1,22 @@
+{
+  "targets": [
+    {
+      "name": "net-plugin-readme",
+      "out": "crates/plugins/oxdock-net-plugin/README.md",
+      "values": "crates/plugins/oxdock-net-plugin/.oxdock/template/values.json",
+      "template": "crates/plugins/oxdock-net-plugin/.oxdock/template/README.md.tmpl",
+      "fragments": {
+        "local": [
+          "crates/plugins/oxdock-net-plugin/.oxdock/template/header.md.tmpl",
+          "crates/plugins/oxdock-net-plugin/.oxdock/template/fragments/*"
+        ],
+        "shared": [
+          ".oxdock/template/shared/footer.md.tmpl"
+        ],
+        "generated": [
+          "crates/plugins/oxdock-net-plugin/.oxdock/template/generated/*"
+        ]
+      }
+    }
+  ]
+}

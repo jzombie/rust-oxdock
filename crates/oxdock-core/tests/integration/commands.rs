@@ -15,15 +15,27 @@ fn parse_one(cmd: &str) -> Box<StepKind> {
     Box::new(steps[0].kind.clone())
 }
 
-fn capture_pipeline(pipe: &str, path: &str, cmd: StepKind) -> [Step; 2] {
-    let pipe_name = pipe.to_string();
-    [
+fn capture_pipeline(pipe: &str, path: &str, cmd: StepKind) -> Vec<Step> {
+    // Hyphenated helper names are not valid `$var` idents; the variable is
+    // internal to the test, so underscores stand in.
+    let var = pipe.replace('-', "_");
+    vec![
+        Step {
+            guard: None,
+            kind: StepKind::Assign {
+                var: var.clone(),
+                decl_type: "PIPE".to_string(),
+                expr: oxdock_parser::Expr::FreshPipe,
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+        },
         Step {
             guard: None,
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdout,
-                    pipe: Some(oxdock_parser::PipeTarget::Name(pipe_name.clone())),
+                    pipe: Some(oxdock_parser::PipeTarget::Var(var.clone())),
                 }],
                 cmd: Box::new(cmd),
             },
@@ -35,7 +47,7 @@ fn capture_pipeline(pipe: &str, path: &str, cmd: StepKind) -> [Step; 2] {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdin,
-                    pipe: Some(oxdock_parser::PipeTarget::Name(pipe_name)),
+                    pipe: Some(oxdock_parser::PipeTarget::Var(var)),
                 }],
                 cmd: Box::new(StepKind::Write {
                     path: path.into(),
@@ -796,8 +808,9 @@ fn env_exposes_git_commit_hash() {
 
     let steps = oxdock_core::parse_script(indoc!(
         r#"
-        WITH_IO [stdout=pipe:commit_capture] ECHO {{ env:WORKSPACE_GIT_COMMIT }}
-        WITH_IO [stdin=pipe:commit_capture] WRITE out.txt
+        LET $commit_capture: PIPE
+        WITH_IO [stdout=$commit_capture] ECHO {{ env:WORKSPACE_GIT_COMMIT }}
+        WITH_IO [stdin=$commit_capture] WRITE out.txt
         "#
     ))
     .unwrap();
@@ -1137,22 +1150,19 @@ fn with_io_block_applies_defaults() {
     let root = guard_root(&temp);
 
     let script = indoc! {r#"
-        WITH_IO [stdout=pipe:snippet] {
+        LET $snippet: PIPE
+        WITH_IO [stdout=$snippet] {
             ECHO "alpha"
             ECHO "beta"
         }
+        WITH_IO [stdin=$snippet] WRITE out.txt
     "#};
     let steps = oxdock_core::parse_script(script).expect("parse WITH_IO block");
 
-    let captured = Arc::new(Mutex::new(Vec::new()));
-    let mut io_cfg = ExecIo::new();
-    io_cfg.insert_output_pipe("snippet", captured.clone());
-
-    run_steps_with_context_result_with_io(&root, &root, &steps, io_cfg)
+    run_steps_with_context_result_with_io(&root, &root, &steps, ExecIo::new())
         .expect("execute WITH_IO block");
 
-    let contents = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
-    assert_eq!(contents, "alpha\nbeta\n");
+    assert_eq!(read_trimmed(&root.join("out.txt").unwrap()), "alpha\nbeta");
 }
 
 #[test]
@@ -1161,8 +1171,9 @@ fn with_io_routes_stdout_into_later_stdin() {
     let root = guard_root(&temp);
 
     let script = indoc! {r#"
-        WITH_IO [stdout=pipe:relay] ECHO streamed
-        WITH_IO [stdin=pipe:relay] READ
+        LET $relay: PIPE
+        WITH_IO [stdout=$relay] ECHO streamed
+        WITH_IO [stdin=$relay] READ
     "#};
     let steps = oxdock_core::parse_script(script).expect("parse WITH_IO pipe script");
 
@@ -1231,11 +1242,224 @@ fn break_outside_loop_is_step_numbered_error() {
 }
 
 #[test]
-fn return_outside_function_is_step_numbered_error() {
+fn return_at_top_level_is_boundary_error() {
+    // Values only cross a boundary (function call, ASYNC task, LET block).
+    // A bare top-level RETURN has none, so it fails like BREAK outside
+    // a loop; EXIT and ECHO cover the top-level uses.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    let err = run_script(&root, "RETURN \"x\"\n").expect_err("RETURN outside func must fail");
-    assert!(err.to_string().contains("RETURN outside function"), "{err}");
+    let err = run_script(&root, "RETURN \"x\"\n").expect_err("top-level RETURN must fail");
+    assert!(
+        err.to_string()
+            .contains("RETURN outside function, ASYNC task, or LET block"),
+        "{err}"
+    );
+}
+
+#[test]
+fn return_inside_top_level_if_is_boundary_error() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IF true {
+          RETURN 42
+        }
+        ECHO "unreached"
+    "#};
+    let err = run_script(&root, script).expect_err("top-level RETURN under IF must fail");
+    assert!(
+        err.to_string()
+            .contains("RETURN outside function, ASYNC task, or LET block"),
+        "{err}"
+    );
+}
+
+#[test]
+fn let_block_binds_return_value() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let bindings = run_script_with_scope(&root, "LET $a: STRING = { RETURN \"hello\" }\n")
+        .expect("LET block runs");
+    assert_eq!(bindings.get("a"), Some(&Value::string("hello".to_string())));
+}
+
+#[test]
+fn let_block_binds_any_declared_type() {
+    // The block yields a value; the declared type checks it like any
+    // other RHS. INT and LIST bind here, STRING is not special.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        LET $n: INT = { RETURN 40 + 2 }
+        LET $xs: LIST = { RETURN ["a", "b"] }
+    "#};
+    let bindings = run_script_with_scope(&root, script).expect("typed blocks run");
+    assert_eq!(bindings.get("n"), Some(&Value::int(42)));
+    assert_eq!(
+        bindings.get("xs"),
+        Some(&Value::list(vec![
+            Value::string("a".to_string()),
+            Value::string("b".to_string()),
+        ]))
+    );
+}
+
+#[test]
+fn let_block_fallthrough_binds_empty_string() {
+    // No RETURN means Done, which yields "" exactly like a function body.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let bindings = run_script_with_scope(&root, "LET $a: STRING = { ECHO hi }\n")
+        .expect("fallthrough block runs");
+    assert_eq!(bindings.get("a"), Some(&Value::string(String::new())));
+}
+
+#[test]
+fn let_block_type_mismatch_fails_at_bind() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let err = run_script(&root, "LET $a: INT = { RETURN \"hi\" }\n")
+        .expect_err("mistyped block value must fail");
+    assert!(!err.to_string().is_empty(), "error names the mismatch");
+}
+
+#[test]
+fn let_block_sees_outer_scope_but_leaks_nothing() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        LET $outer: STRING = "out"
+        LET $a: STRING = {
+            LET $inner: STRING = "in"
+            RETURN "{{ $outer }}-{{ $inner }}"
+        }
+    "#};
+    let bindings = run_script_with_scope(&root, script).expect("scoped block runs");
+    assert_eq!(
+        bindings.get("a"),
+        Some(&Value::string("out-in".to_string()))
+    );
+    assert!(!bindings.contains_key("inner"), "block locals stay inside");
+}
+
+#[test]
+fn let_block_nested_inner_boundary_wins() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        LET $a: STRING = {
+            LET $b: STRING = { RETURN "inner" }
+            RETURN $b
+        }
+    "#};
+    let bindings = run_script_with_scope(&root, script).expect("nested blocks run");
+    assert_eq!(bindings.get("a"), Some(&Value::string("inner".to_string())));
+}
+
+#[test]
+fn let_block_return_does_not_escape_function() {
+    // The block is the nearest boundary: its RETURN binds the variable
+    // instead of returning from the enclosing function.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        FUNC F() {
+            LET $a: STRING = { RETURN "block" }
+            RETURN "func-{{ $a }}"
+        }
+        LET $r: STRING = F()
+        WRITE r.txt "{{ $r }}"
+    "#};
+    run_script(&root, script).expect("block in function runs");
+    assert_eq!(read_trimmed(&root.join("r.txt").unwrap()), "func-block");
+}
+
+#[test]
+fn let_block_return_binds_inside_async_task() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        LET $t: HANDLE = ASYNC {
+            LET $a: STRING = { RETURN "task-block" }
+            RETURN $a
+        }
+        LET $o: STRING = AWAIT $t
+        WRITE o.txt "{{ $o }}"
+    "#};
+    run_script(&root, script).expect("block in task runs");
+    assert_eq!(read_trimmed(&root.join("o.txt").unwrap()), "task-block");
+}
+
+#[test]
+fn let_block_supports_control_flow_return() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        LET $flag: BOOL = true
+        LET $a: STRING = {
+            IF $flag {
+                RETURN "yes"
+            }
+            RETURN "no"
+        }
+    "#};
+    let bindings = run_script_with_scope(&root, script).expect("control-flow block runs");
+    assert_eq!(bindings.get("a"), Some(&Value::string("yes".to_string())));
+}
+
+#[test]
+fn break_cannot_cross_block_boundary() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let err = run_script(&root, "LET $a: STRING = { BREAK }\n")
+        .expect_err("BREAK across block must fail");
+    assert!(
+        err.to_string().contains("cannot cross block boundary"),
+        "{err}"
+    );
+}
+
+#[test]
+fn continue_cannot_cross_block_boundary() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let err = run_script(&root, "LET $a: STRING = { CONTINUE }\n")
+        .expect_err("CONTINUE across block must fail");
+    assert!(
+        err.to_string().contains("cannot cross block boundary"),
+        "{err}"
+    );
+}
+
+#[test]
+fn let_map_literal_still_binds_map() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let bindings =
+        run_script_with_scope(&root, "LET $m: MAP = {a: 1}\n").expect("map literal runs");
+    assert!(bindings.contains_key("m"), "map still parses as map");
+}
+
+#[test]
+fn commented_multiline_map_binds_without_comment_text() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        LET $m: MAP = {
+            // leading comment
+            key_path: "/temp/test_key", /* trailing */
+            // own line
+            port: 2251
+        }
+    "#};
+    let bindings = run_script_with_scope(&root, script).expect("commented map runs");
+    let mut expected = BTreeMap::new();
+    expected.insert(
+        "key_path".to_string(),
+        Value::string("/temp/test_key".to_string()),
+    );
+    expected.insert("port".to_string(), Value::int(2251));
+    assert_eq!(bindings.get("m"), Some(&Value::map(expected)));
 }
 
 #[test]
@@ -1419,7 +1643,7 @@ fn pipe_declare_first_registers_for_later_bindings() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        LET $p: PIPE = pipe:chan
+        LET $p: PIPE
         WITH_IO [stdout=$p] ECHO hello
         WITH_IO [stdin=$p] READ_LINE $line
     "#};
@@ -1441,41 +1665,36 @@ fn inspect_expression_returns_pipe_snapshot_map() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        LET $p: PIPE = pipe:ch
+        LET $p: PIPE
         WITH_IO [stdout=$p] ECHO "payload"
         LET $info: MAP = INSPECT($p)
-        LET $snap: STRING = "{{ $info.type }}-{{ $info.is_os_pipe }}-{{ $info.buffer_bytes }}-{{ $info.readers }}"
-        IF $info.is_os_pipe {
-            WRITE unexpected.txt "should be a script pipe"
-        }
+        LET $snap: STRING = "{{ $info.type }}-{{ $info.pipe_kind }}-{{ $info.buffer_bytes }}-{{ $info.readers }}"
     "#};
     let scope = run_script_with_scope(&root, script).expect("INSPECT must work");
-    assert_eq!(scope["snap"], Value::string("PIPE-false-8-1".to_string()));
-    assert!(!root.join("unexpected.txt").unwrap().exists());
+    assert_eq!(scope["snap"], Value::string("PIPE-script-8-1".to_string()));
 }
 
 #[test]
 #[cfg_attr(
     miri,
-    ignore = "OS promotion is disabled under Miri; every pipe stays a script pipe"
+    ignore = "spawns a real subprocess; Miri does not support process execution"
 )]
-fn inspect_reports_os_pipe_for_promoted_single_run() {
+fn inspect_reports_script_pipe_for_single_run() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    // Single-RUN background tasks promote to zero-copy OS kernel pipes.
-    // Declaring the handle *after* the promoting step keeps the OS type
-    // (first binding wins), so INSPECT must report is_os_pipe=true.
-    // `cargo --version` is the portable single-RUN producer (also used by
-    // the exec-form failure test); its tiny output never fills the pipe.
+    // One pipe kind: even single-RUN producers stay store-and-forward
+    // script pipes, so INSPECT always reports script no matter which
+    // task or command bound the handle. `cargo --version` is the portable
+    // single-RUN producer; its tiny output never fills the pipe.
     let script = indoc! {r#"
-        LET $t: HANDLE = WITH_IO [stdout=pipe:osp] ASYNC RUN ["cargo", "--version"]
+        LET $osp: PIPE
+        LET $t: HANDLE = WITH_IO [stdout=$osp] ASYNC RUN ["cargo", "--version"]
         AWAIT $t
-        LET $p: PIPE = pipe:osp
-        LET $info: MAP = INSPECT($p)
-        LET $v: BOOL = $info.is_os_pipe
+        LET $info: MAP = INSPECT($osp)
+        LET $v: STRING = "{{ $info.pipe_kind }}"
     "#};
-    let scope = run_script_with_scope(&root, script).expect("INSPECT of promoted pipe must work");
-    assert_eq!(scope["v"], Value::bool(true));
+    let scope = run_script_with_scope(&root, script).expect("INSPECT of pipe must work");
+    assert_eq!(scope["v"], Value::string("script".to_string()));
 }
 
 #[test]
@@ -1655,21 +1874,20 @@ fn run_exec_form_spawns_directly_and_pipes_stdout() {
     // without relying on shell builtins (`echo` is not a Windows executable).
     let script = indoc!(
         r#"
-        WITH_IO [stdout=pipe:cap] RUN ["cargo", "--version"]
+        LET $cap: PIPE
+        WITH_IO [stdout=$cap] RUN ["cargo", "--version"]
+        WITH_IO [stdin=$cap] WRITE out.txt
         "#
     );
     let steps = oxdock_core::parse_script(script).unwrap();
     assert!(
-        matches!(&steps[0].kind, StepKind::WithIo { cmd, .. } if matches!(cmd.as_ref(), StepKind::RunExec { .. })),
-        "first step must wrap RunExec, got {:?}",
-        steps[0].kind
+        matches!(&steps[1].kind, StepKind::WithIo { cmd, .. } if matches!(cmd.as_ref(), StepKind::RunExec { .. })),
+        "second step must wrap RunExec, got {:?}",
+        steps[1].kind
     );
-    let captured = Arc::new(Mutex::new(Vec::new()));
-    let mut io_cfg = ExecIo::new();
-    io_cfg.insert_output_pipe("cap", captured.clone());
-    run_steps_with_context_result_with_io(&root, &root, &steps, io_cfg).unwrap();
+    run_steps_with_context_result_with_io(&root, &root, &steps, ExecIo::new()).unwrap();
 
-    let out = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
+    let out = read_trimmed(&root.join("out.txt").unwrap());
     assert!(
         out.starts_with("cargo "),
         "expected cargo version output, got {out:?}"
@@ -1741,6 +1959,7 @@ fn _assert_step_kind_exhaustiveness(kind: &StepKind) {
         StepKind::Cancel { .. } => {}
         StepKind::Timeout { .. } => {}
         StepKind::Sleep { .. } => {}
+        StepKind::ListAppend { .. } => {}
         StepKind::FuncDef { .. } => {}
         StepKind::Call { .. } => {}
         StepKind::Return { .. } => {}
@@ -1814,6 +2033,468 @@ fn cancel_previously_awaited_task_fails() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// LIST_APPEND plus AWAIT on a LIST of HANDLEs (worker pools)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn list_append_mutates_binding_in_place() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        LET $items: LIST = []
+        LIST_APPEND $items "first"
+        LIST_APPEND $items "second"
+        LET $want: LIST = ["first", "second"]
+        ASSERT_EQ $items $want
+    "#};
+    run_script(&root, script).expect("list append mutates");
+}
+
+#[test]
+fn list_append_detaches_shared_buffer() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        LET $a: LIST = ["1"]
+        LET $b: LIST = $a
+        LIST_APPEND $a "2"
+        LET $want_a: LIST = ["1", "2"]
+        LET $want_b: LIST = ["1"]
+        ASSERT_EQ $a $want_a
+        ASSERT_EQ $b $want_b
+    "#};
+    run_script(&root, script).expect("shared append detaches");
+}
+
+#[test]
+fn list_append_accumulates_in_a_loop() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        LET $items: LIST = []
+        LET $w: INT = 0
+        WHILE $w < 3 {
+            LIST_APPEND $items $w
+            $w = $w + 1
+        }
+        LET $want: LIST = [0, 1, 2]
+        ASSERT_EQ $items $want
+    "#};
+    run_script(&root, script).expect("loop accumulation works");
+}
+
+#[test]
+fn list_append_rejects_non_list_binding() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        LET $s: STRING = "nope"
+        LIST_APPEND $s 1
+    "#};
+    let err = run_script(&root, script).expect_err("non-list append must fail");
+    assert!(err.to_string().contains("not LIST"), "{err}");
+}
+
+#[test]
+fn list_append_rejects_undeclared_variable() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        LIST_APPEND $missing 1
+    "#};
+    let err = run_script(&root, script).expect_err("undeclared append must fail");
+    assert!(err.to_string().contains("undeclared variable"), "{err}");
+}
+
+// ---------------------------------------------------------------------------
+// SEMAPHORE admission control
+// ---------------------------------------------------------------------------
+
+#[test]
+fn semaphore_admits_to_cap_then_rejects() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD]
+        LET $max: INT = 2
+        LET $sem: SEMAPHORE = SEMAPHORE_NEW($max)
+        LET $first: MAP = SEMAPHORE_TRY_ACQUIRE($sem)
+        LET $second: MAP = SEMAPHORE_TRY_ACQUIRE($sem)
+        LET $third: MAP = SEMAPHORE_TRY_ACQUIRE($sem)
+        LET $h1: INT = $first.held
+        LET $h2: INT = $second.held
+        LET $h3: INT = $third.held
+        ASSERT_EQ $h1 1
+        ASSERT_EQ $h2 1
+        ASSERT_EQ $h3 0
+        LET $free: INT = SEMAPHORE_AVAILABLE($sem)
+        ASSERT_EQ $free 0
+        LET $active: INT = $max - SEMAPHORE_AVAILABLE($sem)
+        ASSERT_EQ $active 2
+        WRITE first.txt "{{ $first.permit }}"
+    "#};
+    run_script(&root, script).expect("admit to cap runs");
+    assert_eq!(read_trimmed(&root.join("first.txt").unwrap()), "<permit>");
+}
+
+#[test]
+fn semaphore_miss_carries_no_permit_key() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD]
+        LET $sem: SEMAPHORE = SEMAPHORE_NEW(1)
+        LET $only: MAP = SEMAPHORE_TRY_ACQUIRE($sem)
+        LET $miss: MAP = SEMAPHORE_TRY_ACQUIRE($sem)
+        LET $permit: PERMIT = $only.permit
+        LET $late: PERMIT = $miss.permit
+    "#};
+    let err = run_script(&root, script).expect_err("miss has no permit key");
+    assert!(err.to_string().contains("Key 'permit' not found"), "{err}");
+}
+
+#[test]
+fn semaphore_iteration_scope_exit_releases() {
+    // Each FOR iteration is a scope: permits bound inside drop at the
+    // iteration boundary, so a cap-1 semaphore admits every iteration.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD]
+        LET $sem: SEMAPHORE = SEMAPHORE_NEW(1)
+        FOR $i: INT IN [1, 2, 3] {
+            LET $acq: MAP = SEMAPHORE_TRY_ACQUIRE($sem)
+            LET $held: INT = $acq.held
+            ASSERT_EQ $held 1
+            LET $permit: PERMIT = $acq.permit
+        }
+        LET $free: INT = SEMAPHORE_AVAILABLE($sem)
+        ASSERT_EQ $free 1
+    "#};
+    run_script(&root, script).expect("iteration scopes release");
+}
+
+#[test]
+fn semaphore_worker_return_releases() {
+    // The permit rides scope capture into ASYNC; worker return drops the
+    // forked state, so the main flow re-acquires with no cleanup code.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD]
+        LET $sem: SEMAPHORE = SEMAPHORE_NEW(1)
+        LET $t: HANDLE = ASYNC {
+            LET $acq: MAP = SEMAPHORE_TRY_ACQUIRE($sem)
+            LET $permit: PERMIT = $acq.permit
+            RETURN $acq.held
+        }
+        LET $held: INT = AWAIT $t
+        ASSERT_EQ $held 1
+        LET $re: MAP = SEMAPHORE_TRY_ACQUIRE($sem)
+        LET $reheld: INT = $re.held
+        ASSERT_EQ $reheld 1
+    "#};
+    run_script(&root, script).expect("worker return releases");
+}
+
+#[test]
+fn semaphore_rejects_bad_construction_and_types() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    for script in [
+        "IMPORT [STD]\nLET $s: SEMAPHORE = SEMAPHORE_NEW(0)\n",
+        "IMPORT [STD]\nLET $s: SEMAPHORE = SEMAPHORE_NEW(-3)\n",
+        "IMPORT [STD]\nLET $m: MAP = SEMAPHORE_TRY_ACQUIRE(\"nope\")\n",
+        "IMPORT [STD]\nLET $f: INT = SEMAPHORE_AVAILABLE(42)\n",
+        "IMPORT [STD]\nLET $s: SEMAPHORE = \"nope\"\n",
+    ] {
+        let err = run_script(&root, script).expect_err("bad semaphore use must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("SEMAPHORE_NEW() requires a positive max")
+                || msg.contains("must be a SEMAPHORE")
+                || msg.contains("TypeMismatch"),
+            "{msg}"
+        );
+    }
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "CANCEL joins real background threads")]
+fn semaphore_cancel_releases_the_permit() {
+    // Blocking CANCEL joins the worker, so its frame (and the permit
+    // clone) is gone before CANCEL returns: re-acquire is deterministic.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD]
+        LET $sem: SEMAPHORE = SEMAPHORE_NEW(1)
+        LET $t: HANDLE = ASYNC {
+            LET $acq: MAP = SEMAPHORE_TRY_ACQUIRE($sem)
+            LET $permit: PERMIT = $acq.permit
+            WRITE holding.txt "yes"
+            SLEEP 30s
+        }
+        SLEEP 2s
+        CANCEL $t
+        LET $re: MAP = SEMAPHORE_TRY_ACQUIRE($sem)
+        LET $held: INT = $re.held
+        ASSERT_EQ $held 1
+    "#};
+    run_script(&root, script).expect("cancel releases");
+    assert_eq!(read_trimmed(&root.join("holding.txt").unwrap()), "yes");
+}
+
+#[test]
+fn semaphore_worker_error_releases_the_permit() {
+    // The failing worker is never awaited, so its error surfaces at the
+    // end-of-pipeline reap instead: the script fails overall, but the
+    // marker written after re-acquire proves the permit dropped on the
+    // error unwind first.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD]
+        LET $sem: SEMAPHORE = SEMAPHORE_NEW(1)
+        LET $t: HANDLE = ASYNC {
+            LET $acq: MAP = SEMAPHORE_TRY_ACQUIRE($sem)
+            LET $permit: PERMIT = $acq.permit
+            WRITE holding.txt "yes"
+            ASSERT_EQ 1 2
+        }
+        SLEEP 2s
+        LET $re: MAP = SEMAPHORE_TRY_ACQUIRE($sem)
+        WRITE released.txt "{{ $re.held }}"
+    "#};
+    let err = run_script(&root, script).expect_err("worker error must fail the script");
+    assert!(err.to_string().contains("ASSERT_EQ mismatch"), "{err}");
+    assert_eq!(read_trimmed(&root.join("holding.txt").unwrap()), "yes");
+    assert_eq!(read_trimmed(&root.join("released.txt").unwrap()), "1");
+}
+
+#[test]
+fn if_branch_env_reverts_on_exit() {
+    // Blocks scope ENV: an assignment inside IF reverts when the branch
+    // exits, like every other block scope.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        ENV MODE=production
+        LET $flag: BOOL = true
+        IF $flag {
+            ENV MODE=staging
+            WRITE inner.txt "{{ env:MODE }}"
+        }
+        WRITE outer.txt "{{ env:MODE }}"
+        LET $inner_body: STRING = READ inner.txt
+        LET $outer_body: STRING = READ outer.txt
+        ASSERT_EQ $inner_body "staging"
+        ASSERT_EQ $outer_body "production"
+    "#};
+    run_script(&root, script).expect("if env reverts");
+}
+
+#[test]
+fn async_captures_unreferenced_bindings() {
+    // Forking copies the whole environment: a worker holds clones of
+    // every live binding whether or not its body names them. The permit
+    // below is never referenced inside the worker, yet the slot stays
+    // held past the spawner's scope exit and frees on task return.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD]
+        LET $sem: SEMAPHORE = SEMAPHORE_NEW(1)
+        LET $w: HANDLE = {
+            LET $acq: MAP = SEMAPHORE_TRY_ACQUIRE($sem)
+            LET $permit: PERMIT = $acq.permit
+            LET $inner: HANDLE = ASYNC {
+                SLEEP 5s
+            }
+            RETURN $inner
+        }
+        LET $during: INT = SEMAPHORE_AVAILABLE($sem)
+        WRITE during.txt "{{ $during }}"
+        AWAIT $w
+        LET $after: INT = SEMAPHORE_AVAILABLE($sem)
+        WRITE after.txt "{{ $after }}"
+    "#};
+    run_script(&root, script).expect("unreferenced capture holds");
+    assert_eq!(read_trimmed(&root.join("during.txt").unwrap()), "0");
+    assert_eq!(read_trimmed(&root.join("after.txt").unwrap()), "1");
+}
+
+#[test]
+fn is_terminal_reports_bool_for_each_stream() {
+    // The bit follows the harness stdio (captured under cargo test, so
+    // normally false): assert the BOOL shape and determinism, not the bit.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD]
+        LET $out: BOOL = IS_TERMINAL("stdout")
+        LET $out_again: BOOL = IS_TERMINAL("stdout")
+        ASSERT_EQ $out $out_again
+        LET $in: BOOL = IS_TERMINAL("stdin")
+        LET $err: BOOL = IS_TERMINAL("stderr")
+    "#};
+    run_script(&root, script).expect("terminal checks run");
+}
+
+#[test]
+fn is_terminal_rejects_unknown_streams() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD]
+        LET $t: BOOL = IS_TERMINAL("usb0")
+    "#};
+    let err = run_script(&root, script).expect_err("unknown stream must fail");
+    assert!(
+        err.to_string()
+            .contains("expects \"stdin\", \"stdout\", or \"stderr\""),
+        "{err}"
+    );
+}
+
+#[test]
+fn is_terminal_rejects_wrong_case() {
+    // Stream names match exactly: no case folding, so `STDOUT` bails
+    // rather than silently meaning `stdout`.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD]
+        LET $t: BOOL = IS_TERMINAL("STDOUT")
+    "#};
+    let err = run_script(&root, script).expect_err("wrong case must fail");
+    assert!(
+        err.to_string()
+            .contains("expects \"stdin\", \"stdout\", or \"stderr\""),
+        "{err}"
+    );
+}
+
+#[test]
+fn is_terminal_inside_with_io_redirection_is_false() {
+    // Bound streams are never terminals, even when the parent runner
+    // itself sits on a TTY: the query answers for the step's bindings,
+    // not the process fds. Each leg writes its verdict to a file so the
+    // harness asserts values, not harness stdio.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD]
+        LET $p: PIPE
+        LET $q: PIPE
+        LET $r: PIPE
+        LET $t_out: BOOL = true
+        LET $t_in: BOOL = true
+        LET $t_err: BOOL = true
+        WITH_IO [stdout=$p] {
+            $t_out = IS_TERMINAL("stdout")
+        }
+        WITH_IO [stdin=$q] {
+            $t_in = IS_TERMINAL("stdin")
+        }
+        WITH_IO [stderr=$r] {
+            $t_err = IS_TERMINAL("stderr")
+        }
+        ASSERT_EQ $t_out false
+        ASSERT_EQ $t_in false
+        ASSERT_EQ $t_err false
+    "#};
+    run_script(&root, script).expect("redirected checks run");
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "AWAIT joins real background threads")]
+fn await_list_joins_worker_pool() {
+    // The proto multi-connection shape: collect ASYNC handles with
+    // LIST_APPEND in a loop, then join the group with one AWAIT. Task outputs stream to
+    // the parent in completion order, so the assertion sorts first.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        LET $workers: LIST = []
+        LET $w: INT = 0
+        WHILE $w < 3 {
+            LET $h: HANDLE = ASYNC { ECHO "worker {{ $w }}" }
+            LIST_APPEND $workers $h
+            $w = $w + 1
+        }
+        AWAIT $workers
+    "#};
+    let steps = oxdock_core::parse_script(script).unwrap();
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let mut io_cfg = oxdock_core::ExecIo::new();
+    io_cfg.set_stdout(Some(captured.clone()));
+    run_steps_with_context_result_with_io(&root, &root, &steps, io_cfg).unwrap();
+    let mut lines: Vec<String> = String::from_utf8(captured.lock().unwrap().clone())
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect();
+    lines.sort();
+    assert_eq!(lines, vec!["worker 0", "worker 1", "worker 2"]);
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "AWAIT joins real background threads")]
+fn await_empty_list_is_noop() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD]
+        LET $workers: LIST = []
+        AWAIT $workers
+        WRITE "resumed.txt" "ok"
+    "#};
+    run_script(&root, script).expect("empty await runs");
+    assert_eq!(read_trimmed(&root.join("resumed.txt").unwrap()), "ok");
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "AWAIT joins real background threads")]
+fn await_list_rejects_non_handle_member() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        LET $t: HANDLE = ASYNC ECHO hi
+        LET $workers: LIST = []
+        LIST_APPEND $workers $t
+        LIST_APPEND $workers 1
+        AWAIT $workers
+    "#};
+    let err = run_script(&root, script).expect_err("non-handle member must fail");
+    assert!(err.to_string().contains("is not a task handle"), "{err}");
+}
+
+#[test]
+fn await_scalar_non_handle_still_bails() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let err = run_script(&root, "LET $n: INT = 1\nAWAIT $n\n").expect_err("scalar await must fail");
+    assert!(err.to_string().contains("is not a task handle"), "{err}");
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "AWAIT joins real background threads")]
+fn await_list_twice_reports_already_awaited() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        LET $t: HANDLE = ASYNC ECHO hi
+        LET $workers: LIST = []
+        LIST_APPEND $workers $t
+        AWAIT $workers
+        AWAIT $workers
+    "#};
+    let err = run_script(&root, script).expect_err("second group await must fail");
+    assert!(err.to_string().contains("already been awaited"), "{err}");
+}
+
 #[test]
 #[cfg_attr(miri, ignore = "TIMEOUT preemption Zhang real background threads")]
 fn timeout_preempts_hung_await() {
@@ -1831,6 +2512,48 @@ fn timeout_preempts_hung_await() {
     assert!(
         elapsed < Duration::from_secs(10),
         "TIMEOUT must preempt the hung task promptly, took {elapsed:?}"
+    );
+}
+
+#[test]
+fn async_task_failure_preserves_error_chain() {
+    // The same failure must render the same causal chain on the main flow
+    // and across an ASYNC boundary: the task join re-emits the preserved
+    // error, it must not amputate `Caused by` layers.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let direct = run_script(&root, "READ missing.txt\n").expect_err("missing file must fail");
+    let direct_chain = format!("{direct:#}");
+    // Under Miri the workspace uses a synthetic snapshot filesystem, so a
+    // missing file surfaces as `missing file <rel>` with no OS `ENOENT`
+    // layer and no `for reading` open context.
+    #[cfg(miri)]
+    let leaf = "missing file";
+    #[cfg(all(unix, not(miri)))]
+    let leaf = "No such file or directory";
+    #[cfg(all(windows, not(miri)))]
+    let leaf = "cannot find the file";
+    assert!(
+        direct_chain.contains("failed to open") && direct_chain.contains(leaf),
+        "direct failure must carry a two-layer chain, got: {direct_chain}"
+    );
+    let via_task = run_script(&root, "LET $t: HANDLE = ASYNC READ missing.txt\nAWAIT $t\n")
+        .expect_err("task failure must propagate");
+    // The join re-emits the preserved error flattened into one message,
+    // so every causal layer must appear inline (no `causes:` structure
+    // survives, but no layer may go missing either).
+    let task_chain = format!("{via_task:#}");
+    #[cfg(miri)]
+    assert!(
+        task_chain.contains("failed to open") && task_chain.contains(leaf),
+        "task boundary must preserve every causal layer.\ndirect: {direct_chain}\ntask:   {task_chain}"
+    );
+    #[cfg(not(miri))]
+    assert!(
+        task_chain.contains("failed to open")
+            && task_chain.contains("for reading")
+            && task_chain.contains(leaf),
+        "task boundary must preserve every causal layer.\ndirect: {direct_chain}\ntask:   {task_chain}"
     );
 }
 
@@ -1987,6 +2710,7 @@ fn block_scopes_variables_env_and_workdir_while_leaking_files_and_pipes() {
         MKDIR sub_outer
         MKDIR sub_outer/sub_inner
         LET $val: STRING = "outer_val"
+        LET $inner_pipe: PIPE
         ENV APP_ENV="outer_env"
         WORKDIR sub_outer
         [bool:true] {
@@ -1995,11 +2719,11 @@ fn block_scopes_variables_env_and_workdir_while_leaking_files_and_pipes() {
             WORKDIR sub_inner
             WRITE inner.txt $val
             WRITE env_inner.txt "{{ env:APP_ENV }}"
-            WITH_IO [stdout=pipe:inner_pipe] ECHO "from-block"
+            WITH_IO [stdout=$inner_pipe] ECHO "from-block"
         }
         WRITE outer.txt $val
         WRITE env_outer.txt "{{ env:APP_ENV }}"
-        WITH_IO [stdin=pipe:inner_pipe] WRITE from_block.txt
+        WITH_IO [stdin=$inner_pipe] WRITE from_block.txt
         IF true {
             LET $branch: STRING = "branch_val"
             ENV BRANCH_ENV="branch_env"
@@ -2143,6 +2867,7 @@ fn guard_scope_env_does_not_leak() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
+        LET $cap_env_txt: PIPE
         ENV FOO="bar"
         [env:FOO]
         {
@@ -2150,8 +2875,8 @@ fn guard_scope_env_does_not_leak() {
           WRITE inner.txt "inner"
           ENV SCOPE="inner"
         }
-        WITH_IO [stdout=pipe:cap_env_txt] ECHO "scope={{ env:SCOPE }}"
-        WITH_IO [stdin=pipe:cap_env_txt] WRITE env.txt
+        WITH_IO [stdout=$cap_env_txt] ECHO "scope={{ env:SCOPE }}"
+        WITH_IO [stdin=$cap_env_txt] WRITE env.txt
         WRITE outer.txt "outer"
     "#};
     run_script(&root, script).expect("guard scope passes");
@@ -2252,8 +2977,9 @@ fn hash_sha256_captures_output() {
     let expected_hash = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
     let script = indoc! {r#"
         WRITE data.txt "hello"
-        WITH_IO [stdout=pipe:cap_hash_txt] HASH_SHA256 data.txt
-        WITH_IO [stdin=pipe:cap_hash_txt] WRITE hash.txt
+        LET $cap_hash_txt: PIPE
+        WITH_IO [stdout=$cap_hash_txt] HASH_SHA256 data.txt
+        WITH_IO [stdin=$cap_hash_txt] WRITE hash.txt
     "#};
     run_script(&root, script).expect("hash_sha256 passes");
     assert_eq!(read_trimmed(&root.join("hash.txt").unwrap()), expected_hash);
@@ -2272,8 +2998,9 @@ fn with_io_routes_stdin_stdout_pipe() {
     let output = Arc::new(Mutex::new(Vec::new()));
 
     let script = indoc! {r#"
-        WITH_IO [stdin, stdout=pipe:cap_out_txt] READ
-        WITH_IO [stdin=pipe:cap_out_txt] WRITE out.txt
+        LET $cap_out_txt: PIPE
+        WITH_IO [stdin, stdout=$cap_out_txt] READ
+        WITH_IO [stdin=$cap_out_txt] WRITE out.txt
         WRITE empty.txt ""
     "#};
     let steps = oxdock_core::parse_script(script).unwrap();
@@ -2359,10 +3086,11 @@ fn env_target_dir_in_with_io() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         ENV CARGO_TARGET_DIR="ws/target"
-        WITH_IO [stdout=pipe:capture] {
+        LET $capture: PIPE
+        WITH_IO [stdout=$capture] {
           ECHO "{{ env:CARGO_TARGET_DIR }}"
         }
-        WITH_IO [stdin=pipe:capture] {
+        WITH_IO [stdin=$capture] {
           WRITE env-target.txt
         }
     "#};
@@ -2534,14 +3262,24 @@ fn read_large_file_streams_without_oom() {
 
     // READ the file and capture output
     let read_steps = oxdock_core::parse_script("READ large.txt").unwrap();
-    let pipe_name = "read-capture".to_string();
+    let pipe_var = "read_capture".to_string();
     let io_steps = vec![
+        Step {
+            guard: None,
+            kind: StepKind::Assign {
+                var: pipe_var.clone(),
+                decl_type: "PIPE".to_string(),
+                expr: oxdock_parser::Expr::FreshPipe,
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+        },
         Step {
             guard: None,
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdout,
-                    pipe: Some(oxdock_parser::PipeTarget::Name(pipe_name.clone())),
+                    pipe: Some(oxdock_parser::PipeTarget::Var(pipe_var.clone())),
                 }],
                 cmd: Box::new(read_steps[0].kind.clone()),
             },
@@ -2553,7 +3291,7 @@ fn read_large_file_streams_without_oom() {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdin,
-                    pipe: Some(oxdock_parser::PipeTarget::Name(pipe_name)),
+                    pipe: Some(oxdock_parser::PipeTarget::Var(pipe_var)),
                 }],
                 cmd: Box::new(StepKind::Write {
                     path: "output.txt".into(),
@@ -2593,10 +3331,20 @@ fn read_stdin_streaming_via_pipe() {
         },
         Step {
             guard: None,
+            kind: StepKind::Assign {
+                var: "pipe_read".into(),
+                decl_type: "PIPE".to_string(),
+                expr: oxdock_parser::Expr::FreshPipe,
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+        },
+        Step {
+            guard: None,
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdout,
-                    pipe: Some(oxdock_parser::PipeTarget::Name("pipe-read".to_string())),
+                    pipe: Some(oxdock_parser::PipeTarget::Var("pipe_read".to_string())),
                 }],
                 cmd: Box::new(StepKind::Read(Some("source.txt".into()))),
             },
@@ -2608,7 +3356,7 @@ fn read_stdin_streaming_via_pipe() {
             kind: StepKind::WithIo {
                 bindings: vec![IoBinding {
                     stream: IoStream::Stdin,
-                    pipe: Some(oxdock_parser::PipeTarget::Name("pipe-read".to_string())),
+                    pipe: Some(oxdock_parser::PipeTarget::Var("pipe_read".to_string())),
                 }],
                 cmd: Box::new(StepKind::Write {
                     path: "dest.txt".into(),
@@ -2689,29 +3437,33 @@ fn read_line_ping_pong_proves_live_streaming() {
     // READ_LINE would block forever (background holds its stdout open while
     // waiting for chunk_2), deadlocking Exchange 1 deterministically.
     //
-    // Keeper tasks: each `WITH_IO [stdout=pipe:X] <step>` transiently
+    // Keeper tasks: each `WITH_IO [stdout=$X] <step>` transiently
     // attaches/detaches that pipe's writer, signalling EOF on detach. The
     // keepers hold one writer per pipe for the whole test so mid-test EOFs
     // (which would surface as empty reads) are impossible; they exit via
     // one-shot control pipes at the end.
     let script = indoc! {r#"
-        LET $keep_tx: HANDLE = WITH_IO [stdout=pipe:tx, stdin=pipe:ctl_tx] ASYNC READ_LINE $ktx
-        LET $keep_rx: HANDLE = WITH_IO [stdout=pipe:rx, stdin=pipe:ctl_rx] ASYNC READ_LINE $krx
+        LET $tx: PIPE
+        LET $ctl_tx: PIPE
+        LET $rx: PIPE
+        LET $ctl_rx: PIPE
+        LET $keep_tx: HANDLE = WITH_IO [stdout=$tx, stdin=$ctl_tx] ASYNC READ_LINE $ktx
+        LET $keep_rx: HANDLE = WITH_IO [stdout=$rx, stdin=$ctl_rx] ASYNC READ_LINE $krx
         LET $live: HANDLE = ASYNC {
-            WITH_IO [stdin=pipe:tx] READ_LINE $a
-            WITH_IO [stdout=pipe:rx] ECHO "{{ $a }}"
-            WITH_IO [stdin=pipe:tx] READ_LINE $b
-            WITH_IO [stdout=pipe:rx] ECHO "{{ $b }}"
-            WITH_IO [stdin=pipe:tx] READ_LINE $c
+            WITH_IO [stdin=$tx] READ_LINE $a
+            WITH_IO [stdout=$rx] ECHO "{{ $a }}"
+            WITH_IO [stdin=$tx] READ_LINE $b
+            WITH_IO [stdout=$rx] ECHO "{{ $b }}"
+            WITH_IO [stdin=$tx] READ_LINE $c
         }
-        WITH_IO [stdout=pipe:tx] ECHO "chunk_1"
-        WITH_IO [stdin=pipe:rx] READ_LINE $reply_1
-        WITH_IO [stdout=pipe:tx] ECHO "chunk_2"
-        WITH_IO [stdin=pipe:rx] READ_LINE $reply_2
-        WITH_IO [stdout=pipe:tx] ECHO "EXIT"
+        WITH_IO [stdout=$tx] ECHO "chunk_1"
+        WITH_IO [stdin=$rx] READ_LINE $reply_1
+        WITH_IO [stdout=$tx] ECHO "chunk_2"
+        WITH_IO [stdin=$rx] READ_LINE $reply_2
+        WITH_IO [stdout=$tx] ECHO "EXIT"
         AWAIT $live
-        WITH_IO [stdout=pipe:ctl_tx] ECHO "done"
-        WITH_IO [stdout=pipe:ctl_rx] ECHO "done"
+        WITH_IO [stdout=$ctl_tx] ECHO "done"
+        WITH_IO [stdout=$ctl_rx] ECHO "done"
         AWAIT $keep_tx
         AWAIT $keep_rx
         WRITE "reply_1.txt" "{{ $reply_1 }}"
@@ -2740,9 +3492,10 @@ fn async_self_referential_write_then_read_sees_eof() {
     // for the whole task (which would deadlock the consumer step waiting
     // for a close that never comes).
     let script = indoc! {r#"
+        LET $p: PIPE
         LET $t: HANDLE = ASYNC {
-            WITH_IO [stdout=pipe:p] ECHO "hello"
-            WITH_IO [stdin=pipe:p] WRITE got.txt
+            WITH_IO [stdout=$p] ECHO "hello"
+            WITH_IO [stdin=$p] WRITE got.txt
         }
         AWAIT $t
     "#};

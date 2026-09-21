@@ -1,1 +1,12 @@
-{"footer":"Shared footer default.","license":"Apache-2.0","workspace":"OxDock","workspace_url":"https://github.com/jzombie/rust-oxdock","changelog_url":"https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.md","license_url":"https://github.com/jzombie/rust-oxdock/blob/main/LICENSE","engine_example_url":"https://github.com/jzombie/rust-oxdock/blob/main/crates/oxdock-core/src/exec/engine.rs"}
+{
+  "footer": "Shared footer default.",
+  "license": "Apache-2.0",
+  "workspace": "OxDock",
+  "workspace_url": "https://github.com/jzombie/rust-oxdock",
+  "changelog_url": "https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.md",
+  "license_url": "https://github.com/jzombie/rust-oxdock/blob/main/LICENSE",
+  "engine_example_url": "https://github.com/jzombie/rust-oxdock/blob/main/crates/oxdock-core/src/exec/engine.rs",
+  "engine_facade_url": "https://github.com/jzombie/rust-oxdock/blob/main/crates/oxdock-core/src/exec/engine.rs",
+  "ssh_plugin_readme": "https://github.com/jzombie/rust-oxdock/blob/main/crates/plugins/oxdock-ssh-plugin/README.md",
+  "net_plugin_readme": "https://github.com/jzombie/rust-oxdock/blob/main/crates/plugins/oxdock-net-plugin/README.md"
+}

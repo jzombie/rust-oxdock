@@ -1,0 +1,27 @@
+[package]
+name = "oxdock-net-plugin"
+description = "Virtual-endpoint TCP networking for OxDock scripts through the Engine facade: logical service listeners, explicit-pipe pumps, and memory sessions."
+categories = ["development-tools"]
+keywords = ["oxdock", "net", "dsl"]
+authors.workspace = true
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+oxdock-core.workspace = true
+oxdock-func-macro.workspace = true
+oxdock-parser.workspace = true
+oxdock-pipe.workspace = true
+oxdock-process.workspace = true
+
+[dev-dependencies]
+indoc.workspace = true
+oxdock-fs.workspace = true
+oxdock-sys-test-utils.workspace = true
+
+[lints]
+workspace = true

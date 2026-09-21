@@ -8,7 +8,12 @@ use crate::GuardedPath;
 // Path resolution helpers (WORKDIR, READ/WRITE, COPY sources).
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 impl PathResolver {
-    fn root_relative_path(path: &Path) -> PathBuf {
+    /// Strip an absolute or rooted path down to its root-relative form:
+    /// root/prefix markers drop, `.` drops, `..` survives so the guard
+    /// still rejects escapes after re-anchoring. Shared by the
+    /// absolute-fallback arms and by host callers (e.g. plugin option
+    /// paths) that anchor user strings to the workspace root.
+    pub fn root_relative_path(path: &Path) -> PathBuf {
         let mut rel = PathBuf::new();
         for comp in path.components() {
             match comp {
@@ -21,8 +26,11 @@ impl PathResolver {
         rel
     }
 
+    /// Whether `path` is absolute (or Windows-rooted): the shapes the
+    /// absolute-fallback arms rebase under the workspace root instead of
+    /// joining onto the cwd.
     #[allow(clippy::disallowed_macros)]
-    fn is_absolute_or_rooted(path: &Path) -> bool {
+    pub fn is_absolute_or_rooted(path: &Path) -> bool {
         path.is_absolute()
             || (cfg!(windows) && path.components().next() == Some(std::path::Component::RootDir))
     }

@@ -8,19 +8,17 @@
 //! per trial.
 use crate::expectations::{self, ErrorExpectation};
 use anyhow::{Context, Result, anyhow};
-use oxdock_core::{ExecIo, SNAPSHOT_PENDING_DISPLAY, enrich_lazy_error, run_steps_with_fs_with_io};
+use oxdock_core::{ExecIo, SNAPSHOT_PENDING_DISPLAY, enrich_lazy_error, run_steps_with_manager};
 use oxdock_fs::{
     GuardedPath, GuardedTempDir, PathResolver, WorkspaceFs, discover_workspace_root,
     ensure_git_identity,
 };
 use oxdock_parser::{Step, StepKind};
-use oxdock_process::{CommandBuilder, SharedInput, SharedOutput};
+use oxdock_process::{CommandBuilder, SharedInput, SharedOutput, default_process_manager};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use toml_edit::{DocumentMut, Item, Table, Value};
-
-type PipeBuffer = (String, Arc<Mutex<Vec<u8>>>, PipeSpec);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Root {
@@ -85,6 +83,10 @@ struct CaseSpec {
     stdin: Option<String>,
     env: Vec<(String, String)>,
     env_remove: Vec<String>,
+    /// Opt-in dynamic loopback port: when true, the runner injects a fresh
+    /// `BRIDGE_PORT` env entry per trial (pid-scrambled base, atomic offsets
+    /// within the process), so bridge fixtures bind without hardcoded ports.
+    bridge_port: bool,
     expect_error: Option<ErrorExpectation>,
     expectations: Expectations,
     pipes: BTreeMap<String, PipeSpec>,
@@ -328,6 +330,10 @@ fn load_case_spec(
         .map(parse_string_array)
         .transpose()?
         .unwrap_or_default();
+    let bridge_port = doc
+        .get("bridge_port")
+        .and_then(|item| item.as_bool())
+        .unwrap_or(false);
 
     Ok(CaseSpec {
         name,
@@ -338,10 +344,22 @@ fn load_case_spec(
         stdin,
         env,
         env_remove,
+        bridge_port,
         expect_error,
         expectations,
         pipes,
     })
+}
+
+/// Fresh loopback port per bridge trial: a pid-scrambled base keeps
+/// concurrent suite runs on one host apart, while the atomic counter keeps
+/// parallel trials in one process apart. Ports bind at case-run time, so
+/// there is no reserve-then-release TOCTOU window.
+fn allocate_bridge_port() -> u16 {
+    use std::sync::atomic::{AtomicU16, Ordering};
+    static NEXT_OFFSET: AtomicU16 = AtomicU16::new(0);
+    let base = 20000 + (std::process::id() % 2000) as u16;
+    base + NEXT_OFFSET.fetch_add(1, Ordering::SeqCst) % 500
 }
 
 fn parse_build_context(value: Option<&str>) -> Result<BuildContext> {
@@ -790,6 +808,25 @@ fn collect_step_kinds(kind: &StepKind, kinds: &mut HashSet<String>) {
 }
 
 fn run_case(case: &CaseSpec, steps: &[Step]) -> Result<()> {
+    // Bridge cases bind real loopback ports against a shared host: a stolen
+    // candidate fails fast and deterministically at bind time, so retry with
+    // a fresh allocation (bounded). Every attempt runs in isolated tempdirs.
+    // Anything else fails immediately.
+    let attempts = if case.bridge_port { 8 } else { 1 };
+    let mut last: Option<anyhow::Error> = None;
+    for _ in 0..attempts {
+        match run_case_once(case, steps) {
+            Ok(()) => return Ok(()),
+            Err(err) if case.bridge_port && format!("{err:#}").contains("bind failed") => {
+                last = Some(err);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Err(last.unwrap_or_else(|| anyhow!("bridge case produced no attempts")))
+}
+
+fn run_case_once(case: &CaseSpec, steps: &[Step]) -> Result<()> {
     // The local tempdir stays eager (it backs the build context). The
     // snapshot side starts pending and materializes on first
     // snapshot-targeted use. Cases that need it up front (setup seeds
@@ -846,29 +883,31 @@ fn run_case(case: &CaseSpec, steps: &[Step]) -> Result<()> {
     for (key, value) in &case.env {
         io_cfg.insert_inherit_env(key.clone(), value.clone());
     }
-
-    let mut pipe_buffers: Vec<PipeBuffer> = Vec::new();
-    for (name, spec) in &case.pipes {
-        let buffer = Arc::new(Mutex::new(Vec::new()));
-        let writer: SharedOutput = buffer.clone();
-        io_cfg.insert_output_pipe(name, writer);
-        pipe_buffers.push((name.clone(), buffer, spec.clone()));
+    if case.bridge_port {
+        io_cfg.insert_inherit_env("BRIDGE_PORT", allocate_bridge_port().to_string());
     }
+
+    // Pipe assertions resolve post-run against the script's own pipe
+    // variables (each `[pipes.X]` key names a top-level `$X` the script
+    // declared). `ExecIo` clones share the live registry, so this probe
+    // observes every backend the script materialized. Nothing is
+    // pre-injected: there are no named pipes left to address from the host.
+    let io_probe = io_cfg.clone();
 
     resolver.set_workspace_root(build_context.clone());
     let fs: Box<dyn WorkspaceFs> = Box::new(resolver);
     // Enrich exactly like the eager runner (chain inlined at top level plus
     // the snapshot section) so error-text expectations keep matching.
-    let result = run_steps_with_fs_with_io(fs, steps, io_cfg)
-        .map(|_| ())
+    let result = run_steps_with_manager(fs, steps, default_process_manager(), io_cfg)
         .map_err(|err| enrich_lazy_error(&snapshot_handle, &build_context, err));
-    match (&case.expect_error, result) {
+    let bindings = match (&case.expect_error, result) {
         (Some(expectation), Err(err)) => {
             expectations::assert_error_matches(
                 expectation,
                 &err,
                 &format!("AST case {} error", case.name),
             )?;
+            None
         }
         (Some(_), Ok(_)) => {
             return Err(anyhow!("expected error, got success"));
@@ -876,8 +915,8 @@ fn run_case(case: &CaseSpec, steps: &[Step]) -> Result<()> {
         (None, Err(err)) => {
             return Err(err).with_context(|| format!("run {}", case.script_rel));
         }
-        (None, Ok(_)) => {}
-    }
+        (None, Ok((_, _, bindings))) => Some(bindings),
+    };
 
     if let Some(expected_stdout) = &case.expectations.stdout {
         // Fixtures name the pending snapshot sentinel symbolically so the
@@ -906,7 +945,7 @@ fn run_case(case: &CaseSpec, steps: &[Step]) -> Result<()> {
             verify_expectations_local(&case.expectations, &local)?;
         }
     }
-    verify_pipes(&pipe_buffers)?;
+    verify_script_pipes(&case.pipes, bindings.as_ref(), &io_probe, &case.name)?;
     if let Some(setup) = &case.setup {
         let snapshot = snapshot_handle
             .get()
@@ -1103,19 +1142,43 @@ fn verify_root(expect: &RootExpect, root: &GuardedPath) -> Result<()> {
     Ok(())
 }
 
-fn verify_pipes(pipes: &[PipeBuffer]) -> Result<()> {
-    for (name, buffer, spec) in pipes {
-        if let Some(expected) = &spec.expect {
-            let data = buffer.lock().unwrap();
-            let actual = String::from_utf8(data.clone())
-                .with_context(|| format!("pipe {name} output is not valid UTF-8"))?;
-            if &actual != expected {
-                return Err(anyhow!(
-                    "pipe {name} mismatch. expected {:?}, got {:?}",
-                    expected,
-                    actual
-                ));
-            }
+/// Post-run `[pipes.*]` verification against the script's own pipe
+/// variables. Each key names a top-level `$var` the script declared; the
+/// handle's backend is snapshotted non-destructively through the probe
+/// (handles are owned by the bindings, so no registry lookup is needed).
+/// No spec without `expect` is checked; a missing variable or a non-`PIPE`
+/// binding is a hard error so typo'd keys cannot pass silently.
+fn verify_script_pipes(
+    specs: &BTreeMap<String, PipeSpec>,
+    bindings: Option<&BTreeMap<String, oxdock_parser::Value>>,
+    io_probe: &ExecIo,
+    case_name: &str,
+) -> Result<()> {
+    for (name, spec) in specs {
+        let Some(expected) = &spec.expect else {
+            continue;
+        };
+        let bindings = bindings.ok_or_else(|| {
+            anyhow!("case {case_name}: pipe {name} cannot be verified after a failed run")
+        })?;
+        let value = bindings.get(name).ok_or_else(|| {
+            anyhow!("case {case_name}: pipe {name} names no top-level ${name} variable")
+        })?;
+        let handle = value.as_pipe_handle().ok_or_else(|| {
+            anyhow!(
+                "case {case_name}: ${name} is not a PIPE (got {})",
+                value.type_name()
+            )
+        })?;
+        let bytes = io_probe
+            .peek_pipe_content(&handle)
+            .with_context(|| format!("case {case_name}: peek pipe ${name}"))?;
+        let actual = String::from_utf8(bytes)
+            .with_context(|| format!("pipe {name} output is not valid UTF-8"))?;
+        if &actual != expected {
+            return Err(anyhow!(
+                "pipe {name} mismatch. expected {expected:?}, got {actual:?}"
+            ));
         }
     }
     Ok(())
@@ -1421,6 +1484,7 @@ fn step_kind_name(kind: &StepKind) -> &'static str {
         StepKind::Cancel { .. } => "Cancel",
         StepKind::Timeout { .. } => "Timeout",
         StepKind::Sleep { .. } => "Sleep",
+        StepKind::ListAppend { .. } => "ListAppend",
         StepKind::FuncDef { .. } => "FuncDef",
         StepKind::Call { .. } => "Call",
         StepKind::Return { .. } => "Return",

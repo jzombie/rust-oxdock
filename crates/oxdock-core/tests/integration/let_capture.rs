@@ -163,8 +163,9 @@ fn let_capture_with_stdin_pipe() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        WITH_IO [stdout=pipe:relay] ECHO piped
-        LET $x: STRING = WITH_IO [stdin=pipe:relay] READ
+        LET $relay: PIPE
+        WITH_IO [stdout=$relay] ECHO piped
+        LET $x: STRING = WITH_IO [stdin=$relay] READ
         ASSERT_EQ $x "piped\n"
     "#};
     run_script(&root, script).expect("capture with stdin pipe");
@@ -192,16 +193,16 @@ fn let_await_capture_binds_task_output() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        LET $t: HANDLE = ASYNC ECHO "task-hi"
+        LET $t: HANDLE = ASYNC { ECHO "logged"; RETURN "returned" }
         LET $o: STRING = AWAIT $t
-        ASSERT_EQ $o "task-hi\n"
+        ASSERT_EQ $o "returned"
     "#};
     run_script(&root, script).expect("LET $o: STRING = AWAIT $t");
 }
 
 #[test]
 #[cfg_attr(miri, ignore = "AWAIT joins real background threads")]
-fn bare_await_forwards_task_output_to_parent() {
+fn bare_await_task_output_streams_live_to_parent() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
@@ -219,11 +220,69 @@ fn bare_await_forwards_task_output_to_parent() {
 
 #[test]
 #[cfg_attr(miri, ignore = "AWAIT joins real background threads")]
-fn await_capture_then_bare_await_still_double_await_errors() {
+fn await_capture_without_return_binds_zero() {
+    // No stdout sniffing, no error either: a task that succeeded without
+    // RETURN yields INT 0, like a process exit status.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
         LET $t: HANDLE = ASYNC ECHO hi
+        LET $o: INT = AWAIT $t
+        ASSERT_EQ $o 0
+    "#};
+    run_script(&root, script).expect("capture without RETURN binds 0");
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "AWAIT joins real background threads")]
+fn await_capture_missing_fallback_branch_errors() {
+    // A body that can RETURN on some path but falls off the end on the
+    // path taken fails loudly: a missing fallback must never silently
+    // bind the void-task zero.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        LET $flag: BOOL = false
+        LET $t: HANDLE = ASYNC {
+            IF $flag {
+                RETURN "yes"
+            }
+        }
+        LET $o: STRING = AWAIT $t
+    "#};
+    let err = run_script(&root, script).expect_err("missing fallback must fail");
+    assert!(
+        err.to_string().contains("fell off the end without RETURN"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "AWAIT joins real background threads")]
+fn await_capture_exhaustive_branches_bind() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        LET $flag: BOOL = false
+        LET $t: HANDLE = ASYNC {
+            IF $flag {
+                RETURN "yes"
+            }
+            RETURN "fallback"
+        }
+        LET $o: STRING = AWAIT $t
+        ASSERT_EQ $o "fallback"
+    "#};
+    run_script(&root, script).expect("fallthrough RETURN binds");
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "AWAIT joins real background threads")]
+fn await_capture_then_bare_await_still_double_await_errors() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        LET $t: HANDLE = ASYNC { ECHO "logged"; RETURN "returned" }
         LET $o: STRING = AWAIT $t
         AWAIT $t
     "#};

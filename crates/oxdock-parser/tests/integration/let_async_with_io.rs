@@ -7,7 +7,7 @@ use oxdock_parser::parse_script;
 #[test]
 fn let_async_with_io_single_command_binds_task() {
     let script = indoc! {r#"
-        LET $task: HANDLE = WITH_IO [stdin=pipe:in_chan] ASYNC WRITE "inline_direct.txt"
+        LET $task: HANDLE = WITH_IO [stdin=$in_chan] ASYNC WRITE "inline_direct.txt"
     "#};
 
     let steps = parse_script(script, mock_lower).expect("parse LET WITH_IO ASYNC");
@@ -22,7 +22,7 @@ fn let_async_with_io_single_command_binds_task() {
                     assert_eq!(bindings[0].stream, IoStream::Stdin);
                     assert_eq!(
                         bindings[0].pipe,
-                        Some(PipeTarget::Name("in_chan".to_string()))
+                        Some(PipeTarget::Var("in_chan".to_string()))
                     );
                     assert!(
                         matches!(cmd.as_ref(), StepKind::Write { .. }),
@@ -38,10 +38,10 @@ fn let_async_with_io_single_command_binds_task() {
 
 #[test]
 fn let_with_io_sync_command_captures() {
-    // #111: LET $x: TYPE = WITH_IO (without stdout=pipe) <sync command> captures
+    // #111: LET $x: TYPE = WITH_IO (without stdout pipe) <sync command> captures
     // the command's stdout instead of failing.
     let script = indoc! {r#"
-        LET $task: STRING = WITH_IO [stdin=pipe:in_chan] RUN "echo hi"
+        LET $task: STRING = WITH_IO [stdin=$in_chan] RUN "echo hi"
     "#};
 
     let steps = parse_script(script, mock_lower).expect("sync LET WITH_IO captures");
@@ -55,7 +55,7 @@ fn let_with_io_sync_command_captures() {
                     assert_eq!(bindings[0].stream, IoStream::Stdin);
                     assert_eq!(
                         bindings[0].pipe,
-                        Some(PipeTarget::Name("in_chan".to_string()))
+                        Some(PipeTarget::Var("in_chan".to_string()))
                     );
                     assert!(
                         matches!(cmd.as_ref(), StepKind::Run(_)),
@@ -71,10 +71,10 @@ fn let_with_io_sync_command_captures() {
 
 #[test]
 fn let_with_io_stdout_pipe_conflicts_with_capture() {
-    // #111: explicit WITH_IO [stdout=pipe:...] combined with LET-capture is
+    // #111: explicit WITH_IO [stdout=$var] combined with LET-capture is
     // a parse error — the capture sink owns stdout.
     let script = indoc! {r#"
-        LET $task: STRING = WITH_IO [stdout=pipe:out_chan] RUN "echo hi"
+        LET $task: STRING = WITH_IO [stdout=$out_chan] RUN "echo hi"
     "#};
 
     let err = parse_script(script, mock_lower).expect_err("stdout pipe + capture must fail");
@@ -87,7 +87,7 @@ fn let_with_io_stdout_pipe_conflicts_with_capture() {
 #[test]
 fn let_async_with_io_rejects_block_body() {
     let script = indoc! {r#"
-        LET $task: HANDLE = WITH_IO [stdin=pipe:in_chan] ASYNC {
+        LET $task: HANDLE = WITH_IO [stdin=$in_chan] ASYNC {
             WRITE "a.txt"
             WRITE "b.txt"
         }

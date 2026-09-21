@@ -7,9 +7,9 @@ use oxdock_parser::parse_script;
 #[test]
 fn with_io_block_wraps_commands() {
     let script = indoc! {r#"
-        WITH_IO [stdout=pipe:setup] {
+        WITH_IO [stdout=$setup] {
             RUN "echo alpha"
-            WITH_IO [stderr=pipe:setup] RUN "echo beta"
+            WITH_IO [stderr=$setup] RUN "echo beta"
         }
     "#};
 
@@ -25,10 +25,7 @@ fn with_io_block_wraps_commands() {
                 "stdout default should be applied exactly once"
             );
             assert_eq!(bindings[0].stream, IoStream::Stdout);
-            assert_eq!(
-                bindings[0].pipe,
-                Some(PipeTarget::Name("setup".to_string()))
-            );
+            assert_eq!(bindings[0].pipe, Some(PipeTarget::Var("setup".to_string())));
             match cmd.as_ref() {
                 StepKind::Run(rendered) => {
                     assert_eq!(rendered.as_ref(), "echo alpha");
@@ -44,15 +41,9 @@ fn with_io_block_wraps_commands() {
         StepKind::WithIo { bindings, cmd } => {
             assert_eq!(bindings.len(), 2, "default stdout plus stderr override");
             assert_eq!(bindings[0].stream, IoStream::Stdout);
-            assert_eq!(
-                bindings[0].pipe,
-                Some(PipeTarget::Name("setup".to_string()))
-            );
+            assert_eq!(bindings[0].pipe, Some(PipeTarget::Var("setup".to_string())));
             assert_eq!(bindings[1].stream, IoStream::Stderr);
-            assert_eq!(
-                bindings[1].pipe,
-                Some(PipeTarget::Name("setup".to_string()))
-            );
+            assert_eq!(bindings[1].pipe, Some(PipeTarget::Var("setup".to_string())));
             match cmd.as_ref() {
                 StepKind::Run(rendered) => {
                     assert_eq!(rendered.as_ref(), "echo beta");
@@ -66,7 +57,7 @@ fn with_io_block_wraps_commands() {
 
 #[test]
 fn with_io_block_requires_brace() {
-    let script = "WITH_IO [stdout=pipe:setup]\nRUN \"echo hi\"";
+    let script = "WITH_IO [stdout=$setup]\nRUN \"echo hi\"";
     let err =
         parse_script(script, mock_lower).expect_err("script should reject missing block braces");
     let msg = format!("{err:#}");

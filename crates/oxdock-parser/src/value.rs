@@ -17,10 +17,10 @@
 //! Descriptors are canonical singletons: each `#[oxdock_type]` struct gets
 //! one `&'static TypeDescriptor` (built at compile time, shared by every
 //! word of that type), so words carry their own vtable and no registry of
-//! any kind exists. The ten startup types (`INT`, `FLOAT`, `STRING`, `BOOL`,
-//! `LIST`, `MAP`, `PATH`, `DURATION`, `PIPE`, `HANDLE`) are ordinary Rust
-//! structs annotated with `#[oxdock_type]`, exactly as host types are. Name
-//! directories (which descriptor answers for `"TAG"`) live per execution
+//! any kind exists. The twelve startup types (`INT`, `FLOAT`, `STRING`, `BOOL`,
+//! `LIST`, `MAP`, `PATH`, `DURATION`, `PIPE`, `HANDLE`, `SEMAPHORE`, `PERMIT`)
+//! are ordinary Rust structs annotated with `#[oxdock_type]`, exactly as host
+//! types are. Name directories (which descriptor answers for `"TAG"`) live per execution
 //! state in `oxdock-core`, never here: this module knows types, not names.
 //!
 //! Ownership discipline (load-bearing, Miri-verified in
@@ -55,6 +55,7 @@ use std::fmt;
 use std::time::Duration;
 
 use oxdock_func_macro::oxdock_type;
+use oxdock_pipe::{PipeHandle, new_handle_in_task};
 
 /// Anchor of a type's reference section, derived from its name the way the
 /// Markdown slugger derives it from the doc title.
@@ -62,10 +63,10 @@ pub fn type_anchor(name: &str) -> String {
     format!("value-type-{}", name.to_lowercase())
 }
 
-/// Canonical descriptors of the ten startup types, in a fixed order, for
+/// Canonical descriptors of the twelve startup types, in a fixed order, for
 /// seeding per-state name directories and static rendering (docs-gen).
 /// Each entry is the payload struct's own singleton: no table, no lock.
-pub fn startup_descriptors() -> [(&'static str, &'static TypeDescriptor); 10] {
+pub fn startup_descriptors() -> [(&'static str, &'static TypeDescriptor); 12] {
     [
         ("INT", IntValue::descriptor()),
         ("FLOAT", FloatValue::descriptor()),
@@ -77,6 +78,8 @@ pub fn startup_descriptors() -> [(&'static str, &'static TypeDescriptor); 10] {
         ("DURATION", DurationValue::descriptor()),
         ("PIPE", PipeValue::descriptor()),
         ("HANDLE", HandleValue::descriptor()),
+        ("SEMAPHORE", SemaphoreValue::descriptor()),
+        ("PERMIT", SemaphorePermit::descriptor()),
     ]
 }
 
@@ -137,19 +140,150 @@ struct PathValue(#[allow(clippy::disallowed_types)] pub std::path::PathBuf);
 #[derive(Debug, Clone, PartialEq)]
 struct DurationValue(pub Duration);
 
-/// Named script pipe. Validity is checked against the pipe registry at coercion time.
+/// Anonymous pipe handle. The backend materializes lazily on first
+/// binding (never eagerly at declaration), so the choice always has full
+/// usage context. Cloning shares the backend (explicit-sharing fan-out);
+/// equality is handle identity, never byte comparison.
 #[oxdock_type(
     crate_path = "::oxdock_parser",
     name = "PIPE",
-    summary = "Named script pipe."
+    summary = "Anonymous pipe handle.",
+    shared
 )]
-#[derive(Debug, Clone, PartialEq)]
-struct PipeValue(pub String);
+#[derive(Debug, Clone)]
+struct PipeValue(pub PipeHandle);
+
+impl PartialEq for PipeValue {
+    /// Handle identity: two words name the same channel iff they share
+    /// the cell. Never compares bytes (backends may be unbound, and
+    /// locking two cells in `eq` risks ordering deadlocks).
+    fn eq(&self, other: &Self) -> bool {
+        self.0.ptr_eq(&other.0)
+    }
+}
 
 /// Background ASYNC task handle for AWAIT/CANCEL.
 #[oxdock_type(crate_path = "::oxdock_parser", name = "HANDLE", inline)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct HandleValue(pub u64);
+
+/// Shared admission-control counter backing `SEMAPHORE` words. Clones
+/// share the backend, so every word naming one semaphore observes the
+/// same count. Lock-free atomics throughout: no mutex exists to poison,
+/// so `Drop` paths stay infallible on every path including unwinding.
+/// No waiter ever sleeps on the counter, so the non-blocking acquire
+/// adds zero wedge surface.
+#[derive(Debug)]
+pub struct SemaphoreState {
+    max: usize,
+    held: std::sync::atomic::AtomicUsize,
+}
+
+impl SemaphoreState {
+    fn new(max: usize) -> Self {
+        Self {
+            max,
+            held: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+
+    /// Non-blocking acquire: true and counted when a permit was free.
+    /// Compare-and-swap loop, so only a winning CAS claims a slot.
+    pub fn try_acquire(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        let mut current = self.held.load(Ordering::Acquire);
+        loop {
+            if current >= self.max {
+                return false;
+            }
+            match self.held.compare_exchange_weak(
+                current,
+                current + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return true,
+                Err(actual) => current = actual,
+            }
+        }
+    }
+
+    /// Release one permit. Saturating and infallible: exactly-once
+    /// last-drop release (see `PermitInner`) keeps this exact, and the
+    /// floor (never a wrap, never a panic) is the backstop.
+    pub fn release(&self) {
+        use std::sync::atomic::Ordering;
+        let _ = self
+            .held
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |held| {
+                held.checked_sub(1)
+            });
+    }
+
+    /// Permits currently free. Exact at read time, stale the instant the
+    /// caller acts on it: observability only, never admission input.
+    pub fn available(&self) -> usize {
+        self.max
+            .saturating_sub(self.held.load(std::sync::atomic::Ordering::Acquire))
+    }
+}
+
+/// Counting semaphore for admission control. Cloning shares the backend
+/// (explicit-sharing fan-out); equality is handle identity, never the
+/// count.
+#[oxdock_type(
+    crate_path = "::oxdock_parser",
+    name = "SEMAPHORE",
+    summary = "Counting semaphore for admission control.",
+    shared
+)]
+#[derive(Debug, Clone)]
+struct SemaphoreValue(pub std::sync::Arc<SemaphoreState>);
+
+impl PartialEq for SemaphoreValue {
+    /// Handle identity: two words name the same semaphore iff they share
+    /// the backend. Never compares counts (a racing acquire would make
+    /// equality nondeterministic).
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+
+/// Last-drop releaser for one acquired permit. Lives behind the permit
+/// word's `Arc`: when the final permit clone drops, this drops and hands
+/// the permit back exactly once. No manual release exists, so worker
+/// return (clean, error, panic, cooperative cancel) releases through
+/// ordinary frame teardown with no DSL cleanup code.
+#[derive(Debug)]
+struct PermitInner {
+    sem: std::sync::Arc<SemaphoreState>,
+}
+
+impl Drop for PermitInner {
+    fn drop(&mut self) {
+        self.sem.release();
+    }
+}
+
+/// Opaque admission permit minted by `SEMAPHORE_TRY_ACQUIRE`. Cloning
+/// shares the release obligation (first drops release nothing, the last
+/// releases once); equality is handle identity.
+#[oxdock_type(
+    crate_path = "::oxdock_parser",
+    name = "PERMIT",
+    summary = "Opaque admission permit; last drop releases it.",
+    shared
+)]
+#[derive(Debug, Clone)]
+struct SemaphorePermit(pub std::sync::Arc<PermitInner>);
+
+impl PartialEq for SemaphorePermit {
+    /// Handle identity: two words name the same permit iff they share
+    /// the releaser.
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
 
 impl fmt::Display for IntValue {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -221,7 +355,19 @@ impl fmt::Display for PathValue {
 
 impl fmt::Display for PipeValue {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "pipe:{}", self.0)
+        write!(f, "<pipe>")
+    }
+}
+
+impl fmt::Display for SemaphoreValue {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "<semaphore>")
+    }
+}
+
+impl fmt::Display for SemaphorePermit {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "<permit>")
     }
 }
 
@@ -434,9 +580,52 @@ impl Value {
         Self::mint_heap(DurationValue::descriptor(), DurationValue(d))
     }
 
-    /// Construct a pipe-name word.
-    pub fn pipe(name: String) -> Self {
-        Self::mint_heap(PipeValue::descriptor(), PipeValue(name))
+    /// Construct a fresh unbound pipe handle (`LET $p: PIPE`, host
+    /// `new_pipe()`). Materializes lazily on first binding.
+    pub fn pipe_fresh() -> Self {
+        Self::pipe_fresh_in_task(0)
+    }
+
+    /// Construct a fresh unbound pipe handle declared by `task_id` (`0` =
+    /// root flow). The id travels with every clone so promotion checks
+    /// always see the declaration origin.
+    pub fn pipe_fresh_in_task(task_id: u64) -> Self {
+        Self::mint_heap_shared(
+            PipeValue::descriptor(),
+            PipeValue(new_handle_in_task(task_id)),
+        )
+    }
+
+    /// Wrap an existing handle as a `PIPE` word. Clones share the backend.
+    pub fn pipe_handle(handle: PipeHandle) -> Self {
+        Self::mint_heap_shared(PipeValue::descriptor(), PipeValue(handle))
+    }
+
+    /// Construct a semaphore word admitting at most `max` concurrent
+    /// holders. Every clone names the same backend.
+    pub fn semaphore(max: usize) -> Self {
+        Self::mint_heap_shared(
+            SemaphoreValue::descriptor(),
+            SemaphoreValue(std::sync::Arc::new(SemaphoreState::new(max))),
+        )
+    }
+
+    /// Mint a `PERMIT` word bound to `sem`. The permit returns to the
+    /// semaphore when the last clone of the word drops.
+    pub fn permit(sem: &std::sync::Arc<SemaphoreState>) -> Self {
+        Self::mint_heap_shared(
+            SemaphorePermit::descriptor(),
+            SemaphorePermit(std::sync::Arc::new(PermitInner {
+                sem: std::sync::Arc::clone(sem),
+            })),
+        )
+    }
+
+    /// Borrow the semaphore backend out of a `SEMAPHORE` word. Returns
+    /// `None` for non-`SEMAPHORE` words. The clone shares the backend.
+    pub fn as_semaphore(&self) -> Option<std::sync::Arc<SemaphoreState>> {
+        self.read_heap::<SemaphoreValue>(SemaphoreValue::descriptor())
+            .map(|v| std::sync::Arc::clone(&v.0))
     }
 
     /// Read an integer payload. Returns `None` for non-`INT` words.
@@ -497,10 +686,11 @@ impl Value {
             .map(|v| &mut v.0)
     }
 
-    /// Borrow a pipe-name payload. Returns `None` for non-`PIPE` words.
-    pub fn as_pipe_name(&self) -> Option<&str> {
+    /// Clone the pipe handle out of a `PIPE` word. Returns `None` for
+    /// non-`PIPE` words. The clone shares the backend cell.
+    pub fn as_pipe_handle(&self) -> Option<PipeHandle> {
         self.read_heap::<PipeValue>(PipeValue::descriptor())
-            .map(|v| v.0.as_str())
+            .map(|v| v.0.clone())
     }
 
     /// Read a duration payload. Returns `None` for non-`DURATION` words.
@@ -829,4 +1019,110 @@ where
     let out = unique as *mut T;
     payload.as_ptr = std::sync::Arc::into_raw(shared) as *mut ();
     out as *mut ()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn semaphore_counts_exactly_to_cap() {
+        let sem = Value::semaphore(2);
+        let inner = sem.as_semaphore().expect("SEMAPHORE word");
+        assert_eq!(inner.available(), 2);
+        assert!(inner.try_acquire());
+        assert_eq!(inner.available(), 1);
+        assert!(inner.try_acquire());
+        assert_eq!(inner.available(), 0);
+        assert!(!inner.try_acquire());
+        inner.release();
+        assert_eq!(inner.available(), 1);
+    }
+
+    #[test]
+    fn semaphore_words_share_one_backend_by_identity() {
+        let first = Value::semaphore(1);
+        let alias = first.clone();
+        assert_eq!(&alias, &first);
+        assert_eq!(format!("{first}"), "<semaphore>");
+        // One acquire through either word exhausts the shared count.
+        assert!(first.as_semaphore().expect("backend").try_acquire());
+        assert!(!alias.as_semaphore().expect("backend").try_acquire());
+        // Distinct declarations never alias; non-words read as absent.
+        assert_ne!(Value::semaphore(1), first);
+        assert!(Value::int(1).as_semaphore().is_none());
+    }
+
+    #[test]
+    fn permit_last_drop_releases_exactly_once() {
+        let sem = Value::semaphore(1);
+        let inner = sem.as_semaphore().expect("backend");
+        assert!(inner.try_acquire());
+        let first = Value::permit(&inner);
+        assert_eq!(format!("{first}"), "<permit>");
+        let second = first.clone();
+        assert_eq!(&first, &second);
+        drop(first);
+        assert_eq!(inner.available(), 0);
+        drop(second);
+        assert_eq!(inner.available(), 1);
+    }
+
+    #[test]
+    fn permit_releases_when_holder_panics() {
+        let sem = Value::semaphore(1);
+        let inner = sem.as_semaphore().expect("backend");
+        let worker = {
+            let inner = std::sync::Arc::clone(&inner);
+            std::thread::spawn(move || {
+                assert!(inner.try_acquire());
+                let _permit = Value::permit(&inner);
+                panic!("worker fails holding the permit");
+            })
+        };
+        assert!(worker.join().is_err());
+        assert_eq!(inner.available(), 1);
+    }
+
+    #[test]
+    fn semaphore_holds_cap_under_contention() {
+        use std::sync::atomic::Ordering;
+        let sem = Value::semaphore(4);
+        let inner = sem.as_semaphore().expect("backend");
+        let holders = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let peak = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut threads = Vec::new();
+        for _ in 0..8 {
+            let inner = std::sync::Arc::clone(&inner);
+            let holders = std::sync::Arc::clone(&holders);
+            let peak = std::sync::Arc::clone(&peak);
+            threads.push(std::thread::spawn(move || {
+                let mut acquired = 0;
+                while acquired < 25 {
+                    if inner.try_acquire() {
+                        {
+                            // Release rides the permit word's drop: the
+                            // scope exit below hands the permit back.
+                            let _permit = Value::permit(&inner);
+                            let current = holders.fetch_add(1, Ordering::SeqCst) + 1;
+                            peak.fetch_max(current, Ordering::SeqCst);
+                            std::thread::yield_now();
+                            holders.fetch_sub(1, Ordering::SeqCst);
+                        }
+                        acquired += 1;
+                    } else {
+                        std::thread::yield_now();
+                    }
+                }
+            }));
+        }
+        for thread in threads {
+            thread.join().expect("worker joins");
+        }
+        // 200 acquisitions, never more than 4 inside at once, every
+        // permit handed back: exact accounting under contention.
+        assert!(peak.load(Ordering::SeqCst) <= 4);
+        assert_eq!(holders.load(Ordering::SeqCst), 0);
+        assert_eq!(inner.available(), 4);
+    }
 }

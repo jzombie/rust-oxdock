@@ -29,11 +29,12 @@ Two trade offs come with the form. Cloning a string still deep copies it, since 
 
 ### Transport: pipes
 
-A command's standard streams can be rerouted through named pipes, so producers and consumers connect without touching the terminal or temp files. Buffers stay in memory and spill to a guarded temp file past 8 MiB, and background single command tasks can promote a pipe to a zero copy OS kernel pair instead.
+A command's standard streams can be rerouted through pipes declared with `LET $p: PIPE`, so producers and consumers connect without touching the terminal or temp files. Buffers stay in memory and spill to a guarded temp file past 8 MiB, and background single command tasks can promote a pipe to a zero copy OS kernel pair instead.
 
 ```oxdock
-WITH_IO [stdout=pipe:log] ECHO hello
-WITH_IO [stdin=pipe:log] READ_LINE $line
+LET $log: PIPE
+WITH_IO [stdout=$log] ECHO hello
+WITH_IO [stdin=$log] READ_LINE $line
 ASSERT_EQ $line "hello"
 ```
 

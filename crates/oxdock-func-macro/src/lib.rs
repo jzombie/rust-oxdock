@@ -163,7 +163,7 @@ fn peek_key_value(input: ParseStream) -> bool {
 fn type_label_to_string(lit: &syn::LitStr) -> syn::Result<String> {
     match lit.value().as_str() {
         "STRING" | "INT" | "FLOAT" | "BOOL" | "PIPE" | "LIST" | "MAP" | "HANDLE" | "DURATION"
-        | "PATH" => Ok(lit.value()),
+        | "PATH" | "SEMAPHORE" | "PERMIT" => Ok(lit.value()),
         other => Err(syn::Error::new(
             lit.span(),
             format!(
@@ -382,7 +382,13 @@ fn doc_lines(attrs: &[syn::Attribute]) -> Vec<String> {
             && let syn::Expr::Lit(lit) = &pair.value
             && let Lit::Str(text) = &lit.lit
         {
-            lines.push(text.value().trim().to_string());
+            // Strip only the single space after `///`, preserving any
+            // further indentation so fenced examples keep their shape;
+            // trailing whitespace is never significant. A full trim
+            // here flattened every indented example body.
+            let raw = text.value();
+            let stripped = raw.strip_prefix(' ').unwrap_or(&raw);
+            lines.push(stripped.trim_end().to_string());
         }
     }
     lines

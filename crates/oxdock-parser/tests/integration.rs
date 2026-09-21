@@ -5,6 +5,8 @@
 // to its original file, except `mod common;` collapsing to this root.
 #[path = "integration/arithmetic.rs"]
 mod arithmetic;
+#[path = "integration/bare_pipe.rs"]
+mod bare_pipe;
 #[path = "integration/cancel.rs"]
 mod cancel;
 #[path = "integration/common/mod.rs"]

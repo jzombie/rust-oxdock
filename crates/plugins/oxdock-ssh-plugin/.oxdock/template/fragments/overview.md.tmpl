@@ -1,0 +1,9 @@
+## Overview
+
+The SSH module spins up ephemeral loopback SSH servers with in-memory
+credentials, dequeues each session with its metadata, and pumps bytes
+through explicit DSL pipes. Import it with `IMPORT [STD, SSH]` in a
+runner that registers the host module on the
+[Engine facade]({{ $docs_global.engine_facade_url }}). The function
+reference below lists every entry with signatures; the type reference
+lists the session and server handles.

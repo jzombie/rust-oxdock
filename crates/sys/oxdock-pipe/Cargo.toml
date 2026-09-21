@@ -1,0 +1,18 @@
+[package]
+name = "oxdock-pipe"
+description = "Anonymous pipe backends for OxDock: spillable script buffers, OS pairs, and owned handle slots."
+categories = ["development-tools"]
+keywords = ["oxdock", "pipe", "orchestration"]
+authors.workspace = true
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+oxdock-fs.workspace = true
+
+[lints]
+workspace = true

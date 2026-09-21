@@ -55,6 +55,18 @@ pub fn run(repo_root: &Path) -> Result<()> {
 
             LET $funcref: STRING = DOCS::FUNCTION_REFERENCE()
             WRITE $gen.function_reference $funcref
+
+            LET $sshfuncref: STRING = DOCS::PLUGIN_FUNCTION_REFERENCE("SSH")
+            WRITE $gen.ssh_function_reference $sshfuncref
+
+            LET $sshtypes: STRING = DOCS::PLUGIN_TYPE_REFERENCE("SSH")
+            WRITE $gen.ssh_type_reference $sshtypes
+
+            LET $netfuncref: STRING = DOCS::PLUGIN_FUNCTION_REFERENCE("NET")
+            WRITE $gen.net_function_reference $netfuncref
+
+            LET $nettypes: STRING = DOCS::PLUGIN_TYPE_REFERENCE("NET")
+            WRITE $gen.net_type_reference $nettypes
         }
         REFRESH_GENERATED($gen)
 
@@ -136,8 +148,9 @@ pub fn run(repo_root: &Path) -> Result<()> {
             LET $files: MAP = LOAD_JSON("target/oxdock-docs/{{ $t.name }}.json")
 
             WRITE $t.out ""
-            WITH_IO [stdout=pipe:render] EXPAND $t.template
-            WITH_IO [stdin=pipe:render] APPEND $t.out
+            LET $render: PIPE
+            WITH_IO [stdout=$render] EXPAND $t.template
+            WITH_IO [stdin=$render] APPEND $t.out
         }
         FOR $rscope: STRING IN $cfg.scopes {
             FOR $rtj: STRING IN GLOB("{{ $rscope }}/**/target.json") {
