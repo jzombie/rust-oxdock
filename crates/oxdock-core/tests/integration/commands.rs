@@ -115,7 +115,7 @@ fn workspace_local_copy_cannot_escape_workspace_root() {
     let script = indoc!(
         r#"
         WORKSPACE LOCAL
-        COPY --from-current-workspace "{outside}" out/target
+        COPY --from-workspace LOCAL "{outside}" out/target
     "#
     );
     let outside_str = outside_file.as_path().to_string_lossy().to_string();
@@ -126,7 +126,7 @@ fn workspace_local_copy_cannot_escape_workspace_root() {
         run_steps_with_context_result_with_io(&snapshot, &workspace, &steps, ExecIo::new());
     assert!(
         result.is_err(),
-        "expected COPY --from-current-workspace to reject paths outside workspace root even after WORKSPACE LOCAL"
+        "expected COPY --from-workspace LOCAL to reject paths outside workspace root even after WORKSPACE LOCAL"
     );
 }
 
@@ -222,7 +222,7 @@ fn commands_behave_cross_platform() {
         Step {
             guard: None,
             kind: StepKind::Copy {
-                from_current_workspace: false,
+                from_workspace: None,
                 from: "./source.txt".into(),
                 to: "./client/dist/from_build.txt".into(),
             },

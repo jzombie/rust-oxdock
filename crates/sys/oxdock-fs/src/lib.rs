@@ -11,9 +11,9 @@ pub fn init_temp_gc() {
 }
 
 pub fn discover_workspace_root() -> Result<GuardedPath> {
-    if let Ok(root) = std::env::var("OXDOCK_WORKSPACE_ROOT") {
+    if let Ok(root) = std::env::var(env::WORKSPACE_ROOT) {
         return GuardedPath::new_root_from_str(&root)
-            .with_context(|| format!("invalid OXDOCK_WORKSPACE_ROOT {}", root));
+            .with_context(|| format!("invalid {} {root}", env::WORKSPACE_ROOT));
     }
 
     if let Ok(resolver) = PathResolver::from_manifest_env() {
@@ -31,12 +31,13 @@ pub fn discover_workspace_root() -> Result<GuardedPath> {
         .with_context(|| format!("failed to guard current directory {}", cwd.display()))
 }
 
+pub mod env;
 pub mod workspace_fs;
 pub use workspace_fs::git::{GitIdentity, current_head_commit, ensure_git_identity};
 pub use workspace_fs::policy::{GuardPolicy, PolicyPath};
 pub use workspace_fs::{
-    CargoScratch, DirEntry, EntryKind, GuardedPath, GuardedTempDir, LazyGuardedTempDir,
-    PathResolver, reserve_cargo_scratch,
+    CargoScratch, CopySourceRoot, DirEntry, EntryKind, GuardedPath, GuardedTempDir,
+    LazyGuardedTempDir, PathResolver, reserve_cargo_scratch,
 };
 pub use workspace_fs::{SpillFile, command_path, embed_path, normalized_path, to_forward_slashes};
 
@@ -100,6 +101,18 @@ pub trait WorkspaceFs: Send + Sync {
     /// Select the local (build-context) root (`WORKSPACE LOCAL`). Never
     /// touches the snapshot handle.
     fn switch_to_local(&mut self);
+    /// Select the persistent cache root (`WORKSPACE CACHE`). The directory
+    /// is created on first cache-targeted resolve and never deleted.
+    fn switch_to_cache(&mut self);
+    /// Select full filesystem access (`WORKSPACE SYSTEM`). Resolution
+    /// bypasses root-prefix containment; not hermetic.
+    fn switch_to_system(&mut self);
+    /// Entry working directory for `WORKSPACE SYSTEM`: rebase a
+    /// snapshot-anchor-rooted `cwd` onto the concrete root (or the system
+    /// anchor while pending) so unconfined resolution never materializes
+    /// the never-created virtual anchor as a side effect. Passes every
+    /// other `cwd` through untouched.
+    fn system_entry_cwd(&self, cwd: &GuardedPath) -> GuardedPath;
     /// True while snapshot-selected but not yet materialized (drives the
     /// pending display sentinel defined as
     /// `oxdock_core::SNAPSHOT_PENDING_DISPLAY`).
@@ -171,6 +184,11 @@ pub trait WorkspaceFs: Send + Sync {
     fn resolve_write(&self, cwd: &GuardedPath, rel: &str) -> Result<GuardedPath>;
     fn resolve_copy_source(&self, from: &str) -> Result<GuardedPath>;
     fn resolve_copy_source_from_workspace(&self, from: &str) -> Result<GuardedPath>;
+    fn resolve_copy_source_from_target(
+        &self,
+        root: CopySourceRoot,
+        from: &str,
+    ) -> Result<GuardedPath>;
 
     fn entry_kind(&self, path: &GuardedPath) -> Result<EntryKind>;
     #[allow(clippy::disallowed_types)]
@@ -226,6 +244,18 @@ impl WorkspaceFs for PathResolver {
 
     fn switch_to_local(&mut self) {
         PathResolver::switch_to_local(self)
+    }
+
+    fn switch_to_cache(&mut self) {
+        PathResolver::switch_to_cache(self)
+    }
+
+    fn switch_to_system(&mut self) {
+        PathResolver::switch_to_system(self)
+    }
+
+    fn system_entry_cwd(&self, cwd: &GuardedPath) -> GuardedPath {
+        PathResolver::system_entry_cwd(self, cwd)
     }
 
     fn is_snapshot_pending(&self) -> bool {
@@ -430,6 +460,14 @@ impl WorkspaceFs for PathResolver {
 
     fn resolve_copy_source_from_workspace(&self, from: &str) -> Result<GuardedPath> {
         PathResolver::resolve_copy_source_from_workspace(self, from)
+    }
+
+    fn resolve_copy_source_from_target(
+        &self,
+        root: CopySourceRoot,
+        from: &str,
+    ) -> Result<GuardedPath> {
+        PathResolver::resolve_copy_source_from_target(self, root, from)
     }
 
     fn entry_kind(&self, path: &GuardedPath) -> Result<EntryKind> {

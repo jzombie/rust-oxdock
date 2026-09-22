@@ -27,6 +27,7 @@ windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_
 
 [dependencies]
 anyhow.workspace = true
+cache-manager.workspace = true
 glob.workspace = true
 tempfile.workspace = true
 tracing = { workspace = true }

@@ -676,7 +676,7 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
             Ok(())
         }
         StepKind::Copy {
-            from_current_workspace,
+            from_workspace,
             from,
             to,
         } => {
@@ -685,7 +685,7 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
             handlers::copy(
                 &mut cx,
                 idx,
-                *from_current_workspace,
+                from_workspace.clone(),
                 &from_resolved,
                 &to_resolved,
             )
@@ -911,7 +911,7 @@ fn execute_steps_inner<P: ProcessManager>(
                             handlers::dispatch_async_block(&step.kind, &mut cx)
                         }
                         StepKind::Copy {
-                            from_current_workspace,
+                            from_workspace,
                             from,
                             to,
                         } => {
@@ -920,7 +920,7 @@ fn execute_steps_inner<P: ProcessManager>(
                             handlers::copy(
                                 &mut cx,
                                 idx,
-                                *from_current_workspace,
+                                from_workspace.clone(),
                                 &from_resolved,
                                 &to_resolved,
                             )

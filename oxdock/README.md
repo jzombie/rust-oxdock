@@ -320,7 +320,7 @@ ASSERT_CONTAINS stdout "piped-bytes"
 
 ### Workspaces start ephemeral
 
-Scripts start in an ephemeral snapshot workspace, an isolated temp dir that leaves the source tree untouched. Pull inputs with `COPY` or `COPY_GIT`. Switch to the local directory with `WORKSPACE LOCAL` when the script should mutate in place.
+Scripts start in an ephemeral snapshot workspace, an isolated temp dir that leaves the source tree untouched. Pull inputs with `COPY` or `COPY_GIT`. Switch to the local directory with `WORKSPACE LOCAL` when the script should mutate in place, to the persistent per-project cache with `WORKSPACE CACHE` for artifacts that must survive restarts, or to `WORKSPACE SYSTEM` for full filesystem access.
 
 ```oxdock
 WRITE snap.txt from-snapshot
@@ -330,6 +330,14 @@ WORKSPACE LOCAL
 WRITE local.txt from-local
 LET $l: STRING = READ local.txt
 ASSERT_EQ $l "from-local"
+WORKSPACE CACHE
+WRITE cached.txt from-cache
+LET $c: STRING = READ cached.txt
+ASSERT_EQ $c "from-cache"
+WORKSPACE SYSTEM
+WRITE sys.txt from-system
+LET $y: STRING = READ sys.txt
+ASSERT_EQ $y "from-system"
 ```
 
 OxDock scripts automate build-time work: creating files, snapshotting
@@ -695,7 +703,11 @@ Keeping inheritance selective avoids leaking secrets by default while still allo
 
 - **Typical usage pattern:** the temporary workspace is intended for short lived build and test iterations. Run scripts against it, inspect outputs, and discard when done. Because it is separate from the original repo it is safe to run multiple concurrent experiments without changing the original repo.
 
-- **Filesystem gating via `oxdock-fs`:** all filesystem operations in the runtime are routed through the crate internal `oxdock-fs` abstraction. That module centralizes path resolution, canonicalization and access checks so reads and writes can be validated against the allowed workspace root and build context.
+- **Four workspace roots:** `WORKSPACE SNAPSHOT` (the default ephemeral temp location), `WORKSPACE LOCAL` (the local directory), `WORKSPACE CACHE` (a persistent per-project cache directory shared across runs), and `WORKSPACE SYSTEM` (full filesystem access, not hermetic). `WORKSPACE` selection reverts at scope exit like `WORKDIR`.
+
+- **Persistent cache:** `WORKSPACE CACHE` resolves through the `cache-manager` crate with OS-native per-user roots (macOS `~/Library/Caches`, Linux `$XDG_CACHE_HOME` or `~/.cache`, Windows `%LOCALAPPDATA%`) namespaced by application identity (explicit builder argument, `OXDOCK_CACHE_APP`, `CARGO_PKG_NAME`, or the running binary name, in that order; `OXDOCK_CACHE_DIR` pins an exact directory). The cache directory is created on first use, survives restarts, and is never evicted by default.
+
+- **Filesystem gating via `oxdock-fs`:** all filesystem operations in the runtime are routed through the crate internal `oxdock-fs` abstraction. That module centralizes path resolution, canonicalization and access checks so reads and writes can be validated against the allowed workspace root and build context. `WORKSPACE SYSTEM` intentionally bypasses these checks; scripts using it are not hermetic.
 
 - **What `oxdock-fs` protects you from:** the guardrails are pragmatic. They prevent common mistakes such as accidentally writing outside the materialized workspace or reading files from arbitrary absolute paths. However, they are not a full sandbox. A determined process or script can still create destructive actions (for example, invoking native `RUN` commands that modify external state). If you require strict isolation, run OxDock inside a container or VM.
 

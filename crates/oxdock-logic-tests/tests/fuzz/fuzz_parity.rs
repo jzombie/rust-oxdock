@@ -144,7 +144,9 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
         safe_string().prop_map(|s| StepKind::Workdir(s.into())),
         prop_oneof![
             Just(WorkspaceTarget::Snapshot),
-            Just(WorkspaceTarget::Local)
+            Just(WorkspaceTarget::Local),
+            Just(WorkspaceTarget::Cache),
+            Just(WorkspaceTarget::System)
         ]
         .prop_map(StepKind::Workspace),
         (safe_string(), safe_string()).prop_map(|(key, value)| StepKind::Env {
@@ -160,7 +162,7 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
         }),
         safe_msg().prop_map(|s| StepKind::Echo(s.into())),
         (safe_string(), safe_string()).prop_map(|(from, to)| StepKind::Copy {
-            from_current_workspace: false,
+            from_workspace: None,
             from: from.into(),
             to: to.into()
         }),

@@ -960,6 +960,8 @@ fn emit_stepkind(
             let variant = match t {
                 oxdock_parser::WorkspaceTarget::Snapshot => quote! { Snapshot },
                 oxdock_parser::WorkspaceTarget::Local => quote! { Local },
+                oxdock_parser::WorkspaceTarget::Cache => quote! { Cache },
+                oxdock_parser::WorkspaceTarget::System => quote! { System },
             };
             quote! { StepKind::Workspace(oxdock_parser::WorkspaceTarget::#variant) }
         }
@@ -967,13 +969,28 @@ fn emit_stepkind(
             quote! { StepKind::InheritEnv { keys: vec![#(#keys.to_string()),*] } }
         }
         StepKind::Copy {
-            from_current_workspace,
+            from_workspace,
             from,
             to,
         } => {
             let f = emit_arg(from, interp);
             let t = emit_arg(to, interp);
-            quote! { StepKind::Copy { from_current_workspace: #from_current_workspace, from: #f, to: #t } }
+            let w = match from_workspace {
+                None => quote! { None },
+                Some(oxdock_parser::WorkspaceTarget::Snapshot) => {
+                    quote! { Some(oxdock_parser::WorkspaceTarget::Snapshot) }
+                }
+                Some(oxdock_parser::WorkspaceTarget::Local) => {
+                    quote! { Some(oxdock_parser::WorkspaceTarget::Local) }
+                }
+                Some(oxdock_parser::WorkspaceTarget::Cache) => {
+                    quote! { Some(oxdock_parser::WorkspaceTarget::Cache) }
+                }
+                Some(oxdock_parser::WorkspaceTarget::System) => {
+                    quote! { Some(oxdock_parser::WorkspaceTarget::System) }
+                }
+            };
+            quote! { StepKind::Copy { from_workspace: #w, from: #f, to: #t } }
         }
         StepKind::Symlink { from, to } => {
             let f = emit_arg(from, interp);

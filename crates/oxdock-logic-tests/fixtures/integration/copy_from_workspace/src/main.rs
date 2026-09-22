@@ -21,7 +21,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     resolver.write_file(&workspace_file, b"from workspace")?;
 
     // Script: copy from workspace-relative path into snapshot output
-    // Use the new flag to indicate copy from current workspace
+    // Use the workspace-rooted source selector.
     let ws_src = workspace_file
         .as_path()
         .to_string_lossy()
@@ -29,7 +29,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let out_ws_path = "out/target_ws/ws_source.txt";
     let out_build_path = "out/target_build/build_source.txt";
     let script = indoc!(r#"
-    COPY --from-current-workspace "{ws}" "{out_ws}"
+    COPY --from-workspace LOCAL "{ws}" "{out_ws}"
     COPY "{build}" "{out_build}"
     "#);
     let script = script

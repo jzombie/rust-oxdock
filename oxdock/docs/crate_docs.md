@@ -909,12 +909,12 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | Command | Syntax |
 | --- | --- |
 | [`WORKDIR`](#workdir) | `WORKDIR <path>` |
-| [`WORKSPACE`](#workspace) | `WORKSPACE (SNAPSHOT\|LOCAL, case-insensitive)` |
+| [`WORKSPACE`](#workspace) | `WORKSPACE (SNAPSHOT\|LOCAL\|CACHE\|SYSTEM)` |
 | [`ENV`](#env) | `ENV KEY=value` |
 | [`INHERIT_ENV`](#inherit_env) | `INHERIT_ENV [<key>, ...]` |
 | [`ECHO`](#echo) | `ECHO <message>` |
 | [`RUN`](#run) | `RUN <command...> \| RUN ["exe", "arg", ...]` |
-| [`COPY`](#copy) | `COPY [--from-current-workspace] <from> <to>` |
+| [`COPY`](#copy) | `COPY [--from-workspace SNAPSHOT\|LOCAL\|CACHE\|SYSTEM] <from> <to>` |
 | [`COPY_GIT`](#copy_git) | `COPY_GIT [--include-dirty] <rev> <src> <dst>` |
 | [`SYMLINK`](#symlink) | `SYMLINK <from> <to>` |
 | [`MKDIR`](#mkdir) | `MKDIR <path>` |
@@ -1806,15 +1806,15 @@ ASSERT_EQ $body "generated-under-workdir"
 
 Switch workspace roots.
 
-**Syntax:** `WORKSPACE (SNAPSHOT|LOCAL, case-insensitive)`
+**Syntax:** `WORKSPACE (SNAPSHOT|LOCAL|CACHE|SYSTEM)`
 
-SNAPSHOT or LOCAL root.
+SNAPSHOT, LOCAL, CACHE, or SYSTEM root. CACHE is a persistent per-project cache directory shared across runs. SYSTEM grants full filesystem access and is not hermetic.
 
 **Arguments:**
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
-| `target` | `SNAPSHOT\|LOCAL` | yes | Target root |
+| `target` | `SNAPSHOT\|LOCAL\|CACHE\|SYSTEM` | yes | Target root |
 
 **Examples:**
 
@@ -2013,7 +2013,7 @@ RUN ["cargo", "--version"]
 
 Copy file into workspace.
 
-**Syntax:** `COPY [--from-current-workspace] <from> <to>`
+**Syntax:** `COPY [--from-workspace SNAPSHOT|LOCAL|CACHE|SYSTEM] <from> <to>`
 
 Copies from host.
 
@@ -2028,7 +2028,7 @@ Copies from host.
 
 | Flag | Type | Description |
 | --- | --- | --- |
-| `--from-current-workspace` | `BOOL` | Copy from workspace instead of build context |
+| `--from-workspace` | `STRING` | Copy from the given workspace root instead of the build context |
 
 **Examples:**
 
@@ -2045,7 +2045,7 @@ ASSERT_EQ $body "content"
 
 ```oxdock roots:unified
 WRITE ws-src.txt ws-content
-COPY --from-current-workspace ws-src.txt ws-copy.txt
+COPY --from-workspace LOCAL ws-src.txt ws-copy.txt
 LET $body: STRING = READ ws-copy.txt
 ASSERT_EQ $body "ws-content"
 ```

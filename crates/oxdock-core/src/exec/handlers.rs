@@ -2,6 +2,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
+use oxdock_fs::CopySourceRoot;
 use oxdock_parser::{
     Arg, Expr, IoBinding, IoStream, PipeTarget, Step, StepKind, Value, WorkspaceTarget,
 };
@@ -88,6 +89,11 @@ pub(super) fn workspace<P: ProcessManager>(
 ) -> Result<()> {
     // Selection only, no disk I/O. The snapshot side stays pending until the
     // first snapshot-targeted choke point materializes it (issue #131).
+    // CACHE ensures its persistent directory on first cache-targeted use
+    // and never deletes it; SYSTEM bypasses containment. SYSTEM keeps the
+    // current working directory (rebased off the never-created snapshot
+    // anchor when needed) so relative paths keep working from where the
+    // script already was (issue #163).
     match target {
         WorkspaceTarget::Snapshot => {
             cx.state.fs.switch_to_snapshot();
@@ -96,6 +102,15 @@ pub(super) fn workspace<P: ProcessManager>(
         WorkspaceTarget::Local => {
             cx.state.fs.switch_to_local();
             cx.state.cwd = cx.state.fs.root().clone();
+        }
+        WorkspaceTarget::Cache => {
+            cx.state.fs.switch_to_cache();
+            cx.state.cwd = cx.state.fs.root().clone();
+        }
+        WorkspaceTarget::System => {
+            cx.state.fs.switch_to_system();
+            let cwd = cx.state.cwd.clone();
+            cx.state.cwd = cx.state.fs.system_entry_cwd(&cwd);
         }
     }
     Ok(())
@@ -452,17 +467,29 @@ pub(crate) fn sleep<P: ProcessManager>(
     }
 }
 
+/// Map a `COPY --from-workspace` target onto the filesystem layer's source
+/// root (issue #163). The parser owns the DSL vocabulary; `oxdock-fs`
+/// stays a leaf crate, so the translation lives here.
+fn copy_source_root(target: WorkspaceTarget) -> CopySourceRoot {
+    match target {
+        WorkspaceTarget::Snapshot => CopySourceRoot::Snapshot,
+        WorkspaceTarget::Local => CopySourceRoot::Local,
+        WorkspaceTarget::Cache => CopySourceRoot::Cache,
+        WorkspaceTarget::System => CopySourceRoot::System,
+    }
+}
+
 pub(super) fn copy<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     idx: usize,
-    from_current_workspace: bool,
+    from_workspace: Option<WorkspaceTarget>,
     from: &str,
     to: &str,
 ) -> Result<()> {
-    let from_abs = if from_current_workspace {
+    let from_abs = if let Some(target) = from_workspace {
         cx.state
             .fs
-            .resolve_copy_source_from_workspace(from)
+            .resolve_copy_source_from_target(copy_source_root(target), from)
             .with_context(|| format!("step {}: COPY {} {}", idx + 1, from, to))?
     } else {
         cx.state
@@ -2409,7 +2436,7 @@ pub(crate) fn dispatch_copy<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
 ) -> Result<()> {
     let StepKind::Copy {
-        from_current_workspace,
+        from_workspace,
         from,
         to,
     } = step
@@ -2418,7 +2445,7 @@ pub(crate) fn dispatch_copy<P: ProcessManager>(
     };
     let from_resolved = super::args::resolve_arg(from, cx)?;
     let to_resolved = super::args::resolve_arg(to, cx)?;
-    copy(cx, 0, *from_current_workspace, &from_resolved, &to_resolved)
+    copy(cx, 0, from_workspace.clone(), &from_resolved, &to_resolved)
 }
 
 pub(crate) fn dispatch_copy_git<P: ProcessManager>(

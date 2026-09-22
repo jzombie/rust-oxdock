@@ -378,7 +378,7 @@ ASSERT_CONTAINS stdout "piped-bytes"
 
 ### Workspaces start ephemeral
 
-Scripts start in an ephemeral snapshot workspace, an isolated temp dir that leaves the source tree untouched. Pull inputs with `COPY` or `COPY_GIT`. Switch to the local directory with `WORKSPACE LOCAL` when the script should mutate in place.
+Scripts start in an ephemeral snapshot workspace, an isolated temp dir that leaves the source tree untouched. Pull inputs with `COPY` or `COPY_GIT`. Switch to the local directory with `WORKSPACE LOCAL` when the script should mutate in place, to the persistent per-project cache with `WORKSPACE CACHE` for artifacts that must survive restarts, or to `WORKSPACE SYSTEM` for full filesystem access.
 
 ```oxdock
 WRITE snap.txt from-snapshot
@@ -388,6 +388,14 @@ WORKSPACE LOCAL
 WRITE local.txt from-local
 LET $l: STRING = READ local.txt
 ASSERT_EQ $l "from-local"
+WORKSPACE CACHE
+WRITE cached.txt from-cache
+LET $c: STRING = READ cached.txt
+ASSERT_EQ $c "from-cache"
+WORKSPACE SYSTEM
+WRITE sys.txt from-system
+LET $y: STRING = READ sys.txt
+ASSERT_EQ $y "from-system"
 ```
 
 ## Extending OxDock from Rust
@@ -1041,12 +1049,12 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | Command | Syntax |
 | --- | --- |
 | [`WORKDIR`](#workdir) | `WORKDIR <path>` |
-| [`WORKSPACE`](#workspace) | `WORKSPACE (SNAPSHOT\|LOCAL, case-insensitive)` |
+| [`WORKSPACE`](#workspace) | `WORKSPACE (SNAPSHOT\|LOCAL\|CACHE\|SYSTEM)` |
 | [`ENV`](#env) | `ENV KEY=value` |
 | [`INHERIT_ENV`](#inherit_env) | `INHERIT_ENV [<key>, ...]` |
 | [`ECHO`](#echo) | `ECHO <message>` |
 | [`RUN`](#run) | `RUN <command...> \| RUN ["exe", "arg", ...]` |
-| [`COPY`](#copy) | `COPY [--from-current-workspace] <from> <to>` |
+| [`COPY`](#copy) | `COPY [--from-workspace SNAPSHOT\|LOCAL\|CACHE\|SYSTEM] <from> <to>` |
 | [`COPY_GIT`](#copy_git) | `COPY_GIT [--include-dirty] <rev> <src> <dst>` |
 | [`SYMLINK`](#symlink) | `SYMLINK <from> <to>` |
 | [`MKDIR`](#mkdir) | `MKDIR <path>` |
@@ -1938,15 +1946,15 @@ ASSERT_EQ $body "generated-under-workdir"
 
 Switch workspace roots.
 
-**Syntax:** `WORKSPACE (SNAPSHOT|LOCAL, case-insensitive)`
+**Syntax:** `WORKSPACE (SNAPSHOT|LOCAL|CACHE|SYSTEM)`
 
-SNAPSHOT or LOCAL root.
+SNAPSHOT, LOCAL, CACHE, or SYSTEM root. CACHE is a persistent per-project cache directory shared across runs. SYSTEM grants full filesystem access and is not hermetic.
 
 **Arguments:**
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
-| `target` | `SNAPSHOT\|LOCAL` | yes | Target root |
+| `target` | `SNAPSHOT\|LOCAL\|CACHE\|SYSTEM` | yes | Target root |
 
 **Examples:**
 
@@ -2145,7 +2153,7 @@ RUN ["cargo", "--version"]
 
 Copy file into workspace.
 
-**Syntax:** `COPY [--from-current-workspace] <from> <to>`
+**Syntax:** `COPY [--from-workspace SNAPSHOT|LOCAL|CACHE|SYSTEM] <from> <to>`
 
 Copies from host.
 
@@ -2160,7 +2168,7 @@ Copies from host.
 
 | Flag | Type | Description |
 | --- | --- | --- |
-| `--from-current-workspace` | `BOOL` | Copy from workspace instead of build context |
+| `--from-workspace` | `STRING` | Copy from the given workspace root instead of the build context |
 
 **Examples:**
 
@@ -2177,7 +2185,7 @@ ASSERT_EQ $body "content"
 
 ```oxdock roots:unified
 WRITE ws-src.txt ws-content
-COPY --from-current-workspace ws-src.txt ws-copy.txt
+COPY --from-workspace LOCAL ws-src.txt ws-copy.txt
 LET $body: STRING = READ ws-copy.txt
 ASSERT_EQ $body "ws-content"
 ```
@@ -3132,7 +3140,11 @@ Keeping inheritance selective avoids leaking secrets by default while still allo
 
 - **Typical usage pattern:** the temporary workspace is intended for short lived build and test iterations. Run scripts against it, inspect outputs, and discard when done. Because it is separate from the original repo it is safe to run multiple concurrent experiments without changing the original repo.
 
-- **Filesystem gating via `oxdock-fs`:** all filesystem operations in the runtime are routed through the crate internal `oxdock-fs` abstraction. That module centralizes path resolution, canonicalization and access checks so reads and writes can be validated against the allowed workspace root and build context.
+- **Four workspace roots:** `WORKSPACE SNAPSHOT` (the default ephemeral temp location), `WORKSPACE LOCAL` (the local directory), `WORKSPACE CACHE` (a persistent per-project cache directory shared across runs), and `WORKSPACE SYSTEM` (full filesystem access, not hermetic). `WORKSPACE` selection reverts at scope exit like `WORKDIR`.
+
+- **Persistent cache:** `WORKSPACE CACHE` resolves through the `cache-manager` crate with OS-native per-user roots (macOS `~/Library/Caches`, Linux `$XDG_CACHE_HOME` or `~/.cache`, Windows `%LOCALAPPDATA%`) namespaced by application identity (explicit builder argument, `OXDOCK_CACHE_APP`, `CARGO_PKG_NAME`, or the running binary name, in that order; `OXDOCK_CACHE_DIR` pins an exact directory). The cache directory is created on first use, survives restarts, and is never evicted by default.
+
+- **Filesystem gating via `oxdock-fs`:** all filesystem operations in the runtime are routed through the crate internal `oxdock-fs` abstraction. That module centralizes path resolution, canonicalization and access checks so reads and writes can be validated against the allowed workspace root and build context. `WORKSPACE SYSTEM` intentionally bypasses these checks; scripts using it are not hermetic.
 
 - **What `oxdock-fs` protects you from:** the guardrails are pragmatic. They prevent common mistakes such as accidentally writing outside the materialized workspace or reading files from arbitrary absolute paths. However, they are not a full sandbox. A determined process or script can still create destructive actions (for example, invoking native `RUN` commands that modify external state). If you require strict isolation, run OxDock inside a container or VM.
 

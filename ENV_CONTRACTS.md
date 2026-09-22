@@ -31,6 +31,9 @@ Statuses:
 | `SHELL` | Retained | `crates/sys/oxdock-process/src/shell.rs` : `shell_program` (unix fallback `sh`) | Interactive-shell resolution |
 | `COMSPEC` | Retained | `crates/sys/oxdock-process/src/shell.rs` : `shell_program` (windows fallback `cmd`) | Windows shell resolution |
 | `CARGO_FEATURE_*` / `CARGO_CFG_*` | Retained | `crates/sys/oxdock-process/src/builtin_env.rs` : `BuiltinEnv::collect`; emitted for consumer crates by helpers `emit_feature_envs` | Natively visible inside build-script processes, so DSL scripts read them without relay (env_injection fixture pins this) |
+| `OXDOCK_CACHE_APP` | New | `crates/sys/oxdock-fs/src/workspace_fs/cache.rs` : `auto_detect_app_name` | Highest-priority cache application identity override (after an explicit `with_cache_app`/`set_cache_app` argument); sanitized to a filesystem-safe segment |
+| `OXDOCK_CACHE_DIR` | New | `crates/sys/oxdock-fs/src/workspace_fs/cache.rs` : `resolve_cache_dir` | Exact-directory override for the project cache root; takes precedence over OS-native project-dirs resolution. Tests pin this to a temp dir for hermeticity |
+| `CARGO_PKG_NAME` (runtime) | Retained (new reader) | `crates/sys/oxdock-fs/src/workspace_fs/cache.rs` : `auto_detect_app_name` | Read from the process environment (populated by Cargo for `cargo run`/`cargo test` and visible to proc-macro hosts through the compiler driver env); never read from disk, never via `env!` inside `oxdock-fs` |
 
 ## Transition log (Prototype commits)
 

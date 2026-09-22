@@ -630,18 +630,20 @@ declare_commands! {
     Workspace => [
         name: "WORKSPACE",
         variant: Workspace(WorkspaceTarget),
-        syntax: "WORKSPACE (SNAPSHOT|LOCAL, case-insensitive)",
+        syntax: "WORKSPACE (SNAPSHOT|LOCAL|CACHE|SYSTEM)",
         summary: "Switch workspace roots.",
-        description: "SNAPSHOT or LOCAL root.",
-        args: &[ ArgSpec { name: "target", arg_type: ArgType::OneOf(&["SNAPSHOT", "LOCAL"]), description: "Target root", io: IoDirection::Write, index: 0, required: true, fallback_stream: None } ],
+        description: "SNAPSHOT, LOCAL, CACHE, or SYSTEM root. CACHE is a persistent per-project cache directory shared across runs. SYSTEM grants full filesystem access and is not hermetic.",
+        args: &[ ArgSpec { name: "target", arg_type: ArgType::OneOf(&["SNAPSHOT", "LOCAL", "CACHE", "SYSTEM"]), description: "Target root", io: IoDirection::Write, index: 0, required: true, fallback_stream: None } ],
         flags: &[],
         default_output: None,
         examples: &[ Example { name: "switch roots", fence_meta: None, code: indoc! {r#"WORKSPACE LOCAL"#} } ],
         lower: |_flags, args| {
             let target = args.into_iter().next().ok_or_else(|| ParseError::validation("WORKSPACE", "WORKSPACE requires a target".to_string(), &SpanContext::line_only(0)))?;
             match target.as_str() {
-                "SNAPSHOT" | "snapshot" => Ok(StepKind::Workspace(WorkspaceTarget::Snapshot)),
-                "LOCAL" | "local" => Ok(StepKind::Workspace(WorkspaceTarget::Local)),
+                "SNAPSHOT" => Ok(StepKind::Workspace(WorkspaceTarget::Snapshot)),
+                "LOCAL" => Ok(StepKind::Workspace(WorkspaceTarget::Local)),
+                "CACHE" => Ok(StepKind::Workspace(WorkspaceTarget::Cache)),
+                "SYSTEM" => Ok(StepKind::Workspace(WorkspaceTarget::System)),
                 other => Err(ParseError::validation("WORKSPACE", format!("unknown workspace target: {other}"), &SpanContext::line_only(0))),
             }
         },
@@ -788,15 +790,15 @@ declare_commands! {
 
     Copy => [
         name: "COPY",
-        variant: Copy { from_current_workspace: bool, from: Arg, to: Arg },
-        syntax: "COPY [--from-current-workspace] <from> <to>",
+        variant: Copy { from_workspace: Option<WorkspaceTarget>, from: Arg, to: Arg },
+        syntax: "COPY [--from-workspace SNAPSHOT|LOCAL|CACHE|SYSTEM] <from> <to>",
         summary: "Copy file into workspace.",
         description: "Copies from host.",
         args: &[
             ArgSpec { name: "from", arg_type: ArgType::Path, description: "Source", io: IoDirection::Read, index: 0, required: true, fallback_stream: None },
             ArgSpec { name: "to", arg_type: ArgType::Path, description: "Dest", io: IoDirection::Write, index: 1, required: true, fallback_stream: None },
         ],
-        flags: &[ FlagSpec { name: "from_current_workspace", long: "--from-current-workspace", value_type: FlagValueType::Flag, required: false, description: "Copy from workspace instead of build context" } ],
+        flags: &[ FlagSpec { name: "from_workspace", long: "--from-workspace", value_type: FlagValueType::String, required: false, description: "Copy from the given workspace root instead of the build context" } ],
         default_output: None,
         examples: &[ Example { name: "copy", fence_meta: Some("roots:unified"), code: indoc! {r#"
             WRITE src.txt content
@@ -805,16 +807,26 @@ declare_commands! {
             ASSERT_EQ $body "content"
         "#} }, Example { name: "copy from workspace", fence_meta: Some("roots:unified"), code: indoc! {r#"
             WRITE ws-src.txt ws-content
-            COPY --from-current-workspace ws-src.txt ws-copy.txt
+            COPY --from-workspace LOCAL ws-src.txt ws-copy.txt
             LET $body: STRING = READ ws-copy.txt
             ASSERT_EQ $body "ws-content"
         "#} } ],
         lower: |flags, args| {
-            let from_current_workspace = flags.iter().any(|(k, _)| k == "from_current_workspace");
+            let from_workspace = flags
+                .iter()
+                .find(|(k, _)| k == "from_workspace")
+                .map(|(_, v)| match v.as_str() {
+                    "SNAPSHOT" => Ok(WorkspaceTarget::Snapshot),
+                    "LOCAL" => Ok(WorkspaceTarget::Local),
+                    "CACHE" => Ok(WorkspaceTarget::Cache),
+                    "SYSTEM" => Ok(WorkspaceTarget::System),
+                    other => Err(ParseError::validation("COPY", format!("unknown workspace source: {other}"), &SpanContext::line_only(0))),
+                })
+                .transpose()?;
             let mut it = args.into_iter();
             let from = it.next().ok_or_else(|| ParseError::validation("COPY", "COPY requires a source".to_string(), &SpanContext::line_only(0)))?;
             let to = it.next().ok_or_else(|| ParseError::validation("COPY", "COPY requires a destination".to_string(), &SpanContext::line_only(0)))?;
-            Ok(StepKind::Copy { from_current_workspace, from, to })
+            Ok(StepKind::Copy { from_workspace, from, to })
         },
     ],
 
@@ -2234,14 +2246,15 @@ impl fmt::Display for StepKind {
             }
             StepKind::Echo(m) => write!(f, "ECHO {}", fmt_value(m, quote_msg)),
             StepKind::Copy {
-                from_current_workspace,
+                from_workspace,
                 from,
                 to,
             } => {
-                if *from_current_workspace {
+                if let Some(target) = from_workspace {
                     write!(
                         f,
-                        "COPY --from-current-workspace {} {}",
+                        "COPY --from-workspace {} {} {}",
+                        target,
                         fmt_value(from, quote_arg),
                         fmt_value(to, quote_arg)
                     )
@@ -2564,6 +2577,91 @@ mod tests {
     }
 
     #[test]
+    fn workspace_accepts_all_four_targets_uppercase_only() {
+        // WORKSPACE targets are uppercase-only, like every other DSL
+        // keyword argument: lowercase spellings are rejected.
+        for (spelling, target) in [
+            ("SNAPSHOT", WorkspaceTarget::Snapshot),
+            ("LOCAL", WorkspaceTarget::Local),
+            ("CACHE", WorkspaceTarget::Cache),
+            ("SYSTEM", WorkspaceTarget::System),
+        ] {
+            let steps =
+                parse_script(&format!("WORKSPACE {spelling}\n"), lower_command).expect("parses");
+            assert_eq!(steps.len(), 1);
+            assert_eq!(steps[0].kind, StepKind::Workspace(target.clone()));
+            assert_eq!(steps[0].kind.to_string(), format!("WORKSPACE {target}"));
+        }
+        for spelling in ["snapshot", "local", "cache", "system"] {
+            let err = parse_err(&format!("WORKSPACE {spelling}\n"));
+            assert!(
+                err.contains("expected one of SNAPSHOT|LOCAL|CACHE|SYSTEM"),
+                "{spelling}: {err}"
+            );
+        }
+        let err = parse_err("WORKSPACE REMOTE\n");
+        assert!(
+            err.contains("expected one of SNAPSHOT|LOCAL|CACHE|SYSTEM"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn copy_from_workspace_selects_source_root() {
+        for (spelling, target) in [
+            ("SNAPSHOT", WorkspaceTarget::Snapshot),
+            ("LOCAL", WorkspaceTarget::Local),
+            ("CACHE", WorkspaceTarget::Cache),
+            ("SYSTEM", WorkspaceTarget::System),
+        ] {
+            let steps = parse_script(
+                &format!("COPY --from-workspace {spelling} a.txt b.txt\n"),
+                lower_command,
+            )
+            .expect("parses");
+            assert!(
+                matches!(&steps[0].kind, StepKind::Copy { from_workspace: Some(t), .. } if *t == target),
+                "unexpected lowering for {spelling}: {:?}",
+                steps[0].kind
+            );
+        }
+        // The `=` form is not usable for flags: the grammar reads
+        // `--from-workspace=CACHE` as a `KEY=value` assignment, so the
+        // value travels as the next whitespace-separated token.
+        let steps = parse_script("COPY --from-workspace CACHE a.txt b.txt\n", lower_command)
+            .expect("parses");
+        assert!(
+            matches!(
+                &steps[0].kind,
+                StepKind::Copy {
+                    from_workspace: Some(WorkspaceTarget::Cache),
+                    ..
+                }
+            ),
+            "unexpected lowering: {:?}",
+            steps[0].kind
+        );
+        // An absent flag means the build-context default.
+        let steps = parse_script("COPY a.txt b.txt\n", lower_command).expect("parses");
+        assert!(
+            matches!(
+                &steps[0].kind,
+                StepKind::Copy {
+                    from_workspace: None,
+                    ..
+                }
+            ),
+            "unexpected lowering: {:?}",
+            steps[0].kind
+        );
+        // Unknown and lowercase values are rejected uppercase-only.
+        for bad in ["REMOTE", "local"] {
+            let err = parse_err(&format!("COPY --from-workspace {bad} a.txt b.txt\n"));
+            assert!(err.contains("unknown workspace source"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
     fn space_before_paren_is_not_a_call() {
         // The call head and `(` must be contiguous: `ECHO (1 + 2)` is an
         // instruction, never a function invocation.
@@ -2750,8 +2848,15 @@ mod tests {
             "{:?}",
             steps[1].kind
         );
-        let steps =
-            parse_script("WHILE !$done {\n  BREAK\n}\n", lower_command).expect("while parses");
+        let steps = parse_script(
+            indoc! {r#"
+                WHILE !$done {
+                  BREAK
+                }
+            "#},
+            lower_command,
+        )
+        .expect("while parses");
         let StepKind::While { body, .. } = &steps[0].kind else {
             panic!("expected While, got {:?}", steps[0].kind);
         };
@@ -2763,7 +2868,12 @@ mod tests {
         // A bare `NAME(...)` on the LET RHS stays an expression assignment;
         // only ASYNC/TIMEOUT/command captures produce AssignCapture.
         let steps = parse_script(
-            "FUNC GREET($name: STRING) {\n  RETURN $name\n}\nLET $r: STRING = GREET(\"ada\")\n",
+            indoc! {r#"
+                FUNC GREET($name: STRING) {
+                  RETURN $name
+                }
+                LET $r: STRING = GREET("ada")
+            "#},
             lower_command,
         )
         .expect("capture call parses");
@@ -2817,7 +2927,14 @@ mod tests {
     #[test]
     fn multiline_bare_call_and_list_span_lines() {
         let steps = parse_script(
-            "FUNC GREET($a: STRING) {\n  RETURN $a\n}\nGREET(\n  \"ada\"\n)\n",
+            indoc! {r#"
+                FUNC GREET($a: STRING) {
+                  RETURN $a
+                }
+                GREET(
+                  "ada"
+                )
+            "#},
             lower_command,
         )
         .expect("multiline bare call parses");
@@ -2826,8 +2943,16 @@ mod tests {
         };
         assert_eq!(name, "SCRIPT::GREET");
         assert_eq!(args.len(), 1);
-        let steps = parse_script("LET $l: LIST = [\n  \"a\",\n  \"b\"\n]\n", lower_command)
-            .expect("multiline list parses");
+        let steps = parse_script(
+            indoc! {r#"
+                LET $l: LIST = [
+                  "a",
+                  "b"
+                ]
+            "#},
+            lower_command,
+        )
+        .expect("multiline list parses");
         let StepKind::Assign { expr, .. } = &steps[0].kind else {
             panic!("expected Assign, got {:?}", steps[0].kind);
         };

@@ -963,9 +963,12 @@ fn write_interpolates_env_values() {
 
 #[test]
 fn for_int_key_binds_list_indices() {
-    let steps = crate::parse_script(
-        "LET $items: LIST = [\"a\", \"b\"]\nFOR $i: INT, $v: STRING IN $items {\nWRITE \"{{ $v }}.txt\" \"{{ $i }}\"\n}\n",
-    )
+    let steps = crate::parse_script(indoc! {r#"
+        LET $items: LIST = ["a", "b"]
+        FOR $i: INT, $v: STRING IN $items {
+            WRITE "{{ $v }}.txt" "{{ $i }}"
+        }
+    "#})
     .expect("parse typed loop");
     let (_cwd, files) = run_with_mock_fs(&steps);
     let content = |name: &str| {
@@ -978,9 +981,12 @@ fn for_int_key_binds_list_indices() {
     assert_eq!(content("b.txt"), Some("1".to_string()));
 
     // Map iteration with an INT key is rejected: map keys are strings.
-    let steps = crate::parse_script(
-        "LET $m: MAP = {\"k\": \"v\"}\nFOR $k: INT, $v: STRING IN $m {\nWRITE x.txt \"hi\"\n}\n",
-    )
+    let steps = crate::parse_script(indoc! {r#"
+        LET $m: MAP = {"k": "v"}
+        FOR $k: INT, $v: STRING IN $m {
+            WRITE x.txt "hi"
+        }
+    "#})
     .expect("parse");
     let fs = MockFs::new();
     let mut state = create_exec_state(fs.clone());
@@ -1006,9 +1012,15 @@ fn for_int_key_binds_list_indices() {
 fn declared_bool_vs_string_treatment_differs() {
     // Same source text `!true` means different things per declared type:
     // BOOL evaluates the expression to false; quoted STRING stays literal.
-    let steps = crate::parse_script(
-        "LET $b: BOOL = !true\nLET $s: STRING = \"!true\"\nWRITE b.txt \"{{ $b }}\"\nWRITE s.txt \"{{ $s }}\"\nIF $b {\nWRITE wrong.txt \"bool was truthy\"\n}\n",
-    )
+    let steps = crate::parse_script(indoc! {r#"
+        LET $b: BOOL = !true
+        LET $s: STRING = "!true"
+        WRITE b.txt "{{ $b }}"
+        WRITE s.txt "{{ $s }}"
+        IF $b {
+            WRITE wrong.txt "bool was truthy"
+        }
+    "#})
     .expect("parse typed declarations");
     let (_cwd, files) = run_with_mock_fs(&steps);
     let content = |name: &str| {
@@ -1025,8 +1037,13 @@ fn declared_bool_vs_string_treatment_differs() {
     );
 
     // A STRING variable is not a valid condition.
-    let steps = crate::parse_script("LET $s: STRING = \"!true\"\nIF $s {\nWRITE x.txt \"hi\"\n}\n")
-        .expect("parse");
+    let steps = crate::parse_script(indoc! {r#"
+        LET $s: STRING = "!true"
+        IF $s {
+            WRITE x.txt "hi"
+        }
+    "#})
+    .expect("parse");
     let fs = MockFs::new();
     let mut state = create_exec_state(fs.clone());
     let mut proc = MockProcessManager::default();
@@ -1227,6 +1244,62 @@ fn mock_fs_rejects_absolute_windows_paths() {
         msg.contains("escapes allowed root"),
         "unexpected error for absolute Windows path: {msg}"
     );
+}
+
+#[test]
+fn mock_fs_workspace_cache_and_system_round_trip() {
+    // CACHE behaves like the other roots for relative paths; SYSTEM
+    // additionally resolves absolute paths without confinement while
+    // CACHE keeps rejecting escapes (issue #163).
+    let steps = crate::parse_script(indoc! {r#"
+        WORKSPACE CACHE
+        WRITE cached.txt cached
+        LET $v: STRING = READ cached.txt
+        ASSERT_EQ $v cached
+        WORKSPACE SYSTEM
+        WRITE sys.txt sys
+        LET $w: STRING = READ sys.txt
+        ASSERT_EQ $w sys
+    "#})
+    .expect("parse");
+    let (_cwd, files) = run_with_mock_fs(&steps);
+    let content = |name: &str| {
+        files
+            .iter()
+            .find(|(k, _)| k.ends_with(name))
+            .map(|(_, v)| String::from_utf8_lossy(v).to_string())
+    };
+    assert_eq!(content("cached.txt"), Some("cached".to_string()));
+    assert_eq!(content("sys.txt"), Some("sys".to_string()));
+}
+
+#[test]
+fn mock_fs_workspace_scope_restores_cache_and_system() {
+    // Guard-block scoping reverts WORKSPACE selection for all four roots:
+    // after the block the previous root is back in force.
+    let steps = crate::parse_script(indoc! {r#"
+        WORKSPACE CACHE
+        [bool:true] {
+            WORKSPACE LOCAL
+            WRITE inner.txt inner
+        }
+        WRITE outer.txt outer
+        WORKSPACE SYSTEM
+        [bool:true] {
+            WORKSPACE SNAPSHOT
+            WRITE snap.txt snap
+        }
+        WRITE after.txt after
+    "#})
+    .expect("parse");
+    let (_cwd, files) = run_with_mock_fs(&steps);
+    for name in ["inner.txt", "outer.txt", "snap.txt", "after.txt"] {
+        assert!(
+            files.keys().any(|k| k.ends_with(name)),
+            "expected {name} in mock state: {:?}",
+            files.keys()
+        );
+    }
 }
 
 #[test]
@@ -1983,7 +2056,7 @@ fn copy_directory_branch_recurses_into_nested_target() {
         Step {
             guard: None,
             kind: StepKind::Copy {
-                from_current_workspace: false,
+                from_workspace: None,
                 from: "app".into(),
                 to: "copy-of-app".into(),
             },
@@ -3083,7 +3156,11 @@ fn bare_let_pipe_mints_distinct_unspellable_names() {
     // Transitional name backing: every bare declaration mints a key no
     // `pipe:` literal can spell (it contains a space), so anonymous
     // backends never collide with user-named pipes.
-    let steps = crate::parse_script("LET $a: PIPE\nLET $b: PIPE\n").expect("parse ok");
+    let steps = crate::parse_script(indoc! {r#"
+        LET $a: PIPE
+        LET $b: PIPE
+    "#})
+    .expect("parse ok");
     let fs = MockFs::new();
     let mut state = create_exec_state(fs.clone());
     let mut proc = MockProcessManager::default();

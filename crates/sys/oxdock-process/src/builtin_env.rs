@@ -1,4 +1,4 @@
-use oxdock_fs::{GuardedPath, current_head_commit};
+use oxdock_fs::{GuardedPath, current_head_commit, env as oxdock_env};
 use std::collections::HashMap;
 
 /// Built-in environment variables injected into the OxDock execution context.
@@ -43,7 +43,7 @@ impl BuiltinEnv {
 
 fn cargo_features_from_env() -> Vec<String> {
     let mut out = Vec::new();
-    if let Ok(cfg_features) = std::env::var("CARGO_CFG_FEATURE") {
+    if let Ok(cfg_features) = std::env::var(oxdock_env::CARGO_CFG_FEATURE) {
         out.extend(split_feature_list(&cfg_features));
     }
     out
@@ -85,7 +85,10 @@ mod tests {
         let temp = GuardedPath::tempdir().expect("tempdir");
         let root = temp.as_guarded_path().clone();
         let _guard = manifest_env_guard(&root, true);
-        let _cfg = TestEnvGuard::set("CARGO_CFG_FEATURE", "my-feat, other_feat,,  spaced ");
+        let _cfg = TestEnvGuard::set(
+            oxdock_env::CARGO_CFG_FEATURE,
+            "my-feat, other_feat,,  spaced ",
+        );
         let env = BuiltinEnv::collect(&root).into_envs();
 
         // Dashes become underscores; names uppercase; empty segments dropped.
@@ -99,7 +102,7 @@ mod tests {
         let temp = GuardedPath::tempdir().expect("tempdir");
         let root = temp.as_guarded_path().clone();
         let _guard = manifest_env_guard(&root, true);
-        let _cfg = TestEnvGuard::set("CARGO_CFG_FEATURE", "my-feat");
+        let _cfg = TestEnvGuard::set(oxdock_env::CARGO_CFG_FEATURE, "my-feat");
         let _existing = TestEnvGuard::set("CARGO_FEATURE_MY_FEAT", "custom");
         let env = BuiltinEnv::collect(&root).into_envs();
 

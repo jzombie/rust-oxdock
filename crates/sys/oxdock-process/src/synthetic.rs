@@ -6,7 +6,7 @@ use anyhow::{Result, bail};
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 use std::process::ExitStatus;
 
-use oxdock_fs::{GuardedPath, PathResolver, PolicyPath};
+use oxdock_fs::{GuardedPath, PathResolver, PolicyPath, env as oxdock_env};
 use oxdock_sys_test_utils::exit_status_from_code;
 
 use crate::contract::{
@@ -527,7 +527,7 @@ fn expand_env(input: &str, ctx: &CommandContext) -> String {
                         }
                         name.push(ch);
                     }
-                    let val = if name == "CARGO_TARGET_DIR" {
+                    let val = if name == oxdock_env::CARGO_TARGET_DIR {
                         ctx.cargo_target_dir().display().to_string()
                     } else {
                         ctx.envs()
@@ -549,7 +549,7 @@ fn expand_env(input: &str, ctx: &CommandContext) -> String {
                             break;
                         }
                     }
-                    let val = if name == "CARGO_TARGET_DIR" {
+                    let val = if name == oxdock_env::CARGO_TARGET_DIR {
                         ctx.cargo_target_dir().display().to_string()
                     } else {
                         ctx.envs()
@@ -578,7 +578,7 @@ fn env_lookup(name: &str, ctx: &CommandContext) -> String {
     // Accept both `{{ env:X }}` and bare `{{ X }}` forms, matching the
     // host-side `expand_command_env` semantics.
     let key = name.strip_prefix("env:").unwrap_or(name);
-    if key == "CARGO_TARGET_DIR" {
+    if key == oxdock_env::CARGO_TARGET_DIR {
         return ctx.cargo_target_dir().display().to_string();
     }
     ctx.envs()

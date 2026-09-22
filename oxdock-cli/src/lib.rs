@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use oxdock_fs::{
     GuardedPath, LazyGuardedTempDir, PathResolver, WorkspaceFs, discover_workspace_root,
-    init_temp_gc,
+    env as oxdock_env, init_temp_gc,
 };
 #[cfg(windows)]
 use oxdock_process::CommandBuilder;
@@ -537,7 +537,7 @@ fn maybe_reexec_shell_to_temp(opts: &Options) -> Result<()> {
     if !opts.shell {
         return Ok(());
     }
-    if std::env::var("OXDOCK_SHELL_REEXEC").ok().as_deref() == Some("1") {
+    if std::env::var(oxdock_env::SHELL_REEXEC).ok().as_deref() == Some("1") {
         return Ok(());
     }
 
@@ -568,7 +568,7 @@ fn maybe_reexec_shell_to_temp(opts: &Options) -> Result<()> {
 
     let mut cmd = CommandBuilder::new(dest.as_path());
     cmd.args(std::env::args_os().skip(1));
-    cmd.env("OXDOCK_SHELL_REEXEC", "1");
+    cmd.env(oxdock_env::SHELL_REEXEC, "1");
     cmd.spawn()
         .with_context(|| format!("failed to spawn shell from {}", dest.display()))?;
 
@@ -594,7 +594,8 @@ fn shell_banner(cwd: &GuardedPath, workspace_root: &GuardedPath) -> String {
     #[cfg(not(windows))]
     let workspace_disp = workspace_root.display().to_string();
 
-    let pkg = env::var("CARGO_PKG_NAME").unwrap_or_else(|_| "oxdock".to_string());
+    let pkg = env::var(oxdock_env::CARGO_PKG_NAME)
+        .unwrap_or_else(|_| oxdock_env::FALLBACK_APP_NAME.to_string());
     indoc::formatdoc! {"
         {pkg} shell workspace
           cwd: {cwd_disp}

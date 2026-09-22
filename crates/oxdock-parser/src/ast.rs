@@ -148,11 +148,11 @@ impl Command {
         match self {
             Command::InheritEnv => "INHERIT_ENV [KEY1, KEY2, ...]",
             Command::Workdir => "WORKDIR <path>",
-            Command::Workspace => "WORKSPACE SNAPSHOT|LOCAL",
+            Command::Workspace => "WORKSPACE SNAPSHOT|LOCAL|CACHE|SYSTEM",
             Command::Env => "ENV KEY=value",
             Command::Echo => "ECHO <message>",
             Command::Run => "RUN <command...> | RUN [\"exe\", \"arg\", ...]",
-            Command::Copy => "COPY [--from-current-workspace] <from> <to>",
+            Command::Copy => "COPY [--from-workspace SNAPSHOT|LOCAL|CACHE|SYSTEM] <from> <to>",
             Command::CopyGit => "COPY_GIT [--include-dirty] <rev> <src> <dst>",
             Command::WithIo => "WITH_IO [bindings] [command | { block }]",
             Command::HashSha256 => "HASH_SHA256 <path>",
@@ -591,6 +591,8 @@ pub struct Step {
 pub enum WorkspaceTarget {
     Snapshot,
     Local,
+    Cache,
+    System,
 }
 
 fn platform_matches(target: PlatformGuard) -> bool {
@@ -674,6 +676,8 @@ impl fmt::Display for WorkspaceTarget {
         match self {
             WorkspaceTarget::Snapshot => write!(f, "SNAPSHOT"),
             WorkspaceTarget::Local => write!(f, "LOCAL"),
+            WorkspaceTarget::Cache => write!(f, "CACHE"),
+            WorkspaceTarget::System => write!(f, "SYSTEM"),
         }
     }
 }

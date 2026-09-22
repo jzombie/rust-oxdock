@@ -97,12 +97,9 @@ impl ArgType {
                 }
             }
             ArgType::OneOf(options) => {
-                // Match the lower-time normalization: bare lowercase
-                // spellings are accepted alongside exact options.
-                if options
-                    .iter()
-                    .any(|o| *o == literal || o.to_lowercase() == literal)
-                {
+                // Exact match only: lowercase spellings are rejected so
+                // keyword arguments stay uppercase across the DSL.
+                if options.contains(&literal) {
                     Ok(())
                 } else {
                     bail!("expected one of {}, got {literal:?}", options.join("|"))
@@ -412,10 +409,12 @@ mod tests {
         ArgType::OneOf(&["SNAPSHOT", "LOCAL"])
             .check_arg(&lit("LOCAL"))
             .unwrap();
-        // Lowercase spellings stay accepted (WORKSPACE parity).
-        ArgType::OneOf(&["SNAPSHOT", "LOCAL"])
-            .check_arg(&lit("local"))
-            .unwrap();
+        // Lowercase spellings are rejected: keyword arguments stay uppercase.
+        assert!(
+            ArgType::OneOf(&["SNAPSHOT", "LOCAL"])
+                .check_arg(&lit("local"))
+                .is_err()
+        );
         assert!(
             ArgType::OneOf(&["SNAPSHOT", "LOCAL"])
                 .check_arg(&lit("REMOTE"))

@@ -9,8 +9,8 @@ use oxdock_process::CommandBuilder;
 #[test]
 fn readme_quickstart_runs_through_the_real_cli() {
     // Normalize separators first: Windows CARGO_MANIFEST_DIR uses backslashes.
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
-        .expect("CARGO_MANIFEST_DIR")
+    let manifest_dir = std::env::var(oxdock_fs::env::CARGO_MANIFEST_DIR)
+        .expect(oxdock_fs::env::CARGO_MANIFEST_DIR)
         .replace('\\', "/");
     let repo_root = manifest_dir
         .strip_suffix("/oxdock")
@@ -36,7 +36,7 @@ fn readme_quickstart_runs_through_the_real_cli() {
 
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_oxdock"));
     cmd.arg("--script").arg("Oxfile");
-    cmd.env("OXDOCK_WORKSPACE_ROOT", workspace.display());
+    cmd.env(oxdock_fs::env::WORKSPACE_ROOT, workspace.display());
     cmd.current_dir(workspace.as_path());
     let output = cmd.output().expect("run cli on README quick start");
     assert!(

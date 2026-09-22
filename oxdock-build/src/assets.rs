@@ -20,7 +20,7 @@ use oxdock_core::{ExecIo, run_steps_with_lazy_snapshot};
 use oxdock_embed::{emit_embed_module, gather_assets, runtime_support_tokens};
 #[allow(clippy::disallowed_types)]
 use oxdock_fs::UnguardedPath;
-use oxdock_fs::{EntryKind, GuardedPath, PathResolver};
+use oxdock_fs::{EntryKind, GuardedPath, PathResolver, env as oxdock_env};
 use sha2::{Digest, Sha256};
 
 use crate::manifest_paths::module_file_name;
@@ -177,7 +177,7 @@ pub fn embed_force_rebuild() -> bool {
 /// True when `OXDOCK_EMBED_DEBUG` requests verbose asset-pipeline logging
 /// (`1` or any casing of `true`).
 pub fn embed_debug_enabled() -> bool {
-    debug_enabled_from(std::env::var("OXDOCK_EMBED_DEBUG").ok())
+    debug_enabled_from(std::env::var(oxdock_env::EMBED_DEBUG).ok())
 }
 
 /// Truthiness rules for debug logging: enabled by `1` or any casing of `true`.
@@ -263,8 +263,8 @@ fn init() {
 }
 
 fn out_dir_root() -> Result<GuardedPath> {
-    let out =
-        std::env::var("OUT_DIR").context("OUT_DIR missing (not running as a build script?)")?;
+    let out = std::env::var(oxdock_env::OUT_DIR)
+        .context("OUT_DIR missing (not running as a build script?)")?;
     GuardedPath::new_root_from_str(&out).map_err(|e| anyhow::anyhow!("invalid OUT_DIR {out}: {e}"))
 }
 
@@ -324,7 +324,7 @@ fn run_spec(
 
     // Emitting ANY rerun directive disables cargo's default invalidate-
     // everything, so watching build.rs is mandatory completeness.
-    let manifest = std::env::var("CARGO_MANIFEST_DIR")
+    let manifest = std::env::var(oxdock_env::CARGO_MANIFEST_DIR)
         .context("CARGO_MANIFEST_DIR missing (not running as a build script?)")?;
     push(
         &mut directives,
@@ -382,7 +382,7 @@ fn join_manifest(manifest: &str, rel: &str) -> String {
 /// emitted EMPTY directly, without syncing from any snapshot or (worse) the
 /// live workspace tree.
 fn build_and_materialize(name: &str, script: &str, subdir: &str) -> Result<()> {
-    let debug = debug_enabled_from(std::env::var("OXDOCK_EMBED_DEBUG").ok());
+    let debug = debug_enabled_from(std::env::var(oxdock_env::EMBED_DEBUG).ok());
 
     // Parse first so LOCAL-only scripts never create a snapshot directory.
     let steps =
@@ -701,7 +701,7 @@ mod fingerprint_tests {
                     )
                 })?;
                 Ok(StepKind::Copy {
-                    from_current_workspace: false,
+                    from_workspace: None,
                     from,
                     to,
                 })

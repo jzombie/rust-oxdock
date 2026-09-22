@@ -449,7 +449,7 @@ mod tests {
                     )
                 })?;
                 Ok(StepKind::Copy {
-                    from_current_workspace: false,
+                    from_workspace: None,
                     from,
                     to,
                 })

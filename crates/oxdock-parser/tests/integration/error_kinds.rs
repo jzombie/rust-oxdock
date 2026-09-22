@@ -120,8 +120,15 @@ fn with_io_missing_block_brace_is_structural_with_caret() {
 #[test]
 fn for_key_type_error_points_at_type_tag() {
     // Sub-expression precision: the caret lands on `BOOL`, not the statement.
-    let err = parse_script("FOR $k: BOOL, $v: STRING IN $m {\nECHO hi\n}\n", mock_lower)
-        .expect_err("must fail");
+    let err = parse_script(
+        indoc! {r#"
+            FOR $k: BOOL, $v: STRING IN $m {
+            ECHO hi
+            }
+        "#},
+        mock_lower,
+    )
+    .expect_err("must fail");
     assert!(
         matches!(
             err.kind(),
@@ -151,8 +158,15 @@ fn with_io_missing_brace_covers_statement_line() {
 
 #[test]
 fn multi_line_unknown_reports_exact_line() {
-    let err =
-        parse_script("ECHO one\nFROBNICATE hi\nECHO three\n", mock_lower).expect_err("must fail");
+    let err = parse_script(
+        indoc! {r#"
+            ECHO one
+            FROBNICATE hi
+            ECHO three
+        "#},
+        mock_lower,
+    )
+    .expect_err("must fail");
     assert!(
         matches!(err.kind(), ParseErrorKind::UnknownCommand { .. }),
         "unexpected kind: {:?}",

@@ -120,10 +120,10 @@ pub mod test_lower_mock {
                     .next()
                     .ok_or_else(|| validation("WORKSPACE", "requires target"))?;
                 match target.as_str() {
-                    "SNAPSHOT" | "snapshot" | "A" => {
-                        Ok(StepKind::Workspace(WorkspaceTarget::Snapshot))
-                    }
-                    "LOCAL" | "local" | "B" => Ok(StepKind::Workspace(WorkspaceTarget::Local)),
+                    "SNAPSHOT" => Ok(StepKind::Workspace(WorkspaceTarget::Snapshot)),
+                    "LOCAL" => Ok(StepKind::Workspace(WorkspaceTarget::Local)),
+                    "CACHE" => Ok(StepKind::Workspace(WorkspaceTarget::Cache)),
+                    "SYSTEM" => Ok(StepKind::Workspace(WorkspaceTarget::System)),
                     _ => Err(validation("WORKSPACE", "unknown workspace target")),
                 }
             }

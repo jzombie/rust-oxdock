@@ -17,7 +17,7 @@ fn cli_binary_runs_script() {
 
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_oxdock"));
     cmd.arg("--script").arg("script.ox");
-    cmd.env("OXDOCK_WORKSPACE_ROOT", root.display());
+    cmd.env(oxdock_fs::env::WORKSPACE_ROOT, root.display());
     let status = cmd.status().expect("run cli");
     assert!(status.success(), "expected successful CLI exit");
 }

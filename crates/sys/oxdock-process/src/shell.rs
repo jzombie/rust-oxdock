@@ -2,6 +2,7 @@ use anyhow::{Context, Result, bail};
 use oxdock_fs::GuardedPath;
 #[cfg(all(unix, not(miri)))]
 use oxdock_fs::PathResolver;
+use oxdock_fs::env::BANNER;
 use std::ffi::OsStr;
 use std::fs::File;
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
@@ -12,12 +13,12 @@ use crate::CommandBuilder;
 pub fn shell_program() -> String {
     #[cfg(windows)]
     {
-        std::env::var("COMSPEC").unwrap_or_else(|_| "cmd".to_string())
+        std::env::var(oxdock_fs::env::COMSPEC).unwrap_or_else(|_| "cmd".to_string())
     }
 
     #[cfg(not(windows))]
     {
-        std::env::var("SHELL").unwrap_or_else(|_| "sh".to_string())
+        std::env::var(oxdock_fs::env::SHELL).unwrap_or_else(|_| "sh".to_string())
     }
 }
 
@@ -108,7 +109,7 @@ pub fn spawn_interactive_shell(
         // The banner travels via env and the shell program via `$1` so neither is interpolated into
         // the script string (paths with spaces or `%` would break quoting or printf parsing).
         const SCRIPT: &str = "printf '%s\\n' \"$OXDOCK_BANNER\"; exec \"$1\"";
-        cmd.env("OXDOCK_BANNER", banner);
+        cmd.env(BANNER, banner);
         cmd.arg("-c").arg(SCRIPT).arg("sh").arg(shell_program());
 
         // Reattach stdin to the controlling TTY so a piped-in script can still open an interactive shell.
@@ -143,7 +144,7 @@ pub fn spawn_interactive_shell(
         let cwd_path = oxdock_fs::command_path(cwd);
         let banner_cmd = windows_banner_command(banner, cwd);
         let mut cmd = CommandBuilder::new("cmd");
-        cmd.env("OXDOCK_BANNER", banner);
+        cmd.env(BANNER, banner);
         cmd.current_dir(cwd_path.as_ref())
             .arg("/C")
             .arg("start")
@@ -253,9 +254,9 @@ mod tests {
     fn shell_program_prefers_env_override() {
         let _lock = ENV_LOCK.lock().expect("env lock");
         #[cfg(windows)]
-        let _guard = TestEnvGuard::set("COMSPEC", "custom-cmd");
+        let _guard = TestEnvGuard::set(oxdock_fs::env::COMSPEC, "custom-cmd");
         #[cfg(not(windows))]
-        let _guard = TestEnvGuard::set("SHELL", "custom-sh");
+        let _guard = TestEnvGuard::set(oxdock_fs::env::SHELL, "custom-sh");
         let program = shell_program();
         #[cfg(windows)]
         assert_eq!(program, "custom-cmd");
@@ -290,12 +291,12 @@ mod tests {
         let _lock = ENV_LOCK.lock().expect("env lock");
         #[cfg(windows)]
         {
-            let _guard = TestEnvGuard::remove("COMSPEC");
+            let _guard = TestEnvGuard::remove(oxdock_fs::env::COMSPEC);
             assert_eq!(shell_program(), "cmd");
         }
         #[cfg(not(windows))]
         {
-            let _guard = TestEnvGuard::remove("SHELL");
+            let _guard = TestEnvGuard::remove(oxdock_fs::env::SHELL);
             assert_eq!(shell_program(), "sh");
         }
     }
@@ -393,6 +394,7 @@ mod interactive_shell_tests {
     use crate::CommandSnapshot;
     use anyhow::Result;
     use oxdock_fs::GuardedPath;
+    use oxdock_fs::env::BANNER;
     use std::sync::{Arc, Mutex};
 
     #[cfg(any(unix, windows))]
@@ -435,7 +437,7 @@ mod interactive_shell_tests {
         assert!(
             snap.envs
                 .iter()
-                .any(|(k, v)| k == "OXDOCK_BANNER" && v == "test banner"),
+                .any(|(k, v)| k == BANNER && v == "test banner"),
             "expected OXDOCK_BANNER env injection, got {:?}",
             snap.envs
         );

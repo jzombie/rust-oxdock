@@ -33,7 +33,7 @@ ASSERT_CONTAINS stdout "piped-bytes"
 
 ### Workspaces start ephemeral
 
-Scripts start in an ephemeral snapshot workspace, an isolated temp dir that leaves the source tree untouched. Pull inputs with `COPY` or `COPY_GIT`. Switch to the local directory with `WORKSPACE LOCAL` when the script should mutate in place.
+Scripts start in an ephemeral snapshot workspace, an isolated temp dir that leaves the source tree untouched. Pull inputs with `COPY` or `COPY_GIT`. Switch to the local directory with `WORKSPACE LOCAL` when the script should mutate in place, to the persistent per-project cache with `WORKSPACE CACHE` for artifacts that must survive restarts, or to `WORKSPACE SYSTEM` for full filesystem access.
 
 ```oxdock
 WRITE snap.txt from-snapshot
@@ -43,4 +43,12 @@ WORKSPACE LOCAL
 WRITE local.txt from-local
 LET $l: STRING = READ local.txt
 ASSERT_EQ $l "from-local"
+WORKSPACE CACHE
+WRITE cached.txt from-cache
+LET $c: STRING = READ cached.txt
+ASSERT_EQ $c "from-cache"
+WORKSPACE SYSTEM
+WRITE sys.txt from-system
+LET $y: STRING = READ sys.txt
+ASSERT_EQ $y "from-system"
 ```
