@@ -1179,21 +1179,40 @@ mod tests {
         let script = indoc! {r#"
             WORKSPACE CACHE --local
             COPY --from-workspace LOCAL cargo.toml .
+            LET $a: STRING = READ cargo.toml
+            ASSERT_EQ $a manifest
             COPY --from-workspace LOCAL cargo.toml renamed.txt
+            LET $b: STRING = READ renamed.txt
+            ASSERT_EQ $b manifest
             MKDIR subdir
             COPY --from-workspace LOCAL cargo.toml subdir
             COPY --from-workspace LOCAL cargo.toml subdir/
+            LET $c: STRING = READ subdir/cargo.toml
+            ASSERT_EQ $c manifest
             COPY --from-workspace LOCAL sub .
+            LET $d: STRING = READ a.txt
+            ASSERT_EQ $d a
             WORKSPACE SNAPSHOT
             COPY --from-workspace LOCAL cargo.toml .
+            LET $e: STRING = READ cargo.toml
+            ASSERT_EQ $e manifest
         "#};
         let steps = crate::parse_script(script).unwrap();
         run_steps_with_context(&snapshot_root, &local_root, &steps).unwrap();
 
+        // Native only: the Miri synthetic backend keys all non-snapshot
+        // state by build root, so location assertions via `exists()` are
+        // vacuous there. Content is verified in-script above on every
+        // platform; selection itself is covered by mock tests under Miri.
+        #[cfg(not(miri))]
         assert!(exists(&local_root, ".cache/workspace/cargo.toml"));
+        #[cfg(not(miri))]
         assert!(exists(&local_root, ".cache/workspace/renamed.txt"));
+        #[cfg(not(miri))]
         assert!(exists(&local_root, ".cache/workspace/subdir/cargo.toml"));
+        #[cfg(not(miri))]
         assert!(exists(&local_root, ".cache/workspace/a.txt"));
+        #[cfg(not(miri))]
         assert!(exists(&snapshot_root, "cargo.toml"));
     }
 }
