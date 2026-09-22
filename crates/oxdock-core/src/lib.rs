@@ -1165,8 +1165,7 @@ mod tests {
         let snapshot_root = guard_root(&snapshot);
         let local_root = guard_root(&local);
 
-        let seeder =
-            PathResolver::new(local_root.as_path(), local_root.as_path()).unwrap();
+        let seeder = PathResolver::new(local_root.as_path(), local_root.as_path()).unwrap();
         seeder
             .write_file(&local_root.join("cargo.toml").unwrap(), b"manifest")
             .unwrap();
