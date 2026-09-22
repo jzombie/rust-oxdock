@@ -83,7 +83,9 @@ pub fn parse_script_with_modules(
 mod tests {
     use super::*;
     use indoc::indoc;
-    use oxdock_fs::{GuardedPath, GuardedTempDir, PathResolver, env as oxdock_env};
+    use oxdock_fs::{
+        GuardedPath, GuardedTempDir, PathResolver, env as oxdock_env, to_forward_slashes,
+    };
     use oxdock_parser::{Step, StepKind};
     #[cfg(unix)]
     use std::time::Instant;
@@ -974,7 +976,9 @@ mod tests {
         // absolute path, reads it back, and writes a sibling next to it.
         // Seeding from inside the script keeps every backend (including
         // the Miri synthetic one, which keys state by guard root) in one
-        // namespace.
+        // namespace. Forward slashes throughout: a raw Windows path would
+        // lose its backslashes to DSL string escapes (`C:\Users` parses
+        // as `C:Users`).
         let script = format!(
             indoc! {r#"
                 WORKSPACE SYSTEM
@@ -984,16 +988,20 @@ mod tests {
                 WRITE "{sibling}" done
                 WORKSPACE SNAPSHOT
             "#},
-            secret = outside_root
-                .join("secret.txt")
-                .unwrap()
-                .as_path()
-                .to_string_lossy(),
-            sibling = outside_root
-                .join("sibling.txt")
-                .unwrap()
-                .as_path()
-                .to_string_lossy(),
+            secret = to_forward_slashes(
+                &outside_root
+                    .join("secret.txt")
+                    .unwrap()
+                    .as_path()
+                    .to_string_lossy()
+            ),
+            sibling = to_forward_slashes(
+                &outside_root
+                    .join("sibling.txt")
+                    .unwrap()
+                    .as_path()
+                    .to_string_lossy()
+            ),
         );
         let steps = crate::parse_script(&script).unwrap();
         run_steps_with_context(&snapshot_root, &local_root, &steps).unwrap();
@@ -1025,7 +1033,8 @@ mod tests {
         // SNAPSHOT, CACHE, LOCAL, and SYSTEM sources each resolve against
         // their own root and land in the snapshot cwd. The SYSTEM source
         // is seeded from inside the script so every backend observes one
-        // namespace.
+        // namespace. Forward slashes throughout: raw Windows backslashes
+        // would be consumed by DSL string escapes.
         let script = format!(
             indoc! {r#"
                 WRITE snap-src.txt from-snap
@@ -1039,16 +1048,20 @@ mod tests {
                 COPY --from-workspace SYSTEM "{secret}" sys-copy.txt
                 COPY --from-workspace LOCAL "{local_src}" local-copy.txt
             "#},
-            secret = outside_root
-                .join("secret.txt")
-                .unwrap()
-                .as_path()
-                .to_string_lossy(),
-            local_src = local_root
-                .join("local-src.txt")
-                .unwrap()
-                .as_path()
-                .to_string_lossy(),
+            secret = to_forward_slashes(
+                &outside_root
+                    .join("secret.txt")
+                    .unwrap()
+                    .as_path()
+                    .to_string_lossy()
+            ),
+            local_src = to_forward_slashes(
+                &local_root
+                    .join("local-src.txt")
+                    .unwrap()
+                    .as_path()
+                    .to_string_lossy()
+            ),
         );
         // Seed the LOCAL source through the build context side.
         let local_seeder = PathResolver::new(local_root.as_path(), local_root.as_path()).unwrap();

@@ -22,10 +22,14 @@ use crate::env::{CACHE_APP, CACHE_DIR, CARGO_PKG_NAME, FALLBACK_APP_NAME};
 pub(crate) const CACHE_GROUP: &str = "workspace";
 
 /// ProjectDirs identity for the OS-native cache root. Keep stable: the
-/// resolved directory persists across upgrades.
+/// resolved directory persists across upgrades. Unused under Miri, where
+/// the synthetic `/miri/cache` path replaces OS-native resolution.
+#[cfg_attr(miri, allow(dead_code))]
 pub(crate) const CACHE_QUALIFIER: &str = "com";
 /// ProjectDirs identity for the OS-native cache root. Keep stable: the
-/// resolved directory persists across upgrades.
+/// resolved directory persists across upgrades. Unused under Miri, where
+/// the synthetic `/miri/cache` path replaces OS-native resolution.
+#[cfg_attr(miri, allow(dead_code))]
 pub(crate) const CACHE_ORGANIZATION: &str = "oxdock";
 
 /// Sanitize a raw application identity into a filesystem-safe path segment.
