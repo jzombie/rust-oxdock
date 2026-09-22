@@ -208,7 +208,8 @@ impl WorkspaceFs for MockFs {
         self.root = self.build_context.clone();
     }
 
-    fn switch_to_cache(&mut self) {
+    fn switch_to_cache(&mut self, local: bool) {
+        let _ = local;
         if self.cache_root.is_none() {
             self.cache_root = Some(self.root.clone());
         }

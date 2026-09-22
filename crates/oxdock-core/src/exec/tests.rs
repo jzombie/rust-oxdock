@@ -502,15 +502,18 @@ fn symlink_errors_report_underlying_cause() {
     let steps = vec![
         Step {
             guard: None,
-            kind: StepKind::Mkdir("client".into()),
+            kind: StepKind::Write {
+                path: "taken.txt".into(),
+                contents: Some("taken".into()),
+            },
             scope_enter: 0,
             scope_exit: 0,
         },
         Step {
             guard: None,
             kind: StepKind::Symlink {
-                from: "client".into(),
-                to: "client".into(),
+                from: "taken.txt".into(),
+                to: "taken.txt".into(),
             },
             scope_enter: 0,
             scope_exit: 0,
@@ -519,7 +522,7 @@ fn symlink_errors_report_underlying_cause() {
     let err = run_steps(&root, &steps).unwrap_err();
     let msg = err.to_string();
     assert!(
-        msg.contains("step 2: SYMLINK client client"),
+        msg.contains("step 2: SYMLINK taken.txt taken.txt"),
         "error should include step context: {msg}"
     );
     assert!(
@@ -1300,6 +1303,33 @@ fn mock_fs_workspace_scope_restores_cache_and_system() {
             files.keys()
         );
     }
+}
+
+#[test]
+fn mock_fs_workspace_cache_local_round_trip() {
+    // `WORKSPACE CACHE --local` dispatches through the same selection
+    // machinery; the mock shares one namespace, so this pins the
+    // parse-to-write flow rather than the on-disk layout.
+    let steps = crate::parse_script(indoc! {r#"
+        WORKSPACE CACHE --local
+        WRITE local-cached.txt persistent
+        LET $v: STRING = READ local-cached.txt
+        ASSERT_EQ $v persistent
+        WORKSPACE CACHE
+        WRITE os-cached.txt os
+        LET $w: STRING = READ os-cached.txt
+        ASSERT_EQ $w os
+    "#})
+    .expect("parse");
+    let (_cwd, files) = run_with_mock_fs(&steps);
+    let content = |name: &str| {
+        files
+            .iter()
+            .find(|(k, _)| k.ends_with(name))
+            .map(|(_, v)| String::from_utf8_lossy(v).to_string())
+    };
+    assert_eq!(content("local-cached.txt"), Some("persistent".to_string()));
+    assert_eq!(content("os-cached.txt"), Some("os".to_string()));
 }
 
 #[test]

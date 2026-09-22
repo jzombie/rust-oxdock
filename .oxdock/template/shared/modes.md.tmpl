@@ -47,6 +47,10 @@ WORKSPACE CACHE
 WRITE cached.txt from-cache
 LET $c: STRING = READ cached.txt
 ASSERT_EQ $c "from-cache"
+WORKSPACE CACHE --local
+WRITE local-cached.txt from-local-cache
+LET $d: STRING = READ local-cached.txt
+ASSERT_EQ $d "from-local-cache"
 WORKSPACE SYSTEM
 WRITE sys.txt from-system
 LET $y: STRING = READ sys.txt

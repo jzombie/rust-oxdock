@@ -101,9 +101,11 @@ pub trait WorkspaceFs: Send + Sync {
     /// Select the local (build-context) root (`WORKSPACE LOCAL`). Never
     /// touches the snapshot handle.
     fn switch_to_local(&mut self);
-    /// Select the persistent cache root (`WORKSPACE CACHE`). The directory
-    /// is created on first cache-targeted resolve and never deleted.
-    fn switch_to_cache(&mut self);
+    /// Select the persistent cache root (`WORKSPACE CACHE`). With `local`,
+    /// the cache lives in the project tree instead of the OS user cache.
+    /// The directory is created on first cache-targeted resolve and never
+    /// deleted.
+    fn switch_to_cache(&mut self, local: bool);
     /// Select full filesystem access (`WORKSPACE SYSTEM`). Resolution
     /// bypasses root-prefix containment; not hermetic.
     fn switch_to_system(&mut self);
@@ -246,8 +248,8 @@ impl WorkspaceFs for PathResolver {
         PathResolver::switch_to_local(self)
     }
 
-    fn switch_to_cache(&mut self) {
-        PathResolver::switch_to_cache(self)
+    fn switch_to_cache(&mut self, local: bool) {
+        PathResolver::switch_to_cache(self, local)
     }
 
     fn switch_to_system(&mut self) {

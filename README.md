@@ -392,6 +392,10 @@ WORKSPACE CACHE
 WRITE cached.txt from-cache
 LET $c: STRING = READ cached.txt
 ASSERT_EQ $c "from-cache"
+WORKSPACE CACHE --local
+WRITE local-cached.txt from-local-cache
+LET $d: STRING = READ local-cached.txt
+ASSERT_EQ $d "from-local-cache"
 WORKSPACE SYSTEM
 WRITE sys.txt from-system
 LET $y: STRING = READ sys.txt
@@ -1049,7 +1053,7 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | Command | Syntax |
 | --- | --- |
 | [`WORKDIR`](#workdir) | `WORKDIR <path>` |
-| [`WORKSPACE`](#workspace) | `WORKSPACE (SNAPSHOT\|LOCAL\|CACHE\|SYSTEM)` |
+| [`WORKSPACE`](#workspace) | `WORKSPACE (SNAPSHOT\|LOCAL\|CACHE\|SYSTEM) [--local]` |
 | [`ENV`](#env) | `ENV KEY=value` |
 | [`INHERIT_ENV`](#inherit_env) | `INHERIT_ENV [<key>, ...]` |
 | [`ECHO`](#echo) | `ECHO <message>` |
@@ -1946,15 +1950,21 @@ ASSERT_EQ $body "generated-under-workdir"
 
 Switch workspace roots.
 
-**Syntax:** `WORKSPACE (SNAPSHOT|LOCAL|CACHE|SYSTEM)`
+**Syntax:** `WORKSPACE (SNAPSHOT|LOCAL|CACHE|SYSTEM) [--local]`
 
-SNAPSHOT, LOCAL, CACHE, or SYSTEM root. CACHE is a persistent per-project cache directory shared across runs. SYSTEM grants full filesystem access and is not hermetic.
+SNAPSHOT, LOCAL, CACHE, or SYSTEM root. CACHE is a persistent per-project directory under the OS user cache (macOS `~/Library/Caches/com.oxdock.<app>/workspace`, Linux `$XDG_CACHE_HOME/<app>/workspace`, Windows `%LOCALAPPDATA%\oxdock\<app>\cache\workspace`; `OXDOCK_CACHE_DIR` overrides), shared across runs and never evicted. `WORKSPACE CACHE --local` keeps the cache in `<project>/.cache/workspace` instead. SYSTEM grants full filesystem access and is not hermetic.
 
 **Arguments:**
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
 | `target` | `SNAPSHOT\|LOCAL\|CACHE\|SYSTEM` | yes | Target root |
+
+**Flags:**
+
+| Flag | Type | Description |
+| --- | --- | --- |
+| `--local` | `BOOL` | Use the project-local cache directory instead of the OS user cache (CACHE only) |
 
 **Examples:**
 
@@ -2155,7 +2165,7 @@ Copy file into workspace.
 
 **Syntax:** `COPY [--from-workspace SNAPSHOT|LOCAL|CACHE|SYSTEM] <from> <to>`
 
-Copies from host.
+Copies from host (the source is never moved or modified). Docker destination semantics: a file copied onto a directory (an existing one, or a trailing-slash spell like `out/`) is duplicated inside it under its own basename; a directory source duplicates its contents into the destination; any other destination path is created holding the copied bytes.
 
 **Arguments:**
 
@@ -2230,7 +2240,7 @@ Create symlink.
 
 **Syntax:** `SYMLINK <from> <to>`
 
-Creates symlink.
+Creates symlink. A directory destination (existing, or a trailing-slash spell) receives the link under the source basename.
 
 **Arguments:**
 
@@ -3142,7 +3152,7 @@ Keeping inheritance selective avoids leaking secrets by default while still allo
 
 - **Four workspace roots:** `WORKSPACE SNAPSHOT` (the default ephemeral temp location), `WORKSPACE LOCAL` (the local directory), `WORKSPACE CACHE` (a persistent per-project cache directory shared across runs), and `WORKSPACE SYSTEM` (full filesystem access, not hermetic). `WORKSPACE` selection reverts at scope exit like `WORKDIR`.
 
-- **Persistent cache:** `WORKSPACE CACHE` resolves through the `cache-manager` crate with OS-native per-user roots (macOS `~/Library/Caches`, Linux `$XDG_CACHE_HOME` or `~/.cache`, Windows `%LOCALAPPDATA%`) namespaced by application identity (explicit builder argument, `OXDOCK_CACHE_APP`, `CARGO_PKG_NAME`, or the running binary name, in that order; `OXDOCK_CACHE_DIR` pins an exact directory). The cache directory is created on first use, survives restarts, and is never evicted by default.
+- **Persistent cache:** `WORKSPACE CACHE` stores artifacts under the OS per-user cache, namespaced by application identity `<app>`, with a `workspace` group segment underneath. Concretely: macOS `~/Library/Caches/com.oxdock.<app>/workspace`, Linux `$XDG_CACHE_HOME/<app>/workspace` (or `~/.cache/<app>/workspace`, lowercased), Windows `%LOCALAPPDATA%\oxdock\<app>\cache\workspace`. Identity resolves as explicit builder argument, `OXDOCK_CACHE_APP`, runtime `CARGO_PKG_NAME`, running binary name, then `"oxdock"`; `OXDOCK_CACHE_DIR` pins an exact directory instead (OS flavor only), and when no home directory is available the cache falls back to a temp dir (`oxdock-cache-<app>`). `WORKSPACE CACHE --local` keeps the cache in `<project>/.cache/workspace` instead, unconditionally. The directory is created on first use, survives restarts, and is never evicted by default.
 
 - **Filesystem gating via `oxdock-fs`:** all filesystem operations in the runtime are routed through the crate internal `oxdock-fs` abstraction. That module centralizes path resolution, canonicalization and access checks so reads and writes can be validated against the allowed workspace root and build context. `WORKSPACE SYSTEM` intentionally bypasses these checks; scripts using it are not hermetic.
 

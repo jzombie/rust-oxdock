@@ -964,6 +964,61 @@ mod tests {
     }
 
     #[test]
+    fn workspace_cache_local_stays_in_project_tree() {
+        // Pin the OS cache aside: `--local` must never touch it.
+        let pin = GuardedPath::tempdir().unwrap();
+        let pin_root = guard_root(&pin);
+        let _env = SerialCacheDir::pin(&pin_root);
+
+        let snapshot = GuardedPath::tempdir().unwrap();
+        let local = GuardedPath::tempdir().unwrap();
+        let snapshot_root = guard_root(&snapshot);
+        let local_root = guard_root(&local);
+
+        let first = indoc! {
+            r#"
+            WORKSPACE CACHE --local
+            WRITE "local-cached.txt" "persistent"
+            LET $v: STRING = READ local-cached.txt
+            ASSERT_EQ $v "persistent"
+            "#
+        };
+        let steps = crate::parse_script(first).unwrap();
+        run_steps_with_context(&snapshot_root, &local_root, &steps).unwrap();
+
+        // Native only (see above): the Miri synthetic backend shares one
+        // namespace per build root, so location assertions are vacuous.
+        #[cfg(not(miri))]
+        assert!(exists(&local_root, ".cache/workspace/local-cached.txt"));
+        #[cfg(not(miri))]
+        assert!(!exists(&pin_root, "workspace/local-cached.txt"));
+
+        // A fresh snapshot against the same project tree reads it back:
+        // the local cache outlives the ephemeral snapshot.
+        let fresh_snapshot = GuardedPath::tempdir().unwrap();
+        let fresh_snapshot_root = guard_root(&fresh_snapshot);
+        let second = indoc! {
+            r#"
+            WORKSPACE CACHE --local
+            LET $v: STRING = READ local-cached.txt
+            ASSERT_EQ $v "persistent"
+            "#
+        };
+        let steps = crate::parse_script(second).unwrap();
+        run_steps_with_context(&fresh_snapshot_root, &local_root, &steps).unwrap();
+
+        // A fresh project tree does not: the local cache lives and dies
+        // with the tree, unlike the OS-native flavor.
+        let other_local = GuardedPath::tempdir().unwrap();
+        let other_local_root = guard_root(&other_local);
+        let steps = crate::parse_script(second).unwrap();
+        assert!(
+            run_steps_with_context(&fresh_snapshot_root, &other_local_root, &steps).is_err(),
+            "local cache must not leak across project trees"
+        );
+    }
+
+    #[test]
     fn workspace_system_reaches_outside_roots() {
         let snapshot = GuardedPath::tempdir().unwrap();
         let local = GuardedPath::tempdir().unwrap();
@@ -1093,5 +1148,53 @@ mod tests {
             .is_err(),
             "COPY from a pending snapshot must fail"
         );
+    }
+
+    #[test]
+    fn copy_destinations_mirror_docker() {
+        // Docker destination semantics: a file copied onto a directory
+        // (`.`, an existing dir, or a trailing-slash spell) lands inside
+        // it under its basename; a directory source copies its contents.
+        // Covers the `COPY file .` escape-check failure under cache roots.
+        let pin = GuardedPath::tempdir().unwrap();
+        let pin_root = guard_root(&pin);
+        let _env = SerialCacheDir::pin(&pin_root);
+
+        let snapshot = GuardedPath::tempdir().unwrap();
+        let local = GuardedPath::tempdir().unwrap();
+        let snapshot_root = guard_root(&snapshot);
+        let local_root = guard_root(&local);
+
+        let seeder =
+            PathResolver::new(local_root.as_path(), local_root.as_path()).unwrap();
+        seeder
+            .write_file(&local_root.join("cargo.toml").unwrap(), b"manifest")
+            .unwrap();
+        seeder
+            .create_dir_all(&local_root.join("sub").unwrap())
+            .unwrap();
+        seeder
+            .write_file(&local_root.join("sub/a.txt").unwrap(), b"a")
+            .unwrap();
+
+        let script = indoc! {r#"
+            WORKSPACE CACHE --local
+            COPY --from-workspace LOCAL cargo.toml .
+            COPY --from-workspace LOCAL cargo.toml renamed.txt
+            MKDIR subdir
+            COPY --from-workspace LOCAL cargo.toml subdir
+            COPY --from-workspace LOCAL cargo.toml subdir/
+            COPY --from-workspace LOCAL sub .
+            WORKSPACE SNAPSHOT
+            COPY --from-workspace LOCAL cargo.toml .
+        "#};
+        let steps = crate::parse_script(script).unwrap();
+        run_steps_with_context(&snapshot_root, &local_root, &steps).unwrap();
+
+        assert!(exists(&local_root, ".cache/workspace/cargo.toml"));
+        assert!(exists(&local_root, ".cache/workspace/renamed.txt"));
+        assert!(exists(&local_root, ".cache/workspace/subdir/cargo.toml"));
+        assert!(exists(&local_root, ".cache/workspace/a.txt"));
+        assert!(exists(&snapshot_root, "cargo.toml"));
     }
 }

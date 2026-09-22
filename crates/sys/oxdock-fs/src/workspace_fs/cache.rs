@@ -21,6 +21,10 @@ use crate::env::{CACHE_APP, CACHE_DIR, CARGO_PKG_NAME, FALLBACK_APP_NAME};
 // Keep this stable: cache contents must survive upgrades.
 pub(crate) const CACHE_GROUP: &str = "workspace";
 
+/// Project-local cache parent: `WORKSPACE CACHE --local` roots the cache
+/// at `<project>/.cache`, with the shared group segment underneath.
+pub(crate) const LOCAL_CACHE_DIR_NAME: &str = ".cache";
+
 /// ProjectDirs identity for the OS-native cache root. Keep stable: the
 /// resolved directory persists across upgrades. Unused under Miri, where
 /// the synthetic `/miri/cache` path replaces OS-native resolution.
@@ -137,6 +141,21 @@ pub(crate) fn resolve_cache_dir(explicit: Option<&str>) -> std::path::PathBuf {
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 pub(crate) fn cache_guard_for(explicit: Option<&str>) -> GuardedPath {
     let dir = resolve_cache_dir(explicit).join(CACHE_GROUP);
+    GuardedPath::from_guarded_parts(dir.clone(), dir)
+}
+
+/// Build the self-rooted project-local cache guard under `anchor`
+// (`<anchor>/.cache/workspace`, issue #163 follow-up). No filesystem I/O:
+// the directory is created on first cache-targeted resolve. Deliberately
+// ignores the `OXDOCK_CACHE_DIR` override: `--local` means the project
+// tree, unconditionally, so the override stays scoped to the OS-native
+// flavor.
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+pub(crate) fn cache_guard_for_local(anchor: &GuardedPath) -> GuardedPath {
+    let dir = anchor
+        .as_path()
+        .join(LOCAL_CACHE_DIR_NAME)
+        .join(CACHE_GROUP);
     GuardedPath::from_guarded_parts(dir.clone(), dir)
 }
 
@@ -340,7 +359,8 @@ mod tests {
     }
 
     /// Creating the cache dir must never delete pre-existing entries: no
-    /// eviction policy is ever applied (issue #163).
+    /// eviction policy is ever applied (issue #163). Takes the project
+    /// root: the group segment is appended inside, exactly once.
     #[cfg(not(miri))]
     #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
     #[test]
@@ -352,10 +372,33 @@ mod tests {
 
         let resolved = resolve_cache_dir(None);
         assert_eq!(resolved, dir);
-        ensure_cache_dir(&resolved.join(CACHE_GROUP)).expect("ensure");
-        let probe = resolved.join(CACHE_GROUP).join("keep.txt");
+        ensure_cache_dir(&resolved).expect("ensure");
+        let group = resolved.join(CACHE_GROUP);
+        assert!(group.is_dir(), "group segment created exactly once");
+        assert!(
+            !group.join(CACHE_GROUP).exists(),
+            "group segment must not double"
+        );
+        let probe = group.join("keep.txt");
         std::fs::write(&probe, b"keep").expect("seed cache entry");
-        ensure_cache_dir(&resolved.join(CACHE_GROUP)).expect("re-ensure");
+        ensure_cache_dir(&resolved).expect("re-ensure");
         assert_eq!(std::fs::read(&probe).expect("read probe"), b"keep");
+    }
+
+    /// Project-local guards root at `<anchor>/.cache/workspace` with no
+    /// filesystem I/O; the exact override still wins when set.
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    #[test]
+    fn local_guard_roots_under_anchor() {
+        let _env = SerialCacheEnv::new(&[(CACHE_DIR, None)]);
+        let temp = GuardedPath::tempdir().expect("tempdir");
+        let anchor = temp.as_guarded_path().clone();
+        let guard = cache_guard_for_local(&anchor);
+        let expected = anchor
+            .as_path()
+            .join(LOCAL_CACHE_DIR_NAME)
+            .join(CACHE_GROUP);
+        assert_eq!(guard.as_path(), expected.as_path());
+        assert_eq!(guard.root(), expected.as_path());
     }
 }

@@ -334,6 +334,10 @@ WORKSPACE CACHE
 WRITE cached.txt from-cache
 LET $c: STRING = READ cached.txt
 ASSERT_EQ $c "from-cache"
+WORKSPACE CACHE --local
+WRITE local-cached.txt from-local-cache
+LET $d: STRING = READ local-cached.txt
+ASSERT_EQ $d "from-local-cache"
 WORKSPACE SYSTEM
 WRITE sys.txt from-system
 LET $y: STRING = READ sys.txt
@@ -705,7 +709,7 @@ Keeping inheritance selective avoids leaking secrets by default while still allo
 
 - **Four workspace roots:** `WORKSPACE SNAPSHOT` (the default ephemeral temp location), `WORKSPACE LOCAL` (the local directory), `WORKSPACE CACHE` (a persistent per-project cache directory shared across runs), and `WORKSPACE SYSTEM` (full filesystem access, not hermetic). `WORKSPACE` selection reverts at scope exit like `WORKDIR`.
 
-- **Persistent cache:** `WORKSPACE CACHE` resolves through the `cache-manager` crate with OS-native per-user roots (macOS `~/Library/Caches`, Linux `$XDG_CACHE_HOME` or `~/.cache`, Windows `%LOCALAPPDATA%`) namespaced by application identity (explicit builder argument, `OXDOCK_CACHE_APP`, `CARGO_PKG_NAME`, or the running binary name, in that order; `OXDOCK_CACHE_DIR` pins an exact directory). The cache directory is created on first use, survives restarts, and is never evicted by default.
+- **Persistent cache:** `WORKSPACE CACHE` stores artifacts under the OS per-user cache, namespaced by application identity `<app>`, with a `workspace` group segment underneath. Concretely: macOS `~/Library/Caches/com.oxdock.<app>/workspace`, Linux `$XDG_CACHE_HOME/<app>/workspace` (or `~/.cache/<app>/workspace`, lowercased), Windows `%LOCALAPPDATA%\oxdock\<app>\cache\workspace`. Identity resolves as explicit builder argument, `OXDOCK_CACHE_APP`, runtime `CARGO_PKG_NAME`, running binary name, then `"oxdock"`; `OXDOCK_CACHE_DIR` pins an exact directory instead (OS flavor only), and when no home directory is available the cache falls back to a temp dir (`oxdock-cache-<app>`). `WORKSPACE CACHE --local` keeps the cache in `<project>/.cache/workspace` instead, unconditionally. The directory is created on first use, survives restarts, and is never evicted by default.
 
 - **Filesystem gating via `oxdock-fs`:** all filesystem operations in the runtime are routed through the crate internal `oxdock-fs` abstraction. That module centralizes path resolution, canonicalization and access checks so reads and writes can be validated against the allowed workspace root and build context. `WORKSPACE SYSTEM` intentionally bypasses these checks; scripts using it are not hermetic.
 

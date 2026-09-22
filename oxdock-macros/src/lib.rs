@@ -960,7 +960,9 @@ fn emit_stepkind(
             let variant = match t {
                 oxdock_parser::WorkspaceTarget::Snapshot => quote! { Snapshot },
                 oxdock_parser::WorkspaceTarget::Local => quote! { Local },
-                oxdock_parser::WorkspaceTarget::Cache => quote! { Cache },
+                oxdock_parser::WorkspaceTarget::Cache { local } => {
+                    quote! { Cache { local: #local } }
+                }
                 oxdock_parser::WorkspaceTarget::System => quote! { System },
             };
             quote! { StepKind::Workspace(oxdock_parser::WorkspaceTarget::#variant) }
@@ -983,8 +985,8 @@ fn emit_stepkind(
                 Some(oxdock_parser::WorkspaceTarget::Local) => {
                     quote! { Some(oxdock_parser::WorkspaceTarget::Local) }
                 }
-                Some(oxdock_parser::WorkspaceTarget::Cache) => {
-                    quote! { Some(oxdock_parser::WorkspaceTarget::Cache) }
+                Some(oxdock_parser::WorkspaceTarget::Cache { .. }) => {
+                    quote! { Some(oxdock_parser::WorkspaceTarget::Cache { local: false }) }
                 }
                 Some(oxdock_parser::WorkspaceTarget::System) => {
                     quote! { Some(oxdock_parser::WorkspaceTarget::System) }

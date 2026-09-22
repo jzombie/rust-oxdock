@@ -131,6 +131,38 @@ fn workspace_local_copy_cannot_escape_workspace_root() {
 }
 
 #[test]
+fn symlink_into_directory_places_basename() {
+    // `ln -s` destination semantics: a directory destination receives the
+    // link under the source basename instead of failing as "already
+    // exists". Cross-root sources resolve like COPY sources.
+    let snapshot_dir = GuardedPath::tempdir().unwrap();
+    let snapshot = guard_root(&snapshot_dir);
+    let local_dir = GuardedPath::tempdir().unwrap();
+    let local = guard_root(&local_dir);
+
+    if !can_create_symlinks(snapshot.as_path()) {
+        eprintln!("skipping test: cannot create symlinks on host");
+        return;
+    }
+
+    let script = indoc!(
+        r#"
+        WORKSPACE LOCAL
+        WRITE target.txt content
+        MKDIR links
+        SYMLINK target.txt links
+        MKDIR slashed
+        SYMLINK target.txt slashed/
+        "#
+    );
+    let steps = oxdock_core::parse_script(&script).unwrap();
+    run_steps_with_context_result_with_io(&snapshot, &local, &steps, ExecIo::new()).unwrap();
+
+    assert_eq!(read_trimmed(&local.join("links/target.txt").unwrap()), "content");
+    assert_eq!(read_trimmed(&local.join("slashed/target.txt").unwrap()), "content");
+}
+
+#[test]
 #[cfg_attr(
     miri,
     ignore = "requires symlink support; Miri synthetic fs cannot create symlinks"

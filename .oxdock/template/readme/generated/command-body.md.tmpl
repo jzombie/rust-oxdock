@@ -857,15 +857,21 @@ ASSERT_EQ $body "generated-under-workdir"
 
 Switch workspace roots.
 
-**Syntax:** `WORKSPACE (SNAPSHOT|LOCAL|CACHE|SYSTEM)`
+**Syntax:** `WORKSPACE (SNAPSHOT|LOCAL|CACHE|SYSTEM) [--local]`
 
-SNAPSHOT, LOCAL, CACHE, or SYSTEM root. CACHE is a persistent per-project cache directory shared across runs. SYSTEM grants full filesystem access and is not hermetic.
+SNAPSHOT, LOCAL, CACHE, or SYSTEM root. CACHE is a persistent per-project directory under the OS user cache (macOS `~/Library/Caches/com.oxdock.<app>/workspace`, Linux `$XDG_CACHE_HOME/<app>/workspace`, Windows `%LOCALAPPDATA%\oxdock\<app>\cache\workspace`; `OXDOCK_CACHE_DIR` overrides), shared across runs and never evicted. `WORKSPACE CACHE --local` keeps the cache in `<project>/.cache/workspace` instead. SYSTEM grants full filesystem access and is not hermetic.
 
 **Arguments:**
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
 | `target` | `SNAPSHOT\|LOCAL\|CACHE\|SYSTEM` | yes | Target root |
+
+**Flags:**
+
+| Flag | Type | Description |
+| --- | --- | --- |
+| `--local` | `BOOL` | Use the project-local cache directory instead of the OS user cache (CACHE only) |
 
 **Examples:**
 
@@ -1066,7 +1072,7 @@ Copy file into workspace.
 
 **Syntax:** `COPY [--from-workspace SNAPSHOT|LOCAL|CACHE|SYSTEM] <from> <to>`
 
-Copies from host.
+Copies from host (the source is never moved or modified). Docker destination semantics: a file copied onto a directory (an existing one, or a trailing-slash spell like `out/`) is duplicated inside it under its own basename; a directory source duplicates its contents into the destination; any other destination path is created holding the copied bytes.
 
 **Arguments:**
 
@@ -1141,7 +1147,7 @@ Create symlink.
 
 **Syntax:** `SYMLINK <from> <to>`
 
-Creates symlink.
+Creates symlink. A directory destination (existing, or a trailing-slash spell) receives the link under the source basename.
 
 **Arguments:**
 

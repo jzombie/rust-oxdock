@@ -148,7 +148,7 @@ impl Command {
         match self {
             Command::InheritEnv => "INHERIT_ENV [KEY1, KEY2, ...]",
             Command::Workdir => "WORKDIR <path>",
-            Command::Workspace => "WORKSPACE SNAPSHOT|LOCAL|CACHE|SYSTEM",
+            Command::Workspace => "WORKSPACE SNAPSHOT|LOCAL|CACHE|SYSTEM [--local]",
             Command::Env => "ENV KEY=value",
             Command::Echo => "ECHO <message>",
             Command::Run => "RUN <command...> | RUN [\"exe\", \"arg\", ...]",
@@ -591,7 +591,7 @@ pub struct Step {
 pub enum WorkspaceTarget {
     Snapshot,
     Local,
-    Cache,
+    Cache { local: bool },
     System,
 }
 
@@ -676,7 +676,8 @@ impl fmt::Display for WorkspaceTarget {
         match self {
             WorkspaceTarget::Snapshot => write!(f, "SNAPSHOT"),
             WorkspaceTarget::Local => write!(f, "LOCAL"),
-            WorkspaceTarget::Cache => write!(f, "CACHE"),
+            WorkspaceTarget::Cache { local: false } => write!(f, "CACHE"),
+            WorkspaceTarget::Cache { local: true } => write!(f, "CACHE --local"),
             WorkspaceTarget::System => write!(f, "SYSTEM"),
         }
     }

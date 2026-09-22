@@ -690,7 +690,7 @@ mod tests {
         let local = local_temp.as_guarded_path().clone();
         let mut resolver = PathResolver::new_lazy(local.clone()).unwrap();
         let handle = resolver.snapshot_handle();
-        resolver.switch_to_cache();
+        resolver.switch_to_cache(false);
 
         let cwd = resolver.root().clone();
         assert!(
@@ -712,7 +712,7 @@ mod tests {
 
         // A fresh resolver with the same pin sees the same persistent entry.
         let mut second = PathResolver::new_lazy(local.clone()).unwrap();
-        second.switch_to_cache();
+        second.switch_to_cache(false);
         let second_cwd = second.root().clone();
         let probe = second.resolve_read(&second_cwd, "cached.txt").unwrap();
         assert_eq!(second.read_file(&probe).unwrap(), b"persistent");
@@ -729,7 +729,7 @@ mod tests {
         let local_temp = GuardedPath::tempdir().unwrap();
         let local = local_temp.as_guarded_path().clone();
         let mut resolver = PathResolver::new_lazy(local).unwrap();
-        resolver.switch_to_cache();
+        resolver.switch_to_cache(false);
         let cwd = resolver.root().clone();
 
         assert!(resolver.resolve_write(&cwd, "../escape.txt").is_err());
@@ -753,7 +753,7 @@ mod tests {
         let snapshot_root = resolver.root().clone();
         resolver.switch_to_local();
         let local_root = resolver.root().clone();
-        resolver.switch_to_cache();
+        resolver.switch_to_cache(false);
         let cache_root = resolver.root().clone();
         resolver.switch_to_system();
         let system_root = resolver.root().clone();
@@ -772,6 +772,42 @@ mod tests {
         assert_eq!(resolver.root(), &local);
         resolver.set_root(&snapshot_root);
         assert!(resolver.is_snapshot_pending());
+    }
+
+    /// Cross-flavor scope restore: a saved guard from the non-current
+    /// cache flavor restores CACHE (with its flavor), never Snapshot.
+    #[test]
+    fn set_root_restores_cache_across_flavors() {
+        let pin_temp = GuardedPath::tempdir().unwrap();
+        let pin_root = pin_temp.as_guarded_path().clone();
+        let _env = pin_cache_dir(&pin_root);
+
+        let local_temp = GuardedPath::tempdir().unwrap();
+        let local = local_temp.as_guarded_path().clone();
+        let mut resolver = PathResolver::new_lazy(local.clone()).unwrap();
+        resolver.set_workspace_root(local.clone());
+
+        resolver.switch_to_cache(false);
+        let os_guard = resolver.root().clone();
+        resolver.switch_to_cache(true);
+        let local_guard = resolver.root().clone();
+        assert_ne!(os_guard, local_guard);
+
+        // Restore the saved OS-native guard while local is selected.
+        resolver.set_root(&os_guard);
+        assert_eq!(resolver.root(), &os_guard);
+        let target = resolver
+            .resolve_write(&resolver.root().clone(), "flavor.txt")
+            .unwrap();
+        assert!(target.as_path().starts_with(pin_root.as_path()));
+
+        // And back the other way.
+        resolver.set_root(&local_guard);
+        assert_eq!(resolver.root(), &local_guard);
+        let target = resolver
+            .resolve_write(&resolver.root().clone(), "flavor.txt")
+            .unwrap();
+        assert!(target.as_path().starts_with(local.as_path()));
     }
 
     /// `WORKSPACE SYSTEM` bypass (issue #163): absolute paths resolve on any

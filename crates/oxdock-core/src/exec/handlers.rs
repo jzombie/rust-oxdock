@@ -3,6 +3,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use oxdock_fs::CopySourceRoot;
+use oxdock_fs::EntryKind;
+use oxdock_fs::GuardedPath;
 use oxdock_parser::{
     Arg, Expr, IoBinding, IoStream, PipeTarget, Step, StepKind, Value, WorkspaceTarget,
 };
@@ -103,8 +105,8 @@ pub(super) fn workspace<P: ProcessManager>(
             cx.state.fs.switch_to_local();
             cx.state.cwd = cx.state.fs.root().clone();
         }
-        WorkspaceTarget::Cache => {
-            cx.state.fs.switch_to_cache();
+        WorkspaceTarget::Cache { local } => {
+            cx.state.fs.switch_to_cache(*local);
             cx.state.cwd = cx.state.fs.root().clone();
         }
         WorkspaceTarget::System => {
@@ -474,7 +476,7 @@ fn copy_source_root(target: WorkspaceTarget) -> CopySourceRoot {
     match target {
         WorkspaceTarget::Snapshot => CopySourceRoot::Snapshot,
         WorkspaceTarget::Local => CopySourceRoot::Local,
-        WorkspaceTarget::Cache => CopySourceRoot::Cache,
+        WorkspaceTarget::Cache { .. } => CopySourceRoot::Cache,
         WorkspaceTarget::System => CopySourceRoot::System,
     }
 }
@@ -502,9 +504,41 @@ pub(super) fn copy<P: ProcessManager>(
         .fs
         .resolve_write(&cx.state.cwd, to)
         .with_context(|| format!("step {}: COPY {} {}", idx + 1, from, to))?;
+    let to_abs = place_file_in_dir(cx.state.fs.as_ref(), &from_abs, to, &to_abs)
+        .with_context(|| format!("step {}: COPY {} {}", idx + 1, from, to))?;
     copy_entry(cx.state.fs.as_ref(), &from_abs, &to_abs)
         .with_context(|| format!("step {}: COPY {} {}", idx + 1, from, to))?;
     Ok(())
+}
+
+/// Docker destination semantics for file sources: when the destination
+/// names a directory (an existing one, or a trailing-slash spell), the
+/// file lands inside it under its own basename (`COPY file dir/`).
+/// Directory sources already copy their contents into the destination,
+/// and plain file paths keep the rename behavior. Returns the
+/// (possibly rebased) destination guard.
+fn place_file_in_dir(
+    fs: &dyn oxdock_fs::WorkspaceFs,
+    from_abs: &GuardedPath,
+    to: &str,
+    to_abs: &GuardedPath,
+) -> Result<GuardedPath> {
+    if !matches!(fs.entry_kind(from_abs), Ok(EntryKind::File)) {
+        return Ok(to_abs.clone());
+    }
+    let trailing_slash = to.ends_with('/') || to.ends_with('\\');
+    let dst_is_dir = matches!(fs.entry_kind(to_abs), Ok(EntryKind::Dir));
+    if !trailing_slash && !dst_is_dir {
+        return Ok(to_abs.clone());
+    }
+    let base = from_abs
+        .as_path()
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .with_context(|| format!("COPY source has no file name: {}", from_abs.display()))?;
+    to_abs
+        .join(&base)
+        .with_context(|| format!("COPY destination escapes root: {}", to_abs.display()))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -568,11 +602,37 @@ pub(super) fn symlink<P: ProcessManager>(
         .fs
         .resolve_copy_source(from)
         .with_context(|| format!("step {}: SYMLINK {} {}", idx + 1, from, to))?;
+    // `ln -s` destination semantics: a directory destination (existing,
+    // or named with a trailing slash) receives the link under the
+    // source basename instead of failing as "already exists".
+    let to_abs = if to.ends_with('/') || to.ends_with('\\') {
+        let base = link_base_name(&from_abs, from)?;
+        to_abs
+            .join(&base)
+            .with_context(|| format!("step {}: SYMLINK {} {}", idx + 1, from, to))?
+    } else if matches!(cx.state.fs.entry_kind(&to_abs), Ok(EntryKind::Dir)) {
+        let base = link_base_name(&from_abs, from)?;
+        to_abs
+            .join(&base)
+            .with_context(|| format!("step {}: SYMLINK {} {}", idx + 1, from, to))?
+    } else {
+        to_abs
+    };
     cx.state
         .fs
         .symlink(&from_abs, &to_abs)
         .with_context(|| format!("step {}: SYMLINK {} {}", idx + 1, from, to))?;
     Ok(())
+}
+
+/// Basename of a link source for directory-destination placement. Lexical:
+/// dangling sources have no entry kind to inspect.
+fn link_base_name(from_abs: &GuardedPath, from: &str) -> Result<String> {
+    from_abs
+        .as_path()
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .with_context(|| format!("SYMLINK source has no file name: {from}"))
 }
 
 pub(super) fn mkdir<P: ProcessManager>(

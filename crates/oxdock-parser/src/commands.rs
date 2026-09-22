@@ -630,19 +630,21 @@ declare_commands! {
     Workspace => [
         name: "WORKSPACE",
         variant: Workspace(WorkspaceTarget),
-        syntax: "WORKSPACE (SNAPSHOT|LOCAL|CACHE|SYSTEM)",
+        syntax: "WORKSPACE (SNAPSHOT|LOCAL|CACHE|SYSTEM) [--local]",
         summary: "Switch workspace roots.",
-        description: "SNAPSHOT, LOCAL, CACHE, or SYSTEM root. CACHE is a persistent per-project cache directory shared across runs. SYSTEM grants full filesystem access and is not hermetic.",
+        description: "SNAPSHOT, LOCAL, CACHE, or SYSTEM root. CACHE is a persistent per-project directory under the OS user cache (macOS `~/Library/Caches/com.oxdock.<app>/workspace`, Linux `$XDG_CACHE_HOME/<app>/workspace`, Windows `%LOCALAPPDATA%\\oxdock\\<app>\\cache\\workspace`; `OXDOCK_CACHE_DIR` overrides), shared across runs and never evicted. `WORKSPACE CACHE --local` keeps the cache in `<project>/.cache/workspace` instead. SYSTEM grants full filesystem access and is not hermetic.",
         args: &[ ArgSpec { name: "target", arg_type: ArgType::OneOf(&["SNAPSHOT", "LOCAL", "CACHE", "SYSTEM"]), description: "Target root", io: IoDirection::Write, index: 0, required: true, fallback_stream: None } ],
-        flags: &[],
+        flags: &[ FlagSpec { name: "local", long: "--local", value_type: FlagValueType::Flag, required: false, description: "Use the project-local cache directory instead of the OS user cache (CACHE only)" } ],
         default_output: None,
         examples: &[ Example { name: "switch roots", fence_meta: None, code: indoc! {r#"WORKSPACE LOCAL"#} } ],
-        lower: |_flags, args| {
+        lower: |flags, args| {
+            let local = flags.iter().any(|(k, _)| k == "local");
             let target = args.into_iter().next().ok_or_else(|| ParseError::validation("WORKSPACE", "WORKSPACE requires a target".to_string(), &SpanContext::line_only(0)))?;
             match target.as_str() {
+                "SNAPSHOT" | "LOCAL" | "SYSTEM" if local => Err(ParseError::validation("WORKSPACE", "WORKSPACE --local requires CACHE".to_string(), &SpanContext::line_only(0))),
                 "SNAPSHOT" => Ok(StepKind::Workspace(WorkspaceTarget::Snapshot)),
                 "LOCAL" => Ok(StepKind::Workspace(WorkspaceTarget::Local)),
-                "CACHE" => Ok(StepKind::Workspace(WorkspaceTarget::Cache)),
+                "CACHE" => Ok(StepKind::Workspace(WorkspaceTarget::Cache { local })),
                 "SYSTEM" => Ok(StepKind::Workspace(WorkspaceTarget::System)),
                 other => Err(ParseError::validation("WORKSPACE", format!("unknown workspace target: {other}"), &SpanContext::line_only(0))),
             }
@@ -793,7 +795,7 @@ declare_commands! {
         variant: Copy { from_workspace: Option<WorkspaceTarget>, from: Arg, to: Arg },
         syntax: "COPY [--from-workspace SNAPSHOT|LOCAL|CACHE|SYSTEM] <from> <to>",
         summary: "Copy file into workspace.",
-        description: "Copies from host.",
+        description: "Copies from host (the source is never moved or modified). Docker destination semantics: a file copied onto a directory (an existing one, or a trailing-slash spell like `out/`) is duplicated inside it under its own basename; a directory source duplicates its contents into the destination; any other destination path is created holding the copied bytes.",
         args: &[
             ArgSpec { name: "from", arg_type: ArgType::Path, description: "Source", io: IoDirection::Read, index: 0, required: true, fallback_stream: None },
             ArgSpec { name: "to", arg_type: ArgType::Path, description: "Dest", io: IoDirection::Write, index: 1, required: true, fallback_stream: None },
@@ -818,7 +820,7 @@ declare_commands! {
                 .map(|(_, v)| match v.as_str() {
                     "SNAPSHOT" => Ok(WorkspaceTarget::Snapshot),
                     "LOCAL" => Ok(WorkspaceTarget::Local),
-                    "CACHE" => Ok(WorkspaceTarget::Cache),
+                    "CACHE" => Ok(WorkspaceTarget::Cache { local: false }),
                     "SYSTEM" => Ok(WorkspaceTarget::System),
                     other => Err(ParseError::validation("COPY", format!("unknown workspace source: {other}"), &SpanContext::line_only(0))),
                 })
@@ -859,7 +861,7 @@ declare_commands! {
         variant: Symlink { from: Arg, to: Arg },
         syntax: "SYMLINK <from> <to>",
         summary: "Create symlink.",
-        description: "Creates symlink.",
+        description: "Creates symlink. A directory destination (existing, or a trailing-slash spell) receives the link under the source basename.",
         args: &[
             ArgSpec { name: "from", arg_type: ArgType::Path, description: "Target", io: IoDirection::Read, index: 0, required: true, fallback_stream: None },
             ArgSpec { name: "to", arg_type: ArgType::Path, description: "Link", io: IoDirection::Write, index: 1, required: true, fallback_stream: None },
@@ -2583,7 +2585,7 @@ mod tests {
         for (spelling, target) in [
             ("SNAPSHOT", WorkspaceTarget::Snapshot),
             ("LOCAL", WorkspaceTarget::Local),
-            ("CACHE", WorkspaceTarget::Cache),
+            ("CACHE", WorkspaceTarget::Cache { local: false }),
             ("SYSTEM", WorkspaceTarget::System),
         ] {
             let steps =
@@ -2604,6 +2606,23 @@ mod tests {
             err.contains("expected one of SNAPSHOT|LOCAL|CACHE|SYSTEM"),
             "{err}"
         );
+
+        // `--local` selects the project-tree cache and round-trips
+        // through Display; anywhere else it is rejected.
+        let steps = parse_script("WORKSPACE CACHE --local\n", lower_command).expect("parses");
+        assert_eq!(
+            steps[0].kind,
+            StepKind::Workspace(WorkspaceTarget::Cache { local: true })
+        );
+        assert_eq!(steps[0].kind.to_string(), "WORKSPACE CACHE --local");
+        for bad in [
+            "WORKSPACE SNAPSHOT --local\n",
+            "WORKSPACE LOCAL --local\n",
+            "WORKSPACE SYSTEM --local\n",
+        ] {
+            let err = parse_err(bad);
+            assert!(err.contains("--local requires CACHE"), "{bad}: {err}");
+        }
     }
 
     #[test]
@@ -2611,7 +2630,7 @@ mod tests {
         for (spelling, target) in [
             ("SNAPSHOT", WorkspaceTarget::Snapshot),
             ("LOCAL", WorkspaceTarget::Local),
-            ("CACHE", WorkspaceTarget::Cache),
+            ("CACHE", WorkspaceTarget::Cache { local: false }),
             ("SYSTEM", WorkspaceTarget::System),
         ] {
             let steps = parse_script(
@@ -2634,7 +2653,7 @@ mod tests {
             matches!(
                 &steps[0].kind,
                 StepKind::Copy {
-                    from_workspace: Some(WorkspaceTarget::Cache),
+                    from_workspace: Some(WorkspaceTarget::Cache { local: false }),
                     ..
                 }
             ),

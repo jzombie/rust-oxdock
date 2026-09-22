@@ -115,14 +115,18 @@ pub mod test_lower_mock {
             "ENV" => crate::commands::lower_env_assignment(args)
                 .map_err(|e| validation("ENV", &e.to_string())),
             "WORKSPACE" => {
-                let target = args
-                    .into_iter()
+                let mut it = args.into_iter();
+                let target = it
                     .next()
                     .ok_or_else(|| validation("WORKSPACE", "requires target"))?;
+                let local = it.any(|a| a.as_str() == "--local");
                 match target.as_str() {
+                    "SNAPSHOT" | "LOCAL" | "SYSTEM" if local => {
+                        Err(validation("WORKSPACE", "--local requires CACHE"))
+                    }
                     "SNAPSHOT" => Ok(StepKind::Workspace(WorkspaceTarget::Snapshot)),
                     "LOCAL" => Ok(StepKind::Workspace(WorkspaceTarget::Local)),
-                    "CACHE" => Ok(StepKind::Workspace(WorkspaceTarget::Cache)),
+                    "CACHE" => Ok(StepKind::Workspace(WorkspaceTarget::Cache { local })),
                     "SYSTEM" => Ok(StepKind::Workspace(WorkspaceTarget::System)),
                     _ => Err(validation("WORKSPACE", "unknown workspace target")),
                 }

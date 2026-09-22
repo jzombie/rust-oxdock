@@ -145,7 +145,8 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
         prop_oneof![
             Just(WorkspaceTarget::Snapshot),
             Just(WorkspaceTarget::Local),
-            Just(WorkspaceTarget::Cache),
+            Just(WorkspaceTarget::Cache { local: false }),
+            Just(WorkspaceTarget::Cache { local: true }),
             Just(WorkspaceTarget::System)
         ]
         .prop_map(StepKind::Workspace),
