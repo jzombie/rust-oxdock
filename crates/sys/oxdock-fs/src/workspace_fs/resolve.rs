@@ -314,6 +314,7 @@ impl PathResolver {
 
 #[cfg(test)]
 mod tests {
+    use super::super::{command_path, to_forward_slashes};
     use super::*;
     use crate::GuardedPath;
 
@@ -786,7 +787,12 @@ mod tests {
         let outside_temp = GuardedPath::tempdir().unwrap();
         let outside = outside_temp.as_guarded_path().clone();
         let probe = outside.join("sys-probe.txt").expect("probe path");
-        let probe_str = probe.as_path().to_string_lossy().into_owned();
+        // Plain drive form, forward slashes: tempdir guards canonicalize
+        // to Windows verbatim paths (`\\?\C:\...`), whose spelling never
+        // survives `resolve()`'s own slash normalization (`//?/C:/...`
+        // denotes the same file but compares unequal). `command_path`
+        // strips the verbatim prefix so both sides share one spelling.
+        let probe_str = to_forward_slashes(&command_path(&probe).to_string_lossy()).to_string();
 
         // A confined resolver re-anchors the same absolute path under
         // its own root instead of honoring it: the bypass is SYSTEM-only.
@@ -800,7 +806,12 @@ mod tests {
         // the backend namespace the read observes (the Miri synthetic
         // backend keys state by guard root).
         let target = resolver.resolve_write(&cwd, &probe_str).unwrap();
-        assert_eq!(target.as_path(), probe.as_path());
+        // String comparison would trip on separator spelling (Windows
+        // joins with `\`); normalizing both sides compares the location.
+        assert_eq!(
+            to_forward_slashes(&target.as_path().to_string_lossy()),
+            probe_str
+        );
         resolver.write_file(&target, b"system").unwrap();
         let back = resolver.resolve_read(&cwd, &probe_str).unwrap();
         assert_eq!(resolver.read_file(&back).unwrap(), b"system");
