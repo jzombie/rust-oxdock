@@ -155,11 +155,17 @@ fn symlink_into_directory_places_basename() {
         SYMLINK target.txt slashed/
         "#
     );
-    let steps = oxdock_core::parse_script(&script).unwrap();
+    let steps = oxdock_core::parse_script(script).unwrap();
     run_steps_with_context_result_with_io(&snapshot, &local, &steps, ExecIo::new()).unwrap();
 
-    assert_eq!(read_trimmed(&local.join("links/target.txt").unwrap()), "content");
-    assert_eq!(read_trimmed(&local.join("slashed/target.txt").unwrap()), "content");
+    assert_eq!(
+        read_trimmed(&local.join("links/target.txt").unwrap()),
+        "content"
+    );
+    assert_eq!(
+        read_trimmed(&local.join("slashed/target.txt").unwrap()),
+        "content"
+    );
 }
 
 #[test]
