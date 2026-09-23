@@ -620,6 +620,14 @@ declare_commands! {
             WRITE generated.txt generated-under-workdir
             LET $body: STRING = READ generated.txt
             ASSERT_EQ $body "generated-under-workdir"
+        "#} }, Example { name: "workdir in a scoped block", fence_meta: None, code: indoc! {r#"
+            MKDIR project
+            [bool:true] {
+                WORKDIR project
+                WRITE inner.txt inner
+            }
+            LET $body: STRING = READ project/inner.txt
+            ASSERT_EQ $body "inner"
         "#} } ],
         lower: |_flags, args| {
             let path = args.into_iter().next().ok_or_else(|| ParseError::validation("WORKDIR", "WORKDIR requires a path".to_string(), &SpanContext::line_only(0)))?;
@@ -632,11 +640,32 @@ declare_commands! {
         variant: Workspace(WorkspaceTarget),
         syntax: "WORKSPACE (SNAPSHOT|LOCAL|CACHE|SYSTEM) [--local]",
         summary: "Switch workspace roots.",
-        description: "SNAPSHOT, LOCAL, CACHE, or SYSTEM root. CACHE is a persistent per-project directory under the OS user cache (macOS `~/Library/Caches/com.oxdock.<app>/workspace`, Linux `$XDG_CACHE_HOME/<app>/workspace`, Windows `%LOCALAPPDATA%\\oxdock\\<app>\\cache\\workspace`; `OXDOCK_CACHE_DIR` overrides), shared across runs and never evicted. `WORKSPACE CACHE --local` keeps the cache in `<project>/.cache/workspace` instead. SYSTEM grants full filesystem access and is not hermetic.",
+        description: indoc! {r#"
+            Switches the workspace root. The selection reverts at scope
+            exit like `WORKDIR`.
+
+            - `SNAPSHOT`: the materialized build snapshot (the default).
+            - `LOCAL`: the local workspace directory.
+            - `CACHE`: a persistent per-project directory shared across
+              runs, never evicted. It lives under the OS user cache
+              (`OXDOCK_CACHE_DIR` pins an exact directory);
+              `WORKSPACE CACHE --local` keeps it in
+              `<project>/.cache/workspace` instead.
+            - `SYSTEM`: full filesystem access. Scripts using it are not
+              hermetic.
+        "#},
         args: &[ ArgSpec { name: "target", arg_type: ArgType::OneOf(&["SNAPSHOT", "LOCAL", "CACHE", "SYSTEM"]), description: "Target root", io: IoDirection::Write, index: 0, required: true, fallback_stream: None } ],
         flags: &[ FlagSpec { name: "local", long: "--local", value_type: FlagValueType::Flag, required: false, description: "Use the project-local cache directory instead of the OS user cache (CACHE only)" } ],
         default_output: None,
-        examples: &[ Example { name: "switch roots", fence_meta: None, code: indoc! {r#"WORKSPACE LOCAL"#} } ],
+        examples: &[ Example { name: "switch roots", fence_meta: None, code: indoc! {r#"WORKSPACE LOCAL"#} }, Example { name: "workspace cache in a scoped block", fence_meta: None, code: indoc! {r#"
+            [bool:true] {
+                WORKSPACE CACHE
+                WRITE cached.txt cached-content
+            }
+            COPY --from-workspace CACHE cached.txt restored.txt
+            LET $body: STRING = READ restored.txt
+            ASSERT_EQ $body "cached-content"
+        "#} } ],
         lower: |flags, args| {
             let local = flags.iter().any(|(k, _)| k == "local");
             let target = args.into_iter().next().ok_or_else(|| ParseError::validation("WORKSPACE", "WORKSPACE requires a target".to_string(), &SpanContext::line_only(0)))?;

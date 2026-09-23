@@ -852,6 +852,18 @@ LET $body: STRING = READ generated.txt
 ASSERT_EQ $body "generated-under-workdir"
 ```
 
+**Example: workdir in a scoped block**
+
+```oxdock
+MKDIR project
+[bool:true] {
+    WORKDIR project
+    WRITE inner.txt inner
+}
+LET $body: STRING = READ project/inner.txt
+ASSERT_EQ $body "inner"
+```
+
 
 ### WORKSPACE
 
@@ -859,7 +871,19 @@ Switch workspace roots.
 
 **Syntax:** `WORKSPACE (SNAPSHOT|LOCAL|CACHE|SYSTEM) [--local]`
 
-SNAPSHOT, LOCAL, CACHE, or SYSTEM root. CACHE is a persistent per-project directory under the OS user cache (macOS `~/Library/Caches/com.oxdock.<app>/workspace`, Linux `$XDG_CACHE_HOME/<app>/workspace`, Windows `%LOCALAPPDATA%\oxdock\<app>\cache\workspace`; `OXDOCK_CACHE_DIR` overrides), shared across runs and never evicted. `WORKSPACE CACHE --local` keeps the cache in `<project>/.cache/workspace` instead. SYSTEM grants full filesystem access and is not hermetic.
+Switches the workspace root. The selection reverts at scope
+exit like `WORKDIR`.
+
+- `SNAPSHOT`: the materialized build snapshot (the default).
+- `LOCAL`: the local workspace directory.
+- `CACHE`: a persistent per-project directory shared across
+  runs, never evicted. It lives under the OS user cache
+  (`OXDOCK_CACHE_DIR` pins an exact directory);
+  `WORKSPACE CACHE --local` keeps it in
+  `<project>/.cache/workspace` instead.
+- `SYSTEM`: full filesystem access. Scripts using it are not
+  hermetic.
+
 
 **Arguments:**
 
@@ -879,6 +903,18 @@ SNAPSHOT, LOCAL, CACHE, or SYSTEM root. CACHE is a persistent per-project direct
 
 ```oxdock
 WORKSPACE LOCAL
+```
+
+**Example: workspace cache in a scoped block**
+
+```oxdock
+[bool:true] {
+    WORKSPACE CACHE
+    WRITE cached.txt cached-content
+}
+COPY --from-workspace CACHE cached.txt restored.txt
+LET $body: STRING = READ restored.txt
+ASSERT_EQ $body "cached-content"
 ```
 
 
