@@ -2756,8 +2756,11 @@ mod tests {
             assert!(err.contains("unknown workspace source"), "{bad}: {err}");
         }
         // The `=` form carries the value inline, like COPY.
-        let steps = parse_script("SYMLINK --from-workspace=LOCAL a.txt b.txt\n", lower_command)
-            .expect("parses");
+        let steps = parse_script(
+            "SYMLINK --from-workspace=LOCAL a.txt b.txt\n",
+            lower_command,
+        )
+        .expect("parses");
         assert!(
             matches!(
                 &steps[0].kind,
