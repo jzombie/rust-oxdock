@@ -4,7 +4,7 @@ OxDock is a Dockerfile inspired build DSL for Rust. Embed scripts at compile tim
 
 Supports platform gating, async tasks, and piped workflows for custom pipelines.
 
-[Documentation](https://docs.rs/oxdock/0.17.0-alpha/oxdock/)
+[Documentation](https://docs.rs/oxdock/0.18.0-alpha/oxdock/)
 
 ## Embed at compile time
 
@@ -86,8 +86,8 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     LET $a: STRING = READ dist/alpha.txt
     LET $b: STRING = READ dist/beta.txt
     LET $p: STRING = READ dist/picked.txt
-    ASSERT_EQ $a "alpha OxDock 0.17.0-alpha"
-    ASSERT_EQ $b "beta OxDock 0.17.0-alpha"
+    ASSERT_EQ $a "alpha OxDock 0.18.0-alpha"
+    ASSERT_EQ $b "beta OxDock 0.18.0-alpha"
     ASSERT_EQ $p "alpha"
 };
 
@@ -99,7 +99,7 @@ let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolve
 let out = root.join("dist/alpha.txt").expect("out path");
 assert_eq!(
     resolver.read_to_string(&out).expect("read out"),
-    "alpha OxDock 0.17.0-alpha"
+    "alpha OxDock 0.18.0-alpha"
 );
 ```
 
@@ -681,6 +681,17 @@ ASSERT_CONTAINS stdout "run-args-stop-at-slashes"
 ```
 
 Comment markers inside quoted strings are always preserved.
+
+### Command flags
+
+Commands that take flags accept the value either after a space or joined with `=`: `--from-workspace LOCAL` and `--from-workspace=LOCAL` mean the same thing. Boolean flags take no value. Quoted arguments are never treated as flags, even when they start with `--`.
+
+```oxdock roots:unified
+WRITE flag-src.txt flag-content
+COPY --from-workspace=LOCAL flag-src.txt flag-copy.txt
+LET $body: STRING = READ flag-copy.txt
+ASSERT_EQ $body "flag-content"
+```
 
 ### Quoting and escaping
 

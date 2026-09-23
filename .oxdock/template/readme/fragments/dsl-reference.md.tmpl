@@ -92,6 +92,17 @@ ASSERT_CONTAINS stdout "run-args-stop-at-slashes"
 
 Comment markers inside quoted strings are always preserved.
 
+### Command flags
+
+Commands that take flags accept the value either after a space or joined with `=`: `--from-workspace LOCAL` and `--from-workspace=LOCAL` mean the same thing. Boolean flags take no value. Quoted arguments are never treated as flags, even when they start with `--`.
+
+```oxdock roots:unified
+WRITE flag-src.txt flag-content
+COPY --from-workspace=LOCAL flag-src.txt flag-copy.txt
+LET $body: STRING = READ flag-copy.txt
+ASSERT_EQ $body "flag-content"
+```
+
 ### Quoting and escaping
 
 Arguments accept single- or double-quoted strings; the escape sequences `\"` and `\'` embed a quote, and any other backslash escape keeps the escaped character while dropping the backslash. Quoted fragments containing whitespace, `;`, newlines, `//`, or `/*` retain their quotes when `RUN` reconstructs the command string:

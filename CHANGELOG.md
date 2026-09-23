@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
-## [Unreleased]
+## [0.18.0-alpha] - 2026-09-23
 
 ### Added
 
@@ -23,6 +23,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ### Fixed
 
+- DSL `--flag=value` single-token form: flags like `COPY --from-workspace=CACHE` and `ASSERT_EQ --hash=<digest>` now parse. Tokens starting with `--` no longer match `KEY=value` assignment, so the value arrives inline instead of traveling as the next whitespace-separated token.
 - `copy_from_workspace_outside_escape` fixtures remove their system-temp probe files after asserting instead of littering them.
 - `COPY`/`SYMLINK` onto a directory destination (e.g. `COPY file .`) no longer fails with a false workspace-escape error: parent directories defer to the creation check instead of a confining read check. `SYMLINK` sources also re-validate against the root they resolved under, matching `COPY`.
 

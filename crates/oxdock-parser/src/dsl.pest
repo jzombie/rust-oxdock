@@ -377,7 +377,10 @@ templated_arg = @{ "{{" ~ (!"}}" ~ ANY)* ~ "}}" }
 // every command (ENV values, EXPAND overrides, and any other `KEY=...` token).
 // The `=` binds with explicit `gap` on both sides (so `KEY = value` parses);
 // the value keeps its exact raw span, so quoted whitespace survives intact.
-assignment = ${ assign_key ~ gap ~ "=" ~ gap ~ assign_value? }
+// CLI flags are a mutually exclusive form: tokens starting with `--` never
+// match here (the `!"--"` guard), so `--flag=value` falls through to
+// `argument` as one token and `strip_flags` splits it downstream.
+assignment = ${ !"--" ~ assign_key ~ gap ~ "=" ~ gap ~ assign_value? }
 assign_key = @{ (ASCII_ALPHANUMERIC | "_" | "-" | "." | "/")+ }
 assign_value = { quoted_string | assign_expr | raw_fragments }
 // An assignment boundary: whitespace followed by `KEY=` — the start of a

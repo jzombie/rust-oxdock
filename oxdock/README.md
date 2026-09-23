@@ -6,9 +6,9 @@ OxDock is a Dockerfile inspired build DSL for Rust. Embed scripts at compile tim
 
 Supports platform gating, async tasks, and piped workflows for custom pipelines.
 
-[Documentation](https://docs.rs/oxdock/0.17.0-alpha/oxdock/)
+[Documentation](https://docs.rs/oxdock/0.18.0-alpha/oxdock/)
 
-Add it to your Rust build with `cargo add oxdock@0.17.0-alpha`, or install the standalone runner with `cargo install oxdock@0.17.0-alpha`.
+Add it to your Rust build with `cargo add oxdock@0.18.0-alpha`, or install the standalone runner with `cargo install oxdock@0.18.0-alpha`.
 
 Run a script:
 
@@ -96,8 +96,8 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     LET $a: STRING = READ dist/alpha.txt
     LET $b: STRING = READ dist/beta.txt
     LET $p: STRING = READ dist/picked.txt
-    ASSERT_EQ $a "alpha OxDock 0.17.0-alpha"
-    ASSERT_EQ $b "beta OxDock 0.17.0-alpha"
+    ASSERT_EQ $a "alpha OxDock 0.18.0-alpha"
+    ASSERT_EQ $b "beta OxDock 0.18.0-alpha"
     ASSERT_EQ $p "alpha"
 };
 
@@ -109,7 +109,7 @@ let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolve
 let out = root.join("dist/alpha.txt").expect("out path");
 assert_eq!(
     resolver.read_to_string(&out).expect("read out"),
-    "alpha OxDock 0.17.0-alpha"
+    "alpha OxDock 0.18.0-alpha"
 );
 ```
 
@@ -449,6 +449,17 @@ ASSERT_CONTAINS stdout "run-args-stop-at-slashes"
 
 Comment markers inside quoted strings are always preserved.
 
+### Command flags
+
+Commands that take flags accept the value either after a space or joined with `=`: `--from-workspace LOCAL` and `--from-workspace=LOCAL` mean the same thing. Boolean flags take no value. Quoted arguments are never treated as flags, even when they start with `--`.
+
+```oxdock roots:unified
+WRITE flag-src.txt flag-content
+COPY --from-workspace=LOCAL flag-src.txt flag-copy.txt
+LET $body: STRING = READ flag-copy.txt
+ASSERT_EQ $body "flag-content"
+```
+
 ### Quoting and escaping
 
 Arguments accept single- or double-quoted strings; the escape sequences `\"` and `\'` embed a quote, and any other backslash escape keeps the escaped character while dropping the backslash. Quoted fragments containing whitespace, `;`, newlines, `//`, or `/*` retain their quotes when `RUN` reconstructs the command string:
@@ -722,7 +733,7 @@ Keeping inheritance selective avoids leaking secrets by default while still allo
 Install the binary from the registry:
 
 ```sh
-cargo install oxdock@0.17.0-alpha
+cargo install oxdock@0.18.0-alpha
 ```
 
 Run a script file:
@@ -1061,7 +1072,7 @@ Or pin the version in `Cargo.toml`:
 
 ```toml
 [dependencies]
-oxdock = { version = "0.17.0-alpha", default-features = false }
+oxdock = { version = "0.18.0-alpha", default-features = false }
 ```
 
 ## Glossary

@@ -2676,22 +2676,25 @@ mod tests {
                 steps[0].kind
             );
         }
-        // The `=` form is not usable for flags: the grammar reads
-        // `--from-workspace=CACHE` as a `KEY=value` assignment, so the
-        // value travels as the next whitespace-separated token.
-        let steps = parse_script("COPY --from-workspace CACHE a.txt b.txt\n", lower_command)
-            .expect("parses");
-        assert!(
-            matches!(
-                &steps[0].kind,
-                StepKind::Copy {
-                    from_workspace: Some(WorkspaceTarget::Cache { local: false }),
-                    ..
-                }
-            ),
-            "unexpected lowering: {:?}",
-            steps[0].kind
-        );
+        // The `=` form carries the value inline on one token: `--`
+        // tokens never match `assignment`, so `strip_flags` splits it.
+        for script in [
+            "COPY --from-workspace=CACHE a.txt b.txt\n",
+            "COPY --from-workspace=\"CACHE\" a.txt b.txt\n",
+        ] {
+            let steps = parse_script(script, lower_command).expect("parses");
+            assert!(
+                matches!(
+                    &steps[0].kind,
+                    StepKind::Copy {
+                        from_workspace: Some(WorkspaceTarget::Cache { local: false }),
+                        ..
+                    }
+                ),
+                "unexpected lowering for {script:?}: {:?}",
+                steps[0].kind
+            );
+        }
         // An absent flag means the build-context default.
         let steps = parse_script("COPY a.txt b.txt\n", lower_command).expect("parses");
         assert!(
@@ -2752,6 +2755,58 @@ mod tests {
             let err = parse_err(&format!("SYMLINK --from-workspace {bad} a.txt b.txt\n"));
             assert!(err.contains("unknown workspace source"), "{bad}: {err}");
         }
+        // The `=` form carries the value inline, like COPY.
+        let steps = parse_script("SYMLINK --from-workspace=LOCAL a.txt b.txt\n", lower_command)
+            .expect("parses");
+        assert!(
+            matches!(
+                &steps[0].kind,
+                StepKind::Symlink {
+                    from_workspace: Some(WorkspaceTarget::Local),
+                    ..
+                }
+            ),
+            "unexpected lowering: {:?}",
+            steps[0].kind
+        );
+    }
+
+    #[test]
+    fn dash_dash_equals_tokens_bypass_assignment() {
+        // `--` tokens never match `assignment`: flags keep their `=`
+        // form as one argument, while other commands see the same text.
+        let steps = parse_script("ENV --foo=bar\n", lower_command).expect("parses");
+        let StepKind::Env { key, value } = &steps[0].kind else {
+            panic!("expected Env, got {:?}", steps[0].kind);
+        };
+        assert_eq!(key, "--foo");
+        assert_eq!(value.as_str(), "bar");
+
+        let steps = parse_script("RUN echo --foo=bar\n", lower_command).expect("parses");
+        let StepKind::Run(cmd) = &steps[0].kind else {
+            panic!("expected Run, got {:?}", steps[0].kind);
+        };
+        assert!(
+            cmd.as_str().contains("--foo=bar"),
+            "unexpected RUN lowering: {cmd:?}"
+        );
+
+        let digest = "08135c1b6349b0e4f894c36221952f0de00e6b4d82f80895abf359755e77103c";
+        let steps = parse_script(&format!("ASSERT_EQ --hash={digest} $body\n"), lower_command)
+            .expect("parses");
+        let StepKind::AssertEq { hash, .. } = &steps[0].kind else {
+            panic!("expected AssertEq, got {:?}", steps[0].kind);
+        };
+        assert_eq!(hash.as_deref(), Some(digest));
+
+        // EXPAND still treats `--k=v` positionals as overrides.
+        let steps = parse_script("EXPAND --k=v\n", lower_command).expect("parses");
+        let StepKind::Expand { path, overrides } = &steps[0].kind else {
+            panic!("expected Expand, got {:?}", steps[0].kind);
+        };
+        assert!(path.is_none());
+        assert_eq!(overrides.len(), 1);
+        assert_eq!(overrides[0].0.as_str(), "--k");
     }
 
     #[test]
