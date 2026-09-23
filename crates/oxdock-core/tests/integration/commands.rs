@@ -131,6 +131,7 @@ fn workspace_local_copy_cannot_escape_workspace_root() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "creates symlinks; unsupported under Miri")]
 fn symlink_into_directory_places_basename() {
     // `ln -s` destination semantics: a directory destination receives the
     // link under the source basename instead of failing as "already
