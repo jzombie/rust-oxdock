@@ -622,10 +622,12 @@ declare_commands! {
             ASSERT_EQ $body "generated-under-workdir"
         "#} }, Example { name: "workdir in a scoped block", fence_meta: None, code: indoc! {r#"
             MKDIR project
+
             [bool:true] {
                 WORKDIR project
                 WRITE inner.txt inner
             }
+
             LET $body: STRING = READ project/inner.txt
             ASSERT_EQ $body "inner"
         "#} } ],
@@ -662,6 +664,7 @@ declare_commands! {
                 WORKSPACE CACHE
                 WRITE cached.txt cached-content
             }
+
             COPY --from-workspace CACHE cached.txt restored.txt
             LET $body: STRING = READ restored.txt
             ASSERT_EQ $body "cached-content"
@@ -706,6 +709,7 @@ declare_commands! {
                 # quotes keep the space: SET_FORTH stores `outer scope`
                 ENV SET_FORTH="outer scope"
                 WRITE out.txt "{{ env:SET_FORTH }}"
+
                 LET $body: STRING = READ out.txt
                 ASSERT_EQ $body "outer scope"
             "#} },
@@ -714,6 +718,7 @@ declare_commands! {
                 LET $who: STRING = "Alice"
                 ENV GREETING=$who
                 WRITE out.txt "{{ env:GREETING }}"
+
                 LET $body: STRING = READ out.txt
                 ASSERT_EQ $body "Alice"
             "#} },
@@ -725,20 +730,23 @@ declare_commands! {
                 ENV B="hello world"
                 ENV C="{{ $x }} concatenated"
                 WRITE check.txt "{{ env:A }}|{{ env:B }}|{{ env:C }}"
+
                 LET $body: STRING = READ check.txt
                 ASSERT_EQ $body "Ada|hello world|Ada concatenated"
             "#} },
             Example { name: "scoped env reverts", fence_meta: None, code: indoc! {r#"
                 # ENV inside a braced block reverts when the block exits
                 ENV MODE=production
+
                 [bool:true] {
                     ENV MODE=staging
                     WRITE inner.txt "{{ env:MODE }}"
                 }
+
                 WRITE outer.txt "{{ env:MODE }}"
                 LET $inner_body: STRING = READ inner.txt
-                LET $outer_body: STRING = READ outer.txt
                 ASSERT_EQ $inner_body "staging"
+                LET $outer_body: STRING = READ outer.txt
                 ASSERT_EQ $outer_body "production"
             "#} },
         ],
@@ -1149,8 +1157,10 @@ declare_commands! {
                 # they never update the environment itself
                 ENV NAME="Alice"
                 WRITE template.md "Hi \{{ env:NAME }}!"
+
                 EXPAND template.md NAME="Bob"
                 ASSERT_CONTAINS stdout "Hi Bob!"
+
                 EXPAND template.md
                 ASSERT_CONTAINS stdout "Hi Alice!"
             "#} },
@@ -1582,29 +1592,33 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 IMPORT [STD]
                 LET $role: STRING = "admin"
                 LET $level: INT = 3
+
                 # || is true when either side holds; && needs both.
                 IF $role == "owner" || $level >= 5 {
                     WRITE unexpected.txt no
                 } ELSE {
                     WRITE fallback.txt or-false
                 }
+
                 IF $role == "admin" || $level >= 5 {
                     WRITE chosen.txt or-true
                 }
+
                 IF $role == "admin" && $level >= 5 {
                     WRITE unexpected-too.txt no
                 } ELSE {
                     WRITE and.txt and-false
                 }
+
                 LET $fb: STRING = READ fallback.txt
-                LET $ch: STRING = READ chosen.txt
-                LET $an: STRING = READ and.txt
                 ASSERT_EQ $fb "or-false"
+                LET $ch: STRING = READ chosen.txt
                 ASSERT_EQ $ch "or-true"
+                LET $an: STRING = READ and.txt
                 ASSERT_EQ $an "and-false"
                 LET $t1: STRING = PATH_TYPE("unexpected.txt")
-                LET $t2: STRING = PATH_TYPE("unexpected-too.txt")
                 ASSERT_EQ $t1 "absent"
+                LET $t2: STRING = PATH_TYPE("unexpected-too.txt")
                 ASSERT_EQ $t2 "absent"
             "#},
                 },
@@ -1764,14 +1778,16 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     code: indoc! {r#"
                 # LET inside a braced block reverts when the block exits
                 LET $a: STRING = "outer"
+
                 [bool:true] {
                     LET $a: STRING = "inner"
                     WRITE inner.txt "{{ $a }}"
                 }
+
                 WRITE outer.txt "{{ $a }}"
                 LET $in_body: STRING = READ inner.txt
-                LET $out_body: STRING = READ outer.txt
                 ASSERT_EQ $in_body "inner"
+                LET $out_body: STRING = READ outer.txt
                 ASSERT_EQ $out_body "outer"
             "#},
                 },
@@ -1793,6 +1809,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     RETURN $loud
                 }
                 ASSERT_EQ $res "ada!"
+
                 # Any declared type works: the block value checks like any RHS.
                 LET $n: INT = {
                     RETURN 40 + 2
@@ -1807,11 +1824,13 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 LET $size_str: STRING = ECHO 41
                 IMPORT [STD]
                 LET $total: INT = INT($size_str) + 1
+                ASSERT_EQ $total 42
+
                 LET $ratio: FLOAT = 1 + 2.5
+                ASSERT_EQ $ratio 3.5
+
                 # Int x Int stays INT: integer division truncates.
                 LET $half: INT = 7 / 2
-                ASSERT_EQ $total 42
-                ASSERT_EQ $ratio 3.5
                 ASSERT_EQ $half 3
             "#},
                 },
@@ -1830,6 +1849,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 IF $decimal {
                     WRITE unexpected.txt no
                 }
+
                 LET $ok: STRING = READ exact.txt
                 ASSERT_EQ $ok "yes"
                 LET $t: STRING = PATH_TYPE("unexpected.txt")
@@ -1845,6 +1865,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 IF $sum > 0.299999 && $sum < 0.300001 {
                     WRITE bounded.txt yes
                 }
+
                 LET $ok: STRING = READ bounded.txt
                 ASSERT_EQ $ok "yes"
             "#},
@@ -1862,6 +1883,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 IF $info.is_os_pipe {
                     WRITE unexpected.txt "should be a script pipe"
                 }
+
                 ASSERT_EQ $info.type "PIPE"
             "#},
                 },
@@ -1913,12 +1935,14 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 IMPORT [STD]
                 LET $n: INT = INT($raw)
                 $n = $n + 1
+
                 # The declared type also converts plain strings on assignment.
                 $n = "42"
+                ASSERT_EQ $n 42
+
                 # Same crossing for decimals via FLOAT().
                 LET $frac_str: STRING = ECHO 2.5
                 LET $f: FLOAT = FLOAT($frac_str) + 0.25
-                ASSERT_EQ $n 42
                 ASSERT_EQ $f 2.75
             "#},
                 },
@@ -2105,8 +2129,10 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 FUNC GREET($name: STRING) {
                   RETURN $name
                 }
+
                 LET $res: STRING = GREET("ada")
                 ASSERT_EQ $res "ada"
+
                 # Statement form: parens stay, the value drops.
                 GREET("bex")
             "#},
@@ -2122,6 +2148,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                   WITH_IO [stdin=$q] READ_LINE $line
                   RETURN $line
                 }
+
                 LET $p: PIPE
                 WITH_IO [stdout=$p] ECHO "payload"
                 LET $got: STRING = DRAIN($p)
@@ -2157,6 +2184,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                   }
                   RETURN "no"
                 }
+
                 LET $res: STRING = PICK(true)
                 ASSERT_EQ $res "yes"
             "#},

@@ -263,6 +263,7 @@ FUNC SHADOW($v: STRING) {
     LET $inner: STRING = "inner"
     RETURN $v
 }
+
 LET $out: STRING = SHADOW("param")
 ASSERT_EQ $out "param"
 ```
@@ -609,9 +610,11 @@ Every variable binding declares its type at the binding site. `LET $name: TYPE =
 LET $count: INT = 1
 $count = 2
 LET $msg: STRING = hello
+
 FOR $item: STRING IN ["a", "b"] {
     ECHO "{{ $item }}"
 }
+
 WRITE count.txt "{{ $count }}"
 LET $c: STRING = READ count.txt
 ASSERT_EQ $c "2"
@@ -635,8 +638,9 @@ Parentheses mark the boundary between computing a value and running a pipeline s
 // Functions compute values; stdout stays untouched.
 IMPORT [STD]
 LET $t: STRING = PATH_TYPE("missing.txt")
-LET $n: INT = INT("41") + 1
 ASSERT_EQ $t "absent"
+
+LET $n: INT = INT("41") + 1
 ASSERT_EQ $n 42
 ```
 
@@ -675,8 +679,8 @@ ASSERT_CONTAINS stdout "visible-after-comments"
 
 ```oxdock
 ECHO hash-mid-line # stays-in-payload
-RUN echo run-args-stop-at-slashes // removed-as-comment
 ASSERT_CONTAINS stdout "hash-mid-line # stays-in-payload"
+RUN echo run-args-stop-at-slashes // removed-as-comment
 ASSERT_CONTAINS stdout "run-args-stop-at-slashes"
 ```
 
@@ -700,12 +704,12 @@ Arguments accept single- or double-quoted strings; the escape sequences `\"` and
 ```oxdock
 // Single and double quotes behave identically.
 ECHO 'single quotes'
+ASSERT_CONTAINS stdout "single quotes"
 ECHO "double quotes"
+ASSERT_CONTAINS stdout "double quotes"
 
 // \" embeds a quote; the backslash itself is consumed.
 ECHO "escaped \" quote"
-ASSERT_CONTAINS stdout "single quotes"
-ASSERT_CONTAINS stdout "double quotes"
 ASSERT_CONTAINS stdout 'escaped " quote'
 ```
 
@@ -714,15 +718,15 @@ ASSERT_CONTAINS stdout 'escaped " quote'
 `{{ env:KEY }}` interpolates script environment values into arguments at execution time. Values come from the script environment (`ENV`, inherited keys) — there is no fallback to host variables in command context, and unknown keys expand to an empty string. The unprefixed form `{{ KEY }}` is not a valid template and also expands to empty, so always use the `env:`-prefixed spelling:
 
 ```oxdock
-ENV GREETING=hello-world
+ENV USER=OxDock
 
-// env:-prefixed form: interpolates from the SCRIPT environment.
-ECHO <{{ env:GREETING }}>
+# env:-prefixed form: interpolates from the SCRIPT environment.
+ECHO "Hello {{ env:USER }}!"
+ASSERT_CONTAINS stdout "Hello OxDock!"
 
-// Bare braces are not a template: they expand to empty.
-ECHO <{{ GREETING }}>
-ASSERT_CONTAINS stdout "<hello-world>"
-ASSERT_CONTAINS stdout "<>"
+# Bare braces are not a template: they expand to empty.
+ECHO "Hello {{ USER }}!"
+ASSERT_CONTAINS stdout "Hello !"
 ```
 
 ## Guards and scoped blocks
@@ -749,15 +753,14 @@ INHERIT_ENV [DEPLOY_TARGET]
 
 // Passes when the variable exists with any non-empty value.
 [env:DEPLOY_TARGET] ECHO deploy-target-visible
+ASSERT_CONTAINS stdout "deploy-target-visible"
 
 // Equality against the inherited value.
 [eq(env:DEPLOY_TARGET, staging)] ECHO deploying-to-staging
+ASSERT_CONTAINS stdout "deploying-to-staging"
 
 // Inequality: skipped below, because DEPLOY_TARGET IS staging.
 [ne(env:DEPLOY_TARGET, staging)] ECHO deploying-elsewhere
-
-ASSERT_CONTAINS stdout "deploy-target-visible"
-ASSERT_CONTAINS stdout "deploying-to-staging"
 ```
 
 ### Platform guards
@@ -772,6 +775,7 @@ ASSERT_CONTAINS stdout "deploying-to-staging"
   ASSERT_EQ $rep "windows"
   ASSERT_CONTAINS stdout "windows-detected"
 }
+
 [unix] {
   WRITE os-report.txt unix-family
   ECHO unix-detected
@@ -789,15 +793,14 @@ INHERIT_ENV [OXDOCK_DOC_FEATURE_A]
 
 // not(...) inverts the predicate: passes because the variable does NOT exist.
 [not(env:OXDOCK_DOC_UNDEFINED_VAR)] ECHO negation-passes-for-undefined
+ASSERT_CONTAINS stdout "negation-passes-for-undefined"
 
 // any(...) passes when ANY branch holds; A exists, so this runs.
 [any(env:OXDOCK_DOC_FEATURE_A, env:OXDOCK_DOC_FEATURE_B)] ECHO or-matched-a-branch
+ASSERT_CONTAINS stdout "or-matched-a-branch"
 
 // Comma composes with AND: (A or linux) AND A — true here on every OS.
 [any(env:OXDOCK_DOC_FEATURE_A, linux), env:OXDOCK_DOC_FEATURE_A] ECHO composed-and-or-guard
-
-ASSERT_CONTAINS stdout "negation-passes-for-undefined"
-ASSERT_CONTAINS stdout "or-matched-a-branch"
 ASSERT_CONTAINS stdout "composed-and-or-guard"
 ```
 
@@ -859,6 +862,7 @@ ASSERT_EQ $out_body "some_value-production"
 WRITE before.txt "persisted"
 LET $b: STRING = READ before.txt
 ASSERT_EQ $b "persisted"
+
 [bool:true] {
     EXIT 3
     WRITE unreachable.txt "never"
@@ -1117,29 +1121,33 @@ ASSERT_EQ $t "absent"
 IMPORT [STD]
 LET $role: STRING = "admin"
 LET $level: INT = 3
+
 # || is true when either side holds; && needs both.
 IF $role == "owner" || $level >= 5 {
     WRITE unexpected.txt no
 } ELSE {
     WRITE fallback.txt or-false
 }
+
 IF $role == "admin" || $level >= 5 {
     WRITE chosen.txt or-true
 }
+
 IF $role == "admin" && $level >= 5 {
     WRITE unexpected-too.txt no
 } ELSE {
     WRITE and.txt and-false
 }
+
 LET $fb: STRING = READ fallback.txt
-LET $ch: STRING = READ chosen.txt
-LET $an: STRING = READ and.txt
 ASSERT_EQ $fb "or-false"
+LET $ch: STRING = READ chosen.txt
 ASSERT_EQ $ch "or-true"
+LET $an: STRING = READ and.txt
 ASSERT_EQ $an "and-false"
 LET $t1: STRING = PATH_TYPE("unexpected.txt")
-LET $t2: STRING = PATH_TYPE("unexpected-too.txt")
 ASSERT_EQ $t1 "absent"
+LET $t2: STRING = PATH_TYPE("unexpected-too.txt")
 ASSERT_EQ $t2 "absent"
 ```
 
@@ -1296,14 +1304,16 @@ ASSERT_CONTAINS stdout "a.txt"
 ```oxdock
 # LET inside a braced block reverts when the block exits
 LET $a: STRING = "outer"
+
 [bool:true] {
     LET $a: STRING = "inner"
     WRITE inner.txt "{{ $a }}"
 }
+
 WRITE outer.txt "{{ $a }}"
 LET $in_body: STRING = READ inner.txt
-LET $out_body: STRING = READ outer.txt
 ASSERT_EQ $in_body "inner"
+LET $out_body: STRING = READ outer.txt
 ASSERT_EQ $out_body "outer"
 ```
 
@@ -1323,6 +1333,7 @@ LET $res: STRING = {
     RETURN $loud
 }
 ASSERT_EQ $res "ada!"
+
 # Any declared type works: the block value checks like any RHS.
 LET $n: INT = {
     RETURN 40 + 2
@@ -1336,11 +1347,13 @@ ASSERT_EQ $n 42
 LET $size_str: STRING = ECHO 41
 IMPORT [STD]
 LET $total: INT = INT($size_str) + 1
+ASSERT_EQ $total 42
+
 LET $ratio: FLOAT = 1 + 2.5
+ASSERT_EQ $ratio 3.5
+
 # Int x Int stays INT: integer division truncates.
 LET $half: INT = 7 / 2
-ASSERT_EQ $total 42
-ASSERT_EQ $ratio 3.5
 ASSERT_EQ $half 3
 ```
 
@@ -1358,6 +1371,7 @@ IF $exact {
 IF $decimal {
     WRITE unexpected.txt no
 }
+
 LET $ok: STRING = READ exact.txt
 ASSERT_EQ $ok "yes"
 LET $t: STRING = PATH_TYPE("unexpected.txt")
@@ -1372,6 +1386,7 @@ LET $sum: FLOAT = 0.1 + 0.2
 IF $sum > 0.299999 && $sum < 0.300001 {
     WRITE bounded.txt yes
 }
+
 LET $ok: STRING = READ bounded.txt
 ASSERT_EQ $ok "yes"
 ```
@@ -1388,6 +1403,7 @@ LET $info: MAP = INSPECT($p)
 IF $info.is_os_pipe {
     WRITE unexpected.txt "should be a script pipe"
 }
+
 ASSERT_EQ $info.type "PIPE"
 ```
 
@@ -1436,12 +1452,14 @@ LET $raw: STRING = ECHO 100
 IMPORT [STD]
 LET $n: INT = INT($raw)
 $n = $n + 1
+
 # The declared type also converts plain strings on assignment.
 $n = "42"
+ASSERT_EQ $n 42
+
 # Same crossing for decimals via FLOAT().
 LET $frac_str: STRING = ECHO 2.5
 LET $f: FLOAT = FLOAT($frac_str) + 0.25
-ASSERT_EQ $n 42
 ASSERT_EQ $f 2.75
 ```
 
@@ -1618,8 +1636,10 @@ the RETURN value (fallthrough without RETURN captures as "").
 FUNC GREET($name: STRING) {
   RETURN $name
 }
+
 LET $res: STRING = GREET("ada")
 ASSERT_EQ $res "ada"
+
 # Statement form: parens stay, the value drops.
 GREET("bex")
 ```
@@ -1634,6 +1654,7 @@ FUNC DRAIN($q: PIPE) {
   WITH_IO [stdin=$q] READ_LINE $line
   RETURN $line
 }
+
 LET $p: PIPE
 WITH_IO [stdout=$p] ECHO "payload"
 LET $got: STRING = DRAIN($p)
@@ -1668,6 +1689,7 @@ FUNC PICK($flag: BOOL) {
   }
   RETURN "no"
 }
+
 LET $res: STRING = PICK(true)
 ASSERT_EQ $res "yes"
 ```
@@ -1816,10 +1838,12 @@ ASSERT_EQ $body "generated-under-workdir"
 
 ```oxdock
 MKDIR project
+
 [bool:true] {
     WORKDIR project
     WRITE inner.txt inner
 }
+
 LET $body: STRING = READ project/inner.txt
 ASSERT_EQ $body "inner"
 ```
@@ -1872,6 +1896,7 @@ WORKSPACE LOCAL
     WORKSPACE CACHE
     WRITE cached.txt cached-content
 }
+
 COPY --from-workspace CACHE cached.txt restored.txt
 LET $body: STRING = READ restored.txt
 ASSERT_EQ $body "cached-content"
@@ -1916,6 +1941,7 @@ ENV APP_MODE=production
 # quotes keep the space: SET_FORTH stores `outer scope`
 ENV SET_FORTH="outer scope"
 WRITE out.txt "{{ env:SET_FORTH }}"
+
 LET $body: STRING = READ out.txt
 ASSERT_EQ $body "outer scope"
 ```
@@ -1927,6 +1953,7 @@ ASSERT_EQ $body "outer scope"
 LET $who: STRING = "Alice"
 ENV GREETING=$who
 WRITE out.txt "{{ env:GREETING }}"
+
 LET $body: STRING = READ out.txt
 ASSERT_EQ $body "Alice"
 ```
@@ -1941,6 +1968,7 @@ ENV A=$x
 ENV B="hello world"
 ENV C="{{ $x }} concatenated"
 WRITE check.txt "{{ env:A }}|{{ env:B }}|{{ env:C }}"
+
 LET $body: STRING = READ check.txt
 ASSERT_EQ $body "Ada|hello world|Ada concatenated"
 ```
@@ -1950,14 +1978,16 @@ ASSERT_EQ $body "Ada|hello world|Ada concatenated"
 ```oxdock
 # ENV inside a braced block reverts when the block exits
 ENV MODE=production
+
 [bool:true] {
     ENV MODE=staging
     WRITE inner.txt "{{ env:MODE }}"
 }
+
 WRITE outer.txt "{{ env:MODE }}"
 LET $inner_body: STRING = READ inner.txt
-LET $outer_body: STRING = READ outer.txt
 ASSERT_EQ $inner_body "staging"
+LET $outer_body: STRING = READ outer.txt
 ASSERT_EQ $outer_body "production"
 ```
 
@@ -2455,8 +2485,10 @@ ASSERT_CONTAINS stdout "Hello Alice!"
 # they never update the environment itself
 ENV NAME="Alice"
 WRITE template.md "Hi \{{ env:NAME }}!"
+
 EXPAND template.md NAME="Bob"
 ASSERT_CONTAINS stdout "Hi Bob!"
+
 EXPAND template.md
 ASSERT_CONTAINS stdout "Hi Alice!"
 ```

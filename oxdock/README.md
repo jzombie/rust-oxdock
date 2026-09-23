@@ -273,6 +273,7 @@ FUNC SHADOW($v: STRING) {
     LET $inner: STRING = "inner"
     RETURN $v
 }
+
 LET $out: STRING = SHADOW("param")
 ASSERT_EQ $out "param"
 ```
@@ -400,9 +401,11 @@ Every variable binding declares its type at the binding site. `LET $name: TYPE =
 LET $count: INT = 1
 $count = 2
 LET $msg: STRING = hello
+
 FOR $item: STRING IN ["a", "b"] {
     ECHO "{{ $item }}"
 }
+
 WRITE count.txt "{{ $count }}"
 LET $c: STRING = READ count.txt
 ASSERT_EQ $c "2"
@@ -426,8 +429,9 @@ Parentheses mark the boundary between computing a value and running a pipeline s
 // Functions compute values; stdout stays untouched.
 IMPORT [STD]
 LET $t: STRING = PATH_TYPE("missing.txt")
-LET $n: INT = INT("41") + 1
 ASSERT_EQ $t "absent"
+
+LET $n: INT = INT("41") + 1
 ASSERT_EQ $n 42
 ```
 
@@ -466,8 +470,8 @@ ASSERT_CONTAINS stdout "visible-after-comments"
 
 ```oxdock
 ECHO hash-mid-line # stays-in-payload
-RUN echo run-args-stop-at-slashes // removed-as-comment
 ASSERT_CONTAINS stdout "hash-mid-line # stays-in-payload"
+RUN echo run-args-stop-at-slashes // removed-as-comment
 ASSERT_CONTAINS stdout "run-args-stop-at-slashes"
 ```
 
@@ -491,12 +495,12 @@ Arguments accept single- or double-quoted strings; the escape sequences `\"` and
 ```oxdock
 // Single and double quotes behave identically.
 ECHO 'single quotes'
+ASSERT_CONTAINS stdout "single quotes"
 ECHO "double quotes"
+ASSERT_CONTAINS stdout "double quotes"
 
 // \" embeds a quote; the backslash itself is consumed.
 ECHO "escaped \" quote"
-ASSERT_CONTAINS stdout "single quotes"
-ASSERT_CONTAINS stdout "double quotes"
 ASSERT_CONTAINS stdout 'escaped " quote'
 ```
 
@@ -505,15 +509,15 @@ ASSERT_CONTAINS stdout 'escaped " quote'
 `{{ env:KEY }}` interpolates script environment values into arguments at execution time. Values come from the script environment (`ENV`, inherited keys) — there is no fallback to host variables in command context, and unknown keys expand to an empty string. The unprefixed form `{{ KEY }}` is not a valid template and also expands to empty, so always use the `env:`-prefixed spelling:
 
 ```oxdock
-ENV GREETING=hello-world
+ENV USER=OxDock
 
-// env:-prefixed form: interpolates from the SCRIPT environment.
-ECHO <{{ env:GREETING }}>
+# env:-prefixed form: interpolates from the SCRIPT environment.
+ECHO "Hello {{ env:USER }}!"
+ASSERT_CONTAINS stdout "Hello OxDock!"
 
-// Bare braces are not a template: they expand to empty.
-ECHO <{{ GREETING }}>
-ASSERT_CONTAINS stdout "<hello-world>"
-ASSERT_CONTAINS stdout "<>"
+# Bare braces are not a template: they expand to empty.
+ECHO "Hello {{ USER }}!"
+ASSERT_CONTAINS stdout "Hello !"
 ```
 
 ## Guards and scoped blocks
@@ -540,15 +544,14 @@ INHERIT_ENV [DEPLOY_TARGET]
 
 // Passes when the variable exists with any non-empty value.
 [env:DEPLOY_TARGET] ECHO deploy-target-visible
+ASSERT_CONTAINS stdout "deploy-target-visible"
 
 // Equality against the inherited value.
 [eq(env:DEPLOY_TARGET, staging)] ECHO deploying-to-staging
+ASSERT_CONTAINS stdout "deploying-to-staging"
 
 // Inequality: skipped below, because DEPLOY_TARGET IS staging.
 [ne(env:DEPLOY_TARGET, staging)] ECHO deploying-elsewhere
-
-ASSERT_CONTAINS stdout "deploy-target-visible"
-ASSERT_CONTAINS stdout "deploying-to-staging"
 ```
 
 ### Platform guards
@@ -563,6 +566,7 @@ ASSERT_CONTAINS stdout "deploying-to-staging"
   ASSERT_EQ $rep "windows"
   ASSERT_CONTAINS stdout "windows-detected"
 }
+
 [unix] {
   WRITE os-report.txt unix-family
   ECHO unix-detected
@@ -580,15 +584,14 @@ INHERIT_ENV [OXDOCK_DOC_FEATURE_A]
 
 // not(...) inverts the predicate: passes because the variable does NOT exist.
 [not(env:OXDOCK_DOC_UNDEFINED_VAR)] ECHO negation-passes-for-undefined
+ASSERT_CONTAINS stdout "negation-passes-for-undefined"
 
 // any(...) passes when ANY branch holds; A exists, so this runs.
 [any(env:OXDOCK_DOC_FEATURE_A, env:OXDOCK_DOC_FEATURE_B)] ECHO or-matched-a-branch
+ASSERT_CONTAINS stdout "or-matched-a-branch"
 
 // Comma composes with AND: (A or linux) AND A — true here on every OS.
 [any(env:OXDOCK_DOC_FEATURE_A, linux), env:OXDOCK_DOC_FEATURE_A] ECHO composed-and-or-guard
-
-ASSERT_CONTAINS stdout "negation-passes-for-undefined"
-ASSERT_CONTAINS stdout "or-matched-a-branch"
 ASSERT_CONTAINS stdout "composed-and-or-guard"
 ```
 
@@ -650,6 +653,7 @@ ASSERT_EQ $out_body "some_value-production"
 WRITE before.txt "persisted"
 LET $b: STRING = READ before.txt
 ASSERT_EQ $b "persisted"
+
 [bool:true] {
     EXIT 3
     WRITE unreachable.txt "never"

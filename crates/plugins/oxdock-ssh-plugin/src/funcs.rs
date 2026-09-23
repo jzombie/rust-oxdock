@@ -96,6 +96,8 @@ fn dequeue_session<P: ProcessManager>(
 /// ```oxdock
 /// IMPORT [STD, SSH]
 /// LET $m: MAP = SSH_SERVE("doc-ssh-demo", {username: "u", password: "p"})
+///
+/// # Serve: dequeue one session and pump a synthetic reply.
 /// LET $in: PIPE
 /// LET $out: PIPE
 /// LET $w: HANDLE = ASYNC {
@@ -106,9 +108,13 @@ fn dequeue_session<P: ProcessManager>(
 ///     ASSERT_CONTAINS $sess "addr"
 ///     SSH_PUMP_CHANNEL($sess.session, $in, $out)
 /// }
+///
+/// # Connect a client to the server.
 /// LET $cin: PIPE
 /// LET $cout: PIPE
 /// LET $c: HANDLE = ASYNC { SSH_CONNECT("doc-ssh-demo", "u", "p", $cin, $cout) }
+///
+/// # Greet through the server pipe and wait for delivery.
 /// WITH_IO [stdout=$in] ECHO "server-greeting"
 /// LET $info: MAP = INSPECT($cout)
 /// LET $empty: BOOL = $info.buffer_bytes == 0
@@ -118,6 +124,8 @@ fn dequeue_session<P: ProcessManager>(
 ///     $empty = $info.buffer_bytes == 0
 /// }
 /// ASSERT_CONTAINS $cout "server-greeting"
+///
+/// # Shut everything down.
 /// AWAIT $w
 /// CANCEL $c
 /// SSH_CLOSE($m.server)
@@ -346,12 +354,18 @@ fn ssh_serve<P: ProcessManager>(
 /// ```oxdock
 /// IMPORT [STD, SSH]
 /// LET $m: MAP = SSH_SERVE("doc-ssh-demo", {username: "u", password: "p"})
+///
+/// # Accept one session into fresh pipes.
 /// LET $in: PIPE
 /// LET $out: PIPE
 /// LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
+///
+/// # Connect a client to the server.
 /// LET $cin: PIPE
 /// LET $cout: PIPE
 /// LET $c: HANDLE = ASYNC { SSH_CONNECT("doc-ssh-demo", "u", "p", $cin, $cout) }
+///
+/// # Greet through the server pipe and wait for delivery.
 /// WITH_IO [stdout=$in] ECHO "server-greeting"
 /// LET $info: MAP = INSPECT($cout)
 /// LET $empty: BOOL = $info.buffer_bytes == 0
@@ -361,6 +375,8 @@ fn ssh_serve<P: ProcessManager>(
 ///     $empty = $info.buffer_bytes == 0
 /// }
 /// ASSERT_CONTAINS $cout "server-greeting"
+///
+/// # The awaited result carries both keys; then shut down.
 /// LET $done: MAP = AWAIT $acc
 /// ASSERT_CONTAINS $done "closed"
 /// ASSERT_CONTAINS $done "command"
