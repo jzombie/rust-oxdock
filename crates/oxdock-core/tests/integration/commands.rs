@@ -131,6 +131,44 @@ fn workspace_local_copy_cannot_escape_workspace_root() {
 }
 
 #[test]
+fn system_source_root_resolves_absolute_host_paths() {
+    let snapshot_dir = GuardedPath::tempdir().unwrap();
+    let snapshot = guard_root(&snapshot_dir);
+    let workspace_dir = GuardedPath::tempdir().unwrap();
+    let workspace = guard_root(&workspace_dir);
+
+    // A real host file outside every guarded root. Forward slashes keep
+    // the injected path parseable on Windows; the tempdir guard removes
+    // it when the test exits.
+    let outside_dir = GuardedPath::tempdir().unwrap();
+    let outside_file = outside_dir.as_guarded_path().join("probe.txt").unwrap();
+    write_text(&outside_file, "host-bytes");
+    let outside_str = outside_file.as_path().to_string_lossy().replace('\\', "/");
+
+    let script = indoc!(
+        r#"
+        WORKSPACE SYSTEM
+        COPY --from-workspace SYSTEM "{probe}" restored.txt
+        WRITE sys-note.txt kept-cwd
+    "#
+    );
+    let script = script.replace("{probe}", &outside_str);
+    let steps = oxdock_core::parse_script(&script).unwrap();
+    run_steps_with_context_result_with_io(&snapshot, &workspace, &steps, ExecIo::new()).unwrap();
+
+    // The absolute source resolved without confinement ...
+    assert_eq!(
+        read_trimmed(&snapshot.join("restored.txt").unwrap()),
+        "host-bytes"
+    );
+    // ... and SYSTEM kept the snapshot working directory for relative paths.
+    assert_eq!(
+        read_trimmed(&snapshot.join("sys-note.txt").unwrap()),
+        "kept-cwd"
+    );
+}
+
+#[test]
 #[cfg_attr(miri, ignore = "creates symlinks; unsupported under Miri")]
 fn symlink_into_directory_places_basename() {
     // `ln -s` destination semantics: a directory destination receives the

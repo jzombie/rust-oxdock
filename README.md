@@ -376,28 +376,52 @@ READ piped.txt
 ASSERT_CONTAINS stdout "piped-bytes"
 ```
 
-### Workspaces start ephemeral
+### Scripts start in SNAPSHOT
 
-Scripts start in an ephemeral snapshot workspace, an isolated temp dir that leaves the source tree untouched. Pull inputs with `COPY` or `COPY_GIT`. Switch to the local directory with `WORKSPACE LOCAL` when the script should mutate in place, to the persistent per-project cache with `WORKSPACE CACHE` for artifacts that must survive restarts, or to `WORKSPACE SYSTEM` for full filesystem access.
+Scripts start in the SNAPSHOT workspace, an ephemeral isolated temp dir that leaves the source tree untouched. It is the only ephemeral root. Pull inputs with `COPY` or `COPY_GIT`. Each root below is entered inside a scoped block, which reverts to the previous root on exit.
 
 ```oxdock
+IMPORT [STD]
+
+# SNAPSHOT is the starting root.
 WRITE snap.txt from-snapshot
 LET $s: STRING = READ snap.txt
 ASSERT_EQ $s "from-snapshot"
-WORKSPACE LOCAL
-WRITE local.txt from-local
-LET $l: STRING = READ local.txt
-ASSERT_EQ $l "from-local"
-WORKSPACE CACHE
-WRITE cached.txt from-cache
-LET $c: STRING = READ cached.txt
-ASSERT_EQ $c "from-cache"
-WORKSPACE CACHE --local
-WRITE local-cached.txt from-local-cache
-LET $d: STRING = READ local-cached.txt
-ASSERT_EQ $d "from-local-cache"
-WORKSPACE SYSTEM
-WRITE sys.txt from-system
+
+# LOCAL is a separate directory: snapshot files are absent there.
+[bool:true] {
+    WORKSPACE LOCAL
+    LET $t: STRING = PATH_TYPE("snap.txt")
+    ASSERT_EQ $t "absent"
+    WRITE local.txt from-local
+}
+
+# The block reverted to SNAPSHOT: the local file is absent here.
+LET $u: STRING = PATH_TYPE("local.txt")
+ASSERT_EQ $u "absent"
+
+# CACHE persists outside the snapshot and reads back through its own root.
+[bool:true] {
+    WORKSPACE CACHE
+    WRITE cached.txt from-cache
+}
+COPY --from-workspace CACHE cached.txt restored.txt
+LET $w: STRING = READ restored.txt
+ASSERT_EQ $w "from-cache"
+
+# CACHE --local is a different directory from the OS cache.
+[bool:true] {
+    WORKSPACE CACHE --local
+    LET $x: STRING = PATH_TYPE("cached.txt")
+    ASSERT_EQ $x "absent"
+}
+
+# SYSTEM keeps the current directory: relative paths keep working.
+# Scripts using it are not hermetic.
+[bool:true] {
+    WORKSPACE SYSTEM
+    WRITE sys.txt from-system
+}
 LET $y: STRING = READ sys.txt
 ASSERT_EQ $y "from-system"
 ```
