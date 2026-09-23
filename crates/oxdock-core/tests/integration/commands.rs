@@ -131,6 +131,10 @@ fn workspace_local_copy_cannot_escape_workspace_root() {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "resolves absolute host paths; unsupported under the Miri synthetic filesystem"
+)]
 fn system_source_root_resolves_absolute_host_paths() {
     let snapshot_dir = GuardedPath::tempdir().unwrap();
     let snapshot = guard_root(&snapshot_dir);
