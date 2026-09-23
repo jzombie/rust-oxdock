@@ -589,6 +589,7 @@ pub(super) fn hash_sha256<P: ProcessManager>(
 pub(super) fn symlink<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     idx: usize,
+    from_workspace: Option<WorkspaceTarget>,
     from: &str,
     to: &str,
 ) -> Result<()> {
@@ -597,11 +598,17 @@ pub(super) fn symlink<P: ProcessManager>(
         .fs
         .resolve_write(&cx.state.cwd, to)
         .with_context(|| format!("step {}: SYMLINK {} {}", idx + 1, from, to))?;
-    let from_abs = cx
-        .state
-        .fs
-        .resolve_copy_source(from)
-        .with_context(|| format!("step {}: SYMLINK {} {}", idx + 1, from, to))?;
+    let from_abs = if let Some(target) = from_workspace {
+        cx.state
+            .fs
+            .resolve_copy_source_from_target(copy_source_root(target), from)
+            .with_context(|| format!("step {}: SYMLINK {} {}", idx + 1, from, to))?
+    } else {
+        cx.state
+            .fs
+            .resolve_copy_source(from)
+            .with_context(|| format!("step {}: SYMLINK {} {}", idx + 1, from, to))?
+    };
     // `ln -s` destination semantics: a directory destination (existing,
     // or named with a trailing slash) receives the link under the
     // source basename instead of failing as "already exists".
@@ -2538,12 +2545,17 @@ pub(crate) fn dispatch_symlink<P: ProcessManager>(
     step: &StepKind,
     cx: &mut StepCtx<'_, P>,
 ) -> Result<()> {
-    let StepKind::Symlink { from, to } = step else {
+    let StepKind::Symlink {
+        from_workspace,
+        from,
+        to,
+    } = step
+    else {
         unreachable!()
     };
     let from_resolved = super::args::resolve_arg(from, cx)?;
     let to_resolved = super::args::resolve_arg(to, cx)?;
-    symlink(cx, 0, &from_resolved, &to_resolved)
+    symlink(cx, 0, from_workspace.clone(), &from_resolved, &to_resolved)
 }
 
 pub(crate) fn dispatch_mkdir<P: ProcessManager>(

@@ -13,7 +13,7 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | [`RUN`](#run) | `RUN <command...> \| RUN ["exe", "arg", ...]` |
 | [`COPY`](#copy) | `COPY [--from-workspace SNAPSHOT\|LOCAL\|CACHE\|SYSTEM] <from> <to>` |
 | [`COPY_GIT`](#copy_git) | `COPY_GIT [--include-dirty] <rev> <src> <dst>` |
-| [`SYMLINK`](#symlink) | `SYMLINK <from> <to>` |
+| [`SYMLINK`](#symlink) | `SYMLINK [--from-workspace SNAPSHOT\|LOCAL\|CACHE\|SYSTEM] <from> <to>` |
 | [`MKDIR`](#mkdir) | `MKDIR <path>` |
 | [`LS`](#ls) | `LS [<path>]` |
 | [`CWD`](#cwd) | `CWD` |
@@ -1191,7 +1191,7 @@ COPY_GIT HEAD src.txt dst.txt
 
 Create symlink.
 
-**Syntax:** `SYMLINK <from> <to>`
+**Syntax:** `SYMLINK [--from-workspace SNAPSHOT|LOCAL|CACHE|SYSTEM] <from> <to>`
 
 Creates symlink. A directory destination (existing, or a trailing-slash spell) receives the link under the source basename.
 
@@ -1202,6 +1202,12 @@ Creates symlink. A directory destination (existing, or a trailing-slash spell) r
 | `from` | [`PATH`](#value-type-path) | yes | Target |
 | `to` | [`PATH`](#value-type-path) | yes | Link |
 
+**Flags:**
+
+| Flag | Type | Description |
+| --- | --- | --- |
+| `--from-workspace` | `STRING` | Symlink from the given workspace root instead of the build context |
+
 **Examples:**
 
 **Example: symlink**
@@ -1211,6 +1217,15 @@ WRITE original.txt content
 SYMLINK original.txt link.txt
 LET $body: STRING = READ link.txt
 ASSERT_EQ $body "content"
+```
+
+**Example: symlink from workspace**
+
+```oxdock roots:unified
+WRITE ws-src.txt ws-content
+SYMLINK --from-workspace LOCAL ws-src.txt ws-link.txt
+LET $body: STRING = READ ws-link.txt
+ASSERT_EQ $body "ws-content"
 ```
 
 

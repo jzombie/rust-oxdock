@@ -994,10 +994,29 @@ fn emit_stepkind(
             };
             quote! { StepKind::Copy { from_workspace: #w, from: #f, to: #t } }
         }
-        StepKind::Symlink { from, to } => {
+        StepKind::Symlink {
+            from_workspace,
+            from,
+            to,
+        } => {
+            let w = match from_workspace {
+                None => quote! { None },
+                Some(oxdock_parser::WorkspaceTarget::Snapshot) => {
+                    quote! { Some(oxdock_parser::WorkspaceTarget::Snapshot) }
+                }
+                Some(oxdock_parser::WorkspaceTarget::Local) => {
+                    quote! { Some(oxdock_parser::WorkspaceTarget::Local) }
+                }
+                Some(oxdock_parser::WorkspaceTarget::Cache { .. }) => {
+                    quote! { Some(oxdock_parser::WorkspaceTarget::Cache { local: false }) }
+                }
+                Some(oxdock_parser::WorkspaceTarget::System) => {
+                    quote! { Some(oxdock_parser::WorkspaceTarget::System) }
+                }
+            };
             let f = emit_arg(from, interp);
             let t = emit_arg(to, interp);
-            quote! { StepKind::Symlink { from: #f, to: #t } }
+            quote! { StepKind::Symlink { from_workspace: #w, from: #f, to: #t } }
         }
         StepKind::Write { path, contents } => {
             let p = emit_arg(path, interp);

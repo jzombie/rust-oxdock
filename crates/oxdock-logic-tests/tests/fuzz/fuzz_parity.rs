@@ -168,6 +168,7 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
             to: to.into()
         }),
         (safe_string(), safe_string()).prop_map(|(from, to)| StepKind::Symlink {
+            from_workspace: None,
             from: from.into(),
             to: to.into()
         }),
@@ -354,7 +355,14 @@ fn assert_steps_eq(left: &Step, right: &Step, msg: &str) {
             assert!(arg_content_eq(lf, rf), "CopyGit from mismatch: {}", msg);
             assert!(arg_content_eq(lt, rt), "CopyGit to mismatch: {}", msg);
         }
-        (StepKind::Symlink { from: lf, to: lt }, StepKind::Symlink { from: rf, to: rt }) => {
+        (
+            StepKind::Symlink {
+                from: lf, to: lt, ..
+            },
+            StepKind::Symlink {
+                from: rf, to: rt, ..
+            },
+        ) => {
             assert!(arg_content_eq(lf, rf), "Symlink from mismatch: {}", msg);
             assert!(arg_content_eq(lt, rt), "Symlink to mismatch: {}", msg);
         }

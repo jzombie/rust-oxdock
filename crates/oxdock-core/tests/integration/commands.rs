@@ -271,6 +271,7 @@ fn commands_behave_cross_platform() {
         Step {
             guard: None,
             kind: StepKind::Symlink {
+                from_workspace: None,
                 from: "./target_dir".into(),
                 to: "./client/dist-link".into(),
             },
@@ -1021,6 +1022,7 @@ fn workdir_accepts_symlink_into_workspace_root() {
         Step {
             guard: None,
             kind: StepKind::Symlink {
+                from_workspace: None,
                 from: "client".into(),
                 to: "client".into(),
             },

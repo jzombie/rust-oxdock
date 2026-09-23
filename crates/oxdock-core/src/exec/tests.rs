@@ -512,6 +512,7 @@ fn symlink_errors_report_underlying_cause() {
         Step {
             guard: None,
             kind: StepKind::Symlink {
+                from_workspace: None,
                 from: "taken.txt".into(),
                 to: "taken.txt".into(),
             },

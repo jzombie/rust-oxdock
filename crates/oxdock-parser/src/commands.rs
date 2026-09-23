@@ -858,27 +858,43 @@ declare_commands! {
 
     Symlink => [
         name: "SYMLINK",
-        variant: Symlink { from: Arg, to: Arg },
-        syntax: "SYMLINK <from> <to>",
+        variant: Symlink { from_workspace: Option<WorkspaceTarget>, from: Arg, to: Arg },
+        syntax: "SYMLINK [--from-workspace SNAPSHOT|LOCAL|CACHE|SYSTEM] <from> <to>",
         summary: "Create symlink.",
         description: "Creates symlink. A directory destination (existing, or a trailing-slash spell) receives the link under the source basename.",
         args: &[
             ArgSpec { name: "from", arg_type: ArgType::Path, description: "Target", io: IoDirection::Read, index: 0, required: true, fallback_stream: None },
             ArgSpec { name: "to", arg_type: ArgType::Path, description: "Link", io: IoDirection::Write, index: 1, required: true, fallback_stream: None },
         ],
-        flags: &[],
+        flags: &[ FlagSpec { name: "from_workspace", long: "--from-workspace", value_type: FlagValueType::String, required: false, description: "Symlink from the given workspace root instead of the build context" } ],
         default_output: None,
         examples: &[ Example { name: "symlink", fence_meta: Some("roots:unified"), code: indoc! {r#"
             WRITE original.txt content
             SYMLINK original.txt link.txt
             LET $body: STRING = READ link.txt
             ASSERT_EQ $body "content"
+        "#} }, Example { name: "symlink from workspace", fence_meta: Some("roots:unified"), code: indoc! {r#"
+            WRITE ws-src.txt ws-content
+            SYMLINK --from-workspace LOCAL ws-src.txt ws-link.txt
+            LET $body: STRING = READ ws-link.txt
+            ASSERT_EQ $body "ws-content"
         "#} } ],
-        lower: |_flags, args| {
+        lower: |flags, args| {
+            let from_workspace = flags
+                .iter()
+                .find(|(k, _)| k == "from_workspace")
+                .map(|(_, v)| match v.as_str() {
+                    "SNAPSHOT" => Ok(WorkspaceTarget::Snapshot),
+                    "LOCAL" => Ok(WorkspaceTarget::Local),
+                    "CACHE" => Ok(WorkspaceTarget::Cache { local: false }),
+                    "SYSTEM" => Ok(WorkspaceTarget::System),
+                    other => Err(ParseError::validation("SYMLINK", format!("unknown workspace source: {other}"), &SpanContext::line_only(0))),
+                })
+                .transpose()?;
             let mut it = args.into_iter();
             let from = it.next().ok_or_else(|| ParseError::validation("SYMLINK", "SYMLINK requires a source".to_string(), &SpanContext::line_only(0)))?;
             let to = it.next().ok_or_else(|| ParseError::validation("SYMLINK", "SYMLINK requires a target".to_string(), &SpanContext::line_only(0)))?;
-            Ok(StepKind::Symlink { from, to })
+            Ok(StepKind::Symlink { from_workspace, from, to })
         },
     ],
 
@@ -2269,12 +2285,28 @@ impl fmt::Display for StepKind {
                     )
                 }
             }
-            StepKind::Symlink { from, to } => write!(
-                f,
-                "SYMLINK {} {}",
-                fmt_value(from, quote_arg),
-                fmt_value(to, quote_arg)
-            ),
+            StepKind::Symlink {
+                from_workspace,
+                from,
+                to,
+            } => {
+                if let Some(target) = from_workspace {
+                    write!(
+                        f,
+                        "SYMLINK --from-workspace {} {} {}",
+                        target,
+                        fmt_value(from, quote_arg),
+                        fmt_value(to, quote_arg)
+                    )
+                } else {
+                    write!(
+                        f,
+                        "SYMLINK {} {}",
+                        fmt_value(from, quote_arg),
+                        fmt_value(to, quote_arg)
+                    )
+                }
+            }
             StepKind::Mkdir(a) => write!(f, "MKDIR {}", fmt_value(a, quote_arg)),
             StepKind::Ls(a) => {
                 write!(f, "LS")?;
@@ -2676,6 +2708,48 @@ mod tests {
         // Unknown and lowercase values are rejected uppercase-only.
         for bad in ["REMOTE", "local"] {
             let err = parse_err(&format!("COPY --from-workspace {bad} a.txt b.txt\n"));
+            assert!(err.contains("unknown workspace source"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn symlink_from_workspace_selects_source_root() {
+        for (spelling, target) in [
+            ("SNAPSHOT", WorkspaceTarget::Snapshot),
+            ("LOCAL", WorkspaceTarget::Local),
+            ("CACHE", WorkspaceTarget::Cache { local: false }),
+            ("SYSTEM", WorkspaceTarget::System),
+        ] {
+            let steps = parse_script(
+                &format!("SYMLINK --from-workspace {spelling} a.txt b.txt\n"),
+                lower_command,
+            )
+            .expect("parses");
+            assert!(
+                matches!(&steps[0].kind, StepKind::Symlink { from_workspace: Some(t), .. } if *t == target),
+                "unexpected lowering for {spelling}: {:?}",
+                steps[0].kind
+            );
+            let roundtrip = steps[0].kind.to_string();
+            assert!(
+                roundtrip.contains("--from-workspace"),
+                "display should round-trip the flag: {roundtrip}"
+            );
+        }
+        let steps = parse_script("SYMLINK a.txt b.txt\n", lower_command).expect("parses");
+        assert!(
+            matches!(
+                &steps[0].kind,
+                StepKind::Symlink {
+                    from_workspace: None,
+                    ..
+                }
+            ),
+            "unexpected lowering: {:?}",
+            steps[0].kind
+        );
+        for bad in ["REMOTE", "local"] {
+            let err = parse_err(&format!("SYMLINK --from-workspace {bad} a.txt b.txt\n"));
             assert!(err.contains("unknown workspace source"), "{bad}: {err}");
         }
     }

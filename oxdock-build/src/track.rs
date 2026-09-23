@@ -276,7 +276,7 @@ pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
                 template_keys(&mut keys, from);
                 template_keys(&mut keys, to);
             }
-            StepKind::Symlink { from, to } => {
+            StepKind::Symlink { from, to, .. } => {
                 template_keys(&mut keys, from);
                 template_keys(&mut keys, to);
             }
@@ -469,7 +469,11 @@ mod tests {
                         &oxdock_parser::SpanContext::line_only(0),
                     )
                 })?;
-                Ok(StepKind::Symlink { from, to })
+                Ok(StepKind::Symlink {
+                    from_workspace: None,
+                    from,
+                    to,
+                })
             }
             "ENV" => Ok(oxdock_parser::commands::lower_env_assignment(args)?),
             "WRITE" => {

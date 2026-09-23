@@ -712,10 +712,20 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
             let path_resolved = super::args::resolve_arg(path, &mut cx)?;
             handlers::hash_sha256(&mut cx, idx, &path_resolved)
         }
-        StepKind::Symlink { from, to } => {
+        StepKind::Symlink {
+            from_workspace,
+            from,
+            to,
+        } => {
             let from_resolved = super::args::resolve_arg(from, &mut cx)?;
             let to_resolved = super::args::resolve_arg(to, &mut cx)?;
-            handlers::symlink(&mut cx, idx, &from_resolved, &to_resolved)
+            handlers::symlink(
+                &mut cx,
+                idx,
+                from_workspace.clone(),
+                &from_resolved,
+                &to_resolved,
+            )
         }
         StepKind::Mkdir(arg) => {
             let path = super::args::resolve_arg(arg, &mut cx)?;
@@ -947,10 +957,20 @@ fn execute_steps_inner<P: ProcessManager>(
                             let path_resolved = super::args::resolve_arg(path, &mut cx)?;
                             handlers::hash_sha256(&mut cx, idx, &path_resolved)
                         }
-                        StepKind::Symlink { from, to } => {
+                        StepKind::Symlink {
+                            from_workspace,
+                            from,
+                            to,
+                        } => {
                             let from_resolved = super::args::resolve_arg(from, &mut cx)?;
                             let to_resolved = super::args::resolve_arg(to, &mut cx)?;
-                            handlers::symlink(&mut cx, idx, &from_resolved, &to_resolved)
+                            handlers::symlink(
+                                &mut cx,
+                                idx,
+                                from_workspace.clone(),
+                                &from_resolved,
+                                &to_resolved,
+                            )
                         }
                         StepKind::Mkdir(arg) => {
                             let path = super::args::resolve_arg(arg, &mut cx)?;

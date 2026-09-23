@@ -156,7 +156,9 @@ impl Command {
             Command::CopyGit => "COPY_GIT [--include-dirty] <rev> <src> <dst>",
             Command::WithIo => "WITH_IO [bindings] [command | { block }]",
             Command::HashSha256 => "HASH_SHA256 <path>",
-            Command::Symlink => "SYMLINK <from> <to>",
+            Command::Symlink => {
+                "SYMLINK [--from-workspace SNAPSHOT|LOCAL|CACHE|SYSTEM] <from> <to>"
+            }
             Command::Mkdir => "MKDIR <path>",
             Command::Ls => "LS [<path>]",
             Command::Cwd => "CWD",
