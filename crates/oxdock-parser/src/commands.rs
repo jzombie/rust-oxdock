@@ -706,7 +706,7 @@ declare_commands! {
         examples: &[
             Example { name: "set env", fence_meta: None, code: indoc! {r#"ENV APP_MODE=production"#} },
             Example { name: "quoted value with spaces", fence_meta: None, code: indoc! {r#"
-                # quotes keep the space: SET_FORTH stores `outer scope`
+                # Quotes keep the space: SET_FORTH stores `outer scope`.
                 ENV SET_FORTH="outer scope"
                 WRITE out.txt "{{ env:SET_FORTH }}"
 
@@ -714,7 +714,7 @@ declare_commands! {
                 ASSERT_EQ $body "outer scope"
             "#} },
             Example { name: "variable value", fence_meta: None, code: indoc! {r#"
-                # a lone $var evaluates, like ECHO $var
+                # A lone $var evaluates, like ECHO $var.
                 LET $who: STRING = "Alice"
                 ENV GREETING=$who
                 WRITE out.txt "{{ env:GREETING }}"
@@ -723,8 +723,8 @@ declare_commands! {
                 ASSERT_EQ $body "Alice"
             "#} },
             Example { name: "all value forms agree", fence_meta: None, code: indoc! {r#"
-                # a bare variable, a quoted literal, and a template all
-                # store plain strings through the same value rules
+                # A bare variable, a quoted literal, and a template all
+                # store plain strings through the same value rules.
                 LET $x: STRING = "Ada"
                 ENV A=$x
                 ENV B="hello world"
@@ -744,8 +744,10 @@ declare_commands! {
                 }
 
                 WRITE outer.txt "{{ env:MODE }}"
+
                 LET $inner_body: STRING = READ inner.txt
                 ASSERT_EQ $inner_body "staging"
+
                 LET $outer_body: STRING = READ outer.txt
                 ASSERT_EQ $outer_body "production"
             "#} },
@@ -786,7 +788,7 @@ declare_commands! {
         examples: &[
             Example { name: "echo", fence_meta: None, code: indoc! {r#"ECHO build-complete"#} },
             Example { name: "variables", fence_meta: None, code: indoc! {r#"
-                # a lone $x evaluates; {{ }} interpolates inside text
+                # A lone $x evaluates; {{ }} interpolates inside text.
                 LET $x: STRING = "World"
                 ECHO {{ $x }}
                 ECHO $x
@@ -1344,10 +1346,11 @@ declare_commands! {
                 name: "sleep variable duration",
                 fence_meta: None,
                 code: indoc! {r#"
-                # durations resolve at runtime, so variables work too —
-                # quoted or bare, both bind the same string
+                # Durations resolve at runtime, so variables work too:
+                # quoted or bare, both bind the same string.
                 LET $pause: STRING = "100ms"
                 SLEEP $pause
+
                 LET $bare: STRING = 100ms
                 SLEEP $bare
             "#},
@@ -1600,9 +1603,17 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     WRITE fallback.txt or-false
                 }
 
+                LET $fb: STRING = READ fallback.txt
+                ASSERT_EQ $fb "or-false"
+                LET $t1: STRING = PATH_TYPE("unexpected.txt")
+                ASSERT_EQ $t1 "absent"
+
                 IF $role == "admin" || $level >= 5 {
                     WRITE chosen.txt or-true
                 }
+
+                LET $ch: STRING = READ chosen.txt
+                ASSERT_EQ $ch "or-true"
 
                 IF $role == "admin" && $level >= 5 {
                     WRITE unexpected-too.txt no
@@ -1610,14 +1621,8 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     WRITE and.txt and-false
                 }
 
-                LET $fb: STRING = READ fallback.txt
-                ASSERT_EQ $fb "or-false"
-                LET $ch: STRING = READ chosen.txt
-                ASSERT_EQ $ch "or-true"
                 LET $an: STRING = READ and.txt
                 ASSERT_EQ $an "and-false"
-                LET $t1: STRING = PATH_TYPE("unexpected.txt")
-                ASSERT_EQ $t1 "absent"
                 LET $t2: STRING = PATH_TYPE("unexpected-too.txt")
                 ASSERT_EQ $t2 "absent"
             "#},
@@ -1785,8 +1790,10 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 }
 
                 WRITE outer.txt "{{ $a }}"
+
                 LET $in_body: STRING = READ inner.txt
                 ASSERT_EQ $in_body "inner"
+
                 LET $out_body: STRING = READ outer.txt
                 ASSERT_EQ $out_body "outer"
             "#},
@@ -1852,6 +1859,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
 
                 LET $ok: STRING = READ exact.txt
                 ASSERT_EQ $ok "yes"
+
                 LET $t: STRING = PATH_TYPE("unexpected.txt")
                 ASSERT_EQ $t "absent"
             "#},
@@ -2084,9 +2092,10 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     name: "timeout variable duration",
                     fence_meta: None,
                     code: indoc! {r#"
-                    # durations resolve at runtime, so variables work too
+                    # Durations resolve at runtime, so variables work too.
                     LET $budget: DURATION = "30s"
                     TIMEOUT $budget WRITE heartbeat.txt alive
+
                     LET $beat: STRING = READ heartbeat.txt
                     ASSERT_EQ $beat "alive"
                 "#},
@@ -2151,6 +2160,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
 
                 LET $p: PIPE
                 WITH_IO [stdout=$p] ECHO "payload"
+
                 LET $got: STRING = DRAIN($p)
                 ASSERT_EQ $got "payload"
             "#},
@@ -2214,6 +2224,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                   WRITE tick.txt "once"
                   $done = true
                 }
+
                 LET $tick: STRING = READ tick.txt
                 ASSERT_EQ $tick "once"
             "#},
