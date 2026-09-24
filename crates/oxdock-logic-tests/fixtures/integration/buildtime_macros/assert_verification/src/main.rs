@@ -1,7 +1,7 @@
 use oxdock_macros::oxdock_embed;
 
 // Mirrors the README quick-start script so the documented macro path is
-// compiled and executed — assertions included — on every CI run.
+// compiled and executed : assertions included : on every CI run.
 oxdock_embed! {
     name: VerifiedAssets,
     script: {

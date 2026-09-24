@@ -167,7 +167,7 @@ pub(super) fn run<P: ProcessManager>(cx: &mut StepCtx<'_, P>, idx: usize, cmd: &
     };
 
     let mut options = if cx.state.inside_async || cx.state.cancellable {
-        // Inside an ASYNC block — use background mode so we can register
+        // Inside an ASYNC block : use background mode so we can register
         // the handle for cancellation via active_process.
         CommandOptions::background()
     } else {
@@ -275,7 +275,7 @@ pub(super) fn run_argv<P: ProcessManager>(
     };
 
     let mut options = if cx.state.inside_async || cx.state.cancellable {
-        // Inside an ASYNC block — use background mode so we can register
+        // Inside an ASYNC block : use background mode so we can register
         // the handle for cancellation via active_process.
         CommandOptions::background()
     } else {
@@ -338,7 +338,7 @@ pub(super) fn run_argv<P: ProcessManager>(
 
 /// Resolve exec-form (`RUN [...]`) argv elements with explicit coercion:
 /// `Arg::String`/`Arg::Parts` resolve to exactly one entry each;
-/// `Arg::Expr` evaluates and coerces by value — `String`/`Int`/`Bool` push
+/// `Arg::Expr` evaluates and coerces by value : `String`/`Int`/`Bool` push
 /// one entry, `List` flattens recursively (each scalar becomes its own
 /// entry), `Map`/`TaskHandle` bail with a type error.
 /// Template expansion applies strictly to script-literal source text
@@ -442,7 +442,7 @@ pub(crate) fn dispatch_sleep_step<P: ProcessManager>(
     sleep(cx, 0, &duration)
 }
 
-/// Dispatch `SLEEP <duration>` — park the step without spawning a shell.
+/// Dispatch `SLEEP <duration>` : park the step without spawning a shell.
 ///
 /// Cooperative: sleeps in bounded chunks and checks the cancellation token
 /// between chunks, so an enclosing `TIMEOUT` deadline or parent task teardown
@@ -820,7 +820,7 @@ pub(super) fn read_line<P: ProcessManager>(
 }
 
 /// Structured variable snapshot backing the `INSPECT()` expression form:
-/// base keys (`type`, `variable`, `name`, `value`) plus live details —
+/// base keys (`type`, `variable`, `name`, `value`) plus live details :
 /// pipe backend stats for `PIPE`, task phase for `HANDLE`. Undeclared
 /// names are an error. (Expression evaluation carries no step index, so
 /// unlike statement handlers this reports no step number.)
@@ -1526,7 +1526,7 @@ fn resolve_io_streams<P: ProcessManager>(
     let mut seen_stderr = false;
     // `direct` (take vs bridged-shared) still judges by the ultimate
     // command: only RUN consumes raw descriptors. Promotion, in contrast,
-    // is decided per handle below by declaration scope — and only on
+    // is decided per handle below by declaration scope : and only on
     // worker threads. Main-flow bindings never promote: the main thread
     // is the universal sharer (it spawns every task), so anything it
     // decided could race a future share. Workers promote only their own
@@ -2028,7 +2028,7 @@ pub(crate) fn set_var_value<P: ProcessManager>(
     Ok(())
 }
 
-/// Dispatch `LET $var: STRING = <sync command>` — run the command to completion with
+/// Dispatch `LET $var: STRING = <sync command>` : run the command to completion with
 /// a spillable capture sink as its stdout, then bind the exact bytes as a
 /// string. Only stdout is captured (stderr keeps the parent wiring; stdin
 /// passes through so `WITH_IO [stdin=$p]` still works). Captured bytes
@@ -2190,7 +2190,7 @@ pub(crate) fn if_then<P: ProcessManager>(
 /// Collect the pipes a step subtree produces to (`stdout`/`stderr`
 /// bindings), same-thread only. Endpoints are always `$var`, so every
 /// producer resolves against live state at pin time; no static walk exists
-/// by design — with no literals left to name, there is nothing to collect
+/// by design : with no literals left to name, there is nothing to collect
 /// without state. Nested `ASYNC` bodies run on other threads with their
 /// own pins and are excluded; `Timeout`/`For`/`If`/`WithIo` bodies run
 /// inline and are included. Only producers pin: a task that only reads a
@@ -2282,7 +2282,7 @@ fn collect_body_bindings<P: ProcessManager>(
 }
 
 /// Ensure every pipe an async `body` binds (producers and consumers) is
-/// materialized, and pin a keeper slot on each produced pipe — all
+/// materialized, and pin a keeper slot on each produced pipe : all
 /// synchronously on the spawning thread, so backend decisions never
 /// depend on thread scheduling.
 ///
@@ -2608,7 +2608,7 @@ pub(crate) fn dispatch_read_line<P: ProcessManager>(
     read_line(cx, 0, var)
 }
 
-/// Dispatch `LIST_APPEND $list <item>` — append to a LIST binding in
+/// Dispatch `LIST_APPEND $list <item>` : append to a LIST binding in
 /// place (copy-on-write: sole owners mutate with no copy, aliases
 /// detach). Touches no stream: like SLEEP it is a step effect, not an
 /// IO filter, so pipeline bindings resolve but carry no bytes.
@@ -2923,7 +2923,7 @@ fn step_returns_value(kind: &StepKind) -> bool {
     }
 }
 
-/// Dispatch `LET $var: TYPE = ASYNC { ... }` — spawn a background task and store
+/// Dispatch `LET $var: TYPE = ASYNC { ... }` : spawn a background task and store
 /// the handle in the variable scope.
 pub(crate) fn dispatch_assign_async<P: ProcessManager>(
     var: &str,
@@ -3093,7 +3093,7 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
     Ok(())
 }
 
-/// Dispatch `AWAIT $var` — block until the named task completes, propagate
+/// Dispatch `AWAIT $var` : block until the named task completes, propagate
 /// error if it failed.
 ///
 /// State machine (`TaskEntry`): the first `AWAIT` transitions the entry
@@ -3257,7 +3257,7 @@ fn await_task_entry(
     }
 }
 
-/// Dispatch `AWAIT $var` — block until the named task completes, propagate
+/// Dispatch `AWAIT $var` : block until the named task completes, propagate
 /// error if it failed, and forward the task's captured stdout to the parent
 /// stdout.
 ///
@@ -3301,7 +3301,7 @@ pub(crate) fn dispatch_await<P: ProcessManager>(var: &str, cx: &mut StepCtx<'_, 
     Ok(())
 }
 
-/// Dispatch `LET $out: TYPE = AWAIT $task` — join like bare `AWAIT` (identical
+/// Dispatch `LET $out: TYPE = AWAIT $task` : join like bare `AWAIT` (identical
 /// cancellation/timeout/double-await semantics via [`await_task_entry`]),
 /// then bind the task's explicit `RETURN` value (coerced to the declared
 /// type). A task whose body cannot return yields `INT` 0 on success, like
@@ -3339,7 +3339,7 @@ pub(crate) fn dispatch_await_capture<P: ProcessManager>(
     Ok(())
 }
 
-/// Dispatch `CANCEL $var` — synchronously kill a named background task.
+/// Dispatch `CANCEL $var` : synchronously kill a named background task.
 ///
 /// Blocking and deterministic: this function itself takes the handle from
 /// the shared entry and joins the task thread, so return implies the OS

@@ -250,7 +250,7 @@ pub mod harness {
         case: &FixtureCase,
     ) -> Result<()> {
         // Tier 1: `ast_commands` cases execute fully in-process via the shared
-        // runner — no fixture copy, no cargo invocation, no child process.
+        // runner : no fixture copy, no cargo invocation, no child process.
         if let Some(case_config) = &config.case_config
             && spec.name == case_config.fixture_name
         {
@@ -675,7 +675,7 @@ pub mod harness {
                 cmd.env(oxdock_env::CARGO_TARGET_DIR, target_dir);
             }
 
-            // Symlink capability check — independent of shared_target_dir
+            // Symlink capability check : independent of shared_target_dir
             let needs_symlink = case.name.contains("symlink")
                 || case.name == "copy_broken_symlink"
                 || case.name == "copy_complex";

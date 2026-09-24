@@ -186,7 +186,7 @@ impl Handler for EphemeralHandler {
     ///
     /// The requested size IS recorded on this connection's size cell,
     /// where the dequeued session's pty pump picks it up to size its local
-    /// terminal. The explicit reply is equally load-bearing — leaving a
+    /// terminal. The explicit reply is equally load-bearing : leaving a
     /// `want_reply` request unanswered stalls strict clients before they
     /// ever forward stdin.
     async fn pty_request(

@@ -1,7 +1,9 @@
 **Dockerfile inspired build DSL for Rust**
 
-OxDock is a Dockerfile inspired build DSL for Rust. Embed scripts at compile time with macros, or run the same scripts as standalone CLI pipelines. Native. No containers. No daemon. No VM. All commands run identically on every OS, except RUN.
+OxDock is a Dockerfile-inspired build DSL for Rust: scripted pipelines with hermetic workspaces, typed variables, and pipes instead of snowflake shell. Embed scripts at compile time with macros, or run the same scripts as standalone CLI pipelines. Native. No containers. No daemon. No VM.
 
-Supports platform gating, async tasks, and piped workflows for custom pipelines.
+One script runs on Linux, macOS, and Windows, with platform gating, async tasks, and piped workflows for custom pipelines. Only RUN touches the host shell.
+
+Plain Rust functions become script functions with one attribute: `#[oxdock_func]` exports them into namespaced modules scripts call as `DEMO::NAME(...)`. See [Extending OxDock from Rust](#extending-oxdock-from-rust).
 
 [Documentation](https://docs.rs/oxdock/{{ env:CRATE_VERSION }}/oxdock/)

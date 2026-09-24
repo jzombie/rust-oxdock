@@ -1,9 +1,9 @@
 //! Single-site command registry for all OxDock commands.
 //!
 //! `declare_commands!` is the sole source of truth. It generates:
-//! - StepKind enum — all command + structural AST variants
-//! - `pub fn lower_command(name, raw_args)` — name-dispatched lowering
-//! - `pub fn all_metadata()` — collects `CommandMeta` from all declarations
+//! - StepKind enum : all command + structural AST variants
+//! - `pub fn lower_command(name, raw_args)` : name-dispatched lowering
+//! - `pub fn all_metadata()` : collects `CommandMeta` from all declarations
 //!   plus `all_structural_metadata()` (structural statements are documented
 //!   through the same pipeline so reference docs cannot drift).
 //!
@@ -70,7 +70,7 @@ fn join_value(args: Vec<Arg>, cmd_name: &str) -> ParseResult<Arg> {
 }
 
 /// Canonical `lower_command` entry for direct callers holding one pre-joined
-/// `KEY=value` token. Script parsing never reaches this — the grammar splits
+/// `KEY=value` token. Script parsing never reaches this : the grammar splits
 /// assignments on raw spans first (see `lower_env_command` in parser.rs).
 pub fn lower_env_assignment(args: Vec<Arg>) -> ParseResult<StepKind> {
     let arg = args.into_iter().next().ok_or_else(|| {
@@ -94,7 +94,7 @@ pub fn lower_env_assignment(args: Vec<Arg>) -> ParseResult<StepKind> {
 
 /// Collapse a grammar-classified assignment for commands that take no
 /// assignments (`RUN`, `COPY`, ...): canonical `key=<rendered value>` text.
-/// Runtime semantics survive intact — `{{ }}` templates stay textual for
+/// Runtime semantics survive intact : `{{ }}` templates stay textual for
 /// `expand_string`, and `RUN`'s own post-pass expands bare `$var`.
 pub(crate) fn canonical_assignment_arg(key: &str, value: &Arg) -> Arg {
     Arg::String(format!("{key}={}", value.render()), false)
@@ -202,7 +202,7 @@ fn fmt_exec_arg(arg: &Arg) -> String {
 }
 
 /// Render an [`Arg`] for `Display`: the quoted flag drives quoting (not
-/// content sniffing — digit-leading values like `10s` or `0` must stay
+/// content sniffing : digit-leading values like `10s` or `0` must stay
 /// bare to reparse with the same flag).
 fn fmt_raw_arg(arg: &Arg) -> String {
     match arg {
@@ -227,7 +227,7 @@ fn fmt_io(b: &IoBinding) -> String {
 
 // Keywords parsed by PEG rules rather than plain-command lowering (`WITH_IO`,
 // `AWAIT`, ...). When a line starts with one of these but fails to parse as
-// such, lowering falls through here — report a committed syntax error instead
+// such, lowering falls through here : report a committed syntax error instead
 // of an unknown command.
 pub(crate) fn is_known_command(name: &str) -> bool {
     if name == "ELSE" {
@@ -528,7 +528,7 @@ impl AssertTarget {
 
 /// Lower the first positional of `ASSERT_EQ` / `ASSERT_CONTAINS`.
 ///
-/// `Arg::Expr` (variables, key-paths, calls) is always a value — a `$var`
+/// `Arg::Expr` (variables, key-paths, calls) is always a value : a `$var`
 /// holding a `PIPE` peeks its backend bytes at runtime. Bare (unquoted)
 /// `stdout` / `stderr` spellings become stream markers; every other
 /// spelling, quoted or not, stays a literal value. In particular a `$var`
@@ -616,11 +616,15 @@ declare_commands! {
         flags: &[],
         default_output: None,
         examples: &[ Example { name: "change working directory", fence_meta: None, code: indoc! {r#"
+            # Later relative paths resolve under the new directory.
             WORKDIR project/src
             WRITE generated.txt generated-under-workdir
+
             LET $body: STRING = READ generated.txt
             ASSERT_EQ $body "generated-under-workdir"
-        "#} }, Example { name: "workdir in a scoped block", fence_meta: None, code: indoc! {r#"
+        "#} },             Example { name: "workdir in a scoped block", fence_meta: None, code: indoc! {r#"
+            # The block reverts to the starting directory on exit.
+            LET $outside: STRING = CWD
             MKDIR project
 
             [bool:true] {
@@ -628,6 +632,8 @@ declare_commands! {
                 WRITE inner.txt inner
             }
 
+            LET $back: STRING = CWD
+            ASSERT_EQ $back $outside
             LET $body: STRING = READ project/inner.txt
             ASSERT_EQ $body "inner"
         "#} } ],
@@ -659,7 +665,13 @@ declare_commands! {
         args: &[ ArgSpec { name: "target", arg_type: ArgType::OneOf(&["SNAPSHOT", "LOCAL", "CACHE", "SYSTEM"]), description: "Target root", io: IoDirection::Write, index: 0, required: true, fallback_stream: None } ],
         flags: &[ FlagSpec { name: "local", long: "--local", value_type: FlagValueType::Flag, required: false, description: "Use the project-local cache directory instead of the OS user cache (CACHE only)" } ],
         default_output: None,
-        examples: &[ Example { name: "switch roots", fence_meta: None, code: indoc! {r#"WORKSPACE LOCAL"#} }, Example { name: "workspace cache in a scoped block", fence_meta: None, code: indoc! {r#"
+        examples: &[ Example { name: "switch roots", fence_meta: None, code: indoc! {r#"
+            IMPORT [STD]
+            WORKSPACE LOCAL
+
+            LET $t: STRING = PATH_TYPE(".")
+            ASSERT_EQ $t "dir"
+        "#} }, Example { name: "workspace cache in a scoped block", fence_meta: None, code: indoc! {r#"
             [bool:true] {
                 WORKSPACE CACHE
                 WRITE cached.txt cached-content
@@ -704,7 +716,11 @@ declare_commands! {
         flags: &[],
         default_output: None,
         examples: &[
-            Example { name: "set env", fence_meta: None, code: indoc! {r#"ENV APP_MODE=production"#} },
+            Example { name: "set env", fence_meta: None, code: indoc! {r#"
+                ENV APP_MODE=production
+                LET $mode: STRING = env:APP_MODE
+                ASSERT_EQ $mode "production"
+            "#} },
             Example { name: "quoted value with spaces", fence_meta: None, code: indoc! {r#"
                 # Quotes keep the space: SET_FORTH stores `outer scope`.
                 ENV SET_FORTH="outer scope"
@@ -769,7 +785,11 @@ declare_commands! {
         args: &[ ArgSpec { name: "keys", arg_type: ArgType::Rest(&ArgType::String), description: "Host variables to inherit", io: IoDirection::Read, index: 0, required: false, fallback_stream: None } ],
         flags: &[],
         default_output: None,
-        examples: &[ Example { name: "inherit env", fence_meta: None, code: indoc! {r#"INHERIT_ENV [PATH, HOME]"#} } ],
+        examples: &[ Example { name: "inherit env", fence_meta: None, code: indoc! {r#"
+            INHERIT_ENV [PATH, HOME]
+            LET $path: STRING = env:PATH
+            ASSERT_CONTAINS $path ":"
+        "#} } ],
         lower: |_flags, args| {
             let keys = args.into_iter().map(|a| a.as_str().to_string()).collect();
             Ok(StepKind::InheritEnv { keys })
@@ -786,13 +806,16 @@ declare_commands! {
         flags: &[],
         default_output: Some(Stream::Stdout),
         examples: &[
-            Example { name: "echo", fence_meta: None, code: indoc! {r#"ECHO build-complete"#} },
+            Example { name: "echo", fence_meta: None, code: indoc! {r#"
+                ECHO build-complete
+                ASSERT_CONTAINS stdout "build-complete"
+            "#} },
             Example { name: "variables", fence_meta: None, code: indoc! {r#"
-                # A lone $x evaluates; {{ }} interpolates inside text.
+                # {{ }} interpolates inside text; a lone $var evaluates on its own.
                 LET $x: STRING = "World"
-                ECHO {{ $x }}
+                ECHO "braced:{{ $x }}"
                 ECHO $x
-                ASSERT_CONTAINS stdout "World"
+                ASSERT_EQ stdout "braced:World\nWorld\n"
             "#} },
         ],
         lower: |_flags, args| Ok(StepKind::Echo(join_value(args, "ECHO")?)),
@@ -817,7 +840,21 @@ declare_commands! {
         args: &[ ArgSpec { name: "command", arg_type: ArgType::Rest(&ArgType::String), description: "Command", io: IoDirection::Write, index: 0, required: true, fallback_stream: None } ],
         flags: &[],
         default_output: None,
-        examples: &[ Example { name: "run", fence_meta: None, code: indoc! {r#"RUN echo hello"#} }, Example { name: "run exec form", fence_meta: None, code: indoc! {r#"RUN ["cargo", "--version"]"#} } ],
+        examples: &[ Example { name: "run", fence_meta: None, code: indoc! {r#"
+            RUN echo hello
+
+            # Captured runs prove the output, not just the exit status.
+            LET $o: STRING = RUN echo hello
+            ASSERT_CONTAINS $o "hello"
+        "#}         }, Example { name: "run exec form", fence_meta: None, code: indoc! {r#"
+            # No shell: `>` stays a literal argument, so no file is created.
+            IMPORT [STD]
+            RUN ["cargo", "--version", ">", "x.txt"]
+            ASSERT_CONTAINS stdout "cargo"
+
+            LET $t: STRING = PATH_TYPE("x.txt")
+            ASSERT_EQ $t "absent"
+        "#} } ],
         lower: |_flags, args| match args.as_slice() {
             [Arg::Expr(Expr::List(elems))] if elems.is_empty() => {
                 Err(ParseError::validation("RUN", "RUN requires at least one argument".to_string(), &SpanContext::line_only(0)))
@@ -842,13 +879,21 @@ declare_commands! {
         flags: &[ FlagSpec { name: "from_workspace", long: "--from-workspace", value_type: FlagValueType::String, required: false, description: "Copy from the given workspace root instead of the build context" } ],
         default_output: None,
         examples: &[ Example { name: "copy", fence_meta: Some("roots:unified"), code: indoc! {r#"
+            # Copy to a new name, then read back.
             WRITE src.txt content
             COPY src.txt dst.txt
+
             LET $body: STRING = READ dst.txt
             ASSERT_EQ $body "content"
-        "#} }, Example { name: "copy from workspace", fence_meta: Some("roots:unified"), code: indoc! {r#"
-            WRITE ws-src.txt ws-content
-            COPY --from-workspace LOCAL ws-src.txt ws-copy.txt
+        "#} }, Example { name: "copy from workspace", fence_meta: None, code: indoc! {r#"
+            # Same name, different contents per root: only LOCAL has ws-content.
+            WRITE shared.txt from-snapshot
+            WORKSPACE LOCAL
+            WRITE shared.txt ws-content
+
+            WORKSPACE SNAPSHOT
+            COPY --from-workspace LOCAL shared.txt ws-copy.txt
+
             LET $body: STRING = READ ws-copy.txt
             ASSERT_EQ $body "ws-content"
         "#} } ],
@@ -884,7 +929,7 @@ declare_commands! {
         ],
         flags: &[ FlagSpec { name: "dirty", long: "--include-dirty", value_type: FlagValueType::Flag, required: false, description: "Include dirty" } ],
         default_output: None,
-        examples: &[ Example { name: "git copy", fence_meta: Some("expect_error:\"COPY source missing\""), code: indoc! {r#"COPY_GIT HEAD src.txt dst.txt"#} } ],
+        examples: &[ Example { name: "git copy missing source errors", fence_meta: Some("expect_error:\"COPY source missing\""), code: indoc! {r#"COPY_GIT HEAD src.txt dst.txt"#} } ],
         lower: |flags, args| {
             let include_dirty = flags.iter().any(|(k, _)| k == "dirty");
             let mut it = args.into_iter();
@@ -908,13 +953,21 @@ declare_commands! {
         flags: &[ FlagSpec { name: "from_workspace", long: "--from-workspace", value_type: FlagValueType::String, required: false, description: "Symlink from the given workspace root instead of the build context" } ],
         default_output: None,
         examples: &[ Example { name: "symlink", fence_meta: Some("roots:unified"), code: indoc! {r#"
+            # A symlink reads like its target.
             WRITE original.txt content
             SYMLINK original.txt link.txt
+
             LET $body: STRING = READ link.txt
             ASSERT_EQ $body "content"
-        "#} }, Example { name: "symlink from workspace", fence_meta: Some("roots:unified"), code: indoc! {r#"
-            WRITE ws-src.txt ws-content
-            SYMLINK --from-workspace LOCAL ws-src.txt ws-link.txt
+        "#} }, Example { name: "symlink from workspace", fence_meta: None, code: indoc! {r#"
+            # Same name, different contents per root: only LOCAL has ws-content.
+            WRITE shared.txt from-snapshot
+            WORKSPACE LOCAL
+            WRITE shared.txt ws-content
+
+            WORKSPACE SNAPSHOT
+            SYMLINK --from-workspace LOCAL shared.txt ws-link.txt
+
             LET $body: STRING = READ ws-link.txt
             ASSERT_EQ $body "ws-content"
         "#} } ],
@@ -946,7 +999,13 @@ declare_commands! {
         args: &[ ArgSpec { name: "path", arg_type: ArgType::Path, description: "Dir path", io: IoDirection::Write, index: 0, required: true, fallback_stream: None } ],
         flags: &[],
         default_output: None,
-        examples: &[ Example { name: "mkdir", fence_meta: None, code: indoc! {r#"MKDIR deeply/nested/tree"#} } ],
+        examples: &[ Example { name: "mkdir", fence_meta: None, code: indoc! {r#"
+            IMPORT [STD]
+            MKDIR deeply/nested/tree
+
+            LET $t: STRING = PATH_TYPE("deeply/nested/tree")
+            ASSERT_EQ $t "dir"
+        "#} } ],
         lower: |_flags, args| Ok(StepKind::Mkdir(args.into_iter().next().ok_or_else(|| ParseError::validation("MKDIR", "MKDIR requires a path".to_string(), &SpanContext::line_only(0)))?)),
     ],
 
@@ -963,6 +1022,7 @@ declare_commands! {
             MKDIR inventory
             WRITE inventory/a.txt a
             LS inventory
+            ASSERT_CONTAINS stdout "a.txt"
         "#} } ],
         lower: |_flags, args| Ok(StepKind::Ls(args.into_iter().next())),
     ],
@@ -976,7 +1036,15 @@ declare_commands! {
         args: &[],
         flags: &[],
         default_output: Some(Stream::Stdout),
-        examples: &[ Example { name: "cwd", fence_meta: None, code: indoc! {r#"CWD"#} } ],
+        examples: &[ Example { name: "cwd", fence_meta: None, code: indoc! {r#"
+            CWD
+
+            # CWD tracks WORKDIR: the listing names the new directory.
+            MKDIR sub
+            WORKDIR sub
+            LET $c: STRING = CWD
+            ASSERT_CONTAINS $c "sub"
+        "#} } ],
         lower: |_flags, _args| Ok(StepKind::Cwd),
     ],
 
@@ -992,6 +1060,9 @@ declare_commands! {
         examples: &[ Example { name: "read", fence_meta: None, code: indoc! {r#"
             WRITE note.txt "hello"
             READ note.txt
+
+            LET $body: STRING = READ note.txt
+            ASSERT_EQ $body "hello"
         "#} } ],
         lower: |_flags, args| Ok(StepKind::Read(args.into_iter().next())),
     ],
@@ -1011,9 +1082,11 @@ declare_commands! {
         flags: &[],
         default_output: None,
         examples: &[ Example { name: "read line", fence_meta: None, code: indoc! {r#"
+            # The trailing newline is stripped: the variable holds exactly `first`.
             LET $lines: PIPE
             WITH_IO [stdout=$lines] ECHO "first"
             WITH_IO [stdin=$lines] READ_LINE $reply
+            ASSERT_EQ $reply "first"
         "#} } ],
         lower: |_flags, args| {
             let arg = args.into_iter().next().ok_or_else(|| ParseError::validation("READ_LINE", "READ_LINE requires a variable".to_string(), &SpanContext::line_only(0)))?;
@@ -1043,7 +1116,11 @@ declare_commands! {
         ],
         flags: &[],
         default_output: None,
-        examples: &[ Example { name: "write", fence_meta: None, code: indoc! {r#"WRITE output.txt hello-world"#} } ],
+        examples: &[ Example { name: "write", fence_meta: None, code: indoc! {r#"
+            WRITE output.txt hello-world
+            LET $body: STRING = READ output.txt
+            ASSERT_EQ $body "hello-world"
+        "#} } ],
         lower: |_flags, args| {
             let mut it = args.into_iter();
             let path = it.next().ok_or_else(|| ParseError::validation("WRITE", "WRITE requires a path".to_string(), &SpanContext::line_only(0)))?;
@@ -1068,6 +1145,8 @@ declare_commands! {
         examples: &[ Example { name: "append", fence_meta: None, code: indoc! {r#"
             WRITE log.txt line1
             APPEND log.txt line2
+
+            # APPEND concatenates with no separator.
             LET $all: STRING = READ log.txt
             ASSERT_EQ $all "line1line2"
         "#} } ],
@@ -1120,43 +1199,49 @@ declare_commands! {
         default_output: Some(Stream::Stdout),
         examples: &[
             Example { name: "expand", fence_meta: None, code: indoc! {r#"
+                # Placeholders read overrides first, then the environment.
                 ENV NAME="Alice"
                 WRITE template.md "Hello {{ env:NAME }}!"
                 EXPAND template.md
+
                 ASSERT_CONTAINS stdout "Hello Alice!"
             "#} },
             Example { name: "override with spaces", fence_meta: None, code: indoc! {r#"
-                # WRITE would interpolate {{ }} right away, so escape it:
-                # the file must literally contain {{ env:NAME }} for EXPAND
+                # WRITE would interpolate {{ }} right away, so escape it.
+                # The file must literally contain {{ env:NAME }} for EXPAND.
                 WRITE template.md "Hello \{{ env:NAME }}!"
                 EXPAND template.md NAME="Alice Smith"
+
                 ASSERT_CONTAINS stdout "Hello Alice Smith!"
             "#} },
             Example { name: "variable override", fence_meta: None, code: indoc! {r#"
-                # same escaping: keep the placeholder literal until EXPAND;
-                # a lone $who evaluates, like ECHO $who
+                # Same escaping: keep the placeholder literal until EXPAND.
+                # A lone $who evaluates, like ECHO $who.
                 LET $who: STRING = "Bob"
                 WRITE template.md "Hi \{{ env:WHO }}!"
                 EXPAND template.md WHO=$who
+
                 ASSERT_CONTAINS stdout "Hi Bob!"
             "#} },
             Example { name: "override forms agree", fence_meta: None, code: indoc! {r#"
-                # a bare variable and a template-with-tail expand identically
+                # A bare variable and a template-with-tail expand identically.
                 LET $x: STRING = "Ada"
                 WRITE template.md "Hi \{{ env:NAME }} and \{{ env:NAME2 }}!"
                 EXPAND template.md NAME=$x NAME2="{{ $x }} concatenated"
+
                 ASSERT_CONTAINS stdout "Hi Ada and Ada concatenated!"
             "#} },
             Example { name: "expand stdin", fence_meta: None, code: indoc! {r#"
-                # no path: the template arrives on stdin through a pipe
+                # No path: the template arrives on stdin through a pipe.
                 LET $tpl: PIPE
                 WITH_IO [stdout=$tpl] ECHO "Hello \{{ env:NAME }}!"
                 WITH_IO [stdin=$tpl] EXPAND NAME=Alice
+
                 ASSERT_CONTAINS stdout "Hello Alice!"
             "#} },
             Example { name: "override does not leak", fence_meta: None, code: indoc! {r#"
-                # KEY=val overrides shadow env for that EXPAND only —
-                # they never update the environment itself
+                # KEY=val overrides shadow env for that EXPAND only.
+                # They never update the environment itself.
                 ENV NAME="Alice"
                 WRITE template.md "Hi \{{ env:NAME }}!"
 
@@ -1216,7 +1301,7 @@ declare_commands! {
             ASSERT_EQ $body "stable-content"
         "#} },
         Example { name: "assert eq hash", fence_meta: None, code: indoc! {r#"
-            # --hash compares the SHA-256 digest instead of raw bytes
+            # --hash compares the SHA-256 digest instead of raw bytes.
             WRITE payload.bin stable-content
             LET $body: STRING = READ payload.bin
             ASSERT_EQ --hash 08135c1b6349b0e4f894c36221952f0de00e6b4d82f80895abf359755e77103c $body
@@ -1296,6 +1381,9 @@ declare_commands! {
         examples: &[ Example { name: "hash", fence_meta: None, code: indoc! {r#"
             WRITE payload.txt hello
             HASH_SHA256 payload.txt
+
+            LET $digest: STRING = HASH_SHA256 payload.txt
+            ASSERT_EQ $digest "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824\n"
         "#} } ],
         lower: |_flags, args| Ok(StepKind::HashSha256 { path: args.into_iter().next().ok_or_else(|| ParseError::validation("HASH_SHA256", "HASH_SHA256 requires a path".to_string(), &SpanContext::line_only(0)))? }),
     ],
@@ -1389,9 +1477,11 @@ declare_commands! {
         flags: &[],
         default_output: None,
         examples: &[ Example { name: "list append", fence_meta: None, code: indoc! {r#"
+            # Appends accumulate in order.
             LET $items: LIST = []
             LIST_APPEND $items "first"
             LIST_APPEND $items "second"
+
             LET $want: LIST = ["first", "second"]
             ASSERT_EQ $items $want
         "#} } ],
@@ -1423,7 +1513,7 @@ declare_commands! {
 // Single source of truth for structural-statement documentation (TIMEOUT,
 // ASYNC, AWAIT, WITH_IO, IF, FOR, ...). These constructs are parsed by PEG
 // rules rather than `declare_commands!`, so their reference docs live here
-// instead of `crates/docs-gen/src/command_ref.rs` — adding a structural
+// instead of `crates/docs-gen/src/command_ref.rs` : adding a structural
 // StepKind without registering it here fails `structural_metadata_covers_all_structural_kinds`
 // below, and docs-gen renders these entries dynamically (no hardcoded copy).
 pub fn all_structural_metadata() -> Vec<CommandMeta> {
@@ -1476,6 +1566,11 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                   ECHO second
                 }
                 WITH_IO [stdin=$log] WRITE captured.txt
+
+                # The piped bytes landed in the file.
+                LET $body: STRING = READ captured.txt
+                ASSERT_CONTAINS $body "first"
+                ASSERT_CONTAINS $body "second"
             "#},
                 },
                 Example {
@@ -1517,25 +1612,31 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     name: "for loop",
                     fence_meta: None,
                     code: indoc! {r#"
+                # Each element binds in turn; the loop body sees every one.
                 LET $items: LIST = ["a", "b"]
                 FOR $item: STRING IN $items {
                   ECHO $item
                 }
+                ASSERT_CONTAINS stdout "a"
+                ASSERT_CONTAINS stdout "b"
 
+                # Key and value bind together for maps.
                 LET $map: MAP = {"x": 1}
                 FOR $k: STRING, $v: INT IN $map {
-                  ECHO "$k=$v"
+                  ECHO "{{ $k }}={{ $v }}"
                 }
+                ASSERT_CONTAINS stdout "x=1"
             "#},
                 },
                 Example {
                     name: "expand every match",
                     fence_meta: None,
                     code: indoc! {r#"
-                # single-line body; $x is a template path, WHO an override
-                WRITE a.txt "hi \{{ env:WHO }}!"
+                # Single-line body; $x is a template path, WHO an override.
                 IMPORT [STD]
+                WRITE a.txt "hi \{{ env:WHO }}!"
                 FOR $x: STRING IN GLOB("*.txt") { EXPAND $x WHO=World }
+
                 ASSERT_CONTAINS stdout "hi World!"
             "#},
                 },
@@ -1562,12 +1663,15 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     fence_meta: None,
                     code: indoc! {r#"
                 IMPORT [STD]
+
+                # True branch runs; the false branch is skipped.
                 IF true {
                   WRITE yes.txt taken
                 } ELSE {
                   WRITE yes.txt skipped
                 }
 
+                # ELSE IF selects the first true branch.
                 IF false {
                   WRITE skipped.txt no
                 } ELSE IF true {
@@ -1578,6 +1682,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 IF !false {
                   WRITE negated.txt taken
                 }
+
                 LET $yes_body: STRING = READ yes.txt
                 LET $fallback_body: STRING = READ fallback.txt
                 LET $negated_body: STRING = READ negated.txt
@@ -1751,16 +1856,21 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     code: indoc! {r#"
                 LET $name: STRING = "world"
                 ECHO "hello, {{ $name }}"
+                ASSERT_CONTAINS stdout "hello, world"
 
                 LET $items: LIST = ["a", "b"]
+                ASSERT_CONTAINS $items "a"
+                ASSERT_CONTAINS $items "b"
+
                 LET $count: INT = 42
+                ASSERT_EQ $count 42
             "#},
                 },
                 Example {
                     name: "no hoisting",
                     fence_meta: Some("expect_error:\"undefined variable\""),
                     code: indoc! {r#"
-                # reading before the LET runs is an error, not an empty value
+                # Reading before the LET runs is an error, not an empty value.
                 ECHO $too_early
                 LET $too_early: STRING = "too late"
             "#},
@@ -1769,11 +1879,12 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     name: "glob binding",
                     fence_meta: None,
                     code: indoc! {r#"
-                # the RHS is an expression: GLOB(...) runs and binds a list
-                WRITE a.txt "x"
+                # The RHS is an expression: GLOB(...) runs and binds a list.
                 IMPORT [STD]
+                WRITE a.txt "x"
                 LET $files: LIST = GLOB("*.txt")
                 FOR $f: STRING IN $files { ECHO $f }
+
                 ASSERT_CONTAINS stdout "a.txt"
             "#},
                 },
@@ -1781,7 +1892,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     name: "scoped variable reverts",
                     fence_meta: None,
                     code: indoc! {r#"
-                # LET inside a braced block reverts when the block exits
+                # LET inside a braced block reverts when the block exits.
                 LET $a: STRING = "outer"
 
                 [bool:true] {
@@ -1802,6 +1913,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     name: "capture command output",
                     fence_meta: None,
                     code: indoc! {r#"
+                # Capture keeps the trailing newline.
                 LET $out: STRING = ECHO hi
                 ASSERT_EQ $out "hi\n"
             "#},
@@ -1811,6 +1923,8 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     fence_meta: None,
                     code: indoc! {r#"
                 LET $who: STRING = "ada"
+
+                # An inline block binds its RETURN value like a function body.
                 LET $res: STRING = {
                     LET $loud: STRING = "{{ $who }}!"
                     RETURN $loud
@@ -1828,11 +1942,13 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     name: "arithmetic over captured output",
                     fence_meta: None,
                     code: indoc! {r#"
-                LET $size_str: STRING = ECHO 41
+                # Captured output converts explicitly: INT() then arithmetic.
                 IMPORT [STD]
+                LET $size_str: STRING = ECHO 41
                 LET $total: INT = INT($size_str) + 1
                 ASSERT_EQ $total 42
 
+                # FLOAT() promotes instead of truncating.
                 LET $ratio: FLOAT = 1 + 2.5
                 ASSERT_EQ $ratio 3.5
 
@@ -1885,6 +2001,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 # INSPECT($var) snapshots a variable into a MAP: declared
                 # type plus live details (pipe backend stats here), so
                 # scripts can branch on engine state.
+                IMPORT [STD]
                 LET $p: PIPE
                 WITH_IO [stdout=$p] ECHO hello
                 LET $info: MAP = INSPECT($p)
@@ -1893,6 +2010,8 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 }
 
                 ASSERT_EQ $info.type "PIPE"
+                LET $t: STRING = PATH_TYPE("unexpected.txt")
+                ASSERT_EQ $t "absent"
             "#},
                 },
             ],
@@ -1928,6 +2047,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     name: "mutate",
                     fence_meta: None,
                     code: indoc! {r#"
+                # Mutation writes through: the binding holds the new value.
                 LET $count: INT = 1
                 $count = 2
                 ASSERT_EQ $count 2
@@ -1939,8 +2059,8 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     code: indoc! {r#"
                 # Captured output is a string: `"100" + 1` is a Type Error.
                 # Convert explicitly, then mutate with arithmetic.
-                LET $raw: STRING = ECHO 100
                 IMPORT [STD]
+                LET $raw: STRING = ECHO 100
                 LET $n: INT = INT($raw)
                 $n = $n + 1
 
@@ -1977,12 +2097,16 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     name: "async",
                     fence_meta: None,
                     code: indoc! {r#"
-                    ASYNC ECHO "first"
-
-                    ASYNC {
-                        ECHO "first"
-                        ECHO "second"
-                    }
+                # Inline and block forms both run in the background; AWAIT joins them.
+                ASYNC ECHO "warming-up"
+                LET $a: HANDLE = ASYNC ECHO "first"
+                LET $b: HANDLE = ASYNC {
+                    ECHO "second"
+                }
+                AWAIT $a
+                AWAIT $b
+                ASSERT_CONTAINS stdout "first"
+                ASSERT_CONTAINS stdout "second"
                 "#},
                 },
                 Example {
@@ -1993,6 +2117,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                         ECHO "built"
                     }
                     AWAIT $task
+                    ASSERT_CONTAINS stdout "built"
                 "#},
                 },
             ],
@@ -2020,6 +2145,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     code: indoc! {r#"
                 LET $task: HANDLE = ASYNC ECHO "done"
                 AWAIT $task
+                ASSERT_CONTAINS stdout "done"
             "#},
                 },
                 Example {
@@ -2030,6 +2156,8 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     ECHO "logged"
                     RETURN "returned"
                 }
+
+                # AWAIT binds the RETURN value, not the streamed output.
                 LET $out: STRING = AWAIT $task
                 ASSERT_EQ $out "returned"
             "#},
@@ -2050,14 +2178,26 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             args: &[],
             flags: &[],
             default_output: None,
-            examples: &[Example {
-                name: "cancel",
-                fence_meta: None,
-                code: indoc! {r#"
+            examples: &[
+                Example {
+                    name: "cancel",
+                    fence_meta: None,
+                    code: indoc! {r#"
                 LET $task: HANDLE = ASYNC SLEEP 30s
                 CANCEL $task
             "#},
-            }],
+                },
+                Example {
+                    name: "await after cancel reports cancellation",
+                    fence_meta: Some("expect_error:\"was cancelled\""),
+                    code: indoc! {r#"
+                # A cancelled task stays cancelled: joining it reports.
+                LET $task: HANDLE = ASYNC SLEEP 30s
+                CANCEL $task
+                AWAIT $task
+            "#},
+                },
+            ],
         },
         CommandMeta {
             name: "TIMEOUT",
@@ -2076,7 +2216,11 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 Example {
                     name: "timeout",
                     fence_meta: None,
-                    code: indoc! {r#"TIMEOUT 30s WRITE heartbeat.txt alive"#},
+                    code: indoc! {r#"
+                    TIMEOUT 30s WRITE heartbeat.txt alive
+                    LET $beat: STRING = READ heartbeat.txt
+                    ASSERT_EQ $beat "alive"
+                "#},
                 },
                 Example {
                     name: "timeout block",
@@ -2086,6 +2230,19 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                         WRITE a.txt one
                         WRITE b.txt two
                     }
+                    LET $a: STRING = READ a.txt
+                    LET $b: STRING = READ b.txt
+                    ASSERT_EQ $a "one"
+                    ASSERT_EQ $b "two"
+                "#},
+                },
+                Example {
+                    name: "deadline aborts the step",
+                    fence_meta: Some("expect_error:\"TIMEOUT after\""),
+                    code: indoc! {r#"
+                    # 50ms expires long before the sleep does: the step dies
+                    # with a deadline error instead of running out the clock.
+                    TIMEOUT 50ms SLEEP 30s
                 "#},
                 },
                 Example {
@@ -2197,6 +2354,10 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
 
                 LET $res: STRING = PICK(true)
                 ASSERT_EQ $res "yes"
+
+                # Fallthrough without RETURN yields its own value.
+                LET $no: STRING = PICK(false)
+                ASSERT_EQ $no "no"
             "#},
             }],
         },
@@ -2219,14 +2380,16 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 name: "while loop",
                 fence_meta: None,
                 code: indoc! {r#"
-                LET $done: BOOL = false
-                WHILE !$done {
-                  WRITE tick.txt "once"
-                  $done = true
+                # The condition re-evaluates every iteration: three passes, then stop.
+                LET $n: INT = 0
+                WHILE $n < 3 {
+                  WRITE tick.txt "{{ $n }}"
+                  $n = $n + 1
                 }
 
+                ASSERT_EQ $n 3
                 LET $tick: STRING = READ tick.txt
-                ASSERT_EQ $tick "once"
+                ASSERT_EQ $tick "2"
             "#},
             }],
         },
@@ -2246,9 +2409,14 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 name: "break",
                 fence_meta: None,
                 code: indoc! {r#"
+                # BREAK leaves after the first pass: only "a" is written.
                 FOR $x: STRING IN ["a", "b"] {
+                  WRITE picked.txt "{{ $x }}"
                   BREAK
                 }
+
+                LET $body: STRING = READ picked.txt
+                ASSERT_EQ $body "a"
             "#},
             }],
         },
@@ -2269,9 +2437,16 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 name: "continue",
                 fence_meta: None,
                 code: indoc! {r#"
+                # CONTINUE skips the write on "a": only "b" lands.
                 FOR $x: STRING IN ["a", "b"] {
-                  CONTINUE
+                  IF $x == "a" {
+                    CONTINUE
+                  }
+                  WRITE picked.txt "{{ $x }}"
                 }
+
+                LET $body: STRING = READ picked.txt
+                ASSERT_EQ $body "b"
             "#},
             }],
         },
@@ -2304,6 +2479,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 name: "import",
                 fence_meta: None,
                 code: indoc! {r#"
+                # Calls name their module (STD::GLOB); IMPORT [STD] drops the prefix.
                 WRITE a.txt "hi \{{ env:WHO }}!"
                 IMPORT [STD]
                 FOR $x: STRING IN GLOB("*.txt") { EXPAND $x WHO=World }
@@ -2934,7 +3110,7 @@ mod tests {
             ("LET foo\n", "LET"),
             // NOTE: INHERIT_ENV is dual-registered as a leaf command
             // (`INHERIT_ENV <key>...`), so `INHERIT_ENV foo` lowers
-            // successfully instead of erroring — excluded here.
+            // successfully instead of erroring : excluded here.
             ("ASYNC\n", "ASYNC"),
             ("ELSE foo\n", "ELSE"),
         ] {

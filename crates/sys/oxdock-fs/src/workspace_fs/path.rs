@@ -261,8 +261,8 @@ impl GuardedPath {
 
 /// Strip a Windows verbatim-disk prefix (`\\?\C:\...`, already
 /// forward-slashed to `//?/C:/...`) to the plain drive form the glob engine
-/// and path comparisons understand. Returns the input unchanged otherwise —
-/// notably UNC/device forms (`//?/UNC/...`), which keep their prefix.
+/// and path comparisons understand. Returns the input unchanged otherwise.
+/// Notably UNC/device forms (`//?/UNC/...`) keep their prefix.
 fn strip_verbatim_prefix(path: &str) -> &str {
     if let Some(rest) = path.strip_prefix("//?/") {
         let bytes = rest.as_bytes();
@@ -851,7 +851,7 @@ fn is_pid_alive(pid: u32) -> bool {
     unsafe {
         let handle: HANDLE = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
         if handle.is_null() {
-            // A NULL handle usually means the PID is gone — except
+            // A NULL handle usually means the PID is gone, except
             // ERROR_ACCESS_DENIED, where a live (elevated/foreign-session)
             // process simply refused us. Like the Unix EPERM arm, default to
             // keep-alive so the tempdir GC never deletes a live owner's dirs.

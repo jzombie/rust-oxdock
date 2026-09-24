@@ -332,18 +332,18 @@ impl From<Guard> for GuardExpr {
     }
 }
 
-/// A command argument — either an expandable string or an expression.
+/// A command argument : either an expandable string or an expression.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Arg {
     /// Expandable string. The `bool` indicates whether the argument was
     /// quoted in the source (`true`) or unquoted (`false`). Quoted arguments
     /// that start with `--` are positional, not flags.
     String(String, bool),
-    /// Expression — resolved at runtime via evaluate_expr.
+    /// Expression : resolved at runtime via evaluate_expr.
     Expr(Expr),
     /// Mixed literal/expression value (e.g. `KEY={{ $x }} tail`). Fragments
     /// resolve independently at runtime and concatenate with no added
-    /// separator — inter-fragment gaps are already materialized as `Text`.
+    /// separator : inter-fragment gaps are already materialized as `Text`.
     Parts(Vec<ArgPart>),
 }
 
@@ -353,7 +353,7 @@ pub enum ArgPart {
     /// Literal text. The `bool` marks source-quoted regions (exact bytes);
     /// unquoted text carries single-space-normalized gaps.
     Text(String, bool),
-    /// Typed expression — resolved via evaluate_expr, never stringified.
+    /// Typed expression : resolved via evaluate_expr, never stringified.
     Expr(Expr),
 }
 

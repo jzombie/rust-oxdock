@@ -2,8 +2,8 @@
 //!
 //! The buffer implementation lives in `oxdock-pipe` (pipe backlogs and
 //! capture sinks share it); this module keeps the crate's spill/backlog
-//! thresholds — small under `cfg(test)` so tests exercise the spill path
-//! without multi-megabyte payloads — and the threshold-aware constructor
+//! thresholds : small under `cfg(test)` so tests exercise the spill path
+//! without multi-megabyte payloads : and the threshold-aware constructor
 //! production and tests share.
 
 /// Memory threshold before spilling to disk.

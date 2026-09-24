@@ -51,6 +51,7 @@ ASSERT_EQ $t "absent"
 
 LET $n: INT = INT("41") + 1
 ASSERT_EQ $n 42
+ASSERT_EQ stdout ""
 ```
 
 ### Statements and semicolons
@@ -76,8 +77,8 @@ ASSERT_CONTAINS stdout "cargo"
 Three comment styles are supported: `//` line comments, nestable `/* ... */` block comments, and `#` comments. A `#` comment occupies a whole line (optionally indented) and may also trail values inside multi-line `()`, `[]`, and `{}` brackets; inside a command payload a `#` is ordinary text. Similarly, `//` ends a `RUN` argument list but survives inside quoted strings:
 
 ```oxdock
-// slash comment at end of line
-# hash comment occupies the whole line
+// Slash comment at end of line.
+# Hash comment occupies the whole line.
 
 /* block comments
    /* nest */
@@ -89,8 +90,12 @@ ASSERT_CONTAINS stdout "visible-after-comments"
 ```oxdock
 ECHO hash-mid-line # stays-in-payload
 ASSERT_CONTAINS stdout "hash-mid-line # stays-in-payload"
+
 RUN echo run-args-stop-at-slashes // removed-as-comment
 ASSERT_CONTAINS stdout "run-args-stop-at-slashes"
+
+RUN echo "quoted // kept"
+ASSERT_CONTAINS stdout "quoted // kept"
 ```
 
 Comment markers inside quoted strings are always preserved.
@@ -120,22 +125,35 @@ ASSERT_CONTAINS stdout "double quotes"
 // \" embeds a quote; the backslash itself is consumed.
 ECHO "escaped \" quote"
 ASSERT_CONTAINS stdout 'escaped " quote'
+
+// Quoted separators stay literal: no instruction splits here.
+ECHO 'semi;colon'
+ASSERT_CONTAINS stdout "semi;colon"
 ```
 
 ## Templates
 
-`\{{ env:KEY }}` interpolates script environment values into arguments at execution time. Values come from the script environment (`ENV`, inherited keys) — there is no fallback to host variables in command context, and unknown keys expand to an empty string. The unprefixed form `\{{ KEY }}` is not a valid template and also expands to empty, so always use the `env:`-prefixed spelling:
+`\{{ env:KEY }}` interpolates script environment values into arguments at execution time. Values come from the script environment (`ENV`, inherited keys): there is no fallback to host variables in command context, and unknown keys expand to an empty string. The unprefixed form `\{{ KEY }}` resolves a DSL variable of that name instead, else expands to empty; it never reads the environment, so always use the `env:`-prefixed spelling for environment values:
 
 ```oxdock
 ENV USER=OxDock
 
-# env:-prefixed form: interpolates from the SCRIPT environment.
+# The env:-prefixed form interpolates from the script environment.
 ECHO "Hello \{{ env:USER }}!"
 ASSERT_CONTAINS stdout "Hello OxDock!"
 
-# Bare braces are not a template: they expand to empty.
+# Unprefixed names resolve DSL variables instead: $WHO exists, so this expands.
+LET $WHO: STRING = "Ada"
+ECHO "Hi \{{ WHO }}!"
+ASSERT_CONTAINS stdout "Hi Ada!"
+
+# With no such variable the bare name expands to empty.
 ECHO "Hello \{{ USER }}!"
 ASSERT_CONTAINS stdout "Hello !"
+
+# Unknown keys expand to empty with no host fallback.
+ECHO "a\{{ env:OXDOCK_DOC_NO_SUCH_KEY }}b"
+ASSERT_CONTAINS stdout "ab"
 ```
 
 ## Guards and scoped blocks
@@ -145,14 +163,14 @@ A guard is a bracketed expression that gates the instruction or block that follo
 - `env:KEY` passes when variable `KEY` exists and is non-empty; `eq(env:KEY, value)` and `ne(env:KEY, value)` compare values.
 - Bare platform tags pass based on the host: `linux`, `macos` (alias `mac`), `windows`, `unix`. Tags are case-insensitive.
 - A comma-separated list means **AND**: `[env:A, linux]`.
-- Disjunction is expressed as a call — `any(expr, expr, ...)` with at least two branches — not an infix operator.
-- Conjunction is expressed as a call — `all(expr, expr, ...)` — or implicitly via comma separation.
+- Disjunction is expressed as a call: `any(expr, expr, ...)` with at least two branches, not an infix operator.
+- Conjunction is expressed as a call (`all(expr, expr, ...)`) or implicitly via comma separation.
 - Any predicate may be negated with `not(...)`: `[not(env:SKIP)]`.
 - Parentheses group expressions: `[any(env:A, linux), mac]`.
 
 Guards attach to the next instruction. Several guard lines in a row chain onto the same target, and a guard immediately followed by `{` opens a guarded block whose guard applies to every enclosed instruction.
 
-Guard evaluation checks the script environment first and falls back to the process environment, so guards interact naturally with `INHERIT_ENV` and `ENV`.
+Guard evaluation checks the script environment only: `ENV` entries, `INHERIT_ENV` opt-ins, and builtin keys. Host variables stay invisible unless inherited, so guards interact naturally with `INHERIT_ENV` and `ENV`.
 
 ### Environment guards
 
@@ -208,7 +226,7 @@ ASSERT_CONTAINS stdout "negation-passes-for-undefined"
 [any(env:OXDOCK_DOC_FEATURE_A, env:OXDOCK_DOC_FEATURE_B)] ECHO or-matched-a-branch
 ASSERT_CONTAINS stdout "or-matched-a-branch"
 
-// Comma composes with AND: (A or linux) AND A — true here on every OS.
+// Comma composes with AND: (A or linux) AND A: true here on every OS.
 [any(env:OXDOCK_DOC_FEATURE_A, linux), env:OXDOCK_DOC_FEATURE_A] ECHO composed-and-or-guard
 ASSERT_CONTAINS stdout "composed-and-or-guard"
 ```
@@ -218,6 +236,8 @@ ASSERT_CONTAINS stdout "composed-and-or-guard"
 Bracket expressions may span lines. Chained guard lines apply conjunctively to the next instruction; here neither variable is defined, so the gated instruction is skipped:
 
 ```oxdock
+IMPORT [STD]
+
 // Brackets may span lines; chained lines AND together and gate
 // the next command.
 [
@@ -229,14 +249,13 @@ Bracket expressions may span lines. Chained guard lines apply conjunctively to t
 WRITE chained.txt applied
 
 // The artifact was never created.
-IMPORT [STD]
 LET $t: STRING = PATH_TYPE("chained.txt")
 ASSERT_EQ $t "absent"
 ```
 
 ### Scoped blocks
 
-Braced blocks scope everything: `LET` variables, `ENV` values, `WORKDIR`, and `WORKSPACE` all revert when the block exits. Files created inside a block persist on disk, and pipes registered with `WITH_IO` stay open — those are the only things that cross a scope boundary. (A bare `{ ... }` needs an always-true guard: `[bool:true]`. Single commands, including single `WITH_IO` lines like `READ_LINE`, never open a scope.)
+Braced blocks scope everything: `LET` variables, `ENV` values, `WORKDIR`, and `WORKSPACE` all revert when the block exits. Files created inside a block persist on disk, and pipes registered with `WITH_IO` stay open. Those are the only things that cross a scope boundary. (A bare `{ ... }` needs an always-true guard: `[bool:true]`. Single commands, including single `WITH_IO` lines like `READ_LINE`, never open a scope.)
 
 ```oxdock
 LET $a: STRING = "some_value"
@@ -253,7 +272,7 @@ WORKDIR scoped_area
 }
 
 // $a is back to "some_value", MODE is back to "production",
-// and cwd is back at scoped_area — but files persist.
+// and cwd is back at scoped_area. Files persist.
 LET $in_body: STRING = READ inner.txt
 ASSERT_EQ $in_body "inner_value-staging"
 WRITE outer.txt "\{{ $a }}-\{{ env:MODE }}"
@@ -261,11 +280,23 @@ LET $out_body: STRING = READ outer.txt
 ASSERT_EQ $out_body "some_value-production"
 ```
 
+Pipes cross scope boundaries the same way files do: a handle bound
+inside stays usable after the block exits.
+
+```oxdock
+LET $p: PIPE
+[bool:true] {
+    WITH_IO [stdout=$p] ECHO "piped-out"
+}
+WITH_IO [stdin=$p] READ_LINE $line
+ASSERT_EQ $line "piped-out"
+```
+
 `IF`/`ELSE` branches, `FOR` loop bodies, `TIMEOUT` bodies, `ASYNC` bodies, and `WITH_IO [..] { ... }` blocks are all scopes under the same rule: only files and pipes leak out.
 
 ### EXIT in nested blocks
 
-`EXIT <code>` stops the pipeline immediately with an `EXIT requested with code <code>` error — steps after it never run, at any nesting depth. Unwinding still happens on the way out: every enclosing block reverts its `LET`/`ENV`/`WORKDIR`/`WORKSPACE` state before the error propagates, anonymous background tasks are killed synchronously, and files written before the `EXIT` persist. An `EXIT` inside `TIMEOUT` passes through unwrapped (never relabeled as a deadline error); an `EXIT` inside an `ASYNC` task ends that task with an error, which the parent sees at `AWAIT` or end-of-pipeline reaping.
+`EXIT <code>` stops the pipeline immediately with an `EXIT requested with code <code>` error. Steps after it never run, at any nesting depth. Files written before the `EXIT` persist, which the fence below asserts; state unwinding and task teardown follow the same scope rules as everywhere else.
 
 ```oxdock expect_error:"EXIT requested with code 3"
 WRITE before.txt "persisted"
@@ -280,7 +311,7 @@ ASSERT_EQ $b "persisted"
 
 ## Deadlines with TIMEOUT
 
-`TIMEOUT <duration> <command>` bounds a single step, `TIMEOUT <duration> { ... }` bounds a block, and `TIMEOUT <duration> AWAIT $task` bounds a task join. Durations accept `ms`, `s`, `m`, and `h` suffixes (a bare number means seconds, e.g. `TIMEOUT 30 ...`). A step that overruns its deadline is cancelled — a blocking foreground process is killed — and the pipeline fails with a `TIMEOUT after <duration>` error. `SLEEP <duration>` parks the step without spawning a shell, which makes it ideal for testing deadlines portably (a `SLEEP` inside an expired `TIMEOUT` is interrupted instead of running out the clock).
+`TIMEOUT <duration> <command>` bounds a single step, `TIMEOUT <duration> { ... }` bounds a block, and `TIMEOUT <duration> AWAIT $task` bounds a task join. Durations accept `ms`, `s`, `m`, and `h` suffixes (a bare number means seconds, e.g. `TIMEOUT 30 ...`). A step that overruns its deadline is cancelled. A blocking foreground process is killed, and the pipeline fails with a `TIMEOUT after <duration>` error. `SLEEP <duration>` parks the step without spawning a shell, which makes it ideal for testing deadlines portably (a `SLEEP` inside an expired `TIMEOUT` is interrupted instead of running out the clock).
 
 ```oxdock
 // Inline form bounds a single command.
@@ -305,7 +336,7 @@ LET $quick: HANDLE = ASYNC {
 TIMEOUT 30s AWAIT $quick
 ```
 
-`ASYNC` wraps any command or block — including `TIMEOUT`, `CANCEL`, `SLEEP`, and nested `ASYNC` — in either nesting order with the same deadline semantics. `LET $task: HANDLE = ASYNC TIMEOUT 30s RUN "build"` enforces the deadline inside the background thread (a later `AWAIT $task` surfaces the `TIMEOUT` error), while `TIMEOUT 30s AWAIT $task` preempts a hung task from the awaiting side:
+`ASYNC` wraps any command or block (including `TIMEOUT`, `CANCEL`, `SLEEP`, and nested `ASYNC`) in either nesting order with order-dependent deadline semantics: `LET $task: HANDLE = ASYNC TIMEOUT 30s RUN "build"` enforces the deadline inside the background thread (a later `AWAIT $task` surfaces the `TIMEOUT` error), while `TIMEOUT 30s AWAIT $task` preempts a hung task from the awaiting side:
 
 ```oxdock
 // ASYNC wraps TIMEOUT: the deadline fires inside the background thread.

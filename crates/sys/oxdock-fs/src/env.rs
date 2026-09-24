@@ -1,9 +1,10 @@
 //! Shared environment variable names.
 //!
-//! Every process-environment name the workspace reads or writes lives here
-//! as a `pub const`, so call sites never repeat a hardcoded string. (The
+//! Every `OXDOCK_`/`CARGO_` runtime name the workspace reads or writes lives
+//! here as a `pub const`, so call sites never repeat a hardcoded string. (The
 //! `env!("...")` compile-time macros keep their literals: that macro only
-//! accepts literal arguments.)
+//! accepts literal arguments. Third-party names like `GIT_*`, `RUSTFLAGS`,
+//! or `TERM` stay at their call sites.)
 
 /// Exact-directory override for the persistent project cache root.
 pub const CACHE_DIR: &str = "OXDOCK_CACHE_DIR";
@@ -33,9 +34,9 @@ pub const AST_CASE: &str = "OXDOCK_AST_CASE";
 /// Coverage-only mode for the `ast_commands` fixture runner.
 pub const AST_ONLY_COVERAGE: &str = "OXDOCK_AST_ONLY_COVERAGE";
 
-/// Test guards: multi-guard pass/fail tokens.
+/// Test guards: multi-guard pass token.
 pub const MULTI_GUARD_TEST_PASS: &str = "OXDOCK_MULTI_GUARD_TEST_PASS";
-/// Test guards: multi-guard pass/fail tokens.
+/// Test guards: multi-guard fail token.
 pub const MULTI_GUARD_TEST_FAIL: &str = "OXDOCK_MULTI_GUARD_TEST_FAIL";
 /// Test guards: unset-token probe.
 pub const GUARD_TEST_TOKEN_UNSET: &str = "OXDOCK_GUARD_TEST_TOKEN_UNSET";

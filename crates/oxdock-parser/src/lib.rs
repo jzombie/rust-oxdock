@@ -5,7 +5,7 @@
 //!
 //! The reference's fenced examples use `oxdock …` info strings consumed
 //! by the docs-conformance harness (not Rust code), which rustdoc
-//! legitimately flags — hence the targeted allow below.
+//! legitimately flags : hence the targeted allow below.
 //!
 //! The `oxdock_parser` self-alias lets `#[oxdock_type]`-generated code
 //! inside this crate resolve `::oxdock_parser::` paths exactly like
@@ -174,7 +174,7 @@ mod tests {
     use quote::quote;
     use std::collections::HashMap;
 
-    /// Mock lowering — tests grammar mechanics, not domain commands.
+    /// Mock lowering : tests grammar mechanics, not domain commands.
     fn test_lower(name: &str, args: Vec<Arg>) -> ParseResult<StepKind> {
         crate::test_lower_mock::lower(name, args)
     }

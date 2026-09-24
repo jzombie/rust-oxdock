@@ -372,7 +372,7 @@ fn run_exec_processes_escapes_and_keeps_metachars_literal() {
 
     // Backslash escapes resolve exactly once (`\"` -> `"`, `\\` -> `\`,
     // `\n` -> newline); shell metacharacters (`; $() `` > |`) are never
-    // interpreted and reach argv verbatim — there is no shell to escape for.
+    // interpreted and reach argv verbatim : there is no shell to escape for.
     let root = GuardedPath::new_root_from_str(".").unwrap();
     let steps = vec![Step {
         guard: None,
@@ -462,7 +462,7 @@ fn async_completion_short_circuits_pipeline() {
     let mock = MockProcessManager::default();
     mock.push_bg_plan(0, success_status());
     let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
-    // Pipeline should succeed — foreground step runs after async completes
+    // Pipeline should succeed : foreground step runs after async completes
     run_steps_with_manager(fs, &steps, mock.clone(), ExecIo::new()).unwrap();
     // The parent's mock records the foreground step
     let recorded = mock.recorded_runs();
@@ -666,7 +666,7 @@ fn with_io_pipe_routes_stdout_to_run_stdin() {
 /// Mirrors the `async_run_direct` fixture: a background `ECHO` writes into a
 /// script pipe while the foreground `WRITE` drains it to a file. The snapshot
 /// holds raw bytes (no trimming), so this asserts the engine preserves the
-/// trailing newline end to end — pipe EOF included.
+/// trailing newline end to end : pipe EOF included.
 #[test]
 fn async_echo_pipe_write_preserves_exact_bytes() {
     let steps = vec![
@@ -719,7 +719,7 @@ fn async_echo_pipe_write_preserves_exact_bytes() {
 /// blocks on pipe stdin until the foreground `ECHO` delivers payload and EOF.
 /// A single-threaded executor would deadlock here; `AWAIT` joins the task so
 /// the assertion below cannot race the background thread. Raw snapshot bytes
-/// prove the payload — newline included — arrives intact.
+/// prove the payload : newline included : arrives intact.
 #[test]
 fn async_stdin_pipe_unblocks_background_write() {
     let steps = vec![
@@ -2136,7 +2136,7 @@ fn naturally_completed_bg_not_logged_as_killed() {
     let mock = MockProcessManager::default();
     mock.push_bg_plan(0, success_status());
     let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
-    // Pipeline should succeed — the background task completes naturally
+    // Pipeline should succeed : the background task completes naturally
     run_steps_with_manager(fs, &steps, mock.clone(), ExecIo::new()).unwrap();
 }
 
@@ -2180,7 +2180,7 @@ fn timeout_body_completes_within_deadline() {
 
 #[test]
 fn timeout_body_error_passes_through_without_firing() {
-    // A body that fails fast must surface its own error unwrapped — no
+    // A body that fails fast must surface its own error unwrapped : no
     // TIMEOUT prefix when the deadline never elapsed.
     let steps = vec![timeout_step(
         "30s",
@@ -2337,7 +2337,7 @@ fn timeout_preserves_preexisting_cancellation() {
     // scope (e.g. an outer deadline already fired while an inner region was
     // entered): a body that still completes must restore the signal, not
     // erase it, so nested deadline propagation keeps working. Calls
-    // handlers::timeout directly — the step loop's own pre-check would bail
+    // handlers::timeout directly : the step loop's own pre-check would bail
     // before dispatch, which is a separate (already covered) path.
     let fs = MockFs::new();
     let mut state = create_exec_state(fs.clone());
@@ -2402,7 +2402,7 @@ fn script_pipe_stays_in_memory_below_threshold() {
     let writer = pipe.endpoint().stream_handle();
     let reader = pipe.reader();
 
-    let payload = vec![0xABu8; 1024]; // 1 KiB — below threshold
+    let payload = vec![0xABu8; 1024]; // 1 KiB: below threshold
     writer.lock().unwrap().write_all(&payload).unwrap();
     drop(writer);
 
@@ -2577,7 +2577,7 @@ mod escape_props {
             name in "[a-z][a-zA-Z0-9_]{0,10}",
             value in "[a-zA-Z0-9 $\\{}/._-]{0,20}",
         ) {
-            // Whatever the variable holds — even template-looking payloads —
+            // Whatever the variable holds : even template-looking payloads :
             // `\$name` routes `$name` to the shell untouched.
             let state = prop_state(
                 &[],
@@ -2651,7 +2651,7 @@ fn spill_buffer_stays_in_memory_below_threshold() {
     let buf = Arc::new(new_spill_buffer());
     let writer = buf.writer();
 
-    let payload = vec![0xABu8; 1024]; // 1 KiB — below threshold
+    let payload = vec![0xABu8; 1024]; // 1 KiB: below threshold
     writer.lock().unwrap().write_all(&payload).unwrap();
     assert!(!buf.is_spilled());
     assert_eq!(buf.drain_bytes().unwrap(), payload);

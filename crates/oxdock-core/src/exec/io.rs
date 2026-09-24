@@ -24,7 +24,7 @@ pub(super) struct PipeRegistry;
 
 /// Loud take-twice error for OS handles: a second consumer or producer on
 /// one end can never steal the descriptor, and (unlike the old recycling
-/// behavior) never silently receives a fresh pair either — the remedy is a
+/// behavior) never silently receives a fresh pair either : the remedy is a
 /// fresh declaration. No rebind rule exists by design: no rule can tell
 /// sequential loop reuse apart from concurrent fan-in sharing.
 #[cfg(not(miri))]
@@ -304,11 +304,11 @@ where
 /// Slice-based byte adapter over pipe halves for host (`#[oxdock_func]`)
 ///
 /// stateful functions. All byte movement goes through the standard traits
-/// on caller-owned buffers — `Read::read(&mut [u8])` and
-/// `Write::write(&[u8])` — so hosts can hand pipes directly to `serde_json`,
+/// on caller-owned buffers : `Read::read(&mut [u8])` and
+/// `Write::write(&[u8])` : so hosts can hand pipes directly to `serde_json`,
 /// `flate2`, `tar`, and friends with a single reused stack buffer and zero
 /// per-chunk allocation. `0` read means EOF exactly like `std::io`; never
-/// slurp a stream into one `Vec` (unbounded memory growth — stream it).
+/// slurp a stream into one `Vec` (unbounded memory growth : stream it).
 /// `flush()` delegates to backend flush semantics, which for script pipes
 /// is a no-op that loses nothing: every `write()` wakes readers itself.
 ///

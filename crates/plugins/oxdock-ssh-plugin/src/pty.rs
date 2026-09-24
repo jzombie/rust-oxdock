@@ -6,12 +6,12 @@
 //! its remote pty from its *local* stdin tty, and pipes have no size
 //! (0x0), so without a local pty every remote fullscreen app lays out
 //! for a nonexistent screen. Spawning under a local pty sized from the
-//! outer session — and resizing it live as outer window-change requests
-//! arrive — closes the loop: the kernel SIGWINCHes the child, which
+//! outer session : and resizing it live as outer window-change requests
+//! arrive : closes the loop: the kernel SIGWINCHes the child, which
 //! forwards the new size to the remote end itself.
 //!
 //! Implemented on `portable-pty` (the same substrate term-wm uses), so
-//! Unix PTY and Windows ConPTY share one code path — no per-platform
+//! Unix PTY and Windows ConPTY share one code path : no per-platform
 //! branches here. Environment is inherited from the host process, layered
 //! with the script environment like `RUN`: block-scoped `ENV` (such as a
 //! session's `SSH_*` relay) reaches the child and reverts at scope exit.

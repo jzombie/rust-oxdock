@@ -37,7 +37,7 @@ impl ChildHandle {
         // The stdin feeder is deliberately detached, never joined (see
         // below): it blocks reading the producer pipe, whose writers may
         // legitimately outlive a short-lived child (a session pump feeding
-        // the next command), so joining would hang `wait()` forever — the
+        // the next command), so joining would hang `wait()` forever : the
         // same reason `Drop` below never joins pump threads. The detached
         // thread ends on pipe EOF or write failure and releases its
         // handles then; it holds no lock anyone else needs (fresh reader
@@ -82,14 +82,14 @@ impl BackgroundHandle for ChildHandle {
                 None => Ok(None),
             }
         } else if guard.reaped {
-            // Process already reaped — return cached exit status
+            // Process already reaped : return cached exit status
             Ok(Some(
                 guard
                     .exit_status
                     .unwrap_or_else(|| exit_status_from_code(0)),
             ))
         } else {
-            // wait() is executing on another thread — process is still running
+            // wait() is executing on another thread : process is still running
             Ok(None)
         }
     }
@@ -117,7 +117,7 @@ impl BackgroundHandle for ChildHandle {
             guard.exit_status = Some(status);
             Ok(status)
         } else {
-            // Already reaped — return cached exit status
+            // Already reaped : return cached exit status
             let guard = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             Ok(guard
                 .exit_status
@@ -131,7 +131,7 @@ impl BackgroundHandle for ChildHandle {
             return Ok(());
         }
         // Signal the process directly via OS PID. This does NOT need
-        // &mut Child — no aliasing, no UB.
+        // &mut Child : no aliasing, no UB.
         #[cfg(unix)]
         {
             unsafe {

@@ -1501,7 +1501,7 @@ fn lower_command_value(ctx: &SpanContext, lctx: &LowerCtx, pair: Pair<Rule>) -> 
 /// Assemble a bounded raw span into one literal `Arg::String`: `{{ }}` template
 /// chunks pass through verbatim for `expand_string`, quoted chunks unquote
 /// once with exact bytes, and unquoted runs collapse whitespace to single
-/// spaces (trailing/leading edges trimmed). Pure text needs no `Parts` — every
+/// spaces (trailing/leading edges trimmed). Pure text needs no `Parts` : every
 /// fragment resolves through the same `expand_string` pass.
 fn lower_raw_fragments(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Arg> {
     let span = refine_span(ctx, &pair);
@@ -1592,7 +1592,7 @@ fn lower_env_command(ctx: &SpanContext, tokens: Vec<InsToken>) -> ParseResult<St
 
 /// Parser-direct `EXPAND` lowering: positional tokens are the optional path,
 /// assignments are overrides. Split quoted values can never masquerade as
-/// extra paths — tokenize time already proved they are one value.
+/// extra paths : tokenize time already proved they are one value.
 fn lower_expand_command(ctx: &SpanContext, tokens: Vec<InsToken>) -> ParseResult<StepKind> {
     let mut path = None;
     let mut overrides = Vec::new();
@@ -2100,11 +2100,11 @@ fn parse_let_async_statement_from_pair(
                 }]);
             }
             Rule::with_io_command => {
-                // LET $var: TYPE = WITH_IO [flags] ... — two shapes share this rule
+                // LET $var: TYPE = WITH_IO [flags] ... : two shapes share this rule
                 // (`let_async_statement` precedes `let_capture_statement` in
                 // the grammar, so every WITH_IO-led LET lands here):
                 // - wrapping ASYNC binds a pipe-wired background task. The
-                //   bindings apply inside the task thread — the same shape as
+                //   bindings apply inside the task thread : the same shape as
                 //   a braced body holding one WITH_IO step, which the
                 //   AssignAsync runtime path supports.
                 // - wrapping a synchronous command captures its stdout into
@@ -2840,7 +2840,7 @@ fn parse_argument(ctx: &SpanContext, lctx: &LowerCtx, pair: Pair<Rule>) -> Parse
         if group.is_empty() {
             continue;
         }
-        // Single expression — preserve as Arg::Expr for runtime evaluation
+        // Single expression : preserve as Arg::Expr for runtime evaluation
         if group.len() == 1 && group[0].as_rule() == Rule::expr {
             args.push(Arg::Expr(parse_expr(
                 ctx,
@@ -2862,7 +2862,7 @@ fn parse_argument(ctx: &SpanContext, lctx: &LowerCtx, pair: Pair<Rule>) -> Parse
 fn parse_quoted_string(pair: Pair<Rule>) -> ParseResult<String> {
     let s = pair.as_str();
     let content = &s[1..s.len() - 1];
-    // Pass contents verbatim — all escape processing deferred to runtime expand_string
+    // Pass contents verbatim : all escape processing deferred to runtime expand_string
     Ok(content.to_string())
 }
 

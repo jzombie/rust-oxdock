@@ -24,19 +24,19 @@ pub enum RawToken<'a> {
         line_no: usize,
         span: SpanContext<'a>,
     },
-    /// A structural command (WITH_IO, FOR, IF, LET, $var mutation) — parsed by the grammar.
+    /// A structural command (WITH_IO, FOR, IF, LET, $var mutation) : parsed by the grammar.
     Command {
         pair: Pair<'a, Rule>,
         line_no: usize,
         span: SpanContext<'a>,
     },
-    /// A generic instruction — command name + raw args, lowered by a function.
+    /// A generic instruction : command name + raw args, lowered by a function.
     Instruction {
         pair: Pair<'a, Rule>,
         line_no: usize,
         span: SpanContext<'a>,
     },
-    /// A `RUN ["exe", "arg", ...]` exec-form statement — carries a structured
+    /// A `RUN ["exe", "arg", ...]` exec-form statement : carries a structured
     /// `list_literal` pair, lowered without shell stringification.
     RunExec {
         pair: Pair<'a, Rule>,
@@ -134,7 +134,7 @@ pub fn tokenize(input: &str) -> Result<Vec<RawToken<'_>>, ParseError> {
             }
             Rule::block_start => tokens.push(RawToken::BlockStart { line_no, span }),
             Rule::block_end => tokens.push(RawToken::BlockEnd { line_no, span }),
-            // Structural commands — parsed by grammar-specific rules
+            // Structural commands : parsed by grammar-specific rules
             Rule::with_io_command
             | Rule::inherit_env_command
             | Rule::import_statement
@@ -160,13 +160,13 @@ pub fn tokenize(input: &str) -> Result<Vec<RawToken<'_>>, ParseError> {
                 line_no,
                 span,
             }),
-            // Generic instructions — lowered by a function
+            // Generic instructions : lowered by a function
             Rule::instruction | Rule::instruction_inner => tokens.push(RawToken::Instruction {
                 pair,
                 line_no,
                 span,
             }),
-            // RUN exec form — structured list lowering, never shell text
+            // RUN exec form : structured list lowering, never shell text
             Rule::run_exec_statement | Rule::run_exec_inner => tokens.push(RawToken::RunExec {
                 pair,
                 line_no,

@@ -282,7 +282,7 @@ fn walk(
         // A RUN step consumes the rest of its source line as shell text
         // (`RUN echo && ls` stays one step), but any token opening on a later
         // line starts a new statement: without this, `RUN echo hi` followed by
-        // `WRITE x` — or by a punctuation-led statement like `$count = 1` —
+        // `WRITE x` : or by a punctuation-led statement like `$count = 1` :
         // would glue into a single shell command. Punctuation must participate
         // too: `$`/`#` would otherwise advance `last_span_end` and blind the
         // check for the tokens that follow them on the same line.
@@ -570,7 +570,7 @@ fn walk(
                 let expects_expr = trimmed_end.ends_with('=')
                     || trimmed_end.split_whitespace().last() == Some("IN");
                 let mut should_finalize = false;
-                // ELSE always appends to current line — grammar handles } \n ELSE via blank*
+                // ELSE always appends to current line : grammar handles } \n ELSE via blank*
                 // IF after ELSE stays on same line (ELSE IF clause)
                 if ident_text == "ELSE" || (ident_text == "IF" && trimmed.ends_with("ELSE")) {
                     should_finalize = false;
@@ -688,7 +688,7 @@ pub fn script_from_braced_tokens(ts: &TokenStream2) -> Result<String> {
 }
 
 /// Parse a braced token stream directly into DSL steps.
-/// Requires a lowering function — callers must provide it.
+/// Requires a lowering function : callers must provide it.
 pub fn parse_braced_tokens(
     ts: &TokenStream2,
     lower: impl Fn(&str, Vec<crate::Arg>) -> crate::ParseResult<crate::StepKind>,

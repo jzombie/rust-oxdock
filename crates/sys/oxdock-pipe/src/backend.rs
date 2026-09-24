@@ -395,7 +395,7 @@ pub fn script_backend(handle: &crate::slot::PipeHandle) -> Option<Arc<PipeInner>
 /// Non-destructive snapshot of a script handle's buffered bytes for
 /// pipe-content assertions. Never waits and never creates: unbound
 /// handles bail (nothing was ever bound), and OS pairs bail (kernel
-/// bytes are invisible — drain the stream instead).
+/// bytes are invisible : drain the stream instead).
 pub fn peek(handle: &crate::slot::PipeHandle) -> anyhow::Result<Vec<u8>> {
     use crate::slot::Slot;
     let backend = {

@@ -63,12 +63,12 @@ struct PumpHandles {
 /// is FIFO, so an [`UpMsg::Eof`] always arrives after every byte sent
 /// before it: return without waiting for the sender to drop (it stays
 /// alive until the channel itself closes, which this return helps cause
-/// via the supervisor's force-close — waiting for it would deadlock).
+/// via the supervisor's force-close : waiting for it would deadlock).
 /// The supervisor force-closes the output pipe right after this worker
 /// is reaped, so downstream observes EOF promptly.
 /// Also ends when the stdin direction finishes first (`peer_done`): the
 /// response producers are gone, so anything still arriving has nowhere
-/// to go — this is what releases a pump whose inner leg (a `RUN`
+/// to go : this is what releases a pump whose inner leg (a `RUN`
 /// subprocess, an exited remote) died while the outer client idles.
 /// Queued bytes still flush first; only the wait ends.
 fn pump_out(

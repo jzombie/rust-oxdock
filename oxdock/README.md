@@ -2,13 +2,15 @@
 
 **Dockerfile inspired build DSL for Rust**
 
-OxDock is a Dockerfile inspired build DSL for Rust. Embed scripts at compile time with macros, or run the same scripts as standalone CLI pipelines. Native. No containers. No daemon. No VM. All commands run identically on every OS, except RUN.
+OxDock is a Dockerfile-inspired build DSL for Rust: scripted pipelines with hermetic workspaces, typed variables, and pipes instead of snowflake shell. Embed scripts at compile time with macros, or run the same scripts as standalone CLI pipelines. Native. No containers. No daemon. No VM.
 
-Supports platform gating, async tasks, and piped workflows for custom pipelines.
+One script runs on Linux, macOS, and Windows, with platform gating, async tasks, and piped workflows for custom pipelines. Only RUN touches the host shell.
 
-[Documentation](https://docs.rs/oxdock/0.18.0-alpha/oxdock/)
+Plain Rust functions become script functions with one attribute: `#[oxdock_func]` exports them into namespaced modules scripts call as `DEMO::NAME(...)`. See [Extending OxDock from Rust](#extending-oxdock-from-rust).
 
-Add it to your Rust build with `cargo add oxdock@0.18.0-alpha`, or install the standalone runner with `cargo install oxdock@0.18.0-alpha`.
+[Documentation](https://docs.rs/oxdock/0.18.1-alpha/oxdock/)
+
+Add it to your Rust build with `cargo add oxdock@0.18.1-alpha`, or install the standalone runner with `cargo install oxdock@0.18.1-alpha`.
 
 Run a script:
 
@@ -96,8 +98,8 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     LET $a: STRING = READ dist/alpha.txt
     LET $b: STRING = READ dist/beta.txt
     LET $p: STRING = READ dist/picked.txt
-    ASSERT_EQ $a "alpha OxDock 0.18.0-alpha"
-    ASSERT_EQ $b "beta OxDock 0.18.0-alpha"
+    ASSERT_EQ $a "alpha OxDock 0.18.1-alpha"
+    ASSERT_EQ $b "beta OxDock 0.18.1-alpha"
     ASSERT_EQ $p "alpha"
 };
 
@@ -109,7 +111,7 @@ let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolve
 let out = root.join("dist/alpha.txt").expect("out path");
 assert_eq!(
     resolver.read_to_string(&out).expect("read out"),
-    "alpha OxDock 0.18.0-alpha"
+    "alpha OxDock 0.18.1-alpha"
 );
 ```
 
@@ -269,6 +271,8 @@ ASSERT_EQ $line "hello"
 State mutations stay where the script puts them. Entering a braced block or a function call snapshots variables and settings, and exiting restores all of them, so nothing leaks outward. Background tasks fork the same way, so concurrent workers cannot observe each other's half finished mutations. Only pipes and filesystem effects cross these boundaries, by design.
 
 ```oxdock
+# Calls snapshot caller state: the parameter shadows without clobbering.
+LET $v: STRING = "outer"
 FUNC SHADOW($v: STRING) {
     LET $inner: STRING = "inner"
     RETURN $v
@@ -276,11 +280,22 @@ FUNC SHADOW($v: STRING) {
 
 LET $out: STRING = SHADOW("param")
 ASSERT_EQ $out "param"
+ASSERT_EQ $v "outer"
+
+# Background tasks fork the same way: worker mutations never escape.
+LET $w: STRING = "outer"
+LET $t: HANDLE = ASYNC {
+    $w = "inner"
+    ECHO "task-ran"
+}
+AWAIT $t
+ASSERT_EQ $w "outer"
+ASSERT_CONTAINS stdout "task-ran"
 ```
 
 ### Sandboxing
 
-Every path resolves inside a guarded workspace root, and escapes are rejected before any filesystem call. Scripts start with an empty process environment and opt into host variables explicitly.
+Every path resolves inside a guarded workspace root, and escapes are rejected before any filesystem call. Scripts start with only builtin keys (Cargo feature/cfg entries, `WORKSPACE_GIT_COMMIT`) and opt into host variables explicitly.
 
 ```oxdock expect_error:"escapes allowed root"
 WRITE ../escape.txt "nope"
@@ -309,11 +324,11 @@ fn main() {}
 
 ### Stream bytes between steps
 
-`WITH_IO` routes stdout into script pipes declared with `LET $p: PIPE` and back into stdin, so steps form custom pipelines. Pipes hold bytes in memory and spill to a temp file above 8 MiB. Wrapping a single RUN in ASYNC promotes the pipe to a zero copy OS kernel pipe instead; the consumer must then run while the producer is alive.
+`WITH_IO` routes a step's stdout into a script pipe and back into another step's stdin. Run the producer under `ASYNC` so both ends stay live while bytes flow.
 
 ```oxdock
 LET $msg: PIPE
-WITH_IO [stdout=$msg] ECHO piped-bytes
+WITH_IO [stdout=$msg] ASYNC ECHO piped-bytes
 WITH_IO [stdin=$msg] WRITE piped.txt
 READ piped.txt
 ASSERT_CONTAINS stdout "piped-bytes"
@@ -378,7 +393,7 @@ This crate is the front door. It re-exports the CLI runner (enabled by
 default) and the build macros (always available), so most users only
 ever depend on `oxdock`.
 
-One language for the whole build: farm steps out to npm, bundlers, or code generators and pull their artifacts back under cargo's control. Pipe bytes between steps without buffering whole outputs, fan work out with `ASYNC`, or skip embedding entirely and run the same scripts as standalone CLI processes.
+One language for the whole build: farm steps out to npm, bundlers, or code generators and pull their artifacts back under cargo's control. Pipe bytes between steps (buffered in memory to 8 MiB, then spilled to a temp file), fan work out with `ASYNC`, or skip embedding entirely and run the same scripts as standalone CLI processes.
 
 # DSL Reference
 
@@ -433,6 +448,7 @@ ASSERT_EQ $t "absent"
 
 LET $n: INT = INT("41") + 1
 ASSERT_EQ $n 42
+ASSERT_EQ stdout ""
 ```
 
 ### Statements and semicolons
@@ -458,8 +474,8 @@ ASSERT_CONTAINS stdout "cargo"
 Three comment styles are supported: `//` line comments, nestable `/* ... */` block comments, and `#` comments. A `#` comment occupies a whole line (optionally indented) and may also trail values inside multi-line `()`, `[]`, and `{}` brackets; inside a command payload a `#` is ordinary text. Similarly, `//` ends a `RUN` argument list but survives inside quoted strings:
 
 ```oxdock
-// slash comment at end of line
-# hash comment occupies the whole line
+// Slash comment at end of line.
+# Hash comment occupies the whole line.
 
 /* block comments
    /* nest */
@@ -471,8 +487,12 @@ ASSERT_CONTAINS stdout "visible-after-comments"
 ```oxdock
 ECHO hash-mid-line # stays-in-payload
 ASSERT_CONTAINS stdout "hash-mid-line # stays-in-payload"
+
 RUN echo run-args-stop-at-slashes // removed-as-comment
 ASSERT_CONTAINS stdout "run-args-stop-at-slashes"
+
+RUN echo "quoted // kept"
+ASSERT_CONTAINS stdout "quoted // kept"
 ```
 
 Comment markers inside quoted strings are always preserved.
@@ -502,22 +522,35 @@ ASSERT_CONTAINS stdout "double quotes"
 // \" embeds a quote; the backslash itself is consumed.
 ECHO "escaped \" quote"
 ASSERT_CONTAINS stdout 'escaped " quote'
+
+// Quoted separators stay literal: no instruction splits here.
+ECHO 'semi;colon'
+ASSERT_CONTAINS stdout "semi;colon"
 ```
 
 ## Templates
 
-`{{ env:KEY }}` interpolates script environment values into arguments at execution time. Values come from the script environment (`ENV`, inherited keys) — there is no fallback to host variables in command context, and unknown keys expand to an empty string. The unprefixed form `{{ KEY }}` is not a valid template and also expands to empty, so always use the `env:`-prefixed spelling:
+`{{ env:KEY }}` interpolates script environment values into arguments at execution time. Values come from the script environment (`ENV`, inherited keys): there is no fallback to host variables in command context, and unknown keys expand to an empty string. The unprefixed form `{{ KEY }}` resolves a DSL variable of that name instead, else expands to empty; it never reads the environment, so always use the `env:`-prefixed spelling for environment values:
 
 ```oxdock
 ENV USER=OxDock
 
-# env:-prefixed form: interpolates from the SCRIPT environment.
+# The env:-prefixed form interpolates from the script environment.
 ECHO "Hello {{ env:USER }}!"
 ASSERT_CONTAINS stdout "Hello OxDock!"
 
-# Bare braces are not a template: they expand to empty.
+# Unprefixed names resolve DSL variables instead: $WHO exists, so this expands.
+LET $WHO: STRING = "Ada"
+ECHO "Hi {{ WHO }}!"
+ASSERT_CONTAINS stdout "Hi Ada!"
+
+# With no such variable the bare name expands to empty.
 ECHO "Hello {{ USER }}!"
 ASSERT_CONTAINS stdout "Hello !"
+
+# Unknown keys expand to empty with no host fallback.
+ECHO "a{{ env:OXDOCK_DOC_NO_SUCH_KEY }}b"
+ASSERT_CONTAINS stdout "ab"
 ```
 
 ## Guards and scoped blocks
@@ -527,14 +560,14 @@ A guard is a bracketed expression that gates the instruction or block that follo
 - `env:KEY` passes when variable `KEY` exists and is non-empty; `eq(env:KEY, value)` and `ne(env:KEY, value)` compare values.
 - Bare platform tags pass based on the host: `linux`, `macos` (alias `mac`), `windows`, `unix`. Tags are case-insensitive.
 - A comma-separated list means **AND**: `[env:A, linux]`.
-- Disjunction is expressed as a call — `any(expr, expr, ...)` with at least two branches — not an infix operator.
-- Conjunction is expressed as a call — `all(expr, expr, ...)` — or implicitly via comma separation.
+- Disjunction is expressed as a call: `any(expr, expr, ...)` with at least two branches, not an infix operator.
+- Conjunction is expressed as a call (`all(expr, expr, ...)`) or implicitly via comma separation.
 - Any predicate may be negated with `not(...)`: `[not(env:SKIP)]`.
 - Parentheses group expressions: `[any(env:A, linux), mac]`.
 
 Guards attach to the next instruction. Several guard lines in a row chain onto the same target, and a guard immediately followed by `{` opens a guarded block whose guard applies to every enclosed instruction.
 
-Guard evaluation checks the script environment first and falls back to the process environment, so guards interact naturally with `INHERIT_ENV` and `ENV`.
+Guard evaluation checks the script environment only: `ENV` entries, `INHERIT_ENV` opt-ins, and builtin keys. Host variables stay invisible unless inherited, so guards interact naturally with `INHERIT_ENV` and `ENV`.
 
 ### Environment guards
 
@@ -590,7 +623,7 @@ ASSERT_CONTAINS stdout "negation-passes-for-undefined"
 [any(env:OXDOCK_DOC_FEATURE_A, env:OXDOCK_DOC_FEATURE_B)] ECHO or-matched-a-branch
 ASSERT_CONTAINS stdout "or-matched-a-branch"
 
-// Comma composes with AND: (A or linux) AND A — true here on every OS.
+// Comma composes with AND: (A or linux) AND A: true here on every OS.
 [any(env:OXDOCK_DOC_FEATURE_A, linux), env:OXDOCK_DOC_FEATURE_A] ECHO composed-and-or-guard
 ASSERT_CONTAINS stdout "composed-and-or-guard"
 ```
@@ -600,6 +633,8 @@ ASSERT_CONTAINS stdout "composed-and-or-guard"
 Bracket expressions may span lines. Chained guard lines apply conjunctively to the next instruction; here neither variable is defined, so the gated instruction is skipped:
 
 ```oxdock
+IMPORT [STD]
+
 // Brackets may span lines; chained lines AND together and gate
 // the next command.
 [
@@ -611,14 +646,13 @@ Bracket expressions may span lines. Chained guard lines apply conjunctively to t
 WRITE chained.txt applied
 
 // The artifact was never created.
-IMPORT [STD]
 LET $t: STRING = PATH_TYPE("chained.txt")
 ASSERT_EQ $t "absent"
 ```
 
 ### Scoped blocks
 
-Braced blocks scope everything: `LET` variables, `ENV` values, `WORKDIR`, and `WORKSPACE` all revert when the block exits. Files created inside a block persist on disk, and pipes registered with `WITH_IO` stay open — those are the only things that cross a scope boundary. (A bare `{ ... }` needs an always-true guard: `[bool:true]`. Single commands, including single `WITH_IO` lines like `READ_LINE`, never open a scope.)
+Braced blocks scope everything: `LET` variables, `ENV` values, `WORKDIR`, and `WORKSPACE` all revert when the block exits. Files created inside a block persist on disk, and pipes registered with `WITH_IO` stay open. Those are the only things that cross a scope boundary. (A bare `{ ... }` needs an always-true guard: `[bool:true]`. Single commands, including single `WITH_IO` lines like `READ_LINE`, never open a scope.)
 
 ```oxdock
 LET $a: STRING = "some_value"
@@ -635,7 +669,7 @@ WORKDIR scoped_area
 }
 
 // $a is back to "some_value", MODE is back to "production",
-// and cwd is back at scoped_area — but files persist.
+// and cwd is back at scoped_area. Files persist.
 LET $in_body: STRING = READ inner.txt
 ASSERT_EQ $in_body "inner_value-staging"
 WRITE outer.txt "{{ $a }}-{{ env:MODE }}"
@@ -643,11 +677,23 @@ LET $out_body: STRING = READ outer.txt
 ASSERT_EQ $out_body "some_value-production"
 ```
 
+Pipes cross scope boundaries the same way files do: a handle bound
+inside stays usable after the block exits.
+
+```oxdock
+LET $p: PIPE
+[bool:true] {
+    WITH_IO [stdout=$p] ECHO "piped-out"
+}
+WITH_IO [stdin=$p] READ_LINE $line
+ASSERT_EQ $line "piped-out"
+```
+
 `IF`/`ELSE` branches, `FOR` loop bodies, `TIMEOUT` bodies, `ASYNC` bodies, and `WITH_IO [..] { ... }` blocks are all scopes under the same rule: only files and pipes leak out.
 
 ### EXIT in nested blocks
 
-`EXIT <code>` stops the pipeline immediately with an `EXIT requested with code <code>` error — steps after it never run, at any nesting depth. Unwinding still happens on the way out: every enclosing block reverts its `LET`/`ENV`/`WORKDIR`/`WORKSPACE` state before the error propagates, anonymous background tasks are killed synchronously, and files written before the `EXIT` persist. An `EXIT` inside `TIMEOUT` passes through unwrapped (never relabeled as a deadline error); an `EXIT` inside an `ASYNC` task ends that task with an error, which the parent sees at `AWAIT` or end-of-pipeline reaping.
+`EXIT <code>` stops the pipeline immediately with an `EXIT requested with code <code>` error. Steps after it never run, at any nesting depth. Files written before the `EXIT` persist, which the fence below asserts; state unwinding and task teardown follow the same scope rules as everywhere else.
 
 ```oxdock expect_error:"EXIT requested with code 3"
 WRITE before.txt "persisted"
@@ -662,7 +708,7 @@ ASSERT_EQ $b "persisted"
 
 ## Deadlines with TIMEOUT
 
-`TIMEOUT <duration> <command>` bounds a single step, `TIMEOUT <duration> { ... }` bounds a block, and `TIMEOUT <duration> AWAIT $task` bounds a task join. Durations accept `ms`, `s`, `m`, and `h` suffixes (a bare number means seconds, e.g. `TIMEOUT 30 ...`). A step that overruns its deadline is cancelled — a blocking foreground process is killed — and the pipeline fails with a `TIMEOUT after <duration>` error. `SLEEP <duration>` parks the step without spawning a shell, which makes it ideal for testing deadlines portably (a `SLEEP` inside an expired `TIMEOUT` is interrupted instead of running out the clock).
+`TIMEOUT <duration> <command>` bounds a single step, `TIMEOUT <duration> { ... }` bounds a block, and `TIMEOUT <duration> AWAIT $task` bounds a task join. Durations accept `ms`, `s`, `m`, and `h` suffixes (a bare number means seconds, e.g. `TIMEOUT 30 ...`). A step that overruns its deadline is cancelled. A blocking foreground process is killed, and the pipeline fails with a `TIMEOUT after <duration>` error. `SLEEP <duration>` parks the step without spawning a shell, which makes it ideal for testing deadlines portably (a `SLEEP` inside an expired `TIMEOUT` is interrupted instead of running out the clock).
 
 ```oxdock
 // Inline form bounds a single command.
@@ -687,7 +733,7 @@ LET $quick: HANDLE = ASYNC {
 TIMEOUT 30s AWAIT $quick
 ```
 
-`ASYNC` wraps any command or block — including `TIMEOUT`, `CANCEL`, `SLEEP`, and nested `ASYNC` — in either nesting order with the same deadline semantics. `LET $task: HANDLE = ASYNC TIMEOUT 30s RUN "build"` enforces the deadline inside the background thread (a later `AWAIT $task` surfaces the `TIMEOUT` error), while `TIMEOUT 30s AWAIT $task` preempts a hung task from the awaiting side:
+`ASYNC` wraps any command or block (including `TIMEOUT`, `CANCEL`, `SLEEP`, and nested `ASYNC`) in either nesting order with order-dependent deadline semantics: `LET $task: HANDLE = ASYNC TIMEOUT 30s RUN "build"` enforces the deadline inside the background thread (a later `AWAIT $task` surfaces the `TIMEOUT` error), while `TIMEOUT 30s AWAIT $task` preempts a hung task from the awaiting side:
 
 ```oxdock
 // ASYNC wraps TIMEOUT: the deadline fires inside the background thread.
@@ -720,7 +766,7 @@ so the documented behavior is guaranteed to match.
 Scripts no longer inherit the caller's environment wholesale. Host variables stay private unless you opt in explicitly.
 
 - Add `INHERIT_ENV [FOO, BAR, BAZ]` at the very top of the script to copy those keys from the process environment before any other command runs.
-- The directive must be top-level—no guards, no surrounding blocks, and no repeats. Trying to nest or guard it triggers a parser error so scripts stay deterministic.
+- The directive must be top-level: no guards, no surrounding blocks, and no repeats. Trying to nest or guard it triggers a parser error so scripts stay deterministic.
 - Subsequent `ENV` commands can override inherited values, similar to how Docker's `ENV` overrides `--env` flags.
 - Test harnesses and embedders can supply values programmatically; the [environment-guards example](#environment-guards) injects `DEPLOY_TARGET` through the docs-conformance runner rather than the real process environment.
 
@@ -736,9 +782,9 @@ Keeping inheritance selective avoids leaking secrets by default while still allo
 
 - **Absolute paths:** Use platform-appropriate absolute paths (e.g., `/usr/bin` on Unix-like systems, `C:\path\to` on Windows). OxDock will use the host OS path semantics when resolving absolute paths.
 
-- **Symlinks and Windows:** Creating symlinks on Windows may require elevated permissions on some older OS versions; where symlinks are not available the CLI falls back to copying directory contents so scripts remain functional across platforms.
+- **Symlinks and Windows:** Creating symlinks on Windows may require elevated permissions on some older OS versions; without permission the `SYMLINK` step fails with an error instead of falling back.
 
-- **Globbing & shell expansion:** OxDock does not implicitly perform shell globbing or shell-side expansion for file arguments — when you need shell semantics use `RUN` with the platform shell, or add explicit DSL commands that accept wildcards if you want portable behavior.
+- **Globbing & shell expansion:** OxDock does not implicitly perform shell globbing or shell-side expansion for file arguments. When you need shell semantics use `RUN` with the platform shell, or add explicit DSL commands that accept wildcards if you want portable behavior.
 
 ## Workspaces & Filesystem
 
@@ -748,7 +794,7 @@ Keeping inheritance selective avoids leaking secrets by default while still allo
 
 - **Four workspace roots:** `WORKSPACE SNAPSHOT` (the default ephemeral temp location), `WORKSPACE LOCAL` (the local directory), `WORKSPACE CACHE` (a persistent per-project cache directory shared across runs), and `WORKSPACE SYSTEM` (full filesystem access, not hermetic). `WORKSPACE` selection reverts at scope exit like `WORKDIR`.
 
-- **Persistent cache:** `WORKSPACE CACHE` stores artifacts under the OS per-user cache, namespaced by application identity `<app>`, with a `workspace` group segment underneath. Concretely: macOS `~/Library/Caches/com.oxdock.<app>/workspace`, Linux `$XDG_CACHE_HOME/<app>/workspace` (or `~/.cache/<app>/workspace`, lowercased), Windows `%LOCALAPPDATA%\oxdock\<app>\cache\workspace`. Identity resolves as explicit builder argument, `OXDOCK_CACHE_APP`, runtime `CARGO_PKG_NAME`, running binary name, then `"oxdock"`; `OXDOCK_CACHE_DIR` pins an exact directory instead (OS flavor only), and when no home directory is available the cache falls back to a temp dir (`oxdock-cache-<app>`). `WORKSPACE CACHE --local` keeps the cache in `<project>/.cache/workspace` instead, unconditionally. The directory is created on first use, survives restarts, and is never evicted by default.
+- **Persistent cache:** `WORKSPACE CACHE` stores artifacts under the OS per-user cache, namespaced by application identity `<app>`, with a `workspace` group segment underneath. Concretely: macOS `~/Library/Caches/com.oxdock.<app>/workspace`, Linux `$XDG_CACHE_HOME/<app>/workspace` (or `~/.cache/<app>/workspace`), Windows `%LOCALAPPDATA%\oxdock\<app>\cache\workspace`. Identity resolves as explicit builder argument, `OXDOCK_CACHE_APP`, runtime `CARGO_PKG_NAME`, running binary name, then `"oxdock"`; `OXDOCK_CACHE_DIR` pins an exact directory instead (OS flavor only), and when no home directory is available the cache falls back to a temp dir (`oxdock-cache-<app>`). `WORKSPACE CACHE --local` keeps the cache in `<project>/.cache/workspace` instead, unconditionally. The directory is created on first use, survives restarts, and is never evicted by default.
 
 - **Filesystem gating via `oxdock-fs`:** all filesystem operations in the runtime are routed through the crate internal `oxdock-fs` abstraction. That module centralizes path resolution, canonicalization and access checks so reads and writes can be validated against the allowed workspace root and build context. `WORKSPACE SYSTEM` intentionally bypasses these checks; scripts using it are not hermetic.
 
@@ -761,7 +807,7 @@ Keeping inheritance selective avoids leaking secrets by default while still allo
 Install the binary from the registry:
 
 ```sh
-cargo install oxdock@0.18.0-alpha
+cargo install oxdock@0.18.1-alpha
 ```
 
 Run a script file:
@@ -1100,7 +1146,7 @@ Or pin the version in `Cargo.toml`:
 
 ```toml
 [dependencies]
-oxdock = { version = "0.18.0-alpha", default-features = false }
+oxdock = { version = "0.18.1-alpha", default-features = false }
 ```
 
 ## Glossary
@@ -1112,7 +1158,7 @@ oxdock = { version = "0.18.0-alpha", default-features = false }
 - **Inline**: Payload bytes carried inside the word itself, with zero allocation. Available to `Copy` scalars that fit in 64 bits.
 - **NaN boxing**: A technique that packs values into 64 bits by reusing NaN float patterns. Denser than 16 byte words at the cost of pointer masking and constrained host values.
 - **Payload**: The 64 bit data half of a word: either inline bytes or a pointer to one owned box.
-- **Plugin**: A host extension module (NET, SSH) loaded with IMPORT, bringing extra functions into script scope.
+- **Plugin**: A host extension module ([NET](https://github.com/jzombie/rust-oxdock/blob/main/crates/plugins/oxdock-net-plugin/README.md), [SSH](https://github.com/jzombie/rust-oxdock/blob/main/crates/plugins/oxdock-ssh-plugin/README.md)) loaded with IMPORT, bringing extra functions into script scope.
 - **Provenance**: The recorded origin of a pointer, which Rust uses to judge whether a memory access is valid. Round tripping through the same box type preserves it.
 - **RPN**: Reverse Polish Notation: arithmetic compiled to a flat stack program instead of tree walking.
 - **Vtable**: The operations half of a descriptor: function pointers that clone, drop, compare, and render values of that type.

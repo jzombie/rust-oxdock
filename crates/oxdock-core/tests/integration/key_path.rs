@@ -571,7 +571,7 @@ fn missing_key_after_successful_traversal_does_not_dump() {
     let root = temp.as_guarded_path().clone();
     write_file(&root, "t.toml", b"[package]\nname = \"test\"\n");
 
-    // $d.package works, but $d.package.nope fails — should error
+    // $d.package works, but $d.package.nope fails : should error
     let err = run_script(
         &root,
         indoc! {r#"
@@ -592,7 +592,7 @@ fn out_of_bounds_index_in_string_interpolation_does_not_dump_list() {
     let root = temp.as_guarded_path().clone();
     write_file(&root, "t.toml", b"items = [\"a\", \"b\"]\n");
 
-    // $d.items.0 works, but $d.items.99 fails — should error
+    // $d.items.0 works, but $d.items.99 fails : should error
     let err = run_script(
         &root,
         indoc! {r#"
@@ -613,7 +613,7 @@ fn non_numeric_index_in_string_interpolation_does_not_dump() {
     let root = temp.as_guarded_path().clone();
     write_file(&root, "t.toml", b"items = [\"a\"]\n");
 
-    // $d.items works, but $d.items.foo is not a valid index — should error
+    // $d.items works, but $d.items.foo is not a valid index : should error
     let err = run_script(
         &root,
         indoc! {r#"
@@ -1040,7 +1040,7 @@ fn nested_for_loops_inner_shadows_outer() {
     "#},
     )
     .unwrap();
-    // Inner loop should shadow outer — files named i1.txt, i2.txt
+    // Inner loop should shadow outer : files named i1.txt, i2.txt
     assert_eq!(read_trimmed(&root, "i1.txt"), "i1");
     assert_eq!(read_trimmed(&root, "i2.txt"), "i2");
 }

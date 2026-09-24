@@ -331,8 +331,8 @@ pub(super) fn sync_iteration_assert_needles<P: ProcessManager>(
 /// The fields stay crate-private so execution invariants hold for hosts.
 ///
 /// Output contract (load-bearing for `LET`-capture, pipes, and stream assertions):
-/// handlers must emit stdout/stderr ONLY through `out`/`err` — via
-/// `write_stdout` or `StreamHandle::to_stdout`/`to_stderr` — and never write
+/// handlers must emit stdout/stderr ONLY through `out`/`err` : via
+/// `write_stdout` or `StreamHandle::to_stdout`/`to_stderr` : and never write
 /// to host stdout directly. The step runner swaps these handles per context:
 /// `LET $x: STRING = <command>` installs a spillable capture sink, `WITH_IO`
 /// installs named-pipe endpoints, and the root installs the assertion tee. A handler that bypasses its context handles silently breaks all three.
@@ -391,7 +391,7 @@ impl<'a, P: ProcessManager> StepCtx<'a, P> {
     }
 
     /// Borrow the read half of a `PIPE` value for byte streaming (see
-    /// [`PipeStream`](super::PipeStream)). Unbound handles materialize as script pipes —
+    /// [`PipeStream`](super::PipeStream)). Unbound handles materialize as script pipes :
     /// hosts cannot spawn `RUN`, so script is the only sensible kind,
     /// and a later `RUN` binding adapts through the shared path. DSL,
     /// bridge, and host bindings on an OS-materialized handle resolve
@@ -449,7 +449,7 @@ impl<'a, P: ProcessManager> StepCtx<'a, P> {
     /// observe EOF regardless of live writers or keeper pins. Unbound
     /// handles bail (closing a never-bound pipe is a caller bug), and
     /// OS-materialized handles bail (kernel pairs close by dropping their
-    /// taken halves — drop the value instead).
+    /// taken halves : drop the value instead).
     pub fn close_pipe(&self, value: &Value) -> Result<()> {
         let Some(handle) = value.as_pipe_handle() else {
             anyhow::bail!(

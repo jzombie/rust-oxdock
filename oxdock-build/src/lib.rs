@@ -44,6 +44,8 @@ fn feature_env_lines() -> Vec<String> {
 }
 
 /// Emit `cargo:rustc-env=...` directives for cfg keys from `rustc --print cfg`.
+/// A rustc that runs but exits nonzero contributes nothing; a rustc that
+/// cannot spawn is an error.
 pub fn emit_cfg_envs() -> Result<()> {
     let rustc = std::env::var(oxdock_env::RUSTC).unwrap_or_else(|_| "rustc".to_string());
     for line in collect_cfg_lines(&rustc)? {

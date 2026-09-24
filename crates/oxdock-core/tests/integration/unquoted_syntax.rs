@@ -1,4 +1,4 @@
-//! Integration tests for unquoted syntax — Docker-style bare paths.
+//! Integration tests for unquoted syntax : Docker-style bare paths.
 //!
 //! Every test exercises unquoted paths as the primary argument syntax.
 //! Quoted strings are reserved for content containing spaces or templates.
@@ -29,7 +29,7 @@ fn workdir_unquoted_path() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
     run_script(&root, "WORKDIR /app").unwrap();
-    // Just verify no error — WORKDIR succeeded
+    // Just verify no error : WORKDIR succeeded
 }
 
 #[test]
@@ -154,7 +154,7 @@ fn path_type_unquoted_path_reports_absent() {
 fn write_path_with_dollar_sign() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
-    // $1 in path is literal — not a variable
+    // $1 in path is literal : not a variable
     run_script(&root, "WRITE dist/file_$1.txt 'data'").unwrap();
     assert_eq!(read_trimmed(&root, "dist/file_$1.txt"), "data");
 }
@@ -208,7 +208,7 @@ fn workdir_unquoted_template() {
     "#},
     )
     .unwrap();
-    // WORKDIR succeeded — no error
+    // WORKDIR succeeded : no error
 }
 
 #[test]

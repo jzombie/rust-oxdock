@@ -3,12 +3,14 @@
 //! typed module consumed by `oxdock_macros::oxdock_embed!`.
 //!
 //! Contract:
-//! - IDE/miri skip predicates write a placeholder module (typed surface,
-//!   `get() -> None`) and emit NO rerun directives, restoring cargo's default
-//!   conservative invalidation.
+//! - IDE/miri skip predicates emit NO rerun directives, restoring cargo's
+//!   default conservative invalidation. Embed additionally writes a
+//!   placeholder module (typed surface, `get() -> None`) so symbol
+//!   resolution stays intact; prepare writes nothing.
 //! - A successful build writes the real module and emits
 //!   `cargo:rerun-if-changed` for build.rs, the DSL file (when file-based),
-//!   every statically discoverable input, and each `extra_inputs` entry.
+//!   every statically discoverable input, and each `extra_inputs` entry,
+//!   plus `cargo:rerun-if-env-changed` for referenced env keys.
 //! - Any failure prints a decorated error (full chain + filesystem snapshot)
 //!   to stderr so cargo surfaces it before compiling the consumer.
 
@@ -499,8 +501,8 @@ fn placeholder_module_source(name: &str) -> String {
 /// Digest inputs: the raw script text, the out-dir key, every statically
 /// discoverable input file (contents; directories walked sorted; missing
 /// paths recorded as markers), and every referenced environment variable
-/// resolved to `KEY=VALUE` (or `KEY=<unset>`) so environment drift — including
-/// `[env:KEY]` guard gating — invalidates the cache.
+/// resolved to `KEY=VALUE` (or `KEY=<unset>`) so environment drift : including
+/// `[env:KEY]` guard gating : invalidates the cache.
 ///
 /// `resolver` must be manifest-rooted (e.g. `PathResolver::from_manifest_env`);
 /// `envs` should be the builtin env map (`BuiltinEnv::collect(...).into_envs()`),

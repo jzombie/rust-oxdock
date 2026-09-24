@@ -186,7 +186,7 @@ pub(crate) fn render_body() -> Result<String> {
     let mut out = String::new();
 
     // Structural constructs (parsed by PEG rules, documented via the
-    // structural registry in oxdock-parser — never hardcoded here).
+    // structural registry in oxdock-parser : never hardcoded here).
     let structural = all_structural_metadata();
     let structural_names: HashSet<&str> = structural.iter().map(|meta| meta.name).collect();
     for meta in &structural {
@@ -325,7 +325,7 @@ mod tests {
 
     #[test]
     fn body_has_structural_constructs() {
-        // Derived from the registry — not a hardcoded list — so adding a
+        // Derived from the registry : not a hardcoded list : so adding a
         // structural entry automatically extends this check.
         let body = render_body().expect("render");
         for meta in all_structural_metadata() {

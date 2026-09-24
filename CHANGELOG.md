@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [0.18.1-alpha] - 2026-09-24
+
+## Changed
+
+- Improve docs.
+
 ## [0.18.0-alpha] - 2026-09-23
 
 ### Added
@@ -13,7 +19,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - `SYMLINK --from-workspace SNAPSHOT|LOCAL|CACHE|SYSTEM`: selects the symlink source root explicitly, mirroring `COPY --from-workspace`. Absent the flag, the build-context default applies as before.
 - `WORKSPACE CACHE --local`: keeps the persistent cache in `<project>/.cache/workspace` instead of the OS per-user cache. `OXDOCK_CACHE_DIR` stays scoped to the OS flavor; the local flavor lives and dies with the project tree and is never evicted.
 - Docker destination semantics for `COPY` and `SYMLINK`: a file copied onto a directory (an existing one, or a trailing-slash spell like `out/`) is duplicated inside it under its own basename (the source is never moved); a directory source duplicates its contents; any other destination path is created holding the copied bytes. `SYMLINK` onto a directory places the link under the source basename instead of failing as "already exists".
-- Shared `oxdock_fs::env` module: every runtime environment name the workspace reads or writes lives there as a `pub const`, replacing hardcoded duplicates (`env!` compile-time macros keep their literals).
+- Shared `oxdock_fs::env` module: every `OXDOCK_`/`CARGO_` runtime environment name the workspace reads or writes lives there as a `pub const`, replacing hardcoded duplicates (`env!` compile-time macros keep their literals).
 
 ### Changed
 

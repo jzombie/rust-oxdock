@@ -132,7 +132,7 @@ fn mismatch(expected: &str, value: &Value) -> anyhow::Error {
 }
 
 /// Resolve an [`Arg`] using an [`ExecState`] directly (no [`StepCtx`] needed).
-/// Handles `Arg::String` and all-`Text` `Arg::Parts` — `Arg::Expr` requires a
+/// Handles `Arg::String` and all-`Text` `Arg::Parts` : `Arg::Expr` requires a
 /// `StepCtx` and must go through `resolve_arg`. Filesystem-free by design
 /// (issue #131): assertion-needle pre-registration runs before step dispatch
 /// while the snapshot is still pending, so this must never touch the snapshot
@@ -161,7 +161,7 @@ pub(crate) fn resolve_arg_state<P: ProcessManager>(
     }
 }
 
-/// Resolve an [`Arg`] — handles all variants.
+/// Resolve an [`Arg`] : handles all variants.
 pub(crate) fn resolve_arg<P: ProcessManager>(arg: &Arg, cx: &mut StepCtx<'_, P>) -> Result<String> {
     match arg {
         Arg::String(s, _) => Ok(expand_string(s, &cx.state.envs, cx.state)?),
@@ -225,7 +225,7 @@ pub(crate) fn resolve_overrides<P: ProcessManager>(
 
 /// Resolve an [`Arg`] to an integer, enforcing the declared `int` type
 /// on the interpolated value. Dynamics (`$var`, templates) validate
-/// here — lower time only sees their unevaluated form.
+/// here : lower time only sees their unevaluated form.
 pub(crate) fn resolve_arg_as_int<P: ProcessManager>(
     arg: &Arg,
     cx: &mut StepCtx<'_, P>,
@@ -762,7 +762,7 @@ pub(crate) fn glob_from_value<P: ProcessManager>(
 
     // Up-front sandbox gate (mirrors `GuardedPath::glob_paths`): patterns are
     // sandbox-root-relative, so any `..` component escapes. Return empty
-    // without traversing — the same empty-on-no-match GLOB semantics.
+    // without traversing : the same empty-on-no-match GLOB semantics.
     if raw_pattern
         .replace('\\', "/")
         .split('/')
@@ -886,9 +886,9 @@ fn json_to_value(v: serde_json::Value) -> Value {
 
 /// Single-pass string expansion: handles escapes and `{{ }}` template tags.
 ///
-/// `{{ $var }}` — interpolates script variable (supports key-paths: `{{ $d.name.0 }}`).
-/// `{{ env:KEY }}` — interpolates environment variable.
-/// Bare `$` is literal text — `{{ }}` is the ONLY interpolation trigger.
+/// `{{ $var }}` : interpolates script variable (supports key-paths: `{{ $d.name.0 }}`).
+/// `{{ env:KEY }}` : interpolates environment variable.
+/// Bare `$` is literal text : `{{ }}` is the ONLY interpolation trigger.
 ///
 /// Escape rules:
 /// - `\\` → literal `\`
@@ -956,7 +956,7 @@ pub(crate) fn expand_string<P: ProcessManager>(
                 if found_close {
                     let key = template_key.trim();
                     if let Some(var_expr) = key.strip_prefix('$') {
-                        // {{ $var }} or {{ $var.path.0 }} — look up in scope chain.
+                        // {{ $var }} or {{ $var.path.0 }} : look up in scope chain.
                         // Parse key-path from the extracted string, NOT from chars.
                         // Trim whitespace from segments to tolerate spaces around dots.
                         // Bare $var never reads the environment; use {{ env:KEY }}.
@@ -991,9 +991,9 @@ pub(crate) fn expand_string<P: ProcessManager>(
                             // Missing → emit empty
                         }
                     } else {
-                        // {{ env:KEY }} — look up in env (script + process)
-                        // {{ script_env:KEY }} — explicit script env
-                        // {{ bare_key }} — DSL variable only, NOT env
+                        // {{ env:KEY }} : look up in env (script + process)
+                        // {{ script_env:KEY }} : explicit script env
+                        // {{ bare_key }} : DSL variable only, NOT env
                         if let Some(env_key) = key
                             .strip_prefix("env:")
                             .or_else(|| key.strip_prefix("script_env:"))
@@ -1008,7 +1008,7 @@ pub(crate) fn expand_string<P: ProcessManager>(
                         // Bare key not in DSL vars → emit empty
                     }
                 } else {
-                    // Unclosed template — preserve verbatim
+                    // Unclosed template : preserve verbatim
                     output.push_str("{{");
                     output.push_str(&template_key);
                 }
@@ -1027,7 +1027,7 @@ pub(crate) fn expand_string<P: ProcessManager>(
 /// Two escape hatches pass text through to the shell untouched:
 /// `\$` emits a literal `$` (backslash consumed, no expansion), and `$`
 /// inside a `{{ ... }}` span is never expanded (such spans are literal by
-/// construction — real templates were already interpolated upstream, and
+/// construction : real templates were already interpolated upstream, and
 /// `\{{` escapes arrive here with their braces intact).
 /// Note: `\\$var` (literal backslash plus interpolation) is indistinguishable
 /// from `\$var` at this stage (`expand_string` already collapsed `\\`), so it

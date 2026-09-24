@@ -106,6 +106,7 @@ fn dequeue_session<P: ProcessManager>(
 ///     ASSERT_CONTAINS $sess "command"
 ///     ASSERT_CONTAINS $sess "username"
 ///     ASSERT_CONTAINS $sess "addr"
+///     ASSERT_EQ $sess.username "u"
 ///     SSH_PUMP_CHANNEL($sess.session, $in, $out)
 /// }
 ///
@@ -378,7 +379,7 @@ fn ssh_serve<P: ProcessManager>(
 ///
 /// # The awaited result carries both keys; then shut down.
 /// LET $done: MAP = AWAIT $acc
-/// ASSERT_CONTAINS $done "closed"
+/// ASSERT_EQ $done.closed true
 /// ASSERT_CONTAINS $done "command"
 /// CANCEL $c
 /// SSH_CLOSE($m.server)

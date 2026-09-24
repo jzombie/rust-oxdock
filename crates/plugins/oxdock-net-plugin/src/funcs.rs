@@ -220,7 +220,7 @@ fn net_listen<P: ProcessManager>(
 /// # Shut down; the awaited result carries the closed key.
 /// CANCEL $c
 /// LET $done: MAP = AWAIT $acc
-/// ASSERT_CONTAINS $done "closed"
+/// ASSERT_EQ $done.closed true
 /// NET_CLOSE($l.listener)
 /// ```
 #[oxdock_func(returns = "MAP", summary = "Accept one connection into pipes.")]
