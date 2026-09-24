@@ -3310,7 +3310,7 @@ Keeping inheritance selective avoids leaking secrets by default while still allo
 - **Inline**: Payload bytes carried inside the word itself, with zero allocation. Available to `Copy` scalars that fit in 64 bits.
 - **NaN boxing**: A technique that packs values into 64 bits by reusing NaN float patterns. Denser than 16 byte words at the cost of pointer masking and constrained host values.
 - **Payload**: The 64 bit data half of a word: either inline bytes or a pointer to one owned box.
-- **Plugin**: A host extension module (NET, SSH) loaded with IMPORT, bringing extra functions into script scope.
+- **Plugin**: A host extension module ([NET](https://github.com/jzombie/rust-oxdock/blob/main/crates/plugins/oxdock-net-plugin/README.md), [SSH](https://github.com/jzombie/rust-oxdock/blob/main/crates/plugins/oxdock-ssh-plugin/README.md)) loaded with IMPORT, bringing extra functions into script scope.
 - **Provenance**: The recorded origin of a pointer, which Rust uses to judge whether a memory access is valid. Round tripping through the same box type preserves it.
 - **RPN**: Reverse Polish Notation: arithmetic compiled to a flat stack program instead of tree walking.
 - **Vtable**: The operations half of a descriptor: function pointers that clone, drop, compare, and render values of that type.
