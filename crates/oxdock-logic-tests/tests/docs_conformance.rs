@@ -17,7 +17,7 @@ const ANCHOR_DOCUMENTS: &[&str] = &[README_NAME, OXDOCK_README_NAME, CRATE_DOCS_
 
 fn repo_root() -> Result<String> {
     // Normalize separators first: Windows CARGO_MANIFEST_DIR uses backslashes.
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
+    let manifest_dir = std::env::var(oxdock_fs::env::CARGO_MANIFEST_DIR)
         .context("CARGO_MANIFEST_DIR missing")?
         .replace('\\', "/");
     Ok(manifest_dir
@@ -223,6 +223,7 @@ fn plugin_module_table() -> oxdock_parser::ModuleTable {
     ignore = "needs loopback TCP plus threads plus a Tokio runtime for plugin fences"
 )]
 fn plugin_readme_snippets_execute() -> Result<()> {
+    pin_doc_cache_dir()?;
     for name in PLUGIN_FENCE_DOCUMENTS {
         for block in load_blocks(name)? {
             execute_plugin_block(&block, name)?;
@@ -413,6 +414,7 @@ fn readme_anchors_resolve() -> Result<()> {
     ignore = "examples execute real processes (RUN/ASYNC RUN/git) against host tempdirs"
 )]
 fn readme_snippets_execute_as_documented() -> Result<()> {
+    pin_doc_cache_dir()?;
     for name in FENCE_DOCUMENTS {
         for block in load_blocks(name)? {
             execute_block(&block, name).with_context(|| {
@@ -422,6 +424,31 @@ fn readme_snippets_execute_as_documented() -> Result<()> {
                 )
             })?;
         }
+    }
+    Ok(())
+}
+
+/// Pin the project cache dir for doc-fence execution (issue #163).
+/// `WORKSPACE CACHE` fences must not write to the developer's real OS
+/// cache: every fence resolver computes its cache guard from this override,
+/// so all cache I/O stays under a suite tempdir. Process-lifetime storage
+/// (never dropped until exit) keeps the pin stable across parallel fences.
+static DOC_CACHE_PIN: std::sync::OnceLock<oxdock_fs::GuardedTempDir> = std::sync::OnceLock::new();
+
+fn pin_doc_cache_dir() -> Result<()> {
+    DOC_CACHE_PIN
+        .get_or_init(|| GuardedPath::tempdir().expect("failed to create doc cache tempdir"));
+    let dir = DOC_CACHE_PIN
+        .get()
+        .expect("doc cache pin initialized")
+        .as_guarded_path()
+        .as_path()
+        .to_string_lossy()
+        .into_owned();
+    // SAFETY: written once per process to the same value before any fence
+    // resolver is constructed; fences never mutate it back.
+    unsafe {
+        std::env::set_var(oxdock_fs::env::CACHE_DIR, dir);
     }
     Ok(())
 }

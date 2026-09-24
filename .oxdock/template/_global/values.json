@@ -1,5 +1,4 @@
 {
-  "footer": "Shared footer default.",
   "license": "Apache-2.0",
   "workspace": "OxDock",
   "workspace_url": "https://github.com/jzombie/rust-oxdock",

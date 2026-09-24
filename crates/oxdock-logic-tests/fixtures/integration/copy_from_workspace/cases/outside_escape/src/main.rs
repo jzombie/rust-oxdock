@@ -23,7 +23,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     fs::write(&outside_path, b"outside content")?;
     let outside = outside_path.to_string_lossy().to_string();
     let script = indoc!(r#"
-    COPY --from-current-workspace "{outside}" out/target_escape
+    COPY --from-workspace LOCAL "{outside}" out/target_escape
     "#);
     let script = script.replace("{outside}", &outside);
     let steps = parse_script(&script)?;
@@ -31,5 +31,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     // This should fail
     let res = run_steps_with_context_result_with_io(&snapshot_root, &workspace_root, &steps, ExecIo::new());
     assert!(res.is_err(), "expected COPY from outside workspace to fail");
+    // The probe lives in the system temp dir, which no sweeper reclaims:
+    // remove it explicitly so passing runs leave nothing behind.
+    let _ = fs::remove_file(&outside_path);
     Ok(())
 }

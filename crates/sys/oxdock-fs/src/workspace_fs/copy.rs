@@ -36,6 +36,33 @@ fn entry_kind_follow_symlink(file_type: &fs::FileType, src_path: &Path) -> Resul
 
 // Copy helpers for guarded and external sources.
 impl PathResolver {
+    /// Re-validate an already-resolved source at use time (issue #163).
+    /// The source guard records the root it was validated under, so
+    /// re-check against that root first: cross-root uses (a CACHE, SYSTEM,
+    /// or SNAPSHOT source under a different selection) survive selection
+    /// changes while keeping the TOCTOU re-canonicalization. Sources
+    /// wrapped at their own filesystem anchor (SYSTEM) re-wrap lexically
+    /// with no confinement, mirroring resolution. The legacy
+    /// effective-root and build-context fallbacks stay last. Shared by
+    /// COPY and SYMLINK.
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    pub(crate) fn recheck_resolved_source(&self, src: &GuardedPath) -> Result<GuardedPath> {
+        let root_guard =
+            GuardedPath::from_guarded_parts(src.root().to_path_buf(), src.root().to_path_buf());
+        if let Ok(guarded) =
+            self.check_access_with_root(&root_guard, src.as_path(), AccessMode::Read)
+        {
+            return Ok(guarded);
+        }
+        if src.root() == super::cache::system_anchor(src.as_path()).as_path() {
+            return Ok(super::cache::system_wrap_absolute(src.as_path()));
+        }
+        self.check_access(src.as_path(), AccessMode::Read)
+            .or_else(|_| {
+                self.check_access_with_root(&self.build_context, src.as_path(), AccessMode::Read)
+            })
+    }
+
     #[cfg(not(miri))]
     #[allow(clippy::disallowed_methods)]
     pub fn copy_file(&self, src: &GuardedPath, dst: &GuardedPath) -> Result<u64> {
@@ -43,13 +70,17 @@ impl PathResolver {
             .check_access(dst.as_path(), AccessMode::Write)
             .with_context(|| format!("copy destination denied for {}", dst.display()))?;
         let guarded_src = self
-            .check_access(src.as_path(), AccessMode::Read)
-            .or_else(|_| {
-                self.check_access_with_root(&self.build_context, src.as_path(), AccessMode::Read)
-            })
+            .recheck_resolved_source(src)
             .with_context(|| format!("copy source denied for {}", src.display()))?;
         if let Some(parent) = guarded_dst.as_path().parent() {
-            let parent_guard = GuardedPath::new(guarded_dst.root(), parent)?;
+            // Defer validation to `create_dir_all`'s own checks: the
+            // parent of a directory destination (e.g. `COPY file .`)
+            // legitimately sits outside the destination root, and
+            // `GuardedPath::new` would falsely reject it here.
+            let parent_guard = GuardedPath::from_guarded_parts(
+                guarded_dst.root().to_path_buf(),
+                parent.to_path_buf(),
+            );
             self.create_dir_all(&parent_guard)
                 .with_context(|| format!("creating dir {}", parent.display()))?;
         }
@@ -69,13 +100,13 @@ impl PathResolver {
             .check_access(dst.as_path(), AccessMode::Write)
             .with_context(|| format!("copy destination denied for {}", dst.display()))?;
         let guarded_src = self
-            .check_access(src.as_path(), AccessMode::Read)
-            .or_else(|_| {
-                self.check_access_with_root(&self.build_context, src.as_path(), AccessMode::Read)
-            })
+            .recheck_resolved_source(src)
             .with_context(|| format!("copy source denied for {}", src.display()))?;
-        let data = self.read_file(&guarded_src)?;
-        self.write_file(&guarded_dst, &data)?;
+        // Backend-direct I/O: both guards were validated above, so this
+        // must not route through the re-validating `read_file`/`write_file`
+        // trait paths (which only know the current selection).
+        let data = self.backend.read_file(&guarded_src)?;
+        self.backend.write_file(&guarded_dst, &data)?;
         Ok(data.len() as u64)
     }
 
@@ -95,11 +126,10 @@ impl PathResolver {
             let src_path = entry.path();
             let dst_path = guarded_dst_root.as_path().join(entry.file_name());
 
+            let entry_guard =
+                GuardedPath::from_guarded_parts(src.root().to_path_buf(), src_path.clone());
             let guarded_src = self
-                .check_access(&src_path, AccessMode::Read)
-                .or_else(|_| {
-                    self.check_access_with_root(&self.build_context, &src_path, AccessMode::Read)
-                })
+                .recheck_resolved_source(&entry_guard)
                 .with_context(|| format!("copy source denied for {}", src_path.display()))?;
 
             let guarded_dst = self
@@ -114,7 +144,13 @@ impl PathResolver {
                 }
                 CopyEntryKind::File => {
                     if let Some(parent) = guarded_dst.as_path().parent() {
-                        let parent_guard = GuardedPath::new(guarded_dst.root(), parent)?;
+                        // Same as `copy_file`: defer validation to
+                        // `create_dir_all`, whose own checks admit parents
+                        // outside the destination root.
+                        let parent_guard = GuardedPath::from_guarded_parts(
+                            guarded_dst.root().to_path_buf(),
+                            parent.to_path_buf(),
+                        );
                         self.create_dir_all(&parent_guard)
                             .with_context(|| format!("creating dir {}", parent.display()))?;
                     }
@@ -138,16 +174,18 @@ impl PathResolver {
             .with_context(|| format!("copy destination denied for {}", dst.display()))?;
         self.create_dir_all(&guarded_dst_root)?;
 
-        for entry in self.read_dir_entries(src)? {
+        // Backend-direct listing: `src` was validated by the caller, so
+        // this must not route through the re-validating `read_dir_entries`
+        // trait path (which only knows the current selection).
+        for entry in self.backend.read_dir_entries(src)? {
             let file_type = entry.file_type()?;
             let src_path = entry.path();
             let dst_path = guarded_dst_root.as_path().join(entry.file_name());
 
+            let entry_guard =
+                GuardedPath::from_guarded_parts(src.root().to_path_buf(), src_path.clone());
             let guarded_src = self
-                .check_access(&src_path, AccessMode::Read)
-                .or_else(|_| {
-                    self.check_access_with_root(&self.build_context, &src_path, AccessMode::Read)
-                })
+                .recheck_resolved_source(&entry_guard)
                 .with_context(|| format!("copy source denied for {}", src_path.display()))?;
 
             let guarded_dst = self
@@ -160,7 +198,13 @@ impl PathResolver {
                 self.copy_dir_recursive(&guarded_src, &guarded_dst)?;
             } else {
                 if let Some(parent) = guarded_dst.as_path().parent() {
-                    let parent_guard = GuardedPath::new(guarded_dst.root(), parent)?;
+                    // Same as `copy_file`: defer validation to
+                    // `create_dir_all`, whose own checks admit parents
+                    // outside the destination root.
+                    let parent_guard = GuardedPath::from_guarded_parts(
+                        guarded_dst.root().to_path_buf(),
+                        parent.to_path_buf(),
+                    );
                     self.create_dir_all(&parent_guard)
                         .with_context(|| format!("creating dir {}", parent_guard.display()))?;
                 }

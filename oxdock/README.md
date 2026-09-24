@@ -6,9 +6,9 @@ OxDock is a Dockerfile inspired build DSL for Rust. Embed scripts at compile tim
 
 Supports platform gating, async tasks, and piped workflows for custom pipelines.
 
-[Documentation](https://docs.rs/oxdock/0.17.0-alpha/oxdock/)
+[Documentation](https://docs.rs/oxdock/0.18.0-alpha/oxdock/)
 
-Add it to your Rust build with `cargo add oxdock@0.17.0-alpha`, or install the standalone runner with `cargo install oxdock@0.17.0-alpha`.
+Add it to your Rust build with `cargo add oxdock@0.18.0-alpha`, or install the standalone runner with `cargo install oxdock@0.18.0-alpha`.
 
 Run a script:
 
@@ -96,8 +96,8 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     LET $a: STRING = READ dist/alpha.txt
     LET $b: STRING = READ dist/beta.txt
     LET $p: STRING = READ dist/picked.txt
-    ASSERT_EQ $a "alpha OxDock 0.17.0-alpha"
-    ASSERT_EQ $b "beta OxDock 0.17.0-alpha"
+    ASSERT_EQ $a "alpha OxDock 0.18.0-alpha"
+    ASSERT_EQ $b "beta OxDock 0.18.0-alpha"
     ASSERT_EQ $p "alpha"
 };
 
@@ -109,7 +109,7 @@ let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolve
 let out = root.join("dist/alpha.txt").expect("out path");
 assert_eq!(
     resolver.read_to_string(&out).expect("read out"),
-    "alpha OxDock 0.17.0-alpha"
+    "alpha OxDock 0.18.0-alpha"
 );
 ```
 
@@ -273,6 +273,7 @@ FUNC SHADOW($v: STRING) {
     LET $inner: STRING = "inner"
     RETURN $v
 }
+
 LET $out: STRING = SHADOW("param")
 ASSERT_EQ $out "param"
 ```
@@ -318,18 +319,54 @@ READ piped.txt
 ASSERT_CONTAINS stdout "piped-bytes"
 ```
 
-### Workspaces start ephemeral
+### Scripts start in SNAPSHOT
 
-Scripts start in an ephemeral snapshot workspace, an isolated temp dir that leaves the source tree untouched. Pull inputs with `COPY` or `COPY_GIT`. Switch to the local directory with `WORKSPACE LOCAL` when the script should mutate in place.
+Scripts start in the SNAPSHOT workspace, an ephemeral isolated temp dir that leaves the source tree untouched. It is the only ephemeral root. Pull inputs with `COPY` or `COPY_GIT`. Each root below is entered inside a scoped block, which reverts to the previous root on exit.
 
 ```oxdock
+IMPORT [STD]
+
+# SNAPSHOT is the starting root.
 WRITE snap.txt from-snapshot
 LET $s: STRING = READ snap.txt
 ASSERT_EQ $s "from-snapshot"
-WORKSPACE LOCAL
-WRITE local.txt from-local
-LET $l: STRING = READ local.txt
-ASSERT_EQ $l "from-local"
+
+# LOCAL is a separate directory: snapshot files are absent there.
+[bool:true] {
+    WORKSPACE LOCAL
+    LET $t: STRING = PATH_TYPE("snap.txt")
+    ASSERT_EQ $t "absent"
+    WRITE local.txt from-local
+}
+
+# The block reverted to SNAPSHOT: the local file is absent here.
+LET $u: STRING = PATH_TYPE("local.txt")
+ASSERT_EQ $u "absent"
+
+# CACHE persists outside the snapshot and reads back through its own root.
+[bool:true] {
+    WORKSPACE CACHE
+    WRITE cached.txt from-cache
+}
+COPY --from-workspace CACHE cached.txt restored.txt
+LET $w: STRING = READ restored.txt
+ASSERT_EQ $w "from-cache"
+
+# CACHE --local is a different directory from the OS cache.
+[bool:true] {
+    WORKSPACE CACHE --local
+    LET $x: STRING = PATH_TYPE("cached.txt")
+    ASSERT_EQ $x "absent"
+}
+
+# SYSTEM keeps the current directory: relative paths keep working.
+# Scripts using it are not hermetic.
+[bool:true] {
+    WORKSPACE SYSTEM
+    WRITE sys.txt from-system
+}
+LET $y: STRING = READ sys.txt
+ASSERT_EQ $y "from-system"
 ```
 
 OxDock scripts automate build-time work: creating files, snapshotting
@@ -364,9 +401,11 @@ Every variable binding declares its type at the binding site. `LET $name: TYPE =
 LET $count: INT = 1
 $count = 2
 LET $msg: STRING = hello
+
 FOR $item: STRING IN ["a", "b"] {
     ECHO "{{ $item }}"
 }
+
 WRITE count.txt "{{ $count }}"
 LET $c: STRING = READ count.txt
 ASSERT_EQ $c "2"
@@ -390,8 +429,9 @@ Parentheses mark the boundary between computing a value and running a pipeline s
 // Functions compute values; stdout stays untouched.
 IMPORT [STD]
 LET $t: STRING = PATH_TYPE("missing.txt")
-LET $n: INT = INT("41") + 1
 ASSERT_EQ $t "absent"
+
+LET $n: INT = INT("41") + 1
 ASSERT_EQ $n 42
 ```
 
@@ -430,12 +470,23 @@ ASSERT_CONTAINS stdout "visible-after-comments"
 
 ```oxdock
 ECHO hash-mid-line # stays-in-payload
-RUN echo run-args-stop-at-slashes // removed-as-comment
 ASSERT_CONTAINS stdout "hash-mid-line # stays-in-payload"
+RUN echo run-args-stop-at-slashes // removed-as-comment
 ASSERT_CONTAINS stdout "run-args-stop-at-slashes"
 ```
 
 Comment markers inside quoted strings are always preserved.
+
+### Command flags
+
+Commands that take flags accept the value either after a space or joined with `=`: `--from-workspace LOCAL` and `--from-workspace=LOCAL` mean the same thing. Boolean flags take no value. Quoted arguments are never treated as flags, even when they start with `--`.
+
+```oxdock roots:unified
+WRITE flag-src.txt flag-content
+COPY --from-workspace=LOCAL flag-src.txt flag-copy.txt
+LET $body: STRING = READ flag-copy.txt
+ASSERT_EQ $body "flag-content"
+```
 
 ### Quoting and escaping
 
@@ -444,12 +495,12 @@ Arguments accept single- or double-quoted strings; the escape sequences `\"` and
 ```oxdock
 // Single and double quotes behave identically.
 ECHO 'single quotes'
+ASSERT_CONTAINS stdout "single quotes"
 ECHO "double quotes"
+ASSERT_CONTAINS stdout "double quotes"
 
 // \" embeds a quote; the backslash itself is consumed.
 ECHO "escaped \" quote"
-ASSERT_CONTAINS stdout "single quotes"
-ASSERT_CONTAINS stdout "double quotes"
 ASSERT_CONTAINS stdout 'escaped " quote'
 ```
 
@@ -458,15 +509,15 @@ ASSERT_CONTAINS stdout 'escaped " quote'
 `{{ env:KEY }}` interpolates script environment values into arguments at execution time. Values come from the script environment (`ENV`, inherited keys) — there is no fallback to host variables in command context, and unknown keys expand to an empty string. The unprefixed form `{{ KEY }}` is not a valid template and also expands to empty, so always use the `env:`-prefixed spelling:
 
 ```oxdock
-ENV GREETING=hello-world
+ENV USER=OxDock
 
-// env:-prefixed form: interpolates from the SCRIPT environment.
-ECHO <{{ env:GREETING }}>
+# env:-prefixed form: interpolates from the SCRIPT environment.
+ECHO "Hello {{ env:USER }}!"
+ASSERT_CONTAINS stdout "Hello OxDock!"
 
-// Bare braces are not a template: they expand to empty.
-ECHO <{{ GREETING }}>
-ASSERT_CONTAINS stdout "<hello-world>"
-ASSERT_CONTAINS stdout "<>"
+# Bare braces are not a template: they expand to empty.
+ECHO "Hello {{ USER }}!"
+ASSERT_CONTAINS stdout "Hello !"
 ```
 
 ## Guards and scoped blocks
@@ -493,15 +544,14 @@ INHERIT_ENV [DEPLOY_TARGET]
 
 // Passes when the variable exists with any non-empty value.
 [env:DEPLOY_TARGET] ECHO deploy-target-visible
+ASSERT_CONTAINS stdout "deploy-target-visible"
 
 // Equality against the inherited value.
 [eq(env:DEPLOY_TARGET, staging)] ECHO deploying-to-staging
+ASSERT_CONTAINS stdout "deploying-to-staging"
 
 // Inequality: skipped below, because DEPLOY_TARGET IS staging.
 [ne(env:DEPLOY_TARGET, staging)] ECHO deploying-elsewhere
-
-ASSERT_CONTAINS stdout "deploy-target-visible"
-ASSERT_CONTAINS stdout "deploying-to-staging"
 ```
 
 ### Platform guards
@@ -516,6 +566,7 @@ ASSERT_CONTAINS stdout "deploying-to-staging"
   ASSERT_EQ $rep "windows"
   ASSERT_CONTAINS stdout "windows-detected"
 }
+
 [unix] {
   WRITE os-report.txt unix-family
   ECHO unix-detected
@@ -533,15 +584,14 @@ INHERIT_ENV [OXDOCK_DOC_FEATURE_A]
 
 // not(...) inverts the predicate: passes because the variable does NOT exist.
 [not(env:OXDOCK_DOC_UNDEFINED_VAR)] ECHO negation-passes-for-undefined
+ASSERT_CONTAINS stdout "negation-passes-for-undefined"
 
 // any(...) passes when ANY branch holds; A exists, so this runs.
 [any(env:OXDOCK_DOC_FEATURE_A, env:OXDOCK_DOC_FEATURE_B)] ECHO or-matched-a-branch
+ASSERT_CONTAINS stdout "or-matched-a-branch"
 
 // Comma composes with AND: (A or linux) AND A — true here on every OS.
 [any(env:OXDOCK_DOC_FEATURE_A, linux), env:OXDOCK_DOC_FEATURE_A] ECHO composed-and-or-guard
-
-ASSERT_CONTAINS stdout "negation-passes-for-undefined"
-ASSERT_CONTAINS stdout "or-matched-a-branch"
 ASSERT_CONTAINS stdout "composed-and-or-guard"
 ```
 
@@ -603,6 +653,7 @@ ASSERT_EQ $out_body "some_value-production"
 WRITE before.txt "persisted"
 LET $b: STRING = READ before.txt
 ASSERT_EQ $b "persisted"
+
 [bool:true] {
     EXIT 3
     WRITE unreachable.txt "never"
@@ -695,7 +746,11 @@ Keeping inheritance selective avoids leaking secrets by default while still allo
 
 - **Typical usage pattern:** the temporary workspace is intended for short lived build and test iterations. Run scripts against it, inspect outputs, and discard when done. Because it is separate from the original repo it is safe to run multiple concurrent experiments without changing the original repo.
 
-- **Filesystem gating via `oxdock-fs`:** all filesystem operations in the runtime are routed through the crate internal `oxdock-fs` abstraction. That module centralizes path resolution, canonicalization and access checks so reads and writes can be validated against the allowed workspace root and build context.
+- **Four workspace roots:** `WORKSPACE SNAPSHOT` (the default ephemeral temp location), `WORKSPACE LOCAL` (the local directory), `WORKSPACE CACHE` (a persistent per-project cache directory shared across runs), and `WORKSPACE SYSTEM` (full filesystem access, not hermetic). `WORKSPACE` selection reverts at scope exit like `WORKDIR`.
+
+- **Persistent cache:** `WORKSPACE CACHE` stores artifacts under the OS per-user cache, namespaced by application identity `<app>`, with a `workspace` group segment underneath. Concretely: macOS `~/Library/Caches/com.oxdock.<app>/workspace`, Linux `$XDG_CACHE_HOME/<app>/workspace` (or `~/.cache/<app>/workspace`, lowercased), Windows `%LOCALAPPDATA%\oxdock\<app>\cache\workspace`. Identity resolves as explicit builder argument, `OXDOCK_CACHE_APP`, runtime `CARGO_PKG_NAME`, running binary name, then `"oxdock"`; `OXDOCK_CACHE_DIR` pins an exact directory instead (OS flavor only), and when no home directory is available the cache falls back to a temp dir (`oxdock-cache-<app>`). `WORKSPACE CACHE --local` keeps the cache in `<project>/.cache/workspace` instead, unconditionally. The directory is created on first use, survives restarts, and is never evicted by default.
+
+- **Filesystem gating via `oxdock-fs`:** all filesystem operations in the runtime are routed through the crate internal `oxdock-fs` abstraction. That module centralizes path resolution, canonicalization and access checks so reads and writes can be validated against the allowed workspace root and build context. `WORKSPACE SYSTEM` intentionally bypasses these checks; scripts using it are not hermetic.
 
 - **What `oxdock-fs` protects you from:** the guardrails are pragmatic. They prevent common mistakes such as accidentally writing outside the materialized workspace or reading files from arbitrary absolute paths. However, they are not a full sandbox. A determined process or script can still create destructive actions (for example, invoking native `RUN` commands that modify external state). If you require strict isolation, run OxDock inside a container or VM.
 
@@ -706,7 +761,7 @@ Keeping inheritance selective avoids leaking secrets by default while still allo
 Install the binary from the registry:
 
 ```sh
-cargo install oxdock@0.17.0-alpha
+cargo install oxdock@0.18.0-alpha
 ```
 
 Run a script file:
@@ -1045,7 +1100,7 @@ Or pin the version in `Cargo.toml`:
 
 ```toml
 [dependencies]
-oxdock = { version = "0.17.0-alpha", default-features = false }
+oxdock = { version = "0.18.0-alpha", default-features = false }
 ```
 
 ## Glossary
@@ -1057,6 +1112,7 @@ oxdock = { version = "0.17.0-alpha", default-features = false }
 - **Inline**: Payload bytes carried inside the word itself, with zero allocation. Available to `Copy` scalars that fit in 64 bits.
 - **NaN boxing**: A technique that packs values into 64 bits by reusing NaN float patterns. Denser than 16 byte words at the cost of pointer masking and constrained host values.
 - **Payload**: The 64 bit data half of a word: either inline bytes or a pointer to one owned box.
+- **Plugin**: A host extension module (NET, SSH) loaded with IMPORT, bringing extra functions into script scope.
 - **Provenance**: The recorded origin of a pointer, which Rust uses to judge whether a memory access is valid. Round tripping through the same box type preserves it.
 - **RPN**: Reverse Polish Notation: arithmetic compiled to a flat stack program instead of tree walking.
 - **Vtable**: The operations half of a descriptor: function pointers that clone, drop, compare, and render values of that type.

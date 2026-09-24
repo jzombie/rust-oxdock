@@ -4,6 +4,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [0.18.0-alpha] - 2026-09-23
+
+### Added
+
+- `WORKSPACE CACHE` and `WORKSPACE SYSTEM` roots (#163): `CACHE` is a persistent per-project directory shared across runs, resolved through the `cache-manager` crate with OS-native per-user roots and created on first use with no eviction by default; `SYSTEM` grants full filesystem access with per-path filesystem anchors so every drive and UNC share resolves. Both participate in `WORKSPACE` switch, scope-revert, and fork semantics like the other roots. Cache identity resolves with no disk reads as explicit builder argument, `OXDOCK_CACHE_APP`, runtime `CARGO_PKG_NAME`, running binary name, then `"oxdock"`; `OXDOCK_CACHE_DIR` pins an exact directory (also honored by the doc-fence harness).
+- `COPY --from-workspace SNAPSHOT|LOCAL|CACHE|SYSTEM`: selects the copy source root explicitly. `SNAPSHOT` requires a materialized snapshot, `LOCAL` keeps the former workspace-root semantics, `CACHE` ensures the persistent directory first, and `SYSTEM` resolves absolute sources without confinement.
+- `SYMLINK --from-workspace SNAPSHOT|LOCAL|CACHE|SYSTEM`: selects the symlink source root explicitly, mirroring `COPY --from-workspace`. Absent the flag, the build-context default applies as before.
+- `WORKSPACE CACHE --local`: keeps the persistent cache in `<project>/.cache/workspace` instead of the OS per-user cache. `OXDOCK_CACHE_DIR` stays scoped to the OS flavor; the local flavor lives and dies with the project tree and is never evicted.
+- Docker destination semantics for `COPY` and `SYMLINK`: a file copied onto a directory (an existing one, or a trailing-slash spell like `out/`) is duplicated inside it under its own basename (the source is never moved); a directory source duplicates its contents; any other destination path is created holding the copied bytes. `SYMLINK` onto a directory places the link under the source basename instead of failing as "already exists".
+- Shared `oxdock_fs::env` module: every runtime environment name the workspace reads or writes lives there as a `pub const`, replacing hardcoded duplicates (`env!` compile-time macros keep their literals).
+
+### Changed
+
+- [breaking] Scripts are affected: `COPY --from-current-workspace` is replaced by `COPY --from-workspace LOCAL` with no alias.
+- [breaking] Scripts are affected: `WORKSPACE` targets are uppercase-only. Lowercase spellings are rejected, the undocumented `A`/`B` aliases are removed, and `ArgType::OneOf` validation is exact match.
+- COPY sources re-validate against the root they resolved under, so cross-root copies (a `CACHE`, `SYSTEM`, or `SNAPSHOT` source under a different selection) no longer fail at copy time; `SYSTEM` sources re-wrap lexically with no confinement.
+
+### Fixed
+
+- DSL `--flag=value` single-token form: flags like `COPY --from-workspace=CACHE` and `ASSERT_EQ --hash=<digest>` now parse. Tokens starting with `--` no longer match `KEY=value` assignment, so the value arrives inline instead of traveling as the next whitespace-separated token.
+- `copy_from_workspace_outside_escape` fixtures remove their system-temp probe files after asserting instead of littering them.
+- `COPY`/`SYMLINK` onto a directory destination (e.g. `COPY file .`) no longer fails with a false workspace-escape error: parent directories defer to the creation check instead of a confining read check. `SYMLINK` sources also re-validate against the root they resolved under, matching `COPY`.
+
+### Dependencies
+
+- Add `cache-manager` 0.4.1 with `os-cache-dir` (persistent project cache roots; pulls `directories` 6).
+
 ## [0.17.0-alpha] - 2026-09-21
 
 ### Added

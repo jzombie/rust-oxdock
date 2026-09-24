@@ -47,6 +47,7 @@ FUNC SHADOW($v: STRING) {
     LET $inner: STRING = "inner"
     RETURN $v
 }
+
 LET $out: STRING = SHADOW("param")
 ASSERT_EQ $out "param"
 ```

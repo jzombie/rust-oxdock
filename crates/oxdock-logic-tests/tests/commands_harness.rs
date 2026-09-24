@@ -42,8 +42,8 @@ fn main() {
     config.case_config = Some(oxdock_logic_tests::harness::CaseConfig {
         fixture_name: "ast_commands".to_string(),
         cases_dir: "cases".to_string(),
-        case_env: "OXDOCK_AST_CASE".to_string(),
-        coverage_env: Some("OXDOCK_AST_ONLY_COVERAGE".to_string()),
+        case_env: oxdock_fs::env::AST_CASE.to_string(),
+        coverage_env: Some(oxdock_fs::env::AST_ONLY_COVERAGE.to_string()),
         coverage_case_name: "coverage".to_string(),
         smoke_cases: vec!["write".to_string(), "with_io".to_string()],
     });

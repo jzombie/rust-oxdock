@@ -1,4 +1,5 @@
 use oxdock_fs::GuardedPath;
+use oxdock_fs::env::{CARGO_MANIFEST_DIR, CARGO_PRIMARY_PACKAGE};
 use std::sync::{Mutex, MutexGuard};
 
 static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -27,13 +28,13 @@ impl<'a> SerialCargoEnv<'a> {
         let lock = ENV_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let prev_manifest = std::env::var("CARGO_MANIFEST_DIR").ok();
-        let prev_primary = std::env::var("CARGO_PRIMARY_PACKAGE").ok();
+        let prev_manifest = std::env::var(CARGO_MANIFEST_DIR).ok();
+        let prev_primary = std::env::var(CARGO_PRIMARY_PACKAGE).ok();
         // SAFETY: std::env setters are marked unsafe due to global mutation, but we serialize
         // access via `ENV_LOCK` to keep mutations ordered and scoped by this guard.
         unsafe {
-            std::env::set_var("CARGO_MANIFEST_DIR", manifest_dir.as_path());
-            std::env::set_var("CARGO_PRIMARY_PACKAGE", if primary { "1" } else { "0" });
+            std::env::set_var(CARGO_MANIFEST_DIR, manifest_dir.as_path());
+            std::env::set_var(CARGO_PRIMARY_PACKAGE, if primary { "1" } else { "0" });
         }
         Self {
             _lock: lock,
@@ -47,15 +48,15 @@ impl Drop for SerialCargoEnv<'_> {
     fn drop(&mut self) {
         unsafe {
             if let Some(prev) = &self.prev_manifest {
-                std::env::set_var("CARGO_MANIFEST_DIR", prev);
+                std::env::set_var(CARGO_MANIFEST_DIR, prev);
             } else {
-                std::env::remove_var("CARGO_MANIFEST_DIR");
+                std::env::remove_var(CARGO_MANIFEST_DIR);
             }
 
             if let Some(prev) = &self.prev_primary {
-                std::env::set_var("CARGO_PRIMARY_PACKAGE", prev);
+                std::env::set_var(CARGO_PRIMARY_PACKAGE, prev);
             } else {
-                std::env::remove_var("CARGO_PRIMARY_PACKAGE");
+                std::env::remove_var(CARGO_PRIMARY_PACKAGE);
             }
         }
     }
@@ -79,6 +80,7 @@ impl SerialCargoEnv<'_> {
 mod tests {
     use super::manifest_env_guard;
     use oxdock_fs::GuardedPath;
+    use oxdock_fs::env::{CARGO_MANIFEST_DIR, CARGO_PRIMARY_PACKAGE};
 
     #[test]
     fn guard_sets_manifest_dir_and_primary_flag() {
@@ -89,15 +91,15 @@ mod tests {
             let _guard = manifest_env_guard(&root, true);
             let expected = root.as_path().to_string_lossy().into_owned();
             assert_eq!(
-                std::env::var("CARGO_MANIFEST_DIR").as_deref(),
+                std::env::var(CARGO_MANIFEST_DIR).as_deref(),
                 Ok(expected.as_str())
             );
-            assert_eq!(std::env::var("CARGO_PRIMARY_PACKAGE").as_deref(), Ok("1"));
+            assert_eq!(std::env::var(CARGO_PRIMARY_PACKAGE).as_deref(), Ok("1"));
         }
 
         {
             let _guard = manifest_env_guard(&root, false);
-            assert_eq!(std::env::var("CARGO_PRIMARY_PACKAGE").as_deref(), Ok("0"));
+            assert_eq!(std::env::var(CARGO_PRIMARY_PACKAGE).as_deref(), Ok("0"));
         }
     }
 
@@ -120,7 +122,7 @@ mod tests {
             assert_eq!(guard.previous(), expected);
             let expected_dir = root_b.as_path().to_string_lossy().into_owned();
             assert_eq!(
-                std::env::var("CARGO_MANIFEST_DIR").as_deref(),
+                std::env::var(CARGO_MANIFEST_DIR).as_deref(),
                 Ok(expected_dir.as_str())
             );
         }

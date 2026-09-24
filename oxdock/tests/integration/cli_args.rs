@@ -37,7 +37,7 @@ fn positional_script_path_runs_like_script_flag() {
 
     let output = CommandBuilder::new(env!("CARGO_BIN_EXE_oxdock"))
         .arg("script.ox")
-        .env("OXDOCK_WORKSPACE_ROOT", root.display())
+        .env(oxdock_fs::env::WORKSPACE_ROOT, root.display())
         .output()
         .expect("run cli with positional script");
     assert!(

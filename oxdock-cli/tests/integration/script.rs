@@ -46,7 +46,7 @@ fn script_runs_copy_and_symlink() {
         Step {
             guard: None,
             kind: StepKind::Copy {
-                from_current_workspace: false,
+                from_workspace: None,
                 from: "./client/dist".into(),
                 to: "./client/dist-copy".into(),
             },
@@ -56,6 +56,7 @@ fn script_runs_copy_and_symlink() {
         Step {
             guard: None,
             kind: StepKind::Symlink {
+                from_workspace: None,
                 from: "./client/dist".into(),
                 to: "./server/dist".into(),
             },

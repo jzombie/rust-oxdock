@@ -115,7 +115,7 @@ fn workspace_local_copy_cannot_escape_workspace_root() {
     let script = indoc!(
         r#"
         WORKSPACE LOCAL
-        COPY --from-current-workspace "{outside}" out/target
+        COPY --from-workspace LOCAL "{outside}" out/target
     "#
     );
     let outside_str = outside_file.as_path().to_string_lossy().to_string();
@@ -126,7 +126,88 @@ fn workspace_local_copy_cannot_escape_workspace_root() {
         run_steps_with_context_result_with_io(&snapshot, &workspace, &steps, ExecIo::new());
     assert!(
         result.is_err(),
-        "expected COPY --from-current-workspace to reject paths outside workspace root even after WORKSPACE LOCAL"
+        "expected COPY --from-workspace LOCAL to reject paths outside workspace root even after WORKSPACE LOCAL"
+    );
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "resolves absolute host paths; unsupported under the Miri synthetic filesystem"
+)]
+fn system_source_root_resolves_absolute_host_paths() {
+    let snapshot_dir = GuardedPath::tempdir().unwrap();
+    let snapshot = guard_root(&snapshot_dir);
+    let workspace_dir = GuardedPath::tempdir().unwrap();
+    let workspace = guard_root(&workspace_dir);
+
+    // A real host file outside every guarded root. Forward slashes keep
+    // the injected path parseable on Windows; the tempdir guard removes
+    // it when the test exits.
+    let outside_dir = GuardedPath::tempdir().unwrap();
+    let outside_file = outside_dir.as_guarded_path().join("probe.txt").unwrap();
+    write_text(&outside_file, "host-bytes");
+    let outside_str = outside_file.as_path().to_string_lossy().replace('\\', "/");
+
+    let script = indoc!(
+        r#"
+        WORKSPACE SYSTEM
+        COPY --from-workspace SYSTEM "{probe}" restored.txt
+        WRITE sys-note.txt kept-cwd
+    "#
+    );
+    let script = script.replace("{probe}", &outside_str);
+    let steps = oxdock_core::parse_script(&script).unwrap();
+    run_steps_with_context_result_with_io(&snapshot, &workspace, &steps, ExecIo::new()).unwrap();
+
+    // The absolute source resolved without confinement ...
+    assert_eq!(
+        read_trimmed(&snapshot.join("restored.txt").unwrap()),
+        "host-bytes"
+    );
+    // ... and SYSTEM kept the snapshot working directory for relative paths.
+    assert_eq!(
+        read_trimmed(&snapshot.join("sys-note.txt").unwrap()),
+        "kept-cwd"
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "creates symlinks; unsupported under Miri")]
+fn symlink_into_directory_places_basename() {
+    // `ln -s` destination semantics: a directory destination receives the
+    // link under the source basename instead of failing as "already
+    // exists". Cross-root sources resolve like COPY sources.
+    let snapshot_dir = GuardedPath::tempdir().unwrap();
+    let snapshot = guard_root(&snapshot_dir);
+    let local_dir = GuardedPath::tempdir().unwrap();
+    let local = guard_root(&local_dir);
+
+    if !can_create_symlinks(snapshot.as_path()) {
+        eprintln!("skipping test: cannot create symlinks on host");
+        return;
+    }
+
+    let script = indoc!(
+        r#"
+        WORKSPACE LOCAL
+        WRITE target.txt content
+        MKDIR links
+        SYMLINK target.txt links
+        MKDIR slashed
+        SYMLINK target.txt slashed/
+        "#
+    );
+    let steps = oxdock_core::parse_script(script).unwrap();
+    run_steps_with_context_result_with_io(&snapshot, &local, &steps, ExecIo::new()).unwrap();
+
+    assert_eq!(
+        read_trimmed(&local.join("links/target.txt").unwrap()),
+        "content"
+    );
+    assert_eq!(
+        read_trimmed(&local.join("slashed/target.txt").unwrap()),
+        "content"
     );
 }
 
@@ -222,7 +303,7 @@ fn commands_behave_cross_platform() {
         Step {
             guard: None,
             kind: StepKind::Copy {
-                from_current_workspace: false,
+                from_workspace: None,
                 from: "./source.txt".into(),
                 to: "./client/dist/from_build.txt".into(),
             },
@@ -232,6 +313,7 @@ fn commands_behave_cross_platform() {
         Step {
             guard: None,
             kind: StepKind::Symlink {
+                from_workspace: None,
                 from: "./target_dir".into(),
                 to: "./client/dist-link".into(),
             },
@@ -982,6 +1064,7 @@ fn workdir_accepts_symlink_into_workspace_root() {
         Step {
             guard: None,
             kind: StepKind::Symlink {
+                from_workspace: None,
                 from: "client".into(),
                 to: "client".into(),
             },

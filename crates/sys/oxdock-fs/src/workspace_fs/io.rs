@@ -386,10 +386,7 @@ impl PathResolver {
     #[allow(clippy::disallowed_methods)]
     pub fn symlink(&self, src: &GuardedPath, dst: &GuardedPath) -> Result<()> {
         let guarded_src = self
-            .check_access(src.as_path(), AccessMode::Read)
-            .or_else(|_| {
-                self.check_access_with_root(&self.build_context, src.as_path(), AccessMode::Read)
-            })
+            .recheck_resolved_source(src)
             .with_context(|| format!("symlink source denied for {}", src.display()))?;
         let guarded_dst = self
             .check_access(dst.as_path(), AccessMode::Write)
@@ -458,7 +455,7 @@ impl PathResolver {
     #[cfg(miri)]
     pub fn symlink(&self, src: &GuardedPath, dst: &GuardedPath) -> Result<()> {
         let guarded_src = self
-            .check_access_with_root(self.effective_root(), src.as_path(), AccessMode::Read)
+            .recheck_resolved_source(src)
             .with_context(|| format!("symlink source denied for {}", src.display()))?;
         let guarded_dst = self
             .check_access_with_root(self.effective_root(), dst.as_path(), AccessMode::Write)

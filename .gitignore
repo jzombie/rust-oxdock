@@ -4,3 +4,4 @@ vendor/*
 *.patch
 .oxdock-staging/
 temp
+.cache

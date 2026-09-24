@@ -41,12 +41,18 @@ runs end to end under the docs conformance suite.
 ```oxdock
 IMPORT [STD, NET]
 LET $l: MAP = NET_LISTEN("doc-net-demo", {})
+
+# Accept one connection into fresh pipes.
 LET $in: PIPE
 LET $out: PIPE
 LET $acc: HANDLE = ASYNC { NET_ACCEPT($l.listener, $in, $out, {}) }
+
+# Connect a client to the listener.
 LET $cin: PIPE
 LET $cout: PIPE
 LET $c: HANDLE = ASYNC { NET_CONNECT("doc-net-demo", $cin, $cout, {}) }
+
+# Greet through the server pipe and wait for delivery.
 WITH_IO [stdout=$in] ECHO "server-greeting"
 LET $info: MAP = INSPECT($cout)
 LET $empty: BOOL = $info.buffer_bytes == 0
@@ -56,6 +62,8 @@ WHILE $empty {
     $empty = $info.buffer_bytes == 0
 }
 ASSERT_CONTAINS $cout "server-greeting"
+
+# Shut down; the awaited result carries the closed key.
 CANCEL $c
 LET $done: MAP = AWAIT $acc
 ASSERT_CONTAINS $done "closed"

@@ -44,7 +44,24 @@ pub struct MockFs {
     /// `switch_to_snapshot` (mirrors the resolver's selection semantics
     /// without any laziness: mock paths are in-memory).
     snapshot_root: Option<GuardedPath>,
+    /// Cache root remembered across switches (issue #163). The mock has no
+    /// separate cache backing dir; selection is tracked so resolve behavior
+    /// and scope restore mirror the real resolver.
+    cache_root: Option<GuardedPath>,
+    /// System marker remembered across switches (issue #163). Absolute
+    /// paths resolve without confinement while system-selected.
+    system_root: Option<GuardedPath>,
+    current: MockCurrent,
     state: Arc<Mutex<MockState>>,
+}
+
+/// Selection mirror of `CurrentRoot` for the in-memory mock.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MockCurrent {
+    Snapshot,
+    Local,
+    Cache,
+    System,
 }
 
 #[derive(Default)]
@@ -63,6 +80,9 @@ impl MockFs {
             root,
             build_context,
             snapshot_root: None,
+            cache_root: None,
+            system_root: None,
+            current: MockCurrent::Snapshot,
             state: Arc::new(Mutex::new(MockState {
                 files: HashMap::new(),
                 dirs,
@@ -162,9 +182,19 @@ impl WorkspaceFs for MockFs {
 
     fn set_root(&mut self, root: &GuardedPath) {
         self.root = root.clone();
+        if root == &self.build_context {
+            self.current = MockCurrent::Local;
+        } else if Some(root) == self.cache_root.as_ref() {
+            self.current = MockCurrent::Cache;
+        } else if Some(root) == self.system_root.as_ref() {
+            self.current = MockCurrent::System;
+        } else {
+            self.current = MockCurrent::Snapshot;
+        }
     }
 
     fn switch_to_snapshot(&mut self) {
+        self.current = MockCurrent::Snapshot;
         if let Some(saved) = self.snapshot_root.clone() {
             self.root = saved;
         }
@@ -174,7 +204,27 @@ impl WorkspaceFs for MockFs {
         if self.snapshot_root.is_none() {
             self.snapshot_root = Some(self.root.clone());
         }
+        self.current = MockCurrent::Local;
         self.root = self.build_context.clone();
+    }
+
+    fn switch_to_cache(&mut self, local: bool) {
+        let _ = local;
+        if self.cache_root.is_none() {
+            self.cache_root = Some(self.root.clone());
+        }
+        self.current = MockCurrent::Cache;
+    }
+
+    fn switch_to_system(&mut self) {
+        if self.system_root.is_none() {
+            self.system_root = Some(self.root.clone());
+        }
+        self.current = MockCurrent::System;
+    }
+
+    fn system_entry_cwd(&self, cwd: &GuardedPath) -> GuardedPath {
+        cwd.clone()
     }
 
     fn is_snapshot_pending(&self) -> bool {
@@ -406,6 +456,9 @@ impl WorkspaceFs for MockFs {
     fn resolve_workdir(&self, current: &GuardedPath, new_dir: &str) -> Result<GuardedPath> {
         let candidate = Path::new(new_dir);
         if candidate.is_absolute() {
+            if self.current == MockCurrent::System {
+                return Ok(system_guarded(candidate));
+            }
             // Let `GuardedPath::new` (and its `guard_path`) decide whether the
             // absolute candidate escapes the allowed root. Previously we silently
             // remapped absolute paths into the mock root which allowed Windows
@@ -413,6 +466,9 @@ impl WorkspaceFs for MockFs {
             return GuardedPath::new(self.root.root(), candidate);
         }
         if new_dir == "/" {
+            if self.current == MockCurrent::System {
+                return Ok(system_guarded(Path::new("/")));
+            }
             return Ok(self.root.clone());
         }
         let target = self.normalize_rel(current, new_dir)?;
@@ -423,6 +479,9 @@ impl WorkspaceFs for MockFs {
     fn resolve_read(&self, cwd: &GuardedPath, rel: &str) -> Result<GuardedPath> {
         let candidate = Path::new(rel);
         if candidate.is_absolute() {
+            if self.current == MockCurrent::System {
+                return Ok(system_guarded(candidate));
+            }
             return GuardedPath::new(self.root.root(), candidate);
         }
         let target = self.normalize_rel(cwd, rel)?;
@@ -433,6 +492,9 @@ impl WorkspaceFs for MockFs {
     fn resolve_write(&self, cwd: &GuardedPath, rel: &str) -> Result<GuardedPath> {
         let candidate = Path::new(rel);
         if candidate.is_absolute() {
+            if self.current == MockCurrent::System {
+                return Ok(system_guarded(candidate));
+            }
             return GuardedPath::new(self.root.root(), candidate);
         }
         let target = self.normalize_rel(cwd, rel)?;
@@ -443,6 +505,9 @@ impl WorkspaceFs for MockFs {
     fn resolve_copy_source(&self, from: &str) -> Result<GuardedPath> {
         let candidate = Path::new(from);
         if candidate.is_absolute() {
+            if self.current == MockCurrent::System {
+                return Ok(system_guarded(candidate));
+            }
             return GuardedPath::new(self.build_context.root(), candidate);
         }
         let rel = self.split_components(from).join("/");
@@ -451,6 +516,23 @@ impl WorkspaceFs for MockFs {
 
     fn resolve_copy_source_from_workspace(&self, from: &str) -> Result<GuardedPath> {
         // Mock has no separate workspace root; treat workspace as build_context.
+        self.resolve_copy_source(from)
+    }
+
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    fn resolve_copy_source_from_target(
+        &self,
+        root: super::CopySourceRoot,
+        from: &str,
+    ) -> Result<GuardedPath> {
+        // The mock shares one in-memory namespace: only SYSTEM absolute
+        // sources bypass confinement, mirroring the real resolver.
+        if root == super::CopySourceRoot::System {
+            let candidate = Path::new(from);
+            if candidate.is_absolute() {
+                return Ok(system_guarded(candidate));
+            }
+        }
         self.resolve_copy_source(from)
     }
 
@@ -467,4 +549,13 @@ impl WorkspaceFs for MockFs {
     fn clone_box(&self) -> Box<dyn WorkspaceFs> {
         Box::new(self.clone())
     }
+}
+
+/// Wrap an absolute path as a system guard anchored at its own filesystem
+// anchor (issue #163). Mirrors the real resolver's bypass without touching
+// any root-prefix containment.
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+fn system_guarded(candidate: &Path) -> GuardedPath {
+    let anchor = super::cache::system_anchor(candidate);
+    GuardedPath::from_guarded_parts(anchor, candidate.to_path_buf())
 }

@@ -13,3 +13,15 @@ allow = [
   "Unlicense",
   "Unicode-3.0",
 ]
+
+# Per-crate license exceptions. MPL-2.0 stays off the global allowlist:
+# each use is reviewed and scoped to the single crate that needs it.
+[[licenses.exceptions]]
+# option-ext 0.2.0 is MPL-2.0-only, pulled in transitively by
+# cache-manager (os-cache-dir) -> directories 6 -> dirs-sys 0.5 ->
+# option-ext (issue #163). MPL-2.0 is file-level copyleft: linking it
+# unmodified into the larger Apache-2.0 work is compatible, so this
+# exception is scoped to this crate and version only.
+allow = ["MPL-2.0"]
+name = "option-ext"
+version = "0.2.0"

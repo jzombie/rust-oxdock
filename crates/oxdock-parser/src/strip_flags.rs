@@ -1,5 +1,5 @@
 use crate::ast::Arg;
-use crate::command::{CommandMeta, FlagValueType};
+use crate::command::{CommandMeta, FlagValueType, strip_surrounding_quotes};
 use crate::error::{ParseError, SpanContext};
 
 /// Result of flag stripping: (extracted_flags, remaining_positional_args).
@@ -42,7 +42,14 @@ pub fn strip_flags(args: Vec<Arg>, meta: &CommandMeta) -> Result<StrippedArgs, P
                 match matched {
                     Some(flag_meta) => {
                         let value = if let Some(eq_pos) = s.find('=') {
-                            Arg::String(s[eq_pos + 1..].to_string(), false)
+                            // Single-token form: strip one quote layer so
+                            // `--flag="v"` yields the same value as the
+                            // two-token `--flag "v"` (the grammar delivers
+                            // the token verbatim, quotes included).
+                            Arg::String(
+                                strip_surrounding_quotes(&s[eq_pos + 1..]).to_string(),
+                                false,
+                            )
                         } else if matches!(flag_meta.value_type, FlagValueType::Flag) {
                             Arg::String("true".into(), false)
                         } else {
@@ -168,6 +175,23 @@ mod tests {
         assert_eq!(flags[0].0, "hash");
         assert_eq!(flags[0].1.as_str(), "abc123");
         assert_eq!(pos.len(), 1);
+    }
+
+    #[test]
+    fn flag_with_attached_quoted_value_strips_quotes() {
+        let meta = test_meta(&[crate::command::FlagSpec {
+            name: "hash",
+            long: "--hash",
+            value_type: FlagValueType::String,
+            required: false,
+            description: "",
+        }]);
+        let args = vec![Arg::String("--hash=\"abc 123\"".into(), false)];
+        let (flags, pos) = strip_flags(args, &meta).unwrap();
+        assert_eq!(flags.len(), 1);
+        assert_eq!(flags[0].0, "hash");
+        assert_eq!(flags[0].1.as_str(), "abc 123");
+        assert!(pos.is_empty());
     }
 
     #[test]

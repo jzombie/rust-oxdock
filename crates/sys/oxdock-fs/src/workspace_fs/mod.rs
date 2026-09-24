@@ -183,6 +183,7 @@ pub fn reserve_cargo_scratch() -> Result<CargoScratch> {
 pub mod path;
 pub use path::{GuardedPath, GuardedTempDir, LazyGuardedTempDir};
 pub use path::{command_path, embed_path, normalized_path, to_forward_slashes};
+pub(crate) mod cache;
 pub(crate) mod io;
 pub use io::SpillFile;
 
@@ -212,14 +213,29 @@ impl AccessMode {
     }
 }
 
-/// Which workspace root the resolver currently addresses (issue #131).
+/// Which workspace root the resolver currently addresses (issue #131, extended by issue #163).
 /// `WORKSPACE SNAPSHOT` selects the lazily-created snapshot dir, `WORKSPACE
-/// LOCAL` selects the build context. Mutated only through the `&mut` switch
+/// LOCAL` selects the build context, `WORKSPACE CACHE` selects the
+/// persistent per-project cache dir, and `WORKSPACE SYSTEM` bypasses
+/// root-prefix containment entirely. Mutated only through the `&mut` switch
 /// methods; resolution itself stays `&self`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CurrentRoot {
     Snapshot,
     Local,
+    Cache,
+    System,
+}
+
+/// COPY source root selected by `COPY --from-workspace` (issue #163).
+/// Mirrors `oxdock_parser::WorkspaceTarget` without pulling the parser
+/// into this leaf crate: `oxdock-core` maps between them.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CopySourceRoot {
+    Snapshot,
+    Local,
+    Cache,
+    System,
 }
 
 /// Cross-clone synchronized snapshot backing (issue #131). Fork clones share
@@ -253,6 +269,23 @@ pub struct PathResolver {
     build_context: GuardedPath,
     workspace_root: Option<GuardedPath>,
     backend: Backend,
+    /// Persistent cache guard (issue #163): self-rooted at the project cache
+    /// group directory, OS-native or project-local per `cache_local`. Built
+    /// with no filesystem I/O; the directory is created on first
+    /// cache-targeted resolve through `ensure_cache`. Always reflects the
+    /// current flavor, so scope restore via `set_root` keeps working.
+    cache_guard: GuardedPath,
+    /// Application identity for the OS-native cache root, resolved once at
+    /// construction (explicit builder argument over the auto-detect chain).
+    cache_app: String,
+    /// True while the project-local (`<project>/.cache`) flavor is
+    /// selected (`WORKSPACE CACHE --local`).
+    cache_local: bool,
+    /// Display-only SYSTEM base (issue #163): self-rooted at the filesystem
+    /// anchor of the build context (`/` on Unix, the drive or UNC share on
+    /// Windows). Never used for containment: SYSTEM resolution bypasses
+    /// root-prefix checks and anchors each result at its own anchor.
+    system_anchor: GuardedPath,
 }
 
 impl PathResolver {
@@ -261,8 +294,8 @@ impl PathResolver {
     /// creation so callers avoid ad-hoc path construction.
     #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
     pub fn from_manifest_env() -> Result<Self> {
-        let manifest_dir =
-            std::env::var("CARGO_MANIFEST_DIR").context("CARGO_MANIFEST_DIR missing")?;
+        let manifest_dir = std::env::var(crate::env::CARGO_MANIFEST_DIR)
+            .with_context(|| format!("{} missing", crate::env::CARGO_MANIFEST_DIR))?;
         let path = Path::new(&manifest_dir);
         Self::new(path, path)
     }
@@ -286,6 +319,10 @@ impl PathResolver {
         let shared = Arc::new(SharedSnapshot::new());
         let _ = shared.concrete.set(root.clone());
         Ok(Self {
+            system_anchor: Self::system_anchor_for(&build_context),
+            cache_guard: cache::cache_guard_for(None),
+            cache_app: cache::auto_detect_app_name(None),
+            cache_local: false,
             root,
             current: CurrentRoot::Snapshot,
             shared,
@@ -309,6 +346,10 @@ impl PathResolver {
             .expect("miri lazy holder reserves its synthetic path at construction");
         let backend = Backend::new(&root, &build_context)?;
         Ok(Self {
+            system_anchor: Self::system_anchor_for(&build_context),
+            cache_guard: cache::cache_guard_for(None),
+            cache_app: cache::auto_detect_app_name(None),
+            cache_local: false,
             root,
             current: CurrentRoot::Snapshot,
             shared,
@@ -316,6 +357,53 @@ impl PathResolver {
             workspace_root: None,
             backend,
         })
+    }
+
+    /// Override the cache application identity after construction (issue
+    /// #163). Recomputes the cache guard with no filesystem I/O; pass the
+    /// consuming application's name (for example its crate name) so the
+    /// persistent cache is namespaced per project. Composition roots that
+    /// know their identity should prefer this over the auto-detected chain.
+    pub fn with_cache_app(mut self, app: &str) -> Self {
+        self.cache_app = cache::sanitize_app_name(app);
+        self.refresh_cache_guard();
+        self
+    }
+
+    /// Mutating form of `with_cache_app`.
+    pub fn set_cache_app(&mut self, app: &str) {
+        self.cache_app = cache::sanitize_app_name(app);
+        self.refresh_cache_guard();
+    }
+
+    /// Recompute the cache guard for the current flavor with no filesystem
+    /// I/O. The local flavor anchors at the workspace root (falling back
+    /// to the build context when no workspace root is set yet); the
+    /// OS-native flavor derives from the stored application identity.
+    fn refresh_cache_guard(&mut self) {
+        if self.cache_local {
+            let anchor = self
+                .workspace_root
+                .as_ref()
+                .unwrap_or(&self.build_context)
+                .clone();
+            self.cache_guard = cache::cache_guard_for_local(&anchor);
+        } else {
+            self.cache_guard = cache::cache_guard_for(Some(self.cache_app.as_str()));
+        }
+    }
+
+    /// Display-only SYSTEM base for a build context: self-rooted at the
+    /// filesystem anchor of the context path. Never used for containment.
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    fn system_anchor_for(build_context: &GuardedPath) -> GuardedPath {
+        let anchor = cache::system_anchor(build_context.as_path());
+        let anchor = if anchor.as_os_str().is_empty() {
+            build_context.as_path().to_path_buf()
+        } else {
+            anchor
+        };
+        GuardedPath::from_guarded_parts(anchor.clone(), anchor)
     }
 
     /// Share ownership of the snapshot backing dir (execution results, shell
@@ -330,10 +418,16 @@ impl PathResolver {
     /// only ever feeds lexical joins and the pending display. Never a
     /// syscall, because every snapshot-targeted choke point materializes
     /// before any guard or I/O runs.
+    /// The cache guard feeds lexical joins until the first cache-targeted
+    /// choke point ensures its directory. The system anchor is display-only
+    /// and never feeds containment: SYSTEM resolution bypasses root-prefix
+    /// checks (issue #163).
     pub(crate) fn effective_root(&self) -> &GuardedPath {
         match self.current {
             CurrentRoot::Local => &self.build_context,
             CurrentRoot::Snapshot => self.shared.concrete.get().unwrap_or(&self.root),
+            CurrentRoot::Cache => &self.cache_guard,
+            CurrentRoot::System => &self.system_anchor,
         }
     }
 
@@ -392,6 +486,73 @@ impl PathResolver {
     /// touches the snapshot handle.
     pub fn switch_to_local(&mut self) {
         self.current = CurrentRoot::Local;
+    }
+
+    /// Select the persistent cache root (`WORKSPACE CACHE`, issue #163).
+    /// With `local`, the cache lives in the project tree
+    /// (`<workspace-root>/.cache/workspace`, falling back to the build
+    /// context when no workspace root is set); otherwise it lives under
+    /// the OS per-user cache. Never deletes: the directory is created on
+    /// first cache-targeted resolve and survives restarts. No disk I/O
+    /// here; the guard is recomputed so scope restore keeps working.
+    pub fn switch_to_cache(&mut self, local: bool) {
+        self.cache_local = local;
+        self.refresh_cache_guard();
+        self.current = CurrentRoot::Cache;
+    }
+
+    /// Select full filesystem access (`WORKSPACE SYSTEM`). No disk I/O and
+    /// no confinement: resolution bypasses root-prefix checks (issue #163).
+    pub fn switch_to_system(&mut self) {
+        self.current = CurrentRoot::System;
+    }
+
+    /// True while the cache root is selected.
+    pub(crate) fn is_cache(&self) -> bool {
+        matches!(self.current, CurrentRoot::Cache)
+    }
+
+    /// True while full filesystem access is selected.
+    pub(crate) fn is_system(&self) -> bool {
+        matches!(self.current, CurrentRoot::System)
+    }
+
+    /// Choke point for cache-targeted resolution (issue #163): ensures the
+    /// persistent cache directory exists (creation only, never eviction)
+    /// and returns its guard. Idempotent; safe to call on every resolve.
+    /// Ensures the project root, not the guard itself: `ensure_cache_dir`
+    /// appends the group segment, and the guard already carries it.
+    pub(crate) fn ensure_cache(&self) -> Result<GuardedPath> {
+        let root = self.cache_guard.as_path().parent().with_context(|| {
+            format!("cache guard has no parent: {}", self.cache_guard.display())
+        })?;
+        cache::ensure_cache_dir(root)?;
+        Ok(self.cache_guard.clone())
+    }
+
+    /// Entry working directory for `WORKSPACE SYSTEM` (issue #163). The
+    /// never-created snapshot anchor must not leak into unconfined
+    /// resolution (which would create it as a side effect), so an
+    /// anchor-rooted `cwd` is rebased onto the shared concrete root when
+    /// materialized and reset to the system anchor otherwise. Every other
+    /// `cwd` passes through untouched so relative paths keep working from
+    /// where the script already was. Nested (not let-chained): this crate
+    /// carries no MSRV pin.
+    #[allow(clippy::collapsible_if)]
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    pub fn system_entry_cwd(&self, cwd: &GuardedPath) -> GuardedPath {
+        if !cwd.as_path().starts_with(self.anchor_path()) {
+            return cwd.clone();
+        }
+        if let Some(concrete) = self.shared.concrete.get() {
+            if let Ok(rel) = cwd.as_path().strip_prefix(self.anchor_path()) {
+                return GuardedPath::from_guarded_parts(
+                    concrete.root().to_path_buf(),
+                    concrete.as_path().join(rel),
+                );
+            }
+        }
+        self.system_anchor.clone()
     }
 
     /// True while snapshot-selected but with no concrete root published yet
@@ -454,9 +615,40 @@ impl PathResolver {
         // resolution. The anchor field itself is never adopted here.
         if root == &self.build_context {
             self.current = CurrentRoot::Local;
+        } else if root == &self.cache_guard {
+            self.current = CurrentRoot::Cache;
+        } else if root == &self.system_anchor {
+            self.current = CurrentRoot::System;
+        } else if self.adopt_cache_guard(root) {
+            self.current = CurrentRoot::Cache;
         } else {
             self.current = CurrentRoot::Snapshot;
         }
+    }
+
+    /// Adopt a saved cache guard from the non-current flavor (OS-native vs
+    /// project-local): recompute both flavors purely and, on a match,
+    /// install the guard plus its flavor. Returns false when `root` names
+    /// neither flavor. Keeps cross-flavor scope restores exact.
+    fn adopt_cache_guard(&mut self, root: &GuardedPath) -> bool {
+        let os_guard = cache::cache_guard_for(Some(self.cache_app.as_str()));
+        if root == &os_guard {
+            self.cache_guard = os_guard;
+            self.cache_local = false;
+            return true;
+        }
+        let anchor = self
+            .workspace_root
+            .as_ref()
+            .unwrap_or(&self.build_context)
+            .clone();
+        let local_guard = cache::cache_guard_for_local(&anchor);
+        if root == &local_guard {
+            self.cache_guard = local_guard;
+            self.cache_local = true;
+            return true;
+        }
+        false
     }
 }
 

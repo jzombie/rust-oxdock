@@ -620,6 +620,16 @@ declare_commands! {
             WRITE generated.txt generated-under-workdir
             LET $body: STRING = READ generated.txt
             ASSERT_EQ $body "generated-under-workdir"
+        "#} }, Example { name: "workdir in a scoped block", fence_meta: None, code: indoc! {r#"
+            MKDIR project
+
+            [bool:true] {
+                WORKDIR project
+                WRITE inner.txt inner
+            }
+
+            LET $body: STRING = READ project/inner.txt
+            ASSERT_EQ $body "inner"
         "#} } ],
         lower: |_flags, args| {
             let path = args.into_iter().next().ok_or_else(|| ParseError::validation("WORKDIR", "WORKDIR requires a path".to_string(), &SpanContext::line_only(0)))?;
@@ -630,18 +640,44 @@ declare_commands! {
     Workspace => [
         name: "WORKSPACE",
         variant: Workspace(WorkspaceTarget),
-        syntax: "WORKSPACE (SNAPSHOT|LOCAL, case-insensitive)",
+        syntax: "WORKSPACE (SNAPSHOT|LOCAL|CACHE|SYSTEM) [--local]",
         summary: "Switch workspace roots.",
-        description: "SNAPSHOT or LOCAL root.",
-        args: &[ ArgSpec { name: "target", arg_type: ArgType::OneOf(&["SNAPSHOT", "LOCAL"]), description: "Target root", io: IoDirection::Write, index: 0, required: true, fallback_stream: None } ],
-        flags: &[],
+        description: indoc! {r#"
+            Switches the workspace root. The selection reverts at scope
+            exit like `WORKDIR`.
+
+            - `SNAPSHOT`: the materialized build snapshot (the default).
+            - `LOCAL`: the local workspace directory.
+            - `CACHE`: a persistent per-project directory shared across
+              runs, never evicted. It lives under the OS user cache
+              (`OXDOCK_CACHE_DIR` pins an exact directory);
+              `WORKSPACE CACHE --local` keeps it in
+              `<project>/.cache/workspace` instead.
+            - `SYSTEM`: full filesystem access. Scripts using it are not
+              hermetic.
+        "#},
+        args: &[ ArgSpec { name: "target", arg_type: ArgType::OneOf(&["SNAPSHOT", "LOCAL", "CACHE", "SYSTEM"]), description: "Target root", io: IoDirection::Write, index: 0, required: true, fallback_stream: None } ],
+        flags: &[ FlagSpec { name: "local", long: "--local", value_type: FlagValueType::Flag, required: false, description: "Use the project-local cache directory instead of the OS user cache (CACHE only)" } ],
         default_output: None,
-        examples: &[ Example { name: "switch roots", fence_meta: None, code: indoc! {r#"WORKSPACE LOCAL"#} } ],
-        lower: |_flags, args| {
+        examples: &[ Example { name: "switch roots", fence_meta: None, code: indoc! {r#"WORKSPACE LOCAL"#} }, Example { name: "workspace cache in a scoped block", fence_meta: None, code: indoc! {r#"
+            [bool:true] {
+                WORKSPACE CACHE
+                WRITE cached.txt cached-content
+            }
+
+            COPY --from-workspace CACHE cached.txt restored.txt
+            LET $body: STRING = READ restored.txt
+            ASSERT_EQ $body "cached-content"
+        "#} } ],
+        lower: |flags, args| {
+            let local = flags.iter().any(|(k, _)| k == "local");
             let target = args.into_iter().next().ok_or_else(|| ParseError::validation("WORKSPACE", "WORKSPACE requires a target".to_string(), &SpanContext::line_only(0)))?;
             match target.as_str() {
-                "SNAPSHOT" | "snapshot" => Ok(StepKind::Workspace(WorkspaceTarget::Snapshot)),
-                "LOCAL" | "local" => Ok(StepKind::Workspace(WorkspaceTarget::Local)),
+                "SNAPSHOT" | "LOCAL" | "SYSTEM" if local => Err(ParseError::validation("WORKSPACE", "WORKSPACE --local requires CACHE".to_string(), &SpanContext::line_only(0))),
+                "SNAPSHOT" => Ok(StepKind::Workspace(WorkspaceTarget::Snapshot)),
+                "LOCAL" => Ok(StepKind::Workspace(WorkspaceTarget::Local)),
+                "CACHE" => Ok(StepKind::Workspace(WorkspaceTarget::Cache { local })),
+                "SYSTEM" => Ok(StepKind::Workspace(WorkspaceTarget::System)),
                 other => Err(ParseError::validation("WORKSPACE", format!("unknown workspace target: {other}"), &SpanContext::line_only(0))),
             }
         },
@@ -670,42 +706,49 @@ declare_commands! {
         examples: &[
             Example { name: "set env", fence_meta: None, code: indoc! {r#"ENV APP_MODE=production"#} },
             Example { name: "quoted value with spaces", fence_meta: None, code: indoc! {r#"
-                # quotes keep the space: SET_FORTH stores `outer scope`
+                # Quotes keep the space: SET_FORTH stores `outer scope`.
                 ENV SET_FORTH="outer scope"
                 WRITE out.txt "{{ env:SET_FORTH }}"
+
                 LET $body: STRING = READ out.txt
                 ASSERT_EQ $body "outer scope"
             "#} },
             Example { name: "variable value", fence_meta: None, code: indoc! {r#"
-                # a lone $var evaluates, like ECHO $var
+                # A lone $var evaluates, like ECHO $var.
                 LET $who: STRING = "Alice"
                 ENV GREETING=$who
                 WRITE out.txt "{{ env:GREETING }}"
+
                 LET $body: STRING = READ out.txt
                 ASSERT_EQ $body "Alice"
             "#} },
             Example { name: "all value forms agree", fence_meta: None, code: indoc! {r#"
-                # a bare variable, a quoted literal, and a template all
-                # store plain strings through the same value rules
+                # A bare variable, a quoted literal, and a template all
+                # store plain strings through the same value rules.
                 LET $x: STRING = "Ada"
                 ENV A=$x
                 ENV B="hello world"
                 ENV C="{{ $x }} concatenated"
                 WRITE check.txt "{{ env:A }}|{{ env:B }}|{{ env:C }}"
+
                 LET $body: STRING = READ check.txt
                 ASSERT_EQ $body "Ada|hello world|Ada concatenated"
             "#} },
             Example { name: "scoped env reverts", fence_meta: None, code: indoc! {r#"
                 # ENV inside a braced block reverts when the block exits
                 ENV MODE=production
+
                 [bool:true] {
                     ENV MODE=staging
                     WRITE inner.txt "{{ env:MODE }}"
                 }
+
                 WRITE outer.txt "{{ env:MODE }}"
+
                 LET $inner_body: STRING = READ inner.txt
-                LET $outer_body: STRING = READ outer.txt
                 ASSERT_EQ $inner_body "staging"
+
+                LET $outer_body: STRING = READ outer.txt
                 ASSERT_EQ $outer_body "production"
             "#} },
         ],
@@ -745,7 +788,7 @@ declare_commands! {
         examples: &[
             Example { name: "echo", fence_meta: None, code: indoc! {r#"ECHO build-complete"#} },
             Example { name: "variables", fence_meta: None, code: indoc! {r#"
-                # a lone $x evaluates; {{ }} interpolates inside text
+                # A lone $x evaluates; {{ }} interpolates inside text.
                 LET $x: STRING = "World"
                 ECHO {{ $x }}
                 ECHO $x
@@ -788,15 +831,15 @@ declare_commands! {
 
     Copy => [
         name: "COPY",
-        variant: Copy { from_current_workspace: bool, from: Arg, to: Arg },
-        syntax: "COPY [--from-current-workspace] <from> <to>",
+        variant: Copy { from_workspace: Option<WorkspaceTarget>, from: Arg, to: Arg },
+        syntax: "COPY [--from-workspace SNAPSHOT|LOCAL|CACHE|SYSTEM] <from> <to>",
         summary: "Copy file into workspace.",
-        description: "Copies from host.",
+        description: "Copies from host (the source is never moved or modified). Docker destination semantics: a file copied onto a directory (an existing one, or a trailing-slash spell like `out/`) is duplicated inside it under its own basename; a directory source duplicates its contents into the destination; any other destination path is created holding the copied bytes.",
         args: &[
             ArgSpec { name: "from", arg_type: ArgType::Path, description: "Source", io: IoDirection::Read, index: 0, required: true, fallback_stream: None },
             ArgSpec { name: "to", arg_type: ArgType::Path, description: "Dest", io: IoDirection::Write, index: 1, required: true, fallback_stream: None },
         ],
-        flags: &[ FlagSpec { name: "from_current_workspace", long: "--from-current-workspace", value_type: FlagValueType::Flag, required: false, description: "Copy from workspace instead of build context" } ],
+        flags: &[ FlagSpec { name: "from_workspace", long: "--from-workspace", value_type: FlagValueType::String, required: false, description: "Copy from the given workspace root instead of the build context" } ],
         default_output: None,
         examples: &[ Example { name: "copy", fence_meta: Some("roots:unified"), code: indoc! {r#"
             WRITE src.txt content
@@ -805,16 +848,26 @@ declare_commands! {
             ASSERT_EQ $body "content"
         "#} }, Example { name: "copy from workspace", fence_meta: Some("roots:unified"), code: indoc! {r#"
             WRITE ws-src.txt ws-content
-            COPY --from-current-workspace ws-src.txt ws-copy.txt
+            COPY --from-workspace LOCAL ws-src.txt ws-copy.txt
             LET $body: STRING = READ ws-copy.txt
             ASSERT_EQ $body "ws-content"
         "#} } ],
         lower: |flags, args| {
-            let from_current_workspace = flags.iter().any(|(k, _)| k == "from_current_workspace");
+            let from_workspace = flags
+                .iter()
+                .find(|(k, _)| k == "from_workspace")
+                .map(|(_, v)| match v.as_str() {
+                    "SNAPSHOT" => Ok(WorkspaceTarget::Snapshot),
+                    "LOCAL" => Ok(WorkspaceTarget::Local),
+                    "CACHE" => Ok(WorkspaceTarget::Cache { local: false }),
+                    "SYSTEM" => Ok(WorkspaceTarget::System),
+                    other => Err(ParseError::validation("COPY", format!("unknown workspace source: {other}"), &SpanContext::line_only(0))),
+                })
+                .transpose()?;
             let mut it = args.into_iter();
             let from = it.next().ok_or_else(|| ParseError::validation("COPY", "COPY requires a source".to_string(), &SpanContext::line_only(0)))?;
             let to = it.next().ok_or_else(|| ParseError::validation("COPY", "COPY requires a destination".to_string(), &SpanContext::line_only(0)))?;
-            Ok(StepKind::Copy { from_current_workspace, from, to })
+            Ok(StepKind::Copy { from_workspace, from, to })
         },
     ],
 
@@ -844,27 +897,43 @@ declare_commands! {
 
     Symlink => [
         name: "SYMLINK",
-        variant: Symlink { from: Arg, to: Arg },
-        syntax: "SYMLINK <from> <to>",
+        variant: Symlink { from_workspace: Option<WorkspaceTarget>, from: Arg, to: Arg },
+        syntax: "SYMLINK [--from-workspace SNAPSHOT|LOCAL|CACHE|SYSTEM] <from> <to>",
         summary: "Create symlink.",
-        description: "Creates symlink.",
+        description: "Creates symlink. A directory destination (existing, or a trailing-slash spell) receives the link under the source basename.",
         args: &[
             ArgSpec { name: "from", arg_type: ArgType::Path, description: "Target", io: IoDirection::Read, index: 0, required: true, fallback_stream: None },
             ArgSpec { name: "to", arg_type: ArgType::Path, description: "Link", io: IoDirection::Write, index: 1, required: true, fallback_stream: None },
         ],
-        flags: &[],
+        flags: &[ FlagSpec { name: "from_workspace", long: "--from-workspace", value_type: FlagValueType::String, required: false, description: "Symlink from the given workspace root instead of the build context" } ],
         default_output: None,
         examples: &[ Example { name: "symlink", fence_meta: Some("roots:unified"), code: indoc! {r#"
             WRITE original.txt content
             SYMLINK original.txt link.txt
             LET $body: STRING = READ link.txt
             ASSERT_EQ $body "content"
+        "#} }, Example { name: "symlink from workspace", fence_meta: Some("roots:unified"), code: indoc! {r#"
+            WRITE ws-src.txt ws-content
+            SYMLINK --from-workspace LOCAL ws-src.txt ws-link.txt
+            LET $body: STRING = READ ws-link.txt
+            ASSERT_EQ $body "ws-content"
         "#} } ],
-        lower: |_flags, args| {
+        lower: |flags, args| {
+            let from_workspace = flags
+                .iter()
+                .find(|(k, _)| k == "from_workspace")
+                .map(|(_, v)| match v.as_str() {
+                    "SNAPSHOT" => Ok(WorkspaceTarget::Snapshot),
+                    "LOCAL" => Ok(WorkspaceTarget::Local),
+                    "CACHE" => Ok(WorkspaceTarget::Cache { local: false }),
+                    "SYSTEM" => Ok(WorkspaceTarget::System),
+                    other => Err(ParseError::validation("SYMLINK", format!("unknown workspace source: {other}"), &SpanContext::line_only(0))),
+                })
+                .transpose()?;
             let mut it = args.into_iter();
             let from = it.next().ok_or_else(|| ParseError::validation("SYMLINK", "SYMLINK requires a source".to_string(), &SpanContext::line_only(0)))?;
             let to = it.next().ok_or_else(|| ParseError::validation("SYMLINK", "SYMLINK requires a target".to_string(), &SpanContext::line_only(0)))?;
-            Ok(StepKind::Symlink { from, to })
+            Ok(StepKind::Symlink { from_workspace, from, to })
         },
     ],
 
@@ -1090,8 +1159,10 @@ declare_commands! {
                 # they never update the environment itself
                 ENV NAME="Alice"
                 WRITE template.md "Hi \{{ env:NAME }}!"
+
                 EXPAND template.md NAME="Bob"
                 ASSERT_CONTAINS stdout "Hi Bob!"
+
                 EXPAND template.md
                 ASSERT_CONTAINS stdout "Hi Alice!"
             "#} },
@@ -1275,10 +1346,11 @@ declare_commands! {
                 name: "sleep variable duration",
                 fence_meta: None,
                 code: indoc! {r#"
-                # durations resolve at runtime, so variables work too —
-                # quoted or bare, both bind the same string
+                # Durations resolve at runtime, so variables work too:
+                # quoted or bare, both bind the same string.
                 LET $pause: STRING = "100ms"
                 SLEEP $pause
+
                 LET $bare: STRING = 100ms
                 SLEEP $bare
             "#},
@@ -1523,29 +1595,35 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 IMPORT [STD]
                 LET $role: STRING = "admin"
                 LET $level: INT = 3
+
                 # || is true when either side holds; && needs both.
                 IF $role == "owner" || $level >= 5 {
                     WRITE unexpected.txt no
                 } ELSE {
                     WRITE fallback.txt or-false
                 }
+
+                LET $fb: STRING = READ fallback.txt
+                ASSERT_EQ $fb "or-false"
+                LET $t1: STRING = PATH_TYPE("unexpected.txt")
+                ASSERT_EQ $t1 "absent"
+
                 IF $role == "admin" || $level >= 5 {
                     WRITE chosen.txt or-true
                 }
+
+                LET $ch: STRING = READ chosen.txt
+                ASSERT_EQ $ch "or-true"
+
                 IF $role == "admin" && $level >= 5 {
                     WRITE unexpected-too.txt no
                 } ELSE {
                     WRITE and.txt and-false
                 }
-                LET $fb: STRING = READ fallback.txt
-                LET $ch: STRING = READ chosen.txt
+
                 LET $an: STRING = READ and.txt
-                ASSERT_EQ $fb "or-false"
-                ASSERT_EQ $ch "or-true"
                 ASSERT_EQ $an "and-false"
-                LET $t1: STRING = PATH_TYPE("unexpected.txt")
                 LET $t2: STRING = PATH_TYPE("unexpected-too.txt")
-                ASSERT_EQ $t1 "absent"
                 ASSERT_EQ $t2 "absent"
             "#},
                 },
@@ -1705,14 +1783,18 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     code: indoc! {r#"
                 # LET inside a braced block reverts when the block exits
                 LET $a: STRING = "outer"
+
                 [bool:true] {
                     LET $a: STRING = "inner"
                     WRITE inner.txt "{{ $a }}"
                 }
+
                 WRITE outer.txt "{{ $a }}"
+
                 LET $in_body: STRING = READ inner.txt
-                LET $out_body: STRING = READ outer.txt
                 ASSERT_EQ $in_body "inner"
+
+                LET $out_body: STRING = READ outer.txt
                 ASSERT_EQ $out_body "outer"
             "#},
                 },
@@ -1734,6 +1816,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     RETURN $loud
                 }
                 ASSERT_EQ $res "ada!"
+
                 # Any declared type works: the block value checks like any RHS.
                 LET $n: INT = {
                     RETURN 40 + 2
@@ -1748,11 +1831,13 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 LET $size_str: STRING = ECHO 41
                 IMPORT [STD]
                 LET $total: INT = INT($size_str) + 1
+                ASSERT_EQ $total 42
+
                 LET $ratio: FLOAT = 1 + 2.5
+                ASSERT_EQ $ratio 3.5
+
                 # Int x Int stays INT: integer division truncates.
                 LET $half: INT = 7 / 2
-                ASSERT_EQ $total 42
-                ASSERT_EQ $ratio 3.5
                 ASSERT_EQ $half 3
             "#},
                 },
@@ -1771,8 +1856,10 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 IF $decimal {
                     WRITE unexpected.txt no
                 }
+
                 LET $ok: STRING = READ exact.txt
                 ASSERT_EQ $ok "yes"
+
                 LET $t: STRING = PATH_TYPE("unexpected.txt")
                 ASSERT_EQ $t "absent"
             "#},
@@ -1786,6 +1873,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 IF $sum > 0.299999 && $sum < 0.300001 {
                     WRITE bounded.txt yes
                 }
+
                 LET $ok: STRING = READ bounded.txt
                 ASSERT_EQ $ok "yes"
             "#},
@@ -1803,6 +1891,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 IF $info.is_os_pipe {
                     WRITE unexpected.txt "should be a script pipe"
                 }
+
                 ASSERT_EQ $info.type "PIPE"
             "#},
                 },
@@ -1854,12 +1943,14 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 IMPORT [STD]
                 LET $n: INT = INT($raw)
                 $n = $n + 1
+
                 # The declared type also converts plain strings on assignment.
                 $n = "42"
+                ASSERT_EQ $n 42
+
                 # Same crossing for decimals via FLOAT().
                 LET $frac_str: STRING = ECHO 2.5
                 LET $f: FLOAT = FLOAT($frac_str) + 0.25
-                ASSERT_EQ $n 42
                 ASSERT_EQ $f 2.75
             "#},
                 },
@@ -2001,9 +2092,10 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     name: "timeout variable duration",
                     fence_meta: None,
                     code: indoc! {r#"
-                    # durations resolve at runtime, so variables work too
+                    # Durations resolve at runtime, so variables work too.
                     LET $budget: DURATION = "30s"
                     TIMEOUT $budget WRITE heartbeat.txt alive
+
                     LET $beat: STRING = READ heartbeat.txt
                     ASSERT_EQ $beat "alive"
                 "#},
@@ -2046,8 +2138,10 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 FUNC GREET($name: STRING) {
                   RETURN $name
                 }
+
                 LET $res: STRING = GREET("ada")
                 ASSERT_EQ $res "ada"
+
                 # Statement form: parens stay, the value drops.
                 GREET("bex")
             "#},
@@ -2063,8 +2157,10 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                   WITH_IO [stdin=$q] READ_LINE $line
                   RETURN $line
                 }
+
                 LET $p: PIPE
                 WITH_IO [stdout=$p] ECHO "payload"
+
                 LET $got: STRING = DRAIN($p)
                 ASSERT_EQ $got "payload"
             "#},
@@ -2098,6 +2194,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                   }
                   RETURN "no"
                 }
+
                 LET $res: STRING = PICK(true)
                 ASSERT_EQ $res "yes"
             "#},
@@ -2127,6 +2224,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                   WRITE tick.txt "once"
                   $done = true
                 }
+
                 LET $tick: STRING = READ tick.txt
                 ASSERT_EQ $tick "once"
             "#},
@@ -2234,14 +2332,15 @@ impl fmt::Display for StepKind {
             }
             StepKind::Echo(m) => write!(f, "ECHO {}", fmt_value(m, quote_msg)),
             StepKind::Copy {
-                from_current_workspace,
+                from_workspace,
                 from,
                 to,
             } => {
-                if *from_current_workspace {
+                if let Some(target) = from_workspace {
                     write!(
                         f,
-                        "COPY --from-current-workspace {} {}",
+                        "COPY --from-workspace {} {} {}",
+                        target,
                         fmt_value(from, quote_arg),
                         fmt_value(to, quote_arg)
                     )
@@ -2254,12 +2353,28 @@ impl fmt::Display for StepKind {
                     )
                 }
             }
-            StepKind::Symlink { from, to } => write!(
-                f,
-                "SYMLINK {} {}",
-                fmt_value(from, quote_arg),
-                fmt_value(to, quote_arg)
-            ),
+            StepKind::Symlink {
+                from_workspace,
+                from,
+                to,
+            } => {
+                if let Some(target) = from_workspace {
+                    write!(
+                        f,
+                        "SYMLINK --from-workspace {} {} {}",
+                        target,
+                        fmt_value(from, quote_arg),
+                        fmt_value(to, quote_arg)
+                    )
+                } else {
+                    write!(
+                        f,
+                        "SYMLINK {} {}",
+                        fmt_value(from, quote_arg),
+                        fmt_value(to, quote_arg)
+                    )
+                }
+            }
             StepKind::Mkdir(a) => write!(f, "MKDIR {}", fmt_value(a, quote_arg)),
             StepKind::Ls(a) => {
                 write!(f, "LS")?;
@@ -2564,6 +2679,208 @@ mod tests {
     }
 
     #[test]
+    fn workspace_accepts_all_four_targets_uppercase_only() {
+        // WORKSPACE targets are uppercase-only, like every other DSL
+        // keyword argument: lowercase spellings are rejected.
+        for (spelling, target) in [
+            ("SNAPSHOT", WorkspaceTarget::Snapshot),
+            ("LOCAL", WorkspaceTarget::Local),
+            ("CACHE", WorkspaceTarget::Cache { local: false }),
+            ("SYSTEM", WorkspaceTarget::System),
+        ] {
+            let steps =
+                parse_script(&format!("WORKSPACE {spelling}\n"), lower_command).expect("parses");
+            assert_eq!(steps.len(), 1);
+            assert_eq!(steps[0].kind, StepKind::Workspace(target.clone()));
+            assert_eq!(steps[0].kind.to_string(), format!("WORKSPACE {target}"));
+        }
+        for spelling in ["snapshot", "local", "cache", "system"] {
+            let err = parse_err(&format!("WORKSPACE {spelling}\n"));
+            assert!(
+                err.contains("expected one of SNAPSHOT|LOCAL|CACHE|SYSTEM"),
+                "{spelling}: {err}"
+            );
+        }
+        let err = parse_err("WORKSPACE REMOTE\n");
+        assert!(
+            err.contains("expected one of SNAPSHOT|LOCAL|CACHE|SYSTEM"),
+            "{err}"
+        );
+
+        // `--local` selects the project-tree cache and round-trips
+        // through Display; anywhere else it is rejected.
+        let steps = parse_script("WORKSPACE CACHE --local\n", lower_command).expect("parses");
+        assert_eq!(
+            steps[0].kind,
+            StepKind::Workspace(WorkspaceTarget::Cache { local: true })
+        );
+        assert_eq!(steps[0].kind.to_string(), "WORKSPACE CACHE --local");
+        for bad in [
+            "WORKSPACE SNAPSHOT --local\n",
+            "WORKSPACE LOCAL --local\n",
+            "WORKSPACE SYSTEM --local\n",
+        ] {
+            let err = parse_err(bad);
+            assert!(err.contains("--local requires CACHE"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn copy_from_workspace_selects_source_root() {
+        for (spelling, target) in [
+            ("SNAPSHOT", WorkspaceTarget::Snapshot),
+            ("LOCAL", WorkspaceTarget::Local),
+            ("CACHE", WorkspaceTarget::Cache { local: false }),
+            ("SYSTEM", WorkspaceTarget::System),
+        ] {
+            let steps = parse_script(
+                &format!("COPY --from-workspace {spelling} a.txt b.txt\n"),
+                lower_command,
+            )
+            .expect("parses");
+            assert!(
+                matches!(&steps[0].kind, StepKind::Copy { from_workspace: Some(t), .. } if *t == target),
+                "unexpected lowering for {spelling}: {:?}",
+                steps[0].kind
+            );
+        }
+        // The `=` form carries the value inline on one token: `--`
+        // tokens never match `assignment`, so `strip_flags` splits it.
+        for script in [
+            "COPY --from-workspace=CACHE a.txt b.txt\n",
+            "COPY --from-workspace=\"CACHE\" a.txt b.txt\n",
+        ] {
+            let steps = parse_script(script, lower_command).expect("parses");
+            assert!(
+                matches!(
+                    &steps[0].kind,
+                    StepKind::Copy {
+                        from_workspace: Some(WorkspaceTarget::Cache { local: false }),
+                        ..
+                    }
+                ),
+                "unexpected lowering for {script:?}: {:?}",
+                steps[0].kind
+            );
+        }
+        // An absent flag means the build-context default.
+        let steps = parse_script("COPY a.txt b.txt\n", lower_command).expect("parses");
+        assert!(
+            matches!(
+                &steps[0].kind,
+                StepKind::Copy {
+                    from_workspace: None,
+                    ..
+                }
+            ),
+            "unexpected lowering: {:?}",
+            steps[0].kind
+        );
+        // Unknown and lowercase values are rejected uppercase-only.
+        for bad in ["REMOTE", "local"] {
+            let err = parse_err(&format!("COPY --from-workspace {bad} a.txt b.txt\n"));
+            assert!(err.contains("unknown workspace source"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn symlink_from_workspace_selects_source_root() {
+        for (spelling, target) in [
+            ("SNAPSHOT", WorkspaceTarget::Snapshot),
+            ("LOCAL", WorkspaceTarget::Local),
+            ("CACHE", WorkspaceTarget::Cache { local: false }),
+            ("SYSTEM", WorkspaceTarget::System),
+        ] {
+            let steps = parse_script(
+                &format!("SYMLINK --from-workspace {spelling} a.txt b.txt\n"),
+                lower_command,
+            )
+            .expect("parses");
+            assert!(
+                matches!(&steps[0].kind, StepKind::Symlink { from_workspace: Some(t), .. } if *t == target),
+                "unexpected lowering for {spelling}: {:?}",
+                steps[0].kind
+            );
+            let roundtrip = steps[0].kind.to_string();
+            assert!(
+                roundtrip.contains("--from-workspace"),
+                "display should round-trip the flag: {roundtrip}"
+            );
+        }
+        let steps = parse_script("SYMLINK a.txt b.txt\n", lower_command).expect("parses");
+        assert!(
+            matches!(
+                &steps[0].kind,
+                StepKind::Symlink {
+                    from_workspace: None,
+                    ..
+                }
+            ),
+            "unexpected lowering: {:?}",
+            steps[0].kind
+        );
+        for bad in ["REMOTE", "local"] {
+            let err = parse_err(&format!("SYMLINK --from-workspace {bad} a.txt b.txt\n"));
+            assert!(err.contains("unknown workspace source"), "{bad}: {err}");
+        }
+        // The `=` form carries the value inline, like COPY.
+        let steps = parse_script(
+            "SYMLINK --from-workspace=LOCAL a.txt b.txt\n",
+            lower_command,
+        )
+        .expect("parses");
+        assert!(
+            matches!(
+                &steps[0].kind,
+                StepKind::Symlink {
+                    from_workspace: Some(WorkspaceTarget::Local),
+                    ..
+                }
+            ),
+            "unexpected lowering: {:?}",
+            steps[0].kind
+        );
+    }
+
+    #[test]
+    fn dash_dash_equals_tokens_bypass_assignment() {
+        // `--` tokens never match `assignment`: flags keep their `=`
+        // form as one argument, while other commands see the same text.
+        let steps = parse_script("ENV --foo=bar\n", lower_command).expect("parses");
+        let StepKind::Env { key, value } = &steps[0].kind else {
+            panic!("expected Env, got {:?}", steps[0].kind);
+        };
+        assert_eq!(key, "--foo");
+        assert_eq!(value.as_str(), "bar");
+
+        let steps = parse_script("RUN echo --foo=bar\n", lower_command).expect("parses");
+        let StepKind::Run(cmd) = &steps[0].kind else {
+            panic!("expected Run, got {:?}", steps[0].kind);
+        };
+        assert!(
+            cmd.as_str().contains("--foo=bar"),
+            "unexpected RUN lowering: {cmd:?}"
+        );
+
+        let digest = "08135c1b6349b0e4f894c36221952f0de00e6b4d82f80895abf359755e77103c";
+        let steps = parse_script(&format!("ASSERT_EQ --hash={digest} $body\n"), lower_command)
+            .expect("parses");
+        let StepKind::AssertEq { hash, .. } = &steps[0].kind else {
+            panic!("expected AssertEq, got {:?}", steps[0].kind);
+        };
+        assert_eq!(hash.as_deref(), Some(digest));
+
+        // EXPAND still treats `--k=v` positionals as overrides.
+        let steps = parse_script("EXPAND --k=v\n", lower_command).expect("parses");
+        let StepKind::Expand { path, overrides } = &steps[0].kind else {
+            panic!("expected Expand, got {:?}", steps[0].kind);
+        };
+        assert!(path.is_none());
+        assert_eq!(overrides.len(), 1);
+        assert_eq!(overrides[0].0.as_str(), "--k");
+    }
+
+    #[test]
     fn space_before_paren_is_not_a_call() {
         // The call head and `(` must be contiguous: `ECHO (1 + 2)` is an
         // instruction, never a function invocation.
@@ -2750,8 +3067,15 @@ mod tests {
             "{:?}",
             steps[1].kind
         );
-        let steps =
-            parse_script("WHILE !$done {\n  BREAK\n}\n", lower_command).expect("while parses");
+        let steps = parse_script(
+            indoc! {r#"
+                WHILE !$done {
+                  BREAK
+                }
+            "#},
+            lower_command,
+        )
+        .expect("while parses");
         let StepKind::While { body, .. } = &steps[0].kind else {
             panic!("expected While, got {:?}", steps[0].kind);
         };
@@ -2763,7 +3087,12 @@ mod tests {
         // A bare `NAME(...)` on the LET RHS stays an expression assignment;
         // only ASYNC/TIMEOUT/command captures produce AssignCapture.
         let steps = parse_script(
-            "FUNC GREET($name: STRING) {\n  RETURN $name\n}\nLET $r: STRING = GREET(\"ada\")\n",
+            indoc! {r#"
+                FUNC GREET($name: STRING) {
+                  RETURN $name
+                }
+                LET $r: STRING = GREET("ada")
+            "#},
             lower_command,
         )
         .expect("capture call parses");
@@ -2817,7 +3146,14 @@ mod tests {
     #[test]
     fn multiline_bare_call_and_list_span_lines() {
         let steps = parse_script(
-            "FUNC GREET($a: STRING) {\n  RETURN $a\n}\nGREET(\n  \"ada\"\n)\n",
+            indoc! {r#"
+                FUNC GREET($a: STRING) {
+                  RETURN $a
+                }
+                GREET(
+                  "ada"
+                )
+            "#},
             lower_command,
         )
         .expect("multiline bare call parses");
@@ -2826,8 +3162,16 @@ mod tests {
         };
         assert_eq!(name, "SCRIPT::GREET");
         assert_eq!(args.len(), 1);
-        let steps = parse_script("LET $l: LIST = [\n  \"a\",\n  \"b\"\n]\n", lower_command)
-            .expect("multiline list parses");
+        let steps = parse_script(
+            indoc! {r#"
+                LET $l: LIST = [
+                  "a",
+                  "b"
+                ]
+            "#},
+            lower_command,
+        )
+        .expect("multiline list parses");
         let StepKind::Assign { expr, .. } = &steps[0].kind else {
             panic!("expected Assign, got {:?}", steps[0].kind);
         };

@@ -2,7 +2,7 @@ use anyhow::{Context, Result, anyhow};
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 use std::path::{Path, PathBuf};
 
-use super::{AccessMode, PathResolver, to_forward_slashes};
+use super::{AccessMode, CopySourceRoot, PathResolver, to_forward_slashes};
 use crate::GuardedPath;
 
 // Path resolution helpers (WORKDIR, READ/WRITE, COPY sources).
@@ -36,6 +36,12 @@ impl PathResolver {
     }
 
     pub fn resolve_workdir(&self, current: &GuardedPath, new_dir: &str) -> Result<GuardedPath> {
+        if self.is_system() {
+            return self.resolve_workdir_system(current, new_dir);
+        }
+        if self.is_cache() {
+            self.ensure_cache()?;
+        }
         if new_dir == "/" {
             // Reset to the resolver root when WORKDIR is set to '/'. Pure
             // selection, no I/O: a pending anchor is returned as-is and the
@@ -67,6 +73,57 @@ impl PathResolver {
         self.backend.resolve_workdir(resolved)
     }
 
+    /// Unconfined workdir resolution for `WORKSPACE SYSTEM` (issue #163).
+    /// `/` resets to the display-only system anchor; absolute candidates
+    /// resolve as-is; relative candidates join onto the current directory.
+    /// Results anchor at their own filesystem anchor so every drive and
+    /// share resolves. The backend still creates the directory when
+    /// missing, as with confined roots.
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    fn resolve_workdir_system(&self, current: &GuardedPath, new_dir: &str) -> Result<GuardedPath> {
+        if new_dir == "/" {
+            return self.backend.resolve_workdir(self.system_anchor.clone());
+        }
+        let normalized = to_forward_slashes(new_dir);
+        let new_dir_path = Path::new(&normalized);
+        let base = if current.as_path().is_absolute() {
+            current.as_path().to_path_buf()
+        } else {
+            self.build_context.as_path().join(current.as_path())
+        };
+        let absolute = if new_dir_path.is_absolute() {
+            new_dir_path.to_path_buf()
+        } else if Self::is_absolute_or_rooted(new_dir_path) {
+            super::cache::system_anchor(&base).join(Self::root_relative_path(new_dir_path))
+        } else {
+            base.join(new_dir_path)
+        };
+        let wrapped = super::cache::system_wrap_absolute(&absolute);
+        self.backend.resolve_workdir(wrapped)
+    }
+
+    /// Unconfined read/write resolution for `WORKSPACE SYSTEM` (issue #163).
+    /// Purely lexical: no snapshot materialization, no root-prefix
+    /// containment. Read/write mode imposes no distinction under SYSTEM.
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    fn resolve_system(&self, cwd: &GuardedPath, rel: &str) -> Result<GuardedPath> {
+        let normalized = to_forward_slashes(rel);
+        let rel_path = Path::new(&normalized);
+        let base = if cwd.as_path().is_absolute() {
+            cwd.as_path().to_path_buf()
+        } else {
+            self.build_context.as_path().join(cwd.as_path())
+        };
+        let absolute = if rel_path.is_absolute() {
+            rel_path.to_path_buf()
+        } else if Self::is_absolute_or_rooted(rel_path) {
+            super::cache::system_anchor(&base).join(Self::root_relative_path(rel_path))
+        } else {
+            base.join(rel_path)
+        };
+        Ok(super::cache::system_wrap_absolute(&absolute))
+    }
+
     pub fn resolve_read(&self, cwd: &GuardedPath, rel: &str) -> Result<GuardedPath> {
         self.resolve(cwd, rel, AccessMode::Read)
     }
@@ -78,6 +135,13 @@ impl PathResolver {
     pub fn resolve_copy_source(&self, from: &str) -> Result<GuardedPath> {
         let from_path = Path::new(from);
         if Self::is_absolute_or_rooted(from_path) {
+            // SYSTEM bypass (issue #163): absolute sources on any drive or
+            // share resolve without confinement. Relative sources keep the
+            // existing build-context chain below.
+            if self.is_system() {
+                let wrapped = super::cache::system_wrap_absolute(from_path);
+                return self.backend.resolve_copy_source(wrapped);
+            }
             if let Some(workspace_root) = &self.workspace_root
                 && let Ok(guarded) =
                     self.check_access_with_root(workspace_root, from_path, AccessMode::Read)
@@ -126,22 +190,80 @@ impl PathResolver {
             .workspace_root
             .as_ref()
             .ok_or_else(|| anyhow!("no workspace root set for workspace-relative COPY"))?;
+        self.resolve_copy_source_from_root(workspace_root, from)
+    }
 
+    /// COPY source resolution against an explicit `--from-workspace` root
+    /// (issue #163). SNAPSHOT requires a materialized snapshot (reading
+    /// from a pending anchor would fabricate an empty source); LOCAL keeps
+    /// the workspace-root semantics of the former boolean flag; CACHE
+    /// ensures the persistent directory first; SYSTEM resolves absolute
+    /// sources on any drive or share without confinement while relative
+    /// sources stay anchored onto the build context.
+    pub fn resolve_copy_source_from_target(
+        &self,
+        root: CopySourceRoot,
+        from: &str,
+    ) -> Result<GuardedPath> {
+        match root {
+            CopySourceRoot::Local => self.resolve_copy_source_from_workspace(from),
+            CopySourceRoot::Snapshot => {
+                let concrete = self.shared.concrete.get().ok_or_else(|| {
+                    anyhow!("COPY from SNAPSHOT requires a materialized snapshot")
+                })?;
+                self.resolve_copy_source_from_root(concrete, from)
+            }
+            CopySourceRoot::Cache => {
+                let guard = self.ensure_cache()?;
+                self.resolve_copy_source_from_root(&guard, from)
+            }
+            CopySourceRoot::System => {
+                let from_path = Path::new(from);
+                if Self::is_absolute_or_rooted(from_path) {
+                    let wrapped = super::cache::system_wrap_absolute(from_path);
+                    return self.backend.resolve_copy_source(wrapped);
+                }
+                let candidate = self.build_context.as_path().join(from);
+                self.check_access_with_root(&self.build_context, &candidate, AccessMode::Read)
+                    .with_context(|| {
+                        format!("failed to resolve COPY source {}", candidate.display())
+                    })
+                    .and_then(|guarded| self.backend.resolve_copy_source(guarded))
+            }
+        }
+    }
+
+    fn resolve_copy_source_from_root(
+        &self,
+        source_root: &GuardedPath,
+        from: &str,
+    ) -> Result<GuardedPath> {
         let from_path = Path::new(from);
         if Self::is_absolute_or_rooted(from_path) {
             return self
-                .check_access_with_root(workspace_root, from_path, AccessMode::Read)
+                .check_access_with_root(source_root, from_path, AccessMode::Read)
                 .with_context(|| format!("failed to resolve COPY source {}", from_path.display()))
                 .and_then(|guarded| self.backend.resolve_copy_source(guarded));
         }
 
-        let candidate = workspace_root.as_path().join(from);
-        self.check_access_with_root(workspace_root, &candidate, AccessMode::Read)
+        let candidate = source_root.as_path().join(from);
+        self.check_access_with_root(source_root, &candidate, AccessMode::Read)
             .with_context(|| format!("failed to resolve COPY source {}", candidate.display()))
             .and_then(|guarded| self.backend.resolve_copy_source(guarded))
     }
 
     fn resolve(&self, cwd: &GuardedPath, rel: &str, mode: AccessMode) -> Result<GuardedPath> {
+        // SYSTEM bypass (issue #163): no snapshot materialization, no
+        // root-prefix containment. Each result anchors at its own
+        // filesystem anchor so every drive and share resolves.
+        if self.is_system() {
+            return self.resolve_system(cwd, rel);
+        }
+        // CACHE choke point (issue #163): ensure the persistent directory
+        // exists before the confined flow below operates on it.
+        if self.is_cache() {
+            self.ensure_cache()?;
+        }
         // Normalize backslashes to forward slashes before path construction
         let normalized = to_forward_slashes(rel);
         // Choke point (issue #131): snapshot-targeted resolution materializes
@@ -192,6 +314,7 @@ impl PathResolver {
 
 #[cfg(test)]
 mod tests {
+    use super::super::{command_path, to_forward_slashes};
     use super::*;
     use crate::GuardedPath;
 
@@ -545,5 +668,225 @@ mod tests {
             .resolve_read(&root, "sub/../sub/file.txt")
             .expect("contained dotdot resolves");
         assert_eq!(resolved.as_path(), expected.as_path());
+    }
+
+    /// Pin the exact cache dir for hermetic tests (issue #163). Shared with
+    /// the `cache` module's guard so parallel tests cannot race overrides.
+    fn pin_cache_dir(dir: &GuardedPath) -> super::super::cache::SerialCacheEnv {
+        let dir_str = dir.as_path().to_string_lossy().into_owned();
+        super::super::cache::SerialCacheEnv::new(&[(crate::env::CACHE_DIR, Some(dir_str.as_str()))])
+    }
+
+    /// `WORKSPACE CACHE` round trip (issue #163): switching selects the
+    /// persistent guard, writes land under the pinned dir, reads see them,
+    /// and the snapshot handle never materializes.
+    #[test]
+    fn cache_selection_reads_and_writes_under_pinned_dir() {
+        let pin_temp = GuardedPath::tempdir().unwrap();
+        let pin_root = pin_temp.as_guarded_path().clone();
+        let _env = pin_cache_dir(&pin_root);
+
+        let local_temp = GuardedPath::tempdir().unwrap();
+        let local = local_temp.as_guarded_path().clone();
+        let mut resolver = PathResolver::new_lazy(local.clone()).unwrap();
+        let handle = resolver.snapshot_handle();
+        resolver.switch_to_cache(false);
+
+        let cwd = resolver.root().clone();
+        assert!(
+            cwd.as_path().starts_with(pin_root.as_path()),
+            "cache root must live under the pinned dir"
+        );
+        let target = resolver.resolve_write(&cwd, "cached.txt").unwrap();
+        assert!(
+            target.as_path().starts_with(pin_root.as_path()),
+            "cache writes must stay under the pinned dir"
+        );
+        resolver.write_file(&target, b"persistent").unwrap();
+        let back = resolver.resolve_read(&cwd, "cached.txt").unwrap();
+        assert_eq!(resolver.read_file(&back).unwrap(), b"persistent");
+        assert!(
+            !handle.is_materialized(),
+            "cache activity must not materialize the snapshot"
+        );
+
+        // A fresh resolver with the same pin sees the same persistent entry.
+        let mut second = PathResolver::new_lazy(local.clone()).unwrap();
+        second.switch_to_cache(false);
+        let second_cwd = second.root().clone();
+        let probe = second.resolve_read(&second_cwd, "cached.txt").unwrap();
+        assert_eq!(second.read_file(&probe).unwrap(), b"persistent");
+    }
+
+    /// `WORKSPACE CACHE` still confines: `..` escapes above the cache root
+    /// fail exactly like snapshot and local escapes.
+    #[test]
+    fn cache_selection_rejects_escapes() {
+        let pin_temp = GuardedPath::tempdir().unwrap();
+        let pin_root = pin_temp.as_guarded_path().clone();
+        let _env = pin_cache_dir(&pin_root);
+
+        let local_temp = GuardedPath::tempdir().unwrap();
+        let local = local_temp.as_guarded_path().clone();
+        let mut resolver = PathResolver::new_lazy(local).unwrap();
+        resolver.switch_to_cache(false);
+        let cwd = resolver.root().clone();
+
+        assert!(resolver.resolve_write(&cwd, "../escape.txt").is_err());
+        assert!(resolver.resolve_read(&cwd, "a/../../escape.txt").is_err());
+        resolver.resolve_write(&cwd, "ok.txt").unwrap();
+    }
+
+    /// `set_root` restores four-way selection (issue #163): scope push/pop
+    /// round-trips through every root without collapsing CACHE or SYSTEM
+    /// onto snapshot or local.
+    #[test]
+    fn set_root_restores_all_four_selections() {
+        let pin_temp = GuardedPath::tempdir().unwrap();
+        let pin_root = pin_temp.as_guarded_path().clone();
+        let _env = pin_cache_dir(&pin_root);
+
+        let local_temp = GuardedPath::tempdir().unwrap();
+        let local = local_temp.as_guarded_path().clone();
+        let mut resolver = PathResolver::new_lazy(local.clone()).unwrap();
+
+        let snapshot_root = resolver.root().clone();
+        resolver.switch_to_local();
+        let local_root = resolver.root().clone();
+        resolver.switch_to_cache(false);
+        let cache_root = resolver.root().clone();
+        resolver.switch_to_system();
+        let system_root = resolver.root().clone();
+
+        resolver.set_root(&cache_root);
+        assert_eq!(resolver.root(), &cache_root);
+        let cache_cwd = resolver.root().clone();
+        resolver.resolve_write(&cache_cwd, "c.txt").unwrap();
+
+        resolver.set_root(&system_root);
+        let system_cwd = resolver.root().clone();
+        let sys_target = resolver.resolve_write(&system_cwd, "s.txt").unwrap();
+        assert!(sys_target.as_path().is_absolute());
+
+        resolver.set_root(&local_root);
+        assert_eq!(resolver.root(), &local);
+        resolver.set_root(&snapshot_root);
+        assert!(resolver.is_snapshot_pending());
+    }
+
+    /// Cross-flavor scope restore: a saved guard from the non-current
+    /// cache flavor restores CACHE (with its flavor), never Snapshot.
+    #[test]
+    fn set_root_restores_cache_across_flavors() {
+        let pin_temp = GuardedPath::tempdir().unwrap();
+        let pin_root = pin_temp.as_guarded_path().clone();
+        let _env = pin_cache_dir(&pin_root);
+
+        let local_temp = GuardedPath::tempdir().unwrap();
+        let local = local_temp.as_guarded_path().clone();
+        let mut resolver = PathResolver::new_lazy(local.clone()).unwrap();
+        resolver.set_workspace_root(local.clone());
+
+        resolver.switch_to_cache(false);
+        let os_guard = resolver.root().clone();
+        resolver.switch_to_cache(true);
+        let local_guard = resolver.root().clone();
+        assert_ne!(os_guard, local_guard);
+
+        // Restore the saved OS-native guard while local is selected.
+        resolver.set_root(&os_guard);
+        assert_eq!(resolver.root(), &os_guard);
+        let target = resolver
+            .resolve_write(&resolver.root().clone(), "flavor.txt")
+            .unwrap();
+        assert!(target.as_path().starts_with(pin_root.as_path()));
+
+        // And back the other way.
+        resolver.set_root(&local_guard);
+        assert_eq!(resolver.root(), &local_guard);
+        let target = resolver
+            .resolve_write(&resolver.root().clone(), "flavor.txt")
+            .unwrap();
+        assert!(target.as_path().starts_with(local.as_path()));
+    }
+
+    /// `WORKSPACE SYSTEM` bypass (issue #163): absolute paths resolve on any
+    /// location without confinement, relative paths join the cwd, and `..`
+    /// normalizes lexically instead of erroring.
+    #[test]
+    fn system_selection_resolves_absolute_paths_without_confinement() {
+        let local_temp = GuardedPath::tempdir().unwrap();
+        let local = local_temp.as_guarded_path().clone();
+        let mut resolver = PathResolver::new_lazy(local.clone()).unwrap();
+        resolver.switch_to_system();
+
+        let outside_temp = GuardedPath::tempdir().unwrap();
+        let outside = outside_temp.as_guarded_path().clone();
+        let probe = outside.join("sys-probe.txt").expect("probe path");
+        // Plain drive form, forward slashes: tempdir guards canonicalize
+        // to Windows verbatim paths (`\\?\C:\...`), whose spelling never
+        // survives `resolve()`'s own slash normalization (`//?/C:/...`
+        // denotes the same file but compares unequal). `command_path`
+        // strips the verbatim prefix so both sides share one spelling.
+        let probe_str = to_forward_slashes(&command_path(&probe).to_string_lossy()).to_string();
+
+        // A confined resolver re-anchors the same absolute path under
+        // its own root instead of honoring it: the bypass is SYSTEM-only.
+        let confined = PathResolver::new_guarded(local.clone(), local.clone()).expect("confined");
+        let rebased = confined.resolve_read(&local, &probe_str).expect("rebase");
+        assert_ne!(rebased.as_path(), probe.as_path());
+        assert!(rebased.as_path().starts_with(local.as_path()));
+
+        let cwd = resolver.system_entry_cwd(&local);
+        // Seed through the SYSTEM resolver itself so the write lands in
+        // the backend namespace the read observes (the Miri synthetic
+        // backend keys state by guard root).
+        let target = resolver.resolve_write(&cwd, &probe_str).unwrap();
+        // String comparison would trip on separator spelling (Windows
+        // joins with `\`); normalizing both sides compares the location.
+        assert_eq!(
+            to_forward_slashes(&target.as_path().to_string_lossy()),
+            probe_str
+        );
+        resolver.write_file(&target, b"system").unwrap();
+        let back = resolver.resolve_read(&cwd, &probe_str).unwrap();
+        assert_eq!(resolver.read_file(&back).unwrap(), b"system");
+
+        let rel = resolver.resolve_write(&cwd, "rel.txt").unwrap();
+        assert!(rel.as_path().starts_with(cwd.as_path()));
+
+        let dotdot = resolver
+            .resolve_read(&probe, "../sys-probe.txt")
+            .expect("lexical dotdot under system");
+        assert_eq!(dotdot.as_path(), probe.as_path());
+    }
+
+    /// Entering SYSTEM from a pending snapshot must not leak the virtual
+    /// anchor into unconfined resolution (issue #163): the entry cwd leaves
+    /// the never-created anchor behind, landing on the concrete root once
+    /// materialized.
+    #[test]
+    fn system_entry_cwd_rebases_off_the_snapshot_anchor() {
+        let local_temp = GuardedPath::tempdir().unwrap();
+        let local = local_temp.as_guarded_path().clone();
+        let resolver = PathResolver::new_lazy(local.clone()).unwrap();
+
+        let anchor_cwd = resolver.root().clone();
+        assert!(resolver.is_snapshot_pending());
+        let entry = resolver.system_entry_cwd(&anchor_cwd);
+        assert!(!entry.as_path().starts_with(resolver.anchor_path()));
+        assert_ne!(entry.as_path(), anchor_cwd.as_path());
+
+        let materialized = resolver
+            .resolve_write(&anchor_cwd, "seed.txt")
+            .expect("materialize snapshot");
+        resolver.write_file(&materialized, b"x").expect("seed");
+        let rebased = resolver.system_entry_cwd(&anchor_cwd);
+        assert_eq!(rebased.root(), materialized.root());
+        // Native only: under Miri the reserved anchor and the concrete
+        // synthetic root coincide by design, so prefix-distinctness is
+        // vacuous there.
+        #[cfg(not(miri))]
+        assert!(!rebased.as_path().starts_with(resolver.anchor_path()));
     }
 }

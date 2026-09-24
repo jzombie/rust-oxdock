@@ -134,7 +134,7 @@ impl FixtureInstance {
         let cwd = command_path(self.root()).into_owned();
         builder.current_dir(cwd);
         if let Some(root) = &self.workspace_root_env {
-            builder.env("OXDOCK_WORKSPACE_ROOT", root);
+            builder.env(oxdock_fs::env::WORKSPACE_ROOT, root);
         }
         builder
     }
@@ -611,7 +611,7 @@ qux = { version = "1.0.0", features = ["full"] }
         let expected_cwd = command_path(instance.root()).into_owned();
         assert_eq!(snap.cwd, Some(expected_cwd));
         assert!(snap.envs.contains(&(
-            std::ffi::OsString::from("OXDOCK_WORKSPACE_ROOT"),
+            std::ffi::OsString::from(oxdock_fs::env::WORKSPACE_ROOT),
             std::ffi::OsString::from("/original/repo")
         )));
 
@@ -625,7 +625,7 @@ qux = { version = "1.0.0", features = ["full"] }
             !bare_snap
                 .envs
                 .iter()
-                .any(|(k, _)| k == std::ffi::OsStr::new("OXDOCK_WORKSPACE_ROOT"))
+                .any(|(k, _)| k == std::ffi::OsStr::new(oxdock_fs::env::WORKSPACE_ROOT))
         );
         Ok(())
     }

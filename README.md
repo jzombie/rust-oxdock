@@ -32,14 +32,14 @@ OxDock is a Dockerfile inspired build DSL for Rust. Embed scripts at compile tim
 
 Supports platform gating, async tasks, and piped workflows for custom pipelines.
 
-[Documentation](https://docs.rs/oxdock/0.17.0-alpha/oxdock/)
+[Documentation](https://docs.rs/oxdock/0.18.0-alpha/oxdock/)
 
 Jump to the [command reference](#command-reference) below for the full
 command list with runnable examples.
 
 ## Quick start
 
-Add it to your Rust build with `cargo add oxdock@0.17.0-alpha`, or install the standalone runner with `cargo install oxdock@0.17.0-alpha`.
+Add it to your Rust build with `cargo add oxdock@0.18.0-alpha`, or install the standalone runner with `cargo install oxdock@0.18.0-alpha`.
 
 Run a script:
 
@@ -125,8 +125,8 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     LET $a: STRING = READ dist/alpha.txt
     LET $b: STRING = READ dist/beta.txt
     LET $p: STRING = READ dist/picked.txt
-    ASSERT_EQ $a "alpha OxDock 0.17.0-alpha"
-    ASSERT_EQ $b "beta OxDock 0.17.0-alpha"
+    ASSERT_EQ $a "alpha OxDock 0.18.0-alpha"
+    ASSERT_EQ $b "beta OxDock 0.18.0-alpha"
     ASSERT_EQ $p "alpha"
 };
 
@@ -138,7 +138,7 @@ let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolve
 let out = root.join("dist/alpha.txt").expect("out path");
 assert_eq!(
     resolver.read_to_string(&out).expect("read out"),
-    "alpha OxDock 0.17.0-alpha"
+    "alpha OxDock 0.18.0-alpha"
 );
 ```
 
@@ -331,6 +331,7 @@ FUNC SHADOW($v: STRING) {
     LET $inner: STRING = "inner"
     RETURN $v
 }
+
 LET $out: STRING = SHADOW("param")
 ASSERT_EQ $out "param"
 ```
@@ -376,18 +377,54 @@ READ piped.txt
 ASSERT_CONTAINS stdout "piped-bytes"
 ```
 
-### Workspaces start ephemeral
+### Scripts start in SNAPSHOT
 
-Scripts start in an ephemeral snapshot workspace, an isolated temp dir that leaves the source tree untouched. Pull inputs with `COPY` or `COPY_GIT`. Switch to the local directory with `WORKSPACE LOCAL` when the script should mutate in place.
+Scripts start in the SNAPSHOT workspace, an ephemeral isolated temp dir that leaves the source tree untouched. It is the only ephemeral root. Pull inputs with `COPY` or `COPY_GIT`. Each root below is entered inside a scoped block, which reverts to the previous root on exit.
 
 ```oxdock
+IMPORT [STD]
+
+# SNAPSHOT is the starting root.
 WRITE snap.txt from-snapshot
 LET $s: STRING = READ snap.txt
 ASSERT_EQ $s "from-snapshot"
-WORKSPACE LOCAL
-WRITE local.txt from-local
-LET $l: STRING = READ local.txt
-ASSERT_EQ $l "from-local"
+
+# LOCAL is a separate directory: snapshot files are absent there.
+[bool:true] {
+    WORKSPACE LOCAL
+    LET $t: STRING = PATH_TYPE("snap.txt")
+    ASSERT_EQ $t "absent"
+    WRITE local.txt from-local
+}
+
+# The block reverted to SNAPSHOT: the local file is absent here.
+LET $u: STRING = PATH_TYPE("local.txt")
+ASSERT_EQ $u "absent"
+
+# CACHE persists outside the snapshot and reads back through its own root.
+[bool:true] {
+    WORKSPACE CACHE
+    WRITE cached.txt from-cache
+}
+COPY --from-workspace CACHE cached.txt restored.txt
+LET $w: STRING = READ restored.txt
+ASSERT_EQ $w "from-cache"
+
+# CACHE --local is a different directory from the OS cache.
+[bool:true] {
+    WORKSPACE CACHE --local
+    LET $x: STRING = PATH_TYPE("cached.txt")
+    ASSERT_EQ $x "absent"
+}
+
+# SYSTEM keeps the current directory: relative paths keep working.
+# Scripts using it are not hermetic.
+[bool:true] {
+    WORKSPACE SYSTEM
+    WRITE sys.txt from-system
+}
+LET $y: STRING = READ sys.txt
+ASSERT_EQ $y "from-system"
 ```
 
 ## Extending OxDock from Rust
@@ -741,9 +778,11 @@ Every variable binding declares its type at the binding site. `LET $name: TYPE =
 LET $count: INT = 1
 $count = 2
 LET $msg: STRING = hello
+
 FOR $item: STRING IN ["a", "b"] {
     ECHO "{{ $item }}"
 }
+
 WRITE count.txt "{{ $count }}"
 LET $c: STRING = READ count.txt
 ASSERT_EQ $c "2"
@@ -767,8 +806,9 @@ Parentheses mark the boundary between computing a value and running a pipeline s
 // Functions compute values; stdout stays untouched.
 IMPORT [STD]
 LET $t: STRING = PATH_TYPE("missing.txt")
-LET $n: INT = INT("41") + 1
 ASSERT_EQ $t "absent"
+
+LET $n: INT = INT("41") + 1
 ASSERT_EQ $n 42
 ```
 
@@ -807,12 +847,23 @@ ASSERT_CONTAINS stdout "visible-after-comments"
 
 ```oxdock
 ECHO hash-mid-line # stays-in-payload
-RUN echo run-args-stop-at-slashes // removed-as-comment
 ASSERT_CONTAINS stdout "hash-mid-line # stays-in-payload"
+RUN echo run-args-stop-at-slashes // removed-as-comment
 ASSERT_CONTAINS stdout "run-args-stop-at-slashes"
 ```
 
 Comment markers inside quoted strings are always preserved.
+
+### Command flags
+
+Commands that take flags accept the value either after a space or joined with `=`: `--from-workspace LOCAL` and `--from-workspace=LOCAL` mean the same thing. Boolean flags take no value. Quoted arguments are never treated as flags, even when they start with `--`.
+
+```oxdock roots:unified
+WRITE flag-src.txt flag-content
+COPY --from-workspace=LOCAL flag-src.txt flag-copy.txt
+LET $body: STRING = READ flag-copy.txt
+ASSERT_EQ $body "flag-content"
+```
 
 ### Quoting and escaping
 
@@ -821,12 +872,12 @@ Arguments accept single- or double-quoted strings; the escape sequences `\"` and
 ```oxdock
 // Single and double quotes behave identically.
 ECHO 'single quotes'
+ASSERT_CONTAINS stdout "single quotes"
 ECHO "double quotes"
+ASSERT_CONTAINS stdout "double quotes"
 
 // \" embeds a quote; the backslash itself is consumed.
 ECHO "escaped \" quote"
-ASSERT_CONTAINS stdout "single quotes"
-ASSERT_CONTAINS stdout "double quotes"
 ASSERT_CONTAINS stdout 'escaped " quote'
 ```
 
@@ -835,15 +886,15 @@ ASSERT_CONTAINS stdout 'escaped " quote'
 `{{ env:KEY }}` interpolates script environment values into arguments at execution time. Values come from the script environment (`ENV`, inherited keys) — there is no fallback to host variables in command context, and unknown keys expand to an empty string. The unprefixed form `{{ KEY }}` is not a valid template and also expands to empty, so always use the `env:`-prefixed spelling:
 
 ```oxdock
-ENV GREETING=hello-world
+ENV USER=OxDock
 
-// env:-prefixed form: interpolates from the SCRIPT environment.
-ECHO <{{ env:GREETING }}>
+# env:-prefixed form: interpolates from the SCRIPT environment.
+ECHO "Hello {{ env:USER }}!"
+ASSERT_CONTAINS stdout "Hello OxDock!"
 
-// Bare braces are not a template: they expand to empty.
-ECHO <{{ GREETING }}>
-ASSERT_CONTAINS stdout "<hello-world>"
-ASSERT_CONTAINS stdout "<>"
+# Bare braces are not a template: they expand to empty.
+ECHO "Hello {{ USER }}!"
+ASSERT_CONTAINS stdout "Hello !"
 ```
 
 ## Guards and scoped blocks
@@ -870,15 +921,14 @@ INHERIT_ENV [DEPLOY_TARGET]
 
 // Passes when the variable exists with any non-empty value.
 [env:DEPLOY_TARGET] ECHO deploy-target-visible
+ASSERT_CONTAINS stdout "deploy-target-visible"
 
 // Equality against the inherited value.
 [eq(env:DEPLOY_TARGET, staging)] ECHO deploying-to-staging
+ASSERT_CONTAINS stdout "deploying-to-staging"
 
 // Inequality: skipped below, because DEPLOY_TARGET IS staging.
 [ne(env:DEPLOY_TARGET, staging)] ECHO deploying-elsewhere
-
-ASSERT_CONTAINS stdout "deploy-target-visible"
-ASSERT_CONTAINS stdout "deploying-to-staging"
 ```
 
 ### Platform guards
@@ -893,6 +943,7 @@ ASSERT_CONTAINS stdout "deploying-to-staging"
   ASSERT_EQ $rep "windows"
   ASSERT_CONTAINS stdout "windows-detected"
 }
+
 [unix] {
   WRITE os-report.txt unix-family
   ECHO unix-detected
@@ -910,15 +961,14 @@ INHERIT_ENV [OXDOCK_DOC_FEATURE_A]
 
 // not(...) inverts the predicate: passes because the variable does NOT exist.
 [not(env:OXDOCK_DOC_UNDEFINED_VAR)] ECHO negation-passes-for-undefined
+ASSERT_CONTAINS stdout "negation-passes-for-undefined"
 
 // any(...) passes when ANY branch holds; A exists, so this runs.
 [any(env:OXDOCK_DOC_FEATURE_A, env:OXDOCK_DOC_FEATURE_B)] ECHO or-matched-a-branch
+ASSERT_CONTAINS stdout "or-matched-a-branch"
 
 // Comma composes with AND: (A or linux) AND A — true here on every OS.
 [any(env:OXDOCK_DOC_FEATURE_A, linux), env:OXDOCK_DOC_FEATURE_A] ECHO composed-and-or-guard
-
-ASSERT_CONTAINS stdout "negation-passes-for-undefined"
-ASSERT_CONTAINS stdout "or-matched-a-branch"
 ASSERT_CONTAINS stdout "composed-and-or-guard"
 ```
 
@@ -980,6 +1030,7 @@ ASSERT_EQ $out_body "some_value-production"
 WRITE before.txt "persisted"
 LET $b: STRING = READ before.txt
 ASSERT_EQ $b "persisted"
+
 [bool:true] {
     EXIT 3
     WRITE unreachable.txt "never"
@@ -1041,14 +1092,14 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | Command | Syntax |
 | --- | --- |
 | [`WORKDIR`](#workdir) | `WORKDIR <path>` |
-| [`WORKSPACE`](#workspace) | `WORKSPACE (SNAPSHOT\|LOCAL, case-insensitive)` |
+| [`WORKSPACE`](#workspace) | `WORKSPACE (SNAPSHOT\|LOCAL\|CACHE\|SYSTEM) [--local]` |
 | [`ENV`](#env) | `ENV KEY=value` |
 | [`INHERIT_ENV`](#inherit_env) | `INHERIT_ENV [<key>, ...]` |
 | [`ECHO`](#echo) | `ECHO <message>` |
 | [`RUN`](#run) | `RUN <command...> \| RUN ["exe", "arg", ...]` |
-| [`COPY`](#copy) | `COPY [--from-current-workspace] <from> <to>` |
+| [`COPY`](#copy) | `COPY [--from-workspace SNAPSHOT\|LOCAL\|CACHE\|SYSTEM] <from> <to>` |
 | [`COPY_GIT`](#copy_git) | `COPY_GIT [--include-dirty] <rev> <src> <dst>` |
-| [`SYMLINK`](#symlink) | `SYMLINK <from> <to>` |
+| [`SYMLINK`](#symlink) | `SYMLINK [--from-workspace SNAPSHOT\|LOCAL\|CACHE\|SYSTEM] <from> <to>` |
 | [`MKDIR`](#mkdir) | `MKDIR <path>` |
 | [`LS`](#ls) | `LS [<path>]` |
 | [`CWD`](#cwd) | `CWD` |
@@ -1238,29 +1289,35 @@ ASSERT_EQ $t "absent"
 IMPORT [STD]
 LET $role: STRING = "admin"
 LET $level: INT = 3
+
 # || is true when either side holds; && needs both.
 IF $role == "owner" || $level >= 5 {
     WRITE unexpected.txt no
 } ELSE {
     WRITE fallback.txt or-false
 }
+
+LET $fb: STRING = READ fallback.txt
+ASSERT_EQ $fb "or-false"
+LET $t1: STRING = PATH_TYPE("unexpected.txt")
+ASSERT_EQ $t1 "absent"
+
 IF $role == "admin" || $level >= 5 {
     WRITE chosen.txt or-true
 }
+
+LET $ch: STRING = READ chosen.txt
+ASSERT_EQ $ch "or-true"
+
 IF $role == "admin" && $level >= 5 {
     WRITE unexpected-too.txt no
 } ELSE {
     WRITE and.txt and-false
 }
-LET $fb: STRING = READ fallback.txt
-LET $ch: STRING = READ chosen.txt
+
 LET $an: STRING = READ and.txt
-ASSERT_EQ $fb "or-false"
-ASSERT_EQ $ch "or-true"
 ASSERT_EQ $an "and-false"
-LET $t1: STRING = PATH_TYPE("unexpected.txt")
 LET $t2: STRING = PATH_TYPE("unexpected-too.txt")
-ASSERT_EQ $t1 "absent"
 ASSERT_EQ $t2 "absent"
 ```
 
@@ -1417,14 +1474,18 @@ ASSERT_CONTAINS stdout "a.txt"
 ```oxdock
 # LET inside a braced block reverts when the block exits
 LET $a: STRING = "outer"
+
 [bool:true] {
     LET $a: STRING = "inner"
     WRITE inner.txt "{{ $a }}"
 }
+
 WRITE outer.txt "{{ $a }}"
+
 LET $in_body: STRING = READ inner.txt
-LET $out_body: STRING = READ outer.txt
 ASSERT_EQ $in_body "inner"
+
+LET $out_body: STRING = READ outer.txt
 ASSERT_EQ $out_body "outer"
 ```
 
@@ -1444,6 +1505,7 @@ LET $res: STRING = {
     RETURN $loud
 }
 ASSERT_EQ $res "ada!"
+
 # Any declared type works: the block value checks like any RHS.
 LET $n: INT = {
     RETURN 40 + 2
@@ -1457,11 +1519,13 @@ ASSERT_EQ $n 42
 LET $size_str: STRING = ECHO 41
 IMPORT [STD]
 LET $total: INT = INT($size_str) + 1
+ASSERT_EQ $total 42
+
 LET $ratio: FLOAT = 1 + 2.5
+ASSERT_EQ $ratio 3.5
+
 # Int x Int stays INT: integer division truncates.
 LET $half: INT = 7 / 2
-ASSERT_EQ $total 42
-ASSERT_EQ $ratio 3.5
 ASSERT_EQ $half 3
 ```
 
@@ -1479,8 +1543,10 @@ IF $exact {
 IF $decimal {
     WRITE unexpected.txt no
 }
+
 LET $ok: STRING = READ exact.txt
 ASSERT_EQ $ok "yes"
+
 LET $t: STRING = PATH_TYPE("unexpected.txt")
 ASSERT_EQ $t "absent"
 ```
@@ -1493,6 +1559,7 @@ LET $sum: FLOAT = 0.1 + 0.2
 IF $sum > 0.299999 && $sum < 0.300001 {
     WRITE bounded.txt yes
 }
+
 LET $ok: STRING = READ bounded.txt
 ASSERT_EQ $ok "yes"
 ```
@@ -1509,6 +1576,7 @@ LET $info: MAP = INSPECT($p)
 IF $info.is_os_pipe {
     WRITE unexpected.txt "should be a script pipe"
 }
+
 ASSERT_EQ $info.type "PIPE"
 ```
 
@@ -1557,12 +1625,14 @@ LET $raw: STRING = ECHO 100
 IMPORT [STD]
 LET $n: INT = INT($raw)
 $n = $n + 1
+
 # The declared type also converts plain strings on assignment.
 $n = "42"
+ASSERT_EQ $n 42
+
 # Same crossing for decimals via FLOAT().
 LET $frac_str: STRING = ECHO 2.5
 LET $f: FLOAT = FLOAT($frac_str) + 0.25
-ASSERT_EQ $n 42
 ASSERT_EQ $f 2.75
 ```
 
@@ -1696,9 +1766,10 @@ TIMEOUT 30s {
 **Example: timeout variable duration**
 
 ```oxdock
-# durations resolve at runtime, so variables work too
+# Durations resolve at runtime, so variables work too.
 LET $budget: DURATION = "30s"
 TIMEOUT $budget WRITE heartbeat.txt alive
+
 LET $beat: STRING = READ heartbeat.txt
 ASSERT_EQ $beat "alive"
 ```
@@ -1739,8 +1810,10 @@ the RETURN value (fallthrough without RETURN captures as "").
 FUNC GREET($name: STRING) {
   RETURN $name
 }
+
 LET $res: STRING = GREET("ada")
 ASSERT_EQ $res "ada"
+
 # Statement form: parens stay, the value drops.
 GREET("bex")
 ```
@@ -1755,8 +1828,10 @@ FUNC DRAIN($q: PIPE) {
   WITH_IO [stdin=$q] READ_LINE $line
   RETURN $line
 }
+
 LET $p: PIPE
 WITH_IO [stdout=$p] ECHO "payload"
+
 LET $got: STRING = DRAIN($p)
 ASSERT_EQ $got "payload"
 ```
@@ -1789,6 +1864,7 @@ FUNC PICK($flag: BOOL) {
   }
   RETURN "no"
 }
+
 LET $res: STRING = PICK(true)
 ASSERT_EQ $res "yes"
 ```
@@ -1818,6 +1894,7 @@ WHILE !$done {
   WRITE tick.txt "once"
   $done = true
 }
+
 LET $tick: STRING = READ tick.txt
 ASSERT_EQ $tick "once"
 ```
@@ -1933,20 +2010,52 @@ LET $body: STRING = READ generated.txt
 ASSERT_EQ $body "generated-under-workdir"
 ```
 
+**Example: workdir in a scoped block**
+
+```oxdock
+MKDIR project
+
+[bool:true] {
+    WORKDIR project
+    WRITE inner.txt inner
+}
+
+LET $body: STRING = READ project/inner.txt
+ASSERT_EQ $body "inner"
+```
+
 
 ### WORKSPACE
 
 Switch workspace roots.
 
-**Syntax:** `WORKSPACE (SNAPSHOT|LOCAL, case-insensitive)`
+**Syntax:** `WORKSPACE (SNAPSHOT|LOCAL|CACHE|SYSTEM) [--local]`
 
-SNAPSHOT or LOCAL root.
+Switches the workspace root. The selection reverts at scope
+exit like `WORKDIR`.
+
+- `SNAPSHOT`: the materialized build snapshot (the default).
+- `LOCAL`: the local workspace directory.
+- `CACHE`: a persistent per-project directory shared across
+  runs, never evicted. It lives under the OS user cache
+  (`OXDOCK_CACHE_DIR` pins an exact directory);
+  `WORKSPACE CACHE --local` keeps it in
+  `<project>/.cache/workspace` instead.
+- `SYSTEM`: full filesystem access. Scripts using it are not
+  hermetic.
+
 
 **Arguments:**
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
-| `target` | `SNAPSHOT\|LOCAL` | yes | Target root |
+| `target` | `SNAPSHOT\|LOCAL\|CACHE\|SYSTEM` | yes | Target root |
+
+**Flags:**
+
+| Flag | Type | Description |
+| --- | --- | --- |
+| `--local` | `BOOL` | Use the project-local cache directory instead of the OS user cache (CACHE only) |
 
 **Examples:**
 
@@ -1954,6 +2063,19 @@ SNAPSHOT or LOCAL root.
 
 ```oxdock
 WORKSPACE LOCAL
+```
+
+**Example: workspace cache in a scoped block**
+
+```oxdock
+[bool:true] {
+    WORKSPACE CACHE
+    WRITE cached.txt cached-content
+}
+
+COPY --from-workspace CACHE cached.txt restored.txt
+LET $body: STRING = READ restored.txt
+ASSERT_EQ $body "cached-content"
 ```
 
 
@@ -1992,9 +2114,10 @@ ENV APP_MODE=production
 **Example: quoted value with spaces**
 
 ```oxdock
-# quotes keep the space: SET_FORTH stores `outer scope`
+# Quotes keep the space: SET_FORTH stores `outer scope`.
 ENV SET_FORTH="outer scope"
 WRITE out.txt "{{ env:SET_FORTH }}"
+
 LET $body: STRING = READ out.txt
 ASSERT_EQ $body "outer scope"
 ```
@@ -2002,10 +2125,11 @@ ASSERT_EQ $body "outer scope"
 **Example: variable value**
 
 ```oxdock
-# a lone $var evaluates, like ECHO $var
+# A lone $var evaluates, like ECHO $var.
 LET $who: STRING = "Alice"
 ENV GREETING=$who
 WRITE out.txt "{{ env:GREETING }}"
+
 LET $body: STRING = READ out.txt
 ASSERT_EQ $body "Alice"
 ```
@@ -2013,13 +2137,14 @@ ASSERT_EQ $body "Alice"
 **Example: all value forms agree**
 
 ```oxdock
-# a bare variable, a quoted literal, and a template all
-# store plain strings through the same value rules
+# A bare variable, a quoted literal, and a template all
+# store plain strings through the same value rules.
 LET $x: STRING = "Ada"
 ENV A=$x
 ENV B="hello world"
 ENV C="{{ $x }} concatenated"
 WRITE check.txt "{{ env:A }}|{{ env:B }}|{{ env:C }}"
+
 LET $body: STRING = READ check.txt
 ASSERT_EQ $body "Ada|hello world|Ada concatenated"
 ```
@@ -2029,14 +2154,18 @@ ASSERT_EQ $body "Ada|hello world|Ada concatenated"
 ```oxdock
 # ENV inside a braced block reverts when the block exits
 ENV MODE=production
+
 [bool:true] {
     ENV MODE=staging
     WRITE inner.txt "{{ env:MODE }}"
 }
+
 WRITE outer.txt "{{ env:MODE }}"
+
 LET $inner_body: STRING = READ inner.txt
-LET $outer_body: STRING = READ outer.txt
 ASSERT_EQ $inner_body "staging"
+
+LET $outer_body: STRING = READ outer.txt
 ASSERT_EQ $outer_body "production"
 ```
 
@@ -2095,7 +2224,7 @@ ECHO build-complete
 **Example: variables**
 
 ```oxdock
-# a lone $x evaluates; {{ }} interpolates inside text
+# A lone $x evaluates; {{ }} interpolates inside text.
 LET $x: STRING = "World"
 ECHO {{ $x }}
 ECHO $x
@@ -2145,9 +2274,9 @@ RUN ["cargo", "--version"]
 
 Copy file into workspace.
 
-**Syntax:** `COPY [--from-current-workspace] <from> <to>`
+**Syntax:** `COPY [--from-workspace SNAPSHOT|LOCAL|CACHE|SYSTEM] <from> <to>`
 
-Copies from host.
+Copies from host (the source is never moved or modified). Docker destination semantics: a file copied onto a directory (an existing one, or a trailing-slash spell like `out/`) is duplicated inside it under its own basename; a directory source duplicates its contents into the destination; any other destination path is created holding the copied bytes.
 
 **Arguments:**
 
@@ -2160,7 +2289,7 @@ Copies from host.
 
 | Flag | Type | Description |
 | --- | --- | --- |
-| `--from-current-workspace` | `BOOL` | Copy from workspace instead of build context |
+| `--from-workspace` | `STRING` | Copy from the given workspace root instead of the build context |
 
 **Examples:**
 
@@ -2177,7 +2306,7 @@ ASSERT_EQ $body "content"
 
 ```oxdock roots:unified
 WRITE ws-src.txt ws-content
-COPY --from-current-workspace ws-src.txt ws-copy.txt
+COPY --from-workspace LOCAL ws-src.txt ws-copy.txt
 LET $body: STRING = READ ws-copy.txt
 ASSERT_EQ $body "ws-content"
 ```
@@ -2220,9 +2349,9 @@ COPY_GIT HEAD src.txt dst.txt
 
 Create symlink.
 
-**Syntax:** `SYMLINK <from> <to>`
+**Syntax:** `SYMLINK [--from-workspace SNAPSHOT|LOCAL|CACHE|SYSTEM] <from> <to>`
 
-Creates symlink.
+Creates symlink. A directory destination (existing, or a trailing-slash spell) receives the link under the source basename.
 
 **Arguments:**
 
@@ -2230,6 +2359,12 @@ Creates symlink.
 | --- | --- | --- | --- |
 | `from` | [`PATH`](#value-type-path) | yes | Target |
 | `to` | [`PATH`](#value-type-path) | yes | Link |
+
+**Flags:**
+
+| Flag | Type | Description |
+| --- | --- | --- |
+| `--from-workspace` | `STRING` | Symlink from the given workspace root instead of the build context |
 
 **Examples:**
 
@@ -2240,6 +2375,15 @@ WRITE original.txt content
 SYMLINK original.txt link.txt
 LET $body: STRING = READ link.txt
 ASSERT_EQ $body "content"
+```
+
+**Example: symlink from workspace**
+
+```oxdock roots:unified
+WRITE ws-src.txt ws-content
+SYMLINK --from-workspace LOCAL ws-src.txt ws-link.txt
+LET $body: STRING = READ ws-link.txt
+ASSERT_EQ $body "ws-content"
 ```
 
 
@@ -2519,8 +2663,10 @@ ASSERT_CONTAINS stdout "Hello Alice!"
 # they never update the environment itself
 ENV NAME="Alice"
 WRITE template.md "Hi \{{ env:NAME }}!"
+
 EXPAND template.md NAME="Bob"
 ASSERT_CONTAINS stdout "Hi Bob!"
+
 EXPAND template.md
 ASSERT_CONTAINS stdout "Hi Alice!"
 ```
@@ -2707,10 +2853,11 @@ SLEEP 100ms
 **Example: sleep variable duration**
 
 ```oxdock
-# durations resolve at runtime, so variables work too —
-# quoted or bare, both bind the same string
+# Durations resolve at runtime, so variables work too:
+# quoted or bare, both bind the same string.
 LET $pause: STRING = "100ms"
 SLEEP $pause
+
 LET $bare: STRING = 100ms
 SLEEP $bare
 ```
@@ -3132,7 +3279,11 @@ Keeping inheritance selective avoids leaking secrets by default while still allo
 
 - **Typical usage pattern:** the temporary workspace is intended for short lived build and test iterations. Run scripts against it, inspect outputs, and discard when done. Because it is separate from the original repo it is safe to run multiple concurrent experiments without changing the original repo.
 
-- **Filesystem gating via `oxdock-fs`:** all filesystem operations in the runtime are routed through the crate internal `oxdock-fs` abstraction. That module centralizes path resolution, canonicalization and access checks so reads and writes can be validated against the allowed workspace root and build context.
+- **Four workspace roots:** `WORKSPACE SNAPSHOT` (the default ephemeral temp location), `WORKSPACE LOCAL` (the local directory), `WORKSPACE CACHE` (a persistent per-project cache directory shared across runs), and `WORKSPACE SYSTEM` (full filesystem access, not hermetic). `WORKSPACE` selection reverts at scope exit like `WORKDIR`.
+
+- **Persistent cache:** `WORKSPACE CACHE` stores artifacts under the OS per-user cache, namespaced by application identity `<app>`, with a `workspace` group segment underneath. Concretely: macOS `~/Library/Caches/com.oxdock.<app>/workspace`, Linux `$XDG_CACHE_HOME/<app>/workspace` (or `~/.cache/<app>/workspace`, lowercased), Windows `%LOCALAPPDATA%\oxdock\<app>\cache\workspace`. Identity resolves as explicit builder argument, `OXDOCK_CACHE_APP`, runtime `CARGO_PKG_NAME`, running binary name, then `"oxdock"`; `OXDOCK_CACHE_DIR` pins an exact directory instead (OS flavor only), and when no home directory is available the cache falls back to a temp dir (`oxdock-cache-<app>`). `WORKSPACE CACHE --local` keeps the cache in `<project>/.cache/workspace` instead, unconditionally. The directory is created on first use, survives restarts, and is never evicted by default.
+
+- **Filesystem gating via `oxdock-fs`:** all filesystem operations in the runtime are routed through the crate internal `oxdock-fs` abstraction. That module centralizes path resolution, canonicalization and access checks so reads and writes can be validated against the allowed workspace root and build context. `WORKSPACE SYSTEM` intentionally bypasses these checks; scripts using it are not hermetic.
 
 - **What `oxdock-fs` protects you from:** the guardrails are pragmatic. They prevent common mistakes such as accidentally writing outside the materialized workspace or reading files from arbitrary absolute paths. However, they are not a full sandbox. A determined process or script can still create destructive actions (for example, invoking native `RUN` commands that modify external state). If you require strict isolation, run OxDock inside a container or VM.
 
@@ -3277,6 +3428,7 @@ cargo +nightly miri test --workspace --all-features --lib --tests
 - **Inline**: Payload bytes carried inside the word itself, with zero allocation. Available to `Copy` scalars that fit in 64 bits.
 - **NaN boxing**: A technique that packs values into 64 bits by reusing NaN float patterns. Denser than 16 byte words at the cost of pointer masking and constrained host values.
 - **Payload**: The 64 bit data half of a word: either inline bytes or a pointer to one owned box.
+- **Plugin**: A host extension module (NET, SSH) loaded with IMPORT, bringing extra functions into script scope.
 - **Provenance**: The recorded origin of a pointer, which Rust uses to judge whether a memory access is valid. Round tripping through the same box type preserves it.
 - **RPN**: Reverse Polish Notation: arithmetic compiled to a flat stack program instead of tree walking.
 - **Vtable**: The operations half of a descriptor: function pointers that clone, drop, compare, and render values of that type.
