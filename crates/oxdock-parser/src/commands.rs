@@ -2178,23 +2178,26 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             args: &[],
             flags: &[],
             default_output: None,
-            examples: &[Example {
-                name: "cancel",
-                fence_meta: None,
-                code: indoc! {r#"
+            examples: &[
+                Example {
+                    name: "cancel",
+                    fence_meta: None,
+                    code: indoc! {r#"
                 LET $task: HANDLE = ASYNC SLEEP 30s
                 CANCEL $task
             "#},
-            }, Example {
-                name: "await after cancel reports cancellation",
-                fence_meta: Some("expect_error:\"was cancelled\""),
-                code: indoc! {r#"
+                },
+                Example {
+                    name: "await after cancel reports cancellation",
+                    fence_meta: Some("expect_error:\"was cancelled\""),
+                    code: indoc! {r#"
                 # A cancelled task stays cancelled: joining it reports.
                 LET $task: HANDLE = ASYNC SLEEP 30s
                 CANCEL $task
                 AWAIT $task
             "#},
-            }],
+                },
+            ],
         },
         CommandMeta {
             name: "TIMEOUT",
