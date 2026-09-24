@@ -14,10 +14,9 @@ WRITE dist/hello.txt Built with \{{ env:PROJECT }}
 LET $body: STRING = READ dist/hello.txt
 ASSERT_EQ $body "Built with OxDock"
 
-// LS prints "<dir>:" then the entry names, sorted.
+// LS prints "<dir>:" then the entry names.
 LS dist
-
-// Assert the LS output contains "hello.txt".
+ASSERT_CONTAINS stdout "dist:"
 ASSERT_CONTAINS stdout "hello.txt"
 ```
 

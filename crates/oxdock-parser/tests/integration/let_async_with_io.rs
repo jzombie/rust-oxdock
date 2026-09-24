@@ -72,7 +72,7 @@ fn let_with_io_sync_command_captures() {
 #[test]
 fn let_with_io_stdout_pipe_conflicts_with_capture() {
     // #111: explicit WITH_IO [stdout=$var] combined with LET-capture is
-    // a parse error — the capture sink owns stdout.
+    // a parse error : the capture sink owns stdout.
     let script = indoc! {r#"
         LET $task: STRING = WITH_IO [stdout=$out_chan] RUN "echo hi"
     "#};

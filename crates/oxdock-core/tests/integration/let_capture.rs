@@ -130,7 +130,7 @@ fn let_capture_run() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     // Windows needs the `cmd /c` prefix (and its echo appends a stray
-    // trailing quote), so containment — not exact bytes — is asserted here.
+    // trailing quote), so containment : not exact bytes : is asserted here.
     // Exact-byte capture is pinned by `let_capture_echo_binds_exact_bytes`.
     #[cfg(unix)]
     let shell_cmd = "echo run-cap";

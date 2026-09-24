@@ -159,7 +159,7 @@ fn run_exec_interception_yields_typed_list_with_mock_lower() {
 
 #[test]
 fn run_exec_partial_span_is_rejected_not_truncated() {
-    // A second bracket group after the list must fail the whole script —
+    // A second bracket group after the list must fail the whole script :
     // the grammar engine requires total span consumption, so `["hi"]`
     // can never be silently discarded.
     parse_script(r#"RUN ["echo"] ["hi"]"#, lower_command).expect_err("trailing span must fail");

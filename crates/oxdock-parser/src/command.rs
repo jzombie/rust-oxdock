@@ -80,7 +80,7 @@ impl ArgType {
     }
 
     /// Validate a statically-known literal against this type.
-    /// Templates and variables are never passed here — see `check_arg`.
+    /// Templates and variables are never passed here : see `check_arg`.
     pub fn validate_literal(&self, literal: &str) -> Result<()> {
         match self {
             ArgType::String | ArgType::Path | ArgType::Any => Ok(()),
@@ -243,7 +243,7 @@ pub fn strip_surrounding_quotes(value: &str) -> &str {
 }
 
 /// Single-token `KEY=value` split for direct `lower_command` callers and
-/// exotic keys the grammar cannot classify (single tokens only — no whitespace
+/// exotic keys the grammar cannot classify (single tokens only : no whitespace
 /// reassembly, so the quoted-space corruption class cannot arise here).
 /// Returns `Ok(None)` when there is no `=`.
 pub fn split_assignment(text: &str) -> Result<Option<(String, Arg)>> {

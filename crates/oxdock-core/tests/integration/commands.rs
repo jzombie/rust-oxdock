@@ -1990,7 +1990,7 @@ fn run_exec_nonzero_status_bails_with_step_context() {
     let err = run_steps(&root, &steps).unwrap_err();
     let msg = format!("{err:#}");
     // Foreground failures surface the manager's non-zero error wrapped in
-    // step context — identical to shell `RUN` (the `exited with status`
+    // step context : identical to shell `RUN` (the `exited with status`
     // spelling is the background/ASYNC path in `run_argv`/`run`).
     assert!(
         msg.contains("step 1: RUN") && msg.contains("failed with status"),
@@ -2003,7 +2003,7 @@ fn run_exec_nonzero_status_bails_with_step_context() {
 // ---------------------------------------------------------------------------
 
 /// When a new `StepKind` variant is added, the compiler will error here until
-/// the match is updated — enforcing that every variant has test coverage.
+/// the match is updated : enforcing that every variant has test coverage.
 fn _assert_step_kind_exhaustiveness(kind: &StepKind) {
     match kind {
         StepKind::Workdir(_) => {}
@@ -2644,7 +2644,7 @@ fn async_task_failure_preserves_error_chain() {
 #[cfg_attr(miri, ignore = "concurrent CANCEL/AWAIT Zhang real background threads")]
 fn concurrent_cancel_and_await_race() {
     // A background thread CANCELs while the main thread AWAITs the same
-    // task. Every outcome must report cancellation — never TaskNotFound.
+    // task. Every outcome must report cancellation : never TaskNotFound.
     let script = indoc! {r#"
         LET $t: HANDLE = ASYNC SLEEP 30s
         ASYNC {

@@ -91,6 +91,11 @@ WITH_IO [stdout=$log] {
   ECHO second
 }
 WITH_IO [stdin=$log] WRITE captured.txt
+
+# The piped bytes landed in the file.
+LET $body: STRING = READ captured.txt
+ASSERT_CONTAINS $body "first"
+ASSERT_CONTAINS $body "second"
 ```
 
 **Example: variable pipe binding**
@@ -129,24 +134,30 @@ empty when nothing matches, and rejects `..` escapes.
 **Example: for loop**
 
 ```oxdock
+# Each element binds in turn; the loop body sees every one.
 LET $items: LIST = ["a", "b"]
 FOR $item: STRING IN $items {
   ECHO $item
 }
+ASSERT_CONTAINS stdout "a"
+ASSERT_CONTAINS stdout "b"
 
+# Key and value bind together for maps.
 LET $map: MAP = {"x": 1}
 FOR $k: STRING, $v: INT IN $map {
-  ECHO "$k=$v"
+  ECHO "{{ $k }}={{ $v }}"
 }
+ASSERT_CONTAINS stdout "x=1"
 ```
 
 **Example: expand every match**
 
 ```oxdock
-# single-line body; $x is a template path, WHO an override
-WRITE a.txt "hi \{{ env:WHO }}!"
+# Single-line body; $x is a template path, WHO an override.
 IMPORT [STD]
+WRITE a.txt "hi \{{ env:WHO }}!"
 FOR $x: STRING IN GLOB("*.txt") { EXPAND $x WHO=World }
+
 ASSERT_CONTAINS stdout "hi World!"
 ```
 
@@ -171,12 +182,15 @@ accepted as conditions.
 
 ```oxdock
 IMPORT [STD]
+
+# True branch runs; the false branch is skipped.
 IF true {
   WRITE yes.txt taken
 } ELSE {
   WRITE yes.txt skipped
 }
 
+# ELSE IF selects the first true branch.
 IF false {
   WRITE skipped.txt no
 } ELSE IF true {
@@ -187,6 +201,7 @@ IF false {
 IF !false {
   WRITE negated.txt taken
 }
+
 LET $yes_body: STRING = READ yes.txt
 LET $fallback_body: STRING = READ fallback.txt
 LET $negated_body: STRING = READ negated.txt
@@ -357,15 +372,20 @@ string.
 ```oxdock
 LET $name: STRING = "world"
 ECHO "hello, {{ $name }}"
+ASSERT_CONTAINS stdout "hello, world"
 
 LET $items: LIST = ["a", "b"]
+ASSERT_CONTAINS $items "a"
+ASSERT_CONTAINS $items "b"
+
 LET $count: INT = 42
+ASSERT_EQ $count 42
 ```
 
 **Example: no hoisting**
 
 ```oxdock expect_error:"undefined variable"
-# reading before the LET runs is an error, not an empty value
+# Reading before the LET runs is an error, not an empty value.
 ECHO $too_early
 LET $too_early: STRING = "too late"
 ```
@@ -375,18 +395,19 @@ LET $too_early: STRING = "too late"
 **Example: glob binding**
 
 ```oxdock
-# the RHS is an expression: GLOB(...) runs and binds a list
-WRITE a.txt "x"
+# The RHS is an expression: GLOB(...) runs and binds a list.
 IMPORT [STD]
+WRITE a.txt "x"
 LET $files: LIST = GLOB("*.txt")
 FOR $f: STRING IN $files { ECHO $f }
+
 ASSERT_CONTAINS stdout "a.txt"
 ```
 
 **Example: scoped variable reverts**
 
 ```oxdock
-# LET inside a braced block reverts when the block exits
+# LET inside a braced block reverts when the block exits.
 LET $a: STRING = "outer"
 
 [bool:true] {
@@ -406,6 +427,7 @@ ASSERT_EQ $out_body "outer"
 **Example: capture command output**
 
 ```oxdock
+# Capture keeps the trailing newline.
 LET $out: STRING = ECHO hi
 ASSERT_EQ $out "hi\n"
 ```
@@ -414,6 +436,8 @@ ASSERT_EQ $out "hi\n"
 
 ```oxdock
 LET $who: STRING = "ada"
+
+# An inline block binds its RETURN value like a function body.
 LET $res: STRING = {
     LET $loud: STRING = "{{ $who }}!"
     RETURN $loud
@@ -430,11 +454,13 @@ ASSERT_EQ $n 42
 **Example: arithmetic over captured output**
 
 ```oxdock
-LET $size_str: STRING = ECHO 41
+# Captured output converts explicitly: INT() then arithmetic.
 IMPORT [STD]
+LET $size_str: STRING = ECHO 41
 LET $total: INT = INT($size_str) + 1
 ASSERT_EQ $total 42
 
+# FLOAT() promotes instead of truncating.
 LET $ratio: FLOAT = 1 + 2.5
 ASSERT_EQ $ratio 3.5
 
@@ -484,6 +510,7 @@ ASSERT_EQ $ok "yes"
 # INSPECT($var) snapshots a variable into a MAP: declared
 # type plus live details (pipe backend stats here), so
 # scripts can branch on engine state.
+IMPORT [STD]
 LET $p: PIPE
 WITH_IO [stdout=$p] ECHO hello
 LET $info: MAP = INSPECT($p)
@@ -492,6 +519,8 @@ IF $info.is_os_pipe {
 }
 
 ASSERT_EQ $info.type "PIPE"
+LET $t: STRING = PATH_TYPE("unexpected.txt")
+ASSERT_EQ $t "absent"
 ```
 
 
@@ -525,6 +554,7 @@ separate inner variable that reverts on exit.
 **Example: mutate**
 
 ```oxdock
+# Mutation writes through: the binding holds the new value.
 LET $count: INT = 1
 $count = 2
 ASSERT_EQ $count 2
@@ -535,8 +565,8 @@ ASSERT_EQ $count 2
 ```oxdock
 # Captured output is a string: `"100" + 1` is a Type Error.
 # Convert explicitly, then mutate with arithmetic.
-LET $raw: STRING = ECHO 100
 IMPORT [STD]
+LET $raw: STRING = ECHO 100
 LET $n: INT = INT($raw)
 $n = $n + 1
 
@@ -571,12 +601,16 @@ which `LET $out: TYPE = AWAIT $task` binds.
 **Example: async**
 
 ```oxdock
-ASYNC ECHO "first"
-
-ASYNC {
-    ECHO "first"
+# Inline and block forms both run in the background; AWAIT joins them.
+ASYNC ECHO "warming-up"
+LET $a: HANDLE = ASYNC ECHO "first"
+LET $b: HANDLE = ASYNC {
     ECHO "second"
 }
+AWAIT $a
+AWAIT $b
+ASSERT_CONTAINS stdout "first"
+ASSERT_CONTAINS stdout "second"
 ```
 
 **Example: async task handle**
@@ -586,6 +620,7 @@ LET $task: HANDLE = ASYNC {
     ECHO "built"
 }
 AWAIT $task
+ASSERT_CONTAINS stdout "built"
 ```
 
 
@@ -611,6 +646,7 @@ a value).
 ```oxdock
 LET $task: HANDLE = ASYNC ECHO "done"
 AWAIT $task
+ASSERT_CONTAINS stdout "done"
 ```
 
 **Example: await capture**
@@ -620,6 +656,8 @@ LET $task: HANDLE = ASYNC {
     ECHO "logged"
     RETURN "returned"
 }
+
+# AWAIT binds the RETURN value, not the streamed output.
 LET $out: STRING = AWAIT $task
 ASSERT_EQ $out "returned"
 ```
@@ -647,6 +685,17 @@ LET $task: HANDLE = ASYNC SLEEP 30s
 CANCEL $task
 ```
 
+**Example: await after cancel reports cancellation**
+
+```oxdock expect_error:"was cancelled"
+# A cancelled task stays cancelled: joining it reports.
+LET $task: HANDLE = ASYNC SLEEP 30s
+CANCEL $task
+AWAIT $task
+```
+
+**Expected error:** `was cancelled`
+
 
 ### TIMEOUT
 
@@ -666,6 +715,8 @@ A blocking foreground process is killed.
 
 ```oxdock
 TIMEOUT 30s WRITE heartbeat.txt alive
+LET $beat: STRING = READ heartbeat.txt
+ASSERT_EQ $beat "alive"
 ```
 
 **Example: timeout block**
@@ -675,7 +726,21 @@ TIMEOUT 30s {
     WRITE a.txt one
     WRITE b.txt two
 }
+LET $a: STRING = READ a.txt
+LET $b: STRING = READ b.txt
+ASSERT_EQ $a "one"
+ASSERT_EQ $b "two"
 ```
+
+**Example: deadline aborts the step**
+
+```oxdock expect_error:"TIMEOUT after"
+# 50ms expires long before the sleep does: the step dies
+# with a deadline error instead of running out the clock.
+TIMEOUT 50ms SLEEP 30s
+```
+
+**Expected error:** `TIMEOUT after`
 
 **Example: timeout variable duration**
 
@@ -781,6 +846,10 @@ FUNC PICK($flag: BOOL) {
 
 LET $res: STRING = PICK(true)
 ASSERT_EQ $res "yes"
+
+# Fallthrough without RETURN yields its own value.
+LET $no: STRING = PICK(false)
+ASSERT_EQ $no "no"
 ```
 
 
@@ -803,14 +872,16 @@ the next check.
 **Example: while loop**
 
 ```oxdock
-LET $done: BOOL = false
-WHILE !$done {
-  WRITE tick.txt "once"
-  $done = true
+# The condition re-evaluates every iteration: three passes, then stop.
+LET $n: INT = 0
+WHILE $n < 3 {
+  WRITE tick.txt "{{ $n }}"
+  $n = $n + 1
 }
 
+ASSERT_EQ $n 3
 LET $tick: STRING = READ tick.txt
-ASSERT_EQ $tick "once"
+ASSERT_EQ $tick "2"
 ```
 
 
@@ -830,9 +901,14 @@ BREAK outside a loop, or across a FUNC or ASYNC boundary, is an error.
 **Example: break**
 
 ```oxdock
+# BREAK leaves after the first pass: only "a" is written.
 FOR $x: STRING IN ["a", "b"] {
+  WRITE picked.txt "{{ $x }}"
   BREAK
 }
+
+LET $body: STRING = READ picked.txt
+ASSERT_EQ $body "a"
 ```
 
 
@@ -853,9 +929,16 @@ CONTINUE outside a loop, or across a FUNC or ASYNC boundary, is an error.
 **Example: continue**
 
 ```oxdock
+# CONTINUE skips the write on "a": only "b" lands.
 FOR $x: STRING IN ["a", "b"] {
-  CONTINUE
+  IF $x == "a" {
+    CONTINUE
+  }
+  WRITE picked.txt "{{ $x }}"
 }
+
+LET $body: STRING = READ picked.txt
+ASSERT_EQ $body "b"
 ```
 
 
@@ -888,6 +971,7 @@ cannot be used yet.
 **Example: import**
 
 ```oxdock
+# Calls name their module (STD::GLOB); IMPORT [STD] drops the prefix.
 WRITE a.txt "hi \{{ env:WHO }}!"
 IMPORT [STD]
 FOR $x: STRING IN GLOB("*.txt") { EXPAND $x WHO=World }
@@ -918,8 +1002,10 @@ the workspace root. Paths cannot escape the workspace.
 **Example: change working directory**
 
 ```oxdock
+# Later relative paths resolve under the new directory.
 WORKDIR project/src
 WRITE generated.txt generated-under-workdir
+
 LET $body: STRING = READ generated.txt
 ASSERT_EQ $body "generated-under-workdir"
 ```
@@ -927,6 +1013,8 @@ ASSERT_EQ $body "generated-under-workdir"
 **Example: workdir in a scoped block**
 
 ```oxdock
+# The block reverts to the starting directory on exit.
+LET $outside: STRING = CWD
 MKDIR project
 
 [bool:true] {
@@ -934,6 +1022,8 @@ MKDIR project
     WRITE inner.txt inner
 }
 
+LET $back: STRING = CWD
+ASSERT_EQ $back $outside
 LET $body: STRING = READ project/inner.txt
 ASSERT_EQ $body "inner"
 ```
@@ -976,7 +1066,11 @@ exit like `WORKDIR`.
 **Example: switch roots**
 
 ```oxdock
+IMPORT [STD]
 WORKSPACE LOCAL
+
+LET $t: STRING = PATH_TYPE(".")
+ASSERT_EQ $t "dir"
 ```
 
 **Example: workspace cache in a scoped block**
@@ -1023,6 +1117,8 @@ interpolate there.
 
 ```oxdock
 ENV APP_MODE=production
+LET $mode: STRING = env:APP_MODE
+ASSERT_EQ $mode "production"
 ```
 
 **Example: quoted value with spaces**
@@ -1108,6 +1204,8 @@ directive, the script starts with an empty environment.
 
 ```oxdock
 INHERIT_ENV [PATH, HOME]
+LET $path: STRING = env:PATH
+ASSERT_CONTAINS $path ":"
 ```
 
 
@@ -1133,16 +1231,17 @@ Outputs message to stdout.
 
 ```oxdock
 ECHO build-complete
+ASSERT_CONTAINS stdout "build-complete"
 ```
 
 **Example: variables**
 
 ```oxdock
-# A lone $x evaluates; {{ }} interpolates inside text.
+# {{ }} interpolates inside text; a lone $var evaluates on its own.
 LET $x: STRING = "World"
-ECHO {{ $x }}
+ECHO "braced:{{ $x }}"
 ECHO $x
-ASSERT_CONTAINS stdout "World"
+ASSERT_EQ stdout "braced:World\nWorld\n"
 ```
 
 
@@ -1175,12 +1274,22 @@ both forms.
 
 ```oxdock
 RUN echo hello
+
+# Captured runs prove the output, not just the exit status.
+LET $o: STRING = RUN echo hello
+ASSERT_CONTAINS $o "hello"
 ```
 
 **Example: run exec form**
 
 ```oxdock
-RUN ["cargo", "--version"]
+# No shell: `>` stays a literal argument, so no file is created.
+IMPORT [STD]
+RUN ["cargo", "--version", ">", "x.txt"]
+ASSERT_CONTAINS stdout "cargo"
+
+LET $t: STRING = PATH_TYPE("x.txt")
+ASSERT_EQ $t "absent"
 ```
 
 
@@ -1210,17 +1319,25 @@ Copies from host (the source is never moved or modified). Docker destination sem
 **Example: copy**
 
 ```oxdock roots:unified
+# Copy to a new name, then read back.
 WRITE src.txt content
 COPY src.txt dst.txt
+
 LET $body: STRING = READ dst.txt
 ASSERT_EQ $body "content"
 ```
 
 **Example: copy from workspace**
 
-```oxdock roots:unified
-WRITE ws-src.txt ws-content
-COPY --from-workspace LOCAL ws-src.txt ws-copy.txt
+```oxdock
+# Same name, different contents per root: only LOCAL has ws-content.
+WRITE shared.txt from-snapshot
+WORKSPACE LOCAL
+WRITE shared.txt ws-content
+
+WORKSPACE SNAPSHOT
+COPY --from-workspace LOCAL shared.txt ws-copy.txt
+
 LET $body: STRING = READ ws-copy.txt
 ASSERT_EQ $body "ws-content"
 ```
@@ -1250,7 +1367,7 @@ Checkout and copy.
 
 **Examples:**
 
-**Example: git copy**
+**Example: git copy missing source errors**
 
 ```oxdock expect_error:"COPY source missing"
 COPY_GIT HEAD src.txt dst.txt
@@ -1285,17 +1402,25 @@ Creates symlink. A directory destination (existing, or a trailing-slash spell) r
 **Example: symlink**
 
 ```oxdock roots:unified
+# A symlink reads like its target.
 WRITE original.txt content
 SYMLINK original.txt link.txt
+
 LET $body: STRING = READ link.txt
 ASSERT_EQ $body "content"
 ```
 
 **Example: symlink from workspace**
 
-```oxdock roots:unified
-WRITE ws-src.txt ws-content
-SYMLINK --from-workspace LOCAL ws-src.txt ws-link.txt
+```oxdock
+# Same name, different contents per root: only LOCAL has ws-content.
+WRITE shared.txt from-snapshot
+WORKSPACE LOCAL
+WRITE shared.txt ws-content
+
+WORKSPACE SNAPSHOT
+SYMLINK --from-workspace LOCAL shared.txt ws-link.txt
+
 LET $body: STRING = READ ws-link.txt
 ASSERT_EQ $body "ws-content"
 ```
@@ -1320,7 +1445,11 @@ Creates dir with parents.
 **Example: mkdir**
 
 ```oxdock
+IMPORT [STD]
 MKDIR deeply/nested/tree
+
+LET $t: STRING = PATH_TYPE("deeply/nested/tree")
+ASSERT_EQ $t "dir"
 ```
 
 
@@ -1348,6 +1477,7 @@ Lists entries.
 MKDIR inventory
 WRITE inventory/a.txt a
 LS inventory
+ASSERT_CONTAINS stdout "a.txt"
 ```
 
 
@@ -1367,6 +1497,12 @@ Outputs cwd.
 
 ```oxdock
 CWD
+
+# CWD tracks WORKDIR: the listing names the new directory.
+MKDIR sub
+WORKDIR sub
+LET $c: STRING = CWD
+ASSERT_CONTAINS $c "sub"
 ```
 
 
@@ -1393,6 +1529,9 @@ Outputs file contents.
 ```oxdock
 WRITE note.txt "hello"
 READ note.txt
+
+LET $body: STRING = READ note.txt
+ASSERT_EQ $body "hello"
 ```
 
 
@@ -1419,9 +1558,11 @@ assigns accumulated bytes and returns.
 **Example: read line**
 
 ```oxdock
+# The trailing newline is stripped: the variable holds exactly `first`.
 LET $lines: PIPE
 WITH_IO [stdout=$lines] ECHO "first"
 WITH_IO [stdin=$lines] READ_LINE $reply
+ASSERT_EQ $reply "first"
 ```
 
 
@@ -1446,6 +1587,8 @@ Writes contents.
 
 ```oxdock
 WRITE output.txt hello-world
+LET $body: STRING = READ output.txt
+ASSERT_EQ $body "hello-world"
 ```
 
 
@@ -1471,6 +1614,8 @@ Appends contents.
 ```oxdock
 WRITE log.txt line1
 APPEND log.txt line2
+
+# APPEND concatenates with no separator.
 LET $all: STRING = READ log.txt
 ASSERT_EQ $all "line1line2"
 ```
@@ -1523,58 +1668,64 @@ placeholder and errors.
 **Example: expand**
 
 ```oxdock
+# Placeholders read overrides first, then the environment.
 ENV NAME="Alice"
 WRITE template.md "Hello {{ env:NAME }}!"
 EXPAND template.md
+
 ASSERT_CONTAINS stdout "Hello Alice!"
 ```
 
 **Example: override with spaces**
 
 ```oxdock
-# WRITE would interpolate {{ }} right away, so escape it:
-# the file must literally contain {{ env:NAME }} for EXPAND
+# WRITE would interpolate {{ }} right away, so escape it.
+# The file must literally contain {{ env:NAME }} for EXPAND.
 WRITE template.md "Hello \{{ env:NAME }}!"
 EXPAND template.md NAME="Alice Smith"
+
 ASSERT_CONTAINS stdout "Hello Alice Smith!"
 ```
 
 **Example: variable override**
 
 ```oxdock
-# same escaping: keep the placeholder literal until EXPAND;
-# a lone $who evaluates, like ECHO $who
+# Same escaping: keep the placeholder literal until EXPAND.
+# A lone $who evaluates, like ECHO $who.
 LET $who: STRING = "Bob"
 WRITE template.md "Hi \{{ env:WHO }}!"
 EXPAND template.md WHO=$who
+
 ASSERT_CONTAINS stdout "Hi Bob!"
 ```
 
 **Example: override forms agree**
 
 ```oxdock
-# a bare variable and a template-with-tail expand identically
+# A bare variable and a template-with-tail expand identically.
 LET $x: STRING = "Ada"
 WRITE template.md "Hi \{{ env:NAME }} and \{{ env:NAME2 }}!"
 EXPAND template.md NAME=$x NAME2="{{ $x }} concatenated"
+
 ASSERT_CONTAINS stdout "Hi Ada and Ada concatenated!"
 ```
 
 **Example: expand stdin**
 
 ```oxdock
-# no path: the template arrives on stdin through a pipe
+# No path: the template arrives on stdin through a pipe.
 LET $tpl: PIPE
 WITH_IO [stdout=$tpl] ECHO "Hello \{{ env:NAME }}!"
 WITH_IO [stdin=$tpl] EXPAND NAME=Alice
+
 ASSERT_CONTAINS stdout "Hello Alice!"
 ```
 
 **Example: override does not leak**
 
 ```oxdock
-# KEY=val overrides shadow env for that EXPAND only —
-# they never update the environment itself
+# KEY=val overrides shadow env for that EXPAND only.
+# They never update the environment itself.
 ENV NAME="Alice"
 WRITE template.md "Hi \{{ env:NAME }}!"
 
@@ -1639,7 +1790,7 @@ ASSERT_EQ $body "stable-content"
 **Example: assert eq hash**
 
 ```oxdock
-# --hash compares the SHA-256 digest instead of raw bytes
+# --hash compares the SHA-256 digest instead of raw bytes.
 WRITE payload.bin stable-content
 LET $body: STRING = READ payload.bin
 ASSERT_EQ --hash 08135c1b6349b0e4f894c36221952f0de00e6b4d82f80895abf359755e77103c $body
@@ -1703,6 +1854,9 @@ Computes digest.
 ```oxdock
 WRITE payload.txt hello
 HASH_SHA256 payload.txt
+
+LET $digest: STRING = HASH_SHA256 payload.txt
+ASSERT_EQ $digest "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824\n"
 ```
 
 
@@ -1802,9 +1956,11 @@ other holders keep their contents.
 **Example: list append**
 
 ```oxdock
+# Appends accumulate in order.
 LET $items: LIST = []
 LIST_APPEND $items "first"
 LIST_APPEND $items "second"
+
 LET $want: LIST = ["first", "second"]
 ASSERT_EQ $items $want
 ```
@@ -2019,8 +2175,10 @@ LET $sem: SEMAPHORE = SEMAPHORE_NEW(10)
 Attempt one non-blocking acquire, always answering a MAP.
 
 `held` is `1` with the permit under the `permit` key, or `0` with no
-`permit` key: branch on `$m.held` (the DSL has no null, so the absent
-key is the miss shape, and missing-key access already bails strictly).
+`permit` key: branch on `$m.held == 1` (an INT compare; bare `IF $m.held`
+is a Type Error). The DSL has no null, so the absent key is the miss
+shape. Do not read `$m.permit` unless `held == 1`: missing-key access
+bails strictly.
 Never waits, so no wait can wedge.
 
 ```text

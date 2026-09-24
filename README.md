@@ -28,9 +28,11 @@
 
 **Dockerfile inspired build DSL for Rust**
 
-OxDock is a Dockerfile inspired build DSL for Rust. Embed scripts at compile time with macros, or run the same scripts as standalone CLI pipelines. Native. No containers. No daemon. No VM. All commands run identically on every OS, except RUN.
+OxDock is a Dockerfile-inspired build DSL for Rust: scripted pipelines with hermetic workspaces, typed variables, and pipes instead of snowflake shell. Embed scripts at compile time with macros, or run the same scripts as standalone CLI pipelines. Native. No containers. No daemon. No VM.
 
-Supports platform gating, async tasks, and piped workflows for custom pipelines.
+One script runs on Linux, macOS, and Windows, with platform gating, async tasks, and piped workflows for custom pipelines. Only RUN touches the host shell.
+
+Plain Rust functions become script functions with one attribute: `#[oxdock_func]` exports them into namespaced modules scripts call as `DEMO::NAME(...)`. See [Extending OxDock from Rust](#extending-oxdock-from-rust).
 
 [Documentation](https://docs.rs/oxdock/0.18.0-alpha/oxdock/)
 
@@ -269,10 +271,9 @@ WRITE dist/hello.txt Built with {{ env:PROJECT }}
 LET $body: STRING = READ dist/hello.txt
 ASSERT_EQ $body "Built with OxDock"
 
-// LS prints "<dir>:" then the entry names, sorted.
+// LS prints "<dir>:" then the entry names.
 LS dist
-
-// Assert the LS output contains "hello.txt".
+ASSERT_CONTAINS stdout "dist:"
 ASSERT_CONTAINS stdout "hello.txt"
 ```
 
@@ -327,6 +328,8 @@ ASSERT_EQ $line "hello"
 State mutations stay where the script puts them. Entering a braced block or a function call snapshots variables and settings, and exiting restores all of them, so nothing leaks outward. Background tasks fork the same way, so concurrent workers cannot observe each other's half finished mutations. Only pipes and filesystem effects cross these boundaries, by design.
 
 ```oxdock
+# Calls snapshot caller state: the parameter shadows without clobbering.
+LET $v: STRING = "outer"
 FUNC SHADOW($v: STRING) {
     LET $inner: STRING = "inner"
     RETURN $v
@@ -334,11 +337,22 @@ FUNC SHADOW($v: STRING) {
 
 LET $out: STRING = SHADOW("param")
 ASSERT_EQ $out "param"
+ASSERT_EQ $v "outer"
+
+# Background tasks fork the same way: worker mutations never escape.
+LET $w: STRING = "outer"
+LET $t: HANDLE = ASYNC {
+    $w = "inner"
+    ECHO "task-ran"
+}
+AWAIT $t
+ASSERT_EQ $w "outer"
+ASSERT_CONTAINS stdout "task-ran"
 ```
 
 ### Sandboxing
 
-Every path resolves inside a guarded workspace root, and escapes are rejected before any filesystem call. Scripts start with an empty process environment and opt into host variables explicitly.
+Every path resolves inside a guarded workspace root, and escapes are rejected before any filesystem call. Scripts start with only builtin keys (Cargo feature/cfg entries, `WORKSPACE_GIT_COMMIT`) and opt into host variables explicitly.
 
 ```oxdock expect_error:"escapes allowed root"
 WRITE ../escape.txt "nope"
@@ -367,7 +381,7 @@ fn main() {}
 
 ### Stream bytes between steps
 
-`WITH_IO` routes stdout into script pipes declared with `LET $p: PIPE` and back into stdin, so steps form custom pipelines. Pipes hold bytes in memory and spill to a temp file above 8 MiB. Wrapping a single RUN in ASYNC promotes the pipe to a zero copy OS kernel pipe instead; the consumer must then run while the producer is alive.
+`WITH_IO` routes stdout into script pipes declared with `LET $p: PIPE` and back into stdin, so steps form custom pipelines. Pipes hold bytes in memory and spill to a temp file above 8 MiB. Wrapping a single RUN in ASYNC promotes the pipe to a zero copy OS kernel pipe instead, when the background worker owns the unshared pipe; main-flow bindings stay script-backed. The consumer must then run while the producer is alive.
 
 ```oxdock
 LET $msg: PIPE
@@ -740,11 +754,11 @@ The one thing Python still wins is its C ABI as a stable interop target
 for other languages. The OxDock boundary is Rust only, which is exactly
 what keeps it cheap.
 
-One language for the whole build: farm steps out to npm, bundlers, or code generators and pull their artifacts back under cargo's control. Pipe bytes between steps without buffering whole outputs, fan work out with `ASYNC`, or skip embedding entirely and run the same scripts as standalone CLI processes.
+One language for the whole build: farm steps out to npm, bundlers, or code generators and pull their artifacts back under cargo's control. Pipe bytes between steps (buffered in memory to 8 MiB, then spilled to a temp file), fan work out with `ASYNC`, or skip embedding entirely and run the same scripts as standalone CLI processes.
 
 ## Variants
 
-OxDock comes in two variants, each of which are independent of the other, but share the same core:
+OxDock comes in two variants, each of which is independent of the other, but share the same core:
 
 - [oxdock-macros](./oxdock-macros/): Provides a Rust build-time dependency which runs OxDock scripts during the compilation of a Rust program.
 - [oxdock-cli](./oxdock-cli/): Command-line interface for running OxDock scripts from the command line.
@@ -810,6 +824,7 @@ ASSERT_EQ $t "absent"
 
 LET $n: INT = INT("41") + 1
 ASSERT_EQ $n 42
+ASSERT_EQ stdout ""
 ```
 
 ### Statements and semicolons
@@ -835,8 +850,8 @@ ASSERT_CONTAINS stdout "cargo"
 Three comment styles are supported: `//` line comments, nestable `/* ... */` block comments, and `#` comments. A `#` comment occupies a whole line (optionally indented) and may also trail values inside multi-line `()`, `[]`, and `{}` brackets; inside a command payload a `#` is ordinary text. Similarly, `//` ends a `RUN` argument list but survives inside quoted strings:
 
 ```oxdock
-// slash comment at end of line
-# hash comment occupies the whole line
+// Slash comment at end of line.
+# Hash comment occupies the whole line.
 
 /* block comments
    /* nest */
@@ -848,8 +863,12 @@ ASSERT_CONTAINS stdout "visible-after-comments"
 ```oxdock
 ECHO hash-mid-line # stays-in-payload
 ASSERT_CONTAINS stdout "hash-mid-line # stays-in-payload"
+
 RUN echo run-args-stop-at-slashes // removed-as-comment
 ASSERT_CONTAINS stdout "run-args-stop-at-slashes"
+
+RUN echo "quoted // kept"
+ASSERT_CONTAINS stdout "quoted // kept"
 ```
 
 Comment markers inside quoted strings are always preserved.
@@ -879,22 +898,35 @@ ASSERT_CONTAINS stdout "double quotes"
 // \" embeds a quote; the backslash itself is consumed.
 ECHO "escaped \" quote"
 ASSERT_CONTAINS stdout 'escaped " quote'
+
+// Quoted separators stay literal: no instruction splits here.
+ECHO 'semi;colon'
+ASSERT_CONTAINS stdout "semi;colon"
 ```
 
 ## Templates
 
-`{{ env:KEY }}` interpolates script environment values into arguments at execution time. Values come from the script environment (`ENV`, inherited keys) — there is no fallback to host variables in command context, and unknown keys expand to an empty string. The unprefixed form `{{ KEY }}` is not a valid template and also expands to empty, so always use the `env:`-prefixed spelling:
+`{{ env:KEY }}` interpolates script environment values into arguments at execution time. Values come from the script environment (`ENV`, inherited keys): there is no fallback to host variables in command context, and unknown keys expand to an empty string. The unprefixed form `{{ KEY }}` resolves a DSL variable of that name instead, else expands to empty; it never reads the environment, so always use the `env:`-prefixed spelling for environment values:
 
 ```oxdock
 ENV USER=OxDock
 
-# env:-prefixed form: interpolates from the SCRIPT environment.
+# The env:-prefixed form interpolates from the script environment.
 ECHO "Hello {{ env:USER }}!"
 ASSERT_CONTAINS stdout "Hello OxDock!"
 
-# Bare braces are not a template: they expand to empty.
+# Unprefixed names resolve DSL variables instead: $WHO exists, so this expands.
+LET $WHO: STRING = "Ada"
+ECHO "Hi {{ WHO }}!"
+ASSERT_CONTAINS stdout "Hi Ada!"
+
+# With no such variable the bare name expands to empty.
 ECHO "Hello {{ USER }}!"
 ASSERT_CONTAINS stdout "Hello !"
+
+# Unknown keys expand to empty with no host fallback.
+ECHO "a{{ env:OXDOCK_DOC_NO_SUCH_KEY }}b"
+ASSERT_CONTAINS stdout "ab"
 ```
 
 ## Guards and scoped blocks
@@ -904,14 +936,14 @@ A guard is a bracketed expression that gates the instruction or block that follo
 - `env:KEY` passes when variable `KEY` exists and is non-empty; `eq(env:KEY, value)` and `ne(env:KEY, value)` compare values.
 - Bare platform tags pass based on the host: `linux`, `macos` (alias `mac`), `windows`, `unix`. Tags are case-insensitive.
 - A comma-separated list means **AND**: `[env:A, linux]`.
-- Disjunction is expressed as a call — `any(expr, expr, ...)` with at least two branches — not an infix operator.
-- Conjunction is expressed as a call — `all(expr, expr, ...)` — or implicitly via comma separation.
+- Disjunction is expressed as a call: `any(expr, expr, ...)` with at least two branches, not an infix operator.
+- Conjunction is expressed as a call (`all(expr, expr, ...)`) or implicitly via comma separation.
 - Any predicate may be negated with `not(...)`: `[not(env:SKIP)]`.
 - Parentheses group expressions: `[any(env:A, linux), mac]`.
 
 Guards attach to the next instruction. Several guard lines in a row chain onto the same target, and a guard immediately followed by `{` opens a guarded block whose guard applies to every enclosed instruction.
 
-Guard evaluation checks the script environment first and falls back to the process environment, so guards interact naturally with `INHERIT_ENV` and `ENV`.
+Guard evaluation checks the script environment only: `ENV` entries, `INHERIT_ENV` opt-ins, and builtin keys. Host variables stay invisible unless inherited, so guards interact naturally with `INHERIT_ENV` and `ENV`.
 
 ### Environment guards
 
@@ -967,7 +999,7 @@ ASSERT_CONTAINS stdout "negation-passes-for-undefined"
 [any(env:OXDOCK_DOC_FEATURE_A, env:OXDOCK_DOC_FEATURE_B)] ECHO or-matched-a-branch
 ASSERT_CONTAINS stdout "or-matched-a-branch"
 
-// Comma composes with AND: (A or linux) AND A — true here on every OS.
+// Comma composes with AND: (A or linux) AND A: true here on every OS.
 [any(env:OXDOCK_DOC_FEATURE_A, linux), env:OXDOCK_DOC_FEATURE_A] ECHO composed-and-or-guard
 ASSERT_CONTAINS stdout "composed-and-or-guard"
 ```
@@ -977,6 +1009,8 @@ ASSERT_CONTAINS stdout "composed-and-or-guard"
 Bracket expressions may span lines. Chained guard lines apply conjunctively to the next instruction; here neither variable is defined, so the gated instruction is skipped:
 
 ```oxdock
+IMPORT [STD]
+
 // Brackets may span lines; chained lines AND together and gate
 // the next command.
 [
@@ -988,14 +1022,13 @@ Bracket expressions may span lines. Chained guard lines apply conjunctively to t
 WRITE chained.txt applied
 
 // The artifact was never created.
-IMPORT [STD]
 LET $t: STRING = PATH_TYPE("chained.txt")
 ASSERT_EQ $t "absent"
 ```
 
 ### Scoped blocks
 
-Braced blocks scope everything: `LET` variables, `ENV` values, `WORKDIR`, and `WORKSPACE` all revert when the block exits. Files created inside a block persist on disk, and pipes registered with `WITH_IO` stay open — those are the only things that cross a scope boundary. (A bare `{ ... }` needs an always-true guard: `[bool:true]`. Single commands, including single `WITH_IO` lines like `READ_LINE`, never open a scope.)
+Braced blocks scope everything: `LET` variables, `ENV` values, `WORKDIR`, and `WORKSPACE` all revert when the block exits. Files created inside a block persist on disk, and pipes registered with `WITH_IO` stay open. Those are the only things that cross a scope boundary. (A bare `{ ... }` needs an always-true guard: `[bool:true]`. Single commands, including single `WITH_IO` lines like `READ_LINE`, never open a scope.)
 
 ```oxdock
 LET $a: STRING = "some_value"
@@ -1012,7 +1045,7 @@ WORKDIR scoped_area
 }
 
 // $a is back to "some_value", MODE is back to "production",
-// and cwd is back at scoped_area — but files persist.
+// and cwd is back at scoped_area. Files persist.
 LET $in_body: STRING = READ inner.txt
 ASSERT_EQ $in_body "inner_value-staging"
 WRITE outer.txt "{{ $a }}-{{ env:MODE }}"
@@ -1020,11 +1053,23 @@ LET $out_body: STRING = READ outer.txt
 ASSERT_EQ $out_body "some_value-production"
 ```
 
+Pipes cross scope boundaries the same way files do: a handle bound
+inside stays usable after the block exits.
+
+```oxdock
+LET $p: PIPE
+[bool:true] {
+    WITH_IO [stdout=$p] ECHO "piped-out"
+}
+WITH_IO [stdin=$p] READ_LINE $line
+ASSERT_EQ $line "piped-out"
+```
+
 `IF`/`ELSE` branches, `FOR` loop bodies, `TIMEOUT` bodies, `ASYNC` bodies, and `WITH_IO [..] { ... }` blocks are all scopes under the same rule: only files and pipes leak out.
 
 ### EXIT in nested blocks
 
-`EXIT <code>` stops the pipeline immediately with an `EXIT requested with code <code>` error — steps after it never run, at any nesting depth. Unwinding still happens on the way out: every enclosing block reverts its `LET`/`ENV`/`WORKDIR`/`WORKSPACE` state before the error propagates, anonymous background tasks are killed synchronously, and files written before the `EXIT` persist. An `EXIT` inside `TIMEOUT` passes through unwrapped (never relabeled as a deadline error); an `EXIT` inside an `ASYNC` task ends that task with an error, which the parent sees at `AWAIT` or end-of-pipeline reaping.
+`EXIT <code>` stops the pipeline immediately with an `EXIT requested with code <code>` error. Steps after it never run, at any nesting depth. Files written before the `EXIT` persist, which the fence below asserts; state unwinding and task teardown follow the same scope rules as everywhere else.
 
 ```oxdock expect_error:"EXIT requested with code 3"
 WRITE before.txt "persisted"
@@ -1039,7 +1084,7 @@ ASSERT_EQ $b "persisted"
 
 ## Deadlines with TIMEOUT
 
-`TIMEOUT <duration> <command>` bounds a single step, `TIMEOUT <duration> { ... }` bounds a block, and `TIMEOUT <duration> AWAIT $task` bounds a task join. Durations accept `ms`, `s`, `m`, and `h` suffixes (a bare number means seconds, e.g. `TIMEOUT 30 ...`). A step that overruns its deadline is cancelled — a blocking foreground process is killed — and the pipeline fails with a `TIMEOUT after <duration>` error. `SLEEP <duration>` parks the step without spawning a shell, which makes it ideal for testing deadlines portably (a `SLEEP` inside an expired `TIMEOUT` is interrupted instead of running out the clock).
+`TIMEOUT <duration> <command>` bounds a single step, `TIMEOUT <duration> { ... }` bounds a block, and `TIMEOUT <duration> AWAIT $task` bounds a task join. Durations accept `ms`, `s`, `m`, and `h` suffixes (a bare number means seconds, e.g. `TIMEOUT 30 ...`). A step that overruns its deadline is cancelled. A blocking foreground process is killed, and the pipeline fails with a `TIMEOUT after <duration>` error. `SLEEP <duration>` parks the step without spawning a shell, which makes it ideal for testing deadlines portably (a `SLEEP` inside an expired `TIMEOUT` is interrupted instead of running out the clock).
 
 ```oxdock
 // Inline form bounds a single command.
@@ -1064,7 +1109,7 @@ LET $quick: HANDLE = ASYNC {
 TIMEOUT 30s AWAIT $quick
 ```
 
-`ASYNC` wraps any command or block — including `TIMEOUT`, `CANCEL`, `SLEEP`, and nested `ASYNC` — in either nesting order with the same deadline semantics. `LET $task: HANDLE = ASYNC TIMEOUT 30s RUN "build"` enforces the deadline inside the background thread (a later `AWAIT $task` surfaces the `TIMEOUT` error), while `TIMEOUT 30s AWAIT $task` preempts a hung task from the awaiting side:
+`ASYNC` wraps any command or block (including `TIMEOUT`, `CANCEL`, `SLEEP`, and nested `ASYNC`) in either nesting order with order-dependent deadline semantics: `LET $task: HANDLE = ASYNC TIMEOUT 30s RUN "build"` enforces the deadline inside the background thread (a later `AWAIT $task` surfaces the `TIMEOUT` error), while `TIMEOUT 30s AWAIT $task` preempts a hung task from the awaiting side:
 
 ```oxdock
 // ASYNC wraps TIMEOUT: the deadline fires inside the background thread.
@@ -1177,6 +1222,11 @@ WITH_IO [stdout=$log] {
   ECHO second
 }
 WITH_IO [stdin=$log] WRITE captured.txt
+
+# The piped bytes landed in the file.
+LET $body: STRING = READ captured.txt
+ASSERT_CONTAINS $body "first"
+ASSERT_CONTAINS $body "second"
 ```
 
 **Example: variable pipe binding**
@@ -1215,24 +1265,30 @@ empty when nothing matches, and rejects `..` escapes.
 **Example: for loop**
 
 ```oxdock
+# Each element binds in turn; the loop body sees every one.
 LET $items: LIST = ["a", "b"]
 FOR $item: STRING IN $items {
   ECHO $item
 }
+ASSERT_CONTAINS stdout "a"
+ASSERT_CONTAINS stdout "b"
 
+# Key and value bind together for maps.
 LET $map: MAP = {"x": 1}
 FOR $k: STRING, $v: INT IN $map {
-  ECHO "$k=$v"
+  ECHO "{{ $k }}={{ $v }}"
 }
+ASSERT_CONTAINS stdout "x=1"
 ```
 
 **Example: expand every match**
 
 ```oxdock
-# single-line body; $x is a template path, WHO an override
-WRITE a.txt "hi \{{ env:WHO }}!"
+# Single-line body; $x is a template path, WHO an override.
 IMPORT [STD]
+WRITE a.txt "hi \{{ env:WHO }}!"
 FOR $x: STRING IN GLOB("*.txt") { EXPAND $x WHO=World }
+
 ASSERT_CONTAINS stdout "hi World!"
 ```
 
@@ -1257,12 +1313,15 @@ accepted as conditions.
 
 ```oxdock
 IMPORT [STD]
+
+# True branch runs; the false branch is skipped.
 IF true {
   WRITE yes.txt taken
 } ELSE {
   WRITE yes.txt skipped
 }
 
+# ELSE IF selects the first true branch.
 IF false {
   WRITE skipped.txt no
 } ELSE IF true {
@@ -1273,6 +1332,7 @@ IF false {
 IF !false {
   WRITE negated.txt taken
 }
+
 LET $yes_body: STRING = READ yes.txt
 LET $fallback_body: STRING = READ fallback.txt
 LET $negated_body: STRING = READ negated.txt
@@ -1443,15 +1503,20 @@ string.
 ```oxdock
 LET $name: STRING = "world"
 ECHO "hello, {{ $name }}"
+ASSERT_CONTAINS stdout "hello, world"
 
 LET $items: LIST = ["a", "b"]
+ASSERT_CONTAINS $items "a"
+ASSERT_CONTAINS $items "b"
+
 LET $count: INT = 42
+ASSERT_EQ $count 42
 ```
 
 **Example: no hoisting**
 
 ```oxdock expect_error:"undefined variable"
-# reading before the LET runs is an error, not an empty value
+# Reading before the LET runs is an error, not an empty value.
 ECHO $too_early
 LET $too_early: STRING = "too late"
 ```
@@ -1461,18 +1526,19 @@ LET $too_early: STRING = "too late"
 **Example: glob binding**
 
 ```oxdock
-# the RHS is an expression: GLOB(...) runs and binds a list
-WRITE a.txt "x"
+# The RHS is an expression: GLOB(...) runs and binds a list.
 IMPORT [STD]
+WRITE a.txt "x"
 LET $files: LIST = GLOB("*.txt")
 FOR $f: STRING IN $files { ECHO $f }
+
 ASSERT_CONTAINS stdout "a.txt"
 ```
 
 **Example: scoped variable reverts**
 
 ```oxdock
-# LET inside a braced block reverts when the block exits
+# LET inside a braced block reverts when the block exits.
 LET $a: STRING = "outer"
 
 [bool:true] {
@@ -1492,6 +1558,7 @@ ASSERT_EQ $out_body "outer"
 **Example: capture command output**
 
 ```oxdock
+# Capture keeps the trailing newline.
 LET $out: STRING = ECHO hi
 ASSERT_EQ $out "hi\n"
 ```
@@ -1500,6 +1567,8 @@ ASSERT_EQ $out "hi\n"
 
 ```oxdock
 LET $who: STRING = "ada"
+
+# An inline block binds its RETURN value like a function body.
 LET $res: STRING = {
     LET $loud: STRING = "{{ $who }}!"
     RETURN $loud
@@ -1516,11 +1585,13 @@ ASSERT_EQ $n 42
 **Example: arithmetic over captured output**
 
 ```oxdock
-LET $size_str: STRING = ECHO 41
+# Captured output converts explicitly: INT() then arithmetic.
 IMPORT [STD]
+LET $size_str: STRING = ECHO 41
 LET $total: INT = INT($size_str) + 1
 ASSERT_EQ $total 42
 
+# FLOAT() promotes instead of truncating.
 LET $ratio: FLOAT = 1 + 2.5
 ASSERT_EQ $ratio 3.5
 
@@ -1570,6 +1641,7 @@ ASSERT_EQ $ok "yes"
 # INSPECT($var) snapshots a variable into a MAP: declared
 # type plus live details (pipe backend stats here), so
 # scripts can branch on engine state.
+IMPORT [STD]
 LET $p: PIPE
 WITH_IO [stdout=$p] ECHO hello
 LET $info: MAP = INSPECT($p)
@@ -1578,6 +1650,8 @@ IF $info.is_os_pipe {
 }
 
 ASSERT_EQ $info.type "PIPE"
+LET $t: STRING = PATH_TYPE("unexpected.txt")
+ASSERT_EQ $t "absent"
 ```
 
 
@@ -1611,6 +1685,7 @@ separate inner variable that reverts on exit.
 **Example: mutate**
 
 ```oxdock
+# Mutation writes through: the binding holds the new value.
 LET $count: INT = 1
 $count = 2
 ASSERT_EQ $count 2
@@ -1621,8 +1696,8 @@ ASSERT_EQ $count 2
 ```oxdock
 # Captured output is a string: `"100" + 1` is a Type Error.
 # Convert explicitly, then mutate with arithmetic.
-LET $raw: STRING = ECHO 100
 IMPORT [STD]
+LET $raw: STRING = ECHO 100
 LET $n: INT = INT($raw)
 $n = $n + 1
 
@@ -1657,12 +1732,16 @@ which `LET $out: TYPE = AWAIT $task` binds.
 **Example: async**
 
 ```oxdock
-ASYNC ECHO "first"
-
-ASYNC {
-    ECHO "first"
+# Inline and block forms both run in the background; AWAIT joins them.
+ASYNC ECHO "warming-up"
+LET $a: HANDLE = ASYNC ECHO "first"
+LET $b: HANDLE = ASYNC {
     ECHO "second"
 }
+AWAIT $a
+AWAIT $b
+ASSERT_CONTAINS stdout "first"
+ASSERT_CONTAINS stdout "second"
 ```
 
 **Example: async task handle**
@@ -1672,6 +1751,7 @@ LET $task: HANDLE = ASYNC {
     ECHO "built"
 }
 AWAIT $task
+ASSERT_CONTAINS stdout "built"
 ```
 
 
@@ -1697,6 +1777,7 @@ a value).
 ```oxdock
 LET $task: HANDLE = ASYNC ECHO "done"
 AWAIT $task
+ASSERT_CONTAINS stdout "done"
 ```
 
 **Example: await capture**
@@ -1706,6 +1787,8 @@ LET $task: HANDLE = ASYNC {
     ECHO "logged"
     RETURN "returned"
 }
+
+# AWAIT binds the RETURN value, not the streamed output.
 LET $out: STRING = AWAIT $task
 ASSERT_EQ $out "returned"
 ```
@@ -1733,6 +1816,17 @@ LET $task: HANDLE = ASYNC SLEEP 30s
 CANCEL $task
 ```
 
+**Example: await after cancel reports cancellation**
+
+```oxdock expect_error:"was cancelled"
+# A cancelled task stays cancelled: joining it reports.
+LET $task: HANDLE = ASYNC SLEEP 30s
+CANCEL $task
+AWAIT $task
+```
+
+**Expected error:** `was cancelled`
+
 
 ### TIMEOUT
 
@@ -1752,6 +1846,8 @@ A blocking foreground process is killed.
 
 ```oxdock
 TIMEOUT 30s WRITE heartbeat.txt alive
+LET $beat: STRING = READ heartbeat.txt
+ASSERT_EQ $beat "alive"
 ```
 
 **Example: timeout block**
@@ -1761,7 +1857,21 @@ TIMEOUT 30s {
     WRITE a.txt one
     WRITE b.txt two
 }
+LET $a: STRING = READ a.txt
+LET $b: STRING = READ b.txt
+ASSERT_EQ $a "one"
+ASSERT_EQ $b "two"
 ```
+
+**Example: deadline aborts the step**
+
+```oxdock expect_error:"TIMEOUT after"
+# 50ms expires long before the sleep does: the step dies
+# with a deadline error instead of running out the clock.
+TIMEOUT 50ms SLEEP 30s
+```
+
+**Expected error:** `TIMEOUT after`
 
 **Example: timeout variable duration**
 
@@ -1867,6 +1977,10 @@ FUNC PICK($flag: BOOL) {
 
 LET $res: STRING = PICK(true)
 ASSERT_EQ $res "yes"
+
+# Fallthrough without RETURN yields its own value.
+LET $no: STRING = PICK(false)
+ASSERT_EQ $no "no"
 ```
 
 
@@ -1889,14 +2003,16 @@ the next check.
 **Example: while loop**
 
 ```oxdock
-LET $done: BOOL = false
-WHILE !$done {
-  WRITE tick.txt "once"
-  $done = true
+# The condition re-evaluates every iteration: three passes, then stop.
+LET $n: INT = 0
+WHILE $n < 3 {
+  WRITE tick.txt "{{ $n }}"
+  $n = $n + 1
 }
 
+ASSERT_EQ $n 3
 LET $tick: STRING = READ tick.txt
-ASSERT_EQ $tick "once"
+ASSERT_EQ $tick "2"
 ```
 
 
@@ -1916,9 +2032,14 @@ BREAK outside a loop, or across a FUNC or ASYNC boundary, is an error.
 **Example: break**
 
 ```oxdock
+# BREAK leaves after the first pass: only "a" is written.
 FOR $x: STRING IN ["a", "b"] {
+  WRITE picked.txt "{{ $x }}"
   BREAK
 }
+
+LET $body: STRING = READ picked.txt
+ASSERT_EQ $body "a"
 ```
 
 
@@ -1939,9 +2060,16 @@ CONTINUE outside a loop, or across a FUNC or ASYNC boundary, is an error.
 **Example: continue**
 
 ```oxdock
+# CONTINUE skips the write on "a": only "b" lands.
 FOR $x: STRING IN ["a", "b"] {
-  CONTINUE
+  IF $x == "a" {
+    CONTINUE
+  }
+  WRITE picked.txt "{{ $x }}"
 }
+
+LET $body: STRING = READ picked.txt
+ASSERT_EQ $body "b"
 ```
 
 
@@ -1974,6 +2102,7 @@ cannot be used yet.
 **Example: import**
 
 ```oxdock
+# Calls name their module (STD::GLOB); IMPORT [STD] drops the prefix.
 WRITE a.txt "hi \{{ env:WHO }}!"
 IMPORT [STD]
 FOR $x: STRING IN GLOB("*.txt") { EXPAND $x WHO=World }
@@ -2004,8 +2133,10 @@ the workspace root. Paths cannot escape the workspace.
 **Example: change working directory**
 
 ```oxdock
+# Later relative paths resolve under the new directory.
 WORKDIR project/src
 WRITE generated.txt generated-under-workdir
+
 LET $body: STRING = READ generated.txt
 ASSERT_EQ $body "generated-under-workdir"
 ```
@@ -2013,6 +2144,8 @@ ASSERT_EQ $body "generated-under-workdir"
 **Example: workdir in a scoped block**
 
 ```oxdock
+# The block reverts to the starting directory on exit.
+LET $outside: STRING = CWD
 MKDIR project
 
 [bool:true] {
@@ -2020,6 +2153,8 @@ MKDIR project
     WRITE inner.txt inner
 }
 
+LET $back: STRING = CWD
+ASSERT_EQ $back $outside
 LET $body: STRING = READ project/inner.txt
 ASSERT_EQ $body "inner"
 ```
@@ -2062,7 +2197,11 @@ exit like `WORKDIR`.
 **Example: switch roots**
 
 ```oxdock
+IMPORT [STD]
 WORKSPACE LOCAL
+
+LET $t: STRING = PATH_TYPE(".")
+ASSERT_EQ $t "dir"
 ```
 
 **Example: workspace cache in a scoped block**
@@ -2109,6 +2248,8 @@ interpolate there.
 
 ```oxdock
 ENV APP_MODE=production
+LET $mode: STRING = env:APP_MODE
+ASSERT_EQ $mode "production"
 ```
 
 **Example: quoted value with spaces**
@@ -2194,6 +2335,8 @@ directive, the script starts with an empty environment.
 
 ```oxdock
 INHERIT_ENV [PATH, HOME]
+LET $path: STRING = env:PATH
+ASSERT_CONTAINS $path ":"
 ```
 
 
@@ -2219,16 +2362,17 @@ Outputs message to stdout.
 
 ```oxdock
 ECHO build-complete
+ASSERT_CONTAINS stdout "build-complete"
 ```
 
 **Example: variables**
 
 ```oxdock
-# A lone $x evaluates; {{ }} interpolates inside text.
+# {{ }} interpolates inside text; a lone $var evaluates on its own.
 LET $x: STRING = "World"
-ECHO {{ $x }}
+ECHO "braced:{{ $x }}"
 ECHO $x
-ASSERT_CONTAINS stdout "World"
+ASSERT_EQ stdout "braced:World\nWorld\n"
 ```
 
 
@@ -2261,12 +2405,22 @@ both forms.
 
 ```oxdock
 RUN echo hello
+
+# Captured runs prove the output, not just the exit status.
+LET $o: STRING = RUN echo hello
+ASSERT_CONTAINS $o "hello"
 ```
 
 **Example: run exec form**
 
 ```oxdock
-RUN ["cargo", "--version"]
+# No shell: `>` stays a literal argument, so no file is created.
+IMPORT [STD]
+RUN ["cargo", "--version", ">", "x.txt"]
+ASSERT_CONTAINS stdout "cargo"
+
+LET $t: STRING = PATH_TYPE("x.txt")
+ASSERT_EQ $t "absent"
 ```
 
 
@@ -2296,17 +2450,25 @@ Copies from host (the source is never moved or modified). Docker destination sem
 **Example: copy**
 
 ```oxdock roots:unified
+# Copy to a new name, then read back.
 WRITE src.txt content
 COPY src.txt dst.txt
+
 LET $body: STRING = READ dst.txt
 ASSERT_EQ $body "content"
 ```
 
 **Example: copy from workspace**
 
-```oxdock roots:unified
-WRITE ws-src.txt ws-content
-COPY --from-workspace LOCAL ws-src.txt ws-copy.txt
+```oxdock
+# Same name, different contents per root: only LOCAL has ws-content.
+WRITE shared.txt from-snapshot
+WORKSPACE LOCAL
+WRITE shared.txt ws-content
+
+WORKSPACE SNAPSHOT
+COPY --from-workspace LOCAL shared.txt ws-copy.txt
+
 LET $body: STRING = READ ws-copy.txt
 ASSERT_EQ $body "ws-content"
 ```
@@ -2336,7 +2498,7 @@ Checkout and copy.
 
 **Examples:**
 
-**Example: git copy**
+**Example: git copy missing source errors**
 
 ```oxdock expect_error:"COPY source missing"
 COPY_GIT HEAD src.txt dst.txt
@@ -2371,17 +2533,25 @@ Creates symlink. A directory destination (existing, or a trailing-slash spell) r
 **Example: symlink**
 
 ```oxdock roots:unified
+# A symlink reads like its target.
 WRITE original.txt content
 SYMLINK original.txt link.txt
+
 LET $body: STRING = READ link.txt
 ASSERT_EQ $body "content"
 ```
 
 **Example: symlink from workspace**
 
-```oxdock roots:unified
-WRITE ws-src.txt ws-content
-SYMLINK --from-workspace LOCAL ws-src.txt ws-link.txt
+```oxdock
+# Same name, different contents per root: only LOCAL has ws-content.
+WRITE shared.txt from-snapshot
+WORKSPACE LOCAL
+WRITE shared.txt ws-content
+
+WORKSPACE SNAPSHOT
+SYMLINK --from-workspace LOCAL shared.txt ws-link.txt
+
 LET $body: STRING = READ ws-link.txt
 ASSERT_EQ $body "ws-content"
 ```
@@ -2406,7 +2576,11 @@ Creates dir with parents.
 **Example: mkdir**
 
 ```oxdock
+IMPORT [STD]
 MKDIR deeply/nested/tree
+
+LET $t: STRING = PATH_TYPE("deeply/nested/tree")
+ASSERT_EQ $t "dir"
 ```
 
 
@@ -2434,6 +2608,7 @@ Lists entries.
 MKDIR inventory
 WRITE inventory/a.txt a
 LS inventory
+ASSERT_CONTAINS stdout "a.txt"
 ```
 
 
@@ -2453,6 +2628,12 @@ Outputs cwd.
 
 ```oxdock
 CWD
+
+# CWD tracks WORKDIR: the listing names the new directory.
+MKDIR sub
+WORKDIR sub
+LET $c: STRING = CWD
+ASSERT_CONTAINS $c "sub"
 ```
 
 
@@ -2479,6 +2660,9 @@ Outputs file contents.
 ```oxdock
 WRITE note.txt "hello"
 READ note.txt
+
+LET $body: STRING = READ note.txt
+ASSERT_EQ $body "hello"
 ```
 
 
@@ -2505,9 +2689,11 @@ assigns accumulated bytes and returns.
 **Example: read line**
 
 ```oxdock
+# The trailing newline is stripped: the variable holds exactly `first`.
 LET $lines: PIPE
 WITH_IO [stdout=$lines] ECHO "first"
 WITH_IO [stdin=$lines] READ_LINE $reply
+ASSERT_EQ $reply "first"
 ```
 
 
@@ -2532,6 +2718,8 @@ Writes contents.
 
 ```oxdock
 WRITE output.txt hello-world
+LET $body: STRING = READ output.txt
+ASSERT_EQ $body "hello-world"
 ```
 
 
@@ -2557,6 +2745,8 @@ Appends contents.
 ```oxdock
 WRITE log.txt line1
 APPEND log.txt line2
+
+# APPEND concatenates with no separator.
 LET $all: STRING = READ log.txt
 ASSERT_EQ $all "line1line2"
 ```
@@ -2609,58 +2799,64 @@ placeholder and errors.
 **Example: expand**
 
 ```oxdock
+# Placeholders read overrides first, then the environment.
 ENV NAME="Alice"
 WRITE template.md "Hello {{ env:NAME }}!"
 EXPAND template.md
+
 ASSERT_CONTAINS stdout "Hello Alice!"
 ```
 
 **Example: override with spaces**
 
 ```oxdock
-# WRITE would interpolate {{ }} right away, so escape it:
-# the file must literally contain {{ env:NAME }} for EXPAND
+# WRITE would interpolate {{ }} right away, so escape it.
+# The file must literally contain {{ env:NAME }} for EXPAND.
 WRITE template.md "Hello \{{ env:NAME }}!"
 EXPAND template.md NAME="Alice Smith"
+
 ASSERT_CONTAINS stdout "Hello Alice Smith!"
 ```
 
 **Example: variable override**
 
 ```oxdock
-# same escaping: keep the placeholder literal until EXPAND;
-# a lone $who evaluates, like ECHO $who
+# Same escaping: keep the placeholder literal until EXPAND.
+# A lone $who evaluates, like ECHO $who.
 LET $who: STRING = "Bob"
 WRITE template.md "Hi \{{ env:WHO }}!"
 EXPAND template.md WHO=$who
+
 ASSERT_CONTAINS stdout "Hi Bob!"
 ```
 
 **Example: override forms agree**
 
 ```oxdock
-# a bare variable and a template-with-tail expand identically
+# A bare variable and a template-with-tail expand identically.
 LET $x: STRING = "Ada"
 WRITE template.md "Hi \{{ env:NAME }} and \{{ env:NAME2 }}!"
 EXPAND template.md NAME=$x NAME2="{{ $x }} concatenated"
+
 ASSERT_CONTAINS stdout "Hi Ada and Ada concatenated!"
 ```
 
 **Example: expand stdin**
 
 ```oxdock
-# no path: the template arrives on stdin through a pipe
+# No path: the template arrives on stdin through a pipe.
 LET $tpl: PIPE
 WITH_IO [stdout=$tpl] ECHO "Hello \{{ env:NAME }}!"
 WITH_IO [stdin=$tpl] EXPAND NAME=Alice
+
 ASSERT_CONTAINS stdout "Hello Alice!"
 ```
 
 **Example: override does not leak**
 
 ```oxdock
-# KEY=val overrides shadow env for that EXPAND only —
-# they never update the environment itself
+# KEY=val overrides shadow env for that EXPAND only.
+# They never update the environment itself.
 ENV NAME="Alice"
 WRITE template.md "Hi \{{ env:NAME }}!"
 
@@ -2725,7 +2921,7 @@ ASSERT_EQ $body "stable-content"
 **Example: assert eq hash**
 
 ```oxdock
-# --hash compares the SHA-256 digest instead of raw bytes
+# --hash compares the SHA-256 digest instead of raw bytes.
 WRITE payload.bin stable-content
 LET $body: STRING = READ payload.bin
 ASSERT_EQ --hash 08135c1b6349b0e4f894c36221952f0de00e6b4d82f80895abf359755e77103c $body
@@ -2789,6 +2985,9 @@ Computes digest.
 ```oxdock
 WRITE payload.txt hello
 HASH_SHA256 payload.txt
+
+LET $digest: STRING = HASH_SHA256 payload.txt
+ASSERT_EQ $digest "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824\n"
 ```
 
 
@@ -2888,9 +3087,11 @@ other holders keep their contents.
 **Example: list append**
 
 ```oxdock
+# Appends accumulate in order.
 LET $items: LIST = []
 LIST_APPEND $items "first"
 LIST_APPEND $items "second"
+
 LET $want: LIST = ["first", "second"]
 ASSERT_EQ $items $want
 ```
@@ -3105,8 +3306,10 @@ LET $sem: SEMAPHORE = SEMAPHORE_NEW(10)
 Attempt one non-blocking acquire, always answering a MAP.
 
 `held` is `1` with the permit under the `permit` key, or `0` with no
-`permit` key: branch on `$m.held` (the DSL has no null, so the absent
-key is the miss shape, and missing-key access already bails strictly).
+`permit` key: branch on `$m.held == 1` (an INT compare; bare `IF $m.held`
+is a Type Error). The DSL has no null, so the absent key is the miss
+shape. Do not read `$m.permit` unless `held == 1`: missing-key access
+bails strictly.
 Never waits, so no wait can wedge.
 
 ```text
@@ -3253,7 +3456,7 @@ specific token.
 Scripts no longer inherit the caller's environment wholesale. Host variables stay private unless you opt in explicitly.
 
 - Add `INHERIT_ENV [FOO, BAR, BAZ]` at the very top of the script to copy those keys from the process environment before any other command runs.
-- The directive must be top-level—no guards, no surrounding blocks, and no repeats. Trying to nest or guard it triggers a parser error so scripts stay deterministic.
+- The directive must be top-level: no guards, no surrounding blocks, and no repeats. Trying to nest or guard it triggers a parser error so scripts stay deterministic.
 - Subsequent `ENV` commands can override inherited values, similar to how Docker's `ENV` overrides `--env` flags.
 - Test harnesses and embedders can supply values programmatically; the [environment-guards example](#environment-guards) injects `DEPLOY_TARGET` through the docs-conformance runner rather than the real process environment.
 
@@ -3269,9 +3472,9 @@ Keeping inheritance selective avoids leaking secrets by default while still allo
 
 - **Absolute paths:** Use platform-appropriate absolute paths (e.g., `/usr/bin` on Unix-like systems, `C:\path\to` on Windows). OxDock will use the host OS path semantics when resolving absolute paths.
 
-- **Symlinks and Windows:** Creating symlinks on Windows may require elevated permissions on some older OS versions; where symlinks are not available the CLI falls back to copying directory contents so scripts remain functional across platforms.
+- **Symlinks and Windows:** Creating symlinks on Windows may require elevated permissions on some older OS versions; without permission the `SYMLINK` step fails with an error instead of falling back.
 
-- **Globbing & shell expansion:** OxDock does not implicitly perform shell globbing or shell-side expansion for file arguments — when you need shell semantics use `RUN` with the platform shell, or add explicit DSL commands that accept wildcards if you want portable behavior.
+- **Globbing & shell expansion:** OxDock does not implicitly perform shell globbing or shell-side expansion for file arguments. When you need shell semantics use `RUN` with the platform shell, or add explicit DSL commands that accept wildcards if you want portable behavior.
 
 ## Workspaces & Filesystem
 
@@ -3281,7 +3484,7 @@ Keeping inheritance selective avoids leaking secrets by default while still allo
 
 - **Four workspace roots:** `WORKSPACE SNAPSHOT` (the default ephemeral temp location), `WORKSPACE LOCAL` (the local directory), `WORKSPACE CACHE` (a persistent per-project cache directory shared across runs), and `WORKSPACE SYSTEM` (full filesystem access, not hermetic). `WORKSPACE` selection reverts at scope exit like `WORKDIR`.
 
-- **Persistent cache:** `WORKSPACE CACHE` stores artifacts under the OS per-user cache, namespaced by application identity `<app>`, with a `workspace` group segment underneath. Concretely: macOS `~/Library/Caches/com.oxdock.<app>/workspace`, Linux `$XDG_CACHE_HOME/<app>/workspace` (or `~/.cache/<app>/workspace`, lowercased), Windows `%LOCALAPPDATA%\oxdock\<app>\cache\workspace`. Identity resolves as explicit builder argument, `OXDOCK_CACHE_APP`, runtime `CARGO_PKG_NAME`, running binary name, then `"oxdock"`; `OXDOCK_CACHE_DIR` pins an exact directory instead (OS flavor only), and when no home directory is available the cache falls back to a temp dir (`oxdock-cache-<app>`). `WORKSPACE CACHE --local` keeps the cache in `<project>/.cache/workspace` instead, unconditionally. The directory is created on first use, survives restarts, and is never evicted by default.
+- **Persistent cache:** `WORKSPACE CACHE` stores artifacts under the OS per-user cache, namespaced by application identity `<app>`, with a `workspace` group segment underneath. Concretely: macOS `~/Library/Caches/com.oxdock.<app>/workspace`, Linux `$XDG_CACHE_HOME/<app>/workspace` (or `~/.cache/<app>/workspace`), Windows `%LOCALAPPDATA%\oxdock\<app>\cache\workspace`. Identity resolves as explicit builder argument, `OXDOCK_CACHE_APP`, runtime `CARGO_PKG_NAME`, running binary name, then `"oxdock"`; `OXDOCK_CACHE_DIR` pins an exact directory instead (OS flavor only), and when no home directory is available the cache falls back to a temp dir (`oxdock-cache-<app>`). `WORKSPACE CACHE --local` keeps the cache in `<project>/.cache/workspace` instead, unconditionally. The directory is created on first use, survives restarts, and is never evicted by default.
 
 - **Filesystem gating via `oxdock-fs`:** all filesystem operations in the runtime are routed through the crate internal `oxdock-fs` abstraction. That module centralizes path resolution, canonicalization and access checks so reads and writes can be validated against the allowed workspace root and build context. `WORKSPACE SYSTEM` intentionally bypasses these checks; scripts using it are not hermetic.
 
@@ -3293,14 +3496,14 @@ Keeping inheritance selective avoids leaking secrets by default while still allo
 
 Every ```` ```oxdock ```` fence in this document is extracted with [`oxdock_parser::extract_fenced_blocks`](./crates/oxdock-parser/src/markdown.rs) and executed by [`crates/oxdock-logic-tests/tests/docs_conformance.rs`](./crates/oxdock-logic-tests/tests/docs_conformance.rs) against the real parser and interpreter, so the documentation cannot drift from the implementation. Enforcement layers:
 
-- **Parse & execute:** every snippet must parse and run clean (or fail with its declared `expect_error:` message) on Linux, macOS, and Windows CI.
-- **Coverage gates:** every parser command must appear in at least one executable example, and key structural features (`any(`, `not(`, `{{ env:`, `[env:`) must be demonstrated.
-- **Compile-time parity:** a [build-time fixture](./crates/oxdock-logic-tests/fixtures/integration/buildtime_macros/assert_verification/) runs this README's quick-start script through `oxdock_embed!`, assertions included.
-- **Real-binary check:** the quick start is additionally executed through the actual `oxdock` binary exactly as documented (`--script Oxfile`).
-- **Doctest execution:** the Rust quick start is wired into [`crates/oxdock-doc-tests`](./crates/oxdock-doc-tests/) and compiled *and* run by `cargo test --doc` on every CI OS.
-- **Reference integrity:** every relative Markdown link target and every repo path referenced from a ```` ```bash ```` fence must exist.
+- **Parse & execute:** Every snippet must parse and run clean (or fail with its declared `expect_error:` message) on Linux, macOS, and Windows CI.
+- **Coverage gates:** Every parser command must appear in at least one executable example, and key structural features (`any(`, `not(`, `{{ env:`, `[env:`) must be demonstrated.
+- **Compile-time parity:** A [build-time fixture](./crates/oxdock-logic-tests/fixtures/integration/buildtime_macros/assert_verification/) runs this README's quick-start script through `oxdock_embed!`, assertions included.
+- **Real-binary check:** The quick start is additionally executed through the actual `oxdock` binary exactly as documented (`--script Oxfile`).
+- **Doctest execution:** The Rust quick start is wired into [`crates/oxdock-doc-tests`](./crates/oxdock-doc-tests/) and compiled *and* run by `cargo test --doc` on every CI OS.
+- **Reference integrity:** Every relative Markdown link target and every repo path referenced from a ```` ```bash ```` fence must exist.
 
-Snippets contain nothing but OxDock — copy any of them straight into an `Oxfile` or an `oxdock_embed!` macro. Runner-specific configuration lives in the fence info-string, which Markdown renders as inert metadata:
+Snippets contain nothing but OxDock: copy any of them straight into an `Oxfile` or an `oxdock_embed!` macro. Runner-specific configuration lives in the fence info-string, which Markdown renders as inert metadata:
 
 ```text
 ```oxdock                                    plain snippet, must parse and run clean
@@ -3309,9 +3512,9 @@ Snippets contain nothing but OxDock — copy any of them straight into an `Oxfil
 ```oxdock expect_error:"message substring"   snippet must fail with this text in its error
 ```
 
-Everything else you see inside the fences — including the `ASSERT_*` commands — is part of the DSL itself and executes identically in your own pipelines.
+Everything else you see inside the fences, including the `ASSERT_*` commands, is part of the DSL itself and executes identically in your own pipelines.
 
-If you change the DSL, update this reference in the same commit — CI will hold you to it.
+If you change the DSL, update this reference in the same commit. CI will hold you to it.
 
 ## Environment variable contracts
 
@@ -3341,7 +3544,7 @@ INHERIT_ENV [GITHUB_ACTIONS]
 
 ### Collapsible log groups
 
-Group markers go through `ECHO` — no shell required:
+Group markers go through `ECHO`: no shell required:
 
 ```oxdock
 INHERIT_ENV [GITHUB_ACTIONS]
@@ -3367,7 +3570,7 @@ INHERIT_ENV [GITHUB_ACTIONS]
 }
 ```
 
-On GitHub Actions, replace the paths with the runner-provided env vars (`{{ env:GITHUB_STEP_SUMMARY }}`, `{{ env:GITHUB_OUTPUT }}`, `{{ env:GITHUB_ENV }}`):
+On GitHub Actions, replace the paths with the runner-provided env vars (`{{ env:GITHUB_STEP_SUMMARY }}`, `{{ env:GITHUB_OUTPUT }}`, `{{ env:GITHUB_ENV }}`).
 
 ## Testing & Coverage
 

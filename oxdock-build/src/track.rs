@@ -1,6 +1,7 @@
 //! Static input discovery for `cargo:rerun-if-changed` emission.
 //!
-//! Walks the parsed DSL AST and derives watchable inputs:
+//! Walks the parsed DSL AST and derives watchable inputs from read-side
+//! sources only (`COPY`, `COPY_GIT`, `SYMLINK`, `HASH_SHA256`, `READ`):
 //! - fully literal path arguments become `cargo:rerun-if-changed` entries,
 //! - templated paths contribute their literal directory head (conservative)
 //!   plus `cargo:rerun-if-env-changed` entries for every referenced env key,

@@ -220,7 +220,7 @@ fn expand_multi_assignment_splits_uniformly() {
         }
         other => panic!("expected Expand, saw {other:?}"),
     }
-    // Plain values split identically — no shape-dependent tokenizing.
+    // Plain values split identically : no shape-dependent tokenizing.
     match parse_one("EXPAND K1=1 K2=2") {
         StepKind::Expand { overrides, .. } => {
             assert_eq!(overrides.len(), 2);
@@ -241,7 +241,7 @@ fn expand_multi_assignment_splits_uniformly() {
 
 #[test]
 fn env_rejects_second_assignment() {
-    // `A=1 B=2` is two assignments; ENV takes exactly one — loud error,
+    // `A=1 B=2` is two assignments; ENV takes exactly one : loud error,
     // never a silent merge or drop.
     assert!(
         parse_err("ENV A=1 B=2").contains("KEY=value"),

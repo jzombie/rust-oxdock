@@ -39,14 +39,14 @@ pub struct StreamingExpand {
     vars: HashMap<String, oxdock_parser::Value>,
     /// State: are we currently inside a placeholder?
     in_placeholder: bool,
-    /// Trailing opening byte from previous chunk — deferred across chunks.
+    /// Trailing opening byte from previous chunk : deferred across chunks.
     pending_brace: bool,
-    /// Trailing closing byte from previous chunk — deferred across chunks.
+    /// Trailing closing byte from previous chunk : deferred across chunks.
     pending_close_brace: bool,
-    /// Trailing backslash from previous chunk — deferred across chunks so
+    /// Trailing backslash from previous chunk : deferred across chunks so
     /// `\{{` split across a boundary still emits a literal opener.
     pending_escape: bool,
-    /// Trailing `\` + `{` from previous chunk — deferred across chunks so
+    /// Trailing `\` + `{` from previous chunk : deferred across chunks so
     /// a `\{` split across a boundary still resolves as an escape pair.
     pending_escape_brace: bool,
     /// Configurable delimiter syntax.
@@ -92,7 +92,7 @@ impl StreamingExpand {
         if self.pending_close_brace {
             self.pending_close_brace = false;
             if input[0] == self.delimiters.close[1] {
-                // Confirmed close delimiter across boundary — extract key, lookup, emit
+                // Confirmed close delimiter across boundary : extract key, lookup, emit
                 let key = extract_key(&self.buffer);
                 let value = lookup(&key, &self.overrides, &self.env, &self.vars)?;
                 out.extend_from_slice(value.as_bytes());
@@ -100,10 +100,10 @@ impl StreamingExpand {
                 self.in_placeholder = false;
                 i = self.delimiters.close.len() - 1; // Skip input[0] (the second byte)
             } else {
-                // Lone closing byte — treat as literal part of key
+                // Lone closing byte : treat as literal part of key
                 // Push it to buffer, then let scan_placeholder process input[0]
                 self.buffer.push(self.delimiters.close[0]);
-                i = 0; // Do NOT skip input[0] — let scan_placeholder handle it
+                i = 0; // Do NOT skip input[0]: let scan_placeholder handle it
             }
         }
 
@@ -111,12 +111,12 @@ impl StreamingExpand {
         if self.pending_brace {
             self.pending_brace = false;
             if input[0] == self.delimiters.open[1] {
-                // Confirmed `{{` across boundary — enter PlaceholderScan
+                // Confirmed `{{` across boundary : enter PlaceholderScan
                 self.in_placeholder = true;
                 self.buffer.clear();
                 i = 1; // Skip the second open byte
             } else {
-                // Single open byte was just a literal — flush it
+                // Single open byte was just a literal : flush it
                 out.push(self.delimiters.open[0]);
             }
         }
@@ -153,7 +153,7 @@ impl StreamingExpand {
                 out.push(b'\\');
                 i = 1;
             } else {
-                // Not an escape — the backslash was literal; reprocess
+                // Not an escape : the backslash was literal; reprocess
                 // this chunk from the start (a lone `{` still defers via
                 // the pending_brace path below).
                 out.push(b'\\');
@@ -161,50 +161,50 @@ impl StreamingExpand {
         }
 
         if self.in_placeholder {
-            // We're inside a placeholder — scan for closing delimiter
+            // We're inside a placeholder : scan for closing delimiter
             i = self.scan_placeholder(input, i, out)?;
         }
 
-        // Normal state — scan for opening byte or flush literals
+        // Normal state : scan for opening byte or flush literals
         while i < input.len() {
             if input[i] == b'\\' {
                 if i + 2 < input.len() && input[i + 1] == b'{' && input[i + 2] == b'{' {
-                    // Escaped opener — emit a literal `{{`, consume all three
+                    // Escaped opener : emit a literal `{{`, consume all three
                     out.extend_from_slice(b"{{");
                     i += 3;
                 } else if i + 2 == input.len() && input[i + 1] == self.delimiters.open[0] {
-                    // `\{` ends the chunk — defer the pair; the next
+                    // `\{` ends the chunk : defer the pair; the next
                     // chunk decides literal `{{` vs literal `\` + `{`.
                     self.pending_escape_brace = true;
                     i += 2;
                 } else if i + 1 < input.len() && input[i + 1] == b'\\' {
-                    // Escaped backslash — emit one `\`, consume both (this
+                    // Escaped backslash : emit one `\`, consume both (this
                     // keeps `\\{{ ... }}` expanding, matching the lenient
                     // interpolator used for command arguments)
                     out.push(b'\\');
                     i += 2;
                 } else if i + 1 == input.len() {
-                    // Trailing backslash — defer across the chunk boundary
+                    // Trailing backslash : defer across the chunk boundary
                     self.pending_escape = true;
                     i += 1;
                 } else {
-                    // Ordinary backslash — literal, reprocess what follows
+                    // Ordinary backslash : literal, reprocess what follows
                     out.push(b'\\');
                     i += 1;
                 }
             } else if input[i] == self.delimiters.open[0] {
                 if i + 1 < input.len() && input[i + 1] == self.delimiters.open[1] {
-                    // Found open delimiter — enter PlaceholderScan
+                    // Found open delimiter : enter PlaceholderScan
                     self.in_placeholder = true;
                     self.buffer.clear();
                     i += 2;
                     i = self.scan_placeholder(input, i, out)?;
                 } else if i + 1 == input.len() {
-                    // Opening byte is the LAST byte of chunk — defer
+                    // Opening byte is the LAST byte of chunk : defer
                     self.pending_brace = true;
                     i += 1;
                 } else {
-                    // Single opening byte in the middle — flush as literal
+                    // Single opening byte in the middle : flush as literal
                     out.push(self.delimiters.open[0]);
                     i += 1;
                 }
@@ -271,7 +271,7 @@ impl StreamingExpand {
         while i < input.len() {
             if input[i] == self.delimiters.close[0] {
                 if i + 1 < input.len() && input[i + 1] == self.delimiters.close[1] {
-                    // Found closing delimiter — extract key, lookup, emit expansion
+                    // Found closing delimiter : extract key, lookup, emit expansion
                     let key = extract_key(&self.buffer);
                     let value = lookup(&key, &self.overrides, &self.env, &self.vars)?;
                     out.extend_from_slice(value.as_bytes());
@@ -280,7 +280,7 @@ impl StreamingExpand {
                     return Ok(i + 2);
                 }
                 if i + 1 == input.len() {
-                    // Closing byte is the LAST byte — defer to next chunk
+                    // Closing byte is the LAST byte : defer to next chunk
                     self.pending_close_brace = true;
                     return Ok(i + 1);
                 }
@@ -288,7 +288,7 @@ impl StreamingExpand {
             self.buffer.push(input[i]);
             i += 1;
 
-            // Buffer limit exceeded — flush as literal
+            // Buffer limit exceeded : flush as literal
             if self.buffer.len() > MAX_PLACEHOLDER_SCAN {
                 out.extend_from_slice(self.delimiters.open);
                 out.extend_from_slice(&self.buffer);
@@ -832,7 +832,7 @@ mod tests {
 
         // End chunk with closing byte, then empty input, then confirm
         expander.process_bytes(b"{{ env:NAME", &mut out).unwrap();
-        expander.process_bytes(b"", &mut out).unwrap(); // empty — should preserve state
+        expander.process_bytes(b"", &mut out).unwrap(); // empty: should preserve state
         expander.process_bytes(b"}}", &mut out).unwrap();
         expander.flush(&mut out).unwrap();
 
@@ -929,7 +929,7 @@ mod tests {
         let mut env = HashMap::new();
         env.insert("WHO".into(), "from-env".into());
         let expander = StreamingExpand::new(&[], &env);
-        // $WHO queries vars, NOT env — should error even though env has WHO
+        // $WHO queries vars, NOT env : should error even though env has WHO
         let result = expander.expand_string("{{ $WHO }}");
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
@@ -948,7 +948,7 @@ mod tests {
             oxdock_parser::Value::string("from-var".into()),
         );
         let expander = StreamingExpand::new(&[], &HashMap::new()).with_vars(&vars);
-        // env:HOST queries env, NOT vars — should error even though vars has HOST
+        // env:HOST queries env, NOT vars : should error even though vars has HOST
         let result = expander.expand_string("{{ env:HOST }}");
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
@@ -964,7 +964,7 @@ mod tests {
         let mut vars = HashMap::new();
         vars.insert("PORT".into(), oxdock_parser::Value::int(8080));
         let expander = StreamingExpand::new(&[], &HashMap::new()).with_vars(&vars);
-        // PORT (bare) queries overrides, NOT vars — should error
+        // PORT (bare) queries overrides, NOT vars : should error
         let result = expander.expand_string("{{ PORT }}");
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
@@ -980,7 +980,7 @@ mod tests {
         let mut vars = HashMap::new();
         vars.insert("MODE".into(), oxdock_parser::Value::string("dev".into()));
         let expander = StreamingExpand::new(&[], &HashMap::new()).with_vars(&vars);
-        // env:MODE looks in env, not vars — should error
+        // env:MODE looks in env, not vars : should error
         let result = expander.expand_string("{{ env:MODE }}");
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
@@ -996,7 +996,7 @@ mod tests {
         let mut env = HashMap::new();
         env.insert("PORT".into(), "3000".into());
         let expander = StreamingExpand::new(&[], &env);
-        // $PORT looks in vars, not env — should error
+        // $PORT looks in vars, not env : should error
         let result = expander.expand_string("{{ $PORT }}");
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();

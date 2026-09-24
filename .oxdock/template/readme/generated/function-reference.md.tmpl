@@ -150,8 +150,10 @@ LET $sem: SEMAPHORE = SEMAPHORE_NEW(10)
 Attempt one non-blocking acquire, always answering a MAP.
 
 `held` is `1` with the permit under the `permit` key, or `0` with no
-`permit` key: branch on `$m.held` (the DSL has no null, so the absent
-key is the miss shape, and missing-key access already bails strictly).
+`permit` key: branch on `$m.held == 1` (an INT compare; bare `IF $m.held`
+is a Type Error). The DSL has no null, so the absent key is the miss
+shape. Do not read `$m.permit` unless `held == 1`: missing-key access
+bails strictly.
 Never waits, so no wait can wedge.
 
 ```text

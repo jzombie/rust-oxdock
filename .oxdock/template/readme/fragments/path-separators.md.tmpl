@@ -8,6 +8,6 @@
 
 - **Absolute paths:** Use platform-appropriate absolute paths (e.g., `/usr/bin` on Unix-like systems, `C:\path\to` on Windows). OxDock will use the host OS path semantics when resolving absolute paths.
 
-- **Symlinks and Windows:** Creating symlinks on Windows may require elevated permissions on some older OS versions; where symlinks are not available the CLI falls back to copying directory contents so scripts remain functional across platforms.
+- **Symlinks and Windows:** Creating symlinks on Windows may require elevated permissions on some older OS versions; without permission the `SYMLINK` step fails with an error instead of falling back.
 
-- **Globbing & shell expansion:** OxDock does not implicitly perform shell globbing or shell-side expansion for file arguments — when you need shell semantics use `RUN` with the platform shell, or add explicit DSL commands that accept wildcards if you want portable behavior.
+- **Globbing & shell expansion:** OxDock does not implicitly perform shell globbing or shell-side expansion for file arguments. When you need shell semantics use `RUN` with the platform shell, or add explicit DSL commands that accept wildcards if you want portable behavior.

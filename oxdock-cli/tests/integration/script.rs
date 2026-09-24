@@ -89,12 +89,12 @@ fn script_runs_copy_and_symlink() {
     #[cfg(not(unix))]
     {
         if oxdock_sys_test_utils::can_create_symlinks(root.as_path()) {
-            // Host supports symlinks — the script should succeed and the link should exist.
+            // Host supports symlinks : the script should succeed and the link should exist.
             res.unwrap();
             let linked = root.join("server/dist/test.txt").unwrap();
             assert!(linked.as_path().exists());
         } else {
-            // Host cannot create symlinks — we expect an explicit error and no copy fallback.
+            // Host cannot create symlinks : we expect an explicit error and no copy fallback.
             assert!(
                 res.is_err(),
                 "SYMLINK should error on platforms without symlink privilege"

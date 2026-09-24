@@ -1,7 +1,7 @@
 //! Owned pipe handles: a mutex cell holding a lazily materializing slot.
 //!
 //! A [`PipeHandle`] starts [`Slot::Unbound`] and materializes on first
-//! binding — never eagerly at declaration, so the backend choice always
+//! binding : never eagerly at declaration, so the backend choice always
 //! has full usage context. Cloning the handle shares the backend (natural
 //! fan-out for explicit sharing); the last drop closes. No central index
 //! exists: resolution, keepers, and assertions all operate on handles
@@ -243,7 +243,7 @@ pub enum Materialized {
 
 /// First-binding-wins materialization under the cell lock: an unbound
 /// handle decides its kind from `promote` (the caller supplies full usage
-/// context — RUN-terminated ⇒ OS, else script); a decided handle returns
+/// context : RUN-terminated ⇒ OS, else script); a decided handle returns
 /// its kind unchanged. Later bindings with different needs adapt through
 /// the caller's resolution machinery instead of failing or upgrading here.
 pub fn materialize(handle: &PipeHandle, promote: bool) -> anyhow::Result<Materialized> {

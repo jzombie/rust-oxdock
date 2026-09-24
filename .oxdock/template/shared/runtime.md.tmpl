@@ -43,6 +43,8 @@ ASSERT_EQ $line "hello"
 State mutations stay where the script puts them. Entering a braced block or a function call snapshots variables and settings, and exiting restores all of them, so nothing leaks outward. Background tasks fork the same way, so concurrent workers cannot observe each other's half finished mutations. Only pipes and filesystem effects cross these boundaries, by design.
 
 ```oxdock
+# Calls snapshot caller state: the parameter shadows without clobbering.
+LET $v: STRING = "outer"
 FUNC SHADOW($v: STRING) {
     LET $inner: STRING = "inner"
     RETURN $v
@@ -50,11 +52,22 @@ FUNC SHADOW($v: STRING) {
 
 LET $out: STRING = SHADOW("param")
 ASSERT_EQ $out "param"
+ASSERT_EQ $v "outer"
+
+# Background tasks fork the same way: worker mutations never escape.
+LET $w: STRING = "outer"
+LET $t: HANDLE = ASYNC {
+    $w = "inner"
+    ECHO "task-ran"
+}
+AWAIT $t
+ASSERT_EQ $w "outer"
+ASSERT_CONTAINS stdout "task-ran"
 ```
 
 ### Sandboxing
 
-Every path resolves inside a guarded workspace root, and escapes are rejected before any filesystem call. Scripts start with an empty process environment and opt into host variables explicitly.
+Every path resolves inside a guarded workspace root, and escapes are rejected before any filesystem call. Scripts start with only builtin keys (Cargo feature/cfg entries, `WORKSPACE_GIT_COMMIT`) and opt into host variables explicitly.
 
 ```oxdock expect_error:"escapes allowed root"
 WRITE ../escape.txt "nope"

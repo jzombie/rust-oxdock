@@ -45,8 +45,8 @@ use proc_macro2::TokenTree;
 use quote::quote;
 use syn::parse_macro_input;
 
-/// Runs the DSL at compile-time, materializes assets, and emits a lightweight
-/// struct with embedded bytes pointing at the output directory.
+/// Runs the DSL at compile-time, materializes assets, and emits a struct
+/// with embedded bytes via include_bytes!.
 ///
 /// See the crate docs for the full inline contract.
 #[proc_macro]
@@ -436,7 +436,7 @@ fn ensure_out_dir(
 }
 
 // ---------------------------------------------------------------------------
-// oxdock! — runtime AST construction macro with #var interpolation
+// oxdock! : runtime AST construction macro with #var interpolation
 // ---------------------------------------------------------------------------
 
 use oxdock_parser::{Arg, ArgPart, AssertTarget, Expr, Step, StepKind, Value};
@@ -459,7 +459,7 @@ fn is_placeholder(s: &str) -> Option<usize> {
 /// Accepts the same DSL syntax as `oxdock_embed!`'s `script:` block,
 /// but returns `Vec<oxdock_parser::Step>` instead of embedding files.
 ///
-/// Use `#var` to inject Rust variables (must implement `Display`/`ToString`).
+/// Use `#var` to inject Rust variables (must implement `Display`, used via `.to_string()`).
 /// DSL variables (`$var` in LET/FOR) are distinct and unaffected.
 #[proc_macro]
 pub fn oxdock(input: TokenStream) -> TokenStream {
