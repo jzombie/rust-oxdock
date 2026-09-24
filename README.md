@@ -381,11 +381,11 @@ fn main() {}
 
 ### Stream bytes between steps
 
-`WITH_IO` routes stdout into script pipes declared with `LET $p: PIPE` and back into stdin, so steps form custom pipelines. Pipes hold bytes in memory and spill to a temp file above 8 MiB. Wrapping a single RUN in ASYNC promotes the pipe to a zero copy OS kernel pipe instead, when the background worker owns the unshared pipe; main-flow bindings stay script-backed. The consumer must then run while the producer is alive.
+`WITH_IO` routes a step's stdout into a script pipe and back into another step's stdin. Run the producer under `ASYNC` so both ends stay live while bytes flow.
 
 ```oxdock
 LET $msg: PIPE
-WITH_IO [stdout=$msg] ECHO piped-bytes
+WITH_IO [stdout=$msg] ASYNC ECHO piped-bytes
 WITH_IO [stdin=$msg] WRITE piped.txt
 READ piped.txt
 ASSERT_CONTAINS stdout "piped-bytes"
