@@ -9,7 +9,7 @@ use std::net::ToSocketAddrs;
 
 use anyhow::{Context, Result, bail};
 use oxdock_net_plugin::validate as net_validate;
-use oxdock_net_plugin::{EndpointRegistry, SlotKind, VirtualEndpoint};
+use oxdock_net_plugin::{EndpointKey, EndpointRegistry, SlotKind, VirtualEndpoint};
 
 /// Split `host:port` (or `[v6]:port`) with an SSH-context prefix.
 /// Pure string validation: no DNS, Miri-safe. Shape and port rules come
@@ -59,35 +59,36 @@ pub fn resolve_connect_addr(
     target: &str,
 ) -> Result<std::net::SocketAddr> {
     if let Ok(endpoint) = net_validate::parse_virtual_endpoint(target, "SSH_CONNECT") {
-        return match &endpoint {
-            VirtualEndpoint::Port(port) => match registry.slot_kind(&endpoint) {
+        let key = EndpointKey::tcp(endpoint);
+        return match &key.endpoint {
+            VirtualEndpoint::Port(port) => match registry.slot_kind(&key) {
                 SlotKind::Memory => {
                     bail!(
-                        "SSH_CONNECT: '{endpoint}' is a memory service (SSH needs a TCP socket; map it with -p/--listen)"
+                        "SSH_CONNECT: '{key}' is a memory service (SSH needs a TCP socket; map it with -p/--listen)"
                     )
                 }
                 SlotKind::TcpBound(addr) => Ok(addr),
                 SlotKind::TcpUnbound => {
                     bail!(
-                        "SSH_CONNECT: '{endpoint}' was never bound (the runner must call bind_all)"
+                        "SSH_CONNECT: '{key}' was never bound (the runner must call bind_all)"
                     )
                 }
-                SlotKind::Offline => bail!("SSH_CONNECT: '{endpoint}' is offline"),
+                SlotKind::Offline => bail!("SSH_CONNECT: '{key}' is offline"),
                 SlotKind::Unmapped => Ok(std::net::SocketAddr::from(([127, 0, 0, 1], *port))),
             },
-            VirtualEndpoint::Name(_) => match registry.slot_kind(&endpoint) {
+            VirtualEndpoint::Name(_) => match registry.slot_kind(&key) {
                 SlotKind::TcpBound(addr) => Ok(addr),
                 SlotKind::TcpUnbound => {
                     bail!(
-                        "SSH_CONNECT: '{endpoint}' was never bound (the runner must call bind_all)"
+                        "SSH_CONNECT: '{key}' was never bound (the runner must call bind_all)"
                     )
                 }
                 SlotKind::Memory | SlotKind::Unmapped => {
                     bail!(
-                        "SSH_CONNECT: '{endpoint}' is a memory service (SSH needs a TCP socket; map it with -p/--listen)"
+                        "SSH_CONNECT: '{key}' is a memory service (SSH needs a TCP socket; map it with -p/--listen)"
                     )
                 }
-                SlotKind::Offline => bail!("SSH_CONNECT: '{endpoint}' is offline"),
+                SlotKind::Offline => bail!("SSH_CONNECT: '{key}' is offline"),
             },
         };
     }
@@ -163,7 +164,7 @@ mod tests {
         use oxdock_net_plugin::BindingSpec;
         let registry = fresh_registry();
         registry
-            .add_mapping(&VirtualEndpoint::Port(23472), BindingSpec::Memory)
+            .add_mapping(&EndpointKey::tcp(net_validate::VirtualEndpoint::Port(23472)), BindingSpec::Memory)
             .expect("mapping");
         let err = resolve_connect_addr(&registry, "23472").expect_err("memory bails");
         assert!(err.to_string().contains("memory service"), "{err:#}");
@@ -174,7 +175,7 @@ mod tests {
         use oxdock_net_plugin::BindingSpec;
         let registry = fresh_registry();
         registry
-            .add_mapping(&VirtualEndpoint::Port(23473), BindingSpec::Offline)
+            .add_mapping(&EndpointKey::tcp(net_validate::VirtualEndpoint::Port(23473)), BindingSpec::Offline)
             .expect("mapping");
         let err = resolve_connect_addr(&registry, "23473").expect_err("offline bails");
         assert!(err.to_string().contains("offline"), "{err:#}");

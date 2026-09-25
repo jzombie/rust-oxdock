@@ -21,9 +21,11 @@ required-features = ["cli"]
 
 [features]
 default = ["cli"]
-cli = ["dep:oxdock-cli"]
+cli = ["dep:oxdock-cli", "net"]
+# Virtual-endpoint toolkit in the CLI runner (oxdock-net-plugin).
+net = ["oxdock-cli/net"]
 # Ephemeral SSH server/client in the CLI runner (oxdock-ssh-plugin).
-ssh = ["cli", "oxdock-cli/ssh"]
+ssh = ["cli", "net", "oxdock-cli/ssh"]
 
 [dependencies]
 oxdock-build.workspace = true

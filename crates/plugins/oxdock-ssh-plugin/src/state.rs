@@ -271,7 +271,7 @@ pub struct ServerState {
     /// The endpoint this server was acquired for, plus the registry
     /// holding its slot: close/drop frees the slot for re-serve loops.
     registry: Arc<oxdock_net_plugin::EndpointRegistry>,
-    endpoint: oxdock_net_plugin::VirtualEndpoint,
+    endpoint: oxdock_net_plugin::EndpointKey,
 }
 
 /// Construction bundle for [`ServerState::new`]: identity, runtime
@@ -287,7 +287,7 @@ pub struct ServerConfig {
     pub shutdown_tx: std::sync::mpsc::Sender<ShutdownSignal>,
     pub thread: Option<std::thread::JoinHandle<()>>,
     pub registry: Arc<oxdock_net_plugin::EndpointRegistry>,
-    pub endpoint: oxdock_net_plugin::VirtualEndpoint,
+    pub endpoint: oxdock_net_plugin::EndpointKey,
 }
 
 impl ServerState {

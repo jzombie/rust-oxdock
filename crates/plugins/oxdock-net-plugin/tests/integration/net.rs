@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use indoc::indoc;
 use oxdock_core::{Engine, EngineOutput};
 use oxdock_fs::{GuardedPath, GuardedTempDir};
-use oxdock_net_plugin::{BindingSpec, EndpointRegistry, VirtualEndpoint, module_with_endpoints};
+use oxdock_net_plugin::{BindingSpec, EndpointKey, EndpointRegistry, module_with_endpoints};
 
 fn guard_root(temp: &GuardedTempDir) -> GuardedPath {
     temp.as_guarded_path().clone()
@@ -606,7 +606,7 @@ fn prebound_claim_serves_cli_mapped_socket() {
     let registry = Arc::new(EndpointRegistry::new(false));
     registry
         .add_mapping(
-            &VirtualEndpoint::Port(23530),
+            &EndpointKey::tcp(oxdock_net_plugin::VirtualEndpoint::Port(23530)),
             BindingSpec::Exposed {
                 addr: "127.0.0.1:0".parse().expect("addr"),
             },
@@ -721,7 +721,7 @@ fn memory_queue_full_bails_through_connect() {
     // (so the task cannot hang). No sockets involved.
     use oxdock_net_plugin::MemoryPipePair;
     let registry = Arc::new(EndpointRegistry::new(false));
-    let endpoint = VirtualEndpoint::Name("mem-full".to_string());
+    let endpoint = EndpointKey::tcp(oxdock_net_plugin::VirtualEndpoint::Name("mem-full".to_string()));
     registry.ensure_memory_slot(&endpoint);
     for _ in 0..64 {
         registry
@@ -784,4 +784,99 @@ fn offline_connect_bails_before_sockets() {
         let err = run_script_with(registry, &root, &script).expect_err("offline dial must fail");
         assert!(err.to_string().contains("--offline mode"), "{err:#}");
     }
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "needs loopback TCP")]
+fn port_and_addr_observe_prebound_mapping() {
+    // The -p path: a pre-bound ephemeral outer socket is observable
+    // in-script without claiming the slot, then routable into RUN via
+    // normal expansion. No fixed ports: the outer bind is ephemeral.
+    use oxdock_net_plugin::VirtualEndpoint;
+    let registry = Arc::new(EndpointRegistry::new(false));
+    registry
+        .add_mapping(
+            &EndpointKey::tcp(VirtualEndpoint::Name("resolve-demo".to_string())),
+            BindingSpec::Exposed {
+                addr: "127.0.0.1:0".parse().expect("addr"),
+            },
+        )
+        .expect("mapping");
+    registry.bind_all().expect("bind_all resolves ephemeral");
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD, NET]
+        LET $port: INT = NET_PORT("resolve-demo")
+        WRITE port.txt "{{ $port }}"
+        LET $addr: STRING = NET_ADDR("resolve-demo")
+        WRITE addr.txt "{{ $addr }}"
+    "#};
+    run_script_with(registry, &root, script).expect("resolve runs");
+    let port: u16 = read_trimmed(&root.join("port.txt").unwrap())
+        .parse()
+        .expect("resolved port parses");
+    assert_ne!(port, 0, "ephemeral outer port must resolve");
+    let addr = read_trimmed(&root.join("addr.txt").unwrap());
+    assert!(
+        addr.ends_with(&format!(":{port}")),
+        "dial string must carry the resolved port, got {addr:?}"
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "needs loopback TCP")]
+fn port_and_addr_fail_loudly_when_unbound() {
+    // No sentinel returns: unmapped names, memory-only slots, and
+    // ambiguous bare names all bail with explicit context.
+    use oxdock_net_plugin::VirtualEndpoint;
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD, NET]
+        LET $port: INT = NET_PORT("never-mapped-xyz")
+    "#};
+    let err = run_script(&root, script).expect_err("unmapped lookup must fail");
+    assert!(err.to_string().contains("is not bound"), "{err:#}");
+
+    let registry = Arc::new(EndpointRegistry::new(false));
+    registry
+        .add_mapping(
+            &EndpointKey::tcp(VirtualEndpoint::Name("both-proto".to_string())),
+            BindingSpec::Loopback { port: 0 },
+        )
+        .expect("mapping");
+    registry
+        .add_mapping(
+            &EndpointKey::udp(VirtualEndpoint::Name("both-proto".to_string())),
+            BindingSpec::Loopback { port: 0 },
+        )
+        .expect("mapping");
+    registry.bind_all().expect("bind_all");
+    let script = indoc! {r#"
+        IMPORT [STD, NET]
+        LET $port: INT = NET_PORT("both-proto")
+    "#};
+    let err = run_script_with(registry.clone(), &root, script).expect_err("ambiguous must fail");
+    assert!(err.to_string().contains("ambiguous"), "{err:#}");
+    let script = indoc! {r#"
+        IMPORT [STD, NET]
+        LET $tcp: INT = NET_PORT("tcp/both-proto")
+        LET $udp: STRING = NET_ADDR("udp/both-proto")
+        WRITE tcp.txt "{{ $tcp }}"
+        WRITE udp.txt "{{ $udp }}"
+    "#};
+    run_script_with(registry, &root, script).expect("qualified lookups resolve");
+    let tcp: u16 = read_trimmed(&root.join("tcp.txt").unwrap())
+        .parse()
+        .expect("tcp port parses");
+    assert_ne!(tcp, 0);
+    let udp = read_trimmed(&root.join("udp.txt").unwrap());
+    let udp_port: u16 = udp
+        .rsplit(':')
+        .next()
+        .unwrap_or_default()
+        .parse()
+        .expect("udp dial string carries a port");
+    assert_ne!(udp_port, 0, "udp dial string must carry a port, got {udp:?}");
 }

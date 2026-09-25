@@ -271,7 +271,9 @@ fn execute_plugin_block(block: &FencedBlock, name: &str) -> Result<()> {
     let ssh_registry = std::sync::Arc::new(oxdock_net_plugin::EndpointRegistry::new(false));
     ssh_registry
         .add_mapping(
-            &oxdock_net_plugin::VirtualEndpoint::Name("doc-ssh-demo".to_string()),
+            &oxdock_net_plugin::EndpointKey::tcp(oxdock_net_plugin::VirtualEndpoint::Name(
+                "doc-ssh-demo".to_string(),
+            )),
             oxdock_net_plugin::BindingSpec::Loopback { port: 0 },
         )
         .context("map doc service")?;

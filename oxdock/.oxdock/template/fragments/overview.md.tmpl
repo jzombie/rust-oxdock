@@ -5,4 +5,6 @@ standalone processes with the CLI.
 
 This crate is the front door. It re-exports the CLI runner (enabled by
 default) and the build macros (always available), so most users only
-ever depend on `oxdock`.
+ever depend on `oxdock`. The `cli` feature implies `net`, so the facade
+always carries NET; minimal builds go through `oxdock-cli` with
+`--no-default-features`.

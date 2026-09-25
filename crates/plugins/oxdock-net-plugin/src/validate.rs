@@ -110,6 +110,107 @@ impl std::fmt::Display for VirtualEndpoint {
     }
 }
 
+/// Transport protocol qualifying a registry slot. Sockets are TCP-only
+/// today; the compound key exists so a future `5353:dns/udp` mapping can
+/// never collide with or silently misroute `5353:dns/tcp`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Protocol {
+    Tcp,
+    Udp,
+}
+
+impl std::fmt::Display for Protocol {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Protocol::Tcp => write!(formatter, "tcp"),
+            Protocol::Udp => write!(formatter, "udp"),
+        }
+    }
+}
+
+/// Compound registry key: a protocol plus a logical endpoint. TCP displays
+/// bare (`2251`, `demo-proxy`) so every existing TCP message stays
+/// byte-identical; UDP displays qualified (`udp/dns`) so it is always
+/// explicit.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct EndpointKey {
+    pub protocol: Protocol,
+    pub endpoint: VirtualEndpoint,
+}
+
+impl EndpointKey {
+    /// TCP key for a logical endpoint: the default for `--listen`,
+    /// in-script `LISTEN`/`SERVE`, and unqualified lookups.
+    pub fn tcp(endpoint: VirtualEndpoint) -> Self {
+        Self {
+            protocol: Protocol::Tcp,
+            endpoint,
+        }
+    }
+
+    /// UDP key for a logical endpoint: only via explicit qualification.
+    pub fn udp(endpoint: VirtualEndpoint) -> Self {
+        Self {
+            protocol: Protocol::Udp,
+            endpoint,
+        }
+    }
+}
+
+impl std::fmt::Display for EndpointKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.protocol {
+            Protocol::Tcp => write!(formatter, "{}", self.endpoint),
+            Protocol::Udp => write!(formatter, "udp/{}", self.endpoint),
+        }
+    }
+}
+
+/// Split an optional protocol qualifier off endpoint text. Accepts a
+/// leading qualifier (`udp/dns`, the DSL lookup form) or a trailing one
+/// (`dns/udp`, the `-p` flag form); bare text has no qualifier. Unknown
+/// qualifiers bail instead of falling through to name validation.
+fn split_protocol_qualifier(text: &str) -> Result<(Option<Protocol>, &str)> {
+    let parse_protocol = |segment: &str| match segment {
+        "tcp" => Some(Protocol::Tcp),
+        "udp" => Some(Protocol::Udp),
+        _ => None,
+    };
+    // Leading form (`udp/dns`, the DSL lookup spelling) wins: a
+    // qualified rest is never a valid bare endpoint, so it errors below
+    // either way.
+    let leading = text
+        .split_once('/')
+        .filter(|(_, rest)| !rest.is_empty() && !rest.contains('/'))
+        .and_then(|(head, rest)| parse_protocol(head).map(|protocol| (Some(protocol), rest)));
+    if let Some(qualified) = leading {
+        return Ok(qualified);
+    }
+    let trailing = text
+        .rsplit_once('/')
+        .filter(|(bare, _)| !bare.is_empty() && !bare.contains('/'))
+        .and_then(|(bare, tail)| parse_protocol(tail).map(|protocol| (Some(protocol), bare)));
+    if let Some(qualified) = trailing {
+        return Ok(qualified);
+    }
+    if text.contains('/') {
+        bail!("unknown protocol qualifier in {text:?} (expected 'tcp/...', 'udp/...', '.../tcp', or '.../udp')");
+    }
+    Ok((None, text))
+}
+
+/// Validate a possibly protocol-qualified endpoint without touching the
+/// network. Returns the qualifier (`None` for bare text, which callers
+/// resolve as TCP with single-protocol fallback) plus the validated bare
+/// endpoint. The `func` prefix names the caller for error context.
+pub fn parse_endpoint_ref(raw: &str, func: &str) -> Result<(Option<Protocol>, VirtualEndpoint)> {
+    let text = raw.trim();
+    let (protocol, bare) = split_protocol_qualifier(text)
+        .map_err(|err| anyhow::anyhow!("{func} invalid endpoint {raw:?}: {err:#}"))?;
+    let endpoint = parse_virtual_endpoint(bare, func)?;
+    Ok((protocol, endpoint))
+}
+
 /// Reserved service names: resolving them as hosts would be ambiguous, so
 /// scripts must not claim them.
 fn is_reserved_name(name: &str) -> bool {
@@ -283,6 +384,53 @@ mod tests {
             VirtualEndpoint::Name("demo-proxy".to_string()).key(),
             "svc:demo-proxy".to_string()
         );
+    }
+
+    #[test]
+    fn endpoint_key_display_stays_bare_for_tcp() {
+        let tcp = EndpointKey::tcp(VirtualEndpoint::Name("dns".to_string()));
+        assert_eq!(tcp.to_string(), "dns");
+        let udp = EndpointKey::udp(VirtualEndpoint::Name("dns".to_string()));
+        assert_eq!(udp.to_string(), "udp/dns");
+        let port = EndpointKey::tcp(VirtualEndpoint::Port(2251));
+        assert_eq!(port.to_string(), "2251");
+    }
+
+    #[test]
+    fn endpoint_ref_accepts_qualifiers() {
+        assert_eq!(
+            parse_endpoint_ref("web", "NET_PORT").unwrap(),
+            (None, VirtualEndpoint::Name("web".to_string()))
+        );
+        assert_eq!(
+            parse_endpoint_ref("tcp/web", "NET_PORT").unwrap(),
+            (
+                Some(Protocol::Tcp),
+                VirtualEndpoint::Name("web".to_string())
+            )
+        );
+        assert_eq!(
+            parse_endpoint_ref("udp/dns", "NET_PORT").unwrap(),
+            (
+                Some(Protocol::Udp),
+                VirtualEndpoint::Name("dns".to_string())
+            )
+        );
+        assert_eq!(
+            parse_endpoint_ref("dns/udp", "-p").unwrap(),
+            (
+                Some(Protocol::Udp),
+                VirtualEndpoint::Name("dns".to_string())
+            )
+        );
+        assert_eq!(
+            parse_endpoint_ref("2251/tcp", "-p").unwrap(),
+            (Some(Protocol::Tcp), VirtualEndpoint::Port(2251))
+        );
+        for bad in ["sctp/dns", "dns/sctp", "a/b", "udp/", "/dns", ""] {
+            parse_endpoint_ref(bad, "NET_PORT").expect_err("bad qualifier must fail");
+        }
+        parse_endpoint_ref("udp/0", "NET_PORT").expect_err("qualified zero must fail");
     }
 
     #[test]

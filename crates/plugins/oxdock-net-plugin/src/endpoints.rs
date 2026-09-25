@@ -26,7 +26,7 @@ use std::sync::{
 use anyhow::{Context, Result, bail};
 use oxdock_pipe::ScriptPipe;
 
-use crate::validate::VirtualEndpoint;
+use crate::validate::{EndpointKey, VirtualEndpoint};
 
 /// Cap on queued memory sessions per service: a client loop with no
 /// `ACCEPT` consumer must fail loudly instead of leaking pipe backends
@@ -128,7 +128,7 @@ impl std::fmt::Debug for ListenerSlot {
 #[derive(Debug, Default)]
 pub struct EndpointRegistry {
     offline: bool,
-    slots: Mutex<BTreeMap<String, ListenerSlot>>,
+    slots: Mutex<BTreeMap<EndpointKey, ListenerSlot>>,
 }
 
 impl EndpointRegistry {
@@ -146,7 +146,7 @@ impl EndpointRegistry {
         self.offline
     }
 
-    fn lock_slots<'a>(&'a self) -> std::sync::MutexGuard<'a, BTreeMap<String, ListenerSlot>> {
+    fn lock_slots<'a>(&'a self) -> std::sync::MutexGuard<'a, BTreeMap<EndpointKey, ListenerSlot>> {
         self.slots
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
@@ -155,14 +155,13 @@ impl EndpointRegistry {
     /// Map one virtual endpoint to its physical spec. Duplicate keys bail:
     /// the CLI rejects them at flag parse time, so a dup here is an
     /// internal wiring bug.
-    pub fn add_mapping(&self, endpoint: &VirtualEndpoint, spec: BindingSpec) -> Result<()> {
+    pub fn add_mapping(&self, key: &EndpointKey, spec: BindingSpec) -> Result<()> {
         let mut slots = self.lock_slots();
-        let key = endpoint.key();
-        if slots.contains_key(&key) {
-            bail!("duplicate endpoint mapping for '{endpoint}'");
+        if slots.contains_key(key) {
+            bail!("duplicate endpoint mapping for '{key}'");
         }
         slots.insert(
-            key,
+            key.clone(),
             ListenerSlot {
                 spec,
                 socket: None,
@@ -174,9 +173,9 @@ impl EndpointRegistry {
         Ok(())
     }
 
-    /// Whether `endpoint` has a mapped slot.
-    pub fn has(&self, endpoint: &VirtualEndpoint) -> bool {
-        self.lock_slots().contains_key(&endpoint.key())
+    /// Whether `key` has a mapped slot.
+    pub fn has(&self, key: &EndpointKey) -> bool {
+        self.lock_slots().contains_key(key)
     }
 
     /// Open every mapped TCP socket. The CLI calls this before parsing so
@@ -206,28 +205,69 @@ impl EndpointRegistry {
 
     /// Real address of a bound slot, if any. Reports ephemeral resolutions
     /// (CLI `-p 0:<endpoint>`) back to the runner.
-    pub fn bound_addr(&self, endpoint: &VirtualEndpoint) -> Option<SocketAddr> {
+    pub fn bound_addr(&self, key: &EndpointKey) -> Option<SocketAddr> {
         let slots = self.lock_slots();
-        let slot = slots.get(&endpoint.key())?;
+        let slot = slots.get(key)?;
         let socket = slot.socket.as_ref()?;
         socket.local_addr().ok()
+    }
+
+    /// Bound address of a slot, or a `not bound` error naming `key`.
+    /// Unmapped slots, never-bound TCP specs, memory rendezvous, and
+    /// offline slots all report the same error: no `0`/empty sentinels.
+    pub fn resolve_endpoint(&self, key: &EndpointKey) -> Result<SocketAddr> {
+        self.bound_addr(key)
+            .ok_or_else(|| anyhow::anyhow!("virtual endpoint '{key}' is not bound"))
+    }
+
+    /// Resolve caller-facing endpoint text (`NET_PORT`/`NET_ADDR`): an
+    /// explicit qualifier (`tcp/web`, `udp/dns`, `-p`-style `dns/udp`)
+    /// resolves strictly, while bare text defaults to TCP with
+    /// single-protocol fallback (bare `dns` finds lone `udp/dns`). Bare
+    /// text bound under both protocols fails fast as ambiguous; anything
+    /// unbound fails as not bound, echoing the caller's text.
+    pub fn resolve_ref(&self, raw: &str, func: &str) -> Result<SocketAddr> {
+        let text = raw.trim();
+        let (protocol, endpoint) = crate::validate::parse_endpoint_ref(text, func)?;
+        match protocol {
+            Some(protocol) => {
+                let key = EndpointKey {
+                    protocol,
+                    endpoint,
+                };
+                self.bound_addr(&key)
+                    .ok_or_else(|| anyhow::anyhow!("virtual endpoint '{text}' is not bound"))
+            }
+            None => {
+                let tcp = EndpointKey::tcp(endpoint.clone());
+                let udp = EndpointKey::udp(endpoint);
+                match (self.bound_addr(&tcp), self.bound_addr(&udp)) {
+                    (Some(_), Some(_)) => bail!(
+                        "ambiguous virtual endpoint '{text}': both TCP and UDP bindings exist; qualify as 'tcp/{text}' or 'udp/{text}'"
+                    ),
+                    (Some(addr), None) | (None, Some(addr)) => Ok(addr),
+                    (None, None) => {
+                        bail!("virtual endpoint '{text}' is not bound")
+                    }
+                }
+            }
+        }
     }
 
     /// Claim a mapped slot: the second claim while busy bails
     /// (`already claimed`), so concurrent listeners on one service fail
     /// loudly; claim-after-release succeeds for re-bind loops. Offline
     /// registries always acquire socketless.
-    pub fn claim(&self, endpoint: &VirtualEndpoint, func: &str) -> Result<AcquiredListener> {
+    pub fn claim(&self, key: &EndpointKey, func: &str) -> Result<AcquiredListener> {
         if self.offline {
             return Ok(AcquiredListener::Offline);
         }
         let mut slots = self.lock_slots();
-        let key = endpoint.key();
-        let Some(slot) = slots.get_mut(&key) else {
-            bail!("{func}: unknown service '{endpoint}' (map it with -p/--listen)");
+        let Some(slot) = slots.get_mut(key) else {
+            bail!("{func}: unknown service '{key}' (map it with -p/--listen)");
         };
         if slot.claimed.swap(true, Ordering::SeqCst) {
-            bail!("{func}: '{endpoint}' is already claimed");
+            bail!("{func}: '{key}' is already claimed");
         }
         if let Some(socket) = slot.socket.as_ref() {
             let addr = socket
@@ -243,7 +283,7 @@ impl EndpointRegistry {
             BindingSpec::Offline => Ok(AcquiredListener::Offline),
             BindingSpec::Loopback { .. } | BindingSpec::Exposed { .. } => {
                 slot.claimed.store(false, Ordering::SeqCst);
-                bail!("{func}: '{endpoint}' was never bound (the runner must call bind_all)")
+                bail!("{func}: '{key}' was never bound (the runner must call bind_all)")
             }
         }
     }
@@ -254,18 +294,17 @@ impl EndpointRegistry {
     /// socket drops unlistened.
     pub fn register_inline(
         &self,
-        endpoint: &VirtualEndpoint,
+        key: &EndpointKey,
         listener: TcpListener,
         func: &str,
     ) -> Result<Arc<TcpListener>> {
         let mut slots = self.lock_slots();
-        let key = endpoint.key();
-        if slots.contains_key(&key) {
-            bail!("{func}: '{endpoint}' is already claimed");
+        if slots.contains_key(key) {
+            bail!("{func}: '{key}' is already claimed");
         }
         let shared = Arc::new(listener);
         slots.insert(
-            key,
+            key.clone(),
             ListenerSlot {
                 spec: BindingSpec::Loopback {
                     port: shared.local_addr().map(|addr| addr.port()).unwrap_or(0),
@@ -285,24 +324,23 @@ impl EndpointRegistry {
     /// their sockets and any queued memory pairs, so re-bind loops start
     /// clean and ports free promptly; host-bound (persistent) slots keep
     /// their socket and just unclaim for re-claim.
-    pub fn release(&self, endpoint: &VirtualEndpoint) {
+    pub fn release(&self, key: &EndpointKey) {
         let mut slots = self.lock_slots();
-        let key = endpoint.key();
-        let inline = slots.get(&key).is_some_and(|slot| !slot.persistent);
+        let inline = slots.get(key).is_some_and(|slot| !slot.persistent);
         if inline {
-            slots.remove(&key);
-        } else if let Some(slot) = slots.get_mut(&key) {
+            slots.remove(key);
+        } else if let Some(slot) = slots.get_mut(key) {
             slot.claimed.store(false, Ordering::SeqCst);
         }
     }
 
-    /// Ensure a memory rendezvous slot exists for `endpoint`, creating an
+    /// Ensure a memory rendezvous slot exists for `key`, creating an
     /// unclaimed one for unmapped names (client-before-server order).
     /// Present slots pass through untouched: the caller decides (dial the
     /// bound address, or bail offline).
-    pub fn ensure_memory_slot(&self, endpoint: &VirtualEndpoint) {
+    pub fn ensure_memory_slot(&self, key: &EndpointKey) {
         let mut slots = self.lock_slots();
-        slots.entry(endpoint.key()).or_insert_with(|| ListenerSlot {
+        slots.entry(key.clone()).or_insert_with(|| ListenerSlot {
             spec: BindingSpec::Memory,
             socket: None,
             persistent: false,
@@ -314,9 +352,9 @@ impl EndpointRegistry {
     /// What a CONNECT target resolves to: a bound physical address, a
     /// memory rendezvous, an offline dead-end, or nothing mapped (plain
     /// loopback dial for ports, auto-memory for names).
-    pub fn slot_kind(&self, endpoint: &VirtualEndpoint) -> SlotKind {
+    pub fn slot_kind(&self, key: &EndpointKey) -> SlotKind {
         let slots = self.lock_slots();
-        let Some(slot) = slots.get(&endpoint.key()) else {
+        let Some(slot) = slots.get(key) else {
             return SlotKind::Unmapped;
         };
         match &slot.spec {
@@ -340,16 +378,15 @@ impl EndpointRegistry {
     /// accepts.
     pub fn enqueue_memory_session(
         &self,
-        endpoint: &VirtualEndpoint,
+        key: &EndpointKey,
         pair: MemoryPipePair,
     ) -> Result<()> {
         let mut slots = self.lock_slots();
-        let key = endpoint.key();
-        let Some(slot) = slots.get_mut(&key) else {
-            bail!("NET_CONNECT: unknown service '{endpoint}' (map it with -p/--listen)");
+        let Some(slot) = slots.get_mut(key) else {
+            bail!("NET_CONNECT: unknown service '{key}' (map it with -p/--listen)");
         };
         if slot.memory.len() >= MEMORY_QUEUE_CAP {
-            bail!("NET_CONNECT: memory connection queue for '{endpoint}' is full");
+            bail!("NET_CONNECT: memory connection queue for '{key}' is full");
         }
         slot.memory.push_back(pair);
         Ok(())
@@ -357,9 +394,9 @@ impl EndpointRegistry {
 
     /// Pop the oldest queued memory pair, if any. ACCEPT polls this per
     /// tick alongside cancel/shutdown, mirroring the TCP accept loop.
-    pub fn dequeue_memory_session(&self, endpoint: &VirtualEndpoint) -> Option<MemoryPipePair> {
+    pub fn dequeue_memory_session(&self, key: &EndpointKey) -> Option<MemoryPipePair> {
         self.lock_slots()
-            .get_mut(&endpoint.key())
+            .get_mut(key)
             .and_then(|slot| slot.memory.pop_front())
     }
 }
@@ -373,23 +410,23 @@ impl EndpointRegistry {
 /// fallback shape stays identical.
 pub fn acquire_listener(
     registry: &Arc<EndpointRegistry>,
-    endpoint: &VirtualEndpoint,
+    key: &EndpointKey,
     func: &str,
 ) -> Result<(AcquiredListener, Arc<EndpointRegistry>)> {
     if registry.is_offline() {
         return Ok((AcquiredListener::Offline, Arc::clone(registry)));
     }
-    if registry.has(endpoint) {
+    if registry.has(key) {
         return registry
-            .claim(endpoint, func)
+            .claim(key, func)
             .map(|got| (got, Arc::clone(registry)));
     }
-    match endpoint {
+    match &key.endpoint {
         VirtualEndpoint::Port(port) => {
             let addr = SocketAddr::from(([127, 0, 0, 1], *port));
             let listener =
                 TcpListener::bind(addr).with_context(|| format!("{func} bind {addr} failed"))?;
-            let shared = registry.register_inline(endpoint, listener, func)?;
+            let shared = registry.register_inline(key, listener, func)?;
             let bound = shared
                 .local_addr()
                 .with_context(|| format!("{func} cannot read its bound address"))?;
@@ -402,9 +439,9 @@ pub fn acquire_listener(
             ))
         }
         VirtualEndpoint::Name(_) => {
-            registry.ensure_memory_slot(endpoint);
+            registry.ensure_memory_slot(key);
             registry
-                .claim(endpoint, func)
+                .claim(key, func)
                 .map(|got| (got, Arc::clone(registry)))
         }
     }
@@ -414,18 +451,22 @@ pub fn acquire_listener(
 mod tests {
     use super::*;
 
-    fn port_endpoint(port: u16) -> VirtualEndpoint {
-        VirtualEndpoint::Port(port)
+    fn tcp_key(port: u16) -> EndpointKey {
+        EndpointKey::tcp(VirtualEndpoint::Port(port))
+    }
+
+    fn named_key(name: &str) -> EndpointKey {
+        EndpointKey::tcp(VirtualEndpoint::Name(name.to_string()))
     }
 
     #[test]
     fn duplicate_mapping_bails() {
         let registry = EndpointRegistry::new(false);
         registry
-            .add_mapping(&port_endpoint(2251), BindingSpec::Memory)
+            .add_mapping(&tcp_key(2251), BindingSpec::Memory)
             .expect("first mapping");
         registry
-            .add_mapping(&port_endpoint(2251), BindingSpec::Memory)
+            .add_mapping(&tcp_key(2251), BindingSpec::Memory)
             .expect_err("duplicate mapping must fail");
     }
 
@@ -436,19 +477,19 @@ mod tests {
         // reclaim the same socket.
         let registry = EndpointRegistry::new(false);
         registry
-            .add_mapping(&port_endpoint(2251), BindingSpec::Loopback { port: 0 })
+            .add_mapping(&tcp_key(2251), BindingSpec::Loopback { port: 0 })
             .expect("mapping");
         registry.bind_all().expect("bind_all");
-        assert!(registry.claim(&port_endpoint(2251), "NET_LISTEN").is_ok());
+        assert!(registry.claim(&tcp_key(2251), "NET_LISTEN").is_ok());
         let err = format!(
             "{:#}",
             registry
-                .claim(&port_endpoint(2251), "NET_LISTEN")
+                .claim(&tcp_key(2251), "NET_LISTEN")
                 .unwrap_err()
         );
         assert!(err.contains("already claimed"), "{err}");
-        registry.release(&port_endpoint(2251));
-        assert!(registry.claim(&port_endpoint(2251), "NET_LISTEN").is_ok());
+        registry.release(&tcp_key(2251));
+        assert!(registry.claim(&tcp_key(2251), "NET_LISTEN").is_ok());
     }
 
     #[test]
@@ -457,14 +498,14 @@ mod tests {
         // claimant starts clean instead of inheriting state.
         let registry = EndpointRegistry::new(false);
         registry
-            .add_mapping(&port_endpoint(2251), BindingSpec::Memory)
+            .add_mapping(&tcp_key(2251), BindingSpec::Memory)
             .expect("mapping");
-        assert!(registry.claim(&port_endpoint(2251), "NET_LISTEN").is_ok());
-        registry.release(&port_endpoint(2251));
+        assert!(registry.claim(&tcp_key(2251), "NET_LISTEN").is_ok());
+        registry.release(&tcp_key(2251));
         let err = format!(
             "{:#}",
             registry
-                .claim(&port_endpoint(2251), "NET_LISTEN")
+                .claim(&tcp_key(2251), "NET_LISTEN")
                 .unwrap_err()
         );
         assert!(err.contains("unknown service"), "{err}");
@@ -476,7 +517,7 @@ mod tests {
         let err = format!(
             "{:#}",
             registry
-                .claim(&port_endpoint(9999), "NET_LISTEN")
+                .claim(&tcp_key(9999), "NET_LISTEN")
                 .unwrap_err()
         );
         assert!(err.contains("unknown service"), "{err}");
@@ -486,7 +527,7 @@ mod tests {
     fn offline_registry_acquires_socketless() {
         let registry = EndpointRegistry::new(true);
         let got = registry
-            .claim(&port_endpoint(2251), "SSH_SERVE")
+            .claim(&tcp_key(2251), "SSH_SERVE")
             .expect("offline claim");
         assert!(matches!(got, AcquiredListener::Offline));
         assert!(registry.is_offline());
@@ -499,15 +540,15 @@ mod tests {
         // (`-p 0:2261`): bind_all resolves it, claim serves the clone.
         let registry = EndpointRegistry::new(false);
         registry
-            .add_mapping(&port_endpoint(2261), BindingSpec::Loopback { port: 0 })
+            .add_mapping(&tcp_key(2261), BindingSpec::Loopback { port: 0 })
             .expect("mapping");
         registry.bind_all().expect("bind_all binds ephemeral");
         let addr = registry
-            .bound_addr(&port_endpoint(2261))
+            .bound_addr(&tcp_key(2261))
             .expect("bound addr");
         assert_ne!(addr.port(), 0, "ephemeral resolved");
         let got = registry
-            .claim(&port_endpoint(2261), "NET_LISTEN")
+            .claim(&tcp_key(2261), "NET_LISTEN")
             .expect("claim");
         let AcquiredListener::Tcp { addr: claimed, .. } = got else {
             panic!("expected a TCP acquisition");
@@ -519,28 +560,132 @@ mod tests {
     fn memory_queue_caps_at_64() {
         let registry = EndpointRegistry::new(false);
         registry
-            .add_mapping(&port_endpoint(2251), BindingSpec::Memory)
+            .add_mapping(&tcp_key(2251), BindingSpec::Memory)
             .expect("mapping");
         for _ in 0..MEMORY_QUEUE_CAP {
             registry
-                .enqueue_memory_session(&port_endpoint(2251), MemoryPipePair::fresh())
+                .enqueue_memory_session(&tcp_key(2251), MemoryPipePair::fresh())
                 .expect("enqueue within cap");
         }
         let err = format!(
             "{:#}",
             registry
-                .enqueue_memory_session(&port_endpoint(2251), MemoryPipePair::fresh())
+                .enqueue_memory_session(&tcp_key(2251), MemoryPipePair::fresh())
                 .unwrap_err()
         );
         assert!(err.contains("is full"), "{err}");
         // Draining one slot admits exactly one more.
         assert!(
             registry
-                .dequeue_memory_session(&port_endpoint(2251))
+                .dequeue_memory_session(&tcp_key(2251))
                 .is_some()
         );
         registry
-            .enqueue_memory_session(&port_endpoint(2251), MemoryPipePair::fresh())
+            .enqueue_memory_session(&tcp_key(2251), MemoryPipePair::fresh())
             .expect("enqueue after drain");
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "needs loopback TCP")]
+    fn resolve_endpoint_reports_bound_port() {
+        let registry = EndpointRegistry::new(false);
+        registry
+            .add_mapping(&tcp_key(2261), BindingSpec::Loopback { port: 0 })
+            .expect("mapping");
+        registry.bind_all().expect("bind_all binds ephemeral");
+        let addr = registry.resolve_endpoint(&tcp_key(2261)).expect("resolve");
+        assert_ne!(addr.port(), 0, "ephemeral resolved");
+        let err = format!(
+            "{:#}",
+            registry.resolve_endpoint(&named_key("missing")).unwrap_err()
+        );
+        assert!(err.contains("is not bound"), "{err}");
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "needs loopback TCP")]
+    fn resolve_ref_handles_protocols() {
+        let registry = EndpointRegistry::new(false);
+        // TCP-only name: bare and explicit TCP resolve, UDP is not bound.
+        registry
+            .add_mapping(
+                &EndpointKey::tcp(VirtualEndpoint::Name("web".to_string())),
+                BindingSpec::Loopback { port: 0 },
+            )
+            .expect("mapping");
+        // UDP-only name: bare falls back to the single bound protocol.
+        registry
+            .add_mapping(
+                &EndpointKey::udp(VirtualEndpoint::Name("dns".to_string())),
+                BindingSpec::Loopback { port: 0 },
+            )
+            .expect("mapping");
+        registry.bind_all().expect("bind_all");
+        let web = registry.resolve_ref("web", "NET_PORT").expect("bare tcp");
+        assert_ne!(web.port(), 0);
+        assert_eq!(
+            registry.resolve_ref("tcp/web", "NET_PORT").expect("explicit tcp"),
+            web
+        );
+        let dns = registry.resolve_ref("dns", "NET_PORT").expect("bare udp fallback");
+        assert_ne!(dns.port(), 0);
+        assert_eq!(
+            registry.resolve_ref("udp/dns", "NET_PORT").expect("explicit udp"),
+            dns
+        );
+        assert_eq!(
+            registry.resolve_ref("dns/udp", "NET_PORT").expect("suffix form"),
+            dns
+        );
+        let err = format!(
+            "{:#}",
+            registry.resolve_ref("tcp/dns", "NET_PORT").unwrap_err()
+        );
+        assert!(err.contains("is not bound"), "{err}");
+        let err = format!(
+            "{:#}",
+            registry.resolve_ref("nope", "NET_PORT").unwrap_err()
+        );
+        assert!(err.contains("is not bound"), "{err}");
+        // Memory slots have no socket: not bound, never a sentinel.
+        registry
+            .add_mapping(&named_key("mem"), BindingSpec::Memory)
+            .expect("mapping");
+        let err = format!(
+            "{:#}",
+            registry.resolve_ref("mem", "NET_PORT").unwrap_err()
+        );
+        assert!(err.contains("is not bound"), "{err}");
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "needs loopback TCP")]
+    fn resolve_ref_rejects_ambiguity() {
+        let registry = EndpointRegistry::new(false);
+        registry
+            .add_mapping(
+                &EndpointKey::tcp(VirtualEndpoint::Name("dns".to_string())),
+                BindingSpec::Loopback { port: 0 },
+            )
+            .expect("mapping");
+        registry
+            .add_mapping(
+                &EndpointKey::udp(VirtualEndpoint::Name("dns".to_string())),
+                BindingSpec::Loopback { port: 0 },
+            )
+            .expect("mapping");
+        registry.bind_all().expect("bind_all");
+        let err = format!(
+            "{:#}",
+            registry.resolve_ref("dns", "NET_PORT").unwrap_err()
+        );
+        assert!(err.contains("ambiguous"), "{err}");
+        assert!(err.contains("tcp/dns"), "{err}");
+        assert!(err.contains("udp/dns"), "{err}");
+        // Qualified lookups stay independent despite the collision.
+        let tcp = registry.resolve_ref("tcp/dns", "NET_PORT").expect("tcp");
+        let udp = registry.resolve_ref("udp/dns", "NET_PORT").expect("udp");
+        assert_ne!(tcp.port(), 0);
+        assert_ne!(udp.port(), 0);
     }
 }
