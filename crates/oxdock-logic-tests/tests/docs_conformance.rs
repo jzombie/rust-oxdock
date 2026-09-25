@@ -208,12 +208,14 @@ fn oxdock_readme_snippets_parse() -> Result<()> {
 const PLUGIN_FENCE_DOCUMENTS: &[&str] = &[
     "crates/plugins/oxdock-ssh-plugin/README.md",
     "crates/plugins/oxdock-net-plugin/README.md",
+    "crates/plugins/oxdock-toolchain-plugin/README.md",
 ];
 
 fn plugin_module_table() -> oxdock_parser::ModuleTable {
     let mut engine = oxdock_core::Engine::new();
     engine.register_module(oxdock_ssh_plugin::module());
     engine.register_module(oxdock_net_plugin::module());
+    engine.register_module(oxdock_toolchain_plugin::module());
     engine.module_table()
 }
 
@@ -281,6 +283,7 @@ fn execute_plugin_block(block: &FencedBlock, name: &str) -> Result<()> {
     let modules = vec![
         oxdock_ssh_plugin::module_with_endpoints(ssh_registry),
         oxdock_net_plugin::module(),
+        oxdock_toolchain_plugin::module(),
     ];
     let (done_tx, done_rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {

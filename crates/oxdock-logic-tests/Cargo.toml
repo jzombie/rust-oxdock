@@ -25,6 +25,7 @@ oxdock-parser.workspace = true
 oxdock-process.workspace = true
 oxdock-ssh-plugin.workspace = true
 oxdock-sys-test-utils.workspace = true
+oxdock-toolchain-plugin.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 toml_edit.workspace = true

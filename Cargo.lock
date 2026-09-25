@@ -1540,6 +1540,7 @@ dependencies = [
  "oxdock-process",
  "oxdock-ssh-plugin",
  "oxdock-sys-test-utils",
+ "oxdock-toolchain-plugin",
  "proc-macro2",
  "proptest",
  "serde_json",
