@@ -170,10 +170,7 @@ mod tests {
     fn publish_forms() {
         assert_eq!(
             parse_publish_arg("2222:2251").unwrap(),
-            (
-                SocketAddr::from(([0, 0, 0, 0], 2222)),
-                "2251".to_string()
-            )
+            (SocketAddr::from(([0, 0, 0, 0], 2222)), "2251".to_string())
         );
         assert_eq!(
             parse_publish_arg("0:demo-proxy").unwrap(),
@@ -197,24 +194,15 @@ mod tests {
     fn publish_three_part_host_port_forms() {
         assert_eq!(
             parse_publish_arg("127.0.0.1:1234:ssh-server").unwrap(),
-            (
-                "127.0.0.1:1234".parse().unwrap(),
-                "ssh-server".to_string()
-            )
+            ("127.0.0.1:1234".parse().unwrap(), "ssh-server".to_string())
         );
         assert_eq!(
             parse_publish_arg("127.0.0.1:1234:2251").unwrap(),
-            (
-                "127.0.0.1:1234".parse().unwrap(),
-                "2251".to_string()
-            )
+            ("127.0.0.1:1234".parse().unwrap(), "2251".to_string())
         );
         assert_eq!(
             parse_publish_arg("[::1]:8080:web").unwrap(),
-            (
-                "[::1]:8080".parse().unwrap(),
-                "web".to_string()
-            )
+            ("[::1]:8080".parse().unwrap(), "web".to_string())
         );
     }
 
@@ -229,28 +217,16 @@ mod tests {
         build_registry(&flags).expect_err("offline plus listen must fail");
         let flags = EndpointFlags {
             publishes: vec![
-                (
-                    SocketAddr::from(([0, 0, 0, 0], 2222)),
-                    "2251".to_string(),
-                ),
-                (
-                    SocketAddr::from(([0, 0, 0, 0], 2223)),
-                    "2251".to_string(),
-                ),
+                (SocketAddr::from(([0, 0, 0, 0], 2222)), "2251".to_string()),
+                (SocketAddr::from(([0, 0, 0, 0], 2223)), "2251".to_string()),
             ],
             ..EndpointFlags::default()
         };
         build_registry(&flags).expect_err("duplicate inner must fail");
         let flags = EndpointFlags {
             publishes: vec![
-                (
-                    SocketAddr::from(([0, 0, 0, 0], 2222)),
-                    "2251".to_string(),
-                ),
-                (
-                    SocketAddr::from(([0, 0, 0, 0], 2222)),
-                    "2252".to_string(),
-                ),
+                (SocketAddr::from(([0, 0, 0, 0], 2222)), "2251".to_string()),
+                (SocketAddr::from(([0, 0, 0, 0], 2222)), "2252".to_string()),
             ],
             ..EndpointFlags::default()
         };
@@ -261,10 +237,7 @@ mod tests {
     #[test]
     fn registry_rejects_bad_inner() {
         let flags = EndpointFlags {
-            publishes: vec![(
-                SocketAddr::from(([0, 0, 0, 0], 2222)),
-                "0".to_string(),
-            )],
+            publishes: vec![(SocketAddr::from(([0, 0, 0, 0], 2222)), "0".to_string())],
             ..EndpointFlags::default()
         };
         build_registry(&flags).expect_err("bad inner must fail");

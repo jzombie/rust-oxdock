@@ -56,18 +56,14 @@ fn cli_host_modules_with(
     #[cfg(feature = "net")]
     {
         let net_module = match registry {
-            Some(registry) => {
-                oxdock_net_plugin::module_with_endpoints(Arc::clone(registry))
-            }
+            Some(registry) => oxdock_net_plugin::module_with_endpoints(Arc::clone(registry)),
             None => oxdock_net_plugin::module(),
         };
         modules.push(net_module);
         #[cfg(feature = "ssh")]
         {
             let ssh_module = match registry {
-                Some(registry) => {
-                    oxdock_ssh_plugin::module_with_endpoints(Arc::clone(registry))
-                }
+                Some(registry) => oxdock_ssh_plugin::module_with_endpoints(Arc::clone(registry)),
                 None => oxdock_ssh_plugin::module(),
             };
             modules.push(ssh_module);
@@ -202,7 +198,9 @@ impl Options {
                         // and covered in lean builds; the feature error below
                         // still wins regardless of the value.
                         let _ = endpoints::parse_listen_arg(&raw);
-                        bail!("--listen/-p require the `net` feature (rebuild with --features net)");
+                        bail!(
+                            "--listen/-p require the `net` feature (rebuild with --features net)"
+                        );
                     }
                     #[cfg(feature = "net")]
                     endpoints.listens.push(endpoints::parse_listen_arg(&raw)?);
@@ -219,7 +217,9 @@ impl Options {
                         // validation live in lean builds; the feature error
                         // below still wins.
                         let _ = endpoints::parse_publish_arg(&raw);
-                        bail!("--listen/-p require the `net` feature (rebuild with --features net)");
+                        bail!(
+                            "--listen/-p require the `net` feature (rebuild with --features net)"
+                        );
                     }
                     #[cfg(feature = "net")]
                     endpoints
@@ -1252,8 +1252,7 @@ mod tests {
         let snapshot = result
             .snapshot_path()
             .expect("WRITE materializes the snapshot");
-        let snapshot_resolver =
-            PathResolver::new(snapshot.root(), snapshot.root())?;
+        let snapshot_resolver = PathResolver::new(snapshot.root(), snapshot.root())?;
         let port_path = snapshot.join("port.txt")?;
         let port_text = snapshot_resolver.read_to_string(&port_path)?;
         let port: u16 = port_text

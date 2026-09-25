@@ -27,7 +27,9 @@ use oxdock_core::HostModule;
 pub use oxdock_process::DefaultProcessManager;
 
 pub use types::NetListenerTag;
-pub use validate::{EndpointKey, Protocol, VirtualEndpoint, parse_endpoint_ref, parse_virtual_endpoint};
+pub use validate::{
+    EndpointKey, Protocol, VirtualEndpoint, parse_endpoint_ref, parse_virtual_endpoint,
+};
 
 /// The `NET` host module with the default process manager.
 pub fn module() -> HostModule<DefaultProcessManager> {

@@ -194,7 +194,9 @@ fn split_protocol_qualifier(text: &str) -> Result<(Option<Protocol>, &str)> {
         return Ok(qualified);
     }
     if text.contains('/') {
-        bail!("unknown protocol qualifier in {text:?} (expected 'tcp/...', 'udp/...', '.../tcp', or '.../udp')");
+        bail!(
+            "unknown protocol qualifier in {text:?} (expected 'tcp/...', 'udp/...', '.../tcp', or '.../udp')"
+        );
     }
     Ok((None, text))
 }

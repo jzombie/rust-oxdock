@@ -69,9 +69,7 @@ pub fn resolve_connect_addr(
                 }
                 SlotKind::TcpBound(addr) => Ok(addr),
                 SlotKind::TcpUnbound => {
-                    bail!(
-                        "SSH_CONNECT: '{key}' was never bound (the runner must call bind_all)"
-                    )
+                    bail!("SSH_CONNECT: '{key}' was never bound (the runner must call bind_all)")
                 }
                 SlotKind::Offline => bail!("SSH_CONNECT: '{key}' is offline"),
                 SlotKind::Unmapped => Ok(std::net::SocketAddr::from(([127, 0, 0, 1], *port))),
@@ -79,9 +77,7 @@ pub fn resolve_connect_addr(
             VirtualEndpoint::Name(_) => match registry.slot_kind(&key) {
                 SlotKind::TcpBound(addr) => Ok(addr),
                 SlotKind::TcpUnbound => {
-                    bail!(
-                        "SSH_CONNECT: '{key}' was never bound (the runner must call bind_all)"
-                    )
+                    bail!("SSH_CONNECT: '{key}' was never bound (the runner must call bind_all)")
                 }
                 SlotKind::Memory | SlotKind::Unmapped => {
                     bail!(
@@ -164,7 +160,10 @@ mod tests {
         use oxdock_net_plugin::BindingSpec;
         let registry = fresh_registry();
         registry
-            .add_mapping(&EndpointKey::tcp(net_validate::VirtualEndpoint::Port(23472)), BindingSpec::Memory)
+            .add_mapping(
+                &EndpointKey::tcp(net_validate::VirtualEndpoint::Port(23472)),
+                BindingSpec::Memory,
+            )
             .expect("mapping");
         let err = resolve_connect_addr(&registry, "23472").expect_err("memory bails");
         assert!(err.to_string().contains("memory service"), "{err:#}");
@@ -175,7 +174,10 @@ mod tests {
         use oxdock_net_plugin::BindingSpec;
         let registry = fresh_registry();
         registry
-            .add_mapping(&EndpointKey::tcp(net_validate::VirtualEndpoint::Port(23473)), BindingSpec::Offline)
+            .add_mapping(
+                &EndpointKey::tcp(net_validate::VirtualEndpoint::Port(23473)),
+                BindingSpec::Offline,
+            )
             .expect("mapping");
         let err = resolve_connect_addr(&registry, "23473").expect_err("offline bails");
         assert!(err.to_string().contains("offline"), "{err:#}");

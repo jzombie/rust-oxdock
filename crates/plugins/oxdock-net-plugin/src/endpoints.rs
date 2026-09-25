@@ -231,10 +231,7 @@ impl EndpointRegistry {
         let (protocol, endpoint) = crate::validate::parse_endpoint_ref(text, func)?;
         match protocol {
             Some(protocol) => {
-                let key = EndpointKey {
-                    protocol,
-                    endpoint,
-                };
+                let key = EndpointKey { protocol, endpoint };
                 self.bound_addr(&key)
                     .ok_or_else(|| anyhow::anyhow!("virtual endpoint '{text}' is not bound"))
             }
@@ -376,11 +373,7 @@ impl EndpointRegistry {
     /// Queue a CONNECT-side memory pair for a later ACCEPT. Bails past
     /// [`MEMORY_QUEUE_CAP`] instead of leaking backends when no consumer
     /// accepts.
-    pub fn enqueue_memory_session(
-        &self,
-        key: &EndpointKey,
-        pair: MemoryPipePair,
-    ) -> Result<()> {
+    pub fn enqueue_memory_session(&self, key: &EndpointKey, pair: MemoryPipePair) -> Result<()> {
         let mut slots = self.lock_slots();
         let Some(slot) = slots.get_mut(key) else {
             bail!("NET_CONNECT: unknown service '{key}' (map it with -p/--listen)");
@@ -483,9 +476,7 @@ mod tests {
         assert!(registry.claim(&tcp_key(2251), "NET_LISTEN").is_ok());
         let err = format!(
             "{:#}",
-            registry
-                .claim(&tcp_key(2251), "NET_LISTEN")
-                .unwrap_err()
+            registry.claim(&tcp_key(2251), "NET_LISTEN").unwrap_err()
         );
         assert!(err.contains("already claimed"), "{err}");
         registry.release(&tcp_key(2251));
@@ -504,9 +495,7 @@ mod tests {
         registry.release(&tcp_key(2251));
         let err = format!(
             "{:#}",
-            registry
-                .claim(&tcp_key(2251), "NET_LISTEN")
-                .unwrap_err()
+            registry.claim(&tcp_key(2251), "NET_LISTEN").unwrap_err()
         );
         assert!(err.contains("unknown service"), "{err}");
     }
@@ -516,9 +505,7 @@ mod tests {
         let registry = EndpointRegistry::new(false);
         let err = format!(
             "{:#}",
-            registry
-                .claim(&tcp_key(9999), "NET_LISTEN")
-                .unwrap_err()
+            registry.claim(&tcp_key(9999), "NET_LISTEN").unwrap_err()
         );
         assert!(err.contains("unknown service"), "{err}");
     }
@@ -543,13 +530,9 @@ mod tests {
             .add_mapping(&tcp_key(2261), BindingSpec::Loopback { port: 0 })
             .expect("mapping");
         registry.bind_all().expect("bind_all binds ephemeral");
-        let addr = registry
-            .bound_addr(&tcp_key(2261))
-            .expect("bound addr");
+        let addr = registry.bound_addr(&tcp_key(2261)).expect("bound addr");
         assert_ne!(addr.port(), 0, "ephemeral resolved");
-        let got = registry
-            .claim(&tcp_key(2261), "NET_LISTEN")
-            .expect("claim");
+        let got = registry.claim(&tcp_key(2261), "NET_LISTEN").expect("claim");
         let AcquiredListener::Tcp { addr: claimed, .. } = got else {
             panic!("expected a TCP acquisition");
         };
@@ -575,11 +558,7 @@ mod tests {
         );
         assert!(err.contains("is full"), "{err}");
         // Draining one slot admits exactly one more.
-        assert!(
-            registry
-                .dequeue_memory_session(&tcp_key(2251))
-                .is_some()
-        );
+        assert!(registry.dequeue_memory_session(&tcp_key(2251)).is_some());
         registry
             .enqueue_memory_session(&tcp_key(2251), MemoryPipePair::fresh())
             .expect("enqueue after drain");
@@ -597,7 +576,9 @@ mod tests {
         assert_ne!(addr.port(), 0, "ephemeral resolved");
         let err = format!(
             "{:#}",
-            registry.resolve_endpoint(&named_key("missing")).unwrap_err()
+            registry
+                .resolve_endpoint(&named_key("missing"))
+                .unwrap_err()
         );
         assert!(err.contains("is not bound"), "{err}");
     }
@@ -624,17 +605,25 @@ mod tests {
         let web = registry.resolve_ref("web", "NET_PORT").expect("bare tcp");
         assert_ne!(web.port(), 0);
         assert_eq!(
-            registry.resolve_ref("tcp/web", "NET_PORT").expect("explicit tcp"),
+            registry
+                .resolve_ref("tcp/web", "NET_PORT")
+                .expect("explicit tcp"),
             web
         );
-        let dns = registry.resolve_ref("dns", "NET_PORT").expect("bare udp fallback");
+        let dns = registry
+            .resolve_ref("dns", "NET_PORT")
+            .expect("bare udp fallback");
         assert_ne!(dns.port(), 0);
         assert_eq!(
-            registry.resolve_ref("udp/dns", "NET_PORT").expect("explicit udp"),
+            registry
+                .resolve_ref("udp/dns", "NET_PORT")
+                .expect("explicit udp"),
             dns
         );
         assert_eq!(
-            registry.resolve_ref("dns/udp", "NET_PORT").expect("suffix form"),
+            registry
+                .resolve_ref("dns/udp", "NET_PORT")
+                .expect("suffix form"),
             dns
         );
         let err = format!(
@@ -651,10 +640,7 @@ mod tests {
         registry
             .add_mapping(&named_key("mem"), BindingSpec::Memory)
             .expect("mapping");
-        let err = format!(
-            "{:#}",
-            registry.resolve_ref("mem", "NET_PORT").unwrap_err()
-        );
+        let err = format!("{:#}", registry.resolve_ref("mem", "NET_PORT").unwrap_err());
         assert!(err.contains("is not bound"), "{err}");
     }
 
@@ -675,10 +661,7 @@ mod tests {
             )
             .expect("mapping");
         registry.bind_all().expect("bind_all");
-        let err = format!(
-            "{:#}",
-            registry.resolve_ref("dns", "NET_PORT").unwrap_err()
-        );
+        let err = format!("{:#}", registry.resolve_ref("dns", "NET_PORT").unwrap_err());
         assert!(err.contains("ambiguous"), "{err}");
         assert!(err.contains("tcp/dns"), "{err}");
         assert!(err.contains("udp/dns"), "{err}");

@@ -338,7 +338,10 @@ fn ssh_serve<P: ProcessManager>(
     map.insert("addr".to_string(), Value::string(addr_text));
     map.insert("username".to_string(), Value::string(username));
     map.insert("password".to_string(), Value::string(password));
-    map.insert("virtual".to_string(), Value::string(key.endpoint.to_string()));
+    map.insert(
+        "virtual".to_string(),
+        Value::string(key.endpoint.to_string()),
+    );
     Ok(Value::map(map))
 }
 

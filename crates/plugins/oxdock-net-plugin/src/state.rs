@@ -80,11 +80,7 @@ impl ListenerState {
         }
     }
 
-    pub fn new_memory(
-        id: String,
-        registry: Arc<EndpointRegistry>,
-        endpoint: EndpointKey,
-    ) -> Self {
+    pub fn new_memory(id: String, registry: Arc<EndpointRegistry>, endpoint: EndpointKey) -> Self {
         let addr_text = endpoint.to_string();
         Self {
             id,
@@ -99,11 +95,7 @@ impl ListenerState {
         }
     }
 
-    pub fn new_offline(
-        id: String,
-        registry: Arc<EndpointRegistry>,
-        endpoint: EndpointKey,
-    ) -> Self {
+    pub fn new_offline(id: String, registry: Arc<EndpointRegistry>, endpoint: EndpointKey) -> Self {
         let addr_text = endpoint.to_string();
         Self {
             id,

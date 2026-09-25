@@ -721,7 +721,9 @@ fn memory_queue_full_bails_through_connect() {
     // (so the task cannot hang). No sockets involved.
     use oxdock_net_plugin::MemoryPipePair;
     let registry = Arc::new(EndpointRegistry::new(false));
-    let endpoint = EndpointKey::tcp(oxdock_net_plugin::VirtualEndpoint::Name("mem-full".to_string()));
+    let endpoint = EndpointKey::tcp(oxdock_net_plugin::VirtualEndpoint::Name(
+        "mem-full".to_string(),
+    ));
     registry.ensure_memory_slot(&endpoint);
     for _ in 0..64 {
         registry
@@ -878,5 +880,8 @@ fn port_and_addr_fail_loudly_when_unbound() {
         .unwrap_or_default()
         .parse()
         .expect("udp dial string carries a port");
-    assert_ne!(udp_port, 0, "udp dial string must carry a port, got {udp:?}");
+    assert_ne!(
+        udp_port, 0,
+        "udp dial string must carry a port, got {udp:?}"
+    );
 }
