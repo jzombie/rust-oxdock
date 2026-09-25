@@ -617,11 +617,6 @@ fn net_fetch<P: ProcessManager>(
         bail!("NET_FETCH failed: engine running in --offline mode");
     }
     let is_pipe = dest.as_str().is_none();
-    if is_pipe && !cx.is_async_task() {
-        bail!(
-            "NET_FETCH requires ASYNC for PIPE destinations: wrap it as LET $t: HANDLE = ASYNC {{ NET_FETCH($url, $pipe, {{}}) }}"
-        );
-    }
     if let Some(path_raw) = dest.as_str() {
         let guarded = anchor_fetch_path(cx.cwd().root(), path_raw)?;
         let result = fetch_file_streamed(&guarded, &url, timeout, retries, || cx.is_cancelled())?;
@@ -637,6 +632,17 @@ fn net_fetch<P: ProcessManager>(
         out.insert("sha256".to_string(), Value::string(result.sha256));
         out.insert("path".to_string(), Value::string(path_raw.to_string()));
         return Ok(Value::map(out));
+    }
+    let Some(_pipe_handle) = dest.as_pipe_handle() else {
+        bail!(
+            "NET_FETCH() argument `$dest` must be a STRING file path or a PIPE, got {}",
+            dest.type_name()
+        );
+    };
+    if is_pipe && !cx.is_async_task() {
+        bail!(
+            "NET_FETCH requires ASYNC for PIPE destinations: wrap it as LET $t: HANDLE = ASYNC {{ NET_FETCH($url, $pipe, {{}}) }}"
+        );
     }
     let writer = cx.pipe_writer(&dest)?;
     let result = fetch_stream(

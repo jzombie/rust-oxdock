@@ -933,6 +933,18 @@ fn fetch_rejects_bad_scheme_and_options() {
     "#};
     let err = run_script(&root, script).expect_err("pipe fetch needs ASYNC");
     assert!(err.to_string().contains("ASYNC"), "{err:#}");
+
+    for (dest, want) in [("42", "STRING file path or a PIPE"), ("true", "STRING file path or a PIPE")] {
+        let script = format!(
+            indoc! {r#"
+                IMPORT [STD, NET]
+                LET $r: MAP = NET_FETCH("https://example.com/x", {dest}, {{}})
+            "#},
+            dest = dest
+        );
+        let err = run_script(&root, &script).expect_err("invalid dest must fail");
+        assert!(err.to_string().contains(want), "{err:#}");
+    }
 }
 
 #[test]
