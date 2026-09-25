@@ -10,8 +10,10 @@ use anyhow::{Context, Result, bail};
 use oxdock_fs::{EntryKind, GuardedPath, PathResolver};
 
 use crate::fingerprint::{FingerprintInputs, Profile, compute_fingerprint};
-use crate::provision::{ToolchainInfo, provision_toolchain, toolchain_dirs, toolchain_resolver};
-use crate::targets::{host_exe_name, target_exe_name};
+use crate::provision::{
+    ToolchainInfo, provision_linker, provision_toolchain, toolchain_dirs, toolchain_resolver,
+};
+use crate::targets::{Linker, host_exe_name, linker_for_triple, target_exe_name};
 
 /// Compiled artifact description for MAP returns.
 pub struct BuildOutput {
@@ -178,13 +180,14 @@ pub fn build_cached(
         );
     }
     let info = ensure_binaries(anchor, &resolver, triple)?;
+    let (rustflags, link_source) = linker_rustflags(anchor, triple)?;
     let source_hash = hash_source_dir(&resolver, &manifest)?;
     let toolchain_versions = vec![rustc_version(&info)?];
     let fingerprint = compute_fingerprint(&FingerprintInputs {
         source_hash: &source_hash,
         features,
         profile,
-        flags: &[],
+        flags: &rustflags,
         toolchain_versions: &toolchain_versions,
     });
     let dirs = toolchain_dirs(&resolver, triple)?;
@@ -202,7 +205,16 @@ pub fn build_cached(
     if resolver.exists(&marker) && resolver.exists(&binary) {
         let recorded = resolver.read_file(&marker)?;
         if recorded == fingerprint.as_bytes() {
-            return Ok(output_of(&binary, profile, triple, features, &source_hash, &toolchain_versions, &fingerprint));
+            return Ok(output_of(&BuildReport {
+                binary: &binary,
+                profile,
+                triple,
+                features,
+                source_hash: &source_hash,
+                toolchain_versions: &toolchain_versions,
+                fingerprint: &fingerprint,
+                linker: &link_source,
+            }));
         }
     }
     resolver.create_dir_all(&out_dir)?;
@@ -210,7 +222,21 @@ pub fn build_cached(
         .target
         .parent()
         .context("TOOLCHAIN_BUILD target dir has no parent")?;
-    cargo_build(&info, &manifest, &target_base, triple, features, profile)?;
+    let cargo_home = guard
+        .join("cargo-home")
+        .context("TOOLCHAIN_BUILD cannot join cargo home")?;
+    resolver.create_dir_all(&cargo_home)?;
+    let invocation = CargoInvocation {
+        info: &info,
+        manifest: &manifest,
+        target_base: &target_base,
+        triple,
+        features,
+        profile,
+        rustflags: &rustflags,
+        cargo_home: &cargo_home,
+    };
+    cargo_build(&invocation)?;
     if !resolver.exists(&binary) {
         bail!(
             "TOOLCHAIN_BUILD finished but {} is missing: the manifest package name must match the binary name",
@@ -218,7 +244,50 @@ pub fn build_cached(
         );
     }
     resolver.write_file(&marker, fingerprint.as_bytes())?;
-    Ok(output_of(&binary, profile, triple, features, &source_hash, &toolchain_versions, &fingerprint))
+    Ok(output_of(&BuildReport {
+                binary: &binary,
+                profile,
+                triple,
+                features,
+                source_hash: &source_hash,
+                toolchain_versions: &toolchain_versions,
+                fingerprint: &fingerprint,
+                linker: &link_source,
+            }))
+}
+
+/// Resolve the linker for `triple` into cargo rustflags plus a metadata
+/// label. Zig triples provision the cached linker; host-cc triples
+/// contribute a marker flag so policy changes rebuild.
+fn linker_rustflags(anchor: &GuardedPath, triple: &str) -> Result<(Vec<String>, String)> {
+    match linker_for_triple(triple)? {
+        Linker::Zig { zig_target } => {
+            let info = provision_linker(anchor)?;
+            Ok((
+                rustflags_for_linker(&Linker::Zig {
+                    zig_target: zig_target.clone(),
+                }, &info.zig),
+                format!("zig:{}", info.zig),
+            ))
+        }
+        Linker::HostCc => Ok((vec!["linker=host-cc".to_string()], "host-cc".to_string())),
+    }
+}
+
+/// Cargo rustflags argv for a resolved linker. Space-unsafe paths ride
+/// `CARGO_ENCODED_RUSTFLAGS`, never bare `RUSTFLAGS`.
+pub fn rustflags_for_linker(linker: &Linker, zig_bin: &str) -> Vec<String> {
+    match linker {
+        Linker::Zig { zig_target } => vec![
+            "-C".to_string(),
+            format!("linker={zig_bin}"),
+            "-C".to_string(),
+            "link-arg=-target".to_string(),
+            "-C".to_string(),
+            format!("link-arg={zig_target}"),
+        ],
+        Linker::HostCc => vec!["linker=host-cc".to_string()],
+    }
 }
 
 /// Present binaries win; otherwise provision on the spot so callers
@@ -269,19 +338,37 @@ fn package_name(resolver: &PathResolver, manifest: &GuardedPath) -> Result<Strin
         .context("TOOLCHAIN manifest Cargo.toml has no package.name")
 }
 
+/// Everything one cached `cargo build` invocation needs, so the
+/// driver takes a single argument.
+struct CargoInvocation<'a> {
+    info: &'a ToolchainInfo,
+    manifest: &'a GuardedPath,
+    target_base: &'a GuardedPath,
+    triple: &'a str,
+    features: &'a [String],
+    profile: Profile,
+    rustflags: &'a [String],
+    cargo_home: &'a GuardedPath,
+}
+
 /// Drive the cached cargo with manifest and target dir pinned inside
 /// the cache. The base target dir plus `--target` reproduces real cargo
-/// layout (`<base>/<triple>/<profile>`). No host cargo, no ambient
-/// target dir.
+/// layout (`<base>/<triple>/<profile>`). The cached `rustc` rides
+/// `RUSTC` (never host `PATH` discovery), linker argv rides the
+/// space-safe `CARGO_ENCODED_RUSTFLAGS` channel, and registries live in
+/// a cache-scoped `CARGO_HOME`. No host cargo, no ambient target dir.
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-fn cargo_build(
-    info: &ToolchainInfo,
-    manifest: &GuardedPath,
-    target_base: &GuardedPath,
-    triple: &str,
-    features: &[String],
-    profile: Profile,
-) -> Result<()> {
+fn cargo_build(invocation: &CargoInvocation<'_>) -> Result<()> {
+    let CargoInvocation {
+        info,
+        manifest,
+        target_base,
+        triple,
+        features,
+        profile,
+        rustflags,
+        cargo_home,
+    } = invocation;
     let manifest_toml = manifest.join("Cargo.toml")?;
     let mut cmd = oxdock_process::CommandBuilder::new(std::ffi::OsString::from(&info.cargo));
     cmd.arg("build");
@@ -301,7 +388,17 @@ fn cargo_build(
         cmd.arg("--features");
         cmd.arg(features.join(","));
     }
-    cmd.env("CARGO_NET_OFFLINE", "false");
+    cmd.env("RUSTC", std::ffi::OsString::from(&info.rustc));
+    cmd.env(
+        "CARGO_HOME",
+        std::ffi::OsString::from(cargo_home.as_path()),
+    );
+    if !rustflags.is_empty() {
+        cmd.env(
+            "CARGO_ENCODED_RUSTFLAGS",
+            rustflags.join("\u{1f}"),
+        );
+    }
     let out = cmd.output().context("TOOLCHAIN cannot run cached cargo build")?;
     if !out.success() {
         bail!(
@@ -312,19 +409,34 @@ fn cargo_build(
     Ok(())
 }
 
-/// Assemble the return value with artifact metadata.
-fn output_of(
-    binary: &GuardedPath,
+/// Everything identifying one compiled artifact, so the assembler
+/// takes a single argument.
+struct BuildReport<'a> {
+    binary: &'a GuardedPath,
     profile: Profile,
-    triple: &str,
-    features: &[String],
-    source_hash: &str,
-    toolchain_versions: &[String],
-    fingerprint: &str,
-) -> BuildOutput {
+    triple: &'a str,
+    features: &'a [String],
+    source_hash: &'a str,
+    toolchain_versions: &'a [String],
+    fingerprint: &'a str,
+    linker: &'a str,
+}
+
+/// Assemble the return value with artifact metadata.
+fn output_of(report: &BuildReport<'_>) -> BuildOutput {
+    let BuildReport {
+        binary,
+        profile,
+        triple,
+        features,
+        source_hash,
+        toolchain_versions,
+        fingerprint,
+        linker,
+    } = report;
     BuildOutput {
         binary: binary.display().to_string(),
-        profile,
+        profile: *profile,
         releasable: profile.releasable(),
         metadata: vec![
             ("triple".to_string(), triple.to_string()),
@@ -338,7 +450,44 @@ fn output_of(
             ("features".to_string(), features.join(",")),
             ("source".to_string(), source_hash.to_string()),
             ("toolchains".to_string(), toolchain_versions.join(",")),
+            ("linker".to_string(), linker.to_string()),
             ("fingerprint".to_string(), fingerprint.to_string()),
         ],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::targets::Linker;
+
+    #[test]
+    fn zig_rustflags_carry_linker_and_target() {
+        let flags = rustflags_for_linker(
+            &Linker::Zig {
+                zig_target: "x86_64-linux-musl".to_string(),
+            },
+            "/cache/toolchain/linker/zig/zig",
+        );
+        assert_eq!(
+            flags,
+            vec![
+                "-C".to_string(),
+                "linker=/cache/toolchain/linker/zig/zig".to_string(),
+                "-C".to_string(),
+                "link-arg=-target".to_string(),
+                "-C".to_string(),
+                "link-arg=x86_64-linux-musl".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn host_cc_rustflags_mark_the_policy() {
+        let flags = rustflags_for_linker(
+            &Linker::HostCc,
+            "/unused",
+        );
+        assert_eq!(flags, vec!["linker=host-cc".to_string()]);
     }
 }

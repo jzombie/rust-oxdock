@@ -116,6 +116,9 @@ fn seed_fake_toolchain(cache: &PinnedCache) -> String {
             out="$target_dir/$target/$profile"
             mkdir -p "$out"
             printf 'fake-binary' > "$out/demo-pkg"
+            printf '%s' "${RUSTC:-}" > "$target_dir/rustc.env"
+            printf '%s' "${CARGO_ENCODED_RUSTFLAGS:-}" > "$target_dir/rustflags.env"
+            printf '%s' "${CARGO_HOME:-}" > "$target_dir/cargohome.env"
         "#};
         resolver
             .write_file(&cargo, script.as_bytes())
@@ -300,6 +303,33 @@ fn build_release_then_no_rebuild_then_dev() {
         .join(&format!("toolchain/target/{triple}/release/demo-pkg"))
         .expect("binary join");
     assert!(resolver.exists(&binary), "release binary lands in cache");
+    // The build reaches only cached inputs: RUSTC names the cached
+    // rustc and CARGO_HOME stays inside the cache group.
+    let target_base = cache_root
+        .join("toolchain/target")
+        .expect("target base join");
+    let used_rustc = resolver
+        .read_to_string(
+            &target_base
+                .join("rustc.env")
+                .expect("rustc env join"),
+        )
+        .expect("read rustc env");
+    assert!(
+        used_rustc.contains("toolchain/dist"),
+        "cargo builds through the cached rustc, got {used_rustc:?}"
+    );
+    let cargo_home = resolver
+        .read_to_string(
+            &target_base
+                .join("cargohome.env")
+                .expect("cargo home join"),
+        )
+        .expect("read cargo home");
+    assert!(
+        cargo_home.contains("toolchain"),
+        "cargo registries stay inside the cache, got {cargo_home:?}"
+    );
     // Fresh rebuild short-circuits: poison the binary and rebuild.
     resolver
         .write_file(&binary, b"sentinel")

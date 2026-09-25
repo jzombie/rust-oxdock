@@ -15,7 +15,11 @@ bundle; pinned remote fetch is follow-up). `TOOLCHAIN_BUILD`
 compiles with the cached toolchain only, provisioning automatically
 when the binaries are missing and rebuilding only when the
 fingerprint (source plus features plus profile plus toolchain
-versions) goes stale. Release is the default profile; `dev` is an
+versions) goes stale. Linking rides a cached zig linker provisioned
+beside the toolchain (Apple targets on macOS hosts use the host
+compiler for its SDK explicitly), the cached `rustc` rides `RUSTC`,
+and registries live in a cache-scoped `CARGO_HOME`, so no host
+compiler, toolchain, or registry leaks in. Release is the default profile; `dev` is an
 explicit opt-in whose outputs never read releasable. Import it with
 `IMPORT [STD, TOOLCHAIN]` in a runner built with the `toolchain`
 feature. The function reference below lists every entry with
@@ -38,9 +42,13 @@ Build staged source with the cached toolchain only. `triple` blanks
 to host; `manifest_dir` must live inside the toolchain cache;
 `features` is a LIST of STRING feature names; `options` is a MAP
 with optional `profile` (`release` default, explicit `dev` opt-in).
-Missing toolchain binaries provision automatically. Rebuilds only
-when the fingerprint (source plus features plus profile plus
-toolchain versions) is stale. Returns a MAP with `binary`, `profile`,
+Missing toolchain binaries provision automatically. Linking rides
+the cached zig linker through `CARGO_ENCODED_RUSTFLAGS` (Apple
+targets on macOS hosts use the host compiler for its SDK
+explicitly). The cached `rustc` rides `RUSTC` and registries live
+in a cache-scoped `CARGO_HOME`. Rebuilds only when the fingerprint
+(source plus features plus profile plus linker plus toolchain
+versions) is stale. Returns a MAP with `binary`, `profile`,
 `releasable` (BOOL), and `metadata` (MAP).
 
 ### TOOLCHAIN_ENSURE

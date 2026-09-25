@@ -79,6 +79,97 @@ pub fn rust_dist_url(version: &str, triple: &str) -> String {
     format!("https://static.rust-lang.org/dist/rust-standalone-{version}-{triple}.tar.gz")
 }
 
+/// Pinned zig version provisioned as the portable linker. Bumped
+/// deliberately with its hashes, never floating. Override with
+/// `OXDOCK_ZIG_VERSION` when dogfooding a newer release.
+pub const PINNED_ZIG_VERSION: &str = "0.15.1";
+
+/// Version override for the zig linker bundle.
+pub const ZIG_VERSION_ENV: &str = "OXDOCK_ZIG_VERSION";
+
+/// Exact-digest override for the zig bundle. Mirrors the toolchain pin.
+pub const ZIG_SHA256_ENV: &str = "OXDOCK_ZIG_SHA256";
+
+/// Effective zig version: exact env override wins, otherwise the pin.
+pub fn zig_version() -> String {
+    std::env::var(ZIG_VERSION_ENV)
+        .ok()
+        .map(|raw| raw.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| PINNED_ZIG_VERSION.to_string())
+}
+
+/// How a target triple links. `rustc` always shells out to a linker,
+/// and bare hosts have no `cc`, so every triple that zig covers links
+/// through the cached zig binary. Apple targets need the proprietary
+/// macOS SDK, which no cache can provide: native macOS builds use the
+/// host compiler explicitly, and cross-Apple builds from other hosts
+/// fail closed instead of guessing.
+pub enum Linker {
+    /// Link through cached zig: `zig cc -target <zig_target>`.
+    Zig { zig_target: String },
+    /// Link through the host `cc`. Apple targets only: the proprietary
+    /// macOS SDK ships with the Xcode command line tools and no cache
+    /// can provide it.
+    HostCc,
+}
+
+/// Linker policy for `triple`. Validates the triple first so unknown
+/// and MSVC targets keep their existing errors.
+pub fn linker_for_triple(triple: &str) -> Result<Linker> {
+    validate_triple(triple)?;
+    if triple.contains("apple") || triple.contains("darwin") {
+        if std::env::consts::OS == "macos" {
+            return Ok(Linker::HostCc);
+        }
+        bail!(
+            "TOOLCHAIN: {triple} needs the macOS SDK, which is only available on a macOS host: cross-Apple builds from other hosts are not provisioned"
+        );
+    }
+    Ok(Linker::Zig {
+        zig_target: zig_target_for_triple(triple)?,
+    })
+}
+
+/// zig `-target` string for a Rust triple. Only Linux and Windows GNU
+/// targets qualify: zig bundles their libc headers, so no host files
+/// are involved.
+pub fn zig_target_for_triple(triple: &str) -> Result<String> {
+    if let Some(arch) = triple.split('-').next() {
+        let target = match (arch, triple) {
+            ("x86_64", t) if t.contains("linux-gnu") => "x86_64-linux-gnu",
+            ("aarch64", t) if t.contains("linux-gnu") => "aarch64-linux-gnu",
+            ("x86_64", t) if t.contains("linux-musl") => "x86_64-linux-musl",
+            ("aarch64", t) if t.contains("linux-musl") => "aarch64-linux-musl",
+            ("x86_64", t) if t.contains("windows-gnu") => "x86_64-windows-gnu",
+            ("aarch64", t) if t.contains("windows-gnu") => "aarch64-windows-gnu",
+            _ => bail!("TOOLCHAIN: no zig target mapping for triple {triple:?}"),
+        };
+        return Ok(target.to_string());
+    }
+    bail!("TOOLCHAIN: no zig target mapping for triple {triple:?}")
+}
+
+/// Host platform of the running process as a zig bundle `(os, arch)`
+/// pair. Unknown hosts bail instead of guessing.
+pub fn zig_bundle_platform() -> Result<(String, String)> {
+    let arch = std::env::consts::ARCH;
+    let os = std::env::consts::OS;
+    let pair = match (arch, os) {
+        ("x86_64", "linux") => ("linux", "x86_64"),
+        ("aarch64", "linux") => ("linux", "aarch64"),
+        ("x86_64", "macos") => ("macos", "x86_64"),
+        ("aarch64", "macos") => ("macos", "aarch64"),
+        _ => bail!("TOOLCHAIN: no zig bundle for host arch/os combination: {arch}/{os} (Windows hosts are not provisioned yet)"),
+    };
+    Ok((pair.0.to_string(), pair.1.to_string()))
+}
+
+/// Download URL for the zig bundle of a version and host platform.
+pub fn zig_dist_url(version: &str, os: &str, arch: &str) -> String {
+    format!("https://ziglang.org/download/{version}/zig-{os}-{arch}-{version}.tar.xz")
+}
+
 /// Executable file name for a binary this host runs (provisioned
 /// `cargo`/`rustc` execute locally, so the host platform decides).
 #[cfg(windows)]
@@ -158,5 +249,49 @@ mod tests {
         assert_eq!(host_exe_name("cargo"), "cargo.exe");
         #[cfg(not(windows))]
         assert_eq!(host_exe_name("cargo"), "cargo");
+    }
+
+    #[test]
+    fn linux_triples_link_through_zig() {
+        for (triple, ztarget) in [
+            ("x86_64-unknown-linux-gnu", "x86_64-linux-gnu"),
+            ("aarch64-unknown-linux-gnu", "aarch64-linux-gnu"),
+            ("x86_64-unknown-linux-musl", "x86_64-linux-musl"),
+            ("aarch64-unknown-linux-musl", "aarch64-linux-musl"),
+            ("x86_64-pc-windows-gnu", "x86_64-windows-gnu"),
+        ] {
+            match linker_for_triple(triple).expect("supported triple") {
+                Linker::Zig { zig_target } => assert_eq!(zig_target, ztarget),
+                Linker::HostCc => {
+                    panic!("{triple} must use zig, got host-cc")
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn apple_triples_use_host_cc_on_macos() {
+        match linker_for_triple("aarch64-apple-darwin").expect("apple parses") {
+            Linker::HostCc => {}
+            Linker::Zig { .. } => panic!("apple targets must not use zig"),
+        }
+    }
+
+    #[test]
+    #[cfg(not(target_os = "macos"))]
+    fn apple_triples_fail_closed_off_macos() {
+        let err = linker_for_triple("aarch64-apple-darwin")
+            .expect_err("cross-Apple from other hosts must fail");
+        assert!(err.to_string().contains("macOS SDK"), "{err:#}");
+    }
+
+    #[test]
+    fn zig_bundle_names_version_and_platform() {
+        let url = zig_dist_url("0.15.1", "linux", "x86_64");
+        assert_eq!(
+            url,
+            "https://ziglang.org/download/0.15.1/zig-linux-x86_64-0.15.1.tar.xz"
+        );
     }
 }

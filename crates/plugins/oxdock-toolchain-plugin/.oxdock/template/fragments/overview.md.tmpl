@@ -9,7 +9,11 @@ bundle; pinned remote fetch is follow-up). `TOOLCHAIN_BUILD`
 compiles with the cached toolchain only, provisioning automatically
 when the binaries are missing and rebuilding only when the
 fingerprint (source plus features plus profile plus toolchain
-versions) goes stale. Release is the default profile; `dev` is an
+versions) goes stale. Linking rides a cached zig linker provisioned
+beside the toolchain (Apple targets on macOS hosts use the host
+compiler for its SDK explicitly), the cached `rustc` rides `RUSTC`,
+and registries live in a cache-scoped `CARGO_HOME`, so no host
+compiler, toolchain, or registry leaks in. Release is the default profile; `dev` is an
 explicit opt-in whose outputs never read releasable. Import it with
 `IMPORT [STD, TOOLCHAIN]` in a runner built with the `toolchain`
 feature. The function reference below lists every entry with
