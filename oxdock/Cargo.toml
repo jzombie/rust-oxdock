@@ -26,6 +26,8 @@ cli = ["dep:oxdock-cli", "net"]
 net = ["oxdock-cli/net"]
 # Ephemeral SSH server/client in the CLI runner (oxdock-ssh-plugin).
 ssh = ["cli", "net", "oxdock-cli/ssh"]
+# Portable toolchain builder in the CLI runner (oxdock-toolchain-plugin).
+toolchain = ["cli", "net", "oxdock-cli/toolchain"]
 
 [dependencies]
 oxdock-build.workspace = true

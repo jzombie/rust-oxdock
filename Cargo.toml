@@ -11,6 +11,7 @@ members = [
     "crates/oxdock-parser",
     "crates/plugins/oxdock-net-plugin",
     "crates/plugins/oxdock-ssh-plugin",
+    "crates/plugins/oxdock-toolchain-plugin",
     "crates/sys/oxdock-fs",
     "crates/sys/oxdock-pipe",
     "crates/sys/oxdock-process",
@@ -37,6 +38,7 @@ publish = true
 anyhow = "1.0.104"
 bytes = "1"
 cache-manager = { version = "0.4.1", features = ["os-cache-dir"] }
+flate2 = "1"
 glob = "0.3"
 indoc = "2.0.7"
 lexopt = "0.3.2"
@@ -59,6 +61,7 @@ oxdock-pipe = { path = "crates/sys/oxdock-pipe", version = "0.19.0-alpha" }
 oxdock-process = { path = "crates/sys/oxdock-process", version = "0.19.0-alpha" }
 oxdock-ssh-plugin = { path = "crates/plugins/oxdock-ssh-plugin", version = "0.19.0-alpha" }
 oxdock-sys-test-utils = { path = "crates/sys/oxdock-sys-test-utils", version = "0.19.0-alpha" }
+oxdock-toolchain-plugin = { path = "crates/plugins/oxdock-toolchain-plugin", version = "0.19.0-alpha" }
 pest = { version = "2.9.0", default-features = false, features = ["std"] }
 pest_derive = "2.9.0"
 portable-pty = "0.9"
@@ -71,6 +74,7 @@ serde_json = "1.0.151"
 sha2 = "0.11.0"
 hex = "0.4.3"
 syn = { version = "3.0.4", features = ["full", "visit"] }
+tar = "0.4"
 tempfile = "3.27.0"
 tokio = { version = "1", features = ["rt", "net", "sync", "time", "io-util"] }
 toml = "1.1.4"

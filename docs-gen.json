@@ -8,6 +8,8 @@
     "ssh_function_reference": "crates/plugins/oxdock-ssh-plugin/.oxdock/template/generated/ssh-function-reference.md.tmpl",
     "ssh_type_reference": "crates/plugins/oxdock-ssh-plugin/.oxdock/template/generated/ssh-type-reference.md.tmpl",
     "net_function_reference": "crates/plugins/oxdock-net-plugin/.oxdock/template/generated/net-function-reference.md.tmpl",
-    "net_type_reference": "crates/plugins/oxdock-net-plugin/.oxdock/template/generated/net-type-reference.md.tmpl"
+    "net_type_reference": "crates/plugins/oxdock-net-plugin/.oxdock/template/generated/net-type-reference.md.tmpl",
+    "toolchain_function_reference": "crates/plugins/oxdock-toolchain-plugin/.oxdock/template/generated/toolchain-function-reference.md.tmpl",
+    "toolchain_type_reference": "crates/plugins/oxdock-toolchain-plugin/.oxdock/template/generated/toolchain-type-reference.md.tmpl"
   }
 }

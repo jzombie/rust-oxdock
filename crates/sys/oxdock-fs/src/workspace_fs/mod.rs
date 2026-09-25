@@ -544,8 +544,7 @@ impl PathResolver {
     /// Choke point for toolchain-targeted I/O (issue #179): ensures the
     /// persistent toolchain directory exists (creation only, never eviction)
     /// and returns its guard. Idempotent.
-    #[allow(dead_code)]
-    pub(crate) fn ensure_toolchain(&self) -> Result<GuardedPath> {
+    pub fn ensure_toolchain(&self) -> Result<GuardedPath> {
         let guard = self.toolchain_guard();
         let root = guard.as_path().parent().with_context(|| {
             format!("toolchain guard has no parent: {}", guard.display())

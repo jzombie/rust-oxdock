@@ -242,8 +242,11 @@ fn plugin_docs() -> &'static HashMap<String, PluginDocs> {
     static DOCS: OnceLock<HashMap<String, PluginDocs>> = OnceLock::new();
     DOCS.get_or_init(|| {
         let mut map = HashMap::new();
-        let modules: Vec<HostModule<DefaultProcessManager>> =
-            vec![oxdock_ssh_plugin::module(), oxdock_net_plugin::module()];
+        let modules: Vec<HostModule<DefaultProcessManager>> = vec![
+            oxdock_ssh_plugin::module(),
+            oxdock_net_plugin::module(),
+            oxdock_toolchain_plugin::module(),
+        ];
         for module in modules {
             let name = module.name.clone();
             let mut metas: Vec<FuncMeta> = module
@@ -585,6 +588,25 @@ mod tests {
             !net.contains("SSH_SERVE"),
             "NET reference must not contain SSH entries",
         );
+        let tool = plugin_function_reference("TOOLCHAIN".to_string())
+            .expect("toolchain reference")
+            .as_str()
+            .expect("string")
+            .to_string();
+        for name in [
+            "TOOLCHAIN_ENSURE",
+            "TOOLCHAIN_FETCH_SOURCE",
+            "TOOLCHAIN_BUILD",
+        ] {
+            assert!(
+                tool.contains(&format!("### {name}")),
+                "TOOLCHAIN reference must document {name}",
+            );
+        }
+        assert!(
+            !tool.contains("NET_FETCH"),
+            "TOOLCHAIN reference must not contain NET entries",
+        );
     }
 
     #[test]
@@ -594,6 +616,7 @@ mod tests {
         assert!(text.contains("NOPE"), "error names the module: {text}");
         assert!(text.contains("SSH"), "error lists SSH: {text}");
         assert!(text.contains("NET"), "error lists NET: {text}");
+        assert!(text.contains("TOOLCHAIN"), "error lists TOOLCHAIN: {text}");
     }
 
     #[test]

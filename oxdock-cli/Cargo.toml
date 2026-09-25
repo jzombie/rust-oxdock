@@ -20,6 +20,7 @@ build = []
 default = ["net"]
 net = ["dep:oxdock-net-plugin"]
 ssh = ["net", "dep:oxdock-ssh-plugin"]
+toolchain = ["net", "dep:oxdock-toolchain-plugin"]
 
 [dependencies]
 anyhow.workspace = true
@@ -31,6 +32,7 @@ oxdock-net-plugin = { workspace = true, optional = true }
 oxdock-parser.workspace = true
 oxdock-process.workspace = true
 oxdock-ssh-plugin = { workspace = true, optional = true }
+oxdock-toolchain-plugin = { workspace = true, optional = true }
 tempfile.workspace = true
 
 [dev-dependencies]

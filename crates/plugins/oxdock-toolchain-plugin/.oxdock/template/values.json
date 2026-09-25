@@ -1,0 +1,1 @@
+{"name": "oxdock-toolchain-plugin", "description": "Portable OxDock builder: provision pinned Rust toolchains and compile OxDock binaries on demand, all under a dedicated cache group with zero host dependencies."}

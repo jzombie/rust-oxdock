@@ -67,6 +67,12 @@ pub fn run(repo_root: &Path) -> Result<()> {
 
             LET $nettypes: STRING = DOCS::PLUGIN_TYPE_REFERENCE("NET")
             WRITE $gen.net_type_reference $nettypes
+
+            LET $toolfuncref: STRING = DOCS::PLUGIN_FUNCTION_REFERENCE("TOOLCHAIN")
+            WRITE $gen.toolchain_function_reference $toolfuncref
+
+            LET $tooltypes: STRING = DOCS::PLUGIN_TYPE_REFERENCE("TOOLCHAIN")
+            WRITE $gen.toolchain_type_reference $tooltypes
         }
         REFRESH_GENERATED($gen)
 

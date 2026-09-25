@@ -30,11 +30,13 @@ use oxdock_net_plugin::EndpointRegistry;
 
 /// Host modules bundled into the CLI runner. With `net` this exposes STD
 /// plus the NET virtual-endpoint toolkit (`NET_LISTEN`, `NET_ACCEPT`,
-/// `NET_CLOSE`, `NET_CONNECT`, `NET_PORT`, `NET_ADDR`); with `--features
-/// ssh` it additionally registers the SSH server and client (`SSH_SERVE`,
-/// `SSH_ACCEPT`, `SSH_DEQUEUE`, `SSH_PUMP_CHANNEL`, `SSH_CLOSE`,
-/// `SSH_CONNECT`, `SSH_PUMP`) from oxdock-ssh-plugin. Without `net` only
-/// STD builtins remain.
+/// `NET_CLOSE`, `NET_CONNECT`, `NET_PORT`, `NET_ADDR`, `NET_FETCH`); with
+/// `--features ssh` it additionally registers the SSH server and client
+/// (`SSH_SERVE`, `SSH_ACCEPT`, `SSH_DEQUEUE`, `SSH_PUMP_CHANNEL`,
+/// `SSH_CLOSE`, `SSH_CONNECT`, `SSH_PUMP`) from oxdock-ssh-plugin; with
+/// `--features toolchain` it additionally registers the portable builder
+/// (`TOOLCHAIN_ENSURE`, `TOOLCHAIN_FETCH_SOURCE`, `TOOLCHAIN_BUILD`) from
+/// oxdock-toolchain-plugin. Without `net` only STD builtins remain.
 fn cli_host_modules() -> Vec<HostModule<DefaultProcessManager>> {
     cli_host_modules_with(None)
 }
@@ -67,6 +69,10 @@ fn cli_host_modules_with(
                 None => oxdock_ssh_plugin::module(),
             };
             modules.push(ssh_module);
+        }
+        #[cfg(feature = "toolchain")]
+        {
+            modules.push(oxdock_toolchain_plugin::module());
         }
     }
     let _ = registry;
@@ -1183,6 +1189,42 @@ mod tests {
             endpoints: EndpointFlags::default(),
         };
         execute_with_result(opts, workspace_root)?;
+        Ok(())
+    }
+
+    /// The `toolchain` feature wires the TOOLCHAIN host module into the
+    /// real CLI runner: an unknown triple bails at dispatch, which proves
+    /// `TOOLCHAIN_*` names resolve instead of failing as `UnknownCommand`.
+    /// No network, no binaries: validation fires first.
+    #[cfg(feature = "toolchain")]
+    #[cfg_attr(
+        miri,
+        ignore = "GuardedPath::tempdir relies on OS tempdirs; blocked under Miri isolation"
+    )]
+    #[test]
+    fn toolchain_module_resolves_and_validates() -> Result<()> {
+        let workspace = GuardedPath::tempdir()?;
+        let workspace_root = workspace.as_guarded_path().clone();
+        let script_path = workspace_root.join("toolchain-triple.ox")?;
+        let resolver = PathResolver::new(workspace_root.as_path(), workspace_root.as_path())?;
+        let script = indoc! {"
+            IMPORT [STD, TOOLCHAIN]
+            LET $t: MAP = TOOLCHAIN_ENSURE(\"mips-unknown-linux-gnu\")
+        "};
+        resolver.write_file(&script_path, script.as_bytes())?;
+        let opts = Options {
+            script: ScriptSource::Path(script_path),
+            shell: false,
+            endpoints: EndpointFlags::default(),
+        };
+        let err = match execute_with_result(opts, workspace_root) {
+            Ok(_) => panic!("unknown triple must fail"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("unknown target triple"),
+            "{err:#}"
+        );
         Ok(())
     }
 

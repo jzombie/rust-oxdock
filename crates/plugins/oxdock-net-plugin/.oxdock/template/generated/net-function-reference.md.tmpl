@@ -92,6 +92,16 @@ instead of hanging.
 
 Dial a TCP endpoint into pipes.
 
+### NET_FETCH
+
+**Signature:** `NET_FETCH($url: STRING, $dest, $options) -> MAP`
+
+**Contexts:** AST only
+
+Fetch a URL body into a file or pipe.
+
+Fetch a URL over HTTPS with a pure-Rust TLS stack into a guarded file path (synchronous) or a PIPE (requires ASYNC). A PIPE dest is always wire-to-script: the fetch writes the body and the script reads, the same direction as out_pipe in NET_CONNECT. Never write into it; reads observe EOF when the fetch closes. Options: sha256 STRING hex digest, timeout DURATION, retries INT. Errors under --offline.
+
 ### NET_LISTEN
 
 **Signature:** `NET_LISTEN($bind: STRING, $options) -> MAP`

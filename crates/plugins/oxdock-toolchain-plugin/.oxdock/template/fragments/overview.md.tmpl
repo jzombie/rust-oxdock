@@ -1,0 +1,16 @@
+## Overview
+
+The TOOLCHAIN module provisions a pinned Rust toolchain for a target
+triple and compiles staged source into portable OxDock binaries, all
+under a dedicated `toolchain` cache group. `TOOLCHAIN_ENSURE` lays out
+the cache and returns the cached `cargo`, `rustc`, and sysroot paths.
+`TOOLCHAIN_FETCH_SOURCE` snapshots local source into the cache (v1
+bundle; pinned remote fetch is follow-up). `TOOLCHAIN_BUILD`
+compiles with the cached toolchain only, provisioning automatically
+when the binaries are missing and rebuilding only when the
+fingerprint (source plus features plus profile plus toolchain
+versions) goes stale. Release is the default profile; `dev` is an
+explicit opt-in whose outputs never read releasable. Import it with
+`IMPORT [STD, TOOLCHAIN]` in a runner built with the `toolchain`
+feature. The function reference below lists every entry with
+signatures.
