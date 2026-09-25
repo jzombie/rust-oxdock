@@ -7,9 +7,9 @@
 //! are always full-duplex: explicit pipes have no `Null` spelling, so the
 //! builtin read-only mode has no equivalent here.
 //!
-//! `NET_LISTEN` and `NET_CONNECT` resolve through the run's
-//! [`EndpointRegistry`]: the registry rides a closure-captured `Arc` in
-//! hand-built [`HostRegistration::Stateful`] entries (see
+//! `NET_LISTEN`, `NET_CONNECT`, `NET_PORT`, and `NET_ADDR` resolve through
+//! the run's [`EndpointRegistry`]: the registry rides a closure-captured
+//! `Arc` in hand-built [`HostRegistration::Stateful`] entries (see
 //! [`module_with_endpoints`]), because the `#[oxdock_func]` macro
 //! generates closers-over-nothing. `NET_ACCEPT` and `NET_CLOSE` reach the
 //! same registry through their `NET_LISTENER` handle's state.
@@ -36,7 +36,9 @@ use crate::endpoints::{
 };
 use crate::state::ListenerState;
 use crate::types::NetListenerTag;
-use crate::validate::{VirtualEndpoint, parse_connect_endpoint, parse_virtual_endpoint};
+use crate::validate::{
+    EndpointKey, VirtualEndpoint, parse_connect_endpoint, parse_virtual_endpoint,
+};
 
 /// Unique listener ids per process.
 static LISTENER_IDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -143,8 +145,14 @@ fn net_listen<P: ProcessManager>(
     if let Some(key) = map.keys().next() {
         bail!("NET_LISTEN() unknown option '{key}' (no options exist yet)");
     }
+    if bind.contains('/') {
+        bail!(
+            "NET_LISTEN() invalid endpoint {bind:?}: protocol-qualified endpoints cannot be claimed (UDP listen is not supported); observe -p mappings with NET_PORT/NET_ADDR instead"
+        );
+    }
     let endpoint = parse_virtual_endpoint(&bind, "NET_LISTEN")?;
-    let (acquired, registry) = acquire_listener(registry, &endpoint, "NET_LISTEN")?;
+    let key = EndpointKey::tcp(endpoint);
+    let (acquired, registry) = acquire_listener(registry, &key, "NET_LISTEN")?;
     let id = next_listener_id();
     let state = match acquired {
         AcquiredListener::Tcp { listener, addr } => {
@@ -156,7 +164,7 @@ fn net_listen<P: ProcessManager>(
             Arc::new(ListenerState::new_tcp(
                 id,
                 Arc::clone(&registry),
-                endpoint.clone(),
+                key.clone(),
                 addr,
                 owned,
             ))
@@ -164,12 +172,12 @@ fn net_listen<P: ProcessManager>(
         AcquiredListener::Memory => Arc::new(ListenerState::new_memory(
             id,
             Arc::clone(&registry),
-            endpoint.clone(),
+            key.clone(),
         )),
         AcquiredListener::Offline => Arc::new(ListenerState::new_offline(
             id,
             Arc::clone(&registry),
-            endpoint.clone(),
+            key.clone(),
         )),
     };
     let addr_text = state.addr_text().to_string();
@@ -179,7 +187,10 @@ fn net_listen<P: ProcessManager>(
         Value::mint_heap(NetListenerTag::descriptor(), NetListenerTag::new(state)),
     );
     out.insert("addr".to_string(), Value::string(addr_text));
-    out.insert("virtual".to_string(), Value::string(endpoint.to_string()));
+    out.insert(
+        "virtual".to_string(),
+        Value::string(key.endpoint.to_string()),
+    );
     Ok(Value::map(out))
 }
 
@@ -380,6 +391,7 @@ fn net_connect<P: ProcessManager>(
         bail!("NET_CONNECT failed: engine running in --offline mode");
     }
     if let Ok(endpoint) = parse_virtual_endpoint(&target, "NET_CONNECT") {
+        let key = EndpointKey::tcp(endpoint);
         let params = ConnectParams {
             cx,
             registry,
@@ -388,7 +400,7 @@ fn net_connect<P: ProcessManager>(
             timeout,
             half_close: !no_half_close,
         };
-        return connect_virtual(&params, &endpoint, &target);
+        return connect_virtual(&params, &key, &target);
     }
     let (host, port) = parse_connect_endpoint(&target)?;
     let addr = (host.as_str(), port)
@@ -442,15 +454,15 @@ fn dial_tcp<P: ProcessManager>(
 /// client-before-server order works from either side.
 fn connect_virtual<P: ProcessManager>(
     params: &ConnectParams<'_, P>,
-    endpoint: &VirtualEndpoint,
+    key: &EndpointKey,
     target: &str,
 ) -> Result<Value> {
-    match endpoint {
-        VirtualEndpoint::Port(port) => match params.registry.slot_kind(endpoint) {
+    match &key.endpoint {
+        VirtualEndpoint::Port(port) => match params.registry.slot_kind(key) {
             SlotKind::Memory => connect_memory(
                 params.cx,
                 params.registry,
-                endpoint,
+                key,
                 params.in_pipe,
                 params.out_pipe,
                 params.half_close,
@@ -465,9 +477,9 @@ fn connect_virtual<P: ProcessManager>(
                 params.half_close,
             ),
             SlotKind::TcpUnbound => {
-                bail!("NET_CONNECT: '{endpoint}' was never bound (the runner must call bind_all)")
+                bail!("NET_CONNECT: '{key}' was never bound (the runner must call bind_all)")
             }
-            SlotKind::Offline => bail!("NET_CONNECT: '{endpoint}' is offline"),
+            SlotKind::Offline => bail!("NET_CONNECT: '{key}' is offline"),
             SlotKind::Unmapped => dial_tcp(
                 params.cx,
                 target,
@@ -478,13 +490,13 @@ fn connect_virtual<P: ProcessManager>(
                 params.half_close,
             ),
         },
-        VirtualEndpoint::Name(_) => match params.registry.slot_kind(endpoint) {
+        VirtualEndpoint::Name(_) => match params.registry.slot_kind(key) {
             SlotKind::Memory | SlotKind::Unmapped => {
-                params.registry.ensure_memory_slot(endpoint);
+                params.registry.ensure_memory_slot(key);
                 connect_memory(
                     params.cx,
                     params.registry,
-                    endpoint,
+                    key,
                     params.in_pipe,
                     params.out_pipe,
                     params.half_close,
@@ -500,9 +512,9 @@ fn connect_virtual<P: ProcessManager>(
                 params.half_close,
             ),
             SlotKind::TcpUnbound => {
-                bail!("NET_CONNECT: '{endpoint}' was never bound (the runner must call bind_all)")
+                bail!("NET_CONNECT: '{key}' was never bound (the runner must call bind_all)")
             }
-            SlotKind::Offline => bail!("NET_CONNECT: '{endpoint}' is offline"),
+            SlotKind::Offline => bail!("NET_CONNECT: '{key}' is offline"),
         },
     }
 }
@@ -513,13 +525,13 @@ fn connect_virtual<P: ProcessManager>(
 fn connect_memory<P: ProcessManager>(
     cx: &StepCtx<P>,
     registry: &Arc<EndpointRegistry>,
-    endpoint: &VirtualEndpoint,
+    key: &EndpointKey,
     in_pipe: &Value,
     out_pipe: &Value,
     half_close: bool,
 ) -> Result<Value> {
     let pair = MemoryPipePair::fresh();
-    registry.enqueue_memory_session(endpoint, pair.clone())?;
+    registry.enqueue_memory_session(key, pair.clone())?;
     // CONNECT side: script-in flows to client_to_server, server_to_client
     // flows to script-out.
     pump_memory(
@@ -555,7 +567,9 @@ pub fn module_with_endpoints<P: ProcessManager>(registry: Arc<EndpointRegistry>)
             net_listen_registration(Arc::clone(&registry)),
             NetAccept::registration(),
             NetClose::registration(),
-            net_connect_registration(registry),
+            net_connect_registration(Arc::clone(&registry)),
+            net_port_registration(Arc::clone(&registry)),
+            net_addr_registration(registry),
         ],
         types: vec![NetListenerTag::descriptor()],
     }
@@ -654,6 +668,147 @@ fn net_connect_registration<P: ProcessManager>(
             rpn: false,
             summary: "Dial a TCP endpoint into pipes.",
             docs: "Dial a TCP endpoint into pipes.",
+        },
+        func,
+    }
+}
+
+/// Report the bound port of a virtual service endpoint without claiming
+/// it, so a `-p`-mapped outer port (including ephemeral `-p 0:<inner>`
+/// resolutions) can be routed into an inner `RUN` through normal
+/// `LET`/`ENV` expansion. `target` is a logical port (`"2251"`) or a
+/// service name (`"demo-proxy"`), optionally protocol-qualified
+/// (`"tcp/web"`, `"udp/dns"`). Bare text resolves TCP with
+/// single-protocol fallback; text bound under both protocols must be
+/// qualified. Unbound targets bail: no `0` sentinel. The runnable example
+/// lives on the function's metadata docs (rendered into the function
+/// reference and executed by the docs conformance suite).
+fn net_port<P: ProcessManager>(
+    cx: &mut StepCtx<P>,
+    registry: &Arc<EndpointRegistry>,
+    target: String,
+) -> Result<Value> {
+    let _ = cx;
+    let addr = registry.resolve_ref(&target, "NET_PORT")?;
+    Ok(Value::int(i64::from(addr.port())))
+}
+
+/// Hand-built `NET_PORT` entry: same shape the macro would emit, plus the
+/// captured registry threaded into [`net_port`].
+fn net_port_registration<P: ProcessManager>(
+    registry: Arc<EndpointRegistry>,
+) -> HostRegistration<P> {
+    let func: NativeFn<P> = Arc::new(move |cx, values| {
+        if values.len() != 1 {
+            bail!("NET_PORT() expects 1 argument(s), got {}", values.len());
+        }
+        let mut values = values.into_iter();
+        let target = match values.next().expect("arity checked above").as_str() {
+            Some(s) => s.to_string(),
+            None => bail!("NET_PORT() argument `$target` must be a STRING"),
+        };
+        net_port(cx, &registry, target)
+    });
+    HostRegistration::Stateful {
+        name: "NET_PORT".to_string(),
+        meta: FuncMeta {
+            name: "NET_PORT".to_string(),
+            // Assigned at registration, like the macro's markers.
+            module: String::new(),
+            kind: FuncKind::HostCtx,
+            params: Some(vec![FuncParam {
+                name: "target".to_string(),
+                param_type: Some("STRING".to_string()),
+            }]),
+            returns: Some("INT".to_string()),
+            rpn: false,
+            summary: "Report the bound port of a virtual service endpoint.",
+            docs: indoc::indoc! {r#"
+                Report the bound port of a virtual service endpoint without claiming it, so a `-p`-mapped outer port (including ephemeral `-p 0:<inner>` resolutions) can be routed into an inner `RUN` through normal `LET`/`ENV` expansion. `target` is a logical port (`"2251"`) or a service name (`"demo-proxy"`), optionally protocol-qualified (`"tcp/web"`, `"udp/dns"`). Bare text resolves TCP with single-protocol fallback; text bound under both protocols must be qualified. Unbound targets bail: no `0` sentinel.
+
+                ```oxdock
+                IMPORT [STD, NET]
+                LET $l: MAP = NET_LISTEN("23791", {})
+
+                # Observe the bound port without claiming the slot twice.
+                LET $port: INT = NET_PORT("23791")
+                ASSERT_EQ $port 23791
+
+                # The shell reads its own environment, with per-platform spelling:
+                # quoted "$VAR" passes the parser through untouched on unix ...
+                ENV PROXY_PORT="{{ $port }}"
+
+                [unix] LET $o: STRING = RUN echo serving on "$PROXY_PORT"
+
+                # ... while cmd expands %VAR% on Windows.
+                [windows] LET $o: STRING = RUN echo serving on %PROXY_PORT%
+
+                ASSERT_CONTAINS $o "23791"
+                NET_CLOSE($l.listener)
+                ```"#},
+        },
+        func,
+    }
+}
+
+/// Report the full bound socket address (`ip:port`) of a virtual service
+/// endpoint without claiming it: the dial-string companion to [`net_port`].
+/// Same qualifier and fallback rules; unbound targets bail, never an
+/// empty string. The runnable example lives on the function's metadata
+/// docs (rendered into the function reference and executed by the docs
+/// conformance suite).
+fn net_addr<P: ProcessManager>(
+    cx: &mut StepCtx<P>,
+    registry: &Arc<EndpointRegistry>,
+    target: String,
+) -> Result<Value> {
+    let _ = cx;
+    let addr = registry.resolve_ref(&target, "NET_ADDR")?;
+    Ok(Value::string(addr.to_string()))
+}
+
+/// Hand-built `NET_ADDR` entry: same shape the macro would emit, plus the
+/// captured registry threaded into [`net_addr`].
+fn net_addr_registration<P: ProcessManager>(
+    registry: Arc<EndpointRegistry>,
+) -> HostRegistration<P> {
+    let func: NativeFn<P> = Arc::new(move |cx, values| {
+        if values.len() != 1 {
+            bail!("NET_ADDR() expects 1 argument(s), got {}", values.len());
+        }
+        let mut values = values.into_iter();
+        let target = match values.next().expect("arity checked above").as_str() {
+            Some(s) => s.to_string(),
+            None => bail!("NET_ADDR() argument `$target` must be a STRING"),
+        };
+        net_addr(cx, &registry, target)
+    });
+    HostRegistration::Stateful {
+        name: "NET_ADDR".to_string(),
+        meta: FuncMeta {
+            name: "NET_ADDR".to_string(),
+            // Assigned at registration, like the macro's markers.
+            module: String::new(),
+            kind: FuncKind::HostCtx,
+            params: Some(vec![FuncParam {
+                name: "target".to_string(),
+                param_type: Some("STRING".to_string()),
+            }]),
+            returns: Some("STRING".to_string()),
+            rpn: false,
+            summary: "Report the bound socket address of a virtual service endpoint.",
+            docs: indoc::indoc! {r#"
+                Report the full bound socket address (`ip:port`) of a virtual service endpoint without claiming it: the dial-string companion to `NET_PORT`. Same qualifier and fallback rules; unbound targets bail, never an empty string.
+
+                ```oxdock
+                IMPORT [STD, NET]
+                LET $l: MAP = NET_LISTEN("23792", {})
+
+                # Observe the dial string without claiming the slot twice.
+                LET $addr: STRING = NET_ADDR("23792")
+                ASSERT_EQ $addr "127.0.0.1:23792"
+                NET_CLOSE($l.listener)
+                ```"#},
         },
         func,
     }

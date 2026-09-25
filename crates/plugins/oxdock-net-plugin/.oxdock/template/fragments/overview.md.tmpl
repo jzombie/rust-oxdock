@@ -2,8 +2,10 @@
 
 The NET module claims virtual service endpoints mapped to loopback
 binds, accepts connections through explicit DSL pipes, and dials out
-or joins memory sessions. It also owns the endpoint registry shared
-with the [SSH plugin]({{ $docs_global.ssh_plugin_readme }}), so
+or joins memory sessions. `NET_PORT` and `NET_ADDR` report a mapped
+outer port or dial string without claiming the slot, so scripts can
+route `-p` mappings into inner `RUN` commands. It also owns the
+endpoint registry shared with the [SSH plugin]({{ $docs_global.ssh_plugin_readme }}), so
 address shapes stay identical everywhere.
 Import it with `IMPORT [STD, NET]` in a runner that registers the
 host module on the [Engine facade]({{ $docs_global.engine_facade_url }}).

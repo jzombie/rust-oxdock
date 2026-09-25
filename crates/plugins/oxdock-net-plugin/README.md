@@ -8,8 +8,10 @@ Virtual-endpoint TCP networking for OxDock scripts through the Engine facade: lo
 
 The NET module claims virtual service endpoints mapped to loopback
 binds, accepts connections through explicit DSL pipes, and dials out
-or joins memory sessions. It also owns the endpoint registry shared
-with the [SSH plugin](https://github.com/jzombie/rust-oxdock/blob/main/crates/plugins/oxdock-ssh-plugin/README.md), so
+or joins memory sessions. `NET_PORT` and `NET_ADDR` report a mapped
+outer port or dial string without claiming the slot, so scripts can
+route `-p` mappings into inner `RUN` commands. It also owns the
+endpoint registry shared with the [SSH plugin](https://github.com/jzombie/rust-oxdock/blob/main/crates/plugins/oxdock-ssh-plugin/README.md), so
 address shapes stay identical everywhere.
 Import it with `IMPORT [STD, NET]` in a runner that registers the
 host module on the [Engine facade](https://github.com/jzombie/rust-oxdock/blob/main/crates/oxdock-core/src/exec/engine.rs).
@@ -70,6 +72,26 @@ ASSERT_EQ $done.closed true
 NET_CLOSE($l.listener)
 ```
 
+### NET_ADDR
+
+**Signature:** `NET_ADDR($target: STRING) -> STRING`
+
+**Contexts:** AST only
+
+Report the bound socket address of a virtual service endpoint.
+
+Report the full bound socket address (`ip:port`) of a virtual service endpoint without claiming it: the dial-string companion to `NET_PORT`. Same qualifier and fallback rules; unbound targets bail, never an empty string.
+
+```oxdock
+IMPORT [STD, NET]
+LET $l: MAP = NET_LISTEN("23792", {})
+
+# Observe the dial string without claiming the slot twice.
+LET $addr: STRING = NET_ADDR("23792")
+ASSERT_EQ $addr "127.0.0.1:23792"
+NET_CLOSE($l.listener)
+```
+
 ### NET_CLOSE
 
 **Signature:** `NET_CLOSE($listener) -> BOOL`
@@ -97,6 +119,37 @@ Dial a TCP endpoint into pipes.
 **Contexts:** AST only
 
 Claim a virtual service endpoint and report its address.
+
+### NET_PORT
+
+**Signature:** `NET_PORT($target: STRING) -> INT`
+
+**Contexts:** AST only
+
+Report the bound port of a virtual service endpoint.
+
+Report the bound port of a virtual service endpoint without claiming it, so a `-p`-mapped outer port (including ephemeral `-p 0:<inner>` resolutions) can be routed into an inner `RUN` through normal `LET`/`ENV` expansion. `target` is a logical port (`"2251"`) or a service name (`"demo-proxy"`), optionally protocol-qualified (`"tcp/web"`, `"udp/dns"`). Bare text resolves TCP with single-protocol fallback; text bound under both protocols must be qualified. Unbound targets bail: no `0` sentinel.
+
+```oxdock
+IMPORT [STD, NET]
+LET $l: MAP = NET_LISTEN("23791", {})
+
+# Observe the bound port without claiming the slot twice.
+LET $port: INT = NET_PORT("23791")
+ASSERT_EQ $port 23791
+
+# The shell reads its own environment, with per-platform spelling:
+# quoted "$VAR" passes the parser through untouched on unix ...
+ENV PROXY_PORT="{{ $port }}"
+
+[unix] LET $o: STRING = RUN echo serving on "$PROXY_PORT"
+
+# ... while cmd expands %VAR% on Windows.
+[windows] LET $o: STRING = RUN echo serving on %PROXY_PORT%
+
+ASSERT_CONTAINS $o "23791"
+NET_CLOSE($l.listener)
+```
 
 ## Value types
 

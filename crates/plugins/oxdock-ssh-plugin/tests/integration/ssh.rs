@@ -1986,7 +1986,9 @@ fn mapped_name_connect_roundtrip() {
     let registry = Arc::new(oxdock_net_plugin::EndpointRegistry::new(false));
     registry
         .add_mapping(
-            &oxdock_net_plugin::VirtualEndpoint::Name("doc-demo".to_string()),
+            &oxdock_net_plugin::EndpointKey::tcp(oxdock_net_plugin::VirtualEndpoint::Name(
+                "doc-demo".to_string(),
+            )),
             oxdock_net_plugin::BindingSpec::Exposed {
                 addr: "127.0.0.1:0".parse().expect("loopback ephemeral"),
             },

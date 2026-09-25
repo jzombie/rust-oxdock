@@ -16,7 +16,7 @@ use oxdock_core::{
     StepCtx, Value,
 };
 use oxdock_func_macro::oxdock_func;
-use oxdock_net_plugin::{AcquiredListener, EndpointRegistry, acquire_listener};
+use oxdock_net_plugin::{AcquiredListener, EndpointKey, EndpointRegistry, acquire_listener};
 use oxdock_process::ProcessManager;
 use russh::keys::{Algorithm, PrivateKey};
 
@@ -265,7 +265,8 @@ fn ssh_serve<P: ProcessManager>(
     let password = required_string(map, "SSH_SERVE", "password")?;
     let key_path = optional_string(map, "SSH_SERVE", "key_path")?;
     let endpoint = parse_serve_endpoint(&bind)?;
-    let (acquired, registry) = acquire_listener(registry, &endpoint, "SSH_SERVE")?;
+    let key = EndpointKey::tcp(endpoint);
+    let (acquired, registry) = acquire_listener(registry, &key, "SSH_SERVE")?;
     let host_key = match load_or_create_host_key(cx, "SSH_SERVE", key_path)? {
         Some(key) => key,
         None => PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519)
@@ -303,7 +304,7 @@ fn ssh_serve<P: ProcessManager>(
         AcquiredListener::Memory => {
             drop(shutdown_rx);
             bail!(
-                "SSH_SERVE: '{endpoint}' is a memory service (SSH needs a TCP socket; map it with -p/--listen)"
+                "SSH_SERVE: '{key}' is a memory service (SSH needs a TCP socket; map it with -p/--listen)"
             )
         }
         AcquiredListener::Offline => {
@@ -314,7 +315,7 @@ fn ssh_serve<P: ProcessManager>(
             drop(shutdown_rx);
             (
                 std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
-                endpoint.to_string(),
+                key.endpoint.to_string(),
                 None,
             )
         }
@@ -327,7 +328,7 @@ fn ssh_serve<P: ProcessManager>(
         shutdown_tx,
         thread,
         registry: Arc::clone(&registry),
-        endpoint: endpoint.clone(),
+        endpoint: key.clone(),
     }));
     let mut map = BTreeMap::new();
     map.insert(
@@ -337,7 +338,10 @@ fn ssh_serve<P: ProcessManager>(
     map.insert("addr".to_string(), Value::string(addr_text));
     map.insert("username".to_string(), Value::string(username));
     map.insert("password".to_string(), Value::string(password));
-    map.insert("virtual".to_string(), Value::string(endpoint.to_string()));
+    map.insert(
+        "virtual".to_string(),
+        Value::string(key.endpoint.to_string()),
+    );
     Ok(Value::map(map))
 }
 

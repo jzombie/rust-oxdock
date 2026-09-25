@@ -767,6 +767,19 @@ declare_commands! {
                 LET $outer_body: STRING = READ outer.txt
                 ASSERT_EQ $outer_body "production"
             "#} },
+            Example { name: "shell reads env per platform", fence_meta: None, code: indoc! {r#"
+                # A shell command reads its own environment, with
+                # per-platform spelling: quoted "$VAR" passes the parser
+                # through untouched on unix ...
+                ENV PROXY_PORT=23791
+
+                [unix] LET $o: STRING = RUN echo serving on "$PROXY_PORT"
+
+                # ... while cmd expands %VAR% on Windows.
+                [windows] LET $o: STRING = RUN echo serving on %PROXY_PORT%
+
+                ASSERT_CONTAINS $o "23791"
+            "#} },
         ],
         lower: |_flags, args| lower_env_assignment(args),
     ],

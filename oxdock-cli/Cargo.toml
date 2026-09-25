@@ -17,7 +17,9 @@ development = []
 build = []
 
 [features]
-ssh = ["dep:oxdock-ssh-plugin"]
+default = ["net"]
+net = ["dep:oxdock-net-plugin"]
+ssh = ["net", "dep:oxdock-ssh-plugin"]
 
 [dependencies]
 anyhow.workspace = true
@@ -25,7 +27,7 @@ indoc.workspace = true
 lexopt.workspace = true
 oxdock-core.workspace = true
 oxdock-fs.workspace = true
-oxdock-net-plugin.workspace = true
+oxdock-net-plugin = { workspace = true, optional = true }
 oxdock-parser.workspace = true
 oxdock-process.workspace = true
 oxdock-ssh-plugin = { workspace = true, optional = true }

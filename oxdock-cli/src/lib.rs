@@ -22,63 +22,71 @@ pub use oxdock_process::shell_program;
 use std::collections::BTreeMap;
 
 mod endpoints;
-pub use endpoints::{EndpointFlags, build_registry};
+pub use endpoints::EndpointFlags;
+#[cfg(feature = "net")]
+pub use endpoints::build_registry;
+#[cfg(feature = "net")]
 use oxdock_net_plugin::EndpointRegistry;
 
-/// Host modules bundled into the CLI runner. The base build exposes STD
+/// Host modules bundled into the CLI runner. With `net` this exposes STD
 /// plus the NET virtual-endpoint toolkit (`NET_LISTEN`, `NET_ACCEPT`,
-/// `NET_CLOSE`, `NET_CONNECT`); `--features ssh` additionally registers
-/// the SSH server and client (`SSH_SERVE`, `SSH_ACCEPT`, `SSH_DEQUEUE`,
-/// `SSH_PUMP_CHANNEL`, `SSH_CLOSE`, `SSH_CONNECT`, `SSH_PUMP`) from
-/// oxdock-ssh-plugin.
-#[cfg(feature = "ssh")]
+/// `NET_CLOSE`, `NET_CONNECT`, `NET_PORT`, `NET_ADDR`); with `--features
+/// ssh` it additionally registers the SSH server and client (`SSH_SERVE`,
+/// `SSH_ACCEPT`, `SSH_DEQUEUE`, `SSH_PUMP_CHANNEL`, `SSH_CLOSE`,
+/// `SSH_CONNECT`, `SSH_PUMP`) from oxdock-ssh-plugin. Without `net` only
+/// STD builtins remain.
 fn cli_host_modules() -> Vec<HostModule<DefaultProcessManager>> {
-    cli_host_modules_with(&Arc::new(EndpointRegistry::new(false)))
-}
-
-/// Host modules bundled into the CLI runner (base build: STD and NET).
-#[cfg(not(feature = "ssh"))]
-fn cli_host_modules() -> Vec<HostModule<DefaultProcessManager>> {
-    cli_host_modules_with(&Arc::new(EndpointRegistry::new(false)))
+    cli_host_modules_with(None)
 }
 
 /// Host modules resolving virtual endpoints through `registry`: the CLI
 /// builds it from `--listen`/`-p`/`--offline` before parsing so bind
-/// conflicts fail fast.
-#[cfg(feature = "ssh")]
+/// conflicts fail fast. `None` registers default module instances (enough
+/// for parse-time name resolution); without `net` no modules are pushed.
+/// The parameter type is feature-dependent because the registry type only
+/// exists with `net`; callers pass `Some` with `net` and `None` without.
 fn cli_host_modules_with(
-    registry: &Arc<EndpointRegistry>,
+    #[cfg(feature = "net")] registry: Option<&Arc<EndpointRegistry>>,
+    #[cfg(not(feature = "net"))] registry: Option<&Arc<()>>,
 ) -> Vec<HostModule<DefaultProcessManager>> {
-    vec![
-        oxdock_net_plugin::module_with_endpoints(Arc::clone(registry)),
-        oxdock_ssh_plugin::module_with_endpoints(Arc::clone(registry)),
-    ]
-}
-
-/// Host modules bundled into the CLI runner (base build: STD and NET).
-#[cfg(not(feature = "ssh"))]
-fn cli_host_modules_with(
-    registry: &Arc<EndpointRegistry>,
-) -> Vec<HostModule<DefaultProcessManager>> {
-    vec![oxdock_net_plugin::module_with_endpoints(Arc::clone(
-        registry,
-    ))]
+    #[cfg(feature = "net")]
+    let mut modules: Vec<HostModule<DefaultProcessManager>> = Vec::new();
+    #[cfg(not(feature = "net"))]
+    let modules: Vec<HostModule<DefaultProcessManager>> = Vec::new();
+    #[cfg(feature = "net")]
+    {
+        let net_module = match registry {
+            Some(registry) => oxdock_net_plugin::module_with_endpoints(Arc::clone(registry)),
+            None => oxdock_net_plugin::module(),
+        };
+        modules.push(net_module);
+        #[cfg(feature = "ssh")]
+        {
+            let ssh_module = match registry {
+                Some(registry) => oxdock_ssh_plugin::module_with_endpoints(Arc::clone(registry)),
+                None => oxdock_ssh_plugin::module(),
+            };
+            modules.push(ssh_module);
+        }
+    }
+    let _ = registry;
+    modules
 }
 
 /// Host types bundled into the CLI runner alongside [`cli_host_modules`].
-#[cfg(feature = "ssh")]
 fn cli_host_types() -> Vec<&'static TypeDescriptor> {
-    vec![
-        oxdock_net_plugin::NetListenerTag::descriptor(),
+    #[cfg(feature = "net")]
+    let net: &[&'static TypeDescriptor] = &[oxdock_net_plugin::NetListenerTag::descriptor()];
+    #[cfg(not(feature = "net"))]
+    let net: &[&'static TypeDescriptor] = &[];
+    #[cfg(feature = "ssh")]
+    let ssh: &[&'static TypeDescriptor] = &[
         oxdock_ssh_plugin::SshServerTag::descriptor(),
         oxdock_ssh_plugin::SshSessionTag::descriptor(),
-    ]
-}
-
-/// Host types bundled into the CLI runner (base build: NET only).
-#[cfg(not(feature = "ssh"))]
-fn cli_host_types() -> Vec<&'static TypeDescriptor> {
-    vec![oxdock_net_plugin::NetListenerTag::descriptor()]
+    ];
+    #[cfg(not(feature = "ssh"))]
+    let ssh: &[&'static TypeDescriptor] = &[];
+    net.iter().chain(ssh.iter()).copied().collect()
 }
 
 /// Parse a CLI script against STD plus any bundled host modules. Without
@@ -184,6 +192,17 @@ impl Options {
                             .value()
                             .map_err(|_| anyhow::anyhow!("--listen requires an address"))?,
                     )?;
+                    #[cfg(not(feature = "net"))]
+                    {
+                        // Evaluate the pure validator so it stays compiled
+                        // and covered in lean builds; the feature error below
+                        // still wins regardless of the value.
+                        let _ = endpoints::parse_listen_arg(&raw);
+                        bail!(
+                            "--listen/-p require the `net` feature (rebuild with --features net)"
+                        );
+                    }
+                    #[cfg(feature = "net")]
                     endpoints.listens.push(endpoints::parse_listen_arg(&raw)?);
                 }
                 Short('p') => {
@@ -192,6 +211,17 @@ impl Options {
                             .value()
                             .map_err(|_| anyhow::anyhow!("-p requires outer:inner"))?,
                     )?;
+                    #[cfg(not(feature = "net"))]
+                    {
+                        // Same as `--listen` above: keep the pure outer
+                        // validation live in lean builds; the feature error
+                        // below still wins.
+                        let _ = endpoints::parse_publish_arg(&raw);
+                        bail!(
+                            "--listen/-p require the `net` feature (rebuild with --features net)"
+                        );
+                    }
+                    #[cfg(feature = "net")]
                     endpoints
                         .publishes
                         .push(endpoints::parse_publish_arg(&raw)?);
@@ -247,19 +277,36 @@ fn value_string(value: std::ffi::OsString) -> Result<String> {
 pub fn usage() -> String {
     let version = env!("CARGO_PKG_VERSION");
     let description = env!("CARGO_PKG_DESCRIPTION");
-    indoc::formatdoc! {"
-        oxdock {version} — {description}
-        Usage: oxdock [OPTIONS] [SCRIPT]
-          SCRIPT             script file path (same as `--script <file>`); `-` reads stdin
-          --script <file|->  script file under the workspace root, or `-` for stdin
-          --shell            run the script, then drop into an interactive shell (requires a TTY)
-          --listen <addr>    expose a logical service port ([host:]port, repeatable)
-          -p <[host:]outer:inner>  map outer port to an inner service port or name (repeatable; outer 0 is ephemeral)
-          --offline          open no sockets (conflicts with --listen/-p)
-          --help, -h         print this help and exit
-        With no script given, reads the script from stdin (must be piped unless `--shell`).
-        Scripts declare logical endpoints (a port like 2251); the flags above map them to interfaces.
-    "}
+    #[cfg(feature = "net")]
+    {
+        indoc::formatdoc! {"
+            oxdock {version} — {description}
+            Usage: oxdock [OPTIONS] [SCRIPT]
+              SCRIPT             script file path (same as `--script <file>`); `-` reads stdin
+              --script <file|->  script file under the workspace root, or `-` for stdin
+              --shell            run the script, then drop into an interactive shell (requires a TTY)
+              --listen <addr>    expose a logical service port ([host:]port, repeatable)
+              -p <[host:]outer:inner>  map outer port to an inner service port or name (repeatable; outer 0 is ephemeral)
+              --offline          open no sockets (conflicts with --listen/-p)
+              --help, -h         print this help and exit
+            With no script given, reads the script from stdin (must be piped unless `--shell`).
+            Scripts declare logical endpoints (a port like 2251); the flags above map them to interfaces.
+        "}
+    }
+    #[cfg(not(feature = "net"))]
+    {
+        indoc::formatdoc! {"
+            oxdock {version} — {description}
+            Usage: oxdock [OPTIONS] [SCRIPT]
+              SCRIPT             script file path (same as `--script <file>`); `-` reads stdin
+              --script <file|->  script file under the workspace root, or `-` for stdin
+              --shell            run the script, then drop into an interactive shell (requires a TTY)
+              --offline          open no sockets (endpoint flags require the `net` feature)
+              --help, -h         print this help and exit
+            With no script given, reads the script from stdin (must be piped unless `--shell`).
+            Endpoint flags (--listen/-p) require the `net` feature (rebuild with --features net).
+        "}
+    }
 }
 
 pub fn execute(opts: Options, workspace_root: GuardedPath) -> Result<()> {
@@ -314,13 +361,25 @@ pub fn execute_with_result(opts: Options, workspace_root: GuardedPath) -> Result
     if !script.trim().is_empty() {
         // Bind endpoint sockets before parsing: conflicts fail fast,
         // never parse-then-fail-on-bind.
-        let endpoints = build_registry(&opts.endpoints)?;
+        #[cfg(feature = "net")]
+        let registry = build_registry(&opts.endpoints)?;
+        #[cfg(not(feature = "net"))]
+        check_no_net_endpoints(&opts.endpoints)?;
         let steps = parse_cli_script(&script)?;
+        #[cfg(feature = "net")]
         let output = run_steps_with_lazy_snapshot_and_modules(
             &workspace_root,
             &steps,
             ExecIo::new(),
-            cli_host_modules_with(&endpoints),
+            cli_host_modules_with(Some(&registry)),
+            cli_host_types(),
+        )?;
+        #[cfg(not(feature = "net"))]
+        let output = run_steps_with_lazy_snapshot_and_modules(
+            &workspace_root,
+            &steps,
+            ExecIo::new(),
+            cli_host_modules_with(None),
             cli_host_types(),
         )?;
         final_cwd = output.final_cwd;
@@ -341,16 +400,36 @@ pub fn execute_with_result(opts: Options, workspace_root: GuardedPath) -> Result
 /// Report ephemeral outer resolutions (`-p 0:<inner>`) to stderr so the
 /// runner learns the real ports. Fixed mappings need no report: the flags
 /// already name them.
+#[cfg(feature = "net")]
 fn report_ephemeral_publishes(flags: &EndpointFlags, registry: &Arc<EndpointRegistry>) {
+    use oxdock_net_plugin::{EndpointKey, Protocol, parse_endpoint_ref};
     for (outer, inner) in &flags.publishes {
         if outer.port() != 0 {
             continue;
         }
-        match registry.bound_addr(inner) {
-            Some(addr) => eprintln!("oxdock: published {addr} -> {inner}"),
-            None => eprintln!("oxdock: published <unbound> -> {inner}"),
+        let Ok((protocol, endpoint)) = parse_endpoint_ref(inner, "-p") else {
+            continue;
+        };
+        let key = EndpointKey {
+            protocol: protocol.unwrap_or(Protocol::Tcp),
+            endpoint,
+        };
+        match registry.resolve_endpoint(&key) {
+            Ok(addr) => eprintln!("oxdock: published {addr} -> {inner}"),
+            Err(_) => eprintln!("oxdock: published <unbound> -> {inner}"),
         }
     }
+}
+
+/// Without `net`, endpoint sockets cannot exist: `--listen`/`-p` are
+/// rejected (parse time already bails; this covers programmatic `Options`),
+/// while `--offline` or no flags proceed socketless.
+#[cfg(not(feature = "net"))]
+fn check_no_net_endpoints(flags: &EndpointFlags) -> Result<()> {
+    if !flags.listens.is_empty() || !flags.publishes.is_empty() {
+        bail!("--listen/-p require the `net` feature (rebuild with --features net)");
+    }
+    Ok(())
 }
 
 /// Read the script source without creating any execution state.
@@ -434,8 +513,12 @@ where
     if !script.trim().is_empty() {
         // Bind endpoint sockets before parsing: conflicts fail fast,
         // never parse-then-fail-on-bind.
-        let endpoints = build_registry(&opts.endpoints)?;
-        report_ephemeral_publishes(&opts.endpoints, &endpoints);
+        #[cfg(feature = "net")]
+        let registry = build_registry(&opts.endpoints)?;
+        #[cfg(not(feature = "net"))]
+        check_no_net_endpoints(&opts.endpoints)?;
+        #[cfg(feature = "net")]
+        report_ephemeral_publishes(&opts.endpoints, &registry);
         let steps = parse_cli_script(&script)?;
         // If we are running a script from a file, we might have stdin available for the script itself.
         // If we read the script from stdin, then stdin is consumed.
@@ -456,11 +539,20 @@ where
 
         let mut io_cfg = ExecIo::new();
         io_cfg.set_stdin(stdin_handle);
+        #[cfg(feature = "net")]
         let output = run_steps_with_lazy_snapshot_and_modules(
             &workspace_root,
             &steps,
             io_cfg,
-            cli_host_modules_with(&endpoints),
+            cli_host_modules_with(Some(&registry)),
+            cli_host_types(),
+        )?;
+        #[cfg(not(feature = "net"))]
+        let output = run_steps_with_lazy_snapshot_and_modules(
+            &workspace_root,
+            &steps,
+            io_cfg,
+            cli_host_modules_with(None),
             cli_host_types(),
         )?;
         final_cwd = output.final_cwd;
@@ -793,13 +885,23 @@ mod tests {
         assert!(text.contains("SCRIPT"), "{text}");
         assert!(text.contains("--script"), "{text}");
         assert!(text.contains("--help"), "{text}");
-        assert!(text.contains("--listen"), "{text}");
-        assert!(text.contains("-p <[host:]outer:inner>"), "{text}");
         assert!(text.contains("--offline"), "{text}");
+        #[cfg(feature = "net")]
+        {
+            assert!(text.contains("--listen"), "{text}");
+            assert!(text.contains("-p <[host:]outer:inner>"), "{text}");
+        }
+        #[cfg(not(feature = "net"))]
+        {
+            assert!(!text.contains("--listen <addr>"), "{text}");
+            assert!(!text.contains("-p <[host:]outer:inner>"), "{text}");
+            assert!(text.contains("require the `net` feature"), "{text}");
+        }
         // Tagline is single-sourced from the package manifest, not hardcoded.
         assert!(text.contains(env!("CARGO_PKG_DESCRIPTION")), "{text}");
     }
 
+    #[cfg(feature = "net")]
     #[cfg_attr(
         miri,
         ignore = "GuardedPath::tempdir relies on OS tempdirs; blocked under Miri isolation"
@@ -838,6 +940,7 @@ mod tests {
         assert!(opts.endpoints.offline);
     }
 
+    #[cfg(feature = "net")]
     #[cfg_attr(
         miri,
         ignore = "GuardedPath::tempdir relies on OS tempdirs; blocked under Miri isolation"
@@ -885,6 +988,7 @@ mod tests {
         assert!(matches!(opts.script, ScriptSource::Stdin));
     }
 
+    #[cfg(feature = "net")]
     #[cfg_attr(
         miri,
         ignore = "GuardedPath::tempdir relies on OS tempdirs; blocked under Miri isolation"
@@ -1082,9 +1186,10 @@ mod tests {
         Ok(())
     }
 
-    /// The NET module ships in every CLI build: bind an ephemeral
+    /// The NET module ships with the `net` feature: bind an ephemeral
     /// loopback port and close it through `execute_with_result`, no
     /// client needed.
+    #[cfg(feature = "net")]
     #[cfg_attr(
         miri,
         ignore = "loopback TCP plus GuardedPath::tempdir; blocked under Miri isolation"
@@ -1107,6 +1212,60 @@ mod tests {
             endpoints: EndpointFlags::default(),
         };
         execute_with_result(opts, workspace_root)?;
+        Ok(())
+    }
+
+    /// A `-p`-mapped outer port is observable in-script: route an
+    /// ephemeral `-p 0:<name>` resolution through `NET_PORT`/`NET_ADDR`
+    /// into files an inner `RUN` could equally consume via `ENV`.
+    #[cfg(feature = "net")]
+    #[cfg_attr(
+        miri,
+        ignore = "loopback TCP plus GuardedPath::tempdir; blocked under Miri isolation"
+    )]
+    #[test]
+    fn net_port_addr_observe_publish_mapping() -> Result<()> {
+        let workspace = GuardedPath::tempdir()?;
+        let workspace_root = workspace.as_guarded_path().clone();
+        let script_path = workspace_root.join("net-port.ox")?;
+        let resolver = PathResolver::new(workspace_root.as_path(), workspace_root.as_path())?;
+        let script = indoc! {"
+            IMPORT [STD, NET]
+            LET $port: INT = NET_PORT(\"routed-svc\")
+            WRITE port.txt \"{{ $port }}\"
+            LET $addr: STRING = NET_ADDR(\"routed-svc\")
+            WRITE addr.txt \"{{ $addr }}\"
+        "};
+        resolver.write_file(&script_path, script.as_bytes())?;
+        let opts = Options {
+            script: ScriptSource::Path(script_path),
+            shell: false,
+            endpoints: EndpointFlags {
+                publishes: vec![(
+                    std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
+                    "routed-svc".to_string(),
+                )],
+                ..EndpointFlags::default()
+            },
+        };
+        let result = execute_with_result(opts, workspace_root)?;
+        let snapshot = result
+            .snapshot_path()
+            .expect("WRITE materializes the snapshot");
+        let snapshot_resolver = PathResolver::new(snapshot.root(), snapshot.root())?;
+        let port_path = snapshot.join("port.txt")?;
+        let port_text = snapshot_resolver.read_to_string(&port_path)?;
+        let port: u16 = port_text
+            .trim()
+            .parse()
+            .map_err(|_| anyhow::anyhow!("expected a resolved port, got {port_text:?}"))?;
+        assert_ne!(port, 0, "ephemeral outer port must resolve");
+        let addr_path = snapshot.join("addr.txt")?;
+        let addr_text = snapshot_resolver.read_to_string(&addr_path)?;
+        assert!(
+            addr_text.trim().ends_with(&format!(":{port}")),
+            "dial string must carry the resolved port, got {addr_text:?}"
+        );
         Ok(())
     }
 
@@ -1139,6 +1298,67 @@ mod tests {
             Err(err) => err,
         };
         assert!(err.to_string().contains("SSH"), "{err}");
+        Ok(())
+    }
+
+    /// Without the `net` feature `--listen`/`-p` are rejected with the
+    /// feature message, while `--offline` stays accepted as trivially
+    /// satisfied.
+    #[cfg(not(feature = "net"))]
+    #[cfg_attr(
+        miri,
+        ignore = "GuardedPath::tempdir relies on OS tempdirs; blocked under Miri isolation"
+    )]
+    #[test]
+    fn net_flags_rejected_without_feature() {
+        let workspace = GuardedPath::tempdir().expect("tempdir");
+        for args in [
+            vec!["--listen", "0.0.0.0:2251", "-"],
+            vec!["-p", "2222:2251", "-"],
+            vec!["--listen=0.0.0.0:2251", "-"],
+        ] {
+            let mut args = args.into_iter().map(str::to_string);
+            let err = Options::parse(&mut args, workspace.as_guarded_path())
+                .expect_err("endpoint flag must fail without net");
+            assert!(
+                err.to_string().contains("require the `net` feature"),
+                "{err:?}"
+            );
+        }
+        let mut args = vec!["--offline".to_string(), "-".to_string()].into_iter();
+        let opts = Options::parse(&mut args, workspace.as_guarded_path()).expect("parse");
+        assert!(opts.endpoints.offline);
+    }
+
+    /// Without the `net` feature the same script must fail to parse:
+    /// NET names stay unknown instead of silently changing meaning.
+    #[cfg(not(feature = "net"))]
+    #[cfg_attr(
+        miri,
+        ignore = "GuardedPath::tempdir relies on OS tempdirs; blocked under Miri isolation"
+    )]
+    #[test]
+    fn net_scripts_rejected_without_feature() -> Result<()> {
+        let workspace = GuardedPath::tempdir()?;
+        let workspace_root = workspace.as_guarded_path().clone();
+        let script_path = workspace_root.join("net-listen.ox")?;
+        let resolver = PathResolver::new(workspace_root.as_path(), workspace_root.as_path())?;
+        let script = indoc! {"
+            IMPORT [STD, NET]
+            LET $l: MAP = NET_LISTEN(\"23501\", {})
+            NET_CLOSE($l.listener)
+        "};
+        resolver.write_file(&script_path, script.as_bytes())?;
+        let opts = Options {
+            script: ScriptSource::Path(script_path),
+            shell: false,
+            endpoints: EndpointFlags::default(),
+        };
+        let err = match execute_with_result(opts, workspace_root) {
+            Ok(_) => panic!("NET names must be unknown without the feature"),
+            Err(err) => err,
+        };
+        assert!(err.to_string().contains("NET"), "{err}");
         Ok(())
     }
 }

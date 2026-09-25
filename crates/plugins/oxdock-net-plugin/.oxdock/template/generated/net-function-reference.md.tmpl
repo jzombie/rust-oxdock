@@ -52,6 +52,26 @@ ASSERT_EQ $done.closed true
 NET_CLOSE($l.listener)
 ```
 
+### NET_ADDR
+
+**Signature:** `NET_ADDR($target: STRING) -> STRING`
+
+**Contexts:** AST only
+
+Report the bound socket address of a virtual service endpoint.
+
+Report the full bound socket address (`ip:port`) of a virtual service endpoint without claiming it: the dial-string companion to `NET_PORT`. Same qualifier and fallback rules; unbound targets bail, never an empty string.
+
+```oxdock
+IMPORT [STD, NET]
+LET $l: MAP = NET_LISTEN("23792", {})
+
+# Observe the dial string without claiming the slot twice.
+LET $addr: STRING = NET_ADDR("23792")
+ASSERT_EQ $addr "127.0.0.1:23792"
+NET_CLOSE($l.listener)
+```
+
 ### NET_CLOSE
 
 **Signature:** `NET_CLOSE($listener) -> BOOL`
@@ -79,3 +99,34 @@ Dial a TCP endpoint into pipes.
 **Contexts:** AST only
 
 Claim a virtual service endpoint and report its address.
+
+### NET_PORT
+
+**Signature:** `NET_PORT($target: STRING) -> INT`
+
+**Contexts:** AST only
+
+Report the bound port of a virtual service endpoint.
+
+Report the bound port of a virtual service endpoint without claiming it, so a `-p`-mapped outer port (including ephemeral `-p 0:<inner>` resolutions) can be routed into an inner `RUN` through normal `LET`/`ENV` expansion. `target` is a logical port (`"2251"`) or a service name (`"demo-proxy"`), optionally protocol-qualified (`"tcp/web"`, `"udp/dns"`). Bare text resolves TCP with single-protocol fallback; text bound under both protocols must be qualified. Unbound targets bail: no `0` sentinel.
+
+```oxdock
+IMPORT [STD, NET]
+LET $l: MAP = NET_LISTEN("23791", {})
+
+# Observe the bound port without claiming the slot twice.
+LET $port: INT = NET_PORT("23791")
+ASSERT_EQ $port 23791
+
+# The shell reads its own environment, with per-platform spelling:
+# quoted "$VAR" passes the parser through untouched on unix ...
+ENV PROXY_PORT="\{{ $port }}"
+
+[unix] LET $o: STRING = RUN echo serving on "$PROXY_PORT"
+
+# ... while cmd expands %VAR% on Windows.
+[windows] LET $o: STRING = RUN echo serving on %PROXY_PORT%
+
+ASSERT_CONTAINS $o "23791"
+NET_CLOSE($l.listener)
+```

@@ -4,6 +4,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [0.19.0-alpha] - 2026-09-25
+
+### Added
+
+- `NET_PORT(target)` / `NET_ADDR(target)` (#167): report a virtual service endpoint's bound port (`INT`) or dial string (`ip:port` STRING) without claiming it, so `-p`-mapped outer ports (including ephemeral `-p 0:<inner>` resolutions) route into inner `RUN` commands through `LET`/`ENV` expansion. Targets accept optional protocol qualifiers (`tcp/web`, `udp/dns`, `-p`-style `dns/udp`); bare text resolves TCP with single-protocol fallback, text bound under both protocols bails as ambiguous, and unbound targets bail instead of returning sentinels.
+- Protocol-aware endpoint registry: slots are keyed by `(protocol, endpoint)` so `5353:dns/tcp` and `5353:dns/udp` never collide or misroute; `-p` maps TCP by default and UDP when the inner is qualified (`-p 5353:dns/udp`).
+
+### Changed
+
+- `net` is now an optional `oxdock-cli` Cargo feature like `ssh` (on by default; `ssh` implies `net`) (#171): `--no-default-features` builds drop `NET_*`/`SSH_*` from the DSL (parse error if used), reject `--listen`/`-p` with a feature message, and accept `--offline` as trivially satisfied. Default builds behave identically. The `oxdock` facade's `cli` feature implies `net`, so minimal builds go through `oxdock-cli --no-default-features`.
+- CLI internals: the `cfg`-duplicated host-module builders collapse into single `Vec` plus `push` functions; `EndpointFlags::publishes` stores raw inner text (validated at registry build).
+
+### Dependencies
+
+- Bump `pest` 2.9.1 → 2.9.2 (#173).
+- Bump `pest_meta` 2.9.1 → 2.9.2 (#174).
+- Bump `pest_derive` 2.9.1 → 2.9.2 (#175).
+- Bump `rand` 0.10.2 → 0.10.3 (#172).
+- Bump `syn` 3.0.5 → 3.0.6 (#176).
+
 ## [0.18.1-alpha] - 2026-09-24
 
 ## Changed

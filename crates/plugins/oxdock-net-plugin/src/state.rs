@@ -19,7 +19,7 @@ use std::sync::{
 };
 
 use crate::endpoints::EndpointRegistry;
-use crate::validate::VirtualEndpoint;
+use crate::validate::EndpointKey;
 
 /// What one listener pumps: a TCP socket, a memory service, or an offline
 /// handle with no socket at all.
@@ -52,7 +52,7 @@ pub struct ListenerState {
     /// holding its slot: `ACCEPT` resolves memory sessions through it,
     /// close/drop frees the slot through it.
     registry: Arc<EndpointRegistry>,
-    endpoint: VirtualEndpoint,
+    endpoint: EndpointKey,
     /// Set by `NET_CLOSE` and by last-handle drop; observed per
     /// accept-loop tick.
     shutdown: AtomicBool,
@@ -62,7 +62,7 @@ impl ListenerState {
     pub fn new_tcp(
         id: String,
         registry: Arc<EndpointRegistry>,
-        endpoint: VirtualEndpoint,
+        endpoint: EndpointKey,
         local_addr: SocketAddr,
         listener: TcpListener,
     ) -> Self {
@@ -80,11 +80,7 @@ impl ListenerState {
         }
     }
 
-    pub fn new_memory(
-        id: String,
-        registry: Arc<EndpointRegistry>,
-        endpoint: VirtualEndpoint,
-    ) -> Self {
+    pub fn new_memory(id: String, registry: Arc<EndpointRegistry>, endpoint: EndpointKey) -> Self {
         let addr_text = endpoint.to_string();
         Self {
             id,
@@ -99,11 +95,7 @@ impl ListenerState {
         }
     }
 
-    pub fn new_offline(
-        id: String,
-        registry: Arc<EndpointRegistry>,
-        endpoint: VirtualEndpoint,
-    ) -> Self {
+    pub fn new_offline(id: String, registry: Arc<EndpointRegistry>, endpoint: EndpointKey) -> Self {
         let addr_text = endpoint.to_string();
         Self {
             id,
@@ -122,7 +114,7 @@ impl ListenerState {
     }
 
     /// Virtual endpoint this listener was acquired for.
-    pub fn endpoint(&self) -> &VirtualEndpoint {
+    pub fn endpoint(&self) -> &EndpointKey {
         &self.endpoint
     }
 

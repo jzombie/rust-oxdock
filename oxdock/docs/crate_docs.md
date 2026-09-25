@@ -6,7 +6,7 @@ One script runs on Linux, macOS, and Windows, with platform gating, async tasks,
 
 Plain Rust functions become script functions with one attribute: `#[oxdock_func]` exports them into namespaced modules scripts call as `DEMO::NAME(...)`. See [Extending OxDock from Rust](#extending-oxdock-from-rust).
 
-[Documentation](https://docs.rs/oxdock/0.18.1-alpha/oxdock/)
+[Documentation](https://docs.rs/oxdock/0.19.0-alpha/oxdock/)
 
 ## Embed at compile time
 
@@ -88,8 +88,8 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     LET $a: STRING = READ dist/alpha.txt
     LET $b: STRING = READ dist/beta.txt
     LET $p: STRING = READ dist/picked.txt
-    ASSERT_EQ $a "alpha OxDock 0.18.1-alpha"
-    ASSERT_EQ $b "beta OxDock 0.18.1-alpha"
+    ASSERT_EQ $a "alpha OxDock 0.19.0-alpha"
+    ASSERT_EQ $b "beta OxDock 0.19.0-alpha"
     ASSERT_EQ $p "alpha"
 };
 
@@ -101,7 +101,7 @@ let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolve
 let out = root.join("dist/alpha.txt").expect("out path");
 assert_eq!(
     resolver.read_to_string(&out).expect("read out"),
-    "alpha OxDock 0.18.1-alpha"
+    "alpha OxDock 0.19.0-alpha"
 );
 ```
 
@@ -2141,6 +2141,22 @@ ASSERT_EQ $inner_body "staging"
 
 LET $outer_body: STRING = READ outer.txt
 ASSERT_EQ $outer_body "production"
+```
+
+**Example: shell reads env per platform**
+
+```oxdock
+# A shell command reads its own environment, with
+# per-platform spelling: quoted "$VAR" passes the parser
+# through untouched on unix ...
+ENV PROXY_PORT=23791
+
+[unix] LET $o: STRING = RUN echo serving on "$PROXY_PORT"
+
+# ... while cmd expands %VAR% on Windows.
+[windows] LET $o: STRING = RUN echo serving on %PROXY_PORT%
+
+ASSERT_CONTAINS $o "23791"
 ```
 
 

@@ -36,3 +36,7 @@ Run with no sockets at all (services stay handle-only):
 ```sh
 oxdock --offline ./proxy.oxfile
 ```
+
+Endpoint flags need the `net` Cargo feature (enabled by default).
+Observe a mapped outer port in-script with `NET_PORT`/`NET_ADDR`
+and pass it to inner commands through `ENV`.
