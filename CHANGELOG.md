@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
-## [0.18.2-alpha] - 2026-09-25
+## [0.19.0-alpha] - 2026-09-25
 
 ### Added
 
