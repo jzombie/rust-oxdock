@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [Unreleased]
+
+### Added
+
+- `NET_FETCH(url, dest, options)` (#179): pure-Rust HTTPS download for OxDock scripts (`ureq` with `rustls`, no system openssl, curl, or CA tooling). `dest` is a guarded file path (synchronous) or a `PIPE` (requires `ASYNC`): pipe bodies stream in chunks with per-chunk cancel checks, then EOF; file bodies stream straight into the guarded file while the SHA-256 accumulates, so large artifacts never fully buffer. `options` accepts `sha256` (verified on the wire), `timeout` (default 30s), and `retries` (default 2); unknown keys bail. Errors under `--offline` before any DNS or socket work. A `PIPE` dest is always wire-to-script (the fetch writes, the script reads, the same direction as `out_pipe` in `NET_CONNECT`). Non `STRING`/`PIPE` dest types bail at the boundary instead of failing deep inside pipe setup.
+- Toolchain cache group (#179): `oxdock-fs` gains a `toolchain` group next to `workspace`, exposed as `PathResolver::toolchain_guard`, so toolchain artifacts stay isolated without touching the `WorkspaceFs` trait or `WORKSPACE` targets.
+
 ## [0.19.0-alpha] - 2026-09-25
 
 ### Added
