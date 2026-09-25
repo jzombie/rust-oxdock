@@ -79,6 +79,16 @@ fn resolver_for(root: &GuardedPath) -> PathResolver {
     PathResolver::new(root.as_path(), root.as_path()).expect("resolver")
 }
 
+/// Execute a built binary and return its trimmed stdout. Uses the
+/// `oxdock-process` builder like production code, never raw spawn.
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+fn run_binary(binary: &GuardedPath) -> String {
+    let mut cmd = oxdock_process::CommandBuilder::new(binary.as_path());
+    let out = cmd.output().expect("run built binary");
+    assert!(out.success(), "built binary exits zero");
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
 /// Seed fake `cargo`/`rustc` executables into the pinned toolchain
 /// cache for the host triple. The fakes never compile: `cargo` mimics
 /// `cargo build` argument handling well enough to prove orchestration,
@@ -115,7 +125,8 @@ fn seed_fake_toolchain(cache: &PinnedCache) -> String {
             done
             out="$target_dir/$target/$profile"
             mkdir -p "$out"
-            printf 'fake-binary' > "$out/demo-pkg"
+            printf '#!/bin/sh\nprintf "demo-pkg 0.1.0\\n"\n' > "$out/demo-pkg"
+            chmod +x "$out/demo-pkg"
             printf '%s' "${RUSTC:-}" > "$target_dir/rustc.env"
             printf '%s' "${CARGO_ENCODED_RUSTFLAGS:-}" > "$target_dir/rustflags.env"
             printf '%s' "${CARGO_HOME:-}" > "$target_dir/cargohome.env"
@@ -164,7 +175,7 @@ fn stage_demo_pkg(root: &GuardedPath) {
     resolver.create_dir_all(&src).expect("create src");
     let main = src.join("main.rs").expect("main join");
     resolver
-        .write_file(&main, b"fn main() {}\n")
+        .write_file(&main, b"fn main() { println!(\"demo-pkg 0.1.0\"); }\n")
         .expect("write main");
 }
 
@@ -303,6 +314,11 @@ fn build_release_then_no_rebuild_then_dev() {
         .join(&format!("toolchain/target/{triple}/release/demo-pkg"))
         .expect("binary join");
     assert!(resolver.exists(&binary), "release binary lands in cache");
+    // The artifact is runnable: execute it and check its version line.
+    // A marker file would pass an existence check; execution proves the
+    // handoff (path plus executable bit plus spawnability).
+    let version = run_binary(&binary);
+    assert_eq!(version, "demo-pkg 0.1.0", "built binary runs");
     // The build reaches only cached inputs: RUSTC names the cached
     // rustc and CARGO_HOME stays inside the cache group.
     let target_base = cache_root
@@ -356,6 +372,67 @@ fn build_release_then_no_rebuild_then_dev() {
         .join(&format!("toolchain/target/{triple}/dev/demo-pkg"))
         .expect("dev join");
     assert!(resolver.exists(&dev_binary), "dev binary lands apart");
+    assert_eq!(run_binary(&dev_binary), "demo-pkg 0.1.0", "dev binary runs");
+}
+
+#[test]
+#[cfg(unix)]
+#[cfg_attr(
+    miri,
+    ignore = "needs OS tempdirs plus process spawn; blocked under Miri isolation"
+)]
+fn build_real_project_with_host_toolchain() {
+    // No fakes: the toolchain running these tests stands in for a
+    // provisioned toolchain (seeded by symlink, download bypassed),
+    // and a real dependency-free package compiles through the DSL.
+    // This proves the orchestration drives a genuine compiler to a
+    // runnable binary. Provisioning downloads stay unverified here.
+    let cache = PinnedCache::pin();
+    let triple = oxdock_toolchain_plugin::host_triple().expect("host triple");
+    let cargo_bin = std::env::var("CARGO").expect("cargo runs these tests");
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    let rustc_bin = std::path::Path::new(&cargo_bin)
+        .parent()
+        .expect("cargo has a parent dir")
+        .join("rustc")
+        .to_string_lossy()
+        .into_owned();
+    let cache_root = cache.cache_root();
+    let resolver = resolver_for(&cache_root);
+    let bin = cache_root
+        .join(&format!("toolchain/dist/{triple}/bin"))
+        .expect("bin join");
+    resolver.create_dir_all(&bin).expect("create bin");
+    // Copies, never symlinks: guard joins canonicalize through links,
+    // so a linked binary would read as escaped. This mirrors
+    // `wire_binaries`, which always publishes regular files.
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    {
+        use oxdock_fs::UnguardedPath;
+        for (name, source) in [("cargo", &cargo_bin), ("rustc", &rustc_bin)] {
+            let dest = bin.join(name).expect("tool join");
+            let src = UnguardedPath::external(std::path::PathBuf::from(source));
+            resolver
+                .copy_file_from_unguarded(&src, &dest)
+                .expect("seed tool");
+        }
+    }
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    stage_demo_pkg(&root);
+    let script = indoc! {r#"
+        IMPORT [STD, TOOLCHAIN]
+        LET $s: MAP = TOOLCHAIN_FETCH_SOURCE("demo-src")
+        LET $b: MAP = TOOLCHAIN_BUILD("", $s.manifest_dir, [], {})
+        ASSERT_EQ $b.profile "release"
+        ASSERT_EQ $b.releasable true
+    "#};
+    run_script(&root, script).expect("real build runs");
+    let binary = cache_root
+        .join(&format!("toolchain/target/{triple}/release/demo-pkg"))
+        .expect("binary join");
+    assert!(resolver.exists(&binary), "real binary lands in cache");
+    assert_eq!(run_binary(&binary), "demo-pkg 0.1.0", "real binary runs");
 }
 
 #[test]

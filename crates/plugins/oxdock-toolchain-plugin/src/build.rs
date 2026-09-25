@@ -270,12 +270,14 @@ fn linker_rustflags(anchor: &GuardedPath, triple: &str) -> Result<(Vec<String>, 
                 format!("zig:{}", info.zig),
             ))
         }
-        Linker::HostCc => Ok((vec!["linker=host-cc".to_string()], "host-cc".to_string())),
+        Linker::HostCc => Ok((Vec::new(), "host-cc".to_string())),
     }
 }
 
 /// Cargo rustflags argv for a resolved linker. Space-unsafe paths ride
-/// `CARGO_ENCODED_RUSTFLAGS`, never bare `RUSTFLAGS`.
+/// `CARGO_ENCODED_RUSTFLAGS`, never bare `RUSTFLAGS`. Host-cc resolves
+/// to no flags at all: the policy marker lives in metadata and the
+/// fingerprint, never on a compiler command line.
 pub fn rustflags_for_linker(linker: &Linker, zig_bin: &str) -> Vec<String> {
     match linker {
         Linker::Zig { zig_target } => vec![
@@ -286,7 +288,7 @@ pub fn rustflags_for_linker(linker: &Linker, zig_bin: &str) -> Vec<String> {
             "-C".to_string(),
             format!("link-arg={zig_target}"),
         ],
-        Linker::HostCc => vec!["linker=host-cc".to_string()],
+        Linker::HostCc => Vec::new(),
     }
 }
 
@@ -483,11 +485,10 @@ mod tests {
     }
 
     #[test]
-    fn host_cc_rustflags_mark_the_policy() {
-        let flags = rustflags_for_linker(
-            &Linker::HostCc,
-            "/unused",
-        );
-        assert_eq!(flags, vec!["linker=host-cc".to_string()]);
+    fn host_cc_rustflags_stay_empty() {
+        // Host-cc contributes no compiler argv: the policy marker lives
+        // in metadata and the fingerprint, never on a command line.
+        let flags = rustflags_for_linker(&Linker::HostCc, "/unused");
+        assert!(flags.is_empty());
     }
 }
