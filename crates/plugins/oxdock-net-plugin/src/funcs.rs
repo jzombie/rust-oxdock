@@ -34,6 +34,9 @@ use crate::bridge::{pump_memory, pump_stream};
 use crate::endpoints::{
     AcquiredListener, EndpointRegistry, MemoryPipePair, SlotKind, acquire_listener,
 };
+use crate::fetch::{
+    DEFAULT_FETCH_TIMEOUT, FetchResult, fetch_stream, parse_sha256_hex, verify_sha256,
+};
 use crate::state::ListenerState;
 use crate::types::NetListenerTag;
 use crate::validate::{
@@ -114,6 +117,21 @@ fn optional_duration(
         "{func} option '{key}' must be a DURATION, got {}",
         value.type_name()
     )
+}
+
+/// Read an optional INT key from the options MAP. Missing binds `None`;
+/// present non-INTs bail.
+fn optional_int(map: &BTreeMap<String, Value>, func: &str, key: &str) -> Result<Option<i64>> {
+    let Some(value) = map.get(key) else {
+        return Ok(None);
+    };
+    let Some(n) = value.as_i64() else {
+        bail!(
+            "{func} option '{key}' must be an INT, got {}",
+            value.type_name()
+        );
+    };
+    Ok(Some(n))
 }
 
 /// Read the `NET_LISTENER` payload out of a DSL value.
@@ -548,6 +566,180 @@ fn connect_memory<P: ProcessManager>(
     Ok(Value::map(out))
 }
 
+/// Fetch a URL over HTTPS with a pure-Rust TLS stack (`ureq` plus
+/// `rustls`, no system openssl or curl). `dest` is either a STRING file
+/// path (synchronous download, guarded under the workspace root) or a
+/// PIPE value (requires `ASYNC`, bytes stream into the pipe, then EOF).
+/// A PIPE dest is always wire-to-script: the fetch writes the body and
+/// the script reads, the same direction as `out_pipe` in `NET_CONNECT`.
+/// Never write into it; reads observe EOF when the fetch closes.
+/// `options` is a MAP with optional `sha256` (STRING hex digest, verified
+/// on the wire), `timeout` (DURATION, default 30s), and `retries` (INT,
+/// default 2). Under `--offline` every fetch bails before any DNS or
+/// socket work. Returns a MAP with `status` (INT), `bytes` (INT),
+/// `sha256` (STRING hex), plus `path` (STRING) for file destinations or
+/// `closed` (BOOL) for pipe destinations.
+fn net_fetch<P: ProcessManager>(
+    cx: &mut StepCtx<P>,
+    registry: &Arc<EndpointRegistry>,
+    url: String,
+    dest: Value,
+    options: Value,
+) -> Result<Value> {
+    let map = net_options(&options, "NET_FETCH")?;
+    let mut sha256: Option<String> = None;
+    let mut timeout = DEFAULT_FETCH_TIMEOUT;
+    let mut retries: u32 = 2;
+    for key in map.keys() {
+        if key != "sha256" && key != "timeout" && key != "retries" {
+            bail!("NET_FETCH() unknown option '{key}' (expected: sha256, timeout, retries)");
+        }
+    }
+    if let Some(raw) = map.get("sha256") {
+        let Some(text) = raw.as_str() else {
+            bail!(
+                "NET_FETCH option 'sha256' must be a STRING, got {}",
+                raw.type_name()
+            );
+        };
+        sha256 = Some(parse_sha256_hex(text, "NET_FETCH")?);
+    }
+    if let Some(duration) = optional_duration(map, "NET_FETCH", "timeout")? {
+        timeout = duration;
+    }
+    if let Some(n) = optional_int(map, "NET_FETCH", "retries")? {
+        if !(0..=10).contains(&n) {
+            bail!("NET_FETCH option 'retries' must be between 0 and 10, got {n}");
+        }
+        retries = u32::try_from(n).unwrap_or(0);
+    }
+    if registry.is_offline() {
+        bail!("NET_FETCH failed: engine running in --offline mode");
+    }
+    let is_pipe = dest.as_str().is_none();
+    if is_pipe && !cx.is_async_task() {
+        bail!(
+            "NET_FETCH requires ASYNC for PIPE destinations: wrap it as LET $t: HANDLE = ASYNC {{ NET_FETCH($url, $pipe, {{}}) }}"
+        );
+    }
+    if let Some(path_raw) = dest.as_str() {
+        let guarded = anchor_fetch_path(cx.cwd().root(), path_raw)?;
+        let result = fetch_file_streamed(&guarded, &url, timeout, retries, || cx.is_cancelled())?;
+        if let Some(expected) = sha256 {
+            verify_sha256(&result.sha256, &expected)?;
+        }
+        let mut out = BTreeMap::new();
+        out.insert("status".to_string(), Value::int(i64::from(result.status)));
+        out.insert(
+            "bytes".to_string(),
+            Value::int(i64::try_from(result.bytes).unwrap_or(i64::MAX)),
+        );
+        out.insert("sha256".to_string(), Value::string(result.sha256));
+        out.insert("path".to_string(), Value::string(path_raw.to_string()));
+        return Ok(Value::map(out));
+    }
+    let writer = cx.pipe_writer(&dest)?;
+    let result = fetch_stream(
+        &url,
+        timeout,
+        retries,
+        |chunk| {
+            let mut guard = writer.lock().unwrap_or_else(|e| e.into_inner());
+            // `Box<dyn Write>` indirection: the guard derefs to the trait
+            // object, so no `Write` import is needed for these calls.
+            std::io::Write::write_all(&mut *guard, chunk)
+                .context("NET_FETCH failed to write response body into pipe")
+        },
+        || cx.is_cancelled(),
+    )?;
+    // Flush once at the end: per-chunk flushes would turn streaming into
+    // a syscall per 8KB.
+    writer
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .flush()
+        .ok();
+    if let Some(expected) = sha256 {
+        verify_sha256(&result.sha256, &expected)?;
+    }
+    cx.close_pipe(&dest)?;
+    let mut out = BTreeMap::new();
+    out.insert("closed".to_string(), Value::bool(true));
+    out.insert("status".to_string(), Value::int(i64::from(result.status)));
+    out.insert(
+        "bytes".to_string(),
+        Value::int(i64::try_from(result.bytes).unwrap_or(i64::MAX)),
+    );
+    out.insert("sha256".to_string(), Value::string(result.sha256));
+    Ok(Value::map(out))
+}
+
+/// Anchor a `NET_FETCH` file destination under the workspace root,
+/// mirroring READ and WRITE: a leading `/` means the workspace root, and
+/// anything escaping still bails. Relative paths stay root-anchored.
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+fn anchor_fetch_path(
+    root: &std::path::Path,
+    raw: &str,
+) -> Result<oxdock_fs::GuardedPath> {
+    use oxdock_fs::{GuardedPath, PathResolver, to_forward_slashes};
+    let normalized = to_forward_slashes(raw);
+    let rel_path = std::path::Path::new(&normalized);
+    if PathResolver::is_absolute_or_rooted(rel_path) {
+        if let Ok(guarded) = GuardedPath::new(root, rel_path) {
+            return Ok(guarded);
+        }
+        let rel = PathResolver::root_relative_path(rel_path);
+        let Some(rel_str) = rel.to_str().filter(|s| !s.is_empty()) else {
+            bail!("NET_FETCH dest escapes the workspace: {raw}");
+        };
+        return GuardedPath::new_root(root)
+            .with_context(|| "NET_FETCH cannot guard the workspace root".to_string())?
+            .join(rel_str)
+            .with_context(|| format!("NET_FETCH dest escapes the workspace: {raw}"));
+    }
+    GuardedPath::new_root(root)
+        .with_context(|| "NET_FETCH cannot guard the workspace root".to_string())?
+        .join(&normalized)
+        .with_context(|| format!("NET_FETCH dest escapes the workspace: {raw}"))
+}
+
+/// Stream a URL directly into a workspace-anchored file so all I/O stays
+/// inside the guard. Creates parent directories on demand. The file lands
+/// atomically in one pass: bytes stream through the open handle while the
+/// digest accumulates, so arbitrarily large artifacts never buffer.
+fn fetch_file_streamed(
+    guarded: &oxdock_fs::GuardedPath,
+    url: &str,
+    timeout: Duration,
+    retries: u32,
+    cancelled: impl Fn() -> bool,
+) -> Result<FetchResult> {
+    use oxdock_fs::PathResolver;
+    let root = guarded.root();
+    let resolver =
+        PathResolver::new(root, root).context("NET_FETCH cannot open the workspace resolver")?;
+    resolver.ensure_parent_dir(guarded)?;
+    let mut handle = resolver.open_write(guarded)?;
+    let result = fetch_stream(
+        url,
+        timeout,
+        retries,
+        |chunk| {
+            use std::io::Write;
+            handle
+                .write_all(chunk)
+                .context("NET_FETCH failed to write response body to file")
+        },
+        cancelled,
+    );
+    // Flush best-effort: a failed fetch leaves a partial file that the
+    // next fetch overwrites from scratch.
+    use std::io::Write;
+    handle.flush().ok();
+    result
+}
+
 /// The `NET` host module: virtual-endpoint listeners plus dial-out and
 /// memory sessions, bridged to DSL pipes. Generic over the process
 /// manager like every host module.
@@ -569,7 +761,8 @@ pub fn module_with_endpoints<P: ProcessManager>(registry: Arc<EndpointRegistry>)
             NetClose::registration(),
             net_connect_registration(Arc::clone(&registry)),
             net_port_registration(Arc::clone(&registry)),
-            net_addr_registration(registry),
+            net_addr_registration(Arc::clone(&registry)),
+            net_fetch_registration(Arc::clone(&registry)),
         ],
         types: vec![NetListenerTag::descriptor()],
     }
@@ -668,6 +861,54 @@ fn net_connect_registration<P: ProcessManager>(
             rpn: false,
             summary: "Dial a TCP endpoint into pipes.",
             docs: "Dial a TCP endpoint into pipes.",
+        },
+        func,
+    }
+}
+
+/// Hand-built `NET_FETCH` entry: same shape the macro would emit, plus
+/// the captured registry threaded into [`net_fetch`].
+fn net_fetch_registration<P: ProcessManager>(
+    registry: Arc<EndpointRegistry>,
+) -> HostRegistration<P> {
+    let func: NativeFn<P> = Arc::new(move |cx, values| {
+        if values.len() != 3 {
+            bail!("NET_FETCH() expects 3 argument(s), got {}", values.len());
+        }
+        let mut values = values.into_iter();
+        let url = match values.next().expect("arity checked above").as_str() {
+            Some(s) => s.to_string(),
+            None => bail!("NET_FETCH() argument `$url` must be a STRING"),
+        };
+        let dest = values.next().expect("arity checked above");
+        let options = values.next().expect("arity checked above");
+        net_fetch(cx, &registry, url, dest, options)
+    });
+    HostRegistration::Stateful {
+        name: "NET_FETCH".to_string(),
+        meta: FuncMeta {
+            name: "NET_FETCH".to_string(),
+            // Assigned at registration, like the macro's markers.
+            module: String::new(),
+            kind: FuncKind::HostCtx,
+            params: Some(vec![
+                FuncParam {
+                    name: "url".to_string(),
+                    param_type: Some("STRING".to_string()),
+                },
+                FuncParam {
+                    name: "dest".to_string(),
+                    param_type: None,
+                },
+                FuncParam {
+                    name: "options".to_string(),
+                    param_type: None,
+                },
+            ]),
+            returns: Some("MAP".to_string()),
+            rpn: false,
+            summary: "Fetch a URL body into a file or pipe.",
+            docs: "Fetch a URL over HTTPS with a pure-Rust TLS stack into a guarded file path (synchronous) or a PIPE (requires ASYNC). A PIPE dest is always wire-to-script: the fetch writes the body and the script reads, the same direction as out_pipe in NET_CONNECT. Never write into it; reads observe EOF when the fetch closes. Options: sha256 STRING hex digest, timeout DURATION, retries INT. Errors under --offline.",
         },
         func,
     }

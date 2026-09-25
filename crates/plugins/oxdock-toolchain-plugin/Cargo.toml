@@ -1,8 +1,8 @@
 [package]
-name = "oxdock-net-plugin"
-description = "Virtual-endpoint TCP networking for OxDock scripts through the Engine facade: logical service listeners, explicit-pipe pumps, and memory sessions."
+name = "oxdock-toolchain-plugin"
+description = "Portable OxDock builder: provision pinned Rust toolchains and compile OxDock binaries on demand, all under a dedicated cache group with zero host dependencies."
 categories = ["development-tools"]
-keywords = ["oxdock", "net", "dsl"]
+keywords = ["oxdock", "toolchain", "dsl"]
 authors.workspace = true
 version.workspace = true
 edition.workspace = true
@@ -12,19 +12,21 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-hex.workspace = true
+flate2.workspace = true
 indoc.workspace = true
 oxdock-core.workspace = true
 oxdock-fs.workspace = true
 oxdock-func-macro.workspace = true
-oxdock-parser.workspace = true
-oxdock-pipe.workspace = true
+oxdock-net-plugin.workspace = true
 oxdock-process.workspace = true
 sha2.workspace = true
+hex.workspace = true
+tar.workspace = true
+toml.workspace = true
 ureq.workspace = true
 
 [dev-dependencies]
-oxdock-fs.workspace = true
+indoc.workspace = true
 oxdock-sys-test-utils.workspace = true
 
 [lints]

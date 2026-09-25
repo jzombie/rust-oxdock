@@ -21,6 +21,12 @@ use crate::env::{CACHE_APP, CACHE_DIR, CARGO_PKG_NAME, FALLBACK_APP_NAME};
 // Keep this stable: cache contents must survive upgrades.
 pub(crate) const CACHE_GROUP: &str = "workspace";
 
+/// Group name under the project cache root owned by the portable toolchain
+/// plugin (issue #179). Separate from `CACHE_GROUP` so toolchain artifacts,
+// source snapshots, and build outputs never mix with workspace cache entries.
+// Keep stable: cached toolchains must survive upgrades.
+pub(crate) const TOOLCHAIN_GROUP: &str = "toolchain";
+
 /// Project-local cache parent: `WORKSPACE CACHE --local` roots the cache
 /// at `<project>/.cache`, with the shared group segment underneath.
 pub(crate) const LOCAL_CACHE_DIR_NAME: &str = ".cache";
@@ -170,6 +176,33 @@ pub(crate) fn ensure_cache_dir(cache_dir: &std::path::Path) -> Result<()> {
             .ensure_group(CACHE_GROUP)
             .map(|_| ())
             .map_err(|e| anyhow::anyhow!("failed to ensure cache dir {}: {e}", cache_dir.display()))
+    }
+    #[cfg(miri)]
+    {
+        let _ = cache_dir;
+        Ok(())
+    }
+}
+
+/// Build the self-rooted toolchain guard for an explicit or auto-detected
+// app identity (issue #179). No filesystem I/O: the directory is created on
+// first toolchain-targeted use through `ensure_toolchain_dir`.
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+pub(crate) fn toolchain_guard_for(explicit: Option<&str>) -> GuardedPath {
+    let dir = resolve_cache_dir(explicit).join(TOOLCHAIN_GROUP);
+    GuardedPath::from_guarded_parts(dir.clone(), dir)
+}
+
+/// Ensure the toolchain cache directory exists using only creation-only
+// `cache-manager` APIs. Never applies an eviction policy. No-op under Miri.
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+pub(crate) fn ensure_toolchain_dir(cache_dir: &std::path::Path) -> Result<()> {
+    #[cfg(not(miri))]
+    {
+        cache_manager::CacheRoot::from_root(cache_dir.to_path_buf())
+            .ensure_group(TOOLCHAIN_GROUP)
+            .map(|_| ())
+            .map_err(|e| anyhow::anyhow!("failed to ensure toolchain dir {}: {e}", cache_dir.display()))
     }
     #[cfg(miri)]
     {
@@ -400,5 +433,47 @@ mod tests {
             .join(CACHE_GROUP);
         assert_eq!(guard.as_path(), expected.as_path());
         assert_eq!(guard.root(), expected.as_path());
+    }
+
+    /// Toolchain guards resolve under a separate group segment (issue #179).
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    #[test]
+    fn toolchain_guard_uses_separate_group() {
+        let _env = SerialCacheEnv::new(&[(CACHE_DIR, Some("/tmp/oxdock-test-toolchain"))]);
+        let workspace_guard = cache_guard_for(None);
+        let toolchain_guard = toolchain_guard_for(None);
+        assert!(workspace_guard.as_path().ends_with(CACHE_GROUP));
+        assert!(toolchain_guard.as_path().ends_with(TOOLCHAIN_GROUP));
+        assert_ne!(workspace_guard.as_path(), toolchain_guard.as_path());
+        assert_eq!(
+            toolchain_guard.root(),
+            toolchain_guard.as_path(),
+            "toolchain guard stays self-rooted"
+        );
+    }
+
+    /// Creating the toolchain dir must never delete pre-existing entries.
+    #[cfg(not(miri))]
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    #[test]
+    fn ensure_toolchain_dir_creates_without_evicting() {
+        let temp = GuardedPath::tempdir().expect("tempdir");
+        let dir = temp.as_guarded_path().as_path().join("toolchain-root");
+        let dir_str = dir.to_string_lossy().into_owned();
+        let _env = SerialCacheEnv::new(&[(CACHE_DIR, Some(dir_str.as_str()))]);
+
+        let resolved = resolve_cache_dir(None);
+        assert_eq!(resolved, dir);
+        ensure_toolchain_dir(&resolved).expect("ensure");
+        let group = resolved.join(TOOLCHAIN_GROUP);
+        assert!(group.is_dir(), "toolchain group segment created exactly once");
+        assert!(
+            !group.join(TOOLCHAIN_GROUP).exists(),
+            "group segment must not double"
+        );
+        let probe = group.join("keep.txt");
+        std::fs::write(&probe, b"keep").expect("seed toolchain entry");
+        ensure_toolchain_dir(&resolved).expect("re-ensure");
+        assert_eq!(std::fs::read(&probe).expect("read probe"), b"keep");
     }
 }

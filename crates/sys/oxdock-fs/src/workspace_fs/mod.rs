@@ -530,6 +530,30 @@ impl PathResolver {
         Ok(self.cache_guard.clone())
     }
 
+    /// Internal toolchain cache guard (issue #179): self-rooted at
+    /// `<cache-root>/toolchain` for the current application identity. No
+    /// filesystem I/O: the directory is created on first toolchain-targeted
+    /// use through `ensure_toolchain`. Not a DSL `WORKSPACE` target, so it
+    /// never touches `CurrentRoot` or the `WorkspaceFs` trait state machine.
+    /// Isolated compilations initialize a `PathResolver` with this guard as
+    /// root instead.
+    pub fn toolchain_guard(&self) -> GuardedPath {
+        cache::toolchain_guard_for(Some(self.cache_app.as_str()))
+    }
+
+    /// Choke point for toolchain-targeted I/O (issue #179): ensures the
+    /// persistent toolchain directory exists (creation only, never eviction)
+    /// and returns its guard. Idempotent.
+    #[allow(dead_code)]
+    pub(crate) fn ensure_toolchain(&self) -> Result<GuardedPath> {
+        let guard = self.toolchain_guard();
+        let root = guard.as_path().parent().with_context(|| {
+            format!("toolchain guard has no parent: {}", guard.display())
+        })?;
+        cache::ensure_toolchain_dir(root)?;
+        Ok(guard)
+    }
+
     /// Entry working directory for `WORKSPACE SYSTEM` (issue #163). The
     /// never-created snapshot anchor must not leak into unconfined
     /// resolution (which would create it as a side effect), so an

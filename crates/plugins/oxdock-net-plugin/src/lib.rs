@@ -13,6 +13,7 @@
 
 mod bridge;
 mod endpoints;
+mod fetch;
 mod funcs;
 mod state;
 mod types;

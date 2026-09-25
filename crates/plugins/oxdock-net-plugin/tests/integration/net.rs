@@ -885,3 +885,126 @@ fn port_and_addr_fail_loudly_when_unbound() {
         "udp dial string must carry a port, got {udp:?}"
     );
 }
+
+#[test]
+fn fetch_offline_bails_before_sockets() {
+    // Sandbox gate fires before DNS or dial. Runs under Miri.
+    let registry = Arc::new(EndpointRegistry::new(true));
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD, NET]
+        LET $r: MAP = NET_FETCH("https://example.com/toolchain", "out.bin", {})
+    "#};
+    let err = run_script_with(registry, &root, script).expect_err("offline fetch must fail");
+    assert!(err.to_string().contains("--offline mode"), "{err:#}");
+}
+
+#[test]
+fn fetch_rejects_bad_scheme_and_options() {
+    // Validation fires before any socket work. Runs under Miri.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD, NET]
+        LET $r: MAP = NET_FETCH("ftp://example.com/x", "out.bin", {})
+    "#};
+    let err = run_script(&root, script).expect_err("bad scheme must fail");
+    assert!(err.to_string().contains("http:// or https://"), "{err:#}");
+
+    let script = indoc! {r#"
+        IMPORT [STD, NET]
+        LET $r: MAP = NET_FETCH("https://example.com/x", "out.bin", {bogus: 1})
+    "#};
+    let err = run_script(&root, script).expect_err("unknown option must fail");
+    assert!(err.to_string().contains("unknown option"), "{err:#}");
+
+    let script = indoc! {r#"
+        IMPORT [STD, NET]
+        LET $r: MAP = NET_FETCH("https://example.com/x", "out.bin", {sha256: "zzz"})
+    "#};
+    let err = run_script(&root, script).expect_err("bad digest must fail");
+    assert!(err.to_string().contains("sha256"), "{err:#}");
+
+    let script = indoc! {r#"
+        IMPORT [STD, NET]
+        LET $p: PIPE
+        LET $r: MAP = NET_FETCH("https://example.com/x", $p, {})
+    "#};
+    let err = run_script(&root, script).expect_err("pipe fetch needs ASYNC");
+    assert!(err.to_string().contains("ASYNC"), "{err:#}");
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "needs loopback TCP for local HTTP fetch")]
+fn fetch_file_from_loopback_http() {
+    // Minimal loopback HTTP server: no external network. Serves one fixed
+    // body, then the script fetches it into a guarded file.
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let addr = listener.local_addr().expect("local addr");
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        let mut buf = [0u8; 4096];
+        let _ = stream.read(&mut buf);
+        let body = b"hello-toolchain";
+        let header = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(header.as_bytes()).expect("write header");
+        stream.write_all(body).expect("write body");
+        let _ = stream.shutdown(Shutdown::Both);
+    });
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = format!(
+        indoc! {r#"
+            IMPORT [STD, NET]
+            LET $r: MAP = NET_FETCH("http://{addr}/toolchain", "fetched.bin", {{}})
+            ASSERT_EQ $r.status 200
+            ASSERT_EQ $r.bytes 15
+            ASSERT_EQ $r.path "fetched.bin"
+        "#},
+        addr = addr
+    );
+    run_script(&root, &script).expect("loopback fetch runs");
+    let fetched = root.join("fetched.bin").unwrap();
+    assert_eq!(read_trimmed(&fetched), "hello-toolchain");
+    server.join().expect("server joins");
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "needs loopback TCP for local HTTP fetch")]
+fn fetch_pipe_from_loopback_http() {
+    // Same loopback server, but the body streams into a PIPE under ASYNC.
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+    let addr = listener.local_addr().expect("local addr");
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        let mut buf = [0u8; 4096];
+        let _ = stream.read(&mut buf);
+        let body = b"pipe-body";
+        let header = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(header.as_bytes()).expect("write header");
+        stream.write_all(body).expect("write body");
+        let _ = stream.shutdown(Shutdown::Both);
+    });
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = format!(
+        indoc! {r#"
+            IMPORT [STD, NET]
+            LET $p: PIPE
+            LET $t: HANDLE = ASYNC {{ NET_FETCH("http://{addr}/x", $p, {{}}) }}
+            LET $r: MAP = AWAIT $t
+            ASSERT_EQ $r.closed true
+            ASSERT_CONTAINS $p "pipe-body"
+        "#},
+        addr = addr
+    );
+    run_script(&root, &script).expect("pipe fetch runs");
+    server.join().expect("server joins");
+}
