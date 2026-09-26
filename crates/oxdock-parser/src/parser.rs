@@ -1,6 +1,6 @@
 use crate::ast::{
-    Arg, Expr, Guard, GuardExpr, IoBinding, IoStream, ModuleTable, PipeTarget, PlatformGuard, Step,
-    StepKind,
+    Arg, Expr, Guard, GuardExpr, IoBinding, IoStream, MathOp, ModuleTable, PipeTarget,
+    PlatformGuard, Step, StepKind,
 };
 use crate::command::ArgType;
 use crate::constants::{
@@ -78,6 +78,19 @@ impl<'a> LowerCtx<'a> {
             Some(current) => current.insert(name.to_string()),
             None => true,
         }
+    }
+
+    /// All `FUNC` names visible from the current position (every enclosing
+    /// scope, innermost last). Used by `REMOTE` self-containment: a body
+    /// call resolving to one of these without a same-body definition
+    /// would die on the guest with `UnknownFunction`.
+    pub(super) fn visible_func_names(&self) -> HashSet<String> {
+        self.func_scopes
+            .borrow()
+            .iter()
+            .flatten()
+            .cloned()
+            .collect()
     }
 
     /// Record `IMPORT`ed modules in the innermost import frame.
@@ -669,6 +682,15 @@ impl<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> ScriptParser<'a, F> {
             }
         }
 
+        // Validate `COPY --from-host` / `--to-host` placement: transfer
+        // declarations are only meaningful inside a `REMOTE` body, where
+        // the session hoists them around execution. Anywhere else they
+        // would silently behave as local copies, so they fail fast.
+        {
+            let ctx = self.eof_span();
+            validate_remote_copy_placement(&self.steps, &ctx)?;
+        }
+
         Ok(self.steps)
     }
 
@@ -1045,19 +1067,48 @@ fn merge_bindings(defaults: &[IoBinding], overrides: &[IoBinding]) -> Vec<IoBind
     set.into_vec()
 }
 
-fn contains_inherit_env(kind: &StepKind) -> bool {
-    match kind {
-        StepKind::InheritEnv { .. } => true,
-        StepKind::WithIo { cmd, .. } => contains_inherit_env(cmd),
-        StepKind::AssignCapture { cmd, .. } => contains_inherit_env(cmd),
-        StepKind::While { body, .. } | StepKind::FuncDef { body, .. } => {
-            body.iter().any(|s| contains_inherit_env(&s.kind))
+/// Reject `COPY --from-host` / `--to-host` outside `REMOTE` bodies.
+/// Transfer declarations only mean something where a session hoists them;
+/// anywhere else they would silently behave as local copies.
+fn validate_remote_copy_placement(steps: &[Step], ctx: &SpanContext) -> ParseResult<()> {
+    fn visit_kind(kind: &StepKind, in_remote: bool, ctx: &SpanContext) -> ParseResult<()> {
+        if let StepKind::Copy {
+            from_host,
+            to_host,
+            ..
+        } = kind
+            && (*from_host || *to_host)
+            && !in_remote
+        {
+            return Err(ParseError::structural(
+                "copy",
+                "COPY --from-host and --to-host are only valid inside a REMOTE block".to_string(),
+                ctx,
+            ));
         }
-        StepKind::Timeout { body, .. } | StepKind::AssignAsync { body, .. } => {
-            body.iter().any(|s| contains_inherit_env(&s.kind))
-        }
-        _ => false,
+        let child_remote = in_remote || matches!(kind, StepKind::RemoteBlock { .. });
+        let mut result = Ok(());
+        kind.walk_child_kinds(&mut |child| {
+            if result.is_ok() {
+                result = visit_kind(child, child_remote, ctx);
+            }
+        });
+        result
     }
+    for step in steps {
+        visit_kind(&step.kind, false, ctx)?;
+    }
+    Ok(())
+}
+
+fn contains_inherit_env(kind: &StepKind) -> bool {
+    if matches!(kind, StepKind::InheritEnv { .. }) {
+        return true;
+    }
+    let mut found = false;
+    kind.walk_child_kinds(&mut |child| {        found = found || contains_inherit_env(child);
+    });
+    found
 }
 
 /// True when bindings reroute stdout into a named pipe. A `LET`-capture owns
@@ -1077,14 +1128,13 @@ fn reject_async_in_capture(ctx: &SpanContext, kind: &StepKind) -> ParseResult<()
         | StepKind::Await { .. }
         | StepKind::AwaitCapture { .. }
         | StepKind::Cancel { .. } => true,
-        StepKind::WithIo { cmd, .. } => reject_async_in_capture(ctx, cmd).is_err(),
-        StepKind::Timeout { body, .. } => body
-            .iter()
-            .any(|s| reject_async_in_capture(ctx, &s.kind).is_err()),
-        StepKind::While { body, .. } | StepKind::FuncDef { body, .. } => body
-            .iter()
-            .any(|s| reject_async_in_capture(ctx, &s.kind).is_err()),
-        _ => false,
+        _ => {
+            let mut bad = false;
+            kind.walk_child_kinds(&mut |child| {
+                bad = bad || reject_async_in_capture(ctx, child).is_err();
+            });
+            bad
+        }
     };
     if bad {
         return Err(ParseError::structural("let", "LET capture cannot run ASYNC/AWAIT/CANCEL inline; use LET $t: HANDLE = ASYNC ... then LET $o: STRING = AWAIT $t".to_string(), ctx));
@@ -1095,32 +1145,23 @@ fn reject_async_in_capture(ctx: &SpanContext, kind: &StepKind) -> ParseResult<()
 /// Reject `WITH_IO [stdout=$var]` anywhere inside a capture body: the
 /// capture sink owns stdout.
 fn reject_pipe_stdout_in_capture(ctx: &SpanContext, kind: &StepKind) -> ParseResult<()> {
-    match kind {
-        StepKind::WithIo { bindings, cmd } => {
-            if has_stdout_pipe(bindings) {
-                return Err(ParseError::structural(
-                    "let",
-                    "LET capture cannot use WITH_IO [stdout=$var]; the capture sink owns stdout"
-                        .to_string(),
-                    ctx,
-                ));
-            }
-            reject_pipe_stdout_in_capture(ctx, cmd)
-        }
-        StepKind::Timeout { body, .. } => {
-            for step in body {
-                reject_pipe_stdout_in_capture(ctx, &step.kind)?;
-            }
-            Ok(())
-        }
-        StepKind::While { body, .. } | StepKind::FuncDef { body, .. } => {
-            for step in body {
-                reject_pipe_stdout_in_capture(ctx, &step.kind)?;
-            }
-            Ok(())
-        }
-        _ => Ok(()),
+    if let StepKind::WithIo { bindings, .. } = kind
+        && has_stdout_pipe(bindings)
+    {
+        return Err(ParseError::structural(
+            "let",
+            "LET capture cannot use WITH_IO [stdout=$var]; the capture sink owns stdout"
+                .to_string(),
+            ctx,
+        ));
     }
+    let mut result = Ok(());
+    kind.walk_child_kinds(&mut |child| {
+        if result.is_ok() {
+            result = reject_pipe_stdout_in_capture(ctx, child);
+        }
+    });
+    result
 }
 
 /// Re-parse raw RHS text as an expression (fallback when the `LET` RHS lead
@@ -1196,6 +1237,11 @@ fn parse_structural_command_with_lower(
                             ctx, inner, lctx,
                         )?));
                     }
+                    Rule::remote_statement => {
+                        cmd = Some(Box::new(parse_structural_command_with_lower(
+                            ctx, inner, lctx,
+                        )?));
+                    }
                     Rule::call_statement | Rule::while_statement => {
                         cmd = Some(Box::new(parse_structural_command_with_lower(
                             ctx, inner, lctx,
@@ -1246,6 +1292,7 @@ fn parse_structural_command_with_lower(
         Rule::async_statement => parse_async_statement_from_pair(ctx, pair, lctx)?,
         Rule::async_statement_block => parse_async_statement_block_from_pair(ctx, pair, lctx)?,
         Rule::timeout_statement => parse_timeout_statement_from_pair(ctx, pair, lctx)?,
+        Rule::remote_statement => parse_remote_statement_from_pair(ctx, pair, lctx)?,
         Rule::command_inner => {
             // command_inner = { inherit_env_command | instruction }
             // Unwrap to the inner rule
@@ -2422,7 +2469,8 @@ fn parse_timeout_statement_from_pair(
             | Rule::return_statement
             | Rule::break_statement
             | Rule::continue_statement
-            | Rule::timeout_statement => {
+            | Rule::timeout_statement
+            | Rule::remote_statement => {
                 let kind = parse_structural_command_with_lower(ctx, inner, lctx)?;
                 body = Some(vec![Step {
                     guard: None,
@@ -2463,6 +2511,200 @@ fn parse_timeout_statement_from_pair(
                 &span,
             )
         })?,
+    })
+}
+
+/// True when any step in the slice (transitively, through nested bodies)
+/// is a `REMOTE` block. `REMOTE` blocks never nest: the inner block would
+/// have no session, no inventory, and no defined sync boundary.
+fn contains_remote_block(steps: &[Step]) -> bool {
+    steps.iter().any(|step| contains_remote_kind(&step.kind))
+}
+
+fn contains_remote_kind(kind: &StepKind) -> bool {
+    if matches!(kind, StepKind::RemoteBlock { .. }) {
+        return true;
+    }
+    let mut found = false;
+    kind.walk_child_kinds(&mut |child| {
+        found = found || contains_remote_kind(child);
+    });
+    found
+}
+
+/// Collect transitively defined `FUNC` names and invoked call names from a
+/// `REMOTE` body. Statement calls, expression calls (including compiled
+/// math ops and inline blocks), and calls nested in any sub-body are all
+/// covered through the uniform [`StepKind`] walkers. Only user-defined
+/// `SCRIPT` symbols matter downstream: qualified module calls pass through.
+fn collect_remote_body_symbols(
+    steps: &[Step],
+    defs: &mut HashSet<String>,
+    calls: &mut Vec<String>,
+) {
+    for step in steps {
+        collect_remote_kind_symbols(&step.kind, defs, calls);
+    }
+}
+
+fn collect_remote_kind_symbols(
+    kind: &StepKind,
+    defs: &mut HashSet<String>,
+    calls: &mut Vec<String>,
+) {
+    if let StepKind::FuncDef { name, .. } = kind {
+        defs.insert(name.clone());
+    }
+    if let StepKind::Call { name, .. } = kind {
+        calls.push(name.clone());
+    }
+    kind.walk_step_exprs(&mut |expr| match expr {
+        Expr::Call { name, .. } => calls.push(name.clone()),
+        Expr::CompiledMath(ops) => {
+            for op in ops {
+                if let MathOp::Call { name, .. } = op {
+                    calls.push(name.clone());
+                }
+            }
+        }
+        Expr::Block(steps) => collect_remote_body_symbols(steps, defs, calls),
+        _ => {}
+    });
+}
+
+fn parse_remote_statement_from_pair(
+    ctx: &SpanContext,
+    pair: Pair<Rule>,
+    lctx: &LowerCtx,
+) -> ParseResult<StepKind> {
+    let span = refine_span(ctx, &pair);
+    let mut target: Option<String> = None;
+    let mut vars: Vec<String> = Vec::new();
+    let mut env: Vec<String> = Vec::new();
+    let mut body: Option<Vec<Step>> = None;
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::remote_target => {
+                target = Some(inner.as_str().to_string());
+            }
+            Rule::remote_bindings => {
+                for binding in inner.into_inner() {
+                    // Direct children are `remote_binding` wrappers (commas
+                    // and gaps are silent); unwrap one level leniently.
+                    let entry = if binding.as_rule() == Rule::remote_binding {
+                        binding.into_inner().next()
+                    } else {
+                        Some(binding)
+                    };
+                    let Some(entry) = entry else {
+                        continue;
+                    };
+                    match entry.as_rule() {
+                        Rule::remote_var_binding => {
+                            let mut name = None;
+                            for part in entry.into_inner() {
+                                if part.as_rule() == Rule::ident {
+                                    name = Some(part.as_str().to_string());
+                                }
+                            }
+                            vars.push(name.ok_or_else(|| {
+                                ParseError::validation(
+                                    "REMOTE",
+                                    "REMOTE header entries must be `$var` or `env:NAME`".to_string(),
+                                    &span,
+                                )
+                            })?);
+                        }
+                        Rule::remote_env_binding => {
+                            let mut name = None;
+                            for part in entry.into_inner() {
+                                if part.as_rule() == Rule::env_read_key {
+                                    name = Some(part.as_str().to_string());
+                                }
+                            }
+                            env.push(name.ok_or_else(|| {
+                                ParseError::validation(
+                                    "REMOTE",
+                                    "REMOTE header entries must be `$var` or `env:NAME`".to_string(),
+                                    &span,
+                                )
+                            })?);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Rule::block => {
+                body = Some(parse_block_elements_with_lower(ctx, inner, lctx)?);
+            }
+            _ => {}
+        }
+    }
+    let target = target.ok_or_else(|| {
+        ParseError::validation("REMOTE", "REMOTE requires a target".to_string(), &span)
+    })?;
+    if !crate::commands::is_valid_remote_target(&target) {
+        return Err(ParseError::validation(
+            "REMOTE",
+            format!(
+                "invalid REMOTE target `{target}`: start alphanumeric, then alphanumeric, `_`, or `-`, max 64 chars, never SNAPSHOT, LOCAL, CACHE, SYSTEM, or REMOTE"
+            ),
+            &span,
+        ));
+    }
+    let body = body.ok_or_else(|| {
+        ParseError::validation(
+            "REMOTE",
+            "REMOTE requires a braced block, e.g. `REMOTE prod [$version] { ... }`".to_string(),
+            &span,
+        )
+    })?;
+    if body.is_empty() {
+        return Err(ParseError::validation(
+            "REMOTE",
+            "REMOTE requires a non-empty braced block".to_string(),
+            &span,
+        ));
+    }
+    if contains_remote_block(&body) {
+        return Err(ParseError::validation(
+            "REMOTE",
+            format!("REMOTE blocks cannot nest (target `{target}` contains another REMOTE block)"),
+            &span,
+        ));
+    }
+    if body.iter().any(|s| contains_inherit_env(&s.kind)) {
+        return Err(ParseError::validation(
+            "REMOTE",
+            "INHERIT_ENV cannot appear inside a REMOTE block: the guest inherits its own process environment".to_string(),
+            &span,
+        ));
+    }
+    let mut inner_defs = HashSet::new();
+    let mut calls = Vec::new();
+    collect_remote_body_symbols(&body, &mut inner_defs, &mut calls);
+    let outer_defs = lctx.visible_func_names();
+    for call in &calls {
+        let bare = crate::base_name(call);
+        let is_script_call = match crate::split_qualified(call) {
+            Some((module, _)) => module == crate::constants::SCRIPT_MODULE_NAME,
+            None => true,
+        };
+        if is_script_call && outer_defs.contains(bare) && !inner_defs.contains(bare) {
+            return Err(ParseError::validation(
+                "REMOTE",
+                format!(
+                    "REMOTE '{target}' calls outer function '{bare}' (functions must be defined inside the block)"
+                ),
+                &span,
+            ));
+        }
+    }
+    Ok(StepKind::RemoteBlock {
+        target,
+        vars,
+        env,
+        body,
     })
 }
 
@@ -2595,6 +2837,9 @@ fn parse_async_statement_from_pair(
                     Rule::timeout_statement | Rule::cancel_statement => {
                         inner_cmd = Some(parse_structural_command_with_lower(ctx, child, lctx)?);
                     }
+                    Rule::remote_statement => {
+                        inner_cmd = Some(parse_structural_command_with_lower(ctx, child, lctx)?);
+                    }
                     Rule::call_statement | Rule::while_statement => {
                         inner_cmd = Some(parse_structural_command_with_lower(ctx, child, lctx)?);
                     }
@@ -2722,8 +2967,21 @@ fn parse_block_elements_with_lower(
     // errors, nested shadowing stays allowed.
     lctx.enter_scope();
     let mut steps = Vec::new();
+    // Bare guard lines inside blocks attach to the next step parsed here.
+    // Previously they fell into the catch-all and vanished, so inner
+    // guards never reached the engine; block bodies now honor them exactly
+    // like top-level lines (a dangling guard at `}` is a structural error).
+    let mut pending_guard: Option<GuardExpr> = None;
     for elem in block_pair.into_inner() {
         match elem.as_rule() {
+            Rule::guard_line => {
+                let guard = parse_guard_line(ctx, elem)?;
+                pending_guard = Some(match pending_guard.take() {
+                    Some(existing) => GuardExpr::all(vec![existing, guard]),
+                    None => guard,
+                });
+                continue;
+            }
             Rule::for_statement
             | Rule::while_statement
             | Rule::func_def
@@ -2740,10 +2998,11 @@ fn parse_block_elements_with_lower(
             | Rule::if_statement
             | Rule::async_statement
             | Rule::timeout_statement
+            | Rule::remote_statement
             | Rule::async_statement_block => {
                 let step_kind = parse_structural_command_with_lower(ctx, elem, lctx)?;
                 steps.push(Step {
-                    guard: None,
+                    guard: pending_guard.take(),
                     kind: step_kind,
                     scope_enter: 0,
                     scope_exit: 0,
@@ -2763,15 +3022,28 @@ fn parse_block_elements_with_lower(
                     let guard_expr = parse_guard_line(ctx, gp)?;
                     let mut inner_steps = parse_block_elements_with_lower(ctx, bp, lctx)?;
                     for step in &mut inner_steps {
-                        step.guard = Some(guard_expr.clone());
+                        let inner = step.guard.take();
+                        step.guard = Some(match (pending_guard.clone(), inner) {
+                            (Some(pending), Some(existing)) => {
+                                GuardExpr::all(vec![pending, existing])
+                            }
+                            (Some(pending), None) => {
+                                GuardExpr::all(vec![pending, guard_expr.clone()])
+                            }
+                            (None, Some(existing)) => existing,
+                            (None, None) => guard_expr.clone(),
+                        });
                     }
+                    // A bare guard line composes into the braced block that
+                    // follows it and is consumed, like an inline guard.
+                    pending_guard = None;
                     steps.extend(inner_steps);
                 }
             }
             Rule::instruction | Rule::instruction_inner => {
                 let kind = lower_instruction_pair(ctx, elem, lctx)?;
                 steps.push(Step {
-                    guard: None,
+                    guard: pending_guard.take(),
                     kind,
                     scope_enter: 0,
                     scope_exit: 0,
@@ -2780,7 +3052,7 @@ fn parse_block_elements_with_lower(
             Rule::run_exec_statement | Rule::run_exec_inner => {
                 let kind = lower_run_exec_pair(ctx, elem, lctx)?;
                 steps.push(Step {
-                    guard: None,
+                    guard: pending_guard.take(),
                     kind,
                     scope_enter: 0,
                     scope_exit: 0,
@@ -2789,7 +3061,16 @@ fn parse_block_elements_with_lower(
             Rule::with_io_command => {
                 let step_kind = parse_structural_command_with_lower(ctx, elem, lctx)?;
                 steps.push(Step {
-                    guard: None,
+                    guard: pending_guard.take(),
+                    kind: step_kind,
+                    scope_enter: 0,
+                    scope_exit: 0,
+                });
+            }
+            Rule::inherit_env_command => {
+                let step_kind = parse_structural_command_with_lower(ctx, elem, lctx)?;
+                steps.push(Step {
+                    guard: pending_guard.take(),
                     kind: step_kind,
                     scope_enter: 0,
                     scope_exit: 0,
@@ -2809,8 +3090,15 @@ fn parse_block_elements_with_lower(
                     ctx,
                 ));
             }
-            _ => {} // blank, hash_comment, semicolon, block_start, block_end, etc.
+            _ => {} // blank, hash_comment, semicolon, etc.
         }
+    }
+    if pending_guard.is_some() {
+        return Err(ParseError::structural(
+            "guard",
+            "guard declared immediately before '}' without a command".to_string(),
+            ctx,
+        ));
     }
     lctx.exit_scope();
     Ok(steps)
@@ -3242,7 +3530,7 @@ fn parse_dollar_ident(pair: Pair<Rule>) -> String {
     s.strip_prefix('$').unwrap_or(s).to_string()
 }
 
-use crate::ast::{ArithOp, CompareOp, LogicalOp, MathOp, Value};
+use crate::ast::{ArithOp, CompareOp, LogicalOp, Value};
 
 fn parse_expr(ctx: &SpanContext, lctx: &LowerCtx, pair: Pair<Rule>) -> ParseResult<Expr> {
     let span = refine_span(ctx, &pair);

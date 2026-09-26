@@ -131,6 +131,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::Arc;
 
 use anyhow::Result;
 use oxdock_fs::{GuardedPath, PathResolver, WorkspaceFs};
@@ -195,6 +196,17 @@ impl<P: ProcessManager> Engine<P> {
     /// every run. Chainable.
     pub fn with_io(mut self, io: ExecIo) -> Self {
         self.io = io;
+        self
+    }
+
+    /// Stage the transport behind `REMOTE` blocks for every run.
+    /// Chainable. Without this every `REMOTE` step bails naming the NET
+    /// plugin; the CLI registers its SSH session here at startup.
+    pub fn set_remote_runner(
+        &mut self,
+        runner: Arc<dyn super::remote::RemoteRunner>,
+    ) -> &mut Self {
+        self.io.set_remote_runner(runner);
         self
     }
 

@@ -174,7 +174,15 @@ pub struct ExecIo {
     stderr: Option<SharedOutput>,
     inherit_env_overrides: HashMap<String, String>,
     inherit_env_removed: HashSet<String>,
+    remote_runners: HashMap<String, RemoteRunnerArc>,
+    remote_guest: bool,
 }
+
+/// Shared handle to the transport behind `REMOTE` blocks. Staged here (not
+/// threaded through every `run_steps_*` signature) so existing callers keep
+/// compiling: `None` means remote execution is unavailable and every
+/// `REMOTE` step bails naming the NET plugin.
+pub type RemoteRunnerArc = Arc<dyn super::remote::RemoteRunner>;
 
 /// Standard chunk size for all I/O handlers.
 pub const CHUNK_SIZE: usize = 8192;
@@ -534,6 +542,47 @@ impl ExecIo {
 
     pub fn set_stderr(&mut self, stderr: Option<SharedOutput>) {
         self.stderr = stderr;
+    }
+
+    /// Stage the transport behind one `REMOTE` target. Chainable; the NET
+    /// plugin registers one session per inventory target at CLI startup
+    /// and tests stage mocks. Registration is inert (no process spawns
+    /// until a block entry runs).
+    pub fn set_remote_runner_for_target(
+        &mut self,
+        target: String,
+        runner: RemoteRunnerArc,
+    ) -> &mut Self {
+        self.remote_runners.insert(target, runner);
+        self
+    }
+
+    /// The staged remote transport for `target`, if any. `REMOTE`
+    /// interception bails when the target has no runner.
+    pub fn remote_runner(&self, target: &str) -> Option<RemoteRunnerArc> {
+        self.remote_runners.get(target).cloned()
+    }
+
+    /// Legacy single-runner staging: registers under the empty target.
+    /// Prefer [`set_remote_runner_for_target`](Self::set_remote_runner_for_target).
+    pub fn set_remote_runner(&mut self, runner: RemoteRunnerArc) -> &mut Self {
+        self.set_remote_runner_for_target(String::new(), runner)
+    }
+
+    /// Mark this run as executing inside a remote guest serve loop. In
+    /// guest mode, flagged `COPY --from-host` / `--to-host` steps are
+    /// transfer declarations already fulfilled by the session, so they
+    /// acknowledge as no-ops instead of re-copying. Never set on hosts:
+    /// the parser rejects flagged copies outside `REMOTE` bodies, and
+    /// hosts never execute `REMOTE` bodies.
+    pub fn set_remote_guest(&mut self, guest: bool) -> &mut Self {
+        self.remote_guest = guest;
+        self
+    }
+
+    /// Whether flagged `COPY` transfer declarations acknowledge as no-ops.
+    pub fn is_remote_guest(&self) -> bool {
+        self.remote_guest
     }
 
     pub fn insert_inherit_env<S: Into<String>, V: Into<String>>(&mut self, key: S, value: V) {

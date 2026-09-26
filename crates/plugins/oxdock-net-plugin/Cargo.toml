@@ -18,6 +18,10 @@ oxdock-func-macro.workspace = true
 oxdock-parser.workspace = true
 oxdock-pipe.workspace = true
 oxdock-process.workspace = true
+oxdock-remote-proto.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+shell-words.workspace = true
 
 [dev-dependencies]
 oxdock-fs.workspace = true

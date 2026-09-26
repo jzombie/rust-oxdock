@@ -139,9 +139,10 @@ pub fn tokenize(input: &str) -> Result<Vec<RawToken<'_>>, ParseError> {
             | Rule::inherit_env_command
             | Rule::import_statement
             | Rule::export_statement
-            | Rule::async_statement
+            |             Rule::async_statement
             | Rule::async_statement_block
             | Rule::timeout_statement
+            | Rule::remote_statement
             | Rule::let_async_statement
             | Rule::let_capture_statement
             | Rule::await_statement

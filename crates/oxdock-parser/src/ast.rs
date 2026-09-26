@@ -6,7 +6,7 @@ pub use crate::commands::{AssertTarget, StepKind};
 use crate::constants::{
     KEYWORD_ASYNC, KEYWORD_AWAIT, KEYWORD_BREAK, KEYWORD_CANCEL, KEYWORD_CONTINUE, KEYWORD_ELSE,
     KEYWORD_EXPORT, KEYWORD_FOR, KEYWORD_FUNC, KEYWORD_IF, KEYWORD_IMPORT, KEYWORD_LET,
-    KEYWORD_RETURN, KEYWORD_WHILE,
+    KEYWORD_REMOTE, KEYWORD_RETURN, KEYWORD_WHILE,
 };
 
 /// One module's function surface for parse-time call resolution: the base
@@ -242,6 +242,7 @@ pub const STRUCTURAL_KEYWORDS: &[&str] = &[
     KEYWORD_WHILE,
     KEYWORD_BREAK,
     KEYWORD_CONTINUE,
+    KEYWORD_REMOTE,
     KEYWORD_IMPORT,
     KEYWORD_EXPORT,
 ];
@@ -587,6 +588,55 @@ pub struct Step {
     pub kind: StepKind,
     pub scope_enter: usize,
     pub scope_exit: usize,
+}
+
+impl Expr {
+    /// Visit this expression and every descendant, depth first. `Block`
+    /// steps recurse through [`StepKind::walk_step_exprs`](crate::commands::StepKind::walk_step_exprs),
+    /// so inline bodies are covered; `CompiledMath` ops are opaque here
+    /// (match `MathOp::Call` in the visitor when call names matter).
+    /// Exhaustive over variants: adding an `Expr` shape fails compilation
+    /// here, never silently.
+    pub fn walk(&self, f: &mut impl FnMut(&Expr)) {
+        f(self);
+        match self {
+            Expr::Literal(_)
+            | Expr::Var(_)
+            | Expr::Env(_)
+            | Expr::KeyPath { .. }
+            | Expr::Inspect(_)
+            | Expr::FreshPipe
+            | Expr::UnsignedIntBoundary(_) => {}
+            Expr::Call { args, .. } => {
+                for arg in args {
+                    arg.walk(f);
+                }
+            }
+            Expr::List(items) => {
+                for item in items {
+                    item.walk(f);
+                }
+            }
+            Expr::Map(entries) => {
+                for (_, value) in entries {
+                    value.walk(f);
+                }
+            }
+            Expr::Block(steps) => {
+                for step in steps {
+                    step.kind.walk_step_exprs(f);
+                }
+            }
+            Expr::Compare { left, right, .. }
+            | Expr::Arithmetic { left, right, .. }
+            | Expr::Logical { left, right, .. } => {
+                left.walk(f);
+                right.walk(f);
+            }
+            Expr::CompiledMath(_) => {}
+            Expr::Not(inner) => inner.walk(f),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]

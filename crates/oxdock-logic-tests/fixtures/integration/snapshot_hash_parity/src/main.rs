@@ -112,6 +112,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         script: ScriptSource::Path(script_path),
         shell: false,
         endpoints: EndpointFlags::default(),
+        remote_serve: false,
+        remotes: Vec::new(),
     };
 
     let result = execute_with_result(opts, workspace_root.clone())?;

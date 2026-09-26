@@ -2088,6 +2088,8 @@ fn copy_directory_branch_recurses_into_nested_target() {
             guard: None,
             kind: StepKind::Copy {
                 from_workspace: None,
+                from_host: false,
+                to_host: false,
                 from: "app".into(),
                 to: "copy-of-app".into(),
             },
@@ -2634,6 +2636,31 @@ mod escape_props {
             // No `$`, `\`, or braces: both passes are the identity function.
             let state = prop_state(&[], &[]);
             prop_assert_eq!(shell_resolve(&s, &state), s);
+        }
+
+        #[test]
+        #[cfg_attr(miri, ignore = "proptest case loops are impractical under Miri isolation")]
+        fn remote_injection_literals_round_trip(
+            raw in "[a-zA-Z0-9 .,!?/_:@=\\\"\n\r\t{} $-]{0,30}",
+        ) {
+            // The REMOTE header renderer must invert `expand_string`: a
+            // hostile host string renders to a DSL literal that parses and
+            // expands back byte identical on the guest.
+            use super::remote::render_dsl_literal;
+            use oxdock_parser::{Expr, StepKind};
+            let state = prop_state(&[], &[]);
+            let literal = render_dsl_literal(&Value::string(raw.clone()))
+                .expect("strings always render");
+            let reparsed = crate::parse_script(&format!("LET $v: STRING = {literal}\n"))
+                .expect("rendered literal parses");
+            let payload = match &reparsed[0].kind {
+                StepKind::Assign { expr, .. } => match expr {
+                    Expr::Literal(value) => value.as_str().expect("string payload").to_string(),
+                    other => panic!("expected literal, got {other:?}"),
+                },
+                other => panic!("expected Assign, got {other:?}"),
+            };
+            prop_assert_eq!(expand_string(&payload, &state.envs, &state).expect("expand"), raw);
         }
     }
 }

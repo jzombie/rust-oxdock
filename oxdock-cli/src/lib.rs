@@ -27,6 +27,8 @@ pub use endpoints::EndpointFlags;
 pub use endpoints::build_registry;
 #[cfg(feature = "net")]
 use oxdock_net_plugin::EndpointRegistry;
+#[cfg(feature = "net")]
+mod serve;
 
 /// Host modules bundled into the CLI runner. With `net` this exposes STD
 /// plus the NET virtual-endpoint toolkit (`NET_LISTEN`, `NET_ACCEPT`,
@@ -37,6 +39,21 @@ use oxdock_net_plugin::EndpointRegistry;
 /// STD builtins remain.
 fn cli_host_modules() -> Vec<HostModule<DefaultProcessManager>> {
     cli_host_modules_with(None)
+}
+
+/// Module surface for the guest serve loop: identical to the host runner
+/// surface so handshake language-surface identity actually compares the
+/// same tables both ends run.
+#[cfg(feature = "net")]
+fn cli_host_modules_for_serve() -> Vec<HostModule<DefaultProcessManager>> {
+    cli_host_modules_with(None)
+}
+
+/// Module-table digest for the remote handshake: sha256 over sorted
+/// `module::function` entries from the serve surface.
+#[cfg(feature = "net")]
+fn remote_session_module_hash(entries: &[(String, Vec<String>)]) -> String {
+    oxdock_net_plugin::module_hash(entries)
 }
 
 /// Host modules resolving virtual endpoints through `registry`: the CLI
@@ -121,6 +138,19 @@ pub fn run() -> Result<()> {
         }
         Err(err) => return Err(err),
     };
+    // Guest serve mode short-circuits everything: no script, no snapshot,
+    // no shell. Binary stdio contract enforced inside.
+    #[cfg(feature = "net")]
+    if opts.remote_serve {
+        if opts.shell || !opts.remotes.is_empty() || !matches!(opts.script, ScriptSource::Stdin) {
+            bail!("--remote-serve runs alone (no --script, --shell, or --remote)");
+        }
+        return serve::serve();
+    }
+    #[cfg(not(feature = "net"))]
+    if opts.remote_serve {
+        bail!("--remote-serve requires the `net` feature (rebuild with --features net)");
+    }
     execute(opts, workspace_root)
 }
 
@@ -135,6 +165,10 @@ pub struct Options {
     pub script: ScriptSource,
     pub shell: bool,
     pub endpoints: EndpointFlags,
+    pub remote_serve: bool,
+    /// Raw `--remote <target>="<command>"` pairs, in flag order. Validated
+    /// and tokenized at inventory build; empty in lean builds (flag bails).
+    pub remotes: Vec<(String, String)>,
 }
 
 impl Options {
@@ -147,6 +181,8 @@ impl Options {
         let mut script: Option<ScriptSource> = None;
         let mut shell = false;
         let mut endpoints = EndpointFlags::default();
+        let mut remote_serve = false;
+        let mut remotes: Vec<(String, String)> = Vec::new();
         let mut set_script = |source: ScriptSource, origin: &str| -> Result<()> {
             if script.is_some() {
                 bail!("script given multiple times ({origin})");
@@ -229,6 +265,27 @@ impl Options {
                 Long("offline") => {
                     endpoints.offline = true;
                 }
+                Long("remote-serve") => {
+                    remote_serve = true;
+                }
+                Long("remote") => {
+                    let raw = value_string(
+                        parser
+                            .value()
+                            .map_err(|_| anyhow::anyhow!("--remote requires <target>=\"<command>\""))?,
+                    )?;
+                    #[cfg(not(feature = "net"))]
+                    {
+                        // Keep the pure validator live in lean builds; the
+                        // feature error below still wins.
+                        let _ = oxdock_net_plugin_stub_parse_remote(&raw);
+                        bail!(
+                            "--remote requires the `net` feature (rebuild with --features net)"
+                        );
+                    }
+                    #[cfg(feature = "net")]
+                    remotes.push(oxdock_net_plugin::parse_remote_arg(&raw)?);
+                }
                 Long("help") | Short('h') => {
                     bail!("{}", usage());
                 }
@@ -261,6 +318,8 @@ impl Options {
             script,
             shell,
             endpoints,
+            remote_serve,
+            remotes,
         })
     }
 }
@@ -288,6 +347,7 @@ pub fn usage() -> String {
               --listen <addr>    expose a logical service port ([host:]port, repeatable)
               -p <[host:]outer:inner>  map outer port to an inner service port or name (repeatable; outer 0 is ephemeral)
               --offline          open no sockets (conflicts with --listen/-p)
+              --remote TARGET=CMD    bind a REMOTE target to a stdio transport command (repeatable)
               --help, -h         print this help and exit
             With no script given, reads the script from stdin (must be piped unless `--shell`).
             Scripts declare logical endpoints (a port like 2251); the flags above map them to interfaces.
@@ -365,15 +425,32 @@ pub fn execute_with_result(opts: Options, workspace_root: GuardedPath) -> Result
         let registry = build_registry(&opts.endpoints)?;
         #[cfg(not(feature = "net"))]
         check_no_net_endpoints(&opts.endpoints)?;
+        #[cfg(not(feature = "net"))]
+        check_no_net_remotes(&opts.remotes)?;
         let steps = parse_cli_script(&script)?;
+        // Validate REMOTE targets against inventory after parsing (targets
+        // live in AST nodes) and before execution: unknown targets fail
+        // here, never mid-run.
         #[cfg(feature = "net")]
-        let output = run_steps_with_lazy_snapshot_and_modules(
-            &workspace_root,
-            &steps,
-            ExecIo::new(),
-            cli_host_modules_with(Some(&registry)),
-            cli_host_types(),
-        )?;
+        let inventory = {
+            let pairs = opts.remotes.clone();
+            let inventory = oxdock_net_plugin::RemoteInventory::build(pairs)?;
+            inventory.log_resolutions();
+            inventory.validate_script(&steps)?;
+            inventory
+        };
+        #[cfg(feature = "net")]
+        let output = {
+            let mut io_cfg = ExecIo::new();
+            register_remote_runners(&mut io_cfg, &inventory);
+            run_steps_with_lazy_snapshot_and_modules(
+                &workspace_root,
+                &steps,
+                io_cfg,
+                cli_host_modules_with(Some(&registry)),
+                cli_host_types(),
+            )?
+        };
         #[cfg(not(feature = "net"))]
         let output = run_steps_with_lazy_snapshot_and_modules(
             &workspace_root,
@@ -397,9 +474,56 @@ pub fn execute_with_result(opts: Options, workspace_root: GuardedPath) -> Result
     })
 }
 
-/// Report ephemeral outer resolutions (`-p 0:<inner>`) to stderr so the
-/// runner learns the real ports. Fixed mappings need no report: the flags
-/// already name them.
+/// Register one SSH stdio session per inventory target on the run IO.
+/// Lazy spawn still applies (no process exists until a block entry), but
+/// registration happens up front so `REMOTE` interception always finds a
+/// runner when the target validated.
+#[cfg(feature = "net")]
+fn register_remote_runners(io: &mut ExecIo, inventory: &oxdock_net_plugin::RemoteInventory) {
+    use std::sync::Arc;
+    let entries = surface_entries();
+    let module_hash = oxdock_net_plugin::module_hash(&entries);
+    let modules: Vec<String> = entries.iter().map(|(name, _)| name.clone()).collect();
+    for target in inventory.targets() {
+        let Some(argv) = inventory.argv(&target) else {
+            continue;
+        };
+        let config = oxdock_net_plugin::SessionConfig {
+            argv: argv.to_vec(),
+            oxdock_version: env!("CARGO_PKG_VERSION").to_string(),
+            modules: modules.clone(),
+            module_hash: module_hash.clone(),
+        };
+        io.set_remote_runner_for_target(
+            target,
+            Arc::new(oxdock_net_plugin::StdioSession::new(config)),
+        );
+    }
+}
+
+/// Module-table surface for handshake identity and session config: the
+/// same tables the run executes against.
+#[cfg(feature = "net")]
+fn surface_entries() -> Vec<(String, Vec<String>)> {
+    let mut engine = Engine::new();
+    for module in cli_host_modules() {
+        engine.register_module(module);
+    }
+    let table = engine.module_table();
+    let mut entries: Vec<(String, Vec<String>)> = table
+        .modules
+        .into_iter()
+        .map(|(name, funcs)| {
+            let mut functions: Vec<String> = funcs
+                .map(|surface| surface.functions.into_iter().collect())
+                .unwrap_or_default();
+            functions.sort();
+            (name, functions)
+        })
+        .collect();
+    entries.sort();
+    entries
+}
 #[cfg(feature = "net")]
 fn report_ephemeral_publishes(flags: &EndpointFlags, registry: &Arc<EndpointRegistry>) {
     use oxdock_net_plugin::{EndpointKey, Protocol, parse_endpoint_ref};
@@ -419,6 +543,29 @@ fn report_ephemeral_publishes(flags: &EndpointFlags, registry: &Arc<EndpointRegi
             Err(_) => eprintln!("oxdock: published <unbound> -> {inner}"),
         }
     }
+}
+
+/// Without `net`, remote targets cannot exist: `--remote` is rejected
+/// at flag parse time; this covers programmatic `Options` carrying pairs.
+#[cfg(not(feature = "net"))]
+fn oxdock_net_plugin_stub_parse_remote(raw: &str) -> Result<(String, String)> {
+    // Mirror the NET plugin's shape check without the dependency so the
+    // flag stays diagnosed (not silently swallowed) in lean builds.
+    match raw.split_once('=') {
+        Some((target, command)) if !target.trim().is_empty() && !command.trim().is_empty() => {
+            Ok((target.trim().to_string(), command.to_string()))
+        }
+        _ => bail!("invalid --remote {raw:?}: expected <target>=\"<command>\""),
+    }
+}
+
+/// Without `net`, remote targets cannot exist.
+#[cfg(not(feature = "net"))]
+fn check_no_net_remotes(remotes: &[(String, String)]) -> Result<()> {
+    if !remotes.is_empty() {
+        bail!("--remote requires the `net` feature (rebuild with --features net)");
+    }
+    Ok(())
 }
 
 /// Without `net`, endpoint sockets cannot exist: `--listen`/`-p` are
@@ -517,9 +664,22 @@ where
         let registry = build_registry(&opts.endpoints)?;
         #[cfg(not(feature = "net"))]
         check_no_net_endpoints(&opts.endpoints)?;
+        #[cfg(not(feature = "net"))]
+        check_no_net_remotes(&opts.remotes)?;
         #[cfg(feature = "net")]
         report_ephemeral_publishes(&opts.endpoints, &registry);
         let steps = parse_cli_script(&script)?;
+        // Validate REMOTE targets against inventory after parsing (targets
+        // live in AST nodes) and before execution: unknown targets fail
+        // here, never mid-run.
+        #[cfg(feature = "net")]
+        let inventory = {
+            let inventory =
+                oxdock_net_plugin::RemoteInventory::build(opts.remotes.clone())?;
+            inventory.log_resolutions();
+            inventory.validate_script(&steps)?;
+            inventory
+        };
         // If we are running a script from a file, we might have stdin available for the script itself.
         // If we read the script from stdin, then stdin is consumed.
         // But if opts.script is ScriptSource::Path, stdin is still available.
@@ -539,6 +699,8 @@ where
 
         let mut io_cfg = ExecIo::new();
         io_cfg.set_stdin(stdin_handle);
+        #[cfg(feature = "net")]
+        register_remote_runners(&mut io_cfg, &inventory);
         #[cfg(feature = "net")]
         let output = run_steps_with_lazy_snapshot_and_modules(
             &workspace_root,
@@ -732,6 +894,8 @@ mod tests {
             script: ScriptSource::Path(script_path),
             shell: true,
             endpoints: EndpointFlags::default(),
+            remote_serve: false,
+            remotes: Vec::new(),
         };
 
         let observed = Cell::new(false);
@@ -1052,6 +1216,8 @@ mod tests {
             script: ScriptSource::Path(script_path),
             shell: false,
             endpoints: EndpointFlags::default(),
+            remote_serve: false,
+            remotes: Vec::new(),
         };
         let result = execute_with_result(opts, workspace_root).expect("execute");
         let snapshot = result
@@ -1082,6 +1248,8 @@ mod tests {
             script: ScriptSource::Path(script_path),
             shell: false,
             endpoints: EndpointFlags::default(),
+            remote_serve: false,
+            remotes: Vec::new(),
         };
         let result = execute_with_result(opts, workspace_root.clone()).expect("execute");
         assert!(
@@ -1115,6 +1283,8 @@ mod tests {
             script: ScriptSource::Path(script_path),
             shell: false,
             endpoints: EndpointFlags::default(),
+            remote_serve: false,
+            remotes: Vec::new(),
         };
         let result = execute_with_result(opts, workspace_root.clone()).expect("execute");
         assert!(
@@ -1139,6 +1309,8 @@ mod tests {
             script: ScriptSource::Path(script_path),
             shell: true,
             endpoints: EndpointFlags::default(),
+            remote_serve: false,
+            remotes: Vec::new(),
         };
         let called = RefCell::new(None::<(String, String)>);
         execute_for_test(opts, workspace_root.clone(), |cwd, workspace| {
@@ -1181,6 +1353,8 @@ mod tests {
             script: ScriptSource::Path(script_path),
             shell: false,
             endpoints: EndpointFlags::default(),
+            remote_serve: false,
+            remotes: Vec::new(),
         };
         execute_with_result(opts, workspace_root)?;
         Ok(())
@@ -1210,6 +1384,8 @@ mod tests {
             script: ScriptSource::Path(script_path),
             shell: false,
             endpoints: EndpointFlags::default(),
+            remote_serve: false,
+            remotes: Vec::new(),
         };
         execute_with_result(opts, workspace_root)?;
         Ok(())
@@ -1247,6 +1423,8 @@ mod tests {
                 )],
                 ..EndpointFlags::default()
             },
+            remote_serve: false,
+            remotes: Vec::new(),
         };
         let result = execute_with_result(opts, workspace_root)?;
         let snapshot = result
@@ -1292,6 +1470,8 @@ mod tests {
             script: ScriptSource::Path(script_path),
             shell: false,
             endpoints: EndpointFlags::default(),
+            remote_serve: false,
+            remotes: Vec::new(),
         };
         let err = match execute_with_result(opts, workspace_root) {
             Ok(_) => panic!("SSH names must be unknown without the feature"),
@@ -1353,6 +1533,8 @@ mod tests {
             script: ScriptSource::Path(script_path),
             shell: false,
             endpoints: EndpointFlags::default(),
+            remote_serve: false,
+            remotes: Vec::new(),
         };
         let err = match execute_with_result(opts, workspace_root) {
             Ok(_) => panic!("NET names must be unknown without the feature"),

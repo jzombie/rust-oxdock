@@ -704,6 +704,8 @@ mod fingerprint_tests {
                 })?;
                 Ok(StepKind::Copy {
                     from_workspace: None,
+                    from_host: false,
+                    to_host: false,
                     from,
                     to,
                 })

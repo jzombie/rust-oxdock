@@ -5,11 +5,14 @@ mod fs_ops;
 mod handlers;
 mod io;
 mod native;
+pub mod remote;
 mod state;
 mod steps;
 #[cfg(test)]
 mod tests;
 mod typing;
+
+pub use self::remote::{RemoteRequest, RemoteResponse, RemoteRunner};
 
 pub use self::engine::{Engine, EngineOutput};
 pub(crate) use self::handlers::{
@@ -22,7 +25,7 @@ pub(crate) use self::handlers::{
     dispatch_mkdir, dispatch_push_into_step, dispatch_read, dispatch_read_line, dispatch_return,
     dispatch_run, dispatch_run_exec, dispatch_set, dispatch_sleep_step, dispatch_symlink,
     dispatch_timeout_step, dispatch_while_loop, dispatch_with_io, dispatch_with_io_block,
-    dispatch_workdir, dispatch_workspace, dispatch_write,
+    dispatch_workdir, dispatch_workspace, dispatch_write, dispatch_remote,
 };
 pub use self::io::ExecIo;
 pub use self::io::PipeStream;

@@ -47,6 +47,8 @@ fn script_runs_copy_and_symlink() {
             guard: None,
             kind: StepKind::Copy {
                 from_workspace: None,
+                from_host: false,
+                to_host: false,
                 from: "./client/dist".into(),
                 to: "./client/dist-copy".into(),
             },

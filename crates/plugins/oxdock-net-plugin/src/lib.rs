@@ -14,6 +14,7 @@
 mod bridge;
 mod endpoints;
 mod funcs;
+pub mod remote;
 mod state;
 mod types;
 pub mod validate;
@@ -23,6 +24,9 @@ pub use endpoints::{
     acquire_listener,
 };
 pub use funcs::{module_with, module_with_endpoints};
+pub use remote::{
+    RemoteInventory, RemoteTarget, SessionConfig, StdioSession, module_hash, parse_remote_arg,
+};
 use oxdock_core::HostModule;
 pub use oxdock_process::DefaultProcessManager;
 

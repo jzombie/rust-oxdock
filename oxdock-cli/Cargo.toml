@@ -18,7 +18,7 @@ build = []
 
 [features]
 default = ["net"]
-net = ["dep:oxdock-net-plugin"]
+net = ["dep:oxdock-net-plugin", "dep:oxdock-remote-proto"]
 ssh = ["net", "dep:oxdock-ssh-plugin"]
 
 [dependencies]
@@ -29,8 +29,12 @@ oxdock-core.workspace = true
 oxdock-fs.workspace = true
 oxdock-net-plugin = { workspace = true, optional = true }
 oxdock-parser.workspace = true
+oxdock-pipe.workspace = true
 oxdock-process.workspace = true
+oxdock-remote-proto = { workspace = true, optional = true }
 oxdock-ssh-plugin = { workspace = true, optional = true }
+serde_json.workspace = true
+sha2.workspace = true
 tempfile.workspace = true
 
 [dev-dependencies]

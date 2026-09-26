@@ -23,6 +23,8 @@ mod let_capture;
 mod phase_boundary;
 #[path = "integration/reference_examples.rs"]
 mod reference_examples;
+#[path = "integration/remote.rs"]
+mod remote;
 #[path = "integration/unified_values.rs"]
 mod unified_values;
 #[path = "integration/unquoted_syntax.rs"]

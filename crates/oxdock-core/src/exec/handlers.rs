@@ -471,8 +471,9 @@ pub(crate) fn sleep<P: ProcessManager>(
 
 /// Map a `COPY --from-workspace` target onto the filesystem layer's source
 /// root (issue #163). The parser owns the DSL vocabulary; `oxdock-fs`
-/// stays a leaf crate, so the translation lives here.
-fn copy_source_root(target: WorkspaceTarget) -> CopySourceRoot {
+/// stays a leaf crate, so the translation lives here. Shared with the
+/// remote fetch resolver, which honors the same flag on `--from-host`.
+pub(super) fn copy_source_root(target: WorkspaceTarget) -> CopySourceRoot {
     match target {
         WorkspaceTarget::Snapshot => CopySourceRoot::Snapshot,
         WorkspaceTarget::Local => CopySourceRoot::Local,
@@ -2487,6 +2488,22 @@ pub(crate) fn dispatch_workspace<P: ProcessManager>(
     workspace(cx, target)
 }
 
+pub(crate) fn dispatch_remote<P: ProcessManager>(
+    step: &StepKind,
+    cx: &mut StepCtx<'_, P>,
+) -> Result<()> {
+    let StepKind::RemoteBlock {
+        target,
+        vars,
+        env,
+        body,
+    } = step
+    else {
+        unreachable!()
+    };
+    super::remote::run_remote_block(cx, target, vars, env, body, 0)
+}
+
 pub(crate) fn dispatch_env<P: ProcessManager>(
     step: &StepKind,
     cx: &mut StepCtx<'_, P>,
@@ -2504,12 +2521,17 @@ pub(crate) fn dispatch_copy<P: ProcessManager>(
 ) -> Result<()> {
     let StepKind::Copy {
         from_workspace,
+        from_host,
+        to_host,
         from,
         to,
     } = step
     else {
         unreachable!()
     };
+    if *from_host || *to_host {
+        return super::remote::copy_transfer(cx, *from_host, *to_host);
+    }
     let from_resolved = super::args::resolve_arg(from, cx)?;
     let to_resolved = super::args::resolve_arg(to, cx)?;
     copy(cx, 0, from_workspace.clone(), &from_resolved, &to_resolved)

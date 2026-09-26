@@ -972,6 +972,8 @@ fn emit_stepkind(
         }
         StepKind::Copy {
             from_workspace,
+            from_host,
+            to_host,
             from,
             to,
         } => {
@@ -992,7 +994,7 @@ fn emit_stepkind(
                     quote! { Some(oxdock_parser::WorkspaceTarget::System) }
                 }
             };
-            quote! { StepKind::Copy { from_workspace: #w, from: #f, to: #t } }
+            quote! { StepKind::Copy { from_workspace: #w, from_host: #from_host, to_host: #to_host, from: #f, to: #t } }
         }
         StepKind::Symlink {
             from_workspace,
@@ -1194,6 +1196,15 @@ fn emit_stepkind(
             let steps: Vec<_> = body.iter().map(|s| emit_step(s, interp)).collect();
             let d = emit_arg(duration, interp);
             quote! { StepKind::Timeout { duration: #d, body: vec![#(#steps),*] } }
+        }
+        StepKind::RemoteBlock {
+            target,
+            vars,
+            env,
+            body,
+        } => {
+            let steps: Vec<_> = body.iter().map(|s| emit_step(s, interp)).collect();
+            quote! { StepKind::RemoteBlock { target: #target.to_string(), vars: vec![#(#vars.to_string()),*], env: vec![#(#env.to_string()),*], body: vec![#(#steps),*] } }
         }
         StepKind::Sleep { duration } => {
             let d = emit_arg(duration, interp);

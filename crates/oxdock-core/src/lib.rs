@@ -16,6 +16,7 @@ define_pipeline! {
     StepKind::Echo(..) => exec::dispatch_echo,
     StepKind::Workdir(..) => exec::dispatch_workdir,
     StepKind::Workspace(..) => exec::dispatch_workspace,
+    StepKind::RemoteBlock { .. } => exec::dispatch_remote,
     StepKind::Env { .. } => exec::dispatch_env,
     StepKind::Copy { .. } => exec::dispatch_copy,
     StepKind::CopyGit { .. } => exec::dispatch_copy_git,

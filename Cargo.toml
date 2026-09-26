@@ -9,6 +9,7 @@ members = [
     "crates/oxdock-logic-tests",
     "crates/oxdock-logic-tests/fixtures/commands/ast_commands",
     "crates/oxdock-parser",
+    "crates/oxdock-remote-proto",
     "crates/plugins/oxdock-net-plugin",
     "crates/plugins/oxdock-ssh-plugin",
     "crates/sys/oxdock-fs",
@@ -34,15 +35,18 @@ repository = "https://github.com/jzombie/rust-oxdock"
 publish = true
 
 [workspace.dependencies]
-anyhow = "1.0.104"
-bytes = "1"
-cache-manager = { version = "0.4.1", features = ["os-cache-dir"] }
-glob = "0.3"
-indoc = "2.0.7"
-lexopt = "0.3.2"
-libc = "0.2.189"
-libtest-mimic = "0.8.2"
-line-ending = "1.5.1"
+  anyhow = "1.0.104"
+  bytes = "1"
+  cache-manager = { version = "0.4.1", features = ["os-cache-dir"] }
+  flate2 = "1.1.5"
+  glob = "0.3"
+  indoc = "2.0.7"
+  lexopt = "0.3.2"
+  libc = "0.2.189"
+  libtest-mimic = "0.8.2"
+  line-ending = "1.5.1"
+  muxio-rpc-service = "0.16.1-alpha"
+  muxio-core = "0.16.1-alpha"
 oxdock = { path = "oxdock", version = "0.19.0-alpha" }
 oxdock-build = { path = "oxdock-build", version = "0.19.0-alpha" }
 oxdock-cli = { path = "oxdock-cli", version = "0.19.0-alpha" }
@@ -57,8 +61,9 @@ oxdock-net-plugin = { path = "crates/plugins/oxdock-net-plugin", version = "0.19
 oxdock-parser = { path = "crates/oxdock-parser", version = "0.19.0-alpha" }
 oxdock-pipe = { path = "crates/sys/oxdock-pipe", version = "0.19.0-alpha" }
 oxdock-process = { path = "crates/sys/oxdock-process", version = "0.19.0-alpha" }
-oxdock-ssh-plugin = { path = "crates/plugins/oxdock-ssh-plugin", version = "0.19.0-alpha" }
-oxdock-sys-test-utils = { path = "crates/sys/oxdock-sys-test-utils", version = "0.19.0-alpha" }
+  oxdock-ssh-plugin = { path = "crates/plugins/oxdock-ssh-plugin", version = "0.19.0-alpha" }
+  oxdock-sys-test-utils = { path = "crates/sys/oxdock-sys-test-utils", version = "0.19.0-alpha" }
+  oxdock-remote-proto = { path = "crates/oxdock-remote-proto", version = "0.19.0-alpha" }
 pest = { version = "2.9.0", default-features = false, features = ["std"] }
 pest_derive = "2.9.0"
 portable-pty = "0.9"
@@ -66,10 +71,13 @@ proc-macro2 = "1.0.107"
 proptest = "1.11.0"
 quote = "1.0.47"
 rand = "0.10"
-russh = { version = "0.63.3", default-features = false, features = ["aws-lc-rs"] }
-serde_json = "1.0.151"
-sha2 = "0.11.0"
-syn = { version = "3.0.4", features = ["full", "visit"] }
+  russh = { version = "0.63.3", default-features = false, features = ["aws-lc-rs"] }
+  serde = { version = "1.0.228", features = ["derive"] }
+  serde_json = "1.0.151"
+  sha2 = "0.11.0"
+  shell-words = "1.1.1"
+  syn = { version = "3.0.4", features = ["full", "visit"] }
+  tar = "0.4.46"
 tempfile = "3.27.0"
 tokio = { version = "1", features = ["rt", "net", "sync", "time", "io-util"] }
 toml = "1.1.4"

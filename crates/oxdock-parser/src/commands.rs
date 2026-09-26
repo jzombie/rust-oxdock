@@ -31,6 +31,30 @@ use indoc::indoc;
 // `split_assignment`, `parse_duration`, `format_duration`) live in
 // `crate::command` beside the `ArgType` validators that call them.
 
+/// Reserved words that can never name a `REMOTE` target: the workspace
+/// roots plus the block keyword itself. Shared with CLI inventory
+/// validation so charset rules cannot drift between parser and host.
+pub const REMOTE_RESERVED_WORDS: &[&str] =
+    &["SNAPSHOT", "LOCAL", "CACHE", "SYSTEM", "REMOTE"];
+
+/// Validate a `REMOTE` target name: start alnum, then alnum, `_`, or
+/// `-`, max 64 chars. Safe in CLI flags, log lines, tarball names, and
+/// muxio stream labels without quoting.
+pub fn is_valid_remote_target(target: &str) -> bool {
+    if target.is_empty() || target.len() > 64 {
+        return false;
+    }
+    if REMOTE_RESERVED_WORDS.contains(&target) {
+        return false;
+    }
+    let mut chars = target.chars();
+    match chars.next() {
+        Some(first) if first.is_ascii_alphanumeric() => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
 /// Join free-text tail arguments into one value. Single args pass through
 /// untouched (preserving `Arg::Expr`); all-`String` tails join exactly like the
 /// historical `join_args`; tails containing expressions become `Arg::Parts`
@@ -345,6 +369,9 @@ fn structural_hint(name: &str, received: &str) -> Option<String> {
         "TIMEOUT" => Some(format!(
             "TIMEOUT needs a duration and a command or block, e.g. `TIMEOUT 30s RUN ...`; got {got}."
         )),
+        "REMOTE" => Some(format!(
+            "REMOTE needs a target and a braced block, e.g. `REMOTE prod [$version, env:DEPLOY_ENV] {{ ... }}`; got {got}."
+        )),
         "FUNC" => Some(format!(
             "FUNC defines a function, e.g. `FUNC GREET($name: STRING) {{ RETURN $name }}`; got {got}."
         )),
@@ -501,6 +528,198 @@ macro_rules! declare_commands {
     };
 }
 
+impl StepKind {
+    /// Visit every immediate child expression (arguments, conditions,
+    /// durations, initializers). Boxed sub-kinds and bodies are NOT
+    /// descended: pair with [`walk_child_kinds`](Self::walk_child_kinds)
+    /// or use [`walk_step_exprs`](Self::walk_step_exprs) for the full
+    /// tree. Exhaustive: a new variant fails compilation here, so AST
+    /// passes built on this visitor can never silently miss a command.
+    pub fn walk_exprs(&self, f: &mut impl FnMut(&Expr)) {
+        fn walk_arg(arg: &Arg, f: &mut impl FnMut(&Expr)) {
+            match arg {
+                Arg::Expr(expr) => f(expr),
+                Arg::Parts(parts) => {
+                    for part in parts {
+                        if let ArgPart::Expr(expr) = part {
+                            f(expr);
+                        }
+                    }
+                }
+                Arg::String(..) => {}
+            }
+        }
+        fn walk_opt(arg: &Option<Arg>, f: &mut impl FnMut(&Expr)) {
+            if let Some(arg) = arg {
+                walk_arg(arg, f);
+            }
+        }
+        fn walk_target(target: &AssertTarget, f: &mut impl FnMut(&Expr)) {
+            if let AssertTarget::Value(arg) = target {
+                walk_arg(arg, f);
+            }
+        }
+        match self {
+            StepKind::Assign { expr, .. } | StepKind::Set { expr, .. } => f(expr),
+            StepKind::Return { expr } => f(expr),
+            StepKind::Call { args, .. } => {
+                for arg in args {
+                    f(arg);
+                }
+            }
+            StepKind::For { in_expr, .. } => f(in_expr),
+            StepKind::If { cond, else_ifs, .. } => {
+                f(cond);
+                for (cond, _) in else_ifs {
+                    f(cond);
+                }
+            }
+            StepKind::While { cond, .. } => f(cond),
+            StepKind::Timeout { duration, .. } | StepKind::Sleep { duration } => {
+                walk_arg(duration, f);
+            }
+            StepKind::Workdir(arg)
+            | StepKind::Echo(arg)
+            | StepKind::Run(arg)
+            | StepKind::Mkdir(arg)
+            | StepKind::HashSha256 { path: arg }
+            | StepKind::Exit(arg) => walk_arg(arg, f),
+            StepKind::Env { value, .. } => walk_arg(value, f),
+            StepKind::Copy { from, to, .. } | StepKind::Symlink { from, to, .. } => {
+                walk_arg(from, f);
+                walk_arg(to, f);
+            }
+            StepKind::CopyGit { rev, from, to, .. } => {
+                walk_arg(rev, f);
+                walk_arg(from, f);
+                walk_arg(to, f);
+            }
+            StepKind::Ls(arg) | StepKind::Read(arg) => walk_opt(arg, f),
+            StepKind::Write { path, contents } | StepKind::Append { path, contents } => {
+                walk_arg(path, f);
+                walk_opt(contents, f);
+            }
+            StepKind::Expand { path, overrides } => {
+                walk_opt(path, f);
+                for (_, value) in overrides {
+                    walk_arg(value, f);
+                }
+            }
+            StepKind::AssertEq {
+                actual, expected, ..
+            } => {
+                walk_target(actual, f);
+                walk_opt(expected, f);
+            }
+            StepKind::AssertContains { haystack, needle } => {
+                walk_target(haystack, f);
+                walk_arg(needle, f);
+            }
+            StepKind::ListAppend { item, .. } => walk_arg(item, f),
+            StepKind::RunExec { argv } => {
+                for arg in argv {
+                    walk_arg(arg, f);
+                }
+            }
+            StepKind::WithIo { .. }
+            | StepKind::WithIoBlock { .. }
+            | StepKind::Workspace(_)
+            | StepKind::InheritEnv { .. }
+            | StepKind::Cwd
+            | StepKind::ReadLine { .. }
+            | StepKind::AssignCapture { .. }
+            | StepKind::AwaitCapture { .. }
+            | StepKind::AsyncBlock { .. }
+            | StepKind::AssignAsync { .. }
+            | StepKind::Await { .. }
+            | StepKind::Cancel { .. }
+            | StepKind::RemoteBlock { .. }
+            | StepKind::FuncDef { .. }
+            | StepKind::Break
+            | StepKind::Continue => {}
+        }
+    }
+
+    /// Visit every immediate child kind: boxed sub-commands and the kinds
+    /// of every body step. Exhaustive like [`walk_exprs`](Self::walk_exprs):
+    /// new block shapes fail compilation here.
+    pub fn walk_child_kinds(&self, f: &mut impl FnMut(&StepKind)) {
+        fn walk_body(body: &[Step], f: &mut impl FnMut(&StepKind)) {
+            for step in body {
+                f(&step.kind);
+            }
+        }
+        match self {
+            StepKind::WithIo { cmd, .. } => f(cmd),
+            StepKind::AssignCapture { cmd, .. } => f(cmd),
+            StepKind::For { body, .. }
+            | StepKind::While { body, .. }
+            | StepKind::FuncDef { body, .. }
+            | StepKind::Timeout { body, .. }
+            | StepKind::AssignAsync { body, .. }
+            | StepKind::AsyncBlock { body }
+            | StepKind::RemoteBlock { body, .. } => walk_body(body, f),
+            StepKind::If {
+                then_body,
+                else_ifs,
+                else_body,
+                ..
+            } => {
+                walk_body(then_body, f);
+                for (_, body) in else_ifs {
+                    walk_body(body, f);
+                }
+                if let Some(body) = else_body {
+                    walk_body(body, f);
+                }
+            }
+            StepKind::InheritEnv { .. }
+            | StepKind::Workdir(_)
+            | StepKind::Workspace(_)
+            | StepKind::Env { .. }
+            | StepKind::Echo(_)
+            | StepKind::Run(_)
+            | StepKind::RunExec { .. }
+            | StepKind::Copy { .. }
+            | StepKind::CopyGit { .. }
+            | StepKind::Symlink { .. }
+            | StepKind::Mkdir(_)
+            | StepKind::Ls(_)
+            | StepKind::Cwd
+            | StepKind::Read(_)
+            | StepKind::ReadLine { .. }
+            | StepKind::Write { .. }
+            | StepKind::Append { .. }
+            | StepKind::Expand { .. }
+            | StepKind::AssertEq { .. }
+            | StepKind::AssertContains { .. }
+            | StepKind::HashSha256 { .. }
+            | StepKind::Exit(_)
+            | StepKind::WithIoBlock { .. }
+            | StepKind::Assign { .. }
+            | StepKind::Set { .. }
+            | StepKind::AwaitCapture { .. }
+            | StepKind::Await { .. }
+            | StepKind::Cancel { .. }
+            | StepKind::Sleep { .. }
+            | StepKind::ListAppend { .. }
+            | StepKind::Call { .. }
+            | StepKind::Return { .. }
+            | StepKind::Break
+            | StepKind::Continue => {}
+        }
+    }
+
+    /// Visit every descendant expression in the full subtree: immediate
+    /// expressions (deep via [`Expr::walk`](crate::ast::Expr::walk)) plus
+    /// every nested body and boxed sub-command. The single traversal every
+    /// AST inspection pass should use.
+    pub fn walk_step_exprs(&self, f: &mut impl FnMut(&Expr)) {
+        self.walk_exprs(&mut |expr| expr.walk(f));
+        self.walk_child_kinds(&mut |kind| kind.walk_step_exprs(f));
+    }
+}
+
 /// First-argument target for `ASSERT_EQ` / `ASSERT_CONTAINS`.
 ///
 /// Values (`Arg`) evaluate in memory and never touch disk. The `Stdout`
@@ -592,6 +811,7 @@ declare_commands! {
         Await { var: String },
         Cancel { var: String },
         Timeout { duration: Arg, body: Vec<Step> },
+        RemoteBlock { target: String, vars: Vec<String>, env: Vec<String>, body: Vec<Step> },
         RunExec { argv: Vec<Arg> },
         FuncDef { name: String, params: Vec<(String, String)>, body: Vec<Step> },
         Call { name: String, args: Vec<Expr> },
@@ -881,15 +1101,15 @@ declare_commands! {
 
     Copy => [
         name: "COPY",
-        variant: Copy { from_workspace: Option<WorkspaceTarget>, from: Arg, to: Arg },
-        syntax: "COPY [--from-workspace SNAPSHOT|LOCAL|CACHE|SYSTEM] <from> <to>",
+        variant: Copy { from_workspace: Option<WorkspaceTarget>, from_host: bool, to_host: bool, from: Arg, to: Arg },
+        syntax: "COPY [--from-workspace SNAPSHOT|LOCAL|CACHE|SYSTEM] [--from-host | --to-host] <from> <to>",
         summary: "Copy file into workspace.",
         description: "Copies from host (the source is never moved or modified). Docker destination semantics: a file copied onto a directory (an existing one, or a trailing-slash spell like `out/`) is duplicated inside it under its own basename; a directory source duplicates its contents into the destination; any other destination path is created holding the copied bytes.",
         args: &[
             ArgSpec { name: "from", arg_type: ArgType::Path, description: "Source", io: IoDirection::Read, index: 0, required: true, fallback_stream: None },
             ArgSpec { name: "to", arg_type: ArgType::Path, description: "Dest", io: IoDirection::Write, index: 1, required: true, fallback_stream: None },
         ],
-        flags: &[ FlagSpec { name: "from_workspace", long: "--from-workspace", value_type: FlagValueType::String, required: false, description: "Copy from the given workspace root instead of the build context" } ],
+        flags: &[ FlagSpec { name: "from_workspace", long: "--from-workspace", value_type: FlagValueType::String, required: false, description: "Copy from the given workspace root instead of the build context" }, FlagSpec { name: "from_host", long: "--from-host", value_type: FlagValueType::Flag, required: false, description: "Fetch from the host workspace into the guest (REMOTE bodies only)" }, FlagSpec { name: "to_host", long: "--to-host", value_type: FlagValueType::Flag, required: false, description: "Push from the guest workspace back to the host (REMOTE bodies only)" } ],
         default_output: None,
         examples: &[ Example { name: "copy", fence_meta: Some("roots:unified"), code: indoc! {r#"
             # Copy to a new name, then read back.
@@ -925,7 +1145,12 @@ declare_commands! {
             let mut it = args.into_iter();
             let from = it.next().ok_or_else(|| ParseError::validation("COPY", "COPY requires a source".to_string(), &SpanContext::line_only(0)))?;
             let to = it.next().ok_or_else(|| ParseError::validation("COPY", "COPY requires a destination".to_string(), &SpanContext::line_only(0)))?;
-            Ok(StepKind::Copy { from_workspace, from, to })
+            let from_host = flags.iter().any(|(k, _)| k == "from_host");
+            let to_host = flags.iter().any(|(k, _)| k == "to_host");
+            if from_host && to_host {
+                return Err(ParseError::validation("COPY", "COPY --from-host and --to-host are mutually exclusive".to_string(), &SpanContext::line_only(0)));
+            }
+            Ok(StepKind::Copy { from_workspace, from_host, to_host, from, to })
         },
     ],
 
@@ -2273,6 +2498,39 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             ],
         },
         CommandMeta {
+            name: "REMOTE",
+            syntax: "REMOTE <target> [[$var, ...] [env:NAME, ...]] { <commands> }",
+            summary: "Run a sealed block on a remote target.",
+            description: indoc! {r#"
+                Runs the braced block on the named remote target, which the
+                host binds to an SSH destination at startup (`--remote`).
+                The block is sealed: no outer variables or functions cross
+                except header-listed `$var` (outer LET, same name) and
+                `env:NAME` (outer env key) entries. Results return as files
+                in the synced workspace or bytes on `WITH_IO` pipes.
+
+                The target is a static literal, never a variable: the same
+                script addresses another machine by rebinding inventory, not
+                by editing. Unknown targets fail before execution starts.
+            "#},
+            args: &[],
+            flags: &[],
+            default_output: None,
+            examples: &[
+                Example {
+                    name: "remote block without a runner",
+                    fence_meta: Some("expect_error:\"has no registered session\""),
+                    code: indoc! {r#"
+                    # Without a bound session, the block bails instead of
+                    # executing anywhere unexpected.
+                    REMOTE prod {
+                        ECHO "do something on remote"
+                    }
+                "#},
+                },
+            ],
+        },
+        CommandMeta {
             name: "FUNC",
             syntax: "FUNC NAME([$param: TYPE, ...]) { <commands> }",
             summary: "Define a user function.",
@@ -2522,25 +2780,27 @@ impl fmt::Display for StepKind {
             StepKind::Echo(m) => write!(f, "ECHO {}", fmt_value(m, quote_msg)),
             StepKind::Copy {
                 from_workspace,
+                from_host,
+                to_host,
                 from,
                 to,
             } => {
+                let mut head = String::from("COPY");
                 if let Some(target) = from_workspace {
-                    write!(
-                        f,
-                        "COPY --from-workspace {} {} {}",
-                        target,
-                        fmt_value(from, quote_arg),
-                        fmt_value(to, quote_arg)
-                    )
-                } else {
-                    write!(
-                        f,
-                        "COPY {} {}",
-                        fmt_value(from, quote_arg),
-                        fmt_value(to, quote_arg)
-                    )
+                    head.push_str(&format!(" --from-workspace {target}"));
                 }
+                if *from_host {
+                    head.push_str(" --from-host");
+                }
+                if *to_host {
+                    head.push_str(" --to-host");
+                }
+                write!(
+                    f,
+                    "{head} {} {}",
+                    fmt_value(from, quote_arg),
+                    fmt_value(to, quote_arg)
+                )
             }
             StepKind::Symlink {
                 from_workspace,
@@ -2782,6 +3042,25 @@ impl fmt::Display for StepKind {
                     }
                     write!(f, "\n}}")
                 }
+            }
+            StepKind::RemoteBlock {
+                target,
+                vars,
+                env,
+                body,
+            } => {
+                let mut entries: Vec<String> =
+                    vars.iter().map(|v| format!("${v}")).collect();
+                entries.extend(env.iter().map(|e| format!("env:{e}")));
+                if entries.is_empty() {
+                    write!(f, "REMOTE {target} {{")?;
+                } else {
+                    write!(f, "REMOTE {target} [{}] {{", entries.join(", "))?;
+                }
+                for s in body {
+                    write!(f, "\n    {}", s)?;
+                }
+                write!(f, "\n}}")
             }
             StepKind::FuncDef { name, params, body } => {
                 let ps: Vec<String> = params
@@ -3425,6 +3704,7 @@ mod tests {
                 StepKind::Await { .. } => Some("AWAIT"),
                 StepKind::Cancel { .. } => Some("CANCEL"),
                 StepKind::Timeout { .. } => Some("TIMEOUT"),
+                StepKind::RemoteBlock { .. } => Some("REMOTE"),
                 StepKind::FuncDef { .. } => Some("FUNC"),
                 // Bare `NAME(...)` calls share the `FUNC` reference page;
                 // there is no call keyword to document on its own.
@@ -3520,6 +3800,12 @@ mod tests {
             },
             StepKind::Timeout {
                 duration: Arg::String("1s".to_string(), false),
+                body: Vec::new(),
+            },
+            StepKind::RemoteBlock {
+                target: "prod".to_string(),
+                vars: Vec::new(),
+                env: Vec::new(),
                 body: Vec::new(),
             },
             StepKind::FuncDef {

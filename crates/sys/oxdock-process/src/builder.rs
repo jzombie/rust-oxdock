@@ -84,6 +84,16 @@ impl CommandBuilder {
         self
     }
 
+    pub fn stdout_piped(&mut self) -> &mut Self {
+        self.inner.stdout(Stdio::piped());
+        self
+    }
+
+    pub fn stderr_piped(&mut self) -> &mut Self {
+        self.inner.stderr(Stdio::piped());
+        self
+    }
+
     pub fn current_dir(&mut self, dir: impl AsRef<Path>) -> &mut Self {
         let path = dir.as_ref();
         self.inner.current_dir(path);
@@ -144,6 +154,43 @@ impl CommandBuilder {
         }
     }
 
+    /// Spawn with piped stdio halves handed back for frame pumps: stdin and
+    /// stdout are forced to pipes (stderr keeps whatever was configured,
+    /// usually inherited for diagnostics). The remaining child is wrapped
+    /// in a [`ChildHandle`] so kill-on-drop and reaping behave identically
+    /// to [`spawn`](Self::spawn). Sessions own the halves and join their
+    /// pump threads; dropping the halves closes the pipes.
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    pub fn spawn_piped(&mut self) -> Result<PipedChild> {
+        #[cfg(miri)]
+        {
+            let _ = self;
+            bail!("spawn is not supported under miri synthetic process backend")
+        }
+
+        #[cfg(not(miri))]
+        {
+            self.inner.stdin(Stdio::piped());
+            self.inner.stdout(Stdio::piped());
+            let desc = format!("{:?}", self.inner);
+            let mut child = self
+                .inner
+                .spawn()
+                .with_context(|| format!("failed to spawn {desc}"))?;
+            let stdin = child.stdin.take().with_context(|| {
+                format!("spawned process has no piped stdin: {desc}")
+            })?;
+            let stdout = child.stdout.take().with_context(|| {
+                format!("spawned process has no piped stdout: {desc}")
+            })?;
+            Ok(PipedChild {
+                handle: ChildHandle::new(child, None, Vec::new()),
+                stdin,
+                stdout,
+            })
+        }
+    }
+
     /// Return a lightweight snapshot of the command configuration for testing.
     pub fn snapshot(&self) -> CommandSnapshot {
         CommandSnapshot {
@@ -162,6 +209,17 @@ pub struct CommandSnapshot {
     pub args: Vec<OsString>,
     pub envs: Vec<(OsString, OsString)>,
     pub cwd: Option<PathBuf>,
+}
+
+/// A spawned child with its stdio halves detached for frame pumps.
+/// Dropping `stdin`/`stdout` closes the pipes; `handle` keeps kill-on-drop
+/// and reaping semantics. Only constructed by
+/// [`CommandBuilder::spawn_piped`].
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+pub struct PipedChild {
+    pub handle: ChildHandle,
+    pub stdin: std::process::ChildStdin,
+    pub stdout: std::process::ChildStdout,
 }
 
 pub struct CommandOutput {
