@@ -5,11 +5,17 @@ mod fs_ops;
 mod handlers;
 mod io;
 mod native;
+pub mod remote;
 mod state;
 mod steps;
 #[cfg(test)]
 mod tests;
 mod typing;
+
+pub use self::remote::{
+    RemoteRequest, RemoteResponse, RemoteRunner, TransferStage, apply_push_dir, apply_push_file,
+    apply_push_symlink,
+};
 
 pub use self::engine::{Engine, EngineOutput};
 pub(crate) use self::handlers::{
@@ -19,13 +25,14 @@ pub(crate) use self::handlers::{
     dispatch_cancel_step, dispatch_continue, dispatch_copy, dispatch_copy_git, dispatch_cwd,
     dispatch_echo, dispatch_env, dispatch_exit, dispatch_expand, dispatch_for_loop,
     dispatch_func_def, dispatch_hash_sha256, dispatch_if_then, dispatch_inherit_env, dispatch_ls,
-    dispatch_mkdir, dispatch_push_into_step, dispatch_read, dispatch_read_line, dispatch_return,
-    dispatch_run, dispatch_run_exec, dispatch_set, dispatch_sleep_step, dispatch_symlink,
-    dispatch_timeout_step, dispatch_while_loop, dispatch_with_io, dispatch_with_io_block,
-    dispatch_workdir, dispatch_workspace, dispatch_write,
+    dispatch_mkdir, dispatch_push_into_step, dispatch_read, dispatch_read_line, dispatch_remote,
+    dispatch_return, dispatch_run, dispatch_run_exec, dispatch_set, dispatch_sleep_step,
+    dispatch_symlink, dispatch_timeout_step, dispatch_while_loop, dispatch_with_io,
+    dispatch_with_io_block, dispatch_workdir, dispatch_workspace, dispatch_write,
 };
 pub use self::io::ExecIo;
 pub use self::io::PipeStream;
+pub use self::io::PushManifestSink;
 pub use self::native::{
     FuncKind, FuncMeta, FuncParam, FunctionRegistry, HostModule, HostRegistration, NativeFn,
     OxDockFn, PureFn, builtin_function_metas, builtin_function_names, std_module_table,
@@ -346,6 +353,7 @@ fn new_state<P: ProcessManager>(fs: Box<dyn WorkspaceFs>, io: ExecIo) -> Result<
         call_depth: 0,
         // Root flow is task 0; worker ids start at 1 (see next_task_id).
         task_id: 0,
+        push_manifest: Vec::new(),
         _marker: std::marker::PhantomData,
     };
 
@@ -387,6 +395,8 @@ fn finish_run<P: ProcessManager>(
         false,
         stdout,
         stderr,
+        None,
+        None,
         true,
     )?;
     match flow {

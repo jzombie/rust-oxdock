@@ -651,6 +651,8 @@ fn with_io_pipe_routes_stdout_to_run_stdin() {
         false,
         None,
         None,
+        None,
+        None,
         true,
     )
     .expect("pipeline executes");
@@ -861,6 +863,7 @@ fn create_exec_state(fs: MockFs) -> ExecState<MockProcessManager> {
         types: super::typing::startup_type_map(),
         call_depth: 0,
         task_id: 0,
+        push_manifest: Vec::new(),
         _marker: std::marker::PhantomData,
     };
     // Mirror production (`run_steps_with_manager`): push a global variable
@@ -879,6 +882,8 @@ fn run_with_mock_fs(steps: &[Step]) -> (GuardedPath, HashMap<String, Vec<u8>>) {
         steps,
         CommandStdin::Null,
         false,
+        None,
+        None,
         None,
         None,
         true,
@@ -1003,6 +1008,8 @@ fn for_int_key_binds_list_indices() {
         false,
         None,
         None,
+        None,
+        None,
         true,
     )
     .expect_err("INT key over MAP must fail");
@@ -1057,6 +1064,8 @@ fn declared_bool_vs_string_treatment_differs() {
         &steps,
         CommandStdin::Null,
         false,
+        None,
+        None,
         None,
         None,
         true,
@@ -1240,6 +1249,8 @@ fn mock_fs_rejects_absolute_windows_paths() {
         false,
         Some(StreamHandle::Stream(sink.clone())),
         Some(StreamHandle::Stream(sink)),
+        None,
+        None,
         false,
     )
     .unwrap_err();
@@ -1591,6 +1602,8 @@ fn with_io_rejects_duplicate_stdout_binding() {
         false,
         None,
         None,
+        None,
+        None,
         true,
     )
     .expect_err("duplicate stdout binding");
@@ -1647,6 +1660,8 @@ fn with_io_rejects_duplicate_stdin_and_stderr_bindings() {
             false,
             None,
             None,
+            None,
+            None,
             true,
         )
         .expect_err("duplicate binding");
@@ -1701,6 +1716,8 @@ fn with_io_async_outer_pipe_stays_script() {
         false,
         None,
         None,
+        None,
+        None,
         true,
     )
     .expect("run");
@@ -1749,6 +1766,8 @@ fn with_io_async_guarded_and_exec_form_outer_pipe_stays_script() {
             &steps,
             CommandStdin::Null,
             false,
+            None,
+            None,
             None,
             None,
             true,
@@ -1808,6 +1827,8 @@ fn with_io_async_dsl_body_stays_script_pipe() {
         false,
         None,
         None,
+        None,
+        None,
         true,
     )
     .expect("run");
@@ -1843,6 +1864,8 @@ fn with_io_block_form_bails_unexpanded() {
         false,
         None,
         None,
+        None,
+        None,
         true,
     )
     .expect_err("unexpanded WITH_IO block");
@@ -1864,6 +1887,8 @@ fn write_without_contents_or_stdin_bails() {
         &steps,
         CommandStdin::Null,
         false,
+        None,
+        None,
         None,
         None,
         true,
@@ -1890,6 +1915,8 @@ fn stderr_stream_handle_reaches_manager() {
         false,
         None,
         Some(StreamHandle::Stream(sink)),
+        None,
+        None,
         true,
     )
     .expect("run");
@@ -1925,6 +1952,8 @@ fn inherit_stdout_override_forces_inherit_modes() {
         false,
         Some(StreamHandle::Stream(out_sink)),
         Some(StreamHandle::Stream(err_sink)),
+        None,
+        None,
         true,
     )
     .expect("run");
@@ -2031,6 +2060,8 @@ fn hash_sha256_matches_known_digest_for_file() {
         false,
         Some(StreamHandle::Stream(sink.clone())),
         None,
+        None,
+        None,
         true,
     )
     .expect("hash pipeline");
@@ -2088,6 +2119,8 @@ fn copy_directory_branch_recurses_into_nested_target() {
             guard: None,
             kind: StepKind::Copy {
                 from_workspace: None,
+                from_host: false,
+                to_host: false,
                 from: "app".into(),
                 to: "copy-of-app".into(),
             },
@@ -2320,6 +2353,8 @@ fn cancelled_end_poll_reaps_and_bails() {
         &steps,
         CommandStdin::Null,
         false,
+        None,
+        None,
         None,
         None,
         true,
@@ -2635,6 +2670,31 @@ mod escape_props {
             let state = prop_state(&[], &[]);
             prop_assert_eq!(shell_resolve(&s, &state), s);
         }
+
+        #[test]
+        #[cfg_attr(miri, ignore = "proptest case loops are impractical under Miri isolation")]
+        fn remote_injection_literals_round_trip(
+            raw in "[a-zA-Z0-9 .,!?/_:@=\\\"\n\r\t{} $-]{0,30}",
+        ) {
+            // The REMOTE header renderer must invert `expand_string`: a
+            // hostile host string renders to a DSL literal that parses and
+            // expands back byte identical on the guest.
+            use oxdock_parser::render_dsl_literal;
+            use oxdock_parser::{Expr, StepKind};
+            let state = prop_state(&[], &[]);
+            let literal = render_dsl_literal(&Value::string(raw.clone()))
+                .expect("strings always render");
+            let reparsed = crate::parse_script(&format!("LET $v: STRING = {literal}\n"))
+                .expect("rendered literal parses");
+            let payload = match &reparsed[0].kind {
+                StepKind::Assign { expr, .. } => match expr {
+                    Expr::Literal(value) => value.as_str().expect("string payload").to_string(),
+                    other => panic!("expected literal, got {other:?}"),
+                },
+                other => panic!("expected Assign, got {other:?}"),
+            };
+            prop_assert_eq!(expand_string(&payload, &state.envs, &state).expect("expand"), raw);
+        }
     }
 }
 
@@ -2797,6 +2857,8 @@ fn run_mock_steps(
         false,
         None,
         None,
+        None,
+        None,
         true,
     )?;
     Ok(fs.snapshot())
@@ -2940,6 +3002,99 @@ fn bare_let_pipe_copies_share_one_backend() {
 }
 
 #[test]
+fn eof_false_while_buffered_true_once_drained() {
+    // EOF means closed plus empty: buffered bytes answer false even
+    // though no writer is alive, and the post-drain read answers true.
+    let steps = crate::parse_script(indoc! {r#"
+        IMPORT [STD]
+        LET $p: PIPE
+        WITH_IO [stdout=$p] ECHO "hi"
+        LET $buffered: BOOL = EOF($p)
+        IF $buffered {
+            WRITE buffered.txt "eof-true"
+        } ELSE {
+            WRITE buffered.txt "eof-false"
+        }
+        WITH_IO [stdin=$p] READ_LINE $got
+        LET $drained: BOOL = EOF($p)
+        IF $drained {
+            WRITE drained.txt "eof-true"
+        } ELSE {
+            WRITE drained.txt "eof-false"
+        }
+    "#})
+    .expect("parse ok");
+    let files = run_mock_steps(&steps, vec![]).expect("eof states read");
+    assert_eq!(file_content(&files, "buffered.txt"), b"eof-false");
+    assert_eq!(file_content(&files, "drained.txt"), b"eof-true");
+}
+
+#[test]
+fn eof_false_with_live_writer_true_after_join() {
+    // A task holding the write end answers false; once it exits and the
+    // pipe closes, the same handle answers true.
+    let steps = crate::parse_script(indoc! {r#"
+        IMPORT [STD]
+        LET $q: PIPE
+        LET $t: HANDLE = ASYNC {
+            WITH_IO [stdout=$q] SLEEP 5s
+        }
+        LET $live: BOOL = EOF($q)
+        IF $live {
+            WRITE live.txt "eof-true"
+        } ELSE {
+            WRITE live.txt "eof-false"
+        }
+        AWAIT $t
+        LET $joined: BOOL = EOF($q)
+        IF $joined {
+            WRITE joined.txt "eof-true"
+        } ELSE {
+            WRITE joined.txt "eof-false"
+        }
+    "#})
+    .expect("parse ok");
+    let files = run_script_with_timeout(steps, vec![], Duration::from_secs(15));
+    assert_eq!(file_content(&files, "live.txt"), b"eof-false");
+    assert_eq!(file_content(&files, "joined.txt"), b"eof-true");
+}
+
+#[test]
+fn eof_drain_loop_reads_to_end_without_sentinel() {
+    // The documented shape: `WHILE !EOF($p)` drains buffered lines and
+    // exits on close, with no sentinel line and no count baked in.
+    let steps = crate::parse_script(indoc! {r#"
+        IMPORT [STD]
+        LET $d: PIPE
+        WITH_IO [stdout=$d] {
+            ECHO "one"
+            ECHO "two"
+        }
+        LET $n: INT = 0
+        WHILE !EOF($d) {
+            WITH_IO [stdin=$d] READ_LINE $ln
+            $n = $n + 1
+        }
+        WRITE count.txt "{{ $n }}"
+    "#})
+    .expect("parse ok");
+    let files = run_mock_steps(&steps, vec![]).expect("eof drain loop runs");
+    assert_eq!(file_content(&files, "count.txt"), b"2");
+}
+
+#[test]
+fn eof_rejects_non_pipe() {
+    // A non-pipe argument bails naming the expected type, mirroring the
+    // other typed builtins.
+    let steps = crate::parse_script(indoc! {r#"
+        IMPORT [STD]
+        LET $bad: BOOL = EOF("nope")
+    "#})
+    .expect("parse ok");
+    assert!(run_mock_steps(&steps, vec![]).is_err());
+}
+
+#[test]
 fn loop_body_declarations_mint_per_iteration() {
     // Per-iteration freshness comes free from declaration placement: a
     // `LET` inside the loop body mints an independent channel per turn
@@ -3057,6 +3212,8 @@ fn host_round_trip_through_adapters() {
         false,
         None,
         None,
+        None,
+        None,
         true,
     )
     .expect("host round-trip runs");
@@ -3167,6 +3324,8 @@ fn host_take_twice_on_os_bails() {
         false,
         None,
         None,
+        None,
+        None,
         true,
     )
     .expect("host take-twice probe runs");
@@ -3201,6 +3360,8 @@ fn bare_let_pipe_mints_distinct_unspellable_names() {
         &steps,
         CommandStdin::Null,
         false,
+        None,
+        None,
         None,
         None,
         true,

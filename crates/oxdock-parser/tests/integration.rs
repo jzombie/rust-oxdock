@@ -31,6 +31,8 @@ mod let_capture;
 mod macro_input_parens;
 #[path = "integration/platform_display.rs"]
 mod platform_display;
+#[path = "integration/remote_block.rs"]
+mod remote_block;
 #[path = "integration/run_exec.rs"]
 mod run_exec;
 #[path = "integration/timeout_block.rs"]

@@ -28,6 +28,8 @@ fn facade_execute_with_result_runs_script() {
         script: ScriptSource::Path(script_path),
         shell: false,
         endpoints: EndpointFlags::default(),
+        remote_serve: false,
+        remotes: Vec::new(),
     };
     let result = execute_with_result(opts, workspace_root).expect("execute");
     let snapshot = result

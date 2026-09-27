@@ -161,6 +161,13 @@ impl PipeInner {
         self.lock_state().writers
     }
 
+    /// Closed latch: true once writers and keepers are both gone (or
+    /// `force_close` ran). A read returning `Ok(0)` means exactly this
+    /// plus an empty buffer. Used for EOF checks; never blocks.
+    pub fn is_closed(&self) -> bool {
+        self.lock_state().closed
+    }
+
     /// Bytes currently buffered for readers. Used for diagnostics.
     pub fn buffered_bytes(&self) -> u64 {
         self.lock_state().buffer.buffered_bytes()
@@ -375,6 +382,11 @@ pub struct PipeInfo {
     /// Live data-writer attachments for script pipes (keeper pins excluded);
     /// OS pairs report presence, not live takes.
     pub writers: usize,
+    /// Closed latch for script pipes: writers and keepers both gone, or
+    /// `force_close` ran. OS pairs and unbound handles report false;
+    /// kernel bytes are invisible there, so EOF checks are best-effort
+    /// outside script pipes.
+    pub closed: bool,
 }
 
 /// Script backend behind a handle, if materialized as script. Never
@@ -440,6 +452,7 @@ pub fn inspect(handle: &crate::slot::PipeHandle) -> PipeInfo {
                     buffered: 0,
                     readers: 1,
                     writers: 1,
+                    closed: false,
                 };
             }
         }
@@ -450,12 +463,14 @@ pub fn inspect(handle: &crate::slot::PipeHandle) -> PipeInfo {
             buffered: inner.buffered_bytes(),
             readers: 1,
             writers: inner.writer_count(),
+            closed: inner.is_closed(),
         },
         None => PipeInfo {
             kind: PipeKindDesc::Unbound,
             buffered: 0,
             readers: 0,
             writers: 0,
+            closed: false,
         },
     }
 }

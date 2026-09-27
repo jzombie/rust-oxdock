@@ -12,12 +12,23 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+futures-executor.workspace = true
+futures-util.workspace = true
 indoc.workspace = true
+muxio-core.workspace = true
+muxio-rpc-service.workspace = true
+muxio-rpc-service-caller.workspace = true
+muxio-sync-rpc-client.workspace = true
 oxdock-core.workspace = true
+oxdock-fs.workspace = true
 oxdock-func-macro.workspace = true
 oxdock-parser.workspace = true
 oxdock-pipe.workspace = true
 oxdock-process.workspace = true
+oxdock-remote-proto.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+shell-words.workspace = true
 
 [dev-dependencies]
 oxdock-fs.workspace = true

@@ -16,6 +16,38 @@ Bare names fail closed: `DESCRIBE` requires the qualified form (except
 `INSPECT`, which is syntax rather than a registry entry). Errors on
 unknown function.
 
+### STD::EOF
+
+**Signature:** `STD::EOF($pipe) -> BOOL`
+
+**Contexts:** AST only
+
+True when a pipe sits at end of stream: closed with nothing buffered,
+so the next `READ_LINE` would bind `""` via EOF rather than a line.
+Live writers, pinned keepers, and buffered bytes all answer false.
+Never blocks: a reader already blocked stays blocked, so branch on
+`EOF` before reading, not after. OS pairs and unbound handles answer
+best-effort (kernel bytes are invisible there; see `INSPECT`).
+Non-pipe arguments bail.
+
+```oxdock
+# Capture two lines, then drain to end of stream with no sentinel line.
+IMPORT [STD]
+LET $cap: PIPE
+WITH_IO [stdout=$cap] {
+    ECHO "one"
+    ECHO "two"
+}
+
+# The loop exits on close, and the count proves both lines drained.
+LET $n: INT = 0
+WHILE !EOF($cap) {
+    WITH_IO [stdin=$cap] READ_LINE $line
+    $n = $n + 1
+}
+ASSERT_EQ $n 2
+```
+
 ### STD::FLOAT
 
 **Signature:** `STD::FLOAT($val) -> FLOAT`

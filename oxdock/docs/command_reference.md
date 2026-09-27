@@ -11,7 +11,7 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | [`INHERIT_ENV`](#inherit_env) | `INHERIT_ENV [<key>, ...]` |
 | [`ECHO`](#echo) | `ECHO <message>` |
 | [`RUN`](#run) | `RUN <command...> \| RUN ["exe", "arg", ...]` |
-| [`COPY`](#copy) | `COPY [--from-workspace SNAPSHOT\|LOCAL\|CACHE\|SYSTEM] <from> <to>` |
+| [`COPY`](#copy) | `COPY [--from-workspace SNAPSHOT\|LOCAL\|CACHE\|SYSTEM] [--from-host \| --to-host] <from> <to>` |
 | [`COPY_GIT`](#copy_git) | `COPY_GIT [--include-dirty] <rev> <src> <dst>` |
 | [`SYMLINK`](#symlink) | `SYMLINK [--from-workspace SNAPSHOT\|LOCAL\|CACHE\|SYSTEM] <from> <to>` |
 | [`MKDIR`](#mkdir) | `MKDIR <path>` |
@@ -37,6 +37,7 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | [`AWAIT`](#await) | `AWAIT $var \| LET $out: STRING = AWAIT $var` |
 | [`CANCEL`](#cancel) | `CANCEL $var` |
 | [`TIMEOUT`](#timeout) | `TIMEOUT <duration> <command...> \| TIMEOUT <duration> { <commands> } \| TIMEOUT <duration> AWAIT $var` |
+| [`REMOTE`](#remote) | `REMOTE <target> [[$var, ...] [env:NAME, ...]] { <commands> }` |
 | [`FUNC`](#func) | `FUNC NAME([$param: TYPE, ...]) { <commands> }` |
 | [`RETURN`](#return) | `RETURN [<expr>]` |
 | [`WHILE`](#while) | `WHILE <bool-expr> { <commands> }` |
@@ -754,6 +755,39 @@ ASSERT_EQ $beat "alive"
 ```
 
 
+### REMOTE
+
+Run a sealed block on a remote target.
+
+**Syntax:** `REMOTE <target> [[$var, ...] [env:NAME, ...]] { <commands> }`
+
+Runs the braced block on the named remote target, which the
+host binds to an SSH destination at startup (`--remote`).
+The block is sealed: no outer variables or functions cross
+except header-listed `$var` (outer LET, same name) and
+`env:NAME` (outer env key) entries. Results return as files
+in the synced workspace or bytes on `WITH_IO` pipes.
+
+The target is a static literal, never a variable: the same
+script addresses another machine by rebinding inventory, not
+by editing. Unknown targets fail before execution starts.
+
+
+**Examples:**
+
+**Example: remote block without a runner**
+
+```oxdock expect_error:"has no registered session"
+# Without a bound session, the block bails instead of
+# executing anywhere unexpected.
+REMOTE prod {
+    ECHO "do something on remote"
+}
+```
+
+**Expected error:** `has no registered session`
+
+
 ### FUNC
 
 Define a user function.
@@ -1313,7 +1347,7 @@ ASSERT_EQ $t "absent"
 
 Copy file into workspace.
 
-**Syntax:** `COPY [--from-workspace SNAPSHOT|LOCAL|CACHE|SYSTEM] <from> <to>`
+**Syntax:** `COPY [--from-workspace SNAPSHOT|LOCAL|CACHE|SYSTEM] [--from-host | --to-host] <from> <to>`
 
 Copies from host (the source is never moved or modified). Docker destination semantics: a file copied onto a directory (an existing one, or a trailing-slash spell like `out/`) is duplicated inside it under its own basename; a directory source duplicates its contents into the destination; any other destination path is created holding the copied bytes.
 
@@ -1329,6 +1363,8 @@ Copies from host (the source is never moved or modified). Docker destination sem
 | Flag | Type | Description |
 | --- | --- | --- |
 | `--from-workspace` | `STRING` | Copy from the given workspace root instead of the build context |
+| `--from-host` | `BOOL` | Fetch from the host workspace into the guest (REMOTE bodies only) |
+| `--to-host` | `BOOL` | Push from the guest workspace back to the host (REMOTE bodies only) |
 
 **Examples:**
 
@@ -2056,6 +2092,38 @@ Returns a MAP with name, module, kind, params, returns, and summary.
 Bare names fail closed: `DESCRIBE` requires the qualified form (except
 `INSPECT`, which is syntax rather than a registry entry). Errors on
 unknown function.
+
+### STD::EOF
+
+**Signature:** `STD::EOF($pipe) -> BOOL`
+
+**Contexts:** AST only
+
+True when a pipe sits at end of stream: closed with nothing buffered,
+so the next `READ_LINE` would bind `""` via EOF rather than a line.
+Live writers, pinned keepers, and buffered bytes all answer false.
+Never blocks: a reader already blocked stays blocked, so branch on
+`EOF` before reading, not after. OS pairs and unbound handles answer
+best-effort (kernel bytes are invisible there; see `INSPECT`).
+Non-pipe arguments bail.
+
+```oxdock
+# Capture two lines, then drain to end of stream with no sentinel line.
+IMPORT [STD]
+LET $cap: PIPE
+WITH_IO [stdout=$cap] {
+    ECHO "one"
+    ECHO "two"
+}
+
+# The loop exits on close, and the count proves both lines drained.
+LET $n: INT = 0
+WHILE !EOF($cap) {
+    WITH_IO [stdin=$cap] READ_LINE $line
+    $n = $n + 1
+}
+ASSERT_EQ $n 2
+```
 
 ### STD::FLOAT
 

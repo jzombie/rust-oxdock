@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [0.20.0-alpha] - 2026-09-27
+
+### Added
+
+- Sealed `REMOTE` execution blocks (#158): `REMOTE <target> [[$var, ...] [env:NAME, ...]] { <commands> }` ships a closed script scope to a guest OxDock over stdio transports (system `ssh`, local binary, `docker exec -i`, `kubectl exec -i`, `wsl`) and runs it there. The block is sealed: no outer variables or functions cross except header-listed `$var` (outer `LET`, same name) and `env:NAME` (outer env key) entries, which render to `LET`/`ENV` source lines prepended to the shipped text, so the guest parses ordinary steps and no value protocol exists. The guest starts empty and only declared entries cross in either direction; there is no bulk workspace sync in any form. Targets bind via `--remote <target>="<command>"` (the plugin appends `--remote-serve`); guests serve with `--remote-serve` after a handshake gating protocol digest plus module-surface equality. `REMOTE` runs synchronously by default and composes with `ASYNC` (background handles plus `AWAIT`/`CANCEL`), `TIMEOUT`, and `WITH_IO` (live stdin/stdout/stderr streaming).
+- `COPY --from-host` / `COPY --to-host` (valid only inside `REMOTE` bodies): explicit file transfer declarations, mutually exclusive per step. Push sources resolve against the host root and fetch into the guest staging dir; guest results tar back only declared paths and the host unpacks them under guard. Missing push sources fail loudly; statically dead declarations (`IF false`, `[bool:false]` guards) are pruned; symlinks materialize only inside the root. Guest deletions never propagate.
+- `EOF($pipe)` (`STD`): true when a pipe sits at end of stream (closed with nothing buffered), so `WHILE !EOF($cap)` drains a capture without sentinel lines or baked-in counts. Live writers, keeper pins, and buffered bytes answer false; the call never blocks.
+- DSL literal rendering (`oxdock-parser::literal`): values render back to source that reparses to the identical type and value (`3.0` keeps its point so it stays `FLOAT`, non-finite bails, strings gain quoting plus `{{`-triple escaping that exactly inverts runtime expansion, durations keep their `30s` shape). Powers header injection; covered by a render, parse, expand round-trip proptest.
+- Live backend propagation into `ASYNC` workers: a `REMOTE` step inside any task keeps its streaming backend (plus a keeper hold for the worker's lifetime) instead of buffering to task end, and completion no longer force-closes a backend other tasks still share. End of stream comes from writer and keeper detach.
+
 ## [0.19.0-alpha] - 2026-09-25
 
 ### Added

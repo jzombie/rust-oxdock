@@ -1,0 +1,3 @@
+name = "remote_without_runner"
+
+expect_error_contains = "has no registered session"

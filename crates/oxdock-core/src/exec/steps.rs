@@ -357,6 +357,16 @@ pub struct StepCtx<'a, P: ProcessManager> {
 }
 
 impl<'a, P: ProcessManager> StepCtx<'a, P> {
+    /// Shared writer behind the step error stream, when one exists (never
+    /// for OS kernel pairs). Lets streaming hosts pump guest stderr live
+    /// instead of buffering it to the end of the block.
+    pub(super) fn err_shared(&self) -> Option<SharedOutput> {
+        match self.err.clone() {
+            Some(StreamHandle::Stream(writer)) => Some(writer),
+            _ => None,
+        }
+    }
+
     /// Look up a script variable by name (innermost scope first).
     pub fn get_var(&self, key: &str) -> Option<Value> {
         self.state.get_var(key)
@@ -502,6 +512,8 @@ pub(super) fn execute_steps<P: ProcessManager>(
     expose_stdin: bool,
     out: Option<StreamHandle>,
     err: Option<StreamHandle>,
+    out_pipe: Option<Arc<PipeInner>>,
+    stdin_pipe: Option<Arc<PipeInner>>,
     wait_at_end: bool,
 ) -> Result<Flow> {
     let generation = allocate_assert_generation();
@@ -514,6 +526,8 @@ pub(super) fn execute_steps<P: ProcessManager>(
         expose_stdin,
         out,
         err,
+        out_pipe,
+        stdin_pipe,
         wait_at_end,
     ) {
         Ok(flow) => flow,
@@ -657,6 +671,12 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
             handlers::workdir(&mut cx, idx, &path)
         }
         StepKind::Workspace(target) => handlers::workspace(&mut cx, target),
+        StepKind::RemoteBlock {
+            target,
+            vars,
+            env,
+            body,
+        } => super::remote::run_remote_block(&mut cx, target, vars, env, body, idx),
         StepKind::Env { key, value } => {
             let resolved = super::args::resolve_arg(value, &mut cx)?;
             handlers::env(&mut cx, key, &resolved)
@@ -677,18 +697,24 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
         }
         StepKind::Copy {
             from_workspace,
+            from_host,
+            to_host,
             from,
             to,
         } => {
-            let from_resolved = super::args::resolve_arg(from, &mut cx)?;
-            let to_resolved = super::args::resolve_arg(to, &mut cx)?;
-            handlers::copy(
-                &mut cx,
-                idx,
-                from_workspace.clone(),
-                &from_resolved,
-                &to_resolved,
-            )
+            if *from_host || *to_host {
+                super::remote::copy_transfer(&mut cx, *from_host, *to_host, from, to)
+            } else {
+                let from_resolved = super::args::resolve_arg(from, &mut cx)?;
+                let to_resolved = super::args::resolve_arg(to, &mut cx)?;
+                handlers::copy(
+                    &mut cx,
+                    idx,
+                    from_workspace.clone(),
+                    &from_resolved,
+                    &to_resolved,
+                )
+            }
         }
         StepKind::CopyGit {
             rev,
@@ -840,6 +866,8 @@ fn execute_steps_inner<P: ProcessManager>(
     expose_stdin: bool,
     out: Option<StreamHandle>,
     err: Option<StreamHandle>,
+    out_pipe: Option<Arc<PipeInner>>,
+    stdin_pipe: Option<Arc<PipeInner>>,
     wait_at_end: bool,
 ) -> Result<Flow> {
     // Pre-register assertion windows for this generation
@@ -867,8 +895,8 @@ fn execute_steps_inner<P: ProcessManager>(
                 expose_stdin,
                 out: out.clone(),
                 err: err.clone(),
-                out_pipe: None,
-                stdin_pipe: None,
+                out_pipe: out_pipe.clone(),
+                stdin_pipe: stdin_pipe.clone(),
             };
             // Function/loop control steps dispatch through the Flow path;
             // every other variant runs the leaf pipeline and yields Done.
@@ -898,6 +926,12 @@ fn execute_steps_inner<P: ProcessManager>(
                             handlers::workdir(&mut cx, idx, &path)
                         }
                         StepKind::Workspace(target) => handlers::workspace(&mut cx, target),
+                        StepKind::RemoteBlock {
+                            target,
+                            vars,
+                            env,
+                            body,
+                        } => super::remote::run_remote_block(&mut cx, target, vars, env, body, idx),
                         StepKind::Env { key, value } => {
                             let resolved = super::args::resolve_arg(value, &mut cx)?;
                             handlers::env(&mut cx, key, &resolved)?;
@@ -922,18 +956,26 @@ fn execute_steps_inner<P: ProcessManager>(
                         }
                         StepKind::Copy {
                             from_workspace,
+                            from_host,
+                            to_host,
                             from,
                             to,
                         } => {
-                            let from_resolved = super::args::resolve_arg(from, &mut cx)?;
-                            let to_resolved = super::args::resolve_arg(to, &mut cx)?;
-                            handlers::copy(
-                                &mut cx,
-                                idx,
-                                from_workspace.clone(),
-                                &from_resolved,
-                                &to_resolved,
-                            )
+                            if *from_host || *to_host {
+                                super::remote::copy_transfer(
+                                    &mut cx, *from_host, *to_host, from, to,
+                                )
+                            } else {
+                                let from_resolved = super::args::resolve_arg(from, &mut cx)?;
+                                let to_resolved = super::args::resolve_arg(to, &mut cx)?;
+                                handlers::copy(
+                                    &mut cx,
+                                    idx,
+                                    from_workspace.clone(),
+                                    &from_resolved,
+                                    &to_resolved,
+                                )
+                            }
                         }
                         StepKind::CopyGit {
                             rev,
@@ -1313,6 +1355,50 @@ fn restore_scopes<P: ProcessManager>(state: &mut ExecState<P>, count: usize) -> 
     Ok(())
 }
 
+/// Execute a `REMOTE` body locally inside a fresh lexical scope: the
+/// guest-mode path, where the shipped text keeps its `REMOTE` wrapper and
+/// the session already fulfilled the transfer declarations. Scope,
+/// pipes, and filesystem effects behave exactly like any local block;
+/// control-flow signals crossing the block edge become step-numbered
+/// errors, mirroring the pipeline-top mapping.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn execute_scoped_remote_body<P: ProcessManager>(
+    state: &mut ExecState<P>,
+    process: &mut P,
+    steps: &[Step],
+    stdin: CommandStdin,
+    expose_stdin: bool,
+    out: Option<StreamHandle>,
+    err: Option<StreamHandle>,
+    out_pipe: Option<Arc<PipeInner>>,
+    stdin_pipe: Option<Arc<PipeInner>>,
+) -> Result<()> {
+    let flow = execute_scoped_steps(
+        state,
+        process,
+        steps,
+        stdin,
+        expose_stdin,
+        out,
+        err,
+        out_pipe,
+        stdin_pipe,
+        true,
+    )?;
+    match flow {
+        Flow::Done => Ok(()),
+        Flow::Break { idx } => {
+            bail!("step {}: BREAK cannot cross a REMOTE boundary", idx + 1);
+        }
+        Flow::Continue { idx } => {
+            bail!("step {}: CONTINUE cannot cross a REMOTE boundary", idx + 1);
+        }
+        Flow::Return { idx, .. } => {
+            bail!("step {}: RETURN cannot cross a REMOTE boundary", idx + 1);
+        }
+    }
+}
+
 /// Execute steps inside a fresh lexical scope (IF branches, TIMEOUT bodies).
 /// Blocks scope everything (LET/ENV/WORKDIR/WORKSPACE); only pipes and
 /// filesystem effects cross. Restores even when the body fails. Propagates
@@ -1326,6 +1412,8 @@ pub(super) fn execute_scoped_steps<P: ProcessManager>(
     expose_stdin: bool,
     out: Option<StreamHandle>,
     err: Option<StreamHandle>,
+    out_pipe: Option<Arc<PipeInner>>,
+    stdin_pipe: Option<Arc<PipeInner>>,
     wait_at_end: bool,
 ) -> Result<Flow> {
     state.push_scope();
@@ -1337,6 +1425,8 @@ pub(super) fn execute_scoped_steps<P: ProcessManager>(
         expose_stdin,
         out,
         err,
+        out_pipe,
+        stdin_pipe,
         wait_at_end,
     );
     // Restore the scope even when the body failed, but never let an

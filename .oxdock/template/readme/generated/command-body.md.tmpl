@@ -708,6 +708,39 @@ ASSERT_EQ $beat "alive"
 ```
 
 
+### REMOTE
+
+Run a sealed block on a remote target.
+
+**Syntax:** `REMOTE <target> [[$var, ...] [env:NAME, ...]] { <commands> }`
+
+Runs the braced block on the named remote target, which the
+host binds to an SSH destination at startup (`--remote`).
+The block is sealed: no outer variables or functions cross
+except header-listed `$var` (outer LET, same name) and
+`env:NAME` (outer env key) entries. Results return as files
+in the synced workspace or bytes on `WITH_IO` pipes.
+
+The target is a static literal, never a variable: the same
+script addresses another machine by rebinding inventory, not
+by editing. Unknown targets fail before execution starts.
+
+
+**Examples:**
+
+**Example: remote block without a runner**
+
+```oxdock expect_error:"has no registered session"
+# Without a bound session, the block bails instead of
+# executing anywhere unexpected.
+REMOTE prod {
+    ECHO "do something on remote"
+}
+```
+
+**Expected error:** `has no registered session`
+
+
 ### FUNC
 
 Define a user function.
@@ -1267,7 +1300,7 @@ ASSERT_EQ $t "absent"
 
 Copy file into workspace.
 
-**Syntax:** `COPY [--from-workspace SNAPSHOT|LOCAL|CACHE|SYSTEM] <from> <to>`
+**Syntax:** `COPY [--from-workspace SNAPSHOT|LOCAL|CACHE|SYSTEM] [--from-host | --to-host] <from> <to>`
 
 Copies from host (the source is never moved or modified). Docker destination semantics: a file copied onto a directory (an existing one, or a trailing-slash spell like `out/`) is duplicated inside it under its own basename; a directory source duplicates its contents into the destination; any other destination path is created holding the copied bytes.
 
@@ -1283,6 +1316,8 @@ Copies from host (the source is never moved or modified). Docker destination sem
 | Flag | Type | Description |
 | --- | --- | --- |
 | `--from-workspace` | `STRING` | Copy from the given workspace root instead of the build context |
+| `--from-host` | `BOOL` | Fetch from the host workspace into the guest (REMOTE bodies only) |
+| `--to-host` | `BOOL` | Push from the guest workspace back to the host (REMOTE bodies only) |
 
 **Examples:**
 

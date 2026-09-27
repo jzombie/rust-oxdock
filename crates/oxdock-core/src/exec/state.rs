@@ -97,6 +97,13 @@ pub struct ExecState<P: ProcessManager> {
     /// Stamped onto pipe handles minted here and compared by the promotion
     /// check: only the declaring task may promote its own pipes.
     pub(super) task_id: u64,
+    /// Declared `--to-host` transfers recorded strictly at execution time:
+    /// each executed flagged `COPY` appends its evaluated
+    /// `(guest_src, host_dst)` pair. The guest serve loop packs exactly
+    /// these entries, so dead branches contribute nothing and dynamic
+    /// paths (`$var`, `{{ ... }}`) resolve normally. Shared with the sink
+    /// in [`ExecIo`](super::ExecIo) when staged.
+    pub(super) push_manifest: Vec<(String, String)>,
     pub(super) _marker: PhantomData<P>,
 }
 
@@ -271,6 +278,9 @@ impl<P: ProcessManager> ExecState<P> {
             types: self.types.clone(),
             call_depth: self.call_depth,
             task_id: self.task_id,
+            // Forks start with an empty manifest: async children record
+            // their own executions; the guest packs the root manifest.
+            push_manifest: Vec::new(),
             _marker: PhantomData,
         }
     }

@@ -304,6 +304,8 @@ fn commands_behave_cross_platform() {
             guard: None,
             kind: StepKind::Copy {
                 from_workspace: None,
+                from_host: false,
+                to_host: false,
                 from: "./source.txt".into(),
                 to: "./client/dist/from_build.txt".into(),
             },
@@ -2041,6 +2043,7 @@ fn _assert_step_kind_exhaustiveness(kind: &StepKind) {
         StepKind::AwaitCapture { .. } => {}
         StepKind::Cancel { .. } => {}
         StepKind::Timeout { .. } => {}
+        StepKind::RemoteBlock { .. } => {}
         StepKind::Sleep { .. } => {}
         StepKind::ListAppend { .. } => {}
         StepKind::FuncDef { .. } => {}

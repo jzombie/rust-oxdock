@@ -1,0 +1,15 @@
+LET $version: STRING = "1.2.3"
+LET $feed: PIPE
+LET $cap: PIPE
+WORKSPACE LOCAL
+WITH_IO [stdout=$feed] ECHO "hello-remote"
+WITH_IO [stdin=$feed, stdout=$cap] REMOTE prod [$version] {
+    LET $line: STRING = READ
+    ASSERT_CONTAINS $line "hello-remote"
+    ECHO "ver: {{ $version }}"
+    WRITE out.txt "guest-saw: hello-remote {{ $version }}"
+    COPY --to-host ./out.txt back.txt
+}
+WITH_IO [stdin=$cap] READ_LINE $ver
+ASSERT_EQ $ver "ver: 1.2.3"
+ECHO "done"

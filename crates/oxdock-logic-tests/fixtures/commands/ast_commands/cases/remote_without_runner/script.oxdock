@@ -1,0 +1,3 @@
+REMOTE prod {
+    ECHO "do something on remote"
+}

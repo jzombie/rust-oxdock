@@ -11,7 +11,7 @@ mod shell_manager;
 #[cfg(miri)]
 mod synthetic;
 
-pub use builder::{CommandBuilder, CommandOutput, CommandSnapshot};
+pub use builder::{CommandBuilder, CommandOutput, CommandSnapshot, PipedChild};
 pub use builtin_env::BuiltinEnv;
 pub use child::ChildHandle;
 pub use contract::{

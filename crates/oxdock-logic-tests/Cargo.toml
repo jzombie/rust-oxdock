@@ -22,6 +22,7 @@ oxdock-fixture.workspace = true
 oxdock-fs.workspace = true
 oxdock-net-plugin.workspace = true
 oxdock-parser.workspace = true
+oxdock-pipe.workspace = true
 oxdock-process.workspace = true
 oxdock-ssh-plugin.workspace = true
 oxdock-sys-test-utils.workspace = true
