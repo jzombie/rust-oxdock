@@ -94,11 +94,11 @@ struct TransferDecl {
 }
 
 /// Staging for one transfer tarball: memory below, spill file on disk
-/// above. Only [`TransferStage::stage`] constructs: native builds spill
-/// through a guarded temp file past 8 MiB, Miri/unix-minimal builds stay
-/// memory-only (transports never run there; mocks use tiny payloads).
-/// Either way the caller sees streaming `Read` + `Write` + rewind with
-/// O(chunk) memory.
+/// above. Only [`TransferStage::new_mem`] and [`TransferStage::new_spill`]
+/// construct: native builds spill through a guarded temp file past 8 MiB,
+/// Miri/unix-minimal builds stay memory-only (transports never run there;
+/// mocks use tiny payloads). Either way the caller sees streaming `Read`
+/// + `Write` + rewind with O(chunk) memory.
 pub enum TransferStage {
     Mem(std::io::Cursor<Vec<u8>>),
     #[cfg(not(miri))]

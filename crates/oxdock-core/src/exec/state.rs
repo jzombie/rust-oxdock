@@ -102,7 +102,7 @@ pub struct ExecState<P: ProcessManager> {
     /// `(guest_src, host_dst)` pair. The guest serve loop packs exactly
     /// these entries, so dead branches contribute nothing and dynamic
     /// paths (`$var`, `{{ ... }}`) resolve normally. Shared with the sink
-    /// in [`ExecIo`](super::ExecIo) when staged.
+    /// in [`ExecIo`] when staged.
     pub(super) push_manifest: Vec<(String, String)>,
     pub(super) _marker: PhantomData<P>,
 }
