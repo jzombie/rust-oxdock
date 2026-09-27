@@ -269,6 +269,10 @@ fn remote_block_is_sealed_but_declared_files_cross() {
         .open_write(&root.join("input.txt").unwrap())
         .unwrap();
     writer.write_all(b"host-data").unwrap();
+    // Flush before the guest reads: buffered backends (Miri synthetic
+    // state) commit on flush/drop, and the handle below stays alive
+    // across the run. Native files tolerate the omission; Miri does not.
+    writer.flush().unwrap();
     let bindings = run_with_runner(
         &root,
         indoc! {r#"
@@ -416,6 +420,9 @@ fn remote_declared_push_lands_and_guest_deletes_nothing() {
     ] {
         let mut writer = resolver.open_write(&root.join(rel).unwrap()).unwrap();
         writer.write_all(text.as_bytes()).unwrap();
+        // Same flush discipline as above: the guest reads these after
+        // this setup block, and the handles stay alive across the run.
+        writer.flush().unwrap();
     }
     run_with_runner(
         &root,
