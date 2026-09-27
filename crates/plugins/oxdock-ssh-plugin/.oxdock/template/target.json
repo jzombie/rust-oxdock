@@ -7,10 +7,10 @@
       "template": "crates/plugins/oxdock-ssh-plugin/.oxdock/template/README.md.tmpl",
       "fragments": {
         "local": [
-          "crates/plugins/oxdock-ssh-plugin/.oxdock/template/header.md.tmpl",
           "crates/plugins/oxdock-ssh-plugin/.oxdock/template/fragments/*"
         ],
         "shared": [
+          ".oxdock/template/shared/header.md.tmpl",
           ".oxdock/template/shared/footer.md.tmpl"
         ],
         "generated": [

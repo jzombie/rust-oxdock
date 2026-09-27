@@ -1,0 +1,19 @@
+{
+  "targets": [
+    {
+      "name": "tests-readme",
+      "out": "tests/README.md",
+      "values": "tests/.oxdock/template/values.json",
+      "template": "tests/.oxdock/template/README.md.tmpl",
+      "fragments": {
+        "local": [
+          "tests/.oxdock/template/fragments/*"
+        ],
+        "shared": [
+          ".oxdock/template/shared/header.md.tmpl",
+          ".oxdock/template/shared/footer.md.tmpl"
+        ]
+      }
+    }
+  ]
+}

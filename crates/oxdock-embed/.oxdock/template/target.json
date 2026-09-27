@@ -7,10 +7,10 @@
       "template": "crates/oxdock-embed/.oxdock/template/README.md.tmpl",
       "fragments": {
         "local": [
-          "crates/oxdock-embed/.oxdock/template/header.md.tmpl",
           "crates/oxdock-embed/.oxdock/template/fragments/*"
         ],
         "shared": [
+          ".oxdock/template/shared/header.md.tmpl",
           ".oxdock/template/shared/footer.md.tmpl"
         ]
       }
