@@ -2,8 +2,10 @@ use anyhow::{Context, Result, bail};
 use line_ending::LineEnding;
 use oxdock_core::{ExecIo, run_steps_with_context_result_with_io};
 use oxdock_fs::{GuardedPath, PathResolver};
+use oxdock_logic_tests::mock_remote::MockRemoteRunner;
 use oxdock_parser::{COMMANDS, FencedBlock, extract_fenced_blocks};
 use std::collections::HashSet;
+use std::sync::Arc;
 
 const README_NAME: &str = "README.md";
 const OXDOCK_README_NAME: &str = "oxdock/README.md";
@@ -259,6 +261,9 @@ fn execute_plugin_block(block: &FencedBlock, name: &str) -> Result<()> {
     for (key, value) in &block.metadata.env {
         io.insert_inherit_env(key.clone(), value.clone());
     }
+    for target in &block.metadata.mock_remote {
+        io.set_remote_runner_for_target(target.clone(), Arc::new(MockRemoteRunner));
+    }
 
     let mut resolver =
         PathResolver::new_guarded(fs_root.clone(), context_root.clone()).context("fs setup")?;
@@ -475,6 +480,11 @@ fn execute_block(block: &FencedBlock, name: &str) -> Result<()> {
     let mut io = ExecIo::new();
     for (key, value) in &block.metadata.env {
         io.insert_inherit_env(key.clone(), value.clone());
+    }
+    // Doc examples execute sealed blocks against the in-process mock,
+    // never real transports (```oxdock mock_remote:"prod"`).
+    for target in &block.metadata.mock_remote {
+        io.set_remote_runner_for_target(target.clone(), Arc::new(MockRemoteRunner));
     }
 
     let execution = run_steps_with_context_result_with_io(&fs_root, &context_root, &steps, io);

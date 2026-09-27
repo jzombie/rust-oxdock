@@ -2508,30 +2508,144 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
             summary: "Run a sealed block on a remote target.",
             description: indoc! {r#"
                 Runs the braced block on the named remote target, which the
-                host binds to an SSH destination at startup (`--remote`).
-                The block is sealed: no outer variables or functions cross
-                except header-listed `$var` (outer LET, same name) and
-                `env:NAME` (outer env key) entries. Results return as files
-                in the synced workspace or bytes on `WITH_IO` pipes.
-
-                The target is a static literal, never a variable: the same
-                script addresses another machine by rebinding inventory, not
-                by editing. Unknown targets fail before execution starts.
+                host binds at startup (`--remote`). The block is sealed:
+                only header-listed `$var` and `env:NAME` entries cross, the
+                guest starts empty, and results return through declared
+                transfers or `WITH_IO` pipes. The target is a static
+                literal, never a variable. Unknown targets fail before
+                execution starts.
             "#},
             args: &[],
             flags: &[],
             default_output: None,
-            examples: &[Example {
-                name: "remote block without a runner",
-                fence_meta: Some("expect_error:\"has no registered session\""),
-                code: indoc! {r#"
+            examples: &[
+                Example {
+                    name: "sealed header values cross, outer scope does not",
+                    fence_meta: Some("mock_remote:prod"),
+                    code: indoc! {r#"
+                    # Only header-listed names arrive: `$version` is visible
+                    # on the guest, `$secret` was never sent.
+                    LET $version: STRING = "1.2.3"
+                    LET $secret: STRING = "host-only"
+                    REMOTE prod [$version] {
+                        WRITE version.txt "{{ $version }}"
+                        COPY --to-host ./version.txt back.txt
+                    }
+
+                    # The pushed file proves the guest saw the injected value.
+                    LET $back: STRING = READ back.txt
+                    ASSERT_EQ $back "1.2.3"
+                "#},
+                },
+                Example {
+                    name: "background tasks stream through shared pipes",
+                    fence_meta: Some("mock_remote:prod"),
+                    code: indoc! {r#"
+                    # Two background REMOTEs share one capture pipe while a
+                    # WITH_IO block holds the write end open.
+                    IMPORT [STD]
+                    LET $cap: PIPE
+                    WITH_IO [stdout=$cap] {
+                        LET $a: HANDLE = ASYNC REMOTE prod {
+                            ECHO "from-a"
+                        }
+                        LET $b: HANDLE = ASYNC REMOTE prod {
+                            ECHO "from-b"
+                        }
+                        AWAIT $a
+                        AWAIT $b
+                    }
+
+                    # EOF ends the drain: no sentinel line, no baked-in count.
+                    LET $n: INT = 0
+                    WHILE !EOF($cap) {
+                        WITH_IO [stdin=$cap] READ_LINE $line
+                        $n = $n + 1
+                    }
+                    ASSERT_EQ $n 2
+                "#},
+                },
+                Example {
+                    name: "declared files cross both directions",
+                    fence_meta: Some("mock_remote:prod roots:unified"),
+                    code: indoc! {r#"
+                    # Fetches ride in, pushes ride back. Anything undeclared
+                    # never leaves its side.
+                    WRITE send.txt "payload"
+                    REMOTE prod {
+                        COPY --from-host ./send.txt got.txt
+                        LET $v: STRING = READ got.txt
+                        ASSERT_EQ $v "payload"
+                        WRITE back.txt "returned"
+                        COPY --to-host ./back.txt back.txt
+                    }
+
+                    # The push landed on the host; guest staging is gone.
+                    LET $b: STRING = READ back.txt
+                    ASSERT_EQ $b "returned"
+                "#},
+                },
+                Example {
+                    name: "guest workspace selection stays on the guest",
+                    fence_meta: Some("mock_remote:prod"),
+                    code: indoc! {r#"
+                    # WORKSPACE switches inside the block resolve against the
+                    # guest staging dir, which serves as both the SNAPSHOT
+                    # root and the LOCAL build context. The host selection
+                    # restores when the block exits.
+                    REMOTE prod {
+                        WORKSPACE SNAPSHOT
+                        WRITE out.txt "from-snapshot"
+                        COPY --to-host ./out.txt snap.txt
+                    }
+
+                    LET $s: STRING = READ snap.txt
+                    ASSERT_EQ $s "from-snapshot"
+                "#},
+                },
+                Example {
+                    name: "guest cache persists across execs",
+                    fence_meta: Some("mock_remote:prod"),
+                    code: indoc! {r#"
+                    # WORKSPACE CACHE addresses guest-local persistent
+                    # storage: the second block reads what the first wrote,
+                    # while the guest staging starts empty every time.
+                    REMOTE prod {
+                        WORKSPACE CACHE
+                        WRITE marker.txt "run-marker"
+                    }
+                    REMOTE prod {
+                        WORKSPACE CACHE
+                        LET $m: STRING = READ marker.txt
+                        ASSERT_EQ $m "run-marker"
+                    }
+                "#},
+                },
+                Example {
+                    name: "pushes outside staging fail closed",
+                    fence_meta: Some("mock_remote:prod expect_error:\"escapes staging\""),
+                    code: indoc! {r#"
+                    # WORKSPACE SYSTEM exposes the whole guest machine, but
+                    # transfers stay staging scoped: a push source outside
+                    # staging fails loudly instead of crossing.
+                    REMOTE prod {
+                        WORKSPACE SYSTEM
+                        COPY --to-host /no/such/file.txt got.txt
+                    }
+                "#},
+                },
+                Example {
+                    name: "remote block without a runner",
+                    fence_meta: Some("expect_error:\"has no registered session\""),
+                    code: indoc! {r#"
                     # Without a bound session, the block bails instead of
                     # executing anywhere unexpected.
                     REMOTE prod {
                         ECHO "do something on remote"
                     }
                 "#},
-            }],
+                },
+            ],
         },
         CommandMeta {
             name: "FUNC",

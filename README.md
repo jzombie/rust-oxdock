@@ -1893,18 +1893,126 @@ Run a sealed block on a remote target.
 **Syntax:** `REMOTE <target> [[$var, ...] [env:NAME, ...]] { <commands> }`
 
 Runs the braced block on the named remote target, which the
-host binds to an SSH destination at startup (`--remote`).
-The block is sealed: no outer variables or functions cross
-except header-listed `$var` (outer LET, same name) and
-`env:NAME` (outer env key) entries. Results return as files
-in the synced workspace or bytes on `WITH_IO` pipes.
-
-The target is a static literal, never a variable: the same
-script addresses another machine by rebinding inventory, not
-by editing. Unknown targets fail before execution starts.
+host binds at startup (`--remote`). The block is sealed:
+only header-listed `$var` and `env:NAME` entries cross, the
+guest starts empty, and results return through declared
+transfers or `WITH_IO` pipes. The target is a static
+literal, never a variable. Unknown targets fail before
+execution starts.
 
 
 **Examples:**
+
+**Example: sealed header values cross, outer scope does not**
+
+```oxdock mock_remote:prod
+# Only header-listed names arrive: `$version` is visible
+# on the guest, `$secret` was never sent.
+LET $version: STRING = "1.2.3"
+LET $secret: STRING = "host-only"
+REMOTE prod [$version] {
+    WRITE version.txt "{{ $version }}"
+    COPY --to-host ./version.txt back.txt
+}
+
+# The pushed file proves the guest saw the injected value.
+LET $back: STRING = READ back.txt
+ASSERT_EQ $back "1.2.3"
+```
+
+**Example: background tasks stream through shared pipes**
+
+```oxdock mock_remote:prod
+# Two background REMOTEs share one capture pipe while a
+# WITH_IO block holds the write end open.
+IMPORT [STD]
+LET $cap: PIPE
+WITH_IO [stdout=$cap] {
+    LET $a: HANDLE = ASYNC REMOTE prod {
+        ECHO "from-a"
+    }
+    LET $b: HANDLE = ASYNC REMOTE prod {
+        ECHO "from-b"
+    }
+    AWAIT $a
+    AWAIT $b
+}
+
+# EOF ends the drain: no sentinel line, no baked-in count.
+LET $n: INT = 0
+WHILE !EOF($cap) {
+    WITH_IO [stdin=$cap] READ_LINE $line
+    $n = $n + 1
+}
+ASSERT_EQ $n 2
+```
+
+**Example: declared files cross both directions**
+
+```oxdock mock_remote:prod roots:unified
+# Fetches ride in, pushes ride back. Anything undeclared
+# never leaves its side.
+WRITE send.txt "payload"
+REMOTE prod {
+    COPY --from-host ./send.txt got.txt
+    LET $v: STRING = READ got.txt
+    ASSERT_EQ $v "payload"
+    WRITE back.txt "returned"
+    COPY --to-host ./back.txt back.txt
+}
+
+# The push landed on the host; guest staging is gone.
+LET $b: STRING = READ back.txt
+ASSERT_EQ $b "returned"
+```
+
+**Example: guest workspace selection stays on the guest**
+
+```oxdock mock_remote:prod
+# WORKSPACE switches inside the block resolve against the
+# guest staging dir, which serves as both the SNAPSHOT
+# root and the LOCAL build context. The host selection
+# restores when the block exits.
+REMOTE prod {
+    WORKSPACE SNAPSHOT
+    WRITE out.txt "from-snapshot"
+    COPY --to-host ./out.txt snap.txt
+}
+
+LET $s: STRING = READ snap.txt
+ASSERT_EQ $s "from-snapshot"
+```
+
+**Example: guest cache persists across execs**
+
+```oxdock mock_remote:prod
+# WORKSPACE CACHE addresses guest-local persistent
+# storage: the second block reads what the first wrote,
+# while the guest staging starts empty every time.
+REMOTE prod {
+    WORKSPACE CACHE
+    WRITE marker.txt "run-marker"
+}
+REMOTE prod {
+    WORKSPACE CACHE
+    LET $m: STRING = READ marker.txt
+    ASSERT_EQ $m "run-marker"
+}
+```
+
+**Example: pushes outside staging fail closed**
+
+```oxdock mock_remote:prod expect_error:"escapes staging"
+# WORKSPACE SYSTEM exposes the whole guest machine, but
+# transfers stay staging scoped: a push source outside
+# staging fails loudly instead of crossing.
+REMOTE prod {
+    WORKSPACE SYSTEM
+    COPY --to-host /no/such/file.txt got.txt
+}
+```
+
+**Expected error:** `escapes staging`
 
 **Example: remote block without a runner**
 

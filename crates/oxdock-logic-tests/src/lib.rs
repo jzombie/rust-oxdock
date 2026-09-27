@@ -1,6 +1,7 @@
 //! Workspace-level test harness crate (not published).
 
 pub mod ast_runner;
+pub mod mock_remote;
 
 /// Render an engine error exactly as fixture binaries report failures on
 /// stderr (`fixture failed: {err:#}`).
