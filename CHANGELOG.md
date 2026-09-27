@@ -14,6 +14,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - DSL literal rendering (`oxdock-parser::literal`): values render back to source that reparses to the identical type and value (`3.0` keeps its point so it stays `FLOAT`, non-finite bails, strings gain quoting plus `{{`-triple escaping that exactly inverts runtime expansion, durations keep their `30s` shape). Powers header injection; covered by a render, parse, expand round-trip proptest.
 - Live backend propagation into `ASYNC` workers: a `REMOTE` step inside any task keeps its streaming backend (plus a keeper hold for the worker's lifetime) instead of buffering to task end, and completion no longer force-closes a backend other tasks still share. End of stream comes from writer and keeper detach.
 
+### Fixed
+
+- Miri coverage badge now reports the runnable test ratio with counts (e.g. `81.8% (1003/1226)`) instead of a baseline-multiplied product that barely moved. The `miri` job no longer waits on the LLVM coverage job.
+
 ## [0.19.0-alpha] - 2026-09-25
 
 ### Added
