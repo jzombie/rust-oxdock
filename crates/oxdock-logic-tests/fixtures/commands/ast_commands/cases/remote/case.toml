@@ -1,0 +1,8 @@
+name = "remote"
+mock_remote = ["prod"]
+
+[expect]
+stdout = "done\n"
+
+[expect.local]
+files = { "back.txt" = "guest-saw: hello-remote 1.2.3" }

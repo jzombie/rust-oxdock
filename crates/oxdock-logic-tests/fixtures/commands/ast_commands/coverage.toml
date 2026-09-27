@@ -47,9 +47,11 @@ Return = ["func_return"]
 While = ["while_basic"]
 Break = ["break_in_for"]
 Continue = ["while_break_continue"]
+RemoteBlock = ["remote"]
 
 [extras]
 cases = [
+  "remote_without_runner",
   "guards",
   "scopes",
   "escape_workdir",

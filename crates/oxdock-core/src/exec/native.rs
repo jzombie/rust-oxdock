@@ -241,6 +241,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
             Functions::registration(),
             Describe::registration(),
             IsTerminal::registration(),
+            Eof::registration(),
             SemaphoreNew::registration(),
             SemaphoreTryAcquire::registration(),
             SemaphoreAvailable::registration(),
@@ -794,6 +795,43 @@ fn semaphore_available(sem: Value) -> Result<Value> {
         ));
     };
     Ok(Value::int(sem.available() as i64))
+}
+
+/// True when a pipe sits at end of stream: closed with nothing buffered,
+/// so the next `READ_LINE` would bind `""` via EOF rather than a line.
+/// Live writers, pinned keepers, and buffered bytes all answer false.
+/// Never blocks: a reader already blocked stays blocked, so branch on
+/// `EOF` before reading, not after. OS pairs and unbound handles answer
+/// best-effort (kernel bytes are invisible there; see `INSPECT`).
+/// Non-pipe arguments bail.
+///
+/// ```oxdock
+/// # Capture two lines, then drain to end of stream with no sentinel line.
+/// IMPORT [STD]
+/// LET $cap: PIPE
+/// WITH_IO [stdout=$cap] {
+///     ECHO "one"
+///     ECHO "two"
+/// }
+///
+/// # The loop exits on close, and the count proves both lines drained.
+/// LET $n: INT = 0
+/// WHILE !EOF($cap) {
+///     WITH_IO [stdin=$cap] READ_LINE $line
+///     $n = $n + 1
+/// }
+/// ASSERT_EQ $n 2
+/// ```
+#[oxdock_func(returns = "BOOL")]
+fn eof<P: ProcessManager>(cx: &mut StepCtx<P>, pipe: Value) -> Result<Value> {
+    let Some(handle) = pipe.as_pipe_handle() else {
+        return Err(anyhow::anyhow!(
+            "EOF() argument `$pipe` must be a PIPE, got {}",
+            pipe.type_name(),
+        ));
+    };
+    let info = cx.state.io.inspect_pipe(&handle);
+    Ok(Value::bool(info.closed && info.buffered == 0))
 }
 
 fn meta_to_value(meta: &FuncMeta) -> Value {

@@ -18,19 +18,27 @@ build = []
 
 [features]
 default = ["net"]
-net = ["dep:oxdock-net-plugin"]
+net = ["dep:oxdock-net-plugin", "dep:oxdock-remote-proto"]
 ssh = ["net", "dep:oxdock-ssh-plugin"]
 
 [dependencies]
 anyhow.workspace = true
+futures-executor.workspace = true
 indoc.workspace = true
 lexopt.workspace = true
+muxio-core.workspace = true
+muxio-rpc-service-endpoint.workspace = true
+muxio-sync-rpc-server.workspace = true
 oxdock-core.workspace = true
 oxdock-fs.workspace = true
 oxdock-net-plugin = { workspace = true, optional = true }
 oxdock-parser.workspace = true
+oxdock-pipe.workspace = true
 oxdock-process.workspace = true
+oxdock-remote-proto = { workspace = true, optional = true }
 oxdock-ssh-plugin = { workspace = true, optional = true }
+serde_json.workspace = true
+sha2.workspace = true
 tempfile.workspace = true
 
 [dev-dependencies]

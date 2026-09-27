@@ -471,8 +471,9 @@ pub(crate) fn sleep<P: ProcessManager>(
 
 /// Map a `COPY --from-workspace` target onto the filesystem layer's source
 /// root (issue #163). The parser owns the DSL vocabulary; `oxdock-fs`
-/// stays a leaf crate, so the translation lives here.
-fn copy_source_root(target: WorkspaceTarget) -> CopySourceRoot {
+/// stays a leaf crate, so the translation lives here. Shared with the
+/// remote fetch resolver, which honors the same flag on `--from-host`.
+pub(super) fn copy_source_root(target: WorkspaceTarget) -> CopySourceRoot {
     match target {
         WorkspaceTarget::Snapshot => CopySourceRoot::Snapshot,
         WorkspaceTarget::Local => CopySourceRoot::Local,
@@ -1719,6 +1720,8 @@ pub(crate) fn for_loop<P: ProcessManager>(
                 false,
                 cx.out.clone(),
                 cx.err.clone(),
+                cx.out_pipe.clone(),
+                cx.stdin_pipe.clone(),
                 false,
             );
             let pop_res = cx.state.pop_scope();
@@ -1772,6 +1775,8 @@ pub(crate) fn for_loop<P: ProcessManager>(
                 false,
                 cx.out.clone(),
                 cx.err.clone(),
+                cx.out_pipe.clone(),
+                cx.stdin_pipe.clone(),
                 false,
             );
             let pop_res = cx.state.pop_scope();
@@ -1869,6 +1874,8 @@ pub(crate) fn call_func_value<P: ProcessManager>(
                     false,
                     cx.out.clone(),
                     cx.err.clone(),
+                    cx.out_pipe.clone(),
+                    cx.stdin_pipe.clone(),
                     false,
                 )?;
                 match flow {
@@ -1926,6 +1933,8 @@ pub(crate) fn block_value<P: ProcessManager>(
             false,
             cx.out.clone(),
             cx.err.clone(),
+            cx.out_pipe.clone(),
+            cx.stdin_pipe.clone(),
             false,
         )?;
         match flow {
@@ -1989,6 +1998,8 @@ pub(crate) fn while_loop<P: ProcessManager>(
             false,
             cx.out.clone(),
             cx.err.clone(),
+            cx.out_pipe.clone(),
+            cx.stdin_pipe.clone(),
             false,
         );
         let pop_res = cx.state.pop_scope();
@@ -2150,6 +2161,8 @@ pub(crate) fn if_then<P: ProcessManager>(
             false,
             cx.out.clone(),
             cx.err.clone(),
+            cx.out_pipe.clone(),
+            cx.stdin_pipe.clone(),
             false,
         );
     }
@@ -2164,6 +2177,8 @@ pub(crate) fn if_then<P: ProcessManager>(
                 false,
                 cx.out.clone(),
                 cx.err.clone(),
+                cx.out_pipe.clone(),
+                cx.stdin_pipe.clone(),
                 false,
             );
         }
@@ -2177,6 +2192,8 @@ pub(crate) fn if_then<P: ProcessManager>(
             false,
             cx.out.clone(),
             cx.err.clone(),
+            cx.out_pipe.clone(),
+            cx.stdin_pipe.clone(),
             false,
         );
     }
@@ -2405,6 +2422,20 @@ pub(crate) fn dispatch_async_block<P: ProcessManager>(
     let expose_stdin = cx.expose_stdin;
     let out = cx.out.clone();
     let err = cx.err.clone();
+    // Live pipe backends travel with the worker: without them a REMOTE
+    // step inside the task loses its streaming backend (session
+    // accumulates, core flushes at completion) instead of delivering
+    // bytes as they arrive.
+    let out_pipe = cx.out_pipe.clone();
+    let stdin_pipe = cx.stdin_pipe.clone();
+    // Hold a keeper on the inherited stdout backend for the worker's
+    // lifetime: transient writer churn would otherwise toggle the close
+    // latch mid-flight, letting a concurrent drain observe EOF (and exit)
+    // during a producer lull. Keepers never resurrect a closed pipe and
+    // explicit close still wins, so drain-after-join is unaffected.
+    let out_keepalive = out_pipe
+        .as_ref()
+        .map(|backend| KeeperGuard::new(std::sync::Arc::clone(backend)));
     let cancel_token = std::sync::Arc::clone(&forked_state.cancel_token);
     let active_process = std::sync::Arc::clone(&forked_state.active_process);
     let worker: std::sync::Arc<std::sync::Mutex<Option<std::thread::ThreadId>>> =
@@ -2417,6 +2448,7 @@ pub(crate) fn dispatch_async_block<P: ProcessManager>(
     // CONTINUE, or RETURN becomes a step-numbered error here.
     let join = std::thread::spawn(move || {
         *worker_child.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::thread::current().id());
+        let _out_keepalive = out_keepalive;
         let mut child_state = forked_state;
         let mut child_process = forked_process;
         let flow = super::steps::execute_steps(
@@ -2427,6 +2459,8 @@ pub(crate) fn dispatch_async_block<P: ProcessManager>(
             expose_stdin,
             out,
             err,
+            out_pipe,
+            stdin_pipe,
             true, // wait_at_end: child waits for its own bg_children
         )?;
         match flow {
@@ -2487,6 +2521,22 @@ pub(crate) fn dispatch_workspace<P: ProcessManager>(
     workspace(cx, target)
 }
 
+pub(crate) fn dispatch_remote<P: ProcessManager>(
+    step: &StepKind,
+    cx: &mut StepCtx<'_, P>,
+) -> Result<()> {
+    let StepKind::RemoteBlock {
+        target,
+        vars,
+        env,
+        body,
+    } = step
+    else {
+        unreachable!()
+    };
+    super::remote::run_remote_block(cx, target, vars, env, body, 0)
+}
+
 pub(crate) fn dispatch_env<P: ProcessManager>(
     step: &StepKind,
     cx: &mut StepCtx<'_, P>,
@@ -2504,12 +2554,17 @@ pub(crate) fn dispatch_copy<P: ProcessManager>(
 ) -> Result<()> {
     let StepKind::Copy {
         from_workspace,
+        from_host,
+        to_host,
         from,
         to,
     } = step
     else {
         unreachable!()
     };
+    if *from_host || *to_host {
+        return super::remote::copy_transfer(cx, *from_host, *to_host, from, to);
+    }
     let from_resolved = super::args::resolve_arg(from, cx)?;
     let to_resolved = super::args::resolve_arg(to, cx)?;
     copy(cx, 0, from_workspace.clone(), &from_resolved, &to_resolved)
@@ -2961,9 +3016,17 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
     // Tasks share the parent writer: output streams live, exactly like the
     // main flow. There is no per-task capture sink; a task's *value* (for
     // `LET $o = AWAIT $t`) travels only through an explicit `RETURN`, like
-    // a function call. Stderr keeps parent wiring.
+    // a function call. Stderr keeps parent wiring. Live pipe backends ride
+    // along the same way, so a REMOTE step in the task keeps streaming.
     let out = cx.out.clone();
     let err = cx.err.clone();
+    let out_pipe = cx.out_pipe.clone();
+    let stdin_pipe = cx.stdin_pipe.clone();
+    // Same lifetime hold as the block-task worker: a concurrent drain
+    // must block through producer lulls, not observe a flickered EOF.
+    let out_keepalive = out_pipe
+        .as_ref()
+        .map(|backend| KeeperGuard::new(std::sync::Arc::clone(backend)));
     let cancel_token = std::sync::Arc::clone(&forked_state.cancel_token);
     let active_process = std::sync::Arc::clone(&forked_state.active_process);
     let worker: std::sync::Arc<std::sync::Mutex<Option<std::thread::ThreadId>>> =
@@ -2989,6 +3052,7 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
     let (entry_tx, entry_rx) = std::sync::mpsc::channel::<Arc<super::state::TaskEntry>>();
     let join = std::thread::spawn(move || {
         *worker_child.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::thread::current().id());
+        let _out_keepalive = out_keepalive;
         let mut child_state = forked_state;
         let mut child_process = forked_process;
         let entry = entry_rx
@@ -3002,15 +3066,15 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
                 expose_stdin,
                 out,
                 err,
-                out_pipe: None,
-                stdin_pipe: None,
+                out_pipe,
+                stdin_pipe,
             };
             // Apply call-site bindings (e.g. stdin pipes) like the inline
             // path; stdout stays shared-live (parse rejects stdout pipes).
             let value = if bindings.is_empty() {
                 call_func_value(&mut child_cx, 0, &name, &args)?
             } else {
-                let (task_stdin, task_expose, task_out, task_err, _, _) =
+                let (task_stdin, task_expose, task_out, task_err, task_out_pipe, task_stdin_pipe) =
                     resolve_io_streams(&mut child_cx, 0, &bindings, &body[0].kind)?;
                 let state = &mut *child_cx.state;
                 let process = &mut *child_cx.process;
@@ -3021,8 +3085,8 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
                     expose_stdin: task_expose,
                     out: task_out,
                     err: task_err,
-                    out_pipe: None,
-                    stdin_pipe: None,
+                    out_pipe: task_out_pipe.or(child_cx.out_pipe.clone()),
+                    stdin_pipe: task_stdin_pipe.or(child_cx.stdin_pipe.clone()),
                 };
                 call_func_value(&mut sub_cx, 0, &name, &args)?
             };
@@ -3041,6 +3105,8 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
             expose_stdin,
             out,
             err,
+            out_pipe,
+            stdin_pipe,
             true,
         )?;
         match flow {
@@ -3545,6 +3611,8 @@ pub(crate) fn timeout<P: ProcessManager>(
         cx.expose_stdin,
         cx.out.clone(),
         cx.err.clone(),
+        cx.out_pipe.clone(),
+        cx.stdin_pipe.clone(),
         true,
     );
     cx.state.cancellable = prev_cancellable;

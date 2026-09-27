@@ -21,6 +21,7 @@ pub mod commands;
 pub mod constants;
 pub mod error;
 mod lexer;
+pub mod literal;
 #[cfg(feature = "proc-macro-api")]
 mod macro_input;
 pub mod markdown;
@@ -37,6 +38,7 @@ pub use commands::{all_metadata, all_structural_metadata, lower_command};
 pub use constants::*;
 pub use error::{ParseError, ParseErrorKind, ParseResult, SpanContext};
 pub use lexer::LANGUAGE_SPEC;
+pub use literal::{escape_dsl_string, render_dsl_literal, render_quoted};
 #[cfg(feature = "proc-macro-api")]
 pub use macro_input::{
     DslMacroInput, ScriptSource, parse_braced_tokens, script_from_braced_tokens,
@@ -155,6 +157,41 @@ pub mod test_lower_mock {
                     .next()
                     .ok_or_else(|| validation("WORKDIR", "requires path"))?;
                 Ok(StepKind::Workdir(path))
+            }
+            "COPY" => {
+                // Mirror production flag handling for transfer tests:
+                // split leading --from-host/--to-host flags, enforce
+                // mutual exclusivity, require exactly two positionals.
+                let mut from_host = false;
+                let mut to_host = false;
+                let mut positional = Vec::new();
+                for arg in args {
+                    match arg.as_str() {
+                        "--from-host" => from_host = true,
+                        "--to-host" => to_host = true,
+                        _ => positional.push(arg),
+                    }
+                }
+                if from_host && to_host {
+                    return Err(validation(
+                        "COPY",
+                        "COPY --from-host and --to-host are mutually exclusive",
+                    ));
+                }
+                let mut it = positional.into_iter();
+                let from = it
+                    .next()
+                    .ok_or_else(|| validation("COPY", "COPY requires a source"))?;
+                let to = it
+                    .next()
+                    .ok_or_else(|| validation("COPY", "COPY requires a destination"))?;
+                Ok(StepKind::Copy {
+                    from_workspace: None,
+                    from_host,
+                    to_host,
+                    from,
+                    to,
+                })
             }
             _ => Err(ParseError::unknown_command(
                 name,

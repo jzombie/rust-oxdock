@@ -7,6 +7,7 @@
 //! directly so cases execute in-process (Tier 1) instead of via `cargo run`
 //! per trial.
 use crate::expectations::{self, ErrorExpectation};
+use crate::mock_remote::MockRemoteRunner;
 use anyhow::{Context, Result, anyhow};
 use oxdock_core::{ExecIo, SNAPSHOT_PENDING_DISPLAY, enrich_lazy_error, run_steps_with_manager};
 use oxdock_fs::{
@@ -87,6 +88,10 @@ struct CaseSpec {
     /// `BRIDGE_PORT` env entry per trial (pid-scrambled base, atomic offsets
     /// within the process), so bridge fixtures bind without hardcoded ports.
     bridge_port: bool,
+    /// Targets bound to the in-process mock REMOTE runner. Lets a case
+    /// execute sealed blocks for real (header injection, transfers,
+    /// stdio) with no ssh, no muxio, no tarballs.
+    mock_remote: Vec<String>,
     expect_error: Option<ErrorExpectation>,
     expectations: Expectations,
     pipes: BTreeMap<String, PipeSpec>,
@@ -334,6 +339,12 @@ fn load_case_spec(
         .get("bridge_port")
         .and_then(|item| item.as_bool())
         .unwrap_or(false);
+    let mock_remote = doc
+        .get("mock_remote")
+        .and_then(|item| item.as_array())
+        .map(parse_string_array)
+        .transpose()?
+        .unwrap_or_default();
 
     Ok(CaseSpec {
         name,
@@ -345,6 +356,7 @@ fn load_case_spec(
         env,
         env_remove,
         bridge_port,
+        mock_remote,
         expect_error,
         expectations,
         pipes,
@@ -785,6 +797,7 @@ fn collect_step_kinds(kind: &StepKind, kinds: &mut HashSet<String>) {
         | StepKind::While { body, .. }
         | StepKind::FuncDef { body, .. }
         | StepKind::Timeout { body, .. }
+        | StepKind::RemoteBlock { body, .. }
         | StepKind::AssignAsync { body, .. }
         | StepKind::AsyncBlock { body } => vec![body],
         StepKind::If {
@@ -885,6 +898,11 @@ fn run_case_once(case: &CaseSpec, steps: &[Step]) -> Result<()> {
     }
     if case.bridge_port {
         io_cfg.insert_inherit_env("BRIDGE_PORT", allocate_bridge_port().to_string());
+    }
+    // Mock sealed execution for declared targets: the guest runs on a
+    // temp workspace with the same engine and parser the host uses.
+    for target in &case.mock_remote {
+        io_cfg.set_remote_runner_for_target(target.clone(), Arc::new(MockRemoteRunner));
     }
 
     // Pipe assertions resolve post-run against the script's own pipe
@@ -1483,6 +1501,7 @@ fn step_kind_name(kind: &StepKind) -> &'static str {
         StepKind::AwaitCapture { .. } => "AwaitCapture",
         StepKind::Cancel { .. } => "Cancel",
         StepKind::Timeout { .. } => "Timeout",
+        StepKind::RemoteBlock { .. } => "RemoteBlock",
         StepKind::Sleep { .. } => "Sleep",
         StepKind::ListAppend { .. } => "ListAppend",
         StepKind::FuncDef { .. } => "FuncDef",

@@ -8,6 +8,10 @@ pub struct BlockMetadata {
     pub env: Vec<(String, String)>,
     pub unified_roots: bool,
     pub expect_error: Option<String>,
+    /// Targets bound to the in-process mock REMOTE runner
+    /// (```oxdock mock_remote:"prod"`). Lets doc examples execute sealed
+    /// blocks for real with no ssh, no muxio, no tarballs.
+    pub mock_remote: Vec<String>,
 }
 
 /// A fenced code block extracted from a Markdown document.
@@ -204,9 +208,12 @@ fn parse_metadata(info: &str, line_no: usize) -> Result<BlockMetadata> {
                     ));
                 }
             }
+            "mock_remote" => {
+                metadata.mock_remote.push(value.clone());
+            }
             other => {
                 return Err(fail(format!(
-                    "unknown fence metadata key '{other}' (supported: env, roots, expect_error)"
+                    "unknown fence metadata key '{other}' (supported: env, roots, expect_error, mock_remote)"
                 )));
             }
         }

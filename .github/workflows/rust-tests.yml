@@ -196,7 +196,6 @@ jobs:
     runs-on: ubuntu-latest
     needs:
       - test_matrix
-      - coverage
     permissions:
       contents: write
     steps:
@@ -255,8 +254,16 @@ jobs:
 
       - name: Report Miri coverage
         shell: bash
+        # Listings don't need interpretation: Miri ignores are
+        # #[cfg_attr(miri, ignore)], i.e. compile-time, so a native
+        # listing with the cfg set enumerates identically. This spares
+        # two full Miri boots; only the test run above interprets.
+        # Bare `cargo` resolves to the job's pinned nightly toolchain
+        # (see the setup step above), matching every other step here;
+        # no toolchain override: the workspace does not compile on
+        # stable, so ambient nightly is required, not optional.
         env:
-          BASE_LINE_COVERAGE: ${{ needs.coverage.outputs.line_coverage }}
+          MIRI_TEST_CMD: RUSTFLAGS="--cfg miri" cargo test --workspace --all-features --lib --tests
         run: scripts/.github/miri-badge-report.sh
 
       - name: Publish Miri coverage badge

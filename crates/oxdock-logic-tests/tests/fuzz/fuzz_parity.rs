@@ -164,6 +164,8 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
         safe_msg().prop_map(|s| StepKind::Echo(s.into())),
         (safe_string(), safe_string()).prop_map(|(from, to)| StepKind::Copy {
             from_workspace: None,
+            from_host: false,
+            to_host: false,
             from: from.into(),
             to: to.into()
         }),

@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
-# This helper is invoked from GitHub Actions only; it inspects Miri test coverage
-# and writes badge artifacts for the README. Do not run manually in production workflows.
+# This helper is invoked from GitHub Actions only; it inspects Miri test
+# runnable ratio and writes badge artifacts for the README. Do not run
+# manually in production workflows.
+#
+# The badge reports exactly what is measured: how many workspace tests are
+# runnable under Miri vs. the total (`-- --list` vs. `-- --ignored --list`).
 set -euo pipefail
 
-: "${BASE_LINE_COVERAGE:=0}"
 MIRI_TEST_CMD=${MIRI_TEST_CMD:-"cargo miri test --workspace --all-features --lib --tests"}
 
 run_listing() {
@@ -21,33 +24,25 @@ if [ "$total" -gt 0 ]; then
   ratio_label="${runnable_ratio_value}%"
 fi
 
-base_cov="${BASE_LINE_COVERAGE:-0}"
-if [ -z "$base_cov" ]; then
-  base_cov="0"
-fi
-
-effective_cov=$(awk -v base="$base_cov" -v ratio="$runnable_ratio_value" 'BEGIN { printf "%.1f", (base * ratio) / 100 }')
-effective_label="${effective_cov}%"
-effective_int=$(printf "%.0f" "$effective_cov")
-if [ "$effective_int" -ge 90 ]; then
+ratio_int=$(printf "%.0f" "$runnable_ratio_value")
+if [ "$ratio_int" -ge 90 ]; then
   color="brightgreen"
-elif [ "$effective_int" -ge 80 ]; then
+elif [ "$ratio_int" -ge 80 ]; then
   color="green"
-elif [ "$effective_int" -ge 70 ]; then
+elif [ "$ratio_int" -ge 70 ]; then
   color="yellow"
 else
   color="red"
 fi
 
+message="${ratio_label} (${run_cnt}/${total})"
 mkdir -p badges
 {
   printf "Miri runnable tests: %s/%s\n" "$run_cnt" "$total"
   printf "Runnable ratio: %s\n" "$ratio_label"
-  printf "LLVM line coverage baseline: %s%%\n" "$base_cov"
-  printf "Effective Miri coverage: %s\n" "$effective_label"
 } | tee miri-summary.txt
-printf "effective_coverage=%s\n" "${effective_label}" | tee miri-output.env
-printf '{"schemaVersion":1,"label":"miri coverage","message":"%s","color":"%s"}\n' "${effective_label}" "${color}" | tee badges/miri-coverage.json
+printf "runnable_ratio=%s\n" "${ratio_label}" | tee miri-output.env
+printf '{"schemaVersion":1,"label":"miri coverage","message":"%s","color":"%s"}\n' "$message" "$color" | tee badges/miri-coverage.json
 
 if [ -n "${GITHUB_OUTPUT:-}" ]; then
   cat miri-output.env >> "$GITHUB_OUTPUT"

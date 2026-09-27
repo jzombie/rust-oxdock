@@ -383,6 +383,17 @@ pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
                     keys.insert(k);
                 }
             }
+            StepKind::RemoteBlock { env, body, .. } => {
+                // Header `env:NAME` entries read host env at block entry;
+                // body references resolve guest-side but are tracked too so
+                // host rebuilds stay conservative.
+                for key in env {
+                    keys.insert(key.clone());
+                }
+                for k in collect_env_references(body) {
+                    keys.insert(k);
+                }
+            }
             StepKind::Await { .. } => {}
             StepKind::Cancel { .. } => {}
             StepKind::Sleep { duration } => template_keys(&mut keys, duration),
@@ -451,6 +462,8 @@ mod tests {
                 })?;
                 Ok(StepKind::Copy {
                     from_workspace: None,
+                    from_host: false,
+                    to_host: false,
                     from,
                     to,
                 })

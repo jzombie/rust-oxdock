@@ -42,6 +42,8 @@ fn main() -> anyhow::Result<()> {
             script: ScriptSource::Path(script_path),
             shell,
             endpoints: EndpointFlags::default(),
+            remote_serve: false,
+            remotes: Vec::new(),
         },
         root,
     )

@@ -34,14 +34,14 @@ One script runs on Linux, macOS, and Windows, with platform gating, async tasks,
 
 Plain Rust functions become script functions with one attribute: `#[oxdock_func]` exports them into namespaced modules scripts call as `DEMO::NAME(...)`. See [Extending OxDock from Rust](#extending-oxdock-from-rust).
 
-[Documentation](https://docs.rs/oxdock/0.19.0-alpha/oxdock/)
+[Documentation](https://docs.rs/oxdock/0.20.0-alpha/oxdock/)
 
 Jump to the [command reference](#command-reference) below for the full
 command list with runnable examples.
 
 ## Quick start
 
-Add it to your Rust build with `cargo add oxdock@0.19.0-alpha`, or install the standalone runner with `cargo install oxdock@0.19.0-alpha`.
+Add it to your Rust build with `cargo add oxdock@0.20.0-alpha`, or install the standalone runner with `cargo install oxdock@0.20.0-alpha`.
 
 Run a script:
 
@@ -127,8 +127,8 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     LET $a: STRING = READ dist/alpha.txt
     LET $b: STRING = READ dist/beta.txt
     LET $p: STRING = READ dist/picked.txt
-    ASSERT_EQ $a "alpha OxDock 0.19.0-alpha"
-    ASSERT_EQ $b "beta OxDock 0.19.0-alpha"
+    ASSERT_EQ $a "alpha OxDock 0.20.0-alpha"
+    ASSERT_EQ $b "beta OxDock 0.20.0-alpha"
     ASSERT_EQ $p "alpha"
 };
 
@@ -140,7 +140,7 @@ let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolve
 let out = root.join("dist/alpha.txt").expect("out path");
 assert_eq!(
     resolver.read_to_string(&out).expect("read out"),
-    "alpha OxDock 0.19.0-alpha"
+    "alpha OxDock 0.20.0-alpha"
 );
 ```
 
@@ -1142,7 +1142,7 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | [`INHERIT_ENV`](#inherit_env) | `INHERIT_ENV [<key>, ...]` |
 | [`ECHO`](#echo) | `ECHO <message>` |
 | [`RUN`](#run) | `RUN <command...> \| RUN ["exe", "arg", ...]` |
-| [`COPY`](#copy) | `COPY [--from-workspace SNAPSHOT\|LOCAL\|CACHE\|SYSTEM] <from> <to>` |
+| [`COPY`](#copy) | `COPY [--from-workspace SNAPSHOT\|LOCAL\|CACHE\|SYSTEM] [--from-host \| --to-host] <from> <to>` |
 | [`COPY_GIT`](#copy_git) | `COPY_GIT [--include-dirty] <rev> <src> <dst>` |
 | [`SYMLINK`](#symlink) | `SYMLINK [--from-workspace SNAPSHOT\|LOCAL\|CACHE\|SYSTEM] <from> <to>` |
 | [`MKDIR`](#mkdir) | `MKDIR <path>` |
@@ -1168,6 +1168,7 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | [`AWAIT`](#await) | `AWAIT $var \| LET $out: STRING = AWAIT $var` |
 | [`CANCEL`](#cancel) | `CANCEL $var` |
 | [`TIMEOUT`](#timeout) | `TIMEOUT <duration> <command...> \| TIMEOUT <duration> { <commands> } \| TIMEOUT <duration> AWAIT $var` |
+| [`REMOTE`](#remote) | `REMOTE <target> [[$var, ...] [env:NAME, ...]] { <commands> }` |
 | [`FUNC`](#func) | `FUNC NAME([$param: TYPE, ...]) { <commands> }` |
 | [`RETURN`](#return) | `RETURN [<expr>]` |
 | [`WHILE`](#while) | `WHILE <bool-expr> { <commands> }` |
@@ -1885,6 +1886,147 @@ ASSERT_EQ $beat "alive"
 ```
 
 
+### REMOTE
+
+Run a sealed block on a remote target.
+
+**Syntax:** `REMOTE <target> [[$var, ...] [env:NAME, ...]] { <commands> }`
+
+Runs the braced block on the named remote target, which the
+host binds at startup (`--remote`). The block is sealed:
+only header-listed `$var` and `env:NAME` entries cross, the
+guest starts empty, and results return through declared
+transfers or `WITH_IO` pipes. The target is a static
+literal, never a variable. Unknown targets fail before
+execution starts.
+
+
+**Examples:**
+
+**Example: sealed header values cross, outer scope does not**
+
+```oxdock mock_remote:prod
+# Only header-listed names arrive: `$version` is visible
+# on the guest, `$secret` was never sent.
+LET $version: STRING = "1.2.3"
+LET $secret: STRING = "host-only"
+REMOTE prod [$version] {
+    WRITE version.txt "{{ $version }}"
+    COPY --to-host ./version.txt back.txt
+}
+
+# The pushed file proves the guest saw the injected value.
+LET $back: STRING = READ back.txt
+ASSERT_EQ $back "1.2.3"
+```
+
+**Example: background tasks stream through shared pipes**
+
+```oxdock mock_remote:prod
+# Two background REMOTEs share one capture pipe while a
+# WITH_IO block holds the write end open.
+IMPORT [STD]
+LET $cap: PIPE
+WITH_IO [stdout=$cap] {
+    LET $a: HANDLE = ASYNC REMOTE prod {
+        ECHO "from-a"
+    }
+    LET $b: HANDLE = ASYNC REMOTE prod {
+        ECHO "from-b"
+    }
+    AWAIT $a
+    AWAIT $b
+}
+
+# EOF ends the drain: no sentinel line, no baked-in count.
+LET $n: INT = 0
+WHILE !EOF($cap) {
+    WITH_IO [stdin=$cap] READ_LINE $line
+    $n = $n + 1
+}
+ASSERT_EQ $n 2
+```
+
+**Example: declared files cross both directions**
+
+```oxdock mock_remote:prod roots:unified
+# Fetches ride in, pushes ride back. Anything undeclared
+# never leaves its side.
+WRITE send.txt "payload"
+REMOTE prod {
+    COPY --from-host ./send.txt got.txt
+    LET $v: STRING = READ got.txt
+    ASSERT_EQ $v "payload"
+    WRITE back.txt "returned"
+    COPY --to-host ./back.txt back.txt
+}
+
+# The push landed on the host; guest staging is gone.
+LET $b: STRING = READ back.txt
+ASSERT_EQ $b "returned"
+```
+
+**Example: guest workspace selection stays on the guest**
+
+```oxdock mock_remote:prod
+# WORKSPACE switches inside the block resolve against the
+# guest staging dir, which serves as both the SNAPSHOT
+# root and the LOCAL build context. The host selection
+# restores when the block exits.
+REMOTE prod {
+    WORKSPACE SNAPSHOT
+    WRITE out.txt "from-snapshot"
+    COPY --to-host ./out.txt snap.txt
+}
+
+LET $s: STRING = READ snap.txt
+ASSERT_EQ $s "from-snapshot"
+```
+
+**Example: guest cache persists across execs**
+
+```oxdock mock_remote:prod
+# WORKSPACE CACHE addresses guest-local persistent
+# storage: the second block reads what the first wrote,
+# while the guest staging starts empty every time.
+REMOTE prod {
+    WORKSPACE CACHE
+    WRITE marker.txt "run-marker"
+}
+REMOTE prod {
+    WORKSPACE CACHE
+    LET $m: STRING = READ marker.txt
+    ASSERT_EQ $m "run-marker"
+}
+```
+
+**Example: pushes outside staging fail closed**
+
+```oxdock mock_remote:prod expect_error:"escapes staging"
+# WORKSPACE SYSTEM exposes the whole guest machine, but
+# transfers stay staging scoped: a push source outside
+# staging fails loudly instead of crossing.
+REMOTE prod {
+    WORKSPACE SYSTEM
+    COPY --to-host /no/such/file.txt got.txt
+}
+```
+
+**Expected error:** `escapes staging`
+
+**Example: remote block without a runner**
+
+```oxdock expect_error:"has no registered session"
+# Without a bound session, the block bails instead of
+# executing anywhere unexpected.
+REMOTE prod {
+    ECHO "do something on remote"
+}
+```
+
+**Expected error:** `has no registered session`
+
+
 ### FUNC
 
 Define a user function.
@@ -2444,7 +2586,7 @@ ASSERT_EQ $t "absent"
 
 Copy file into workspace.
 
-**Syntax:** `COPY [--from-workspace SNAPSHOT|LOCAL|CACHE|SYSTEM] <from> <to>`
+**Syntax:** `COPY [--from-workspace SNAPSHOT|LOCAL|CACHE|SYSTEM] [--from-host | --to-host] <from> <to>`
 
 Copies from host (the source is never moved or modified). Docker destination semantics: a file copied onto a directory (an existing one, or a trailing-slash spell like `out/`) is duplicated inside it under its own basename; a directory source duplicates its contents into the destination; any other destination path is created holding the copied bytes.
 
@@ -2460,6 +2602,8 @@ Copies from host (the source is never moved or modified). Docker destination sem
 | Flag | Type | Description |
 | --- | --- | --- |
 | `--from-workspace` | `STRING` | Copy from the given workspace root instead of the build context |
+| `--from-host` | `BOOL` | Fetch from the host workspace into the guest (REMOTE bodies only) |
+| `--to-host` | `BOOL` | Push from the guest workspace back to the host (REMOTE bodies only) |
 
 **Examples:**
 
@@ -3188,6 +3332,38 @@ Bare names fail closed: `DESCRIBE` requires the qualified form (except
 `INSPECT`, which is syntax rather than a registry entry). Errors on
 unknown function.
 
+### STD::EOF
+
+**Signature:** `STD::EOF($pipe) -> BOOL`
+
+**Contexts:** AST only
+
+True when a pipe sits at end of stream: closed with nothing buffered,
+so the next `READ_LINE` would bind `""` via EOF rather than a line.
+Live writers, pinned keepers, and buffered bytes all answer false.
+Never blocks: a reader already blocked stays blocked, so branch on
+`EOF` before reading, not after. OS pairs and unbound handles answer
+best-effort (kernel bytes are invisible there; see `INSPECT`).
+Non-pipe arguments bail.
+
+```oxdock
+# Capture two lines, then drain to end of stream with no sentinel line.
+IMPORT [STD]
+LET $cap: PIPE
+WITH_IO [stdout=$cap] {
+    ECHO "one"
+    ECHO "two"
+}
+
+# The loop exits on close, and the count proves both lines drained.
+LET $n: INT = 0
+WHILE !EOF($cap) {
+    WITH_IO [stdin=$cap] READ_LINE $line
+    $n = $n + 1
+}
+ASSERT_EQ $n 2
+```
+
 ### STD::FLOAT
 
 **Signature:** `STD::FLOAT($val) -> FLOAT`
@@ -3614,20 +3790,16 @@ cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info
 
 The CI `miri` job monitors how many workspace unit tests can run under [`cargo miri`](https://github.com/rust-lang/miri). On pushes to `main`, the job publishes a badge description (`badges/miri-coverage.json` on the `badges` branch) that backs the Miri coverage badge above.
 
-To keep the badge grounded in real coverage reporting, the workflow multiplies two signals:
-
-1. **Runnable test ratio:** how many workspace tests are runnable under Miri vs. the total (`cargo miri test -- --list`).
-2. **LLVM line coverage baseline:** the percent reported by `cargo llvm-cov --summary-only` (the same value sent to Coveralls).
-
-The badge therefore shows an approximate “effective Miri coverage” (baseline coverage × runnable ratio), which can never exceed the standard coverage percentage but gives a tangible sense of how much of the tested surface area is validated under the runner.
+The badge reports the runnable test ratio directly: runnable tests over total tests (`cargo miri test -- --list` vs. `-- --ignored --list`), with both counts in the message. LLVM line coverage keeps its own badge; this one answers only how much of the suite Miri can execute.
 
 To test the calculation locally without waiting for CI:
 
 ```bash
-cargo llvm-cov --workspace --all-features --summary-only > coverage-summary.txt
-BASE_LINE_COVERAGE=$(awk '/^TOTAL/ {print $10}' coverage-summary.txt | tr -d '%' | head -n1) \
+MIRI_TEST_CMD="cargo test --workspace --all-features --lib --tests" \
   scripts/.github/miri-badge-report.sh
 ```
+
+(Note: plain `cargo test` has no `cfg(miri)`, so every test counts as runnable and the ratio reads 100%. For CI-parity counts including Miri ignores, prefix the command with `RUSTFLAGS="--cfg miri" cargo +nightly`.)
 
 The helper emits the same badge JSON (`badges/miri-coverage.json`) and summary text used by CI, making it easy to confirm the numbers before opening a PR.
 
