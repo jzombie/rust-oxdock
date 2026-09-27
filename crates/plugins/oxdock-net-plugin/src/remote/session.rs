@@ -114,7 +114,9 @@ impl RemoteRunner for StdioSession {
 }
 
 /// Counter for unique spill names within one session: `create_spill_file`
-/// fails when the name exists, so every stage gets its own.
+/// fails when the name exists, so every stage gets its own. Native only:
+/// under Miri the session stages to memory and never spills.
+#[cfg(not(miri))]
 static SPILL_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 /// Live session driver: muxio streaming calls plus a stdin pump thread on
@@ -629,7 +631,9 @@ impl MuxioSession {
 struct TransferScratch {
     _temp: GuardedPath,
     _tempdir: oxdock_fs::GuardedTempDir,
-    resolver: PathResolver,
+    // Spill staging only; unread under Miri, where sessions stage to
+    // memory. Underscored like the other lifetime-held fields.
+    _resolver: PathResolver,
 }
 
 impl TransferScratch {
@@ -640,16 +644,27 @@ impl TransferScratch {
         Ok(Self {
             _temp: root,
             _tempdir: tempdir,
-            resolver,
+            _resolver: resolver,
         })
     }
 
     fn stage(&self, name: &str) -> Result<oxdock_core::TransferStage> {
-        oxdock_core::TransferStage::new_spill(
-            &self.resolver,
-            &self._temp,
-            &format!("{}-{}", next_spill_id(), name),
-        )
+        // Memory-backed under Miri: transports never run there (no process
+        // spawning), so the spill path is unreachable; this exists only so
+        // the session compiles under `--cfg miri`.
+        #[cfg(miri)]
+        {
+            let _ = name;
+            Ok(oxdock_core::TransferStage::new_mem())
+        }
+        #[cfg(not(miri))]
+        {
+            oxdock_core::TransferStage::new_spill(
+                &self._resolver,
+                &self._temp,
+                &format!("{}-{}", next_spill_id(), name),
+            )
+        }
     }
 
     fn hash_and_len(&self, stage: &mut oxdock_core::TransferStage) -> Result<(String, u64)> {
@@ -675,6 +690,7 @@ impl TransferScratch {
     }
 }
 
+#[cfg(not(miri))]
 fn next_spill_id() -> u64 {
     SPILL_COUNTER.fetch_add(1, Ordering::SeqCst)
 }

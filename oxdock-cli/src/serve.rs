@@ -103,6 +103,15 @@ impl FetchStage {
         let dir = GuardedPath::tempdir().context("serve transfer tempdir failed")?;
         let root = dir.as_guarded_path().clone();
         let resolver = PathResolver::new(root.root(), root.root())?;
+        // Memory-backed under Miri: the serve loop never runs there (no
+        // transports), so the spill path is unreachable; this exists only
+        // so the guest compiles under `--cfg miri`.
+        #[cfg(miri)]
+        let spill = {
+            let _ = (&resolver, &root);
+            oxdock_core::TransferStage::new_mem()
+        };
+        #[cfg(not(miri))]
         let spill = oxdock_core::TransferStage::new_spill(&resolver, &root, "fetch.tar.gz")?;
         Ok(Self {
             _tempdir: root,
@@ -623,6 +632,14 @@ fn pack_manifest(
     let push_dir = GuardedPath::tempdir().context("serve push tempdir failed")?;
     let push_root = push_dir.as_guarded_path().clone();
     let push_resolver = PathResolver::new(push_root.root(), push_root.root())?;
+    // Memory-backed under Miri: same unreachable-spill rationale as
+    // `FetchStage::new` above.
+    #[cfg(miri)]
+    let mut spill = {
+        let _ = (&push_resolver, &push_root);
+        oxdock_core::TransferStage::new_mem()
+    };
+    #[cfg(not(miri))]
     let mut spill =
         oxdock_core::TransferStage::new_spill(&push_resolver, &push_root, "push.tar.gz")?;
     // NOTE: spill tempdir must outlive streaming below; moved out via the

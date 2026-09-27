@@ -126,14 +126,16 @@ impl TransferStage {
 
     /// Rewind to the start for the read-back pass.
     pub fn rewind(&mut self) -> Result<()> {
-        use std::io::Seek;
         let result: std::io::Result<()> = match self {
             Self::Mem(cursor) => {
                 cursor.set_position(0);
                 Ok(())
             }
             #[cfg(not(miri))]
-            Self::File(file) => file.seek(std::io::SeekFrom::Start(0)).map(|_| ()),
+            Self::File(file) => {
+                use std::io::Seek;
+                file.seek(std::io::SeekFrom::Start(0)).map(|_| ())
+            }
         };
         result.map_err(|err| anyhow::anyhow!("transfer stage rewind failed: {err:#}"))
     }
