@@ -7,10 +7,10 @@
       "template": "crates/oxdock-logic-tests/fixtures/commands/ast_commands/.oxdock/template/README.md.tmpl",
       "fragments": {
         "local": [
-          "crates/oxdock-logic-tests/fixtures/commands/ast_commands/.oxdock/template/header.md.tmpl",
           "crates/oxdock-logic-tests/fixtures/commands/ast_commands/.oxdock/template/fragments/*"
         ],
         "shared": [
+          ".oxdock/template/shared/header.md.tmpl",
           ".oxdock/template/shared/footer.md.tmpl"
         ]
       }

@@ -1,3 +1,8 @@
+Anonymous pipe backends. Handles start unbound and materialize lazily on
+first binding (script buffers by default, OS kernel pairs for pure
+single-`RUN` pipelines); cloning a handle shares the backend, and the last
+drop closes. Under Miri everything stays on script pipes.
+
 ### Layout
 
 - `spill`: the spillable byte buffer. Bytes accumulate in memory and spill

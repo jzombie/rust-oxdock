@@ -4,7 +4,6 @@ Guarded filesystem and workspace utilities for OxDock environments.
 
 > Part of the [OxDock](https://github.com/jzombie/rust-oxdock) workspace.
 
-
 Guarded filesystem and workspace utilities. `GuardedPath` guarantees that
 every operation stays within a declared root; `PathResolver` abstracts read,
 write, copy, and directory-creation behind a trait so host syscalls are

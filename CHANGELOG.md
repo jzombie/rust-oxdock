@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [UNRELEASED]
+
+### Added
+
+- Added README for `oxdock-remote-proto`: the sealed remote execution contract now ships generated docs like every other workspace crate, covering the stable block-granular session, the digest-gated handshake, and the guarded tar transfer helpers.
+
 ## [0.20.0-alpha] - 2026-09-27
 
 ### Added
