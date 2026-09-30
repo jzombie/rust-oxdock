@@ -25,7 +25,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use oxdock_core::{
     FuncKind, FuncMeta, FuncParam, HostModule, HostRegistration, NativeFn, OxDockFn, OxDockType,
-    StepCtx, Value,
+    StepCtx, TypeTag, Value,
 };
 use oxdock_func_macro::oxdock_func;
 use oxdock_process::ProcessManager;
@@ -572,6 +572,7 @@ pub fn module_with_endpoints<P: ProcessManager>(registry: Arc<EndpointRegistry>)
             net_addr_registration(registry),
         ],
         types: vec![NetListenerTag::descriptor()],
+        record_schemas: vec![],
     }
 }
 
@@ -604,14 +605,14 @@ fn net_listen_registration<P: ProcessManager>(
             params: Some(vec![
                 FuncParam {
                     name: "bind".to_string(),
-                    param_type: Some("STRING".to_string()),
+                    param_type: Some(TypeTag::String),
                 },
                 FuncParam {
                     name: "options".to_string(),
                     param_type: None,
                 },
             ]),
-            returns: Some("MAP".to_string()),
+            returns: Some(TypeTag::Map),
             rpn: false,
             summary: "Claim a virtual service endpoint and report its address.",
             docs: "Claim a virtual service endpoint and report its address.",
@@ -649,7 +650,7 @@ fn net_connect_registration<P: ProcessManager>(
             params: Some(vec![
                 FuncParam {
                     name: "target".to_string(),
-                    param_type: Some("STRING".to_string()),
+                    param_type: Some(TypeTag::String),
                 },
                 FuncParam {
                     name: "in_pipe".to_string(),
@@ -664,7 +665,7 @@ fn net_connect_registration<P: ProcessManager>(
                     param_type: None,
                 },
             ]),
-            returns: Some("MAP".to_string()),
+            returns: Some(TypeTag::Map),
             rpn: false,
             summary: "Dial a TCP endpoint into pipes.",
             docs: "Dial a TCP endpoint into pipes.",
@@ -718,9 +719,9 @@ fn net_port_registration<P: ProcessManager>(
             kind: FuncKind::HostCtx,
             params: Some(vec![FuncParam {
                 name: "target".to_string(),
-                param_type: Some("STRING".to_string()),
+                param_type: Some(TypeTag::String),
             }]),
-            returns: Some("INT".to_string()),
+            returns: Some(TypeTag::Int),
             rpn: false,
             summary: "Report the bound port of a virtual service endpoint.",
             docs: indoc::indoc! {r#"
@@ -792,9 +793,9 @@ fn net_addr_registration<P: ProcessManager>(
             kind: FuncKind::HostCtx,
             params: Some(vec![FuncParam {
                 name: "target".to_string(),
-                param_type: Some("STRING".to_string()),
+                param_type: Some(TypeTag::String),
             }]),
-            returns: Some("STRING".to_string()),
+            returns: Some(TypeTag::String),
             rpn: false,
             summary: "Report the bound socket address of a virtual service endpoint.",
             docs: indoc::indoc! {r#"

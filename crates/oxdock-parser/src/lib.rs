@@ -27,6 +27,7 @@ mod macro_input;
 pub mod markdown;
 pub mod parser;
 pub mod strip_flags;
+pub mod tag;
 pub mod value;
 
 pub use ast::*;
@@ -49,6 +50,7 @@ pub use parser::{
     parse_guard_expr_str, parse_script, parse_script_with_modules, parse_script_with_preseed,
 };
 pub use strip_flags::strip_flags;
+pub use tag::{Field, TypeTag, check_value};
 
 /// Shared mock lowering for parser tests.
 /// Centralizes AST lowering so unit tests, integration tests, and macro_input tests

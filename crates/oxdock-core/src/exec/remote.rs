@@ -370,7 +370,7 @@ fn resolve_header<P: ProcessManager>(
                 value.type_name()
             )
         })?;
-        lines.push(format!("LET ${name}: {decl_type} = {literal}"));
+        lines.push(format!("LET ${name}: {} = {literal}", decl_type.name()));
     }
     for name in env_names {
         let Some(value) = cx.get_env(name) else {

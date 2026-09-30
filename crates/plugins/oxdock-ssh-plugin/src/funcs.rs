@@ -13,7 +13,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use oxdock_core::{
     FuncKind, FuncMeta, FuncParam, HostModule, HostRegistration, NativeFn, OxDockFn, OxDockType,
-    StepCtx, Value,
+    StepCtx, TypeTag, Value,
 };
 use oxdock_func_macro::oxdock_func;
 use oxdock_net_plugin::{AcquiredListener, EndpointKey, EndpointRegistry, acquire_listener};
@@ -588,6 +588,7 @@ pub fn module_with_endpoints<P: ProcessManager>(registry: Arc<EndpointRegistry>)
             SshPtyRun::registration(),
         ],
         types: vec![SshServerTag::descriptor(), SshSessionTag::descriptor()],
+        record_schemas: vec![],
     }
 }
 
@@ -619,14 +620,14 @@ fn ssh_serve_registration<P: ProcessManager>(
             params: Some(vec![
                 FuncParam {
                     name: "bind".to_string(),
-                    param_type: Some("STRING".to_string()),
+                    param_type: Some(TypeTag::String),
                 },
                 FuncParam {
                     name: "options".to_string(),
                     param_type: None,
                 },
             ]),
-            returns: Some("MAP".to_string()),
+            returns: Some(TypeTag::Map),
             rpn: false,
             summary: "Serve SSH on a virtual service endpoint.",
             docs: "Serve SSH on a virtual service endpoint.",
@@ -671,15 +672,15 @@ fn ssh_connect_registration<P: ProcessManager>(
             params: Some(vec![
                 FuncParam {
                     name: "target".to_string(),
-                    param_type: Some("STRING".to_string()),
+                    param_type: Some(TypeTag::String),
                 },
                 FuncParam {
                     name: "username".to_string(),
-                    param_type: Some("STRING".to_string()),
+                    param_type: Some(TypeTag::String),
                 },
                 FuncParam {
                     name: "password".to_string(),
-                    param_type: Some("STRING".to_string()),
+                    param_type: Some(TypeTag::String),
                 },
                 FuncParam {
                     name: "in_pipe".to_string(),
@@ -690,7 +691,7 @@ fn ssh_connect_registration<P: ProcessManager>(
                     param_type: None,
                 },
             ]),
-            returns: Some("MAP".to_string()),
+            returns: Some(TypeTag::Map),
             rpn: false,
             summary: "Open an SSH client session into pipes.",
             docs: "Open an SSH client session into pipes. Target shapes: a logical port (CLI-mapped address or loopback default), a service name (CLI-mapped address only), a served address, or a host:port dial.",

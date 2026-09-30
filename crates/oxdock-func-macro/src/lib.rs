@@ -97,12 +97,20 @@ fn expand_oxdock_func(attr: TokenStream, item: TokenStream) -> syn::Result<Token
     expand_func(options, func)
 }
 
+/// A declared return type: a builtin label checked against the closed
+/// set at compile time, or a `TypeTag` expression (descriptor-backed
+/// customs, shaped records and lists) resolved by the compiler.
+enum ReturnsSpec {
+    Builtin(syn::Ident),
+    Expr(syn::Expr),
+}
+
 #[derive(Default)]
 struct FuncOptions {
     pure: bool,
     rpn: bool,
     name: Option<String>,
-    returns: Option<String>,
+    returns: Option<ReturnsSpec>,
     summary: Option<String>,
 }
 
@@ -125,11 +133,17 @@ impl Parse for FuncOptions {
             } else if input.peek(syn::Ident) {
                 let key: syn::Ident = input.parse()?;
                 input.parse::<Token![=]>()?;
+                if key == "returns" {
+                    let value: syn::Expr = input.parse()?;
+                    options.returns = Some(parse_returns(value)?);
+                    if input.peek(Token![,]) {
+                        input.parse::<Token![,]>()?;
+                    }
+                    continue;
+                }
                 let value: syn::LitStr = input.parse()?;
                 if key == "name" {
                     options.name = Some(value.value());
-                } else if key == "returns" {
-                    options.returns = Some(type_label_to_string(&value)?);
                 } else if key == "summary" {
                     options.summary = Some(value.value());
                 } else {
@@ -160,17 +174,42 @@ fn peek_key_value(input: ParseStream) -> bool {
     fork.peek(Token![=])
 }
 
-fn type_label_to_string(lit: &syn::LitStr) -> syn::Result<String> {
-    match lit.value().as_str() {
-        "STRING" | "INT" | "FLOAT" | "BOOL" | "PIPE" | "LIST" | "MAP" | "HANDLE" | "DURATION"
-        | "PATH" | "SEMAPHORE" | "PERMIT" => Ok(lit.value()),
-        other => Err(syn::Error::new(
-            lit.span(),
-            format!(
-                "unknown type label {other:?}; expected a builtin descriptor name such as STRING, INT, LIST, or MAP"
-            ),
-        )),
+/// Parse a `returns` attribute value: either a builtin label checked
+/// against the closed set at compile time, or a `TypeTag` expression
+/// (descriptor-backed customs, shaped records and lists) resolved by
+/// the compiler. A string naming a non-builtin fails here pointing at
+/// the expression form, so custom types can never slip through as
+/// unchecked strings.
+fn parse_returns(value: syn::Expr) -> syn::Result<ReturnsSpec> {
+    if let syn::Expr::Lit(lit) = &value {
+        if let syn::Lit::Str(text) = &lit.lit {
+            let variant = match text.value().as_str() {
+                "STRING" => "String",
+                "INT" => "Int",
+                "FLOAT" => "Float",
+                "BOOL" => "Bool",
+                "LIST" => "List",
+                "MAP" => "Map",
+                "PIPE" => "Pipe",
+                "HANDLE" => "Handle",
+                "DURATION" => "Duration",
+                "PATH" => "Path",
+                "SEMAPHORE" => "Semaphore",
+                "PERMIT" => "Permit",
+                other => {
+                    return Err(syn::Error::new(
+                        text.span(),
+                        format!(
+                            "unknown builtin type label {other:?}; pass a TypeTag expression for host types, e.g. returns = TypeTag::Custom(FooTag::descriptor())"
+                        ),
+                    ));
+                }
+            };
+            let ident = syn::Ident::new(variant, text.span());
+            return Ok(ReturnsSpec::Builtin(ident));
+        }
     }
+    Ok(ReturnsSpec::Expr(value))
 }
 
 /// A DSL-facing parameter: binding identifier plus mapped type info.
@@ -192,10 +231,10 @@ impl ParamKind {
     fn type_path(&self) -> TokenStream2 {
         match self {
             ParamKind::Value => quote! { None },
-            ParamKind::String => quote! { Some("STRING".to_string()) },
-            ParamKind::Int => quote! { Some("INT".to_string()) },
-            ParamKind::Float => quote! { Some("FLOAT".to_string()) },
-            ParamKind::Bool => quote! { Some("BOOL".to_string()) },
+            ParamKind::String => quote! { Some(::oxdock_core::TypeTag::String) },
+            ParamKind::Int => quote! { Some(::oxdock_core::TypeTag::Int) },
+            ParamKind::Float => quote! { Some(::oxdock_core::TypeTag::Float) },
+            ParamKind::Bool => quote! { Some(::oxdock_core::TypeTag::Bool) },
         }
     }
 
@@ -518,7 +557,12 @@ fn expand_func(options: FuncOptions, func: ItemFn) -> syn::Result<TokenStream2> 
     let docs_text = docs.join("\n");
     let returns = options
         .returns
-        .map(|label| quote! { Some(#label.to_string()) })
+        .map(|spec| match spec {
+            ReturnsSpec::Builtin(variant) => {
+                quote! { Some(::oxdock_core::TypeTag::#variant) }
+            }
+            ReturnsSpec::Expr(expr) => quote! { Some(#expr) },
+        })
         .unwrap_or(quote! { None });
 
     // The entry point closes over nothing: arity check, unpack, then the

@@ -861,6 +861,7 @@ fn create_exec_state(fs: MockFs) -> ExecState<MockProcessManager> {
         cancellable: false,
         functions: super::native::FunctionRegistry::with_builtins(),
         types: super::typing::startup_type_map(),
+        record_schemas: std::collections::HashMap::new(),
         call_depth: 0,
         task_id: 0,
         push_manifest: Vec::new(),
@@ -2592,7 +2593,7 @@ mod escape_props {
         for (k, v) in vars {
             // Declared type always matches the value's descriptor: the
             // property under test is expansion, not coercion.
-            let kind = v.type_name().to_string();
+            let kind = state.resolve_tag(v.type_name()).expect("startup types resolve");
             let _ = state.declare_var(k.clone(), kind, v.clone());
         }
         state
@@ -3153,7 +3154,7 @@ fn host_round_trip_through_adapters() {
             module: "T".to_string(),
             kind: FuncKind::HostCtx,
             params: None,
-            returns: Some("PIPE".to_string()),
+            returns: Some(TypeTag::Pipe),
             rpn: false,
             summary: "test-only host pipe relay",
             docs: "test-only",
@@ -3178,6 +3179,7 @@ fn host_round_trip_through_adapters() {
             func: relay,
         }],
         types: vec![],
+        record_schemas: vec![],
     };
     let table = oxdock_parser::ModuleTable {
         modules: std::collections::HashMap::from([(
@@ -3233,7 +3235,7 @@ fn expand_placeholder_calls_pure_host_function() {
             module: "T".to_string(),
             kind: FuncKind::HostPure,
             params: None,
-            returns: Some("STRING".to_string()),
+            returns: Some(TypeTag::String),
             rpn: false,
             summary: "test-only pure shout",
             docs: "test-only",
@@ -3254,6 +3256,7 @@ fn expand_placeholder_calls_pure_host_function() {
             func: shout,
         }],
         types: vec![],
+        record_schemas: vec![],
     };
     let table = oxdock_parser::ModuleTable {
         modules: std::collections::HashMap::from([(
@@ -3293,6 +3296,83 @@ fn expand_placeholder_calls_pure_host_function() {
     .expect("placeholder call runs");
     let files = fs.snapshot();
     assert_eq!(file_content(&files, "out.txt"), b"hi BOB!");
+}
+
+#[test]
+fn run_start_rejects_unknown_type_tags() {
+    // Typo'd `returns` and `params` labels fail before the first step
+    // runs, listing every known type. Previously a bad `returns` label
+    // lived forever as a lie in DESCRIBE output and generated docs:
+    // nothing read it but introspection.
+    /// Opaque handle minted here and never registered.
+    #[oxdock_func_macro::oxdock_type(name = "TEST_UNREGISTERED")]
+    #[derive(Debug, Clone, PartialEq)]
+    struct UnregisteredTag(String);
+    impl std::fmt::Display for UnregisteredTag {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "unregistered:{}", self.0)
+        }
+    }
+    fn bad_module(
+        return_type: Option<TypeTag>,
+        param_type: Option<TypeTag>,
+    ) -> HostModule<MockProcessManager> {
+        let noop: PureFn = Arc::new(|_| Ok(Value::string("x".to_string())));
+        HostModule {
+            name: "T".to_string(),
+            funcs: vec![HostRegistration::Pure {
+                name: "BAD".to_string(),
+                meta: FuncMeta {
+                    name: "T::BAD".to_string(),
+                    module: "T".to_string(),
+                    kind: FuncKind::HostPure,
+                    params: Some(vec![FuncParam {
+                        name: "arg".to_string(),
+                        param_type,
+                    }]),
+                    returns: return_type,
+                    rpn: false,
+                    summary: "test-only",
+                    docs: "test-only",
+                },
+                func: noop,
+            }],
+            types: vec![],
+            record_schemas: vec![],
+        }
+    }
+    // A custom descriptor whose name was never registered: tags make the
+    // reference well-typed in Rust, but the run directory cannot resolve
+    // it, so run-start validation fails naming the function and type.
+    let unregistered = TypeTag::Custom(UnregisteredTag::descriptor());
+    let mut state = create_exec_state(MockFs::new());
+    state.register_module(bad_module(Some(unregistered), Some(TypeTag::String)));
+    let err = state
+        .validate_function_type_tags()
+        .expect_err("unknown return must fail");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("T::BAD") && msg.contains("TEST_UNREGISTERED"),
+        "unexpected: {msg}"
+    );
+    assert!(msg.contains("STRING"), "must list known types: {msg}");
+
+    let mut state = create_exec_state(MockFs::new());
+    state.register_module(bad_module(Some(TypeTag::String), Some(unregistered)));
+    let err = state
+        .validate_function_type_tags()
+        .expect_err("unknown param must fail");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("TEST_UNREGISTERED") && msg.contains("arg"),
+        "unexpected: {msg}"
+    );
+
+    let mut state = create_exec_state(MockFs::new());
+    state.register_module(bad_module(Some(TypeTag::String), Some(TypeTag::Map)));
+    state
+        .validate_function_type_tags()
+        .expect("valid tags must pass");
 }
 
 #[cfg(not(miri))]
@@ -3342,7 +3422,7 @@ fn host_take_twice_on_os_bails() {
             module: "T".to_string(),
             kind: FuncKind::HostCtx,
             params: None,
-            returns: Some("STRING".to_string()),
+            returns: Some(TypeTag::String),
             rpn: false,
             summary: "test-only host take-twice probe",
             docs: "test-only",
@@ -3363,6 +3443,7 @@ fn host_take_twice_on_os_bails() {
             func: probe,
         }],
         types: vec![],
+        record_schemas: vec![],
     };
     let table = oxdock_parser::ModuleTable {
         modules: std::collections::HashMap::from([(

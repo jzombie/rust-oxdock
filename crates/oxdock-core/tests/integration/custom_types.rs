@@ -5,7 +5,7 @@
 //! `TYPES()`.
 
 use indoc::indoc;
-use oxdock_core::{Engine, EngineOutput, HostModule, OxDockFn, OxDockType, Value};
+use oxdock_core::{Engine, EngineOutput, HostModule, OxDockFn, OxDockType, TypeTag, Value};
 use oxdock_fs::{GuardedPath, GuardedTempDir, PathResolver, WorkspaceFs};
 use oxdock_func_macro::{oxdock_func, oxdock_type};
 use oxdock_process::MockProcessManager;
@@ -47,6 +47,7 @@ fn run_with_tag_hosts(root: &GuardedPath, script: &str) -> Result<(), anyhow::Er
         name: "TEST".to_string(),
         funcs: vec![MakeTag::registration(), ReadTag::registration()],
         types: vec![],
+        record_schemas: vec![],
     });
     engine.run_script(root, script).map(|_| ())
 }
@@ -99,7 +100,7 @@ fn unregistered_custom_type_fails_at_coercion() {
     let root = guard_root(&temp);
     let err = run_with_tag_hosts(&root, "IMPORT [STD, TEST]\nLET $x: NOPE = MAKE_TAG()\n")
         .expect_err("unknown custom type must fail");
-    assert!(err.to_string().contains("unknown type `NOPE`"), "{err}");
+    assert!(err.to_string().contains("unknown type 'NOPE'"), "{err}");
 }
 
 #[test]
@@ -126,6 +127,7 @@ fn engine_runs_with_custom_process_manager() {
         name: "TEST".to_string(),
         funcs: vec![MakeTag::registration(), ReadTag::registration()],
         types: vec![],
+        record_schemas: vec![],
     });
     let run = engine
         .run_script_on(
@@ -266,6 +268,7 @@ fn run_with_matrix_hosts(root: &GuardedPath, script: &str) -> Result<EngineOutpu
             MatrixRows::registration(),
         ],
         types: vec![],
+        record_schemas: vec![],
     });
     engine.run_script(root, script)
 }
@@ -290,6 +293,7 @@ fn duplicate_qualified_registration_panics() {
         name: "TEST".to_string(),
         funcs: vec![MakeTag::registration()],
         types: vec![],
+        record_schemas: vec![],
     };
     engine.register_module(module());
     engine.register_module(module());
@@ -311,9 +315,9 @@ fn host_module_cannot_reclaim_std_name() {
                 kind: oxdock_core::FuncKind::HostPure,
                 params: Some(vec![FuncParam {
                     name: "pattern".to_string(),
-                    param_type: Some("STRING".to_string()),
+                    param_type: Some(TypeTag::String),
                 }]),
-                returns: Some("LIST".to_string()),
+                returns: Some(TypeTag::List),
                 rpn: false,
                 summary: "Shadow attempt.",
                 docs: "Must never replace the builtin.",
@@ -321,6 +325,7 @@ fn host_module_cannot_reclaim_std_name() {
             func: Arc::new(|_| Ok(Value::string(String::new()))),
         }],
         types: vec![],
+        record_schemas: vec![],
     });
 }
 
@@ -336,11 +341,13 @@ fn same_base_name_in_different_modules_coexists() {
         name: "TEST".to_string(),
         funcs: vec![MakeTag::registration(), ReadTag::registration()],
         types: vec![],
+        record_schemas: vec![],
     });
     engine.register_module(HostModule {
         name: "OTHER".to_string(),
         funcs: vec![MakeTag::registration()],
         types: vec![],
+        record_schemas: vec![],
     });
     engine
         .run_script(
@@ -365,6 +372,7 @@ fn conflicting_payload_type_for_live_name_panics() {
         name: "TEST".to_string(),
         funcs: vec![MakeTag::registration(), ReadTag::registration()],
         types: vec![],
+        record_schemas: vec![],
     });
     engine.register_type::<ImpostorTag>();
     engine

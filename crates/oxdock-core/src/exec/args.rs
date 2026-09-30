@@ -1,6 +1,6 @@
 use anyhow::{Result, bail};
 use oxdock_fs::EntryKind;
-use oxdock_parser::{Arg, ArgPart, ArithOp, CompareOp, Expr, LogicalOp, MathOp, Value};
+use oxdock_parser::{Arg, ArgPart, ArithOp, CompareOp, Expr, LogicalOp, MathOp, TypeTag, Value};
 use oxdock_process::ProcessManager;
 
 use super::state::ExecState;
@@ -11,108 +11,94 @@ use super::steps::StepCtx;
 /// run's name directory here (not at parse time, where host descriptors
 /// are not visible). Pipe targets validate against the live PipeRegistry
 /// via ExecState.
-pub(crate) fn coerce_value<P: ProcessManager>(
-    value: Value,
-    expected: &str,
-    state: &ExecState<P>,
-) -> Result<Value> {
-    if !state.is_known_type(expected) {
-        return Err(anyhow::anyhow!(
-            "unknown type `{expected}`: no descriptor registered (expected one of {})",
-            state.type_names().join(", "),
-        ));
-    }
-    // Same-type passthrough for every type: the word carries its own
-    // vtable, so descriptor-name equality is type equality. Pipe handles
-    // are already owned values: passing one through never instantiates
-    // backend state (materialization happens only at binding sites), and
-    // `LET $q: PIPE = $p` shares the backend by cloning the handle.
-    if value.type_name() == expected {
+pub(crate) fn coerce_value(value: Value, expected: &TypeTag) -> Result<Value> {
+    // Exact conformance first: passthrough when the value already
+    // satisfies the tag, including shaped records and typed lists.
+    if oxdock_parser::check_value(expected, &value).is_ok() {
         return Ok(value);
     }
-    // Values of other registered types never cross-coerce; the mismatch
-    // below reports both names through the descriptor.
-    match (value.as_str(), expected) {
-        (Some(s), "INT") => {
-            s.trim().parse::<i64>().map(Value::int).map_err(|_| {
-                anyhow::anyhow!("TypeMismatch: expected {expected}, got STRING ({s:?})")
-            })
-        }
-        (Some(s), "FLOAT") => {
-            s.trim().parse::<f64>().map(Value::float).map_err(|_| {
-                anyhow::anyhow!("TypeMismatch: expected {expected}, got STRING ({s:?})")
-            })
-        }
-        (Some(s), "BOOL") => match s.trim() {
-            "true" => Ok(Value::bool(true)),
-            "false" => Ok(Value::bool(false)),
+    // Values of other shapes never cross-coerce; the mismatch below
+    // reports both names through the tag.
+    if let Some(s) = value.as_str() {
+        let name = expected.name();
+        return match expected {
+            TypeTag::Int => {
+                s.trim().parse::<i64>().map(Value::int).map_err(|_| {
+                    anyhow::anyhow!("TypeMismatch: expected {name}, got STRING ({s:?})")
+                })
+            }
+            TypeTag::Float => {
+                s.trim().parse::<f64>().map(Value::float).map_err(|_| {
+                    anyhow::anyhow!("TypeMismatch: expected {name}, got STRING ({s:?})")
+                })
+            }
+            TypeTag::Bool => match s.trim() {
+                "true" => Ok(Value::bool(true)),
+                "false" => Ok(Value::bool(false)),
+                _ => Err(anyhow::anyhow!(
+                    "TypeMismatch: expected {name}, got STRING ({s:?})"
+                )),
+            },
+            TypeTag::Pipe => {
+                // Strict: plain strings never coerce to pipes, so a handle is
+                // always created explicitly via `LET $p: PIPE`. Anything else
+                // is a TypeMismatch.
+                Err(anyhow::anyhow!(
+                    "TypeMismatch: expected {name}, got STRING ({s:?}); declare LET $x: PIPE and pass $x"
+                ))
+            }
+            TypeTag::Duration => oxdock_parser::command::parse_duration(s.trim())
+                .map(Value::duration)
+                .map_err(|_| {
+                    anyhow::anyhow!("TypeMismatch: expected {name}, got STRING ({s:?})")
+                }),
+            TypeTag::Path => {
+                // Narrow exception: materializing the PATH payload. Guard checks
+                // still run through oxdock-fs at use time.
+                #[allow(clippy::disallowed_types)]
+                let path = std::path::PathBuf::from(s.trim());
+                Ok(Value::path(path))
+            }
             _ => Err(anyhow::anyhow!(
-                "TypeMismatch: expected {expected}, got STRING ({s:?})"
+                "TypeMismatch: expected {name}, got STRING ({s:?})"
             )),
-        },
-        (Some(s), "PIPE") => {
-            // Strict: plain strings never coerce to pipes, so a handle is
-            // always created explicitly via `LET $p: PIPE`. Anything else
-            // is a TypeMismatch.
-            Err(anyhow::anyhow!(
-                "TypeMismatch: expected {expected}, got STRING ({s:?}); declare LET $x: PIPE and pass $x"
-            ))
-        }
-        (Some(s), "DURATION") => oxdock_parser::command::parse_duration(s.trim())
-            .map(Value::duration)
-            .map_err(|_| anyhow::anyhow!("TypeMismatch: expected {expected}, got STRING ({s:?})")),
-        (Some(s), "PATH") => {
-            // Narrow exception: materializing the PATH payload. Guard checks
-            // still run through oxdock-fs at use time.
-            #[allow(clippy::disallowed_types)]
-            let path = std::path::PathBuf::from(s.trim());
-            Ok(Value::path(path))
-        }
-        (Some(s), "LIST") => Err(anyhow::anyhow!(
-            "TypeMismatch: expected {expected}, got STRING ({s:?})"
-        )),
-        (Some(s), "MAP") => Err(anyhow::anyhow!(
-            "TypeMismatch: expected {expected}, got STRING ({s:?})"
-        )),
-        (Some(s), "HANDLE") => Err(anyhow::anyhow!(
-            "TypeMismatch: expected {expected}, got STRING ({s:?})"
-        )),
-        _ => coerce_scalar(&value, expected),
+        };
     }
+    coerce_scalar(&value, expected)
 }
 
 /// Scalar cross-coercions between numeric, boolean, duration, path, and
 /// pipe-name words. Anything else is a `TypeMismatch`.
-fn coerce_scalar(value: &Value, expected: &str) -> Result<Value> {
+fn coerce_scalar(value: &Value, expected: &TypeTag) -> Result<Value> {
     if let Some(n) = value.as_i64() {
         return match expected {
-            "STRING" => Ok(Value::string(n.to_string())),
-            "FLOAT" => Ok(Value::float(n as f64)),
+            TypeTag::String => Ok(Value::string(n.to_string())),
+            TypeTag::Float => Ok(Value::float(n as f64)),
             _ => Err(mismatch(expected, value)),
         };
     }
     if let Some(f) = value.as_f64() {
         return match expected {
-            "STRING" => Ok(Value::string(f.to_string())),
-            "INT" if f.fract() == 0.0 && f.is_finite() => Ok(Value::int(f as i64)),
+            TypeTag::String => Ok(Value::string(f.to_string())),
+            TypeTag::Int if f.fract() == 0.0 && f.is_finite() => Ok(Value::int(f as i64)),
             _ => Err(mismatch(expected, value)),
         };
     }
     if let Some(b) = value.as_bool() {
         return match expected {
-            "STRING" => Ok(Value::string(b.to_string())),
+            TypeTag::String => Ok(Value::string(b.to_string())),
             _ => Err(mismatch(expected, value)),
         };
     }
     if let Some(d) = value.as_duration() {
         return match expected {
-            "STRING" => Ok(Value::string(oxdock_parser::command::format_duration(&d))),
+            TypeTag::String => Ok(Value::string(oxdock_parser::command::format_duration(&d))),
             _ => Err(mismatch(expected, value)),
         };
     }
     if let Some(p) = value.as_path() {
         return match expected {
-            "STRING" => Ok(Value::string(p.to_string_lossy().to_string())),
+            TypeTag::String => Ok(Value::string(p.to_string_lossy().to_string())),
             _ => Err(mismatch(expected, value)),
         };
     }
@@ -120,15 +106,18 @@ fn coerce_scalar(value: &Value, expected: &str) -> Result<Value> {
         return match expected {
             // Opaque rendering: stringifying a handle was already
             // meaningless with names; `<pipe>` keeps the totality.
-            "STRING" => Ok(Value::string(format!("{value}"))),
+            TypeTag::String => Ok(Value::string(format!("{value}"))),
             _ => Err(mismatch(expected, value)),
         };
     }
     Err(mismatch(expected, value))
 }
 
-fn mismatch(expected: &str, value: &Value) -> anyhow::Error {
-    anyhow::anyhow!("TypeMismatch: expected {expected}, got value ({value:?})")
+fn mismatch(expected: &TypeTag, value: &Value) -> anyhow::Error {
+    anyhow::anyhow!(
+        "TypeMismatch: expected {}, got value ({value:?})",
+        expected.name()
+    )
 }
 
 /// Resolve an [`Arg`] using an [`ExecState`] directly (no [`StepCtx`] needed).

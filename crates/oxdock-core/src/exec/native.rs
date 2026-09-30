@@ -4,8 +4,8 @@ use std::sync::Arc;
 use anyhow::Result;
 use oxdock_func_macro::oxdock_func;
 use oxdock_parser::{
-    KEYWORD_INSPECT, SCRIPT_MODULE_NAME, STD_MODULE_NAME, Step, Value, base_name, qualify,
-    split_qualified,
+    Field, KEYWORD_INSPECT, SCRIPT_MODULE_NAME, STD_MODULE_NAME, Step, TypeTag, Value,
+    base_name, qualify, split_qualified,
 };
 use oxdock_process::{CommandStdin, DefaultProcessManager, ProcessManager};
 
@@ -40,7 +40,7 @@ impl FuncKind {
 #[derive(Debug, Clone)]
 pub struct FuncParam {
     pub name: String,
-    pub param_type: Option<String>,
+    pub param_type: Option<TypeTag>,
 }
 
 /// Introspectable metadata for one function. Single source for
@@ -57,7 +57,7 @@ pub struct FuncMeta {
     pub module: String,
     pub kind: FuncKind,
     pub params: Option<Vec<FuncParam>>,
-    pub returns: Option<String>,
+    pub returns: Option<TypeTag>,
     pub rpn: bool,
     pub summary: &'static str,
     pub docs: &'static str,
@@ -128,9 +128,11 @@ impl<P: ProcessManager> HostRegistration<P> {
 }
 
 /// One user-defined function body (`FUNC NAME($p: TYPE, ...) { ... }`).
+/// Param types resolve to tags at definition time, where the type
+/// directory is in scope; the registry never holds raw type strings.
 #[derive(Debug, Clone)]
 pub(super) struct FuncDefData {
-    pub(super) params: Vec<(String, String)>,
+    pub(super) params: Vec<(String, TypeTag)>,
     pub(super) body: Vec<Step>,
 }
 
@@ -194,15 +196,22 @@ impl<P: ProcessManager> Clone for ScopeFrame<P> {
 /// scope exit, shadowing an outer definition restores it); native entries
 /// persist for the run. Shared across `fork()` via clone; the entry maps
 /// clone while scope frames stay per state.
+/// Module to function-name table of pure entries, shared by reference.
+/// Nested so placeholder dispatch looks up `table[module][func]` with
+/// zero allocation; rebuilt only when native entries register.
+pub type PureTable = HashMap<String, HashMap<String, PureFn>>;
+
 pub struct FunctionRegistry<P: ProcessManager> {
     entries: HashMap<String, FuncEntry<P>>,
     scopes: Vec<ScopeFrame<P>>,
+    pure_shared: Arc<PureTable>,
 }
 
 impl<P: ProcessManager> FunctionRegistry<P> {
     pub(super) fn with_builtins() -> Self {
         let mut reg = Self {
             entries: HashMap::new(),
+            pure_shared: Arc::new(HashMap::new()),
             scopes: vec![ScopeFrame {
                 defined: HashSet::new(),
                 shadowed: Vec::new(),
@@ -261,6 +270,26 @@ impl<P: ProcessManager> FunctionRegistry<P> {
 
     fn insert_native(&mut self, name: String, meta: FuncMeta, body: FuncBody<P>) {
         self.entries.insert(name, FuncEntry { meta, body });
+        self.rebuild_pure_shared();
+    }
+
+    /// Rebuild the shared pure table. Runs only on native insertion:
+    /// script definitions insert `Script` bodies directly and never
+    /// affect the pure set, so this stays correct between rebuilds.
+    fn rebuild_pure_shared(&mut self) {
+        let mut table: PureTable = HashMap::new();
+        for (name, entry) in &self.entries {
+            let FuncBody::Pure(ref func) = entry.body else {
+                continue;
+            };
+            if let Some((module, base)) = split_qualified(name) {
+                table
+                    .entry(module.to_string())
+                    .or_default()
+                    .insert(base.to_string(), Arc::clone(func));
+            }
+        }
+        self.pure_shared = Arc::new(table);
     }
 
     /// Insert under `MODULE::BASE`, stamping provenance on the metadata.
@@ -314,7 +343,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
     pub(super) fn define_script(
         &mut self,
         name: &str,
-        params: &[(String, String)],
+        params: &[(String, TypeTag)],
         body: &[Step],
     ) -> Result<()> {
         let qualified = qualify(SCRIPT_MODULE_NAME, name);
@@ -350,7 +379,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
                             .iter()
                             .map(|(name, param_type)| FuncParam {
                                 name: name.clone(),
-                                param_type: Some(param_type.clone()),
+                                param_type: Some(*param_type),
                             })
                             .collect(),
                     ),
@@ -416,6 +445,19 @@ impl<P: ProcessManager> FunctionRegistry<P> {
         }
     }
 
+    /// Shared snapshot of every pure entry, nested by module and base
+    /// name. Cloning the `Arc` is refcount-only: placeholder dispatch
+    /// borrows this per expansion with no map copies.
+    pub(super) fn pure_shared(&self) -> Arc<PureTable> {
+        Arc::clone(&self.pure_shared)
+    }
+
+    /// Every entry's metadata, scripts included, sorted by name. Backs
+    /// run-start type tag validation.
+    pub(super) fn all_metas(&self) -> Vec<FuncMeta> {
+        self.entries_metas()
+    }
+
     /// Clone the ctx fn for `name` (ending the registry borrow) so callers
     /// can invoke it with `&mut StepCtx` without double-borrowing state.
     fn clone_ctx_fn(&self, name: &str) -> Option<NativeFn<P>> {
@@ -458,6 +500,7 @@ impl<P: ProcessManager> Clone for FunctionRegistry<P> {
         Self {
             entries: self.entries.clone(),
             scopes: self.scopes.clone(),
+            pure_shared: Arc::clone(&self.pure_shared),
         }
     }
 }
@@ -851,7 +894,12 @@ fn meta_to_value(meta: &FuncMeta) -> Value {
                     entry.insert("name".to_string(), Value::string(p.name.clone()));
                     entry.insert(
                         "param_type".to_string(),
-                        Value::string(p.param_type.clone().unwrap_or_default()),
+                        Value::string(
+                            p.param_type
+                                .as_ref()
+                                .map(|tag| tag.name().to_string())
+                                .unwrap_or_default(),
+                        ),
                     );
                     Value::map(entry)
                 })
@@ -862,7 +910,12 @@ fn meta_to_value(meta: &FuncMeta) -> Value {
     map.insert("params".to_string(), params);
     map.insert(
         "returns".to_string(),
-        Value::string(meta.returns.clone().unwrap_or_default()),
+        Value::string(
+            meta.returns
+                .as_ref()
+                .map(|tag| tag.name().to_string())
+                .unwrap_or_default(),
+        ),
     );
     map.insert("rpn".to_string(), Value::bool(meta.rpn));
     map.insert(
@@ -870,6 +923,15 @@ fn meta_to_value(meta: &FuncMeta) -> Value {
         Value::string(meta.summary.to_string()),
     );
     Value::map(map)
+}
+
+/// One named record schema: a shape host functions produce and scripts
+/// bind by name (`LET $s: SSH_SESSION_INFO`). Travels with its module
+/// so schemas register exactly when their producer does.
+#[derive(Debug, Clone, Copy)]
+pub struct RecordSchema {
+    pub name: &'static str,
+    pub fields: &'static [Field],
 }
 
 /// One host library: functions and types registered under a single module
@@ -880,6 +942,7 @@ pub struct HostModule<P: ProcessManager> {
     pub name: String,
     pub funcs: Vec<HostRegistration<P>>,
     pub types: Vec<&'static TypeDescriptor>,
+    pub record_schemas: Vec<RecordSchema>,
 }
 
 impl<P: ProcessManager> ExecState<P> {
@@ -900,6 +963,9 @@ impl<P: ProcessManager> ExecState<P> {
         for descriptor in module.types {
             self.register_type(descriptor);
         }
+        for schema in module.record_schemas {
+            self.register_record_schema(schema.name, schema.fields);
+        }
     }
 
     /// All visible functions: natives plus hosts plus current DSL definitions.
@@ -912,7 +978,7 @@ impl<P: ProcessManager> ExecState<P> {
                 module: STD_MODULE_NAME.to_string(),
                 kind: FuncKind::HostCtx,
                 params: None,
-                returns: Some("MAP".to_string()),
+                returns: Some(TypeTag::Map),
                 rpn: false,
                 summary: "Inspect a variable binding.",
                 docs: "INSPECT($var): dedicated AST node taking a variable, not a value.",
@@ -934,7 +1000,7 @@ impl<P: ProcessManager> ExecState<P> {
                 module: STD_MODULE_NAME.to_string(),
                 kind: FuncKind::HostCtx,
                 params: None,
-                returns: Some("MAP".to_string()),
+                returns: Some(TypeTag::Map),
                 rpn: false,
                 summary: "Inspect a variable binding.",
                 docs: "INSPECT($var): dedicated AST node taking a variable, not a value.",
@@ -945,6 +1011,14 @@ impl<P: ProcessManager> ExecState<P> {
 
     pub(super) fn clone_native_pure(&self, name: &str) -> Option<PureFn> {
         self.functions.clone_pure_fn(name)
+    }
+
+    /// Shared snapshot of every registered pure function for
+    /// placeholder and host driven expansion. Public so host crates
+    /// resolve calls through the live registry instead of hardcoding
+    /// module or function names. Cloning the `Arc` never copies the map.
+    pub fn pure_function_table(&self) -> Arc<PureTable> {
+        self.functions.pure_shared()
     }
 
     pub(super) fn clone_native_ctx(&self, name: &str) -> Option<NativeFn<P>> {

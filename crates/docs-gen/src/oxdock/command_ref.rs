@@ -224,7 +224,7 @@ fn render_signature(meta: &FuncMeta) -> String {
         .join(", ");
     let returns = meta
         .returns
-        .as_deref()
+        .as_ref()
         .map(|label| format!(" -> {label}"))
         .unwrap_or_default();
     format!("{}({}){}", meta.name, params, returns)

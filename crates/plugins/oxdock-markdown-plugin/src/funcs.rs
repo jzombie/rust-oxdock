@@ -23,6 +23,7 @@ pub fn module_with<P: ProcessManager>() -> HostModule<P> {
         name: "MARKDOWN".to_string(),
         funcs: vec![MapToMdTable::registration()],
         types: vec![],
+        record_schemas: vec![],
     }
 }
 

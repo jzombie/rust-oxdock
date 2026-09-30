@@ -25,6 +25,7 @@ fn exit_status_from_code(code: i32) -> ExitStatus {
 
 use super::handlers;
 use super::io::{ExactCapture, SlidingWindow, StreamHandle};
+use super::native::PureTable;
 use super::state::{ExecState, TaskEntry, TaskPhase};
 use oxdock_pipe::PipeInner;
 
@@ -390,6 +391,16 @@ impl<'a, P: ProcessManager> StepCtx<'a, P> {
     /// Current working directory (guarded; stays inside the workspace).
     pub fn cwd(&self) -> &GuardedPath {
         &self.state.cwd
+    }
+
+    /// Shared snapshot of every registered pure function, keyed by
+    /// qualified name. Lets host-driven expansion resolve
+    /// `{{ MODULE::FUNC(args) }}` through the live registry instead of
+    /// hardcoding module or function names. Stateful, script, and pipe
+    /// backed entries never appear here: placeholder evaluation has no
+    /// step context and must stay side effect free.
+    pub fn pure_functions(&self) -> std::sync::Arc<PureTable> {
+        self.state.pure_function_table()
     }
 
     /// Mint a fresh unbound pipe handle, like bare `LET $p: PIPE`. The

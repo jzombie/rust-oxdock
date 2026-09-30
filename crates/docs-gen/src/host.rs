@@ -129,8 +129,35 @@ fn to_json(value: Value) -> Result<Value> {
 /// newline: the placeholder line in the master template supplies the
 /// line structure back, which keeps master assembly byte-identical to
 /// plain concatenation.
-#[oxdock_func(pure, returns = "STRING")]
-fn expand_fragment(raw: String, global: Value, ctx: Value, version: String) -> Result<Value> {
+///
+/// Placeholder calls dispatch through the live registry snapshot, the
+/// same table generic `EXPAND` uses: no module or function name is
+/// hardcoded here, so `{{ MARKDOWN::MAP_TO_MD_TABLE($var) }}` and any
+/// future pure helper resolve identically in every expansion scope.
+#[oxdock_func(returns = "STRING")]
+fn expand_fragment<P: ProcessManager>(
+    cx: &mut StepCtx<P>,
+    raw: String,
+    global: Value,
+    ctx: Value,
+    version: String,
+) -> Result<Value> {
+    render_fragment(&raw, &global, &ctx, &version, Some(cx.pure_functions()))
+}
+
+/// Fragment expansion over an explicit call table. Pure over its inputs
+/// so tests drive it without engine state: pass `None` for plain key
+/// path scope, or `Some` shared table to enable
+/// `{{ MODULE::FUNC(args) }}` calls. Lookup is nested by module and
+/// function with zero allocation; the known-functions listing builds
+/// only on failure.
+pub(crate) fn render_fragment(
+    raw: &str,
+    global: &Value,
+    ctx: &Value,
+    version: &str,
+    calls: Option<std::sync::Arc<oxdock_core::PureTable>>,
+) -> Result<Value> {
     let global_map = global.as_map().ok_or_else(|| {
         anyhow::anyhow!(
             "EXPAND_FRAGMENT expects a MAP as its global argument, got {}",
@@ -144,32 +171,29 @@ fn expand_fragment(raw: String, global: Value, ctx: Value, version: String) -> R
         )
     })?;
     let mut env = HashMap::new();
-    env.insert("CRATE_VERSION".to_string(), version);
+    env.insert("CRATE_VERSION".to_string(), version.to_string());
     let mut vars = HashMap::new();
     vars.insert("docs_global".to_string(), Value::map(global_map.clone()));
     vars.insert("docs_ctx".to_string(), Value::map(ctx_map.clone()));
-    // Fragment scope wires the same MARKDOWN entry the DSL and generic
-    // EXPAND paths expose, so `{{ MARKDOWN::MAP_TO_MD_TABLE($var) }}`
-    // resolves identically in every expansion scope. Values pass
-    // straight through on the shared value model with no conversion.
-    let calls: oxdock_process::PlaceholderCall = Arc::new(|module, func, args| {
-        if module == "MARKDOWN" && func == "MAP_TO_MD_TABLE" {
-            if args.len() != 1 {
-                bail!(
-                    "MARKDOWN::MAP_TO_MD_TABLE expects 1 argument, got {}",
-                    args.len()
-                );
-            }
-            let table = oxdock_markdown_plugin::markdown::map_to_table(&args[0])?;
-            return Ok(Value::string(table));
-        }
-        bail!(
-            "unknown placeholder function '{module}::{func}'; known functions: MARKDOWN::MAP_TO_MD_TABLE"
-        )
-    });
-    let mut expander = oxdock_process::StreamingExpand::new(&[], &env)
-        .with_vars(&vars)
-        .with_call_resolver(calls);
+    let mut expander = oxdock_process::StreamingExpand::new(&[], &env).with_vars(&vars);
+    if let Some(table) = calls {
+        let resolver: oxdock_process::PlaceholderCall = Arc::new(move |module, func, args| {
+            let callee =
+                table.get(module).and_then(|entries| entries.get(func)).ok_or_else(|| {
+                    let mut known: Vec<String> = table
+                        .iter()
+                        .flat_map(|(m, entries)| entries.keys().map(move |f| format!("{m}::{f}")))
+                        .collect();
+                    known.sort();
+                    anyhow::anyhow!(
+                        "unknown placeholder function '{module}::{func}'; known functions: {}",
+                        known.join(", ")
+                    )
+                })?;
+            callee(args)
+        });
+        expander = expander.with_call_resolver(resolver);
+    }
     let mut out = Vec::with_capacity(raw.len());
     expander
         .process_bytes(raw.as_bytes(), &mut out)
@@ -344,6 +368,7 @@ pub fn module<P: ProcessManager>() -> HostModule<P> {
             PluginTypeReference::registration(),
         ],
         types: vec![],
+        record_schemas: vec![],
     }
 }
 
@@ -475,12 +500,12 @@ mod tests {
     fn fragment_expansion_mirrors_pipeline_scope() {
         let global = map(&[("workspace", Value::string("OxDock".to_string()))]);
         let ctx = map(&[("name", Value::string("oxdock".to_string()))]);
-        let out = expand_fragment(
-            "# {{ $docs_ctx.name }} {{ $docs_global.workspace }} {{ env:CRATE_VERSION }}\n"
-                .to_string(),
-            global,
-            ctx,
-            "1.2.3".to_string(),
+        let out = render_fragment(
+            "# {{ $docs_ctx.name }} {{ $docs_global.workspace }} {{ env:CRATE_VERSION }}\n",
+            &global,
+            &ctx,
+            "1.2.3",
+            None,
         )
         .expect("expand");
         assert_eq!(out.as_str().expect("string"), "# oxdock OxDock 1.2.3");
@@ -489,14 +514,29 @@ mod tests {
     #[test]
     fn fragment_expansion_keeps_doc_examples_literal() {
         let empty = Value::map(BTreeMap::new());
-        let out = expand_fragment(
-            "write `\\{{ $var }}` here\n".to_string(),
-            empty.clone(),
-            empty,
-            "1.2.3".to_string(),
-        )
-        .expect("expand");
+        let out = render_fragment("write `\\{{ $var }}` here\n", &empty, &empty, "1.2.3", None)
+            .expect("expand");
         assert_eq!(out.as_str().expect("string"), "write `{{ $var }}` here");
+    }
+
+    /// Explicit call table for fragment tests: the qualified name below
+    /// is test input data, not dispatch logic. Production passes the
+    /// live registry snapshot instead of naming anything.
+    fn markdown_call_table() -> std::sync::Arc<oxdock_core::PureTable> {
+        let mut markdown = HashMap::new();
+        markdown.insert(
+            "MAP_TO_MD_TABLE".to_string(),
+            Arc::new(|args: Vec<Value>| {
+                if args.len() != 1 {
+                    bail!("MAP_TO_MD_TABLE expects 1 argument, got {}", args.len());
+                }
+                let table = oxdock_markdown_plugin::markdown::map_to_table(&args[0])?;
+                Ok(Value::string(table))
+            }) as oxdock_core::PureFn,
+        );
+        let mut table = HashMap::new();
+        table.insert("MARKDOWN".to_string(), markdown);
+        std::sync::Arc::new(table)
     }
 
     #[test]
@@ -507,11 +547,13 @@ mod tests {
         let mut ctx_entries = BTreeMap::new();
         ctx_entries.insert("skills".to_string(), Value::map(skills));
         let ctx = Value::map(ctx_entries);
-        let out = expand_fragment(
-            "# Skills\n{{ MARKDOWN::MAP_TO_MD_TABLE($docs_ctx.skills) }}\n".to_string(),
-            global,
-            ctx,
-            "1.2.3".to_string(),
+        let table = markdown_call_table();
+        let out = render_fragment(
+            "# Skills\n{{ MARKDOWN::MAP_TO_MD_TABLE($docs_ctx.skills) }}\n",
+            &global,
+            &ctx,
+            "1.2.3",
+            Some(table),
         )
         .expect("expand");
         assert_eq!(
@@ -523,11 +565,13 @@ mod tests {
     #[test]
     fn fragment_placeholder_call_rejects_unknown_functions() {
         let empty = Value::map(BTreeMap::new());
-        let err = expand_fragment(
-            "{{ NOPE::MISSING($docs_ctx) }}".to_string(),
-            empty.clone(),
-            empty,
-            "1.2.3".to_string(),
+        let table = markdown_call_table();
+        let err = render_fragment(
+            "{{ NOPE::MISSING($docs_ctx) }}",
+            &empty,
+            &empty,
+            "1.2.3",
+            Some(table),
         )
         .expect_err("unknown must fail");
         assert!(format!("{err:#}").contains("NOPE::MISSING"));
@@ -679,9 +723,23 @@ mod tests {
 
     #[test]
     fn plugin_returns_stay_within_known_types() {
-        // `returns` labels render verbatim, so every label must name a
-        // startup type or the module's own handle type. This documents
-        // the limitation rather than enforcing it in the engine.
+        // Every `returns` tag must resolve against startup types plus the
+        // module's own descriptors. Tags make typos unspellable for
+        // builtins; this test pins the custom and shaped remainder, and
+        // run-start validation enforces the same rule for every run.
+        use oxdock_core::TypeTag;
+        fn leaves(tag: &TypeTag, out: &mut Vec<&'static str>) {
+            match tag {
+                TypeTag::Custom(descriptor) => out.push(descriptor.name),
+                TypeTag::ListOf(element) => leaves(element, out),
+                TypeTag::Record(fields) => {
+                    for field in *fields {
+                        leaves(&field.ty, out);
+                    }
+                }
+                _ => {}
+            }
+        }
         let startup: std::collections::HashSet<&str> = oxdock_core::startup_descriptors()
             .into_iter()
             .map(|(name, _)| name)
@@ -692,12 +750,16 @@ mod tests {
                 known.insert(descriptor.name);
             }
             for meta in &entry.metas {
-                if let Some(returns) = meta.returns.as_deref() {
-                    assert!(
-                        known.contains(returns),
-                        "{module}::{} returns unknown type '{returns}'",
-                        meta.name,
-                    );
+                if let Some(returns) = meta.returns.as_ref() {
+                    let mut pending = Vec::new();
+                    leaves(returns, &mut pending);
+                    for name in pending {
+                        assert!(
+                            known.contains(name),
+                            "{module}::{} returns unregistered type '{name}'",
+                            meta.name,
+                        );
+                    }
                 }
             }
         }
