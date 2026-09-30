@@ -675,6 +675,7 @@ dependencies = [
  "oxdock-fs",
  "oxdock-func-macro",
  "oxdock-macros",
+ "oxdock-markdown-plugin",
  "oxdock-net-plugin",
  "oxdock-parser",
  "oxdock-process",
@@ -1668,6 +1669,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.6",
+]
+
+[[package]]
+name = "oxdock-markdown-plugin"
+version = "0.20.0-alpha"
+dependencies = [
+ "anyhow",
+ "indoc",
+ "oxdock-core",
+ "oxdock-func-macro",
+ "oxdock-parser",
+ "oxdock-process",
+ "serde_json",
 ]
 
 [[package]]

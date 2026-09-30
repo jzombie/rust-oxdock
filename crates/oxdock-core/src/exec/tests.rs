@@ -3221,6 +3221,80 @@ fn host_round_trip_through_adapters() {
     assert_eq!(file_content(&files, "out.txt"), b"hello host-seed");
 }
 
+#[test]
+fn expand_placeholder_calls_pure_host_function() {
+    // `{{ T::SHOUT($who) }}` inside EXPAND input dispatches through the
+    // registered pure function, sharing the registry DSL `CALL` uses.
+    // The `\{{` escape keeps the placeholder literal through WRITE so
+    // EXPAND is the stage that evaluates it.
+    fn test_meta(name: &str) -> FuncMeta {
+        FuncMeta {
+            name: name.to_string(),
+            module: "T".to_string(),
+            kind: FuncKind::HostPure,
+            params: None,
+            returns: Some("STRING".to_string()),
+            rpn: false,
+            summary: "test-only pure shout",
+            docs: "test-only",
+        }
+    }
+    let shout: PureFn = Arc::new(|vals| {
+        let s = vals
+            .first()
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("SHOUT expects one string"))?;
+        Ok(Value::string(s.to_uppercase()))
+    });
+    let module = HostModule {
+        name: "T".to_string(),
+        funcs: vec![HostRegistration::Pure {
+            name: "SHOUT".to_string(),
+            meta: test_meta("SHOUT"),
+            func: shout,
+        }],
+        types: vec![],
+    };
+    let table = oxdock_parser::ModuleTable {
+        modules: std::collections::HashMap::from([(
+            "T".to_string(),
+            Some(oxdock_parser::ModuleFuncs {
+                functions: std::collections::HashSet::from(["SHOUT".to_string()]),
+            }),
+        )]),
+    };
+    let steps = crate::parse_script_with_modules(
+        indoc! {r#"
+        LET $who: STRING = "bob"
+        WRITE tmpl.txt "hi \{{ T::SHOUT($who) }}!"
+        LET $buf: PIPE
+        WITH_IO [stdout=$buf] EXPAND tmpl.txt
+        WITH_IO [stdin=$buf] APPEND out.txt
+    "#},
+        table,
+    )
+    .expect("parse ok");
+    let fs = MockFs::new();
+    let mut state = create_exec_state(fs.clone());
+    state.register_module(module);
+    let mut proc = MockProcessManager::default();
+    execute_steps(
+        &mut state,
+        &mut proc,
+        &steps,
+        CommandStdin::Null,
+        false,
+        None,
+        None,
+        None,
+        None,
+        true,
+    )
+    .expect("placeholder call runs");
+    let files = fs.snapshot();
+    assert_eq!(file_content(&files, "out.txt"), b"hi BOB!");
+}
+
 #[cfg(not(miri))]
 #[test]
 fn os_rebind_take_twice_bails_with_fresh_declaration_remedy() {

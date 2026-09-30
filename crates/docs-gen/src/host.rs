@@ -8,7 +8,7 @@
 //! metadata, strict JSON encoding, placeholder-safe stems).
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context, Result, bail};
 use oxdock_core::{FuncMeta, HostModule, OxDockFn, StepCtx, TypeDescriptor, Value};
@@ -148,7 +148,28 @@ fn expand_fragment(raw: String, global: Value, ctx: Value, version: String) -> R
     let mut vars = HashMap::new();
     vars.insert("docs_global".to_string(), Value::map(global_map.clone()));
     vars.insert("docs_ctx".to_string(), Value::map(ctx_map.clone()));
-    let mut expander = oxdock_process::StreamingExpand::new(&[], &env).with_vars(&vars);
+    // Fragment scope wires the same MARKDOWN entry the DSL and generic
+    // EXPAND paths expose, so `{{ MARKDOWN::MAP_TO_MD_TABLE($var) }}`
+    // resolves identically in every expansion scope. Values pass
+    // straight through on the shared value model with no conversion.
+    let calls: oxdock_process::PlaceholderCall = Arc::new(|module, func, args| {
+        if module == "MARKDOWN" && func == "MAP_TO_MD_TABLE" {
+            if args.len() != 1 {
+                bail!(
+                    "MARKDOWN::MAP_TO_MD_TABLE expects 1 argument, got {}",
+                    args.len()
+                );
+            }
+            let table = oxdock_markdown_plugin::markdown::map_to_table(&args[0])?;
+            return Ok(Value::string(table));
+        }
+        bail!(
+            "unknown placeholder function '{module}::{func}'; known functions: MARKDOWN::MAP_TO_MD_TABLE"
+        )
+    });
+    let mut expander = oxdock_process::StreamingExpand::new(&[], &env)
+        .with_vars(&vars)
+        .with_call_resolver(calls);
     let mut out = Vec::with_capacity(raw.len());
     expander
         .process_bytes(raw.as_bytes(), &mut out)
@@ -476,6 +497,40 @@ mod tests {
         )
         .expect("expand");
         assert_eq!(out.as_str().expect("string"), "write `{{ $var }}` here");
+    }
+
+    #[test]
+    fn fragment_placeholder_call_renders_markdown_table() {
+        let global = Value::map(BTreeMap::new());
+        let mut skills = BTreeMap::new();
+        skills.insert("rust".to_string(), Value::string("advanced".to_string()));
+        let mut ctx_entries = BTreeMap::new();
+        ctx_entries.insert("skills".to_string(), Value::map(skills));
+        let ctx = Value::map(ctx_entries);
+        let out = expand_fragment(
+            "# Skills\n{{ MARKDOWN::MAP_TO_MD_TABLE($docs_ctx.skills) }}\n".to_string(),
+            global,
+            ctx,
+            "1.2.3".to_string(),
+        )
+        .expect("expand");
+        assert_eq!(
+            out.as_str().expect("string"),
+            "# Skills\n| rust     |\n| -------- |\n| advanced |\n"
+        );
+    }
+
+    #[test]
+    fn fragment_placeholder_call_rejects_unknown_functions() {
+        let empty = Value::map(BTreeMap::new());
+        let err = expand_fragment(
+            "{{ NOPE::MISSING($docs_ctx) }}".to_string(),
+            empty.clone(),
+            empty,
+            "1.2.3".to_string(),
+        )
+        .expect_err("unknown must fail");
+        assert!(format!("{err:#}").contains("NOPE::MISSING"));
     }
 
     #[test]

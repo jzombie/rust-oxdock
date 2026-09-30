@@ -2,18 +2,13 @@ use anyhow::{Context, Result};
 use oxdock_core::startup_descriptors;
 use oxdock_core::{ArgType, CommandMeta, all_metadata, all_structural_metadata};
 use oxdock_core::{FuncMeta, FuncParam, TypeDescriptor, builtin_function_metas};
+use oxdock_markdown_plugin::markdown::escape_table_cell;
 use std::collections::HashSet;
 
 /// GitHub heading anchor for a `### NAME` section: lowercase. Command names
 /// are `[A-Z_]+`, so lowercasing is the whole transformation.
 fn index_anchor(name: &str) -> String {
     name.to_lowercase()
-}
-
-/// Escape pipe characters so `|` alternatives in syntax strings do not
-/// break the enclosing Markdown table.
-fn escape_table_cell(s: &str) -> String {
-    s.replace('|', "\\|")
 }
 
 /// Escape placeholders in emitted prose and examples so the reference

@@ -18,6 +18,7 @@ use super::SNAPSHOT_PENDING_DISPLAY;
 use super::fs_ops::{canonical_cwd, copy_entry, hash_path};
 use super::io::{StreamHandle, write_stdout};
 use super::native::FuncBody;
+use super::native::PureFn;
 use super::state::{ExecState, MAX_CALL_DEPTH, TaskPhase};
 use super::steps::{Flow, StepCtx};
 use oxdock_pipe::{KeeperGuard, PipeHandle, PipeInner};
@@ -1006,8 +1007,36 @@ pub(super) fn replace<P: ProcessManager>(
 ) -> Result<()> {
     let ctx = cx.state.command_ctx()?;
     let vars = cx.state.all_vars();
+    // Snapshot every pure host function so `{{ MODULE::FUNC(args) }}`
+    // placeholders dispatch through the same registry DSL `CALL` uses.
+    // Stateful, script, and pipe backed entries stay out: placeholders
+    // evaluate without a step context and must stay side effect free.
+    let pure_table: HashMap<String, PureFn> = cx
+        .state
+        .list_functions()
+        .into_iter()
+        .filter_map(|meta| {
+            cx.state
+                .clone_native_pure(&meta.name)
+                .map(|func| (meta.name, func))
+        })
+        .collect();
+    let mut known: Vec<String> = pure_table.keys().cloned().collect();
+    known.sort();
+    let calls: oxdock_process::PlaceholderCall = Arc::new(move |module, func, args| {
+        let name = format!("{module}::{func}");
+        let callee = pure_table.get(&name).ok_or_else(|| {
+            anyhow!(
+                "unknown placeholder function '{name}'; known functions: {}",
+                known.join(", ")
+            )
+        })?;
+        callee(args)
+    });
 
-    let mut expander = oxdock_process::StreamingExpand::new(overrides, ctx.envs()).with_vars(&vars);
+    let mut expander = oxdock_process::StreamingExpand::new(overrides, ctx.envs())
+        .with_vars(&vars)
+        .with_call_resolver(calls);
     let mut out_buf = Vec::with_capacity(super::io::CHUNK_SIZE);
 
     write_stdout(cx.out.clone(), |w| {

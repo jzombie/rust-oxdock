@@ -10,6 +10,7 @@ members = [
     "crates/oxdock-logic-tests/fixtures/commands/ast_commands",
     "crates/oxdock-parser",
     "crates/oxdock-remote-proto",
+    "crates/plugins/oxdock-markdown-plugin",
     "crates/plugins/oxdock-net-plugin",
     "crates/plugins/oxdock-ssh-plugin",
     "crates/sys/oxdock-fs",
@@ -63,6 +64,7 @@ oxdock-fs = { path = "crates/sys/oxdock-fs", version = "0.20.0-alpha" }
 oxdock-func-macro = { path = "crates/oxdock-func-macro", version = "0.20.0-alpha" }
 oxdock-logic-tests = { path = "crates/oxdock-logic-tests", version = "0.20.0-alpha" }
 oxdock-macros = { path = "oxdock-macros", version = "0.20.0-alpha" }
+oxdock-markdown-plugin = { path = "crates/plugins/oxdock-markdown-plugin", version = "0.20.0-alpha" }
 oxdock-net-plugin = { path = "crates/plugins/oxdock-net-plugin", version = "0.20.0-alpha" }
 oxdock-parser = { path = "crates/oxdock-parser", version = "0.20.0-alpha" }
 oxdock-pipe = { path = "crates/sys/oxdock-pipe", version = "0.20.0-alpha" }

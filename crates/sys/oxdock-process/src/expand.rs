@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use anyhow::{Result, anyhow, bail};
 
@@ -23,6 +24,16 @@ impl Default for TemplateDelimiters {
     }
 }
 
+/// Resolver for `{{ MODULE::FUNC(args) }}` placeholder calls.
+///
+/// Receives the module name, function name, and already resolved argument
+/// values, and returns the call result. Only pure value returning host
+/// functions may back this: no handles, no pipes, no I/O. The resolver
+/// carries no formatting logic; formatting lives with the function.
+pub type PlaceholderCall = Arc<
+    dyn Fn(&str, &str, Vec<oxdock_parser::Value>) -> Result<oxdock_parser::Value> + Send + Sync,
+>;
+
 /// Streaming template expansion state machine.
 ///
 /// Processes input bytes incrementally, expanding `{{ env:KEY }}` placeholders.
@@ -37,6 +48,10 @@ pub struct StreamingExpand {
     env: HashMap<String, String>,
     /// Structured variable lookup (for key-path evaluation).
     vars: HashMap<String, oxdock_parser::Value>,
+    /// Optional dispatcher for `{{ MODULE::FUNC(args) }}` calls. When set,
+    /// placeholders holding a call expression are evaluated through it.
+    /// Carries dispatch only; formatting stays with the callee.
+    call_resolver: Option<PlaceholderCall>,
     /// State: are we currently inside a placeholder?
     in_placeholder: bool,
     /// Trailing opening byte from previous chunk : deferred across chunks.
@@ -62,6 +77,7 @@ impl StreamingExpand {
             overrides: overrides.iter().cloned().collect(),
             env: env.clone(),
             vars: HashMap::new(),
+            call_resolver: None,
             in_placeholder: false,
             pending_brace: false,
             pending_close_brace: false,
@@ -75,6 +91,14 @@ impl StreamingExpand {
     /// Enables key-path evaluation in template tags (e.g., `{{ pkg.package.name }}`).
     pub fn with_vars(mut self, vars: &HashMap<String, oxdock_parser::Value>) -> Self {
         self.vars = vars.clone();
+        self
+    }
+
+    /// Enable `{{ MODULE::FUNC(args) }}` calls, dispatched through `resolver`.
+    /// Args are `$var.path` references or string, int, float, and bool
+    /// literals. Unknown functions and bad arity fail strict at expansion.
+    pub fn with_call_resolver(mut self, resolver: PlaceholderCall) -> Self {
+        self.call_resolver = Some(resolver);
         self
     }
 
@@ -94,7 +118,13 @@ impl StreamingExpand {
             if input[0] == self.delimiters.close[1] {
                 // Confirmed close delimiter across boundary : extract key, lookup, emit
                 let key = extract_key(&self.buffer);
-                let value = lookup(&key, &self.overrides, &self.env, &self.vars)?;
+                let value = lookup(
+                    &key,
+                    &self.overrides,
+                    &self.env,
+                    &self.vars,
+                    self.call_resolver.as_ref(),
+                )?;
                 out.extend_from_slice(value.as_bytes());
                 self.buffer.clear();
                 self.in_placeholder = false;
@@ -273,7 +303,13 @@ impl StreamingExpand {
                 if i + 1 < input.len() && input[i + 1] == self.delimiters.close[1] {
                     // Found closing delimiter : extract key, lookup, emit expansion
                     let key = extract_key(&self.buffer);
-                    let value = lookup(&key, &self.overrides, &self.env, &self.vars)?;
+                    let value = lookup(
+                        &key,
+                        &self.overrides,
+                        &self.env,
+                        &self.vars,
+                        self.call_resolver.as_ref(),
+                    )?;
                     out.extend_from_slice(value.as_bytes());
                     self.buffer.clear();
                     self.in_placeholder = false;
@@ -313,6 +349,7 @@ fn extract_key(buffer: &[u8]) -> String {
 /// - `{{ env:KEY }}` → overrides then env
 /// - `{{ $var }}` → script vars
 /// - `{{ $var.field }}` → script var key-path
+/// - `{{ MODULE::FUNC(args) }}` → placeholder call via `calls`
 ///
 /// All missing or invalid references return an error.
 fn lookup(
@@ -320,6 +357,7 @@ fn lookup(
     overrides: &HashMap<String, String>,
     env: &HashMap<String, String>,
     vars: &HashMap<String, oxdock_parser::Value>,
+    calls: Option<&PlaceholderCall>,
 ) -> Result<String> {
     let key = raw_key.trim();
 
@@ -360,7 +398,24 @@ fn lookup(
         bail!("undefined script variable: '${var_key}'{hint}");
     }
 
-    // 4. Unprefixed key: could be a missing step override or invalid syntax
+    // 4. Placeholder calls: `MODULE::FUNC(args)` dispatches through the
+    // registered resolver. Without one, the shape falls through to the
+    // invalid placeholder error below.
+    if let Some((module, func, args_src)) = parse_call(key) {
+        let Some(resolver) = calls else {
+            bail!(
+                "placeholder call '{module}::{func}' has no function registry; register one with with_call_resolver"
+            );
+        };
+        let mut args = Vec::with_capacity(args_src.len());
+        for src in args_src {
+            args.push(resolve_call_arg(&src, vars)?);
+        }
+        let result = resolver(module, func, args)?;
+        return Ok(format_value_for_string(&result));
+    }
+
+    // 5. Unprefixed key: could be a missing step override or invalid syntax
     if !key.is_empty()
         && key
             .chars()
@@ -378,6 +433,168 @@ fn lookup(
     bail!(
         "invalid placeholder format '{key}': script variables must start with '$' and environment variables with 'env:'"
     );
+}
+
+/// Split a placeholder call body into module, function, and raw args.
+///
+/// Accepts `MODULE::FUNC()` and `MODULE::FUNC(a, b)`. Returns `None` when
+/// the body is not call shaped, so plain key paths keep their own errors.
+fn parse_call(key: &str) -> Option<(&str, &str, Vec<String>)> {
+    let (module, rest) = key.split_once("::")?;
+    if module.is_empty()
+        || !module
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return None;
+    }
+    let (func, args_src) = rest.split_once('(')?;
+    let func = func.trim();
+    if func.is_empty()
+        || !func
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return None;
+    }
+    let args_src = args_src.strip_suffix(')')?;
+    Some((module, func, split_args(args_src)))
+}
+
+/// Split call args on top level commas, keeping quoted strings intact.
+/// Nested calls are rejected: placeholder calls stay one level deep.
+fn split_args(src: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut in_string = false;
+    let mut escaped = false;
+    for c in src.chars() {
+        if in_string {
+            current.push(c);
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => {
+                in_string = true;
+                current.push(c);
+            }
+            ',' => {
+                out.push(current.trim().to_string());
+                current.clear();
+            }
+            _ => current.push(c),
+        }
+    }
+    let last = current.trim();
+    if !(out.is_empty() && last.is_empty()) {
+        out.push(last.to_string());
+    }
+    out
+}
+
+/// Resolve one call argument to a value: `$var.path` from vars, or a
+/// string, int, float, or bool literal.
+fn resolve_call_arg(
+    src: &str,
+    vars: &HashMap<String, oxdock_parser::Value>,
+) -> Result<oxdock_parser::Value> {
+    if let Some(path) = src.strip_prefix('$') {
+        let parts: Vec<&str> = path.split('.').collect();
+        return resolve_value_path(&parts, vars);
+    }
+    if src.len() >= 2 && src.starts_with('"') && src.ends_with('"') {
+        return Ok(oxdock_parser::Value::string(unescape_literal(
+            &src[1..src.len() - 1],
+        )?));
+    }
+    match src {
+        "true" => return Ok(oxdock_parser::Value::bool(true)),
+        "false" => return Ok(oxdock_parser::Value::bool(false)),
+        _ => {}
+    }
+    if let Ok(i) = src.parse::<i64>() {
+        return Ok(oxdock_parser::Value::int(i));
+    }
+    if let Ok(f) = src.parse::<f64>() {
+        return Ok(oxdock_parser::Value::float(f));
+    }
+    bail!(
+        "invalid placeholder call argument '{src}': use $var.path or a string, int, float, or bool literal"
+    )
+}
+
+/// Unescape a double quoted literal: `\\` and `\"` only. Anything else
+/// keeps its backslash so template text stays predictable.
+fn unescape_literal(src: &str) -> Result<String> {
+    let mut out = String::with_capacity(src.len());
+    let mut chars = src.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match chars.next() {
+            Some('\\') => out.push('\\'),
+            Some('"') => out.push('"'),
+            Some(other) => {
+                out.push('\\');
+                out.push(other);
+            }
+            None => bail!("unterminated escape in placeholder string literal"),
+        }
+    }
+    Ok(out)
+}
+
+/// Resolve a dotted path against vars, cloning the value for the caller.
+/// Mirrors `resolve_key_path_strict` but returns the value instead of
+/// its string form so calls receive typed arguments.
+fn resolve_value_path(
+    parts: &[&str],
+    vars: &HashMap<String, oxdock_parser::Value>,
+) -> Result<oxdock_parser::Value> {
+    if parts.is_empty() || parts[0].is_empty() {
+        bail!("invalid placeholder call argument: empty variable reference");
+    }
+    let root_key = parts[0];
+    let mut current = vars
+        .get(root_key)
+        .ok_or_else(|| anyhow!("undefined script variable: '${root_key}'"))?
+        .clone();
+    for &segment in &parts[1..] {
+        if segment.contains('(') || segment.contains(')') {
+            bail!("nested calls are not supported in placeholder arguments");
+        }
+        if let Some(map) = current.as_map() {
+            current = map
+                .get(segment)
+                .ok_or_else(|| anyhow!("property '{segment}' not found on object '${root_key}'"))?
+                .clone();
+        } else if let Some(list) = current.as_list() {
+            let idx: usize = segment
+                .parse()
+                .map_err(|_| anyhow!("invalid array index '{segment}' on list '${root_key}'"))?;
+            current = list
+                .get(idx)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "index {idx} out of bounds for list '${root_key}' (len: {})",
+                        list.len()
+                    )
+                })?
+                .clone();
+        } else {
+            bail!("cannot access property '{segment}' on primitive value of '${root_key}'")
+        }
+    }
+    Ok(current)
 }
 
 /// Resolve nested key-paths against the vars map.
@@ -662,6 +879,81 @@ mod tests {
             .expand_string("Built with \\{{ env:PROJECT }}")
             .unwrap();
         assert_eq!(result, "Built with {{ env:PROJECT }}");
+    }
+
+    /// Stub resolver echoing `upper` over one string arg, for call tests.
+    fn shout_resolver() -> PlaceholderCall {
+        Arc::new(|module, func, args| {
+            if module == "T" && func == "SHOUT" && args.len() == 1 {
+                let s = args[0]
+                    .as_str()
+                    .ok_or_else(|| anyhow!("SHOUT expects a string"))?;
+                return Ok(oxdock_parser::Value::string(s.to_uppercase()));
+            }
+            bail!("unknown placeholder function '{module}::{func}'")
+        })
+    }
+
+    #[test]
+    fn placeholder_call_with_var_arg() {
+        let env = HashMap::new();
+        let mut vars = HashMap::new();
+        vars.insert(
+            "who".to_string(),
+            oxdock_parser::Value::string("bob".to_string()),
+        );
+        let expander = StreamingExpand::new(&[], &env)
+            .with_vars(&vars)
+            .with_call_resolver(shout_resolver());
+        let result = expander.expand_string("hi {{ T::SHOUT($who) }}!").unwrap();
+        assert_eq!(result, "hi BOB!");
+    }
+
+    #[test]
+    fn placeholder_call_with_literal_args() {
+        let env = HashMap::new();
+        let expander = StreamingExpand::new(&[], &env).with_call_resolver(shout_resolver());
+        let result = expander
+            .expand_string("{{ T::SHOUT(\"bob\") }} {{ T::SHOUT( \"ann\" ) }}")
+            .unwrap();
+        assert_eq!(result, "BOB ANN");
+    }
+
+    #[test]
+    fn placeholder_call_output_stays_literal() {
+        // Call output containing `{{ }}` is terminal text, never re-expanded.
+        let env = HashMap::new();
+        let mut vars = HashMap::new();
+        vars.insert(
+            "any".to_string(),
+            oxdock_parser::Value::string("v".to_string()),
+        );
+        let resolver: PlaceholderCall = Arc::new(|_, _, _| {
+            Ok(oxdock_parser::Value::string(
+                "x {{ env:NOPE }} y".to_string(),
+            ))
+        });
+        let expander = StreamingExpand::new(&[], &env)
+            .with_vars(&vars)
+            .with_call_resolver(resolver);
+        let result = expander.expand_string("{{ T::SHOUT($any) }}").unwrap();
+        assert_eq!(result, "x {{ env:NOPE }} y");
+    }
+
+    #[test]
+    fn placeholder_call_unknown_function_fails() {
+        let env = HashMap::new();
+        let expander = StreamingExpand::new(&[], &env).with_call_resolver(shout_resolver());
+        let result = expander.expand_string("{{ T::NOPE($x) }}");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn placeholder_call_without_resolver_fails() {
+        let env = HashMap::new();
+        let expander = StreamingExpand::new(&[], &env);
+        let result = expander.expand_string("{{ T::SHOUT($x) }}");
+        assert!(result.is_err());
     }
 
     #[test]

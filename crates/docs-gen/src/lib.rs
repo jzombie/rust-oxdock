@@ -166,6 +166,7 @@ pub fn run(repo_root: &Path) -> Result<()> {
     let fs: Box<dyn WorkspaceFs> = Box::new(fs_resolver);
     let mut engine = Engine::new().with_io(ExecIo::new());
     engine.register_module(host::module());
+    engine.register_module(oxdock_markdown_plugin::module());
     engine
         .run_steps_on(fs, &steps, default_process_manager())
         .context("render documents")?;
