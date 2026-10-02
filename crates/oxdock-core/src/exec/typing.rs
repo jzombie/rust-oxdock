@@ -134,7 +134,10 @@ impl<P: ProcessManager> ExecState<P> {
     /// the first step executes: param arity and `LET` coercion already
     /// check values at use time, but a typo'd `returns` label otherwise
     /// lives forever as a lie in `DESCRIBE` output and generated
-    /// references. Unknown names bail listing every known type.
+    /// references. Unknown names bail listing every known type. A
+    /// closed `allowed` set without a type is rejected too: the set
+    /// only means something alongside the `STRING` check that enforces
+    /// it, so hand-built entries cannot render a set they never check.
     pub fn validate_function_type_tags(&self) -> Result<()> {
         for meta in self.functions.all_metas() {
             if let Some(params) = meta.params.as_deref() {
@@ -142,6 +145,13 @@ impl<P: ProcessManager> ExecState<P> {
                     if let Some(expected) = param.param_type.as_ref() {
                         let what = format!("param '{}' of '{}'", param.name, meta.name);
                         Self::check_tag_known(self, &what, expected)?;
+                    }
+                    if param.param_type.is_none() && param.allowed.is_some() {
+                        anyhow::bail!(
+                            "param '{}' of '{}' declares values without a type",
+                            param.name,
+                            meta.name,
+                        );
                     }
                 }
             }

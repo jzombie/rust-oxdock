@@ -621,10 +621,12 @@ fn ssh_serve_registration<P: ProcessManager>(
                 FuncParam {
                     name: "bind".to_string(),
                     param_type: Some(TypeTag::String),
+                    allowed: None,
                 },
                 FuncParam {
                     name: "options".to_string(),
                     param_type: None,
+                    allowed: None,
                 },
             ]),
             returns: Some(TypeTag::Map),
@@ -673,22 +675,27 @@ fn ssh_connect_registration<P: ProcessManager>(
                 FuncParam {
                     name: "target".to_string(),
                     param_type: Some(TypeTag::String),
+                    allowed: None,
                 },
                 FuncParam {
                     name: "username".to_string(),
                     param_type: Some(TypeTag::String),
+                    allowed: None,
                 },
                 FuncParam {
                     name: "password".to_string(),
                     param_type: Some(TypeTag::String),
+                    allowed: None,
                 },
                 FuncParam {
                     name: "in_pipe".to_string(),
                     param_type: None,
+                    allowed: None,
                 },
                 FuncParam {
                     name: "out_pipe".to_string(),
                     param_type: None,
+                    allowed: None,
                 },
             ]),
             returns: Some(TypeTag::Map),

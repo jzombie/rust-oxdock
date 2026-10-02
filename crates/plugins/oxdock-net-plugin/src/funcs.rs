@@ -608,10 +608,12 @@ fn net_listen_registration<P: ProcessManager>(
                 FuncParam {
                     name: "bind".to_string(),
                     param_type: Some(TypeTag::String),
+                    allowed: None,
                 },
                 FuncParam {
                     name: "options".to_string(),
                     param_type: None,
+                    allowed: None,
                 },
             ]),
             returns: Some(TypeTag::Map),
@@ -653,18 +655,22 @@ fn net_connect_registration<P: ProcessManager>(
                 FuncParam {
                     name: "target".to_string(),
                     param_type: Some(TypeTag::String),
+                    allowed: None,
                 },
                 FuncParam {
                     name: "in_pipe".to_string(),
                     param_type: None,
+                    allowed: None,
                 },
                 FuncParam {
                     name: "out_pipe".to_string(),
                     param_type: None,
+                    allowed: None,
                 },
                 FuncParam {
                     name: "options".to_string(),
                     param_type: None,
+                    allowed: None,
                 },
             ]),
             returns: Some(TypeTag::Map),
@@ -722,6 +728,7 @@ fn net_port_registration<P: ProcessManager>(
             params: Some(vec![FuncParam {
                 name: "target".to_string(),
                 param_type: Some(TypeTag::String),
+                allowed: None,
             }]),
             returns: Some(TypeTag::Int),
             rpn: false,
@@ -796,6 +803,7 @@ fn net_addr_registration<P: ProcessManager>(
             params: Some(vec![FuncParam {
                 name: "target".to_string(),
                 param_type: Some(TypeTag::String),
+                allowed: None,
             }]),
             returns: Some(TypeTag::String),
             rpn: false,
@@ -857,6 +865,7 @@ fn net_fetch_registration<P: ProcessManager>() -> HostRegistration<P> {
             params: Some(vec![FuncParam {
                 name: "url".to_string(),
                 param_type: Some(TypeTag::String),
+                allowed: None,
             }]),
             returns: Some(TypeTag::String),
             rpn: false,

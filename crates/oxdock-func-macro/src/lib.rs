@@ -56,7 +56,7 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::parse::{Parse, ParseStream};
-use syn::{FnArg, ItemFn, Lit, Meta, Pat, Token, Type};
+use syn::{FnArg, ItemFn, Lit, LitStr, Meta, Pat, Token, Type};
 
 /// Host export macro for DSL native and host functions. See the crate docs for the
 /// full contract: `#[oxdock_func]` for stateful functions taking
@@ -186,10 +186,15 @@ fn parse_returns(value: syn::Expr) -> syn::Result<syn::Expr> {
     Ok(value)
 }
 
-/// A DSL-facing parameter: binding identifier plus mapped type info.
+/// A DSL-facing parameter: binding identifier, mapped type info, and
+/// optional closed value set. `allowed` comes from a `#[values(...)]`
+/// attribute and is valid only on `String` parameters: the same token
+/// list feeds the extractor check, the rejection message, and the
+/// metadata, so the three cannot drift apart.
 struct Param {
     ident: syn::Ident,
     kind: ParamKind,
+    allowed: Option<Vec<String>>,
 }
 
 #[derive(Clone, Copy)]
@@ -199,6 +204,7 @@ enum ParamKind {
     Int,
     Float,
     Bool,
+    List,
 }
 
 impl ParamKind {
@@ -209,28 +215,63 @@ impl ParamKind {
             ParamKind::Int => quote! { Some(::oxdock_core::TypeTag::Int) },
             ParamKind::Float => quote! { Some(::oxdock_core::TypeTag::Float) },
             ParamKind::Bool => quote! { Some(::oxdock_core::TypeTag::Bool) },
+            ParamKind::List => quote! { Some(::oxdock_core::TypeTag::List) },
         }
     }
 
     /// Emitted extractor: turns the next `::oxdock_core::Value` word into
     /// the Rust type, bailing with a `{NAME}()`-prefixed message on
     /// mismatch. Reads go through word accessors; words are never
-    /// destructured.
-    fn extractor(&self, param: &syn::Ident, dsl_name: &str) -> TokenStream2 {
+    /// destructured. A closed `allowed` set (from `#[values(...)]`)
+    /// adds a membership check generated from the same tokens that
+    /// feed the metadata, so the check and the documented set cannot
+    /// drift apart.
+    fn extractor(
+        &self,
+        param: &syn::Ident,
+        dsl_name: &str,
+        allowed: Option<&[String]>,
+    ) -> TokenStream2 {
         match self {
             ParamKind::Value => quote! {
                 __oxdock_values.next().expect("arity checked above")
             },
-            ParamKind::String => quote! {
-                match __oxdock_values.next().expect("arity checked above").as_str() {
-                    Some(s) => s.to_string(),
-                    None => ::anyhow::bail!(
-                        "{}() argument `${}` must be a STRING",
-                        #dsl_name,
-                        stringify!(#param),
-                    ),
+            ParamKind::String => {
+                let membership = match allowed {
+                    Some(values) => {
+                        let lits: Vec<LitStr> = values
+                            .iter()
+                            .map(|value| LitStr::new(value, proc_macro2::Span::call_site()))
+                            .collect();
+                        let joined = values.join(", ");
+                        quote! {
+                            match s {
+                                #(#lits => {},)*
+                                _ => ::anyhow::bail!(
+                                    "{}() argument `${}` must be one of: {}, got {s:?}",
+                                    #dsl_name,
+                                    stringify!(#param),
+                                    #joined,
+                                ),
+                            }
+                        }
+                    }
+                    None => quote! {},
+                };
+                quote! {
+                    match __oxdock_values.next().expect("arity checked above").as_str() {
+                        Some(s) => {
+                            #membership
+                            s.to_string()
+                        }
+                        None => ::anyhow::bail!(
+                            "{}() argument `${}` must be a STRING",
+                            #dsl_name,
+                            stringify!(#param),
+                        ),
+                    }
                 }
-            },
+            }
             ParamKind::Int => quote! {
                 {
                     let __oxdock_v = __oxdock_values.next().expect("arity checked above");
@@ -328,6 +369,16 @@ impl ParamKind {
                     }
                 }
             },
+            ParamKind::List => quote! {
+                match __oxdock_values.next().expect("arity checked above").as_list() {
+                    Some(items) => items.clone(),
+                    None => ::anyhow::bail!(
+                        "{}() argument `${}` must be a LIST",
+                        #dsl_name,
+                        stringify!(#param),
+                    ),
+                }
+            },
         }
     }
 }
@@ -342,12 +393,23 @@ fn param_kind(ty: &Type) -> syn::Result<ParamKind> {
             "i64" => return Ok(ParamKind::Int),
             "f64" => return Ok(ParamKind::Float),
             "bool" => return Ok(ParamKind::Bool),
+            "Vec" => {
+                if let syn::PathArguments::AngleBracketed(args) = &last.arguments
+                    && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
+                    && args.args.len() == 1
+                    && let Type::Path(inner_path) = inner
+                    && let Some(inner_last) = inner_path.path.segments.last()
+                    && inner_last.ident == "Value"
+                {
+                    return Ok(ParamKind::List);
+                }
+            }
             _ => {}
         }
     }
     Err(syn::Error::new_spanned(
         ty,
-        "unsupported oxdock_func parameter type; expected Value, String, i64, f64, or bool",
+        "unsupported oxdock_func parameter type; expected Value, String, i64, f64, bool, or Vec<Value>",
     ))
 }
 
@@ -492,10 +554,43 @@ fn expand_func(options: FuncOptions, func: ItemFn) -> syn::Result<TokenStream2> 
                 "oxdock_func parameters must be plain bindings",
             ));
         };
+        let mut allowed: Option<Vec<String>> = None;
+        for attr in &typed.attrs {
+            if attr.path().is_ident("values") {
+                let parsed = attr.parse_args_with(
+                    syn::punctuated::Punctuated::<LitStr, Token![,]>::parse_terminated,
+                )?;
+                let values: Vec<String> = parsed.into_iter().map(|lit| lit.value()).collect();
+                if values.is_empty() {
+                    return Err(syn::Error::new_spanned(
+                        attr,
+                        "`#[values(...)]` needs at least one value",
+                    ));
+                }
+                allowed = Some(values);
+            }
+        }
+        let kind = param_kind(&typed.ty)?;
+        if allowed.is_some() && !matches!(kind, ParamKind::String) {
+            return Err(syn::Error::new_spanned(
+                &typed.ty,
+                "`#[values(...)]` needs a STRING parameter",
+            ));
+        }
         params.push(Param {
             ident: binding.ident.clone(),
-            kind: param_kind(&typed.ty)?,
+            kind,
+            allowed,
         });
+    }
+    // `#[values(...)]` is macro input, not a real attribute: strip it
+    // so the re-emitted function compiles without unknown-attribute
+    // errors. All other parameter attributes pass through untouched.
+    let mut emitted = func.clone();
+    for arg in &mut emitted.sig.inputs {
+        if let FnArg::Typed(typed) = arg {
+            typed.attrs.retain(|attr| !attr.path().is_ident("values"));
+        }
     }
 
     let arity = params.len();
@@ -503,16 +598,27 @@ fn expand_func(options: FuncOptions, func: ItemFn) -> syn::Result<TokenStream2> 
     let param_metas = params.iter().map(|p| {
         let name = p.ident.to_string();
         let kind = p.kind.type_path();
+        let allowed = match &p.allowed {
+            Some(values) => {
+                let lits: Vec<LitStr> = values
+                    .iter()
+                    .map(|value| LitStr::new(value, proc_macro2::Span::call_site()))
+                    .collect();
+                quote! { Some(&[#(#lits),*]) }
+            }
+            None => quote! { None },
+        };
         quote! {
             ::oxdock_core::FuncParam {
                 name: #name.to_string(),
                 param_type: #kind,
+                allowed: #allowed,
             }
         }
     });
     let unpacks = params.iter().map(|p| {
         let name = &p.ident;
-        let extract = p.kind.extractor(name, &dsl_name);
+        let extract = p.kind.extractor(name, &dsl_name, p.allowed.as_deref());
         quote! { let #name = #extract; }
     });
     let values_iter = if params.is_empty() {
@@ -666,7 +772,7 @@ fn expand_func(options: FuncOptions, func: ItemFn) -> syn::Result<TokenStream2> 
     };
 
     Ok(quote! {
-        #func
+        #emitted
 
         #export
     })

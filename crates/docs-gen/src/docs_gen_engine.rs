@@ -128,55 +128,12 @@ pub(crate) fn render_fragment(
     Ok(Value::string(text))
 }
 
-// TODO: Move to STD as `merge_maps`
-/// Merge loaded values files in order under one duplicate policy.
-///
-/// `fail_on_duplicate` (the default) fails naming the repeated key,
-/// so two files claiming one placeholder fail the run instead of
-/// shadowing each other. `overwrite` lets later files win, for
-/// environment overlays. Anything else fails listing the two known
-/// policies. Non MAP elements fail naming their position.
-#[oxdock_func(pure, returns = TypeTag::Map)]
-fn merge_values(maps: Value, policy: String) -> Result<Value> {
-    let items = maps.as_list().ok_or_else(|| {
-        anyhow::anyhow!(
-            "MERGE_VALUES expects a LIST of MAPs, got {}",
-            maps.type_name()
-        )
-    })?;
-    if policy != "fail_on_duplicate" && policy != "overwrite" {
-        bail!("unknown merge policy '{policy}'; known policies: fail_on_duplicate, overwrite");
-    }
-    let mut merged = std::collections::BTreeMap::new();
-    for (index, item) in items.iter().enumerate() {
-        let entries = item.as_map().ok_or_else(|| {
-            anyhow::anyhow!(
-                "MERGE_VALUES element {index} is {}, not MAP",
-                item.type_name()
-            )
-        })?;
-        for (key, value) in entries {
-            if merged.contains_key(key) && policy == "fail_on_duplicate" {
-                bail!(
-                    "duplicate values key '{key}'; later files must not repeat it under fail_on_duplicate"
-                );
-            }
-            merged.insert(key.clone(), value.clone());
-        }
-    }
-    Ok(Value::map(merged))
-}
-
 /// The render engine builtins, registered unconditionally by
 /// `crate::run` alongside whichever domain plugins a pipeline needs.
 pub fn module<P: ProcessManager>() -> HostModule<P> {
     HostModule {
         name: "DOCS_GEN_ENGINE".to_string(),
-        funcs: vec![
-            FileStem::registration(),
-            ExpandTemplate::registration(),
-            MergeValues::registration(),
-        ],
+        funcs: vec![FileStem::registration(), ExpandTemplate::registration()],
         types: vec![],
         record_schemas: vec![],
     }
@@ -194,72 +151,6 @@ mod tests {
                 .map(|(k, v)| ((*k).to_string(), v.clone()))
                 .collect(),
         )
-    }
-
-    #[test]
-    fn merge_values_layers_in_order() {
-        let base = map(&[("a", Value::string("1".to_string()))]);
-        let overlay = map(&[("b", Value::string("2".to_string())), ("c", Value::int(3))]);
-        let merged_value =
-            merge_values(Value::list(vec![base, overlay]), "overwrite".to_string()).expect("merge");
-        let merged = merged_value.as_map().expect("map");
-        assert_eq!(
-            merged.get("a").expect("a").as_str(),
-            Some("1"),
-            "base keys survive",
-        );
-        assert_eq!(
-            merged.get("c").expect("c").as_i64(),
-            Some(3),
-            "overlay keys land",
-        );
-    }
-
-    #[test]
-    fn merge_values_fail_on_duplicate_names_the_key() {
-        let first = map(&[("name", Value::string("base".to_string()))]);
-        let second = map(&[("name", Value::string("overlay".to_string()))]);
-        let err = merge_values(
-            Value::list(vec![first, second]),
-            "fail_on_duplicate".to_string(),
-        )
-        .expect_err("duplicate must fail");
-        let text = format!("{err:#}");
-        assert!(text.contains("name"), "error names the key: {text}");
-        let overlay_value = merge_values(
-            Value::list(vec![
-                map(&[("name", Value::string("base".to_string()))]),
-                map(&[("name", Value::string("overlay".to_string()))]),
-            ]),
-            "overwrite".to_string(),
-        )
-        .expect("overwrite allows it");
-        let won = overlay_value.as_map().expect("map");
-        assert_eq!(
-            won.get("name").expect("name").as_str(),
-            Some("overlay"),
-            "later files win under overwrite",
-        );
-    }
-
-    #[test]
-    fn merge_values_rejects_bad_policy_and_shapes() {
-        let err =
-            merge_values(Value::list(vec![]), "merge".to_string()).expect_err("policy must fail");
-        let text = format!("{err:#}");
-        assert!(text.contains("merge"), "error names the policy: {text}");
-        assert!(
-            text.contains("fail_on_duplicate"),
-            "error lists known policies: {text}"
-        );
-        assert!(
-            merge_values(Value::string("nope".to_string()), "overwrite".to_string()).is_err(),
-            "non LIST fails",
-        );
-        assert!(
-            merge_values(Value::list(vec![Value::int(1)]), "overwrite".to_string(),).is_err(),
-            "non MAP element fails",
-        );
     }
 
     #[test]

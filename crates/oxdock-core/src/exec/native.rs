@@ -37,10 +37,15 @@ impl FuncKind {
 
 /// One declared parameter of a registered function. `param_type` is `None`
 /// for unconstrained `Value` parameters (the macro accepts any value).
+/// `allowed` names the closed value set for constrained `STRING`
+/// parameters, declared once via `#[values(...)]`: the generated
+/// extractor enforces membership and the reference renders the set,
+/// so the list cannot rot apart from the check.
 #[derive(Debug, Clone)]
 pub struct FuncParam {
     pub name: String,
     pub param_type: Option<TypeTag>,
+    pub allowed: Option<&'static [&'static str]>,
 }
 
 /// Introspectable metadata for one function. Single source for
@@ -251,6 +256,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
             PathType::registration(),
             HasKey::registration(),
             MapSet::registration(),
+            MergeMaps::registration(),
             ToJson::registration(),
             TypeOf::registration(),
             Functions::registration(),
@@ -386,6 +392,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
                             .map(|(name, param_type)| FuncParam {
                                 name: name.clone(),
                                 param_type: Some(*param_type),
+                                allowed: None,
                             })
                             .collect(),
                     ),
@@ -663,6 +670,20 @@ fn to_json(value: Value) -> Result<Value> {
 #[oxdock_func(pure, returns = TypeTag::String)]
 fn type_of(value: Value) -> Result<Value> {
     super::args::type_of_from_value(value)
+}
+
+/// Merge a LIST of MAPs in order under one duplicate policy.
+///
+/// `fail_on_duplicate` fails naming the repeated key, so two files
+/// claiming one placeholder fail the run instead of shadowing each
+/// other. `overwrite` lets later files win, for environment overlays.
+/// Non MAP elements fail naming their position.
+#[oxdock_func(pure, returns = TypeTag::Map)]
+fn merge_maps(
+    maps: Vec<Value>,
+    #[values("fail_on_duplicate", "overwrite")] policy: String,
+) -> Result<Value> {
+    super::args::merge_maps_from_value(Value::list(maps), policy)
 }
 
 /// List all visible function names.
@@ -964,6 +985,14 @@ fn meta_to_value(meta: &FuncMeta) -> Value {
                             p.param_type
                                 .as_ref()
                                 .map(|tag| tag.name().to_string())
+                                .unwrap_or_default(),
+                        ),
+                    );
+                    entry.insert(
+                        "allowed".to_string(),
+                        Value::string(
+                            p.allowed
+                                .map(|values| values.join(", "))
                                 .unwrap_or_default(),
                         ),
                     );

@@ -34,8 +34,9 @@ stems).
 Domain content arrives as in-crate plugins registered only by `run()`:
 the core language never sees them.
 
-- `DOCS_GEN_ENGINE` builtins: `FILE_STEM`, generic
-  `EXPAND_TEMPLATE(raw, vars, env)`, `MERGE_VALUES`.
+- `DOCS_GEN_ENGINE` builtins: `FILE_STEM` and generic
+  `EXPAND_TEMPLATE(raw, vars, env)`. Layered values merge through
+  the pure `STD::MERGE_MAPS` builtin instead of engine code.
 - `OXDOCK` registry introspection with config-driven `GENERATED(key)`
   dispatch.
 - `RUST` Cargo workspace content: members, versions, and package

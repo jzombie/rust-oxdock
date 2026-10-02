@@ -3318,6 +3318,19 @@ Insert one key into a map.
 Fails on duplicates so two entries sharing a key fail the run
 instead of silently shadowing each other.
 
+### STD::MERGE_MAPS
+
+**Signature:** `STD::MERGE_MAPS($maps: LIST, $policy: STRING = fail_on_duplicate | overwrite) -> MAP`
+
+**Contexts:** AST, RPN
+
+Merge a LIST of MAPs in order under one duplicate policy.
+
+`fail_on_duplicate` fails naming the repeated key, so two files
+claiming one placeholder fail the run instead of shadowing each
+other. `overwrite` lets later files win, for environment overlays.
+Non MAP elements fail naming their position.
+
 ### STD::PARSE_JSON
 
 **Signature:** `STD::PARSE_JSON($text: STRING)`

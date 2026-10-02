@@ -612,6 +612,39 @@ pub(crate) fn map_set_from_value(map: Value, key: String, value: Value) -> Resul
     Ok(Value::map(next))
 }
 
+/// Value-semantics core of `MERGE_MAPS()`: merge a LIST of MAPs in
+/// order. `policy` must be one of the values the DSL extractor
+/// enforces (`fail_on_duplicate`, `overwrite`); the core compares
+/// against `fail_on_duplicate` only and treats anything else as
+/// overwrite, so all production traffic enters through the checked
+/// boundary.
+pub(crate) fn merge_maps_from_value(maps: Value, policy: String) -> Result<Value> {
+    let items = maps.as_list().ok_or_else(|| {
+        anyhow::anyhow!(
+            "MERGE_MAPS expects a LIST of MAPs, got {}",
+            maps.type_name()
+        )
+    })?;
+    let mut merged = std::collections::BTreeMap::new();
+    for (index, item) in items.iter().enumerate() {
+        let entries = item.as_map().ok_or_else(|| {
+            anyhow::anyhow!(
+                "MERGE_MAPS element {index} is {}, not MAP",
+                item.type_name()
+            )
+        })?;
+        for (key, value) in entries {
+            if merged.contains_key(key) && policy == "fail_on_duplicate" {
+                bail!(
+                    "duplicate values key '{key}'; later files must not repeat it under fail_on_duplicate"
+                );
+            }
+            merged.insert(key.clone(), value.clone());
+        }
+    }
+    Ok(Value::map(merged))
+}
+
 /// Value-semantics core of `TYPE_OF()`: name the word a value holds.
 ///
 /// Returns the registered descriptor name, the same string arity and
@@ -1330,6 +1363,67 @@ mod tests {
         assert!(parse_toml_from_value(Value::string("a = ".to_string())).is_err());
         assert!(parse_json_from_value(Value::int(1)).is_err());
         assert!(parse_toml_from_value(Value::bool(true)).is_err());
+    }
+
+    #[test]
+    fn merge_maps_layers_in_order() {
+        use std::collections::BTreeMap;
+        let mut base_entries = BTreeMap::new();
+        base_entries.insert("a".to_string(), Value::string("1".to_string()));
+        let mut overlay_entries = BTreeMap::new();
+        overlay_entries.insert("b".to_string(), Value::string("2".to_string()));
+        overlay_entries.insert("c".to_string(), Value::int(3));
+        let merged = merge_maps_from_value(
+            Value::list(vec![Value::map(base_entries), Value::map(overlay_entries)]),
+            "overwrite".to_string(),
+        )
+        .expect("merge")
+        .as_map()
+        .expect("map")
+        .clone();
+        assert_eq!(merged.get("a").expect("a").as_str(), Some("1"));
+        assert_eq!(merged.get("c").expect("c").as_i64(), Some(3));
+    }
+
+    #[test]
+    fn merge_maps_fail_on_duplicate_names_the_key() {
+        use std::collections::BTreeMap;
+        let mut first_entries = BTreeMap::new();
+        first_entries.insert("name".to_string(), Value::string("base".to_string()));
+        let mut second_entries = BTreeMap::new();
+        second_entries.insert("name".to_string(), Value::string("overlay".to_string()));
+        let err = merge_maps_from_value(
+            Value::list(vec![Value::map(first_entries), Value::map(second_entries)]),
+            "fail_on_duplicate".to_string(),
+        )
+        .expect_err("duplicate must fail");
+        assert!(
+            format!("{err:#}").contains("name"),
+            "error names the key: {err:#}"
+        );
+    }
+
+    #[test]
+    fn merge_maps_rejects_bad_shapes() {
+        assert!(
+            merge_maps_from_value(Value::string("nope".to_string()), "overwrite".to_string())
+                .is_err(),
+            "non LIST fails",
+        );
+        for (element, word) in [
+            (Value::int(1), "INT"),
+            (Value::string("nope".to_string()), "STRING"),
+            (Value::list(vec![Value::int(1)]), "LIST"),
+            (Value::bool(true), "BOOL"),
+        ] {
+            let err = merge_maps_from_value(Value::list(vec![element]), "overwrite".to_string())
+                .expect_err("non MAP element must fail");
+            let text = format!("{err:#}");
+            assert!(
+                text.contains("element 0") && text.contains(word),
+                "error names position and offending shape: {text}"
+            );
+        }
     }
 
     #[test]

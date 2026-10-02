@@ -342,6 +342,7 @@ fn host_module_cannot_reclaim_std_name() {
                 params: Some(vec![FuncParam {
                     name: "pattern".to_string(),
                     param_type: Some(TypeTag::String),
+                    allowed: None,
                 }]),
                 returns: Some(TypeTag::List),
                 rpn: false,

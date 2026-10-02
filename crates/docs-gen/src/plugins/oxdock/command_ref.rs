@@ -207,7 +207,9 @@ pub(crate) fn render_body() -> Result<String> {
 
 /// Render one function signature from its derived metadata:
 /// `NAME($param: TYPE, ...) -> RET`. Unconstrained `Value` parameters
-/// render bare; absent return types render no arrow.
+/// render bare; absent return types render no arrow. Closed `#[values]`
+/// sets render after the type (`$policy: STRING = a | b`), generated
+/// from the same tokens as the extractor check.
 fn render_signature(meta: &FuncMeta) -> String {
     let params = meta
         .params
@@ -215,9 +217,16 @@ fn render_signature(meta: &FuncMeta) -> String {
         .unwrap_or(&[])
         .iter()
         .map(
-            |FuncParam { name, param_type }: &FuncParam| match param_type {
-                Some(label) => format!("${name}: {label}"),
-                None => format!("${name}"),
+            |FuncParam {
+                 name,
+                 param_type,
+                 allowed,
+             }: &FuncParam| match (param_type, allowed) {
+                (Some(label), Some(values)) => {
+                    format!("${name}: {label} = {}", values.join(" | "))
+                }
+                (Some(label), None) => format!("${name}: {label}"),
+                (None, _) => format!("${name}"),
             },
         )
         .collect::<Vec<_>>()
@@ -249,10 +258,11 @@ pub(crate) fn render_plugin_reference(metas: &[FuncMeta], module: &str) -> Strin
     );
     for meta in metas {
         out.push_str(&format!("### {}\n\n", meta.name));
-        out.push_str(&format!(
-            "**Signature:** `{}`\n\n",
-            escape_table_cell(&render_signature(meta)),
-        ));
+        // No cell escaping: the signature renders inside backticks,
+        // which already isolate `|` from table parsing. Escaping here
+        // would print a literal backslash (closed `#[values]` sets
+        // render `a | b`).
+        out.push_str(&format!("**Signature:** `{}`\n\n", render_signature(meta)));
         out.push_str(&format!(
             "**Contexts:** {}\n\n",
             if meta.rpn { "AST, RPN" } else { "AST only" },

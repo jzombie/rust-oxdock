@@ -3337,6 +3337,45 @@ fn parse_text_matches_file_loader_and_placeholder() {
 }
 
 #[test]
+fn merge_maps_rejects_unknown_policy_at_boundary() {
+    // Closed-set enforcement lives in the generated extractor: an
+    // unknown policy fails before the body runs, naming the allowed
+    // values from the same attribute tokens that render the
+    // signature. Valid policies run end to end through the docs-gen
+    // render suite on every pipeline run.
+    let steps = crate::parse_script(indoc! {r#"
+        IMPORT [STD]
+        LET $m: MAP = MERGE_MAPS([], "merge")
+    "#})
+    .expect("parse ok");
+    let fs = MockFs::new();
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    let text = format!("{err:#}");
+    assert!(
+        text.contains("must be one of"),
+        "boundary names the rule: {text}"
+    );
+    assert!(
+        text.contains("fail_on_duplicate") && text.contains("overwrite"),
+        "boundary lists the allowed values: {text}"
+    );
+
+    // The LIST shape is boundary-checked too: a non-list never
+    // reaches the merge.
+    let steps = crate::parse_script(indoc! {r#"
+        IMPORT [STD]
+        LET $m: MAP = MERGE_MAPS("nope", "overwrite")
+    "#})
+    .expect("parse ok");
+    let fs = MockFs::new();
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    assert!(
+        format!("{err:#}").contains("must be a LIST"),
+        "boundary enforces the LIST shape: {err:#}"
+    );
+}
+
+#[test]
 fn run_start_rejects_unknown_type_tags() {
     // Typo'd `returns` and `params` labels fail before the first step
     // runs, listing every known type. Previously a bad `returns` label
@@ -3367,6 +3406,7 @@ fn run_start_rejects_unknown_type_tags() {
                     params: Some(vec![FuncParam {
                         name: "arg".to_string(),
                         param_type,
+                        allowed: None,
                     }]),
                     returns: return_type,
                     rpn: false,

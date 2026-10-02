@@ -177,7 +177,7 @@ pub fn run_with_plugins(
         }
 
         // Shared values: one path or a path list, merged in order.
-        // MERGE_VALUES validates the policy and names duplicates.
+        // STD::MERGE_MAPS validates the policy and names duplicates.
         LET $vpaths: LIST = []
         IF TYPE_OF($cfg.global_values) == "LIST" {
             $vpaths = $cfg.global_values
@@ -189,7 +189,7 @@ pub fn run_with_plugins(
             LET $one: MAP = LOAD_JSON($vp)
             LIST_APPEND $vmaps $one
         }
-        LET $docs_global: MAP = DOCS_GEN_ENGINE::MERGE_VALUES($vmaps, $policy)
+        LET $docs_global: MAP = STD::MERGE_MAPS($vmaps, $policy)
 
         // Registry-derived inputs declared by the config: one entry
         // per generated artifact, dispatched by key. An unknown key
