@@ -1,4 +1,5 @@
 # Changelog
+
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
@@ -8,7 +9,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ### Added
 
-- Added README for `oxdock-remote-proto`: the sealed remote execution contract now ships generated docs like every other workspace crate, covering the stable block-granular session, the digest-gated handshake, and the guarded tar transfer helpers.
 - `TypeTag` value shapes (`oxdock-parser::tag`): function signatures now carry real types instead of strings. `TypeTag::Custom` names handle types, `TypeTag::ListOf` shapes lists, and `TypeTag::Record` pins required fields, rejecting missing and extra keys with path-aware errors. `FuncParam` and `FuncMeta.returns` use them, and run-start validation enforces the same rule for every run.
 - New `STD` builtins: `HAS_KEY($map, $key)` reports key presence without tripping the strict missing-key error, `MAP_SET($map, $key, $value)` inserts failing on duplicates, `TO_JSON($value)` encodes template-safe shapes with one trailing newline, and `TYPE_OF($value)` names the word a value holds (`STRING`, `LIST`, `MAP`, ...) so scripts can branch on config shapes.
 - Placeholder function calls inside `{{ }}`: any template or fragment can invoke a pure value-returning function as `{{ MODULE::FUNC($var, ...) }}`, with `$var.path` refs or string/int/bool literals as args. Arity and types check against the registered signature, output is terminal text (never re-expanded), and unknown modules or functions fail listing the known names.
@@ -20,6 +20,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - `NET::NET_FETCH($url)` (net plugin, `Stateful`): fetch an `https` URL to text, the network source composing with the pure `STD::PARSE_JSON`/`STD::PARSE_TOML` string parsers (`LET $doc: MAP = PARSE_JSON(NET_FETCH($url))`). Cleartext `http` reaches loopback hosts only (tests serve fixtures without TLS); redirects follow by hand (at most 5 hops, absolute URLs only, every hop re-validated so a `Location` can never smuggle cleartext), one 30-second deadline, at most 10 MiB of body, strict UTF-8, non-2xx statuses bail with the URL and reason. Never in the pure table behind `{{ }}` placeholders, and unknown without the `net` CLI feature like every other `NET_*` name.
 - Citation support: a `CITATION.cff` at the root plus a `## Citation` section in the workspace README with a BibTeX entry. Author, repository, and license render from the root manifest through the new `RUST::WORKSPACE_PACKAGE()` step (no copies in templates or values files); title comes from the target values and version from `CRATE_VERSION`.
 - Fail-fast pipeline contract in the shared error-handling docs: a pipeline runs to completion and the first failed step ends the run immediately with step context. No retry, resume, or continue-on-error mode exists. Guards and branches select work, timeouts bound it, and `EXIT <code>` is the intentional immediate stop; files written before the stop persist.
+- Added README for `oxdock-remote-proto` (omission from earlier release): the sealed remote execution contract now ships generated docs like every other workspace crate, covering the stable block-granular session, the digest-gated handshake, and the guarded tar transfer helpers.
 
 ### Changed
 
