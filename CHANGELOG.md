@@ -4,11 +4,36 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
-## [UNRELEASED]
+## [0.21.0-alpha] - TBD
 
 ### Added
 
 - Added README for `oxdock-remote-proto`: the sealed remote execution contract now ships generated docs like every other workspace crate, covering the stable block-granular session, the digest-gated handshake, and the guarded tar transfer helpers.
+- `TypeTag` value shapes (`oxdock-parser::tag`): function signatures now carry real types instead of strings. `TypeTag::Custom` names handle types, `TypeTag::ListOf` shapes lists, and `TypeTag::Record` pins required fields, rejecting missing and extra keys with path-aware errors. `FuncParam` and `FuncMeta.returns` use them, and run-start validation enforces the same rule for every run.
+- New `STD` builtins: `HAS_KEY($map, $key)` reports key presence without tripping the strict missing-key error, `MAP_SET($map, $key, $value)` inserts failing on duplicates, `TO_JSON($value)` encodes template-safe shapes with one trailing newline, and `TYPE_OF($value)` names the word a value holds (`STRING`, `LIST`, `MAP`, ...) so scripts can branch on config shapes.
+- Placeholder function calls inside `{{ }}`: any template or fragment can invoke a pure value-returning function as `{{ MODULE::FUNC($var, ...) }}`, with `$var.path` refs or string/int/bool literals as args. Arity and types check against the registered signature, output is terminal text (never re-expanded), and unknown modules or functions fail listing the known names.
+- New `oxdock-markdown-plugin` crate (#170): `MARKDOWN::MAP_TO_MD_TABLE($map)` renders a MAP as a Markdown table (one row per entry, union columns for lists of MAPs, padded pipes, strict errors), usable both as a DSL statement and as a `{{ MARKDOWN::MAP_TO_MD_TABLE($var) }}` placeholder. Its pure `markdown` module is the single source for table rendering and cell escaping, shared with the docs-gen reference renderers.
+- docs-gen engine overhaul: the pipeline script stays DSL-first while domain content splits into in-crate plugins registered only by `run()`: `DOCS_GEN_ENGINE` builtins (`FILE_STEM`, generic `EXPAND_TEMPLATE(raw, vars, env)`, `MERGE_VALUES`), `OXDOCK` registry introspection with config-driven `GENERATED(key)` dispatch, and `RUST` Cargo workspace content. New library surface: `run_with_plugins(root, extras)` registers external modules (template placeholders resolve them with no header change) and `pipeline_engine()` returns an engine with exactly the `DOCS_GEN_ENGINE` default for custom scripts. Covered by 9 render integration tests over tempdir fixtures.
+- docs-gen.json evolution (all optional, defaults preserve behavior): `generated` is now a list of `{key, out}` entries rendered through one `FOR` loop; `global_values` accepts one path or a path list merged in order under `merge_policy` (`fail_on_duplicate` names the repeated key, `overwrite` lets later files win); plus `staging_dir`, `version_key`, and `vars` mappings for scope key conventions.
+- Non-Rust pipeline examples, rendered live: `examples/resume/` (resume data renders `resume.md` with Markdown tables plus a parseable `resume.jsonld` from a plain template) and `examples/generic-readme/` (one values file renders human `README.md`, slim agent `llms.txt`, and full carrier `llms-full.txt` from shared fragments; the full output carries every shared section the slim has plus its own, pinned by a split-invariant render test).
+- `STD::PARSE_JSON($text)` / `STD::PARSE_TOML($text)` (pure): parse in-memory text with the same conversion as file loading, so fetch bodies, file contents, and captured text share one value shape. `PARSE_JSON` carries no return tag by design (a top-level array parses to `LIST`); `PARSE_TOML` returns `MAP` (a document root is always a table). `LET` coercion still checks the actual value at assignment.
+- `NET::NET_FETCH($url)` (net plugin, `Stateful`): fetch an `https` URL to text, the network source composing with the pure `STD::PARSE_JSON`/`STD::PARSE_TOML` string parsers (`LET $doc: MAP = PARSE_JSON(NET_FETCH($url))`). Cleartext `http` reaches loopback hosts only (tests serve fixtures without TLS); redirects follow by hand (at most 5 hops, absolute URLs only, every hop re-validated so a `Location` can never smuggle cleartext), one 30-second deadline, at most 10 MiB of body, strict UTF-8, non-2xx statuses bail with the URL and reason. Never in the pure table behind `{{ }}` placeholders, and unknown without the `net` CLI feature like every other `NET_*` name.
+- Citation support: a `CITATION.cff` at the root plus a `## Citation` section in the workspace README with a BibTeX entry. Author, repository, and license render from the root manifest through the new `RUST::WORKSPACE_PACKAGE()` step (no copies in templates or values files); title comes from the target values and version from `CRATE_VERSION`.
+- Fail-fast pipeline contract in the shared error-handling docs: a pipeline runs to completion and the first failed step ends the run immediately with step context. No retry, resume, or continue-on-error mode exists. Guards and branches select work, timeouts bound it, and `EXIT <code>` is the intentional immediate stop; files written before the stop persist.
+
+### Changed
+
+- [breaking] Host Rust API only, scripts are unaffected: `#[oxdock_func(returns = ...)]` now takes a `TypeTag::...` expression and string labels (`returns = "MAP"`) are rejected at compile time. All first-party modules migrated.
+- [breaking] docs-gen config only, workspace config updated: `docs-gen.json` `generated` changed from a key to out map to a list of `{key, out}` entries. `global_values` keeps accepting a single path string.
+- docs-gen `vars` gains an optional `workspace_pkg` scope-key alias (default `workspace_pkg`), matching the existing `global`/`ctx`/`version_key` conventions; the citation metadata rides the expansion scope under that key.
+
+### Fixed
+
+- `oxdock!` braced guard blocks (`[bool:true] { ... }`) no longer split the guard bracket across lines, which used to fail the whole enclosing `FUNC` with the span misreported at its opener.
+
+### Dependencies
+
+- Bump `cache-manager` 0.4.1 → 0.5.0.
 
 ## [0.20.0-alpha] - 2026-09-27
 

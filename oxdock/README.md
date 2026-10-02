@@ -8,9 +8,9 @@ One script runs on Linux, macOS, and Windows, with platform gating, async tasks,
 
 Plain Rust functions become script functions with one attribute: `#[oxdock_func]` exports them into namespaced modules scripts call as `DEMO::NAME(...)`. See [Extending OxDock from Rust](#extending-oxdock-from-rust).
 
-[Documentation](https://docs.rs/oxdock/0.20.0-alpha/oxdock/)
+[Documentation](https://docs.rs/oxdock/0.21.0-alpha/oxdock/)
 
-Add it to your Rust build with `cargo add oxdock@0.20.0-alpha`, or install the standalone runner with `cargo install oxdock@0.20.0-alpha`.
+Add it to your Rust build with `cargo add oxdock@0.21.0-alpha`, or install the standalone runner with `cargo install oxdock@0.21.0-alpha`.
 
 Run a script:
 
@@ -98,8 +98,8 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     LET $a: STRING = READ dist/alpha.txt
     LET $b: STRING = READ dist/beta.txt
     LET $p: STRING = READ dist/picked.txt
-    ASSERT_EQ $a "alpha OxDock 0.20.0-alpha"
-    ASSERT_EQ $b "beta OxDock 0.20.0-alpha"
+    ASSERT_EQ $a "alpha OxDock 0.21.0-alpha"
+    ASSERT_EQ $b "beta OxDock 0.21.0-alpha"
     ASSERT_EQ $p "alpha"
 };
 
@@ -111,7 +111,7 @@ let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolve
 let out = root.join("dist/alpha.txt").expect("out path");
 assert_eq!(
     resolver.read_to_string(&out).expect("read out"),
-    "alpha OxDock 0.20.0-alpha"
+    "alpha OxDock 0.21.0-alpha"
 );
 ```
 
@@ -167,6 +167,7 @@ instead of heap boxing; both forms, with stateful functions, live under
 
 ```rust
 use oxdock::{Engine, HostModule, OxDockFn, OxDockType, Value, oxdock_func, oxdock_type};
+use oxdock::oxdock_core::TypeTag;
 use std::fmt;
 
 /// Word count summary: computed in Rust, carried as one script value.
@@ -195,7 +196,7 @@ fn summarize(text: String) -> anyhow::Result<Value> {
 }
 
 /// Read the word count back out: `WORD_COUNT($s)` is an `INT`.
-#[oxdock_func(pure, returns = "INT")]
+#[oxdock_func(pure, returns = TypeTag::Int)]
 fn word_count(summary: Value) -> anyhow::Result<Value> {
     let Some(stats) = summary.read_heap::<Stats>(Stats::descriptor()) else {
         anyhow::bail!("WORD_COUNT() expects a STATS value");
@@ -210,6 +211,7 @@ fn main() -> anyhow::Result<()> {
         name: "DEMO".to_string(),
         funcs: vec![Summarize::registration(), WordCount::registration()],
         types: vec![],
+        record_schemas: vec![],
     });
     let temp = oxdock_fs::GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
@@ -809,7 +811,7 @@ Keeping inheritance selective avoids leaking secrets by default while still allo
 Install the binary from the registry:
 
 ```sh
-cargo install oxdock@0.20.0-alpha
+cargo install oxdock@0.21.0-alpha
 ```
 
 Run a script file:
@@ -837,6 +839,7 @@ written: the shape first, the definitions it names right below it.
 
 ```rust
 use oxdock::{Engine, HostModule, OxDockFn, OxDockType, oxdock_func, oxdock_type};
+use oxdock::oxdock_core::TypeTag;
 use std::fmt;
 
 // The script below is the DSL itself, not a string: the `oxdock!` macro
@@ -849,6 +852,7 @@ fn main() -> anyhow::Result<()> {
         name: "DEMO".to_string(),
         funcs: vec![MakeTag::registration(), ReadTag::registration()],
         types: vec![],
+        record_schemas: vec![],
     });
 
     let temp = oxdock_fs::GuardedPath::tempdir().unwrap();
@@ -902,7 +906,7 @@ fn make_tag() -> anyhow::Result<oxdock::Value> {
 }
 
 /// Read the payload back out through a descriptor-checked typed read.
-#[oxdock_func(pure, returns = "STRING")]
+#[oxdock_func(pure, returns = TypeTag::String)]
 fn read_tag(val: oxdock::Value) -> anyhow::Result<oxdock::Value> {
     let Some(tag) = val.read_heap::<Tag>(Tag::descriptor()) else {
         anyhow::bail!("READ_TAG() expects a TAG value");
@@ -931,10 +935,11 @@ the declared return type explicitly when the defaults do not fit:
 
 ```rust
 use oxdock::{HostModule, OxDockFn, StepCtx, oxdock_func};
+use oxdock::oxdock_core::TypeTag;
 use oxdock::oxdock_core::ProcessManager;
 
 /// Read an environment variable, defaulting to empty.
-#[oxdock_func(name = "ENV_OR", returns = "STRING")]
+#[oxdock_func(name = "ENV_OR", returns = TypeTag::String)]
 fn env_or<P: ProcessManager>(
     cx: &mut StepCtx<P>,
     key: String,
@@ -948,6 +953,7 @@ fn main() {
         name: "DEMO".to_string(),
         funcs: vec![EnvOr::registration()],
         types: vec![],
+        record_schemas: vec![],
     });
 }
 ```
@@ -1015,6 +1021,7 @@ unavailable by the boundary above.
 
 ```rust
 use oxdock::{HostModule, OxDockFn, OxDockType, Value, oxdock_func, oxdock_type};
+use oxdock::oxdock_core::TypeTag;
 use std::fmt;
 
 /// Integer grid with no literal syntax: scripts query it through functions.
@@ -1038,7 +1045,7 @@ fn make_matrix() -> anyhow::Result<Value> {
 }
 
 /// Read one cell by row and column.
-#[oxdock_func(pure, returns = "INT")]
+#[oxdock_func(pure, returns = TypeTag::Int)]
 fn matrix_get(board: Value, row: i64, col: i64) -> anyhow::Result<Value> {
     let Some(grid) = board.read_heap::<Matrix>(Matrix::descriptor()) else {
         anyhow::bail!("MATRIX_GET() expects a MATRIX value");
@@ -1066,6 +1073,7 @@ fn main() -> anyhow::Result<()> {
             MatrixGet::registration(),
         ],
         types: vec![],
+        record_schemas: vec![],
     });
     let temp = oxdock_fs::GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
@@ -1148,7 +1156,7 @@ Or pin the version in `Cargo.toml`:
 
 ```toml
 [dependencies]
-oxdock = { version = "0.20.0-alpha", default-features = false }
+oxdock = { version = "0.21.0-alpha", default-features = false }
 ```
 
 ## Glossary

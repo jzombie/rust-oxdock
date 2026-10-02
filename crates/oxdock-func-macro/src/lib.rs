@@ -33,7 +33,8 @@
 //! - Return type must be `Result<Value>` (spelled via any `Result` alias).
 //! - The DSL name defaults to the uppercased Rust name (`load_toml` becomes
 //!   `LOAD_TOML`); override with `name = "..."`. The declared return type
-//!   comes from `returns = "..."` (a descriptor name) and defaults to none.
+//!   comes from `returns = TypeTag::...` (a `TypeTag` expression) and
+//!   defaults to none.
 //! - The first doc-comment line becomes `FuncMeta.summary`; the full doc
 //!   text becomes `FuncMeta.docs`. Override the summary with `summary = "..."`.
 //!
@@ -97,12 +98,15 @@ fn expand_oxdock_func(attr: TokenStream, item: TokenStream) -> syn::Result<Token
     expand_func(options, func)
 }
 
+/// A declared return type is always a `TypeTag` expression, resolved by
+/// the compiler. String labels are rejected: pre-release software takes
+/// the breaking change now so unchecked strings can never slip through.
 #[derive(Default)]
 struct FuncOptions {
     pure: bool,
     rpn: bool,
     name: Option<String>,
-    returns: Option<String>,
+    returns: Option<syn::Expr>,
     summary: Option<String>,
 }
 
@@ -125,11 +129,17 @@ impl Parse for FuncOptions {
             } else if input.peek(syn::Ident) {
                 let key: syn::Ident = input.parse()?;
                 input.parse::<Token![=]>()?;
+                if key == "returns" {
+                    let value: syn::Expr = input.parse()?;
+                    options.returns = Some(parse_returns(value)?);
+                    if input.peek(Token![,]) {
+                        input.parse::<Token![,]>()?;
+                    }
+                    continue;
+                }
                 let value: syn::LitStr = input.parse()?;
                 if key == "name" {
                     options.name = Some(value.value());
-                } else if key == "returns" {
-                    options.returns = Some(type_label_to_string(&value)?);
                 } else if key == "summary" {
                     options.summary = Some(value.value());
                 } else {
@@ -160,17 +170,20 @@ fn peek_key_value(input: ParseStream) -> bool {
     fork.peek(Token![=])
 }
 
-fn type_label_to_string(lit: &syn::LitStr) -> syn::Result<String> {
-    match lit.value().as_str() {
-        "STRING" | "INT" | "FLOAT" | "BOOL" | "PIPE" | "LIST" | "MAP" | "HANDLE" | "DURATION"
-        | "PATH" | "SEMAPHORE" | "PERMIT" => Ok(lit.value()),
-        other => Err(syn::Error::new(
-            lit.span(),
-            format!(
-                "unknown type label {other:?}; expected a builtin descriptor name such as STRING, INT, LIST, or MAP"
-            ),
-        )),
+/// Parse a `returns` attribute value: must be a `TypeTag` expression
+/// (`TypeTag::String`, `TypeTag::Custom(FooTag::descriptor())`,
+/// `TypeTag::Record(&FIELDS)`). String literals fail here, so custom
+/// and shaped types can never slip through as unchecked strings.
+fn parse_returns(value: syn::Expr) -> syn::Result<syn::Expr> {
+    if let syn::Expr::Lit(lit) = &value
+        && let syn::Lit::Str(text) = &lit.lit
+    {
+        return Err(syn::Error::new(
+            text.span(),
+            "returns must be a TypeTag expression, e.g. returns = TypeTag::String; string labels are rejected",
+        ));
     }
+    Ok(value)
 }
 
 /// A DSL-facing parameter: binding identifier plus mapped type info.
@@ -192,10 +205,10 @@ impl ParamKind {
     fn type_path(&self) -> TokenStream2 {
         match self {
             ParamKind::Value => quote! { None },
-            ParamKind::String => quote! { Some("STRING".to_string()) },
-            ParamKind::Int => quote! { Some("INT".to_string()) },
-            ParamKind::Float => quote! { Some("FLOAT".to_string()) },
-            ParamKind::Bool => quote! { Some("BOOL".to_string()) },
+            ParamKind::String => quote! { Some(::oxdock_core::TypeTag::String) },
+            ParamKind::Int => quote! { Some(::oxdock_core::TypeTag::Int) },
+            ParamKind::Float => quote! { Some(::oxdock_core::TypeTag::Float) },
+            ParamKind::Bool => quote! { Some(::oxdock_core::TypeTag::Bool) },
         }
     }
 
@@ -518,7 +531,7 @@ fn expand_func(options: FuncOptions, func: ItemFn) -> syn::Result<TokenStream2> 
     let docs_text = docs.join("\n");
     let returns = options
         .returns
-        .map(|label| quote! { Some(#label.to_string()) })
+        .map(|expr| quote! { Some(#expr) })
         .unwrap_or(quote! { None });
 
     // The entry point closes over nothing: arity check, unpack, then the

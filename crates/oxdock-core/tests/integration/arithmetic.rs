@@ -12,8 +12,10 @@ fn guard_root(temp: &GuardedTempDir) -> GuardedPath {
 fn run_script(root: &GuardedPath, script: &str) -> Result<(), anyhow::Error> {
     // File-local scripts call `STD` builtins; the import is fixture,
     // not subject: `IMPORT` semantics are covered in `import.rs`.
-    let steps =
-        oxdock_core::parse_script(&format!("IMPORT [STD]\n{script}")).expect("parse script");
+    let steps = oxdock_core::parse_script(&indoc::formatdoc! {r#"
+        IMPORT [STD]
+        {script}"#})
+    .expect("parse script");
     run_steps_with_context_result_with_io(root, root, &steps, ExecIo::new()).map(|_| ())
 }
 
@@ -162,7 +164,10 @@ fn div_zero_and_overflow_fail() {
             "arithmetic error: integer overflow or division by zero",
         ),
         (
-            "LET $a: INT = 5\nLET $x: INT = $a / 0\n",
+            indoc! {r#"
+                LET $a: INT = 5
+                LET $x: INT = $a / 0
+            "#},
             "arithmetic error: integer overflow or division by zero",
         ),
         (
@@ -170,7 +175,10 @@ fn div_zero_and_overflow_fail() {
             "arithmetic error: float division by zero",
         ),
         (
-            "LET $a: INT = 9223372036854775807\nLET $x: INT = $a + 1\n",
+            indoc! {r#"
+                LET $a: INT = 9223372036854775807
+                LET $x: INT = $a + 1
+            "#},
             "arithmetic error: integer overflow or division by zero",
         ),
     ] {
@@ -191,19 +199,32 @@ fn every_int_op_overflows_loudly() {
     let root = guard_root(&temp);
     for (script, needle) in [
         (
-            "LET $m: INT = -9223372036854775808\nLET $x: INT = $m - 1\n",
+            indoc! {r#"
+                LET $m: INT = -9223372036854775808
+                LET $x: INT = $m - 1
+            "#},
             "arithmetic error: integer overflow or division by zero",
         ),
         (
-            "LET $a: INT = 9223372036854775807\nLET $x: INT = $a * 2\n",
+            indoc! {r#"
+                LET $a: INT = 9223372036854775807
+                LET $x: INT = $a * 2
+            "#},
             "arithmetic error: integer overflow or division by zero",
         ),
         (
-            "LET $m: INT = -9223372036854775808\nLET $n: INT = 0 - 1\nLET $x: INT = $m / $n\n",
+            indoc! {r#"
+                LET $m: INT = -9223372036854775808
+                LET $n: INT = 0 - 1
+                LET $x: INT = $m / $n
+            "#},
             "arithmetic error: integer overflow or division by zero",
         ),
         (
-            "LET $m: INT = -9223372036854775808\nLET $x: INT = -$m\n",
+            indoc! {r#"
+                LET $m: INT = -9223372036854775808
+                LET $x: INT = -$m
+            "#},
             "arithmetic error: integer overflow",
         ),
     ] {
@@ -222,7 +243,10 @@ fn float_overflow_to_infinity_fails() {
     // storing a non-finite value.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    let script = "LET $big: FLOAT = FLOAT(\"1e308\")\nLET $x: FLOAT = $big * 10.0\n";
+    let script = indoc! {r#"
+        LET $big: FLOAT = FLOAT("1e308")
+        LET $x: FLOAT = $big * 10.0
+    "#};
     let err = run_script(&root, script).expect_err("float overflow must fail");
     assert!(
         err.to_string()

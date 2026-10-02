@@ -1,0 +1,20 @@
+{
+  "person": {
+    "name": "Mary Example",
+    "title": "Systems Engineer",
+    "email": "mary@example.com",
+    "site": "https://example.com"
+  },
+  "experience": {
+    "Acme Corp": "Systems Engineer, 2020 to 2026",
+    "Beta LLC": "Junior Engineer, 2018 to 2020"
+  },
+  "education": {
+    "State University": "BSc Computer Science, 2018"
+  },
+  "skills": {
+    "Rust": "expert",
+    "Markdown": "advanced",
+    "OxDock": "working"
+  }
+}

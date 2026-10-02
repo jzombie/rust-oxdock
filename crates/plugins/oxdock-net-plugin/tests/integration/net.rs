@@ -789,6 +789,104 @@ fn offline_connect_bails_before_sockets() {
 }
 
 #[test]
+fn fetch_cleartext_to_real_host_refuses_without_dialing() {
+    // The scheme gate fires before DNS or dial: no sockets open, so this
+    // runs under Miri.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD, NET]
+        LET $body: STRING = NET_FETCH("http://example.com/doc.json")
+    "#};
+    let err = run_script(&root, script).expect_err("cleartext must fail");
+    assert!(err.to_string().contains("cleartext"), "{err:#}");
+}
+
+#[test]
+fn fetch_in_placeholder_stays_unknown() {
+    // Stateful entries never reach the pure table behind `{{ }}`: the
+    // placeholder fails listing the known pure names, and `NET_FETCH`
+    // is not among them. No sockets open, so this runs under Miri.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD, NET]
+        WRITE tmpl.txt "body \{{ NET::NET_FETCH(\"http://127.0.0.1:9/x\") }}"
+        LET $buf: PIPE
+        WITH_IO [stdout=$buf] EXPAND tmpl.txt
+    "#};
+    let err = run_script(&root, script).expect_err("placeholder fetch must fail");
+    assert!(
+        err.to_string().contains("unknown placeholder function"),
+        "{err:#}"
+    );
+    let known = err
+        .to_string()
+        .split("known functions:")
+        .nth(1)
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        !known.contains("NET_FETCH"),
+        "pure listing must not offer NET_FETCH: {err:#}"
+    );
+}
+
+/// Serve one canned HTTP/1.1 response on loopback, then exit. Returns
+/// the bound address for `NET_FETCH` URLs.
+fn serve_http_once(body: Vec<u8>) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("timeout");
+        let mut seen = Vec::new();
+        let mut byte = [0u8; 1];
+        while seen.len() < 65536 {
+            match stream.read(&mut byte) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    seen.push(byte[0]);
+                    if seen.ends_with(b"\r\n\r\n") {
+                        break;
+                    }
+                }
+            }
+        }
+        let head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(head.as_bytes()).expect("head");
+        stream.write_all(&body).expect("body");
+    });
+    addr.to_string()
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "needs loopback TCP plus threads")]
+fn fetch_feeds_parse_json() {
+    // The stream shape end to end: bytes off the wire flow into the
+    // pure parser with no bespoke conversion. Ephemeral bind, so no
+    // fixed-port coordination.
+    let addr = serve_http_once(br#"{"name": "loopback"}"#.to_vec());
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = format!(
+        indoc! {r#"
+            IMPORT [STD, NET]
+            LET $body: STRING = NET_FETCH("http://{addr}/doc.json")
+            LET $doc: MAP = PARSE_JSON($body)
+            ASSERT_EQ $doc.name "loopback"
+        "#},
+        addr = addr
+    );
+    run_script(&root, &script).expect("fetch into parse runs");
+}
+
+#[test]
 #[cfg_attr(miri, ignore = "needs loopback TCP")]
 fn port_and_addr_observe_prebound_mapping() {
     // The -p path: a pre-bound ephemeral outer socket is observable

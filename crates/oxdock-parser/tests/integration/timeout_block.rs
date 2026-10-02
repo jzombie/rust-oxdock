@@ -122,7 +122,10 @@ fn timeout_display_round_trips() {
         "TIMEOUT 30s AWAIT $task",
         // NOTE: inputs use Display-stable quoting (quote_arg quotes dotted
         // paths), so the round-trip comparison is exact.
-        "TIMEOUT 2m {\nWRITE \"a.txt\" x\nECHO done\n}",
+        indoc! {r#"TIMEOUT 2m {
+        WRITE "a.txt" x
+        ECHO done
+        }"#},
     ] {
         let steps = parse_script(script, mock_lower).expect("parse");
         let rendered: Vec<String> = steps.iter().map(|s| s.to_string()).collect();

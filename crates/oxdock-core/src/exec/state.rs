@@ -5,7 +5,7 @@ use std::sync::{Arc, Condvar, Mutex};
 
 use anyhow::Result;
 use oxdock_fs::{CargoScratch, GuardedPath, WorkspaceFs};
-use oxdock_parser::{Step, TypeDescriptor, Value};
+use oxdock_parser::{Field, Step, TypeDescriptor, TypeTag, Value};
 use oxdock_process::{BackgroundHandle, CommandContext, ProcessManager};
 
 use super::io::{ExactCapture, ExecIo, SlidingWindow};
@@ -44,11 +44,16 @@ pub struct ExecState<P: ProcessManager> {
     /// Variable scopes for $variable bindings (FOR loops, LET assignments).
     /// Innermost scope is last. Variables are looked up from innermost to outermost.
     /// Each entry carries its declared type name alongside the value.
-    pub(super) var_scopes: Vec<HashMap<String, (String, Value)>>,
+    pub(super) var_scopes: Vec<HashMap<String, (TypeTag, Value)>>,
     /// Name directory for type resolution: startup descriptors plus the
     /// run's host descriptors. Words carry their own vtables, so this map
     /// serves only name queries (declarations, `TYPES()`, `TYPE_DESCRIBE`).
     pub(super) types: HashMap<String, &'static TypeDescriptor>,
+    /// Named record schemas for shaped MAP bindings: schema name to its
+    /// field table. Populated from host modules alongside descriptors, so
+    /// `LET $s: SSH_SESSION_INFO` resolves exactly when the owning module
+    /// is registered. Impossible to reference an unregistered schema.
+    pub(super) record_schemas: HashMap<String, &'static [Field]>,
     /// Cancellation token for background thread teardown.
     #[allow(dead_code)]
     pub(super) cancel_token: Arc<AtomicBool>,
@@ -276,6 +281,7 @@ impl<P: ProcessManager> ExecState<P> {
             cancellable: self.cancellable,
             functions: self.functions.clone(),
             types: self.types.clone(),
+            record_schemas: self.record_schemas.clone(),
             call_depth: self.call_depth,
             task_id: self.task_id,
             // Forks start with an empty manifest: async children record
@@ -350,7 +356,7 @@ impl<P: ProcessManager> ExecState<P> {
         self.pop_var_scope();
         Ok(())
     }
-    pub(super) fn declare_var(&mut self, key: String, kind: String, value: Value) -> Result<()> {
+    pub(super) fn declare_var(&mut self, key: String, kind: TypeTag, value: Value) -> Result<()> {
         if self
             .var_scopes
             .last()
@@ -363,7 +369,7 @@ impl<P: ProcessManager> ExecState<P> {
                 key
             );
         }
-        let coerced = super::args::coerce_value(value, &kind, &*self)?;
+        let coerced = super::args::coerce_value(value, &kind)?;
         let scope = self
             .var_scopes
             .last_mut()
@@ -377,13 +383,13 @@ impl<P: ProcessManager> ExecState<P> {
             .var_scopes
             .iter()
             .rev()
-            .find_map(|s| s.get(key).map(|(k, _)| k.clone()))
+            .find_map(|s| s.get(key).map(|(k, _)| *k))
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "undeclared variable ${key}: declare it first with LET ${key}: TYPE = ..."
                 )
             })?;
-        let coerced = super::args::coerce_value(value, &kind, &*self)?;
+        let coerced = super::args::coerce_value(value, &kind)?;
         for scope in self.var_scopes.iter_mut().rev() {
             if let Some(slot) = scope.get_mut(key) {
                 slot.1 = coerced;
@@ -402,14 +408,14 @@ impl<P: ProcessManager> ExecState<P> {
             .var_scopes
             .iter()
             .rev()
-            .find_map(|s| s.get(key).map(|(k, _)| k.clone()))
+            .find_map(|s| s.get(key).map(|(k, _)| *k))
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "undeclared variable ${key}: declare it first with LET ${key}: LIST = ..."
                 )
             })?;
-        if kind != "LIST" {
-            anyhow::bail!("LIST_APPEND ${key}: variable is {kind}, not LIST");
+        if !matches!(kind, TypeTag::List) {
+            anyhow::bail!("LIST_APPEND ${key}: variable is {}, not LIST", kind.name());
         }
         for scope in self.var_scopes.iter_mut().rev() {
             if let Some(slot) = scope.get_mut(key) {
@@ -433,7 +439,7 @@ impl<P: ProcessManager> ExecState<P> {
         None
     }
 
-    pub(super) fn get_var_typed(&self, key: &str) -> Option<(String, Value)> {
+    pub(super) fn get_var_typed(&self, key: &str) -> Option<(TypeTag, Value)> {
         for scope in self.var_scopes.iter().rev() {
             if let Some(entry) = scope.get(key) {
                 return Some(entry.clone());

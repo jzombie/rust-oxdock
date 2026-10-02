@@ -127,15 +127,19 @@ fn parser_single_dollar_is_variable_not_key_path() {
 
 #[test]
 fn parser_load_toml_in_let() {
-    let steps =
-        oxdock_core::parse_script("IMPORT [STD]\nLET $d: MAP = LOAD_TOML(\"x.toml\")").unwrap();
+    let steps = oxdock_core::parse_script(indoc! {r#"
+        IMPORT [STD]
+        LET $d: MAP = LOAD_TOML("x.toml")"#})
+    .unwrap();
     assert_eq!(steps.len(), 1);
 }
 
 #[test]
 fn parser_load_json_in_let() {
-    let steps =
-        oxdock_core::parse_script("IMPORT [STD]\nLET $d: MAP = LOAD_JSON(\"x.json\")").unwrap();
+    let steps = oxdock_core::parse_script(indoc! {r#"
+        IMPORT [STD]
+        LET $d: MAP = LOAD_JSON("x.json")"#})
+    .unwrap();
     assert_eq!(steps.len(), 1);
 }
 
@@ -147,7 +151,15 @@ fn parser_load_json_in_let() {
 fn load_toml_flat_keys() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
-    write_file(&root, "t.toml", b"a = \"1\"\nb = \"2\"\n");
+    write_file(
+        &root,
+        "t.toml",
+        indoc! {r#"
+        a = "1"
+        b = "2"
+    "#}
+        .as_bytes(),
+    );
 
     let scope = run_script_with_scope(
         &root,
@@ -166,7 +178,15 @@ fn load_toml_flat_keys() {
 fn load_toml_nested_tables() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
-    write_file(&root, "t.toml", b"[a]\nb = \"deep\"\n");
+    write_file(
+        &root,
+        "t.toml",
+        indoc! {r#"
+        [a]
+        b = "deep"
+    "#}
+        .as_bytes(),
+    );
 
     let scope = run_script_with_scope(
         &root,
@@ -404,7 +424,15 @@ fn key_path_resolves_top_level_field() {
 fn key_path_resolves_nested_field() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
-    write_file(&root, "t.toml", b"[a]\nb = \"nested\"\n");
+    write_file(
+        &root,
+        "t.toml",
+        indoc! {r#"
+        [a]
+        b = "nested"
+    "#}
+        .as_bytes(),
+    );
 
     let scope = run_script_with_scope(
         &root,
@@ -421,7 +449,16 @@ fn key_path_resolves_nested_field() {
 fn key_path_deeply_nested() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
-    write_file(&root, "t.toml", b"[a]\n[a.b]\nc = \"deep\"\n");
+    write_file(
+        &root,
+        "t.toml",
+        indoc! {r#"
+        [a]
+        [a.b]
+        c = "deep"
+    "#}
+        .as_bytes(),
+    );
 
     let scope = run_script_with_scope(
         &root,
@@ -550,7 +587,15 @@ fn key_path_with_underscore_key() {
 fn missing_key_in_string_interpolation_does_not_dump_parent_map() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
-    write_file(&root, "t.toml", b"name = \"oxdock\"\nversion = \"1.0\"\n");
+    write_file(
+        &root,
+        "t.toml",
+        indoc! {r#"
+        name = "oxdock"
+        version = "1.0"
+    "#}
+        .as_bytes(),
+    );
 
     // $pkg.missing should emit literal "$pkg", not the stringified map
     run_script(
@@ -569,7 +614,15 @@ fn missing_key_in_string_interpolation_does_not_dump_parent_map() {
 fn missing_key_after_successful_traversal_does_not_dump() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
-    write_file(&root, "t.toml", b"[package]\nname = \"test\"\n");
+    write_file(
+        &root,
+        "t.toml",
+        indoc! {r#"
+        [package]
+        name = "test"
+    "#}
+        .as_bytes(),
+    );
 
     // $d.package works, but $d.package.nope fails : should error
     let err = run_script(
@@ -781,7 +834,15 @@ fn expand_resolves_bare_key_path_tag() {
 fn expand_resolves_nested_key_path_tag() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
-    write_file(&root, "t.toml", b"[pkg]\nname = \"ox\"\n");
+    write_file(
+        &root,
+        "t.toml",
+        indoc! {r#"
+        [pkg]
+        name = "ox"
+    "#}
+        .as_bytes(),
+    );
     write_file(&root, "tmpl.txt", b"{{ $d.pkg.name }}");
 
     let out = run_script_captured_pipe(
@@ -932,7 +993,15 @@ fn for_loop_body_has_loop_var() {
 fn load_toml_then_use_in_template() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
-    write_file(&root, "crate.toml", b"[package]\nname = \"my-crate\"\n");
+    write_file(
+        &root,
+        "crate.toml",
+        indoc! {r#"
+        [package]
+        name = "my-crate"
+    "#}
+        .as_bytes(),
+    );
     write_file(&root, "header.txt", b"# {{ $d.package.name }}");
 
     run_script(

@@ -4,8 +4,8 @@ use std::sync::Arc;
 use anyhow::Result;
 use oxdock_func_macro::oxdock_func;
 use oxdock_parser::{
-    KEYWORD_INSPECT, SCRIPT_MODULE_NAME, STD_MODULE_NAME, Step, Value, base_name, qualify,
-    split_qualified,
+    Field, KEYWORD_INSPECT, SCRIPT_MODULE_NAME, STD_MODULE_NAME, Step, TypeTag, Value, base_name,
+    qualify, split_qualified,
 };
 use oxdock_process::{CommandStdin, DefaultProcessManager, ProcessManager};
 
@@ -40,7 +40,7 @@ impl FuncKind {
 #[derive(Debug, Clone)]
 pub struct FuncParam {
     pub name: String,
-    pub param_type: Option<String>,
+    pub param_type: Option<TypeTag>,
 }
 
 /// Introspectable metadata for one function. Single source for
@@ -57,7 +57,7 @@ pub struct FuncMeta {
     pub module: String,
     pub kind: FuncKind,
     pub params: Option<Vec<FuncParam>>,
-    pub returns: Option<String>,
+    pub returns: Option<TypeTag>,
     pub rpn: bool,
     pub summary: &'static str,
     pub docs: &'static str,
@@ -128,9 +128,11 @@ impl<P: ProcessManager> HostRegistration<P> {
 }
 
 /// One user-defined function body (`FUNC NAME($p: TYPE, ...) { ... }`).
+/// Param types resolve to tags at definition time, where the type
+/// directory is in scope; the registry never holds raw type strings.
 #[derive(Debug, Clone)]
 pub(super) struct FuncDefData {
-    pub(super) params: Vec<(String, String)>,
+    pub(super) params: Vec<(String, TypeTag)>,
     pub(super) body: Vec<Step>,
 }
 
@@ -194,15 +196,22 @@ impl<P: ProcessManager> Clone for ScopeFrame<P> {
 /// scope exit, shadowing an outer definition restores it); native entries
 /// persist for the run. Shared across `fork()` via clone; the entry maps
 /// clone while scope frames stay per state.
+/// Module to function-name table of pure entries, shared by reference.
+/// Nested so placeholder dispatch looks up `table[module][func]` with
+/// zero allocation; rebuilt only when native entries register.
+pub type PureTable = HashMap<String, HashMap<String, PureFn>>;
+
 pub struct FunctionRegistry<P: ProcessManager> {
     entries: HashMap<String, FuncEntry<P>>,
     scopes: Vec<ScopeFrame<P>>,
+    pure_shared: Arc<PureTable>,
 }
 
 impl<P: ProcessManager> FunctionRegistry<P> {
     pub(super) fn with_builtins() -> Self {
         let mut reg = Self {
             entries: HashMap::new(),
+            pure_shared: Arc::new(HashMap::new()),
             scopes: vec![ScopeFrame {
                 defined: HashSet::new(),
                 shadowed: Vec::new(),
@@ -237,7 +246,13 @@ impl<P: ProcessManager> FunctionRegistry<P> {
             Glob::registration(),
             LoadToml::registration(),
             LoadJson::registration(),
+            ParseToml::registration(),
+            ParseJson::registration(),
             PathType::registration(),
+            HasKey::registration(),
+            MapSet::registration(),
+            ToJson::registration(),
+            TypeOf::registration(),
             Functions::registration(),
             Describe::registration(),
             IsTerminal::registration(),
@@ -261,6 +276,26 @@ impl<P: ProcessManager> FunctionRegistry<P> {
 
     fn insert_native(&mut self, name: String, meta: FuncMeta, body: FuncBody<P>) {
         self.entries.insert(name, FuncEntry { meta, body });
+        self.rebuild_pure_shared();
+    }
+
+    /// Rebuild the shared pure table. Runs only on native insertion:
+    /// script definitions insert `Script` bodies directly and never
+    /// affect the pure set, so this stays correct between rebuilds.
+    fn rebuild_pure_shared(&mut self) {
+        let mut table: PureTable = HashMap::new();
+        for (name, entry) in &self.entries {
+            let FuncBody::Pure(ref func) = entry.body else {
+                continue;
+            };
+            if let Some((module, base)) = split_qualified(name) {
+                table
+                    .entry(module.to_string())
+                    .or_default()
+                    .insert(base.to_string(), Arc::clone(func));
+            }
+        }
+        self.pure_shared = Arc::new(table);
     }
 
     /// Insert under `MODULE::BASE`, stamping provenance on the metadata.
@@ -314,7 +349,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
     pub(super) fn define_script(
         &mut self,
         name: &str,
-        params: &[(String, String)],
+        params: &[(String, TypeTag)],
         body: &[Step],
     ) -> Result<()> {
         let qualified = qualify(SCRIPT_MODULE_NAME, name);
@@ -350,7 +385,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
                             .iter()
                             .map(|(name, param_type)| FuncParam {
                                 name: name.clone(),
-                                param_type: Some(param_type.clone()),
+                                param_type: Some(*param_type),
                             })
                             .collect(),
                     ),
@@ -416,6 +451,19 @@ impl<P: ProcessManager> FunctionRegistry<P> {
         }
     }
 
+    /// Shared snapshot of every pure entry, nested by module and base
+    /// name. Cloning the `Arc` is refcount-only: placeholder dispatch
+    /// borrows this per expansion with no map copies.
+    pub(super) fn pure_shared(&self) -> Arc<PureTable> {
+        Arc::clone(&self.pure_shared)
+    }
+
+    /// Every entry's metadata, scripts included, sorted by name. Backs
+    /// run-start type tag validation.
+    pub(super) fn all_metas(&self) -> Vec<FuncMeta> {
+        self.entries_metas()
+    }
+
     /// Clone the ctx fn for `name` (ending the registry borrow) so callers
     /// can invoke it with `&mut StepCtx` without double-borrowing state.
     fn clone_ctx_fn(&self, name: &str) -> Option<NativeFn<P>> {
@@ -458,6 +506,7 @@ impl<P: ProcessManager> Clone for FunctionRegistry<P> {
         Self {
             entries: self.entries.clone(),
             scopes: self.scopes.clone(),
+            pure_shared: Arc::clone(&self.pure_shared),
         }
     }
 }
@@ -510,7 +559,7 @@ pub fn std_module_table() -> oxdock_parser::ModuleTable {
 ///
 /// Trims ASCII whitespace and parses i64. Passes Int through; Float only
 /// when integral and finite.
-#[oxdock_func(pure, returns = "INT")]
+#[oxdock_func(pure, returns = TypeTag::Int)]
 fn int(val: Value) -> Result<Value> {
     super::args::int_from_value(val)
 }
@@ -518,7 +567,7 @@ fn int(val: Value) -> Result<Value> {
 /// Convert a value to FLOAT.
 ///
 /// Parses f64 (accepts int strings), bails on non-finite or non-numeric.
-#[oxdock_func(pure, returns = "FLOAT")]
+#[oxdock_func(pure, returns = TypeTag::Float)]
 fn float(val: Value) -> Result<Value> {
     super::args::float_from_value(val)
 }
@@ -526,7 +575,7 @@ fn float(val: Value) -> Result<Value> {
 /// List workspace paths matching a glob pattern.
 ///
 /// Sorted, root-relative LIST; empty on no match or `..` escape.
-#[oxdock_func(rpn, returns = "LIST")]
+#[oxdock_func(rpn, returns = TypeTag::List)]
 fn glob<P: ProcessManager>(cx: &mut StepCtx<P>, pattern: String) -> Result<Value> {
     super::args::glob_from_value(&[Value::string(pattern)], cx)
 }
@@ -534,7 +583,7 @@ fn glob<P: ProcessManager>(cx: &mut StepCtx<P>, pattern: String) -> Result<Value
 /// Load and parse a TOML file.
 ///
 /// Reads a workspace file and parses TOML into a DSL value.
-#[oxdock_func(rpn, returns = "MAP")]
+#[oxdock_func(rpn, returns = TypeTag::Map)]
 fn load_toml<P: ProcessManager>(cx: &mut StepCtx<P>, path: String) -> Result<Value> {
     super::args::load_toml_from_value(&[Value::string(path)], cx)
 }
@@ -542,25 +591,85 @@ fn load_toml<P: ProcessManager>(cx: &mut StepCtx<P>, path: String) -> Result<Val
 /// Load and parse a JSON file.
 ///
 /// Reads a workspace file and parses JSON into a DSL value.
-#[oxdock_func(rpn, returns = "MAP")]
+#[oxdock_func(rpn, returns = TypeTag::Map)]
 fn load_json<P: ProcessManager>(cx: &mut StepCtx<P>, path: String) -> Result<Value> {
     super::args::load_json_from_value(&[Value::string(path)], cx)
+}
+
+/// Parse TOML text already held in memory.
+///
+/// Uses the same conversion as file loading, so fetch bodies, file
+/// contents, and captured text share one JSON/TOML shape.
+#[oxdock_func(pure, returns = TypeTag::Map)]
+fn parse_toml(text: String) -> Result<Value> {
+    super::args::parse_toml_from_value(Value::string(text))
+}
+
+/// Parse JSON text already held in memory.
+///
+/// Uses the same conversion as file loading, so fetch bodies, file
+/// contents, and captured text share one JSON value shape. No `returns`
+/// tag by design: a top-level array or scalar parses to `LIST` or a
+/// scalar word, so a `MAP` tag would lie the way `LOAD_JSON`'s does.
+/// `LET` coercion still checks the actual value at assignment.
+#[oxdock_func(pure)]
+fn parse_json(text: String) -> Result<Value> {
+    super::args::parse_json_from_value(Value::string(text))
 }
 
 /// Describe a filesystem entry.
 ///
 /// Reports file, dir, symlink (no-follow), or absent. AST-only by design;
 /// there is no RPN arm for filesystem IO.
-#[oxdock_func(returns = "STRING")]
+#[oxdock_func(returns = TypeTag::String)]
 fn path_type<P: ProcessManager>(cx: &mut StepCtx<P>, path: String) -> Result<Value> {
     super::args::path_type_from_value(&[Value::string(path)], cx)
+}
+
+/// Report whether a map holds a key.
+///
+/// Pure MAP probe so scripts can branch on optional fields without
+/// tripping the strict missing-key error.
+#[oxdock_func(pure, returns = TypeTag::Bool)]
+fn has_key(map: Value, key: String) -> Result<Value> {
+    super::args::has_key_from_value(map, &key)
+}
+
+/// Insert one key into a map.
+///
+/// Fails on duplicates so two entries sharing a key fail the run
+/// instead of silently shadowing each other.
+#[oxdock_func(pure, returns = TypeTag::Map)]
+fn map_set(map: Value, key: String, value: Value) -> Result<Value> {
+    super::args::map_set_from_value(map, key, value)
+}
+
+/// Encode a script value as JSON with one trailing newline.
+///
+/// Maps stay sorted; only template-safe shapes (STRING, INT, FLOAT,
+/// BOOL, LIST, MAP) survive, anything else fails here instead of
+/// rendering as a silent empty.
+#[oxdock_func(pure, returns = TypeTag::String)]
+fn to_json(value: Value) -> Result<Value> {
+    super::args::to_json_from_value(value)
+}
+
+/// Name the word a value holds, for data-driven branching.
+///
+/// Returns the registered type word (`STRING`, `INT`, `FLOAT`, `BOOL`,
+/// `LIST`, `MAP`, plus handle words like `PIPE`): the same name the
+/// value prints in arity and coercion errors, so scripts can branch
+/// on config shapes (a path string or a path list) without failing.
+#[oxdock_func(pure, returns = TypeTag::String)]
+fn type_of(value: Value) -> Result<Value> {
+    super::args::type_of_from_value(value)
 }
 
 /// List all visible function names.
 ///
 /// Sorted LIST of qualified `MODULE::NAME` entries: DSL-defined plus native
 /// plus host-registered names.
-#[oxdock_func(returns = "LIST")]
+#[oxdock_func(returns = TypeTag::List)]
 fn functions<P: ProcessManager>(cx: &mut StepCtx<P>) -> Result<Value> {
     let mut names: Vec<String> = cx
         .state
@@ -579,7 +688,7 @@ fn functions<P: ProcessManager>(cx: &mut StepCtx<P>) -> Result<Value> {
 /// Bare names fail closed: `DESCRIBE` requires the qualified form (except
 /// `INSPECT`, which is syntax rather than a registry entry). Errors on
 /// unknown function.
-#[oxdock_func(returns = "MAP")]
+#[oxdock_func(returns = TypeTag::Map)]
 fn describe<P: ProcessManager>(cx: &mut StepCtx<P>, name: String) -> Result<Value> {
     if split_qualified(&name).is_none() && name != KEYWORD_INSPECT {
         anyhow::bail!(
@@ -596,7 +705,7 @@ fn describe<P: ProcessManager>(cx: &mut StepCtx<P>, name: String) -> Result<Valu
 /// Sorted LIST of startup plus host-registered type descriptors. Reads the
 /// run's name directory, so it runs on the AST path like the other
 /// introspection functions.
-#[oxdock_func(returns = "LIST")]
+#[oxdock_func(returns = TypeTag::List)]
 fn types<P: ProcessManager>(cx: &mut StepCtx<P>) -> Result<Value> {
     Ok(Value::list(
         cx.state
@@ -611,7 +720,7 @@ fn types<P: ProcessManager>(cx: &mut StepCtx<P>) -> Result<Value> {
 ///
 /// Returns a MAP with name, summary, and docs. Errors on unknown type.
 /// Reads the run's name directory, so it runs on the AST path.
-#[oxdock_func(returns = "MAP")]
+#[oxdock_func(returns = TypeTag::Map)]
 fn type_describe<P: ProcessManager>(cx: &mut StepCtx<P>, name: String) -> Result<Value> {
     cx.state
         .describe_type(&name)
@@ -646,7 +755,7 @@ fn type_describe<P: ProcessManager>(cx: &mut StepCtx<P>, name: String) -> Result
 /// still answers the session question via the process check. The name
 /// matches exactly (no case folding): anything else bails. AST-only:
 /// reads the step context like the other introspection functions.
-#[oxdock_func(returns = "BOOL")]
+#[oxdock_func(returns = TypeTag::Bool)]
 fn is_terminal<P: ProcessManager>(cx: &mut StepCtx<P>, stream: String) -> Result<Value> {
     use std::io::IsTerminal;
     let terminal = match stream.as_str() {
@@ -729,7 +838,7 @@ fn is_terminal<P: ProcessManager>(cx: &mut StepCtx<P>, stream: String) -> Result
 /// ```text
 /// LET $sem: SEMAPHORE = SEMAPHORE_NEW(10)
 /// ```
-#[oxdock_func(returns = "SEMAPHORE")]
+#[oxdock_func(returns = TypeTag::Semaphore)]
 fn semaphore_new<P: ProcessManager>(cx: &mut StepCtx<P>, max: i64) -> Result<Value> {
     let _ = cx;
     if max <= 0 {
@@ -758,7 +867,7 @@ fn semaphore_new<P: ProcessManager>(cx: &mut StepCtx<P>, max: i64) -> Result<Val
 ///   ASYNC { session work }
 /// }
 /// ```
-#[oxdock_func(returns = "MAP")]
+#[oxdock_func(returns = TypeTag::Map)]
 fn semaphore_try_acquire<P: ProcessManager>(cx: &mut StepCtx<P>, sem: Value) -> Result<Value> {
     let _ = cx;
     let Some(sem) = sem.as_semaphore() else {
@@ -786,7 +895,7 @@ fn semaphore_try_acquire<P: ProcessManager>(cx: &mut StepCtx<P>, sem: Value) -> 
 /// ```text
 /// LET $free: INT = SEMAPHORE_AVAILABLE($sem)
 /// ```
-#[oxdock_func(pure, returns = "INT")]
+#[oxdock_func(pure, returns = TypeTag::Int)]
 fn semaphore_available(sem: Value) -> Result<Value> {
     let Some(sem) = sem.as_semaphore() else {
         return Err(anyhow::anyhow!(
@@ -822,7 +931,7 @@ fn semaphore_available(sem: Value) -> Result<Value> {
 /// }
 /// ASSERT_EQ $n 2
 /// ```
-#[oxdock_func(returns = "BOOL")]
+#[oxdock_func(returns = TypeTag::Bool)]
 fn eof<P: ProcessManager>(cx: &mut StepCtx<P>, pipe: Value) -> Result<Value> {
     let Some(handle) = pipe.as_pipe_handle() else {
         return Err(anyhow::anyhow!(
@@ -851,7 +960,12 @@ fn meta_to_value(meta: &FuncMeta) -> Value {
                     entry.insert("name".to_string(), Value::string(p.name.clone()));
                     entry.insert(
                         "param_type".to_string(),
-                        Value::string(p.param_type.clone().unwrap_or_default()),
+                        Value::string(
+                            p.param_type
+                                .as_ref()
+                                .map(|tag| tag.name().to_string())
+                                .unwrap_or_default(),
+                        ),
                     );
                     Value::map(entry)
                 })
@@ -862,7 +976,12 @@ fn meta_to_value(meta: &FuncMeta) -> Value {
     map.insert("params".to_string(), params);
     map.insert(
         "returns".to_string(),
-        Value::string(meta.returns.clone().unwrap_or_default()),
+        Value::string(
+            meta.returns
+                .as_ref()
+                .map(|tag| tag.name().to_string())
+                .unwrap_or_default(),
+        ),
     );
     map.insert("rpn".to_string(), Value::bool(meta.rpn));
     map.insert(
@@ -870,6 +989,15 @@ fn meta_to_value(meta: &FuncMeta) -> Value {
         Value::string(meta.summary.to_string()),
     );
     Value::map(map)
+}
+
+/// One named record schema: a shape host functions produce and scripts
+/// bind by name (`LET $s: SSH_SESSION_INFO`). Travels with its module
+/// so schemas register exactly when their producer does.
+#[derive(Debug, Clone, Copy)]
+pub struct RecordSchema {
+    pub name: &'static str,
+    pub fields: &'static [Field],
 }
 
 /// One host library: functions and types registered under a single module
@@ -880,6 +1008,7 @@ pub struct HostModule<P: ProcessManager> {
     pub name: String,
     pub funcs: Vec<HostRegistration<P>>,
     pub types: Vec<&'static TypeDescriptor>,
+    pub record_schemas: Vec<RecordSchema>,
 }
 
 impl<P: ProcessManager> ExecState<P> {
@@ -900,6 +1029,9 @@ impl<P: ProcessManager> ExecState<P> {
         for descriptor in module.types {
             self.register_type(descriptor);
         }
+        for schema in module.record_schemas {
+            self.register_record_schema(schema.name, schema.fields);
+        }
     }
 
     /// All visible functions: natives plus hosts plus current DSL definitions.
@@ -912,7 +1044,7 @@ impl<P: ProcessManager> ExecState<P> {
                 module: STD_MODULE_NAME.to_string(),
                 kind: FuncKind::HostCtx,
                 params: None,
-                returns: Some("MAP".to_string()),
+                returns: Some(TypeTag::Map),
                 rpn: false,
                 summary: "Inspect a variable binding.",
                 docs: "INSPECT($var): dedicated AST node taking a variable, not a value.",
@@ -934,7 +1066,7 @@ impl<P: ProcessManager> ExecState<P> {
                 module: STD_MODULE_NAME.to_string(),
                 kind: FuncKind::HostCtx,
                 params: None,
-                returns: Some("MAP".to_string()),
+                returns: Some(TypeTag::Map),
                 rpn: false,
                 summary: "Inspect a variable binding.",
                 docs: "INSPECT($var): dedicated AST node taking a variable, not a value.",
@@ -945,6 +1077,14 @@ impl<P: ProcessManager> ExecState<P> {
 
     pub(super) fn clone_native_pure(&self, name: &str) -> Option<PureFn> {
         self.functions.clone_pure_fn(name)
+    }
+
+    /// Shared snapshot of every registered pure function for
+    /// placeholder and host driven expansion. Public so host crates
+    /// resolve calls through the live registry instead of hardcoding
+    /// module or function names. Cloning the `Arc` never copies the map.
+    pub fn pure_function_table(&self) -> Arc<PureTable> {
+        self.functions.pure_shared()
     }
 
     pub(super) fn clone_native_ctx(&self, name: &str) -> Option<NativeFn<P>> {

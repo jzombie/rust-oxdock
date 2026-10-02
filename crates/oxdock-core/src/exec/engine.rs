@@ -67,7 +67,7 @@
 //! }
 //!
 //! /// Read an environment variable, defaulting to empty.
-//! #[oxdock_func(name = "ENV_OR", returns = "STRING")]
+//! #[oxdock_func(name = "ENV_OR", returns = TypeTag::String)]
 //! fn env_or<P: ::oxdock_core::ProcessManager>(
 //!     cx: &mut ::oxdock_core::StepCtx<P>,
 //!     key: String,

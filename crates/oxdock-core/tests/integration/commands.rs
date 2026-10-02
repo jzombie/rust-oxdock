@@ -1,4 +1,4 @@
-use indoc::indoc;
+use indoc::{formatdoc, indoc};
 use oxdock_core::{
     ExecIo, run_steps, run_steps_with_context, run_steps_with_context_result_with_io,
     run_steps_with_fs,
@@ -1247,7 +1247,12 @@ fn with_io_block_applies_defaults() {
     run_steps_with_context_result_with_io(&root, &root, &steps, ExecIo::new())
         .expect("execute WITH_IO block");
 
-    assert_eq!(read_trimmed(&root.join("out.txt").unwrap()), "alpha\nbeta");
+    assert_eq!(
+        read_trimmed(&root.join("out.txt").unwrap()),
+        indoc! {r#"
+            alpha
+            beta"#}
+    );
 }
 
 #[test]
@@ -1837,7 +1842,11 @@ fn assert_eq_accepts_matching_content() {
     let root = guard_root(&temp);
     run_script(
         &root,
-        "WRITE out.txt payload\nLET $b: STRING = READ out.txt\nASSERT_EQ $b \"payload\"\n",
+        indoc! {r#"
+            WRITE out.txt payload
+            LET $b: STRING = READ out.txt
+            ASSERT_EQ $b "payload"
+        "#},
     )
     .expect("matching content passes");
 }
@@ -1848,7 +1857,11 @@ fn assert_eq_rejects_content_mismatch() {
     let root = guard_root(&temp);
     let err = run_script(
         &root,
-        "WRITE out.txt actual\nLET $b: STRING = READ out.txt\nASSERT_EQ $b \"expected\"\n",
+        indoc! {r#"
+            WRITE out.txt actual
+            LET $b: STRING = READ out.txt
+            ASSERT_EQ $b "expected"
+        "#},
     )
     .expect_err("mismatch must fail");
     assert!(err.to_string().contains("mismatch"), "{err}");
@@ -1860,7 +1873,11 @@ fn assert_eq_path_type_reports_absent() {
     let root = guard_root(&temp);
     run_script(
         &root,
-        "IMPORT [STD]\nLET $t: STRING = PATH_TYPE(\"missing.txt\")\nASSERT_EQ $t \"absent\"\n",
+        indoc! {r#"
+            IMPORT [STD]
+            LET $t: STRING = PATH_TYPE("missing.txt")
+            ASSERT_EQ $t "absent"
+        "#},
     )
     .expect("absent path reports absent");
 }
@@ -1873,13 +1890,21 @@ fn assert_eq_hash_mode_matches_and_rejects() {
     let digest = "08135c1b6349b0e4f894c36221952f0de00e6b4d82f80895abf359755e77103c";
     run_script(
         &root,
-        &format!("WRITE payload.bin stable-content\nLET $b: STRING = READ payload.bin\nASSERT_EQ --hash {digest} $b\n"),
+        &formatdoc! {r#"
+            WRITE payload.bin stable-content
+            LET $b: STRING = READ payload.bin
+            ASSERT_EQ --hash {digest} $b
+        "#},
     )
     .expect("hash match passes");
 
     let err = run_script(
         &root,
-        "WRITE payload.bin stable-content\nLET $b: STRING = READ payload.bin\nASSERT_EQ --hash 1111111111111111111111111111111111111111111111111111111111111111 $b\n",
+        indoc! {r#"
+            WRITE payload.bin stable-content
+            LET $b: STRING = READ payload.bin
+            ASSERT_EQ --hash 1111111111111111111111111111111111111111111111111111111111111111 $b
+        "#},
     )
     .expect_err("hash mismatch must fail");
     assert!(err.to_string().contains("--hash mismatch"), "{err}");
@@ -1891,13 +1916,28 @@ fn assert_eq_path_type_covers_file_dir_absent() {
     let root = guard_root(&temp);
     run_script(
         &root,
-        "IMPORT [STD]\nMKDIR tree/deep\nWRITE file.txt x\nLET $d: STRING = PATH_TYPE(\"tree/deep\")\nLET $f: STRING = PATH_TYPE(\"file.txt\")\nLET $n: STRING = PATH_TYPE(\"nope.txt\")\nASSERT_EQ $d \"dir\"\nASSERT_EQ $f \"file\"\nASSERT_EQ $n \"absent\"\n",
+        indoc! {r#"
+            IMPORT [STD]
+            MKDIR tree/deep
+            WRITE file.txt x
+            LET $d: STRING = PATH_TYPE("tree/deep")
+            LET $f: STRING = PATH_TYPE("file.txt")
+            LET $n: STRING = PATH_TYPE("nope.txt")
+            ASSERT_EQ $d "dir"
+            ASSERT_EQ $f "file"
+            ASSERT_EQ $n "absent"
+        "#},
     )
     .expect("path type rows pass");
 
     let dir_err = run_script(
         &root,
-        "IMPORT [STD]\nWRITE file.txt x\nLET $t: STRING = PATH_TYPE(\"file.txt\")\nASSERT_EQ $t \"dir\"\n",
+        indoc! {r#"
+            IMPORT [STD]
+            WRITE file.txt x
+            LET $t: STRING = PATH_TYPE("file.txt")
+            ASSERT_EQ $t "dir"
+        "#},
     )
     .expect_err("file-as-dir must fail");
     assert!(dir_err.to_string().contains("mismatch"), "{dir_err}");
@@ -1909,7 +1949,10 @@ fn assert_contains_sees_interpreter_output_without_capture_sink() {
     let root = guard_root(&temp);
     run_script(
         &root,
-        "ECHO banner-line\nASSERT_CONTAINS stdout banner-line\n",
+        indoc! {r#"
+            ECHO banner-line
+            ASSERT_CONTAINS stdout banner-line
+        "#},
     )
     .expect("interpreter output is recorded even with no configured sink");
 }
@@ -1919,10 +1962,15 @@ fn assert_contains_sees_streamed_child_output() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     #[cfg(unix)]
-    let script = "RUN \"echo child-echo-line\"\nASSERT_CONTAINS stdout \"child-echo-line\"\n";
+    let script = indoc! {r#"
+        RUN "echo child-echo-line"
+        ASSERT_CONTAINS stdout "child-echo-line"
+    "#};
     #[cfg(windows)]
-    let script =
-        "RUN \"cmd /c echo child-echo-line\"\nASSERT_CONTAINS stdout \"child-echo-line\"\n";
+    let script = indoc! {r#"
+        RUN "cmd /c echo child-echo-line"
+        ASSERT_CONTAINS stdout "child-echo-line"
+    "#};
     run_script(&root, script).expect("child output is recorded");
 }
 
@@ -1932,7 +1980,10 @@ fn assert_contains_miss_reports_emitted_log() {
     let root = guard_root(&temp);
     let err = run_script(
         &root,
-        "ECHO present-line\nASSERT_CONTAINS stdout absent-line\n",
+        indoc! {r#"
+            ECHO present-line
+            ASSERT_CONTAINS stdout absent-line
+        "#},
     )
     .expect_err("miss must fail");
     assert!(
@@ -2109,7 +2160,11 @@ fn cancel_previously_awaited_task_fails() {
     let root = guard_root(&temp);
     let err = run_script(
         &root,
-        "LET $t: HANDLE = ASYNC ECHO hi\nAWAIT $t\nCANCEL $t\n",
+        indoc! {r#"
+            LET $t: HANDLE = ASYNC ECHO hi
+            AWAIT $t
+            CANCEL $t
+        "#},
     )
     .expect_err("CANCEL after AWAIT must fail");
     assert!(
@@ -2289,11 +2344,26 @@ fn semaphore_rejects_bad_construction_and_types() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     for script in [
-        "IMPORT [STD]\nLET $s: SEMAPHORE = SEMAPHORE_NEW(0)\n",
-        "IMPORT [STD]\nLET $s: SEMAPHORE = SEMAPHORE_NEW(-3)\n",
-        "IMPORT [STD]\nLET $m: MAP = SEMAPHORE_TRY_ACQUIRE(\"nope\")\n",
-        "IMPORT [STD]\nLET $f: INT = SEMAPHORE_AVAILABLE(42)\n",
-        "IMPORT [STD]\nLET $s: SEMAPHORE = \"nope\"\n",
+        indoc! {r#"
+            IMPORT [STD]
+            LET $s: SEMAPHORE = SEMAPHORE_NEW(0)
+        "#},
+        indoc! {r#"
+            IMPORT [STD]
+            LET $s: SEMAPHORE = SEMAPHORE_NEW(-3)
+        "#},
+        indoc! {r#"
+            IMPORT [STD]
+            LET $m: MAP = SEMAPHORE_TRY_ACQUIRE("nope")
+        "#},
+        indoc! {r#"
+            IMPORT [STD]
+            LET $f: INT = SEMAPHORE_AVAILABLE(42)
+        "#},
+        indoc! {r#"
+            IMPORT [STD]
+            LET $s: SEMAPHORE = "nope"
+        "#},
     ] {
         let err = run_script(&root, script).expect_err("bad semaphore use must fail");
         let msg = err.to_string();
@@ -2561,7 +2631,14 @@ fn await_list_rejects_non_handle_member() {
 fn await_scalar_non_handle_still_bails() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    let err = run_script(&root, "LET $n: INT = 1\nAWAIT $n\n").expect_err("scalar await must fail");
+    let err = run_script(
+        &root,
+        indoc! {r#"
+            LET $n: INT = 1
+            AWAIT $n
+        "#},
+    )
+    .expect_err("scalar await must fail");
     assert!(err.to_string().contains("is not a task handle"), "{err}");
 }
 
@@ -2623,8 +2700,14 @@ fn async_task_failure_preserves_error_chain() {
         direct_chain.contains("failed to open") && direct_chain.contains(leaf),
         "direct failure must carry a two-layer chain, got: {direct_chain}"
     );
-    let via_task = run_script(&root, "LET $t: HANDLE = ASYNC READ missing.txt\nAWAIT $t\n")
-        .expect_err("task failure must propagate");
+    let via_task = run_script(
+        &root,
+        indoc! {r#"
+            LET $t: HANDLE = ASYNC READ missing.txt
+            AWAIT $t
+        "#},
+    )
+    .expect_err("task failure must propagate");
     // The join re-emits the preserved error flattened into one message,
     // so every causal layer must appear inline (no `causes:` structure
     // survives, but no layer may go missing either).
@@ -2708,7 +2791,10 @@ fn append_concatenates_content() {
     let root = guard_root(&temp);
     run_script(
         &root,
-        "APPEND note.txt \"hello\"\nAPPEND note.txt \"world\"\n",
+        indoc! {r#"
+            APPEND note.txt "hello"
+            APPEND note.txt "world"
+        "#},
     )
     .expect("append passes");
     assert_eq!(read_trimmed(&root.join("note.txt").unwrap()), "helloworld");
@@ -2753,7 +2839,15 @@ fn for_loop_iterates_array() {
 fn if_statement_conditional() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    run_script(&root, "IF true {\n    WRITE result.txt \"yes\"\n}\n").expect("if true passes");
+    run_script(
+        &root,
+        indoc! {r#"
+            IF true {
+                WRITE result.txt "yes"
+            }
+        "#},
+    )
+    .expect("if true passes");
     assert_eq!(read_trimmed(&root.join("result.txt").unwrap()), "yes");
 }
 
@@ -2911,7 +3005,14 @@ fn mutation_converts_to_declared_type() {
         ASSERT_EQ $n 42
     "#};
     run_script(&root, script).expect("mutation converts");
-    run_script(&root, "LET $m: INT = 1\n$m = \"abc\"\n").expect_err("non-numeric string must fail");
+    run_script(
+        &root,
+        indoc! {r#"
+            LET $m: INT = 1
+            $m = "abc"
+        "#},
+    )
+    .expect_err("non-numeric string must fail");
 }
 
 #[test]
@@ -3615,7 +3716,15 @@ fn timeout_wraps_block_and_await() {
     let root = guard_root(&temp);
     run_script(
         &root,
-        "LET $task: HANDLE = ASYNC {\nECHO quick\n}\nTIMEOUT 30s {\nAWAIT $task\nWRITE joined.txt yes\n}\n",
+        indoc! {r#"
+            LET $task: HANDLE = ASYNC {
+                ECHO quick
+            }
+            TIMEOUT 30s {
+                AWAIT $task
+                WRITE joined.txt yes
+            }
+        "#},
     )
     .expect("bounded await must succeed");
     assert_eq!(read_trimmed(&root.join("joined.txt").unwrap()), "yes");
@@ -3671,7 +3780,14 @@ fn timeout_enforces_deadline_on_native_sleep() {
 fn sleep_completes_and_is_cancellable() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    run_script(&root, "SLEEP 50ms\nWRITE awake.txt yes\n").expect("short sleep must complete");
+    run_script(
+        &root,
+        indoc! {r#"
+            SLEEP 50ms
+            WRITE awake.txt yes
+        "#},
+    )
+    .expect("short sleep must complete");
     assert_eq!(read_trimmed(&root.join("awake.txt").unwrap()), "yes");
 }
 
@@ -3685,7 +3801,11 @@ fn sleep_accepts_variable_duration() {
     let root = guard_root(&temp);
     run_script(
         &root,
-        "LET $d: DURATION = \"50ms\"\nSLEEP $d\nWRITE awake.txt yes\n",
+        indoc! {r#"
+            LET $d: DURATION = "50ms"
+            SLEEP $d
+            WRITE awake.txt yes
+        "#},
     )
     .expect("variable sleep must complete");
     assert_eq!(read_trimmed(&root.join("awake.txt").unwrap()), "yes");
@@ -3708,7 +3828,14 @@ fn sleep_rejects_garbage_duration_at_lower() {
 fn exit_accepts_variable_code() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    let err = run_script(&root, "LET $c: INT = \"3\"\nEXIT $c\n").expect_err("exit must abort");
+    let err = run_script(
+        &root,
+        indoc! {r#"
+            LET $c: INT = "3"
+            EXIT $c
+        "#},
+    )
+    .expect_err("exit must abort");
     assert!(
         err.to_string().contains("EXIT requested with code 3"),
         "expected exit error, got: {err:#}"
@@ -3747,7 +3874,10 @@ fn timeout_accepts_variable_duration() {
     let root = guard_root(&temp);
     run_script(
         &root,
-        "LET $d: DURATION = \"50ms\"\nTIMEOUT $d WRITE done.txt yes\n",
+        indoc! {r#"
+            LET $d: DURATION = "50ms"
+            TIMEOUT $d WRITE done.txt yes
+        "#},
     )
     .expect("variable timeout must complete");
     assert_eq!(read_trimmed(&root.join("done.txt").unwrap()), "yes");

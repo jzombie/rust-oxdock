@@ -397,9 +397,17 @@ fn walk(
                                 // Reset so the next bracket group (if any) is recognized as a guard.
                                 *last_was_command = false;
                             } else {
-                                // Guard bracket (e.g., [#flag], [env:KEY])
+                                // Guard bracket (e.g., [bool:true], [env:KEY])
                                 // or second bracket group after a command.
-                                // Finalize previous line and start guard on a new line.
+                                // Finalize any previous line and render the
+                                // guard open/expr/close exactly like the
+                                // string grammar reads them (a guard_line may
+                                // span lines; it guards the next element).
+                                // But do NOT finalize after `]`: the grammar
+                                // joins a guard block's `]` to its `{` with
+                                // gap only, so the brace must attach to the
+                                // `]` line or the enclosing block misparses
+                                // (misreported at its opener).
                                 finalize_line(lines, line, capture_has_inner);
                                 push_fragment(line, &open.to_string(), gap_space);
                                 finalize_line(lines, line, capture_has_inner);
@@ -415,7 +423,6 @@ fn walk(
                                 )?;
                                 finalize_line(lines, line, capture_has_inner);
                                 push_fragment(line, &close.to_string(), false);
-                                finalize_line(lines, line, capture_has_inner);
                             }
                         }
                         _ => {
@@ -773,6 +780,30 @@ mod tests {
         };
         let steps = parse_braced_tokens(&ts, mock_lower).expect("parse guarded block");
         assert_eq!(steps.len(), 1);
+    }
+
+    #[test]
+    fn braced_guard_block_keeps_brace_on_bracket_line() {
+        // The grammar joins a guard block's `]` to its `{` with gap only,
+        // so the walker must attach the brace to the `]` line: a split
+        // `]` / `{` never parses back and misreports at the enclosing
+        // block opener.
+        let ts: proc_macro2::TokenStream = indoc! {r#"
+            FUNC FOO($x: MAP) {
+                [bool:true] {
+                    WRITE inner.txt inside
+                }
+            }
+        "#}
+        .parse()
+        .expect("tokens");
+        let script = script_from_braced_tokens(&ts).expect("render braced script");
+        assert!(
+            script.contains("] {"),
+            "guard close and block open must share a line, got:\n{script}"
+        );
+        let steps = parse_braced_tokens(&ts, mock_lower).expect("guarded block parses");
+        assert_eq!(steps.len(), 1, "got: {steps:?}");
     }
 
     #[test]

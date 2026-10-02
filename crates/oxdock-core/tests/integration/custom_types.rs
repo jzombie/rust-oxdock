@@ -5,7 +5,7 @@
 //! `TYPES()`.
 
 use indoc::indoc;
-use oxdock_core::{Engine, EngineOutput, HostModule, OxDockFn, OxDockType, Value};
+use oxdock_core::{Engine, EngineOutput, HostModule, OxDockFn, OxDockType, TypeTag, Value};
 use oxdock_fs::{GuardedPath, GuardedTempDir, PathResolver, WorkspaceFs};
 use oxdock_func_macro::{oxdock_func, oxdock_type};
 use oxdock_process::MockProcessManager;
@@ -32,7 +32,7 @@ fn make_tag() -> anyhow::Result<Value> {
 }
 
 /// Read the payload back out through a descriptor-checked typed read.
-#[oxdock_func(pure, returns = "STRING")]
+#[oxdock_func(pure, returns = TypeTag::String)]
 fn read_tag(val: Value) -> anyhow::Result<Value> {
     let Some(tag) = val.read_heap::<Tag>(Tag::descriptor()) else {
         anyhow::bail!("READ_TAG() expects an opaque TAG value");
@@ -47,6 +47,7 @@ fn run_with_tag_hosts(root: &GuardedPath, script: &str) -> Result<(), anyhow::Er
         name: "TEST".to_string(),
         funcs: vec![MakeTag::registration(), ReadTag::registration()],
         types: vec![],
+        record_schemas: vec![],
     });
     engine.run_script(root, script).map(|_| ())
 }
@@ -97,17 +98,24 @@ fn custom_type_flows_through_declare_and_hosts() {
 fn unregistered_custom_type_fails_at_coercion() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    let err = run_with_tag_hosts(&root, "IMPORT [STD, TEST]\nLET $x: NOPE = MAKE_TAG()\n")
-        .expect_err("unknown custom type must fail");
-    assert!(err.to_string().contains("unknown type `NOPE`"), "{err}");
+    let script = indoc! {r#"
+        IMPORT [STD, TEST]
+        LET $x: NOPE = MAKE_TAG()
+    "#};
+    let err = run_with_tag_hosts(&root, script).expect_err("unknown custom type must fail");
+    assert!(err.to_string().contains("unknown type 'NOPE'"), "{err}");
 }
 
 #[test]
 fn custom_value_rejected_by_builtin_declaration() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    let err = run_with_tag_hosts(&root, "IMPORT [STD, TEST]\nLET $x: STRING = MAKE_TAG()\n")
-        .expect_err("custom value must not coerce to STRING");
+    let script = indoc! {r#"
+        IMPORT [STD, TEST]
+        LET $x: STRING = MAKE_TAG()
+    "#};
+    let err =
+        run_with_tag_hosts(&root, script).expect_err("custom value must not coerce to STRING");
     assert!(err.to_string().contains("TypeMismatch"), "{err}");
 }
 
@@ -126,11 +134,15 @@ fn engine_runs_with_custom_process_manager() {
         name: "TEST".to_string(),
         funcs: vec![MakeTag::registration(), ReadTag::registration()],
         types: vec![],
+        record_schemas: vec![],
     });
     let run = engine
         .run_script_on(
             fs,
-            "IMPORT [STD, TEST]\nLET $t: TAG = MAKE_TAG()\n",
+            indoc! {r#"
+                IMPORT [STD, TEST]
+                LET $t: TAG = MAKE_TAG()
+            "#},
             MockProcessManager::default(),
         )
         .expect("custom manager runs");
@@ -161,13 +173,21 @@ fn container_accessors_reject_bad_reads() {
     let root = guard_root(&temp);
     let err = run_with_matrix_hosts(
         &root,
-        "IMPORT [STD, TEST]\nLET $m: MATRIX = MAKE_MATRIX()\nLET $cell: INT = MATRIX_GET($m, 9, 9)\n",
+        indoc! {r#"
+            IMPORT [STD, TEST]
+            LET $m: MATRIX = MAKE_MATRIX()
+            LET $cell: INT = MATRIX_GET($m, 9, 9)
+        "#},
     )
     .expect_err("out-of-bounds cell must fail");
     assert!(err.to_string().contains("out of bounds"), "{err}");
     let err = run_with_matrix_hosts(
         &root,
-        "IMPORT [STD, TEST]\nLET $w: STRING = \"hi\"\nLET $cell: INT = MATRIX_GET($w, 0, 0)\n",
+        indoc! {r#"
+            IMPORT [STD, TEST]
+            LET $w: STRING = "hi"
+            LET $cell: INT = MATRIX_GET($w, 0, 0)
+        "#},
     )
     .expect_err("foreign value must fail");
     assert!(err.to_string().contains("expects a MATRIX value"), "{err}");
@@ -179,7 +199,11 @@ fn custom_type_rejects_key_path_traversal() {
     let root = guard_root(&temp);
     let err = run_with_tag_hosts(
         &root,
-        "IMPORT [STD, TEST]\nLET $t: TAG = MAKE_TAG()\nLET $x: STRING = $t.label\n",
+        indoc! {r#"
+            IMPORT [STD, TEST]
+            LET $t: TAG = MAKE_TAG()
+            LET $x: STRING = $t.label
+        "#},
     )
     .expect_err("key path into opaque type must fail");
     assert!(
@@ -194,7 +218,11 @@ fn custom_type_rejects_for_iteration() {
     let root = guard_root(&temp);
     let err = run_with_tag_hosts(
         &root,
-        "IMPORT [STD, TEST]\nLET $t: TAG = MAKE_TAG()\nFOR $x: TAG IN $t { ECHO hi }\n",
+        indoc! {r#"
+            IMPORT [STD, TEST]
+            LET $t: TAG = MAKE_TAG()
+            FOR $x: TAG IN $t { ECHO hi }
+        "#},
     )
     .expect_err("iteration over opaque type must fail");
     assert!(
@@ -232,7 +260,7 @@ fn make_matrix() -> anyhow::Result<Value> {
 }
 
 /// Read one cell by row and column. Out-of-bounds indices are an error.
-#[oxdock_func(pure, returns = "INT")]
+#[oxdock_func(pure, returns = TypeTag::Int)]
 fn matrix_get(board: Value, row: i64, col: i64) -> anyhow::Result<Value> {
     let Some(grid) = board.read_heap::<Matrix>(Matrix::descriptor()) else {
         anyhow::bail!("MATRIX_GET() expects a MATRIX value");
@@ -247,7 +275,7 @@ fn matrix_get(board: Value, row: i64, col: i64) -> anyhow::Result<Value> {
 }
 
 /// Count the rows.
-#[oxdock_func(pure, returns = "INT")]
+#[oxdock_func(pure, returns = TypeTag::Int)]
 fn matrix_rows(board: Value) -> anyhow::Result<Value> {
     let Some(grid) = board.read_heap::<Matrix>(Matrix::descriptor()) else {
         anyhow::bail!("MATRIX_ROWS() expects a MATRIX value");
@@ -266,6 +294,7 @@ fn run_with_matrix_hosts(root: &GuardedPath, script: &str) -> Result<EngineOutpu
             MatrixRows::registration(),
         ],
         types: vec![],
+        record_schemas: vec![],
     });
     engine.run_script(root, script)
 }
@@ -290,6 +319,7 @@ fn duplicate_qualified_registration_panics() {
         name: "TEST".to_string(),
         funcs: vec![MakeTag::registration()],
         types: vec![],
+        record_schemas: vec![],
     };
     engine.register_module(module());
     engine.register_module(module());
@@ -311,9 +341,9 @@ fn host_module_cannot_reclaim_std_name() {
                 kind: oxdock_core::FuncKind::HostPure,
                 params: Some(vec![FuncParam {
                     name: "pattern".to_string(),
-                    param_type: Some("STRING".to_string()),
+                    param_type: Some(TypeTag::String),
                 }]),
-                returns: Some("LIST".to_string()),
+                returns: Some(TypeTag::List),
                 rpn: false,
                 summary: "Shadow attempt.",
                 docs: "Must never replace the builtin.",
@@ -321,6 +351,7 @@ fn host_module_cannot_reclaim_std_name() {
             func: Arc::new(|_| Ok(Value::string(String::new()))),
         }],
         types: vec![],
+        record_schemas: vec![],
     });
 }
 
@@ -336,16 +367,23 @@ fn same_base_name_in_different_modules_coexists() {
         name: "TEST".to_string(),
         funcs: vec![MakeTag::registration(), ReadTag::registration()],
         types: vec![],
+        record_schemas: vec![],
     });
     engine.register_module(HostModule {
         name: "OTHER".to_string(),
         funcs: vec![MakeTag::registration()],
         types: vec![],
+        record_schemas: vec![],
     });
     engine
         .run_script(
             &root,
-            "IMPORT [TEST]\nLET $t: TAG = MAKE_TAG()\nLET $o: TAG = OTHER::MAKE_TAG()\nWRITE both.txt \"{{ $t }}::{{ $o }}\"\n",
+            indoc! {r#"
+                IMPORT [TEST]
+                LET $t: TAG = MAKE_TAG()
+                LET $o: TAG = OTHER::MAKE_TAG()
+                WRITE both.txt "{{ $t }}::{{ $o }}"
+            "#},
         )
         .expect("distinct qualified names coexist");
     assert_eq!(
@@ -365,9 +403,16 @@ fn conflicting_payload_type_for_live_name_panics() {
         name: "TEST".to_string(),
         funcs: vec![MakeTag::registration(), ReadTag::registration()],
         types: vec![],
+        record_schemas: vec![],
     });
     engine.register_type::<ImpostorTag>();
     engine
-        .run_script(&root, "IMPORT [STD, TEST]\nLET $t: TAG = MAKE_TAG()\n")
+        .run_script(
+            &root,
+            indoc! {r#"
+                IMPORT [STD, TEST]
+                LET $t: TAG = MAKE_TAG()
+            "#},
+        )
         .unwrap();
 }

@@ -1,0 +1,31 @@
+{
+  "targets": [
+    {
+      "name": "tiny-readme",
+      "out": "examples/generic-readme/README.md",
+      "values": "examples/generic-readme/values.json",
+      "template": "examples/generic-readme/README.md.tmpl",
+      "fragments": {
+        "sec": ["examples/generic-readme/fragments/sec/*.md.tmpl"]
+      }
+    },
+    {
+      "name": "tiny-llms",
+      "out": "examples/generic-readme/llms.txt",
+      "values": "examples/generic-readme/values.json",
+      "template": "examples/generic-readme/llms.txt.tmpl",
+      "fragments": {
+        "sec": ["examples/generic-readme/fragments/sec/*.md.tmpl"]
+      }
+    },
+    {
+      "name": "tiny-llms-full",
+      "out": "examples/generic-readme/llms-full.txt",
+      "values": "examples/generic-readme/values.json",
+      "template": "examples/generic-readme/llms-full.txt.tmpl",
+      "fragments": {
+        "sec": ["examples/generic-readme/fragments/sec/*.md.tmpl"]
+      }
+    }
+  ]
+}

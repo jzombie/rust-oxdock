@@ -1,6 +1,6 @@
 use anyhow::{Result, bail};
 use oxdock_fs::EntryKind;
-use oxdock_parser::{Arg, ArgPart, ArithOp, CompareOp, Expr, LogicalOp, MathOp, Value};
+use oxdock_parser::{Arg, ArgPart, ArithOp, CompareOp, Expr, LogicalOp, MathOp, TypeTag, Value};
 use oxdock_process::ProcessManager;
 
 use super::state::ExecState;
@@ -11,108 +11,92 @@ use super::steps::StepCtx;
 /// run's name directory here (not at parse time, where host descriptors
 /// are not visible). Pipe targets validate against the live PipeRegistry
 /// via ExecState.
-pub(crate) fn coerce_value<P: ProcessManager>(
-    value: Value,
-    expected: &str,
-    state: &ExecState<P>,
-) -> Result<Value> {
-    if !state.is_known_type(expected) {
-        return Err(anyhow::anyhow!(
-            "unknown type `{expected}`: no descriptor registered (expected one of {})",
-            state.type_names().join(", "),
-        ));
-    }
-    // Same-type passthrough for every type: the word carries its own
-    // vtable, so descriptor-name equality is type equality. Pipe handles
-    // are already owned values: passing one through never instantiates
-    // backend state (materialization happens only at binding sites), and
-    // `LET $q: PIPE = $p` shares the backend by cloning the handle.
-    if value.type_name() == expected {
+pub(crate) fn coerce_value(value: Value, expected: &TypeTag) -> Result<Value> {
+    // Exact conformance first: passthrough when the value already
+    // satisfies the tag, including shaped records and typed lists.
+    if oxdock_parser::check_value(expected, &value).is_ok() {
         return Ok(value);
     }
-    // Values of other registered types never cross-coerce; the mismatch
-    // below reports both names through the descriptor.
-    match (value.as_str(), expected) {
-        (Some(s), "INT") => {
-            s.trim().parse::<i64>().map(Value::int).map_err(|_| {
-                anyhow::anyhow!("TypeMismatch: expected {expected}, got STRING ({s:?})")
-            })
-        }
-        (Some(s), "FLOAT") => {
-            s.trim().parse::<f64>().map(Value::float).map_err(|_| {
-                anyhow::anyhow!("TypeMismatch: expected {expected}, got STRING ({s:?})")
-            })
-        }
-        (Some(s), "BOOL") => match s.trim() {
-            "true" => Ok(Value::bool(true)),
-            "false" => Ok(Value::bool(false)),
+    // Values of other shapes never cross-coerce; the mismatch below
+    // reports both names through the tag.
+    if let Some(s) = value.as_str() {
+        let name = expected.name();
+        return match expected {
+            TypeTag::Int => {
+                s.trim().parse::<i64>().map(Value::int).map_err(|_| {
+                    anyhow::anyhow!("TypeMismatch: expected {name}, got STRING ({s:?})")
+                })
+            }
+            TypeTag::Float => {
+                s.trim().parse::<f64>().map(Value::float).map_err(|_| {
+                    anyhow::anyhow!("TypeMismatch: expected {name}, got STRING ({s:?})")
+                })
+            }
+            TypeTag::Bool => match s.trim() {
+                "true" => Ok(Value::bool(true)),
+                "false" => Ok(Value::bool(false)),
+                _ => Err(anyhow::anyhow!(
+                    "TypeMismatch: expected {name}, got STRING ({s:?})"
+                )),
+            },
+            TypeTag::Pipe => {
+                // Strict: plain strings never coerce to pipes, so a handle is
+                // always created explicitly via `LET $p: PIPE`. Anything else
+                // is a TypeMismatch.
+                Err(anyhow::anyhow!(
+                    "TypeMismatch: expected {name}, got STRING ({s:?}); declare LET $x: PIPE and pass $x"
+                ))
+            }
+            TypeTag::Duration => oxdock_parser::command::parse_duration(s.trim())
+                .map(Value::duration)
+                .map_err(|_| anyhow::anyhow!("TypeMismatch: expected {name}, got STRING ({s:?})")),
+            TypeTag::Path => {
+                // Narrow exception: materializing the PATH payload. Guard checks
+                // still run through oxdock-fs at use time.
+                #[allow(clippy::disallowed_types)]
+                let path = std::path::PathBuf::from(s.trim());
+                Ok(Value::path(path))
+            }
             _ => Err(anyhow::anyhow!(
-                "TypeMismatch: expected {expected}, got STRING ({s:?})"
+                "TypeMismatch: expected {name}, got STRING ({s:?})"
             )),
-        },
-        (Some(s), "PIPE") => {
-            // Strict: plain strings never coerce to pipes, so a handle is
-            // always created explicitly via `LET $p: PIPE`. Anything else
-            // is a TypeMismatch.
-            Err(anyhow::anyhow!(
-                "TypeMismatch: expected {expected}, got STRING ({s:?}); declare LET $x: PIPE and pass $x"
-            ))
-        }
-        (Some(s), "DURATION") => oxdock_parser::command::parse_duration(s.trim())
-            .map(Value::duration)
-            .map_err(|_| anyhow::anyhow!("TypeMismatch: expected {expected}, got STRING ({s:?})")),
-        (Some(s), "PATH") => {
-            // Narrow exception: materializing the PATH payload. Guard checks
-            // still run through oxdock-fs at use time.
-            #[allow(clippy::disallowed_types)]
-            let path = std::path::PathBuf::from(s.trim());
-            Ok(Value::path(path))
-        }
-        (Some(s), "LIST") => Err(anyhow::anyhow!(
-            "TypeMismatch: expected {expected}, got STRING ({s:?})"
-        )),
-        (Some(s), "MAP") => Err(anyhow::anyhow!(
-            "TypeMismatch: expected {expected}, got STRING ({s:?})"
-        )),
-        (Some(s), "HANDLE") => Err(anyhow::anyhow!(
-            "TypeMismatch: expected {expected}, got STRING ({s:?})"
-        )),
-        _ => coerce_scalar(&value, expected),
+        };
     }
+    coerce_scalar(&value, expected)
 }
 
 /// Scalar cross-coercions between numeric, boolean, duration, path, and
 /// pipe-name words. Anything else is a `TypeMismatch`.
-fn coerce_scalar(value: &Value, expected: &str) -> Result<Value> {
+fn coerce_scalar(value: &Value, expected: &TypeTag) -> Result<Value> {
     if let Some(n) = value.as_i64() {
         return match expected {
-            "STRING" => Ok(Value::string(n.to_string())),
-            "FLOAT" => Ok(Value::float(n as f64)),
+            TypeTag::String => Ok(Value::string(n.to_string())),
+            TypeTag::Float => Ok(Value::float(n as f64)),
             _ => Err(mismatch(expected, value)),
         };
     }
     if let Some(f) = value.as_f64() {
         return match expected {
-            "STRING" => Ok(Value::string(f.to_string())),
-            "INT" if f.fract() == 0.0 && f.is_finite() => Ok(Value::int(f as i64)),
+            TypeTag::String => Ok(Value::string(f.to_string())),
+            TypeTag::Int if f.fract() == 0.0 && f.is_finite() => Ok(Value::int(f as i64)),
             _ => Err(mismatch(expected, value)),
         };
     }
     if let Some(b) = value.as_bool() {
         return match expected {
-            "STRING" => Ok(Value::string(b.to_string())),
+            TypeTag::String => Ok(Value::string(b.to_string())),
             _ => Err(mismatch(expected, value)),
         };
     }
     if let Some(d) = value.as_duration() {
         return match expected {
-            "STRING" => Ok(Value::string(oxdock_parser::command::format_duration(&d))),
+            TypeTag::String => Ok(Value::string(oxdock_parser::command::format_duration(&d))),
             _ => Err(mismatch(expected, value)),
         };
     }
     if let Some(p) = value.as_path() {
         return match expected {
-            "STRING" => Ok(Value::string(p.to_string_lossy().to_string())),
+            TypeTag::String => Ok(Value::string(p.to_string_lossy().to_string())),
             _ => Err(mismatch(expected, value)),
         };
     }
@@ -120,15 +104,18 @@ fn coerce_scalar(value: &Value, expected: &str) -> Result<Value> {
         return match expected {
             // Opaque rendering: stringifying a handle was already
             // meaningless with names; `<pipe>` keeps the totality.
-            "STRING" => Ok(Value::string(format!("{value}"))),
+            TypeTag::String => Ok(Value::string(format!("{value}"))),
             _ => Err(mismatch(expected, value)),
         };
     }
     Err(mismatch(expected, value))
 }
 
-fn mismatch(expected: &str, value: &Value) -> anyhow::Error {
-    anyhow::anyhow!("TypeMismatch: expected {expected}, got value ({value:?})")
+fn mismatch(expected: &TypeTag, value: &Value) -> anyhow::Error {
+    anyhow::anyhow!(
+        "TypeMismatch: expected {}, got value ({value:?})",
+        expected.name()
+    )
 }
 
 /// Resolve an [`Arg`] using an [`ExecState`] directly (no [`StepCtx`] needed).
@@ -594,6 +581,93 @@ pub(crate) fn float_from_value(val: Value) -> Result<Value> {
     bail!("FLOAT() requires an Int, Float, or String, found {val:?}")
 }
 
+/// Value-semantics core of `HAS_KEY()`: report whether a map holds a key
+/// so scripts can branch on optional fields without tripping the strict
+/// missing-key error.
+pub(crate) fn has_key_from_value(map: Value, key: &str) -> Result<Value> {
+    let entries = map.as_map().ok_or_else(|| {
+        anyhow::anyhow!(
+            "HAS_KEY expects a MAP as its first argument, got {}",
+            map.type_name()
+        )
+    })?;
+    Ok(Value::bool(entries.contains_key(key)))
+}
+
+/// Value-semantics core of `MAP_SET()`: insert one key into a map,
+/// failing on duplicates so two entries sharing a key fail the run
+/// instead of silently shadowing each other.
+pub(crate) fn map_set_from_value(map: Value, key: String, value: Value) -> Result<Value> {
+    let entries = map.as_map().ok_or_else(|| {
+        anyhow::anyhow!(
+            "MAP_SET expects a MAP as its first argument, got {}",
+            map.type_name()
+        )
+    })?;
+    if entries.contains_key(&key) {
+        bail!("MAP_SET duplicate key '{key}'");
+    }
+    let mut next = entries.clone();
+    next.insert(key, value);
+    Ok(Value::map(next))
+}
+
+/// Value-semantics core of `TYPE_OF()`: name the word a value holds.
+///
+/// Returns the registered descriptor name, the same string arity and
+/// coercion errors print, so scripts branch on config shapes with the
+/// vocabulary the errors already teach.
+pub(crate) fn type_of_from_value(value: Value) -> Result<Value> {
+    Ok(Value::string(value.type_name().to_string()))
+}
+
+/// Value-semantics core of `TO_JSON()`: encode a script value as JSON
+/// with one trailing newline. Only template-safe shapes survive;
+/// anything else fails here instead of rendering as a silent empty.
+pub(crate) fn to_json_from_value(value: Value) -> Result<Value> {
+    let json = value_to_json(&value)?;
+    let mut out = serde_json::to_string(&json).map_err(|e| anyhow::anyhow!("encode JSON: {e}"))?;
+    out.push('\n');
+    Ok(Value::string(out))
+}
+
+/// Script values to JSON. Maps stay sorted (the word holds a BTreeMap);
+/// only template-safe shapes survive.
+fn value_to_json(value: &Value) -> Result<serde_json::Value> {
+    if let Some(map) = value.as_map() {
+        return map
+            .iter()
+            .map(|(key, item)| value_to_json(item).map(|v| (key.clone(), v)))
+            .collect::<Result<serde_json::Map<_, _>>>()
+            .map(serde_json::Value::Object);
+    }
+    if let Some(list) = value.as_list() {
+        return list
+            .iter()
+            .map(value_to_json)
+            .collect::<Result<Vec<_>>>()
+            .map(serde_json::Value::Array);
+    }
+    if let Some(s) = value.as_str() {
+        return Ok(serde_json::Value::String(s.to_string()));
+    }
+    if let Some(i) = value.as_i64() {
+        return Ok(serde_json::Value::Number(serde_json::Number::from(i)));
+    }
+    if let Some(f) = value.as_f64() {
+        let number = serde_json::Number::from_f64(f)
+            .ok_or_else(|| anyhow::anyhow!("TO_JSON cannot encode non-finite float {f}"))?;
+        return Ok(serde_json::Value::Number(number));
+    }
+    if let Some(b) = value.as_bool() {
+        return Ok(serde_json::Value::Bool(b));
+    }
+    bail!(
+        "TO_JSON cannot encode {} values; use STRING, INT, FLOAT, BOOL, LIST, or MAP",
+        value.type_name()
+    )
+}
+
 /// Resolve `$base.key...` against the scope chain (shared by the AST
 /// `KeyPath` arm and the RPN `LoadKeyPath` op).
 fn resolve_key_path_value<P: ProcessManager>(
@@ -853,11 +927,29 @@ pub fn load_toml_value(content: &str) -> Result<Value> {
     Ok(json_to_value(json_val))
 }
 
+/// Value-semantics core of `PARSE_TOML()`: parse TOML text already held
+/// in memory, using the same conversion as file loading.
+pub(crate) fn parse_toml_from_value(value: Value) -> Result<Value> {
+    let Some(text) = value.as_str() else {
+        bail!("PARSE_TOML expects a STRING, got {}", value.type_name());
+    };
+    load_toml_value(text)
+}
+
 /// Parse JSON content into a DSL `Value`.
 pub fn load_json_value(content: &str) -> Result<Value> {
     let json_val: serde_json::Value =
         serde_json::from_str(content).map_err(|e| anyhow::anyhow!("JSON parse error: {}", e))?;
     Ok(json_to_value(json_val))
+}
+
+/// Value-semantics core of `PARSE_JSON()`: parse JSON text already held
+/// in memory, using the same conversion as file loading.
+pub(crate) fn parse_json_from_value(value: Value) -> Result<Value> {
+    let Some(text) = value.as_str() else {
+        bail!("PARSE_JSON expects a STRING, got {}", value.type_name());
+    };
+    load_json_value(text)
 }
 
 /// Convert a `serde_json::Value` to a DSL `Value`.
@@ -1143,6 +1235,119 @@ mod tests {
         stack.push(Value::int(1));
         assert_eq!(pop_stack(&mut stack).unwrap(), Value::int(1));
         assert!(pop_stack(&mut stack).is_err());
+    }
+
+    #[test]
+    fn type_of_names_words_for_branching() {
+        use std::collections::BTreeMap;
+        assert_eq!(
+            type_of_from_value(Value::string("x".to_string()))
+                .expect("string")
+                .as_str(),
+            Some("STRING")
+        );
+        assert_eq!(
+            type_of_from_value(Value::int(1)).expect("int").as_str(),
+            Some("INT")
+        );
+        assert_eq!(
+            type_of_from_value(Value::bool(true))
+                .expect("bool")
+                .as_str(),
+            Some("BOOL")
+        );
+        assert_eq!(
+            type_of_from_value(Value::list(vec![]))
+                .expect("list")
+                .as_str(),
+            Some("LIST")
+        );
+        assert_eq!(
+            type_of_from_value(Value::map(BTreeMap::new()))
+                .expect("map")
+                .as_str(),
+            Some("MAP")
+        );
+    }
+
+    #[test]
+    fn map_set_inserts_and_rejects_duplicates() {
+        use std::collections::BTreeMap;
+        let empty = Value::map(BTreeMap::new());
+        let one = map_set_from_value(empty, "a".to_string(), Value::string("x".to_string()))
+            .expect("insert");
+        assert_eq!(
+            one.as_map().expect("map").get("a").expect("key").as_str(),
+            Some("x")
+        );
+        assert!(map_set_from_value(one, "a".to_string(), Value::string("y".to_string())).is_err());
+        assert!(
+            map_set_from_value(
+                Value::string("nope".to_string()),
+                "a".to_string(),
+                Value::int(1)
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn has_key_reports_presence() {
+        use std::collections::BTreeMap;
+        let mut entries = BTreeMap::new();
+        entries.insert("name".to_string(), Value::string("mary".to_string()));
+        let mary = Value::map(entries);
+        assert_eq!(
+            has_key_from_value(mary.clone(), "name")
+                .expect("has")
+                .as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            has_key_from_value(mary, "globs").expect("has").as_bool(),
+            Some(false)
+        );
+        assert!(has_key_from_value(Value::int(1), "name").is_err());
+    }
+
+    #[test]
+    fn parse_text_matches_file_load_shapes() {
+        let json = parse_json_from_value(Value::string("{\"a\": 1}".to_string())).expect("parse");
+        assert_eq!(
+            json.as_map().expect("map").get("a").expect("key").as_i64(),
+            Some(1)
+        );
+        let toml = parse_toml_from_value(Value::string("a = 2\n".to_string())).expect("parse");
+        assert_eq!(
+            toml.as_map().expect("map").get("a").expect("key").as_i64(),
+            Some(2)
+        );
+        // Any-shape inputs stay any-shape: arrays parse to LIST, which is
+        // why PARSE_JSON carries no MAP return tag.
+        let list = parse_json_from_value(Value::string("[1, 2]".to_string())).expect("parse");
+        assert_eq!(list.as_list().expect("list").len(), 2);
+        assert!(parse_json_from_value(Value::string("{bad".to_string())).is_err());
+        assert!(parse_toml_from_value(Value::string("a = ".to_string())).is_err());
+        assert!(parse_json_from_value(Value::int(1)).is_err());
+        assert!(parse_toml_from_value(Value::bool(true)).is_err());
+    }
+
+    #[test]
+    fn to_json_sorts_keys_and_appends_newline() {
+        use std::collections::BTreeMap;
+        let mut entries = BTreeMap::new();
+        entries.insert("b".to_string(), Value::int(2));
+        entries.insert(
+            "a".to_string(),
+            Value::list(vec![Value::string("x".to_string()), Value::bool(true)]),
+        );
+        let encoded = to_json_from_value(Value::map(entries))
+            .expect("encode")
+            .as_str()
+            .expect("string")
+            .to_string();
+        assert_eq!(encoded, "{\"a\":[\"x\",true],\"b\":2}\n");
+        assert!(to_json_from_value(Value::handle(1)).is_err());
     }
 
     #[test]

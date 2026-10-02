@@ -102,7 +102,14 @@ fn lowercase_command_is_parse_error_with_uppercase_note() {
 
 #[test]
 fn with_io_missing_block_brace_is_structural_with_caret() {
-    let err = parse_script("WITH_IO [stdout]\nECHO hi\n", mock_lower).expect_err("must fail");
+    let err = parse_script(
+        indoc! {r#"
+        WITH_IO [stdout]
+        ECHO hi
+    "#},
+        mock_lower,
+    )
+    .expect_err("must fail");
     assert!(
         matches!(err.kind(), ParseErrorKind::Structural { .. }),
         "unexpected kind: {:?}",
@@ -147,7 +154,14 @@ fn for_key_type_error_points_at_type_tag() {
 
 #[test]
 fn with_io_missing_brace_covers_statement_line() {
-    let err = parse_script("WITH_IO [stdout]\nECHO hi\n", mock_lower).expect_err("must fail");
+    let err = parse_script(
+        indoc! {r#"
+        WITH_IO [stdout]
+        ECHO hi
+    "#},
+        mock_lower,
+    )
+    .expect_err("must fail");
     assert_eq!(
         (err.line(), err.col_start(), err.col_end()),
         (1, Some(1), Some(16))

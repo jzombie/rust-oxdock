@@ -861,6 +861,7 @@ fn create_exec_state(fs: MockFs) -> ExecState<MockProcessManager> {
         cancellable: false,
         functions: super::native::FunctionRegistry::with_builtins(),
         types: super::typing::startup_type_map(),
+        record_schemas: std::collections::HashMap::new(),
         call_depth: 0,
         task_id: 0,
         push_manifest: Vec::new(),
@@ -1748,11 +1749,15 @@ fn with_io_async_guarded_and_exec_form_outer_pipe_stays_script() {
     // pipe is main-declared and shared, so no producer shape promotes it.
     for (script, var) in [
         (
-            "LET $g: PIPE\nWITH_IO [stdout=$g] ASYNC { [bool:true] RUN \"echo hi\" }",
+            indoc! {r#"
+                LET $g: PIPE
+                WITH_IO [stdout=$g] ASYNC { [bool:true] RUN "echo hi" }"#},
             "g",
         ),
         (
-            "LET $e: PIPE\nWITH_IO [stdout=$e] ASYNC RUN [\"echo\", \"hi\"]",
+            indoc! {r#"
+                LET $e: PIPE
+                WITH_IO [stdout=$e] ASYNC RUN ["echo", "hi"]"#},
             "e",
         ),
     ] {
@@ -2592,7 +2597,9 @@ mod escape_props {
         for (k, v) in vars {
             // Declared type always matches the value's descriptor: the
             // property under test is expansion, not coercion.
-            let kind = v.type_name().to_string();
+            let kind = state
+                .resolve_tag(v.type_name())
+                .expect("startup types resolve");
             let _ = state.declare_var(k.clone(), kind, v.clone());
         }
         state
@@ -3153,7 +3160,7 @@ fn host_round_trip_through_adapters() {
             module: "T".to_string(),
             kind: FuncKind::HostCtx,
             params: None,
-            returns: Some("PIPE".to_string()),
+            returns: Some(TypeTag::Pipe),
             rpn: false,
             summary: "test-only host pipe relay",
             docs: "test-only",
@@ -3178,6 +3185,7 @@ fn host_round_trip_through_adapters() {
             func: relay,
         }],
         types: vec![],
+        record_schemas: vec![],
     };
     let table = oxdock_parser::ModuleTable {
         modules: std::collections::HashMap::from([(
@@ -3219,6 +3227,190 @@ fn host_round_trip_through_adapters() {
     .expect("host round-trip runs");
     let files = fs.snapshot();
     assert_eq!(file_content(&files, "out.txt"), b"hello host-seed");
+}
+
+#[test]
+fn expand_placeholder_calls_pure_host_function() {
+    // `{{ T::SHOUT($who) }}` inside EXPAND input dispatches through the
+    // registered pure function, sharing the registry DSL `CALL` uses.
+    // The `\{{` escape keeps the placeholder literal through WRITE so
+    // EXPAND is the stage that evaluates it.
+    fn test_meta(name: &str) -> FuncMeta {
+        FuncMeta {
+            name: name.to_string(),
+            module: "T".to_string(),
+            kind: FuncKind::HostPure,
+            params: None,
+            returns: Some(TypeTag::String),
+            rpn: false,
+            summary: "test-only pure shout",
+            docs: "test-only",
+        }
+    }
+    let shout: PureFn = Arc::new(|vals| {
+        let s = vals
+            .first()
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("SHOUT expects one string"))?;
+        Ok(Value::string(s.to_uppercase()))
+    });
+    let module = HostModule {
+        name: "T".to_string(),
+        funcs: vec![HostRegistration::Pure {
+            name: "SHOUT".to_string(),
+            meta: test_meta("SHOUT"),
+            func: shout,
+        }],
+        types: vec![],
+        record_schemas: vec![],
+    };
+    let table = oxdock_parser::ModuleTable {
+        modules: std::collections::HashMap::from([(
+            "T".to_string(),
+            Some(oxdock_parser::ModuleFuncs {
+                functions: std::collections::HashSet::from(["SHOUT".to_string()]),
+            }),
+        )]),
+    };
+    let steps = crate::parse_script_with_modules(
+        indoc! {r#"
+        LET $who: STRING = "bob"
+        WRITE tmpl.txt "hi \{{ T::SHOUT($who) }}!"
+        LET $buf: PIPE
+        WITH_IO [stdout=$buf] EXPAND tmpl.txt
+        WITH_IO [stdin=$buf] APPEND out.txt
+    "#},
+        table,
+    )
+    .expect("parse ok");
+    let fs = MockFs::new();
+    let mut state = create_exec_state(fs.clone());
+    state.register_module(module);
+    let mut proc = MockProcessManager::default();
+    execute_steps(
+        &mut state,
+        &mut proc,
+        &steps,
+        CommandStdin::Null,
+        false,
+        None,
+        None,
+        None,
+        None,
+        true,
+    )
+    .expect("placeholder call runs");
+    let files = fs.snapshot();
+    assert_eq!(file_content(&files, "out.txt"), b"hi BOB!");
+}
+
+#[test]
+fn parse_text_matches_file_loader_and_placeholder() {
+    // In-memory parsing must produce the same values as file loading, and
+    // the pure parser must also resolve through the placeholder registry.
+    let steps = crate::parse_script(indoc! {r#"
+        IMPORT [STD]
+        WRITE seed.json "{\"a\": 1}"
+        WRITE seed.toml "a = 1"
+        LET $json_raw: STRING = READ seed.json
+        LET $toml_raw: STRING = READ seed.toml
+        LET $loaded_json: MAP = LOAD_JSON("seed.json")
+        LET $parsed_json: MAP = PARSE_JSON($json_raw)
+        LET $loaded_toml: MAP = LOAD_TOML("seed.toml")
+        LET $parsed_toml: MAP = PARSE_TOML($toml_raw)
+        ASSERT_EQ $parsed_json $loaded_json
+        ASSERT_EQ $parsed_toml $loaded_toml
+        LET $parity: STRING = TO_JSON($loaded_json)
+        WRITE parity.txt "{{ $parity }}"
+        WRITE tmpl.txt "parsed \{{ STD::PARSE_JSON($json_raw) }} and \{{ STD::PARSE_TOML($toml_raw) }}"
+        LET $buf: PIPE
+        WITH_IO [stdout=$buf] EXPAND tmpl.txt
+        WITH_IO [stdin=$buf] APPEND expanded.txt
+    "#})
+    .expect("parse ok");
+    let (_, files) = run_with_mock_fs(&steps);
+    assert_eq!(file_content(&files, "parity.txt"), b"{\"a\":1}\n");
+    assert_eq!(
+        file_content(&files, "expanded.txt"),
+        b"parsed \"a\": 1 and \"a\": 1"
+    );
+}
+
+#[test]
+fn run_start_rejects_unknown_type_tags() {
+    // Typo'd `returns` and `params` labels fail before the first step
+    // runs, listing every known type. Previously a bad `returns` label
+    // lived forever as a lie in DESCRIBE output and generated docs:
+    // nothing read it but introspection.
+    /// Opaque handle minted here and never registered.
+    #[oxdock_func_macro::oxdock_type(name = "TEST_UNREGISTERED")]
+    #[derive(Debug, Clone, PartialEq)]
+    struct UnregisteredTag(String);
+    impl std::fmt::Display for UnregisteredTag {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "unregistered:{}", self.0)
+        }
+    }
+    fn bad_module(
+        return_type: Option<TypeTag>,
+        param_type: Option<TypeTag>,
+    ) -> HostModule<MockProcessManager> {
+        let noop: PureFn = Arc::new(|_| Ok(Value::string("x".to_string())));
+        HostModule {
+            name: "T".to_string(),
+            funcs: vec![HostRegistration::Pure {
+                name: "BAD".to_string(),
+                meta: FuncMeta {
+                    name: "T::BAD".to_string(),
+                    module: "T".to_string(),
+                    kind: FuncKind::HostPure,
+                    params: Some(vec![FuncParam {
+                        name: "arg".to_string(),
+                        param_type,
+                    }]),
+                    returns: return_type,
+                    rpn: false,
+                    summary: "test-only",
+                    docs: "test-only",
+                },
+                func: noop,
+            }],
+            types: vec![],
+            record_schemas: vec![],
+        }
+    }
+    // A custom descriptor whose name was never registered: tags make the
+    // reference well-typed in Rust, but the run directory cannot resolve
+    // it, so run-start validation fails naming the function and type.
+    let unregistered = TypeTag::Custom(UnregisteredTag::descriptor());
+    let mut state = create_exec_state(MockFs::new());
+    state.register_module(bad_module(Some(unregistered), Some(TypeTag::String)));
+    let err = state
+        .validate_function_type_tags()
+        .expect_err("unknown return must fail");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("T::BAD") && msg.contains("TEST_UNREGISTERED"),
+        "unexpected: {msg}"
+    );
+    assert!(msg.contains("STRING"), "must list known types: {msg}");
+
+    let mut state = create_exec_state(MockFs::new());
+    state.register_module(bad_module(Some(TypeTag::String), Some(unregistered)));
+    let err = state
+        .validate_function_type_tags()
+        .expect_err("unknown param must fail");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("TEST_UNREGISTERED") && msg.contains("arg"),
+        "unexpected: {msg}"
+    );
+
+    let mut state = create_exec_state(MockFs::new());
+    state.register_module(bad_module(Some(TypeTag::String), Some(TypeTag::Map)));
+    state
+        .validate_function_type_tags()
+        .expect("valid tags must pass");
 }
 
 #[cfg(not(miri))]
@@ -3268,7 +3460,7 @@ fn host_take_twice_on_os_bails() {
             module: "T".to_string(),
             kind: FuncKind::HostCtx,
             params: None,
-            returns: Some("STRING".to_string()),
+            returns: Some(TypeTag::String),
             rpn: false,
             summary: "test-only host take-twice probe",
             docs: "test-only",
@@ -3289,6 +3481,7 @@ fn host_take_twice_on_os_bails() {
             func: probe,
         }],
         types: vec![],
+        record_schemas: vec![],
     };
     let table = oxdock_parser::ModuleTable {
         modules: std::collections::HashMap::from([(
