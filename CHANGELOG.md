@@ -34,6 +34,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 ### Dependencies
 
 - Bump `cache-manager` 0.4.1 → 0.5.0.
+- Add `ureq` at 3.4.2.
 
 ## [0.20.0-alpha] - 2026-09-27
 
