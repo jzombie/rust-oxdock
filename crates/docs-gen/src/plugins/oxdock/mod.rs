@@ -2,7 +2,7 @@
 //!
 //! Command index and body plus function and plugin type references,
 //! all rendered live from parser and registry metadata so docs can
-//! never list a removed command. Rendering lives in [`command_ref`],
+//! never list a removed command. Rendering lives in `command_ref.rs`,
 //! the single source the host wrappers call into. Registered only by
 //! `crate::run`; reusable by any OxDock-based project documenting
 //! itself, registered by no project outside OxDock.

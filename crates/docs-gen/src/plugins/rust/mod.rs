@@ -2,7 +2,7 @@
 //!
 //! Workspace member lists, manifest package metadata, render versions,
 //! and per-member values rendering with the committed `name` override
-//! winning. Reading lives in [`cargo`] and [`version`]; the host
+//! winning. Reading lives in `cargo.rs` and `version.rs`; the host
 //! wrappers below stay thin. Registered only by `crate::run`;
 //! reusable by any Rust project feeding its manifests into a pipeline,
 //! registered by no non-Cargo project.
