@@ -20,7 +20,7 @@ oxdock <PATH>
 
 ## Embed at compile time
 
-Scripts run during `rustc`, and their artifacts ship inside the binary with zero heap allocation, `no_std` included:
+Embed build-time dependencies from any language: scripts run inline during `rustc`, and their artifacts ship inside the binary with zero heap allocation, `no_std` included:
 
 ```rust
 use oxdock_macros::oxdock_embed;
@@ -36,11 +36,13 @@ oxdock_embed! {
         // include_bytes!.
         ENV PROJECT=OxDock
         MKDIR dist
+
         // Provenance comes from the shell: only the matching gate runs,
         // so this stays green on every OS in CI.
         [unix] LET $os: STRING = RUN uname -srm
         [windows] LET $os: STRING = RUN ver
         LET $toolchain: STRING = RUN cargo --version
+
         WRITE dist/os.txt "{{ $os }}"
         WRITE dist/toolchain.txt "{{ $toolchain }}"
         WRITE dist/manifest.txt "os toolchain"
@@ -53,8 +55,10 @@ fn main() {
     // Verify we can read the resources we just created
     let manifest = SiteAssets::get("dist/manifest.txt").expect("manifest must be embedded");
     assert_eq!(manifest.data.as_ref(), b"os toolchain");
+
     let toolchain = SiteAssets::get("dist/toolchain.txt").expect("toolchain must be embedded");
     assert!(toolchain.data.starts_with(b"cargo "));
+
     let os = SiteAssets::get("dist/os.txt").expect("os must be embedded");
     assert!(!os.data.is_empty());
 }
@@ -80,6 +84,7 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     ENV PROJECT=OxDock
     LET $version: STRING = #crate_version
     MKDIR dist
+
     FUNC STAMP($name: STRING) {
         WRITE dist/{{ $name }}.txt {{ $name }} {{ env:PROJECT }} {{ $version }}
         RETURN $name
@@ -87,6 +92,7 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     FOR $name: STRING IN ["alpha", "beta"] {
         STAMP($name)
     }
+
     FUNC PICK($flag: BOOL) {
         IF $flag {
             RETURN "alpha"
@@ -95,6 +101,7 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     }
     LET $picked: STRING = PICK(true)
     WRITE dist/picked.txt {{ $picked }}
+
     LET $a: STRING = READ dist/alpha.txt
     LET $b: STRING = READ dist/beta.txt
     LET $p: STRING = READ dist/picked.txt
@@ -127,14 +134,17 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     ENV PROJECT=#project
     MKDIR dist
     [bool:#verbose] WRITE dist/verbose.log "verbose on"
+
     LET $log: PIPE
     WITH_IO [stdout=$log] ECHO "built {{ env:PROJECT }}"
     WITH_IO [stdin=$log] READ_LINE $line
     WRITE dist/build.txt "{{ $line }}"
+
     IMPORT [STD]
     FOR $f: STRING IN GLOB("dist/*.txt") {
         EXPAND $f
     }
+
     ASSERT_CONTAINS stdout "built OxDock"
     LET $build: STRING = READ dist/build.txt
     LET $verbose: STRING = READ dist/verbose.log
