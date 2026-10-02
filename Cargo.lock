@@ -1675,6 +1675,7 @@ dependencies = [
  "oxdock-fixture",
  "oxdock-fs",
  "oxdock-macros",
+ "oxdock-markdown-plugin",
  "oxdock-net-plugin",
  "oxdock-parser",
  "oxdock-pipe",

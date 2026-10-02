@@ -8,6 +8,7 @@
     {"key": "ssh_function_reference", "out": "crates/plugins/oxdock-ssh-plugin/.oxdock/template/generated/ssh-function-reference.md.tmpl"},
     {"key": "ssh_type_reference", "out": "crates/plugins/oxdock-ssh-plugin/.oxdock/template/generated/ssh-type-reference.md.tmpl"},
     {"key": "net_function_reference", "out": "crates/plugins/oxdock-net-plugin/.oxdock/template/generated/net-function-reference.md.tmpl"},
-    {"key": "net_type_reference", "out": "crates/plugins/oxdock-net-plugin/.oxdock/template/generated/net-type-reference.md.tmpl"}
+    {"key": "net_type_reference", "out": "crates/plugins/oxdock-net-plugin/.oxdock/template/generated/net-type-reference.md.tmpl"},
+    {"key": "markdown_function_reference", "out": "crates/plugins/oxdock-markdown-plugin/.oxdock/template/generated/markdown-function-reference.md.tmpl"}
   ]
 }

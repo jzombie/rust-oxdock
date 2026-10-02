@@ -1,0 +1,24 @@
+## Overview
+
+The MARKDOWN module renders record data as Markdown tables for
+reports and digests: `MAP_TO_MD_TABLE` takes one MAP (or a LIST of
+MAPs sharing keys) and returns aligned pipe-table text with union
+columns, padded cells, and strict errors on shapes with no table in
+them. Import it with `IMPORT [STD, MARKDOWN]` in a runner that
+registers the host module on the [Engine facade]({{ $docs_global.engine_facade_url }}).
+It works both as a DSL statement and inside placeholders as
+`\{{ MARKDOWN::MAP_TO_MD_TABLE($var) }}`. Table rendering and cell
+escaping live in the pure `markdown` module, the single source the
+host wrapper calls into.
+
+```oxdock
+IMPORT [STD, MARKDOWN]
+
+# One MAP renders one body row under the key header.
+LET $row: MAP = {name: "demo", stars: 3}
+LET $table: STRING = MAP_TO_MD_TABLE($row)
+
+# The header names the keys, the row carries the values.
+ASSERT_CONTAINS $table "| name | stars |"
+ASSERT_CONTAINS $table "| demo | 3     |"
+```

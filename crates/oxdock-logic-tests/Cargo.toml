@@ -12,6 +12,11 @@ publish = false
 
 [features]
 slow-integration = []
+# On by default so plugin conformance covers MARKDOWN fences.
+# `--no-default-features` drops the markdown plugin; its README
+# fences are then skipped like any other unregistered module.
+default = ["markdown"]
+markdown = ["dep:oxdock-markdown-plugin"]
 
 [dependencies]
 anyhow.workspace = true
@@ -20,6 +25,7 @@ libtest-mimic.workspace = true
 oxdock-core.workspace = true
 oxdock-fixture.workspace = true
 oxdock-fs.workspace = true
+oxdock-markdown-plugin = { workspace = true, optional = true }
 oxdock-net-plugin.workspace = true
 oxdock-parser.workspace = true
 oxdock-pipe.workspace = true

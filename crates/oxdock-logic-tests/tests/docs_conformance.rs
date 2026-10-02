@@ -207,15 +207,24 @@ fn oxdock_readme_snippets_parse() -> Result<()> {
 /// socket tests). Kept separate from FENCE_DOCUMENTS: that list feeds
 /// the module-unaware STD-only executor, while plugin fences need their
 /// modules and network.
-const PLUGIN_FENCE_DOCUMENTS: &[&str] = &[
-    "crates/plugins/oxdock-ssh-plugin/README.md",
-    "crates/plugins/oxdock-net-plugin/README.md",
-];
+fn plugin_fence_documents() -> Vec<&'static str> {
+    let mut docs = vec![
+        "crates/plugins/oxdock-ssh-plugin/README.md",
+        "crates/plugins/oxdock-net-plugin/README.md",
+    ];
+    // Optional dependency: minimal builds skip the markdown fences
+    // instead of failing to link the plugin.
+    #[cfg(feature = "markdown")]
+    docs.push("crates/plugins/oxdock-markdown-plugin/README.md");
+    docs
+}
 
 fn plugin_module_table() -> oxdock_parser::ModuleTable {
     let mut engine = oxdock_core::Engine::new();
     engine.register_module(oxdock_ssh_plugin::module());
     engine.register_module(oxdock_net_plugin::module());
+    #[cfg(feature = "markdown")]
+    engine.register_module(oxdock_markdown_plugin::module());
     engine.module_table()
 }
 
@@ -226,7 +235,7 @@ fn plugin_module_table() -> oxdock_parser::ModuleTable {
 )]
 fn plugin_readme_snippets_execute() -> Result<()> {
     pin_doc_cache_dir()?;
-    for name in PLUGIN_FENCE_DOCUMENTS {
+    for name in plugin_fence_documents() {
         for block in load_blocks(name)? {
             execute_plugin_block(&block, name)?;
         }
@@ -283,10 +292,12 @@ fn execute_plugin_block(block: &FencedBlock, name: &str) -> Result<()> {
         )
         .context("map doc service")?;
     ssh_registry.bind_all().context("bind doc service")?;
-    let modules = vec![
+    let mut modules = vec![
         oxdock_ssh_plugin::module_with_endpoints(ssh_registry),
         oxdock_net_plugin::module(),
     ];
+    #[cfg(feature = "markdown")]
+    modules.push(oxdock_markdown_plugin::module());
     let (done_tx, done_rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let execution = oxdock_core::run_steps_with_manager_with_modules(

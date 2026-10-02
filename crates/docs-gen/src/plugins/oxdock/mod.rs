@@ -69,6 +69,7 @@ fn generated(key: String) -> Result<Value> {
         "ssh_type_reference" => plugin_type_reference("SSH".to_string()),
         "net_function_reference" => plugin_function_reference("NET".to_string()),
         "net_type_reference" => plugin_type_reference("NET".to_string()),
+        "markdown_function_reference" => plugin_function_reference("MARKDOWN".to_string()),
         _ => {
             const KNOWN: &[&str] = &[
                 "command_index",
@@ -78,6 +79,7 @@ fn generated(key: String) -> Result<Value> {
                 "ssh_type_reference",
                 "net_function_reference",
                 "net_type_reference",
+                "markdown_function_reference",
             ];
             anyhow::bail!(
                 "unknown generated key '{key}'; known keys: {}",
@@ -118,8 +120,11 @@ fn plugin_docs() -> &'static HashMap<String, PluginDocs> {
     static DOCS: OnceLock<HashMap<String, PluginDocs>> = OnceLock::new();
     DOCS.get_or_init(|| {
         let mut map = HashMap::new();
-        let modules: Vec<HostModule<DefaultProcessManager>> =
-            vec![oxdock_ssh_plugin::module(), oxdock_net_plugin::module()];
+        let modules: Vec<HostModule<DefaultProcessManager>> = vec![
+            oxdock_ssh_plugin::module(),
+            oxdock_net_plugin::module(),
+            oxdock_markdown_plugin::module(),
+        ];
         for module in modules {
             let name = module.name.clone();
             let mut metas: Vec<FuncMeta> = module
@@ -208,6 +213,19 @@ mod tests {
         assert!(
             !net.contains("SSH_SERVE"),
             "NET reference must not contain SSH entries",
+        );
+        let markdown = plugin_function_reference("MARKDOWN".to_string())
+            .expect("markdown reference")
+            .as_str()
+            .expect("string")
+            .to_string();
+        assert!(
+            markdown.contains("### MAP_TO_MD_TABLE"),
+            "MARKDOWN reference must document MAP_TO_MD_TABLE",
+        );
+        assert!(
+            !markdown.contains("NET_FETCH"),
+            "MARKDOWN reference must not contain NET entries",
         );
     }
 
