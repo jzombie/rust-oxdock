@@ -30,7 +30,9 @@ pub fn parse_with_math(
     lower: impl Fn(&str, Vec<Arg>) -> ParseResult<StepKind>,
 ) -> ParseResult<Vec<Step>> {
     oxdock_parser::parse_script_with_modules(
-        &format!("IMPORT [MATH]\n{script}"),
+        &indoc::formatdoc! {r#"
+            IMPORT [MATH]
+            {script}"#},
         lower,
         HashSet::new(),
         math_table(),

@@ -1,0 +1,25 @@
+[package]
+name = "oxdock-markdown-plugin"
+description = "Markdown rendering for OxDock scripts through the Engine facade: MAP to table conversion callable as a DSL statement or inside placeholders."
+categories = ["development-tools"]
+keywords = ["oxdock", "markdown", "dsl"]
+authors.workspace = true
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+oxdock-core.workspace = true
+oxdock-func-macro.workspace = true
+oxdock-parser.workspace = true
+oxdock-process.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+indoc.workspace = true
+
+[lints]
+workspace = true

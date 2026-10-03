@@ -25,7 +25,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use oxdock_core::{
     FuncKind, FuncMeta, FuncParam, HostModule, HostRegistration, NativeFn, OxDockFn, OxDockType,
-    StepCtx, Value,
+    StepCtx, TypeTag, Value,
 };
 use oxdock_func_macro::oxdock_func;
 use oxdock_process::ProcessManager;
@@ -34,6 +34,7 @@ use crate::bridge::{pump_memory, pump_stream};
 use crate::endpoints::{
     AcquiredListener, EndpointRegistry, MemoryPipePair, SlotKind, acquire_listener,
 };
+use crate::fetch::fetch_text;
 use crate::state::ListenerState;
 use crate::types::NetListenerTag;
 use crate::validate::{
@@ -234,7 +235,7 @@ fn net_listen<P: ProcessManager>(
 /// ASSERT_EQ $done.closed true
 /// NET_CLOSE($l.listener)
 /// ```
-#[oxdock_func(returns = "MAP", summary = "Accept one connection into pipes.")]
+#[oxdock_func(returns = TypeTag::Map, summary = "Accept one connection into pipes.")]
 fn net_accept<P: ProcessManager>(
     cx: &mut StepCtx<P>,
     listener: Value,
@@ -343,7 +344,7 @@ fn net_accept<P: ProcessManager>(
 /// Shut a listener down. Idempotent: returns BOOL true. A blocked
 /// `NET_ACCEPT` observes the shutdown flag on its next tick and returns
 /// instead of hanging.
-#[oxdock_func(returns = "BOOL", summary = "Shut down a NET listener.")]
+#[oxdock_func(returns = TypeTag::Bool, summary = "Shut down a NET listener.")]
 fn net_close<P: ProcessManager>(cx: &mut StepCtx<P>, listener: Value) -> Result<Value> {
     let _ = cx;
     let state = listener_state(&listener, "NET_CLOSE")?;
@@ -570,8 +571,10 @@ pub fn module_with_endpoints<P: ProcessManager>(registry: Arc<EndpointRegistry>)
             net_connect_registration(Arc::clone(&registry)),
             net_port_registration(Arc::clone(&registry)),
             net_addr_registration(registry),
+            net_fetch_registration(),
         ],
         types: vec![NetListenerTag::descriptor()],
+        record_schemas: vec![],
     }
 }
 
@@ -604,14 +607,16 @@ fn net_listen_registration<P: ProcessManager>(
             params: Some(vec![
                 FuncParam {
                     name: "bind".to_string(),
-                    param_type: Some("STRING".to_string()),
+                    param_type: Some(TypeTag::String),
+                    allowed: None,
                 },
                 FuncParam {
                     name: "options".to_string(),
                     param_type: None,
+                    allowed: None,
                 },
             ]),
-            returns: Some("MAP".to_string()),
+            returns: Some(TypeTag::Map),
             rpn: false,
             summary: "Claim a virtual service endpoint and report its address.",
             docs: "Claim a virtual service endpoint and report its address.",
@@ -649,22 +654,26 @@ fn net_connect_registration<P: ProcessManager>(
             params: Some(vec![
                 FuncParam {
                     name: "target".to_string(),
-                    param_type: Some("STRING".to_string()),
+                    param_type: Some(TypeTag::String),
+                    allowed: None,
                 },
                 FuncParam {
                     name: "in_pipe".to_string(),
                     param_type: None,
+                    allowed: None,
                 },
                 FuncParam {
                     name: "out_pipe".to_string(),
                     param_type: None,
+                    allowed: None,
                 },
                 FuncParam {
                     name: "options".to_string(),
                     param_type: None,
+                    allowed: None,
                 },
             ]),
-            returns: Some("MAP".to_string()),
+            returns: Some(TypeTag::Map),
             rpn: false,
             summary: "Dial a TCP endpoint into pipes.",
             docs: "Dial a TCP endpoint into pipes.",
@@ -718,9 +727,10 @@ fn net_port_registration<P: ProcessManager>(
             kind: FuncKind::HostCtx,
             params: Some(vec![FuncParam {
                 name: "target".to_string(),
-                param_type: Some("STRING".to_string()),
+                param_type: Some(TypeTag::String),
+                allowed: None,
             }]),
-            returns: Some("INT".to_string()),
+            returns: Some(TypeTag::Int),
             rpn: false,
             summary: "Report the bound port of a virtual service endpoint.",
             docs: indoc::indoc! {r#"
@@ -792,9 +802,10 @@ fn net_addr_registration<P: ProcessManager>(
             kind: FuncKind::HostCtx,
             params: Some(vec![FuncParam {
                 name: "target".to_string(),
-                param_type: Some("STRING".to_string()),
+                param_type: Some(TypeTag::String),
+                allowed: None,
             }]),
-            returns: Some("STRING".to_string()),
+            returns: Some(TypeTag::String),
             rpn: false,
             summary: "Report the bound socket address of a virtual service endpoint.",
             docs: indoc::indoc! {r#"
@@ -809,6 +820,57 @@ fn net_addr_registration<P: ProcessManager>(
                 ASSERT_EQ $addr "127.0.0.1:23792"
                 NET_CLOSE($l.listener)
                 ```"#},
+        },
+        func,
+    }
+}
+
+/// Fetch an `https` URL to text: the network source for `PARSE_JSON`
+/// and `PARSE_TOML`. Hand-built [`HostRegistration::Stateful`] entry on
+/// the macro's shape (arity check, `STRING` unpacking, metadata) with no
+/// captured state: fetching touches the network, so the entry is
+/// `HostCtx` and never reaches the pure table that backs `{{ }}`
+/// placeholders.
+///
+/// No runnable example lives on this metadata: a fetch needs a live
+/// server, which docs conformance cannot provide. The contract, in
+/// full: `https` only (cleartext `http` reaches loopback hosts only, so
+/// tests serve fixtures without TLS), redirects follow by hand (at most
+/// 5 hops, absolute URLs only, every hop re-validated against the
+/// scheme gate, so a `Location` can never smuggle cleartext), one
+/// 30-second deadline, at most 10 MiB of body, strict UTF-8, non-2xx
+/// statuses bail. Failures name the URL and the reason; nothing
+/// retries, nothing touches the filesystem.
+fn net_fetch_registration<P: ProcessManager>() -> HostRegistration<P> {
+    let func: NativeFn<P> = Arc::new(move |cx, values| {
+        let _ = cx;
+        if values.len() != 1 {
+            bail!("NET_FETCH() expects 1 argument(s), got {}", values.len());
+        }
+        let mut values = values.into_iter();
+        let url = match values.next().expect("arity checked above").as_str() {
+            Some(s) => s.to_string(),
+            None => bail!("NET_FETCH() argument `$url` must be a STRING"),
+        };
+        let body = fetch_text(&url)?;
+        Ok(Value::string(body))
+    });
+    HostRegistration::Stateful {
+        name: "NET_FETCH".to_string(),
+        meta: FuncMeta {
+            name: "NET_FETCH".to_string(),
+            // Assigned at registration, like the macro's markers.
+            module: String::new(),
+            kind: FuncKind::HostCtx,
+            params: Some(vec![FuncParam {
+                name: "url".to_string(),
+                param_type: Some(TypeTag::String),
+                allowed: None,
+            }]),
+            returns: Some(TypeTag::String),
+            rpn: false,
+            summary: "Fetch an https URL to text.",
+            docs: "Fetch an `https` URL to text: the network source for `PARSE_JSON` and `PARSE_TOML`. Cleartext `http` reaches loopback hosts only. Redirects follow by hand (at most 5 hops, absolute URLs only, every hop re-validated), one 30-second deadline, at most 10 MiB of body, strict UTF-8, non-2xx statuses bail. Compose with the pure parsers: `LET $doc: MAP = PARSE_JSON(NET_FETCH($url))`.",
         },
         func,
     }

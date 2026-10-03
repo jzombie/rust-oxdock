@@ -33,7 +33,8 @@
 //! - Return type must be `Result<Value>` (spelled via any `Result` alias).
 //! - The DSL name defaults to the uppercased Rust name (`load_toml` becomes
 //!   `LOAD_TOML`); override with `name = "..."`. The declared return type
-//!   comes from `returns = "..."` (a descriptor name) and defaults to none.
+//!   comes from `returns = TypeTag::...` (a `TypeTag` expression) and
+//!   defaults to none.
 //! - The first doc-comment line becomes `FuncMeta.summary`; the full doc
 //!   text becomes `FuncMeta.docs`. Override the summary with `summary = "..."`.
 //!
@@ -55,7 +56,7 @@ use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::parse::{Parse, ParseStream};
-use syn::{FnArg, ItemFn, Lit, Meta, Pat, Token, Type};
+use syn::{FnArg, ItemFn, Lit, LitStr, Meta, Pat, Token, Type};
 
 /// Host export macro for DSL native and host functions. See the crate docs for the
 /// full contract: `#[oxdock_func]` for stateful functions taking
@@ -97,12 +98,15 @@ fn expand_oxdock_func(attr: TokenStream, item: TokenStream) -> syn::Result<Token
     expand_func(options, func)
 }
 
+/// A declared return type is always a `TypeTag` expression, resolved by
+/// the compiler. String labels are rejected: pre-release software takes
+/// the breaking change now so unchecked strings can never slip through.
 #[derive(Default)]
 struct FuncOptions {
     pure: bool,
     rpn: bool,
     name: Option<String>,
-    returns: Option<String>,
+    returns: Option<syn::Expr>,
     summary: Option<String>,
 }
 
@@ -125,11 +129,17 @@ impl Parse for FuncOptions {
             } else if input.peek(syn::Ident) {
                 let key: syn::Ident = input.parse()?;
                 input.parse::<Token![=]>()?;
+                if key == "returns" {
+                    let value: syn::Expr = input.parse()?;
+                    options.returns = Some(parse_returns(value)?);
+                    if input.peek(Token![,]) {
+                        input.parse::<Token![,]>()?;
+                    }
+                    continue;
+                }
                 let value: syn::LitStr = input.parse()?;
                 if key == "name" {
                     options.name = Some(value.value());
-                } else if key == "returns" {
-                    options.returns = Some(type_label_to_string(&value)?);
                 } else if key == "summary" {
                     options.summary = Some(value.value());
                 } else {
@@ -160,64 +170,168 @@ fn peek_key_value(input: ParseStream) -> bool {
     fork.peek(Token![=])
 }
 
-fn type_label_to_string(lit: &syn::LitStr) -> syn::Result<String> {
-    match lit.value().as_str() {
-        "STRING" | "INT" | "FLOAT" | "BOOL" | "PIPE" | "LIST" | "MAP" | "HANDLE" | "DURATION"
-        | "PATH" | "SEMAPHORE" | "PERMIT" => Ok(lit.value()),
-        other => Err(syn::Error::new(
-            lit.span(),
-            format!(
-                "unknown type label {other:?}; expected a builtin descriptor name such as STRING, INT, LIST, or MAP"
-            ),
-        )),
+/// Parse a `returns` attribute value: must be a `TypeTag` expression
+/// (`TypeTag::String`, `TypeTag::Custom(FooTag::descriptor())`,
+/// `TypeTag::Record(&FIELDS)`). String literals fail here, so custom
+/// and shaped types can never slip through as unchecked strings.
+fn parse_returns(value: syn::Expr) -> syn::Result<syn::Expr> {
+    if let syn::Expr::Lit(lit) = &value
+        && let syn::Lit::Str(text) = &lit.lit
+    {
+        return Err(syn::Error::new(
+            text.span(),
+            "returns must be a TypeTag expression, e.g. returns = TypeTag::String; string labels are rejected",
+        ));
     }
+    Ok(value)
 }
 
-/// A DSL-facing parameter: binding identifier plus mapped type info.
+/// A DSL-facing parameter: binding identifier, mapped type info, and
+/// optional closed value set. `allowed` comes from a `#[values(...)]`
+/// attribute and is valid only on `String` parameters: the same token
+/// list feeds the extractor check, the rejection message, and the
+/// metadata, so the three cannot drift apart.
 struct Param {
     ident: syn::Ident,
     kind: ParamKind,
+    allowed: Option<Vec<String>>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum ParamKind {
     Value,
     String,
     Int,
     Float,
     Bool,
+    Shaped(Shape),
+}
+
+/// A composable shape: leaves are words, composites nest freely.
+/// Resolution is recursive over the Rust spelling, so no combination
+/// is ever enumerated: `Vec<Vec<BTreeMap<String, Value>>>` works the
+/// day someone writes it. Scalar numerics never nest (their
+/// extractors coerce, which has no meaning inside a strict shape
+/// check). Any-valued shapes collapse to their bare word: there is
+/// nothing to check below them.
+#[derive(Clone)]
+enum Shape {
+    Str,
+    List,
+    Map,
+    ListOf(Box<Shape>),
 }
 
 impl ParamKind {
     fn type_path(&self) -> TokenStream2 {
         match self {
-            ParamKind::Value => quote! { None },
-            ParamKind::String => quote! { Some("STRING".to_string()) },
-            ParamKind::Int => quote! { Some("INT".to_string()) },
-            ParamKind::Float => quote! { Some("FLOAT".to_string()) },
-            ParamKind::Bool => quote! { Some("BOOL".to_string()) },
+            // `Value` renders `ANY`: the extractor accepts every word,
+            // so the tag is vacuously honest instead of a bare hole.
+            ParamKind::Value => quote! { Some(::oxdock_core::TypeTag::Any) },
+            ParamKind::String => quote! { Some(::oxdock_core::TypeTag::String) },
+            ParamKind::Int => quote! { Some(::oxdock_core::TypeTag::Int) },
+            ParamKind::Float => quote! { Some(::oxdock_core::TypeTag::Float) },
+            ParamKind::Bool => quote! { Some(::oxdock_core::TypeTag::Bool) },
+            ParamKind::Shaped(shape) => {
+                let tag = Self::shape_tag(shape);
+                quote! { Some(#tag) }
+            }
+        }
+    }
+
+    /// Metadata tag for a shape, composed recursively: the same tree
+    /// the extractor checks, so documentation and enforcement share
+    /// one source by construction. Emits a value; check sites borrow
+    /// it (constant promotion makes every nesting level `'static`).
+    fn shape_tag(shape: &Shape) -> TokenStream2 {
+        match shape {
+            Shape::Str => quote! { ::oxdock_core::TypeTag::String },
+            Shape::List => quote! { ::oxdock_core::LIST_TAG },
+            Shape::Map => quote! { ::oxdock_core::MAP_TAG },
+            Shape::ListOf(inner) => {
+                let inner_tag = Self::shape_tag(inner);
+                quote! { ::oxdock_core::TypeTag::ListOf(&#inner_tag) }
+            }
+        }
+    }
+
+    /// Owned-value conversion for a shape that just passed
+    /// `check_value_at`: every `expect` names the check that makes it
+    /// infallible. Element closures shadow `__e` per level; each
+    /// receiver binds outward, so shadowing is correct by scoping.
+    fn shape_narrow(shape: &Shape, value: &TokenStream2) -> TokenStream2 {
+        match shape {
+            Shape::Str => {
+                quote! { #value.as_str().expect("check_value_at enforces STRING").to_string() }
+            }
+            Shape::List => {
+                quote! { #value.as_list().expect("check_value_at enforces LIST").clone() }
+            }
+            Shape::Map => {
+                quote! { #value.as_map().expect("check_value_at enforces MAP").clone() }
+            }
+            Shape::ListOf(inner) => {
+                let elem = ParamKind::shape_narrow(inner, &quote! { __e });
+                quote! {
+                    #value.as_list().expect("check_value_at enforces LIST").iter().map(|__e| #elem).collect::<Vec<_>>()
+                }
+            }
         }
     }
 
     /// Emitted extractor: turns the next `::oxdock_core::Value` word into
     /// the Rust type, bailing with a `{NAME}()`-prefixed message on
     /// mismatch. Reads go through word accessors; words are never
-    /// destructured.
-    fn extractor(&self, param: &syn::Ident, dsl_name: &str) -> TokenStream2 {
+    /// destructured. A closed `allowed` set (from `#[values(...)]`)
+    /// adds a membership check generated from the same tokens that
+    /// feed the metadata, so the check and the documented set cannot
+    /// drift apart.
+    fn extractor(
+        &self,
+        param: &syn::Ident,
+        dsl_name: &str,
+        allowed: Option<&[String]>,
+    ) -> TokenStream2 {
         match self {
             ParamKind::Value => quote! {
                 __oxdock_values.next().expect("arity checked above")
             },
-            ParamKind::String => quote! {
-                match __oxdock_values.next().expect("arity checked above").as_str() {
-                    Some(s) => s.to_string(),
-                    None => ::anyhow::bail!(
-                        "{}() argument `${}` must be a STRING",
-                        #dsl_name,
-                        stringify!(#param),
-                    ),
+            ParamKind::String => {
+                let membership = match allowed {
+                    Some(values) => {
+                        let lits: Vec<LitStr> = values
+                            .iter()
+                            .map(|value| LitStr::new(value, proc_macro2::Span::call_site()))
+                            .collect();
+                        let joined = values.join(", ");
+                        quote! {
+                            match s {
+                                #(#lits => {},)*
+                                _ => ::anyhow::bail!(
+                                    "{}() argument `${}` must be one of: {}, got {s:?}",
+                                    #dsl_name,
+                                    stringify!(#param),
+                                    #joined,
+                                ),
+                            }
+                        }
+                    }
+                    None => quote! {},
+                };
+                quote! {
+                    match __oxdock_values.next().expect("arity checked above").as_str() {
+                        Some(s) => {
+                            #membership
+                            s.to_string()
+                        }
+                        None => ::anyhow::bail!(
+                            "{}() argument `${}` must be a STRING",
+                            #dsl_name,
+                            stringify!(#param),
+                        ),
+                    }
                 }
-            },
+            }
             ParamKind::Int => quote! {
                 {
                     let __oxdock_v = __oxdock_values.next().expect("arity checked above");
@@ -315,6 +429,21 @@ impl ParamKind {
                     }
                 }
             },
+            ParamKind::Shaped(shape) => {
+                let tag = ParamKind::shape_tag(shape);
+                let narrow = ParamKind::shape_narrow(shape, &quote! { __oxdock_v });
+                quote! {
+                    {
+                        let __oxdock_v = __oxdock_values.next().expect("arity checked above");
+                        ::oxdock_core::check_value_at(
+                            &(#tag),
+                            &__oxdock_v,
+                            &format!("{}() argument `${}`", #dsl_name, stringify!(#param)),
+                        )?;
+                        #narrow
+                    }
+                }
+            }
         }
     }
 }
@@ -329,13 +458,82 @@ fn param_kind(ty: &Type) -> syn::Result<ParamKind> {
             "i64" => return Ok(ParamKind::Int),
             "f64" => return Ok(ParamKind::Float),
             "bool" => return Ok(ParamKind::Bool),
+            "Vec" => {
+                if let Some(shape) = list_shape(last) {
+                    return Ok(ParamKind::Shaped(shape));
+                }
+            }
+            "BTreeMap" => {
+                if let Some(shape) = map_shape(last) {
+                    return Ok(ParamKind::Shaped(shape));
+                }
+            }
             _ => {}
         }
     }
     Err(syn::Error::new_spanned(
         ty,
-        "unsupported oxdock_func parameter type; expected Value, String, i64, f64, or bool",
+        "unsupported oxdock_func parameter type; expected Value, String, i64, f64, bool, Vec<...>, or BTreeMap<String, Value>",
     ))
+}
+
+/// Resolve `Vec<...>` to a shape: `Vec<Value>` collapses to bare
+/// `List` (nothing to check below the word), anything else composes
+/// `ListOf` over the element shape. Scalar numerics are rejected:
+/// their extractors coerce, which has no meaning inside strict shape
+/// checking.
+fn list_shape(segment: &syn::PathSegment) -> Option<Shape> {
+    if let syn::PathArguments::AngleBracketed(args) = &segment.arguments
+        && args.args.len() == 1
+        && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
+        && let Type::Path(inner_path) = inner
+        && let Some(inner_last) = inner_path.path.segments.last()
+    {
+        match inner_last.ident.to_string().as_str() {
+            "Value" => return Some(Shape::List),
+            "String" => return Some(Shape::ListOf(Box::new(Shape::Str))),
+            "BTreeMap" => {
+                if map_shape(inner_last).is_some() {
+                    return Some(Shape::ListOf(Box::new(Shape::Map)));
+                }
+            }
+            "Vec" => {
+                if let Some(nested) = list_shape(inner_last) {
+                    return Some(Shape::ListOf(Box::new(nested)));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Resolve `BTreeMap<String, Value>` to bare `Map`. Richer value
+/// shapes need a `MapOf` tag that does not exist yet; until it does,
+/// anything else is a macro error naming the supported spellings.
+fn map_shape(segment: &syn::PathSegment) -> Option<Shape> {
+    if let syn::PathArguments::AngleBracketed(args) = &segment.arguments
+        && args.args.len() == 2
+    {
+        let mut iter = args.args.iter();
+        let (Some(syn::GenericArgument::Type(key)), Some(syn::GenericArgument::Type(value))) =
+            (iter.next(), iter.next())
+        else {
+            return None;
+        };
+        if let Type::Path(key_path) = key
+            && let Some(key_last) = key_path.path.segments.last()
+            && key_last.ident == "String"
+            && key_last.arguments.is_empty()
+            && let Type::Path(value_path) = value
+            && let Some(value_last) = value_path.path.segments.last()
+            && value_last.ident == "Value"
+            && value_last.arguments.is_empty()
+        {
+            return Some(Shape::Map);
+        }
+    }
+    None
 }
 
 /// True when `ty` is written `&mut StepCtx<...>` (any generic arguments).
@@ -479,10 +677,43 @@ fn expand_func(options: FuncOptions, func: ItemFn) -> syn::Result<TokenStream2> 
                 "oxdock_func parameters must be plain bindings",
             ));
         };
+        let mut allowed: Option<Vec<String>> = None;
+        for attr in &typed.attrs {
+            if attr.path().is_ident("values") {
+                let parsed = attr.parse_args_with(
+                    syn::punctuated::Punctuated::<LitStr, Token![,]>::parse_terminated,
+                )?;
+                let values: Vec<String> = parsed.into_iter().map(|lit| lit.value()).collect();
+                if values.is_empty() {
+                    return Err(syn::Error::new_spanned(
+                        attr,
+                        "`#[values(...)]` needs at least one value",
+                    ));
+                }
+                allowed = Some(values);
+            }
+        }
+        let kind = param_kind(&typed.ty)?;
+        if allowed.is_some() && !matches!(kind, ParamKind::String) {
+            return Err(syn::Error::new_spanned(
+                &typed.ty,
+                "`#[values(...)]` needs a STRING parameter",
+            ));
+        }
         params.push(Param {
             ident: binding.ident.clone(),
-            kind: param_kind(&typed.ty)?,
+            kind,
+            allowed,
         });
+    }
+    // `#[values(...)]` is macro input, not a real attribute: strip it
+    // so the re-emitted function compiles without unknown-attribute
+    // errors. All other parameter attributes pass through untouched.
+    let mut emitted = func.clone();
+    for arg in &mut emitted.sig.inputs {
+        if let FnArg::Typed(typed) = arg {
+            typed.attrs.retain(|attr| !attr.path().is_ident("values"));
+        }
     }
 
     let arity = params.len();
@@ -490,16 +721,27 @@ fn expand_func(options: FuncOptions, func: ItemFn) -> syn::Result<TokenStream2> 
     let param_metas = params.iter().map(|p| {
         let name = p.ident.to_string();
         let kind = p.kind.type_path();
+        let allowed = match &p.allowed {
+            Some(values) => {
+                let lits: Vec<LitStr> = values
+                    .iter()
+                    .map(|value| LitStr::new(value, proc_macro2::Span::call_site()))
+                    .collect();
+                quote! { Some(&[#(#lits),*]) }
+            }
+            None => quote! { None },
+        };
         quote! {
             ::oxdock_core::FuncParam {
                 name: #name.to_string(),
                 param_type: #kind,
+                allowed: #allowed,
             }
         }
     });
     let unpacks = params.iter().map(|p| {
         let name = &p.ident;
-        let extract = p.kind.extractor(name, &dsl_name);
+        let extract = p.kind.extractor(name, &dsl_name, p.allowed.as_deref());
         quote! { let #name = #extract; }
     });
     let values_iter = if params.is_empty() {
@@ -518,7 +760,7 @@ fn expand_func(options: FuncOptions, func: ItemFn) -> syn::Result<TokenStream2> 
     let docs_text = docs.join("\n");
     let returns = options
         .returns
-        .map(|label| quote! { Some(#label.to_string()) })
+        .map(|expr| quote! { Some(#expr) })
         .unwrap_or(quote! { None });
 
     // The entry point closes over nothing: arity check, unpack, then the
@@ -653,7 +895,7 @@ fn expand_func(options: FuncOptions, func: ItemFn) -> syn::Result<TokenStream2> 
     };
 
     Ok(quote! {
-        #func
+        #emitted
 
         #export
     })

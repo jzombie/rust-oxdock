@@ -118,7 +118,9 @@ fn assert_eq_unquoted_path() {
     run_script(&root, "WRITE check.txt 'verified'").unwrap();
     run_script(
         &root,
-        "LET $v: STRING = READ check.txt\nASSERT_EQ $v 'verified'",
+        indoc! {r#"
+            LET $v: STRING = READ check.txt
+            ASSERT_EQ $v 'verified'"#},
     )
     .unwrap();
 }
@@ -130,7 +132,9 @@ fn path_type_unquoted_path_reports_dir() {
     run_script(&root, "MKDIR mydir").unwrap();
     run_script(
         &root,
-        "LET $t: STRING = PATH_TYPE(mydir)\nASSERT_EQ $t \"dir\"",
+        indoc! {r#"
+            LET $t: STRING = PATH_TYPE(mydir)
+            ASSERT_EQ $t "dir""#},
     )
     .unwrap();
 }
@@ -141,7 +145,9 @@ fn path_type_unquoted_path_reports_absent() {
     let root = temp.as_guarded_path().clone();
     run_script(
         &root,
-        "LET $t: STRING = PATH_TYPE(nofile.txt)\nASSERT_EQ $t \"absent\"",
+        indoc! {r#"
+            LET $t: STRING = PATH_TYPE(nofile.txt)
+            ASSERT_EQ $t "absent""#},
     )
     .unwrap();
 }

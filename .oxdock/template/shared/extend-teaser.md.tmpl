@@ -7,6 +7,7 @@ instead of heap boxing; both forms, with stateful functions, live under
 
 ```rust
 use oxdock::{Engine, HostModule, OxDockFn, OxDockType, Value, oxdock_func, oxdock_type};
+use oxdock::oxdock_core::TypeTag;
 use std::fmt;
 
 /// Word count summary: computed in Rust, carried as one script value.
@@ -35,7 +36,7 @@ fn summarize(text: String) -> anyhow::Result<Value> {
 }
 
 /// Read the word count back out: `WORD_COUNT($s)` is an `INT`.
-#[oxdock_func(pure, returns = "INT")]
+#[oxdock_func(pure, returns = TypeTag::Int)]
 fn word_count(summary: Value) -> anyhow::Result<Value> {
     let Some(stats) = summary.read_heap::<Stats>(Stats::descriptor()) else {
         anyhow::bail!("WORD_COUNT() expects a STATS value");
@@ -50,6 +51,7 @@ fn main() -> anyhow::Result<()> {
         name: "DEMO".to_string(),
         funcs: vec![Summarize::registration(), WordCount::registration()],
         types: vec![],
+        record_schemas: vec![],
     });
     let temp = oxdock_fs::GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();

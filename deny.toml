@@ -29,3 +29,12 @@ allow = [
 allow = ["MPL-2.0"]
 name = "option-ext"
 version = "0.2.0"
+[[licenses.exceptions]]
+# webpki-roots 1.0.9 carries Mozilla's root certificate DATA under
+# CDLA-Permissive-2.0, pulled in by ureq (rustls TLS) for
+# NET::NET_FETCH. CDLA-Permissive is a permissive data license with no
+# copyleft: the bundle ships unmodified as trust anchors, so this
+# exception is scoped to this crate and version only.
+allow = ["CDLA-Permissive-2.0"]
+name = "webpki-roots"
+version = "1.0.9"

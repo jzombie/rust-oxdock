@@ -1,3 +1,4 @@
+use indoc::indoc;
 use oxdock_core::{ExecIo, run_steps_with_context_result_with_io};
 use oxdock_fs::{GuardedPath, PathResolver};
 use oxdock_macros::oxdock;
@@ -62,9 +63,15 @@ fn macro_emitted_steps_equal_parsed_steps() {
             ECHO big
         }
     };
-    let via_parse = oxdock_core::parse_script(
-        "IMPORT [STD]\nLET $t: INT = $total + INT($size_str)\nLET $ok: BOOL = INSPECT($p) == INSPECT($p)\nLET $n: INT = -$v * 2\nIF $t >= 10 {\nECHO big\n}\n",
-    )
+    let via_parse = oxdock_core::parse_script(indoc! {r#"
+        IMPORT [STD]
+        LET $t: INT = $total + INT($size_str)
+        LET $ok: BOOL = INSPECT($p) == INSPECT($p)
+        LET $n: INT = -$v * 2
+        IF $t >= 10 {
+        ECHO big
+        }
+    "#})
     .unwrap();
     assert_eq!(via_macro, via_parse);
 }
@@ -80,9 +87,13 @@ fn macro_and_parse_execute_identically() {
         LET $ratio: FLOAT = $total + 0.5
         WRITE out.txt "{{ $total }}|{{ $ratio }}"
     };
-    let via_parse = oxdock_core::parse_script(
-        "LET $a: INT = 6\nLET $b: INT = 7\nLET $total: INT = $a * ($b + 1) - 10 / 2\nLET $ratio: FLOAT = $total + 0.5\nWRITE out.txt \"{{ $total }}|{{ $ratio }}\"\n",
-    )
+    let via_parse = oxdock_core::parse_script(indoc! {r#"
+        LET $a: INT = 6
+        LET $b: INT = 7
+        LET $total: INT = $a * ($b + 1) - 10 / 2
+        LET $ratio: FLOAT = $total + 0.5
+        WRITE out.txt "{{ $total }}|{{ $ratio }}"
+    "#})
     .unwrap();
 
     let temp_macro = GuardedPath::tempdir().unwrap();

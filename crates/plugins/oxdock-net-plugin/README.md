@@ -25,7 +25,7 @@ Callable as `MODULE::NAME(...)` in expressions (or bare `NAME(...)` with the mod
 
 ### NET_ACCEPT
 
-**Signature:** `NET_ACCEPT($listener, $in_pipe, $out_pipe, $options) -> MAP`
+**Signature:** `NET_ACCEPT($listener: ANY, $in_pipe: ANY, $out_pipe: ANY, $options: ANY) -> MAP`
 
 **Contexts:** AST only
 
@@ -94,7 +94,7 @@ NET_CLOSE($l.listener)
 
 ### NET_CLOSE
 
-**Signature:** `NET_CLOSE($listener) -> BOOL`
+**Signature:** `NET_CLOSE($listener: ANY) -> BOOL`
 
 **Contexts:** AST only
 
@@ -111,6 +111,16 @@ instead of hanging.
 **Contexts:** AST only
 
 Dial a TCP endpoint into pipes.
+
+### NET_FETCH
+
+**Signature:** `NET_FETCH($url: STRING) -> STRING`
+
+**Contexts:** AST only
+
+Fetch an https URL to text.
+
+Fetch an `https` URL to text: the network source for `PARSE_JSON` and `PARSE_TOML`. Cleartext `http` reaches loopback hosts only. Redirects follow by hand (at most 5 hops, absolute URLs only, every hop re-validated), one 30-second deadline, at most 10 MiB of body, strict UTF-8, non-2xx statuses bail. Compose with the pure parsers: `LET $doc: MAP = PARSE_JSON(NET_FETCH($url))`.
 
 ### NET_LISTEN
 

@@ -10,6 +10,7 @@ members = [
     "crates/oxdock-logic-tests/fixtures/commands/ast_commands",
     "crates/oxdock-parser",
     "crates/oxdock-remote-proto",
+    "crates/plugins/oxdock-markdown-plugin",
     "crates/plugins/oxdock-net-plugin",
     "crates/plugins/oxdock-ssh-plugin",
     "crates/sys/oxdock-fs",
@@ -28,7 +29,7 @@ resolver = "2"
 
 [workspace.package]
 authors = ["Jeremy Harris <jeremy.harris@zenosmosis.com>"]
-version = "0.20.0-alpha"
+version = "0.21.0-alpha"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/jzombie/rust-oxdock"
@@ -37,7 +38,7 @@ publish = true
 [workspace.dependencies]
 anyhow = "1.0.104"
 bytes = "1"
-cache-manager = { version = "0.4.1", features = ["os-cache-dir"] }
+cache-manager = { version = "0.5.0", features = ["os-cache-dir"] }
 flate2 = "1.1.5"
 futures-executor = "0.3.31"
 futures-util = "0.3.31"
@@ -53,23 +54,24 @@ muxio-rpc-service-caller = "0.17.0-alpha"
 muxio-rpc-service-endpoint = "0.17.0-alpha"
 muxio-sync-rpc-client = "0.17.0-alpha"
 muxio-sync-rpc-server = "0.17.0-alpha"
-oxdock = { path = "oxdock", version = "0.20.0-alpha" }
-oxdock-build = { path = "oxdock-build", version = "0.20.0-alpha" }
-oxdock-cli = { path = "oxdock-cli", version = "0.20.0-alpha" }
-oxdock-core = { path = "crates/oxdock-core", version = "0.20.0-alpha" }
-oxdock-embed = { path = "crates/oxdock-embed", version = "0.20.0-alpha" }
-oxdock-fixture = { path = "crates/oxdock-fixture", version = "0.20.0-alpha" }
-oxdock-fs = { path = "crates/sys/oxdock-fs", version = "0.20.0-alpha" }
-oxdock-func-macro = { path = "crates/oxdock-func-macro", version = "0.20.0-alpha" }
-oxdock-logic-tests = { path = "crates/oxdock-logic-tests", version = "0.20.0-alpha" }
-oxdock-macros = { path = "oxdock-macros", version = "0.20.0-alpha" }
-oxdock-net-plugin = { path = "crates/plugins/oxdock-net-plugin", version = "0.20.0-alpha" }
-oxdock-parser = { path = "crates/oxdock-parser", version = "0.20.0-alpha" }
-oxdock-pipe = { path = "crates/sys/oxdock-pipe", version = "0.20.0-alpha" }
-oxdock-process = { path = "crates/sys/oxdock-process", version = "0.20.0-alpha" }
-oxdock-remote-proto = { path = "crates/oxdock-remote-proto", version = "0.20.0-alpha" }
-oxdock-ssh-plugin = { path = "crates/plugins/oxdock-ssh-plugin", version = "0.20.0-alpha" }
-oxdock-sys-test-utils = { path = "crates/sys/oxdock-sys-test-utils", version = "0.20.0-alpha" }
+oxdock = { path = "oxdock", version = "0.21.0-alpha" }
+oxdock-build = { path = "oxdock-build", version = "0.21.0-alpha" }
+oxdock-cli = { path = "oxdock-cli", version = "0.21.0-alpha" }
+oxdock-core = { path = "crates/oxdock-core", version = "0.21.0-alpha" }
+oxdock-embed = { path = "crates/oxdock-embed", version = "0.21.0-alpha" }
+oxdock-fixture = { path = "crates/oxdock-fixture", version = "0.21.0-alpha" }
+oxdock-fs = { path = "crates/sys/oxdock-fs", version = "0.21.0-alpha" }
+oxdock-func-macro = { path = "crates/oxdock-func-macro", version = "0.21.0-alpha" }
+oxdock-logic-tests = { path = "crates/oxdock-logic-tests", version = "0.21.0-alpha" }
+oxdock-macros = { path = "oxdock-macros", version = "0.21.0-alpha" }
+oxdock-markdown-plugin = { path = "crates/plugins/oxdock-markdown-plugin", version = "0.21.0-alpha" }
+oxdock-net-plugin = { path = "crates/plugins/oxdock-net-plugin", version = "0.21.0-alpha" }
+oxdock-parser = { path = "crates/oxdock-parser", version = "0.21.0-alpha" }
+oxdock-pipe = { path = "crates/sys/oxdock-pipe", version = "0.21.0-alpha" }
+oxdock-process = { path = "crates/sys/oxdock-process", version = "0.21.0-alpha" }
+oxdock-remote-proto = { path = "crates/oxdock-remote-proto", version = "0.21.0-alpha" }
+oxdock-ssh-plugin = { path = "crates/plugins/oxdock-ssh-plugin", version = "0.21.0-alpha" }
+oxdock-sys-test-utils = { path = "crates/sys/oxdock-sys-test-utils", version = "0.21.0-alpha" }
 pest = { version = "2.9.0", default-features = false, features = ["std"] }
 pest_derive = "2.9.0"
 portable-pty = "0.9"
@@ -89,6 +91,7 @@ tokio = { version = "1", features = ["rt", "net", "sync", "time", "io-util"] }
 toml = "1.1.4"
 toml_edit = "0.25.13"
 tracing = "0.1.44"
+ureq = { version = "3.4.2", default-features = false, features = ["rustls"] }
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Threading"] }
 
 [workspace.lints.clippy]

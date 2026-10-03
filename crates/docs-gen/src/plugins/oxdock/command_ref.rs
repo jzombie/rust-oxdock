@@ -1,19 +1,14 @@
 use anyhow::{Context, Result};
 use oxdock_core::startup_descriptors;
 use oxdock_core::{ArgType, CommandMeta, all_metadata, all_structural_metadata};
-use oxdock_core::{FuncMeta, FuncParam, TypeDescriptor, builtin_function_metas};
+use oxdock_core::{FuncMeta, FuncParam, TypeDescriptor, TypeTag, builtin_function_metas};
+use oxdock_markdown_plugin::markdown::escape_table_cell;
 use std::collections::HashSet;
 
 /// GitHub heading anchor for a `### NAME` section: lowercase. Command names
 /// are `[A-Z_]+`, so lowercasing is the whole transformation.
 fn index_anchor(name: &str) -> String {
     name.to_lowercase()
-}
-
-/// Escape pipe characters so `|` alternatives in syntax strings do not
-/// break the enclosing Markdown table.
-fn escape_table_cell(s: &str) -> String {
-    s.replace('|', "\\|")
 }
 
 /// Escape placeholders in emitted prose and examples so the reference
@@ -211,8 +206,11 @@ pub(crate) fn render_body() -> Result<String> {
 }
 
 /// Render one function signature from its derived metadata:
-/// `NAME($param: TYPE, ...) -> RET`. Unconstrained `Value` parameters
-/// render bare; absent return types render no arrow.
+/// `NAME($param: TYPE, ...) -> RET`. Every parameter renders its
+/// type (bare `Value` is `ANY`, never a hole); absent return types
+/// render no arrow. Closed `#[values]` sets render after the type
+/// (`$policy: STRING = a | b`), generated from the same tokens as
+/// the extractor check.
 fn render_signature(meta: &FuncMeta) -> String {
     let params = meta
         .params
@@ -220,19 +218,44 @@ fn render_signature(meta: &FuncMeta) -> String {
         .unwrap_or(&[])
         .iter()
         .map(
-            |FuncParam { name, param_type }: &FuncParam| match param_type {
-                Some(label) => format!("${name}: {label}"),
-                None => format!("${name}"),
+            |FuncParam {
+                 name,
+                 param_type,
+                 allowed,
+             }: &FuncParam| match (param_type, allowed) {
+                (Some(tag), Some(values)) => {
+                    format!("${name}: {} = {}", render_tag(tag), values.join(" | "))
+                }
+                (Some(tag), None) => format!("${name}: {}", render_tag(tag)),
+                (None, _) => format!("${name}"),
             },
         )
         .collect::<Vec<_>>()
         .join(", ");
     let returns = meta
         .returns
-        .as_deref()
-        .map(|label| format!(" -> {label}"))
+        .as_ref()
+        .map(|tag| format!(" -> {}", render_tag(tag)))
         .unwrap_or_default();
     format!("{}({}){}", meta.name, params, returns)
+}
+
+/// Render one tag structurally: shaped tags name their contents
+/// (`LIST<MAP>`, `MAP<name: TYPE, ...>`), so the signature shows the
+/// generics the extractor enforces instead of the coarse word kind.
+fn render_tag(tag: &TypeTag) -> String {
+    match tag {
+        TypeTag::ListOf(inner) => format!("LIST<{}>", render_tag(inner)),
+        TypeTag::Record(fields) => {
+            let field_list = fields
+                .iter()
+                .map(|field| format!("{}: {}", field.name, render_tag(&field.ty)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("MAP<{field_list}>")
+        }
+        tag => tag.name().to_string(),
+    }
 }
 
 /// Function reference for one module, generated from its function
@@ -254,10 +277,11 @@ pub(crate) fn render_plugin_reference(metas: &[FuncMeta], module: &str) -> Strin
     );
     for meta in metas {
         out.push_str(&format!("### {}\n\n", meta.name));
-        out.push_str(&format!(
-            "**Signature:** `{}`\n\n",
-            escape_table_cell(&render_signature(meta)),
-        ));
+        // No cell escaping: the signature renders inside backticks,
+        // which already isolate `|` from table parsing. Escaping here
+        // would print a literal backslash (closed `#[values]` sets
+        // render `a | b`).
+        out.push_str(&format!("**Signature:** `{}`\n\n", render_signature(meta)));
         out.push_str(&format!(
             "**Contexts:** {}\n\n",
             if meta.rpn { "AST, RPN" } else { "AST only" },

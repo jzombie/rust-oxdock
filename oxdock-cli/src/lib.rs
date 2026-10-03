@@ -1521,6 +1521,7 @@ mod tests {
         let script = indoc! {"
             IMPORT [STD, NET]
             LET $l: MAP = NET_LISTEN(\"23501\", {})
+            LET $body: STRING = NET_FETCH(\"https://example.com/x\")
             NET_CLOSE($l.listener)
         "};
         resolver.write_file(&script_path, script.as_bytes())?;

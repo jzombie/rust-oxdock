@@ -255,7 +255,7 @@ impl PartialEq for SemaphoreValue {
 /// return (clean, error, panic, cooperative cancel) releases through
 /// ordinary frame teardown with no DSL cleanup code.
 #[derive(Debug)]
-struct PermitInner {
+pub struct PermitInner {
     sem: std::sync::Arc<SemaphoreState>,
 }
 
@@ -625,6 +625,13 @@ impl Value {
     /// `None` for non-`SEMAPHORE` words. The clone shares the backend.
     pub fn as_semaphore(&self) -> Option<std::sync::Arc<SemaphoreState>> {
         self.read_heap::<SemaphoreValue>(SemaphoreValue::descriptor())
+            .map(|v| std::sync::Arc::clone(&v.0))
+    }
+
+    /// Borrow the permit backend out of a `PERMIT` word. Returns `None`
+    /// for non-`PERMIT` words. The clone shares the backend.
+    pub fn as_permit(&self) -> Option<std::sync::Arc<PermitInner>> {
+        self.read_heap::<SemaphorePermit>(SemaphorePermit::descriptor())
             .map(|v| std::sync::Arc::clone(&v.0))
     }
 

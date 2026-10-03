@@ -1,0 +1,22 @@
+{
+  "targets": [
+    {
+      "name": "resume-md",
+      "out": "examples/resume/resume.md",
+      "values": "examples/resume/values.json",
+      "template": "examples/resume/resume.md.tmpl",
+      "fragments": {
+        "sec": ["examples/resume/fragments/sec/*.md.tmpl"]
+      }
+    },
+    {
+      "name": "resume-jsonld",
+      "out": "examples/resume/resume.jsonld",
+      "values": "examples/resume/values.json",
+      "template": "examples/resume/resume.jsonld.tmpl",
+      "fragments": {
+        "data": ["examples/resume/fragments/data/*.tmpl"]
+      }
+    }
+  ]
+}

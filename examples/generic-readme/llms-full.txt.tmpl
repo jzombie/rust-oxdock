@@ -1,0 +1,11 @@
+# {{ $docs_ctx.project }} (full agent docs)
+
+{{ $docs_ctx.blurb }}
+
+Install: `{{ $docs_ctx.install }}`. Usage: `{{ $docs_ctx.usage }}`.
+
+{{ $files.sec.intro }}
+
+{{ $files.sec.usage }}
+
+Values: {{ STD::TO_JSON($docs_ctx) }}

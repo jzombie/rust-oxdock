@@ -1,4 +1,4 @@
-Scripts run during `rustc`, and their artifacts ship inside the binary with zero heap allocation, `no_std` included:
+Embed build-time dependencies from any language: scripts run inline during `rustc`, and their artifacts ship inside the binary with zero heap allocation, `no_std` included:
 
 ```rust
 use oxdock_macros::oxdock_embed;
@@ -14,11 +14,13 @@ oxdock_embed! {
         // include_bytes!.
         ENV PROJECT=OxDock
         MKDIR dist
+
         // Provenance comes from the shell: only the matching gate runs,
         // so this stays green on every OS in CI.
         [unix] LET $os: STRING = RUN uname -srm
         [windows] LET $os: STRING = RUN ver
         LET $toolchain: STRING = RUN cargo --version
+
         WRITE dist/os.txt "\{{ $os }}"
         WRITE dist/toolchain.txt "\{{ $toolchain }}"
         WRITE dist/manifest.txt "os toolchain"
@@ -31,8 +33,10 @@ fn main() {
     // Verify we can read the resources we just created
     let manifest = SiteAssets::get("dist/manifest.txt").expect("manifest must be embedded");
     assert_eq!(manifest.data.as_ref(), b"os toolchain");
+
     let toolchain = SiteAssets::get("dist/toolchain.txt").expect("toolchain must be embedded");
     assert!(toolchain.data.starts_with(b"cargo "));
+
     let os = SiteAssets::get("dist/os.txt").expect("os must be embedded");
     assert!(!os.data.is_empty());
 }

@@ -124,12 +124,23 @@ fn remote_rejects_bad_targets() {
     // Grammar-level failures: the target cannot even lex, so any parse
     // error proves rejection (the message names the fallback instead).
     for target in ["", "has space"] {
-        parse_script(&format!("REMOTE {target} {{\n ECHO hi\n}}\n"), mock_lower)
-            .expect_err("bad target must fail");
+        parse_script(
+            &indoc::formatdoc! {r#"
+                REMOTE {target} {{
+                 ECHO hi
+                }}
+            "#},
+            mock_lower,
+        )
+        .expect_err("bad target must fail");
     }
     // Lowering-level failures: lexed fine, rejected with a named message.
     for target in ["-lead", "_lead", "has.dot", "a:b", "LOCAL", "REMOTE"] {
-        let err = parse_err(&format!("REMOTE {target} {{\n ECHO hi\n}}\n"));
+        let err = parse_err(&indoc::formatdoc! {r#"
+            REMOTE {target} {{
+             ECHO hi
+            }}
+        "#});
         assert!(err.contains("invalid REMOTE target"), "{target}: {err}");
     }
 }
@@ -145,7 +156,10 @@ fn remote_rejects_inline_form() {
 
 #[test]
 fn remote_rejects_empty_body() {
-    let err = parse_err("REMOTE prod {\n}\n");
+    let err = parse_err(indoc! {r#"
+        REMOTE prod {
+        }
+    "#});
     assert!(err.contains("non-empty"), "{err}");
 }
 
@@ -343,12 +357,24 @@ fn remote_wraps_in_with_io_block() {
 #[test]
 fn remote_target_charset_edges() {
     for target in ["a", "win-arm", "mac_mini_01", "A0-9_z"] {
-        let (_, _, _, _) = remote_case(&format!("REMOTE {target} {{\n ECHO hi\n}}\n"));
+        let (_, _, _, _) = remote_case(&indoc::formatdoc! {r#"
+            REMOTE {target} {{
+             ECHO hi
+            }}
+        "#});
     }
     let long = "a".repeat(64);
-    let (_, _, _, _) = remote_case(&format!("REMOTE {long} {{\n ECHO hi\n}}\n"));
+    let (_, _, _, _) = remote_case(&indoc::formatdoc! {r#"
+        REMOTE {long} {{
+         ECHO hi
+        }}
+    "#});
     let too_long = "a".repeat(65);
-    let err = parse_err(&format!("REMOTE {too_long} {{\n ECHO hi\n}}\n"));
+    let err = parse_err(&indoc::formatdoc! {r#"
+        REMOTE {too_long} {{
+         ECHO hi
+        }}
+    "#});
     assert!(err.contains("invalid REMOTE target"), "{err}");
 }
 

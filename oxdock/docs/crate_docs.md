@@ -6,11 +6,11 @@ One script runs on Linux, macOS, and Windows, with platform gating, async tasks,
 
 Plain Rust functions become script functions with one attribute: `#[oxdock_func]` exports them into namespaced modules scripts call as `DEMO::NAME(...)`. See [Extending OxDock from Rust](#extending-oxdock-from-rust).
 
-[Documentation](https://docs.rs/oxdock/0.20.0-alpha/oxdock/)
+[Documentation](https://docs.rs/oxdock/0.21.0-alpha/oxdock/)
 
 ## Embed at compile time
 
-Scripts run during `rustc`, and their artifacts ship inside the binary with zero heap allocation, `no_std` included:
+Embed build-time dependencies from any language: scripts run inline during `rustc`, and their artifacts ship inside the binary with zero heap allocation, `no_std` included:
 
 ```rust
 use oxdock_macros::oxdock_embed;
@@ -26,11 +26,13 @@ oxdock_embed! {
         // include_bytes!.
         ENV PROJECT=OxDock
         MKDIR dist
+
         // Provenance comes from the shell: only the matching gate runs,
         // so this stays green on every OS in CI.
         [unix] LET $os: STRING = RUN uname -srm
         [windows] LET $os: STRING = RUN ver
         LET $toolchain: STRING = RUN cargo --version
+
         WRITE dist/os.txt "{{ $os }}"
         WRITE dist/toolchain.txt "{{ $toolchain }}"
         WRITE dist/manifest.txt "os toolchain"
@@ -43,8 +45,10 @@ fn main() {
     // Verify we can read the resources we just created
     let manifest = SiteAssets::get("dist/manifest.txt").expect("manifest must be embedded");
     assert_eq!(manifest.data.as_ref(), b"os toolchain");
+
     let toolchain = SiteAssets::get("dist/toolchain.txt").expect("toolchain must be embedded");
     assert!(toolchain.data.starts_with(b"cargo "));
+
     let os = SiteAssets::get("dist/os.txt").expect("os must be embedded");
     assert!(!os.data.is_empty());
 }
@@ -70,6 +74,7 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     ENV PROJECT=OxDock
     LET $version: STRING = #crate_version
     MKDIR dist
+
     FUNC STAMP($name: STRING) {
         WRITE dist/{{ $name }}.txt {{ $name }} {{ env:PROJECT }} {{ $version }}
         RETURN $name
@@ -77,6 +82,7 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     FOR $name: STRING IN ["alpha", "beta"] {
         STAMP($name)
     }
+
     FUNC PICK($flag: BOOL) {
         IF $flag {
             RETURN "alpha"
@@ -85,11 +91,12 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     }
     LET $picked: STRING = PICK(true)
     WRITE dist/picked.txt {{ $picked }}
+
     LET $a: STRING = READ dist/alpha.txt
     LET $b: STRING = READ dist/beta.txt
     LET $p: STRING = READ dist/picked.txt
-    ASSERT_EQ $a "alpha OxDock 0.20.0-alpha"
-    ASSERT_EQ $b "beta OxDock 0.20.0-alpha"
+    ASSERT_EQ $a "alpha OxDock 0.21.0-alpha"
+    ASSERT_EQ $b "beta OxDock 0.21.0-alpha"
     ASSERT_EQ $p "alpha"
 };
 
@@ -101,7 +108,7 @@ let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolve
 let out = root.join("dist/alpha.txt").expect("out path");
 assert_eq!(
     resolver.read_to_string(&out).expect("read out"),
-    "alpha OxDock 0.20.0-alpha"
+    "alpha OxDock 0.21.0-alpha"
 );
 ```
 
@@ -117,14 +124,17 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     ENV PROJECT=#project
     MKDIR dist
     [bool:#verbose] WRITE dist/verbose.log "verbose on"
+
     LET $log: PIPE
     WITH_IO [stdout=$log] ECHO "built {{ env:PROJECT }}"
     WITH_IO [stdin=$log] READ_LINE $line
     WRITE dist/build.txt "{{ $line }}"
+
     IMPORT [STD]
     FOR $f: STRING IN GLOB("dist/*.txt") {
         EXPAND $f
     }
+
     ASSERT_CONTAINS stdout "built OxDock"
     LET $build: STRING = READ dist/build.txt
     LET $verbose: STRING = READ dist/verbose.log
@@ -157,6 +167,7 @@ instead of heap boxing; both forms, with stateful functions, live under
 
 ```rust
 use oxdock::{Engine, HostModule, OxDockFn, OxDockType, Value, oxdock_func, oxdock_type};
+use oxdock::oxdock_core::TypeTag;
 use std::fmt;
 
 /// Word count summary: computed in Rust, carried as one script value.
@@ -185,7 +196,7 @@ fn summarize(text: String) -> anyhow::Result<Value> {
 }
 
 /// Read the word count back out: `WORD_COUNT($s)` is an `INT`.
-#[oxdock_func(pure, returns = "INT")]
+#[oxdock_func(pure, returns = TypeTag::Int)]
 fn word_count(summary: Value) -> anyhow::Result<Value> {
     let Some(stats) = summary.read_heap::<Stats>(Stats::descriptor()) else {
         anyhow::bail!("WORD_COUNT() expects a STATS value");
@@ -200,6 +211,7 @@ fn main() -> anyhow::Result<()> {
         name: "DEMO".to_string(),
         funcs: vec![Summarize::registration(), WordCount::registration()],
         types: vec![],
+        record_schemas: vec![],
     });
     let temp = oxdock_fs::GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
@@ -303,6 +315,7 @@ written: the shape first, the definitions it names right below it.
 
 ```rust
 use oxdock::{Engine, HostModule, OxDockFn, OxDockType, oxdock_func, oxdock_type};
+use oxdock::oxdock_core::TypeTag;
 use std::fmt;
 
 // The script below is the DSL itself, not a string: the `oxdock!` macro
@@ -315,6 +328,7 @@ fn main() -> anyhow::Result<()> {
         name: "DEMO".to_string(),
         funcs: vec![MakeTag::registration(), ReadTag::registration()],
         types: vec![],
+        record_schemas: vec![],
     });
 
     let temp = oxdock_fs::GuardedPath::tempdir().unwrap();
@@ -368,7 +382,7 @@ fn make_tag() -> anyhow::Result<oxdock::Value> {
 }
 
 /// Read the payload back out through a descriptor-checked typed read.
-#[oxdock_func(pure, returns = "STRING")]
+#[oxdock_func(pure, returns = TypeTag::String)]
 fn read_tag(val: oxdock::Value) -> anyhow::Result<oxdock::Value> {
     let Some(tag) = val.read_heap::<Tag>(Tag::descriptor()) else {
         anyhow::bail!("READ_TAG() expects a TAG value");
@@ -397,10 +411,11 @@ the declared return type explicitly when the defaults do not fit:
 
 ```rust
 use oxdock::{HostModule, OxDockFn, StepCtx, oxdock_func};
+use oxdock::oxdock_core::TypeTag;
 use oxdock::oxdock_core::ProcessManager;
 
 /// Read an environment variable, defaulting to empty.
-#[oxdock_func(name = "ENV_OR", returns = "STRING")]
+#[oxdock_func(name = "ENV_OR", returns = TypeTag::String)]
 fn env_or<P: ProcessManager>(
     cx: &mut StepCtx<P>,
     key: String,
@@ -414,6 +429,7 @@ fn main() {
         name: "DEMO".to_string(),
         funcs: vec![EnvOr::registration()],
         types: vec![],
+        record_schemas: vec![],
     });
 }
 ```
@@ -481,6 +497,7 @@ unavailable by the boundary above.
 
 ```rust
 use oxdock::{HostModule, OxDockFn, OxDockType, Value, oxdock_func, oxdock_type};
+use oxdock::oxdock_core::TypeTag;
 use std::fmt;
 
 /// Integer grid with no literal syntax: scripts query it through functions.
@@ -504,7 +521,7 @@ fn make_matrix() -> anyhow::Result<Value> {
 }
 
 /// Read one cell by row and column.
-#[oxdock_func(pure, returns = "INT")]
+#[oxdock_func(pure, returns = TypeTag::Int)]
 fn matrix_get(board: Value, row: i64, col: i64) -> anyhow::Result<Value> {
     let Some(grid) = board.read_heap::<Matrix>(Matrix::descriptor()) else {
         anyhow::bail!("MATRIX_GET() expects a MATRIX value");
@@ -532,6 +549,7 @@ fn main() -> anyhow::Result<()> {
             MatrixGet::registration(),
         ],
         types: vec![],
+        record_schemas: vec![],
     });
     let temp = oxdock_fs::GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
@@ -3167,7 +3185,7 @@ unknown function.
 
 ### STD::EOF
 
-**Signature:** `STD::EOF($pipe) -> BOOL`
+**Signature:** `STD::EOF($pipe: ANY) -> BOOL`
 
 **Contexts:** AST only
 
@@ -3199,7 +3217,7 @@ ASSERT_EQ $n 2
 
 ### STD::FLOAT
 
-**Signature:** `STD::FLOAT($val) -> FLOAT`
+**Signature:** `STD::FLOAT($val: ANY) -> FLOAT`
 
 **Contexts:** AST, RPN
 
@@ -3228,9 +3246,20 @@ List workspace paths matching a glob pattern.
 
 Sorted, root-relative LIST; empty on no match or `..` escape.
 
+### STD::HAS_KEY
+
+**Signature:** `STD::HAS_KEY($map: MAP, $key: STRING) -> BOOL`
+
+**Contexts:** AST, RPN
+
+Report whether a map holds a key.
+
+Pure MAP probe so scripts can branch on optional fields without
+tripping the strict missing-key error.
+
 ### STD::INT
 
-**Signature:** `STD::INT($val) -> INT`
+**Signature:** `STD::INT($val: ANY) -> INT`
 
 **Contexts:** AST, RPN
 
@@ -3278,6 +3307,55 @@ Load and parse a TOML file.
 
 Reads a workspace file and parses TOML into a DSL value.
 
+### STD::MAP_SET
+
+**Signature:** `STD::MAP_SET($map: MAP, $key: STRING, $value: ANY) -> MAP`
+
+**Contexts:** AST, RPN
+
+Insert one key into a map.
+
+Fails on duplicates so two entries sharing a key fail the run
+instead of silently shadowing each other.
+
+### STD::MERGE_MAPS
+
+**Signature:** `STD::MERGE_MAPS($maps: LIST<MAP>, $policy: STRING = fail_on_duplicate | overwrite) -> MAP`
+
+**Contexts:** AST, RPN
+
+Merge a LIST of MAPs in order under one duplicate policy.
+
+`fail_on_duplicate` fails naming the repeated key, so two files
+claiming one placeholder fail the run instead of shadowing each
+other. `overwrite` lets later files win, for environment overlays.
+Non MAP elements fail naming their position.
+
+### STD::PARSE_JSON
+
+**Signature:** `STD::PARSE_JSON($text: STRING)`
+
+**Contexts:** AST, RPN
+
+Parse JSON text already held in memory.
+
+Uses the same conversion as file loading, so fetch bodies, file
+contents, and captured text share one JSON value shape. No `returns`
+tag by design: a top-level array or scalar parses to `LIST` or a
+scalar word, so a `MAP` tag would lie the way `LOAD_JSON`'s does.
+`LET` coercion still checks the actual value at assignment.
+
+### STD::PARSE_TOML
+
+**Signature:** `STD::PARSE_TOML($text: STRING) -> MAP`
+
+**Contexts:** AST, RPN
+
+Parse TOML text already held in memory.
+
+Uses the same conversion as file loading, so fetch bodies, file
+contents, and captured text share one JSON/TOML shape.
+
 ### STD::PATH_TYPE
 
 **Signature:** `STD::PATH_TYPE($path: STRING) -> STRING`
@@ -3291,7 +3369,7 @@ there is no RPN arm for filesystem IO.
 
 ### STD::SEMAPHORE_AVAILABLE
 
-**Signature:** `STD::SEMAPHORE_AVAILABLE($sem) -> INT`
+**Signature:** `STD::SEMAPHORE_AVAILABLE($sem: ANY) -> INT`
 
 **Contexts:** AST, RPN
 
@@ -3324,7 +3402,7 @@ LET $sem: SEMAPHORE = SEMAPHORE_NEW(10)
 
 ### STD::SEMAPHORE_TRY_ACQUIRE
 
-**Signature:** `STD::SEMAPHORE_TRY_ACQUIRE($sem) -> MAP`
+**Signature:** `STD::SEMAPHORE_TRY_ACQUIRE($sem: ANY) -> MAP`
 
 **Contexts:** AST only
 
@@ -3346,6 +3424,18 @@ IF $acq.held == 0 {
   ASYNC { session work }
 }
 ```
+
+### STD::TO_JSON
+
+**Signature:** `STD::TO_JSON($value: ANY) -> STRING`
+
+**Contexts:** AST, RPN
+
+Encode a script value as JSON with one trailing newline.
+
+Maps stay sorted; only template-safe shapes (STRING, INT, FLOAT,
+BOOL, LIST, MAP) survive, anything else fails here instead of
+rendering as a silent empty.
 
 ### STD::TYPES
 
@@ -3370,7 +3460,34 @@ Describe one type by name.
 Returns a MAP with name, summary, and docs. Errors on unknown type.
 Reads the run's name directory, so it runs on the AST path.
 
-## When a script fails to parse
+### STD::TYPE_OF
+
+**Signature:** `STD::TYPE_OF($value: ANY) -> STRING`
+
+**Contexts:** AST, RPN
+
+Name the word a value holds, for data-driven branching.
+
+Returns the registered type word (`STRING`, `INT`, `FLOAT`, `BOOL`,
+`LIST`, `MAP`, plus handle words like `PIPE`): the same name the
+value prints in arity and coercion errors, so scripts can branch
+on config shapes (a path string or a path list) without failing.
+
+## Errors stop the pipeline
+
+A pipeline is expected to run to completion. The engine is fail fast:
+the first failed step ends the run immediately, later steps do not
+execute, and the failure is reported with its step context. There is
+no retry, resume, or continue on error mode, and partial completion is
+not treated as success.
+
+Choosing not to run work is different from failing it. Guards and
+branches select work, timeouts bound it, and `EXIT <code>` is the
+intentional form of an immediate stop. Files written before the stop
+persist, while unwinding and task teardown follow the normal scope
+rules.
+
+### When a script fails to parse
 
 Parse errors tell you what went wrong, where, and what was expected.
 Every error names the line and column, echoes the source line, and points

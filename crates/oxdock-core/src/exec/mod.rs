@@ -35,15 +35,16 @@ pub use self::io::PipeStream;
 pub use self::io::PushManifestSink;
 pub use self::native::{
     FuncKind, FuncMeta, FuncParam, FunctionRegistry, HostModule, HostRegistration, NativeFn,
-    OxDockFn, PureFn, builtin_function_metas, builtin_function_names, std_module_table,
+    OxDockFn, PureFn, PureTable, RecordSchema, builtin_function_metas, builtin_function_names,
+    std_module_table,
 };
 pub use self::state::ExecState;
 pub use self::steps::StepCtx;
 pub use self::typing::{
-    OxDockType, TypeDescriptor, Value, ValuePayload, clone_boxed, clone_copy, clone_shared,
-    drop_boxed, drop_noop, drop_shared, eq_boxed, eq_inline, eq_shared, fmt_boxed, fmt_inline,
-    fmt_shared, load_inline, startup_descriptors, store_inline, type_anchor, unshare_boxed,
-    unshare_inline, unshare_shared,
+    Field, LIST_TAG, MAP_TAG, OxDockType, TypeDescriptor, TypeTag, Value, ValuePayload,
+    check_value, check_value_at, clone_boxed, clone_copy, clone_shared, drop_boxed, drop_noop,
+    drop_shared, eq_boxed, eq_inline, eq_shared, fmt_boxed, fmt_inline, fmt_shared, load_inline,
+    startup_descriptors, store_inline, type_anchor, unshare_boxed, unshare_inline, unshare_shared,
 };
 
 use anyhow::Result;
@@ -350,6 +351,7 @@ fn new_state<P: ProcessManager>(fs: Box<dyn WorkspaceFs>, io: ExecIo) -> Result<
         cancellable: false,
         functions: self::native::FunctionRegistry::with_builtins(),
         types: self::typing::startup_type_map(),
+        record_schemas: std::collections::HashMap::new(),
         call_depth: 0,
         // Root flow is task 0; worker ids start at 1 (see next_task_id).
         task_id: 0,
@@ -369,6 +371,10 @@ fn finish_run<P: ProcessManager>(
     process: P,
     steps: &[Step],
 ) -> Result<(GuardedPath, Box<dyn WorkspaceFs>, BTreeMap<String, Value>)> {
+    // Execution boundary: every run entry point funnels through here, so
+    // typo'd param and return type tags fail before any step runs. A bad
+    // label is a programmer error, never a runtime value.
+    state.validate_function_type_tags()?;
     let assert_windows = Arc::clone(&state.assert_windows);
     let assert_windows_stderr = Arc::clone(&state.assert_windows_stderr);
     let exact_stdout = Arc::clone(&state.exact_stdout);

@@ -13,7 +13,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use oxdock_core::{
     FuncKind, FuncMeta, FuncParam, HostModule, HostRegistration, NativeFn, OxDockFn, OxDockType,
-    StepCtx, Value,
+    StepCtx, TypeTag, Value,
 };
 use oxdock_func_macro::oxdock_func;
 use oxdock_net_plugin::{AcquiredListener, EndpointKey, EndpointRegistry, acquire_listener};
@@ -132,7 +132,7 @@ fn dequeue_session<P: ProcessManager>(
 /// SSH_CLOSE($m.server)
 /// ```
 #[oxdock_func(
-    returns = "MAP",
+    returns = TypeTag::Map,
     summary = "Dequeue one SSH session with its metadata."
 )]
 fn ssh_dequeue<P: ProcessManager>(cx: &mut StepCtx<P>, server: Value) -> Result<Value> {
@@ -388,7 +388,7 @@ fn ssh_serve<P: ProcessManager>(
 /// CANCEL $c
 /// SSH_CLOSE($m.server)
 /// ```
-#[oxdock_func(returns = "MAP", summary = "Accept one SSH session into pipes.")]
+#[oxdock_func(returns = TypeTag::Map, summary = "Accept one SSH session into pipes.")]
 fn ssh_accept<P: ProcessManager>(
     cx: &mut StepCtx<P>,
     server: Value,
@@ -425,7 +425,7 @@ fn ssh_accept<P: ProcessManager>(
 /// second pump on the same session bails instead of splitting bytes.
 /// Returns a MAP with `closed` (BOOL).
 #[oxdock_func(
-    returns = "MAP",
+    returns = TypeTag::Map,
     summary = "Pump a dequeued SSH session through pipes."
 )]
 fn ssh_pump_channel<P: ProcessManager>(
@@ -448,7 +448,7 @@ fn ssh_pump_channel<P: ProcessManager>(
 
 /// Shut a server down and join its runtime thread (bounded). Idempotent:
 /// returns BOOL true when no thread remains.
-#[oxdock_func(returns = "BOOL", summary = "Shut down an SSH server.")]
+#[oxdock_func(returns = TypeTag::Bool, summary = "Shut down an SSH server.")]
 fn ssh_close<P: ProcessManager>(cx: &mut StepCtx<P>, server: Value) -> Result<Value> {
     let _ = cx;
     let state = server_state(&server, "SSH_CLOSE")?;
@@ -506,7 +506,7 @@ fn ssh_connect<P: ProcessManager>(
 /// Copy one pipe into another until EOF, then close the target.
 /// Returns the INT byte count. Either task placement works, as long as
 /// the other end is live (usually an `ASYNC` task).
-#[oxdock_func(returns = "INT", summary = "Copy one pipe into another until EOF.")]
+#[oxdock_func(returns = TypeTag::Int, summary = "Copy one pipe into another until EOF.")]
 fn ssh_pump<P: ProcessManager>(
     cx: &mut StepCtx<P>,
     from_pipe: Value,
@@ -529,7 +529,7 @@ fn ssh_pump<P: ProcessManager>(
 /// session's `SSH_USER` / `SSH_CLIENT` / `SSH_SERVER` / `SSH_COMMAND`
 /// relay) reaches the child; the working directory comes from the script.
 #[oxdock_func(
-    returns = "INT",
+    returns = TypeTag::Int,
     summary = "Run a command under a sized local terminal into pipes."
 )]
 fn ssh_pty_run<P: ProcessManager>(
@@ -588,6 +588,7 @@ pub fn module_with_endpoints<P: ProcessManager>(registry: Arc<EndpointRegistry>)
             SshPtyRun::registration(),
         ],
         types: vec![SshServerTag::descriptor(), SshSessionTag::descriptor()],
+        record_schemas: vec![],
     }
 }
 
@@ -619,14 +620,16 @@ fn ssh_serve_registration<P: ProcessManager>(
             params: Some(vec![
                 FuncParam {
                     name: "bind".to_string(),
-                    param_type: Some("STRING".to_string()),
+                    param_type: Some(TypeTag::String),
+                    allowed: None,
                 },
                 FuncParam {
                     name: "options".to_string(),
                     param_type: None,
+                    allowed: None,
                 },
             ]),
-            returns: Some("MAP".to_string()),
+            returns: Some(TypeTag::Map),
             rpn: false,
             summary: "Serve SSH on a virtual service endpoint.",
             docs: "Serve SSH on a virtual service endpoint.",
@@ -671,26 +674,31 @@ fn ssh_connect_registration<P: ProcessManager>(
             params: Some(vec![
                 FuncParam {
                     name: "target".to_string(),
-                    param_type: Some("STRING".to_string()),
+                    param_type: Some(TypeTag::String),
+                    allowed: None,
                 },
                 FuncParam {
                     name: "username".to_string(),
-                    param_type: Some("STRING".to_string()),
+                    param_type: Some(TypeTag::String),
+                    allowed: None,
                 },
                 FuncParam {
                     name: "password".to_string(),
-                    param_type: Some("STRING".to_string()),
+                    param_type: Some(TypeTag::String),
+                    allowed: None,
                 },
                 FuncParam {
                     name: "in_pipe".to_string(),
                     param_type: None,
+                    allowed: None,
                 },
                 FuncParam {
                     name: "out_pipe".to_string(),
                     param_type: None,
+                    allowed: None,
                 },
             ]),
-            returns: Some("MAP".to_string()),
+            returns: Some(TypeTag::Map),
             rpn: false,
             summary: "Open an SSH client session into pipes.",
             docs: "Open an SSH client session into pipes. Target shapes: a logical port (CLI-mapped address or loopback default), a service name (CLI-mapped address only), a served address, or a host:port dial.",
