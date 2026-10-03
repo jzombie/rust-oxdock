@@ -30,6 +30,30 @@ fn platform_guard_display_uses_namespaces() {
 }
 
 #[test]
+fn arch_guard_display_round_trips() {
+    let step = Step {
+        guard: Some(
+            Guard::Attr {
+                ns: Ns::Arch,
+                key: None,
+                val: Some("x86_64".to_string()),
+            }
+            .into(),
+        ),
+        kind: StepKind::Workdir("a".into()),
+        scope_enter: 0,
+        scope_exit: 0,
+    };
+
+    let rendered = step.to_string();
+    assert_eq!(rendered, "[arch:x86_64] WORKDIR a");
+
+    let parsed = parse_script(&rendered, mock_lower).expect("round-trip parse");
+    assert_eq!(parsed.len(), 1);
+    assert_eq!(parsed[0].guard, step.guard);
+}
+
+#[test]
 fn family_alias_lowers_to_os_disjunction() {
     // `family:` is an accepted alias, never a stored namespace: it
     // lowers at parse to `os:` expressions.

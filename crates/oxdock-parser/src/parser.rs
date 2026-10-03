@@ -1,6 +1,6 @@
 use crate::ast::{
-    Arg, Expr, Guard, GuardExpr, IoBinding, IoStream, MathOp, ModuleTable, Ns, PipeTarget, Step,
-    StepKind,
+    ARCH_VALUES, Arg, Expr, Guard, GuardExpr, IoBinding, IoStream, MathOp, ModuleTable, Ns,
+    PipeTarget, Step, StepKind,
 };
 use crate::command::ArgType;
 use crate::constants::{
@@ -3563,9 +3563,29 @@ fn parse_ns_guard(pair: Pair<Rule>, span: &SpanContext) -> ParseResult<GuardExpr
                 span,
             )),
         },
+        "arch" => {
+            if ARCH_VALUES.contains(&val.as_str()) {
+                Ok(GuardExpr::Predicate(Guard::Attr {
+                    ns: Ns::Arch,
+                    key: None,
+                    val: Some(val),
+                }))
+            } else {
+                Err(ParseError::structural(
+                    "guard",
+                    format!(
+                        "unknown arch '{val}'; known values: {}",
+                        ARCH_VALUES.join(", ")
+                    ),
+                    span,
+                ))
+            }
+        }
         _ => Err(ParseError::structural(
             "guard",
-            format!("unknown guard namespace '{ns}'; known namespaces: family, os, env, bool"),
+            format!(
+                "unknown guard namespace '{ns}'; known namespaces: family, os, arch, env, bool"
+            ),
             span,
         )),
     }

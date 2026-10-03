@@ -13,6 +13,11 @@ fn arb_guard() -> impl Strategy<Value = Guard> {
             key: None,
             val: Some(val),
         }),
+        prop::sample::select(oxdock_parser::ARCH_VALUES.to_vec()).prop_map(|val| Guard::Attr {
+            ns: Ns::Arch,
+            key: None,
+            val: Some(val.to_string()),
+        }),
         "[a-zA-Z_][a-zA-Z0-9_]*".prop_map(|key| Guard::Attr {
             ns: Ns::Env,
             key: Some(key),

@@ -4282,6 +4282,46 @@ fn static_covered_partition_read_passes() {
 }
 
 #[test]
+fn static_exclusive_arch_guards_share_scope() {
+    // Disjoint arch pairs shadow across exclusive paths instead of
+    // erroring; the same arch twice still overlaps and fails.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        [arch:x86_64] LET $o: STRING = "x"
+        [arch:aarch64] LET $o: STRING = "a"
+    "#};
+    run_script(&root, script).expect("exclusive arch guards share scope");
+    let script = indoc! {r#"
+        [arch:x86_64] LET $o: STRING = "x"
+        [arch:x86_64] LET $o: STRING = "y"
+    "#};
+    let err = run_script(&root, script).expect_err("same arch twice must fail");
+    assert!(err.to_string().contains("redeclaration error"), "{err}");
+}
+
+#[test]
+fn arch_guard_runs_on_host_arch_only() {
+    // Runtime anchor: the host arch fires, any other valid arch
+    // skips without error.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let host = std::env::consts::ARCH;
+    let other = if host == "x86_64" {
+        "aarch64"
+    } else {
+        "x86_64"
+    };
+    let script = formatdoc! {r#"
+        [arch:{host}] WRITE hit.txt "hit"
+        [arch:{other}] WRITE miss.txt "miss"
+    "#};
+    run_script(&root, &script).expect("arch gates run");
+    assert_eq!(read_trimmed(&root.join("hit.txt").unwrap()), "hit");
+    assert!(!exists(&root, "miss.txt"));
+}
+
+#[test]
 fn static_set_outside_binding_path_fails() {
     // Mutations are site-aware: `$port` binds under `family:unix`
     // only, so setting it on the Windows path fails statically

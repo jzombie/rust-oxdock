@@ -160,7 +160,7 @@ ASSERT_CONTAINS stdout "ab"
 
 A guard is a bracketed expression that gates the instruction or block that follows it. Inside the brackets:
 
-- Guards are namespaced `key:value` pairs: `os:macos`, `os:linux`, `os:windows`, `bool:true`, `env:KEY`, `eq(env:KEY, value)`. `family:unix` and `family:windows` are accepted aliases for `any(os:macos, os:linux)` and `os:windows` respectively, lowered at parse so every platform check runs under `os:`. Matching is case-sensitive throughout.
+- Guards are namespaced `key:value` pairs: `os:macos`, `os:linux`, `os:windows`, `arch:x86_64` (any documented target-architecture value), `bool:true`, `env:KEY`, `eq(env:KEY, value)`. `family:unix` and `family:windows` are accepted aliases for `any(os:macos, os:linux)` and `os:windows` respectively, lowered at parse so every platform check runs under `os:`. Matching is case-sensitive throughout.
 - A comma-separated list means **AND**: `[env:A, os:linux]`.
 - Disjunction is expressed as a call: `any(expr, expr, ...)` with at least two branches, not an infix operator.
 - Conjunction is expressed as a call (`all(expr, expr, ...)`) or implicitly via comma separation.

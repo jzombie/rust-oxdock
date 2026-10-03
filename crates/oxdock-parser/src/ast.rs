@@ -280,6 +280,7 @@ pub enum Guard {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Ns {
     Os,
+    Arch,
     Bool,
     Env,
 }
@@ -288,11 +289,45 @@ impl fmt::Display for Ns {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Ns::Os => write!(f, "os"),
+            Ns::Arch => write!(f, "arch"),
             Ns::Bool => write!(f, "bool"),
             Ns::Env => write!(f, "env"),
         }
     }
 }
+
+/// Every documented `std::env::consts::ARCH` value: the closed
+/// `arch:` domain. Shared by parser validation and coverage
+/// reasoning so the two can never disagree on membership.
+pub const ARCH_VALUES: &[&str] = &[
+    "aarch64",
+    "arm",
+    "arm64ec",
+    "avr",
+    "bpf",
+    "csky",
+    "hexagon",
+    "loongarch32",
+    "loongarch64",
+    "mips",
+    "mips32r6",
+    "mips64",
+    "mips64r6",
+    "msp430",
+    "nvptx64",
+    "powerpc",
+    "powerpc64",
+    "riscv32",
+    "riscv64",
+    "s390x",
+    "sparc",
+    "sparc64",
+    "wasm32",
+    "wasm64",
+    "x86",
+    "x86_64",
+    "xtensa",
+];
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum GuardExpr {
@@ -697,6 +732,10 @@ pub fn guard_allows(guard: &Guard, env: &impl EnvLookup) -> bool {
             Some("windows") => platform_is_windows(),
             _ => false,
         },
+        Ns::Arch => match val.as_deref() {
+            Some(want) => ARCH_TARGET == want,
+            None => false,
+        },
         Ns::Bool => val
             .as_deref()
             .map(|v| v.parse::<bool>().unwrap_or(false))
@@ -722,17 +761,21 @@ fn platform_is_windows() -> bool {
     cfg!(windows)
 }
 
-/// See `platform_is_unix`.
+/// See `platform_is_windows`.
 #[allow(clippy::disallowed_macros)]
 fn platform_is_macos() -> bool {
     cfg!(target_os = "macos")
 }
 
-/// See `platform_is_unix`.
+/// See `platform_is_windows`.
 #[allow(clippy::disallowed_macros)]
 fn platform_is_linux() -> bool {
     cfg!(target_os = "linux")
 }
+
+/// Host target architecture behind `arch:` guards. A plain const
+/// read alongside the platform helpers above.
+const ARCH_TARGET: &str = std::env::consts::ARCH;
 
 pub fn guard_expr_allows(expr: &GuardExpr, env: &impl EnvLookup) -> bool {
     match expr {
@@ -830,6 +873,7 @@ fn closed_domain_values(ns: Ns, key: Option<&str>) -> Option<&'static [&'static 
     match (ns, key) {
         (Ns::Bool, None) => Some(&["true", "false"]),
         (Ns::Os, None) => Some(&["macos", "linux", "windows"]),
+        (Ns::Arch, None) => Some(ARCH_VALUES),
         _ => None,
     }
 }
@@ -1439,6 +1483,10 @@ mod guard_analysis_tests {
         attr(Ns::Os, None, Some(value))
     }
 
+    fn arch(value: &str) -> GuardExpr {
+        attr(Ns::Arch, None, Some(value))
+    }
+
     /// The `family:unix` parse alias, desugared exactly as the
     /// parser lowers it.
     fn unix() -> GuardExpr {
@@ -1496,6 +1544,24 @@ mod guard_analysis_tests {
         // cover every host, so their joint negation is dead.
         let covered = GuardExpr::All(vec![GuardExpr::Not(Box::new(unix())), not(windows())]);
         assert!(!guard_satisfiable(&covered));
+    }
+
+    /// `arch:` decides by value like every namespace; it overlaps
+    /// `os:` (independent axes: an aarch64 mac exists). Negating
+    /// the whole closed `ARCH_VALUES` domain covers no host.
+    #[test]
+    fn arch_guards_decide_by_value() {
+        assert!(!guards_overlap(
+            Some(&arch("x86_64")),
+            Some(&arch("aarch64"))
+        ));
+        assert!(guards_overlap(Some(&arch("x86_64")), Some(&arch("x86_64"))));
+        assert!(guards_overlap(Some(&arch("aarch64")), Some(&os("macos"))));
+        let exhausted = GuardExpr::All(ARCH_VALUES.iter().map(|value| not(arch(value))).collect());
+        assert!(!guard_satisfiable(&exhausted));
+        // Runtime anchor: this host's own architecture fires here.
+        let host = attr(Ns::Arch, None, Some(ARCH_TARGET));
+        assert!(guard_expr_allows(&host, &HashMap::new()));
     }
 
     /// The full platform matrix, asserted exhaustively. All three

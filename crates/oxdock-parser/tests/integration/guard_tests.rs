@@ -9,9 +9,13 @@ fn test_valid_guard_expressions() {
         "bool:true",
         "family:unix",
         "not(family:windows)",
+        "arch:x86_64",
+        "not(arch:aarch64)",
         "any(env:A, env:B)",
         "any(eq(env:A, 1), os:linux)",
+        "any(arch:x86_64, arch:aarch64)",
         "all(env:A, os:linux)",
+        "all(arch:arm, os:linux)",
     ];
 
     for guard_str in valid_guards {
@@ -98,6 +102,22 @@ fn test_eq_guard_quoted_value_with_comma() {
         }
         other => panic!("expected EnvEquals, got {other:?}"),
     }
+}
+
+#[test]
+fn test_arch_guard_values_are_closed() {
+    // Known targets parse; unknown or wrong-case values fail like
+    // every other closed namespace.
+    assert!(parse_guard_expr_str("arch:x86_64").is_ok());
+    for bad in ["arch:commodore64", "arch:X86_64", "arch:x86-64"] {
+        let err = parse_guard_expr_str(bad).expect_err("closed arch domain must reject");
+        let text = format!("{err:#}");
+        assert!(text.contains("unknown arch"), "{text}");
+    }
+    // Empty values never reach validation: the grammar rejects them.
+    assert!(parse_guard_expr_str("arch:").is_err());
+    let err = parse_guard_expr_str("cpuid:x86_64").expect_err("unknown namespace must fail");
+    assert!(format!("{err:#}").contains("arch"));
 }
 
 #[test]

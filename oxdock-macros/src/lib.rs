@@ -1305,6 +1305,7 @@ fn emit_guard_pred(
             // never interpolated. Key and value keep interpolation.
             let ns_variant = match ns {
                 oxdock_parser::Ns::Os => quote! { Os },
+                oxdock_parser::Ns::Arch => quote! { Arch },
                 oxdock_parser::Ns::Bool => quote! { Bool },
                 oxdock_parser::Ns::Env => quote! { Env },
             };
