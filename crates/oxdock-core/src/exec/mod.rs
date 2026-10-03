@@ -7,6 +7,7 @@ mod io;
 mod native;
 pub mod remote;
 mod state;
+mod static_check;
 mod steps;
 #[cfg(test)]
 mod tests;
@@ -375,6 +376,10 @@ fn finish_run<P: ProcessManager>(
     // typo'd param and return type tags fail before any step runs. A bad
     // label is a programmer error, never a runtime value.
     state.validate_function_type_tags()?;
+    // Script-side counterpart: terminal unification, MissingReturn,
+    // undeclared variables, and ungated ANY flow fail here too,
+    // before any step runs.
+    static_check::validate_script_types(steps, &state)?;
     let assert_windows = Arc::clone(&state.assert_windows);
     let assert_windows_stderr = Arc::clone(&state.assert_windows_stderr);
     let exact_stdout = Arc::clone(&state.exact_stdout);

@@ -118,6 +118,7 @@ impl TypeTag {
             "PATH" => Some(TypeTag::Path),
             "SEMAPHORE" => Some(TypeTag::Semaphore),
             "PERMIT" => Some(TypeTag::Permit),
+            "ANY" => Some(TypeTag::Any),
             _ => None,
         }
     }

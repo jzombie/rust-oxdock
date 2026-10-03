@@ -161,18 +161,20 @@ pub fn run_with_plugins(
         }
         LET $vpkg: STRING = "workspace_pkg"
         IF HAS_KEY($cfg, "vars") {
-            IF HAS_KEY($cfg.vars, "workspace_pkg") {
-                $vpkg = $cfg.vars.workspace_pkg
+            LET $vars: MAP = $cfg.vars
+            IF HAS_KEY($vars, "workspace_pkg") {
+                $vpkg = $vars.workspace_pkg
             }
         }
         LET $vglobal: STRING = "docs_global"
         LET $vctx: STRING = "docs_ctx"
         IF HAS_KEY($cfg, "vars") {
-            IF HAS_KEY($cfg.vars, "global") {
-                $vglobal = $cfg.vars.global
+            LET $vars: MAP = $cfg.vars
+            IF HAS_KEY($vars, "global") {
+                $vglobal = $vars.global
             }
-            IF HAS_KEY($cfg.vars, "ctx") {
-                $vctx = $cfg.vars.ctx
+            IF HAS_KEY($vars, "ctx") {
+                $vctx = $vars.ctx
             }
         }
 
@@ -196,7 +198,8 @@ pub fn run_with_plugins(
         // fails listing the known ones instead of rendering empty.
         FUNC REFRESH_GENERATED($gen: LIST) {
             FOR $entry: MAP IN $gen {
-                LET $text: STRING = OXDOCK::GENERATED($entry.key)
+                LET $key: STRING = $entry.key
+                LET $text: STRING = OXDOCK::GENERATED($key)
                 WRITE $entry.out $text
             }
         }
@@ -269,12 +272,14 @@ pub fn run_with_plugins(
             FOR $tj: STRING IN GLOB("{{ $scope }}/**/target.json") {
                 LET $file: MAP = LOAD_JSON($tj)
                 FOR $t: MAP IN $file.targets {
-                    $seen = NOTE_TARGET($seen, $t.name, $tj)
+                    LET $tname: STRING = $t.name
+                    $seen = NOTE_TARGET($seen, $tname, $tj)
                     IF HAS_KEY($t, "globs") {
                         ECHO "target '{{ $t.name }}' still uses 'globs'; declare 'template' and grouped 'fragments' patterns instead"
                         EXIT 1
                     }
-                    LET $docs_ctx: MAP = LOAD_JSON($t.values)
+                    LET $values_path: STRING = $t.values
+                    LET $docs_ctx: MAP = LOAD_JSON($values_path)
                     LET $json: STRING = BUILD_MANIFEST($t, $docs_global, $docs_ctx, $version, $workspace_pkg, $vglobal, $vctx, $vkey, $vpkg)
                     WRITE "{{ $staging }}/{{ $t.name }}.json" $json
                 }
@@ -285,7 +290,8 @@ pub fn run_with_plugins(
         FUNC RENDER_TARGET($t: MAP, $docs_global: MAP, $staging: STRING) {
             ECHO "rendering {{ $t.name }} -> {{ $t.out }}"
 
-            LET $docs_ctx: MAP = LOAD_JSON($t.values)
+            LET $values_path: STRING = $t.values
+            LET $docs_ctx: MAP = LOAD_JSON($values_path)
             LET $files: MAP = LOAD_JSON("{{ $staging }}/{{ $t.name }}.json")
 
             WRITE $t.out ""

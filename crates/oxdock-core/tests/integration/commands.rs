@@ -1399,9 +1399,20 @@ fn let_block_fallthrough_binds_empty_string() {
     // No RETURN means Done, which yields "" exactly like a function body.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    let bindings = run_script_with_scope(&root, "LET $a: STRING = { ECHO hi }\n")
+    let bindings = run_script_with_scope(&root, "LET $a: STRING = { ECHO hi\nRETURN \"\" }\n")
         .expect("fallthrough block runs");
     assert_eq!(bindings.get("a"), Some(&Value::string(String::new())));
+}
+
+#[test]
+fn let_void_block_without_return_is_static_error() {
+    // A block with no RETURN has no value: binding it fails at run
+    // start instead of silently binding "".
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let err =
+        run_script(&root, "LET $a: STRING = { ECHO hi }\n").expect_err("VOID block must fail");
+    assert!(err.to_string().contains("VOID block has no value"), "{err}");
 }
 
 #[test]
@@ -3903,4 +3914,232 @@ fn sleep_undefined_variable_errors_at_runtime() {
         err.to_string().contains("undefined"),
         "expected undefined-variable error, got: {err:#}"
     );
+}
+
+#[test]
+fn func_missing_return_fails_at_run_start() {
+    // A RETURN on some path with reachable fallthrough fails before
+    // the first step executes.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        FUNC MAYBE($c: BOOL) {
+            IF $c {
+                RETURN "yes"
+            }
+            ECHO "fell through"
+        }
+    "#};
+    let err = run_script(&root, script).expect_err("missing return must fail");
+    assert!(
+        err.to_string().contains("may fall through with no RETURN"),
+        "{err}"
+    );
+}
+
+#[test]
+fn func_disjoint_branch_types_fail_unification() {
+    // Terminal INT vs STRING paths cannot unify.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        FUNC PICK($c: BOOL) {
+            IF $c {
+                RETURN 1
+            } ELSE {
+                RETURN "one"
+            }
+        }
+    "#};
+    let err = run_script(&root, script).expect_err("disjoint returns must fail");
+    assert!(err.to_string().contains("cannot unify"), "{err}");
+    assert!(err.to_string().contains("INT"), "{err}");
+    assert!(err.to_string().contains("STRING"), "{err}");
+}
+
+#[test]
+fn func_any_return_widens_unification() {
+    // INT unifies with ANY (from PARSE_JSON) to ANY; the function
+    // still runs and both paths execute.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD]
+        FUNC WIDE($c: BOOL) {
+            IF $c {
+                RETURN 1
+            } ELSE {
+                RETURN PARSE_JSON("[2]")
+            }
+        }
+        LET $a: ANY = WIDE(true)
+        LET $b: ANY = WIDE(false)
+        WRITE out.txt "{{ $a }}{{ $b }}"
+    "#};
+    run_script(&root, script).expect("widened returns run");
+}
+
+#[test]
+fn ungated_any_argument_fails_naming_the_gate() {
+    // An ANY value straight into a MAP parameter fails statically;
+    //binding through LET first coerces at the gate and passes.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD]
+        LET $hit: BOOL = HAS_KEY(PARSE_JSON("{\"a\": 1}"), "a")
+    "#};
+    let err = run_script(&root, script).expect_err("ungated ANY must fail");
+    assert!(err.to_string().contains("bind through LET"), "{err}");
+    let script = indoc! {r#"
+        IMPORT [STD]
+        LET $m: MAP = PARSE_JSON("{\"a\": 1}")
+        LET $hit: BOOL = HAS_KEY($m, "a")
+        ASSERT_EQ $hit true
+    "#};
+    run_script(&root, script).expect("gated ANY runs");
+}
+
+#[test]
+fn func_return_only_inside_loop_fails() {
+    // Loops may trip zero times: a RETURN solely inside FOR leaves
+    // fallthrough reachable.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        FUNC FIRST($xs: LIST) {
+            FOR $x: ANY IN $xs {
+                RETURN $x
+            }
+        }
+    "#};
+    let err = run_script(&root, script).expect_err("loop-only return must fail");
+    assert!(
+        err.to_string().contains("may fall through with no RETURN"),
+        "{err}"
+    );
+}
+
+#[test]
+fn func_guarded_return_without_fallback_fails() {
+    // A conditionally-guarded RETURN with no unconditional fallback
+    // leaves fallthrough reachable.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        FUNC MAYBE() {
+            [env:STATIC_CHECK_DEMO_GUARD] RETURN "yes"
+        }
+    "#};
+    let err = run_script(&root, script).expect_err("guarded return must fail");
+    assert!(
+        err.to_string().contains("may fall through with no RETURN"),
+        "{err}"
+    );
+}
+
+#[test]
+fn func_undeclared_variable_fails_at_run_start() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        LET $x: INT = $nope
+    "#};
+    let err = run_script(&root, script).expect_err("undeclared must fail");
+    assert!(err.to_string().contains("is not defined"), "{err}");
+}
+
+#[test]
+fn static_math_inference_keeps_int_and_float() {
+    // Exact operative rules: INT op INT stays INT (gateless into INT
+    // positions), FLOAT mixes promote, non-numerics fail statically.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        LET $a: INT = 6
+        LET $b: INT = 7
+        LET $c: INT = $a + $b
+        LET $f: FLOAT = $a + 0.5
+        ASSERT_EQ $c 13
+    "#};
+    run_script(&root, script).expect("typed math runs");
+    let script = indoc! {r#"
+        LET $c: INT = "a" + "b"
+    "#};
+    let err = run_script(&root, script).expect_err("string math must fail");
+    assert!(
+        err.to_string().contains("arithmetic requires Int or Float"),
+        "{err}"
+    );
+}
+
+#[test]
+fn static_dead_guards_excluded_from_classification() {
+    // A `[bool:false]` RETURN is statically unreachable: it neither
+    // voids the function nor satisfies completeness.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        FUNC QUIET() {
+            [bool:false] RETURN 1
+            ECHO hi
+        }
+        QUIET()
+    "#};
+    run_script(&root, script).expect("dead return ignored");
+    // And `[bool:true]` counts as unconditional.
+    let script = indoc! {r#"
+        FUNC LOUD() {
+            [bool:true] RETURN 1
+        }
+        LET $x: INT = LOUD()
+        ASSERT_EQ $x 1
+    "#};
+    run_script(&root, script).expect("live guard counts");
+}
+
+#[test]
+fn static_else_if_condition_is_checked() {
+    // ELSE IF conditions evaluate at runtime, so undeclared names in
+    // them fail the pre-pass like any other condition.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        LET $c: BOOL = false
+        IF $c {
+            ECHO one
+        } ELSE IF $nope {
+            ECHO two
+        }
+    "#};
+    let err = run_script(&root, script).expect_err("else-if cond must fail");
+    assert!(err.to_string().contains("is not defined"), "{err}");
+}
+
+#[test]
+fn static_capture_command_is_checked() {
+    // The captured command runs before the declaration lands: a bad
+    // arity inside fails before the LET is examined.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD]
+        LET $x: INT = INT("a", "b")
+    "#};
+    let err = run_script(&root, script).expect_err("capture arity must fail");
+    assert!(err.to_string().contains("expects 1 argument(s)"), "{err}");
+}
+
+#[test]
+fn static_timeout_duration_is_checked() {
+    // A dynamic timeout evaluates before the body runs.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        TIMEOUT $nope {
+            ECHO hi
+        }
+    "#};
+    let err = run_script(&root, script).expect_err("timeout expr must fail");
+    assert!(err.to_string().contains("is not defined"), "{err}");
 }

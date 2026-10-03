@@ -3337,6 +3337,36 @@ fn parse_text_matches_file_loader_and_placeholder() {
 }
 
 #[test]
+fn static_pass_scales_linearly_on_adversarial_input() {
+    // Deterministic linearity enforcement (no wall-time bench):
+    // visits must stay proportional to input size on deep nesting,
+    // wide sequences, loops, math, and nested functions. A fixpoint
+    // or exponential blowup trips this like any regression.
+    let mut script = String::from("IMPORT [STD]\nFUNC DEEP($x: INT) {\n");
+    for index in 0..200 {
+        script.push_str(&format!("    LET $v{index}: INT = $x + {index}\n"));
+    }
+    for depth in 0..80 {
+        script.push_str(&format!(
+            "    IF $v0 == {depth} {{\n        RETURN $v0\n    }}\n"
+        ));
+    }
+    script.push_str("    FOR $i: INT IN [1, 2, 3] {\n        LET $w: INT = $i * 2\n    }\n");
+    script.push_str("    FUNC INNER($y: INT) {\n        RETURN $y\n    }\n");
+    script.push_str("    RETURN $v0\n}\n");
+    let steps = crate::parse_script(&script).expect("adversarial script parses");
+    let fs = MockFs::new();
+    let state = create_exec_state(fs);
+    let visits = super::static_check::validate_script_types_counted(&steps, &state)
+        .expect("deep but well-formed script passes");
+    assert!(
+        visits <= script.len() as u64,
+        "visits {visits} exceed input bytes {}",
+        script.len()
+    );
+}
+
+#[test]
 fn merge_maps_rejects_unknown_policy_at_boundary() {
     // Closed-set enforcement lives in the generated extractor: an
     // unknown policy fails before the body runs, naming the allowed
