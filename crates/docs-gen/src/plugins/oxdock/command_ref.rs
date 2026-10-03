@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use oxdock_core::startup_descriptors;
 use oxdock_core::{ArgType, CommandMeta, all_metadata, all_structural_metadata};
-use oxdock_core::{FuncMeta, FuncParam, TypeDescriptor, builtin_function_metas};
+use oxdock_core::{FuncMeta, FuncParam, TypeDescriptor, TypeTag, builtin_function_metas};
 use oxdock_markdown_plugin::markdown::escape_table_cell;
 use std::collections::HashSet;
 
@@ -206,10 +206,11 @@ pub(crate) fn render_body() -> Result<String> {
 }
 
 /// Render one function signature from its derived metadata:
-/// `NAME($param: TYPE, ...) -> RET`. Unconstrained `Value` parameters
-/// render bare; absent return types render no arrow. Closed `#[values]`
-/// sets render after the type (`$policy: STRING = a | b`), generated
-/// from the same tokens as the extractor check.
+/// `NAME($param: TYPE, ...) -> RET`. Every parameter renders its
+/// type (bare `Value` is `ANY`, never a hole); absent return types
+/// render no arrow. Closed `#[values]` sets render after the type
+/// (`$policy: STRING = a | b`), generated from the same tokens as
+/// the extractor check.
 fn render_signature(meta: &FuncMeta) -> String {
     let params = meta
         .params
@@ -222,10 +223,10 @@ fn render_signature(meta: &FuncMeta) -> String {
                  param_type,
                  allowed,
              }: &FuncParam| match (param_type, allowed) {
-                (Some(label), Some(values)) => {
-                    format!("${name}: {label} = {}", values.join(" | "))
+                (Some(tag), Some(values)) => {
+                    format!("${name}: {} = {}", render_tag(tag), values.join(" | "))
                 }
-                (Some(label), None) => format!("${name}: {label}"),
+                (Some(tag), None) => format!("${name}: {}", render_tag(tag)),
                 (None, _) => format!("${name}"),
             },
         )
@@ -234,9 +235,27 @@ fn render_signature(meta: &FuncMeta) -> String {
     let returns = meta
         .returns
         .as_ref()
-        .map(|label| format!(" -> {label}"))
+        .map(|tag| format!(" -> {}", render_tag(tag)))
         .unwrap_or_default();
     format!("{}({}){}", meta.name, params, returns)
+}
+
+/// Render one tag structurally: shaped tags name their contents
+/// (`LIST<MAP>`, `MAP<name: TYPE, ...>`), so the signature shows the
+/// generics the extractor enforces instead of the coarse word kind.
+fn render_tag(tag: &TypeTag) -> String {
+    match tag {
+        TypeTag::ListOf(inner) => format!("LIST<{}>", render_tag(inner)),
+        TypeTag::Record(fields) => {
+            let field_list = fields
+                .iter()
+                .map(|field| format!("{}: {}", field.name, render_tag(&field.ty)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("MAP<{field_list}>")
+        }
+        tag => tag.name().to_string(),
+    }
 }
 
 /// Function reference for one module, generated from its function

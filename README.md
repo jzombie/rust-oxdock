@@ -3487,7 +3487,7 @@ instead of silently shadowing each other.
 
 ### STD::MERGE_MAPS
 
-**Signature:** `STD::MERGE_MAPS($maps: LIST, $policy: STRING = fail_on_duplicate | overwrite) -> MAP`
+**Signature:** `STD::MERGE_MAPS($maps: LIST<MAP>, $policy: STRING = fail_on_duplicate | overwrite) -> MAP`
 
 **Contexts:** AST, RPN
 
