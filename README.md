@@ -1002,6 +1002,39 @@ ASSERT_CONTAINS stdout "deploying-to-staging"
 }
 ```
 
+### Architecture guards
+
+```oxdock
+# Gate blocks on the host target architecture. Exactly one block
+# runs on any host, and each block proves its own execution.
+[arch:x86_64] {
+  WRITE arch-report.txt x86_64
+  ECHO arch-detected
+  LET $rep: STRING = READ arch-report.txt
+  ASSERT_EQ $rep "x86_64"
+  ASSERT_CONTAINS stdout "arch-detected"
+}
+
+[arch:aarch64] {
+  WRITE arch-report.txt aarch64
+  ECHO arch-detected
+  LET $rep: STRING = READ arch-report.txt
+  ASSERT_EQ $rep "aarch64"
+  ASSERT_CONTAINS stdout "arch-detected"
+}
+
+[not(any(arch:x86_64, arch:aarch64))] {
+  WRITE arch-report.txt other-arch
+  ECHO arch-detected
+  LET $rep: STRING = READ arch-report.txt
+  ASSERT_EQ $rep "other-arch"
+  ASSERT_CONTAINS stdout "arch-detected"
+}
+
+# One block always runs, so this holds on every host.
+ASSERT_CONTAINS stdout "arch-detected"
+```
+
 ### Negation, disjunction, and composition
 
 ```oxdock env:OXDOCK_DOC_FEATURE_A=enabled
