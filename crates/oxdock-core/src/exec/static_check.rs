@@ -46,7 +46,7 @@
 use std::collections::HashMap;
 
 use anyhow::{Result, bail};
-use oxdock_parser::{CompareOp, Expr, Guard, GuardExpr, MathOp, Step, StepKind, TypeTag, Value};
+use oxdock_parser::{CompareOp, Expr, GuardExpr, MathOp, Step, StepKind, TypeTag, Value};
 use oxdock_process::ProcessManager;
 
 use super::{ExecState, FuncMeta, FuncParam};
@@ -89,9 +89,19 @@ struct FuncInfo {
 /// shadowing an outer frame is legal exactly where the runtime
 /// pushes a scope. `SET` and reads walk outward; types never change
 /// on mutation (runtime coerces).
-#[derive(Clone, Default)]
+/// One live declaration: its tag plus the guard it was declared
+/// under. Same-scope duplicates with disjoint guards coexist (only
+/// one path ever binds); reads unify across entries since the path
+/// is unknowable statically.
+#[derive(Clone, Debug)]
+struct Binding {
+    tag: TypeTag,
+    guard: Option<GuardExpr>,
+}
+
+#[derive(Clone, Default, Debug)]
 struct Env {
-    frames: Vec<HashMap<String, TypeTag>>,
+    frames: Vec<HashMap<String, Vec<Binding>>>,
 }
 
 /// Where a `RETURN`/`BREAK`/`CONTINUE` may legally land, mirroring
@@ -105,7 +115,8 @@ enum RetCtx {
     AsyncStmt,
 }
 
-/// Walk context: message label, return boundary, loop depth.
+/// Walk context: message label, return boundary, loop depth,
+/// plus the current step's guard for site-aware reads.
 /// `BREAK`/`CONTINUE` are legal only with `loops > 0`; blocks,
 /// functions, and tasks reset it (control never crosses those
 /// boundaries at runtime).
@@ -114,6 +125,7 @@ struct Scope<'x> {
     label: &'x str,
     ret: RetCtx,
     loops: usize,
+    site: Option<GuardExpr>,
 }
 
 /// The pass state: collected functions, host metas, inference
@@ -195,53 +207,20 @@ fn unify(left: TypeTag, right: TypeTag, ctx: &str) -> Result<TypeTag> {
     bail!("{ctx}: cannot unify {} and {}", left.name(), right.name());
 }
 
-/// Three-valued static guard evaluation: `Some(true)` executes
-/// unconditionally, `Some(false)` never executes, `None` is decided
-/// at runtime.
-fn eval_static_guard(expr: &GuardExpr) -> Option<bool> {
-    match expr {
-        GuardExpr::Predicate(guard) => match guard {
-            Guard::StaticBool { value } => match value.as_str() {
-                "true" => Some(true),
-                "false" => Some(false),
-                _ => None,
-            },
-            _ => None,
-        },
-        GuardExpr::All(items) => {
-            let mut unknown = false;
-            for item in items {
-                match eval_static_guard(item) {
-                    Some(false) => return Some(false),
-                    None => unknown = true,
-                    Some(true) => {}
-                }
-            }
-            if unknown { None } else { Some(true) }
-        }
-        GuardExpr::Or(items) => {
-            let mut unknown = false;
-            for item in items {
-                match eval_static_guard(item) {
-                    Some(true) => return Some(true),
-                    None => unknown = true,
-                    Some(false) => {}
-                }
-            }
-            if unknown { None } else { Some(false) }
-        }
-        GuardExpr::Not(inner) => eval_static_guard(inner).map(|value| !value),
-    }
-}
-
 fn classify_guard(guard: Option<&GuardExpr>) -> GuardClass {
     match guard {
         None => GuardClass::Unconditional,
-        Some(expr) => match eval_static_guard(expr) {
-            Some(true) => GuardClass::Unconditional,
-            Some(false) => GuardClass::Dead,
-            None => GuardClass::Conditional,
-        },
+        Some(expr) => {
+            if !oxdock_parser::guard_satisfiable(expr) {
+                // Unsatisfiable (e.g. `[os:macos]` + `[os:windows]` on one
+                // step): never executes, excluded everywhere.
+                GuardClass::Dead
+            } else if oxdock_parser::guard_valid(expr) {
+                GuardClass::Unconditional
+            } else {
+                GuardClass::Conditional
+            }
+        }
     }
 }
 
@@ -285,7 +264,7 @@ impl Env {
     fn one_frame(bindings: Vec<(String, TypeTag)>) -> Self {
         let mut top = HashMap::new();
         for (name, tag) in bindings {
-            top.insert(name, tag);
+            top.insert(name, vec![Binding { tag, guard: None }]);
         }
         Self { frames: vec![top] }
     }
@@ -299,22 +278,130 @@ impl Env {
         fork
     }
 
-    fn lookup(&self, key: &str) -> Option<TypeTag> {
+    /// Read a binding under a read-site guard: first frame outward
+    /// holding the name wins (shadowing); only entries overlapping
+    /// the site are live on that path, and they unify. No overlap
+    /// means the name is never bound where the read executes — the
+    /// same undeclared error runtime would produce there.
+    fn read_guarded(&self, key: &str, site: Option<&GuardExpr>) -> Result<TypeTag> {
+        Ok(self.read_entry_guarded(key, site)?.0)
+    }
+
+    /// Same as `read_guarded`, plus the precise liveness guard for
+    /// re-seeding (REMOTE headers): the union of surviving entry
+    /// guards conjoined with the site. A value crossing scopes is
+    /// live exactly where both hold.
+    fn read_entry_guarded(
+        &self,
+        key: &str,
+        site: Option<&GuardExpr>,
+    ) -> Result<(TypeTag, Option<GuardExpr>)> {
+        for frame in self.frames.iter().rev() {
+            if let Some(entries) = frame.get(key) {
+                let live: Vec<&Binding> = entries
+                    .iter()
+                    .filter(|entry| oxdock_parser::guards_overlap(entry.guard.as_ref(), site))
+                    .collect();
+                if live.is_empty() {
+                    bail!("variable '${key}' is not defined");
+                }
+                // Coverage: an unguarded live entry fires everywhere,
+                // otherwise the site must imply the disjunction of
+                // live binding guards. That is, site AND NOT(each
+                // live guard) must be unsatisfiable — else some
+                // reachable path reads unbound.
+                let any_bare = live.iter().any(|entry| entry.guard.is_none());
+                if !any_bare {
+                    let mut atoms: Vec<GuardExpr> = Vec::new();
+                    if let Some(site_expr) = site {
+                        atoms.push(site_expr.clone());
+                    }
+                    for entry in &live {
+                        if let Some(guard) = entry.guard.as_ref() {
+                            atoms.push(GuardExpr::Not(Box::new(guard.clone())));
+                        }
+                    }
+                    if oxdock_parser::guard_satisfiable(&GuardExpr::All(atoms)) {
+                        bail!(
+                            "variable '${key}' is not guaranteed to be defined on all reachable paths for this step"
+                        );
+                    }
+                }
+                let mut unified: Option<TypeTag> = None;
+                let mut union: Option<GuardExpr> = None;
+                for entry in live {
+                    unified = Some(match unified {
+                        None => entry.tag,
+                        Some(acc) => {
+                            unify(acc, entry.tag, &format!("${key} across platform guards"))?
+                        }
+                    });
+                    union = match (union, entry.guard.clone()) {
+                        (None, None) => None,
+                        (Some(g), None) | (None, Some(g)) => Some(g),
+                        (Some(g1), Some(g2)) => Some(GuardExpr::Or(vec![g1, g2])),
+                    };
+                }
+                let guard = match (site.cloned(), union) {
+                    (None, union) => union,
+                    (Some(site), None) => Some(site),
+                    (Some(site), Some(union)) => Some(GuardExpr::All(vec![site, union])),
+                };
+                return Ok((unified.expect("live never empty"), guard));
+            }
+        }
+        bail!("variable '${key}' is not defined");
+    }
+
+    fn is_declared(&self, key: &str) -> bool {
         self.frames
             .iter()
             .rev()
-            .find_map(|frame| frame.get(key).copied())
+            .any(|frame| frame.contains_key(key))
     }
 
-    fn top_contains(&self, key: &str) -> bool {
-        self.frames
-            .last()
-            .is_some_and(|frame| frame.contains_key(key))
-    }
-
-    fn insert_top(&mut self, key: String, tag: TypeTag) {
+    /// Declare in the top frame. A duplicate whose guard overlaps any
+    /// live entry mirrors the runtime redeclaration error; a disjoint
+    /// one (e.g. `[os:windows]` after `[os:macos]`) shadows across exclusive
+    /// paths and is allowed.
+    fn declare(
+        &mut self,
+        key: String,
+        tag: TypeTag,
+        guard: Option<&GuardExpr>,
+        idx: usize,
+    ) -> Result<()> {
+        if let Some(frame) = self.frames.last()
+            && let Some(entries) = frame.get(&key)
+        {
+            for entry in entries {
+                if oxdock_parser::guards_overlap(entry.guard.as_ref(), guard) {
+                    bail!(
+                        "step {}: redeclaration error: ${key} already declared in this scope; \
+                         use ${key} = ... to mutate",
+                        idx + 1
+                    );
+                }
+            }
+        }
         if let Some(frame) = self.frames.last_mut() {
-            frame.insert(key, tag);
+            frame.entry(key).or_default().push(Binding {
+                tag,
+                guard: guard.cloned(),
+            });
+        }
+        Ok(())
+    }
+
+    fn insert_top(&mut self, key: String, tag: TypeTag, guard: Option<&GuardExpr>) {
+        if let Some(frame) = self.frames.last_mut() {
+            frame.insert(
+                key,
+                vec![Binding {
+                    tag,
+                    guard: guard.cloned(),
+                }],
+            );
         }
     }
 }
@@ -415,6 +502,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             label: "top level",
             ret: RetCtx::Top,
             loops: 0,
+            site: None,
         };
         let out = self.walk_body(steps, &mut env, &scope, 0)?;
         let _ = out;
@@ -459,6 +547,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             label: key,
             ret: RetCtx::Func(key.to_string()),
             loops: 0,
+            site: None,
         };
         let out = self.walk_body(&info.body, &mut env, &scope, depth + 1)?;
         if out.has_return && out.falls_through {
@@ -505,6 +594,13 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         };
         for (idx, step) in steps.iter().enumerate() {
             self.visits += 1;
+            let scoped = Scope {
+                label: scope.label,
+                ret: scope.ret.clone(),
+                loops: scope.loops,
+                site: step.guard.clone(),
+            };
+            let scope = &scoped;
             // Positional scopes mirror execution exactly: pushed
             // before the guard check, restored after the step, even
             // for dead steps (net effect zero there).
@@ -633,7 +729,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     .resolve_tag(var_type)
                     .map_err(|err| anyhow::anyhow!("step {}: {err:#}", idx + 1))?;
                 let mut fork = env.fork();
-                fork.insert_top(clean_var(var), val_tag);
+                fork.insert_top(clean_var(var), val_tag, step.guard.as_ref());
                 if let Some(key) = key_var {
                     let key_tag = match key_type {
                         Some(name) => self
@@ -642,7 +738,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                             .map_err(|err| anyhow::anyhow!("step {}: {err:#}", idx + 1))?,
                         None => TypeTag::Int,
                     };
-                    fork.insert_top(clean_var(key), key_tag);
+                    fork.insert_top(clean_var(key), key_tag, step.guard.as_ref());
                 }
                 let mut inner_scope = scope.clone();
                 inner_scope.loops += 1;
@@ -702,14 +798,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     .resolve_tag(decl_type)
                     .map_err(|err| anyhow::anyhow!("step {}: {err:#}", idx + 1))?;
                 let key = clean_var(var);
-                if env.top_contains(&key) {
-                    bail!(
-                        "step {}: redeclaration error: ${key} already declared in this scope; \
-                         use ${key} = ... to mutate",
-                        idx + 1
-                    );
-                }
-                env.insert_top(key, tag);
+                env.declare(key, tag, step.guard.as_ref(), idx)?;
                 Ok(live)
             }
             StepKind::AssignCapture {
@@ -725,24 +814,22 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     .resolve_tag(decl_type)
                     .map_err(|err| anyhow::anyhow!("step {}: {err:#}", idx + 1))?;
                 let key = clean_var(var);
-                if env.top_contains(&key) {
-                    bail!(
-                        "step {}: redeclaration error: ${key} already declared in this scope; \
-                         use ${key} = ... to mutate",
-                        idx + 1
-                    );
-                }
-                env.insert_top(key, tag);
+                env.declare(key, tag, step.guard.as_ref(), idx)?;
                 Ok(live)
             }
             StepKind::Set { var, expr } => {
                 let key = clean_var(var);
-                if env.lookup(&key).is_none() {
+                if !env.is_declared(&key) {
                     bail!(
                         "step {}: undeclared variable ${key}: declare it first with LET ${key}: TYPE = ...",
                         idx + 1
                     );
                 }
+                // Site-aware liveness: the binding must hold on this
+                // step's path, not merely somewhere in scope. A bare
+                // existence check would accept a mutation on a path
+                // where the variable never binds.
+                let _ = env.read_guarded(&key, scope.site.as_ref())?;
                 self.infer_expr(expr, env, scope, idx, depth + 1)?;
                 Ok(live)
             }
@@ -754,7 +841,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     .resolve_tag(out_type)
                     .map_err(|err| anyhow::anyhow!("step {}: {err:#}", idx + 1))?;
                 let key = clean_var(out_var);
-                env.insert_top(key, tag);
+                env.declare(key, tag, step.guard.as_ref(), idx)?;
                 Ok(live)
             }
             StepKind::AsyncBlock { body } => {
@@ -765,6 +852,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     label: scope.label,
                     ret: RetCtx::AsyncStmt,
                     loops: 0,
+                    site: scope.site.clone(),
                 };
                 self.walk_body(body, &mut fork, &task, depth + 1)?;
                 Ok(live)
@@ -782,6 +870,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     label: scope.label,
                     ret: RetCtx::AsyncValue,
                     loops: 0,
+                    site: scope.site.clone(),
                 };
                 self.walk_body(body, &mut fork, &task, depth + 1)?;
                 let tag = self
@@ -789,7 +878,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     .resolve_tag(decl_type)
                     .map_err(|err| anyhow::anyhow!("step {}: {err:#}", idx + 1))?;
                 let key = clean_var(var);
-                env.insert_top(key, tag);
+                env.insert_top(key, tag, step.guard.as_ref());
                 Ok(live)
             }
             StepKind::Timeout { duration, body } => {
@@ -821,10 +910,12 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 let mut sealed = Env::one_frame(Vec::new());
                 for name in vars {
                     let key = clean_var(name);
-                    match env.lookup(&key) {
-                        Some(tag) => sealed.insert_top(key, tag),
-                        None => bail!("REMOTE '{target}' uses unknown variable ${key}"),
-                    }
+                    let (tag, guard) =
+                        env.read_entry_guarded(&key, step.guard.as_ref())
+                            .map_err(|_| {
+                                anyhow::anyhow!("REMOTE '{target}' uses unknown variable ${key}")
+                            })?;
+                    sealed.insert_top(key, tag, guard.as_ref());
                 }
                 // Body declarations shadow injected names: the seal
                 // pushes a scope exactly like a braced block.
@@ -833,6 +924,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     label: scope.label,
                     ret: RetCtx::Top,
                     loops: 0,
+                    site: None,
                 };
                 self.walk_body(body, &mut sealed, &remote, depth + 1)?;
                 Ok(live)
@@ -845,8 +937,8 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 // Declares `STRING` when absent, mutates (type kept)
                 // when present — mirroring `read_line` exactly.
                 let key = clean_var(var);
-                if env.lookup(&key).is_none() {
-                    env.insert_top(key, TypeTag::String);
+                if !env.is_declared(&key) {
+                    env.insert_top(key, TypeTag::String, step.guard.as_ref());
                 }
                 Ok(live)
             }
@@ -1207,18 +1299,18 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             Expr::Literal(value) => Ok(StaticTy::Ty(literal_tag(value))),
             Expr::Var(name) => {
                 let key = clean_var(name);
-                match env.lookup(&key) {
-                    Some(tag) => Ok(StaticTy::Ty(tag)),
-                    None => bail!("{}variable '${key}' is not defined", loc(Some(&at()))),
+                if !env.is_declared(&key) {
+                    bail!("{}variable '${key}' is not defined", loc(Some(&at())));
                 }
+                Ok(StaticTy::Ty(env.read_guarded(&key, scope.site.as_ref())?))
             }
             Expr::Env(_) => Ok(StaticTy::Ty(TypeTag::String)),
             Expr::KeyPath { base, keys } => {
                 let key = clean_var(base);
-                let Some(root) = env.lookup(&key) else {
-                    bail!("{}variable '${key}' is not defined", loc(None));
-                };
-                let mut current = root;
+                if !env.is_declared(&key) {
+                    bail!("{}variable '${key}' is not defined", loc(Some(&at())));
+                }
+                let mut current = env.read_guarded(&key, scope.site.as_ref())?;
                 for part in keys {
                     match current {
                         TypeTag::Record(fields) => {
@@ -1265,6 +1357,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                         label: scope.label,
                         ret: RetCtx::Block,
                         loops: 0,
+                        site: scope.site.clone(),
                     },
                     depth + 1,
                 )?;
@@ -1289,9 +1382,10 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             Expr::Call { name, args } => self.check_call(name, args, env, scope, idx, depth),
             Expr::Inspect(name) => {
                 let key = clean_var(name);
-                if !env.lookup(&key).is_some() {
-                    bail!("{}variable '${key}' is not defined", loc(None));
+                if !env.is_declared(&key) {
+                    bail!("{}variable '${key}' is not defined", loc(Some(&at())));
                 }
+                env.read_guarded(&key, scope.site.as_ref())?;
                 Ok(StaticTy::Ty(TypeTag::Any))
             }
             Expr::Compare { op, left, right } => {
@@ -1314,7 +1408,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 // `apply_arith`; only operand shapes matter.
                 numeric_pair(left_ty, right_ty, Some(&at()))
             }
-            Expr::CompiledMath(ops) => self.infer_rpn(ops, env, scope.label, idx, depth),
+            Expr::CompiledMath(ops) => self.infer_rpn(ops, env, scope, depth),
             Expr::FreshPipe => Ok(StaticTy::Ty(TypeTag::Pipe)),
             Expr::UnsignedIntBoundary(_) => Ok(StaticTy::Ty(TypeTag::Int)),
             Expr::Not(inner) => {
@@ -1342,12 +1436,11 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         &mut self,
         ops: &[MathOp],
         env: &mut Env,
-        ctx: &str,
-        _idx: usize,
+        scope: &Scope,
         depth: usize,
     ) -> Result<StaticTy> {
         if depth > MAX_STATIC_DEPTH {
-            bail!("static analysis depth exceeded in `{ctx}`");
+            bail!("static analysis depth exceeded in `{}`", scope.label);
         }
         let mut stack: Vec<StaticTy> = Vec::new();
         for op in ops {
@@ -1355,20 +1448,18 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 MathOp::PushConst(value) => stack.push(StaticTy::Ty(literal_tag(value))),
                 MathOp::LoadVar(name) => {
                     let key = clean_var(name);
-                    match env.lookup(&key) {
-                        Some(tag) => stack.push(StaticTy::Ty(tag)),
-                        None => {
-                            bail!("variable '${key}' is not defined");
-                        }
+                    if !env.is_declared(&key) {
+                        bail!("variable '${key}' is not defined");
                     }
+                    stack.push(StaticTy::Ty(env.read_guarded(&key, scope.site.as_ref())?));
                 }
                 MathOp::LoadEnv(_) => stack.push(StaticTy::Ty(TypeTag::String)),
                 MathOp::LoadKeyPath { base, keys } => {
                     let key = clean_var(base);
-                    let Some(root) = env.lookup(&key) else {
+                    if !env.is_declared(&key) {
                         bail!("variable '${key}' is not defined");
-                    };
-                    let mut current = root;
+                    }
+                    let mut current = env.read_guarded(&key, scope.site.as_ref())?;
                     for part in keys {
                         match current {
                             TypeTag::Record(fields) => {
@@ -1414,9 +1505,10 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 }
                 MathOp::Inspect(name) => {
                     let key = clean_var(name);
-                    if env.lookup(&key).is_none() {
+                    if !env.is_declared(&key) {
                         bail!("variable '${key}' is not defined");
                     }
+                    env.read_guarded(&key, scope.site.as_ref())?;
                     stack.push(StaticTy::Ty(TypeTag::Any));
                 }
                 MathOp::Neg => {
@@ -1456,10 +1548,13 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use oxdock_parser::Guard;
 
     fn static_bool(value: &str) -> GuardExpr {
-        GuardExpr::Predicate(Guard::StaticBool {
-            value: value.to_string(),
+        GuardExpr::Predicate(Guard::Attr {
+            ns: oxdock_parser::Ns::Bool,
+            key: None,
+            val: Some(value.to_string()),
         })
     }
 

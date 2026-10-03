@@ -162,7 +162,7 @@ fn parse_semicolon_splits_multiple_instructions() {
 fn parse_multi_line_guard_block() {
     let script = indoc! {r#"
         [ eq(env:MODE, debug),
-          linux
+          os:linux
         ]
         WRITE "guarded.txt" "ok"
     "#};

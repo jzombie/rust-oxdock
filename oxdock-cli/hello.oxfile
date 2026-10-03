@@ -12,15 +12,17 @@
 ECHO "This runs unconditionally"
 
 # --- Platform-specific guarded RUNs (inline guards) ---
-[mac] ECHO "Hello from Mac"
-[linux] ECHO "Hello from Linux"
-[windows] ECHO "Hello from Windows"
+# Two axes: `os:` names the exact system, `family:` splits unix-shell
+# vs Windows (`family:unix` covers macOS and Linux).
+[os:macos] ECHO "Hello from Mac"
+[os:linux] ECHO "Hello from Linux"
+[os:windows] ECHO "Hello from Windows"
 
 # Negation: run when NOT on Windows
-[!windows] ECHO "Not on Windows"
+[not(os:windows)] ECHO "Not on Windows"
 
 # OR: run on mac OR linux
-[or(mac, linux)] ECHO "mac or linux"
+[or(os:macos, os:linux)] ECHO "mac or linux"
 
 # --- ENV and env-guards ---
 # Set an environment variable for subsequent RUN commands
@@ -34,13 +36,13 @@ ENV FOO=1
 ECHO "(previous-line) Foo is set"
 
 # Example mixing AND/OR: (FOO and linux) OR mac
-[or((env:FOO, linux), mac)] ECHO "Foo on linux, or any mac"
+[or((env:FOO, os:linux), os:macos)] ECHO "Foo on linux, or any mac"
 
 # Show that ECHO can print the ENV we set earlier (cross-platform)
 ECHO {{ env:FOO }}
 
 # --- Notes ---
-# - Guards in `[...]` support comma-separated AND, `or(...)` for OR, parentheses for grouping, and `!` for inversion.
+# - Guards in `[...]` support comma-separated AND, `or(...)` for OR, parentheses for grouping, and `not(...)` for inversion.
 # - Guard-only lines accumulate and apply to the next non-empty command line.
 # - `ENV` affects subsequent RUN and RUN_BG commands and is also considered by guards.
 
@@ -48,12 +50,12 @@ ECHO {{ env:FOO }}
 # Use `ECHO` for cross-platform DSL output. Use `RUN` when you need to execute
 # native shell/OS commands; these are often platform-specific so guard them.
 # Example: list the current directory using the native command on each platform.
-[unix] RUN ls -la
-[windows] RUN dir
+[family:unix] RUN ls -la
+[family:windows] RUN dir
 
 # Example: show the `FOO` env using native commands (guarded per-platform).
-[unix] RUN env | grep FOO
-[windows] RUN cmd /C "echo %FOO%"
+[family:unix] RUN env | grep FOO
+[family:windows] RUN cmd /C "echo %FOO%"
 
 # Note: The LS command is also a built-in command
 # LS

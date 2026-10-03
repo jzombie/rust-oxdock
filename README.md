@@ -68,8 +68,8 @@ oxdock_embed! {
 
         // Provenance comes from the shell: only the matching gate runs,
         // so this stays green on every OS in CI.
-        [unix] LET $os: STRING = RUN uname -srm
-        [windows] LET $os: STRING = RUN ver
+        [family:unix] LET $os: STRING = RUN uname -srm
+        [family:windows] LET $os: STRING = RUN ver
         LET $toolchain: STRING = RUN cargo --version
 
         WRITE dist/os.txt "{{ $os }}"
@@ -951,13 +951,12 @@ ASSERT_CONTAINS stdout "ab"
 
 A guard is a bracketed expression that gates the instruction or block that follows it. Inside the brackets:
 
-- `env:KEY` passes when variable `KEY` exists and is non-empty; `eq(env:KEY, value)` and `ne(env:KEY, value)` compare values.
-- Bare platform tags pass based on the host: `linux`, `macos` (alias `mac`), `windows`, `unix`. Tags are case-insensitive.
-- A comma-separated list means **AND**: `[env:A, linux]`.
+- Guards are namespaced `key:value` pairs: `os:macos`, `os:linux`, `os:windows`, `bool:true`, `env:KEY`, `eq(env:KEY, value)`. `family:unix` and `family:windows` are accepted aliases for `any(os:macos, os:linux)` and `os:windows` respectively, lowered at parse so every platform check runs under `os:`. Matching is case-sensitive throughout.
+- A comma-separated list means **AND**: `[env:A, os:linux]`.
 - Disjunction is expressed as a call: `any(expr, expr, ...)` with at least two branches, not an infix operator.
 - Conjunction is expressed as a call (`all(expr, expr, ...)`) or implicitly via comma separation.
 - Any predicate may be negated with `not(...)`: `[not(env:SKIP)]`.
-- Parentheses group expressions: `[any(env:A, linux), mac]`.
+- Parentheses group expressions: `[any(env:A, os:linux), os:macos]`.
 
 Guards attach to the next instruction. Several guard lines in a row chain onto the same target, and a guard immediately followed by `{` opens a guarded block whose guard applies to every enclosed instruction.
 
@@ -986,7 +985,7 @@ ASSERT_CONTAINS stdout "deploying-to-staging"
 ```oxdock
 // Exactly one block runs depending on the host OS; every command
 // inside a guarded block inherits the block's guard.
-[windows] {
+[family:windows] {
   WRITE os-report.txt windows
   ECHO windows-detected
   LET $rep: STRING = READ os-report.txt
@@ -994,7 +993,7 @@ ASSERT_CONTAINS stdout "deploying-to-staging"
   ASSERT_CONTAINS stdout "windows-detected"
 }
 
-[unix] {
+[family:unix] {
   WRITE os-report.txt unix-family
   ECHO unix-detected
   LET $rep: STRING = READ os-report.txt
@@ -1018,7 +1017,7 @@ ASSERT_CONTAINS stdout "negation-passes-for-undefined"
 ASSERT_CONTAINS stdout "or-matched-a-branch"
 
 // Comma composes with AND: (A or linux) AND A: true here on every OS.
-[any(env:OXDOCK_DOC_FEATURE_A, linux), env:OXDOCK_DOC_FEATURE_A] ECHO composed-and-or-guard
+[any(env:OXDOCK_DOC_FEATURE_A, os:linux), env:OXDOCK_DOC_FEATURE_A] ECHO composed-and-or-guard
 ASSERT_CONTAINS stdout "composed-and-or-guard"
 ```
 
@@ -2478,18 +2477,12 @@ ASSERT_EQ $outer_body "production"
 # through untouched on unix ...
 ENV PROXY_PORT=23791
 
-# Each platform branch is its own scope, so both spell
-# the capture the same way without colliding.
-[unix] {
-    LET $o: STRING = RUN echo serving on "$PROXY_PORT"
-    ASSERT_CONTAINS $o "23791"
-}
+[family:unix] LET $o: STRING = RUN echo serving on "$PROXY_PORT"
 
 # ... while cmd expands %VAR% on Windows.
-[windows] {
-    LET $o: STRING = RUN echo serving on %PROXY_PORT%
-    ASSERT_CONTAINS $o "23791"
-}
+[family:windows] LET $o: STRING = RUN echo serving on %PROXY_PORT%
+
+ASSERT_CONTAINS $o "23791"
 ```
 
 

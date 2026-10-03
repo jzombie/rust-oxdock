@@ -1,6 +1,6 @@
 use crate::ast::{
-    Arg, Expr, Guard, GuardExpr, IoBinding, IoStream, MathOp, ModuleTable, PipeTarget,
-    PlatformGuard, Step, StepKind,
+    Arg, Expr, Guard, GuardExpr, IoBinding, IoStream, MathOp, ModuleTable, Ns, PipeTarget, Step,
+    StepKind,
 };
 use crate::command::ArgType;
 use crate::constants::{
@@ -3434,6 +3434,13 @@ fn parse_guard_term(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<GuardExp
     let span = refine_span(ctx, &pair);
     for inner in pair.into_inner() {
         match inner.as_rule() {
+            Rule::inject_guard => {
+                return Ok(GuardExpr::Predicate(Guard::Attr {
+                    ns: Ns::Env,
+                    key: Some(inner.as_str().to_string()),
+                    val: None,
+                }));
+            }
             Rule::eq_guard => {
                 return Ok(GuardExpr::Predicate(parse_func_guard(inner)?));
             }
@@ -3448,19 +3455,17 @@ fn parse_guard_term(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<GuardExp
                     .expect("grammar invariant violated: bool_guard missing bool_value")
                     .as_str()
                     .to_string();
-                return Ok(GuardExpr::Predicate(Guard::StaticBool { value: val }));
+                return Ok(GuardExpr::Predicate(Guard::Attr {
+                    ns: Ns::Bool,
+                    key: None,
+                    val: Some(val),
+                }));
             }
             Rule::env_guard => {
                 return Ok(GuardExpr::Predicate(parse_env_guard(inner)?));
             }
-            Rule::bare_guard_ident => {
-                let tag = inner.as_str();
-                if let Ok(g) = parse_platform_tag(ctx, tag) {
-                    return Ok(GuardExpr::Predicate(g));
-                }
-                return Ok(GuardExpr::Predicate(Guard::EnvExists {
-                    key: tag.to_string(),
-                }));
+            Rule::ns_guard => {
+                return parse_ns_guard(inner, &span);
             }
             _ => {}
         }
@@ -3488,7 +3493,11 @@ fn parse_func_guard(pair: Pair<Rule>) -> ParseResult<Guard> {
             _ => {}
         }
     }
-    Ok(Guard::EnvEquals { key, value })
+    Ok(Guard::Attr {
+        ns: Ns::Env,
+        key: Some(key),
+        val: Some(value),
+    })
 }
 
 fn unquote(s: &str) -> &str {
@@ -3505,24 +3514,61 @@ fn parse_env_guard(pair: Pair<Rule>) -> ParseResult<Guard> {
             key = inner.as_str().trim().to_string();
         }
     }
-    Ok(Guard::EnvExists { key })
+    Ok(Guard::Attr {
+        ns: Ns::Env,
+        key: Some(key),
+        val: None,
+    })
 }
 
-fn parse_platform_tag(ctx: &SpanContext, tag: &str) -> ParseResult<Guard> {
-    let target = match tag.to_ascii_lowercase().as_str() {
-        "unix" => PlatformGuard::Unix,
-        "windows" => PlatformGuard::Windows,
-        "mac" | "macos" => PlatformGuard::Macos,
-        "linux" => PlatformGuard::Linux,
-        _ => {
-            return Err(ParseError::structural(
-                "platform",
-                format!("unknown platform '{}'", tag),
-                ctx,
-            ));
+/// Namespaced guard (`[family:unix]`, `[os:macos]`): namespace and
+/// values validated here with closed lists and custom errors.
+/// `family:unix` and `family:windows` are accepted aliases lowered
+/// immediately to `any(os:macos, os:linux)` and `os:windows`, so
+/// every platform check downstream executes uniformly under `os:`.
+/// Case-sensitive throughout, matching the language's uppercase
+/// keywords and tags.
+fn parse_ns_guard(pair: Pair<Rule>, span: &SpanContext) -> ParseResult<GuardExpr> {
+    fn os(value: &str) -> GuardExpr {
+        GuardExpr::Predicate(Guard::Attr {
+            ns: Ns::Os,
+            key: None,
+            val: Some(value.to_string()),
+        })
+    }
+    let mut ns = String::new();
+    let mut val = String::new();
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::ns_name => ns = inner.as_str().trim().to_string(),
+            Rule::ns_value => val = inner.as_str().trim().to_string(),
+            _ => {}
         }
-    };
-    Ok(Guard::Platform { target })
+    }
+    match ns.as_str() {
+        "family" => match val.as_str() {
+            "unix" => Ok(GuardExpr::or(vec![os("macos"), os("linux")])),
+            "windows" => Ok(os("windows")),
+            _ => Err(ParseError::structural(
+                "guard",
+                format!("unknown family '{val}'; known values: unix, windows"),
+                span,
+            )),
+        },
+        "os" => match val.as_str() {
+            "macos" | "linux" | "windows" => Ok(os(val.as_str())),
+            _ => Err(ParseError::structural(
+                "guard",
+                format!("unknown os '{val}'; known values: macos, linux, windows"),
+                span,
+            )),
+        },
+        _ => Err(ParseError::structural(
+            "guard",
+            format!("unknown guard namespace '{ns}'; known namespaces: family, os, env, bool"),
+            span,
+        )),
+    }
 }
 
 fn parse_dollar_ident(pair: Pair<Rule>) -> String {

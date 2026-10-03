@@ -405,7 +405,7 @@ mod tests {
 
         let script = indoc!(
             r#"
-            [not(unix)] WRITE "platform.txt" "hi"
+            [not(family:unix)] WRITE "platform.txt" "hi"
             WRITE "always.txt" "ok"
             "#
         );

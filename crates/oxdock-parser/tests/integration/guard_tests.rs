@@ -1,4 +1,4 @@
-use oxdock_parser::{Guard, GuardExpr, parse_guard_expr_str};
+use oxdock_parser::{Guard, GuardExpr, Ns, parse_guard_expr_str};
 
 #[test]
 fn test_valid_guard_expressions() {
@@ -7,11 +7,11 @@ fn test_valid_guard_expressions() {
         "eq(env:FOO, bar)",
         "ne(env:FOO, bar)",
         "bool:true",
-        "linux",
-        "not(windows)",
+        "family:unix",
+        "not(family:windows)",
         "any(env:A, env:B)",
-        "any(eq(env:A, 1), linux)",
-        "all(env:A, linux)",
+        "any(eq(env:A, 1), os:linux)",
+        "all(env:A, os:linux)",
     ];
 
     for guard_str in valid_guards {
@@ -41,7 +41,11 @@ fn test_eq_ne_guard_parsing() {
     // eq() produces GuardExpr::Predicate(EnvEquals)
     let expr = parse_guard_expr_str("eq(env:STAGE, prod)").unwrap();
     match &expr {
-        GuardExpr::Predicate(Guard::EnvEquals { key, value }) => {
+        GuardExpr::Predicate(Guard::Attr {
+            ns: Ns::Env,
+            key: Some(key),
+            val: Some(value),
+        }) => {
             assert_eq!(key, "STAGE");
             assert_eq!(value, "prod");
         }
@@ -52,7 +56,11 @@ fn test_eq_ne_guard_parsing() {
     let expr = parse_guard_expr_str("ne(env:STAGE, prod)").unwrap();
     match &expr {
         GuardExpr::Not(inner) => match inner.as_ref() {
-            GuardExpr::Predicate(Guard::EnvEquals { key, value }) => {
+            GuardExpr::Predicate(Guard::Attr {
+                ns: Ns::Env,
+                key: Some(key),
+                val: Some(value),
+            }) => {
                 assert_eq!(key, "STAGE");
                 assert_eq!(value, "prod");
             }
@@ -64,7 +72,11 @@ fn test_eq_ne_guard_parsing() {
     // Quoted value with spaces
     let expr = parse_guard_expr_str("eq(env:FOO, bar baz)").unwrap();
     match &expr {
-        GuardExpr::Predicate(Guard::EnvEquals { key, value }) => {
+        GuardExpr::Predicate(Guard::Attr {
+            ns: Ns::Env,
+            key: Some(key),
+            val: Some(value),
+        }) => {
             assert_eq!(key, "FOO");
             assert_eq!(value, "bar baz");
         }
@@ -76,7 +88,11 @@ fn test_eq_ne_guard_parsing() {
 fn test_eq_guard_quoted_value_with_comma() {
     let expr = parse_guard_expr_str(r#"eq(env:LIST, "a,b")"#).unwrap();
     match &expr {
-        GuardExpr::Predicate(Guard::EnvEquals { key, value }) => {
+        GuardExpr::Predicate(Guard::Attr {
+            ns: Ns::Env,
+            key: Some(key),
+            val: Some(value),
+        }) => {
             assert_eq!(key, "LIST");
             assert_eq!(value, "a,b");
         }
@@ -97,16 +113,18 @@ fn test_eq_guard_requires_env_prefix() {
 
 #[test]
 fn test_eq_guard_display_roundtrip() {
-    let guard = Guard::EnvEquals {
-        key: "STAGE".into(),
-        value: "prod".into(),
+    let guard = Guard::Attr {
+        ns: Ns::Env,
+        key: Some("STAGE".into()),
+        val: Some("prod".into()),
     };
     assert_eq!(guard.to_string(), "eq(env:STAGE, prod)");
 
     // ne() displays as not(eq(...))
-    let expr = GuardExpr::Not(Box::new(GuardExpr::Predicate(Guard::EnvEquals {
-        key: "STAGE".into(),
-        value: "prod".into(),
+    let expr = GuardExpr::Not(Box::new(GuardExpr::Predicate(Guard::Attr {
+        ns: Ns::Env,
+        key: Some("STAGE".into()),
+        val: Some("prod".into()),
     })));
     assert_eq!(expr.to_string(), "not(eq(env:STAGE, prod))");
 }

@@ -507,7 +507,7 @@ fn expand_oxdock(input: TokenStream) -> syn::Result<TokenStream> {
     let ts_out = quote! {
         {
             use oxdock_parser::{Arg, ArgPart, AssertTarget, Expr, Step, StepKind, Value,
-                IoBinding, IoStream, WorkspaceTarget, GuardExpr, Guard, PlatformGuard};
+                IoBinding, IoStream, WorkspaceTarget, GuardExpr, Guard, Ns};
             vec![#(#step_tokens),*]
         }
     };
@@ -1300,27 +1300,35 @@ fn emit_guard_pred(
     interp: &[(proc_macro2::Ident, usize)],
 ) -> proc_macro2::TokenStream {
     match g {
-        oxdock_parser::Guard::Platform { target } => {
-            let target_variant = match target {
-                oxdock_parser::PlatformGuard::Unix => quote! { Unix },
-                oxdock_parser::PlatformGuard::Windows => quote! { Windows },
-                oxdock_parser::PlatformGuard::Macos => quote! { Macos },
-                oxdock_parser::PlatformGuard::Linux => quote! { Linux },
+        oxdock_parser::Guard::Attr { ns, key, val } => {
+            // Namespace is parser-validated closed: emit directly,
+            // never interpolated. Key and value keep interpolation.
+            let ns_variant = match ns {
+                oxdock_parser::Ns::Os => quote! { Os },
+                oxdock_parser::Ns::Bool => quote! { Bool },
+                oxdock_parser::Ns::Env => quote! { Env },
             };
-            quote! { oxdock_parser::Guard::Platform { target: oxdock_parser::PlatformGuard::#target_variant } }
-        }
-        oxdock_parser::Guard::EnvExists { key } => {
-            let k = resolve_placeholder_or_literal(key, interp);
-            quote! { oxdock_parser::Guard::EnvExists { key: #k } }
-        }
-        oxdock_parser::Guard::EnvEquals { key, value } => {
-            let k = resolve_placeholder_or_literal(key, interp);
-            let v = resolve_placeholder_or_literal(value, interp);
-            quote! { oxdock_parser::Guard::EnvEquals { key: #k, value: #v } }
-        }
-        oxdock_parser::Guard::StaticBool { value } => {
-            let v = resolve_placeholder_or_literal(value, interp);
-            quote! { oxdock_parser::Guard::StaticBool { value: #v } }
+            let key_tok = match key {
+                Some(k) => {
+                    let k = resolve_placeholder_or_literal(k, interp);
+                    quote! { Some(#k) }
+                }
+                None => quote! { None },
+            };
+            let val_tok = match val {
+                Some(v) => {
+                    let v = resolve_placeholder_or_literal(v, interp);
+                    quote! { Some(#v) }
+                }
+                None => quote! { None },
+            };
+            quote! {
+                oxdock_parser::Guard::Attr {
+                    ns: oxdock_parser::Ns::#ns_variant,
+                    key: #key_tok,
+                    val: #val_tok,
+                }
+            }
         }
     }
 }

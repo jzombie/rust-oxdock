@@ -1329,18 +1329,12 @@ ASSERT_EQ $outer_body "production"
 # through untouched on unix ...
 ENV PROXY_PORT=23791
 
-# Each platform branch is its own scope, so both spell
-# the capture the same way without colliding.
-[unix] {
-    LET $o: STRING = RUN echo serving on "$PROXY_PORT"
-    ASSERT_CONTAINS $o "23791"
-}
+[family:unix] LET $o: STRING = RUN echo serving on "$PROXY_PORT"
 
 # ... while cmd expands %VAR% on Windows.
-[windows] {
-    LET $o: STRING = RUN echo serving on %PROXY_PORT%
-    ASSERT_CONTAINS $o "23791"
-}
+[family:windows] LET $o: STRING = RUN echo serving on %PROXY_PORT%
+
+ASSERT_CONTAINS $o "23791"
 ```
 
 

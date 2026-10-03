@@ -229,17 +229,19 @@ pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
     fn walk_guard(out: &mut BTreeSet<String>, expr: &GuardExpr) {
         match expr {
             GuardExpr::Predicate(predicate) => match predicate {
-                oxdock_parser::Guard::EnvExists { key, .. } => {
-                    out.insert(key.clone());
-                }
-                oxdock_parser::Guard::EnvEquals { key, value, .. } => {
+                oxdock_parser::Guard::Attr {
+                    ns: oxdock_parser::Ns::Env,
+                    key: Some(key),
+                    val,
+                } => {
                     // The pair matters: same key with a different expected
                     // value gates differently.
-                    out.insert(format!("{key}={value}"));
+                    if let Some(value) = val {
+                        out.insert(format!("{key}={value}"));
+                    }
                     out.insert(key.clone());
                 }
-                oxdock_parser::Guard::Platform { .. } => {}
-                oxdock_parser::Guard::StaticBool { .. } => {}
+                oxdock_parser::Guard::Attr { .. } => {}
             },
             GuardExpr::All(children) | GuardExpr::Or(children) => {
                 for child in children {

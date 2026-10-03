@@ -535,9 +535,10 @@ fn symlink_errors_report_underlying_cause() {
 #[test]
 fn guarded_run_waits_for_env_to_be_set() {
     let root = GuardedPath::new_root_from_str(".").unwrap();
-    let guard = Guard::EnvEquals {
-        key: "READY".into(),
-        value: "1".into(),
+    let guard = Guard::Attr {
+        ns: oxdock_parser::Ns::Env,
+        key: Some("READY".into()),
+        val: Some("1".into()),
     };
     let steps = vec![
         Step {
@@ -573,13 +574,15 @@ fn guarded_run_waits_for_env_to_be_set() {
 #[test]
 fn guard_groups_allow_any_matching_branch() {
     let root = GuardedPath::new_root_from_str(".").unwrap();
-    let guard_alpha = Guard::EnvEquals {
-        key: "MODE".into(),
-        value: "alpha".into(),
+    let guard_alpha = Guard::Attr {
+        ns: oxdock_parser::Ns::Env,
+        key: Some("MODE".into()),
+        val: Some("alpha".into()),
     };
-    let guard_beta = Guard::EnvEquals {
-        key: "MODE".into(),
-        value: "beta".into(),
+    let guard_beta = Guard::Attr {
+        ns: oxdock_parser::Ns::Env,
+        key: Some("MODE".into()),
+        val: Some("beta".into()),
     };
     let steps = vec![
         Step {

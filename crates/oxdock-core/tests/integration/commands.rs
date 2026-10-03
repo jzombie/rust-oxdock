@@ -3239,8 +3239,8 @@ fn with_io_bg_routes_stdin_stdout() {
     // Spawns a background non-blocking pass-through child process concurrently
     // alongside a mainline foreground step.
     let script = indoc! {r#"
-        [unix] WITH_IO [stdin, stdout] ASYNC RUN "cat"
-        [windows] WITH_IO [stdin, stdout] ASYNC RUN "sort"
+        [family:unix] WITH_IO [stdin, stdout] ASYNC RUN "cat"
+        [family:windows] WITH_IO [stdin, stdout] ASYNC RUN "sort"
         RUN "echo foreground"
     "#};
     let steps = oxdock_core::parse_script(script).unwrap();
@@ -4141,5 +4141,170 @@ fn static_timeout_duration_is_checked() {
         }
     "#};
     let err = run_script(&root, script).expect_err("timeout expr must fail");
+    assert!(err.to_string().contains("is not defined"), "{err}");
+}
+
+#[test]
+fn static_exclusive_platform_guards_share_scope() {
+    // Disjoint platform pairs can never both fire: same-scope
+    // declarations under them shadow across exclusive paths instead
+    // of erroring. Only the live platform executes. Each pair runs
+    // in its own script since pairs overlap each other (`unix`
+    // covers macOS and Linux).
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    for script in [
+        "[family:unix] LET $o: STRING = \"unix\"\n[family:windows] LET $o: STRING = \"windows\"\n",
+        "[os:macos] LET $o: STRING = \"macos\"\n[os:linux] LET $o: STRING = \"linux\"\nWRITE out.txt \"{{ $o }}\"\n",
+    ] {
+        run_script(&root, script).expect("exclusive guards share scope");
+    }
+}
+
+#[test]
+fn static_overlapping_platform_guards_still_error() {
+    // Overlapping pairs share no disjointness proof (`os:macos`
+    // meets the `family:unix` alias on macos, same guard twice
+    // trivially overlaps), so same-scope duplicates fail.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    for guarded in [
+        "[os:macos] LET $o: STRING = \"m\"\n[family:unix] LET $o: STRING = \"u\"\n",
+        "[family:unix] LET $o: STRING = \"u\"\n[family:unix] LET $o: STRING = \"u2\"\n",
+        "[os:macos] LET $o: STRING = \"m\"\n[os:linux] LET $o: STRING = \"l\"\n[family:unix] LET $o: STRING = \"u\"\n",
+    ] {
+        let err = run_script(&root, guarded).expect_err("overlapping must fail");
+        assert!(err.to_string().contains("redeclaration error"), "{err}");
+    }
+    // But macos vs linux alone are disjoint and pass.
+    let script = indoc! {r#"
+        [os:macos] LET $o: STRING = "m"
+        [os:linux] LET $o: STRING = "l"
+    "#};
+    run_script(&root, script).expect("macos vs linux share scope");
+}
+
+#[test]
+fn static_unsatisfiable_guard_is_dead() {
+    // `[family:unix]` + `[family:windows]` on one step can never fire: the step is
+    // skipped entirely, so its RETURN neither voids nor satisfies.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        FUNC NEVER() {
+            ECHO hi
+        }
+        NEVER()
+    "#};
+    run_script(&root, script).expect("void runs");
+    let script = indoc! {r#"
+        FUNC VOIDDESPITEDEAD() {
+            [family:unix] [family:windows] RETURN 1
+            ECHO hi
+        }
+        VOIDDESPITEDEAD()
+    "#};
+    run_script(&root, script).expect("dead return ignored");
+}
+
+#[test]
+fn static_guarded_read_sees_only_live_entry() {
+    // Same name, disjoint types, read under one guard: only the live
+    // entry participates, so no unification error.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        [family:unix] LET $val: STRING = "path"
+        [family:windows] LET $val: INT = 100
+        [family:unix] ECHO $val
+    "#};
+    run_script(&root, script).expect("guarded read passes");
+}
+
+#[test]
+fn static_unguarded_read_of_split_types_fails() {
+    // Unguarded read sees both live entries: genuinely ambiguous.
+    // (ECHO stringifies at runtime, so it stays unchecked — the read
+    // below goes through a typed LET instead.)
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        [family:unix] LET $val: STRING = "path"
+        [family:windows] LET $val: INT = 100
+        LET $copy: STRING = $val
+    "#};
+    let err = run_script(&root, script).expect_err("ambiguous read must fail");
+    assert!(err.to_string().contains("cannot unify"), "{err}");
+}
+
+#[test]
+fn static_read_outside_coverage_is_undeclared() {
+    // Declared under one guard only, read where it never binds.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        [eq(env:STATIC_CHECK_COVERAGE_A, "1")] LET $o: STRING = "covered"
+        [eq(env:STATIC_CHECK_COVERAGE_A, "2")] LET $s: STRING = $o
+    "#};
+    let err = run_script(&root, script).expect_err("uncovered read must fail");
+    assert!(err.to_string().contains("is not defined"), "{err}");
+}
+
+#[test]
+fn static_unguarded_read_needs_full_coverage() {
+    // Declared under `[family:unix]` only, read unconditionally: some
+    // reachable path (Windows) never binds it.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        [family:unix] LET $o: STRING = "unix_only"
+        LET $s: STRING = $o
+    "#};
+    let err = run_script(&root, script).expect_err("uncovered read must fail");
+    assert!(
+        err.to_string().contains("not guaranteed to be defined"),
+        "{err}"
+    );
+}
+
+#[test]
+fn static_covered_partition_read_passes() {
+    // Canonical split: unix + windows declarations cover every host,
+    // so the unguarded read is exhaustive.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        [family:unix] LET $o: STRING = "unix"
+        [family:windows] LET $o: STRING = "windows"
+        LET $s: STRING = $o
+    "#};
+    run_script(&root, script).expect("covered read passes");
+}
+
+#[test]
+fn static_set_outside_binding_path_fails() {
+    // Mutations are site-aware: `$port` binds under `family:unix`
+    // only, so setting it on the Windows path fails statically
+    // instead of crashing at runtime.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        [family:unix] LET $port: INT = 8080
+        [family:windows] $port = 8081
+    "#};
+    let err = run_script(&root, script).expect_err("path-unbound SET must fail");
+    assert!(err.to_string().contains("is not defined"), "{err}");
+}
+
+#[test]
+fn static_rpn_math_keeps_site_context() {
+    // Math lowers to RPN; the operand load must see the step guard.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        [family:windows] LET $a: INT = 1
+        [family:unix] LET $c: INT = $a + 1
+    "#};
+    let err = run_script(&root, script).expect_err("disjoint math read must fail");
     assert!(err.to_string().contains("is not defined"), "{err}");
 }
