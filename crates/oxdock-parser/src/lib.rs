@@ -50,7 +50,7 @@ pub use parser::{
     parse_guard_expr_str, parse_script, parse_script_with_modules, parse_script_with_preseed,
 };
 pub use strip_flags::strip_flags;
-pub use tag::{Field, TypeTag, check_value};
+pub use tag::{Field, LIST_TAG, MAP_TAG, TypeTag, check_value, check_value_at};
 
 /// Shared mock lowering for parser tests.
 /// Centralizes AST lowering so unit tests, integration tests, and macro_input tests

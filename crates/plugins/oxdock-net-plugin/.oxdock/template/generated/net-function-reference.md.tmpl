@@ -5,7 +5,7 @@ Callable as `MODULE::NAME(...)` in expressions (or bare `NAME(...)` with the mod
 
 ### NET_ACCEPT
 
-**Signature:** `NET_ACCEPT($listener, $in_pipe, $out_pipe, $options) -> MAP`
+**Signature:** `NET_ACCEPT($listener: ANY, $in_pipe: ANY, $out_pipe: ANY, $options: ANY) -> MAP`
 
 **Contexts:** AST only
 
@@ -74,7 +74,7 @@ NET_CLOSE($l.listener)
 
 ### NET_CLOSE
 
-**Signature:** `NET_CLOSE($listener) -> BOOL`
+**Signature:** `NET_CLOSE($listener: ANY) -> BOOL`
 
 **Contexts:** AST only
 

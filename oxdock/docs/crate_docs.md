@@ -3185,7 +3185,7 @@ unknown function.
 
 ### STD::EOF
 
-**Signature:** `STD::EOF($pipe) -> BOOL`
+**Signature:** `STD::EOF($pipe: ANY) -> BOOL`
 
 **Contexts:** AST only
 
@@ -3217,7 +3217,7 @@ ASSERT_EQ $n 2
 
 ### STD::FLOAT
 
-**Signature:** `STD::FLOAT($val) -> FLOAT`
+**Signature:** `STD::FLOAT($val: ANY) -> FLOAT`
 
 **Contexts:** AST, RPN
 
@@ -3248,7 +3248,7 @@ Sorted, root-relative LIST; empty on no match or `..` escape.
 
 ### STD::HAS_KEY
 
-**Signature:** `STD::HAS_KEY($map, $key: STRING) -> BOOL`
+**Signature:** `STD::HAS_KEY($map: MAP, $key: STRING) -> BOOL`
 
 **Contexts:** AST, RPN
 
@@ -3259,7 +3259,7 @@ tripping the strict missing-key error.
 
 ### STD::INT
 
-**Signature:** `STD::INT($val) -> INT`
+**Signature:** `STD::INT($val: ANY) -> INT`
 
 **Contexts:** AST, RPN
 
@@ -3309,7 +3309,7 @@ Reads a workspace file and parses TOML into a DSL value.
 
 ### STD::MAP_SET
 
-**Signature:** `STD::MAP_SET($map, $key: STRING, $value) -> MAP`
+**Signature:** `STD::MAP_SET($map: MAP, $key: STRING, $value: ANY) -> MAP`
 
 **Contexts:** AST, RPN
 
@@ -3369,7 +3369,7 @@ there is no RPN arm for filesystem IO.
 
 ### STD::SEMAPHORE_AVAILABLE
 
-**Signature:** `STD::SEMAPHORE_AVAILABLE($sem) -> INT`
+**Signature:** `STD::SEMAPHORE_AVAILABLE($sem: ANY) -> INT`
 
 **Contexts:** AST, RPN
 
@@ -3402,7 +3402,7 @@ LET $sem: SEMAPHORE = SEMAPHORE_NEW(10)
 
 ### STD::SEMAPHORE_TRY_ACQUIRE
 
-**Signature:** `STD::SEMAPHORE_TRY_ACQUIRE($sem) -> MAP`
+**Signature:** `STD::SEMAPHORE_TRY_ACQUIRE($sem: ANY) -> MAP`
 
 **Contexts:** AST only
 
@@ -3427,7 +3427,7 @@ IF $acq.held == 0 {
 
 ### STD::TO_JSON
 
-**Signature:** `STD::TO_JSON($value) -> STRING`
+**Signature:** `STD::TO_JSON($value: ANY) -> STRING`
 
 **Contexts:** AST, RPN
 
@@ -3462,7 +3462,7 @@ Reads the run's name directory, so it runs on the AST path.
 
 ### STD::TYPE_OF
 
-**Signature:** `STD::TYPE_OF($value) -> STRING`
+**Signature:** `STD::TYPE_OF($value: ANY) -> STRING`
 
 **Contexts:** AST, RPN
 

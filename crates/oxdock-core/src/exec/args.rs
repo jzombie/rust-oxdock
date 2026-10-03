@@ -12,6 +12,11 @@ use super::steps::StepCtx;
 /// are not visible). Pipe targets validate against the live PipeRegistry
 /// via ExecState.
 pub(crate) fn coerce_value(value: Value, expected: &TypeTag) -> Result<Value> {
+    // `ANY` accepts every word: the boundary already let it through,
+    // so coercion is a passthrough, never a second opinion.
+    if matches!(expected, TypeTag::Any) {
+        return Ok(value);
+    }
     // Exact conformance first: passthrough when the value already
     // satisfies the tag, including shaped records and typed lists.
     if oxdock_parser::check_value(expected, &value).is_ok() {

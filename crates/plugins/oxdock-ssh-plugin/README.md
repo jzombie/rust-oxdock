@@ -21,7 +21,7 @@ Callable as `MODULE::NAME(...)` in expressions (or bare `NAME(...)` with the mod
 
 ### SSH_ACCEPT
 
-**Signature:** `SSH_ACCEPT($server, $in_pipe, $out_pipe) -> MAP`
+**Signature:** `SSH_ACCEPT($server: ANY, $in_pipe: ANY, $out_pipe: ANY) -> MAP`
 
 **Contexts:** AST only
 
@@ -73,7 +73,7 @@ SSH_CLOSE($m.server)
 
 ### SSH_CLOSE
 
-**Signature:** `SSH_CLOSE($server) -> BOOL`
+**Signature:** `SSH_CLOSE($server: ANY) -> BOOL`
 
 **Contexts:** AST only
 
@@ -92,7 +92,7 @@ Open an SSH client session into pipes. Target shapes: a logical port (CLI-mapped
 
 ### SSH_DEQUEUE
 
-**Signature:** `SSH_DEQUEUE($server) -> MAP`
+**Signature:** `SSH_DEQUEUE($server: ANY) -> MAP`
 
 **Contexts:** AST only
 
@@ -151,7 +151,7 @@ SSH_CLOSE($m.server)
 
 ### SSH_PTY_RUN
 
-**Signature:** `SSH_PTY_RUN($session, $argv, $rows: INT, $cols: INT, $in_pipe, $out_pipe) -> INT`
+**Signature:** `SSH_PTY_RUN($session: ANY, $argv: ANY, $rows: INT, $cols: INT, $in_pipe: ANY, $out_pipe: ANY) -> INT`
 
 **Contexts:** AST only
 
@@ -171,7 +171,7 @@ relay) reaches the child; the working directory comes from the script.
 
 ### SSH_PUMP
 
-**Signature:** `SSH_PUMP($from_pipe, $to_pipe) -> INT`
+**Signature:** `SSH_PUMP($from_pipe: ANY, $to_pipe: ANY) -> INT`
 
 **Contexts:** AST only
 
@@ -183,7 +183,7 @@ the other end is live (usually an `ASYNC` task).
 
 ### SSH_PUMP_CHANNEL
 
-**Signature:** `SSH_PUMP_CHANNEL($session, $in_pipe, $out_pipe) -> MAP`
+**Signature:** `SSH_PUMP_CHANNEL($session: ANY, $in_pipe: ANY, $out_pipe: ANY) -> MAP`
 
 **Contexts:** AST only
 

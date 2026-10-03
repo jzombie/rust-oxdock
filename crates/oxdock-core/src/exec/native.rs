@@ -638,8 +638,8 @@ fn path_type<P: ProcessManager>(cx: &mut StepCtx<P>, path: String) -> Result<Val
 /// Pure MAP probe so scripts can branch on optional fields without
 /// tripping the strict missing-key error.
 #[oxdock_func(pure, returns = TypeTag::Bool)]
-fn has_key(map: Value, key: String) -> Result<Value> {
-    super::args::has_key_from_value(map, &key)
+fn has_key(map: BTreeMap<String, Value>, key: String) -> Result<Value> {
+    super::args::has_key_from_value(Value::map(map), &key)
 }
 
 /// Insert one key into a map.
@@ -647,8 +647,8 @@ fn has_key(map: Value, key: String) -> Result<Value> {
 /// Fails on duplicates so two entries sharing a key fail the run
 /// instead of silently shadowing each other.
 #[oxdock_func(pure, returns = TypeTag::Map)]
-fn map_set(map: Value, key: String, value: Value) -> Result<Value> {
-    super::args::map_set_from_value(map, key, value)
+fn map_set(map: BTreeMap<String, Value>, key: String, value: Value) -> Result<Value> {
+    super::args::map_set_from_value(Value::map(map), key, value)
 }
 
 /// Encode a script value as JSON with one trailing newline.
@@ -680,10 +680,13 @@ fn type_of(value: Value) -> Result<Value> {
 /// Non MAP elements fail naming their position.
 #[oxdock_func(pure, returns = TypeTag::Map)]
 fn merge_maps(
-    maps: Vec<Value>,
+    maps: Vec<BTreeMap<String, Value>>,
     #[values("fail_on_duplicate", "overwrite")] policy: String,
 ) -> Result<Value> {
-    super::args::merge_maps_from_value(Value::list(maps), policy)
+    super::args::merge_maps_from_value(
+        Value::list(maps.into_iter().map(Value::map).collect()),
+        policy,
+    )
 }
 
 /// List all visible function names.

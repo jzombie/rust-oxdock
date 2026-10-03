@@ -40,10 +40,21 @@ pub enum TypeTag {
     Path,
     Semaphore,
     Permit,
+    /// Every word: for parameters that accept anything by design
+    /// (coercion inputs, generic carriers). Boundary and coercion
+    /// both accept unconditionally, so the tag never lies.
+    Any,
     Custom(&'static TypeDescriptor),
     ListOf(&'static TypeTag),
     Record(&'static [Field]),
 }
+
+/// The MAP word for `TypeTag::ListOf` metadata: one shared instance
+/// so generated registrations never mint competing statics.
+pub const MAP_TAG: TypeTag = TypeTag::Map;
+
+/// The LIST word for `TypeTag` metadata, matching `MAP_TAG`.
+pub const LIST_TAG: TypeTag = TypeTag::List;
 impl std::fmt::Debug for TypeTag {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -83,6 +94,7 @@ impl TypeTag {
             TypeTag::Path => "PATH",
             TypeTag::Semaphore => "SEMAPHORE",
             TypeTag::Permit => "PERMIT",
+            TypeTag::Any => "ANY",
             TypeTag::Custom(descriptor) => descriptor.name,
             TypeTag::ListOf(_) => "LIST",
             TypeTag::Record(_) => "MAP",
@@ -126,8 +138,14 @@ pub fn check_value(tag: &TypeTag, value: &Value) -> Result<()> {
     check_value_at(tag, value, "$")
 }
 
-fn check_value_at(tag: &TypeTag, value: &Value, path: &str) -> Result<()> {
+/// Shape conformance with a caller-chosen path prefix: the single
+/// implementation behind generated parameter extractors, so boundary
+/// errors name the function, the parameter, and the nested position
+/// (`F() argument `$maps`[1]: expected MAP, got INT`) with no second
+/// copy of the shape logic anywhere.
+pub fn check_value_at(tag: &TypeTag, value: &Value, path: &str) -> Result<()> {
     match tag {
+        TypeTag::Any => Ok(()),
         TypeTag::String if value.as_str().is_some() => Ok(()),
         TypeTag::Int if value.as_i64().is_some() => Ok(()),
         TypeTag::Float if value.as_f64().is_some() => Ok(()),

@@ -3370,8 +3370,23 @@ fn merge_maps_rejects_unknown_policy_at_boundary() {
     let fs = MockFs::new();
     let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
     assert!(
-        format!("{err:#}").contains("must be a LIST"),
+        format!("{err:#}").contains("expected LIST"),
         "boundary enforces the LIST shape: {err:#}"
+    );
+
+    // Element shapes walk the same boundary: a non-map element fails
+    // naming its position, through the one shape implementation.
+    let steps = crate::parse_script(indoc! {r#"
+        IMPORT [STD]
+        LET $m: MAP = MERGE_MAPS([{a: 1}, "nope"], "overwrite")
+    "#})
+    .expect("parse ok");
+    let fs = MockFs::new();
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    let text = format!("{err:#}");
+    assert!(
+        text.contains("[1]") && text.contains("expected MAP"),
+        "boundary names the element position and shape: {text}"
     );
 }
 
