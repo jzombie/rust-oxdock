@@ -6,7 +6,7 @@ Unlike Docker's Linux-VM requirement on non-Linux hosts, OxDock runs directly on
 
 Platform gating selects OS-specific steps, and remote targets bind over any stdio transport. Only RUN touches the host shell.
 
-Plain Rust functions become script functions with one attribute: `#[oxdock_func]` exports them into namespaced modules scripts call as `DEMO::NAME(...)`. See [Extending OxDock from Rust](#extending-oxdock-from-rust).
+The syntax is line-oriented in the spirit of BASIC, with a static type system checking scripts before the first step runs. Plain Rust functions become script functions with one attribute: `#[oxdock_func]` exports them into namespaced modules scripts call as `DEMO::NAME(...)`. See [Extending OxDock from Rust](#extending-oxdock-from-rust).
 
 [Documentation](https://docs.rs/oxdock/0.21.0-alpha/oxdock/)
 
