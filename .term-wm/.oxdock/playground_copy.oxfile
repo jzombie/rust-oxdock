@@ -12,7 +12,7 @@ WORKSPACE LOCAL
 RUN git add -N .
 
 [eq(env:WITH_MAIN, "0")] LET $body: STRING = RUN git diff HEAD
-[eq(env:WITH_MAIN, "1")] LET $body: STRING = RUN git diff v0.21.0-alpha
+[eq(env:WITH_MAIN, "1")] LET $body: STRING = RUN git diff main
 
 # Apply template around `git diff` body
 LET $out: PIPE
