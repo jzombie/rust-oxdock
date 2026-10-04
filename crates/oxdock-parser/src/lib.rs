@@ -51,9 +51,9 @@ pub use parser::{
 };
 pub use strip_flags::strip_flags;
 pub use tag::{
-    Field, LIST_TAG, MAP_TAG, MAX_GENERIC_DEPTH, Spelled, TypeTag, canonicalize_spelling,
-    check_value, check_value_at, intern_composed, lookup_composed, parse_spelling,
-    render_structural,
+    ANY_TAG, Field, LIST_TAG, MAP_TAG, MAX_GENERIC_DEPTH, Spelled, SpelledField, TypeTag,
+    canonicalize_spelling, check_value, check_value_at, intern_composed, lookup_composed,
+    parse_spelling, render_structural,
 };
 
 /// Shared mock lowering for parser tests.

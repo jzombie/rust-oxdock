@@ -17,12 +17,37 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::{Result, bail};
 use oxdock_parser::{
-    MAX_GENERIC_DEPTH, Spelled, Step, StepKind, canonicalize_spelling, intern_composed,
-    lookup_composed, parse_spelling,
+    ANY_TAG, MAX_GENERIC_DEPTH, Spelled, SpelledField, Step, StepKind, canonicalize_spelling,
+    intern_composed, lookup_composed, parse_spelling,
 };
 use oxdock_process::ProcessManager;
 
 use super::state::ExecState;
+
+/// Check an options map against its declared keys: unknown keys fail
+/// listing the known ones, so script typos fail fast instead of
+/// silently ignored. Shared by generated extractors and hand-built
+/// entries alike: both validate against the same `ParamOption`
+/// statics the metadata renders, so the documented keys and the
+/// enforced keys cannot drift apart. Per-key value checks stay with
+/// the function (defaults, coercion, and cross-key rules are logic,
+/// not shape).
+pub fn check_options(
+    map: &std::collections::BTreeMap<String, Value>,
+    options: &[crate::ParamOption],
+    func: &str,
+) -> Result<()> {
+    for key in map.keys() {
+        if !options.iter().any(|known| known.name == key) {
+            let known: Vec<&str> = options.iter().map(|known| known.name).collect();
+            bail!(
+                "{func}() unknown option '{key}' (expected: {})",
+                known.join(", ")
+            );
+        }
+    }
+    Ok(())
+}
 
 /// Fresh name directory seeded with the startup descriptors.
 pub(super) fn startup_type_map() -> HashMap<String, &'static TypeDescriptor> {
@@ -128,6 +153,16 @@ impl<P: ProcessManager> ExecState<P> {
         if depth > MAX_GENERIC_DEPTH {
             bail!("type spelling exceeds maximum generic depth of {MAX_GENERIC_DEPTH}: '{name}'");
         }
+        if name == "MAP" {
+            bail!(
+                "bare MAP is not a declaration type: write a shape (MAP<name: TYPE, ...>) or MAP<ANY> for maps with unknown keys"
+            );
+        }
+        if name == "LIST" {
+            bail!(
+                "bare LIST is not a declaration type: write a shape (LIST<TYPE>) or LIST<ANY> for lists with unknown elements"
+            );
+        }
         if let Some(tag) = TypeTag::builtin(name) {
             return Ok(tag);
         }
@@ -208,7 +243,7 @@ impl<P: ProcessManager> ExecState<P> {
     fn build_generic(
         &self,
         name: &str,
-        args: &[(Option<String>, Spelled)],
+        args: &[SpelledField],
         resolving: &mut Vec<String>,
         depth: usize,
     ) -> Result<TypeTag> {
@@ -217,20 +252,47 @@ impl<P: ProcessManager> ExecState<P> {
             bail!("'{name}' takes no type arguments");
         }
         if name == "LIST" {
-            let [(None, element)] = args else {
+            let [
+                SpelledField {
+                    name: None,
+                    ty: element,
+                    ..
+                },
+            ] = args
+            else {
                 bail!("LIST takes exactly one bare type argument");
             };
             let element = self.build_composed(element, resolving, depth + 1)?;
             return Ok(TypeTag::ListOf(Box::leak(Box::new(element))));
         }
+        if name == "MAP"
+            && let [
+                SpelledField {
+                    name: None,
+                    ty: Spelled::Named(any),
+                    ..
+                },
+            ] = args
+            && any.as_str() == "ANY"
+        {
+            // Explicit unknown map: the only bare MAP spelling. Anything
+            // else bare still rejects below, and plain `MAP` never
+            // resolves (see `resolve_named`).
+            return Ok(TypeTag::MapOf(&ANY_TAG));
+        }
         let mut fields = Vec::with_capacity(args.len());
-        for (field_name, field_spelled) in args {
-            let Some(field_name) = field_name else {
+        for arg in args {
+            let Some(field_name) = arg.name.as_ref() else {
                 bail!("MAP fields require 'name: TYPE'; '{name}' takes no bare arguments");
             };
-            let ty = self.build_composed(field_spelled, resolving, depth + 1)?;
+            let ty = self.build_composed(&arg.ty, resolving, depth + 1)?;
             let leaked: &'static str = Box::leak(field_name.clone().into_boxed_str());
-            fields.push(Field { name: leaked, ty });
+            fields.push(Field {
+                name: leaked,
+                ty,
+                docs: "",
+                optional: arg.optional,
+            });
         }
         Ok(TypeTag::Record(Box::leak(fields.into_boxed_slice())))
     }

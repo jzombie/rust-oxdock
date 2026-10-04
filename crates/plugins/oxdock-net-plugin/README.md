@@ -25,9 +25,19 @@ Callable as `MODULE::NAME(...)` in expressions (or bare `NAME(...)` with the mod
 
 ### NET_ACCEPT
 
-**Signature:** `NET_ACCEPT($listener: ANY, $in_pipe: ANY, $out_pipe: ANY, $options: ANY) -> MAP`
+**Signature:** `NET_ACCEPT($listener: NET_LISTENER, $in_pipe: PIPE, $out_pipe: PIPE, $options: MAP<no_half_close?: BOOL>) -> MAP<closed: BOOL>`
 
 **Contexts:** AST only
+
+**Parameters:**
+- `$listener` (NET_LISTENER): Listener handle from `NET_LISTEN`.
+- `$in_pipe` (PIPE): Pipe carrying bytes consumed by the wire side.
+- `$out_pipe` (PIPE): Pipe carrying bytes produced by the wire side.
+- `$options` (MAP<no_half_close?: BOOL>): Optional `no_half_close` setting.
+  - `no_half_close` (BOOL, optional)
+
+**Returns:** `MAP<closed: BOOL>`
+  - `closed` (BOOL): True when the connection closed cleanly.
 
 Accept one connection into pipes.
 
@@ -42,7 +52,7 @@ runs end to end under the docs conformance suite.
 
 ```oxdock
 IMPORT [STD, NET]
-LET $l: MAP = NET_LISTEN("doc-net-demo", {})
+LET $l: NET_LISTEN_INFO = NET_LISTEN("doc-net-demo", {})
 
 # Accept one connection into fresh pipes.
 LET $in: PIPE
@@ -56,7 +66,7 @@ LET $c: HANDLE = ASYNC { NET_CONNECT("doc-net-demo", $cin, $cout, {}) }
 
 # Greet through the server pipe and wait for delivery.
 WITH_IO [stdout=$in] ECHO "server-greeting"
-LET $info: MAP = INSPECT($cout)
+LET $info: MAP<ANY> = INSPECT($cout)
 LET $empty: BOOL = $info.buffer_bytes == 0
 WHILE $empty {
     SLEEP 100ms
@@ -67,7 +77,7 @@ ASSERT_CONTAINS $cout "server-greeting"
 
 # Shut down; the awaited result carries the closed key.
 CANCEL $c
-LET $done: MAP = AWAIT $acc
+LET $done: MAP<ANY> = AWAIT $acc
 ASSERT_EQ $done.closed true
 NET_CLOSE($l.listener)
 ```
@@ -78,13 +88,18 @@ NET_CLOSE($l.listener)
 
 **Contexts:** AST only
 
+**Parameters:**
+- `$target` (STRING): Logical port, service name, optionally protocol-qualified; unbound targets bail.
+
+**Returns:** `STRING`
+
 Report the bound socket address of a virtual service endpoint.
 
 Report the full bound socket address (`ip:port`) of a virtual service endpoint without claiming it: the dial-string companion to `NET_PORT`. Same qualifier and fallback rules; unbound targets bail, never an empty string.
 
 ```oxdock
 IMPORT [STD, NET]
-LET $l: MAP = NET_LISTEN("23792", {})
+LET $l: NET_LISTEN_INFO = NET_LISTEN("23792", {})
 
 # Observe the dial string without claiming the slot twice.
 LET $addr: STRING = NET_ADDR("23792")
@@ -94,9 +109,14 @@ NET_CLOSE($l.listener)
 
 ### NET_CLOSE
 
-**Signature:** `NET_CLOSE($listener: ANY) -> BOOL`
+**Signature:** `NET_CLOSE($listener: NET_LISTENER) -> BOOL`
 
 **Contexts:** AST only
+
+**Parameters:**
+- `$listener` (NET_LISTENER)
+
+**Returns:** `BOOL`
 
 Shut down a NET listener.
 
@@ -106,9 +126,20 @@ instead of hanging.
 
 ### NET_CONNECT
 
-**Signature:** `NET_CONNECT($target: STRING, $in_pipe, $out_pipe, $options) -> MAP`
+**Signature:** `NET_CONNECT($target: STRING, $in_pipe: PIPE, $out_pipe: PIPE, $options: MAP<timeout?: DURATION, no_half_close?: BOOL>) -> MAP<closed: BOOL>`
 
 **Contexts:** AST only
+
+**Parameters:**
+- `$target` (STRING): Dial target: `host:port`, a logical port, or a service name.
+- `$in_pipe` (PIPE): Pipe carrying bytes consumed by the wire side.
+- `$out_pipe` (PIPE): Pipe carrying bytes produced by the wire side.
+- `$options` (MAP<timeout?: DURATION, no_half_close?: BOOL>): Optional `timeout` and `no_half_close` settings.
+  - `timeout` (DURATION, optional, default `10s`)
+  - `no_half_close` (BOOL, optional)
+
+**Returns:** `MAP<closed: BOOL>`
+  - `closed` (BOOL): True when the connection closed cleanly.
 
 Dial a TCP endpoint into pipes.
 
@@ -118,15 +149,29 @@ Dial a TCP endpoint into pipes.
 
 **Contexts:** AST only
 
+**Parameters:**
+- `$url` (STRING): `https` URL to fetch; cleartext `http` reaches loopback hosts only.
+
+**Returns:** `STRING`
+
 Fetch an https URL to text.
 
-Fetch an `https` URL to text: the network source for `PARSE_JSON` and `PARSE_TOML`. Cleartext `http` reaches loopback hosts only. Redirects follow by hand (at most 5 hops, absolute URLs only, every hop re-validated), one 30-second deadline, at most 10 MiB of body, strict UTF-8, non-2xx statuses bail. Compose with the pure parsers: `LET $doc: MAP = PARSE_JSON(NET_FETCH($url))`.
+Fetch an `https` URL to text: the network source for `PARSE_JSON` and `PARSE_TOML`. Cleartext `http` reaches loopback hosts only. Redirects follow by hand (at most 5 hops, absolute URLs only, every hop re-validated), one 30-second deadline, at most 10 MiB of body, strict UTF-8, non-2xx statuses bail. Compose with the pure parsers: `LET $doc: MAP<ANY> = PARSE_JSON(NET_FETCH($url))`.
 
 ### NET_LISTEN
 
-**Signature:** `NET_LISTEN($bind: STRING, $options) -> MAP`
+**Signature:** `NET_LISTEN($bind: STRING, $options: MAP) -> MAP<listener: NET_LISTENER, addr: STRING, virtual: STRING>`
 
 **Contexts:** AST only
+
+**Parameters:**
+- `$bind` (STRING): Logical port (`"2251"`) or service name; physical binds are rejected.
+- `$options` (MAP): Reserved for future socket settings; must be an empty MAP today.
+
+**Returns:** `MAP<listener: NET_LISTENER, addr: STRING, virtual: STRING>`
+  - `listener` (NET_LISTENER): Listener handle for `NET_ACCEPT` and `NET_CLOSE`.
+  - `addr` (STRING): Bound socket address (`ip:port`), or the virtual endpoint echo when socketless.
+  - `virtual` (STRING): Virtual endpoint echo of the claimed slot.
 
 Claim a virtual service endpoint and report its address.
 
@@ -136,13 +181,18 @@ Claim a virtual service endpoint and report its address.
 
 **Contexts:** AST only
 
+**Parameters:**
+- `$target` (STRING): Logical port, service name, optionally protocol-qualified; unbound targets bail.
+
+**Returns:** `INT`
+
 Report the bound port of a virtual service endpoint.
 
 Report the bound port of a virtual service endpoint without claiming it, so a `-p`-mapped outer port (including ephemeral `-p 0:<inner>` resolutions) can be routed into an inner `RUN` through normal `LET`/`ENV` expansion. `target` is a logical port (`"2251"`) or a service name (`"demo-proxy"`), optionally protocol-qualified (`"tcp/web"`, `"udp/dns"`). Bare text resolves TCP with single-protocol fallback; text bound under both protocols must be qualified. Unbound targets bail: no `0` sentinel.
 
 ```oxdock
 IMPORT [STD, NET]
-LET $l: MAP = NET_LISTEN("23791", {})
+LET $l: NET_LISTEN_INFO = NET_LISTEN("23791", {})
 
 # Observe the bound port without claiming the slot twice.
 LET $port: INT = NET_PORT("23791")
@@ -167,9 +217,10 @@ NET_CLOSE($l.listener)
 
 Handle to one `NET_LISTEN` listener instance.
 
-Minted by `NET_LISTEN`, consumed by `NET_ACCEPT` and `NET_CLOSE`.
 Cloning the value shares the listener; dropping the last clone
 signals shutdown.
+
+Minted by `NET_LISTEN`; used by `NET_ACCEPT`, `NET_CLOSE`.
 
 ## License
 

@@ -15,7 +15,7 @@ host wrapper calls into.
 IMPORT [STD, MARKDOWN]
 
 # One MAP renders one body row under the key header.
-LET $row: MAP = {name: "demo", stars: 3}
+LET $row: MAP<name: STRING, stars: INT> = {name: "demo", stars: 3}
 LET $table: STRING = MAP_TO_MD_TABLE($row)
 
 # The header names the keys, the row carries the values.

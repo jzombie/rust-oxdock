@@ -3,5 +3,5 @@ ASSERT_CONTAINS stdout "build-complete"
 WRITE config.txt "key=val"
 LET $text: STRING = READ config.txt
 ASSERT_CONTAINS $text "key=val"
-LET $items: LIST = ["a", "b"]
+LET $items: LIST<STRING> = ["a", "b"]
 ASSERT_CONTAINS $items "b"

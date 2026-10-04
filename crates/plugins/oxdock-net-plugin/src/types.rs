@@ -12,7 +12,6 @@ use crate::state::ListenerState;
 
 /// Handle to one `NET_LISTEN` listener instance.
 ///
-/// Minted by `NET_LISTEN`, consumed by `NET_ACCEPT` and `NET_CLOSE`.
 /// Cloning the value shares the listener; dropping the last clone
 /// signals shutdown.
 #[oxdock_type(name = "NET_LISTENER")]

@@ -25,7 +25,7 @@ use std::sync::atomic::AtomicBool;
 
 use anyhow::{Context, Result, bail};
 use oxdock_fs::{EntryKind, GuardedPath};
-use oxdock_parser::{Step, render_dsl_literal, render_quoted};
+use oxdock_parser::{Step, render_dsl_literal, render_quoted, render_structural};
 use oxdock_pipe::PipeInner;
 use oxdock_process::ProcessManager;
 
@@ -372,7 +372,13 @@ fn resolve_header<P: ProcessManager>(
                 value.type_name()
             )
         })?;
-        lines.push(format!("LET ${name}: {} = {literal}", decl_type.name()));
+        // The declared type renders structurally, never as the coarse
+        // word: the guest re-parses these lines under the same rules,
+        // so a coarse word the guest rejects would break the seal.
+        lines.push(format!(
+            "LET ${name}: {} = {literal}",
+            render_structural(&decl_type)
+        ));
     }
     for name in env_names {
         let Some(value) = cx.get_env(name) else {

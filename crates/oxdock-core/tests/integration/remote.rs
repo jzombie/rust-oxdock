@@ -311,7 +311,7 @@ fn remote_header_injection_executes() {
     let script = indoc! {r#"
         LET $version: STRING = "1.2.3"
         LET $count: INT = 41
-        LET $flags: LIST = ["a", "b"]
+        LET $flags: LIST<STRING> = ["a", "b"]
         ENV DEPLOY_ENV=staging
         REMOTE prod [$version, $count, $flags, env:DEPLOY_ENV] {
             WRITE version.txt $version

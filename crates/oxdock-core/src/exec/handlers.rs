@@ -7,6 +7,7 @@ use oxdock_fs::EntryKind;
 use oxdock_fs::GuardedPath;
 use oxdock_parser::{
     Arg, Expr, IoBinding, IoStream, PipeTarget, Step, StepKind, TypeTag, Value, WorkspaceTarget,
+    render_structural,
 };
 use oxdock_process::{
     BackgroundHandle, CommandOptions, CommandResult, CommandStderr, CommandStdin, CommandStdout,
@@ -835,7 +836,7 @@ pub(super) fn inspect_var_map<P: ProcessManager>(
     let mut map = BTreeMap::new();
     map.insert(
         "type".to_string(),
-        Value::string(decl_type.name().to_string()),
+        Value::string(render_structural(&decl_type)),
     );
     map.insert("variable".to_string(), Value::string(clean_var.clone()));
     match (decl_type, value.as_pipe_handle()) {

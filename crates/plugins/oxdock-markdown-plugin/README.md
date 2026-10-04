@@ -21,7 +21,7 @@ host wrapper calls into.
 IMPORT [STD, MARKDOWN]
 
 # One MAP renders one body row under the key header.
-LET $row: MAP = {name: "demo", stars: 3}
+LET $row: MAP<name: STRING, stars: INT> = {name: "demo", stars: 3}
 LET $table: STRING = MAP_TO_MD_TABLE($row)
 
 # The header names the keys, the row carries the values.
@@ -39,6 +39,11 @@ Callable as `MODULE::NAME(...)` in expressions (or bare `NAME(...)` with the mod
 **Signature:** `MAP_TO_MD_TABLE($map: ANY) -> STRING`
 
 **Contexts:** AST, RPN
+
+**Parameters:**
+- `$map` (ANY): Record data: a MAP renders one row, a LIST of MAPs renders one row per entry with union columns.
+
+**Returns:** `STRING`
 
 Render record data as an aligned Markdown table: one row per MAP,
 one column per key. Fails strict on shapes with no table in them.

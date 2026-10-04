@@ -182,7 +182,7 @@ type_name = @{ ASCII_ALPHA_UPPER ~ (ASCII_ALPHA_UPPER | ASCII_DIGIT | "_")* }
 // tag. Arity and shape enforce at resolution, not here.
 type_tag = !{ type_name ~ ("<" ~ type_args ~ ">")? }
 type_args = { type_field ~ ("," ~ type_field)* }
-type_field = { (field_name ~ ":")? ~ type_tag }
+type_field = { (field_name ~ "?"? ~ ":")? ~ type_tag }
 field_name = @{ ASCII_ALPHA_LOWER ~ (ASCII_ALPHA_LOWER | ASCII_DIGIT | "_")* }
 // Script-level type alias: `TYPE PERSON = MAP<name: STRING>`.
 // Top-level only (the parser rejects bodies and guards); the spelling

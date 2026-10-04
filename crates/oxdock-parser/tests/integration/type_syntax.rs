@@ -64,8 +64,11 @@ fn type_alias_rejects_nested_and_guarded_positions() {
 fn generic_for_key_still_hits_the_pin() {
     // Loop keys stay `INT` (default) or `STRING`: a shaped key
     // fails with the pre-existing pin error, not a shape error.
-    let err = parse_script("FOR $k: LIST<MAP>, $v: MAP IN [] {\n}\n", mock_lower)
-        .expect_err("generic FOR key must fail");
+    let err = parse_script(
+        "FOR $k: LIST<MAP<ANY>>, $v: MAP<name: STRING> IN [] {\n}\n",
+        mock_lower,
+    )
+    .expect_err("generic FOR key must fail");
     assert!(format!("{err:#}").contains("INT"), "{err:#}");
 }
 

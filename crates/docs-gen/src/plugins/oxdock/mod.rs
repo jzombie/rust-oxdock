@@ -51,6 +51,7 @@ fn plugin_type_reference(module: String) -> Result<Value> {
     let entry = plugin_entry(&module)?;
     Ok(Value::string(command_ref::render_plugin_types(
         &entry.types,
+        &entry.metas,
     )))
 }
 
@@ -253,6 +254,25 @@ mod tests {
             ssh.contains("SSH_SESSION"),
             "SSH types name the session: {ssh}"
         );
+        // Origins derive from metadata, never prose: every handle names
+        // its minter and its users exactly, so a new consumer fails
+        // loudly instead of rotting a hand list.
+        for (name, line) in [
+            (
+                "SSH_SERVER",
+                "Minted by `SSH_SERVE`; used by `SSH_ACCEPT`, `SSH_CLOSE`, `SSH_DEQUEUE`.",
+            ),
+            (
+                "SSH_SESSION",
+                "Minted by `SSH_DEQUEUE`; used by `SSH_PTY_RUN`, `SSH_PUMP_CHANNEL`.",
+            ),
+        ] {
+            let section = ssh
+                .split(&format!("### Value type: {name}"))
+                .nth(1)
+                .unwrap_or("");
+            assert!(section.contains(line), "{name} pins its origins: {section}");
+        }
         let net = plugin_type_reference("NET".to_string())
             .expect("net types")
             .as_str()
@@ -261,6 +281,14 @@ mod tests {
         assert!(
             net.contains("NET_LISTENER"),
             "NET types name the listener: {net}"
+        );
+        let section = net
+            .split("### Value type: NET_LISTENER")
+            .nth(1)
+            .unwrap_or("");
+        assert!(
+            section.contains("Minted by `NET_LISTEN`; used by `NET_ACCEPT`, `NET_CLOSE`."),
+            "listener pins its origins: {section}"
         );
     }
 

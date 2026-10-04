@@ -62,6 +62,8 @@ fn guard_root(temp: &GuardedTempDir) -> GuardedPath {
 static EMP_FIELDS: &[Field] = &[Field {
     name: "name",
     ty: TypeTag::String,
+    docs: "",
+    optional: false,
 }];
 
 fn read_trimmed(path: &GuardedPath) -> String {
@@ -82,9 +84,9 @@ fn custom_type_flows_through_declare_and_hosts() {
         LET $t: TAG = MAKE_TAG()
         LET $s: STRING = READ_TAG($t)
         WRITE tag.txt "{{ $s }}::{{ $t }}"
-        LET $ts: LIST = TYPES()
+        LET $ts: LIST<STRING> = TYPES()
         WRITE types.txt "{{ $ts }}"
-        LET $td: MAP = TYPE_DESCRIBE("TAG")
+        LET $td: MAP<name: STRING, summary: STRING, docs: STRING> = TYPE_DESCRIBE("TAG")
         WRITE tag-doc.txt "{{ $td.summary }}"
     "#};
     run_with_tag_hosts(&root, script).expect("custom type runs");
@@ -386,6 +388,8 @@ fn host_module_cannot_reclaim_std_name() {
                     name: "pattern".to_string(),
                     param_type: Some(TypeTag::String),
                     allowed: None,
+                    docs: "",
+                    options: None,
                 }]),
                 returns: Some(TypeTag::List),
                 rpn: false,

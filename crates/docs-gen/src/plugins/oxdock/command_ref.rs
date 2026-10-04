@@ -210,26 +210,24 @@ pub(crate) fn render_body() -> Result<String> {
 /// type (bare `Value` is `ANY`, never a hole); absent return types
 /// render no arrow. Closed `#[values]` sets render after the type
 /// (`$policy: STRING = a | b`), generated from the same tokens as
-/// the extractor check.
+/// the extractor check. Options-bearing `MAP` parameters render
+/// their known keys in record form (`MAP<timeout?: DURATION>`),
+/// the same grammar record returns use.
 fn render_signature(meta: &FuncMeta) -> String {
     let params = meta
         .params
         .as_deref()
         .unwrap_or(&[])
         .iter()
-        .map(
-            |FuncParam {
-                 name,
-                 param_type,
-                 allowed,
-             }: &FuncParam| match (param_type, allowed) {
-                (Some(tag), Some(values)) => {
-                    format!("${name}: {} = {}", render_tag(tag), values.join(" | "))
+        .map(|param| {
+            let rendered = render_param_type(param);
+            match param.param_type.as_ref().zip(param.allowed.as_ref()) {
+                Some((_, values)) => {
+                    format!("${}: {} = {}", param.name, rendered, values.join(" | "))
                 }
-                (Some(tag), None) => format!("${name}: {}", render_tag(tag)),
-                (None, _) => format!("${name}"),
-            },
-        )
+                None => format!("${}: {}", param.name, rendered),
+            }
+        })
         .collect::<Vec<_>>()
         .join(", ");
     let returns = meta
@@ -240,12 +238,107 @@ fn render_signature(meta: &FuncMeta) -> String {
     format!("{}({}){}", meta.name, params, returns)
 }
 
+/// Render one parameter's type: options-bearing `MAP` params name
+/// their known keys in the record grammar (`MAP<timeout?: DURATION>`,
+/// defaults in nested bullets only), everything else renders its tag
+/// structurally. Single source for signatures and parameter bullets,
+/// so the two can never disagree.
+fn render_param_type(param: &FuncParam) -> String {
+    if let Some(keys) = param.options
+        && !keys.is_empty()
+    {
+        let rendered = keys
+            .iter()
+            .map(|key| {
+                format!(
+                    "{}{}: {}",
+                    key.name,
+                    if key.required { "" } else { "?" },
+                    render_tag(&key.value),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        return format!("MAP<{rendered}>");
+    }
+    param
+        .param_type
+        .as_ref()
+        .map(render_tag)
+        .unwrap_or_default()
+}
+
 /// Render one tag structurally: shaped tags name their contents
 /// (`LIST<MAP>`, `MAP<name: TYPE, ...>`), so the signature shows the
 /// generics the extractor enforces instead of the coarse word kind.
 /// Single renderer shared with the core (`DESCRIBE` output).
 fn render_tag(tag: &TypeTag) -> String {
     oxdock_parser::render_structural(tag)
+}
+
+/// Render one function's parameter docs: a bullet per parameter with
+/// its structural type, plus nested bullets for options keys, plus a
+/// returns block naming the return shape and every record field.
+/// Bullets derive entirely from typed metadata (names, tags, allowed
+/// sets, options keys, return shapes); per-parameter prose, when the
+/// author wrote `///` docs on the parameter itself, appends after a
+/// colon. Structure never depends on prose, so nothing can vary.
+fn render_parameters(meta: &FuncMeta) -> String {
+    let params = meta.params.as_deref().unwrap_or(&[]);
+    let mut bullets = Vec::new();
+    for param in params {
+        let mut bullet = format!("- `${}` ({})", param.name, render_param_type(param));
+        if !param.docs.is_empty() {
+            bullet.push_str(&format!(": {}", escape_placeholders(param.docs)));
+        }
+        if let Some(keys) = param.options {
+            for key in keys.iter() {
+                bullet.push_str(&format!(
+                    "\n  - `{}` ({}, {}{})",
+                    key.name,
+                    render_tag(&key.value),
+                    if key.required { "required" } else { "optional" },
+                    key.default
+                        .map(|default| format!(", default `{default}`"))
+                        .unwrap_or_default(),
+                ));
+            }
+        }
+        bullets.push(bullet);
+    }
+    let mut sections = Vec::new();
+    if !bullets.is_empty() {
+        sections.push(format!("**Parameters:**\n{}", bullets.join("\n")));
+    }
+    if let Some(returns) = meta.returns.as_ref() {
+        sections.push(render_returns(returns));
+    }
+    if sections.is_empty() {
+        return String::new();
+    }
+    format!("{}\n\n", sections.join("\n\n"))
+}
+
+/// Render one function's return shape: the structural type plus a
+/// nested bullet per record field (optional marks included). Derived
+/// entirely from the return tag, like parameters: fixed-shape
+/// returns document every property, unknown shapes render bare.
+fn render_returns(returns: &TypeTag) -> String {
+    let mut out = format!("**Returns:** `{}`", render_tag(returns));
+    if let TypeTag::Record(fields) = returns {
+        for field in fields.iter() {
+            out.push_str(&format!(
+                "\n  - `{}` ({}{})",
+                field.name,
+                render_tag(&field.ty),
+                if field.optional { ", optional" } else { "" },
+            ));
+            if !field.docs.is_empty() {
+                out.push_str(&format!(": {}", escape_placeholders(field.docs)));
+            }
+        }
+    }
+    out
 }
 
 /// Function reference for one module, generated from its function
@@ -276,6 +369,7 @@ pub(crate) fn render_plugin_reference(metas: &[FuncMeta], module: &str) -> Strin
             "**Contexts:** {}\n\n",
             if meta.rpn { "AST, RPN" } else { "AST only" },
         ));
+        out.push_str(&render_parameters(meta));
         // The full docs already open with the summary line: print whichever
         // carries more, never both stacked.
         if meta.docs.starts_with(meta.summary) && !meta.summary.is_empty() {
@@ -303,8 +397,11 @@ pub(crate) fn render_function_reference() -> String {
 }
 
 /// Plugin handle types, rendered like the startup value types so anchors
-/// stay consistent across references.
-pub(crate) fn render_plugin_types(descriptors: &[&TypeDescriptor]) -> String {
+/// stay consistent across references. Minted-by and consumed-by lists
+/// derive from function metadata (record returns carrying the handle,
+/// parameters taking it), so the lifecycle story cannot rot apart from
+/// the signatures that enforce it.
+pub(crate) fn render_plugin_types(descriptors: &[&TypeDescriptor], metas: &[FuncMeta]) -> String {
     let mut out = String::new();
     out.push_str("## Value types\n\n");
     for descriptor in descriptors {
@@ -313,12 +410,65 @@ pub(crate) fn render_plugin_types(descriptors: &[&TypeDescriptor]) -> String {
             escape_placeholders(&format!("Value type: {}", descriptor.name)),
             escape_placeholders(descriptor.docs),
         ));
+        let mut minted: Vec<&str> = Vec::new();
+        let mut consumed: Vec<&str> = Vec::new();
+        for meta in metas {
+            if meta
+                .returns
+                .as_ref()
+                .is_some_and(|returns| tag_mentions(returns, descriptor))
+            {
+                minted.push(meta.name.as_str());
+            }
+            let takes = meta
+                .params
+                .as_deref()
+                .unwrap_or(&[])
+                .iter()
+                .filter_map(|param| param.param_type.as_ref())
+                .any(|tag| tag_mentions(tag, descriptor));
+            if takes {
+                consumed.push(meta.name.as_str());
+            }
+        }
+        let mut origins = Vec::new();
+        if !minted.is_empty() {
+            origins.push(format!("Minted by {}", backticked(&minted)));
+        }
+        if !consumed.is_empty() {
+            origins.push(format!("used by {}", backticked(&consumed)));
+        }
+        if !origins.is_empty() {
+            out.push_str(&format!("{}.\n\n", origins.join("; ")));
+        }
     }
     while out.ends_with('\n') {
         out.pop();
     }
     out.push('\n');
     out
+}
+
+/// Whether a tag carries a custom handle descriptor, recursing through
+/// composites: record returns mint the handles nested in their fields.
+fn tag_mentions(tag: &TypeTag, descriptor: &TypeDescriptor) -> bool {
+    match tag {
+        TypeTag::Custom(other) => std::ptr::eq(*other, descriptor),
+        TypeTag::ListOf(inner) | TypeTag::MapOf(inner) => tag_mentions(inner, descriptor),
+        TypeTag::Record(fields) => fields
+            .iter()
+            .any(|field| tag_mentions(&field.ty, descriptor)),
+        _ => false,
+    }
+}
+
+/// Comma-joined backticked names for origin lines.
+fn backticked(names: &[&str]) -> String {
+    names
+        .iter()
+        .map(|name| format!("`{name}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[cfg(test)]

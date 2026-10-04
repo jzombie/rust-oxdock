@@ -11,8 +11,12 @@ use oxdock_process::ProcessManager;
 
 /// Render record data as an aligned Markdown table: one row per MAP,
 /// one column per key. Fails strict on shapes with no table in them.
+///
 #[oxdock_func(pure, returns = TypeTag::String)]
-fn map_to_md_table(map: Value) -> Result<Value> {
+fn map_to_md_table(
+    /// Record data: a MAP renders one row, a LIST of MAPs renders one row per entry with union columns.
+    map: Value,
+) -> Result<Value> {
     let table = crate::markdown::map_to_table(&map)?;
     Ok(Value::string(table))
 }

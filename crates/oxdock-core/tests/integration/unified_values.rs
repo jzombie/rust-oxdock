@@ -76,7 +76,7 @@ fn env_preserves_non_string_expr_types() {
     let out = run_script_captured(
         &root,
         indoc! {r#"
-            LET $pair: LIST = [1, 2]
+            LET $pair: LIST<INT> = [1, 2]
             ENV PAIR=$pair
             ECHO "{{ env:PAIR }}"
         "#},

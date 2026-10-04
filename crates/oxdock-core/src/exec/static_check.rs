@@ -57,6 +57,7 @@ use std::collections::HashMap;
 use anyhow::{Result, bail};
 use oxdock_parser::{
     CompareOp, Expr, GuardExpr, IoBinding, MathOp, PipeTarget, Step, StepKind, TypeTag, Value,
+    render_structural,
 };
 use oxdock_process::ProcessManager;
 
@@ -200,9 +201,22 @@ fn tags_equal(left: &TypeTag, right: &TypeTag) -> bool {
         | (TypeTag::Any, TypeTag::Any) => true,
         (TypeTag::Custom(a), TypeTag::Custom(b)) => std::ptr::eq(*a, *b),
         (TypeTag::ListOf(a), TypeTag::ListOf(b)) => tags_equal(a, b),
+        (TypeTag::MapOf(a), TypeTag::MapOf(b)) => tags_equal(a, b),
         (TypeTag::Record(a), TypeTag::Record(b)) => std::ptr::eq(*a, *b),
         _ => false,
     }
+}
+
+/// Map-kind tags: bare words, fixed shapes, and value shapes alike.
+/// Literals whose every element is maplike join to the unknown map
+/// shape instead of collapsing to a bare list.
+fn is_maplike(tag: &TypeTag) -> bool {
+    matches!(tag, TypeTag::Map | TypeTag::Record(_) | TypeTag::MapOf(_))
+}
+
+/// List-kind tags, mirroring [`is_maplike`] for nested lists.
+fn is_listlike(tag: &TypeTag) -> bool {
+    matches!(tag, TypeTag::List | TypeTag::ListOf(_))
 }
 
 /// Unify two terminal types: equal stays, any `ANY` widens to `ANY`
@@ -214,6 +228,26 @@ fn unify(left: TypeTag, right: TypeTag, ctx: &str) -> Result<TypeTag> {
     }
     if matches!(left, TypeTag::Any) || matches!(right, TypeTag::Any) {
         return Ok(TypeTag::Any);
+    }
+    // Same-kind containment: a shaped value IS its bare word, so mixed
+    // branches widen to the general tag instead of failing. Narrowing
+    // never happens here: unknown shapes never unify INTO fixed ones.
+    if matches!(
+        (&left, &right),
+        (TypeTag::ListOf(_), TypeTag::List) | (TypeTag::List, TypeTag::ListOf(_))
+    ) {
+        return Ok(TypeTag::List);
+    }
+    if matches!(
+        (&left, &right),
+        (TypeTag::Record(_), TypeTag::Map)
+            | (TypeTag::Map, TypeTag::Record(_))
+            | (TypeTag::Record(_), TypeTag::MapOf(_))
+            | (TypeTag::MapOf(_), TypeTag::Record(_))
+            | (TypeTag::MapOf(_), TypeTag::Map)
+            | (TypeTag::Map, TypeTag::MapOf(_))
+    ) {
+        return Ok(TypeTag::Map);
     }
     bail!("{ctx}: cannot unify {} and {}", left.name(), right.name());
 }
@@ -974,15 +1008,37 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                     StepKind::WithIoBlock { bindings } => {
                         Self::check_pipe_bindings(env, bindings, scope, idx)?;
                     }
-                    StepKind::ListAppend { list, .. } => {
+                    StepKind::ListAppend { list, item } => {
                         let tag = Self::check_name_read(env, list, scope, idx)?;
-                        if !tags_equal(&tag, &TypeTag::List) {
-                            bail!(
+                        let element = match tag {
+                            TypeTag::List => None,
+                            TypeTag::ListOf(element) => Some(*element),
+                            _ => bail!(
                                 "step {}: LIST_APPEND ${}: variable is {}, not LIST",
                                 idx + 1,
                                 clean_var(list),
-                                tag.name()
-                            );
+                                render_structural(&tag)
+                            ),
+                        };
+                        // Shaped lists check the item exactly (no coercion
+                        // applies on push, so unlike call arguments there
+                        // is no gate: unknown items defer to the runtime
+                        // walk, which validates every push).
+                        if let Some(expected) = element {
+                            let actual = match item {
+                                oxdock_parser::Arg::Expr(expr) => {
+                                    self.infer_expr(expr, env, scope, idx, depth + 1)?
+                                }
+                                _ => StaticTy::Ty(TypeTag::String),
+                            };
+                            let StaticTy::Ty(actual) = actual else {
+                                bail!(
+                                    "step {}: LIST_APPEND ${}: VOID has no value to push",
+                                    idx + 1,
+                                    clean_var(list)
+                                );
+                            };
+                            Self::check_exact(&expected, &actual, &format!("step {}", idx + 1))?;
                         }
                     }
                     _ => {}
@@ -1119,43 +1175,110 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             bail!(
                 "{ctx}: untyped ANY value flows into {} parameter; \
                  bind through LET $x: {} first",
-                expected.name(),
-                expected.name()
+                render_structural(expected),
+                render_structural(expected)
             );
         }
         if tags_equal(expected, &actual) {
             return Ok(());
         }
         // Mirror coerce_value/coerce_scalar: allow pairs the runtime
-        // decides by value; reject pairs that always bail.
-        let ok = match (&actual, expected) {
+        // decides by value; reject pairs that always bail. Shaped
+        // values satisfy bare words (a record IS a map); bare words
+        // never satisfy fixed shapes, except the unknown list shape:
+        // an empty or heterogeneous literal infers bare `LIST`, which
+        // enters `LIST<...>` vacuously (mirroring the bare `MAP`
+        // into `MAP<...>` arm). Literals infer their own shapes, so
+        // dynamic values still gate through `LET` instead of slipping
+        // into shaped positions. Same-constructor shapes compare
+        // exactly below; the runtime walk re-validates every element,
+        // so a mixed literal still fails loudly at execution.
+        let ok = matches!(
+            (&actual, expected),
             (TypeTag::String, TypeTag::Int)
-            | (TypeTag::String, TypeTag::Float)
-            | (TypeTag::String, TypeTag::Bool)
-            | (TypeTag::String, TypeTag::Duration)
-            | (TypeTag::String, TypeTag::Path) => true,
-            (TypeTag::Int, TypeTag::String) | (TypeTag::Int, TypeTag::Float) => true,
-            (TypeTag::Float, TypeTag::String) | (TypeTag::Float, TypeTag::Int) => true,
-            (TypeTag::Bool, TypeTag::String)
-            | (TypeTag::Duration, TypeTag::String)
-            | (TypeTag::Path, TypeTag::String) => true,
-            // Container words satisfy shaped expectations; the
-            // runtime shape walk is the gate. Shaped values satisfy
-            // bare words; they are those words.
-            (TypeTag::List, TypeTag::ListOf(_))
-            | (TypeTag::ListOf(_), TypeTag::List)
-            | (TypeTag::Map, TypeTag::Record(_))
-            | (TypeTag::Record(_), TypeTag::Map) => true,
-            _ => false,
-        };
+                | (TypeTag::String, TypeTag::Float)
+                | (TypeTag::String, TypeTag::Bool)
+                | (TypeTag::String, TypeTag::Duration)
+                | (TypeTag::String, TypeTag::Path)
+                | (TypeTag::Int, TypeTag::String)
+                | (TypeTag::Int, TypeTag::Float)
+                | (TypeTag::Float, TypeTag::String)
+                | (TypeTag::Float, TypeTag::Int)
+                | (TypeTag::Bool, TypeTag::String)
+                | (TypeTag::Duration, TypeTag::String)
+                | (TypeTag::Path, TypeTag::String)
+                | (TypeTag::ListOf(_), TypeTag::List)
+                | (TypeTag::List, TypeTag::ListOf(_))
+                | (TypeTag::Record(_), TypeTag::Map)
+                | (TypeTag::MapOf(_), TypeTag::Map)
+                | (TypeTag::Map, TypeTag::MapOf(_))
+        );
         if ok {
             return Ok(());
         }
+        if matches!(
+            (&actual, expected),
+            (TypeTag::ListOf(_), TypeTag::ListOf(_))
+                | (TypeTag::MapOf(_), TypeTag::MapOf(_))
+                | (TypeTag::Record(_), TypeTag::Record(_))
+                | (TypeTag::Record(_), TypeTag::MapOf(_))
+        ) {
+            return Self::check_exact(expected, &actual, ctx);
+        }
         bail!(
             "{ctx}: TypeMismatch: expected {}, got {}",
-            expected.name(),
-            actual.name()
+            render_structural(expected),
+            render_structural(&actual)
         );
+    }
+
+    /// Exact shape compatibility for same-constructor tags: element by
+    /// element, field by field, with `ANY` deferring to the runtime
+    /// walk. No scalar coercion applies inside collections (the walk
+    /// checks exactly), so mismatches fail here naming the position.
+    /// Record comparison is order-free: same names with compatible
+    /// types satisfy regardless of declaration order.
+    fn check_exact(expected: &TypeTag, actual: &TypeTag, ctx: &str) -> Result<()> {
+        if tags_equal(expected, actual) {
+            return Ok(());
+        }
+        if matches!(expected, TypeTag::Any) || matches!(actual, TypeTag::Any) {
+            return Ok(());
+        }
+        match (actual, expected) {
+            (TypeTag::ListOf(a), TypeTag::ListOf(e)) | (TypeTag::MapOf(a), TypeTag::MapOf(e)) => {
+                Self::check_exact(e, a, ctx)
+            }
+            (TypeTag::Record(a_fields), TypeTag::Record(e_fields)) => {
+                for field in *e_fields {
+                    match a_fields.iter().find(|found| found.name == field.name) {
+                        Some(found) => Self::check_exact(&field.ty, &found.ty, ctx)?,
+                        None if field.optional => {}
+                        None => bail!("{ctx}: missing field '{}'", field.name),
+                    }
+                }
+                for field in *a_fields {
+                    if !e_fields.iter().any(|known| known.name == field.name) {
+                        bail!("{ctx}: unknown field '{}'", field.name);
+                    }
+                }
+                Ok(())
+            }
+            (TypeTag::Record(a_fields), TypeTag::MapOf(inner)) => {
+                for field in *a_fields {
+                    Self::check_exact(inner, &field.ty, ctx)?;
+                }
+                Ok(())
+            }
+            (TypeTag::ListOf(_), TypeTag::List)
+            | (TypeTag::Record(_), TypeTag::Map)
+            | (TypeTag::MapOf(_), TypeTag::Map) => Ok(()),
+            _ => bail!(
+                "{ctx}: TypeMismatch: expected {}, got {}",
+                render_structural(expected),
+                render_structural(actual)
+            ),
+        }
     }
 
     /// Resolve a callee: script functions (bare or `SCRIPT::`-qualified)
@@ -1390,6 +1513,87 @@ fn ordering_pair(left: StaticTy, right: StaticTy, at: Option<&str>) -> Result<()
 }
 
 impl<'a, P: ProcessManager> Checker<'a, P> {
+    /// Infer a list literal's shape: homogeneous non-empty lists lock
+    /// their element tag through the interned spelling (shared with
+    /// declarations, so identical shapes unify). Uniformly maplike or
+    /// listlike elements join to the unknown shape (`LIST<MAP<ANY>>`,
+    /// `LIST<LIST<ANY>>`); anything else stays bare `LIST` for the
+    /// runtime walk to decide. Never fails: shapes that cannot be
+    /// spelled fall back instead of erroring.
+    fn infer_list_literal(
+        &mut self,
+        items: &[Expr],
+        env: &mut Env,
+        scope: &Scope,
+        idx: usize,
+        depth: usize,
+    ) -> Result<StaticTy> {
+        let mut tags = Vec::with_capacity(items.len());
+        for item in items {
+            match self.infer_expr(item, env, scope, idx, depth + 1)? {
+                StaticTy::Ty(tag) => tags.push(tag),
+                StaticTy::Void => return Ok(StaticTy::Ty(TypeTag::List)),
+            }
+        }
+        let Some(first) = tags.first() else {
+            return Ok(StaticTy::Ty(TypeTag::List));
+        };
+        if matches!(first, TypeTag::Any) || !tags.iter().all(|tag| tags_equal(first, tag)) {
+            let join = if tags.iter().all(is_maplike) {
+                Some("LIST<MAP<ANY>>")
+            } else if tags.iter().all(is_listlike) {
+                Some("LIST<LIST<ANY>>")
+            } else {
+                None
+            };
+            let Some(spelling) = join else {
+                return Ok(StaticTy::Ty(TypeTag::List));
+            };
+            return Ok(self
+                .exec
+                .resolve_tag(spelling)
+                .map(StaticTy::Ty)
+                .unwrap_or(StaticTy::Ty(TypeTag::List)));
+        }
+        let spelling = format!("LIST<{}>", render_structural(first));
+        Ok(self
+            .exec
+            .resolve_tag(&spelling)
+            .map(StaticTy::Ty)
+            .unwrap_or(StaticTy::Ty(TypeTag::List)))
+    }
+
+    /// Infer a map literal's shape through its canonical spelling, so
+    /// conforming literals share the interned entry that declarations
+    /// resolve to. Source order is significant (spellings canonicalize
+    /// without reordering): matching declaration order unifies, anything
+    /// else falls back to bare shape handling downstream. Never fails.
+    fn infer_map_literal(
+        &mut self,
+        entries: &[(String, Expr)],
+        env: &mut Env,
+        scope: &Scope,
+        idx: usize,
+        depth: usize,
+    ) -> Result<StaticTy> {
+        let mut parts = Vec::with_capacity(entries.len());
+        for (key, value) in entries {
+            match self.infer_expr(value, env, scope, idx, depth + 1)? {
+                StaticTy::Ty(tag) => parts.push(format!("{key}: {}", render_structural(&tag))),
+                StaticTy::Void => return Ok(StaticTy::Ty(TypeTag::Map)),
+            }
+        }
+        if parts.is_empty() {
+            return Ok(StaticTy::Ty(TypeTag::Map));
+        }
+        let spelling = format!("MAP<{}>", parts.join(", "));
+        Ok(self
+            .exec
+            .resolve_tag(&spelling)
+            .map(StaticTy::Ty)
+            .unwrap_or(StaticTy::Ty(TypeTag::Map)))
+    }
+
     /// Infer an expression's static type, running nested checks
     /// (undeclared variables, nested calls) along the way.
     fn infer_expr(
@@ -1447,6 +1651,11 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                             }
                             current = *element;
                         }
+                        TypeTag::MapOf(values) => {
+                            // Unknown maps step into their value shape;
+                            // keys resolve by value at runtime.
+                            current = *values;
+                        }
                         // MAP keys and LIST indices resolve by value at
                         // runtime (missing keys, bounds); the shape
                         // stays unknown here.
@@ -1463,8 +1672,8 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 }
                 Ok(StaticTy::Ty(current))
             }
-            Expr::List(_) => Ok(StaticTy::Ty(TypeTag::List)),
-            Expr::Map(_) => Ok(StaticTy::Ty(TypeTag::Map)),
+            Expr::List(items) => self.infer_list_literal(items, env, scope, idx, depth),
+            Expr::Map(entries) => self.infer_map_literal(entries, env, scope, idx, depth),
             Expr::Block(steps) => {
                 // Blocks run in a fresh scope but read enclosing
                 // bindings: fork, check, discard. Same terminal rules
@@ -1601,6 +1810,9 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                                     bail!("Invalid array index '{part}'");
                                 }
                                 current = *element;
+                            }
+                            TypeTag::MapOf(values) => {
+                                current = *values;
                             }
                             TypeTag::Map | TypeTag::List | TypeTag::Any => {
                                 current = TypeTag::Any;

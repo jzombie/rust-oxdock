@@ -9,5 +9,10 @@ Callable as `MODULE::NAME(...)` in expressions (or bare `NAME(...)` with the mod
 
 **Contexts:** AST, RPN
 
+**Parameters:**
+- `$map` (ANY): Record data: a MAP renders one row, a LIST of MAPs renders one row per entry with union columns.
+
+**Returns:** `STRING`
+
 Render record data as an aligned Markdown table: one row per MAP,
 one column per key. Fails strict on shapes with no table in them.

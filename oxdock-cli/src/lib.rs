@@ -1340,7 +1340,7 @@ mod tests {
         let resolver = PathResolver::new(workspace_root.as_path(), workspace_root.as_path())?;
         let script = indoc! {"
             IMPORT [STD, SSH]
-            LET $m: MAP = SSH_SERVE(\"23301\", {username: \"test\", password: \"test123\"})
+            LET $m: SSH_SERVE_INFO = SSH_SERVE(\"23301\", {username: \"test\", password: \"test123\"})
             SSH_CLOSE($m.server)
         "};
         resolver.write_file(&script_path, script.as_bytes())?;
@@ -1371,7 +1371,7 @@ mod tests {
         let resolver = PathResolver::new(workspace_root.as_path(), workspace_root.as_path())?;
         let script = indoc! {"
             IMPORT [STD, NET]
-            LET $l: MAP = NET_LISTEN(\"23501\", {})
+            LET $l: NET_LISTEN_INFO = NET_LISTEN(\"23501\", {})
             NET_CLOSE($l.listener)
         "};
         resolver.write_file(&script_path, script.as_bytes())?;
@@ -1457,7 +1457,7 @@ mod tests {
         let resolver = PathResolver::new(workspace_root.as_path(), workspace_root.as_path())?;
         let script = indoc! {"
             IMPORT [STD, SSH]
-            LET $m: MAP = SSH_SERVE(\"23301\", {username: \"test\", password: \"test123\"})
+            LET $m: SSH_SERVE_INFO = SSH_SERVE(\"23301\", {username: \"test\", password: \"test123\"})
             SSH_CLOSE($m.server)
         "};
         resolver.write_file(&script_path, script.as_bytes())?;
@@ -1520,7 +1520,7 @@ mod tests {
         let resolver = PathResolver::new(workspace_root.as_path(), workspace_root.as_path())?;
         let script = indoc! {"
             IMPORT [STD, NET]
-            LET $l: MAP = NET_LISTEN(\"23501\", {})
+            LET $l: NET_LISTEN_INFO = NET_LISTEN(\"23501\", {})
             LET $body: STRING = NET_FETCH(\"https://example.com/x\")
             NET_CLOSE($l.listener)
         "};

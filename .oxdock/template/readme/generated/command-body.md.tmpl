@@ -89,7 +89,7 @@ empty when nothing matches, and rejects `..` escapes.
 
 ```oxdock
 # Each element binds in turn; the loop body sees every one.
-LET $items: LIST = ["a", "b"]
+LET $items: LIST<STRING> = ["a", "b"]
 FOR $item: STRING IN $items {
   ECHO $item
 }
@@ -97,7 +97,7 @@ ASSERT_CONTAINS stdout "a"
 ASSERT_CONTAINS stdout "b"
 
 # Key and value bind together for maps.
-LET $map: MAP = {"x": 1}
+LET $map: MAP<x: INT> = {"x": 1}
 FOR $k: STRING, $v: INT IN $map {
   ECHO "\{{ $k }}=\{{ $v }}"
 }
@@ -328,7 +328,7 @@ LET $name: STRING = "world"
 ECHO "hello, \{{ $name }}"
 ASSERT_CONTAINS stdout "hello, world"
 
-LET $items: LIST = ["a", "b"]
+LET $items: LIST<STRING> = ["a", "b"]
 ASSERT_CONTAINS $items "a"
 ASSERT_CONTAINS $items "b"
 
@@ -352,7 +352,7 @@ LET $too_early: STRING = "too late"
 # The RHS is an expression: GLOB(...) runs and binds a list.
 IMPORT [STD]
 WRITE a.txt "x"
-LET $files: LIST = GLOB("*.txt")
+LET $files: LIST<STRING> = GLOB("*.txt")
 FOR $f: STRING IN $files { ECHO $f }
 
 ASSERT_CONTAINS stdout "a.txt"
@@ -467,7 +467,7 @@ ASSERT_EQ $ok "yes"
 IMPORT [STD]
 LET $p: PIPE
 WITH_IO [stdout=$p] ECHO hello
-LET $info: MAP = INSPECT($p)
+LET $info: MAP<ANY> = INSPECT($p)
 IF $info.is_os_pipe {
     WRITE unexpected.txt "should be a script pipe"
 }
@@ -2070,11 +2070,11 @@ other holders keep their contents.
 
 ```oxdock
 # Appends accumulate in order.
-LET $items: LIST = []
+LET $items: LIST<STRING> = []
 LIST_APPEND $items "first"
 LIST_APPEND $items "second"
 
-LET $want: LIST = ["first", "second"]
+LET $want: LIST<STRING> = ["first", "second"]
 ASSERT_EQ $items $want
 ```
 

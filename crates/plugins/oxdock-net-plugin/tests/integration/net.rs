@@ -112,7 +112,7 @@ fn listen_reports_loopback_addr_and_virtual_echo() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, NET]
-        LET $l: MAP = NET_LISTEN("23511", {})
+        LET $l: NET_LISTEN_INFO = NET_LISTEN("23511", {})
         WRITE addr.txt "{{ $l.addr }}"
         WRITE virt.txt "{{ $l.virtual }}"
         NET_CLOSE($l.listener)
@@ -135,7 +135,7 @@ fn physical_binds_rejected_in_script() {
         let script = format!(
             indoc! {r#"
                 IMPORT [STD, NET]
-                LET $l: MAP = NET_LISTEN("{bind}", {{}})
+                LET $l: NET_LISTEN_INFO = NET_LISTEN("{bind}", {{}})
             "#},
             bind = bind
         );
@@ -152,7 +152,7 @@ fn ephemeral_zero_banned_in_script() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, NET]
-        LET $l: MAP = NET_LISTEN("0", {})
+        LET $l: NET_LISTEN_INFO = NET_LISTEN("0", {})
     "#};
     let err = run_script(&root, script).expect_err("port 0 must fail");
     assert!(err.to_string().contains("-p 0:"), "{err:#}");
@@ -168,7 +168,7 @@ fn accept_connect_roundtrip() {
     let probe = root.clone();
     let script = indoc! {r#"
         IMPORT [STD, NET]
-        LET $l: MAP = NET_LISTEN("23513", {})
+        LET $l: NET_LISTEN_INFO = NET_LISTEN("23513", {})
         WRITE addr.txt "{{ $l.addr }}"
         LET $in: PIPE
         LET $out: PIPE
@@ -308,8 +308,8 @@ fn listen_refuses_while_serving() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, NET]
-        LET $a: MAP = NET_LISTEN("23514", {})
-        LET $b: MAP = NET_LISTEN("23514", {})
+        LET $a: NET_LISTEN_INFO = NET_LISTEN("23514", {})
+        LET $b: NET_LISTEN_INFO = NET_LISTEN("23514", {})
         NET_CLOSE($a.listener)
         NET_CLOSE($b.listener)
     "#};
@@ -327,9 +327,9 @@ fn reclaim_after_close_rebinds() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, NET]
-        LET $a: MAP = NET_LISTEN("23515", {})
+        LET $a: NET_LISTEN_INFO = NET_LISTEN("23515", {})
         NET_CLOSE($a.listener)
-        LET $b: MAP = NET_LISTEN("23515", {})
+        LET $b: NET_LISTEN_INFO = NET_LISTEN("23515", {})
         WRITE addr.txt "{{ $b.addr }}"
         NET_CLOSE($b.listener)
     "#};
@@ -350,7 +350,7 @@ fn close_during_accept_returns() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, NET]
-        LET $l: MAP = NET_LISTEN("23516", {})
+        LET $l: NET_LISTEN_INFO = NET_LISTEN("23516", {})
         LET $in: PIPE
         LET $out: PIPE
         LET $t: HANDLE = ASYNC { NET_ACCEPT($l.listener, $in, $out, {}) }
@@ -370,7 +370,7 @@ fn main_thread_accept_bails() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, NET]
-        LET $l: MAP = NET_LISTEN("23518", {})
+        LET $l: NET_LISTEN_INFO = NET_LISTEN("23518", {})
         LET $in: PIPE
         LET $out: PIPE
         NET_ACCEPT($l.listener, $in, $out, {})
@@ -402,7 +402,7 @@ fn unknown_options_bail() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, NET]
-        LET $l: MAP = NET_LISTEN("23519", {backlog: 5})
+        LET $l: NET_LISTEN_INFO = NET_LISTEN("23519", {backlog: 5})
     "#};
     let err = run_script(&root, script).expect_err("unknown listen option must fail");
     assert!(
@@ -455,7 +455,7 @@ fn proxy_terminates() {
     let script = indoc! {r#"
         IMPORT [STD, NET]
         LET $up_port: STRING = READ up.txt
-        LET $l: MAP = NET_LISTEN("23520", {})
+        LET $l: NET_LISTEN_INFO = NET_LISTEN("23520", {})
         WRITE addr.txt "{{ $l.addr }}"
         LET $s2c: PIPE
         LET $c2s: PIPE
@@ -530,7 +530,7 @@ fn cancel_accept_blocked_returns_promptly() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, NET]
-        LET $l: MAP = NET_LISTEN("23521", {})
+        LET $l: NET_LISTEN_INFO = NET_LISTEN("23521", {})
         LET $in: PIPE
         LET $out: PIPE
         LET $t: HANDLE = ASYNC { NET_ACCEPT($l.listener, $in, $out, {}) }
@@ -555,7 +555,7 @@ fn second_accept_serves_next_client() {
     let probe = root.clone();
     let script = indoc! {r#"
         IMPORT [STD, NET]
-        LET $l: MAP = NET_LISTEN("23522", {})
+        LET $l: NET_LISTEN_INFO = NET_LISTEN("23522", {})
         WRITE addr.txt "{{ $l.addr }}"
         LET $in1: PIPE
         LET $out1: PIPE
@@ -618,7 +618,7 @@ fn prebound_claim_serves_cli_mapped_socket() {
     let probe = root.clone();
     let script = indoc! {r#"
         IMPORT [STD, NET]
-        LET $l: MAP = NET_LISTEN("23530", {})
+        LET $l: NET_LISTEN_INFO = NET_LISTEN("23530", {})
         WRITE addr.txt "{{ $l.addr }}"
         LET $in: PIPE
         LET $out: PIPE
@@ -657,7 +657,7 @@ fn memory_session_roundtrips_with_zero_sockets() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, NET]
-        LET $l: MAP = NET_LISTEN("mem-echo", {})
+        LET $l: NET_LISTEN_INFO = NET_LISTEN("mem-echo", {})
         WRITE virt.txt "{{ $l.virtual }}"
         LET $sin: PIPE
         LET $sout: PIPE
@@ -694,7 +694,7 @@ fn memory_client_before_server_rendezvous() {
         LET $cout: PIPE
         LET $c: HANDLE = ASYNC { NET_CONNECT("mem-early", $cin, $cout, {}) }
         SLEEP 500ms
-        LET $l: MAP = NET_LISTEN("mem-early", {})
+        LET $l: NET_LISTEN_INFO = NET_LISTEN("mem-early", {})
         LET $sin: PIPE
         LET $sout: PIPE
         LET $t: HANDLE = ASYNC { NET_ACCEPT($l.listener, $sin, $sout, {}) }
@@ -753,7 +753,7 @@ fn offline_listen_and_close_opens_no_socket() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, NET]
-        LET $l: MAP = NET_LISTEN("23531", {})
+        LET $l: NET_LISTEN_INFO = NET_LISTEN("23531", {})
         WRITE addr.txt "{{ $l.addr }}"
         WRITE virt.txt "{{ $l.virtual }}"
         NET_CLOSE($l.listener)
@@ -878,7 +878,7 @@ fn fetch_feeds_parse_json() {
         indoc! {r#"
             IMPORT [STD, NET]
             LET $body: STRING = NET_FETCH("http://{addr}/doc.json")
-            LET $doc: MAP = PARSE_JSON($body)
+            LET $doc: MAP<ANY> = PARSE_JSON($body)
             ASSERT_EQ $doc.name "loopback"
         "#},
         addr = addr

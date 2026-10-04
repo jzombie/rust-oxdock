@@ -176,7 +176,7 @@ fn run_exec_resolves_and_flattens_argv() {
             guard: None,
             kind: StepKind::Assign {
                 var: "args".into(),
-                decl_type: "LIST".to_string(),
+                decl_type: "LIST<STRING>".to_string(),
                 expr: Expr::List(vec![
                     Expr::Literal(Value::string("-v".to_string())),
                     Expr::Literal(Value::string("--all".to_string())),
@@ -282,7 +282,7 @@ fn run_exec_resolves_every_variable_type() {
             guard: None,
             kind: StepKind::Assign {
                 var: "m".into(),
-                decl_type: "MAP".to_string(),
+                decl_type: "MAP<k: STRING>".to_string(),
                 expr: Expr::Map(vec![(
                     "k".to_string(),
                     Expr::Literal(Value::string("keyval".to_string())),
@@ -978,7 +978,7 @@ fn write_interpolates_env_values() {
 #[test]
 fn for_int_key_binds_list_indices() {
     let steps = crate::parse_script(indoc! {r#"
-        LET $items: LIST = ["a", "b"]
+        LET $items: LIST<STRING> = ["a", "b"]
         FOR $i: INT, $v: STRING IN $items {
             WRITE "{{ $v }}.txt" "{{ $i }}"
         }
@@ -996,7 +996,7 @@ fn for_int_key_binds_list_indices() {
 
     // Map iteration with an INT key is rejected: map keys are strings.
     let steps = crate::parse_script(indoc! {r#"
-        LET $m: MAP = {"k": "v"}
+        LET $m: MAP<k: STRING> = {"k": "v"}
         FOR $k: INT, $v: STRING IN $m {
             WRITE x.txt "hi"
         }
@@ -2933,7 +2933,7 @@ fn spawn_manifest_outer_pipe_stays_script() {
         }
         WITH_IO [stdout=$p] ECHO "hello"
         AWAIT $t
-        LET $info: MAP = INSPECT($p)
+        LET $info: MAP<ANY> = INSPECT($p)
         WRITE kind.txt "{{ $info.pipe_kind }}"
     "#})
     .expect("parse ok");
@@ -2958,7 +2958,7 @@ fn nested_spawn_marks_pipes_nested_in_collections_escaped() {
             RETURN [$p]
         }
         LET $t1: HANDLE = ASYNC {
-            LET $bag: LIST = MAKE()
+            LET $bag: LIST<PIPE> = MAKE()
             LET $t2: HANDLE = ASYNC {
                 LET $q: PIPE = $bag.0
                 WITH_IO [stdout=$q] ECHO "child"
@@ -2966,7 +2966,7 @@ fn nested_spawn_marks_pipes_nested_in_collections_escaped() {
             LET $p2: PIPE = $bag.0
             WITH_IO [stdout=$p2] ECHO "spawner"
             AWAIT $t2
-            LET $info: MAP = INSPECT($p2)
+            LET $info: MAP<ANY> = INSPECT($p2)
             RETURN "{{ $info.pipe_kind }}"
         }
         LET $kind: STRING = AWAIT $t1
@@ -3095,14 +3095,19 @@ fn eof_drain_loop_reads_to_end_without_sentinel() {
 
 #[test]
 fn eof_rejects_non_pipe() {
-    // A non-pipe argument bails naming the expected type, mirroring the
-    // other typed builtins.
+    // A non-pipe argument bails at the boundary extractor naming the
+    // expected type, mirroring the other typed builtins. (The static
+    // pass rejects it even earlier; see `static_pipe_param_*`.)
     let steps = crate::parse_script(indoc! {r#"
         IMPORT [STD]
         LET $bad: BOOL = EOF("nope")
     "#})
     .expect("parse ok");
-    assert!(run_mock_steps(&steps, vec![]).is_err());
+    let err = run_mock_steps(&steps, vec![]).expect_err("non-pipe EOF must fail");
+    assert!(
+        format!("{err:#}").contains("must be a PIPE"),
+        "boundary must name PIPE: {err:#}"
+    );
 }
 
 #[test]
@@ -3112,7 +3117,7 @@ fn loop_body_declarations_mint_per_iteration() {
     // (fresh per-iteration scope), so no generation observes another's
     // bytes.
     let steps = crate::parse_script(indoc! {r#"
-        LET $items: LIST = ["a", "b"]
+        LET $items: LIST<STRING> = ["a", "b"]
         FOR $x: STRING IN $items {
             LET $p: PIPE
             WITH_IO [stdout=$p] ECHO "{{ $x }}"
@@ -3140,7 +3145,7 @@ fn mixed_task_body_pins_script_and_run_adapts() {
         }
         WITH_IO [stdin=$p] READ_LINE $a
         AWAIT $t
-        LET $info: MAP = INSPECT($p)
+        LET $info: MAP<ANY> = INSPECT($p)
         WRITE out.txt "{{ $a }}"
         WRITE kind.txt "{{ $info.pipe_kind }}"
     "#})
@@ -3318,10 +3323,10 @@ fn parse_text_matches_file_loader_and_placeholder() {
         WRITE seed.toml "a = 1"
         LET $json_raw: STRING = READ seed.json
         LET $toml_raw: STRING = READ seed.toml
-        LET $loaded_json: MAP = LOAD_JSON("seed.json")
-        LET $parsed_json: MAP = PARSE_JSON($json_raw)
-        LET $loaded_toml: MAP = LOAD_TOML("seed.toml")
-        LET $parsed_toml: MAP = PARSE_TOML($toml_raw)
+        LET $loaded_json: MAP<ANY> = LOAD_JSON("seed.json")
+        LET $parsed_json: MAP<ANY> = PARSE_JSON($json_raw)
+        LET $loaded_toml: MAP<ANY> = LOAD_TOML("seed.toml")
+        LET $parsed_toml: MAP<ANY> = PARSE_TOML($toml_raw)
         ASSERT_EQ $parsed_json $loaded_json
         ASSERT_EQ $parsed_toml $loaded_toml
         LET $parity: STRING = TO_JSON($loaded_json)
@@ -3341,13 +3346,72 @@ fn parse_text_matches_file_loader_and_placeholder() {
 }
 
 #[test]
-fn resolve_tag_interns_identical_spellings_once() {
-    // Identical canonical spellings share one interned pointer;
-    // spaced forms canonicalize onto it.
+fn resolve_tag_accepts_unknown_map_spelling() {
+    // `MAP<ANY>` is the declared unknown map: it resolves to a value
+    // shape, and spaced or nested forms canonicalize onto shared
+    // entries like every other spelling.
     let fs = MockFs::new();
     let state = create_exec_state(fs);
-    let first = state.resolve_tag("LIST<MAP>").expect("resolves");
-    let second = state.resolve_tag("LIST< MAP >").expect("resolves");
+    let tag = state.resolve_tag("MAP<ANY>").expect("MAP<ANY> resolves");
+    assert!(matches!(tag, TypeTag::MapOf(_)));
+    let nested = state
+        .resolve_tag("LIST<MAP<ANY>>")
+        .expect("nested resolves");
+    assert!(matches!(nested, TypeTag::ListOf(_)));
+}
+
+#[test]
+fn resolve_tag_rejects_bare_collections() {
+    // Bare collections are runtime words, never declaration types:
+    // every spelling position fails naming the explicit form.
+    let fs = MockFs::new();
+    let state = create_exec_state(fs);
+    for bad in ["MAP", "LIST", "LIST<MAP>", "LIST<LIST>", "MAP<name: MAP>"] {
+        let err = state.resolve_tag(bad).expect_err("bare form must fail");
+        assert!(
+            format!("{err:#}").contains("not a declaration type"),
+            "{bad}: {err:#}"
+        );
+    }
+}
+
+#[test]
+fn resolve_tag_accepts_optional_fields() {
+    // A `?` suffix marks one field optional: it resolves into the
+    // flag, and identical spellings share one interned entry.
+    let fs = MockFs::new();
+    let state = create_exec_state(fs);
+    let tag = state
+        .resolve_tag("MAP<held: BOOL, permit?: PERMIT>")
+        .expect("optional field resolves");
+    match tag {
+        TypeTag::Record(fields) => {
+            assert_eq!(fields.len(), 2);
+            assert!(!fields[0].optional);
+            assert!(fields[1].optional);
+            assert_eq!(fields[1].name, "permit");
+        }
+        other => panic!("expected record, got {other:?}"),
+    }
+    let again = state
+        .resolve_tag("MAP<held: BOOL,permit?: PERMIT>")
+        .expect("resolves");
+    match (tag, again) {
+        (TypeTag::Record(a), TypeTag::Record(b)) => {
+            assert!(std::ptr::eq(a.as_ptr(), b.as_ptr()), "shared entry");
+        }
+        _ => panic!("expected records"),
+    }
+}
+
+#[test]
+fn resolve_tag_interns_identical_spellings_once() {
+    // Identical canonical spellings share one interned pointer;
+    // spaced forms canonicalize onto it, nesting included.
+    let fs = MockFs::new();
+    let state = create_exec_state(fs);
+    let first = state.resolve_tag("LIST<MAP<ANY>>").expect("resolves");
+    let second = state.resolve_tag("LIST< MAP< ANY > >").expect("resolves");
     match (first, second) {
         (TypeTag::ListOf(a), TypeTag::ListOf(b)) => {
             assert!(std::ptr::eq(a, b), "shared interned entry");
@@ -3403,6 +3467,8 @@ fn resolve_tag_composes_schema_and_alias_leaves() {
     static SCHEMA_FIELDS: &[Field] = &[Field {
         name: "name",
         ty: TypeTag::String,
+        docs: "",
+        optional: false,
     }];
     state.register_record_schema("EMP", SCHEMA_FIELDS);
     state
@@ -3487,7 +3553,7 @@ fn merge_maps_rejects_unknown_policy_at_boundary() {
     // render suite on every pipeline run.
     let steps = crate::parse_script(indoc! {r#"
         IMPORT [STD]
-        LET $m: MAP = MERGE_MAPS([], "merge")
+        LET $m: MAP<ANY> = MERGE_MAPS([{a: 1}], "merge")
     "#})
     .expect("parse ok");
     let fs = MockFs::new();
@@ -3506,7 +3572,7 @@ fn merge_maps_rejects_unknown_policy_at_boundary() {
     // reaches the merge.
     let steps = crate::parse_script(indoc! {r#"
         IMPORT [STD]
-        LET $m: MAP = MERGE_MAPS("nope", "overwrite")
+        LET $m: MAP<ANY> = MERGE_MAPS("nope", "overwrite")
     "#})
     .expect("parse ok");
     let fs = MockFs::new();
@@ -3516,11 +3582,13 @@ fn merge_maps_rejects_unknown_policy_at_boundary() {
         "boundary enforces the LIST shape: {err:#}"
     );
 
-    // Element shapes walk the same boundary: a non-map element fails
-    // naming its position, through the one shape implementation.
+    // Element shapes walk the same boundary: gating a heterogeneous
+    // list through `LET` reaches the runtime walk, which names the
+    // offending position through the one shape implementation.
     let steps = crate::parse_script(indoc! {r#"
         IMPORT [STD]
-        LET $m: MAP = MERGE_MAPS([{a: 1}, "nope"], "overwrite")
+        LET $ms: LIST<MAP<ANY>> = [{a: 1}, "nope"]
+        LET $m: MAP<ANY> = MERGE_MAPS($ms, "overwrite")
     "#})
     .expect("parse ok");
     let fs = MockFs::new();
@@ -3564,6 +3632,8 @@ fn run_start_rejects_unknown_type_tags() {
                         name: "arg".to_string(),
                         param_type,
                         allowed: None,
+                        docs: "",
+                        options: None,
                     }]),
                     returns: return_type,
                     rpn: false,

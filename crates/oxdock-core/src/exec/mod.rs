@@ -36,16 +36,17 @@ pub use self::io::PipeStream;
 pub use self::io::PushManifestSink;
 pub use self::native::{
     FuncKind, FuncMeta, FuncParam, FunctionRegistry, HostModule, HostRegistration, NativeFn,
-    OxDockFn, PureFn, PureTable, RecordSchema, builtin_function_metas, builtin_function_names,
-    std_module_table,
+    OxDockFn, ParamOption, PureFn, PureTable, RecordSchema, builtin_function_metas,
+    builtin_function_names, std_module_table,
 };
 pub use self::state::ExecState;
 pub use self::steps::StepCtx;
 pub use self::typing::{
     Field, LIST_TAG, MAP_TAG, OxDockType, TypeDescriptor, TypeTag, Value, ValuePayload,
-    check_value, check_value_at, clone_boxed, clone_copy, clone_shared, drop_boxed, drop_noop,
-    drop_shared, eq_boxed, eq_inline, eq_shared, fmt_boxed, fmt_inline, fmt_shared, load_inline,
-    startup_descriptors, store_inline, type_anchor, unshare_boxed, unshare_inline, unshare_shared,
+    check_options, check_value, check_value_at, clone_boxed, clone_copy, clone_shared, drop_boxed,
+    drop_noop, drop_shared, eq_boxed, eq_inline, eq_shared, fmt_boxed, fmt_inline, fmt_shared,
+    load_inline, startup_descriptors, store_inline, type_anchor, unshare_boxed, unshare_inline,
+    unshare_shared,
 };
 
 use anyhow::Result;

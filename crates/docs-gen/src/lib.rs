@@ -138,11 +138,11 @@ pub fn run_with_plugins(
         // Citation metadata for expansion scopes. Workspace author,
         // license, and repository come from the root manifest here, so
         // citation templates never copy them into checked-in files.
-        LET $workspace_pkg: MAP = RUST::WORKSPACE_PACKAGE()
+        LET $workspace_pkg: MAP<ANY> = RUST::WORKSPACE_PACKAGE()
 
         // Workspace config: scopes, shared values, generated destinations.
-        LET $cfg: MAP = LOAD_JSON("docs-gen.json")
-        LET $gen: LIST = $cfg.generated
+        LET $cfg: MAP<ANY> = LOAD_JSON("docs-gen.json")
+        LET $gen: LIST<ANY> = $cfg.generated
 
         // Provider conventions: every key below is optional. Absent
         // keys keep the OxDock project defaults, so the current
@@ -161,7 +161,7 @@ pub fn run_with_plugins(
         }
         LET $vpkg: STRING = "workspace_pkg"
         IF HAS_KEY($cfg, "vars") {
-            LET $vars: MAP = $cfg.vars
+            LET $vars: MAP<ANY> = $cfg.vars
             IF HAS_KEY($vars, "workspace_pkg") {
                 $vpkg = $vars.workspace_pkg
             }
@@ -169,7 +169,7 @@ pub fn run_with_plugins(
         LET $vglobal: STRING = "docs_global"
         LET $vctx: STRING = "docs_ctx"
         IF HAS_KEY($cfg, "vars") {
-            LET $vars: MAP = $cfg.vars
+            LET $vars: MAP<ANY> = $cfg.vars
             IF HAS_KEY($vars, "global") {
                 $vglobal = $vars.global
             }
@@ -180,24 +180,24 @@ pub fn run_with_plugins(
 
         // Shared values: one path or a path list, merged in order.
         // STD::MERGE_MAPS validates the policy and names duplicates.
-        LET $vpaths: LIST = []
+        LET $vpaths: LIST<ANY> = []
         IF TYPE_OF($cfg.global_values) == "LIST" {
             $vpaths = $cfg.global_values
         } ELSE {
             LIST_APPEND $vpaths $cfg.global_values
         }
-        LET $vmaps: LIST = []
+        LET $vmaps: LIST<ANY> = []
         FOR $vp: STRING IN $vpaths {
-            LET $one: MAP = LOAD_JSON($vp)
+            LET $one: MAP<ANY> = LOAD_JSON($vp)
             LIST_APPEND $vmaps $one
         }
-        LET $docs_global: MAP = STD::MERGE_MAPS($vmaps, $policy)
+        LET $docs_global: MAP<ANY> = STD::MERGE_MAPS($vmaps, $policy)
 
         // Registry-derived inputs declared by the config: one entry
         // per generated artifact, dispatched by key. An unknown key
         // fails listing the known ones instead of rendering empty.
-        FUNC REFRESH_GENERATED($gen: LIST) {
-            FOR $entry: MAP IN $gen {
+        FUNC REFRESH_GENERATED($gen: LIST<ANY>) {
+            FOR $entry: MAP<ANY> IN $gen {
                 LET $key: STRING = $entry.key
                 LET $text: STRING = OXDOCK::GENERATED($key)
                 WRITE $entry.out $text
@@ -209,16 +209,16 @@ pub fn run_with_plugins(
         FUNC SYNC_MEMBER($member: STRING) {
             ECHO "syncing values for {{ $member }}"
 
-            LET $pkg: MAP = RUST::CARGO_PACKAGE($member)
+            LET $pkg: MAP<ANY> = RUST::CARGO_PACKAGE($member)
             IF $pkg.name != "" {
                 LET $values_path: STRING = "{{ $member }}/.oxdock/template/values.json"
                 LET $pt: STRING = PATH_TYPE($values_path)
                 IF $pt == "file" {
-                    LET $existing: MAP = LOAD_JSON($values_path)
+                    LET $existing: MAP<ANY> = LOAD_JSON($values_path)
                     LET $json: STRING = RUST::PACKAGE_VALUES_JSON($pkg, $existing)
                     WRITE $values_path $json
                 } ELSE {
-                    LET $empty: MAP = {}
+                    LET $empty: MAP<ANY> = {}
                     LET $fresh: STRING = RUST::PACKAGE_VALUES_JSON($pkg, $empty)
                     WRITE $values_path $fresh
                 }
@@ -229,7 +229,7 @@ pub fn run_with_plugins(
         }
 
         // Track one target name, failing on duplicates.
-        FUNC NOTE_TARGET($seen: MAP, $name: STRING, $tj: STRING) {
+        FUNC NOTE_TARGET($seen: MAP<ANY>, $name: STRING, $tj: STRING) {
             IF HAS_KEY($seen, $name) {
                 ECHO "duplicate target name '{{ $name }}' (in {{ $tj }})"
                 EXIT 1
@@ -238,10 +238,10 @@ pub fn run_with_plugins(
         }
 
         // One target manifest as JSON: expand every fragment once.
-        FUNC BUILD_MANIFEST($t: MAP, $docs_global: MAP, $docs_ctx: MAP, $version: STRING, $workspace_pkg: MAP, $vglobal: STRING, $vctx: STRING, $vkey: STRING, $vpkg: STRING) {
-            LET $manifest: MAP = {}
-            FOR $group: STRING, $patterns: LIST IN $t.fragments {
-                LET $group_map: MAP = {}
+        FUNC BUILD_MANIFEST($t: MAP<ANY>, $docs_global: MAP<ANY>, $docs_ctx: MAP<ANY>, $version: STRING, $workspace_pkg: MAP<ANY>, $vglobal: STRING, $vctx: STRING, $vkey: STRING, $vpkg: STRING) {
+            LET $manifest: MAP<ANY> = {}
+            FOR $group: STRING, $patterns: LIST<ANY> IN $t.fragments {
+                LET $group_map: MAP<ANY> = {}
                 FOR $pattern: STRING IN $patterns {
                     FOR $file_rel: STRING IN GLOB($pattern) {
                         LET $stem: STRING = DOCS_GEN_ENGINE::FILE_STEM($file_rel)
@@ -253,11 +253,11 @@ pub fn run_with_plugins(
                         // Scope assembly lives in the script, not the
                         // engine: each pipeline maps its own variable
                         // and env conventions here.
-                        LET $scope: MAP = {}
+                        LET $scope: MAP<ANY> = {}
                         $scope = MAP_SET($scope, $vglobal, $docs_global)
                         $scope = MAP_SET($scope, $vctx, $docs_ctx)
                         $scope = MAP_SET($scope, $vpkg, $workspace_pkg)
-                        LET $envmap: MAP = {}
+                        LET $envmap: MAP<ANY> = {}
                         $envmap = MAP_SET($envmap, $vkey, $version)
                         LET $expanded: STRING = DOCS_GEN_ENGINE::EXPAND_TEMPLATE($raw, $scope, $envmap)
                         $group_map = MAP_SET($group_map, $stem, $expanded)
@@ -267,11 +267,11 @@ pub fn run_with_plugins(
             }
             RETURN TO_JSON($manifest)
         }
-        LET $seen: MAP = {}
+        LET $seen: MAP<ANY> = {}
         FOR $scope: STRING IN $cfg.scopes {
             FOR $tj: STRING IN GLOB("{{ $scope }}/**/target.json") {
-                LET $file: MAP = LOAD_JSON($tj)
-                FOR $t: MAP IN $file.targets {
+                LET $file: MAP<ANY> = LOAD_JSON($tj)
+                FOR $t: MAP<ANY> IN $file.targets {
                     LET $tname: STRING = $t.name
                     $seen = NOTE_TARGET($seen, $tname, $tj)
                     IF HAS_KEY($t, "globs") {
@@ -279,7 +279,7 @@ pub fn run_with_plugins(
                         EXIT 1
                     }
                     LET $values_path: STRING = $t.values
-                    LET $docs_ctx: MAP = LOAD_JSON($values_path)
+                    LET $docs_ctx: MAP<ANY> = LOAD_JSON($values_path)
                     LET $json: STRING = BUILD_MANIFEST($t, $docs_global, $docs_ctx, $version, $workspace_pkg, $vglobal, $vctx, $vkey, $vpkg)
                     WRITE "{{ $staging }}/{{ $t.name }}.json" $json
                 }
@@ -287,12 +287,12 @@ pub fn run_with_plugins(
         }
 
         // One master template expanded into its output.
-        FUNC RENDER_TARGET($t: MAP, $docs_global: MAP, $staging: STRING) {
+        FUNC RENDER_TARGET($t: MAP<ANY>, $docs_global: MAP<ANY>, $staging: STRING) {
             ECHO "rendering {{ $t.name }} -> {{ $t.out }}"
 
             LET $values_path: STRING = $t.values
-            LET $docs_ctx: MAP = LOAD_JSON($values_path)
-            LET $files: MAP = LOAD_JSON("{{ $staging }}/{{ $t.name }}.json")
+            LET $docs_ctx: MAP<ANY> = LOAD_JSON($values_path)
+            LET $files: MAP<ANY> = LOAD_JSON("{{ $staging }}/{{ $t.name }}.json")
 
             WRITE $t.out ""
             LET $render: PIPE
@@ -301,8 +301,8 @@ pub fn run_with_plugins(
         }
         FOR $rscope: STRING IN $cfg.scopes {
             FOR $rtj: STRING IN GLOB("{{ $rscope }}/**/target.json") {
-                LET $rfile: MAP = LOAD_JSON($rtj)
-                FOR $rt: MAP IN $rfile.targets {
+                LET $rfile: MAP<ANY> = LOAD_JSON($rtj)
+                FOR $rt: MAP<ANY> IN $rfile.targets {
                     RENDER_TARGET($rt, $docs_global, $staging)
                 }
             }

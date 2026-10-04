@@ -1724,11 +1724,11 @@ declare_commands! {
         default_output: None,
         examples: &[ Example { name: "list append", fence_meta: None, code: indoc! {r#"
             # Appends accumulate in order.
-            LET $items: LIST = []
+            LET $items: LIST<STRING> = []
             LIST_APPEND $items "first"
             LIST_APPEND $items "second"
 
-            LET $want: LIST = ["first", "second"]
+            LET $want: LIST<STRING> = ["first", "second"]
             ASSERT_EQ $items $want
         "#} } ],
         lower: |_flags, args| {
@@ -1859,7 +1859,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     fence_meta: None,
                     code: indoc! {r#"
                 # Each element binds in turn; the loop body sees every one.
-                LET $items: LIST = ["a", "b"]
+                LET $items: LIST<STRING> = ["a", "b"]
                 FOR $item: STRING IN $items {
                   ECHO $item
                 }
@@ -1867,7 +1867,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 ASSERT_CONTAINS stdout "b"
 
                 # Key and value bind together for maps.
-                LET $map: MAP = {"x": 1}
+                LET $map: MAP<x: INT> = {"x": 1}
                 FOR $k: STRING, $v: INT IN $map {
                   ECHO "{{ $k }}={{ $v }}"
                 }
@@ -2104,7 +2104,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 ECHO "hello, {{ $name }}"
                 ASSERT_CONTAINS stdout "hello, world"
 
-                LET $items: LIST = ["a", "b"]
+                LET $items: LIST<STRING> = ["a", "b"]
                 ASSERT_CONTAINS $items "a"
                 ASSERT_CONTAINS $items "b"
 
@@ -2128,7 +2128,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 # The RHS is an expression: GLOB(...) runs and binds a list.
                 IMPORT [STD]
                 WRITE a.txt "x"
-                LET $files: LIST = GLOB("*.txt")
+                LET $files: LIST<STRING> = GLOB("*.txt")
                 FOR $f: STRING IN $files { ECHO $f }
 
                 ASSERT_CONTAINS stdout "a.txt"
@@ -2250,7 +2250,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 IMPORT [STD]
                 LET $p: PIPE
                 WITH_IO [stdout=$p] ECHO hello
-                LET $info: MAP = INSPECT($p)
+                LET $info: MAP<ANY> = INSPECT($p)
                 IF $info.is_os_pipe {
                     WRITE unexpected.txt "should be a script pipe"
                 }

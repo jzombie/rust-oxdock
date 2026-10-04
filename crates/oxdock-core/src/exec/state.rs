@@ -408,7 +408,9 @@ impl<P: ProcessManager> ExecState<P> {
     /// Append `item` to the LIST binding `key` in place. Copy-on-write:
     /// the buffer detaches only when shared, so aliases keep their
     /// contents; the sole owner mutates with no copy. Bails for
-    /// undeclared names and non-LIST bindings.
+    /// undeclared names and non-list bindings. Shaped lists validate
+    /// the item against the element tag, so a push can never silently
+    /// corrupt the shape the declaration promises.
     pub(super) fn push_into_list(&mut self, key: &str, item: Value) -> Result<()> {
         let kind = self
             .var_scopes
@@ -417,17 +419,28 @@ impl<P: ProcessManager> ExecState<P> {
             .find_map(|s| s.get(key).map(|(k, _)| *k))
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "undeclared variable ${key}: declare it first with LET ${key}: LIST = ..."
+                    "undeclared variable ${key}: declare it first with LET ${key}: LIST<...> = ..."
                 )
             })?;
-        if !matches!(kind, TypeTag::List) {
-            anyhow::bail!("LIST_APPEND ${key}: variable is {}, not LIST", kind.name());
-        }
+        let element = match kind {
+            TypeTag::List => None,
+            TypeTag::ListOf(element) => Some(*element),
+            _ => {
+                anyhow::bail!("LIST_APPEND ${key}: variable is {}, not LIST", kind.name());
+            }
+        };
         for scope in self.var_scopes.iter_mut().rev() {
             if let Some(slot) = scope.get_mut(key) {
                 let list = slot.1.as_list_mut().ok_or_else(|| {
                     anyhow::anyhow!("LIST_APPEND ${key}: variable is not a LIST value")
                 })?;
+                if let Some(expected) = element {
+                    oxdock_parser::check_value_at(
+                        &expected,
+                        &item,
+                        &format!("${key}[{}]", list.len()),
+                    )?;
+                }
                 list.push(item);
                 return Ok(());
             }

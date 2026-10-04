@@ -248,7 +248,7 @@ fn serve_and_close_roundtrip() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: MAP = SSH_SERVE("23331", {username: "guest", password: "close-pass"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("23331", {username: "guest", password: "close-pass"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $closed: BOOL = SSH_CLOSE($m.server)
         WRITE closed.txt "{{ $closed }}"
@@ -269,7 +269,7 @@ fn wrong_password_rejected() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: MAP = SSH_SERVE("23221", {username: "guest", password: "right-pass"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("23221", {username: "guest", password: "right-pass"})
         SLEEP 8s
         SSH_CLOSE($m.server)
     "#};
@@ -293,7 +293,7 @@ fn accept_echo_roundtrip() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: MAP = SSH_SERVE("23222", {username: "guest", password: "echo-pass"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("23222", {username: "guest", password: "echo-pass"})
         LET $in: PIPE
         LET $out: PIPE
         LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
@@ -331,7 +331,7 @@ fn pty_request_accepted_echo_roundtrip() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: MAP = SSH_SERVE("23225", {username: "guest", password: "pty-pass"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("23225", {username: "guest", password: "pty-pass"})
         LET $in: PIPE
         LET $out: PIPE
         LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
@@ -388,10 +388,10 @@ fn pty_explicit_size_unix() {
     let probe = root.clone();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: MAP = SSH_SERVE("23334", {username: "u", password: "p"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("23334", {username: "u", password: "p"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $h: HANDLE = ASYNC {
-            LET $dq: MAP = SSH_DEQUEUE($m.server)
+            LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             LET $in: PIPE
             LET $out: PIPE
             LET $t: HANDLE = ASYNC { SSH_PTY_RUN($dq.session, ["sh", "-c", "stty size"], 40, 100, $in, $out) }
@@ -425,10 +425,10 @@ fn pty_explicit_size_windows() {
     let probe = root.clone();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: MAP = SSH_SERVE("23335", {username: "u", password: "p"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("23335", {username: "u", password: "p"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $h: HANDLE = ASYNC {
-            LET $dq: MAP = SSH_DEQUEUE($m.server)
+            LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             LET $in: PIPE
             LET $out: PIPE
             LET $t: HANDLE = ASYNC { SSH_PTY_RUN($dq.session, ["cmd", "/c", "mode con"], 40, 100, $in, $out) }
@@ -467,11 +467,11 @@ fn pty_child_sees_session_env_unix() {
     let probe = root.clone();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: MAP = SSH_SERVE("23353", {username: "u", password: "p"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("23353", {username: "u", password: "p"})
         WRITE addr.txt "{{ $m.addr }}"
         ENV PROBE_TOP="top"
         LET $h: HANDLE = ASYNC {
-            LET $dq: MAP = SSH_DEQUEUE($m.server)
+            LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             ENV SSH_USER="{{ $dq.username }}"
             ENV SSH_CLIENT="{{ $dq.addr }}"
             ENV SSH_SERVER="{{ $m.addr }}"
@@ -513,10 +513,10 @@ fn pty_child_sees_session_env_windows() {
     let probe = root.clone();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: MAP = SSH_SERVE("23354", {username: "u", password: "p"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("23354", {username: "u", password: "p"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $h: HANDLE = ASYNC {
-            LET $dq: MAP = SSH_DEQUEUE($m.server)
+            LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             ENV SSH_USER="{{ $dq.username }}"
             ENV SSH_CLIENT="{{ $dq.addr }}"
             ENV SSH_SERVER="{{ $m.addr }}"
@@ -553,31 +553,31 @@ fn semaphore_guards_the_accept_loop() {
     let probe = root.clone();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: MAP = SSH_SERVE("23355", {username: "guest", password: "pass"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("23355", {username: "guest", password: "pass"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $sem: SEMAPHORE = SEMAPHORE_NEW(1)
         LET $w: HANDLE = ASYNC {
-            LET $s1: MAP = SSH_DEQUEUE($m.server)
-            LET $a1: MAP = SEMAPHORE_TRY_ACQUIRE($sem)
-            LET $held1: INT = $a1.held
-            ASSERT_EQ $held1 1
+            LET $s1: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
+            LET $a1: MAP<held: BOOL, permit?: PERMIT> = SEMAPHORE_TRY_ACQUIRE($sem)
+            LET $held1: BOOL = $a1.held
+            ASSERT_EQ $held1 true
             LET $permit: PERMIT = $a1.permit
             WRITE stage1.txt "admitted"
             LET $hold: HANDLE = ASYNC {
-                LET $s2: MAP = SSH_DEQUEUE($m.server)
-                LET $a2: MAP = SEMAPHORE_TRY_ACQUIRE($sem)
+                LET $s2: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
+                LET $a2: MAP<held: BOOL, permit?: PERMIT> = SEMAPHORE_TRY_ACQUIRE($sem)
                 WRITE rejected.txt "{{ $a2.held }}"
                 RETURN $a2.held
             }
-            LET $r: INT = AWAIT $hold
-            ASSERT_EQ $r 0
+            LET $r: BOOL = AWAIT $hold
+            ASSERT_EQ $r false
             RETURN $r
         }
-        LET $res: INT = AWAIT $w
-        ASSERT_EQ $res 0
+        LET $res: BOOL = AWAIT $w
+        ASSERT_EQ $res false
         LET $t3: HANDLE = ASYNC { SSH_DEQUEUE($m.server) }
-        LET $s3: MAP = AWAIT $t3
-        LET $a3: MAP = SEMAPHORE_TRY_ACQUIRE($sem)
+        LET $s3: MAP<ANY> = AWAIT $t3
+        LET $a3: MAP<held: BOOL, permit?: PERMIT> = SEMAPHORE_TRY_ACQUIRE($sem)
         WRITE admitted.txt "{{ $a3.held }}"
         SSH_CLOSE($m.server)
     "#};
@@ -587,7 +587,7 @@ fn semaphore_guards_the_accept_loop() {
     let client_a = TestClient::connect(addr, "guest", "pass").expect("first client connects");
     poll_file(&probe, "stage1.txt");
     let client_b = TestClient::connect(addr, "guest", "pass").expect("second client connects");
-    assert_eq!(poll_file(&probe, "rejected.txt"), "0");
+    assert_eq!(poll_file(&probe, "rejected.txt"), "false");
     let client_c = TestClient::connect(addr, "guest", "pass").expect("third client connects");
     handle
         .join()
@@ -595,7 +595,7 @@ fn semaphore_guards_the_accept_loop() {
         .expect("guarded accept loop runs");
     assert_eq!(
         read_trimmed(&probe.join("admitted.txt").unwrap()),
-        "1",
+        "true",
         "cap frees after worker return"
     );
     client_a.close();
@@ -617,10 +617,10 @@ fn pty_live_resize_unix() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: MAP = SSH_SERVE("23336", {username: "u", password: "p"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("23336", {username: "u", password: "p"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $h: HANDLE = ASYNC {
-            LET $dq: MAP = SSH_DEQUEUE($m.server)
+            LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             LET $in: PIPE
             LET $out: PIPE
             LET $t: HANDLE = ASYNC { SSH_PTY_RUN($dq.session, ["sh", "-c", "sleep 4; stty size"], 0, 0, $in, $out) }
@@ -660,10 +660,10 @@ fn pty_live_resize_windows() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: MAP = SSH_SERVE("23337", {username: "u", password: "p"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("23337", {username: "u", password: "p"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $h: HANDLE = ASYNC {
-            LET $dq: MAP = SSH_DEQUEUE($m.server)
+            LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             LET $in: PIPE
             LET $out: PIPE
             LET $t: HANDLE = ASYNC { SSH_PTY_RUN($dq.session, ["cmd", "/c", "ping -n 5 127.0.0.1 >nul & mode con"], 0, 0, $in, $out) }
@@ -699,7 +699,7 @@ fn main_thread_accept_bails() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: MAP = SSH_SERVE("23338", {username: "guest", password: "pass"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("23338", {username: "guest", password: "pass"})
         LET $in: PIPE
         LET $out: PIPE
         SSH_ACCEPT($m.server, $in, $out)
@@ -715,7 +715,7 @@ fn teardown_wakes_blocked_accept() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: MAP = SSH_SERVE("23339", {username: "guest", password: "pass"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("23339", {username: "guest", password: "pass"})
         LET $in: PIPE
         LET $out: PIPE
         LET $t: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
@@ -770,7 +770,7 @@ fn inner_exit_closes_outer_session() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: MAP = SSH_SERVE("23340", {username: "test", password: "test123"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("23340", {username: "test", password: "test123"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $c_in: PIPE
         LET $c_out: PIPE
@@ -830,7 +830,7 @@ fn real_openssh_client_echo_roundtrip() {
         IMPORT [STD, SSH]
         WRITE askpass.sh "#!/bin/sh\necho test123\n"
         RUN ["chmod", "+x", "askpass.sh"]
-        LET $m: MAP = SSH_SERVE("23341", {username: "test", password: "test123"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("23341", {username: "test", password: "test123"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $in: PIPE
         LET $out: PIPE
@@ -890,8 +890,8 @@ fn proxy_outer_to_inner_roundtrip() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $o: MAP = SSH_SERVE("23223", {username: "outer", password: "outer-pass"})
-        LET $i: MAP = SSH_SERVE("23224", {username: "inner", password: "inner-pass"})
+        LET $o: SSH_SERVE_INFO = SSH_SERVE("23223", {username: "outer", password: "outer-pass"})
+        LET $i: SSH_SERVE_INFO = SSH_SERVE("23224", {username: "inner", password: "inner-pass"})
         LET $j_in: PIPE
         LET $j_out: PIPE
         LET $h_inner: HANDLE = ASYNC { SSH_ACCEPT($i.server, $j_in, $j_out) }
@@ -942,7 +942,7 @@ fn unknown_serve_option_bails() {
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
-            LET $m: MAP = SSH_SERVE("23342", {username: "guest", password: "pass", frobnicate: 1})
+            LET $m: SSH_SERVE_INFO = SSH_SERVE("23342", {username: "guest", password: "pass", frobnicate: 1})
             SSH_CLOSE($m.server)
         "#},
     )
@@ -956,18 +956,21 @@ fn unknown_serve_option_bails() {
 #[test]
 #[cfg_attr(miri, ignore = "needs loopback TCP plus threads plus a Tokio runtime")]
 fn non_map_serve_options_bails() {
+    // MAP-typed options enforce at the pre-pass: a non-map fails
+    // statically with TypeMismatch before any socket opens.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let err = run_script(
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
-            LET $m: MAP = SSH_SERVE("23343", "nope")
+            LET $m: SSH_SERVE_INFO = SSH_SERVE("23343", "nope")
             SSH_CLOSE($m.server)
         "#},
     )
     .expect_err("non-map options must fail");
-    assert!(err.to_string().contains("options must be a MAP"), "{err:#}");
+    assert!(err.to_string().contains("TypeMismatch"), "{err:#}");
+    assert!(err.to_string().contains("expected MAP"), "{err:#}");
 }
 
 #[test]
@@ -979,7 +982,7 @@ fn missing_username_bails() {
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
-            LET $m: MAP = SSH_SERVE("23323", {password: "pass"})
+            LET $m: SSH_SERVE_INFO = SSH_SERVE("23323", {password: "pass"})
             SSH_CLOSE($m.server)
         "#},
     )
@@ -1001,7 +1004,7 @@ fn empty_password_bails() {
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
-            LET $m: MAP = SSH_SERVE("23324", {username: "guest", password: ""})
+            LET $m: SSH_SERVE_INFO = SSH_SERVE("23324", {username: "guest", password: ""})
             SSH_CLOSE($m.server)
         "#},
     )
@@ -1022,7 +1025,7 @@ fn missing_password_bails() {
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
-            LET $m: MAP = SSH_SERVE("23325", {username: "guest"})
+            LET $m: SSH_SERVE_INFO = SSH_SERVE("23325", {username: "guest"})
             SSH_CLOSE($m.server)
         "#},
     )
@@ -1042,7 +1045,7 @@ fn non_string_username_bails() {
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
-            LET $m: MAP = SSH_SERVE("23326", {username: 1, password: "pass"})
+            LET $m: SSH_SERVE_INFO = SSH_SERVE("23326", {username: 1, password: "pass"})
             SSH_CLOSE($m.server)
         "#},
     )
@@ -1063,7 +1066,7 @@ fn unknown_option_names_all_valid_keys() {
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
-            LET $m: MAP = SSH_SERVE("23327", {username: "guest", password: "pass", frobnicate: 1})
+            LET $m: SSH_SERVE_INFO = SSH_SERVE("23327", {username: "guest", password: "pass", frobnicate: 1})
             SSH_CLOSE($m.server)
         "#},
     )
@@ -1084,7 +1087,7 @@ fn non_string_key_path_bails() {
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
-            LET $m: MAP = SSH_SERVE("23344", {username: "guest", password: "pass", key_path: 1})
+            LET $m: SSH_SERVE_INFO = SSH_SERVE("23344", {username: "guest", password: "pass", key_path: 1})
             SSH_CLOSE($m.server)
         "#},
     )
@@ -1100,12 +1103,12 @@ fn stable_host_key_reused_across_restarts() {
     let root = guard_root(&temp);
     let serve_first = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: MAP = SSH_SERVE("23311", {username: "guest", password: "key-pass", key_path: "ssh_host_key"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("23311", {username: "guest", password: "key-pass", key_path: "ssh_host_key"})
         SSH_CLOSE($m.server)
     "#};
     let serve_second = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: MAP = SSH_SERVE("23312", {username: "guest", password: "key-pass", key_path: "ssh_host_key"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("23312", {username: "guest", password: "key-pass", key_path: "ssh_host_key"})
         SSH_CLOSE($m.server)
     "#};
     run_script(&root, serve_first).expect("first boot creates the key");
@@ -1132,14 +1135,14 @@ fn loaded_host_key_serves_clients() {
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
-            LET $m: MAP = SSH_SERVE("23313", {username: "guest", password: "key-pass", key_path: "ssh_host_key"})
+            LET $m: SSH_SERVE_INFO = SSH_SERVE("23313", {username: "guest", password: "key-pass", key_path: "ssh_host_key"})
             SSH_CLOSE($m.server)
         "#},
     )
     .expect("first boot creates the key");
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: MAP = SSH_SERVE("23314", {username: "guest", password: "key-pass", key_path: "ssh_host_key"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("23314", {username: "guest", password: "key-pass", key_path: "ssh_host_key"})
         LET $in: PIPE
         LET $out: PIPE
         LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
@@ -1181,7 +1184,7 @@ fn created_host_key_has_owner_only_permissions() {
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
-            LET $m: MAP = SSH_SERVE("23315", {username: "guest", password: "key-pass", key_path: "ssh_host_key"})
+            LET $m: SSH_SERVE_INFO = SSH_SERVE("23315", {username: "guest", password: "key-pass", key_path: "ssh_host_key"})
             SSH_CLOSE($m.server)
         "#},
     )
@@ -1215,7 +1218,7 @@ fn invalid_host_key_file_bails() {
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
-            LET $m: MAP = SSH_SERVE("23316", {username: "guest", password: "key-pass", key_path: "ssh_host_key"})
+            LET $m: SSH_SERVE_INFO = SSH_SERVE("23316", {username: "guest", password: "key-pass", key_path: "ssh_host_key"})
             SSH_CLOSE($m.server)
         "#},
     )
@@ -1236,7 +1239,7 @@ fn world_readable_host_key_bails() {
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
-            LET $m: MAP = SSH_SERVE("23317", {username: "guest", password: "key-pass", key_path: "ssh_host_key"})
+            LET $m: SSH_SERVE_INFO = SSH_SERVE("23317", {username: "guest", password: "key-pass", key_path: "ssh_host_key"})
             SSH_CLOSE($m.server)
         "#},
     )
@@ -1248,7 +1251,7 @@ fn world_readable_host_key_bails() {
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
-            LET $m: MAP = SSH_SERVE("23318", {username: "guest", password: "key-pass", key_path: "ssh_host_key"})
+            LET $m: SSH_SERVE_INFO = SSH_SERVE("23318", {username: "guest", password: "key-pass", key_path: "ssh_host_key"})
             SSH_CLOSE($m.server)
         "#},
     )
@@ -1271,7 +1274,7 @@ fn blank_key_path_keeps_ephemeral_key() {
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
-            LET $m: MAP = SSH_SERVE("23319", {username: "guest", password: "key-pass", key_path: ""})
+            LET $m: SSH_SERVE_INFO = SSH_SERVE("23319", {username: "guest", password: "key-pass", key_path: ""})
             SSH_CLOSE($m.server)
         "#},
     )
@@ -1292,7 +1295,7 @@ fn escaping_key_path_bails() {
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
-            LET $m: MAP = SSH_SERVE("23320", {username: "guest", password: "key-pass", key_path: "../escape_key"})
+            LET $m: SSH_SERVE_INFO = SSH_SERVE("23320", {username: "guest", password: "key-pass", key_path: "../escape_key"})
             SSH_CLOSE($m.server)
         "#},
     )
@@ -1310,12 +1313,12 @@ fn leading_slash_key_path_anchors_to_workspace_root() {
     let root = guard_root(&temp);
     let serve_first = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: MAP = SSH_SERVE("23321", {username: "guest", password: "key-pass", key_path: "/slash_key"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("23321", {username: "guest", password: "key-pass", key_path: "/slash_key"})
         SSH_CLOSE($m.server)
     "#};
     let serve_second = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: MAP = SSH_SERVE("23322", {username: "guest", password: "key-pass", key_path: "/slash_key"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("23322", {username: "guest", password: "key-pass", key_path: "/slash_key"})
         SSH_CLOSE($m.server)
     "#};
     run_script(&root, serve_first).expect("first boot creates the key");
@@ -1338,9 +1341,9 @@ fn dequeue_exposes_metadata_before_pump() {
     let probe = root.clone();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: MAP = SSH_SERVE("23328", {username: "guest", password: "pass"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("23328", {username: "guest", password: "pass"})
         LET $t: HANDLE = ASYNC {
-            LET $sess: MAP = SSH_DEQUEUE($m.server)
+            LET $sess: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             WRITE meta.txt "{{ $sess.command }}|{{ $sess.username }}|{{ $sess.addr }}"
         }
         AWAIT $t
@@ -1381,9 +1384,9 @@ fn virtual_command_router() {
     let probe = root.clone();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: MAP = SSH_SERVE("23329", {username: "guest", password: "pass"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("23329", {username: "guest", password: "pass"})
         LET $t: HANDLE = ASYNC {
-            LET $sess: MAP = SSH_DEQUEUE($m.server)
+            LET $sess: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             IF $sess.command == "health-check" {
                 LET $in: PIPE
                 LET $out: PIPE
@@ -1434,9 +1437,9 @@ fn unknown_virtual_command_rejected_cleanly() {
     let probe = root.clone();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: MAP = SSH_SERVE("23330", {username: "guest", password: "pass"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("23330", {username: "guest", password: "pass"})
         LET $t: HANDLE = ASYNC {
-            LET $sess: MAP = SSH_DEQUEUE($m.server)
+            LET $sess: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             IF $sess.command == "health-check" {
                 WRITE routed.txt "health-check"
             } ELSE {
@@ -1473,9 +1476,9 @@ fn session_value_crosses_await_boundary() {
     let probe = root.clone();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: MAP = SSH_SERVE("23332", {username: "guest", password: "pass"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("23332", {username: "guest", password: "pass"})
         LET $t: HANDLE = ASYNC {
-            LET $sess: MAP = SSH_DEQUEUE($m.server)
+            LET $sess: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             RETURN $sess.session
         }
         LET $s: SSH_SESSION = AWAIT $t
@@ -1508,9 +1511,9 @@ fn pump_channel_second_pump_bails() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: MAP = SSH_SERVE("23333", {username: "guest", password: "pass"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("23333", {username: "guest", password: "pass"})
         LET $t: HANDLE = ASYNC {
-            LET $sess: MAP = SSH_DEQUEUE($m.server)
+            LET $sess: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             RETURN $sess.session
         }
         LET $s: SSH_SESSION = AWAIT $t
@@ -1548,7 +1551,7 @@ fn worker_pool_script_parses() {
         IMPORT [STD, SSH]
         WORKSPACE LOCAL
 
-        LET $server: MAP = SSH_SERVE(
+        LET $server: SSH_SERVE_INFO = SSH_SERVE(
             "127.0.0.1:2241", {
                 username: "test",
                 password: "test123",
@@ -1558,7 +1561,7 @@ fn worker_pool_script_parses() {
 
         ECHO "ssh proxy listening on {{ $server.addr }} (login test)"
 
-        LET $workers: LIST = []
+        LET $workers: LIST<ANY> = []
         LET $w: INT = 0
         WHILE $w < 4 {
             LET $h: HANDLE = ASYNC {
@@ -1606,7 +1609,7 @@ fn finite_worker_pool_runs_to_completion() {
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
-            LET $workers: LIST = []
+            LET $workers: LIST<ANY> = []
             LET $w: INT = 0
             WHILE $w < 4 {
                 LET $h: HANDLE = ASYNC { ECHO "w{{ $w }}" }
@@ -1631,9 +1634,9 @@ fn pool_accept_round_robins_across_workers() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: MAP = SSH_SERVE("23345", {username: "test", password: "test123"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("23345", {username: "test", password: "test123"})
         WRITE addr.txt "{{ $m.addr }}"
-        LET $workers: LIST = []
+        LET $workers: LIST<ANY> = []
         LET $w: INT = 0
         WHILE $w < 4 {
             LET $h: HANDLE = ASYNC {
@@ -1707,13 +1710,13 @@ fn pool_pty_run_companions_terminate() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: MAP = SSH_SERVE("23346", {username: "test", password: "test123"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("23346", {username: "test", password: "test123"})
         WRITE addr.txt "{{ $m.addr }}"
-        LET $workers: LIST = []
+        LET $workers: LIST<ANY> = []
         LET $w: INT = 0
         WHILE $w < 2 {
             LET $h: HANDLE = ASYNC {
-                LET $dq: MAP = SSH_DEQUEUE($m.server)
+                LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
                 LET $c_in: PIPE
                 LET $c_out: PIPE
                 LET $acc: HANDLE = ASYNC { SSH_PUMP_CHANNEL($dq.session, $c_in, $c_out) }
@@ -1777,7 +1780,7 @@ fn serve_reports_virtual_echo() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: MAP = SSH_SERVE("23347", {username: "guest", password: "pass"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("23347", {username: "guest", password: "pass"})
         WRITE addr.txt "{{ $m.addr }}"
         WRITE virt.txt "{{ $m.virtual }}"
         SSH_CLOSE($m.server)
@@ -1799,7 +1802,7 @@ fn physical_serve_binds_rejected_in_script() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: MAP = SSH_SERVE("127.0.0.1:23348", {username: "guest", password: "pass"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("127.0.0.1:23348", {username: "guest", password: "pass"})
     "#};
     let err = run_script(&root, script).expect_err("physical bind must fail");
     assert!(err.to_string().contains("logical endpoints"), "{err:#}");
@@ -1814,7 +1817,7 @@ fn memory_service_serve_rejected() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: MAP = SSH_SERVE("ssh-mem-svc", {username: "guest", password: "pass"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("ssh-mem-svc", {username: "guest", password: "pass"})
     "#};
     let err = run_script(&root, script).expect_err("memory serve must fail");
     assert!(err.to_string().contains("needs a TCP socket"), "{err:#}");
@@ -1828,9 +1831,9 @@ fn serve_reclaim_after_close_rebinds() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $a: MAP = SSH_SERVE("23351", {username: "guest", password: "pass"})
+        LET $a: SSH_SERVE_INFO = SSH_SERVE("23351", {username: "guest", password: "pass"})
         SSH_CLOSE($a.server)
-        LET $b: MAP = SSH_SERVE("23351", {username: "guest", password: "pass"})
+        LET $b: SSH_SERVE_INFO = SSH_SERVE("23351", {username: "guest", password: "pass"})
         WRITE addr.txt "{{ $b.addr }}"
         SSH_CLOSE($b.server)
     "#};
@@ -1851,7 +1854,7 @@ fn offline_serve_and_close_opens_no_socket() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: MAP = SSH_SERVE("23349", {username: "guest", password: "pass"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("23349", {username: "guest", password: "pass"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $closed: BOOL = SSH_CLOSE($m.server)
         WRITE closed.txt "{{ $closed }}"
@@ -1898,11 +1901,11 @@ fn concurrent_guests_keep_their_own_pty_size() {
     let probe = root.clone();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: MAP = SSH_SERVE("23352", {username: "u", password: "p"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("23352", {username: "u", password: "p"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $h: HANDLE = ASYNC {
-            LET $a: MAP = SSH_DEQUEUE($m.server)
-            LET $b: MAP = SSH_DEQUEUE($m.server)
+            LET $a: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
+            LET $b: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             LET $a_in: PIPE
             LET $a_out: PIPE
             LET $b_in: PIPE
@@ -1945,7 +1948,7 @@ fn logical_port_connect_roundtrip() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: MAP = SSH_SERVE("23541", {username: "guest", password: "echo-pass"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("23541", {username: "guest", password: "echo-pass"})
         LET $in: PIPE
         LET $out: PIPE
         LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
@@ -1953,7 +1956,7 @@ fn logical_port_connect_roundtrip() {
         LET $cout: PIPE
         LET $c: HANDLE = ASYNC { SSH_CONNECT("23541", "guest", "echo-pass", $cin, $cout) }
         WITH_IO [stdout=$in] ECHO "server-greeting"
-        LET $info: MAP = INSPECT($cout)
+        LET $info: MAP<ANY> = INSPECT($cout)
         LET $empty: BOOL = $info.buffer_bytes == 0
         LET $tries: INT = 0
         WHILE $empty {
@@ -1999,7 +2002,7 @@ fn mapped_name_connect_roundtrip() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: MAP = SSH_SERVE("doc-demo", {username: "guest", password: "echo-pass"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-demo", {username: "guest", password: "echo-pass"})
         LET $in: PIPE
         LET $out: PIPE
         LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
@@ -2007,7 +2010,7 @@ fn mapped_name_connect_roundtrip() {
         LET $cout: PIPE
         LET $c: HANDLE = ASYNC { SSH_CONNECT("doc-demo", "guest", "echo-pass", $cin, $cout) }
         WITH_IO [stdout=$in] ECHO "server-greeting"
-        LET $info: MAP = INSPECT($cout)
+        LET $info: MAP<ANY> = INSPECT($cout)
         LET $empty: BOOL = $info.buffer_bytes == 0
         LET $tries: INT = 0
         WHILE $empty {
