@@ -341,7 +341,7 @@ pub fn usage() -> String {
               --script <file|->  script file under the workspace root, or `-` for stdin
               --shell            run the script, then drop into an interactive shell (requires a TTY)
               --listen <addr>    expose a logical service port ([host:]port, repeatable)
-              -p <[host:]outer:inner>  map outer port to an inner service port or name (repeatable; outer 0 is ephemeral)
+              -p <[host:]outer:inner>  map outer port to an inner service port or name (repeatable; outer 0 is ephemeral; bare outer binds loopback, prefix 0.0.0.0: for all interfaces)
               --offline          open no sockets (conflicts with --listen/-p)
               --remote TARGET=CMD    bind a REMOTE target to a stdio transport command (repeatable)
               --help, -h         print this help and exit

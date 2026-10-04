@@ -36,6 +36,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - [breaking] Host Rust API only, scripts are unaffected: `FuncParam` gains an `allowed` closed-set field, `TypeTag` gains `Any`, and `#[oxdock_func]` accepts `Vec<...>`/`BTreeMap<String, Value>` parameter spellings plus `#[values(...)]` sets. Signatures render more precisely (`: ANY`, `: MAP`, `: LIST`, `LIST<MAP>`); calls that relied on passing wrong shapes now fail at the boundary instead of inside function bodies.
 - [breaking] Scripts are affected: `SEMAPHORE_TRY_ACQUIRE` answers `held` as `BOOL` (`true`/`false`) instead of `INT` (`1`/`0`); branch on `$m.held` directly. Declarations use `MAP<held: BOOL, permit?: PERMIT>`.
 - [breaking] Scripts are affected: bare `MAP` and `LIST` are no longer declaration types. Unknown collections declare `MAP<ANY>` and `LIST<ANY>`; fixed shapes keep working unchanged.
+- [breaking] CLI behavior, scripts are unaffected: bare `-p outer:inner` now binds loopback (`127.0.0.1`) instead of all interfaces (`0.0.0.0`). This diverges from Docker on purpose, since Docker binds the bare form publicly. A previously public mapping now listens on loopback only. Prefix an explicit host for all interfaces (`-p 0.0.0.0:2222:2251`).
 
 ### Fixed
 
