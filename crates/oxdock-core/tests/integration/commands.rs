@@ -1804,7 +1804,7 @@ fn inspect_undeclared_variable_is_error() {
     let root = guard_root(&temp);
     let err = run_script(&root, "LET $m: MAP = INSPECT($nope)\n")
         .expect_err("INSPECT of undeclared var must fail");
-    assert!(err.to_string().contains("not defined"), "{err}");
+    assert!(err.to_string().contains("undefined variable"), "{err}");
 }
 
 #[test]
@@ -1814,7 +1814,7 @@ fn with_io_variable_pipe_undeclared_is_step_numbered_error() {
     let err = run_script(&root, "WITH_IO [stdout=$nope] ECHO hi\n")
         .expect_err("undeclared pipe var must fail");
     assert!(
-        err.to_string().contains("undeclared variable $nope"),
+        err.to_string().contains("undefined variable $nope"),
         "{err}"
     );
 }
@@ -2256,7 +2256,7 @@ fn list_append_rejects_undeclared_variable() {
         LIST_APPEND $missing 1
     "#};
     let err = run_script(&root, script).expect_err("undeclared append must fail");
-    assert!(err.to_string().contains("undeclared variable"), "{err}");
+    assert!(err.to_string().contains("undefined variable"), "{err}");
 }
 
 // ---------------------------------------------------------------------------
@@ -4046,7 +4046,7 @@ fn func_undeclared_variable_fails_at_run_start() {
         LET $x: INT = $nope
     "#};
     let err = run_script(&root, script).expect_err("undeclared must fail");
-    assert!(err.to_string().contains("is not defined"), "{err}");
+    assert!(err.to_string().contains("undefined variable"), "{err}");
 }
 
 #[test]
@@ -4113,7 +4113,7 @@ fn static_else_if_condition_is_checked() {
         }
     "#};
     let err = run_script(&root, script).expect_err("else-if cond must fail");
-    assert!(err.to_string().contains("is not defined"), "{err}");
+    assert!(err.to_string().contains("undefined variable"), "{err}");
 }
 
 #[test]
@@ -4141,7 +4141,7 @@ fn static_timeout_duration_is_checked() {
         }
     "#};
     let err = run_script(&root, script).expect_err("timeout expr must fail");
-    assert!(err.to_string().contains("is not defined"), "{err}");
+    assert!(err.to_string().contains("undefined variable"), "{err}");
 }
 
 #[test]
@@ -4247,7 +4247,7 @@ fn static_read_outside_coverage_is_undeclared() {
         [eq(env:STATIC_CHECK_COVERAGE_A, "2")] LET $s: STRING = $o
     "#};
     let err = run_script(&root, script).expect_err("uncovered read must fail");
-    assert!(err.to_string().contains("is not defined"), "{err}");
+    assert!(err.to_string().contains("undefined variable"), "{err}");
 }
 
 #[test]
@@ -4322,6 +4322,70 @@ fn arch_guard_runs_on_host_arch_only() {
 }
 
 #[test]
+fn static_simple_command_args_participate_in_liveness() {
+    // Statement arguments are reads: a variable declared under a
+    // guard cannot flow into an unguarded `ECHO` or `{{ }}`
+    // interpolation, and undeclared names fail in any argument.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    for (n, script) in [
+        "[family:unix] LET $val: STRING = \"path\"\nECHO $val\n",
+        "[family:unix] LET $val: STRING = \"path\"\nECHO hello $val\n",
+        "ECHO $missing\n",
+        "WRITE out.txt $missing\n",
+        "LET $code: STRING = \"x\"\nEXIT $missing\n",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let err = run_script(&root, script).expect_err(&format!("unchecked read must fail #{n}"));
+        let text = err.to_string();
+        assert!(
+            text.contains("undefined variable") || text.contains("not guaranteed to be defined"),
+            "{text}"
+        );
+    }
+    // Declared and live on the path: passes.
+    let script = indoc! {r#"
+        LET $val: STRING = "path"
+        ECHO $val
+        ECHO hello $val
+        WRITE out.txt prefix $val
+    "#};
+    run_script(&root, script).expect("live reads pass");
+    // Quoted `{{ }}` templates are runtime-total (missing names
+    // expand to empty, never error), so they stay unchecked by
+    // design: rejecting them would be a false positive.
+    let script = indoc! {r#"
+        WRITE out.txt "{{ $missing }}"
+    "#};
+    run_script(&root, script).expect("plain-string templates stay unchecked");
+}
+
+#[test]
+fn static_task_and_pipe_names_participate_in_liveness() {
+    // Handle names are reads too: unknown task/pipe/list names
+    // fail statically with the runtime message shape.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let err = run_script(&root, "AWAIT $t\n").expect_err("unknown task must fail");
+    assert!(err.to_string().contains("undefined variable"), "{err}");
+    let err = run_script(&root, "CANCEL $t\n").expect_err("unknown task must fail");
+    assert!(err.to_string().contains("undefined variable"), "{err}");
+    let script = indoc! {r#"
+        LET $o: INT = AWAIT $t
+    "#};
+    let err = run_script(&root, script).expect_err("unknown task must fail");
+    assert!(err.to_string().contains("undefined variable"), "{err}");
+    let script = indoc! {r#"
+        LET $l: STRING = "not-a-list"
+        LIST_APPEND $l "x"
+    "#};
+    let err = run_script(&root, script).expect_err("non-list append must fail");
+    assert!(err.to_string().contains("not LIST"), "{err}");
+}
+
+#[test]
 fn static_set_outside_binding_path_fails() {
     // Mutations are site-aware: `$port` binds under `family:unix`
     // only, so setting it on the Windows path fails statically
@@ -4333,7 +4397,7 @@ fn static_set_outside_binding_path_fails() {
         [family:windows] $port = 8081
     "#};
     let err = run_script(&root, script).expect_err("path-unbound SET must fail");
-    assert!(err.to_string().contains("is not defined"), "{err}");
+    assert!(err.to_string().contains("undefined variable"), "{err}");
 }
 
 #[test]
@@ -4346,5 +4410,5 @@ fn static_rpn_math_keeps_site_context() {
         [family:unix] LET $c: INT = $a + 1
     "#};
     let err = run_script(&root, script).expect_err("disjoint math read must fail");
-    assert!(err.to_string().contains("is not defined"), "{err}");
+    assert!(err.to_string().contains("undefined variable"), "{err}");
 }

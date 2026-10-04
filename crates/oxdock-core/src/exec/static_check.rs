@@ -37,6 +37,15 @@
 //!   a concrete parameter fails naming the `LET $x: T` gate; an
 //!   `ANY`-returning call assigned to `LET $x: T` is allowed because
 //!   `declare_var` coercion is the gate.
+//! - Every statement argument participates: `Arg::Expr` operands and
+//!   `{{ }}` fragments inside `Arg::Parts` read through inference,
+//!   and task-handle (`AWAIT`, `CANCEL`, `AWAIT`-capture), pipe
+//!   (`WITH_IO` bindings), and list (`LIST_APPEND`) names read
+//!   through site-aware liveness with their runtime type rules
+//!   (`PIPE`/`LIST` exactly). Plain `Arg::String` text stays
+//!   unchecked by design: `{{ }}` there expands missing names to
+//!   empty at runtime and never errors, so rejecting it would be a
+//!   false positive.
 //!
 //! Performance: single traversal, no fixpoint, no I/O, no registry
 //! writes. Branch forks clone a map of live vars; the merge walk
@@ -46,7 +55,9 @@
 use std::collections::HashMap;
 
 use anyhow::{Result, bail};
-use oxdock_parser::{CompareOp, Expr, GuardExpr, MathOp, Step, StepKind, TypeTag, Value};
+use oxdock_parser::{
+    CompareOp, Expr, GuardExpr, IoBinding, MathOp, PipeTarget, Step, StepKind, TypeTag, Value,
+};
 use oxdock_process::ProcessManager;
 
 use super::{ExecState, FuncMeta, FuncParam};
@@ -303,7 +314,7 @@ impl Env {
                     .filter(|entry| oxdock_parser::guards_overlap(entry.guard.as_ref(), site))
                     .collect();
                 if live.is_empty() {
-                    bail!("variable '${key}' is not defined");
+                    bail!("undefined variable ${key}");
                 }
                 // Coverage: an unguarded live entry fires everywhere,
                 // otherwise the site must imply the disjunction of
@@ -350,7 +361,7 @@ impl Env {
                 return Ok((unified.expect("live never empty"), guard));
             }
         }
-        bail!("variable '${key}' is not defined");
+        bail!("undefined variable ${key}");
     }
 
     fn is_declared(&self, key: &str) -> bool {
@@ -676,11 +687,14 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             }
             StepKind::Break => self.walk_break("BREAK", scope, idx),
             StepKind::Continue => self.walk_break("CONTINUE", scope, idx),
-            StepKind::Exit(_) => Ok(WalkOut {
-                falls_through: false,
-                has_return: false,
-                types: Vec::new(),
-            }),
+            StepKind::Exit(_) => {
+                self.check_step_args(&step.kind, env, scope, idx, depth)?;
+                Ok(WalkOut {
+                    falls_through: false,
+                    has_return: false,
+                    types: Vec::new(),
+                })
+            }
             StepKind::If {
                 cond,
                 then_body,
@@ -834,8 +848,12 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 Ok(live)
             }
             StepKind::AwaitCapture {
-                out_var, out_type, ..
+                out_var,
+                out_type,
+                task_var,
             } => {
+                // The handle resolves before the output declares.
+                Self::check_name_read(env, task_var, scope, idx)?;
                 let tag = self
                     .exec
                     .resolve_tag(out_type)
@@ -881,11 +899,9 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 env.insert_top(key, tag, step.guard.as_ref());
                 Ok(live)
             }
-            StepKind::Timeout { duration, body } => {
+            StepKind::Timeout { body, .. } => {
                 // A dynamic duration evaluates before the body runs.
-                if let oxdock_parser::Arg::Expr(expr) = duration {
-                    self.infer_expr(expr, env, scope, idx, depth + 1)?;
-                }
+                self.check_step_args(&step.kind, env, scope, idx, depth)?;
                 let inner = self.walk_body(body, env, scope, depth + 1)?;
                 let mut out = live;
                 // TIMEOUT bounds execution in place: a `RETURN`
@@ -929,8 +945,9 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 self.walk_body(body, &mut sealed, &remote, depth + 1)?;
                 Ok(live)
             }
-            StepKind::WithIo { cmd, .. } => {
-                // Single wrapped step: recurse transparently.
+            StepKind::WithIo { bindings, cmd } => {
+                // Bindings resolve before the wrapped command runs.
+                Self::check_pipe_bindings(env, bindings, scope, idx)?;
                 self.walk_wrapped(cmd, env, scope, idx, depth + 1)
             }
             StepKind::ReadLine { var } => {
@@ -942,8 +959,101 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 }
                 Ok(live)
             }
-            _ => Ok(live),
+            _ => {
+                // Every remaining variant is a simple command: all its
+                // argument expressions (including `{{ }}` template
+                // fragments) read through inference, and handle/pipe/list
+                // names read through site-aware liveness. Control-flow,
+                // declaration, and wrapped forms return through their own
+                // arms above, so nothing here double-checks.
+                self.check_step_args(&step.kind, env, scope, idx, depth)?;
+                match &step.kind {
+                    StepKind::Await { var } | StepKind::Cancel { var } => {
+                        Self::check_name_read(env, var, scope, idx)?;
+                    }
+                    StepKind::WithIoBlock { bindings } => {
+                        Self::check_pipe_bindings(env, bindings, scope, idx)?;
+                    }
+                    StepKind::ListAppend { list, .. } => {
+                        let tag = Self::check_name_read(env, list, scope, idx)?;
+                        if !tags_equal(&tag, &TypeTag::List) {
+                            bail!(
+                                "step {}: LIST_APPEND ${}: variable is {}, not LIST",
+                                idx + 1,
+                                clean_var(list),
+                                tag.name()
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+                Ok(live)
+            }
         }
+    }
+
+    /// Check every argument expression of one simple command through
+    /// `infer_expr`: `Arg::Expr` operands and `{{ }}` template
+    /// fragments (`Arg::Parts`) read live bindings; plain strings
+    /// carry nothing. Built on the exhaustive `walk_exprs` visitor,
+    /// so a new expression-carrying variant fails compilation in the
+    /// parser instead of slipping past this pass.
+    fn check_step_args(
+        &mut self,
+        kind: &StepKind,
+        env: &mut Env,
+        scope: &Scope,
+        idx: usize,
+        depth: usize,
+    ) -> Result<()> {
+        let mut failed: Option<anyhow::Error> = None;
+        kind.walk_exprs(&mut |expr| {
+            if failed.is_none()
+                && let Err(err) = self.infer_expr(expr, env, scope, idx, depth + 1)
+            {
+                failed = Some(err);
+            }
+        });
+        if let Some(err) = failed {
+            return Err(err);
+        }
+        Ok(())
+    }
+
+    /// Static counterpart of a runtime name lookup (`get_var` and
+    /// friends): the binding must be declared and live on this
+    /// step's path, mirroring the `undefined variable` failure one
+    /// for one.
+    fn check_name_read(env: &Env, name: &str, scope: &Scope, idx: usize) -> Result<TypeTag> {
+        let key = clean_var(name);
+        if !env.is_declared(&key) {
+            bail!("step {}: undefined variable ${key}", idx + 1);
+        }
+        env.read_guarded(&key, scope.site.as_ref())
+    }
+
+    /// Static counterpart of `resolve_pipe_handle`: a `$var` pipe
+    /// endpoint must be a live `PIPE` binding, mirroring the runtime
+    /// `TypeMismatch` one for one.
+    fn check_pipe_bindings(
+        env: &Env,
+        bindings: &[IoBinding],
+        scope: &Scope,
+        idx: usize,
+    ) -> Result<()> {
+        for binding in bindings {
+            if let Some(PipeTarget::Var(name)) = &binding.pipe {
+                let tag = Self::check_name_read(env, name, scope, idx)?;
+                if !tags_equal(&tag, &TypeTag::Pipe) {
+                    bail!(
+                        "step {}: TypeMismatch: expected PIPE, got {}",
+                        idx + 1,
+                        tag.name()
+                    );
+                }
+            }
+        }
+        Ok(())
     }
 
     /// `BREAK`/`CONTINUE`: legal only inside a loop body. Anywhere
@@ -1300,7 +1410,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             Expr::Var(name) => {
                 let key = clean_var(name);
                 if !env.is_declared(&key) {
-                    bail!("{}variable '${key}' is not defined", loc(Some(&at())));
+                    bail!("{}undefined variable ${key}", loc(Some(&at())));
                 }
                 Ok(StaticTy::Ty(env.read_guarded(&key, scope.site.as_ref())?))
             }
@@ -1308,7 +1418,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             Expr::KeyPath { base, keys } => {
                 let key = clean_var(base);
                 if !env.is_declared(&key) {
-                    bail!("{}variable '${key}' is not defined", loc(Some(&at())));
+                    bail!("{}undefined variable ${key}", loc(Some(&at())));
                 }
                 let mut current = env.read_guarded(&key, scope.site.as_ref())?;
                 for part in keys {
@@ -1383,7 +1493,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             Expr::Inspect(name) => {
                 let key = clean_var(name);
                 if !env.is_declared(&key) {
-                    bail!("{}variable '${key}' is not defined", loc(Some(&at())));
+                    bail!("{}undefined variable ${key}", loc(Some(&at())));
                 }
                 env.read_guarded(&key, scope.site.as_ref())?;
                 Ok(StaticTy::Ty(TypeTag::Any))
@@ -1449,7 +1559,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 MathOp::LoadVar(name) => {
                     let key = clean_var(name);
                     if !env.is_declared(&key) {
-                        bail!("variable '${key}' is not defined");
+                        bail!("undefined variable ${key}");
                     }
                     stack.push(StaticTy::Ty(env.read_guarded(&key, scope.site.as_ref())?));
                 }
@@ -1457,7 +1567,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 MathOp::LoadKeyPath { base, keys } => {
                     let key = clean_var(base);
                     if !env.is_declared(&key) {
-                        bail!("variable '${key}' is not defined");
+                        bail!("undefined variable ${key}");
                     }
                     let mut current = env.read_guarded(&key, scope.site.as_ref())?;
                     for part in keys {
@@ -1506,7 +1616,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 MathOp::Inspect(name) => {
                     let key = clean_var(name);
                     if !env.is_declared(&key) {
-                        bail!("variable '${key}' is not defined");
+                        bail!("undefined variable ${key}");
                     }
                     env.read_guarded(&key, scope.site.as_ref())?;
                     stack.push(StaticTy::Ty(TypeTag::Any));
