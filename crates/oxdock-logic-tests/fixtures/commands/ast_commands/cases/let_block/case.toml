@@ -1,4 +1,4 @@
 name = "let_block"
 
 [expect]
-files = { "picked.txt" = "hello-out-in--yes" }
+files = { "picked.txt" = "hello-out-in-captured-yes" }

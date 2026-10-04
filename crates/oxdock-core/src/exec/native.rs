@@ -746,25 +746,40 @@ fn types<P: ProcessManager>(cx: &mut StepCtx<P>) -> Result<Value> {
 /// Reads the run's name directory, so it runs on the AST path.
 #[oxdock_func(returns = TypeTag::Map)]
 fn type_describe<P: ProcessManager>(cx: &mut StepCtx<P>, name: String) -> Result<Value> {
-    cx.state
-        .describe_type(&name)
-        .map(|descriptor| {
-            let mut map = BTreeMap::new();
-            map.insert(
-                "name".to_string(),
-                Value::string(descriptor.name.to_string()),
-            );
-            map.insert(
-                "summary".to_string(),
-                Value::string(descriptor.summary.to_string()),
-            );
-            map.insert(
-                "docs".to_string(),
-                Value::string(descriptor.docs.to_string()),
-            );
-            Value::map(map)
-        })
-        .ok_or_else(|| anyhow::anyhow!("unknown type {name}"))
+    if let Some(descriptor) = cx.state.describe_type(&name) {
+        let mut map = BTreeMap::new();
+        map.insert(
+            "name".to_string(),
+            Value::string(descriptor.name.to_string()),
+        );
+        map.insert(
+            "summary".to_string(),
+            Value::string(descriptor.summary.to_string()),
+        );
+        map.insert(
+            "docs".to_string(),
+            Value::string(descriptor.docs.to_string()),
+        );
+        return Ok(Value::map(map));
+    }
+    // Script aliases have no descriptor but introspect the same way:
+    // the entry names the alias and its canonical target spelling.
+    if let Some(target) = cx.state.alias_target(&name) {
+        let mut map = BTreeMap::new();
+        map.insert("name".to_string(), Value::string(name.clone()));
+        map.insert(
+            "summary".to_string(),
+            Value::string(format!("Script type alias for {target}.")),
+        );
+        map.insert(
+            "docs".to_string(),
+            Value::string(format!(
+                "Declared with TYPE {name} = {target}. The alias expands structurally at every declaration."
+            )),
+        );
+        return Ok(Value::map(map));
+    }
+    Err(anyhow::anyhow!("unknown type {name}"))
 }
 
 /// Report whether a standard stream is a terminal.

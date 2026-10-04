@@ -17,8 +17,8 @@ oxdock_embed! {
 
         // Provenance comes from the shell: only the matching gate runs,
         // so this stays green on every OS in CI.
-        [unix] LET $os: STRING = RUN uname -srm
-        [windows] LET $os: STRING = RUN ver
+        [family:unix] LET $os: STRING = RUN uname -srm
+        [family:windows] LET $os: STRING = RUN ver
         LET $toolchain: STRING = RUN cargo --version
 
         WRITE dist/os.txt "\{{ $os }}"

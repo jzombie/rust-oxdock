@@ -5,7 +5,9 @@
 //! `TYPES()`.
 
 use indoc::indoc;
-use oxdock_core::{Engine, EngineOutput, HostModule, OxDockFn, OxDockType, TypeTag, Value};
+use oxdock_core::{
+    Engine, EngineOutput, Field, HostModule, OxDockFn, OxDockType, RecordSchema, TypeTag, Value,
+};
 use oxdock_fs::{GuardedPath, GuardedTempDir, PathResolver, WorkspaceFs};
 use oxdock_func_macro::{oxdock_func, oxdock_type};
 use oxdock_process::MockProcessManager;
@@ -56,6 +58,12 @@ fn guard_root(temp: &GuardedTempDir) -> GuardedPath {
     temp.as_guarded_path().clone()
 }
 
+/// One host-owned record shape for the alias-collision proof below.
+static EMP_FIELDS: &[Field] = &[Field {
+    name: "name",
+    ty: TypeTag::String,
+}];
+
 fn read_trimmed(path: &GuardedPath) -> String {
     let resolver = PathResolver::new(path.root(), path.root()).unwrap();
     resolver
@@ -91,6 +99,41 @@ fn custom_type_flows_through_declare_and_hosts() {
     assert_eq!(
         read_trimmed(&root.join("tag-doc.txt").unwrap()),
         "Opaque label type."
+    );
+}
+
+#[test]
+fn type_alias_collisions_with_host_type_and_schema_fail() {
+    // `collect_type_aliases` rejects names the host owns: a custom
+    // type and a registered record schema both win over `TYPE`.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let mut engine = Engine::new();
+    engine.register_type::<Tag>();
+    engine.register_module(HostModule {
+        name: "TEST".to_string(),
+        funcs: vec![MakeTag::registration(), ReadTag::registration()],
+        types: vec![],
+        record_schemas: vec![RecordSchema {
+            name: "EMP",
+            fields: EMP_FIELDS,
+        }],
+    });
+    let err = engine
+        .run_script(&root, "TYPE TAG = MAP\n")
+        .expect_err("host type collision must fail");
+    assert!(
+        err.to_string()
+            .contains("collides with registered host type 'TAG'"),
+        "{err}"
+    );
+    let err = engine
+        .run_script(&root, "TYPE EMP = MAP\n")
+        .expect_err("schema collision must fail");
+    assert!(
+        err.to_string()
+            .contains("collides with registered record schema 'EMP'"),
+        "{err}"
     );
 }
 

@@ -156,7 +156,8 @@ pub fn tokenize(input: &str) -> Result<Vec<RawToken<'_>>, ParseError> {
             | Rule::call_statement
             | Rule::return_statement
             | Rule::break_statement
-            | Rule::continue_statement => tokens.push(RawToken::Command {
+            | Rule::continue_statement
+            | Rule::type_statement => tokens.push(RawToken::Command {
                 pair,
                 line_no,
                 span,

@@ -39,8 +39,8 @@ oxdock_embed! {
 
         // Provenance comes from the shell: only the matching gate runs,
         // so this stays green on every OS in CI.
-        [unix] LET $os: STRING = RUN uname -srm
-        [windows] LET $os: STRING = RUN ver
+        [family:unix] LET $os: STRING = RUN uname -srm
+        [family:windows] LET $os: STRING = RUN ver
         LET $toolchain: STRING = RUN cargo --version
 
         WRITE dist/os.txt "{{ $os }}"
@@ -424,7 +424,7 @@ Scripts are sequences of instructions, one per line. Instructions may be prefixe
 
 ### Declared variable types
 
-Every variable binding declares its type at the binding site. `LET $name: TYPE = ...` creates the binding, `$name = ...` mutates it, and bodies use the bare `$name` reference. The leading `$` keeps mutation distinct from `KEY=value` command assignments. Repeating `LET` for the same name in the same scope is a redeclaration error. Loop variables are declared the same way: `FOR $item: STRING IN ...`. Valid types: `STRING`, `INT`, `FLOAT`, `BOOL`, `PIPE`, `LIST`, `MAP`, `HANDLE`, `DURATION`, `PATH`.
+Every variable binding declares its type at the binding site. `LET $name: TYPE = ...` creates the binding, `$name = ...` mutates it, and bodies use the bare `$name` reference. The leading `$` keeps mutation distinct from `KEY=value` command assignments. Repeating `LET` for the same name in the same scope is a redeclaration error. Loop variables are declared the same way: `FOR $item: STRING IN ...`. Valid types: `STRING`, `INT`, `FLOAT`, `BOOL`, `PIPE`, `LIST`, `MAP`, `HANDLE`, `DURATION`, `PATH`. Shapes compose (`LIST<MAP>`, `MAP<name: STRING, age: INT>`, arbitrary nesting, spacing insignificant); `TYPE NAME = <shape>` binds one immutable name per run that every declaration form accepts.
 
 ```oxdock
 LET $count: INT = 1
@@ -438,6 +438,22 @@ FOR $item: STRING IN ["a", "b"] {
 WRITE count.txt "{{ $count }}"
 LET $c: STRING = READ count.txt
 ASSERT_EQ $c "2"
+```
+
+Shapes enforce at the binding: a bad element fails naming its position.
+
+```oxdock
+# A list of maps and an inline record bind shaped values.
+LET $ms: LIST<MAP> = [{a: 1}]
+LET $p: MAP<name: STRING, age: INT> = {name: "x", age: 3}
+ASSERT_EQ $p.name "x"
+
+# TYPE binds one reusable name; uses enforce structurally.
+TYPE PERSON = MAP<name: STRING, age: INT>
+LET $q: PERSON = {name: "y", age: 4}
+LET $team: LIST<PERSON> = [$q]
+LET $n: STRING = $team.0.name
+ASSERT_EQ $n "y"
 ```
 
 The `env:KEY` expression reads the script environment into a plain value. A `$var` reference never reads the environment, even when the names match:
@@ -571,13 +587,12 @@ ASSERT_CONTAINS stdout "ab"
 
 A guard is a bracketed expression that gates the instruction or block that follows it. Inside the brackets:
 
-- `env:KEY` passes when variable `KEY` exists and is non-empty; `eq(env:KEY, value)` and `ne(env:KEY, value)` compare values.
-- Bare platform tags pass based on the host: `linux`, `macos` (alias `mac`), `windows`, `unix`. Tags are case-insensitive.
-- A comma-separated list means **AND**: `[env:A, linux]`.
+- Guards are namespaced `key:value` pairs: `os:macos`, `os:linux`, `os:windows`, `arch:x86_64` (any documented target-architecture value), `bool:true`, `env:KEY`, `eq(env:KEY, value)`. `family:unix` and `family:windows` are accepted aliases for `any(os:macos, os:linux)` and `os:windows` respectively, lowered at parse so every platform check runs under `os:`. Matching is case-sensitive throughout.
+- A comma-separated list means **AND**: `[env:A, os:linux]`.
 - Disjunction is expressed as a call: `any(expr, expr, ...)` with at least two branches, not an infix operator.
 - Conjunction is expressed as a call (`all(expr, expr, ...)`) or implicitly via comma separation.
 - Any predicate may be negated with `not(...)`: `[not(env:SKIP)]`.
-- Parentheses group expressions: `[any(env:A, linux), mac]`.
+- Parentheses group expressions: `[any(env:A, os:linux), os:macos]`.
 
 Guards attach to the next instruction. Several guard lines in a row chain onto the same target, and a guard immediately followed by `{` opens a guarded block whose guard applies to every enclosed instruction.
 
@@ -606,7 +621,7 @@ ASSERT_CONTAINS stdout "deploying-to-staging"
 ```oxdock
 // Exactly one block runs depending on the host OS; every command
 // inside a guarded block inherits the block's guard.
-[windows] {
+[family:windows] {
   WRITE os-report.txt windows
   ECHO windows-detected
   LET $rep: STRING = READ os-report.txt
@@ -614,13 +629,46 @@ ASSERT_CONTAINS stdout "deploying-to-staging"
   ASSERT_CONTAINS stdout "windows-detected"
 }
 
-[unix] {
+[family:unix] {
   WRITE os-report.txt unix-family
   ECHO unix-detected
   LET $rep: STRING = READ os-report.txt
   ASSERT_EQ $rep "unix-family"
   ASSERT_CONTAINS stdout "unix-detected"
 }
+```
+
+### Architecture guards
+
+```oxdock
+# Gate blocks on the host target architecture. Exactly one block
+# runs on any host, and each block proves its own execution.
+[arch:x86_64] {
+  WRITE arch-report.txt x86_64
+  ECHO arch-detected
+  LET $rep: STRING = READ arch-report.txt
+  ASSERT_EQ $rep "x86_64"
+  ASSERT_CONTAINS stdout "arch-detected"
+}
+
+[arch:aarch64] {
+  WRITE arch-report.txt aarch64
+  ECHO arch-detected
+  LET $rep: STRING = READ arch-report.txt
+  ASSERT_EQ $rep "aarch64"
+  ASSERT_CONTAINS stdout "arch-detected"
+}
+
+[not(any(arch:x86_64, arch:aarch64))] {
+  WRITE arch-report.txt other-arch
+  ECHO arch-detected
+  LET $rep: STRING = READ arch-report.txt
+  ASSERT_EQ $rep "other-arch"
+  ASSERT_CONTAINS stdout "arch-detected"
+}
+
+# One block always runs, so this holds on every host.
+ASSERT_CONTAINS stdout "arch-detected"
 ```
 
 ### Negation, disjunction, and composition
@@ -638,7 +686,7 @@ ASSERT_CONTAINS stdout "negation-passes-for-undefined"
 ASSERT_CONTAINS stdout "or-matched-a-branch"
 
 // Comma composes with AND: (A or linux) AND A: true here on every OS.
-[any(env:OXDOCK_DOC_FEATURE_A, linux), env:OXDOCK_DOC_FEATURE_A] ECHO composed-and-or-guard
+[any(env:OXDOCK_DOC_FEATURE_A, os:linux), env:OXDOCK_DOC_FEATURE_A] ECHO composed-and-or-guard
 ASSERT_CONTAINS stdout "composed-and-or-guard"
 ```
 
@@ -932,7 +980,9 @@ id checked read. `{{ $t }}` renders the custom value through its
 `Display`, so interpolation, `WRITE`, and equality treat host values like
 native ones. `TYPES()` lists every registered name and
 `TYPE_DESCRIBE("TAG")` returns its summary and docs, so scripts introspect
-host surface exactly like native surface. Host types stay opaque:
+host surface exactly like native surface. Script `TYPE` aliases ride the
+same listing: `TYPES()` includes alias names and `TYPE_DESCRIBE("PERSON")`
+reports the canonical target spelling. Host types stay opaque:
 literal syntax, `$var.key` traversal, and `FOR` iteration remain `LIST`
 and `MAP` only, so queryable containers expose host accessor functions
 (`MATRIX_GET($m, $row, $col)`) instead of new syntax.

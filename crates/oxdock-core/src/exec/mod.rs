@@ -7,6 +7,7 @@ mod io;
 mod native;
 pub mod remote;
 mod state;
+mod static_check;
 mod steps;
 #[cfg(test)]
 mod tests;
@@ -352,6 +353,7 @@ fn new_state<P: ProcessManager>(fs: Box<dyn WorkspaceFs>, io: ExecIo) -> Result<
         functions: self::native::FunctionRegistry::with_builtins(),
         types: self::typing::startup_type_map(),
         record_schemas: std::collections::HashMap::new(),
+        type_aliases: std::collections::HashMap::new(),
         call_depth: 0,
         // Root flow is task 0; worker ids start at 1 (see next_task_id).
         task_id: 0,
@@ -374,7 +376,12 @@ fn finish_run<P: ProcessManager>(
     // Execution boundary: every run entry point funnels through here, so
     // typo'd param and return type tags fail before any step runs. A bad
     // label is a programmer error, never a runtime value.
+    state.type_aliases = self::typing::collect_type_aliases(steps, &state)?;
     state.validate_function_type_tags()?;
+    // Script-side counterpart: terminal unification, MissingReturn,
+    // undeclared variables, and ungated ANY flow fail here too,
+    // before any step runs.
+    static_check::validate_script_types(steps, &state)?;
     let assert_windows = Arc::clone(&state.assert_windows);
     let assert_windows_stderr = Arc::clone(&state.assert_windows_stderr);
     let exact_stdout = Arc::clone(&state.exact_stdout);

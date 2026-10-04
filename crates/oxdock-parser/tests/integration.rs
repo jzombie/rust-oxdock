@@ -37,6 +37,8 @@ mod remote_block;
 mod run_exec;
 #[path = "integration/timeout_block.rs"]
 mod timeout_block;
+#[path = "integration/type_syntax.rs"]
+mod type_syntax;
 #[path = "integration/unified_values.rs"]
 mod unified_values;
 #[path = "integration/with_io_block.rs"]

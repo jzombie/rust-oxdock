@@ -628,6 +628,7 @@ impl StepKind {
             }
             StepKind::WithIo { .. }
             | StepKind::WithIoBlock { .. }
+            | StepKind::TypeAlias { .. }
             | StepKind::Workspace(_)
             | StepKind::InheritEnv { .. }
             | StepKind::Cwd
@@ -679,6 +680,7 @@ impl StepKind {
                 }
             }
             StepKind::InheritEnv { .. }
+            | StepKind::TypeAlias { .. }
             | StepKind::Workdir(_)
             | StepKind::Workspace(_)
             | StepKind::Env { .. }
@@ -805,6 +807,7 @@ declare_commands! {
     structural [
         WithIo { bindings: Vec<IoBinding>, cmd: Box<StepKind> },
         WithIoBlock { bindings: Vec<IoBinding> },
+        TypeAlias { name: String, target: String },
         For { key_var: Option<String>, key_type: Option<String>, var: String, var_type: String, in_expr: Expr, body: Vec<Step> },
         If { cond: Box<Expr>, then_body: Vec<Step>, else_ifs: Vec<(Box<Expr>, Vec<Step>)>, else_body: Option<Vec<Step>> },
         Assign { var: String, decl_type: String, expr: Expr },
@@ -998,10 +1001,10 @@ declare_commands! {
                 # through untouched on unix ...
                 ENV PROXY_PORT=23791
 
-                [unix] LET $o: STRING = RUN echo serving on "$PROXY_PORT"
+                [family:unix] LET $o: STRING = RUN echo serving on "$PROXY_PORT"
 
                 # ... while cmd expands %VAR% on Windows.
-                [windows] LET $o: STRING = RUN echo serving on %PROXY_PORT%
+                [family:windows] LET $o: STRING = RUN echo serving on %PROXY_PORT%
 
                 ASSERT_CONTAINS $o "23791"
             "#} },
@@ -3194,6 +3197,7 @@ impl fmt::Display for StepKind {
                 write!(f, "{}({})", name, ps.join(", "))
             }
             StepKind::Return { expr } => write!(f, "RETURN {}", expr),
+            StepKind::TypeAlias { name, target } => write!(f, "TYPE {} = {}", name, target),
             StepKind::While { cond, body } => {
                 write!(f, "WHILE {} {{", cond)?;
                 for s in body {
@@ -3829,6 +3833,10 @@ mod tests {
                 StepKind::While { .. } => Some("WHILE"),
                 StepKind::Break => Some("BREAK"),
                 StepKind::Continue => Some("CONTINUE"),
+                // Aliases are declared by `TYPE` but documented with the
+                // type-word prose on the `LET` page (define-once,
+                // use-everywhere); no dedicated reference page.
+                StepKind::TypeAlias { .. } => Some("LET"),
                 StepKind::RunExec { .. } => None,
                 StepKind::Workdir(_)
                 | StepKind::Workspace(_)
@@ -3942,6 +3950,10 @@ mod tests {
             },
             StepKind::Break,
             StepKind::Continue,
+            StepKind::TypeAlias {
+                name: "PERSON".to_string(),
+                target: "MAP<name: STRING>".to_string(),
+            },
         ];
         let registry = all_structural_metadata();
         for kind in &dummies {

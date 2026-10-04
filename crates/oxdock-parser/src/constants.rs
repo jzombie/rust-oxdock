@@ -33,6 +33,7 @@ pub const KEYWORD_WHILE: &str = "WHILE";
 pub const KEYWORD_BREAK: &str = "BREAK";
 pub const KEYWORD_CONTINUE: &str = "CONTINUE";
 pub const KEYWORD_REMOTE: &str = "REMOTE";
+pub const KEYWORD_TYPE: &str = "TYPE";
 
 /// Variable inspection: a dedicated AST node, never a registry entry, so it
 /// needs no import and accepts no qualifier.

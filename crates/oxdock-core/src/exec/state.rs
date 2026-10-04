@@ -54,6 +54,11 @@ pub struct ExecState<P: ProcessManager> {
     /// `LET $s: SSH_SESSION_INFO` resolves exactly when the owning module
     /// is registered. Impossible to reference an unregistered schema.
     pub(super) record_schemas: HashMap<String, &'static [Field]>,
+    /// Script-level type aliases for this run: alias name to canonical
+    /// target spelling (`PERSON` to `MAP<name:STRING>`). Populated once
+    /// from top-level `TYPE` steps before the static pass, so forward
+    /// references resolve run-wide at first coercion.
+    pub(super) type_aliases: HashMap<String, String>,
     /// Cancellation token for background thread teardown.
     #[allow(dead_code)]
     pub(super) cancel_token: Arc<AtomicBool>,
@@ -282,6 +287,7 @@ impl<P: ProcessManager> ExecState<P> {
             functions: self.functions.clone(),
             types: self.types.clone(),
             record_schemas: self.record_schemas.clone(),
+            type_aliases: self.type_aliases.clone(),
             call_depth: self.call_depth,
             task_id: self.task_id,
             // Forks start with an empty manifest: async children record

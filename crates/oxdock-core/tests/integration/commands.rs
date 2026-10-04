@@ -1399,9 +1399,20 @@ fn let_block_fallthrough_binds_empty_string() {
     // No RETURN means Done, which yields "" exactly like a function body.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    let bindings = run_script_with_scope(&root, "LET $a: STRING = { ECHO hi }\n")
+    let bindings = run_script_with_scope(&root, "LET $a: STRING = { ECHO hi\nRETURN \"\" }\n")
         .expect("fallthrough block runs");
     assert_eq!(bindings.get("a"), Some(&Value::string(String::new())));
+}
+
+#[test]
+fn let_void_block_without_return_is_static_error() {
+    // A block with no RETURN has no value: binding it fails at run
+    // start instead of silently binding "".
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let err =
+        run_script(&root, "LET $a: STRING = { ECHO hi }\n").expect_err("VOID block must fail");
+    assert!(err.to_string().contains("VOID block has no value"), "{err}");
 }
 
 #[test]
@@ -1793,7 +1804,7 @@ fn inspect_undeclared_variable_is_error() {
     let root = guard_root(&temp);
     let err = run_script(&root, "LET $m: MAP = INSPECT($nope)\n")
         .expect_err("INSPECT of undeclared var must fail");
-    assert!(err.to_string().contains("not defined"), "{err}");
+    assert!(err.to_string().contains("undefined variable"), "{err}");
 }
 
 #[test]
@@ -1803,7 +1814,7 @@ fn with_io_variable_pipe_undeclared_is_step_numbered_error() {
     let err = run_script(&root, "WITH_IO [stdout=$nope] ECHO hi\n")
         .expect_err("undeclared pipe var must fail");
     assert!(
-        err.to_string().contains("undeclared variable $nope"),
+        err.to_string().contains("undefined variable $nope"),
         "{err}"
     );
 }
@@ -2103,6 +2114,7 @@ fn _assert_step_kind_exhaustiveness(kind: &StepKind) {
         StepKind::While { .. } => {}
         StepKind::Break => {}
         StepKind::Continue => {}
+        StepKind::TypeAlias { .. } => {}
     }
 }
 
@@ -2245,7 +2257,7 @@ fn list_append_rejects_undeclared_variable() {
         LIST_APPEND $missing 1
     "#};
     let err = run_script(&root, script).expect_err("undeclared append must fail");
-    assert!(err.to_string().contains("undeclared variable"), "{err}");
+    assert!(err.to_string().contains("undefined variable"), "{err}");
 }
 
 // ---------------------------------------------------------------------------
@@ -3228,8 +3240,8 @@ fn with_io_bg_routes_stdin_stdout() {
     // Spawns a background non-blocking pass-through child process concurrently
     // alongside a mainline foreground step.
     let script = indoc! {r#"
-        [unix] WITH_IO [stdin, stdout] ASYNC RUN "cat"
-        [windows] WITH_IO [stdin, stdout] ASYNC RUN "sort"
+        [family:unix] WITH_IO [stdin, stdout] ASYNC RUN "cat"
+        [family:windows] WITH_IO [stdin, stdout] ASYNC RUN "sort"
         RUN "echo foreground"
     "#};
     let steps = oxdock_core::parse_script(script).unwrap();
@@ -3903,4 +3915,614 @@ fn sleep_undefined_variable_errors_at_runtime() {
         err.to_string().contains("undefined"),
         "expected undefined-variable error, got: {err:#}"
     );
+}
+
+#[test]
+fn func_missing_return_fails_at_run_start() {
+    // A RETURN on some path with reachable fallthrough fails before
+    // the first step executes.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        FUNC MAYBE($c: BOOL) {
+            IF $c {
+                RETURN "yes"
+            }
+            ECHO "fell through"
+        }
+    "#};
+    let err = run_script(&root, script).expect_err("missing return must fail");
+    assert!(
+        err.to_string().contains("may fall through with no RETURN"),
+        "{err}"
+    );
+}
+
+#[test]
+fn func_disjoint_branch_types_fail_unification() {
+    // Terminal INT vs STRING paths cannot unify.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        FUNC PICK($c: BOOL) {
+            IF $c {
+                RETURN 1
+            } ELSE {
+                RETURN "one"
+            }
+        }
+    "#};
+    let err = run_script(&root, script).expect_err("disjoint returns must fail");
+    assert!(err.to_string().contains("cannot unify"), "{err}");
+    assert!(err.to_string().contains("INT"), "{err}");
+    assert!(err.to_string().contains("STRING"), "{err}");
+}
+
+#[test]
+fn func_any_return_widens_unification() {
+    // INT unifies with ANY (from PARSE_JSON) to ANY; the function
+    // still runs and both paths execute.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD]
+        FUNC WIDE($c: BOOL) {
+            IF $c {
+                RETURN 1
+            } ELSE {
+                RETURN PARSE_JSON("[2]")
+            }
+        }
+        LET $a: ANY = WIDE(true)
+        LET $b: ANY = WIDE(false)
+        WRITE out.txt "{{ $a }}{{ $b }}"
+    "#};
+    run_script(&root, script).expect("widened returns run");
+}
+
+#[test]
+fn ungated_any_argument_fails_naming_the_gate() {
+    // An ANY value straight into a MAP parameter fails statically;
+    //binding through LET first coerces at the gate and passes.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD]
+        LET $hit: BOOL = HAS_KEY(PARSE_JSON("{\"a\": 1}"), "a")
+    "#};
+    let err = run_script(&root, script).expect_err("ungated ANY must fail");
+    assert!(err.to_string().contains("bind through LET"), "{err}");
+    let script = indoc! {r#"
+        IMPORT [STD]
+        LET $m: MAP = PARSE_JSON("{\"a\": 1}")
+        LET $hit: BOOL = HAS_KEY($m, "a")
+        ASSERT_EQ $hit true
+    "#};
+    run_script(&root, script).expect("gated ANY runs");
+}
+
+#[test]
+fn func_return_only_inside_loop_fails() {
+    // Loops may trip zero times: a RETURN solely inside FOR leaves
+    // fallthrough reachable.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        FUNC FIRST($xs: LIST) {
+            FOR $x: ANY IN $xs {
+                RETURN $x
+            }
+        }
+    "#};
+    let err = run_script(&root, script).expect_err("loop-only return must fail");
+    assert!(
+        err.to_string().contains("may fall through with no RETURN"),
+        "{err}"
+    );
+}
+
+#[test]
+fn func_guarded_return_without_fallback_fails() {
+    // A conditionally-guarded RETURN with no unconditional fallback
+    // leaves fallthrough reachable.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        FUNC MAYBE() {
+            [env:STATIC_CHECK_DEMO_GUARD] RETURN "yes"
+        }
+    "#};
+    let err = run_script(&root, script).expect_err("guarded return must fail");
+    assert!(
+        err.to_string().contains("may fall through with no RETURN"),
+        "{err}"
+    );
+}
+
+#[test]
+fn func_undeclared_variable_fails_at_run_start() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        LET $x: INT = $nope
+    "#};
+    let err = run_script(&root, script).expect_err("undeclared must fail");
+    assert!(err.to_string().contains("undefined variable"), "{err}");
+}
+
+#[test]
+fn static_math_inference_keeps_int_and_float() {
+    // Exact operative rules: INT op INT stays INT (gateless into INT
+    // positions), FLOAT mixes promote, non-numerics fail statically.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        LET $a: INT = 6
+        LET $b: INT = 7
+        LET $c: INT = $a + $b
+        LET $f: FLOAT = $a + 0.5
+        ASSERT_EQ $c 13
+    "#};
+    run_script(&root, script).expect("typed math runs");
+    let script = indoc! {r#"
+        LET $c: INT = "a" + "b"
+    "#};
+    let err = run_script(&root, script).expect_err("string math must fail");
+    assert!(
+        err.to_string().contains("arithmetic requires Int or Float"),
+        "{err}"
+    );
+}
+
+#[test]
+fn static_dead_guards_excluded_from_classification() {
+    // A `[bool:false]` RETURN is statically unreachable: it neither
+    // voids the function nor satisfies completeness.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        FUNC QUIET() {
+            [bool:false] RETURN 1
+            ECHO hi
+        }
+        QUIET()
+    "#};
+    run_script(&root, script).expect("dead return ignored");
+    // And `[bool:true]` counts as unconditional.
+    let script = indoc! {r#"
+        FUNC LOUD() {
+            [bool:true] RETURN 1
+        }
+        LET $x: INT = LOUD()
+        ASSERT_EQ $x 1
+    "#};
+    run_script(&root, script).expect("live guard counts");
+}
+
+#[test]
+fn static_else_if_condition_is_checked() {
+    // ELSE IF conditions evaluate at runtime, so undeclared names in
+    // them fail the pre-pass like any other condition.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        LET $c: BOOL = false
+        IF $c {
+            ECHO one
+        } ELSE IF $nope {
+            ECHO two
+        }
+    "#};
+    let err = run_script(&root, script).expect_err("else-if cond must fail");
+    assert!(err.to_string().contains("undefined variable"), "{err}");
+}
+
+#[test]
+fn static_capture_command_is_checked() {
+    // The captured command runs before the declaration lands: a bad
+    // arity inside fails before the LET is examined.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD]
+        LET $x: INT = INT("a", "b")
+    "#};
+    let err = run_script(&root, script).expect_err("capture arity must fail");
+    assert!(err.to_string().contains("expects 1 argument(s)"), "{err}");
+}
+
+#[test]
+fn static_timeout_duration_is_checked() {
+    // A dynamic timeout evaluates before the body runs.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        TIMEOUT $nope {
+            ECHO hi
+        }
+    "#};
+    let err = run_script(&root, script).expect_err("timeout expr must fail");
+    assert!(err.to_string().contains("undefined variable"), "{err}");
+}
+
+#[test]
+fn static_exclusive_platform_guards_share_scope() {
+    // Disjoint platform pairs can never both fire: same-scope
+    // declarations under them shadow across exclusive paths instead
+    // of erroring. Only the live platform executes. Each pair runs
+    // in its own script since pairs overlap each other (`unix`
+    // covers macOS and Linux).
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    for script in [
+        "[family:unix] LET $o: STRING = \"unix\"\n[family:windows] LET $o: STRING = \"windows\"\n",
+        "[os:macos] LET $o: STRING = \"macos\"\n[os:linux] LET $o: STRING = \"linux\"\nWRITE out.txt \"{{ $o }}\"\n",
+    ] {
+        run_script(&root, script).expect("exclusive guards share scope");
+    }
+}
+
+#[test]
+fn static_overlapping_platform_guards_still_error() {
+    // Overlapping pairs share no disjointness proof (`os:macos`
+    // meets the `family:unix` alias on macos, same guard twice
+    // trivially overlaps), so same-scope duplicates fail.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    for guarded in [
+        "[os:macos] LET $o: STRING = \"m\"\n[family:unix] LET $o: STRING = \"u\"\n",
+        "[family:unix] LET $o: STRING = \"u\"\n[family:unix] LET $o: STRING = \"u2\"\n",
+        "[os:macos] LET $o: STRING = \"m\"\n[os:linux] LET $o: STRING = \"l\"\n[family:unix] LET $o: STRING = \"u\"\n",
+    ] {
+        let err = run_script(&root, guarded).expect_err("overlapping must fail");
+        assert!(err.to_string().contains("redeclaration error"), "{err}");
+    }
+    // But macos vs linux alone are disjoint and pass.
+    let script = indoc! {r#"
+        [os:macos] LET $o: STRING = "m"
+        [os:linux] LET $o: STRING = "l"
+    "#};
+    run_script(&root, script).expect("macos vs linux share scope");
+}
+
+#[test]
+fn static_unsatisfiable_guard_is_dead() {
+    // `[family:unix]` + `[family:windows]` on one step can never fire: the step is
+    // skipped entirely, so its RETURN neither voids nor satisfies.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        FUNC NEVER() {
+            ECHO hi
+        }
+        NEVER()
+    "#};
+    run_script(&root, script).expect("void runs");
+    let script = indoc! {r#"
+        FUNC VOIDDESPITEDEAD() {
+            [family:unix] [family:windows] RETURN 1
+            ECHO hi
+        }
+        VOIDDESPITEDEAD()
+    "#};
+    run_script(&root, script).expect("dead return ignored");
+}
+
+#[test]
+fn static_guarded_read_sees_only_live_entry() {
+    // Same name, disjoint types, read under one guard: only the live
+    // entry participates, so no unification error.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        [family:unix] LET $val: STRING = "path"
+        [family:windows] LET $val: INT = 100
+        [family:unix] ECHO $val
+    "#};
+    run_script(&root, script).expect("guarded read passes");
+}
+
+#[test]
+fn static_unguarded_read_of_split_types_fails() {
+    // Unguarded read sees both live entries: genuinely ambiguous.
+    // (ECHO stringifies at runtime, so it stays unchecked — the read
+    // below goes through a typed LET instead.)
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        [family:unix] LET $val: STRING = "path"
+        [family:windows] LET $val: INT = 100
+        LET $copy: STRING = $val
+    "#};
+    let err = run_script(&root, script).expect_err("ambiguous read must fail");
+    assert!(err.to_string().contains("cannot unify"), "{err}");
+}
+
+#[test]
+fn static_read_outside_coverage_is_undeclared() {
+    // Declared under one guard only, read where it never binds.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        [eq(env:STATIC_CHECK_COVERAGE_A, "1")] LET $o: STRING = "covered"
+        [eq(env:STATIC_CHECK_COVERAGE_A, "2")] LET $s: STRING = $o
+    "#};
+    let err = run_script(&root, script).expect_err("uncovered read must fail");
+    assert!(err.to_string().contains("undefined variable"), "{err}");
+}
+
+#[test]
+fn static_unguarded_read_needs_full_coverage() {
+    // Declared under `[family:unix]` only, read unconditionally: some
+    // reachable path (Windows) never binds it.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        [family:unix] LET $o: STRING = "unix_only"
+        LET $s: STRING = $o
+    "#};
+    let err = run_script(&root, script).expect_err("uncovered read must fail");
+    assert!(
+        err.to_string().contains("not guaranteed to be defined"),
+        "{err}"
+    );
+}
+
+#[test]
+fn static_covered_partition_read_passes() {
+    // Canonical split: unix + windows declarations cover every host,
+    // so the unguarded read is exhaustive.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        [family:unix] LET $o: STRING = "unix"
+        [family:windows] LET $o: STRING = "windows"
+        LET $s: STRING = $o
+    "#};
+    run_script(&root, script).expect("covered read passes");
+}
+
+#[test]
+fn static_exclusive_arch_guards_share_scope() {
+    // Disjoint arch pairs shadow across exclusive paths instead of
+    // erroring; the same arch twice still overlaps and fails.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        [arch:x86_64] LET $o: STRING = "x"
+        [arch:aarch64] LET $o: STRING = "a"
+    "#};
+    run_script(&root, script).expect("exclusive arch guards share scope");
+    let script = indoc! {r#"
+        [arch:x86_64] LET $o: STRING = "x"
+        [arch:x86_64] LET $o: STRING = "y"
+    "#};
+    let err = run_script(&root, script).expect_err("same arch twice must fail");
+    assert!(err.to_string().contains("redeclaration error"), "{err}");
+}
+
+#[test]
+fn arch_guard_runs_on_host_arch_only() {
+    // Runtime anchor: the host arch fires, any other valid arch
+    // skips without error.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let host = std::env::consts::ARCH;
+    let other = if host == "x86_64" {
+        "aarch64"
+    } else {
+        "x86_64"
+    };
+    let script = formatdoc! {r#"
+        [arch:{host}] WRITE hit.txt "hit"
+        [arch:{other}] WRITE miss.txt "miss"
+    "#};
+    run_script(&root, &script).expect("arch gates run");
+    assert_eq!(read_trimmed(&root.join("hit.txt").unwrap()), "hit");
+    assert!(!exists(&root, "miss.txt"));
+}
+
+#[test]
+fn static_generic_annotations_enforce_shapes() {
+    // Shaped spellings resolve through the single choke and enforce
+    // at the boundary with indexed paths.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        LET $ms: LIST<MAP> = [{a: 1}, {b: 2}]
+        LET $ns: LIST<LIST<INT>> = [[1], [2, 3]]
+        LET $p: MAP<name: STRING, age: INT> = {name: "x", age: 3}
+    "#};
+    run_script(&root, script).expect("shaped declarations pass");
+    let err = run_script(&root, "LET $ms: LIST<MAP> = [1]\n").expect_err("bad element must fail");
+    assert!(err.to_string().contains("[0]"), "{err}");
+    let err =
+        run_script(&root, "LET $p: MAP<name: STRING> = {}\n").expect_err("missing field must fail");
+    assert!(err.to_string().contains("missing field"), "{err}");
+    let err = run_script(&root, "LET $p: MAP<name: STRING> = {name: \"x\", z: 1}\n")
+        .expect_err("extra field must fail");
+    assert!(err.to_string().contains("unknown field"), "{err}");
+    // Arity and shape misuse fail naming the rule.
+    for (script, needle) in [
+        ("LET $x: LIST<MAP, INT> = []\n", "LIST takes exactly one"),
+        ("LET $x: MAP<STRING> = {}\n", "MAP fields require"),
+        ("LET $x: STRING<INT> = \"s\"\n", "takes no type arguments"),
+        ("LET $x: NOPE<INT> = 1\n", "unknown type"),
+    ] {
+        let err = run_script(&root, script).expect_err("bad shape must fail");
+        assert!(err.to_string().contains(needle), "{err}");
+    }
+}
+
+#[test]
+fn static_type_aliases_define_once_use_everywhere() {
+    // `TYPE` binds one name per run; use sites enforce structurally
+    // through the alias, including nesting and forward refs.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD]
+        LET $early: PERSON = {name: "pre", age: 1}
+        TYPE PERSON = MAP<name: STRING, age: INT>
+        TYPE TEAM = LIST<PERSON>
+        LET $t: TEAM = [{name: "a", age: 1}]
+        LET $n: STRING = $t.0.name
+        ASSERT_EQ $n "a"
+        LET $ts: LIST = TYPES()
+        ASSERT_CONTAINS $ts "PERSON"
+    "#};
+    run_script(&root, script).expect("aliases resolve run-wide");
+    let err = run_script(
+        &root,
+        "TYPE PERSON = MAP<name: STRING>\nLET $x: PERSON = {age: 1}\n",
+    )
+    .expect_err("missing field through alias must fail");
+    assert!(err.to_string().contains("missing field"), "{err}");
+    let err =
+        run_script(&root, "TYPE A = MAP\nTYPE A = MAP\n").expect_err("duplicate alias must fail");
+    assert!(err.to_string().contains("already defined"), "{err}");
+    let err = run_script(&root, "TYPE A = LIST<A>\nLET $x: A = []\n")
+        .expect_err("direct cycle must fail");
+    assert!(err.to_string().contains("cycle"), "{err}");
+    let err = run_script(
+        &root,
+        "TYPE A = LIST<B>\nTYPE B = LIST<A>\nLET $x: A = []\n",
+    )
+    .expect_err("mutual cycle must fail");
+    assert!(err.to_string().contains("cycle"), "{err}");
+    let err = run_script(&root, "TYPE STRING = MAP\n").expect_err("builtin collision must fail");
+    assert!(err.to_string().contains("collides"), "{err}");
+    let err = run_script(&root, "FUNC F() {\n}\nTYPE F = MAP\n")
+        .expect_err("func name collision must fail");
+    assert!(
+        err.to_string().contains("collides with function 'F'"),
+        "{err}"
+    );
+    // Generic spellings work in every declaration form.
+    let script = indoc! {r#"
+        FUNC FIRST($ms: LIST<MAP>) {
+            RETURN $ms
+        }
+        LET $got: LIST<MAP> = FIRST([{a: 1}])
+        FOR $m: MAP IN $got {
+            ECHO hi
+        }
+    "#};
+    run_script(&root, script).expect("generic FUNC param and FOR var pass");
+}
+
+#[test]
+fn type_describe_reports_alias_targets() {
+    // Aliases introspect like named types: `TYPES()` lists them and
+    // `TYPE_DESCRIBE` names the canonical target spelling. Unknown
+    // names still fail instead of describing nothing.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD]
+        TYPE PERSON = MAP<name: STRING, age: INT>
+        LET $d: MAP = TYPE_DESCRIBE("PERSON")
+        ASSERT_EQ $d.name "PERSON"
+        ASSERT_CONTAINS $d.summary "MAP<name: STRING, age: INT>"
+        ASSERT_CONTAINS $d.docs "TYPE PERSON = MAP<name: STRING, age: INT>"
+    "#};
+    run_script(&root, script).expect("alias describes its target");
+    let err = run_script(
+        &root,
+        "IMPORT [STD]\nLET $d: MAP = TYPE_DESCRIBE(\"NOPE\")\n",
+    )
+    .expect_err("unknown type must still fail");
+    assert!(err.to_string().contains("unknown type NOPE"), "{err}");
+}
+
+#[test]
+fn static_simple_command_args_participate_in_liveness() {
+    // Statement arguments are reads: a variable declared under a
+    // guard cannot flow into an unguarded `ECHO` or `{{ }}`
+    // interpolation, and undeclared names fail in any argument.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    for (n, script) in [
+        "[family:unix] LET $val: STRING = \"path\"\nECHO $val\n",
+        "[family:unix] LET $val: STRING = \"path\"\nECHO hello $val\n",
+        "ECHO $missing\n",
+        "WRITE out.txt $missing\n",
+        "LET $code: STRING = \"x\"\nEXIT $missing\n",
+    ]
+    .iter()
+    .enumerate()
+    {
+        let err = run_script(&root, script).expect_err(&format!("unchecked read must fail #{n}"));
+        let text = err.to_string();
+        assert!(
+            text.contains("undefined variable") || text.contains("not guaranteed to be defined"),
+            "{text}"
+        );
+    }
+    // Declared and live on the path: passes.
+    let script = indoc! {r#"
+        LET $val: STRING = "path"
+        ECHO $val
+        ECHO hello $val
+        WRITE out.txt prefix $val
+    "#};
+    run_script(&root, script).expect("live reads pass");
+    // Quoted `{{ }}` templates are runtime-total (missing names
+    // expand to empty, never error), so they stay unchecked by
+    // design: rejecting them would be a false positive.
+    let script = indoc! {r#"
+        WRITE out.txt "{{ $missing }}"
+    "#};
+    run_script(&root, script).expect("plain-string templates stay unchecked");
+}
+
+#[test]
+fn static_task_and_pipe_names_participate_in_liveness() {
+    // Handle names are reads too: unknown task/pipe/list names
+    // fail statically with the runtime message shape.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let err = run_script(&root, "AWAIT $t\n").expect_err("unknown task must fail");
+    assert!(err.to_string().contains("undefined variable"), "{err}");
+    let err = run_script(&root, "CANCEL $t\n").expect_err("unknown task must fail");
+    assert!(err.to_string().contains("undefined variable"), "{err}");
+    let script = indoc! {r#"
+        LET $o: INT = AWAIT $t
+    "#};
+    let err = run_script(&root, script).expect_err("unknown task must fail");
+    assert!(err.to_string().contains("undefined variable"), "{err}");
+    let script = indoc! {r#"
+        LET $l: STRING = "not-a-list"
+        LIST_APPEND $l "x"
+    "#};
+    let err = run_script(&root, script).expect_err("non-list append must fail");
+    assert!(err.to_string().contains("not LIST"), "{err}");
+}
+
+#[test]
+fn static_set_outside_binding_path_fails() {
+    // Mutations are site-aware: `$port` binds under `family:unix`
+    // only, so setting it on the Windows path fails statically
+    // instead of crashing at runtime.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        [family:unix] LET $port: INT = 8080
+        [family:windows] $port = 8081
+    "#};
+    let err = run_script(&root, script).expect_err("path-unbound SET must fail");
+    assert!(err.to_string().contains("undefined variable"), "{err}");
+}
+
+#[test]
+fn static_rpn_math_keeps_site_context() {
+    // Math lowers to RPN; the operand load must see the step guard.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        [family:windows] LET $a: INT = 1
+        [family:unix] LET $c: INT = $a + 1
+    "#};
+    let err = run_script(&root, script).expect_err("disjoint math read must fail");
+    assert!(err.to_string().contains("undefined variable"), "{err}");
 }

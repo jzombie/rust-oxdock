@@ -850,6 +850,11 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
             let duration = super::args::resolve_arg_as_duration(duration, &mut cx)?;
             handlers::sleep(&mut cx, idx, &duration)
         }
+        StepKind::TypeAlias { .. } => {
+            // Static declaration: collected before the run and
+            // resolved at first coercion. Nothing to execute.
+            Ok(())
+        }
         StepKind::FuncDef { .. }
         | StepKind::Call { .. }
         | StepKind::Return { .. }
@@ -1130,6 +1135,11 @@ fn execute_steps_inner<P: ProcessManager>(
                         StepKind::Sleep { duration } => {
                             let duration = super::args::resolve_arg_as_duration(duration, &mut cx)?;
                             handlers::sleep(&mut cx, idx, &duration)
+                        }
+                        StepKind::TypeAlias { .. } => {
+                            // Static declaration: collected before the run and
+                            // resolved at first coercion. Nothing to execute.
+                            Ok(())
                         }
                         StepKind::FuncDef { .. }
                         | StepKind::Call { .. }

@@ -266,9 +266,11 @@ fn statically_false_guard(guard: Option<&oxdock_parser::GuardExpr>) -> bool {
     use oxdock_parser::{Guard, GuardExpr};
     fn is_false(expr: &GuardExpr) -> bool {
         match expr {
-            GuardExpr::Predicate(Guard::StaticBool { value }) => {
-                !value.parse::<bool>().unwrap_or(true)
-            }
+            GuardExpr::Predicate(Guard::Attr {
+                ns: oxdock_parser::Ns::Bool,
+                val: Some(value),
+                ..
+            }) => !value.parse::<bool>().unwrap_or(true),
             GuardExpr::Predicate(_) => false,
             GuardExpr::All(children) => children.iter().any(is_false),
             GuardExpr::Or(_) => false,

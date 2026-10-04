@@ -535,9 +535,10 @@ fn symlink_errors_report_underlying_cause() {
 #[test]
 fn guarded_run_waits_for_env_to_be_set() {
     let root = GuardedPath::new_root_from_str(".").unwrap();
-    let guard = Guard::EnvEquals {
-        key: "READY".into(),
-        value: "1".into(),
+    let guard = Guard::Attr {
+        ns: oxdock_parser::Ns::Env,
+        key: Some("READY".into()),
+        val: Some("1".into()),
     };
     let steps = vec![
         Step {
@@ -573,13 +574,15 @@ fn guarded_run_waits_for_env_to_be_set() {
 #[test]
 fn guard_groups_allow_any_matching_branch() {
     let root = GuardedPath::new_root_from_str(".").unwrap();
-    let guard_alpha = Guard::EnvEquals {
-        key: "MODE".into(),
-        value: "alpha".into(),
+    let guard_alpha = Guard::Attr {
+        ns: oxdock_parser::Ns::Env,
+        key: Some("MODE".into()),
+        val: Some("alpha".into()),
     };
-    let guard_beta = Guard::EnvEquals {
-        key: "MODE".into(),
-        value: "beta".into(),
+    let guard_beta = Guard::Attr {
+        ns: oxdock_parser::Ns::Env,
+        key: Some("MODE".into()),
+        val: Some("beta".into()),
     };
     let steps = vec![
         Step {
@@ -862,6 +865,7 @@ fn create_exec_state(fs: MockFs) -> ExecState<MockProcessManager> {
         functions: super::native::FunctionRegistry::with_builtins(),
         types: super::typing::startup_type_map(),
         record_schemas: std::collections::HashMap::new(),
+        type_aliases: std::collections::HashMap::new(),
         call_depth: 0,
         task_id: 0,
         push_manifest: Vec::new(),
@@ -3333,6 +3337,144 @@ fn parse_text_matches_file_loader_and_placeholder() {
     assert_eq!(
         file_content(&files, "expanded.txt"),
         b"parsed \"a\": 1 and \"a\": 1"
+    );
+}
+
+#[test]
+fn resolve_tag_interns_identical_spellings_once() {
+    // Identical canonical spellings share one interned pointer;
+    // spaced forms canonicalize onto it.
+    let fs = MockFs::new();
+    let state = create_exec_state(fs);
+    let first = state.resolve_tag("LIST<MAP>").expect("resolves");
+    let second = state.resolve_tag("LIST< MAP >").expect("resolves");
+    match (first, second) {
+        (TypeTag::ListOf(a), TypeTag::ListOf(b)) => {
+            assert!(std::ptr::eq(a, b), "shared interned entry");
+        }
+        other => panic!("expected shaped lists, got {other:?}"),
+    }
+}
+
+#[test]
+fn resolve_tag_rejects_generic_arity_violations() {
+    // Arity violations parse (see tag.rs `spellings_parse_to_shapes`)
+    // but fail here at resolution, naming the rule.
+    let fs = MockFs::new();
+    let mut state = create_exec_state(fs);
+    let err = state
+        .resolve_tag("LIST<MAP, STRING>")
+        .expect_err("LIST with two args must fail");
+    assert!(
+        format!("{err:#}").contains("LIST takes exactly one bare type argument"),
+        "{err:#}"
+    );
+    let err = state
+        .resolve_tag("STRING<INT>")
+        .expect_err("arguments on a scalar must fail");
+    assert!(
+        format!("{err:#}").contains("'STRING' takes no type arguments"),
+        "{err:#}"
+    );
+    let err = state
+        .resolve_tag("MAP<STRING>")
+        .expect_err("bare MAP field must fail");
+    assert!(
+        format!("{err:#}").contains("MAP fields require 'name: TYPE'"),
+        "{err:#}"
+    );
+    // Alias targets enforce the same rules: the violation rides
+    // through the alias hop instead of escaping it.
+    state
+        .type_aliases
+        .insert("BAD".to_string(), "LIST<MAP, STRING>".to_string());
+    let err = state.resolve_tag("BAD").expect_err("alias arity must fail");
+    assert!(
+        format!("{err:#}").contains("LIST takes exactly one bare type argument"),
+        "{err:#}"
+    );
+}
+
+#[test]
+fn resolve_tag_composes_schema_and_alias_leaves() {
+    use oxdock_parser::Field;
+    let fs = MockFs::new();
+    let mut state = create_exec_state(fs);
+    static SCHEMA_FIELDS: &[Field] = &[Field {
+        name: "name",
+        ty: TypeTag::String,
+    }];
+    state.register_record_schema("EMP", SCHEMA_FIELDS);
+    state
+        .type_aliases
+        .insert("PERSON".to_string(), "MAP<name: STRING>".to_string());
+    let tag = state
+        .resolve_tag("LIST<PERSON>")
+        .expect("alias leaf composes");
+    assert!(matches!(tag, TypeTag::ListOf(_)));
+    let tag = state
+        .resolve_tag("LIST<EMP>")
+        .expect("schema leaf composes");
+    assert!(matches!(tag, TypeTag::ListOf(_)));
+    let err = state
+        .resolve_tag("LIST<MISSING>")
+        .expect_err("unknown leaf must fail");
+    assert!(
+        format!("{err:#}").contains("unknown type 'MISSING'"),
+        "{err:#}"
+    );
+}
+
+#[test]
+fn resolve_tag_rejects_deep_alias_chains() {
+    // Alias hops share the syntactic depth budget: a chain longer
+    // than the cap bails instead of recursing.
+    let fs = MockFs::new();
+    let mut state = create_exec_state(fs);
+    for n in 0..12 {
+        state.type_aliases.insert(
+            format!("A{n}"),
+            if n == 11 {
+                "MAP".to_string()
+            } else {
+                format!("LIST<A{}>", n + 1)
+            },
+        );
+    }
+    let err = state.resolve_tag("A0").expect_err("deep chain must fail");
+    assert!(
+        format!("{err:#}").contains("maximum generic depth"),
+        "{err:#}"
+    );
+}
+
+#[test]
+fn static_pass_scales_linearly_on_adversarial_input() {
+    // Deterministic linearity enforcement (no wall-time bench):
+    // visits must stay proportional to input size on deep nesting,
+    // wide sequences, loops, math, and nested functions. A fixpoint
+    // or exponential blowup trips this like any regression.
+    let mut script = String::from("IMPORT [STD]\nFUNC DEEP($x: INT) {\n");
+    for index in 0..200 {
+        script.push_str(&format!("    LET $v{index}: INT = $x + {index}\n"));
+    }
+    for depth in 0..80 {
+        script.push_str(&format!(
+            "    IF $v0 == {depth} {{\n        RETURN $v0\n    }}\n"
+        ));
+    }
+    script.push_str("    FOR $i: INT IN [1, 2, 3] {\n        LET $w: INT = $i * 2\n    }\n");
+    script.push_str("    FUNC INNER($y: INT) {\n        RETURN $y\n    }\n");
+    script.push_str("    RETURN $v0\n}\n");
+    let steps = crate::parse_script(&script).expect("adversarial script parses");
+    let fs = MockFs::new();
+    let state = create_exec_state(fs);
+    let visits = super::static_check::validate_script_types_counted(&steps, &state)
+        .expect("deep but well-formed script passes");
+    assert!(
+        visits <= script.len() as u64,
+        "visits {visits} exceed input bytes {}",
+        script.len()
     );
 }
 

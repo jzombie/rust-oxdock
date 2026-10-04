@@ -48,6 +48,7 @@ While = ["while_basic"]
 Break = ["break_in_for"]
 Continue = ["while_break_continue"]
 RemoteBlock = ["remote"]
+TypeAlias = ["type_alias"]
 
 [extras]
 cases = [

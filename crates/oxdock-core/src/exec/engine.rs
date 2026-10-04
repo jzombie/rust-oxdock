@@ -34,6 +34,7 @@
 //!         name: "DEMO".to_string(),
 //!         funcs: vec![EngineMakeTag::registration()],
 //!         types: vec![],
+//!         record_schemas: vec![],
 //!     });
 //!     let run = engine
 //!         .run_script(
@@ -67,7 +68,7 @@
 //! }
 //!
 //! /// Read an environment variable, defaulting to empty.
-//! #[oxdock_func(name = "ENV_OR", returns = TypeTag::String)]
+//! #[oxdock_func(name = "ENV_OR", returns = ::oxdock_core::TypeTag::String)]
 //! fn env_or<P: ::oxdock_core::ProcessManager>(
 //!     cx: &mut ::oxdock_core::StepCtx<P>,
 //!     key: String,

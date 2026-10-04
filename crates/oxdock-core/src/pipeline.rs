@@ -21,6 +21,9 @@ macro_rules! define_pipeline {
                 $crate::StepKind::For { .. } => $crate::exec::dispatch_for_loop(step, cx),
                 $crate::StepKind::If { .. } => $crate::exec::dispatch_if_then(step, cx),
                 $crate::StepKind::Assign { .. } => $crate::exec::dispatch_assign(step, cx),
+                // Static declaration: collected before the run and
+                // resolved at first coercion. Nothing to execute.
+                $crate::StepKind::TypeAlias { .. } => Ok(()),
             }
         }
     };

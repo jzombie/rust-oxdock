@@ -3,7 +3,10 @@ LET $b: STRING = {
     LET $inner: STRING = { RETURN "in" }
     RETURN "out-{{ $inner }}"
 }
-LET $c: STRING = { ECHO hi }
+LET $c: STRING = {
+    ECHO hi
+    RETURN "captured"
+}
 LET $flag: BOOL = true
 LET $d: STRING = {
     IF $flag {

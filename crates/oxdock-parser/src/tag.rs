@@ -8,7 +8,16 @@
 
 use anyhow::{Result, bail};
 
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+
 use crate::{TypeDescriptor, Value};
+
+/// Maximum generic nesting for one spelling: syntactic `<` levels
+/// and alias hops share this budget at resolution, so neither deep
+/// nesting nor long alias chains can wedge the pass. Parser-bounded
+/// scripts never approach it; exceeding it bails naming the shape.
+pub const MAX_GENERIC_DEPTH: usize = 8;
 
 /// One named field of a [`TypeTag::Record`] schema.
 #[derive(Debug, Clone, Copy)]
@@ -118,6 +127,7 @@ impl TypeTag {
             "PATH" => Some(TypeTag::Path),
             "SEMAPHORE" => Some(TypeTag::Semaphore),
             "PERMIT" => Some(TypeTag::Permit),
+            "ANY" => Some(TypeTag::Any),
             _ => None,
         }
     }
@@ -129,6 +139,201 @@ impl TypeTag {
             _ => None,
         }
     }
+}
+
+/// Render one tag structurally: shaped tags name their contents
+/// (`LIST<MAP>`, `MAP<name: TYPE, ...>`), so signatures show the
+/// generics the extractor enforces instead of the coarse word
+/// kind. Single renderer for `DESCRIBE` and docs-gen alike.
+pub fn render_structural(tag: &TypeTag) -> String {
+    match tag {
+        TypeTag::ListOf(inner) => format!("LIST<{}>", render_structural(inner)),
+        TypeTag::Record(fields) => {
+            let field_list = fields
+                .iter()
+                .map(|field| format!("{}: {}", field.name, render_structural(&field.ty)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("MAP<{field_list}>")
+        }
+        tag => tag.name().to_string(),
+    }
+}
+
+/// One parsed type spelling: a bare name or a generic application
+/// with positional (`LIST<MAP>`) or named (`MAP<name: STRING>`)
+/// arguments. Arity and shape enforce at resolution, never here:
+/// `LIST<A, B>` and `STRING<INT>` parse and fail later naming
+/// the rule each breaks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Spelled {
+    Named(String),
+    Generic {
+        name: String,
+        args: Vec<(Option<String>, Spelled)>,
+    },
+}
+
+/// Canonical spelling: exactly the structural representation
+/// (`MAP<name: STRING, age: INT>`), so stored declarations, intern
+/// keys, alias targets, and rendered signatures are one form, never
+/// two. Any input spacing parses to the same shape and renders to
+/// this form, which keeps every parse pathway in agreement.
+/// Malformed input passes through trimmed for the resolver to
+/// reject by name.
+pub fn canonicalize_spelling(s: &str) -> String {
+    let stripped: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+    match parse_spelling(&stripped) {
+        Ok(spelled) => render_spelled(&spelled),
+        Err(_) => s.trim().to_string(),
+    }
+}
+
+/// Render one parsed spelling in canonical form: `LIST<MAP>`,
+/// `MAP<name: STRING, age: INT>`. Deterministic by construction,
+/// so equal shapes share intern entries.
+pub fn render_spelled(spelled: &Spelled) -> String {
+    match spelled {
+        Spelled::Named(name) => name.clone(),
+        Spelled::Generic { name, args } => {
+            let rendered: Vec<String> = args
+                .iter()
+                .map(|(field, inner)| match field {
+                    Some(field) => format!("{field}: {}", render_spelled(inner)),
+                    None => render_spelled(inner),
+                })
+                .collect();
+            format!("{name}<{}>", rendered.join(", "))
+        }
+    }
+}
+
+/// Parse a spelling into its shape. Hand-rolled descent: the
+/// grammar guarantees shape for parser strings, this keeps the
+/// public resolution API safe for direct callers. All whitespace
+/// is stripped before parsing, so any spaced form parses.
+pub fn parse_spelling(s: &str) -> Result<Spelled, String> {
+    let text: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+    let (spelled, rest) = parse_spelled_one(&text, 0)?;
+    if !rest.is_empty() {
+        return Err(format!(
+            "unexpected trailing text in type spelling: {rest:?}"
+        ));
+    }
+    Ok(spelled)
+}
+
+fn parse_spelled_one(text: &str, depth: usize) -> Result<(Spelled, &str), String> {
+    if depth > MAX_GENERIC_DEPTH {
+        return Err(format!(
+            "type spelling exceeds maximum generic depth of {MAX_GENERIC_DEPTH}: {text:?}"
+        ));
+    }
+    let mut chars = text.char_indices();
+    let Some((_, first)) = chars.next() else {
+        return Err("expected type name, found end of spelling".to_string());
+    };
+    if !first.is_ascii_uppercase() {
+        return Err(format!("expected uppercase type name, found {first:?}"));
+    }
+    let mut end = first.len_utf8();
+    for (idx, ch) in chars {
+        if ch.is_ascii_uppercase() || ch.is_ascii_digit() || ch == '_' {
+            end = idx + ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    let (name, mut rest) = text.split_at(end);
+    let name = name.to_string();
+    if !rest.starts_with('<') {
+        return Ok((Spelled::Named(name), rest));
+    }
+    rest = &rest[1..];
+    let mut args = Vec::new();
+    loop {
+        let (field_name, after_name) = parse_spelled_field_name(rest);
+        let (arg, after_arg) = parse_spelled_one(after_name, depth + 1)?;
+        args.push((field_name, arg));
+        rest = after_arg;
+        if let Some(tail) = rest.strip_prefix(',') {
+            rest = tail;
+            continue;
+        }
+        if let Some(tail) = rest.strip_prefix('>') {
+            rest = tail;
+            break;
+        }
+        return Err(format!(
+            "expected ',' or '>' in type spelling, found {rest:?}"
+        ));
+    }
+    Ok((Spelled::Generic { name, args }, rest))
+}
+
+/// Optional `field:` prefix of one generic argument. A lowercase
+/// name followed by `:` claims the prefix; anything else leaves
+/// the text untouched for the bare-argument path.
+fn parse_spelled_field_name(text: &str) -> (Option<String>, &str) {
+    let mut chars = text.char_indices();
+    let Some((_, first)) = chars.next() else {
+        return (None, text);
+    };
+    if !first.is_ascii_lowercase() {
+        return (None, text);
+    }
+    let mut end = first.len_utf8();
+    for (idx, ch) in chars {
+        if ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_' {
+            end = idx + ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    let (candidate, rest) = text.split_at(end);
+    match rest.strip_prefix(':') {
+        Some(after) => (Some(candidate.to_string()), after),
+        None => (None, text),
+    }
+}
+
+/// Process-global intern table for composed tags: one shared
+/// `&'static TypeTag` per distinct canonical spelling. The lock is
+/// held only for lookup/insert; leaf resolution happens outside it
+/// in the caller.
+static COMPOSED_TAGS: OnceLock<Mutex<HashMap<String, &'static TypeTag>>> = OnceLock::new();
+
+fn composed_table() -> &'static Mutex<HashMap<String, &'static TypeTag>> {
+    COMPOSED_TAGS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Look up an already-interned spelling. Resolution checks this
+/// before building, so identical spellings share one pointer.
+pub fn lookup_composed(canonical: &str) -> Option<&'static TypeTag> {
+    composed_table()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(canonical)
+        .copied()
+}
+
+/// Intern one composed tag under its canonical spelling: a raced
+/// build stores once (the loser drops its duplicate leaves, still
+/// bounded by distinct spellings per process). Exactly one leak
+/// per distinct spelling per process: the leak is the point (a
+/// process-global `'static` home for composed tags), localized
+/// here so the rest of the crate stays deny-clean.
+#[allow(clippy::disallowed_methods)]
+pub fn intern_composed(canonical: String, tag: TypeTag) -> &'static TypeTag {
+    let mut table = composed_table()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(hit) = table.get(&canonical).copied() {
+        return hit;
+    }
+    let leaked: &'static TypeTag = Box::leak(Box::new(tag));
+    table.insert(canonical, leaked);
+    leaked
 }
 
 /// Check a value against a tag, failing naming the expected shape and
@@ -311,5 +516,90 @@ mod tests {
             format!("{err:#}").contains("[1]"),
             "names the index: {err:#}"
         );
+    }
+
+    #[test]
+    fn canonicalization_unifies_input_spacing() {
+        // Every spaced form lands on the structural representation:
+        // the stored, keyed, and rendered form is one form.
+        assert_eq!(canonicalize_spelling("LIST<MAP>"), "LIST<MAP>");
+        assert_eq!(canonicalize_spelling("LIST< MAP >"), "LIST<MAP>");
+        assert_eq!(
+            canonicalize_spelling("MAP<name:STRING,age:INT>"),
+            "MAP<name: STRING, age: INT>"
+        );
+        assert_eq!(
+            canonicalize_spelling("MAP<name : STRING>"),
+            "MAP<name: STRING>"
+        );
+    }
+
+    #[test]
+    fn spellings_parse_to_shapes() {
+        assert_eq!(
+            parse_spelling("LIST<MAP>").expect("parses"),
+            Spelled::Generic {
+                name: "LIST".to_string(),
+                args: vec![(None, Spelled::Named("MAP".to_string()))],
+            }
+        );
+        assert_eq!(
+            parse_spelling("MAP<name: STRING>").expect("parses"),
+            Spelled::Generic {
+                name: "MAP".to_string(),
+                args: vec![(
+                    Some("name".to_string()),
+                    Spelled::Named("STRING".to_string())
+                )],
+            }
+        );
+        // Arity violations parse; resolution rejects them naming
+        // the rule (`LIST` arity, `MAP` bare fields).
+        assert!(parse_spelling("LIST<A, B>").is_ok());
+        assert!(parse_spelling("MAP<STRING>").is_ok());
+    }
+
+    #[test]
+    fn spellings_reject_malformed_input() {
+        for bad in [
+            "",
+            "LIST<>",
+            "LIST<A,>",
+            "MAP<name:>",
+            "LIST<A",
+            "list<MAP>",
+            "LIST<A>>",
+        ] {
+            assert!(parse_spelling(bad).is_err(), "{bad:?} must fail");
+        }
+        // Depth cap counts syntactic nesting; deeper bails naming it.
+        let mut deep = "INT".to_string();
+        for _ in 0..MAX_GENERIC_DEPTH + 1 {
+            deep = format!("LIST<{deep}>");
+        }
+        let err = parse_spelling(&deep).expect_err("over-deep spelling must fail");
+        assert!(err.contains("maximum generic depth"), "{err}");
+    }
+
+    #[test]
+    fn identical_spellings_share_one_interned_pointer() {
+        let first = intern_composed("LIST<MAP>".to_string(), TypeTag::ListOf(&TypeTag::Map));
+        let second = intern_composed("LIST<MAP>".to_string(), TypeTag::ListOf(&TypeTag::Map));
+        assert!(
+            std::ptr::eq(first, second),
+            "same canonical spelling interns once"
+        );
+    }
+
+    #[test]
+    fn structural_rendering_names_contents() {
+        static FIELDS: &[Field] = &[Field {
+            name: "name",
+            ty: TypeTag::String,
+        }];
+        static RECORD: TypeTag = TypeTag::Record(FIELDS);
+        static LIST: TypeTag = TypeTag::ListOf(&RECORD);
+        assert_eq!(render_structural(&LIST), "LIST<MAP<name: STRING>>");
+        assert_eq!(render_structural(&TypeTag::Int), "INT");
     }
 }

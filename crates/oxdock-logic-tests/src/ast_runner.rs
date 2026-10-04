@@ -1510,5 +1510,6 @@ fn step_kind_name(kind: &StepKind) -> &'static str {
         StepKind::While { .. } => "While",
         StepKind::Break => "Break",
         StepKind::Continue => "Continue",
+        StepKind::TypeAlias { .. } => "TypeAlias",
     }
 }

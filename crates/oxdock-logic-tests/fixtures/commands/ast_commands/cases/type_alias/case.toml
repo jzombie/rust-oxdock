@@ -1,0 +1,4 @@
+name = "type_alias"
+
+[expect]
+files = { "picked.txt" = "a" }

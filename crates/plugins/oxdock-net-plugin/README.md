@@ -152,10 +152,10 @@ ASSERT_EQ $port 23791
 # quoted "$VAR" passes the parser through untouched on unix ...
 ENV PROXY_PORT="{{ $port }}"
 
-[unix] LET $o: STRING = RUN echo serving on "$PROXY_PORT"
+[family:unix] LET $o: STRING = RUN echo serving on "$PROXY_PORT"
 
 # ... while cmd expands %VAR% on Windows.
-[windows] LET $o: STRING = RUN echo serving on %PROXY_PORT%
+[family:windows] LET $o: STRING = RUN echo serving on %PROXY_PORT%
 
 ASSERT_CONTAINS $o "23791"
 NET_CLOSE($l.listener)

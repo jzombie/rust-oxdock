@@ -1,11 +1,11 @@
 use crate::ast::{
-    Arg, Expr, Guard, GuardExpr, IoBinding, IoStream, MathOp, ModuleTable, PipeTarget,
-    PlatformGuard, Step, StepKind,
+    ARCH_VALUES, Arg, Expr, Guard, GuardExpr, IoBinding, IoStream, MathOp, ModuleTable, Ns,
+    PipeTarget, Step, StepKind,
 };
 use crate::command::ArgType;
 use crate::constants::{
-    KEYWORD_EXPORT, KEYWORD_IMPORT, KEYWORD_INSPECT, MODULE_SEPARATOR, SCRIPT_MODULE_NAME, qualify,
-    split_qualified,
+    KEYWORD_EXPORT, KEYWORD_IMPORT, KEYWORD_INSPECT, KEYWORD_TYPE, MODULE_SEPARATOR,
+    SCRIPT_MODULE_NAME, qualify, split_qualified,
 };
 use crate::error::{ParseError, ParseResult, SpanContext};
 use crate::lexer::{self, RawToken, Rule, parse_pest_error, refine_span, span_for_line, span_of};
@@ -553,6 +553,15 @@ impl<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> ScriptParser<'a, F> {
                         return Err(ParseError::validation(
                             KEYWORD_EXPORT,
                             "`EXPORT` is reserved for future script-module support and cannot be used yet.".to_string(),
+                            &span,
+                        ));
+                    }
+                    if pair.as_rule() == Rule::type_statement
+                        && (self.pending_guards.is_some() || self.pending_inline_guards.is_some())
+                    {
+                        return Err(ParseError::structural(
+                            KEYWORD_TYPE,
+                            "TYPE cannot be guarded".to_string(),
                             &span,
                         ));
                     }
@@ -1292,6 +1301,7 @@ fn parse_structural_command_with_lower(
         Rule::async_statement_block => parse_async_statement_block_from_pair(ctx, pair, lctx)?,
         Rule::timeout_statement => parse_timeout_statement_from_pair(ctx, pair, lctx)?,
         Rule::remote_statement => parse_remote_statement_from_pair(ctx, pair, lctx)?,
+        Rule::type_statement => parse_type_statement_from_pair(ctx, pair)?,
         Rule::command_inner => {
             // command_inner = { inherit_env_command | instruction }
             // Unwrap to the inner rule
@@ -1691,9 +1701,38 @@ fn lower_expand_command(ctx: &SpanContext, tokens: Vec<InsToken>) -> ParseResult
 }
 
 fn parse_type_tag(pair: Pair<Rule>) -> String {
-    // The open `type_tag` rule accepts any uppercase identifier; tags are
-    // plain names here and resolve against the descriptor table at runtime.
-    pair.as_str().trim().to_string()
+    // Canonicalize to the no-space form: `LIST<MAP>` and `LIST< MAP >`
+    // (including macro token-stream reconstructions, which space
+    // punctuation) are one spelling from here on. Resolution keys
+    // on this form, so interning and pointer equality hold across
+    // parse pathways.
+    crate::canonicalize_spelling(pair.as_str())
+}
+
+/// Lower a `TYPE NAME = <shape>` alias declaration. Both halves flow
+/// through as text: the binder is a bare `type_name`, the target the
+/// full (possibly generic) `type_tag` spelling. Shape validation,
+/// collision checks, and resolution all happen at collection time in
+/// `oxdock-core`, never here.
+fn parse_type_statement_from_pair(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<StepKind> {
+    let span = refine_span(ctx, &pair);
+    let mut name: Option<String> = None;
+    let mut target: Option<String> = None;
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::type_name => name = Some(inner.as_str().trim().to_string()),
+            Rule::type_tag => target = Some(parse_type_tag(inner)),
+            _ => {}
+        }
+    }
+    let (Some(name), Some(target)) = (name, target) else {
+        return Err(ParseError::structural(
+            KEYWORD_TYPE,
+            "TYPE requires a name and a shape (`TYPE NAME = SHAPE`)".to_string(),
+            &span,
+        ));
+    };
+    Ok(StepKind::TypeAlias { name, target })
 }
 
 fn check_func_ident(ctx: &SpanContext, name: &str) -> ParseResult<()> {
@@ -3009,6 +3048,13 @@ fn parse_block_elements_with_lower(
                     scope_exit: 0,
                 });
             }
+            Rule::type_statement => {
+                return Err(ParseError::structural(
+                    KEYWORD_TYPE,
+                    "TYPE must appear at top level".to_string(),
+                    ctx,
+                ));
+            }
             Rule::guard_block => {
                 let mut guard_pair = None;
                 let mut inner_block = None;
@@ -3434,6 +3480,13 @@ fn parse_guard_term(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<GuardExp
     let span = refine_span(ctx, &pair);
     for inner in pair.into_inner() {
         match inner.as_rule() {
+            Rule::inject_guard => {
+                return Ok(GuardExpr::Predicate(Guard::Attr {
+                    ns: Ns::Env,
+                    key: Some(inner.as_str().to_string()),
+                    val: None,
+                }));
+            }
             Rule::eq_guard => {
                 return Ok(GuardExpr::Predicate(parse_func_guard(inner)?));
             }
@@ -3448,19 +3501,17 @@ fn parse_guard_term(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<GuardExp
                     .expect("grammar invariant violated: bool_guard missing bool_value")
                     .as_str()
                     .to_string();
-                return Ok(GuardExpr::Predicate(Guard::StaticBool { value: val }));
+                return Ok(GuardExpr::Predicate(Guard::Attr {
+                    ns: Ns::Bool,
+                    key: None,
+                    val: Some(val),
+                }));
             }
             Rule::env_guard => {
                 return Ok(GuardExpr::Predicate(parse_env_guard(inner)?));
             }
-            Rule::bare_guard_ident => {
-                let tag = inner.as_str();
-                if let Ok(g) = parse_platform_tag(ctx, tag) {
-                    return Ok(GuardExpr::Predicate(g));
-                }
-                return Ok(GuardExpr::Predicate(Guard::EnvExists {
-                    key: tag.to_string(),
-                }));
+            Rule::ns_guard => {
+                return parse_ns_guard(inner, &span);
             }
             _ => {}
         }
@@ -3488,7 +3539,11 @@ fn parse_func_guard(pair: Pair<Rule>) -> ParseResult<Guard> {
             _ => {}
         }
     }
-    Ok(Guard::EnvEquals { key, value })
+    Ok(Guard::Attr {
+        ns: Ns::Env,
+        key: Some(key),
+        val: Some(value),
+    })
 }
 
 fn unquote(s: &str) -> &str {
@@ -3505,24 +3560,81 @@ fn parse_env_guard(pair: Pair<Rule>) -> ParseResult<Guard> {
             key = inner.as_str().trim().to_string();
         }
     }
-    Ok(Guard::EnvExists { key })
+    Ok(Guard::Attr {
+        ns: Ns::Env,
+        key: Some(key),
+        val: None,
+    })
 }
 
-fn parse_platform_tag(ctx: &SpanContext, tag: &str) -> ParseResult<Guard> {
-    let target = match tag.to_ascii_lowercase().as_str() {
-        "unix" => PlatformGuard::Unix,
-        "windows" => PlatformGuard::Windows,
-        "mac" | "macos" => PlatformGuard::Macos,
-        "linux" => PlatformGuard::Linux,
-        _ => {
-            return Err(ParseError::structural(
-                "platform",
-                format!("unknown platform '{}'", tag),
-                ctx,
-            ));
+/// Namespaced guard (`[family:unix]`, `[os:macos]`): namespace and
+/// values validated here with closed lists and custom errors.
+/// `family:unix` and `family:windows` are accepted aliases lowered
+/// immediately to `any(os:macos, os:linux)` and `os:windows`, so
+/// every platform check downstream executes uniformly under `os:`.
+/// Case-sensitive throughout, matching the language's uppercase
+/// keywords and tags.
+fn parse_ns_guard(pair: Pair<Rule>, span: &SpanContext) -> ParseResult<GuardExpr> {
+    fn os(value: &str) -> GuardExpr {
+        GuardExpr::Predicate(Guard::Attr {
+            ns: Ns::Os,
+            key: None,
+            val: Some(value.to_string()),
+        })
+    }
+    let mut ns = String::new();
+    let mut val = String::new();
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::ns_name => ns = inner.as_str().trim().to_string(),
+            Rule::ns_value => val = inner.as_str().trim().to_string(),
+            _ => {}
         }
-    };
-    Ok(Guard::Platform { target })
+    }
+    match ns.as_str() {
+        "family" => match val.as_str() {
+            "unix" => Ok(GuardExpr::or(vec![os("macos"), os("linux")])),
+            "windows" => Ok(os("windows")),
+            _ => Err(ParseError::structural(
+                "guard",
+                format!("unknown family '{val}'; known values: unix, windows"),
+                span,
+            )),
+        },
+        "os" => match val.as_str() {
+            "macos" | "linux" | "windows" => Ok(os(val.as_str())),
+            _ => Err(ParseError::structural(
+                "guard",
+                format!("unknown os '{val}'; known values: macos, linux, windows"),
+                span,
+            )),
+        },
+        "arch" => {
+            if ARCH_VALUES.contains(&val.as_str()) {
+                Ok(GuardExpr::Predicate(Guard::Attr {
+                    ns: Ns::Arch,
+                    key: None,
+                    val: Some(val),
+                }))
+            } else {
+                Err(ParseError::structural(
+                    "guard",
+                    format!(
+                        "unknown arch '{val}'; known values: {}",
+                        ARCH_VALUES.join(", ")
+                    ),
+                    span,
+                ))
+            }
+        }
+        _ => Err(ParseError::structural(
+            "guard",
+            format!(
+                "unknown guard namespace '{ns}'; known namespaces: family, os, arch, env, bool"
+            ),
+            span,
+        )),
+    }
 }
 
 fn parse_dollar_ident(pair: Pair<Rule>) -> String {

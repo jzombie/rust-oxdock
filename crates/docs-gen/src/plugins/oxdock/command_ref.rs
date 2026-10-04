@@ -243,19 +243,9 @@ fn render_signature(meta: &FuncMeta) -> String {
 /// Render one tag structurally: shaped tags name their contents
 /// (`LIST<MAP>`, `MAP<name: TYPE, ...>`), so the signature shows the
 /// generics the extractor enforces instead of the coarse word kind.
+/// Single renderer shared with the core (`DESCRIBE` output).
 fn render_tag(tag: &TypeTag) -> String {
-    match tag {
-        TypeTag::ListOf(inner) => format!("LIST<{}>", render_tag(inner)),
-        TypeTag::Record(fields) => {
-            let field_list = fields
-                .iter()
-                .map(|field| format!("{}: {}", field.name, render_tag(&field.ty)))
-                .collect::<Vec<_>>()
-                .join(", ");
-            format!("MAP<{field_list}>")
-        }
-        tag => tag.name().to_string(),
-    }
+    oxdock_parser::render_structural(tag)
 }
 
 /// Function reference for one module, generated from its function

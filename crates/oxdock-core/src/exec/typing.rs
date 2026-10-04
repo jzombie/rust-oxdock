@@ -13,9 +13,13 @@ pub use oxdock_parser::{
     startup_descriptors, store_inline, type_anchor, unshare_boxed, unshare_inline, unshare_shared,
 };
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{Result, bail};
+use oxdock_parser::{
+    MAX_GENERIC_DEPTH, Spelled, Step, StepKind, canonicalize_spelling, intern_composed,
+    lookup_composed, parse_spelling,
+};
 use oxdock_process::ProcessManager;
 
 use super::state::ExecState;
@@ -80,11 +84,50 @@ impl<P: ProcessManager> ExecState<P> {
         names
     }
 
+    /// Every script alias name, sorted. Backs discovery listings
+    /// and unknown-type errors alongside schemas.
+    pub fn alias_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.type_aliases.keys().cloned().collect();
+        names.sort();
+        names
+    }
+
+    /// The canonical target spelling of one script alias, if defined.
+    /// Backs `TYPE_DESCRIBE` so aliases introspect like named types.
+    pub fn alias_target(&self, name: &str) -> Option<String> {
+        self.type_aliases.get(name).cloned()
+    }
+
     /// Resolve a source-level type name to its tag: builtins by closed
     /// match, customs through the type directory, named schemas through
-    /// the schema directory. Anything else bails listing every known
-    /// type and schema. Single choke for every `LET`/`FUNC` declaration.
+    /// the schema directory, script aliases through the alias directory,
+    /// and generic spellings (`LIST<MAP>`, `MAP<name: STRING>`) composed
+    /// structurally with one interned entry per distinct spelling.
+    /// Anything else bails listing every known type, schema, and alias.
+    /// Single choke for every `LET`/`FUNC` declaration. Signature is
+    /// stable: alias cycles and shared depth accounting thread
+    /// internally, so all call sites gain generics with zero edits.
     pub fn resolve_tag(&self, name: &str) -> Result<TypeTag> {
+        let canonical = canonicalize_spelling(name);
+        if canonical.contains('<') {
+            return self.resolve_spelling_text(&canonical, &mut Vec::new(), 0);
+        }
+        self.resolve_named(&canonical, &mut Vec::new(), 0)
+    }
+
+    /// Resolve one bare name through every directory. Alias targets
+    /// loop back through the spelling path, so `LIST<PERSON>`
+    /// composes; each alias hop costs 1 of the shared depth budget
+    /// and repeats bail naming the cycle.
+    fn resolve_named(
+        &self,
+        name: &str,
+        resolving: &mut Vec<String>,
+        depth: usize,
+    ) -> Result<TypeTag> {
+        if depth > MAX_GENERIC_DEPTH {
+            bail!("type spelling exceeds maximum generic depth of {MAX_GENERIC_DEPTH}: '{name}'");
+        }
         if let Some(tag) = TypeTag::builtin(name) {
             return Ok(tag);
         }
@@ -96,13 +139,145 @@ impl<P: ProcessManager> ExecState<P> {
             self.check_tag_known("declaration", &tag)?;
             return Ok(tag);
         }
+        if let Some(target) = self.type_aliases.get(name) {
+            if resolving.contains(&name.to_string()) {
+                resolving.push(name.to_string());
+                bail!("type alias cycle: {}", resolving.join(" -> "));
+            }
+            resolving.push(name.to_string());
+            let target = target.clone();
+            let result = self.resolve_spelling_text(&target, resolving, depth + 1);
+            resolving.pop();
+            return result;
+        }
         bail!(
-            "unknown type '{name}'; known types: {} and schemas: {}",
+            "unknown type '{name}'; known types: {} and schemas: {} and aliases: {}",
             self.type_names().join(", "),
             self.schema_names().join(", "),
+            self.alias_names().join(", "),
         )
     }
 
+    /// Resolve one canonical spelling that may carry `<...>` args:
+    /// interned hit returns shared, else parse, build, and intern.
+    fn resolve_spelling_text(
+        &self,
+        canonical: &str,
+        resolving: &mut Vec<String>,
+        depth: usize,
+    ) -> Result<TypeTag> {
+        if let Some(hit) = lookup_composed(canonical) {
+            return Ok(*hit);
+        }
+        let spelled = parse_spelling(canonical)
+            .map_err(|err| anyhow::anyhow!("invalid type spelling: {err}"))?;
+        let tag = self.build_composed(&spelled, resolving, depth)?;
+        Ok(*intern_composed(canonical.to_string(), tag))
+    }
+
+    /// Compose a parsed spelling into its structural tag. `LIST`
+    /// takes exactly one bare argument, `MAP` takes named fields;
+    /// anything else with arguments (or `MAP` with bare ones)
+    /// bails naming the rule. Leaves resolve through the full
+    /// directory, so schema and alias names nest freely.
+    fn build_composed(
+        &self,
+        spelled: &Spelled,
+        resolving: &mut Vec<String>,
+        depth: usize,
+    ) -> Result<TypeTag> {
+        if depth > MAX_GENERIC_DEPTH {
+            bail!(
+                "type spelling exceeds maximum generic depth of {MAX_GENERIC_DEPTH}: '{spelled:?}'"
+            );
+        }
+        match spelled {
+            Spelled::Named(name) => self.resolve_named(name, resolving, depth),
+            Spelled::Generic { name, args } => self.build_generic(name, args, resolving, depth),
+        }
+    }
+
+    /// Compose one generic application. `LIST` takes exactly one
+    /// bare argument, `MAP` takes named fields; any other head
+    /// resolves bare first so the error names the real problem
+    /// (`unknown type` vs. arguments on a scalar, custom,
+    /// schema, or alias target). Leaf homes leak like the composed
+    /// entry itself (one per distinct spelling; see
+    /// `intern_composed`), localized here for the same reason.
+    #[allow(clippy::disallowed_methods)]
+    fn build_generic(
+        &self,
+        name: &str,
+        args: &[(Option<String>, Spelled)],
+        resolving: &mut Vec<String>,
+        depth: usize,
+    ) -> Result<TypeTag> {
+        if name != "LIST" && name != "MAP" {
+            self.resolve_named(name, resolving, depth)?;
+            bail!("'{name}' takes no type arguments");
+        }
+        if name == "LIST" {
+            let [(None, element)] = args else {
+                bail!("LIST takes exactly one bare type argument");
+            };
+            let element = self.build_composed(element, resolving, depth + 1)?;
+            return Ok(TypeTag::ListOf(Box::leak(Box::new(element))));
+        }
+        let mut fields = Vec::with_capacity(args.len());
+        for (field_name, field_spelled) in args {
+            let Some(field_name) = field_name else {
+                bail!("MAP fields require 'name: TYPE'; '{name}' takes no bare arguments");
+            };
+            let ty = self.build_composed(field_spelled, resolving, depth + 1)?;
+            let leaked: &'static str = Box::leak(field_name.clone().into_boxed_str());
+            fields.push(Field { name: leaked, ty });
+        }
+        Ok(TypeTag::Record(Box::leak(fields.into_boxed_slice())))
+    }
+}
+/// Collect top-level `TYPE` alias definitions into the run's
+/// alias directory: name to canonical target spelling. Runs
+/// before the static pass so forward references resolve
+/// run-wide. Duplicates and collisions with builtin, host,
+/// schema, and top-level `FUNC` names are static errors
+/// naming the offender. Nested `TYPE` steps cannot occur
+/// (the parser rejects them); hand-built ones never resolve.
+pub fn collect_type_aliases<P: ProcessManager>(
+    steps: &[Step],
+    exec: &ExecState<P>,
+) -> Result<HashMap<String, String>> {
+    let mut func_names = HashSet::new();
+    for step in steps {
+        if let StepKind::FuncDef { name, .. } = &step.kind {
+            func_names.insert(name.clone());
+        }
+    }
+    let mut aliases = HashMap::new();
+    for step in steps {
+        let StepKind::TypeAlias { name, target } = &step.kind else {
+            continue;
+        };
+        if aliases.contains_key(name) {
+            bail!("type alias '{name}' is already defined");
+        }
+        if TypeTag::builtin(name).is_some() {
+            bail!("type alias '{name}' collides with a builtin type");
+        }
+        if exec.types.contains_key(name) {
+            bail!("type alias '{name}' collides with registered host type '{name}'");
+        }
+        if exec.record_schemas.contains_key(name) {
+            bail!("type alias '{name}' collides with registered record schema '{name}'");
+        }
+        if func_names.contains(name) {
+            bail!("type alias '{name}' collides with function '{name}'");
+        }
+        aliases.insert(name.clone(), canonicalize_spelling(target));
+    }
+    Ok(aliases)
+}
+
+impl<P: ProcessManager> ExecState<P> {
     /// Check one tag against the directories: customs must name a
     /// registered descriptor, shaped tags recurse into fields and
     /// elements, builtins are variants and cannot be misspelled.
@@ -169,7 +344,7 @@ impl<P: ProcessManager> ExecState<P> {
     }
 
     /// Every registered type name: startup descriptors first, then hosts in
-    /// registration order.
+    /// registration order, then script aliases.
     pub fn type_names(&self) -> Vec<String> {
         let mut names: Vec<String> = startup_descriptors()
             .into_iter()
@@ -178,6 +353,11 @@ impl<P: ProcessManager> ExecState<P> {
         for name in self.types.keys() {
             if !names.contains(&name.to_string()) {
                 names.push(name.clone());
+            }
+        }
+        for name in self.alias_names() {
+            if !names.contains(&name) {
+                names.push(name);
             }
         }
         names
