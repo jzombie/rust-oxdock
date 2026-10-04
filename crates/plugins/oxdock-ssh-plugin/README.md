@@ -26,12 +26,12 @@ Callable as `MODULE::NAME(...)` in expressions (or bare `NAME(...)` with the mod
 **Contexts:** AST only
 
 **Parameters:**
-- `$server` (SSH_SERVER): Server handle from `SSH_SERVE`.
-- `$in_pipe` (PIPE): Pipe carrying bytes consumed by the wire side.
-- `$out_pipe` (PIPE): Pipe carrying bytes produced by the wire side.
+- `$server` (`SSH_SERVER`): Server handle from `SSH_SERVE`.
+- `$in_pipe` (`PIPE`): Pipe carrying bytes consumed by the wire side.
+- `$out_pipe` (`PIPE`): Pipe carrying bytes produced by the wire side.
 
 **Returns:** `MAP<closed: BOOL>`
-  - `closed` (BOOL): True when the session closed cleanly.
+  - `closed` (`BOOL`): True when the session closed cleanly.
 
 Accept one SSH session into pipes.
 
@@ -87,7 +87,7 @@ SSH_CLOSE($m.server)
 **Contexts:** AST only
 
 **Parameters:**
-- `$server` (SSH_SERVER): Server handle from `SSH_SERVE`.
+- `$server` (`SSH_SERVER`): Server handle from `SSH_SERVE`.
 
 **Returns:** `BOOL`
 
@@ -104,11 +104,11 @@ returns BOOL true when no thread remains.
 **Contexts:** AST only
 
 **Parameters:**
-- `$target` (STRING): Dial target: logical port, service name, served address, or `host:port`.
-- `$username` (STRING): Inner credentials for the SSH session.
-- `$password` (STRING): Inner credentials for the SSH session.
-- `$in_pipe` (PIPE): Pipe carrying bytes consumed by the wire side.
-- `$out_pipe` (PIPE): Pipe carrying bytes produced by the wire side.
+- `$target` (`STRING`): Dial target: logical port, service name, served address, or `host:port`.
+- `$username` (`STRING`): Inner credentials for the SSH session.
+- `$password` (`STRING`): Inner credentials for the SSH session.
+- `$in_pipe` (`PIPE`): Pipe carrying bytes consumed by the wire side.
+- `$out_pipe` (`PIPE`): Pipe carrying bytes produced by the wire side.
 
 **Returns:** `MAP`
 
@@ -121,13 +121,13 @@ Open an SSH client session into pipes. Target shapes: a logical port (CLI-mapped
 **Contexts:** AST only
 
 **Parameters:**
-- `$server` (SSH_SERVER): Server handle from `SSH_SERVE`.
+- `$server` (`SSH_SERVER`): Server handle from `SSH_SERVE`.
 
 **Returns:** `MAP<session: SSH_SESSION, command: STRING, username: STRING, addr: STRING>`
-  - `session` (SSH_SESSION): Session handle for `SSH_PUMP_CHANNEL` (pump ends take once).
-  - `command` (STRING): Executed command, empty for shells.
-  - `username` (STRING): Authenticated username, empty when unset.
-  - `addr` (STRING): Peer address, empty when unset.
+  - `session` (`SSH_SESSION`): Session handle for `SSH_PUMP_CHANNEL` (pump ends take once).
+  - `command` (`STRING`): Executed command, empty for shells.
+  - `username` (`STRING`): Authenticated username, empty when unset.
+  - `addr` (`STRING`): Peer address, empty when unset.
 
 Dequeue one SSH session with its metadata.
 
@@ -190,12 +190,12 @@ SSH_CLOSE($m.server)
 **Contexts:** AST only
 
 **Parameters:**
-- `$session` (SSH_SESSION): Session handle from `SSH_DEQUEUE`.
-- `$argv` (LIST<STRING>): Program and arguments to run.
-- `$rows` (INT): Terminal rows when positive, session size otherwise.
-- `$cols` (INT): Terminal columns when positive, session size otherwise.
-- `$in_pipe` (PIPE): Pipe carrying bytes consumed by the child.
-- `$out_pipe` (PIPE): Pipe carrying bytes produced by the child.
+- `$session` (`SSH_SESSION`): Session handle from `SSH_DEQUEUE`.
+- `$argv` (`LIST<STRING>`): Program and arguments to run.
+- `$rows` (`INT`): Terminal rows when positive, session size otherwise.
+- `$cols` (`INT`): Terminal columns when positive, session size otherwise.
+- `$in_pipe` (`PIPE`): Pipe carrying bytes consumed by the child.
+- `$out_pipe` (`PIPE`): Pipe carrying bytes produced by the child.
 
 **Returns:** `INT`
 
@@ -221,8 +221,8 @@ relay) reaches the child; the working directory comes from the script.
 **Contexts:** AST only
 
 **Parameters:**
-- `$from_pipe` (PIPE): Source pipe to drain.
-- `$to_pipe` (PIPE): Target pipe receiving the bytes (closed at EOF).
+- `$from_pipe` (`PIPE`): Source pipe to drain.
+- `$to_pipe` (`PIPE`): Target pipe receiving the bytes (closed at EOF).
 
 **Returns:** `INT`
 
@@ -240,12 +240,12 @@ the other end is live (usually an `ASYNC` task).
 **Contexts:** AST only
 
 **Parameters:**
-- `$session` (SSH_SESSION): Session handle from `SSH_DEQUEUE` (pump ends take once).
-- `$in_pipe` (PIPE): Pipe carrying bytes consumed by the wire side.
-- `$out_pipe` (PIPE): Pipe carrying bytes produced by the wire side.
+- `$session` (`SSH_SESSION`): Session handle from `SSH_DEQUEUE` (pump ends take once).
+- `$in_pipe` (`PIPE`): Pipe carrying bytes consumed by the wire side.
+- `$out_pipe` (`PIPE`): Pipe carrying bytes produced by the wire side.
 
 **Returns:** `MAP<closed: BOOL>`
-  - `closed` (BOOL): True when the session closed cleanly.
+  - `closed` (`BOOL`): True when the session closed cleanly.
 
 Pump a dequeued SSH session through pipes.
 
@@ -262,18 +262,18 @@ Returns a MAP with `closed` (BOOL).
 **Contexts:** AST only
 
 **Parameters:**
-- `$bind` (STRING): Virtual service endpoint to serve (logical port or service name).
-- `$options` (MAP<username: STRING, password: STRING, key_path?: STRING>): Server credentials and host key.
-  - `username` (STRING, required)
-  - `password` (STRING, required)
-  - `key_path` (STRING, optional)
+- `$bind` (`STRING`): Virtual service endpoint to serve (logical port or service name).
+- `$options` (`MAP<username: STRING, password: STRING, key_path?: STRING>`): Server credentials and host key.
+  - `username` (`STRING`, required)
+  - `password` (`STRING`, required)
+  - `key_path` (`STRING`, optional)
 
 **Returns:** `MAP<server: SSH_SERVER, addr: STRING, username: STRING, password: STRING, virtual: STRING>`
-  - `server` (SSH_SERVER): Server handle for `SSH_ACCEPT`, `SSH_DEQUEUE`, and `SSH_CLOSE`.
-  - `addr` (STRING): Bound socket address (`ip:port`) of the server.
-  - `username` (STRING): Configured username.
-  - `password` (STRING): Configured password.
-  - `virtual` (STRING): Virtual endpoint echo of the claimed slot.
+  - `server` (`SSH_SERVER`): Server handle for `SSH_ACCEPT`, `SSH_DEQUEUE`, and `SSH_CLOSE`.
+  - `addr` (`STRING`): Bound socket address (`ip:port`) of the server.
+  - `username` (`STRING`): Configured username.
+  - `password` (`STRING`): Configured password.
+  - `virtual` (`STRING`): Virtual endpoint echo of the claimed slot.
 
 Serve SSH on a virtual service endpoint.
 

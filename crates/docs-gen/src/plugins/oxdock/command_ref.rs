@@ -287,14 +287,14 @@ fn render_parameters(meta: &FuncMeta) -> String {
     let params = meta.params.as_deref().unwrap_or(&[]);
     let mut bullets = Vec::new();
     for param in params {
-        let mut bullet = format!("- `${}` ({})", param.name, render_param_type(param));
+        let mut bullet = format!("- `${}` (`{}`)", param.name, render_param_type(param));
         if !param.docs.is_empty() {
             bullet.push_str(&format!(": {}", escape_placeholders(param.docs)));
         }
         if let Some(keys) = param.options {
             for key in keys.iter() {
                 bullet.push_str(&format!(
-                    "\n  - `{}` ({}, {}{})",
+                    "\n  - `{}` (`{}`, {}{})",
                     key.name,
                     render_tag(&key.value),
                     if key.required { "required" } else { "optional" },
@@ -328,7 +328,7 @@ fn render_returns(returns: &TypeTag) -> String {
     if let TypeTag::Record(fields) = returns {
         for field in fields.iter() {
             out.push_str(&format!(
-                "\n  - `{}` ({}{})",
+                "\n  - `{}` (`{}`{})",
                 field.name,
                 render_tag(&field.ty),
                 if field.optional { ", optional" } else { "" },

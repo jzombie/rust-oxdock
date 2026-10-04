@@ -30,14 +30,14 @@ Callable as `MODULE::NAME(...)` in expressions (or bare `NAME(...)` with the mod
 **Contexts:** AST only
 
 **Parameters:**
-- `$listener` (NET_LISTENER): Listener handle from `NET_LISTEN`.
-- `$in_pipe` (PIPE): Pipe carrying bytes consumed by the wire side.
-- `$out_pipe` (PIPE): Pipe carrying bytes produced by the wire side.
-- `$options` (MAP<no_half_close?: BOOL>): Optional `no_half_close` setting.
-  - `no_half_close` (BOOL, optional)
+- `$listener` (`NET_LISTENER`): Listener handle from `NET_LISTEN`.
+- `$in_pipe` (`PIPE`): Pipe carrying bytes consumed by the wire side.
+- `$out_pipe` (`PIPE`): Pipe carrying bytes produced by the wire side.
+- `$options` (`MAP<no_half_close?: BOOL>`): Optional `no_half_close` setting.
+  - `no_half_close` (`BOOL`, optional)
 
 **Returns:** `MAP<closed: BOOL>`
-  - `closed` (BOOL): True when the connection closed cleanly.
+  - `closed` (`BOOL`): True when the connection closed cleanly.
 
 Accept one connection into pipes.
 
@@ -89,7 +89,7 @@ NET_CLOSE($l.listener)
 **Contexts:** AST only
 
 **Parameters:**
-- `$target` (STRING): Logical port, service name, optionally protocol-qualified; unbound targets bail.
+- `$target` (`STRING`): Logical port, service name, optionally protocol-qualified; unbound targets bail.
 
 **Returns:** `STRING`
 
@@ -114,7 +114,7 @@ NET_CLOSE($l.listener)
 **Contexts:** AST only
 
 **Parameters:**
-- `$listener` (NET_LISTENER)
+- `$listener` (`NET_LISTENER`)
 
 **Returns:** `BOOL`
 
@@ -131,15 +131,15 @@ instead of hanging.
 **Contexts:** AST only
 
 **Parameters:**
-- `$target` (STRING): Dial target: `host:port`, a logical port, or a service name.
-- `$in_pipe` (PIPE): Pipe carrying bytes consumed by the wire side.
-- `$out_pipe` (PIPE): Pipe carrying bytes produced by the wire side.
-- `$options` (MAP<timeout?: DURATION, no_half_close?: BOOL>): Optional `timeout` and `no_half_close` settings.
-  - `timeout` (DURATION, optional, default `10s`)
-  - `no_half_close` (BOOL, optional)
+- `$target` (`STRING`): Dial target: `host:port`, a logical port, or a service name.
+- `$in_pipe` (`PIPE`): Pipe carrying bytes consumed by the wire side.
+- `$out_pipe` (`PIPE`): Pipe carrying bytes produced by the wire side.
+- `$options` (`MAP<timeout?: DURATION, no_half_close?: BOOL>`): Optional `timeout` and `no_half_close` settings.
+  - `timeout` (`DURATION`, optional, default `10s`)
+  - `no_half_close` (`BOOL`, optional)
 
 **Returns:** `MAP<closed: BOOL>`
-  - `closed` (BOOL): True when the connection closed cleanly.
+  - `closed` (`BOOL`): True when the connection closed cleanly.
 
 Dial a TCP endpoint into pipes.
 
@@ -150,7 +150,7 @@ Dial a TCP endpoint into pipes.
 **Contexts:** AST only
 
 **Parameters:**
-- `$url` (STRING): `https` URL to fetch; cleartext `http` reaches loopback hosts only.
+- `$url` (`STRING`): `https` URL to fetch; cleartext `http` reaches loopback hosts only.
 
 **Returns:** `STRING`
 
@@ -165,13 +165,13 @@ Fetch an `https` URL to text: the network source for `PARSE_JSON` and `PARSE_TOM
 **Contexts:** AST only
 
 **Parameters:**
-- `$bind` (STRING): Logical port (`"2251"`) or service name; physical binds are rejected.
-- `$options` (MAP): Reserved for future socket settings; must be an empty MAP today.
+- `$bind` (`STRING`): Logical port (`"2251"`) or service name; physical binds are rejected.
+- `$options` (`MAP`): Reserved for future socket settings; must be an empty MAP today.
 
 **Returns:** `MAP<listener: NET_LISTENER, addr: STRING, virtual: STRING>`
-  - `listener` (NET_LISTENER): Listener handle for `NET_ACCEPT` and `NET_CLOSE`.
-  - `addr` (STRING): Bound socket address (`ip:port`), or the virtual endpoint echo when socketless.
-  - `virtual` (STRING): Virtual endpoint echo of the claimed slot.
+  - `listener` (`NET_LISTENER`): Listener handle for `NET_ACCEPT` and `NET_CLOSE`.
+  - `addr` (`STRING`): Bound socket address (`ip:port`), or the virtual endpoint echo when socketless.
+  - `virtual` (`STRING`): Virtual endpoint echo of the claimed slot.
 
 Claim a virtual service endpoint and report its address.
 
@@ -182,7 +182,7 @@ Claim a virtual service endpoint and report its address.
 **Contexts:** AST only
 
 **Parameters:**
-- `$target` (STRING): Logical port, service name, optionally protocol-qualified; unbound targets bail.
+- `$target` (`STRING`): Logical port, service name, optionally protocol-qualified; unbound targets bail.
 
 **Returns:** `INT`
 

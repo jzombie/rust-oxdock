@@ -2195,7 +2195,7 @@ Callable as `MODULE::NAME(...)` in expressions (or bare `NAME(...)` with the mod
 **Contexts:** AST only
 
 **Parameters:**
-- `$name` (STRING): Qualified function name (`MODULE::NAME`).
+- `$name` (`STRING`): Qualified function name (`MODULE::NAME`).
 
 **Returns:** `MAP<ANY>`
 
@@ -2214,7 +2214,7 @@ unknown function.
 **Contexts:** AST only
 
 **Parameters:**
-- `$pipe` (PIPE): Pipe handle to query for end of stream.
+- `$pipe` (`PIPE`): Pipe handle to query for end of stream.
 
 **Returns:** `BOOL`
 
@@ -2254,7 +2254,7 @@ ASSERT_EQ $n 2
 **Contexts:** AST, RPN
 
 **Parameters:**
-- `$val` (ANY): Value to convert to `FLOAT`.
+- `$val` (`ANY`): Value to convert to `FLOAT`.
 
 **Returns:** `FLOAT`
 
@@ -2283,7 +2283,7 @@ plus host-registered names.
 **Contexts:** AST, RPN
 
 **Parameters:**
-- `$pattern` (STRING): Glob pattern matched against workspace paths.
+- `$pattern` (`STRING`): Glob pattern matched against workspace paths.
 
 **Returns:** `LIST<STRING>`
 
@@ -2299,8 +2299,8 @@ Sorted, root-relative LIST; empty on no match or `..` escape.
 **Contexts:** AST, RPN
 
 **Parameters:**
-- `$map` (MAP<ANY>): Map to probe.
-- `$key` (STRING): Key to look up.
+- `$map` (`MAP<ANY>`): Map to probe.
+- `$key` (`STRING`): Key to look up.
 
 **Returns:** `BOOL`
 
@@ -2317,7 +2317,7 @@ tripping the strict missing-key error.
 **Contexts:** AST, RPN
 
 **Parameters:**
-- `$val` (ANY): Value to convert to `INT`.
+- `$val` (`ANY`): Value to convert to `INT`.
 
 **Returns:** `INT`
 
@@ -2334,7 +2334,7 @@ when integral and finite.
 **Contexts:** AST only
 
 **Parameters:**
-- `$stream` (STRING): Stream name: `stdin`, `stdout`, or `stderr` (exact match).
+- `$stream` (`STRING`): Stream name: `stdin`, `stdout`, or `stderr` (exact match).
 
 **Returns:** `BOOL`
 
@@ -2359,7 +2359,7 @@ reads the step context like the other introspection functions.
 **Contexts:** AST, RPN
 
 **Parameters:**
-- `$path` (STRING): Workspace file path to load and parse as JSON.
+- `$path` (`STRING`): Workspace file path to load and parse as JSON.
 
 **Returns:** `MAP<ANY>`
 
@@ -2375,7 +2375,7 @@ Reads a workspace file and parses JSON into a DSL value.
 **Contexts:** AST, RPN
 
 **Parameters:**
-- `$path` (STRING): Workspace file path to load and parse as TOML.
+- `$path` (`STRING`): Workspace file path to load and parse as TOML.
 
 **Returns:** `MAP<ANY>`
 
@@ -2391,9 +2391,9 @@ Reads a workspace file and parses TOML into a DSL value.
 **Contexts:** AST, RPN
 
 **Parameters:**
-- `$map` (MAP<ANY>): Map to insert into.
-- `$key` (STRING): Key to insert; duplicates fail.
-- `$value` (ANY): Value to store.
+- `$map` (`MAP<ANY>`): Map to insert into.
+- `$key` (`STRING`): Key to insert; duplicates fail.
+- `$value` (`ANY`): Value to store.
 
 **Returns:** `MAP<ANY>`
 
@@ -2410,8 +2410,8 @@ instead of silently shadowing each other.
 **Contexts:** AST, RPN
 
 **Parameters:**
-- `$maps` (LIST<MAP<ANY>>): LIST of MAPs to merge in order.
-- `$policy` (STRING): Duplicate policy.
+- `$maps` (`LIST<MAP<ANY>>`): LIST of MAPs to merge in order.
+- `$policy` (`STRING`): Duplicate policy.
 
 **Returns:** `MAP<ANY>`
 
@@ -2430,7 +2430,7 @@ Non MAP elements fail naming their position.
 **Contexts:** AST, RPN
 
 **Parameters:**
-- `$text` (STRING): JSON text already held in memory.
+- `$text` (`STRING`): JSON text already held in memory.
 
 Parse JSON text already held in memory.
 
@@ -2448,7 +2448,7 @@ scalar word, so a `MAP` tag would lie the way `LOAD_JSON`'s does.
 **Contexts:** AST, RPN
 
 **Parameters:**
-- `$text` (STRING): TOML text already held in memory.
+- `$text` (`STRING`): TOML text already held in memory.
 
 **Returns:** `MAP<ANY>`
 
@@ -2465,7 +2465,7 @@ contents, and captured text share one JSON/TOML shape.
 **Contexts:** AST only
 
 **Parameters:**
-- `$path` (STRING): Workspace path of the entry to describe.
+- `$path` (`STRING`): Workspace path of the entry to describe.
 
 **Returns:** `STRING`
 
@@ -2482,7 +2482,7 @@ there is no RPN arm for filesystem IO.
 **Contexts:** AST, RPN
 
 **Parameters:**
-- `$sem` (SEMAPHORE): Semaphore handle from `SEMAPHORE_NEW`.
+- `$sem` (`SEMAPHORE`): Semaphore handle from `SEMAPHORE_NEW`.
 
 **Returns:** `INT`
 
@@ -2504,7 +2504,7 @@ LET $free: INT = SEMAPHORE_AVAILABLE($sem)
 **Contexts:** AST only
 
 **Parameters:**
-- `$max` (INT): Maximum concurrent holders; must be positive.
+- `$max` (`INT`): Maximum concurrent holders; must be positive.
 
 **Returns:** `SEMAPHORE`
 
@@ -2527,11 +2527,11 @@ LET $sem: SEMAPHORE = SEMAPHORE_NEW(10)
 **Contexts:** AST only
 
 **Parameters:**
-- `$sem` (SEMAPHORE): Semaphore handle from `SEMAPHORE_NEW`.
+- `$sem` (`SEMAPHORE`): Semaphore handle from `SEMAPHORE_NEW`.
 
 **Returns:** `MAP<held: BOOL, permit?: PERMIT>`
-  - `held` (BOOL): `true` with the permit under `permit`, `false` with no `permit` key.
-  - `permit` (PERMIT, optional): Permit handle; read only when `held`.
+  - `held` (`BOOL`): `true` with the permit under `permit`, `false` with no `permit` key.
+  - `permit` (`PERMIT`, optional): Permit handle; read only when `held`.
 
 Attempt one non-blocking acquire, always answering a MAP.
 
@@ -2559,7 +2559,7 @@ IF !$acq.held {
 **Contexts:** AST, RPN
 
 **Parameters:**
-- `$value` (ANY): Value to encode as JSON.
+- `$value` (`ANY`): Value to encode as JSON.
 
 **Returns:** `STRING`
 
@@ -2591,12 +2591,12 @@ introspection functions.
 **Contexts:** AST only
 
 **Parameters:**
-- `$name` (STRING): Type name to describe.
+- `$name` (`STRING`): Type name to describe.
 
 **Returns:** `MAP<name: STRING, summary: STRING, docs: STRING>`
-  - `name` (STRING): Queried type name.
-  - `summary` (STRING): One-line description.
-  - `docs` (STRING): Full documentation text.
+  - `name` (`STRING`): Queried type name.
+  - `summary` (`STRING`): One-line description.
+  - `docs` (`STRING`): Full documentation text.
 
 Describe one type by name.
 
@@ -2611,7 +2611,7 @@ Reads the run's name directory, so it runs on the AST path.
 **Contexts:** AST, RPN
 
 **Parameters:**
-- `$value` (ANY): Value whose word to name.
+- `$value` (`ANY`): Value whose word to name.
 
 **Returns:** `STRING`
 
