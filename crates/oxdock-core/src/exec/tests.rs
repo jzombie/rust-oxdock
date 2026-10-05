@@ -3515,6 +3515,10 @@ fn resolve_tag_rejects_deep_alias_chains() {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "adversarial scaling probe (200 LETs plus 80 nested IFs through parse and the full static pass); interpreter slowdown stalls it for hours with no unsafe code exercised"
+)]
 fn static_pass_scales_linearly_on_adversarial_input() {
     // Deterministic linearity enforcement (no wall-time bench):
     // visits must stay proportional to input size on deep nesting,
