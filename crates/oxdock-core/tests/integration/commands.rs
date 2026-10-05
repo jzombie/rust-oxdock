@@ -2520,8 +2520,7 @@ fn is_terminal_rejects_unknown_streams() {
     "#};
     let err = run_script(&root, script).expect_err("unknown stream must fail");
     assert!(
-        err.to_string()
-            .contains("expects \"stdin\", \"stdout\", or \"stderr\""),
+        err.to_string().contains("must be one of: stdin, stdout, stderr"),
         "{err}"
     );
 }
@@ -2538,8 +2537,7 @@ fn is_terminal_rejects_wrong_case() {
     "#};
     let err = run_script(&root, script).expect_err("wrong case must fail");
     assert!(
-        err.to_string()
-            .contains("expects \"stdin\", \"stdout\", or \"stderr\""),
+        err.to_string().contains("must be one of: stdin, stdout, stderr"),
         "{err}"
     );
 }

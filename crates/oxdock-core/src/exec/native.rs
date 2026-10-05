@@ -967,6 +967,7 @@ fn type_describe<P: ProcessManager>(
 fn is_terminal<P: ProcessManager>(
     cx: &mut StepCtx<P>,
     /// Stream name: `stdin`, `stdout`, or `stderr` (exact match).
+    #[values("stdin", "stdout", "stderr")]
     stream_name: String,
 ) -> Result<Value> {
     use std::io::IsTerminal;
@@ -1034,6 +1035,10 @@ fn is_terminal<P: ProcessManager>(
             }
         }
         _ => anyhow::bail!(
+            // Unreachable through the macro path: the generated
+            // extractor rejects non-members before the body runs, and
+            // the static pre-pass rejects bad literals earlier still.
+            // Kept as a bail (never a panic) for hand-built callers.
             "IS_TERMINAL expects \"stdin\", \"stdout\", or \"stderr\", got {stream_name:?}"
         ),
     };

@@ -3529,7 +3529,7 @@ when integral and finite.
 
 ### STD::IS_TERMINAL
 
-**Signature:** `STD::IS_TERMINAL($stream_name: STRING) -> BOOL`
+**Signature:** `STD::IS_TERMINAL($stream_name: STRING = "stdin" | "stdout" | "stderr") -> BOOL`
 
 **Contexts:** AST only
 
