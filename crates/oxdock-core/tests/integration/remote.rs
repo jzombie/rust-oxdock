@@ -241,6 +241,30 @@ fn read_trimmed(root: &GuardedPath, rel: &str) -> String {
 }
 
 #[test]
+fn remote_body_type_error_fails_before_shipping() {
+    // The host pre-pass descends into REMOTE bodies: a static error
+    // inside fails here with the type error, not the missing-runner
+    // bail, proving nothing ships before the body checks. The guest
+    // re-validates on arrival through the same entry point.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let steps = oxdock_core::parse_script(indoc! {r#"
+        REMOTE prod {
+            ECHO $undefined
+        }
+    "#})
+    .unwrap();
+    let fs: Box<dyn WorkspaceFs> = Box::new(PathResolver::new(root.root(), root.root()).unwrap());
+    let err = run_steps_with_manager(fs, &steps, MockProcessManager::default(), ExecIo::new())
+        .map(|_| ())
+        .expect_err("body type error must fail statically");
+    assert!(
+        err.to_string().contains("undefined variable $undefined"),
+        "static error wins over missing runner, got: {err:#}"
+    );
+}
+
+#[test]
 fn remote_without_runner_names_the_binding() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);

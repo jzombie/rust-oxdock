@@ -1970,7 +1970,11 @@ only header-listed `$var` and `env:NAME` entries cross, the
 guest starts empty, and results return through declared
 transfers or `WITH_IO` pipes. The target is a static
 literal, never a variable. Unknown targets fail before
-execution starts.
+execution starts. Bodies check twice: the host static
+pass validates the body before anything ships, and the
+guest re-validates on arrival through the same entry
+point, so a body type error fails locally, never mid-run
+on the remote.
 
 
 **Examples:**
