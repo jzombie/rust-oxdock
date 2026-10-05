@@ -967,10 +967,10 @@ fn type_describe<P: ProcessManager>(
 fn is_terminal<P: ProcessManager>(
     cx: &mut StepCtx<P>,
     /// Stream name: `stdin`, `stdout`, or `stderr` (exact match).
-    stream: String,
+    stream_name: String,
 ) -> Result<Value> {
     use std::io::IsTerminal;
-    let terminal = match stream.as_str() {
+    let terminal = match stream_name.as_str() {
         "stdin" => {
             // A script-pipe backend is definitive; Null is /dev/null.
             // Only a directly inherited fd answers the process check: a
@@ -1034,7 +1034,7 @@ fn is_terminal<P: ProcessManager>(
             }
         }
         _ => anyhow::bail!(
-            "IS_TERMINAL expects \"stdin\", \"stdout\", or \"stderr\", got {stream:?}"
+            "IS_TERMINAL expects \"stdin\", \"stdout\", or \"stderr\", got {stream_name:?}"
         ),
     };
     Ok(Value::bool(terminal))
