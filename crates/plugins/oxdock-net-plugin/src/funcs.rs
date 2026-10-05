@@ -142,11 +142,7 @@ fn read_string_map(
 
 /// Read an optional non-negative INT key from the options MAP.
 /// Missing binds `None`; present non-INTs and negatives bail.
-fn optional_count(
-    map: &BTreeMap<String, Value>,
-    func: &str,
-    key: &str,
-) -> Result<Option<u64>> {
+fn optional_count(map: &BTreeMap<String, Value>, func: &str, key: &str) -> Result<Option<u64>> {
     let Some(value) = map.get(key) else {
         return Ok(None);
     };

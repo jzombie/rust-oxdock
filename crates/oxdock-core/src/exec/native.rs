@@ -1245,10 +1245,7 @@ fn meta_to_value(meta: &FuncMeta) -> Value {
                         ),
                     );
                     entry.insert("docs".to_string(), Value::string(String::new()));
-                    entry.insert(
-                        "optional".to_string(),
-                        Value::bool(p.optional),
-                    );
+                    entry.insert("optional".to_string(), Value::bool(p.optional));
                     entry.insert(
                         "options".to_string(),
                         match p.options {

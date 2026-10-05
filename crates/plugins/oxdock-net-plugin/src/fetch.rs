@@ -283,12 +283,8 @@ mod tests {
 
     #[test]
     fn cleartext_to_real_hosts_refuses_without_dialing() {
-        let err = fetch_text_with_options(
-            "http://example.com/x",
-            &FetchOptions::default(),
-            
-        )
-        .expect_err("cleartext must fail");
+        let err = fetch_text_with_options("http://example.com/x", &FetchOptions::default())
+            .expect_err("cleartext must fail");
         assert!(
             err.to_string().contains("cleartext"),
             "refusal must name the reason: {err}"
@@ -330,12 +326,9 @@ mod tests {
     #[cfg_attr(miri, ignore = "needs loopback TCP")]
     fn loopback_body_round_trips_exact() {
         let addr = serve_bytes(b"{\"a\": 1}".to_vec(), "200 OK");
-        let body = fetch_text_with_options(
-            &format!("http://{addr}/doc.json"),
-            &FetchOptions::default(),
-            
-        )
-        .expect("loopback fetch");
+        let body =
+            fetch_text_with_options(&format!("http://{addr}/doc.json"), &FetchOptions::default())
+                .expect("loopback fetch");
         assert_eq!(body, "{\"a\": 1}");
     }
 
@@ -343,12 +336,8 @@ mod tests {
     #[cfg_attr(miri, ignore = "needs loopback TCP")]
     fn non_2xx_bails_with_status() {
         let addr = serve_bytes(b"nope".to_vec(), "500 Internal Server Error");
-        let err = fetch_text_with_options(
-            &format!("http://{addr}/x"),
-            &FetchOptions::default(),
-            
-        )
-        .expect_err("500 must fail");
+        let err = fetch_text_with_options(&format!("http://{addr}/x"), &FetchOptions::default())
+            .expect_err("500 must fail");
         assert!(
             format!("{err:#}").contains("500"),
             "status must surface: {err:#}"
@@ -363,12 +352,9 @@ mod tests {
         // `127.0.0.2` is loopback-range but outside the literal
         // allowlist, so refusal is deterministic with no dial.
         let addr = serve_redirect_once("http://127.0.0.2:9/x".to_string());
-        let err = fetch_text_with_options(
-            &format!("http://{addr}/start"),
-            &FetchOptions::default(),
-            
-        )
-        .expect_err("cleartext hop must fail");
+        let err =
+            fetch_text_with_options(&format!("http://{addr}/start"), &FetchOptions::default())
+                .expect_err("cleartext hop must fail");
         assert!(
             format!("{err:#}").contains("cleartext"),
             "hop must hit the cleartext refusal: {err:#}"
@@ -381,12 +367,9 @@ mod tests {
         // No silent same-origin widening: a relative `Location` has no
         // scheme to validate, so the hop bails.
         let addr = serve_redirect_once("/relative".to_string());
-        let err = fetch_text_with_options(
-            &format!("http://{addr}/start"),
-            &FetchOptions::default(),
-            
-        )
-        .expect_err("relative hop must fail");
+        let err =
+            fetch_text_with_options(&format!("http://{addr}/start"), &FetchOptions::default())
+                .expect_err("relative hop must fail");
         assert!(
             format!("{err:#}").contains("missing '://'"),
             "hop must fail closed on scheme: {err:#}"
@@ -397,12 +380,8 @@ mod tests {
     #[cfg_attr(miri, ignore = "needs loopback TCP")]
     fn redirect_loop_bails() {
         let addr = serve_redirect_loop(8);
-        let err = fetch_text_with_options(
-            &format!("http://{addr}/loop"),
-            &FetchOptions::default(),
-            
-        )
-        .expect_err("loop must fail");
+        let err = fetch_text_with_options(&format!("http://{addr}/loop"), &FetchOptions::default())
+            .expect_err("loop must fail");
         assert!(
             format!("{err:#}").contains("too many redirects"),
             "redirect cap must surface: {err:#}"
@@ -429,12 +408,8 @@ mod tests {
     #[cfg_attr(miri, ignore = "needs loopback TCP")]
     fn invalid_utf8_bails() {
         let addr = serve_bytes(b"\xff\xfe invalid".to_vec(), "200 OK");
-        let err = fetch_text_with_options(
-            &format!("http://{addr}/bin"),
-            &FetchOptions::default(),
-            
-        )
-        .expect_err("bad UTF-8 must fail");
+        let err = fetch_text_with_options(&format!("http://{addr}/bin"), &FetchOptions::default())
+            .expect_err("bad UTF-8 must fail");
         assert!(
             format!("{err:#}").contains("UTF-8"),
             "encoding must surface: {err:#}"

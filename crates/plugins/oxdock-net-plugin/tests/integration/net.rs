@@ -953,7 +953,8 @@ fn fetch_arity_names_its_optional_range() {
     let err = run_script(&root, "IMPORT [STD, NET]\nLET $b: STRING = NET_FETCH()\n")
         .expect_err("zero args must fail");
     assert!(
-        err.to_string().contains("expects 1 to 2 argument(s), got 0"),
+        err.to_string()
+            .contains("expects 1 to 2 argument(s), got 0"),
         "{err:#}"
     );
     // Three args against a 1-to-2 range: the fillers never
@@ -965,13 +966,15 @@ fn fetch_arity_names_its_optional_range() {
     )
     .expect_err("three args must fail");
     assert!(
-        err.to_string().contains("expects 1 to 2 argument(s), got 3"),
+        err.to_string()
+            .contains("expects 1 to 2 argument(s), got 3"),
         "{err:#}"
     );
 }
 
 #[test]
-fn fetch_rejects_unknown_options_without_dialing() {    // The key check fires before any socket opens: example.com never
+fn fetch_rejects_unknown_options_without_dialing() {
+    // The key check fires before any socket opens: example.com never
     // dials, so this runs under Miri.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
