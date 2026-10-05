@@ -3634,6 +3634,7 @@ fn run_start_rejects_unknown_type_tags() {
                         allowed: None,
                         docs: "",
                         options: None,
+                        optional: false,
                     }]),
                     returns: return_type,
                     rpn: false,
@@ -3678,6 +3679,79 @@ fn run_start_rejects_unknown_type_tags() {
     state
         .validate_function_type_tags()
         .expect("valid tags must pass");
+}
+
+#[test]
+fn run_start_rejects_misplaced_optional_params() {
+    // Omission fills an empty MAP, so only trailing MAP params may be
+    // optional: a required param after an optional one, or an optional
+    // non-MAP, fails run-start validation naming the offender.
+    fn optional_module(params: Vec<(&str, TypeTag, bool)>) -> HostModule<MockProcessManager> {
+        let noop: PureFn = Arc::new(|_| Ok(Value::string("x".to_string())));
+        HostModule {
+            name: "T".to_string(),
+            funcs: vec![HostRegistration::Pure {
+                name: "OPT".to_string(),
+                meta: FuncMeta {
+                    name: "T::OPT".to_string(),
+                    module: "T".to_string(),
+                    kind: FuncKind::HostPure,
+                    params: Some(
+                        params
+                            .into_iter()
+                            .map(|(name, tag, optional)| FuncParam {
+                                name: name.to_string(),
+                                param_type: Some(tag),
+                                allowed: None,
+                                docs: "",
+                                options: None,
+                                optional,
+                            })
+                            .collect(),
+                    ),
+                    returns: Some(TypeTag::String),
+                    rpn: false,
+                    summary: "test-only",
+                    docs: "test-only",
+                },
+                func: noop,
+            }],
+            types: vec![],
+            record_schemas: vec![],
+        }
+    }
+    // Optional MAP before a required param: rejected.
+    let mut state = create_exec_state(MockFs::new());
+    state.register_module(optional_module(vec![
+        ("first", TypeTag::Map, true),
+        ("second", TypeTag::String, false),
+    ]));
+    let err = state
+        .validate_function_type_tags()
+        .expect_err("non-trailing optional must fail");
+    assert!(
+        format!("{err:#}").contains("optional before a required param"),
+        "{err:#}"
+    );
+    // Optional non-MAP in trailing position: rejected.
+    let mut state = create_exec_state(MockFs::new());
+    state.register_module(optional_module(vec![("only", TypeTag::String, true)]));
+    let err = state
+        .validate_function_type_tags()
+        .expect_err("optional non-MAP must fail");
+    assert!(
+        format!("{err:#}").contains("optional without a MAP type"),
+        "{err:#}"
+    );
+    // Trailing optional MAP: accepted.
+    let mut state = create_exec_state(MockFs::new());
+    state.register_module(optional_module(vec![
+        ("url", TypeTag::String, false),
+        ("options", TypeTag::Map, true),
+    ]));
+    state
+        .validate_function_type_tags()
+        .expect("trailing optional MAP must pass");
 }
 
 #[cfg(not(miri))]

@@ -3,24 +3,54 @@
 //!
 //! The contract is deliberately narrow: `https` only (cleartext `http`
 //! reaches only loopback hosts, so tests can serve fixtures without a
-//! TLS stack), at most [`MAX_REDIRECTS`] redirect hops, one
-//! [`FETCH_TIMEOUT`] deadline for the whole request, at most
-//! [`MAX_BODY_BYTES`] of body, strict UTF-8, and non-2xx statuses bail.
-//! Every failure names the URL and the reason; nothing retries.
+//! TLS stack), at most `DEFAULT_MAX_REDIRECTS` redirect hops, one
+//! `DEFAULT_FETCH_TIMEOUT` deadline for the whole request, at most
+//! `DEFAULT_MAX_BODY_BYTES` of body, strict UTF-8, and non-2xx statuses
+//! bail. Every limit above is a default: per-request options override
+//! each one. Every failure names the URL and the reason; nothing
+//! retries.
 
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
-/// Maximum response body a fetch reads: 10 MiB. Matches ureq's own
-/// default cap, stated here so the limit is pinned by name and test.
-pub const MAX_BODY_BYTES: u64 = 10 * 1024 * 1024;
+/// Default maximum response body a fetch reads: 10 MiB. Matches
+/// ureq's own default cap. Overridable per request through the
+/// `max_body_bytes` option; the `body_over_cap` test pins the
+/// enforcement, not the number.
+pub const DEFAULT_MAX_BODY_BYTES: u64 = 10 * 1024 * 1024;
 
-/// Redirect hops followed before bailing with `too many redirects`.
-const MAX_REDIRECTS: u32 = 5;
+/// Default redirect hops followed before bailing with `too many
+/// redirects`. Overridable per request through the `max_redirects`
+/// option (`0` disables following).
+pub const DEFAULT_MAX_REDIRECTS: u32 = 5;
 
-/// Whole-request deadline: connect, TLS, headers, and body.
-const FETCH_TIMEOUT: Duration = Duration::from_secs(30);
+/// Default whole-request deadline: connect, TLS, headers, and body.
+/// Overridable per request through the `timeout` option.
+pub const DEFAULT_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Per-request fetch settings: extra request headers, the
+/// whole-request deadline, the body cap, and the redirect budget.
+/// Headers forward on every redirect hop (curl precedent: custom
+/// headers travel with the redirect chain), documented on `NET_FETCH`
+/// so callers can reason about it.
+pub struct FetchOptions {
+    pub headers: Vec<(String, String)>,
+    pub timeout: Duration,
+    pub max_body_bytes: u64,
+    pub max_redirects: u32,
+}
+
+impl Default for FetchOptions {
+    fn default() -> Self {
+        Self {
+            headers: Vec::new(),
+            timeout: DEFAULT_FETCH_TIMEOUT,
+            max_body_bytes: DEFAULT_MAX_BODY_BYTES,
+            max_redirects: DEFAULT_MAX_REDIRECTS,
+        }
+    }
+}
 
 /// Hosts where cleartext `http` is accepted: loopback only, so the test
 /// suite can serve fixtures from `TcpListener` without TLS. Real hosts
@@ -64,11 +94,6 @@ fn authority_host(authority: &str) -> &str {
     }
 }
 
-/// Fetch `url` to text under the production limits.
-pub fn fetch_text(url: &str) -> Result<String> {
-    fetch_text_with_limit(url, MAX_BODY_BYTES)
-}
-
 /// Reject non-`https` schemes and cleartext `http` to non-loopback
 /// hosts, before any socket opens. Runs per redirect hop, not just on
 /// the initial URL, so a `Location` pointing at cleartext never slips
@@ -92,17 +117,18 @@ fn check_url(url: &str) -> Result<()> {
     Ok(())
 }
 
-/// Fetch `url` to text with an explicit body cap. The cap exists so
-/// tests can pin the too-large failure without serving 10 MiB.
+/// Fetch `url` to text with explicit options.
 ///
-/// Redirects follow by hand, at most [`MAX_REDIRECTS`] hops: the
+/// Redirects follow by hand, at most `options.max_redirects` hops: the
 /// client never follows automatically, so every `Location` target
 /// passes [`check_url`] before the next request. Absolute URLs only:
 /// a relative `Location` fails closed instead of widening silently,
-/// as does a redirect without a `Location` header.
-pub fn fetch_text_with_limit(initial_url: &str, max_bytes: u64) -> Result<String> {
+/// as does a redirect without a `Location` header. Custom headers
+/// apply to every hop; the deadline covers the whole chain; bodies
+/// over `options.max_body_bytes` bail naming the limit.
+pub fn fetch_text_with_options(initial_url: &str, options: &FetchOptions) -> Result<String> {
     let config = ureq::Agent::config_builder()
-        .timeout_global(Some(FETCH_TIMEOUT))
+        .timeout_global(Some(options.timeout))
         .max_redirects(0)
         .build();
     let agent = ureq::Agent::new_with_config(config);
@@ -110,7 +136,11 @@ pub fn fetch_text_with_limit(initial_url: &str, max_bytes: u64) -> Result<String
     let mut redirects = 0u32;
     loop {
         check_url(&current_url)?;
-        let response = match agent.get(&current_url).call() {
+        let mut request = agent.get(&current_url);
+        for (name, value) in &options.headers {
+            request = request.header(name, value);
+        }
+        let response = match request.call() {
             Ok(response) => response,
             Err(err) => {
                 return Err(anyhow::Error::from(err))
@@ -119,7 +149,7 @@ pub fn fetch_text_with_limit(initial_url: &str, max_bytes: u64) -> Result<String
         };
         let status = response.status().as_u16();
         if (300..400).contains(&status) {
-            if redirects >= MAX_REDIRECTS {
+            if redirects >= options.max_redirects {
                 bail!("NET_FETCH({initial_url:?}) failed: too many redirects");
             }
             let location = response.headers().get("location").ok_or_else(|| {
@@ -139,7 +169,7 @@ pub fn fetch_text_with_limit(initial_url: &str, max_bytes: u64) -> Result<String
         let body = response
             .body_mut()
             .with_config()
-            .limit(max_bytes)
+            .limit(options.max_body_bytes)
             .lossy_utf8(false)
             .read_to_string()
             .with_context(|| format!("NET_FETCH({current_url:?}) failed"))?;
@@ -246,13 +276,19 @@ mod tests {
             "ftp://example.com/x",
             "file:///etc/passwd",
         ] {
-            fetch_text(url).expect_err("bad scheme must fail offline: {url}");
+            fetch_text_with_options(url, &FetchOptions::default())
+                .expect_err("bad scheme must fail offline: {url}");
         }
     }
 
     #[test]
     fn cleartext_to_real_hosts_refuses_without_dialing() {
-        let err = fetch_text("http://example.com/x").expect_err("cleartext must fail");
+        let err = fetch_text_with_options(
+            "http://example.com/x",
+            &FetchOptions::default(),
+            
+        )
+        .expect_err("cleartext must fail");
         assert!(
             err.to_string().contains("cleartext"),
             "refusal must name the reason: {err}"
@@ -269,7 +305,8 @@ mod tests {
             "http://evil.com#@127.0.0.1",
             "http://evil.com/path?x=@localhost",
         ] {
-            let err = fetch_text(url).expect_err("spoofed host must fail: {url}");
+            let err = fetch_text_with_options(url, &FetchOptions::default())
+                .expect_err("spoofed host must fail: {url}");
             assert!(
                 format!("{err:#}").contains("cleartext"),
                 "spoof must hit the cleartext refusal: {err:#}"
@@ -293,7 +330,12 @@ mod tests {
     #[cfg_attr(miri, ignore = "needs loopback TCP")]
     fn loopback_body_round_trips_exact() {
         let addr = serve_bytes(b"{\"a\": 1}".to_vec(), "200 OK");
-        let body = fetch_text(&format!("http://{addr}/doc.json")).expect("loopback fetch");
+        let body = fetch_text_with_options(
+            &format!("http://{addr}/doc.json"),
+            &FetchOptions::default(),
+            
+        )
+        .expect("loopback fetch");
         assert_eq!(body, "{\"a\": 1}");
     }
 
@@ -301,7 +343,12 @@ mod tests {
     #[cfg_attr(miri, ignore = "needs loopback TCP")]
     fn non_2xx_bails_with_status() {
         let addr = serve_bytes(b"nope".to_vec(), "500 Internal Server Error");
-        let err = fetch_text(&format!("http://{addr}/x")).expect_err("500 must fail");
+        let err = fetch_text_with_options(
+            &format!("http://{addr}/x"),
+            &FetchOptions::default(),
+            
+        )
+        .expect_err("500 must fail");
         assert!(
             format!("{err:#}").contains("500"),
             "status must surface: {err:#}"
@@ -316,7 +363,12 @@ mod tests {
         // `127.0.0.2` is loopback-range but outside the literal
         // allowlist, so refusal is deterministic with no dial.
         let addr = serve_redirect_once("http://127.0.0.2:9/x".to_string());
-        let err = fetch_text(&format!("http://{addr}/start")).expect_err("cleartext hop must fail");
+        let err = fetch_text_with_options(
+            &format!("http://{addr}/start"),
+            &FetchOptions::default(),
+            
+        )
+        .expect_err("cleartext hop must fail");
         assert!(
             format!("{err:#}").contains("cleartext"),
             "hop must hit the cleartext refusal: {err:#}"
@@ -329,7 +381,12 @@ mod tests {
         // No silent same-origin widening: a relative `Location` has no
         // scheme to validate, so the hop bails.
         let addr = serve_redirect_once("/relative".to_string());
-        let err = fetch_text(&format!("http://{addr}/start")).expect_err("relative hop must fail");
+        let err = fetch_text_with_options(
+            &format!("http://{addr}/start"),
+            &FetchOptions::default(),
+            
+        )
+        .expect_err("relative hop must fail");
         assert!(
             format!("{err:#}").contains("missing '://'"),
             "hop must fail closed on scheme: {err:#}"
@@ -340,7 +397,12 @@ mod tests {
     #[cfg_attr(miri, ignore = "needs loopback TCP")]
     fn redirect_loop_bails() {
         let addr = serve_redirect_loop(8);
-        let err = fetch_text(&format!("http://{addr}/loop")).expect_err("loop must fail");
+        let err = fetch_text_with_options(
+            &format!("http://{addr}/loop"),
+            &FetchOptions::default(),
+            
+        )
+        .expect_err("loop must fail");
         assert!(
             format!("{err:#}").contains("too many redirects"),
             "redirect cap must surface: {err:#}"
@@ -351,7 +413,11 @@ mod tests {
     #[cfg_attr(miri, ignore = "needs loopback TCP")]
     fn body_over_cap_bails() {
         let addr = serve_bytes(vec![b'x'; 64], "200 OK");
-        let err = fetch_text_with_limit(&format!("http://{addr}/big"), 16)
+        let options = FetchOptions {
+            max_body_bytes: 16,
+            ..FetchOptions::default()
+        };
+        let err = fetch_text_with_options(&format!("http://{addr}/big"), &options)
             .expect_err("over-cap body must fail");
         assert!(
             format!("{err:#}").contains("larger than request limit"),
@@ -363,7 +429,12 @@ mod tests {
     #[cfg_attr(miri, ignore = "needs loopback TCP")]
     fn invalid_utf8_bails() {
         let addr = serve_bytes(b"\xff\xfe invalid".to_vec(), "200 OK");
-        let err = fetch_text(&format!("http://{addr}/bin")).expect_err("bad UTF-8 must fail");
+        let err = fetch_text_with_options(
+            &format!("http://{addr}/bin"),
+            &FetchOptions::default(),
+            
+        )
+        .expect_err("bad UTF-8 must fail");
         assert!(
             format!("{err:#}").contains("UTF-8"),
             "encoding must surface: {err:#}"

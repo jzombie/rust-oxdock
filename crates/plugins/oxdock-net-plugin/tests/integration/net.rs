@@ -877,13 +877,150 @@ fn fetch_feeds_parse_json() {
     let script = format!(
         indoc! {r#"
             IMPORT [STD, NET]
-            LET $body: STRING = NET_FETCH("http://{addr}/doc.json")
+            LET $body: STRING = NET_FETCH("http://{addr}/doc.json", {{}})
             LET $doc: MAP<ANY> = PARSE_JSON($body)
             ASSERT_EQ $doc.name "loopback"
         "#},
         addr = addr
     );
     run_script(&root, &script).expect("fetch into parse runs");
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "needs loopback TCP plus threads")]
+fn fetch_sends_custom_headers() {
+    // Headers from the options MAP reach the wire: the fixture
+    // captures the request head and the script asserts on it through
+    // a second fetch of the captured bytes. Ephemeral bind, so no
+    // fixed-port coordination.
+    use std::sync::{Arc, Mutex};
+    let seen: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let captured = Arc::clone(&seen);
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("timeout");
+        let mut head = Vec::new();
+        let mut byte = [0u8; 1];
+        while head.len() < 65536 {
+            match stream.read(&mut byte) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    head.push(byte[0]);
+                    if head.ends_with(b"\r\n\r\n") {
+                        break;
+                    }
+                }
+            }
+        }
+        *captured.lock().expect("lock") = head;
+        let body = b"ok";
+        let head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(head.as_bytes()).expect("head");
+        stream.write_all(body).expect("body");
+    });
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = format!(
+        indoc! {r#"
+            IMPORT [STD, NET]
+            LET $body: STRING = NET_FETCH("http://{addr}/doc.json", {{headers: {{x-test-name: "fetch-headers"}}}})
+            ASSERT_EQ $body "ok"
+        "#},
+        addr = addr
+    );
+    run_script(&root, &script).expect("fetch with headers runs");
+    let head = String::from_utf8_lossy(&seen.lock().expect("lock")).to_string();
+    assert!(
+        head.to_lowercase().contains("x-test-name: fetch-headers"),
+        "custom header must reach the wire: {head}"
+    );
+}
+
+#[test]
+fn fetch_arity_names_its_optional_range() {
+    // `$options` is omittable: zero and three args fail naming the
+    // 1-to-2 range, all before any socket opens, so this runs under
+    // Miri.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let err = run_script(&root, "IMPORT [STD, NET]\nLET $b: STRING = NET_FETCH()\n")
+        .expect_err("zero args must fail");
+    assert!(
+        err.to_string().contains("expects 1 to 2 argument(s), got 0"),
+        "{err:#}"
+    );
+    // Three args against a 1-to-2 range: the fillers never
+    // evaluate (the arity gate fires first), so their values are
+    // irrelevant, only their count.
+    let err = run_script(
+        &root,
+        "IMPORT [STD, NET]\nLET $b: STRING = NET_FETCH(\"http://example.com/x\", {}, {})\n",
+    )
+    .expect_err("three args must fail");
+    assert!(
+        err.to_string().contains("expects 1 to 2 argument(s), got 3"),
+        "{err:#}"
+    );
+}
+
+#[test]
+fn fetch_rejects_unknown_options_without_dialing() {    // The key check fires before any socket opens: example.com never
+    // dials, so this runs under Miri.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD, NET]
+        LET $body: STRING = NET_FETCH("http://example.com/doc.json", {bogus: 1})
+    "#};
+    let err = run_script(&root, script).expect_err("unknown option must fail");
+    assert!(err.to_string().contains("unknown option"), "{err:#}");
+}
+
+#[test]
+fn fetch_rejects_non_string_header_values_without_dialing() {
+    // Value shape is checked before any socket opens, so this runs
+    // under Miri.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD, NET]
+        LET $body: STRING = NET_FETCH("http://example.com/doc.json", {headers: {x-n: 1}})
+    "#};
+    let err = run_script(&root, script).expect_err("non-string header must fail");
+    assert!(err.to_string().contains("must be a STRING"), "{err:#}");
+}
+
+#[test]
+fn fetch_rejects_bad_timeout_without_dialing() {
+    // Duration parsing precedes the dial, so this runs under Miri.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD, NET]
+        LET $body: STRING = NET_FETCH("http://example.com/doc.json", {timeout: "soon"})
+    "#};
+    let err = run_script(&root, script).expect_err("bad timeout must fail");
+    assert!(err.to_string().contains("must be a duration"), "{err:#}");
+}
+
+#[test]
+fn fetch_rejects_negative_counts_without_dialing() {
+    // Count validation precedes the dial, so this runs under Miri.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD, NET]
+        LET $body: STRING = NET_FETCH("http://example.com/doc.json", {max_redirects: -1})
+    "#};
+    let err = run_script(&root, script).expect_err("negative count must fail");
+    assert!(err.to_string().contains("non-negative"), "{err:#}");
 }
 
 #[test]

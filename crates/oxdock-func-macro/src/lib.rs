@@ -989,6 +989,10 @@ fn expand_func(options: FuncOptions, func: ItemFn) -> syn::Result<TokenStream2> 
                 allowed: #allowed,
                 docs: #param_docs,
                 options: #options_meta,
+                // The macro has no defaults syntax: generated params
+                // are always required. Hand-built entries alone mark
+                // trailing options MAPs optional.
+                optional: false,
             }
         });
     }

@@ -37,7 +37,7 @@ pub use self::io::PushManifestSink;
 pub use self::native::{
     FuncKind, FuncMeta, FuncParam, FunctionRegistry, HostModule, HostRegistration, NativeFn,
     OxDockFn, ParamOption, PureFn, PureTable, RecordSchema, builtin_function_metas,
-    builtin_function_names, std_module_table,
+    builtin_function_names, fill_optional_args, required_arity, std_module_table,
 };
 pub use self::state::ExecState;
 pub use self::steps::StepCtx;

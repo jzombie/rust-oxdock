@@ -61,7 +61,7 @@ use oxdock_parser::{
 };
 use oxdock_process::ProcessManager;
 
-use super::{ExecState, FuncMeta, FuncParam};
+use super::{ExecState, FuncMeta, FuncParam, required_arity};
 
 /// Maximum expression nesting and nested-body descent. Parser-bounded
 /// scripts never approach it; hand-built ASTs cannot wedge the pass.
@@ -1364,14 +1364,33 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         // argument evaluates, so undeclared names in extra arguments
         // never surface. (`native_arity_failure_...` pins this.)
         let callee = self.resolve_call(name, depth)?;
-        if let Some(expected) = callee.params.as_deref()
-            && args.len() != expected.len()
-        {
+        // Arity range comes from the full host metadata (which carries
+        // the optional flags); script FUNCs and bare shape lists are
+        // always exact. Missing lists (INSPECT-like) skip the check:
+        // the dedicated AST path owns that call shape.
+        let (required, total) = match callee.host_params.as_deref() {
+            Some(host) => (required_arity(host), host.len()),
+            None => match callee.params.as_deref() {
+                Some(shape) => (shape.len(), shape.len()),
+                None => (0, usize::MAX),
+            },
+        };
+        if args.len() < required || args.len() > total {
+            if required == total {
+                bail!(
+                    "step {}: {}() expects {} argument(s), got {}",
+                    idx + 1,
+                    base_name(name),
+                    total,
+                    args.len()
+                );
+            }
             bail!(
-                "step {}: {}() expects {} argument(s), got {}",
+                "step {}: {}() expects {} to {} argument(s), got {}",
                 idx + 1,
                 base_name(name),
-                expected.len(),
+                required,
+                total,
                 args.len()
             );
         }
@@ -1413,13 +1432,29 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             ret,
             host_params,
         } = callee;
-        if let Some(expected) = params.as_deref()
-            && arg_tys.len() != expected.len()
-        {
+        let (required, total) = match host_params.as_deref() {
+            Some(host) => (required_arity(host), host.len()),
+            None => match params.as_deref() {
+                Some(shape) => (shape.len(), shape.len()),
+                // INSPECT-like entries skip arity: the dedicated AST
+                // path owns that call shape.
+                None => (0, usize::MAX),
+            },
+        };
+        if arg_tys.len() < required || arg_tys.len() > total {
+            if required == total {
+                bail!(
+                    "{}{display}() expects {} argument(s), got {}",
+                    loc(at),
+                    total,
+                    arg_tys.len()
+                );
+            }
             bail!(
-                "{}{display}() expects {} argument(s), got {}",
+                "{}{display}() expects {} to {} argument(s), got {}",
                 loc(at),
-                expected.len(),
+                required,
+                total,
                 arg_tys.len()
             );
         }

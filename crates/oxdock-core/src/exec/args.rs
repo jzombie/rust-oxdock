@@ -307,15 +307,25 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
                     super::base_name(name)
                 );
             }
-            if let Some(params) = &meta.params
-                && params.len() != args.len()
-            {
-                bail!(
-                    "{}() expects {} argument(s), got {}",
-                    super::base_name(name),
-                    params.len(),
-                    args.len()
-                );
+            if let Some(params) = &meta.params {
+                let required = super::required_arity(params);
+                if args.len() < required || args.len() > params.len() {
+                    if required == params.len() {
+                        bail!(
+                            "{}() expects {} argument(s), got {}",
+                            super::base_name(name),
+                            params.len(),
+                            args.len()
+                        );
+                    }
+                    bail!(
+                        "{}() expects {} to {} argument(s), got {}",
+                        super::base_name(name),
+                        required,
+                        params.len(),
+                        args.len()
+                    );
+                }
             }
             let mut vals = Vec::with_capacity(args.len());
             for arg in args {

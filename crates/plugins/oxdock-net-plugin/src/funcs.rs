@@ -35,7 +35,7 @@ use crate::bridge::{pump_memory, pump_stream};
 use crate::endpoints::{
     AcquiredListener, EndpointRegistry, MemoryPipePair, SlotKind, acquire_listener,
 };
-use crate::fetch::fetch_text;
+use crate::fetch::{FetchOptions, fetch_text_with_options};
 use crate::state::ListenerState;
 use crate::types::NetListenerTag;
 use crate::validate::{
@@ -109,6 +109,88 @@ fn optional_duration(
         value.type_name()
     )
 }
+
+/// Read an optional string MAP key from the options MAP: every value
+/// must be a STRING, anything else bails naming the key. Missing binds
+/// an empty vec; a non-MAP binds bail.
+fn read_string_map(
+    map: &BTreeMap<String, Value>,
+    func: &str,
+    key: &str,
+) -> Result<Vec<(String, String)>> {
+    let Some(value) = map.get(key) else {
+        return Ok(Vec::new());
+    };
+    let Some(entries) = value.as_map() else {
+        bail!(
+            "{func} option '{key}' must be a MAP, got {}",
+            value.type_name()
+        );
+    };
+    let mut out = Vec::with_capacity(entries.len());
+    for (entry_key, entry_value) in entries {
+        let Some(text) = entry_value.as_str() else {
+            bail!(
+                "{func} option '{key}' entry '{entry_key}' must be a STRING, got {}",
+                entry_value.type_name()
+            );
+        };
+        out.push((entry_key.clone(), text.to_string()));
+    }
+    Ok(out)
+}
+
+/// Read an optional non-negative INT key from the options MAP.
+/// Missing binds `None`; present non-INTs and negatives bail.
+fn optional_count(
+    map: &BTreeMap<String, Value>,
+    func: &str,
+    key: &str,
+) -> Result<Option<u64>> {
+    let Some(value) = map.get(key) else {
+        return Ok(None);
+    };
+    let Some(n) = value.as_i64() else {
+        bail!(
+            "{func} option '{key}' must be an INT, got {}",
+            value.type_name()
+        );
+    };
+    if n < 0 {
+        bail!("{func} option '{key}' must be non-negative, got {n}");
+    }
+    Ok(Some(n as u64))
+}
+
+/// `NET_FETCH` options, shared by the registration metadata and the
+/// runtime key check: one source for the keys scripts may pass, so
+/// documentation and enforcement cannot drift apart.
+static NET_FETCH_OPTIONS: &[ParamOption] = &[
+    ParamOption {
+        name: "headers",
+        value: TypeTag::Map,
+        required: false,
+        default: None,
+    },
+    ParamOption {
+        name: "timeout",
+        value: TypeTag::Duration,
+        required: false,
+        default: None,
+    },
+    ParamOption {
+        name: "max_body_bytes",
+        value: TypeTag::Int,
+        required: false,
+        default: None,
+    },
+    ParamOption {
+        name: "max_redirects",
+        value: TypeTag::Int,
+        required: false,
+        default: None,
+    },
+];
 
 /// Claim a virtual service endpoint and report its address. `bind` is a
 /// logical port (`"2251"`) or service name (`"demo-proxy"`): physical
@@ -633,6 +715,7 @@ fn net_listen_registration<P: ProcessManager>(
             allowed: None,
             docs: "Logical port (`\"2251\"`) or service name; physical binds are rejected.",
             options: None,
+            optional: false,
         },
         FuncParam {
             name: "options".to_string(),
@@ -640,6 +723,7 @@ fn net_listen_registration<P: ProcessManager>(
             allowed: None,
             docs: "Reserved for future socket settings; must be an empty MAP today.",
             options: Some(&[]),
+            optional: false,
         },
     ];
     let arity = params.len();
@@ -697,6 +781,7 @@ fn net_connect_registration<P: ProcessManager>(
             allowed: None,
             docs: "Dial target: `host:port`, a logical port, or a service name.",
             options: None,
+            optional: false,
         },
         FuncParam {
             name: "in_pipe".to_string(),
@@ -704,6 +789,7 @@ fn net_connect_registration<P: ProcessManager>(
             allowed: None,
             docs: "Pipe carrying bytes consumed by the wire side.",
             options: None,
+            optional: false,
         },
         FuncParam {
             name: "out_pipe".to_string(),
@@ -711,6 +797,7 @@ fn net_connect_registration<P: ProcessManager>(
             allowed: None,
             docs: "Pipe carrying bytes produced by the wire side.",
             options: None,
+            optional: false,
         },
         FuncParam {
             name: "options".to_string(),
@@ -718,6 +805,7 @@ fn net_connect_registration<P: ProcessManager>(
             allowed: None,
             docs: "Optional `timeout` and `no_half_close` settings.",
             options: Some(NET_CONNECT_OPTIONS),
+            optional: false,
         },
     ];
     let arity = params.len();
@@ -812,6 +900,7 @@ fn net_port_registration<P: ProcessManager>(
         allowed: None,
         docs: "Logical port, service name, optionally protocol-qualified; unbound targets bail.",
         options: None,
+        optional: false,
     }];
     let arity = params.len();
     let func: NativeFn<P> = Arc::new(move |cx, values| {
@@ -896,6 +985,7 @@ fn net_addr_registration<P: ProcessManager>(
         allowed: None,
         docs: "Logical port, service name, optionally protocol-qualified; unbound targets bail.",
         options: None,
+        optional: false,
     }];
     let arity = params.len();
     let func: NativeFn<P> = Arc::new(move |cx, values| {
@@ -947,40 +1037,91 @@ fn net_addr_registration<P: ProcessManager>(
 /// `HostCtx` and never reaches the pure table that backs `{{ }}`
 /// placeholders.
 ///
+/// `options` carries `headers` (a MAP of STRING to STRING, sent on
+/// every request including redirect hops), `timeout` (a DURATION
+/// whole-request deadline, default 30s), `max_body_bytes` (an INT body
+/// cap, default 10 MiB), and `max_redirects` (an INT hop budget,
+/// default 5, `0` disables following). Streaming is out of scope:
+/// a streamed body would arrive as a `PIPE`, not text, so it needs
+/// its own function rather than an option on this one.
+///
 /// No runnable example lives on this metadata: a fetch needs a live
 /// server, which docs conformance cannot provide. The contract, in
 /// full: `https` only (cleartext `http` reaches loopback hosts only, so
 /// tests serve fixtures without TLS), redirects follow by hand (at most
 /// 5 hops, absolute URLs only, every hop re-validated against the
-/// scheme gate, so a `Location` can never smuggle cleartext), one
-/// 30-second deadline, at most 10 MiB of body, strict UTF-8, non-2xx
-/// statuses bail. Failures name the URL and the reason; nothing
-/// retries, nothing touches the filesystem.
+/// scheme gate, so a `Location` can never smuggle cleartext), at most
+/// 10 MiB of body, strict UTF-8, non-2xx statuses bail. Failures name
+/// the URL and the reason; nothing retries, nothing touches the
+/// filesystem.
 fn net_fetch_registration<P: ProcessManager>() -> HostRegistration<P> {
     // One params vector feeds both the metadata and the arity check,
     // so the two can never disagree: add a parameter once, here.
-    let params = vec![FuncParam {
-        name: "url".to_string(),
-        param_type: Some(TypeTag::String),
-        allowed: None,
-        docs: "`https` URL to fetch; cleartext `http` reaches loopback hosts only.",
-        options: None,
-    }];
+    let params = vec![
+        FuncParam {
+            name: "url".to_string(),
+            param_type: Some(TypeTag::String),
+            allowed: None,
+            docs: "`https` URL to fetch; cleartext `http` reaches loopback hosts only.",
+            options: None,
+            optional: false,
+        },
+        FuncParam {
+            name: "options".to_string(),
+            param_type: Some(TypeTag::Map),
+            allowed: None,
+            docs: "Fetch settings: `headers`, `timeout`, `max_body_bytes`, and `max_redirects`. Omittable: a missing options MAP fills `{}`.",
+            options: Some(NET_FETCH_OPTIONS),
+            optional: true,
+        },
+    ];
     let arity = params.len();
+    let required = oxdock_core::required_arity(&params);
+    // Cloned for the fill call below: the closure takes ownership,
+    // while the metadata keeps the original. Both derive from the
+    // one params vector above.
+    let fill_params = params.clone();
     let func: NativeFn<P> = Arc::new(move |cx, values| {
         let _ = cx;
-        if values.len() != arity {
+        if values.len() < required || values.len() > arity {
             bail!(
-                "NET_FETCH() expects {arity} argument(s), got {}",
+                "NET_FETCH() expects {required} to {arity} argument(s), got {}",
                 values.len()
             );
         }
-        let mut values = values.into_iter();
+        let mut values = oxdock_core::fill_optional_args(&fill_params, values).into_iter();
         let url = match values.next().expect("arity checked above").as_str() {
             Some(s) => s.to_string(),
             None => bail!("NET_FETCH() argument `$url` must be a STRING"),
         };
-        let body = fetch_text(&url)?;
+        let options_value = values.next().expect("arity checked above");
+        let options_map = match options_value.as_map() {
+            Some(map) => map.clone(),
+            None => bail!(
+                "NET_FETCH() argument `$options` must be a MAP, got {}",
+                options_value.type_name()
+            ),
+        };
+        oxdock_core::check_options(&options_map, NET_FETCH_OPTIONS, "NET_FETCH")?;
+        let headers = read_string_map(&options_map, "NET_FETCH", "headers")?;
+        let timeout = optional_duration(&options_map, "NET_FETCH", "timeout")?
+            .unwrap_or(crate::fetch::DEFAULT_FETCH_TIMEOUT);
+        let max_body_bytes = optional_count(&options_map, "NET_FETCH", "max_body_bytes")?
+            .unwrap_or(crate::fetch::DEFAULT_MAX_BODY_BYTES);
+        let max_redirects = optional_count(&options_map, "NET_FETCH", "max_redirects")?
+            .unwrap_or(crate::fetch::DEFAULT_MAX_REDIRECTS as u64);
+        let max_redirects = u32::try_from(max_redirects).map_err(|_| {
+            anyhow::anyhow!("NET_FETCH() option 'max_redirects' exceeds u32: {max_redirects}")
+        })?;
+        let body = fetch_text_with_options(
+            &url,
+            &FetchOptions {
+                headers,
+                timeout,
+                max_body_bytes,
+                max_redirects,
+            },
+        )?;
         Ok(Value::string(body))
     });
     HostRegistration::Stateful {
@@ -994,7 +1135,7 @@ fn net_fetch_registration<P: ProcessManager>() -> HostRegistration<P> {
             returns: Some(TypeTag::String),
             rpn: false,
             summary: "Fetch an https URL to text.",
-            docs: "Fetch an `https` URL to text: the network source for `PARSE_JSON` and `PARSE_TOML`. Cleartext `http` reaches loopback hosts only. Redirects follow by hand (at most 5 hops, absolute URLs only, every hop re-validated), one 30-second deadline, at most 10 MiB of body, strict UTF-8, non-2xx statuses bail. Compose with the pure parsers: `LET $doc: MAP<ANY> = PARSE_JSON(NET_FETCH($url))`.",
+            docs: "Fetch an `https` URL to text: the network source for `PARSE_JSON` and `PARSE_TOML`. Cleartext `http` reaches loopback hosts only. Redirects follow by hand (at most 5 hops, absolute URLs only, every hop re-validated), custom headers send on every hop, the `timeout` option overrides the 30-second whole-request deadline, `max_body_bytes` caps the body, `max_redirects` budgets the hops, strict UTF-8, non-2xx statuses bail. Compose with the pure parsers: `LET $doc: MAP<ANY> = PARSE_JSON(NET_FETCH($url, {}))`.",
         },
         func,
     }

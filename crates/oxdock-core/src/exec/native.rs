@@ -47,6 +47,12 @@ impl FuncKind {
 /// renders into every reference surface. `options` declares the known
 /// keys of a `MAP` options parameter: same single-source rule as
 /// `allowed`, with per-key types, required flags, defaults, and docs.
+/// `optional` marks a trailing `MAP` parameter callers may omit: the
+/// runtime fills an empty MAP, and signatures render `= {}`. Only
+/// trailing `MAP` params may be optional (run-start validation
+/// rejects anything else), so omission always means "no options".
+/// The macro never emits optional params: only hand-built entries
+/// use them, and only for options MAPs.
 #[derive(Debug, Clone)]
 pub struct FuncParam {
     pub name: String,
@@ -54,6 +60,38 @@ pub struct FuncParam {
     pub allowed: Option<&'static [&'static str]>,
     pub docs: &'static str,
     pub options: Option<&'static [ParamOption]>,
+    pub optional: bool,
+}
+
+/// Required argument count: total params minus trailing optionals.
+/// Callers may pass any count in `required..=total`; omitted trailing
+/// MAPs fill with an empty MAP. Shared by the static arity gate and
+/// the runtime gate so the two can never disagree.
+pub fn required_arity(params: &[FuncParam]) -> usize {
+    params
+        .iter()
+        .rev()
+        .take_while(|param| param.optional)
+        .fold(params.len(), |count, _| count - 1)
+}
+
+/// Fill omitted trailing optional MAP params with empty MAPs. The
+/// caller guarantees `values.len()` is within
+/// `required_arity(params)..=params.len()`; anything else is a bug,
+/// not a user error, so over- and under-counts panic loudly.
+pub fn fill_optional_args(params: &[FuncParam], mut values: Vec<Value>) -> Vec<Value> {
+    assert!(
+        values.len() <= params.len(),
+        "arity gate must run before fill_optional_args"
+    );
+    assert!(
+        values.len() >= required_arity(params),
+        "arity gate must run before fill_optional_args"
+    );
+    while values.len() < params.len() {
+        values.push(Value::map(BTreeMap::new()));
+    }
+    values
 }
 
 /// One known key of a `MAP` options parameter: name, value type,
@@ -419,6 +457,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
                                 // declarations have no doc syntax.
                                 docs: "",
                                 options: None,
+                                optional: false,
                             })
                             .collect(),
                     ),
@@ -805,10 +844,11 @@ fn functions<P: ProcessManager>(cx: &mut StepCtx<P>) -> Result<Value> {
 ///
 /// Returns a MAP with name, module, kind, params, returns, rpn, and
 /// summary. `params` is always a LIST (empty for parameterless
-/// functions), so the shape holds for every entry. Bare names fail
-/// closed: `DESCRIBE` requires the qualified form (except `INSPECT`,
-/// which is syntax rather than a registry entry). Errors on unknown
-/// function.
+/// functions) of entries carrying name, param_type, allowed, docs,
+/// options, and optional flags, so the shape holds for every entry. Bare names
+/// fail closed: `DESCRIBE` requires the qualified form (except
+/// `INSPECT`, which is syntax rather than a registry entry). Errors
+/// on unknown function.
 ///
 /// Field table for the `DESCRIBE` result bundle: one source for the
 /// shape the host mints, so introspection, enforcement, and
@@ -1206,6 +1246,10 @@ fn meta_to_value(meta: &FuncMeta) -> Value {
                     );
                     entry.insert("docs".to_string(), Value::string(String::new()));
                     entry.insert(
+                        "optional".to_string(),
+                        Value::bool(p.optional),
+                    );
+                    entry.insert(
                         "options".to_string(),
                         match p.options {
                             Some(keys) => Value::list(
@@ -1366,5 +1410,64 @@ impl<P: ProcessManager> ExecState<P> {
 
     pub(super) fn native_meta(&self, name: &str) -> Option<FuncMeta> {
         self.functions.meta(name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn describe_entry_carries_optional_flag() {
+        // The `optional` key on params entries is the machine-readable
+        // half of the `?` rendering: pin both values through the same
+        // builder the runtime serves, not through prose.
+        let meta = FuncMeta {
+            name: "T::F".to_string(),
+            module: "T".to_string(),
+            kind: FuncKind::HostPure,
+            params: Some(vec![
+                FuncParam {
+                    name: "url".to_string(),
+                    param_type: Some(TypeTag::String),
+                    allowed: None,
+                    docs: "",
+                    options: None,
+                    optional: false,
+                },
+                FuncParam {
+                    name: "options".to_string(),
+                    param_type: Some(TypeTag::Map),
+                    allowed: None,
+                    docs: "",
+                    options: None,
+                    optional: true,
+                },
+            ]),
+            returns: Some(TypeTag::String),
+            rpn: false,
+            summary: "test-only",
+            docs: "test-only",
+        };
+        let value = meta_to_value(&meta);
+        let map = value.as_map().expect("describe value is a map");
+        let params = map
+            .get("params")
+            .expect("params key")
+            .as_list()
+            .expect("params is a list");
+        assert_eq!(params.len(), 2);
+        let first = params[0].as_map().expect("entry is a map");
+        let second = params[1].as_map().expect("entry is a map");
+        assert_eq!(
+            first.get("optional").and_then(Value::as_bool),
+            Some(false),
+            "required param must read false"
+        );
+        assert_eq!(
+            second.get("optional").and_then(Value::as_bool),
+            Some(true),
+            "omittable param must read true"
+        );
     }
 }

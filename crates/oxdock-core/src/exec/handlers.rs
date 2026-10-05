@@ -1883,17 +1883,30 @@ pub(crate) fn call_func_value<P: ProcessManager>(
             super::base_name(name)
         );
     }
-    // 3. Pre-evaluation arity gate from the entry metadata.
-    if let Some(params) = entry.meta.params.as_deref()
-        && params.len() != args.len()
-    {
-        bail!(
-            "step {}: {}() expects {} argument(s), got {}",
-            idx + 1,
-            super::base_name(name),
-            params.len(),
-            args.len()
-        );
+    // 3. Pre-evaluation arity gate from the entry metadata. Trailing
+    // optional MAP params widen exact counts to ranges; everything
+    // else stays exact.
+    if let Some(params) = entry.meta.params.as_deref() {
+        let required = super::required_arity(params);
+        if args.len() < required || args.len() > params.len() {
+            if required == params.len() {
+                bail!(
+                    "step {}: {}() expects {} argument(s), got {}",
+                    idx + 1,
+                    super::base_name(name),
+                    params.len(),
+                    args.len()
+                );
+            }
+            bail!(
+                "step {}: {}() expects {} to {} argument(s), got {}",
+                idx + 1,
+                super::base_name(name),
+                required,
+                params.len(),
+                args.len()
+            );
+        }
     }
     // 4. Argument evaluation: only reachable for a valid invocation.
     let mut arg_vals = Vec::with_capacity(args.len());

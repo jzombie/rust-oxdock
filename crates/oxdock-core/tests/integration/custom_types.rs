@@ -390,6 +390,7 @@ fn host_module_cannot_reclaim_std_name() {
                     allowed: None,
                     docs: "",
                     options: None,
+                    optional: false,
                 }]),
                 returns: Some(TypeTag::List),
                 rpn: false,

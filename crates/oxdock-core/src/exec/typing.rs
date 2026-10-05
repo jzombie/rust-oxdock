@@ -379,7 +379,7 @@ impl<P: ProcessManager> ExecState<P> {
     pub fn validate_function_type_tags(&self) -> Result<()> {
         for meta in self.functions.all_metas() {
             if let Some(params) = meta.params.as_deref() {
-                for param in params {
+                for (position, param) in params.iter().enumerate() {
                     if let Some(expected) = param.param_type.as_ref() {
                         let what = format!("param '{}' of '{}'", param.name, meta.name);
                         Self::check_tag_known(self, &what, expected)?;
@@ -390,6 +390,26 @@ impl<P: ProcessManager> ExecState<P> {
                             param.name,
                             meta.name,
                         );
+                    }
+                    if param.optional {
+                        // Omission fills an empty MAP, so only trailing
+                        // MAP params qualify: anything else would fill a
+                        // value the caller never chose.
+                        let trails = params[position..].iter().all(|later| later.optional);
+                        if !trails {
+                            anyhow::bail!(
+                                "param '{}' of '{}' is optional before a required param",
+                                param.name,
+                                meta.name,
+                            );
+                        }
+                        if !matches!(param.param_type, Some(TypeTag::Map)) {
+                            anyhow::bail!(
+                                "param '{}' of '{}' is optional without a MAP type",
+                                param.name,
+                                meta.name,
+                            );
+                        }
                     }
                 }
             }

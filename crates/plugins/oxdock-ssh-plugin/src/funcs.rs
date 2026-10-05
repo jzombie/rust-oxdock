@@ -713,6 +713,7 @@ fn ssh_serve_registration<P: ProcessManager>(
             allowed: None,
             docs: "Virtual service endpoint to serve (logical port or service name).",
             options: None,
+            optional: false,
         },
         FuncParam {
             name: "options".to_string(),
@@ -720,6 +721,7 @@ fn ssh_serve_registration<P: ProcessManager>(
             allowed: None,
             docs: "Server credentials and host key.",
             options: Some(SSH_SERVE_OPTIONS),
+            optional: false,
         },
     ];
     let arity = params.len();
@@ -776,6 +778,7 @@ fn ssh_connect_registration<P: ProcessManager>(
             allowed: None,
             docs: "Dial target: logical port, service name, served address, or `host:port`.",
             options: None,
+            optional: false,
         },
         FuncParam {
             name: "username".to_string(),
@@ -783,6 +786,7 @@ fn ssh_connect_registration<P: ProcessManager>(
             allowed: None,
             docs: "Inner credentials for the SSH session.",
             options: None,
+            optional: false,
         },
         FuncParam {
             name: "password".to_string(),
@@ -790,6 +794,7 @@ fn ssh_connect_registration<P: ProcessManager>(
             allowed: None,
             docs: "Inner credentials for the SSH session.",
             options: None,
+            optional: false,
         },
         FuncParam {
             name: "in_pipe".to_string(),
@@ -797,6 +802,7 @@ fn ssh_connect_registration<P: ProcessManager>(
             allowed: None,
             docs: "Pipe carrying bytes consumed by the wire side.",
             options: None,
+            optional: false,
         },
         FuncParam {
             name: "out_pipe".to_string(),
@@ -804,6 +810,7 @@ fn ssh_connect_registration<P: ProcessManager>(
             allowed: None,
             docs: "Pipe carrying bytes produced by the wire side.",
             options: None,
+            optional: false,
         },
     ];
     let arity = params.len();

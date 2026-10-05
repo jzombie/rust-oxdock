@@ -233,12 +233,13 @@ fn render_signature(meta: &FuncMeta) -> String {
         .unwrap_or(&[])
         .iter()
         .map(|param| {
+            let name = render_param_name(param);
             let rendered = render_param_type(param);
             match param.param_type.as_ref().zip(param.allowed.as_ref()) {
                 Some((_, values)) => {
-                    format!("${}: {} = {}", param.name, rendered, render_allowed(values))
+                    format!("{name}: {} = {}", rendered, render_allowed(values))
                 }
-                None => format!("${}: {}", param.name, rendered),
+                None => format!("{name}: {rendered}"),
             }
         })
         .collect::<Vec<_>>()
@@ -281,6 +282,17 @@ fn render_param_type(param: &FuncParam) -> String {
         .unwrap_or_default()
 }
 
+/// Render one parameter's name: a `?` suffix marks an omittable
+/// trailing options MAP (omission fills `{}`), matching the `?`
+/// convention optional options keys and record fields already use.
+fn render_param_name(param: &FuncParam) -> String {
+    if param.optional {
+        format!("${}?", param.name)
+    } else {
+        format!("${}", param.name)
+    }
+}
+
 /// Render one tag structurally: shaped tags name their contents
 /// (`LIST<MAP>`, `MAP<name: TYPE, ...>`), so the signature shows the
 /// generics the extractor enforces instead of the coarse word kind.
@@ -304,7 +316,7 @@ fn render_parameters(meta: &FuncMeta) -> String {
         if let Some(values) = param.allowed.as_ref() {
             cell.push_str(&format!(" = {}", render_allowed(values)));
         }
-        let mut bullet = format!("- `${}` (`{cell}`)", param.name);
+        let mut bullet = format!("- `{}` (`{cell}`)", render_param_name(param));
         if !param.docs.is_empty() {
             bullet.push_str(&format!(": {}", escape_placeholders(param.docs)));
         }
@@ -491,6 +503,54 @@ fn backticked(names: &[&str]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use oxdock_core::FuncKind;
+
+    #[test]
+    fn optional_param_renders_question_mark() {
+        // The `?` suffix is the only marker omittability gets: pin it
+        // literally in both surfaces, not via self-rendered output.
+        let meta = FuncMeta {
+            name: "NET_FETCH".to_string(),
+            module: "NET".to_string(),
+            kind: FuncKind::HostCtx,
+            params: Some(vec![
+                FuncParam {
+                    name: "url".to_string(),
+                    param_type: Some(TypeTag::String),
+                    allowed: None,
+                    docs: "",
+                    options: None,
+                    optional: false,
+                },
+                FuncParam {
+                    name: "options".to_string(),
+                    param_type: Some(TypeTag::Map),
+                    allowed: None,
+                    docs: "",
+                    options: None,
+                    optional: true,
+                },
+            ]),
+            returns: Some(TypeTag::String),
+            rpn: false,
+            summary: "",
+            docs: "",
+        };
+        let signature = render_signature(&meta);
+        assert!(
+            signature.contains("$options?: MAP"),
+            "signature must mark the omittable param: {signature}"
+        );
+        assert!(
+            !signature.contains("$url?"),
+            "required params stay unmarked: {signature}"
+        );
+        let params = render_parameters(&meta);
+        assert!(
+            params.contains("`$options?` (`MAP`)"),
+            "bullet must mark the omittable param: {params}"
+        );
+    }
 
     #[test]
     fn body_has_all_commands() {
