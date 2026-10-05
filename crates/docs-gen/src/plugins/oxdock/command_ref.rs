@@ -209,10 +209,11 @@ pub(crate) fn render_body() -> Result<String> {
 /// `NAME($param: TYPE, ...) -> RET`. Every parameter renders its
 /// type (bare `Value` is `ANY`, never a hole); absent return types
 /// render no arrow. Closed `#[values]` sets render after the type
-/// (`$policy: STRING = a | b`), generated from the same tokens as
-/// the extractor check. Options-bearing `MAP` parameters render
-/// their known keys in record form (`MAP<timeout?: DURATION>`),
-/// the same grammar record returns use.
+/// (`$policy: STRING = "a" | "b"`), quoted because callers pass
+/// strings and the extractor matches string literals. Generated from
+/// the same tokens as the extractor check. Options-bearing `MAP`
+/// parameters render their known keys in record form
+/// (`MAP<timeout?: DURATION>`), the same grammar record returns use.
 fn render_signature(meta: &FuncMeta) -> String {
     let params = meta
         .params
@@ -223,7 +224,12 @@ fn render_signature(meta: &FuncMeta) -> String {
             let rendered = render_param_type(param);
             match param.param_type.as_ref().zip(param.allowed.as_ref()) {
                 Some((_, values)) => {
-                    format!("${}: {} = {}", param.name, rendered, values.join(" | "))
+                    let quoted = values
+                        .iter()
+                        .map(|value| format!("\"{value}\""))
+                        .collect::<Vec<_>>()
+                        .join(" | ");
+                    format!("${}: {} = {}", param.name, rendered, quoted)
                 }
                 None => format!("${}: {}", param.name, rendered),
             }
