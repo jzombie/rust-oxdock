@@ -1307,7 +1307,11 @@ mod tests {
                 "BOOL" => Some(Value::bool(true)),
                 "LIST" => Some(Value::list(vec![])),
                 "MAP" => Some(Value::map(BTreeMap::new())),
-                "PATH" => Some(Value::path(std::path::PathBuf::from("x"))),
+                "PATH" => {
+                    #[allow(clippy::disallowed_types)]
+                    let path = std::path::PathBuf::from("x");
+                    Some(Value::path(path))
+                }
                 "DURATION" => Some(Value::duration(std::time::Duration::from_secs(1))),
                 "PIPE" => Some(Value::pipe_fresh()),
                 "HANDLE" => Some(Value::handle(1)),
