@@ -2335,7 +2335,7 @@ when integral and finite.
 **Contexts:** AST only
 
 **Parameters:**
-- `$stream_name` (`STRING`): Stream name: `stdin`, `stdout`, or `stderr` (exact match).
+- `$stream_name` (`STRING = "stdin" | "stdout" | "stderr"`): Stream name: `stdin`, `stdout`, or `stderr` (exact match).
 
 **Returns:** `BOOL`
 
@@ -2415,7 +2415,7 @@ instead of silently shadowing each other.
 
 **Parameters:**
 - `$maps` (`LIST<MAP<ANY>>`): LIST of MAPs to merge in order.
-- `$policy` (`STRING`): Duplicate policy.
+- `$policy` (`STRING = "fail_on_duplicate" | "overwrite"`): Duplicate policy.
 
 **Returns:** `MAP<ANY>`
 

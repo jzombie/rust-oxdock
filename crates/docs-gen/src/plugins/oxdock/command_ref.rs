@@ -214,6 +214,18 @@ pub(crate) fn render_body() -> Result<String> {
 /// the same tokens as the extractor check. Options-bearing `MAP`
 /// parameters render their known keys in record form
 /// (`MAP<timeout?: DURATION>`), the same grammar record returns use.
+/// Render one closed `#[values]` set: quoted alternation
+/// (`"a" | "b"`), quoted because callers pass strings and the
+/// extractor matches string literals. Single source for signatures
+/// and parameter bullets, so the two can never disagree.
+fn render_allowed(values: &[&str]) -> String {
+    values
+        .iter()
+        .map(|value| format!("\"{value}\""))
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
 fn render_signature(meta: &FuncMeta) -> String {
     let params = meta
         .params
@@ -224,12 +236,7 @@ fn render_signature(meta: &FuncMeta) -> String {
             let rendered = render_param_type(param);
             match param.param_type.as_ref().zip(param.allowed.as_ref()) {
                 Some((_, values)) => {
-                    let quoted = values
-                        .iter()
-                        .map(|value| format!("\"{value}\""))
-                        .collect::<Vec<_>>()
-                        .join(" | ");
-                    format!("${}: {} = {}", param.name, rendered, quoted)
+                    format!("${}: {} = {}", param.name, rendered, render_allowed(values))
                 }
                 None => format!("${}: {}", param.name, rendered),
             }
@@ -293,7 +300,11 @@ fn render_parameters(meta: &FuncMeta) -> String {
     let params = meta.params.as_deref().unwrap_or(&[]);
     let mut bullets = Vec::new();
     for param in params {
-        let mut bullet = format!("- `${}` (`{}`)", param.name, render_param_type(param));
+        let mut cell = render_param_type(param);
+        if let Some(values) = param.allowed.as_ref() {
+            cell.push_str(&format!(" = {}", render_allowed(values)));
+        }
+        let mut bullet = format!("- `${}` (`{cell}`)", param.name);
         if !param.docs.is_empty() {
             bullet.push_str(&format!(": {}", escape_placeholders(param.docs)));
         }
