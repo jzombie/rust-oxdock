@@ -183,8 +183,8 @@ Load and parse a JSON file.
 
 Reads a workspace file and parses JSON into a DSL value. Returns
 `ANY` by design: a top-level array or scalar parses to `LIST` or a
-scalar word, so a `MAP` tag would lie. `LET` coercion still checks
-the actual value at assignment.
+scalar word. `LET` coercion still checks the actual value at
+assignment.
 
 
 ### STD::LOAD_TOML

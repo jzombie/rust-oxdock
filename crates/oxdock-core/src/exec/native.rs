@@ -682,8 +682,8 @@ fn load_toml<P: ProcessManager>(
 ///
 /// Reads a workspace file and parses JSON into a DSL value. Returns
 /// `ANY` by design: a top-level array or scalar parses to `LIST` or a
-/// scalar word, so a `MAP` tag would lie. `LET` coercion still checks
-/// the actual value at assignment.
+/// scalar word. `LET` coercion still checks the actual value at
+/// assignment.
 ///
 #[oxdock_func(rpn, returns = TypeTag::Any)]
 fn load_json<P: ProcessManager>(
