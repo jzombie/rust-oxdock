@@ -1296,34 +1296,36 @@ mod tests {
     #[test]
     fn type_of_names_words_for_branching() {
         use std::collections::BTreeMap;
-        assert_eq!(
-            type_of_from_value(Value::string("x".to_string()))
-                .expect("string")
-                .as_str(),
-            Some("STRING")
-        );
-        assert_eq!(
-            type_of_from_value(Value::int(1)).expect("int").as_str(),
-            Some("INT")
-        );
-        assert_eq!(
-            type_of_from_value(Value::bool(true))
-                .expect("bool")
-                .as_str(),
-            Some("BOOL")
-        );
-        assert_eq!(
-            type_of_from_value(Value::list(vec![]))
-                .expect("list")
-                .as_str(),
-            Some("LIST")
-        );
-        assert_eq!(
-            type_of_from_value(Value::map(BTreeMap::new()))
-                .expect("map")
-                .as_str(),
-            Some("MAP")
-        );
+        // Table-driven over the startup registry itself: a new word
+        // without a sampler below fails here naming the word, so the
+        // table can never silently shrink behind a hand list.
+        fn sample(name: &str) -> Option<Value> {
+            match name {
+                "INT" => Some(Value::int(1)),
+                "FLOAT" => Some(Value::float(1.5)),
+                "STRING" => Some(Value::string("x".to_string())),
+                "BOOL" => Some(Value::bool(true)),
+                "LIST" => Some(Value::list(vec![])),
+                "MAP" => Some(Value::map(BTreeMap::new())),
+                "PATH" => Some(Value::path(std::path::PathBuf::from("x"))),
+                "DURATION" => Some(Value::duration(std::time::Duration::from_secs(1))),
+                "PIPE" => Some(Value::pipe_fresh()),
+                "HANDLE" => Some(Value::handle(1)),
+                "SEMAPHORE" => Some(Value::semaphore(1)),
+                "PERMIT" => {
+                    let sem = Value::semaphore(1);
+                    let backend = sem.as_semaphore().expect("semaphore backend");
+                    Some(Value::permit(&backend))
+                }
+                _ => None,
+            }
+        }
+        for (name, _) in oxdock_parser::startup_descriptors() {
+            let value =
+                sample(name).unwrap_or_else(|| panic!("no sampler for startup word {name}"));
+            let word = type_of_from_value(value).expect("type_of runs");
+            assert_eq!(word.as_str(), Some(name), "TYPE_OF must name {name}");
+        }
     }
 
     #[test]
