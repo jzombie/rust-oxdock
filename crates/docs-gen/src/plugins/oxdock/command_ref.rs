@@ -132,7 +132,7 @@ fn render_meta(meta: &CommandMeta) -> Result<String> {
             out.push_str(&format!(
                 "| `{}` | `{}` | {} |\n",
                 escape_table_cell(flag.long),
-                flag.value_type.label(),
+                escape_table_cell(flag.value_type.label()),
                 escape_table_cell(&escape_placeholders(flag.description))
             ));
         }

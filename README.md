@@ -1002,13 +1002,17 @@ ASSERT_CONTAINS stdout "deploying-to-staging"
 
 ```oxdock
 // Exactly one block runs depending on the host OS; every command
-// inside a guarded block inherits the block's guard.
+// inside a guarded block inherits the block's guard. A shared
+// counter incremented in each block proves exactly one ran.
+LET $ran: INT = 0
+
 [family:windows] {
   WRITE os-report.txt windows
   ECHO windows-detected
   LET $rep: STRING = READ os-report.txt
   ASSERT_EQ $rep "windows"
   ASSERT_CONTAINS stdout "windows-detected"
+  $ran = $ran + 1
 }
 
 [family:unix] {
@@ -1017,7 +1021,10 @@ ASSERT_CONTAINS stdout "deploying-to-staging"
   LET $rep: STRING = READ os-report.txt
   ASSERT_EQ $rep "unix-family"
   ASSERT_CONTAINS stdout "unix-detected"
+  $ran = $ran + 1
 }
+
+ASSERT_EQ $ran 1
 ```
 
 ### Architecture guards
