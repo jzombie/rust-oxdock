@@ -3389,22 +3389,23 @@ Callable as `MODULE::NAME(...)` in expressions (or bare `NAME(...)` with the mod
 
 ### STD::DESCRIBE
 
-**Signature:** `STD::DESCRIBE($name: STRING) -> MAP<ANY>`
+**Signature:** `STD::DESCRIBE($name: STRING) -> MAP<name: STRING, module: STRING, kind: STRING, params: LIST<MAP<ANY>>, returns: STRING, rpn: BOOL, summary: STRING>`
 
 **Contexts:** AST only
 
 **Parameters:**
 - `$name` (`STRING`): Qualified function name (`MODULE::NAME`).
 
-**Returns:** `MAP<ANY>`
+**Returns:** `MAP<name: STRING, module: STRING, kind: STRING, params: LIST<MAP<ANY>>, returns: STRING, rpn: BOOL, summary: STRING>`
+  - `name` (`STRING`): Qualified function name.
+  - `module` (`STRING`): Owning module.
+  - `kind` (`STRING`): Origin label (`host` or `script`).
+  - `params` (`LIST<MAP<ANY>>`): Parameter entries (empty for parameterless functions).
+  - `returns` (`STRING`): Structural return shape (empty when untagged).
+  - `rpn` (`BOOL`): True when callable in RPN position.
+  - `summary` (`STRING`): One-line description.
 
 Describe one function by qualified name.
-
-Returns a MAP with name, module, kind, params, returns, and summary.
-Bare names fail closed: `DESCRIBE` requires the qualified form (except
-`INSPECT`, which is syntax rather than a registry entry). Errors on
-unknown function.
-
 
 ### STD::EOF
 

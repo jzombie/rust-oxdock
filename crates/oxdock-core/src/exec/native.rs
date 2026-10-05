@@ -803,12 +803,60 @@ fn functions<P: ProcessManager>(cx: &mut StepCtx<P>) -> Result<Value> {
 
 /// Describe one function by qualified name.
 ///
-/// Returns a MAP with name, module, kind, params, returns, and summary.
-/// Bare names fail closed: `DESCRIBE` requires the qualified form (except
-/// `INSPECT`, which is syntax rather than a registry entry). Errors on
-/// unknown function.
+/// Returns a MAP with name, module, kind, params, returns, rpn, and
+/// summary. `params` is always a LIST (empty for parameterless
+/// functions), so the shape holds for every entry. Bare names fail
+/// closed: `DESCRIBE` requires the qualified form (except `INSPECT`,
+/// which is syntax rather than a registry entry). Errors on unknown
+/// function.
 ///
-#[oxdock_func(returns = TypeTag::MapOf(&TypeTag::Any))]
+/// Field table for the `DESCRIBE` result bundle: one source for the
+/// shape the host mints, so introspection, enforcement, and
+/// documentation cannot drift apart. `const` (not `static`) so the
+/// inline `Record` below const-promotes to `'static` like the
+/// `TYPE_DESCRIBE` table beside it.
+const DESCRIBE_PARAMS_MAP: TypeTag = TypeTag::MapOf(&TypeTag::Any);
+const DESCRIBE_PARAMS: TypeTag = TypeTag::ListOf(&DESCRIBE_PARAMS_MAP);
+
+#[oxdock_func(
+    returns = TypeTag::Record(&[Field {
+        name: "name",
+        ty: TypeTag::String,
+        docs: "Qualified function name.",
+        optional: false,
+    }, Field {
+        name: "module",
+        ty: TypeTag::String,
+        docs: "Owning module.",
+        optional: false,
+    }, Field {
+        name: "kind",
+        ty: TypeTag::String,
+        docs: "Origin label (`host` or `script`).",
+        optional: false,
+    }, Field {
+        name: "params",
+        ty: DESCRIBE_PARAMS,
+        docs: "Parameter entries (empty for parameterless functions).",
+        optional: false,
+    }, Field {
+        name: "returns",
+        ty: TypeTag::String,
+        docs: "Structural return shape (empty when untagged).",
+        optional: false,
+    }, Field {
+        name: "rpn",
+        ty: TypeTag::Bool,
+        docs: "True when callable in RPN position.",
+        optional: false,
+    }, Field {
+        name: "summary",
+        ty: TypeTag::String,
+        docs: "One-line description.",
+        optional: false,
+    }]),
+    summary = "Describe one function by qualified name."
+)]
 fn describe<P: ProcessManager>(
     cx: &mut StepCtx<P>,
     /// Qualified function name (`MODULE::NAME`).
@@ -1188,7 +1236,10 @@ fn meta_to_value(meta: &FuncMeta) -> Value {
                 })
                 .collect(),
         ),
-        None => Value::string(String::new()),
+        // Parameterless functions mint an empty LIST, never an empty
+        // STRING: the `DESCRIBE` return tag promises `LIST<MAP<ANY>>`
+        // for every entry, and the boundary enforces it.
+        None => Value::list(Vec::new()),
     };
     map.insert("params".to_string(), params);
     map.insert(

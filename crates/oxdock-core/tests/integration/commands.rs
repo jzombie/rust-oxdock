@@ -4501,6 +4501,24 @@ fn type_describe_reports_alias_targets() {
 }
 
 #[test]
+fn describe_enforces_its_documented_shape() {
+    // The `DESCRIBE` return tag promises a record, so the boundary
+    // enforces it: even a parameterless function mints a LIST for
+    // `params`, never an empty STRING. Binding the full documented
+    // shape proves the tag and the minted value agree.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD]
+        LET $d: MAP<name: STRING, module: STRING, kind: STRING, params: LIST<MAP<ANY>>, returns: STRING, rpn: BOOL, summary: STRING> = DESCRIBE("STD::TYPES")
+        ASSERT_EQ $d.name "STD::TYPES"
+        ASSERT_EQ $d.module "STD"
+        ASSERT_EQ $d.kind "host"
+    "#};
+    run_script(&root, script).expect("describe binds its record shape");
+}
+
+#[test]
 fn static_pipe_param_rejects_non_pipe() {
     // Pipe parameters enforce at the pre-pass: a non-pipe argument
     // fails statically with TypeMismatch before the first step runs.
