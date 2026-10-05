@@ -2354,18 +2354,21 @@ reads the step context like the other introspection functions.
 
 ### STD::LOAD_JSON
 
-**Signature:** `STD::LOAD_JSON($path: STRING) -> MAP<ANY>`
+**Signature:** `STD::LOAD_JSON($path: STRING) -> ANY`
 
 **Contexts:** AST, RPN
 
 **Parameters:**
 - `$path` (`STRING`): Workspace file path to load and parse as JSON.
 
-**Returns:** `MAP<ANY>`
+**Returns:** `ANY`
 
 Load and parse a JSON file.
 
-Reads a workspace file and parses JSON into a DSL value.
+Reads a workspace file and parses JSON into a DSL value. Returns
+`ANY` by design: a top-level array or scalar parses to `LIST` or a
+scalar word, so a `MAP` tag would lie. `LET` coercion still checks
+the actual value at assignment.
 
 
 ### STD::LOAD_TOML
@@ -2425,20 +2428,26 @@ Non MAP elements fail naming their position.
 
 ### STD::PARSE_JSON
 
-**Signature:** `STD::PARSE_JSON($text: STRING)`
+**Signature:** `STD::PARSE_JSON($text: STRING) -> ANY`
 
 **Contexts:** AST, RPN
 
 **Parameters:**
 - `$text` (`STRING`): JSON text already held in memory.
 
+**Returns:** `ANY`
+
 Parse JSON text already held in memory.
 
 Uses the same conversion as file loading, so fetch bodies, file
-contents, and captured text share one JSON value shape. No `returns`
-tag by design: a top-level array or scalar parses to `LIST` or a
-scalar word, so a `MAP` tag would lie the way `LOAD_JSON`'s does.
-`LET` coercion still checks the actual value at assignment.
+contents, and captured text share one JSON value shape. Returns
+`ANY` by design, matching `LOAD_JSON`: a top-level array or scalar
+parses to `LIST` or a scalar word. `LET` coercion still checks the
+actual value at assignment.
+
+```text
+LET $doc: ANY = PARSE_JSON($body)
+```
 
 
 ### STD::PARSE_TOML

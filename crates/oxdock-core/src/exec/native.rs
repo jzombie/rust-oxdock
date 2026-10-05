@@ -641,9 +641,12 @@ fn load_toml<P: ProcessManager>(
 
 /// Load and parse a JSON file.
 ///
-/// Reads a workspace file and parses JSON into a DSL value.
+/// Reads a workspace file and parses JSON into a DSL value. Returns
+/// `ANY` by design: a top-level array or scalar parses to `LIST` or a
+/// scalar word, so a `MAP` tag would lie. `LET` coercion still checks
+/// the actual value at assignment.
 ///
-#[oxdock_func(rpn, returns = TypeTag::MapOf(&TypeTag::Any))]
+#[oxdock_func(rpn, returns = TypeTag::Any)]
 fn load_json<P: ProcessManager>(
     cx: &mut StepCtx<P>,
     /// Workspace file path to load and parse as JSON.
@@ -668,12 +671,16 @@ fn parse_toml(
 /// Parse JSON text already held in memory.
 ///
 /// Uses the same conversion as file loading, so fetch bodies, file
-/// contents, and captured text share one JSON value shape. No `returns`
-/// tag by design: a top-level array or scalar parses to `LIST` or a
-/// scalar word, so a `MAP` tag would lie the way `LOAD_JSON`'s does.
-/// `LET` coercion still checks the actual value at assignment.
+/// contents, and captured text share one JSON value shape. Returns
+/// `ANY` by design, matching `LOAD_JSON`: a top-level array or scalar
+/// parses to `LIST` or a scalar word. `LET` coercion still checks the
+/// actual value at assignment.
 ///
-#[oxdock_func(pure)]
+/// ```text
+/// LET $doc: ANY = PARSE_JSON($body)
+/// ```
+///
+#[oxdock_func(pure, returns = TypeTag::Any)]
 fn parse_json(
     /// JSON text already held in memory.
     text: String,

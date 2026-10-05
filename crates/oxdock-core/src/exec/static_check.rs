@@ -249,7 +249,11 @@ fn unify(left: TypeTag, right: TypeTag, ctx: &str) -> Result<TypeTag> {
     ) {
         return Ok(TypeTag::Map);
     }
-    bail!("{ctx}: cannot unify {} and {}", left.name(), right.name());
+    bail!(
+        "{ctx}: cannot unify {} and {}",
+        render_structural(&left),
+        render_structural(&right)
+    );
 }
 
 fn classify_guard(guard: Option<&GuardExpr>) -> GuardClass {

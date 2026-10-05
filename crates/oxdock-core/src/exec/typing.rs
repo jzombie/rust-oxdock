@@ -356,6 +356,7 @@ impl<P: ProcessManager> ExecState<P> {
                 }
             }
             TypeTag::ListOf(element) => self.check_tag_known(what, element)?,
+            TypeTag::MapOf(values) => self.check_tag_known(what, values)?,
             TypeTag::Record(fields) => {
                 for field in *fields {
                     self.check_tag_known(what, &field.ty)?;

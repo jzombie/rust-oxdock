@@ -1369,7 +1369,7 @@ mod tests {
             Some(2)
         );
         // Any-shape inputs stay any-shape: arrays parse to LIST, which is
-        // why PARSE_JSON carries no MAP return tag.
+        // why PARSE_JSON returns ANY instead of MAP.
         let list = parse_json_from_value(Value::string("[1, 2]".to_string())).expect("parse");
         assert_eq!(list.as_list().expect("list").len(), 2);
         assert!(parse_json_from_value(Value::string("{bad".to_string())).is_err());
