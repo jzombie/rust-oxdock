@@ -713,3 +713,43 @@ fn remote_inside_async_block_keeps_live_stdout_backend() {
     );
     assert_eq!(read_trimmed(&root, "out.txt"), "live-block");
 }
+
+#[test]
+fn remote_guest_exit_fails_host_step() {
+    // EXIT inside a REMOTE body runs in the guest: it kills guest
+    // background children and bails the guest script with its code.
+    // The host keeps executing after the guest is already dead (the
+    // marker file proves it) and only AWAIT surfaces the guest
+    // failure as a step error carrying the same code as a value, not
+    // just text. The host itself never exits, so the harness keeps
+    // running.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let err = run_with_runner(
+        &root,
+        indoc! {r#"
+            LET $t: HANDLE = ASYNC REMOTE prod {
+                EXIT 3
+            }
+            WRITE host-alive.txt "still here"
+            AWAIT $t
+        "#},
+    )
+    .map(|_| ())
+    .expect_err("guest EXIT must fail the REMOTE step");
+    assert_eq!(
+        oxdock_core::exit_code_of(&err),
+        Some(3),
+        "guest exit code must relay as a value, got: {err:#}"
+    );
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("REMOTE 'prod' exited with code 3"),
+        "guest exit must surface, got: {msg}"
+    );
+    assert_eq!(
+        read_trimmed(&root, "host-alive.txt"),
+        "still here",
+        "host kept executing after the guest exited"
+    );
+}

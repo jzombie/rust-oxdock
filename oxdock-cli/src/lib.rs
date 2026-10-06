@@ -11,10 +11,10 @@ use std::io::{self, IsTerminal, Read};
 use std::sync::{Arc, Mutex};
 
 pub use oxdock_core::{
-    Engine, EngineOutput, ExecState, FuncKind, FuncMeta, FuncParam, HostModule, HostRegistration,
-    NativeFn, OxDockFn, OxDockType, PureFn, PushManifestSink, StepCtx, TypeDescriptor, Value,
-    parse_script, parse_script_with_modules, run_steps, run_steps_with_context,
-    run_steps_with_context_result, run_steps_with_manager_with_modules,
+    Engine, EngineOutput, ExecState, ExitRequest, FuncKind, FuncMeta, FuncParam, HostModule,
+    HostRegistration, NativeFn, OxDockFn, OxDockType, PureFn, PushManifestSink, StepCtx,
+    TypeDescriptor, Value, exit_code_of, parse_script, parse_script_with_modules, run_steps,
+    run_steps_with_context, run_steps_with_context_result, run_steps_with_manager_with_modules,
 };
 use oxdock_core::{ExecIo, run_steps_with_lazy_snapshot_and_modules};
 pub use oxdock_parser::{Guard, Step, StepKind};
@@ -152,6 +152,15 @@ pub fn run() -> Result<()> {
         bail!("--remote-serve requires the `net` feature (rebuild with --features net)");
     }
     execute(opts, workspace_root)
+}
+
+/// Process exit status for a failed CLI run: relays an `EXIT` code (host
+/// or guest-relayed) clamped to the portable 0..=255 range, 1 for every
+/// other failure.
+pub fn process_exit_code(err: &anyhow::Error) -> i32 {
+    exit_code_of(err)
+        .map(|code| code.clamp(0, 255) as i32)
+        .unwrap_or(1)
 }
 
 #[derive(Debug, Clone)]
@@ -1538,6 +1547,26 @@ mod tests {
         };
         assert!(err.to_string().contains("NET"), "{err}");
         Ok(())
+    }
+
+    #[test]
+    fn process_exit_code_relays_exit_requests() {
+        let exit = anyhow::Error::new(ExitRequest(3));
+        assert_eq!(process_exit_code(&exit), 3);
+        let relayed =
+            anyhow::Error::new(ExitRequest(3)).context("REMOTE 'prod' exited with code 3");
+        assert_eq!(process_exit_code(&relayed), 3);
+        assert_eq!(process_exit_code(&anyhow::anyhow!("boom")), 1);
+        assert_eq!(
+            process_exit_code(&anyhow::Error::new(ExitRequest(300))),
+            255,
+            "codes clamp to the portable range"
+        );
+        assert_eq!(
+            process_exit_code(&anyhow::Error::new(ExitRequest(-1))),
+            0,
+            "negative codes clamp to zero"
+        );
     }
 }
 

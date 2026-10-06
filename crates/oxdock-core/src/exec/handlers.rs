@@ -1704,7 +1704,7 @@ pub(super) fn exit<P: ProcessManager>(cx: &mut StepCtx<'_, P>, code: i64) -> Res
         }
     }
     cx.state.bg_children.clear();
-    bail!("EXIT requested with code {}", code);
+    Err(anyhow::Error::new(super::exit::ExitRequest(code)))
 }
 
 pub(crate) fn for_loop<P: ProcessManager>(

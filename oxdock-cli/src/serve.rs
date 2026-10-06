@@ -524,13 +524,20 @@ fn run_guest_engine(
                 return;
             }
         };
-    let (ok, error) = match outcome {
-        Ok(_) => (true, None),
-        Err(err) => (false, Some(format!("{err:#}"))),
+    let (ok, error, exit_code) = match outcome {
+        Ok(_) => (true, None, None),
+        Err(err) => {
+            // Guest EXIT relays its code on the wire: the host re-raises
+            // it as its own EXIT so the CLI exits with what the guest
+            // asked for.
+            let code = crate::exit_code_of(&err);
+            (false, Some(format!("{err:#}")), code)
+        }
     };
     let result = types::ExecResult {
         ok,
         error,
+        exit_code,
         result_tar_sha256: push_sha.clone(),
         script_sha256: script_hash,
         stdout_sha256: stdout_hash,
@@ -706,6 +713,8 @@ fn send_result(
     let result = types::ExecResult {
         ok,
         error: if ok { None } else { Some(error.to_string()) },
+        // Pre-exec failures never ran a script, so no EXIT to relay.
+        exit_code: None,
         result_tar_sha256,
         script_sha256: script_hash,
         stdout_sha256: stdout_hash,

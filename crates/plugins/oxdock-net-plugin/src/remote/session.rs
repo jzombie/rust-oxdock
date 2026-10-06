@@ -517,6 +517,14 @@ impl MuxioSession {
         let result: types::ExecResult =
             serde_json::from_slice(&result_json).context("REMOTE result decode failed")?;
         if !result.ok {
+            // Guest EXIT relays its code as a typed request so the host
+            // re-raises it as its own EXIT (see `run_remote_block`); every
+            // other guest failure keeps the plain message.
+            if let Some(code) = result.exit_code {
+                return Err(oxdock_core::ExitRequest(code)).with_context(|| {
+                    format!("REMOTE target '{}' exited with code {code}", request.target)
+                });
+            }
             bail!(
                 "REMOTE target '{}' failed: {}",
                 request.target,

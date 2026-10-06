@@ -45,6 +45,10 @@ pub(super) struct ThreadJoinHandle {
     worker: Arc<Mutex<Option<std::thread::ThreadId>>>,
     /// Preserved error from the child thread, if any.
     thread_error: Option<anyhow::Error>,
+    /// `EXIT` code from the child thread, if it exited. anyhow errors do
+    /// not cross the join boundary by value, and the re-emit below would
+    /// otherwise flatten the typed request into a plain string.
+    thread_exit_code: Option<i64>,
 }
 
 impl ThreadJoinHandle {
@@ -60,6 +64,24 @@ impl ThreadJoinHandle {
             active_process,
             worker,
             thread_error: None,
+            thread_exit_code: None,
+        }
+    }
+
+    /// Re-emit the preserved thread error. `anyhow` errors do not cross
+    /// the join boundary by value, so an EXIT code rides alongside in
+    /// `thread_exit_code` and is re-attached here as a typed request
+    /// under the flattened message: the text stays identical, and the
+    /// code stays machine readable.
+    fn reemit_error(&self) -> anyhow::Error {
+        let msg = self
+            .thread_error
+            .as_ref()
+            .map(|err| format!("{err:#}"))
+            .unwrap_or_else(|| "background thread failed without an error".to_string());
+        match self.thread_exit_code {
+            Some(code) => anyhow::Error::new(super::exit::ExitRequest(code)).context(msg),
+            None => anyhow::anyhow!("{msg}"),
         }
     }
 
@@ -85,6 +107,7 @@ impl ThreadJoinHandle {
         match handle.join() {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
+                self.thread_exit_code = super::exit::exit_code_of(&e);
                 self.thread_error = Some(e);
             }
             Err(panic) => {
@@ -115,8 +138,8 @@ impl BackgroundHandle for ThreadJoinHandle {
         // alternate display (`{err:#}`) flattens the full causal chain
         // into the new message: `{err}` alone would drop every
         // `Caused by` layer at the ASYNC task boundary.
-        if let Some(ref err) = self.thread_error {
-            Err(anyhow::anyhow!("{err:#}"))
+        if self.thread_error.is_some() {
+            Err(self.reemit_error())
         } else {
             Ok(Some(exit_status_from_code(0)))
         }
@@ -139,8 +162,8 @@ impl BackgroundHandle for ThreadJoinHandle {
     fn wait(&mut self) -> Result<ExitStatus> {
         self.reap();
         // Same chain-preserving re-emit as `try_wait` above.
-        if let Some(ref err) = self.thread_error {
-            Err(anyhow::anyhow!("{err:#}"))
+        if self.thread_error.is_some() {
+            Err(self.reemit_error())
         } else {
             Ok(exit_status_from_code(0))
         }

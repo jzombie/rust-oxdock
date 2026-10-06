@@ -1,6 +1,7 @@
 mod args;
 mod capture;
 mod engine;
+mod exit;
 mod fs_ops;
 mod handlers;
 mod io;
@@ -19,6 +20,7 @@ pub use self::remote::{
 };
 
 pub use self::engine::{Engine, EngineOutput};
+pub use self::exit::{ExitRequest, exit_code_of};
 pub(crate) use self::handlers::{
     dispatch_append, dispatch_assert_contains, dispatch_assert_eq, dispatch_assign,
     dispatch_assign_async_step, dispatch_assign_capture_step, dispatch_async_block,
@@ -150,7 +152,15 @@ fn compose_error_with_snapshot(err: anyhow::Error, snapshot_section: String) -> 
         String::new()
     };
     let msg = format!("{}{}\n{}", primary, rest, snapshot_section);
-    anyhow::anyhow!(msg)
+    // The snapshot composer flattens the chain into one message for CLI
+    // rendering. Re-attach a relayed EXIT code as the inner error under
+    // that message: the text stays byte-identical while the code stays
+    // machine readable (context values are invisible to chain traversal,
+    // so the typed request must ride as a real error, not as context).
+    match exit::exit_code_of(&err) {
+        Some(code) => anyhow::Error::new(exit::ExitRequest(code)).context(msg),
+        None => anyhow::anyhow!(msg),
+    }
 }
 
 fn run_steps_inner(

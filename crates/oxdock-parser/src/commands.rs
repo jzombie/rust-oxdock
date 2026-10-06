@@ -1646,6 +1646,9 @@ declare_commands! {
             Enclosing blocks still unwind their LET/ENV/WORKDIR/WORKSPACE state,
             anonymous background tasks are killed synchronously, and files written
             before the EXIT persist.
+
+            The code reaches the OS: the CLI exits with `<code>` clamped to
+            0..=255, and a guest EXIT relays through `REMOTE` the same way.
         "#},
         args: &[ ArgSpec { name: "code", arg_type: ArgType::Int, description: "Code", io: IoDirection::Write, index: 0, required: true, fallback_stream: None } ],
         flags: &[],
@@ -2543,7 +2546,9 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 pass validates the body before anything ships, and the
                 guest re-validates on arrival through the same entry
                 point, so a body type error fails locally, never mid-run
-                on the remote.
+                on the remote. A failing guest fails the host step: EXIT
+                in the body exits the guest, and the host relays the code
+                to its own process exit status (see EXIT).
             "#},
             args: &[],
             flags: &[],
@@ -2662,6 +2667,24 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                         WORKSPACE SYSTEM
                         COPY --to-host /no/such/file.txt got.txt
                     }
+                "#},
+                },
+                Example {
+                    name: "guest exit fails the step, host survives",
+                    fence_meta: Some(
+                        "mock_remote:prod expect_error:\"REMOTE 'prod' exited with code 3\"",
+                    ),
+                    code: indoc! {r#"
+                    # EXIT in the body exits the guest with code 3. The
+                    # host is unaffected: it keeps executing after the
+                    # guest is already dead, and the failure surfaces as
+                    # a host step error carrying the same code. The CLI
+                    # then exits with it, so the guest code reaches the OS.
+                    LET $t: HANDLE = ASYNC REMOTE prod {
+                        EXIT 3
+                    }
+                    WRITE host-alive.txt "still here"
+                    AWAIT $t
                 "#},
                 },
                 Example {

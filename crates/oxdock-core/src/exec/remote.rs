@@ -691,9 +691,21 @@ pub(super) fn run_remote_block<P: ProcessManager>(
     // partial guest state is ever applied. The runner applies declared
     // pushes directly against the active filesystem.
     let fs = cx.state.fs.as_ref();
-    let response = runner
-        .run_remote(request, fs)
-        .with_context(|| format!("REMOTE '{target}' transport failed"))?;
+    let response = match runner.run_remote(request, fs) {
+        Ok(response) => response,
+        // Guest EXIT relays its code: the step fails as a host EXIT with
+        // the same code instead of a transport error, so the CLI exits
+        // with what the guest asked for. Anything else keeps the
+        // transport-failed wrapper.
+        Err(err) => match super::exit::exit_code_of(&err) {
+            Some(code) => {
+                return Err(err.context(format!("REMOTE '{target}' exited with code {code}")));
+            }
+            None => {
+                return Err(err.context(format!("REMOTE '{target}' transport failed")));
+            }
+        },
+    };
     route_stdio(
         cx,
         cx.out_pipe.clone(),

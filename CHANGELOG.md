@@ -36,6 +36,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - [breaking] Scripts are affected: `SEMAPHORE_TRY_ACQUIRE` answers `held` as `BOOL` (`true`/`false`) instead of `INT` (`1`/`0`); branch on `$m.held` directly. Declarations use `MAP<held: BOOL, permit?: PERMIT>`.
 - [breaking] Scripts are affected: bare `MAP` and `LIST` are no longer declaration types. Unknown collections declare `MAP<ANY>` and `LIST<ANY>`; fixed shapes keep working unchanged.
 - [breaking] CLI behavior, scripts are unaffected: bare `-p outer:inner` now binds loopback (`127.0.0.1`) instead of all interfaces (`0.0.0.0`). This diverges from Docker on purpose, since Docker binds the bare form publicly. A previously public mapping now listens on loopback only. Prefix an explicit host for all interfaces (`-p 0.0.0.0:2222:2251`).
+- CLI exit statuses relay `EXIT` codes: `EXIT <code>` used to print its code but always exit the process with 1. The CLI now exits with the requested code clamped to the portable 0..=255 range; every other failure still exits 1. Guest `EXIT` relays through `REMOTE` the same way (a new `exit_code` on the `ExecResult` wire frame, plus a typed `ExitRequest` error that survives `ASYNC` thread boundaries and the snapshot error composer), so the host process exits with the guest's code.
 
 ### Fixed
 

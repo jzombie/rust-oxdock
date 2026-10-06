@@ -71,6 +71,7 @@ fn exec_result_golden_json() {
     let result = ExecResult {
         ok: true,
         error: None,
+        exit_code: None,
         result_tar_sha256: "00".repeat(32),
         script_sha256: "11".repeat(32),
         stdout_sha256: "22".repeat(32),
