@@ -2494,8 +2494,17 @@ contents, and captured text share one JSON value shape. Returns
 parses to `LIST` or a scalar word. `LET` coercion still checks the
 actual value at assignment.
 
-```text
+```oxdock
+# Parse in-memory JSON text with the same conversion as file loading.
+IMPORT [STD]
+LET $body: STRING = "{\"a\": 1}"
 LET $doc: ANY = PARSE_JSON($body)
+ASSERT_EQ $doc.a 1
+
+# Top-level arrays parse to LIST, which is why the return is ANY.
+LET $items: LIST<ANY> = PARSE_JSON("[1, 2]")
+ASSERT_EQ $items.0 1
+ASSERT_EQ $items.1 2
 ```
 
 
@@ -2550,8 +2559,16 @@ Observability only (audit lines, healthchecks: `active = max - free`).
 Exact at read time and stale the instant the caller acts on it, so it
 must never drive admission: that is `SEMAPHORE_TRY_ACQUIRE`'s job.
 
-```text
+```oxdock
+# Hold one permit on a cap of two.
+IMPORT [STD]
+LET $sem: SEMAPHORE = SEMAPHORE_NEW(2)
+LET $acq: MAP<held: BOOL, permit?: PERMIT> = SEMAPHORE_TRY_ACQUIRE($sem)
+ASSERT_EQ $acq.held true
+
+# One held permit leaves exactly one free.
 LET $free: INT = SEMAPHORE_AVAILABLE($sem)
+ASSERT_EQ $free 1
 ```
 
 
@@ -2573,8 +2590,14 @@ observes the same count, and admission runs through
 `SEMAPHORE_TRY_ACQUIRE`, never through the `SEMAPHORE_AVAILABLE`
 readout.
 
-```text
-LET $sem: SEMAPHORE = SEMAPHORE_NEW(10)
+```oxdock
+# Mint a semaphore admitting at most two holders.
+IMPORT [STD]
+LET $sem: SEMAPHORE = SEMAPHORE_NEW(2)
+
+# A fresh semaphore reports its full cap as available.
+LET $free: INT = SEMAPHORE_AVAILABLE($sem)
+ASSERT_EQ $free 2
 ```
 
 
@@ -2599,14 +2622,19 @@ null, so the absent key is the miss shape. Do not read `$m.permit`
 unless `held`: missing-key access bails strictly.
 Never waits, so no wait can wedge.
 
-```text
-LET $acq: MAP<held: BOOL, permit?: PERMIT> = SEMAPHORE_TRY_ACQUIRE($sem)
-IF !$acq.held {
-  ECHO "at cap, rejecting"
-} ELSE {
-  LET $permit: PERMIT = $acq.permit
-  ASYNC { session work }
-}
+```oxdock
+# First acquire holds with a permit to bind.
+IMPORT [STD]
+LET $sem: SEMAPHORE = SEMAPHORE_NEW(1)
+LET $first: MAP<held: BOOL, permit?: PERMIT> = SEMAPHORE_TRY_ACQUIRE($sem)
+ASSERT_EQ $first.held true
+LET $permit: PERMIT = $first.permit
+
+# A capped semaphore answers held false with no permit key.
+LET $second: MAP<held: BOOL, permit?: PERMIT> = SEMAPHORE_TRY_ACQUIRE($sem)
+ASSERT_EQ $second.held false
+LET $has_permit: BOOL = HAS_KEY($second, "permit")
+ASSERT_EQ $has_permit false
 ```
 
 
