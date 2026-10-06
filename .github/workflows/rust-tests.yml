@@ -14,16 +14,14 @@ concurrency:
 
 jobs:
   test_matrix:
-    name: test (OS=${{ matrix.os }}, Features=${{ matrix.name }})
+    name: test (OS=${{ matrix.os }}, Flags=${{ matrix.flags }})
     runs-on: ${{ matrix.os }}
 
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        include:
-          - name: "All Features"
-            flags: "--all-features"
+        flags: ["--all-features", "--no-default-features"]
 
     steps:
       - name: Checkout repository
@@ -78,10 +76,10 @@ jobs:
             ${{ runner.os }}-cargo-${{ steps.rustc.outputs.hash }}-${{ steps.lockfile.outputs.hash }}-
 
       - name: Test
-        run: cargo test --workspace --all-features --lib --bins --tests --examples -- --include-ignored
+        run: cargo test --workspace ${{ matrix.flags }} --lib --bins --tests --examples -- --include-ignored
 
       - name: README doctests
-        run: cargo test -p oxdock-doc-tests --doc --all-features
+        run: cargo test -p oxdock-doc-tests --doc ${{ matrix.flags }}
 
   test:
     name: test
