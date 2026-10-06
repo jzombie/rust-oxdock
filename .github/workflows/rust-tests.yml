@@ -14,18 +14,14 @@ concurrency:
 
 jobs:
   test_matrix:
-    name: test (OS=${{ matrix.os }}, Features=${{ matrix.name }})
+    name: test (OS=${{ matrix.os }}, Flags=${{ matrix.flags }})
     runs-on: ${{ matrix.os }}
 
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
-        include:
-          - name: "All Features"
-            flags: "--all-features"
-          - name: "No Default Features"
-            flags: "--no-default-features"
+        flags: ["--all-features", "--no-default-features"]
 
     steps:
       - name: Checkout repository
