@@ -83,7 +83,7 @@ jobs:
         run: cargo test --workspace ${{ matrix.flags }} --lib --bins --tests --examples -- --include-ignored
 
       - name: README doctests
-        run: cargo test -p oxdock-doc-tests --doc --all-features
+        run: cargo test -p oxdock-doc-tests --doc ${{ matrix.flags }}
 
   test:
     name: test
