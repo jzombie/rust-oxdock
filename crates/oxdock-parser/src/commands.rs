@@ -2284,6 +2284,10 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 afterwards, for every type. This is the counterpart to LET
                 shadowing, where `LET $x` *inside* the block declares a
                 separate inner variable that reverts on exit.
+
+                Reassignment rebinds the variable to a new value: values
+                captured earlier keep the old word (see the rebinding
+                example below).
             "#},
             args: &[],
             flags: &[],
@@ -2297,6 +2301,25 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 LET $count: INT = 1
                 $count = 2
                 ASSERT_EQ $count 2
+            "#},
+                },
+                Example {
+                    name: "rebind keeps earlier captures",
+                    fence_meta: None,
+                    code: indoc! {r#"
+                # Reassignment rebinds: a map built from `$s` still
+                # reads the original string after `$s` moves on.
+                LET $s: STRING = "test"
+                LET $m: MAP<ANY> = {a: $s}
+                $s = "changed"
+                ASSERT_EQ $m.a "test"
+
+                # Appending to one list binding never touches its clones.
+                LET $a: LIST<STRING> = ["1"]
+                LET $b: LIST<STRING> = $a
+                LIST_APPEND $a "2"
+                LET $want: LIST<STRING> = ["1"]
+                ASSERT_EQ $b $want
             "#},
                 },
                 Example {

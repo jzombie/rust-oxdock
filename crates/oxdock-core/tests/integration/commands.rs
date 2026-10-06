@@ -2221,6 +2221,31 @@ fn list_append_detaches_shared_buffer() {
 }
 
 #[test]
+fn map_set_returns_new_map_without_aliasing() {
+    // `MAP_SET` mints a fresh MAP: the source keeps its shape, so
+    // sharing a buffer never surfaces as aliasing at script level.
+    // (There is no in-place MAP mutation; `LIST_APPEND` is the only
+    // script-visible write, pinned above.)
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD]
+        LET $a: MAP<ANY> = {x: 1}
+        LET $b: MAP<ANY> = MAP_SET($a, "y", 2)
+        ASSERT_EQ $b.y 2
+        ASSERT_EQ $b.x 1
+        ASSERT_EQ $a.x 1
+        LET $has_y: BOOL = HAS_KEY($a, "y")
+        ASSERT_EQ $has_y false
+        LET $s: STRING = "test"
+        LET $m2: MAP<ANY> = {a: $s}
+        $s = "changed"
+        ASSERT_EQ $m2.a "test"
+    "#};
+    run_script(&root, script).expect("map set does not alias source");
+}
+
+#[test]
 fn list_append_accumulates_in_a_loop() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
