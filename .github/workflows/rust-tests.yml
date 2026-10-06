@@ -24,6 +24,8 @@ jobs:
         include:
           - name: "All Features"
             flags: "--all-features"
+          - name: "No Default Features"
+            flags: "--no-default-features"
 
     steps:
       - name: Checkout repository
@@ -78,7 +80,7 @@ jobs:
             ${{ runner.os }}-cargo-${{ steps.rustc.outputs.hash }}-${{ steps.lockfile.outputs.hash }}-
 
       - name: Test
-        run: cargo test --workspace --all-features --lib --bins --tests --examples -- --include-ignored
+        run: cargo test --workspace ${{ matrix.flags }} --lib --bins --tests --examples -- --include-ignored
 
       - name: README doctests
         run: cargo test -p oxdock-doc-tests --doc --all-features
