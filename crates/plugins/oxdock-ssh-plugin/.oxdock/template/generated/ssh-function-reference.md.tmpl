@@ -5,9 +5,17 @@ Callable as `MODULE::NAME(...)` in expressions (or bare `NAME(...)` with the mod
 
 ### SSH_ACCEPT
 
-**Signature:** `SSH_ACCEPT($server, $in_pipe, $out_pipe) -> MAP`
+**Signature:** `SSH_ACCEPT($server: SSH_SERVER, $in_pipe: PIPE, $out_pipe: PIPE) -> MAP<closed: BOOL>`
 
 **Contexts:** AST only
+
+**Parameters:**
+- `$server` (`SSH_SERVER`): Server handle from `SSH_SERVE`.
+- `$in_pipe` (`PIPE`): Pipe carrying bytes consumed by the wire side.
+- `$out_pipe` (`PIPE`): Pipe carrying bytes produced by the wire side.
+
+**Returns:** `MAP<closed: BOOL>`
+  - `closed` (`BOOL`): True when the session closed cleanly.
 
 Accept one SSH session into pipes.
 
@@ -24,7 +32,7 @@ complete program runs end to end under the docs conformance suite.
 
 ```oxdock
 IMPORT [STD, SSH]
-LET $m: MAP = SSH_SERVE("doc-ssh-demo", {username: "u", password: "p"})
+LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-demo", {username: "u", password: "p"})
 
 # Accept one session into fresh pipes.
 LET $in: PIPE
@@ -38,7 +46,7 @@ LET $c: HANDLE = ASYNC { SSH_CONNECT("doc-ssh-demo", "u", "p", $cin, $cout) }
 
 # Greet through the server pipe and wait for delivery.
 WITH_IO [stdout=$in] ECHO "server-greeting"
-LET $info: MAP = INSPECT($cout)
+LET $info: MAP<ANY> = INSPECT($cout)
 LET $empty: BOOL = $info.buffer_bytes == 0
 WHILE $empty {
     SLEEP 100ms
@@ -48,37 +56,62 @@ WHILE $empty {
 ASSERT_CONTAINS $cout "server-greeting"
 
 # The awaited result carries both keys; then shut down.
-LET $done: MAP = AWAIT $acc
+LET $done: MAP<ANY> = AWAIT $acc
 ASSERT_EQ $done.closed true
 ASSERT_CONTAINS $done "command"
 CANCEL $c
 SSH_CLOSE($m.server)
 ```
 
+
 ### SSH_CLOSE
 
-**Signature:** `SSH_CLOSE($server) -> BOOL`
+**Signature:** `SSH_CLOSE($server: SSH_SERVER) -> BOOL`
 
 **Contexts:** AST only
+
+**Parameters:**
+- `$server` (`SSH_SERVER`): Server handle from `SSH_SERVE`.
+
+**Returns:** `BOOL`
 
 Shut down an SSH server.
 
 Shut a server down and join its runtime thread (bounded). Idempotent:
 returns BOOL true when no thread remains.
 
+
 ### SSH_CONNECT
 
-**Signature:** `SSH_CONNECT($target: STRING, $username: STRING, $password: STRING, $in_pipe, $out_pipe) -> MAP`
+**Signature:** `SSH_CONNECT($target: STRING, $username: STRING, $password: STRING, $in_pipe: PIPE, $out_pipe: PIPE) -> MAP`
 
 **Contexts:** AST only
+
+**Parameters:**
+- `$target` (`STRING`): Dial target: logical port, service name, served address, or `host:port`.
+- `$username` (`STRING`): Inner credentials for the SSH session.
+- `$password` (`STRING`): Inner credentials for the SSH session.
+- `$in_pipe` (`PIPE`): Pipe carrying bytes consumed by the wire side.
+- `$out_pipe` (`PIPE`): Pipe carrying bytes produced by the wire side.
+
+**Returns:** `MAP`
 
 Open an SSH client session into pipes. Target shapes: a logical port (CLI-mapped address or loopback default), a service name (CLI-mapped address only), a served address, or a host:port dial.
 
 ### SSH_DEQUEUE
 
-**Signature:** `SSH_DEQUEUE($server) -> MAP`
+**Signature:** `SSH_DEQUEUE($server: SSH_SERVER) -> MAP<session: SSH_SESSION, command: STRING, username: STRING, addr: STRING>`
 
 **Contexts:** AST only
+
+**Parameters:**
+- `$server` (`SSH_SERVER`): Server handle from `SSH_SERVE`.
+
+**Returns:** `MAP<session: SSH_SESSION, command: STRING, username: STRING, addr: STRING>`
+  - `session` (`SSH_SESSION`): Session handle for `SSH_PUMP_CHANNEL` (pump ends take once).
+  - `command` (`STRING`): Executed command, empty for shells.
+  - `username` (`STRING`): Authenticated username, empty when unset.
+  - `addr` (`STRING`): Peer address, empty when unset.
 
 Dequeue one SSH session with its metadata.
 
@@ -96,13 +129,13 @@ program runs end to end under the docs conformance suite.
 
 ```oxdock
 IMPORT [STD, SSH]
-LET $m: MAP = SSH_SERVE("doc-ssh-demo", {username: "u", password: "p"})
+LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-demo", {username: "u", password: "p"})
 
 # Serve: dequeue one session and pump a synthetic reply.
 LET $in: PIPE
 LET $out: PIPE
 LET $w: HANDLE = ASYNC {
-    LET $sess: MAP = SSH_DEQUEUE($m.server)
+    LET $sess: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
     ASSERT_CONTAINS $sess "session"
     ASSERT_CONTAINS $sess "command"
     ASSERT_CONTAINS $sess "username"
@@ -118,7 +151,7 @@ LET $c: HANDLE = ASYNC { SSH_CONNECT("doc-ssh-demo", "u", "p", $cin, $cout) }
 
 # Greet through the server pipe and wait for delivery.
 WITH_IO [stdout=$in] ECHO "server-greeting"
-LET $info: MAP = INSPECT($cout)
+LET $info: MAP<ANY> = INSPECT($cout)
 LET $empty: BOOL = $info.buffer_bytes == 0
 WHILE $empty {
     SLEEP 100ms
@@ -133,11 +166,22 @@ CANCEL $c
 SSH_CLOSE($m.server)
 ```
 
+
 ### SSH_PTY_RUN
 
-**Signature:** `SSH_PTY_RUN($session, $argv, $rows: INT, $cols: INT, $in_pipe, $out_pipe) -> INT`
+**Signature:** `SSH_PTY_RUN($session: SSH_SESSION, $argv: LIST<STRING>, $rows: INT, $cols: INT, $in_pipe: PIPE, $out_pipe: PIPE) -> INT`
 
 **Contexts:** AST only
+
+**Parameters:**
+- `$session` (`SSH_SESSION`): Session handle from `SSH_DEQUEUE`.
+- `$argv` (`LIST<STRING>`): Program and arguments to run.
+- `$rows` (`INT`): Terminal rows when positive, session size otherwise.
+- `$cols` (`INT`): Terminal columns when positive, session size otherwise.
+- `$in_pipe` (`PIPE`): Pipe carrying bytes consumed by the child.
+- `$out_pipe` (`PIPE`): Pipe carrying bytes produced by the child.
+
+**Returns:** `INT`
 
 Run a command under a sized local terminal into pipes.
 
@@ -153,11 +197,18 @@ the script environment like `RUN`: block-scoped `ENV` (such as the
 session's `SSH_USER` / `SSH_CLIENT` / `SSH_SERVER` / `SSH_COMMAND`
 relay) reaches the child; the working directory comes from the script.
 
+
 ### SSH_PUMP
 
-**Signature:** `SSH_PUMP($from_pipe, $to_pipe) -> INT`
+**Signature:** `SSH_PUMP($from_pipe: PIPE, $to_pipe: PIPE) -> INT`
 
 **Contexts:** AST only
+
+**Parameters:**
+- `$from_pipe` (`PIPE`): Source pipe to drain.
+- `$to_pipe` (`PIPE`): Target pipe receiving the bytes (closed at EOF).
+
+**Returns:** `INT`
 
 Copy one pipe into another until EOF.
 
@@ -165,11 +216,20 @@ Copy one pipe into another until EOF, then close the target.
 Returns the INT byte count. Either task placement works, as long as
 the other end is live (usually an `ASYNC` task).
 
+
 ### SSH_PUMP_CHANNEL
 
-**Signature:** `SSH_PUMP_CHANNEL($session, $in_pipe, $out_pipe) -> MAP`
+**Signature:** `SSH_PUMP_CHANNEL($session: SSH_SESSION, $in_pipe: PIPE, $out_pipe: PIPE) -> MAP<closed: BOOL>`
 
 **Contexts:** AST only
+
+**Parameters:**
+- `$session` (`SSH_SESSION`): Session handle from `SSH_DEQUEUE` (pump ends take once).
+- `$in_pipe` (`PIPE`): Pipe carrying bytes consumed by the wire side.
+- `$out_pipe` (`PIPE`): Pipe carrying bytes produced by the wire side.
+
+**Returns:** `MAP<closed: BOOL>`
+  - `closed` (`BOOL`): True when the session closed cleanly.
 
 Pump a dequeued SSH session through pipes.
 
@@ -178,10 +238,25 @@ closes. Must run inside `ASYNC`. The session ends are take-once: a
 second pump on the same session bails instead of splitting bytes.
 Returns a MAP with `closed` (BOOL).
 
+
 ### SSH_SERVE
 
-**Signature:** `SSH_SERVE($bind: STRING, $options) -> MAP`
+**Signature:** `SSH_SERVE($bind: STRING, $options: MAP<username: STRING, password: STRING, key_path?: STRING>) -> MAP<server: SSH_SERVER, addr: STRING, username: STRING, password: STRING, virtual: STRING>`
 
 **Contexts:** AST only
+
+**Parameters:**
+- `$bind` (`STRING`): Virtual service endpoint to serve (logical port or service name).
+- `$options` (`MAP<username: STRING, password: STRING, key_path?: STRING>`): Server credentials and host key.
+  - `username` (`STRING`, required)
+  - `password` (`STRING`, required)
+  - `key_path` (`STRING`, optional)
+
+**Returns:** `MAP<server: SSH_SERVER, addr: STRING, username: STRING, password: STRING, virtual: STRING>`
+  - `server` (`SSH_SERVER`): Server handle for `SSH_ACCEPT`, `SSH_DEQUEUE`, and `SSH_CLOSE`.
+  - `addr` (`STRING`): Bound socket address (`ip:port`) of the server.
+  - `username` (`STRING`): Configured username.
+  - `password` (`STRING`): Configured password.
+  - `virtual` (`STRING`): Virtual endpoint echo of the claimed slot.
 
 Serve SSH on a virtual service endpoint.

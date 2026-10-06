@@ -628,6 +628,7 @@ impl StepKind {
             }
             StepKind::WithIo { .. }
             | StepKind::WithIoBlock { .. }
+            | StepKind::TypeAlias { .. }
             | StepKind::Workspace(_)
             | StepKind::InheritEnv { .. }
             | StepKind::Cwd
@@ -679,6 +680,7 @@ impl StepKind {
                 }
             }
             StepKind::InheritEnv { .. }
+            | StepKind::TypeAlias { .. }
             | StepKind::Workdir(_)
             | StepKind::Workspace(_)
             | StepKind::Env { .. }
@@ -805,6 +807,7 @@ declare_commands! {
     structural [
         WithIo { bindings: Vec<IoBinding>, cmd: Box<StepKind> },
         WithIoBlock { bindings: Vec<IoBinding> },
+        TypeAlias { name: String, target: String },
         For { key_var: Option<String>, key_type: Option<String>, var: String, var_type: String, in_expr: Expr, body: Vec<Step> },
         If { cond: Box<Expr>, then_body: Vec<Step>, else_ifs: Vec<(Box<Expr>, Vec<Step>)>, else_body: Option<Vec<Step>> },
         Assign { var: String, decl_type: String, expr: Expr },
@@ -998,10 +1001,10 @@ declare_commands! {
                 # through untouched on unix ...
                 ENV PROXY_PORT=23791
 
-                [unix] LET $o: STRING = RUN echo serving on "$PROXY_PORT"
+                [family:unix] LET $o: STRING = RUN echo serving on "$PROXY_PORT"
 
                 # ... while cmd expands %VAR% on Windows.
-                [windows] LET $o: STRING = RUN echo serving on %PROXY_PORT%
+                [family:windows] LET $o: STRING = RUN echo serving on %PROXY_PORT%
 
                 ASSERT_CONTAINS $o "23791"
             "#} },
@@ -1643,6 +1646,9 @@ declare_commands! {
             Enclosing blocks still unwind their LET/ENV/WORKDIR/WORKSPACE state,
             anonymous background tasks are killed synchronously, and files written
             before the EXIT persist.
+
+            The code reaches the OS: the CLI exits with `<code>` clamped to
+            0..=255, and a guest EXIT relays through `REMOTE` the same way.
         "#},
         args: &[ ArgSpec { name: "code", arg_type: ArgType::Int, description: "Code", io: IoDirection::Write, index: 0, required: true, fallback_stream: None } ],
         flags: &[],
@@ -1721,11 +1727,11 @@ declare_commands! {
         default_output: None,
         examples: &[ Example { name: "list append", fence_meta: None, code: indoc! {r#"
             # Appends accumulate in order.
-            LET $items: LIST = []
+            LET $items: LIST<STRING> = []
             LIST_APPEND $items "first"
             LIST_APPEND $items "second"
 
-            LET $want: LIST = ["first", "second"]
+            LET $want: LIST<STRING> = ["first", "second"]
             ASSERT_EQ $items $want
         "#} } ],
         lower: |_flags, args| {
@@ -1856,7 +1862,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                     fence_meta: None,
                     code: indoc! {r#"
                 # Each element binds in turn; the loop body sees every one.
-                LET $items: LIST = ["a", "b"]
+                LET $items: LIST<STRING> = ["a", "b"]
                 FOR $item: STRING IN $items {
                   ECHO $item
                 }
@@ -1864,7 +1870,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 ASSERT_CONTAINS stdout "b"
 
                 # Key and value bind together for maps.
-                LET $map: MAP = {"x": 1}
+                LET $map: MAP<x: INT> = {"x": 1}
                 FOR $k: STRING, $v: INT IN $map {
                   ECHO "{{ $k }}={{ $v }}"
                 }
@@ -2101,7 +2107,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 ECHO "hello, {{ $name }}"
                 ASSERT_CONTAINS stdout "hello, world"
 
-                LET $items: LIST = ["a", "b"]
+                LET $items: LIST<STRING> = ["a", "b"]
                 ASSERT_CONTAINS $items "a"
                 ASSERT_CONTAINS $items "b"
 
@@ -2125,7 +2131,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 # The RHS is an expression: GLOB(...) runs and binds a list.
                 IMPORT [STD]
                 WRITE a.txt "x"
-                LET $files: LIST = GLOB("*.txt")
+                LET $files: LIST<STRING> = GLOB("*.txt")
                 FOR $f: STRING IN $files { ECHO $f }
 
                 ASSERT_CONTAINS stdout "a.txt"
@@ -2247,7 +2253,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 IMPORT [STD]
                 LET $p: PIPE
                 WITH_IO [stdout=$p] ECHO hello
-                LET $info: MAP = INSPECT($p)
+                LET $info: MAP<ANY> = INSPECT($p)
                 IF $info.is_os_pipe {
                     WRITE unexpected.txt "should be a script pipe"
                 }
@@ -2281,6 +2287,10 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 afterwards, for every type. This is the counterpart to LET
                 shadowing, where `LET $x` *inside* the block declares a
                 separate inner variable that reverts on exit.
+
+                Reassignment rebinds the variable to a new value: values
+                captured earlier keep the old word (see the rebinding
+                example below).
             "#},
             args: &[],
             flags: &[],
@@ -2294,6 +2304,25 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 LET $count: INT = 1
                 $count = 2
                 ASSERT_EQ $count 2
+            "#},
+                },
+                Example {
+                    name: "rebind keeps earlier captures",
+                    fence_meta: None,
+                    code: indoc! {r#"
+                # Reassignment rebinds: a map built from `$s` still
+                # reads the original string after `$s` moves on.
+                LET $s: STRING = "test"
+                LET $m: MAP<ANY> = {a: $s}
+                $s = "changed"
+                ASSERT_EQ $m.a "test"
+
+                # Appending to one list binding never touches its clones.
+                LET $a: LIST<STRING> = ["1"]
+                LET $b: LIST<STRING> = $a
+                LIST_APPEND $a "2"
+                LET $want: LIST<STRING> = ["1"]
+                ASSERT_EQ $b $want
             "#},
                 },
                 Example {
@@ -2513,7 +2542,13 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 guest starts empty, and results return through declared
                 transfers or `WITH_IO` pipes. The target is a static
                 literal, never a variable. Unknown targets fail before
-                execution starts.
+                execution starts. Bodies check twice: the host static
+                pass validates the body before anything ships, and the
+                guest re-validates on arrival through the same entry
+                point, so a body type error fails locally, never mid-run
+                on the remote. A failing guest fails the host step: EXIT
+                in the body exits the guest, and the host relays the code
+                to its own process exit status (see EXIT).
             "#},
             args: &[],
             flags: &[],
@@ -2632,6 +2667,24 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                         WORKSPACE SYSTEM
                         COPY --to-host /no/such/file.txt got.txt
                     }
+                "#},
+                },
+                Example {
+                    name: "guest exit fails the step, host survives",
+                    fence_meta: Some(
+                        "mock_remote:prod expect_error:\"REMOTE 'prod' exited with code 3\"",
+                    ),
+                    code: indoc! {r#"
+                    # EXIT in the body exits the guest with code 3. The
+                    # host is unaffected: it keeps executing after the
+                    # guest is already dead, and the failure surfaces as
+                    # a host step error carrying the same code. The CLI
+                    # then exits with it, so the guest code reaches the OS.
+                    LET $t: HANDLE = ASYNC REMOTE prod {
+                        EXIT 3
+                    }
+                    WRITE host-alive.txt "still here"
+                    AWAIT $t
                 "#},
                 },
                 Example {
@@ -3194,6 +3247,7 @@ impl fmt::Display for StepKind {
                 write!(f, "{}({})", name, ps.join(", "))
             }
             StepKind::Return { expr } => write!(f, "RETURN {}", expr),
+            StepKind::TypeAlias { name, target } => write!(f, "TYPE {} = {}", name, target),
             StepKind::While { cond, body } => {
                 write!(f, "WHILE {} {{", cond)?;
                 for s in body {
@@ -3829,6 +3883,10 @@ mod tests {
                 StepKind::While { .. } => Some("WHILE"),
                 StepKind::Break => Some("BREAK"),
                 StepKind::Continue => Some("CONTINUE"),
+                // Aliases are declared by `TYPE` but documented with the
+                // type-word prose on the `LET` page (define-once,
+                // use-everywhere); no dedicated reference page.
+                StepKind::TypeAlias { .. } => Some("LET"),
                 StepKind::RunExec { .. } => None,
                 StepKind::Workdir(_)
                 | StepKind::Workspace(_)
@@ -3942,6 +4000,10 @@ mod tests {
             },
             StepKind::Break,
             StepKind::Continue,
+            StepKind::TypeAlias {
+                name: "PERSON".to_string(),
+                target: "MAP<name: STRING>".to_string(),
+            },
         ];
         let registry = all_structural_metadata();
         for kind in &dummies {

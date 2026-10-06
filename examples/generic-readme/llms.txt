@@ -1,0 +1,10 @@
+# Tiny Tool (agent docs)
+
+Install: `npm install tiny-tool`. Usage: `tiny-tool --help`.
+
+# Tiny Tool
+
+A minimal non Rust project documented through the generic file-set renderer: no manifests, no registry, just values plus fragments.
+
+Values: {"blurb":"A minimal non Rust project documented through the generic file-set renderer: no manifests, no registry, just values plus fragments.","install":"npm install tiny-tool","project":"Tiny Tool","usage":"tiny-tool --help"}
+

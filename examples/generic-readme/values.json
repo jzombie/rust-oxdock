@@ -1,0 +1,6 @@
+{
+  "project": "Tiny Tool",
+  "blurb": "A minimal non Rust project documented through the generic file-set renderer: no manifests, no registry, just values plus fragments.",
+  "install": "npm install tiny-tool",
+  "usage": "tiny-tool --help"
+}

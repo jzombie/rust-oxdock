@@ -1,9 +1,10 @@
-pub mod cargo;
+//! Render version resolution: explicit environment wins, otherwise the
+//! workspace manifest.
 
 use anyhow::{Context, Result};
 use oxdock_fs::{GuardedPath, PathResolver};
 
-use crate::io::read_text;
+use super::io::read_text;
 
 /// Resolve a version string: explicit env wins, otherwise fall
 /// back to the workspace manifest. The source is always logged so the
@@ -55,8 +56,10 @@ mod tests {
         ignore = "fixture needs host tempdir and file IO, blocked by Miri isolation"
     )]
     fn env_value_wins_then_falls_back_to_manifest() {
-        let (_temp, root, resolver) =
-            fixture_root("[workspace.package]\nversion = \"0.10.0-alpha\"\n");
+        let (_temp, root, resolver) = fixture_root(indoc::indoc! {r#"
+            [workspace.package]
+            version = "0.10.0-alpha"
+        "#});
         assert_eq!(
             crate_version_with_env(&root, &resolver, Some("9.9.9-test".to_string()))
                 .expect("version"),

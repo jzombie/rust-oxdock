@@ -25,7 +25,7 @@ use std::sync::atomic::AtomicBool;
 
 use anyhow::{Context, Result, bail};
 use oxdock_fs::{EntryKind, GuardedPath};
-use oxdock_parser::{Step, render_dsl_literal, render_quoted};
+use oxdock_parser::{Step, render_dsl_literal, render_quoted, render_structural};
 use oxdock_pipe::PipeInner;
 use oxdock_process::ProcessManager;
 
@@ -266,9 +266,11 @@ fn statically_false_guard(guard: Option<&oxdock_parser::GuardExpr>) -> bool {
     use oxdock_parser::{Guard, GuardExpr};
     fn is_false(expr: &GuardExpr) -> bool {
         match expr {
-            GuardExpr::Predicate(Guard::StaticBool { value }) => {
-                !value.parse::<bool>().unwrap_or(true)
-            }
+            GuardExpr::Predicate(Guard::Attr {
+                ns: oxdock_parser::Ns::Bool,
+                val: Some(value),
+                ..
+            }) => !value.parse::<bool>().unwrap_or(true),
             GuardExpr::Predicate(_) => false,
             GuardExpr::All(children) => children.iter().any(is_false),
             GuardExpr::Or(_) => false,
@@ -370,7 +372,13 @@ fn resolve_header<P: ProcessManager>(
                 value.type_name()
             )
         })?;
-        lines.push(format!("LET ${name}: {decl_type} = {literal}"));
+        // The declared type renders structurally, never as the coarse
+        // word: the guest re-parses these lines under the same rules,
+        // so a coarse word the guest rejects would break the seal.
+        lines.push(format!(
+            "LET ${name}: {} = {literal}",
+            render_structural(&decl_type)
+        ));
     }
     for name in env_names {
         let Some(value) = cx.get_env(name) else {
@@ -683,9 +691,21 @@ pub(super) fn run_remote_block<P: ProcessManager>(
     // partial guest state is ever applied. The runner applies declared
     // pushes directly against the active filesystem.
     let fs = cx.state.fs.as_ref();
-    let response = runner
-        .run_remote(request, fs)
-        .with_context(|| format!("REMOTE '{target}' transport failed"))?;
+    let response = match runner.run_remote(request, fs) {
+        Ok(response) => response,
+        // Guest EXIT relays its code: the step fails as a host EXIT with
+        // the same code instead of a transport error, so the CLI exits
+        // with what the guest asked for. Anything else keeps the
+        // transport-failed wrapper.
+        Err(err) => match super::exit::exit_code_of(&err) {
+            Some(code) => {
+                return Err(err.context(format!("REMOTE '{target}' exited with code {code}")));
+            }
+            None => {
+                return Err(err.context(format!("REMOTE '{target}' transport failed")));
+            }
+        },
+    };
     route_stdio(
         cx,
         cx.out_pipe.clone(),

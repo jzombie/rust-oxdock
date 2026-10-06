@@ -5,7 +5,7 @@ IMPORT [STD, SSH]
 WORKSPACE LOCAL
 
 # 1. Ephemeral server setup
-LET $server: MAP = SSH_SERVE(
+LET $server: SSH_SERVE_INFO = SSH_SERVE(
     "ssh-server", {
         username: "test",
         password: "test123",
@@ -28,13 +28,13 @@ LET $run: BOOL = true
 WHILE $run {
     # Dequeue authenticated session metadata
     LET $deq_task: HANDLE = ASYNC { SSH_DEQUEUE($server.server) }
-    LET $sess: MAP = AWAIT $deq_task
+    LET $sess: SSH_DEQUEUE_INFO = AWAIT $deq_task
 
     # Non-blocking admission: a miss carries no permit key, so branch
     # on held. Counts below derive from the semaphore (observability
     # only); nothing here checks then acts.
-    LET $acq: MAP = SEMAPHORE_TRY_ACQUIRE($sem)
-    IF $acq.held == 0 {
+    LET $acq: MAP<held: BOOL, permit?: PERMIT> = SEMAPHORE_TRY_ACQUIRE($sem)
+    IF !$acq.held {
         LET $avail: INT = SEMAPHORE_AVAILABLE($sem)
         LET $active: INT = $max_conns - $avail
         ECHO "[REJECT] Capacity reached ({{ $active }}/{{ $max_conns }}). Dropping connection from {{ $sess.addr }}"

@@ -1,13 +1,14 @@
 use crate::common::mock_lower;
 
-use oxdock_parser::ast::{Guard, GuardExpr};
+use oxdock_parser::ast::{Guard, GuardExpr, Ns};
 use oxdock_parser::parse_script;
 
 #[test]
 fn env_equals_display_uses_functional_syntax() {
-    let guard = Guard::EnvEquals {
-        key: "A".into(),
-        value: "1".into(),
+    let guard = Guard::Attr {
+        ns: Ns::Env,
+        key: Some("A".into()),
+        val: Some("1".into()),
     };
 
     assert_eq!(guard.to_string(), "eq(env:A, 1)");

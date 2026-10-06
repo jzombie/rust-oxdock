@@ -6,7 +6,8 @@ use oxdock_fs::CopySourceRoot;
 use oxdock_fs::EntryKind;
 use oxdock_fs::GuardedPath;
 use oxdock_parser::{
-    Arg, Expr, IoBinding, IoStream, PipeTarget, Step, StepKind, Value, WorkspaceTarget,
+    Arg, Expr, IoBinding, IoStream, PipeTarget, Step, StepKind, TypeTag, Value, WorkspaceTarget,
+    render_structural,
 };
 use oxdock_process::{
     BackgroundHandle, CommandOptions, CommandResult, CommandStderr, CommandStdin, CommandStdout,
@@ -814,8 +815,7 @@ pub(super) fn read_line<P: ProcessManager>(
     if cx.state.get_var_typed(&clean_var).is_some() {
         cx.state.mutate_var(&clean_var, text)?;
     } else {
-        cx.state
-            .declare_var(clean_var, "STRING".to_string(), text)?;
+        cx.state.declare_var(clean_var, TypeTag::String, text)?;
     }
     Ok(())
 }
@@ -834,10 +834,13 @@ pub(super) fn inspect_var_map<P: ProcessManager>(
         bail!("variable '${clean_var}' is not defined");
     };
     let mut map = BTreeMap::new();
-    map.insert("type".to_string(), Value::string(decl_type.clone()));
+    map.insert(
+        "type".to_string(),
+        Value::string(render_structural(&decl_type)),
+    );
     map.insert("variable".to_string(), Value::string(clean_var.clone()));
-    match (decl_type.as_str(), value.as_pipe_handle()) {
-        ("PIPE", Some(handle)) => {
+    match (decl_type, value.as_pipe_handle()) {
+        (TypeTag::Pipe, Some(handle)) => {
             let info = cx.state.io.inspect_pipe(&handle);
             map.insert("name".to_string(), Value::string(clean_var.clone()));
             map.insert("value".to_string(), Value::string(format!("{value}")));
@@ -853,7 +856,7 @@ pub(super) fn inspect_var_map<P: ProcessManager>(
             map.insert("readers".to_string(), Value::int(info.readers as i64));
             map.insert("writers".to_string(), Value::int(info.writers as i64));
         }
-        ("HANDLE", _) => {
+        (TypeTag::Handle, _) => {
             if let Some(task_id) = value.as_handle() {
                 map.insert("name".to_string(), Value::string(clean_var.clone()));
                 map.insert(
@@ -1006,8 +1009,33 @@ pub(super) fn replace<P: ProcessManager>(
 ) -> Result<()> {
     let ctx = cx.state.command_ctx()?;
     let vars = cx.state.all_vars();
+    // Dispatch `{{ MODULE::FUNC(args) }}` through the shared pure table:
+    // one `Arc` clone per EXPAND, nested lookup per call with zero
+    // allocation, known-names listing built only on failure. Stateful,
+    // script, and pipe backed entries never appear here: placeholders
+    // evaluate without a step context and must stay side effect free.
+    let table = cx.state.pure_function_table();
+    let calls: oxdock_process::PlaceholderCall = Arc::new(move |module, func, args| {
+        let callee = table
+            .get(module)
+            .and_then(|entries| entries.get(func))
+            .ok_or_else(|| {
+                let mut known: Vec<String> = table
+                    .iter()
+                    .flat_map(|(m, entries)| entries.keys().map(move |f| format!("{m}::{f}")))
+                    .collect();
+                known.sort();
+                anyhow!(
+                    "unknown placeholder function '{module}::{func}'; known functions: {}",
+                    known.join(", ")
+                )
+            })?;
+        callee(args)
+    });
 
-    let mut expander = oxdock_process::StreamingExpand::new(overrides, ctx.envs()).with_vars(&vars);
+    let mut expander = oxdock_process::StreamingExpand::new(overrides, ctx.envs())
+        .with_vars(&vars)
+        .with_call_resolver(calls);
     let mut out_buf = Vec::with_capacity(super::io::CHUNK_SIZE);
 
     write_stdout(cx.out.clone(), |w| {
@@ -1612,12 +1640,12 @@ fn resolve_pipe_handle<P: ProcessManager>(
 ) -> Result<PipeHandle> {
     let PipeTarget::Var(var) = target;
     match cx.state.get_var_typed(var) {
-        Some((kind, value)) if kind == "PIPE" => {
+        Some((kind, value)) if matches!(kind, TypeTag::Pipe) => {
             let Some(handle) = value.as_pipe_handle() else {
                 bail!(
                     "step {}: TypeMismatch: expected PIPE, got {} ({:?})",
                     idx + 1,
-                    kind,
+                    kind.name(),
                     value
                 );
             };
@@ -1627,7 +1655,7 @@ fn resolve_pipe_handle<P: ProcessManager>(
             bail!(
                 "step {}: TypeMismatch: expected PIPE, got {} ({:?})",
                 idx + 1,
-                kind,
+                kind.name(),
                 value
             );
         }
@@ -1676,7 +1704,7 @@ pub(super) fn exit<P: ProcessManager>(cx: &mut StepCtx<'_, P>, code: i64) -> Res
         }
     }
     cx.state.bg_children.clear();
-    bail!("EXIT requested with code {}", code);
+    Err(anyhow::Error::new(super::exit::ExitRequest(code)))
 }
 
 pub(crate) fn for_loop<P: ProcessManager>(
@@ -1690,6 +1718,7 @@ pub(crate) fn for_loop<P: ProcessManager>(
 ) -> Result<Flow> {
     let iterable = super::args::evaluate_expr(in_expr, cx)?;
     let clean_val_var = val_var.trim_start_matches('$').to_string();
+    let val_tag = cx.state.resolve_tag(&val_type)?;
 
     if let Some(items) = iterable.as_list() {
         for (i, item) in items.iter().enumerate() {
@@ -1699,17 +1728,20 @@ pub(crate) fn for_loop<P: ProcessManager>(
             cx.state.push_scope();
             if let Some(idx_name) = key_var {
                 let clean_idx = idx_name.trim_start_matches('$').to_string();
-                let kt = key_type.clone().unwrap_or("INT".to_string());
+                let kt = match &key_type {
+                    Some(name) => cx.state.resolve_tag(name)?,
+                    None => TypeTag::Int,
+                };
                 cx.state.declare_var(
                     clean_idx,
-                    kt.clone(),
-                    super::args::coerce_value(Value::int(i as i64), &kt, &*cx.state)?,
+                    kt,
+                    super::args::coerce_value(Value::int(i as i64), &kt)?,
                 )?;
             }
             cx.state.declare_var(
                 clean_val_var.clone(),
-                val_type.clone(),
-                super::args::coerce_value(item.clone(), &val_type, &*cx.state)?,
+                val_tag,
+                super::args::coerce_value(item.clone(), &val_tag)?,
             )?;
 
             let res = super::steps::execute_steps(
@@ -1747,10 +1779,14 @@ pub(crate) fn for_loop<P: ProcessManager>(
         keys.sort();
 
         // Map keys are strings: only a STRING key binding is valid here.
-        if key_type.clone().is_some_and(|kt| kt != "STRING") {
+        let kt = match &key_type {
+            Some(name) => cx.state.resolve_tag(name)?,
+            None => TypeTag::String,
+        };
+        if !matches!(kt, TypeTag::String) {
             anyhow::bail!(
                 "FOR loop over MAP requires a STRING key variable, got {}",
-                key_type.clone().unwrap_or("unknown".to_string()),
+                kt.name(),
             );
         }
         for k in keys {
@@ -1758,13 +1794,13 @@ pub(crate) fn for_loop<P: ProcessManager>(
             cx.state.push_scope();
             cx.state.declare_var(
                 clean_key_var.clone(),
-                "STRING".to_string(),
+                TypeTag::String,
                 Value::string(k.clone()),
             )?;
             cx.state.declare_var(
                 clean_val_var.clone(),
-                val_type.clone(),
-                super::args::coerce_value(v, &val_type, &*cx.state)?,
+                val_tag,
+                super::args::coerce_value(v, &val_tag)?,
             )?;
 
             let res = super::steps::execute_steps(
@@ -1809,9 +1845,16 @@ pub(crate) fn define_func<P: ProcessManager>(
     params: &[(String, String)],
     body: &[Step],
 ) -> Result<()> {
+    // Resolve param type names where the directory lives, so the
+    // registry only ever holds tags. Unknown names fail here naming
+    // the function and every known type and schema.
+    let mut resolved = Vec::with_capacity(params.len());
+    for (pname, ptype) in params {
+        resolved.push((pname.clone(), cx.state.resolve_tag(ptype)?));
+    }
     // Runtime counterpart of the parse-time scope validation; the single
     // registry owns the reserved, duplicate, and shadowing rules.
-    cx.state.functions.define_script(name, params, body)
+    cx.state.functions.define_script(name, &resolved, body)
 }
 
 /// Invoke a function by UPPERCASE name and return its value. One lookup
@@ -1840,17 +1883,30 @@ pub(crate) fn call_func_value<P: ProcessManager>(
             super::base_name(name)
         );
     }
-    // 3. Pre-evaluation arity gate from the entry metadata.
-    if let Some(params) = entry.meta.params.as_deref()
-        && params.len() != args.len()
-    {
-        bail!(
-            "step {}: {}() expects {} argument(s), got {}",
-            idx + 1,
-            super::base_name(name),
-            params.len(),
-            args.len()
-        );
+    // 3. Pre-evaluation arity gate from the entry metadata. Trailing
+    // optional MAP params widen exact counts to ranges; everything
+    // else stays exact.
+    if let Some(params) = entry.meta.params.as_deref() {
+        let required = super::required_arity(params);
+        if args.len() < required || args.len() > params.len() {
+            if required == params.len() {
+                bail!(
+                    "step {}: {}() expects {} argument(s), got {}",
+                    idx + 1,
+                    super::base_name(name),
+                    params.len(),
+                    args.len()
+                );
+            }
+            bail!(
+                "step {}: {}() expects {} to {} argument(s), got {}",
+                idx + 1,
+                super::base_name(name),
+                required,
+                params.len(),
+                args.len()
+            );
+        }
     }
     // 4. Argument evaluation: only reachable for a valid invocation.
     let mut arg_vals = Vec::with_capacity(args.len());
@@ -1864,7 +1920,7 @@ pub(crate) fn call_func_value<P: ProcessManager>(
             cx.state.push_scope();
             let outcome: Result<Value> = (|| {
                 for ((pname, ptype), pval) in def.params.iter().zip(arg_vals) {
-                    cx.state.declare_var(pname.clone(), ptype.clone(), pval)?;
+                    cx.state.declare_var(pname.clone(), *ptype, pval)?;
                 }
                 let flow = super::steps::execute_steps(
                     cx.state,
@@ -2024,7 +2080,8 @@ pub(crate) fn assign<P: ProcessManager>(
 ) -> Result<()> {
     let value = super::args::evaluate_expr(expr, cx)?;
     let clean_var = var.trim_start_matches('$').to_string();
-    cx.state.declare_var(clean_var, decl_type, value)?;
+    let tag = cx.state.resolve_tag(&decl_type)?;
+    cx.state.declare_var(clean_var, tag, value)?;
     Ok(())
 }
 
@@ -2076,7 +2133,8 @@ pub(crate) fn assign_capture<P: ProcessManager>(
         if bindings.is_empty() {
             let value = call_func_value(cx, idx, name, args)?;
             let clean_var = var.trim_start_matches('$').to_string();
-            cx.state.declare_var(clean_var, decl_type, value)?;
+            let tag = cx.state.resolve_tag(&decl_type)?;
+            cx.state.declare_var(clean_var, tag, value)?;
             return Ok(Flow::Done);
         }
         let (step_stdin, expose_stdin, step_stdout, step_stderr, out_pipe, stdin_pipe) =
@@ -2095,9 +2153,10 @@ pub(crate) fn assign_capture<P: ProcessManager>(
             stdin_pipe,
         };
         let value = call_func_value(&mut sub_cx, idx, name, args)?;
+        let tag = sub_cx.state.resolve_tag(&decl_type)?;
         sub_cx
             .state
-            .declare_var(var.trim_start_matches('$').to_string(), decl_type, value)?;
+            .declare_var(var.trim_start_matches('$').to_string(), tag, value)?;
         return Ok(Flow::Done);
     }
     let sink = Arc::new(super::capture::new_spill_buffer());
@@ -2139,8 +2198,8 @@ pub(crate) fn assign_capture<P: ProcessManager>(
         .drain_string_strict()
         .map_err(|e| anyhow!("LET ${var} capture is not valid UTF-8: {e}"))?;
     let clean_var = var.trim_start_matches('$').to_string();
-    cx.state
-        .declare_var(clean_var, decl_type, Value::string(text))?;
+    let tag = cx.state.resolve_tag(&decl_type)?;
+    cx.state.declare_var(clean_var, tag, Value::string(text))?;
     Ok(Flow::Done)
 }
 
@@ -2232,7 +2291,7 @@ fn binding_handle<P: ProcessManager>(
 ) -> Option<PipeHandle> {
     let PipeTarget::Var(var) = target;
     match state.get_var_typed(var) {
-        Some((kind, value)) if kind == "PIPE" => value.as_pipe_handle(),
+        Some((TypeTag::Pipe, value)) => value.as_pipe_handle(),
         _ => None,
     }
 }
@@ -3154,8 +3213,9 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
     }
 
     // Store the task handle in the variable scope
+    let tag = cx.state.resolve_tag(&decl_type)?;
     cx.state
-        .declare_var(var.to_string(), decl_type, Value::handle(task_id))?;
+        .declare_var(var.to_string(), tag, Value::handle(task_id))?;
     Ok(())
 }
 
@@ -3388,8 +3448,9 @@ pub(crate) fn dispatch_await_capture<P: ProcessManager>(
         (guard.return_value.clone(), guard.returns_value)
     };
     if let Some(value) = return_value {
+        let tag = cx.state.resolve_tag(&out_type)?;
         cx.state
-            .declare_var(out_var.trim_start_matches('$').to_string(), out_type, value)?;
+            .declare_var(out_var.trim_start_matches('$').to_string(), tag, value)?;
         return Ok(());
     }
     if returns_value {
@@ -3397,9 +3458,10 @@ pub(crate) fn dispatch_await_capture<P: ProcessManager>(
             "LET ${out_var} = AWAIT ${task_var} fell off the end without RETURN: the task body can return a value on some path but this run produced none"
         );
     }
+    let tag = cx.state.resolve_tag(&out_type)?;
     cx.state.declare_var(
         out_var.trim_start_matches('$').to_string(),
-        out_type,
+        tag,
         Value::int(0),
     )?;
     Ok(())

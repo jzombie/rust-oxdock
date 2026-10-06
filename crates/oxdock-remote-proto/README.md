@@ -11,6 +11,15 @@ take effect without manual versioning. Control types cover session setup and
 the result envelope. Tar helpers stream declared file transfers with
 fail-closed path sanitation under the active root.
 
+On the wire the session is framed sections: a JSON fetch descriptor,
+the declared files as a guarded tarball, the script as UTF-8 source
+text, then live stdin. The script leg carries rendered DSL source,
+not a serialized AST: header values render to `LET` source lines
+(non-renderable types bail before anything ships) and the guest
+re-parses and re-validates before running. Stdout and stderr stream
+live during the run while the closing result envelope carries content
+hashes.
+
 Dependency-light by design for use from the network plugin, the guest serve
 loop, and test harnesses. Filesystem application stays with the caller under
 guarded containment, and execution isolation stays with the operator and OS.

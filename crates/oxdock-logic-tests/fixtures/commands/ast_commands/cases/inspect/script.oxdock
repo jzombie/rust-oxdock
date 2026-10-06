@@ -4,7 +4,7 @@
 # and fixtures can assert engine invariants directly.
 LET $p: PIPE
 WITH_IO [stdout=$p] ECHO "payload"
-LET $info: MAP = INSPECT($p)
+LET $info: MAP<ANY> = INSPECT($p)
 WRITE type.txt "{{ $info.type }}"
 WRITE ospipe.txt "{{ $info.is_os_pipe }}"
 WRITE buf.txt "{{ $info.buffer_bytes }}"
@@ -13,5 +13,5 @@ IF $info.is_os_pipe {
     WRITE unexpected.txt "should be a script pipe"
 }
 LET $s: STRING = "hi"
-LET $si: MAP = INSPECT($s)
+LET $si: MAP<ANY> = INSPECT($s)
 WRITE sval.txt "{{ $si.type }}-{{ $si.value }}"

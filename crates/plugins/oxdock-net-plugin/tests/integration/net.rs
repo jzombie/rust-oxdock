@@ -112,7 +112,7 @@ fn listen_reports_loopback_addr_and_virtual_echo() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, NET]
-        LET $l: MAP = NET_LISTEN("23511", {})
+        LET $l: NET_LISTEN_INFO = NET_LISTEN("23511", {})
         WRITE addr.txt "{{ $l.addr }}"
         WRITE virt.txt "{{ $l.virtual }}"
         NET_CLOSE($l.listener)
@@ -135,7 +135,7 @@ fn physical_binds_rejected_in_script() {
         let script = format!(
             indoc! {r#"
                 IMPORT [STD, NET]
-                LET $l: MAP = NET_LISTEN("{bind}", {{}})
+                LET $l: NET_LISTEN_INFO = NET_LISTEN("{bind}", {{}})
             "#},
             bind = bind
         );
@@ -152,7 +152,7 @@ fn ephemeral_zero_banned_in_script() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, NET]
-        LET $l: MAP = NET_LISTEN("0", {})
+        LET $l: NET_LISTEN_INFO = NET_LISTEN("0", {})
     "#};
     let err = run_script(&root, script).expect_err("port 0 must fail");
     assert!(err.to_string().contains("-p 0:"), "{err:#}");
@@ -168,7 +168,7 @@ fn accept_connect_roundtrip() {
     let probe = root.clone();
     let script = indoc! {r#"
         IMPORT [STD, NET]
-        LET $l: MAP = NET_LISTEN("23513", {})
+        LET $l: NET_LISTEN_INFO = NET_LISTEN("23513", {})
         WRITE addr.txt "{{ $l.addr }}"
         LET $in: PIPE
         LET $out: PIPE
@@ -308,8 +308,8 @@ fn listen_refuses_while_serving() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, NET]
-        LET $a: MAP = NET_LISTEN("23514", {})
-        LET $b: MAP = NET_LISTEN("23514", {})
+        LET $a: NET_LISTEN_INFO = NET_LISTEN("23514", {})
+        LET $b: NET_LISTEN_INFO = NET_LISTEN("23514", {})
         NET_CLOSE($a.listener)
         NET_CLOSE($b.listener)
     "#};
@@ -327,9 +327,9 @@ fn reclaim_after_close_rebinds() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, NET]
-        LET $a: MAP = NET_LISTEN("23515", {})
+        LET $a: NET_LISTEN_INFO = NET_LISTEN("23515", {})
         NET_CLOSE($a.listener)
-        LET $b: MAP = NET_LISTEN("23515", {})
+        LET $b: NET_LISTEN_INFO = NET_LISTEN("23515", {})
         WRITE addr.txt "{{ $b.addr }}"
         NET_CLOSE($b.listener)
     "#};
@@ -350,7 +350,7 @@ fn close_during_accept_returns() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, NET]
-        LET $l: MAP = NET_LISTEN("23516", {})
+        LET $l: NET_LISTEN_INFO = NET_LISTEN("23516", {})
         LET $in: PIPE
         LET $out: PIPE
         LET $t: HANDLE = ASYNC { NET_ACCEPT($l.listener, $in, $out, {}) }
@@ -370,7 +370,7 @@ fn main_thread_accept_bails() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, NET]
-        LET $l: MAP = NET_LISTEN("23518", {})
+        LET $l: NET_LISTEN_INFO = NET_LISTEN("23518", {})
         LET $in: PIPE
         LET $out: PIPE
         NET_ACCEPT($l.listener, $in, $out, {})
@@ -402,7 +402,7 @@ fn unknown_options_bail() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, NET]
-        LET $l: MAP = NET_LISTEN("23519", {backlog: 5})
+        LET $l: NET_LISTEN_INFO = NET_LISTEN("23519", {backlog: 5})
     "#};
     let err = run_script(&root, script).expect_err("unknown listen option must fail");
     assert!(
@@ -455,7 +455,7 @@ fn proxy_terminates() {
     let script = indoc! {r#"
         IMPORT [STD, NET]
         LET $up_port: STRING = READ up.txt
-        LET $l: MAP = NET_LISTEN("23520", {})
+        LET $l: NET_LISTEN_INFO = NET_LISTEN("23520", {})
         WRITE addr.txt "{{ $l.addr }}"
         LET $s2c: PIPE
         LET $c2s: PIPE
@@ -530,7 +530,7 @@ fn cancel_accept_blocked_returns_promptly() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, NET]
-        LET $l: MAP = NET_LISTEN("23521", {})
+        LET $l: NET_LISTEN_INFO = NET_LISTEN("23521", {})
         LET $in: PIPE
         LET $out: PIPE
         LET $t: HANDLE = ASYNC { NET_ACCEPT($l.listener, $in, $out, {}) }
@@ -555,7 +555,7 @@ fn second_accept_serves_next_client() {
     let probe = root.clone();
     let script = indoc! {r#"
         IMPORT [STD, NET]
-        LET $l: MAP = NET_LISTEN("23522", {})
+        LET $l: NET_LISTEN_INFO = NET_LISTEN("23522", {})
         WRITE addr.txt "{{ $l.addr }}"
         LET $in1: PIPE
         LET $out1: PIPE
@@ -618,7 +618,7 @@ fn prebound_claim_serves_cli_mapped_socket() {
     let probe = root.clone();
     let script = indoc! {r#"
         IMPORT [STD, NET]
-        LET $l: MAP = NET_LISTEN("23530", {})
+        LET $l: NET_LISTEN_INFO = NET_LISTEN("23530", {})
         WRITE addr.txt "{{ $l.addr }}"
         LET $in: PIPE
         LET $out: PIPE
@@ -657,7 +657,7 @@ fn memory_session_roundtrips_with_zero_sockets() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, NET]
-        LET $l: MAP = NET_LISTEN("mem-echo", {})
+        LET $l: NET_LISTEN_INFO = NET_LISTEN("mem-echo", {})
         WRITE virt.txt "{{ $l.virtual }}"
         LET $sin: PIPE
         LET $sout: PIPE
@@ -694,7 +694,7 @@ fn memory_client_before_server_rendezvous() {
         LET $cout: PIPE
         LET $c: HANDLE = ASYNC { NET_CONNECT("mem-early", $cin, $cout, {}) }
         SLEEP 500ms
-        LET $l: MAP = NET_LISTEN("mem-early", {})
+        LET $l: NET_LISTEN_INFO = NET_LISTEN("mem-early", {})
         LET $sin: PIPE
         LET $sout: PIPE
         LET $t: HANDLE = ASYNC { NET_ACCEPT($l.listener, $sin, $sout, {}) }
@@ -753,7 +753,7 @@ fn offline_listen_and_close_opens_no_socket() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, NET]
-        LET $l: MAP = NET_LISTEN("23531", {})
+        LET $l: NET_LISTEN_INFO = NET_LISTEN("23531", {})
         WRITE addr.txt "{{ $l.addr }}"
         WRITE virt.txt "{{ $l.virtual }}"
         NET_CLOSE($l.listener)
@@ -786,6 +786,244 @@ fn offline_connect_bails_before_sockets() {
         let err = run_script_with(registry, &root, &script).expect_err("offline dial must fail");
         assert!(err.to_string().contains("--offline mode"), "{err:#}");
     }
+}
+
+#[test]
+fn fetch_cleartext_to_real_host_refuses_without_dialing() {
+    // The scheme gate fires before DNS or dial: no sockets open, so this
+    // runs under Miri.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD, NET]
+        LET $body: STRING = NET_FETCH("http://example.com/doc.json")
+    "#};
+    let err = run_script(&root, script).expect_err("cleartext must fail");
+    assert!(err.to_string().contains("cleartext"), "{err:#}");
+}
+
+#[test]
+fn fetch_in_placeholder_stays_unknown() {
+    // Stateful entries never reach the pure table behind `{{ }}`: the
+    // placeholder fails listing the known pure names, and `NET_FETCH`
+    // is not among them. No sockets open, so this runs under Miri.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD, NET]
+        WRITE tmpl.txt "body \{{ NET::NET_FETCH(\"http://127.0.0.1:9/x\") }}"
+        LET $buf: PIPE
+        WITH_IO [stdout=$buf] EXPAND tmpl.txt
+    "#};
+    let err = run_script(&root, script).expect_err("placeholder fetch must fail");
+    assert!(
+        err.to_string().contains("unknown placeholder function"),
+        "{err:#}"
+    );
+    let known = err
+        .to_string()
+        .split("known functions:")
+        .nth(1)
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        !known.contains("NET_FETCH"),
+        "pure listing must not offer NET_FETCH: {err:#}"
+    );
+}
+
+/// Serve one canned HTTP/1.1 response on loopback, then exit. Returns
+/// the bound address for `NET_FETCH` URLs.
+fn serve_http_once(body: Vec<u8>) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("timeout");
+        let mut seen = Vec::new();
+        let mut byte = [0u8; 1];
+        while seen.len() < 65536 {
+            match stream.read(&mut byte) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    seen.push(byte[0]);
+                    if seen.ends_with(b"\r\n\r\n") {
+                        break;
+                    }
+                }
+            }
+        }
+        let head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(head.as_bytes()).expect("head");
+        stream.write_all(&body).expect("body");
+    });
+    addr.to_string()
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "needs loopback TCP plus threads")]
+fn fetch_feeds_parse_json() {
+    // The stream shape end to end: bytes off the wire flow into the
+    // pure parser with no bespoke conversion. Ephemeral bind, so no
+    // fixed-port coordination.
+    let addr = serve_http_once(br#"{"name": "loopback"}"#.to_vec());
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = format!(
+        indoc! {r#"
+            IMPORT [STD, NET]
+            LET $body: STRING = NET_FETCH("http://{addr}/doc.json", {{}})
+            LET $doc: MAP<ANY> = PARSE_JSON($body)
+            ASSERT_EQ $doc.name "loopback"
+        "#},
+        addr = addr
+    );
+    run_script(&root, &script).expect("fetch into parse runs");
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "needs loopback TCP plus threads")]
+fn fetch_sends_custom_headers() {
+    // Headers from the options MAP reach the wire: the fixture
+    // captures the request head and the script asserts on it through
+    // a second fetch of the captured bytes. Ephemeral bind, so no
+    // fixed-port coordination.
+    use std::sync::{Arc, Mutex};
+    let seen: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let captured = Arc::clone(&seen);
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .expect("timeout");
+        let mut head = Vec::new();
+        let mut byte = [0u8; 1];
+        while head.len() < 65536 {
+            match stream.read(&mut byte) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {
+                    head.push(byte[0]);
+                    if head.ends_with(b"\r\n\r\n") {
+                        break;
+                    }
+                }
+            }
+        }
+        *captured.lock().expect("lock") = head;
+        let body = b"ok";
+        let head = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(head.as_bytes()).expect("head");
+        stream.write_all(body).expect("body");
+    });
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = format!(
+        indoc! {r#"
+            IMPORT [STD, NET]
+            LET $body: STRING = NET_FETCH("http://{addr}/doc.json", {{headers: {{x-test-name: "fetch-headers"}}}})
+            ASSERT_EQ $body "ok"
+        "#},
+        addr = addr
+    );
+    run_script(&root, &script).expect("fetch with headers runs");
+    let head = String::from_utf8_lossy(&seen.lock().expect("lock")).to_string();
+    assert!(
+        head.to_lowercase().contains("x-test-name: fetch-headers"),
+        "custom header must reach the wire: {head}"
+    );
+}
+
+#[test]
+fn fetch_arity_names_its_optional_range() {
+    // `$options` is omittable: zero and three args fail naming the
+    // 1-to-2 range, all before any socket opens, so this runs under
+    // Miri.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let err = run_script(&root, "IMPORT [STD, NET]\nLET $b: STRING = NET_FETCH()\n")
+        .expect_err("zero args must fail");
+    assert!(
+        err.to_string()
+            .contains("expects 1 to 2 argument(s), got 0"),
+        "{err:#}"
+    );
+    // Three args against a 1-to-2 range: the fillers never
+    // evaluate (the arity gate fires first), so their values are
+    // irrelevant, only their count.
+    let err = run_script(
+        &root,
+        "IMPORT [STD, NET]\nLET $b: STRING = NET_FETCH(\"http://example.com/x\", {}, {})\n",
+    )
+    .expect_err("three args must fail");
+    assert!(
+        err.to_string()
+            .contains("expects 1 to 2 argument(s), got 3"),
+        "{err:#}"
+    );
+}
+
+#[test]
+fn fetch_rejects_unknown_options_without_dialing() {
+    // The key check fires before any socket opens: example.com never
+    // dials, so this runs under Miri.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD, NET]
+        LET $body: STRING = NET_FETCH("http://example.com/doc.json", {bogus: 1})
+    "#};
+    let err = run_script(&root, script).expect_err("unknown option must fail");
+    assert!(err.to_string().contains("unknown option"), "{err:#}");
+}
+
+#[test]
+fn fetch_rejects_non_string_header_values_without_dialing() {
+    // Value shape is checked before any socket opens, so this runs
+    // under Miri.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD, NET]
+        LET $body: STRING = NET_FETCH("http://example.com/doc.json", {headers: {x-n: 1}})
+    "#};
+    let err = run_script(&root, script).expect_err("non-string header must fail");
+    assert!(err.to_string().contains("must be a STRING"), "{err:#}");
+}
+
+#[test]
+fn fetch_rejects_bad_timeout_without_dialing() {
+    // Duration parsing precedes the dial, so this runs under Miri.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD, NET]
+        LET $body: STRING = NET_FETCH("http://example.com/doc.json", {timeout: "soon"})
+    "#};
+    let err = run_script(&root, script).expect_err("bad timeout must fail");
+    assert!(err.to_string().contains("must be a duration"), "{err:#}");
+}
+
+#[test]
+fn fetch_rejects_negative_counts_without_dialing() {
+    // Count validation precedes the dial, so this runs under Miri.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD, NET]
+        LET $body: STRING = NET_FETCH("http://example.com/doc.json", {max_redirects: -1})
+    "#};
+    let err = run_script(&root, script).expect_err("negative count must fail");
+    assert!(err.to_string().contains("non-negative"), "{err:#}");
 }
 
 #[test]

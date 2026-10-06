@@ -16,7 +16,6 @@ use crate::state::{DownMsg, ServerState, UpMsg};
 
 /// Handle to one ephemeral SSH server instance.
 ///
-/// Minted by `SSH_SERVE`, consumed by `SSH_ACCEPT` and `SSH_CLOSE`.
 /// Cloning the value shares the server; dropping the last clone
 /// signals shutdown.
 #[oxdock_type(name = "SSH_SERVER")]
@@ -73,9 +72,8 @@ struct SshSessionInner {
 
 /// Handle to one dequeued SSH session instance.
 ///
-/// Minted by `SSH_DEQUEUE`, consumed once by `SSH_PUMP_CHANNEL`. Cloning
-/// the value shares the session; metadata reads never consume. Display
-/// shows id and peer only: the command string may carry secrets.
+/// Cloning the value shares the session; metadata reads never consume.
+/// Display shows id and peer only: the command string may carry secrets.
 #[oxdock_type(name = "SSH_SESSION")]
 #[derive(Debug, Clone)]
 pub struct SshSessionTag {

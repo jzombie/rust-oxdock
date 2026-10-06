@@ -241,6 +241,30 @@ fn read_trimmed(root: &GuardedPath, rel: &str) -> String {
 }
 
 #[test]
+fn remote_body_type_error_fails_before_shipping() {
+    // The host pre-pass descends into REMOTE bodies: a static error
+    // inside fails here with the type error, not the missing-runner
+    // bail, proving nothing ships before the body checks. The guest
+    // re-validates on arrival through the same entry point.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let steps = oxdock_core::parse_script(indoc! {r#"
+        REMOTE prod {
+            ECHO $undefined
+        }
+    "#})
+    .unwrap();
+    let fs: Box<dyn WorkspaceFs> = Box::new(PathResolver::new(root.root(), root.root()).unwrap());
+    let err = run_steps_with_manager(fs, &steps, MockProcessManager::default(), ExecIo::new())
+        .map(|_| ())
+        .expect_err("body type error must fail statically");
+    assert!(
+        err.to_string().contains("undefined variable $undefined"),
+        "static error wins over missing runner, got: {err:#}"
+    );
+}
+
+#[test]
 fn remote_without_runner_names_the_binding() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
@@ -311,7 +335,7 @@ fn remote_header_injection_executes() {
     let script = indoc! {r#"
         LET $version: STRING = "1.2.3"
         LET $count: INT = 41
-        LET $flags: LIST = ["a", "b"]
+        LET $flags: LIST<STRING> = ["a", "b"]
         ENV DEPLOY_ENV=staging
         REMOTE prod [$version, $count, $flags, env:DEPLOY_ENV] {
             WRITE version.txt $version
@@ -688,4 +712,44 @@ fn remote_inside_async_block_keeps_live_stdout_backend() {
         "REMOTE in an ASYNC block must keep its live stdout backend"
     );
     assert_eq!(read_trimmed(&root, "out.txt"), "live-block");
+}
+
+#[test]
+fn remote_guest_exit_fails_host_step() {
+    // EXIT inside a REMOTE body runs in the guest: it kills guest
+    // background children and bails the guest script with its code.
+    // The host keeps executing after the guest is already dead (the
+    // marker file proves it) and only AWAIT surfaces the guest
+    // failure as a step error carrying the same code as a value, not
+    // just text. The host itself never exits, so the harness keeps
+    // running.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let err = run_with_runner(
+        &root,
+        indoc! {r#"
+            LET $t: HANDLE = ASYNC REMOTE prod {
+                EXIT 3
+            }
+            WRITE host-alive.txt "still here"
+            AWAIT $t
+        "#},
+    )
+    .map(|_| ())
+    .expect_err("guest EXIT must fail the REMOTE step");
+    assert_eq!(
+        oxdock_core::exit_code_of(&err),
+        Some(3),
+        "guest exit code must relay as a value, got: {err:#}"
+    );
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("REMOTE 'prod' exited with code 3"),
+        "guest exit must surface, got: {msg}"
+    );
+    assert_eq!(
+        read_trimmed(&root, "host-alive.txt"),
+        "still here",
+        "host kept executing after the guest exited"
+    );
 }

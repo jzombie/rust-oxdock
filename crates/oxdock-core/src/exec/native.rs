@@ -4,9 +4,10 @@ use std::sync::Arc;
 use anyhow::Result;
 use oxdock_func_macro::oxdock_func;
 use oxdock_parser::{
-    KEYWORD_INSPECT, SCRIPT_MODULE_NAME, STD_MODULE_NAME, Step, Value, base_name, qualify,
-    split_qualified,
+    Field, KEYWORD_INSPECT, SCRIPT_MODULE_NAME, STD_MODULE_NAME, SemaphoreState, Step, TypeTag,
+    Value, base_name, qualify, render_structural, split_qualified,
 };
+use oxdock_pipe::PipeHandle;
 use oxdock_process::{CommandStdin, DefaultProcessManager, ProcessManager};
 
 use super::io::StreamHandle;
@@ -37,10 +38,74 @@ impl FuncKind {
 
 /// One declared parameter of a registered function. `param_type` is `None`
 /// for unconstrained `Value` parameters (the macro accepts any value).
+/// `allowed` names the closed value set for constrained `STRING`
+/// parameters, declared once via `#[values(...)]`: the generated
+/// extractor enforces membership and the reference renders the set,
+/// so the list cannot rot apart from the check. `docs` carries the
+/// parameter's description (parsed from the `# Arguments` doc section
+/// for macro functions, written inline for hand-built entries) and
+/// renders into every reference surface. `options` declares the known
+/// keys of a `MAP` options parameter: same single-source rule as
+/// `allowed`, with per-key types, required flags, defaults, and docs.
+/// `optional` marks a trailing `MAP` parameter callers may omit: the
+/// runtime fills an empty MAP, and signatures render `= {}`. Only
+/// trailing `MAP` params may be optional (run-start validation
+/// rejects anything else), so omission always means "no options".
+/// The macro never emits optional params: only hand-built entries
+/// use them, and only for options MAPs.
 #[derive(Debug, Clone)]
 pub struct FuncParam {
     pub name: String,
-    pub param_type: Option<String>,
+    pub param_type: Option<TypeTag>,
+    pub allowed: Option<&'static [&'static str]>,
+    pub docs: &'static str,
+    pub options: Option<&'static [ParamOption]>,
+    pub optional: bool,
+}
+
+/// Required argument count: total params minus trailing optionals.
+/// Callers may pass any count in `required..=total`; omitted trailing
+/// MAPs fill with an empty MAP. Shared by the static arity gate and
+/// the runtime gate so the two can never disagree.
+pub fn required_arity(params: &[FuncParam]) -> usize {
+    params
+        .iter()
+        .rev()
+        .take_while(|param| param.optional)
+        .fold(params.len(), |count, _| count - 1)
+}
+
+/// Fill omitted trailing optional MAP params with empty MAPs. The
+/// caller guarantees `values.len()` is within
+/// `required_arity(params)..=params.len()`; anything else is a bug,
+/// not a user error, so over- and under-counts panic loudly.
+pub fn fill_optional_args(params: &[FuncParam], mut values: Vec<Value>) -> Vec<Value> {
+    assert!(
+        values.len() <= params.len(),
+        "arity gate must run before fill_optional_args"
+    );
+    assert!(
+        values.len() >= required_arity(params),
+        "arity gate must run before fill_optional_args"
+    );
+    while values.len() < params.len() {
+        values.push(Value::map(BTreeMap::new()));
+    }
+    values
+}
+
+/// One known key of a `MAP` options parameter: name, value type,
+/// whether callers must pass it, the rendered default for optional
+/// keys, and what it controls. Declared once per options parameter
+/// (macro `#[options(...)]` plus the `# Options` doc section, or
+/// inline for hand-built entries) and rendered into signatures,
+/// `DESCRIBE` output, and generated references alike.
+#[derive(Debug, Clone, Copy)]
+pub struct ParamOption {
+    pub name: &'static str,
+    pub value: TypeTag,
+    pub required: bool,
+    pub default: Option<&'static str>,
 }
 
 /// Introspectable metadata for one function. Single source for
@@ -57,7 +122,7 @@ pub struct FuncMeta {
     pub module: String,
     pub kind: FuncKind,
     pub params: Option<Vec<FuncParam>>,
-    pub returns: Option<String>,
+    pub returns: Option<TypeTag>,
     pub rpn: bool,
     pub summary: &'static str,
     pub docs: &'static str,
@@ -128,9 +193,11 @@ impl<P: ProcessManager> HostRegistration<P> {
 }
 
 /// One user-defined function body (`FUNC NAME($p: TYPE, ...) { ... }`).
+/// Param types resolve to tags at definition time, where the type
+/// directory is in scope; the registry never holds raw type strings.
 #[derive(Debug, Clone)]
 pub(super) struct FuncDefData {
-    pub(super) params: Vec<(String, String)>,
+    pub(super) params: Vec<(String, TypeTag)>,
     pub(super) body: Vec<Step>,
 }
 
@@ -194,15 +261,22 @@ impl<P: ProcessManager> Clone for ScopeFrame<P> {
 /// scope exit, shadowing an outer definition restores it); native entries
 /// persist for the run. Shared across `fork()` via clone; the entry maps
 /// clone while scope frames stay per state.
+/// Module to function-name table of pure entries, shared by reference.
+/// Nested so placeholder dispatch looks up `table[module][func]` with
+/// zero allocation; rebuilt only when native entries register.
+pub type PureTable = HashMap<String, HashMap<String, PureFn>>;
+
 pub struct FunctionRegistry<P: ProcessManager> {
     entries: HashMap<String, FuncEntry<P>>,
     scopes: Vec<ScopeFrame<P>>,
+    pure_shared: Arc<PureTable>,
 }
 
 impl<P: ProcessManager> FunctionRegistry<P> {
     pub(super) fn with_builtins() -> Self {
         let mut reg = Self {
             entries: HashMap::new(),
+            pure_shared: Arc::new(HashMap::new()),
             scopes: vec![ScopeFrame {
                 defined: HashSet::new(),
                 shadowed: Vec::new(),
@@ -237,7 +311,14 @@ impl<P: ProcessManager> FunctionRegistry<P> {
             Glob::registration(),
             LoadToml::registration(),
             LoadJson::registration(),
+            ParseToml::registration(),
+            ParseJson::registration(),
             PathType::registration(),
+            HasKey::registration(),
+            MapSet::registration(),
+            MergeMaps::registration(),
+            ToJson::registration(),
+            TypeOf::registration(),
             Functions::registration(),
             Describe::registration(),
             IsTerminal::registration(),
@@ -261,6 +342,26 @@ impl<P: ProcessManager> FunctionRegistry<P> {
 
     fn insert_native(&mut self, name: String, meta: FuncMeta, body: FuncBody<P>) {
         self.entries.insert(name, FuncEntry { meta, body });
+        self.rebuild_pure_shared();
+    }
+
+    /// Rebuild the shared pure table. Runs only on native insertion:
+    /// script definitions insert `Script` bodies directly and never
+    /// affect the pure set, so this stays correct between rebuilds.
+    fn rebuild_pure_shared(&mut self) {
+        let mut table: PureTable = HashMap::new();
+        for (name, entry) in &self.entries {
+            let FuncBody::Pure(ref func) = entry.body else {
+                continue;
+            };
+            if let Some((module, base)) = split_qualified(name) {
+                table
+                    .entry(module.to_string())
+                    .or_default()
+                    .insert(base.to_string(), Arc::clone(func));
+            }
+        }
+        self.pure_shared = Arc::new(table);
     }
 
     /// Insert under `MODULE::BASE`, stamping provenance on the metadata.
@@ -314,7 +415,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
     pub(super) fn define_script(
         &mut self,
         name: &str,
-        params: &[(String, String)],
+        params: &[(String, TypeTag)],
         body: &[Step],
     ) -> Result<()> {
         let qualified = qualify(SCRIPT_MODULE_NAME, name);
@@ -350,7 +451,13 @@ impl<P: ProcessManager> FunctionRegistry<P> {
                             .iter()
                             .map(|(name, param_type)| FuncParam {
                                 name: name.clone(),
-                                param_type: Some(param_type.clone()),
+                                param_type: Some(*param_type),
+                                allowed: None,
+                                // Script `FUNC` params carry no prose:
+                                // declarations have no doc syntax.
+                                docs: "",
+                                options: None,
+                                optional: false,
                             })
                             .collect(),
                     ),
@@ -416,6 +523,19 @@ impl<P: ProcessManager> FunctionRegistry<P> {
         }
     }
 
+    /// Shared snapshot of every pure entry, nested by module and base
+    /// name. Cloning the `Arc` is refcount-only: placeholder dispatch
+    /// borrows this per expansion with no map copies.
+    pub(super) fn pure_shared(&self) -> Arc<PureTable> {
+        Arc::clone(&self.pure_shared)
+    }
+
+    /// Every entry's metadata, scripts included, sorted by name. Backs
+    /// run-start type tag validation.
+    pub(super) fn all_metas(&self) -> Vec<FuncMeta> {
+        self.entries_metas()
+    }
+
     /// Clone the ctx fn for `name` (ending the registry borrow) so callers
     /// can invoke it with `&mut StepCtx` without double-borrowing state.
     fn clone_ctx_fn(&self, name: &str) -> Option<NativeFn<P>> {
@@ -458,6 +578,7 @@ impl<P: ProcessManager> Clone for FunctionRegistry<P> {
         Self {
             entries: self.entries.clone(),
             scopes: self.scopes.clone(),
+            pure_shared: Arc::clone(&self.pure_shared),
         }
     }
 }
@@ -510,57 +631,212 @@ pub fn std_module_table() -> oxdock_parser::ModuleTable {
 ///
 /// Trims ASCII whitespace and parses i64. Passes Int through; Float only
 /// when integral and finite.
-#[oxdock_func(pure, returns = "INT")]
-fn int(val: Value) -> Result<Value> {
+///
+#[oxdock_func(pure, returns = TypeTag::Int)]
+fn int(
+    /// Value to convert to `INT`.
+    val: Value,
+) -> Result<Value> {
     super::args::int_from_value(val)
 }
 
 /// Convert a value to FLOAT.
 ///
 /// Parses f64 (accepts int strings), bails on non-finite or non-numeric.
-#[oxdock_func(pure, returns = "FLOAT")]
-fn float(val: Value) -> Result<Value> {
+///
+#[oxdock_func(pure, returns = TypeTag::Float)]
+fn float(
+    /// Value to convert to `FLOAT`.
+    val: Value,
+) -> Result<Value> {
     super::args::float_from_value(val)
 }
 
 /// List workspace paths matching a glob pattern.
 ///
 /// Sorted, root-relative LIST; empty on no match or `..` escape.
-#[oxdock_func(rpn, returns = "LIST")]
-fn glob<P: ProcessManager>(cx: &mut StepCtx<P>, pattern: String) -> Result<Value> {
+///
+#[oxdock_func(rpn, returns = TypeTag::ListOf(&TypeTag::String))]
+fn glob<P: ProcessManager>(
+    cx: &mut StepCtx<P>,
+    /// Glob pattern matched against workspace paths.
+    pattern: String,
+) -> Result<Value> {
     super::args::glob_from_value(&[Value::string(pattern)], cx)
 }
 
 /// Load and parse a TOML file.
 ///
 /// Reads a workspace file and parses TOML into a DSL value.
-#[oxdock_func(rpn, returns = "MAP")]
-fn load_toml<P: ProcessManager>(cx: &mut StepCtx<P>, path: String) -> Result<Value> {
+///
+#[oxdock_func(rpn, returns = TypeTag::MapOf(&TypeTag::Any))]
+fn load_toml<P: ProcessManager>(
+    cx: &mut StepCtx<P>,
+    /// Workspace file path to load and parse as TOML.
+    path: String,
+) -> Result<Value> {
     super::args::load_toml_from_value(&[Value::string(path)], cx)
 }
 
 /// Load and parse a JSON file.
 ///
-/// Reads a workspace file and parses JSON into a DSL value.
-#[oxdock_func(rpn, returns = "MAP")]
-fn load_json<P: ProcessManager>(cx: &mut StepCtx<P>, path: String) -> Result<Value> {
+/// Reads a workspace file and parses JSON into a DSL value. Returns
+/// `ANY` by design: a top-level array or scalar parses to `LIST` or a
+/// scalar word. `LET` coercion still checks the actual value at
+/// assignment.
+///
+#[oxdock_func(rpn, returns = TypeTag::Any)]
+fn load_json<P: ProcessManager>(
+    cx: &mut StepCtx<P>,
+    /// Workspace file path to load and parse as JSON.
+    path: String,
+) -> Result<Value> {
     super::args::load_json_from_value(&[Value::string(path)], cx)
+}
+
+/// Parse TOML text already held in memory.
+///
+/// Uses the same conversion as file loading, so fetch bodies, file
+/// contents, and captured text share one JSON/TOML shape.
+///
+#[oxdock_func(pure, returns = TypeTag::MapOf(&TypeTag::Any))]
+fn parse_toml(
+    /// TOML text already held in memory.
+    text: String,
+) -> Result<Value> {
+    super::args::parse_toml_from_value(Value::string(text))
+}
+
+/// Parse JSON text already held in memory.
+///
+/// Uses the same conversion as file loading, so fetch bodies, file
+/// contents, and captured text share one JSON value shape. Returns
+/// `ANY` by design, matching `LOAD_JSON`: a top-level array or scalar
+/// parses to `LIST` or a scalar word. `LET` coercion still checks the
+/// actual value at assignment.
+///
+/// ```oxdock
+/// # Parse in-memory JSON text with the same conversion as file loading.
+/// IMPORT [STD]
+/// LET $body: STRING = "{\"a\": 1}"
+/// LET $doc: ANY = PARSE_JSON($body)
+/// ASSERT_EQ $doc.a 1
+///
+/// # Top-level arrays parse to LIST, which is why the return is ANY.
+/// LET $items: LIST<ANY> = PARSE_JSON("[1, 2]")
+/// ASSERT_EQ $items.0 1
+/// ASSERT_EQ $items.1 2
+/// ```
+///
+#[oxdock_func(pure, returns = TypeTag::Any)]
+fn parse_json(
+    /// JSON text already held in memory.
+    text: String,
+) -> Result<Value> {
+    super::args::parse_json_from_value(Value::string(text))
 }
 
 /// Describe a filesystem entry.
 ///
 /// Reports file, dir, symlink (no-follow), or absent. AST-only by design;
 /// there is no RPN arm for filesystem IO.
-#[oxdock_func(returns = "STRING")]
-fn path_type<P: ProcessManager>(cx: &mut StepCtx<P>, path: String) -> Result<Value> {
+///
+#[oxdock_func(returns = TypeTag::String)]
+fn path_type<P: ProcessManager>(
+    cx: &mut StepCtx<P>,
+    /// Workspace path of the entry to describe.
+    path: String,
+) -> Result<Value> {
     super::args::path_type_from_value(&[Value::string(path)], cx)
+}
+
+/// Report whether a map holds a key.
+///
+/// Pure MAP probe so scripts can branch on optional fields without
+/// tripping the strict missing-key error.
+///
+#[oxdock_func(pure, returns = TypeTag::Bool)]
+fn has_key(
+    /// Map to probe.
+    map: BTreeMap<String, Value>,
+    /// Key to look up.
+    key: String,
+) -> Result<Value> {
+    super::args::has_key_from_value(Value::map(map), &key)
+}
+
+/// Insert one key into a map.
+///
+/// Fails on duplicates so two entries sharing a key fail the run
+/// instead of silently shadowing each other.
+///
+#[oxdock_func(pure, returns = TypeTag::MapOf(&TypeTag::Any))]
+fn map_set(
+    /// Map to insert into.
+    map: BTreeMap<String, Value>,
+    /// Key to insert; duplicates fail.
+    key: String,
+    /// Value to store.
+    value: Value,
+) -> Result<Value> {
+    super::args::map_set_from_value(Value::map(map), key, value)
+}
+
+/// Encode a script value as JSON with one trailing newline.
+///
+/// Maps stay sorted; only template-safe shapes (STRING, INT, FLOAT,
+/// BOOL, LIST, MAP) survive, anything else fails here instead of
+/// rendering as a silent empty.
+///
+#[oxdock_func(pure, returns = TypeTag::String)]
+fn to_json(
+    /// Value to encode as JSON.
+    value: Value,
+) -> Result<Value> {
+    super::args::to_json_from_value(value)
+}
+
+/// Name the word a value holds, for data-driven branching.
+///
+/// Returns the registered type word (`STRING`, `INT`, `FLOAT`, `BOOL`,
+/// `LIST`, `MAP`, plus handle words like `PIPE`): the same name the
+/// value prints in arity and coercion errors, so scripts can branch
+/// on config shapes (a path string or a path list) without failing.
+///
+#[oxdock_func(pure, returns = TypeTag::String)]
+fn type_of(
+    /// Value whose word to name.
+    value: Value,
+) -> Result<Value> {
+    super::args::type_of_from_value(value)
+}
+
+/// Merge a LIST of MAPs in order under one duplicate policy.
+///
+/// `fail_on_duplicate` fails naming the repeated key, so two files
+/// claiming one placeholder fail the run instead of shadowing each
+/// other. `overwrite` lets later files win, for environment overlays.
+/// Non MAP elements fail naming their position.
+///
+#[oxdock_func(pure, returns = TypeTag::MapOf(&TypeTag::Any))]
+fn merge_maps(
+    /// LIST of MAPs to merge in order.
+    maps: Vec<BTreeMap<String, Value>>,
+    /// Duplicate policy.
+    #[values("fail_on_duplicate", "overwrite")]
+    policy: String,
+) -> Result<Value> {
+    super::args::merge_maps_from_value(
+        Value::list(maps.into_iter().map(Value::map).collect()),
+        policy,
+    )
 }
 
 /// List all visible function names.
 ///
 /// Sorted LIST of qualified `MODULE::NAME` entries: DSL-defined plus native
 /// plus host-registered names.
-#[oxdock_func(returns = "LIST")]
+#[oxdock_func(returns = TypeTag::ListOf(&TypeTag::String))]
 fn functions<P: ProcessManager>(cx: &mut StepCtx<P>) -> Result<Value> {
     let mut names: Vec<String> = cx
         .state
@@ -575,12 +851,66 @@ fn functions<P: ProcessManager>(cx: &mut StepCtx<P>) -> Result<Value> {
 
 /// Describe one function by qualified name.
 ///
-/// Returns a MAP with name, module, kind, params, returns, and summary.
-/// Bare names fail closed: `DESCRIBE` requires the qualified form (except
-/// `INSPECT`, which is syntax rather than a registry entry). Errors on
-/// unknown function.
-#[oxdock_func(returns = "MAP")]
-fn describe<P: ProcessManager>(cx: &mut StepCtx<P>, name: String) -> Result<Value> {
+/// Returns a MAP with name, module, kind, params, returns, rpn, and
+/// summary. `params` is always a LIST (empty for parameterless
+/// functions) of entries carrying name, param_type, allowed, docs,
+/// options, and optional flags, so the shape holds for every entry. Bare names
+/// fail closed: `DESCRIBE` requires the qualified form (except
+/// `INSPECT`, which is syntax rather than a registry entry). Errors
+/// on unknown function.
+///
+/// Field table for the `DESCRIBE` result bundle: one source for the
+/// shape the host mints, so introspection, enforcement, and
+/// documentation cannot drift apart. `const` (not `static`) so the
+/// inline `Record` below const-promotes to `'static` like the
+/// `TYPE_DESCRIBE` table beside it.
+const DESCRIBE_PARAMS_MAP: TypeTag = TypeTag::MapOf(&TypeTag::Any);
+const DESCRIBE_PARAMS: TypeTag = TypeTag::ListOf(&DESCRIBE_PARAMS_MAP);
+
+#[oxdock_func(
+    returns = TypeTag::Record(&[Field {
+        name: "name",
+        ty: TypeTag::String,
+        docs: "Qualified function name.",
+        optional: false,
+    }, Field {
+        name: "module",
+        ty: TypeTag::String,
+        docs: "Owning module.",
+        optional: false,
+    }, Field {
+        name: "kind",
+        ty: TypeTag::String,
+        docs: "Origin label (`host` or `script`).",
+        optional: false,
+    }, Field {
+        name: "params",
+        ty: DESCRIBE_PARAMS,
+        docs: "Parameter entries (empty for parameterless functions).",
+        optional: false,
+    }, Field {
+        name: "returns",
+        ty: TypeTag::String,
+        docs: "Structural return shape (empty when untagged).",
+        optional: false,
+    }, Field {
+        name: "rpn",
+        ty: TypeTag::Bool,
+        docs: "True when callable in RPN position.",
+        optional: false,
+    }, Field {
+        name: "summary",
+        ty: TypeTag::String,
+        docs: "One-line description.",
+        optional: false,
+    }]),
+    summary = "Describe one function by qualified name."
+)]
+fn describe<P: ProcessManager>(
+    cx: &mut StepCtx<P>,
+    /// Qualified function name (`MODULE::NAME`).
+    name: String,
+) -> Result<Value> {
     if split_qualified(&name).is_none() && name != KEYWORD_INSPECT {
         anyhow::bail!(
             "unknown function `{name}`: DESCRIBE requires a qualified name (e.g. `STD::{name}`)"
@@ -596,7 +926,7 @@ fn describe<P: ProcessManager>(cx: &mut StepCtx<P>, name: String) -> Result<Valu
 /// Sorted LIST of startup plus host-registered type descriptors. Reads the
 /// run's name directory, so it runs on the AST path like the other
 /// introspection functions.
-#[oxdock_func(returns = "LIST")]
+#[oxdock_func(returns = TypeTag::ListOf(&TypeTag::String))]
 fn types<P: ProcessManager>(cx: &mut StepCtx<P>) -> Result<Value> {
     Ok(Value::list(
         cx.state
@@ -611,27 +941,62 @@ fn types<P: ProcessManager>(cx: &mut StepCtx<P>) -> Result<Value> {
 ///
 /// Returns a MAP with name, summary, and docs. Errors on unknown type.
 /// Reads the run's name directory, so it runs on the AST path.
-#[oxdock_func(returns = "MAP")]
-fn type_describe<P: ProcessManager>(cx: &mut StepCtx<P>, name: String) -> Result<Value> {
-    cx.state
-        .describe_type(&name)
-        .map(|descriptor| {
-            let mut map = BTreeMap::new();
-            map.insert(
-                "name".to_string(),
-                Value::string(descriptor.name.to_string()),
-            );
-            map.insert(
-                "summary".to_string(),
-                Value::string(descriptor.summary.to_string()),
-            );
-            map.insert(
-                "docs".to_string(),
-                Value::string(descriptor.docs.to_string()),
-            );
-            Value::map(map)
-        })
-        .ok_or_else(|| anyhow::anyhow!("unknown type {name}"))
+///
+#[oxdock_func(returns = TypeTag::Record(&[Field {
+    name: "name",
+    ty: TypeTag::String,
+    docs: "Queried type name.",
+    optional: false,
+}, Field {
+    name: "summary",
+    ty: TypeTag::String,
+    docs: "One-line description.",
+    optional: false,
+}, Field {
+    name: "docs",
+    ty: TypeTag::String,
+    docs: "Full documentation text.",
+    optional: false,
+}]))]
+fn type_describe<P: ProcessManager>(
+    cx: &mut StepCtx<P>,
+    /// Type name to describe.
+    name: String,
+) -> Result<Value> {
+    if let Some(descriptor) = cx.state.describe_type(&name) {
+        let mut map = BTreeMap::new();
+        map.insert(
+            "name".to_string(),
+            Value::string(descriptor.name.to_string()),
+        );
+        map.insert(
+            "summary".to_string(),
+            Value::string(descriptor.summary.to_string()),
+        );
+        map.insert(
+            "docs".to_string(),
+            Value::string(descriptor.docs.to_string()),
+        );
+        return Ok(Value::map(map));
+    }
+    // Script aliases have no descriptor but introspect the same way:
+    // the entry names the alias and its canonical target spelling.
+    if let Some(target) = cx.state.alias_target(&name) {
+        let mut map = BTreeMap::new();
+        map.insert("name".to_string(), Value::string(name.clone()));
+        map.insert(
+            "summary".to_string(),
+            Value::string(format!("Script type alias for {target}.")),
+        );
+        map.insert(
+            "docs".to_string(),
+            Value::string(format!(
+                "Declared with TYPE {name} = {target}. The alias expands structurally at every declaration."
+            )),
+        );
+        return Ok(Value::map(map));
+    }
+    Err(anyhow::anyhow!("unknown type {name}"))
 }
 
 /// Report whether a standard stream is a terminal.
@@ -646,10 +1011,16 @@ fn type_describe<P: ProcessManager>(cx: &mut StepCtx<P>, name: String) -> Result
 /// still answers the session question via the process check. The name
 /// matches exactly (no case folding): anything else bails. AST-only:
 /// reads the step context like the other introspection functions.
-#[oxdock_func(returns = "BOOL")]
-fn is_terminal<P: ProcessManager>(cx: &mut StepCtx<P>, stream: String) -> Result<Value> {
+///
+#[oxdock_func(returns = TypeTag::Bool)]
+fn is_terminal<P: ProcessManager>(
+    cx: &mut StepCtx<P>,
+    /// Stream name: `stdin`, `stdout`, or `stderr` (exact match).
+    #[values("stdin", "stdout", "stderr")]
+    stream_name: String,
+) -> Result<Value> {
     use std::io::IsTerminal;
-    let terminal = match stream.as_str() {
+    let terminal = match stream_name.as_str() {
         "stdin" => {
             // A script-pipe backend is definitive; Null is /dev/null.
             // Only a directly inherited fd answers the process check: a
@@ -713,7 +1084,11 @@ fn is_terminal<P: ProcessManager>(cx: &mut StepCtx<P>, stream: String) -> Result
             }
         }
         _ => anyhow::bail!(
-            "IS_TERMINAL expects \"stdin\", \"stdout\", or \"stderr\", got {stream:?}"
+            // Unreachable through the macro path: the generated
+            // extractor rejects non-members before the body runs, and
+            // the static pre-pass rejects bad literals earlier still.
+            // Kept as a bail (never a panic) for hand-built callers.
+            "IS_TERMINAL expects \"stdin\", \"stdout\", or \"stderr\", got {stream_name:?}"
         ),
     };
     Ok(Value::bool(terminal))
@@ -726,11 +1101,22 @@ fn is_terminal<P: ProcessManager>(cx: &mut StepCtx<P>, stream: String) -> Result
 /// `SEMAPHORE_TRY_ACQUIRE`, never through the `SEMAPHORE_AVAILABLE`
 /// readout.
 ///
-/// ```text
-/// LET $sem: SEMAPHORE = SEMAPHORE_NEW(10)
+/// ```oxdock
+/// # Mint a semaphore admitting at most two holders.
+/// IMPORT [STD]
+/// LET $sem: SEMAPHORE = SEMAPHORE_NEW(2)
+///
+/// # A fresh semaphore reports its full cap as available.
+/// LET $free: INT = SEMAPHORE_AVAILABLE($sem)
+/// ASSERT_EQ $free 2
 /// ```
-#[oxdock_func(returns = "SEMAPHORE")]
-fn semaphore_new<P: ProcessManager>(cx: &mut StepCtx<P>, max: i64) -> Result<Value> {
+///
+#[oxdock_func(returns = TypeTag::Semaphore)]
+fn semaphore_new<P: ProcessManager>(
+    cx: &mut StepCtx<P>,
+    /// Maximum concurrent holders; must be positive.
+    max: i64,
+) -> Result<Value> {
     let _ = cx;
     if max <= 0 {
         return Err(anyhow::anyhow!(
@@ -742,37 +1128,50 @@ fn semaphore_new<P: ProcessManager>(cx: &mut StepCtx<P>, max: i64) -> Result<Val
 
 /// Attempt one non-blocking acquire, always answering a MAP.
 ///
-/// `held` is `1` with the permit under the `permit` key, or `0` with no
-/// `permit` key: branch on `$m.held == 1` (an INT compare; bare `IF $m.held`
-/// is a Type Error). The DSL has no null, so the absent key is the miss
-/// shape. Do not read `$m.permit` unless `held == 1`: missing-key access
-/// bails strictly.
+/// `held` is `true` with the permit under the `permit` key, or `false`
+/// with no `permit` key: branch on `$m.held` directly. The DSL has no
+/// null, so the absent key is the miss shape. Do not read `$m.permit`
+/// unless `held`: missing-key access bails strictly.
 /// Never waits, so no wait can wedge.
 ///
-/// ```text
-/// LET $acq: MAP = SEMAPHORE_TRY_ACQUIRE($sem)
-/// IF $acq.held == 0 {
-///   ECHO "at cap, rejecting"
-/// } ELSE {
-///   LET $permit: PERMIT = $acq.permit
-///   ASYNC { session work }
-/// }
+/// ```oxdock
+/// # First acquire holds with a permit to bind.
+/// IMPORT [STD]
+/// LET $sem: SEMAPHORE = SEMAPHORE_NEW(1)
+/// LET $first: MAP<held: BOOL, permit?: PERMIT> = SEMAPHORE_TRY_ACQUIRE($sem)
+/// ASSERT_EQ $first.held true
+/// LET $permit: PERMIT = $first.permit
+///
+/// # A capped semaphore answers held false with no permit key.
+/// LET $second: MAP<held: BOOL, permit?: PERMIT> = SEMAPHORE_TRY_ACQUIRE($sem)
+/// ASSERT_EQ $second.held false
+/// LET $has_permit: BOOL = HAS_KEY($second, "permit")
+/// ASSERT_EQ $has_permit false
 /// ```
-#[oxdock_func(returns = "MAP")]
-fn semaphore_try_acquire<P: ProcessManager>(cx: &mut StepCtx<P>, sem: Value) -> Result<Value> {
+///
+#[oxdock_func(returns = TypeTag::Record(&[Field {
+    name: "held",
+    ty: TypeTag::Bool,
+    docs: "`true` with the permit under `permit`, `false` with no `permit` key.",
+    optional: false,
+}, Field {
+    name: "permit",
+    ty: TypeTag::Permit,
+    docs: "Permit handle; read only when `held`.",
+    optional: true,
+}]))]
+fn semaphore_try_acquire<P: ProcessManager>(
+    cx: &mut StepCtx<P>,
+    /// Semaphore handle from `SEMAPHORE_NEW`.
+    sem: Arc<SemaphoreState>,
+) -> Result<Value> {
     let _ = cx;
-    let Some(sem) = sem.as_semaphore() else {
-        return Err(anyhow::anyhow!(
-            "SEMAPHORE_TRY_ACQUIRE() argument `$sem` must be a SEMAPHORE, got {}",
-            sem.type_name(),
-        ));
-    };
     let mut map = BTreeMap::new();
     if sem.try_acquire() {
-        map.insert("held".to_string(), Value::int(1));
+        map.insert("held".to_string(), Value::bool(true));
         map.insert("permit".to_string(), Value::permit(&sem));
     } else {
-        map.insert("held".to_string(), Value::int(0));
+        map.insert("held".to_string(), Value::bool(false));
     }
     Ok(Value::map(map))
 }
@@ -783,17 +1182,23 @@ fn semaphore_try_acquire<P: ProcessManager>(cx: &mut StepCtx<P>, sem: Value) -> 
 /// Exact at read time and stale the instant the caller acts on it, so it
 /// must never drive admission: that is `SEMAPHORE_TRY_ACQUIRE`'s job.
 ///
-/// ```text
+/// ```oxdock
+/// # Hold one permit on a cap of two.
+/// IMPORT [STD]
+/// LET $sem: SEMAPHORE = SEMAPHORE_NEW(2)
+/// LET $acq: MAP<held: BOOL, permit?: PERMIT> = SEMAPHORE_TRY_ACQUIRE($sem)
+/// ASSERT_EQ $acq.held true
+///
+/// # One held permit leaves exactly one free.
 /// LET $free: INT = SEMAPHORE_AVAILABLE($sem)
+/// ASSERT_EQ $free 1
 /// ```
-#[oxdock_func(pure, returns = "INT")]
-fn semaphore_available(sem: Value) -> Result<Value> {
-    let Some(sem) = sem.as_semaphore() else {
-        return Err(anyhow::anyhow!(
-            "SEMAPHORE_AVAILABLE() argument `$sem` must be a SEMAPHORE, got {}",
-            sem.type_name(),
-        ));
-    };
+///
+#[oxdock_func(pure, returns = TypeTag::Int)]
+fn semaphore_available(
+    /// Semaphore handle from `SEMAPHORE_NEW`.
+    sem: Arc<SemaphoreState>,
+) -> Result<Value> {
     Ok(Value::int(sem.available() as i64))
 }
 
@@ -803,7 +1208,9 @@ fn semaphore_available(sem: Value) -> Result<Value> {
 /// Never blocks: a reader already blocked stays blocked, so branch on
 /// `EOF` before reading, not after. OS pairs and unbound handles answer
 /// best-effort (kernel bytes are invisible there; see `INSPECT`).
-/// Non-pipe arguments bail.
+/// Non-pipe arguments bail at the boundary: the parameter declares
+/// `PIPE`, so the extractor and the static pass reject them before
+/// the body runs.
 ///
 /// ```oxdock
 /// # Capture two lines, then drain to end of stream with no sentinel line.
@@ -822,15 +1229,14 @@ fn semaphore_available(sem: Value) -> Result<Value> {
 /// }
 /// ASSERT_EQ $n 2
 /// ```
-#[oxdock_func(returns = "BOOL")]
-fn eof<P: ProcessManager>(cx: &mut StepCtx<P>, pipe: Value) -> Result<Value> {
-    let Some(handle) = pipe.as_pipe_handle() else {
-        return Err(anyhow::anyhow!(
-            "EOF() argument `$pipe` must be a PIPE, got {}",
-            pipe.type_name(),
-        ));
-    };
-    let info = cx.state.io.inspect_pipe(&handle);
+///
+#[oxdock_func(returns = TypeTag::Bool)]
+fn eof<P: ProcessManager>(
+    cx: &mut StepCtx<P>,
+    /// Pipe handle to query for end of stream.
+    pipe: PipeHandle,
+) -> Result<Value> {
+    let info = cx.state.io.inspect_pipe(&pipe);
     Ok(Value::bool(info.closed && info.buffered == 0))
 }
 
@@ -851,18 +1257,73 @@ fn meta_to_value(meta: &FuncMeta) -> Value {
                     entry.insert("name".to_string(), Value::string(p.name.clone()));
                     entry.insert(
                         "param_type".to_string(),
-                        Value::string(p.param_type.clone().unwrap_or_default()),
+                        Value::string(
+                            p.param_type
+                                .as_ref()
+                                .map(render_structural)
+                                .unwrap_or_default(),
+                        ),
+                    );
+                    entry.insert(
+                        "allowed".to_string(),
+                        Value::string(
+                            p.allowed
+                                .map(|values| values.join(", "))
+                                .unwrap_or_default(),
+                        ),
+                    );
+                    entry.insert("docs".to_string(), Value::string(String::new()));
+                    entry.insert("optional".to_string(), Value::bool(p.optional));
+                    entry.insert(
+                        "options".to_string(),
+                        match p.options {
+                            Some(keys) => Value::list(
+                                keys.iter()
+                                    .map(|key| {
+                                        let mut option = BTreeMap::new();
+                                        option.insert(
+                                            "name".to_string(),
+                                            Value::string(key.name.to_string()),
+                                        );
+                                        option.insert(
+                                            "value_type".to_string(),
+                                            Value::string(render_structural(&key.value)),
+                                        );
+                                        option.insert(
+                                            "required".to_string(),
+                                            Value::bool(key.required),
+                                        );
+                                        option.insert(
+                                            "default".to_string(),
+                                            Value::string(
+                                                key.default.unwrap_or_default().to_string(),
+                                            ),
+                                        );
+                                        Value::map(option)
+                                    })
+                                    .collect(),
+                            ),
+                            None => Value::string(String::new()),
+                        },
                     );
                     Value::map(entry)
                 })
                 .collect(),
         ),
-        None => Value::string(String::new()),
+        // Parameterless functions mint an empty LIST, never an empty
+        // STRING: the `DESCRIBE` return tag promises `LIST<MAP<ANY>>`
+        // for every entry, and the boundary enforces it.
+        None => Value::list(Vec::new()),
     };
     map.insert("params".to_string(), params);
     map.insert(
         "returns".to_string(),
-        Value::string(meta.returns.clone().unwrap_or_default()),
+        Value::string(
+            meta.returns
+                .as_ref()
+                .map(render_structural)
+                .unwrap_or_default(),
+        ),
     );
     map.insert("rpn".to_string(), Value::bool(meta.rpn));
     map.insert(
@@ -870,6 +1331,15 @@ fn meta_to_value(meta: &FuncMeta) -> Value {
         Value::string(meta.summary.to_string()),
     );
     Value::map(map)
+}
+
+/// One named record schema: a shape host functions produce and scripts
+/// bind by name (`LET $s: SSH_SESSION_INFO`). Travels with its module
+/// so schemas register exactly when their producer does.
+#[derive(Debug, Clone, Copy)]
+pub struct RecordSchema {
+    pub name: &'static str,
+    pub fields: &'static [Field],
 }
 
 /// One host library: functions and types registered under a single module
@@ -880,6 +1350,7 @@ pub struct HostModule<P: ProcessManager> {
     pub name: String,
     pub funcs: Vec<HostRegistration<P>>,
     pub types: Vec<&'static TypeDescriptor>,
+    pub record_schemas: Vec<RecordSchema>,
 }
 
 impl<P: ProcessManager> ExecState<P> {
@@ -900,6 +1371,9 @@ impl<P: ProcessManager> ExecState<P> {
         for descriptor in module.types {
             self.register_type(descriptor);
         }
+        for schema in module.record_schemas {
+            self.register_record_schema(schema.name, schema.fields);
+        }
     }
 
     /// All visible functions: natives plus hosts plus current DSL definitions.
@@ -912,7 +1386,7 @@ impl<P: ProcessManager> ExecState<P> {
                 module: STD_MODULE_NAME.to_string(),
                 kind: FuncKind::HostCtx,
                 params: None,
-                returns: Some("MAP".to_string()),
+                returns: Some(TypeTag::Map),
                 rpn: false,
                 summary: "Inspect a variable binding.",
                 docs: "INSPECT($var): dedicated AST node taking a variable, not a value.",
@@ -934,7 +1408,7 @@ impl<P: ProcessManager> ExecState<P> {
                 module: STD_MODULE_NAME.to_string(),
                 kind: FuncKind::HostCtx,
                 params: None,
-                returns: Some("MAP".to_string()),
+                returns: Some(TypeTag::Map),
                 rpn: false,
                 summary: "Inspect a variable binding.",
                 docs: "INSPECT($var): dedicated AST node taking a variable, not a value.",
@@ -947,11 +1421,78 @@ impl<P: ProcessManager> ExecState<P> {
         self.functions.clone_pure_fn(name)
     }
 
+    /// Shared snapshot of every registered pure function for
+    /// placeholder and host driven expansion. Public so host crates
+    /// resolve calls through the live registry instead of hardcoding
+    /// module or function names. Cloning the `Arc` never copies the map.
+    pub fn pure_function_table(&self) -> Arc<PureTable> {
+        self.functions.pure_shared()
+    }
+
     pub(super) fn clone_native_ctx(&self, name: &str) -> Option<NativeFn<P>> {
         self.functions.clone_ctx_fn(name)
     }
 
     pub(super) fn native_meta(&self, name: &str) -> Option<FuncMeta> {
         self.functions.meta(name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn describe_entry_carries_optional_flag() {
+        // The `optional` key on params entries is the machine-readable
+        // half of the `?` rendering: pin both values through the same
+        // builder the runtime serves, not through prose.
+        let meta = FuncMeta {
+            name: "T::F".to_string(),
+            module: "T".to_string(),
+            kind: FuncKind::HostPure,
+            params: Some(vec![
+                FuncParam {
+                    name: "url".to_string(),
+                    param_type: Some(TypeTag::String),
+                    allowed: None,
+                    docs: "",
+                    options: None,
+                    optional: false,
+                },
+                FuncParam {
+                    name: "options".to_string(),
+                    param_type: Some(TypeTag::Map),
+                    allowed: None,
+                    docs: "",
+                    options: None,
+                    optional: true,
+                },
+            ]),
+            returns: Some(TypeTag::String),
+            rpn: false,
+            summary: "test-only",
+            docs: "test-only",
+        };
+        let value = meta_to_value(&meta);
+        let map = value.as_map().expect("describe value is a map");
+        let params = map
+            .get("params")
+            .expect("params key")
+            .as_list()
+            .expect("params is a list");
+        assert_eq!(params.len(), 2);
+        let first = params[0].as_map().expect("entry is a map");
+        let second = params[1].as_map().expect("entry is a map");
+        assert_eq!(
+            first.get("optional").and_then(Value::as_bool),
+            Some(false),
+            "required param must read false"
+        );
+        assert_eq!(
+            second.get("optional").and_then(Value::as_bool),
+            Some(true),
+            "omittable param must read true"
+        );
     }
 }

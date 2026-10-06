@@ -21,7 +21,7 @@ pub use contract::{
 };
 #[cfg(not(miri))]
 pub use contract::{OsPipeReader, OsPipeWriter, create_os_pipe};
-pub use expand::{StreamingExpand, expand_command_env, expand_script_env};
+pub use expand::{PlaceholderCall, StreamingExpand, expand_command_env, expand_script_env};
 pub use oxdock_sys_test_utils::TestEnvGuard;
 pub use shell::{ShellLauncher, shell_program, spawn_interactive_shell};
 pub use shell_manager::ShellProcessManager;

@@ -31,6 +31,30 @@ fn let_capture_echo_binds_exact_bytes() {
 }
 
 #[test]
+fn alias_spellings_bind_in_capture_decls() {
+    // Capture declarations resolve through `resolve_tag` like `LET`,
+    // so aliases (and shaped spellings) bind and coerce there too.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        TYPE GREETING = STRING
+        LET $x: GREETING = ECHO hi
+        ASSERT_EQ $x "hi\n"
+    "#};
+    run_script(&root, script).expect("alias in capture decl");
+    // AWAIT capture binds the published value through the alias.
+    let script = indoc! {r#"
+        TYPE PERSON = MAP<name: STRING, age: INT>
+        LET $t: HANDLE = ASYNC {
+            RETURN {name: "a", age: 1}
+        }
+        LET $p: PERSON = AWAIT $t
+        ASSERT_EQ $p.name "a"
+    "#};
+    run_script(&root, script).expect("alias in await capture decl");
+}
+
+#[test]
 fn let_capture_empty_stdout_binds_empty_string() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);

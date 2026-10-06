@@ -10,6 +10,7 @@ written: the shape first, the definitions it names right below it.
 
 ```rust
 use oxdock::{Engine, HostModule, OxDockFn, OxDockType, oxdock_func, oxdock_type};
+use oxdock::oxdock_core::TypeTag;
 use std::fmt;
 
 // The script below is the DSL itself, not a string: the `oxdock!` macro
@@ -22,6 +23,7 @@ fn main() -> anyhow::Result<()> {
         name: "DEMO".to_string(),
         funcs: vec![MakeTag::registration(), ReadTag::registration()],
         types: vec![],
+        record_schemas: vec![],
     });
 
     let temp = oxdock_fs::GuardedPath::tempdir().unwrap();
@@ -75,7 +77,7 @@ fn make_tag() -> anyhow::Result<oxdock::Value> {
 }
 
 /// Read the payload back out through a descriptor-checked typed read.
-#[oxdock_func(pure, returns = "STRING")]
+#[oxdock_func(pure, returns = TypeTag::String)]
 fn read_tag(val: oxdock::Value) -> anyhow::Result<oxdock::Value> {
     let Some(tag) = val.read_heap::<Tag>(Tag::descriptor()) else {
         anyhow::bail!("READ_TAG() expects a TAG value");
@@ -91,7 +93,9 @@ id checked read. `\{{ $t }}` renders the custom value through its
 `Display`, so interpolation, `WRITE`, and equality treat host values like
 native ones. `TYPES()` lists every registered name and
 `TYPE_DESCRIBE("TAG")` returns its summary and docs, so scripts introspect
-host surface exactly like native surface. Host types stay opaque:
+host surface exactly like native surface. Script `TYPE` aliases ride the
+same listing: `TYPES()` includes alias names and `TYPE_DESCRIBE("PERSON")`
+reports the canonical target spelling. Host types stay opaque:
 literal syntax, `$var.key` traversal, and `FOR` iteration remain `LIST`
 and `MAP` only, so queryable containers expose host accessor functions
 (`MATRIX_GET($m, $row, $col)`) instead of new syntax.
@@ -104,10 +108,11 @@ the declared return type explicitly when the defaults do not fit:
 
 ```rust
 use oxdock::{HostModule, OxDockFn, StepCtx, oxdock_func};
+use oxdock::oxdock_core::TypeTag;
 use oxdock::oxdock_core::ProcessManager;
 
 /// Read an environment variable, defaulting to empty.
-#[oxdock_func(name = "ENV_OR", returns = "STRING")]
+#[oxdock_func(name = "ENV_OR", returns = TypeTag::String)]
 fn env_or<P: ProcessManager>(
     cx: &mut StepCtx<P>,
     key: String,
@@ -121,6 +126,7 @@ fn main() {
         name: "DEMO".to_string(),
         funcs: vec![EnvOr::registration()],
         types: vec![],
+        record_schemas: vec![],
     });
 }
 ```
@@ -188,6 +194,7 @@ unavailable by the boundary above.
 
 ```rust
 use oxdock::{HostModule, OxDockFn, OxDockType, Value, oxdock_func, oxdock_type};
+use oxdock::oxdock_core::TypeTag;
 use std::fmt;
 
 /// Integer grid with no literal syntax: scripts query it through functions.
@@ -211,7 +218,7 @@ fn make_matrix() -> anyhow::Result<Value> {
 }
 
 /// Read one cell by row and column.
-#[oxdock_func(pure, returns = "INT")]
+#[oxdock_func(pure, returns = TypeTag::Int)]
 fn matrix_get(board: Value, row: i64, col: i64) -> anyhow::Result<Value> {
     let Some(grid) = board.read_heap::<Matrix>(Matrix::descriptor()) else {
         anyhow::bail!("MATRIX_GET() expects a MATRIX value");
@@ -239,6 +246,7 @@ fn main() -> anyhow::Result<()> {
             MatrixGet::registration(),
         ],
         types: vec![],
+        record_schemas: vec![],
     });
     let temp = oxdock_fs::GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();

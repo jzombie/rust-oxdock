@@ -27,6 +27,7 @@ mod macro_input;
 pub mod markdown;
 pub mod parser;
 pub mod strip_flags;
+pub mod tag;
 pub mod value;
 
 pub use ast::*;
@@ -49,6 +50,11 @@ pub use parser::{
     parse_guard_expr_str, parse_script, parse_script_with_modules, parse_script_with_preseed,
 };
 pub use strip_flags::strip_flags;
+pub use tag::{
+    ANY_TAG, Field, LIST_TAG, MAP_TAG, MAX_GENERIC_DEPTH, Spelled, SpelledField, TypeTag,
+    canonicalize_spelling, check_value, check_value_at, intern_composed, lookup_composed,
+    parse_spelling, render_structural,
+};
 
 /// Shared mock lowering for parser tests.
 /// Centralizes AST lowering so unit tests, integration tests, and macro_input tests
@@ -500,12 +506,16 @@ mod tests {
     #[test]
     fn guard_or_requires_at_least_one_branch() {
         let expr = GuardExpr::or(vec![
-            Guard::EnvExists {
-                key: "MISSING".into(),
+            Guard::Attr {
+                ns: Ns::Env,
+                key: Some("MISSING".into()),
+                val: None,
             }
             .into(),
-            Guard::EnvExists {
-                key: "ALSO_MISSING".into(),
+            Guard::Attr {
+                ns: Ns::Env,
+                key: Some("ALSO_MISSING".into()),
+                val: None,
             }
             .into(),
         ]);
@@ -517,19 +527,21 @@ mod tests {
 
     #[test]
     fn guard_or_can_chain_with_additional_predicates() {
-        let script = "[any(env:A, linux), mac] WRITE \"echo hi\"";
+        let script = "[any(env:A, os:linux), os:macos] WRITE \"echo hi\"";
         let steps = parse_script(script, test_lower).expect("parse ok");
         assert_eq!(steps.len(), 1);
         let guard = steps[0].guard.as_ref().expect("missing guard");
-        assert_eq!(guard.to_string(), "any(env:A, linux), macos");
+        assert_eq!(guard.to_string(), "any(env:A, os:linux), os:macos");
         let GuardExpr::All(children) = guard else {
             panic!("expected ALL guard");
         };
         assert!(matches!(children[0], GuardExpr::Or(_)));
         match &children[1] {
-            GuardExpr::Predicate(Guard::Platform {
-                target: PlatformGuard::Macos,
-            }) => {}
+            GuardExpr::Predicate(Guard::Attr {
+                ns: Ns::Os,
+                key: None,
+                val: Some(value),
+            }) if value == "macos" => {}
             other => panic!("unexpected trailing guard: {other:?}"),
         }
     }
@@ -538,15 +550,26 @@ mod tests {
     fn guard_or_guard_line_parses() {
         use crate::lexer::{LanguageParser, Rule};
         use pest::Parser;
-        LanguageParser::parse(Rule::guard_line, "[any(linux, env:FOO)]")
+        LanguageParser::parse(Rule::guard_line, "[any(os:linux, env:FOO)]")
             .expect("guard guard line should parse");
     }
 
     #[test]
+    fn guard_bare_platform_word_fails_to_parse() {
+        // Alpha software: removed syntax fails hard at parse with no
+        // legacy arm and no migration shim.
+        let err = parse_script("[unix] WRITE \"echo hi\"", test_lower)
+            .expect_err("bare platform must fail");
+        let text = format!("{err:#}");
+        assert!(!text.contains("family:unix"), "{text}");
+    }
+
+    #[test]
     fn env_equals_guard_with_not_wrapper() {
-        let g = GuardExpr::Not(Box::new(GuardExpr::Predicate(Guard::EnvEquals {
-            key: "A".into(),
-            value: "1".into(),
+        let g = GuardExpr::Not(Box::new(GuardExpr::Predicate(Guard::Attr {
+            ns: Ns::Env,
+            key: Some("A".into()),
+            val: Some("1".into()),
         })));
         let mut env = HashMap::new();
         env.insert("A".into(), "1".into());
@@ -658,15 +681,15 @@ mod tests {
         cases.push((
             indoc! {r#"
                 [not(env:SKIP)]
-                [windows] WRITE win
-                [eq(env:MODE, beta), linux] WRITE combo
+                [family:windows] WRITE win
+                [eq(env:MODE, beta), os:linux] WRITE combo
             "#}
             .trim()
             .to_string(),
             quote! {
                 [not(env:SKIP)]
-                [windows] WRITE win
-                [eq(env:MODE, beta), linux] WRITE combo
+                [family:windows] WRITE win
+                [eq(env:MODE, beta), os:linux] WRITE combo
             },
         ));
 

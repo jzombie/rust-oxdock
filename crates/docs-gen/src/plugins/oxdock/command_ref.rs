@@ -1,19 +1,14 @@
 use anyhow::{Context, Result};
 use oxdock_core::startup_descriptors;
 use oxdock_core::{ArgType, CommandMeta, all_metadata, all_structural_metadata};
-use oxdock_core::{FuncMeta, FuncParam, TypeDescriptor, builtin_function_metas};
+use oxdock_core::{FuncMeta, FuncParam, TypeDescriptor, TypeTag, builtin_function_metas};
+use oxdock_markdown_plugin::markdown::escape_table_cell;
 use std::collections::HashSet;
 
 /// GitHub heading anchor for a `### NAME` section: lowercase. Command names
 /// are `[A-Z_]+`, so lowercasing is the whole transformation.
 fn index_anchor(name: &str) -> String {
     name.to_lowercase()
-}
-
-/// Escape pipe characters so `|` alternatives in syntax strings do not
-/// break the enclosing Markdown table.
-fn escape_table_cell(s: &str) -> String {
-    s.replace('|', "\\|")
 }
 
 /// Escape placeholders in emitted prose and examples so the reference
@@ -137,7 +132,7 @@ fn render_meta(meta: &CommandMeta) -> Result<String> {
             out.push_str(&format!(
                 "| `{}` | `{}` | {} |\n",
                 escape_table_cell(flag.long),
-                flag.value_type.label(),
+                escape_table_cell(flag.value_type.label()),
                 escape_table_cell(&escape_placeholders(flag.description))
             ));
         }
@@ -211,28 +206,168 @@ pub(crate) fn render_body() -> Result<String> {
 }
 
 /// Render one function signature from its derived metadata:
-/// `NAME($param: TYPE, ...) -> RET`. Unconstrained `Value` parameters
-/// render bare; absent return types render no arrow.
+/// `NAME($param: TYPE, ...) -> RET`. Every parameter renders its
+/// type (bare `Value` is `ANY`, never a hole); absent return types
+/// render no arrow. Closed `#[values]` sets render after the type
+/// (`$policy: STRING = "a" | "b"`), quoted because callers pass
+/// strings and the extractor matches string literals. Generated from
+/// the same tokens as the extractor check. Options-bearing `MAP`
+/// parameters render their known keys in record form
+/// (`MAP<timeout?: DURATION>`), the same grammar record returns use.
+/// Render one closed `#[values]` set: quoted alternation
+/// (`"a" | "b"`), quoted because callers pass strings and the
+/// extractor matches string literals. Single source for signatures
+/// and parameter bullets, so the two can never disagree.
+fn render_allowed(values: &[&str]) -> String {
+    values
+        .iter()
+        .map(|value| format!("\"{value}\""))
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
 fn render_signature(meta: &FuncMeta) -> String {
     let params = meta
         .params
         .as_deref()
         .unwrap_or(&[])
         .iter()
-        .map(
-            |FuncParam { name, param_type }: &FuncParam| match param_type {
-                Some(label) => format!("${name}: {label}"),
-                None => format!("${name}"),
-            },
-        )
+        .map(|param| {
+            let name = render_param_name(param);
+            let rendered = render_param_type(param);
+            match param.param_type.as_ref().zip(param.allowed.as_ref()) {
+                Some((_, values)) => {
+                    format!("{name}: {} = {}", rendered, render_allowed(values))
+                }
+                None => format!("{name}: {rendered}"),
+            }
+        })
         .collect::<Vec<_>>()
         .join(", ");
     let returns = meta
         .returns
-        .as_deref()
-        .map(|label| format!(" -> {label}"))
+        .as_ref()
+        .map(|tag| format!(" -> {}", render_tag(tag)))
         .unwrap_or_default();
     format!("{}({}){}", meta.name, params, returns)
+}
+
+/// Render one parameter's type: options-bearing `MAP` params name
+/// their known keys in the record grammar (`MAP<timeout?: DURATION>`,
+/// defaults in nested bullets only), everything else renders its tag
+/// structurally. Single source for signatures and parameter bullets,
+/// so the two can never disagree.
+fn render_param_type(param: &FuncParam) -> String {
+    if let Some(keys) = param.options
+        && !keys.is_empty()
+    {
+        let rendered = keys
+            .iter()
+            .map(|key| {
+                format!(
+                    "{}{}: {}",
+                    key.name,
+                    if key.required { "" } else { "?" },
+                    render_tag(&key.value),
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        return format!("MAP<{rendered}>");
+    }
+    param
+        .param_type
+        .as_ref()
+        .map(render_tag)
+        .unwrap_or_default()
+}
+
+/// Render one parameter's name: a `?` suffix marks an omittable
+/// trailing options MAP (omission fills `{}`), matching the `?`
+/// convention optional options keys and record fields already use.
+fn render_param_name(param: &FuncParam) -> String {
+    if param.optional {
+        format!("${}?", param.name)
+    } else {
+        format!("${}", param.name)
+    }
+}
+
+/// Render one tag structurally: shaped tags name their contents
+/// (`LIST<MAP>`, `MAP<name: TYPE, ...>`), so the signature shows the
+/// generics the extractor enforces instead of the coarse word kind.
+/// Single renderer shared with the core (`DESCRIBE` output).
+fn render_tag(tag: &TypeTag) -> String {
+    oxdock_parser::render_structural(tag)
+}
+
+/// Render one function's parameter docs: a bullet per parameter with
+/// its structural type, plus nested bullets for options keys, plus a
+/// returns block naming the return shape and every record field.
+/// Bullets derive entirely from typed metadata (names, tags, allowed
+/// sets, options keys, return shapes); per-parameter prose, when the
+/// author wrote `///` docs on the parameter itself, appends after a
+/// colon. Structure never depends on prose, so nothing can vary.
+fn render_parameters(meta: &FuncMeta) -> String {
+    let params = meta.params.as_deref().unwrap_or(&[]);
+    let mut bullets = Vec::new();
+    for param in params {
+        let mut cell = render_param_type(param);
+        if let Some(values) = param.allowed.as_ref() {
+            cell.push_str(&format!(" = {}", render_allowed(values)));
+        }
+        let mut bullet = format!("- `{}` (`{cell}`)", render_param_name(param));
+        if !param.docs.is_empty() {
+            bullet.push_str(&format!(": {}", escape_placeholders(param.docs)));
+        }
+        if let Some(keys) = param.options {
+            for key in keys.iter() {
+                bullet.push_str(&format!(
+                    "\n  - `{}` (`{}`, {}{})",
+                    key.name,
+                    render_tag(&key.value),
+                    if key.required { "required" } else { "optional" },
+                    key.default
+                        .map(|default| format!(", default `{default}`"))
+                        .unwrap_or_default(),
+                ));
+            }
+        }
+        bullets.push(bullet);
+    }
+    let mut sections = Vec::new();
+    if !bullets.is_empty() {
+        sections.push(format!("**Parameters:**\n{}", bullets.join("\n")));
+    }
+    if let Some(returns) = meta.returns.as_ref() {
+        sections.push(render_returns(returns));
+    }
+    if sections.is_empty() {
+        return String::new();
+    }
+    format!("{}\n\n", sections.join("\n\n"))
+}
+
+/// Render one function's return shape: the structural type plus a
+/// nested bullet per record field (optional marks included). Derived
+/// entirely from the return tag, like parameters: fixed-shape
+/// returns document every property, unknown shapes render bare.
+fn render_returns(returns: &TypeTag) -> String {
+    let mut out = format!("**Returns:** `{}`", render_tag(returns));
+    if let TypeTag::Record(fields) = returns {
+        for field in fields.iter() {
+            out.push_str(&format!(
+                "\n  - `{}` (`{}`{})",
+                field.name,
+                render_tag(&field.ty),
+                if field.optional { ", optional" } else { "" },
+            ));
+            if !field.docs.is_empty() {
+                out.push_str(&format!(": {}", escape_placeholders(field.docs)));
+            }
+        }
+    }
+    out
 }
 
 /// Function reference for one module, generated from its function
@@ -254,14 +389,16 @@ pub(crate) fn render_plugin_reference(metas: &[FuncMeta], module: &str) -> Strin
     );
     for meta in metas {
         out.push_str(&format!("### {}\n\n", meta.name));
-        out.push_str(&format!(
-            "**Signature:** `{}`\n\n",
-            escape_table_cell(&render_signature(meta)),
-        ));
+        // No cell escaping: the signature renders inside backticks,
+        // which already isolate `|` from table parsing. Escaping here
+        // would print a literal backslash (closed `#[values]` sets
+        // render `a | b`).
+        out.push_str(&format!("**Signature:** `{}`\n\n", render_signature(meta)));
         out.push_str(&format!(
             "**Contexts:** {}\n\n",
             if meta.rpn { "AST, RPN" } else { "AST only" },
         ));
+        out.push_str(&render_parameters(meta));
         // The full docs already open with the summary line: print whichever
         // carries more, never both stacked.
         if meta.docs.starts_with(meta.summary) && !meta.summary.is_empty() {
@@ -289,8 +426,11 @@ pub(crate) fn render_function_reference() -> String {
 }
 
 /// Plugin handle types, rendered like the startup value types so anchors
-/// stay consistent across references.
-pub(crate) fn render_plugin_types(descriptors: &[&TypeDescriptor]) -> String {
+/// stay consistent across references. Minted-by and consumed-by lists
+/// derive from function metadata (record returns carrying the handle,
+/// parameters taking it), so the lifecycle story cannot rot apart from
+/// the signatures that enforce it.
+pub(crate) fn render_plugin_types(descriptors: &[&TypeDescriptor], metas: &[FuncMeta]) -> String {
     let mut out = String::new();
     out.push_str("## Value types\n\n");
     for descriptor in descriptors {
@@ -299,6 +439,37 @@ pub(crate) fn render_plugin_types(descriptors: &[&TypeDescriptor]) -> String {
             escape_placeholders(&format!("Value type: {}", descriptor.name)),
             escape_placeholders(descriptor.docs),
         ));
+        let mut minted: Vec<&str> = Vec::new();
+        let mut consumed: Vec<&str> = Vec::new();
+        for meta in metas {
+            if meta
+                .returns
+                .as_ref()
+                .is_some_and(|returns| tag_mentions(returns, descriptor))
+            {
+                minted.push(meta.name.as_str());
+            }
+            let takes = meta
+                .params
+                .as_deref()
+                .unwrap_or(&[])
+                .iter()
+                .filter_map(|param| param.param_type.as_ref())
+                .any(|tag| tag_mentions(tag, descriptor));
+            if takes {
+                consumed.push(meta.name.as_str());
+            }
+        }
+        let mut origins = Vec::new();
+        if !minted.is_empty() {
+            origins.push(format!("Minted by {}", backticked(&minted)));
+        }
+        if !consumed.is_empty() {
+            origins.push(format!("used by {}", backticked(&consumed)));
+        }
+        if !origins.is_empty() {
+            out.push_str(&format!("{}.\n\n", origins.join("; ")));
+        }
     }
     while out.ends_with('\n') {
         out.pop();
@@ -307,9 +478,79 @@ pub(crate) fn render_plugin_types(descriptors: &[&TypeDescriptor]) -> String {
     out
 }
 
+/// Whether a tag carries a custom handle descriptor, recursing through
+/// composites: record returns mint the handles nested in their fields.
+fn tag_mentions(tag: &TypeTag, descriptor: &TypeDescriptor) -> bool {
+    match tag {
+        TypeTag::Custom(other) => std::ptr::eq(*other, descriptor),
+        TypeTag::ListOf(inner) | TypeTag::MapOf(inner) => tag_mentions(inner, descriptor),
+        TypeTag::Record(fields) => fields
+            .iter()
+            .any(|field| tag_mentions(&field.ty, descriptor)),
+        _ => false,
+    }
+}
+
+/// Comma-joined backticked names for origin lines.
+fn backticked(names: &[&str]) -> String {
+    names
+        .iter()
+        .map(|name| format!("`{name}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use oxdock_core::FuncKind;
+
+    #[test]
+    fn optional_param_renders_question_mark() {
+        // The `?` suffix is the only marker omittability gets: pin it
+        // literally in both surfaces, not via self-rendered output.
+        let meta = FuncMeta {
+            name: "NET_FETCH".to_string(),
+            module: "NET".to_string(),
+            kind: FuncKind::HostCtx,
+            params: Some(vec![
+                FuncParam {
+                    name: "url".to_string(),
+                    param_type: Some(TypeTag::String),
+                    allowed: None,
+                    docs: "",
+                    options: None,
+                    optional: false,
+                },
+                FuncParam {
+                    name: "options".to_string(),
+                    param_type: Some(TypeTag::Map),
+                    allowed: None,
+                    docs: "",
+                    options: None,
+                    optional: true,
+                },
+            ]),
+            returns: Some(TypeTag::String),
+            rpn: false,
+            summary: "",
+            docs: "",
+        };
+        let signature = render_signature(&meta);
+        assert!(
+            signature.contains("$options?: MAP"),
+            "signature must mark the omittable param: {signature}"
+        );
+        assert!(
+            !signature.contains("$url?"),
+            "required params stay unmarked: {signature}"
+        );
+        let params = render_parameters(&meta);
+        assert!(
+            params.contains("`$options?` (`MAP`)"),
+            "bullet must mark the omittable param: {params}"
+        );
+    }
 
     #[test]
     fn body_has_all_commands() {

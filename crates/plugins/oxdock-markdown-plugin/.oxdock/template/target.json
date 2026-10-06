@@ -1,0 +1,22 @@
+{
+  "targets": [
+    {
+      "name": "markdown-plugin-readme",
+      "out": "crates/plugins/oxdock-markdown-plugin/README.md",
+      "values": "crates/plugins/oxdock-markdown-plugin/.oxdock/template/values.json",
+      "template": "crates/plugins/oxdock-markdown-plugin/.oxdock/template/README.md.tmpl",
+      "fragments": {
+        "local": [
+          "crates/plugins/oxdock-markdown-plugin/.oxdock/template/fragments/*"
+        ],
+        "shared": [
+          ".oxdock/template/shared/header.md.tmpl",
+          ".oxdock/template/shared/footer.md.tmpl"
+        ],
+        "generated": [
+          "crates/plugins/oxdock-markdown-plugin/.oxdock/template/generated/*"
+        ]
+      }
+    }
+  ]
+}

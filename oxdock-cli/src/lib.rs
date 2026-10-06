@@ -11,10 +11,10 @@ use std::io::{self, IsTerminal, Read};
 use std::sync::{Arc, Mutex};
 
 pub use oxdock_core::{
-    Engine, EngineOutput, ExecState, FuncKind, FuncMeta, FuncParam, HostModule, HostRegistration,
-    NativeFn, OxDockFn, OxDockType, PureFn, PushManifestSink, StepCtx, TypeDescriptor, Value,
-    parse_script, parse_script_with_modules, run_steps, run_steps_with_context,
-    run_steps_with_context_result, run_steps_with_manager_with_modules,
+    Engine, EngineOutput, ExecState, ExitRequest, FuncKind, FuncMeta, FuncParam, HostModule,
+    HostRegistration, NativeFn, OxDockFn, OxDockType, PureFn, PushManifestSink, StepCtx,
+    TypeDescriptor, Value, exit_code_of, parse_script, parse_script_with_modules, run_steps,
+    run_steps_with_context, run_steps_with_context_result, run_steps_with_manager_with_modules,
 };
 use oxdock_core::{ExecIo, run_steps_with_lazy_snapshot_and_modules};
 pub use oxdock_parser::{Guard, Step, StepKind};
@@ -152,6 +152,15 @@ pub fn run() -> Result<()> {
         bail!("--remote-serve requires the `net` feature (rebuild with --features net)");
     }
     execute(opts, workspace_root)
+}
+
+/// Process exit status for a failed CLI run: relays an `EXIT` code (host
+/// or guest-relayed) clamped to the portable 0..=255 range, 1 for every
+/// other failure.
+pub fn process_exit_code(err: &anyhow::Error) -> i32 {
+    exit_code_of(err)
+        .map(|code| code.clamp(0, 255) as i32)
+        .unwrap_or(1)
 }
 
 #[derive(Debug, Clone)]
@@ -341,7 +350,7 @@ pub fn usage() -> String {
               --script <file|->  script file under the workspace root, or `-` for stdin
               --shell            run the script, then drop into an interactive shell (requires a TTY)
               --listen <addr>    expose a logical service port ([host:]port, repeatable)
-              -p <[host:]outer:inner>  map outer port to an inner service port or name (repeatable; outer 0 is ephemeral)
+              -p <[host:]outer:inner>  map outer port to an inner service port or name (repeatable; outer 0 is ephemeral; bare outer binds loopback, prefix 0.0.0.0: for all interfaces)
               --offline          open no sockets (conflicts with --listen/-p)
               --remote TARGET=CMD    bind a REMOTE target to a stdio transport command (repeatable)
               --help, -h         print this help and exit
@@ -1340,7 +1349,7 @@ mod tests {
         let resolver = PathResolver::new(workspace_root.as_path(), workspace_root.as_path())?;
         let script = indoc! {"
             IMPORT [STD, SSH]
-            LET $m: MAP = SSH_SERVE(\"23301\", {username: \"test\", password: \"test123\"})
+            LET $m: SSH_SERVE_INFO = SSH_SERVE(\"23301\", {username: \"test\", password: \"test123\"})
             SSH_CLOSE($m.server)
         "};
         resolver.write_file(&script_path, script.as_bytes())?;
@@ -1371,7 +1380,7 @@ mod tests {
         let resolver = PathResolver::new(workspace_root.as_path(), workspace_root.as_path())?;
         let script = indoc! {"
             IMPORT [STD, NET]
-            LET $l: MAP = NET_LISTEN(\"23501\", {})
+            LET $l: NET_LISTEN_INFO = NET_LISTEN(\"23501\", {})
             NET_CLOSE($l.listener)
         "};
         resolver.write_file(&script_path, script.as_bytes())?;
@@ -1457,7 +1466,7 @@ mod tests {
         let resolver = PathResolver::new(workspace_root.as_path(), workspace_root.as_path())?;
         let script = indoc! {"
             IMPORT [STD, SSH]
-            LET $m: MAP = SSH_SERVE(\"23301\", {username: \"test\", password: \"test123\"})
+            LET $m: SSH_SERVE_INFO = SSH_SERVE(\"23301\", {username: \"test\", password: \"test123\"})
             SSH_CLOSE($m.server)
         "};
         resolver.write_file(&script_path, script.as_bytes())?;
@@ -1520,7 +1529,8 @@ mod tests {
         let resolver = PathResolver::new(workspace_root.as_path(), workspace_root.as_path())?;
         let script = indoc! {"
             IMPORT [STD, NET]
-            LET $l: MAP = NET_LISTEN(\"23501\", {})
+            LET $l: NET_LISTEN_INFO = NET_LISTEN(\"23501\", {})
+            LET $body: STRING = NET_FETCH(\"https://example.com/x\")
             NET_CLOSE($l.listener)
         "};
         resolver.write_file(&script_path, script.as_bytes())?;
@@ -1537,6 +1547,26 @@ mod tests {
         };
         assert!(err.to_string().contains("NET"), "{err}");
         Ok(())
+    }
+
+    #[test]
+    fn process_exit_code_relays_exit_requests() {
+        let exit = anyhow::Error::new(ExitRequest(3));
+        assert_eq!(process_exit_code(&exit), 3);
+        let relayed =
+            anyhow::Error::new(ExitRequest(3)).context("REMOTE 'prod' exited with code 3");
+        assert_eq!(process_exit_code(&relayed), 3);
+        assert_eq!(process_exit_code(&anyhow::anyhow!("boom")), 1);
+        assert_eq!(
+            process_exit_code(&anyhow::Error::new(ExitRequest(300))),
+            255,
+            "codes clamp to the portable range"
+        );
+        assert_eq!(
+            process_exit_code(&anyhow::Error::new(ExitRequest(-1))),
+            0,
+            "negative codes clamp to zero"
+        );
     }
 }
 

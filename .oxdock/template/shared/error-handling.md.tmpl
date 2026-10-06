@@ -1,4 +1,18 @@
-## When a script fails to parse
+## Errors stop the pipeline
+
+A pipeline is expected to run to completion. The engine is fail fast:
+the first failed step ends the run immediately, later steps do not
+execute, and the failure is reported with its step context. There is
+no retry, resume, or continue on error mode, and partial completion is
+not treated as success.
+
+Choosing not to run work is different from failing it. Guards and
+branches select work, timeouts bound it, and `EXIT <code>` is the
+intentional form of an immediate stop. Files written before the stop
+persist, while unwinding and task teardown follow the normal scope
+rules.
+
+### When a script fails to parse
 
 Parse errors tell you what went wrong, where, and what was expected.
 Every error names the line and column, echoes the source line, and points

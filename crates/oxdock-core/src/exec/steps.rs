@@ -25,6 +25,7 @@ fn exit_status_from_code(code: i32) -> ExitStatus {
 
 use super::handlers;
 use super::io::{ExactCapture, SlidingWindow, StreamHandle};
+use super::native::PureTable;
 use super::state::{ExecState, TaskEntry, TaskPhase};
 use oxdock_pipe::PipeInner;
 
@@ -44,6 +45,10 @@ pub(super) struct ThreadJoinHandle {
     worker: Arc<Mutex<Option<std::thread::ThreadId>>>,
     /// Preserved error from the child thread, if any.
     thread_error: Option<anyhow::Error>,
+    /// `EXIT` code from the child thread, if it exited. anyhow errors do
+    /// not cross the join boundary by value, and the re-emit below would
+    /// otherwise flatten the typed request into a plain string.
+    thread_exit_code: Option<i64>,
 }
 
 impl ThreadJoinHandle {
@@ -59,6 +64,24 @@ impl ThreadJoinHandle {
             active_process,
             worker,
             thread_error: None,
+            thread_exit_code: None,
+        }
+    }
+
+    /// Re-emit the preserved thread error. `anyhow` errors do not cross
+    /// the join boundary by value, so an EXIT code rides alongside in
+    /// `thread_exit_code` and is re-attached here as a typed request
+    /// under the flattened message: the text stays identical, and the
+    /// code stays machine readable.
+    fn reemit_error(&self) -> anyhow::Error {
+        let msg = self
+            .thread_error
+            .as_ref()
+            .map(|err| format!("{err:#}"))
+            .unwrap_or_else(|| "background thread failed without an error".to_string());
+        match self.thread_exit_code {
+            Some(code) => anyhow::Error::new(super::exit::ExitRequest(code)).context(msg),
+            None => anyhow::anyhow!("{msg}"),
         }
     }
 
@@ -84,6 +107,7 @@ impl ThreadJoinHandle {
         match handle.join() {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
+                self.thread_exit_code = super::exit::exit_code_of(&e);
                 self.thread_error = Some(e);
             }
             Err(panic) => {
@@ -114,8 +138,8 @@ impl BackgroundHandle for ThreadJoinHandle {
         // alternate display (`{err:#}`) flattens the full causal chain
         // into the new message: `{err}` alone would drop every
         // `Caused by` layer at the ASYNC task boundary.
-        if let Some(ref err) = self.thread_error {
-            Err(anyhow::anyhow!("{err:#}"))
+        if self.thread_error.is_some() {
+            Err(self.reemit_error())
         } else {
             Ok(Some(exit_status_from_code(0)))
         }
@@ -138,8 +162,8 @@ impl BackgroundHandle for ThreadJoinHandle {
     fn wait(&mut self) -> Result<ExitStatus> {
         self.reap();
         // Same chain-preserving re-emit as `try_wait` above.
-        if let Some(ref err) = self.thread_error {
-            Err(anyhow::anyhow!("{err:#}"))
+        if self.thread_error.is_some() {
+            Err(self.reemit_error())
         } else {
             Ok(exit_status_from_code(0))
         }
@@ -390,6 +414,16 @@ impl<'a, P: ProcessManager> StepCtx<'a, P> {
     /// Current working directory (guarded; stays inside the workspace).
     pub fn cwd(&self) -> &GuardedPath {
         &self.state.cwd
+    }
+
+    /// Shared snapshot of every registered pure function, keyed by
+    /// qualified name. Lets host-driven expansion resolve
+    /// `{{ MODULE::FUNC(args) }}` through the live registry instead of
+    /// hardcoding module or function names. Stateful, script, and pipe
+    /// backed entries never appear here: placeholder evaluation has no
+    /// step context and must stay side effect free.
+    pub fn pure_functions(&self) -> std::sync::Arc<PureTable> {
+        self.state.pure_function_table()
     }
 
     /// Mint a fresh unbound pipe handle, like bare `LET $p: PIPE`. The
@@ -839,6 +873,11 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
             let duration = super::args::resolve_arg_as_duration(duration, &mut cx)?;
             handlers::sleep(&mut cx, idx, &duration)
         }
+        StepKind::TypeAlias { .. } => {
+            // Static declaration: collected before the run and
+            // resolved at first coercion. Nothing to execute.
+            Ok(())
+        }
         StepKind::FuncDef { .. }
         | StepKind::Call { .. }
         | StepKind::Return { .. }
@@ -1119,6 +1158,11 @@ fn execute_steps_inner<P: ProcessManager>(
                         StepKind::Sleep { duration } => {
                             let duration = super::args::resolve_arg_as_duration(duration, &mut cx)?;
                             handlers::sleep(&mut cx, idx, &duration)
+                        }
+                        StepKind::TypeAlias { .. } => {
+                            // Static declaration: collected before the run and
+                            // resolved at first coercion. Nothing to execute.
+                            Ok(())
                         }
                         StepKind::FuncDef { .. }
                         | StepKind::Call { .. }

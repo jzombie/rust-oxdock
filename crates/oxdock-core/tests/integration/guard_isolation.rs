@@ -1,12 +1,13 @@
 use std::collections::HashMap;
 
-use oxdock_parser::{Guard, guard_allows};
+use oxdock_parser::{Guard, Ns, guard_allows};
 
 #[test]
 fn test_guard_evaluator_accepts_only_script_env_map() {
-    let guard = Guard::EnvEquals {
-        key: "STAGE".to_string(),
-        value: "prod".to_string(),
+    let guard = Guard::Attr {
+        ns: Ns::Env,
+        key: Some("STAGE".to_string()),
+        val: Some("prod".to_string()),
     };
 
     let ambient_env: HashMap<String, String> = HashMap::new();

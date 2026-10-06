@@ -1,0 +1,15 @@
+## Citation
+
+If you use {{ $docs_ctx.name }} in published work, cite version `{{ env:CRATE_VERSION }}` with the metadata in [CITATION.cff](./CITATION.cff).
+
+```bibtex
+@software{oxdock,
+  author = "{{ $workspace_pkg.author }}",
+  title = "{{ $docs_ctx.name }}",
+  version = "{{ env:CRATE_VERSION }}",
+  url = "{{ $workspace_pkg.repository }}",
+  license = "{{ $workspace_pkg.license }}"
+}
+```
+
+<!-- DOI: reserved for future minting; no DOI is claimed here. -->

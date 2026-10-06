@@ -4,6 +4,7 @@
 
 Handle to one `NET_LISTEN` listener instance.
 
-Minted by `NET_LISTEN`, consumed by `NET_ACCEPT` and `NET_CLOSE`.
 Cloning the value shares the listener; dropping the last clone
 signals shutdown.
+
+Minted by `NET_LISTEN`; used by `NET_ACCEPT`, `NET_CLOSE`.

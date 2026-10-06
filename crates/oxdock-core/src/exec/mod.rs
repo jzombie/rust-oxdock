@@ -1,12 +1,14 @@
 mod args;
 mod capture;
 mod engine;
+mod exit;
 mod fs_ops;
 mod handlers;
 mod io;
 mod native;
 pub mod remote;
 mod state;
+mod static_check;
 mod steps;
 #[cfg(test)]
 mod tests;
@@ -18,6 +20,7 @@ pub use self::remote::{
 };
 
 pub use self::engine::{Engine, EngineOutput};
+pub use self::exit::{ExitRequest, exit_code_of};
 pub(crate) use self::handlers::{
     dispatch_append, dispatch_assert_contains, dispatch_assert_eq, dispatch_assign,
     dispatch_assign_async_step, dispatch_assign_capture_step, dispatch_async_block,
@@ -35,15 +38,17 @@ pub use self::io::PipeStream;
 pub use self::io::PushManifestSink;
 pub use self::native::{
     FuncKind, FuncMeta, FuncParam, FunctionRegistry, HostModule, HostRegistration, NativeFn,
-    OxDockFn, PureFn, builtin_function_metas, builtin_function_names, std_module_table,
+    OxDockFn, ParamOption, PureFn, PureTable, RecordSchema, builtin_function_metas,
+    builtin_function_names, fill_optional_args, required_arity, std_module_table,
 };
 pub use self::state::ExecState;
 pub use self::steps::StepCtx;
 pub use self::typing::{
-    OxDockType, TypeDescriptor, Value, ValuePayload, clone_boxed, clone_copy, clone_shared,
-    drop_boxed, drop_noop, drop_shared, eq_boxed, eq_inline, eq_shared, fmt_boxed, fmt_inline,
-    fmt_shared, load_inline, startup_descriptors, store_inline, type_anchor, unshare_boxed,
-    unshare_inline, unshare_shared,
+    Field, LIST_TAG, MAP_TAG, OxDockType, TypeDescriptor, TypeTag, Value, ValuePayload,
+    check_options, check_value, check_value_at, clone_boxed, clone_copy, clone_shared, drop_boxed,
+    drop_noop, drop_shared, eq_boxed, eq_inline, eq_shared, fmt_boxed, fmt_inline, fmt_shared,
+    load_inline, startup_descriptors, store_inline, type_anchor, unshare_boxed, unshare_inline,
+    unshare_shared,
 };
 
 use anyhow::Result;
@@ -147,7 +152,15 @@ fn compose_error_with_snapshot(err: anyhow::Error, snapshot_section: String) -> 
         String::new()
     };
     let msg = format!("{}{}\n{}", primary, rest, snapshot_section);
-    anyhow::anyhow!(msg)
+    // The snapshot composer flattens the chain into one message for CLI
+    // rendering. Re-attach a relayed EXIT code as the inner error under
+    // that message: the text stays byte-identical while the code stays
+    // machine readable (context values are invisible to chain traversal,
+    // so the typed request must ride as a real error, not as context).
+    match exit::exit_code_of(&err) {
+        Some(code) => anyhow::Error::new(exit::ExitRequest(code)).context(msg),
+        None => anyhow::anyhow!(msg),
+    }
 }
 
 fn run_steps_inner(
@@ -350,6 +363,8 @@ fn new_state<P: ProcessManager>(fs: Box<dyn WorkspaceFs>, io: ExecIo) -> Result<
         cancellable: false,
         functions: self::native::FunctionRegistry::with_builtins(),
         types: self::typing::startup_type_map(),
+        record_schemas: std::collections::HashMap::new(),
+        type_aliases: std::collections::HashMap::new(),
         call_depth: 0,
         // Root flow is task 0; worker ids start at 1 (see next_task_id).
         task_id: 0,
@@ -369,6 +384,15 @@ fn finish_run<P: ProcessManager>(
     process: P,
     steps: &[Step],
 ) -> Result<(GuardedPath, Box<dyn WorkspaceFs>, BTreeMap<String, Value>)> {
+    // Execution boundary: every run entry point funnels through here, so
+    // typo'd param and return type tags fail before any step runs. A bad
+    // label is a programmer error, never a runtime value.
+    state.type_aliases = self::typing::collect_type_aliases(steps, &state)?;
+    state.validate_function_type_tags()?;
+    // Script-side counterpart: terminal unification, MissingReturn,
+    // undeclared variables, and ungated ANY flow fail here too,
+    // before any step runs.
+    static_check::validate_script_types(steps, &state)?;
     let assert_windows = Arc::clone(&state.assert_windows);
     let assert_windows_stderr = Arc::clone(&state.assert_windows_stderr);
     let exact_stdout = Arc::clone(&state.exact_stdout);

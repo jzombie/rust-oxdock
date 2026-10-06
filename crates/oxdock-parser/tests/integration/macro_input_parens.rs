@@ -1,5 +1,6 @@
 #[cfg(feature = "proc-macro-api")]
 mod tests {
+    use indoc::indoc;
     use oxdock_parser::script_from_braced_tokens;
     use proc_macro2::{Delimiter, Group, Ident, Punct, Spacing, Span, TokenStream, TokenTree};
 
@@ -72,7 +73,8 @@ mod tests {
 
         let script = script_from_braced_tokens(&ts).expect("failed to render write instruction");
         assert!(
-            script.contains("WRITE out_txt\nWORKDIR dist"),
+            script.contains(indoc! {r#"WRITE out_txt
+            WORKDIR dist"#}),
             "expected WRITE to terminate before next command, got: {script}"
         );
     }
@@ -143,7 +145,12 @@ mod tests {
         ]);
 
         let script = script_from_braced_tokens(&ts).expect("failed to render semicolon script");
-        assert_eq!(script, "RUN echo;\nLS;\nRUN echo && ls");
+        assert_eq!(
+            script,
+            indoc! {r#"RUN echo;
+            LS;
+            RUN echo && ls"#}
+        );
     }
 
     #[test]

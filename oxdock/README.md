@@ -1,16 +1,16 @@
 # OxDock
 
-**Dockerfile inspired build DSL for Rust**
+**OxDock is a Dockerfile-inspired DSL for native builds, multi-node pipelines, and sealed remote execution.**
 
-OxDock is a Dockerfile-inspired build DSL for Rust: scripted pipelines with hermetic workspaces, typed variables, and pipes instead of snowflake shell. Embed scripts at compile time with macros, or run the same scripts as standalone CLI pipelines. Native. No containers. No daemon. No VM.
+Unlike Docker's Linux-VM requirement on non-Linux hosts, OxDock runs directly on Linux, macOS, and Windows. Execute scripts on bare metal, inside containers, or dispatched across remote machines simultaneously. No daemons. No hypervisors.
 
-One script runs on Linux, macOS, and Windows, with platform gating, async tasks, and piped workflows for custom pipelines. Only RUN touches the host shell.
+Platform gating selects OS-specific steps, and remote targets bind over any stdio transport. Only RUN touches the host shell.
 
-Plain Rust functions become script functions with one attribute: `#[oxdock_func]` exports them into namespaced modules scripts call as `DEMO::NAME(...)`. See [Extending OxDock from Rust](#extending-oxdock-from-rust).
+The syntax is line-oriented in the spirit of BASIC, with a static type system checking scripts before the first step runs. Plain Rust functions become script functions with one attribute: `#[oxdock_func]` exports them into namespaced modules scripts call as `DEMO::NAME(...)`. See [Extending OxDock from Rust](#extending-oxdock-from-rust).
 
-[Documentation](https://docs.rs/oxdock/0.20.0-alpha/oxdock/)
+[Documentation](https://docs.rs/oxdock/0.21.0-alpha/oxdock/)
 
-Add it to your Rust build with `cargo add oxdock@0.20.0-alpha`, or install the standalone runner with `cargo install oxdock@0.20.0-alpha`.
+Add it to your Rust build with `cargo add oxdock@0.21.0-alpha`, or install the standalone runner with `cargo install oxdock@0.21.0-alpha`.
 
 Run a script:
 
@@ -20,7 +20,7 @@ oxdock <PATH>
 
 ## Embed at compile time
 
-Scripts run during `rustc`, and their artifacts ship inside the binary with zero heap allocation, `no_std` included:
+Embed build-time dependencies from any language: scripts run inline during `rustc`, and their artifacts ship inside the binary with zero heap allocation, `no_std` included:
 
 ```rust
 use oxdock_macros::oxdock_embed;
@@ -36,11 +36,13 @@ oxdock_embed! {
         // include_bytes!.
         ENV PROJECT=OxDock
         MKDIR dist
+
         // Provenance comes from the shell: only the matching gate runs,
         // so this stays green on every OS in CI.
-        [unix] LET $os: STRING = RUN uname -srm
-        [windows] LET $os: STRING = RUN ver
+        [family:unix] LET $os: STRING = RUN uname -srm
+        [family:windows] LET $os: STRING = RUN ver
         LET $toolchain: STRING = RUN cargo --version
+
         WRITE dist/os.txt "{{ $os }}"
         WRITE dist/toolchain.txt "{{ $toolchain }}"
         WRITE dist/manifest.txt "os toolchain"
@@ -53,8 +55,10 @@ fn main() {
     // Verify we can read the resources we just created
     let manifest = SiteAssets::get("dist/manifest.txt").expect("manifest must be embedded");
     assert_eq!(manifest.data.as_ref(), b"os toolchain");
+
     let toolchain = SiteAssets::get("dist/toolchain.txt").expect("toolchain must be embedded");
     assert!(toolchain.data.starts_with(b"cargo "));
+
     let os = SiteAssets::get("dist/os.txt").expect("os must be embedded");
     assert!(!os.data.is_empty());
 }
@@ -80,6 +84,7 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     ENV PROJECT=OxDock
     LET $version: STRING = #crate_version
     MKDIR dist
+
     FUNC STAMP($name: STRING) {
         WRITE dist/{{ $name }}.txt {{ $name }} {{ env:PROJECT }} {{ $version }}
         RETURN $name
@@ -87,6 +92,7 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     FOR $name: STRING IN ["alpha", "beta"] {
         STAMP($name)
     }
+
     FUNC PICK($flag: BOOL) {
         IF $flag {
             RETURN "alpha"
@@ -95,11 +101,12 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     }
     LET $picked: STRING = PICK(true)
     WRITE dist/picked.txt {{ $picked }}
+
     LET $a: STRING = READ dist/alpha.txt
     LET $b: STRING = READ dist/beta.txt
     LET $p: STRING = READ dist/picked.txt
-    ASSERT_EQ $a "alpha OxDock 0.20.0-alpha"
-    ASSERT_EQ $b "beta OxDock 0.20.0-alpha"
+    ASSERT_EQ $a "alpha OxDock 0.21.0-alpha"
+    ASSERT_EQ $b "beta OxDock 0.21.0-alpha"
     ASSERT_EQ $p "alpha"
 };
 
@@ -111,7 +118,7 @@ let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolve
 let out = root.join("dist/alpha.txt").expect("out path");
 assert_eq!(
     resolver.read_to_string(&out).expect("read out"),
-    "alpha OxDock 0.20.0-alpha"
+    "alpha OxDock 0.21.0-alpha"
 );
 ```
 
@@ -127,14 +134,17 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     ENV PROJECT=#project
     MKDIR dist
     [bool:#verbose] WRITE dist/verbose.log "verbose on"
+
     LET $log: PIPE
     WITH_IO [stdout=$log] ECHO "built {{ env:PROJECT }}"
     WITH_IO [stdin=$log] READ_LINE $line
     WRITE dist/build.txt "{{ $line }}"
+
     IMPORT [STD]
     FOR $f: STRING IN GLOB("dist/*.txt") {
         EXPAND $f
     }
+
     ASSERT_CONTAINS stdout "built OxDock"
     LET $build: STRING = READ dist/build.txt
     LET $verbose: STRING = READ dist/verbose.log
@@ -167,6 +177,7 @@ instead of heap boxing; both forms, with stateful functions, live under
 
 ```rust
 use oxdock::{Engine, HostModule, OxDockFn, OxDockType, Value, oxdock_func, oxdock_type};
+use oxdock::oxdock_core::TypeTag;
 use std::fmt;
 
 /// Word count summary: computed in Rust, carried as one script value.
@@ -195,7 +206,7 @@ fn summarize(text: String) -> anyhow::Result<Value> {
 }
 
 /// Read the word count back out: `WORD_COUNT($s)` is an `INT`.
-#[oxdock_func(pure, returns = "INT")]
+#[oxdock_func(pure, returns = TypeTag::Int)]
 fn word_count(summary: Value) -> anyhow::Result<Value> {
     let Some(stats) = summary.read_heap::<Stats>(Stats::descriptor()) else {
         anyhow::bail!("WORD_COUNT() expects a STATS value");
@@ -210,6 +221,7 @@ fn main() -> anyhow::Result<()> {
         name: "DEMO".to_string(),
         funcs: vec![Summarize::registration(), WordCount::registration()],
         types: vec![],
+        record_schemas: vec![],
     });
     let temp = oxdock_fs::GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
@@ -240,7 +252,7 @@ A naive tagged enum needs 32 bytes per value (a 24 byte payload plus tag and pad
 
 Type checks compare one descriptor address, and operations (`clone`, `drop`, equality, formatting) call the descriptor directly, with no registry lookup and no lock. Each type owns one compile time descriptor singleton, so identity is pointer equality that fails closed. Host types extend the same path: `#[oxdock_type]` derives a static descriptor for the payload struct, and `inline` selects the zero allocation form for small `Copy` scalars.
 
-There is no garbage collector because values form trees, not graphs. Each exclusive heap word owns its box exactly once: cloning allocates a fresh box with a deep copy, dropping frees it. Each container word co-owns its buffer instead: cloning a `LIST` or `MAP` bumps a reference count in constant time with no allocation, dropping releases one count. A `LIST` owns its items and a `MAP` owns its entries.
+There is no garbage collector because values form trees, not graphs. Each exclusive heap word owns its box exactly once: cloning allocates a fresh box with a deep copy, dropping frees it. Each container word co-owns its buffer instead: cloning a `LIST` or `MAP` bumps a reference count in constant time with no allocation, dropping releases one count. A `LIST` owns its items and a `MAP` owns its entries. Mutating a shared container detaches first, so clones never observe each other's writes: assignment behaves as a copy.
 
 Nothing is mutably borrowed from two places, so cycles cannot form and plain deterministic cleanup suffices. Pointer casts always round trip through the same concrete box or buffer type, and inline words never enter the pointer domain, which keeps provenance intact. The lifecycle is checked under Miri.
 
@@ -412,7 +424,7 @@ Scripts are sequences of instructions, one per line. Instructions may be prefixe
 
 ### Declared variable types
 
-Every variable binding declares its type at the binding site. `LET $name: TYPE = ...` creates the binding, `$name = ...` mutates it, and bodies use the bare `$name` reference. The leading `$` keeps mutation distinct from `KEY=value` command assignments. Repeating `LET` for the same name in the same scope is a redeclaration error. Loop variables are declared the same way: `FOR $item: STRING IN ...`. Valid types: `STRING`, `INT`, `FLOAT`, `BOOL`, `PIPE`, `LIST`, `MAP`, `HANDLE`, `DURATION`, `PATH`.
+Every variable binding declares its type at the binding site. `LET $name: TYPE = ...` creates the binding, `$name = ...` mutates it, and bodies use the bare `$name` reference. The leading `$` keeps mutation distinct from `KEY=value` command assignments. Repeating `LET` for the same name in the same scope is a redeclaration error. Loop variables are declared the same way: `FOR $item: STRING IN ...`. Valid types: scalars (`STRING`, `INT`, `FLOAT`, `BOOL`, `DURATION`, `PATH`), handles (`PIPE`, `HANDLE`, `SEMAPHORE`, `PERMIT`), `ANY`, and composed shapes (`LIST<STRING>`, `MAP<name: STRING, age: INT>`, arbitrary nesting, spacing insignificant). Bare `LIST` and `MAP` are runtime words, never declarations: unknown collections declare `LIST<ANY>` and `MAP<ANY>`. A field with a `?` suffix is optional (`MAP<held: BOOL, permit?: PERMIT>`): missing optional keys pass, missing required keys fail. `TYPE NAME = <shape>` binds one immutable name per run that every declaration form accepts.
 
 ```oxdock
 LET $count: INT = 1
@@ -426,6 +438,22 @@ FOR $item: STRING IN ["a", "b"] {
 WRITE count.txt "{{ $count }}"
 LET $c: STRING = READ count.txt
 ASSERT_EQ $c "2"
+```
+
+Shapes enforce at the binding: a bad element fails naming its position.
+
+```oxdock
+# A list of unknown maps and an inline record bind shaped values.
+LET $ms: LIST<MAP<ANY>> = [{a: 1}]
+LET $p: MAP<name: STRING, age: INT> = {name: "x", age: 3}
+ASSERT_EQ $p.name "x"
+
+# TYPE binds one reusable name; uses enforce structurally.
+TYPE PERSON = MAP<name: STRING, age: INT>
+LET $q: PERSON = {name: "y", age: 4}
+LET $team: LIST<PERSON> = [$q]
+LET $n: STRING = $team.0.name
+ASSERT_EQ $n "y"
 ```
 
 The `env:KEY` expression reads the script environment into a plain value. A `$var` reference never reads the environment, even when the names match:
@@ -559,13 +587,12 @@ ASSERT_CONTAINS stdout "ab"
 
 A guard is a bracketed expression that gates the instruction or block that follows it. Inside the brackets:
 
-- `env:KEY` passes when variable `KEY` exists and is non-empty; `eq(env:KEY, value)` and `ne(env:KEY, value)` compare values.
-- Bare platform tags pass based on the host: `linux`, `macos` (alias `mac`), `windows`, `unix`. Tags are case-insensitive.
-- A comma-separated list means **AND**: `[env:A, linux]`.
+- Guards are namespaced `key:value` pairs: `os:macos`, `os:linux`, `os:windows`, `arch:x86_64` (any documented target-architecture value), `bool:true`, `env:KEY`, `eq(env:KEY, value)`. `family:unix` and `family:windows` are accepted aliases for `any(os:macos, os:linux)` and `os:windows` respectively, lowered at parse so every platform check runs under `os:`. Matching is case-sensitive throughout.
+- A comma-separated list means **AND**: `[env:A, os:linux]`.
 - Disjunction is expressed as a call: `any(expr, expr, ...)` with at least two branches, not an infix operator.
 - Conjunction is expressed as a call (`all(expr, expr, ...)`) or implicitly via comma separation.
 - Any predicate may be negated with `not(...)`: `[not(env:SKIP)]`.
-- Parentheses group expressions: `[any(env:A, linux), mac]`.
+- Parentheses group expressions: `[any(env:A, os:linux), os:macos]`.
 
 Guards attach to the next instruction. Several guard lines in a row chain onto the same target, and a guard immediately followed by `{` opens a guarded block whose guard applies to every enclosed instruction.
 
@@ -593,22 +620,62 @@ ASSERT_CONTAINS stdout "deploying-to-staging"
 
 ```oxdock
 // Exactly one block runs depending on the host OS; every command
-// inside a guarded block inherits the block's guard.
-[windows] {
+// inside a guarded block inherits the block's guard. A shared
+// counter incremented in each block proves exactly one ran.
+LET $ran: INT = 0
+
+[family:windows] {
   WRITE os-report.txt windows
   ECHO windows-detected
   LET $rep: STRING = READ os-report.txt
   ASSERT_EQ $rep "windows"
   ASSERT_CONTAINS stdout "windows-detected"
+  $ran = $ran + 1
 }
 
-[unix] {
+[family:unix] {
   WRITE os-report.txt unix-family
   ECHO unix-detected
   LET $rep: STRING = READ os-report.txt
   ASSERT_EQ $rep "unix-family"
   ASSERT_CONTAINS stdout "unix-detected"
+  $ran = $ran + 1
 }
+
+ASSERT_EQ $ran 1
+```
+
+### Architecture guards
+
+```oxdock
+# Gate blocks on the host target architecture. Exactly one block
+# runs on any host, and each block proves its own execution.
+[arch:x86_64] {
+  WRITE arch-report.txt x86_64
+  ECHO arch-detected
+  LET $rep: STRING = READ arch-report.txt
+  ASSERT_EQ $rep "x86_64"
+  ASSERT_CONTAINS stdout "arch-detected"
+}
+
+[arch:aarch64] {
+  WRITE arch-report.txt aarch64
+  ECHO arch-detected
+  LET $rep: STRING = READ arch-report.txt
+  ASSERT_EQ $rep "aarch64"
+  ASSERT_CONTAINS stdout "arch-detected"
+}
+
+[not(any(arch:x86_64, arch:aarch64))] {
+  WRITE arch-report.txt other-arch
+  ECHO arch-detected
+  LET $rep: STRING = READ arch-report.txt
+  ASSERT_EQ $rep "other-arch"
+  ASSERT_CONTAINS stdout "arch-detected"
+}
+
+# One block always runs, so this holds on every host.
+ASSERT_CONTAINS stdout "arch-detected"
 ```
 
 ### Negation, disjunction, and composition
@@ -626,7 +693,7 @@ ASSERT_CONTAINS stdout "negation-passes-for-undefined"
 ASSERT_CONTAINS stdout "or-matched-a-branch"
 
 // Comma composes with AND: (A or linux) AND A: true here on every OS.
-[any(env:OXDOCK_DOC_FEATURE_A, linux), env:OXDOCK_DOC_FEATURE_A] ECHO composed-and-or-guard
+[any(env:OXDOCK_DOC_FEATURE_A, os:linux), env:OXDOCK_DOC_FEATURE_A] ECHO composed-and-or-guard
 ASSERT_CONTAINS stdout "composed-and-or-guard"
 ```
 
@@ -809,7 +876,7 @@ Keeping inheritance selective avoids leaking secrets by default while still allo
 Install the binary from the registry:
 
 ```sh
-cargo install oxdock@0.20.0-alpha
+cargo install oxdock@0.21.0-alpha
 ```
 
 Run a script file:
@@ -837,6 +904,7 @@ written: the shape first, the definitions it names right below it.
 
 ```rust
 use oxdock::{Engine, HostModule, OxDockFn, OxDockType, oxdock_func, oxdock_type};
+use oxdock::oxdock_core::TypeTag;
 use std::fmt;
 
 // The script below is the DSL itself, not a string: the `oxdock!` macro
@@ -849,6 +917,7 @@ fn main() -> anyhow::Result<()> {
         name: "DEMO".to_string(),
         funcs: vec![MakeTag::registration(), ReadTag::registration()],
         types: vec![],
+        record_schemas: vec![],
     });
 
     let temp = oxdock_fs::GuardedPath::tempdir().unwrap();
@@ -902,7 +971,7 @@ fn make_tag() -> anyhow::Result<oxdock::Value> {
 }
 
 /// Read the payload back out through a descriptor-checked typed read.
-#[oxdock_func(pure, returns = "STRING")]
+#[oxdock_func(pure, returns = TypeTag::String)]
 fn read_tag(val: oxdock::Value) -> anyhow::Result<oxdock::Value> {
     let Some(tag) = val.read_heap::<Tag>(Tag::descriptor()) else {
         anyhow::bail!("READ_TAG() expects a TAG value");
@@ -918,7 +987,9 @@ id checked read. `{{ $t }}` renders the custom value through its
 `Display`, so interpolation, `WRITE`, and equality treat host values like
 native ones. `TYPES()` lists every registered name and
 `TYPE_DESCRIBE("TAG")` returns its summary and docs, so scripts introspect
-host surface exactly like native surface. Host types stay opaque:
+host surface exactly like native surface. Script `TYPE` aliases ride the
+same listing: `TYPES()` includes alias names and `TYPE_DESCRIBE("PERSON")`
+reports the canonical target spelling. Host types stay opaque:
 literal syntax, `$var.key` traversal, and `FOR` iteration remain `LIST`
 and `MAP` only, so queryable containers expose host accessor functions
 (`MATRIX_GET($m, $row, $col)`) instead of new syntax.
@@ -931,10 +1002,11 @@ the declared return type explicitly when the defaults do not fit:
 
 ```rust
 use oxdock::{HostModule, OxDockFn, StepCtx, oxdock_func};
+use oxdock::oxdock_core::TypeTag;
 use oxdock::oxdock_core::ProcessManager;
 
 /// Read an environment variable, defaulting to empty.
-#[oxdock_func(name = "ENV_OR", returns = "STRING")]
+#[oxdock_func(name = "ENV_OR", returns = TypeTag::String)]
 fn env_or<P: ProcessManager>(
     cx: &mut StepCtx<P>,
     key: String,
@@ -948,6 +1020,7 @@ fn main() {
         name: "DEMO".to_string(),
         funcs: vec![EnvOr::registration()],
         types: vec![],
+        record_schemas: vec![],
     });
 }
 ```
@@ -1015,6 +1088,7 @@ unavailable by the boundary above.
 
 ```rust
 use oxdock::{HostModule, OxDockFn, OxDockType, Value, oxdock_func, oxdock_type};
+use oxdock::oxdock_core::TypeTag;
 use std::fmt;
 
 /// Integer grid with no literal syntax: scripts query it through functions.
@@ -1038,7 +1112,7 @@ fn make_matrix() -> anyhow::Result<Value> {
 }
 
 /// Read one cell by row and column.
-#[oxdock_func(pure, returns = "INT")]
+#[oxdock_func(pure, returns = TypeTag::Int)]
 fn matrix_get(board: Value, row: i64, col: i64) -> anyhow::Result<Value> {
     let Some(grid) = board.read_heap::<Matrix>(Matrix::descriptor()) else {
         anyhow::bail!("MATRIX_GET() expects a MATRIX value");
@@ -1066,6 +1140,7 @@ fn main() -> anyhow::Result<()> {
             MatrixGet::registration(),
         ],
         types: vec![],
+        record_schemas: vec![],
     });
     let temp = oxdock_fs::GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
@@ -1148,7 +1223,7 @@ Or pin the version in `Cargo.toml`:
 
 ```toml
 [dependencies]
-oxdock = { version = "0.20.0-alpha", default-features = false }
+oxdock = { version = "0.21.0-alpha", default-features = false }
 ```
 
 ## Glossary

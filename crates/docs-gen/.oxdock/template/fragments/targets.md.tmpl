@@ -25,3 +25,10 @@ Two formatting rules keep assembly exact: keep fragments
 newline-terminated with placeholders on their own lines, and escape
 literal placeholder examples natively (`\{{ ... }}`) so they pass
 through untouched.
+
+One values file can feed several masters: the generic example renders
+a human `README.md`, a slim agent pointer `llms.txt`, and a full
+carrier `llms-full.txt` from the same values through shared fragments.
+Each master selects its sections, so the split between outputs is
+structural (same values, same fragments) and can never drift into
+copies.

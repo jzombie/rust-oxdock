@@ -6,17 +6,18 @@
 //! carries bytes consumed by the wire side (the DSL writes them).
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use oxdock_core::{
-    FuncKind, FuncMeta, FuncParam, HostModule, HostRegistration, NativeFn, OxDockFn, OxDockType,
-    StepCtx, Value,
+    Field, FuncKind, FuncMeta, FuncParam, HostModule, HostRegistration, NativeFn, OxDockFn,
+    OxDockType, ParamOption, RecordSchema, StepCtx, TypeTag, Value,
 };
 use oxdock_func_macro::oxdock_func;
 use oxdock_net_plugin::{AcquiredListener, EndpointKey, EndpointRegistry, acquire_listener};
+use oxdock_pipe::PipeHandle;
 use oxdock_process::ProcessManager;
 use russh::keys::{Algorithm, PrivateKey};
 
@@ -34,28 +35,6 @@ static SERVER_IDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::
 
 /// Dequeue tick: shutdown and cancellation surface within a few ticks.
 const DEQUEUE_TICK: Duration = Duration::from_millis(10);
-
-/// Read the `SSH_SERVER` payload out of a DSL value.
-fn server_state(value: &Value, func: &str) -> Result<Arc<ServerState>> {
-    let Some(tag) = value.read_heap::<SshServerTag>(SshServerTag::descriptor()) else {
-        bail!(
-            "{func} expects an SSH_SERVER value, got {}",
-            value.type_name()
-        );
-    };
-    Ok(Arc::clone(tag.state()))
-}
-
-/// Read the `SSH_SESSION` payload out of a DSL value.
-fn session_tag(value: &Value, func: &str) -> Result<SshSessionTag> {
-    let Some(tag) = value.read_heap::<SshSessionTag>(SshSessionTag::descriptor()) else {
-        bail!(
-            "{func} expects an SSH_SESSION value, got {}",
-            value.type_name()
-        );
-    };
-    Ok(tag.clone())
-}
 
 /// Block until the queue yields an authenticated session (or teardown).
 /// Shared by `SSH_DEQUEUE` and the `SSH_ACCEPT` wrapper.
@@ -95,13 +74,13 @@ fn dequeue_session<P: ProcessManager>(
 ///
 /// ```oxdock
 /// IMPORT [STD, SSH]
-/// LET $m: MAP = SSH_SERVE("doc-ssh-demo", {username: "u", password: "p"})
+/// LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-demo", {username: "u", password: "p"})
 ///
 /// # Serve: dequeue one session and pump a synthetic reply.
 /// LET $in: PIPE
 /// LET $out: PIPE
 /// LET $w: HANDLE = ASYNC {
-///     LET $sess: MAP = SSH_DEQUEUE($m.server)
+///     LET $sess: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
 ///     ASSERT_CONTAINS $sess "session"
 ///     ASSERT_CONTAINS $sess "command"
 ///     ASSERT_CONTAINS $sess "username"
@@ -117,7 +96,7 @@ fn dequeue_session<P: ProcessManager>(
 ///
 /// # Greet through the server pipe and wait for delivery.
 /// WITH_IO [stdout=$in] ECHO "server-greeting"
-/// LET $info: MAP = INSPECT($cout)
+/// LET $info: MAP<ANY> = INSPECT($cout)
 /// LET $empty: BOOL = $info.buffer_bytes == 0
 /// WHILE $empty {
 ///     SLEEP 100ms
@@ -131,17 +110,22 @@ fn dequeue_session<P: ProcessManager>(
 /// CANCEL $c
 /// SSH_CLOSE($m.server)
 /// ```
+///
 #[oxdock_func(
-    returns = "MAP",
+    returns = TypeTag::Record(dequeue_result_fields()),
     summary = "Dequeue one SSH session with its metadata."
 )]
-fn ssh_dequeue<P: ProcessManager>(cx: &mut StepCtx<P>, server: Value) -> Result<Value> {
+fn ssh_dequeue<P: ProcessManager>(
+    cx: &mut StepCtx<P>,
+    /// Server handle from `SSH_SERVE`.
+    server: SshServerTag,
+) -> Result<Value> {
     if !cx.is_async_task() {
         bail!(
             "SSH_DEQUEUE requires ASYNC: wrap it as LET $t: HANDLE = ASYNC {{ SSH_DEQUEUE($server.server) }}"
         );
     }
-    let state = server_state(&server, "SSH_DEQUEUE")?;
+    let state = Arc::clone(server.state());
     let session = dequeue_session(cx, state.queue(), "SSH_DEQUEUE")?;
     let command = session.exec_command.clone().unwrap_or_default();
     let username = session.username.clone().unwrap_or_default();
@@ -166,35 +150,6 @@ fn ssh_dequeue<P: ProcessManager>(cx: &mut StepCtx<P>, server: Value) -> Result<
     map.insert("username".to_string(), Value::string(username));
     map.insert("addr".to_string(), Value::string(addr));
     Ok(Value::map(map))
-}
-
-/// Read a flat string list (an argv vector) out of a DSL value.
-fn argv_list(value: &Value, func: &str) -> Result<Vec<String>> {
-    let Some(items) = value.as_list() else {
-        bail!("{func} argv must be a LIST of strings");
-    };
-    if items.is_empty() {
-        bail!("{func} argv must not be empty");
-    }
-    items
-        .iter()
-        .map(|item| {
-            item.as_str().map(str::to_string).ok_or_else(|| {
-                anyhow::anyhow!("{func} argv must be strings, got {}", item.type_name())
-            })
-        })
-        .collect()
-}
-
-/// Read the options MAP for `SSH_SERVE`. The 2nd argument must be a MAP;
-/// unknown keys bail so script typos fail fast instead of silently ignored.
-fn serve_options(options: &Value) -> Result<&BTreeMap<String, Value>> {
-    options.as_map().ok_or_else(|| {
-        anyhow::anyhow!(
-            "SSH_SERVE options must be a MAP, got {}",
-            options.type_name()
-        )
-    })
 }
 
 /// Read a required STRING key from the options MAP. Missing, non-string,
@@ -244,6 +199,30 @@ fn optional_string(map: &BTreeMap<String, Value>, func: &str, key: &str) -> Resu
 /// file, load-or-create; a leading `/` anchors to the workspace root like
 /// WRITE, and escapes still bail; absent or blank keeps the ephemeral
 /// in-memory key).
+/// SERVE options, shared by the registration metadata and the runtime
+/// key check: one source for the keys scripts may pass, so
+/// documentation and enforcement cannot drift apart.
+static SSH_SERVE_OPTIONS: &[ParamOption] = &[
+    ParamOption {
+        name: "username",
+        value: TypeTag::String,
+        required: true,
+        default: None,
+    },
+    ParamOption {
+        name: "password",
+        value: TypeTag::String,
+        required: true,
+        default: None,
+    },
+    ParamOption {
+        name: "key_path",
+        value: TypeTag::String,
+        required: false,
+        default: None,
+    },
+];
+
 /// Non-blocking: returns a MAP with `server` (SSH_SERVER),
 /// `addr` (STRING: the physical bind, or the virtual endpoint echo when
 /// socketless), `username` and `password` (STRINGs), and `virtual`
@@ -253,14 +232,10 @@ fn ssh_serve<P: ProcessManager>(
     cx: &mut StepCtx<P>,
     registry: &Arc<EndpointRegistry>,
     bind: String,
-    options: Value,
+    options: BTreeMap<String, Value>,
 ) -> Result<Value> {
-    let map = serve_options(&options)?;
-    for key in map.keys() {
-        if key != "username" && key != "password" && key != "key_path" {
-            bail!("SSH_SERVE() unknown option '{key}' (expected: username, password, key_path)");
-        }
-    }
+    let map = &options;
+    oxdock_core::check_options(map, SSH_SERVE_OPTIONS, "SSH_SERVE")?;
     let username = required_string(map, "SSH_SERVE", "username")?;
     let password = required_string(map, "SSH_SERVE", "password")?;
     let key_path = optional_string(map, "SSH_SERVE", "key_path")?;
@@ -358,7 +333,7 @@ fn ssh_serve<P: ProcessManager>(
 ///
 /// ```oxdock
 /// IMPORT [STD, SSH]
-/// LET $m: MAP = SSH_SERVE("doc-ssh-demo", {username: "u", password: "p"})
+/// LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-demo", {username: "u", password: "p"})
 ///
 /// # Accept one session into fresh pipes.
 /// LET $in: PIPE
@@ -372,7 +347,7 @@ fn ssh_serve<P: ProcessManager>(
 ///
 /// # Greet through the server pipe and wait for delivery.
 /// WITH_IO [stdout=$in] ECHO "server-greeting"
-/// LET $info: MAP = INSPECT($cout)
+/// LET $info: MAP<ANY> = INSPECT($cout)
 /// LET $empty: BOOL = $info.buffer_bytes == 0
 /// WHILE $empty {
 ///     SLEEP 100ms
@@ -382,25 +357,38 @@ fn ssh_serve<P: ProcessManager>(
 /// ASSERT_CONTAINS $cout "server-greeting"
 ///
 /// # The awaited result carries both keys; then shut down.
-/// LET $done: MAP = AWAIT $acc
+/// LET $done: MAP<ANY> = AWAIT $acc
 /// ASSERT_EQ $done.closed true
 /// ASSERT_CONTAINS $done "command"
 /// CANCEL $c
 /// SSH_CLOSE($m.server)
 /// ```
-#[oxdock_func(returns = "MAP", summary = "Accept one SSH session into pipes.")]
+///
+#[oxdock_func(returns = TypeTag::Record(&[Field {
+    name: "closed",
+    ty: TypeTag::Bool,
+    docs: "True when the session closed cleanly.",
+    optional: false,
+}]), summary = "Accept one SSH session into pipes.")]
 fn ssh_accept<P: ProcessManager>(
     cx: &mut StepCtx<P>,
-    server: Value,
-    in_pipe: Value,
-    out_pipe: Value,
+    /// Server handle from `SSH_SERVE`.
+    server: SshServerTag,
+    /// Pipe carrying bytes consumed by the wire side.
+    in_pipe: PipeHandle,
+    /// Pipe carrying bytes produced by the wire side.
+    out_pipe: PipeHandle,
 ) -> Result<Value> {
     if !cx.is_async_task() {
         bail!(
             "SSH_ACCEPT requires ASYNC: wrap it as LET $t: HANDLE = ASYNC {{ SSH_ACCEPT($server, $in, $out) }}"
         );
     }
-    let state = server_state(&server, "SSH_ACCEPT")?;
+    // Downstream pumps take `&Value`: re-wrap the extracted handles so
+    // every helper below keeps its Value-based shape.
+    let in_pipe = Value::pipe_handle(in_pipe);
+    let out_pipe = Value::pipe_handle(out_pipe);
+    let state = Arc::clone(server.state());
     let cancel = AtomicBool::new(false);
     let session = dequeue_session(cx, state.queue(), "SSH_ACCEPT")?;
     pump_session(
@@ -424,21 +412,33 @@ fn ssh_accept<P: ProcessManager>(
 /// closes. Must run inside `ASYNC`. The session ends are take-once: a
 /// second pump on the same session bails instead of splitting bytes.
 /// Returns a MAP with `closed` (BOOL).
+///
 #[oxdock_func(
-    returns = "MAP",
+    returns = TypeTag::Record(&[Field {
+        name: "closed",
+        ty: TypeTag::Bool,
+        docs: "True when the session closed cleanly.",
+        optional: false,
+    }]),
     summary = "Pump a dequeued SSH session through pipes."
 )]
 fn ssh_pump_channel<P: ProcessManager>(
     cx: &mut StepCtx<P>,
-    session: Value,
-    in_pipe: Value,
-    out_pipe: Value,
+    /// Session handle from `SSH_DEQUEUE` (pump ends take once).
+    session: SshSessionTag,
+    /// Pipe carrying bytes consumed by the wire side.
+    in_pipe: PipeHandle,
+    /// Pipe carrying bytes produced by the wire side.
+    out_pipe: PipeHandle,
 ) -> Result<Value> {
     if !cx.is_async_task() {
         bail!("SSH_PUMP_CHANNEL requires ASYNC: pump it in its own task after SSH_DEQUEUE");
     }
-    let tag = session_tag(&session, "SSH_PUMP_CHANNEL")?;
-    let (up_rx, down_tx) = tag.take_pump_ends()?;
+    // Downstream pumps take `&Value`: re-wrap the extracted handles so
+    // every helper below keeps its Value-based shape.
+    let in_pipe = Value::pipe_handle(in_pipe);
+    let out_pipe = Value::pipe_handle(out_pipe);
+    let (up_rx, down_tx) = session.take_pump_ends()?;
     let cancel = AtomicBool::new(false);
     pump_session(cx, &in_pipe, &out_pipe, up_rx, down_tx, &cancel)?;
     let mut map = BTreeMap::new();
@@ -448,10 +448,15 @@ fn ssh_pump_channel<P: ProcessManager>(
 
 /// Shut a server down and join its runtime thread (bounded). Idempotent:
 /// returns BOOL true when no thread remains.
-#[oxdock_func(returns = "BOOL", summary = "Shut down an SSH server.")]
-fn ssh_close<P: ProcessManager>(cx: &mut StepCtx<P>, server: Value) -> Result<Value> {
+///
+#[oxdock_func(returns = TypeTag::Bool, summary = "Shut down an SSH server.")]
+fn ssh_close<P: ProcessManager>(
+    cx: &mut StepCtx<P>,
+    /// Server handle from `SSH_SERVE`.
+    server: SshServerTag,
+) -> Result<Value> {
     let _ = cx;
-    let state = server_state(&server, "SSH_CLOSE")?;
+    let state = Arc::clone(server.state());
     state.request_shutdown();
     Ok(Value::bool(state.join_thread(CLOSE_JOIN_TIMEOUT)))
 }
@@ -506,12 +511,19 @@ fn ssh_connect<P: ProcessManager>(
 /// Copy one pipe into another until EOF, then close the target.
 /// Returns the INT byte count. Either task placement works, as long as
 /// the other end is live (usually an `ASYNC` task).
-#[oxdock_func(returns = "INT", summary = "Copy one pipe into another until EOF.")]
+///
+#[oxdock_func(returns = TypeTag::Int, summary = "Copy one pipe into another until EOF.")]
 fn ssh_pump<P: ProcessManager>(
     cx: &mut StepCtx<P>,
-    from_pipe: Value,
-    to_pipe: Value,
+    /// Source pipe to drain.
+    from_pipe: PipeHandle,
+    /// Target pipe receiving the bytes (closed at EOF).
+    to_pipe: PipeHandle,
 ) -> Result<Value> {
+    // `pump_pipe_to_pipe` takes `&Value`: re-wrap the extracted
+    // handles so the bridge keeps its Value-based shape.
+    let from_pipe = Value::pipe_handle(from_pipe);
+    let to_pipe = Value::pipe_handle(to_pipe);
     let cancel = AtomicBool::new(false);
     let total = pump_pipe_to_pipe(cx, &from_pipe, &to_pipe, &cancel)?;
     Ok(Value::int(total))
@@ -528,40 +540,125 @@ fn ssh_pump<P: ProcessManager>(
 /// the script environment like `RUN`: block-scoped `ENV` (such as the
 /// session's `SSH_USER` / `SSH_CLIENT` / `SSH_SERVER` / `SSH_COMMAND`
 /// relay) reaches the child; the working directory comes from the script.
+///
 #[oxdock_func(
-    returns = "INT",
+    returns = TypeTag::Int,
     summary = "Run a command under a sized local terminal into pipes."
 )]
 fn ssh_pty_run<P: ProcessManager>(
     cx: &mut StepCtx<P>,
-    session: Value,
-    argv: Value,
+    /// Session handle from `SSH_DEQUEUE`.
+    session: SshSessionTag,
+    /// Program and arguments to run.
+    argv: Vec<String>,
+    /// Terminal rows when positive, session size otherwise.
     rows: i64,
+    /// Terminal columns when positive, session size otherwise.
     cols: i64,
-    in_pipe: Value,
-    out_pipe: Value,
+    /// Pipe carrying bytes consumed by the child.
+    in_pipe: PipeHandle,
+    /// Pipe carrying bytes produced by the child.
+    out_pipe: PipeHandle,
 ) -> Result<Value> {
     if !cx.is_async_task() {
         bail!("SSH_PTY_RUN requires ASYNC: run it in its own task beside the session pump task");
     }
-    let tag = session_tag(&session, "SSH_PTY_RUN")?;
-    let argv = argv_list(&argv, "SSH_PTY_RUN")?;
+    // `pump_pty_session` takes `&Value` pipes: re-wrap the extracted
+    // handles so the bridge keeps its Value-based shape.
+    let in_pipe = Value::pipe_handle(in_pipe);
+    let out_pipe = Value::pipe_handle(out_pipe);
     let initial = if rows > 0 && cols > 0 {
         crate::state::PtySize::new(rows as u32, cols as u32)
     } else {
-        tag.pty_size()
+        session.pty_size()
     };
     let cancel = AtomicBool::new(false);
     let code = crate::pty::pump_pty_session(
         cx,
         &argv,
         initial,
-        &tag.pty_size_handle(),
+        &session.pty_size_handle(),
         &in_pipe,
         &out_pipe,
         &cancel,
     )?;
     Ok(Value::int(code))
+}
+
+/// Field table for the `SSH_SERVE` result bundle, backing the
+/// `SSH_SERVE_INFO` schema and the `SSH_SERVE` return tag: one source
+/// for the shape the host mints, so introspection, enforcement, and
+/// documentation cannot drift apart.
+fn serve_result_fields() -> &'static [Field] {
+    static FIELDS: OnceLock<Vec<Field>> = OnceLock::new();
+    FIELDS.get_or_init(|| {
+        vec![
+            Field {
+                name: "server",
+                ty: TypeTag::Custom(SshServerTag::descriptor()),
+                docs: "Server handle for `SSH_ACCEPT`, `SSH_DEQUEUE`, and `SSH_CLOSE`.",
+                optional: false,
+            },
+            Field {
+                name: "addr",
+                ty: TypeTag::String,
+                docs: "Bound socket address (`ip:port`) of the server.",
+                optional: false,
+            },
+            Field {
+                name: "username",
+                ty: TypeTag::String,
+                docs: "Configured username.",
+                optional: false,
+            },
+            Field {
+                name: "password",
+                ty: TypeTag::String,
+                docs: "Configured password.",
+                optional: false,
+            },
+            Field {
+                name: "virtual",
+                ty: TypeTag::String,
+                docs: "Virtual endpoint echo of the claimed slot.",
+                optional: false,
+            },
+        ]
+    })
+}
+
+/// Field table for the `SSH_DEQUEUE` result bundle, backing the
+/// `SSH_DEQUEUE_INFO` schema and the `SSH_DEQUEUE` return tag.
+fn dequeue_result_fields() -> &'static [Field] {
+    static FIELDS: OnceLock<Vec<Field>> = OnceLock::new();
+    FIELDS.get_or_init(|| {
+        vec![
+            Field {
+                name: "session",
+                ty: TypeTag::Custom(SshSessionTag::descriptor()),
+                docs: "Session handle for `SSH_PUMP_CHANNEL` (pump ends take once).",
+                optional: false,
+            },
+            Field {
+                name: "command",
+                ty: TypeTag::String,
+                docs: "Executed command, empty for shells.",
+                optional: false,
+            },
+            Field {
+                name: "username",
+                ty: TypeTag::String,
+                docs: "Authenticated username, empty when unset.",
+                optional: false,
+            },
+            Field {
+                name: "addr",
+                ty: TypeTag::String,
+                docs: "Peer address, empty when unset.",
+                optional: false,
+            },
+        ]
+    })
 }
 
 /// The `SSH` host module: virtual-endpoint server plus client, bridged
@@ -588,6 +685,16 @@ pub fn module_with_endpoints<P: ProcessManager>(registry: Arc<EndpointRegistry>)
             SshPtyRun::registration(),
         ],
         types: vec![SshServerTag::descriptor(), SshSessionTag::descriptor()],
+        record_schemas: vec![
+            RecordSchema {
+                name: "SSH_SERVE_INFO",
+                fields: serve_result_fields(),
+            },
+            RecordSchema {
+                name: "SSH_DEQUEUE_INFO",
+                fields: dequeue_result_fields(),
+            },
+        ],
     }
 }
 
@@ -597,16 +704,47 @@ pub fn module_with_endpoints<P: ProcessManager>(registry: Arc<EndpointRegistry>)
 fn ssh_serve_registration<P: ProcessManager>(
     registry: Arc<EndpointRegistry>,
 ) -> HostRegistration<P> {
+    // One params vector feeds both the metadata and the arity check,
+    // so the two can never disagree: add a parameter once, here.
+    let params = vec![
+        FuncParam {
+            name: "bind".to_string(),
+            param_type: Some(TypeTag::String),
+            allowed: None,
+            docs: "Virtual service endpoint to serve (logical port or service name).",
+            options: None,
+            optional: false,
+        },
+        FuncParam {
+            name: "options".to_string(),
+            param_type: Some(TypeTag::Map),
+            allowed: None,
+            docs: "Server credentials and host key.",
+            options: Some(SSH_SERVE_OPTIONS),
+            optional: false,
+        },
+    ];
+    let arity = params.len();
     let func: NativeFn<P> = Arc::new(move |cx, values| {
-        if values.len() != 2 {
-            bail!("SSH_SERVE() expects 2 argument(s), got {}", values.len());
+        if values.len() != arity {
+            bail!(
+                "SSH_SERVE() expects {arity} argument(s), got {}",
+                values.len()
+            );
         }
         let mut values = values.into_iter();
         let bind = match values.next().expect("arity checked above").as_str() {
             Some(s) => s.to_string(),
             None => bail!("SSH_SERVE() argument `$bind` must be a STRING"),
         };
-        let options = values.next().expect("arity checked above");
+        let options_value = values.next().expect("arity checked above");
+        let options = match options_value.as_map() {
+            Some(map) => map.clone(),
+            None => bail!(
+                "SSH_SERVE() argument `$options` must be a MAP, got {}",
+                options_value.type_name()
+            ),
+        };
         ssh_serve(cx, &registry, bind, options)
     });
     HostRegistration::Stateful {
@@ -616,17 +754,8 @@ fn ssh_serve_registration<P: ProcessManager>(
             // Assigned at registration, like the macro's markers.
             module: String::new(),
             kind: FuncKind::HostCtx,
-            params: Some(vec![
-                FuncParam {
-                    name: "bind".to_string(),
-                    param_type: Some("STRING".to_string()),
-                },
-                FuncParam {
-                    name: "options".to_string(),
-                    param_type: None,
-                },
-            ]),
-            returns: Some("MAP".to_string()),
+            params: Some(params),
+            returns: Some(TypeTag::Record(serve_result_fields())),
             rpn: false,
             summary: "Serve SSH on a virtual service endpoint.",
             docs: "Serve SSH on a virtual service endpoint.",
@@ -640,9 +769,57 @@ fn ssh_serve_registration<P: ProcessManager>(
 fn ssh_connect_registration<P: ProcessManager>(
     registry: Arc<EndpointRegistry>,
 ) -> HostRegistration<P> {
+    // One params vector feeds both the metadata and the arity check,
+    // so the two can never disagree: add a parameter once, here.
+    let params = vec![
+        FuncParam {
+            name: "target".to_string(),
+            param_type: Some(TypeTag::String),
+            allowed: None,
+            docs: "Dial target: logical port, service name, served address, or `host:port`.",
+            options: None,
+            optional: false,
+        },
+        FuncParam {
+            name: "username".to_string(),
+            param_type: Some(TypeTag::String),
+            allowed: None,
+            docs: "Inner credentials for the SSH session.",
+            options: None,
+            optional: false,
+        },
+        FuncParam {
+            name: "password".to_string(),
+            param_type: Some(TypeTag::String),
+            allowed: None,
+            docs: "Inner credentials for the SSH session.",
+            options: None,
+            optional: false,
+        },
+        FuncParam {
+            name: "in_pipe".to_string(),
+            param_type: Some(TypeTag::Pipe),
+            allowed: None,
+            docs: "Pipe carrying bytes consumed by the wire side.",
+            options: None,
+            optional: false,
+        },
+        FuncParam {
+            name: "out_pipe".to_string(),
+            param_type: Some(TypeTag::Pipe),
+            allowed: None,
+            docs: "Pipe carrying bytes produced by the wire side.",
+            options: None,
+            optional: false,
+        },
+    ];
+    let arity = params.len();
     let func: NativeFn<P> = Arc::new(move |cx, values| {
-        if values.len() != 5 {
-            bail!("SSH_CONNECT() expects 5 argument(s), got {}", values.len());
+        if values.len() != arity {
+            bail!(
+                "SSH_CONNECT() expects {arity} argument(s), got {}",
+                values.len()
+            );
         }
         let mut values = values.into_iter();
         let target = match values.next().expect("arity checked above").as_str() {
@@ -658,7 +835,19 @@ fn ssh_connect_registration<P: ProcessManager>(
             None => bail!("SSH_CONNECT() argument `$password` must be a STRING"),
         };
         let in_pipe = values.next().expect("arity checked above");
+        if in_pipe.as_pipe_handle().is_none() {
+            bail!(
+                "SSH_CONNECT() argument `$in_pipe` must be a PIPE, got {}",
+                in_pipe.type_name()
+            );
+        }
         let out_pipe = values.next().expect("arity checked above");
+        if out_pipe.as_pipe_handle().is_none() {
+            bail!(
+                "SSH_CONNECT() argument `$out_pipe` must be a PIPE, got {}",
+                out_pipe.type_name()
+            );
+        }
         ssh_connect(cx, &registry, target, username, password, in_pipe, out_pipe)
     });
     HostRegistration::Stateful {
@@ -668,29 +857,8 @@ fn ssh_connect_registration<P: ProcessManager>(
             // Assigned at registration, like the macro's markers.
             module: String::new(),
             kind: FuncKind::HostCtx,
-            params: Some(vec![
-                FuncParam {
-                    name: "target".to_string(),
-                    param_type: Some("STRING".to_string()),
-                },
-                FuncParam {
-                    name: "username".to_string(),
-                    param_type: Some("STRING".to_string()),
-                },
-                FuncParam {
-                    name: "password".to_string(),
-                    param_type: Some("STRING".to_string()),
-                },
-                FuncParam {
-                    name: "in_pipe".to_string(),
-                    param_type: None,
-                },
-                FuncParam {
-                    name: "out_pipe".to_string(),
-                    param_type: None,
-                },
-            ]),
-            returns: Some("MAP".to_string()),
+            params: Some(params),
+            returns: Some(TypeTag::Map),
             rpn: false,
             summary: "Open an SSH client session into pipes.",
             docs: "Open an SSH client session into pipes. Target shapes: a logical port (CLI-mapped address or loopback default), a service name (CLI-mapped address only), a served address, or a host:port dial.",

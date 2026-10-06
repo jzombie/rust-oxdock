@@ -60,6 +60,11 @@ pub struct ExecHeader {
 pub struct ExecResult {
     pub ok: bool,
     pub error: Option<String>,
+    /// Guest `EXIT` code, if the failure was an exit request. The host
+    /// relays it to its own process exit status. `None` for success and
+    /// for non-exit failures. Defaulted so older guests still decode.
+    #[serde(default)]
+    pub exit_code: Option<i64>,
     pub result_tar_sha256: String,
     pub script_sha256: String,
     pub stdout_sha256: String,

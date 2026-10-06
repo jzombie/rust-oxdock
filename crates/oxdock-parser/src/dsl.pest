@@ -14,11 +14,11 @@ blank = _{ (WHITESPACE | linebreak)+ }
 script = { SOI ~ element* ~ EOI }
 
 // Structural statements MUST precede generic commands
-element = _{ blank | hash_comment | COMMENT | semicolon | guard_line | block_start | block_end | if_statement | for_statement | while_statement | func_def | import_statement | export_statement | call_statement | return_statement | break_statement | continue_statement | let_async_statement | let_capture_statement | await_statement | cancel_statement | let_statement | mutate_statement | timeout_statement | remote_statement | async_statement_block | async_statement | command }
+element = _{ blank | hash_comment | COMMENT | semicolon | guard_line | block_start | block_end | if_statement | for_statement | while_statement | func_def | import_statement | export_statement | call_statement | return_statement | break_statement | continue_statement | let_async_statement | let_capture_statement | await_statement | cancel_statement | let_statement | mutate_statement | timeout_statement | remote_statement | async_statement_block | async_statement | type_statement | command }
 
 // Inside for/let blocks, block_start/block_end must NOT appear as elements
 // (the block's own braces handle them).  Nested guard blocks use guard_block.
-block_element = _{ blank | hash_comment | COMMENT | semicolon | guard_block | guard_line | if_statement | for_statement | while_statement | func_def | import_statement | export_statement | call_statement | return_statement | break_statement | continue_statement | let_async_statement | let_capture_statement | await_statement | cancel_statement | let_statement | mutate_statement | timeout_statement | remote_statement | async_statement_block | async_statement | command }
+block_element = _{ blank | hash_comment | COMMENT | semicolon | guard_block | guard_line | if_statement | for_statement | while_statement | func_def | import_statement | export_statement | call_statement | return_statement | break_statement | continue_statement | let_async_statement | let_capture_statement | await_statement | cancel_statement | let_statement | mutate_statement | timeout_statement | remote_statement | async_statement_block | async_statement | type_statement | command }
 guard_block = ${ guard_line ~ gap ~ block }
 
 block_start = { "{" }
@@ -42,7 +42,11 @@ any_kw = _{ "any" }
 all_kw = _{ "all" }
 guard_expr_list = { guard_expr ~ ( ws? ~ "," ~ ws? ~ guard_expr )* }
 guard_term = { ws? ~ guard_predicate ~ !( "(" | ":" | "=" | "!") ~ ws? }
-guard_predicate = _{ eq_guard | neq_guard | bool_guard | env_guard | bare_guard_ident }
+guard_predicate = _{ inject_guard | eq_guard | neq_guard | bool_guard | env_guard | ns_guard }
+// Macro interpolation placeholder (`[#flag]` renders here before the
+// proc macro substitutes the Rust identifier): parses as an env-key
+// shape so emission interpolates it into the variable name.
+inject_guard = @{ "__OXDOCK_INJECT_" ~ ASCII_DIGIT+ ~ "__" }
 bool_guard = { "bool" ~ ":" ~ ws? ~ bool_value }
 bool_value = @{ guard_key_char+ }
 eq_guard = { "eq" ~ "(" ~ env_prefix ~ env_key ~ "," ~ ws? ~ guard_value ~ ws? ~ ")" }
@@ -50,10 +54,17 @@ neq_guard = { "ne" ~ "(" ~ env_prefix ~ env_key ~ "," ~ ws? ~ guard_value ~ ws? 
 env_guard = { env_prefix ~ ws? ~ env_key }
 env_prefix = { "env" ~ ":" }
 env_key = @{ guard_key_char+ }
+// Single generic namespaced guard: the namespace list is closed in
+// the parser (custom "unknown namespace" error), values are checked
+// per namespace there. `family:unix`/`family:windows` are accepted
+// aliases lowered to `os:` expressions at parse. Case-sensitive
+// throughout, matching the language's uppercase keywords and tags.
+ns_guard = { ns_name ~ ":" ~ ns_value }
+ns_name = @{ guard_key_char+ }
+ns_value = @{ guard_key_char+ }
 guard_key_char = _{ !( ":" | "=" | "!" | "," | "|" | "(" | ")" | "]" | "$" | " " | "\t" | linebreak | "//" | "/*" ) ~ ANY }
 guard_value = _{ quoted_string | bare_guard_value }
 bare_guard_value = @{ (!( "," | "|" | ")" | "]" | "$" | linebreak | "//" | "/*" ) ~ ANY)+ }
-bare_guard_ident = @{ guard_key_char+ }
 
 // Comparison and arithmetic operators (used by expression tiers in LET/IF expressions)
 eq_op = @{ "==" }
@@ -164,7 +175,20 @@ else_keyword = @{ "ELSE" ~ !(ASCII_ALPHANUMERIC | "_") }
 // Open uppercase identifier for type tags. Tags stay plain names and
 // resolve against the descriptor table at runtime, so host types parse
 // without grammar changes; unregistered names fail at first coercion.
-type_tag = @{ ASCII_ALPHA_UPPER ~ (ASCII_ALPHA_UPPER | ASCII_DIGIT | "_")* }
+type_name = @{ ASCII_ALPHA_UPPER ~ (ASCII_ALPHA_UPPER | ASCII_DIGIT | "_")* }
+// Compound, explicitly non-atomic: implicit whitespace stays active
+// inside the spelling even where an enclosing rule is atomic, so
+// `LIST<MAP>` and `LIST< MAP >` both parse and canonicalize to one
+// tag. Arity and shape enforce at resolution, not here.
+type_tag = !{ type_name ~ ("<" ~ type_args ~ ">")? }
+type_args = { type_field ~ ("," ~ type_field)* }
+type_field = { (field_name ~ "?"? ~ ":")? ~ type_tag }
+field_name = @{ ASCII_ALPHA_LOWER ~ (ASCII_ALPHA_LOWER | ASCII_DIGIT | "_")* }
+// Script-level type alias: `TYPE PERSON = MAP<name: STRING>`.
+// Top-level only (the parser rejects bodies and guards); the spelling
+// flows through as text and resolves at first coercion like tags.
+type_keyword = @{ "TYPE" ~ !(ASCII_ALPHANUMERIC | "_") }
+type_statement = ${ type_keyword ~ gap ~ type_name ~ gap ~ "=" ~ gap ~ type_tag }
 
 for_statement = ${ for_keyword ~ gap ~ dollar_ident ~ gap ~ (":" ~ gap ~ type_tag ~ gap)? ~ ("," ~ gap ~ dollar_ident ~ gap ~ (":" ~ gap ~ type_tag ~ gap)?)? ~ in_keyword ~ gap ~ expr ~ gap ~ block }
 // Bare `LET $p: PIPE` (no `=`, no initializer) mints a fresh anonymous

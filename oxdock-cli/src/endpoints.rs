@@ -5,8 +5,9 @@
 //!
 //! - default: bare ports bind loopback, names open memory rendezvous;
 //! - `--listen 0.0.0.0:2251`: expose a logical port on an interface;
-//! - `-p 2222:2251`: map outer port 2222 to inner virtual 2251
-//!   (`-p 0:2251` takes an ephemeral outer port);
+//! - `-p 2222:2251`: map loopback outer port 2222 to inner virtual 2251
+//!   (`-p 0:2251` takes an ephemeral loopback outer port; prefix an
+//!   explicit host for all interfaces, e.g. `-p 0.0.0.0:2222:2251`);
 //! - `--offline`: no sockets at all (conflicts with both above).
 //!
 //! [`build_registry`] turns the flags into a bound [`EndpointRegistry`];
@@ -27,7 +28,8 @@ pub struct EndpointFlags {
     /// `--listen` addresses: each maps its own port as a virtual port.
     pub listens: Vec<SocketAddr>,
     /// `-p` mappings: (outer socket address, inner virtual endpoint as raw
-    /// text). A bare outer port binds all interfaces; outer port `0` takes an
+    /// text). A bare outer port binds loopback (use an explicit host such
+    /// as `0.0.0.0` for all interfaces); outer port `0` takes an
     /// ephemeral port, resolved at bind time. The inner text is validated by
     /// [`build_registry`] so this container stays free of net types.
     pub publishes: Vec<(SocketAddr, String)>,
@@ -66,9 +68,11 @@ pub fn parse_listen_arg(raw: &str) -> Result<SocketAddr> {
     Ok(addr)
 }
 
-/// Parse one `-p` value: `[host:]outer:inner` (Docker-style). The outer
-/// side is a bare port (all interfaces) or a full socket address; the
-/// inner side stays raw text here and is validated by [`build_registry`]
+/// Parse one `-p` value: `[host:]outer:inner` (Docker-style, but safer by
+/// default: unlike Docker, a bare outer port binds loopback, never all
+/// interfaces). The outer side is a bare port (loopback) or a full socket
+/// address (the only place a wildcard or a non-loopback interface may
+/// appear, e.g. `-p 0.0.0.0:2222:2251`); the inner side stays raw text
 /// (when `net` is enabled the inner is also validated eagerly so parse
 /// errors keep their current shape). The inner may carry a protocol
 /// qualifier (`-p 5353:dns/udp` maps the UDP slot; unqualified inners map
@@ -94,7 +98,7 @@ pub fn parse_publish_arg(raw: &str) -> Result<(SocketAddr, String)> {
         .with_context(|| format!("-p inner endpoint invalid in {raw:?}"))?;
     let outer_text = outer_text.trim();
     let addr = if let Ok(port) = outer_text.parse::<u16>() {
-        SocketAddr::from(([0, 0, 0, 0], port))
+        SocketAddr::from(([127, 0, 0, 1], port))
     } else if let Ok(addr) = outer_text.parse::<SocketAddr>() {
         addr
     } else {
@@ -170,12 +174,12 @@ mod tests {
     fn publish_forms() {
         assert_eq!(
             parse_publish_arg("2222:2251").unwrap(),
-            (SocketAddr::from(([0, 0, 0, 0], 2222)), "2251".to_string())
+            (SocketAddr::from(([127, 0, 0, 1], 2222)), "2251".to_string())
         );
         assert_eq!(
             parse_publish_arg("0:demo-proxy").unwrap(),
             (
-                SocketAddr::from(([0, 0, 0, 0], 0)),
+                SocketAddr::from(([127, 0, 0, 1], 0)),
                 "demo-proxy".to_string()
             )
         );
@@ -203,6 +207,11 @@ mod tests {
         assert_eq!(
             parse_publish_arg("[::1]:8080:web").unwrap(),
             ("[::1]:8080".parse().unwrap(), "web".to_string())
+        );
+        // All interfaces is an explicit opt-in, never the bare default.
+        assert_eq!(
+            parse_publish_arg("0.0.0.0:2222:2251").unwrap(),
+            ("0.0.0.0:2222".parse().unwrap(), "2251".to_string())
         );
     }
 

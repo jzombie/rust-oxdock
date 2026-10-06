@@ -176,7 +176,7 @@ fn run_exec_resolves_and_flattens_argv() {
             guard: None,
             kind: StepKind::Assign {
                 var: "args".into(),
-                decl_type: "LIST".to_string(),
+                decl_type: "LIST<STRING>".to_string(),
                 expr: Expr::List(vec![
                     Expr::Literal(Value::string("-v".to_string())),
                     Expr::Literal(Value::string("--all".to_string())),
@@ -282,7 +282,7 @@ fn run_exec_resolves_every_variable_type() {
             guard: None,
             kind: StepKind::Assign {
                 var: "m".into(),
-                decl_type: "MAP".to_string(),
+                decl_type: "MAP<k: STRING>".to_string(),
                 expr: Expr::Map(vec![(
                     "k".to_string(),
                     Expr::Literal(Value::string("keyval".to_string())),
@@ -535,9 +535,10 @@ fn symlink_errors_report_underlying_cause() {
 #[test]
 fn guarded_run_waits_for_env_to_be_set() {
     let root = GuardedPath::new_root_from_str(".").unwrap();
-    let guard = Guard::EnvEquals {
-        key: "READY".into(),
-        value: "1".into(),
+    let guard = Guard::Attr {
+        ns: oxdock_parser::Ns::Env,
+        key: Some("READY".into()),
+        val: Some("1".into()),
     };
     let steps = vec![
         Step {
@@ -573,13 +574,15 @@ fn guarded_run_waits_for_env_to_be_set() {
 #[test]
 fn guard_groups_allow_any_matching_branch() {
     let root = GuardedPath::new_root_from_str(".").unwrap();
-    let guard_alpha = Guard::EnvEquals {
-        key: "MODE".into(),
-        value: "alpha".into(),
+    let guard_alpha = Guard::Attr {
+        ns: oxdock_parser::Ns::Env,
+        key: Some("MODE".into()),
+        val: Some("alpha".into()),
     };
-    let guard_beta = Guard::EnvEquals {
-        key: "MODE".into(),
-        value: "beta".into(),
+    let guard_beta = Guard::Attr {
+        ns: oxdock_parser::Ns::Env,
+        key: Some("MODE".into()),
+        val: Some("beta".into()),
     };
     let steps = vec![
         Step {
@@ -861,6 +864,8 @@ fn create_exec_state(fs: MockFs) -> ExecState<MockProcessManager> {
         cancellable: false,
         functions: super::native::FunctionRegistry::with_builtins(),
         types: super::typing::startup_type_map(),
+        record_schemas: std::collections::HashMap::new(),
+        type_aliases: std::collections::HashMap::new(),
         call_depth: 0,
         task_id: 0,
         push_manifest: Vec::new(),
@@ -973,7 +978,7 @@ fn write_interpolates_env_values() {
 #[test]
 fn for_int_key_binds_list_indices() {
     let steps = crate::parse_script(indoc! {r#"
-        LET $items: LIST = ["a", "b"]
+        LET $items: LIST<STRING> = ["a", "b"]
         FOR $i: INT, $v: STRING IN $items {
             WRITE "{{ $v }}.txt" "{{ $i }}"
         }
@@ -991,7 +996,7 @@ fn for_int_key_binds_list_indices() {
 
     // Map iteration with an INT key is rejected: map keys are strings.
     let steps = crate::parse_script(indoc! {r#"
-        LET $m: MAP = {"k": "v"}
+        LET $m: MAP<k: STRING> = {"k": "v"}
         FOR $k: INT, $v: STRING IN $m {
             WRITE x.txt "hi"
         }
@@ -1748,11 +1753,15 @@ fn with_io_async_guarded_and_exec_form_outer_pipe_stays_script() {
     // pipe is main-declared and shared, so no producer shape promotes it.
     for (script, var) in [
         (
-            "LET $g: PIPE\nWITH_IO [stdout=$g] ASYNC { [bool:true] RUN \"echo hi\" }",
+            indoc! {r#"
+                LET $g: PIPE
+                WITH_IO [stdout=$g] ASYNC { [bool:true] RUN "echo hi" }"#},
             "g",
         ),
         (
-            "LET $e: PIPE\nWITH_IO [stdout=$e] ASYNC RUN [\"echo\", \"hi\"]",
+            indoc! {r#"
+                LET $e: PIPE
+                WITH_IO [stdout=$e] ASYNC RUN ["echo", "hi"]"#},
             "e",
         ),
     ] {
@@ -2592,7 +2601,9 @@ mod escape_props {
         for (k, v) in vars {
             // Declared type always matches the value's descriptor: the
             // property under test is expansion, not coercion.
-            let kind = v.type_name().to_string();
+            let kind = state
+                .resolve_tag(v.type_name())
+                .expect("startup types resolve");
             let _ = state.declare_var(k.clone(), kind, v.clone());
         }
         state
@@ -2922,7 +2933,7 @@ fn spawn_manifest_outer_pipe_stays_script() {
         }
         WITH_IO [stdout=$p] ECHO "hello"
         AWAIT $t
-        LET $info: MAP = INSPECT($p)
+        LET $info: MAP<ANY> = INSPECT($p)
         WRITE kind.txt "{{ $info.pipe_kind }}"
     "#})
     .expect("parse ok");
@@ -2947,7 +2958,7 @@ fn nested_spawn_marks_pipes_nested_in_collections_escaped() {
             RETURN [$p]
         }
         LET $t1: HANDLE = ASYNC {
-            LET $bag: LIST = MAKE()
+            LET $bag: LIST<PIPE> = MAKE()
             LET $t2: HANDLE = ASYNC {
                 LET $q: PIPE = $bag.0
                 WITH_IO [stdout=$q] ECHO "child"
@@ -2955,7 +2966,7 @@ fn nested_spawn_marks_pipes_nested_in_collections_escaped() {
             LET $p2: PIPE = $bag.0
             WITH_IO [stdout=$p2] ECHO "spawner"
             AWAIT $t2
-            LET $info: MAP = INSPECT($p2)
+            LET $info: MAP<ANY> = INSPECT($p2)
             RETURN "{{ $info.pipe_kind }}"
         }
         LET $kind: STRING = AWAIT $t1
@@ -3084,14 +3095,19 @@ fn eof_drain_loop_reads_to_end_without_sentinel() {
 
 #[test]
 fn eof_rejects_non_pipe() {
-    // A non-pipe argument bails naming the expected type, mirroring the
-    // other typed builtins.
+    // A non-pipe argument bails at the boundary extractor naming the
+    // expected type, mirroring the other typed builtins. (The static
+    // pass rejects it even earlier; see `static_pipe_param_*`.)
     let steps = crate::parse_script(indoc! {r#"
         IMPORT [STD]
         LET $bad: BOOL = EOF("nope")
     "#})
     .expect("parse ok");
-    assert!(run_mock_steps(&steps, vec![]).is_err());
+    let err = run_mock_steps(&steps, vec![]).expect_err("non-pipe EOF must fail");
+    assert!(
+        format!("{err:#}").contains("must be a PIPE"),
+        "boundary must name PIPE: {err:#}"
+    );
 }
 
 #[test]
@@ -3101,7 +3117,7 @@ fn loop_body_declarations_mint_per_iteration() {
     // (fresh per-iteration scope), so no generation observes another's
     // bytes.
     let steps = crate::parse_script(indoc! {r#"
-        LET $items: LIST = ["a", "b"]
+        LET $items: LIST<STRING> = ["a", "b"]
         FOR $x: STRING IN $items {
             LET $p: PIPE
             WITH_IO [stdout=$p] ECHO "{{ $x }}"
@@ -3129,7 +3145,7 @@ fn mixed_task_body_pins_script_and_run_adapts() {
         }
         WITH_IO [stdin=$p] READ_LINE $a
         AWAIT $t
-        LET $info: MAP = INSPECT($p)
+        LET $info: MAP<ANY> = INSPECT($p)
         WRITE out.txt "{{ $a }}"
         WRITE kind.txt "{{ $info.pipe_kind }}"
     "#})
@@ -3153,7 +3169,7 @@ fn host_round_trip_through_adapters() {
             module: "T".to_string(),
             kind: FuncKind::HostCtx,
             params: None,
-            returns: Some("PIPE".to_string()),
+            returns: Some(TypeTag::Pipe),
             rpn: false,
             summary: "test-only host pipe relay",
             docs: "test-only",
@@ -3178,6 +3194,7 @@ fn host_round_trip_through_adapters() {
             func: relay,
         }],
         types: vec![],
+        record_schemas: vec![],
     };
     let table = oxdock_parser::ModuleTable {
         modules: std::collections::HashMap::from([(
@@ -3219,6 +3236,526 @@ fn host_round_trip_through_adapters() {
     .expect("host round-trip runs");
     let files = fs.snapshot();
     assert_eq!(file_content(&files, "out.txt"), b"hello host-seed");
+}
+
+#[test]
+fn expand_placeholder_calls_pure_host_function() {
+    // `{{ T::SHOUT($who) }}` inside EXPAND input dispatches through the
+    // registered pure function, sharing the registry DSL `CALL` uses.
+    // The `\{{` escape keeps the placeholder literal through WRITE so
+    // EXPAND is the stage that evaluates it.
+    fn test_meta(name: &str) -> FuncMeta {
+        FuncMeta {
+            name: name.to_string(),
+            module: "T".to_string(),
+            kind: FuncKind::HostPure,
+            params: None,
+            returns: Some(TypeTag::String),
+            rpn: false,
+            summary: "test-only pure shout",
+            docs: "test-only",
+        }
+    }
+    let shout: PureFn = Arc::new(|vals| {
+        let s = vals
+            .first()
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("SHOUT expects one string"))?;
+        Ok(Value::string(s.to_uppercase()))
+    });
+    let module = HostModule {
+        name: "T".to_string(),
+        funcs: vec![HostRegistration::Pure {
+            name: "SHOUT".to_string(),
+            meta: test_meta("SHOUT"),
+            func: shout,
+        }],
+        types: vec![],
+        record_schemas: vec![],
+    };
+    let table = oxdock_parser::ModuleTable {
+        modules: std::collections::HashMap::from([(
+            "T".to_string(),
+            Some(oxdock_parser::ModuleFuncs {
+                functions: std::collections::HashSet::from(["SHOUT".to_string()]),
+            }),
+        )]),
+    };
+    let steps = crate::parse_script_with_modules(
+        indoc! {r#"
+        LET $who: STRING = "bob"
+        WRITE tmpl.txt "hi \{{ T::SHOUT($who) }}!"
+        LET $buf: PIPE
+        WITH_IO [stdout=$buf] EXPAND tmpl.txt
+        WITH_IO [stdin=$buf] APPEND out.txt
+    "#},
+        table,
+    )
+    .expect("parse ok");
+    let fs = MockFs::new();
+    let mut state = create_exec_state(fs.clone());
+    state.register_module(module);
+    let mut proc = MockProcessManager::default();
+    execute_steps(
+        &mut state,
+        &mut proc,
+        &steps,
+        CommandStdin::Null,
+        false,
+        None,
+        None,
+        None,
+        None,
+        true,
+    )
+    .expect("placeholder call runs");
+    let files = fs.snapshot();
+    assert_eq!(file_content(&files, "out.txt"), b"hi BOB!");
+}
+
+#[test]
+fn parse_text_matches_file_loader_and_placeholder() {
+    // In-memory parsing must produce the same values as file loading, and
+    // the pure parser must also resolve through the placeholder registry.
+    let steps = crate::parse_script(indoc! {r#"
+        IMPORT [STD]
+        WRITE seed.json "{\"a\": 1}"
+        WRITE seed.toml "a = 1"
+        LET $json_raw: STRING = READ seed.json
+        LET $toml_raw: STRING = READ seed.toml
+        LET $loaded_json: MAP<ANY> = LOAD_JSON("seed.json")
+        LET $parsed_json: MAP<ANY> = PARSE_JSON($json_raw)
+        LET $loaded_toml: MAP<ANY> = LOAD_TOML("seed.toml")
+        LET $parsed_toml: MAP<ANY> = PARSE_TOML($toml_raw)
+        ASSERT_EQ $parsed_json $loaded_json
+        ASSERT_EQ $parsed_toml $loaded_toml
+        LET $parity: STRING = TO_JSON($loaded_json)
+        WRITE parity.txt "{{ $parity }}"
+        WRITE tmpl.txt "parsed \{{ STD::PARSE_JSON($json_raw) }} and \{{ STD::PARSE_TOML($toml_raw) }}"
+        LET $buf: PIPE
+        WITH_IO [stdout=$buf] EXPAND tmpl.txt
+        WITH_IO [stdin=$buf] APPEND expanded.txt
+    "#})
+    .expect("parse ok");
+    let (_, files) = run_with_mock_fs(&steps);
+    assert_eq!(file_content(&files, "parity.txt"), b"{\"a\":1}\n");
+    assert_eq!(
+        file_content(&files, "expanded.txt"),
+        b"parsed \"a\": 1 and \"a\": 1"
+    );
+}
+
+#[test]
+fn resolve_tag_accepts_unknown_map_spelling() {
+    // `MAP<ANY>` is the declared unknown map: it resolves to a value
+    // shape, and spaced or nested forms canonicalize onto shared
+    // entries like every other spelling.
+    let fs = MockFs::new();
+    let state = create_exec_state(fs);
+    let tag = state.resolve_tag("MAP<ANY>").expect("MAP<ANY> resolves");
+    assert!(matches!(tag, TypeTag::MapOf(_)));
+    let nested = state
+        .resolve_tag("LIST<MAP<ANY>>")
+        .expect("nested resolves");
+    assert!(matches!(nested, TypeTag::ListOf(_)));
+}
+
+#[test]
+fn resolve_tag_rejects_bare_collections() {
+    // Bare collections are runtime words, never declaration types:
+    // every spelling position fails naming the explicit form.
+    let fs = MockFs::new();
+    let state = create_exec_state(fs);
+    for bad in ["MAP", "LIST", "LIST<MAP>", "LIST<LIST>", "MAP<name: MAP>"] {
+        let err = state.resolve_tag(bad).expect_err("bare form must fail");
+        assert!(
+            format!("{err:#}").contains("not a declaration type"),
+            "{bad}: {err:#}"
+        );
+    }
+}
+
+#[test]
+fn resolve_tag_accepts_optional_fields() {
+    // A `?` suffix marks one field optional: it resolves into the
+    // flag, and identical spellings share one interned entry.
+    let fs = MockFs::new();
+    let state = create_exec_state(fs);
+    let tag = state
+        .resolve_tag("MAP<held: BOOL, permit?: PERMIT>")
+        .expect("optional field resolves");
+    match tag {
+        TypeTag::Record(fields) => {
+            assert_eq!(fields.len(), 2);
+            assert!(!fields[0].optional);
+            assert!(fields[1].optional);
+            assert_eq!(fields[1].name, "permit");
+        }
+        other => panic!("expected record, got {other:?}"),
+    }
+    let again = state
+        .resolve_tag("MAP<held: BOOL,permit?: PERMIT>")
+        .expect("resolves");
+    match (tag, again) {
+        (TypeTag::Record(a), TypeTag::Record(b)) => {
+            assert!(std::ptr::eq(a.as_ptr(), b.as_ptr()), "shared entry");
+        }
+        _ => panic!("expected records"),
+    }
+}
+
+#[test]
+fn resolve_tag_interns_identical_spellings_once() {
+    // Identical canonical spellings share one interned pointer;
+    // spaced forms canonicalize onto it, nesting included.
+    let fs = MockFs::new();
+    let state = create_exec_state(fs);
+    let first = state.resolve_tag("LIST<MAP<ANY>>").expect("resolves");
+    let second = state.resolve_tag("LIST< MAP< ANY > >").expect("resolves");
+    match (first, second) {
+        (TypeTag::ListOf(a), TypeTag::ListOf(b)) => {
+            assert!(std::ptr::eq(a, b), "shared interned entry");
+        }
+        other => panic!("expected shaped lists, got {other:?}"),
+    }
+}
+
+#[test]
+fn resolve_tag_rejects_generic_arity_violations() {
+    // Arity violations parse (see tag.rs `spellings_parse_to_shapes`)
+    // but fail here at resolution, naming the rule.
+    let fs = MockFs::new();
+    let mut state = create_exec_state(fs);
+    let err = state
+        .resolve_tag("LIST<MAP, STRING>")
+        .expect_err("LIST with two args must fail");
+    assert!(
+        format!("{err:#}").contains("LIST takes exactly one bare type argument"),
+        "{err:#}"
+    );
+    let err = state
+        .resolve_tag("STRING<INT>")
+        .expect_err("arguments on a scalar must fail");
+    assert!(
+        format!("{err:#}").contains("'STRING' takes no type arguments"),
+        "{err:#}"
+    );
+    let err = state
+        .resolve_tag("MAP<STRING>")
+        .expect_err("bare MAP field must fail");
+    assert!(
+        format!("{err:#}").contains("MAP fields require 'name: TYPE'"),
+        "{err:#}"
+    );
+    // Alias targets enforce the same rules: the violation rides
+    // through the alias hop instead of escaping it.
+    state
+        .type_aliases
+        .insert("BAD".to_string(), "LIST<MAP, STRING>".to_string());
+    let err = state.resolve_tag("BAD").expect_err("alias arity must fail");
+    assert!(
+        format!("{err:#}").contains("LIST takes exactly one bare type argument"),
+        "{err:#}"
+    );
+}
+
+#[test]
+fn resolve_tag_composes_schema_and_alias_leaves() {
+    use oxdock_parser::Field;
+    let fs = MockFs::new();
+    let mut state = create_exec_state(fs);
+    static SCHEMA_FIELDS: &[Field] = &[Field {
+        name: "name",
+        ty: TypeTag::String,
+        docs: "",
+        optional: false,
+    }];
+    state.register_record_schema("EMP", SCHEMA_FIELDS);
+    state
+        .type_aliases
+        .insert("PERSON".to_string(), "MAP<name: STRING>".to_string());
+    let tag = state
+        .resolve_tag("LIST<PERSON>")
+        .expect("alias leaf composes");
+    assert!(matches!(tag, TypeTag::ListOf(_)));
+    let tag = state
+        .resolve_tag("LIST<EMP>")
+        .expect("schema leaf composes");
+    assert!(matches!(tag, TypeTag::ListOf(_)));
+    let err = state
+        .resolve_tag("LIST<MISSING>")
+        .expect_err("unknown leaf must fail");
+    assert!(
+        format!("{err:#}").contains("unknown type 'MISSING'"),
+        "{err:#}"
+    );
+}
+
+#[test]
+fn resolve_tag_rejects_deep_alias_chains() {
+    // Alias hops share the syntactic depth budget: a chain longer
+    // than the cap bails instead of recursing.
+    let fs = MockFs::new();
+    let mut state = create_exec_state(fs);
+    for n in 0..12 {
+        state.type_aliases.insert(
+            format!("A{n}"),
+            if n == 11 {
+                "MAP".to_string()
+            } else {
+                format!("LIST<A{}>", n + 1)
+            },
+        );
+    }
+    let err = state.resolve_tag("A0").expect_err("deep chain must fail");
+    assert!(
+        format!("{err:#}").contains("maximum generic depth"),
+        "{err:#}"
+    );
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "adversarial scaling probe (200 LETs plus 80 nested IFs through parse and the full static pass); interpreter slowdown stalls it for hours with no unsafe code exercised"
+)]
+fn static_pass_scales_linearly_on_adversarial_input() {
+    // Deterministic linearity enforcement (no wall-time bench):
+    // visits must stay proportional to input size on deep nesting,
+    // wide sequences, loops, math, and nested functions. A fixpoint
+    // or exponential blowup trips this like any regression.
+    let mut script = String::from("IMPORT [STD]\nFUNC DEEP($x: INT) {\n");
+    for index in 0..200 {
+        script.push_str(&format!("    LET $v{index}: INT = $x + {index}\n"));
+    }
+    for depth in 0..80 {
+        script.push_str(&format!(
+            "    IF $v0 == {depth} {{\n        RETURN $v0\n    }}\n"
+        ));
+    }
+    script.push_str("    FOR $i: INT IN [1, 2, 3] {\n        LET $w: INT = $i * 2\n    }\n");
+    script.push_str("    FUNC INNER($y: INT) {\n        RETURN $y\n    }\n");
+    script.push_str("    RETURN $v0\n}\n");
+    let steps = crate::parse_script(&script).expect("adversarial script parses");
+    let fs = MockFs::new();
+    let state = create_exec_state(fs);
+    let visits = super::static_check::validate_script_types_counted(&steps, &state)
+        .expect("deep but well-formed script passes");
+    assert!(
+        visits <= script.len() as u64,
+        "visits {visits} exceed input bytes {}",
+        script.len()
+    );
+}
+
+#[test]
+fn merge_maps_rejects_unknown_policy_at_boundary() {
+    // Closed-set enforcement lives in the generated extractor: an
+    // unknown policy fails before the body runs, naming the allowed
+    // values from the same attribute tokens that render the
+    // signature. Valid policies run end to end through the docs-gen
+    // render suite on every pipeline run.
+    let steps = crate::parse_script(indoc! {r#"
+        IMPORT [STD]
+        LET $m: MAP<ANY> = MERGE_MAPS([{a: 1}], "merge")
+    "#})
+    .expect("parse ok");
+    let fs = MockFs::new();
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    let text = format!("{err:#}");
+    assert!(
+        text.contains("must be one of"),
+        "boundary names the rule: {text}"
+    );
+    assert!(
+        text.contains("fail_on_duplicate") && text.contains("overwrite"),
+        "boundary lists the allowed values: {text}"
+    );
+
+    // The LIST shape is boundary-checked too: a non-list never
+    // reaches the merge.
+    let steps = crate::parse_script(indoc! {r#"
+        IMPORT [STD]
+        LET $m: MAP<ANY> = MERGE_MAPS("nope", "overwrite")
+    "#})
+    .expect("parse ok");
+    let fs = MockFs::new();
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    assert!(
+        format!("{err:#}").contains("expected LIST"),
+        "boundary enforces the LIST shape: {err:#}"
+    );
+
+    // Element shapes walk the same boundary: gating a heterogeneous
+    // list through `LET` reaches the runtime walk, which names the
+    // offending position through the one shape implementation.
+    let steps = crate::parse_script(indoc! {r#"
+        IMPORT [STD]
+        LET $ms: LIST<MAP<ANY>> = [{a: 1}, "nope"]
+        LET $m: MAP<ANY> = MERGE_MAPS($ms, "overwrite")
+    "#})
+    .expect("parse ok");
+    let fs = MockFs::new();
+    let err = run_expect_err(Box::new(fs), &steps, MockProcessManager::default());
+    let text = format!("{err:#}");
+    assert!(
+        text.contains("[1]") && text.contains("expected MAP"),
+        "boundary names the element position and shape: {text}"
+    );
+}
+
+#[test]
+fn run_start_rejects_unknown_type_tags() {
+    // Typo'd `returns` and `params` labels fail before the first step
+    // runs, listing every known type. Previously a bad `returns` label
+    // lived forever as a lie in DESCRIBE output and generated docs:
+    // nothing read it but introspection.
+    /// Opaque handle minted here and never registered.
+    #[oxdock_func_macro::oxdock_type(name = "TEST_UNREGISTERED")]
+    #[derive(Debug, Clone, PartialEq)]
+    struct UnregisteredTag(String);
+    impl std::fmt::Display for UnregisteredTag {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "unregistered:{}", self.0)
+        }
+    }
+    fn bad_module(
+        return_type: Option<TypeTag>,
+        param_type: Option<TypeTag>,
+    ) -> HostModule<MockProcessManager> {
+        let noop: PureFn = Arc::new(|_| Ok(Value::string("x".to_string())));
+        HostModule {
+            name: "T".to_string(),
+            funcs: vec![HostRegistration::Pure {
+                name: "BAD".to_string(),
+                meta: FuncMeta {
+                    name: "T::BAD".to_string(),
+                    module: "T".to_string(),
+                    kind: FuncKind::HostPure,
+                    params: Some(vec![FuncParam {
+                        name: "arg".to_string(),
+                        param_type,
+                        allowed: None,
+                        docs: "",
+                        options: None,
+                        optional: false,
+                    }]),
+                    returns: return_type,
+                    rpn: false,
+                    summary: "test-only",
+                    docs: "test-only",
+                },
+                func: noop,
+            }],
+            types: vec![],
+            record_schemas: vec![],
+        }
+    }
+    // A custom descriptor whose name was never registered: tags make the
+    // reference well-typed in Rust, but the run directory cannot resolve
+    // it, so run-start validation fails naming the function and type.
+    let unregistered = TypeTag::Custom(UnregisteredTag::descriptor());
+    let mut state = create_exec_state(MockFs::new());
+    state.register_module(bad_module(Some(unregistered), Some(TypeTag::String)));
+    let err = state
+        .validate_function_type_tags()
+        .expect_err("unknown return must fail");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("T::BAD") && msg.contains("TEST_UNREGISTERED"),
+        "unexpected: {msg}"
+    );
+    assert!(msg.contains("STRING"), "must list known types: {msg}");
+
+    let mut state = create_exec_state(MockFs::new());
+    state.register_module(bad_module(Some(TypeTag::String), Some(unregistered)));
+    let err = state
+        .validate_function_type_tags()
+        .expect_err("unknown param must fail");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("TEST_UNREGISTERED") && msg.contains("arg"),
+        "unexpected: {msg}"
+    );
+
+    let mut state = create_exec_state(MockFs::new());
+    state.register_module(bad_module(Some(TypeTag::String), Some(TypeTag::Map)));
+    state
+        .validate_function_type_tags()
+        .expect("valid tags must pass");
+}
+
+#[test]
+fn run_start_rejects_misplaced_optional_params() {
+    // Omission fills an empty MAP, so only trailing MAP params may be
+    // optional: a required param after an optional one, or an optional
+    // non-MAP, fails run-start validation naming the offender.
+    fn optional_module(params: Vec<(&str, TypeTag, bool)>) -> HostModule<MockProcessManager> {
+        let noop: PureFn = Arc::new(|_| Ok(Value::string("x".to_string())));
+        HostModule {
+            name: "T".to_string(),
+            funcs: vec![HostRegistration::Pure {
+                name: "OPT".to_string(),
+                meta: FuncMeta {
+                    name: "T::OPT".to_string(),
+                    module: "T".to_string(),
+                    kind: FuncKind::HostPure,
+                    params: Some(
+                        params
+                            .into_iter()
+                            .map(|(name, tag, optional)| FuncParam {
+                                name: name.to_string(),
+                                param_type: Some(tag),
+                                allowed: None,
+                                docs: "",
+                                options: None,
+                                optional,
+                            })
+                            .collect(),
+                    ),
+                    returns: Some(TypeTag::String),
+                    rpn: false,
+                    summary: "test-only",
+                    docs: "test-only",
+                },
+                func: noop,
+            }],
+            types: vec![],
+            record_schemas: vec![],
+        }
+    }
+    // Optional MAP before a required param: rejected.
+    let mut state = create_exec_state(MockFs::new());
+    state.register_module(optional_module(vec![
+        ("first", TypeTag::Map, true),
+        ("second", TypeTag::String, false),
+    ]));
+    let err = state
+        .validate_function_type_tags()
+        .expect_err("non-trailing optional must fail");
+    assert!(
+        format!("{err:#}").contains("optional before a required param"),
+        "{err:#}"
+    );
+    // Optional non-MAP in trailing position: rejected.
+    let mut state = create_exec_state(MockFs::new());
+    state.register_module(optional_module(vec![("only", TypeTag::String, true)]));
+    let err = state
+        .validate_function_type_tags()
+        .expect_err("optional non-MAP must fail");
+    assert!(
+        format!("{err:#}").contains("optional without a MAP type"),
+        "{err:#}"
+    );
+    // Trailing optional MAP: accepted.
+    let mut state = create_exec_state(MockFs::new());
+    state.register_module(optional_module(vec![
+        ("url", TypeTag::String, false),
+        ("options", TypeTag::Map, true),
+    ]));
+    state
+        .validate_function_type_tags()
+        .expect("trailing optional MAP must pass");
 }
 
 #[cfg(not(miri))]
@@ -3268,7 +3805,7 @@ fn host_take_twice_on_os_bails() {
             module: "T".to_string(),
             kind: FuncKind::HostCtx,
             params: None,
-            returns: Some("STRING".to_string()),
+            returns: Some(TypeTag::String),
             rpn: false,
             summary: "test-only host take-twice probe",
             docs: "test-only",
@@ -3289,6 +3826,7 @@ fn host_take_twice_on_os_bails() {
             func: probe,
         }],
         types: vec![],
+        record_schemas: vec![],
     };
     let table = oxdock_parser::ModuleTable {
         modules: std::collections::HashMap::from([(

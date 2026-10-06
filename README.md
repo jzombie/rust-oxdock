@@ -12,9 +12,6 @@
   <!-- <a href="https://docs.rs/oxdock">
     <img src="https://img.shields.io/docsrs/oxdock" alt="docs.rs" />
   </a> -->
-  <a href="https://github.com/jzombie/rust-oxdock/actions/workflows/rust-tests.yml?query=branch%3Amain+event%3Apush">
-    <img src="https://img.shields.io/github/actions/workflow/status/jzombie/rust-oxdock/rust-tests.yml?branch=main&label=Miri&logo=github" alt="Miri status" />
-  </a>
   <!-- <a href="https://deepwiki.com/jzombie/rust-oxdock">
     <img src="https://deepwiki.com/badge.svg" alt="DeepWiki" />
     </a> -->
@@ -26,22 +23,22 @@
   </a>
 </div>
 
-**Dockerfile inspired build DSL for Rust**
+**OxDock is a Dockerfile-inspired DSL for native builds, multi-node pipelines, and sealed remote execution.**
 
-OxDock is a Dockerfile-inspired build DSL for Rust: scripted pipelines with hermetic workspaces, typed variables, and pipes instead of snowflake shell. Embed scripts at compile time with macros, or run the same scripts as standalone CLI pipelines. Native. No containers. No daemon. No VM.
+Unlike Docker's Linux-VM requirement on non-Linux hosts, OxDock runs directly on Linux, macOS, and Windows. Execute scripts on bare metal, inside containers, or dispatched across remote machines simultaneously. No daemons. No hypervisors.
 
-One script runs on Linux, macOS, and Windows, with platform gating, async tasks, and piped workflows for custom pipelines. Only RUN touches the host shell.
+Platform gating selects OS-specific steps, and remote targets bind over any stdio transport. Only RUN touches the host shell.
 
-Plain Rust functions become script functions with one attribute: `#[oxdock_func]` exports them into namespaced modules scripts call as `DEMO::NAME(...)`. See [Extending OxDock from Rust](#extending-oxdock-from-rust).
+The syntax is line-oriented in the spirit of BASIC, with a static type system checking scripts before the first step runs. Plain Rust functions become script functions with one attribute: `#[oxdock_func]` exports them into namespaced modules scripts call as `DEMO::NAME(...)`. See [Extending OxDock from Rust](#extending-oxdock-from-rust).
 
-[Documentation](https://docs.rs/oxdock/0.20.0-alpha/oxdock/)
+[Documentation](https://docs.rs/oxdock/0.21.0-alpha/oxdock/)
 
 Jump to the [command reference](#command-reference) below for the full
 command list with runnable examples.
 
 ## Quick start
 
-Add it to your Rust build with `cargo add oxdock@0.20.0-alpha`, or install the standalone runner with `cargo install oxdock@0.20.0-alpha`.
+Add it to your Rust build with `cargo add oxdock@0.21.0-alpha`, or install the standalone runner with `cargo install oxdock@0.21.0-alpha`.
 
 Run a script:
 
@@ -49,7 +46,7 @@ Run a script:
 oxdock <PATH>
 ```
 
-Scripts run during `rustc`, and their artifacts ship inside the binary with zero heap allocation, `no_std` included:
+Embed build-time dependencies from any language: scripts run inline during `rustc`, and their artifacts ship inside the binary with zero heap allocation, `no_std` included:
 
 ```rust
 use oxdock_macros::oxdock_embed;
@@ -65,11 +62,13 @@ oxdock_embed! {
         // include_bytes!.
         ENV PROJECT=OxDock
         MKDIR dist
+
         // Provenance comes from the shell: only the matching gate runs,
         // so this stays green on every OS in CI.
-        [unix] LET $os: STRING = RUN uname -srm
-        [windows] LET $os: STRING = RUN ver
+        [family:unix] LET $os: STRING = RUN uname -srm
+        [family:windows] LET $os: STRING = RUN ver
         LET $toolchain: STRING = RUN cargo --version
+
         WRITE dist/os.txt "{{ $os }}"
         WRITE dist/toolchain.txt "{{ $toolchain }}"
         WRITE dist/manifest.txt "os toolchain"
@@ -82,8 +81,10 @@ fn main() {
     // Verify we can read the resources we just created
     let manifest = SiteAssets::get("dist/manifest.txt").expect("manifest must be embedded");
     assert_eq!(manifest.data.as_ref(), b"os toolchain");
+
     let toolchain = SiteAssets::get("dist/toolchain.txt").expect("toolchain must be embedded");
     assert!(toolchain.data.starts_with(b"cargo "));
+
     let os = SiteAssets::get("dist/os.txt").expect("os must be embedded");
     assert!(!os.data.is_empty());
 }
@@ -109,6 +110,7 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     ENV PROJECT=OxDock
     LET $version: STRING = #crate_version
     MKDIR dist
+
     FUNC STAMP($name: STRING) {
         WRITE dist/{{ $name }}.txt {{ $name }} {{ env:PROJECT }} {{ $version }}
         RETURN $name
@@ -116,6 +118,7 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     FOR $name: STRING IN ["alpha", "beta"] {
         STAMP($name)
     }
+
     FUNC PICK($flag: BOOL) {
         IF $flag {
             RETURN "alpha"
@@ -124,11 +127,12 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     }
     LET $picked: STRING = PICK(true)
     WRITE dist/picked.txt {{ $picked }}
+
     LET $a: STRING = READ dist/alpha.txt
     LET $b: STRING = READ dist/beta.txt
     LET $p: STRING = READ dist/picked.txt
-    ASSERT_EQ $a "alpha OxDock 0.20.0-alpha"
-    ASSERT_EQ $b "beta OxDock 0.20.0-alpha"
+    ASSERT_EQ $a "alpha OxDock 0.21.0-alpha"
+    ASSERT_EQ $b "beta OxDock 0.21.0-alpha"
     ASSERT_EQ $p "alpha"
 };
 
@@ -140,7 +144,7 @@ let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolve
 let out = root.join("dist/alpha.txt").expect("out path");
 assert_eq!(
     resolver.read_to_string(&out).expect("read out"),
-    "alpha OxDock 0.20.0-alpha"
+    "alpha OxDock 0.21.0-alpha"
 );
 ```
 
@@ -156,14 +160,17 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     ENV PROJECT=#project
     MKDIR dist
     [bool:#verbose] WRITE dist/verbose.log "verbose on"
+
     LET $log: PIPE
     WITH_IO [stdout=$log] ECHO "built {{ env:PROJECT }}"
     WITH_IO [stdin=$log] READ_LINE $line
     WRITE dist/build.txt "{{ $line }}"
+
     IMPORT [STD]
     FOR $f: STRING IN GLOB("dist/*.txt") {
         EXPAND $f
     }
+
     ASSERT_CONTAINS stdout "built OxDock"
     LET $build: STRING = READ dist/build.txt
     LET $verbose: STRING = READ dist/verbose.log
@@ -196,6 +203,7 @@ instead of heap boxing; both forms, with stateful functions, live under
 
 ```rust
 use oxdock::{Engine, HostModule, OxDockFn, OxDockType, Value, oxdock_func, oxdock_type};
+use oxdock::oxdock_core::TypeTag;
 use std::fmt;
 
 /// Word count summary: computed in Rust, carried as one script value.
@@ -224,7 +232,7 @@ fn summarize(text: String) -> anyhow::Result<Value> {
 }
 
 /// Read the word count back out: `WORD_COUNT($s)` is an `INT`.
-#[oxdock_func(pure, returns = "INT")]
+#[oxdock_func(pure, returns = TypeTag::Int)]
 fn word_count(summary: Value) -> anyhow::Result<Value> {
     let Some(stats) = summary.read_heap::<Stats>(Stats::descriptor()) else {
         anyhow::bail!("WORD_COUNT() expects a STATS value");
@@ -239,6 +247,7 @@ fn main() -> anyhow::Result<()> {
         name: "DEMO".to_string(),
         funcs: vec![Summarize::registration(), WordCount::registration()],
         types: vec![],
+        record_schemas: vec![],
     });
     let temp = oxdock_fs::GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
@@ -297,7 +306,7 @@ A naive tagged enum needs 32 bytes per value (a 24 byte payload plus tag and pad
 
 Type checks compare one descriptor address, and operations (`clone`, `drop`, equality, formatting) call the descriptor directly, with no registry lookup and no lock. Each type owns one compile time descriptor singleton, so identity is pointer equality that fails closed. Host types extend the same path: `#[oxdock_type]` derives a static descriptor for the payload struct, and `inline` selects the zero allocation form for small `Copy` scalars.
 
-There is no garbage collector because values form trees, not graphs. Each exclusive heap word owns its box exactly once: cloning allocates a fresh box with a deep copy, dropping frees it. Each container word co-owns its buffer instead: cloning a `LIST` or `MAP` bumps a reference count in constant time with no allocation, dropping releases one count. A `LIST` owns its items and a `MAP` owns its entries.
+There is no garbage collector because values form trees, not graphs. Each exclusive heap word owns its box exactly once: cloning allocates a fresh box with a deep copy, dropping frees it. Each container word co-owns its buffer instead: cloning a `LIST` or `MAP` bumps a reference count in constant time with no allocation, dropping releases one count. A `LIST` owns its items and a `MAP` owns its entries. Mutating a shared container detaches first, so clones never observe each other's writes: assignment behaves as a copy.
 
 Nothing is mutably borrowed from two places, so cycles cannot form and plain deterministic cleanup suffices. Pointer casts always round trip through the same concrete box or buffer type, and inline words never enter the pointer domain, which keeps provenance intact. The lifecycle is checked under Miri.
 
@@ -453,6 +462,7 @@ written: the shape first, the definitions it names right below it.
 
 ```rust
 use oxdock::{Engine, HostModule, OxDockFn, OxDockType, oxdock_func, oxdock_type};
+use oxdock::oxdock_core::TypeTag;
 use std::fmt;
 
 // The script below is the DSL itself, not a string: the `oxdock!` macro
@@ -465,6 +475,7 @@ fn main() -> anyhow::Result<()> {
         name: "DEMO".to_string(),
         funcs: vec![MakeTag::registration(), ReadTag::registration()],
         types: vec![],
+        record_schemas: vec![],
     });
 
     let temp = oxdock_fs::GuardedPath::tempdir().unwrap();
@@ -518,7 +529,7 @@ fn make_tag() -> anyhow::Result<oxdock::Value> {
 }
 
 /// Read the payload back out through a descriptor-checked typed read.
-#[oxdock_func(pure, returns = "STRING")]
+#[oxdock_func(pure, returns = TypeTag::String)]
 fn read_tag(val: oxdock::Value) -> anyhow::Result<oxdock::Value> {
     let Some(tag) = val.read_heap::<Tag>(Tag::descriptor()) else {
         anyhow::bail!("READ_TAG() expects a TAG value");
@@ -534,7 +545,9 @@ id checked read. `{{ $t }}` renders the custom value through its
 `Display`, so interpolation, `WRITE`, and equality treat host values like
 native ones. `TYPES()` lists every registered name and
 `TYPE_DESCRIBE("TAG")` returns its summary and docs, so scripts introspect
-host surface exactly like native surface. Host types stay opaque:
+host surface exactly like native surface. Script `TYPE` aliases ride the
+same listing: `TYPES()` includes alias names and `TYPE_DESCRIBE("PERSON")`
+reports the canonical target spelling. Host types stay opaque:
 literal syntax, `$var.key` traversal, and `FOR` iteration remain `LIST`
 and `MAP` only, so queryable containers expose host accessor functions
 (`MATRIX_GET($m, $row, $col)`) instead of new syntax.
@@ -547,10 +560,11 @@ the declared return type explicitly when the defaults do not fit:
 
 ```rust
 use oxdock::{HostModule, OxDockFn, StepCtx, oxdock_func};
+use oxdock::oxdock_core::TypeTag;
 use oxdock::oxdock_core::ProcessManager;
 
 /// Read an environment variable, defaulting to empty.
-#[oxdock_func(name = "ENV_OR", returns = "STRING")]
+#[oxdock_func(name = "ENV_OR", returns = TypeTag::String)]
 fn env_or<P: ProcessManager>(
     cx: &mut StepCtx<P>,
     key: String,
@@ -564,6 +578,7 @@ fn main() {
         name: "DEMO".to_string(),
         funcs: vec![EnvOr::registration()],
         types: vec![],
+        record_schemas: vec![],
     });
 }
 ```
@@ -631,6 +646,7 @@ unavailable by the boundary above.
 
 ```rust
 use oxdock::{HostModule, OxDockFn, OxDockType, Value, oxdock_func, oxdock_type};
+use oxdock::oxdock_core::TypeTag;
 use std::fmt;
 
 /// Integer grid with no literal syntax: scripts query it through functions.
@@ -654,7 +670,7 @@ fn make_matrix() -> anyhow::Result<Value> {
 }
 
 /// Read one cell by row and column.
-#[oxdock_func(pure, returns = "INT")]
+#[oxdock_func(pure, returns = TypeTag::Int)]
 fn matrix_get(board: Value, row: i64, col: i64) -> anyhow::Result<Value> {
     let Some(grid) = board.read_heap::<Matrix>(Matrix::descriptor()) else {
         anyhow::bail!("MATRIX_GET() expects a MATRIX value");
@@ -682,6 +698,7 @@ fn main() -> anyhow::Result<()> {
             MatrixGet::registration(),
         ],
         types: vec![],
+        record_schemas: vec![],
     });
     let temp = oxdock_fs::GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
@@ -786,7 +803,7 @@ Scripts are sequences of instructions, one per line. Instructions may be prefixe
 
 ### Declared variable types
 
-Every variable binding declares its type at the binding site. `LET $name: TYPE = ...` creates the binding, `$name = ...` mutates it, and bodies use the bare `$name` reference. The leading `$` keeps mutation distinct from `KEY=value` command assignments. Repeating `LET` for the same name in the same scope is a redeclaration error. Loop variables are declared the same way: `FOR $item: STRING IN ...`. Valid types: `STRING`, `INT`, `FLOAT`, `BOOL`, `PIPE`, `LIST`, `MAP`, `HANDLE`, `DURATION`, `PATH`.
+Every variable binding declares its type at the binding site. `LET $name: TYPE = ...` creates the binding, `$name = ...` mutates it, and bodies use the bare `$name` reference. The leading `$` keeps mutation distinct from `KEY=value` command assignments. Repeating `LET` for the same name in the same scope is a redeclaration error. Loop variables are declared the same way: `FOR $item: STRING IN ...`. Valid types: scalars (`STRING`, `INT`, `FLOAT`, `BOOL`, `DURATION`, `PATH`), handles (`PIPE`, `HANDLE`, `SEMAPHORE`, `PERMIT`), `ANY`, and composed shapes (`LIST<STRING>`, `MAP<name: STRING, age: INT>`, arbitrary nesting, spacing insignificant). Bare `LIST` and `MAP` are runtime words, never declarations: unknown collections declare `LIST<ANY>` and `MAP<ANY>`. A field with a `?` suffix is optional (`MAP<held: BOOL, permit?: PERMIT>`): missing optional keys pass, missing required keys fail. `TYPE NAME = <shape>` binds one immutable name per run that every declaration form accepts.
 
 ```oxdock
 LET $count: INT = 1
@@ -800,6 +817,22 @@ FOR $item: STRING IN ["a", "b"] {
 WRITE count.txt "{{ $count }}"
 LET $c: STRING = READ count.txt
 ASSERT_EQ $c "2"
+```
+
+Shapes enforce at the binding: a bad element fails naming its position.
+
+```oxdock
+# A list of unknown maps and an inline record bind shaped values.
+LET $ms: LIST<MAP<ANY>> = [{a: 1}]
+LET $p: MAP<name: STRING, age: INT> = {name: "x", age: 3}
+ASSERT_EQ $p.name "x"
+
+# TYPE binds one reusable name; uses enforce structurally.
+TYPE PERSON = MAP<name: STRING, age: INT>
+LET $q: PERSON = {name: "y", age: 4}
+LET $team: LIST<PERSON> = [$q]
+LET $n: STRING = $team.0.name
+ASSERT_EQ $n "y"
 ```
 
 The `env:KEY` expression reads the script environment into a plain value. A `$var` reference never reads the environment, even when the names match:
@@ -933,13 +966,12 @@ ASSERT_CONTAINS stdout "ab"
 
 A guard is a bracketed expression that gates the instruction or block that follows it. Inside the brackets:
 
-- `env:KEY` passes when variable `KEY` exists and is non-empty; `eq(env:KEY, value)` and `ne(env:KEY, value)` compare values.
-- Bare platform tags pass based on the host: `linux`, `macos` (alias `mac`), `windows`, `unix`. Tags are case-insensitive.
-- A comma-separated list means **AND**: `[env:A, linux]`.
+- Guards are namespaced `key:value` pairs: `os:macos`, `os:linux`, `os:windows`, `arch:x86_64` (any documented target-architecture value), `bool:true`, `env:KEY`, `eq(env:KEY, value)`. `family:unix` and `family:windows` are accepted aliases for `any(os:macos, os:linux)` and `os:windows` respectively, lowered at parse so every platform check runs under `os:`. Matching is case-sensitive throughout.
+- A comma-separated list means **AND**: `[env:A, os:linux]`.
 - Disjunction is expressed as a call: `any(expr, expr, ...)` with at least two branches, not an infix operator.
 - Conjunction is expressed as a call (`all(expr, expr, ...)`) or implicitly via comma separation.
 - Any predicate may be negated with `not(...)`: `[not(env:SKIP)]`.
-- Parentheses group expressions: `[any(env:A, linux), mac]`.
+- Parentheses group expressions: `[any(env:A, os:linux), os:macos]`.
 
 Guards attach to the next instruction. Several guard lines in a row chain onto the same target, and a guard immediately followed by `{` opens a guarded block whose guard applies to every enclosed instruction.
 
@@ -967,22 +999,62 @@ ASSERT_CONTAINS stdout "deploying-to-staging"
 
 ```oxdock
 // Exactly one block runs depending on the host OS; every command
-// inside a guarded block inherits the block's guard.
-[windows] {
+// inside a guarded block inherits the block's guard. A shared
+// counter incremented in each block proves exactly one ran.
+LET $ran: INT = 0
+
+[family:windows] {
   WRITE os-report.txt windows
   ECHO windows-detected
   LET $rep: STRING = READ os-report.txt
   ASSERT_EQ $rep "windows"
   ASSERT_CONTAINS stdout "windows-detected"
+  $ran = $ran + 1
 }
 
-[unix] {
+[family:unix] {
   WRITE os-report.txt unix-family
   ECHO unix-detected
   LET $rep: STRING = READ os-report.txt
   ASSERT_EQ $rep "unix-family"
   ASSERT_CONTAINS stdout "unix-detected"
+  $ran = $ran + 1
 }
+
+ASSERT_EQ $ran 1
+```
+
+### Architecture guards
+
+```oxdock
+# Gate blocks on the host target architecture. Exactly one block
+# runs on any host, and each block proves its own execution.
+[arch:x86_64] {
+  WRITE arch-report.txt x86_64
+  ECHO arch-detected
+  LET $rep: STRING = READ arch-report.txt
+  ASSERT_EQ $rep "x86_64"
+  ASSERT_CONTAINS stdout "arch-detected"
+}
+
+[arch:aarch64] {
+  WRITE arch-report.txt aarch64
+  ECHO arch-detected
+  LET $rep: STRING = READ arch-report.txt
+  ASSERT_EQ $rep "aarch64"
+  ASSERT_CONTAINS stdout "arch-detected"
+}
+
+[not(any(arch:x86_64, arch:aarch64))] {
+  WRITE arch-report.txt other-arch
+  ECHO arch-detected
+  LET $rep: STRING = READ arch-report.txt
+  ASSERT_EQ $rep "other-arch"
+  ASSERT_CONTAINS stdout "arch-detected"
+}
+
+# One block always runs, so this holds on every host.
+ASSERT_CONTAINS stdout "arch-detected"
 ```
 
 ### Negation, disjunction, and composition
@@ -1000,7 +1072,7 @@ ASSERT_CONTAINS stdout "negation-passes-for-undefined"
 ASSERT_CONTAINS stdout "or-matched-a-branch"
 
 // Comma composes with AND: (A or linux) AND A: true here on every OS.
-[any(env:OXDOCK_DOC_FEATURE_A, linux), env:OXDOCK_DOC_FEATURE_A] ECHO composed-and-or-guard
+[any(env:OXDOCK_DOC_FEATURE_A, os:linux), env:OXDOCK_DOC_FEATURE_A] ECHO composed-and-or-guard
 ASSERT_CONTAINS stdout "composed-and-or-guard"
 ```
 
@@ -1267,7 +1339,7 @@ empty when nothing matches, and rejects `..` escapes.
 
 ```oxdock
 # Each element binds in turn; the loop body sees every one.
-LET $items: LIST = ["a", "b"]
+LET $items: LIST<STRING> = ["a", "b"]
 FOR $item: STRING IN $items {
   ECHO $item
 }
@@ -1275,7 +1347,7 @@ ASSERT_CONTAINS stdout "a"
 ASSERT_CONTAINS stdout "b"
 
 # Key and value bind together for maps.
-LET $map: MAP = {"x": 1}
+LET $map: MAP<x: INT> = {"x": 1}
 FOR $k: STRING, $v: INT IN $map {
   ECHO "{{ $k }}={{ $v }}"
 }
@@ -1506,7 +1578,7 @@ LET $name: STRING = "world"
 ECHO "hello, {{ $name }}"
 ASSERT_CONTAINS stdout "hello, world"
 
-LET $items: LIST = ["a", "b"]
+LET $items: LIST<STRING> = ["a", "b"]
 ASSERT_CONTAINS $items "a"
 ASSERT_CONTAINS $items "b"
 
@@ -1530,7 +1602,7 @@ LET $too_early: STRING = "too late"
 # The RHS is an expression: GLOB(...) runs and binds a list.
 IMPORT [STD]
 WRITE a.txt "x"
-LET $files: LIST = GLOB("*.txt")
+LET $files: LIST<STRING> = GLOB("*.txt")
 FOR $f: STRING IN $files { ECHO $f }
 
 ASSERT_CONTAINS stdout "a.txt"
@@ -1645,7 +1717,7 @@ ASSERT_EQ $ok "yes"
 IMPORT [STD]
 LET $p: PIPE
 WITH_IO [stdout=$p] ECHO hello
-LET $info: MAP = INSPECT($p)
+LET $info: MAP<ANY> = INSPECT($p)
 IF $info.is_os_pipe {
     WRITE unexpected.txt "should be a script pipe"
 }
@@ -1680,6 +1752,10 @@ afterwards, for every type. This is the counterpart to LET
 shadowing, where `LET $x` *inside* the block declares a
 separate inner variable that reverts on exit.
 
+Reassignment rebinds the variable to a new value: values
+captured earlier keep the old word (see the rebinding
+example below).
+
 
 **Examples:**
 
@@ -1690,6 +1766,24 @@ separate inner variable that reverts on exit.
 LET $count: INT = 1
 $count = 2
 ASSERT_EQ $count 2
+```
+
+**Example: rebind keeps earlier captures**
+
+```oxdock
+# Reassignment rebinds: a map built from `$s` still
+# reads the original string after `$s` moves on.
+LET $s: STRING = "test"
+LET $m: MAP<ANY> = {a: $s}
+$s = "changed"
+ASSERT_EQ $m.a "test"
+
+# Appending to one list binding never touches its clones.
+LET $a: LIST<STRING> = ["1"]
+LET $b: LIST<STRING> = $a
+LIST_APPEND $a "2"
+LET $want: LIST<STRING> = ["1"]
+ASSERT_EQ $b $want
 ```
 
 **Example: convert before math**
@@ -1898,7 +1992,13 @@ only header-listed `$var` and `env:NAME` entries cross, the
 guest starts empty, and results return through declared
 transfers or `WITH_IO` pipes. The target is a static
 literal, never a variable. Unknown targets fail before
-execution starts.
+execution starts. Bodies check twice: the host static
+pass validates the body before anything ships, and the
+guest re-validates on arrival through the same entry
+point, so a body type error fails locally, never mid-run
+on the remote. A failing guest fails the host step: EXIT
+in the body exits the guest, and the host relays the code
+to its own process exit status (see EXIT).
 
 
 **Examples:**
@@ -2013,6 +2113,23 @@ REMOTE prod {
 ```
 
 **Expected error:** `escapes staging`
+
+**Example: guest exit fails the step, host survives**
+
+```oxdock mock_remote:prod expect_error:"REMOTE 'prod' exited with code 3"
+# EXIT in the body exits the guest with code 3. The
+# host is unaffected: it keeps executing after the
+# guest is already dead, and the failure surfaces as
+# a host step error carrying the same code. The CLI
+# then exits with it, so the guest code reaches the OS.
+LET $t: HANDLE = ASYNC REMOTE prod {
+    EXIT 3
+}
+WRITE host-alive.txt "still here"
+AWAIT $t
+```
+
+**Expected error:** `REMOTE 'prod' exited with code 3`
 
 **Example: remote block without a runner**
 
@@ -2460,10 +2577,10 @@ ASSERT_EQ $outer_body "production"
 # through untouched on unix ...
 ENV PROXY_PORT=23791
 
-[unix] LET $o: STRING = RUN echo serving on "$PROXY_PORT"
+[family:unix] LET $o: STRING = RUN echo serving on "$PROXY_PORT"
 
 # ... while cmd expands %VAR% on Windows.
-[windows] LET $o: STRING = RUN echo serving on %PROXY_PORT%
+[family:windows] LET $o: STRING = RUN echo serving on %PROXY_PORT%
 
 ASSERT_CONTAINS $o "23791"
 ```
@@ -3164,6 +3281,9 @@ Enclosing blocks still unwind their LET/ENV/WORKDIR/WORKSPACE state,
 anonymous background tasks are killed synchronously, and files written
 before the EXIT persist.
 
+The code reaches the OS: the CLI exits with `<code>` clamped to
+0..=255, and a guest EXIT relays through `REMOTE` the same way.
+
 
 **Arguments:**
 
@@ -3248,11 +3368,11 @@ other holders keep their contents.
 
 ```oxdock
 # Appends accumulate in order.
-LET $items: LIST = []
+LET $items: LIST<STRING> = []
 LIST_APPEND $items "first"
 LIST_APPEND $items "second"
 
-LET $want: LIST = ["first", "second"]
+LET $want: LIST<STRING> = ["first", "second"]
 ASSERT_EQ $items $want
 ```
 
@@ -3321,22 +3441,34 @@ Callable as `MODULE::NAME(...)` in expressions (or bare `NAME(...)` with the mod
 
 ### STD::DESCRIBE
 
-**Signature:** `STD::DESCRIBE($name: STRING) -> MAP`
+**Signature:** `STD::DESCRIBE($name: STRING) -> MAP<name: STRING, module: STRING, kind: STRING, params: LIST<MAP<ANY>>, returns: STRING, rpn: BOOL, summary: STRING>`
 
 **Contexts:** AST only
+
+**Parameters:**
+- `$name` (`STRING`): Qualified function name (`MODULE::NAME`).
+
+**Returns:** `MAP<name: STRING, module: STRING, kind: STRING, params: LIST<MAP<ANY>>, returns: STRING, rpn: BOOL, summary: STRING>`
+  - `name` (`STRING`): Qualified function name.
+  - `module` (`STRING`): Owning module.
+  - `kind` (`STRING`): Origin label (`host` or `script`).
+  - `params` (`LIST<MAP<ANY>>`): Parameter entries (empty for parameterless functions).
+  - `returns` (`STRING`): Structural return shape (empty when untagged).
+  - `rpn` (`BOOL`): True when callable in RPN position.
+  - `summary` (`STRING`): One-line description.
 
 Describe one function by qualified name.
 
-Returns a MAP with name, module, kind, params, returns, and summary.
-Bare names fail closed: `DESCRIBE` requires the qualified form (except
-`INSPECT`, which is syntax rather than a registry entry). Errors on
-unknown function.
-
 ### STD::EOF
 
-**Signature:** `STD::EOF($pipe) -> BOOL`
+**Signature:** `STD::EOF($pipe: PIPE) -> BOOL`
 
 **Contexts:** AST only
+
+**Parameters:**
+- `$pipe` (`PIPE`): Pipe handle to query for end of stream.
+
+**Returns:** `BOOL`
 
 True when a pipe sits at end of stream: closed with nothing buffered,
 so the next `READ_LINE` would bind `""` via EOF rather than a line.
@@ -3344,7 +3476,9 @@ Live writers, pinned keepers, and buffered bytes all answer false.
 Never blocks: a reader already blocked stays blocked, so branch on
 `EOF` before reading, not after. OS pairs and unbound handles answer
 best-effort (kernel bytes are invisible there; see `INSPECT`).
-Non-pipe arguments bail.
+Non-pipe arguments bail at the boundary: the parameter declares
+`PIPE`, so the extractor and the static pass reject them before
+the body runs.
 
 ```oxdock
 # Capture two lines, then drain to end of stream with no sentinel line.
@@ -3364,21 +3498,30 @@ WHILE !EOF($cap) {
 ASSERT_EQ $n 2
 ```
 
+
 ### STD::FLOAT
 
-**Signature:** `STD::FLOAT($val) -> FLOAT`
+**Signature:** `STD::FLOAT($val: ANY) -> FLOAT`
 
 **Contexts:** AST, RPN
+
+**Parameters:**
+- `$val` (`ANY`): Value to convert to `FLOAT`.
+
+**Returns:** `FLOAT`
 
 Convert a value to FLOAT.
 
 Parses f64 (accepts int strings), bails on non-finite or non-numeric.
 
+
 ### STD::FUNCTIONS
 
-**Signature:** `STD::FUNCTIONS() -> LIST`
+**Signature:** `STD::FUNCTIONS() -> LIST<STRING>`
 
 **Contexts:** AST only
+
+**Returns:** `LIST<STRING>`
 
 List all visible function names.
 
@@ -3387,30 +3530,65 @@ plus host-registered names.
 
 ### STD::GLOB
 
-**Signature:** `STD::GLOB($pattern: STRING) -> LIST`
+**Signature:** `STD::GLOB($pattern: STRING) -> LIST<STRING>`
 
 **Contexts:** AST, RPN
+
+**Parameters:**
+- `$pattern` (`STRING`): Glob pattern matched against workspace paths.
+
+**Returns:** `LIST<STRING>`
 
 List workspace paths matching a glob pattern.
 
 Sorted, root-relative LIST; empty on no match or `..` escape.
 
-### STD::INT
 
-**Signature:** `STD::INT($val) -> INT`
+### STD::HAS_KEY
+
+**Signature:** `STD::HAS_KEY($map: MAP<ANY>, $key: STRING) -> BOOL`
 
 **Contexts:** AST, RPN
+
+**Parameters:**
+- `$map` (`MAP<ANY>`): Map to probe.
+- `$key` (`STRING`): Key to look up.
+
+**Returns:** `BOOL`
+
+Report whether a map holds a key.
+
+Pure MAP probe so scripts can branch on optional fields without
+tripping the strict missing-key error.
+
+
+### STD::INT
+
+**Signature:** `STD::INT($val: ANY) -> INT`
+
+**Contexts:** AST, RPN
+
+**Parameters:**
+- `$val` (`ANY`): Value to convert to `INT`.
+
+**Returns:** `INT`
 
 Convert a value to INT.
 
 Trims ASCII whitespace and parses i64. Passes Int through; Float only
 when integral and finite.
 
+
 ### STD::IS_TERMINAL
 
-**Signature:** `STD::IS_TERMINAL($stream: STRING) -> BOOL`
+**Signature:** `STD::IS_TERMINAL($stream_name: STRING = "stdin" | "stdout" | "stderr") -> BOOL`
 
 **Contexts:** AST only
+
+**Parameters:**
+- `$stream_name` (`STRING = "stdin" | "stdout" | "stderr"`): Stream name: `stdin`, `stdout`, or `stderr` (exact match).
+
+**Returns:** `BOOL`
 
 Report whether a standard stream is a terminal.
 
@@ -3425,25 +3603,130 @@ still answers the session question via the process check. The name
 matches exactly (no case folding): anything else bails. AST-only:
 reads the step context like the other introspection functions.
 
+
 ### STD::LOAD_JSON
 
-**Signature:** `STD::LOAD_JSON($path: STRING) -> MAP`
+**Signature:** `STD::LOAD_JSON($path: STRING) -> ANY`
 
 **Contexts:** AST, RPN
+
+**Parameters:**
+- `$path` (`STRING`): Workspace file path to load and parse as JSON.
+
+**Returns:** `ANY`
 
 Load and parse a JSON file.
 
-Reads a workspace file and parses JSON into a DSL value.
+Reads a workspace file and parses JSON into a DSL value. Returns
+`ANY` by design: a top-level array or scalar parses to `LIST` or a
+scalar word. `LET` coercion still checks the actual value at
+assignment.
+
 
 ### STD::LOAD_TOML
 
-**Signature:** `STD::LOAD_TOML($path: STRING) -> MAP`
+**Signature:** `STD::LOAD_TOML($path: STRING) -> MAP<ANY>`
 
 **Contexts:** AST, RPN
+
+**Parameters:**
+- `$path` (`STRING`): Workspace file path to load and parse as TOML.
+
+**Returns:** `MAP<ANY>`
 
 Load and parse a TOML file.
 
 Reads a workspace file and parses TOML into a DSL value.
+
+
+### STD::MAP_SET
+
+**Signature:** `STD::MAP_SET($map: MAP<ANY>, $key: STRING, $value: ANY) -> MAP<ANY>`
+
+**Contexts:** AST, RPN
+
+**Parameters:**
+- `$map` (`MAP<ANY>`): Map to insert into.
+- `$key` (`STRING`): Key to insert; duplicates fail.
+- `$value` (`ANY`): Value to store.
+
+**Returns:** `MAP<ANY>`
+
+Insert one key into a map.
+
+Fails on duplicates so two entries sharing a key fail the run
+instead of silently shadowing each other.
+
+
+### STD::MERGE_MAPS
+
+**Signature:** `STD::MERGE_MAPS($maps: LIST<MAP<ANY>>, $policy: STRING = "fail_on_duplicate" | "overwrite") -> MAP<ANY>`
+
+**Contexts:** AST, RPN
+
+**Parameters:**
+- `$maps` (`LIST<MAP<ANY>>`): LIST of MAPs to merge in order.
+- `$policy` (`STRING = "fail_on_duplicate" | "overwrite"`): Duplicate policy.
+
+**Returns:** `MAP<ANY>`
+
+Merge a LIST of MAPs in order under one duplicate policy.
+
+`fail_on_duplicate` fails naming the repeated key, so two files
+claiming one placeholder fail the run instead of shadowing each
+other. `overwrite` lets later files win, for environment overlays.
+Non MAP elements fail naming their position.
+
+
+### STD::PARSE_JSON
+
+**Signature:** `STD::PARSE_JSON($text: STRING) -> ANY`
+
+**Contexts:** AST, RPN
+
+**Parameters:**
+- `$text` (`STRING`): JSON text already held in memory.
+
+**Returns:** `ANY`
+
+Parse JSON text already held in memory.
+
+Uses the same conversion as file loading, so fetch bodies, file
+contents, and captured text share one JSON value shape. Returns
+`ANY` by design, matching `LOAD_JSON`: a top-level array or scalar
+parses to `LIST` or a scalar word. `LET` coercion still checks the
+actual value at assignment.
+
+```oxdock
+# Parse in-memory JSON text with the same conversion as file loading.
+IMPORT [STD]
+LET $body: STRING = "{\"a\": 1}"
+LET $doc: ANY = PARSE_JSON($body)
+ASSERT_EQ $doc.a 1
+
+# Top-level arrays parse to LIST, which is why the return is ANY.
+LET $items: LIST<ANY> = PARSE_JSON("[1, 2]")
+ASSERT_EQ $items.0 1
+ASSERT_EQ $items.1 2
+```
+
+
+### STD::PARSE_TOML
+
+**Signature:** `STD::PARSE_TOML($text: STRING) -> MAP<ANY>`
+
+**Contexts:** AST, RPN
+
+**Parameters:**
+- `$text` (`STRING`): TOML text already held in memory.
+
+**Returns:** `MAP<ANY>`
+
+Parse TOML text already held in memory.
+
+Uses the same conversion as file loading, so fetch bodies, file
+contents, and captured text share one JSON/TOML shape.
+
 
 ### STD::PATH_TYPE
 
@@ -3451,16 +3734,27 @@ Reads a workspace file and parses TOML into a DSL value.
 
 **Contexts:** AST only
 
+**Parameters:**
+- `$path` (`STRING`): Workspace path of the entry to describe.
+
+**Returns:** `STRING`
+
 Describe a filesystem entry.
 
 Reports file, dir, symlink (no-follow), or absent. AST-only by design;
 there is no RPN arm for filesystem IO.
 
+
 ### STD::SEMAPHORE_AVAILABLE
 
-**Signature:** `STD::SEMAPHORE_AVAILABLE($sem) -> INT`
+**Signature:** `STD::SEMAPHORE_AVAILABLE($sem: SEMAPHORE) -> INT`
 
 **Contexts:** AST, RPN
+
+**Parameters:**
+- `$sem` (`SEMAPHORE`): Semaphore handle from `SEMAPHORE_NEW`.
+
+**Returns:** `INT`
 
 Read free permits under the lock, with no mutation.
 
@@ -3468,15 +3762,29 @@ Observability only (audit lines, healthchecks: `active = max - free`).
 Exact at read time and stale the instant the caller acts on it, so it
 must never drive admission: that is `SEMAPHORE_TRY_ACQUIRE`'s job.
 
-```text
+```oxdock
+# Hold one permit on a cap of two.
+IMPORT [STD]
+LET $sem: SEMAPHORE = SEMAPHORE_NEW(2)
+LET $acq: MAP<held: BOOL, permit?: PERMIT> = SEMAPHORE_TRY_ACQUIRE($sem)
+ASSERT_EQ $acq.held true
+
+# One held permit leaves exactly one free.
 LET $free: INT = SEMAPHORE_AVAILABLE($sem)
+ASSERT_EQ $free 1
 ```
+
 
 ### STD::SEMAPHORE_NEW
 
 **Signature:** `STD::SEMAPHORE_NEW($max: INT) -> SEMAPHORE`
 
 **Contexts:** AST only
+
+**Parameters:**
+- `$max` (`INT`): Maximum concurrent holders; must be positive.
+
+**Returns:** `SEMAPHORE`
 
 Create a counting semaphore admitting at most `max` concurrent holders.
 
@@ -3485,40 +3793,79 @@ observes the same count, and admission runs through
 `SEMAPHORE_TRY_ACQUIRE`, never through the `SEMAPHORE_AVAILABLE`
 readout.
 
-```text
-LET $sem: SEMAPHORE = SEMAPHORE_NEW(10)
+```oxdock
+# Mint a semaphore admitting at most two holders.
+IMPORT [STD]
+LET $sem: SEMAPHORE = SEMAPHORE_NEW(2)
+
+# A fresh semaphore reports its full cap as available.
+LET $free: INT = SEMAPHORE_AVAILABLE($sem)
+ASSERT_EQ $free 2
 ```
+
 
 ### STD::SEMAPHORE_TRY_ACQUIRE
 
-**Signature:** `STD::SEMAPHORE_TRY_ACQUIRE($sem) -> MAP`
+**Signature:** `STD::SEMAPHORE_TRY_ACQUIRE($sem: SEMAPHORE) -> MAP<held: BOOL, permit?: PERMIT>`
 
 **Contexts:** AST only
+
+**Parameters:**
+- `$sem` (`SEMAPHORE`): Semaphore handle from `SEMAPHORE_NEW`.
+
+**Returns:** `MAP<held: BOOL, permit?: PERMIT>`
+  - `held` (`BOOL`): `true` with the permit under `permit`, `false` with no `permit` key.
+  - `permit` (`PERMIT`, optional): Permit handle; read only when `held`.
 
 Attempt one non-blocking acquire, always answering a MAP.
 
-`held` is `1` with the permit under the `permit` key, or `0` with no
-`permit` key: branch on `$m.held == 1` (an INT compare; bare `IF $m.held`
-is a Type Error). The DSL has no null, so the absent key is the miss
-shape. Do not read `$m.permit` unless `held == 1`: missing-key access
-bails strictly.
+`held` is `true` with the permit under the `permit` key, or `false`
+with no `permit` key: branch on `$m.held` directly. The DSL has no
+null, so the absent key is the miss shape. Do not read `$m.permit`
+unless `held`: missing-key access bails strictly.
 Never waits, so no wait can wedge.
 
-```text
-LET $acq: MAP = SEMAPHORE_TRY_ACQUIRE($sem)
-IF $acq.held == 0 {
-  ECHO "at cap, rejecting"
-} ELSE {
-  LET $permit: PERMIT = $acq.permit
-  ASYNC { session work }
-}
+```oxdock
+# First acquire holds with a permit to bind.
+IMPORT [STD]
+LET $sem: SEMAPHORE = SEMAPHORE_NEW(1)
+LET $first: MAP<held: BOOL, permit?: PERMIT> = SEMAPHORE_TRY_ACQUIRE($sem)
+ASSERT_EQ $first.held true
+LET $permit: PERMIT = $first.permit
+
+# A capped semaphore answers held false with no permit key.
+LET $second: MAP<held: BOOL, permit?: PERMIT> = SEMAPHORE_TRY_ACQUIRE($sem)
+ASSERT_EQ $second.held false
+LET $has_permit: BOOL = HAS_KEY($second, "permit")
+ASSERT_EQ $has_permit false
 ```
+
+
+### STD::TO_JSON
+
+**Signature:** `STD::TO_JSON($value: ANY) -> STRING`
+
+**Contexts:** AST, RPN
+
+**Parameters:**
+- `$value` (`ANY`): Value to encode as JSON.
+
+**Returns:** `STRING`
+
+Encode a script value as JSON with one trailing newline.
+
+Maps stay sorted; only template-safe shapes (STRING, INT, FLOAT,
+BOOL, LIST, MAP) survive, anything else fails here instead of
+rendering as a silent empty.
+
 
 ### STD::TYPES
 
-**Signature:** `STD::TYPES() -> LIST`
+**Signature:** `STD::TYPES() -> LIST<STRING>`
 
 **Contexts:** AST only
+
+**Returns:** `LIST<STRING>`
 
 List all known type names.
 
@@ -3528,14 +3875,41 @@ introspection functions.
 
 ### STD::TYPE_DESCRIBE
 
-**Signature:** `STD::TYPE_DESCRIBE($name: STRING) -> MAP`
+**Signature:** `STD::TYPE_DESCRIBE($name: STRING) -> MAP<name: STRING, summary: STRING, docs: STRING>`
 
 **Contexts:** AST only
+
+**Parameters:**
+- `$name` (`STRING`): Type name to describe.
+
+**Returns:** `MAP<name: STRING, summary: STRING, docs: STRING>`
+  - `name` (`STRING`): Queried type name.
+  - `summary` (`STRING`): One-line description.
+  - `docs` (`STRING`): Full documentation text.
 
 Describe one type by name.
 
 Returns a MAP with name, summary, and docs. Errors on unknown type.
 Reads the run's name directory, so it runs on the AST path.
+
+
+### STD::TYPE_OF
+
+**Signature:** `STD::TYPE_OF($value: ANY) -> STRING`
+
+**Contexts:** AST, RPN
+
+**Parameters:**
+- `$value` (`ANY`): Value whose word to name.
+
+**Returns:** `STRING`
+
+Name the word a value holds, for data-driven branching.
+
+Returns the registered type word (`STRING`, `INT`, `FLOAT`, `BOOL`,
+`LIST`, `MAP`, plus handle words like `PIPE`): the same name the
+value prints in arity and coercion errors, so scripts can branch
+on config shapes (a path string or a path list) without failing.
 
 ## Plugin references
 
@@ -3545,7 +3919,21 @@ their own READMEs:
 - [SSH plugin reference](https://github.com/jzombie/rust-oxdock/blob/main/crates/plugins/oxdock-ssh-plugin/README.md): ephemeral loopback SSH servers and session pumps.
 - [NET plugin reference](https://github.com/jzombie/rust-oxdock/blob/main/crates/plugins/oxdock-net-plugin/README.md): virtual-endpoint TCP listeners, pumps, and memory sessions.
 
-## When a script fails to parse
+## Errors stop the pipeline
+
+A pipeline is expected to run to completion. The engine is fail fast:
+the first failed step ends the run immediately, later steps do not
+execute, and the failure is reported with its step context. There is
+no retry, resume, or continue on error mode, and partial completion is
+not treated as success.
+
+Choosing not to run work is different from failing it. Guards and
+branches select work, timeouts bound it, and `EXIT <code>` is the
+intentional form of an immediate stop. Files written before the stop
+persist, while unwinding and task teardown follow the normal scope
+rules.
+
+### When a script fails to parse
 
 Parse errors tell you what went wrong, where, and what was expected.
 Every error names the line and column, echoes the source line, and points
@@ -3684,30 +4072,6 @@ Keeping inheritance selective avoids leaking secrets by default while still allo
 
 - **Performance:** routing via `oxdock-fs` adds negligible overhead for typical workloads. The module focuses on correctness and containment with minimal runtime cost so interactive iteration remains fast.
 
-## How these examples are tested
-
-Every ```` ```oxdock ```` fence in this document is extracted with [`oxdock_parser::extract_fenced_blocks`](./crates/oxdock-parser/src/markdown.rs) and executed by [`crates/oxdock-logic-tests/tests/docs_conformance.rs`](./crates/oxdock-logic-tests/tests/docs_conformance.rs) against the real parser and interpreter, so the documentation cannot drift from the implementation. Enforcement layers:
-
-- **Parse & execute:** Every snippet must parse and run clean (or fail with its declared `expect_error:` message) on Linux, macOS, and Windows CI.
-- **Coverage gates:** Every parser command must appear in at least one executable example, and key structural features (`any(`, `not(`, `{{ env:`, `[env:`) must be demonstrated.
-- **Compile-time parity:** A [build-time fixture](./crates/oxdock-logic-tests/fixtures/integration/buildtime_macros/assert_verification/) runs this README's quick-start script through `oxdock_embed!`, assertions included.
-- **Real-binary check:** The quick start is additionally executed through the actual `oxdock` binary exactly as documented (`--script Oxfile`).
-- **Doctest execution:** The Rust quick start is wired into [`crates/oxdock-doc-tests`](./crates/oxdock-doc-tests/) and compiled *and* run by `cargo test --doc` on every CI OS.
-- **Reference integrity:** Every relative Markdown link target and every repo path referenced from a ```` ```bash ```` fence must exist.
-
-Snippets contain nothing but OxDock: copy any of them straight into an `Oxfile` or an `oxdock_embed!` macro. Runner-specific configuration lives in the fence info-string, which Markdown renders as inert metadata:
-
-```text
-```oxdock                                    plain snippet, must parse and run clean
-```oxdock env:KEY=value                      inject an environment value (visible to INHERIT_ENV/guards)
-```oxdock roots:unified                      run with workspace root == build context (COPY/COPY_GIT demos)
-```oxdock expect_error:"message substring"   snippet must fail with this text in its error
-```
-
-Everything else you see inside the fences, including the `ASSERT_*` commands, is part of the DSL itself and executes identically in your own pipelines.
-
-If you change the DSL, update this reference in the same commit. CI will hold you to it.
-
 ## Environment variable contracts
 
 Environment variables understood by the toolchain (workspace roots, caching fingerprints, IDE integrations) are specified in [ENV_CONTRACTS.md](./ENV_CONTRACTS.md).
@@ -3788,7 +4152,7 @@ cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info
 
 #### Miri coverage
 
-The CI `miri` job monitors how many workspace unit tests can run under [`cargo miri`](https://github.com/rust-lang/miri). On pushes to `main`, the job publishes a badge description (`badges/miri-coverage.json` on the `badges` branch) that backs the Miri coverage badge above.
+The nightly `miri` job monitors how many workspace unit tests can run under [`cargo miri`](https://github.com/rust-lang/miri). Miri is too slow for the PR path, so it runs on schedule against `main` instead of gating merges; findings become follow-up issues. Each run publishes a badge description (`badges/miri-coverage.json` on the `badges` branch) that backs the Miri coverage badge above.
 
 The badge reports the runnable test ratio directly: runnable tests over total tests (`cargo miri test -- --list` vs. `-- --ignored --list`), with both counts in the message. LLVM line coverage keeps its own badge; this one answers only how much of the suite Miri can execute.
 
@@ -3824,6 +4188,22 @@ cargo +nightly miri test --workspace --all-features --lib --tests
 - **RPN**: Reverse Polish Notation: arithmetic compiled to a flat stack program instead of tree walking.
 - **Vtable**: The operations half of a descriptor: function pointers that clone, drop, compare, and render values of that type.
 - **Word**: The fixed 128 bit unit of every script value: a descriptor pointer plus a payload.
+
+## Citation
+
+If you use OxDock in published work, cite version `0.21.0-alpha` with the metadata in [CITATION.cff](./CITATION.cff).
+
+```bibtex
+@software{oxdock,
+  author = "Jeremy Harris",
+  title = "OxDock",
+  version = "0.21.0-alpha",
+  url = "https://github.com/jzombie/rust-oxdock",
+  license = "Apache-2.0"
+}
+```
+
+<!-- DOI: reserved for future minting; no DOI is claimed here. -->
 
 ## License
 

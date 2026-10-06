@@ -6,21 +6,30 @@ use std::str::FromStr;
 
 // Strategies
 
-fn arb_platform_guard() -> impl Strategy<Value = PlatformGuard> {
-    prop_oneof![
-        Just(PlatformGuard::Unix),
-        Just(PlatformGuard::Windows),
-        Just(PlatformGuard::Macos),
-        Just(PlatformGuard::Linux),
-    ]
-}
-
 fn arb_guard() -> impl Strategy<Value = Guard> {
     prop_oneof![
-        arb_platform_guard().prop_map(|target| Guard::Platform { target }),
-        "[a-zA-Z_][a-zA-Z0-9_]*".prop_map(|key| Guard::EnvExists { key }),
-        ("[a-zA-Z_][a-zA-Z0-9_]*", "[a-zA-Z_][a-zA-Z0-9_]*",)
-            .prop_map(|(key, value)| Guard::EnvEquals { key, value }),
+        ("macos|linux|windows").prop_map(|val| Guard::Attr {
+            ns: Ns::Os,
+            key: None,
+            val: Some(val),
+        }),
+        prop::sample::select(oxdock_parser::ARCH_VALUES.to_vec()).prop_map(|val| Guard::Attr {
+            ns: Ns::Arch,
+            key: None,
+            val: Some(val.to_string()),
+        }),
+        "[a-zA-Z_][a-zA-Z0-9_]*".prop_map(|key| Guard::Attr {
+            ns: Ns::Env,
+            key: Some(key),
+            val: None,
+        }),
+        ("[a-zA-Z_][a-zA-Z0-9_]*", "[a-zA-Z_][a-zA-Z0-9_]*",).prop_map(|(key, value)| {
+            Guard::Attr {
+                ns: Ns::Env,
+                key: Some(key),
+                val: Some(value),
+            }
+        }),
     ]
 }
 
@@ -211,6 +220,16 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
             needle: needle.into(),
         }),
         (0i32..255).prop_map(|i| StepKind::Exit(Arg::String(i.to_string(), false))),
+        (
+            "[A-Z][A-Z0-9_]*",
+            prop_oneof![
+                Just("MAP".to_string()),
+                Just("LIST<MAP>".to_string()),
+                Just("MAP<name: STRING>".to_string()),
+                Just("LIST<PERSON>".to_string()),
+            ]
+        )
+            .prop_map(|(name, target)| StepKind::TypeAlias { name, target }),
     ]
 }
 
@@ -224,6 +243,10 @@ fn arb_step() -> impl Strategy<Value = Step> {
         })
         .prop_filter("Reject guarded INHERIT_ENV", |step| match &step.kind {
             StepKind::InheritEnv { .. } => step.guard.is_none(),
+            _ => true,
+        })
+        .prop_filter("Reject guarded TYPE aliases", |step| match &step.kind {
+            StepKind::TypeAlias { .. } => step.guard.is_none(),
             _ => true,
         })
         .prop_filter("Reject strings that fail proc_macro2 lexing", |step| {

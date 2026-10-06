@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::common::mock_lower;
 
+use indoc::indoc;
 use oxdock_parser::{Expr, ModuleFuncs, ModuleTable, StepKind, parse_script_with_modules};
 
 /// Fictional modules exercising resolution logic: `ALPHA` (several
@@ -47,7 +48,11 @@ fn call_name(steps: &[oxdock_parser::Step], idx: usize) -> String {
 
 #[test]
 fn import_brings_bare_calls_into_scope() {
-    let steps = parse("IMPORT [ALPHA]\nGLOB(\"*.txt\")\n").expect("import parses");
+    let steps = parse(indoc! {r#"
+        IMPORT [ALPHA]
+        GLOB("*.txt")
+    "#})
+    .expect("import parses");
     // IMPORT emits zero runtime steps.
     assert_eq!(steps.len(), 1, "{steps:?}");
     assert_eq!(call_name(&steps, 0), "ALPHA::GLOB");
@@ -55,15 +60,22 @@ fn import_brings_bare_calls_into_scope() {
 
 #[test]
 fn import_bare_module_form_works() {
-    let steps = parse("IMPORT ALPHA\nGLOB(\"*.txt\")\n").expect("bare import parses");
+    let steps = parse(indoc! {r#"
+        IMPORT ALPHA
+        GLOB("*.txt")
+    "#})
+    .expect("bare import parses");
     assert_eq!(steps.len(), 1, "{steps:?}");
     assert_eq!(call_name(&steps, 0), "ALPHA::GLOB");
 }
 
 #[test]
 fn import_in_let_rhs_resolves() {
-    let steps =
-        parse("IMPORT [ALPHA]\nLET $files: LIST = GLOB(\"*.txt\")\n").expect("import parses");
+    let steps = parse(indoc! {r#"
+        IMPORT [ALPHA]
+        LET $files: LIST = GLOB("*.txt")
+    "#})
+    .expect("import parses");
     assert_eq!(steps.len(), 1, "{steps:?}");
     let StepKind::Assign { expr, .. } = &steps[0].kind else {
         panic!("expected Assign, got {:?}", steps[0].kind);
@@ -108,7 +120,11 @@ fn unknown_bare_call_has_no_suggestion() {
 fn ambiguous_bare_call_across_modules_fails() {
     // Both ALPHA and BETA export GLOB: importing both leaves bare GLOB
     // ambiguous instead of shadowing silently.
-    let err = parse("IMPORT [ALPHA, BETA]\nGLOB(\"*.txt\")\n").expect_err("ambiguous must fail");
+    let err = parse(indoc! {r#"
+        IMPORT [ALPHA, BETA]
+        GLOB("*.txt")
+    "#})
+    .expect_err("ambiguous must fail");
     let text = err.to_string();
     assert!(text.contains("ambiguous function `GLOB`"), "{text}");
     assert!(text.contains("ALPHA::GLOB"), "{text}");
@@ -116,15 +132,26 @@ fn ambiguous_bare_call_across_modules_fails() {
 
 #[test]
 fn import_reverts_on_block_exit() {
-    let err = parse("[bool:true] {\nIMPORT [ALPHA]\nWRITE a.txt x\n}\nGLOB(\"*.txt\")\n")
-        .expect_err("call after block must fail");
+    let err = parse(indoc! {r#"
+        [bool:true] {
+        IMPORT [ALPHA]
+        WRITE a.txt x
+        }
+        GLOB("*.txt")
+    "#})
+    .expect_err("call after block must fail");
     assert!(err.to_string().contains("unknown function `GLOB`"), "{err}");
 }
 
 #[test]
 fn import_inside_block_applies_within() {
-    let steps =
-        parse("[bool:true] {\nIMPORT [ALPHA]\nGLOB(\"*.txt\")\n}\n").expect("block import parses");
+    let steps = parse(indoc! {r#"
+        [bool:true] {
+        IMPORT [ALPHA]
+        GLOB("*.txt")
+        }
+    "#})
+    .expect("block import parses");
     assert_eq!(steps.len(), 1, "{steps:?}");
     assert_eq!(call_name(&steps, 0), "ALPHA::GLOB");
 }
@@ -134,15 +161,26 @@ fn script_definitions_win_over_opaque_imports() {
     // Opaque membership is unknown, so a SCRIPT definition deterministically
     // wins: no ambiguity to report. (Known-module names stay reserved, see
     // func_shadow_native and func_cannot_shadow_module_function.)
-    let steps = parse("FUNC FOO($p: STRING) {\nRETURN $p\n}\nIMPORT [OPAQ]\nFOO(\"x\")\n")
-        .expect("script def parses");
+    let steps = parse(indoc! {r#"
+        FUNC FOO($p: STRING) {
+        RETURN $p
+        }
+        IMPORT [OPAQ]
+        FOO("x")
+    "#})
+    .expect("script def parses");
     assert_eq!(call_name(&steps, 1), "SCRIPT::FOO");
 }
 
 #[test]
 fn func_cannot_shadow_module_function() {
-    let err = parse("IMPORT [ALPHA]\nFUNC GLOB($p: STRING) {\nRETURN $p\n}\n")
-        .expect_err("shadow must fail");
+    let err = parse(indoc! {r#"
+        IMPORT [ALPHA]
+        FUNC GLOB($p: STRING) {
+        RETURN $p
+        }
+    "#})
+    .expect_err("shadow must fail");
     assert!(
         err.to_string()
             .contains("cannot shadow reserved function `GLOB`"),
@@ -158,13 +196,21 @@ fn export_is_reserved() {
 
 #[test]
 fn import_cannot_be_guarded() {
-    let err = parse("[env:FOO]\nIMPORT [ALPHA]\n").expect_err("guarded import must fail");
+    let err = parse(indoc! {r#"
+        [env:FOO]
+        IMPORT [ALPHA]
+    "#})
+    .expect_err("guarded import must fail");
     assert!(err.to_string().contains("cannot be guarded"), "{err}");
 }
 
 #[test]
 fn lone_opaque_import_determines_target() {
-    let steps = parse("IMPORT [OPAQ]\nFOO(\"x\")\n").expect("opaque import parses");
+    let steps = parse(indoc! {r#"
+        IMPORT [OPAQ]
+        FOO("x")
+    "#})
+    .expect("opaque import parses");
     assert_eq!(call_name(&steps, 0), "OPAQ::FOO");
 }
 
@@ -174,7 +220,10 @@ fn several_opaque_imports_are_ambiguous() {
         modules: HashMap::from([("OPAQ".to_string(), None), ("OPAQ2".to_string(), None)]),
     };
     let err = parse_script_with_modules(
-        "IMPORT [OPAQ, OPAQ2]\nFOO(\"x\")\n",
+        indoc! {r#"
+            IMPORT [OPAQ, OPAQ2]
+            FOO("x")
+        "#},
         mock_lower,
         HashSet::new(),
         table,
@@ -207,8 +256,11 @@ fn deep_paths_are_rejected() {
 
 #[test]
 fn module_qualified_inspect_is_rejected() {
-    let err = parse("LET $v: STRING = \"x\"\nLET $m: STRING = ALPHA::INSPECT($v)\n")
-        .expect_err("qualified INSPECT must fail");
+    let err = parse(indoc! {r#"
+        LET $v: STRING = "x"
+        LET $m: STRING = ALPHA::INSPECT($v)
+    "#})
+    .expect_err("qualified INSPECT must fail");
     assert!(
         err.to_string().contains("cannot be module-qualified"),
         "{err}"
@@ -217,8 +269,11 @@ fn module_qualified_inspect_is_rejected() {
 
 #[test]
 fn bare_inspect_needs_no_import() {
-    let steps =
-        parse("LET $v: STRING = \"x\"\nLET $m: MAP = INSPECT($v)\n").expect("bare INSPECT parses");
+    let steps = parse(indoc! {r#"
+        LET $v: STRING = "x"
+        LET $m: MAP = INSPECT($v)
+    "#})
+    .expect("bare INSPECT parses");
     assert_eq!(steps.len(), 2, "{steps:?}");
 }
 
