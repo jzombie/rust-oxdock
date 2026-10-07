@@ -733,8 +733,11 @@ pub(crate) fn to_json_from_value(value: Value) -> Result<Value> {
 }
 
 /// Script values to JSON. Maps stay sorted (the word holds a BTreeMap);
-/// only template-safe shapes survive.
-fn value_to_json(value: &Value) -> Result<serde_json::Value> {
+/// only template-safe shapes survive: STRING, INT, FLOAT, BOOL, LIST,
+/// and MAP. Anything else fails naming the type instead of rendering
+/// a silent empty. Shared by `TO_JSON` and any host bridging values
+/// across a JSON boundary (sentinel payloads, wire frames).
+pub fn value_to_json(value: &Value) -> Result<serde_json::Value> {
     if let Some(map) = value.as_map() {
         return map
             .iter()
@@ -1053,8 +1056,13 @@ pub(crate) fn parse_json_from_value(value: Value) -> Result<Value> {
     load_json_value(text)
 }
 
-/// Convert a `serde_json::Value` to a DSL `Value`.
-fn json_to_value(v: serde_json::Value) -> Value {
+/// Convert a `serde_json::Value` to a DSL `Value`. The strict inverse
+/// of [`value_to_json`] over the shapes it emits: numbers that fit
+/// `i64` bind INT, the rest bind FLOAT. Lenient leftovers from foreign
+/// JSON degrade gracefully (unrepresentable numbers and null bind
+/// STRING), matching `PARSE_JSON` file loading. Shared by `PARSE_JSON`
+/// and any host decoding values back across a JSON boundary.
+pub fn json_to_value(v: serde_json::Value) -> Value {
     match v {
         serde_json::Value::String(s) => Value::string(s),
         serde_json::Value::Bool(b) => Value::bool(b),

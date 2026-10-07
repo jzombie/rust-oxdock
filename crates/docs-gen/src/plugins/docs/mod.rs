@@ -9,8 +9,6 @@
 //! Only `crate::run` registers this module; the core language never
 //! sees it.
 
-use std::collections::BTreeMap;
-
 use anyhow::{Context, Result, bail};
 use oxdock_core::{HostModule, OxDockFn, StepCtx, TypeTag, Value};
 use oxdock_func_macro::oxdock_func;
@@ -51,86 +49,25 @@ fn check_target_shape(target: &str) -> Result<()> {
     Ok(())
 }
 
-/// Options map to JSON: only plain data crosses the pass boundary.
-/// Handles, pipes, paths, and durations have no JSON shape and fail
-/// naming the offending type instead of rendering a silent empty.
-fn value_to_json(value: &Value) -> Result<serde_json::Value> {
-    if let Some(text) = value.as_str() {
-        return Ok(serde_json::Value::String(text.to_string()));
-    }
-    if let Some(n) = value.as_i64() {
-        return Ok(serde_json::Value::Number(serde_json::Number::from(n)));
-    }
-    if let Some(f) = value.as_f64() {
-        let number = serde_json::Number::from_f64(f).ok_or_else(|| {
-            anyhow::anyhow!("DOCS::DEFER options cannot encode non-finite float {f}")
-        })?;
-        return Ok(serde_json::Value::Number(number));
-    }
-    if let Some(b) = value.as_bool() {
-        return Ok(serde_json::Value::Bool(b));
-    }
-    if let Some(map) = value.as_map() {
-        let mut out = serde_json::Map::with_capacity(map.len());
-        for (key, item) in map {
-            out.insert(key.clone(), value_to_json(item)?);
-        }
-        return Ok(serde_json::Value::Object(out));
-    }
-    if let Some(list) = value.as_list() {
-        return list
-            .iter()
-            .map(value_to_json)
-            .collect::<Result<Vec<_>>>()
-            .map(serde_json::Value::Array);
-    }
-    bail!(
-        "DOCS::DEFER options hold {} values, which cannot cross the pass boundary; use STRING, INT, FLOAT, BOOL, LIST, or MAP",
-        value.type_name()
-    )
-}
-
-/// JSON back to a script value: the strict inverse of [`value_to_json`]
-/// over the shapes sentinels can carry. Numbers that fit `i64` bind
-/// INT, the rest bind FLOAT; anything else the encoder never emits
-/// fails naming itself.
-fn value_from_json(json: &serde_json::Value) -> Result<Value> {
-    match json {
-        serde_json::Value::String(text) => Ok(Value::string(text.clone())),
-        serde_json::Value::Number(number) => {
-            if let Some(n) = number.as_i64() {
-                Ok(Value::int(n))
-            } else if let Some(f) = number.as_f64() {
-                Ok(Value::float(f))
-            } else {
-                bail!("deferred options hold an unrepresentable number: {number}")
-            }
-        }
-        serde_json::Value::Bool(b) => Ok(Value::bool(*b)),
-        serde_json::Value::Array(items) => items
-            .iter()
-            .map(value_from_json)
-            .collect::<Result<Vec<_>>>()
-            .map(Value::list),
-        serde_json::Value::Object(map) => map
-            .iter()
-            .map(|(key, item)| value_from_json(item).map(|value| (key.clone(), value)))
-            .collect::<Result<BTreeMap<_, _>>>()
-            .map(Value::map),
-        serde_json::Value::Null => {
-            bail!("deferred options hold null, which has no script word")
-        }
-    }
-}
 /// Mint one sentinel for a validated target and its remaining
-/// arguments. The payload is base64url JSON naming the target plus
-/// its arguments: pass 2 decodes it natively without parsing DSL.
+/// arguments. Values cross the pass boundary through the shared
+/// [`oxdock_core::value_to_json`] conversion, so only plain data
+/// (STRING, INT, FLOAT, BOOL, LIST, MAP) qualifies: handles and
+/// friends fail at the boundary naming their type instead of
+/// rendering a silent empty. The payload is base64url JSON naming the
+/// target plus its arguments: pass 2 decodes it natively without
+/// parsing DSL.
 fn mint_deferred(target: &str, args: &[Value]) -> Result<String> {
     use base64::Engine as _;
     check_target_shape(target)?;
     let mut arg_json = Vec::with_capacity(args.len());
     for arg in args {
-        arg_json.push(value_to_json(arg)?);
+        arg_json.push(oxdock_core::value_to_json(arg).with_context(|| {
+            format!(
+                "DOCS::DEFER args hold {} values, which cannot cross the pass boundary",
+                arg.type_name()
+            )
+        })?);
     }
     let envelope = serde_json::json!({
         ENVELOPE_TARGET: target,
@@ -172,7 +109,7 @@ fn decode_deferred(sentinel: &str) -> Result<Deferred> {
         .ok_or_else(|| anyhow::anyhow!("deferred sentinel is missing its args"))?;
     let mut args = Vec::with_capacity(args_json.len());
     for item in args_json {
-        args.push(value_from_json(item)?);
+        args.push(oxdock_core::json_to_value(item.clone()));
     }
     Ok(Deferred {
         target: target.to_string(),
@@ -303,6 +240,7 @@ pub fn module<P: ProcessManager>() -> HostModule<P> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     fn options(entries: &[(&str, Value)]) -> BTreeMap<String, Value> {
         entries
@@ -331,6 +269,8 @@ mod tests {
 
     #[test]
     fn options_json_round_trips_plain_data() {
+        // The envelope rides the shared core conversion: this pins the
+        // round-trip through the same functions the pipeline uses.
         let original = options(&[
             ("level", Value::int(2)),
             ("format", Value::string("inline".to_string())),
@@ -351,11 +291,14 @@ mod tests {
         ]);
         let mut json_map = serde_json::Map::new();
         for (key, item) in &original {
-            json_map.insert(key.clone(), value_to_json(item).expect("encode"));
+            json_map.insert(
+                key.clone(),
+                oxdock_core::value_to_json(item).expect("encode"),
+            );
         }
         let back: BTreeMap<String, Value> = json_map
             .iter()
-            .map(|(key, item)| (key.clone(), value_from_json(item).expect("decode")))
+            .map(|(key, item)| (key.clone(), oxdock_core::json_to_value(item.clone())))
             .collect();
         assert_eq!(back, original);
     }
