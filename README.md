@@ -3974,6 +3974,7 @@ their own READMEs:
 
 - [SSH plugin reference](https://github.com/jzombie/rust-oxdock/blob/main/crates/plugins/oxdock-ssh-plugin/README.md): ephemeral loopback SSH servers and session pumps.
 - [NET plugin reference](https://github.com/jzombie/rust-oxdock/blob/main/crates/plugins/oxdock-net-plugin/README.md): virtual-endpoint TCP listeners, pumps, and memory sessions.
+- [MARKDOWN plugin reference](https://github.com/jzombie/rust-oxdock/blob/main/crates/plugins/oxdock-markdown-plugin/README.md): render record data as Markdown tables and parse Markdown document structure.
 
 ## Errors stop the pipeline
 
