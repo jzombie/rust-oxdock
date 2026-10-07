@@ -59,11 +59,18 @@ fn cell_text(value: &oxdock_parser::Value) -> Result<String> {
 /// Convert a script value to JSON for nested cell fallback. Mirrors the
 /// shapes table cells accept; anything else fails naming the type.
 ///
-/// Deliberately not the shared [`oxdock_core::value_to_json`]: table
-/// cells need display forms, not data fidelity. Durations and paths
-/// render through their display strings here (the shared converter
-/// rejects them), and the result is embedded inside already-escaped
-/// cell text rather than emitted as standalone JSON.
+/// Deliberately not the shared [`oxdock_core::value_to_json`]: this
+/// converter is lossy on purpose, and lossy has no place in a data
+/// boundary. Durations render through their human display form
+/// (`30s`), which no longer parses back to a DURATION word, and paths
+/// render through `to_string_lossy`, which silently replaces
+/// non-UTF-8 bytes instead of failing. Both are exactly right for
+/// display text a human reads, and both would corrupt machine output
+/// that a script later parses back, which is why the shared converter
+/// rejects them and this one must not be unified with it. Only nested
+/// values arrive here (top-level scalars take the `cell_text` fast
+/// path); the result is embedded inside already-escaped cell text
+/// rather than emitted as standalone JSON.
 fn to_json(value: &oxdock_parser::Value) -> Result<serde_json::Value> {
     if let Some(map) = value.as_map() {
         let mut out = serde_json::Map::with_capacity(map.len());
