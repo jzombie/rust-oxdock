@@ -2627,23 +2627,20 @@ there is no RPN arm for filesystem IO.
 
 ### STD::RAND
 
-Draw a random FLOAT uniformly from [0, 1), optionally seeded.
-
-Impure by design: unseeded calls return different values, so this
-runs on the AST script path only, never as a `{{ }}` placeholder
-call. A seed draws the same value on every run, for deterministic
-fixtures. Scale and shift the draw for wider ranges.
+Draw a random FLOAT uniformly from [0, 1), optionally seeded. Impure by design: unseeded calls return different values, so this runs on the AST script path only, never as a `{{ }}` placeholder call. A seed draws the same value on every run, for deterministic fixtures. Scale and shift the draw for wider ranges. Hand-built (not `#[oxdock_func]`): the macro marks every param required, and only hand-built entries can leave a trailing options MAP omittable, so bare `RAND()` fills `{}`.
 
 ```oxdock
-# Draw a float in [0, 1): both bounds hold on every draw.
+# Scale a unit draw into a backoff delay between 1 and 11 seconds.
 IMPORT [STD]
-LET $draw: FLOAT = RAND({})
-IF $draw < 0.0 {
+LET $draw: FLOAT = RAND()
+LET $delay: FLOAT = 1.0 + $draw * 10.0
+IF $delay < 1.0 {
     EXIT 1
 }
-IF $draw >= 1.0 {
+IF $delay >= 11.0 {
     EXIT 1
 }
+ECHO "retrying in {{ $delay }}s"
 
 # A seed draws the same value on every run.
 LET $one: FLOAT = RAND({seed: 7})
@@ -2652,12 +2649,12 @@ ASSERT_EQ $one $two
 ```
 
 
-**Signature:** `STD::RAND($options: MAP<seed?: INT>) -> FLOAT`
+**Signature:** `STD::RAND($options?: MAP<seed?: INT>) -> FLOAT`
 
 **Contexts:** AST only
 
 **Parameters:**
-- `$options` (`MAP<seed?: INT>`): Draw options.
+- `$options?` (`MAP<seed?: INT>`): Draw settings: `seed`. Omittable: a missing options MAP fills `{}`.
   - `seed` (`INT`, optional)
 
 **Returns:** `FLOAT`
