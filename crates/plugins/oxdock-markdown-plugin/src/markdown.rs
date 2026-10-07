@@ -58,6 +58,12 @@ fn cell_text(value: &oxdock_parser::Value) -> Result<String> {
 
 /// Convert a script value to JSON for nested cell fallback. Mirrors the
 /// shapes table cells accept; anything else fails naming the type.
+///
+/// Deliberately not the shared [`oxdock_core::value_to_json`]: table
+/// cells need display forms, not data fidelity. Durations and paths
+/// render through their display strings here (the shared converter
+/// rejects them), and the result is embedded inside already-escaped
+/// cell text rather than emitted as standalone JSON.
 fn to_json(value: &oxdock_parser::Value) -> Result<serde_json::Value> {
     if let Some(map) = value.as_map() {
         let mut out = serde_json::Map::with_capacity(map.len());
