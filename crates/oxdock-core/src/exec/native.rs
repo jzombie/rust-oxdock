@@ -868,7 +868,8 @@ fn rand_registration<P: ProcessManager>() -> HostRegistration<P> {
             ),
         };
         check_options(&options_map, RAND_OPTIONS, "RAND")?;
-        let seed = match options_map.get("seed") {            Some(value) => Some(value.as_i64().ok_or_else(|| {
+        let seed = match options_map.get("seed") {
+            Some(value) => Some(value.as_i64().ok_or_else(|| {
                 anyhow::anyhow!(
                     "RAND option 'seed' must be an INT, got {}",
                     value.type_name()
