@@ -4308,6 +4308,55 @@ fn static_covered_partition_read_passes() {
 }
 
 #[test]
+fn static_split_guarded_declare_with_unguarded_read_fails() {
+    // Pins the reported playground_copy.oxfile bug: two disjoint-guarded
+    // declarations with one unguarded read are not covered on all paths
+    // (WITH_MAIN unset or otherwise valued binds nothing).
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        INHERIT_ENV [PLAYGROUND_MAIN]
+        [eq(env:PLAYGROUND_MAIN, "0")] LET $body: STRING = RUN echo head
+        [eq(env:PLAYGROUND_MAIN, "1")] LET $body: STRING = RUN echo main
+        LET $copy: STRING = $body
+    "#};
+    let err = run_script(&root, script).expect_err("split declare must fail static");
+    assert!(
+        err.to_string().contains("not guaranteed to be defined"),
+        "{err}"
+    );
+}
+
+#[test]
+fn guarded_target_selection_with_unconditional_capture() {
+    // Fixed playground_copy.oxfile producer shape: the branch selects a
+    // plain string under guard; the RUN capture runs unconditionally, so
+    // every downstream read is covered on all paths.
+    let script = indoc! {r#"
+        INHERIT_ENV [PLAYGROUND_MAIN]
+        LET $target: STRING = "HEAD"
+        [eq(env:PLAYGROUND_MAIN, "1")] $target = "main"
+        LET $body: STRING = RUN echo diff $target
+        WRITE out.txt "{{ $body }}"
+    "#};
+    for (value, expected) in [("1", "diff main"), ("0", "diff HEAD"), ("2", "diff HEAD")] {
+        let temp = GuardedPath::tempdir().unwrap();
+        let root = guard_root(&temp);
+        let steps = oxdock_core::parse_script(script).unwrap();
+        let mut io_cfg = ExecIo::new();
+        io_cfg.insert_inherit_env("PLAYGROUND_MAIN", value);
+        run_steps_with_context_result_with_io(&root, &root, &steps, io_cfg).unwrap();
+        assert_eq!(read_trimmed(&root.join("out.txt").unwrap()), expected);
+    }
+    // Unset variable takes the default branch with no static error.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let steps = oxdock_core::parse_script(script).unwrap();
+    run_steps_with_context_result_with_io(&root, &root, &steps, ExecIo::new()).unwrap();
+    assert_eq!(read_trimmed(&root.join("out.txt").unwrap()), "diff HEAD");
+}
+
+#[test]
 fn static_exclusive_arch_guards_share_scope() {
     // Disjoint arch pairs shadow across exclusive paths instead of
     // erroring; the same arch twice still overlaps and fails.
