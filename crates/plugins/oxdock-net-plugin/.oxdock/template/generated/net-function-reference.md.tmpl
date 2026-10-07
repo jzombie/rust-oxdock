@@ -5,20 +5,6 @@ Callable as `MODULE::NAME(...)` in expressions (or bare `NAME(...)` with the mod
 
 ### NET_ACCEPT
 
-**Signature:** `NET_ACCEPT($listener: NET_LISTENER, $in_pipe: PIPE, $out_pipe: PIPE, $options: MAP<no_half_close?: BOOL>) -> MAP<closed: BOOL>`
-
-**Contexts:** AST only
-
-**Parameters:**
-- `$listener` (`NET_LISTENER`): Listener handle from `NET_LISTEN`.
-- `$in_pipe` (`PIPE`): Pipe carrying bytes consumed by the wire side.
-- `$out_pipe` (`PIPE`): Pipe carrying bytes produced by the wire side.
-- `$options` (`MAP<no_half_close?: BOOL>`): Optional `no_half_close` setting.
-  - `no_half_close` (`BOOL`, optional)
-
-**Returns:** `MAP<closed: BOOL>`
-  - `closed` (`BOOL`): True when the connection closed cleanly.
-
 Accept one connection into pipes.
 
 Accept one connection and pump it through explicit pipes until it
@@ -62,16 +48,21 @@ ASSERT_EQ $done.closed true
 NET_CLOSE($l.listener)
 ```
 
-### NET_ADDR
-
-**Signature:** `NET_ADDR($target: STRING) -> STRING`
+**Signature:** `NET_ACCEPT($listener: NET_LISTENER, $in_pipe: PIPE, $out_pipe: PIPE, $options: MAP<no_half_close?: BOOL>) -> MAP<closed: BOOL>`
 
 **Contexts:** AST only
 
 **Parameters:**
-- `$target` (`STRING`): Logical port, service name, optionally protocol-qualified; unbound targets bail.
+- `$listener` (`NET_LISTENER`): Listener handle from `NET_LISTEN`.
+- `$in_pipe` (`PIPE`): Pipe carrying bytes consumed by the wire side.
+- `$out_pipe` (`PIPE`): Pipe carrying bytes produced by the wire side.
+- `$options` (`MAP<no_half_close?: BOOL>`): Optional `no_half_close` setting.
+  - `no_half_close` (`BOOL`, optional)
 
-**Returns:** `STRING`
+**Returns:** `MAP<closed: BOOL>`
+  - `closed` (`BOOL`): True when the connection closed cleanly.
+
+### NET_ADDR
 
 Report the bound socket address of a virtual service endpoint.
 
@@ -87,7 +78,22 @@ ASSERT_EQ $addr "127.0.0.1:23792"
 NET_CLOSE($l.listener)
 ```
 
+**Signature:** `NET_ADDR($target: STRING) -> STRING`
+
+**Contexts:** AST only
+
+**Parameters:**
+- `$target` (`STRING`): Logical port, service name, optionally protocol-qualified; unbound targets bail.
+
+**Returns:** `STRING`
+
 ### NET_CLOSE
+
+Shut down a NET listener.
+
+Shut a listener down. Idempotent: returns BOOL true. A blocked
+`NET_ACCEPT` observes the shutdown flag on its next tick and returns
+instead of hanging.
 
 **Signature:** `NET_CLOSE($listener: NET_LISTENER) -> BOOL`
 
@@ -98,13 +104,9 @@ NET_CLOSE($l.listener)
 
 **Returns:** `BOOL`
 
-Shut down a NET listener.
-
-Shut a listener down. Idempotent: returns BOOL true. A blocked
-`NET_ACCEPT` observes the shutdown flag on its next tick and returns
-instead of hanging.
-
 ### NET_CONNECT
+
+Dial a TCP endpoint into pipes.
 
 **Signature:** `NET_CONNECT($target: STRING, $in_pipe: PIPE, $out_pipe: PIPE, $options: MAP<timeout?: DURATION, no_half_close?: BOOL>) -> MAP<closed: BOOL>`
 
@@ -121,9 +123,11 @@ instead of hanging.
 **Returns:** `MAP<closed: BOOL>`
   - `closed` (`BOOL`): True when the connection closed cleanly.
 
-Dial a TCP endpoint into pipes.
-
 ### NET_FETCH
+
+Fetch an https URL to text.
+
+Fetch an `https` URL to text: the network source for `PARSE_JSON` and `PARSE_TOML`. Cleartext `http` reaches loopback hosts only. Redirects follow by hand (at most 5 hops, absolute URLs only, every hop re-validated), custom headers send on every hop, the `timeout` option overrides the 30-second whole-request deadline, `max_body_bytes` caps the body, `max_redirects` budgets the hops, strict UTF-8, non-2xx statuses bail. Compose with the pure parsers: `LET $doc: MAP<ANY> = PARSE_JSON(NET_FETCH($url, {}))`.
 
 **Signature:** `NET_FETCH($url: STRING, $options?: MAP<headers?: MAP, timeout?: DURATION, max_body_bytes?: INT, max_redirects?: INT>) -> STRING`
 
@@ -139,11 +143,9 @@ Dial a TCP endpoint into pipes.
 
 **Returns:** `STRING`
 
-Fetch an https URL to text.
-
-Fetch an `https` URL to text: the network source for `PARSE_JSON` and `PARSE_TOML`. Cleartext `http` reaches loopback hosts only. Redirects follow by hand (at most 5 hops, absolute URLs only, every hop re-validated), custom headers send on every hop, the `timeout` option overrides the 30-second whole-request deadline, `max_body_bytes` caps the body, `max_redirects` budgets the hops, strict UTF-8, non-2xx statuses bail. Compose with the pure parsers: `LET $doc: MAP<ANY> = PARSE_JSON(NET_FETCH($url, {}))`.
-
 ### NET_LISTEN
+
+Claim a virtual service endpoint and report its address.
 
 **Signature:** `NET_LISTEN($bind: STRING, $options: MAP) -> MAP<listener: NET_LISTENER, addr: STRING, virtual: STRING>`
 
@@ -158,18 +160,7 @@ Fetch an `https` URL to text: the network source for `PARSE_JSON` and `PARSE_TOM
   - `addr` (`STRING`): Bound socket address (`ip:port`), or the virtual endpoint echo when socketless.
   - `virtual` (`STRING`): Virtual endpoint echo of the claimed slot.
 
-Claim a virtual service endpoint and report its address.
-
 ### NET_PORT
-
-**Signature:** `NET_PORT($target: STRING) -> INT`
-
-**Contexts:** AST only
-
-**Parameters:**
-- `$target` (`STRING`): Logical port, service name, optionally protocol-qualified; unbound targets bail.
-
-**Returns:** `INT`
 
 Report the bound port of a virtual service endpoint.
 
@@ -195,3 +186,12 @@ ENV PROXY_PORT="\{{ $port }}"
 ASSERT_CONTAINS $o "23791"
 NET_CLOSE($l.listener)
 ```
+
+**Signature:** `NET_PORT($target: STRING) -> INT`
+
+**Contexts:** AST only
+
+**Parameters:**
+- `$target` (`STRING`): Logical port, service name, optionally protocol-qualified; unbound targets bail.
+
+**Returns:** `INT`

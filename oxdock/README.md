@@ -8,9 +8,9 @@ Platform gating selects OS-specific steps, and remote targets bind over any stdi
 
 The syntax is line-oriented in the spirit of BASIC, with a static type system checking scripts before the first step runs. Plain Rust functions become script functions with one attribute: `#[oxdock_func]` exports them into namespaced modules scripts call as `DEMO::NAME(...)`. See [Extending OxDock from Rust](#extending-oxdock-from-rust).
 
-[Documentation](https://docs.rs/oxdock/0.21.0-alpha/oxdock/)
+[Documentation](https://docs.rs/oxdock/0.22.0-alpha/oxdock/)
 
-Add it to your Rust build with `cargo add oxdock@0.21.0-alpha`, or install the standalone runner with `cargo install oxdock@0.21.0-alpha`.
+Add it to your Rust build with `cargo add oxdock@0.22.0-alpha`, or install the standalone runner with `cargo install oxdock@0.22.0-alpha`.
 
 Run a script:
 
@@ -18,7 +18,7 @@ Run a script:
 oxdock <PATH>
 ```
 
-## Embed at compile time
+## Dynamically embed assets at compile time
 
 Embed build-time dependencies from any language: scripts run inline during `rustc`, and their artifacts ship inside the binary with zero heap allocation, `no_std` included:
 
@@ -68,7 +68,7 @@ For each artifact the macro emits a constant backed by `include_bytes!`, which b
 
 Asset scripts resolve `STD` (via `IMPORT [STD]`) and `SCRIPT` functions only. There is no `modules:` prefix here, and that is structural, not missing: opaque modules defer membership to runtime, but asset scripts execute at compile time with no `Engine` to resolve against. Scripts needing host functions belong in `build.rs` through the `Engine` facade instead.
 
-### Run scripts inline
+## Run scripts inline
 
 The `oxdock!` macro builds the same DSL into a `Vec<Step>` at compile time, so tests and tools can run scripts without a file. Pass the steps to a `run_steps_*` runner with a guarded root. The root types live in `oxdock-fs`, so add both crates: `cargo add oxdock oxdock-fs`. Only portable commands are used below, so the script behaves identically on every OS.
 
@@ -105,8 +105,8 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     LET $a: STRING = READ dist/alpha.txt
     LET $b: STRING = READ dist/beta.txt
     LET $p: STRING = READ dist/picked.txt
-    ASSERT_EQ $a "alpha OxDock 0.21.0-alpha"
-    ASSERT_EQ $b "beta OxDock 0.21.0-alpha"
+    ASSERT_EQ $a "alpha OxDock 0.22.0-alpha"
+    ASSERT_EQ $b "beta OxDock 0.22.0-alpha"
     ASSERT_EQ $p "alpha"
 };
 
@@ -118,7 +118,7 @@ let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolve
 let out = root.join("dist/alpha.txt").expect("out path");
 assert_eq!(
     resolver.read_to_string(&out).expect("read out"),
-    "alpha OxDock 0.21.0-alpha"
+    "alpha OxDock 0.22.0-alpha"
 );
 ```
 
@@ -558,31 +558,6 @@ ECHO 'semi;colon'
 ASSERT_CONTAINS stdout "semi;colon"
 ```
 
-## Templates
-
-`{{ env:KEY }}` interpolates script environment values into arguments at execution time. Values come from the script environment (`ENV`, inherited keys): there is no fallback to host variables in command context, and unknown keys expand to an empty string. The unprefixed form `{{ KEY }}` resolves a DSL variable of that name instead, else expands to empty; it never reads the environment, so always use the `env:`-prefixed spelling for environment values:
-
-```oxdock
-ENV USER=OxDock
-
-# The env:-prefixed form interpolates from the script environment.
-ECHO "Hello {{ env:USER }}!"
-ASSERT_CONTAINS stdout "Hello OxDock!"
-
-# Unprefixed names resolve DSL variables instead: $WHO exists, so this expands.
-LET $WHO: STRING = "Ada"
-ECHO "Hi {{ WHO }}!"
-ASSERT_CONTAINS stdout "Hi Ada!"
-
-# With no such variable the bare name expands to empty.
-ECHO "Hello {{ USER }}!"
-ASSERT_CONTAINS stdout "Hello !"
-
-# Unknown keys expand to empty with no host fallback.
-ECHO "a{{ env:OXDOCK_DOC_NO_SUCH_KEY }}b"
-ASSERT_CONTAINS stdout "ab"
-```
-
 ## Guards and scoped blocks
 
 A guard is a bracketed expression that gates the instruction or block that follows it. Inside the brackets:
@@ -775,53 +750,6 @@ ASSERT_EQ $b "persisted"
 }
 ```
 
-## Deadlines with TIMEOUT
-
-`TIMEOUT <duration> <command>` bounds a single step, `TIMEOUT <duration> { ... }` bounds a block, and `TIMEOUT <duration> AWAIT $task` bounds a task join. Durations accept `ms`, `s`, `m`, and `h` suffixes (a bare number means seconds, e.g. `TIMEOUT 30 ...`). A step that overruns its deadline is cancelled. A blocking foreground process is killed, and the pipeline fails with a `TIMEOUT after <duration>` error. `SLEEP <duration>` parks the step without spawning a shell, which makes it ideal for testing deadlines portably (a `SLEEP` inside an expired `TIMEOUT` is interrupted instead of running out the clock).
-
-```oxdock
-// Inline form bounds a single command.
-TIMEOUT 30s WRITE heartbeat.txt alive
-LET $beat: STRING = READ heartbeat.txt
-ASSERT_EQ $beat "alive"
-
-// Block form bounds multiple steps.
-TIMEOUT 30s {
-    WRITE a.txt one
-    WRITE b.txt two
-}
-LET $a: STRING = READ a.txt
-LET $b: STRING = READ b.txt
-ASSERT_EQ $a "one"
-ASSERT_EQ $b "two"
-
-// AWAIT form bounds a task join.
-LET $quick: HANDLE = ASYNC {
-    ECHO hi
-}
-TIMEOUT 30s AWAIT $quick
-```
-
-`ASYNC` wraps any command or block (including `TIMEOUT`, `CANCEL`, `SLEEP`, and nested `ASYNC`) in either nesting order with order-dependent deadline semantics: `LET $task: HANDLE = ASYNC TIMEOUT 30s RUN "build"` enforces the deadline inside the background thread (a later `AWAIT $task` surfaces the `TIMEOUT` error), while `TIMEOUT 30s AWAIT $task` preempts a hung task from the awaiting side:
-
-```oxdock
-// ASYNC wraps TIMEOUT: the deadline fires inside the background thread.
-LET $bounded: HANDLE = ASYNC TIMEOUT 30s ECHO "bounded"
-AWAIT $bounded
-```
-
-The one structural exception is `WITH_IO`, which must wrap `ASYNC` from the outside (`LET $p: PIPE` first, then `WITH_IO [stdout=$p] ASYNC ...`) so pipe endpoints are allocated synchronously on the main thread before the worker spawns. Placing `WITH_IO` directly inside `ASYNC` is rejected at parse time.
-
-## Cancelling tasks with CANCEL
-
-`CANCEL $task` synchronously stops a named background task spawned via `LET $task: HANDLE = ASYNC ...`. It is blocking: when the statement returns, the task thread has been joined and its OS process reaped, so no residual filesystem or stream mutation can follow and the next step runs in a quiet workspace. Only named tasks can be cancelled; a later `AWAIT $task` fails with a cancellation error, and a second `CANCEL $task` fails as already cancelled.
-
-```oxdock
-// CANCEL form stops a named background task synchronously.
-LET $worker: HANDLE = ASYNC SLEEP 30s
-CANCEL $worker
-```
-
 ## Command reference
 
 The full command reference with runnable examples lives in the
@@ -876,7 +804,7 @@ Keeping inheritance selective avoids leaking secrets by default while still allo
 Install the binary from the registry:
 
 ```sh
-cargo install oxdock@0.21.0-alpha
+cargo install oxdock@0.22.0-alpha
 ```
 
 Run a script file:
@@ -1223,7 +1151,7 @@ Or pin the version in `Cargo.toml`:
 
 ```toml
 [dependencies]
-oxdock = { version = "0.21.0-alpha", default-features = false }
+oxdock = { version = "0.22.0-alpha", default-features = false }
 ```
 
 ## Glossary

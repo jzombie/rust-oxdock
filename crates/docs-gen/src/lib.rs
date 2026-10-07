@@ -19,8 +19,9 @@ use std::path::Path;
 /// requirements, not engine defaults: the only module the engine
 /// itself defaults to is `DOCS_GEN_ENGINE` (see [`pipeline_engine`]);
 /// `OXDOCK`, `RUST`, and `MARKDOWN` are here because this pipeline
-/// documents an OxDock Rust workspace, and a resume pipeline would
-/// list a different set.
+/// documents an OxDock Rust workspace, `DOCS` because deferred
+/// placeholders (`DEFER`/`EXPAND_DEFERRED`) resolve in every template,
+/// and a resume pipeline would list a different set.
 ///
 /// External plugins never go here either: pass them to
 /// [`run_with_plugins`], which registers them alongside this list.
@@ -44,6 +45,7 @@ macro_rules! pipeline_modules {
         pipeline_split! {
             $final ; [$($args)*] ;
             (DOCS_GEN_ENGINE, crate::docs_gen_engine),
+            (DOCS, crate::plugins::docs),
             (OXDOCK, crate::plugins::oxdock),
             (RUST, crate::plugins::rust),
             (MARKDOWN, oxdock_markdown_plugin)
@@ -107,7 +109,6 @@ macro_rules! pipeline_emit_header_names {
 pub fn run(repo_root: &Path) -> Result<()> {
     run_with_plugins(repo_root, vec![])
 }
-
 /// Execute the document pipeline with extra modules registered
 /// alongside this pipeline's set.
 ///
@@ -287,6 +288,10 @@ pub fn run_with_plugins(
         }
 
         // One master template expanded into its output.
+        FUNC READ_TEXT($path: STRING) {
+            LET $text: STRING = READ $path
+            RETURN $text
+        }
         FUNC RENDER_TARGET($t: MAP<ANY>, $docs_global: MAP<ANY>, $staging: STRING) {
             ECHO "rendering {{ $t.name }} -> {{ $t.out }}"
 
@@ -299,11 +304,24 @@ pub fn run_with_plugins(
             WITH_IO [stdout=$render] EXPAND $t.template
             WITH_IO [stdin=$render] APPEND $t.out
         }
+        // Pass 2 lives in its own FUNC because declarations and call
+        // expressions after WITH_IO steps do not bind in the same
+        // scope: pass 1 stays byte-identical above, then this reads the
+        // rendered output back, dispatches deferred sentinels against
+        // the full document, and rewrites it. Outputs without sentinels
+        // round-trip unchanged.
+        FUNC POST_TARGET($t: MAP<ANY>) {
+            LET $out_path: STRING = $t.out
+            LET $full_text: STRING = READ_TEXT($out_path)
+            LET $toc_final: STRING = DOCS::EXPAND_DEFERRED($full_text)
+            WRITE $t.out $toc_final
+        }
         FOR $rscope: STRING IN $cfg.scopes {
             FOR $rtj: STRING IN GLOB("{{ $rscope }}/**/target.json") {
                 LET $rfile: MAP<ANY> = LOAD_JSON($rtj)
                 FOR $rt: MAP<ANY> IN $rfile.targets {
                     RENDER_TARGET($rt, $docs_global, $staging)
+                    POST_TARGET($rt)
                 }
             }
         }

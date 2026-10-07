@@ -4,6 +4,8 @@
 //! table rendering. Values pass straight through on the shared value
 //! model with no conversion.
 
+use std::collections::BTreeMap;
+
 use anyhow::Result;
 use oxdock_core::{HostModule, OxDockFn, TypeTag, Value};
 use oxdock_func_macro::oxdock_func;
@@ -21,11 +23,72 @@ fn map_to_md_table(
     Ok(Value::string(table))
 }
 
+/// Render a table of contents for markdown text, immediately.
+///
+/// Pure and pass-agnostic: takes document text plus options and returns
+/// the TOC in one call, with zero knowledge of sentinels, passes, or
+/// docs-gen. Deferred pipelines wrap this with `DOCS::DEFER` instead
+/// of calling it during expansion. Links render GitHub-style
+/// (`[text](#github-slug)` with `-1` dedup), so output pastes into any
+/// GitHub-rendered document with working anchors.
+#[oxdock_func(pure, returns = TypeTag::String)]
+fn toc(
+    /// Document markdown text to scan for headings.
+    md: String,
+    /// TOC options: heading bounds (`min_level` default 2 skips `#`
+    /// titles, `max_level` default 3), output layout (`format` `tree`
+    /// or `inline`, default `tree`), and the inline `delimiter`
+    /// (default ` | `). A bare `{format: "inline"}` collects the
+    /// `min_level` layer only.
+    #[options(
+        "min_level?: INT = 2",
+        "max_level?: INT = 3",
+        "format?: STRING = tree",
+        "delimiter?: STRING =  | "
+    )]
+    options: BTreeMap<String, Value>,
+) -> Result<Value> {
+    let resolved = crate::markdown::resolve_toc_options(&options)?;
+    let rendered = crate::markdown::generate_toc(&md, &resolved)?;
+    Ok(Value::string(rendered))
+}
+
+/// Parse markdown headings into a structured list.
+///
+/// Immediate helper for composition and tests: returns one MAP per
+/// heading with `level`, `text`, and `anchor` keys.
+#[oxdock_func(pure, returns = TypeTag::ListOf(&TypeTag::Any))]
+fn parse(
+    /// Markdown document to scan for headings.
+    md: String,
+) -> Result<Value> {
+    let headings = crate::markdown::extract_headings(&md, 1, 6);
+    let items = headings
+        .into_iter()
+        .map(|heading| {
+            Value::map(
+                [
+                    ("level".to_string(), Value::int(i64::from(heading.level))),
+                    ("text".to_string(), Value::string(heading.text)),
+                    ("anchor".to_string(), Value::string(heading.anchor)),
+                ]
+                .into_iter()
+                .collect::<BTreeMap<_, _>>(),
+            )
+        })
+        .collect::<Vec<_>>();
+    Ok(Value::list(items))
+}
+
 /// The `MARKDOWN` host module for OxDock scripts and placeholders.
 pub fn module_with<P: ProcessManager>() -> HostModule<P> {
     HostModule {
         name: "MARKDOWN".to_string(),
-        funcs: vec![MapToMdTable::registration()],
+        funcs: vec![
+            MapToMdTable::registration(),
+            Toc::registration(),
+            Parse::registration(),
+        ],
         types: vec![],
         record_schemas: vec![],
     }
@@ -65,5 +128,25 @@ mod tests {
     #[test]
     fn rejects_non_maps() {
         assert!(map_to_md_table(Value::string("nope".to_string())).is_err());
+    }
+
+    #[test]
+    fn toc_renders_immediately_from_text_and_options() {
+        let options = map(&[("max_level", Value::int(2))]);
+        let out = toc(
+            "# Title\n\n## Alpha\n\n### Sub\n".to_string(),
+            options.as_map().expect("map").clone(),
+        )
+        .expect("toc")
+        .as_str()
+        .expect("string")
+        .to_string();
+        assert_eq!(out, "- [Alpha](#alpha)\n");
+    }
+
+    #[test]
+    fn toc_rejects_bad_options_at_the_boundary() {
+        let options = map(&[("format", Value::string("grid".to_string()))]);
+        assert!(toc("## A\n".to_string(), options.as_map().expect("map").clone()).is_err());
     }
 }

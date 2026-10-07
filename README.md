@@ -31,20 +31,27 @@ Platform gating selects OS-specific steps, and remote targets bind over any stdi
 
 The syntax is line-oriented in the spirit of BASIC, with a static type system checking scripts before the first step runs. Plain Rust functions become script functions with one attribute: `#[oxdock_func]` exports them into namespaced modules scripts call as `DEMO::NAME(...)`. See [Extending OxDock from Rust](#extending-oxdock-from-rust).
 
-[Documentation](https://docs.rs/oxdock/0.21.0-alpha/oxdock/)
+[Documentation](https://docs.rs/oxdock/0.22.0-alpha/oxdock/)
 
-Jump to the [command reference](#command-reference) below for the full
-command list with runnable examples.
+Jump to the [Command Reference](#command-reference) below for the full
+command list with runnable examples, or view the growing list of standard
+library [Functions](#functions).
+
+**Browse by section:**
+
+[Quick start](#quick-start) | [Dynamically embed assets at compile time](#dynamically-embed-assets-at-compile-time) | [Run scripts inline](#run-scripts-inline) | [Extend the language](#extend-the-language) | [Runtime architecture](#runtime-architecture) | [Extending OxDock from Rust](#extending-oxdock-from-rust) | [Variants](#variants) | [Goals](#goals) | [Lexical structure](#lexical-structure) | [Guards and scoped blocks](#guards-and-scoped-blocks) | [Command Reference](#command-reference) | [Value types](#value-types) | [Functions](#functions) | [Plugin references](#plugin-references) | [Errors stop the pipeline](#errors-stop-the-pipeline) | [Selective environment inheritance](#selective-environment-inheritance) | [Path Separators](#path-separators) | [Workspaces & Filesystem](#workspaces--filesystem) | [Environment variable contracts](#environment-variable-contracts) | [GitHub Actions Integration](#github-actions-integration) | [Testing & Coverage](#testing--coverage) | [Glossary](#glossary) | [Citation](#citation) | [License](#license)
 
 ## Quick start
 
-Add it to your Rust build with `cargo add oxdock@0.21.0-alpha`, or install the standalone runner with `cargo install oxdock@0.21.0-alpha`.
+Add it to your Rust build with `cargo add oxdock@0.22.0-alpha`, or install the standalone runner with `cargo install oxdock@0.22.0-alpha`.
 
 Run a script:
 
 ```sh
 oxdock <PATH>
 ```
+
+## Dynamically embed assets at compile time
 
 Embed build-time dependencies from any language: scripts run inline during `rustc`, and their artifacts ship inside the binary with zero heap allocation, `no_std` included:
 
@@ -94,7 +101,7 @@ For each artifact the macro emits a constant backed by `include_bytes!`, which b
 
 Asset scripts resolve `STD` (via `IMPORT [STD]`) and `SCRIPT` functions only. There is no `modules:` prefix here, and that is structural, not missing: opaque modules defer membership to runtime, but asset scripts execute at compile time with no `Engine` to resolve against. Scripts needing host functions belong in `build.rs` through the `Engine` facade instead.
 
-### Run scripts inline
+## Run scripts inline
 
 The `oxdock!` macro builds the same DSL into a `Vec<Step>` at compile time, so tests and tools can run scripts without a file. Pass the steps to a `run_steps_*` runner with a guarded root. The root types live in `oxdock-fs`, so add both crates: `cargo add oxdock oxdock-fs`. Only portable commands are used below, so the script behaves identically on every OS.
 
@@ -131,8 +138,8 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     LET $a: STRING = READ dist/alpha.txt
     LET $b: STRING = READ dist/beta.txt
     LET $p: STRING = READ dist/picked.txt
-    ASSERT_EQ $a "alpha OxDock 0.21.0-alpha"
-    ASSERT_EQ $b "beta OxDock 0.21.0-alpha"
+    ASSERT_EQ $a "alpha OxDock 0.22.0-alpha"
+    ASSERT_EQ $b "beta OxDock 0.22.0-alpha"
     ASSERT_EQ $p "alpha"
 };
 
@@ -144,7 +151,7 @@ let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolve
 let out = root.join("dist/alpha.txt").expect("out path");
 assert_eq!(
     resolver.read_to_string(&out).expect("read out"),
-    "alpha OxDock 0.21.0-alpha"
+    "alpha OxDock 0.22.0-alpha"
 );
 ```
 
@@ -937,31 +944,6 @@ ECHO 'semi;colon'
 ASSERT_CONTAINS stdout "semi;colon"
 ```
 
-## Templates
-
-`{{ env:KEY }}` interpolates script environment values into arguments at execution time. Values come from the script environment (`ENV`, inherited keys): there is no fallback to host variables in command context, and unknown keys expand to an empty string. The unprefixed form `{{ KEY }}` resolves a DSL variable of that name instead, else expands to empty; it never reads the environment, so always use the `env:`-prefixed spelling for environment values:
-
-```oxdock
-ENV USER=OxDock
-
-# The env:-prefixed form interpolates from the script environment.
-ECHO "Hello {{ env:USER }}!"
-ASSERT_CONTAINS stdout "Hello OxDock!"
-
-# Unprefixed names resolve DSL variables instead: $WHO exists, so this expands.
-LET $WHO: STRING = "Ada"
-ECHO "Hi {{ WHO }}!"
-ASSERT_CONTAINS stdout "Hi Ada!"
-
-# With no such variable the bare name expands to empty.
-ECHO "Hello {{ USER }}!"
-ASSERT_CONTAINS stdout "Hello !"
-
-# Unknown keys expand to empty with no host fallback.
-ECHO "a{{ env:OXDOCK_DOC_NO_SUCH_KEY }}b"
-ASSERT_CONTAINS stdout "ab"
-```
-
 ## Guards and scoped blocks
 
 A guard is a bracketed expression that gates the instruction or block that follows it. Inside the brackets:
@@ -1152,53 +1134,6 @@ ASSERT_EQ $b "persisted"
     EXIT 3
     WRITE unreachable.txt "never"
 }
-```
-
-## Deadlines with TIMEOUT
-
-`TIMEOUT <duration> <command>` bounds a single step, `TIMEOUT <duration> { ... }` bounds a block, and `TIMEOUT <duration> AWAIT $task` bounds a task join. Durations accept `ms`, `s`, `m`, and `h` suffixes (a bare number means seconds, e.g. `TIMEOUT 30 ...`). A step that overruns its deadline is cancelled. A blocking foreground process is killed, and the pipeline fails with a `TIMEOUT after <duration>` error. `SLEEP <duration>` parks the step without spawning a shell, which makes it ideal for testing deadlines portably (a `SLEEP` inside an expired `TIMEOUT` is interrupted instead of running out the clock).
-
-```oxdock
-// Inline form bounds a single command.
-TIMEOUT 30s WRITE heartbeat.txt alive
-LET $beat: STRING = READ heartbeat.txt
-ASSERT_EQ $beat "alive"
-
-// Block form bounds multiple steps.
-TIMEOUT 30s {
-    WRITE a.txt one
-    WRITE b.txt two
-}
-LET $a: STRING = READ a.txt
-LET $b: STRING = READ b.txt
-ASSERT_EQ $a "one"
-ASSERT_EQ $b "two"
-
-// AWAIT form bounds a task join.
-LET $quick: HANDLE = ASYNC {
-    ECHO hi
-}
-TIMEOUT 30s AWAIT $quick
-```
-
-`ASYNC` wraps any command or block (including `TIMEOUT`, `CANCEL`, `SLEEP`, and nested `ASYNC`) in either nesting order with order-dependent deadline semantics: `LET $task: HANDLE = ASYNC TIMEOUT 30s RUN "build"` enforces the deadline inside the background thread (a later `AWAIT $task` surfaces the `TIMEOUT` error), while `TIMEOUT 30s AWAIT $task` preempts a hung task from the awaiting side:
-
-```oxdock
-// ASYNC wraps TIMEOUT: the deadline fires inside the background thread.
-LET $bounded: HANDLE = ASYNC TIMEOUT 30s ECHO "bounded"
-AWAIT $bounded
-```
-
-The one structural exception is `WITH_IO`, which must wrap `ASYNC` from the outside (`LET $p: PIPE` first, then `WITH_IO [stdout=$p] ASYNC ...`) so pipe endpoints are allocated synchronously on the main thread before the worker spawns. Placing `WITH_IO` directly inside `ASYNC` is rejected at parse time.
-
-## Cancelling tasks with CANCEL
-
-`CANCEL $task` synchronously stops a named background task spawned via `LET $task: HANDLE = ASYNC ...`. It is blocking: when the statement returns, the task thread has been joined and its OS process reaped, so no residual filesystem or stream mutation can follow and the next step runs in a quiet workspace. Only named tasks can be cancelled; a later `AWAIT $task` fails with a cancellation error, and a second `CANCEL $task` fails as already cancelled.
-
-```oxdock
-// CANCEL form stops a named background task synchronously.
-LET $worker: HANDLE = ASYNC SLEEP 30s
-CANCEL $worker
 ```
 
 <!-- GENERATED by docs-gen from oxdock-parser metadata. Do not edit by hand. -->
@@ -1821,6 +1756,11 @@ task handle for `AWAIT`. Task output streams live to the parent
 stdout; a task publishes a value with an explicit `RETURN`,
 which `LET $out: TYPE = AWAIT $task` binds.
 
+`WITH_IO` must wrap `ASYNC` from the outside (`LET $p: PIPE` first,
+then `WITH_IO [stdout=$p] ASYNC ...`) so pipe endpoints allocate on
+the main thread before the worker spawns. Placing `WITH_IO` directly
+inside `ASYNC` is rejected at parse time.
+
 
 **Examples:**
 
@@ -1934,6 +1874,12 @@ duration (e.g. 500ms, 10s, 2m; a bare number means seconds).
 
 A blocking foreground process is killed.
 
+ASYNC composes in either nesting order with order-dependent deadline
+semantics: `LET $task: HANDLE = ASYNC TIMEOUT 30s RUN "build"` enforces
+the deadline inside the background thread (a later `AWAIT $task`
+surfaces the `TIMEOUT` error), while `TIMEOUT 30s AWAIT $task`
+preempts a hung task from the awaiting side.
+
 
 **Examples:**
 
@@ -1977,6 +1923,16 @@ TIMEOUT $budget WRITE heartbeat.txt alive
 
 LET $beat: STRING = READ heartbeat.txt
 ASSERT_EQ $beat "alive"
+```
+
+**Example: timeout await**
+
+```oxdock
+# AWAIT form bounds a task join instead of a step.
+LET $quick: HANDLE = ASYNC {
+    ECHO hi
+}
+TIMEOUT 30s AWAIT $quick
 ```
 
 
@@ -2648,6 +2604,18 @@ LET $x: STRING = "World"
 ECHO "braced:{{ $x }}"
 ECHO $x
 ASSERT_EQ stdout "braced:World\nWorld\n"
+```
+
+**Example: interpolation**
+
+```oxdock
+# `{{ env:KEY }}` reads the script environment; a bare name
+# resolves a DSL variable instead. Unknown keys expand to
+# empty with no host fallback.
+ENV USER=OxDock
+LET $WHO: STRING = "Ada"
+ECHO "Hello {{ env:USER }}! Hi {{ WHO }}!{{ env:OXDOCK_DOC_NO_SUCH_KEY }}"
+ASSERT_CONTAINS stdout "Hello OxDock! Hi Ada!"
 ```
 
 
@@ -3376,7 +3344,6 @@ LET $want: LIST<STRING> = ["first", "second"]
 ASSERT_EQ $items $want
 ```
 
-
 ## Value types
 
 ### Value type: INT
@@ -3434,12 +3401,65 @@ Opaque admission permit minted by `SEMAPHORE_TRY_ACQUIRE`. Cloning
 shares the release obligation (first drops release nothing, the last
 releases once); equality is handle identity.
 
+
+
 <!-- GENERATED by docs-gen from STD function metadata. Do not edit by hand. -->
 ## Functions
 
 Callable as `MODULE::NAME(...)` in expressions (or bare `NAME(...)` with the module imported via `IMPORT`). Introspectable from scripts with `FUNCTIONS()` and `DESCRIBE(name)`.
 
+### STD::BASE64_DECODE
+
+Decode standard base64 to a STRING.
+
+Fails naming the input on invalid alphabet characters or
+non-UTF-8 payloads instead of rendering a silent empty. Pairs
+with [`base64_encode`] for the round trip.
+
+```oxdock
+# Decode standard base64 back to text.
+IMPORT [STD]
+LET $decoded: STRING = BASE64_DECODE("aGVsbG8=")
+ASSERT_EQ $decoded "hello"
+```
+
+
+**Signature:** `STD::BASE64_DECODE($text: STRING) -> STRING`
+
+**Contexts:** AST, RPN
+
+**Parameters:**
+- `$text` (`STRING`): Base64 text to decode.
+
+**Returns:** `STRING`
+
+### STD::BASE64_ENCODE
+
+Encode a STRING as standard base64.
+
+Padded RFC 4648 alphabet, so encoded output pastes into any
+standard decoder. Pairs with [`base64_decode`] for the round trip.
+
+```oxdock
+# Encode text to standard base64.
+IMPORT [STD]
+LET $encoded: STRING = BASE64_ENCODE("hello")
+ASSERT_EQ $encoded "aGVsbG8="
+```
+
+
+**Signature:** `STD::BASE64_ENCODE($text: STRING) -> STRING`
+
+**Contexts:** AST, RPN
+
+**Parameters:**
+- `$text` (`STRING`): Text to encode.
+
+**Returns:** `STRING`
+
 ### STD::DESCRIBE
+
+Describe one function by qualified name.
 
 **Signature:** `STD::DESCRIBE($name: STRING) -> MAP<name: STRING, module: STRING, kind: STRING, params: LIST<MAP<ANY>>, returns: STRING, rpn: BOOL, summary: STRING>`
 
@@ -3457,18 +3477,7 @@ Callable as `MODULE::NAME(...)` in expressions (or bare `NAME(...)` with the mod
   - `rpn` (`BOOL`): True when callable in RPN position.
   - `summary` (`STRING`): One-line description.
 
-Describe one function by qualified name.
-
 ### STD::EOF
-
-**Signature:** `STD::EOF($pipe: PIPE) -> BOOL`
-
-**Contexts:** AST only
-
-**Parameters:**
-- `$pipe` (`PIPE`): Pipe handle to query for end of stream.
-
-**Returns:** `BOOL`
 
 True when a pipe sits at end of stream: closed with nothing buffered,
 so the next `READ_LINE` would bind `""` via EOF rather than a line.
@@ -3499,7 +3508,21 @@ ASSERT_EQ $n 2
 ```
 
 
+**Signature:** `STD::EOF($pipe: PIPE) -> BOOL`
+
+**Contexts:** AST only
+
+**Parameters:**
+- `$pipe` (`PIPE`): Pipe handle to query for end of stream.
+
+**Returns:** `BOOL`
+
 ### STD::FLOAT
+
+Convert a value to FLOAT.
+
+Parses f64 (accepts int strings), bails on non-finite or non-numeric.
+
 
 **Signature:** `STD::FLOAT($val: ANY) -> FLOAT`
 
@@ -3510,12 +3533,12 @@ ASSERT_EQ $n 2
 
 **Returns:** `FLOAT`
 
-Convert a value to FLOAT.
-
-Parses f64 (accepts int strings), bails on non-finite or non-numeric.
-
-
 ### STD::FUNCTIONS
+
+List all visible function names.
+
+Sorted LIST of qualified `MODULE::NAME` entries: DSL-defined plus native
+plus host-registered names.
 
 **Signature:** `STD::FUNCTIONS() -> LIST<STRING>`
 
@@ -3523,12 +3546,12 @@ Parses f64 (accepts int strings), bails on non-finite or non-numeric.
 
 **Returns:** `LIST<STRING>`
 
-List all visible function names.
-
-Sorted LIST of qualified `MODULE::NAME` entries: DSL-defined plus native
-plus host-registered names.
-
 ### STD::GLOB
+
+List workspace paths matching a glob pattern.
+
+Sorted, root-relative LIST; empty on no match or `..` escape.
+
 
 **Signature:** `STD::GLOB($pattern: STRING) -> LIST<STRING>`
 
@@ -3539,12 +3562,13 @@ plus host-registered names.
 
 **Returns:** `LIST<STRING>`
 
-List workspace paths matching a glob pattern.
-
-Sorted, root-relative LIST; empty on no match or `..` escape.
-
-
 ### STD::HAS_KEY
+
+Report whether a map holds a key.
+
+Pure MAP probe so scripts can branch on optional fields without
+tripping the strict missing-key error.
+
 
 **Signature:** `STD::HAS_KEY($map: MAP<ANY>, $key: STRING) -> BOOL`
 
@@ -3556,13 +3580,13 @@ Sorted, root-relative LIST; empty on no match or `..` escape.
 
 **Returns:** `BOOL`
 
-Report whether a map holds a key.
-
-Pure MAP probe so scripts can branch on optional fields without
-tripping the strict missing-key error.
-
-
 ### STD::INT
+
+Convert a value to INT.
+
+Trims ASCII whitespace and parses i64. Passes Int through; Float only
+when integral and finite.
+
 
 **Signature:** `STD::INT($val: ANY) -> INT`
 
@@ -3573,22 +3597,7 @@ tripping the strict missing-key error.
 
 **Returns:** `INT`
 
-Convert a value to INT.
-
-Trims ASCII whitespace and parses i64. Passes Int through; Float only
-when integral and finite.
-
-
 ### STD::IS_TERMINAL
-
-**Signature:** `STD::IS_TERMINAL($stream_name: STRING = "stdin" | "stdout" | "stderr") -> BOOL`
-
-**Contexts:** AST only
-
-**Parameters:**
-- `$stream_name` (`STRING = "stdin" | "stdout" | "stderr"`): Stream name: `stdin`, `stdout`, or `stderr` (exact match).
-
-**Returns:** `BOOL`
 
 Report whether a standard stream is a terminal.
 
@@ -3604,7 +3613,24 @@ matches exactly (no case folding): anything else bails. AST-only:
 reads the step context like the other introspection functions.
 
 
+**Signature:** `STD::IS_TERMINAL($stream_name: STRING = "stdin" | "stdout" | "stderr") -> BOOL`
+
+**Contexts:** AST only
+
+**Parameters:**
+- `$stream_name` (`STRING = "stdin" | "stdout" | "stderr"`): Stream name: `stdin`, `stdout`, or `stderr` (exact match).
+
+**Returns:** `BOOL`
+
 ### STD::LOAD_JSON
+
+Load and parse a JSON file.
+
+Reads a workspace file and parses JSON into a DSL value. Returns
+`ANY` by design: a top-level array or scalar parses to `LIST` or a
+scalar word. `LET` coercion still checks the actual value at
+assignment.
+
 
 **Signature:** `STD::LOAD_JSON($path: STRING) -> ANY`
 
@@ -3615,15 +3641,12 @@ reads the step context like the other introspection functions.
 
 **Returns:** `ANY`
 
-Load and parse a JSON file.
-
-Reads a workspace file and parses JSON into a DSL value. Returns
-`ANY` by design: a top-level array or scalar parses to `LIST` or a
-scalar word. `LET` coercion still checks the actual value at
-assignment.
-
-
 ### STD::LOAD_TOML
+
+Load and parse a TOML file.
+
+Reads a workspace file and parses TOML into a DSL value.
+
 
 **Signature:** `STD::LOAD_TOML($path: STRING) -> MAP<ANY>`
 
@@ -3634,12 +3657,13 @@ assignment.
 
 **Returns:** `MAP<ANY>`
 
-Load and parse a TOML file.
-
-Reads a workspace file and parses TOML into a DSL value.
-
-
 ### STD::MAP_SET
+
+Insert one key into a map.
+
+Fails on duplicates so two entries sharing a key fail the run
+instead of silently shadowing each other.
+
 
 **Signature:** `STD::MAP_SET($map: MAP<ANY>, $key: STRING, $value: ANY) -> MAP<ANY>`
 
@@ -3652,13 +3676,15 @@ Reads a workspace file and parses TOML into a DSL value.
 
 **Returns:** `MAP<ANY>`
 
-Insert one key into a map.
-
-Fails on duplicates so two entries sharing a key fail the run
-instead of silently shadowing each other.
-
-
 ### STD::MERGE_MAPS
+
+Merge a LIST of MAPs in order under one duplicate policy.
+
+`fail_on_duplicate` fails naming the repeated key, so two files
+claiming one placeholder fail the run instead of shadowing each
+other. `overwrite` lets later files win, for environment overlays.
+Non MAP elements fail naming their position.
+
 
 **Signature:** `STD::MERGE_MAPS($maps: LIST<MAP<ANY>>, $policy: STRING = "fail_on_duplicate" | "overwrite") -> MAP<ANY>`
 
@@ -3670,24 +3696,7 @@ instead of silently shadowing each other.
 
 **Returns:** `MAP<ANY>`
 
-Merge a LIST of MAPs in order under one duplicate policy.
-
-`fail_on_duplicate` fails naming the repeated key, so two files
-claiming one placeholder fail the run instead of shadowing each
-other. `overwrite` lets later files win, for environment overlays.
-Non MAP elements fail naming their position.
-
-
 ### STD::PARSE_JSON
-
-**Signature:** `STD::PARSE_JSON($text: STRING) -> ANY`
-
-**Contexts:** AST, RPN
-
-**Parameters:**
-- `$text` (`STRING`): JSON text already held in memory.
-
-**Returns:** `ANY`
 
 Parse JSON text already held in memory.
 
@@ -3711,7 +3720,22 @@ ASSERT_EQ $items.1 2
 ```
 
 
+**Signature:** `STD::PARSE_JSON($text: STRING) -> ANY`
+
+**Contexts:** AST, RPN
+
+**Parameters:**
+- `$text` (`STRING`): JSON text already held in memory.
+
+**Returns:** `ANY`
+
 ### STD::PARSE_TOML
+
+Parse TOML text already held in memory.
+
+Uses the same conversion as file loading, so fetch bodies, file
+contents, and captured text share one JSON/TOML shape.
+
 
 **Signature:** `STD::PARSE_TOML($text: STRING) -> MAP<ANY>`
 
@@ -3722,13 +3746,13 @@ ASSERT_EQ $items.1 2
 
 **Returns:** `MAP<ANY>`
 
-Parse TOML text already held in memory.
-
-Uses the same conversion as file loading, so fetch bodies, file
-contents, and captured text share one JSON/TOML shape.
-
-
 ### STD::PATH_TYPE
+
+Describe a filesystem entry.
+
+Reports file, dir, symlink (no-follow), or absent. AST-only by design;
+there is no RPN arm for filesystem IO.
+
 
 **Signature:** `STD::PATH_TYPE($path: STRING) -> STRING`
 
@@ -3739,22 +3763,44 @@ contents, and captured text share one JSON/TOML shape.
 
 **Returns:** `STRING`
 
-Describe a filesystem entry.
+### STD::RAND
 
-Reports file, dir, symlink (no-follow), or absent. AST-only by design;
-there is no RPN arm for filesystem IO.
+Draw a random FLOAT uniformly from [0, 1), optionally seeded.
+
+Impure by design: unseeded calls return different values, so this
+runs on the AST script path only, never as a `{{ }}` placeholder
+call. A seed draws the same value on every run, for deterministic
+fixtures. Scale and shift the draw for wider ranges.
+
+```oxdock
+# Draw a float in [0, 1): both bounds hold on every draw.
+IMPORT [STD]
+LET $draw: FLOAT = RAND({})
+IF $draw < 0.0 {
+    EXIT 1
+}
+IF $draw >= 1.0 {
+    EXIT 1
+}
+
+# A seed draws the same value on every run.
+LET $one: FLOAT = RAND({seed: 7})
+LET $two: FLOAT = RAND({seed: 7})
+ASSERT_EQ $one $two
+```
 
 
-### STD::SEMAPHORE_AVAILABLE
+**Signature:** `STD::RAND($options: MAP<seed?: INT>) -> FLOAT`
 
-**Signature:** `STD::SEMAPHORE_AVAILABLE($sem: SEMAPHORE) -> INT`
-
-**Contexts:** AST, RPN
+**Contexts:** AST only
 
 **Parameters:**
-- `$sem` (`SEMAPHORE`): Semaphore handle from `SEMAPHORE_NEW`.
+- `$options` (`MAP<seed?: INT>`): Draw options.
+  - `seed` (`INT`, optional)
 
-**Returns:** `INT`
+**Returns:** `FLOAT`
+
+### STD::SEMAPHORE_AVAILABLE
 
 Read free permits under the lock, with no mutation.
 
@@ -3775,16 +3821,16 @@ ASSERT_EQ $free 1
 ```
 
 
-### STD::SEMAPHORE_NEW
+**Signature:** `STD::SEMAPHORE_AVAILABLE($sem: SEMAPHORE) -> INT`
 
-**Signature:** `STD::SEMAPHORE_NEW($max: INT) -> SEMAPHORE`
-
-**Contexts:** AST only
+**Contexts:** AST, RPN
 
 **Parameters:**
-- `$max` (`INT`): Maximum concurrent holders; must be positive.
+- `$sem` (`SEMAPHORE`): Semaphore handle from `SEMAPHORE_NEW`.
 
-**Returns:** `SEMAPHORE`
+**Returns:** `INT`
+
+### STD::SEMAPHORE_NEW
 
 Create a counting semaphore admitting at most `max` concurrent holders.
 
@@ -3804,18 +3850,16 @@ ASSERT_EQ $free 2
 ```
 
 
-### STD::SEMAPHORE_TRY_ACQUIRE
-
-**Signature:** `STD::SEMAPHORE_TRY_ACQUIRE($sem: SEMAPHORE) -> MAP<held: BOOL, permit?: PERMIT>`
+**Signature:** `STD::SEMAPHORE_NEW($max: INT) -> SEMAPHORE`
 
 **Contexts:** AST only
 
 **Parameters:**
-- `$sem` (`SEMAPHORE`): Semaphore handle from `SEMAPHORE_NEW`.
+- `$max` (`INT`): Maximum concurrent holders; must be positive.
 
-**Returns:** `MAP<held: BOOL, permit?: PERMIT>`
-  - `held` (`BOOL`): `true` with the permit under `permit`, `false` with no `permit` key.
-  - `permit` (`PERMIT`, optional): Permit handle; read only when `held`.
+**Returns:** `SEMAPHORE`
+
+### STD::SEMAPHORE_TRY_ACQUIRE
 
 Attempt one non-blocking acquire, always answering a MAP.
 
@@ -3841,7 +3885,25 @@ ASSERT_EQ $has_permit false
 ```
 
 
+**Signature:** `STD::SEMAPHORE_TRY_ACQUIRE($sem: SEMAPHORE) -> MAP<held: BOOL, permit?: PERMIT>`
+
+**Contexts:** AST only
+
+**Parameters:**
+- `$sem` (`SEMAPHORE`): Semaphore handle from `SEMAPHORE_NEW`.
+
+**Returns:** `MAP<held: BOOL, permit?: PERMIT>`
+  - `held` (`BOOL`): `true` with the permit under `permit`, `false` with no `permit` key.
+  - `permit` (`PERMIT`, optional): Permit handle; read only when `held`.
+
 ### STD::TO_JSON
+
+Encode a script value as JSON with one trailing newline.
+
+Maps stay sorted; only template-safe shapes (STRING, INT, FLOAT,
+BOOL, LIST, MAP) survive, anything else fails here instead of
+rendering as a silent empty.
+
 
 **Signature:** `STD::TO_JSON($value: ANY) -> STRING`
 
@@ -3852,20 +3914,7 @@ ASSERT_EQ $has_permit false
 
 **Returns:** `STRING`
 
-Encode a script value as JSON with one trailing newline.
-
-Maps stay sorted; only template-safe shapes (STRING, INT, FLOAT,
-BOOL, LIST, MAP) survive, anything else fails here instead of
-rendering as a silent empty.
-
-
 ### STD::TYPES
-
-**Signature:** `STD::TYPES() -> LIST<STRING>`
-
-**Contexts:** AST only
-
-**Returns:** `LIST<STRING>`
 
 List all known type names.
 
@@ -3873,7 +3922,19 @@ Sorted LIST of startup plus host-registered type descriptors. Reads the
 run's name directory, so it runs on the AST path like the other
 introspection functions.
 
+**Signature:** `STD::TYPES() -> LIST<STRING>`
+
+**Contexts:** AST only
+
+**Returns:** `LIST<STRING>`
+
 ### STD::TYPE_DESCRIBE
+
+Describe one type by name.
+
+Returns a MAP with name, summary, and docs. Errors on unknown type.
+Reads the run's name directory, so it runs on the AST path.
+
 
 **Signature:** `STD::TYPE_DESCRIBE($name: STRING) -> MAP<name: STRING, summary: STRING, docs: STRING>`
 
@@ -3887,13 +3948,15 @@ introspection functions.
   - `summary` (`STRING`): One-line description.
   - `docs` (`STRING`): Full documentation text.
 
-Describe one type by name.
-
-Returns a MAP with name, summary, and docs. Errors on unknown type.
-Reads the run's name directory, so it runs on the AST path.
-
-
 ### STD::TYPE_OF
+
+Name the word a value holds, for data-driven branching.
+
+Returns the registered type word (`STRING`, `INT`, `FLOAT`, `BOOL`,
+`LIST`, `MAP`, plus handle words like `PIPE`): the same name the
+value prints in arity and coercion errors, so scripts can branch
+on config shapes (a path string or a path list) without failing.
+
 
 **Signature:** `STD::TYPE_OF($value: ANY) -> STRING`
 
@@ -3903,13 +3966,6 @@ Reads the run's name directory, so it runs on the AST path.
 - `$value` (`ANY`): Value whose word to name.
 
 **Returns:** `STRING`
-
-Name the word a value holds, for data-driven branching.
-
-Returns the registered type word (`STRING`, `INT`, `FLOAT`, `BOOL`,
-`LIST`, `MAP`, plus handle words like `PIPE`): the same name the
-value prints in arity and coercion errors, so scripts can branch
-on config shapes (a path string or a path list) without failing.
 
 ## Plugin references
 
@@ -4191,13 +4247,13 @@ cargo +nightly miri test --workspace --all-features --lib --tests
 
 ## Citation
 
-If you use OxDock in published work, cite version `0.21.0-alpha` with the metadata in [CITATION.cff](./CITATION.cff).
+If you use OxDock in published work, cite version `0.22.0-alpha` with the metadata in [CITATION.cff](./CITATION.cff).
 
 ```bibtex
 @software{oxdock,
   author = "Jeremy Harris",
   title = "OxDock",
-  version = "0.21.0-alpha",
+  version = "0.22.0-alpha",
   url = "https://github.com/jzombie/rust-oxdock",
   license = "Apache-2.0"
 }

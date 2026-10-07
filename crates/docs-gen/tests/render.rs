@@ -363,3 +363,254 @@ fn external_plugin_resolves_in_templates_without_header_changes() {
         "external placeholder call resolves: {manifest}"
     );
 }
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "fixture render needs a host tempdir filesystem, blocked by Miri isolation"
+)]
+fn toc_renders_tree_from_final_readme() {
+    let tree = vec![
+        ("Cargo.toml".to_string(), MANIFEST.to_string()),
+        (
+            "docs-gen.json".to_string(),
+            r#"{"global_values": "base.json", "scopes": ["."], "generated": []}"#.to_string(),
+        ),
+        ("base.json".to_string(), BASE_VALUES.to_string()),
+        ("target.json".to_string(), TARGET.to_string()),
+        ("values.json".to_string(), VALUES.to_string()),
+        (
+            "master.md.tmpl".to_string(),
+            indoc::indoc! {r#"
+                # {{ $docs_global.title }}
+                {{ DOCS::DEFER("MARKDOWN::TOC", [{}]) }}
+                {{ $files.sec.a }}
+            "#}
+            .to_string(),
+        ),
+        (
+            "fragments/sec/a.md.tmpl".to_string(),
+            indoc::indoc! {r#"
+                ## Alpha
+
+                ```markdown
+                ## Not a heading
+                ```
+
+                ### Sub
+
+                ## Alpha
+            "#}
+            .to_string(),
+        ),
+    ];
+    let (_temp, root, resolver) = fixture(&as_refs(&tree));
+    docs_gen::run(root.as_path()).expect("render");
+    let out = read(&resolver, &root, "out.md");
+    assert!(
+        out.contains("- [Alpha](#alpha)\n  - [Sub](#sub)\n- [Alpha](#alpha-1)\n"),
+        "tree TOC lists sections with dedup anchors: {out}"
+    );
+    assert!(
+        !out.contains("- [Base]") && !out.contains("- [Not a heading]"),
+        "TOC skips the H1 title and fenced code headings: {out}"
+    );
+    assert!(!out.contains("OXDOCK"), "no sentinel survives: {out}");
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "fixture render needs a host tempdir filesystem, blocked by Miri isolation"
+)]
+fn toc_renders_inline_bar_for_single_level() {
+    let tree = vec![
+        ("Cargo.toml".to_string(), MANIFEST.to_string()),
+        (
+            "docs-gen.json".to_string(),
+            r#"{"global_values": "base.json", "scopes": ["."], "generated": []}"#.to_string(),
+        ),
+        ("base.json".to_string(), BASE_VALUES.to_string()),
+        ("target.json".to_string(), TARGET.to_string()),
+        ("values.json".to_string(), VALUES.to_string()),
+        (
+            "master.md.tmpl".to_string(),
+            indoc::indoc! {r#"
+                # {{ $docs_global.title }}
+                {{ DOCS::DEFER("MARKDOWN::TOC", [{format: "inline"}]) }}
+                {{ $files.sec.a }}
+            "#}
+            .to_string(),
+        ),
+        (
+            "fragments/sec/a.md.tmpl".to_string(),
+            "## Alpha\n\n### Sub\n\n## Beta\n".to_string(),
+        ),
+    ];
+    let (_temp, root, resolver) = fixture(&as_refs(&tree));
+    docs_gen::run(root.as_path()).expect("render");
+    let out = read(&resolver, &root, "out.md");
+    assert!(
+        out.contains("[Alpha](#alpha) | [Beta](#beta)"),
+        "inline TOC joins one level: {out}"
+    );
+    assert!(
+        !out.contains("Sub]"),
+        "inline TOC omits deeper levels: {out}"
+    );
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "fixture render needs a host tempdir filesystem, blocked by Miri isolation"
+)]
+fn toc_replaces_multiple_sentinels_independently() {
+    // Two DEFERs with different options in one file: each sentinel
+    // decodes its own envelope and renders from the same document.
+    let tree = vec![
+        ("Cargo.toml".to_string(), MANIFEST.to_string()),
+        (
+            "docs-gen.json".to_string(),
+            r#"{"global_values": "base.json", "scopes": ["."], "generated": []}"#.to_string(),
+        ),
+        ("base.json".to_string(), BASE_VALUES.to_string()),
+        ("target.json".to_string(), TARGET.to_string()),
+        ("values.json".to_string(), VALUES.to_string()),
+        (
+            "master.md.tmpl".to_string(),
+            indoc::indoc! {r#"
+                # {{ $docs_global.title }}
+                {{ DOCS::DEFER("MARKDOWN::TOC", [{format: "inline"}]) }}
+                {{ DOCS::DEFER("MARKDOWN::TOC", [{max_level: 2, delimiter: " • "}]) }}
+                {{ $files.sec.a }}
+            "#}
+            .to_string(),
+        ),
+        (
+            "fragments/sec/a.md.tmpl".to_string(),
+            "## Alpha\n\n## Beta\n".to_string(),
+        ),
+    ];
+    let (_temp, root, resolver) = fixture(&as_refs(&tree));
+    docs_gen::run(root.as_path()).expect("render");
+    let out = read(&resolver, &root, "out.md");
+    assert!(
+        out.contains("[Alpha](#alpha) | [Beta](#beta)"),
+        "inline sentinel renders with its own options: {out}"
+    );
+    assert!(
+        out.contains("- [Alpha](#alpha)\n- [Beta](#beta)\n"),
+        "tree sentinel renders with its own options: {out}"
+    );
+    assert!(!out.contains("OXDOCK"), "no sentinel survives: {out}");
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "fixture render needs a host tempdir filesystem, blocked by Miri isolation"
+)]
+fn toc_rejects_multi_level_inline_at_dispatch() {
+    let tree = vec![
+        ("Cargo.toml".to_string(), MANIFEST.to_string()),
+        (
+            "docs-gen.json".to_string(),
+            r#"{"global_values": "base.json", "scopes": ["."], "generated": []}"#.to_string(),
+        ),
+        ("base.json".to_string(), BASE_VALUES.to_string()),
+        ("target.json".to_string(), TARGET.to_string()),
+        ("values.json".to_string(), VALUES.to_string()),
+        (
+            "master.md.tmpl".to_string(),
+            indoc::indoc! {r#"
+                # {{ $docs_global.title }}
+                {{ DOCS::DEFER("MARKDOWN::TOC", [{format: "inline", max_level: 3}]) }}
+            "#}
+            .to_string(),
+        ),
+    ];
+    let (_temp, root, _resolver) = fixture(&as_refs(&tree));
+    // DEFER only checks the envelope in pass 1; the target validates
+    // its own options when pass 2 dispatches the full document.
+    let err = err_text(docs_gen::run(root.as_path()).expect_err("inline depth must fail"));
+    assert!(
+        err.contains("requires max_level == min_level"),
+        "error names the inline depth rule: {err}"
+    );
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "fixture render needs a host tempdir filesystem, blocked by Miri isolation"
+)]
+fn toc_renders_immediately_without_deferral() {
+    // TOC is pass-agnostic: called directly with text plus options it
+    // renders at once, no sentinel involved.
+    let tree = vec![
+        ("Cargo.toml".to_string(), MANIFEST.to_string()),
+        (
+            "docs-gen.json".to_string(),
+            r#"{"global_values": "base.json", "scopes": ["."], "generated": []}"#.to_string(),
+        ),
+        ("base.json".to_string(), BASE_VALUES.to_string()),
+        ("target.json".to_string(), TARGET.to_string()),
+        ("values.json".to_string(), VALUES.to_string()),
+        (
+            "master.md.tmpl".to_string(),
+            indoc::indoc! {r#"
+                # {{ $docs_global.title }}
+                {{ MARKDOWN::TOC($files.sec.a, {max_level: 2}) }}
+            "#}
+            .to_string(),
+        ),
+        (
+            "fragments/sec/a.md.tmpl".to_string(),
+            "## Alpha\n\n### Sub\n\n## Beta\n".to_string(),
+        ),
+    ];
+    let (_temp, root, resolver) = fixture(&as_refs(&tree));
+    docs_gen::run(root.as_path()).expect("render");
+    let out = read(&resolver, &root, "out.md");
+    assert!(
+        out.contains("- [Alpha](#alpha)\n- [Beta](#beta)\n"),
+        "immediate TOC renders from the fragment text: {out}"
+    );
+    assert!(
+        !out.contains("Sub]"),
+        "max_level bounds immediate use: {out}"
+    );
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "fixture render needs a host tempdir filesystem, blocked by Miri isolation"
+)]
+fn toc_rejects_unknown_defer_targets_at_dispatch() {
+    let tree = vec![
+        ("Cargo.toml".to_string(), MANIFEST.to_string()),
+        (
+            "docs-gen.json".to_string(),
+            r#"{"global_values": "base.json", "scopes": ["."], "generated": []}"#.to_string(),
+        ),
+        ("base.json".to_string(), BASE_VALUES.to_string()),
+        ("target.json".to_string(), TARGET.to_string()),
+        ("values.json".to_string(), VALUES.to_string()),
+        (
+            "master.md.tmpl".to_string(),
+            indoc::indoc! {r#"
+                # {{ $docs_global.title }}
+                {{ DOCS::DEFER("NOPE::MISSING", [{}]) }}
+            "#}
+            .to_string(),
+        ),
+    ];
+    let (_temp, root, _resolver) = fixture(&as_refs(&tree));
+    let err = err_text(docs_gen::run(root.as_path()).expect_err("unknown target must fail"));
+    assert!(
+        err.contains("unknown deferred target 'NOPE::MISSING'"),
+        "error names the target: {err}"
+    );
+}

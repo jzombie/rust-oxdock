@@ -3,7 +3,58 @@
 
 Callable as `MODULE::NAME(...)` in expressions (or bare `NAME(...)` with the module imported via `IMPORT`). Introspectable from scripts with `FUNCTIONS()` and `DESCRIBE(name)`.
 
+### STD::BASE64_DECODE
+
+Decode standard base64 to a STRING.
+
+Fails naming the input on invalid alphabet characters or
+non-UTF-8 payloads instead of rendering a silent empty. Pairs
+with [`base64_encode`] for the round trip.
+
+```oxdock
+# Decode standard base64 back to text.
+IMPORT [STD]
+LET $decoded: STRING = BASE64_DECODE("aGVsbG8=")
+ASSERT_EQ $decoded "hello"
+```
+
+
+**Signature:** `STD::BASE64_DECODE($text: STRING) -> STRING`
+
+**Contexts:** AST, RPN
+
+**Parameters:**
+- `$text` (`STRING`): Base64 text to decode.
+
+**Returns:** `STRING`
+
+### STD::BASE64_ENCODE
+
+Encode a STRING as standard base64.
+
+Padded RFC 4648 alphabet, so encoded output pastes into any
+standard decoder. Pairs with [`base64_decode`] for the round trip.
+
+```oxdock
+# Encode text to standard base64.
+IMPORT [STD]
+LET $encoded: STRING = BASE64_ENCODE("hello")
+ASSERT_EQ $encoded "aGVsbG8="
+```
+
+
+**Signature:** `STD::BASE64_ENCODE($text: STRING) -> STRING`
+
+**Contexts:** AST, RPN
+
+**Parameters:**
+- `$text` (`STRING`): Text to encode.
+
+**Returns:** `STRING`
+
 ### STD::DESCRIBE
+
+Describe one function by qualified name.
 
 **Signature:** `STD::DESCRIBE($name: STRING) -> MAP<name: STRING, module: STRING, kind: STRING, params: LIST<MAP<ANY>>, returns: STRING, rpn: BOOL, summary: STRING>`
 
@@ -21,18 +72,7 @@ Callable as `MODULE::NAME(...)` in expressions (or bare `NAME(...)` with the mod
   - `rpn` (`BOOL`): True when callable in RPN position.
   - `summary` (`STRING`): One-line description.
 
-Describe one function by qualified name.
-
 ### STD::EOF
-
-**Signature:** `STD::EOF($pipe: PIPE) -> BOOL`
-
-**Contexts:** AST only
-
-**Parameters:**
-- `$pipe` (`PIPE`): Pipe handle to query for end of stream.
-
-**Returns:** `BOOL`
 
 True when a pipe sits at end of stream: closed with nothing buffered,
 so the next `READ_LINE` would bind `""` via EOF rather than a line.
@@ -63,7 +103,21 @@ ASSERT_EQ $n 2
 ```
 
 
+**Signature:** `STD::EOF($pipe: PIPE) -> BOOL`
+
+**Contexts:** AST only
+
+**Parameters:**
+- `$pipe` (`PIPE`): Pipe handle to query for end of stream.
+
+**Returns:** `BOOL`
+
 ### STD::FLOAT
+
+Convert a value to FLOAT.
+
+Parses f64 (accepts int strings), bails on non-finite or non-numeric.
+
 
 **Signature:** `STD::FLOAT($val: ANY) -> FLOAT`
 
@@ -74,12 +128,12 @@ ASSERT_EQ $n 2
 
 **Returns:** `FLOAT`
 
-Convert a value to FLOAT.
-
-Parses f64 (accepts int strings), bails on non-finite or non-numeric.
-
-
 ### STD::FUNCTIONS
+
+List all visible function names.
+
+Sorted LIST of qualified `MODULE::NAME` entries: DSL-defined plus native
+plus host-registered names.
 
 **Signature:** `STD::FUNCTIONS() -> LIST<STRING>`
 
@@ -87,12 +141,12 @@ Parses f64 (accepts int strings), bails on non-finite or non-numeric.
 
 **Returns:** `LIST<STRING>`
 
-List all visible function names.
-
-Sorted LIST of qualified `MODULE::NAME` entries: DSL-defined plus native
-plus host-registered names.
-
 ### STD::GLOB
+
+List workspace paths matching a glob pattern.
+
+Sorted, root-relative LIST; empty on no match or `..` escape.
+
 
 **Signature:** `STD::GLOB($pattern: STRING) -> LIST<STRING>`
 
@@ -103,12 +157,13 @@ plus host-registered names.
 
 **Returns:** `LIST<STRING>`
 
-List workspace paths matching a glob pattern.
-
-Sorted, root-relative LIST; empty on no match or `..` escape.
-
-
 ### STD::HAS_KEY
+
+Report whether a map holds a key.
+
+Pure MAP probe so scripts can branch on optional fields without
+tripping the strict missing-key error.
+
 
 **Signature:** `STD::HAS_KEY($map: MAP<ANY>, $key: STRING) -> BOOL`
 
@@ -120,13 +175,13 @@ Sorted, root-relative LIST; empty on no match or `..` escape.
 
 **Returns:** `BOOL`
 
-Report whether a map holds a key.
-
-Pure MAP probe so scripts can branch on optional fields without
-tripping the strict missing-key error.
-
-
 ### STD::INT
+
+Convert a value to INT.
+
+Trims ASCII whitespace and parses i64. Passes Int through; Float only
+when integral and finite.
+
 
 **Signature:** `STD::INT($val: ANY) -> INT`
 
@@ -137,22 +192,7 @@ tripping the strict missing-key error.
 
 **Returns:** `INT`
 
-Convert a value to INT.
-
-Trims ASCII whitespace and parses i64. Passes Int through; Float only
-when integral and finite.
-
-
 ### STD::IS_TERMINAL
-
-**Signature:** `STD::IS_TERMINAL($stream_name: STRING = "stdin" | "stdout" | "stderr") -> BOOL`
-
-**Contexts:** AST only
-
-**Parameters:**
-- `$stream_name` (`STRING = "stdin" | "stdout" | "stderr"`): Stream name: `stdin`, `stdout`, or `stderr` (exact match).
-
-**Returns:** `BOOL`
 
 Report whether a standard stream is a terminal.
 
@@ -168,7 +208,24 @@ matches exactly (no case folding): anything else bails. AST-only:
 reads the step context like the other introspection functions.
 
 
+**Signature:** `STD::IS_TERMINAL($stream_name: STRING = "stdin" | "stdout" | "stderr") -> BOOL`
+
+**Contexts:** AST only
+
+**Parameters:**
+- `$stream_name` (`STRING = "stdin" | "stdout" | "stderr"`): Stream name: `stdin`, `stdout`, or `stderr` (exact match).
+
+**Returns:** `BOOL`
+
 ### STD::LOAD_JSON
+
+Load and parse a JSON file.
+
+Reads a workspace file and parses JSON into a DSL value. Returns
+`ANY` by design: a top-level array or scalar parses to `LIST` or a
+scalar word. `LET` coercion still checks the actual value at
+assignment.
+
 
 **Signature:** `STD::LOAD_JSON($path: STRING) -> ANY`
 
@@ -179,15 +236,12 @@ reads the step context like the other introspection functions.
 
 **Returns:** `ANY`
 
-Load and parse a JSON file.
-
-Reads a workspace file and parses JSON into a DSL value. Returns
-`ANY` by design: a top-level array or scalar parses to `LIST` or a
-scalar word. `LET` coercion still checks the actual value at
-assignment.
-
-
 ### STD::LOAD_TOML
+
+Load and parse a TOML file.
+
+Reads a workspace file and parses TOML into a DSL value.
+
 
 **Signature:** `STD::LOAD_TOML($path: STRING) -> MAP<ANY>`
 
@@ -198,12 +252,13 @@ assignment.
 
 **Returns:** `MAP<ANY>`
 
-Load and parse a TOML file.
-
-Reads a workspace file and parses TOML into a DSL value.
-
-
 ### STD::MAP_SET
+
+Insert one key into a map.
+
+Fails on duplicates so two entries sharing a key fail the run
+instead of silently shadowing each other.
+
 
 **Signature:** `STD::MAP_SET($map: MAP<ANY>, $key: STRING, $value: ANY) -> MAP<ANY>`
 
@@ -216,13 +271,15 @@ Reads a workspace file and parses TOML into a DSL value.
 
 **Returns:** `MAP<ANY>`
 
-Insert one key into a map.
-
-Fails on duplicates so two entries sharing a key fail the run
-instead of silently shadowing each other.
-
-
 ### STD::MERGE_MAPS
+
+Merge a LIST of MAPs in order under one duplicate policy.
+
+`fail_on_duplicate` fails naming the repeated key, so two files
+claiming one placeholder fail the run instead of shadowing each
+other. `overwrite` lets later files win, for environment overlays.
+Non MAP elements fail naming their position.
+
 
 **Signature:** `STD::MERGE_MAPS($maps: LIST<MAP<ANY>>, $policy: STRING = "fail_on_duplicate" | "overwrite") -> MAP<ANY>`
 
@@ -234,24 +291,7 @@ instead of silently shadowing each other.
 
 **Returns:** `MAP<ANY>`
 
-Merge a LIST of MAPs in order under one duplicate policy.
-
-`fail_on_duplicate` fails naming the repeated key, so two files
-claiming one placeholder fail the run instead of shadowing each
-other. `overwrite` lets later files win, for environment overlays.
-Non MAP elements fail naming their position.
-
-
 ### STD::PARSE_JSON
-
-**Signature:** `STD::PARSE_JSON($text: STRING) -> ANY`
-
-**Contexts:** AST, RPN
-
-**Parameters:**
-- `$text` (`STRING`): JSON text already held in memory.
-
-**Returns:** `ANY`
 
 Parse JSON text already held in memory.
 
@@ -275,7 +315,22 @@ ASSERT_EQ $items.1 2
 ```
 
 
+**Signature:** `STD::PARSE_JSON($text: STRING) -> ANY`
+
+**Contexts:** AST, RPN
+
+**Parameters:**
+- `$text` (`STRING`): JSON text already held in memory.
+
+**Returns:** `ANY`
+
 ### STD::PARSE_TOML
+
+Parse TOML text already held in memory.
+
+Uses the same conversion as file loading, so fetch bodies, file
+contents, and captured text share one JSON/TOML shape.
+
 
 **Signature:** `STD::PARSE_TOML($text: STRING) -> MAP<ANY>`
 
@@ -286,13 +341,13 @@ ASSERT_EQ $items.1 2
 
 **Returns:** `MAP<ANY>`
 
-Parse TOML text already held in memory.
-
-Uses the same conversion as file loading, so fetch bodies, file
-contents, and captured text share one JSON/TOML shape.
-
-
 ### STD::PATH_TYPE
+
+Describe a filesystem entry.
+
+Reports file, dir, symlink (no-follow), or absent. AST-only by design;
+there is no RPN arm for filesystem IO.
+
 
 **Signature:** `STD::PATH_TYPE($path: STRING) -> STRING`
 
@@ -303,22 +358,44 @@ contents, and captured text share one JSON/TOML shape.
 
 **Returns:** `STRING`
 
-Describe a filesystem entry.
+### STD::RAND
 
-Reports file, dir, symlink (no-follow), or absent. AST-only by design;
-there is no RPN arm for filesystem IO.
+Draw a random FLOAT uniformly from [0, 1), optionally seeded.
+
+Impure by design: unseeded calls return different values, so this
+runs on the AST script path only, never as a `\{{ }}` placeholder
+call. A seed draws the same value on every run, for deterministic
+fixtures. Scale and shift the draw for wider ranges.
+
+```oxdock
+# Draw a float in [0, 1): both bounds hold on every draw.
+IMPORT [STD]
+LET $draw: FLOAT = RAND({})
+IF $draw < 0.0 {
+    EXIT 1
+}
+IF $draw >= 1.0 {
+    EXIT 1
+}
+
+# A seed draws the same value on every run.
+LET $one: FLOAT = RAND({seed: 7})
+LET $two: FLOAT = RAND({seed: 7})
+ASSERT_EQ $one $two
+```
 
 
-### STD::SEMAPHORE_AVAILABLE
+**Signature:** `STD::RAND($options: MAP<seed?: INT>) -> FLOAT`
 
-**Signature:** `STD::SEMAPHORE_AVAILABLE($sem: SEMAPHORE) -> INT`
-
-**Contexts:** AST, RPN
+**Contexts:** AST only
 
 **Parameters:**
-- `$sem` (`SEMAPHORE`): Semaphore handle from `SEMAPHORE_NEW`.
+- `$options` (`MAP<seed?: INT>`): Draw options.
+  - `seed` (`INT`, optional)
 
-**Returns:** `INT`
+**Returns:** `FLOAT`
+
+### STD::SEMAPHORE_AVAILABLE
 
 Read free permits under the lock, with no mutation.
 
@@ -339,16 +416,16 @@ ASSERT_EQ $free 1
 ```
 
 
-### STD::SEMAPHORE_NEW
+**Signature:** `STD::SEMAPHORE_AVAILABLE($sem: SEMAPHORE) -> INT`
 
-**Signature:** `STD::SEMAPHORE_NEW($max: INT) -> SEMAPHORE`
-
-**Contexts:** AST only
+**Contexts:** AST, RPN
 
 **Parameters:**
-- `$max` (`INT`): Maximum concurrent holders; must be positive.
+- `$sem` (`SEMAPHORE`): Semaphore handle from `SEMAPHORE_NEW`.
 
-**Returns:** `SEMAPHORE`
+**Returns:** `INT`
+
+### STD::SEMAPHORE_NEW
 
 Create a counting semaphore admitting at most `max` concurrent holders.
 
@@ -368,18 +445,16 @@ ASSERT_EQ $free 2
 ```
 
 
-### STD::SEMAPHORE_TRY_ACQUIRE
-
-**Signature:** `STD::SEMAPHORE_TRY_ACQUIRE($sem: SEMAPHORE) -> MAP<held: BOOL, permit?: PERMIT>`
+**Signature:** `STD::SEMAPHORE_NEW($max: INT) -> SEMAPHORE`
 
 **Contexts:** AST only
 
 **Parameters:**
-- `$sem` (`SEMAPHORE`): Semaphore handle from `SEMAPHORE_NEW`.
+- `$max` (`INT`): Maximum concurrent holders; must be positive.
 
-**Returns:** `MAP<held: BOOL, permit?: PERMIT>`
-  - `held` (`BOOL`): `true` with the permit under `permit`, `false` with no `permit` key.
-  - `permit` (`PERMIT`, optional): Permit handle; read only when `held`.
+**Returns:** `SEMAPHORE`
+
+### STD::SEMAPHORE_TRY_ACQUIRE
 
 Attempt one non-blocking acquire, always answering a MAP.
 
@@ -405,7 +480,25 @@ ASSERT_EQ $has_permit false
 ```
 
 
+**Signature:** `STD::SEMAPHORE_TRY_ACQUIRE($sem: SEMAPHORE) -> MAP<held: BOOL, permit?: PERMIT>`
+
+**Contexts:** AST only
+
+**Parameters:**
+- `$sem` (`SEMAPHORE`): Semaphore handle from `SEMAPHORE_NEW`.
+
+**Returns:** `MAP<held: BOOL, permit?: PERMIT>`
+  - `held` (`BOOL`): `true` with the permit under `permit`, `false` with no `permit` key.
+  - `permit` (`PERMIT`, optional): Permit handle; read only when `held`.
+
 ### STD::TO_JSON
+
+Encode a script value as JSON with one trailing newline.
+
+Maps stay sorted; only template-safe shapes (STRING, INT, FLOAT,
+BOOL, LIST, MAP) survive, anything else fails here instead of
+rendering as a silent empty.
+
 
 **Signature:** `STD::TO_JSON($value: ANY) -> STRING`
 
@@ -416,20 +509,7 @@ ASSERT_EQ $has_permit false
 
 **Returns:** `STRING`
 
-Encode a script value as JSON with one trailing newline.
-
-Maps stay sorted; only template-safe shapes (STRING, INT, FLOAT,
-BOOL, LIST, MAP) survive, anything else fails here instead of
-rendering as a silent empty.
-
-
 ### STD::TYPES
-
-**Signature:** `STD::TYPES() -> LIST<STRING>`
-
-**Contexts:** AST only
-
-**Returns:** `LIST<STRING>`
 
 List all known type names.
 
@@ -437,7 +517,19 @@ Sorted LIST of startup plus host-registered type descriptors. Reads the
 run's name directory, so it runs on the AST path like the other
 introspection functions.
 
+**Signature:** `STD::TYPES() -> LIST<STRING>`
+
+**Contexts:** AST only
+
+**Returns:** `LIST<STRING>`
+
 ### STD::TYPE_DESCRIBE
+
+Describe one type by name.
+
+Returns a MAP with name, summary, and docs. Errors on unknown type.
+Reads the run's name directory, so it runs on the AST path.
+
 
 **Signature:** `STD::TYPE_DESCRIBE($name: STRING) -> MAP<name: STRING, summary: STRING, docs: STRING>`
 
@@ -451,13 +543,15 @@ introspection functions.
   - `summary` (`STRING`): One-line description.
   - `docs` (`STRING`): Full documentation text.
 
-Describe one type by name.
-
-Returns a MAP with name, summary, and docs. Errors on unknown type.
-Reads the run's name directory, so it runs on the AST path.
-
-
 ### STD::TYPE_OF
+
+Name the word a value holds, for data-driven branching.
+
+Returns the registered type word (`STRING`, `INT`, `FLOAT`, `BOOL`,
+`LIST`, `MAP`, plus handle words like `PIPE`): the same name the
+value prints in arity and coercion errors, so scripts can branch
+on config shapes (a path string or a path list) without failing.
+
 
 **Signature:** `STD::TYPE_OF($value: ANY) -> STRING`
 
@@ -467,10 +561,3 @@ Reads the run's name directory, so it runs on the AST path.
 - `$value` (`ANY`): Value whose word to name.
 
 **Returns:** `STRING`
-
-Name the word a value holds, for data-driven branching.
-
-Returns the registered type word (`STRING`, `INT`, `FLOAT`, `BOOL`,
-`LIST`, `MAP`, plus handle words like `PIPE`): the same name the
-value prints in arity and coercion errors, so scripts can branch
-on config shapes (a path string or a path list) without failing.

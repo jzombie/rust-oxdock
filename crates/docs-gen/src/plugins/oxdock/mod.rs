@@ -23,10 +23,18 @@ fn command_index() -> Result<Value> {
     Ok(Value::string(command_ref::render_index()))
 }
 
-/// Generated command body from parser metadata plus value types.
+/// Generated command body from parser metadata.
 #[oxdock_func(pure, returns = TypeTag::String)]
 fn command_body() -> Result<Value> {
     Ok(Value::string(command_ref::render_body()?))
+}
+
+/// Generated value type reference from the startup descriptors.
+/// Rendered separately from the command body so templates place the
+/// Value types section independently of the command details.
+#[oxdock_func(pure, returns = TypeTag::String)]
+fn value_types() -> Result<Value> {
+    Ok(Value::string(command_ref::render_value_types()))
 }
 
 /// Generated function reference from the `#[oxdock_func]` registry.
@@ -65,6 +73,7 @@ fn generated(key: String) -> Result<Value> {
     match key.as_str() {
         "command_index" => command_index(),
         "command_body" => command_body(),
+        "value_types" => value_types(),
         "function_reference" => function_reference(),
         "ssh_function_reference" => plugin_function_reference("SSH".to_string()),
         "ssh_type_reference" => plugin_type_reference("SSH".to_string()),
@@ -75,6 +84,7 @@ fn generated(key: String) -> Result<Value> {
             const KNOWN: &[&str] = &[
                 "command_index",
                 "command_body",
+                "value_types",
                 "function_reference",
                 "ssh_function_reference",
                 "ssh_type_reference",
@@ -98,6 +108,7 @@ pub fn module<P: ProcessManager>() -> HostModule<P> {
         funcs: vec![
             CommandIndex::registration(),
             CommandBody::registration(),
+            ValueTypes::registration(),
             FunctionReference::registration(),
             PluginFunctionReference::registration(),
             PluginTypeReference::registration(),
@@ -344,6 +355,24 @@ mod tests {
             .expect("string")
             .to_string();
         assert!(index.contains("## Command Reference"), "got: {index}");
+        let types = generated("value_types".to_string())
+            .expect("value types")
+            .as_str()
+            .expect("string")
+            .to_string();
+        assert!(
+            types.contains("## Value types"),
+            "value types split renders its own section: {types}"
+        );
+        let body = generated("command_body".to_string())
+            .expect("body")
+            .as_str()
+            .expect("string")
+            .to_string();
+        assert!(
+            !body.contains("## Value types"),
+            "command body no longer carries the value types tail"
+        );
     }
 
     #[test]

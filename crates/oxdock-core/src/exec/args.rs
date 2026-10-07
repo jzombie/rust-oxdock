@@ -677,6 +677,51 @@ pub(crate) fn type_of_from_value(value: Value) -> Result<Value> {
     Ok(Value::string(value.type_name().to_string()))
 }
 
+/// Value-semantics core of `RAND()`: draw a FLOAT uniformly from
+/// `[0, 1)`. Without a seed the draw comes from the thread RNG;
+/// with one it is the first draw of a `StdRng` stream, so the same
+/// seed draws the same value on every run. Impure by design either
+/// way: unseeded calls differ, so this never rides the pure
+/// placeholder or RPN paths.
+pub(crate) fn rand_float_from_value(seed: Option<i64>) -> Result<Value> {
+    use rand::{RngExt, SeedableRng};
+    let draw = match seed {
+        Some(n) => rand::rngs::StdRng::seed_from_u64(n as u64).random_range(0.0..1.0),
+        None => rand::random::<f64>(),
+    };
+    Ok(Value::float(draw))
+}
+
+/// Value-semantics core of `BASE64_ENCODE()`: standard-alphabet
+/// base64 with padding. Rejects non-STRING input naming the type
+/// instead of rendering a silent empty.
+pub(crate) fn base64_encode_from_value(text: Value) -> Result<Value> {
+    use base64::Engine as _;
+    let input = text.as_str().ok_or_else(|| {
+        anyhow::anyhow!("BASE64_ENCODE expects a STRING, got {}", text.type_name())
+    })?;
+    Ok(Value::string(
+        base64::engine::general_purpose::STANDARD.encode(input.as_bytes()),
+    ))
+}
+
+/// Value-semantics core of `BASE64_DECODE()`: standard-alphabet
+/// base64 back to UTF-8 text. Invalid alphabet characters and
+/// non-UTF-8 payloads fail naming the input instead of rendering a
+/// silent empty.
+pub(crate) fn base64_decode_from_value(text: Value) -> Result<Value> {
+    use base64::Engine as _;
+    let input = text.as_str().ok_or_else(|| {
+        anyhow::anyhow!("BASE64_DECODE expects a STRING, got {}", text.type_name())
+    })?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(input)
+        .map_err(|e| anyhow::anyhow!("BASE64_DECODE cannot decode {input:?}: {e}"))?;
+    let decoded = String::from_utf8(bytes)
+        .map_err(|_| anyhow::anyhow!("BASE64_DECODE decoded bytes are not UTF-8"))?;
+    Ok(Value::string(decoded))
+}
+
 /// Value-semantics core of `TO_JSON()`: encode a script value as JSON
 /// with one trailing newline. Only template-safe shapes survive;
 /// anything else fails here instead of rendering as a silent empty.
@@ -1453,6 +1498,53 @@ mod tests {
                 "error names position and offending shape: {text}"
             );
         }
+    }
+
+    #[test]
+    fn rand_draws_stay_in_unit_interval() {
+        for _ in 0..1000 {
+            let draw = rand_float_from_value(None)
+                .expect("draw")
+                .as_f64()
+                .expect("float");
+            assert!((0.0..1.0).contains(&draw), "draw out of [0, 1): {draw}");
+        }
+    }
+
+    #[test]
+    fn rand_seed_is_deterministic() {
+        let first = rand_float_from_value(Some(7))
+            .expect("seeded")
+            .as_f64()
+            .expect("float");
+        let second = rand_float_from_value(Some(7))
+            .expect("seeded")
+            .as_f64()
+            .expect("float");
+        assert_eq!(first, second, "same seed draws the same value");
+        assert!(
+            (0.0..1.0).contains(&first),
+            "seeded draw out of [0, 1): {first}"
+        );
+    }
+
+    #[test]
+    fn base64_round_trips_standard_alphabet() {
+        let encoded = base64_encode_from_value(Value::string("hello".to_string()))
+            .expect("encode")
+            .as_str()
+            .expect("string")
+            .to_string();
+        assert_eq!(encoded, "aGVsbG8=");
+        let decoded = base64_decode_from_value(Value::string(encoded))
+            .expect("decode")
+            .as_str()
+            .expect("string")
+            .to_string();
+        assert_eq!(decoded, "hello");
+        assert!(base64_decode_from_value(Value::string("!!!".to_string())).is_err());
+        assert!(base64_encode_from_value(Value::int(1)).is_err());
+        assert!(base64_decode_from_value(Value::int(1)).is_err());
     }
 
     #[test]

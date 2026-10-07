@@ -21,18 +21,6 @@ Callable as `MODULE::NAME(...)` in expressions (or bare `NAME(...)` with the mod
 
 ### SSH_ACCEPT
 
-**Signature:** `SSH_ACCEPT($server: SSH_SERVER, $in_pipe: PIPE, $out_pipe: PIPE) -> MAP<closed: BOOL>`
-
-**Contexts:** AST only
-
-**Parameters:**
-- `$server` (`SSH_SERVER`): Server handle from `SSH_SERVE`.
-- `$in_pipe` (`PIPE`): Pipe carrying bytes consumed by the wire side.
-- `$out_pipe` (`PIPE`): Pipe carrying bytes produced by the wire side.
-
-**Returns:** `MAP<closed: BOOL>`
-  - `closed` (`BOOL`): True when the session closed cleanly.
-
 Accept one SSH session into pipes.
 
 Accept the next authenticated session and pump it through explicit
@@ -80,7 +68,25 @@ SSH_CLOSE($m.server)
 ```
 
 
+**Signature:** `SSH_ACCEPT($server: SSH_SERVER, $in_pipe: PIPE, $out_pipe: PIPE) -> MAP<closed: BOOL>`
+
+**Contexts:** AST only
+
+**Parameters:**
+- `$server` (`SSH_SERVER`): Server handle from `SSH_SERVE`.
+- `$in_pipe` (`PIPE`): Pipe carrying bytes consumed by the wire side.
+- `$out_pipe` (`PIPE`): Pipe carrying bytes produced by the wire side.
+
+**Returns:** `MAP<closed: BOOL>`
+  - `closed` (`BOOL`): True when the session closed cleanly.
+
 ### SSH_CLOSE
+
+Shut down an SSH server.
+
+Shut a server down and join its runtime thread (bounded). Idempotent:
+returns BOOL true when no thread remains.
+
 
 **Signature:** `SSH_CLOSE($server: SSH_SERVER) -> BOOL`
 
@@ -91,13 +97,9 @@ SSH_CLOSE($m.server)
 
 **Returns:** `BOOL`
 
-Shut down an SSH server.
-
-Shut a server down and join its runtime thread (bounded). Idempotent:
-returns BOOL true when no thread remains.
-
-
 ### SSH_CONNECT
+
+Open an SSH client session into pipes. Target shapes: a logical port (CLI-mapped address or loopback default), a service name (CLI-mapped address only), a served address, or a host:port dial.
 
 **Signature:** `SSH_CONNECT($target: STRING, $username: STRING, $password: STRING, $in_pipe: PIPE, $out_pipe: PIPE) -> MAP`
 
@@ -112,22 +114,7 @@ returns BOOL true when no thread remains.
 
 **Returns:** `MAP`
 
-Open an SSH client session into pipes. Target shapes: a logical port (CLI-mapped address or loopback default), a service name (CLI-mapped address only), a served address, or a host:port dial.
-
 ### SSH_DEQUEUE
-
-**Signature:** `SSH_DEQUEUE($server: SSH_SERVER) -> MAP<session: SSH_SESSION, command: STRING, username: STRING, addr: STRING>`
-
-**Contexts:** AST only
-
-**Parameters:**
-- `$server` (`SSH_SERVER`): Server handle from `SSH_SERVE`.
-
-**Returns:** `MAP<session: SSH_SESSION, command: STRING, username: STRING, addr: STRING>`
-  - `session` (`SSH_SESSION`): Session handle for `SSH_PUMP_CHANNEL` (pump ends take once).
-  - `command` (`STRING`): Executed command, empty for shells.
-  - `username` (`STRING`): Authenticated username, empty when unset.
-  - `addr` (`STRING`): Peer address, empty when unset.
 
 Dequeue one SSH session with its metadata.
 
@@ -183,21 +170,20 @@ SSH_CLOSE($m.server)
 ```
 
 
-### SSH_PTY_RUN
-
-**Signature:** `SSH_PTY_RUN($session: SSH_SESSION, $argv: LIST<STRING>, $rows: INT, $cols: INT, $in_pipe: PIPE, $out_pipe: PIPE) -> INT`
+**Signature:** `SSH_DEQUEUE($server: SSH_SERVER) -> MAP<session: SSH_SESSION, command: STRING, username: STRING, addr: STRING>`
 
 **Contexts:** AST only
 
 **Parameters:**
-- `$session` (`SSH_SESSION`): Session handle from `SSH_DEQUEUE`.
-- `$argv` (`LIST<STRING>`): Program and arguments to run.
-- `$rows` (`INT`): Terminal rows when positive, session size otherwise.
-- `$cols` (`INT`): Terminal columns when positive, session size otherwise.
-- `$in_pipe` (`PIPE`): Pipe carrying bytes consumed by the child.
-- `$out_pipe` (`PIPE`): Pipe carrying bytes produced by the child.
+- `$server` (`SSH_SERVER`): Server handle from `SSH_SERVE`.
 
-**Returns:** `INT`
+**Returns:** `MAP<session: SSH_SESSION, command: STRING, username: STRING, addr: STRING>`
+  - `session` (`SSH_SESSION`): Session handle for `SSH_PUMP_CHANNEL` (pump ends take once).
+  - `command` (`STRING`): Executed command, empty for shells.
+  - `username` (`STRING`): Authenticated username, empty when unset.
+  - `addr` (`STRING`): Peer address, empty when unset.
+
+### SSH_PTY_RUN
 
 Run a command under a sized local terminal into pipes.
 
@@ -214,7 +200,28 @@ session's `SSH_USER` / `SSH_CLIENT` / `SSH_SERVER` / `SSH_COMMAND`
 relay) reaches the child; the working directory comes from the script.
 
 
+**Signature:** `SSH_PTY_RUN($session: SSH_SESSION, $argv: LIST<STRING>, $rows: INT, $cols: INT, $in_pipe: PIPE, $out_pipe: PIPE) -> INT`
+
+**Contexts:** AST only
+
+**Parameters:**
+- `$session` (`SSH_SESSION`): Session handle from `SSH_DEQUEUE`.
+- `$argv` (`LIST<STRING>`): Program and arguments to run.
+- `$rows` (`INT`): Terminal rows when positive, session size otherwise.
+- `$cols` (`INT`): Terminal columns when positive, session size otherwise.
+- `$in_pipe` (`PIPE`): Pipe carrying bytes consumed by the child.
+- `$out_pipe` (`PIPE`): Pipe carrying bytes produced by the child.
+
+**Returns:** `INT`
+
 ### SSH_PUMP
+
+Copy one pipe into another until EOF.
+
+Copy one pipe into another until EOF, then close the target.
+Returns the INT byte count. Either task placement works, as long as
+the other end is live (usually an `ASYNC` task).
+
 
 **Signature:** `SSH_PUMP($from_pipe: PIPE, $to_pipe: PIPE) -> INT`
 
@@ -226,14 +233,15 @@ relay) reaches the child; the working directory comes from the script.
 
 **Returns:** `INT`
 
-Copy one pipe into another until EOF.
-
-Copy one pipe into another until EOF, then close the target.
-Returns the INT byte count. Either task placement works, as long as
-the other end is live (usually an `ASYNC` task).
-
-
 ### SSH_PUMP_CHANNEL
+
+Pump a dequeued SSH session through pipes.
+
+Pump a dequeued session between explicit DSL pipes until the channel
+closes. Must run inside `ASYNC`. The session ends are take-once: a
+second pump on the same session bails instead of splitting bytes.
+Returns a MAP with `closed` (BOOL).
+
 
 **Signature:** `SSH_PUMP_CHANNEL($session: SSH_SESSION, $in_pipe: PIPE, $out_pipe: PIPE) -> MAP<closed: BOOL>`
 
@@ -247,15 +255,9 @@ the other end is live (usually an `ASYNC` task).
 **Returns:** `MAP<closed: BOOL>`
   - `closed` (`BOOL`): True when the session closed cleanly.
 
-Pump a dequeued SSH session through pipes.
-
-Pump a dequeued session between explicit DSL pipes until the channel
-closes. Must run inside `ASYNC`. The session ends are take-once: a
-second pump on the same session bails instead of splitting bytes.
-Returns a MAP with `closed` (BOOL).
-
-
 ### SSH_SERVE
+
+Serve SSH on a virtual service endpoint.
 
 **Signature:** `SSH_SERVE($bind: STRING, $options: MAP<username: STRING, password: STRING, key_path?: STRING>) -> MAP<server: SSH_SERVER, addr: STRING, username: STRING, password: STRING, virtual: STRING>`
 
@@ -274,8 +276,6 @@ Returns a MAP with `closed` (BOOL).
   - `username` (`STRING`): Configured username.
   - `password` (`STRING`): Configured password.
   - `virtual` (`STRING`): Virtual endpoint echo of the claimed slot.
-
-Serve SSH on a virtual service endpoint.
 
 ## Value types
 

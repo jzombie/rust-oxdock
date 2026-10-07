@@ -317,6 +317,9 @@ impl<P: ProcessManager> FunctionRegistry<P> {
             HasKey::registration(),
             MapSet::registration(),
             MergeMaps::registration(),
+            Base64Encode::registration(),
+            Base64Decode::registration(),
+            Rand::registration(),
             ToJson::registration(),
             TypeOf::registration(),
             Functions::registration(),
@@ -780,6 +783,91 @@ fn map_set(
     value: Value,
 ) -> Result<Value> {
     super::args::map_set_from_value(Value::map(map), key, value)
+}
+
+/// Draw a random FLOAT uniformly from [0, 1), optionally seeded.
+///
+/// Impure by design: unseeded calls return different values, so this
+/// runs on the AST script path only, never as a `{{ }}` placeholder
+/// call. A seed draws the same value on every run, for deterministic
+/// fixtures. Scale and shift the draw for wider ranges.
+///
+/// ```oxdock
+/// # Draw a float in [0, 1): both bounds hold on every draw.
+/// IMPORT [STD]
+/// LET $draw: FLOAT = RAND({})
+/// IF $draw < 0.0 {
+///     EXIT 1
+/// }
+/// IF $draw >= 1.0 {
+///     EXIT 1
+/// }
+///
+/// # A seed draws the same value on every run.
+/// LET $one: FLOAT = RAND({seed: 7})
+/// LET $two: FLOAT = RAND({seed: 7})
+/// ASSERT_EQ $one $two
+/// ```
+///
+#[oxdock_func(returns = TypeTag::Float)]
+fn rand<P: ProcessManager>(
+    cx: &mut StepCtx<P>,
+    /// Draw options.
+    #[options("seed?: INT")]
+    options: BTreeMap<String, Value>,
+) -> Result<Value> {
+    let _ = cx;
+    let seed = match options.get("seed") {
+        Some(value) => Some(value.as_i64().ok_or_else(|| {
+            anyhow::anyhow!(
+                "RAND option 'seed' must be an INT, got {}",
+                value.type_name()
+            )
+        })?),
+        None => None,
+    };
+    super::args::rand_float_from_value(seed)
+}
+
+/// Encode a STRING as standard base64.
+///
+/// Padded RFC 4648 alphabet, so encoded output pastes into any
+/// standard decoder. Pairs with [`base64_decode`] for the round trip.
+///
+/// ```oxdock
+/// # Encode text to standard base64.
+/// IMPORT [STD]
+/// LET $encoded: STRING = BASE64_ENCODE("hello")
+/// ASSERT_EQ $encoded "aGVsbG8="
+/// ```
+///
+#[oxdock_func(pure, returns = TypeTag::String)]
+fn base64_encode(
+    /// Text to encode.
+    text: String,
+) -> Result<Value> {
+    super::args::base64_encode_from_value(Value::string(text))
+}
+
+/// Decode standard base64 to a STRING.
+///
+/// Fails naming the input on invalid alphabet characters or
+/// non-UTF-8 payloads instead of rendering a silent empty. Pairs
+/// with [`base64_encode`] for the round trip.
+///
+/// ```oxdock
+/// # Decode standard base64 back to text.
+/// IMPORT [STD]
+/// LET $decoded: STRING = BASE64_DECODE("aGVsbG8=")
+/// ASSERT_EQ $decoded "hello"
+/// ```
+///
+#[oxdock_func(pure, returns = TypeTag::String)]
+fn base64_decode(
+    /// Base64 text to decode.
+    text: String,
+) -> Result<Value> {
+    super::args::base64_decode_from_value(Value::string(text))
 }
 
 /// Encode a script value as JSON with one trailing newline.
