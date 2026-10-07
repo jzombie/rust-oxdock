@@ -832,7 +832,7 @@ fn rand<P: ProcessManager>(
 /// Encode a STRING as standard base64.
 ///
 /// Padded RFC 4648 alphabet, so encoded output pastes into any
-/// standard decoder. Pairs with [`base64_decode`] for the round trip.
+/// standard decoder. Pairs with `BASE64_DECODE` for the round trip.
 ///
 /// ```oxdock
 /// # Encode text to standard base64.
@@ -853,7 +853,7 @@ fn base64_encode(
 ///
 /// Fails naming the input on invalid alphabet characters or
 /// non-UTF-8 payloads instead of rendering a silent empty. Pairs
-/// with [`base64_encode`] for the round trip.
+/// with `BASE64_ENCODE` for the round trip.
 ///
 /// ```oxdock
 /// # Decode standard base64 back to text.
