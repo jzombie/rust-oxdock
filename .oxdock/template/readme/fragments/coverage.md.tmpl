@@ -30,12 +30,12 @@ To test the calculation locally without waiting for CI:
 
 ```bash
 MIRI_TEST_CMD="cargo test --workspace --all-features --lib --tests" \
-  scripts/.github/miri-badge-report.sh
+  cargo run -p oxdock -- ./gha-miri-badge.oxfile
 ```
 
 (Note: plain `cargo test` has no `cfg(miri)`, so every test counts as runnable and the ratio reads 100%. For CI-parity counts including Miri ignores, prefix the command with `RUSTFLAGS="--cfg miri" cargo +nightly`.)
 
-The helper emits the same badge JSON (`badges/miri-coverage.json`) and summary text used by CI, making it easy to confirm the numbers before opening a PR.
+The script emits the same badge JSON (`badges/miri-coverage.json`) and summary text used by CI, making it easy to confirm the numbers before opening a PR.
 
 If you run new tests under Miri locally, you can sanity-check parity with CI via:
 
