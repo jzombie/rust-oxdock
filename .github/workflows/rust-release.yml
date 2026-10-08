@@ -47,6 +47,11 @@ on:
         required: false
         default: "oxdock"
         type: string
+      binaries:
+        description: "Build and attach binaries (false for library-only products)"
+        required: false
+        default: true
+        type: boolean
       pipeline_ref:
         description: "Ref of this repo to take scripts and runner source from"
         required: true
@@ -67,6 +72,11 @@ on:
         required: false
         default: "oxdock"
         type: string
+      binaries:
+        description: "Build and attach binaries (false for library-only products)"
+        required: false
+        default: true
+        type: boolean
       pipeline_ref:
         description: "Ref of this repo to take scripts and runner source from"
         required: true
@@ -79,6 +89,7 @@ on:
 jobs:
   build:
     name: build (${{ matrix.target }})
+    if: ${{ inputs.binaries }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -122,6 +133,9 @@ jobs:
 
   release:
     name: release
+    # Runs when the build succeeded or was skipped (binaries off):
+    # a failed or cancelled build still stops everything.
+    if: ${{ always() && (needs.build.result == 'success' || needs.build.result == 'skipped') }}
     runs-on: ubuntu-latest
     needs: [build]
     environment: release
@@ -146,6 +160,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Download build archives
+        if: ${{ inputs.binaries }}
         uses: actions/download-artifact@v4
         with:
           pattern: "${{ inputs.binary }}-*"
@@ -159,9 +174,10 @@ jobs:
       - name: Run the release script
         shell: bash
         env:
-          OXDOCK_RELEASE_CONFIRM: ${{ inputs.confirm_version }}
-          OXDOCK_RELEASE_DRY_RUN: ${{ inputs.dry_run }}
-          OXDOCK_BINARY: ${{ inputs.binary }}
+          RELEASE_CONFIRM: ${{ inputs.confirm_version }}
+          RELEASE_DRY_RUN: ${{ inputs.dry_run }}
+          RELEASE_BINARY: ${{ inputs.binary }}
+          RELEASE_BINARIES: ${{ inputs.binaries }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |

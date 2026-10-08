@@ -67,6 +67,12 @@ fn release_script_parses() -> Result<()> {
         text.contains("\"gh\", \"release\", \"create\""),
         "release creation step exists"
     );
+    // Library products skip binaries: a notes-only create with no
+    // asset paths must exist alongside the asset-carrying one.
+    assert!(
+        text.contains("\"--notes-file\", \"target/release-notes.md\"]"),
+        "notes-only creation step exists"
+    );
     // Tag identity gate: nothing destructive runs unless the tag
     // points at HEAD, so wrong-version binaries can never replace a
     // release under an old tag.
@@ -132,8 +138,8 @@ fn release_gate_rejects_mismatched_confirmation() -> Result<()> {
     let repo_root = repo_root()?;
     let root = GuardedPath::new_root_from_str(&repo_root)?;
     let mut io = ExecIo::new();
-    io.insert_inherit_env("OXDOCK_RELEASE_CONFIRM", "0.0.0-nope");
-    io.insert_inherit_env("OXDOCK_RELEASE_DRY_RUN", "true");
+    io.insert_inherit_env("RELEASE_CONFIRM", "0.0.0-nope");
+    io.insert_inherit_env("RELEASE_DRY_RUN", "true");
     let err = run_steps_with_context_result_with_io(&root, &root, &steps, io)
         .expect_err("mismatched confirmation must fail");
     let rendered = format!("{err:#}");

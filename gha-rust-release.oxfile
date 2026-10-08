@@ -7,7 +7,7 @@
 
 IMPORT [STD, MARKDOWN]
 
-INHERIT_ENV [OXDOCK_RELEASE_CONFIRM, OXDOCK_RELEASE_DRY_RUN, OXDOCK_BINARY, GITHUB_ACTIONS]
+INHERIT_ENV [RELEASE_CONFIRM, RELEASE_DRY_RUN, RELEASE_BINARY, RELEASE_BINARIES, GITHUB_ACTIONS]
 
 # Pin to the live tree: scripts start in an isolated snapshot, and every
 # release step (manifest read, publish, tag) must hit the real repo.
@@ -19,7 +19,7 @@ LET $version: STRING = $manifest.workspace.package.version
 
 # Typed confirmation gate: the dispatched version must equal the tree.
 # A typo or stale input fails here, before anything publishes.
-LET $confirm: STRING = "{{ env:OXDOCK_RELEASE_CONFIRM }}"
+LET $confirm: STRING = "{{ env:RELEASE_CONFIRM }}"
 ASSERT_EQ $confirm $version
 
 # Release notes come from the CHANGELOG through the real markdown
@@ -37,7 +37,7 @@ RUN ["cargo", "publish", "--workspace", "--dry-run"]
     ECHO "::endgroup::"
 }
 
-LET $dry: STRING = "{{ env:OXDOCK_RELEASE_DRY_RUN }}"
+LET $dry: STRING = "{{ env:RELEASE_DRY_RUN }}"
 IF $dry == "false" {
     [env:GITHUB_ACTIONS] {
         ECHO "::group::Publish workspace"
@@ -71,8 +71,13 @@ IF $dry == "false" {
     # release.yml): the tag carries the product version and the binary
     # name rides in from the workflow, so asset names stay static
     # across releases while differing per product.
-    LET $bin: STRING = "{{ env:OXDOCK_BINARY }}"
-    RUN ["gh", "release", "create", "v{{ $version }}", "--title", "{{ $version }}", "--notes-file", "target/release-notes.md", "target/artifacts/{{ $bin }}-x86_64-unknown-linux-gnu.tar.gz", "target/artifacts/{{ $bin }}-aarch64-apple-darwin.tar.gz", "target/artifacts/{{ $bin }}-x86_64-pc-windows-msvc.tar.gz"]
+    LET $bin: STRING = "{{ env:RELEASE_BINARY }}"
+    LET $bins: STRING = "{{ env:RELEASE_BINARIES }}"
+    IF $bins == "false" {
+        RUN ["gh", "release", "create", "v{{ $version }}", "--title", "{{ $version }}", "--notes-file", "target/release-notes.md"]
+    } ELSE {
+        RUN ["gh", "release", "create", "v{{ $version }}", "--title", "{{ $version }}", "--notes-file", "target/release-notes.md", "target/artifacts/{{ $bin }}-x86_64-unknown-linux-gnu.tar.gz", "target/artifacts/{{ $bin }}-aarch64-apple-darwin.tar.gz", "target/artifacts/{{ $bin }}-x86_64-pc-windows-msvc.tar.gz"]
+    }
 } ELSE {
     ECHO "Dry run complete: nothing published, no tag created."
 }
