@@ -1,0 +1,14 @@
+{
+  "repos": [
+    {
+      "name": "jzombie/rust-oxdock",
+      "environments": [
+        {
+          "name": "release",
+          "reviewers": [{ "type": "User", "id": 1139657 }]
+        }
+      ],
+      "secrets": ["CARGO_REGISTRY_TOKEN"]
+    }
+  ]
+}

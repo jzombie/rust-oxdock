@@ -1,4 +1,4 @@
-# Release pipeline: thin shim over rust-release.oxfile, which owns the
+# Release pipeline: thin shim over gha-rust-release.oxfile, which owns the
 # release itself (version gate, notes, workspace publish, binaries,
 # tag, GitHub release). Dispatch is manual only; nothing else triggers
 # this workflow.
@@ -100,7 +100,7 @@ jobs:
 
       # No bash logic lives here by design: confirmation gating, notes
       # extraction, publishing, tagging, and releasing all run inside
-      # rust-release.oxfile, which fails fast on a mismatched confirmation
+      # gha-rust-release.oxfile, which fails fast on a mismatched confirmation
       # before anything publishes. This step only bridges inputs.
       - name: Run the release script
         shell: bash
@@ -111,7 +111,7 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           set -euo pipefail
-          cargo run -p oxdock --features markdown -- ./rust-release.oxfile
+          cargo run -p oxdock --features markdown -- ./gha-rust-release.oxfile
 
       # The notes file the script extracted: download and read it from
       # the run before approving the real release.

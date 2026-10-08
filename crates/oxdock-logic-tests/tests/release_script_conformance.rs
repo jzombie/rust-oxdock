@@ -19,7 +19,7 @@ fn load_release_script() -> Result<String> {
     let repo_root = repo_root()?;
     let root = GuardedPath::new_root_from_str(&repo_root)?;
     let resolver = PathResolver::new_guarded(root.clone(), root)?;
-    let script_path = resolver.root().join("rust-release.oxfile")?;
+    let script_path = resolver.root().join("gha-rust-release.oxfile")?;
     resolver.read_to_string(&script_path)
 }
 
@@ -31,7 +31,7 @@ fn parse_release_script(text: &str) -> Result<Vec<oxdock_parser::Step>> {
     let mut engine = oxdock_core::Engine::new();
     engine.register_module(oxdock_markdown_plugin::module());
     oxdock_core::parse_script_with_modules(text, engine.module_table())
-        .map_err(|err| anyhow::anyhow!("rust-release.oxfile failed to parse: {err}"))
+        .map_err(|err| anyhow::anyhow!("gha-rust-release.oxfile failed to parse: {err}"))
 }
 
 /// The release script must always parse: a breaking language change that
@@ -40,7 +40,7 @@ fn parse_release_script(text: &str) -> Result<Vec<oxdock_parser::Step>> {
 #[cfg(feature = "markdown")]
 #[cfg_attr(
     miri,
-    ignore = "reads rust-release.oxfile from the repository checkout layout"
+    ignore = "reads gha-rust-release.oxfile from the repository checkout layout"
 )]
 fn release_script_parses() -> Result<()> {
     let text = load_release_script()?;

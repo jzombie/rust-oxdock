@@ -1,0 +1,48 @@
+# Fleet settings applier: converges repo configuration from
+# .github/settings.json with no clicks. Environments (plus reviewers)
+# apply on every run. Secrets apply only when their value is bridged in
+# under the same name; missing values log a skip instead of writing
+# empties. Reviewer IDs are numeric (resolve once with
+# `gh api users/NAME --jq .id`): the API takes IDs, not logins.
+
+IMPORT [STD]
+
+INHERIT_ENV [CARGO_REGISTRY_TOKEN]
+
+# Pin to the live tree: scripts start in an isolated snapshot, and the
+# settings file lives in the real repo.
+WORKSPACE LOCAL
+
+LET $fleet: MAP<ANY> = LOAD_JSON(".github/settings.json")
+LET $repos: LIST<ANY> = $fleet.repos
+FOR $repo: MAP<ANY> IN $repos {
+    LET $name: STRING = $repo.name
+    LET $envs: LIST<ANY> = $repo.environments
+    FOR $env: MAP<ANY> IN $envs {
+        LET $env_name: STRING = $env.name
+        LET $body: MAP<ANY> = {}
+        $body = MAP_SET($body, "reviewers", $env.reviewers)
+        LET $json: STRING = TO_JSON($body)
+        WRITE "target/settings-body.json" $json
+        RUN ["gh", "api", "repos/{{ $name }}/environments/{{ $env_name }}", "-X", "PUT", "--input", "target/settings-body.json"]
+    }
+    LET $secrets: LIST<ANY> = $repo.secrets
+    FOR $secret: STRING IN $secrets {
+        IF $secret == "CARGO_REGISTRY_TOKEN" {
+            LET $value: STRING = "{{ env:CARGO_REGISTRY_TOKEN }}"
+            IF $value != "" {
+                # Never in argv: the value rides an in-memory pipe into
+                # `gh secret set` stdin (gh trims the ECHO newline, so the
+                # stored bytes are exact). Declared per iteration because
+                # rebinding a live handle is an error.
+                LET $p: PIPE
+                WITH_IO [stdout=$p] ECHO $value
+                WITH_IO [stdin=$p] RUN ["gh", "secret", "set", "CARGO_REGISTRY_TOKEN", "--repo", "{{ $name }}"]
+            } ELSE {
+                ECHO "Skipping CARGO_REGISTRY_TOKEN for {{ $name }}: no value bridged in."
+            }
+        } ELSE {
+            ECHO "Unknown secret {{ $secret }} for {{ $name }}: add explicit bridging first."
+        }
+    }
+}

@@ -9,7 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ### Added
 
-- Self-hosted releases: `rust-release.oxfile` cuts this project's own releases (version gate, workspace publish, tag, GitHub release with prebuilt Linux, macOS, and Windows binaries) run from a thin `release` workflow, so the release pipeline dogfoods the DSL it ships. Dispatch is manual only, with a typed version confirmation plus a default-dry-run flag and a required-reviewer environment guarding against accidental publishes.
+- Self-hosted releases: `gha-rust-release.oxfile` cuts this project's own releases (version gate, workspace publish, tag, GitHub release with prebuilt Linux, macOS, and Windows binaries) run from a thin `release` workflow, so the release pipeline dogfoods the DSL it ships. Dispatch is manual only, with a typed version confirmation plus a default-dry-run flag and a required-reviewer environment guarding against accidental publishes.
 - `MARKDOWN::SECTION($md, $needle)` (pure): extract the section under the first heading whose text starts with `needle`, through the real markdown parser (fenced code never matches). The release script uses it to slice CHANGELOG notes with no shell text processing.
 - Opt-in `markdown` feature for the CLI runner (`--features markdown`), registering the `MARKDOWN` helpers without changing default or minimal builds.
 
