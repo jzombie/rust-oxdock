@@ -50,7 +50,7 @@ NET_CLOSE($l.listener)
 
 **Signature:** `NET_ACCEPT($listener: NET_LISTENER, $in_pipe: PIPE, $out_pipe: PIPE, $options: MAP<no_half_close?: BOOL>) -> MAP<closed: BOOL>`
 
-**Contexts:** AST only
+**Contexts:** [`AST`](#context-ast) only
 
 **Parameters:**
 - `$listener` (`NET_LISTENER`): Listener handle from `NET_LISTEN`.
@@ -80,7 +80,7 @@ NET_CLOSE($l.listener)
 
 **Signature:** `NET_ADDR($target: STRING) -> STRING`
 
-**Contexts:** AST only
+**Contexts:** [`AST`](#context-ast) only
 
 **Parameters:**
 - `$target` (`STRING`): Logical port, service name, optionally protocol-qualified; unbound targets bail.
@@ -97,7 +97,7 @@ instead of hanging.
 
 **Signature:** `NET_CLOSE($listener: NET_LISTENER) -> BOOL`
 
-**Contexts:** AST only
+**Contexts:** [`AST`](#context-ast) only
 
 **Parameters:**
 - `$listener` (`NET_LISTENER`)
@@ -110,7 +110,7 @@ Dial a TCP endpoint into pipes.
 
 **Signature:** `NET_CONNECT($target: STRING, $in_pipe: PIPE, $out_pipe: PIPE, $options: MAP<timeout?: DURATION, no_half_close?: BOOL>) -> MAP<closed: BOOL>`
 
-**Contexts:** AST only
+**Contexts:** [`AST`](#context-ast) only
 
 **Parameters:**
 - `$target` (`STRING`): Dial target: `host:port`, a logical port, or a service name.
@@ -131,7 +131,7 @@ Fetch an `https` URL to text: the network source for `PARSE_JSON` and `PARSE_TOM
 
 **Signature:** `NET_FETCH($url: STRING, $options?: MAP<headers?: MAP, timeout?: DURATION, max_body_bytes?: INT, max_redirects?: INT>) -> STRING`
 
-**Contexts:** AST only
+**Contexts:** [`AST`](#context-ast) only
 
 **Parameters:**
 - `$url` (`STRING`): `https` URL to fetch; cleartext `http` reaches loopback hosts only.
@@ -149,7 +149,7 @@ Claim a virtual service endpoint and report its address.
 
 **Signature:** `NET_LISTEN($bind: STRING, $options: MAP) -> MAP<listener: NET_LISTENER, addr: STRING, virtual: STRING>`
 
-**Contexts:** AST only
+**Contexts:** [`AST`](#context-ast) only
 
 **Parameters:**
 - `$bind` (`STRING`): Logical port (`"2251"`) or service name; physical binds are rejected.
@@ -189,7 +189,7 @@ NET_CLOSE($l.listener)
 
 **Signature:** `NET_PORT($target: STRING) -> INT`
 
-**Contexts:** AST only
+**Contexts:** [`AST`](#context-ast) only
 
 **Parameters:**
 - `$target` (`STRING`): Logical port, service name, optionally protocol-qualified; unbound targets bail.

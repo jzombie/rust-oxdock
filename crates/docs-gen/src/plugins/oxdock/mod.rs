@@ -43,6 +43,22 @@ fn function_reference() -> Result<Value> {
     Ok(Value::string(command_ref::render_function_reference()))
 }
 
+/// Generated context reference for the function listings: the single
+/// `## Contexts` section every master that embeds a function reference
+/// includes exactly once, so `**Contexts:**` links resolve unambiguously.
+#[oxdock_func(pure, returns = TypeTag::String)]
+fn context_reference() -> Result<Value> {
+    Ok(Value::string(command_ref::render_context_reference()))
+}
+
+/// Lower one expression to its RPN op program, for live machine docs.
+/// Empty module scope (see `parse_expression_str`): arithmetic over
+/// variables and literals is the demo shape, calls need imports and fail.
+#[oxdock_func(pure, returns = TypeTag::String)]
+fn lower_math(source: String) -> Result<Value> {
+    Ok(Value::string(command_ref::render_lowered_math(&source)?))
+}
+
 /// Generated function reference for one plugin module.
 #[oxdock_func(pure, returns = TypeTag::String)]
 fn plugin_function_reference(module: String) -> Result<Value> {
@@ -75,6 +91,7 @@ fn generated(key: String) -> Result<Value> {
         "command_body" => command_body(),
         "value_types" => value_types(),
         "function_reference" => function_reference(),
+        "context_reference" => context_reference(),
         "ssh_function_reference" => plugin_function_reference("SSH".to_string()),
         "ssh_type_reference" => plugin_type_reference("SSH".to_string()),
         "net_function_reference" => plugin_function_reference("NET".to_string()),
@@ -86,6 +103,7 @@ fn generated(key: String) -> Result<Value> {
                 "command_body",
                 "value_types",
                 "function_reference",
+                "context_reference",
                 "ssh_function_reference",
                 "ssh_type_reference",
                 "net_function_reference",
@@ -110,6 +128,8 @@ pub fn module<P: ProcessManager>() -> HostModule<P> {
             CommandBody::registration(),
             ValueTypes::registration(),
             FunctionReference::registration(),
+            ContextReference::registration(),
+            LowerMath::registration(),
             PluginFunctionReference::registration(),
             PluginTypeReference::registration(),
             Generated::registration(),
@@ -398,6 +418,13 @@ mod tests {
                 .as_str()
                 .expect("string")
                 .contains("## Functions")
+        );
+        assert!(
+            context_reference()
+                .expect("contexts")
+                .as_str()
+                .expect("string")
+                .contains("## Contexts")
         );
     }
 }

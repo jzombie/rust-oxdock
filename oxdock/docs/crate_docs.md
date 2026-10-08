@@ -6,7 +6,7 @@ Platform gating selects OS-specific steps, and remote targets bind over any stdi
 
 The syntax is line-oriented in the spirit of BASIC, with a static type system checking scripts before the first step runs. Plain Rust functions become script functions with one attribute: `#[oxdock_func]` exports them into namespaced modules scripts call as `DEMO::NAME(...)`. See [Extending OxDock from Rust](#extending-oxdock-from-rust).
 
-[Documentation](https://docs.rs/oxdock/0.22.0-alpha/oxdock/)
+[Documentation](https://docs.rs/oxdock/0.23.0-alpha/oxdock/)
 
 ## Dynamically embed assets at compile time
 
@@ -95,8 +95,8 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     LET $a: STRING = READ dist/alpha.txt
     LET $b: STRING = READ dist/beta.txt
     LET $p: STRING = READ dist/picked.txt
-    ASSERT_EQ $a "alpha OxDock 0.22.0-alpha"
-    ASSERT_EQ $b "beta OxDock 0.22.0-alpha"
+    ASSERT_EQ $a "alpha OxDock 0.23.0-alpha"
+    ASSERT_EQ $b "beta OxDock 0.23.0-alpha"
     ASSERT_EQ $p "alpha"
 };
 
@@ -108,7 +108,7 @@ let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolve
 let out = root.join("dist/alpha.txt").expect("out path");
 assert_eq!(
     resolver.read_to_string(&out).expect("read out"),
-    "alpha OxDock 0.22.0-alpha"
+    "alpha OxDock 0.23.0-alpha"
 );
 ```
 
@@ -623,6 +623,78 @@ crate depends on `oxdock-core` and calls `Engine::register_module`.
 The one thing Python still wins is its C ABI as a stable interop target
 for other languages. The OxDock boundary is Rust only, which is exactly
 what keeps it cheap.
+
+## Machine model
+
+How the machinery operates, for the curious. Behavior contracts live in
+the command and function reference. This section maps those contracts
+onto the moving parts: words, evaluators, and the stack program that
+runs math.
+
+### Words
+
+Every script value is one 128 bit word: a descriptor pointer plus a 64
+bit payload. The descriptor names the type and carries the vtable that
+clones, drops, compares, and renders the value. The payload is either
+inline bytes (for `Copy` scalars that fit in 64 bits, with zero
+allocation) or a pointer to one owned heap box (for containers and
+everything else). Words are fixed size and deterministic to move, which
+is what keeps the host boundary cheap: plain Rust functions returning
+`Result<Value>`, nothing to pin and nothing reference counted. The
+glossary defines each of these terms precisely.
+
+### Two evaluators
+
+Scripts run under two evaluators. The AST evaluator walks the parsed
+tree one step at a time, with line numbers on every failure. The RPN
+evaluator runs arithmetic and comparison as a flat stack program with
+values only and no step numbers. Which functions may run where is the
+[Contexts](#contexts) rule: everything runs on the tree, and only pure
+functions plus explicit `rpn` opt ins run on the stack program.
+
+### The stack program
+
+Parsing lowers each arithmetic or comparison subtree in three passes.
+First, literal only subtrees fold to their value and vanish. Then the
+survivors flatten to postfix ops with resolved arities: loads for
+variables, env reads, and keypaths; prebuilt constants; calls; and one
+op per arithmetic or comparison operator. Anything without a stack
+encoding (`!`, `&&` and `||`, list and map literals, pipes) stays a
+tree node and runs on the AST path. The static pre-pass type checks the
+same program abstractly before the first step runs, so math shape errors
+surface early with the same step free wording the runtime reports. The
+program is built once per parse and runs again on every evaluation, so a
+`WHILE` condition pays lowering once no matter how many iterations it
+runs.
+
+The demos below are computed, not copied: each placeholder lowers its
+expression through the real parser on every docs run, so the shown ops
+cannot drift from the implementation.
+
+`$a + 2 * $b` is the classic shape: loads and one constant feeding two
+operators.
+
+```text
+`$a + 2 * $b` lowers to 5 ops:
+1. LoadVar($a)
+2. PushConst(2)
+3. LoadVar($b)
+4. Mul
+5. Add
+```
+
+`1 + 2 * 3` never reaches the stack machine: both subtrees fold at parse
+time.
+
+```text
+`1 + 2 * 3` folds to the literal `7` at parse time: no ops are emitted
+```
+
+`!$ready` has no stack encoding and stays on the tree path.
+
+```text
+`!$ready` has no RPN encoding and stays a tree node: `!$ready`
+```
 
 # DSL Reference
 
@@ -3255,7 +3327,7 @@ ASSERT_EQ $decoded "hello"
 
 **Signature:** `STD::BASE64_DECODE($text: STRING) -> STRING`
 
-**Contexts:** AST, RPN
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
 - `$text` (`STRING`): Base64 text to decode.
@@ -3279,7 +3351,7 @@ ASSERT_EQ $encoded "aGVsbG8="
 
 **Signature:** `STD::BASE64_ENCODE($text: STRING) -> STRING`
 
-**Contexts:** AST, RPN
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
 - `$text` (`STRING`): Text to encode.
@@ -3292,7 +3364,7 @@ Describe one function by qualified name.
 
 **Signature:** `STD::DESCRIBE($name: STRING) -> MAP<name: STRING, module: STRING, kind: STRING, params: LIST<MAP<ANY>>, returns: STRING, rpn: BOOL, summary: STRING>`
 
-**Contexts:** AST only
+**Contexts:** [`AST`](#context-ast) only
 
 **Parameters:**
 - `$name` (`STRING`): Qualified function name (`MODULE::NAME`).
@@ -3339,7 +3411,7 @@ ASSERT_EQ $n 2
 
 **Signature:** `STD::EOF($pipe: PIPE) -> BOOL`
 
-**Contexts:** AST only
+**Contexts:** [`AST`](#context-ast) only
 
 **Parameters:**
 - `$pipe` (`PIPE`): Pipe handle to query for end of stream.
@@ -3355,7 +3427,7 @@ Parses f64 (accepts int strings), bails on non-finite or non-numeric.
 
 **Signature:** `STD::FLOAT($val: ANY) -> FLOAT`
 
-**Contexts:** AST, RPN
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
 - `$val` (`ANY`): Value to convert to `FLOAT`.
@@ -3371,7 +3443,7 @@ plus host-registered names.
 
 **Signature:** `STD::FUNCTIONS() -> LIST<STRING>`
 
-**Contexts:** AST only
+**Contexts:** [`AST`](#context-ast) only
 
 **Returns:** `LIST<STRING>`
 
@@ -3384,7 +3456,7 @@ Sorted, root-relative LIST; empty on no match or `..` escape.
 
 **Signature:** `STD::GLOB($pattern: STRING) -> LIST<STRING>`
 
-**Contexts:** AST, RPN
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
 - `$pattern` (`STRING`): Glob pattern matched against workspace paths.
@@ -3401,7 +3473,7 @@ tripping the strict missing-key error.
 
 **Signature:** `STD::HAS_KEY($map: MAP<ANY>, $key: STRING) -> BOOL`
 
-**Contexts:** AST, RPN
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
 - `$map` (`MAP<ANY>`): Map to probe.
@@ -3419,7 +3491,7 @@ when integral and finite.
 
 **Signature:** `STD::INT($val: ANY) -> INT`
 
-**Contexts:** AST, RPN
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
 - `$val` (`ANY`): Value to convert to `INT`.
@@ -3444,7 +3516,7 @@ reads the step context like the other introspection functions.
 
 **Signature:** `STD::IS_TERMINAL($stream_name: STRING = "stdin" | "stdout" | "stderr") -> BOOL`
 
-**Contexts:** AST only
+**Contexts:** [`AST`](#context-ast) only
 
 **Parameters:**
 - `$stream_name` (`STRING = "stdin" | "stdout" | "stderr"`): Stream name: `stdin`, `stdout`, or `stderr` (exact match).
@@ -3463,7 +3535,7 @@ assignment.
 
 **Signature:** `STD::LOAD_JSON($path: STRING) -> ANY`
 
-**Contexts:** AST, RPN
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
 - `$path` (`STRING`): Workspace file path to load and parse as JSON.
@@ -3479,7 +3551,7 @@ Reads a workspace file and parses TOML into a DSL value.
 
 **Signature:** `STD::LOAD_TOML($path: STRING) -> MAP<ANY>`
 
-**Contexts:** AST, RPN
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
 - `$path` (`STRING`): Workspace file path to load and parse as TOML.
@@ -3496,7 +3568,7 @@ instead of silently shadowing each other.
 
 **Signature:** `STD::MAP_SET($map: MAP<ANY>, $key: STRING, $value: ANY) -> MAP<ANY>`
 
-**Contexts:** AST, RPN
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
 - `$map` (`MAP<ANY>`): Map to insert into.
@@ -3517,7 +3589,7 @@ Non MAP elements fail naming their position.
 
 **Signature:** `STD::MERGE_MAPS($maps: LIST<MAP<ANY>>, $policy: STRING = "fail_on_duplicate" | "overwrite") -> MAP<ANY>`
 
-**Contexts:** AST, RPN
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
 - `$maps` (`LIST<MAP<ANY>>`): LIST of MAPs to merge in order.
@@ -3551,7 +3623,7 @@ ASSERT_EQ $items.1 2
 
 **Signature:** `STD::PARSE_JSON($text: STRING) -> ANY`
 
-**Contexts:** AST, RPN
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
 - `$text` (`STRING`): JSON text already held in memory.
@@ -3568,7 +3640,7 @@ contents, and captured text share one JSON/TOML shape.
 
 **Signature:** `STD::PARSE_TOML($text: STRING) -> MAP<ANY>`
 
-**Contexts:** AST, RPN
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
 - `$text` (`STRING`): TOML text already held in memory.
@@ -3585,7 +3657,7 @@ there is no RPN arm for filesystem IO.
 
 **Signature:** `STD::PATH_TYPE($path: STRING) -> STRING`
 
-**Contexts:** AST only
+**Contexts:** [`AST`](#context-ast) only
 
 **Parameters:**
 - `$path` (`STRING`): Workspace path of the entry to describe.
@@ -3618,7 +3690,7 @@ ASSERT_EQ $one $two
 
 **Signature:** `STD::RAND($options?: MAP<seed?: INT>) -> FLOAT`
 
-**Contexts:** AST only
+**Contexts:** [`AST`](#context-ast) only
 
 **Parameters:**
 - `$options?` (`MAP<seed?: INT>`): Draw settings: `seed`. Omittable: a missing options MAP fills `{}`.
@@ -3649,7 +3721,7 @@ ASSERT_EQ $free 1
 
 **Signature:** `STD::SEMAPHORE_AVAILABLE($sem: SEMAPHORE) -> INT`
 
-**Contexts:** AST, RPN
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
 - `$sem` (`SEMAPHORE`): Semaphore handle from `SEMAPHORE_NEW`.
@@ -3678,7 +3750,7 @@ ASSERT_EQ $free 2
 
 **Signature:** `STD::SEMAPHORE_NEW($max: INT) -> SEMAPHORE`
 
-**Contexts:** AST only
+**Contexts:** [`AST`](#context-ast) only
 
 **Parameters:**
 - `$max` (`INT`): Maximum concurrent holders; must be positive.
@@ -3713,7 +3785,7 @@ ASSERT_EQ $has_permit false
 
 **Signature:** `STD::SEMAPHORE_TRY_ACQUIRE($sem: SEMAPHORE) -> MAP<held: BOOL, permit?: PERMIT>`
 
-**Contexts:** AST only
+**Contexts:** [`AST`](#context-ast) only
 
 **Parameters:**
 - `$sem` (`SEMAPHORE`): Semaphore handle from `SEMAPHORE_NEW`.
@@ -3733,7 +3805,7 @@ rendering as a silent empty.
 
 **Signature:** `STD::TO_JSON($value: ANY) -> STRING`
 
-**Contexts:** AST, RPN
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
 - `$value` (`ANY`): Value to encode as JSON.
@@ -3750,7 +3822,7 @@ introspection functions.
 
 **Signature:** `STD::TYPES() -> LIST<STRING>`
 
-**Contexts:** AST only
+**Contexts:** [`AST`](#context-ast) only
 
 **Returns:** `LIST<STRING>`
 
@@ -3764,7 +3836,7 @@ Reads the run's name directory, so it runs on the AST path.
 
 **Signature:** `STD::TYPE_DESCRIBE($name: STRING) -> MAP<name: STRING, summary: STRING, docs: STRING>`
 
-**Contexts:** AST only
+**Contexts:** [`AST`](#context-ast) only
 
 **Parameters:**
 - `$name` (`STRING`): Type name to describe.
@@ -3786,12 +3858,25 @@ on config shapes (a path string or a path list) without failing.
 
 **Signature:** `STD::TYPE_OF($value: ANY) -> STRING`
 
-**Contexts:** AST, RPN
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
 - `$value` (`ANY`): Value whose word to name.
 
 **Returns:** `STRING`
+
+<!-- GENERATED by docs-gen from function context metadata. Do not edit by hand. -->
+## Contexts
+
+Every function lists the contexts it runs in. `AST` is always available. `RPN` additionally requires a pure function or an explicit `rpn` opt in.
+
+### Context: AST
+
+The parsed tree of a script, walked one step at a time. Statements, declarations, scopes, pipes, and IO live here. Every step knows its line number, so failures name it. Every function runs in this context.
+
+### Context: RPN
+
+Arithmetic and comparison expressions compiled to a flat stack program of values with no statements, scopes, pipes, or step numbers. Pure functions run here with no flag. Stateful functions run here only when they opt in with `#[oxdock_func(rpn)]`, which is reserved for read only queries that stay meaningful inside math (`GLOB`, `LOAD_TOML`, `LOAD_JSON` do this). A call that fails inside math reports the bare error with no step number.
 
 ## Errors stop the pipeline
 

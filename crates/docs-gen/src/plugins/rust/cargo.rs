@@ -22,13 +22,46 @@ pub fn workspace_members(root: &GuardedPath, resolver: &PathResolver) -> Result<
 /// Workspace citation metadata from the root manifest.
 ///
 /// Returns the first workspace author as a display name (without the
-/// optional `<email>` suffix), plus the workspace license and
-/// repository. Citation rendering must use these values instead of
-/// copying them into templates or values files.
+/// `<email>` suffix) plus its structured `Given ... Family <email>`
+/// parts, the workspace license, and the repository. Citation rendering
+/// must use these values instead of copying them into templates or
+/// values files.
 pub struct WorkspacePackage {
     pub author: String,
+    pub author_given: String,
+    pub author_family: String,
+    pub author_email: String,
     pub license: String,
     pub repository: String,
+}
+
+/// Split one `Given ... Family <email>` author entry into its citation
+/// parts. Strict: given plus family names and an email are all required,
+/// so a malformed entry fails naming the fix instead of rendering a
+/// half empty citation file.
+fn split_citation_author(raw: &str) -> Result<(String, String, String)> {
+    let (name, email) = raw.rsplit_once('<').ok_or_else(|| {
+        anyhow::anyhow!("workspace.package.authors entry {raw:?} needs an `<email>` suffix")
+    })?;
+    let email = email.strip_suffix('>').ok_or_else(|| {
+        anyhow::anyhow!(
+            "workspace.package.authors entry {raw:?} needs a closing `>` after the email"
+        )
+    })?;
+    let email = email.trim().to_string();
+    if email.is_empty() {
+        anyhow::bail!("workspace.package.authors entry {raw:?} has an empty email");
+    }
+    let mut words: Vec<&str> = name.split_whitespace().collect();
+    let Some(family) = words.pop() else {
+        anyhow::bail!("workspace.package.authors entry {raw:?} has no display name");
+    };
+    if words.is_empty() {
+        anyhow::bail!(
+            "workspace.package.authors entry {raw:?} needs given plus family names (`Given Family <email>`)",
+        );
+    }
+    Ok((words.join(" "), family.to_string(), email))
 }
 
 /// Read workspace citation metadata from `Cargo.toml`.
@@ -67,8 +100,12 @@ pub fn workspace_package(root: &GuardedPath, resolver: &PathResolver) -> Result<
         .and_then(|value| value.as_str())
         .context("workspace.package.repository not found in Cargo.toml")?
         .to_string();
+    let (author_given, author_family, author_email) = split_citation_author(raw_author)?;
     Ok(WorkspacePackage {
         author,
+        author_given,
+        author_family,
+        author_email,
         license,
         repository,
     })
@@ -172,6 +209,31 @@ mod tests {
         assert_eq!(package.author, "Jeremy Harris");
         assert_eq!(package.license, "Apache-2.0");
         assert_eq!(package.repository, "https://github.com/jzombie/rust-oxdock");
+    }
+
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "fixture needs host tempdir and file IO, blocked by Miri isolation"
+    )]
+    fn workspace_package_splits_citation_author() {
+        let (_temp, root, resolver) = fixture_root();
+        write_root_manifest(&resolver, &root, WORKSPACE_METADATA);
+        let package = workspace_package(&root, &resolver).expect("package");
+        assert_eq!(package.author_given, "Jeremy");
+        assert_eq!(package.author_family, "Harris");
+        assert_eq!(package.author_email, "jeremy.harris@zenosmosis.com");
+        for raw in [
+            "Jeremy Harris",
+            "Jeremy",
+            "Jeremy Harris <>",
+            "Jeremy Harris <jeremy.harris@zenosmosis.com",
+        ] {
+            assert!(
+                split_citation_author(raw).is_err(),
+                "author entry must be `Given Family <email>`: {raw}",
+            );
+        }
     }
 
     #[test]

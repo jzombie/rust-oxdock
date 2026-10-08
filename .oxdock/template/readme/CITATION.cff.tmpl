@@ -1,0 +1,11 @@
+cff-version: 1.2.0
+message: "If you use {{ $docs_ctx.name }}, please cite it as below."
+type: software
+title: "{{ $docs_ctx.name }}"
+version: {{ env:CRATE_VERSION }}
+authors:
+  - family-names: "{{ $workspace_pkg.author_family }}"
+    given-names: "{{ $workspace_pkg.author_given }}"
+    email: "{{ $workspace_pkg.author_email }}"
+repository-code: "{{ $workspace_pkg.repository }}"
+license: "{{ $workspace_pkg.license }}"

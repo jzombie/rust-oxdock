@@ -14,7 +14,8 @@
           ".oxdock/template/shared/footer.md.tmpl"
         ],
         "generated": [
-          "crates/plugins/oxdock-net-plugin/.oxdock/template/generated/*"
+          "crates/plugins/oxdock-net-plugin/.oxdock/template/generated/*",
+          ".oxdock/template/readme/generated/context-reference.md.tmpl"
         ]
       }
     }

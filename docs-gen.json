@@ -6,6 +6,7 @@
     {"key": "command_body", "out": ".oxdock/template/readme/generated/command-body.md.tmpl"},
     {"key": "value_types", "out": ".oxdock/template/readme/generated/value-types.md.tmpl"},
     {"key": "function_reference", "out": ".oxdock/template/readme/generated/function-reference.md.tmpl"},
+    {"key": "context_reference", "out": ".oxdock/template/readme/generated/context-reference.md.tmpl"},
     {"key": "ssh_function_reference", "out": "crates/plugins/oxdock-ssh-plugin/.oxdock/template/generated/ssh-function-reference.md.tmpl"},
     {"key": "ssh_type_reference", "out": "crates/plugins/oxdock-ssh-plugin/.oxdock/template/generated/ssh-type-reference.md.tmpl"},
     {"key": "net_function_reference", "out": "crates/plugins/oxdock-net-plugin/.oxdock/template/generated/net-function-reference.md.tmpl"},

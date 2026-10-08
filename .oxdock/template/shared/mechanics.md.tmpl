@@ -1,0 +1,60 @@
+## Machine model
+
+How the machinery operates, for the curious. Behavior contracts live in
+the command and function reference. This section maps those contracts
+onto the moving parts: words, evaluators, and the stack program that
+runs math.
+
+### Words
+
+Every script value is one 128 bit word: a descriptor pointer plus a 64
+bit payload. The descriptor names the type and carries the vtable that
+clones, drops, compares, and renders the value. The payload is either
+inline bytes (for `Copy` scalars that fit in 64 bits, with zero
+allocation) or a pointer to one owned heap box (for containers and
+everything else). Words are fixed size and deterministic to move, which
+is what keeps the host boundary cheap: plain Rust functions returning
+`Result<Value>`, nothing to pin and nothing reference counted. The
+glossary defines each of these terms precisely.
+
+### Two evaluators
+
+Scripts run under two evaluators. The AST evaluator walks the parsed
+tree one step at a time, with line numbers on every failure. The RPN
+evaluator runs arithmetic and comparison as a flat stack program with
+values only and no step numbers. Which functions may run where is the
+[Contexts](#contexts) rule: everything runs on the tree, and only pure
+functions plus explicit `rpn` opt ins run on the stack program.
+
+### The stack program
+
+Parsing lowers each arithmetic or comparison subtree in three passes.
+First, literal only subtrees fold to their value and vanish. Then the
+survivors flatten to postfix ops with resolved arities: loads for
+variables, env reads, and keypaths; prebuilt constants; calls; and one
+op per arithmetic or comparison operator. Anything without a stack
+encoding (`!`, `&&` and `||`, list and map literals, pipes) stays a
+tree node and runs on the AST path. The static pre-pass type checks the
+same program abstractly before the first step runs, so math shape errors
+surface early with the same step free wording the runtime reports. The
+program is built once per parse and runs again on every evaluation, so a
+`WHILE` condition pays lowering once no matter how many iterations it
+runs.
+
+The demos below are computed, not copied: each placeholder lowers its
+expression through the real parser on every docs run, so the shown ops
+cannot drift from the implementation.
+
+`$a + 2 * $b` is the classic shape: loads and one constant feeding two
+operators.
+
+{{ OXDOCK::LOWER_MATH("$a + 2 * $b") }}
+
+`1 + 2 * 3` never reaches the stack machine: both subtrees fold at parse
+time.
+
+{{ OXDOCK::LOWER_MATH("1 + 2 * 3") }}
+
+`!$ready` has no stack encoding and stays on the tree path.
+
+{{ OXDOCK::LOWER_MATH("!$ready") }}

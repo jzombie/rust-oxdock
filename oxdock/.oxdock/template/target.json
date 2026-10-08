@@ -46,6 +46,7 @@
           ".oxdock/template/shared/inline-macro.md.tmpl",
           ".oxdock/template/shared/extend-teaser.md.tmpl",
           ".oxdock/template/shared/host-extension.md.tmpl",
+          ".oxdock/template/shared/mechanics.md.tmpl",
           ".oxdock/template/shared/runtime.md.tmpl",
           ".oxdock/template/shared/error-handling.md.tmpl",
           ".oxdock/template/shared/glossary.md.tmpl"

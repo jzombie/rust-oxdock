@@ -1047,6 +1047,45 @@ pub fn parse_script_with_modules(
     ScriptParser::new_with_modules(input, lower, reserved_names, modules)?.parse()
 }
 
+/// Parse one expression from source text with an empty module scope, for
+/// tooling that shows lowering without running (docs demos, explain output).
+/// No imports exist here, so bare function calls fail and qualified calls
+/// fail against the empty table; only `INSPECT` passes through untouched.
+/// Arithmetic, comparison, variables, env reads, keypaths, and literals
+/// lower normally, with literal only subtrees folded before flattening.
+pub fn parse_expression_str(input: &str) -> ParseResult<Expr> {
+    use pest::Parser;
+    // `Rule::expr` leaves trailing whitespace and newlines unconsumed, so
+    // lex the trimmed text and measure the span against it: otherwise padded
+    // but valid input fails the full consumption check below.
+    let trimmed = input.trim();
+    let pairs = lexer::LanguageParser::parse(Rule::expr, trimmed).map_err(parse_pest_error)?;
+    let pair = pairs.into_iter().next().ok_or_else(|| {
+        ParseError::structural(
+            "expr",
+            "empty expression".to_string(),
+            &span_for_line(trimmed, 1),
+        )
+    })?;
+    if pair.as_span().end() != trimmed.len() {
+        return Err(ParseError::structural(
+            "expr",
+            format!("invalid expression {input:?}"),
+            &span_of(&pair, trimmed),
+        ));
+    }
+    let ctx = span_of(&pair, trimmed);
+    let reserved = HashSet::new();
+    let func_scopes = RefCell::new(vec![HashSet::new()]);
+    let modules = ModuleTable {
+        modules: std::collections::HashMap::new(),
+    };
+    let import_scopes = RefCell::new(vec![Vec::new()]);
+    let lower = crate::commands::lower_command as fn(&str, Vec<Arg>) -> ParseResult<StepKind>;
+    let lctx = LowerCtx::new(&lower, &reserved, &func_scopes, &modules, &import_scopes);
+    parse_expr(&ctx, &lctx, pair)
+}
+
 pub fn parse_guard_expr_str(input: &str) -> ParseResult<GuardExpr> {
     use pest::Parser;
     let pairs = lexer::LanguageParser::parse(Rule::guard_expr, input).map_err(parse_pest_error)?;

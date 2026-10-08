@@ -3,12 +3,136 @@ use oxdock_core::startup_descriptors;
 use oxdock_core::{ArgType, CommandMeta, all_metadata, all_structural_metadata};
 use oxdock_core::{FuncMeta, FuncParam, TypeDescriptor, TypeTag, builtin_function_metas};
 use oxdock_markdown_plugin::markdown::escape_table_cell;
+use oxdock_parser::MathOp;
 use std::collections::HashSet;
 
 /// GitHub heading anchor for a `### NAME` section: lowercase. Command names
 /// are `[A-Z_]+`, so lowercasing is the whole transformation.
 fn index_anchor(name: &str) -> String {
     name.to_lowercase()
+}
+
+/// GitHub heading anchor for a context section: `AST` renders as
+/// `#context-ast`, matching the `### Context: AST` heading GitHub slugs
+/// by lowercasing, dropping the colon, and turning the space into a dash.
+fn context_anchor(name: &str) -> String {
+    format!("context-{}", name.to_lowercase())
+}
+
+/// Normative context definitions: the single source for the generated
+/// `## Contexts` section. Short rule statements only. The long form
+/// evaluator essay stays solely in the shared host extension fragment.
+struct ContextDef {
+    name: &'static str,
+    body: &'static str,
+}
+
+const CONTEXTS: &[ContextDef] = &[
+    ContextDef {
+        name: "AST",
+        body: "The parsed tree of a script, walked one step at a time. \
+         Statements, declarations, scopes, pipes, and IO live here. \
+         Every step knows its line number, so failures name it. \
+         Every function runs in this context.",
+    },
+    ContextDef {
+        name: "RPN",
+        body: "Arithmetic and comparison expressions compiled to a flat \
+         stack program of values with no statements, scopes, pipes, or \
+         step numbers. Pure functions run here with no flag. Stateful \
+         functions run here only when they opt in with `#[oxdock_func(rpn)]`, \
+         which is reserved for read only queries that stay meaningful \
+         inside math (`GLOB`, `LOAD_TOML`, `LOAD_JSON` do this). A call \
+         that fails inside math reports the bare error with no step number.",
+    },
+];
+
+/// One op of a lowered math program, rendered for the live lowering demo.
+/// The match is exhaustive over `MathOp`, so a new op is a compile error
+/// here until its rendering exists: the docs cannot silently miss it.
+fn render_math_op(op: &MathOp) -> String {
+    match op {
+        MathOp::PushConst(value) => format!("PushConst({value})"),
+        MathOp::LoadVar(name) => format!("LoadVar(${name})"),
+        MathOp::LoadEnv(key) => format!("LoadEnv(env:{key})"),
+        MathOp::LoadKeyPath { base, keys } => {
+            let mut rendered = format!("${base}");
+            for key in keys {
+                rendered.push('.');
+                rendered.push_str(key);
+            }
+            format!("LoadKeyPath({rendered})")
+        }
+        MathOp::Call { name, arity } => format!("Call({name}/{arity})"),
+        MathOp::Inspect(name) => format!("Inspect(${name})"),
+        MathOp::Neg => "Neg".to_string(),
+        MathOp::Add => "Add".to_string(),
+        MathOp::Sub => "Sub".to_string(),
+        MathOp::Mul => "Mul".to_string(),
+        MathOp::Div => "Div".to_string(),
+        MathOp::Lt => "Lt".to_string(),
+        MathOp::Le => "Le".to_string(),
+        MathOp::Gt => "Gt".to_string(),
+        MathOp::Ge => "Ge".to_string(),
+        MathOp::Eq => "Eq".to_string(),
+        MathOp::Ne => "Ne".to_string(),
+    }
+}
+
+/// Lower one expression to its op program and render the result as a
+/// `text` fence, for live machine docs. Computed from the real parser on
+/// every docs run, so the shown ops cannot drift from the implementation:
+/// folded literals vanish, unencodable shapes report the tree node.
+pub(crate) fn render_lowered_math(source: &str) -> Result<String> {
+    let expr = oxdock_parser::parse_expression_str(source)
+        .map_err(|err| anyhow::anyhow!("cannot lower {source:?}: {err}"))?;
+    let body = match &expr {
+        oxdock_parser::Expr::CompiledMath(ops) => {
+            let lines = ops
+                .iter()
+                .enumerate()
+                .map(|(index, op)| format!("{}. {}", index + 1, render_math_op(op)))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let count = match ops.len() {
+                1 => "1 op".to_string(),
+                n => format!("{n} ops"),
+            };
+            format!("lowers to {count}:\n{lines}")
+        }
+        oxdock_parser::Expr::Literal(value) => {
+            format!("folds to the literal `{value}` at parse time: no ops are emitted")
+        }
+        other => format!("has no RPN encoding and stays a tree node: `{other}`"),
+    };
+    Ok(format!("```text\n`{source}` {body}\n```"))
+}
+
+/// Context reference for the function listings: one `## Contexts` section
+/// with one `### Context: NAME` subsection per context, derived from the
+/// `CONTEXTS` table above. Rendered as its own generated fragment and
+/// included exactly once per master that embeds any function reference,
+/// so N function sections compose with a single unambiguous link target.
+pub(crate) fn render_context_reference() -> String {
+    let mut out = String::new();
+    out.push_str(
+        "<!-- GENERATED by docs-gen from function context metadata. Do not edit by hand. -->\n",
+    );
+    out.push_str("## Contexts\n\n");
+    out.push_str(
+        "Every function lists the contexts it runs in. `AST` is always \
+         available. `RPN` additionally requires a pure function or an \
+         explicit `rpn` opt in.\n\n",
+    );
+    for def in CONTEXTS {
+        out.push_str(&format!("### Context: {}\n\n", def.name));
+        out.push_str(&escape_placeholders(&format!("{}\n\n", def.body)));
+    }
+    while out.ends_with('\n') {
+        out.pop();
+    }
+    out.push('\n');
+    out
 }
 
 /// Escape placeholders in emitted prose and examples so the reference
@@ -409,10 +533,20 @@ pub(crate) fn render_plugin_reference(metas: &[FuncMeta], module: &str) -> Strin
         // would print a literal backslash (closed `#[values]` sets
         // render `a | b`).
         out.push_str(&format!("**Signature:** `{}`\n\n", render_signature(meta)));
-        out.push_str(&format!(
-            "**Contexts:** {}\n\n",
-            if meta.rpn { "AST, RPN" } else { "AST only" },
-        ));
+        // Links only, never headings: the `## Contexts` targets live in
+        // the dedicated context reference fragment, included exactly once
+        // per master, so composed documents keep a single unambiguous
+        // `#context-ast` and `#context-rpn`.
+        let contexts = if meta.rpn {
+            format!(
+                "[`AST`](#{}), [`RPN`](#{})",
+                context_anchor("AST"),
+                context_anchor("RPN"),
+            )
+        } else {
+            format!("[`AST`](#{}) only", context_anchor("AST"))
+        };
+        out.push_str(&format!("**Contexts:** {contexts}\n\n"));
         out.push_str(&render_parameters(meta));
     }
     while out.ends_with('\n') {
@@ -674,16 +808,139 @@ mod tests {
             .nth(1)
             .expect("GLOB section renders");
         assert!(
-            glob.contains("**Contexts:** AST, RPN"),
-            "RPN-capable functions must render both contexts",
+            glob.contains("**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)"),
+            "RPN-capable functions must link both contexts",
         );
         let types = reference
             .split("### STD::TYPES\n")
             .nth(1)
             .expect("TYPES section renders");
         assert!(
-            types.contains("**Contexts:** AST only"),
-            "AST-only functions must render their restriction",
+            types.contains("**Contexts:** [`AST`](#context-ast) only"),
+            "AST-only functions must link their restriction",
         );
+        // Decoupling: function fragments emit links only. The `## Contexts`
+        // targets live in the dedicated context reference fragment, included
+        // exactly once per master, so composed documents keep one target.
+        assert!(
+            !reference.contains("## Contexts"),
+            "function reference must not carry its own context section",
+        );
+        assert!(
+            !reference.contains("### Context:"),
+            "function reference must not carry context subsections",
+        );
+    }
+
+    #[test]
+    fn context_reference_renders_one_section_with_both_contexts() {
+        let contexts = render_context_reference();
+        assert_eq!(
+            contexts.matches("## Contexts").count(),
+            1,
+            "exactly one context section: {contexts}",
+        );
+        for name in ["AST", "RPN"] {
+            assert!(
+                contexts.contains(&format!("### Context: {name}")),
+                "context reference must document {name}: {contexts}",
+            );
+        }
+        // Self contained: no outbound in-page links, so the section renders
+        // identically in plugin READMEs that lack the host extension essay.
+        assert!(
+            !contexts.contains("](#"),
+            "context section must not link outside itself: {contexts}",
+        );
+    }
+
+    #[test]
+    fn every_math_op_renders() {
+        // Pins the exact bytes the live lowering demo shows. The renderer
+        // match is exhaustive, so a new `MathOp` breaks compilation until
+        // its rendering exists; this test then pins the new bytes too.
+        use oxdock_core::Value;
+        let cases = [
+            (MathOp::PushConst(Value::int(2)), "PushConst(2)"),
+            (MathOp::LoadVar("a".to_string()), "LoadVar($a)"),
+            (MathOp::LoadEnv("HOME".to_string()), "LoadEnv(env:HOME)"),
+            (
+                MathOp::LoadKeyPath {
+                    base: "m".to_string(),
+                    keys: vec!["key".to_string(), "0".to_string()],
+                },
+                "LoadKeyPath($m.key.0)",
+            ),
+            (
+                MathOp::Call {
+                    name: "STD::ABS".to_string(),
+                    arity: 1,
+                },
+                "Call(STD::ABS/1)",
+            ),
+            (MathOp::Inspect("x".to_string()), "Inspect($x)"),
+            (MathOp::Neg, "Neg"),
+            (MathOp::Add, "Add"),
+            (MathOp::Sub, "Sub"),
+            (MathOp::Mul, "Mul"),
+            (MathOp::Div, "Div"),
+            (MathOp::Lt, "Lt"),
+            (MathOp::Le, "Le"),
+            (MathOp::Gt, "Gt"),
+            (MathOp::Ge, "Ge"),
+            (MathOp::Eq, "Eq"),
+            (MathOp::Ne, "Ne"),
+        ];
+        for (op, expected) in cases {
+            assert_eq!(render_math_op(&op), expected, "op renders as {expected}");
+        }
+    }
+
+    #[test]
+    fn lowered_math_shows_real_ops_folding_and_fallback() {
+        let program = render_lowered_math("$a + 2 * $b").expect("lowers");
+        assert_eq!(
+            program,
+            indoc::indoc! {r#"
+                ```text
+                `$a + 2 * $b` lowers to 5 ops:
+                1. LoadVar($a)
+                2. PushConst(2)
+                3. LoadVar($b)
+                4. Mul
+                5. Add
+                ```"#}
+        );
+        let folded = render_lowered_math("1 + 2 * 3").expect("folds");
+        assert_eq!(
+            folded,
+            indoc::indoc! {r#"
+                ```text
+                `1 + 2 * 3` folds to the literal `7` at parse time: no ops are emitted
+                ```"#}
+        );
+        let tree = render_lowered_math("!$ready").expect("stays a tree");
+        assert!(
+            tree.contains("has no RPN encoding and stays a tree node"),
+            "fallback names itself: {tree}"
+        );
+        let padded = render_lowered_math("  $a + 2 * $b\n").expect("padded lowers");
+        assert!(
+            padded.contains("1. LoadVar($a)"),
+            "padded input lowers like trimmed input: {padded}"
+        );
+        assert!(
+            render_lowered_math("F($b)").is_err(),
+            "calls need imports and fail in the empty demo scope",
+        );
+    }
+
+    #[test]
+    fn context_anchors_match_github_heading_slugs() {
+        // `### Context: AST` slugs to `#context-ast` under GitHub rules
+        // (lowercase, colon dropped, space to dash), which is what the
+        // `**Contexts:**` links point at.
+        assert_eq!(context_anchor("AST"), "context-ast");
+        assert_eq!(context_anchor("RPN"), "context-rpn");
     }
 }

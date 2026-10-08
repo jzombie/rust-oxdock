@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [0.23.0-alpha] - 2026-10-08
+
+### Added
+
+- Linkable evaluation contexts (#184): function reference `**Contexts:**` lines now link to a generated `## Contexts` section (`#context-ast`, `#context-rpn`), rendered once per document from function metadata, so every builtin and plugin function documents where it runs.
+- New `Machine model` docs section covering words, the two evaluators, and the stack program, with live lowering demos: `OXDOCK::LOWER_MATH($src)` lowers an expression through the real parser at docs render time and bakes the true op program into the page, so the shown bytecode cannot drift from the implementation. The op renderer matches exhaustively over `MathOp` and exact-output unit tests pin the shown bytes.
+- `oxdock_parser::parse_expression_str`: parse one expression from source text with an empty module scope, for tooling that shows lowering without running.
+- CI `docs-fresh` job regenerates docs with `cargo run -p docs-gen` and fails on any diff, so stale generated docs break the build.
+
+### Fixed
+
+- `CITATION.cff` was three releases stale (`0.20.0-alpha` while the workspace moved on); it is now rendered by `docs-gen` from the workspace manifest like every other generated artifact, so its version tracks releases automatically.
+
 ## [0.22.0-alpha] - 2026-10-07
 
 ### Added
