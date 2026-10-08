@@ -35,8 +35,9 @@ mod serve;
 /// `NET_CLOSE`, `NET_CONNECT`, `NET_PORT`, `NET_ADDR`); with `--features
 /// ssh` it additionally registers the SSH server and client (`SSH_SERVE`,
 /// `SSH_ACCEPT`, `SSH_DEQUEUE`, `SSH_PUMP_CHANNEL`, `SSH_CLOSE`,
-/// `SSH_CONNECT`, `SSH_PUMP`) from oxdock-ssh-plugin. Without `net` only
-/// STD builtins remain.
+/// `SSH_CONNECT`, `SSH_PUMP`) from oxdock-ssh-plugin; with `--features
+/// markdown` it registers the MARKDOWN helpers (`MAP_TO_MD_TABLE`,
+/// `TOC`, `PARSE`, `SECTION`). Without features only STD builtins remain.
 fn cli_host_modules() -> Vec<HostModule<DefaultProcessManager>> {
     cli_host_modules_with(None)
 }
@@ -66,9 +67,9 @@ fn cli_host_modules_with(
     #[cfg(feature = "net")] registry: Option<&Arc<EndpointRegistry>>,
     #[cfg(not(feature = "net"))] registry: Option<&Arc<()>>,
 ) -> Vec<HostModule<DefaultProcessManager>> {
-    #[cfg(feature = "net")]
+    #[cfg(any(feature = "net", feature = "markdown"))]
     let mut modules: Vec<HostModule<DefaultProcessManager>> = Vec::new();
-    #[cfg(not(feature = "net"))]
+    #[cfg(not(any(feature = "net", feature = "markdown")))]
     let modules: Vec<HostModule<DefaultProcessManager>> = Vec::new();
     #[cfg(feature = "net")]
     {
@@ -86,6 +87,8 @@ fn cli_host_modules_with(
             modules.push(ssh_module);
         }
     }
+    #[cfg(feature = "markdown")]
+    modules.push(oxdock_markdown_plugin::module());
     let _ = registry;
     modules
 }

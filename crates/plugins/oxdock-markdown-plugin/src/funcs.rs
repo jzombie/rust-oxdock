@@ -80,6 +80,24 @@ fn parse(
     Ok(Value::list(items))
 }
 
+/// Extract one document section by heading prefix.
+///
+/// Finds the first heading whose plain text starts with `needle` and
+/// returns the heading plus its body, stopping before the next heading
+/// of equal or higher level. Fenced code headings never match. Missing
+/// needles fail naming the needle, so release notes extraction fails
+/// loudly instead of publishing an empty section.
+#[oxdock_func(pure, returns = TypeTag::String)]
+fn section(
+    /// Markdown document to slice.
+    md: String,
+    /// Heading text prefix selecting the section (e.g. `[0.24.0-alpha]`).
+    needle: String,
+) -> Result<Value> {
+    let body = crate::markdown::extract_section(&md, &needle)?;
+    Ok(Value::string(body))
+}
+
 /// The `MARKDOWN` host module for OxDock scripts and placeholders.
 pub fn module_with<P: ProcessManager>() -> HostModule<P> {
     HostModule {
@@ -88,6 +106,7 @@ pub fn module_with<P: ProcessManager>() -> HostModule<P> {
             MapToMdTable::registration(),
             Toc::registration(),
             Parse::registration(),
+            Section::registration(),
         ],
         types: vec![],
         record_schemas: vec![],

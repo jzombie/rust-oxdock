@@ -431,6 +431,68 @@ pub fn extract_headings(document: &str, min_level: u8, max_level: u8) -> Vec<Hea
     out
 }
 
+/// Extract one document section by heading prefix.
+///
+/// Finds the first heading whose plain text starts with `needle` and
+/// returns the heading line plus its body, stopping before the next
+/// heading of equal or higher level. Fenced code headings never match:
+/// only real heading events qualify, so fences showing `##` shapes stay
+/// invisible. The slice keeps its heading and ends with exactly one
+/// trailing newline.
+pub fn extract_section(document: &str, needle: &str) -> Result<String> {
+    use pulldown_cmark::{Event, Parser, Tag, TagEnd};
+    let mut headings: Vec<(u8, String, usize, usize)> = Vec::new();
+    let mut current_level: Option<u8> = None;
+    let mut current_text = String::new();
+    let mut current_start = 0usize;
+    for (event, range) in Parser::new(document).into_offset_iter() {
+        match event {
+            Event::Start(Tag::Heading { level, .. }) => {
+                current_level = Some(level as u8);
+                current_text.clear();
+                current_start = range.start;
+            }
+            Event::Text(text) | Event::Code(text) => {
+                if current_level.is_some() {
+                    current_text.push_str(&text);
+                }
+            }
+            Event::End(TagEnd::Heading(_)) => {
+                if let Some(level) = current_level.take() {
+                    let text = current_text.trim().to_string();
+                    if !text.is_empty() {
+                        headings.push((level, text, current_start, range.end));
+                    }
+                }
+                current_text.clear();
+            }
+            _ => {}
+        }
+    }
+    let start_index = headings
+        .iter()
+        .position(|(_, text, _, _)| text.starts_with(needle))
+        .ok_or_else(|| anyhow::anyhow!("no heading starts with {needle:?}"))?;
+    let level = headings[start_index].0;
+    let slice_start = headings[start_index].2;
+    let mut slice_end = document.len();
+    for next in headings.iter().skip(start_index + 1) {
+        if next.0 <= level {
+            slice_end = next.2;
+            break;
+        }
+    }
+    let mut body = document
+        .get(slice_start..slice_end)
+        .ok_or_else(|| anyhow::anyhow!("section offsets out of bounds"))?
+        .to_string();
+    while body.ends_with('\n') || body.ends_with('\r') {
+        body.pop();
+    }
+    body.push('\n');
+    Ok(body)
+}
+
 /// Render headings as nested bullets relative to `min_level`.
 fn render_toc_tree(headings: &[Heading], min_level: u8) -> String {
     let mut out = String::new();
@@ -707,5 +769,49 @@ mod tests {
     fn toc_empty_document_renders_empty() {
         let options = resolve_toc_options(&toc_map(&[])).expect("options");
         assert_eq!(generate_toc("# Only title\n", &options).expect("toc"), "");
+    }
+
+    #[test]
+    fn section_extracts_heading_plus_body_up_to_next_sibling() {
+        let document = indoc::indoc! {r#"
+            # Changelog
+
+            ## [0.24.0-alpha] - 2026-10-08
+
+            ### Added
+
+            - First line.
+
+            ```text
+            ## Not a heading
+            ```
+
+            ## [0.23.0-alpha] - 2026-10-07
+
+            ### Added
+
+            - Older line.
+        "#};
+        assert_eq!(
+            extract_section(document, "[0.24.0-alpha]").expect("section"),
+            indoc::indoc! {r#"
+                ## [0.24.0-alpha] - 2026-10-08
+
+                ### Added
+
+                - First line.
+
+                ```text
+                ## Not a heading
+                ```
+            "#}
+        );
+    }
+
+    #[test]
+    fn section_missing_needle_names_the_needle() {
+        let err = extract_section("# Title\n", "[9.9.9]").expect_err("missing must fail");
+        let text = format!("{err:#}");
+        assert!(text.contains("[9.9.9]"), "error names the needle: {text}");
     }
 }

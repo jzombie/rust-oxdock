@@ -34,6 +34,26 @@ heading with `level`, `text`, and `anchor` keys.
 
 **Returns:** `LIST<ANY>`
 
+### SECTION
+
+Extract one document section by heading prefix.
+
+Finds the first heading whose plain text starts with `needle` and
+returns the heading plus its body, stopping before the next heading
+of equal or higher level. Fenced code headings never match. Missing
+needles fail naming the needle, so release notes extraction fails
+loudly instead of publishing an empty section.
+
+**Signature:** `SECTION($md: STRING, $needle: STRING) -> STRING`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+- `$md` (`STRING`): Markdown document to slice.
+- `$needle` (`STRING`): Heading text prefix selecting the section (e.g. `[0.24.0-alpha]`).
+
+**Returns:** `STRING`
+
 ### TOC
 
 Render a table of contents for markdown text, immediately.
