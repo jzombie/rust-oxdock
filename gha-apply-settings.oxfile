@@ -14,10 +14,10 @@ INHERIT_ENV [CARGO_REGISTRY_TOKEN]
 WORKSPACE LOCAL
 
 LET $fleet: MAP<ANY> = LOAD_JSON(".github/settings.json")
-LET $repos: LIST<ANY> = $fleet.repos
+LET $repos: LIST<MAP<ANY>> = $fleet.repos
 FOR $repo: MAP<ANY> IN $repos {
     LET $name: STRING = $repo.name
-    LET $envs: LIST<ANY> = $repo.environments
+    LET $envs: LIST<MAP<ANY>> = $repo.environments
     FOR $env: MAP<ANY> IN $envs {
         LET $env_name: STRING = $env.name
         LET $body: MAP<ANY> = {}
@@ -26,7 +26,7 @@ FOR $repo: MAP<ANY> IN $repos {
         WRITE "target/settings-body.json" $json
         RUN ["gh", "api", "repos/{{ $name }}/environments/{{ $env_name }}", "-X", "PUT", "--input", "target/settings-body.json"]
     }
-    LET $secrets: LIST<ANY> = $repo.secrets
+    LET $secrets: LIST<STRING> = $repo.secrets
     FOR $secret: STRING IN $secrets {
         IF $secret == "CARGO_REGISTRY_TOKEN" {
             LET $value: STRING = "{{ env:CARGO_REGISTRY_TOKEN }}"
