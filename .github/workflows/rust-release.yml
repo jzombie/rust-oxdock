@@ -66,8 +66,9 @@ on:
         default: true
         type: boolean
       pipeline_ref:
-        description: "Ref of this repo to take scripts and runner source from"
-        required: true
+        description: "Ref of this repo to take scripts and runner source from (empty runs the dispatched branch in place: use for bootstrap before the first tag exists)"
+        required: false
+        default: ""
         type: string
   workflow_call:
     inputs:
@@ -161,8 +162,11 @@ jobs:
 
       # Pipeline source: scripts plus the runner build. Callers pin this
       # ref explicitly (a tag for stability); this repo dispatches with
-      # the branch under release (typically main).
+      # the branch under release (typically main). Empty means local:
+      # the dispatched branch already carries the scripts (bootstrap
+      # before the first tag exists), so no second checkout runs.
       - name: Checkout pipeline source
+        if: ${{ inputs.pipeline_ref != '' }}
         uses: actions/checkout@v6
         with:
           repository: jzombie/rust-oxdock
@@ -190,7 +194,27 @@ jobs:
       # the pipeline checkout instead of the caller tree. The CLI offers
       # no --root flag, so the documented environment override is the
       # mechanism.
+      # Local pipeline (empty pipeline_ref): the dispatched branch
+      # already holds the scripts, so build and run in place.
       - name: Run the release script
+        if: ${{ inputs.pipeline_ref == '' }}
+        shell: bash
+        env:
+          RELEASE_CONFIRM: ${{ inputs.confirm_version }}
+          RELEASE_DRY_RUN: ${{ inputs.dry_run }}
+          RELEASE_BINARY: ${{ inputs.binary }}
+          RELEASE_BINARIES: ${{ inputs.binaries }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          cargo run -p oxdock --features markdown -- ./gha-rust-release.oxfile
+
+      # Pinned pipeline: runner builds from the central source at the
+      # pinned ref, operating on the caller tree via the documented
+      # workspace override.
+      - name: Run the pinned release script
+        if: ${{ inputs.pipeline_ref != '' }}
         shell: bash
         env:
           OXDOCK_WORKSPACE_ROOT: ${{ github.workspace }}
