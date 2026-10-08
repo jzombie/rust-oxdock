@@ -16,6 +16,13 @@
           ".oxdock/template/readme/generated/*"
         ]
       }
+    },
+    {
+      "name": "citation-cff",
+      "out": "CITATION.cff",
+      "values": ".oxdock/template/readme/values.json",
+      "template": ".oxdock/template/readme/CITATION.cff.tmpl",
+      "fragments": {}
     }
   ]
 }

@@ -47,15 +47,27 @@ fn workspace_version<P: ProcessManager>(cx: &mut StepCtx<P>) -> Result<Value> {
 }
 
 /// Workspace citation metadata from the root manifest: first author
-/// display name, license, and repository. Citation rendering must use
-/// this map instead of copying manifest values into templates or
-/// checked-in values files.
+/// display name plus its structured given, family, and email parts,
+/// license, and repository. Citation rendering must use this map instead
+/// of copying manifest values into templates or checked-in values files.
 #[oxdock_func(returns = TypeTag::Map)]
 fn workspace_package<P: ProcessManager>(cx: &mut StepCtx<P>) -> Result<Value> {
     let (root, resolver) = docs_resolver(cx)?;
     let package = cargo::workspace_package(&root, &resolver)?;
     let mut entries = BTreeMap::new();
     entries.insert("author".to_string(), Value::string(package.author));
+    entries.insert(
+        "author_given".to_string(),
+        Value::string(package.author_given),
+    );
+    entries.insert(
+        "author_family".to_string(),
+        Value::string(package.author_family),
+    );
+    entries.insert(
+        "author_email".to_string(),
+        Value::string(package.author_email),
+    );
     entries.insert("license".to_string(), Value::string(package.license));
     entries.insert("repository".to_string(), Value::string(package.repository));
     Ok(Value::map(entries))
