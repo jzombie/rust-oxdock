@@ -50,6 +50,12 @@ IF $dry == "false" {
     RUN ["git", "push", "origin", "v{{ $version }}"]
     # Release notes live under target/ (gitignored) so the notes file
     # itself never trips cargo's clean-tree publish guard.
+    # Resume safety: a run that dies mid-release must converge on
+    # re-dispatch. Deleting any existing release first makes creation
+    # unconditional: first runs delete nothing, resumed runs replace the
+    # partial release with a fresh one from current notes. `|| cd .`
+    # swallows the delete when nothing exists (cmd has no `true`).
+    RUN gh release delete "v{{ $version }}" --yes || cd .
     # The three archives are the build matrix output, downloaded by the
     # workflow into target/artifacts/ under these exact names (see the
     # asset contract in release.yml): the tag carries the version, so

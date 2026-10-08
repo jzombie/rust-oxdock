@@ -61,6 +61,16 @@ fn release_script_parses() -> Result<()> {
         !text.contains("\"publish\", \"-p\""),
         "no per-crate publish flags"
     );
+    // Resume hardening: an existing release is deleted first so
+    // creation stays unconditional across re-dispatches.
+    assert!(
+        text.contains("\"gh\", \"release\", \"create\""),
+        "release creation step exists"
+    );
+    assert!(
+        text.contains("gh release delete"),
+        "stale release cleanup exists"
+    );
     Ok(())
 }
 
