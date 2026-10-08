@@ -54,7 +54,7 @@ SSH_CLOSE($m.server)
 
 **Signature:** `SSH_ACCEPT($server: SSH_SERVER, $in_pipe: PIPE, $out_pipe: PIPE) -> MAP<closed: BOOL>`
 
-**Contexts:** AST only
+**Contexts:** [`AST`](#context-ast) only
 
 **Parameters:**
 - `$server` (`SSH_SERVER`): Server handle from `SSH_SERVE`.
@@ -74,7 +74,7 @@ returns BOOL true when no thread remains.
 
 **Signature:** `SSH_CLOSE($server: SSH_SERVER) -> BOOL`
 
-**Contexts:** AST only
+**Contexts:** [`AST`](#context-ast) only
 
 **Parameters:**
 - `$server` (`SSH_SERVER`): Server handle from `SSH_SERVE`.
@@ -87,7 +87,7 @@ Open an SSH client session into pipes. Target shapes: a logical port (CLI-mapped
 
 **Signature:** `SSH_CONNECT($target: STRING, $username: STRING, $password: STRING, $in_pipe: PIPE, $out_pipe: PIPE) -> MAP`
 
-**Contexts:** AST only
+**Contexts:** [`AST`](#context-ast) only
 
 **Parameters:**
 - `$target` (`STRING`): Dial target: logical port, service name, served address, or `host:port`.
@@ -156,7 +156,7 @@ SSH_CLOSE($m.server)
 
 **Signature:** `SSH_DEQUEUE($server: SSH_SERVER) -> MAP<session: SSH_SESSION, command: STRING, username: STRING, addr: STRING>`
 
-**Contexts:** AST only
+**Contexts:** [`AST`](#context-ast) only
 
 **Parameters:**
 - `$server` (`SSH_SERVER`): Server handle from `SSH_SERVE`.
@@ -186,7 +186,7 @@ relay) reaches the child; the working directory comes from the script.
 
 **Signature:** `SSH_PTY_RUN($session: SSH_SESSION, $argv: LIST<STRING>, $rows: INT, $cols: INT, $in_pipe: PIPE, $out_pipe: PIPE) -> INT`
 
-**Contexts:** AST only
+**Contexts:** [`AST`](#context-ast) only
 
 **Parameters:**
 - `$session` (`SSH_SESSION`): Session handle from `SSH_DEQUEUE`.
@@ -209,7 +209,7 @@ the other end is live (usually an `ASYNC` task).
 
 **Signature:** `SSH_PUMP($from_pipe: PIPE, $to_pipe: PIPE) -> INT`
 
-**Contexts:** AST only
+**Contexts:** [`AST`](#context-ast) only
 
 **Parameters:**
 - `$from_pipe` (`PIPE`): Source pipe to drain.
@@ -229,7 +229,7 @@ Returns a MAP with `closed` (BOOL).
 
 **Signature:** `SSH_PUMP_CHANNEL($session: SSH_SESSION, $in_pipe: PIPE, $out_pipe: PIPE) -> MAP<closed: BOOL>`
 
-**Contexts:** AST only
+**Contexts:** [`AST`](#context-ast) only
 
 **Parameters:**
 - `$session` (`SSH_SESSION`): Session handle from `SSH_DEQUEUE` (pump ends take once).
@@ -245,7 +245,7 @@ Serve SSH on a virtual service endpoint.
 
 **Signature:** `SSH_SERVE($bind: STRING, $options: MAP<username: STRING, password: STRING, key_path?: STRING>) -> MAP<server: SSH_SERVER, addr: STRING, username: STRING, password: STRING, virtual: STRING>`
 
-**Contexts:** AST only
+**Contexts:** [`AST`](#context-ast) only
 
 **Parameters:**
 - `$bind` (`STRING`): Virtual service endpoint to serve (logical port or service name).

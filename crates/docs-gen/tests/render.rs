@@ -588,6 +588,102 @@ fn toc_renders_immediately_without_deferral() {
     miri,
     ignore = "fixture render needs a host tempdir filesystem, blocked by Miri isolation"
 )]
+fn context_reference_composes_once_with_resolving_links() {
+    // Two generated inputs (function plus context references) composed in
+    // one master: every `**Contexts:**` link resolves against exactly one
+    // `## Contexts` section, with no suffixed duplicate anchors.
+    let tree = vec![
+        ("Cargo.toml", MANIFEST),
+        (
+            "docs-gen.json",
+            r#"{"global_values": "base.json", "scopes": ["."], "generated": [{"key": "function_reference", "out": "gen/fn.md.tmpl"}, {"key": "context_reference", "out": "gen/ctx.md.tmpl"}]}"#,
+        ),
+        ("base.json", BASE_VALUES),
+        (
+            "target.json",
+            r#"{"targets": [{"name": "t", "out": "out.md", "template": "master.md.tmpl", "values": "values.json", "fragments": {"gen": ["gen/*.md.tmpl"]}}]}"#,
+        ),
+        ("values.json", VALUES),
+        (
+            "master.md.tmpl",
+            "# {{ $docs_global.title }}\n{{ $files.gen.fn }}\n{{ $files.gen.ctx }}\n",
+        ),
+    ];
+    let (_temp, root, resolver) = fixture(&tree);
+    docs_gen::run(root.as_path()).expect("render");
+    let out = read(&resolver, &root, "out.md");
+    assert_eq!(
+        out.matches("## Contexts").count(),
+        1,
+        "exactly one context section: {out}"
+    );
+    for heading in ["### Context: AST", "### Context: RPN"] {
+        assert_eq!(
+            out.matches(heading).count(),
+            1,
+            "exactly one {heading}: {out}"
+        );
+    }
+    let mut linked = 0;
+    for line in out.lines().filter(|line| line.starts_with("**Contexts:**")) {
+        linked += 1;
+        assert!(
+            line.contains("](#context-ast)"),
+            "every contexts line links AST: {line}"
+        );
+        assert!(
+            !line.contains("AST, RPN") && !line.contains("AST only"),
+            "no plain context text survives: {line}"
+        );
+    }
+    assert!(linked > 0, "function reference renders contexts lines");
+    assert!(
+        !out.contains("#context-ast-1") && !out.contains("#context-rpn-1"),
+        "no suffixed duplicate anchors: {out}"
+    );
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "fixture render needs a host tempdir filesystem, blocked by Miri isolation"
+)]
+fn function_reference_without_context_fragment_leaves_dangling_anchors() {
+    // The negative half of the composition invariant: a master that embeds
+    // a function reference without the context fragment renders links with
+    // no targets, so the missing include is caught instead of silent.
+    let tree = vec![
+        ("Cargo.toml", MANIFEST),
+        (
+            "docs-gen.json",
+            r#"{"global_values": "base.json", "scopes": ["."], "generated": [{"key": "function_reference", "out": "gen/fn.md.tmpl"}]}"#,
+        ),
+        ("base.json", BASE_VALUES),
+        (
+            "target.json",
+            r#"{"targets": [{"name": "t", "out": "out.md", "template": "master.md.tmpl", "values": "values.json", "fragments": {"gen": ["gen/*.md.tmpl"]}}]}"#,
+        ),
+        ("values.json", VALUES),
+        (
+            "master.md.tmpl",
+            "# {{ $docs_global.title }}\n{{ $files.gen.fn }}\n",
+        ),
+    ];
+    let (_temp, root, resolver) = fixture(&tree);
+    docs_gen::run(root.as_path()).expect("render");
+    let out = read(&resolver, &root, "out.md");
+    assert!(out.contains("](#context-ast)"), "links still render: {out}");
+    assert!(
+        !out.contains("### Context: AST"),
+        "missing context fragment leaves links dangling: {out}"
+    );
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "fixture render needs a host tempdir filesystem, blocked by Miri isolation"
+)]
 fn toc_rejects_unknown_defer_targets_at_dispatch() {
     let tree = vec![
         ("Cargo.toml".to_string(), MANIFEST.to_string()),

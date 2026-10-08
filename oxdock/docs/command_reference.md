@@ -2288,7 +2288,7 @@ ASSERT_EQ $decoded "hello"
 
 **Signature:** `STD::BASE64_DECODE($text: STRING) -> STRING`
 
-**Contexts:** AST, RPN
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
 - `$text` (`STRING`): Base64 text to decode.
@@ -2312,7 +2312,7 @@ ASSERT_EQ $encoded "aGVsbG8="
 
 **Signature:** `STD::BASE64_ENCODE($text: STRING) -> STRING`
 
-**Contexts:** AST, RPN
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
 - `$text` (`STRING`): Text to encode.
@@ -2325,7 +2325,7 @@ Describe one function by qualified name.
 
 **Signature:** `STD::DESCRIBE($name: STRING) -> MAP<name: STRING, module: STRING, kind: STRING, params: LIST<MAP<ANY>>, returns: STRING, rpn: BOOL, summary: STRING>`
 
-**Contexts:** AST only
+**Contexts:** [`AST`](#context-ast) only
 
 **Parameters:**
 - `$name` (`STRING`): Qualified function name (`MODULE::NAME`).
@@ -2372,7 +2372,7 @@ ASSERT_EQ $n 2
 
 **Signature:** `STD::EOF($pipe: PIPE) -> BOOL`
 
-**Contexts:** AST only
+**Contexts:** [`AST`](#context-ast) only
 
 **Parameters:**
 - `$pipe` (`PIPE`): Pipe handle to query for end of stream.
@@ -2388,7 +2388,7 @@ Parses f64 (accepts int strings), bails on non-finite or non-numeric.
 
 **Signature:** `STD::FLOAT($val: ANY) -> FLOAT`
 
-**Contexts:** AST, RPN
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
 - `$val` (`ANY`): Value to convert to `FLOAT`.
@@ -2404,7 +2404,7 @@ plus host-registered names.
 
 **Signature:** `STD::FUNCTIONS() -> LIST<STRING>`
 
-**Contexts:** AST only
+**Contexts:** [`AST`](#context-ast) only
 
 **Returns:** `LIST<STRING>`
 
@@ -2417,7 +2417,7 @@ Sorted, root-relative LIST; empty on no match or `..` escape.
 
 **Signature:** `STD::GLOB($pattern: STRING) -> LIST<STRING>`
 
-**Contexts:** AST, RPN
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
 - `$pattern` (`STRING`): Glob pattern matched against workspace paths.
@@ -2434,7 +2434,7 @@ tripping the strict missing-key error.
 
 **Signature:** `STD::HAS_KEY($map: MAP<ANY>, $key: STRING) -> BOOL`
 
-**Contexts:** AST, RPN
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
 - `$map` (`MAP<ANY>`): Map to probe.
@@ -2452,7 +2452,7 @@ when integral and finite.
 
 **Signature:** `STD::INT($val: ANY) -> INT`
 
-**Contexts:** AST, RPN
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
 - `$val` (`ANY`): Value to convert to `INT`.
@@ -2477,7 +2477,7 @@ reads the step context like the other introspection functions.
 
 **Signature:** `STD::IS_TERMINAL($stream_name: STRING = "stdin" | "stdout" | "stderr") -> BOOL`
 
-**Contexts:** AST only
+**Contexts:** [`AST`](#context-ast) only
 
 **Parameters:**
 - `$stream_name` (`STRING = "stdin" | "stdout" | "stderr"`): Stream name: `stdin`, `stdout`, or `stderr` (exact match).
@@ -2496,7 +2496,7 @@ assignment.
 
 **Signature:** `STD::LOAD_JSON($path: STRING) -> ANY`
 
-**Contexts:** AST, RPN
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
 - `$path` (`STRING`): Workspace file path to load and parse as JSON.
@@ -2512,7 +2512,7 @@ Reads a workspace file and parses TOML into a DSL value.
 
 **Signature:** `STD::LOAD_TOML($path: STRING) -> MAP<ANY>`
 
-**Contexts:** AST, RPN
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
 - `$path` (`STRING`): Workspace file path to load and parse as TOML.
@@ -2529,7 +2529,7 @@ instead of silently shadowing each other.
 
 **Signature:** `STD::MAP_SET($map: MAP<ANY>, $key: STRING, $value: ANY) -> MAP<ANY>`
 
-**Contexts:** AST, RPN
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
 - `$map` (`MAP<ANY>`): Map to insert into.
@@ -2550,7 +2550,7 @@ Non MAP elements fail naming their position.
 
 **Signature:** `STD::MERGE_MAPS($maps: LIST<MAP<ANY>>, $policy: STRING = "fail_on_duplicate" | "overwrite") -> MAP<ANY>`
 
-**Contexts:** AST, RPN
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
 - `$maps` (`LIST<MAP<ANY>>`): LIST of MAPs to merge in order.
@@ -2584,7 +2584,7 @@ ASSERT_EQ $items.1 2
 
 **Signature:** `STD::PARSE_JSON($text: STRING) -> ANY`
 
-**Contexts:** AST, RPN
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
 - `$text` (`STRING`): JSON text already held in memory.
@@ -2601,7 +2601,7 @@ contents, and captured text share one JSON/TOML shape.
 
 **Signature:** `STD::PARSE_TOML($text: STRING) -> MAP<ANY>`
 
-**Contexts:** AST, RPN
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
 - `$text` (`STRING`): TOML text already held in memory.
@@ -2618,7 +2618,7 @@ there is no RPN arm for filesystem IO.
 
 **Signature:** `STD::PATH_TYPE($path: STRING) -> STRING`
 
-**Contexts:** AST only
+**Contexts:** [`AST`](#context-ast) only
 
 **Parameters:**
 - `$path` (`STRING`): Workspace path of the entry to describe.
@@ -2651,7 +2651,7 @@ ASSERT_EQ $one $two
 
 **Signature:** `STD::RAND($options?: MAP<seed?: INT>) -> FLOAT`
 
-**Contexts:** AST only
+**Contexts:** [`AST`](#context-ast) only
 
 **Parameters:**
 - `$options?` (`MAP<seed?: INT>`): Draw settings: `seed`. Omittable: a missing options MAP fills `{}`.
@@ -2682,7 +2682,7 @@ ASSERT_EQ $free 1
 
 **Signature:** `STD::SEMAPHORE_AVAILABLE($sem: SEMAPHORE) -> INT`
 
-**Contexts:** AST, RPN
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
 - `$sem` (`SEMAPHORE`): Semaphore handle from `SEMAPHORE_NEW`.
@@ -2711,7 +2711,7 @@ ASSERT_EQ $free 2
 
 **Signature:** `STD::SEMAPHORE_NEW($max: INT) -> SEMAPHORE`
 
-**Contexts:** AST only
+**Contexts:** [`AST`](#context-ast) only
 
 **Parameters:**
 - `$max` (`INT`): Maximum concurrent holders; must be positive.
@@ -2746,7 +2746,7 @@ ASSERT_EQ $has_permit false
 
 **Signature:** `STD::SEMAPHORE_TRY_ACQUIRE($sem: SEMAPHORE) -> MAP<held: BOOL, permit?: PERMIT>`
 
-**Contexts:** AST only
+**Contexts:** [`AST`](#context-ast) only
 
 **Parameters:**
 - `$sem` (`SEMAPHORE`): Semaphore handle from `SEMAPHORE_NEW`.
@@ -2766,7 +2766,7 @@ rendering as a silent empty.
 
 **Signature:** `STD::TO_JSON($value: ANY) -> STRING`
 
-**Contexts:** AST, RPN
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
 - `$value` (`ANY`): Value to encode as JSON.
@@ -2783,7 +2783,7 @@ introspection functions.
 
 **Signature:** `STD::TYPES() -> LIST<STRING>`
 
-**Contexts:** AST only
+**Contexts:** [`AST`](#context-ast) only
 
 **Returns:** `LIST<STRING>`
 
@@ -2797,7 +2797,7 @@ Reads the run's name directory, so it runs on the AST path.
 
 **Signature:** `STD::TYPE_DESCRIBE($name: STRING) -> MAP<name: STRING, summary: STRING, docs: STRING>`
 
-**Contexts:** AST only
+**Contexts:** [`AST`](#context-ast) only
 
 **Parameters:**
 - `$name` (`STRING`): Type name to describe.
@@ -2819,9 +2819,22 @@ on config shapes (a path string or a path list) without failing.
 
 **Signature:** `STD::TYPE_OF($value: ANY) -> STRING`
 
-**Contexts:** AST, RPN
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
 - `$value` (`ANY`): Value whose word to name.
 
 **Returns:** `STRING`
+
+<!-- GENERATED by docs-gen from function context metadata. Do not edit by hand. -->
+## Contexts
+
+Every function lists the contexts it runs in. `AST` is always available. `RPN` additionally requires a pure function or an explicit `rpn` opt in.
+
+### Context: AST
+
+The parsed tree of a script, walked one step at a time. Statements, declarations, scopes, pipes, and IO live here. Every step knows its line number, so failures name it. Every function runs in this context.
+
+### Context: RPN
+
+Arithmetic and comparison expressions compiled to a flat stack program of values with no statements, scopes, pipes, or step numbers. Pure functions run here with no flag. Stateful functions run here only when they opt in with `#[oxdock_func(rpn)]`, which is reserved for read only queries that stay meaningful inside math (`GLOB`, `LOAD_TOML`, `LOAD_JSON` do this). A call that fails inside math reports the bare error with no step number.

@@ -81,6 +81,28 @@ jobs:
       - name: README doctests
         run: cargo test -p oxdock-doc-tests --doc ${{ matrix.flags }}
 
+  docs-fresh:
+    name: docs-fresh (docs-gen output matches checked-in docs)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Regenerate docs
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run -p docs-gen
+
+      - name: Fail on stale docs
+        shell: bash
+        run: |
+          set -euo pipefail
+          git diff --exit-code -- . ':!target'
+
   test:
     name: test
     runs-on: ubuntu-latest

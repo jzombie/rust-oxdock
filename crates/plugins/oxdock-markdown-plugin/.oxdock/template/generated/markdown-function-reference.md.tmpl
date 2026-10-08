@@ -11,7 +11,7 @@ one column per key. Fails strict on shapes with no table in them.
 
 **Signature:** `MAP_TO_MD_TABLE($map: ANY) -> STRING`
 
-**Contexts:** AST, RPN
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
 - `$map` (`ANY`): Record data: a MAP renders one row, a LIST of MAPs renders one row per entry with union columns.
@@ -27,7 +27,7 @@ heading with `level`, `text`, and `anchor` keys.
 
 **Signature:** `PARSE($md: STRING) -> LIST<ANY>`
 
-**Contexts:** AST, RPN
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
 - `$md` (`STRING`): Markdown document to scan for headings.
@@ -47,7 +47,7 @@ GitHub-rendered document with working anchors.
 
 **Signature:** `TOC($md: STRING, $options: MAP<min_level?: INT, max_level?: INT, format?: STRING, delimiter?: STRING>) -> STRING`
 
-**Contexts:** AST, RPN
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
 - `$md` (`STRING`): Document markdown text to scan for headings.

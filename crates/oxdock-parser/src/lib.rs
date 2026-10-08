@@ -47,7 +47,8 @@ pub use macro_input::{
 };
 pub use markdown::{BlockMetadata, FencedBlock, expect_error_from_info, extract_fenced_blocks};
 pub use parser::{
-    parse_guard_expr_str, parse_script, parse_script_with_modules, parse_script_with_preseed,
+    parse_expression_str, parse_guard_expr_str, parse_script, parse_script_with_modules,
+    parse_script_with_preseed,
 };
 pub use strip_flags::strip_flags;
 pub use tag::{
