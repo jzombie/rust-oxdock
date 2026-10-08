@@ -1,0 +1,20 @@
+# Release version gate: fails the run in seconds on a mistyped
+# version, before the build matrix burns any time. Same confirmation
+# check the release script enforces in full; this one just runs first.
+# No publishing, tagging, or releasing lives here by design.
+
+IMPORT [STD]
+
+INHERIT_ENV [RELEASE_CONFIRM]
+
+# Pin to the live tree: the manifest read must hit the real repo.
+WORKSPACE LOCAL
+
+# The workspace manifest is the single source of truth for the version.
+LET $manifest: MAP<ANY> = LOAD_TOML("Cargo.toml")
+LET $version: STRING = $manifest.workspace.package.version
+
+# Typed confirmation gate: the dispatched version must equal the tree.
+# A typo or stale input fails here with both sides named.
+LET $confirm: STRING = "{{ env:RELEASE_CONFIRM }}"
+ASSERT_EQ $confirm $version
