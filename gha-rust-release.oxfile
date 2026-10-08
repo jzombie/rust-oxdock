@@ -7,7 +7,7 @@
 
 IMPORT [STD, MARKDOWN]
 
-INHERIT_ENV [OXDOCK_RELEASE_CONFIRM, OXDOCK_RELEASE_DRY_RUN, GITHUB_ACTIONS]
+INHERIT_ENV [OXDOCK_RELEASE_CONFIRM, OXDOCK_RELEASE_DRY_RUN, OXDOCK_BINARY, GITHUB_ACTIONS]
 
 # Pin to the live tree: scripts start in an isolated snapshot, and every
 # release step (manifest read, publish, tag) must hit the real repo.
@@ -67,10 +67,12 @@ IF $dry == "false" {
     # swallows the delete when nothing exists (cmd has no `true`).
     RUN gh release delete "v{{ $version }}" --yes || cd .
     # The three archives are the build matrix output, downloaded by the
-    # workflow into target/artifacts/ under these exact names (see the
-    # asset contract in release.yml): the tag carries the version, so
-    # asset names stay static across releases.
-    RUN ["gh", "release", "create", "v{{ $version }}", "--title", "{{ $version }}", "--notes-file", "target/release-notes.md", "target/artifacts/oxdock-x86_64-unknown-linux-gnu.tar.gz", "target/artifacts/oxdock-aarch64-apple-darwin.tar.gz", "target/artifacts/oxdock-x86_64-pc-windows-msvc.tar.gz"]
+    # workflow into target/artifacts/ (see the asset contract in
+    # release.yml): the tag carries the product version and the binary
+    # name rides in from the workflow, so asset names stay static
+    # across releases while differing per product.
+    LET $bin: STRING = "{{ env:OXDOCK_BINARY }}"
+    RUN ["gh", "release", "create", "v{{ $version }}", "--title", "{{ $version }}", "--notes-file", "target/release-notes.md", "target/artifacts/{{ $bin }}-x86_64-unknown-linux-gnu.tar.gz", "target/artifacts/{{ $bin }}-aarch64-apple-darwin.tar.gz", "target/artifacts/{{ $bin }}-x86_64-pc-windows-msvc.tar.gz"]
 } ELSE {
     ECHO "Dry run complete: nothing published, no tag created."
 }

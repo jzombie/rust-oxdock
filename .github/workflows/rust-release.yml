@@ -1,0 +1,169 @@
+# Release pipeline, callable from any repo plus dispatchable here.
+#
+# Downstream caller (ten lines in the calling repo, pinned by tag):
+#
+# ```yaml
+# jobs:
+#   release:
+#     uses: jzombie/rust-oxdock/.github/workflows/rust-release.yml@v0.24.0-alpha
+#     with:
+#       confirm_version: 1.2.3
+#       dry_run: true
+#       binary: mytool
+#       pipeline_ref: v0.24.0-alpha
+#     secrets: inherit
+# ```
+#
+# Conventions a calling repo follows (all OxDock defaults here): a
+# Cargo workspace whose binary package matches `binary`, a CHANGELOG.md
+# with `## [<version>]` sections, and a `release` environment with
+# required reviewers (converge it with gha-apply-settings.oxfile).
+# The pipeline checks out this repo at `pipeline_ref` for its scripts
+# and builds its runner from that source, so callers hold no OxDock
+# code and pin the pipeline version explicitly. Asset names derive
+# from `binary`; the tag carries the product version.
+#
+# One-time setup here (repo settings, not code): CARGO_REGISTRY_TOKEN
+# secret plus the `release` environment with required reviewers.
+# `gh` ships preinstalled on GitHub-hosted runners; self-hosted
+# runners must provide it and tar.
+
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm_version:
+        description: "Version to release (must equal the workspace version)"
+        required: true
+        type: string
+      dry_run:
+        description: "Dry run only (no publish, binaries, tag, or release)"
+        required: false
+        default: true
+        type: boolean
+      binary:
+        description: "Binary and package name to build and ship"
+        required: false
+        default: "oxdock"
+        type: string
+      pipeline_ref:
+        description: "Ref of this repo to take scripts and runner source from"
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      confirm_version:
+        description: "Version to release (must equal the workspace version)"
+        required: true
+        type: string
+      dry_run:
+        description: "Dry run only (no publish, binaries, tag, or release)"
+        required: false
+        default: true
+        type: boolean
+      binary:
+        description: "Binary and package name to build and ship"
+        required: false
+        default: "oxdock"
+        type: string
+      pipeline_ref:
+        description: "Ref of this repo to take scripts and runner source from"
+        required: true
+        type: string
+    secrets:
+      CARGO_REGISTRY_TOKEN:
+        description: "Crates.io token with publish scope"
+        required: false
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            exe: ""
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            exe: ""
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            exe: ".exe"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # Default features, matching exactly what
+      # `cargo install <binary>@<version>` produces.
+      - name: Build the release binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release -p ${{ inputs.binary }}
+
+      - name: Archive the binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -czf "${{ inputs.binary }}-${{ matrix.target }}.tar.gz" -C target/release "${{ inputs.binary }}${{ matrix.exe }}"
+
+      - name: Upload the archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.binary }}-${{ matrix.target }}.tar.gz
+          path: ${{ inputs.binary }}-${{ matrix.target }}.tar.gz
+
+  release:
+    name: release
+    runs-on: ubuntu-latest
+    needs: [build]
+    environment: release
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      # Pipeline source: scripts plus the runner build. Callers pin this
+      # ref explicitly (a tag for stability); this repo dispatches with
+      # the branch under release (typically main).
+      - name: Checkout pipeline source
+        uses: actions/checkout@v6
+        with:
+          repository: jzombie/rust-oxdock
+          ref: ${{ inputs.pipeline_ref }}
+          path: rust-release
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Download build archives
+        uses: actions/download-artifact@v4
+        with:
+          pattern: "${{ inputs.binary }}-*"
+          merge-multiple: true
+          path: target/artifacts
+
+      # No bash logic lives here by design: confirmation gating, notes
+      # extraction, publishing, tagging, and releasing all run inside
+      # the script, which fails fast on a mismatched confirmation
+      # before anything publishes. This step only bridges inputs.
+      - name: Run the release script
+        shell: bash
+        env:
+          OXDOCK_RELEASE_CONFIRM: ${{ inputs.confirm_version }}
+          OXDOCK_RELEASE_DRY_RUN: ${{ inputs.dry_run }}
+          OXDOCK_BINARY: ${{ inputs.binary }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          cargo run --manifest-path rust-release/Cargo.toml -p oxdock --features markdown -- rust-release/gha-rust-release.oxfile
