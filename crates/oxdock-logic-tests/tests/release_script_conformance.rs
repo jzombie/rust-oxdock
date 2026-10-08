@@ -67,6 +67,17 @@ fn release_script_parses() -> Result<()> {
         text.contains("\"gh\", \"release\", \"create\""),
         "release creation step exists"
     );
+    // Tag identity gate: nothing destructive runs unless the tag
+    // points at HEAD, so wrong-version binaries can never replace a
+    // release under an old tag.
+    assert!(
+        text.contains("git rev-list -n 1"),
+        "tag identity probe dereferences annotated tags"
+    );
+    assert!(
+        text.contains("ASSERT_EQ $head $tagged"),
+        "tag identity assertion exists"
+    );
     assert!(
         text.contains("gh release delete"),
         "stale release cleanup exists"

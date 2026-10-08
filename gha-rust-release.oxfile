@@ -50,6 +50,16 @@ IF $dry == "false" {
     RUN ["git", "push", "origin", "v{{ $version }}"]
     # Release notes live under target/ (gitignored) so the notes file
     # itself never trips cargo's clean-tree publish guard.
+    # Tag identity gate: the tag must point at HEAD before anything
+    # destructive runs, so wrong-version binaries can never replace a
+    # release under an old tag. `rev-list` dereferences lightweight and
+    # annotated tags alike with no shell-hostile characters (a caret
+    # suffix would break under cmd). Both sides carry identical
+    # formatting, so the exact comparison holds. A moved or missing tag
+    # fails here.
+    LET $head: STRING = RUN git rev-parse HEAD
+    LET $tagged: STRING = RUN git rev-list -n 1 "v{{ $version }}"
+    ASSERT_EQ $head $tagged
     # Resume safety: a run that dies mid-release must converge on
     # re-dispatch. Deleting any existing release first makes creation
     # unconditional: first runs delete nothing, resumed runs replace the
