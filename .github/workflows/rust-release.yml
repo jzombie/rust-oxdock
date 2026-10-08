@@ -101,9 +101,54 @@ on:
         required: false
 
 jobs:
+  # Fails the run on a mistyped version before the build matrix burns
+  # any time. Same confirmation the release script enforces in full;
+  # this gate just runs first (defense in depth, not logic in bash).
+  validate:
+    name: validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      # Pinned pipeline for downstream callers: same split as the
+      # release job (empty means local, set means central source).
+      - name: Checkout pipeline source
+        if: ${{ inputs.pipeline_ref != '' }}
+        uses: actions/checkout@v6
+        with:
+          repository: jzombie/rust-oxdock
+          ref: ${{ inputs.pipeline_ref }}
+          path: rust-release
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Fail unless the confirmation matches the tree (local)
+        if: ${{ inputs.pipeline_ref == '' }}
+        shell: bash
+        env:
+          RELEASE_CONFIRM: ${{ inputs.confirm_version }}
+        run: |
+          set -euo pipefail
+          cargo run -p oxdock -- ./gha-rust-validate.oxfile
+
+      - name: Fail unless the confirmation matches the tree (pinned)
+        if: ${{ inputs.pipeline_ref != '' }}
+        shell: bash
+        env:
+          OXDOCK_WORKSPACE_ROOT: ${{ github.workspace }}
+          RELEASE_CONFIRM: ${{ inputs.confirm_version }}
+        run: |
+          set -euo pipefail
+          cargo run --manifest-path rust-release/Cargo.toml -p oxdock -- rust-release/gha-rust-validate.oxfile
+
   build:
     name: build (${{ matrix.target }})
     if: ${{ inputs.binaries }}
+    needs: [validate]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -147,11 +192,11 @@ jobs:
 
   release:
     name: release
-    # Runs when the build succeeded or was skipped (binaries off):
-    # a failed or cancelled build still stops everything.
-    if: ${{ always() && (needs.build.result == 'success' || needs.build.result == 'skipped') }}
+    # Runs when validation passed and the build succeeded or was skipped
+    # (binaries off): a failed or cancelled build still stops everything.
+    if: ${{ always() && needs.validate.result == 'success' && (needs.build.result == 'success' || needs.build.result == 'skipped') }}
     runs-on: ubuntu-latest
-    needs: [build]
+    needs: [validate, build]
     environment: release
     permissions:
       contents: write

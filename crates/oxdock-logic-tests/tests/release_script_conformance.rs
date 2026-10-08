@@ -91,6 +91,29 @@ fn release_script_parses() -> Result<()> {
     Ok(())
 }
 
+/// The standalone version gate must always parse: it guards the build
+/// matrix, so a breaking language change that invalidates it fails the
+/// PR that makes the change, never release day.
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "reads gha-rust-validate.oxfile from the repository checkout layout"
+)]
+fn validate_script_parses_and_gates_on_version() -> Result<()> {
+    let repo_root = repo_root()?;
+    let root = GuardedPath::new_root_from_str(&repo_root)?;
+    let resolver = PathResolver::new_guarded(root.clone(), root)?;
+    let script_path = resolver.root().join("gha-rust-validate.oxfile")?;
+    let text = resolver.read_to_string(&script_path)?;
+    oxdock_core::parse_script(&text)
+        .map_err(|err| anyhow::anyhow!("gha-rust-validate.oxfile failed to parse: {err}"))?;
+    assert!(
+        text.contains("ASSERT_EQ $confirm $version"),
+        "gate compares the confirmation against the tree version"
+    );
+    Ok(())
+}
+
 /// The tree version always has extractable notes: the same extraction
 /// the release script runs, asserted on every PR, so a missing
 /// CHANGELOG section fails long before release day.
