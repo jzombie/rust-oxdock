@@ -84,7 +84,9 @@ jobs:
         # stable, so ambient nightly is required, not optional.
         env:
           MIRI_TEST_CMD: RUSTFLAGS="--cfg miri" cargo test --workspace --all-features --lib --tests
-        run: scripts/.github/miri-badge-report.sh
+        run: |
+          set -euo pipefail
+          cargo run -p oxdock -- ./gha-miri-badge.oxfile
 
       - name: Publish Miri coverage badge
         if: github.ref == 'refs/heads/main'

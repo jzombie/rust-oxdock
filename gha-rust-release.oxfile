@@ -1,0 +1,83 @@
+# Release pipeline for OxDock itself: version gate, workspace publish,
+# tag, and GitHub release. Dispatch is manual only via the release
+# workflow, which bridges CONFIRM_VERSION and DRY_RUN from its inputs.
+# DRY_RUN defaults to dry behavior: only an explicit "false" publishes.
+# The workflow builds this commit's binary and runs this commit's script,
+# so language and script stay mutually consistent by construction.
+
+IMPORT [STD, MARKDOWN]
+
+INHERIT_ENV [RELEASE_CONFIRM, RELEASE_DRY_RUN, RELEASE_BINARY, RELEASE_BINARIES, GITHUB_ACTIONS]
+
+# Pin to the live tree: scripts start in an isolated snapshot, and every
+# release step (manifest read, publish, tag) must hit the real repo.
+WORKSPACE LOCAL
+
+# The workspace manifest is the single source of truth for the version.
+LET $manifest: MAP<ANY> = LOAD_TOML("Cargo.toml")
+LET $version: STRING = $manifest.workspace.package.version
+
+# Typed confirmation gate: the dispatched version must equal the tree.
+# A typo or stale input fails here, before anything publishes.
+LET $confirm: STRING = "{{ env:RELEASE_CONFIRM }}"
+ASSERT_EQ $confirm $version
+
+# Release notes come from the CHANGELOG through the real markdown
+# parser, sliced under target/ (gitignored) so the notes file itself
+# never trips cargo's clean-tree publish guard.
+LET $log: STRING = READ "CHANGELOG.md"
+LET $notes: STRING = MARKDOWN::SECTION($log, "[{{ $version }}]")
+WRITE "target/release-notes.md" $notes
+
+[env:GITHUB_ACTIONS] {
+    ECHO "::group::Publish workspace (dry-run)"
+}
+RUN ["cargo", "publish", "--workspace", "--dry-run"]
+[env:GITHUB_ACTIONS] {
+    ECHO "::endgroup::"
+}
+
+LET $dry: STRING = "{{ env:RELEASE_DRY_RUN }}"
+IF $dry == "false" {
+    [env:GITHUB_ACTIONS] {
+        ECHO "::group::Publish workspace"
+    }
+    RUN ["cargo", "publish", "--workspace"]
+    [env:GITHUB_ACTIONS] {
+        ECHO "::endgroup::"
+    }
+    RUN ["git", "tag", "v{{ $version }}"]
+    RUN ["git", "push", "origin", "v{{ $version }}"]
+    # Release notes live under target/ (gitignored) so the notes file
+    # itself never trips cargo's clean-tree publish guard.
+    # Tag identity gate: the tag must point at HEAD before anything
+    # destructive runs, so wrong-version binaries can never replace a
+    # release under an old tag. `rev-list` dereferences lightweight and
+    # annotated tags alike with no shell-hostile characters (a caret
+    # suffix would break under cmd). Both sides carry identical
+    # formatting, so the exact comparison holds. A moved or missing tag
+    # fails here.
+    LET $head: STRING = RUN git rev-parse HEAD
+    LET $tagged: STRING = RUN git rev-list -n 1 "v{{ $version }}"
+    ASSERT_EQ $head $tagged
+    # Resume safety: a run that dies mid-release must converge on
+    # re-dispatch. Deleting any existing release first makes creation
+    # unconditional: first runs delete nothing, resumed runs replace the
+    # partial release with a fresh one from current notes. `|| cd .`
+    # swallows the delete when nothing exists (cmd has no `true`).
+    RUN gh release delete "v{{ $version }}" --yes || cd .
+    # The three archives are the build matrix output, downloaded by the
+    # workflow into target/artifacts/ (see the asset contract in
+    # release.yml): the tag carries the product version and the binary
+    # name rides in from the workflow, so asset names stay static
+    # across releases while differing per product.
+    LET $bin: STRING = "{{ env:RELEASE_BINARY }}"
+    LET $bins: STRING = "{{ env:RELEASE_BINARIES }}"
+    IF $bins == "false" {
+        RUN ["gh", "release", "create", "v{{ $version }}", "--title", "{{ $version }}", "--notes-file", "target/release-notes.md"]
+    } ELSE {
+        RUN ["gh", "release", "create", "v{{ $version }}", "--title", "{{ $version }}", "--notes-file", "target/release-notes.md", "target/artifacts/{{ $bin }}-x86_64-unknown-linux-gnu.tar.gz", "target/artifacts/{{ $bin }}-aarch64-apple-darwin.tar.gz", "target/artifacts/{{ $bin }}-x86_64-pc-windows-msvc.tar.gz"]
+    }
+} ELSE {
+    ECHO "Dry run complete: nothing published, no tag created."
+}

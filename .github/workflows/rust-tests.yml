@@ -81,27 +81,13 @@ jobs:
       - name: README doctests
         run: cargo test -p oxdock-doc-tests --doc ${{ matrix.flags }}
 
+  # Dogfoods the reusable docs pipeline against this repo itself:
+  # same render plus drift check a downstream caller gets.
   docs-fresh:
     name: docs-fresh (docs-gen output matches checked-in docs)
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Regenerate docs
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo run -p docs-gen
-
-      - name: Fail on stale docs
-        shell: bash
-        run: |
-          set -euo pipefail
-          git diff --exit-code -- . ':!target'
+    uses: ./.github/workflows/docs.yml
+    with:
+      pipeline_ref: ${{ github.sha }}
 
   test:
     name: test

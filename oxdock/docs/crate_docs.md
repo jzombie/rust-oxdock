@@ -6,7 +6,7 @@ Platform gating selects OS-specific steps, and remote targets bind over any stdi
 
 The syntax is line-oriented in the spirit of BASIC, with a static type system checking scripts before the first step runs. Plain Rust functions become script functions with one attribute: `#[oxdock_func]` exports them into namespaced modules scripts call as `DEMO::NAME(...)`. See [Extending OxDock from Rust](#extending-oxdock-from-rust).
 
-[Documentation](https://docs.rs/oxdock/0.23.0-alpha/oxdock/)
+[Documentation](https://docs.rs/oxdock/0.24.0-alpha/oxdock/)
 
 ## Dynamically embed assets at compile time
 
@@ -95,8 +95,8 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     LET $a: STRING = READ dist/alpha.txt
     LET $b: STRING = READ dist/beta.txt
     LET $p: STRING = READ dist/picked.txt
-    ASSERT_EQ $a "alpha OxDock 0.23.0-alpha"
-    ASSERT_EQ $b "beta OxDock 0.23.0-alpha"
+    ASSERT_EQ $a "alpha OxDock 0.24.0-alpha"
+    ASSERT_EQ $b "beta OxDock 0.24.0-alpha"
     ASSERT_EQ $p "alpha"
 };
 
@@ -108,7 +108,7 @@ let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolve
 let out = root.join("dist/alpha.txt").expect("out path");
 assert_eq!(
     resolver.read_to_string(&out).expect("read out"),
-    "alpha OxDock 0.23.0-alpha"
+    "alpha OxDock 0.24.0-alpha"
 );
 ```
 

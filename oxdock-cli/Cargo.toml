@@ -20,6 +20,9 @@ build = []
 default = ["net"]
 net = ["dep:oxdock-net-plugin", "dep:oxdock-remote-proto"]
 ssh = ["net", "dep:oxdock-ssh-plugin"]
+# Markdown helpers in the CLI runner (oxdock-markdown-plugin). Opt-in so
+# default and minimal builds keep their current module surface.
+markdown = ["dep:oxdock-markdown-plugin"]
 
 [dependencies]
 anyhow.workspace = true
@@ -31,6 +34,7 @@ muxio-rpc-service-endpoint.workspace = true
 muxio-sync-rpc-server.workspace = true
 oxdock-core.workspace = true
 oxdock-fs.workspace = true
+oxdock-markdown-plugin = { workspace = true, optional = true }
 oxdock-net-plugin = { workspace = true, optional = true }
 oxdock-parser.workspace = true
 oxdock-pipe.workspace = true

@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [0.24.0-alpha] - 2026-10-08
+
+### Added
+
+- Self-hosted releases: `gha-rust-release.oxfile` cuts this project's own releases (version gate, workspace publish, tag, GitHub release with prebuilt Linux, macOS, and Windows binaries) run from a thin `release` workflow, so the release pipeline dogfoods the DSL it ships. Dispatch is manual only, with a typed version confirmation plus a default-dry-run flag and a required-reviewer environment guarding against accidental publishes. The workflow is also callable from other repos (`workflow_call`) with their own binary name and pipeline pin, so the fleet reuses one pipeline source.
+- `MARKDOWN::SECTION($md, $needle)` (pure): extract the section under the first heading whose text starts with `needle`, through the real markdown parser (fenced code never matches). The release script uses it to slice CHANGELOG notes with no shell text processing.
+- Opt-in `markdown` feature for the CLI runner (`--features markdown`), registering the `MARKDOWN` helpers without changing default or minimal builds.
+- Reusable `docs` workflow (`workflow_call`): other repos render and drift-check their docs against a pinned docs-gen source with a ten-line caller, the same shape as the release pipeline. This repo dogfoods it for its own freshness check.
+
 ## [0.23.0-alpha] - 2026-10-08
 
 ### Added

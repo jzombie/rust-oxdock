@@ -26,6 +26,9 @@ cli = ["dep:oxdock-cli", "net"]
 net = ["oxdock-cli/net"]
 # Ephemeral SSH server/client in the CLI runner (oxdock-ssh-plugin).
 ssh = ["cli", "net", "oxdock-cli/ssh"]
+# Markdown helpers in the CLI runner (oxdock-markdown-plugin). Opt-in so
+# default and minimal builds keep their current module surface.
+markdown = ["oxdock-cli/markdown"]
 
 [dependencies]
 oxdock-build.workspace = true

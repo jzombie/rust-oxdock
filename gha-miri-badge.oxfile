@@ -1,0 +1,78 @@
+# Miri runnable-ratio badge report: measures how many workspace tests run
+# under Miri vs. the total and writes badge artifacts for the README.
+# Invoked from the miri-nightly workflow only. The badge reports exactly
+# what is measured: runnable tests over total tests, with both counts in
+# the message.
+
+IMPORT [STD]
+
+INHERIT_ENV [MIRI_TEST_CMD, GITHUB_OUTPUT, GITHUB_STEP_SUMMARY]
+
+# Pin to the live tree: badge artifacts must land in the real repo.
+WORKSPACE LOCAL
+
+# Shell formatting isolated behind a call: reassignment takes
+# expressions, never bare RUN statements, so the branch below assigns
+# from this call instead of formatting inline.
+FUNC RATIO_LABEL($pct: FLOAT) {
+    LET $label: STRING = RUN printf "%.1f%%" $pct
+    RETURN $label
+}
+
+# The listing command rides in from the workflow; default matches a
+# plain native listing for local runs.
+LET $cmd: STRING = "{{ env:MIRI_TEST_CMD }}"
+IF $cmd == "" {
+    $cmd = "cargo test --workspace --all-features --lib --tests"
+}
+
+# Listings run in the system shell: pipes and `|| true` are shell
+# syntax (grep -c exits 1 on zero matches, which must not fail the run).
+LET $total_out: STRING = RUN "{{ $cmd }} -- --list --format terse | grep -c ': test' || true"
+LET $ignored_out: STRING = RUN "{{ $cmd }} -- --ignored --list --format terse | grep -c ': test' || true"
+LET $total: INT = INT($total_out)
+LET $ignored: INT = INT($ignored_out)
+LET $run_cnt: INT = $total - $ignored
+
+LET $pct: FLOAT = 0.0
+LET $ratio_label: STRING = "n/a"
+IF $total != 0 {
+    $pct = FLOAT($run_cnt) / FLOAT($total) * 100
+    $ratio_label = RATIO_LABEL($pct)
+}
+
+LET $color: STRING = "red"
+IF $pct >= 90.0 {
+    $color = "brightgreen"
+} ELSE IF $pct >= 80.0 {
+    $color = "green"
+} ELSE IF $pct >= 70.0 {
+    $color = "yellow"
+}
+
+LET $message: STRING = "{{ $ratio_label }} ({{ $run_cnt }}/{{ $total }})"
+ECHO "Miri runnable tests: {{ $run_cnt }}/{{ $total }}"
+ECHO "Runnable ratio: {{ $ratio_label }}"
+
+MKDIR badges
+WRITE miri-summary.txt "Miri runnable tests: {{ $run_cnt }}/{{ $total }}\nRunnable ratio: {{ $ratio_label }}\n"
+WRITE miri-output.env "runnable_ratio={{ $ratio_label }}\n"
+LET $badge: MAP<ANY> = {schemaVersion: 1, label: "miri coverage", message: $message, color: $color}
+LET $badge_json: STRING = TO_JSON($badge)
+WRITE badges/miri-coverage.json $badge_json
+
+LET $gh_out: STRING = "{{ env:GITHUB_OUTPUT }}"
+IF $gh_out != "" {
+    APPEND $gh_out "runnable_ratio={{ $ratio_label }}\n"
+} ELSE {
+    ECHO "runnable_ratio={{ $ratio_label }}"
+}
+
+LET $gh_sum: STRING = "{{ env:GITHUB_STEP_SUMMARY }}"
+IF $gh_sum != "" {
+    APPEND $gh_sum "### Miri coverage\n\nMiri runnable tests: {{ $run_cnt }}/{{ $total }}\nRunnable ratio: {{ $ratio_label }}\n"
+} ELSE {
+    ECHO "### Miri coverage"
+    ECHO "Miri runnable tests: {{ $run_cnt }}/{{ $total }}"
+    ECHO "Runnable ratio: {{ $ratio_label }}"
+}
