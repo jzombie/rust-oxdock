@@ -1,6 +1,9 @@
 # Release pipeline, callable from any repo plus dispatchable here.
 #
-# Downstream caller (ten lines in the calling repo, pinned by tag):
+# Downstream caller (ten lines in the calling repo, pinned by tag).
+# Keep both refs identical: GitHub exposes no variable for the ref the
+# caller pinned in `uses:`, so the workflow cannot derive it. Mismatched
+# pins run one version's logic against another version's scripts.
 #
 # ```yaml
 # jobs:
@@ -181,9 +184,16 @@ jobs:
       # extraction, publishing, tagging, and releasing all run inside
       # the script, which fails fast on a mismatched confirmation
       # before anything publishes. This step only bridges inputs.
+      # OXDOCK_WORKSPACE_ROOT is load-bearing, not redundant: workspace
+      # discovery prefers the built binary's own manifest directory over
+      # the working directory, so without it the CLI would operate on
+      # the pipeline checkout instead of the caller tree. The CLI offers
+      # no --root flag, so the documented environment override is the
+      # mechanism.
       - name: Run the release script
         shell: bash
         env:
+          OXDOCK_WORKSPACE_ROOT: ${{ github.workspace }}
           RELEASE_CONFIRM: ${{ inputs.confirm_version }}
           RELEASE_DRY_RUN: ${{ inputs.dry_run }}
           RELEASE_BINARY: ${{ inputs.binary }}
