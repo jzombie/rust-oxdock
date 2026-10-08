@@ -23,6 +23,16 @@
 # code and pin the pipeline version explicitly. Asset names derive
 # from `binary`; the tag carries the product version.
 #
+# Explicit behavior contract:
+# - `binaries` defaults to true. Exactly one binary (the `binary`
+#   input) builds on three platforms (linux x86_64, macOS arm64,
+#   Windows x86_64) and attaches to the release. Multi-binary
+#   products are not supported: one input, one binary.
+# - `binaries: false` (library-only products) skips the build matrix
+#   and artifact download entirely; the release ships notes only.
+#   Nothing else changes: version gate, publish, tag, and resume
+#   semantics are identical.
+#
 # One-time setup here (repo settings, not code): CARGO_REGISTRY_TOKEN
 # secret plus the `release` environment with required reviewers.
 # `gh` ships preinstalled on GitHub-hosted runners; self-hosted
