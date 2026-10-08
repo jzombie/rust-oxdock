@@ -8,5 +8,6 @@
   "engine_facade_url": "https://github.com/jzombie/rust-oxdock/blob/main/crates/oxdock-core/src/exec/engine.rs",
   "ssh_plugin_readme": "https://github.com/jzombie/rust-oxdock/blob/main/crates/plugins/oxdock-ssh-plugin/README.md",
   "net_plugin_readme": "https://github.com/jzombie/rust-oxdock/blob/main/crates/plugins/oxdock-net-plugin/README.md",
+  "markdown_plugin_readme": "https://github.com/jzombie/rust-oxdock/blob/main/crates/plugins/oxdock-markdown-plugin/README.md",
   "ci_url": "https://github.com/jzombie/rust-oxdock/actions/workflows/rust-tests.yml"
 }

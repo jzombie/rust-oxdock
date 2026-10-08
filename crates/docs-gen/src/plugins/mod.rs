@@ -10,5 +10,6 @@
 //! (`OXDOCK` for OxDock projects, `RUST` for Cargo workspaces) plus the
 //! engine builtins in [`crate::docs_gen_engine`], and registers nothing else.
 
+pub mod docs;
 pub mod oxdock;
 pub mod rust;

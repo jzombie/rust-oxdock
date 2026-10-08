@@ -93,6 +93,40 @@ pub fn oxdock_type(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
+/// Mint a compile-time deferred sentinel framing with a random nonce.
+///
+/// Takes one string literal tag naming the deferred operation namespace
+/// (`deferred_sentinel!("TOC")`) and emits a `(&str, &str)` prefix and
+/// suffix pair sharing 128 random hex digits baked in at macro
+/// expansion time. Both edges carry the nonce, so neither edge can
+/// match arbitrary content: typing the human-readable tag in a file
+/// never triggers replacement, only sentinels minted through the same
+/// compiled constant do. Invoke exactly once per namespace and share
+/// the resulting constants between the minting and scanning sites, so
+/// both sides of the pass boundary agree within the built binary.
+#[proc_macro]
+pub fn deferred_sentinel(input: TokenStream) -> TokenStream {
+    match expand_deferred_sentinel(input) {
+        Ok(expanded) => expanded.into(),
+        Err(err) => err.to_compile_error().into(),
+    }
+}
+
+fn expand_deferred_sentinel(input: TokenStream) -> syn::Result<TokenStream2> {
+    let tag: LitStr = syn::parse(input)?;
+    let name = tag.value();
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return Err(syn::Error::new(
+            tag.span(),
+            "deferred_sentinel! needs a nonempty ASCII identifier tag",
+        ));
+    }
+    let nonce: u128 = rand::random();
+    let prefix = format!("\u{1f}\u{1e}OXDOCK_{name}_{nonce:032x}:");
+    let suffix = format!(":{nonce:032x}\u{1e}\u{1f}");
+    Ok(quote! { (#prefix, #suffix) })
+}
+
 fn expand_oxdock_func(attr: TokenStream, item: TokenStream) -> syn::Result<TokenStream2> {
     let options = syn::parse::<FuncOptions>(attr)?;
     let func = syn::parse::<ItemFn>(item)?;

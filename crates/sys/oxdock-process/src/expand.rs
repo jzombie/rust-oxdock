@@ -95,8 +95,9 @@ impl StreamingExpand {
     }
 
     /// Enable `{{ MODULE::FUNC(args) }}` calls, dispatched through `resolver`.
-    /// Args are `$var.path` references or string, int, float, and bool
-    /// literals. Unknown functions and bad arity fail strict at expansion.
+    /// Args are `$var.path` references, string, int, float, and bool
+    /// literals, or `{key: value}` and `[item]` literals nesting those
+    /// same shapes. Unknown functions and bad arity fail strict at expansion.
     pub fn with_call_resolver(mut self, resolver: PlaceholderCall) -> Self {
         self.call_resolver = Some(resolver);
         self
@@ -461,13 +462,25 @@ fn parse_call(key: &str) -> Option<(&str, &str, Vec<String>)> {
     Some((module, func, split_args(args_src)))
 }
 
-/// Split call args on top level commas, keeping quoted strings intact.
-/// Nested calls are rejected: placeholder calls stay one level deep.
+/// Maximum nesting for map and list literals in placeholder call args.
+const MAX_LITERAL_DEPTH: usize = 16;
+
+/// Split call args on top level commas, keeping quoted strings and
+/// `{...}` / `[...]` literals intact. Commas nested inside literals
+/// belong to the literal, not the argument list. Nested calls stay
+/// rejected: only data literals nest, never `MODULE::FUNC(...)`.
 fn split_args(src: &str) -> Vec<String> {
+    split_top_level(src, ',')
+}
+
+/// Split on a top level separator, keeping quoted strings and
+/// `{...}` / `[...]` literals intact.
+fn split_top_level(src: &str, sep: char) -> Vec<String> {
     let mut out = Vec::new();
     let mut current = String::new();
     let mut in_string = false;
     let mut escaped = false;
+    let mut depth: usize = 0;
     for c in src.chars() {
         if in_string {
             current.push(c);
@@ -485,7 +498,15 @@ fn split_args(src: &str) -> Vec<String> {
                 in_string = true;
                 current.push(c);
             }
-            ',' => {
+            '{' | '[' => {
+                depth += 1;
+                current.push(c);
+            }
+            '}' | ']' => {
+                depth = depth.saturating_sub(1);
+                current.push(c);
+            }
+            _ if c == sep && depth == 0 => {
                 out.push(current.trim().to_string());
                 current.clear();
             }
@@ -499,12 +520,24 @@ fn split_args(src: &str) -> Vec<String> {
     out
 }
 
-/// Resolve one call argument to a value: `$var.path` from vars, or a
-/// string, int, float, or bool literal.
+/// Resolve one call argument to a value: `$var.path` from vars, a
+/// string, int, float, or bool literal, or a `{key: value}` map or
+/// `[item]` list literal holding those same shapes nested.
 fn resolve_call_arg(
     src: &str,
     vars: &HashMap<String, oxdock_parser::Value>,
 ) -> Result<oxdock_parser::Value> {
+    resolve_call_value(src, vars, 0)
+}
+
+fn resolve_call_value(
+    src: &str,
+    vars: &HashMap<String, oxdock_parser::Value>,
+    depth: usize,
+) -> Result<oxdock_parser::Value> {
+    if depth > MAX_LITERAL_DEPTH {
+        bail!("placeholder call argument nests too deep (limit {MAX_LITERAL_DEPTH})");
+    }
     if let Some(path) = src.strip_prefix('$') {
         let parts: Vec<&str> = path.split('.').collect();
         return resolve_value_path(&parts, vars);
@@ -513,6 +546,12 @@ fn resolve_call_arg(
         return Ok(oxdock_parser::Value::string(unescape_literal(
             &src[1..src.len() - 1],
         )?));
+    }
+    if let Some(inner) = strip_wrapped(src, '{', '}') {
+        return resolve_call_map(inner, vars, depth);
+    }
+    if let Some(inner) = strip_wrapped(src, '[', ']') {
+        return resolve_call_list(inner, vars, depth);
     }
     match src {
         "true" => return Ok(oxdock_parser::Value::bool(true)),
@@ -526,8 +565,103 @@ fn resolve_call_arg(
         return Ok(oxdock_parser::Value::float(f));
     }
     bail!(
-        "invalid placeholder call argument '{src}': use $var.path or a string, int, float, or bool literal"
+        "invalid placeholder call argument '{src}': use $var.path, a string, int, float, or bool literal, or a {{key: value}} or [item] literal"
     )
+}
+
+/// Strip one wrapping delimiter pair, rejecting unbalanced closers
+/// inside: the opener at 0 must match the closer at the end with no
+/// earlier top level closer.
+fn strip_wrapped(src: &str, open: char, close: char) -> Option<&str> {
+    if !src.starts_with(open) || !src.ends_with(close) || src.len() < 2 {
+        return None;
+    }
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut depth: usize = 0;
+    for (idx, c) in src.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if c == '\\' {
+                escaped = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            _ if c == open => depth += 1,
+            _ if c == close => {
+                depth -= 1;
+                if depth == 0 && idx != src.len() - close.len_utf8() {
+                    return None;
+                }
+            }
+            _ => {}
+        }
+    }
+    if depth != 0 {
+        return None;
+    }
+    Some(&src[open.len_utf8()..src.len() - close.len_utf8()])
+}
+
+/// Resolve a `{key: value}` map literal. Keys are bare ASCII
+/// identifiers or double quoted strings; values recurse through
+/// [`resolve_call_value`].
+fn resolve_call_map(
+    inner: &str,
+    vars: &HashMap<String, oxdock_parser::Value>,
+    depth: usize,
+) -> Result<oxdock_parser::Value> {
+    let mut entries = std::collections::BTreeMap::new();
+    if inner.trim().is_empty() {
+        return Ok(oxdock_parser::Value::map(entries));
+    }
+    for entry in split_top_level(inner, ',') {
+        let parts = split_top_level(&entry, ':');
+        if parts.len() != 2 {
+            bail!("invalid map literal entry '{entry}': use key: value");
+        }
+        let key = resolve_call_key(&parts[0])?;
+        if entries.contains_key(&key) {
+            bail!("duplicate key '{key}' in map literal");
+        }
+        let value = resolve_call_value(&parts[1], vars, depth + 1)?;
+        entries.insert(key, value);
+    }
+    Ok(oxdock_parser::Value::map(entries))
+}
+
+/// Resolve one map literal key: a bare ASCII identifier or a double
+/// quoted string.
+fn resolve_call_key(src: &str) -> Result<String> {
+    if src.len() >= 2 && src.starts_with('"') && src.ends_with('"') {
+        return unescape_literal(&src[1..src.len() - 1]);
+    }
+    if !src.is_empty() && src.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return Ok(src.to_string());
+    }
+    bail!("invalid map literal key '{src}': use name or \"name\"")
+}
+
+/// Resolve a `[item]` list literal, elements recursing through
+/// [`resolve_call_value`].
+fn resolve_call_list(
+    inner: &str,
+    vars: &HashMap<String, oxdock_parser::Value>,
+    depth: usize,
+) -> Result<oxdock_parser::Value> {
+    let mut items = Vec::new();
+    if inner.trim().is_empty() {
+        return Ok(oxdock_parser::Value::list(items));
+    }
+    for item in split_top_level(inner, ',') {
+        items.push(resolve_call_value(&item, vars, depth + 1)?);
+    }
+    Ok(oxdock_parser::Value::list(items))
 }
 
 /// Unescape a double quoted literal: `\\` and `\"` only. Anything else
@@ -1439,5 +1573,93 @@ mod tests {
         let expander = StreamingExpand::new(&[], &env).with_vars(&vars);
         let result = expander.expand_string("Hello {{ $inner }}").unwrap();
         assert_eq!(result, "Hello {{ env:OTHER }}");
+    }
+
+    /// Echo resolver returning the debug shape of each argument, so
+    /// literal parsing asserts on values instead of formatting.
+    fn shape_resolver() -> PlaceholderCall {
+        Arc::new(|module, func, args| {
+            if module == "T" && func == "SHAPE" {
+                let shape = args
+                    .iter()
+                    .map(|arg| arg.type_name().to_string())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                return Ok(oxdock_parser::Value::string(shape));
+            }
+            bail!("unknown placeholder function '{module}::{func}'")
+        })
+    }
+
+    #[test]
+    fn placeholder_call_with_empty_map_literal() {
+        let expander =
+            StreamingExpand::new(&[], &HashMap::new()).with_call_resolver(shape_resolver());
+        let result = expander.expand_string("{{ T::SHAPE({}) }}").unwrap();
+        assert_eq!(result, "MAP");
+    }
+
+    #[test]
+    fn placeholder_call_with_map_and_list_literals() {
+        let expander =
+            StreamingExpand::new(&[], &HashMap::new()).with_call_resolver(shape_resolver());
+        let result = expander
+            .expand_string("{{ T::SHAPE({a: 1, b: \"x\"}, [1, true]) }}")
+            .unwrap();
+        assert_eq!(result, "MAP,LIST");
+    }
+
+    #[test]
+    fn placeholder_call_map_commas_nest_inside_literals() {
+        let resolver: PlaceholderCall = Arc::new(|_, _, args| {
+            let map = args[0].as_map().expect("map");
+            let format = map
+                .get("format")
+                .and_then(|v| v.as_str())
+                .expect("format string");
+            Ok(oxdock_parser::Value::string(format.to_string()))
+        });
+        let expander = StreamingExpand::new(&[], &HashMap::new()).with_call_resolver(resolver);
+        let result = expander
+            .expand_string("{{ T::SHAPE({min_level: 2, format: \"a,b\"}) }}")
+            .unwrap();
+        assert_eq!(result, "a,b");
+    }
+
+    #[test]
+    fn placeholder_call_map_values_accept_var_refs_and_nesting() {
+        let mut vars = HashMap::new();
+        vars.insert("depth".into(), oxdock_parser::Value::int(2));
+        let resolver: PlaceholderCall = Arc::new(|_, _, args| {
+            let map = args[0].as_map().expect("map");
+            let depth = map.get("n").and_then(|v| v.as_i64()).expect("int");
+            let tags = map.get("tags").and_then(|v| v.as_list()).expect("list");
+            Ok(oxdock_parser::Value::string(format!(
+                "{depth}:{}",
+                tags.len()
+            )))
+        });
+        let expander = StreamingExpand::new(&[], &HashMap::new())
+            .with_vars(&vars)
+            .with_call_resolver(resolver);
+        let result = expander
+            .expand_string("{{ T::SHAPE({n: $depth, tags: [\"a\", \"b\"]}) }}")
+            .unwrap();
+        assert_eq!(result, "2:2");
+    }
+
+    #[test]
+    fn placeholder_call_rejects_malformed_literals() {
+        for bad in [
+            "{{ T::SHAPE({a}) }}",
+            "{{ T::SHAPE({a: 1, a: 2}) }}",
+            "{{ T::SHAPE({\"a\": 1: 2}) }}",
+            "{{ T::SHAPE([1) }}",
+            "{{ T::SHAPE({a: 1) }}",
+        ] {
+            let expander =
+                StreamingExpand::new(&[], &HashMap::new()).with_call_resolver(shape_resolver());
+            assert!(expander.expand_string(bad).is_err(), "must fail: {bad}");
+        }
     }
 }

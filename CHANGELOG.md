@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [0.22.0-alpha] - 2026-10-07
+
+### Added
+
+- Deferred second-pass placeholders for docs-gen: `DOCS::DEFER($target, $args)` wraps a domain call during pass 1 expansion, minting a sentinel that `DOCS::EXPAND_DEFERRED($full_text)` replaces in pass 2 by dispatching `target($full_text, ...args)` through the live pure registry. Pass 1 checks only the envelope (the target names a `MODULE::FUNC` entry, args hold plain data) and never invokes the target; option maps ride as ordinary trailing arguments, so targets without an options map work unchanged. Sentinels frame a base64url JSON envelope in control characters around one compile-time random nonce (new `deferred_sentinel!` proc macro, invoked once per namespace), so typing the human-readable shape in a file can never trigger replacement. Unknown targets fail listing the known functions. Only `docs-gen run()` registers the new `DOCS` module; the core language never sees it.
+- `MARKDOWN::TOC($md, $options)` (pure, immediate, pass-agnostic): renders a table of contents for markdown text in one call with zero sentinel knowledge, usable in any single-pass script (`LET $toc: STRING = MARKDOWN::TOC($md, {min_level: 2})`) or deferred through `DOCS::DEFER("MARKDOWN::TOC", [{...}])`. Headings parse via `pulldown-cmark` (fenced code never surfaces), anchors slug GitHub-style byte-for-byte matching the `docs_conformance` anchor check (lowercase, punctuation dropped except `-`/`_`, spaces to hyphens with runs left uncollapsed, `-1` dedup), and layouts render `tree` nested bullets or a flat `inline` bar. Options (`min_level` default 2 skipping `#` titles, `max_level`, `format`, `delimiter`) validate fail-fast at the call boundary, including the inline single-layer rule and the bare `{format: "inline"}` collapse to `min_level`.
+- `MARKDOWN::PARSE($md)` (pure): immediate heading inventory returning one MAP per heading (`level`, `text`, `anchor`) for composition and tests.
+- Workspace README section index: the master template carries `{{ DOCS::DEFER("MARKDOWN::TOC", [{min_level: 2, max_level: 2, format: "inline"}]) }}`, rendering a level-2 inline navigation bar from the final document on every docs-gen run.
+- Placeholder call arguments accept `{key: value}` map and `[item]` list literals (brace-aware splitting, recursive values of `$var.path` refs and string/int/float/bool literals, depth cap 16, strict errors for malformed shapes). Previously only `$var.path` and scalar literals were expressible, which made options-carrying placeholder calls impossible.
+- `STD::BASE64_ENCODE($text)` / `STD::BASE64_DECODE($text)` (pure): standard padded RFC 4648 alphabet both ways, so encoded output pastes into any standard decoder. Decoding fails naming the input on bad alphabet characters or non-UTF-8 payloads instead of rendering a silent empty.
+- `STD::RAND({seed?})` (AST-only, never a `{{ }}` placeholder call): draws a FLOAT uniformly from `[0, 1)`. Unseeded draws come from the thread RNG; a `seed` draws the first value of a seeded stream, so the same seed draws the same value on every run.
+
+### Changed
+
+- docs-gen renders every master template twice: pass 1 (`RENDER_TARGET`) is byte-identical to before, then a separate `POST_TARGET` step reads the output back, expands deferred sentinels against the full document, and rewrites it. Outputs without sentinels round-trip unchanged.
+- README narrative order: the reference block (Command Reference, Value types, Functions) now follows Guards directly, ahead of Deadlines and Templates. Value types split out of the command body into its own `value_types` generated artifact so templates place it independently; all four consuming docs keep their sections.
+- Guide sections folded into the command reference: Deadlines/Cancel/Templates no longer stand as top-level narrative. TIMEOUT gains an AWAIT-join example plus ASYNC nesting-order prose, ASYNC documents the WITH_IO-outside constraint, ECHO gains an interpolation example (`env:`/bare-name/empty semantics), and CANCEL's entry already covered its section. The workspace TOC bar no longer advertises individual features.
+
+### Dependencies
+
+- Add `base64` 0.22.1 (sentinel payloads, `BASE64_*` builtins).
+- Add `pulldown-cmark` 0.13.4 (`MARKDOWN::TOC`/`PARSE` heading extraction).
+
 ## [0.21.0-alpha] - 2026-10-06
 
 ### Added

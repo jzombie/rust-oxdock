@@ -36,6 +36,10 @@ Callable as `MODULE::NAME(...)` in expressions (or bare `NAME(...)` with the mod
 
 ### MAP_TO_MD_TABLE
 
+Render record data as an aligned Markdown table: one row per MAP,
+one column per key. Fails strict on shapes with no table in them.
+
+
 **Signature:** `MAP_TO_MD_TABLE($map: ANY) -> STRING`
 
 **Contexts:** AST, RPN
@@ -45,8 +49,50 @@ Callable as `MODULE::NAME(...)` in expressions (or bare `NAME(...)` with the mod
 
 **Returns:** `STRING`
 
-Render record data as an aligned Markdown table: one row per MAP,
-one column per key. Fails strict on shapes with no table in them.
+### PARSE
+
+Parse markdown headings into a structured list.
+
+Immediate helper for composition and tests: returns one MAP per
+heading with `level`, `text`, and `anchor` keys.
+
+**Signature:** `PARSE($md: STRING) -> LIST<ANY>`
+
+**Contexts:** AST, RPN
+
+**Parameters:**
+- `$md` (`STRING`): Markdown document to scan for headings.
+
+**Returns:** `LIST<ANY>`
+
+### TOC
+
+Render a table of contents for markdown text, immediately.
+
+Pure and pass-agnostic: takes document text plus options and returns
+the TOC in one call, with zero knowledge of sentinels, passes, or
+docs-gen. Deferred pipelines wrap this with `DOCS::DEFER` instead
+of calling it during expansion. Links render GitHub-style
+(`[text](#github-slug)` with `-1` dedup), so output pastes into any
+GitHub-rendered document with working anchors.
+
+**Signature:** `TOC($md: STRING, $options: MAP<min_level?: INT, max_level?: INT, format?: STRING, delimiter?: STRING>) -> STRING`
+
+**Contexts:** AST, RPN
+
+**Parameters:**
+- `$md` (`STRING`): Document markdown text to scan for headings.
+- `$options` (`MAP<min_level?: INT, max_level?: INT, format?: STRING, delimiter?: STRING>`): TOC options: heading bounds (`min_level` default 2 skips `#`
+titles, `max_level` default 3), output layout (`format` `tree`
+or `inline`, default `tree`), and the inline `delimiter`
+(default ` | `). A bare `{format: "inline"}` collects the
+`min_level` layer only.
+  - `min_level` (`INT`, optional, default `2`)
+  - `max_level` (`INT`, optional, default `3`)
+  - `format` (`STRING`, optional, default `tree`)
+  - `delimiter` (`STRING`, optional, default `|`)
+
+**Returns:** `STRING`
 
 ## License
 

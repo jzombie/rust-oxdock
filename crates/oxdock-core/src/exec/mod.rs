@@ -19,6 +19,7 @@ pub use self::remote::{
     apply_push_symlink,
 };
 
+pub use self::args::{json_to_value, value_to_json};
 pub use self::engine::{Engine, EngineOutput};
 pub use self::exit::{ExitRequest, exit_code_of};
 pub(crate) use self::handlers::{

@@ -1,0 +1,58 @@
+## Value types
+
+### Value type: INT
+
+64-bit signed integer, e.g. an exit code.
+
+### Value type: FLOAT
+
+64-bit float, e.g. a ratio.
+
+### Value type: STRING
+
+Arbitrary text. Quotes keep exact bytes, lone `$var` evaluates, `\{{ ... }}` interpolates.
+
+### Value type: BOOL
+
+Boolean `true` or `false`.
+
+### Value type: LIST
+
+Ordered list of values. Shared heap: cloning bumps a refcount.
+
+### Value type: MAP
+
+String-keyed map of values. Shared heap: cloning bumps a refcount.
+
+### Value type: PATH
+
+Workspace path, resolved against cwd and guarded against escape.
+
+### Value type: DURATION
+
+Positive time span: `500ms`, `10s`, `2m`, `1h`; bare number means seconds.
+
+### Value type: PIPE
+
+Anonymous pipe handle. The backend materializes lazily on first
+binding (never eagerly at declaration), so the choice always has full
+usage context. Cloning shares the backend (explicit-sharing fan-out);
+equality is handle identity, never byte comparison.
+
+### Value type: HANDLE
+
+Background ASYNC task handle for AWAIT/CANCEL.
+
+### Value type: SEMAPHORE
+
+Counting semaphore for admission control. Cloning shares the backend
+(explicit-sharing fan-out); equality is handle identity, never the
+count.
+
+### Value type: PERMIT
+
+Opaque admission permit minted by `SEMAPHORE_TRY_ACQUIRE`. Cloning
+shares the release obligation (first drops release nothing, the last
+releases once); equality is handle identity.
+
+

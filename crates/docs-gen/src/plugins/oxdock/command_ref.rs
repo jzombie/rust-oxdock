@@ -78,8 +78,10 @@ fn render_arg_type(arg_type: &ArgType) -> String {
 /// documented types cannot drift from the type system.
 /// Argument shapes (`$var`, `KEY=value`) are not value types: they render
 /// unlinked in argument tables (like inline `OneOf` alternations) and are
-/// documented where they are used (LET, MUTATION, ENV).
-fn render_value_types() -> String {
+/// documented where they are used (LET, MUTATION, ENV). Rendered as its
+/// own generated artifact so templates place it independently of the
+/// command body.
+pub(crate) fn render_value_types() -> String {
     let mut out = String::new();
     out.push_str("## Value types\n\n");
     for (name, descriptor) in startup_descriptors() {
@@ -197,7 +199,6 @@ pub(crate) fn render_body() -> Result<String> {
         out.push_str(&render_meta(&meta).with_context(|| format!("render {}", meta.name))?);
     }
 
-    out.push_str(&render_value_types());
     while out.ends_with('\n') {
         out.pop();
     }
@@ -389,18 +390,10 @@ pub(crate) fn render_plugin_reference(metas: &[FuncMeta], module: &str) -> Strin
     );
     for meta in metas {
         out.push_str(&format!("### {}\n\n", meta.name));
-        // No cell escaping: the signature renders inside backticks,
-        // which already isolate `|` from table parsing. Escaping here
-        // would print a literal backslash (closed `#[values]` sets
-        // render `a | b`).
-        out.push_str(&format!("**Signature:** `{}`\n\n", render_signature(meta)));
-        out.push_str(&format!(
-            "**Contexts:** {}\n\n",
-            if meta.rpn { "AST, RPN" } else { "AST only" },
-        ));
-        out.push_str(&render_parameters(meta));
-        // The full docs already open with the summary line: print whichever
-        // carries more, never both stacked.
+        // Prose first: the description reads immediately below the
+        // heading, with the signature and machine detail after it.
+        // The full docs already open with the summary line: print
+        // whichever carries more, never both stacked.
         if meta.docs.starts_with(meta.summary) && !meta.summary.is_empty() {
             out.push_str(&escape_placeholders(&format!("{}\n\n", meta.docs)));
         } else {
@@ -411,6 +404,16 @@ pub(crate) fn render_plugin_reference(metas: &[FuncMeta], module: &str) -> Strin
                 out.push_str(&escape_placeholders(&format!("{}\n\n", meta.docs)));
             }
         }
+        // No cell escaping: the signature renders inside backticks,
+        // which already isolate `|` from table parsing. Escaping here
+        // would print a literal backslash (closed `#[values]` sets
+        // render `a | b`).
+        out.push_str(&format!("**Signature:** `{}`\n\n", render_signature(meta)));
+        out.push_str(&format!(
+            "**Contexts:** {}\n\n",
+            if meta.rpn { "AST, RPN" } else { "AST only" },
+        ));
+        out.push_str(&render_parameters(meta));
     }
     while out.ends_with('\n') {
         out.pop();

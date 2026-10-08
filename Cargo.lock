@@ -177,6 +177,12 @@ checksum = "fd307490d624467aa6f74b0eabb77633d1f758a7b25f12bceb0b22e08d9726f6"
 
 [[package]]
 name = "base64"
+version = "0.22.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+
+[[package]]
+name = "base64"
 version = "0.23.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
@@ -677,6 +683,7 @@ name = "docs-gen"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "indoc",
  "oxdock-core",
  "oxdock-fs",
@@ -1529,7 +1536,7 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
 name = "oxdock"
-version = "0.21.0-alpha"
+version = "0.22.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -1545,7 +1552,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-build"
-version = "0.21.0-alpha"
+version = "0.22.0-alpha"
 dependencies = [
  "anyhow",
  "oxdock-core",
@@ -1561,7 +1568,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-cli"
-version = "0.21.0-alpha"
+version = "0.22.0-alpha"
 dependencies = [
  "anyhow",
  "futures-executor",
@@ -1586,9 +1593,10 @@ dependencies = [
 
 [[package]]
 name = "oxdock-core"
-version = "0.21.0-alpha"
+version = "0.22.0-alpha"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "indoc",
  "oxdock-fs",
  "oxdock-func-macro",
@@ -1597,6 +1605,7 @@ dependencies = [
  "oxdock-process",
  "oxdock-sys-test-utils",
  "proptest",
+ "rand 0.10.3",
  "serde_json",
  "sha2",
  "toml",
@@ -1604,7 +1613,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-doc-tests"
-version = "0.21.0-alpha"
+version = "0.22.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -1618,7 +1627,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-embed"
-version = "0.21.0-alpha"
+version = "0.22.0-alpha"
 dependencies = [
  "anyhow",
  "oxdock-fs",
@@ -1630,7 +1639,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-fixture"
-version = "0.21.0-alpha"
+version = "0.22.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -1641,7 +1650,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-fs"
-version = "0.21.0-alpha"
+version = "0.22.0-alpha"
 dependencies = [
  "anyhow",
  "cache-manager",
@@ -1655,16 +1664,17 @@ dependencies = [
 
 [[package]]
 name = "oxdock-func-macro"
-version = "0.21.0-alpha"
+version = "0.22.0-alpha"
 dependencies = [
  "proc-macro2",
  "quote",
+ "rand 0.10.3",
  "syn 3.0.6",
 ]
 
 [[package]]
 name = "oxdock-logic-tests"
-version = "0.21.0-alpha"
+version = "0.22.0-alpha"
 dependencies = [
  "anyhow",
  "cargo_metadata",
@@ -1691,7 +1701,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-macros"
-version = "0.21.0-alpha"
+version = "0.22.0-alpha"
 dependencies = [
  "anyhow",
  "oxdock-build",
@@ -1708,7 +1718,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-markdown-plugin"
-version = "0.21.0-alpha"
+version = "0.22.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -1716,12 +1726,13 @@ dependencies = [
  "oxdock-func-macro",
  "oxdock-parser",
  "oxdock-process",
+ "pulldown-cmark",
  "serde_json",
 ]
 
 [[package]]
 name = "oxdock-net-plugin"
-version = "0.21.0-alpha"
+version = "0.22.0-alpha"
 dependencies = [
  "anyhow",
  "futures-executor",
@@ -1747,7 +1758,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-parser"
-version = "0.21.0-alpha"
+version = "0.22.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -1765,7 +1776,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-pipe"
-version = "0.21.0-alpha"
+version = "0.22.0-alpha"
 dependencies = [
  "anyhow",
  "oxdock-fs",
@@ -1773,7 +1784,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-process"
-version = "0.21.0-alpha"
+version = "0.22.0-alpha"
 dependencies = [
  "anyhow",
  "libc",
@@ -1786,7 +1797,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-remote-proto"
-version = "0.21.0-alpha"
+version = "0.22.0-alpha"
 dependencies = [
  "anyhow",
  "flate2",
@@ -1799,7 +1810,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-ssh-plugin"
-version = "0.21.0-alpha"
+version = "0.22.0-alpha"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1819,7 +1830,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-sys-test-utils"
-version = "0.21.0-alpha"
+version = "0.22.0-alpha"
 
 [[package]]
 name = "p256"
@@ -2980,7 +2991,7 @@ version = "3.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9a7ac20be9b7726e0bbdbf974c059676d9acb1cd414961f570a4e8231cacd7fc"
 dependencies = [
- "base64",
+ "base64 0.23.1",
  "log",
  "percent-encoding",
  "rustls",
@@ -2996,7 +3007,7 @@ version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f86fd172ccca569e458f61b6bdd6220965a9ef36e672a6852953b51a0e1583be"
 dependencies = [
- "base64",
+ "base64 0.23.1",
  "http",
  "httparse",
  "log",

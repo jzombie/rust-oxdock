@@ -14,6 +14,7 @@ use super::io::StreamHandle;
 use super::state::ExecState;
 use super::steps::StepCtx;
 use super::typing::TypeDescriptor;
+use super::typing::check_options;
 
 /// Origin of a callable in the unified function registry. `Script` is an
 /// interpreted `FUNC` body; `HostCtx` and `HostPure` are compiled Rust
@@ -317,6 +318,9 @@ impl<P: ProcessManager> FunctionRegistry<P> {
             HasKey::registration(),
             MapSet::registration(),
             MergeMaps::registration(),
+            Base64Encode::registration(),
+            Base64Decode::registration(),
+            Rand::registration(),
             ToJson::registration(),
             TypeOf::registration(),
             Functions::registration(),
@@ -780,6 +784,178 @@ fn map_set(
     value: Value,
 ) -> Result<Value> {
     super::args::map_set_from_value(Value::map(map), key, value)
+}
+
+/// `RAND` options, shared by the registration metadata and the
+/// arity check. One params vector feeds both, so the two can never
+/// disagree: add a parameter once, here.
+static RAND_OPTIONS: &[ParamOption] = &[ParamOption {
+    name: "seed",
+    value: TypeTag::Int,
+    required: false,
+    default: None,
+}];
+
+/// Draw a random FLOAT uniformly from [0, 1), optionally seeded.
+///
+/// Impure by design: unseeded calls return different values, so this
+/// runs on the AST script path only, never as a `{{ }}` placeholder
+/// call. A seed draws the same value on every run, for deterministic
+/// fixtures. Scale and shift the draw for wider ranges. Hand-built
+/// (not `#[oxdock_func]`): the macro marks every param required, and
+/// only hand-built entries can leave a trailing options MAP omittable,
+/// so bare `RAND()` fills `{}`.
+///
+/// ```oxdock
+/// # Scale a unit draw into a backoff delay between 1 and 11 seconds.
+/// IMPORT [STD]
+/// LET $draw: FLOAT = RAND()
+/// LET $delay: FLOAT = 1.0 + $draw * 10.0
+/// IF $delay < 1.0 {
+///     EXIT 1
+/// }
+/// IF $delay >= 11.0 {
+///     EXIT 1
+/// }
+/// ECHO "retrying in {{ $delay }}s"
+///
+/// # A seed draws the same value on every run.
+/// LET $one: FLOAT = RAND({seed: 7})
+/// LET $two: FLOAT = RAND({seed: 7})
+/// ASSERT_EQ $one $two
+/// ```
+///
+/// Registration marker for `RAND`, hand-implementing [`OxDockFn`]:
+/// the `#[oxdock_func]` macro marks every param required, and only a
+/// hand-built entry can leave the trailing options MAP omittable, so
+/// bare `RAND()` fills `{}`.
+pub struct Rand;
+impl<P: ProcessManager> OxDockFn<P> for Rand {
+    fn registration() -> HostRegistration<P> {
+        rand_registration()
+    }
+}
+
+fn rand_registration<P: ProcessManager>() -> HostRegistration<P> {
+    // One params vector feeds both the metadata and the arity check,
+    // so the two can never disagree: add a parameter once, here.
+    let params = vec![FuncParam {
+        name: "options".to_string(),
+        param_type: Some(TypeTag::Map),
+        allowed: None,
+        docs: "Draw settings: `seed`. Omittable: a missing options MAP fills `{}`.",
+        options: Some(RAND_OPTIONS),
+        optional: true,
+    }];
+    let arity = params.len();
+    let required = required_arity(&params);
+    let fill_params = params.clone();
+    let func: NativeFn<P> = Arc::new(move |cx, values| {
+        let _ = cx;
+        if values.len() < required || values.len() > arity {
+            anyhow::bail!(
+                "RAND() expects {required} to {arity} argument(s), got {}",
+                values.len()
+            );
+        }
+        let mut values = fill_optional_args(&fill_params, values).into_iter();
+        let options_value = values.next().expect("arity checked above");
+        let options_map = match options_value.as_map() {
+            Some(map) => map.clone(),
+            None => anyhow::bail!(
+                "RAND() argument `$options` must be a MAP, got {}",
+                options_value.type_name()
+            ),
+        };
+        check_options(&options_map, RAND_OPTIONS, "RAND")?;
+        let seed = match options_map.get("seed") {
+            Some(value) => Some(value.as_i64().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "RAND option 'seed' must be an INT, got {}",
+                    value.type_name()
+                )
+            })?),
+            None => None,
+        };
+        super::args::rand_float_from_value(seed)
+    });
+    HostRegistration::Stateful {
+        name: "RAND".to_string(),
+        meta: FuncMeta {
+            name: "RAND".to_string(),
+            // Assigned at registration, like the macro's markers.
+            module: String::new(),
+            kind: FuncKind::HostCtx,
+            params: Some(params),
+            returns: Some(TypeTag::Float),
+            rpn: false,
+            summary: "Draw a random FLOAT uniformly from [0, 1), optionally seeded.",
+            docs: indoc::indoc! {r#"
+                Draw a random FLOAT uniformly from [0, 1), optionally seeded. Impure by design: unseeded calls return different values, so this runs on the AST script path only, never as a `{{ }}` placeholder call. A seed draws the same value on every run, for deterministic fixtures. Scale and shift the draw for wider ranges. Hand-built (not `#[oxdock_func]`): the macro marks every param required, and only hand-built entries can leave a trailing options MAP omittable, so bare `RAND()` fills `{}`.
+
+                ```oxdock
+                # Scale a unit draw into a backoff delay between 1 and 11 seconds.
+                IMPORT [STD]
+                LET $draw: FLOAT = RAND()
+                LET $delay: FLOAT = 1.0 + $draw * 10.0
+                IF $delay < 1.0 {
+                    EXIT 1
+                }
+                IF $delay >= 11.0 {
+                    EXIT 1
+                }
+                ECHO "retrying in {{ $delay }}s"
+
+                # A seed draws the same value on every run.
+                LET $one: FLOAT = RAND({seed: 7})
+                LET $two: FLOAT = RAND({seed: 7})
+                ASSERT_EQ $one $two
+                ```
+            "#},
+        },
+        func,
+    }
+}
+
+/// Encode a STRING as standard base64.
+///
+/// Padded RFC 4648 alphabet, so encoded output pastes into any
+/// standard decoder. Pairs with `BASE64_DECODE` for the round trip.
+///
+/// ```oxdock
+/// # Encode text to standard base64.
+/// IMPORT [STD]
+/// LET $encoded: STRING = BASE64_ENCODE("hello")
+/// ASSERT_EQ $encoded "aGVsbG8="
+/// ```
+///
+#[oxdock_func(pure, returns = TypeTag::String)]
+fn base64_encode(
+    /// Text to encode.
+    text: String,
+) -> Result<Value> {
+    super::args::base64_encode_from_value(Value::string(text))
+}
+
+/// Decode standard base64 to a STRING.
+///
+/// Fails naming the input on invalid alphabet characters or
+/// non-UTF-8 payloads instead of rendering a silent empty. Pairs
+/// with `BASE64_ENCODE` for the round trip.
+///
+/// ```oxdock
+/// # Decode standard base64 back to text.
+/// IMPORT [STD]
+/// LET $decoded: STRING = BASE64_DECODE("aGVsbG8=")
+/// ASSERT_EQ $decoded "hello"
+/// ```
+///
+#[oxdock_func(pure, returns = TypeTag::String)]
+fn base64_decode(
+    /// Base64 text to decode.
+    text: String,
+) -> Result<Value> {
+    super::args::base64_decode_from_value(Value::string(text))
 }
 
 /// Encode a script value as JSON with one trailing newline.

@@ -571,6 +571,11 @@ task handle for `AWAIT`. Task output streams live to the parent
 stdout; a task publishes a value with an explicit `RETURN`,
 which `LET $out: TYPE = AWAIT $task` binds.
 
+`WITH_IO` must wrap `ASYNC` from the outside (`LET $p: PIPE` first,
+then `WITH_IO [stdout=$p] ASYNC ...`) so pipe endpoints allocate on
+the main thread before the worker spawns. Placing `WITH_IO` directly
+inside `ASYNC` is rejected at parse time.
+
 
 **Examples:**
 
@@ -684,6 +689,12 @@ duration (e.g. 500ms, 10s, 2m; a bare number means seconds).
 
 A blocking foreground process is killed.
 
+ASYNC composes in either nesting order with order-dependent deadline
+semantics: `LET $task: HANDLE = ASYNC TIMEOUT 30s RUN "build"` enforces
+the deadline inside the background thread (a later `AWAIT $task`
+surfaces the `TIMEOUT` error), while `TIMEOUT 30s AWAIT $task`
+preempts a hung task from the awaiting side.
+
 
 **Examples:**
 
@@ -727,6 +738,16 @@ TIMEOUT $budget WRITE heartbeat.txt alive
 
 LET $beat: STRING = READ heartbeat.txt
 ASSERT_EQ $beat "alive"
+```
+
+**Example: timeout await**
+
+```oxdock
+# AWAIT form bounds a task join instead of a step.
+LET $quick: HANDLE = ASYNC {
+    ECHO hi
+}
+TIMEOUT 30s AWAIT $quick
 ```
 
 
@@ -1398,6 +1419,18 @@ LET $x: STRING = "World"
 ECHO "braced:\{{ $x }}"
 ECHO $x
 ASSERT_EQ stdout "braced:World\nWorld\n"
+```
+
+**Example: interpolation**
+
+```oxdock
+# `\{{ env:KEY }}` reads the script environment; a bare name
+# resolves a DSL variable instead. Unknown keys expand to
+# empty with no host fallback.
+ENV USER=OxDock
+LET $WHO: STRING = "Ada"
+ECHO "Hello \{{ env:USER }}! Hi \{{ WHO }}!\{{ env:OXDOCK_DOC_NO_SUCH_KEY }}"
+ASSERT_CONTAINS stdout "Hello OxDock! Hi Ada!"
 ```
 
 
@@ -2125,61 +2158,3 @@ LIST_APPEND $items "second"
 LET $want: LIST<STRING> = ["first", "second"]
 ASSERT_EQ $items $want
 ```
-
-
-## Value types
-
-### Value type: INT
-
-64-bit signed integer, e.g. an exit code.
-
-### Value type: FLOAT
-
-64-bit float, e.g. a ratio.
-
-### Value type: STRING
-
-Arbitrary text. Quotes keep exact bytes, lone `$var` evaluates, `\{{ ... }}` interpolates.
-
-### Value type: BOOL
-
-Boolean `true` or `false`.
-
-### Value type: LIST
-
-Ordered list of values. Shared heap: cloning bumps a refcount.
-
-### Value type: MAP
-
-String-keyed map of values. Shared heap: cloning bumps a refcount.
-
-### Value type: PATH
-
-Workspace path, resolved against cwd and guarded against escape.
-
-### Value type: DURATION
-
-Positive time span: `500ms`, `10s`, `2m`, `1h`; bare number means seconds.
-
-### Value type: PIPE
-
-Anonymous pipe handle. The backend materializes lazily on first
-binding (never eagerly at declaration), so the choice always has full
-usage context. Cloning shares the backend (explicit-sharing fan-out);
-equality is handle identity, never byte comparison.
-
-### Value type: HANDLE
-
-Background ASYNC task handle for AWAIT/CANCEL.
-
-### Value type: SEMAPHORE
-
-Counting semaphore for admission control. Cloning shares the backend
-(explicit-sharing fan-out); equality is handle identity, never the
-count.
-
-### Value type: PERMIT
-
-Opaque admission permit minted by `SEMAPHORE_TRY_ACQUIRE`. Cloning
-shares the release obligation (first drops release nothing, the last
-releases once); equality is handle identity.

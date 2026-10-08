@@ -1058,6 +1058,15 @@ declare_commands! {
                 ECHO $x
                 ASSERT_EQ stdout "braced:World\nWorld\n"
             "#} },
+            Example { name: "interpolation", fence_meta: None, code: indoc! {r#"
+                # `{{ env:KEY }}` reads the script environment; a bare name
+                # resolves a DSL variable instead. Unknown keys expand to
+                # empty with no host fallback.
+                ENV USER=OxDock
+                LET $WHO: STRING = "Ada"
+                ECHO "Hello {{ env:USER }}! Hi {{ WHO }}!{{ env:OXDOCK_DOC_NO_SUCH_KEY }}"
+                ASSERT_CONTAINS stdout "Hello OxDock! Hi Ada!"
+            "#} },
         ],
         lower: |_flags, args| Ok(StepKind::Echo(join_value(args, "ECHO")?)),
     ],
@@ -2360,6 +2369,11 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 task handle for `AWAIT`. Task output streams live to the parent
                 stdout; a task publishes a value with an explicit `RETURN`,
                 which `LET $out: TYPE = AWAIT $task` binds.
+
+                `WITH_IO` must wrap `ASYNC` from the outside (`LET $p: PIPE` first,
+                then `WITH_IO [stdout=$p] ASYNC ...`) so pipe endpoints allocate on
+                the main thread before the worker spawns. Placing `WITH_IO` directly
+                inside `ASYNC` is rejected at parse time.
             "#},
             args: &[],
             flags: &[],
@@ -2480,6 +2494,12 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 duration (e.g. 500ms, 10s, 2m; a bare number means seconds).
 
                 A blocking foreground process is killed.
+
+                ASYNC composes in either nesting order with order-dependent deadline
+                semantics: `LET $task: HANDLE = ASYNC TIMEOUT 30s RUN "build"` enforces
+                the deadline inside the background thread (a later `AWAIT $task`
+                surfaces the `TIMEOUT` error), while `TIMEOUT 30s AWAIT $task`
+                preempts a hung task from the awaiting side.
             "#},
             args: &[],
             flags: &[],
@@ -2527,6 +2547,17 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
 
                     LET $beat: STRING = READ heartbeat.txt
                     ASSERT_EQ $beat "alive"
+                "#},
+                },
+                Example {
+                    name: "timeout await",
+                    fence_meta: None,
+                    code: indoc! {r#"
+                    # AWAIT form bounds a task join instead of a step.
+                    LET $quick: HANDLE = ASYNC {
+                        ECHO hi
+                    }
+                    TIMEOUT 30s AWAIT $quick
                 "#},
                 },
             ],

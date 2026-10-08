@@ -147,31 +147,6 @@ ECHO 'semi;colon'
 ASSERT_CONTAINS stdout "semi;colon"
 ```
 
-## Templates
-
-`\{{ env:KEY }}` interpolates script environment values into arguments at execution time. Values come from the script environment (`ENV`, inherited keys): there is no fallback to host variables in command context, and unknown keys expand to an empty string. The unprefixed form `\{{ KEY }}` resolves a DSL variable of that name instead, else expands to empty; it never reads the environment, so always use the `env:`-prefixed spelling for environment values:
-
-```oxdock
-ENV USER=OxDock
-
-# The env:-prefixed form interpolates from the script environment.
-ECHO "Hello \{{ env:USER }}!"
-ASSERT_CONTAINS stdout "Hello OxDock!"
-
-# Unprefixed names resolve DSL variables instead: $WHO exists, so this expands.
-LET $WHO: STRING = "Ada"
-ECHO "Hi \{{ WHO }}!"
-ASSERT_CONTAINS stdout "Hi Ada!"
-
-# With no such variable the bare name expands to empty.
-ECHO "Hello \{{ USER }}!"
-ASSERT_CONTAINS stdout "Hello !"
-
-# Unknown keys expand to empty with no host fallback.
-ECHO "a\{{ env:OXDOCK_DOC_NO_SUCH_KEY }}b"
-ASSERT_CONTAINS stdout "ab"
-```
-
 ## Guards and scoped blocks
 
 A guard is a bracketed expression that gates the instruction or block that follows it. Inside the brackets:
@@ -362,51 +337,4 @@ ASSERT_EQ $b "persisted"
     EXIT 3
     WRITE unreachable.txt "never"
 }
-```
-
-## Deadlines with TIMEOUT
-
-`TIMEOUT <duration> <command>` bounds a single step, `TIMEOUT <duration> { ... }` bounds a block, and `TIMEOUT <duration> AWAIT $task` bounds a task join. Durations accept `ms`, `s`, `m`, and `h` suffixes (a bare number means seconds, e.g. `TIMEOUT 30 ...`). A step that overruns its deadline is cancelled. A blocking foreground process is killed, and the pipeline fails with a `TIMEOUT after <duration>` error. `SLEEP <duration>` parks the step without spawning a shell, which makes it ideal for testing deadlines portably (a `SLEEP` inside an expired `TIMEOUT` is interrupted instead of running out the clock).
-
-```oxdock
-// Inline form bounds a single command.
-TIMEOUT 30s WRITE heartbeat.txt alive
-LET $beat: STRING = READ heartbeat.txt
-ASSERT_EQ $beat "alive"
-
-// Block form bounds multiple steps.
-TIMEOUT 30s {
-    WRITE a.txt one
-    WRITE b.txt two
-}
-LET $a: STRING = READ a.txt
-LET $b: STRING = READ b.txt
-ASSERT_EQ $a "one"
-ASSERT_EQ $b "two"
-
-// AWAIT form bounds a task join.
-LET $quick: HANDLE = ASYNC {
-    ECHO hi
-}
-TIMEOUT 30s AWAIT $quick
-```
-
-`ASYNC` wraps any command or block (including `TIMEOUT`, `CANCEL`, `SLEEP`, and nested `ASYNC`) in either nesting order with order-dependent deadline semantics: `LET $task: HANDLE = ASYNC TIMEOUT 30s RUN "build"` enforces the deadline inside the background thread (a later `AWAIT $task` surfaces the `TIMEOUT` error), while `TIMEOUT 30s AWAIT $task` preempts a hung task from the awaiting side:
-
-```oxdock
-// ASYNC wraps TIMEOUT: the deadline fires inside the background thread.
-LET $bounded: HANDLE = ASYNC TIMEOUT 30s ECHO "bounded"
-AWAIT $bounded
-```
-
-The one structural exception is `WITH_IO`, which must wrap `ASYNC` from the outside (`LET $p: PIPE` first, then `WITH_IO [stdout=$p] ASYNC ...`) so pipe endpoints are allocated synchronously on the main thread before the worker spawns. Placing `WITH_IO` directly inside `ASYNC` is rejected at parse time.
-
-## Cancelling tasks with CANCEL
-
-`CANCEL $task` synchronously stops a named background task spawned via `LET $task: HANDLE = ASYNC ...`. It is blocking: when the statement returns, the task thread has been joined and its OS process reaped, so no residual filesystem or stream mutation can follow and the next step runs in a quiet workspace. Only named tasks can be cancelled; a later `AWAIT $task` fails with a cancellation error, and a second `CANCEL $task` fails as already cancelled.
-
-```oxdock
-// CANCEL form stops a named background task synchronously.
-LET $worker: HANDLE = ASYNC SLEEP 30s
-CANCEL $worker
 ```
