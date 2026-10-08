@@ -14,6 +14,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - `oxdock_parser::parse_expression_str`: parse one expression from source text with an empty module scope, for tooling that shows lowering without running.
 - CI `docs-fresh` job regenerates docs with `cargo run -p docs-gen` and fails on any diff, so stale generated docs break the build.
 
+### Fixed
+
+- `CITATION.cff` was three releases stale (`0.20.0-alpha` while the workspace moved on); it is now rendered by `docs-gen` from the workspace manifest like every other generated artifact, so its version tracks releases automatically.
+
 ## [0.22.0-alpha] - 2026-10-07
 
 ### Added
