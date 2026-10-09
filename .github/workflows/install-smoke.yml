@@ -67,6 +67,26 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # The installer under test is this branch, never the newest
+      # release: behavior fixes prove before any release ships them.
+      # Same build the release ships (all features), by package name.
+      - name: Build branch binary
+        id: branch-bin
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release -p oxdock --all-features
+          bin="$PWD/target/release/oxdock"
+          if [ "${RUNNER_OS}" = Windows ]; then
+            bin="$bin.exe"
+            bin="$(cygpath -w "$bin")"
+          fi
+          test -f "$bin"
+          echo "path=$bin" >> "$GITHUB_OUTPUT"
+
       # Resolved once for steps that must not touch network at all:
       # unpinned VERSION queries the API, which would defeat a
       # blackhole proof.
@@ -85,6 +105,7 @@ jobs:
         env:
           INSTALL_DIR: ${{ runner.temp }}/oxbin
           SMOKE_VERSION: ${{ steps.smoke-version.outputs.version }}
+          OXDOCK_ENGINE: ${{ steps.branch-bin.outputs.path }}
         run: |
           set -euo pipefail
           ./bootstrap.sh
@@ -97,6 +118,7 @@ jobs:
         env:
           INSTALL_DIR: ${{ runner.temp }}\oxbin
           SMOKE_VERSION: ${{ steps.smoke-version.outputs.version }}
+          OXDOCK_ENGINE: ${{ steps.branch-bin.outputs.path }}
         run: |
           $ErrorActionPreference = 'Stop'
           # Native-bound strings pipe as UTF-8: PowerShell defaults to
@@ -116,6 +138,7 @@ jobs:
         shell: bash
         env:
           INSTALL_DIR: ${{ runner.temp }}/oxbin-warm
+          OXDOCK_ENGINE: ${{ steps.branch-bin.outputs.path }}
         run: |
           set -euo pipefail
           ./bootstrap.sh 2>&1 | tee "${RUNNER_TEMP}/warm.log"
@@ -134,6 +157,7 @@ jobs:
         shell: pwsh
         env:
           INSTALL_DIR: ${{ runner.temp }}\oxbin-warm
+          OXDOCK_ENGINE: ${{ steps.branch-bin.outputs.path }}
         run: |
           $ErrorActionPreference = 'Stop'
           .\bootstrap.ps1 2>&1 | Tee-Object (Join-Path $env:RUNNER_TEMP 'warm.log')
@@ -156,6 +180,7 @@ jobs:
         env:
           VERSION: ${{ steps.smoke-version.outputs.tag }}
           INSTALL_DIR: ${{ runner.temp }}/oxbin-offline
+          OXDOCK_ENGINE: ${{ steps.branch-bin.outputs.path }}
           http_proxy: http://127.0.0.1:9
           https_proxy: http://127.0.0.1:9
         run: |

@@ -16,6 +16,11 @@
 #
 # Pass INSTALL_DIR to choose the destination; the installer defaults
 # it when absent.
+#
+# Point OXDOCK_ENGINE at a branch-built binary to run the installer
+# with it instead of the downloaded release (CI smoke proves behavior
+# fixes before any release ships them). The asset still downloads and
+# verifies; only the execution engine swaps.
 $ErrorActionPreference = 'Stop'
 
 $Repo = "{{ $docs_global.repo }}"
@@ -105,10 +110,23 @@ try {
   if ($env:INSTALL_DIR) { $env:OXDOCK_DIR = $env:INSTALL_DIR.Replace('/', '\') }
   $env:OXDOCK_SHA = $Expected
   $env:OXDOCK_VERSION = $Version
+  # An explicit OXDOCK_ENGINE runs the installer instead of the
+  # unpacked release; it must name an existing file, and fails closed
+  # otherwise.
+  # Resolve relative to the caller's directory: execution below runs
+  # from the scratch dir, where a relative path would no longer point
+  # at the engine.
+  $Engine = if ($env:OXDOCK_ENGINE) { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($env:OXDOCK_ENGINE) } else { (Join-Path $tmp 'x\oxdock.exe') }
+  if (-not (Test-Path $Engine)) { throw "installer engine missing: $Engine" }
   Push-Location $tmp
-  & (Join-Path $tmp 'x\oxdock.exe') 'install.oxfile'
-  if ($LASTEXITCODE -ne 0) { throw "installer failed with exit code $LASTEXITCODE" }
-  Pop-Location
+  try {
+    & $Engine 'install.oxfile'
+    if ($LASTEXITCODE -ne 0) { throw "installer failed with exit code $LASTEXITCODE" }
+  } finally {
+    # Restore first: deleting the working directory while standing
+    # inside it fails as in use and would mask the real error.
+    Pop-Location
+  }
 } finally {
   Remove-Item -Recurse -Force $tmp
 }
