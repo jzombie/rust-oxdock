@@ -3,7 +3,7 @@ pub mod plugins;
 
 use anyhow::{Context, Result};
 use oxdock_core::{Engine, ExecIo, HostModule};
-use oxdock_fs::{GuardedPath, PathResolver, WorkspaceFs};
+use oxdock_fs::{EntryKind, GuardedPath, PathResolver, WorkspaceFs};
 use oxdock_macros::oxdock;
 use oxdock_process::default_process_manager;
 #[allow(clippy::disallowed_types)]
@@ -334,10 +334,129 @@ pub fn run_with_plugins(
     for module in extra_modules {
         engine.register_module(module);
     }
-    engine
+    let output = engine
         .run_steps_on(fs, &steps, default_process_manager())
         .context("render documents")?;
+    apply_executable_bits(output.fs.as_ref(), &root).context("apply executable bits")?;
     eprintln!("docs rendered");
+    Ok(())
+}
+
+/// Mode re-applied to rendered outputs whose target declares
+/// `"executable": true`.
+const EXECUTABLE_MODE: u32 = 0o755;
+
+/// Output paths in one target.json manifest requesting the executable
+/// bit: every target entry with `"executable": true` contributes its
+/// `out`. Strict so a typo degrades to an error, never to a silently
+/// non-executable script: a present-but-not-boolean flag, or `true`
+/// without a string `out`, fails naming the target.
+fn executable_outs(manifest: &serde_json::Value) -> Result<Vec<String>> {
+    let mut outs = Vec::new();
+    let targets = manifest
+        .get("targets")
+        .and_then(|targets| targets.as_array())
+        .context("target manifest needs a 'targets' array")?;
+    for target in targets {
+        let name = target
+            .get("name")
+            .and_then(|name| name.as_str())
+            .unwrap_or("<unnamed>");
+        match target.get("executable") {
+            None | Some(serde_json::Value::Bool(false)) => {}
+            Some(serde_json::Value::Bool(true)) => {
+                let out = target
+                    .get("out")
+                    .and_then(|out| out.as_str())
+                    .with_context(|| {
+                        format!("target '{name}' sets 'executable' without a string 'out'")
+                    })?;
+                outs.push(out.to_string());
+            }
+            Some(_) => {
+                anyhow::bail!(
+                    "target '{name}' sets 'executable' to a non-boolean; use true or omit it"
+                )
+            }
+        }
+    }
+    Ok(outs)
+}
+
+/// Collect every target.json path under one docs-gen scope, relative
+/// to the repo root. Symlinked directories are never descended, so a
+/// link cycle cannot loop the walk; a symlinked target.json file
+/// itself still resolves through the normal read.
+fn collect_target_manifests(
+    fs: &dyn WorkspaceFs,
+    root: &GuardedPath,
+    rel: &str,
+    out: &mut Vec<String>,
+) -> Result<()> {
+    let dir = if rel == "." {
+        root.clone()
+    } else {
+        root.join(rel)?
+    };
+    let entries = fs
+        .read_dir_entries(&dir)
+        .with_context(|| format!("list '{rel}' for executable-bit pass"))?;
+    for entry in entries {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let child = if rel == "." {
+            name.clone()
+        } else {
+            format!("{rel}/{name}")
+        };
+        if name == "target.json" {
+            out.push(child);
+            continue;
+        }
+        let guarded = root.join(&child)?;
+        if matches!(fs.entry_kind_no_follow(&guarded)?, EntryKind::Dir) {
+            collect_target_manifests(fs, root, &child, out)?;
+        }
+    }
+    Ok(())
+}
+
+/// Re-apply the executable bit to every rendered output whose target
+/// declares `"executable": true`. Fresh files arrive `0644` from the
+/// renderer, which silently drops the `0755` the smoke workflow needs
+/// to execute `./install.sh`; re-applying here keeps regeneration
+/// self-healing instead of relying on a committed mode bit
+/// surviving. The bit itself lands through
+/// `set_permissions_mode_unix`, so Windows and Miri runs succeed as
+/// no-ops and only POSIX trees change.
+fn apply_executable_bits(fs: &dyn WorkspaceFs, root: &GuardedPath) -> Result<()> {
+    let cfg_raw = fs
+        .read_to_string(&root.join("docs-gen.json")?)
+        .context("read docs-gen.json for executable-bit pass")?;
+    let cfg: serde_json::Value =
+        serde_json::from_str(&cfg_raw).context("parse docs-gen.json for executable-bit pass")?;
+    let scopes = cfg
+        .get("scopes")
+        .and_then(|scopes| scopes.as_array())
+        .context("docs-gen.json needs a 'scopes' array")?;
+    let mut manifests = Vec::new();
+    for scope in scopes {
+        let scope = scope
+            .as_str()
+            .context("docs-gen.json 'scopes' entries must be strings")?;
+        collect_target_manifests(fs, root, scope, &mut manifests)?;
+    }
+    for manifest_rel in &manifests {
+        let raw = fs
+            .read_to_string(&root.join(manifest_rel)?)
+            .with_context(|| format!("read '{manifest_rel}' for executable-bit pass"))?;
+        let manifest: serde_json::Value = serde_json::from_str(&raw)
+            .with_context(|| format!("parse '{manifest_rel}' for executable-bit pass"))?;
+        for out in executable_outs(&manifest)? {
+            let path = root.join(&out)?;
+            fs.set_permissions_mode_unix(&path, EXECUTABLE_MODE)
+                .with_context(|| format!("set executable bit on '{out}'"))?;
+        }
+    }
     Ok(())
 }
 
@@ -391,5 +510,40 @@ mod tests {
         let mut expected = header.clone();
         expected.sort_unstable();
         assert_eq!(registered, expected, "registered set drifted from header");
+    }
+
+    #[test]
+    fn executable_outs_selects_flagged_targets() {
+        let manifest = serde_json::json!({"targets": [
+            {"name": "a", "out": "a.sh", "executable": true},
+            {"name": "b", "out": "b.md"},
+            {"name": "c", "out": "c.ps1", "executable": false},
+        ]});
+        assert_eq!(
+            executable_outs(&manifest).expect("select"),
+            vec!["a.sh".to_string()]
+        );
+    }
+
+    #[test]
+    fn executable_outs_rejects_non_boolean_flag() {
+        let manifest = serde_json::json!({"targets": [
+            {"name": "a", "out": "a.sh", "executable": "yes"},
+        ]});
+        let err = format!(
+            "{:#}",
+            executable_outs(&manifest).expect_err("string flag must fail")
+        );
+        assert!(err.contains("'a'"), "names the target: {err}");
+    }
+
+    #[test]
+    fn executable_outs_rejects_flag_without_out() {
+        let manifest = serde_json::json!({"targets": [{"name": "a", "executable": true}]});
+        let err = format!(
+            "{:#}",
+            executable_outs(&manifest).expect_err("missing out must fail")
+        );
+        assert!(err.contains("'a'"), "names the target: {err}");
     }
 }

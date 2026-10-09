@@ -29,6 +29,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 - CLI script paths containing a URL scheme fail fast with the input intact instead of letting path normalization mangle it (`https://` no longer comes out as `https:/`).
 - `WORKSPACE SYSTEM` resolves absolute paths on every drive and share instead of confining them under the build-context drive, so installs and file operations reach drives other than the build drive on Windows.
+- docs-gen re-applies the executable bit to targets declaring `"executable": true` (`install.sh`), so regenerating the installer cannot silently drop the mode the smoke workflow needs to execute it.
 
 ## [0.24.0-alpha] - 2026-10-08
 
