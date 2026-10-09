@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use oxdock_core::{ExecIo, run_steps_with_manager_with_modules};
 use oxdock_fs::{GuardedPath, PathResolver};
-use oxdock_logic_tests::recording::RecordingManager;
+use oxdock_logic_tests::recording::{RecordingManager, argv_calls};
 
 /// sha256 of `INSTALL_PAYLOAD`, computed once and pinned beside it: if
 /// the bytes change without the digest, the success test fails loudly
@@ -231,6 +231,44 @@ fn missing_asset_fails_naming_the_file() -> Result<()> {
     assert!(
         manager.calls().is_empty(),
         "no process spawned for a missing asset"
+    );
+    Ok(())
+}
+
+/// A piped script runs instead of installing: with OXDOCK_PIPED_SCRIPT
+/// bridged, the oxfile reinvokes OXDOCK_INTERPRETER on it and places
+/// nothing, even with a destination bridged. The run-vs-install
+/// decision lives here in the script, never in the stub.
+#[test]
+#[cfg_attr(miri, ignore = "needs host tempdir for the fixture root")]
+fn piped_script_reinvokes_interpreter_without_placing() -> Result<()> {
+    let mut run = install_harness(INSTALL_PAYLOAD, INSTALL_DIGEST, Some("dest"))?;
+    let piped_path = run.root.join("piped.oxfile")?;
+    let setup = PathResolver::new_guarded(run.root.clone(), run.root.clone())?;
+    setup.write_file(&piped_path, b"ECHO piped\n")?;
+    let interpreter = run.root.join("x/oxdock")?;
+    run.io.insert_inherit_env(
+        "OXDOCK_PIPED_SCRIPT",
+        piped_path.as_path().display().to_string(),
+    );
+    run.io.insert_inherit_env(
+        "OXDOCK_INTERPRETER",
+        interpreter.as_path().display().to_string(),
+    );
+    run.execute()?;
+    let expected = vec![
+        interpreter.as_path().display().to_string(),
+        piped_path.as_path().display().to_string(),
+    ];
+    assert!(
+        argv_calls(&run.calls()).contains(&expected),
+        "reinvoke recorded: {:?}",
+        run.calls()
+    );
+    let reader = PathResolver::new_guarded(run.root.clone(), run.root.clone())?;
+    assert!(
+        reader.read_file(&run.root.join("dest/oxdock")?).is_err(),
+        "run mode places nothing"
     );
     Ok(())
 }

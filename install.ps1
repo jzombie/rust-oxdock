@@ -2,6 +2,10 @@
 # every install decision lives in install.oxfile, executed below with
 # the fetched binary.
 #
+# Piped stdin runs instead of installing: the stub saves any piped
+# bytes and bridges them to install.oxfile, which reinvokes the
+# fetched binary on that script. Nothing is placed in run mode.
+#
 # Content-addressed local cache: the first run downloads and verifies,
 # later runs reuse the cached tarball after re-verifying its hash, so
 # reruns need no network once warm (pin VERSION to stay fully offline).
@@ -122,6 +126,22 @@ try {
   # at the engine.
   $Engine = if ($env:OXDOCK_ENGINE) { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($env:OXDOCK_ENGINE) } else { (Join-Path $tmp 'x\oxdock.exe') }
   if (-not (Test-Path $Engine)) { throw "installer engine missing: $Engine" }
+  # Stdin capture, no decisions: when input is redirected, save whatever
+  # it holds and bridge that file for the oxfile below as
+  # OXDOCK_PIPED_SCRIPT, which alone decides run vs install. Drained
+  # here, at the end: the pipeline has necessarily delivered the whole
+  # script by now, so remaining bytes are user input (`irm ... | iex`
+  # lands here at EOF and installs as before; a TTY is never drained).
+  $env:OXDOCK_PIPED_SCRIPT = $null
+  if ([Console]::IsInputRedirected) {
+    $stdinText = [Console]::In.ReadToEnd()
+    if ($stdinText -and $stdinText.Trim().Length -gt 0) {
+      $stdinFile = Join-Path $tmp 'piped.oxfile'
+      [IO.File]::WriteAllText($stdinFile, $stdinText)
+      $env:OXDOCK_PIPED_SCRIPT = $stdinFile
+    }
+  }
+  $env:OXDOCK_INTERPRETER = $Engine
   Push-Location $tmp
   try {
     & $Engine 'install.oxfile'

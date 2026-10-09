@@ -3,6 +3,10 @@
 # every install decision lives in install.oxfile, executed below with
 # the fetched binary.
 #
+# Piped stdin runs instead of installing: the stub saves any piped
+# bytes and bridges them to install.oxfile, which reinvokes the
+# fetched binary on that script. Nothing is placed in run mode.
+#
 # Content-addressed local cache: the first run downloads and verifies,
 # later runs reuse the cached tarball after re-verifying its hash, so
 # reruns need no network once warm (pin VERSION to stay fully offline).
@@ -135,7 +139,25 @@ if [ -n "${OXDOCK_ENGINE:-}" ]; then
   esac
 fi
 [ -x "$ENGINE" ] || { echo "installer engine is not executable: $ENGINE" >&2; exit 1; }
-(cd "$tmp" && OXDOCK_ASSET="$VDIR/$ASSET" OXDOCK_SHA="$EXPECTED" OXDOCK_BIN="$BIN" OXDOCK_DIR="${INSTALL_DIR:-}" OXDOCK_VERSION="$VERSION" "$ENGINE" install.oxfile) || {
+# Stdin capture, no decisions: when stdin is not a TTY, save whatever it
+# holds and bridge that file for the oxfile below as OXDOCK_PIPED_SCRIPT,
+# which alone decides run vs install. Drained here, at the end: the shell
+# has necessarily consumed its own source by now, so remaining bytes are
+# user input, never this script (`curl ... | bash` lands here at EOF and
+# installs as before; a TTY is never drained, so interactive runs never
+# hang on input).
+OXDOCK_PIPED_SCRIPT=""
+if [ ! -t 0 ]; then
+  stdin_tmp=$(mktemp)
+  trap 'rm -rf "$tmp" "$stdin_tmp"' EXIT
+  cat > "$stdin_tmp"
+  if [ -s "$stdin_tmp" ]; then
+    OXDOCK_PIPED_SCRIPT="$stdin_tmp"
+  else
+    rm -f "$stdin_tmp"
+  fi
+fi
+(cd "$tmp" && OXDOCK_ASSET="$VDIR/$ASSET" OXDOCK_SHA="$EXPECTED" OXDOCK_BIN="$BIN" OXDOCK_DIR="${INSTALL_DIR:-}" OXDOCK_VERSION="$VERSION" OXDOCK_INTERPRETER="$ENGINE" OXDOCK_PIPED_SCRIPT="$OXDOCK_PIPED_SCRIPT" "$ENGINE" install.oxfile) || {
   code=$?
   echo "installer failed with exit code $code" >&2
   exit "$code"
