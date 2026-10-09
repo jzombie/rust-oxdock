@@ -2,8 +2,6 @@ use anyhow::{Context, Result};
 use oxdock_core::{ExecIo, run_steps_with_manager_with_modules};
 use oxdock_fs::{GuardedPath, PathResolver};
 use oxdock_logic_tests::recording::RecordingManager;
-#[cfg(windows)]
-use oxdock_logic_tests::recording::argv_calls;
 
 /// sha256 of `INSTALL_PAYLOAD`, computed once and pinned beside it: if
 /// the bytes change without the digest, the success test fails loudly
