@@ -78,17 +78,19 @@ IF $dry == "false" {
     # partial release with a fresh one from current notes. `|| cd .`
     # swallows the delete when nothing exists (cmd has no `true`).
     RUN gh release delete "v{{ $version }}" --yes || cd .
-    # The three archives are the build matrix output, downloaded by the
+    # The archives are the build matrix output, downloaded by the
     # workflow into target/artifacts/ (see the asset contract in
     # release.yml): the tag carries the product version and the binary
     # name rides in from the workflow, so asset names stay static
-    # across releases while differing per product.
+    # across releases while differing per product. Linux archives are
+    # musl-static so they run in scratch containers; Windows archives
+    # link the CRT statically so downloaders need no VCRedist.
     LET $bin: STRING = "{{ env:RELEASE_BINARY }}"
     LET $bins: STRING = "{{ env:RELEASE_BINARIES }}"
     IF $bins == "false" {
         RUN ["gh", "release", "create", "v{{ $version }}", "--title", "{{ $version }}", "--notes-file", "target/release-notes.md"]
     } ELSE {
-        RUN ["gh", "release", "create", "v{{ $version }}", "--title", "{{ $version }}", "--notes-file", "target/release-notes.md", "target/artifacts/{{ $bin }}-x86_64-unknown-linux-gnu.tar.gz", "target/artifacts/{{ $bin }}-aarch64-unknown-linux-gnu.tar.gz", "target/artifacts/{{ $bin }}-aarch64-apple-darwin.tar.gz", "target/artifacts/{{ $bin }}-x86_64-pc-windows-msvc.tar.gz", "target/artifacts/{{ $bin }}-aarch64-pc-windows-msvc.tar.gz", "target/artifacts/SHA256SUMS"]
+        RUN ["gh", "release", "create", "v{{ $version }}", "--title", "{{ $version }}", "--notes-file", "target/release-notes.md", "target/artifacts/{{ $bin }}-x86_64-unknown-linux-musl.tar.gz", "target/artifacts/{{ $bin }}-aarch64-unknown-linux-musl.tar.gz", "target/artifacts/{{ $bin }}-aarch64-apple-darwin.tar.gz", "target/artifacts/{{ $bin }}-x86_64-pc-windows-msvc.tar.gz", "target/artifacts/{{ $bin }}-aarch64-pc-windows-msvc.tar.gz", "target/artifacts/SHA256SUMS"]
     }
 } ELSE {
     ECHO "Dry run complete: nothing published, no tag created."

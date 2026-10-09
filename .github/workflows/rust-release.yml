@@ -139,9 +139,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          if gh release download "${{ steps.pin.outputs.ref }}" -R jzombie/rust-oxdock -p "oxdock-x86_64-unknown-linux-gnu.tar.gz" -D /tmp/pipeline-dl; then
+          if gh release download "${{ steps.pin.outputs.ref }}" -R jzombie/rust-oxdock -p "oxdock-x86_64-unknown-linux-musl.tar.gz" -D /tmp/pipeline-dl; then
             mkdir -p /tmp/pipeline-bin
-            tar -xzf /tmp/pipeline-dl/oxdock-x86_64-unknown-linux-gnu.tar.gz -C /tmp/pipeline-bin
+            tar -xzf /tmp/pipeline-dl/oxdock-x86_64-unknown-linux-musl.tar.gz -C /tmp/pipeline-bin
             chmod +x /tmp/pipeline-bin/oxdock
             /tmp/pipeline-bin/oxdock rust-release/scripts/gha/gha-rust-validate.oxfile
           else
@@ -158,26 +158,44 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
+            target: x86_64-unknown-linux-musl
             exe: ""
+            cc: musl-gcc
           - os: ubuntu-26.04-arm
-            target: aarch64-unknown-linux-gnu
+            target: aarch64-unknown-linux-musl
             exe: ""
+            cc: musl-gcc
           - os: macos-latest
             target: aarch64-apple-darwin
             exe: ""
+            cc: ""
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             exe: ".exe"
+            cc: ""
           - os: windows-11-arm
             target: aarch64-pc-windows-msvc
             exe: ".exe"
+            cc: ""
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # musl libc headers and wrapper so C dependencies (ring,
+      # aws-lc-sys) compile against musl; the Rust musl targets then
+      # link fully static binaries that run in scratch containers.
+      - name: Install musl toolchain
+        if: ${{ endsWith(matrix.target, 'linux-musl') }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
 
       # All features: downloaders get the most capable binary (every
       # module, including MARKDOWN). Registry installers still get
@@ -185,15 +203,26 @@ jobs:
       # property of the registry path, not the download path.
       - name: Build the release binary
         shell: bash
+        env:
+          # Static CRT on MSVC so downloaders need no VCRedist:
+          # aws-lc-sys honors it through CARGO_ENCODED_RUSTFLAGS and
+          # the Rust code links vcruntime plus UCRT statically.
+          RUSTFLAGS: ${{ (startsWith(matrix.os, 'windows') && '-C target-feature=+crt-static') || '' }}
         run: |
           set -euo pipefail
-          cargo build --release -p ${{ inputs.binary }} --all-features
+          if [ -n "${{ matrix.cc }}" ]; then
+            under="${{ matrix.target }}"
+            under="${under//-/_}"
+            export "CC_${{ matrix.target }}=${{ matrix.cc }}"
+            export "CC_${under}=${{ matrix.cc }}"
+          fi
+          cargo build --release --target ${{ matrix.target }} -p ${{ inputs.binary }} --all-features
 
       - name: Archive the binary
         shell: bash
         run: |
           set -euo pipefail
-          tar -czf "${{ inputs.binary }}-${{ matrix.target }}.tar.gz" -C target/release "${{ inputs.binary }}${{ matrix.exe }}"
+          tar -czf "${{ inputs.binary }}-${{ matrix.target }}.tar.gz" -C target/${{ matrix.target }}/release "${{ inputs.binary }}${{ matrix.exe }}"
 
       - name: Upload the archive
         uses: actions/upload-artifact@v4
@@ -266,7 +295,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p target/runner
-          tar -xzf "target/artifacts/${{ inputs.binary }}-x86_64-unknown-linux-gnu.tar.gz" -C target/runner
+          tar -xzf "target/artifacts/${{ inputs.binary }}-x86_64-unknown-linux-musl.tar.gz" -C target/runner
           chmod +x "target/runner/${{ inputs.binary }}"
 
       # Self release with artifacts: the fresh matrix binary runs the
@@ -304,9 +333,9 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           set -euo pipefail
-          if gh release download "${{ steps.pin.outputs.ref }}" -R jzombie/rust-oxdock -p "oxdock-x86_64-unknown-linux-gnu.tar.gz" -D /tmp/pipeline-dl; then
+          if gh release download "${{ steps.pin.outputs.ref }}" -R jzombie/rust-oxdock -p "oxdock-x86_64-unknown-linux-musl.tar.gz" -D /tmp/pipeline-dl; then
             mkdir -p /tmp/pipeline-bin
-            tar -xzf /tmp/pipeline-dl/oxdock-x86_64-unknown-linux-gnu.tar.gz -C /tmp/pipeline-bin
+            tar -xzf /tmp/pipeline-dl/oxdock-x86_64-unknown-linux-musl.tar.gz -C /tmp/pipeline-bin
             chmod +x /tmp/pipeline-bin/oxdock
             /tmp/pipeline-bin/oxdock rust-release/scripts/gha/gha-rust-release.oxfile
           else
