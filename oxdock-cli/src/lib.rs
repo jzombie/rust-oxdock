@@ -130,11 +130,15 @@ pub fn run() -> Result<()> {
     let workspace_root = discover_workspace_root().context("guard workspace root")?;
 
     let mut args = std::env::args().skip(1);
-    // `--help`/`-h` surfaces as the usage text in the parse error (parse must
-    // not exit the process itself: it is public library API). Print it and
-    // succeed so the binary exits 0.
+    // `--help`/`-h` and `--version`/`-V` surface as text in the parse
+    // error (parse must not exit the process itself: it is public
+    // library API). Print it and succeed so the binary exits 0.
     let opts = match Options::parse(&mut args, &workspace_root) {
         Ok(opts) => opts,
+        Err(err) if err.to_string() == version() => {
+            println!("{err}");
+            return Ok(());
+        }
         Err(err) if err.to_string() == usage() => {
             print!("{err}");
             return Ok(());
@@ -355,7 +359,7 @@ fn value_string(value: std::ffi::OsString) -> Result<String> {
         .map_err(|_| anyhow::anyhow!("argument must be UTF-8"))
 }
 
-/// Human-readable CLI usage, printed for `--help`/`-h`.
+/// Human-readable CLI version, printed for `--version`/`-V`.
 pub fn version() -> String {
     format!("oxdock {}", env!("CARGO_PKG_VERSION"))
 }
