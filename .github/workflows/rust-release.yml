@@ -137,6 +137,11 @@ jobs:
           set -euo pipefail
           cargo run -p oxdock -- ./gha-rust-validate.oxfile
 
+      # Pinned pipeline: prefer the already-published binary at the
+      # pinned ref and fall back to a source build when the ref has no
+      # release yet (branch under development). Either way the script
+      # comes from the central checkout, so binary and script stay
+      # mutually consistent.
       - name: Fail unless the confirmation matches the tree (pinned)
         if: ${{ inputs.pipeline_ref != '' }}
         shell: bash
@@ -145,7 +150,14 @@ jobs:
           RELEASE_CONFIRM: ${{ inputs.confirm_version }}
         run: |
           set -euo pipefail
-          cargo run --manifest-path rust-release/Cargo.toml -p oxdock -- rust-release/gha-rust-validate.oxfile
+          if gh release download "${{ inputs.pipeline_ref }}" -R jzombie/rust-oxdock -p "oxdock-x86_64-unknown-linux-gnu.tar.gz" -D /tmp/pipeline-dl; then
+            mkdir -p /tmp/pipeline-bin
+            tar -xzf /tmp/pipeline-dl/oxdock-x86_64-unknown-linux-gnu.tar.gz -C /tmp/pipeline-bin
+            chmod +x /tmp/pipeline-bin/oxdock
+            /tmp/pipeline-bin/oxdock rust-release/gha-rust-validate.oxfile
+          else
+            cargo run --manifest-path rust-release/Cargo.toml -p oxdock -- rust-release/gha-rust-validate.oxfile
+          fi
 
   build:
     name: build (${{ matrix.target }})
@@ -236,22 +248,24 @@ jobs:
           merge-multiple: true
           path: target/artifacts
 
-      # No bash logic lives here by design: confirmation gating, notes
-      # extraction, publishing, tagging, and releasing all run inside
-      # the script, which fails fast on a mismatched confirmation
-      # before anything publishes. This step only bridges inputs.
-      # OXDOCK_WORKSPACE_ROOT is load-bearing, not redundant: workspace
-      # discovery prefers the built binary's own manifest directory over
-      # the working directory, so without it the CLI would operate on
-      # the pipeline checkout instead of the caller tree. The CLI offers
-      # no --root flag, so the documented environment override is the
-      # mechanism.
-      # Local pipeline (empty pipeline_ref): the dispatched branch
-      # already holds the scripts, so build and run in place.
-      - name: Run the release script
-        if: ${{ inputs.pipeline_ref == '' }}
+      # Run the script with the just-built binary. OXDOCK_WORKSPACE_ROOT
+      # points it at this tree instead of its build machine.
+      - name: Extract the release runner
+        if: ${{ inputs.binaries }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p target/runner
+          tar -xzf "target/artifacts/${{ inputs.binary }}-x86_64-unknown-linux-gnu.tar.gz" -C target/runner
+          chmod +x "target/runner/${{ inputs.binary }}"
+
+      # Local release, artifacts present: the fresh matrix binary runs
+      # this branch's script in place.
+      - name: Run your branch's gha-rust-release.oxfile with the fresh binary
+        if: ${{ inputs.pipeline_ref == '' && inputs.binaries }}
         shell: bash
         env:
+          OXDOCK_WORKSPACE_ROOT: ${{ github.workspace }}
           RELEASE_CONFIRM: ${{ inputs.confirm_version }}
           RELEASE_DRY_RUN: ${{ inputs.dry_run }}
           RELEASE_BINARY: ${{ inputs.binary }}
@@ -260,12 +274,13 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           set -euo pipefail
-          cargo run -p oxdock --features markdown -- ./gha-rust-release.oxfile
+          ./target/runner/${{ inputs.binary }} ./gha-rust-release.oxfile
 
-      # Pinned pipeline: runner builds from the central source at the
-      # pinned ref, operating on the caller tree via the documented
-      # workspace override.
-      - name: Run the pinned release script
+      # Pinned pipeline (a downstream caller): published binary at the
+      # pinned ref if the ref has a release, else a source build. The
+      # script always comes from the central checkout. Never the
+      # caller's binary: it lacks the MARKDOWN the script imports.
+      - name: Run OxDock's gha-rust-release.oxfile at the pinned ref (published binary, else source build)
         if: ${{ inputs.pipeline_ref != '' }}
         shell: bash
         env:
@@ -278,4 +293,28 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           set -euo pipefail
-          cargo run --manifest-path rust-release/Cargo.toml -p oxdock --features markdown -- rust-release/gha-rust-release.oxfile
+          if gh release download "${{ inputs.pipeline_ref }}" -R jzombie/rust-oxdock -p "oxdock-x86_64-unknown-linux-gnu.tar.gz" -D /tmp/pipeline-dl; then
+            mkdir -p /tmp/pipeline-bin
+            tar -xzf /tmp/pipeline-dl/oxdock-x86_64-unknown-linux-gnu.tar.gz -C /tmp/pipeline-bin
+            chmod +x /tmp/pipeline-bin/oxdock
+            /tmp/pipeline-bin/oxdock rust-release/gha-rust-release.oxfile
+          else
+            cargo run --manifest-path rust-release/Cargo.toml -p oxdock --features markdown -- rust-release/gha-rust-release.oxfile
+          fi
+
+      # Binaries off: the matrix never ran, so no artifacts exist.
+      # Source build, branch's script, in place.
+      - name: Run your branch's gha-rust-release.oxfile via source build
+        if: ${{ inputs.pipeline_ref == '' && !inputs.binaries }}
+        shell: bash
+        env:
+          RELEASE_CONFIRM: ${{ inputs.confirm_version }}
+          RELEASE_DRY_RUN: ${{ inputs.dry_run }}
+          RELEASE_BINARY: ${{ inputs.binary }}
+          RELEASE_BINARIES: ${{ inputs.binaries }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          cargo run -p oxdock --features markdown -- ./gha-rust-release.oxfile
+
