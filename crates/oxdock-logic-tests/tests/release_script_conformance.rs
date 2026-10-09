@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use oxdock_core::{ExecIo, run_steps_with_context_result_with_io};
 use oxdock_fs::{GuardedPath, PathResolver};
+use oxdock_macros::oxdock;
 
 fn repo_root() -> Result<String> {
     // Same layout derivation as docs_conformance: normalize separators
@@ -60,6 +61,10 @@ fn release_script_parses() -> Result<()> {
     assert!(
         !text.contains("\"publish\", \"-p\""),
         "no per-crate publish flags"
+    );
+    assert!(
+        text.contains("HAS_KEY($manifest, \"workspace\")"),
+        "version reads both manifest layouts"
     );
     // Resume hardening: an existing release is deleted first so
     // creation stays unconditional across re-dispatches.
@@ -129,6 +134,50 @@ fn validate_script_parses_and_gates_on_version() -> Result<()> {
         text.contains("ASSERT_EQ $confirm $version"),
         "gate compares the confirmation against the tree version"
     );
+    Ok(())
+}
+
+/// The version fallback reads unified workspaces and single-crate repos
+/// alike: `workspace.package` when the workspace table exists, bare
+/// `package` otherwise. Proves the exact branching both release scripts
+/// gate on, against synthetic roots of each layout.
+#[test]
+#[cfg_attr(miri, ignore = "needs host tempdir for synthetic Cargo roots")]
+fn version_fallback_covers_both_manifest_layouts() -> Result<()> {
+    for (manifest, expected) in [
+        (
+            "[workspace]\n[workspace.package]\nversion = \"1.2.3-ws\"\n",
+            "1.2.3-ws",
+        ),
+        (
+            "[package]\nname = \"solo\"\nversion = \"4.5.6-solo\"\n",
+            "4.5.6-solo",
+        ),
+    ] {
+        let temp = GuardedPath::tempdir().context("tempdir")?;
+        let root = temp.as_guarded_path().clone();
+        let resolver = PathResolver::new_guarded(root.clone(), root.clone())?;
+        let cargo_path = root.join("Cargo.toml")?;
+        resolver.write_file(&cargo_path, manifest.as_bytes())?;
+        let probe_path = root.join("probe.txt")?;
+        let steps = oxdock! {
+            IMPORT [STD]
+            LET $manifest: MAP<ANY> = LOAD_TOML("Cargo.toml")
+            LET $version: STRING = ""
+            IF HAS_KEY($manifest, "workspace") {
+                $version = $manifest.workspace.package.version
+            } ELSE {
+                $version = $manifest.package.version
+            }
+            WRITE probe.txt "{{ $version }}"
+        };
+        run_steps_with_context_result_with_io(&root, &root, &steps, ExecIo::new())?;
+        let body = resolver.read_to_string(&probe_path)?;
+        assert!(
+            body.contains(expected),
+            "expected version {expected} for layout, got: {body}"
+        );
+    }
     Ok(())
 }
 
