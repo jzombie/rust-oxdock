@@ -12,6 +12,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - New `--version`, `-V` flag printing `oxdock <version>` and exiting 0, matching `--help` behavior.
 - The `--script` file and positional script argument accept absolute paths outside the OxDock workspace root; relative paths still resolve under it, so generated step files (GitHub Actions shells) load like stdin text.
 - `oxdock_embed!` and `oxdock_prepare!` fingerprints are location-independent: validation compares script, inputs, and environment against the user-relative staging name instead of an absolute path, so a staging tree copied to another machine still validates. Existing caches rebuild once.
+- CLI `--help` text now ships as compile-time embedded assets, and the `oxdock-cli` README carries a Command-line reference rendered from the same body.
 
 ### Changed
 
