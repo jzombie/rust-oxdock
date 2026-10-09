@@ -1,5 +1,6 @@
 {
   "license": "Apache-2.0",
+  "repo": "jzombie/rust-oxdock",
   "workspace": "OxDock",
   "workspace_url": "https://github.com/jzombie/rust-oxdock",
   "changelog_url": "https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.md",

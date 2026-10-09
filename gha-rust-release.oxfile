@@ -76,7 +76,7 @@ IF $dry == "false" {
     IF $bins == "false" {
         RUN ["gh", "release", "create", "v{{ $version }}", "--title", "{{ $version }}", "--notes-file", "target/release-notes.md"]
     } ELSE {
-        RUN ["gh", "release", "create", "v{{ $version }}", "--title", "{{ $version }}", "--notes-file", "target/release-notes.md", "target/artifacts/{{ $bin }}-x86_64-unknown-linux-gnu.tar.gz", "target/artifacts/{{ $bin }}-aarch64-apple-darwin.tar.gz", "target/artifacts/{{ $bin }}-x86_64-pc-windows-msvc.tar.gz"]
+        RUN ["gh", "release", "create", "v{{ $version }}", "--title", "{{ $version }}", "--notes-file", "target/release-notes.md", "target/artifacts/{{ $bin }}-x86_64-unknown-linux-gnu.tar.gz", "target/artifacts/{{ $bin }}-aarch64-unknown-linux-gnu.tar.gz", "target/artifacts/{{ $bin }}-aarch64-apple-darwin.tar.gz", "target/artifacts/{{ $bin }}-x86_64-pc-windows-msvc.tar.gz"]
     }
 } ELSE {
     ECHO "Dry run complete: nothing published, no tag created."

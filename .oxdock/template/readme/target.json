@@ -23,6 +23,20 @@
       "values": ".oxdock/template/readme/values.json",
       "template": ".oxdock/template/readme/CITATION.cff.tmpl",
       "fragments": {}
+    },
+    {
+      "name": "install-sh",
+      "out": "install.sh",
+      "values": ".oxdock/template/readme/values.json",
+      "template": ".oxdock/template/readme/install.sh.tmpl",
+      "fragments": {}
+    },
+    {
+      "name": "install-ps1",
+      "out": "install.ps1",
+      "values": ".oxdock/template/readme/values.json",
+      "template": ".oxdock/template/readme/install.ps1.tmpl",
+      "fragments": {}
     }
   ]
 }

@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [0.24.1-alpha] - 2026-10-08
+
+### Changed
+
+- Prebuilt release binaries now ship with all features enabled (every module, including `MARKDOWN`), instead of default features. Registry installs via `cargo install` still resolve default features; the download path gives downloaders the most capable binary.
+- The release executes on the shipped binary itself: the workflow extracts the built Linux archive and runs the release script with it instead of rebuilding from source, so the artifact being released performs the release.
+
 ## [0.24.0-alpha] - 2026-10-08
 
 ### Added

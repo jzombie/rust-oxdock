@@ -73,6 +73,16 @@ fn release_script_parses() -> Result<()> {
         text.contains("\"--notes-file\", \"target/release-notes.md\"]"),
         "notes-only creation step exists"
     );
+    // Binaries attach per platform under static asset names; the tag
+    // carries the product version.
+    assert!(
+        text.contains("x86_64-unknown-linux-gnu.tar.gz"),
+        "linux asset attaches to the release"
+    );
+    assert!(
+        text.contains("aarch64-unknown-linux-gnu.tar.gz"),
+        "linux arm64 asset attaches to the release"
+    );
     // Tag identity gate: nothing destructive runs unless the tag
     // points at HEAD, so wrong-version binaries can never replace a
     // release under an old tag.
