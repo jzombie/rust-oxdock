@@ -266,7 +266,8 @@ jobs:
           ./bootstrap.sh 2>&1 | tee "${RUNNER_TEMP}/warm.log"
           grep -q "using cached" "${RUNNER_TEMP}/warm.log"
           "${INSTALL_DIR}/oxdock" --help
-          echo corrupt > "$HOME"/.cache/oxdock/*/*.tar.gz
+          # Scope to this leg's VERSION: other legs share the cache.
+          echo corrupt > "$HOME"/.cache/oxdock/local-test/*.tar.gz
           ./bootstrap.sh 2>&1 | tee "${RUNNER_TEMP}/healed.log"
           grep -q "downloading" "${RUNNER_TEMP}/healed.log"
           "${INSTALL_DIR}/oxdock" --help
@@ -294,7 +295,8 @@ jobs:
             .\bootstrap.ps1 2>&1 | Tee-Object (Join-Path $env:RUNNER_TEMP 'warm.log')
           if (-not (Select-String "using cached" (Join-Path $env:RUNNER_TEMP 'warm.log'))) { throw "expected a cache hit" }
           & (Join-Path $env:INSTALL_DIR 'oxdock.exe') --help
-          Set-Content -NoNewline -Path (Get-ChildItem $HOME\.cache\oxdock\*\*.tar.gz) -Value 'corrupt'
+          # Scope to this leg's VERSION: other legs share the cache.
+          Set-Content -NoNewline -Path (Get-ChildItem $HOME\.cache\oxdock\local-test\*.tar.gz) -Value 'corrupt'
           .\bootstrap.ps1 2>&1 | Tee-Object (Join-Path $env:RUNNER_TEMP 'healed.log')
           if (-not (Select-String "downloading" (Join-Path $env:RUNNER_TEMP 'healed.log'))) { throw "expected a heal download" }
           & (Join-Path $env:INSTALL_DIR 'oxdock.exe') --help
