@@ -308,6 +308,9 @@ impl Options {
                 Long("help") | Short('h') => {
                     bail!("{}", usage());
                 }
+                Long("version") | Short('V') => {
+                    bail!("{}", version());
+                }
                 Value(value) => {
                     let text = value_string(value)?;
                     if text.is_empty() {
@@ -353,6 +356,11 @@ fn value_string(value: std::ffi::OsString) -> Result<String> {
 }
 
 /// Human-readable CLI usage, printed for `--help`/`-h`.
+pub fn version() -> String {
+    format!("oxdock {}", env!("CARGO_PKG_VERSION"))
+}
+
+/// Human-readable CLI usage, printed for `--help`/`-h`.
 pub fn usage() -> String {
     let version = env!("CARGO_PKG_VERSION");
     let description = env!("CARGO_PKG_DESCRIPTION");
@@ -369,6 +377,7 @@ pub fn usage() -> String {
               --offline          open no sockets (conflicts with --listen/-p)
               --remote TARGET=CMD    bind a REMOTE target to a stdio transport command (repeatable)
               --help, -h         print this help and exit
+              --version, -V      print the version and exit
             With no script given, reads the script from stdin (must be piped unless `--shell`).
             Scripts declare logical endpoints (a port like 2251); the flags above map them to interfaces.
         "}
@@ -383,6 +392,7 @@ pub fn usage() -> String {
               --shell            run the script, then drop into an interactive shell (requires a TTY)
               --offline          open no sockets (endpoint flags require the `net` feature)
               --help, -h         print this help and exit
+              --version, -V      print the version and exit
             With no script given, reads the script from stdin (must be piped unless `--shell`).
             Endpoint flags (--listen/-p) require the `net` feature (rebuild with --features net).
         "}
@@ -1197,6 +1207,24 @@ mod tests {
                 assert_eq!(path, workspace_root.join("script.ox").expect("script path"))
             }
             ScriptSource::Stdin => panic!("expected path script after --"),
+        }
+    }
+
+    #[cfg_attr(
+        miri,
+        ignore = "GuardedPath::tempdir relies on OS tempdirs; blocked under Miri isolation"
+    )]
+    #[test]
+    fn options_parse_version_returns_version_without_exiting() {
+        // Same contract as --help: version surfaces as the parse error
+        // (parse must not exit the process itself: it is public library
+        // API). Print it and succeed so the binary exits 0.
+        let workspace = GuardedPath::tempdir().expect("tempdir");
+        for flag in ["--version", "-V"] {
+            let mut args = vec![flag.to_string()].into_iter();
+            let err = Options::parse(&mut args, workspace.as_guarded_path())
+                .expect_err("version flag must not parse as options");
+            assert_eq!(err.to_string(), version());
         }
     }
 
