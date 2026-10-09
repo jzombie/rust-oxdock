@@ -3,6 +3,11 @@
 # every install decision lives in install.oxfile, executed below with
 # the fetched binary.
 #
+# Content-addressed local cache: the first run downloads and verifies,
+# later runs reuse the cached tarball after re-verifying its hash, so
+# reruns need no network once warm (pin VERSION to stay fully offline).
+# Override the cache root with OXDOCK_CACHE_DIR.
+#
 #   curl -fsSL https://raw.githubusercontent.com/jzombie/rust-oxdock/main/bootstrap.sh | bash
 #
 # Pin explicitly with VERSION (a tag: the API's "latest" skips
@@ -16,6 +21,7 @@ set -euo pipefail
 
 REPO="jzombie/rust-oxdock"
 VERSION="${VERSION:-}"
+CACHE_DIR="${OXDOCK_CACHE_DIR:-$HOME/.cache/oxdock}"
 
 if [ -z "$VERSION" ]; then
   VERSION=$(curl -fsSL "https://api.github.com/repos/$REPO/releases?per_page=1" | grep -m1 '"tag_name"' | cut -d'"' -f4)
@@ -30,18 +36,60 @@ case "$(uname -s)-$(uname -m)" in
   *) echo "unsupported platform: $(uname -s)-$(uname -m)" >&2; exit 1 ;;
 esac
 
+ASSET="oxdock-$TARGET.tar.gz"
+VDIR="$CACHE_DIR/$VERSION"
+mkdir -p "$VDIR"
+
+verify_cached() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    (cd "$VDIR" && grep "$ASSET\$" SHA256SUMS 2>/dev/null | sha256sum -c - >/dev/null 2>&1)
+  else
+    (cd "$VDIR" && grep "$ASSET\$" SHA256SUMS 2>/dev/null | shasum -a 256 -c - >/dev/null 2>&1)
+  fi
+}
+
+# Same hash as last time means same bytes: reuse the cached tarball
+# after re-verifying it. Anything missing or mismatched falls through
+# to a fresh download, so a corrupt cache heals itself.
+if [ -f "$VDIR/$ASSET" ] && [ -f "$VDIR/SHA256SUMS" ] && [ -f "$VDIR/install.oxfile" ] && verify_cached; then
+  echo "using cached oxdock $VERSION" >&2
+else
+  echo "downloading oxdock $VERSION" >&2
+  tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' EXIT
+  base="https://github.com/$REPO/releases/download/$VERSION"
+  # Download under the release filename: `sha256sum -c` resolves names
+  # from the checksums file, so a renamed download would never verify.
+  curl -fsSL "$base/$ASSET" -o "$tmp/$ASSET"
+  curl -fsSL "$base/SHA256SUMS" -o "$tmp/SHA256SUMS"
+  # Installer logic rides with the release; tags predating it fall back
+  # to main. The logic is version-agnostic (verify, extract, place).
+  # Fetched here, inside population, so warm runs never touch network.
+  curl -fsSL "https://raw.githubusercontent.com/$REPO/$VERSION/install.oxfile" -o "$tmp/install.oxfile" || curl -fsSL "https://raw.githubusercontent.com/$REPO/main/install.oxfile" -o "$tmp/install.oxfile"
+  if command -v sha256sum >/dev/null 2>&1; then
+    (cd "$tmp" && grep "$ASSET\$" SHA256SUMS | sha256sum -c - >/dev/null)
+  else
+    (cd "$tmp" && grep "$ASSET\$" SHA256SUMS | shasum -a 256 -c - >/dev/null)
+  fi
+  mv "$tmp/$ASSET" "$VDIR/$ASSET"
+  mv "$tmp/SHA256SUMS" "$VDIR/SHA256SUMS"
+  mv "$tmp/install.oxfile" "$VDIR/install.oxfile"
+  trap - EXIT
+  rm -rf "$tmp"
+fi
+EXPECTED=$(grep "$ASSET\$" "$VDIR/SHA256SUMS" | cut -d' ' -f1)
+# The installer runs from the cache, never the network: population
+# above stored the release's own logic beside its bytes.
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
-base="https://github.com/$REPO/releases/download/$VERSION"
-curl -fsSL "$base/oxdock-$TARGET.tar.gz" -o "$tmp/asset.tar.gz"
-curl -fsSL "$base/SHA256SUMS" -o "$tmp/SHA256SUMS"
-EXPECTED=$(grep "oxdock-$TARGET.tar.gz$" "$tmp/SHA256SUMS" | cut -d' ' -f1)
-# Installer logic rides with the release; tags predating it fall back
-# to main. The logic is version-agnostic (verify, extract, place).
-curl -fsSL "https://raw.githubusercontent.com/$REPO/$VERSION/install.oxfile" -o "$tmp/install.oxfile" || curl -fsSL "https://raw.githubusercontent.com/$REPO/main/install.oxfile" -o "$tmp/install.oxfile"
+cp "$VDIR/install.oxfile" "$tmp/install.oxfile"
 mkdir -p "$tmp/x"
-tar -xzf "$tmp/asset.tar.gz" -C "$tmp/x"
+tar -xzf "$VDIR/$ASSET" -C "$tmp/x"
 chmod +x "$tmp"/x/oxdock*
+# Assignment words never glob-expand: resolve the unpacked binary
+# explicitly, and fail closed when the tarball held nothing expected.
+BIN=$(echo "$tmp"/x/oxdock*)
+[ -f "$BIN" ] || { echo "no binary unpacked from $ASSET" >&2; exit 1; }
 # INSTALL_DIR passes through untouched (possibly unset): the installer
 # owns the default. Forwarding the mapping is the stub's only job here.
-(cd "$tmp" && OXDOCK_ASSET="$tmp/asset.tar.gz" OXDOCK_SHA="$EXPECTED" OXDOCK_BIN="$tmp"/x/oxdock* OXDOCK_DIR="${INSTALL_DIR:-}" OXDOCK_VERSION="$VERSION" ./x/oxdock* install.oxfile)
+(cd "$tmp" && OXDOCK_ASSET="$VDIR/$ASSET" OXDOCK_SHA="$EXPECTED" OXDOCK_BIN="$BIN" OXDOCK_DIR="${INSTALL_DIR:-}" OXDOCK_VERSION="$VERSION" ./x/oxdock* install.oxfile)
