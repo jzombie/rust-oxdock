@@ -105,20 +105,24 @@ try {
   # at the engine.
   $Engine = if ($env:OXDOCK_ENGINE) { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($env:OXDOCK_ENGINE) } else { (Join-Path $tmp 'x\oxdock.exe') }
   if (-not (Test-Path $Engine)) { throw "installer engine missing: $Engine" }
-  # Stdin capture, no decisions: when input is redirected, save whatever
-  # it holds and bridge that file for the oxfile below as
-  # OXDOCK_PIPED_SCRIPT, which alone decides run vs install. Drained
-  # here, at the end: the pipeline has necessarily delivered the whole
-  # script by now, so remaining bytes are user input (`irm ... | iex`
-  # lands here at EOF and installs as before; a TTY is never drained).
+  # Stdin capture, no decisions: collect any piped input and bridge that
+  # file for the oxfile below as OXDOCK_PIPED_SCRIPT, which alone decides
+  # run vs install. Collected here, at the end: the pipeline has
+  # necessarily delivered the whole script by now, so remaining input is
+  # user data (`irm ... | iex` lands here with none and installs as
+  # before). Pipeline objects arrive via $input, which console-stdin
+  # redirection never sees: a piped string lives in $input while
+  # [Console]::In sits at EOF, so $input is read first and redirected
+  # bytes only as fallback. A TTY is never drained.
   $env:OXDOCK_PIPED_SCRIPT = $null
-  if ([Console]::IsInputRedirected) {
+  $stdinText = [string]::Join("`n", @($input))
+  if ([string]::IsNullOrWhiteSpace($stdinText) -and [Console]::IsInputRedirected) {
     $stdinText = [Console]::In.ReadToEnd()
-    if ($stdinText -and $stdinText.Trim().Length -gt 0) {
-      $stdinFile = Join-Path $tmp 'piped.oxfile'
-      [IO.File]::WriteAllText($stdinFile, $stdinText)
-      $env:OXDOCK_PIPED_SCRIPT = $stdinFile
-    }
+  }
+  if (-not [string]::IsNullOrWhiteSpace($stdinText)) {
+    $stdinFile = Join-Path $tmp 'piped.oxfile'
+    [IO.File]::WriteAllText($stdinFile, $stdinText)
+    $env:OXDOCK_PIPED_SCRIPT = $stdinFile
   }
   $env:OXDOCK_INTERPRETER = $Engine
   Push-Location $tmp
