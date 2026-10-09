@@ -23,8 +23,20 @@ REPO="{{ $docs_global.repo }}"
 VERSION="${VERSION:-}"
 CACHE_DIR="${OXDOCK_CACHE_DIR:-$HOME/.cache/oxdock}"
 
+# Shared runner IPs burn the anonymous API quota: authenticate reads
+# when a token is present (CI bridges GITHUB_TOKEN; users never need
+# one). A function, not a flags string: quoted flag strings word-split
+# into garbage on expansion.
+gh_curl() {
+  if [ -n "${GITHUB_TOKEN:-}" ]; then
+    curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" "$@"
+  else
+    curl -fsSL "$@"
+  fi
+}
+
 if [ -z "$VERSION" ]; then
-  VERSION=$(curl -fsSL "https://api.github.com/repos/$REPO/releases?per_page=1" | grep -m1 '"tag_name"' | cut -d'"' -f4)
+  VERSION=$(gh_curl "https://api.github.com/repos/$REPO/releases?per_page=1" | grep -m1 '"tag_name"' | cut -d'"' -f4)
 fi
 
 case "$(uname -s)-$(uname -m)" in
@@ -60,12 +72,12 @@ else
   base="https://github.com/$REPO/releases/download/$VERSION"
   # Download under the release filename: `sha256sum -c` resolves names
   # from the checksums file, so a renamed download would never verify.
-  curl -fsSL "$base/$ASSET" -o "$tmp/$ASSET"
-  curl -fsSL "$base/SHA256SUMS" -o "$tmp/SHA256SUMS"
+  gh_curl "$base/$ASSET" -o "$tmp/$ASSET"
+  gh_curl "$base/SHA256SUMS" -o "$tmp/SHA256SUMS"
   # Installer logic rides with the release; tags predating it fall back
   # to main. The logic is version-agnostic (verify, extract, place).
   # Fetched here, inside population, so warm runs never touch network.
-  curl -fsSL "https://raw.githubusercontent.com/$REPO/$VERSION/install.oxfile" -o "$tmp/install.oxfile" || curl -fsSL "https://raw.githubusercontent.com/$REPO/main/install.oxfile" -o "$tmp/install.oxfile"
+  gh_curl "https://raw.githubusercontent.com/$REPO/$VERSION/install.oxfile" -o "$tmp/install.oxfile" || gh_curl "https://raw.githubusercontent.com/$REPO/main/install.oxfile" -o "$tmp/install.oxfile"
   if command -v sha256sum >/dev/null 2>&1; then
     (cd "$tmp" && grep "$ASSET\$" SHA256SUMS | sha256sum -c - >/dev/null)
   else

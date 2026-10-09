@@ -55,6 +55,10 @@ jobs:
         os: [ubuntu-latest, macos-latest, windows-latest]
     permissions:
       contents: read
+    # Shared runner IPs burn the anonymous API quota: every stub API
+    # read below authenticates with the job token.
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -87,6 +91,9 @@ jobs:
           INSTALL_DIR: ${{ runner.temp }}\oxbin
         run: |
           $ErrorActionPreference = 'Stop'
+          # Native-bound strings pipe as UTF-8: PowerShell defaults to
+          # UTF-16, which the binary reads as garbage.
+          $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
           .\bootstrap.ps1
           & (Join-Path $env:INSTALL_DIR 'oxdock.exe') --version
           "IMPORT [STD]`nECHO via-stdin" | & (Join-Path $env:INSTALL_DIR 'oxdock.exe') --script - | Tee-Object (Join-Path $env:RUNNER_TEMP 'stdin.log')

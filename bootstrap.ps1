@@ -22,8 +22,14 @@ $Repo = "jzombie/rust-oxdock"
 $Version = $env:VERSION
 $CacheRoot = if ($env:OXDOCK_CACHE_DIR) { $env:OXDOCK_CACHE_DIR } else { Join-Path $HOME '.cache\oxdock' }
 
+# Shared runner IPs burn the anonymous API quota: authenticate reads
+# when a token is present (CI bridges GITHUB_TOKEN; users never need
+# one). An empty table sends no headers.
+$ApiHeaders = @{}
+if ($env:GITHUB_TOKEN) { $ApiHeaders['Authorization'] = "Bearer $($env:GITHUB_TOKEN)" }
+
 if (-not $Version) {
-  $Version = (Invoke-RestMethod "https://api.github.com/repos/$Repo/releases?per_page=1")[0].tag_name
+  $Version = (Invoke-RestMethod "https://api.github.com/repos/$Repo/releases?per_page=1" -Headers $ApiHeaders)[0].tag_name
 }
 
 $ArchTarget = switch ($env:PROCESSOR_ARCHITECTURE) {
@@ -58,8 +64,8 @@ if (Test-CachedAsset) {
   New-Item -ItemType Directory -Force -Path $tmp | Out-Null
   try {
     $base = "https://github.com/$Repo/releases/download/$Version"
-    Invoke-WebRequest "$base/$Asset" -OutFile (Join-Path $tmp 'asset.tar.gz')
-    Invoke-WebRequest "$base/SHA256SUMS" -OutFile (Join-Path $tmp 'SHA256SUMS')
+    Invoke-WebRequest "$base/$Asset" -Headers $ApiHeaders -OutFile (Join-Path $tmp 'asset.tar.gz')
+    Invoke-WebRequest "$base/SHA256SUMS" -Headers $ApiHeaders -OutFile (Join-Path $tmp 'SHA256SUMS')
     $line = (Get-Content (Join-Path $tmp 'SHA256SUMS')) | Where-Object { $_ -match "$Asset" } | Select-Object -First 1
     if (-not $line) { throw "asset $Asset missing from SHA256SUMS" }
     $expected = ($line -split '\s+')[0]
@@ -69,7 +75,7 @@ if (Test-CachedAsset) {
     # back to main. Fetched here, inside population, so warm runs never
     # touch network.
     $raw = "https://raw.githubusercontent.com/$Repo/$Version/install.oxfile"
-    try { Invoke-WebRequest $raw -OutFile (Join-Path $tmp 'install.oxfile') } catch { Invoke-WebRequest "https://raw.githubusercontent.com/$Repo/main/install.oxfile" -OutFile (Join-Path $tmp 'install.oxfile') }
+    try { Invoke-WebRequest $raw -Headers $ApiHeaders -OutFile (Join-Path $tmp 'install.oxfile') } catch { Invoke-WebRequest "https://raw.githubusercontent.com/$Repo/main/install.oxfile" -Headers $ApiHeaders -OutFile (Join-Path $tmp 'install.oxfile') }
     Move-Item (Join-Path $tmp 'asset.tar.gz') (Join-Path $VDir $Asset) -Force
     Move-Item (Join-Path $tmp 'SHA256SUMS') (Join-Path $VDir 'SHA256SUMS') -Force
     Move-Item (Join-Path $tmp 'install.oxfile') (Join-Path $VDir 'install.oxfile') -Force
