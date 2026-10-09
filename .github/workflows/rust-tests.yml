@@ -74,9 +74,12 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-cargo-${{ steps.rustc.outputs.hash }}-${{ steps.lockfile.outputs.hash }}-${{ matrix.flags }}
+          # runner.arch segments ARM from x64: runner.os reports Linux
+          # on both, so without it the ARM legs restore x86_64 cargo
+          # binaries and fail with Exec format error.
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ steps.rustc.outputs.hash }}-${{ steps.lockfile.outputs.hash }}-${{ matrix.flags }}
           restore-keys: |
-            ${{ runner.os }}-cargo-${{ steps.rustc.outputs.hash }}-${{ steps.lockfile.outputs.hash }}-
+            ${{ runner.os }}-${{ runner.arch }}-cargo-${{ steps.rustc.outputs.hash }}-${{ steps.lockfile.outputs.hash }}-
 
       - name: Test
         run: cargo test --workspace ${{ matrix.flags }} --lib --bins --tests --examples -- --include-ignored
