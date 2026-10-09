@@ -20,7 +20,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # ubuntu-24.04-arm is pinned by necessity (no -latest label
+        # exists for arm); the x64 legs float. Revisit when 24.04 ages out.
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
         flags: ["--all-features", "--no-default-features"]
 
     steps:
