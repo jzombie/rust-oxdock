@@ -321,6 +321,21 @@ mod security_tests {
         assert!(dotform.as_path().ends_with("sub/file.txt"));
     }
 
+    /// Drive mapping reclaimed on drop, so a failing assert cannot leak
+    /// a virtual drive into the developer session.
+    #[cfg(windows)]
+    struct SubstGuard(String);
+
+    #[cfg(windows)]
+    impl Drop for SubstGuard {
+        #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("cmd")
+                .args(["/C", "subst", &self.0, "/d"])
+                .status();
+        }
+    }
+
     /// SYSTEM full access must not depend on drive coincidence: a second
     /// drive letter mapped at a tempdir (no hardware needed) receives
     /// writes under `WORKSPACE SYSTEM` exactly like the build drive
@@ -334,20 +349,21 @@ mod security_tests {
         let temp = GuardedPath::tempdir().expect("tempdir");
         let root = temp.as_guarded_path().clone();
         // Claim a free letter; subst maps it at the tempdir.
-        let mut letter = None;
-        for candidate in ["X:", "Y:", "Z:"] {
+        let candidates = ["Z:", "Y:", "X:", "W:", "V:", "U:", "T:", "S:"];
+        let mut guard = None;
+        for candidate in candidates {
             let status = Command::new("cmd")
                 .args(["/C", "subst", candidate])
                 .arg(root.as_path())
                 .status()
                 .expect("spawn subst");
             if status.success() {
-                letter = Some(candidate);
+                guard = Some(SubstGuard(candidate.to_string()));
                 break;
             }
         }
-        let letter = letter.expect("a free drive letter");
-        let drive = std::path::PathBuf::from(letter);
+        let guard = guard.expect("a free drive letter for subst test");
+        let drive = std::path::PathBuf::from(&guard.0);
         let target = GuardedPath::from_guarded_parts(drive.clone(), drive.join("out.txt"));
         let mut resolver = PathResolver::new_guarded(root.clone(), root.clone()).expect("resolver");
         resolver.switch_to_system();
@@ -356,8 +372,6 @@ mod security_tests {
             .expect("SYSTEM writes must reach drives other than the build context drive");
         let back = resolver.read_file(&target).expect("read back");
         assert_eq!(back, b"fleet");
-        let _ = Command::new("cmd")
-            .args(["/C", "subst", letter, "/d"])
-            .status();
+        // `guard` drops here and runs `subst /d` on every outcome.
     }
 }
