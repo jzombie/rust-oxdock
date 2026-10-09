@@ -100,8 +100,9 @@ try {
   $env:OXDOCK_BIN = (Join-Path $tmp 'x\oxdock.exe')
   # Pass-through only (possibly unset, which removes it): the installer
   # owns the default. The name mapping lives here because only the stub
-  # knows both sides.
-  $env:OXDOCK_DIR = $env:INSTALL_DIR
+  # knows both sides. Separators go native: GitHub contexts use forward
+  # slashes even on Windows, and the guard rejects the mix.
+  if ($env:INSTALL_DIR) { $env:OXDOCK_DIR = $env:INSTALL_DIR.Replace('/', '\') }
   $env:OXDOCK_SHA = $Expected
   $env:OXDOCK_VERSION = $Version
   Push-Location $tmp
