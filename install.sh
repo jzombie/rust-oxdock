@@ -45,7 +45,10 @@ gh_curl() {
 }
 
 if [ -z "$VERSION" ]; then
-  VERSION=$(gh_curl "https://api.github.com/repos/$REPO/releases?per_page=1" | grep -m1 '"tag_name"' | cut -d'"' -f4)
+  # No `grep -m1`: every stage consumes the body to EOF, else curl
+  # fails writing to the closed pipe under `pipefail` (exit 23).
+  # The releases endpoint yields exactly one `tag_name` per page entry.
+  VERSION=$(gh_curl "https://api.github.com/repos/$REPO/releases?per_page=1" | grep '"tag_name"' | cut -d'"' -f4)
 fi
 
 case "$(uname -s)-$(uname -m)" in

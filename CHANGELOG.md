@@ -15,6 +15,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 ### Fixed
 
 - A host with no home variable and no `INSTALL_DIR` fails loudly at the gate naming `INSTALL_DIR` with the exact syntax for its shell, instead of failing obscurely inside directory creation.
+- Release-tag resolution no longer pipes curl through `grep -m1`: the early pipe close made curl fail under `pipefail` (exit 23), flaking the smoke matrix and the unpinned installer path. Every stage now consumes the body to EOF.
 
 ## [0.24.1-alpha] - 2026-10-09
 
