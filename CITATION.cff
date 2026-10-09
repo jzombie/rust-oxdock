@@ -2,7 +2,7 @@ cff-version: 1.2.0
 message: "If you use OxDock, please cite it as below."
 type: software
 title: "OxDock"
-version: 0.24.1-alpha
+version: 0.24.2-alpha
 authors:
   - family-names: "Harris"
     given-names: "Jeremy"
