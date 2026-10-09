@@ -17,6 +17,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - Supply-chain checksums: releases attach a `SHA256SUMS` file alongside the archives, and both installers verify before extracting (fail closed: releases predating checksums refuse to install).
 - Release profile optimizes for binary size (`lto`, single codegen unit, `strip`, `opt-level = "z"`).
 
+### Fixed
+
+- CLI script paths containing a URL scheme fail fast with the input intact instead of letting path normalization mangle it (`https://` no longer comes out as `https:/`).
+
 ## [0.24.0-alpha] - 2026-10-08
 
 ### Added

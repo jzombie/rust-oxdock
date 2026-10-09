@@ -172,6 +172,16 @@ pub enum ScriptSource {
     Stdin,
 }
 
+/// URLs never resolve to workspace files: fail with the input intact
+/// instead of letting normalization mangle the scheme. Present fact
+/// about this argument, not a claim about imports.
+fn reject_url_script(text: &str) -> Result<()> {
+    if text.contains("://") {
+        bail!("not a local path: {text:?} (pass a workspace path or `-` for stdin)");
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 pub struct Options {
     pub script: ScriptSource,
@@ -221,6 +231,7 @@ impl Options {
                     if path == "-" {
                         set_script(ScriptSource::Stdin, "--script -")?;
                     } else {
+                        reject_url_script(&path)?;
                         set_script(
                             ScriptSource::Path(
                                 workspace_root
@@ -305,6 +316,7 @@ impl Options {
                     if text == "-" {
                         set_script(ScriptSource::Stdin, "positional `-`")?;
                     } else {
+                        reject_url_script(&text)?;
                         set_script(
                             ScriptSource::Path(
                                 workspace_root
@@ -1209,6 +1221,31 @@ mod tests {
         miri,
         ignore = "GuardedPath::tempdir relies on OS tempdirs; blocked under Miri isolation"
     )]
+    #[test]
+    fn options_parse_rejects_remote_script_with_input_intact() {
+        let workspace = GuardedPath::tempdir().expect("tempdir");
+        for args in [
+            vec!["https://example.com/process.oxfile".to_string()],
+            vec![
+                "--script".to_string(),
+                "https://example.com/process.oxfile".to_string(),
+            ],
+        ] {
+            let err = Options::parse(&mut args.into_iter(), workspace.as_guarded_path())
+                .expect_err("remote script must not parse as a path");
+            let rendered = format!("{err:#}");
+            assert!(
+                rendered.contains("not a local path")
+                    && rendered.contains("https://example.com/process.oxfile"),
+                "rejection names the intact input: {rendered}"
+            );
+            assert!(
+                !rendered.contains("https:/example.com"),
+                "scheme must never come out mangled: {rendered}"
+            );
+        }
+    }
+
     #[test]
     fn execute_with_result_runs_script() {
         let workspace = GuardedPath::tempdir().expect("tempdir");
