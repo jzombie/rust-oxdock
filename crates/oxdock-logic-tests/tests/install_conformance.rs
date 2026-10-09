@@ -2,6 +2,8 @@ use anyhow::{Context, Result};
 use oxdock_core::{ExecIo, run_steps_with_manager_with_modules};
 use oxdock_fs::{GuardedPath, PathResolver};
 use oxdock_logic_tests::recording::RecordingManager;
+#[cfg(windows)]
+use oxdock_logic_tests::recording::argv_calls;
 
 /// sha256 of `INSTALL_PAYLOAD`, computed once and pinned beside it: if
 /// the bytes change without the digest, the success test fails loudly
@@ -120,19 +122,14 @@ impl InstallRun {
 }
 
 /// Verified bytes install end to end: the placed file lands in the
-/// destination holding the exact payload bytes, and no process ever
-/// spawns. Native commands do the placing, so the proof is the file,
-/// not the call log.
+/// destination holding the exact payload bytes. Unix places natively
+/// (no processes spawn); Windows places through powershell because
+/// guarded writes outside the workspace are denied there.
 #[test]
 #[cfg_attr(miri, ignore = "needs host tempdir for the fixture root")]
 fn verified_asset_installs_bytes() -> Result<()> {
     let run = install_harness(INSTALL_PAYLOAD, INSTALL_DIGEST, Some("dest"))?;
     run.execute()?;
-    assert!(
-        run.calls().is_empty(),
-        "native placement spawns no processes: {:?}",
-        run.calls()
-    );
     #[cfg(unix)]
     let placed = "dest/oxdock";
     #[cfg(windows)]
@@ -142,6 +139,31 @@ fn verified_asset_installs_bytes() -> Result<()> {
     assert_eq!(
         body, INSTALL_PAYLOAD,
         "placed file holds the verified bytes"
+    );
+    #[cfg(unix)]
+    assert!(
+        run.calls().is_empty(),
+        "native placement spawns no processes: {:?}",
+        run.calls()
+    );
+    #[cfg(windows)]
+    assert_eq!(
+        argv_calls(&run.calls()),
+        vec![
+            vec![
+                "powershell".to_string(),
+                "-NoProfile".to_string(),
+                "-Command".to_string(),
+                "New-Item -ItemType Directory -Force -Path 'dest'".to_string(),
+            ],
+            vec![
+                "powershell".to_string(),
+                "-NoProfile".to_string(),
+                "-Command".to_string(),
+                "Copy-Item 'x/oxdock' 'dest/oxdock.exe' -Force".to_string(),
+            ],
+        ],
+        "dir then place through powershell"
     );
     Ok(())
 }
