@@ -3,9 +3,8 @@
 # every install decision lives in install.oxfile, executed below with
 # the fetched binary.
 #
-# Piped stdin runs instead of installing: the stub saves any piped
-# bytes and bridges them to install.oxfile, which reinvokes the
-# fetched binary on that script. Nothing is placed in run mode.
+# Piped stdin is saved to a scratch file and bridged to install.oxfile
+# as OXDOCK_PIPED_SCRIPT.
 #
 # Content-addressed local cache: the first run downloads and verifies,
 # later runs reuse the cached tarball after re-verifying its hash, so

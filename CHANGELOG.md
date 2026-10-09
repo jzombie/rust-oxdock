@@ -7,6 +7,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ## [0.24.2-alpha] - 2026-10-09
 
+### Added
+
+- Piped stdin runs instead of installing: the stubs save piped bytes and bridge them to `install.oxfile`, which reinvokes the fetched interpreter on that script and places nothing. The run-vs-install decision lives in the oxfile; the stubs only capture and bridge.
+
 ### Changed
 
 - Linux release archives are musl-static (asset names are now `*-unknown-linux-musl.tar.gz`): they run in scratch containers with no libc. Windows binaries link the CRT statically, so downloaders need no VCRedist.
