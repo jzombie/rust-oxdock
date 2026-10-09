@@ -26,7 +26,8 @@ LET $actual: STRING = HASH_SHA256 $asset
 ASSERT_EQ $actual "{{ $want }}\n"
 
 MKDIR $dir
-[family:unix] COPY $bin "{{ $dir }}/oxdock"
-[family:windows] COPY $bin "{{ $dir }}/oxdock.exe"
+LET $dest: STRING = "{{ $dir }}/oxdock"
+[family:windows] $dest = "{{ $dir }}/oxdock.exe"
+COPY $bin $dest
 ECHO "installed oxdock {{ env:OXDOCK_VERSION }} to {{ $dir }}"
 ECHO "ensure {{ $dir }} is on PATH"
