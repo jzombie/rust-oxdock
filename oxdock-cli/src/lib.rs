@@ -208,6 +208,8 @@ impl Options {
         let mut shell = false;
         let mut endpoints = EndpointFlags::default();
         let mut remote_serve = false;
+        // Pushed only under `net`; without it the binding never mutates.
+        #[cfg_attr(not(feature = "net"), allow(unused_mut))]
         let mut remotes: Vec<(String, String)> = Vec::new();
         let mut set_script = |source: ScriptSource, origin: &str| -> Result<()> {
             if script.is_some() {
@@ -364,43 +366,40 @@ pub fn version() -> String {
     format!("oxdock {}", env!("CARGO_PKG_VERSION"))
 }
 
-/// Human-readable CLI usage, printed for `--help`/`-h`.
+/// Human-readable CLI usage, printed for `--help`/`-h`. One shared
+/// head and tail; only the endpoint lines differ by `net` feature, so
+/// flag edits land in exactly one place.
 pub fn usage() -> String {
     let version = env!("CARGO_PKG_VERSION");
     let description = env!("CARGO_PKG_DESCRIPTION");
+    let mut text = indoc::formatdoc! {"
+        oxdock {version} — {description}
+        Usage: oxdock [OPTIONS] [SCRIPT]
+          SCRIPT             script file path (same as `--script <file>`); `-` reads stdin
+          --script <file|->  script file (relative resolves under the OxDock workspace root), or `-` for stdin
+          --shell            run the script, then drop into an interactive shell (requires a TTY)
+    "};
+    // Plain literals, not formatdoc: a uniformly indented block would
+    // dedent to column zero, but these lines carry two leading spaces.
     #[cfg(feature = "net")]
-    {
-        indoc::formatdoc! {"
-            oxdock {version} — {description}
-            Usage: oxdock [OPTIONS] [SCRIPT]
-              SCRIPT             script file path (same as `--script <file>`); `-` reads stdin
-              --script <file|->  script file (relative resolves under the OxDock workspace root), or `-` for stdin
-              --shell            run the script, then drop into an interactive shell (requires a TTY)
-              --listen <addr>    expose a logical service port ([host:]port, repeatable)
-              -p <[host:]outer:inner>  map outer port to an inner service port or name (repeatable; outer 0 is ephemeral; bare outer binds loopback, prefix 0.0.0.0: for all interfaces)
-              --offline          open no sockets (conflicts with --listen/-p)
-              --remote TARGET=CMD    bind a REMOTE target to a stdio transport command (repeatable)
-              --help, -h         print this help and exit
-              --version, -V      print the version and exit
-            With no script given, reads the script from stdin (must be piped unless `--shell`).
-            Scripts declare logical endpoints (a port like 2251); the flags above map them to interfaces.
-        "}
-    }
+    text.push_str(concat!(
+        "  --listen <addr>    expose a logical service port ([host:]port, repeatable)\n",
+        "  -p <[host:]outer:inner>  map outer port to an inner service port or name (repeatable; outer 0 is ephemeral; bare outer binds loopback, prefix 0.0.0.0: for all interfaces)\n",
+        "  --offline          open no sockets (conflicts with --listen/-p)\n",
+        "  --remote TARGET=CMD    bind a REMOTE target to a stdio transport command (repeatable)\n",
+    ));
     #[cfg(not(feature = "net"))]
-    {
-        indoc::formatdoc! {"
-            oxdock {version} — {description}
-            Usage: oxdock [OPTIONS] [SCRIPT]
-              SCRIPT             script file path (same as `--script <file>`); `-` reads stdin
-              --script <file|->  script file (relative resolves under the OxDock workspace root), or `-` for stdin
-              --shell            run the script, then drop into an interactive shell (requires a TTY)
-              --offline          open no sockets (endpoint flags require the `net` feature)
-              --help, -h         print this help and exit
-              --version, -V      print the version and exit
-            With no script given, reads the script from stdin (must be piped unless `--shell`).
-            Endpoint flags (--listen/-p) require the `net` feature (rebuild with --features net).
-        "}
-    }
+    text.push_str("  --offline          open no sockets (endpoint flags require the `net` feature)\n");
+    text.push_str(&indoc::formatdoc! {"
+          --help, -h         print this help and exit
+          --version, -V      print the version and exit
+        With no script given, reads the script from stdin (must be piped unless `--shell`).
+    "});
+    #[cfg(feature = "net")]
+    text.push_str("Scripts declare logical endpoints (a port like 2251); the flags above map them to interfaces.\n");
+    #[cfg(not(feature = "net"))]
+    text.push_str("Endpoint flags (--listen/-p) require the `net` feature (rebuild with --features net).\n");
+    text
 }
 
 pub fn execute(opts: Options, workspace_root: GuardedPath) -> Result<()> {
