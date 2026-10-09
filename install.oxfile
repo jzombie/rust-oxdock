@@ -25,14 +25,8 @@ LET $actual: STRING = HASH_SHA256 $asset
 # Rust never emits \r\n here on any platform, so this is exact.
 ASSERT_EQ $actual "{{ $want }}\n"
 
-# Windows cannot use native placement: verbatim-prefix
-# canonicalization (`\\?\D:\...`) never prefix-matches the guard root,
-# so guarded writes outside the workspace are denied there (unix
-# canonicalizes cleanly). Child processes bypass that layer, hence
-# powershell below. Revisit if the guard learns verbatim equivalence.
-[family:unix] MKDIR $dir
-[family:windows] RUN ["powershell", "-NoProfile", "-Command", "New-Item -ItemType Directory -Force -Path '{{ $dir }}'"]
+MKDIR $dir
 [family:unix] COPY $bin "{{ $dir }}/oxdock"
-[family:windows] RUN ["powershell", "-NoProfile", "-Command", "Copy-Item '{{ $bin }}' '{{ $dir }}/oxdock.exe' -Force"]
+[family:windows] COPY $bin "{{ $dir }}/oxdock.exe"
 ECHO "installed oxdock {{ env:OXDOCK_VERSION }} to {{ $dir }}"
 ECHO "ensure {{ $dir }} is on PATH"

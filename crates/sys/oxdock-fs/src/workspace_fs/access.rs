@@ -227,6 +227,17 @@ impl PathResolver {
                 candidate.display()
             );
         }
+        // SYSTEM bypass: anchor each result at its own filesystem anchor
+        // (drive root, UNC share, or `/`) instead of the single
+        // build-context drive, so every drive and share resolves. Upward
+        // escape past an anchor is impossible by construction, and a
+        // missing drive fails closed when the anchor will not create.
+        // Relative candidates keep the effective-root chain below.
+        if self.is_system() && candidate.is_absolute() {
+            let anchor = super::cache::system_anchor(candidate);
+            let anchored = GuardedPath::from_guarded_parts(anchor.clone(), anchor);
+            return self.check_access_with_root(&anchored, candidate, mode);
+        }
         self.check_access_with_root(self.effective_root(), candidate, mode)
     }
 }
