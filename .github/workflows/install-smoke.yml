@@ -238,9 +238,15 @@ jobs:
             sleep 0.1
           done
           [ "$ready" = 1 ]
+          # Isolated scratch: the stub's mktemp dirs land here, so an
+          # empty dir afterward proves per-run cleanup, not just
+          # placement absence.
+          export TMPDIR="${RUNNER_TEMP}/ephemeral-tmp"
+          mkdir -p "$TMPDIR"
           printf 'IMPORT [STD]\nECHO "via-ephemeral"\n' | bash <(cat ./install.sh) 2>&1 | tee "${RUNNER_TEMP}/ephemeral.log"
           grep -q "via-ephemeral" "${RUNNER_TEMP}/ephemeral.log"
           [ ! -e "${{ runner.temp }}/oxbin-ephemeral" ]
+          [ -z "$(ls -A "$TMPDIR")" ]
 
       # TODO(single-source-commands): same single-sourcing as the sh
       # leg above; both one-liners move to the CLI template file together.
@@ -266,9 +272,14 @@ jobs:
             # program itself on the pipe): the exact one-liner downloaders
             # paste, with Get-Content standing in for irm to keep the
             # branch hermetic.
+            # Isolated scratch: GetTempPath honors TMP, so an empty dir
+            # afterward proves per-run cleanup, not just placement absence.
+            $env:TMP = Join-Path $env:RUNNER_TEMP 'ephemeral-tmp'
+            New-Item -ItemType Directory -Force -Path $env:TMP | Out-Null
             "IMPORT [STD]`nECHO via-ephemeral" | & ([scriptblock]::Create((Get-Content -Raw .\install.ps1))) *>&1 | Tee-Object (Join-Path $env:RUNNER_TEMP 'ephemeral.log')
             if (-not (Select-String "via-ephemeral" (Join-Path $env:RUNNER_TEMP 'ephemeral.log'))) { throw "ephemeral run produced no output" }
             if (Test-Path (Join-Path $env:RUNNER_TEMP 'oxbin-ephemeral')) { throw "ephemeral run placed files" }
+            if (Get-ChildItem $env:TMP) { throw "scratch leaked temp files" }
           } finally {
             Stop-Process -Id $srv.Id -Force
           }
