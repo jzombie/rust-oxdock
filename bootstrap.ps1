@@ -21,6 +21,10 @@
 # with it instead of the downloaded release (CI smoke proves behavior
 # fixes before any release ships them). The asset still downloads and
 # verifies; only the execution engine swaps.
+#
+# Point OXDOCK_RELEASE_BASE at a mirror root (no trailing slash) to
+# fetch the asset and checksums from elsewhere; CI smoke serves a
+# staged branch build over loopback through it.
 $ErrorActionPreference = 'Stop'
 
 $Repo = "jzombie/rust-oxdock"
@@ -68,7 +72,7 @@ if (Test-CachedAsset) {
   $tmp = Join-Path ([IO.Path]::GetTempPath()) "oxdock-install-$([Guid]::NewGuid())"
   New-Item -ItemType Directory -Force -Path $tmp | Out-Null
   try {
-    $base = "https://github.com/$Repo/releases/download/$Version"
+    $base = if ($env:OXDOCK_RELEASE_BASE) { $env:OXDOCK_RELEASE_BASE.TrimEnd('/') } else { "https://github.com/$Repo/releases/download/$Version" }
     Invoke-WebRequest "$base/$Asset" -Headers $ApiHeaders -OutFile (Join-Path $tmp 'asset.tar.gz')
     Invoke-WebRequest "$base/SHA256SUMS" -Headers $ApiHeaders -OutFile (Join-Path $tmp 'SHA256SUMS')
     $line = (Get-Content (Join-Path $tmp 'SHA256SUMS')) | Where-Object { $_ -match "$Asset" } | Select-Object -First 1

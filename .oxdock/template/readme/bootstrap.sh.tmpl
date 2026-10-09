@@ -22,6 +22,10 @@
 # with it instead of the downloaded release (CI smoke proves behavior
 # fixes before any release ships them). The asset still downloads and
 # verifies; only the execution engine swaps.
+#
+# Point OXDOCK_RELEASE_BASE at a mirror root (no trailing slash) to
+# fetch the asset and checksums from elsewhere; CI smoke serves a
+# staged branch build over loopback through it.
 set -euo pipefail
 
 REPO="{{ $docs_global.repo }}"
@@ -74,7 +78,8 @@ else
   echo "downloading oxdock $VERSION" >&2
   tmp=$(mktemp -d)
   trap 'rm -rf "$tmp"' EXIT
-  base="https://github.com/$REPO/releases/download/$VERSION"
+  base="${OXDOCK_RELEASE_BASE:-https://github.com/$REPO/releases/download/$VERSION}"
+  base="${base%/}"
   # Download under the release filename: `sha256sum -c` resolves names
   # from the checksums file, so a renamed download would never verify.
   gh_curl "$base/$ASSET" -o "$tmp/$ASSET"
