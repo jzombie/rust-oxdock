@@ -234,3 +234,26 @@ fn missing_asset_fails_naming_the_file() -> Result<()> {
     );
     Ok(())
 }
+
+/// No destination and no home fails loudly at the gate: the script
+/// environment never inherits host variables unless bridged, so an
+/// unbridged HOME must error naming the override instead of deriving
+/// `/.local/bin` from an empty expansion.
+#[test]
+#[cfg_attr(miri, ignore = "needs host tempdir for the fixture root")]
+fn missing_home_fails_naming_install_dir() -> Result<()> {
+    let mut run = install_harness(INSTALL_PAYLOAD, INSTALL_DIGEST, None)?;
+    run.io.remove_inherit_env("HOME");
+    run.io.remove_inherit_env("USERPROFILE");
+    let err = run.execute().expect_err("no home and no dir must fail");
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered.contains("EXIT requested with code 1"),
+        "failure exits at the gate: {rendered}"
+    );
+    assert!(
+        run.calls().is_empty(),
+        "no process spawned for a missing home"
+    );
+    Ok(())
+}

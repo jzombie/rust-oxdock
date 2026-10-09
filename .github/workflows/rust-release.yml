@@ -210,11 +210,11 @@ jobs:
           RUSTFLAGS: ${{ (startsWith(matrix.os, 'windows') && '-C target-feature=+crt-static') || '' }}
         run: |
           set -euo pipefail
+          # Underscores only: dashes are illegal in shell identifiers,
+          # and the cc crate reads the underscored TARGET_CC form.
           if [ -n "${{ matrix.cc }}" ]; then
-            under="${{ matrix.target }}"
-            under="${under//-/_}"
-            export "CC_${{ matrix.target }}=${{ matrix.cc }}"
-            export "CC_${under}=${{ matrix.cc }}"
+            cc_var="CC_$(echo '${{ matrix.target }}' | tr '-' '_')"
+            export "${cc_var}=${{ matrix.cc }}"
           fi
           cargo build --release --target ${{ matrix.target }} -p ${{ inputs.binary }} --all-features
 
