@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use oxdock_core::{ExecIo, run_steps_with_context_result_with_io};
 use oxdock_fs::{GuardedPath, PathResolver};
+#[cfg(feature = "markdown")]
+use oxdock_logic_tests::recording::{Call, RecordingManager, argv_calls, shell_calls};
 
 fn repo_root() -> Result<String> {
     // Same layout derivation as docs_conformance: normalize separators
@@ -172,93 +174,6 @@ fn release_gate_rejects_mismatched_confirmation() -> Result<()> {
     Ok(())
 }
 
-/// Recording process manager: stands in for cargo, git, and gh so the
-/// real release scripts execute end to end with zero side effects.
-/// Every invocation lands in one shared log; canned stdout is identical
-/// everywhere, which is exactly what the tag identity gate compares.
-#[derive(Clone, Debug, PartialEq)]
-#[cfg(feature = "markdown")]
-enum Call {
-    Argv(Vec<String>),
-    Shell(String),
-}
-
-#[derive(Clone)]
-#[cfg(feature = "markdown")]
-struct RecordingManager {
-    log: std::sync::Arc<std::sync::Mutex<Vec<Call>>>,
-}
-
-#[derive(Clone)]
-#[cfg(feature = "markdown")]
-struct RecordingHandle;
-
-#[cfg(feature = "markdown")]
-fn exit_success() -> std::process::ExitStatus {
-    #[cfg(unix)]
-    {
-        std::os::unix::process::ExitStatusExt::from_raw(0)
-    }
-    #[cfg(windows)]
-    {
-        std::os::windows::process::ExitStatusExt::from_raw(0)
-    }
-}
-
-#[cfg(feature = "markdown")]
-impl oxdock_process::BackgroundHandle for RecordingHandle {
-    fn try_wait(&mut self) -> Result<Option<std::process::ExitStatus>> {
-        Ok(Some(exit_success()))
-    }
-    fn kill(&mut self) -> Result<()> {
-        Ok(())
-    }
-    fn wait(&mut self) -> Result<std::process::ExitStatus> {
-        Ok(exit_success())
-    }
-}
-
-#[cfg(feature = "markdown")]
-impl oxdock_process::ProcessManager for RecordingManager {
-    type Handle = RecordingHandle;
-
-    fn run_command(
-        &mut self,
-        _ctx: &oxdock_process::CommandContext,
-        script: &str,
-        options: oxdock_process::CommandOptions,
-    ) -> Result<oxdock_process::CommandResult<Self::Handle>> {
-        self.log
-            .lock()
-            .expect("log")
-            .push(Call::Shell(script.to_string()));
-        match options.stdout {
-            oxdock_process::CommandStdout::Capture => Ok(oxdock_process::CommandResult::Captured(
-                b"deadbeef\n".to_vec(),
-            )),
-            _ => Ok(oxdock_process::CommandResult::Completed),
-        }
-    }
-
-    fn run_argv(
-        &mut self,
-        _ctx: &oxdock_process::CommandContext,
-        argv: &[String],
-        options: oxdock_process::CommandOptions,
-    ) -> Result<oxdock_process::CommandResult<Self::Handle>> {
-        self.log
-            .lock()
-            .expect("log")
-            .push(Call::Argv(argv.to_vec()));
-        match options.stdout {
-            oxdock_process::CommandStdout::Capture => Ok(oxdock_process::CommandResult::Captured(
-                b"deadbeef\n".to_vec(),
-            )),
-            _ => Ok(oxdock_process::CommandResult::Completed),
-        }
-    }
-}
-
 /// Fixture root carrying a workspace Cargo.toml plus a CHANGELOG whose
 /// wanted section precedes a decoy, so notes slicing proves itself.
 #[cfg(feature = "markdown")]
@@ -294,9 +209,7 @@ fn release_harness(confirm: &str, dry_run: &str, binaries: &str) -> Result<Relea
     setup.write_file(&root.join("Cargo.toml")?, fixture_manifest().as_bytes())?;
     setup.write_file(&root.join("CHANGELOG.md")?, fixture_changelog().as_bytes())?;
     setup.create_dir_all(&root.join("target")?)?;
-    let manager = RecordingManager {
-        log: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
-    };
+    let manager = RecordingManager::new();
     let mut io = ExecIo::new();
     io.insert_inherit_env("RELEASE_CONFIRM", confirm);
     io.insert_inherit_env("RELEASE_DRY_RUN", dry_run);
@@ -312,13 +225,12 @@ fn release_harness(confirm: &str, dry_run: &str, binaries: &str) -> Result<Relea
 }
 
 #[cfg(feature = "markdown")]
-#[cfg(feature = "markdown")]
 impl ReleaseRun {
     fn calls(&self) -> Vec<Call> {
-        self.manager.log.lock().expect("log").clone()
+        self.manager.calls()
     }
 
-    fn execute(self) -> Result<()> {
+    fn execute(&self) -> Result<()> {
         let modules = vec![oxdock_markdown_plugin::module_with::<RecordingManager>()];
         let fs: Box<dyn oxdock_fs::WorkspaceFs> = Box::new(PathResolver::new_guarded(
             self.root.clone(),
@@ -328,7 +240,7 @@ impl ReleaseRun {
             fs,
             &self.steps,
             self.manager.clone(),
-            self.io,
+            self.io.clone(),
             modules,
             Vec::new(),
         )?;
@@ -339,28 +251,6 @@ impl ReleaseRun {
         let reader = PathResolver::new_guarded(self.root.clone(), self.root.clone())?;
         reader.read_to_string(&self.root.join("target/release-notes.md")?)
     }
-}
-
-#[cfg(feature = "markdown")]
-fn argv_calls(calls: &[Call]) -> Vec<Vec<String>> {
-    calls
-        .iter()
-        .filter_map(|call| match call {
-            Call::Argv(argv) => Some(argv.clone()),
-            Call::Shell(_) => None,
-        })
-        .collect()
-}
-
-#[cfg(feature = "markdown")]
-fn shell_calls<'a>(calls: &'a [Call]) -> Vec<&'a str> {
-    calls
-        .iter()
-        .filter_map(|call| match call {
-            Call::Argv(_) => None,
-            Call::Shell(script) => Some(script.as_str()),
-        })
-        .collect()
 }
 
 /// Dry run publishes nothing: exactly one dry-run publish invocation,
@@ -524,9 +414,7 @@ fn missing_section_fails_naming_the_needle() -> Result<()> {
         "# Changelog\n\n## [0.0.0-old] - 2026-01-01\n\n- Decoy.\n".as_bytes(),
     )?;
     setup.create_dir_all(&root.join("target")?)?;
-    let manager = RecordingManager {
-        log: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
-    };
+    let manager = RecordingManager::new();
     let mut io = ExecIo::new();
     io.insert_inherit_env("RELEASE_CONFIRM", FIXTURE_VERSION);
     io.insert_inherit_env("RELEASE_DRY_RUN", "true");
@@ -551,7 +439,7 @@ fn missing_section_fails_naming_the_needle() -> Result<()> {
         "failure names the missing section: {rendered}"
     );
     assert!(
-        manager.log.lock().expect("log").is_empty(),
+        manager.calls().is_empty(),
         "no process spawned before notes extraction"
     );
     Ok(())
