@@ -129,8 +129,11 @@ jobs:
           & (Join-Path $env:INSTALL_DIR 'oxdock.exe') --version
 
       # Blackholed egress: with a warm cache and pinned resolution,
-      # nothing may leave the machine. curl honors proxy env vars, so
-      # a dead proxy proves zero network. Unix legs only (see above).
+      # nothing may leave the machine. Lowercase proxy vars only:
+      # GitHub treats env keys case-insensitively, so carrying both
+      # cases is a duplicate key and kills the run at startup. The
+      # canary first proves the blackhole holds; without it a silently
+      # ignored proxy would pass vacuously. Unix legs only (see above).
       - name: Install offline via bootstrap.sh
         if: ${{ runner.os != 'Windows' }}
         shell: bash
@@ -139,9 +142,11 @@ jobs:
           INSTALL_DIR: ${{ runner.temp }}/oxbin-offline
           http_proxy: http://127.0.0.1:9
           https_proxy: http://127.0.0.1:9
-          HTTP_PROXY: http://127.0.0.1:9
-          HTTPS_PROXY: http://127.0.0.1:9
         run: |
           set -euo pipefail
+          if curl -fsSL --max-time 15 https://github.com >/dev/null 2>&1; then
+            echo "blackhole broken: egress succeeded" >&2
+            exit 1
+          fi
           ./bootstrap.sh
           "${INSTALL_DIR}/oxdock" --version
