@@ -59,6 +59,10 @@ jobs:
     # read below authenticates with the job token.
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Test the branch's own installer logic, not whatever main happens
+      # to carry: head branch on PRs, branch name otherwise. Unset on no
+      # known branch would skip the override; every event here has one.
+      OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.head_ref || github.ref_name }}/install.oxfile
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6

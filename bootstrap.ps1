@@ -72,10 +72,15 @@ if (Test-CachedAsset) {
     $actual = (Get-FileHash (Join-Path $tmp 'asset.tar.gz') -Algorithm SHA256).Hash
     if ($expected.ToLowerInvariant() -ne $actual.ToLowerInvariant()) { throw "checksum mismatch for $Asset" }
     # Installer logic rides with the release; tags predating it fall
-    # back to main. Fetched here, inside population, so warm runs never
-    # touch network.
-    $raw = "https://raw.githubusercontent.com/$Repo/$Version/install.oxfile"
-    try { Invoke-WebRequest $raw -Headers $ApiHeaders -OutFile (Join-Path $tmp 'install.oxfile') } catch { Invoke-WebRequest "https://raw.githubusercontent.com/$Repo/main/install.oxfile" -Headers $ApiHeaders -OutFile (Join-Path $tmp 'install.oxfile') }
+    # back to main. An explicit OXDOCK_OXFILE_URL wins over both
+    # (pre-merge testing, mirrors). Fetched here, inside population,
+    # so warm runs never touch network.
+    if ($env:OXDOCK_OXFILE_URL) {
+      Invoke-WebRequest $env:OXDOCK_OXFILE_URL -Headers $ApiHeaders -OutFile (Join-Path $tmp 'install.oxfile')
+    } else {
+      $raw = "https://raw.githubusercontent.com/$Repo/$Version/install.oxfile"
+      try { Invoke-WebRequest $raw -Headers $ApiHeaders -OutFile (Join-Path $tmp 'install.oxfile') } catch { Invoke-WebRequest "https://raw.githubusercontent.com/$Repo/main/install.oxfile" -Headers $ApiHeaders -OutFile (Join-Path $tmp 'install.oxfile') }
+    }
     Move-Item (Join-Path $tmp 'asset.tar.gz') (Join-Path $VDir $Asset) -Force
     Move-Item (Join-Path $tmp 'SHA256SUMS') (Join-Path $VDir 'SHA256SUMS') -Force
     Move-Item (Join-Path $tmp 'install.oxfile') (Join-Path $VDir 'install.oxfile') -Force

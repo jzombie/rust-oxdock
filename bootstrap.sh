@@ -75,9 +75,14 @@ else
   gh_curl "$base/$ASSET" -o "$tmp/$ASSET"
   gh_curl "$base/SHA256SUMS" -o "$tmp/SHA256SUMS"
   # Installer logic rides with the release; tags predating it fall back
-  # to main. The logic is version-agnostic (verify, extract, place).
-  # Fetched here, inside population, so warm runs never touch network.
-  gh_curl "https://raw.githubusercontent.com/$REPO/$VERSION/install.oxfile" -o "$tmp/install.oxfile" || gh_curl "https://raw.githubusercontent.com/$REPO/main/install.oxfile" -o "$tmp/install.oxfile"
+  # to main. An explicit OXDOCK_OXFILE_URL wins over both (pre-merge
+  # testing, mirrors). Fetched here, inside population, so warm runs
+  # never touch network.
+  if [ -n "${OXDOCK_OXFILE_URL:-}" ]; then
+    gh_curl "$OXDOCK_OXFILE_URL" -o "$tmp/install.oxfile"
+  else
+    gh_curl "https://raw.githubusercontent.com/$REPO/$VERSION/install.oxfile" -o "$tmp/install.oxfile" || gh_curl "https://raw.githubusercontent.com/$REPO/main/install.oxfile" -o "$tmp/install.oxfile"
+  fi
   if command -v sha256sum >/dev/null 2>&1; then
     (cd "$tmp" && grep "$ASSET\$" SHA256SUMS | sha256sum -c - >/dev/null)
   else
