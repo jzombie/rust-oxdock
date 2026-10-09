@@ -20,9 +20,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # ubuntu-24.04-arm is pinned by necessity (no -latest label
-        # exists for arm); the x64 legs float. Revisit when 24.04 ages out.
-        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
+        # The arm leg is pinned by necessity (no -latest label exists
+        # for arm); 26.04 is GA, and ubuntu-latest floats there in
+        # November, so the whole matrix converges on one Ubuntu.
+        os: [ubuntu-latest, ubuntu-26.04-arm, macos-latest, windows-latest]
         flags: ["--all-features", "--no-default-features"]
 
     steps:
