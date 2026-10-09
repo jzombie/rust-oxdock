@@ -1,0 +1,11 @@
+# Pass INSTALL_DIR to choose the destination; the installer defaults
+# it when absent.
+#
+# Point OXDOCK_ENGINE at a branch-built binary to run the installer
+# with it instead of the downloaded release (CI smoke proves behavior
+# fixes before any release ships them). The asset still downloads and
+# verifies; only the execution engine swaps.
+#
+# Point OXDOCK_RELEASE_BASE at a mirror root (no trailing slash) to
+# fetch the asset and checksums from elsewhere; CI smoke serves a
+# staged branch build over loopback through it.

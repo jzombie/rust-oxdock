@@ -1,5 +1,5 @@
 # Settings convergence: applies .github/settings.json through
-# gha-apply-settings.oxfile so repo configuration never drifts
+# scripts/gha/gha-apply-settings.oxfile so repo configuration never drifts
 # silently. Runs when the settings or the script change, weekly
 # against UI-side drift, and on demand. Secrets converge only when
 # their values exist: the very first secret still needs one manual
@@ -20,7 +20,7 @@ on:
     branches: [main]
     paths:
       - ".github/settings.json"
-      - "gha-apply-settings.oxfile"
+      - "scripts/gha/gha-apply-settings.oxfile"
   schedule:
     - cron: "0 6 * * 1"
   workflow_dispatch:
@@ -45,4 +45,4 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           set -euo pipefail
-          cargo run -p oxdock -- ./gha-apply-settings.oxfile
+          cargo run -p oxdock -- ./scripts/gha/gha-apply-settings.oxfile

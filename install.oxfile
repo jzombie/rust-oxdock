@@ -1,0 +1,33 @@
+# Installs the downloaded OxDock release binary after running cross-platform
+# interpreter bootstrapper (install.sh on Unix; install.ps1 on Windows).
+
+IMPORT [STD]
+
+INHERIT_ENV [OXDOCK_ASSET, OXDOCK_SHA, OXDOCK_BIN, OXDOCK_DIR, OXDOCK_VERSION]
+
+# Full filesystem access: installation writes outside any workspace.
+WORKSPACE SYSTEM
+
+# Install locations arrive through the stub environment.
+LET $asset: STRING = "{{ env:OXDOCK_ASSET }}"
+LET $want: STRING = "{{ env:OXDOCK_SHA }}"
+LET $bin: STRING = "{{ env:OXDOCK_BIN }}"
+LET $dir: STRING = "{{ env:OXDOCK_DIR }}"
+IF $dir == "" {
+    [family:unix] $dir = "{{ env:HOME }}/.local/bin"
+    [family:windows] $dir = "{{ env:USERPROFILE }}/.local/bin"
+}
+
+# Refuse to place anything the checksum rejects.
+LET $actual: STRING = HASH_SHA256 $asset
+# The digest command terminates its line: the comparison includes it.
+# Rust never emits \r\n here on any platform, so this is exact.
+ASSERT_EQ $actual "{{ $want }}\n"
+
+# Place the verified binary and report where it landed.
+MKDIR $dir
+LET $dest: STRING = "{{ $dir }}/oxdock"
+[family:windows] $dest = "{{ $dir }}/oxdock.exe"
+COPY $bin $dest
+ECHO "installed oxdock {{ env:OXDOCK_VERSION }} to {{ $dir }}"
+ECHO "ensure {{ $dir }} is on PATH"

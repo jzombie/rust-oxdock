@@ -227,6 +227,17 @@ impl PathResolver {
                 candidate.display()
             );
         }
+        // SYSTEM bypass: anchor each result at its own filesystem anchor
+        // (drive root, UNC share, or `/`) instead of the single
+        // build-context drive, so every drive and share resolves. Upward
+        // escape past an anchor is impossible by construction, and a
+        // missing drive fails closed when the anchor will not create.
+        // Relative candidates keep the effective-root chain below.
+        if self.is_system() && candidate.is_absolute() {
+            let anchor = super::cache::system_anchor(candidate);
+            let anchored = GuardedPath::from_guarded_parts(anchor.clone(), anchor);
+            return self.check_access_with_root(&anchored, candidate, mode);
+        }
         self.check_access_with_root(self.effective_root(), candidate, mode)
     }
 }
@@ -308,5 +319,59 @@ mod security_tests {
             .expect("dot components allowed");
         assert!(dotform.as_path().starts_with(root.as_path()));
         assert!(dotform.as_path().ends_with("sub/file.txt"));
+    }
+
+    /// Drive mapping reclaimed on drop, so a failing assert cannot leak
+    /// a virtual drive into the developer session.
+    #[cfg(windows)]
+    struct SubstGuard(String);
+
+    #[cfg(windows)]
+    impl Drop for SubstGuard {
+        #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("cmd")
+                .args(["/C", "subst", &self.0, "/d"])
+                .status();
+        }
+    }
+
+    /// SYSTEM full access must not depend on drive coincidence: a second
+    /// drive letter mapped at a tempdir (no hardware needed) receives
+    /// writes under `WORKSPACE SYSTEM` exactly like the build drive
+    /// does. Fails while containment compares against the single
+    /// build-context drive instead of each result's own anchor.
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    #[cfg(windows)]
+    #[test]
+    fn system_reaches_other_drives() {
+        use std::process::Command;
+        let temp = GuardedPath::tempdir().expect("tempdir");
+        let root = temp.as_guarded_path().clone();
+        // Claim a free letter; subst maps it at the tempdir.
+        let candidates = ["Z:", "Y:", "X:", "W:", "V:", "U:", "T:", "S:"];
+        let mut guard = None;
+        for candidate in candidates {
+            let status = Command::new("cmd")
+                .args(["/C", "subst", candidate])
+                .arg(root.as_path())
+                .status()
+                .expect("spawn subst");
+            if status.success() {
+                guard = Some(SubstGuard(candidate.to_string()));
+                break;
+            }
+        }
+        let guard = guard.expect("a free drive letter for subst test");
+        let drive = std::path::PathBuf::from(&guard.0);
+        let target = GuardedPath::from_guarded_parts(drive.clone(), drive.join("out.txt"));
+        let mut resolver = PathResolver::new_guarded(root.clone(), root.clone()).expect("resolver");
+        resolver.switch_to_system();
+        resolver
+            .write_file(&target, b"fleet")
+            .expect("SYSTEM writes must reach drives other than the build context drive");
+        let back = resolver.read_file(&target).expect("read back");
+        assert_eq!(back, b"fleet");
+        // `guard` drops here and runs `subst /d` on every outcome.
     }
 }

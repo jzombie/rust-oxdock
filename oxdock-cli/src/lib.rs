@@ -23,6 +23,53 @@ use std::collections::BTreeMap;
 
 mod endpoints;
 pub use endpoints::EndpointFlags;
+
+// CLI usage bodies, one file per Cargo feature variant: statically
+// compiled assets cannot branch on Cargo features, so the script
+// renders both variants (version line included, through inherited
+// Cargo metadata) and Rust `#[cfg]` picks the live one.
+use oxdock_macros::oxdock_embed;
+oxdock_embed! {
+    name: UsageAssets,
+    script: {
+        INHERIT_ENV [CARGO_PKG_VERSION, CARGO_PKG_DESCRIPTION]
+        FUNC EMIT_BODY($is_net: BOOL) {
+            ECHO "oxdock {{ env:CARGO_PKG_VERSION }} — {{ env:CARGO_PKG_DESCRIPTION }}"
+            ECHO ""
+            ECHO "Usage: oxdock [OPTIONS] [SCRIPT]"
+            ECHO "  SCRIPT             script file path (same as `--script <file>`); `-` reads stdin"
+            ECHO "  --script <file|->  script file (relative resolves under the OxDock workspace root), or `-` for stdin"
+            ECHO "  --shell            run the script, then drop into an interactive shell (requires a TTY)"
+            IF $is_net {
+                ECHO "  --listen <addr>    expose a logical service port ([host:]port, repeatable)"
+                ECHO "  -p <[host:]outer:inner>  map outer port to an inner service port or name (repeatable; outer 0 is ephemeral; bare outer binds loopback, prefix 0.0.0.0: for all interfaces)"
+                ECHO "  --offline          open no sockets (conflicts with --listen/-p)"
+                ECHO "  --remote TARGET=CMD    bind a REMOTE target to a stdio transport command (repeatable)"
+            } ELSE {
+                ECHO "  --offline          open no sockets (endpoint flags require the `net` feature)"
+            }
+            ECHO "  --help, -h         print this help and exit"
+            ECHO "  --version, -V      print the version and exit"
+            ECHO ""
+            ECHO "With no script given, reads the script from stdin (must be piped unless `--shell`)."
+            IF $is_net {
+                ECHO "Scripts declare logical endpoints (a port like 2251); the flags above map them to interfaces."
+            } ELSE {
+                ECHO "Endpoint flags (--listen/-p) require the `net` feature (rebuild with --features net)."
+            }
+        }
+        LET $p: PIPE
+        WITH_IO [stdout=$p] {
+            EMIT_BODY(true)
+        }
+        WITH_IO [stdin=$p] WRITE dist/usage-net.txt
+        WITH_IO [stdout=$p] {
+            EMIT_BODY(false)
+        }
+        WITH_IO [stdin=$p] WRITE dist/usage-lean.txt
+    },
+    out_dir: "usage-prebuilt",
+}
 #[cfg(feature = "net")]
 pub use endpoints::build_registry;
 #[cfg(feature = "net")]
@@ -130,11 +177,15 @@ pub fn run() -> Result<()> {
     let workspace_root = discover_workspace_root().context("guard workspace root")?;
 
     let mut args = std::env::args().skip(1);
-    // `--help`/`-h` surfaces as the usage text in the parse error (parse must
-    // not exit the process itself: it is public library API). Print it and
-    // succeed so the binary exits 0.
+    // `--help`/`-h` and `--version`/`-V` surface as text in the parse
+    // error (parse must not exit the process itself: it is public
+    // library API). Print it and succeed so the binary exits 0.
     let opts = match Options::parse(&mut args, &workspace_root) {
         Ok(opts) => opts,
+        Err(err) if err.to_string() == version() => {
+            println!("{err}");
+            return Ok(());
+        }
         Err(err) if err.to_string() == usage() => {
             print!("{err}");
             return Ok(());
@@ -172,6 +223,16 @@ pub enum ScriptSource {
     Stdin,
 }
 
+/// URLs never resolve to workspace files: fail with the input intact
+/// instead of letting normalization mangle the scheme. Present fact
+/// about this argument, not a claim about imports.
+fn reject_url_script(text: &str) -> Result<()> {
+    if text.contains("://") {
+        bail!("not a local path: {text:?} (pass a workspace path or `-` for stdin)");
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 pub struct Options {
     pub script: ScriptSource,
@@ -194,6 +255,8 @@ impl Options {
         let mut shell = false;
         let mut endpoints = EndpointFlags::default();
         let mut remote_serve = false;
+        // Pushed only under `net`; without it the binding never mutates.
+        #[cfg_attr(not(feature = "net"), allow(unused_mut))]
         let mut remotes: Vec<(String, String)> = Vec::new();
         let mut set_script = |source: ScriptSource, origin: &str| -> Result<()> {
             if script.is_some() {
@@ -221,10 +284,11 @@ impl Options {
                     if path == "-" {
                         set_script(ScriptSource::Stdin, "--script -")?;
                     } else {
+                        reject_url_script(&path)?;
                         set_script(
                             ScriptSource::Path(
                                 workspace_root
-                                    .join(&path)
+                                    .join_script(&path)
                                     .with_context(|| format!("guard script path {path}"))?,
                             ),
                             "--script",
@@ -297,6 +361,9 @@ impl Options {
                 Long("help") | Short('h') => {
                     bail!("{}", usage());
                 }
+                Long("version") | Short('V') => {
+                    bail!("{}", version());
+                }
                 Value(value) => {
                     let text = value_string(value)?;
                     if text.is_empty() {
@@ -305,10 +372,11 @@ impl Options {
                     if text == "-" {
                         set_script(ScriptSource::Stdin, "positional `-`")?;
                     } else {
+                        reject_url_script(&text)?;
                         set_script(
                             ScriptSource::Path(
                                 workspace_root
-                                    .join(&text)
+                                    .join_script(&text)
                                     .with_context(|| format!("guard script path {text}"))?,
                             ),
                             "positional argument",
@@ -340,41 +408,25 @@ fn value_string(value: std::ffi::OsString) -> Result<String> {
         .map_err(|_| anyhow::anyhow!("argument must be UTF-8"))
 }
 
-/// Human-readable CLI usage, printed for `--help`/`-h`.
+/// Human-readable CLI version, printed for `--version`/`-V`.
+pub fn version() -> String {
+    format!("oxdock {}", env!("CARGO_PKG_VERSION"))
+}
+
+/// Human-readable CLI usage, printed for `--help`/`-h`. The full
+/// text, version line included, is rendered once at compile time by
+/// the `UsageAssets` script above. Feature selection stays in Rust
+/// `#[cfg]`: the DSL has no feature namespace, so each variant lives
+/// in its own asset file.
 pub fn usage() -> String {
-    let version = env!("CARGO_PKG_VERSION");
-    let description = env!("CARGO_PKG_DESCRIPTION");
     #[cfg(feature = "net")]
-    {
-        indoc::formatdoc! {"
-            oxdock {version} — {description}
-            Usage: oxdock [OPTIONS] [SCRIPT]
-              SCRIPT             script file path (same as `--script <file>`); `-` reads stdin
-              --script <file|->  script file under the workspace root, or `-` for stdin
-              --shell            run the script, then drop into an interactive shell (requires a TTY)
-              --listen <addr>    expose a logical service port ([host:]port, repeatable)
-              -p <[host:]outer:inner>  map outer port to an inner service port or name (repeatable; outer 0 is ephemeral; bare outer binds loopback, prefix 0.0.0.0: for all interfaces)
-              --offline          open no sockets (conflicts with --listen/-p)
-              --remote TARGET=CMD    bind a REMOTE target to a stdio transport command (repeatable)
-              --help, -h         print this help and exit
-            With no script given, reads the script from stdin (must be piped unless `--shell`).
-            Scripts declare logical endpoints (a port like 2251); the flags above map them to interfaces.
-        "}
-    }
+    let asset = "dist/usage-net.txt";
     #[cfg(not(feature = "net"))]
-    {
-        indoc::formatdoc! {"
-            oxdock {version} — {description}
-            Usage: oxdock [OPTIONS] [SCRIPT]
-              SCRIPT             script file path (same as `--script <file>`); `-` reads stdin
-              --script <file|->  script file under the workspace root, or `-` for stdin
-              --shell            run the script, then drop into an interactive shell (requires a TTY)
-              --offline          open no sockets (endpoint flags require the `net` feature)
-              --help, -h         print this help and exit
-            With no script given, reads the script from stdin (must be piped unless `--shell`).
-            Endpoint flags (--listen/-p) require the `net` feature (rebuild with --features net).
-        "}
-    }
+    let asset = "dist/usage-lean.txt";
+    let file = UsageAssets::get(asset).expect("usage must be embedded");
+    str::from_utf8(file.data.as_ref())
+        .expect("usage is UTF-8")
+        .to_string()
 }
 
 pub fn execute(opts: Options, workspace_root: GuardedPath) -> Result<()> {
@@ -422,7 +474,7 @@ pub fn execute_with_result(opts: Options, workspace_root: GuardedPath) -> Result
 
     // Read + parse BEFORE any tempdir exists so LOCAL-only scripts never
     // create a snapshot directory they never use (issue #131).
-    let script = read_script(&opts.script, &workspace_root)?;
+    let script = read_script(&opts.script)?;
 
     let mut final_cwd = workspace_root.clone();
     let snapshot = Arc::new(LazyGuardedTempDir::new());
@@ -587,11 +639,13 @@ fn check_no_net_endpoints(flags: &EndpointFlags) -> Result<()> {
     Ok(())
 }
 
-/// Read the script source without creating any execution state.
-fn read_script(source: &ScriptSource, workspace_root: &GuardedPath) -> Result<String> {
+/// Read the script source without creating any execution state. The
+/// read resolves against the script path's own root, so scripts
+/// outside the execution workspace load exactly like scripts inside it.
+fn read_script(source: &ScriptSource) -> Result<String> {
     match source {
         ScriptSource::Path(path) => {
-            let resolver = PathResolver::new(workspace_root.as_path(), workspace_root.as_path())?;
+            let resolver = PathResolver::new(path.root(), path.root())?;
             resolver
                 .read_to_string(path)
                 .with_context(|| format!("failed to read script at {}", path.display()))
@@ -623,14 +677,7 @@ where
     // snapshot materializes lazily on first snapshot-targeted step, so an
     // empty non-shell run creates nothing at all (issue #131).
     let script = match &opts.script {
-        ScriptSource::Path(path) => {
-            // Read script path via PathResolver rooted at the workspace so
-            // script files are validated to live under the workspace.
-            let resolver = PathResolver::new(workspace_root.as_path(), workspace_root.as_path())?;
-            resolver
-                .read_to_string(path)
-                .with_context(|| format!("failed to read script at {}", path.display()))?
-        }
+        ScriptSource::Path(_) => read_script(&opts.script)?,
         ScriptSource::Stdin => {
             let stdin = io::stdin();
             if stdin.is_terminal() {
@@ -1041,6 +1088,46 @@ mod tests {
         ignore = "GuardedPath::tempdir relies on OS tempdirs; blocked under Miri isolation"
     )]
     #[test]
+    fn options_parse_absolute_script_outside_execution_workspace_loads() {
+        // Stdin parity: an explicit absolute location loads wherever
+        // it lives; only relative paths resolve under the workspace.
+        let workspace = GuardedPath::tempdir().expect("tempdir");
+        let outside = GuardedPath::tempdir().expect("outside");
+        let target = outside
+            .as_guarded_path()
+            .as_path()
+            .join("step.ox")
+            .to_string_lossy()
+            .into_owned();
+        let mut args = vec!["--script".to_string(), target.clone()].into_iter();
+        let opts = Options::parse(&mut args, workspace.as_guarded_path()).expect("parse");
+        match opts.script {
+            ScriptSource::Path(path) => {
+                assert_eq!(path.as_path().to_string_lossy(), target);
+                assert_eq!(path.root(), outside.as_guarded_path().as_path());
+            }
+            ScriptSource::Stdin => panic!("absolute script must not parse as stdin"),
+        }
+    }
+
+    #[cfg_attr(
+        miri,
+        ignore = "GuardedPath::tempdir relies on OS tempdirs; blocked under Miri isolation"
+    )]
+    #[test]
+    fn options_parse_relative_escape_stays_rejected() {
+        let workspace = GuardedPath::tempdir().expect("tempdir");
+        let mut args = vec!["--script".to_string(), "../escape.ox".to_string()].into_iter();
+        let err =
+            Options::parse(&mut args, workspace.as_guarded_path()).expect_err("escape must fail");
+        assert!(err.to_string().contains("guard script path"), "{err:?}");
+    }
+
+    #[cfg_attr(
+        miri,
+        ignore = "GuardedPath::tempdir relies on OS tempdirs; blocked under Miri isolation"
+    )]
+    #[test]
     fn options_parse_rejects_unknown_flags() {
         let workspace = GuardedPath::tempdir().expect("tempdir");
         let mut args = vec!["--frobnicate".to_string()].into_iter();
@@ -1193,6 +1280,24 @@ mod tests {
         ignore = "GuardedPath::tempdir relies on OS tempdirs; blocked under Miri isolation"
     )]
     #[test]
+    fn options_parse_version_returns_version_without_exiting() {
+        // Same contract as --help: version surfaces as the parse error
+        // (parse must not exit the process itself: it is public library
+        // API). Print it and succeed so the binary exits 0.
+        let workspace = GuardedPath::tempdir().expect("tempdir");
+        for flag in ["--version", "-V"] {
+            let mut args = vec![flag.to_string()].into_iter();
+            let err = Options::parse(&mut args, workspace.as_guarded_path())
+                .expect_err("version flag must not parse as options");
+            assert_eq!(err.to_string(), version());
+        }
+    }
+
+    #[cfg_attr(
+        miri,
+        ignore = "GuardedPath::tempdir relies on OS tempdirs; blocked under Miri isolation"
+    )]
+    #[test]
     fn options_parse_help_returns_usage_error_without_exiting() {
         // Regression: parse is public library API and must return instead of
         // terminating the process; `run()` turns this error into a clean exit 0.
@@ -1209,6 +1314,31 @@ mod tests {
         miri,
         ignore = "GuardedPath::tempdir relies on OS tempdirs; blocked under Miri isolation"
     )]
+    #[test]
+    fn options_parse_rejects_remote_script_with_input_intact() {
+        let workspace = GuardedPath::tempdir().expect("tempdir");
+        for args in [
+            vec!["https://example.com/process.oxfile".to_string()],
+            vec![
+                "--script".to_string(),
+                "https://example.com/process.oxfile".to_string(),
+            ],
+        ] {
+            let err = Options::parse(&mut args.into_iter(), workspace.as_guarded_path())
+                .expect_err("remote script must not parse as a path");
+            let rendered = format!("{err:#}");
+            assert!(
+                rendered.contains("not a local path")
+                    && rendered.contains("https://example.com/process.oxfile"),
+                "rejection names the intact input: {rendered}"
+            );
+            assert!(
+                !rendered.contains("https:/example.com"),
+                "scheme must never come out mangled: {rendered}"
+            );
+        }
+    }
+
     #[test]
     fn execute_with_result_runs_script() {
         let workspace = GuardedPath::tempdir().expect("tempdir");

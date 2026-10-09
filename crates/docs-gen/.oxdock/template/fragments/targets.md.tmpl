@@ -26,6 +26,12 @@ newline-terminated with placeholders on their own lines, and escape
 literal placeholder examples natively (`\{{ ... }}`) so they pass
 through untouched.
 
+A target whose output executes directly declares `"executable":
+true` beside `out`: docs-gen re-applies `0755` after every render,
+so regenerating `install.sh` cannot silently drop the bit the smoke
+workflow needs to execute it. Omitted everywhere else; a
+present-but-not-boolean flag fails the run instead of rendering.
+
 One values file can feed several masters: the generic example renders
 a human `README.md`, a slim agent pointer `llms.txt`, and a full
 carrier `llms-full.txt` from the same values through shared fragments.

@@ -2,7 +2,7 @@ use super::AccessMode;
 use super::PathResolver;
 use super::guard_path;
 use crate::PathLike;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::borrow::Cow;
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 use std::fs::File;
@@ -179,6 +179,30 @@ impl GuardedPath {
 
     pub fn join(&self, rel: &str) -> Result<Self> {
         GuardedPath::new(&self.root, &self.path.join(rel))
+    }
+
+    /// Join a CLI script argument: relative paths resolve under the
+    /// guard root (existing behavior); absolute paths re-root at
+    /// their own parent, so an explicit location loads like stdin
+    /// text instead of failing guard containment. Never creates
+    /// directories: a missing parent fails instead of materializing
+    /// (unlike `new_root`, which ensures its root).
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    pub fn join_script(&self, text: &str) -> Result<Self> {
+        let raw = Path::new(text);
+        if !raw.is_absolute() {
+            return self.join(text);
+        }
+        let parent = raw
+            .parent()
+            .with_context(|| format!("script has no parent: {text}"))?;
+        // Host check only: under Miri the guard below is pure and
+        // creates nothing, so there is nothing to pre-empt.
+        #[cfg(not(miri))]
+        if !parent.exists() {
+            anyhow::bail!("script not found: {text}");
+        }
+        Self::new(parent, raw)
     }
 
     /// Return the parent directory as a guarded path, if it exists within the same root.
@@ -886,6 +910,50 @@ mod tests {
         let parent = child.parent().expect("parent");
         assert_eq!(parent.as_path(), root.as_path().join("child"));
         assert_eq!(child.root(), root.root());
+    }
+
+    #[test]
+    fn join_script_matches_join_for_relative_paths() {
+        let temp = GuardedPath::tempdir().expect("tempdir");
+        let root = temp.as_guarded_path().clone();
+        let scripted = root.join_script("sub/step.ox").expect("relative");
+        assert_eq!(scripted, root.join("sub/step.ox").expect("join"));
+    }
+
+    #[test]
+    fn join_script_roots_absolute_paths_at_their_parent() {
+        let workspace = GuardedPath::tempdir().expect("tempdir");
+        let outside = GuardedPath::tempdir().expect("outside");
+        let root = workspace.as_guarded_path().clone();
+        let text = outside
+            .as_guarded_path()
+            .as_path()
+            .join("step.ox")
+            .to_string_lossy()
+            .into_owned();
+        let resolved = root.join_script(&text).expect("absolute");
+        assert_eq!(resolved.as_path().to_string_lossy(), text);
+        assert_eq!(resolved.root(), outside.as_guarded_path().as_path());
+    }
+
+    #[cfg_attr(
+        miri,
+        ignore = "asserts host directories are never created; blocked under Miri isolation"
+    )]
+    #[test]
+    fn join_script_missing_parent_fails_without_creating() {
+        let temp = GuardedPath::tempdir().expect("tempdir");
+        let root = temp.as_guarded_path().clone();
+        let missing = root.as_path().join("no-such-dir");
+        let text = missing.join("step.ox").to_string_lossy().into_owned();
+        let err = root
+            .join_script(&text)
+            .expect_err("missing parent must fail");
+        assert!(err.to_string().contains("script not found"), "{err:?}");
+        assert!(
+            !missing.exists(),
+            "join_script must never materialize parents"
+        );
     }
 
     #[allow(clippy::disallowed_types)]

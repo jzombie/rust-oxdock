@@ -1,29 +1,25 @@
 # Docs pipeline, callable from any repo plus dispatchable here.
 #
-# Downstream caller (ten lines in the calling repo, pinned by tag).
-# Keep both refs identical: GitHub exposes no variable for the ref the
-# caller pinned in `uses:`, so the workflow cannot derive it. Mismatched
-# pins run one version's logic against another version's scripts.
+# Downstream caller (eight lines in the calling repo, pinned by tag):
 #
 # ```yaml
 # jobs:
 #   docs:
 #     uses: jzombie/rust-oxdock/.github/workflows/docs.yml@v0.24.0-alpha
-#     with:
-#       pipeline_ref: v0.24.0-alpha
 # ```
+#
+# The pipeline pin derives from the call itself
+# (`github.workflow_ref` carries the `uses:` ref): one pin, not two.
 #
 # Conventions a calling repo follows: a Cargo workspace root (used for
 # version metadata and workspace discovery), a `docs-gen.json` config,
 # and per-target `target.json` plus templates (copy the
 # `examples/generic-readme` shape to start: values plus fragments, no
-# manifests required beyond the root one). The pipeline checks out this
-# repo at `pipeline_ref` for the docs-gen source and builds its runner
-# from that source, so callers hold no OxDock code and pin the pipeline
-# version explicitly. The stock engine plus `RUST` and `MARKDOWN`
-# plugins travel; the `OXDOCK` registry keys only make sense for
-# OxDock-based projects, and custom Rust plugins cannot cross the
-# boundary (those pipelines still build docs-gen locally).
+# manifests required beyond the root one). Callers hold no OxDock code.
+# The stock engine plus `RUST` and `MARKDOWN` plugins travel; the
+# `OXDOCK` registry keys only make sense for OxDock-based projects,
+# and custom Rust plugins cannot cross the boundary (those pipelines
+# still build docs-gen locally).
 #
 # Every run renders and then fails on drift, so generated docs can
 # never go stale silently. Read-only throughout: no secrets, no
@@ -33,17 +29,7 @@ name: docs
 
 on:
   workflow_dispatch:
-    inputs:
-      pipeline_ref:
-        description: "Ref of this repo to take docs-gen source from"
-        required: true
-        type: string
   workflow_call:
-    inputs:
-      pipeline_ref:
-        description: "Ref of this repo to take docs-gen source from"
-        required: true
-        type: string
 
 jobs:
   docs:
@@ -55,13 +41,23 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      # Pipeline source: the docs-gen binary builds from this ref, so
-      # callers pin the pipeline version exactly like a dependency.
+      # The pipeline pin is the call itself: the ref this file was
+      # loaded at.
+      - name: Resolve pipeline ref
+        id: pin
+        shell: bash
+        run: |
+          set -euo pipefail
+          ref="${GITHUB_WORKFLOW_REF##*@}"
+          ref="${ref#refs/tags/}"
+          ref="${ref#refs/heads/}"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
       - name: Checkout pipeline source
         uses: actions/checkout@v6
         with:
           repository: jzombie/rust-oxdock
-          ref: ${{ inputs.pipeline_ref }}
+          ref: ${{ steps.pin.outputs.ref }}
           path: pipeline
 
       - name: Install Rust

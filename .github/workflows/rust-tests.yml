@@ -20,7 +20,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
+        # The arm leg is pinned by necessity (no -latest label exists
+        # for arm); 26.04 is GA, and ubuntu-latest floats there in
+        # November, so the whole matrix converges on one Ubuntu.
+        os: [ubuntu-latest, ubuntu-26.04-arm, macos-latest, windows-latest]
         flags: ["--all-features", "--no-default-features"]
 
     steps:
@@ -71,9 +74,12 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: ${{ runner.os }}-cargo-${{ steps.rustc.outputs.hash }}-${{ steps.lockfile.outputs.hash }}-${{ matrix.flags }}
+          # runner.arch segments ARM from x64: runner.os reports Linux
+          # on both, so without it the ARM legs restore x86_64 cargo
+          # binaries and fail with Exec format error.
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ steps.rustc.outputs.hash }}-${{ steps.lockfile.outputs.hash }}-${{ matrix.flags }}
           restore-keys: |
-            ${{ runner.os }}-cargo-${{ steps.rustc.outputs.hash }}-${{ steps.lockfile.outputs.hash }}-
+            ${{ runner.os }}-${{ runner.arch }}-cargo-${{ steps.rustc.outputs.hash }}-${{ steps.lockfile.outputs.hash }}-
 
       - name: Test
         run: cargo test --workspace ${{ matrix.flags }} --lib --bins --tests --examples -- --include-ignored
@@ -82,12 +88,11 @@ jobs:
         run: cargo test -p oxdock-doc-tests --doc ${{ matrix.flags }}
 
   # Dogfoods the reusable docs pipeline against this repo itself:
-  # same render plus drift check a downstream caller gets.
+  # same render plus drift check a downstream caller gets. The pin
+  # derives from the call, so no inputs pass.
   docs-fresh:
     name: docs-fresh (docs-gen output matches checked-in docs)
     uses: ./.github/workflows/docs.yml
-    with:
-      pipeline_ref: ${{ github.sha }}
 
   test:
     name: test

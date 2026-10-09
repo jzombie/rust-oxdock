@@ -710,3 +710,34 @@ fn toc_rejects_unknown_defer_targets_at_dispatch() {
         "error names the target: {err}"
     );
 }
+
+const EXEC_TARGET: &str = r#"{"targets": [{"name": "t", "out": "run.sh", "template": "master.md.tmpl", "values": "values.json", "fragments": {"sec": ["fragments/sec/*.md.tmpl"]}, "executable": true}]}"#;
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "fixture render needs a host tempdir filesystem, blocked by Miri isolation"
+)]
+fn executable_target_regains_mode_bit_after_render() {
+    let mut tree = base_tree("overwrite");
+    let entry = tree
+        .iter_mut()
+        .find(|(rel, _)| rel == "target.json")
+        .expect("base tree carries target.json");
+    entry.1 = EXEC_TARGET.to_string();
+    let (_temp, root, resolver) = fixture(&as_refs(&tree));
+    docs_gen::run(root.as_path()).expect("render");
+    let out = read(&resolver, &root, "run.sh");
+    assert!(!out.contains("{{"), "no placeholders survive: {out}");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let path = root.join("run.sh").expect("join out");
+        let mode = resolver
+            .metadata(&path)
+            .expect("stat out")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o111, 0o111, "executable bit re-applied");
+    }
+}

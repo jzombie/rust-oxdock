@@ -1,4 +1,4 @@
 {
   "name": "OxDock",
-  "description": "Dockerfile inspired build DSL. Native. Embed scripts at compile time in Rust, or run the same scripts as standalone CLI pipelines."
+  "description": "Dockerfile-inspired build DSL. Native. Embed scripts at compile time in Rust, or run the same scripts as standalone CLI pipelines."
 }

@@ -12,6 +12,9 @@
         "shared": [
           ".oxdock/template/shared/header.md.tmpl",
           ".oxdock/template/shared/footer.md.tmpl"
+        ],
+        "usage": [
+          "oxdock-cli/usage-prebuilt/dist/*.txt"
         ]
       }
     }

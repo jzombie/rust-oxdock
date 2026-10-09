@@ -10,9 +10,21 @@ INHERIT_ENV [RELEASE_CONFIRM]
 # Pin to the live tree: the manifest read must hit the real repo.
 WORKSPACE LOCAL
 
-# The workspace manifest is the single source of truth for the version.
+# The manifest is the single source of truth for the version: unified
+# workspaces read `workspace.package`, single-crate repos fall back to
+# bare `package`. Cargo guarantees one of them exists.
 LET $manifest: MAP<ANY> = LOAD_TOML("Cargo.toml")
-LET $version: STRING = $manifest.workspace.package.version
+LET $version: STRING = ""
+IF HAS_KEY($manifest, "workspace") {
+    LET $ws: MAP<ANY> = $manifest.workspace
+    IF HAS_KEY($ws, "package") {
+        $version = $manifest.workspace.package.version
+    } ELSE {
+        $version = $manifest.package.version
+    }
+} ELSE {
+    $version = $manifest.package.version
+}
 
 # Typed confirmation gate: the dispatched version must equal the tree.
 # A typo or stale input fails here with both sides named.

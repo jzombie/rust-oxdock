@@ -20,8 +20,8 @@ path = "src/main.rs"
 required-features = ["cli"]
 
 [features]
-default = ["cli"]
-cli = ["dep:oxdock-cli", "net"]
+default = ["cli", "net"]
+cli = ["dep:oxdock-cli"]
 # Virtual-endpoint toolkit in the CLI runner (oxdock-net-plugin).
 net = ["oxdock-cli/net"]
 # Ephemeral SSH server/client in the CLI runner (oxdock-ssh-plugin).
