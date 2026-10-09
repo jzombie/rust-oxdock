@@ -209,7 +209,10 @@ jobs:
       # and places nothing. INSTALL_DIR points at a fresh dir that must
       # stay absent; VERSION stays pinned so no release API is involved.
       # The run-vs-install decision lives in install.oxfile; the stub
-      # only bridges the piped bytes.
+      # only bridges the piped bytes. The stub arrives via process
+      # substitution (never `curl | bash`, which would feed the program
+      # itself on fd 0): this is the exact one-liner downloaders paste,
+      # with `cat` standing in for `curl` to keep the branch hermetic.
       - name: Ephemeral run via install.sh
         if: ${{ runner.os != 'Windows' }}
         shell: bash
@@ -229,7 +232,7 @@ jobs:
             sleep 0.1
           done
           [ "$ready" = 1 ]
-          printf 'IMPORT [STD]\nECHO "via-ephemeral"\n' | ./install.sh 2>&1 | tee "${RUNNER_TEMP}/ephemeral.log"
+          printf 'IMPORT [STD]\nECHO "via-ephemeral"\n' | bash <(cat ./install.sh) 2>&1 | tee "${RUNNER_TEMP}/ephemeral.log"
           grep -q "via-ephemeral" "${RUNNER_TEMP}/ephemeral.log"
           [ ! -e "${{ runner.temp }}/oxbin-ephemeral" ]
 
@@ -251,7 +254,11 @@ jobs:
               try { $null = Invoke-WebRequest 'http://127.0.0.1:18731/' -UseBasicParsing -TimeoutSec 2; $ready = $true } catch { Start-Sleep -Milliseconds 100 }
             }
             if (-not $ready) { throw "local stage server never came up" }
-            "IMPORT [STD]`nECHO via-ephemeral" | .\install.ps1 *>&1 | Tee-Object (Join-Path $env:RUNNER_TEMP 'ephemeral.log')
+            # In-memory scriptblock, never `irm | iex` (which would feed the
+            # program itself on the pipe): the exact one-liner downloaders
+            # paste, with Get-Content standing in for irm to keep the
+            # branch hermetic.
+            "IMPORT [STD]`nECHO via-ephemeral" | & ([scriptblock]::Create((Get-Content -Raw .\install.ps1))) *>&1 | Tee-Object (Join-Path $env:RUNNER_TEMP 'ephemeral.log')
             if (-not (Select-String "via-ephemeral" (Join-Path $env:RUNNER_TEMP 'ephemeral.log'))) { throw "ephemeral run produced no output" }
             if (Test-Path (Join-Path $env:RUNNER_TEMP 'oxbin-ephemeral')) { throw "ephemeral run placed files" }
           } finally {
