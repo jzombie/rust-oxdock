@@ -1,5 +1,6 @@
 # Install the downloaded OxDock release binary after verifying its checksum.
-# The bootstrap stub fetches the OxDock interpreter and runs this file with it.
+# The bootstrap stub fetches the OxDock interpreter and runs this file
+# with it: bootstrap.sh on Unix, bootstrap.ps1 on Windows.
 
 IMPORT [STD]
 
