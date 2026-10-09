@@ -81,10 +81,11 @@ and pass it to inner commands through `ENV`.
 
 The default build (with the `net` feature) prints the following for
 `oxdock --help`. It is rendered from the same embedded usage body
-the binary prints, so the two cannot drift:
+the binary prints:
 
 ```text
 oxdock 0.24.1-alpha — CLI tooling for executing OxDock's Dockerfile-inspired DSL on native platforms.
+
 Usage: oxdock [OPTIONS] [SCRIPT]
   SCRIPT             script file path (same as `--script <file>`); `-` reads stdin
   --script <file|->  script file (relative resolves under the OxDock workspace root), or `-` for stdin
