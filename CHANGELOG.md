@@ -10,6 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 ### Added
 
 - New `--version`, `-V` flag printing `oxdock <version>` and exiting 0, matching `--help` behavior.
+- The `--script` file and positional script argument accept absolute paths outside the OxDock workspace root; relative paths still resolve under it, so generated step files (GitHub Actions shells) load like stdin text.
 
 ### Changed
 

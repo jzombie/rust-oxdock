@@ -239,7 +239,7 @@ impl Options {
                         set_script(
                             ScriptSource::Path(
                                 workspace_root
-                                    .join(&path)
+                                    .join_script(&path)
                                     .with_context(|| format!("guard script path {path}"))?,
                             ),
                             "--script",
@@ -327,7 +327,7 @@ impl Options {
                         set_script(
                             ScriptSource::Path(
                                 workspace_root
-                                    .join(&text)
+                                    .join_script(&text)
                                     .with_context(|| format!("guard script path {text}"))?,
                             ),
                             "positional argument",
@@ -374,7 +374,7 @@ pub fn usage() -> String {
             oxdock {version} — {description}
             Usage: oxdock [OPTIONS] [SCRIPT]
               SCRIPT             script file path (same as `--script <file>`); `-` reads stdin
-              --script <file|->  script file under the workspace root, or `-` for stdin
+              --script <file|->  script file (relative resolves under the OxDock workspace root), or `-` for stdin
               --shell            run the script, then drop into an interactive shell (requires a TTY)
               --listen <addr>    expose a logical service port ([host:]port, repeatable)
               -p <[host:]outer:inner>  map outer port to an inner service port or name (repeatable; outer 0 is ephemeral; bare outer binds loopback, prefix 0.0.0.0: for all interfaces)
@@ -392,7 +392,7 @@ pub fn usage() -> String {
             oxdock {version} — {description}
             Usage: oxdock [OPTIONS] [SCRIPT]
               SCRIPT             script file path (same as `--script <file>`); `-` reads stdin
-              --script <file|->  script file under the workspace root, or `-` for stdin
+              --script <file|->  script file (relative resolves under the OxDock workspace root), or `-` for stdin
               --shell            run the script, then drop into an interactive shell (requires a TTY)
               --offline          open no sockets (endpoint flags require the `net` feature)
               --help, -h         print this help and exit
@@ -448,7 +448,7 @@ pub fn execute_with_result(opts: Options, workspace_root: GuardedPath) -> Result
 
     // Read + parse BEFORE any tempdir exists so LOCAL-only scripts never
     // create a snapshot directory they never use (issue #131).
-    let script = read_script(&opts.script, &workspace_root)?;
+    let script = read_script(&opts.script)?;
 
     let mut final_cwd = workspace_root.clone();
     let snapshot = Arc::new(LazyGuardedTempDir::new());
@@ -613,11 +613,13 @@ fn check_no_net_endpoints(flags: &EndpointFlags) -> Result<()> {
     Ok(())
 }
 
-/// Read the script source without creating any execution state.
-fn read_script(source: &ScriptSource, workspace_root: &GuardedPath) -> Result<String> {
+/// Read the script source without creating any execution state. The
+/// read resolves against the script path's own root, so scripts
+/// outside the execution workspace load exactly like scripts inside it.
+fn read_script(source: &ScriptSource) -> Result<String> {
     match source {
         ScriptSource::Path(path) => {
-            let resolver = PathResolver::new(workspace_root.as_path(), workspace_root.as_path())?;
+            let resolver = PathResolver::new(path.root(), path.root())?;
             resolver
                 .read_to_string(path)
                 .with_context(|| format!("failed to read script at {}", path.display()))
@@ -649,14 +651,7 @@ where
     // snapshot materializes lazily on first snapshot-targeted step, so an
     // empty non-shell run creates nothing at all (issue #131).
     let script = match &opts.script {
-        ScriptSource::Path(path) => {
-            // Read script path via PathResolver rooted at the workspace so
-            // script files are validated to live under the workspace.
-            let resolver = PathResolver::new(workspace_root.as_path(), workspace_root.as_path())?;
-            resolver
-                .read_to_string(path)
-                .with_context(|| format!("failed to read script at {}", path.display()))?
-        }
+        ScriptSource::Path(_) => read_script(&opts.script)?,
         ScriptSource::Stdin => {
             let stdin = io::stdin();
             if stdin.is_terminal() {
@@ -1060,6 +1055,46 @@ mod tests {
         let err = Options::parse(&mut args, &workspace_root)
             .expect_err("expected duplicate script error");
         assert!(err.to_string().contains("multiple times"), "{err:?}");
+    }
+
+    #[cfg_attr(
+        miri,
+        ignore = "GuardedPath::tempdir relies on OS tempdirs; blocked under Miri isolation"
+    )]
+    #[test]
+    fn options_parse_absolute_script_outside_execution_workspace_loads() {
+        // Stdin parity: an explicit absolute location loads wherever
+        // it lives; only relative paths resolve under the workspace.
+        let workspace = GuardedPath::tempdir().expect("tempdir");
+        let outside = GuardedPath::tempdir().expect("outside");
+        let target = outside
+            .as_guarded_path()
+            .as_path()
+            .join("step.ox")
+            .to_string_lossy()
+            .into_owned();
+        let mut args = vec!["--script".to_string(), target.clone()].into_iter();
+        let opts = Options::parse(&mut args, workspace.as_guarded_path()).expect("parse");
+        match opts.script {
+            ScriptSource::Path(path) => {
+                assert_eq!(path.as_path().to_string_lossy(), target);
+                assert_eq!(path.root(), outside.as_guarded_path().as_path());
+            }
+            ScriptSource::Stdin => panic!("absolute script must not parse as stdin"),
+        }
+    }
+
+    #[cfg_attr(
+        miri,
+        ignore = "GuardedPath::tempdir relies on OS tempdirs; blocked under Miri isolation"
+    )]
+    #[test]
+    fn options_parse_relative_escape_stays_rejected() {
+        let workspace = GuardedPath::tempdir().expect("tempdir");
+        let mut args = vec!["--script".to_string(), "../escape.ox".to_string()].into_iter();
+        let err = Options::parse(&mut args, workspace.as_guarded_path())
+            .expect_err("escape must fail");
+        assert!(err.to_string().contains("guard script path"), "{err:?}");
     }
 
     #[cfg_attr(
