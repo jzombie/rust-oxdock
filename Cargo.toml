@@ -57,7 +57,10 @@ muxio-sync-rpc-client = "0.17.0-alpha"
 muxio-sync-rpc-server = "0.17.0-alpha"
 oxdock = { path = "oxdock", version = "0.24.1-alpha" }
 oxdock-build = { path = "oxdock-build", version = "0.24.1-alpha" }
-oxdock-cli = { path = "oxdock-cli", version = "0.24.1-alpha" }
+# No defaults: dependents opt into `net`/`ssh`/`markdown` explicitly,
+# so a CLI binary without endpoint mapping is buildable. The
+# `oxdock-cli` package keeps its own defaults for direct builds.
+oxdock-cli = { path = "oxdock-cli", version = "0.24.1-alpha", default-features = false }
 oxdock-core = { path = "crates/oxdock-core", version = "0.24.1-alpha" }
 oxdock-embed = { path = "crates/oxdock-embed", version = "0.24.1-alpha" }
 oxdock-fixture = { path = "crates/oxdock-fixture", version = "0.24.1-alpha" }
