@@ -389,7 +389,9 @@ pub fn usage() -> String {
         "  --remote TARGET=CMD    bind a REMOTE target to a stdio transport command (repeatable)\n",
     ));
     #[cfg(not(feature = "net"))]
-    text.push_str("  --offline          open no sockets (endpoint flags require the `net` feature)\n");
+    text.push_str(
+        "  --offline          open no sockets (endpoint flags require the `net` feature)\n",
+    );
     text.push_str(&indoc::formatdoc! {"
           --help, -h         print this help and exit
           --version, -V      print the version and exit
@@ -398,7 +400,9 @@ pub fn usage() -> String {
     #[cfg(feature = "net")]
     text.push_str("Scripts declare logical endpoints (a port like 2251); the flags above map them to interfaces.\n");
     #[cfg(not(feature = "net"))]
-    text.push_str("Endpoint flags (--listen/-p) require the `net` feature (rebuild with --features net).\n");
+    text.push_str(
+        "Endpoint flags (--listen/-p) require the `net` feature (rebuild with --features net).\n",
+    );
     text
 }
 
