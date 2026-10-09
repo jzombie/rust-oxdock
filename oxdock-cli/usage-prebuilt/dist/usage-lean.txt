@@ -1,0 +1,11 @@
+oxdock 0.24.1-alpha — CLI tooling for executing OxDock's Dockerfile-inspired DSL on native platforms.
+
+Usage: oxdock [OPTIONS] [SCRIPT]
+  SCRIPT             script file path (same as `--script <file>`); `-` reads stdin
+  --script <file|->  script file (relative resolves under the OxDock workspace root), or `-` for stdin
+  --shell            run the script, then drop into an interactive shell (requires a TTY)
+  --offline          open no sockets (endpoint flags require the `net` feature)
+  --help, -h         print this help and exit
+  --version, -V      print the version and exit
+With no script given, reads the script from stdin (must be piped unless `--shell`).
+Endpoint flags (--listen/-p) require the `net` feature (rebuild with --features net).

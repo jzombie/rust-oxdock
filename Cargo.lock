@@ -1579,6 +1579,7 @@ dependencies = [
  "muxio-sync-rpc-server",
  "oxdock-core",
  "oxdock-fs",
+ "oxdock-macros",
  "oxdock-markdown-plugin",
  "oxdock-net-plugin",
  "oxdock-parser",

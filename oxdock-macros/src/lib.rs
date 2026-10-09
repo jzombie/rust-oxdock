@@ -4,6 +4,12 @@
 //! ```rust
 //! use oxdock_macros::oxdock_embed;
 //!
+//! // Side effect, visible on every test run: expanding this
+//! // materializes assets plus `.oxdock_hash` into `prebuilt/`.
+//! // `out_dir` resolves under the package manifest directory
+//! // (`CARGO_MANIFEST_DIR`) and must stay there: absolute paths
+//! // and parent escapes fail containment. Set `OXDOCK_EMBED_DEBUG=1`
+//! // to log the materialization directory.
 //! oxdock_embed! {
 //!     name: DemoAssets,
 //!     script: {
@@ -23,11 +29,20 @@
 //! `oxdock-fs`): every path stays sandboxed, subprocess lifecycle is tracked,
 //! and panics are isolated into `compile_error!` streams.
 //!
-//! Caching: a content fingerprint of the script, its statically discoverable
+//! Caching treats the script as a pure function of its declared inputs:
+//! a content fingerprint of the script, its statically discoverable
 //! inputs, and every referenced environment variable is stored in
 //! `<out_dir>/.oxdock_hash`. Matching fingerprints skip re-execution entirely;
-//! any drift rebuilds. `oxdock_prepare!` behaves identically but emits no runtime
-//! module.
+//! any drift rebuilds. The fingerprint key is the user-relative staging
+//! name rather than an absolute path, so a staging tree copied to
+//! another machine still validates. Tracked inputs are the script text,
+//! files named by read-like steps, and referenced env values: external
+//! toolchains behind `RUN` (an `npm run build`, a compiler) are opaque,
+//! so their sources never invalidate the cache. Scripts must be
+//! byte-deterministic for validation to hold. `OXDOCK_EMBED_FORCE_REBUILD=1`
+//! bypasses a valid cache; `OXDOCK_EMBED_FINGERPRINT_SALT=<salt>` shifts
+//! the digest and forces exactly one rebuild. `oxdock_prepare!` shares this
+//! contract and emits no runtime module.
 
 use oxdock_build::{
     asset_input_fingerprint, clear_materialize_dir, embed_debug_enabled, embed_force_rebuild,
@@ -66,6 +81,13 @@ pub fn oxdock_prepare(input: TokenStream) -> TokenStream {
     }
 }
 
+/// Cache validity file: first line is the hex digest, every following
+/// line must be empty or a `#` comment. `# written by ...` names the
+/// invoking macro; `# asset: <rel>` pins one staged file. Validation
+/// requires the digest to match and every listed asset to exist, so a
+/// wiped staging dir with a surviving hash fails instead of embedding
+/// silence. Anything else fails closed, and the file always answers
+/// who wrote it.
 const HASH_FILE: &str = ".oxdock_hash";
 const STAGING_DIR: &str = ".oxdock-staging";
 
@@ -177,6 +199,29 @@ struct InlinePlan {
     fingerprint: String,
 }
 
+/// Content fingerprint for a staging location: parse plus environment
+/// collection live here so the read-only fallback can recompute for a
+/// relocated out_dir without duplicating the sequence. The key is the
+/// user-relative out_dir name, never an absolute display path: absolute
+/// paths would pin validation to one machine and break consumers
+/// building from vendored staging.
+fn compute_fingerprint(
+    manifest_resolver: &PathResolver,
+    script_src: &str,
+    script_span: proc_macro2::Span,
+    out_dir_key: &str,
+) -> syn::Result<String> {
+    let steps = oxdock_core::parse_script(script_src)
+        .map_err(|e| syn::Error::new(script_span, format!("parse error: {e}")))?;
+    let build_context = oxdock_fs::discover_workspace_root()
+        .map_err(|e| syn::Error::new(script_span, e.to_string()))?;
+    let envs = BuiltinEnv::collect(&build_context).into_envs();
+    catch_engine_panics(script_span, || {
+        asset_input_fingerprint(manifest_resolver, script_src, &steps, out_dir_key, &envs)
+            .map_err(|e| syn::Error::new(script_span, format!("fingerprint failed: {e:#}")))
+    })
+}
+
 fn prepare_inline_plan(input: &DslMacroInput) -> syn::Result<InlinePlan> {
     let (script_src, script_span) =
         script_source_text(&input.script, proc_macro2::Span::call_site())?;
@@ -188,21 +233,12 @@ fn prepare_inline_plan(input: &DslMacroInput) -> syn::Result<InlinePlan> {
         input.out_dir.span(),
     )?;
 
-    let steps = oxdock_core::parse_script(&script_src)
-        .map_err(|e| syn::Error::new(script_span, format!("parse error: {e}")))?;
-    let build_context = oxdock_fs::discover_workspace_root()
-        .map_err(|e| syn::Error::new(script_span, e.to_string()))?;
-    let envs = BuiltinEnv::collect(&build_context).into_envs();
-    let fingerprint = catch_engine_panics(script_span, || {
-        asset_input_fingerprint(
-            &manifest_resolver,
-            &script_src,
-            &steps,
-            &out_dir.display().to_string(),
-            &envs,
-        )
-        .map_err(|e| syn::Error::new(script_span, format!("fingerprint failed: {e:#}")))
-    })?;
+    let fingerprint = compute_fingerprint(
+        &manifest_resolver,
+        &script_src,
+        script_span,
+        &input.out_dir.value(),
+    )?;
 
     Ok(InlinePlan {
         script_src,
@@ -229,17 +265,80 @@ fn cached_out_dir_valid(plan: &InlinePlan) -> bool {
     };
     plan.manifest_resolver
         .read_to_string(&hash_path)
-        .map(|contents| contents.trim() == plan.fingerprint)
+        .map(|contents| {
+            parse_hash_file(&contents) == Some(plan.fingerprint.as_str())
+                && staged_assets_present(&plan.manifest_resolver, &plan.out_dir, &contents)
+        })
         .unwrap_or(false)
 }
 
-fn record_cache_hash(plan: &InlinePlan) -> syn::Result<()> {
+/// Split a hash file into its digest: first non-empty line, trimmed.
+/// Every line after it must be empty or a `#` comment; anything else
+/// fails closed.
+fn parse_hash_file(contents: &str) -> Option<&str> {
+    let mut lines = contents
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty());
+    let digest = lines.next()?;
+    if lines.any(|line| !line.starts_with('#')) {
+        return None;
+    }
+    Some(digest)
+}
+
+/// Asset paths pinned by `# asset: <rel>` lines. Unknown `#` comments
+/// are inert provenance; only `asset:` lines constrain validation.
+fn hash_file_assets(contents: &str) -> Vec<String> {
+    contents
+        .lines()
+        .map(str::trim)
+        .filter_map(|line| line.strip_prefix("# asset:"))
+        .map(|rest| rest.trim().to_string())
+        .filter(|rel| !rel.is_empty())
+        .collect()
+}
+
+/// True when every pinned asset exists under `out_dir`. A wiped
+/// staging dir with a surviving hash fails here, forcing a rebuild
+/// on writable trees or a loud preflight error on read-only ones,
+/// instead of silently embedding nothing.
+fn staged_assets_present(
+    resolver: &PathResolver,
+    out_dir: &GuardedPath,
+    contents: &str,
+) -> bool {
+    hash_file_assets(contents).iter().all(|rel| {
+        out_dir
+            .join(rel)
+            .map(|path| resolver.entry_kind(&path).is_ok())
+            .unwrap_or(false)
+    })
+}
+
+fn record_cache_hash(plan: &InlinePlan, writer: &str) -> syn::Result<()> {
     let hash_path = plan
         .out_dir
         .join(HASH_FILE)
         .map_err(|e| syn::Error::new(plan.script_span, e.to_string()))?;
+    // Pin the staged asset names alongside the digest: validation
+    // re-checks their existence, so later deletion fails the cache
+    // instead of embedding an empty module. A gather failure degrades
+    // to digest-only rather than blocking the record.
+    let mut contents = format!("{}\n# written by {}\n", plan.fingerprint, writer);
+    if let Ok(assets) = gather_assets(&plan.manifest_resolver, &plan.out_dir) {
+        let mut rels: Vec<&str> = assets
+            .iter()
+            .map(|asset| asset.rel_path.as_str())
+            .filter(|rel| *rel != HASH_FILE && !is_internal_artifact(rel))
+            .collect();
+        rels.sort_unstable();
+        for rel in rels {
+            contents.push_str(&format!("# asset: {rel}\n"));
+        }
+    }
     plan.manifest_resolver
-        .write_file(&hash_path, plan.fingerprint.as_bytes())
+        .write_file(&hash_path, contents.as_bytes())
         .map_err(|e| {
             syn::Error::new(
                 plan.script_span,
@@ -261,7 +360,7 @@ fn expand_prepare_internal(input: &DslMacroInput) -> syn::Result<()> {
         catch_engine_panics(plan.script_span, || {
             build_assets(&plan.script_src, plan.script_span, &plan.out_dir)
         })?;
-        record_cache_hash(&plan)?;
+        record_cache_hash(&plan, &format!("oxdock_prepare! {}", input.name))?;
     }
     Ok(())
 }
@@ -281,13 +380,55 @@ fn expand_embed_internal(input: &DslMacroInput) -> syn::Result<proc_macro2::Toke
         catch_engine_panics(plan.script_span, || {
             build_assets(&plan.script_src, plan.script_span, &plan.out_dir)
         })?;
-        record_cache_hash(&plan)?;
+        record_cache_hash(&plan, &format!("oxdock_embed! {}", input.name))?;
+    }
+
+    // Rebuild when the cache is stale, then gather. A valid-but-vacuous
+    // cache (a pre-asset-list hash with wiped staging) gathers nothing:
+    // retry the build once before failing closed.
+    let mut rebuilt = false;
+    if should_rebuild(embed_force_rebuild(), cached_out_dir_valid(&plan)) {
+        rebuild_embed(&plan, name, input.out_dir.span())?;
+        rebuilt = true;
     }
 
     let mut assets = gather_assets(&plan.manifest_resolver, &plan.out_dir)
         .map_err(|e| syn::Error::new(plan.script_span, e.to_string()))?;
     assets.retain(|asset| !is_internal_artifact(&asset.rel_path));
+    if assets.is_empty() && !rebuilt {
+        rebuild_embed(&plan, name, input.out_dir.span())?;
+        assets = gather_assets(&plan.manifest_resolver, &plan.out_dir)
+            .map_err(|e| syn::Error::new(plan.script_span, e.to_string()))?;
+        assets.retain(|asset| !is_internal_artifact(&asset.rel_path));
+    }
+    // An embed with no assets is always a bug (`get()` could never
+    // succeed): fail here with the staging location instead of
+    // emitting an empty module that panics at runtime.
+    if assets.is_empty() {
+        return Err(syn::Error::new(
+            plan.script_span,
+            format!(
+                "oxdock_embed! {} staged no assets in {}; refusing to emit an empty module",
+                name,
+                plan.out_dir.display()
+            ),
+        ));
+    }
     emit_embed_module(name, &assets)
+}
+
+/// Preflight, build, and record one embed staging. Shared by the
+/// stale-cache and vacuous-cache paths above so both behave alike.
+fn rebuild_embed(
+    plan: &InlinePlan,
+    name: &syn::Ident,
+    out_dir_span: proc_macro2::Span,
+) -> syn::Result<()> {
+    preflight_out_dir_for_build(&plan.out_dir, out_dir_span)?;
+    catch_engine_panics(plan.script_span, || {
+        build_assets(&plan.script_src, plan.script_span, &plan.out_dir)
+    })?;
+    record_cache_hash(&plan, &format!("oxdock_embed! {name}"))
 }
 
 fn preflight_out_dir_for_build(
@@ -297,7 +438,6 @@ fn preflight_out_dir_for_build(
     // Build a resolver rooted at the manifest; ensure out_dir is created
     let resolver = PathResolver::from_manifest_env()
         .map_err(|e| syn::Error::new(out_dir_span, e.to_string()))?;
-
     // Ensure out_dir exists
     if out_dir.as_path().exists() {
         if !out_dir.as_path().is_dir() {
@@ -332,7 +472,10 @@ fn preflight_out_dir_for_build(
         }
         Err(e) => Err(syn::Error::new(
             out_dir_span,
-            format!("out_dir not writable: {} ({e})", out_dir.display()),
+            format!(
+                "out_dir not writable: {} ({e}); published crates must vendor their staging dir",
+                out_dir.display()
+            ),
         )),
     }
 }
@@ -1525,6 +1668,174 @@ mod tests {
             .write_file(&hash_path, b" deadbeef \n")
             .unwrap();
         assert!(cached_out_dir_valid(&plan), "trimmed equality");
+    }
+
+    #[test]
+    fn hash_file_provenance_is_inert_but_tampering_fails() {
+        assert_eq!(
+            parse_hash_file("deadbeef\n# written by oxdock_embed! Demo\n"),
+            Some("deadbeef")
+        );
+        assert_eq!(parse_hash_file("  deadbeef  \n"), Some("deadbeef"));
+        assert_eq!(parse_hash_file("\n\ndeadbeef\n# note\n\n"), Some("deadbeef"));
+        assert_eq!(parse_hash_file(""), None);
+        assert_eq!(parse_hash_file("deadbeef\ntampered\n"), None);
+        assert_eq!(parse_hash_file("deadbeef\n# ok\njunk\n"), None);
+    }
+
+    #[test]
+    fn staged_assets_present_pins_listed_files() {
+        let (_temp, resolver, root) = make_ctx();
+        let out = root.join("prebuilt").expect("join");
+        resolver.create_dir_all(&out).expect("mkdir");
+        let asset = out.join("a.txt").expect("join");
+        resolver.write_file(&asset, b"a").expect("seed");
+        let contents = "deadbeef\n# written by x\n# asset: a.txt\n# asset: b.txt\n";
+        assert_eq!(
+            hash_file_assets(contents),
+            vec!["a.txt".to_string(), "b.txt".to_string()]
+        );
+        // b.txt is missing: the staging no longer matches its record.
+        assert!(!staged_assets_present(&resolver, &out, contents));
+        resolver
+            .write_file(&out.join("b.txt").expect("join"), b"b")
+            .expect("seed");
+        assert!(staged_assets_present(&resolver, &out, contents));
+        // No asset lines: digest-only validation, unchanged behavior.
+        assert!(staged_assets_present(&resolver, &out, "deadbeef\n"));
+    }
+
+    #[test]
+    fn wiped_staging_with_surviving_hash_fails_validation() {
+        // A staging dir wiped with its hash intact must fail
+        // validation, so the build rebuilds (writable) or errors
+        // loudly (read-only) instead of embedding an empty module.
+        let (_temp, resolver, root) = make_ctx();
+        let out = root.join("prebuilt").expect("join");
+        resolver.create_dir_all(&out).expect("mkdir");
+        let plan = InlinePlan {
+            script_src: "WRITE x.txt y".into(),
+            script_span: proc_macro2::Span::call_site(),
+            manifest_resolver: resolver,
+            out_dir: out,
+            fingerprint: "deadbeef".into(),
+        };
+        let live = plan.out_dir.join("x.txt").expect("join");
+        plan.manifest_resolver
+            .write_file(&live, b"y")
+            .expect("stage an asset first");
+        record_cache_hash(&plan, "oxdock_embed! Demo").expect("record");
+        assert!(
+            cached_out_dir_valid(&plan),
+            "fresh staging validates"
+        );
+        plan.manifest_resolver
+            .remove_file(&live)
+            .expect("simulate the wipe");
+        assert!(
+            !cached_out_dir_valid(&plan),
+            "wiped staging must fail validation"
+        );
+    }
+
+    #[test]
+    fn record_cache_hash_names_the_invoker() {
+        let (_temp, resolver, root) = make_ctx();
+        let out = root.join("prebuilt").expect("join");
+        resolver.create_dir_all(&out).expect("mkdir");
+        let plan = InlinePlan {
+            script_src: "WRITE x.txt y".into(),
+            script_span: proc_macro2::Span::call_site(),
+            manifest_resolver: resolver,
+            out_dir: out,
+            fingerprint: "deadbeef".into(),
+        };
+        record_cache_hash(&plan, "oxdock_embed! Demo").expect("record");
+        assert!(
+            cached_out_dir_valid(&plan),
+            "recorded provenance must validate"
+        );
+        let text = plan
+            .manifest_resolver
+            .read_to_string(&plan.out_dir.join(HASH_FILE).unwrap())
+            .unwrap();
+        assert!(
+            text.contains("oxdock_embed! Demo"),
+            "hash file must name its writer: {text}"
+        );
+    }
+
+    /// Vendored staging validates across machines: the fingerprint key
+    /// is the user-relative out_dir name, so a tree copied to another
+    /// location (registry consumer) still matches. An absolute display
+    /// key would fail the same check.
+    #[test]
+    fn fingerprint_key_is_location_independent() {
+        let (_temp_a, resolver_a, root_a) = make_ctx();
+        let out_a = root_a.join("prebuilt").expect("join");
+        resolver_a.create_dir_all(&out_a).expect("mkdir");
+        resolver_a
+            .write_file(&out_a.join("asset.txt").expect("join"), b"vendored bytes")
+            .expect("seed asset");
+
+        let script = "WRITE asset.txt x";
+        let steps = oxdock_core::parse_script(script).expect("parse");
+        let envs = std::collections::HashMap::new();
+        let hash = asset_input_fingerprint(&resolver_a, script, &steps, "prebuilt", &envs)
+            .expect("fingerprint");
+        let hash_path = out_a.join(HASH_FILE).expect("join");
+        resolver_a
+            .write_file(&hash_path, hash.as_bytes())
+            .expect("seed hash");
+
+        // Copy the staging tree to a second location, as a registry
+        // extraction would: same content, different prefix.
+        let (_temp_b, resolver_b, root_b) = make_ctx();
+        let out_b = root_b.join("prebuilt").expect("join");
+        resolver_b.create_dir_all(&out_b).expect("mkdir");
+        for name in ["asset.txt", HASH_FILE] {
+            let bytes = resolver_a
+                .read_file(&out_a.join(name).expect("join"))
+                .expect("read staged");
+            resolver_b
+                .write_file(&out_b.join(name).expect("join"), &bytes)
+                .expect("copy staged");
+        }
+
+        // The user-relative key validates at the new location.
+        let plan = InlinePlan {
+            script_src: script.into(),
+            script_span: proc_macro2::Span::call_site(),
+            manifest_resolver: resolver_b,
+            out_dir: out_b,
+            fingerprint: hash,
+        };
+        assert!(
+            cached_out_dir_valid(&plan),
+            "vendored staging must validate at a new location"
+        );
+
+        // An absolute display key would not: location leaks into the
+        // digest and every move looks like a content change.
+        let abs_hash = asset_input_fingerprint(
+            &plan.manifest_resolver,
+            script,
+            &steps,
+            &plan.out_dir.display().to_string(),
+            &envs,
+        )
+        .expect("fingerprint");
+        let moved = InlinePlan {
+            script_src: script.into(),
+            script_span: proc_macro2::Span::call_site(),
+            manifest_resolver: plan.manifest_resolver.clone(),
+            out_dir: plan.out_dir.clone(),
+            fingerprint: abs_hash,
+        };
+        assert!(
+            !cached_out_dir_valid(&moved),
+            "absolute display keys pin validation to one machine"
+        );
     }
 
     // Proc-macro expansion is a pure function

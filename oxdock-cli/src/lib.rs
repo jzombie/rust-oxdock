@@ -23,6 +23,53 @@ use std::collections::BTreeMap;
 
 mod endpoints;
 pub use endpoints::EndpointFlags;
+
+// CLI usage bodies, one file per feature variant: the DSL has no
+// feature namespace, so the script renders both and Rust `#[cfg]`
+// picks the live one. Bodies start at the `Usage:` line; `usage()`
+// prepends the version line from the manifest, since expansion
+// cannot see build metadata.
+use oxdock_macros::oxdock_embed;
+oxdock_embed! {
+    name: UsageAssets,
+    script: {
+        INHERIT_ENV [CARGO_PKG_VERSION, CARGO_PKG_DESCRIPTION]
+        FUNC EMIT_BODY($is_net: BOOL) {
+            ECHO "oxdock {{ env:CARGO_PKG_VERSION }} — {{ env:CARGO_PKG_DESCRIPTION }}"
+            ECHO ""
+            ECHO "Usage: oxdock [OPTIONS] [SCRIPT]"
+            ECHO "  SCRIPT             script file path (same as `--script <file>`); `-` reads stdin"
+            ECHO "  --script <file|->  script file (relative resolves under the OxDock workspace root), or `-` for stdin"
+            ECHO "  --shell            run the script, then drop into an interactive shell (requires a TTY)"
+            IF $is_net {
+                ECHO "  --listen <addr>    expose a logical service port ([host:]port, repeatable)"
+                ECHO "  -p <[host:]outer:inner>  map outer port to an inner service port or name (repeatable; outer 0 is ephemeral; bare outer binds loopback, prefix 0.0.0.0: for all interfaces)"
+                ECHO "  --offline          open no sockets (conflicts with --listen/-p)"
+                ECHO "  --remote TARGET=CMD    bind a REMOTE target to a stdio transport command (repeatable)"
+            } ELSE {
+                ECHO "  --offline          open no sockets (endpoint flags require the `net` feature)"
+            }
+            ECHO "  --help, -h         print this help and exit"
+            ECHO "  --version, -V      print the version and exit"
+            ECHO "With no script given, reads the script from stdin (must be piped unless `--shell`)."
+            IF $is_net {
+                ECHO "Scripts declare logical endpoints (a port like 2251); the flags above map them to interfaces."
+            } ELSE {
+                ECHO "Endpoint flags (--listen/-p) require the `net` feature (rebuild with --features net)."
+            }
+        }
+        LET $p: PIPE
+        WITH_IO [stdout=$p] {
+            EMIT_BODY(true)
+        }
+        WITH_IO [stdin=$p] WRITE dist/usage-net.txt
+        WITH_IO [stdout=$p] {
+            EMIT_BODY(false)
+        }
+        WITH_IO [stdin=$p] WRITE dist/usage-lean.txt
+    },
+    out_dir: "usage-prebuilt",
+}
 #[cfg(feature = "net")]
 pub use endpoints::build_registry;
 #[cfg(feature = "net")]
@@ -366,44 +413,20 @@ pub fn version() -> String {
     format!("oxdock {}", env!("CARGO_PKG_VERSION"))
 }
 
-/// Human-readable CLI usage, printed for `--help`/`-h`. One shared
-/// head and tail; only the endpoint lines differ by `net` feature, so
-/// flag edits land in exactly one place.
+/// Human-readable CLI usage, printed for `--help`/`-h`. The full
+/// text, version line included, is rendered once at compile time by
+/// the `UsageAssets` script above. Feature selection stays in Rust
+/// `#[cfg]`: the DSL has no feature namespace, so each variant lives
+/// in its own asset file.
 pub fn usage() -> String {
-    let version = env!("CARGO_PKG_VERSION");
-    let description = env!("CARGO_PKG_DESCRIPTION");
-    let mut text = indoc::formatdoc! {"
-        oxdock {version} — {description}
-        Usage: oxdock [OPTIONS] [SCRIPT]
-          SCRIPT             script file path (same as `--script <file>`); `-` reads stdin
-          --script <file|->  script file (relative resolves under the OxDock workspace root), or `-` for stdin
-          --shell            run the script, then drop into an interactive shell (requires a TTY)
-    "};
-    // Plain literals, not formatdoc: a uniformly indented block would
-    // dedent to column zero, but these lines carry two leading spaces.
     #[cfg(feature = "net")]
-    text.push_str(concat!(
-        "  --listen <addr>    expose a logical service port ([host:]port, repeatable)\n",
-        "  -p <[host:]outer:inner>  map outer port to an inner service port or name (repeatable; outer 0 is ephemeral; bare outer binds loopback, prefix 0.0.0.0: for all interfaces)\n",
-        "  --offline          open no sockets (conflicts with --listen/-p)\n",
-        "  --remote TARGET=CMD    bind a REMOTE target to a stdio transport command (repeatable)\n",
-    ));
+    let asset = "dist/usage-net.txt";
     #[cfg(not(feature = "net"))]
-    text.push_str(
-        "  --offline          open no sockets (endpoint flags require the `net` feature)\n",
-    );
-    text.push_str(&indoc::formatdoc! {"
-          --help, -h         print this help and exit
-          --version, -V      print the version and exit
-        With no script given, reads the script from stdin (must be piped unless `--shell`).
-    "});
-    #[cfg(feature = "net")]
-    text.push_str("Scripts declare logical endpoints (a port like 2251); the flags above map them to interfaces.\n");
-    #[cfg(not(feature = "net"))]
-    text.push_str(
-        "Endpoint flags (--listen/-p) require the `net` feature (rebuild with --features net).\n",
-    );
-    text
+    let asset = "dist/usage-lean.txt";
+    let file = UsageAssets::get(asset).expect("usage must be embedded");
+    str::from_utf8(file.data.as_ref())
+        .expect("usage is UTF-8")
+        .to_string()
 }
 
 pub fn execute(opts: Options, workspace_root: GuardedPath) -> Result<()> {

@@ -77,6 +77,28 @@ Endpoint flags need the `net` Cargo feature (enabled by default).
 Observe a mapped outer port in-script with `NET_PORT`/`NET_ADDR`
 and pass it to inner commands through `ENV`.
 
+## Command-line reference
+
+The default build (with the `net` feature) prints the following for
+`oxdock --help`. It is rendered from the same embedded usage body
+the binary prints, so the two cannot drift:
+
+```text
+oxdock 0.24.1-alpha — CLI tooling for executing OxDock's Dockerfile-inspired DSL on native platforms.
+Usage: oxdock [OPTIONS] [SCRIPT]
+  SCRIPT             script file path (same as `--script <file>`); `-` reads stdin
+  --script <file|->  script file (relative resolves under the OxDock workspace root), or `-` for stdin
+  --shell            run the script, then drop into an interactive shell (requires a TTY)
+  --listen <addr>    expose a logical service port ([host:]port, repeatable)
+  -p <[host:]outer:inner>  map outer port to an inner service port or name (repeatable; outer 0 is ephemeral; bare outer binds loopback, prefix 0.0.0.0: for all interfaces)
+  --offline          open no sockets (conflicts with --listen/-p)
+  --remote TARGET=CMD    bind a REMOTE target to a stdio transport command (repeatable)
+  --help, -h         print this help and exit
+  --version, -V      print the version and exit
+With no script given, reads the script from stdin (must be piped unless `--shell`).
+Scripts declare logical endpoints (a port like 2251); the flags above map them to interfaces.
+```
+
 ## License
 
 `oxdock-cli` is distributed under the terms of the [Apache License (Version 2.0)](https://github.com/jzombie/rust-oxdock/blob/main/LICENSE).
