@@ -28,11 +28,11 @@
 #
 # Explicit behavior contract:
 # - `binaries` defaults to true. Exactly one binary (the `binary`
-#   input) builds with all features on four platforms (linux x86_64,
-#   linux arm64, macOS arm64, Windows x86_64) and attaches to the
-#   release. Downloaders get the most capable binary; registry
-#   installers get default features via `cargo install`. Multi-binary
-#   products are not supported: one input, one binary.
+#   input) builds with all features on five platforms (linux x86_64,
+#   linux arm64, macOS arm64, Windows x86_64, Windows arm64) and
+#   attaches to the release. Downloaders get the most capable binary;
+#   registry installers get default features via `cargo install`.
+#   Multi-binary products are not supported: one input, one binary.
 # - `binaries: false` (library-only products) skips the build matrix
 #   and artifact download entirely; the release ships notes only.
 #   Nothing else changes: version gate, publish, tag, and resume
@@ -179,6 +179,9 @@ jobs:
             exe: ""
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+            exe: ".exe"
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
             exe: ".exe"
     steps:
       - name: Checkout repository

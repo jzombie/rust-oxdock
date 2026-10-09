@@ -23,6 +23,7 @@ case "$(uname -s)-$(uname -m)" in
   Linux-x86_64) TARGET="x86_64-unknown-linux-gnu" ;;
   Linux-aarch64) TARGET="aarch64-unknown-linux-gnu" ;;
   MINGW64*-x86_64 | MSYS*-x86_64 | CYGWIN*-x86_64) TARGET="x86_64-pc-windows-msvc" ;;
+  MINGW64*-aarch64 | MSYS*-aarch64 | CYGWIN*-aarch64) TARGET="aarch64-pc-windows-msvc" ;;
   *) echo "unsupported platform: $(uname -s)-$(uname -m)" >&2; exit 1 ;;
 esac
 
