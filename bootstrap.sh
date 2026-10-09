@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# Install the oxdock binary from GitHub releases. Thin fetcher only:
+# every install decision lives in install.oxfile, executed below with
+# the fetched binary.
+#
+#   curl -fsSL https://raw.githubusercontent.com/jzombie/rust-oxdock/main/bootstrap.sh | bash
+#
+# Pin explicitly with VERSION (a tag: the API's "latest" skips
+# pre-releases, and every release here is `-alpha` until stable):
+#
+#   VERSION=v0.24.1-alpha curl -fsSL ... | bash
+#
+# Pass INSTALL_DIR to choose the destination; the installer defaults
+# it when absent.
+set -euo pipefail
+
+REPO="jzombie/rust-oxdock"
+VERSION="${VERSION:-}"
+
+if [ -z "$VERSION" ]; then
+  VERSION=$(curl -fsSL "https://api.github.com/repos/$REPO/releases?per_page=1" | grep -m1 '"tag_name"' | cut -d'"' -f4)
+fi
+
+case "$(uname -s)-$(uname -m)" in
+  Darwin-arm64) TARGET="aarch64-apple-darwin" ;;
+  Linux-x86_64) TARGET="x86_64-unknown-linux-gnu" ;;
+  Linux-aarch64) TARGET="aarch64-unknown-linux-gnu" ;;
+  MINGW64*-x86_64 | MSYS*-x86_64 | CYGWIN*-x86_64) TARGET="x86_64-pc-windows-msvc" ;;
+  MINGW64*-aarch64 | MSYS*-aarch64 | CYGWIN*-aarch64) TARGET="aarch64-pc-windows-msvc" ;;
+  *) echo "unsupported platform: $(uname -s)-$(uname -m)" >&2; exit 1 ;;
+esac
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+base="https://github.com/$REPO/releases/download/$VERSION"
+curl -fsSL "$base/oxdock-$TARGET.tar.gz" -o "$tmp/asset.tar.gz"
+curl -fsSL "$base/SHA256SUMS" -o "$tmp/SHA256SUMS"
+EXPECTED=$(grep "oxdock-$TARGET.tar.gz$" "$tmp/SHA256SUMS" | cut -d' ' -f1)
+# Installer logic rides with the release; tags predating it fall back
+# to main. The logic is version-agnostic (verify, extract, place).
+curl -fsSL "https://raw.githubusercontent.com/$REPO/$VERSION/install.oxfile" -o "$tmp/install.oxfile" || curl -fsSL "https://raw.githubusercontent.com/$REPO/main/install.oxfile" -o "$tmp/install.oxfile"
+mkdir -p "$tmp/x"
+tar -xzf "$tmp/asset.tar.gz" -C "$tmp/x"
+chmod +x "$tmp"/x/oxdock*
+# INSTALL_DIR passes through untouched (possibly unset): the installer
+# owns the default. Forwarding the mapping is the stub's only job here.
+(cd "$tmp" && OXDOCK_ASSET="$tmp/asset.tar.gz" OXDOCK_SHA="$EXPECTED" OXDOCK_BIN="$tmp"/x/oxdock* OXDOCK_DIR="${INSTALL_DIR:-}" OXDOCK_VERSION="$VERSION" ./x/oxdock* install.oxfile)

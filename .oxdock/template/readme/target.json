@@ -26,16 +26,16 @@
     },
     {
       "name": "install-sh",
-      "out": "install.sh",
+      "out": "bootstrap.sh",
       "values": ".oxdock/template/readme/values.json",
-      "template": ".oxdock/template/readme/install.sh.tmpl",
+      "template": ".oxdock/template/readme/bootstrap.sh.tmpl",
       "fragments": {}
     },
     {
       "name": "install-ps1",
-      "out": "install.ps1",
+      "out": "bootstrap.ps1",
       "values": ".oxdock/template/readme/values.json",
-      "template": ".oxdock/template/readme/install.ps1.tmpl",
+      "template": ".oxdock/template/readme/bootstrap.ps1.tmpl",
       "fragments": {}
     }
   ]

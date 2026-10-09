@@ -2,6 +2,7 @@
 
 pub mod ast_runner;
 pub mod mock_remote;
+pub mod recording;
 
 /// Render an engine error exactly as fixture binaries report failures on
 /// stderr (`fixture failed: {err:#}`).

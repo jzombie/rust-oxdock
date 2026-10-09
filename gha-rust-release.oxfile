@@ -19,7 +19,12 @@ WORKSPACE LOCAL
 LET $manifest: MAP<ANY> = LOAD_TOML("Cargo.toml")
 LET $version: STRING = ""
 IF HAS_KEY($manifest, "workspace") {
-    $version = $manifest.workspace.package.version
+    LET $ws: MAP<ANY> = $manifest.workspace
+    IF HAS_KEY($ws, "package") {
+        $version = $manifest.workspace.package.version
+    } ELSE {
+        $version = $manifest.package.version
+    }
 } ELSE {
     $version = $manifest.package.version
 }
