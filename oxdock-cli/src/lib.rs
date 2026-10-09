@@ -24,11 +24,10 @@ use std::collections::BTreeMap;
 mod endpoints;
 pub use endpoints::EndpointFlags;
 
-// CLI usage bodies, one file per feature variant: the DSL has no
-// feature namespace, so the script renders both and Rust `#[cfg]`
-// picks the live one. Bodies start at the `Usage:` line; `usage()`
-// prepends the version line from the manifest, since expansion
-// cannot see build metadata.
+// CLI usage bodies, one file per Cargo feature variant: statically
+// compiled assets cannot branch on Cargo features, so the script
+// renders both variants (version line included, through inherited
+// Cargo metadata) and Rust `#[cfg]` picks the live one.
 use oxdock_macros::oxdock_embed;
 oxdock_embed! {
     name: UsageAssets,
