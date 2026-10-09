@@ -213,6 +213,12 @@ jobs:
       # substitution (never `curl | bash`, which would feed the program
       # itself on fd 0): this is the exact one-liner downloaders paste,
       # with `cat` standing in for `curl` to keep the branch hermetic.
+      # TODO(single-source-commands): move this one-liner into a CLI
+      # template file that the README renders via docs-gen and this leg
+      # executes, so a published command can never drift from a tested
+      # one. A README command that never ran in CI is the worst outcome.
+      # Keep it unpinned: main ships before versions cut, so a pinned
+      # VERSION would rot on arrival.
       - name: Ephemeral run via install.sh
         if: ${{ runner.os != 'Windows' }}
         shell: bash
@@ -236,6 +242,8 @@ jobs:
           grep -q "via-ephemeral" "${RUNNER_TEMP}/ephemeral.log"
           [ ! -e "${{ runner.temp }}/oxbin-ephemeral" ]
 
+      # TODO(single-source-commands): same single-sourcing as the sh
+      # leg above; both one-liners move to the CLI template file together.
       - name: Ephemeral run via install.ps1
         if: ${{ runner.os == 'Windows' }}
         shell: pwsh
