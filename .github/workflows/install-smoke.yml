@@ -110,7 +110,10 @@ jobs:
           stage="${RUNNER_TEMP}/oxdock-stage"
           mkdir -p "$stage"
           cp "$bin" "$stage/$assetbin"
-          tar -czf "$stage/$asset" -C "$stage" "$assetbin"
+          # Relative archive name: GNU tar reads `host:file` in an
+          # absolute Windows path as a remote tape (`D:` looks like a
+          # host), so create from inside the stage dir instead.
+          (cd "$stage" && tar -czf "$asset" "$assetbin")
           rm "$stage/$assetbin"
           if command -v sha256sum >/dev/null 2>&1; then
             (cd "$stage" && sha256sum "$asset" > SHA256SUMS)
