@@ -1,0 +1,74 @@
+# Installer smoke: runs the tree's bootstrap fetchers against real
+# releases into temp dirs and executes the installed binary. Static
+# checks (lint) prove the stubs parse; this proves they install.
+# VERSION stays unset so smoke tracks what users actually get (newest
+# release, pre-releases included). Weekly plus on demand; also runs on
+# pushes to main so stub changes prove before users meet them.
+
+name: install-smoke
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "bootstrap.sh"
+      - "bootstrap.ps1"
+      - "install.oxfile"
+      - ".oxdock/template/readme/bootstrap.*.tmpl"
+  schedule:
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+
+jobs:
+  parse:
+    name: parse
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      # Static gate before any download runs: shell natively, PowerShell
+      # through its own parser API (single quotes keep bash from eating
+      # its `$` variables under `set -u`).
+      - name: Check bootstrap scripts parse
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n bootstrap.sh
+          pwsh -NoProfile -Command '$e=$null; [void][System.Management.Automation.Language.Parser]::ParseFile("bootstrap.ps1", [ref]$null, [ref]$e); if ($e.Count -gt 0) { $e | ForEach-Object { Write-Error $_.Message }; exit 1 }'
+
+  smoke:
+    name: smoke (${{ matrix.os }})
+    needs: [parse]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install and run via bootstrap.sh
+        if: ${{ runner.os != 'Windows' }}
+        shell: bash
+        env:
+          INSTALL_DIR: ${{ runner.temp }}/oxbin
+        run: |
+          set -euo pipefail
+          ./bootstrap.sh
+          "${INSTALL_DIR}/oxdock" --version
+
+      - name: Install and run via bootstrap.ps1
+        if: ${{ runner.os == 'Windows' }}
+        shell: pwsh
+        env:
+          INSTALL_DIR: ${{ runner.temp }}\oxbin
+        run: |
+          $ErrorActionPreference = 'Stop'
+          .\bootstrap.ps1
+          & (Join-Path $env:INSTALL_DIR 'oxdock.exe') --version
