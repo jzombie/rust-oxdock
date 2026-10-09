@@ -17,6 +17,11 @@
 #
 # Pass INSTALL_DIR to choose the destination; the installer defaults
 # it when absent.
+#
+# Point OXDOCK_ENGINE at a branch-built binary to run the installer
+# with it instead of the downloaded release (CI smoke proves behavior
+# fixes before any release ships them). The asset still downloads and
+# verifies; only the execution engine swaps.
 set -euo pipefail
 
 REPO="jzombie/rust-oxdock"
@@ -109,4 +114,17 @@ BIN=$(echo "$tmp"/x/oxdock*)
 [ -f "$BIN" ] || { echo "no binary unpacked from $ASSET" >&2; exit 1; }
 # INSTALL_DIR passes through untouched (possibly unset): the installer
 # owns the default. Forwarding the mapping is the stub's only job here.
-(cd "$tmp" && OXDOCK_ASSET="$VDIR/$ASSET" OXDOCK_SHA="$EXPECTED" OXDOCK_BIN="$BIN" OXDOCK_DIR="${INSTALL_DIR:-}" OXDOCK_VERSION="$VERSION" ./x/oxdock* install.oxfile)
+# An explicit OXDOCK_ENGINE runs the installer instead of the unpacked
+# release; it must name an executable file, and fails closed otherwise.
+ENGINE="$BIN"
+if [ -n "${OXDOCK_ENGINE:-}" ]; then
+  # Resolve relative to the caller's directory: execution below runs
+  # from the scratch dir, where a relative path would no longer point
+  # at the engine.
+  case "$OXDOCK_ENGINE" in
+    /*|[A-Za-z]:*) ENGINE="$OXDOCK_ENGINE" ;;
+    *) ENGINE="$PWD/$OXDOCK_ENGINE" ;;
+  esac
+fi
+[ -x "$ENGINE" ] || { echo "installer engine is not executable: $ENGINE" >&2; exit 1; }
+(cd "$tmp" && OXDOCK_ASSET="$VDIR/$ASSET" OXDOCK_SHA="$EXPECTED" OXDOCK_BIN="$BIN" OXDOCK_DIR="${INSTALL_DIR:-}" OXDOCK_VERSION="$VERSION" "$ENGINE" install.oxfile)

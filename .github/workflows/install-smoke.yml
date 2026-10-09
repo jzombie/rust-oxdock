@@ -75,7 +75,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          tag=$(curl -fsSL "https://api.github.com/repos/jzombie/rust-oxdock/releases?per_page=1" | grep -m1 '"tag_name"' | cut -d'"' -f4)
+          tag=$(curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" "https://api.github.com/repos/jzombie/rust-oxdock/releases?per_page=1" | grep -m1 '"tag_name"' | cut -d'"' -f4)
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
 
