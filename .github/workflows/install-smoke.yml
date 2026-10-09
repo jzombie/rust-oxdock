@@ -125,6 +125,11 @@ jobs:
           fi
           echo "path=$bin" >> "$GITHUB_OUTPUT"
 
+      # TODO(release-0.24.2): re-enable together with the
+      # newest-release legs below; this step feeds only them. Skipped
+      # because those legs 404 by construction until musl assets
+      # publish (branch stub requests musl names the 0.24.1 release
+      # lacks).
       # Pinned by the newest-release legs below: the stub resolves the
       # newest tag itself there, and the workflow must expect the same
       # one. Authenticated: shared runner IPs burn the anonymous quota.
@@ -133,6 +138,7 @@ jobs:
       # `per_page=1` yields exactly one `tag_name`, so nothing is lost.
       - name: Resolve newest release
         id: smoke-version
+        if: false
         shell: bash
         run: |
           set -euo pipefail
@@ -199,12 +205,16 @@ jobs:
             Stop-Process -Id $srv.Id -Force
           }
 
+      # TODO(release-0.24.2): re-enable once the newest published
+      # release ships musl assets; this 404s by construction until
+      # then. Original gate was `runner.os != 'Windows'`. Re-enabling
+      # may rewrite these legs in OxDock instead of shell.
       # TODO: consolidate on exact `--version` once the newest published
       # release supports the flag. This leg leaves VERSION unset so the
       # stub's release-API resolution executes for real; the payload is
       # whatever is newest, checked via its `--help` menu.
       - name: Install newest release via install.sh
-        if: ${{ runner.os != 'Windows' }}
+        if: false
         shell: bash
         env:
           INSTALL_DIR: ${{ runner.temp }}/oxbin-newest
@@ -218,12 +228,14 @@ jobs:
           "${INSTALL_DIR}/oxdock" --help | grep -q "$SMOKE_VERSION"
           printf 'IMPORT [STD]\nECHO "via-stdin"\n' | "${INSTALL_DIR}/oxdock" --script - | grep -q "via-stdin"
 
+      # TODO(release-0.24.2): re-enable with the sh leg above.
+      # Original gate was `runner.os == 'Windows'`.
       # TODO: consolidate on exact `--version` once the newest published
       # release supports the flag. Same contract as the sh leg above.
       # `*>&1` merges every stream: the stub announces via
       # Write-Warning, which `2>&1` never sees.
       - name: Install newest release via install.ps1
-        if: ${{ runner.os == 'Windows' }}
+        if: false
         shell: pwsh
         env:
           INSTALL_DIR: ${{ runner.temp }}\oxbin-newest
