@@ -1,34 +1,17 @@
 #!/usr/bin/env bash
-# Install the OxDock binary from GitHub releases. Thin fetcher only:
-# every install decision lives in install.oxfile, executed below with
-# the fetched binary.
+{{ $files.stubs.installer-doc-header }}
 #
-# Content-addressed local cache: the first run downloads and verifies,
-# later runs reuse the cached tarball after re-verifying its hash, so
-# reruns need no network once warm (pin VERSION to stay fully offline).
-# Override the cache root with OXDOCK_CACHE_DIR.
-#
-#   curl -fsSL https://raw.githubusercontent.com/jzombie/rust-oxdock/main/bootstrap.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/{{ $docs_global.repo }}/main/install.sh | bash
 #
 # Pin explicitly with VERSION (a tag: the API's "latest" skips
 # pre-releases, and every release here is `-alpha` until stable):
 #
-#   VERSION=v0.24.1-alpha curl -fsSL ... | bash
+#   VERSION=v{{ env:CRATE_VERSION }} curl -fsSL ... | bash
 #
-# Pass INSTALL_DIR to choose the destination; the installer defaults
-# it when absent.
-#
-# Point OXDOCK_ENGINE at a branch-built binary to run the installer
-# with it instead of the downloaded release (CI smoke proves behavior
-# fixes before any release ships them). The asset still downloads and
-# verifies; only the execution engine swaps.
-#
-# Point OXDOCK_RELEASE_BASE at a mirror root (no trailing slash) to
-# fetch the asset and checksums from elsewhere; CI smoke serves a
-# staged branch build over loopback through it.
+{{ $files.stubs.installer-doc-env }}
 set -euo pipefail
 
-REPO="jzombie/rust-oxdock"
+REPO="{{ $docs_global.repo }}"
 VERSION="${VERSION:-}"
 CACHE_DIR="${OXDOCK_CACHE_DIR:-$HOME/.cache/oxdock}"
 
@@ -45,7 +28,7 @@ gh_curl() {
 }
 
 if [ -z "$VERSION" ]; then
-  VERSION=$(gh_curl "https://api.github.com/repos/$REPO/releases?per_page=1" | grep -m1 '"tag_name"' | cut -d'"' -f4)
+  VERSION=$(gh_curl "{{ $docs_global.stub_url_releases_latest }}" | grep -m1 '"tag_name"' | cut -d'"' -f4)
 fi
 
 case "$(uname -s)-$(uname -m)" in
@@ -63,53 +46,53 @@ mkdir -p "$VDIR"
 
 verify_cached() {
   if command -v sha256sum >/dev/null 2>&1; then
-    (cd "$VDIR" && grep "$ASSET\$" SHA256SUMS 2>/dev/null | sha256sum -c - >/dev/null 2>&1)
+    (cd "$VDIR" && grep "$ASSET\$" {{ $docs_global.stub_name_checksums }} 2>/dev/null | sha256sum -c - >/dev/null 2>&1)
   else
-    (cd "$VDIR" && grep "$ASSET\$" SHA256SUMS 2>/dev/null | shasum -a 256 -c - >/dev/null 2>&1)
+    (cd "$VDIR" && grep "$ASSET\$" {{ $docs_global.stub_name_checksums }} 2>/dev/null | shasum -a 256 -c - >/dev/null 2>&1)
   fi
 }
 
 # Same hash as last time means same bytes: reuse the cached tarball
 # after re-verifying it. Anything missing or mismatched falls through
 # to a fresh download, so a corrupt cache heals itself.
-if [ -f "$VDIR/$ASSET" ] && [ -f "$VDIR/SHA256SUMS" ] && [ -f "$VDIR/install.oxfile" ] && verify_cached; then
-  echo "using cached oxdock $VERSION" >&2
+if [ -f "$VDIR/$ASSET" ] && [ -f "$VDIR/{{ $docs_global.stub_name_checksums }}" ] && [ -f "$VDIR/{{ $docs_global.stub_name_oxfile }}" ] && verify_cached; then
+  echo "{{ $docs_global.stub_msg_using_cached }}" >&2
 else
-  echo "downloading oxdock $VERSION" >&2
+  echo "{{ $docs_global.stub_msg_downloading }}" >&2
   tmp=$(mktemp -d)
   trap 'rm -rf "$tmp"' EXIT
-  base="${OXDOCK_RELEASE_BASE:-https://github.com/$REPO/releases/download/$VERSION}"
+  base="${OXDOCK_RELEASE_BASE:-{{ $docs_global.stub_url_release_base }}}"
   base="${base%/}"
   # Download under the release filename: `sha256sum -c` resolves names
   # from the checksums file, so a renamed download would never verify.
   gh_curl "$base/$ASSET" -o "$tmp/$ASSET"
-  gh_curl "$base/SHA256SUMS" -o "$tmp/SHA256SUMS"
+  gh_curl "$base/{{ $docs_global.stub_name_checksums }}" -o "$tmp/{{ $docs_global.stub_name_checksums }}"
   # Installer logic rides with the release; tags predating it fall back
   # to main. An explicit OXDOCK_OXFILE_URL wins over both (pre-merge
   # testing, mirrors). Fetched here, inside population, so warm runs
   # never touch network.
   if [ -n "${OXDOCK_OXFILE_URL:-}" ]; then
-    gh_curl "$OXDOCK_OXFILE_URL" -o "$tmp/install.oxfile"
+    gh_curl "$OXDOCK_OXFILE_URL" -o "$tmp/{{ $docs_global.stub_name_oxfile }}"
   else
-    gh_curl "https://raw.githubusercontent.com/$REPO/$VERSION/install.oxfile" -o "$tmp/install.oxfile" || gh_curl "https://raw.githubusercontent.com/$REPO/main/install.oxfile" -o "$tmp/install.oxfile"
+    gh_curl "{{ $docs_global.stub_url_oxfile_versioned }}" -o "$tmp/{{ $docs_global.stub_name_oxfile }}" || gh_curl "{{ $docs_global.stub_url_oxfile_main }}" -o "$tmp/{{ $docs_global.stub_name_oxfile }}"
   fi
   if command -v sha256sum >/dev/null 2>&1; then
-    (cd "$tmp" && grep "$ASSET\$" SHA256SUMS | sha256sum -c - >/dev/null)
+    (cd "$tmp" && grep "$ASSET\$" {{ $docs_global.stub_name_checksums }} | sha256sum -c - >/dev/null)
   else
-    (cd "$tmp" && grep "$ASSET\$" SHA256SUMS | shasum -a 256 -c - >/dev/null)
+    (cd "$tmp" && grep "$ASSET\$" {{ $docs_global.stub_name_checksums }} | shasum -a 256 -c - >/dev/null)
   fi
   mv "$tmp/$ASSET" "$VDIR/$ASSET"
-  mv "$tmp/SHA256SUMS" "$VDIR/SHA256SUMS"
-  mv "$tmp/install.oxfile" "$VDIR/install.oxfile"
+  mv "$tmp/{{ $docs_global.stub_name_checksums }}" "$VDIR/{{ $docs_global.stub_name_checksums }}"
+  mv "$tmp/{{ $docs_global.stub_name_oxfile }}" "$VDIR/{{ $docs_global.stub_name_oxfile }}"
   trap - EXIT
   rm -rf "$tmp"
 fi
-EXPECTED=$(grep "$ASSET\$" "$VDIR/SHA256SUMS" | cut -d' ' -f1)
+EXPECTED=$(grep "$ASSET\$" "$VDIR/{{ $docs_global.stub_name_checksums }}" | cut -d' ' -f1)
 # The installer runs from the cache, never the network: population
 # above stored the release's own logic beside its bytes.
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
-cp "$VDIR/install.oxfile" "$tmp/install.oxfile"
+cp "$VDIR/{{ $docs_global.stub_name_oxfile }}" "$tmp/{{ $docs_global.stub_name_oxfile }}"
 mkdir -p "$tmp/x"
 tar -xzf "$VDIR/$ASSET" -C "$tmp/x"
 chmod +x "$tmp"/x/oxdock*
@@ -132,8 +115,8 @@ if [ -n "${OXDOCK_ENGINE:-}" ]; then
   esac
 fi
 [ -x "$ENGINE" ] || { echo "installer engine is not executable: $ENGINE" >&2; exit 1; }
-(cd "$tmp" && OXDOCK_ASSET="$VDIR/$ASSET" OXDOCK_SHA="$EXPECTED" OXDOCK_BIN="$BIN" OXDOCK_DIR="${INSTALL_DIR:-}" OXDOCK_VERSION="$VERSION" "$ENGINE" install.oxfile) || {
+(cd "$tmp" && OXDOCK_ASSET="$VDIR/$ASSET" OXDOCK_SHA="$EXPECTED" OXDOCK_BIN="$BIN" OXDOCK_DIR="${INSTALL_DIR:-}" OXDOCK_VERSION="$VERSION" "$ENGINE" {{ $docs_global.stub_name_oxfile }}) || {
   code=$?
-  echo "installer failed with exit code $code" >&2
+  echo "{{ $docs_global.stub_msg_install_failed }}" >&2
   exit "$code"
 }

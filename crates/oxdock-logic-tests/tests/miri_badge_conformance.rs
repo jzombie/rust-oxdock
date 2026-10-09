@@ -16,7 +16,7 @@ fn load_badge_script() -> Result<String> {
     let repo_root = repo_root()?;
     let root = GuardedPath::new_root_from_str(&repo_root)?;
     let resolver = PathResolver::new_guarded(root.clone(), root)?;
-    let script_path = resolver.root().join("gha-miri-badge.oxfile")?;
+    let script_path = resolver.root().join("scripts/gha/gha-miri-badge.oxfile")?;
     resolver.read_to_string(&script_path)
 }
 
@@ -25,12 +25,13 @@ fn load_badge_script() -> Result<String> {
 #[test]
 #[cfg_attr(
     miri,
-    ignore = "reads gha-miri-badge.oxfile from the repository checkout layout"
+    ignore = "reads scripts/gha/gha-miri-badge.oxfile from the repository checkout layout"
 )]
 fn badge_script_parses_and_covers_all_surfaces() -> Result<()> {
     let text = load_badge_script()?;
-    oxdock_core::parse_script(&text)
-        .map_err(|err| anyhow::anyhow!("gha-miri-badge.oxfile failed to parse: {err}"))?;
+    oxdock_core::parse_script(&text).map_err(|err| {
+        anyhow::anyhow!("scripts/gha/gha-miri-badge.oxfile failed to parse: {err}")
+    })?;
     assert!(
         text.contains("miri-coverage.json"),
         "badge script writes the badge JSON"

@@ -1,4 +1,4 @@
-# Installer smoke: runs the tree's bootstrap fetchers into temp dirs
+# Installer smoke: runs the tree's install fetchers into temp dirs
 # and executes the installed binary. Static checks (lint) prove the
 # stubs parse; this proves they install. The fetch source is a staged
 # branch build served over loopback, never a published tag: branch
@@ -16,16 +16,16 @@ on:
   push:
     branches: [main]
     paths:
-      - "bootstrap.sh"
-      - "bootstrap.ps1"
+      - "install.sh"
+      - "install.ps1"
       - "install.oxfile"
-      - ".oxdock/template/readme/bootstrap.*.tmpl"
+      - ".oxdock/template/readme/install.*.tmpl"
   pull_request:
     paths:
-      - "bootstrap.sh"
-      - "bootstrap.ps1"
+      - "install.sh"
+      - "install.ps1"
       - "install.oxfile"
-      - ".oxdock/template/readme/bootstrap.*.tmpl"
+      - ".oxdock/template/readme/install.*.tmpl"
   schedule:
     - cron: "0 7 * * 1"
   workflow_dispatch:
@@ -43,12 +43,12 @@ jobs:
       # Static gate before any download runs: shell natively, PowerShell
       # through its own parser API (single quotes keep bash from eating
       # its `$` variables under `set -u`).
-      - name: Check bootstrap scripts parse
+      - name: Check install scripts parse
         shell: bash
         run: |
           set -euo pipefail
-          bash -n bootstrap.sh
-          pwsh -NoProfile -Command '$e=$null; [void][System.Management.Automation.Language.Parser]::ParseFile("bootstrap.ps1", [ref]$null, [ref]$e); if ($e.Count -gt 0) { $e | ForEach-Object { Write-Error $_.Message }; exit 1 }'
+          bash -n install.sh
+          pwsh -NoProfile -Command '$e=$null; [void][System.Management.Automation.Language.Parser]::ParseFile("install.ps1", [ref]$null, [ref]$e); if ($e.Count -gt 0) { $e | ForEach-Object { Write-Error $_.Message }; exit 1 }'
 
   smoke:
     name: smoke (${{ matrix.os }})
@@ -140,7 +140,7 @@ jobs:
       # Every leg below fetches the staged branch build through the
       # stub from loopback: VERSION stays pinned so no release API is
       # involved, and the stub populates a cold cache from the server.
-      - name: Install and run via bootstrap.sh
+      - name: Install and run via install.sh
         if: ${{ runner.os != 'Windows' }}
         shell: bash
         env:
@@ -159,11 +159,11 @@ jobs:
             sleep 0.1
           done
           [ "$ready" = 1 ]
-          ./bootstrap.sh
+          ./install.sh
           [ "$("${INSTALL_DIR}/oxdock" --version)" = "$("$OXDOCK_ENGINE" --version)" ]
           printf 'IMPORT [STD]\nECHO "via-stdin"\n' | "${INSTALL_DIR}/oxdock" --script - | grep -q "via-stdin"
 
-      - name: Install and run via bootstrap.ps1
+      - name: Install and run via install.ps1
         if: ${{ runner.os == 'Windows' }}
         shell: pwsh
         env:
@@ -183,7 +183,7 @@ jobs:
               try { $null = Invoke-WebRequest 'http://127.0.0.1:18731/' -UseBasicParsing -TimeoutSec 2; $ready = $true } catch { Start-Sleep -Milliseconds 100 }
             }
             if (-not $ready) { throw "local stage server never came up" }
-            .\bootstrap.ps1
+            .\install.ps1
             $installed = Join-Path $env:INSTALL_DIR 'oxdock.exe'
             $engineVer = & $env:OXDOCK_ENGINE --version
             if ($LASTEXITCODE -ne 0) { throw "branch engine --version failed" }
@@ -200,7 +200,7 @@ jobs:
       # release supports the flag. This leg leaves VERSION unset so the
       # stub's release-API resolution executes for real; the payload is
       # whatever is newest, checked via its `--help` menu.
-      - name: Install newest release via bootstrap.sh
+      - name: Install newest release via install.sh
         if: ${{ runner.os != 'Windows' }}
         shell: bash
         env:
@@ -210,7 +210,7 @@ jobs:
           OXDOCK_ENGINE: ${{ steps.branch-bin.outputs.path }}
         run: |
           set -euo pipefail
-          ./bootstrap.sh 2>&1 | tee "${RUNNER_TEMP}/install-newest.log"
+          ./install.sh 2>&1 | tee "${RUNNER_TEMP}/install-newest.log"
           grep -q "downloading oxdock ${SMOKE_TAG}" "${RUNNER_TEMP}/install-newest.log"
           "${INSTALL_DIR}/oxdock" --help | grep -q "$SMOKE_VERSION"
           printf 'IMPORT [STD]\nECHO "via-stdin"\n' | "${INSTALL_DIR}/oxdock" --script - | grep -q "via-stdin"
@@ -219,7 +219,7 @@ jobs:
       # release supports the flag. Same contract as the sh leg above.
       # `*>&1` merges every stream: the stub announces via
       # Write-Warning, which `2>&1` never sees.
-      - name: Install newest release via bootstrap.ps1
+      - name: Install newest release via install.ps1
         if: ${{ runner.os == 'Windows' }}
         shell: pwsh
         env:
@@ -232,7 +232,7 @@ jobs:
           # Native-bound strings pipe as UTF-8: PowerShell defaults to
           # UTF-16, which the binary reads as garbage.
           $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-          .\bootstrap.ps1 *>&1 | Tee-Object (Join-Path $env:RUNNER_TEMP 'install-newest.log')
+          .\install.ps1 *>&1 | Tee-Object (Join-Path $env:RUNNER_TEMP 'install-newest.log')
           if (-not (Select-String "downloading oxdock $([regex]::Escape($env:SMOKE_TAG))" (Join-Path $env:RUNNER_TEMP 'install-newest.log'))) { throw "stub resolved an unexpected release" }
           $installed = Join-Path $env:INSTALL_DIR 'oxdock.exe'
           $installedMenu = & $installed --help
@@ -244,7 +244,7 @@ jobs:
       # Same job, so $HOME (and the cache) persists: warm reuse must
       # skip downloads, corruption must heal by redownloading. The sh
       # stub announces which path it took; assert on that.
-      - name: Reuse and heal cache via bootstrap.sh
+      - name: Reuse and heal cache via install.sh
         if: ${{ runner.os != 'Windows' }}
         shell: bash
         env:
@@ -263,19 +263,19 @@ jobs:
             sleep 0.1
           done
           [ "$ready" = 1 ]
-          ./bootstrap.sh 2>&1 | tee "${RUNNER_TEMP}/warm.log"
+          ./install.sh 2>&1 | tee "${RUNNER_TEMP}/warm.log"
           grep -q "using cached" "${RUNNER_TEMP}/warm.log"
           "${INSTALL_DIR}/oxdock" --help
           # Scope to this leg's VERSION: other legs share the cache.
           echo corrupt > "$HOME"/.cache/oxdock/local-test/*.tar.gz
-          ./bootstrap.sh 2>&1 | tee "${RUNNER_TEMP}/healed.log"
+          ./install.sh 2>&1 | tee "${RUNNER_TEMP}/healed.log"
           grep -q "downloading" "${RUNNER_TEMP}/healed.log"
           "${INSTALL_DIR}/oxdock" --help
 
       # No proxy blackhole here: .NET WinHTTP ignores proxy env vars,
       # so it would prove nothing. Warm reuse plus tamper-heal cover
       # the cache contract on this leg.
-      - name: Reuse and heal cache via bootstrap.ps1
+      - name: Reuse and heal cache via install.ps1
         if: ${{ runner.os == 'Windows' }}
         shell: pwsh
         env:
@@ -294,12 +294,12 @@ jobs:
             if (-not $ready) { throw "local stage server never came up" }
             # `*>&1` merges every stream: the stub announces cache hits
             # and downloads via Write-Warning, which `2>&1` never sees.
-            .\bootstrap.ps1 *>&1 | Tee-Object (Join-Path $env:RUNNER_TEMP 'warm.log')
+            .\install.ps1 *>&1 | Tee-Object (Join-Path $env:RUNNER_TEMP 'warm.log')
           if (-not (Select-String "using cached" (Join-Path $env:RUNNER_TEMP 'warm.log'))) { throw "expected a cache hit" }
           & (Join-Path $env:INSTALL_DIR 'oxdock.exe') --help
           # Scope to this leg's VERSION: other legs share the cache.
           Set-Content -NoNewline -Path (Get-ChildItem $HOME\.cache\oxdock\local-test\*.tar.gz) -Value 'corrupt'
-          .\bootstrap.ps1 *>&1 | Tee-Object (Join-Path $env:RUNNER_TEMP 'healed.log')
+          .\install.ps1 *>&1 | Tee-Object (Join-Path $env:RUNNER_TEMP 'healed.log')
           if (-not (Select-String "downloading" (Join-Path $env:RUNNER_TEMP 'healed.log'))) { throw "expected a heal download" }
           & (Join-Path $env:INSTALL_DIR 'oxdock.exe') --help
           } finally {
@@ -312,7 +312,7 @@ jobs:
       # cases is a duplicate key and kills the run at startup. The
       # canary first proves the blackhole holds; without it a silently
       # ignored proxy would pass vacuously. Unix legs only (see above).
-      - name: Install offline via bootstrap.sh
+      - name: Install offline via install.sh
         if: ${{ runner.os != 'Windows' }}
         shell: bash
         env:
@@ -327,5 +327,5 @@ jobs:
             echo "blackhole broken: egress succeeded" >&2
             exit 1
           fi
-          ./bootstrap.sh
+          ./install.sh
           "${INSTALL_DIR}/oxdock" --help

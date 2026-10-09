@@ -86,7 +86,7 @@ jobs:
           MIRI_TEST_CMD: RUSTFLAGS="--cfg miri" cargo test --workspace --all-features --lib --tests
         run: |
           set -euo pipefail
-          cargo run -p oxdock -- ./gha-miri-badge.oxfile
+          cargo run -p oxdock -- ./scripts/gha/gha-miri-badge.oxfile
 
       - name: Publish Miri coverage badge
         if: github.ref == 'refs/heads/main'

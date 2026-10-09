@@ -20,7 +20,7 @@
 # Conventions a calling repo follows (all OxDock defaults here): a
 # Cargo workspace whose binary package matches `binary`, a CHANGELOG.md
 # with `## [<version>]` sections, and a `release` environment with
-# required reviewers (converge it with gha-apply-settings.oxfile).
+# required reviewers (converge it with scripts/gha/gha-apply-settings.oxfile).
 # Callers hold no OxDock code. Asset names derive from `binary`; the
 # tag carries the product version.
 #
@@ -143,9 +143,9 @@ jobs:
             mkdir -p /tmp/pipeline-bin
             tar -xzf /tmp/pipeline-dl/oxdock-x86_64-unknown-linux-gnu.tar.gz -C /tmp/pipeline-bin
             chmod +x /tmp/pipeline-bin/oxdock
-            /tmp/pipeline-bin/oxdock rust-release/gha-rust-validate.oxfile
+            /tmp/pipeline-bin/oxdock rust-release/scripts/gha/gha-rust-validate.oxfile
           else
-            cargo run --manifest-path rust-release/Cargo.toml -p oxdock -- rust-release/gha-rust-validate.oxfile
+            cargo run --manifest-path rust-release/Cargo.toml -p oxdock -- rust-release/scripts/gha/gha-rust-validate.oxfile
           fi
 
   build:
@@ -285,7 +285,7 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           set -euo pipefail
-          ./target/runner/${{ inputs.binary }} ./gha-rust-release.oxfile
+          ./target/runner/${{ inputs.binary }} ./scripts/gha/gha-rust-release.oxfile
 
       # Everything else runs the central script with the central runner:
       # published binary at the derived pin if the ref has a release,
@@ -308,8 +308,8 @@ jobs:
             mkdir -p /tmp/pipeline-bin
             tar -xzf /tmp/pipeline-dl/oxdock-x86_64-unknown-linux-gnu.tar.gz -C /tmp/pipeline-bin
             chmod +x /tmp/pipeline-bin/oxdock
-            /tmp/pipeline-bin/oxdock rust-release/gha-rust-release.oxfile
+            /tmp/pipeline-bin/oxdock rust-release/scripts/gha/gha-rust-release.oxfile
           else
-            cargo run --manifest-path rust-release/Cargo.toml -p oxdock --features markdown -- rust-release/gha-rust-release.oxfile
+            cargo run --manifest-path rust-release/Cargo.toml -p oxdock --features markdown -- rust-release/scripts/gha/gha-rust-release.oxfile
           fi
 
