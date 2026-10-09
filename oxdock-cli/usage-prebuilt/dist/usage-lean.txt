@@ -7,5 +7,6 @@ Usage: oxdock [OPTIONS] [SCRIPT]
   --offline          open no sockets (endpoint flags require the `net` feature)
   --help, -h         print this help and exit
   --version, -V      print the version and exit
+
 With no script given, reads the script from stdin (must be piped unless `--shell`).
 Endpoint flags (--listen/-p) require the `net` feature (rebuild with --features net).

@@ -51,6 +51,7 @@ oxdock_embed! {
             }
             ECHO "  --help, -h         print this help and exit"
             ECHO "  --version, -V      print the version and exit"
+            ECHO ""
             ECHO "With no script given, reads the script from stdin (must be piped unless `--shell`)."
             IF $is_net {
                 ECHO "Scripts declare logical endpoints (a port like 2251); the flags above map them to interfaces."

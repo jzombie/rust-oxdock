@@ -10,5 +10,6 @@ Usage: oxdock [OPTIONS] [SCRIPT]
   --remote TARGET=CMD    bind a REMOTE target to a stdio transport command (repeatable)
   --help, -h         print this help and exit
   --version, -V      print the version and exit
+
 With no script given, reads the script from stdin (must be piped unless `--shell`).
 Scripts declare logical endpoints (a port like 2251); the flags above map them to interfaces.

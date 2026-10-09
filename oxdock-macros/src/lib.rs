@@ -303,11 +303,7 @@ fn hash_file_assets(contents: &str) -> Vec<String> {
 /// staging dir with a surviving hash fails here, forcing a rebuild
 /// on writable trees or a loud preflight error on read-only ones,
 /// instead of silently embedding nothing.
-fn staged_assets_present(
-    resolver: &PathResolver,
-    out_dir: &GuardedPath,
-    contents: &str,
-) -> bool {
+fn staged_assets_present(resolver: &PathResolver, out_dir: &GuardedPath, contents: &str) -> bool {
     hash_file_assets(contents).iter().all(|rel| {
         out_dir
             .join(rel)
@@ -428,7 +424,7 @@ fn rebuild_embed(
     catch_engine_panics(plan.script_span, || {
         build_assets(&plan.script_src, plan.script_span, &plan.out_dir)
     })?;
-    record_cache_hash(&plan, &format!("oxdock_embed! {name}"))
+    record_cache_hash(plan, &format!("oxdock_embed! {name}"))
 }
 
 fn preflight_out_dir_for_build(
@@ -1677,7 +1673,10 @@ mod tests {
             Some("deadbeef")
         );
         assert_eq!(parse_hash_file("  deadbeef  \n"), Some("deadbeef"));
-        assert_eq!(parse_hash_file("\n\ndeadbeef\n# note\n\n"), Some("deadbeef"));
+        assert_eq!(
+            parse_hash_file("\n\ndeadbeef\n# note\n\n"),
+            Some("deadbeef")
+        );
         assert_eq!(parse_hash_file(""), None);
         assert_eq!(parse_hash_file("deadbeef\ntampered\n"), None);
         assert_eq!(parse_hash_file("deadbeef\n# ok\njunk\n"), None);
@@ -1725,10 +1724,7 @@ mod tests {
             .write_file(&live, b"y")
             .expect("stage an asset first");
         record_cache_hash(&plan, "oxdock_embed! Demo").expect("record");
-        assert!(
-            cached_out_dir_valid(&plan),
-            "fresh staging validates"
-        );
+        assert!(cached_out_dir_valid(&plan), "fresh staging validates");
         plan.manifest_resolver
             .remove_file(&live)
             .expect("simulate the wipe");
