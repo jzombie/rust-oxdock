@@ -28,8 +28,10 @@
 #
 # Explicit behavior contract:
 # - `binaries` defaults to true. Exactly one binary (the `binary`
-#   input) builds on three platforms (linux x86_64, macOS arm64,
-#   Windows x86_64) and attaches to the release. Multi-binary
+#   input) builds with all features on four platforms (linux x86_64,
+#   linux arm64, macOS arm64, Windows x86_64) and attaches to the
+#   release. Downloaders get the most capable binary; registry
+#   installers get default features via `cargo install`. Multi-binary
 #   products are not supported: one input, one binary.
 # - `binaries: false` (library-only products) skips the build matrix
 #   and artifact download entirely; the release ships notes only.
@@ -157,6 +159,9 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             exe: ""
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            exe: ""
           - os: macos-latest
             target: aarch64-apple-darwin
             exe: ""
@@ -170,13 +175,15 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      # Default features, matching exactly what
-      # `cargo install <binary>@<version>` produces.
+      # All features: downloaders get the most capable binary (every
+      # module, including MARKDOWN). Registry installers still get
+      # default features via `cargo install`; that equivalence is a
+      # property of the registry path, not the download path.
       - name: Build the release binary
         shell: bash
         run: |
           set -euo pipefail
-          cargo build --release -p ${{ inputs.binary }}
+          cargo build --release -p ${{ inputs.binary }} --all-features
 
       - name: Archive the binary
         shell: bash
