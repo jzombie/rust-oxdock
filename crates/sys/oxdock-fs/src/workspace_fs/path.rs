@@ -945,11 +945,10 @@ mod tests {
         let temp = GuardedPath::tempdir().expect("tempdir");
         let root = temp.as_guarded_path().clone();
         let missing = root.as_path().join("no-such-dir");
-        let text = missing
-            .join("step.ox")
-            .to_string_lossy()
-            .into_owned();
-        let err = root.join_script(&text).expect_err("missing parent must fail");
+        let text = missing.join("step.ox").to_string_lossy().into_owned();
+        let err = root
+            .join_script(&text)
+            .expect_err("missing parent must fail");
         assert!(err.to_string().contains("script not found"), "{err:?}");
         assert!(
             !missing.exists(),

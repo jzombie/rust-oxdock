@@ -1092,8 +1092,8 @@ mod tests {
     fn options_parse_relative_escape_stays_rejected() {
         let workspace = GuardedPath::tempdir().expect("tempdir");
         let mut args = vec!["--script".to_string(), "../escape.ox".to_string()].into_iter();
-        let err = Options::parse(&mut args, workspace.as_guarded_path())
-            .expect_err("escape must fail");
+        let err =
+            Options::parse(&mut args, workspace.as_guarded_path()).expect_err("escape must fail");
         assert!(err.to_string().contains("guard script path"), "{err:?}");
     }
 
