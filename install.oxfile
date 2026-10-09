@@ -1,16 +1,14 @@
-# Installer logic for the release binaries: verifies the downloaded
-# asset against its checksum, then places the binary. Full filesystem
-# access: installation writes outside any workspace by design, so every
-# path below is absolute. The shell stub downloads the asset plus this
-# file and executes it with a fetched interpreter; fail closed
-# throughout, with a hash mismatch aborting before anything places.
+# Install the downloaded OxDock release binary after verifying its checksum.
+# The bootstrap stub fetches the OxDock interpreter and runs this file with it.
 
 IMPORT [STD]
 
 INHERIT_ENV [OXDOCK_ASSET, OXDOCK_SHA, OXDOCK_BIN, OXDOCK_DIR, OXDOCK_VERSION]
 
+# Full filesystem access: installation writes outside any workspace.
 WORKSPACE SYSTEM
 
+# Install locations arrive through the stub environment.
 LET $asset: STRING = "{{ env:OXDOCK_ASSET }}"
 LET $want: STRING = "{{ env:OXDOCK_SHA }}"
 LET $bin: STRING = "{{ env:OXDOCK_BIN }}"
@@ -20,11 +18,13 @@ IF $dir == "" {
     [family:windows] $dir = "{{ env:USERPROFILE }}/.local/bin"
 }
 
+# Refuse to place anything the checksum rejects.
 LET $actual: STRING = HASH_SHA256 $asset
 # The digest command terminates its line: the comparison includes it.
 # Rust never emits \r\n here on any platform, so this is exact.
 ASSERT_EQ $actual "{{ $want }}\n"
 
+# Place the verified binary and report where it landed.
 MKDIR $dir
 LET $dest: STRING = "{{ $dir }}/oxdock"
 [family:windows] $dest = "{{ $dir }}/oxdock.exe"
