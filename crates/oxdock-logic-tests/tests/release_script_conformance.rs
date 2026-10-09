@@ -87,6 +87,10 @@ fn release_script_parses() -> Result<()> {
         text.contains("aarch64-pc-windows-msvc.tar.gz"),
         "windows arm64 asset attaches to the release"
     );
+    assert!(
+        text.contains("target/artifacts/SHA256SUMS"),
+        "checksums file attaches to the release"
+    );
     // Tag identity gate: nothing destructive runs unless the tag
     // points at HEAD, so wrong-version binaries can never replace a
     // release under an old tag.

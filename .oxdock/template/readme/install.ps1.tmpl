@@ -28,7 +28,14 @@ New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 $tmp = Join-Path ([IO.Path]::GetTempPath()) "oxdock-install-$([Guid]::NewGuid())"
 New-Item -ItemType Directory -Force -Path $tmp | Out-Null
 try {
-  Invoke-WebRequest "https://github.com/$Repo/releases/download/$Version/oxdock-$ArchTarget.tar.gz" -OutFile (Join-Path $tmp 'asset.tar.gz')
+  $base = "https://github.com/$Repo/releases/download/$Version"
+  Invoke-WebRequest "$base/SHA256SUMS" -OutFile (Join-Path $tmp 'SHA256SUMS')
+  Invoke-WebRequest "$base/oxdock-$ArchTarget.tar.gz" -OutFile (Join-Path $tmp 'asset.tar.gz')
+  # Fail closed: no checksums file (releases before checksums shipped),
+  # no install.
+  $expected = ((Get-Content (Join-Path $tmp 'SHA256SUMS')) | Where-Object { $_ -match "oxdock-$ArchTarget.tar.gz" } | Select-Object -First 1) -split '\s+' | Select-Object -First 1
+  $actual = (Get-FileHash (Join-Path $tmp 'asset.tar.gz') -Algorithm SHA256).Hash
+  if ($expected.ToLowerInvariant() -ne $actual.ToLowerInvariant()) { throw "checksum mismatch for oxdock-$ArchTarget.tar.gz" }
   tar.exe -xzf (Join-Path $tmp 'asset.tar.gz') -C $tmp
   Copy-Item (Join-Path $tmp 'oxdock.exe') (Join-Path $InstallDir 'oxdock.exe') -Force
   Write-Output "installed oxdock $Version to $InstallDir"

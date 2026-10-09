@@ -31,8 +31,20 @@ INSTALL_DIR="${INSTALL_DIR:-$HOME/.local/bin}"
 mkdir -p "$INSTALL_DIR"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
-curl -fsSL "https://github.com/$REPO/releases/download/$VERSION/oxdock-$TARGET.tar.gz" | tar -xz -C "$tmp"
-install -m 755 "$tmp"/oxdock* "$INSTALL_DIR/"
+base="https://github.com/$REPO/releases/download/$VERSION"
+curl -fsSL "$base/SHA256SUMS" -o "$tmp/SHA256SUMS"
+curl -fsSL "$base/oxdock-$TARGET.tar.gz" -o "$tmp/oxdock-$TARGET.tar.gz"
+# Fail closed: no checksums file (releases before checksums shipped),
+# no install. sha256sum is GNU coreutils; macOS falls back to shasum.
+# The asset keeps its release filename so `-c` resolves it.
+if command -v sha256sum >/dev/null 2>&1; then
+  (cd "$tmp" && grep "oxdock-$TARGET.tar.gz$" SHA256SUMS | sha256sum -c -)
+else
+  (cd "$tmp" && grep "oxdock-$TARGET.tar.gz$" SHA256SUMS | shasum -a 256 -c -)
+fi
+mkdir -p "$tmp/x"
+tar -xzf "$tmp/oxdock-$TARGET.tar.gz" -C "$tmp/x"
+install -m 755 "$tmp"/x/oxdock* "$INSTALL_DIR/"
 echo "installed oxdock $VERSION to $INSTALL_DIR"
 case ":$PATH:" in
   *":$INSTALL_DIR:"*) ;;

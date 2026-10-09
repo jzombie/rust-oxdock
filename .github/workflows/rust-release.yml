@@ -251,6 +251,18 @@ jobs:
           merge-multiple: true
           path: target/artifacts
 
+      # SHA256SUMS rides alongside the tarballs so installers can pin
+      # supply chain, not just transit. Written here (gitignored working
+      # file, never checked in) and attached by the script like any
+      # other asset.
+      - name: Write checksums file
+        if: ${{ inputs.binaries }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd target/artifacts && sha256sum ./*.tar.gz > SHA256SUMS)
+          cat target/artifacts/SHA256SUMS
+
       # Run the script with the just-built binary. OXDOCK_WORKSPACE_ROOT
       # points it at this tree instead of its build machine.
       - name: Extract the release runner
