@@ -29,14 +29,22 @@
       "out": "bootstrap.sh",
       "values": ".oxdock/template/readme/values.json",
       "template": ".oxdock/template/readme/bootstrap.sh.tmpl",
-      "fragments": {}
+      "fragments": {
+        "stubs": [
+          ".oxdock/template/readme/stubs/*"
+        ]
+      }
     },
     {
       "name": "install-ps1",
       "out": "bootstrap.ps1",
       "values": ".oxdock/template/readme/values.json",
       "template": ".oxdock/template/readme/bootstrap.ps1.tmpl",
-      "fragments": {}
+      "fragments": {
+        "stubs": [
+          ".oxdock/template/readme/stubs/*"
+        ]
+      }
     }
   ]
 }

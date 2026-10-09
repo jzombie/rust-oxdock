@@ -4295,7 +4295,7 @@ fn static_unguarded_read_needs_full_coverage() {
 
 #[test]
 fn static_covered_partition_read_passes() {
-    // Canonical split: unix + windows declarations cover every host,
+    // Canonical split: Unix + Windows declarations cover every host,
     // so the unguarded read is exhaustive.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);

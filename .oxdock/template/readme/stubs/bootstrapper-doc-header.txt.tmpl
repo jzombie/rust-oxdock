@@ -1,0 +1,8 @@
+# Install the OxDock binary from GitHub releases. Thin fetcher only:
+# every install decision lives in install.oxfile, executed below with
+# the fetched binary.
+#
+# Content-addressed local cache: the first run downloads and verifies,
+# later runs reuse the cached tarball after re-verifying its hash, so
+# reruns need no network once warm (pin VERSION to stay fully offline).
+# Override the cache root with OXDOCK_CACHE_DIR.

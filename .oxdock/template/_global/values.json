@@ -10,5 +10,14 @@
   "ssh_plugin_readme": "https://github.com/jzombie/rust-oxdock/blob/main/crates/plugins/oxdock-ssh-plugin/README.md",
   "net_plugin_readme": "https://github.com/jzombie/rust-oxdock/blob/main/crates/plugins/oxdock-net-plugin/README.md",
   "markdown_plugin_readme": "https://github.com/jzombie/rust-oxdock/blob/main/crates/plugins/oxdock-markdown-plugin/README.md",
-  "ci_url": "https://github.com/jzombie/rust-oxdock/actions/workflows/rust-tests.yml"
+  "ci_url": "https://github.com/jzombie/rust-oxdock/actions/workflows/rust-tests.yml",
+  "stub_msg_using_cached": "using cached oxdock $VERSION",
+  "stub_msg_downloading": "downloading oxdock $VERSION",
+  "stub_url_releases_latest": "https://api.github.com/repos/$REPO/releases?per_page=1",
+  "stub_url_release_base": "https://github.com/$REPO/releases/download/$VERSION",
+  "stub_url_oxfile_versioned": "https://raw.githubusercontent.com/$REPO/$VERSION/install.oxfile",
+  "stub_url_oxfile_main": "https://raw.githubusercontent.com/$REPO/main/install.oxfile",
+  "stub_name_oxfile": "install.oxfile",
+  "stub_name_checksums": "SHA256SUMS",
+  "stub_msg_install_failed": "installer failed with exit code $code"
 }

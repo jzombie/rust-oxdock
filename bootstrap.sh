@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install the oxdock binary from GitHub releases. Thin fetcher only:
+# Install the OxDock binary from GitHub releases. Thin fetcher only:
 # every install decision lives in install.oxfile, executed below with
 # the fetched binary.
 #
@@ -132,4 +132,8 @@ if [ -n "${OXDOCK_ENGINE:-}" ]; then
   esac
 fi
 [ -x "$ENGINE" ] || { echo "installer engine is not executable: $ENGINE" >&2; exit 1; }
-(cd "$tmp" && OXDOCK_ASSET="$VDIR/$ASSET" OXDOCK_SHA="$EXPECTED" OXDOCK_BIN="$BIN" OXDOCK_DIR="${INSTALL_DIR:-}" OXDOCK_VERSION="$VERSION" "$ENGINE" install.oxfile)
+(cd "$tmp" && OXDOCK_ASSET="$VDIR/$ASSET" OXDOCK_SHA="$EXPECTED" OXDOCK_BIN="$BIN" OXDOCK_DIR="${INSTALL_DIR:-}" OXDOCK_VERSION="$VERSION" "$ENGINE" install.oxfile) || {
+  code=$?
+  echo "installer failed with exit code $code" >&2
+  exit "$code"
+}

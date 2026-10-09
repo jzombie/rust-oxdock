@@ -1,4 +1,4 @@
-# Install the oxdock binary from GitHub releases. Thin fetcher only:
+# Install the OxDock binary from GitHub releases. Thin fetcher only:
 # every install decision lives in install.oxfile, executed below with
 # the fetched binary.
 #
@@ -38,7 +38,7 @@ $ApiHeaders = @{}
 if ($env:GITHUB_TOKEN) { $ApiHeaders['Authorization'] = "Bearer $($env:GITHUB_TOKEN)" }
 
 if (-not $Version) {
-  $Version = (Invoke-RestMethod "https://api.github.com/repos/$Repo/releases?per_page=1" -Headers $ApiHeaders)[0].tag_name
+  $Version = (Invoke-RestMethod "https://api.github.com/repos/$REPO/releases?per_page=1" -Headers $ApiHeaders)[0].tag_name
 }
 
 $ArchTarget = switch ($env:PROCESSOR_ARCHITECTURE) {
@@ -66,13 +66,13 @@ function Test-CachedAsset {
 # after re-verifying it. Anything missing or mismatched falls through
 # to a fresh download, so a corrupt cache heals itself.
 if (Test-CachedAsset) {
-  Write-Warning "using cached oxdock $Version"
+  Write-Warning "using cached oxdock $VERSION"
 } else {
-  Write-Warning "downloading oxdock $Version"
+  Write-Warning "downloading oxdock $VERSION"
   $tmp = Join-Path ([IO.Path]::GetTempPath()) "oxdock-install-$([Guid]::NewGuid())"
   New-Item -ItemType Directory -Force -Path $tmp | Out-Null
   try {
-    $base = if ($env:OXDOCK_RELEASE_BASE) { $env:OXDOCK_RELEASE_BASE.TrimEnd('/') } else { "https://github.com/$Repo/releases/download/$Version" }
+    $base = if ($env:OXDOCK_RELEASE_BASE) { $env:OXDOCK_RELEASE_BASE.TrimEnd('/') } else { "https://github.com/$REPO/releases/download/$VERSION" }
     Invoke-WebRequest "$base/$Asset" -Headers $ApiHeaders -OutFile (Join-Path $tmp 'asset.tar.gz')
     Invoke-WebRequest "$base/SHA256SUMS" -Headers $ApiHeaders -OutFile (Join-Path $tmp 'SHA256SUMS')
     $line = (Get-Content (Join-Path $tmp 'SHA256SUMS')) | Where-Object { $_ -match "$Asset" } | Select-Object -First 1
@@ -87,8 +87,8 @@ if (Test-CachedAsset) {
     if ($env:OXDOCK_OXFILE_URL) {
       Invoke-WebRequest $env:OXDOCK_OXFILE_URL -Headers $ApiHeaders -OutFile (Join-Path $tmp 'install.oxfile')
     } else {
-      $raw = "https://raw.githubusercontent.com/$Repo/$Version/install.oxfile"
-      try { Invoke-WebRequest $raw -Headers $ApiHeaders -OutFile (Join-Path $tmp 'install.oxfile') } catch { Invoke-WebRequest "https://raw.githubusercontent.com/$Repo/main/install.oxfile" -Headers $ApiHeaders -OutFile (Join-Path $tmp 'install.oxfile') }
+      $raw = "https://raw.githubusercontent.com/$REPO/$VERSION/install.oxfile"
+      try { Invoke-WebRequest $raw -Headers $ApiHeaders -OutFile (Join-Path $tmp 'install.oxfile') } catch { Invoke-WebRequest "https://raw.githubusercontent.com/$REPO/main/install.oxfile" -Headers $ApiHeaders -OutFile (Join-Path $tmp 'install.oxfile') }
     }
     Move-Item (Join-Path $tmp 'asset.tar.gz') (Join-Path $VDir $Asset) -Force
     Move-Item (Join-Path $tmp 'SHA256SUMS') (Join-Path $VDir 'SHA256SUMS') -Force
@@ -125,7 +125,8 @@ try {
   Push-Location $tmp
   try {
     & $Engine 'install.oxfile'
-    if ($LASTEXITCODE -ne 0) { throw "installer failed with exit code $LASTEXITCODE" }
+    $code = $LASTEXITCODE
+    if ($code -ne 0) { throw "installer failed with exit code $code" }
   } finally {
     # Restore first: deleting the working directory while standing
     # inside it fails as in use and would mask the real error.
