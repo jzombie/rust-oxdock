@@ -7,6 +7,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ## [0.24.1-alpha] - 2026-10-09
 
+### Added
+
+- New `--version`, `-V` flag printing `oxdock <version>` and exiting 0, matching `--help` behavior.
+
 ### Changed
 
 - Prebuilt release binaries now ship with all features enabled (every module, including `MARKDOWN`), instead of default features. Registry installs via `cargo install` still resolve default features; the download path gives downloaders the most capable binary.
@@ -20,6 +24,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 ### Fixed
 
 - CLI script paths containing a URL scheme fail fast with the input intact instead of letting path normalization mangle it (`https://` no longer comes out as `https:/`).
+- `WORKSPACE SYSTEM` resolves absolute paths on every drive and share instead of confining them under the build-context drive, so installs and file operations reach drives other than the build drive on Windows.
 
 ## [0.24.0-alpha] - 2026-10-08
 
