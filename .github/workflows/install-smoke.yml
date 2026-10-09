@@ -3,9 +3,12 @@
 # stubs parse; this proves they install. The fetch source is a staged
 # branch build served over loopback, never a published tag: branch
 # bytes prove end to end, and the installer engine is the same branch
-# build, so behavior fixes prove before any release ships them. Weekly
-# plus on demand; also runs on pushes to main so stub changes prove
-# before users meet them.
+# build, so behavior fixes prove before any release ships them. One leg
+# per stub leaves VERSION unset so the release-API resolution line
+# executes for real (TODO: consolidate those legs on exact `--version`
+# once the newest published release supports the flag). Weekly plus on
+# demand; also runs on pushes to main so stub changes prove before
+# users meet them.
 
 name: install-smoke
 
@@ -119,6 +122,18 @@ jobs:
           fi
           echo "path=$bin" >> "$GITHUB_OUTPUT"
 
+      # Pinned by the newest-release legs below: the stub resolves the
+      # newest tag itself there, and the workflow must expect the same
+      # one. Authenticated: shared runner IPs burn the anonymous quota.
+      - name: Resolve newest release
+        id: smoke-version
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag=$(curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" "https://api.github.com/repos/jzombie/rust-oxdock/releases?per_page=1" | grep -m1 '"tag_name"' | cut -d'"' -f4)
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+
       # Every leg below fetches the staged branch build through the
       # stub from loopback: VERSION stays pinned so no release API is
       # involved, and the stub populates a cold cache from the server.
@@ -177,6 +192,51 @@ jobs:
           } finally {
             Stop-Process -Id $srv.Id -Force
           }
+
+      # TODO: consolidate on exact `--version` once the newest published
+      # release supports the flag. This leg leaves VERSION unset so the
+      # stub's release-API resolution executes for real; the payload is
+      # whatever is newest, so its menu is checked for the resolved
+      # version and hashed against the engine menu to prove two distinct
+      # builds are in play.
+      - name: Install newest release via bootstrap.sh
+        if: ${{ runner.os != 'Windows' }}
+        shell: bash
+        env:
+          INSTALL_DIR: ${{ runner.temp }}/oxbin-newest
+          SMOKE_TAG: ${{ steps.smoke-version.outputs.tag }}
+          SMOKE_VERSION: ${{ steps.smoke-version.outputs.version }}
+          OXDOCK_ENGINE: ${{ steps.branch-bin.outputs.path }}
+        run: |
+          set -euo pipefail
+          ./bootstrap.sh 2>&1 | tee "${RUNNER_TEMP}/install-newest.log"
+          grep -q "downloading oxdock ${SMOKE_TAG}" "${RUNNER_TEMP}/install-newest.log"
+          "${INSTALL_DIR}/oxdock" --help | grep -q "$SMOKE_VERSION"
+          printf 'IMPORT [STD]\nECHO "via-stdin"\n' | "${INSTALL_DIR}/oxdock" --script - | grep -q "via-stdin"
+
+      # TODO: consolidate on exact `--version` once the newest published
+      # release supports the flag. Same contract as the sh leg above.
+      - name: Install newest release via bootstrap.ps1
+        if: ${{ runner.os == 'Windows' }}
+        shell: pwsh
+        env:
+          INSTALL_DIR: ${{ runner.temp }}\oxbin-newest
+          SMOKE_TAG: ${{ steps.smoke-version.outputs.tag }}
+          SMOKE_VERSION: ${{ steps.smoke-version.outputs.version }}
+          OXDOCK_ENGINE: ${{ steps.branch-bin.outputs.path }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # Native-bound strings pipe as UTF-8: PowerShell defaults to
+          # UTF-16, which the binary reads as garbage.
+          $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+          .\bootstrap.ps1 2>&1 | Tee-Object (Join-Path $env:RUNNER_TEMP 'install-newest.log')
+          if (-not (Select-String "downloading oxdock $([regex]::Escape($env:SMOKE_TAG))" (Join-Path $env:RUNNER_TEMP 'install-newest.log'))) { throw "stub resolved an unexpected release" }
+          $installed = Join-Path $env:INSTALL_DIR 'oxdock.exe'
+          $installedMenu = & $installed --help
+          if ($LASTEXITCODE -ne 0) { throw "installed --help failed" }
+          if (($installedMenu | Out-String) -notmatch [regex]::Escape($env:SMOKE_VERSION)) { throw "version missing from installed help" }
+          "IMPORT [STD]`nECHO via-stdin" | & $installed --script - | Tee-Object (Join-Path $env:RUNNER_TEMP 'newest-stdin.log')
+          if (-not (Select-String "via-stdin" (Join-Path $env:RUNNER_TEMP 'newest-stdin.log'))) { throw "stdin delivery failed" }
 
       # Same job, so $HOME (and the cache) persists: warm reuse must
       # skip downloads, corruption must heal by redownloading. The sh
