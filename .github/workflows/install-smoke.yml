@@ -15,6 +15,12 @@ on:
       - "bootstrap.ps1"
       - "install.oxfile"
       - ".oxdock/template/readme/bootstrap.*.tmpl"
+  pull_request:
+    paths:
+      - "bootstrap.sh"
+      - "bootstrap.ps1"
+      - "install.oxfile"
+      - ".oxdock/template/readme/bootstrap.*.tmpl"
   schedule:
     - cron: "0 7 * * 1"
   workflow_dispatch:
@@ -53,6 +59,16 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
+      # Resolved once for steps that must not touch network at all:
+      # unpinned VERSION queries the API, which would defeat a
+      # blackhole proof.
+      - name: Resolve smoke version
+        id: smoke-version
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "version=$(curl -fsSL "https://api.github.com/repos/jzombie/rust-oxdock/releases?per_page=1" | grep -m1 '"tag_name"' | cut -d'"' -f4)" >> "$GITHUB_OUTPUT"
+
       - name: Install and run via bootstrap.sh
         if: ${{ runner.os != 'Windows' }}
         shell: bash
@@ -62,6 +78,7 @@ jobs:
           set -euo pipefail
           ./bootstrap.sh
           "${INSTALL_DIR}/oxdock" --version
+          printf 'IMPORT [STD]\nECHO "via-stdin"\n' | "${INSTALL_DIR}/oxdock" --script - | grep -q "via-stdin"
 
       - name: Install and run via bootstrap.ps1
         if: ${{ runner.os == 'Windows' }}
@@ -72,3 +89,59 @@ jobs:
           $ErrorActionPreference = 'Stop'
           .\bootstrap.ps1
           & (Join-Path $env:INSTALL_DIR 'oxdock.exe') --version
+          "IMPORT [STD]`nECHO via-stdin" | & (Join-Path $env:INSTALL_DIR 'oxdock.exe') --script - | Tee-Object (Join-Path $env:RUNNER_TEMP 'stdin.log')
+          if (-not (Select-String "via-stdin" (Join-Path $env:RUNNER_TEMP 'stdin.log'))) { throw "stdin delivery failed" }
+
+      # Same job, so $HOME (and the cache) persists: warm reuse must
+      # skip downloads, corruption must heal by redownloading. The sh
+      # stub announces which path it took; assert on that.
+      - name: Reuse and heal cache via bootstrap.sh
+        if: ${{ runner.os != 'Windows' }}
+        shell: bash
+        env:
+          INSTALL_DIR: ${{ runner.temp }}/oxbin-warm
+        run: |
+          set -euo pipefail
+          ./bootstrap.sh 2>&1 | tee "${RUNNER_TEMP}/warm.log"
+          grep -q "using cached" "${RUNNER_TEMP}/warm.log"
+          "${INSTALL_DIR}/oxdock" --version
+          echo corrupt > "$HOME"/.cache/oxdock/*/*.tar.gz
+          ./bootstrap.sh 2>&1 | tee "${RUNNER_TEMP}/healed.log"
+          grep -q "downloading" "${RUNNER_TEMP}/healed.log"
+          "${INSTALL_DIR}/oxdock" --version
+
+      # No proxy blackhole here: .NET WinHTTP ignores proxy env vars,
+      # so it would prove nothing. Warm reuse plus tamper-heal cover
+      # the cache contract on this leg.
+      - name: Reuse and heal cache via bootstrap.ps1
+        if: ${{ runner.os == 'Windows' }}
+        shell: pwsh
+        env:
+          INSTALL_DIR: ${{ runner.temp }}\oxbin-warm
+        run: |
+          $ErrorActionPreference = 'Stop'
+          .\bootstrap.ps1 2>&1 | Tee-Object (Join-Path $env:RUNNER_TEMP 'warm.log')
+          if (-not (Select-String "using cached" (Join-Path $env:RUNNER_TEMP 'warm.log'))) { throw "expected a cache hit" }
+          & (Join-Path $env:INSTALL_DIR 'oxdock.exe') --version
+          Set-Content -NoNewline -Path (Get-ChildItem $HOME\.cache\oxdock\*\*.tar.gz) -Value 'corrupt'
+          .\bootstrap.ps1 2>&1 | Tee-Object (Join-Path $env:RUNNER_TEMP 'healed.log')
+          if (-not (Select-String "downloading" (Join-Path $env:RUNNER_TEMP 'healed.log'))) { throw "expected a heal download" }
+          & (Join-Path $env:INSTALL_DIR 'oxdock.exe') --version
+
+      # Blackholed egress: with a warm cache and pinned resolution,
+      # nothing may leave the machine. curl honors proxy env vars, so
+      # a dead proxy proves zero network. Unix legs only (see above).
+      - name: Install offline via bootstrap.sh
+        if: ${{ runner.os != 'Windows' }}
+        shell: bash
+        env:
+          VERSION: ${{ steps.smoke-version.outputs.version }}
+          INSTALL_DIR: ${{ runner.temp }}/oxbin-offline
+          http_proxy: http://127.0.0.1:9
+          https_proxy: http://127.0.0.1:9
+          HTTP_PROXY: http://127.0.0.1:9
+          HTTPS_PROXY: http://127.0.0.1:9
+        run: |
+          set -euo pipefail
+          ./bootstrap.sh
+          "${INSTALL_DIR}/oxdock" --version
