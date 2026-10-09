@@ -75,17 +75,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo "version=$(curl -fsSL "https://api.github.com/repos/jzombie/rust-oxdock/releases?per_page=1" | grep -m1 '"tag_name"' | cut -d'"' -f4)" >> "$GITHUB_OUTPUT"
+          tag=$(curl -fsSL "https://api.github.com/repos/jzombie/rust-oxdock/releases?per_page=1" | grep -m1 '"tag_name"' | cut -d'"' -f4)
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
 
       - name: Install and run via bootstrap.sh
         if: ${{ runner.os != 'Windows' }}
         shell: bash
         env:
           INSTALL_DIR: ${{ runner.temp }}/oxbin
+          SMOKE_VERSION: ${{ steps.smoke-version.outputs.version }}
         run: |
           set -euo pipefail
           ./bootstrap.sh
-          "${INSTALL_DIR}/oxdock" --version
+          "${INSTALL_DIR}/oxdock" --help | grep -q "$SMOKE_VERSION"
           printf 'IMPORT [STD]\nECHO "via-stdin"\n' | "${INSTALL_DIR}/oxdock" --script - | grep -q "via-stdin"
 
       - name: Install and run via bootstrap.ps1
@@ -93,13 +96,15 @@ jobs:
         shell: pwsh
         env:
           INSTALL_DIR: ${{ runner.temp }}\oxbin
+          SMOKE_VERSION: ${{ steps.smoke-version.outputs.version }}
         run: |
           $ErrorActionPreference = 'Stop'
           # Native-bound strings pipe as UTF-8: PowerShell defaults to
           # UTF-16, which the binary reads as garbage.
           $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
           .\bootstrap.ps1
-          & (Join-Path $env:INSTALL_DIR 'oxdock.exe') --version
+          $helpOut = & (Join-Path $env:INSTALL_DIR 'oxdock.exe') --help
+          if ($helpOut -notmatch [regex]::Escape($env:SMOKE_VERSION)) { throw "version mismatch in help output" }
           "IMPORT [STD]`nECHO via-stdin" | & (Join-Path $env:INSTALL_DIR 'oxdock.exe') --script - | Tee-Object (Join-Path $env:RUNNER_TEMP 'stdin.log')
           if (-not (Select-String "via-stdin" (Join-Path $env:RUNNER_TEMP 'stdin.log'))) { throw "stdin delivery failed" }
 
@@ -115,11 +120,11 @@ jobs:
           set -euo pipefail
           ./bootstrap.sh 2>&1 | tee "${RUNNER_TEMP}/warm.log"
           grep -q "using cached" "${RUNNER_TEMP}/warm.log"
-          "${INSTALL_DIR}/oxdock" --version
+          "${INSTALL_DIR}/oxdock" --help
           echo corrupt > "$HOME"/.cache/oxdock/*/*.tar.gz
           ./bootstrap.sh 2>&1 | tee "${RUNNER_TEMP}/healed.log"
           grep -q "downloading" "${RUNNER_TEMP}/healed.log"
-          "${INSTALL_DIR}/oxdock" --version
+          "${INSTALL_DIR}/oxdock" --help
 
       # No proxy blackhole here: .NET WinHTTP ignores proxy env vars,
       # so it would prove nothing. Warm reuse plus tamper-heal cover
@@ -133,11 +138,11 @@ jobs:
           $ErrorActionPreference = 'Stop'
           .\bootstrap.ps1 2>&1 | Tee-Object (Join-Path $env:RUNNER_TEMP 'warm.log')
           if (-not (Select-String "using cached" (Join-Path $env:RUNNER_TEMP 'warm.log'))) { throw "expected a cache hit" }
-          & (Join-Path $env:INSTALL_DIR 'oxdock.exe') --version
+          & (Join-Path $env:INSTALL_DIR 'oxdock.exe') --help
           Set-Content -NoNewline -Path (Get-ChildItem $HOME\.cache\oxdock\*\*.tar.gz) -Value 'corrupt'
           .\bootstrap.ps1 2>&1 | Tee-Object (Join-Path $env:RUNNER_TEMP 'healed.log')
           if (-not (Select-String "downloading" (Join-Path $env:RUNNER_TEMP 'healed.log'))) { throw "expected a heal download" }
-          & (Join-Path $env:INSTALL_DIR 'oxdock.exe') --version
+          & (Join-Path $env:INSTALL_DIR 'oxdock.exe') --help
 
       # Blackholed egress: with a warm cache and pinned resolution,
       # nothing may leave the machine. Lowercase proxy vars only:
@@ -149,7 +154,7 @@ jobs:
         if: ${{ runner.os != 'Windows' }}
         shell: bash
         env:
-          VERSION: ${{ steps.smoke-version.outputs.version }}
+          VERSION: ${{ steps.smoke-version.outputs.tag }}
           INSTALL_DIR: ${{ runner.temp }}/oxbin-offline
           http_proxy: http://127.0.0.1:9
           https_proxy: http://127.0.0.1:9
@@ -160,4 +165,4 @@ jobs:
             exit 1
           fi
           ./bootstrap.sh
-          "${INSTALL_DIR}/oxdock" --version
+          "${INSTALL_DIR}/oxdock" --help
