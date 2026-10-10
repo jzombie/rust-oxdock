@@ -15,7 +15,7 @@
 # Pin explicitly with VERSION (a tag: the API's "latest" skips
 # pre-releases, and every release here is `-alpha` until stable):
 #
-#   $env:VERSION = 'v0.24.2-alpha'; irm ... | iex
+#   $env:VERSION = 'v0.24.3-alpha'; irm ... | iex
 #
 # Pass INSTALL_DIR to choose the destination; the installer defaults
 # it when absent.

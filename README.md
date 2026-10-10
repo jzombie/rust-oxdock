@@ -31,7 +31,7 @@ Platform gating selects OS-specific steps, and remote targets bind over any stdi
 
 The syntax is line-oriented in the spirit of BASIC, with a static type system checking scripts before the first step runs. Plain Rust functions become script functions with one attribute: `#[oxdock_func]` exports them into namespaced modules scripts call as `DEMO::NAME(...)`. See [Extending OxDock from Rust](#extending-oxdock-from-rust).
 
-[Documentation](https://docs.rs/oxdock/0.24.2-alpha/oxdock/)
+[Documentation](https://docs.rs/oxdock/0.24.3-alpha/oxdock/)
 
 Jump to the [Command Reference](#command-reference) below for the full
 command list with runnable examples, or view the growing list of standard
@@ -54,19 +54,19 @@ library [Functions](#functions).
 **Build from source via Cargo** *(default features only)*:
 
 ```sh
-cargo install oxdock@0.24.2-alpha
+cargo install oxdock@0.24.3-alpha
 ```
 
 For a full-feature build:
 
 ```sh
-cargo install oxdock@0.24.2-alpha --all-features
+cargo install oxdock@0.24.3-alpha --all-features
 ```
 
 ### Add to Rust project
 
 ```sh
-cargo add oxdock@0.24.2-alpha
+cargo add oxdock@0.24.3-alpha
 ```
 
 Run a script:
@@ -162,8 +162,8 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     LET $a: STRING = READ dist/alpha.txt
     LET $b: STRING = READ dist/beta.txt
     LET $p: STRING = READ dist/picked.txt
-    ASSERT_EQ $a "alpha OxDock 0.24.2-alpha"
-    ASSERT_EQ $b "beta OxDock 0.24.2-alpha"
+    ASSERT_EQ $a "alpha OxDock 0.24.3-alpha"
+    ASSERT_EQ $b "beta OxDock 0.24.3-alpha"
     ASSERT_EQ $p "alpha"
 };
 
@@ -175,7 +175,7 @@ let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolve
 let out = root.join("dist/alpha.txt").expect("out path");
 assert_eq!(
     resolver.read_to_string(&out).expect("read out"),
-    "alpha OxDock 0.24.2-alpha"
+    "alpha OxDock 0.24.3-alpha"
 );
 ```
 
@@ -4354,13 +4354,13 @@ cargo +nightly miri test --workspace --all-features --lib --tests
 
 ## Citation
 
-If you use OxDock in published work, cite version `0.24.2-alpha` with the metadata in [CITATION.cff](./CITATION.cff).
+If you use OxDock in published work, cite version `0.24.3-alpha` with the metadata in [CITATION.cff](./CITATION.cff).
 
 ```bibtex
 @software{oxdock,
   author = "Jeremy Harris",
   title = "OxDock",
-  version = "0.24.2-alpha",
+  version = "0.24.3-alpha",
   url = "https://github.com/jzombie/rust-oxdock",
   license = "Apache-2.0"
 }
