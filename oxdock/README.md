@@ -47,8 +47,17 @@ oxdock_embed! {
         WRITE dist/toolchain.txt "{{ $toolchain }}"
         WRITE dist/manifest.txt "os toolchain"
     },
-    // Generated assets land under target/, keeping the source tree clean
-    out_dir: "target/prebuilt",
+    // Staged under the manifest dir: build once locally so the tree
+    // and its `.oxdock_hash` fingerprint exist and are committed.
+    //
+    // `cargo publish` ships them as-is without re-running the script,
+    // so downstream crates embed the bundled files.
+    //
+    // Later builds hash the script text, its inputs, and referenced
+    // env values: a match skips the script and embeds the vendored files.
+    //
+    // Set OXDOCK_EMBED_FORCE_REBUILD=1 to re-run regardless.
+    out_dir: "prebuilt",
 }
 
 fn main() {
@@ -63,6 +72,8 @@ fn main() {
     assert!(!os.data.is_empty());
 }
 ```
+
+> You can find an example of this workspace dogfooding this very design in its own CLI binary by searching for: [usage-prebuilt](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+usage-prebuilt&type=code).
 
 For each artifact the macro emits a constant backed by `include_bytes!`, which bakes the file bytes into read-only binary data during compilation. At runtime `get()` scans a static table and returns a borrowed slice, so there are no file reads and no heap allocation. The support types only need `alloc::borrow::Cow` and core iterators, which is why it works in `no_std`.
 

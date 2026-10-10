@@ -17,6 +17,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - `install.sh` installs identically piped or from file: the tail runs as a function so piped delivery is fully read before the stdin drain runs. Piped runs previously exited 0 with nothing installed when the drain swallowed unread script.
 - The Windows default install destination is `%LOCALAPPDATA%\Microsoft\WindowsApps` from either installer, already on PATH: installs work immediately with no shell restart or path editing. The shell stub previously defaulted to `$HOME/.local/bin` under Git Bash, where the msys HOME shadows the real profile. Set `INSTALL_DIR` to choose another destination.
 
+### Fixed
+
+- The `oxdock_embed!` README example stages assets under manifest-relative `prebuilt/` instead of `target/prebuilt`: `target/` is gitignored and excluded from `cargo package`, so published crates must vendor their staging tree and hash for downstream builds to reuse it without re-execution.
+
 ## [0.24.2-alpha] - 2026-10-09
 
 ### Added
