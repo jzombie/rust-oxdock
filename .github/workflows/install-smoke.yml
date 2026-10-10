@@ -1,9 +1,12 @@
 # Installer smoke: runs the tree's install fetchers into temp dirs
 # and executes the installed binary. Static checks (lint) prove the
 # stubs parse; this proves they install. Steps run DSL directly
-# (`shell: oxdock --script {0}` on the pinned engine below): leg bodies
-# live inline, one step per leg, platform guards inside, so there is no
-# shell logic and no separate script file to drift. The fetch source is
+# (`shell: oxdock --script {0}`): leg bodies live inline, one step per
+# leg, platform guards inside, so there is no shell logic and no
+# separate script file to drift. Self-hosted end to end: the pinned
+# engine interprets exactly one step (the branch build), which publishes
+# the just-built binary onto PATH; every leg below is interpreted by
+# branch bytes. The fetch source is
 # a staged branch build served over loopback, never a published tag:
 # branch bytes prove end to end, and the installer engine is the same
 # branch build, so behavior fixes prove before any release ships them.
@@ -107,7 +110,7 @@ jobs:
         shell: oxdock --script {0}
         run: |
           IMPORT [STD]
-          INHERIT_ENV [GITHUB_OUTPUT, GITHUB_WORKSPACE, RUNNER_TEMP]
+          INHERIT_ENV [GITHUB_OUTPUT, GITHUB_PATH, GITHUB_WORKSPACE, RUNNER_TEMP]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           RUN ["cargo", "build", "--release", "-p", "oxdock", "--all-features"]
@@ -157,6 +160,14 @@ jobs:
           # legs bridge this output instead of joining it themselves.
           [family:unix] APPEND {{ env:GITHUB_OUTPUT }} "path={{ env:GITHUB_WORKSPACE }}/target/release/oxdock"
           [family:windows] APPEND {{ env:GITHUB_OUTPUT }} "path={{ env:GITHUB_WORKSPACE }}\\target\\release\\oxdock.exe"
+          # Publish the build output dir: subsequent `shell: oxdock`
+          # steps resolve the just-built binary through PATH, so every
+          # leg below is interpreted by branch bytes, not the pinned
+          # engine (which interprets only this build step). True
+          # self-hosting from here on; a broken branch binary fails its
+          # own legs loudly instead of being masked.
+          [family:unix] APPEND {{ env:GITHUB_PATH }} "{{ env:GITHUB_WORKSPACE }}/target/release"
+          [family:windows] APPEND {{ env:GITHUB_PATH }} "{{ env:GITHUB_WORKSPACE }}\\target\\release"
 
       # Pinned by the newest-release legs below: the stub resolves the
       # newest tag itself there, and the workflow must expect the same
