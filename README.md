@@ -43,7 +43,38 @@ library [Functions](#functions).
 
 ## Quick start
 
-Add it to your Rust build with `cargo add oxdock@0.24.2-alpha`, or install the standalone runner with `cargo install oxdock@0.24.2-alpha`.
+### Standalone CLI installation
+
+Prebuilt installers include all features and target `~/.local/bin`
+(`%USERPROFILE%\.local\bin` on Windows); override with `INSTALL_DIR`.
+
+**Linux / macOS:**
+```sh
+curl -fsSL https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.sh | bash
+```
+
+**Windows:**
+```powershell
+irm https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.ps1 | iex
+```
+
+**Build from source via Cargo** *(default features only)*:
+
+```sh
+cargo install oxdock@0.24.2-alpha
+```
+
+For a full-feature build matching the prebuilts:
+
+```sh
+cargo install oxdock@0.24.2-alpha --all-features
+```
+
+### Add to Rust project
+
+```sh
+cargo add oxdock@0.24.2-alpha
+```
 
 Run a script:
 

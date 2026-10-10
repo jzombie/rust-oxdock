@@ -96,7 +96,7 @@ fn smoke_steps_parse_and_cover_all_legs() -> Result<()> {
     for marker in [
         "oxdock-stage",
         "via-stdin",
-        "via-ephemeral",
+        "scripts/smoke/run-ephemeral",
         "SMOKE_TAG",
         "using cached",
     ] {
@@ -108,6 +108,40 @@ fn smoke_steps_parse_and_cover_all_legs() -> Result<()> {
     assert!(
         text.contains("127.0.0.1:9"),
         "offline leg bridges the blackhole proxies via env"
+    );
+    Ok(())
+}
+
+/// Template-to-output fidelity: the rendered ephemeral commands must
+/// carry the CI payload and hermetic stub sources. If values drift
+/// from the template, this names it instead of failing in CI.
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "reads rendered smoke commands from the repository checkout layout"
+)]
+fn rendered_ephemeral_commands_carry_ci_wiring() -> Result<()> {
+    let repo_root = repo_root()?;
+    let root = GuardedPath::new_root_from_str(&repo_root)?;
+    let resolver = PathResolver::new_guarded(root.clone(), root)?;
+    let sh = resolver.read_to_string(&resolver.root().join("scripts/smoke/run-ephemeral.sh")?)?;
+    let ps1 = resolver.read_to_string(&resolver.root().join("scripts/smoke/run-ephemeral.ps1")?)?;
+    for (name, body) in [
+        ("run-ephemeral.sh", sh.as_str()),
+        ("run-ephemeral.ps1", ps1.as_str()),
+    ] {
+        assert!(
+            body.contains("via-ephemeral"),
+            "{name} pipes the CI marker payload"
+        );
+    }
+    assert!(
+        sh.contains("cat ./install.sh"),
+        "sh rendering reads the branch stub, never the network"
+    );
+    assert!(
+        ps1.contains("Get-Content -Raw"),
+        "ps1 rendering reads the branch stub, never the network"
     );
     Ok(())
 }

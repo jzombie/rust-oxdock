@@ -1,6 +1,6 @@
 {{ $files.stubs.installer-doc-header }}
 #
-#   irm https://raw.githubusercontent.com/{{ $docs_global.repo }}/main/install.ps1 | iex
+#   {{ $files.commands.run-install-ps1 }}
 #
 # Pin explicitly with VERSION (a tag: the API's "latest" skips
 # pre-releases, and every release here is `-alpha` until stable):

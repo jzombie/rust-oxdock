@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 {{ $files.stubs.installer-doc-header }}
 #
-#   curl -fsSL https://raw.githubusercontent.com/{{ $docs_global.repo }}/main/install.sh | bash
+#   {{ $files.commands.run-install-sh }}
 #
 # Pin explicitly with VERSION (a tag: the API's "latest" skips
 # pre-releases, and every release here is `-alpha` until stable):

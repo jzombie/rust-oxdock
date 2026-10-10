@@ -26,6 +26,8 @@ on:
       - "install.ps1"
       - "install.oxfile"
       - ".oxdock/template/readme/install.*.tmpl"
+      - ".oxdock/template/cli/**"
+      - "scripts/smoke/**"
       - ".github/actions/setup-oxdock/**"
       - ".github/workflows/install-smoke.yml"
   pull_request:
@@ -34,6 +36,8 @@ on:
       - "install.ps1"
       - "install.oxfile"
       - ".oxdock/template/readme/install.*.tmpl"
+      - ".oxdock/template/cli/**"
+      - "scripts/smoke/**"
       - ".github/actions/setup-oxdock/**"
       - ".github/workflows/install-smoke.yml"
   schedule:
@@ -59,6 +63,8 @@ jobs:
           set -euo pipefail
           bash -n install.sh
           pwsh -NoProfile -Command '$e=$null; [void][System.Management.Automation.Language.Parser]::ParseFile("install.ps1", [ref]$null, [ref]$e); if ($e.Count -gt 0) { $e | ForEach-Object { Write-Error $_.Message }; exit 1 }'
+          bash -n scripts/smoke/run-ephemeral.sh
+          pwsh -NoProfile -Command '$e=$null; [void][System.Management.Automation.Language.Parser]::ParseFile("scripts/smoke/run-ephemeral.ps1", [ref]$null, [ref]$e); if ($e.Count -gt 0) { $e | ForEach-Object { Write-Error $_.Message }; exit 1 }'
 
   smoke:
     name: smoke (${{ matrix.os }})
@@ -242,19 +248,8 @@ jobs:
           ASSERT_CONTAINS stdout "via-stdin"
           CANCEL $srv
 
-      # Ephemeral run: a piped script executes with the fetched engine
-      # and places nothing. INSTALL_DIR points at a fresh dir that must
-      # stay absent; VERSION stays pinned so no release API is involved.
-      # The run-vs-install decision lives in install.oxfile; the stub
-      # only bridges the piped bytes. Delivery here is pipe-into-stub;
-      # the downloader one-liner shapes (process substitution,
-      # scriptblock) share this downstream path.
-      # TODO(single-source-commands): move those one-liners into a CLI
-      # template file that the README renders via docs-gen and CI
-      # executes, so a published command can never drift from a tested
-      # one. A README command that never ran in CI is the worst outcome.
-      # Keep them unpinned: main ships before versions cut, so a pinned
-      # VERSION would rot on arrival.
+      # Ephemeral run: executes the template-rendered one-liners that
+      # the README also publishes, so documented commands stay tested.
       - name: Ephemeral run
         shell: oxdock --script {0}
         env:
@@ -277,14 +272,8 @@ jobs:
           SLEEP 5s
           [family:unix] RUN ["curl", "-fsS", "http://127.0.0.1:18731/"]
           [family:windows] RUN ["curl.exe", "-fsS", "http://127.0.0.1:18731/"]
-          LET $p: PIPE
-          LET $t: HANDLE = ASYNC {
-              WITH_IO [stdout=$p] ECHO "IMPORT [STD]"
-              WITH_IO [stdout=$p] ECHO "ECHO via-ephemeral"
-          }
-          [family:unix] WITH_IO [stdin=$p] RUN ["bash", "./install.sh"]
-          [family:windows] WITH_IO [stdin=$p] RUN ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ".\\install.ps1"]
-          AWAIT $t
+          [family:unix] RUN ["bash", "scripts/smoke/run-ephemeral.sh"]
+          [family:windows] RUN ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ".\\scripts\\smoke\\run-ephemeral.ps1"]
           ASSERT_CONTAINS stdout "via-ephemeral"
           CANCEL $srv
           LET $t2: STRING = PATH_TYPE("{{ env:INSTALL_DIR }}")

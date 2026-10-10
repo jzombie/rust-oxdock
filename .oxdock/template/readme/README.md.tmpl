@@ -12,7 +12,39 @@ library [Functions](#functions).
 
 ## Quick start
 
-{{ $files.shared.quick-install }}
+### Standalone CLI installation
+
+{{ $files.local.install }}
+
+**Linux / macOS:**
+```sh
+{{ $files.commands.run-install-sh }}
+```
+
+**Windows:**
+```powershell
+{{ $files.commands.run-install-ps1 }}
+```
+
+**Build from source via Cargo** *(default features only)*:
+
+```sh
+cargo install oxdock@{{ env:CRATE_VERSION }}
+```
+
+For a full-feature build matching the prebuilts:
+
+```sh
+cargo install oxdock@{{ env:CRATE_VERSION }} --all-features
+```
+
+### Add to Rust project
+
+```sh
+cargo add oxdock@{{ env:CRATE_VERSION }}
+```
+
+{{ $files.shared.run-script }}
 
 {{ $files.shared.embed-example }}
 
