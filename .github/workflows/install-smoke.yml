@@ -126,8 +126,8 @@ jobs:
           ECHO "manifest: {{ $manifest }}"
 
           LET $p2: PIPE
-          [family:unix] WITH_IO [stdout=$p2] RUN ["target/release/oxdock", "--version"]
-          [family:windows] WITH_IO [stdout=$p2] RUN ["target/release/oxdock.exe", "--version"]
+          [family:unix] WITH_IO [stdout=$p2] RUN ["{{ env:GITHUB_WORKSPACE }}/target/release/oxdock", "--version"]
+          [family:windows] WITH_IO [stdout=$p2] RUN ["{{ env:GITHUB_WORKSPACE }}\\target\\release\\oxdock.exe", "--version"]
           WITH_IO [stdin=$p2] READ_LINE $reported
           ASSERT_CONTAINS $reported "oxdock "
 
