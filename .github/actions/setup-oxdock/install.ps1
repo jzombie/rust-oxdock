@@ -67,11 +67,13 @@ function Test-CachedAsset {
 
 # Same hash as last time means same bytes: reuse the cached tarball
 # after re-verifying it. Anything missing or mismatched falls through
-# to a fresh download, so a corrupt cache heals itself.
+# to a fresh download, so a corrupt cache heals itself. Direct fd
+# writes: Write-Warning follows stdout when stdout is redirected, so
+# pipe captures would miss the announcement.
 if (Test-CachedAsset) {
-  Write-Warning "using cached oxdock $VERSION"
+  [Console]::Error.WriteLine("using cached oxdock $VERSION")
 } else {
-  Write-Warning "downloading oxdock $VERSION"
+  [Console]::Error.WriteLine("downloading oxdock $VERSION")
   $tmp = Join-Path ([IO.Path]::GetTempPath()) "oxdock-install-$([Guid]::NewGuid())"
   New-Item -ItemType Directory -Force -Path $tmp | Out-Null
   try {
