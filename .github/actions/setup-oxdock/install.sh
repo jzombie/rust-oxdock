@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+# Install the OxDock binary from GitHub releases. Thin fetcher only:
+# every install decision lives in install.oxfile, executed below with
+# the fetched binary.
+#
+# Piped stdin is saved to a scratch file and bridged to install.oxfile
+# as OXDOCK_PIPED_SCRIPT.
+#
+# Content-addressed local cache: the first run downloads and verifies,
+# later runs reuse the cached tarball after re-verifying its hash, so
+# reruns need no network once warm (pin VERSION to stay fully offline).
+# Override the cache root with OXDOCK_CACHE_DIR.
+#
+#   curl -fsSL https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.sh | bash
+#
+# Pin explicitly with VERSION (a tag: the API's "latest" skips
+# pre-releases, and every release here is `-alpha` until stable):
+#
+#   VERSION=v0.24.2-alpha curl -fsSL ... | bash
+#
+# Pass INSTALL_DIR to choose the destination; the installer defaults
+# it when absent.
+#
+# Point OXDOCK_ENGINE at a branch-built binary to run the installer
+# with it instead of the downloaded release (CI smoke proves behavior
+# fixes before any release ships them). The asset still downloads and
+# verifies; only the execution engine swaps.
+#
+# Point OXDOCK_RELEASE_BASE at a mirror root (no trailing slash) to
+# fetch the asset and checksums from elsewhere; CI smoke serves a
+# staged branch build over loopback through it.
+set -euo pipefail
+
+REPO="jzombie/rust-oxdock"
+VERSION="${VERSION:-}"
+CACHE_DIR="${OXDOCK_CACHE_DIR:-$HOME/.cache/oxdock}"
+
+# Shared runner IPs burn the anonymous API quota: authenticate reads
+# when a token is present (CI bridges GITHUB_TOKEN; users never need
+# one). A function, not a flags string: quoted flag strings word-split
+# into garbage on expansion.
+gh_curl() {
+  if [ -n "${GITHUB_TOKEN:-}" ]; then
+    curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" "$@"
+  else
+    curl -fsSL "$@"
+  fi
+}
+
+if [ -z "$VERSION" ]; then
+  # No `grep -m1`: every stage consumes the body to EOF, else curl
+  # fails writing to the closed pipe under `pipefail` (exit 23).
+  # The releases endpoint yields exactly one `tag_name` per page entry.
+  VERSION=$(gh_curl "https://api.github.com/repos/$REPO/releases?per_page=1" | grep '"tag_name"' | cut -d'"' -f4)
+fi
+
+case "$(uname -s)-$(uname -m)" in
+  Darwin-arm64) TARGET="aarch64-apple-darwin" ;;
+  Linux-x86_64) TARGET="x86_64-unknown-linux-musl" ;;
+  Linux-aarch64) TARGET="aarch64-unknown-linux-musl" ;;
+  MINGW64*-x86_64 | MSYS*-x86_64 | CYGWIN*-x86_64) TARGET="x86_64-pc-windows-msvc" ;;
+  MINGW64*-aarch64 | MSYS*-aarch64 | CYGWIN*-aarch64) TARGET="aarch64-pc-windows-msvc" ;;
+  *) echo "unsupported platform: $(uname -s)-$(uname -m)" >&2; exit 1 ;;
+esac
+
+ASSET="oxdock-$TARGET.tar.gz"
+VDIR="$CACHE_DIR/$VERSION"
+mkdir -p "$VDIR"
+
+verify_cached() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    (cd "$VDIR" && grep "$ASSET\$" SHA256SUMS 2>/dev/null | sha256sum -c - >/dev/null 2>&1)
+  else
+    (cd "$VDIR" && grep "$ASSET\$" SHA256SUMS 2>/dev/null | shasum -a 256 -c - >/dev/null 2>&1)
+  fi
+}
+
+# Same hash as last time means same bytes: reuse the cached tarball
+# after re-verifying it. Anything missing or mismatched falls through
+# to a fresh download, so a corrupt cache heals itself.
+if [ -f "$VDIR/$ASSET" ] && [ -f "$VDIR/SHA256SUMS" ] && [ -f "$VDIR/install.oxfile" ] && verify_cached; then
+  echo "using cached oxdock $VERSION" >&2
+else
+  echo "downloading oxdock $VERSION" >&2
+  tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' EXIT
+  base="${OXDOCK_RELEASE_BASE:-https://github.com/$REPO/releases/download/$VERSION}"
+  base="${base%/}"
+  # Download under the release filename: `sha256sum -c` resolves names
+  # from the checksums file, so a renamed download would never verify.
+  gh_curl "$base/$ASSET" -o "$tmp/$ASSET"
+  gh_curl "$base/SHA256SUMS" -o "$tmp/SHA256SUMS"
+  # Installer logic rides with the release; tags predating it fall back
+  # to main. An explicit OXDOCK_OXFILE_URL wins over both (pre-merge
+  # testing, mirrors). Fetched here, inside population, so warm runs
+  # never touch network.
+  if [ -n "${OXDOCK_OXFILE_URL:-}" ]; then
+    gh_curl "$OXDOCK_OXFILE_URL" -o "$tmp/install.oxfile"
+  else
+    gh_curl "https://raw.githubusercontent.com/$REPO/$VERSION/install.oxfile" -o "$tmp/install.oxfile" || gh_curl "https://raw.githubusercontent.com/$REPO/main/install.oxfile" -o "$tmp/install.oxfile"
+  fi
+  if command -v sha256sum >/dev/null 2>&1; then
+    (cd "$tmp" && grep "$ASSET\$" SHA256SUMS | sha256sum -c - >/dev/null)
+  else
+    (cd "$tmp" && grep "$ASSET\$" SHA256SUMS | shasum -a 256 -c - >/dev/null)
+  fi
+  mv "$tmp/$ASSET" "$VDIR/$ASSET"
+  mv "$tmp/SHA256SUMS" "$VDIR/SHA256SUMS"
+  mv "$tmp/install.oxfile" "$VDIR/install.oxfile"
+  trap - EXIT
+  rm -rf "$tmp"
+fi
+EXPECTED=$(grep "$ASSET\$" "$VDIR/SHA256SUMS" | cut -d' ' -f1)
+# The installer runs from the cache, never the network: population
+# above stored the release's own logic beside its bytes.
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+cp "$VDIR/install.oxfile" "$tmp/install.oxfile"
+mkdir -p "$tmp/x"
+tar -xzf "$VDIR/$ASSET" -C "$tmp/x"
+chmod +x "$tmp"/x/oxdock*
+# Assignment words never glob-expand: resolve the unpacked binary
+# explicitly, and fail closed when the tarball held nothing expected.
+BIN=$(echo "$tmp"/x/oxdock*)
+[ -f "$BIN" ] || { echo "no binary unpacked from $ASSET" >&2; exit 1; }
+# INSTALL_DIR passes through untouched (possibly unset): the installer
+# owns the default. Forwarding the mapping is the stub's only job here.
+# An explicit OXDOCK_ENGINE runs the installer instead of the unpacked
+# release; it must name an executable file, and fails closed otherwise.
+ENGINE="$BIN"
+if [ -n "${OXDOCK_ENGINE:-}" ]; then
+  # Resolve relative to the caller's directory: execution below runs
+  # from the scratch dir, where a relative path would no longer point
+  # at the engine.
+  case "$OXDOCK_ENGINE" in
+    /*|[A-Za-z]:*) ENGINE="$OXDOCK_ENGINE" ;;
+    *) ENGINE="$PWD/$OXDOCK_ENGINE" ;;
+  esac
+fi
+[ -x "$ENGINE" ] || { echo "installer engine is not executable: $ENGINE" >&2; exit 1; }
+# Stdin capture, no decisions: when stdin is not a TTY, save whatever it
+# holds and bridge that file for the oxfile below as OXDOCK_PIPED_SCRIPT,
+# which alone decides run vs install. Drained here, at the end: the shell
+# has necessarily consumed its own source by now, so remaining bytes are
+# user input, never this script (`curl ... | bash` lands here at EOF and
+# installs as before; a TTY is never drained, so interactive runs never
+# hang on input).
+OXDOCK_PIPED_SCRIPT=""
+if [ ! -t 0 ]; then
+  stdin_tmp=$(mktemp)
+  trap 'rm -rf "$tmp" "$stdin_tmp"' EXIT
+  cat > "$stdin_tmp"
+  if [ -s "$stdin_tmp" ]; then
+    OXDOCK_PIPED_SCRIPT="$stdin_tmp"
+  else
+    rm -f "$stdin_tmp"
+  fi
+fi
+(cd "$tmp" && OXDOCK_ASSET="$VDIR/$ASSET" OXDOCK_SHA="$EXPECTED" OXDOCK_BIN="$BIN" OXDOCK_DIR="${INSTALL_DIR:-}" OXDOCK_VERSION="$VERSION" OXDOCK_INTERPRETER="$ENGINE" OXDOCK_PIPED_SCRIPT="$OXDOCK_PIPED_SCRIPT" "$ENGINE" install.oxfile) || {
+  code=$?
+  echo "installer failed with exit code $code" >&2
+  exit "$code"
+}

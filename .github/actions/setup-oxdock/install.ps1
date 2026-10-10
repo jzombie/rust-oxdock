@@ -1,0 +1,160 @@
+# Install the OxDock binary from GitHub releases. Thin fetcher only:
+# every install decision lives in install.oxfile, executed below with
+# the fetched binary.
+#
+# Piped stdin is saved to a scratch file and bridged to install.oxfile
+# as OXDOCK_PIPED_SCRIPT.
+#
+# Content-addressed local cache: the first run downloads and verifies,
+# later runs reuse the cached tarball after re-verifying its hash, so
+# reruns need no network once warm (pin VERSION to stay fully offline).
+# Override the cache root with OXDOCK_CACHE_DIR.
+#
+#   irm https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.ps1 | iex
+#
+# Pin explicitly with VERSION (a tag: the API's "latest" skips
+# pre-releases, and every release here is `-alpha` until stable):
+#
+#   $env:VERSION = 'v0.24.2-alpha'; irm ... | iex
+#
+# Pass INSTALL_DIR to choose the destination; the installer defaults
+# it when absent.
+#
+# Point OXDOCK_ENGINE at a branch-built binary to run the installer
+# with it instead of the downloaded release (CI smoke proves behavior
+# fixes before any release ships them). The asset still downloads and
+# verifies; only the execution engine swaps.
+#
+# Point OXDOCK_RELEASE_BASE at a mirror root (no trailing slash) to
+# fetch the asset and checksums from elsewhere; CI smoke serves a
+# staged branch build over loopback through it.
+$ErrorActionPreference = 'Stop'
+
+$Repo = "jzombie/rust-oxdock"
+$Version = $env:VERSION
+$CacheRoot = if ($env:OXDOCK_CACHE_DIR) { $env:OXDOCK_CACHE_DIR } else { Join-Path $HOME '.cache\oxdock' }
+
+# Shared runner IPs burn the anonymous API quota: authenticate reads
+# when a token is present (CI bridges GITHUB_TOKEN; users never need
+# one). An empty table sends no headers.
+$ApiHeaders = @{}
+if ($env:GITHUB_TOKEN) { $ApiHeaders['Authorization'] = "Bearer $($env:GITHUB_TOKEN)" }
+
+if (-not $Version) {
+  $Version = (Invoke-RestMethod "https://api.github.com/repos/$REPO/releases?per_page=1" -Headers $ApiHeaders)[0].tag_name
+}
+
+$ArchTarget = switch ($env:PROCESSOR_ARCHITECTURE) {
+  'AMD64' { 'x86_64-pc-windows-msvc' }
+  'ARM64' { 'aarch64-pc-windows-msvc' }
+  default { Write-Error "unsupported platform: $($env:PROCESSOR_ARCHITECTURE)"; return }
+}
+
+$Asset = "oxdock-$ArchTarget.tar.gz"
+$VDir = Join-Path $CacheRoot $Version
+New-Item -ItemType Directory -Force -Path $VDir | Out-Null
+
+function Test-CachedAsset {
+  $sums = Join-Path $VDir 'SHA256SUMS'
+  $path = Join-Path $VDir $Asset
+  $logic = Join-Path $VDir 'install.oxfile'
+  if (-not (Test-Path $path) -or -not (Test-Path $sums) -or -not (Test-Path $logic)) { return $false }
+  $expected = ((Get-Content $sums) | Where-Object { $_ -match "$Asset" } | Select-Object -First 1) -split '\s+' | Select-Object -First 1
+  if (-not $expected) { return $false }
+  $actual = (Get-FileHash $path -Algorithm SHA256).Hash
+  return $expected.ToLowerInvariant() -eq $actual.ToLowerInvariant()
+}
+
+# Same hash as last time means same bytes: reuse the cached tarball
+# after re-verifying it. Anything missing or mismatched falls through
+# to a fresh download, so a corrupt cache heals itself.
+if (Test-CachedAsset) {
+  Write-Warning "using cached oxdock $VERSION"
+} else {
+  Write-Warning "downloading oxdock $VERSION"
+  $tmp = Join-Path ([IO.Path]::GetTempPath()) "oxdock-install-$([Guid]::NewGuid())"
+  New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+  try {
+    $base = if ($env:OXDOCK_RELEASE_BASE) { $env:OXDOCK_RELEASE_BASE.TrimEnd('/') } else { "https://github.com/$REPO/releases/download/$VERSION" }
+    Invoke-WebRequest "$base/$Asset" -Headers $ApiHeaders -OutFile (Join-Path $tmp 'asset.tar.gz')
+    Invoke-WebRequest "$base/SHA256SUMS" -Headers $ApiHeaders -OutFile (Join-Path $tmp 'SHA256SUMS')
+    $line = (Get-Content (Join-Path $tmp 'SHA256SUMS')) | Where-Object { $_ -match "$Asset" } | Select-Object -First 1
+    if (-not $line) { throw "asset $Asset missing from SHA256SUMS" }
+    $expected = ($line -split '\s+')[0]
+    $actual = (Get-FileHash (Join-Path $tmp 'asset.tar.gz') -Algorithm SHA256).Hash
+    if ($expected.ToLowerInvariant() -ne $actual.ToLowerInvariant()) { throw "checksum mismatch for $Asset" }
+    # Installer logic rides with the release; tags predating it fall
+    # back to main. An explicit OXDOCK_OXFILE_URL wins over both
+    # (pre-merge testing, mirrors). Fetched here, inside population,
+    # so warm runs never touch network.
+    if ($env:OXDOCK_OXFILE_URL) {
+      Invoke-WebRequest $env:OXDOCK_OXFILE_URL -Headers $ApiHeaders -OutFile (Join-Path $tmp 'install.oxfile')
+    } else {
+      $raw = "https://raw.githubusercontent.com/$REPO/$VERSION/install.oxfile"
+      try { Invoke-WebRequest $raw -Headers $ApiHeaders -OutFile (Join-Path $tmp 'install.oxfile') } catch { Invoke-WebRequest "https://raw.githubusercontent.com/$REPO/main/install.oxfile" -Headers $ApiHeaders -OutFile (Join-Path $tmp 'install.oxfile') }
+    }
+    Move-Item (Join-Path $tmp 'asset.tar.gz') (Join-Path $VDir $Asset) -Force
+    Move-Item (Join-Path $tmp 'SHA256SUMS') (Join-Path $VDir 'SHA256SUMS') -Force
+    Move-Item (Join-Path $tmp 'install.oxfile') (Join-Path $VDir 'install.oxfile') -Force
+  } finally {
+    Remove-Item -Recurse -Force $tmp
+  }
+}
+$Expected = ((Get-Content (Join-Path $VDir 'SHA256SUMS')) | Where-Object { $_ -match "$Asset" } | Select-Object -First 1) -split '\s+' | Select-Object -First 1
+# The installer runs from the cache, never the network.
+$tmp = Join-Path ([IO.Path]::GetTempPath()) "oxdock-install-$([Guid]::NewGuid())"
+New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+try {
+  Copy-Item (Join-Path $VDir 'install.oxfile') (Join-Path $tmp 'install.oxfile') -Force
+  New-Item -ItemType Directory -Force -Path (Join-Path $tmp 'x') | Out-Null
+  tar.exe -xzf (Join-Path $VDir $Asset) -C (Join-Path $tmp 'x')
+  $env:OXDOCK_ASSET = (Join-Path $VDir $Asset)
+  $env:OXDOCK_BIN = (Join-Path $tmp 'x\oxdock.exe')
+  # Pass-through only (possibly unset, which removes it): the installer
+  # owns the default. The name mapping lives here because only the stub
+  # knows both sides. Separators go native: GitHub contexts use forward
+  # slashes even on Windows, and the guard rejects the mix.
+  if ($env:INSTALL_DIR) { $env:OXDOCK_DIR = $env:INSTALL_DIR.Replace('/', '\') }
+  $env:OXDOCK_SHA = $Expected
+  $env:OXDOCK_VERSION = $Version
+  # An explicit OXDOCK_ENGINE runs the installer instead of the
+  # unpacked release; it must name an existing file, and fails closed
+  # otherwise.
+  # Resolve relative to the caller's directory: execution below runs
+  # from the scratch dir, where a relative path would no longer point
+  # at the engine.
+  $Engine = if ($env:OXDOCK_ENGINE) { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($env:OXDOCK_ENGINE) } else { (Join-Path $tmp 'x\oxdock.exe') }
+  if (-not (Test-Path $Engine)) { throw "installer engine missing: $Engine" }
+  # Stdin capture, no decisions: collect any piped input and bridge that
+  # file for the oxfile below as OXDOCK_PIPED_SCRIPT, which alone decides
+  # run vs install. Collected here, at the end: the pipeline has
+  # necessarily delivered the whole script by now, so remaining input is
+  # user data (`irm ... | iex` lands here with none and installs as
+  # before). Pipeline objects arrive via $input, which console-stdin
+  # redirection never sees: a piped string lives in $input while
+  # [Console]::In sits at EOF, so $input is read first and redirected
+  # bytes only as fallback. A TTY is never drained.
+  $env:OXDOCK_PIPED_SCRIPT = $null
+  $stdinText = [string]::Join("`n", @($input))
+  if ([string]::IsNullOrWhiteSpace($stdinText) -and [Console]::IsInputRedirected) {
+    $stdinText = [Console]::In.ReadToEnd()
+  }
+  if (-not [string]::IsNullOrWhiteSpace($stdinText)) {
+    $stdinFile = Join-Path $tmp 'piped.oxfile'
+    [IO.File]::WriteAllText($stdinFile, $stdinText)
+    $env:OXDOCK_PIPED_SCRIPT = $stdinFile
+  }
+  $env:OXDOCK_INTERPRETER = $Engine
+  Push-Location $tmp
+  try {
+    & $Engine 'install.oxfile'
+    $code = $LASTEXITCODE
+    if ($code -ne 0) { throw "installer failed with exit code $code" }
+  } finally {
+    # Restore first: deleting the working directory while standing
+    # inside it fails as in use and would mask the real error.
+    Pop-Location
+  }
+} finally {
+  Remove-Item -Recurse -Force $tmp
+}
