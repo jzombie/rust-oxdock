@@ -1,11 +1,6 @@
-# Setup the OxDock interpreter for `shell: oxdock` steps. Dogfoods the
-# repo's own installers (platform detection, checksums, placement
-# already live there) instead of reimplementing fetching: the action
-# only bridges inputs and PATH. The installer copies beside this file
-# are rendered by docs-gen from the same templates as the root files,
-# so there is one source and the docs-fresh drift gate keeps them
-# identical; remote consumers check out just this directory, which is
-# why the copies live here instead of a traversal above it.
+# Install the oxdock interpreter for `shell: oxdock` steps.
+# The installers beside this file are generated from the repo
+# templates; remote consumers check out only this directory.
 name: Setup OxDock engine
 description: Install the oxdock interpreter so later steps can use shell oxdock.
 
