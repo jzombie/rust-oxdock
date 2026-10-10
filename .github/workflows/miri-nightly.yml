@@ -72,6 +72,11 @@ jobs:
       - name: Run Miri (unit tests only)
         run: cargo miri test --workspace --all-features --lib --tests
 
+      - name: Install OxDock engine
+        uses: ./.github/actions/setup-oxdock
+        with:
+          version: v0.24.2-alpha
+
       - name: Report Miri coverage
         shell: bash
         # Listings don't need interpretation: Miri ignores are
@@ -82,11 +87,14 @@ jobs:
         # (see the setup step above), matching every other step here;
         # no toolchain override: the workspace does not compile on
         # stable, so ambient nightly is required, not optional.
+        # Pinned engine, never a source build: reporting only runs the
+        # badge script, so compiling the tool would be pure waste.
         env:
+          OXDOCK_WORKSPACE_ROOT: ${{ github.workspace }}
           MIRI_TEST_CMD: RUSTFLAGS="--cfg miri" cargo test --workspace --all-features --lib --tests
         run: |
           set -euo pipefail
-          cargo run -p oxdock -- ./scripts/gha/gha-miri-badge.oxfile
+          oxdock ./scripts/gha/gha-miri-badge.oxfile
 
       - name: Publish Miri coverage badge
         if: github.ref == 'refs/heads/main'

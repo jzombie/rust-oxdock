@@ -35,14 +35,19 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      # Pinned engine, never a source build: this job only runs the
+      # convergence script, so compiling the tool would be pure waste.
+      - name: Install OxDock engine
+        uses: ./.github/actions/setup-oxdock
+        with:
+          version: v0.24.2-alpha
 
       - name: Apply settings
         shell: bash
         env:
+          OXDOCK_WORKSPACE_ROOT: ${{ github.workspace }}
           GH_TOKEN: ${{ secrets.SETTINGS_PAT }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           set -euo pipefail
-          cargo run -p oxdock -- ./scripts/gha/gha-apply-settings.oxfile
+          oxdock ./scripts/gha/gha-apply-settings.oxfile
