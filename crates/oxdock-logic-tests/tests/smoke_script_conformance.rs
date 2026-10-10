@@ -101,12 +101,29 @@ fn smoke_steps_parse_and_cover_all_legs() -> Result<()> {
         "using cached",
         "install.sh | bash",
         "\"oxdock\", \"--version\"",
+        // Version identity against source truth, not a second binary.
+        "LOAD_TOML(\"Cargo.toml\")",
+        // Configured shell: unix legs put the install dir on PATH so
+        // bare names reach the product on both platforms.
+        "/.local/bin:{{ env:PATH }}",
         "installed oxdock",
         "| iex",
         "INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT",
     ] {
         assert!(
             joined.contains(marker),
+            "smoke orchestration covers '{marker}'"
+        );
+    }
+    // Renamed bootstrap: bare names in the blocks above can only mean
+    // the binary just installed, with no shadow on PATH. These live in
+    // yaml steps, so they assert against the whole workflow text.
+    for marker in [
+        "binary-name: oxdock-engine",
+        "shell: oxdock-engine --script {0}",
+    ] {
+        assert!(
+            text.contains(marker),
             "smoke orchestration covers '{marker}'"
         );
     }
