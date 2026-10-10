@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [0.24.2-alpha] - 2026-10-09
+
+### Added
+
+- Piped stdin runs instead of installing: the stubs save piped bytes and bridge them to `install.oxfile`, which reinvokes the fetched interpreter on that script and places nothing. The run-vs-install decision lives in the oxfile; the stubs only capture and bridge.
+
+### Changed
+
+- Linux release archives are musl-static (asset names are now `*-unknown-linux-musl.tar.gz`): they run in scratch containers with no libc. Windows binaries link the CRT statically, so downloaders need no VCRedist.
+- The installer derives the default destination from `HOME`/`USERPROFILE` again: neither was bridged into the script environment, so stock installs failed creating `/.local/bin` instead of defaulting to `~/.local/bin`.
+
+### Fixed
+
+- A host with no home variable and no `INSTALL_DIR` fails loudly at the gate naming `INSTALL_DIR` with the exact syntax for its shell, instead of failing obscurely inside directory creation.
+- Release-tag resolution no longer pipes curl through `grep -m1`: the early pipe close made curl fail under `pipefail` (exit 23), flaking the smoke matrix and the unpinned installer path. Every stage now consumes the body to EOF.
+
 ## [0.24.1-alpha] - 2026-10-09
 
 ### Added

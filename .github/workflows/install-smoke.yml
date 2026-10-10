@@ -100,8 +100,8 @@ jobs:
           # real release asset dir; the target mapping mirrors the stub.
           case "$(uname -s)-$(uname -m)" in
             Darwin-arm64) target="aarch64-apple-darwin"; assetbin="oxdock" ;;
-            Linux-x86_64) target="x86_64-unknown-linux-gnu"; assetbin="oxdock" ;;
-            Linux-aarch64) target="aarch64-unknown-linux-gnu"; assetbin="oxdock" ;;
+            Linux-x86_64) target="x86_64-unknown-linux-musl"; assetbin="oxdock" ;;
+            Linux-aarch64) target="aarch64-unknown-linux-musl"; assetbin="oxdock" ;;
             MINGW64*-x86_64 | MSYS*-x86_64 | CYGWIN*-x86_64) target="x86_64-pc-windows-msvc"; assetbin="oxdock.exe" ;;
             MINGW64*-aarch64 | MSYS*-aarch64 | CYGWIN*-aarch64) target="aarch64-pc-windows-msvc"; assetbin="oxdock.exe" ;;
             *) echo "unsupported platform: $(uname -s)-$(uname -m)" >&2; exit 1 ;;
@@ -125,15 +125,24 @@ jobs:
           fi
           echo "path=$bin" >> "$GITHUB_OUTPUT"
 
+      # TODO(release-0.24.2): re-enable together with the
+      # newest-release legs below; this step feeds only them. Skipped
+      # because those legs 404 by construction until musl assets
+      # publish (branch stub requests musl names the 0.24.1 release
+      # lacks).
       # Pinned by the newest-release legs below: the stub resolves the
       # newest tag itself there, and the workflow must expect the same
       # one. Authenticated: shared runner IPs burn the anonymous quota.
+      # No `grep -m1`: every stage must consume the body to EOF, else
+      # curl fails writing to the closed pipe under pipefail (exit 23).
+      # `per_page=1` yields exactly one `tag_name`, so nothing is lost.
       - name: Resolve newest release
         id: smoke-version
+        if: false
         shell: bash
         run: |
           set -euo pipefail
-          tag=$(curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" "https://api.github.com/repos/jzombie/rust-oxdock/releases?per_page=1" | grep -m1 '"tag_name"' | cut -d'"' -f4)
+          tag=$(curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" "https://api.github.com/repos/jzombie/rust-oxdock/releases?per_page=1" | grep '"tag_name"' | cut -d'"' -f4)
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
 
@@ -196,12 +205,95 @@ jobs:
             Stop-Process -Id $srv.Id -Force
           }
 
+      # Ephemeral run: a piped script executes with the fetched engine
+      # and places nothing. INSTALL_DIR points at a fresh dir that must
+      # stay absent; VERSION stays pinned so no release API is involved.
+      # The run-vs-install decision lives in install.oxfile; the stub
+      # only bridges the piped bytes. The stub arrives via process
+      # substitution (never `curl | bash`, which would feed the program
+      # itself on fd 0): this is the exact one-liner downloaders paste,
+      # with `cat` standing in for `curl` to keep the branch hermetic.
+      # TODO(single-source-commands): move this one-liner into a CLI
+      # template file that the README renders via docs-gen and this leg
+      # executes, so a published command can never drift from a tested
+      # one. A README command that never ran in CI is the worst outcome.
+      # Keep it unpinned: main ships before versions cut, so a pinned
+      # VERSION would rot on arrival.
+      - name: Ephemeral run via install.sh
+        if: ${{ runner.os != 'Windows' }}
+        shell: bash
+        env:
+          VERSION: local-test
+          INSTALL_DIR: ${{ runner.temp }}/oxbin-ephemeral
+          OXDOCK_RELEASE_BASE: http://127.0.0.1:18731
+          OXDOCK_ENGINE: ${{ steps.branch-bin.outputs.path }}
+        run: |
+          set -euo pipefail
+          python3 -m http.server 18731 --directory "${RUNNER_TEMP}/oxdock-stage" >/dev/null 2>&1 &
+          srv=$!
+          trap 'kill $srv 2>/dev/null' EXIT
+          ready=0
+          for i in $(seq 1 50); do
+            if curl -fsS "http://127.0.0.1:18731/" >/dev/null 2>&1; then ready=1; break; fi
+            sleep 0.1
+          done
+          [ "$ready" = 1 ]
+          # Isolated scratch: the stub's mktemp dirs land here, so an
+          # empty dir afterward proves per-run cleanup, not just
+          # placement absence.
+          export TMPDIR="${RUNNER_TEMP}/ephemeral-tmp"
+          mkdir -p "$TMPDIR"
+          printf 'IMPORT [STD]\nECHO "via-ephemeral"\n' | bash <(cat ./install.sh) 2>&1 | tee "${RUNNER_TEMP}/ephemeral.log"
+          grep -q "via-ephemeral" "${RUNNER_TEMP}/ephemeral.log"
+          [ ! -e "${{ runner.temp }}/oxbin-ephemeral" ]
+          [ -z "$(ls -A "$TMPDIR")" ]
+
+      # TODO(single-source-commands): same single-sourcing as the sh
+      # leg above; both one-liners move to the CLI template file together.
+      - name: Ephemeral run via install.ps1
+        if: ${{ runner.os == 'Windows' }}
+        shell: pwsh
+        env:
+          VERSION: local-test
+          INSTALL_DIR: ${{ runner.temp }}\oxbin-ephemeral
+          OXDOCK_RELEASE_BASE: http://127.0.0.1:18731
+          OXDOCK_ENGINE: ${{ steps.branch-bin.outputs.path }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+          $srv = Start-Process python3 -ArgumentList @('-m', 'http.server', '18731', '--directory', (Join-Path $env:RUNNER_TEMP 'oxdock-stage')) -PassThru
+          try {
+            $ready = $false
+            for ($i = 0; $i -lt 50 -and -not $ready; $i++) {
+              try { $null = Invoke-WebRequest 'http://127.0.0.1:18731/' -UseBasicParsing -TimeoutSec 2; $ready = $true } catch { Start-Sleep -Milliseconds 100 }
+            }
+            if (-not $ready) { throw "local stage server never came up" }
+            # In-memory scriptblock, never `irm | iex` (which would feed the
+            # program itself on the pipe): the exact one-liner downloaders
+            # paste, with Get-Content standing in for irm to keep the
+            # branch hermetic.
+            # Isolated scratch: GetTempPath honors TMP, so an empty dir
+            # afterward proves per-run cleanup, not just placement absence.
+            $env:TMP = Join-Path $env:RUNNER_TEMP 'ephemeral-tmp'
+            New-Item -ItemType Directory -Force -Path $env:TMP | Out-Null
+            "IMPORT [STD]`nECHO via-ephemeral" | & ([scriptblock]::Create((Get-Content -Raw .\install.ps1))) *>&1 | Tee-Object (Join-Path $env:RUNNER_TEMP 'ephemeral.log')
+            if (-not (Select-String "via-ephemeral" (Join-Path $env:RUNNER_TEMP 'ephemeral.log'))) { throw "ephemeral run produced no output" }
+            if (Test-Path (Join-Path $env:RUNNER_TEMP 'oxbin-ephemeral')) { throw "ephemeral run placed files" }
+            if (Get-ChildItem $env:TMP) { throw "scratch leaked temp files" }
+          } finally {
+            Stop-Process -Id $srv.Id -Force
+          }
+
+      # TODO(release-0.24.2): re-enable once the newest published
+      # release ships musl assets; this 404s by construction until
+      # then. Original gate was `runner.os != 'Windows'`. Re-enabling
+      # may rewrite these legs in OxDock instead of shell.
       # TODO: consolidate on exact `--version` once the newest published
       # release supports the flag. This leg leaves VERSION unset so the
       # stub's release-API resolution executes for real; the payload is
       # whatever is newest, checked via its `--help` menu.
       - name: Install newest release via install.sh
-        if: ${{ runner.os != 'Windows' }}
+        if: false
         shell: bash
         env:
           INSTALL_DIR: ${{ runner.temp }}/oxbin-newest
@@ -215,12 +307,14 @@ jobs:
           "${INSTALL_DIR}/oxdock" --help | grep -q "$SMOKE_VERSION"
           printf 'IMPORT [STD]\nECHO "via-stdin"\n' | "${INSTALL_DIR}/oxdock" --script - | grep -q "via-stdin"
 
+      # TODO(release-0.24.2): re-enable with the sh leg above.
+      # Original gate was `runner.os == 'Windows'`.
       # TODO: consolidate on exact `--version` once the newest published
       # release supports the flag. Same contract as the sh leg above.
       # `*>&1` merges every stream: the stub announces via
       # Write-Warning, which `2>&1` never sees.
       - name: Install newest release via install.ps1
-        if: ${{ runner.os == 'Windows' }}
+        if: false
         shell: pwsh
         env:
           INSTALL_DIR: ${{ runner.temp }}\oxbin-newest

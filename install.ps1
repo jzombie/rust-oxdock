@@ -2,6 +2,9 @@
 # every install decision lives in install.oxfile, executed below with
 # the fetched binary.
 #
+# Piped stdin is saved to a scratch file and bridged to install.oxfile
+# as OXDOCK_PIPED_SCRIPT.
+#
 # Content-addressed local cache: the first run downloads and verifies,
 # later runs reuse the cached tarball after re-verifying its hash, so
 # reruns need no network once warm (pin VERSION to stay fully offline).
@@ -12,7 +15,7 @@
 # Pin explicitly with VERSION (a tag: the API's "latest" skips
 # pre-releases, and every release here is `-alpha` until stable):
 #
-#   $env:VERSION = 'v0.24.1-alpha'; irm ... | iex
+#   $env:VERSION = 'v0.24.2-alpha'; irm ... | iex
 #
 # Pass INSTALL_DIR to choose the destination; the installer defaults
 # it when absent.
@@ -122,6 +125,26 @@ try {
   # at the engine.
   $Engine = if ($env:OXDOCK_ENGINE) { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($env:OXDOCK_ENGINE) } else { (Join-Path $tmp 'x\oxdock.exe') }
   if (-not (Test-Path $Engine)) { throw "installer engine missing: $Engine" }
+  # Stdin capture, no decisions: collect any piped input and bridge that
+  # file for the oxfile below as OXDOCK_PIPED_SCRIPT, which alone decides
+  # run vs install. Collected here, at the end: the pipeline has
+  # necessarily delivered the whole script by now, so remaining input is
+  # user data (`irm ... | iex` lands here with none and installs as
+  # before). Pipeline objects arrive via $input, which console-stdin
+  # redirection never sees: a piped string lives in $input while
+  # [Console]::In sits at EOF, so $input is read first and redirected
+  # bytes only as fallback. A TTY is never drained.
+  $env:OXDOCK_PIPED_SCRIPT = $null
+  $stdinText = [string]::Join("`n", @($input))
+  if ([string]::IsNullOrWhiteSpace($stdinText) -and [Console]::IsInputRedirected) {
+    $stdinText = [Console]::In.ReadToEnd()
+  }
+  if (-not [string]::IsNullOrWhiteSpace($stdinText)) {
+    $stdinFile = Join-Path $tmp 'piped.oxfile'
+    [IO.File]::WriteAllText($stdinFile, $stdinText)
+    $env:OXDOCK_PIPED_SCRIPT = $stdinFile
+  }
+  $env:OXDOCK_INTERPRETER = $Engine
   Push-Location $tmp
   try {
     & $Engine 'install.oxfile'

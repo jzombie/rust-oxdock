@@ -3,6 +3,9 @@
 # every install decision lives in install.oxfile, executed below with
 # the fetched binary.
 #
+# Piped stdin is saved to a scratch file and bridged to install.oxfile
+# as OXDOCK_PIPED_SCRIPT.
+#
 # Content-addressed local cache: the first run downloads and verifies,
 # later runs reuse the cached tarball after re-verifying its hash, so
 # reruns need no network once warm (pin VERSION to stay fully offline).
@@ -13,7 +16,7 @@
 # Pin explicitly with VERSION (a tag: the API's "latest" skips
 # pre-releases, and every release here is `-alpha` until stable):
 #
-#   VERSION=v0.24.1-alpha curl -fsSL ... | bash
+#   VERSION=v0.24.2-alpha curl -fsSL ... | bash
 #
 # Pass INSTALL_DIR to choose the destination; the installer defaults
 # it when absent.
@@ -45,13 +48,16 @@ gh_curl() {
 }
 
 if [ -z "$VERSION" ]; then
-  VERSION=$(gh_curl "https://api.github.com/repos/$REPO/releases?per_page=1" | grep -m1 '"tag_name"' | cut -d'"' -f4)
+  # No `grep -m1`: every stage consumes the body to EOF, else curl
+  # fails writing to the closed pipe under `pipefail` (exit 23).
+  # The releases endpoint yields exactly one `tag_name` per page entry.
+  VERSION=$(gh_curl "https://api.github.com/repos/$REPO/releases?per_page=1" | grep '"tag_name"' | cut -d'"' -f4)
 fi
 
 case "$(uname -s)-$(uname -m)" in
   Darwin-arm64) TARGET="aarch64-apple-darwin" ;;
-  Linux-x86_64) TARGET="x86_64-unknown-linux-gnu" ;;
-  Linux-aarch64) TARGET="aarch64-unknown-linux-gnu" ;;
+  Linux-x86_64) TARGET="x86_64-unknown-linux-musl" ;;
+  Linux-aarch64) TARGET="aarch64-unknown-linux-musl" ;;
   MINGW64*-x86_64 | MSYS*-x86_64 | CYGWIN*-x86_64) TARGET="x86_64-pc-windows-msvc" ;;
   MINGW64*-aarch64 | MSYS*-aarch64 | CYGWIN*-aarch64) TARGET="aarch64-pc-windows-msvc" ;;
   *) echo "unsupported platform: $(uname -s)-$(uname -m)" >&2; exit 1 ;;
@@ -132,7 +138,25 @@ if [ -n "${OXDOCK_ENGINE:-}" ]; then
   esac
 fi
 [ -x "$ENGINE" ] || { echo "installer engine is not executable: $ENGINE" >&2; exit 1; }
-(cd "$tmp" && OXDOCK_ASSET="$VDIR/$ASSET" OXDOCK_SHA="$EXPECTED" OXDOCK_BIN="$BIN" OXDOCK_DIR="${INSTALL_DIR:-}" OXDOCK_VERSION="$VERSION" "$ENGINE" install.oxfile) || {
+# Stdin capture, no decisions: when stdin is not a TTY, save whatever it
+# holds and bridge that file for the oxfile below as OXDOCK_PIPED_SCRIPT,
+# which alone decides run vs install. Drained here, at the end: the shell
+# has necessarily consumed its own source by now, so remaining bytes are
+# user input, never this script (`curl ... | bash` lands here at EOF and
+# installs as before; a TTY is never drained, so interactive runs never
+# hang on input).
+OXDOCK_PIPED_SCRIPT=""
+if [ ! -t 0 ]; then
+  stdin_tmp=$(mktemp)
+  trap 'rm -rf "$tmp" "$stdin_tmp"' EXIT
+  cat > "$stdin_tmp"
+  if [ -s "$stdin_tmp" ]; then
+    OXDOCK_PIPED_SCRIPT="$stdin_tmp"
+  else
+    rm -f "$stdin_tmp"
+  fi
+fi
+(cd "$tmp" && OXDOCK_ASSET="$VDIR/$ASSET" OXDOCK_SHA="$EXPECTED" OXDOCK_BIN="$BIN" OXDOCK_DIR="${INSTALL_DIR:-}" OXDOCK_VERSION="$VERSION" OXDOCK_INTERPRETER="$ENGINE" OXDOCK_PIPED_SCRIPT="$OXDOCK_PIPED_SCRIPT" "$ENGINE" install.oxfile) || {
   code=$?
   echo "installer failed with exit code $code" >&2
   exit "$code"

@@ -21,9 +21,10 @@
 # and custom Rust plugins cannot cross the boundary (those pipelines
 # still build docs-gen locally).
 #
-# Every run renders and then fails on drift, so generated docs can
-# never go stale silently. Read-only throughout: no secrets, no
-# environment, no writes beyond the rendered tree.
+# Every run builds the workspace (so proc-macro outputs are fresh),
+# renders, and then fails on drift, so generated docs can never go
+# stale silently. No secrets, no environment; writes stay within the
+# rendered tree plus the gitignored build cache.
 
 name: docs
 
@@ -62,6 +63,16 @@ jobs:
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+
+      # Build the caller's workspace first: proc macros (e.g.
+      # oxdock_embed! regenerating usage-prebuilt) execute at build
+      # time, and the render below reads their outputs. Without this,
+      # the drift check can pass on stale macro products.
+      - name: Build workspace macros
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --workspace --all-features
 
       # Explicit --root is load-bearing, not redundant: workspace
       # discovery prefers the built binary's own manifest directory over

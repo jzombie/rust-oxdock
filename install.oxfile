@@ -1,33 +1,54 @@
 # Installs the downloaded OxDock release binary after running cross-platform
 # interpreter bootstrapper (install.sh on Unix; install.ps1 on Windows).
+# Piped stdin runs instead of installing: the stub saves any piped bytes
+# and bridges that file as OXDOCK_PIPED_SCRIPT, and the fetched
+# interpreter (bridged as OXDOCK_INTERPRETER) reinvokes itself on that
+# script below. Nothing is placed and no destination is derived in run
+# mode.
 
 IMPORT [STD]
 
-INHERIT_ENV [OXDOCK_ASSET, OXDOCK_SHA, OXDOCK_BIN, OXDOCK_DIR, OXDOCK_VERSION]
+INHERIT_ENV [OXDOCK_ASSET, OXDOCK_SHA, OXDOCK_BIN, OXDOCK_DIR, OXDOCK_VERSION, HOME, USERPROFILE, OXDOCK_PIPED_SCRIPT, OXDOCK_INTERPRETER]
 
 # Full filesystem access: installation writes outside any workspace.
 WORKSPACE SYSTEM
 
-# Install locations arrive through the stub environment.
-LET $asset: STRING = "{{ env:OXDOCK_ASSET }}"
-LET $want: STRING = "{{ env:OXDOCK_SHA }}"
-LET $bin: STRING = "{{ env:OXDOCK_BIN }}"
-LET $dir: STRING = "{{ env:OXDOCK_DIR }}"
-IF $dir == "" {
-    [family:unix] $dir = "{{ env:HOME }}/.local/bin"
-    [family:windows] $dir = "{{ env:USERPROFILE }}/.local/bin"
+# Run vs install is decided here, never in the stub: a non-empty piped
+# script bridge means execute it with the fetched interpreter.
+LET $piped: STRING = "{{ env:OXDOCK_PIPED_SCRIPT }}"
+IF $piped != "" {
+    RUN ["{{ env:OXDOCK_INTERPRETER }}", "{{ env:OXDOCK_PIPED_SCRIPT }}"]
+} ELSE {
+    # Install locations arrive through the stub environment. HOME and
+    # USERPROFILE ride along only to default the destination below: the
+    # stub never sets them, the host environment supplies them.
+    LET $asset: STRING = "{{ env:OXDOCK_ASSET }}"
+    LET $want: STRING = "{{ env:OXDOCK_SHA }}"
+    LET $bin: STRING = "{{ env:OXDOCK_BIN }}"
+    LET $dir: STRING = "{{ env:OXDOCK_DIR }}"
+    IF $dir == "" {
+        [family:unix] LET $home: STRING = "{{ env:HOME }}"
+        [family:windows] LET $home: STRING = "{{ env:USERPROFILE }}"
+        IF $home == "" {
+            [family:unix] ECHO "no install directory: HOME is unset, so set INSTALL_DIR (example: INSTALL_DIR=\"$HOME/.local/bin\")"
+            [family:windows] ECHO "no install directory: USERPROFILE is unset, so set INSTALL_DIR (example: $env:INSTALL_DIR = \"$env:USERPROFILE\\.local\\bin\")"
+            EXIT 1
+        }
+        [family:unix] $dir = "{{ env:HOME }}/.local/bin"
+        [family:windows] $dir = "{{ env:USERPROFILE }}/.local/bin"
+    }
+
+    # Refuse to place anything the checksum rejects.
+    LET $actual: STRING = HASH_SHA256 $asset
+    # The digest command terminates its line: the comparison includes it.
+    # Rust never emits \r\n here on any platform, so this is exact.
+    ASSERT_EQ $actual "{{ $want }}\n"
+
+    # Place the verified binary and report where it landed.
+    MKDIR $dir
+    LET $dest: STRING = "{{ $dir }}/oxdock"
+    [family:windows] $dest = "{{ $dir }}/oxdock.exe"
+    COPY $bin $dest
+    ECHO "installed oxdock {{ env:OXDOCK_VERSION }} to {{ $dir }}"
+    ECHO "ensure {{ $dir }} is on PATH"
 }
-
-# Refuse to place anything the checksum rejects.
-LET $actual: STRING = HASH_SHA256 $asset
-# The digest command terminates its line: the comparison includes it.
-# Rust never emits \r\n here on any platform, so this is exact.
-ASSERT_EQ $actual "{{ $want }}\n"
-
-# Place the verified binary and report where it landed.
-MKDIR $dir
-LET $dest: STRING = "{{ $dir }}/oxdock"
-[family:windows] $dest = "{{ $dir }}/oxdock.exe"
-COPY $bin $dest
-ECHO "installed oxdock {{ env:OXDOCK_VERSION }} to {{ $dir }}"
-ECHO "ensure {{ $dir }} is on PATH"
