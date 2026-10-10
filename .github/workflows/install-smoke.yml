@@ -221,19 +221,23 @@ jobs:
           INSTALL_DIR_WIN: ${{ runner.temp }}\oxbin
           INSTALL_BIN_NIX: ${{ runner.temp }}/oxbin/oxdock
           INSTALL_BIN_WIN: ${{ runner.temp }}\oxbin\oxdock.exe
-          OXDOCK_RELEASE_BASE: http://127.0.0.1:18731
+          # Loopback port for this leg; server, probe, and release base derive from it.
+          SMOKE_PORT: 18731
           OXDOCK_ENGINE: ${{ steps.branch-bin.outputs.path }}
         run: |
           IMPORT [STD]
-          INHERIT_ENV [OXDOCK_ENGINE, OXDOCK_OXFILE_URL, OXDOCK_RELEASE_BASE, INSTALL_DIR_NIX, INSTALL_DIR_WIN, INSTALL_BIN_NIX, INSTALL_BIN_WIN, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, HOME, USERPROFILE, GITHUB_TOKEN]
+          INHERIT_ENV [OXDOCK_ENGINE, OXDOCK_OXFILE_URL, SMOKE_PORT, INSTALL_DIR_NIX, INSTALL_DIR_WIN, INSTALL_BIN_NIX, INSTALL_BIN_WIN, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, HOME, USERPROFILE, GITHUB_TOKEN]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           [family:unix] ENV INSTALL_DIR="{{ env:INSTALL_DIR_NIX }}"
           [family:windows] ENV INSTALL_DIR="{{ env:INSTALL_DIR_WIN }}"
-          LET $srv: HANDLE = ASYNC { RUN ["python3", "-m", "http.server", "18731", "--directory", "{{ env:RUNNER_TEMP }}/oxdock-stage"] }
+          # Own loopback port per leg, bound to IPv4 explicitly: a server
+          # lingering from an earlier leg must never fail this bind.
+          ENV OXDOCK_RELEASE_BASE="http://127.0.0.1:{{ env:SMOKE_PORT }}"
+          LET $srv: HANDLE = ASYNC { RUN ["python3", "-m", "http.server", "{{ env:SMOKE_PORT }}", "--bind", "127.0.0.1", "--directory", "{{ env:RUNNER_TEMP }}/oxdock-stage"] }
           SLEEP 5s
-          [family:unix] RUN ["curl", "-fsS", "http://127.0.0.1:18731/"]
-          [family:windows] RUN ["curl.exe", "-fsS", "http://127.0.0.1:18731/"]
+          [family:unix] RUN ["curl", "-fsS", "http://127.0.0.1:{{ env:SMOKE_PORT }}/"]
+          [family:windows] RUN ["curl.exe", "-fsS", "http://127.0.0.1:{{ env:SMOKE_PORT }}/"]
           [family:unix] RUN ["bash", "./install.sh"]
           [family:windows] RUN ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ".\\install.ps1"]
           LET $p1: PIPE
@@ -263,11 +267,12 @@ jobs:
           VERSION: local-test
           INSTALL_DIR_NIX: ${{ runner.temp }}/oxbin-ephemeral
           INSTALL_DIR_WIN: ${{ runner.temp }}\oxbin-ephemeral
-          OXDOCK_RELEASE_BASE: http://127.0.0.1:18731
+          # Loopback port for this leg; server, probe, and release base derive from it.
+          SMOKE_PORT: 18732
           OXDOCK_ENGINE: ${{ steps.branch-bin.outputs.path }}
         run: |
           IMPORT [STD]
-          INHERIT_ENV [OXDOCK_ENGINE, OXDOCK_OXFILE_URL, OXDOCK_RELEASE_BASE, INSTALL_DIR_NIX, INSTALL_DIR_WIN, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, HOME, USERPROFILE, GITHUB_TOKEN]
+          INHERIT_ENV [OXDOCK_ENGINE, OXDOCK_OXFILE_URL, SMOKE_PORT, INSTALL_DIR_NIX, INSTALL_DIR_WIN, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, HOME, USERPROFILE, GITHUB_TOKEN]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           [family:unix] ENV INSTALL_DIR="{{ env:INSTALL_DIR_NIX }}"
@@ -275,10 +280,12 @@ jobs:
           ENV TMPDIR="{{ env:GITHUB_WORKSPACE }}/target/ephemeral-tmp"
           [family:windows] ENV TMP="{{ env:GITHUB_WORKSPACE }}/target/ephemeral-tmp"
           MKDIR "{{ env:GITHUB_WORKSPACE }}/target/ephemeral-tmp"
-          LET $srv: HANDLE = ASYNC { RUN ["python3", "-m", "http.server", "18731", "--directory", "{{ env:RUNNER_TEMP }}/oxdock-stage"] }
+          # Own loopback port for this leg; shared binds flake across legs.
+          ENV OXDOCK_RELEASE_BASE="http://127.0.0.1:{{ env:SMOKE_PORT }}"
+          LET $srv: HANDLE = ASYNC { RUN ["python3", "-m", "http.server", "{{ env:SMOKE_PORT }}", "--bind", "127.0.0.1", "--directory", "{{ env:RUNNER_TEMP }}/oxdock-stage"] }
           SLEEP 5s
-          [family:unix] RUN ["curl", "-fsS", "http://127.0.0.1:18731/"]
-          [family:windows] RUN ["curl.exe", "-fsS", "http://127.0.0.1:18731/"]
+          [family:unix] RUN ["curl", "-fsS", "http://127.0.0.1:{{ env:SMOKE_PORT }}/"]
+          [family:windows] RUN ["curl.exe", "-fsS", "http://127.0.0.1:{{ env:SMOKE_PORT }}/"]
           [family:unix] RUN ["bash", "scripts/smoke/run-ephemeral.sh"]
           [family:windows] RUN ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ".\\scripts\\smoke\\run-ephemeral.ps1"]
           ASSERT_CONTAINS stdout "via-ephemeral"
@@ -321,8 +328,10 @@ jobs:
           LET $e: PIPE
           [family:unix] WITH_IO [stderr=$e] RUN ["bash", "./install.sh"]
           [family:windows] WITH_IO [stderr=$e] RUN ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ".\\install.ps1"]
-          WITH_IO [stdin=$e] READ_LINE $line
-          ASSERT_CONTAINS $line "downloading oxdock {{ env:SMOKE_TAG }}"
+          # Full-content match: the announcement is not guaranteed to be
+          # the first stderr line on every stub path and platform, so a
+          # first-line read goes flaky where a substring holds steady.
+          ASSERT_CONTAINS $e "downloading oxdock {{ env:SMOKE_TAG }}"
           LET $p: PIPE
           [family:unix] WITH_IO [stdout=$p] RUN ["{{ env:INSTALL_BIN_NIX }}", "--help"]
           [family:windows] WITH_IO [stdout=$p] RUN ["{{ env:INSTALL_BIN_WIN }}", "--help"]
@@ -349,24 +358,26 @@ jobs:
           INSTALL_DIR_WIN: ${{ runner.temp }}\oxbin-warm
           INSTALL_BIN_NIX: ${{ runner.temp }}/oxbin-warm/oxdock
           INSTALL_BIN_WIN: ${{ runner.temp }}\oxbin-warm\oxdock.exe
-          OXDOCK_RELEASE_BASE: http://127.0.0.1:18731
+          # Loopback port for this leg; server, probe, and release base derive from it.
+          SMOKE_PORT: 18733
           OXDOCK_ENGINE: ${{ steps.branch-bin.outputs.path }}
         run: |
           IMPORT [STD]
-          INHERIT_ENV [OXDOCK_ENGINE, OXDOCK_OXFILE_URL, OXDOCK_RELEASE_BASE, INSTALL_DIR_NIX, INSTALL_DIR_WIN, INSTALL_BIN_NIX, INSTALL_BIN_WIN, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, HOME, USERPROFILE, GITHUB_TOKEN]
+          INHERIT_ENV [OXDOCK_ENGINE, OXDOCK_OXFILE_URL, SMOKE_PORT, INSTALL_DIR_NIX, INSTALL_DIR_WIN, INSTALL_BIN_NIX, INSTALL_BIN_WIN, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, HOME, USERPROFILE, GITHUB_TOKEN]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           [family:unix] ENV INSTALL_DIR="{{ env:INSTALL_DIR_NIX }}"
           [family:windows] ENV INSTALL_DIR="{{ env:INSTALL_DIR_WIN }}"
-          LET $srv: HANDLE = ASYNC { RUN ["python3", "-m", "http.server", "18731", "--directory", "{{ env:RUNNER_TEMP }}/oxdock-stage"] }
+          # Own loopback port for this leg; shared binds flake across legs.
+          ENV OXDOCK_RELEASE_BASE="http://127.0.0.1:{{ env:SMOKE_PORT }}"
+          LET $srv: HANDLE = ASYNC { RUN ["python3", "-m", "http.server", "{{ env:SMOKE_PORT }}", "--bind", "127.0.0.1", "--directory", "{{ env:RUNNER_TEMP }}/oxdock-stage"] }
           SLEEP 5s
-          [family:unix] RUN ["curl", "-fsS", "http://127.0.0.1:18731/"]
-          [family:windows] RUN ["curl.exe", "-fsS", "http://127.0.0.1:18731/"]
+          [family:unix] RUN ["curl", "-fsS", "http://127.0.0.1:{{ env:SMOKE_PORT }}/"]
+          [family:windows] RUN ["curl.exe", "-fsS", "http://127.0.0.1:{{ env:SMOKE_PORT }}/"]
           LET $e1: PIPE
           [family:unix] WITH_IO [stderr=$e1] RUN ["bash", "./install.sh"]
           [family:windows] WITH_IO [stderr=$e1] RUN ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ".\\install.ps1"]
-          WITH_IO [stdin=$e1] READ_LINE $line1
-          ASSERT_CONTAINS $line1 "using cached"
+          ASSERT_CONTAINS $e1 "using cached"
           [family:unix] RUN ["{{ env:INSTALL_BIN_NIX }}", "--help"]
           [family:windows] RUN ["{{ env:INSTALL_BIN_WIN }}", "--help"]
           [os:macos] LET $asset: STRING = "oxdock-aarch64-apple-darwin.tar.gz"
@@ -383,8 +394,7 @@ jobs:
           LET $e2: PIPE
           [family:unix] WITH_IO [stderr=$e2] RUN ["bash", "./install.sh"]
           [family:windows] WITH_IO [stderr=$e2] RUN ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ".\\install.ps1"]
-          WITH_IO [stdin=$e2] READ_LINE $line2
-          ASSERT_CONTAINS $line2 "downloading"
+          ASSERT_CONTAINS $e2 "downloading"
           [family:unix] RUN ["{{ env:INSTALL_BIN_NIX }}", "--help"]
           [family:windows] RUN ["{{ env:INSTALL_BIN_WIN }}", "--help"]
           CANCEL $srv
