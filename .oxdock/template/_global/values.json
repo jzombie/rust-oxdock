@@ -19,5 +19,8 @@
   "stub_url_oxfile_main": "https://raw.githubusercontent.com/$REPO/main/install.oxfile",
   "stub_name_oxfile": "install.oxfile",
   "stub_name_checksums": "SHA256SUMS",
-  "stub_msg_install_failed": "installer failed with exit code $code"
+  "stub_msg_install_failed": "installer failed with exit code $code",
+  "unix_default_suffix": ".local/bin",
+  "windows_default_prefix": "%LOCALAPPDATA%\\",
+  "windows_default_suffix": "Microsoft\\WindowsApps"
 }

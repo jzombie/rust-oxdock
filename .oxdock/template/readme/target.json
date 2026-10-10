@@ -23,52 +23,6 @@
       "values": ".oxdock/template/readme/values.json",
       "template": ".oxdock/template/readme/CITATION.cff.tmpl",
       "fragments": {}
-    },
-    {
-      "name": "install-sh",
-      "out": "install.sh",
-      "values": ".oxdock/template/readme/values.json",
-      "template": ".oxdock/template/readme/install.sh.tmpl",
-      "executable": true,
-      "fragments": {
-        "stubs": [
-          ".oxdock/template/readme/stubs/*"
-        ]
-      }
-    },
-    {
-      "name": "install-ps1",
-      "out": "install.ps1",
-      "values": ".oxdock/template/readme/values.json",
-      "template": ".oxdock/template/readme/install.ps1.tmpl",
-      "fragments": {
-        "stubs": [
-          ".oxdock/template/readme/stubs/*"
-        ]
-      }
-    },
-    {
-      "name": "install-sh-action",
-      "out": ".github/actions/setup-oxdock/install.sh",
-      "values": ".oxdock/template/readme/values.json",
-      "template": ".oxdock/template/readme/install.sh.tmpl",
-      "executable": true,
-      "fragments": {
-        "stubs": [
-          ".oxdock/template/readme/stubs/*"
-        ]
-      }
-    },
-    {
-      "name": "install-ps1-action",
-      "out": ".github/actions/setup-oxdock/install.ps1",
-      "values": ".oxdock/template/readme/values.json",
-      "template": ".oxdock/template/readme/install.ps1.tmpl",
-      "fragments": {
-        "stubs": [
-          ".oxdock/template/readme/stubs/*"
-        ]
-      }
     }
   ]
 }

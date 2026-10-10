@@ -6,13 +6,13 @@ Prebuilt installers include all features.
 ```sh
 curl -fsSL https://raw.githubusercontent.com/{{ $docs_global.repo }}/main/install.sh | bash
 ```
-Installs to `~/.local/bin`. Set `INSTALL_DIR` to choose another destination.
+Installs to `~/{{ $docs_global.unix_default_suffix }}`. Set `INSTALL_DIR` to choose another destination.
 
-**Windows:**
+**Windows (PowerShell, not Command Prompt):**
 ```powershell
 irm https://raw.githubusercontent.com/{{ $docs_global.repo }}/main/install.ps1 | iex
 ```
-Installs to `%USERPROFILE%\.local\bin`. Set `INSTALL_DIR` to choose another destination.
+Installs to `{{ $docs_global.windows_default_prefix }}{{ $docs_global.windows_default_suffix }}`, already on PATH. Set `INSTALL_DIR` to choose another destination.
 
 **Build from source via Cargo** *(default features only)*:
 

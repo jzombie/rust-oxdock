@@ -92,11 +92,9 @@ try {
   tar.exe -xzf (Join-Path $VDir $Asset) -C (Join-Path $tmp 'x')
   $env:OXDOCK_ASSET = (Join-Path $VDir $Asset)
   $env:OXDOCK_BIN = (Join-Path $tmp 'x\oxdock.exe')
-  # Pass-through only (possibly unset, which removes it): the installer
-  # owns the default. The name mapping lives here because only the stub
-  # knows both sides. Separators go native: GitHub contexts use forward
-  # slashes even on Windows, and the guard rejects the mix.
-  if ($env:INSTALL_DIR) { $env:OXDOCK_DIR = $env:INSTALL_DIR.Replace('/', '\') }
+  # Destination default lives here in native shell; empty keeps the
+  # installer's loud gate. The engine normalizes separators itself.
+  if ($env:INSTALL_DIR) { $env:OXDOCK_DIR = $env:INSTALL_DIR } elseif ($env:LOCALAPPDATA) { $env:OXDOCK_DIR = Join-Path $env:LOCALAPPDATA '{{ $docs_global.windows_default_suffix }}' }
   $env:OXDOCK_SHA = $Expected
   $env:OXDOCK_VERSION = $Version
   # An explicit OXDOCK_ENGINE runs the installer instead of the

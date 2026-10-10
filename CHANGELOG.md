@@ -14,6 +14,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 ### Changed
 
 - Windows installer announcements print as plain stderr lines instead of yellow `WARNING:` records: PowerShell routes warnings to stdout when stdout is redirected, so anything capturing stderr missed them. The shell stub already wrote bare lines, so both stubs now emit identical bytes.
+- `install.sh` installs identically piped or from file: the tail runs as a function so piped delivery is fully read before the stdin drain runs. Piped runs previously exited 0 with nothing installed when the drain swallowed unread script.
+- The Windows default install destination is `%LOCALAPPDATA%\Microsoft\WindowsApps`, already on PATH: installs work immediately with no shell restart or path editing. Set `INSTALL_DIR` to choose another destination.
 
 ## [0.24.2-alpha] - 2026-10-09
 

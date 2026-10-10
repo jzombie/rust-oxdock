@@ -53,11 +53,11 @@ curl -fsSL https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.sh
 ```
 Installs to `~/.local/bin`. Set `INSTALL_DIR` to choose another destination.
 
-**Windows:**
+**Windows (PowerShell, not Command Prompt):**
 ```powershell
 irm https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.ps1 | iex
 ```
-Installs to `%USERPROFILE%\.local\bin`. Set `INSTALL_DIR` to choose another destination.
+Installs to `%LOCALAPPDATA%\Microsoft\WindowsApps`, already on PATH. Set `INSTALL_DIR` to choose another destination.
 
 **Build from source via Cargo** *(default features only)*:
 

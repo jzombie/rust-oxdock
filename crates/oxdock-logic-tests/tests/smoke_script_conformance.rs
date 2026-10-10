@@ -82,8 +82,8 @@ fn smoke_steps_parse_and_cover_all_legs() -> Result<()> {
     let text = load_workflow()?;
     let blocks = oxdock_blocks(&text)?;
     assert!(
-        blocks.len() >= 6,
-        "expected build plus five legs, found {} oxdock blocks",
+        blocks.len() >= 8,
+        "expected build plus seven legs, found {} oxdock blocks",
         blocks.len()
     );
     let mut joined = String::new();
@@ -99,6 +99,9 @@ fn smoke_steps_parse_and_cover_all_legs() -> Result<()> {
         "scripts/smoke/run-ephemeral",
         "SMOKE_TAG",
         "using cached",
+        "install.sh | bash",
+        "\"oxdock\", \"--version\"",
+        "installed oxdock",
     ] {
         assert!(
             joined.contains(marker),

@@ -123,8 +123,8 @@ chmod +x "$tmp"/x/oxdock*
 # explicitly, and fail closed when the tarball held nothing expected.
 BIN=$(echo "$tmp"/x/oxdock*)
 [ -f "$BIN" ] || { echo "no binary unpacked from $ASSET" >&2; exit 1; }
-# INSTALL_DIR passes through untouched (possibly unset): the installer
-# owns the default. Forwarding the mapping is the stub's only job here.
+# INSTALL_DIR passes through untouched (possibly unset): the name
+# mapping lives here because only the stub knows both sides.
 # An explicit OXDOCK_ENGINE runs the installer instead of the unpacked
 # release; it must name an executable file, and fails closed otherwise.
 ENGINE="$BIN"
@@ -138,13 +138,16 @@ if [ -n "${OXDOCK_ENGINE:-}" ]; then
   esac
 fi
 [ -x "$ENGINE" ] || { echo "installer engine is not executable: $ENGINE" >&2; exit 1; }
-# Stdin capture, no decisions: when stdin is not a TTY, save whatever it
-# holds and bridge that file for the oxfile below as OXDOCK_PIPED_SCRIPT,
-# which alone decides run vs install. Drained here, at the end: the shell
-# has necessarily consumed its own source by now, so remaining bytes are
-# user input, never this script (`curl ... | bash` lands here at EOF and
-# installs as before; a TTY is never drained, so interactive runs never
-# hang on input).
+# Destination default lives here in native shell; empty keeps the
+# installer's loud gate instead of rooted garbage.
+OXDOCK_DIR="${INSTALL_DIR:-}"
+if [ -z "$OXDOCK_DIR" ] && [ -n "${HOME:-}" ]; then
+  OXDOCK_DIR="$HOME/.local/bin"
+fi
+# A function so piped delivery is fully read before the drain runs;
+# straight-line code would let it swallow unread script tail.
+run_installer() {
+# Stdin capture, no decisions: a TTY is never drained.
 OXDOCK_PIPED_SCRIPT=""
 if [ ! -t 0 ]; then
   stdin_tmp=$(mktemp)
@@ -156,8 +159,10 @@ if [ ! -t 0 ]; then
     rm -f "$stdin_tmp"
   fi
 fi
-(cd "$tmp" && OXDOCK_ASSET="$VDIR/$ASSET" OXDOCK_SHA="$EXPECTED" OXDOCK_BIN="$BIN" OXDOCK_DIR="${INSTALL_DIR:-}" OXDOCK_VERSION="$VERSION" OXDOCK_INTERPRETER="$ENGINE" OXDOCK_PIPED_SCRIPT="$OXDOCK_PIPED_SCRIPT" "$ENGINE" install.oxfile) || {
+(cd "$tmp" && OXDOCK_ASSET="$VDIR/$ASSET" OXDOCK_SHA="$EXPECTED" OXDOCK_BIN="$BIN" OXDOCK_DIR="$OXDOCK_DIR" OXDOCK_VERSION="$VERSION" OXDOCK_INTERPRETER="$ENGINE" OXDOCK_PIPED_SCRIPT="$OXDOCK_PIPED_SCRIPT" "$ENGINE" install.oxfile) || {
   code=$?
   echo "installer failed with exit code $code" >&2
   exit "$code"
 }
+}
+run_installer
