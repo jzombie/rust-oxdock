@@ -268,7 +268,7 @@ jobs:
           SMOKE_PORT: 18731
         run: |
           IMPORT [STD]
-          INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, HOME, USERPROFILE, LOCALAPPDATA, GITHUB_TOKEN]
+          INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, HOME, USERPROFILE, LOCALAPPDATA, GITHUB_TOKEN, PATH]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           # Source truth for version identity: the installed binary must
@@ -360,7 +360,7 @@ jobs:
           SMOKE_PORT: 18734
         run: |
           IMPORT [STD]
-          INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, HOME, USERPROFILE, LOCALAPPDATA, GITHUB_TOKEN]
+          INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, HOME, USERPROFILE, LOCALAPPDATA, GITHUB_TOKEN, PATH]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           # Source truth for version identity: the installed binary must
@@ -456,7 +456,7 @@ jobs:
           SMOKE_PORT: 18737
         run: |
           IMPORT [STD]
-          INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, HOME, USERPROFILE, LOCALAPPDATA, GITHUB_TOKEN]
+          INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, HOME, USERPROFILE, LOCALAPPDATA, GITHUB_TOKEN, PATH]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           # Source truth for version identity: the installed binary must
@@ -542,7 +542,7 @@ jobs:
           SMOKE_PORT: 18735
         run: |
           IMPORT [STD]
-          INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, HOME, USERPROFILE, LOCALAPPDATA, GITHUB_TOKEN]
+          INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, HOME, USERPROFILE, LOCALAPPDATA, GITHUB_TOKEN, PATH]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           # Source truth for version identity: the installed binary must
@@ -724,7 +724,7 @@ jobs:
           OXDOCK_CACHE_DIR: ${{ runner.temp }}/oxdock-cache-newest
         run: |
           IMPORT [STD]
-          INHERIT_ENV [SMOKE_TAG, SMOKE_VERSION, OXDOCK_CACHE_DIR, RUNNER_TEMP, GITHUB_WORKSPACE, HOME, USERPROFILE, LOCALAPPDATA, GITHUB_TOKEN]
+          INHERIT_ENV [SMOKE_TAG, SMOKE_VERSION, OXDOCK_CACHE_DIR, RUNNER_TEMP, GITHUB_WORKSPACE, HOME, USERPROFILE, LOCALAPPDATA, GITHUB_TOKEN, PATH]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           LET $e: PIPE
@@ -805,7 +805,7 @@ jobs:
           SMOKE_PORT: 18733
         run: |
           IMPORT [STD]
-          INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, HOME, USERPROFILE, LOCALAPPDATA, GITHUB_TOKEN]
+          INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, HOME, USERPROFILE, LOCALAPPDATA, GITHUB_TOKEN, PATH]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           # Source truth for version identity: the installed binary must
@@ -908,7 +908,8 @@ jobs:
       # treats env keys case-insensitively, so carrying both cases is
       # a duplicate key and kills the run at startup. The canary first
       # proves the blackhole holds; without it a silently ignored proxy
-      # would pass vacuously.
+      # would pass vacuously. Windows canary uses assignment form: a
+      # pipeline into Out-Null resets $LASTEXITCODE, hiding curl's code.
       - name: Install offline
         shell: oxdock-engine --script {0}
         env:
@@ -916,7 +917,7 @@ jobs:
           SMOKE_PORT: 18738
         run: |
           IMPORT [STD]
-          INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, HOME, USERPROFILE, LOCALAPPDATA, GITHUB_TOKEN]
+          INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, HOME, USERPROFILE, LOCALAPPDATA, GITHUB_TOKEN, PATH]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           # Source truth for version identity: the installed binary must
@@ -940,7 +941,7 @@ jobs:
           ENV http_proxy="http://127.0.0.1:9"
           ENV https_proxy="http://127.0.0.1:9"
           [family:unix] RUN ["sh", "-c", "! curl -fsSL --max-time 15 https://github.com"]
-          [family:windows] RUN ["pwsh", "-NoProfile", "-Command", "curl.exe -fsSL --max-time 15 https://github.com | Out-Null; if ($LASTEXITCODE -eq 0) { exit 1 }"]
+          [family:windows] RUN ["pwsh", "-NoProfile", "-Command", "$null = curl.exe -fsSL --max-time 15 https://github.com; if ($LASTEXITCODE -eq 0) { exit 1 }; exit 0"]
 
           LET $p2: PIPE
           [family:unix] WITH_IO [stderr=$p2] RUN ["bash", "./install.sh"]
