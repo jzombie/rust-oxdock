@@ -11,6 +11,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 - Quick start documents standalone installs with the same template-rendered commands CI executes, organized by intent: try without installing, install the CLI, add the library.
 
+### Changed
+
+- Windows installer announcements print as plain stderr lines instead of yellow `WARNING:` records: PowerShell routes warnings to stdout when stdout is redirected, so anything capturing stderr missed them. The shell stub already wrote bare lines, so both stubs now emit identical bytes.
+
 ## [0.24.2-alpha] - 2026-10-09
 
 ### Added
