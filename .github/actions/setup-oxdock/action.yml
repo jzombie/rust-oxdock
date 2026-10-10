@@ -1,0 +1,57 @@
+# Setup the OxDock interpreter for `shell: oxdock` steps. Uses the
+# repo's own installers (platform detection, checksums, placement
+# already live there) instead of reimplementing fetching: the action
+# only bridges inputs and PATH. No installer copies live here.
+# Remote use pulls them at the action's own pin, so installer and
+# action versions can never mismatch; local `./` use reads the
+# checkout's files, so smoke tests the branch bytes it ships.
+name: Setup OxDock engine
+description: Install the oxdock interpreter so later steps can use shell oxdock.
+
+inputs:
+  version:
+    description: Full release tag to install (e.g. v0.24.2-alpha), or `latest` to resolve the newest release.
+    required: false
+    default: latest
+
+runs:
+  using: composite
+  steps:
+    # Empty VERSION resolves latest inside the installer; a tag pins.
+    - name: Install OxDock engine
+      if: ${{ runner.os != 'Windows' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        enginedir="${RUNNER_TEMP}/oxdock-engine"
+        mkdir -p "$enginedir"
+        if [ -n "${{ github.action_ref }}" ]; then
+          curl -fsSL "https://raw.githubusercontent.com/jzombie/rust-oxdock/${{ github.action_ref }}/install.sh" -o "$enginedir/install.sh"
+          installer="$enginedir/install.sh"
+        else
+          installer="${GITHUB_WORKSPACE}/install.sh"
+        fi
+        if [ "${{ inputs.version }}" = "latest" ]; then
+          INSTALL_DIR="$enginedir" bash "$installer"
+        else
+          VERSION="${{ inputs.version }}" INSTALL_DIR="$enginedir" bash "$installer"
+        fi
+        echo "$enginedir" >> "$GITHUB_PATH"
+
+    - name: Install OxDock engine
+      if: ${{ runner.os == 'Windows' }}
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $enginedir = Join-Path $env:RUNNER_TEMP 'oxdock-engine'
+        New-Item -ItemType Directory -Force -Path $enginedir | Out-Null
+        if ('${{ github.action_ref }}') {
+          Invoke-WebRequest "https://raw.githubusercontent.com/jzombie/rust-oxdock/${{ github.action_ref }}/install.ps1" -OutFile (Join-Path $enginedir 'install.ps1')
+          $installer = Join-Path $enginedir 'install.ps1'
+        } else {
+          $installer = Join-Path $env:GITHUB_WORKSPACE 'install.ps1'
+        }
+        if ('${{ inputs.version }}' -ne 'latest') { $env:VERSION = '${{ inputs.version }}' }
+        $env:INSTALL_DIR = $enginedir
+        & $installer
+        Add-Content -Path $env:GITHUB_PATH -Value $enginedir
