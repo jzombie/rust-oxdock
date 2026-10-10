@@ -14,10 +14,6 @@
         ],
         "generated": [
           ".oxdock/template/readme/generated/*"
-        ],
-        "commands": [
-          ".oxdock/template/cli/fragments/run-install-sh.md.tmpl",
-          ".oxdock/template/cli/fragments/run-install-ps1.md.tmpl"
         ]
       }
     },
@@ -37,9 +33,6 @@
       "fragments": {
         "stubs": [
           ".oxdock/template/readme/stubs/*"
-        ],
-        "commands": [
-          ".oxdock/template/cli/fragments/run-install-sh.md.tmpl"
         ]
       }
     },
@@ -51,9 +44,6 @@
       "fragments": {
         "stubs": [
           ".oxdock/template/readme/stubs/*"
-        ],
-        "commands": [
-          ".oxdock/template/cli/fragments/run-install-ps1.md.tmpl"
         ]
       }
     },
@@ -66,9 +56,6 @@
       "fragments": {
         "stubs": [
           ".oxdock/template/readme/stubs/*"
-        ],
-        "commands": [
-          ".oxdock/template/cli/fragments/run-install-sh.md.tmpl"
         ]
       }
     },
@@ -80,9 +67,6 @@
       "fragments": {
         "stubs": [
           ".oxdock/template/readme/stubs/*"
-        ],
-        "commands": [
-          ".oxdock/template/cli/fragments/run-install-ps1.md.tmpl"
         ]
       }
     }

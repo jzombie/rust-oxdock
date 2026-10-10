@@ -1,0 +1,33 @@
+### Standalone CLI installation
+
+Prebuilt installers include all features.
+
+**Linux / macOS:**
+```sh
+curl -fsSL https://raw.githubusercontent.com/{{ $docs_global.repo }}/main/install.sh | bash
+```
+Installs to `~/.local/bin`. Set `INSTALL_DIR` to choose another destination.
+
+**Windows:**
+```powershell
+irm https://raw.githubusercontent.com/{{ $docs_global.repo }}/main/install.ps1 | iex
+```
+Installs to `%USERPROFILE%\.local\bin`. Set `INSTALL_DIR` to choose another destination.
+
+**Build from source via Cargo** *(default features only)*:
+
+```sh
+cargo install oxdock@{{ env:CRATE_VERSION }}
+```
+
+For a full-feature build matching the prebuilts:
+
+```sh
+cargo install oxdock@{{ env:CRATE_VERSION }} --all-features
+```
+
+### Add to Rust project
+
+```sh
+cargo add oxdock@{{ env:CRATE_VERSION }}
+```
