@@ -35,8 +35,10 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      # Pinned engine, never a source build: this job only runs the
-      # convergence script, so compiling the tool would be pure waste.
+      # Pinned engine, never a source build and never `latest`: this
+      # job only runs the convergence script, so compiling the tool
+      # would be pure waste, and a moving default would change CI with
+      # no repo diff. Bump only after a newer tag proves green.
       - name: Install OxDock engine
         uses: ./.github/actions/setup-oxdock
         with:

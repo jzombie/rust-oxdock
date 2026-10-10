@@ -82,8 +82,8 @@ fn smoke_steps_parse_and_cover_all_legs() -> Result<()> {
     let text = load_workflow()?;
     let blocks = oxdock_blocks(&text)?;
     assert!(
-        blocks.len() >= 8,
-        "expected build plus seven legs, found {} oxdock blocks",
+        blocks.len() >= 9,
+        "expected build plus eight legs, found {} oxdock blocks",
         blocks.len()
     );
     let mut joined = String::new();
@@ -102,6 +102,8 @@ fn smoke_steps_parse_and_cover_all_legs() -> Result<()> {
         "install.sh | bash",
         "\"oxdock\", \"--version\"",
         "installed oxdock",
+        "| iex",
+        "INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT",
     ] {
         assert!(
             joined.contains(marker),
