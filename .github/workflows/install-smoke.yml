@@ -1,30 +1,7 @@
-# Installer smoke: every leg runs alone on a fresh runner. Leg bodies
-# live inline (`shell: oxdock-engine --script {0}`), one job per leg,
-# platform guards inside, so there is no shell logic and no separate
-# script file to drift. Static checks (lint) prove the stubs parse;
-# this proves they install. The build job compiles the branch once per
-# OS and publishes the staged release as an artifact. Legs download it
-# and run on the pinned stable engine, installed under a renamed binary
-# so the bare `oxdock` name stays free for the binary under test: branch
-# bytes prove through the artifacts under test (branch stub file, branch
-# oxfile, branch asset), so legs stay within the pinned vocabulary and
-# an old engine choking on new syntax fails loudly at step start. The
-# bootstrap installs renamed (`oxdock-engine`), so the bare `oxdock`
-# name in checks below always means the binary just installed: with no
-# shadow on PATH there is no ambiguity to guard against. Unix legs
-# complete the documented setup first (the stub asks users to put the
-# install dir on PATH), so bare names reach the product on both
-# platforms and every post-install check runs unguarded everywhere.
-# Windows needs no such step: WindowsApps is already on PATH.
-# Script-execution behavior is sampled, not repeated: install proves
-# the branch product runs scripts, newest proves the published product
-# does, and ephemeral proves run-mode on every platform. Legs
-# install to stub defaults (no per-leg destinations rigged) except the
-# ephemeral leg, which names one to prove nothing lands there. One leg
-# (newest) instead runs the published release untouched, so the
-# documented commands prove against what users actually fetch. Weekly
-# plus on demand; also runs on pushes to main so stub changes prove
-# before users meet them.
+# Installer smoke: legs run the branch stubs against the staged branch
+# build over loopback, on the pinned engine installed as `oxdock-engine`
+# so bare `oxdock` means the product just installed. Lint proves stubs
+# parse; this proves they install.
 
 name: install-smoke
 
