@@ -120,6 +120,13 @@ jobs:
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
 
+          # Nested cargo builds run isolated in a temp target dir
+          # unless told otherwise; pin it to the workspace so the
+          # staged paths below resolve. Safe here: no concurrent outer
+          # cargo shares this runner job.
+          [family:unix] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
+          [family:windows] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}\\target"
+
           RUN ["cargo", "build", "--release", "-p", "oxdock", "--all-features"]
 
           # Identity, exact-free: the binary must report itself, and the
