@@ -45,18 +45,19 @@ library [Functions](#functions).
 
 ### Standalone CLI installation
 
-Prebuilt installers include all features and target `~/.local/bin`
-(`%USERPROFILE%\.local\bin` on Windows); override with `INSTALL_DIR`.
+Prebuilt installers include all features.
 
 **Linux / macOS:**
 ```sh
 curl -fsSL https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.sh | bash
 ```
+Installs to `~/.local/bin`. Set `INSTALL_DIR` to choose another destination.
 
 **Windows:**
 ```powershell
 irm https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.ps1 | iex
 ```
+Installs to `%USERPROFILE%\.local\bin`. Set `INSTALL_DIR` to choose another destination.
 
 **Build from source via Cargo** *(default features only)*:
 

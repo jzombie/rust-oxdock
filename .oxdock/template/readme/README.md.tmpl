@@ -20,11 +20,13 @@ library [Functions](#functions).
 ```sh
 {{ $files.commands.run-install-sh }}
 ```
+Installs to `~/.local/bin`. Set `INSTALL_DIR` to choose another destination.
 
 **Windows:**
 ```powershell
 {{ $files.commands.run-install-ps1 }}
 ```
+Installs to `%USERPROFILE%\.local\bin`. Set `INSTALL_DIR` to choose another destination.
 
 **Build from source via Cargo** *(default features only)*:
 
