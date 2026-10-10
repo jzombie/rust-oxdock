@@ -301,16 +301,23 @@ jobs:
           INSTALL_DIR_WIN: ${{ runner.temp }}\oxbin-newest
           INSTALL_BIN_NIX: ${{ runner.temp }}/oxbin-newest/oxdock
           INSTALL_BIN_WIN: ${{ runner.temp }}\oxbin-newest\oxdock.exe
+          OXDOCK_CACHE_DIR_NIX: ${{ runner.temp }}/oxcache-newest
+          OXDOCK_CACHE_DIR_WIN: ${{ runner.temp }}\oxcache-newest
           SMOKE_TAG: ${{ steps.smoke-version.outputs.tag }}
           SMOKE_VERSION: ${{ steps.smoke-version.outputs.version }}
           OXDOCK_ENGINE: ${{ steps.branch-bin.outputs.path }}
         run: |
           IMPORT [STD]
-          INHERIT_ENV [OXDOCK_ENGINE, OXDOCK_OXFILE_URL, INSTALL_DIR_NIX, INSTALL_DIR_WIN, INSTALL_BIN_NIX, INSTALL_BIN_WIN, SMOKE_TAG, SMOKE_VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, HOME, USERPROFILE, GITHUB_TOKEN]
+          INHERIT_ENV [OXDOCK_ENGINE, OXDOCK_OXFILE_URL, INSTALL_DIR_NIX, INSTALL_DIR_WIN, INSTALL_BIN_NIX, INSTALL_BIN_WIN, OXDOCK_CACHE_DIR_NIX, OXDOCK_CACHE_DIR_WIN, SMOKE_TAG, SMOKE_VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, HOME, USERPROFILE, GITHUB_TOKEN]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           [family:unix] ENV INSTALL_DIR="{{ env:INSTALL_DIR_NIX }}"
           [family:windows] ENV INSTALL_DIR="{{ env:INSTALL_DIR_WIN }}"
+          # Cold cache: the engine install above warms the shared cache
+          # for this same tag, which would report reuse instead of the
+          # fresh download this leg asserts.
+          [family:unix] ENV OXDOCK_CACHE_DIR="{{ env:OXDOCK_CACHE_DIR_NIX }}"
+          [family:windows] ENV OXDOCK_CACHE_DIR="{{ env:OXDOCK_CACHE_DIR_WIN }}"
           LET $e: PIPE
           [family:unix] WITH_IO [stderr=$e] RUN ["bash", "./install.sh"]
           [family:windows] WITH_IO [stderr=$e] RUN ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ".\\install.ps1"]
