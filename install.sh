@@ -139,11 +139,22 @@ if [ -n "${OXDOCK_ENGINE:-}" ]; then
 fi
 [ -x "$ENGINE" ] || { echo "installer engine is not executable: $ENGINE" >&2; exit 1; }
 # Destination default lives here in native shell; empty keeps the
-# installer's loud gate instead of rooted garbage.
+# installer's loud gate instead of rooted garbage. Under Git Bash the
+# msys HOME shadows the real profile, so Windows takes the same
+# WindowsApps default as install.ps1 instead of $HOME/.local/bin.
 OXDOCK_DIR="${INSTALL_DIR:-}"
-if [ -z "$OXDOCK_DIR" ] && [ -n "${HOME:-}" ]; then
-  OXDOCK_DIR="$HOME/.local/bin"
-fi
+case "$(uname -s)" in
+  MINGW64*|MSYS*|CYGWIN*)
+    if [ -z "$OXDOCK_DIR" ] && [ -n "${LOCALAPPDATA:-}" ]; then
+      OXDOCK_DIR="$LOCALAPPDATA\Microsoft\WindowsApps"
+    fi
+    ;;
+  *)
+    if [ -z "$OXDOCK_DIR" ] && [ -n "${HOME:-}" ]; then
+      OXDOCK_DIR="$HOME/.local/bin"
+    fi
+    ;;
+esac
 # A function so piped delivery is fully read before the drain runs;
 # straight-line code would let it swallow unread script tail.
 run_installer() {

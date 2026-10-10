@@ -3,8 +3,8 @@
 # guards inside, so there is no shell logic and no separate script file
 # to drift. Static checks (lint) prove the stubs parse; this proves
 # they install. The build job compiles the branch once per OS and
-# publishes binary plus staged release as artifacts. Legs download both
-# and run on the pinned stable engine: branch bytes prove through the
+# publishes the staged release as an artifact. Legs download it and
+# run on the pinned stable engine: branch bytes prove through the
 # artifacts under test (branch stub file, branch oxfile, branch asset,
 # branch engine override), so legs stay within the pinned vocabulary
 # and an old engine choking on new syntax fails loudly at step start.
@@ -188,13 +188,11 @@ jobs:
           WITH_IO [stdin=$p3] READ_LINE $sums
           WRITE SHA256SUMS "{{ $sums }}"
 
-      - name: Upload branch binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: smoke-bin-${{ matrix.os }}
-          path: target/release/oxdock${{ matrix.exe }}
-          retention-days: 1
-
+      # No bare-binary artifact: artifact zips strip the unix execute
+      # bit in transit, and a harness chmod would silently repair a
+      # build that shipped a mode-less binary. Legs unpack the engine
+      # from this staged asset tarball instead, exactly as users
+      # receive it, modes included.
       - name: Upload staged release
         uses: actions/upload-artifact@v4
         with:
@@ -246,17 +244,25 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Download branch binary
-        uses: actions/download-artifact@v4
-        with:
-          name: smoke-bin-${{ matrix.os }}
-          path: ${{ github.workspace }}/smoke-bin
-
+      # Branch engine unpacks from the staged asset tarball, never as
+      # a bare artifact file: tar transit preserves the unix execute
+      # bit that artifact zips strip, so the stubs find an executable
+      # OXDOCK_ENGINE with no repair step. Windows paths go through
+      # cygpath: Git Bash mangles mixed-separator globs otherwise.
       - name: Download staged release
         uses: actions/download-artifact@v4
         with:
           name: smoke-stage-${{ matrix.os }}
           path: ${{ runner.temp }}/oxdock-stage
+
+      - name: Unpack branch engine from staged asset
+        shell: bash
+        run: |
+          stage="${{ runner.temp }}/oxdock-stage"
+          dest="${{ github.workspace }}/smoke-bin"
+          if [ "${RUNNER_OS:-}" = "Windows" ]; then stage="$(cygpath -u "$RUNNER_TEMP")/oxdock-stage"; dest="$(cygpath -u "$GITHUB_WORKSPACE")/smoke-bin"; fi
+          mkdir -p "$dest"
+          tar -xzf "$stage"/oxdock-*.tar.gz -C "$dest"
 
       - name: Install OxDock engine
         uses: ./.github/actions/setup-oxdock
@@ -337,17 +343,25 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Download branch binary
-        uses: actions/download-artifact@v4
-        with:
-          name: smoke-bin-${{ matrix.os }}
-          path: ${{ github.workspace }}/smoke-bin
-
+      # Branch engine unpacks from the staged asset tarball, never as
+      # a bare artifact file: tar transit preserves the unix execute
+      # bit that artifact zips strip, so the stubs find an executable
+      # OXDOCK_ENGINE with no repair step. Windows paths go through
+      # cygpath: Git Bash mangles mixed-separator globs otherwise.
       - name: Download staged release
         uses: actions/download-artifact@v4
         with:
           name: smoke-stage-${{ matrix.os }}
           path: ${{ runner.temp }}/oxdock-stage
+
+      - name: Unpack branch engine from staged asset
+        shell: bash
+        run: |
+          stage="${{ runner.temp }}/oxdock-stage"
+          dest="${{ github.workspace }}/smoke-bin"
+          if [ "${RUNNER_OS:-}" = "Windows" ]; then stage="$(cygpath -u "$RUNNER_TEMP")/oxdock-stage"; dest="$(cygpath -u "$GITHUB_WORKSPACE")/smoke-bin"; fi
+          mkdir -p "$dest"
+          tar -xzf "$stage"/oxdock-*.tar.gz -C "$dest"
 
       - name: Install OxDock engine
         uses: ./.github/actions/setup-oxdock
@@ -498,17 +512,25 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Download branch binary
-        uses: actions/download-artifact@v4
-        with:
-          name: smoke-bin-${{ matrix.os }}
-          path: ${{ github.workspace }}/smoke-bin
-
+      # Branch engine unpacks from the staged asset tarball, never as
+      # a bare artifact file: tar transit preserves the unix execute
+      # bit that artifact zips strip, so the stubs find an executable
+      # OXDOCK_ENGINE with no repair step. Windows paths go through
+      # cygpath: Git Bash mangles mixed-separator globs otherwise.
       - name: Download staged release
         uses: actions/download-artifact@v4
         with:
           name: smoke-stage-${{ matrix.os }}
           path: ${{ runner.temp }}/oxdock-stage
+
+      - name: Unpack branch engine from staged asset
+        shell: bash
+        run: |
+          stage="${{ runner.temp }}/oxdock-stage"
+          dest="${{ github.workspace }}/smoke-bin"
+          if [ "${RUNNER_OS:-}" = "Windows" ]; then stage="$(cygpath -u "$RUNNER_TEMP")/oxdock-stage"; dest="$(cygpath -u "$GITHUB_WORKSPACE")/smoke-bin"; fi
+          mkdir -p "$dest"
+          tar -xzf "$stage"/oxdock-*.tar.gz -C "$dest"
 
       - name: Install OxDock engine
         uses: ./.github/actions/setup-oxdock
@@ -575,17 +597,25 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Download branch binary
-        uses: actions/download-artifact@v4
-        with:
-          name: smoke-bin-${{ matrix.os }}
-          path: ${{ github.workspace }}/smoke-bin
-
+      # Branch engine unpacks from the staged asset tarball, never as
+      # a bare artifact file: tar transit preserves the unix execute
+      # bit that artifact zips strip, so the stubs find an executable
+      # OXDOCK_ENGINE with no repair step. Windows paths go through
+      # cygpath: Git Bash mangles mixed-separator globs otherwise.
       - name: Download staged release
         uses: actions/download-artifact@v4
         with:
           name: smoke-stage-${{ matrix.os }}
           path: ${{ runner.temp }}/oxdock-stage
+
+      - name: Unpack branch engine from staged asset
+        shell: bash
+        run: |
+          stage="${{ runner.temp }}/oxdock-stage"
+          dest="${{ github.workspace }}/smoke-bin"
+          if [ "${RUNNER_OS:-}" = "Windows" ]; then stage="$(cygpath -u "$RUNNER_TEMP")/oxdock-stage"; dest="$(cygpath -u "$GITHUB_WORKSPACE")/smoke-bin"; fi
+          mkdir -p "$dest"
+          tar -xzf "$stage"/oxdock-*.tar.gz -C "$dest"
 
       - name: Install OxDock engine
         uses: ./.github/actions/setup-oxdock
@@ -675,15 +705,19 @@ jobs:
       # stub's release-API resolution executes for real; the payload is
       # whatever is newest, checked via its `--help` menu. Published
       # everything (no engine or oxfile overrides), installed to stub
-      # defaults on a fresh runner.
+      # defaults on a fresh runner. Own cache dir: the engine install
+      # above already populated the default cache with this same tag,
+      # so a shared cache would report cached where downloading is
+      # asserted.
       - name: Install newest release
         shell: oxdock --script {0}
         env:
           SMOKE_TAG: ${{ steps.smoke-version.outputs.tag }}
           SMOKE_VERSION: ${{ steps.smoke-version.outputs.version }}
+          OXDOCK_CACHE_DIR: ${{ runner.temp }}/oxdock-cache-newest
         run: |
           IMPORT [STD]
-          INHERIT_ENV [SMOKE_TAG, SMOKE_VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, HOME, USERPROFILE, LOCALAPPDATA, GITHUB_TOKEN]
+          INHERIT_ENV [SMOKE_TAG, SMOKE_VERSION, OXDOCK_CACHE_DIR, RUNNER_TEMP, GITHUB_WORKSPACE, HOME, USERPROFILE, LOCALAPPDATA, GITHUB_TOKEN]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           LET $e: PIPE
@@ -734,26 +768,35 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Download branch binary
-        uses: actions/download-artifact@v4
-        with:
-          name: smoke-bin-${{ matrix.os }}
-          path: ${{ github.workspace }}/smoke-bin
-
+      # Branch engine unpacks from the staged asset tarball, never as
+      # a bare artifact file: tar transit preserves the unix execute
+      # bit that artifact zips strip, so the stubs find an executable
+      # OXDOCK_ENGINE with no repair step. Windows paths go through
+      # cygpath: Git Bash mangles mixed-separator globs otherwise.
       - name: Download staged release
         uses: actions/download-artifact@v4
         with:
           name: smoke-stage-${{ matrix.os }}
           path: ${{ runner.temp }}/oxdock-stage
 
+      - name: Unpack branch engine from staged asset
+        shell: bash
+        run: |
+          stage="${{ runner.temp }}/oxdock-stage"
+          dest="${{ github.workspace }}/smoke-bin"
+          if [ "${RUNNER_OS:-}" = "Windows" ]; then stage="$(cygpath -u "$RUNNER_TEMP")/oxdock-stage"; dest="$(cygpath -u "$GITHUB_WORKSPACE")/smoke-bin"; fi
+          mkdir -p "$dest"
+          tar -xzf "$stage"/oxdock-*.tar.gz -C "$dest"
+
       - name: Install OxDock engine
         uses: ./.github/actions/setup-oxdock
         with:
           version: ${{ env.OXDOCK_PINNED_ENGINE }}
 
-      # Same job, so $HOME (and the cache) persists: warm reuse must
-      # skip downloads, corruption must heal by redownloading. The stub
-      # announces which path it took; assert the first stderr line.
+      # Same job, so $HOME (and the cache) persists across runs: the
+      # first install primes a cold cache, the second must reuse it,
+      # and corruption must heal by redownloading. The stub announces
+      # which path it took; assert the announcement stderr.
       - name: Reuse and heal cache
         shell: oxdock --script {0}
         env:
@@ -772,6 +815,11 @@ jobs:
           # in the log instead of a bare connect timeout.
           [family:unix] RUN ["sh", "-c", "for i in $(seq 1 30); do curl -fs http://127.0.0.1:{{ env:SMOKE_PORT }}/ >/dev/null && exit 0; sleep 1; done; lsof -iTCP:{{ env:SMOKE_PORT }} -sTCP:LISTEN || true; exit 1"]
           [family:windows] RUN ["pwsh", "-NoProfile", "-Command", "for ($i=0; $i -lt 30; $i++) { curl.exe -fs http://127.0.0.1:{{ env:SMOKE_PORT }}/ | Out-Null; if ($LASTEXITCODE -eq 0) { exit 0 }; Start-Sleep -Seconds 1 }; Get-NetTCPConnection -LocalPort {{ env:SMOKE_PORT }} -ErrorAction SilentlyContinue; exit 1"]
+          # Prime: cold cache downloads.
+          LET $e0: PIPE
+          [family:unix] WITH_IO [stderr=$e0] RUN ["bash", "./install.sh"]
+          [family:windows] WITH_IO [stderr=$e0] RUN ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ".\\install.ps1"]
+          ASSERT_CONTAINS $e0 "downloading"
           LET $e1: PIPE
           [family:unix] WITH_IO [stderr=$e1] RUN ["bash", "./install.sh"]
           [family:windows] WITH_IO [stderr=$e1] RUN ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ".\\install.ps1"]
@@ -821,17 +869,25 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
-      - name: Download branch binary
-        uses: actions/download-artifact@v4
-        with:
-          name: smoke-bin-${{ matrix.os }}
-          path: ${{ github.workspace }}/smoke-bin
-
+      # Branch engine unpacks from the staged asset tarball, never as
+      # a bare artifact file: tar transit preserves the unix execute
+      # bit that artifact zips strip, so the stubs find an executable
+      # OXDOCK_ENGINE with no repair step. Windows paths go through
+      # cygpath: Git Bash mangles mixed-separator globs otherwise.
       - name: Download staged release
         uses: actions/download-artifact@v4
         with:
           name: smoke-stage-${{ matrix.os }}
           path: ${{ runner.temp }}/oxdock-stage
+
+      - name: Unpack branch engine from staged asset
+        shell: bash
+        run: |
+          stage="${{ runner.temp }}/oxdock-stage"
+          dest="${{ github.workspace }}/smoke-bin"
+          if [ "${RUNNER_OS:-}" = "Windows" ]; then stage="$(cygpath -u "$RUNNER_TEMP")/oxdock-stage"; dest="$(cygpath -u "$GITHUB_WORKSPACE")/smoke-bin"; fi
+          mkdir -p "$dest"
+          tar -xzf "$stage"/oxdock-*.tar.gz -C "$dest"
 
       - name: Install OxDock engine
         uses: ./.github/actions/setup-oxdock
