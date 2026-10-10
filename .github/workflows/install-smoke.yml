@@ -96,7 +96,7 @@ jobs:
       # bumped deliberately; an old engine choking on new syntax fails
       # loudly here rather than haunting later steps. VERSION pins the
       # engine; the branch under test is built from source next.
-      - name: Install engine
+      - name: Install OxDock engine
         uses: ./.github/actions/setup-oxdock
         with:
           version: v0.24.2-alpha
@@ -179,7 +179,7 @@ jobs:
 
       # TODO: OxDock could resolve latest on its own with a new plugin module
       # dedicated for version tracking, etc.
-      # 
+      #
       # Pinned by the newest-release legs below: the stub resolves the
       # newest tag itself there, and the workflow must expect the same
       # one. Authenticated: shared runner IPs burn the anonymous quota.
