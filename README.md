@@ -45,19 +45,11 @@ library [Functions](#functions).
 
 ### Standalone CLI installation
 
-Prebuilt installers include all features.
-
-**Linux / macOS:**
-```sh
-curl -fsSL https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.sh | bash
-```
-Installs to `~/.local/bin`. Set `INSTALL_DIR` to choose another destination.
-
-**Windows (PowerShell, not Command Prompt):**
-```powershell
-irm https://raw.githubusercontent.com/jzombie/rust-oxdock/main/install.ps1 | iex
-```
-Installs to `%LOCALAPPDATA%\Microsoft\WindowsApps`, already on PATH. Set `INSTALL_DIR` to choose another destination.
+<!-- Piped installers (`install.sh | bash`, `install.ps1 | iex`)
+     stay out of the docs until a release proves them: they fetch
+     unreleased code, so advertising them here would ask
+     installer-grade trust for unproven bytes. Restore the stanzas
+     from git history once the release smoke is green. -->
 
 **Build from source via Cargo** *(default features only)*:
 
@@ -65,7 +57,7 @@ Installs to `%LOCALAPPDATA%\Microsoft\WindowsApps`, already on PATH. Set `INSTAL
 cargo install oxdock@0.24.2-alpha
 ```
 
-For a full-feature build matching the prebuilts:
+For a full-feature build:
 
 ```sh
 cargo install oxdock@0.24.2-alpha --all-features

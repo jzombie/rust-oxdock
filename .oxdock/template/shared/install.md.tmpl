@@ -1,18 +1,10 @@
 ### Standalone CLI installation
 
-Prebuilt installers include all features.
-
-**Linux / macOS:**
-```sh
-curl -fsSL https://raw.githubusercontent.com/{{ $docs_global.repo }}/main/install.sh | bash
-```
-Installs to `~/{{ $docs_global.unix_default_suffix }}`. Set `INSTALL_DIR` to choose another destination.
-
-**Windows (PowerShell, not Command Prompt):**
-```powershell
-irm https://raw.githubusercontent.com/{{ $docs_global.repo }}/main/install.ps1 | iex
-```
-Installs to `{{ $docs_global.windows_default_prefix }}{{ $docs_global.windows_default_suffix }}`, already on PATH. Set `INSTALL_DIR` to choose another destination.
+<!-- Piped installers (`install.sh | bash`, `install.ps1 | iex`)
+     stay out of the docs until a release proves them: they fetch
+     unreleased code, so advertising them here would ask
+     installer-grade trust for unproven bytes. Restore the stanzas
+     from git history once the release smoke is green. -->
 
 **Build from source via Cargo** *(default features only)*:
 
@@ -20,7 +12,7 @@ Installs to `{{ $docs_global.windows_default_prefix }}{{ $docs_global.windows_de
 cargo install oxdock@{{ env:CRATE_VERSION }}
 ```
 
-For a full-feature build matching the prebuilts:
+For a full-feature build:
 
 ```sh
 cargo install oxdock@{{ env:CRATE_VERSION }} --all-features
