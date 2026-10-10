@@ -274,4 +274,3 @@ fn piped_script_reinvokes_interpreter_without_placing() -> Result<()> {
     );
     Ok(())
 }
-
