@@ -49,6 +49,7 @@ Prefer explicit, test-only skips over runtime detection.
 ## Code Style
 
 - **Punctuation**: do not use em dashes or en dashes as punctuation in code comments, doc comments, or any other prose. Use periods or colons instead. Hyphens inside code, identifiers, crate names, CLI flags, and versions remain allowed. This extends the README prose-style rule below to all written text in the repo.
+- **Brevity**: inline comments state the one non-obvious fact and stop. No rationale essays, no design narratives, no restating what the code says. A comment that takes a paragraph belongs in a doc fragment or a decision record, not inline. Doc-fence narration below is user-facing prose with an execution guarantee and keeps its own rules.
 
 ## Host Signatures
 
