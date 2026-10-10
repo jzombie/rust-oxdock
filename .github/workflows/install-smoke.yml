@@ -113,7 +113,9 @@ jobs:
           INHERIT_ENV [GITHUB_OUTPUT, GITHUB_PATH, GITHUB_WORKSPACE, RUNNER_TEMP]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
+
           RUN ["cargo", "build", "--release", "-p", "oxdock", "--all-features"]
+
           # Identity, exact-free: the binary must report itself, and the
           # manifest line is echoed for the log. Exact equality needs
           # string surgery the DSL has no vocabulary for; the release
@@ -122,11 +124,13 @@ jobs:
           WITH_IO [stdout=$p1] RUN ["grep", "^version = ", "Cargo.toml"]
           WITH_IO [stdin=$p1] READ_LINE $manifest
           ECHO "manifest: {{ $manifest }}"
+
           LET $p2: PIPE
           [family:unix] WITH_IO [stdout=$p2] RUN ["target/release/oxdock", "--version"]
           [family:windows] WITH_IO [stdout=$p2] RUN ["target/release/oxdock.exe", "--version"]
           WITH_IO [stdin=$p2] READ_LINE $reported
           ASSERT_CONTAINS $reported "oxdock "
+
           # Stage a local release of the branch build: every leg below
           # fetches through the stub from loopback, so branch bytes
           # prove and no published tag is involved. Layout mirrors a
@@ -144,10 +148,12 @@ jobs:
           MKDIR {{ $stage }}
           COPY target/release/{{ $assetbin }} {{ $stage }}/{{ $assetbin }}
           WORKDIR {{ $stage }}
+
           # Relative archive name: GNU tar reads `host:file` in an
           # absolute Windows path as a remote tape (`D:` looks like a
           # host), so archive from inside the stage dir instead.
           RUN ["tar", "-czf", "{{ $asset }}", "{{ $assetbin }}"]
+
           # Checksum tool mirrors the stub per platform exactly.
           LET $p3: PIPE
           [os:linux] WITH_IO [stdout=$p3] RUN ["sha256sum", "{{ $asset }}"]
@@ -155,11 +161,13 @@ jobs:
           [os:windows] WITH_IO [stdout=$p3] RUN ["sha256sum", "{{ $asset }}"]
           WITH_IO [stdin=$p3] READ_LINE $sums
           WRITE SHA256SUMS "{{ $sums }}"
+
           # Engine path for the legs below, in native separators: exec
           # position only accepts literals or `env:` templates, so the
           # legs bridge this output instead of joining it themselves.
           [family:unix] APPEND {{ env:GITHUB_OUTPUT }} "path={{ env:GITHUB_WORKSPACE }}/target/release/oxdock"
           [family:windows] APPEND {{ env:GITHUB_OUTPUT }} "path={{ env:GITHUB_WORKSPACE }}\\target\\release\\oxdock.exe"
+
           # Publish the build output dir: subsequent `shell: oxdock`
           # steps resolve the just-built binary through PATH, so every
           # leg below is interpreted by branch bytes, not the pinned
@@ -169,6 +177,9 @@ jobs:
           [family:unix] APPEND {{ env:GITHUB_PATH }} "{{ env:GITHUB_WORKSPACE }}/target/release"
           [family:windows] APPEND {{ env:GITHUB_PATH }} "{{ env:GITHUB_WORKSPACE }}\\target\\release"
 
+      # TODO: OxDock could resolve latest on its own with a new plugin module
+      # dedicated for version tracking, etc.
+      # 
       # Pinned by the newest-release legs below: the stub resolves the
       # newest tag itself there, and the workflow must expect the same
       # one. Authenticated: shared runner IPs burn the anonymous quota.
