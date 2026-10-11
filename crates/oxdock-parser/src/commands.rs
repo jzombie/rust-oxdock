@@ -1414,6 +1414,36 @@ declare_commands! {
         },
     ],
 
+    Remove => [
+        name: "REMOVE",
+        variant: Remove { path: Arg, recursive: bool },
+        syntax: "REMOVE [--recursive] <path>",
+        summary: "Remove a file, symlink, or directory.",
+        description: "Removes a file, symlink (the link itself), or empty dir. With --recursive removes a directory tree.",
+        args: &[ ArgSpec { name: "path", arg_type: ArgType::Path, description: "Path to remove", io: IoDirection::Write, index: 0, required: true, fallback_stream: None } ],
+        flags: &[ FlagSpec { name: "recursive", long: "--recursive", value_type: FlagValueType::Flag, required: false, description: "Remove a directory tree" } ],
+        default_output: None,
+        examples: &[ Example { name: "remove", fence_meta: None, code: indoc! {r#"
+            # WRITE then REMOVE leaves nothing behind.
+            WRITE scratch.txt content
+
+            # Assert original file is written
+            LET $o: STRING = PATH_TYPE("scratch.txt")
+            ASSERT_EQ $o "file"
+
+            REMOVE scratch.txt
+
+            # Assert file has been removed
+            LET $t: STRING = PATH_TYPE("scratch.txt")
+            ASSERT_EQ $t "absent"
+        "#} } ],
+        lower: |flags, args| {
+            let recursive = flags.iter().any(|(k, _)| k == "recursive");
+            let path = args.into_iter().next().ok_or_else(|| ParseError::validation("REMOVE", "REMOVE requires a path".to_string(), &SpanContext::line_only(0)))?;
+            Ok(StepKind::Remove { path, recursive })
+        },
+    ],
+
     Expand => [
         name: "EXPAND",
         variant: Expand { path: Option<Arg>, overrides: Vec<(String, Arg)> },
