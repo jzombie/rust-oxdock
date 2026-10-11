@@ -62,7 +62,7 @@ const SCRIPT: &str = r#"
     WITH_IO [stdout=$cap_file_hash] HASH_SHA256 data/inner/a.txt
     WITH_IO [stdin=$cap_file_hash] WRITE file_hash.txt
 
-    // Double-check the hash matches on unix system
+    // Double-check the hash matches on Unix systems
     // TODO: Gate system cmd execution based on sha256sum detection: https://github.com/jzombie/rust-oxdock/issues/55
     // [platform=unix] {
     //     CAPTURE_TO_FILE system_hash.txt RUN sh -c "if command -v sha256sum >/dev/null 2>&1; then sha256sum data/inner/a.txt | awk '{print $1}'; elif command -v shasum >/dev/null 2>&1; then shasum -a 256 data/inner/a.txt | awk '{print $1}'; elif command -v openssl >/dev/null 2>&1; then openssl dgst -sha256 data/inner/a.txt | awk '{print $2}'; else echo 'no sha256 tool available' >&2; exit 1; fi | tr 'A-F' 'a-f'"

@@ -890,7 +890,7 @@ OxDock comes in two variants, each of which is independent of the other, but sha
 
 ## Goals
 
-OxDock has a simple goal to provide a simple DSL that works the same across Mac, Linux, and Windows, including support for background processes, symlinks, and boolean conditionals (such as env and platform-based command filtering), which runs the same whether it's used as a preprocessing step in a build-time Rust macro, or as a CLI program, regardless of platform it is building on.
+OxDock has a simple goal to provide a simple DSL that works the same across macOS, Linux, and Windows, including support for background processes, symlinks, and boolean conditionals (such as env and platform-based command filtering), which runs the same whether it's used as a preprocessing step in a build-time Rust macro, or as a CLI program, regardless of platform it is building on.
 
 Every internal command is engineered to run the same way across platforms, except for the `RUN` command, which calls native programs.
 
@@ -2634,7 +2634,7 @@ ASSERT_EQ $outer_body "production"
 ```oxdock
 # A shell command reads its own environment, with
 # per-platform spelling: quoted "$VAR" passes the parser
-# through untouched on unix ...
+# through untouched on Unix ...
 ENV PROXY_PORT=23791
 
 [family:unix] LET $o: STRING = RUN echo serving on "$PROXY_PORT"
@@ -4440,7 +4440,7 @@ On GitHub Actions, replace the paths with the runner-provided env vars (`{{ env:
 
 ### Testing
 
-Testing is performed across Linux, Mac, and Windows environments, and UB (Undefined Behavior) testing is handled by [Miri](https://github.com/rust-lang/miri).
+Testing is performed across Linux, macOS, and Windows environments, and UB (Undefined Behavior) testing is handled by [Miri](https://github.com/rust-lang/miri).
 
 There is strong prioritization in keeping unit and integration tests compatible with Miri, because doing so also encourages clean separation of process and filesystem modeling from direct OS calls, avoiding scattered filesystem and process usage throughout the codebase.
 

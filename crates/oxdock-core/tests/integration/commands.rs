@@ -4468,7 +4468,7 @@ fn static_exclusive_platform_guards_share_scope() {
 #[test]
 fn static_overlapping_platform_guards_still_error() {
     // Overlapping pairs share no disjointness proof (`os:macos`
-    // meets the `family:unix` alias on macos, same guard twice
+    // meets the `family:unix` alias on `macos`, same guard twice
     // trivially overlaps), so same-scope duplicates fail.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
@@ -4480,12 +4480,12 @@ fn static_overlapping_platform_guards_still_error() {
         let err = run_script(&root, guarded).expect_err("overlapping must fail");
         assert!(err.to_string().contains("redeclaration error"), "{err}");
     }
-    // But macos vs linux alone are disjoint and pass.
+    // But `macos` vs `linux` alone are disjoint and pass.
     let script = indoc! {r#"
         [os:macos] LET $o: STRING = "m"
         [os:linux] LET $o: STRING = "l"
     "#};
-    run_script(&root, script).expect("macos vs linux share scope");
+    run_script(&root, script).expect("`macos` vs `linux` share scope");
 }
 
 #[test]

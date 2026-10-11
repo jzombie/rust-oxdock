@@ -421,7 +421,7 @@ mod tests {
         assert_eq!(
             exists(&root, "platform.txt"),
             !expect_skipped,
-            "platform guard should skip on unix and run elsewhere"
+            "platform guard should skip on Unix and run elsewhere"
         );
         assert!(exists(&root, "always.txt"), "unguarded WRITE should run");
     }
@@ -609,7 +609,7 @@ mod tests {
     #[cfg(unix)]
     #[cfg_attr(
         miri,
-        ignore = "stdout streaming not supported for background command under miri"
+        ignore = "stdout streaming not supported for background command under Miri"
     )]
     #[test]
     fn async_exits_success_and_stops_pipeline() {
@@ -626,7 +626,7 @@ mod tests {
     #[cfg(unix)]
     #[cfg_attr(
         miri,
-        ignore = "stdout streaming not supported for background command under miri"
+        ignore = "stdout streaming not supported for background command under Miri"
     )]
     #[test]
     fn async_failure_bubbles_status() {
@@ -723,7 +723,7 @@ mod tests {
     #[cfg(unix)]
     #[cfg_attr(
         miri,
-        ignore = "stdout streaming not supported for background command under miri"
+        ignore = "stdout streaming not supported for background command under Miri"
     )]
     #[test]
     fn exit_terminates_backgrounds_and_returns_code() {
@@ -782,7 +782,7 @@ mod tests {
 
     #[cfg_attr(
         miri,
-        ignore = "stdout streaming not supported for background command under miri"
+        ignore = "stdout streaming not supported for background command under Miri"
     )]
     #[test]
     fn env_applies_to_run_and_background() {

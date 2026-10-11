@@ -1010,7 +1010,7 @@ declare_commands! {
             Example { name: "shell reads env per platform", fence_meta: None, code: indoc! {r#"
                 # A shell command reads its own environment, with
                 # per-platform spelling: quoted "$VAR" passes the parser
-                # through untouched on unix ...
+                # through untouched on Unix ...
                 ENV PROXY_PORT=23791
 
                 [family:unix] LET $o: STRING = RUN echo serving on "$PROXY_PORT"

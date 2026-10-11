@@ -936,7 +936,7 @@ fn net_port_registration<P: ProcessManager>(
                 ASSERT_EQ $port 23791
 
                 # The shell reads its own environment, with per-platform spelling:
-                # quoted "$VAR" passes the parser through untouched on unix ...
+                # quoted "$VAR" passes the parser through untouched on Unix ...
                 ENV PROXY_PORT="{{ $port }}"
 
                 [family:unix] LET $o: STRING = RUN echo serving on "$PROXY_PORT"

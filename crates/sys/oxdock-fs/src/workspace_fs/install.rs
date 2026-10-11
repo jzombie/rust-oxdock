@@ -10,7 +10,7 @@ impl PathResolver {
     /// Atomically place `src` at `dst` with unix `mode`.
     ///
     /// `mode` is the caller's policy (`INSTALL` passes `0o755`); the
-    /// mechanism stays centralized here. The mode applies on unix only:
+    /// mechanism stays centralized here. The mode applies on Unix only:
     /// octal modes are meaningless on Windows, so the parameter is
     /// ignored there rather than making false promises.
     #[allow(clippy::disallowed_methods)]

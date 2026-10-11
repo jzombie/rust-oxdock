@@ -1417,7 +1417,7 @@ pub mod expectations {
     pub fn parse_error_expectation(doc: &DocumentMut) -> Result<Option<ErrorExpectation>> {
         // Prefer a platform-specific table at runtime. First look for an
         // exact OS key (e.g. "linux", "macos", "windows"). If that
-        // doesn't exist, prefer a generic `unix` table for unix-like
+        // doesn't exist, prefer a generic `unix` table for Unix-like
         // platforms. Finally fall back to the top-level expectation.
         let os = std::env::consts::OS;
         if let Some(item) = doc.get(os) {

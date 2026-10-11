@@ -1529,11 +1529,11 @@ mod guard_analysis_tests {
         let os_exhausted = GuardExpr::All(vec![not(os("macos")), not(os("linux")), not(windows())]);
         assert!(
             !guard_satisfiable(&os_exhausted),
-            "no host is outside macos/linux/windows"
+            "no host is outside `macos`/`linux`/`windows`"
         );
         // Partial negations stay live.
         let os_partial = GuardExpr::All(vec![not(os("macos")), not(os("linux"))]);
-        assert!(guard_satisfiable(&os_partial), "windows is still open");
+        assert!(guard_satisfiable(&os_partial), "`windows` is still open");
         // The bool domain exhausts the same way.
         let bool_exhausted = GuardExpr::All(vec![
             not(attr(Ns::Bool, None, Some("true"))),
@@ -1550,13 +1550,13 @@ mod guard_analysis_tests {
         assert!(guard_satisfiable(&not(unix())));
     }
 
-    /// The desugared unix alias behaves as a disjunction: it meets
-    /// windows nowhere and covers macos/linux deployment reads.
+    /// The desugared `unix` alias behaves as a disjunction: it meets
+    /// `windows` nowhere and covers `macos`/`linux` deployment reads.
     #[test]
     fn unix_alias_is_os_disjunction() {
         assert!(!guards_overlap(Some(&unix()), Some(&windows())));
         assert!(guards_overlap(Some(&unix()), Some(&os("macos"))));
-        // Coverage through the alias: unix + windows declarations
+        // Coverage through the alias: `unix` + `windows` declarations
         // cover every host, so their joint negation is dead.
         let covered = GuardExpr::All(vec![GuardExpr::Not(Box::new(unix())), not(windows())]);
         assert!(!guard_satisfiable(&covered));

@@ -753,7 +753,7 @@ fn write_temp_lock(guard: &GuardedPath) -> Result<File> {
 #[cfg_attr(miri, allow(dead_code))]
 #[cfg(miri)]
 fn write_temp_lock(_guard: &GuardedPath) -> Result<File> {
-    Err(anyhow::anyhow!("temp lock unused under miri"))
+    Err(anyhow::anyhow!("temp lock unused under Miri"))
 }
 
 #[cfg(not(miri))]

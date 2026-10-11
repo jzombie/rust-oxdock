@@ -532,7 +532,7 @@ mod miri_backend {
         {
             // Conservative fallback: metadata is not available under Miri on this platform.
             let _ = _kind;
-            bail!("synthetic metadata unsupported under miri on this platform")
+            bail!("synthetic metadata unsupported under Miri on this platform")
         }
     }
 
