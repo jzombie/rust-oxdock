@@ -28,11 +28,14 @@ runs:
       shell: pwsh
       run: |
         $ErrorActionPreference = 'Stop'
-        # Downloaded scripts carry Mark of the Web; the default policy
-        # refuses them, and so would the bundled copy the installer
-        # re-executes below. Process scope needs no admin and covers
-        # the whole step, re-entry included.
-        Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+        # Downloaded scripts carry Mark of the Web; the default Windows
+        # policy refuses them, and so would the bundled copy the
+        # installer re-executes below. Process scope needs no admin and
+        # covers the whole step, re-entry included. Windows-only cmdlet:
+        # execution policy does not exist on other platforms.
+        if ($IsWindows) {
+          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+        }
         # Shared runner IPs burn the anonymous API quota: authenticate
         # reads when a token is present (CI bridges GITHUB_TOKEN).
         # An empty table sends no headers.
