@@ -224,6 +224,90 @@ impl PathResolver {
         self.backend.remove_dir_all(&guarded)
     }
 
+    /// Remove an empty directory after validating it is within allowed
+    /// roots. Fails when the directory holds entries, so `REMOVE` without
+    /// `--recursive` never deletes a tree.
+    #[allow(clippy::disallowed_methods)]
+    pub fn remove_empty_dir(&self, path: &GuardedPath) -> Result<()> {
+        let guarded = self
+            .check_access(path.as_path(), AccessMode::Write)
+            .with_context(|| format!("remove_empty_dir denied for {}", path.display()))?;
+        self.backend.remove_empty_dir(&guarded)
+    }
+
+    /// Remove the symlink at the lexical path when one stands there,
+    /// deleting the link itself, never its target. Returns whether a link
+    /// was removed; `false` means the caller falls through to ordinary
+    /// file/dir handling. Canonical resolution routes through the final
+    /// link, so the parent resolves while the file name joins lexically;
+    /// the link is re-verified with `symlink_metadata` immediately before
+    /// removal. Host only; the synthetic backends hold no symlinks and
+    /// report `false`.
+    pub fn remove_link_if_symlink(&self, cwd: &GuardedPath, rel: &str) -> Result<bool> {
+        #[cfg(miri)]
+        {
+            let _ = (cwd, rel);
+            Ok(false)
+        }
+        #[cfg(not(miri))]
+        {
+            self.remove_link_if_symlink_host(cwd, rel)
+        }
+    }
+
+    #[cfg(not(miri))]
+    #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+    fn remove_link_if_symlink_host(&self, cwd: &GuardedPath, rel: &str) -> Result<bool> {
+        use super::to_forward_slashes;
+        use std::path::Path;
+        let normalized = to_forward_slashes(rel);
+        let rel_path = Path::new(&normalized);
+        let Some(name) = rel_path
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+        else {
+            bail!("remove_link denied for {rel}: no file name");
+        };
+        if name == "." || name == ".." {
+            bail!("remove_link denied for {rel}: no file name");
+        }
+        let parent_str = rel_path
+            .parent()
+            .map(|p| p.to_string_lossy().into_owned())
+            .filter(|p| !p.is_empty());
+        let parent_guard = match parent_str {
+            Some(parent) => self.resolve_write(cwd, &parent)?,
+            None => self.resolve_write(cwd, ".")?,
+        };
+        let link_path = parent_guard.as_path().join(&name);
+        if !link_path.starts_with(parent_guard.as_path()) {
+            bail!("remove_link denied for {rel}: escapes root");
+        }
+        let meta = match std::fs::symlink_metadata(&link_path) {
+            Ok(meta) => meta,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => {
+                return Err(e).with_context(|| format!("failed to stat {rel}"));
+            }
+        };
+        if !meta.file_type().is_symlink() {
+            return Ok(false);
+        }
+        #[cfg(windows)]
+        {
+            let is_dir_link = std::fs::metadata(&link_path)
+                .map(|m| m.is_dir())
+                .unwrap_or(false);
+            if is_dir_link {
+                std::fs::remove_dir(&link_path)
+                    .with_context(|| format!("failed to remove link {rel}"))?;
+                return Ok(true);
+            }
+        }
+        std::fs::remove_file(&link_path).with_context(|| format!("failed to remove link {rel}"))?;
+        Ok(true)
+    }
+
     /// Create a new spill file with read/write access (fails if it exists).
     /// Backs large stdout capture / pipe backlog under a guarded tempdir.
     /// Host only; Miri callers stay memory-only and never call this.

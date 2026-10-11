@@ -1,0 +1,4 @@
+# Atomic placement: the cold dest dir is created first, then the staged
+# payload is renamed into place with its bytes intact.
+WRITE src.bin install-payload
+INSTALL src.bin dst-bin/tool

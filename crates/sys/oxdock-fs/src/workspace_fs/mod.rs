@@ -671,6 +671,7 @@ fn virtual_snapshot_anchor() -> GuardedPath {
 pub(crate) mod access;
 mod backend;
 mod copy;
+mod install;
 mod resolve;
 use access::guard_path;
 

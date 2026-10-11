@@ -103,7 +103,7 @@ fn smoke_steps_parse_and_cover_all_legs() -> Result<()> {
         "\"oxdock\", \"--version\"",
         // Version identity against source truth, not a second binary.
         "LOAD_TOML(\"Cargo.toml\")",
-        // Configured shell: unix legs put the install dir on PATH so
+        // Configured shell: Unix legs put the install dir on PATH so
         // bare names reach the product on both platforms.
         "/.local/bin:{{ env:PATH }}",
         "installed oxdock",

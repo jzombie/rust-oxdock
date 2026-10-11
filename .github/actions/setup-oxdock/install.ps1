@@ -15,7 +15,7 @@
 # Pin explicitly with VERSION (a tag: the API's "latest" skips
 # pre-releases, and every release here is `-alpha` until stable):
 #
-#   $env:VERSION = 'v0.24.3-alpha'; irm ... | iex
+#   $env:VERSION = 'v0.24.4-alpha'; irm ... | iex
 #
 # Pass INSTALL_DIR to choose the destination; the installer defaults
 # it when absent.
@@ -92,16 +92,64 @@ if (Test-CachedAsset) {
     if ($env:OXDOCK_OXFILE_URL) {
       Invoke-WebRequest $env:OXDOCK_OXFILE_URL -Headers $ApiHeaders -OutFile (Join-Path $tmp 'install.oxfile')
     } else {
+      # TODO(bundled-release): fetch the oxfile from the release bundle
+      # ($base) instead of the tag and main fallbacks below, and delete
+      # both fallbacks. Every supported release will carry the file.
+
       $raw = "https://raw.githubusercontent.com/$REPO/$VERSION/install.oxfile"
       try { Invoke-WebRequest $raw -Headers $ApiHeaders -OutFile (Join-Path $tmp 'install.oxfile') } catch { Invoke-WebRequest "https://raw.githubusercontent.com/$REPO/main/install.oxfile" -Headers $ApiHeaders -OutFile (Join-Path $tmp 'install.oxfile') }
     }
+    # Release-bundled installer: when the checksums list it, fetch it
+    # alongside everything else so execution below can hand off to logic
+    # matching the engine version. Releases predating bundled installers
+    # list nothing here, so nothing is fetched and the vendored logic
+    # runs unchanged.
+
+    # TODO(bundled-release): fetch unconditionally and delete this guard.
+    # Every supported release will list the bundled installer.
+
+    $stubLine = (Get-Content (Join-Path $tmp 'SHA256SUMS')) | Where-Object { $_ -match " install.ps1" } | Select-Object -First 1
+    if ($stubLine) { Invoke-WebRequest "$base/install.ps1" -Headers $ApiHeaders -OutFile (Join-Path $tmp 'install.ps1') }
     Move-Item (Join-Path $tmp 'asset.tar.gz') (Join-Path $VDir $Asset) -Force
     Move-Item (Join-Path $tmp 'SHA256SUMS') (Join-Path $VDir 'SHA256SUMS') -Force
     Move-Item (Join-Path $tmp 'install.oxfile') (Join-Path $VDir 'install.oxfile') -Force
+
+    # TODO(bundled-release): move unconditionally and delete this guard.
+    # Every supported release will carry the bundled installer.
+
+    if (Test-Path (Join-Path $tmp 'install.ps1')) { Move-Item (Join-Path $tmp 'install.ps1') (Join-Path $VDir 'install.ps1') -Force }
   } finally {
     Remove-Item -Recurse -Force $tmp
   }
 }
+# Self-update to the release-bundled installer when the release carries
+# one: the executed logic then always matches the engine version, and
+# warm runs keep working because the bundled copy lives in the cache
+# beside everything else. Releases predating bundled installers leave
+# no checksums entry, so the vendored logic below runs unchanged. The
+# flag prevents re-entry: the re-executed copy skips this block.
+
+# TODO(bundled-release): drop the existence and checksums-entry guards
+# and always hand off. Keep the re-entry flag and the digest
+# verification: the flag prevents loops and the digest proves integrity.
+
+if (-not $env:OXDOCK_STUB_ACTIVE -and (Test-Path (Join-Path $VDir 'install.ps1'))) {
+  $stubOk = ((Get-Content (Join-Path $VDir 'SHA256SUMS')) | Where-Object { $_ -match " install.ps1" } | Select-Object -First 1)
+  if (-not $stubOk) { throw "installer stub missing from checksums" }
+  $stubWant = ($stubOk -split '\s+')[0]
+  $stubGot = (Get-FileHash (Join-Path $VDir 'install.ps1') -Algorithm SHA256).Hash
+  if ($stubWant.ToLowerInvariant() -ne $stubGot.ToLowerInvariant()) { throw "installer stub failed verification" }
+  $env:OXDOCK_STUB_ACTIVE = '1'
+  & (Join-Path $VDir 'install.ps1')
+  if ($LASTEXITCODE -ne 0) { throw "installer failed with exit code $LASTEXITCODE" }
+  return
+}
+# Provenance for smoke forensics: which oxfile payload executes below
+# and its digest. A version-skewed payload names its source here
+# instead of surfacing as a bare parse error downstream.
+$oxfileSrc = if ($env:OXDOCK_OXFILE_URL) { $env:OXDOCK_OXFILE_URL } else { "release $Version" }
+$oxfileDigest = (Get-FileHash (Join-Path $VDir 'install.oxfile') -Algorithm SHA256).Hash
+[Console]::Error.WriteLine("installer oxfile: $oxfileSrc $oxfileDigest")
 $Expected = ((Get-Content (Join-Path $VDir 'SHA256SUMS')) | Where-Object { $_ -match "$Asset" } | Select-Object -First 1) -split '\s+' | Select-Object -First 1
 # The installer runs from the cache, never the network.
 $tmp = Join-Path ([IO.Path]::GetTempPath()) "oxdock-install-$([Guid]::NewGuid())"
@@ -135,6 +183,11 @@ try {
   # [Console]::In sits at EOF, so $input is read first and redirected
   # bytes only as fallback. A TTY is never drained.
   $env:OXDOCK_PIPED_SCRIPT = $null
+  # Interactive consoles confirm the destination in the oxfile: export
+  # the flag only with a console behind stdin. Either condition alone
+  # misfires in CI-without-console, so both must hold.
+  $env:OXDOCK_INTERACTIVE = $null
+  if ([Environment]::UserInteractive -and -not [Console]::IsInputRedirected) { $env:OXDOCK_INTERACTIVE = '1' }
   $stdinText = [string]::Join("`n", @($input))
   if ([string]::IsNullOrWhiteSpace($stdinText) -and [Console]::IsInputRedirected) {
     $stdinText = [Console]::In.ReadToEnd()
@@ -147,7 +200,10 @@ try {
   $env:OXDOCK_INTERPRETER = $Engine
   Push-Location $tmp
   try {
-    & $Engine 'install.oxfile'
+    # Absolute script path: the engine resolves relative script names
+    # against the workspace root, which would run the checkout's copy
+    # instead of the fetched payload above.
+    & $Engine (Join-Path $tmp 'install.oxfile')
     $code = $LASTEXITCODE
     if ($code -ne 0) { throw "installer failed with exit code $code" }
   } finally {

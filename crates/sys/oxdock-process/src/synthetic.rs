@@ -141,14 +141,14 @@ impl ProcessManager for SyntheticProcessManager {
             }
             CommandMode::Background => match stdout {
                 CommandStdout::Capture => {
-                    bail!("cannot capture stdout for background command under miri")
+                    bail!("cannot capture stdout for background command under Miri")
                 }
                 CommandStdout::Stream(_) => {
-                    bail!("stdout streaming not supported for background command under miri")
+                    bail!("stdout streaming not supported for background command under Miri")
                 }
                 CommandStdout::Inherit => {
                     if matches!(stderr, CommandStderr::Stream(_)) {
-                        bail!("stderr streaming not supported for background command under miri");
+                        bail!("stderr streaming not supported for background command under Miri");
                     }
                     let plan = plan_background(ctx, script)?;
                     Ok(CommandResult::Background(plan))
@@ -206,14 +206,14 @@ impl ProcessManager for SyntheticProcessManager {
             }
             CommandMode::Background => match stdout {
                 CommandStdout::Capture => {
-                    bail!("cannot capture stdout for background command under miri")
+                    bail!("cannot capture stdout for background command under Miri")
                 }
                 CommandStdout::Stream(_) => {
-                    bail!("stdout streaming not supported for background command under miri")
+                    bail!("stdout streaming not supported for background command under Miri")
                 }
                 CommandStdout::Inherit => {
                     if matches!(stderr, CommandStderr::Stream(_)) {
-                        bail!("stderr streaming not supported for background command under miri");
+                        bail!("stderr streaming not supported for background command under Miri");
                     }
                     let plan = plan_argv_background(ctx, argv)?;
                     Ok(CommandResult::Background(plan))

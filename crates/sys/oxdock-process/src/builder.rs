@@ -140,7 +140,7 @@ impl CommandBuilder {
     pub fn spawn(&mut self) -> Result<ChildHandle> {
         #[cfg(miri)]
         {
-            bail!("spawn is not supported under miri synthetic process backend")
+            bail!("spawn is not supported under Miri synthetic process backend")
         }
 
         #[cfg(not(miri))]
@@ -165,7 +165,7 @@ impl CommandBuilder {
         #[cfg(miri)]
         {
             let _ = self;
-            bail!("spawn is not supported under miri synthetic process backend")
+            bail!("spawn is not supported under Miri synthetic process backend")
         }
 
         #[cfg(not(miri))]

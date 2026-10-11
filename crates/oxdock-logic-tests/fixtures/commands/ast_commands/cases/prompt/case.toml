@@ -1,0 +1,4 @@
+name = "prompt"
+
+[expect]
+files = { "out.txt" = "fallback-dir" }

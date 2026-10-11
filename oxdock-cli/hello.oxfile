@@ -14,7 +14,7 @@ ECHO "This runs unconditionally"
 # --- Platform-specific guarded RUNs (inline guards) ---
 # Two axes: `os:` names the exact system, `family:` splits unix-shell
 # vs Windows (`family:unix` covers macOS and Linux).
-[os:macos] ECHO "Hello from Mac"
+[os:macos] ECHO "Hello from macOS"
 [os:linux] ECHO "Hello from Linux"
 [os:windows] ECHO "Hello from Windows"
 
@@ -36,7 +36,7 @@ ENV FOO=1
 ECHO "(previous-line) Foo is set"
 
 # Example mixing AND/OR: (FOO and linux) OR mac
-[or((env:FOO, os:linux), os:macos)] ECHO "Foo on linux, or any mac"
+[or((env:FOO, os:linux), os:macos)] ECHO "Foo on Linux, or any Mac"
 
 # Show that ECHO can print the ENV we set earlier (cross-platform)
 ECHO {{ env:FOO }}

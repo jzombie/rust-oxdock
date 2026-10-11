@@ -362,8 +362,11 @@ fn real_run_with_binaries_runs_the_full_pipeline() -> Result<()> {
             "target/artifacts/demo-x86_64-pc-windows-msvc.tar.gz".to_string(),
             "target/artifacts/demo-aarch64-pc-windows-msvc.tar.gz".to_string(),
             "target/artifacts/SHA256SUMS".to_string(),
+            "target/artifacts/install.sh".to_string(),
+            "target/artifacts/install.ps1".to_string(),
+            "target/artifacts/install.oxfile".to_string(),
         ]],
-        "creation carries notes, every asset, and checksums"
+        "creation carries notes, every asset, checksums, and installers"
     );
     Ok(())
 }

@@ -16,7 +16,7 @@
 # Pin explicitly with VERSION (a tag: the API's "latest" skips
 # pre-releases, and every release here is `-alpha` until stable):
 #
-#   VERSION=v0.24.3-alpha curl -fsSL ... | bash
+#   VERSION=v0.24.4-alpha curl -fsSL ... | bash
 #
 # Pass INSTALL_DIR to choose the destination; the installer defaults
 # it when absent.
@@ -97,7 +97,24 @@ else
   if [ -n "${OXDOCK_OXFILE_URL:-}" ]; then
     gh_curl "$OXDOCK_OXFILE_URL" -o "$tmp/install.oxfile"
   else
+
+    # TODO(bundled-release): fetch the oxfile from the release bundle
+    # ($base) instead of the tag and main fallbacks below, and delete
+    # both fallbacks. Every supported release will carry the file.
+
     gh_curl "https://raw.githubusercontent.com/$REPO/$VERSION/install.oxfile" -o "$tmp/install.oxfile" || gh_curl "https://raw.githubusercontent.com/$REPO/main/install.oxfile" -o "$tmp/install.oxfile"
+  fi
+  # Release-bundled installer: when the checksums list it, fetch it
+  # alongside everything else so execution below can hand off to logic
+  # matching the engine version. Releases predating bundled installers
+  # list nothing here, so nothing is fetched and the vendored logic
+  # runs unchanged.
+
+  # TODO(bundled-release): fetch unconditionally and delete this guard.
+  # Every supported release will list the bundled installer.
+
+  if grep -q " install.sh$" "$tmp/SHA256SUMS" 2>/dev/null; then
+    gh_curl "$base/install.sh" -o "$tmp/install.sh"
   fi
   if command -v sha256sum >/dev/null 2>&1; then
     (cd "$tmp" && grep "$ASSET\$" SHA256SUMS | sha256sum -c - >/dev/null)
@@ -107,9 +124,51 @@ else
   mv "$tmp/$ASSET" "$VDIR/$ASSET"
   mv "$tmp/SHA256SUMS" "$VDIR/SHA256SUMS"
   mv "$tmp/install.oxfile" "$VDIR/install.oxfile"
+
+  # TODO(bundled-release): move unconditionally and delete this guard.
+  # Every supported release will carry the bundled installer.
+
+  if [ -f "$tmp/install.sh" ]; then
+    mv "$tmp/install.sh" "$VDIR/install.sh"
+  fi
   trap - EXIT
   rm -rf "$tmp"
 fi
+# Self-update to the release-bundled installer when the release carries
+# one: the executed logic then always matches the engine version, and
+# warm runs keep working because the bundled copy lives in the cache
+# beside everything else. Releases predating bundled installers leave
+# no checksums entry, so the vendored logic below runs unchanged. The
+# flag prevents re-entry: the re-executed copy skips this block.
+
+# TODO(bundled-release): drop the file-existence and checksums-entry
+# guards and always hand off. Keep the re-entry flag and the digest
+# verification: the flag prevents loops and the digest proves integrity.
+
+if [ -z "${OXDOCK_STUB_ACTIVE:-}" ] && [ -f "$VDIR/install.sh" ]; then
+  if ! grep -q " install.sh$" "$VDIR/SHA256SUMS" 2>/dev/null; then
+    echo "installer stub missing from checksums" >&2
+    exit 1
+  fi
+  if command -v sha256sum >/dev/null 2>&1; then
+    (cd "$VDIR" && grep " install.sh$" SHA256SUMS | sha256sum -c - >/dev/null) || { echo "installer stub failed verification" >&2; exit 1; }
+  else
+    (cd "$VDIR" && grep " install.sh$" SHA256SUMS | shasum -a 256 -c - >/dev/null) || { echo "installer stub failed verification" >&2; exit 1; }
+  fi
+  OXDOCK_STUB_ACTIVE=1
+  export OXDOCK_STUB_ACTIVE
+  exec bash "$VDIR/install.sh"
+fi
+# Provenance for smoke forensics: which oxfile payload executes below
+# and its digest. A version-skewed payload names its source here
+# instead of surfacing as a bare parse error downstream.
+oxfile_src="${OXDOCK_OXFILE_URL:-release $VERSION}"
+if command -v sha256sum >/dev/null 2>&1; then
+  oxfile_digest=$(sha256sum "$VDIR/install.oxfile" | cut -d' ' -f1)
+else
+  oxfile_digest=$(shasum -a 256 "$VDIR/install.oxfile" | cut -d' ' -f1)
+fi
+echo "installer oxfile: $oxfile_src $oxfile_digest" >&2
 EXPECTED=$(grep "$ASSET\$" "$VDIR/SHA256SUMS" | cut -d' ' -f1)
 # The installer runs from the cache, never the network: population
 # above stored the release's own logic beside its bytes.
@@ -160,6 +219,12 @@ esac
 run_installer() {
 # Stdin capture, no decisions: a TTY is never drained.
 OXDOCK_PIPED_SCRIPT=""
+# Interactive consoles confirm the destination in the oxfile: export the
+# flag only with a console behind stdin, before the drain logic below.
+OXDOCK_INTERACTIVE=""
+if [ -t 0 ]; then
+  OXDOCK_INTERACTIVE=1
+fi
 if [ ! -t 0 ]; then
   stdin_tmp=$(mktemp)
   trap 'rm -rf "$tmp" "$stdin_tmp"' EXIT
@@ -170,7 +235,7 @@ if [ ! -t 0 ]; then
     rm -f "$stdin_tmp"
   fi
 fi
-(cd "$tmp" && OXDOCK_ASSET="$VDIR/$ASSET" OXDOCK_SHA="$EXPECTED" OXDOCK_BIN="$BIN" OXDOCK_DIR="$OXDOCK_DIR" OXDOCK_VERSION="$VERSION" OXDOCK_INTERPRETER="$ENGINE" OXDOCK_PIPED_SCRIPT="$OXDOCK_PIPED_SCRIPT" "$ENGINE" install.oxfile) || {
+(cd "$tmp" && OXDOCK_ASSET="$VDIR/$ASSET" OXDOCK_SHA="$EXPECTED" OXDOCK_BIN="$BIN" OXDOCK_DIR="$OXDOCK_DIR" OXDOCK_VERSION="$VERSION" OXDOCK_INTERPRETER="$ENGINE" OXDOCK_PIPED_SCRIPT="$OXDOCK_PIPED_SCRIPT" OXDOCK_INTERACTIVE="$OXDOCK_INTERACTIVE" "$ENGINE" "$tmp/install.oxfile") || {
   code=$?
   echo "installer failed with exit code $code" >&2
   exit "$code"

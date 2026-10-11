@@ -590,7 +590,9 @@ impl StepKind {
             | StepKind::HashSha256 { path: arg }
             | StepKind::Exit(arg) => walk_arg(arg, f),
             StepKind::Env { value, .. } => walk_arg(value, f),
-            StepKind::Copy { from, to, .. } | StepKind::Symlink { from, to, .. } => {
+            StepKind::Copy { from, to, .. }
+            | StepKind::Symlink { from, to, .. }
+            | StepKind::Install { from, to } => {
                 walk_arg(from, f);
                 walk_arg(to, f);
             }
@@ -600,6 +602,13 @@ impl StepKind {
                 walk_arg(to, f);
             }
             StepKind::Ls(arg) | StepKind::Read(arg) => walk_opt(arg, f),
+            StepKind::Remove { path, .. } => walk_arg(path, f),
+            StepKind::Prompt {
+                message, default, ..
+            } => {
+                walk_arg(message, f);
+                walk_opt(default, f);
+            }
             StepKind::Write { path, contents } | StepKind::Append { path, contents } => {
                 walk_arg(path, f);
                 walk_opt(contents, f);
@@ -690,13 +699,16 @@ impl StepKind {
             | StepKind::Copy { .. }
             | StepKind::CopyGit { .. }
             | StepKind::Symlink { .. }
+            | StepKind::Install { .. }
             | StepKind::Mkdir(_)
             | StepKind::Ls(_)
             | StepKind::Cwd
             | StepKind::Read(_)
             | StepKind::ReadLine { .. }
+            | StepKind::Prompt { .. }
             | StepKind::Write { .. }
             | StepKind::Append { .. }
+            | StepKind::Remove { .. }
             | StepKind::Expand { .. }
             | StepKind::AssertEq { .. }
             | StepKind::AssertContains { .. }
@@ -998,7 +1010,7 @@ declare_commands! {
             Example { name: "shell reads env per platform", fence_meta: None, code: indoc! {r#"
                 # A shell command reads its own environment, with
                 # per-platform spelling: quoted "$VAR" passes the parser
-                # through untouched on unix ...
+                # through untouched on Unix ...
                 ENV PROXY_PORT=23791
 
                 [family:unix] LET $o: STRING = RUN echo serving on "$PROXY_PORT"
@@ -1264,6 +1276,35 @@ declare_commands! {
         lower: |_flags, args| Ok(StepKind::Mkdir(args.into_iter().next().ok_or_else(|| ParseError::validation("MKDIR", "MKDIR requires a path".to_string(), &SpanContext::line_only(0)))?)),
     ],
 
+    Install => [
+        name: "INSTALL",
+        variant: Install { from: Arg, to: Arg },
+        syntax: "INSTALL <source> <dest>",
+        summary: "Atomically install a verified binary as executable.",
+        description: "Stages the source as a temp file in the dest dir, sets executable mode, then renames into place.",
+        args: &[
+            ArgSpec { name: "from", arg_type: ArgType::Path, description: "Source file", io: IoDirection::Read, index: 0, required: true, fallback_stream: None },
+            ArgSpec { name: "to", arg_type: ArgType::Path, description: "Dest file", io: IoDirection::Write, index: 1, required: true, fallback_stream: None },
+        ],
+        flags: &[],
+        default_output: None,
+        examples: &[ Example { name: "install", fence_meta: Some("roots:unified"), code: indoc! {r#"
+            # Place a verified binary with executable mode.
+            IMPORT [STD]
+            WRITE src.bin payload
+            INSTALL src.bin dst-bin/tool
+
+            LET $t: STRING = PATH_TYPE("dst-bin/tool")
+            ASSERT_EQ $t "file"
+        "#} } ],
+        lower: |_flags, args| {
+            let mut it = args.into_iter();
+            let from = it.next().ok_or_else(|| ParseError::validation("INSTALL", "INSTALL requires a source".to_string(), &SpanContext::line_only(0)))?;
+            let to = it.next().ok_or_else(|| ParseError::validation("INSTALL", "INSTALL requires a destination".to_string(), &SpanContext::line_only(0)))?;
+            Ok(StepKind::Install { from, to })
+        },
+    ],
+
     Ls => [
         name: "LS",
         variant: Ls(Option<Arg>),
@@ -1359,6 +1400,48 @@ declare_commands! {
         },
     ],
 
+    Prompt => [
+        name: "PROMPT",
+        variant: Prompt { var: String, message: Arg, default: Option<Arg> },
+        syntax: "PROMPT $var <message> [<default>]",
+        summary: "Prompt on the terminal into a variable.",
+        description: indoc! {r#"
+            Prints `{message} [{default}]: ` (or `{message}: ` with no
+            default) to stderr and reads one line from the terminal.
+
+            Empty input yields the default when one is given, else an
+            empty string. EOF aborts loudly. Non-TTY stdin never reads:
+            a default binds with a stderr note, while no default bails.
+        "#},
+        args: &[
+            ArgSpec { name: "var", arg_type: ArgType::String, description: "Target variable (`$name`); the answer binds as STRING", io: IoDirection::Write, index: 0, required: true, fallback_stream: None },
+            ArgSpec { name: "message", arg_type: ArgType::String, description: "Prompt message", io: IoDirection::Read, index: 1, required: true, fallback_stream: None },
+            ArgSpec { name: "default", arg_type: ArgType::String, description: "Default on empty input", io: IoDirection::Read, index: 2, required: false, fallback_stream: None },
+        ],
+        flags: &[],
+        default_output: None,
+        examples: &[ Example { name: "prompt needs a terminal", fence_meta: Some("expect_error:\"non-TTY\""), code: indoc! {r#"
+            # Headless runs have no terminal: without a default the
+            # prompt fails instead of hanging or reading piped stdin.
+            PROMPT $dir "Install destination?"
+        "#} } ],
+        lower: |_flags, args| {
+            let mut it = args.into_iter();
+            let var_arg = it.next().ok_or_else(|| ParseError::validation("PROMPT", "PROMPT requires a variable".to_string(), &SpanContext::line_only(0)))?;
+            let var = match var_arg {
+                Arg::Expr(Expr::Var(name)) => name,
+                Arg::String(s, _) if s.starts_with('$') || s.contains("{{") => s.trim_start_matches('$').to_string(),
+                other => return Err(ParseError::validation("PROMPT", format!("PROMPT requires a $variable, found {:?}", other), &SpanContext::line_only(0))),
+            };
+            if var.is_empty() {
+                return Err(ParseError::validation("PROMPT", "PROMPT requires a variable".to_string(), &SpanContext::line_only(0)))
+            }
+            let message = it.next().ok_or_else(|| ParseError::validation("PROMPT", "PROMPT requires a message".to_string(), &SpanContext::line_only(0)))?;
+            let default = it.next();
+            Ok(StepKind::Prompt { var, message, default })
+        },
+    ],
+
     Write => [
         name: "WRITE",
         variant: Write { path: Arg, contents: Option<Arg> },
@@ -1411,6 +1494,37 @@ declare_commands! {
             let remaining: Vec<Arg> = it.collect();
             let contents = if remaining.is_empty() { None } else { Some(join_value(remaining, "APPEND")?) };
             Ok(StepKind::Append { path, contents })
+        },
+    ],
+
+    Remove => [
+        name: "REMOVE",
+        variant: Remove { path: Arg, recursive: bool },
+        syntax: "REMOVE [--recursive] <path>",
+        summary: "Remove a file, symlink, or directory.",
+        description: "Removes a file, symlink (the link itself), or empty dir. With --recursive removes a directory tree.",
+        args: &[ ArgSpec { name: "path", arg_type: ArgType::Path, description: "Path to remove", io: IoDirection::Write, index: 0, required: true, fallback_stream: None } ],
+        flags: &[ FlagSpec { name: "recursive", long: "--recursive", value_type: FlagValueType::Flag, required: false, description: "Remove a directory tree" } ],
+        default_output: None,
+        examples: &[ Example { name: "remove", fence_meta: None, code: indoc! {r#"
+            # WRITE then REMOVE leaves nothing behind.
+            IMPORT [STD]
+            WRITE scratch.txt content
+
+            # Assert original file is written
+            LET $o: STRING = PATH_TYPE("scratch.txt")
+            ASSERT_EQ $o "file"
+
+            REMOVE scratch.txt
+
+            # Assert file has been removed
+            LET $t: STRING = PATH_TYPE("scratch.txt")
+            ASSERT_EQ $t "absent"
+        "#} } ],
+        lower: |flags, args| {
+            let recursive = flags.iter().any(|(k, _)| k == "recursive");
+            let path = args.into_iter().next().ok_or_else(|| ParseError::validation("REMOVE", "REMOVE requires a path".to_string(), &SpanContext::line_only(0)))?;
+            Ok(StepKind::Remove { path, recursive })
         },
     ],
 
@@ -3026,6 +3140,12 @@ impl fmt::Display for StepKind {
                 }
             }
             StepKind::Mkdir(a) => write!(f, "MKDIR {}", fmt_value(a, quote_arg)),
+            StepKind::Install { from, to } => write!(
+                f,
+                "INSTALL {} {}",
+                fmt_value(from, quote_arg),
+                fmt_value(to, quote_arg)
+            ),
             StepKind::Ls(a) => {
                 write!(f, "LS")?;
                 if let Some(x) = a {
@@ -3042,6 +3162,17 @@ impl fmt::Display for StepKind {
                 Ok(())
             }
             StepKind::ReadLine { var } => write!(f, "READ_LINE ${}", var),
+            StepKind::Prompt {
+                var,
+                message,
+                default,
+            } => {
+                write!(f, "PROMPT ${} {}", var, fmt_value(message, quote_arg))?;
+                if let Some(d) = default {
+                    write!(f, " {}", fmt_value(d, quote_arg))?;
+                }
+                Ok(())
+            }
             StepKind::Write { path, contents } => {
                 write!(f, "WRITE {}", fmt_value(path, quote_arg))?;
                 if let Some(b) = contents {
@@ -3055,6 +3186,13 @@ impl fmt::Display for StepKind {
                     write!(f, " {}", fmt_value(b, quote_msg))?;
                 }
                 Ok(())
+            }
+            StepKind::Remove { path, recursive } => {
+                if *recursive {
+                    write!(f, "REMOVE --recursive {}", fmt_value(path, quote_arg))
+                } else {
+                    write!(f, "REMOVE {}", fmt_value(path, quote_arg))
+                }
             }
             StepKind::Expand { path, overrides } => {
                 write!(f, "EXPAND")?;
@@ -3928,12 +4066,15 @@ mod tests {
                 | StepKind::Copy { .. }
                 | StepKind::Symlink { .. }
                 | StepKind::Mkdir(_)
+                | StepKind::Install { .. }
                 | StepKind::Ls(_)
                 | StepKind::Cwd
                 | StepKind::Read(_)
                 | StepKind::ReadLine { .. }
+                | StepKind::Prompt { .. }
                 | StepKind::Write { .. }
                 | StepKind::Append { .. }
+                | StepKind::Remove { .. }
                 | StepKind::Expand { .. }
                 | StepKind::AssertEq { .. }
                 | StepKind::AssertContains { .. }

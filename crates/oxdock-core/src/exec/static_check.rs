@@ -997,6 +997,15 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 }
                 Ok(live)
             }
+            StepKind::Prompt { var, .. } => {
+                // Same declare-or-mutate contract as `read_line`:
+                // the answer binds as `STRING`, mutating when present.
+                let key = clean_var(var);
+                if !env.is_declared(&key) {
+                    env.insert_top(key, TypeTag::String, step.guard.as_ref());
+                }
+                Ok(live)
+            }
             _ => {
                 // Every remaining variant is a simple command: all its
                 // argument expressions (including `{{ }}` template

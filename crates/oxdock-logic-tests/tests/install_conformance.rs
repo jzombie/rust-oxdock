@@ -47,6 +47,41 @@ fn install_script_parses() -> Result<()> {
     Ok(())
 }
 
+/// The installer places the verified binary through the atomic `INSTALL`
+/// primitive with an explicit interactive branch: placement never falls
+/// back to `MKDIR` + `COPY`, the `OXDOCK_INTERACTIVE` prompt branch and
+/// the `PATH_WRITABLE` validity loop stay visible, and the checksum gate
+/// plus both report lines are untouched.
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "reads install.oxfile from the repository checkout layout"
+)]
+fn install_script_uses_atomic_install_with_interactive_branch() -> Result<()> {
+    let text = load_install_script()?;
+    for marker in [
+        "INSTALL $bin $dest",
+        "PROMPT $dir",
+        "OXDOCK_INTERACTIVE",
+        "PATH_WRITABLE",
+        "ASSERT_EQ $actual",
+        "installed oxdock",
+        "is on PATH",
+    ] {
+        assert!(
+            text.contains(marker),
+            "install.oxfile must contain {marker:?}"
+        );
+    }
+    for retired in ["COPY $bin $dest", "MKDIR $dir"] {
+        assert!(
+            !text.contains(retired),
+            "install.oxfile must not contain {retired:?}"
+        );
+    }
+    Ok(())
+}
+
 struct InstallRun {
     _temp: oxdock_fs::GuardedTempDir,
     root: GuardedPath,

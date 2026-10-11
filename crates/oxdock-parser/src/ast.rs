@@ -61,12 +61,15 @@ pub enum Command {
     HashSha256,
     Symlink,
     Mkdir,
+    Install,
     Ls,
     Cwd,
     Read,
     ReadLine,
+    Prompt,
     Write,
     Append,
+    Remove,
     Expand,
     AssertEq,
     AssertContains,
@@ -90,12 +93,15 @@ pub const COMMANDS: &[Command] = &[
     Command::HashSha256,
     Command::Symlink,
     Command::Mkdir,
+    Command::Install,
     Command::Ls,
     Command::Cwd,
     Command::Read,
     Command::ReadLine,
+    Command::Prompt,
     Command::Write,
     Command::Append,
+    Command::Remove,
     Command::Expand,
     Command::AssertEq,
     Command::AssertContains,
@@ -127,12 +133,15 @@ impl Command {
             Command::HashSha256 => "HASH_SHA256",
             Command::Symlink => "SYMLINK",
             Command::Mkdir => "MKDIR",
+            Command::Install => "INSTALL",
             Command::Ls => "LS",
             Command::Cwd => "CWD",
             Command::Read => "READ",
             Command::ReadLine => "READ_LINE",
+            Command::Prompt => "PROMPT",
             Command::Write => "WRITE",
             Command::Append => "APPEND",
+            Command::Remove => "REMOVE",
             Command::Expand => "EXPAND",
             Command::AssertEq => "ASSERT_EQ",
             Command::AssertContains => "ASSERT_CONTAINS",
@@ -160,12 +169,15 @@ impl Command {
                 "SYMLINK [--from-workspace SNAPSHOT|LOCAL|CACHE|SYSTEM] <from> <to>"
             }
             Command::Mkdir => "MKDIR <path>",
+            Command::Install => "INSTALL <source> <dest>",
             Command::Ls => "LS [<path>]",
             Command::Cwd => "CWD",
             Command::Read => "READ [<path>]",
             Command::ReadLine => "READ_LINE $var",
+            Command::Prompt => "PROMPT $var <message> [<default>]",
             Command::Write => "WRITE <path> [<contents>]",
             Command::Append => "APPEND <path> [<contents>]",
+            Command::Remove => "REMOVE [--recursive] <path>",
             Command::Expand => "EXPAND [<path>] [<KEY=val> ...]",
             Command::AssertEq => "ASSERT_EQ [--hash <sha256>] <actual> <expected>",
             Command::AssertContains => "ASSERT_CONTAINS <haystack> <needle>",
@@ -197,12 +209,15 @@ impl Command {
             "HASH_SHA256" => Some(Command::HashSha256),
             "SYMLINK" => Some(Command::Symlink),
             "MKDIR" => Some(Command::Mkdir),
+            "INSTALL" => Some(Command::Install),
             "LS" => Some(Command::Ls),
             "CWD" => Some(Command::Cwd),
             "READ" => Some(Command::Read),
             "READ_LINE" => Some(Command::ReadLine),
+            "PROMPT" => Some(Command::Prompt),
             "WRITE" => Some(Command::Write),
             "APPEND" => Some(Command::Append),
+            "REMOVE" => Some(Command::Remove),
             "EXPAND" => Some(Command::Expand),
             "ASSERT_EQ" => Some(Command::AssertEq),
             "ASSERT_CONTAINS" => Some(Command::AssertContains),
@@ -1514,11 +1529,11 @@ mod guard_analysis_tests {
         let os_exhausted = GuardExpr::All(vec![not(os("macos")), not(os("linux")), not(windows())]);
         assert!(
             !guard_satisfiable(&os_exhausted),
-            "no host is outside macos/linux/windows"
+            "no host is outside `macos`/`linux`/`windows`"
         );
         // Partial negations stay live.
         let os_partial = GuardExpr::All(vec![not(os("macos")), not(os("linux"))]);
-        assert!(guard_satisfiable(&os_partial), "windows is still open");
+        assert!(guard_satisfiable(&os_partial), "`windows` is still open");
         // The bool domain exhausts the same way.
         let bool_exhausted = GuardExpr::All(vec![
             not(attr(Ns::Bool, None, Some("true"))),
@@ -1535,13 +1550,13 @@ mod guard_analysis_tests {
         assert!(guard_satisfiable(&not(unix())));
     }
 
-    /// The desugared unix alias behaves as a disjunction: it meets
-    /// windows nowhere and covers macos/linux deployment reads.
+    /// The desugared `unix` alias behaves as a disjunction: it meets
+    /// `windows` nowhere and covers `macos`/`linux` deployment reads.
     #[test]
     fn unix_alias_is_os_disjunction() {
         assert!(!guards_overlap(Some(&unix()), Some(&windows())));
         assert!(guards_overlap(Some(&unix()), Some(&os("macos"))));
-        // Coverage through the alias: unix + windows declarations
+        // Coverage through the alias: `unix` + `windows` declarations
         // cover every host, so their joint negation is dead.
         let covered = GuardExpr::All(vec![GuardExpr::Not(Box::new(unix())), not(windows())]);
         assert!(!guard_satisfiable(&covered));

@@ -22,12 +22,15 @@ define_pipeline! {
     StepKind::CopyGit { .. } => exec::dispatch_copy_git,
     StepKind::Symlink { .. } => exec::dispatch_symlink,
     StepKind::Mkdir(..) => exec::dispatch_mkdir,
+    StepKind::Install { .. } => exec::dispatch_install,
     StepKind::Ls(..) => exec::dispatch_ls,
     StepKind::Cwd => exec::dispatch_cwd,
     StepKind::Read(..) => exec::dispatch_read,
     StepKind::ReadLine { .. } => exec::dispatch_read_line,
+    StepKind::Prompt { .. } => exec::dispatch_prompt,
     StepKind::Write { .. } => exec::dispatch_write,
     StepKind::Append { .. } => exec::dispatch_append,
+    StepKind::Remove { .. } => exec::dispatch_remove,
     StepKind::Expand { .. } => exec::dispatch_expand,
     StepKind::AssertEq { .. } => exec::dispatch_assert_eq,
     StepKind::AssertContains { .. } => exec::dispatch_assert_contains,
@@ -418,7 +421,7 @@ mod tests {
         assert_eq!(
             exists(&root, "platform.txt"),
             !expect_skipped,
-            "platform guard should skip on unix and run elsewhere"
+            "platform guard should skip on Unix and run elsewhere"
         );
         assert!(exists(&root, "always.txt"), "unguarded WRITE should run");
     }
@@ -606,7 +609,7 @@ mod tests {
     #[cfg(unix)]
     #[cfg_attr(
         miri,
-        ignore = "stdout streaming not supported for background command under miri"
+        ignore = "stdout streaming not supported for background command under Miri"
     )]
     #[test]
     fn async_exits_success_and_stops_pipeline() {
@@ -623,7 +626,7 @@ mod tests {
     #[cfg(unix)]
     #[cfg_attr(
         miri,
-        ignore = "stdout streaming not supported for background command under miri"
+        ignore = "stdout streaming not supported for background command under Miri"
     )]
     #[test]
     fn async_failure_bubbles_status() {
@@ -720,7 +723,7 @@ mod tests {
     #[cfg(unix)]
     #[cfg_attr(
         miri,
-        ignore = "stdout streaming not supported for background command under miri"
+        ignore = "stdout streaming not supported for background command under Miri"
     )]
     #[test]
     fn exit_terminates_backgrounds_and_returns_code() {
@@ -779,7 +782,7 @@ mod tests {
 
     #[cfg_attr(
         miri,
-        ignore = "stdout streaming not supported for background command under miri"
+        ignore = "stdout streaming not supported for background command under Miri"
     )]
     #[test]
     fn env_applies_to_run_and_background() {

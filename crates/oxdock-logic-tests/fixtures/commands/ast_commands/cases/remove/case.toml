@@ -1,0 +1,4 @@
+name = "remove"
+
+[expect]
+files = { "kept.txt" = "kept" }

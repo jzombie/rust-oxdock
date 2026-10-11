@@ -791,6 +791,11 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
             let path = super::args::resolve_arg(arg, &mut cx)?;
             handlers::mkdir(&mut cx, idx, &path)
         }
+        StepKind::Install { from, to } => {
+            let from_resolved = super::args::resolve_arg(from, &mut cx)?;
+            let to_resolved = super::args::resolve_arg(to, &mut cx)?;
+            handlers::install(&mut cx, idx, &from_resolved, &to_resolved)
+        }
         StepKind::Ls(arg) => {
             let resolved = super::args::resolve_arg_opt(arg, &mut cx)?;
             handlers::ls(&mut cx, idx, &resolved)
@@ -801,6 +806,24 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
             handlers::read(&mut cx, idx, &resolved)
         }
         StepKind::ReadLine { var } => handlers::read_line(&mut cx, idx, var),
+        StepKind::Prompt {
+            var,
+            message,
+            default,
+        } => {
+            let message_resolved = super::args::resolve_arg(message, &mut cx)?;
+            let default_resolved = match default {
+                Some(d) => Some(super::args::resolve_arg(d, &mut cx)?),
+                None => None,
+            };
+            handlers::prompt(
+                &mut cx,
+                idx,
+                var,
+                &message_resolved,
+                default_resolved.as_deref(),
+            )
+        }
         StepKind::ListAppend { list, item } => {
             let value = super::args::evaluate_assert_operand(item, &mut cx)?;
             handlers::push_into(&mut cx, idx, list, value)
@@ -814,6 +837,10 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
             let path_resolved = super::args::resolve_arg(path, &mut cx)?;
             let contents_resolved = super::args::resolve_arg_opt(contents, &mut cx)?;
             handlers::append(&mut cx, idx, &path_resolved, contents_resolved.as_deref())
+        }
+        StepKind::Remove { path, recursive } => {
+            let path_resolved = super::args::resolve_arg(path, &mut cx)?;
+            handlers::remove(&mut cx, idx, &path_resolved, *recursive)
         }
         StepKind::Expand { path, overrides } => {
             let path_resolved = super::args::resolve_arg_opt(path, &mut cx)?;
@@ -1057,6 +1084,11 @@ fn execute_steps_inner<P: ProcessManager>(
                             let path = super::args::resolve_arg(arg, &mut cx)?;
                             handlers::mkdir(&mut cx, idx, &path)
                         }
+                        StepKind::Install { from, to } => {
+                            let from_resolved = super::args::resolve_arg(from, &mut cx)?;
+                            let to_resolved = super::args::resolve_arg(to, &mut cx)?;
+                            handlers::install(&mut cx, idx, &from_resolved, &to_resolved)
+                        }
                         StepKind::Ls(arg) => {
                             let resolved = super::args::resolve_arg_opt(arg, &mut cx)?;
                             handlers::ls(&mut cx, idx, &resolved)
@@ -1067,6 +1099,24 @@ fn execute_steps_inner<P: ProcessManager>(
                             handlers::read(&mut cx, idx, &resolved)
                         }
                         StepKind::ReadLine { var } => handlers::read_line(&mut cx, idx, var),
+                        StepKind::Prompt {
+                            var,
+                            message,
+                            default,
+                        } => {
+                            let message_resolved = super::args::resolve_arg(message, &mut cx)?;
+                            let default_resolved = match default {
+                                Some(d) => Some(super::args::resolve_arg(d, &mut cx)?),
+                                None => None,
+                            };
+                            handlers::prompt(
+                                &mut cx,
+                                idx,
+                                var,
+                                &message_resolved,
+                                default_resolved.as_deref(),
+                            )
+                        }
                         StepKind::ListAppend { list, item } => {
                             let value = super::args::evaluate_assert_operand(item, &mut cx)?;
                             handlers::push_into(&mut cx, idx, list, value)
@@ -1092,6 +1142,10 @@ fn execute_steps_inner<P: ProcessManager>(
                                 &path_resolved,
                                 contents_resolved.as_deref(),
                             )
+                        }
+                        StepKind::Remove { path, recursive } => {
+                            let path_resolved = super::args::resolve_arg(path, &mut cx)?;
+                            handlers::remove(&mut cx, idx, &path_resolved, *recursive)
                         }
                         StepKind::Expand { path, overrides } => {
                             let path_resolved = super::args::resolve_arg_opt(path, &mut cx)?;

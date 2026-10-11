@@ -1955,6 +1955,281 @@ fn assert_eq_path_type_covers_file_dir_absent() {
 }
 
 #[test]
+#[cfg_attr(miri, ignore = "needs host tempdir for staging files")]
+fn install_places_binary_with_executable_mode() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    run_script(
+        &root,
+        indoc! {r#"
+            IMPORT [STD]
+            WRITE src.bin install-payload
+            INSTALL src.bin cold-bin/tool
+            LET $t: STRING = PATH_TYPE("cold-bin/tool")
+            ASSERT_EQ $t "file"
+            LET $body: STRING = READ cold-bin/tool
+            ASSERT_EQ $body "install-payload"
+        "#},
+    )
+    .expect("install places bytes");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let resolver = PathResolver::new(root.as_path(), root.as_path()).unwrap();
+        let mode = resolver
+            .metadata(&root.join("cold-bin/tool").unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o755, "installed binary carries 0755");
+    }
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "needs host tempdir for staging files")]
+fn install_replaces_existing_destination() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    run_script(
+        &root,
+        indoc! {r#"
+            WRITE new.bin new-bytes
+            WRITE tool old-bytes
+            INSTALL new.bin tool
+            LET $body: STRING = READ tool
+            ASSERT_EQ $body "new-bytes"
+        "#},
+    )
+    .expect("reinstall replaces bytes");
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "PROMPT bails under Miri (no terminal); headless default/error paths are native-only"
+)]
+fn prompt_without_default_fails_closed_on_non_tty() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let err = run_script(&root, "PROMPT $dir \"Install destination?\"")
+        .expect_err("headless prompt without default must fail");
+    assert!(
+        err.to_string().contains("non-TTY"),
+        "failure names the non-TTY: {err}"
+    );
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "PROMPT bails under Miri (no terminal); headless default/error paths are native-only"
+)]
+fn prompt_with_default_binds_without_reading_stdin() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    run_script(
+        &root,
+        indoc! {r#"
+            PROMPT $dir "Install destination?" "fallback-dir"
+            WRITE out.txt "{{ $dir }}"
+            LET $body: STRING = READ out.txt
+            ASSERT_EQ $body "fallback-dir"
+        "#},
+    )
+    .expect("default binds without a terminal");
+}
+
+#[test]
+fn remove_file_and_empty_dir() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    run_script(
+        &root,
+        indoc! {r#"
+            IMPORT [STD]
+            WRITE kept.txt kept
+            WRITE gone.txt content
+            MKDIR empty-dir
+            REMOVE gone.txt
+            REMOVE empty-dir
+            LET $t: STRING = PATH_TYPE("gone.txt")
+            ASSERT_EQ $t "absent"
+            LET $d: STRING = PATH_TYPE("empty-dir")
+            ASSERT_EQ $d "absent"
+            LET $body: STRING = READ kept.txt
+            ASSERT_EQ $body "kept"
+        "#},
+    )
+    .expect("remove deletes file and empty dir");
+}
+
+#[test]
+fn remove_missing_errors_naming_path() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let err = run_script(&root, "REMOVE absent.txt").expect_err("missing must fail");
+    assert!(
+        err.to_string().contains("absent.txt"),
+        "failure names the path: {err}"
+    );
+}
+
+#[test]
+fn remove_non_empty_without_flag_errors() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let err = run_script(
+        &root,
+        indoc! {r#"
+            WRITE tree/keep.txt keep
+            REMOVE tree
+        "#},
+    )
+    .expect_err("non-empty without flag must fail");
+    assert!(
+        err.to_string().contains("tree"),
+        "failure names the dir: {err}"
+    );
+}
+
+#[test]
+fn remove_recursive_deletes_tree() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    run_script(
+        &root,
+        indoc! {r#"
+            IMPORT [STD]
+            WRITE tree/sub/keep.txt keep
+            REMOVE --recursive tree
+            LET $t: STRING = PATH_TYPE("tree")
+            ASSERT_EQ $t "absent"
+        "#},
+    )
+    .expect("recursive removes the tree");
+}
+
+#[test]
+fn remove_working_directory_fails_closed_without_touching_state() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    run_script(
+        &root,
+        indoc! {r#"
+            WRITE keep.txt kept
+            MKDIR sub
+        "#},
+    )
+    .expect("seed state");
+    for script in ["REMOVE .", "REMOVE --recursive ."] {
+        let err = run_script(&root, script).expect_err("removing the cwd must fail");
+        assert!(
+            err.to_string()
+                .contains("cannot remove working directory or workspace root"),
+            "failure names the guard, got: {err}"
+        );
+    }
+    assert_eq!(read_trimmed(&root.join("keep.txt").unwrap()), "kept");
+    assert!(exists(&root, "sub"), "guarded tree survives");
+}
+
+#[test]
+fn remove_filesystem_root_under_system_fails_closed() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let err = run_script(
+        &root,
+        indoc! {r#"
+            WRITE keep.txt kept
+            WORKSPACE SYSTEM
+            REMOVE --recursive /
+        "#},
+    )
+    .expect_err("removing / under SYSTEM must fail");
+    assert!(
+        err.to_string()
+            .contains("cannot remove working directory or workspace root"),
+        "failure names the guard, got: {err}"
+    );
+    assert!(exists(&root, "keep.txt"), "host state survives");
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "requires symlink support; Miri synthetic fs cannot create symlinks"
+)]
+fn remove_symlink_removes_link_only() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    if !can_create_symlinks(root.as_path()) {
+        eprintln!("skipping test: cannot create symlinks on host");
+        return;
+    }
+    run_script(
+        &root,
+        indoc! {r#"
+            IMPORT [STD]
+            WRITE real.txt through-link
+            SYMLINK real.txt alias.txt
+            REMOVE alias.txt
+            LET $link: STRING = PATH_TYPE("alias.txt")
+            ASSERT_EQ $link "absent"
+            LET $body: STRING = READ real.txt
+            ASSERT_EQ $body "through-link"
+        "#},
+    )
+    .expect("symlink removal keeps the target");
+}
+
+#[test]
+fn path_writable_probe_matrix() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    run_script(
+        &root,
+        indoc! {r#"
+            IMPORT [STD]
+            MKDIR present
+            WRITE present/file.txt x
+            LET $empty: BOOL = PATH_WRITABLE("")
+            ASSERT_EQ $empty false
+            LET $dir: BOOL = PATH_WRITABLE("present")
+            ASSERT_EQ $dir true
+            LET $nested: BOOL = PATH_WRITABLE("present/fresh/nested/file.txt")
+            ASSERT_EQ $nested true
+            LET $file: BOOL = PATH_WRITABLE("present/file.txt")
+            ASSERT_EQ $file false
+        "#},
+    )
+    .expect("probe matrix passes");
+}
+
+#[test]
+#[cfg(unix)]
+#[cfg_attr(miri, ignore = "needs host permissions for the read-only probe")]
+fn path_writable_rejects_read_only_dir() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let resolver = PathResolver::new(root.as_path(), root.as_path()).unwrap();
+    let dir = root.join("locked").unwrap();
+    resolver.create_dir_all(&dir).unwrap();
+    resolver.set_permissions_mode_unix(&dir, 0o555).unwrap();
+    let err = run_script(
+        &root,
+        indoc! {r#"
+            IMPORT [STD]
+            LET $w: BOOL = PATH_WRITABLE("locked/file.txt")
+            ASSERT_EQ $w true
+        "#},
+    )
+    .expect_err("read-only parent must probe false");
+    assert!(err.to_string().contains("mismatch"), "{err}");
+    resolver.set_permissions_mode_unix(&dir, 0o755).unwrap();
+}
+
+#[test]
 fn assert_contains_sees_interpreter_output_without_capture_sink() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
@@ -2082,12 +2357,15 @@ fn _assert_step_kind_exhaustiveness(kind: &StepKind) {
         StepKind::CopyGit { .. } => {}
         StepKind::Symlink { .. } => {}
         StepKind::Mkdir(_) => {}
+        StepKind::Install { .. } => {}
         StepKind::Ls(_) => {}
         StepKind::Cwd => {}
         StepKind::Read(_) => {}
         StepKind::ReadLine { .. } => {}
+        StepKind::Prompt { .. } => {}
         StepKind::Write { .. } => {}
         StepKind::Append { .. } => {}
+        StepKind::Remove { .. } => {}
         StepKind::Expand { .. } => {}
         StepKind::AssertEq { .. } => {}
         StepKind::AssertContains { .. } => {}
@@ -4190,7 +4468,7 @@ fn static_exclusive_platform_guards_share_scope() {
 #[test]
 fn static_overlapping_platform_guards_still_error() {
     // Overlapping pairs share no disjointness proof (`os:macos`
-    // meets the `family:unix` alias on macos, same guard twice
+    // meets the `family:unix` alias on `macos`, same guard twice
     // trivially overlaps), so same-scope duplicates fail.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
@@ -4202,12 +4480,12 @@ fn static_overlapping_platform_guards_still_error() {
         let err = run_script(&root, guarded).expect_err("overlapping must fail");
         assert!(err.to_string().contains("redeclaration error"), "{err}");
     }
-    // But macos vs linux alone are disjoint and pass.
+    // But `macos` vs `linux` alone are disjoint and pass.
     let script = indoc! {r#"
         [os:macos] LET $o: STRING = "m"
         [os:linux] LET $o: STRING = "l"
     "#};
-    run_script(&root, script).expect("macos vs linux share scope");
+    run_script(&root, script).expect("`macos` vs `linux` share scope");
 }
 
 #[test]

@@ -8,9 +8,9 @@ Platform gating selects OS-specific steps, and remote targets bind over any stdi
 
 The syntax is line-oriented in the spirit of BASIC, with a static type system checking scripts before the first step runs. Plain Rust functions become script functions with one attribute: `#[oxdock_func]` exports them into namespaced modules scripts call as `DEMO::NAME(...)`. See [Extending OxDock from Rust](#extending-oxdock-from-rust).
 
-[Documentation](https://docs.rs/oxdock/0.24.3-alpha/oxdock/)
+[Documentation](https://docs.rs/oxdock/0.24.4-alpha/oxdock/)
 
-Add it to your Rust build with `cargo add oxdock@0.24.3-alpha`, or install the standalone runner with `cargo install oxdock@0.24.3-alpha`.
+Add it to your Rust build with `cargo add oxdock@0.24.4-alpha`, or install the standalone runner with `cargo install oxdock@0.24.4-alpha`.
 
 Run a script:
 
@@ -110,8 +110,8 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     LET $a: STRING = READ dist/alpha.txt
     LET $b: STRING = READ dist/beta.txt
     LET $p: STRING = READ dist/picked.txt
-    ASSERT_EQ $a "alpha OxDock 0.24.3-alpha"
-    ASSERT_EQ $b "beta OxDock 0.24.3-alpha"
+    ASSERT_EQ $a "alpha OxDock 0.24.4-alpha"
+    ASSERT_EQ $b "beta OxDock 0.24.4-alpha"
     ASSERT_EQ $p "alpha"
 };
 
@@ -123,7 +123,7 @@ let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolve
 let out = root.join("dist/alpha.txt").expect("out path");
 assert_eq!(
     resolver.read_to_string(&out).expect("read out"),
-    "alpha OxDock 0.24.3-alpha"
+    "alpha OxDock 0.24.4-alpha"
 );
 ```
 
@@ -809,7 +809,7 @@ Keeping inheritance selective avoids leaking secrets by default while still allo
 Install the binary from the registry:
 
 ```sh
-cargo install oxdock@0.24.3-alpha
+cargo install oxdock@0.24.4-alpha
 ```
 
 Run a script file:
@@ -1156,7 +1156,7 @@ Or pin the version in `Cargo.toml`:
 
 ```toml
 [dependencies]
-oxdock = { version = "0.24.3-alpha", default-features = false }
+oxdock = { version = "0.24.4-alpha", default-features = false }
 ```
 
 ## Glossary
