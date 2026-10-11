@@ -38,20 +38,34 @@ case "$(uname -s)-$(uname -m)" in
   Darwin-arm64) TARGET="aarch64-apple-darwin" ;;
   Linux-x86_64) TARGET="x86_64-unknown-linux-musl" ;;
   Linux-aarch64) TARGET="aarch64-unknown-linux-musl" ;;
-  # Emulated shells lie: x64 Git Bash on ARM64 Windows reports x86_64
-  # while the machine (and everything the installer places outside the
-  # shell) is ARM64. The emulated process itself sees AMD64 in
-  # PROCESSOR_ARCHITECTURE; only PROCESSOR_ARCHITEW6432 names the native
-  # arch there, so both are checked and native wins either way.
+  # Emulated shells lie about -m: x64 Git Bash on ARM64 Windows reports
+  # x86_64, and msys does not forward PROCESSOR_ARCHITEW6432 into the
+  # shell, so the usual variable tells are absent. Two independent host
+  # signals remain: the kernel release carries an -ARM64 suffix, and the
+  # SysArm32 system directory exists only on ARM64 Windows (checked
+  # under both msys and Cygwin drive prefixes). W6432 stays as a
+  # fallback for shells that forward it. The installed binary runs
+  # outside the shell, so native always wins.
   MINGW64*-x86_64 | MSYS*-x86_64 | CYGWIN*-x86_64)
-    if [ "${PROCESSOR_ARCHITECTURE:-}" = "ARM64" ] || [ "${PROCESSOR_ARCHITEW6432:-}" = "ARM64" ]; then
+    if [ "${PROCESSOR_ARCHITEW6432:-}" = "ARM64" ]; then
       TARGET="aarch64-pc-windows-msvc"
     else
-      TARGET="x86_64-pc-windows-msvc"
+      case "$(uname -s)" in
+        *-ARM64) TARGET="aarch64-pc-windows-msvc" ;;
+        *)
+          if [ -d "/c/Windows/SysArm32" ] || [ -d "/cygdrive/c/Windows/SysArm32" ]; then
+            TARGET="aarch64-pc-windows-msvc"
+          else
+            TARGET="x86_64-pc-windows-msvc"
+          fi ;;
+      esac
     fi ;;
   MINGW64*-aarch64 | MSYS*-aarch64 | CYGWIN*-aarch64) TARGET="aarch64-pc-windows-msvc" ;;
   *) echo "unsupported platform: $(uname -s)-$(uname -m)" >&2; exit 1 ;;
 esac
+# Platform forensics: which detection inputs chose the asset below, so a
+# mistargeted download names its cause instead of surfacing as a bare 404.
+echo "platform: $(uname -s)-$(uname -m) target: $TARGET" >&2
 
 ASSET="oxdock-$TARGET.tar.gz"
 VDIR="$CACHE_DIR/$VERSION"
