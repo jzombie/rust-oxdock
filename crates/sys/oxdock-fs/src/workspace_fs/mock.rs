@@ -176,6 +176,10 @@ impl WorkspaceFs for MockFs {
         &self.root
     }
 
+    fn workspace_root(&self) -> Option<&GuardedPath> {
+        None
+    }
+
     fn build_context(&self) -> &GuardedPath {
         &self.build_context
     }
@@ -357,8 +361,14 @@ impl WorkspaceFs for MockFs {
         Ok(())
     }
 
-    fn remove_file(&self, _path: &GuardedPath) -> Result<()> {
-        bail!("remove unsupported")
+    fn remove_file(&self, path: &GuardedPath) -> Result<()> {
+        let rel = self.relative_path(path);
+        let mut state = self.state.lock().expect("mock state poisoned");
+        if state.files.remove(&rel).is_some() {
+            Ok(())
+        } else {
+            bail!("REMOVE {}: no such file", path.display())
+        }
     }
 
     #[allow(clippy::disallowed_types)]
@@ -366,8 +376,50 @@ impl WorkspaceFs for MockFs {
         bail!("unguarded operations not supported in mock fs");
     }
 
-    fn remove_dir_all(&self, _path: &GuardedPath) -> Result<()> {
-        bail!("remove unsupported")
+    fn remove_dir_all(&self, path: &GuardedPath) -> Result<()> {
+        let rel = self.relative_path(path);
+        let mut state = self.state.lock().expect("mock state poisoned");
+        if !state.dirs.contains(&rel) && !state.files.contains_key(&rel) {
+            bail!("REMOVE {}: no such directory", path.display())
+        }
+        let prefix = if rel.is_empty() {
+            String::new()
+        } else {
+            format!("{rel}/")
+        };
+        state
+            .files
+            .retain(|p, _| !p.eq(&rel) && !p.starts_with(&prefix));
+        state
+            .dirs
+            .retain(|d| !d.eq(&rel) && !d.starts_with(&prefix));
+        Ok(())
+    }
+
+    fn remove_empty_dir(&self, path: &GuardedPath) -> Result<()> {
+        let rel = self.relative_path(path);
+        let mut state = self.state.lock().expect("mock state poisoned");
+        if !state.dirs.contains(&rel) {
+            bail!("REMOVE {}: no such directory", path.display())
+        }
+        let prefix = if rel.is_empty() {
+            String::new()
+        } else {
+            format!("{rel}/")
+        };
+        let has_children = state.files.keys().any(|p| p.starts_with(&prefix))
+            || state.dirs.iter().any(|d| d.starts_with(&prefix));
+        if has_children {
+            bail!("REMOVE {}: directory not empty", path.display())
+        }
+        state.dirs.remove(&rel);
+        Ok(())
+    }
+
+    fn remove_link_if_symlink(&self, _cwd: &GuardedPath, _rel: &str) -> Result<bool> {
+        // The mock filesystem holds no symlinks, so no link ever stands
+        // at the lexical path: callers fall through to file/dir handling.
+        Ok(false)
     }
 
     #[allow(clippy::disallowed_types)]
@@ -413,6 +465,13 @@ impl WorkspaceFs for MockFs {
 
     fn symlink(&self, _src: &GuardedPath, _dst: &GuardedPath) -> Result<()> {
         bail!("symlink unsupported")
+    }
+
+    fn install_file_atomic(&self, src: &GuardedPath, dst: &GuardedPath, _mode: u32) -> Result<()> {
+        let data = self.read_file(src)?;
+        self.ensure_parent_dir(dst)?;
+        self.write_file(dst, &data)?;
+        Ok(())
     }
 
     #[allow(clippy::disallowed_types, clippy::disallowed_methods)]

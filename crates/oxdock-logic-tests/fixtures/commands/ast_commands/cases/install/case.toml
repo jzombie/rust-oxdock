@@ -1,0 +1,5 @@
+name = "install"
+
+[expect]
+dirs = ["dst-bin"]
+files = { "dst-bin/tool" = "install-payload" }

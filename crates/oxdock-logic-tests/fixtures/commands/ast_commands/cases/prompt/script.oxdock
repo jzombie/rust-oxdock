@@ -1,0 +1,4 @@
+# Headless runs never read stdin: with a default the prompt binds it
+# and continues instead of hanging.
+PROMPT $dir "Install destination?" "fallback-dir"
+WRITE out.txt "{{ $dir }}"

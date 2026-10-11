@@ -1,0 +1,13 @@
+# REMOVE deletes files and empty dirs quietly; trees need --recursive.
+IMPORT [STD]
+WRITE kept.txt kept
+WRITE gone.txt content
+MKDIR empty-dir
+WRITE tree/keep.txt keep
+REMOVE gone.txt
+REMOVE empty-dir
+REMOVE --recursive tree
+LET $gone: STRING = PATH_TYPE("gone.txt")
+ASSERT_EQ $gone "absent"
+LET $tree: STRING = PATH_TYPE("tree")
+ASSERT_EQ $tree "absent"

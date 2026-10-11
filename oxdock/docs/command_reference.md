@@ -15,12 +15,15 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | [`COPY_GIT`](#copy_git) | `COPY_GIT [--include-dirty] <rev> <src> <dst>` |
 | [`SYMLINK`](#symlink) | `SYMLINK [--from-workspace SNAPSHOT\|LOCAL\|CACHE\|SYSTEM] <from> <to>` |
 | [`MKDIR`](#mkdir) | `MKDIR <path>` |
+| [`INSTALL`](#install) | `INSTALL <source> <dest>` |
 | [`LS`](#ls) | `LS [<path>]` |
 | [`CWD`](#cwd) | `CWD` |
 | [`READ`](#read) | `READ [<path>]` |
 | [`READ_LINE`](#read_line) | `READ_LINE $var` |
+| [`PROMPT`](#prompt) | `PROMPT $var <message> [<default>]` |
 | [`WRITE`](#write) | `WRITE <path> [<contents>]` |
 | [`APPEND`](#append) | `APPEND <path> [<contents>]` |
+| [`REMOVE`](#remove) | `REMOVE [--recursive] <path>` |
 | [`EXPAND`](#expand) | `EXPAND [<path>] [<KEY=val> ...]` |
 | [`ASSERT_EQ`](#assert_eq) | `ASSERT_EQ <actual> <expected> \| ASSERT_EQ --hash <sha256> <actual>` |
 | [`ASSERT_CONTAINS`](#assert_contains) | `ASSERT_CONTAINS <haystack> <needle>` |
@@ -1691,6 +1694,36 @@ ASSERT_EQ $t "dir"
 ```
 
 
+### INSTALL
+
+Atomically install a verified binary as executable.
+
+**Syntax:** `INSTALL <source> <dest>`
+
+Stages the source as a temp file in the dest dir, sets executable mode, then renames into place.
+
+**Arguments:**
+
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| `from` | [`PATH`](#value-type-path) | yes | Source file |
+| `to` | [`PATH`](#value-type-path) | yes | Dest file |
+
+**Examples:**
+
+**Example: install**
+
+```oxdock roots:unified
+# Place a verified binary with executable mode.
+IMPORT [STD]
+WRITE src.bin payload
+INSTALL src.bin dst-bin/tool
+
+LET $t: STRING = PATH_TYPE("dst-bin/tool")
+ASSERT_EQ $t "file"
+```
+
+
 ### LS
 
 List directory.
@@ -1804,6 +1837,41 @@ ASSERT_EQ $reply "first"
 ```
 
 
+### PROMPT
+
+Prompt on the terminal into a variable.
+
+**Syntax:** `PROMPT $var <message> [<default>]`
+
+Prints `{message} [{default}]: ` (or `{message}: ` with no
+default) to stderr and reads one line from the terminal.
+
+Empty input yields the default when one is given, else an
+empty string. EOF aborts loudly. Non-TTY stdin never reads:
+a default binds with a stderr note, while no default bails.
+
+
+**Arguments:**
+
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| `var` | [`STRING`](#value-type-string) | yes | Target variable (`$name`); the answer binds as STRING |
+| `message` | [`STRING`](#value-type-string) | yes | Prompt message |
+| `default` | [`STRING`](#value-type-string) | no | Default on empty input |
+
+**Examples:**
+
+**Example: prompt needs a terminal**
+
+```oxdock expect_error:"non-TTY"
+# Headless runs have no terminal: without a default the
+# prompt fails instead of hanging or reading piped stdin.
+PROMPT $dir "Install destination?"
+```
+
+**Expected error:** `non-TTY`
+
+
 ### WRITE
 
 Write to file.
@@ -1856,6 +1924,47 @@ APPEND log.txt line2
 # APPEND concatenates with no separator.
 LET $all: STRING = READ log.txt
 ASSERT_EQ $all "line1line2"
+```
+
+
+### REMOVE
+
+Remove a file, symlink, or directory.
+
+**Syntax:** `REMOVE [--recursive] <path>`
+
+Removes a file, symlink (the link itself), or empty dir. With --recursive removes a directory tree.
+
+**Arguments:**
+
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| `path` | [`PATH`](#value-type-path) | yes | Path to remove |
+
+**Flags:**
+
+| Flag | Type | Description |
+| --- | --- | --- |
+| `--recursive` | `BOOL` | Remove a directory tree |
+
+**Examples:**
+
+**Example: remove**
+
+```oxdock
+# WRITE then REMOVE leaves nothing behind.
+IMPORT [STD]
+WRITE scratch.txt content
+
+# Assert original file is written
+LET $o: STRING = PATH_TYPE("scratch.txt")
+ASSERT_EQ $o "file"
+
+REMOVE scratch.txt
+
+# Assert file has been removed
+LET $t: STRING = PATH_TYPE("scratch.txt")
+ASSERT_EQ $t "absent"
 ```
 
 
@@ -2624,6 +2733,37 @@ there is no RPN arm for filesystem IO.
 - `$path` (`STRING`): Workspace path of the entry to describe.
 
 **Returns:** `STRING`
+
+### STD::PATH_WRITABLE
+
+Report whether an ordinary file can be created at a path.
+
+Walks up to the nearest existing ancestor, requires it be a
+directory, and probes writability by creating and deleting a probe
+file, so retry loops never litter. The empty string is false.
+AST-only by design, like `PATH_TYPE`: there is no RPN arm for
+filesystem IO.
+
+```oxdock
+# An absent nested path is writable when its ancestor is.
+IMPORT [STD]
+LET $fresh: BOOL = PATH_WRITABLE("probe-check/nested/file.txt")
+ASSERT_EQ $fresh true
+
+# The empty string never aliases the working directory.
+LET $empty: BOOL = PATH_WRITABLE("")
+ASSERT_EQ $empty false
+```
+
+
+**Signature:** `STD::PATH_WRITABLE($path: STRING) -> BOOL`
+
+**Contexts:** [`AST`](#context-ast) only
+
+**Parameters:**
+- `$path` (`STRING`): Workspace path to probe for file creation.
+
+**Returns:** `BOOL`
 
 ### STD::RAND
 

@@ -184,10 +184,28 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
             to: to.into()
         }),
         safe_string().prop_map(|s| StepKind::Mkdir(s.into())),
+        (safe_string(), safe_string()).prop_map(|(from, to)| StepKind::Install {
+            from: from.into(),
+            to: to.into()
+        }),
         prop::option::of(safe_string()).prop_map(|s| StepKind::Ls(s.map(Into::into))),
         Just(StepKind::Cwd),
         prop::option::of(safe_string()).prop_map(|s| StepKind::Read(s.map(Into::into))),
         "[a-zA-Z_][a-zA-Z0-9_]*".prop_map(|v| StepKind::ReadLine { var: v }),
+        (
+            "[a-zA-Z_][a-zA-Z0-9_]*",
+            safe_msg(),
+            prop::option::of(safe_msg()),
+        )
+            .prop_map(|(var, message, default)| StepKind::Prompt {
+                var,
+                message: message.into(),
+                default: default.map(Into::into),
+            }),
+        safe_string().prop_map(|path| StepKind::Remove {
+            path: path.into(),
+            recursive: false,
+        }),
         (safe_string(), safe_msg()).prop_map(|(path, contents)| StepKind::Write {
             path: path.into(),
             contents: Some(contents.into())
@@ -302,6 +320,23 @@ fn assert_steps_eq(left: &Step, right: &Step, msg: &str) {
         }
         (StepKind::Mkdir(l), StepKind::Mkdir(r)) => {
             assert!(arg_content_eq(l, r), "Mkdir mismatch: {}", msg)
+        }
+        (StepKind::Install { from: lf, to: lt }, StepKind::Install { from: rf, to: rt }) => {
+            assert!(arg_content_eq(lf, rf), "Install from mismatch: {}", msg);
+            assert!(arg_content_eq(lt, rt), "Install to mismatch: {}", msg);
+        }
+        (
+            StepKind::Remove {
+                path: lp,
+                recursive: lr,
+            },
+            StepKind::Remove {
+                path: rp,
+                recursive: rr,
+            },
+        ) => {
+            assert!(arg_content_eq(lp, rp), "Remove path mismatch: {}", msg);
+            assert_eq!(lr, rr, "Remove recursive mismatch: {}", msg);
         }
         (StepKind::Ls(l), StepKind::Ls(r)) => assert_eq!(
             l.as_ref().map(|a| a.as_str()),
@@ -434,6 +469,27 @@ fn assert_steps_eq(left: &Step, right: &Step, msg: &str) {
         }
         (StepKind::ReadLine { var: lv }, StepKind::ReadLine { var: rv }) => {
             assert_eq!(lv, rv, "ReadLine mismatch: {}", msg)
+        }
+        (
+            StepKind::Prompt {
+                var: lv,
+                message: lm,
+                default: ld,
+            },
+            StepKind::Prompt {
+                var: rv,
+                message: rm,
+                default: rd,
+            },
+        ) => {
+            assert_eq!(lv, rv, "Prompt var mismatch: {}", msg);
+            assert!(arg_content_eq(lm, rm), "Prompt message mismatch: {}", msg);
+            assert_eq!(
+                ld.as_ref().map(|a| a.as_str()),
+                rd.as_ref().map(|a| a.as_str()),
+                "Prompt default mismatch: {}",
+                msg
+            );
         }
         (
             StepKind::Expand {

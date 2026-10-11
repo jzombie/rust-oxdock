@@ -358,6 +358,37 @@ there is no RPN arm for filesystem IO.
 
 **Returns:** `STRING`
 
+### STD::PATH_WRITABLE
+
+Report whether an ordinary file can be created at a path.
+
+Walks up to the nearest existing ancestor, requires it be a
+directory, and probes writability by creating and deleting a probe
+file, so retry loops never litter. The empty string is false.
+AST-only by design, like `PATH_TYPE`: there is no RPN arm for
+filesystem IO.
+
+```oxdock
+# An absent nested path is writable when its ancestor is.
+IMPORT [STD]
+LET $fresh: BOOL = PATH_WRITABLE("probe-check/nested/file.txt")
+ASSERT_EQ $fresh true
+
+# The empty string never aliases the working directory.
+LET $empty: BOOL = PATH_WRITABLE("")
+ASSERT_EQ $empty false
+```
+
+
+**Signature:** `STD::PATH_WRITABLE($path: STRING) -> BOOL`
+
+**Contexts:** [`AST`](#context-ast) only
+
+**Parameters:**
+- `$path` (`STRING`): Workspace path to probe for file creation.
+
+**Returns:** `BOOL`
+
 ### STD::RAND
 
 Draw a random FLOAT uniformly from [0, 1), optionally seeded. Impure by design: unseeded calls return different values, so this runs on the AST script path only, never as a `\{{ }}` placeholder call. A seed draws the same value on every run, for deterministic fixtures. Scale and shift the draw for wider ranges. Hand-built (not `#[oxdock_func]`): the macro marks every param required, and only hand-built entries can leave a trailing options MAP omittable, so bare `RAND()` fills `{}`.

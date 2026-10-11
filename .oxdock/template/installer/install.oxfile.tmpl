@@ -8,7 +8,7 @@
 
 IMPORT [STD]
 
-INHERIT_ENV [OXDOCK_ASSET, OXDOCK_SHA, OXDOCK_BIN, OXDOCK_DIR, OXDOCK_VERSION, HOME, USERPROFILE, OXDOCK_PIPED_SCRIPT, OXDOCK_INTERPRETER]
+INHERIT_ENV [OXDOCK_ASSET, OXDOCK_SHA, OXDOCK_BIN, OXDOCK_DIR, OXDOCK_VERSION, HOME, USERPROFILE, OXDOCK_PIPED_SCRIPT, OXDOCK_INTERPRETER, OXDOCK_INTERACTIVE]
 
 # Full filesystem access: installation writes outside any workspace.
 WORKSPACE SYSTEM
@@ -26,6 +26,25 @@ IF $piped != "" {
     LET $want: STRING = "\{{ env:OXDOCK_SHA }}"
     LET $bin: STRING = "\{{ env:OXDOCK_BIN }}"
     LET $dir: STRING = "\{{ env:OXDOCK_DIR }}"
+    # Interactive consoles confirm the destination: the stub exports
+    # OXDOCK_INTERACTIVE only with a console behind stdin, and PROMPT
+    # itself refuses non-TTY stdin as backstop. The outer LET above owns
+    # $dir, so PROMPT mutates it in place; the loop retries until the
+    # path is a writable dir or a creatable absence, then INSTALL below
+    # stays fail-closed regardless.
+    IF "\{{ env:OXDOCK_INTERACTIVE }}" != "" {
+        PROMPT $dir "Install destination?" "\{{ env:OXDOCK_DIR }}"
+        WHILE true {
+            LET $kind: STRING = PATH_TYPE($dir)
+            LET $writable: BOOL = PATH_WRITABLE($dir)
+            IF $kind == "dir" || $kind == "absent" {
+                IF $writable {
+                    BREAK
+                }
+            }
+            PROMPT $dir "Install destination?"
+        }
+    }
     IF $dir == "" {
         [family:unix] LET $home: STRING = "\{{ env:HOME }}"
         [family:windows] LET $home: STRING = "\{{ env:USERPROFILE }}"
@@ -46,10 +65,9 @@ IF $piped != "" {
     ASSERT_EQ $actual "\{{ $want }}\n"
 
     # Place the verified binary and report where it landed.
-    MKDIR $dir
     LET $dest: STRING = "\{{ $dir }}/oxdock"
     [family:windows] $dest = "\{{ $dir }}/oxdock.exe"
-    COPY $bin $dest
+    INSTALL $bin $dest
     ECHO "installed oxdock \{{ env:OXDOCK_VERSION }} to \{{ $dir }}"
     ECHO "ensure \{{ $dir }} is on PATH"
 }

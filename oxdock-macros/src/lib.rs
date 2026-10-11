@@ -1049,6 +1049,11 @@ fn emit_stepkind(
             let t = emit_arg(a, interp);
             quote! { StepKind::Mkdir(#t) }
         }
+        StepKind::Install { from, to } => {
+            let f = emit_arg(from, interp);
+            let t = emit_arg(to, interp);
+            quote! { StepKind::Install { from: #f, to: #t } }
+        }
         StepKind::Cwd => quote! { StepKind::Cwd },
         StepKind::AssertEq {
             hash,
@@ -1178,6 +1183,10 @@ fn emit_stepkind(
                 }
                 None => quote! { StepKind::Append { path: #p, contents: None } },
             }
+        }
+        StepKind::Remove { path, recursive } => {
+            let p = emit_arg(path, interp);
+            quote! { StepKind::Remove { path: #p, recursive: #recursive } }
         }
         StepKind::Expand { path, overrides } => match path {
             Some(a) => {
@@ -1351,6 +1360,21 @@ fn emit_stepkind(
         }
         StepKind::ReadLine { var } => {
             quote! { StepKind::ReadLine { var: #var.to_string() } }
+        }
+        StepKind::Prompt {
+            var,
+            message,
+            default,
+        } => {
+            let m = emit_arg(message, interp);
+            let d = match default {
+                Some(v) => {
+                    let t = emit_arg(v, interp);
+                    quote! { Some(#t) }
+                }
+                None => quote! { None },
+            };
+            quote! { StepKind::Prompt { var: #var.to_string(), message: #m, default: #d } }
         }
         StepKind::TypeAlias { name, target } => {
             quote! { StepKind::TypeAlias { name: #name.to_string(), target: #target.to_string() } }

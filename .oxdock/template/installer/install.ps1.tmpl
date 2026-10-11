@@ -115,6 +115,11 @@ try {
   # [Console]::In sits at EOF, so $input is read first and redirected
   # bytes only as fallback. A TTY is never drained.
   $env:OXDOCK_PIPED_SCRIPT = $null
+  # Interactive consoles confirm the destination in the oxfile: export
+  # the flag only with a console behind stdin. Either condition alone
+  # misfires in CI-without-console, so both must hold.
+  $env:OXDOCK_INTERACTIVE = $null
+  if ([Environment]::UserInteractive -and -not [Console]::IsInputRedirected) { $env:OXDOCK_INTERACTIVE = '1' }
   $stdinText = [string]::Join("`n", @($input))
   if ([string]::IsNullOrWhiteSpace($stdinText) -and [Console]::IsInputRedirected) {
     $stdinText = [Console]::In.ReadToEnd()

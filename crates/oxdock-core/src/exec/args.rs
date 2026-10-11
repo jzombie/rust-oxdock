@@ -431,6 +431,106 @@ pub(crate) fn path_type_from_value<P: ProcessManager>(
     Ok(Value::string(kind.to_string()))
 }
 
+/// Value-semantics core of `PATH_WRITABLE()`: true iff an ordinary file
+/// can be created at the path, decided WITHOUT creating anything
+/// permanent. The empty string is immediately false (it would otherwise
+/// alias the working directory and yield a false positive). Otherwise
+/// walks up to the nearest existing ancestor, requires it be a directory,
+/// and probes writability by creating and deleting a randomized probe
+/// file behind an RAII drop-guard. Only [`WorkspaceFs`](oxdock_fs::WorkspaceFs)
+/// trait methods are used, so native runs probe the real path while Miri
+/// runs probe the synthetic backend. TOCTOU races are inherent and
+/// accepted; `INSTALL` stays fail-closed regardless.
+pub(crate) fn path_writable_from_value<P: ProcessManager>(
+    args: &[Value],
+    cx: &mut StepCtx<'_, P>,
+) -> Result<Value> {
+    let path_val = args
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("PATH_WRITABLE requires a path argument"))?;
+    let path_str = match path_val.as_str() {
+        Some(s) => s.to_string(),
+        None => bail!("PATH_WRITABLE path argument must evaluate to a string"),
+    };
+    if path_str.is_empty() {
+        return Ok(Value::bool(false));
+    }
+    let target = cx
+        .state
+        .fs
+        .resolve_write(&cx.state.cwd, &path_str)
+        .map_err(|e| anyhow::anyhow!("failed to resolve path '{}': {}", path_str, e))?;
+    let mut current = target;
+    loop {
+        match cx.state.fs.entry_kind_no_follow(&current) {
+            Ok(EntryKind::Dir) => {
+                return Ok(Value::bool(probe_dir_writable(cx, &current)));
+            }
+            Ok(EntryKind::File) | Ok(EntryKind::Symlink) => {
+                return Ok(Value::bool(false));
+            }
+            Err(_) => {
+                let Some(parent) = current.parent() else {
+                    return Ok(Value::bool(false));
+                };
+                if parent.as_path().as_os_str().is_empty() {
+                    let cwd = cx.state.cwd.clone();
+                    let anchor =
+                        cx.state.fs.resolve_write(&cwd, ".").map_err(|e| {
+                            anyhow::anyhow!("failed to resolve working directory: {e}")
+                        })?;
+                    return Ok(Value::bool(probe_dir_writable(cx, &anchor)));
+                }
+                current = parent;
+            }
+        }
+    }
+}
+
+/// Probe whether a file can be created inside `dir` by creating and
+/// deleting `.oxdock_probe_<rand>`. The [`ProbeGuard`] removes the probe
+/// on drop, so early returns cannot litter. Any failure to create reads
+/// as not-writable, never as an error.
+fn probe_dir_writable<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    dir: &oxdock_fs::GuardedPath,
+) -> bool {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static PROBE_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let id = PROBE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
+        ^ (std::process::id() as u128)
+        ^ ((id as u128) << 64);
+    let name = format!(".oxdock_probe_{nanos:x}");
+    let Ok(probe) = dir.join(&name) else {
+        return false;
+    };
+    if cx.state.fs.write_file(&probe, b"").is_err() {
+        return false;
+    }
+    let _guard = ProbeGuard {
+        fs: cx.state.fs.clone_box(),
+        path: probe,
+    };
+    true
+}
+
+/// Best-effort probe cleanup: removes the probe file when the probe
+/// scope exits, so retry loops cannot litter orphan files.
+struct ProbeGuard {
+    fs: Box<dyn oxdock_fs::WorkspaceFs>,
+    path: oxdock_fs::GuardedPath,
+}
+
+impl Drop for ProbeGuard {
+    fn drop(&mut self) {
+        let _ = self.fs.remove_file(&self.path);
+    }
+}
+
 /// Pop one operand off the RPN stack with a structured error instead of a
 /// panic on malformed/truncated `CompiledMath` vectors.
 fn pop_stack(stack: &mut Vec<Value>) -> Result<Value> {

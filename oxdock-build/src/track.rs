@@ -287,6 +287,10 @@ pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
                 template_keys(&mut keys, to);
             }
             StepKind::Mkdir(t) => template_keys(&mut keys, t),
+            StepKind::Install { from, to } => {
+                template_keys(&mut keys, from);
+                template_keys(&mut keys, to);
+            }
             StepKind::Ls(Some(t)) => template_keys(&mut keys, t),
             StepKind::Ls(None) => {}
             StepKind::Read(None) => {}
@@ -297,6 +301,7 @@ pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
                     template_keys(&mut keys, body);
                 }
             }
+            StepKind::Remove { path, .. } => template_keys(&mut keys, path),
             StepKind::Append { path, contents } => {
                 template_keys(&mut keys, path);
                 if let Some(body) = contents {
@@ -404,6 +409,14 @@ pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
             StepKind::Sleep { duration } => template_keys(&mut keys, duration),
             StepKind::ListAppend { item, .. } => template_keys(&mut keys, item),
             StepKind::ReadLine { .. } => {}
+            StepKind::Prompt {
+                message, default, ..
+            } => {
+                template_keys(&mut keys, message);
+                if let Some(d) = default {
+                    template_keys(&mut keys, d);
+                }
+            }
             StepKind::FuncDef { body, .. } => {
                 for k in collect_env_references(body) {
                     keys.insert(k);

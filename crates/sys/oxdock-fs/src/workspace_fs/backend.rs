@@ -23,6 +23,7 @@ trait BackendImpl: Send + Sync {
     fn resolve_copy_source(&self, guarded: GuardedPath) -> Result<GuardedPath>;
     fn remove_file(&self, path: &GuardedPath) -> Result<()>;
     fn remove_dir_all(&self, path: &GuardedPath) -> Result<()>;
+    fn remove_empty_dir(&self, path: &GuardedPath) -> Result<()>;
 }
 
 // Host implementation (used when not under Miri)
@@ -212,6 +213,12 @@ impl BackendImpl for HostBackend {
 
     fn remove_dir_all(&self, path: &GuardedPath) -> Result<()> {
         std::fs::remove_dir_all(path.as_path())
+            .with_context(|| format!("failed to remove dir {}", path.display()))?;
+        Ok(())
+    }
+
+    fn remove_empty_dir(&self, path: &GuardedPath) -> Result<()> {
+        std::fs::remove_dir(path.as_path())
             .with_context(|| format!("failed to remove dir {}", path.display()))?;
         Ok(())
     }
@@ -499,6 +506,16 @@ mod miri_backend {
                 .remove_dir_all(&rel);
             Ok(())
         }
+
+        fn remove_empty_dir(&self, path: &GuardedPath) -> Result<()> {
+            let rel = normalize_rel(path);
+            self.state_for_guard_rc(path)?
+                .lock()
+                .expect("miri state poisoned")
+                .remove_empty_dir(&rel)
+                .with_context(|| format!("failed to remove dir {}", path.display()))?;
+            Ok(())
+        }
     }
 
     fn synthetic_metadata(_kind: EntryKind) -> Result<std::fs::Metadata> {
@@ -615,6 +632,17 @@ mod miri_backend {
                 .retain(|path, _| !path.eq(rel) && !path.starts_with(&prefix));
             self.dirs
                 .retain(|dir| !dir.eq(rel) && !dir.starts_with(&prefix));
+        }
+
+        fn remove_empty_dir(&mut self, rel: &str) -> Result<()> {
+            if !self.dir_exists(rel) {
+                bail!("directory does not exist: {rel}");
+            }
+            if !self.list_children(rel).is_empty() {
+                bail!("directory not empty: {rel}");
+            }
+            self.dirs.remove(rel);
+            Ok(())
         }
 
         fn dir_exists(&self, rel: &str) -> bool {
@@ -808,5 +836,9 @@ impl Backend {
 
     pub(super) fn remove_dir_all(&self, path: &GuardedPath) -> Result<()> {
         self.as_impl().remove_dir_all(path)
+    }
+
+    pub(super) fn remove_empty_dir(&self, path: &GuardedPath) -> Result<()> {
+        self.as_impl().remove_empty_dir(path)
     }
 }

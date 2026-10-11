@@ -2683,6 +2683,41 @@ pub(crate) fn dispatch_mkdir<P: ProcessManager>(
     mkdir(cx, 0, &path)
 }
 
+pub(super) fn install<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    idx: usize,
+    from: &str,
+    to: &str,
+) -> Result<()> {
+    let from_abs = cx
+        .state
+        .fs
+        .resolve_read(&cx.state.cwd, from)
+        .with_context(|| format!("step {}: INSTALL {from} {to}", idx + 1))?;
+    let to_abs = cx
+        .state
+        .fs
+        .resolve_write(&cx.state.cwd, to)
+        .with_context(|| format!("step {}: INSTALL {from} {to}", idx + 1))?;
+    cx.state
+        .fs
+        .install_file_atomic(&from_abs, &to_abs, 0o755)
+        .with_context(|| format!("step {}: INSTALL {from} {to}", idx + 1))?;
+    Ok(())
+}
+
+pub(crate) fn dispatch_install<P: ProcessManager>(
+    step: &StepKind,
+    cx: &mut StepCtx<'_, P>,
+) -> Result<()> {
+    let StepKind::Install { from, to } = step else {
+        unreachable!()
+    };
+    let from_resolved = super::args::resolve_arg(from, cx)?;
+    let to_resolved = super::args::resolve_arg(to, cx)?;
+    install(cx, 0, &from_resolved, &to_resolved)
+}
+
 pub(crate) fn dispatch_ls<P: ProcessManager>(
     step: &StepKind,
     cx: &mut StepCtx<'_, P>,
@@ -2720,6 +2755,130 @@ pub(crate) fn dispatch_read_line<P: ProcessManager>(
         unreachable!()
     };
     read_line(cx, 0, var)
+}
+
+/// Render the terminal prompt: `{message} [{default}]: ` with a default,
+/// `{message}: ` without one. Pure so unit tests pin it without a TTY.
+pub(super) fn format_prompt(message: &str, default: Option<&str>) -> String {
+    match default {
+        Some(d) => format!("{message} [{d}]: "),
+        None => format!("{message}: "),
+    }
+}
+
+/// Map a trimmed answer line onto its binding: empty input yields the
+/// default when one exists, else an empty string. Pure so unit tests pin
+/// it without a TTY.
+pub(super) fn apply_prompt_answer(line: &str, default: Option<&str>) -> String {
+    if line.is_empty() {
+        default.unwrap_or("").to_string()
+    } else {
+        line.to_string()
+    }
+}
+
+pub(super) fn prompt<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    idx: usize,
+    var: &str,
+    message: &str,
+    default: Option<&str>,
+) -> Result<()> {
+    #[cfg(miri)]
+    {
+        let _ = (cx, idx, var, message, default);
+        bail!(
+            "step {}: PROMPT unavailable under Miri (no terminal)",
+            idx + 1
+        );
+    }
+    #[cfg(not(miri))]
+    {
+        use std::io::IsTerminal;
+        let clean_var = var.trim_start_matches('$').to_string();
+        if !std::io::stdin().is_terminal() {
+            match default {
+                Some(d) => {
+                    eprintln!("non-interactive: using default for {message}");
+                    let text = Value::string(d.to_string());
+                    bind_prompt_var(cx, idx, &clean_var, text)?;
+                    return Ok(());
+                }
+                None => {
+                    bail!(
+                        "step {}: PROMPT {message}: non-TTY stdin has no answer and no default",
+                        idx + 1
+                    );
+                }
+            }
+        }
+        let rendered = format_prompt(message, default);
+        {
+            use std::io::Write;
+            let mut err = std::io::stderr().lock();
+            err.write_all(rendered.as_bytes()).with_context(|| {
+                format!("step {}: PROMPT {message}: failed to write prompt", idx + 1)
+            })?;
+            err.flush().with_context(|| {
+                format!("step {}: PROMPT {message}: failed to flush prompt", idx + 1)
+            })?;
+        }
+        let mut line = String::new();
+        let n = std::io::stdin()
+            .read_line(&mut line)
+            .with_context(|| format!("step {}: PROMPT {message}: failed reading stdin", idx + 1))?;
+        if n == 0 && line.is_empty() {
+            bail!(
+                "step {}: PROMPT {message}: EOF on stdin before any input",
+                idx + 1
+            );
+        }
+        let trimmed = line
+            .strip_suffix("\r\n")
+            .or_else(|| line.strip_suffix('\n'))
+            .unwrap_or(&line);
+        let text = Value::string(apply_prompt_answer(trimmed, default));
+        bind_prompt_var(cx, idx, &clean_var, text)?;
+        Ok(())
+    }
+}
+
+fn bind_prompt_var<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    idx: usize,
+    clean_var: &str,
+    text: Value,
+) -> Result<()> {
+    if cx.state.get_var_typed(clean_var).is_some() {
+        cx.state
+            .mutate_var(clean_var, text)
+            .with_context(|| format!("step {}: PROMPT ${clean_var}", idx + 1))?;
+    } else {
+        cx.state
+            .declare_var(clean_var.to_string(), TypeTag::String, text)
+            .with_context(|| format!("step {}: PROMPT ${clean_var}", idx + 1))?;
+    }
+    Ok(())
+}
+
+pub(crate) fn dispatch_prompt<P: ProcessManager>(
+    step: &StepKind,
+    cx: &mut StepCtx<'_, P>,
+) -> Result<()> {
+    let StepKind::Prompt {
+        var,
+        message,
+        default,
+    } = step
+    else {
+        unreachable!()
+    };
+    let message_resolved = super::args::resolve_arg(message, cx)?;
+    let default_resolved = match default {
+        Some(d) => Some(super::args::resolve_arg(d, cx)?),
+        None => None,
+    };
+    prompt(cx, 0, var, &message_resolved, default_resolved.as_deref())
 }
 
 /// Dispatch `LIST_APPEND $list <item>` : append to a LIST binding in
@@ -2770,6 +2929,96 @@ pub(crate) fn dispatch_append<P: ProcessManager>(
     let path_resolved = super::args::resolve_arg(path, cx)?;
     let contents_resolved = super::args::resolve_arg_opt(contents, cx)?;
     append(cx, 0, &path_resolved, contents_resolved.as_deref())
+}
+
+pub(super) fn remove<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    idx: usize,
+    path: &str,
+    recursive: bool,
+) -> Result<()> {
+    let cwd = cx.state.cwd.clone();
+    let target = cx
+        .state
+        .fs
+        .resolve_write(&cwd, path)
+        .with_context(|| format!("step {}: REMOVE {path}", idx + 1))?;
+    // Root and working-directory deletion guard: removing the cwd (or any
+    // of its ancestors), the workspace root, or the effective root (`/`
+    // under `WORKSPACE SYSTEM`) would destroy the execution context or
+    // the host root, so fail closed before any filesystem driver runs.
+    // Both sides compare canonicalized: symlinked prefixes would
+    // otherwise defeat a lexical equality check.
+    let cwd_canon = cx
+        .state
+        .fs
+        .canonicalize(&cwd)
+        .unwrap_or_else(|_| cwd.clone());
+    if target == cwd_canon
+        || cwd_canon.as_path().starts_with(target.as_path())
+        || Some(&target) == cx.state.fs.workspace_root()
+        || target == *cx.state.fs.root()
+    {
+        bail!(
+            "step {}: REMOVE {path}: cannot remove working directory or workspace root",
+            idx + 1
+        );
+    }
+    // Lexical link probe: canonical resolution routes through the
+    // final link, so a link would otherwise read as its target and the
+    // target would be deleted instead of the link.
+    if cx
+        .state
+        .fs
+        .remove_link_if_symlink(&cwd, path)
+        .with_context(|| format!("step {}: REMOVE {path}", idx + 1))?
+    {
+        return Ok(());
+    }
+    match cx.state.fs.entry_kind_no_follow(&target) {
+        Err(_) => bail!("step {}: REMOVE {path}: no such file or directory", idx + 1),
+        Ok(EntryKind::File) => {
+            cx.state
+                .fs
+                .remove_file(&target)
+                .with_context(|| format!("step {}: REMOVE {path}", idx + 1))?;
+            Ok(())
+        }
+        // A link reaching here appeared between the probe and the
+        // resolve: fail closed rather than touch its target.
+        Ok(EntryKind::Symlink) => bail!(
+            "step {}: REMOVE {path}: link changed during removal",
+            idx + 1
+        ),
+        Ok(EntryKind::Dir) => {
+            if recursive {
+                cx.state
+                    .fs
+                    .remove_dir_all(&target)
+                    .with_context(|| format!("step {}: REMOVE {path}", idx + 1))?;
+                Ok(())
+            } else {
+                cx.state.fs.remove_empty_dir(&target).with_context(|| {
+                    format!(
+                        "step {}: REMOVE {path}: directory not empty (use --recursive)",
+                        idx + 1
+                    )
+                })?;
+                Ok(())
+            }
+        }
+    }
+}
+
+pub(crate) fn dispatch_remove<P: ProcessManager>(
+    step: &StepKind,
+    cx: &mut StepCtx<'_, P>,
+) -> Result<()> {
+    let StepKind::Remove { path, recursive } = step else {
+        unreachable!()
+    };
+    let path_resolved = super::args::resolve_arg(path, cx)?;
+    remove(cx, 0, &path_resolved, *recursive)
 }
 
 pub(crate) fn dispatch_expand<P: ProcessManager>(
@@ -3724,5 +3973,32 @@ pub(crate) fn timeout<P: ProcessManager>(
                 Err(err)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{apply_prompt_answer, format_prompt};
+
+    #[test]
+    fn prompt_format_shows_default_in_brackets() {
+        assert_eq!(
+            format_prompt("Install destination?", Some("/tmp/bin")),
+            "Install destination? [/tmp/bin]: "
+        );
+        assert_eq!(
+            format_prompt("Install destination?", None),
+            "Install destination?: "
+        );
+    }
+
+    #[test]
+    fn prompt_answer_prefers_input_over_default() {
+        assert_eq!(
+            apply_prompt_answer("/custom/bin", Some("/tmp/bin")),
+            "/custom/bin"
+        );
+        assert_eq!(apply_prompt_answer("", Some("/tmp/bin")), "/tmp/bin");
+        assert_eq!(apply_prompt_answer("", None), "");
     }
 }

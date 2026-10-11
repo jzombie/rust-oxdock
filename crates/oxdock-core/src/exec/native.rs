@@ -315,6 +315,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
             ParseToml::registration(),
             ParseJson::registration(),
             PathType::registration(),
+            PathWritable::registration(),
             HasKey::registration(),
             MapSet::registration(),
             MergeMaps::registration(),
@@ -752,6 +753,34 @@ fn path_type<P: ProcessManager>(
     path: String,
 ) -> Result<Value> {
     super::args::path_type_from_value(&[Value::string(path)], cx)
+}
+
+/// Report whether an ordinary file can be created at a path.
+///
+/// Walks up to the nearest existing ancestor, requires it be a
+/// directory, and probes writability by creating and deleting a probe
+/// file, so retry loops never litter. The empty string is false.
+/// AST-only by design, like `PATH_TYPE`: there is no RPN arm for
+/// filesystem IO.
+///
+/// ```oxdock
+/// # An absent nested path is writable when its ancestor is.
+/// IMPORT [STD]
+/// LET $fresh: BOOL = PATH_WRITABLE("probe-check/nested/file.txt")
+/// ASSERT_EQ $fresh true
+///
+/// # The empty string never aliases the working directory.
+/// LET $empty: BOOL = PATH_WRITABLE("")
+/// ASSERT_EQ $empty false
+/// ```
+///
+#[oxdock_func(returns = TypeTag::Bool)]
+fn path_writable<P: ProcessManager>(
+    cx: &mut StepCtx<P>,
+    /// Workspace path to probe for file creation.
+    path: String,
+) -> Result<Value> {
+    super::args::path_writable_from_value(&[Value::string(path)], cx)
 }
 
 /// Report whether a map holds a key.

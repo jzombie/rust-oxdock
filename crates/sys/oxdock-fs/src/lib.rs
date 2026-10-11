@@ -93,6 +93,8 @@ pub trait WorkspaceFs: Send + Sync {
     fn root(&self) -> &GuardedPath;
     fn build_context(&self) -> &GuardedPath;
     fn set_root(&mut self, root: &GuardedPath);
+    /// Project root recorded via `set_workspace_root`, when one is set.
+    fn workspace_root(&self) -> Option<&GuardedPath>;
 
     /// Select the snapshot root without touching the disk (`WORKSPACE
     /// SNAPSHOT`). The pending anchor serves lexical joins until the first
@@ -161,6 +163,14 @@ pub trait WorkspaceFs: Send + Sync {
     #[allow(clippy::disallowed_types)]
     fn remove_dir_all_unguarded(&self, path: &UnguardedPath) -> Result<()>;
 
+    /// Remove an empty directory. Fails when the directory holds entries.
+    fn remove_empty_dir(&self, path: &GuardedPath) -> Result<()>;
+
+    /// Remove the symlink at the lexical path (`cwd`-relative `rel`) when
+    /// one stands there, deleting the link itself, never its target.
+    /// Returns whether a link was removed.
+    fn remove_link_if_symlink(&self, cwd: &GuardedPath, rel: &str) -> Result<bool>;
+
     fn copy_file(&self, src: &GuardedPath, dst: &GuardedPath) -> Result<u64>;
     #[allow(clippy::disallowed_types)]
     fn copy_file_unguarded(&self, src: &UnguardedPath, dst: &UnguardedPath) -> Result<u64>;
@@ -172,6 +182,11 @@ pub trait WorkspaceFs: Send + Sync {
     fn copy_dir_recursive(&self, src: &GuardedPath, dst: &GuardedPath) -> Result<()>;
     #[allow(clippy::disallowed_types)]
     fn copy_dir_from_unguarded(&self, src: &UnguardedPath, dst: &GuardedPath) -> Result<()>;
+
+    /// Atomically place `src` at `dst` with unix `mode` (`INSTALL` passes
+    /// `0o755`). Stages as a temp file in the dest dir, sets the mode,
+    /// then renames, so the final path never carries the wrong mode.
+    fn install_file_atomic(&self, src: &GuardedPath, dst: &GuardedPath, mode: u32) -> Result<()>;
 
     fn symlink(&self, src: &GuardedPath, dst: &GuardedPath) -> Result<()>;
 
@@ -230,6 +245,10 @@ impl WorkspaceFs for PathResolver {
 
     fn root(&self) -> &GuardedPath {
         PathResolver::root(self)
+    }
+
+    fn workspace_root(&self) -> Option<&GuardedPath> {
+        PathResolver::workspace_root(self)
     }
 
     fn build_context(&self) -> &GuardedPath {
@@ -375,6 +394,14 @@ impl WorkspaceFs for PathResolver {
         PathResolver::remove_dir_all(self, path)
     }
 
+    fn remove_empty_dir(&self, path: &GuardedPath) -> Result<()> {
+        PathResolver::remove_empty_dir(self, path)
+    }
+
+    fn remove_link_if_symlink(&self, cwd: &GuardedPath, rel: &str) -> Result<bool> {
+        PathResolver::remove_link_if_symlink(self, cwd, rel)
+    }
+
     #[allow(clippy::disallowed_types)]
     fn remove_dir_all_unguarded(&self, path: &UnguardedPath) -> Result<()> {
         #[allow(clippy::disallowed_methods)]
@@ -413,6 +440,10 @@ impl WorkspaceFs for PathResolver {
 
     fn symlink(&self, src: &GuardedPath, dst: &GuardedPath) -> Result<()> {
         PathResolver::symlink(self, src, dst)
+    }
+
+    fn install_file_atomic(&self, src: &GuardedPath, dst: &GuardedPath, mode: u32) -> Result<()> {
+        PathResolver::install_file_atomic(self, src, dst, mode)
     }
 
     #[allow(clippy::disallowed_types)]

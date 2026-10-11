@@ -160,6 +160,12 @@ esac
 run_installer() {
 # Stdin capture, no decisions: a TTY is never drained.
 OXDOCK_PIPED_SCRIPT=""
+# Interactive consoles confirm the destination in the oxfile: export the
+# flag only with a console behind stdin, before the drain logic below.
+OXDOCK_INTERACTIVE=""
+if [ -t 0 ]; then
+  OXDOCK_INTERACTIVE=1
+fi
 if [ ! -t 0 ]; then
   stdin_tmp=$(mktemp)
   trap 'rm -rf "$tmp" "$stdin_tmp"' EXIT
@@ -170,7 +176,7 @@ if [ ! -t 0 ]; then
     rm -f "$stdin_tmp"
   fi
 fi
-(cd "$tmp" && OXDOCK_ASSET="$VDIR/$ASSET" OXDOCK_SHA="$EXPECTED" OXDOCK_BIN="$BIN" OXDOCK_DIR="$OXDOCK_DIR" OXDOCK_VERSION="$VERSION" OXDOCK_INTERPRETER="$ENGINE" OXDOCK_PIPED_SCRIPT="$OXDOCK_PIPED_SCRIPT" "$ENGINE" install.oxfile) || {
+(cd "$tmp" && OXDOCK_ASSET="$VDIR/$ASSET" OXDOCK_SHA="$EXPECTED" OXDOCK_BIN="$BIN" OXDOCK_DIR="$OXDOCK_DIR" OXDOCK_VERSION="$VERSION" OXDOCK_INTERPRETER="$ENGINE" OXDOCK_PIPED_SCRIPT="$OXDOCK_PIPED_SCRIPT" OXDOCK_INTERACTIVE="$OXDOCK_INTERACTIVE" "$ENGINE" install.oxfile) || {
   code=$?
   echo "installer failed with exit code $code" >&2
   exit "$code"
