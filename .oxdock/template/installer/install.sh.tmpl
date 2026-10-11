@@ -166,7 +166,7 @@ if [ ! -t 0 ]; then
     rm -f "$stdin_tmp"
   fi
 fi
-(cd "$tmp" && OXDOCK_ASSET="$VDIR/$ASSET" OXDOCK_SHA="$EXPECTED" OXDOCK_BIN="$BIN" OXDOCK_DIR="$OXDOCK_DIR" OXDOCK_VERSION="$VERSION" OXDOCK_INTERPRETER="$ENGINE" OXDOCK_PIPED_SCRIPT="$OXDOCK_PIPED_SCRIPT" OXDOCK_INTERACTIVE="$OXDOCK_INTERACTIVE" "$ENGINE" {{ $docs_global.stub_name_oxfile }}) || {
+(cd "$tmp" && OXDOCK_ASSET="$VDIR/$ASSET" OXDOCK_SHA="$EXPECTED" OXDOCK_BIN="$BIN" OXDOCK_DIR="$OXDOCK_DIR" OXDOCK_VERSION="$VERSION" OXDOCK_INTERPRETER="$ENGINE" OXDOCK_PIPED_SCRIPT="$OXDOCK_PIPED_SCRIPT" OXDOCK_INTERACTIVE="$OXDOCK_INTERACTIVE" "$ENGINE" "$tmp/{{ $docs_global.stub_name_oxfile }}") || {
   code=$?
   echo "{{ $docs_global.stub_msg_install_failed }}" >&2
   exit "$code"

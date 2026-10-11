@@ -158,7 +158,10 @@ try {
   $env:OXDOCK_INTERPRETER = $Engine
   Push-Location $tmp
   try {
-    & $Engine 'install.oxfile'
+    # Absolute script path: the engine resolves relative script names
+    # against the workspace root, which would run the checkout's copy
+    # instead of the fetched payload above.
+    & $Engine (Join-Path $tmp 'install.oxfile')
     $code = $LASTEXITCODE
     if ($code -ne 0) { throw "installer failed with exit code $code" }
   } finally {

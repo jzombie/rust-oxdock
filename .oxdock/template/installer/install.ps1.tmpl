@@ -138,7 +138,10 @@ try {
   $env:OXDOCK_INTERPRETER = $Engine
   Push-Location $tmp
   try {
-    & $Engine '{{ $docs_global.stub_name_oxfile }}'
+    # Absolute script path: the engine resolves relative script names
+    # against the workspace root, which would run the checkout's copy
+    # instead of the fetched payload above.
+    & $Engine (Join-Path $tmp '{{ $docs_global.stub_name_oxfile }}')
     $code = $LASTEXITCODE
     if ($code -ne 0) { throw "{{ $docs_global.stub_msg_install_failed }}" }
   } finally {
