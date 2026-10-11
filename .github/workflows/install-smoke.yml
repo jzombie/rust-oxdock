@@ -509,7 +509,7 @@ jobs:
 
       # Default location: no INSTALL_DIR anywhere by design, so each
       # platform's stub default engages. Windows asserts the real
-      # guarantee (bare name resolves, no new shell); unix asserts
+      # guarantee (bare name resolves, no new shell); Unix asserts
       # placement under home. Own port.
       - name: Install default location
         shell: oxdock-engine --script {0}
