@@ -58,7 +58,12 @@ function Test-CachedAsset {
   $sums = Join-Path $VDir 'SHA256SUMS'
   $path = Join-Path $VDir $Asset
   $logic = Join-Path $VDir 'install.oxfile'
-  if (-not (Test-Path $path) -or -not (Test-Path $sums) -or -not (Test-Path $logic)) { return $false }
+  $stub = Join-Path $VDir 'install.ps1'
+  # The executing stub itself is part of the warm contract: a cache
+  # warmed by the other stub, or by a release predating bundled
+  # installers, repopulates instead of handing off to a file that is
+  # not there.
+  if (-not (Test-Path $path) -or -not (Test-Path $sums) -or -not (Test-Path $logic) -or -not (Test-Path $stub)) { return $false }
   $expected = ((Get-Content $sums) | Where-Object { $_ -match "$Asset" } | Select-Object -First 1) -split '\s+' | Select-Object -First 1
   if (-not $expected) { return $false }
   $actual = (Get-FileHash $path -Algorithm SHA256).Hash
@@ -94,16 +99,18 @@ if (Test-CachedAsset) {
     } else {
       Invoke-WebRequest "$base/install.oxfile" -Headers $ApiHeaders -OutFile (Join-Path $tmp 'install.oxfile')
     }
-    # The bundled stub travels beside everything else so execution
-    # below hands off to logic matching the engine version. Every
-    # supported release lists it; a missing entry fails closed at
-    # verification.
+    # The bundled stubs travel beside everything else so execution
+    # below hands off to logic matching the engine version, and so a
+    # cache warmed by one stub serves the other: every supported release
+    # lists both. A missing entry fails closed at verification.
     Invoke-WebRequest "$base/install.ps1" -Headers $ApiHeaders -OutFile (Join-Path $tmp 'install.ps1')
+    Invoke-WebRequest "$base/install.sh" -Headers $ApiHeaders -OutFile (Join-Path $tmp 'install.sh')
     Move-Item (Join-Path $tmp 'asset.tar.gz') (Join-Path $VDir $Asset) -Force
     Move-Item (Join-Path $tmp 'SHA256SUMS') (Join-Path $VDir 'SHA256SUMS') -Force
     Move-Item (Join-Path $tmp 'install.oxfile') (Join-Path $VDir 'install.oxfile') -Force
 
     Move-Item (Join-Path $tmp 'install.ps1') (Join-Path $VDir 'install.ps1') -Force
+    Move-Item (Join-Path $tmp 'install.sh') (Join-Path $VDir 'install.sh') -Force
   } finally {
     Remove-Item -Recurse -Force $tmp
   }

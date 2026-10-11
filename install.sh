@@ -77,8 +77,11 @@ verify_cached() {
 
 # Same hash as last time means same bytes: reuse the cached tarball
 # after re-verifying it. Anything missing or mismatched falls through
-# to a fresh download, so a corrupt cache heals itself.
-if [ -f "$VDIR/$ASSET" ] && [ -f "$VDIR/SHA256SUMS" ] && [ -f "$VDIR/install.oxfile" ] && verify_cached; then
+# to a fresh download, so a corrupt cache heals itself. The executing
+# stub itself is part of the warm contract: a cache warmed by the other
+# stub, or by a release predating bundled installers, repopulates
+# instead of handing off to a file that is not there.
+if [ -f "$VDIR/$ASSET" ] && [ -f "$VDIR/SHA256SUMS" ] && [ -f "$VDIR/install.oxfile" ] && [ -f "$VDIR/install.sh" ] && verify_cached; then
   echo "using cached oxdock $VERSION" >&2
 else
   echo "downloading oxdock $VERSION" >&2
@@ -99,10 +102,12 @@ else
   else
     gh_curl "$base/install.oxfile" -o "$tmp/install.oxfile"
   fi
-  # The bundled stub travels beside everything else so execution below
-  # hands off to logic matching the engine version. Every supported
-  # release lists it; a missing entry fails closed at verification.
+  # The bundled stubs travel beside everything else so execution below
+  # hands off to logic matching the engine version, and so a cache warmed
+  # by one stub serves the other: every supported release lists both. A
+  # missing entry fails closed at verification.
   gh_curl "$base/install.sh" -o "$tmp/install.sh"
+  gh_curl "$base/install.ps1" -o "$tmp/install.ps1"
   if command -v sha256sum >/dev/null 2>&1; then
     (cd "$tmp" && grep "$ASSET\$" SHA256SUMS | sha256sum -c - >/dev/null)
   else
@@ -113,6 +118,7 @@ else
   mv "$tmp/install.oxfile" "$VDIR/install.oxfile"
 
   mv "$tmp/install.sh" "$VDIR/install.sh"
+  mv "$tmp/install.ps1" "$VDIR/install.ps1"
   trap - EXIT
   rm -rf "$tmp"
 fi
