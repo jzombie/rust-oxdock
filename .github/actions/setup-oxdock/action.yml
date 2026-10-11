@@ -1,0 +1,56 @@
+# Install the oxdock interpreter for `shell: oxdock` steps (or
+# `shell: oxdock-engine` when binary-name renames it).
+# The installers beside this file are generated from the repo
+# templates; remote consumers check out only this directory.
+name: Setup OxDock engine
+description: Install the oxdock interpreter so later steps can use shell oxdock.
+
+inputs:
+  version:
+    description: Full release tag to install (e.g. v0.24.2-alpha), or `latest` to resolve the newest release.
+    required: false
+    default: latest
+  binary-name:
+    description: Installed executable stem (`oxdock-engine` frees the bare `oxdock` name for a binary under test).
+    required: false
+    default: oxdock
+
+runs:
+  using: composite
+  steps:
+    # Empty VERSION resolves latest inside the installer; a tag pins.
+    - name: Install OxDock engine
+      if: ${{ runner.os != 'Windows' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        enginedir="${RUNNER_TEMP}/oxdock-engine"
+        mkdir -p "$enginedir"
+        if [ "${{ inputs.version }}" = "latest" ]; then
+          INSTALL_DIR="$enginedir" bash "${GITHUB_ACTION_PATH}/install.sh"
+        else
+          VERSION="${{ inputs.version }}" INSTALL_DIR="$enginedir" bash "${GITHUB_ACTION_PATH}/install.sh"
+        fi
+        # A renamed bootstrap frees the bare name: same-directory move,
+        # skipped when the name is already the default.
+        if [ "${{ inputs.binary-name }}" != "oxdock" ]; then
+          mv "$enginedir/oxdock" "$enginedir/${{ inputs.binary-name }}"
+        fi
+        echo "$enginedir" >> "$GITHUB_PATH"
+
+    - name: Install OxDock engine
+      if: ${{ runner.os == 'Windows' }}
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+        $enginedir = Join-Path $env:RUNNER_TEMP 'oxdock-engine'
+        New-Item -ItemType Directory -Force -Path $enginedir | Out-Null
+        if ('${{ inputs.version }}' -ne 'latest') { $env:VERSION = '${{ inputs.version }}' }
+        $env:INSTALL_DIR = $enginedir
+        & (Join-Path $env:GITHUB_ACTION_PATH 'install.ps1')
+        # A renamed bootstrap frees the bare name: same-directory move,
+        # skipped when the name is already the default.
+        if ('${{ inputs.binary-name }}' -ne 'oxdock') {
+          Rename-Item -Path (Join-Path $enginedir 'oxdock.exe') -NewName ('${{ inputs.binary-name }}.exe')
+        }
+        Add-Content -Path $env:GITHUB_PATH -Value $enginedir

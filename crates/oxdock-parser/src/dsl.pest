@@ -268,7 +268,7 @@ async_statement_block = { async_keyword ~ sep? ~ block }
 //   `let_statement`, where the RHS parses as an expression. Trailing text
 //   after a complete instruction can never be a valid expression
 //   continuation, so the guard claims no expression input.
-let_capture_statement = ${ let_keyword ~ gap ~ dollar_ident ~ gap ~ ":" ~ gap ~ type_tag ~ gap ~ "=" ~ gap ~ (await_statement | timeout_statement | instruction) ~ gap ~ &(linebreak | ";" | "}" | EOI) }
+let_capture_statement = ${ let_keyword ~ gap ~ dollar_ident ~ gap ~ ":" ~ gap ~ type_tag ~ gap ~ "=" ~ gap ~ (await_statement | timeout_statement | run_exec_statement | instruction) ~ gap ~ &(linebreak | ";" | "}" | EOI) }
 
 // LET $var: TYPE = ASYNC { ... } — spawn background task, store handle in $var
 // NOTE: "ASYNC" is consumed here, so we inline the block/inline forms

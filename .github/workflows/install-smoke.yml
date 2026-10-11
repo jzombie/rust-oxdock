@@ -1,14 +1,7 @@
-# Installer smoke: runs the tree's install fetchers into temp dirs
-# and executes the installed binary. Static checks (lint) prove the
-# stubs parse; this proves they install. The fetch source is a staged
-# branch build served over loopback, never a published tag: branch
-# bytes prove end to end, and the installer engine is the same branch
-# build, so behavior fixes prove before any release ships them. One leg
-# per stub leaves VERSION unset so the release-API resolution line
-# executes for real (TODO: consolidate those legs on exact `--version`
-# once the newest published release supports the flag). Weekly plus on
-# demand; also runs on pushes to main so stub changes prove before
-# users meet them.
+# Installer smoke: legs run the branch stubs against the staged branch
+# build over loopback, on the pinned engine installed as `oxdock-engine`
+# so bare `oxdock` means the product just installed. Lint proves stubs
+# parse; this proves they install.
 
 name: install-smoke
 
@@ -19,16 +12,32 @@ on:
       - "install.sh"
       - "install.ps1"
       - "install.oxfile"
-      - ".oxdock/template/readme/install.*.tmpl"
+      - ".oxdock/template/installer/**"
+      - ".oxdock/template/cli/**"
+      - "scripts/smoke/**"
+      - ".github/actions/setup-oxdock/**"
+      - ".github/workflows/install-smoke.yml"
   pull_request:
     paths:
       - "install.sh"
       - "install.ps1"
       - "install.oxfile"
-      - ".oxdock/template/readme/install.*.tmpl"
+      - ".oxdock/template/installer/**"
+      - ".oxdock/template/cli/**"
+      - "scripts/smoke/**"
+      - ".github/actions/setup-oxdock/**"
+      - ".github/workflows/install-smoke.yml"
   schedule:
     - cron: "0 7 * * 1"
   workflow_dispatch:
+
+# Pinned interpreter for every leg below: legs run branch DSL on a
+# stable release while the branch engine is still compiling, and the
+# action's `latest` default would move under us with no repo diff. Bump
+# to a newer tag only after it proves green; an older engine choking on
+# new syntax fails loudly at step start, which is the point.
+env:
+  OXDOCK_PINNED_ENGINE: v0.24.2-alpha
 
 jobs:
   parse:
@@ -49,9 +58,11 @@ jobs:
           set -euo pipefail
           bash -n install.sh
           pwsh -NoProfile -Command '$e=$null; [void][System.Management.Automation.Language.Parser]::ParseFile("install.ps1", [ref]$null, [ref]$e); if ($e.Count -gt 0) { $e | ForEach-Object { Write-Error $_.Message }; exit 1 }'
+          bash -n scripts/smoke/run-ephemeral.sh
+          pwsh -NoProfile -Command '$e=$null; [void][System.Management.Automation.Language.Parser]::ParseFile("scripts/smoke/run-ephemeral.ps1", [ref]$null, [ref]$e); if ($e.Count -gt 0) { $e | ForEach-Object { Write-Error $_.Message }; exit 1 }'
 
-  smoke:
-    name: smoke (${{ matrix.os }})
+  build:
+    name: build (${{ matrix.os }})
     needs: [parse]
     runs-on: ${{ matrix.os }}
     strategy:
@@ -64,6 +75,10 @@ jobs:
     # user runs may; loopback fetches ignore it harmlessly.
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # Temp-file DSL steps resolve the workspace through this, never
+      # through the script path: GitHub stages `run:` blocks outside the
+      # checkout, so discovery would misresolve without the override.
+      OXDOCK_WORKSPACE_ROOT: ${{ github.workspace }}
       # Test the branch's own installer logic, not whatever main happens
       # to carry: head branch on PRs, branch name otherwise. Unset on no
       # known branch would skip the override; every event here has one.
@@ -75,70 +90,111 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      # The engine arrives via the reusable setup action (pinned here;
+      # downstream projects omit `version` for latest): platform
+      # detection, checksums, and placement already live in the
+      # installers, so no asset matrix is repeated. Pin is exact and
+      # bumped deliberately; an old engine choking on new syntax fails
+      # loudly here rather than haunting later steps. VERSION pins the
+      # engine; the branch under test is built from source next.
+      - name: Install OxDock engine
+        uses: ./.github/actions/setup-oxdock
+        with:
+          version: ${{ env.OXDOCK_PINNED_ENGINE }}
+
       # The binary under test is this branch, never a published tag:
       # behavior fixes prove before any release ships them. Same build
       # the release ships (all features), by package name. The build
       # doubles as the staged release served below.
       - name: Build branch binary
         id: branch-bin
-        shell: bash
+        shell: oxdock --script {0}
         run: |
-          set -euo pipefail
-          cargo build --release -p oxdock --all-features
-          bin="$PWD/target/release/oxdock"
-          if [ "${RUNNER_OS}" = Windows ]; then
-            bin="$bin.exe"
-          fi
-          test -f "$bin"
-          # The engine reports its own version and exits 0: same build
-          # the release ships, so this is the version downloaders get.
-          ver=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
-          [ "$("$bin" --version)" = "oxdock $ver" ]
+          IMPORT [STD]
+          INHERIT_ENV [GITHUB_OUTPUT, GITHUB_PATH, GITHUB_WORKSPACE, RUNNER_TEMP]
+          WORKSPACE SYSTEM
+          WORKDIR {{ env:GITHUB_WORKSPACE }}
+
+          # Nested cargo builds run isolated in a temp target dir
+          # unless told otherwise; pin it to the workspace so the
+          # staged paths below resolve. Safe here: no concurrent outer
+          # cargo shares this runner job.
+          [family:unix] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
+          [family:windows] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}\\target"
+
+          RUN ["cargo", "build", "--release", "-p", "oxdock", "--all-features"]
+
+          # Identity, exact-free: the binary must report itself, and the
+          # manifest version is echoed for the log. Exact equality lives
+          # in the release gate, which enforces it authoritatively later.
+          LET $manifest: MAP<ANY> = LOAD_TOML("Cargo.toml")
+          ECHO "manifest: {{ $manifest.workspace.package.version }}"
+
+          LET $p2: PIPE
+          [family:unix] WITH_IO [stdout=$p2] RUN ["{{ env:GITHUB_WORKSPACE }}/target/release/oxdock", "--version"]
+          [family:windows] WITH_IO [stdout=$p2] RUN ["{{ env:GITHUB_WORKSPACE }}\\target\\release\\oxdock.exe", "--version"]
+          WITH_IO [stdin=$p2] READ_LINE $reported
+          ASSERT_CONTAINS $reported "oxdock "
+
           # Stage a local release of the branch build: every leg below
           # fetches through the stub from loopback, so branch bytes
           # prove and no published tag is involved. Layout mirrors a
           # real release asset dir; the target mapping mirrors the stub.
-          case "$(uname -s)-$(uname -m)" in
-            Darwin-arm64) target="aarch64-apple-darwin"; assetbin="oxdock" ;;
-            Linux-x86_64) target="x86_64-unknown-linux-musl"; assetbin="oxdock" ;;
-            Linux-aarch64) target="aarch64-unknown-linux-musl"; assetbin="oxdock" ;;
-            MINGW64*-x86_64 | MSYS*-x86_64 | CYGWIN*-x86_64) target="x86_64-pc-windows-msvc"; assetbin="oxdock.exe" ;;
-            MINGW64*-aarch64 | MSYS*-aarch64 | CYGWIN*-aarch64) target="aarch64-pc-windows-msvc"; assetbin="oxdock.exe" ;;
-            *) echo "unsupported platform: $(uname -s)-$(uname -m)" >&2; exit 1 ;;
-          esac
-          asset="oxdock-$target.tar.gz"
-          stage="${RUNNER_TEMP}/oxdock-stage"
-          mkdir -p "$stage"
-          cp "$bin" "$stage/$assetbin"
+          [os:macos] LET $target: STRING = "aarch64-apple-darwin"
+          [os:linux, arch:x86_64] LET $target: STRING = "x86_64-unknown-linux-musl"
+          [os:linux, arch:aarch64] LET $target: STRING = "aarch64-unknown-linux-musl"
+          [os:windows, arch:x86_64] LET $target: STRING = "x86_64-pc-windows-msvc"
+          [os:windows, arch:aarch64] LET $target: STRING = "aarch64-pc-windows-msvc"
+          [family:unix] LET $assetbin: STRING = "oxdock"
+          [family:windows] LET $assetbin: STRING = "oxdock.exe"
+          LET $asset: STRING = "oxdock-{{ $target }}.tar.gz"
+          [family:unix] LET $stage: STRING = "{{ env:RUNNER_TEMP }}/oxdock-stage"
+          [family:windows] LET $stage: STRING = "{{ env:RUNNER_TEMP }}\\oxdock-stage"
+          MKDIR {{ $stage }}
+          COPY target/release/{{ $assetbin }} {{ $stage }}/{{ $assetbin }}
+          # The piped-delivery legs fetch the stubs themselves over loopback.
+          COPY install.sh {{ $stage }}/install.sh
+          COPY install.ps1 {{ $stage }}/install.ps1
+          WORKDIR {{ $stage }}
+
           # Relative archive name: GNU tar reads `host:file` in an
           # absolute Windows path as a remote tape (`D:` looks like a
-          # host), so create from inside the stage dir instead.
-          (cd "$stage" && tar -czf "$asset" "$assetbin")
-          rm "$stage/$assetbin"
-          if command -v sha256sum >/dev/null 2>&1; then
-            (cd "$stage" && sha256sum "$asset" > SHA256SUMS)
-          else
-            (cd "$stage" && shasum -a 256 "$asset" > SHA256SUMS)
-          fi
-          if [ "${RUNNER_OS}" = Windows ]; then
-            bin="$(cygpath -w "$bin")"
-          fi
-          echo "path=$bin" >> "$GITHUB_OUTPUT"
+          # host), so archive from inside the stage dir instead.
+          RUN ["tar", "-czf", "{{ $asset }}", "{{ $assetbin }}"]
 
-      # TODO(release-0.24.2): re-enable together with the
-      # newest-release legs below; this step feeds only them. Skipped
-      # because those legs 404 by construction until musl assets
-      # publish (branch stub requests musl names the 0.24.1 release
-      # lacks).
+          # Checksum tool mirrors the stub per platform exactly.
+          LET $p3: PIPE
+          [os:linux] WITH_IO [stdout=$p3] RUN ["sha256sum", "{{ $asset }}"]
+          [os:macos] WITH_IO [stdout=$p3] RUN ["shasum", "-a", "256", "{{ $asset }}"]
+          [os:windows] WITH_IO [stdout=$p3] RUN ["sha256sum", "{{ $asset }}"]
+          WITH_IO [stdin=$p3] READ_LINE $sums
+          WRITE SHA256SUMS "{{ $sums }}"
+
+      # No bare-binary artifact: artifact zips strip the unix execute
+      # bit in transit, and a harness chmod would silently repair a
+      # build that shipped a mode-less binary. Legs unpack the engine
+      # from this staged asset tarball instead, exactly as users
+      # receive it, modes included.
+      - name: Upload staged release
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-stage-${{ matrix.os }}
+          path: ${{ runner.temp }}/oxdock-stage
+          retention-days: 1
+
+      # TODO: OxDock could resolve latest on its own with a new plugin module
+      # dedicated for version tracking, etc.
+      #
       # Pinned by the newest-release legs below: the stub resolves the
       # newest tag itself there, and the workflow must expect the same
       # one. Authenticated: shared runner IPs burn the anonymous quota.
       # No `grep -m1`: every stage must consume the body to EOF, else
       # curl fails writing to the closed pipe under pipefail (exit 23).
       # `per_page=1` yields exactly one `tag_name`, so nothing is lost.
+      # Stays shell deliberately: stripping the `v` prefix is string
+      # surgery the DSL has no vocabulary for, and this is six lines.
       - name: Resolve newest release
         id: smoke-version
-        if: false
         shell: bash
         run: |
           set -euo pipefail
@@ -146,280 +202,736 @@ jobs:
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
 
+  install:
+    name: install (${{ matrix.os }})
+    needs: [parse, build]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    permissions:
+      contents: read
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      OXDOCK_WORKSPACE_ROOT: ${{ github.workspace }}
+      OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.head_ref || github.ref_name }}/install.oxfile
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Download staged release
+        uses: actions/download-artifact@v4
+        with:
+          name: smoke-stage-${{ matrix.os }}
+          path: ${{ runner.temp }}/oxdock-stage
+
+      # Bootstrap interpreter only: installed as `oxdock-engine` so the
+      # bare `oxdock` name stays free for the binary under test. Pinned,
+      # so legs stay within a stable vocabulary.
+      - name: Install OxDock engine
+        uses: ./.github/actions/setup-oxdock
+        with:
+          version: ${{ env.OXDOCK_PINNED_ENGINE }}
+          binary-name: oxdock-engine
+
       # Every leg below fetches the staged branch build through the
       # stub from loopback: VERSION stays pinned so no release API is
       # involved, and the stub populates a cold cache from the server.
-      - name: Install and run via install.sh
-        if: ${{ runner.os != 'Windows' }}
-        shell: bash
+      - name: Install and run
+        shell: oxdock-engine --script {0}
         env:
           VERSION: local-test
-          INSTALL_DIR: ${{ runner.temp }}/oxbin
-          OXDOCK_RELEASE_BASE: http://127.0.0.1:18731
-          OXDOCK_ENGINE: ${{ steps.branch-bin.outputs.path }}
+          SMOKE_PORT: 18731
         run: |
-          set -euo pipefail
-          python3 -m http.server 18731 --directory "${RUNNER_TEMP}/oxdock-stage" >/dev/null 2>&1 &
-          srv=$!
-          trap 'kill $srv 2>/dev/null' EXIT
-          ready=0
-          for i in $(seq 1 50); do
-            if curl -fsS "http://127.0.0.1:18731/" >/dev/null 2>&1; then ready=1; break; fi
-            sleep 0.1
-          done
-          [ "$ready" = 1 ]
-          ./install.sh
-          [ "$("${INSTALL_DIR}/oxdock" --version)" = "$("$OXDOCK_ENGINE" --version)" ]
-          printf 'IMPORT [STD]\nECHO "via-stdin"\n' | "${INSTALL_DIR}/oxdock" --script - | grep -q "via-stdin"
+          IMPORT [STD]
+          INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, HOME, USERPROFILE, LOCALAPPDATA, GITHUB_TOKEN, PATH]
+          WORKSPACE SYSTEM
+          WORKDIR {{ env:GITHUB_WORKSPACE }}
+          # Source truth for version identity: the installed binary must
+          # report the manifest version. No second binary to compare
+          # against: every `oxdock` here is branch bytes already.
+          LET $manifest: MAP<ANY> = LOAD_TOML("Cargo.toml")
+          # Own loopback port per leg, bound to IPv4 explicitly: a server
+          # lingering from an earlier leg must never fail this bind.
+          ENV OXDOCK_RELEASE_BASE="http://127.0.0.1:{{ env:SMOKE_PORT }}"
+          LET $srv: HANDLE = ASYNC { RUN ["python3", "-m", "http.server", "{{ env:SMOKE_PORT }}", "--bind", "127.0.0.1", "--directory", "{{ env:RUNNER_TEMP }}/oxdock-stage"] }
 
-      - name: Install and run via install.ps1
-        if: ${{ runner.os == 'Windows' }}
-        shell: pwsh
+          # Bounded readiness wait in shell: the DSL has no try/retry, so a
+          # slow listener gets 30s and a dead one fails with listener state
+          # in the log instead of a bare connect timeout.
+          [family:unix] RUN ["sh", "-c", "for i in $(seq 1 30); do curl -fs http://127.0.0.1:{{ env:SMOKE_PORT }}/ >/dev/null && exit 0; sleep 1; done; lsof -iTCP:{{ env:SMOKE_PORT }} -sTCP:LISTEN || true; exit 1"]
+          [family:windows] RUN ["pwsh", "-NoProfile", "-Command", "for ($i=0; $i -lt 30; $i++) { curl.exe -fs http://127.0.0.1:{{ env:SMOKE_PORT }}/ | Out-Null; if ($LASTEXITCODE -eq 0) { exit 0 }; Start-Sleep -Seconds 1 }; Get-NetTCPConnection -LocalPort {{ env:SMOKE_PORT }} -ErrorAction SilentlyContinue; exit 1"]
+
+          LET $o: PIPE
+          [family:unix] WITH_IO [stdout=$o] RUN ["bash", "./install.sh"]
+          [family:windows] WITH_IO [stdout=$o] RUN ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ".\\install.ps1"]
+          ASSERT_CONTAINS $o "installed oxdock {{ env:VERSION }} to "
+          [family:unix] ASSERT_CONTAINS $o "to {{ env:HOME }}/.local/bin"
+          [family:windows] ASSERT_CONTAINS $o "to {{ env:LOCALAPPDATA }}\\Microsoft\\WindowsApps"
+          [family:unix] ASSERT_CONTAINS $o "ensure {{ env:HOME }}/.local/bin is on PATH"
+          [family:windows] ASSERT_CONTAINS $o "ensure {{ env:LOCALAPPDATA }}\\Microsoft\\WindowsApps is on PATH"
+
+          # Configured shell: the stub asks users to put the install dir
+          # on PATH, so do that here; bare names below then reach the
+          # product on both platforms. Windows needs nothing: WindowsApps
+          # is already on PATH.
+          [family:unix] ENV PATH="{{ env:HOME }}/.local/bin:{{ env:PATH }}"
+
+          LET $p1: PIPE
+          WITH_IO [stdout=$p1] RUN ["oxdock", "--version"]
+          WITH_IO [stdin=$p1] READ_LINE $got
+          ASSERT_EQ $got "oxdock {{ $manifest.workspace.package.version }}"
+
+          LET $p: PIPE
+          LET $t: HANDLE = ASYNC {
+              WITH_IO [stdout=$p] ECHO "IMPORT [STD]"
+              WITH_IO [stdout=$p] ECHO "ECHO via-stdin"
+          }
+          WITH_IO [stdin=$p] RUN ["oxdock", "--script", "-"]
+          AWAIT $t
+          ASSERT_CONTAINS stdout "via-stdin"
+
+          CANCEL $srv
+
+  pipe:
+    name: pipe (${{ matrix.os }})
+    needs: [parse, build]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    permissions:
+      contents: read
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      OXDOCK_WORKSPACE_ROOT: ${{ github.workspace }}
+      OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.head_ref || github.ref_name }}/install.oxfile
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Download staged release
+        uses: actions/download-artifact@v4
+        with:
+          name: smoke-stage-${{ matrix.os }}
+          path: ${{ runner.temp }}/oxdock-stage
+
+      # Bootstrap interpreter only: installed as `oxdock-engine` so the
+      # bare `oxdock` name stays free for the binary under test. Pinned,
+      # so legs stay within a stable vocabulary.
+      - name: Install OxDock engine
+        uses: ./.github/actions/setup-oxdock
+        with:
+          version: ${{ env.OXDOCK_PINNED_ENGINE }}
+          binary-name: oxdock-engine
+
+      # Piped delivery: the stub arrives on stdin exactly as real users
+      # run it, covering the self-consumption class where the drain eats
+      # unread script and the engine never runs. Own port and cold cache.
+      - name: Install via pipe
+        shell: oxdock-engine --script {0}
         env:
           VERSION: local-test
-          INSTALL_DIR: ${{ runner.temp }}\oxbin
-          OXDOCK_RELEASE_BASE: http://127.0.0.1:18731
-          OXDOCK_ENGINE: ${{ steps.branch-bin.outputs.path }}
+          SMOKE_PORT: 18734
         run: |
-          $ErrorActionPreference = 'Stop'
-          # Native-bound strings pipe as UTF-8: PowerShell defaults to
-          # UTF-16, which the binary reads as garbage.
-          $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-          $srv = Start-Process python3 -ArgumentList @('-m', 'http.server', '18731', '--directory', (Join-Path $env:RUNNER_TEMP 'oxdock-stage')) -PassThru
-          try {
-            $ready = $false
-            for ($i = 0; $i -lt 50 -and -not $ready; $i++) {
-              try { $null = Invoke-WebRequest 'http://127.0.0.1:18731/' -UseBasicParsing -TimeoutSec 2; $ready = $true } catch { Start-Sleep -Milliseconds 100 }
-            }
-            if (-not $ready) { throw "local stage server never came up" }
-            .\install.ps1
-            $installed = Join-Path $env:INSTALL_DIR 'oxdock.exe'
-            $engineVer = & $env:OXDOCK_ENGINE --version
-            if ($LASTEXITCODE -ne 0) { throw "branch engine --version failed" }
-            $gotVer = & $installed --version
-            if ($LASTEXITCODE -ne 0) { throw "installed binary --version failed" }
-            if ($gotVer -ne $engineVer) { throw "version mismatch: $gotVer vs $engineVer" }
-            "IMPORT [STD]`nECHO via-stdin" | & $installed --script - | Tee-Object (Join-Path $env:RUNNER_TEMP 'stdin.log')
-            if (-not (Select-String "via-stdin" (Join-Path $env:RUNNER_TEMP 'stdin.log'))) { throw "stdin delivery failed" }
-          } finally {
-            Stop-Process -Id $srv.Id -Force
+          IMPORT [STD]
+          INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, HOME, USERPROFILE, LOCALAPPDATA, GITHUB_TOKEN, PATH]
+          WORKSPACE SYSTEM
+          WORKDIR {{ env:GITHUB_WORKSPACE }}
+          # Source truth for version identity: the installed binary must
+          # report the manifest version. No second binary to compare
+          # against: every `oxdock` here is branch bytes already.
+          LET $manifest: MAP<ANY> = LOAD_TOML("Cargo.toml")
+          # Own loopback port for this leg; shared binds flake across legs.
+          ENV OXDOCK_RELEASE_BASE="http://127.0.0.1:{{ env:SMOKE_PORT }}"
+          LET $srv: HANDLE = ASYNC { RUN ["python3", "-m", "http.server", "{{ env:SMOKE_PORT }}", "--bind", "127.0.0.1", "--directory", "{{ env:RUNNER_TEMP }}/oxdock-stage"] }
+
+          # Bounded readiness wait in shell: the DSL has no try/retry, so a
+          # slow listener gets 30s and a dead one fails with listener state
+          # in the log instead of a bare connect timeout.
+          [family:unix] RUN ["sh", "-c", "for i in $(seq 1 30); do curl -fs http://127.0.0.1:{{ env:SMOKE_PORT }}/ >/dev/null && exit 0; sleep 1; done; lsof -iTCP:{{ env:SMOKE_PORT }} -sTCP:LISTEN || true; exit 1"]
+          [family:windows] RUN ["pwsh", "-NoProfile", "-Command", "for ($i=0; $i -lt 30; $i++) { curl.exe -fs http://127.0.0.1:{{ env:SMOKE_PORT }}/ | Out-Null; if ($LASTEXITCODE -eq 0) { exit 0 }; Start-Sleep -Seconds 1 }; Get-NetTCPConnection -LocalPort {{ env:SMOKE_PORT }} -ErrorAction SilentlyContinue; exit 1"]
+
+          LET $e: PIPE
+          LET $o: PIPE
+          [family:unix] WITH_IO [stdout=$o, stderr=$e] RUN ["sh", "-c", "curl -fsS http://127.0.0.1:{{ env:SMOKE_PORT }}/install.sh | bash"]
+          [family:windows] WITH_IO [stdout=$o, stderr=$e] RUN ["pwsh", "-NoProfile", "-Command", "curl.exe -fsS http://127.0.0.1:{{ env:SMOKE_PORT }}/install.sh | bash"]
+          ASSERT_CONTAINS $e "downloading oxdock local-test"
+          ASSERT_CONTAINS $o "installed oxdock local-test to "
+          [family:unix] ASSERT_CONTAINS $o "to {{ env:HOME }}/.local/bin"
+          [family:windows] ASSERT_CONTAINS $o "to {{ env:LOCALAPPDATA }}\\Microsoft\\WindowsApps"
+          [family:unix] ASSERT_CONTAINS $o "ensure {{ env:HOME }}/.local/bin is on PATH"
+          [family:windows] ASSERT_CONTAINS $o "ensure {{ env:LOCALAPPDATA }}\\Microsoft\\WindowsApps is on PATH"
+
+          # Configured shell: the stub asks users to put the install dir
+          # on PATH, so do that here; bare names below then reach the
+          # product on both platforms. Windows needs nothing: WindowsApps
+          # is already on PATH.
+          [family:unix] ENV PATH="{{ env:HOME }}/.local/bin:{{ env:PATH }}"
+
+          LET $p1: PIPE
+          WITH_IO [stdout=$p1] RUN ["oxdock", "--version"]
+          WITH_IO [stdin=$p1] READ_LINE $got
+          ASSERT_EQ $got "oxdock {{ $manifest.workspace.package.version }}"
+
+          # Same stub over irm|iex on Windows: the sh pass above warmed
+          # the cache, so reuse must report cached, proving cross-stub
+          # cache compatibility too.
+          [family:windows] LET $e2: PIPE
+          [family:windows] LET $o2: PIPE
+          [family:windows] WITH_IO [stdout=$o2, stderr=$e2] RUN ["pwsh", "-NoProfile", "-Command", "(irm http://127.0.0.1:{{ env:SMOKE_PORT }}/install.ps1) | iex"]
+          [family:windows] ASSERT_CONTAINS $e2 "using cached"
+          [family:windows] ASSERT_CONTAINS $o2 "installed oxdock local-test to "
+          [family:windows] ASSERT_CONTAINS $o2 "to {{ env:LOCALAPPDATA }}\\Microsoft\\WindowsApps"
+          [family:windows] ASSERT_CONTAINS $o2 "ensure {{ env:LOCALAPPDATA }}\\Microsoft\\WindowsApps is on PATH"
+
+          CANCEL $srv
+
+
+  unpacked:
+    name: unpacked (${{ matrix.os }})
+    needs: [parse, build]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    permissions:
+      contents: read
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      OXDOCK_WORKSPACE_ROOT: ${{ github.workspace }}
+      OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.head_ref || github.ref_name }}/install.oxfile
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Download staged release
+        uses: actions/download-artifact@v4
+        with:
+          name: smoke-stage-${{ matrix.os }}
+          path: ${{ runner.temp }}/oxdock-stage
+
+      # Bootstrap interpreter only: installed as `oxdock-engine` so the
+      # bare `oxdock` name stays free for the binary under test. Pinned,
+      # so legs stay within a stable vocabulary.
+      - name: Install OxDock engine
+        uses: ./.github/actions/setup-oxdock
+        with:
+          version: ${{ env.OXDOCK_PINNED_ENGINE }}
+          binary-name: oxdock-engine
+
+      # No engine override anywhere by design, so the unpacked release
+      # binary itself runs the installer: the user-visible shape, with
+      # the strictest announcement match. Own port, cold cache.
+      - name: Install with unpacked engine
+        shell: oxdock-engine --script {0}
+        env:
+          VERSION: local-test
+          SMOKE_PORT: 18737
+        run: |
+          IMPORT [STD]
+          INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, HOME, USERPROFILE, LOCALAPPDATA, GITHUB_TOKEN, PATH]
+          WORKSPACE SYSTEM
+          WORKDIR {{ env:GITHUB_WORKSPACE }}
+          # Source truth for version identity: the installed binary must
+          # report the manifest version. No second binary to compare
+          # against: every `oxdock` here is branch bytes already.
+          LET $manifest: MAP<ANY> = LOAD_TOML("Cargo.toml")
+
+          ENV OXDOCK_RELEASE_BASE="http://127.0.0.1:{{ env:SMOKE_PORT }}"
+          LET $srv: HANDLE = ASYNC { RUN ["python3", "-m", "http.server", "{{ env:SMOKE_PORT }}", "--bind", "127.0.0.1", "--directory", "{{ env:RUNNER_TEMP }}/oxdock-stage"] }
+
+          # Bounded readiness wait in shell: the DSL has no try/retry, so a
+          # slow listener gets 30s and a dead one fails with listener state
+          # in the log instead of a bare connect timeout.
+          [family:unix] RUN ["sh", "-c", "for i in $(seq 1 30); do curl -fs http://127.0.0.1:{{ env:SMOKE_PORT }}/ >/dev/null && exit 0; sleep 1; done; lsof -iTCP:{{ env:SMOKE_PORT }} -sTCP:LISTEN || true; exit 1"]
+          [family:windows] RUN ["pwsh", "-NoProfile", "-Command", "for ($i=0; $i -lt 30; $i++) { curl.exe -fs http://127.0.0.1:{{ env:SMOKE_PORT }}/ | Out-Null; if ($LASTEXITCODE -eq 0) { exit 0 }; Start-Sleep -Seconds 1 }; Get-NetTCPConnection -LocalPort {{ env:SMOKE_PORT }} -ErrorAction SilentlyContinue; exit 1"]
+
+          LET $e: PIPE
+          LET $o: PIPE
+          [family:unix] WITH_IO [stdout=$o, stderr=$e] RUN ["sh", "-c", "curl -fsS http://127.0.0.1:{{ env:SMOKE_PORT }}/install.sh | bash"]
+          [family:windows] WITH_IO [stdout=$o, stderr=$e] RUN ["pwsh", "-NoProfile", "-Command", "curl.exe -fsS http://127.0.0.1:{{ env:SMOKE_PORT }}/install.sh | bash"]
+          ASSERT_CONTAINS $e "downloading oxdock local-test"
+          ASSERT_CONTAINS $o "installed oxdock local-test to "
+          [family:unix] ASSERT_CONTAINS $o "to {{ env:HOME }}/.local/bin"
+          [family:windows] ASSERT_CONTAINS $o "to {{ env:LOCALAPPDATA }}\\Microsoft\\WindowsApps"
+          [family:unix] ASSERT_CONTAINS $o "ensure {{ env:HOME }}/.local/bin is on PATH"
+          [family:windows] ASSERT_CONTAINS $o "ensure {{ env:LOCALAPPDATA }}\\Microsoft\\WindowsApps is on PATH"
+
+          # Configured shell: the stub asks users to put the install dir
+          # on PATH, so do that here; bare names below then reach the
+          # product on both platforms. Windows needs nothing: WindowsApps
+          # is already on PATH.
+          [family:unix] ENV PATH="{{ env:HOME }}/.local/bin:{{ env:PATH }}"
+
+          LET $p: PIPE
+          WITH_IO [stdout=$p] RUN ["oxdock", "--version"]
+          WITH_IO [stdin=$p] READ_LINE $got
+          ASSERT_EQ $got "oxdock {{ $manifest.workspace.package.version }}"
+
+          CANCEL $srv
+
+  default:
+    name: default (${{ matrix.os }})
+    needs: [parse, build]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    permissions:
+      contents: read
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      OXDOCK_WORKSPACE_ROOT: ${{ github.workspace }}
+      OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.head_ref || github.ref_name }}/install.oxfile
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Download staged release
+        uses: actions/download-artifact@v4
+        with:
+          name: smoke-stage-${{ matrix.os }}
+          path: ${{ runner.temp }}/oxdock-stage
+
+      # Bootstrap interpreter only: installed as `oxdock-engine` so the
+      # bare `oxdock` name stays free for the binary under test. Pinned,
+      # so legs stay within a stable vocabulary.
+      - name: Install OxDock engine
+        uses: ./.github/actions/setup-oxdock
+        with:
+          version: ${{ env.OXDOCK_PINNED_ENGINE }}
+          binary-name: oxdock-engine
+
+      # Default location: no INSTALL_DIR anywhere by design, so each
+      # platform's stub default engages. Windows asserts the real
+      # guarantee (bare name resolves, no new shell); unix asserts
+      # placement under home. Own port.
+      - name: Install default location
+        shell: oxdock-engine --script {0}
+        env:
+          VERSION: local-test
+          # Loopback port for this leg; server, probe, and release base derive from it.
+          SMOKE_PORT: 18735
+        run: |
+          IMPORT [STD]
+          INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, HOME, USERPROFILE, LOCALAPPDATA, GITHUB_TOKEN, PATH]
+          WORKSPACE SYSTEM
+          WORKDIR {{ env:GITHUB_WORKSPACE }}
+          # Source truth for version identity: the installed binary must
+          # report the manifest version. No second binary to compare
+          # against: every `oxdock` here is branch bytes already.
+          LET $manifest: MAP<ANY> = LOAD_TOML("Cargo.toml")
+
+          ENV OXDOCK_RELEASE_BASE="http://127.0.0.1:{{ env:SMOKE_PORT }}"
+          LET $srv: HANDLE = ASYNC { RUN ["python3", "-m", "http.server", "{{ env:SMOKE_PORT }}", "--bind", "127.0.0.1", "--directory", "{{ env:RUNNER_TEMP }}/oxdock-stage"] }
+
+          # Bounded readiness wait in shell: the DSL has no try/retry, so a
+          # slow listener gets 30s and a dead one fails with listener state
+          # in the log instead of a bare connect timeout.
+          [family:unix] RUN ["sh", "-c", "for i in $(seq 1 30); do curl -fs http://127.0.0.1:{{ env:SMOKE_PORT }}/ >/dev/null && exit 0; sleep 1; done; lsof -iTCP:{{ env:SMOKE_PORT }} -sTCP:LISTEN || true; exit 1"]
+          [family:windows] RUN ["pwsh", "-NoProfile", "-Command", "for ($i=0; $i -lt 30; $i++) { curl.exe -fs http://127.0.0.1:{{ env:SMOKE_PORT }}/ | Out-Null; if ($LASTEXITCODE -eq 0) { exit 0 }; Start-Sleep -Seconds 1 }; Get-NetTCPConnection -LocalPort {{ env:SMOKE_PORT }} -ErrorAction SilentlyContinue; exit 1"]
+
+          LET $o: PIPE
+          [family:unix] WITH_IO [stdout=$o] RUN ["bash", "./install.sh"]
+          [family:windows] WITH_IO [stdout=$o] RUN ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ".\\install.ps1"]
+          ASSERT_CONTAINS $o "installed oxdock {{ env:VERSION }} to "
+          [family:unix] ASSERT_CONTAINS $o "to {{ env:HOME }}/.local/bin"
+          [family:windows] ASSERT_CONTAINS $o "to {{ env:LOCALAPPDATA }}\\Microsoft\\WindowsApps"
+          [family:unix] ASSERT_CONTAINS $o "ensure {{ env:HOME }}/.local/bin is on PATH"
+          [family:windows] ASSERT_CONTAINS $o "ensure {{ env:LOCALAPPDATA }}\\Microsoft\\WindowsApps is on PATH"
+
+          # Configured shell: the stub asks users to put the install dir
+          # on PATH, so do that here; bare names below then reach the
+          # product on both platforms. Windows needs nothing: WindowsApps
+          # is already on PATH.
+          [family:unix] ENV PATH="{{ env:HOME }}/.local/bin:{{ env:PATH }}"
+
+          LET $p: PIPE
+          WITH_IO [stdout=$p] RUN ["oxdock", "--version"]
+          WITH_IO [stdin=$p] READ_LINE $got
+          ASSERT_EQ $got "oxdock {{ $manifest.workspace.package.version }}"
+
+          CANCEL $srv
+
+  ephemeral:
+    name: ephemeral (${{ matrix.os }})
+    needs: [parse, build]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    permissions:
+      contents: read
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      OXDOCK_WORKSPACE_ROOT: ${{ github.workspace }}
+      OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.head_ref || github.ref_name }}/install.oxfile
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Download staged release
+        uses: actions/download-artifact@v4
+        with:
+          name: smoke-stage-${{ matrix.os }}
+          path: ${{ runner.temp }}/oxdock-stage
+
+      # Bootstrap interpreter only: installed as `oxdock-engine` so the
+      # bare `oxdock` name stays free for the binary under test. Pinned,
+      # so legs stay within a stable vocabulary.
+      - name: Install OxDock engine
+        uses: ./.github/actions/setup-oxdock
+        with:
+          version: ${{ env.OXDOCK_PINNED_ENGINE }}
+          binary-name: oxdock-engine
+
+      # Ephemeral run: executes the template-rendered one-liners that
+      # the README also publishes, so documented commands stay tested.
+      - name: Ephemeral run
+        shell: oxdock-engine --script {0}
+        env:
+          VERSION: local-test
+          INSTALL_DIR_NIX: ${{ runner.temp }}/oxbin-ephemeral
+          INSTALL_DIR_WIN: ${{ runner.temp }}\oxbin-ephemeral
+          # Loopback port for this leg; server, probe, and release base derive from it.
+          SMOKE_PORT: 18732
+        run: |
+          IMPORT [STD]
+          INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, INSTALL_DIR_NIX, INSTALL_DIR_WIN, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, HOME, USERPROFILE, GITHUB_TOKEN]
+          WORKSPACE SYSTEM
+          WORKDIR {{ env:GITHUB_WORKSPACE }}
+          [family:unix] ENV INSTALL_DIR="{{ env:INSTALL_DIR_NIX }}"
+          [family:windows] ENV INSTALL_DIR="{{ env:INSTALL_DIR_WIN }}"
+          ENV TMPDIR="{{ env:GITHUB_WORKSPACE }}/target/ephemeral-tmp"
+          [family:windows] ENV TMP="{{ env:GITHUB_WORKSPACE }}/target/ephemeral-tmp"
+          MKDIR "{{ env:GITHUB_WORKSPACE }}/target/ephemeral-tmp"
+
+          # Own loopback port for this leg; shared binds flake across legs.
+          ENV OXDOCK_RELEASE_BASE="http://127.0.0.1:{{ env:SMOKE_PORT }}"
+          LET $srv: HANDLE = ASYNC { RUN ["python3", "-m", "http.server", "{{ env:SMOKE_PORT }}", "--bind", "127.0.0.1", "--directory", "{{ env:RUNNER_TEMP }}/oxdock-stage"] }
+
+          # Bounded readiness wait in shell: the DSL has no try/retry, so a
+          # slow listener gets 30s and a dead one fails with listener state
+          # in the log instead of a bare connect timeout.
+          [family:unix] RUN ["sh", "-c", "for i in $(seq 1 30); do curl -fs http://127.0.0.1:{{ env:SMOKE_PORT }}/ >/dev/null && exit 0; sleep 1; done; lsof -iTCP:{{ env:SMOKE_PORT }} -sTCP:LISTEN || true; exit 1"]
+          [family:windows] RUN ["pwsh", "-NoProfile", "-Command", "for ($i=0; $i -lt 30; $i++) { curl.exe -fs http://127.0.0.1:{{ env:SMOKE_PORT }}/ | Out-Null; if ($LASTEXITCODE -eq 0) { exit 0 }; Start-Sleep -Seconds 1 }; Get-NetTCPConnection -LocalPort {{ env:SMOKE_PORT }} -ErrorAction SilentlyContinue; exit 1"]
+
+          [family:unix] RUN ["bash", "scripts/smoke/run-ephemeral.sh"]
+          [family:windows] RUN ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ".\\scripts\\smoke\\run-ephemeral.ps1"]
+          ASSERT_CONTAINS stdout "via-ephemeral"
+
+          CANCEL $srv
+
+          LET $t2: STRING = PATH_TYPE("{{ env:INSTALL_DIR }}")
+          ASSERT_EQ $t2 "absent"
+
+          FOR $f: STRING IN GLOB("target/ephemeral-tmp/*") {
+              ECHO "scratch leaked: {{ $f }}"
+              EXIT 1
           }
 
-      # Ephemeral run: a piped script executes with the fetched engine
-      # and places nothing. INSTALL_DIR points at a fresh dir that must
-      # stay absent; VERSION stays pinned so no release API is involved.
-      # The run-vs-install decision lives in install.oxfile; the stub
-      # only bridges the piped bytes. The stub arrives via process
-      # substitution (never `curl | bash`, which would feed the program
-      # itself on fd 0): this is the exact one-liner downloaders paste,
-      # with `cat` standing in for `curl` to keep the branch hermetic.
-      # TODO(single-source-commands): move this one-liner into a CLI
-      # template file that the README renders via docs-gen and this leg
-      # executes, so a published command can never drift from a tested
-      # one. A README command that never ran in CI is the worst outcome.
-      # Keep it unpinned: main ships before versions cut, so a pinned
-      # VERSION would rot on arrival.
-      - name: Ephemeral run via install.sh
-        if: ${{ runner.os != 'Windows' }}
+  newest:
+    name: newest (${{ matrix.os }})
+    needs: [parse, build]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    permissions:
+      contents: read
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      OXDOCK_WORKSPACE_ROOT: ${{ github.workspace }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Download staged release
+        uses: actions/download-artifact@v4
+        with:
+          name: smoke-stage-${{ matrix.os }}
+          path: ${{ runner.temp }}/oxdock-stage
+
+      # Bootstrap interpreter only: installed as `oxdock-engine` so the
+      # bare `oxdock` name stays free for the binary under test. Pinned,
+      # so legs stay within a stable vocabulary.
+      - name: Install OxDock engine
+        uses: ./.github/actions/setup-oxdock
+        with:
+          version: ${{ env.OXDOCK_PINNED_ENGINE }}
+          binary-name: oxdock-engine
+
+      # Pinned by this leg itself: the stub resolves the newest tag
+      # here, and the leg expects the same one. Authenticated: shared
+      # runner IPs burn the anonymous quota. No `grep -m1`: every stage
+      # must consume the body to EOF, else curl fails writing to the
+      # closed pipe under pipefail (exit 23). Stays shell deliberately:
+      # stripping the `v` prefix is string surgery the DSL has no
+      # vocabulary for, and this is six lines.
+      - name: Resolve newest release
+        id: smoke-version
         shell: bash
-        env:
-          VERSION: local-test
-          INSTALL_DIR: ${{ runner.temp }}/oxbin-ephemeral
-          OXDOCK_RELEASE_BASE: http://127.0.0.1:18731
-          OXDOCK_ENGINE: ${{ steps.branch-bin.outputs.path }}
         run: |
           set -euo pipefail
-          python3 -m http.server 18731 --directory "${RUNNER_TEMP}/oxdock-stage" >/dev/null 2>&1 &
-          srv=$!
-          trap 'kill $srv 2>/dev/null' EXIT
-          ready=0
-          for i in $(seq 1 50); do
-            if curl -fsS "http://127.0.0.1:18731/" >/dev/null 2>&1; then ready=1; break; fi
-            sleep 0.1
-          done
-          [ "$ready" = 1 ]
-          # Isolated scratch: the stub's mktemp dirs land here, so an
-          # empty dir afterward proves per-run cleanup, not just
-          # placement absence.
-          export TMPDIR="${RUNNER_TEMP}/ephemeral-tmp"
-          mkdir -p "$TMPDIR"
-          printf 'IMPORT [STD]\nECHO "via-ephemeral"\n' | bash <(cat ./install.sh) 2>&1 | tee "${RUNNER_TEMP}/ephemeral.log"
-          grep -q "via-ephemeral" "${RUNNER_TEMP}/ephemeral.log"
-          [ ! -e "${{ runner.temp }}/oxbin-ephemeral" ]
-          [ -z "$(ls -A "$TMPDIR")" ]
+          tag=$(curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" "https://api.github.com/repos/jzombie/rust-oxdock/releases?per_page=1" | grep '"tag_name"' | cut -d'"' -f4)
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
 
-      # TODO(single-source-commands): same single-sourcing as the sh
-      # leg above; both one-liners move to the CLI template file together.
-      - name: Ephemeral run via install.ps1
-        if: ${{ runner.os == 'Windows' }}
-        shell: pwsh
-        env:
-          VERSION: local-test
-          INSTALL_DIR: ${{ runner.temp }}\oxbin-ephemeral
-          OXDOCK_RELEASE_BASE: http://127.0.0.1:18731
-          OXDOCK_ENGINE: ${{ steps.branch-bin.outputs.path }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-          $srv = Start-Process python3 -ArgumentList @('-m', 'http.server', '18731', '--directory', (Join-Path $env:RUNNER_TEMP 'oxdock-stage')) -PassThru
-          try {
-            $ready = $false
-            for ($i = 0; $i -lt 50 -and -not $ready; $i++) {
-              try { $null = Invoke-WebRequest 'http://127.0.0.1:18731/' -UseBasicParsing -TimeoutSec 2; $ready = $true } catch { Start-Sleep -Milliseconds 100 }
-            }
-            if (-not $ready) { throw "local stage server never came up" }
-            # In-memory scriptblock, never `irm | iex` (which would feed the
-            # program itself on the pipe): the exact one-liner downloaders
-            # paste, with Get-Content standing in for irm to keep the
-            # branch hermetic.
-            # Isolated scratch: GetTempPath honors TMP, so an empty dir
-            # afterward proves per-run cleanup, not just placement absence.
-            $env:TMP = Join-Path $env:RUNNER_TEMP 'ephemeral-tmp'
-            New-Item -ItemType Directory -Force -Path $env:TMP | Out-Null
-            "IMPORT [STD]`nECHO via-ephemeral" | & ([scriptblock]::Create((Get-Content -Raw .\install.ps1))) *>&1 | Tee-Object (Join-Path $env:RUNNER_TEMP 'ephemeral.log')
-            if (-not (Select-String "via-ephemeral" (Join-Path $env:RUNNER_TEMP 'ephemeral.log'))) { throw "ephemeral run produced no output" }
-            if (Test-Path (Join-Path $env:RUNNER_TEMP 'oxbin-ephemeral')) { throw "ephemeral run placed files" }
-            if (Get-ChildItem $env:TMP) { throw "scratch leaked temp files" }
-          } finally {
-            Stop-Process -Id $srv.Id -Force
-          }
-
-      # TODO(release-0.24.2): re-enable once the newest published
-      # release ships musl assets; this 404s by construction until
-      # then. Original gate was `runner.os != 'Windows'`. Re-enabling
-      # may rewrite these legs in OxDock instead of shell.
       # TODO: consolidate on exact `--version` once the newest published
       # release supports the flag. This leg leaves VERSION unset so the
       # stub's release-API resolution executes for real; the payload is
-      # whatever is newest, checked via its `--help` menu.
-      - name: Install newest release via install.sh
-        if: false
-        shell: bash
+      # whatever is newest, checked via its `--help` menu. Published
+      # everything (no engine or oxfile overrides), installed to stub
+      # defaults on a fresh runner. Own cache dir: the engine install
+      # above already populated the default cache with this same tag,
+      # so a shared cache would report cached where downloading is
+      # asserted.
+      - name: Install newest release
+        shell: oxdock-engine --script {0}
         env:
-          INSTALL_DIR: ${{ runner.temp }}/oxbin-newest
           SMOKE_TAG: ${{ steps.smoke-version.outputs.tag }}
           SMOKE_VERSION: ${{ steps.smoke-version.outputs.version }}
-          OXDOCK_ENGINE: ${{ steps.branch-bin.outputs.path }}
+          OXDOCK_CACHE_DIR: ${{ runner.temp }}/oxdock-cache-newest
         run: |
-          set -euo pipefail
-          ./install.sh 2>&1 | tee "${RUNNER_TEMP}/install-newest.log"
-          grep -q "downloading oxdock ${SMOKE_TAG}" "${RUNNER_TEMP}/install-newest.log"
-          "${INSTALL_DIR}/oxdock" --help | grep -q "$SMOKE_VERSION"
-          printf 'IMPORT [STD]\nECHO "via-stdin"\n' | "${INSTALL_DIR}/oxdock" --script - | grep -q "via-stdin"
+          IMPORT [STD]
+          INHERIT_ENV [SMOKE_TAG, SMOKE_VERSION, OXDOCK_CACHE_DIR, RUNNER_TEMP, GITHUB_WORKSPACE, HOME, USERPROFILE, LOCALAPPDATA, GITHUB_TOKEN, PATH]
+          WORKSPACE SYSTEM
+          WORKDIR {{ env:GITHUB_WORKSPACE }}
+          LET $e: PIPE
+          LET $o: PIPE
+          [family:unix] WITH_IO [stdout=$o, stderr=$e] RUN ["bash", "./install.sh"]
+          [family:windows] WITH_IO [stdout=$o, stderr=$e] RUN ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ".\\install.ps1"]
+          # Full-content match: the announcement is not guaranteed to be
+          # the first stderr line on every stub path and platform, so a
+          # first-line read goes flaky where a substring holds steady.
+          ASSERT_CONTAINS $e "downloading oxdock {{ env:SMOKE_TAG }}"
+          ASSERT_CONTAINS $o "installed oxdock {{ env:SMOKE_TAG }} to "
+          [family:unix] ASSERT_CONTAINS $o "to {{ env:HOME }}/.local/bin"
+          [family:windows] ASSERT_CONTAINS $o "to {{ env:LOCALAPPDATA }}\\Microsoft\\WindowsApps"
+          [family:unix] ASSERT_CONTAINS $o "ensure {{ env:HOME }}/.local/bin is on PATH"
+          [family:windows] ASSERT_CONTAINS $o "ensure {{ env:LOCALAPPDATA }}\\Microsoft\\WindowsApps is on PATH"
 
-      # TODO(release-0.24.2): re-enable with the sh leg above.
-      # Original gate was `runner.os == 'Windows'`.
-      # TODO: consolidate on exact `--version` once the newest published
-      # release supports the flag. Same contract as the sh leg above.
-      # `*>&1` merges every stream: the stub announces via
-      # Write-Warning, which `2>&1` never sees.
-      - name: Install newest release via install.ps1
-        if: false
-        shell: pwsh
-        env:
-          INSTALL_DIR: ${{ runner.temp }}\oxbin-newest
-          SMOKE_TAG: ${{ steps.smoke-version.outputs.tag }}
-          SMOKE_VERSION: ${{ steps.smoke-version.outputs.version }}
-          OXDOCK_ENGINE: ${{ steps.branch-bin.outputs.path }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          # Native-bound strings pipe as UTF-8: PowerShell defaults to
-          # UTF-16, which the binary reads as garbage.
-          $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-          .\install.ps1 *>&1 | Tee-Object (Join-Path $env:RUNNER_TEMP 'install-newest.log')
-          if (-not (Select-String "downloading oxdock $([regex]::Escape($env:SMOKE_TAG))" (Join-Path $env:RUNNER_TEMP 'install-newest.log'))) { throw "stub resolved an unexpected release" }
-          $installed = Join-Path $env:INSTALL_DIR 'oxdock.exe'
-          $installedMenu = & $installed --help
-          if ($LASTEXITCODE -ne 0) { throw "installed --help failed" }
-          if (($installedMenu | Out-String) -notmatch [regex]::Escape($env:SMOKE_VERSION)) { throw "version missing from installed help" }
-          "IMPORT [STD]`nECHO via-stdin" | & $installed --script - | Tee-Object (Join-Path $env:RUNNER_TEMP 'newest-stdin.log')
-          if (-not (Select-String "via-stdin" (Join-Path $env:RUNNER_TEMP 'newest-stdin.log'))) { throw "stdin delivery failed" }
+          # Configured shell: the stub asks users to put the install dir
+          # on PATH, so do that here; bare names below then reach the
+          # product on both platforms. Windows needs nothing: WindowsApps
+          # is already on PATH.
+          [family:unix] ENV PATH="{{ env:HOME }}/.local/bin:{{ env:PATH }}"
 
-      # Same job, so $HOME (and the cache) persists: warm reuse must
-      # skip downloads, corruption must heal by redownloading. The sh
-      # stub announces which path it took; assert on that.
-      - name: Reuse and heal cache via install.sh
-        if: ${{ runner.os != 'Windows' }}
-        shell: bash
-        env:
-          VERSION: local-test
-          INSTALL_DIR: ${{ runner.temp }}/oxbin-warm
-          OXDOCK_RELEASE_BASE: http://127.0.0.1:18731
-          OXDOCK_ENGINE: ${{ steps.branch-bin.outputs.path }}
-        run: |
-          set -euo pipefail
-          python3 -m http.server 18731 --directory "${RUNNER_TEMP}/oxdock-stage" >/dev/null 2>&1 &
-          srv=$!
-          trap 'kill $srv 2>/dev/null' EXIT
-          ready=0
-          for i in $(seq 1 50); do
-            if curl -fsS "http://127.0.0.1:18731/" >/dev/null 2>&1; then ready=1; break; fi
-            sleep 0.1
-          done
-          [ "$ready" = 1 ]
-          ./install.sh 2>&1 | tee "${RUNNER_TEMP}/warm.log"
-          grep -q "using cached" "${RUNNER_TEMP}/warm.log"
-          "${INSTALL_DIR}/oxdock" --help
-          # Scope to this leg's VERSION: other legs share the cache.
-          echo corrupt > "$HOME"/.cache/oxdock/local-test/*.tar.gz
-          ./install.sh 2>&1 | tee "${RUNNER_TEMP}/healed.log"
-          grep -q "downloading" "${RUNNER_TEMP}/healed.log"
-          "${INSTALL_DIR}/oxdock" --help
+          LET $p: PIPE
+          WITH_IO [stdout=$p] RUN ["oxdock", "--help"]
+          WITH_IO [stdin=$p] READ_LINE $first
+          ASSERT_CONTAINS $first "{{ env:SMOKE_VERSION }}"
 
-      # No proxy blackhole here: .NET WinHTTP ignores proxy env vars,
-      # so it would prove nothing. Warm reuse plus tamper-heal cover
-      # the cache contract on this leg.
-      - name: Reuse and heal cache via install.ps1
-        if: ${{ runner.os == 'Windows' }}
-        shell: pwsh
-        env:
-          VERSION: local-test
-          INSTALL_DIR: ${{ runner.temp }}\oxbin-warm
-          OXDOCK_RELEASE_BASE: http://127.0.0.1:18731
-          OXDOCK_ENGINE: ${{ steps.branch-bin.outputs.path }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $srv = Start-Process python3 -ArgumentList @('-m', 'http.server', '18731', '--directory', (Join-Path $env:RUNNER_TEMP 'oxdock-stage')) -PassThru
-          try {
-            $ready = $false
-            for ($i = 0; $i -lt 50 -and -not $ready; $i++) {
-              try { $null = Invoke-WebRequest 'http://127.0.0.1:18731/' -UseBasicParsing -TimeoutSec 2; $ready = $true } catch { Start-Sleep -Milliseconds 100 }
-            }
-            if (-not $ready) { throw "local stage server never came up" }
-            # `*>&1` merges every stream: the stub announces cache hits
-            # and downloads via Write-Warning, which `2>&1` never sees.
-            .\install.ps1 *>&1 | Tee-Object (Join-Path $env:RUNNER_TEMP 'warm.log')
-          if (-not (Select-String "using cached" (Join-Path $env:RUNNER_TEMP 'warm.log'))) { throw "expected a cache hit" }
-          & (Join-Path $env:INSTALL_DIR 'oxdock.exe') --help
-          # Scope to this leg's VERSION: other legs share the cache.
-          Set-Content -NoNewline -Path (Get-ChildItem $HOME\.cache\oxdock\local-test\*.tar.gz) -Value 'corrupt'
-          .\install.ps1 *>&1 | Tee-Object (Join-Path $env:RUNNER_TEMP 'healed.log')
-          if (-not (Select-String "downloading" (Join-Path $env:RUNNER_TEMP 'healed.log'))) { throw "expected a heal download" }
-          & (Join-Path $env:INSTALL_DIR 'oxdock.exe') --help
-          } finally {
-            Stop-Process -Id $srv.Id -Force
+          LET $q: PIPE
+          LET $t: HANDLE = ASYNC {
+              WITH_IO [stdout=$q] ECHO "IMPORT [STD]"
+              WITH_IO [stdout=$q] ECHO "ECHO via-stdin"
           }
+          WITH_IO [stdin=$q] RUN ["oxdock", "--script", "-"]
+          AWAIT $t
+          ASSERT_CONTAINS stdout "via-stdin"
+
+  reuse:
+    name: reuse (${{ matrix.os }})
+    needs: [parse, build]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    permissions:
+      contents: read
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      OXDOCK_WORKSPACE_ROOT: ${{ github.workspace }}
+      OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.head_ref || github.ref_name }}/install.oxfile
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Download staged release
+        uses: actions/download-artifact@v4
+        with:
+          name: smoke-stage-${{ matrix.os }}
+          path: ${{ runner.temp }}/oxdock-stage
+
+      # Bootstrap interpreter only: installed as `oxdock-engine` so the
+      # bare `oxdock` name stays free for the binary under test. Pinned,
+      # so legs stay within a stable vocabulary.
+      - name: Install OxDock engine
+        uses: ./.github/actions/setup-oxdock
+        with:
+          version: ${{ env.OXDOCK_PINNED_ENGINE }}
+          binary-name: oxdock-engine
+
+      # Same job, so $HOME (and the cache) persists across runs: the
+      # first install primes a cold cache, the second must reuse it,
+      # and corruption must heal by redownloading. The stub announces
+      # which path it took; assert the announcement stderr.
+      - name: Reuse and heal cache
+        shell: oxdock-engine --script {0}
+        env:
+          VERSION: local-test
+          SMOKE_PORT: 18733
+        run: |
+          IMPORT [STD]
+          INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, HOME, USERPROFILE, LOCALAPPDATA, GITHUB_TOKEN, PATH]
+          WORKSPACE SYSTEM
+          WORKDIR {{ env:GITHUB_WORKSPACE }}
+          # Source truth for version identity: the installed binary must
+          # report the manifest version. No second binary to compare
+          # against: every `oxdock` here is branch bytes already.
+          LET $manifest: MAP<ANY> = LOAD_TOML("Cargo.toml")
+
+          ENV OXDOCK_RELEASE_BASE="http://127.0.0.1:{{ env:SMOKE_PORT }}"
+          LET $srv: HANDLE = ASYNC { RUN ["python3", "-m", "http.server", "{{ env:SMOKE_PORT }}", "--bind", "127.0.0.1", "--directory", "{{ env:RUNNER_TEMP }}/oxdock-stage"] }
+
+          # Bounded readiness wait in shell: the DSL has no try/retry, so a
+          # slow listener gets 30s and a dead one fails with listener state
+          # in the log instead of a bare connect timeout.
+          [family:unix] RUN ["sh", "-c", "for i in $(seq 1 30); do curl -fs http://127.0.0.1:{{ env:SMOKE_PORT }}/ >/dev/null && exit 0; sleep 1; done; lsof -iTCP:{{ env:SMOKE_PORT }} -sTCP:LISTEN || true; exit 1"]
+          [family:windows] RUN ["pwsh", "-NoProfile", "-Command", "for ($i=0; $i -lt 30; $i++) { curl.exe -fs http://127.0.0.1:{{ env:SMOKE_PORT }}/ | Out-Null; if ($LASTEXITCODE -eq 0) { exit 0 }; Start-Sleep -Seconds 1 }; Get-NetTCPConnection -LocalPort {{ env:SMOKE_PORT }} -ErrorAction SilentlyContinue; exit 1"]
+
+          # Prime: cold cache downloads.
+          LET $e0: PIPE
+          [family:unix] WITH_IO [stderr=$e0] RUN ["bash", "./install.sh"]
+          [family:windows] WITH_IO [stderr=$e0] RUN ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ".\\install.ps1"]
+          ASSERT_CONTAINS $e0 "downloading"
+
+          LET $e1: PIPE
+          [family:unix] WITH_IO [stderr=$e1] RUN ["bash", "./install.sh"]
+          [family:windows] WITH_IO [stderr=$e1] RUN ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ".\\install.ps1"]
+          ASSERT_CONTAINS $e1 "using cached"
+
+          # Configured shell: the stub asks users to put the install dir
+          # on PATH, so do that here; bare names below then reach the
+          # product on both platforms. Windows needs nothing: WindowsApps
+          # is already on PATH.
+          [family:unix] ENV PATH="{{ env:HOME }}/.local/bin:{{ env:PATH }}"
+
+          LET $h1: PIPE
+          WITH_IO [stdout=$h1] RUN ["oxdock", "--version"]
+          WITH_IO [stdin=$h1] READ_LINE $help1
+          ASSERT_EQ $help1 "oxdock {{ $manifest.workspace.package.version }}"
+
+          [os:macos] LET $asset: STRING = "oxdock-aarch64-apple-darwin.tar.gz"
+          [os:linux, arch:x86_64] LET $asset: STRING = "oxdock-x86_64-unknown-linux-musl.tar.gz"
+          [os:linux, arch:aarch64] LET $asset: STRING = "oxdock-aarch64-unknown-linux-musl.tar.gz"
+          [os:windows, arch:x86_64] LET $asset: STRING = "oxdock-x86_64-pc-windows-msvc.tar.gz"
+          [os:windows, arch:aarch64] LET $asset: STRING = "oxdock-aarch64-pc-windows-msvc.tar.gz"
+          LET $cacheroot: STRING = "{{ env:OXDOCK_CACHE_DIR }}"
+          IF $cacheroot == "" {
+              [family:unix] $cacheroot = "{{ env:HOME }}/.cache/oxdock"
+              [family:windows] $cacheroot = "{{ env:USERPROFILE }}/.cache/oxdock"
+          }
+          WRITE {{ $cacheroot }}/local-test/{{ $asset }} "corrupt"
+
+          LET $e2: PIPE
+          [family:unix] WITH_IO [stderr=$e2] RUN ["bash", "./install.sh"]
+          [family:windows] WITH_IO [stderr=$e2] RUN ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ".\\install.ps1"]
+          ASSERT_CONTAINS $e2 "downloading"
+
+          LET $h2: PIPE
+          WITH_IO [stdout=$h2] RUN ["oxdock", "--version"]
+          WITH_IO [stdin=$h2] READ_LINE $help2
+          ASSERT_EQ $help2 "oxdock {{ $manifest.workspace.package.version }}"
+
+          CANCEL $srv
+
+  offline:
+    name: offline (${{ matrix.os }})
+    needs: [parse, build]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    permissions:
+      contents: read
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      OXDOCK_WORKSPACE_ROOT: ${{ github.workspace }}
+      OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.head_ref || github.ref_name }}/install.oxfile
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Download staged release
+        uses: actions/download-artifact@v4
+        with:
+          name: smoke-stage-${{ matrix.os }}
+          path: ${{ runner.temp }}/oxdock-stage
+
+      # Bootstrap interpreter only: installed as `oxdock-engine` so the
+      # bare `oxdock` name stays free for the binary under test. Pinned,
+      # so legs stay within a stable vocabulary.
+      - name: Install OxDock engine
+        uses: ./.github/actions/setup-oxdock
+        with:
+          version: ${{ env.OXDOCK_PINNED_ENGINE }}
+          binary-name: oxdock-engine
 
       # Blackholed egress: with a warm cache and pinned resolution,
-      # nothing may leave the machine. Lowercase proxy vars only:
-      # GitHub treats env keys case-insensitively, so carrying both
-      # cases is a duplicate key and kills the run at startup. The
-      # canary first proves the blackhole holds; without it a silently
-      # ignored proxy would pass vacuously. Unix legs only (see above).
-      - name: Install offline via install.sh
-        if: ${{ runner.os != 'Windows' }}
-        shell: bash
+      # nothing may leave the machine. The cache warms over loopback
+      # first; then the proxies blackhole the run and the reinstall
+      # must still succeed offline. Lowercase proxy vars only: GitHub
+      # treats env keys case-insensitively, so carrying both cases is
+      # a duplicate key and kills the run at startup. The canary first
+      # proves the blackhole holds; without it a silently ignored proxy
+      # would pass vacuously. Windows canary uses assignment form: a
+      # pipeline into Out-Null resets $LASTEXITCODE, hiding curl's code.
+      - name: Install offline
+        shell: oxdock-engine --script {0}
         env:
           VERSION: local-test
-          INSTALL_DIR: ${{ runner.temp }}/oxbin-offline
-          OXDOCK_ENGINE: ${{ steps.branch-bin.outputs.path }}
-          http_proxy: http://127.0.0.1:9
-          https_proxy: http://127.0.0.1:9
+          SMOKE_PORT: 18738
         run: |
-          set -euo pipefail
-          if curl -fsSL --max-time 15 https://github.com >/dev/null 2>&1; then
-            echo "blackhole broken: egress succeeded" >&2
-            exit 1
-          fi
-          ./install.sh
-          "${INSTALL_DIR}/oxdock" --help
+          IMPORT [STD]
+          INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, HOME, USERPROFILE, LOCALAPPDATA, GITHUB_TOKEN, PATH]
+          WORKSPACE SYSTEM
+          WORKDIR {{ env:GITHUB_WORKSPACE }}
+          # Source truth for version identity: the installed binary must
+          # report the manifest version. No second binary to compare
+          # against: every `oxdock` here is branch bytes already.
+          LET $manifest: MAP<ANY> = LOAD_TOML("Cargo.toml")
+
+          ENV OXDOCK_RELEASE_BASE="http://127.0.0.1:{{ env:SMOKE_PORT }}"
+          LET $srv: HANDLE = ASYNC { RUN ["python3", "-m", "http.server", "{{ env:SMOKE_PORT }}", "--bind", "127.0.0.1", "--directory", "{{ env:RUNNER_TEMP }}/oxdock-stage"] }
+
+          [family:unix] RUN ["sh", "-c", "for i in $(seq 1 30); do curl -fs http://127.0.0.1:{{ env:SMOKE_PORT }}/ >/dev/null && exit 0; sleep 1; done; lsof -iTCP:{{ env:SMOKE_PORT }} -sTCP:LISTEN || true; exit 1"]
+          [family:windows] RUN ["pwsh", "-NoProfile", "-Command", "for ($i=0; $i -lt 30; $i++) { curl.exe -fs http://127.0.0.1:{{ env:SMOKE_PORT }}/ | Out-Null; if ($LASTEXITCODE -eq 0) { exit 0 }; Start-Sleep -Seconds 1 }; Get-NetTCPConnection -LocalPort {{ env:SMOKE_PORT }} -ErrorAction SilentlyContinue; exit 1"]
+
+          LET $p1: PIPE
+          [family:unix] WITH_IO [stderr=$p1] RUN ["bash", "./install.sh"]
+          [family:windows] WITH_IO [stderr=$p1] RUN ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ".\\install.ps1"]
+          ASSERT_CONTAINS $p1 "downloading"
+
+          CANCEL $srv
+
+          ENV http_proxy="http://127.0.0.1:9"
+          ENV https_proxy="http://127.0.0.1:9"
+          [family:unix] RUN ["sh", "-c", "! curl -fsSL --max-time 15 https://github.com"]
+          [family:windows] RUN ["pwsh", "-NoProfile", "-Command", "$null = curl.exe -fsSL --max-time 15 https://github.com; if ($LASTEXITCODE -eq 0) { exit 1 }; exit 0"]
+
+          LET $p2: PIPE
+          [family:unix] WITH_IO [stderr=$p2] RUN ["bash", "./install.sh"]
+          [family:windows] WITH_IO [stderr=$p2] RUN ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ".\\install.ps1"]
+          ASSERT_CONTAINS $p2 "using cached"
+
+          # Configured shell: the stub asks users to put the install dir
+          # on PATH, so do that here; bare names below then reach the
+          # product on both platforms. Windows needs nothing: WindowsApps
+          # is already on PATH.
+          [family:unix] ENV PATH="{{ env:HOME }}/.local/bin:{{ env:PATH }}"
+
+          LET $v: PIPE
+          WITH_IO [stdout=$v] RUN ["oxdock", "--version"]
+          WITH_IO [stdin=$v] READ_LINE $ver
+          ASSERT_EQ $ver "oxdock {{ $manifest.workspace.package.version }}"

@@ -31,53 +31,68 @@ pub enum ScriptSource {
 
 impl Parse for DslMacroInput {
     fn parse(input: ParseStream) -> syn::Result<Self> {
-        let name_label: Ident = input.parse()?;
-        if name_label != "name" {
-            return Err(syn::Error::new(name_label.span(), "expected `name` label"));
+        // Fields accept any order so call sites can lead with the
+        // staging directory ahead of a long script block. Each field
+        // must appear exactly once.
+        let mut name: Option<Ident> = None;
+        let mut script: Option<ScriptSource> = None;
+        let mut out_dir: Option<LitStr> = None;
+        while !input.is_empty() {
+            let label: Ident = input.parse()?;
+            let label_span = label.span();
+            let label_name = label.to_string();
+            input.parse::<Token![:]>()?;
+            match label_name.as_str() {
+                "name" => {
+                    if name.is_some() {
+                        return Err(syn::Error::new(label_span, "duplicate `name` label"));
+                    }
+                    name = Some(input.parse()?);
+                }
+                "script" => {
+                    if script.is_some() {
+                        return Err(syn::Error::new(label_span, "duplicate `script` label"));
+                    }
+                    if input.peek(LitStr) {
+                        let s: LitStr = input.parse()?;
+                        script = Some(ScriptSource::Literal(s));
+                    } else if input.peek(syn::token::Brace) {
+                        let content;
+                        syn::braced!(content in input);
+                        let ts: TokenStream2 = content.parse()?;
+                        script = Some(ScriptSource::Braced(ts));
+                    } else {
+                        return Err(syn::Error::new(
+                            input.span(),
+                            "expected string literal or braced script block",
+                        ));
+                    }
+                }
+                "out_dir" => {
+                    if out_dir.is_some() {
+                        return Err(syn::Error::new(label_span, "duplicate `out_dir` label"));
+                    }
+                    out_dir = Some(input.parse()?);
+                }
+                _ => {
+                    return Err(syn::Error::new(
+                        label_span,
+                        format!(
+                            "unknown label `{label_name}`: expected `name`, `script`, or `out_dir`"
+                        ),
+                    ));
+                }
+            }
+            let _ = input.parse::<Token![,]>().ok();
         }
-        input.parse::<Token![:]>()?;
-        let name: Ident = input.parse()?;
-        let _ = input.parse::<Token![,]>().ok();
-
-        let script_label: Ident = input.parse()?;
-        if script_label != "script" {
-            return Err(syn::Error::new(
-                script_label.span(),
-                "expected `script` label",
-            ));
-        }
-        input.parse::<Token![:]>()?;
-        let script = if input.peek(LitStr) {
-            let s: LitStr = input.parse()?;
-            ScriptSource::Literal(s)
-        } else if input.peek(syn::token::Brace) {
-            let content;
-            syn::braced!(content in input);
-            let ts: TokenStream2 = content.parse()?;
-            ScriptSource::Braced(ts)
-        } else {
-            return Err(syn::Error::new(
-                input.span(),
-                "expected string literal or braced script block",
-            ));
-        };
-        let _ = input.parse::<Token![,]>().ok();
-
-        let out_dir_label: Ident = input.parse()?;
-        if out_dir_label != "out_dir" {
-            return Err(syn::Error::new(
-                out_dir_label.span(),
-                "expected `out_dir` label",
-            ));
-        }
-        input.parse::<Token![:]>()?;
-        let out_dir: LitStr = input.parse()?;
-        let _ = input.parse::<Token![,]>().ok();
 
         Ok(Self {
-            name,
-            script,
-            out_dir,
+            name: name
+                .ok_or_else(|| syn::Error::new(input.span(), "missing `name: ...` field"))?,
+            script: script
+                .ok_or_else(|| syn::Error::new(input.span(), "missing `script: ...` field"))?,
+            out_dir: out_dir
+                .ok_or_else(|| syn::Error::new(input.span(), "missing `out_dir: ...` field"))?,
         })
     }
 }
@@ -750,6 +765,71 @@ mod tests {
             syn::parse_str("name: foo, script: { RUN echo hi }, out_dir: \"out\"")
                 .expect("parse braced script");
         assert!(matches!(input.script, ScriptSource::Braced(_)));
+    }
+
+    #[test]
+    fn parse_dsl_macro_input_accepts_any_field_order() {
+        // The README leads with `out_dir` ahead of a long script block.
+        let input: DslMacroInput =
+            syn::parse_str("name: foo, out_dir: \"out\", script: { RUN echo hi }")
+                .expect("out_dir before script");
+        assert_eq!(input.name.to_string(), "foo");
+        assert_eq!(input.out_dir.value(), "out");
+        assert!(matches!(input.script, ScriptSource::Braced(_)));
+
+        let input: DslMacroInput =
+            syn::parse_str("out_dir: \"out\", script: \"RUN echo hi\", name: foo")
+                .expect("fully reversed order");
+        assert_eq!(input.name.to_string(), "foo");
+        assert!(matches!(input.script, ScriptSource::Literal(_)));
+    }
+
+    #[test]
+    fn parse_dsl_macro_input_rejects_duplicates_unknown_and_missing() {
+        assert!(syn::parse_str::<DslMacroInput>(
+            "name: foo, name: bar, script: \"RUN echo hi\", out_dir: \"out\""
+        )
+        .is_err());
+        assert!(syn::parse_str::<DslMacroInput>(
+            "name: foo, script: \"RUN echo hi\", script: \"RUN echo yo\", out_dir: \"out\""
+        )
+        .is_err());
+        assert!(syn::parse_str::<DslMacroInput>(
+            "name: foo, script: \"RUN echo hi\", out_dir: \"a\", out_dir: \"b\""
+        )
+        .is_err());
+        assert!(syn::parse_str::<DslMacroInput>(
+            "name: foo, script: \"RUN echo hi\", out_dir: \"out\", extra: 1"
+        )
+        .is_err());
+        assert!(syn::parse_str::<DslMacroInput>("script: \"x\", out_dir: \"y\"").is_err());
+        assert!(syn::parse_str::<DslMacroInput>("name: foo, out_dir: \"y\"").is_err());
+        assert!(syn::parse_str::<DslMacroInput>("name: foo, script: \"x\"").is_err());
+    }
+
+    #[test]
+    fn braced_let_run_exec_stays_exec_form() {
+        // End-to-end guard for the README embed example: tokens shaped
+        // exactly like the macro receives them must rebuild to text
+        // that still lowers to RunExec, never shell text. A prior
+        // revision executed `[ cargo , --version ]` through zsh.
+        let ts: proc_macro2::TokenStream = r#"LET $cargo: STRING = RUN ["cargo", "--version"]"#
+            .parse()
+            .expect("tokens");
+        let script = script_from_braced_tokens(&ts).expect("rebuild");
+        let steps =
+            crate::parse_script(&script, crate::lower_command).expect("parse rebuilt script");
+        assert_eq!(steps.len(), 1);
+        match &steps[0].kind {
+            StepKind::AssignCapture { var, cmd, .. } => {
+                assert_eq!(var, "cargo");
+                assert!(
+                    matches!(cmd.as_ref(), StepKind::RunExec { .. }),
+                    "rebuilt {script:?} degraded to {cmd:?}"
+                );
+            }
+            other => panic!("expected AssignCapture, got {other:?}"),
+        }
     }
 
     #[test]

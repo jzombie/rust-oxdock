@@ -15,27 +15,27 @@ WORKSPACE SYSTEM
 
 # Run vs install is decided here, never in the stub: a non-empty piped
 # script bridge means execute it with the fetched interpreter.
-LET $piped: STRING = "{{ env:OXDOCK_PIPED_SCRIPT }}"
+LET $piped: STRING = "\{{ env:OXDOCK_PIPED_SCRIPT }}"
 IF $piped != "" {
-    RUN ["{{ env:OXDOCK_INTERPRETER }}", "{{ env:OXDOCK_PIPED_SCRIPT }}"]
+    RUN ["\{{ env:OXDOCK_INTERPRETER }}", "\{{ env:OXDOCK_PIPED_SCRIPT }}"]
 } ELSE {
     # Install locations arrive through the stub environment. HOME and
     # USERPROFILE ride along for fix suggestions: the stub never sets
     # them, the host supplies them.
-    LET $asset: STRING = "{{ env:OXDOCK_ASSET }}"
-    LET $want: STRING = "{{ env:OXDOCK_SHA }}"
-    LET $bin: STRING = "{{ env:OXDOCK_BIN }}"
-    LET $dir: STRING = "{{ env:OXDOCK_DIR }}"
+    LET $asset: STRING = "\{{ env:OXDOCK_ASSET }}"
+    LET $want: STRING = "\{{ env:OXDOCK_SHA }}"
+    LET $bin: STRING = "\{{ env:OXDOCK_BIN }}"
+    LET $dir: STRING = "\{{ env:OXDOCK_DIR }}"
     IF $dir == "" {
-        [family:unix] LET $home: STRING = "{{ env:HOME }}"
-        [family:windows] LET $home: STRING = "{{ env:USERPROFILE }}"
+        [family:unix] LET $home: STRING = "\{{ env:HOME }}"
+        [family:windows] LET $home: STRING = "\{{ env:USERPROFILE }}"
         IF $home == "" {
-            [family:unix] ECHO "no install directory: HOME is unset, so set INSTALL_DIR (example: INSTALL_DIR=\"$HOME/.local/bin\")"
-            [family:windows] ECHO "no install directory: USERPROFILE is unset, so set INSTALL_DIR (example: $env:INSTALL_DIR = \"%LOCALAPPDATA%\Microsoft\WindowsApps\")"
+            [family:unix] ECHO "no install directory: HOME is unset, so set INSTALL_DIR (example: INSTALL_DIR=\"$HOME/{{ $docs_global.unix_default_suffix }}\")"
+            [family:windows] ECHO "no install directory: USERPROFILE is unset, so set INSTALL_DIR (example: $env:INSTALL_DIR = \"{{ $docs_global.windows_default_prefix }}{{ $docs_global.windows_default_suffix }}\")"
             EXIT 1
         }
-        [family:unix] ECHO "no install directory: set INSTALL_DIR (example: INSTALL_DIR=\"$HOME/.local/bin\")"
-        [family:windows] ECHO "no install directory: set INSTALL_DIR (example: $env:INSTALL_DIR = \"%LOCALAPPDATA%\Microsoft\WindowsApps\")"
+        [family:unix] ECHO "no install directory: set INSTALL_DIR (example: INSTALL_DIR=\"$HOME/{{ $docs_global.unix_default_suffix }}\")"
+        [family:windows] ECHO "no install directory: set INSTALL_DIR (example: $env:INSTALL_DIR = \"{{ $docs_global.windows_default_prefix }}{{ $docs_global.windows_default_suffix }}\")"
         EXIT 1
     }
 
@@ -43,13 +43,13 @@ IF $piped != "" {
     LET $actual: STRING = HASH_SHA256 $asset
     # The digest command terminates its line: the comparison includes it.
     # Rust never emits \r\n here on any platform, so this is exact.
-    ASSERT_EQ $actual "{{ $want }}\n"
+    ASSERT_EQ $actual "\{{ $want }}\n"
 
     # Place the verified binary and report where it landed.
     MKDIR $dir
-    LET $dest: STRING = "{{ $dir }}/oxdock"
-    [family:windows] $dest = "{{ $dir }}/oxdock.exe"
+    LET $dest: STRING = "\{{ $dir }}/oxdock"
+    [family:windows] $dest = "\{{ $dir }}/oxdock.exe"
     COPY $bin $dest
-    ECHO "installed oxdock {{ env:OXDOCK_VERSION }} to {{ $dir }}"
-    ECHO "ensure {{ $dir }} is on PATH"
+    ECHO "installed oxdock \{{ env:OXDOCK_VERSION }} to \{{ $dir }}"
+    ECHO "ensure \{{ $dir }} is on PATH"
 }

@@ -1,4 +1,4 @@
-oxdock 0.24.2-alpha — CLI tooling for executing OxDock's Dockerfile-inspired DSL on native platforms.
+oxdock 0.24.3-alpha — CLI tooling for executing OxDock's Dockerfile-inspired DSL on native platforms.
 
 Usage: oxdock [OPTIONS] [SCRIPT]
   SCRIPT             script file path (same as `--script <file>`); `-` reads stdin

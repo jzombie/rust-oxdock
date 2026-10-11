@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [0.24.3-alpha] - 2026-10-10
+
+### Added
+
+- Quick start documents standalone installs with the same template-rendered commands CI executes, organized by intent: try without installing, install the CLI, add the library.
+
+### Changed
+
+- Windows installer announcements print as plain stderr lines instead of yellow `WARNING:` records: PowerShell routes warnings to stdout when stdout is redirected, so anything capturing stderr missed them. The shell stub already wrote bare lines, so both stubs now emit identical bytes.
+- `install.sh` installs identically piped or from file: the tail runs as a function so piped delivery is fully read before the stdin drain runs. Piped runs previously exited 0 with nothing installed when the drain swallowed unread script.
+- The Windows default install destination is `%LOCALAPPDATA%\Microsoft\WindowsApps` from either installer, already on PATH: installs work immediately with no shell restart or path editing. The shell stub previously defaulted to `$HOME/.local/bin` under Git Bash, where the msys HOME shadows the real profile. Set `INSTALL_DIR` to choose another destination.
+
+### Fixed
+
+- The `oxdock_embed!` README example stages assets under manifest-relative `prebuilt/` instead of `target/prebuilt`: `target/` is gitignored and excluded from `cargo package`, so published crates must vendor their staging tree and hash for downstream builds to reuse it without re-execution.
+- `oxdock_embed!` and `oxdock_prepare!` accept `name`, `script`, and `out_dir` in any order, each exactly once with duplicates and unknown labels rejected: the README leads with `out_dir` ahead of the script block, which the previous fixed-order parser rejected.
+- `LET $var: TYPE = RUN [...]` exec form lowers through the run_exec grammar arm instead of degrading to shell text: LET-capture previously accepted only shell form.
+
 ## [0.24.2-alpha] - 2026-10-09
 
 ### Added

@@ -1,0 +1,25 @@
+### Standalone CLI installation
+
+<!-- Piped installers (`install.sh | bash`, `install.ps1 | iex`)
+     stay out of the docs until a release proves them: they fetch
+     unreleased code, so advertising them here would ask
+     installer-grade trust for unproven bytes. Restore the stanzas
+     from git history once the release smoke is green. -->
+
+**Build from source via Cargo** *(default features only)*:
+
+```sh
+cargo install oxdock@{{ env:CRATE_VERSION }}
+```
+
+For a full-feature build:
+
+```sh
+cargo install oxdock@{{ env:CRATE_VERSION }} --all-features
+```
+
+### Add to Rust project
+
+```sh
+cargo add oxdock@{{ env:CRATE_VERSION }}
+```

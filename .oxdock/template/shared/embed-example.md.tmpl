@@ -6,43 +6,48 @@ Embed build-time dependencies from any language: scripts run inline during `rust
 use oxdock_macros::oxdock_embed;
 
 oxdock_embed! {
-    // Embedded resources are mapped to `SiteAssets::get(resource)`
+    // Generated struct for resource lookups via `SiteAssets::get(path)`.
     name: SiteAssets,
+
+    // Manifest-relative staging directory. Run `cargo build` locally to generate
+    // the files and `.oxdock_hash` fingerprint, then commit `prebuilt/` to git.
+    // `cargo publish` vendors these files so downstream crates embed them
+    // directly without re-running the script on read-only registry paths.
+    // Set OXDOCK_EMBED_FORCE_REBUILD=1 to force re-execution.
+    out_dir: "prebuilt",
+
     script: {
-        // Scripts run in an ephemeral snapshot workspace: every command
-        // sees an isolated temp dir, so the local checkout stays untouched
-        // unless the script opts in with WORKSPACE LOCAL. Finished assets
-        // are staged to out_dir below, where rustc scoops them up with
-        // include_bytes!.
+        // Executes in an isolated temporary workspace (`WORKSPACE SNAPSHOT`),
+        // keeping the source tree clean unless `WORKSPACE LOCAL` is requested.
         ENV PROJECT=OxDock
         MKDIR dist
 
-        // Provenance comes from the shell: only the matching gate runs,
-        // so this stays green on every OS in CI.
-        [family:unix] LET $os: STRING = RUN uname -srm
-        [family:windows] LET $os: STRING = RUN ver
-        LET $toolchain: STRING = RUN cargo --version
+        // Exec form spawns cargo portably without a shell. Asserting the version string
+        // in memory verifies the toolchain without baking volatile output into staged assets.
+        LET $cargo: STRING = RUN ["cargo", "--version"]
+        ASSERT_CONTAINS $cargo "cargo"
 
-        WRITE dist/os.txt "\{{ $os }}"
-        WRITE dist/toolchain.txt "\{{ $toolchain }}"
-        WRITE dist/manifest.txt "os toolchain"
-    },
-    // Generated assets land under target/, keeping the source tree clean
-    out_dir: "target/prebuilt",
+        // Assets stage under subdirectories relative to `out_dir` (e.g., prebuilt/dist/os.txt)
+        WRITE dist/hello.txt "hello from \{{ env:PROJECT }}"
+        WRITE dist/project.txt "the-project"
+        WRITE dist/manifest.txt "the-manifest"
+    }
 }
 
 fn main() {
     // Verify we can read the resources we just created
+    let hello = SiteAssets::get("dist/hello.txt").expect("hello must be embedded");
+    assert_eq!(hello.data.as_ref(), b"hello from OxDock");
+
+    let project = SiteAssets::get("dist/project.txt").expect("project must be embedded");
+    assert_eq!(project.data.as_ref(), b"the-project");
+
     let manifest = SiteAssets::get("dist/manifest.txt").expect("manifest must be embedded");
-    assert_eq!(manifest.data.as_ref(), b"os toolchain");
-
-    let toolchain = SiteAssets::get("dist/toolchain.txt").expect("toolchain must be embedded");
-    assert!(toolchain.data.starts_with(b"cargo "));
-
-    let os = SiteAssets::get("dist/os.txt").expect("os must be embedded");
-    assert!(!os.data.is_empty());
+    assert_eq!(manifest.data.as_ref(), b"the-manifest");
 }
 ```
+
+> You can find an example of this workspace dogfooding this very design in its own CLI binary by searching for: [usage-prebuilt](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+usage-prebuilt&type=code).
 
 For each artifact the macro emits a constant backed by `include_bytes!`, which bakes the file bytes into read-only binary data during compilation. At runtime `get()` scans a static table and returns a borrowed slice, so there are no file reads and no heap allocation. The support types only need `alloc::borrow::Cow` and core iterators, which is why it works in `no_std`.
 

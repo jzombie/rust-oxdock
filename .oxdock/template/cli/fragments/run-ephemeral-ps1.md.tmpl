@@ -1,0 +1,1 @@
+"IMPORT [STD]`nECHO '{{ $docs_ctx.ephemeral_payload }}'" | & ([scriptblock]::Create(({{ $docs_ctx.ephemeral_stub_src_ps1 }})))
