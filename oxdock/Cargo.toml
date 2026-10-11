@@ -1,6 +1,6 @@
 [package]
 name = "oxdock"
-description = "Dockerfile inspired build DSL. Native. Embed scripts at compile time in Rust, or run the same scripts as standalone CLI pipelines."
+description = "Dockerfile-inspired build DSL. Native. Embed scripts at compile time in Rust, or run the same scripts as standalone CLI pipelines."
 categories = ["command-line-utilities", "development-tools"]
 keywords = ["oxdock", "embed", "dsl", "build", "compile-time"]
 authors.workspace = true
