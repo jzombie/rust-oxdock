@@ -21,7 +21,7 @@ LET $dir: STRING = "{{ env:OXDOCK_ENGINE_DIR }}"
 LET $src: STRING = "{{ env:OXDOCK_ENGINE_SRC }}"
 LET $dst: STRING = "{{ env:OXDOCK_ENGINE_DST }}"
 IF $src != $dst {
-    COPY "{{ $dir }}/{{ $src }}" "{{ $dir }}/{{ $dst }}"
+    INSTALL "{{ $dir }}/{{ $src }}" "{{ $dir }}/{{ $dst }}"
     REMOVE "{{ $dir }}/{{ $src }}"
 }
 # The installed engine reports itself: a mode-less copy or a failed

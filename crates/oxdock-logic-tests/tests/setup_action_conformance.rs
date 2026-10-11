@@ -68,7 +68,7 @@ fn post_install_script_pins_rename_publish_smoke() -> Result<()> {
     for marker in [
         "INHERIT_ENV [OXDOCK_ENGINE_DIR, OXDOCK_ENGINE_SRC, OXDOCK_ENGINE_DST, GITHUB_PATH]",
         "WORKSPACE SYSTEM",
-        "COPY \"{{ $dir }}/{{ $src }}\" \"{{ $dir }}/{{ $dst }}\"",
+        "INSTALL \"{{ $dir }}/{{ $src }}\" \"{{ $dir }}/{{ $dst }}\"",
         "REMOVE \"{{ $dir }}/{{ $src }}\"",
         "PATH_TYPE(",
         "\"--version\"",
@@ -78,6 +78,12 @@ fn post_install_script_pins_rename_publish_smoke() -> Result<()> {
         assert!(
             text.contains(marker),
             "post-install.oxfile must contain {marker:?}"
+        );
+    }
+    for retired in ["COPY \"{{ $dir }}/{{ $src }}\""] {
+        assert!(
+            !text.contains(retired),
+            "post-install.oxfile must not contain {retired:?}"
         );
     }
     Ok(())
