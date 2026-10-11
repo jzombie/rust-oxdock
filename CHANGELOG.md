@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [UNRELEASED]
+
+### Added
+
+- `INSTALL <source> <dest>` command (#205): atomically places an already-verified binary with executable modes. The `oxdock-fs` helper (`install_file_atomic`) ensures the parent dir first, stages as a temp file inside the dest dir, sets `0755` on Unix, then renames, so the final path never carries the wrong mode and interrupted transfers leave no truncated binary. Unix renames atomically (running images swap inode); Windows renames an existing dest aside first, since overwrite-copy fails on a running image. `install.oxfile` now places through `INSTALL` instead of `MKDIR` + `COPY`.
+- `PROMPT $var <message> [<default>]` command (#205): prints `{message} [{default}]: ` to stderr and reads one line from the terminal, binding `$var` with declare-or-mutate semantics. Empty input yields the default (or `""`); EOF aborts loudly; non-TTY stdin is never read (a default binds with a stderr note, no default bails). The installer stubs export `OXDOCK_INTERACTIVE=1` only with a console behind stdin (`[ -t 0 ]` on shell, `UserInteractive` without input redirection on PowerShell), and `install.oxfile` confirms the destination in that branch, looping until the path is a writable dir or a creatable absence.
+- `STD::PATH_WRITABLE($path)` function (#205): reports whether an ordinary file can be created at a path without creating anything. Empty strings are false; otherwise it walks to the nearest existing ancestor, requires a directory, and probes with a randomized file behind an RAII drop-guard, so installer retry loops cannot litter. The installer validity loop composes it with `PATH_TYPE`.
+- `REMOVE [--recursive] <path>` command (#205): removes a file, symlink, or empty dir; directory trees require spelling out `--recursive`. Missing paths and non-empty dirs without the flag bail naming the path. Symlink removal unlinks the reference itself, never the target (guard canonicalization routes through the final link, so the lexical path is probed first). Removing the working directory (or any of its ancestors), the workspace root, or the effective root (`/` under `WORKSPACE SYSTEM`) fails closed with `cannot remove working directory or workspace root`; both sides compare canonicalized so symlinked prefixes cannot defeat the check.
+
 ## [0.24.3-alpha] - 2026-10-10
 
 ### Added
