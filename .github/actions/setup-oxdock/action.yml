@@ -44,7 +44,7 @@ runs:
         $repo = 'jzombie/rust-oxdock'
         $enginedir = Join-Path $env:RUNNER_TEMP 'oxdock-engine'
         $scratch = Join-Path $env:RUNNER_TEMP 'oxdock-installer'
-        New-Item -ItemType Directory -Force -Path $enginedir, $scratch | Out-Null
+        New-Item -ItemType Directory -Force -Path $scratch | Out-Null
         $version = '${{ inputs.version }}'
         if ($version -eq 'latest') {
           # Same list endpoint the stub queries: `/releases/latest`
