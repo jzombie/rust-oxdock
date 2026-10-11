@@ -1,35 +1,27 @@
-# Post-install for the setup-oxdock action: rename the bootstrap engine
-# when asked and publish its directory on GITHUB_PATH. Runs under the
-# freshly installed engine; the shell prelude bridges ENGINE_DIR (install
-# directory), ENGINE_SRC (installed filename), ENGINE_DST (wanted
-# filename), and GITHUB_PATH. Filenames arrive with the platform
-# extension computed by the caller, so this script never branches on OS.
-# A renamed bootstrap frees the bare `oxdock` name for a binary under
-# test; the default name skips the rename and only publishes the path.
+# Post-install for the setup-oxdock action: smoke-check the installed
+# engine and publish its directory on GITHUB_PATH. Runs under the fresh
+# engine; the shell prelude bridges ENGINE_DIR (install directory),
+# ENGINE_BIN (installed filename, rename already applied), and
+# GITHUB_PATH. The rename itself stays in the shell: the engine cannot
+# rename the file it runs from on Windows, while the installer that
+# placed it has already exited.
 
 IMPORT [STD]
 
-INHERIT_ENV [OXDOCK_ENGINE_DIR, OXDOCK_ENGINE_SRC, OXDOCK_ENGINE_DST, GITHUB_PATH]
+INHERIT_ENV [OXDOCK_ENGINE_DIR, OXDOCK_ENGINE_BIN, GITHUB_PATH]
 
 # Full filesystem access: the engine directory and the PATH file live
 # outside any workspace.
 WORKSPACE SYSTEM
 
-# Same name in and out means no rename: the guard below skips a
-# self-move and falls straight through to the smoke check.
 LET $dir: STRING = "{{ env:OXDOCK_ENGINE_DIR }}"
-LET $src: STRING = "{{ env:OXDOCK_ENGINE_SRC }}"
-LET $dst: STRING = "{{ env:OXDOCK_ENGINE_DST }}"
-IF $src != $dst {
-    INSTALL "{{ $dir }}/{{ $src }}" "{{ $dir }}/{{ $dst }}"
-    REMOVE "{{ $dir }}/{{ $src }}"
-}
-# The installed engine reports itself: a mode-less copy or a failed
-# rename surfaces here instead of haunting later steps.
-LET $kind: STRING = PATH_TYPE("{{ $dir }}/{{ $dst }}")
+LET $bin: STRING = "{{ env:OXDOCK_ENGINE_BIN }}"
+# The installed engine reports itself: a broken placement surfaces here
+# instead of haunting later steps.
+LET $kind: STRING = PATH_TYPE("{{ $dir }}/{{ $bin }}")
 ASSERT_EQ $kind "file"
 LET $v: PIPE
-WITH_IO [stdout=$v] RUN ["{{ $dir }}/{{ $dst }}", "--version"]
+WITH_IO [stdout=$v] RUN ["{{ $dir }}/{{ $bin }}", "--version"]
 WITH_IO [stdin=$v] READ_LINE $reported
 ASSERT_CONTAINS $reported "oxdock "
 APPEND "{{ env:GITHUB_PATH }}" "{{ $dir }}\n"

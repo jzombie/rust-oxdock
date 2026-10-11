@@ -1,12 +1,14 @@
 #![allow(clippy::disallowed_types, clippy::disallowed_methods)]
 
 //! Conformance for the setup-oxdock post-install script: the DSL that
-//! renames the bootstrap engine and publishes it on `GITHUB_PATH` after
-//! every install. Parse and marker pins run everywhere; live execution
-//! runs on Unix only, where a shell-script fixture can stand in for the
-//! engine (Windows cannot execute a fixture binary without shipping one,
-//! so Windows coverage is the smoke matrix itself, which runs this
-//! script on every platform per PR).
+//! smoke-checks the installed engine and publishes it on `GITHUB_PATH`
+//! after every install. The shell renames before invoking (the engine
+//! cannot rename the file it runs from on Windows), so this script only
+//! verifies and publishes. Parse and marker pins run everywhere; live
+//! execution runs on Unix only, where a shell-script fixture can stand
+//! in for the engine (Windows cannot execute a fixture binary without
+//! shipping one, so Windows coverage is the smoke matrix itself, which
+//! runs this script on every platform per PR).
 
 use anyhow::{Context, Result};
 #[cfg(unix)]
@@ -54,22 +56,20 @@ fn post_install_script_parses() -> Result<()> {
     Ok(())
 }
 
-/// The script stays a rename plus a publish plus a smoke check: the
-/// bridge contract (four env names), the system workspace for paths
-/// outside the checkout, the copy-then-unlink rename, and the
-/// `--version` gate before the `GITHUB_PATH` append.
+/// The script stays a smoke check plus a publish: the bridge contract
+/// (three env names), the system workspace for paths outside the
+/// checkout, the file-kind gate, the `--version` run, and the
+/// `GITHUB_PATH` append. Retired names must not linger.
 #[test]
 #[cfg_attr(
     miri,
     ignore = "reads post-install.oxfile from the repository checkout layout"
 )]
-fn post_install_script_pins_rename_publish_smoke() -> Result<()> {
+fn post_install_script_pins_smoke_publish() -> Result<()> {
     let text = load_post_install_script()?;
     for marker in [
-        "INHERIT_ENV [OXDOCK_ENGINE_DIR, OXDOCK_ENGINE_SRC, OXDOCK_ENGINE_DST, GITHUB_PATH]",
+        "INHERIT_ENV [OXDOCK_ENGINE_DIR, OXDOCK_ENGINE_BIN, GITHUB_PATH]",
         "WORKSPACE SYSTEM",
-        "INSTALL \"{{ $dir }}/{{ $src }}\" \"{{ $dir }}/{{ $dst }}\"",
-        "REMOVE \"{{ $dir }}/{{ $src }}\"",
         "PATH_TYPE(",
         "\"--version\"",
         "ASSERT_CONTAINS $reported \"oxdock \"",
@@ -80,10 +80,12 @@ fn post_install_script_pins_rename_publish_smoke() -> Result<()> {
             "post-install.oxfile must contain {marker:?}"
         );
     }
-    assert!(
-        !text.contains("COPY \"{{ $dir }}/{{ $src }}\""),
-        "post-install.oxfile must not regress to COPY for the rename"
-    );
+    for retired in ["OXDOCK_ENGINE_SRC", "OXDOCK_ENGINE_DST"] {
+        assert!(
+            !text.contains(retired),
+            "post-install.oxfile must not contain {retired:?}"
+        );
+    }
     Ok(())
 }
 
@@ -109,7 +111,7 @@ fn write_fixture_engine(path: &GuardedPath) -> Result<()> {
 }
 
 #[cfg(unix)]
-fn post_install_harness(src: &str, dst: &str) -> Result<PostInstallRun> {
+fn post_install_harness(bin: &str) -> Result<PostInstallRun> {
     let text = load_post_install_script()?;
     let steps = parse_post_install_script(&text)?;
     let temp = GuardedPath::tempdir().context("tempdir")?;
@@ -119,14 +121,13 @@ fn post_install_harness(src: &str, dst: &str) -> Result<PostInstallRun> {
     setup.create_dir_all(&engine_dir)?;
     let gh_path = root.join("github_path")?;
     setup.write_file(&gh_path, b"")?;
-    write_fixture_engine(&engine_dir.join(src)?)?;
+    write_fixture_engine(&engine_dir.join(bin)?)?;
     let mut io = ExecIo::new();
     io.insert_inherit_env(
         "OXDOCK_ENGINE_DIR",
         engine_dir.as_path().display().to_string(),
     );
-    io.insert_inherit_env("OXDOCK_ENGINE_SRC", src);
-    io.insert_inherit_env("OXDOCK_ENGINE_DST", dst);
+    io.insert_inherit_env("OXDOCK_ENGINE_BIN", bin);
     io.insert_inherit_env("GITHUB_PATH", gh_path.as_path().display().to_string());
     Ok(PostInstallRun {
         _temp: temp,
@@ -138,7 +139,6 @@ fn post_install_harness(src: &str, dst: &str) -> Result<PostInstallRun> {
     })
 }
 
-#[cfg(unix)]
 #[cfg(unix)]
 fn execute(run: &PostInstallRun) -> Result<()> {
     let fs: Box<dyn oxdock_fs::WorkspaceFs> = Box::new(PathResolver::new_guarded(
@@ -156,46 +156,24 @@ fn execute(run: &PostInstallRun) -> Result<()> {
     Ok(())
 }
 
-/// Renamed bootstrap installs end to end: the source name unlinks, the
-/// destination runs and reports itself (proving the copy kept its mode),
-/// and the engine directory lands on the `GITHUB_PATH` file.
+/// Installed engine verifies end to end: the file gates as a file, runs
+/// and reports itself, and its directory lands on the `GITHUB_PATH`
+/// file. A fixture that stops reporting fails the smoke gate instead.
 #[test]
 #[cfg(unix)]
 #[cfg_attr(
     miri,
     ignore = "spawns a real OS process, which dies under Miri isolation"
 )]
-fn post_install_renames_smokes_and_publishes() -> Result<()> {
-    let run = post_install_harness("oxdock-src", "oxdock-engine-test")?;
+fn post_install_smokes_and_publishes() -> Result<()> {
+    let run = post_install_harness("oxdock-engine-test")?;
     execute(&run)?;
     assert!(
-        !run.engine_dir.join("oxdock-src")?.as_path().exists(),
-        "renamed source must unlink"
-    );
-    let dst = run.engine_dir.join("oxdock-engine-test")?;
-    assert!(dst.as_path().exists(), "renamed engine must exist");
-    let published = std::fs::read_to_string(run.gh_path.as_path())?;
-    assert!(
-        published.contains(&run.engine_dir.as_path().display().to_string()),
-        "engine directory must land on GITHUB_PATH, got: {published:?}"
-    );
-    Ok(())
-}
-
-/// Default name skips the rename: the installed file stays put, still
-/// smokes, still publishes. The guard must never self-move.
-#[test]
-#[cfg(unix)]
-#[cfg_attr(
-    miri,
-    ignore = "spawns a real OS process, which dies under Miri isolation"
-)]
-fn post_install_default_name_skips_rename() -> Result<()> {
-    let run = post_install_harness("oxdock", "oxdock")?;
-    execute(&run)?;
-    assert!(
-        run.engine_dir.join("oxdock")?.as_path().exists(),
-        "default-named engine must stay in place"
+        run.engine_dir
+            .join("oxdock-engine-test")?
+            .as_path()
+            .exists(),
+        "installed engine must exist"
     );
     let published = std::fs::read_to_string(run.gh_path.as_path())?;
     assert!(

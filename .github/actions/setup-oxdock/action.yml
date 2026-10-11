@@ -46,6 +46,12 @@ runs:
         $env:VERSION = $v; $env:INSTALL_DIR = $dir
         if ($IsWindows) { & (Join-Path $tmp $stub) } else { bash (Join-Path $tmp $stub) }
 
-        # The fresh engine runs the rest as DSL: rename, PATH publish, --version smoke check.
-        $env:OXDOCK_ENGINE_DIR = $dir; $env:OXDOCK_ENGINE_SRC = "oxdock$ext"; $env:OXDOCK_ENGINE_DST = "${{ inputs.binary-name }}$ext"
-        & (Join-Path $dir "oxdock$ext") (Join-Path $env:GITHUB_ACTION_PATH 'post-install.oxfile')
+        # Rename before the DSL run, never inside it: the engine cannot
+        # rename the file it runs from on Windows, while the installer
+        # that placed it has already exited so nothing holds it here.
+        $execName = "oxdock$ext"
+        $wantName = "${{ inputs.binary-name }}$ext"
+        if ($wantName -ne $execName) { Move-Item -Path (Join-Path $dir $execName) -Destination (Join-Path $dir $wantName) }
+        $env:OXDOCK_ENGINE_DIR = $dir
+        $env:OXDOCK_ENGINE_BIN = $wantName
+        & (Join-Path $dir $wantName) (Join-Path $env:GITHUB_ACTION_PATH 'post-install.oxfile')
