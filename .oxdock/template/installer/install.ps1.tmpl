@@ -82,6 +82,12 @@ if (Test-CachedAsset) {
     Remove-Item -Recurse -Force $tmp
   }
 }
+# Provenance for smoke forensics: which oxfile payload executes below
+# and its digest. A version-skewed payload names its source here
+# instead of surfacing as a bare parse error downstream.
+$oxfileSrc = if ($env:OXDOCK_OXFILE_URL) { $env:OXDOCK_OXFILE_URL } else { "release $Version" }
+$oxfileDigest = (Get-FileHash (Join-Path $VDir '{{ $docs_global.stub_name_oxfile }}') -Algorithm SHA256).Hash
+[Console]::Error.WriteLine("installer oxfile: $oxfileSrc $oxfileDigest")
 $Expected = ((Get-Content (Join-Path $VDir '{{ $docs_global.stub_name_checksums }}')) | Where-Object { $_ -match "$Asset" } | Select-Object -First 1) -split '\s+' | Select-Object -First 1
 # The installer runs from the cache, never the network.
 $tmp = Join-Path ([IO.Path]::GetTempPath()) "oxdock-install-$([Guid]::NewGuid())"

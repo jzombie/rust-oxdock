@@ -110,6 +110,16 @@ else
   trap - EXIT
   rm -rf "$tmp"
 fi
+# Provenance for smoke forensics: which oxfile payload executes below
+# and its digest. A version-skewed payload names its source here
+# instead of surfacing as a bare parse error downstream.
+oxfile_src="${OXDOCK_OXFILE_URL:-release $VERSION}"
+if command -v sha256sum >/dev/null 2>&1; then
+  oxfile_digest=$(sha256sum "$VDIR/install.oxfile" | cut -d' ' -f1)
+else
+  oxfile_digest=$(shasum -a 256 "$VDIR/install.oxfile" | cut -d' ' -f1)
+fi
+echo "installer oxfile: $oxfile_src $oxfile_digest" >&2
 EXPECTED=$(grep "$ASSET\$" "$VDIR/SHA256SUMS" | cut -d' ' -f1)
 # The installer runs from the cache, never the network: population
 # above stored the release's own logic beside its bytes.
