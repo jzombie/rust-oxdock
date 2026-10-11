@@ -2368,6 +2368,17 @@ fn grouped_numbers_survive_arithmetic_and_conversions() {
         LET $scaled: INT = 2_000 * 3_000
         ASSERT_EQ $scaled 6_000_000
 
+        # Grouping rides fractions through arithmetic too. Negative
+        # expectations bind first, like integers above.
+        LET $f: FLOAT = 1_024.768 + 1_000.232
+        ASSERT_EQ $f 2025.0
+        LET $nf: FLOAT = 0.0 - 1_024.5
+        LET $enf: FLOAT = 0.0 - 1024.5
+        ASSERT_EQ $nf $enf
+        LET $nu: FLOAT = -1_024.25
+        LET $enu: FLOAT = 0.0 - 1024.25
+        ASSERT_EQ $nu $enu
+
         # Parsed units join arithmetic at full precision.
         LET $cap: INT = PARSE_BYTE_COUNT("1MB") + 500_000
         ASSERT_EQ $cap 1_500_000
