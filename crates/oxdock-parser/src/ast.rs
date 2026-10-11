@@ -177,7 +177,7 @@ impl Command {
             Command::Mkdir => "MKDIR <path>",
             Command::Install => "INSTALL <source> <dest>",
             Command::Archive => "ARCHIVE [--raw] <src> <dst>",
-            Command::Unarchive => "UNARCHIVE <src> <dst>",
+            Command::Unarchive => "UNARCHIVE <src> <dst> [--max-bytes <bytes>]",
             Command::Ls => "LS [<path>]",
             Command::Cwd => "CWD",
             Command::Read => "READ [<path>]",

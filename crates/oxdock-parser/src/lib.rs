@@ -214,14 +214,28 @@ pub mod test_lower_mock {
                 Ok(StepKind::Archive { src, dst, raw })
             }
             "UNARCHIVE" => {
-                let mut it = args.into_iter();
+                let mut max_bytes = None;
+                let mut positional = Vec::new();
+                let mut iter = args.into_iter().peekable();
+                while let Some(arg) = iter.next() {
+                    if arg.as_str() == "--max-bytes" {
+                        max_bytes = iter.next();
+                    } else {
+                        positional.push(arg);
+                    }
+                }
+                let mut it = positional.into_iter();
                 let src = it
                     .next()
                     .ok_or_else(|| validation("UNARCHIVE", "UNARCHIVE requires an archive"))?;
                 let dst = it
                     .next()
                     .ok_or_else(|| validation("UNARCHIVE", "UNARCHIVE requires a destination"))?;
-                Ok(StepKind::Unarchive { src, dst })
+                Ok(StepKind::Unarchive {
+                    src,
+                    dst,
+                    max_bytes,
+                })
             }
             _ => Err(ParseError::unknown_command(
                 name,

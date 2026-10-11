@@ -307,6 +307,10 @@ impl<P: ProcessManager> FunctionRegistry<P> {
         vec![
             Int::registration(),
             Float::registration(),
+            FormatByteCount::registration(),
+            ParseByteCount::registration(),
+            FormatDuration::registration(),
+            ParseDuration::registration(),
             Types::registration(),
             TypeDescribe::registration(),
             Glob::registration(),
@@ -655,6 +659,125 @@ fn float(
     val: Value,
 ) -> Result<Value> {
     super::args::float_from_value(val)
+}
+
+/// Format a byte count canonically (`500B`, `10KB`, `2MB`, `1GB`,
+/// binary `10KIB` and friends): the inverse of `PARSE_BYTE_COUNT`, so
+/// formatted values reparse exactly. Negative inputs fail.
+///
+/// ```oxdock
+/// # Byte counts render in the largest exact unit.
+/// IMPORT [STD]
+/// LET $pretty: STRING = FORMAT_BYTE_COUNT(1048576)
+/// ASSERT_EQ $pretty "1MiB"
+///
+/// # The pair round-trips through the parser.
+/// LET $back: INT = PARSE_BYTE_COUNT($pretty)
+/// ASSERT_EQ $back 1048576
+/// ```
+///
+#[oxdock_func(pure, returns = TypeTag::String)]
+fn format_byte_count(
+    /// Byte count to format; negatives fail.
+    bytes: i64,
+) -> Result<Value> {
+    if bytes < 0 {
+        return Err(anyhow::anyhow!(
+            "FORMAT_BYTE_COUNT needs a non-negative byte count, got {bytes}"
+        ));
+    }
+    Ok(Value::string(oxdock_parser::command::format_byte_count(
+        bytes as u64,
+    )))
+}
+
+/// Parse a byte-count token to `INT` bytes.
+///
+/// Bare digits are bytes; suffixes `B`/`KB`/`MB`/`GB`/`TB` scale
+/// decimal and `KIB`/`MIB`/`GIB`/`TIB` binary, in any case. Pairs
+/// with `FORMAT_BYTE_COUNT` for the round trip.
+///
+/// ```oxdock
+/// # Units parse case-insensitively; bare digits are bytes.
+/// IMPORT [STD]
+/// LET $bytes: INT = PARSE_BYTE_COUNT("1Gb")
+/// ASSERT_EQ $bytes 1000000000
+///
+/// # Binary suffixes scale by powers of two.
+/// LET $mebi: INT = PARSE_BYTE_COUNT("2mib")
+/// ASSERT_EQ $mebi 2097152
+///
+/// # Digit runs group Rust-literal style.
+/// LET $grouped: INT = PARSE_BYTE_COUNT("1_000_000")
+/// ASSERT_EQ $grouped 1000000
+/// ```
+///
+#[oxdock_func(pure, returns = TypeTag::Int)]
+fn parse_byte_count(
+    /// Byte-count token to parse.
+    text: String,
+) -> Result<Value> {
+    let n = oxdock_parser::command::parse_byte_count(&text)?;
+    let n = i64::try_from(n)
+        .map_err(|_| anyhow::anyhow!("PARSE_BYTE_COUNT out of INT range: {text:?}"))?;
+    Ok(Value::int(n))
+}
+
+/// Format millisecond durations canonically (`500ms`, `10s`, `2m`,
+/// `1h`): the inverse of `PARSE_DURATION`, so formatted values
+/// reparse exactly. Negative inputs fail.
+///
+/// ```oxdock
+/// # Durations render in the largest exact unit.
+/// IMPORT [STD]
+/// LET $pretty: STRING = FORMAT_DURATION(90000)
+/// ASSERT_EQ $pretty "90s"
+///
+/// # The pair round-trips through the parser.
+/// LET $back: INT = PARSE_DURATION($pretty)
+/// ASSERT_EQ $back 90000
+/// ```
+///
+#[oxdock_func(pure, returns = TypeTag::String)]
+fn format_duration(
+    /// Milliseconds to format; negatives fail.
+    millis: i64,
+) -> Result<Value> {
+    if millis < 0 {
+        return Err(anyhow::anyhow!(
+            "FORMAT_DURATION needs non-negative milliseconds, got {millis}"
+        ));
+    }
+    Ok(Value::string(oxdock_parser::command::format_duration(
+        &std::time::Duration::from_millis(millis as u64),
+    )))
+}
+
+/// Parse a duration token to `INT` milliseconds.
+///
+/// Suffixes `ms`/`s`/`m`/`h`; a bare number means seconds. Pairs with
+/// `FORMAT_DURATION` for the round trip.
+///
+/// ```oxdock
+/// # A bare number means seconds, like TIMEOUT.
+/// IMPORT [STD]
+/// LET $ms: INT = PARSE_DURATION("2m")
+/// ASSERT_EQ $ms 120000
+///
+/// # Milliseconds stay exact.
+/// LET $exact: INT = PARSE_DURATION("1500ms")
+/// ASSERT_EQ $exact 1500
+/// ```
+///
+#[oxdock_func(pure, returns = TypeTag::Int)]
+fn parse_duration(
+    /// Duration token to parse.
+    text: String,
+) -> Result<Value> {
+    let duration = oxdock_parser::command::parse_duration(&text)?;
+    let millis = i64::try_from(duration.as_millis())
+        .map_err(|_| anyhow::anyhow!("PARSE_DURATION out of INT range: {text:?}"))?;
+    Ok(Value::int(millis))
 }
 
 /// List workspace paths matching a glob pattern.

@@ -1748,11 +1748,17 @@ ASSERT_EQ $body "tool-payload"
 
 Unpack a tarball into a directory.
 
-**Syntax:** `UNARCHIVE <src> <dst>`
+**Syntax:** `UNARCHIVE <src> <dst> [--max-bytes <bytes>]`
 
 Unpacks a tarball under the destination directory, creating
 it first. Gzip and raw (`ARCHIVE --raw`) tarballs
 self-identify by magic bytes, so no flag is needed.
+
+Member bytes meter against a 1 GiB default expansion cap
+across the whole archive: a decompression bomb trips it
+instead of filling the disk, and `--max-bytes` moves the
+ceiling either way (plain integer bytes). The tripped member
+stays truncated on disk while the step fails loudly.
 
 Symlink and special members refuse naming the entry, and
 absolute or escaping paths fail closed before any byte
@@ -1769,6 +1775,12 @@ modes (confer executability with `INSTALL` there).
 | `src` | [`PATH`](#value-type-path) | yes | Archive file to unpack |
 | `dst` | [`PATH`](#value-type-path) | yes | Directory to unpack under |
 
+**Flags:**
+
+| Flag | Type | Description |
+| --- | --- | --- |
+| `--max-bytes` | `STRING` | Cap total unpacked member bytes: bare digits are bytes (`1_000_000` grouping allowed), suffixes B/KB/MB/GB/TB (decimal) and KIB/MIB/GIB/TIB (binary), any case (defaults to 1 GiB) |
+
 **Examples:**
 
 **Example: unarchive**
@@ -1780,6 +1792,18 @@ ARCHIVE pack pack.tar.gz
 UNARCHIVE pack.tar.gz unpacked
 
 LET $body: STRING = READ unpacked/note.txt
+ASSERT_EQ $body "packed-note"
+```
+
+**Example: unarchive with a lower cap**
+
+```oxdock
+# Small payloads clear even a tight ceiling.
+WRITE pack/note.txt packed-note
+ARCHIVE pack pack.tar.gz
+UNARCHIVE pack.tar.gz capped --max-bytes 100KB
+
+LET $body: STRING = READ capped/note.txt
 ASSERT_EQ $body "packed-note"
 ```
 

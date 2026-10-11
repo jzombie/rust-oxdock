@@ -595,10 +595,18 @@ impl StepKind {
             | StepKind::Archive {
                 src: from, dst: to, ..
             }
-            | StepKind::Unarchive { src: from, dst: to }
             | StepKind::Install { from, to } => {
                 walk_arg(from, f);
                 walk_arg(to, f);
+            }
+            StepKind::Unarchive {
+                src,
+                dst,
+                max_bytes,
+            } => {
+                walk_arg(src, f);
+                walk_arg(dst, f);
+                walk_opt(max_bytes, f);
             }
             StepKind::CopyGit { rev, from, to, .. } => {
                 walk_arg(rev, f);
@@ -1374,13 +1382,19 @@ declare_commands! {
 
     Unarchive => [
         name: "UNARCHIVE",
-        variant: Unarchive { src: Arg, dst: Arg },
-        syntax: "UNARCHIVE <src> <dst>",
+        variant: Unarchive { src: Arg, dst: Arg, max_bytes: Option<Arg> },
+        syntax: "UNARCHIVE <src> <dst> [--max-bytes <bytes>]",
         summary: "Unpack a tarball into a directory.",
         description: indoc! {r#"
             Unpacks a tarball under the destination directory, creating
             it first. Gzip and raw (`ARCHIVE --raw`) tarballs
             self-identify by magic bytes, so no flag is needed.
+
+            Member bytes meter against a 1 GiB default expansion cap
+            across the whole archive: a decompression bomb trips it
+            instead of filling the disk, and `--max-bytes` moves the
+            ceiling either way (plain integer bytes). The tripped member
+            stays truncated on disk while the step fails loudly.
 
             Symlink and special members refuse naming the entry, and
             absolute or escaping paths fail closed before any byte
@@ -1393,7 +1407,7 @@ declare_commands! {
             ArgSpec { name: "src", arg_type: ArgType::Path, description: "Archive file to unpack", io: IoDirection::Read, index: 0, required: true, fallback_stream: None },
             ArgSpec { name: "dst", arg_type: ArgType::Path, description: "Directory to unpack under", io: IoDirection::Write, index: 1, required: true, fallback_stream: None },
         ],
-        flags: &[],
+        flags: &[ FlagSpec { name: "max_bytes", long: "--max-bytes", value_type: FlagValueType::String, required: false, description: "Cap total unpacked member bytes: bare digits are bytes (`1_000_000` grouping allowed), suffixes B/KB/MB/GB/TB (decimal) and KIB/MIB/GIB/TIB (binary), any case (defaults to 1 GiB)" } ],
         default_output: None,
         examples: &[ Example { name: "unarchive", fence_meta: None, code: indoc! {r#"
             # Pack a note, then restore it under a fresh destination.
@@ -1403,12 +1417,36 @@ declare_commands! {
 
             LET $body: STRING = READ unpacked/note.txt
             ASSERT_EQ $body "packed-note"
+        "#}         }, Example { name: "unarchive with a lower cap", fence_meta: None, code: indoc! {r#"
+            # Small payloads clear even a tight ceiling.
+            WRITE pack/note.txt packed-note
+            ARCHIVE pack pack.tar.gz
+            UNARCHIVE pack.tar.gz capped --max-bytes 100KB
+
+            LET $body: STRING = READ capped/note.txt
+            ASSERT_EQ $body "packed-note"
         "#} } ],
-        lower: |_flags, args| {
+        lower: |flags, args| {
             let mut it = args.into_iter();
             let src = it.next().ok_or_else(|| ParseError::validation("UNARCHIVE", "UNARCHIVE requires an archive".to_string(), &SpanContext::line_only(0)))?;
             let dst = it.next().ok_or_else(|| ParseError::validation("UNARCHIVE", "UNARCHIVE requires a destination".to_string(), &SpanContext::line_only(0)))?;
-            Ok(StepKind::Unarchive { src, dst })
+            let max_bytes = flags
+                .into_iter()
+                .find_map(|(k, v)| (k == "max_bytes").then_some(v));
+            // Static literals fail fast at parse; templates and
+            // variables defer to the runtime resolver, which enforces
+            // the same shape on the resolved value.
+            if let Some(Arg::String(text, _)) = max_bytes.as_ref()
+                && !text.contains("{{")
+                && let Err(e) = crate::command::parse_byte_count(text)
+            {
+                return Err(ParseError::validation(
+                    "UNARCHIVE",
+                    format!("UNARCHIVE --max-bytes {e:#}"),
+                    &SpanContext::line_only(0),
+                ));
+            }
+            Ok(StepKind::Unarchive { src, dst, max_bytes })
         },
     ],
 
@@ -3270,12 +3308,22 @@ impl fmt::Display for StepKind {
                     )
                 }
             }
-            StepKind::Unarchive { src, dst } => write!(
-                f,
-                "UNARCHIVE {} {}",
-                fmt_value(src, quote_arg),
-                fmt_value(dst, quote_arg)
-            ),
+            StepKind::Unarchive {
+                src,
+                dst,
+                max_bytes,
+            } => {
+                write!(f, "UNARCHIVE")?;
+                if let Some(n) = max_bytes {
+                    write!(f, " --max-bytes {}", fmt_value(n, quote_arg))?;
+                }
+                write!(
+                    f,
+                    " {} {}",
+                    fmt_value(src, quote_arg),
+                    fmt_value(dst, quote_arg)
+                )
+            }
             StepKind::Ls(a) => {
                 write!(f, "LS")?;
                 if let Some(x) = a {
@@ -3563,7 +3611,7 @@ impl fmt::Display for StepKind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::command::{format_duration, parse_duration};
+    use crate::command::{format_byte_count, format_duration, parse_byte_count, parse_duration};
     use crate::parser::parse_script;
 
     fn parse_err(script: &str) -> String {
@@ -3693,9 +3741,14 @@ mod tests {
         let steps =
             parse_script("UNARCHIVE pack.tar.gz unpacked\n", lower_command).expect("parses");
         match &steps[0].kind {
-            StepKind::Unarchive { src, dst } => {
+            StepKind::Unarchive {
+                src,
+                dst,
+                max_bytes,
+            } => {
                 assert_eq!(src.as_str(), "pack.tar.gz");
                 assert_eq!(dst.as_str(), "unpacked");
+                assert_eq!(max_bytes, &None);
             }
             other => panic!("expected Unarchive, got {other:?}"),
         }
@@ -3704,10 +3757,33 @@ mod tests {
             "UNARCHIVE \"pack.tar.gz\" unpacked"
         );
 
+        let steps = parse_script(
+            "UNARCHIVE pack.tar.gz unpacked --max-bytes 100000\n",
+            lower_command,
+        )
+        .expect("parses");
+        match &steps[0].kind {
+            StepKind::Unarchive {
+                src,
+                dst,
+                max_bytes,
+            } => {
+                assert_eq!(src.as_str(), "pack.tar.gz");
+                assert_eq!(dst.as_str(), "unpacked");
+                assert_eq!(max_bytes.as_ref().map(|a| a.as_str()), Some("100000"));
+            }
+            other => panic!("expected Unarchive, got {other:?}"),
+        }
+        assert_eq!(
+            steps[0].kind.to_string(),
+            "UNARCHIVE --max-bytes \"100000\" \"pack.tar.gz\" unpacked"
+        );
+
         for script in [
             "ARCHIVE bundle bundle.tar.gz\n",
             "ARCHIVE --raw tool.bin tool.tar\n",
             "UNARCHIVE pack.tar.gz unpacked\n",
+            "UNARCHIVE pack.tar.gz unpacked --max-bytes 100000\n",
         ] {
             let first = parse_script(script, lower_command).expect("parses");
             let rendered = first[0].kind.to_string() + "\n";
@@ -4204,6 +4280,77 @@ mod tests {
         assert!(parse_duration("0s").is_err());
         assert!(parse_duration("0").is_err());
         assert!(parse_duration("-5s").is_err());
+    }
+
+    #[test]
+    fn parse_byte_count_units() {
+        assert_eq!(parse_byte_count("500").unwrap(), 500);
+        assert_eq!(parse_byte_count("500B").unwrap(), 500);
+        assert_eq!(parse_byte_count("10KB").unwrap(), 10_000);
+        assert_eq!(parse_byte_count("2MB").unwrap(), 2_000_000);
+        assert_eq!(parse_byte_count("1GB").unwrap(), 1_000_000_000);
+        assert_eq!(parse_byte_count("1TB").unwrap(), 1_000_000_000_000);
+        assert_eq!(parse_byte_count("10KIB").unwrap(), 10 * 1024);
+        assert_eq!(parse_byte_count("2MIB").unwrap(), 2 * 1024 * 1024);
+        assert_eq!(parse_byte_count("1GIB").unwrap(), 1024 * 1024 * 1024);
+        assert_eq!(parse_byte_count("1TIB").unwrap(), 1024 * 1024 * 1024 * 1024);
+        // Case-insensitive: `1gb`, `1GB`, and `1Gb` agree.
+        assert_eq!(parse_byte_count("1gb").unwrap(), 1_000_000_000);
+        assert_eq!(parse_byte_count("1Gb").unwrap(), 1_000_000_000);
+        assert_eq!(parse_byte_count("1gib").unwrap(), 1024 * 1024 * 1024);
+        assert_eq!(parse_byte_count("1Gib").unwrap(), 1024 * 1024 * 1024);
+        // Rust-literal grouping: separators ride between digits only.
+        assert_eq!(parse_byte_count("1_000").unwrap(), 1_000);
+        assert_eq!(
+            parse_byte_count("1_000_000_000_000").unwrap(),
+            1_000_000_000_000
+        );
+        assert_eq!(parse_byte_count("1_0KB").unwrap(), 10_000);
+        assert_eq!(parse_byte_count("1_0GiB").unwrap(), 10 * 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn parse_byte_count_rejects_garbage() {
+        for bad in [
+            "",
+            "banana",
+            "10x",
+            "1G",
+            "1K",
+            "1.5GB",
+            "-5",
+            "-5GB",
+            "0",
+            "0GB",
+            "1 GB",
+            "_100",
+            "100_",
+            "1__000",
+            "_",
+            "1_GB",
+            // Absurd magnitudes fail loudly instead of wrapping.
+            "1000000000000000000000000",
+            "1000000000TB",
+        ] {
+            assert!(parse_byte_count(bad).is_err(), "{bad:?} must fail");
+        }
+    }
+
+    #[test]
+    fn format_byte_count_round_trips() {
+        for text in [
+            "500", "500B", "10KB", "2MB", "1GB", "1TB", "10KIB", "2MIB", "1GIB", "1TIB", "1500B",
+        ] {
+            let parsed = parse_byte_count(text).unwrap();
+            let rendered = format_byte_count(parsed);
+            assert_eq!(
+                parse_byte_count(&rendered).unwrap(),
+                parsed,
+                "round-trip failed for {text}"
+            );
+        }
+        assert_eq!(format_byte_count(1024 * 1024 * 1024), "1GiB");
+        assert_eq!(format_byte_count(1_000_000_000), "1GB");
     }
 
     #[test]

@@ -2179,6 +2179,7 @@ fn archive_unarchive_round_trips_tree_gzip_and_raw() {
             step(StepKind::Unarchive {
                 src: archive.into(),
                 dst: dst.into(),
+                max_bytes: None,
             }),
         ];
         let temp = GuardedPath::tempdir().unwrap();
@@ -2222,6 +2223,7 @@ fn archive_single_file_packs_under_basename() {
         step(StepKind::Unarchive {
             src: "note.tar.gz".into(),
             dst: "out".into(),
+            max_bytes: None,
         }),
     ];
     let temp = GuardedPath::tempdir().unwrap();
@@ -2262,6 +2264,7 @@ fn archive_root_absolute_src_ignores_cwd_shadow() {
         step(StepKind::Unarchive {
             src: "packed.tar.gz".into(),
             dst: "out".into(),
+            max_bytes: None,
         }),
     ];
     let temp = GuardedPath::tempdir().unwrap();
@@ -2308,7 +2311,6 @@ fn archive_destination_cannot_be_source_or_inside_packed_tree() {
         b"do not eat me",
         "rejected self-archives must leave the source intact"
     );
-
     // A pre-existing destination inside the packed tree would be
     // truncated before its own append reads it back.
     let temp = GuardedPath::tempdir().unwrap();
@@ -2355,6 +2357,7 @@ fn archive_destination_cannot_be_source_or_inside_packed_tree() {
         step(StepKind::Unarchive {
             src: "bundle/fresh.tar.gz".into(),
             dst: "elsewhere".into(),
+            max_bytes: None,
         }),
     ];
     run_steps_with_manager(fs, &steps, MockProcessManager::default(), ExecIo::new())
@@ -2396,6 +2399,7 @@ fn unarchive_restores_read_only_dirs_after_children_land() {
     let steps = vec![step(StepKind::Unarchive {
         src: "locked.tar".into(),
         dst: "out".into(),
+        max_bytes: None,
     })];
     let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
     run_steps_with_manager(fs, &steps, MockProcessManager::default(), ExecIo::new())
@@ -2422,6 +2426,7 @@ fn unarchive_rejects_truncated_input() {
         let steps = vec![step(StepKind::Unarchive {
             src: "cut.tar".into(),
             dst: "out".into(),
+            max_bytes: None,
         })];
         let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
         let err = run_expect_err(fs, &steps, MockProcessManager::default());
@@ -2430,6 +2435,228 @@ fn unarchive_rejects_truncated_input() {
             "{name}: unexpected chain: {err:#}"
         );
     }
+}
+
+#[test]
+fn unarchive_exact_cap_extraction_succeeds() {
+    // A payload ending exactly on the cap must read clean: the meter
+    // probes for EOF instead of tripping on the trailing read. One
+    // byte over still fails.
+    for (name, cap, ok) in [("exact", "5", true), ("over", "4", false)] {
+        let temp = GuardedPath::tempdir().unwrap();
+        let root = temp.as_guarded_path().clone();
+        let resolver = PathResolver::new_guarded(root.clone(), root.clone()).unwrap();
+        let tool = root.join("tool.bin").unwrap();
+        resolver.write_file(&tool, b"12345").unwrap();
+        let steps = vec![
+            step(StepKind::Archive {
+                src: "tool.bin".into(),
+                dst: "tool.tar.gz".into(),
+                raw: false,
+            }),
+            step(StepKind::Unarchive {
+                src: "tool.tar.gz".into(),
+                dst: "out".into(),
+                max_bytes: Some(cap.into()),
+            }),
+        ];
+        let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
+        if ok {
+            run_steps_with_manager(fs, &steps, MockProcessManager::default(), ExecIo::new())
+                .expect("exact-cap payloads must extract");
+            let resolver = PathResolver::new_guarded(root.clone(), root.clone()).unwrap();
+            let restored = root.join("out/tool.bin").unwrap();
+            assert_eq!(resolver.read_file(&restored).unwrap(), b"12345");
+        } else {
+            let err = run_expect_err(fs, &steps, MockProcessManager::default());
+            assert!(
+                err.chain().any(|c| c.to_string().contains("expansion cap")),
+                "{name}: unexpected chain: {err:#}"
+            );
+        }
+    }
+}
+
+#[test]
+fn unarchive_expansion_cap_trips_on_bombs() {
+    // 5 MiB of zeroes compress to kilobytes: metering archive bytes
+    // would miss it, metering member bytes trips the cap. Seeded
+    // through the resolver so no 5 MB literal rides the test source.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = temp.as_guarded_path().clone();
+    let resolver = PathResolver::new_guarded(root.clone(), root.clone()).unwrap();
+    let zeros = root.join("zeros.bin").unwrap();
+    resolver
+        .write_file(&zeros, &vec![0u8; 5 * 1024 * 1024])
+        .unwrap();
+    let steps = vec![
+        step(StepKind::Archive {
+            src: "zeros.bin".into(),
+            dst: "bomb.tar.gz".into(),
+            raw: false,
+        }),
+        step(StepKind::Unarchive {
+            src: "bomb.tar.gz".into(),
+            dst: "out".into(),
+            max_bytes: Some("1MB".into()),
+        }),
+    ];
+    let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
+    let err = run_expect_err(fs, &steps, MockProcessManager::default());
+    assert!(
+        err.chain().any(|c| c
+            .to_string()
+            .contains("exceeds the 1000000-byte expansion cap")),
+        "unexpected chain: {err:#}"
+    );
+
+    // The default 1 GiB ceiling clears the same 5 MiB honestly.
+    let steps = vec![step(StepKind::Unarchive {
+        src: "bomb.tar.gz".into(),
+        dst: "wide".into(),
+        max_bytes: None,
+    })];
+    let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
+    run_steps_with_manager(fs, &steps, MockProcessManager::default(), ExecIo::new())
+        .expect("default cap must clear megabyte payloads");
+    let resolver = PathResolver::new_guarded(root.clone(), root.clone()).unwrap();
+    let restored = root.join("wide/zeros.bin").unwrap();
+    assert_eq!(
+        resolver.read_file(&restored).unwrap().len(),
+        5 * 1024 * 1024
+    );
+}
+
+#[test]
+fn unarchive_rejects_garbage_cap() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = temp.as_guarded_path().clone();
+    let resolver = PathResolver::new_guarded(root.clone(), root.clone()).unwrap();
+    let tool = root.join("tool.bin").unwrap();
+    resolver.write_file(&tool, b"tool").unwrap();
+    let steps = vec![
+        step(StepKind::Archive {
+            src: "tool.bin".into(),
+            dst: "tool.tar.gz".into(),
+            raw: false,
+        }),
+        step(StepKind::Unarchive {
+            src: "tool.tar.gz".into(),
+            dst: "out".into(),
+            max_bytes: Some("banana".into()),
+        }),
+    ];
+    let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
+    let err = run_expect_err(fs, &steps, MockProcessManager::default());
+    assert!(
+        err.chain()
+            .any(|c| c.to_string().contains("invalid byte count")),
+        "unexpected chain: {err:#}"
+    );
+}
+
+#[test]
+fn archive_refuses_nested_symlink_in_tree() {
+    // The top-level source is a plain dir; the link hides one level
+    // down. The walk must probe every descendant listing entry, not
+    // just the source.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = temp.as_guarded_path().clone();
+    if !can_create_symlinks(root.as_path()) {
+        return;
+    }
+    let resolver = PathResolver::new_guarded(root.clone(), root.clone()).unwrap();
+    let target = root.join("bundle/real.txt").unwrap();
+    resolver.write_file(&target, b"real").unwrap();
+    let sub = root.join("bundle/sub").unwrap();
+    resolver.create_dir_all(&sub).unwrap();
+    let link = root.join("bundle/sub/link.txt").unwrap();
+    resolver.symlink(&target, &link).unwrap();
+    let steps = vec![step(StepKind::Archive {
+        src: "bundle".into(),
+        dst: "bundle.tar.gz".into(),
+        raw: false,
+    })];
+    let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
+    let err = run_expect_err(fs, &steps, MockProcessManager::default());
+    assert!(
+        err.chain()
+            .any(|c| c.to_string().contains("refuses to pack symlink")),
+        "unexpected chain: {err:#}"
+    );
+}
+
+#[test]
+fn archive_round_trips_unix_modes() {
+    // Pack-side mode recording plus unpack-side restore: an executable
+    // bit set before ARCHIVE must survive the round trip.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = temp.as_guarded_path().clone();
+    let resolver = PathResolver::new_guarded(root.clone(), root.clone()).unwrap();
+    let tool = root.join("tool.sh").unwrap();
+    resolver.write_file(&tool, b"tool").unwrap();
+    resolver.set_permissions_mode_unix(&tool, 0o755).unwrap();
+    let steps = vec![
+        step(StepKind::Archive {
+            src: "tool.sh".into(),
+            dst: "tool.tar.gz".into(),
+            raw: false,
+        }),
+        step(StepKind::Unarchive {
+            src: "tool.tar.gz".into(),
+            dst: "out".into(),
+            max_bytes: None,
+        }),
+    ];
+    let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
+    run_steps_with_manager(fs, &steps, MockProcessManager::default(), ExecIo::new())
+        .expect("mode round trip");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let restored = root.join("out/tool.sh").unwrap();
+        let mode = resolver.metadata(&restored).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o755, "executable bit must survive, got {mode:o}");
+    }
+}
+
+#[test]
+fn archive_hashes_through_hash_sha256() {
+    // No built-in hashing flag: the finished archive hashes like any
+    // other file.
+    let backing = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let sink: SharedOutput = backing.clone();
+    let steps = vec![
+        step(StepKind::Write {
+            path: "tool.bin".into(),
+            contents: Some("tool".into()),
+        }),
+        step(StepKind::Archive {
+            src: "tool.bin".into(),
+            dst: "tool.tar.gz".into(),
+            raw: false,
+        }),
+        step(StepKind::HashSha256 {
+            path: "tool.tar.gz".into(),
+        }),
+    ];
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = temp.as_guarded_path().clone();
+    let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
+    run_steps_with_manager(
+        fs,
+        &steps,
+        MockProcessManager::default(),
+        assemble_default_io(None, Some(sink.clone())),
+    )
+    .expect("hash pipeline");
+    let hex = String::from_utf8(backing.lock().unwrap().clone()).unwrap();
+    let hex = hex.trim();
+    assert_eq!(hex.len(), 64, "full sha256 hex expected: {hex}");
+    assert!(
+        hex.chars().all(|c| c.is_ascii_hexdigit()),
+        "hex digest expected: {hex}"
+    );
 }
 
 #[test]
@@ -2460,36 +2687,76 @@ fn archive_refuses_symlink_source() {
 
 #[test]
 fn unarchive_refuses_hostile_members() {
-    let temp = GuardedPath::tempdir().unwrap();
-    let root = temp.as_guarded_path().clone();
-    let resolver = PathResolver::new_guarded(root.clone(), root.clone()).unwrap();
-    let hostile = hostile_tar_bytes("../evil.txt", b"evil");
-    let archive = root.join("hostile.tar").unwrap();
-    resolver.write_file(&archive, &hostile).unwrap();
-    let steps = vec![step(StepKind::Unarchive {
-        src: "hostile.tar".into(),
-        dst: "out".into(),
-    })];
-    let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
-    let err = run_expect_err(fs, &steps, MockProcessManager::default());
-    assert!(
-        err.chain().any(|c| c.to_string().contains("escapes")),
-        "unexpected chain: {err:#}"
-    );
-    assert!(
-        !root.join("evil.txt").unwrap().exists(),
-        "no byte may land outside the destination"
-    );
-    assert!(
-        !root.join("out/evil.txt").unwrap().exists(),
-        "no byte may land inside the destination either"
-    );
+    let mut symlink_tar = Vec::new();
+    {
+        let mut builder = tar::Builder::new(&mut symlink_tar);
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Symlink);
+        header.set_size(0);
+        header.set_cksum();
+        builder
+            .append_link(&mut header, "link.txt", "target.txt")
+            .unwrap();
+        builder.into_inner().unwrap();
+    }
+    let cases: Vec<(&str, Vec<u8>, &str)> = vec![
+        (
+            "traversal",
+            hostile_tar_bytes("../evil.txt", b"evil"),
+            "escapes",
+        ),
+        (
+            "absolute",
+            hostile_tar_bytes("/abs.txt", b"evil"),
+            "absolute",
+        ),
+        ("symlink", symlink_tar, "refuses symlink member"),
+        (
+            "fifo",
+            hostile_tar_typed("fifo", b"", Some(b'6')),
+            "unsupported type",
+        ),
+    ];
+    for (name, bytes, needle) in cases {
+        let temp = GuardedPath::tempdir().unwrap();
+        let root = temp.as_guarded_path().clone();
+        let resolver = PathResolver::new_guarded(root.clone(), root.clone()).unwrap();
+        let archive = root.join("hostile.tar").unwrap();
+        resolver.write_file(&archive, &bytes).unwrap();
+        let steps = vec![step(StepKind::Unarchive {
+            src: "hostile.tar".into(),
+            dst: "out".into(),
+            max_bytes: None,
+        })];
+        let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
+        let err = run_expect_err(fs, &steps, MockProcessManager::default());
+        assert!(
+            err.chain().any(|c| c.to_string().contains(needle)),
+            "{name}: unexpected chain: {err:#}"
+        );
+        assert!(
+            !root.join("evil.txt").unwrap().exists(),
+            "{name}: no byte may land outside the destination"
+        );
+        let out = root.join("out").unwrap();
+        let leftovers = resolver.read_dir_entries(&out).unwrap_or_default();
+        assert!(
+            leftovers.is_empty(),
+            "{name}: no byte may land inside the destination either"
+        );
+    }
 }
 
 /// Splice a hostile member name into an otherwise valid raw tar and
 /// re-checksum its header: the `tar` builder refuses hostile names up
 /// front, but hostile bytes arrive over the wire.
 fn hostile_tar_bytes(name: &str, payload: &[u8]) -> Vec<u8> {
+    hostile_tar_typed(name, payload, None)
+}
+
+/// [`hostile_tar_bytes`] plus a typeflag override for special members
+/// (`b'6'` fifo, ...): the checksum covers the patched byte.
+fn hostile_tar_typed(name: &str, payload: &[u8], entry_type: Option<u8>) -> Vec<u8> {
     let mut raw = Vec::new();
     {
         let mut builder = tar::Builder::new(&mut raw);
@@ -2506,6 +2773,9 @@ fn hostile_tar_bytes(name: &str, payload: &[u8]) -> Vec<u8> {
     assert!(name_bytes.len() < 100, "name must fit the tar name field");
     raw[..name_bytes.len()].copy_from_slice(name_bytes);
     raw[name_bytes.len()] = 0;
+    if let Some(entry_type) = entry_type {
+        raw[156] = entry_type;
+    }
     for b in &mut raw[148..156] {
         *b = b' ';
     }

@@ -828,8 +828,14 @@ pub(super) fn unarchive<P: ProcessManager>(
     idx: usize,
     src: &str,
     dst: &str,
+    max_bytes: Option<&str>,
 ) -> Result<()> {
     let tag = format!("step {}: UNARCHIVE {src} {dst}", idx + 1);
+    let cap = match max_bytes {
+        Some(raw) => oxdock_parser::command::parse_byte_count(raw)
+            .with_context(|| format!("{tag}: --max-bytes {raw:?}"))?,
+        None => DEFAULT_UNARCHIVE_MAX_BYTES,
+    };
     let src_abs = cx
         .state
         .fs
@@ -855,6 +861,9 @@ pub(super) fn unarchive<P: ProcessManager>(
     // before they extract. Deepest first, so restrictive parents settle
     // last with nothing left to write beneath them.
     let mut deferred_dir_modes: Vec<(GuardedPath, u32)> = Vec::new();
+    // The expansion budget spans the whole archive, not one member: a
+    // bomb split across many just-under-cap members must still trip it.
+    let mut remaining = cap;
     unpack_auto_from(reader, &mut |entry| {
         let entry_tag = format!("{tag}: member");
         match entry {
@@ -868,7 +877,23 @@ pub(super) fn unarchive<P: ProcessManager>(
                 fs.ensure_parent_dir(&file)
                     .with_context(|| entry_tag.clone())?;
                 let mut out = fs.open_write(&file).with_context(|| entry_tag.clone())?;
-                std::io::copy(reader, &mut out).with_context(|| entry_tag.clone())?;
+                // Metered copy: bombs read small and write huge, so the
+                // cap counts member bytes out, not archive bytes in. The
+                // tripped member stays truncated while the step fails.
+                let mut capped = CappedReader {
+                    inner: reader,
+                    remaining,
+                };
+                std::io::copy(&mut capped, &mut out).map_err(|e| {
+                    if e.kind() == std::io::ErrorKind::QuotaExceeded {
+                        anyhow!(
+                            "{entry_tag}: archive exceeds the {cap}-byte expansion cap at {path:?}"
+                        )
+                    } else {
+                        anyhow::Error::new(e).context(entry_tag.clone())
+                    }
+                })?;
+                remaining = capped.remaining;
                 std::io::Write::flush(&mut out).with_context(|| entry_tag.clone())?;
                 restore_archive_mode(fs, &file, mode).with_context(|| entry_tag.clone())?;
             }
@@ -885,6 +910,44 @@ pub(super) fn unarchive<P: ProcessManager>(
     Ok(())
 }
 
+/// Default `UNARCHIVE` expansion cap (1 GiB of member bytes): release
+/// artifacts are megabytes, so this never gates legitimate use while a
+/// decompression bomb trips it long before runner disks fill. Per-call
+/// `--max-bytes` moves the ceiling either way.
+const DEFAULT_UNARCHIVE_MAX_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// Read adapter metering decompressed member bytes against the
+/// expansion cap: bombs read small and write huge, so the meter sits on
+/// the output side. Zero-length probes pass through so EOF detection
+/// keeps working, and an exhausted budget probes the stream before
+/// erroring: a payload ending exactly on the cap reads `Ok(0)` there
+/// instead of false-tripping.
+struct CappedReader<'a> {
+    inner: &'a mut dyn std::io::Read,
+    remaining: u64,
+}
+
+impl std::io::Read for CappedReader<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        if self.remaining == 0 {
+            let mut probe = [0u8; 1];
+            if self.inner.read(&mut probe)? == 0 {
+                return Ok(0);
+            }
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::QuotaExceeded,
+                "archive member exceeds the expansion cap",
+            ));
+        }
+        let allowed = (buf.len() as u64).min(self.remaining) as usize;
+        let n = self.inner.read(&mut buf[..allowed])?;
+        self.remaining -= n as u64;
+        Ok(n)
+    }
+}
 /// Restore one header mode through the fs abstraction (Unix-effective,
 /// no-op elsewhere). Zero modes skip: a degenerate header must never
 /// brick its file unreadable.
@@ -2981,12 +3044,18 @@ pub(crate) fn dispatch_unarchive<P: ProcessManager>(
     step: &StepKind,
     cx: &mut StepCtx<'_, P>,
 ) -> Result<()> {
-    let StepKind::Unarchive { src, dst } = step else {
+    let StepKind::Unarchive {
+        src,
+        dst,
+        max_bytes,
+    } = step
+    else {
         unreachable!()
     };
     let src_resolved = super::args::resolve_arg(src, cx)?;
     let dst_resolved = super::args::resolve_arg(dst, cx)?;
-    unarchive(cx, 0, &src_resolved, &dst_resolved)
+    let cap_resolved = super::args::resolve_arg_opt(max_bytes, cx)?;
+    unarchive(cx, 0, &src_resolved, &dst_resolved, cap_resolved.as_deref())
 }
 
 pub(crate) fn dispatch_copy_git<P: ProcessManager>(

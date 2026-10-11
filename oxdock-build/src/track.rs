@@ -291,9 +291,20 @@ pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
                 template_keys(&mut keys, from);
                 template_keys(&mut keys, to);
             }
-            StepKind::Archive { src, dst, .. } | StepKind::Unarchive { src, dst } => {
+            StepKind::Archive { src, dst, .. } => {
                 template_keys(&mut keys, src);
                 template_keys(&mut keys, dst);
+            }
+            StepKind::Unarchive {
+                src,
+                dst,
+                max_bytes,
+            } => {
+                template_keys(&mut keys, src);
+                template_keys(&mut keys, dst);
+                if let Some(cap) = max_bytes {
+                    template_keys(&mut keys, cap);
+                }
             }
             StepKind::Ls(Some(t)) => template_keys(&mut keys, t),
             StepKind::Ls(None) => {}
