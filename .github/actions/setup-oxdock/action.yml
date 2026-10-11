@@ -20,57 +20,32 @@ inputs:
 runs:
   using: composite
   steps:
-    # The resolved tag passes explicitly so the installer fetches one
-    # version's assets even if `latest` moves mid-run. Filenames carry
-    # the platform extension computed here, so the DSL below never
-    # branches on OS.
+    # Resolved tag passes explicitly: one version's assets even if latest moves mid-run.
     - name: Install OxDock engine
       shell: pwsh
       run: |
         $ErrorActionPreference = 'Stop'
-        # Downloaded scripts carry Mark of the Web; the default Windows
-        # policy refuses them, and so would the bundled copy the
-        # installer re-executes below. Process scope needs no admin and
-        # covers the whole step, re-entry included. Windows-only cmdlet:
-        # execution policy does not exist on other platforms.
-        if ($IsWindows) {
-          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
-        }
-        # Shared runner IPs burn the anonymous API quota: authenticate
-        # reads when a token is present (CI bridges GITHUB_TOKEN).
-        # An empty table sends no headers.
-        $ApiHeaders = @{}
-        if ($env:GITHUB_TOKEN) { $ApiHeaders['Authorization'] = "Bearer $($env:GITHUB_TOKEN)" }
-        $repo = 'jzombie/rust-oxdock'
-        $enginedir = Join-Path $env:RUNNER_TEMP 'oxdock-engine'
-        $scratch = Join-Path $env:RUNNER_TEMP 'oxdock-installer'
-        New-Item -ItemType Directory -Force -Path $scratch | Out-Null
-        $version = '${{ inputs.version }}'
-        if ($version -eq 'latest') {
-          # Same list endpoint the stub queries: `/releases/latest`
-          # excludes pre-releases by contract.
-          $version = (Invoke-RestMethod "https://api.github.com/repos/$repo/releases?per_page=1" -Headers $ApiHeaders)[0].tag_name
-        }
-        if ($IsWindows) {
-          $stub = 'install.ps1'
-          $execName = 'oxdock.exe'
-          $wantName = '${{ inputs.binary-name }}.exe'
-        } else {
-          $stub = 'install.sh'
-          $execName = 'oxdock'
-          $wantName = '${{ inputs.binary-name }}'
-        }
-        Invoke-WebRequest "https://github.com/$repo/releases/download/$version/$stub" -Headers $ApiHeaders -OutFile (Join-Path $scratch $stub)
-        $env:VERSION = $version
-        $env:INSTALL_DIR = $enginedir
-        if ($IsWindows) {
-          & (Join-Path $scratch 'install.ps1')
-        } else {
-          bash (Join-Path $scratch 'install.sh')
-        }
-        # The engine just installed runs the rest: rename, PATH publish,
-        # and a `--version` smoke check live in DSL, not in YAML strings.
-        $env:OXDOCK_ENGINE_DIR = $enginedir
-        $env:OXDOCK_ENGINE_SRC = $execName
-        $env:OXDOCK_ENGINE_DST = $wantName
-        & (Join-Path $enginedir $execName) (Join-Path $env:GITHUB_ACTION_PATH 'post-install.oxfile')
+
+        # Mark-of-the-Web downloads need Bypass on Windows, process-wide so the re-executed stub is covered.
+        if ($IsWindows) { Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force }
+
+        # Shared runner IPs burn the anonymous API quota: authenticate when a token is present.
+        $h = @{}; if ($env:GITHUB_TOKEN) { $h.Authorization = "Bearer $env:GITHUB_TOKEN" }
+
+        $v = '${{ inputs.version }}'
+        # List endpoint: /releases/latest excludes pre-releases by contract.
+        if ($v -eq 'latest') { $v = (Invoke-RestMethod 'https://api.github.com/repos/jzombie/rust-oxdock/releases?per_page=1' -Headers $h)[0].tag_name }
+
+        $dir = Join-Path $env:RUNNER_TEMP 'oxdock-engine'
+        $tmp = Join-Path $env:RUNNER_TEMP 'oxdock-installer'
+        New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+        $stub = if ($IsWindows) { 'install.ps1' } else { 'install.sh' }
+        $ext = if ($IsWindows) { '.exe' } else { '' }
+
+        Invoke-WebRequest "https://github.com/jzombie/rust-oxdock/releases/download/$v/$stub" -Headers $h -OutFile (Join-Path $tmp $stub)
+        $env:VERSION = $v; $env:INSTALL_DIR = $dir
+        if ($IsWindows) { & (Join-Path $tmp $stub) } else { bash (Join-Path $tmp $stub) }
+
+        # The fresh engine runs the rest as DSL: rename, PATH publish, --version smoke check.
+        $env:OXDOCK_ENGINE_DIR = $dir; $env:OXDOCK_ENGINE_SRC = "oxdock$ext"; $env:OXDOCK_ENGINE_DST = "${{ inputs.binary-name }}$ext"
+        & (Join-Path $dir "oxdock$ext") (Join-Path $env:GITHUB_ACTION_PATH 'post-install.oxfile')
