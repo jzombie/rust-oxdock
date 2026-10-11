@@ -64,6 +64,11 @@ runs:
       shell: pwsh
       run: |
         $ErrorActionPreference = 'Stop'
+        # Downloaded scripts carry Mark of the Web; the default policy
+        # refuses them, and so would the bundled copy the installer
+        # re-executes below. Process scope needs no admin and covers
+        # the whole step, re-entry included.
+        Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
         $repo = 'jzombie/rust-oxdock'
         $enginedir = Join-Path $env:RUNNER_TEMP 'oxdock-engine'
         $scratch = Join-Path $env:RUNNER_TEMP 'oxdock-installer'

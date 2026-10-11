@@ -116,21 +116,6 @@ else
   trap - EXIT
   rm -rf "$tmp"
 fi
-# Hand off to the release-bundled installer: the executed logic always
-# matches the engine version, and warm runs keep working because the
-# bundled copy lives in the cache beside everything else. The flag
-# prevents re-entry: the re-executed copy skips this block. Digest
-# verification fails closed when the entry is missing or mismatched.
-if [ -z "${OXDOCK_STUB_ACTIVE:-}" ]; then
-  if command -v sha256sum >/dev/null 2>&1; then
-    (cd "$VDIR" && grep " install.sh$" SHA256SUMS | sha256sum -c - >/dev/null) || { echo "installer stub failed verification" >&2; exit 1; }
-  else
-    (cd "$VDIR" && grep " install.sh$" SHA256SUMS | shasum -a 256 -c - >/dev/null) || { echo "installer stub failed verification" >&2; exit 1; }
-  fi
-  OXDOCK_STUB_ACTIVE=1
-  export OXDOCK_STUB_ACTIVE
-  exec bash "$VDIR/install.sh"
-fi
 # Provenance for smoke forensics: which oxfile payload executes below
 # and its digest. A version-skewed payload names its source here
 # instead of surfacing as a bare parse error downstream.
@@ -187,25 +172,61 @@ case "$(uname -s)" in
     ;;
 esac
 # A function so piped delivery is fully read before the drain runs;
-# straight-line code would let it swallow unread script tail.
+# straight-line code would let it swallow unread script tail. The
+# handoff lives in here, after the drain, for the same reason: a
+# top-level exec would re-run the prologue below against a stdin
+# offset in the middle of the script, and the re-executed copy would
+# bridge stub tail as a user script.
 run_installer() {
-# Stdin capture, no decisions: a TTY is never drained.
-OXDOCK_PIPED_SCRIPT=""
+# Stdin capture, no decisions: a TTY is never drained. Under handoff
+# re-entry the outer copy already drained, so inherit its capture
+# instead of reading the pipe twice.
+if [ -z "${OXDOCK_STUB_ACTIVE:-}" ]; then
+  OXDOCK_PIPED_SCRIPT=""
+  if [ ! -t 0 ]; then
+    stdin_tmp=$(mktemp)
+    trap 'rm -rf "$tmp" "$stdin_tmp"' EXIT
+    cat > "$stdin_tmp"
+    if [ -s "$stdin_tmp" ]; then
+      OXDOCK_PIPED_SCRIPT="$stdin_tmp"
+    else
+      rm -f "$stdin_tmp"
+    fi
+  fi
+fi
 # Interactive consoles confirm the destination in the oxfile: export the
-# flag only with a console behind stdin, before the drain logic below.
+# flag only with a console behind stdin. Re-probed, never inherited:
+# the descriptor survives re-entry unchanged, so the answer matches.
 OXDOCK_INTERACTIVE=""
 if [ -t 0 ]; then
   OXDOCK_INTERACTIVE=1
 fi
-if [ ! -t 0 ]; then
-  stdin_tmp=$(mktemp)
-  trap 'rm -rf "$tmp" "$stdin_tmp"' EXIT
-  cat > "$stdin_tmp"
-  if [ -s "$stdin_tmp" ]; then
-    OXDOCK_PIPED_SCRIPT="$stdin_tmp"
+# Hand off to the release-bundled installer: the executed logic always
+# matches the engine version, and warm runs keep working because the
+# bundled copy lives in the cache beside everything else. The flag
+# prevents re-entry: the re-executed copy skips this block and the
+# drain above. Digest verification fails closed when the entry is
+# missing or mismatched.
+if [ -z "${OXDOCK_STUB_ACTIVE:-}" ]; then
+  if command -v sha256sum >/dev/null 2>&1; then
+    (cd "$VDIR" && grep " install.sh$" SHA256SUMS | sha256sum -c - >/dev/null) || { echo "installer stub failed verification" >&2; exit 1; }
   else
-    rm -f "$stdin_tmp"
+    (cd "$VDIR" && grep " install.sh$" SHA256SUMS | shasum -a 256 -c - >/dev/null) || { echo "installer stub failed verification" >&2; exit 1; }
   fi
+  OXDOCK_STUB_ACTIVE=1
+  export OXDOCK_STUB_ACTIVE
+  export OXDOCK_PIPED_SCRIPT
+  export OXDOCK_INTERACTIVE
+  # The outer unpack stays behind: exec discards its EXIT trap, and the
+  # re-executed copy unpacks the cache into its own directory below.
+  rm -rf "$tmp"
+  exec bash "$VDIR/install.sh"
+fi
+# Re-entry owns the inherited capture now: the outer trap died with
+# the exec, so this process unlinks the bridged file on exit. Only
+# re-entry reaches past the handoff above with a capture present.
+if [ -n "${OXDOCK_PIPED_SCRIPT:-}" ] && [ -f "$OXDOCK_PIPED_SCRIPT" ]; then
+  trap 'rm -rf "$tmp" "$OXDOCK_PIPED_SCRIPT"' EXIT
 fi
 (cd "$tmp" && OXDOCK_ASSET="$VDIR/$ASSET" OXDOCK_SHA="$EXPECTED" OXDOCK_BIN="$BIN" OXDOCK_DIR="$OXDOCK_DIR" OXDOCK_VERSION="$VERSION" OXDOCK_INTERPRETER="$ENGINE" OXDOCK_PIPED_SCRIPT="$OXDOCK_PIPED_SCRIPT" OXDOCK_INTERACTIVE="$OXDOCK_INTERACTIVE" "$ENGINE" "$tmp/install.oxfile") || {
   code=$?
