@@ -2759,6 +2759,7 @@ pub(crate) fn dispatch_read_line<P: ProcessManager>(
 
 /// Render the terminal prompt: `{message} [{default}]: ` with a default,
 /// `{message}: ` without one. Pure so unit tests pin it without a TTY.
+#[cfg_attr(miri, allow(dead_code))]
 pub(super) fn format_prompt(message: &str, default: Option<&str>) -> String {
     match default {
         Some(d) => format!("{message} [{d}]: "),
@@ -2769,6 +2770,7 @@ pub(super) fn format_prompt(message: &str, default: Option<&str>) -> String {
 /// Map a trimmed answer line onto its binding: empty input yields the
 /// default when one exists, else an empty string. Pure so unit tests pin
 /// it without a TTY.
+#[cfg_attr(miri, allow(dead_code))]
 pub(super) fn apply_prompt_answer(line: &str, default: Option<&str>) -> String {
     if line.is_empty() {
         default.unwrap_or("").to_string()
@@ -2843,6 +2845,7 @@ pub(super) fn prompt<P: ProcessManager>(
     }
 }
 
+#[cfg_attr(miri, allow(dead_code))]
 fn bind_prompt_var<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
     idx: usize,

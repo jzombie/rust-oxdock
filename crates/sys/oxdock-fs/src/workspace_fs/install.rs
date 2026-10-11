@@ -32,7 +32,7 @@ impl PathResolver {
             let data = self.backend.read_file(&guarded_src)?;
             self.backend.write_file(&guarded_dst, &data)?;
             let _ = mode;
-            return Ok(());
+            Ok(())
         }
         #[cfg(not(miri))]
         {

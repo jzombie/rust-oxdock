@@ -247,7 +247,7 @@ impl PathResolver {
         #[cfg(miri)]
         {
             let _ = (cwd, rel);
-            return Ok(false);
+            Ok(false)
         }
         #[cfg(not(miri))]
         {
