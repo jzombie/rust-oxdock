@@ -10,8 +10,8 @@ IMPORT [STD]
 
 INHERIT_ENV [OXDOCK_ENGINE_DIR, OXDOCK_ENGINE_BIN, GITHUB_PATH]
 
-# Full filesystem access: the engine directory and the PATH file live
-# outside any workspace.
+# System workspace: the engine directory and the PATH file sit outside
+# the checkout, so resolution runs from the filesystem root.
 WORKSPACE SYSTEM
 
 LET $dir: STRING = "{{ env:OXDOCK_ENGINE_DIR }}"
