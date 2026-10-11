@@ -10,6 +10,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 ### Changed
 
 - Installers fetch `install.oxfile` and the executing stub from the release bundle unconditionally and always hand off to the bundled copy: the tag and main fallbacks are gone, so installing a release predating bundled installers (`< v0.24.4-alpha`) now fails closed at verification instead of running version-skewed logic. An explicit `OXDOCK_OXFILE_URL` still wins for pre-merge testing.
+- The installer stubs detect ARM64 Windows under x64 emulation instead of installing the wrong target: an emulated shell reports `x86_64` with `PROCESSOR_ARCHITECTURE=AMD64` and no `W6432`, so detection now keys off `W6432`, the `MINGW64_NT-*-ARM64` kernel suffix, and the `SysArm32` directory, and prints a `platform:` forensics line naming the evidence behind the choice.
+
+### Fixed
+
+- Installer cache reuse no longer passes warmth on the sibling stub's files: each stub fetches both scripts when populating the cache and requires its own script when reusing it, so a cache warmed by `install.sh` cannot satisfy `install.ps1` into a missing-file handoff failure (and vice versa).
+- Installer handoff no longer races the delivery stream: the shell stub hands off inside the installer body after the stdin drain runs (with the handoff marker inherited and the scratch dir removed before `exec`), and the PowerShell stub drains the remaining script into a temp dir before a file-based handoff cleans it up. Piped runs previously exited without installing when the drain swallowed unread script, and ephemeral runs failed on scripts nobody drained.
 
 ## [0.24.4-alpha] - 2026-10-11
 
