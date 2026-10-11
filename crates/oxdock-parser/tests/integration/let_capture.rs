@@ -40,6 +40,45 @@ fn let_capture_run_command() {
 }
 
 #[test]
+fn let_capture_run_exec_binds_assign_capture() {
+    // Exec form captures through the run_exec grammar arm. The inner
+    // kind is lowerer-dependent by design (`lower_run_exec_pair`
+    // routes the list through the injected lowerer: production maps
+    // it to RunExec, the mock wraps shell Run), so this pins the
+    // capture shape while run_exec.rs pins RunExec end to end.
+    match parse_one("LET $cargo: STRING = RUN [\"cargo\", \"--version\"]\n") {
+        StepKind::AssignCapture { var, .. } => {
+            assert_eq!(var, "cargo");
+        }
+        other => panic!("expected AssignCapture, got {other:?}"),
+    }
+}
+
+#[test]
+fn let_capture_run_exec_rejects_trailing_span() {
+    // Like bare statements (`run_exec_partial_span_is_rejected_not_truncated`),
+    // a second bracket group must fail, not silently degrade to shell text.
+    // Without the run_exec alternative the whole line parses as shell RUN.
+    let err = parse_with_math("LET $c: STRING = RUN [\"a\"] [\"b\"]\n", mock_lower)
+        .expect_err("trailing span must fail");
+    assert!(!err.to_string().is_empty());
+}
+
+#[test]
+fn let_capture_shell_run_stays_shell() {
+    // No regression: bracket-free RUN still captures shell form.
+    match parse_one("LET $out: STRING = RUN cargo --version\n") {
+        StepKind::AssignCapture { cmd, .. } => {
+            assert!(
+                matches!(cmd.as_ref(), StepKind::Run(_)),
+                "expected shell Run body, got {cmd:?}"
+            );
+        }
+        other => panic!("expected AssignCapture, got {other:?}"),
+    }
+}
+
+#[test]
 fn let_capture_unknown_lead_stays_expression() {
     // Uppercase-but-unknown leads must not break expression assignment.
     match parse_one("LET $x: STRING = MY_VAR\n") {
@@ -128,6 +167,7 @@ fn let_capture_display_round_trip() {
         "LET $x: STRING = ECHO hi\n",
         "LET $o: STRING = AWAIT $t\n",
         "LET $x: STRING = TIMEOUT 5s ECHO hi\n",
+        "LET $cargo: STRING = RUN [\"cargo\", \"--version\"]\n",
     ] {
         let steps = parse_with_math(script, mock_lower).expect("parse");
         let rendered = steps

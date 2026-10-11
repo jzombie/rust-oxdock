@@ -15,7 +15,7 @@
 # Pin explicitly with VERSION (a tag: the API's "latest" skips
 # pre-releases, and every release here is `-alpha` until stable):
 #
-#   $env:VERSION = 'v0.24.2-alpha'; irm ... | iex
+#   $env:VERSION = 'v0.24.3-alpha'; irm ... | iex
 #
 # Pass INSTALL_DIR to choose the destination; the installer defaults
 # it when absent.
@@ -67,11 +67,13 @@ function Test-CachedAsset {
 
 # Same hash as last time means same bytes: reuse the cached tarball
 # after re-verifying it. Anything missing or mismatched falls through
-# to a fresh download, so a corrupt cache heals itself.
+# to a fresh download, so a corrupt cache heals itself. Direct fd
+# writes: Write-Warning follows stdout when stdout is redirected, so
+# pipe captures would miss the announcement.
 if (Test-CachedAsset) {
-  Write-Warning "using cached oxdock $VERSION"
+  [Console]::Error.WriteLine("using cached oxdock $VERSION")
 } else {
-  Write-Warning "downloading oxdock $VERSION"
+  [Console]::Error.WriteLine("downloading oxdock $VERSION")
   $tmp = Join-Path ([IO.Path]::GetTempPath()) "oxdock-install-$([Guid]::NewGuid())"
   New-Item -ItemType Directory -Force -Path $tmp | Out-Null
   try {
@@ -110,11 +112,9 @@ try {
   tar.exe -xzf (Join-Path $VDir $Asset) -C (Join-Path $tmp 'x')
   $env:OXDOCK_ASSET = (Join-Path $VDir $Asset)
   $env:OXDOCK_BIN = (Join-Path $tmp 'x\oxdock.exe')
-  # Pass-through only (possibly unset, which removes it): the installer
-  # owns the default. The name mapping lives here because only the stub
-  # knows both sides. Separators go native: GitHub contexts use forward
-  # slashes even on Windows, and the guard rejects the mix.
-  if ($env:INSTALL_DIR) { $env:OXDOCK_DIR = $env:INSTALL_DIR.Replace('/', '\') }
+  # Destination default lives here in native shell; empty keeps the
+  # installer's loud gate. The engine normalizes separators itself.
+  if ($env:INSTALL_DIR) { $env:OXDOCK_DIR = $env:INSTALL_DIR } elseif ($env:LOCALAPPDATA) { $env:OXDOCK_DIR = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps' }
   $env:OXDOCK_SHA = $Expected
   $env:OXDOCK_VERSION = $Version
   # An explicit OXDOCK_ENGINE runs the installer instead of the

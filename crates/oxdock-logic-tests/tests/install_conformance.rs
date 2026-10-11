@@ -167,22 +167,24 @@ fn tampered_asset_aborts_before_place() -> Result<()> {
     Ok(())
 }
 
-/// Unbridged dir defaults under home: the placed file lands in
-/// `.local` beneath the overridden home, with no stub involvement.
+/// Missing destination fails naming the override: the stubs own the
+/// defaults now, so the oxfile only gates on an empty dir, whatever
+/// the homes hold.
 #[test]
 #[cfg_attr(miri, ignore = "needs host tempdir for the fixture root")]
-fn empty_dir_defaults_under_home() -> Result<()> {
-    let run = install_harness(INSTALL_PAYLOAD, INSTALL_DIGEST, None)?;
-    run.execute()?;
-    #[cfg(unix)]
-    let placed = "home/.local/bin/oxdock";
-    #[cfg(windows)]
-    let placed = "home/.local/bin/oxdock.exe";
-    let reader = PathResolver::new_guarded(run.root.clone(), run.root.clone())?;
-    let body = reader.read_file(&run.root.join(placed)?)?;
-    assert_eq!(
-        body, INSTALL_PAYLOAD,
-        "default destination holds the verified bytes"
+fn missing_dir_fails_naming_install_dir() -> Result<()> {
+    let mut run = install_harness(INSTALL_PAYLOAD, INSTALL_DIGEST, None)?;
+    run.io.remove_inherit_env("HOME");
+    run.io.remove_inherit_env("USERPROFILE");
+    let err = run.execute().expect_err("no dir must fail");
+    let rendered = format!("{err:#}");
+    assert!(
+        rendered.contains("EXIT requested with code 1"),
+        "failure exits at the gate: {rendered}"
+    );
+    assert!(
+        run.calls().is_empty(),
+        "no process spawned for a missing dir"
     );
     Ok(())
 }
@@ -269,29 +271,6 @@ fn piped_script_reinvokes_interpreter_without_placing() -> Result<()> {
     assert!(
         reader.read_file(&run.root.join("dest/oxdock")?).is_err(),
         "run mode places nothing"
-    );
-    Ok(())
-}
-
-/// No destination and no home fails loudly at the gate: the script
-/// environment never inherits host variables unless bridged, so an
-/// unbridged HOME must error naming the override instead of deriving
-/// `/.local/bin` from an empty expansion.
-#[test]
-#[cfg_attr(miri, ignore = "needs host tempdir for the fixture root")]
-fn missing_home_fails_naming_install_dir() -> Result<()> {
-    let mut run = install_harness(INSTALL_PAYLOAD, INSTALL_DIGEST, None)?;
-    run.io.remove_inherit_env("HOME");
-    run.io.remove_inherit_env("USERPROFILE");
-    let err = run.execute().expect_err("no home and no dir must fail");
-    let rendered = format!("{err:#}");
-    assert!(
-        rendered.contains("EXIT requested with code 1"),
-        "failure exits at the gate: {rendered}"
-    );
-    assert!(
-        run.calls().is_empty(),
-        "no process spawned for a missing home"
     );
     Ok(())
 }

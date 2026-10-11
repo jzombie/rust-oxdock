@@ -1,0 +1,5 @@
+{
+  "ephemeral_payload": "via-ephemeral",
+  "ephemeral_stub_src_sh": "cat ./install.sh",
+  "ephemeral_stub_src_ps1": "Get-Content -Raw .\\install.ps1"
+}

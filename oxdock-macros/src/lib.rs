@@ -1930,6 +1930,13 @@ mod tests {
                 .expect("braced form");
         assert!(matches!(braced.script, ScriptSource::Braced(_)));
 
+        // The README leads with `out_dir` ahead of the script block.
+        let reordered: DslMacroInput =
+            syn::parse_str("name: DemoAssets, out_dir: \"prebuilt\", script: { WRITE x.txt y }")
+                .expect("reordered form");
+        assert_eq!(reordered.name.to_string(), "DemoAssets");
+        assert!(matches!(reordered.script, ScriptSource::Braced(_)));
+
         assert!(syn::parse_str::<DslMacroInput>("script: \"x\", out_dir: \"y\"").is_err());
     }
 }

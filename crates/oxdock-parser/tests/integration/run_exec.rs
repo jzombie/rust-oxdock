@@ -235,3 +235,21 @@ fn run_exec_wraps_in_structural_commands() {
         other => panic!("expected TIMEOUT wrapper, got {other:?}"),
     }
 }
+
+#[test]
+fn run_exec_let_capture_binds_run_exec() {
+    // The README embeds this exact line: LET-capture must lower exec
+    // form to RunExec, not shell text.
+    let steps = parse_prod("LET $cargo: STRING = RUN [\"cargo\", \"--version\"]");
+    assert_eq!(steps.len(), 1);
+    match &steps[0].kind {
+        StepKind::AssignCapture { var, cmd, .. } => {
+            assert_eq!(var, "cargo");
+            match cmd.as_ref() {
+                StepKind::RunExec { argv } => assert_eq!(argv.len(), 2),
+                other => panic!("expected RunExec body, got {other:?}"),
+            }
+        }
+        other => panic!("expected AssignCapture, got {other:?}"),
+    }
+}

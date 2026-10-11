@@ -1,0 +1,27 @@
+{
+  "targets": [
+    {
+      "name": "ephemeral-sh-ci",
+      "out": "scripts/smoke/run-ephemeral.sh",
+      "values": ".oxdock/template/cli/values.json",
+      "template": ".oxdock/template/cli/run-sh.tmpl",
+      "executable": true,
+      "fragments": {
+        "cmd": [
+          ".oxdock/template/cli/fragments/run-ephemeral-sh.md.tmpl"
+        ]
+      }
+    },
+    {
+      "name": "ephemeral-ps1-ci",
+      "out": "scripts/smoke/run-ephemeral.ps1",
+      "values": ".oxdock/template/cli/values.json",
+      "template": ".oxdock/template/cli/run-ps1.tmpl",
+      "fragments": {
+        "cmd": [
+          ".oxdock/template/cli/fragments/run-ephemeral-ps1.md.tmpl"
+        ]
+      }
+    }
+  ]
+}
