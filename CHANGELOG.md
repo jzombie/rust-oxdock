@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [Unreleased]
+
+### Added
+
+- `ARCHIVE [--raw] <src> <dst>` and `UNARCHIVE <src> <dst>` commands (#182): pack a file or directory into a tarball and unpack one under a destination, with no host `tar` dependency. Archives are gzip-compressed by default and raw tar with `--raw`; `UNARCHIVE` sniffs the magic bytes so no flag is needed. Packing streams one file at a time (O(chunk) memory, O(1) open files), records Unix source modes in the headers, and refuses symlink sources through a listing probe (canonical resolution would otherwise hide the final link). Unpacking fails closed on symlink and special members, absolute or escaping paths, and empty input, and restores header modes on Unix. Hashing stays with `HASH_SHA256`, which reads the finished archive like any other file.
+
 ## [0.24.5-alpha] - 2026-10-11
 
 ### Changed
