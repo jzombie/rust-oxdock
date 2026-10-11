@@ -84,7 +84,7 @@ impl ArgType {
     pub fn validate_literal(&self, literal: &str) -> Result<()> {
         match self {
             ArgType::String | ArgType::Path | ArgType::Any => Ok(()),
-            ArgType::Int => literal
+            ArgType::Int => strip_digit_separators(literal)
                 .parse::<i64>()
                 .map(|_| ())
                 .map_err(|_| anyhow!("expected int, got {literal:?}")),
@@ -301,12 +301,46 @@ pub fn format_duration(d: &std::time::Duration) -> String {
     }
 }
 
+/// Strip Rust-style `_` digit separators when well-formed (digits and
+/// at most one `.`, separators only between digits, never leading,
+/// trailing, or doubled, with an optional leading `+`/`-` sign passing
+/// through for signed domains); otherwise return the text untouched so
+/// the caller's own parse decides. The single rule behind every
+/// string-to-number coercion (`INT` validation, assertion operands,
+/// byte counts), so `1_000_000` and `-1_000` read identically everywhere
+/// while `1__0` and `1_` never silently become numbers. Unsigned
+/// callers still reject `-` at parse time; `+` parses like every other
+/// Rust-parsed number in the DSL.
+pub fn strip_digit_separators(text: &str) -> String {
+    let body = text
+        .strip_prefix('+')
+        .or_else(|| text.strip_prefix('-'))
+        .unwrap_or(text);
+    let bytes = body.as_bytes();
+    let well_formed = !body.is_empty()
+        && bytes[0].is_ascii_digit()
+        && bytes[bytes.len() - 1].is_ascii_digit()
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_digit() || *b == b'_' || *b == b'.')
+        && !body.contains("__")
+        && body.bytes().filter(|b| *b == b'.').count() <= 1;
+    if well_formed {
+        text.replace('_', "")
+    } else {
+        text.to_string()
+    }
+}
+
 /// Parse a byte-count token (`500`, `500B`, `10KB`, `2MB`, `1GB`, `1TB`
 /// decimal; `10KIB`, `2MIB`, `1GIB`, `1TIB` binary; a bare number means
 /// bytes). Digit runs may group with `_` separators (`1_000_000`),
 /// Rust-literal style: leading, trailing, and doubled separators fail.
-/// Matching is case-insensitive (`1gb`, `1GB`, and `1Gb` agree),
-/// mirroring [`parse_duration`]: digits only, no fractions, no signs.
+/// Fractions stay rejected by design (`1.5GB` fails: float parsing
+/// cannot hold exact byte boundaries past 2^53, and every sub-unit has
+/// an exact integer spelling like `1500MB`). Matching is
+/// case-insensitive (`1gb`, `1GB`, and `1Gb` agree), mirroring
+/// [`parse_duration`]: digits only, no fractions, no signs.
 pub fn parse_byte_count(s: &str) -> Result<u64> {
     let lower = s.to_ascii_lowercase();
     let (digits, unit): (&str, u64) = if let Some(v) = lower.strip_suffix("kib") {
@@ -332,20 +366,12 @@ pub fn parse_byte_count(s: &str) -> Result<u64> {
     };
     // Suffixes strip from the lowercased copy; slice the original at
     // the same boundary so errors echo the caller's spelling.
-    // Underscores group digits Rust-literal style: between digits only,
-    // never leading, trailing, or doubled.
-    let digits = &s[..digits.len()];
-    let grouped = digits.as_bytes();
-    let well_formed = !digits.is_empty()
-        && grouped[0].is_ascii_digit()
-        && grouped[grouped.len() - 1].is_ascii_digit()
-        && grouped.iter().all(|b| b.is_ascii_digit() || *b == b'_')
-        && !digits.contains("__");
-    if !well_formed {
-        bail!("invalid byte count: {s}");
-    }
+    // Separators follow the shared rule, so `1_0KB` parses while
+    // `1__0KB` fails like everywhere else. A leading `+` strips before
+    // the unsigned parse (`u64` rejects it; `-` still fails below).
+    let digits = strip_digit_separators(&s[..digits.len()]);
+    let digits = digits.strip_prefix('+').unwrap_or(&digits);
     let n: u64 = digits
-        .replace('_', "")
         .parse()
         .map_err(|_| anyhow!("invalid byte count: {s}"))?;
     let bytes = n

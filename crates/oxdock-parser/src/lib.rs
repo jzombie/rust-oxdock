@@ -411,6 +411,24 @@ mod tests {
     }
 
     #[test]
+    fn grouped_int_assert_operand_types_as_int() {
+        // Grouped digits in argument position type as INT, matching
+        // expression position: the separators never leak into values.
+        let steps = parse_script("ASSERT_EQ $x 1_000_000", crate::commands::lower_command)
+            .expect("grouped int parses");
+        match &steps[0].kind {
+            StepKind::AssertEq { expected, .. } => {
+                assert_eq!(
+                    expected,
+                    &Some(Arg::Expr(Expr::Literal(Value::int(1_000_000)))),
+                    "grouped digits must type as Int, got {expected:?}"
+                );
+            }
+            other => panic!("expected AssertEq, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn bare_let_pipe_declares_fresh_backend() {
         let steps = parse_script("LET $p: PIPE", test_lower).expect("bare LET $p: PIPE parses");
         assert_eq!(steps.len(), 1);
@@ -791,6 +809,25 @@ mod tests {
                 assert_eq!(expr, &Expr::Literal(Value::string("hello".to_string())));
             }
             other => panic!("expected Assign, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn let_assign_grouped_int_literal() {
+        let steps =
+            parse_script("LET $x: INT = 1_000_000", test_lower).expect("grouped int parses");
+        match &steps[0].kind {
+            StepKind::Assign { expr, .. } => {
+                assert_eq!(expr, &Expr::Literal(Value::int(1_000_000)));
+            }
+            other => panic!("expected Assign, got {:?}", other),
+        }
+        // Stray separators never read as numbers: the spelling stays a
+        // bare word, exactly like expression position decides.
+        let steps = parse_script("ECHO 1__0", test_lower).expect("parses as text");
+        match &steps[0].kind {
+            StepKind::Echo(arg) => assert_eq!(arg.as_str(), "1__0"),
+            other => panic!("expected Echo, got {:?}", other),
         }
     }
 

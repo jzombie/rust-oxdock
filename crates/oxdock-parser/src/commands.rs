@@ -811,11 +811,16 @@ fn lower_assert_target(arg: Arg) -> ParseResult<AssertTarget> {
 fn lower_assert_operand(arg: Arg) -> Arg {
     match arg {
         Arg::String(text, false) => {
-            if let Ok(i) = text.parse::<i64>() {
+            // Separators strip only when well-formed, so `1_000_000`
+            // types as Int while `1__0` keeps its literal reading,
+            // exactly like expression position. The original text
+            // survives below for the string case.
+            let clean = crate::command::strip_digit_separators(&text);
+            if let Ok(i) = clean.parse::<i64>() {
                 Arg::Expr(Expr::Literal(Value::int(i)))
-            } else if text.contains('.') && text.parse::<f64>().is_ok() {
+            } else if clean.contains('.') && clean.parse::<f64>().is_ok() {
                 Arg::Expr(Expr::Literal(Value::float(
-                    text.parse::<f64>().unwrap_or(f64::NAN),
+                    clean.parse::<f64>().unwrap_or(f64::NAN),
                 )))
             } else if text == "true" {
                 Arg::Expr(Expr::Literal(Value::bool(true)))
@@ -3611,7 +3616,10 @@ impl fmt::Display for StepKind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::command::{format_byte_count, format_duration, parse_byte_count, parse_duration};
+    use crate::command::{
+        format_byte_count, format_duration, parse_byte_count, parse_duration,
+        strip_digit_separators,
+    };
     use crate::parser::parse_script;
 
     fn parse_err(script: &str) -> String {
@@ -4351,6 +4359,53 @@ mod tests {
         }
         assert_eq!(format_byte_count(1024 * 1024 * 1024), "1GiB");
         assert_eq!(format_byte_count(1_000_000_000), "1GB");
+    }
+
+    #[test]
+    fn strip_digit_separators_passes_signs_through() {
+        // Signs belong to signed domains: the strip keeps them so
+        // `-1_000` reads as -1000 wherever ints coerce, while unsigned
+        // callers (byte counts) still reject at parse time.
+        assert_eq!(strip_digit_separators("-1_000"), "-1000");
+        assert_eq!(strip_digit_separators("+1_000_000"), "+1000000");
+        assert_eq!(strip_digit_separators("-1_000.5"), "-1000.5");
+        assert_eq!(strip_digit_separators("1_000"), "1000");
+        for untouched in ["+", "-", "", "1__0", "abc", "+-5", "--5"] {
+            assert_eq!(strip_digit_separators(untouched), untouched);
+        }
+        // Unsigned byte counts reject `-` at parse time but take `+`
+        // like every other Rust-parsed number in the DSL.
+        assert!(parse_byte_count("-1_000").is_err());
+        assert_eq!(parse_byte_count("+1GB").unwrap(), 1_000_000_000);
+    }
+
+    #[test]
+    fn format_byte_count_is_lossless() {
+        // The canonical form parses back to the exact input value:
+        // formatting never loses information, only spelling.
+        // Zero is unrepresentable by design (like durations): the
+        // parser rejects it, so it cannot round-trip.
+        for n in [
+            1,
+            500,
+            999,
+            1_000,
+            1_024,
+            1_500,
+            1_000_000,
+            1_048_576,
+            1_000_000_000,
+            1_073_741_824,
+            1_000_000_000_000,
+            1_099_511_627_776,
+            u64::MAX,
+        ] {
+            assert_eq!(
+                parse_byte_count(&format_byte_count(n)).unwrap(),
+                n,
+                "lossless round-trip failed for {n}"
+            );
+        }
     }
 
     #[test]

@@ -4233,11 +4233,14 @@ fn parse_expr_atom(ctx: &SpanContext, lctx: &LowerCtx, pair: Pair<Rule>) -> Pars
 /// as `f64` (non-finite/overflow bails); integers parse as `u64` so the
 /// unsigned half of `i64::MIN` (`9223372036854775808`) stages as
 /// `UnsignedIntBoundary` for unary `-` to consume. Larger values bail.
+/// `_` separators strip first: the grammar only admits them between
+/// digits, so the cleaned text always parses when the shape is right.
 fn parse_numeric_literal(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Expr> {
     let span = refine_span(ctx, &pair);
     let text = pair.as_str();
-    if text.contains('.') {
-        let parsed: f64 = text.parse().map_err(|_| {
+    let clean = text.replace('_', "");
+    if clean.contains('.') {
+        let parsed: f64 = clean.parse().map_err(|_| {
             ParseError::structural("expr", format!("invalid float literal {text:?}"), &span)
         })?;
         if !parsed.is_finite() {
@@ -4249,7 +4252,7 @@ fn parse_numeric_literal(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<Exp
         }
         return Ok(Expr::Literal(Value::float(parsed)));
     }
-    let digits: u64 = text.parse().map_err(|_| {
+    let digits: u64 = clean.parse().map_err(|_| {
         ParseError::structural(
             "expr",
             format!("integer overflow: {text:?} exceeds i64::MAX"),

@@ -2862,8 +2862,9 @@ Non MAP elements fail naming their position.
 Parse a byte-count token to `INT` bytes.
 
 Bare digits are bytes; suffixes `B`/`KB`/`MB`/`GB`/`TB` scale
-decimal and `KIB`/`MIB`/`GIB`/`TIB` binary, in any case. Pairs
-with `FORMAT_BYTE_COUNT` for the round trip.
+decimal and `KIB`/`MIB`/`GIB`/`TIB` binary, in any case. Plain
+`INT` values pass through (already bytes); integral finite `FLOAT`
+values convert. Pairs with `FORMAT_BYTE_COUNT` for the round trip.
 
 ```oxdock
 # Units parse case-insensitively; bare digits are bytes.
@@ -2878,15 +2879,23 @@ ASSERT_EQ $mebi 2097152
 # Digit runs group Rust-literal style.
 LET $grouped: INT = PARSE_BYTE_COUNT("1_000_000")
 ASSERT_EQ $grouped 1000000
+
+# Plain numbers pass through as bytes already.
+LET $plain: INT = PARSE_BYTE_COUNT(1048576)
+ASSERT_EQ $plain 1048576
+
+# Bare literals group too.
+LET $bare: INT = PARSE_BYTE_COUNT(1_000_000)
+ASSERT_EQ $bare 1000000
 ```
 
 
-**Signature:** `STD::PARSE_BYTE_COUNT($text: STRING) -> INT`
+**Signature:** `STD::PARSE_BYTE_COUNT($text: ANY) -> INT`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
-- `$text` (`STRING`): Byte-count token to parse.
+- `$text` (`ANY`): Byte-count token to parse, or bytes already.
 
 **Returns:** `INT`
 

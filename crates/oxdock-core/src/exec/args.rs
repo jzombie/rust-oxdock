@@ -231,7 +231,7 @@ pub(crate) fn resolve_arg_as_int<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
 ) -> Result<i64> {
     let resolved = resolve_arg(arg, cx)?;
-    resolved
+    oxdock_parser::command::strip_digit_separators(&resolved)
         .parse::<i64>()
         .map_err(|_| anyhow::anyhow!("expected int, got {resolved:?}"))
 }
@@ -671,7 +671,8 @@ pub(crate) fn int_from_value(val: Value) -> Result<Value> {
     }
     if let Some(s) = val.as_str() {
         let trimmed = trim_ascii(s);
-        return trimmed
+        let clean = oxdock_parser::command::strip_digit_separators(trimmed);
+        return clean
             .parse::<i64>()
             .map(Value::int)
             .map_err(|_| anyhow::anyhow!("INT() requires an integer string, found {s:?}"));

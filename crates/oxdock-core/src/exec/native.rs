@@ -668,12 +668,12 @@ fn float(
 /// ```oxdock
 /// # Byte counts render in the largest exact unit.
 /// IMPORT [STD]
-/// LET $pretty: STRING = FORMAT_BYTE_COUNT(1048576)
+/// LET $pretty: STRING = FORMAT_BYTE_COUNT(1_048_576)
 /// ASSERT_EQ $pretty "1MiB"
 ///
 /// # The pair round-trips through the parser.
 /// LET $back: INT = PARSE_BYTE_COUNT($pretty)
-/// ASSERT_EQ $back 1048576
+/// ASSERT_EQ $back 1_048_576
 /// ```
 ///
 #[oxdock_func(pure, returns = TypeTag::String)]
@@ -694,8 +694,9 @@ fn format_byte_count(
 /// Parse a byte-count token to `INT` bytes.
 ///
 /// Bare digits are bytes; suffixes `B`/`KB`/`MB`/`GB`/`TB` scale
-/// decimal and `KIB`/`MIB`/`GIB`/`TIB` binary, in any case. Pairs
-/// with `FORMAT_BYTE_COUNT` for the round trip.
+/// decimal and `KIB`/`MIB`/`GIB`/`TIB` binary, in any case. Plain
+/// `INT` values pass through (already bytes); integral finite `FLOAT`
+/// values convert. Pairs with `FORMAT_BYTE_COUNT` for the round trip.
 ///
 /// ```oxdock
 /// # Units parse case-insensitively; bare digits are bytes.
@@ -705,21 +706,50 @@ fn format_byte_count(
 ///
 /// # Binary suffixes scale by powers of two.
 /// LET $mebi: INT = PARSE_BYTE_COUNT("2mib")
-/// ASSERT_EQ $mebi 2097152
+/// ASSERT_EQ $mebi 2_097_152
 ///
 /// # Digit runs group Rust-literal style.
 /// LET $grouped: INT = PARSE_BYTE_COUNT("1_000_000")
-/// ASSERT_EQ $grouped 1000000
+/// ASSERT_EQ $grouped 1_000_000
+///
+/// # Plain numbers pass through as bytes already.
+/// LET $plain: INT = PARSE_BYTE_COUNT(1048576)
+/// ASSERT_EQ $plain 1_048_576
+///
+/// # Bare literals group too.
+/// LET $bare: INT = PARSE_BYTE_COUNT(1_000_000)
+/// ASSERT_EQ $bare 1_000_000
 /// ```
 ///
 #[oxdock_func(pure, returns = TypeTag::Int)]
 fn parse_byte_count(
-    /// Byte-count token to parse.
-    text: String,
+    /// Byte-count token to parse, or bytes already.
+    text: Value,
 ) -> Result<Value> {
-    let n = oxdock_parser::command::parse_byte_count(&text)?;
+    if let Some(n) = text.as_i64() {
+        if n < 0 {
+            return Err(anyhow::anyhow!(
+                "PARSE_BYTE_COUNT needs a non-negative byte count, got {n}"
+            ));
+        }
+        return Ok(Value::int(n));
+    }
+    if let Some(f) = text.as_f64() {
+        if f.is_finite() && f.fract() == 0.0 && f >= 0.0 && f <= i64::MAX as f64 {
+            return Ok(Value::int(f as i64));
+        }
+        return Err(anyhow::anyhow!(
+            "PARSE_BYTE_COUNT needs an integral byte count, got {f:?}"
+        ));
+    }
+    let Some(s) = text.as_str() else {
+        return Err(anyhow::anyhow!(
+            "PARSE_BYTE_COUNT needs a token or number, found {text:?}"
+        ));
+    };
+    let n = oxdock_parser::command::parse_byte_count(s)?;
     let n = i64::try_from(n)
-        .map_err(|_| anyhow::anyhow!("PARSE_BYTE_COUNT out of INT range: {text:?}"))?;
+        .map_err(|_| anyhow::anyhow!("PARSE_BYTE_COUNT out of INT range: {s:?}"))?;
     Ok(Value::int(n))
 }
 

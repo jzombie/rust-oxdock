@@ -2338,6 +2338,67 @@ fn run_exec_nonzero_status_bails_with_step_context() {
 }
 
 // ---------------------------------------------------------------------------
+// Grouped numerics survive every coercion and arithmetic they touch.
+// ---------------------------------------------------------------------------
+
+/// Grouped literals, signs, parsed units, and conversions must agree
+/// through arithmetic: separators never leak into values, and every
+/// spelling of one magnitude asserts equal.
+#[test]
+fn grouped_numbers_survive_arithmetic_and_conversions() {
+    let script = indoc! {r#"
+        IMPORT [STD]
+        # Bare literals group in expression position.
+        LET $a: INT = 1_000_000
+        ASSERT_EQ $a 1000000
+        ASSERT_EQ $a 1_000_000
+
+        # Unary and binary minus over grouped literals. Negative
+        # expectations bind first: a bare `-1000` in assert position
+        # parses as subtraction, like every other negative there.
+        LET $u: INT = -1_000
+        LET $neg: INT = 0 - 1_000
+        LET $e: INT = 0 - 1_000
+        ASSERT_EQ $u $e
+        ASSERT_EQ $neg $e
+
+        # Grouped operands fold through arithmetic.
+        LET $sum: INT = 1_000_000 + 2_500_000
+        ASSERT_EQ $sum 3_500_000
+        LET $scaled: INT = 2_000 * 3_000
+        ASSERT_EQ $scaled 6_000_000
+
+        # Parsed units join arithmetic at full precision.
+        LET $cap: INT = PARSE_BYTE_COUNT("1MB") + 500_000
+        ASSERT_EQ $cap 1_500_000
+        LET $pretty: STRING = FORMAT_BYTE_COUNT($cap)
+        ASSERT_EQ $pretty "1500KB"
+        LET $back: INT = PARSE_BYTE_COUNT($pretty)
+        ASSERT_EQ $back $cap
+
+        # Durations pair the same way.
+        LET $ms: INT = PARSE_DURATION("1m") + 30_000
+        ASSERT_EQ $ms 90_000
+        LET $dur: STRING = FORMAT_DURATION($ms)
+        ASSERT_EQ $dur "90s"
+        LET $msback: INT = PARSE_DURATION($dur)
+        ASSERT_EQ $msback $ms
+
+        # String conversions accept grouped and signed spellings.
+        LET $from_grouped: INT = INT("1_000_000")
+        ASSERT_EQ $from_grouped 1000000
+        LET $from_signed: INT = INT("-1_000")
+        ASSERT_EQ $from_signed $e
+        LET $from_plus: INT = INT("+1_000")
+        ASSERT_EQ $from_plus 1000
+    "#};
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let steps = oxdock_core::parse_script(script).unwrap();
+    run_steps(&root, &steps).unwrap();
+}
+
+// ---------------------------------------------------------------------------
 // Compile-time StepKind exhaustiveness check
 // ---------------------------------------------------------------------------
 
