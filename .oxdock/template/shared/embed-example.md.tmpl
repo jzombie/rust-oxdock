@@ -22,29 +22,28 @@ oxdock_embed! {
         ENV PROJECT=OxDock
         MKDIR dist
 
-        // Platform-gated execution (supports os:*, arch:*, family:*, and logical guards)
-        [family:unix] LET $os: STRING = RUN uname -srm
-        [family:windows] LET $os: STRING = RUN ver
-
-        LET $toolchain: STRING = RUN cargo --version
+        // Exec form spawns cargo portably without a shell. Asserting the version string
+        // in memory verifies the toolchain without baking volatile output into staged assets.
+        LET $cargo: STRING = RUN ["cargo", "--version"]
+        ASSERT_CONTAINS $cargo "cargo"
 
         // Assets stage under subdirectories relative to `out_dir` (e.g., prebuilt/dist/os.txt)
-        WRITE dist/os.txt "\{{ $os }}"
-        WRITE dist/toolchain.txt "\{{ $toolchain }}"
-        WRITE dist/manifest.txt "os toolchain"
+        WRITE dist/hello.txt "hello from \{{ env:PROJECT }}"
+        WRITE dist/project.txt "the-project"
+        WRITE dist/manifest.txt "the-manifest"
     }
 }
 
 fn main() {
     // Verify we can read the resources we just created
+    let hello = SiteAssets::get("dist/hello.txt").expect("hello must be embedded");
+    assert_eq!(hello.data.as_ref(), b"hello from OxDock");
+
+    let project = SiteAssets::get("dist/project.txt").expect("project must be embedded");
+    assert_eq!(project.data.as_ref(), b"the-project");
+
     let manifest = SiteAssets::get("dist/manifest.txt").expect("manifest must be embedded");
-    assert_eq!(manifest.data.as_ref(), b"os toolchain");
-
-    let toolchain = SiteAssets::get("dist/toolchain.txt").expect("toolchain must be embedded");
-    assert!(toolchain.data.starts_with(b"cargo "));
-
-    let os = SiteAssets::get("dist/os.txt").expect("os must be embedded");
-    assert!(!os.data.is_empty());
+    assert_eq!(manifest.data.as_ref(), b"the-manifest");
 }
 ```
 
