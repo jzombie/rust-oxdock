@@ -90,32 +90,19 @@ else
   # from the checksums file, so a renamed download would never verify.
   gh_curl "$base/$ASSET" -o "$tmp/$ASSET"
   gh_curl "$base/SHA256SUMS" -o "$tmp/SHA256SUMS"
-  # Installer logic rides with the release; tags predating it fall back
-  # to main. An explicit OXDOCK_OXFILE_URL wins over both (pre-merge
-  # testing, mirrors). Fetched here, inside population, so warm runs
-  # never touch network.
+  # Installer logic rides with the release bundle. An explicit
+  # OXDOCK_OXFILE_URL wins over the bundle (pre-merge testing,
+  # mirrors). Fetched here, inside population, so warm runs never
+  # touch network.
   if [ -n "${OXDOCK_OXFILE_URL:-}" ]; then
     gh_curl "$OXDOCK_OXFILE_URL" -o "$tmp/install.oxfile"
   else
-
-    # TODO(bundled-release): fetch the oxfile from the release bundle
-    # ($base) instead of the tag and main fallbacks below, and delete
-    # both fallbacks. Every supported release will carry the file.
-
-    gh_curl "https://raw.githubusercontent.com/$REPO/$VERSION/install.oxfile" -o "$tmp/install.oxfile" || gh_curl "https://raw.githubusercontent.com/$REPO/main/install.oxfile" -o "$tmp/install.oxfile"
+    gh_curl "$base/install.oxfile" -o "$tmp/install.oxfile"
   fi
-  # Release-bundled installer: when the checksums list it, fetch it
-  # alongside everything else so execution below can hand off to logic
-  # matching the engine version. Releases predating bundled installers
-  # list nothing here, so nothing is fetched and the vendored logic
-  # runs unchanged.
-
-  # TODO(bundled-release): fetch unconditionally and delete this guard.
-  # Every supported release will list the bundled installer.
-
-  if grep -q " install.sh$" "$tmp/SHA256SUMS" 2>/dev/null; then
-    gh_curl "$base/install.sh" -o "$tmp/install.sh"
-  fi
+  # The bundled stub travels beside everything else so execution below
+  # hands off to logic matching the engine version. Every supported
+  # release lists it; a missing entry fails closed at verification.
+  gh_curl "$base/install.sh" -o "$tmp/install.sh"
   if command -v sha256sum >/dev/null 2>&1; then
     (cd "$tmp" && grep "$ASSET\$" SHA256SUMS | sha256sum -c - >/dev/null)
   else
@@ -125,31 +112,16 @@ else
   mv "$tmp/SHA256SUMS" "$VDIR/SHA256SUMS"
   mv "$tmp/install.oxfile" "$VDIR/install.oxfile"
 
-  # TODO(bundled-release): move unconditionally and delete this guard.
-  # Every supported release will carry the bundled installer.
-
-  if [ -f "$tmp/install.sh" ]; then
-    mv "$tmp/install.sh" "$VDIR/install.sh"
-  fi
+  mv "$tmp/install.sh" "$VDIR/install.sh"
   trap - EXIT
   rm -rf "$tmp"
 fi
-# Self-update to the release-bundled installer when the release carries
-# one: the executed logic then always matches the engine version, and
-# warm runs keep working because the bundled copy lives in the cache
-# beside everything else. Releases predating bundled installers leave
-# no checksums entry, so the vendored logic below runs unchanged. The
-# flag prevents re-entry: the re-executed copy skips this block.
-
-# TODO(bundled-release): drop the file-existence and checksums-entry
-# guards and always hand off. Keep the re-entry flag and the digest
-# verification: the flag prevents loops and the digest proves integrity.
-
-if [ -z "${OXDOCK_STUB_ACTIVE:-}" ] && [ -f "$VDIR/install.sh" ]; then
-  if ! grep -q " install.sh$" "$VDIR/SHA256SUMS" 2>/dev/null; then
-    echo "installer stub missing from checksums" >&2
-    exit 1
-  fi
+# Hand off to the release-bundled installer: the executed logic always
+# matches the engine version, and warm runs keep working because the
+# bundled copy lives in the cache beside everything else. The flag
+# prevents re-entry: the re-executed copy skips this block. Digest
+# verification fails closed when the entry is missing or mismatched.
+if [ -z "${OXDOCK_STUB_ACTIVE:-}" ]; then
   if command -v sha256sum >/dev/null 2>&1; then
     (cd "$VDIR" && grep " install.sh$" SHA256SUMS | sha256sum -c - >/dev/null) || { echo "installer stub failed verification" >&2; exit 1; }
   else

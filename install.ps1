@@ -85,58 +85,36 @@ if (Test-CachedAsset) {
     $expected = ($line -split '\s+')[0]
     $actual = (Get-FileHash (Join-Path $tmp 'asset.tar.gz') -Algorithm SHA256).Hash
     if ($expected.ToLowerInvariant() -ne $actual.ToLowerInvariant()) { throw "checksum mismatch for $Asset" }
-    # Installer logic rides with the release; tags predating it fall
-    # back to main. An explicit OXDOCK_OXFILE_URL wins over both
-    # (pre-merge testing, mirrors). Fetched here, inside population,
-    # so warm runs never touch network.
+    # Installer logic rides with the release bundle. An explicit
+    # OXDOCK_OXFILE_URL wins over the bundle (pre-merge testing,
+    # mirrors). Fetched here, inside population, so warm runs never
+    # touch network.
     if ($env:OXDOCK_OXFILE_URL) {
       Invoke-WebRequest $env:OXDOCK_OXFILE_URL -Headers $ApiHeaders -OutFile (Join-Path $tmp 'install.oxfile')
     } else {
-      # TODO(bundled-release): fetch the oxfile from the release bundle
-      # ($base) instead of the tag and main fallbacks below, and delete
-      # both fallbacks. Every supported release will carry the file.
-
-      $raw = "https://raw.githubusercontent.com/$REPO/$VERSION/install.oxfile"
-      try { Invoke-WebRequest $raw -Headers $ApiHeaders -OutFile (Join-Path $tmp 'install.oxfile') } catch { Invoke-WebRequest "https://raw.githubusercontent.com/$REPO/main/install.oxfile" -Headers $ApiHeaders -OutFile (Join-Path $tmp 'install.oxfile') }
+      Invoke-WebRequest "$base/install.oxfile" -Headers $ApiHeaders -OutFile (Join-Path $tmp 'install.oxfile')
     }
-    # Release-bundled installer: when the checksums list it, fetch it
-    # alongside everything else so execution below can hand off to logic
-    # matching the engine version. Releases predating bundled installers
-    # list nothing here, so nothing is fetched and the vendored logic
-    # runs unchanged.
-
-    # TODO(bundled-release): fetch unconditionally and delete this guard.
-    # Every supported release will list the bundled installer.
-
-    $stubLine = (Get-Content (Join-Path $tmp 'SHA256SUMS')) | Where-Object { $_ -match " install.ps1" } | Select-Object -First 1
-    if ($stubLine) { Invoke-WebRequest "$base/install.ps1" -Headers $ApiHeaders -OutFile (Join-Path $tmp 'install.ps1') }
+    # The bundled stub travels beside everything else so execution
+    # below hands off to logic matching the engine version. Every
+    # supported release lists it; a missing entry fails closed at
+    # verification.
+    Invoke-WebRequest "$base/install.ps1" -Headers $ApiHeaders -OutFile (Join-Path $tmp 'install.ps1')
     Move-Item (Join-Path $tmp 'asset.tar.gz') (Join-Path $VDir $Asset) -Force
     Move-Item (Join-Path $tmp 'SHA256SUMS') (Join-Path $VDir 'SHA256SUMS') -Force
     Move-Item (Join-Path $tmp 'install.oxfile') (Join-Path $VDir 'install.oxfile') -Force
 
-    # TODO(bundled-release): move unconditionally and delete this guard.
-    # Every supported release will carry the bundled installer.
-
-    if (Test-Path (Join-Path $tmp 'install.ps1')) { Move-Item (Join-Path $tmp 'install.ps1') (Join-Path $VDir 'install.ps1') -Force }
+    Move-Item (Join-Path $tmp 'install.ps1') (Join-Path $VDir 'install.ps1') -Force
   } finally {
     Remove-Item -Recurse -Force $tmp
   }
 }
-# Self-update to the release-bundled installer when the release carries
-# one: the executed logic then always matches the engine version, and
-# warm runs keep working because the bundled copy lives in the cache
-# beside everything else. Releases predating bundled installers leave
-# no checksums entry, so the vendored logic below runs unchanged. The
-# flag prevents re-entry: the re-executed copy skips this block.
-
-# TODO(bundled-release): drop the existence and checksums-entry guards
-# and always hand off. Keep the re-entry flag and the digest
-# verification: the flag prevents loops and the digest proves integrity.
-
-if (-not $env:OXDOCK_STUB_ACTIVE -and (Test-Path (Join-Path $VDir 'install.ps1'))) {
-  $stubOk = ((Get-Content (Join-Path $VDir 'SHA256SUMS')) | Where-Object { $_ -match " install.ps1" } | Select-Object -First 1)
-  if (-not $stubOk) { throw "installer stub missing from checksums" }
-  $stubWant = ($stubOk -split '\s+')[0]
+# Hand off to the release-bundled installer: the executed logic always
+# matches the engine version, and warm runs keep working because the
+# bundled copy lives in the cache beside everything else. The flag
+# prevents re-entry: the re-executed copy skips this block. Digest
+# verification fails closed when the entry is missing or mismatched.
+if (-not $env:OXDOCK_STUB_ACTIVE) {
+  $stubWant = (((Get-Content (Join-Path $VDir 'SHA256SUMS')) | Where-Object { $_ -match " install.ps1" } | Select-Object -First 1) -split '\s+')[0]
   $stubGot = (Get-FileHash (Join-Path $VDir 'install.ps1') -Algorithm SHA256).Hash
   if ($stubWant.ToLowerInvariant() -ne $stubGot.ToLowerInvariant()) { throw "installer stub failed verification" }
   $env:OXDOCK_STUB_ACTIVE = '1'

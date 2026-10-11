@@ -37,7 +37,7 @@ on:
 # to a newer tag only after it proves green; an older engine choking on
 # new syntax fails loudly at step start, which is the point.
 env:
-  OXDOCK_PINNED_ENGINE: v0.24.2-alpha
+  OXDOCK_PINNED_ENGINE: v0.24.4-alpha
 
 jobs:
   parse:

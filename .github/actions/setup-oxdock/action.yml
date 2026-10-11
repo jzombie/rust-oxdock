@@ -1,13 +1,16 @@
 # Install the oxdock interpreter for `shell: oxdock` steps (or
 # `shell: oxdock-engine` when binary-name renames it).
-# The installers beside this file are generated from the repo
-# templates; remote consumers check out only this directory.
+# The installer runs from the requested release, fetched over TLS:
+# remote consumers check out only this directory, so no vendored
+# scripts ride along to drift out of sync. First release carrying
+# installers: v0.24.4-alpha; `latest` resolves through the API, and
+# any tag carrying them works.
 name: Setup OxDock engine
 description: Install the oxdock interpreter so later steps can use shell oxdock.
 
 inputs:
   version:
-    description: Full release tag to install (e.g. v0.24.2-alpha), or `latest` to resolve the newest release.
+    description: Full release tag to install (e.g. v0.24.4-alpha), or `latest` to resolve the newest release.
     required: false
     default: latest
   binary-name:
@@ -18,19 +21,37 @@ inputs:
 runs:
   using: composite
   steps:
-    # Empty VERSION resolves latest inside the installer; a tag pins.
+    # The resolved tag passes explicitly so the installer fetches one
+    # version's assets even if `latest` moves mid-run.
     - name: Install OxDock engine
       if: ${{ runner.os != 'Windows' }}
       shell: bash
       run: |
         set -euo pipefail
+        # Shared runner IPs burn the anonymous API quota: authenticate
+        # reads when a token is present (CI bridges GITHUB_TOKEN).
+        # A function, not a flags string: quoted flag strings
+        # word-split into garbage on expansion.
+        fetch() {
+          if [ -n "${GITHUB_TOKEN:-}" ]; then
+            curl -fsSL -H "Authorization: Bearer $GITHUB_TOKEN" "$@"
+          else
+            curl -fsSL "$@"
+          fi
+        }
+        repo="jzombie/rust-oxdock"
         enginedir="${RUNNER_TEMP}/oxdock-engine"
-        mkdir -p "$enginedir"
-        if [ "${{ inputs.version }}" = "latest" ]; then
-          INSTALL_DIR="$enginedir" bash "${GITHUB_ACTION_PATH}/install.sh"
-        else
-          VERSION="${{ inputs.version }}" INSTALL_DIR="$enginedir" bash "${GITHUB_ACTION_PATH}/install.sh"
+        scratch="${RUNNER_TEMP}/oxdock-installer"
+        mkdir -p "$enginedir" "$scratch"
+        version="${{ inputs.version }}"
+        if [ "$version" = "latest" ]; then
+          # Same list endpoint the stub queries: `/releases/latest`
+          # excludes pre-releases by contract, and a future publish
+          # flagged as one would 404 every default-input caller.
+          version=$(fetch "https://api.github.com/repos/$repo/releases?per_page=1" | grep '"tag_name"' | cut -d'"' -f4)
         fi
+        fetch "https://github.com/$repo/releases/download/$version/install.sh" -o "$scratch/install.sh"
+        VERSION="$version" INSTALL_DIR="$enginedir" bash "$scratch/install.sh"
         # A renamed bootstrap frees the bare name: same-directory move,
         # skipped when the name is already the default.
         if [ "${{ inputs.binary-name }}" != "oxdock" ]; then
@@ -43,11 +64,26 @@ runs:
       shell: pwsh
       run: |
         $ErrorActionPreference = 'Stop'
+        $repo = 'jzombie/rust-oxdock'
         $enginedir = Join-Path $env:RUNNER_TEMP 'oxdock-engine'
-        New-Item -ItemType Directory -Force -Path $enginedir | Out-Null
-        if ('${{ inputs.version }}' -ne 'latest') { $env:VERSION = '${{ inputs.version }}' }
+        $scratch = Join-Path $env:RUNNER_TEMP 'oxdock-installer'
+        New-Item -ItemType Directory -Force -Path $enginedir, $scratch | Out-Null
+        # Shared runner IPs burn the anonymous API quota: authenticate
+        # reads when a token is present (CI bridges GITHUB_TOKEN).
+        # An empty table sends no headers.
+        $ApiHeaders = @{}
+        if ($env:GITHUB_TOKEN) { $ApiHeaders['Authorization'] = "Bearer $($env:GITHUB_TOKEN)" }
+        $version = '${{ inputs.version }}'
+        if ($version -eq 'latest') {
+          # Same list endpoint the stub queries: `/releases/latest`
+          # excludes pre-releases by contract.
+          $version = (Invoke-RestMethod "https://api.github.com/repos/$repo/releases?per_page=1" -Headers $ApiHeaders)[0].tag_name
+        }
+        $installer = Join-Path $scratch 'install.ps1'
+        Invoke-WebRequest "https://github.com/$repo/releases/download/$version/install.ps1" -Headers $ApiHeaders -OutFile $installer
+        $env:VERSION = $version
         $env:INSTALL_DIR = $enginedir
-        & (Join-Path $env:GITHUB_ACTION_PATH 'install.ps1')
+        & $installer
         # A renamed bootstrap frees the bare name: same-directory move,
         # skipped when the name is already the default.
         if ('${{ inputs.binary-name }}' -ne 'oxdock') {

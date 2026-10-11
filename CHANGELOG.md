@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [UNRELEASED]
+
+### Changed
+
+- Installers fetch `install.oxfile` and the executing stub from the release bundle unconditionally and always hand off to the bundled copy: the tag and main fallbacks are gone, so installing a release predating bundled installers (`< v0.24.4-alpha`) now fails closed at verification instead of running version-skewed logic. An explicit `OXDOCK_OXFILE_URL` still wins for pre-merge testing.
+
 ## [0.24.4-alpha] - 2026-10-11
 
 ### Added
