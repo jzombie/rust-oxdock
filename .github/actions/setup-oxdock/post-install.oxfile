@@ -1,0 +1,35 @@
+# Post-install for the setup-oxdock action: rename the bootstrap engine
+# when asked and publish its directory on GITHUB_PATH. Runs under the
+# freshly installed engine; the shell prelude bridges ENGINE_DIR (install
+# directory), ENGINE_SRC (installed filename), ENGINE_DST (wanted
+# filename), and GITHUB_PATH. Filenames arrive with the platform
+# extension computed by the caller, so this script never branches on OS.
+# A renamed bootstrap frees the bare `oxdock` name for a binary under
+# test; the default name skips the rename and only publishes the path.
+
+IMPORT [STD]
+
+INHERIT_ENV [OXDOCK_ENGINE_DIR, OXDOCK_ENGINE_SRC, OXDOCK_ENGINE_DST, GITHUB_PATH]
+
+# Full filesystem access: the engine directory and the PATH file live
+# outside any workspace.
+WORKSPACE SYSTEM
+
+# Same name in and out means no rename: the guard below skips a
+# self-move and falls straight through to the smoke check.
+LET $dir: STRING = "{{ env:OXDOCK_ENGINE_DIR }}"
+LET $src: STRING = "{{ env:OXDOCK_ENGINE_SRC }}"
+LET $dst: STRING = "{{ env:OXDOCK_ENGINE_DST }}"
+IF $src != $dst {
+    COPY "{{ $dir }}/{{ $src }}" "{{ $dir }}/{{ $dst }}"
+    REMOVE "{{ $dir }}/{{ $src }}"
+}
+# The installed engine reports itself: a mode-less copy or a failed
+# rename surfaces here instead of haunting later steps.
+LET $kind: STRING = PATH_TYPE("{{ $dir }}/{{ $dst }}")
+ASSERT_EQ $kind "file"
+LET $v: PIPE
+WITH_IO [stdout=$v] RUN ["{{ $dir }}/{{ $dst }}", "--version"]
+WITH_IO [stdin=$v] READ_LINE $reported
+ASSERT_CONTAINS $reported "oxdock "
+APPEND "{{ env:GITHUB_PATH }}" "{{ $dir }}\n"
