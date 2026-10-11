@@ -1831,7 +1831,7 @@ modes (confer executability with `INSTALL` there).
 
 | Flag | Type | Description |
 | --- | --- | --- |
-| `--max-bytes` | `STRING` | Cap total unpacked member bytes: bare digits are bytes (`1_000_000` grouping allowed), suffixes B/KB/MB/GB/TB (decimal) and KIB/MIB/GIB/TIB (binary), any case (defaults to 1 GiB) |
+| `--max-bytes` | `STRING` | Cap total unpacked member bytes: bare digits are bytes (`1_000_000` grouping allowed), suffixes B/KB/MB/GB/TB (decimal) and KIB/MIB/GIB/TIB (binary), any case, one optional space before the unit (defaults to 1 GiB) |
 
 **Examples:**
 
@@ -2649,12 +2649,12 @@ formatted values reparse exactly. Negative inputs fail.
 ```oxdock
 # Byte counts render in the largest exact unit.
 IMPORT [STD]
-LET $pretty: STRING = FORMAT_BYTE_COUNT(1048576)
+LET $pretty: STRING = FORMAT_BYTE_COUNT(1_048_576)
 ASSERT_EQ $pretty "1MiB"
 
 # The pair round-trips through the parser.
 LET $back: INT = PARSE_BYTE_COUNT($pretty)
-ASSERT_EQ $back 1048576
+ASSERT_EQ $back 1_048_576
 ```
 
 
@@ -2874,19 +2874,23 @@ ASSERT_EQ $bytes 1000000000
 
 # Binary suffixes scale by powers of two.
 LET $mebi: INT = PARSE_BYTE_COUNT("2mib")
-ASSERT_EQ $mebi 2097152
+ASSERT_EQ $mebi 2_097_152
 
 # Digit runs group Rust-literal style.
 LET $grouped: INT = PARSE_BYTE_COUNT("1_000_000")
-ASSERT_EQ $grouped 1000000
+ASSERT_EQ $grouped 1_000_000
 
 # Plain numbers pass through as bytes already.
 LET $plain: INT = PARSE_BYTE_COUNT(1048576)
-ASSERT_EQ $plain 1048576
+ASSERT_EQ $plain 1_048_576
 
 # Bare literals group too.
 LET $bare: INT = PARSE_BYTE_COUNT(1_000_000)
-ASSERT_EQ $bare 1000000
+ASSERT_EQ $bare 1_000_000
+
+# One optional space separates number from unit.
+LET $spaced: INT = PARSE_BYTE_COUNT("1 GB")
+ASSERT_EQ $spaced 1_000_000_000
 ```
 
 
@@ -2915,6 +2919,10 @@ ASSERT_EQ $ms 120000
 # Milliseconds stay exact.
 LET $exact: INT = PARSE_DURATION("1500ms")
 ASSERT_EQ $exact 1500
+
+# One optional space separates number from unit.
+LET $spaced: INT = PARSE_DURATION("1 h")
+ASSERT_EQ $spaced 3_600_000
 ```
 
 

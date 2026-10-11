@@ -1412,7 +1412,7 @@ declare_commands! {
             ArgSpec { name: "src", arg_type: ArgType::Path, description: "Archive file to unpack", io: IoDirection::Read, index: 0, required: true, fallback_stream: None },
             ArgSpec { name: "dst", arg_type: ArgType::Path, description: "Directory to unpack under", io: IoDirection::Write, index: 1, required: true, fallback_stream: None },
         ],
-        flags: &[ FlagSpec { name: "max_bytes", long: "--max-bytes", value_type: FlagValueType::String, required: false, description: "Cap total unpacked member bytes: bare digits are bytes (`1_000_000` grouping allowed), suffixes B/KB/MB/GB/TB (decimal) and KIB/MIB/GIB/TIB (binary), any case (defaults to 1 GiB)" } ],
+        flags: &[ FlagSpec { name: "max_bytes", long: "--max-bytes", value_type: FlagValueType::String, required: false, description: "Cap total unpacked member bytes: bare digits are bytes (`1_000_000` grouping allowed), suffixes B/KB/MB/GB/TB (decimal) and KIB/MIB/GIB/TIB (binary), any case, one optional space before the unit (defaults to 1 GiB)" } ],
         default_output: None,
         examples: &[ Example { name: "unarchive", fence_meta: None, code: indoc! {r#"
             # Pack a note, then restore it under a fresh destination.
@@ -4278,6 +4278,9 @@ mod tests {
         assert_eq!(parse_duration("2m").unwrap(), Duration::from_secs(120));
         assert_eq!(parse_duration("1h").unwrap(), Duration::from_secs(3600));
         assert_eq!(parse_duration("30").unwrap(), Duration::from_secs(30));
+        // One optional space separates number from unit, like bytes.
+        assert_eq!(parse_duration("30 s").unwrap(), Duration::from_secs(30));
+        assert_eq!(parse_duration("2 m").unwrap(), Duration::from_secs(120));
     }
 
     #[test]
@@ -4288,9 +4291,9 @@ mod tests {
         assert!(parse_duration("0s").is_err());
         assert!(parse_duration("0").is_err());
         assert!(parse_duration("-5s").is_err());
-        // Units glue to the number, like byte counts: a space would
-        // split DSL tokens upstream anyway.
-        assert!(parse_duration("30 s").is_err());
+        // Three parts or a split digit run stay rejected.
+        assert!(parse_duration("30 s s").is_err());
+        assert!(parse_duration("3 0s").is_err());
     }
 
     #[test]
@@ -4318,6 +4321,13 @@ mod tests {
         );
         assert_eq!(parse_byte_count("1_0KB").unwrap(), 10_000);
         assert_eq!(parse_byte_count("1_0GiB").unwrap(), 10 * 1024 * 1024 * 1024);
+        // One optional space separates number from unit, never digits.
+        assert_eq!(parse_byte_count("1 GB").unwrap(), 1_000_000_000);
+        assert_eq!(parse_byte_count("10 KiB").unwrap(), 10_240);
+        assert_eq!(parse_byte_count("  2MB  ").unwrap(), 2_000_000);
+        // A leading `+` rides spaced or glued; `-` stays rejected.
+        assert_eq!(parse_byte_count("+1 GB").unwrap(), 1_000_000_000);
+        assert!(parse_byte_count("-1 GB").is_err());
     }
 
     #[test]
@@ -4333,12 +4343,15 @@ mod tests {
             "-5GB",
             "0",
             "0GB",
-            "1 GB",
             "_100",
             "100_",
             "1__000",
             "_",
             "1_GB",
+            // A space splits tokens, never digit runs or units.
+            "1 G B",
+            "1 2",
+            "1 0",
             // Absurd magnitudes fail loudly instead of wrapping.
             "1000000000000000000000000",
             "1000000000TB",

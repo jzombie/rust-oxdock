@@ -2870,23 +2870,23 @@ values convert. Pairs with `FORMAT_BYTE_COUNT` for the round trip.
 # Units parse case-insensitively; bare digits are bytes.
 IMPORT [STD]
 LET $bytes: INT = PARSE_BYTE_COUNT("1Gb")
-ASSERT_EQ $bytes 1000000000
+ASSERT_EQ $bytes 1_000_000_000
 
 # Binary suffixes scale by powers of two.
 LET $mebi: INT = PARSE_BYTE_COUNT("2mib")
-ASSERT_EQ $mebi 2097152
+ASSERT_EQ $mebi 2_097_152
 
 # Digit runs group Rust-literal style.
 LET $grouped: INT = PARSE_BYTE_COUNT("1_000_000")
-ASSERT_EQ $grouped 1000000
+ASSERT_EQ $grouped 1_000_000
 
 # Plain numbers pass through as bytes already.
-LET $plain: INT = PARSE_BYTE_COUNT(1048576)
-ASSERT_EQ $plain 1048576
+LET $plain: INT = PARSE_BYTE_COUNT(1_048_576)
+ASSERT_EQ $plain 1_048_576
 
 # Bare literals group too.
 LET $bare: INT = PARSE_BYTE_COUNT(1_000_000)
-ASSERT_EQ $bare 1000000
+ASSERT_EQ $bare 1_000_000
 ```
 
 

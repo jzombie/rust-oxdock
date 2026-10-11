@@ -719,6 +719,10 @@ fn format_byte_count(
 /// # Bare literals group too.
 /// LET $bare: INT = PARSE_BYTE_COUNT(1_000_000)
 /// ASSERT_EQ $bare 1_000_000
+///
+/// # One optional space separates number from unit.
+/// LET $spaced: INT = PARSE_BYTE_COUNT("1 GB")
+/// ASSERT_EQ $spaced 1_000_000_000
 /// ```
 ///
 #[oxdock_func(pure, returns = TypeTag::Int)]
@@ -797,6 +801,10 @@ fn format_duration(
 /// # Milliseconds stay exact.
 /// LET $exact: INT = PARSE_DURATION("1500ms")
 /// ASSERT_EQ $exact 1500
+///
+/// # One optional space separates number from unit.
+/// LET $spaced: INT = PARSE_DURATION("1 h")
+/// ASSERT_EQ $spaced 3_600_000
 /// ```
 ///
 #[oxdock_func(pure, returns = TypeTag::Int)]

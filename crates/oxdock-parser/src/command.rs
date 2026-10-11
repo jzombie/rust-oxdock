@@ -260,8 +260,11 @@ pub fn split_assignment(text: &str) -> Result<Option<(String, Arg)>> {
 }
 
 /// Parse a TIMEOUT duration token (`500ms`, `10s`, `2m`, `1h`; a bare
-/// number means seconds).
+/// number means seconds). One optional space may separate the number
+/// from its unit (`30 s`), like byte counts: bare DSL tokens still
+/// split upstream, so this covers quoted strings and variables.
 pub fn parse_duration(s: &str) -> Result<std::time::Duration> {
+    let s = join_single_space(s)?;
     let (digits, unit_ms): (&str, u64) = if let Some(v) = s.strip_suffix("ms") {
         (v, 1)
     } else if let Some(v) = s.strip_suffix('s') {
@@ -271,7 +274,7 @@ pub fn parse_duration(s: &str) -> Result<std::time::Duration> {
     } else if let Some(v) = s.strip_suffix('h') {
         (v, 3_600_000)
     } else {
-        (s, 1_000)
+        (s.as_str(), 1_000)
     };
     let n: u64 = digits
         .parse()
@@ -332,16 +335,49 @@ pub fn strip_digit_separators(text: &str) -> String {
     }
 }
 
+/// Join a numeric token whose unit may ride separated by one space
+/// (`1 GB`, `30 s`): surrounding whitespace trims, and exactly two
+/// whitespace-separated parts rejoin digit-run plus unit. Anything else
+/// (three parts, a split digit run like `1 0`, an empty string) fails:
+/// the space may only separate the number from its unit, never split
+/// the digits themselves.
+fn join_single_space(s: &str) -> Result<String> {
+    let mut parts = s.split_whitespace();
+    let (first, second) = (parts.next(), parts.next());
+    if parts.next().is_some() {
+        bail!("invalid numeric token: {s}");
+    }
+    match (first, second) {
+        (Some(digits), None) => Ok(digits.to_string()),
+        (Some(digits), Some(unit))
+            if digits
+                .strip_prefix('+')
+                .unwrap_or(digits)
+                .bytes()
+                .all(|b| b.is_ascii_digit() || b == b'_')
+                && unit.bytes().all(|b| b.is_ascii_alphabetic()) =>
+        {
+            Ok(format!("{digits}{unit}"))
+        }
+        _ => bail!("invalid numeric token: {s}"),
+    }
+}
+
 /// Parse a byte-count token (`500`, `500B`, `10KB`, `2MB`, `1GB`, `1TB`
 /// decimal; `10KIB`, `2MIB`, `1GIB`, `1TIB` binary; a bare number means
 /// bytes). Digit runs may group with `_` separators (`1_000_000`),
 /// Rust-literal style: leading, trailing, and doubled separators fail.
+/// One optional space may separate the number from its unit (`1 GB`);
+/// anything more stays rejected, and bare DSL tokens still split
+/// upstream (this covers quoted strings, variables, and flag values).
 /// Fractions stay rejected by design (`1.5GB` fails: float parsing
 /// cannot hold exact byte boundaries past 2^53, and every sub-unit has
 /// an exact integer spelling like `1500MB`). Matching is
 /// case-insensitive (`1gb`, `1GB`, and `1Gb` agree), mirroring
 /// [`parse_duration`]: digits only, no fractions, no signs.
 pub fn parse_byte_count(s: &str) -> Result<u64> {
+    let compact = join_single_space(s)?;
+    let s = compact.as_str();
     let lower = s.to_ascii_lowercase();
     let (digits, unit): (&str, u64) = if let Some(v) = lower.strip_suffix("kib") {
         (v, 1 << 10)
