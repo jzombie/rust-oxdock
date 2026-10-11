@@ -38,7 +38,17 @@ case "$(uname -s)-$(uname -m)" in
   Darwin-arm64) TARGET="aarch64-apple-darwin" ;;
   Linux-x86_64) TARGET="x86_64-unknown-linux-musl" ;;
   Linux-aarch64) TARGET="aarch64-unknown-linux-musl" ;;
-  MINGW64*-x86_64 | MSYS*-x86_64 | CYGWIN*-x86_64) TARGET="x86_64-pc-windows-msvc" ;;
+  # Emulated shells lie: x64 Git Bash on ARM64 Windows reports x86_64
+  # while the machine (and everything the installer places outside the
+  # shell) is ARM64. The emulated process itself sees AMD64 in
+  # PROCESSOR_ARCHITECTURE; only PROCESSOR_ARCHITEW6432 names the native
+  # arch there, so both are checked and native wins either way.
+  MINGW64*-x86_64 | MSYS*-x86_64 | CYGWIN*-x86_64)
+    if [ "${PROCESSOR_ARCHITECTURE:-}" = "ARM64" ] || [ "${PROCESSOR_ARCHITEW6432:-}" = "ARM64" ]; then
+      TARGET="aarch64-pc-windows-msvc"
+    else
+      TARGET="x86_64-pc-windows-msvc"
+    fi ;;
   MINGW64*-aarch64 | MSYS*-aarch64 | CYGWIN*-aarch64) TARGET="aarch64-pc-windows-msvc" ;;
   *) echo "unsupported platform: $(uname -s)-$(uname -m)" >&2; exit 1 ;;
 esac
