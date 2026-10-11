@@ -87,8 +87,7 @@ impl Parse for DslMacroInput {
         }
 
         Ok(Self {
-            name: name
-                .ok_or_else(|| syn::Error::new(input.span(), "missing `name: ...` field"))?,
+            name: name.ok_or_else(|| syn::Error::new(input.span(), "missing `name: ...` field"))?,
             script: script
                 .ok_or_else(|| syn::Error::new(input.span(), "missing `script: ...` field"))?,
             out_dir: out_dir
@@ -786,22 +785,30 @@ mod tests {
 
     #[test]
     fn parse_dsl_macro_input_rejects_duplicates_unknown_and_missing() {
-        assert!(syn::parse_str::<DslMacroInput>(
-            "name: foo, name: bar, script: \"RUN echo hi\", out_dir: \"out\""
-        )
-        .is_err());
-        assert!(syn::parse_str::<DslMacroInput>(
-            "name: foo, script: \"RUN echo hi\", script: \"RUN echo yo\", out_dir: \"out\""
-        )
-        .is_err());
-        assert!(syn::parse_str::<DslMacroInput>(
-            "name: foo, script: \"RUN echo hi\", out_dir: \"a\", out_dir: \"b\""
-        )
-        .is_err());
-        assert!(syn::parse_str::<DslMacroInput>(
-            "name: foo, script: \"RUN echo hi\", out_dir: \"out\", extra: 1"
-        )
-        .is_err());
+        assert!(
+            syn::parse_str::<DslMacroInput>(
+                "name: foo, name: bar, script: \"RUN echo hi\", out_dir: \"out\""
+            )
+            .is_err()
+        );
+        assert!(
+            syn::parse_str::<DslMacroInput>(
+                "name: foo, script: \"RUN echo hi\", script: \"RUN echo yo\", out_dir: \"out\""
+            )
+            .is_err()
+        );
+        assert!(
+            syn::parse_str::<DslMacroInput>(
+                "name: foo, script: \"RUN echo hi\", out_dir: \"a\", out_dir: \"b\""
+            )
+            .is_err()
+        );
+        assert!(
+            syn::parse_str::<DslMacroInput>(
+                "name: foo, script: \"RUN echo hi\", out_dir: \"out\", extra: 1"
+            )
+            .is_err()
+        );
         assert!(syn::parse_str::<DslMacroInput>("script: \"x\", out_dir: \"y\"").is_err());
         assert!(syn::parse_str::<DslMacroInput>("name: foo, out_dir: \"y\"").is_err());
         assert!(syn::parse_str::<DslMacroInput>("name: foo, script: \"x\"").is_err());
