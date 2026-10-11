@@ -79,10 +79,6 @@ jobs:
       # through the script path: GitHub stages `run:` blocks outside the
       # checkout, so discovery would misresolve without the override.
       OXDOCK_WORKSPACE_ROOT: ${{ github.workspace }}
-      # Test the branch's own installer logic, not whatever main happens
-      # to carry: head branch on PRs, branch name otherwise. Unset on no
-      # known branch would skip the override; every event here has one.
-      OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.head_ref || github.ref_name }}/install.oxfile
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -101,6 +97,12 @@ jobs:
         uses: ./.github/actions/setup-oxdock
         with:
           version: ${{ env.OXDOCK_PINNED_ENGINE }}
+        env:
+          # Bootstrap determinism: run the pinned release's own oxfile,
+          # which matches the pinned engine's vocabulary, regardless of
+          # any branch URL leaking in from elsewhere. The pin is always
+          # an exact tag, so this URL resolves.
+          OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ env.OXDOCK_PINNED_ENGINE }}/install.oxfile
 
       # The binary under test is this branch, never a published tag:
       # behavior fixes prove before any release ships them. Same build
@@ -215,7 +217,6 @@ jobs:
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       OXDOCK_WORKSPACE_ROOT: ${{ github.workspace }}
-      OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.head_ref || github.ref_name }}/install.oxfile
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -234,6 +235,12 @@ jobs:
         with:
           version: ${{ env.OXDOCK_PINNED_ENGINE }}
           binary-name: oxdock-engine
+        env:
+          # Bootstrap determinism: run the pinned release's own oxfile,
+          # which matches the pinned engine's vocabulary, regardless of
+          # any branch URL leaking in from elsewhere. The pin is always
+          # an exact tag, so this URL resolves.
+          OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ env.OXDOCK_PINNED_ENGINE }}/install.oxfile
 
       # Every leg below fetches the staged branch build through the
       # stub from loopback: VERSION stays pinned so no release API is
@@ -243,6 +250,10 @@ jobs:
         env:
           VERSION: local-test
           SMOKE_PORT: 18731
+          # Legs exercise the branch's own installer logic, not whatever
+          # main happens to carry. Kept off the job env so the pinned
+          # bootstrap stays on the release's own oxfile.
+          OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.head_ref || github.ref_name }}/install.oxfile
         run: |
           IMPORT [STD]
           INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, HOME, USERPROFILE, LOCALAPPDATA, GITHUB_TOKEN, PATH]
@@ -307,7 +318,6 @@ jobs:
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       OXDOCK_WORKSPACE_ROOT: ${{ github.workspace }}
-      OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.head_ref || github.ref_name }}/install.oxfile
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -326,6 +336,12 @@ jobs:
         with:
           version: ${{ env.OXDOCK_PINNED_ENGINE }}
           binary-name: oxdock-engine
+        env:
+          # Bootstrap determinism: run the pinned release's own oxfile,
+          # which matches the pinned engine's vocabulary, regardless of
+          # any branch URL leaking in from elsewhere. The pin is always
+          # an exact tag, so this URL resolves.
+          OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ env.OXDOCK_PINNED_ENGINE }}/install.oxfile
 
       # Piped delivery: the stub arrives on stdin exactly as real users
       # run it, covering the self-consumption class where the drain eats
@@ -335,6 +351,10 @@ jobs:
         env:
           VERSION: local-test
           SMOKE_PORT: 18734
+          # Legs exercise the branch's own installer logic, not whatever
+          # main happens to carry. Kept off the job env so the pinned
+          # bootstrap stays on the release's own oxfile.
+          OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.head_ref || github.ref_name }}/install.oxfile
         run: |
           IMPORT [STD]
           INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, HOME, USERPROFILE, LOCALAPPDATA, GITHUB_TOKEN, PATH]
@@ -403,7 +423,6 @@ jobs:
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       OXDOCK_WORKSPACE_ROOT: ${{ github.workspace }}
-      OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.head_ref || github.ref_name }}/install.oxfile
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -422,6 +441,12 @@ jobs:
         with:
           version: ${{ env.OXDOCK_PINNED_ENGINE }}
           binary-name: oxdock-engine
+        env:
+          # Bootstrap determinism: run the pinned release's own oxfile,
+          # which matches the pinned engine's vocabulary, regardless of
+          # any branch URL leaking in from elsewhere. The pin is always
+          # an exact tag, so this URL resolves.
+          OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ env.OXDOCK_PINNED_ENGINE }}/install.oxfile
 
       # No engine override anywhere by design, so the unpacked release
       # binary itself runs the installer: the user-visible shape, with
@@ -431,6 +456,10 @@ jobs:
         env:
           VERSION: local-test
           SMOKE_PORT: 18737
+          # Legs exercise the branch's own installer logic, not whatever
+          # main happens to carry. Kept off the job env so the pinned
+          # bootstrap stays on the release's own oxfile.
+          OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.head_ref || github.ref_name }}/install.oxfile
         run: |
           IMPORT [STD]
           INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, HOME, USERPROFILE, LOCALAPPDATA, GITHUB_TOKEN, PATH]
@@ -487,7 +516,6 @@ jobs:
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       OXDOCK_WORKSPACE_ROOT: ${{ github.workspace }}
-      OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.head_ref || github.ref_name }}/install.oxfile
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -506,6 +534,12 @@ jobs:
         with:
           version: ${{ env.OXDOCK_PINNED_ENGINE }}
           binary-name: oxdock-engine
+        env:
+          # Bootstrap determinism: run the pinned release's own oxfile,
+          # which matches the pinned engine's vocabulary, regardless of
+          # any branch URL leaking in from elsewhere. The pin is always
+          # an exact tag, so this URL resolves.
+          OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ env.OXDOCK_PINNED_ENGINE }}/install.oxfile
 
       # Default location: no INSTALL_DIR anywhere by design, so each
       # platform's stub default engages. Windows asserts the real
@@ -517,6 +551,10 @@ jobs:
           VERSION: local-test
           # Loopback port for this leg; server, probe, and release base derive from it.
           SMOKE_PORT: 18735
+          # Legs exercise the branch's own installer logic, not whatever
+          # main happens to carry. Kept off the job env so the pinned
+          # bootstrap stays on the release's own oxfile.
+          OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.head_ref || github.ref_name }}/install.oxfile
         run: |
           IMPORT [STD]
           INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, HOME, USERPROFILE, LOCALAPPDATA, GITHUB_TOKEN, PATH]
@@ -571,7 +609,6 @@ jobs:
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       OXDOCK_WORKSPACE_ROOT: ${{ github.workspace }}
-      OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.head_ref || github.ref_name }}/install.oxfile
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -590,6 +627,12 @@ jobs:
         with:
           version: ${{ env.OXDOCK_PINNED_ENGINE }}
           binary-name: oxdock-engine
+        env:
+          # Bootstrap determinism: run the pinned release's own oxfile,
+          # which matches the pinned engine's vocabulary, regardless of
+          # any branch URL leaking in from elsewhere. The pin is always
+          # an exact tag, so this URL resolves.
+          OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ env.OXDOCK_PINNED_ENGINE }}/install.oxfile
 
       # Ephemeral run: executes the template-rendered one-liners that
       # the README also publishes, so documented commands stay tested.
@@ -601,6 +644,10 @@ jobs:
           INSTALL_DIR_WIN: ${{ runner.temp }}\oxbin-ephemeral
           # Loopback port for this leg; server, probe, and release base derive from it.
           SMOKE_PORT: 18732
+          # Legs exercise the branch's own installer logic, not whatever
+          # main happens to carry. Kept off the job env so the pinned
+          # bootstrap stays on the release's own oxfile.
+          OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.head_ref || github.ref_name }}/install.oxfile
         run: |
           IMPORT [STD]
           INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, INSTALL_DIR_NIX, INSTALL_DIR_WIN, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, HOME, USERPROFILE, GITHUB_TOKEN]
@@ -667,6 +714,12 @@ jobs:
         with:
           version: ${{ env.OXDOCK_PINNED_ENGINE }}
           binary-name: oxdock-engine
+        env:
+          # Bootstrap determinism: run the pinned release's own oxfile,
+          # which matches the pinned engine's vocabulary, regardless of
+          # any branch URL leaking in from elsewhere. The pin is always
+          # an exact tag, so this URL resolves.
+          OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ env.OXDOCK_PINNED_ENGINE }}/install.oxfile
 
       # Pinned by this leg itself: the stub resolves the newest tag
       # here, and the leg expects the same one. Authenticated: shared
@@ -751,7 +804,6 @@ jobs:
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       OXDOCK_WORKSPACE_ROOT: ${{ github.workspace }}
-      OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.head_ref || github.ref_name }}/install.oxfile
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -770,6 +822,12 @@ jobs:
         with:
           version: ${{ env.OXDOCK_PINNED_ENGINE }}
           binary-name: oxdock-engine
+        env:
+          # Bootstrap determinism: run the pinned release's own oxfile,
+          # which matches the pinned engine's vocabulary, regardless of
+          # any branch URL leaking in from elsewhere. The pin is always
+          # an exact tag, so this URL resolves.
+          OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ env.OXDOCK_PINNED_ENGINE }}/install.oxfile
 
       # Same job, so $HOME (and the cache) persists across runs: the
       # first install primes a cold cache, the second must reuse it,
@@ -780,6 +838,10 @@ jobs:
         env:
           VERSION: local-test
           SMOKE_PORT: 18733
+          # Legs exercise the branch's own installer logic, not whatever
+          # main happens to carry. Kept off the job env so the pinned
+          # bootstrap stays on the release's own oxfile.
+          OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.head_ref || github.ref_name }}/install.oxfile
         run: |
           IMPORT [STD]
           INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, HOME, USERPROFILE, LOCALAPPDATA, GITHUB_TOKEN, PATH]
@@ -858,7 +920,6 @@ jobs:
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       OXDOCK_WORKSPACE_ROOT: ${{ github.workspace }}
-      OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.head_ref || github.ref_name }}/install.oxfile
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -877,6 +938,12 @@ jobs:
         with:
           version: ${{ env.OXDOCK_PINNED_ENGINE }}
           binary-name: oxdock-engine
+        env:
+          # Bootstrap determinism: run the pinned release's own oxfile,
+          # which matches the pinned engine's vocabulary, regardless of
+          # any branch URL leaking in from elsewhere. The pin is always
+          # an exact tag, so this URL resolves.
+          OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ env.OXDOCK_PINNED_ENGINE }}/install.oxfile
 
       # Blackholed egress: with a warm cache and pinned resolution,
       # nothing may leave the machine. The cache warms over loopback
@@ -892,6 +959,10 @@ jobs:
         env:
           VERSION: local-test
           SMOKE_PORT: 18738
+          # Legs exercise the branch's own installer logic, not whatever
+          # main happens to carry. Kept off the job env so the pinned
+          # bootstrap stays on the release's own oxfile.
+          OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.head_ref || github.ref_name }}/install.oxfile
         run: |
           IMPORT [STD]
           INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, HOME, USERPROFILE, LOCALAPPDATA, GITHUB_TOKEN, PATH]
