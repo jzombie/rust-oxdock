@@ -8,25 +8,7 @@ name: install-smoke
 on:
   push:
     branches: [main]
-    paths:
-      - "install.sh"
-      - "install.ps1"
-      - "install.oxfile"
-      - ".oxdock/template/installer/**"
-      - ".oxdock/template/cli/**"
-      - "scripts/smoke/**"
-      - ".github/actions/setup-oxdock/**"
-      - ".github/workflows/install-smoke.yml"
   pull_request:
-    paths:
-      - "install.sh"
-      - "install.ps1"
-      - "install.oxfile"
-      - ".oxdock/template/installer/**"
-      - ".oxdock/template/cli/**"
-      - "scripts/smoke/**"
-      - ".github/actions/setup-oxdock/**"
-      - ".github/workflows/install-smoke.yml"
   schedule:
     - cron: "0 7 * * 1"
   workflow_dispatch:
