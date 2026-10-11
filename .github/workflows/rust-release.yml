@@ -274,16 +274,31 @@ jobs:
           merge-multiple: true
           path: target/artifacts
 
+      # Installer files ride the release beside the tarballs so a
+      # bootstrap can run logic matching its engine version: the stubs
+      # hand off to these copies when the checksums list them. Staged
+      # from this checkout, which is the tree being released.
+      - name: Stage installer files
+        if: ${{ inputs.binaries }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp install.sh install.ps1 install.oxfile target/artifacts/
+          ls target/artifacts/install.sh target/artifacts/install.ps1 target/artifacts/install.oxfile
+
       # SHA256SUMS rides alongside the tarballs so installers can pin
       # supply chain, not just transit. Written here (gitignored working
       # file, never checked in) and attached by the script like any
-      # other asset.
+      # other asset. Installer entries stay bare filenames: the stubs
+      # match ` install.sh` with a leading space, which a `./` prefix
+      # would defeat (tarball entries keep their historical `./` form,
+      # which their looser patterns tolerate).
       - name: Write checksums file
         if: ${{ inputs.binaries }}
         shell: bash
         run: |
           set -euo pipefail
-          (cd target/artifacts && sha256sum ./*.tar.gz > SHA256SUMS)
+          (cd target/artifacts && sha256sum ./*.tar.gz install.sh install.ps1 install.oxfile > SHA256SUMS)
           cat target/artifacts/SHA256SUMS
 
       # Unpack the linux archive for the self-run step below. The
