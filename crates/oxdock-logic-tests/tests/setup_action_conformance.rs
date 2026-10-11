@@ -68,11 +68,11 @@ fn post_install_script_parses() -> Result<()> {
 fn post_install_script_pins_smoke_publish() -> Result<()> {
     let text = load_post_install_script()?;
     for marker in [
-        "INHERIT_ENV [OXDOCK_ENGINE_DIR, OXDOCK_ENGINE_BIN, GITHUB_PATH]",
+        "INHERIT_ENV [OXDOCK_ENGINE_DIR, OXDOCK_ENGINE_BIN, OXDOCK_EXPECTED_VERSION, GITHUB_PATH]",
         "WORKSPACE SYSTEM",
         "PATH_TYPE(",
         "\"--version\"",
-        "ASSERT_CONTAINS $reported \"oxdock \"",
+        "ASSERT_EQ $reported \"oxdock {{ env:OXDOCK_EXPECTED_VERSION }}\"",
         "APPEND \"{{ env:GITHUB_PATH }}\"",
     ] {
         assert!(
@@ -128,6 +128,7 @@ fn post_install_harness(bin: &str) -> Result<PostInstallRun> {
         engine_dir.as_path().display().to_string(),
     );
     io.insert_inherit_env("OXDOCK_ENGINE_BIN", bin);
+    io.insert_inherit_env("OXDOCK_EXPECTED_VERSION", "0.0.0-test");
     io.insert_inherit_env("GITHUB_PATH", gh_path.as_path().display().to_string());
     Ok(PostInstallRun {
         _temp: temp,

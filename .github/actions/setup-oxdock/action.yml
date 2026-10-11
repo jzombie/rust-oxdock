@@ -54,4 +54,5 @@ runs:
         if ($wantName -ne $execName) { Move-Item -Path (Join-Path $dir $execName) -Destination (Join-Path $dir $wantName) }
         $env:OXDOCK_ENGINE_DIR = $dir
         $env:OXDOCK_ENGINE_BIN = $wantName
+        $env:OXDOCK_EXPECTED_VERSION = $v.TrimStart("v")
         & (Join-Path $dir $wantName) (Join-Path $env:GITHUB_ACTION_PATH 'post-install.oxfile')

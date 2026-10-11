@@ -8,7 +8,7 @@
 
 IMPORT [STD]
 
-INHERIT_ENV [OXDOCK_ENGINE_DIR, OXDOCK_ENGINE_BIN, GITHUB_PATH]
+INHERIT_ENV [OXDOCK_ENGINE_DIR, OXDOCK_ENGINE_BIN, OXDOCK_EXPECTED_VERSION, GITHUB_PATH]
 
 # System workspace: the engine directory and the PATH file sit outside
 # the checkout, so resolution runs from the filesystem root.
@@ -23,5 +23,5 @@ ASSERT_EQ $kind "file"
 LET $v: PIPE
 WITH_IO [stdout=$v] RUN ["{{ $dir }}/{{ $bin }}", "--version"]
 WITH_IO [stdin=$v] READ_LINE $reported
-ASSERT_CONTAINS $reported "oxdock "
+ASSERT_EQ $reported "oxdock {{ env:OXDOCK_EXPECTED_VERSION }}"
 APPEND "{{ env:GITHUB_PATH }}" "{{ $dir }}\n"
