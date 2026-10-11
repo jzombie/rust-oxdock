@@ -97,6 +97,29 @@ if (-not $env:OXDOCK_STUB_ACTIVE) {
   $stubWant = (((Get-Content (Join-Path $VDir '{{ $docs_global.stub_name_checksums }}')) | Where-Object { $_ -match " install.ps1" } | Select-Object -First 1) -split '\s+')[0]
   $stubGot = (Get-FileHash (Join-Path $VDir 'install.ps1') -Algorithm SHA256).Hash
   if ($stubWant.ToLowerInvariant() -ne $stubGot.ToLowerInvariant()) { throw "installer stub failed verification" }
+  # Stdin capture, no decisions: collect any piped input and bridge that
+  # file for the oxfile below as OXDOCK_PIPED_SCRIPT, which alone decides
+  # run vs install. Captured here, after verification, so a failed handoff
+  # leaves nothing behind; the re-executed copy below inherits the bridge
+  # instead of draining again. Pipeline input belongs to this invocation:
+  # it never crosses an `&` file call, so only this process can read it
+  # (`irm ... | iex` lands here with none and installs as before).
+  # Pipeline objects arrive via $input, which console-stdin redirection
+  # never sees: a piped string lives in $input while [Console]::In sits
+  # at EOF, so $input is read first and redirected bytes only as
+  # fallback. A TTY is never drained.
+  $env:OXDOCK_PIPED_SCRIPT = $null
+  $stdinText = [string]::Join("`n", @($input))
+  if ([string]::IsNullOrWhiteSpace($stdinText) -and [Console]::IsInputRedirected) {
+    $stdinText = [Console]::In.ReadToEnd()
+  }
+  if (-not [string]::IsNullOrWhiteSpace($stdinText)) {
+    $pipedDir = Join-Path ([IO.Path]::GetTempPath()) "oxdock-piped-$([Guid]::NewGuid())"
+    New-Item -ItemType Directory -Force -Path $pipedDir | Out-Null
+    $stdinFile = Join-Path $pipedDir 'piped.oxfile'
+    [IO.File]::WriteAllText($stdinFile, $stdinText)
+    $env:OXDOCK_PIPED_SCRIPT = $stdinFile
+  }
   $env:OXDOCK_STUB_ACTIVE = '1'
   & (Join-Path $VDir 'install.ps1')
   if ($LASTEXITCODE -ne 0) { throw "installer failed with exit code $LASTEXITCODE" }
@@ -131,30 +154,9 @@ try {
   # at the engine.
   $Engine = if ($env:OXDOCK_ENGINE) { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($env:OXDOCK_ENGINE) } else { (Join-Path $tmp 'x\oxdock.exe') }
   if (-not (Test-Path $Engine)) { throw "installer engine missing: $Engine" }
-  # Stdin capture, no decisions: collect any piped input and bridge that
-  # file for the oxfile below as OXDOCK_PIPED_SCRIPT, which alone decides
-  # run vs install. Collected here, at the end: the pipeline has
-  # necessarily delivered the whole script by now, so remaining input is
-  # user data (`irm ... | iex` lands here with none and installs as
-  # before). Pipeline objects arrive via $input, which console-stdin
-  # redirection never sees: a piped string lives in $input while
-  # [Console]::In sits at EOF, so $input is read first and redirected
-  # bytes only as fallback. A TTY is never drained.
-  $env:OXDOCK_PIPED_SCRIPT = $null
   # Interactive consoles confirm the destination in the oxfile: export
   # the flag only with a console behind stdin. Either condition alone
   # misfires in CI-without-console, so both must hold.
-  $env:OXDOCK_INTERACTIVE = $null
-  if ([Environment]::UserInteractive -and -not [Console]::IsInputRedirected) { $env:OXDOCK_INTERACTIVE = '1' }
-  $stdinText = [string]::Join("`n", @($input))
-  if ([string]::IsNullOrWhiteSpace($stdinText) -and [Console]::IsInputRedirected) {
-    $stdinText = [Console]::In.ReadToEnd()
-  }
-  if (-not [string]::IsNullOrWhiteSpace($stdinText)) {
-    $stdinFile = Join-Path $tmp 'piped.oxfile'
-    [IO.File]::WriteAllText($stdinFile, $stdinText)
-    $env:OXDOCK_PIPED_SCRIPT = $stdinFile
-  }
   $env:OXDOCK_INTERPRETER = $Engine
   Push-Location $tmp
   try {
@@ -168,6 +170,17 @@ try {
     # Restore first: deleting the working directory while standing
     # inside it fails as in use and would mask the real error.
     Pop-Location
+    # The handoff bridged a piped script through its own directory
+    # outside the scratch space above: unlink it here, on success and
+    # failure alike. The empty-parent check keeps this from touching
+    # anything it did not create.
+    if ($env:OXDOCK_PIPED_SCRIPT -and (Test-Path $env:OXDOCK_PIPED_SCRIPT -PathType Leaf)) {
+      Remove-Item -Force $env:OXDOCK_PIPED_SCRIPT
+      $pipedParent = Split-Path $env:OXDOCK_PIPED_SCRIPT -Parent
+      if ($pipedParent -and (Test-Path $pipedParent) -and @(Get-ChildItem $pipedParent -Force).Count -eq 0) {
+        Remove-Item -Force $pipedParent
+      }
+    }
   }
 } finally {
   Remove-Item -Recurse -Force $tmp
