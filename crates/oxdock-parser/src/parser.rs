@@ -2335,6 +2335,7 @@ fn parse_let_capture_statement_from_pair(
     let mut decl_type: Option<String> = None;
     let mut await_pair = None;
     let mut timeout_pair = None;
+    let mut run_exec_pair = None;
     let mut instruction_pair = None;
     for inner in pair.into_inner() {
         match inner.as_rule() {
@@ -2349,6 +2350,9 @@ fn parse_let_capture_statement_from_pair(
             }
             Rule::timeout_statement => {
                 timeout_pair = Some(inner);
+            }
+            Rule::run_exec_statement => {
+                run_exec_pair = Some(inner);
             }
             Rule::instruction => {
                 instruction_pair = Some(inner);
@@ -2387,6 +2391,16 @@ fn parse_let_capture_statement_from_pair(
     }
     if let Some(timeouted) = timeout_pair {
         let kind = parse_structural_command_with_lower(ctx, timeouted, lctx)?;
+        reject_async_in_capture(ctx, &kind)?;
+        reject_pipe_stdout_in_capture(ctx, &kind)?;
+        return Ok(StepKind::AssignCapture {
+            var,
+            decl_type: dtype,
+            cmd: Box::new(kind),
+        });
+    }
+    if let Some(exec) = run_exec_pair {
+        let kind = lower_run_exec_pair(ctx, exec, lctx)?;
         reject_async_in_capture(ctx, &kind)?;
         reject_pipe_stdout_in_capture(ctx, &kind)?;
         return Ok(StepKind::AssignCapture {

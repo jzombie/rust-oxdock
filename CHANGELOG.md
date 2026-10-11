@@ -21,6 +21,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 - The `oxdock_embed!` README example stages assets under manifest-relative `prebuilt/` instead of `target/prebuilt`: `target/` is gitignored and excluded from `cargo package`, so published crates must vendor their staging tree and hash for downstream builds to reuse it without re-execution.
 - `oxdock_embed!` and `oxdock_prepare!` accept `name`, `script`, and `out_dir` in any order, each exactly once with duplicates and unknown labels rejected: the README leads with `out_dir` ahead of the script block, which the previous fixed-order parser rejected.
+- `LET $var: TYPE = RUN [...]` exec form lowers through the run_exec grammar arm instead of degrading to shell text: LET-capture previously accepted only shell form.
 
 ## [0.24.2-alpha] - 2026-10-09
 

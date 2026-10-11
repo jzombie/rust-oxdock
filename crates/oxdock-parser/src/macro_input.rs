@@ -808,6 +808,31 @@ mod tests {
     }
 
     #[test]
+    fn braced_let_run_exec_stays_exec_form() {
+        // End-to-end guard for the README embed example: tokens shaped
+        // exactly like the macro receives them must rebuild to text
+        // that still lowers to RunExec, never shell text. A prior
+        // revision executed `[ cargo , --version ]` through zsh.
+        let ts: proc_macro2::TokenStream = r#"LET $cargo: STRING = RUN ["cargo", "--version"]"#
+            .parse()
+            .expect("tokens");
+        let script = script_from_braced_tokens(&ts).expect("rebuild");
+        let steps =
+            crate::parse_script(&script, crate::lower_command).expect("parse rebuilt script");
+        assert_eq!(steps.len(), 1);
+        match &steps[0].kind {
+            StepKind::AssignCapture { var, cmd, .. } => {
+                assert_eq!(var, "cargo");
+                assert!(
+                    matches!(cmd.as_ref(), StepKind::RunExec { .. }),
+                    "rebuilt {script:?} degraded to {cmd:?}"
+                );
+            }
+            other => panic!("expected AssignCapture, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn braced_script_preserves_dot_path_spacing() {
         // Parsed from real text so span-column gaps drive spacing decisions,
         // exactly like the historical proc-macro input pathway.
