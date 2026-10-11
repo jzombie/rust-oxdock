@@ -83,38 +83,33 @@ Embed build-time dependencies from any language: scripts run inline during `rust
 use oxdock_macros::oxdock_embed;
 
 oxdock_embed! {
-    // Embedded resources are mapped to `SiteAssets::get(resource)`
+    // Generated struct for resource lookups via `SiteAssets::get(path)`.
     name: SiteAssets,
+
+    // Manifest-relative staging directory. Run `cargo build` locally to generate
+    // the files and `.oxdock_hash` fingerprint, then commit `prebuilt/` to git.
+    // `cargo publish` vendors these files so downstream crates embed them
+    // directly without re-running the script on read-only registry paths.
+    // Set OXDOCK_EMBED_FORCE_REBUILD=1 to force re-execution.
+    out_dir: "prebuilt",
+
     script: {
-        // Scripts run in an ephemeral snapshot workspace: every command
-        // sees an isolated temp dir, so the local checkout stays untouched
-        // unless the script opts in with WORKSPACE LOCAL. Finished assets
-        // are staged to out_dir below, where rustc scoops them up with
-        // include_bytes!.
+        // Executes in an isolated temporary workspace (`WORKSPACE SNAPSHOT`),
+        // keeping the source tree clean unless `WORKSPACE LOCAL` is requested.
         ENV PROJECT=OxDock
         MKDIR dist
 
-        // Provenance comes from the shell: only the matching gate runs,
-        // so this stays green on every OS in CI.
+        // Platform-gated execution (supports os:*, arch:*, family:*, and logical guards)
         [family:unix] LET $os: STRING = RUN uname -srm
         [family:windows] LET $os: STRING = RUN ver
+
         LET $toolchain: STRING = RUN cargo --version
 
+        // Assets stage under subdirectories relative to `out_dir` (e.g., prebuilt/dist/os.txt)
         WRITE dist/os.txt "{{ $os }}"
         WRITE dist/toolchain.txt "{{ $toolchain }}"
         WRITE dist/manifest.txt "os toolchain"
-    },
-    // Staged under the manifest dir: build once locally so the tree
-    // and its `.oxdock_hash` fingerprint exist and are committed.
-    //
-    // `cargo publish` ships them as-is without re-running the script,
-    // so downstream crates embed the bundled files.
-    //
-    // Later builds hash the script text, its inputs, and referenced
-    // env values: a match skips the script and embeds the vendored files.
-    //
-    // Set OXDOCK_EMBED_FORCE_REBUILD=1 to re-run regardless.
-    out_dir: "prebuilt",
+    }
 }
 
 fn main() {
