@@ -80,12 +80,10 @@ fn post_install_script_pins_rename_publish_smoke() -> Result<()> {
             "post-install.oxfile must contain {marker:?}"
         );
     }
-    for retired in ["COPY \"{{ $dir }}/{{ $src }}\""] {
-        assert!(
-            !text.contains(retired),
-            "post-install.oxfile must not contain {retired:?}"
-        );
-    }
+    assert!(
+        !text.contains("COPY \"{{ $dir }}/{{ $src }}\""),
+        "post-install.oxfile must not regress to COPY for the rename"
+    );
     Ok(())
 }
 
