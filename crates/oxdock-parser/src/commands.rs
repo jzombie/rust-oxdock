@@ -4288,6 +4288,9 @@ mod tests {
         assert!(parse_duration("0s").is_err());
         assert!(parse_duration("0").is_err());
         assert!(parse_duration("-5s").is_err());
+        // Units glue to the number, like byte counts: a space would
+        // split DSL tokens upstream anyway.
+        assert!(parse_duration("30 s").is_err());
     }
 
     #[test]
