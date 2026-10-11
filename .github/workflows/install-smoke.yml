@@ -97,12 +97,6 @@ jobs:
         uses: ./.github/actions/setup-oxdock
         with:
           version: ${{ env.OXDOCK_PINNED_ENGINE }}
-        env:
-          # Bootstrap determinism: run the pinned release's own oxfile,
-          # which matches the pinned engine's vocabulary, regardless of
-          # any branch URL leaking in from elsewhere. The pin is always
-          # an exact tag, so this URL resolves.
-          OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ env.OXDOCK_PINNED_ENGINE }}/install.oxfile
 
       # The binary under test is this branch, never a published tag:
       # behavior fixes prove before any release ships them. Same build
@@ -235,12 +229,6 @@ jobs:
         with:
           version: ${{ env.OXDOCK_PINNED_ENGINE }}
           binary-name: oxdock-engine
-        env:
-          # Bootstrap determinism: run the pinned release's own oxfile,
-          # which matches the pinned engine's vocabulary, regardless of
-          # any branch URL leaking in from elsewhere. The pin is always
-          # an exact tag, so this URL resolves.
-          OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ env.OXDOCK_PINNED_ENGINE }}/install.oxfile
 
       # Every leg below fetches the staged branch build through the
       # stub from loopback: VERSION stays pinned so no release API is
@@ -336,12 +324,6 @@ jobs:
         with:
           version: ${{ env.OXDOCK_PINNED_ENGINE }}
           binary-name: oxdock-engine
-        env:
-          # Bootstrap determinism: run the pinned release's own oxfile,
-          # which matches the pinned engine's vocabulary, regardless of
-          # any branch URL leaking in from elsewhere. The pin is always
-          # an exact tag, so this URL resolves.
-          OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ env.OXDOCK_PINNED_ENGINE }}/install.oxfile
 
       # Piped delivery: the stub arrives on stdin exactly as real users
       # run it, covering the self-consumption class where the drain eats
@@ -441,12 +423,6 @@ jobs:
         with:
           version: ${{ env.OXDOCK_PINNED_ENGINE }}
           binary-name: oxdock-engine
-        env:
-          # Bootstrap determinism: run the pinned release's own oxfile,
-          # which matches the pinned engine's vocabulary, regardless of
-          # any branch URL leaking in from elsewhere. The pin is always
-          # an exact tag, so this URL resolves.
-          OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ env.OXDOCK_PINNED_ENGINE }}/install.oxfile
 
       # No engine override anywhere by design, so the unpacked release
       # binary itself runs the installer: the user-visible shape, with
@@ -534,12 +510,6 @@ jobs:
         with:
           version: ${{ env.OXDOCK_PINNED_ENGINE }}
           binary-name: oxdock-engine
-        env:
-          # Bootstrap determinism: run the pinned release's own oxfile,
-          # which matches the pinned engine's vocabulary, regardless of
-          # any branch URL leaking in from elsewhere. The pin is always
-          # an exact tag, so this URL resolves.
-          OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ env.OXDOCK_PINNED_ENGINE }}/install.oxfile
 
       # Default location: no INSTALL_DIR anywhere by design, so each
       # platform's stub default engages. Windows asserts the real
@@ -627,12 +597,6 @@ jobs:
         with:
           version: ${{ env.OXDOCK_PINNED_ENGINE }}
           binary-name: oxdock-engine
-        env:
-          # Bootstrap determinism: run the pinned release's own oxfile,
-          # which matches the pinned engine's vocabulary, regardless of
-          # any branch URL leaking in from elsewhere. The pin is always
-          # an exact tag, so this URL resolves.
-          OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ env.OXDOCK_PINNED_ENGINE }}/install.oxfile
 
       # Ephemeral run: executes the template-rendered one-liners that
       # the README also publishes, so documented commands stay tested.
@@ -714,12 +678,6 @@ jobs:
         with:
           version: ${{ env.OXDOCK_PINNED_ENGINE }}
           binary-name: oxdock-engine
-        env:
-          # Bootstrap determinism: run the pinned release's own oxfile,
-          # which matches the pinned engine's vocabulary, regardless of
-          # any branch URL leaking in from elsewhere. The pin is always
-          # an exact tag, so this URL resolves.
-          OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ env.OXDOCK_PINNED_ENGINE }}/install.oxfile
 
       # Pinned by this leg itself: the stub resolves the newest tag
       # here, and the leg expects the same one. Authenticated: shared
@@ -822,12 +780,6 @@ jobs:
         with:
           version: ${{ env.OXDOCK_PINNED_ENGINE }}
           binary-name: oxdock-engine
-        env:
-          # Bootstrap determinism: run the pinned release's own oxfile,
-          # which matches the pinned engine's vocabulary, regardless of
-          # any branch URL leaking in from elsewhere. The pin is always
-          # an exact tag, so this URL resolves.
-          OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ env.OXDOCK_PINNED_ENGINE }}/install.oxfile
 
       # Same job, so $HOME (and the cache) persists across runs: the
       # first install primes a cold cache, the second must reuse it,
@@ -938,12 +890,6 @@ jobs:
         with:
           version: ${{ env.OXDOCK_PINNED_ENGINE }}
           binary-name: oxdock-engine
-        env:
-          # Bootstrap determinism: run the pinned release's own oxfile,
-          # which matches the pinned engine's vocabulary, regardless of
-          # any branch URL leaking in from elsewhere. The pin is always
-          # an exact tag, so this URL resolves.
-          OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ env.OXDOCK_PINNED_ENGINE }}/install.oxfile
 
       # Blackholed egress: with a warm cache and pinned resolution,
       # nothing may leave the machine. The cache warms over loopback
