@@ -1,0 +1,27 @@
+# Post-install for the setup-oxdock action: smoke-check the installed
+# engine and publish its directory on GITHUB_PATH. Runs under the fresh
+# engine; the shell prelude bridges ENGINE_DIR (install directory),
+# ENGINE_BIN (installed filename, rename already applied), and
+# GITHUB_PATH. The rename itself stays in the shell: the engine cannot
+# rename the file it runs from on Windows, while the installer that
+# placed it has already exited.
+
+IMPORT [STD]
+
+INHERIT_ENV [OXDOCK_ENGINE_DIR, OXDOCK_ENGINE_BIN, OXDOCK_EXPECTED_VERSION, GITHUB_PATH]
+
+# System workspace: the engine directory and the PATH file sit outside
+# the checkout, so resolution runs from the filesystem root.
+WORKSPACE SYSTEM
+
+LET $dir: STRING = "{{ env:OXDOCK_ENGINE_DIR }}"
+LET $bin: STRING = "{{ env:OXDOCK_ENGINE_BIN }}"
+# The installed engine reports itself: a broken placement surfaces here
+# instead of haunting later steps.
+LET $kind: STRING = PATH_TYPE("{{ $dir }}/{{ $bin }}")
+ASSERT_EQ $kind "file"
+LET $v: PIPE
+WITH_IO [stdout=$v] RUN ["{{ $dir }}/{{ $bin }}", "--version"]
+WITH_IO [stdin=$v] READ_LINE $reported
+ASSERT_EQ $reported "oxdock {{ env:OXDOCK_EXPECTED_VERSION }}"
+APPEND "{{ env:GITHUB_PATH }}" "{{ $dir }}\n"

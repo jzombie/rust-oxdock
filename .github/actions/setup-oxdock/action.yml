@@ -1,13 +1,15 @@
-# Install the oxdock interpreter for `shell: oxdock` steps (or
-# `shell: oxdock-engine` when binary-name renames it).
-# The installers beside this file are generated from the repo
-# templates; remote consumers check out only this directory.
+# Setup OxDock engine for `shell: oxdock` steps (`oxdock-engine` when renamed).
+#
+# One pwsh step (present on every runner OS): fetch the release installer,
+# run it, then the fresh engine runs post-install.oxfile (rename, PATH, smoke).
+# Installers are fetched, never vendored (remote consumers check out only
+# this directory); first bundled release is v0.24.4-alpha.
 name: Setup OxDock engine
 description: Install the oxdock interpreter so later steps can use shell oxdock.
 
 inputs:
   version:
-    description: Full release tag to install (e.g. v0.24.2-alpha), or `latest` to resolve the newest release.
+    description: Full release tag to install (e.g. v0.24.4-alpha), or `latest` to resolve the newest release.
     required: false
     default: latest
   binary-name:
@@ -18,39 +20,39 @@ inputs:
 runs:
   using: composite
   steps:
-    # Empty VERSION resolves latest inside the installer; a tag pins.
+    # Resolved tag passes explicitly: one version's assets even if latest moves mid-run.
     - name: Install OxDock engine
-      if: ${{ runner.os != 'Windows' }}
-      shell: bash
-      run: |
-        set -euo pipefail
-        enginedir="${RUNNER_TEMP}/oxdock-engine"
-        mkdir -p "$enginedir"
-        if [ "${{ inputs.version }}" = "latest" ]; then
-          INSTALL_DIR="$enginedir" bash "${GITHUB_ACTION_PATH}/install.sh"
-        else
-          VERSION="${{ inputs.version }}" INSTALL_DIR="$enginedir" bash "${GITHUB_ACTION_PATH}/install.sh"
-        fi
-        # A renamed bootstrap frees the bare name: same-directory move,
-        # skipped when the name is already the default.
-        if [ "${{ inputs.binary-name }}" != "oxdock" ]; then
-          mv "$enginedir/oxdock" "$enginedir/${{ inputs.binary-name }}"
-        fi
-        echo "$enginedir" >> "$GITHUB_PATH"
-
-    - name: Install OxDock engine
-      if: ${{ runner.os == 'Windows' }}
       shell: pwsh
       run: |
         $ErrorActionPreference = 'Stop'
-        $enginedir = Join-Path $env:RUNNER_TEMP 'oxdock-engine'
-        New-Item -ItemType Directory -Force -Path $enginedir | Out-Null
-        if ('${{ inputs.version }}' -ne 'latest') { $env:VERSION = '${{ inputs.version }}' }
-        $env:INSTALL_DIR = $enginedir
-        & (Join-Path $env:GITHUB_ACTION_PATH 'install.ps1')
-        # A renamed bootstrap frees the bare name: same-directory move,
-        # skipped when the name is already the default.
-        if ('${{ inputs.binary-name }}' -ne 'oxdock') {
-          Rename-Item -Path (Join-Path $enginedir 'oxdock.exe') -NewName ('${{ inputs.binary-name }}.exe')
-        }
-        Add-Content -Path $env:GITHUB_PATH -Value $enginedir
+
+        # Mark-of-the-Web downloads need Bypass on Windows, process-wide so the re-executed stub is covered.
+        if ($IsWindows) { Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force }
+
+        # Shared runner IPs burn the anonymous API quota: authenticate when a token is present.
+        $h = @{}; if ($env:GITHUB_TOKEN) { $h.Authorization = "Bearer $env:GITHUB_TOKEN" }
+
+        $v = '${{ inputs.version }}'
+        # List endpoint: /releases/latest excludes pre-releases by contract.
+        if ($v -eq 'latest') { $v = (Invoke-RestMethod 'https://api.github.com/repos/jzombie/rust-oxdock/releases?per_page=1' -Headers $h)[0].tag_name }
+
+        $dir = Join-Path $env:RUNNER_TEMP 'oxdock-engine'
+        $tmp = Join-Path $env:RUNNER_TEMP 'oxdock-installer'
+        New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+        $stub = if ($IsWindows) { 'install.ps1' } else { 'install.sh' }
+        $ext = if ($IsWindows) { '.exe' } else { '' }
+
+        Invoke-WebRequest "https://github.com/jzombie/rust-oxdock/releases/download/$v/$stub" -Headers $h -OutFile (Join-Path $tmp $stub)
+        $env:VERSION = $v; $env:INSTALL_DIR = $dir
+        if ($IsWindows) { & (Join-Path $tmp $stub) } else { bash (Join-Path $tmp $stub) }
+
+        # Rename before the DSL run, never inside it: the engine cannot
+        # rename the file it runs from on Windows, while the installer
+        # that placed it has already exited so nothing holds it here.
+        $execName = "oxdock$ext"
+        $wantName = "${{ inputs.binary-name }}$ext"
+        if ($wantName -ne $execName) { Move-Item -Path (Join-Path $dir $execName) -Destination (Join-Path $dir $wantName) }
+        $env:OXDOCK_ENGINE_DIR = $dir
+        $env:OXDOCK_ENGINE_BIN = $wantName
+        $env:OXDOCK_EXPECTED_VERSION = $v.TrimStart("v")
+        & (Join-Path $dir $wantName) (Join-Path $env:GITHUB_ACTION_PATH 'post-install.oxfile')

@@ -167,3 +167,117 @@ fn rendered_ephemeral_commands_carry_ci_wiring() -> Result<()> {
     );
     Ok(())
 }
+
+/// Architecture coverage contract: every release target is installed by
+/// smoke, on every leg. The aarch64-linux artifact shipped for releases
+/// with zero executions before this test existed; adding a release
+/// target without a matching runner (or dropping a runner from any leg
+/// matrix) fails here instead of shipping another untested artifact.
+/// Update the mapping below in the same commit as either workflow.
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "reads workflow and stub files from the repository checkout layout"
+)]
+fn release_targets_all_have_smoke_legs() -> Result<()> {
+    // (release target triple, smoke runner, DSL arch-branch marker,
+    // release asset name).
+    let coverage = [
+        (
+            "x86_64-unknown-linux-musl",
+            "ubuntu-latest",
+            "[os:linux, arch:x86_64]",
+            "oxdock-x86_64-unknown-linux-musl.tar.gz",
+        ),
+        (
+            "aarch64-unknown-linux-musl",
+            "ubuntu-26.04-arm",
+            "[os:linux, arch:aarch64]",
+            "oxdock-aarch64-unknown-linux-musl.tar.gz",
+        ),
+        (
+            "aarch64-apple-darwin",
+            "macos-latest",
+            "[os:macos]",
+            "oxdock-aarch64-apple-darwin.tar.gz",
+        ),
+        (
+            "x86_64-pc-windows-msvc",
+            "windows-latest",
+            "[os:windows, arch:x86_64]",
+            "oxdock-x86_64-pc-windows-msvc.tar.gz",
+        ),
+        (
+            "aarch64-pc-windows-msvc",
+            "windows-11-arm",
+            "[os:windows, arch:aarch64]",
+            "oxdock-aarch64-pc-windows-msvc.tar.gz",
+        ),
+    ];
+    let repo_root = repo_root()?;
+    let root = GuardedPath::new_root_from_str(&repo_root)?;
+    let resolver = PathResolver::new_guarded(root.clone(), root)?;
+    let release =
+        resolver.read_to_string(&resolver.root().join(".github/workflows/rust-release.yml")?)?;
+    let smoke = load_workflow()?;
+    let sh = resolver.read_to_string(&resolver.root().join("install.sh")?)?;
+    let ps1 = resolver.read_to_string(&resolver.root().join("install.ps1")?)?;
+
+    // Release side: every mapped triple is still shipped. A new target
+    // without a mapping row fails here until one is added.
+    for (triple, _, _, _) in &coverage {
+        assert!(
+            release.contains(triple),
+            "release matrix no longer ships {triple}: update the coverage mapping"
+        );
+    }
+
+    // Smoke side: every `os:` matrix (build plus eight legs) carries the
+    // full runner set, in order. A leg dropping an architecture fails
+    // here instead of silently untesting it.
+    let runners: Vec<&str> = coverage.iter().map(|(_, runner, _, _)| *runner).collect();
+    let mut matrices = 0;
+    for line in smoke.lines() {
+        let trimmed = line.trim_start();
+        if let Some(list) = trimmed
+            .strip_prefix("os: [")
+            .and_then(|rest| rest.strip_suffix(']'))
+        {
+            matrices += 1;
+            let found: Vec<&str> = list.split(',').map(|item| item.trim()).collect();
+            assert_eq!(
+                found, runners,
+                "smoke matrix diverged from the coverage contract: {line}"
+            );
+        }
+    }
+    assert_eq!(
+        matrices, 9,
+        "expected build plus eight leg matrices, found {matrices}"
+    );
+
+    // DSL side: each mapping's arch branch and asset name resolve in the
+    // workflow, so the runner actually selects its artifact.
+    for (_, _, branch, asset) in &coverage {
+        assert!(
+            smoke.contains(branch),
+            "smoke workflow lost arch branch {branch}"
+        );
+        assert!(
+            smoke.contains(asset),
+            "smoke workflow never selects asset {asset}"
+        );
+    }
+
+    // Stub side: the user-facing download path maps both ARM targets.
+    // These carried no executions before the coverage above existed.
+    assert!(
+        sh.contains("Linux-aarch64"),
+        "install.sh lost its Linux ARM64 target mapping"
+    );
+    assert!(
+        ps1.contains("'ARM64'"),
+        "install.ps1 lost its Windows ARM64 target mapping"
+    );
+    Ok(())
+}

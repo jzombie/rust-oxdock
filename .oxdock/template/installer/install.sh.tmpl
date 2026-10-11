@@ -38,10 +38,34 @@ case "$(uname -s)-$(uname -m)" in
   Darwin-arm64) TARGET="aarch64-apple-darwin" ;;
   Linux-x86_64) TARGET="x86_64-unknown-linux-musl" ;;
   Linux-aarch64) TARGET="aarch64-unknown-linux-musl" ;;
-  MINGW64*-x86_64 | MSYS*-x86_64 | CYGWIN*-x86_64) TARGET="x86_64-pc-windows-msvc" ;;
+  # Emulated shells lie about -m: x64 Git Bash on ARM64 Windows reports
+  # x86_64, and msys does not forward PROCESSOR_ARCHITEW6432 into the
+  # shell, so the usual variable tells are absent. Two independent host
+  # signals remain: the kernel release carries an -ARM64 suffix, and the
+  # SysArm32 system directory exists only on ARM64 Windows (checked
+  # under both msys and Cygwin drive prefixes). W6432 stays as a
+  # fallback for shells that forward it. The installed binary runs
+  # outside the shell, so native always wins.
+  MINGW64*-x86_64 | MSYS*-x86_64 | CYGWIN*-x86_64)
+    if [ "${PROCESSOR_ARCHITEW6432:-}" = "ARM64" ]; then
+      TARGET="aarch64-pc-windows-msvc"
+    else
+      case "$(uname -s)" in
+        *-ARM64) TARGET="aarch64-pc-windows-msvc" ;;
+        *)
+          if [ -d "/c/Windows/SysArm32" ] || [ -d "/cygdrive/c/Windows/SysArm32" ]; then
+            TARGET="aarch64-pc-windows-msvc"
+          else
+            TARGET="x86_64-pc-windows-msvc"
+          fi ;;
+      esac
+    fi ;;
   MINGW64*-aarch64 | MSYS*-aarch64 | CYGWIN*-aarch64) TARGET="aarch64-pc-windows-msvc" ;;
   *) echo "unsupported platform: $(uname -s)-$(uname -m)" >&2; exit 1 ;;
 esac
+# Platform forensics: which detection inputs chose the asset below, so a
+# mistargeted download names its cause instead of surfacing as a bare 404.
+echo "platform: $(uname -s)-$(uname -m) target: $TARGET" >&2
 
 ASSET="oxdock-$TARGET.tar.gz"
 VDIR="$CACHE_DIR/$VERSION"
@@ -57,8 +81,11 @@ verify_cached() {
 
 # Same hash as last time means same bytes: reuse the cached tarball
 # after re-verifying it. Anything missing or mismatched falls through
-# to a fresh download, so a corrupt cache heals itself.
-if [ -f "$VDIR/$ASSET" ] && [ -f "$VDIR/{{ $docs_global.stub_name_checksums }}" ] && [ -f "$VDIR/{{ $docs_global.stub_name_oxfile }}" ] && verify_cached; then
+# to a fresh download, so a corrupt cache heals itself. The executing
+# stub itself is part of the warm contract: a cache warmed by the other
+# stub, or by a release predating bundled installers, repopulates
+# instead of handing off to a file that is not there.
+if [ -f "$VDIR/$ASSET" ] && [ -f "$VDIR/{{ $docs_global.stub_name_checksums }}" ] && [ -f "$VDIR/{{ $docs_global.stub_name_oxfile }}" ] && [ -f "$VDIR/install.sh" ] && verify_cached; then
   echo "{{ $docs_global.stub_msg_using_cached }}" >&2
 else
   echo "{{ $docs_global.stub_msg_downloading }}" >&2
@@ -70,32 +97,21 @@ else
   # from the checksums file, so a renamed download would never verify.
   gh_curl "$base/$ASSET" -o "$tmp/$ASSET"
   gh_curl "$base/{{ $docs_global.stub_name_checksums }}" -o "$tmp/{{ $docs_global.stub_name_checksums }}"
-  # Installer logic rides with the release; tags predating it fall back
-  # to main. An explicit OXDOCK_OXFILE_URL wins over both (pre-merge
-  # testing, mirrors). Fetched here, inside population, so warm runs
-  # never touch network.
+  # Installer logic rides with the release bundle. An explicit
+  # OXDOCK_OXFILE_URL wins over the bundle (pre-merge testing,
+  # mirrors). Fetched here, inside population, so warm runs never
+  # touch network.
   if [ -n "${OXDOCK_OXFILE_URL:-}" ]; then
     gh_curl "$OXDOCK_OXFILE_URL" -o "$tmp/{{ $docs_global.stub_name_oxfile }}"
   else
-
-    # TODO(bundled-release): fetch the oxfile from the release bundle
-    # ($base) instead of the tag and main fallbacks below, and delete
-    # both fallbacks. Every supported release will carry the file.
-
-    gh_curl "{{ $docs_global.stub_url_oxfile_versioned }}" -o "$tmp/{{ $docs_global.stub_name_oxfile }}" || gh_curl "{{ $docs_global.stub_url_oxfile_main }}" -o "$tmp/{{ $docs_global.stub_name_oxfile }}"
+    gh_curl "$base/{{ $docs_global.stub_name_oxfile }}" -o "$tmp/{{ $docs_global.stub_name_oxfile }}"
   fi
-  # Release-bundled installer: when the checksums list it, fetch it
-  # alongside everything else so execution below can hand off to logic
-  # matching the engine version. Releases predating bundled installers
-  # list nothing here, so nothing is fetched and the vendored logic
-  # runs unchanged.
-
-  # TODO(bundled-release): fetch unconditionally and delete this guard.
-  # Every supported release will list the bundled installer.
-
-  if grep -q " install.sh$" "$tmp/{{ $docs_global.stub_name_checksums }}" 2>/dev/null; then
-    gh_curl "$base/install.sh" -o "$tmp/install.sh"
-  fi
+  # The bundled stubs travel beside everything else so execution below
+  # hands off to logic matching the engine version, and so a cache warmed
+  # by one stub serves the other: every supported release lists both. A
+  # missing entry fails closed at verification.
+  gh_curl "$base/install.sh" -o "$tmp/install.sh"
+  gh_curl "$base/install.ps1" -o "$tmp/install.ps1"
   if command -v sha256sum >/dev/null 2>&1; then
     (cd "$tmp" && grep "$ASSET\$" {{ $docs_global.stub_name_checksums }} | sha256sum -c - >/dev/null)
   else
@@ -105,39 +121,10 @@ else
   mv "$tmp/{{ $docs_global.stub_name_checksums }}" "$VDIR/{{ $docs_global.stub_name_checksums }}"
   mv "$tmp/{{ $docs_global.stub_name_oxfile }}" "$VDIR/{{ $docs_global.stub_name_oxfile }}"
 
-  # TODO(bundled-release): move unconditionally and delete this guard.
-  # Every supported release will carry the bundled installer.
-
-  if [ -f "$tmp/install.sh" ]; then
-    mv "$tmp/install.sh" "$VDIR/install.sh"
-  fi
+  mv "$tmp/install.sh" "$VDIR/install.sh"
+  mv "$tmp/install.ps1" "$VDIR/install.ps1"
   trap - EXIT
   rm -rf "$tmp"
-fi
-# Self-update to the release-bundled installer when the release carries
-# one: the executed logic then always matches the engine version, and
-# warm runs keep working because the bundled copy lives in the cache
-# beside everything else. Releases predating bundled installers leave
-# no checksums entry, so the vendored logic below runs unchanged. The
-# flag prevents re-entry: the re-executed copy skips this block.
-
-# TODO(bundled-release): drop the file-existence and checksums-entry
-# guards and always hand off. Keep the re-entry flag and the digest
-# verification: the flag prevents loops and the digest proves integrity.
-
-if [ -z "${OXDOCK_STUB_ACTIVE:-}" ] && [ -f "$VDIR/install.sh" ]; then
-  if ! grep -q " install.sh$" "$VDIR/{{ $docs_global.stub_name_checksums }}" 2>/dev/null; then
-    echo "installer stub missing from checksums" >&2
-    exit 1
-  fi
-  if command -v sha256sum >/dev/null 2>&1; then
-    (cd "$VDIR" && grep " install.sh$" {{ $docs_global.stub_name_checksums }} | sha256sum -c - >/dev/null) || { echo "installer stub failed verification" >&2; exit 1; }
-  else
-    (cd "$VDIR" && grep " install.sh$" {{ $docs_global.stub_name_checksums }} | shasum -a 256 -c - >/dev/null) || { echo "installer stub failed verification" >&2; exit 1; }
-  fi
-  OXDOCK_STUB_ACTIVE=1
-  export OXDOCK_STUB_ACTIVE
-  exec bash "$VDIR/install.sh"
 fi
 # Provenance for smoke forensics: which oxfile payload executes below
 # and its digest. A version-skewed payload names its source here
@@ -195,25 +182,61 @@ case "$(uname -s)" in
     ;;
 esac
 # A function so piped delivery is fully read before the drain runs;
-# straight-line code would let it swallow unread script tail.
+# straight-line code would let it swallow unread script tail. The
+# handoff lives in here, after the drain, for the same reason: a
+# top-level exec would re-run the prologue below against a stdin
+# offset in the middle of the script, and the re-executed copy would
+# bridge stub tail as a user script.
 run_installer() {
-# Stdin capture, no decisions: a TTY is never drained.
-OXDOCK_PIPED_SCRIPT=""
+# Stdin capture, no decisions: a TTY is never drained. Under handoff
+# re-entry the outer copy already drained, so inherit its capture
+# instead of reading the pipe twice.
+if [ -z "${OXDOCK_STUB_ACTIVE:-}" ]; then
+  OXDOCK_PIPED_SCRIPT=""
+  if [ ! -t 0 ]; then
+    stdin_tmp=$(mktemp)
+    trap 'rm -rf "$tmp" "$stdin_tmp"' EXIT
+    cat > "$stdin_tmp"
+    if [ -s "$stdin_tmp" ]; then
+      OXDOCK_PIPED_SCRIPT="$stdin_tmp"
+    else
+      rm -f "$stdin_tmp"
+    fi
+  fi
+fi
 # Interactive consoles confirm the destination in the oxfile: export the
-# flag only with a console behind stdin, before the drain logic below.
+# flag only with a console behind stdin. Re-probed, never inherited:
+# the descriptor survives re-entry unchanged, so the answer matches.
 OXDOCK_INTERACTIVE=""
 if [ -t 0 ]; then
   OXDOCK_INTERACTIVE=1
 fi
-if [ ! -t 0 ]; then
-  stdin_tmp=$(mktemp)
-  trap 'rm -rf "$tmp" "$stdin_tmp"' EXIT
-  cat > "$stdin_tmp"
-  if [ -s "$stdin_tmp" ]; then
-    OXDOCK_PIPED_SCRIPT="$stdin_tmp"
+# Hand off to the release-bundled installer: the executed logic always
+# matches the engine version, and warm runs keep working because the
+# bundled copy lives in the cache beside everything else. The flag
+# prevents re-entry: the re-executed copy skips this block and the
+# drain above. Digest verification fails closed when the entry is
+# missing or mismatched.
+if [ -z "${OXDOCK_STUB_ACTIVE:-}" ]; then
+  if command -v sha256sum >/dev/null 2>&1; then
+    (cd "$VDIR" && grep " install.sh$" {{ $docs_global.stub_name_checksums }} | sha256sum -c - >/dev/null) || { echo "installer stub failed verification" >&2; exit 1; }
   else
-    rm -f "$stdin_tmp"
+    (cd "$VDIR" && grep " install.sh$" {{ $docs_global.stub_name_checksums }} | shasum -a 256 -c - >/dev/null) || { echo "installer stub failed verification" >&2; exit 1; }
   fi
+  OXDOCK_STUB_ACTIVE=1
+  export OXDOCK_STUB_ACTIVE
+  export OXDOCK_PIPED_SCRIPT
+  export OXDOCK_INTERACTIVE
+  # The outer unpack stays behind: exec discards its EXIT trap, and the
+  # re-executed copy unpacks the cache into its own directory below.
+  rm -rf "$tmp"
+  exec bash "$VDIR/install.sh"
+fi
+# Re-entry owns the inherited capture now: the outer trap died with
+# the exec, so this process unlinks the bridged file on exit. Only
+# re-entry reaches past the handoff above with a capture present.
+if [ -n "${OXDOCK_PIPED_SCRIPT:-}" ] && [ -f "$OXDOCK_PIPED_SCRIPT" ]; then
+  trap 'rm -rf "$tmp" "$OXDOCK_PIPED_SCRIPT"' EXIT
 fi
 (cd "$tmp" && OXDOCK_ASSET="$VDIR/$ASSET" OXDOCK_SHA="$EXPECTED" OXDOCK_BIN="$BIN" OXDOCK_DIR="$OXDOCK_DIR" OXDOCK_VERSION="$VERSION" OXDOCK_INTERPRETER="$ENGINE" OXDOCK_PIPED_SCRIPT="$OXDOCK_PIPED_SCRIPT" OXDOCK_INTERACTIVE="$OXDOCK_INTERACTIVE" "$ENGINE" "$tmp/{{ $docs_global.stub_name_oxfile }}") || {
   code=$?
