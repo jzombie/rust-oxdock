@@ -79,6 +79,10 @@ jobs:
       # through the script path: GitHub stages `run:` blocks outside the
       # checkout, so discovery would misresolve without the override.
       OXDOCK_WORKSPACE_ROOT: ${{ github.workspace }}
+      # Test the branch's own installer logic, not whatever main happens
+      # to carry: head branch on PRs, branch name otherwise. Unset on no
+      # known branch would skip the override; every event here has one.
+      OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.head_ref || github.ref_name }}/install.oxfile
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -211,6 +215,7 @@ jobs:
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       OXDOCK_WORKSPACE_ROOT: ${{ github.workspace }}
+      OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.head_ref || github.ref_name }}/install.oxfile
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -238,11 +243,6 @@ jobs:
         env:
           VERSION: local-test
           SMOKE_PORT: 18731
-          # Legs exercise the branch's own installer logic, not whatever
-          # main happens to carry. Kept off the job env so the pinned
-          # bootstrap engine runs the release's own oxfile, which its
-          # vocabulary can still parse.
-          OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.head_ref || github.ref_name }}/install.oxfile
         run: |
           IMPORT [STD]
           INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, HOME, USERPROFILE, LOCALAPPDATA, GITHUB_TOKEN, PATH]
@@ -307,6 +307,7 @@ jobs:
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       OXDOCK_WORKSPACE_ROOT: ${{ github.workspace }}
+      OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.head_ref || github.ref_name }}/install.oxfile
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -334,11 +335,6 @@ jobs:
         env:
           VERSION: local-test
           SMOKE_PORT: 18734
-          # Legs exercise the branch's own installer logic, not whatever
-          # main happens to carry. Kept off the job env so the pinned
-          # bootstrap engine runs the release's own oxfile, which its
-          # vocabulary can still parse.
-          OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.head_ref || github.ref_name }}/install.oxfile
         run: |
           IMPORT [STD]
           INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, HOME, USERPROFILE, LOCALAPPDATA, GITHUB_TOKEN, PATH]
@@ -407,6 +403,7 @@ jobs:
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       OXDOCK_WORKSPACE_ROOT: ${{ github.workspace }}
+      OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.head_ref || github.ref_name }}/install.oxfile
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -434,11 +431,6 @@ jobs:
         env:
           VERSION: local-test
           SMOKE_PORT: 18737
-          # Legs exercise the branch's own installer logic, not whatever
-          # main happens to carry. Kept off the job env so the pinned
-          # bootstrap engine runs the release's own oxfile, which its
-          # vocabulary can still parse.
-          OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.head_ref || github.ref_name }}/install.oxfile
         run: |
           IMPORT [STD]
           INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, HOME, USERPROFILE, LOCALAPPDATA, GITHUB_TOKEN, PATH]
@@ -495,6 +487,7 @@ jobs:
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       OXDOCK_WORKSPACE_ROOT: ${{ github.workspace }}
+      OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.head_ref || github.ref_name }}/install.oxfile
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -516,7 +509,7 @@ jobs:
 
       # Default location: no INSTALL_DIR anywhere by design, so each
       # platform's stub default engages. Windows asserts the real
-      # guarantee (bare name resolves, no new shell); Unix asserts
+      # guarantee (bare name resolves, no new shell); unix asserts
       # placement under home. Own port.
       - name: Install default location
         shell: oxdock-engine --script {0}
@@ -524,11 +517,6 @@ jobs:
           VERSION: local-test
           # Loopback port for this leg; server, probe, and release base derive from it.
           SMOKE_PORT: 18735
-          # Legs exercise the branch's own installer logic, not whatever
-          # main happens to carry. Kept off the job env so the pinned
-          # bootstrap engine runs the release's own oxfile, which its
-          # vocabulary can still parse.
-          OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.head_ref || github.ref_name }}/install.oxfile
         run: |
           IMPORT [STD]
           INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, HOME, USERPROFILE, LOCALAPPDATA, GITHUB_TOKEN, PATH]
@@ -583,6 +571,7 @@ jobs:
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       OXDOCK_WORKSPACE_ROOT: ${{ github.workspace }}
+      OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.head_ref || github.ref_name }}/install.oxfile
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -612,11 +601,6 @@ jobs:
           INSTALL_DIR_WIN: ${{ runner.temp }}\oxbin-ephemeral
           # Loopback port for this leg; server, probe, and release base derive from it.
           SMOKE_PORT: 18732
-          # Legs exercise the branch's own installer logic, not whatever
-          # main happens to carry. Kept off the job env so the pinned
-          # bootstrap engine runs the release's own oxfile, which its
-          # vocabulary can still parse.
-          OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.head_ref || github.ref_name }}/install.oxfile
         run: |
           IMPORT [STD]
           INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, INSTALL_DIR_NIX, INSTALL_DIR_WIN, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, HOME, USERPROFILE, GITHUB_TOKEN]
@@ -767,6 +751,7 @@ jobs:
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       OXDOCK_WORKSPACE_ROOT: ${{ github.workspace }}
+      OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.head_ref || github.ref_name }}/install.oxfile
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -795,11 +780,6 @@ jobs:
         env:
           VERSION: local-test
           SMOKE_PORT: 18733
-          # Legs exercise the branch's own installer logic, not whatever
-          # main happens to carry. Kept off the job env so the pinned
-          # bootstrap engine runs the release's own oxfile, which its
-          # vocabulary can still parse.
-          OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.head_ref || github.ref_name }}/install.oxfile
         run: |
           IMPORT [STD]
           INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, HOME, USERPROFILE, LOCALAPPDATA, GITHUB_TOKEN, PATH]
@@ -878,6 +858,7 @@ jobs:
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       OXDOCK_WORKSPACE_ROOT: ${{ github.workspace }}
+      OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.head_ref || github.ref_name }}/install.oxfile
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -911,11 +892,6 @@ jobs:
         env:
           VERSION: local-test
           SMOKE_PORT: 18738
-          # Legs exercise the branch's own installer logic, not whatever
-          # main happens to carry. Kept off the job env so the pinned
-          # bootstrap engine runs the release's own oxfile, which its
-          # vocabulary can still parse.
-          OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.head_ref || github.ref_name }}/install.oxfile
         run: |
           IMPORT [STD]
           INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, HOME, USERPROFILE, LOCALAPPDATA, GITHUB_TOKEN, PATH]
