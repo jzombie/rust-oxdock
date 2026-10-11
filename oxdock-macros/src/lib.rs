@@ -1054,6 +1054,16 @@ fn emit_stepkind(
             let t = emit_arg(to, interp);
             quote! { StepKind::Install { from: #f, to: #t } }
         }
+        StepKind::Archive { src, dst, raw } => {
+            let s = emit_arg(src, interp);
+            let d = emit_arg(dst, interp);
+            quote! { StepKind::Archive { src: #s, dst: #d, raw: #raw } }
+        }
+        StepKind::Unarchive { src, dst } => {
+            let s = emit_arg(src, interp);
+            let d = emit_arg(dst, interp);
+            quote! { StepKind::Unarchive { src: #s, dst: #d } }
+        }
         StepKind::Cwd => quote! { StepKind::Cwd },
         StepKind::AssertEq {
             hash,

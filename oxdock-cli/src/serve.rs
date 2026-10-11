@@ -386,7 +386,7 @@ fn prepare_staging(
     let staging = dir.as_guarded_path().clone();
     let resolver = PathResolver::new(staging.root(), staging.root())?;
     tar::unpack_from(spill, &mut |entry| match entry {
-        tar::StreamedEntry::Dir { path } => {
+        tar::StreamedEntry::Dir { path, .. } => {
             if path.is_empty() {
                 return Ok(());
             }
@@ -396,7 +396,7 @@ fn prepare_staging(
             resolver.create_dir_all(&dest)?;
             Ok(())
         }
-        tar::StreamedEntry::File { path, reader } => {
+        tar::StreamedEntry::File { path, reader, .. } => {
             let dest = staging
                 .join(&path)
                 .map_err(|err| anyhow::anyhow!("fetch file {path:?} escapes staging: {err:#}"))?;

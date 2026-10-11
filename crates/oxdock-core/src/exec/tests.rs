@@ -2,13 +2,13 @@ use super::*;
 
 use anyhow::bail;
 use indoc::indoc;
-use oxdock_fs::{GuardedPath, MockFs, WorkspaceFs};
+use oxdock_fs::{EntryKind, GuardedPath, MockFs, WorkspaceFs};
 use oxdock_parser::{Expr, Guard, GuardExpr, IoBinding, IoStream, StepKind};
 use oxdock_process::{
     BackgroundHandle, CommandContext, CommandMode, CommandOptions, CommandResult, CommandStdin,
     MockProcessManager, MockRunCall, ProcessManager,
 };
-use oxdock_sys_test_utils::exit_status_from_code;
+use oxdock_sys_test_utils::{can_create_symlinks, exit_status_from_code};
 use std::collections::HashMap;
 use std::process::ExitStatus;
 use std::sync::{Arc, Mutex};
@@ -2151,6 +2151,368 @@ fn copy_directory_branch_recurses_into_nested_target() {
         b"nested",
         "COPY must recurse into directories"
     );
+}
+
+#[test]
+fn archive_unarchive_round_trips_tree_gzip_and_raw() {
+    for raw in [false, true] {
+        let (archive, dst) = if raw {
+            ("bundle.tar", "restored-raw")
+        } else {
+            ("bundle.tar.gz", "restored")
+        };
+        let steps = vec![
+            step(StepKind::Write {
+                path: "bundle/app.txt".into(),
+                contents: Some("payload".into()),
+            }),
+            step(StepKind::Write {
+                path: "bundle/nested/deep.txt".into(),
+                contents: Some("deep".into()),
+            }),
+            step(StepKind::Mkdir("bundle/empty".into())),
+            step(StepKind::Archive {
+                src: "bundle".into(),
+                dst: archive.into(),
+                raw,
+            }),
+            step(StepKind::Unarchive {
+                src: archive.into(),
+                dst: dst.into(),
+            }),
+        ];
+        let temp = GuardedPath::tempdir().unwrap();
+        let root = temp.as_guarded_path().clone();
+        let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
+        run_steps_with_manager(fs, &steps, MockProcessManager::default(), ExecIo::new())
+            .expect("archive pipeline");
+        let resolver = PathResolver::new_guarded(root.clone(), root.clone()).unwrap();
+        let app = root.join(&format!("{dst}/app.txt")).unwrap();
+        let deep = root.join(&format!("{dst}/nested/deep.txt")).unwrap();
+        let empty = root.join(&format!("{dst}/empty")).unwrap();
+        assert_eq!(
+            resolver.read_file(&app).unwrap(),
+            b"payload",
+            "raw={raw}: top-level file must survive"
+        );
+        assert_eq!(
+            resolver.read_file(&deep).unwrap(),
+            b"deep",
+            "raw={raw}: nested file must survive"
+        );
+        assert!(
+            matches!(resolver.entry_kind(&empty), Ok(EntryKind::Dir)),
+            "raw={raw}: empty dirs must survive"
+        );
+    }
+}
+
+#[test]
+fn archive_single_file_packs_under_basename() {
+    let steps = vec![
+        step(StepKind::Write {
+            path: "note.txt".into(),
+            contents: Some("lone".into()),
+        }),
+        step(StepKind::Archive {
+            src: "note.txt".into(),
+            dst: "note.tar.gz".into(),
+            raw: false,
+        }),
+        step(StepKind::Unarchive {
+            src: "note.tar.gz".into(),
+            dst: "out".into(),
+        }),
+    ];
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = temp.as_guarded_path().clone();
+    let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
+    run_steps_with_manager(fs, &steps, MockProcessManager::default(), ExecIo::new())
+        .expect("single-file pipeline");
+    let resolver = PathResolver::new_guarded(root.clone(), root.clone()).unwrap();
+    let restored = root.join("out/note.txt").unwrap();
+    assert_eq!(
+        resolver.read_file(&restored).unwrap(),
+        b"lone",
+        "single files land under their basename"
+    );
+}
+
+#[test]
+fn archive_root_absolute_src_ignores_cwd_shadow() {
+    // `/f` must resolve against the workspace root even when the
+    // working directory holds its own `f`: splitting on the leading
+    // slash used to yield an empty parent and probe the cwd instead.
+    let steps = vec![
+        step(StepKind::Mkdir("sub".into())),
+        step(StepKind::Write {
+            path: "sub/f".into(),
+            contents: Some("wrong".into()),
+        }),
+        step(StepKind::Write {
+            path: "f".into(),
+            contents: Some("right".into()),
+        }),
+        step(StepKind::Workdir("sub".into())),
+        step(StepKind::Archive {
+            src: "/f".into(),
+            dst: "packed.tar.gz".into(),
+            raw: false,
+        }),
+        step(StepKind::Unarchive {
+            src: "packed.tar.gz".into(),
+            dst: "out".into(),
+        }),
+    ];
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = temp.as_guarded_path().clone();
+    let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
+    run_steps_with_manager(fs, &steps, MockProcessManager::default(), ExecIo::new())
+        .expect("absolute archive pipeline");
+    let resolver = PathResolver::new_guarded(root.clone(), root.clone()).unwrap();
+    let restored = root.join("sub/out/f").unwrap();
+    assert_eq!(
+        resolver.read_file(&restored).unwrap(),
+        b"right",
+        "root-absolute sources must not resolve through the cwd shadow"
+    );
+}
+
+#[test]
+fn archive_destination_cannot_be_source_or_inside_packed_tree() {
+    // Destination equal to the source would truncate it before reading.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = temp.as_guarded_path().clone();
+    let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
+    let steps = vec![
+        step(StepKind::Write {
+            path: "note.txt".into(),
+            contents: Some("do not eat me".into()),
+        }),
+        step(StepKind::Archive {
+            src: "note.txt".into(),
+            dst: "note.txt".into(),
+            raw: false,
+        }),
+    ];
+    let err = run_expect_err(fs, &steps, MockProcessManager::default());
+    assert!(
+        err.chain()
+            .any(|c| c.to_string().contains("cannot be the source itself")),
+        "unexpected chain: {err:#}"
+    );
+    let resolver = PathResolver::new_guarded(root.clone(), root.clone()).unwrap();
+    let survivor = root.join("note.txt").unwrap();
+    assert_eq!(
+        resolver.read_file(&survivor).unwrap(),
+        b"do not eat me",
+        "rejected self-archives must leave the source intact"
+    );
+
+    // A pre-existing destination inside the packed tree would be
+    // truncated before its own append reads it back.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = temp.as_guarded_path().clone();
+    let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
+    let steps = vec![
+        step(StepKind::Write {
+            path: "bundle/a.txt".into(),
+            contents: Some("a".into()),
+        }),
+        step(StepKind::Write {
+            path: "bundle/out.tar.gz".into(),
+            contents: Some("stale".into()),
+        }),
+        step(StepKind::Archive {
+            src: "bundle".into(),
+            dst: "bundle/out.tar.gz".into(),
+            raw: false,
+        }),
+    ];
+    let err = run_expect_err(fs, &steps, MockProcessManager::default());
+    assert!(
+        err.chain()
+            .any(|c| c.to_string().contains("cannot overwrite inside")),
+        "unexpected chain: {err:#}"
+    );
+
+    // A fresh destination inside the tree is safe (collection already
+    // ran, so it cannot be a member) and keeps whole-tree archives
+    // like `ARCHIVE project project.tar.gz` working.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = temp.as_guarded_path().clone();
+    let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
+    let steps = vec![
+        step(StepKind::Write {
+            path: "bundle/a.txt".into(),
+            contents: Some("a".into()),
+        }),
+        step(StepKind::Archive {
+            src: "bundle".into(),
+            dst: "bundle/fresh.tar.gz".into(),
+            raw: false,
+        }),
+        step(StepKind::Unarchive {
+            src: "bundle/fresh.tar.gz".into(),
+            dst: "elsewhere".into(),
+        }),
+    ];
+    run_steps_with_manager(fs, &steps, MockProcessManager::default(), ExecIo::new())
+        .expect("fresh inside-tree destination must pack");
+    let resolver = PathResolver::new_guarded(root.clone(), root.clone()).unwrap();
+    let restored = root.join("elsewhere/a.txt").unwrap();
+    assert_eq!(resolver.read_file(&restored).unwrap(), b"a");
+}
+
+#[test]
+fn unarchive_restores_read_only_dirs_after_children_land() {
+    // A 0555 member dir applied eagerly would lock out its own file
+    // creations with EACCES; modes must settle after extraction.
+    let mut raw = Vec::new();
+    {
+        let mut builder = tar::Builder::new(&mut raw);
+        let mut dir_header = tar::Header::new_gnu();
+        dir_header.set_entry_type(tar::EntryType::Directory);
+        dir_header.set_mode(0o555);
+        dir_header.set_size(0);
+        dir_header.set_cksum();
+        builder
+            .append_data(&mut dir_header, "rodir", std::io::empty())
+            .unwrap();
+        let mut file_header = tar::Header::new_gnu();
+        file_header.set_size(5);
+        file_header.set_mode(0o644);
+        file_header.set_cksum();
+        builder
+            .append_data(&mut file_header, "rodir/inner.txt", &b"inner"[..])
+            .unwrap();
+        builder.into_inner().unwrap();
+    }
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = temp.as_guarded_path().clone();
+    let resolver = PathResolver::new_guarded(root.clone(), root.clone()).unwrap();
+    let archive = root.join("locked.tar").unwrap();
+    resolver.write_file(&archive, &raw).unwrap();
+    let steps = vec![step(StepKind::Unarchive {
+        src: "locked.tar".into(),
+        dst: "out".into(),
+    })];
+    let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
+    run_steps_with_manager(fs, &steps, MockProcessManager::default(), ExecIo::new())
+        .expect("read-only member dirs must not block their children");
+    let restored = root.join("out/rodir/inner.txt").unwrap();
+    assert_eq!(resolver.read_file(&restored).unwrap(), b"inner");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = root.join("out/rodir").unwrap();
+        let mode = resolver.metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o555, "deferred modes still settle, got {mode:o}");
+    }
+}
+
+#[test]
+fn unarchive_rejects_truncated_input() {
+    for (name, bytes) in [("short", vec![0u8; 100]), ("almost-header", vec![0u8; 511])] {
+        let temp = GuardedPath::tempdir().unwrap();
+        let root = temp.as_guarded_path().clone();
+        let resolver = PathResolver::new_guarded(root.clone(), root.clone()).unwrap();
+        let archive = root.join("cut.tar").unwrap();
+        resolver.write_file(&archive, &bytes).unwrap();
+        let steps = vec![step(StepKind::Unarchive {
+            src: "cut.tar".into(),
+            dst: "out".into(),
+        })];
+        let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
+        let err = run_expect_err(fs, &steps, MockProcessManager::default());
+        assert!(
+            err.chain().any(|c| c.to_string().contains("truncated")),
+            "{name}: unexpected chain: {err:#}"
+        );
+    }
+}
+
+#[test]
+fn archive_refuses_symlink_source() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = temp.as_guarded_path().clone();
+    if !can_create_symlinks(root.as_path()) {
+        return;
+    }
+    let resolver = PathResolver::new_guarded(root.clone(), root.clone()).unwrap();
+    let target = root.join("target.txt").unwrap();
+    resolver.write_file(&target, b"target").unwrap();
+    let link = root.join("link.txt").unwrap();
+    resolver.symlink(&target, &link).unwrap();
+    let steps = vec![step(StepKind::Archive {
+        src: "link.txt".into(),
+        dst: "link.tar.gz".into(),
+        raw: false,
+    })];
+    let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
+    let err = run_expect_err(fs, &steps, MockProcessManager::default());
+    assert!(
+        err.chain()
+            .any(|c| c.to_string().contains("refuses to pack symlink")),
+        "unexpected chain: {err:#}"
+    );
+}
+
+#[test]
+fn unarchive_refuses_hostile_members() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = temp.as_guarded_path().clone();
+    let resolver = PathResolver::new_guarded(root.clone(), root.clone()).unwrap();
+    let hostile = hostile_tar_bytes("../evil.txt", b"evil");
+    let archive = root.join("hostile.tar").unwrap();
+    resolver.write_file(&archive, &hostile).unwrap();
+    let steps = vec![step(StepKind::Unarchive {
+        src: "hostile.tar".into(),
+        dst: "out".into(),
+    })];
+    let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
+    let err = run_expect_err(fs, &steps, MockProcessManager::default());
+    assert!(
+        err.chain().any(|c| c.to_string().contains("escapes")),
+        "unexpected chain: {err:#}"
+    );
+    assert!(
+        !root.join("evil.txt").unwrap().exists(),
+        "no byte may land outside the destination"
+    );
+    assert!(
+        !root.join("out/evil.txt").unwrap().exists(),
+        "no byte may land inside the destination either"
+    );
+}
+
+/// Splice a hostile member name into an otherwise valid raw tar and
+/// re-checksum its header: the `tar` builder refuses hostile names up
+/// front, but hostile bytes arrive over the wire.
+fn hostile_tar_bytes(name: &str, payload: &[u8]) -> Vec<u8> {
+    let mut raw = Vec::new();
+    {
+        let mut builder = tar::Builder::new(&mut raw);
+        let mut header = tar::Header::new_gnu();
+        header.set_size(payload.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "victim.txt", payload)
+            .unwrap();
+        builder.into_inner().unwrap();
+    }
+    let name_bytes = name.as_bytes();
+    assert!(name_bytes.len() < 100, "name must fit the tar name field");
+    raw[..name_bytes.len()].copy_from_slice(name_bytes);
+    raw[name_bytes.len()] = 0;
+    for b in &mut raw[148..156] {
+        *b = b' ';
+    }
+    let sum: u32 = raw[..512].iter().map(|b| *b as u32).sum();
+    let octal = format!("{sum:06o}\0 ");
+    raw[148..156].copy_from_slice(octal.as_bytes());
+    raw
 }
 
 #[test]

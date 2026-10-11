@@ -2358,6 +2358,8 @@ fn _assert_step_kind_exhaustiveness(kind: &StepKind) {
         StepKind::Symlink { .. } => {}
         StepKind::Mkdir(_) => {}
         StepKind::Install { .. } => {}
+        StepKind::Archive { .. } => {}
+        StepKind::Unarchive { .. } => {}
         StepKind::Ls(_) => {}
         StepKind::Cwd => {}
         StepKind::Read(_) => {}

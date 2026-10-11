@@ -20,6 +20,8 @@ define_pipeline! {
     StepKind::Env { .. } => exec::dispatch_env,
     StepKind::Copy { .. } => exec::dispatch_copy,
     StepKind::CopyGit { .. } => exec::dispatch_copy_git,
+    StepKind::Archive { .. } => exec::dispatch_archive,
+    StepKind::Unarchive { .. } => exec::dispatch_unarchive,
     StepKind::Symlink { .. } => exec::dispatch_symlink,
     StepKind::Mkdir(..) => exec::dispatch_mkdir,
     StepKind::Install { .. } => exec::dispatch_install,

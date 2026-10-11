@@ -1599,17 +1599,20 @@ version = "0.24.5-alpha"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
+ "flate2",
  "indoc",
  "oxdock-fs",
  "oxdock-func-macro",
  "oxdock-parser",
  "oxdock-pipe",
  "oxdock-process",
+ "oxdock-remote-proto",
  "oxdock-sys-test-utils",
  "proptest",
  "rand 0.10.3",
  "serde_json",
  "sha2",
+ "tar",
  "toml",
 ]
 

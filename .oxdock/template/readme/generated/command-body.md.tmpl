@@ -1674,6 +1674,116 @@ ASSERT_EQ $t "file"
 ```
 
 
+### ARCHIVE
+
+Pack a file or directory into a tarball.
+
+**Syntax:** `ARCHIVE [--raw] <src> <dst>`
+
+Packs a file or directory into a tarball, gzip-compressed by
+default (`--raw` writes an uncompressed tar instead).
+
+A lone file packs as a single top-level entry under its
+basename; a directory recurses, preserving empty dirs. Source
+modes ride in the headers on Unix, so system `tar` restores
+them elsewhere. Symlink sources refuse: archives cross trust
+boundaries, so links never resolve into member bytes. Hashing
+stays with `HASH_SHA256`, which reads the finished archive
+like any other file.
+
+
+**Arguments:**
+
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| `src` | [`PATH`](#value-type-path) | yes | File or directory to pack |
+| `dst` | [`PATH`](#value-type-path) | yes | Archive file to write |
+
+**Flags:**
+
+| Flag | Type | Description |
+| --- | --- | --- |
+| `--raw` | `BOOL` | Write an uncompressed tar instead of gzip |
+
+**Examples:**
+
+**Example: archive directory**
+
+```oxdock
+# Stage a small tree to pack.
+WRITE bundle/app.txt bundled-payload
+WRITE bundle/nested/deep.txt deep-payload
+
+# ARCHIVE packs it gzip-compressed by default.
+ARCHIVE bundle bundle.tar.gz
+
+# UNARCHIVE restores the tree under the destination.
+UNARCHIVE bundle.tar.gz restored
+
+# The payloads arrive byte-identical.
+LET $body: STRING = READ restored/app.txt
+ASSERT_EQ $body "bundled-payload"
+
+LET $deep: STRING = READ restored/nested/deep.txt
+ASSERT_EQ $deep "deep-payload"
+```
+
+**Example: archive raw**
+
+```oxdock
+# A lone file packs as a single top-level entry.
+WRITE tool.bin tool-payload
+
+# Raw archives skip gzip and stay readable by any tar.
+ARCHIVE --raw tool.bin tool.tar
+UNARCHIVE tool.tar tool-out
+
+# The entry lands under its basename.
+LET $body: STRING = READ tool-out/tool.bin
+ASSERT_EQ $body "tool-payload"
+```
+
+
+### UNARCHIVE
+
+Unpack a tarball into a directory.
+
+**Syntax:** `UNARCHIVE <src> <dst>`
+
+Unpacks a tarball under the destination directory, creating
+it first. Gzip and raw (`ARCHIVE --raw`) tarballs
+self-identify by magic bytes, so no flag is needed.
+
+Symlink and special members refuse naming the entry, and
+absolute or escaping paths fail closed before any byte
+lands: the member sanitizer plus the destination join check
+form two independent walls. Unix modes recorded in the
+headers restore on unpack; other platforms land default
+modes (confer executability with `INSTALL` there).
+
+
+**Arguments:**
+
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| `src` | [`PATH`](#value-type-path) | yes | Archive file to unpack |
+| `dst` | [`PATH`](#value-type-path) | yes | Directory to unpack under |
+
+**Examples:**
+
+**Example: unarchive**
+
+```oxdock
+# Pack a note, then restore it under a fresh destination.
+WRITE pack/note.txt packed-note
+ARCHIVE pack pack.tar.gz
+UNARCHIVE pack.tar.gz unpacked
+
+LET $body: STRING = READ unpacked/note.txt
+ASSERT_EQ $body "packed-note"
+```
+
+
 ### LS
 
 List directory.

@@ -200,6 +200,29 @@ pub mod test_lower_mock {
                     to,
                 })
             }
+            "ARCHIVE" => {
+                let raw = args.iter().any(|a| a.as_str() == "--raw");
+                let positional: Vec<_> =
+                    args.into_iter().filter(|a| a.as_str() != "--raw").collect();
+                let mut it = positional.into_iter();
+                let src = it
+                    .next()
+                    .ok_or_else(|| validation("ARCHIVE", "ARCHIVE requires a source"))?;
+                let dst = it
+                    .next()
+                    .ok_or_else(|| validation("ARCHIVE", "ARCHIVE requires a destination"))?;
+                Ok(StepKind::Archive { src, dst, raw })
+            }
+            "UNARCHIVE" => {
+                let mut it = args.into_iter();
+                let src = it
+                    .next()
+                    .ok_or_else(|| validation("UNARCHIVE", "UNARCHIVE requires an archive"))?;
+                let dst = it
+                    .next()
+                    .ok_or_else(|| validation("UNARCHIVE", "UNARCHIVE requires a destination"))?;
+                Ok(StepKind::Unarchive { src, dst })
+            }
             _ => Err(ParseError::unknown_command(
                 name,
                 format!("unknown command: {name}"),

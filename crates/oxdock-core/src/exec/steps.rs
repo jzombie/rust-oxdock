@@ -772,6 +772,16 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
             let path_resolved = super::args::resolve_arg(path, &mut cx)?;
             handlers::hash_sha256(&mut cx, idx, &path_resolved)
         }
+        StepKind::Archive { src, dst, raw } => {
+            let src_resolved = super::args::resolve_arg(src, &mut cx)?;
+            let dst_resolved = super::args::resolve_arg(dst, &mut cx)?;
+            handlers::archive(&mut cx, idx, &src_resolved, &dst_resolved, *raw)
+        }
+        StepKind::Unarchive { src, dst } => {
+            let src_resolved = super::args::resolve_arg(src, &mut cx)?;
+            let dst_resolved = super::args::resolve_arg(dst, &mut cx)?;
+            handlers::unarchive(&mut cx, idx, &src_resolved, &dst_resolved)
+        }
         StepKind::Symlink {
             from_workspace,
             from,
@@ -1064,6 +1074,16 @@ fn execute_steps_inner<P: ProcessManager>(
                         StepKind::HashSha256 { path } => {
                             let path_resolved = super::args::resolve_arg(path, &mut cx)?;
                             handlers::hash_sha256(&mut cx, idx, &path_resolved)
+                        }
+                        StepKind::Archive { src, dst, raw } => {
+                            let src_resolved = super::args::resolve_arg(src, &mut cx)?;
+                            let dst_resolved = super::args::resolve_arg(dst, &mut cx)?;
+                            handlers::archive(&mut cx, idx, &src_resolved, &dst_resolved, *raw)
+                        }
+                        StepKind::Unarchive { src, dst } => {
+                            let src_resolved = super::args::resolve_arg(src, &mut cx)?;
+                            let dst_resolved = super::args::resolve_arg(dst, &mut cx)?;
+                            handlers::unarchive(&mut cx, idx, &src_resolved, &dst_resolved)
                         }
                         StepKind::Symlink {
                             from_workspace,

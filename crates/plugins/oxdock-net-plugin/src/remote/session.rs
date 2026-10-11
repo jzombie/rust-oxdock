@@ -600,7 +600,7 @@ impl MuxioSession {
     ) -> Result<()> {
         let root = fs.root().clone();
         tar::unpack_from(stage, &mut |entry| match entry {
-            tar::StreamedEntry::Dir { path } => {
+            tar::StreamedEntry::Dir { path, .. } => {
                 let host_rel = map_push_path(&request.push_decls, &path).ok_or_else(|| {
                     anyhow::anyhow!(
                         "REMOTE target '{}' returned undeclared path {path:?}",
@@ -609,7 +609,7 @@ impl MuxioSession {
                 })?;
                 oxdock_core::apply_push_dir(fs, &root, &host_rel)
             }
-            tar::StreamedEntry::File { path, reader } => {
+            tar::StreamedEntry::File { path, reader, .. } => {
                 let host_rel = map_push_path(&request.push_decls, &path).ok_or_else(|| {
                     anyhow::anyhow!(
                         "REMOTE target '{}' returned undeclared path {path:?}",

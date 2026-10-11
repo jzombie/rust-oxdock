@@ -21,13 +21,17 @@ pub struct PackEntry {
 
 /// One unpacked entry, borrowed from the archive driver: the caller's
 /// `apply` callback consumes file bytes (streaming) or records metadata
-/// before the next entry arrives. Nothing accumulates.
+/// before the next entry arrives. Nothing accumulates. Modes ride along
+/// so filesystem apply sites can restore them; transfer apply sites may
+/// ignore the field.
 pub enum StreamedEntry<'a> {
     Dir {
         path: String,
+        mode: u32,
     },
     File {
         path: String,
+        mode: u32,
         reader: &'a mut dyn Read,
     },
     Symlink {
@@ -171,13 +175,83 @@ pub fn unpack_from<R: Read>(
 ) -> Result<()> {
     use flate2::read::GzDecoder;
     let decoder = GzDecoder::new(src);
-    let mut archive = tar::Archive::new(decoder);
+    drain_entries(&mut tar::Archive::new(decoder), apply)
+}
+
+/// Gzip magic the sniffer keys on (`1f 8b`): a raw tar member header
+/// opens with a file name, never these bytes in practice.
+const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
+
+/// Unpack either a gzip tarball or a raw (`ARCHIVE --raw`) tar: sniff the
+/// first two bytes for the gzip magic, then stream the rest through the
+/// matching driver. Sniffed bytes chain back, so no byte is lost. Empty
+/// input fails closed: an empty file is corruption, not an empty tree.
+/// The raw path additionally requires one full 512-byte header block up
+/// front: shorter inputs yield zero entries with no error, so they fail
+/// here instead of reporting a silent success. (Truncated gzip fails on
+/// its own in the decoder; gzip wrapping a sub-header payload can only
+/// be hand-built, and extracts nothing, which downstream assertions on
+/// restored content catch.)
+pub fn unpack_auto_from<R: Read>(
+    mut src: R,
+    apply: &mut dyn FnMut(StreamedEntry) -> Result<()>,
+) -> Result<()> {
+    let mut head = [0u8; 2];
+    let mut filled = 0usize;
+    while filled < 2 {
+        match src.read(&mut head[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(e) => return Err(e.into()),
+        }
+    }
+    if filled == 0 {
+        bail!("archive is empty");
+    }
+    let chained = std::io::Cursor::new(head[..filled].to_vec()).chain(src);
+    if filled == 2 && head == GZIP_MAGIC {
+        unpack_from(chained, apply)
+    } else {
+        unpack_raw_checked(chained, apply)
+    }
+}
+
+/// Raw-tar entry point with a truncation floor: buffer the first header
+/// block and fail closed when the stream ends before it is whole.
+fn unpack_raw_checked<R: Read>(
+    mut src: R,
+    apply: &mut dyn FnMut(StreamedEntry) -> Result<()>,
+) -> Result<()> {
+    let mut first = vec![0u8; 512];
+    let mut filled = 0usize;
+    while filled < first.len() {
+        match src.read(&mut first[filled..]) {
+            Ok(0) => break,
+            Ok(n) => filled += n,
+            Err(e) => return Err(e.into()),
+        }
+    }
+    if filled < first.len() {
+        bail!("archive is truncated: {filled} bytes cannot hold a tar header");
+    }
+    let chained = std::io::Cursor::new(first).chain(src);
+    drain_entries(&mut tar::Archive::new(chained), apply)
+}
+
+/// Drive one `tar::Archive` to completion through `apply`. Both the gzip
+/// and the raw entry points share this loop, so hostile-entry failures
+/// (`sanitize_rel`, unsupported types) read identically either way.
+fn drain_entries<R: Read>(
+    archive: &mut tar::Archive<R>,
+    apply: &mut dyn FnMut(StreamedEntry) -> Result<()>,
+) -> Result<()> {
     for entry in archive.entries()? {
         let mut entry = entry?;
         let raw = entry.path()?.to_string_lossy().to_string();
         let rel = sanitize_rel(&raw)?;
+        let mode = entry.header().mode().unwrap_or(0);
         match entry.header().entry_type() {
-            t if t.is_dir() => apply(StreamedEntry::Dir { path: rel })?,
+            t if t.is_dir() => apply(StreamedEntry::Dir { path: rel, mode })?,
             t if t.is_symlink() || t.is_hard_link() => {
                 let target = entry
                     .link_name()?
@@ -188,6 +262,7 @@ pub fn unpack_from<R: Read>(
             t if t.is_file() => {
                 apply(StreamedEntry::File {
                     path: rel,
+                    mode,
                     reader: &mut entry,
                 })?;
             }
@@ -272,8 +347,8 @@ mod tests {
         let mut seen: std::collections::HashMap<String, Vec<u8>> = std::collections::HashMap::new();
         unpack_from(Cursor::new(&staged), &mut |entry| {
             match entry {
-                StreamedEntry::Dir { path } => names.push(format!("dir:{path}")),
-                StreamedEntry::File { path, reader } => {
+                StreamedEntry::Dir { path, .. } => names.push(format!("dir:{path}")),
+                StreamedEntry::File { path, reader, .. } => {
                     let mut bytes = Vec::new();
                     reader.read_to_end(&mut bytes)?;
                     names.push(format!("file:{path}"));
@@ -290,6 +365,125 @@ mod tests {
         assert_eq!(seen.get("a/nested.txt").unwrap(), &data_b);
         assert!(names.contains(&"dir:a".to_string()));
         assert!(names.contains(&"dir:empty".to_string()));
+    }
+
+    #[test]
+    fn unpack_auto_detects_gzip_and_raw() {
+        let payload = b"auto-detect me".to_vec();
+        let mut files: Vec<(String, u64, Box<dyn Read + Send>)> = vec![(
+            "note.txt".to_string(),
+            payload.len() as u64,
+            Box::new(Cursor::new(payload.clone())),
+        )];
+        let mut gzipped = Vec::new();
+        pack_to(&mut gzipped, &mut files, &[]).unwrap();
+        assert_eq!(&gzipped[..2], GZIP_MAGIC, "gzip output keeps its magic");
+
+        let mut raw = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut raw);
+            let mut header = tar::Header::new_gnu();
+            header.set_size(payload.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "note.txt", &payload[..])
+                .unwrap();
+            builder.into_inner().unwrap();
+        }
+        assert_ne!(&raw[..2], GZIP_MAGIC, "raw output carries no magic");
+
+        for bytes in [&gzipped, &raw] {
+            let mut seen = Vec::new();
+            unpack_auto_from(Cursor::new(bytes), &mut |entry| {
+                match entry {
+                    StreamedEntry::File { path, reader, .. } => {
+                        let mut out = Vec::new();
+                        reader.read_to_end(&mut out)?;
+                        seen.push((path, out));
+                    }
+                    StreamedEntry::Dir { path, .. } => panic!("expected one file, saw dir {path}"),
+                    StreamedEntry::Symlink { path, .. } => {
+                        panic!("expected one file, saw link {path}")
+                    }
+                }
+                Ok(())
+            })
+            .unwrap();
+            assert_eq!(
+                seen,
+                vec![("note.txt".to_string(), payload.clone())],
+                "both drivers restore the same bytes"
+            );
+        }
+    }
+
+    #[test]
+    fn unpack_auto_rejects_truncated_raw() {
+        for len in [1usize, 100, 511] {
+            let err = unpack_auto_from(Cursor::new(vec![0u8; len]), &mut |_| Ok(()))
+                .expect_err("sub-header inputs must fail, not silently extract nothing");
+            assert!(err.to_string().contains("truncated"), "{err}");
+        }
+        // A bare terminator pair is a valid empty archive: no members,
+        // no error.
+        let mut count = 0usize;
+        unpack_auto_from(Cursor::new(vec![0u8; 1024]), &mut |_| {
+            count += 1;
+            Ok(())
+        })
+        .expect("terminator-only tar is a valid empty archive");
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn unpack_auto_rejects_empty_and_hostile_entries() {
+        let mut count = 0usize;
+        let err = unpack_auto_from(Cursor::new(Vec::new()), &mut |entry| {
+            match entry {
+                StreamedEntry::Dir { path, .. } => count += path.len(),
+                StreamedEntry::File { path, .. } => count += path.len(),
+                StreamedEntry::Symlink { path, .. } => count += path.len(),
+            }
+            Ok(())
+        })
+        .expect_err("empty input is corruption, not an empty tree");
+        assert!(err.to_string().contains("empty"), "{err}");
+
+        let hostile = tar_with_entry_name("../evil.txt", b"evil");
+        let err = unpack_auto_from(Cursor::new(&hostile), &mut |_| Ok(()))
+            .expect_err("escaping entries must fail through the sniffer too");
+        assert!(err.to_string().contains("escapes"), "{err}");
+    }
+
+    /// Splice a hostile member name into an otherwise valid raw tar and
+    /// re-checksum its header: the `tar` builder refuses hostile names up
+    /// front, but hostile bytes arrive over the wire.
+    #[cfg(test)]
+    fn tar_with_entry_name(name: &str, payload: &[u8]) -> Vec<u8> {
+        let mut raw = Vec::new();
+        {
+            let mut builder = tar::Builder::new(&mut raw);
+            let mut header = tar::Header::new_gnu();
+            header.set_size(payload.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "victim.txt", payload)
+                .unwrap();
+            builder.into_inner().unwrap();
+        }
+        let name_bytes = name.as_bytes();
+        assert!(name_bytes.len() < 100, "name must fit the tar name field");
+        raw[..name_bytes.len()].copy_from_slice(name_bytes);
+        raw[name_bytes.len()] = 0;
+        for b in &mut raw[148..156] {
+            *b = b' ';
+        }
+        let sum: u32 = raw[..512].iter().map(|b| *b as u32).sum();
+        let octal = format!("{sum:06o}\0 ");
+        raw[148..156].copy_from_slice(octal.as_bytes());
+        raw
     }
 
     #[test]

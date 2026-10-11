@@ -188,6 +188,20 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
             from: from.into(),
             to: to.into()
         }),
+        (safe_string(), safe_string()).prop_map(|(from, to)| StepKind::Archive {
+            src: from.into(),
+            dst: to.into(),
+            raw: false,
+        }),
+        (safe_string(), safe_string()).prop_map(|(from, to)| StepKind::Archive {
+            src: from.into(),
+            dst: to.into(),
+            raw: true,
+        }),
+        (safe_string(), safe_string()).prop_map(|(from, to)| StepKind::Unarchive {
+            src: from.into(),
+            dst: to.into()
+        }),
         prop::option::of(safe_string()).prop_map(|s| StepKind::Ls(s.map(Into::into))),
         Just(StepKind::Cwd),
         prop::option::of(safe_string()).prop_map(|s| StepKind::Read(s.map(Into::into))),
@@ -324,6 +338,26 @@ fn assert_steps_eq(left: &Step, right: &Step, msg: &str) {
         (StepKind::Install { from: lf, to: lt }, StepKind::Install { from: rf, to: rt }) => {
             assert!(arg_content_eq(lf, rf), "Install from mismatch: {}", msg);
             assert!(arg_content_eq(lt, rt), "Install to mismatch: {}", msg);
+        }
+        (
+            StepKind::Archive {
+                src: ls,
+                dst: ld,
+                raw: lr,
+            },
+            StepKind::Archive {
+                src: rs,
+                dst: rd,
+                raw: rr,
+            },
+        ) => {
+            assert!(arg_content_eq(ls, rs), "Archive src mismatch: {}", msg);
+            assert!(arg_content_eq(ld, rd), "Archive dst mismatch: {}", msg);
+            assert_eq!(lr, rr, "Archive raw mismatch: {}", msg);
+        }
+        (StepKind::Unarchive { src: ls, dst: ld }, StepKind::Unarchive { src: rs, dst: rd }) => {
+            assert!(arg_content_eq(ls, rs), "Unarchive src mismatch: {}", msg);
+            assert!(arg_content_eq(ld, rd), "Unarchive dst mismatch: {}", msg);
         }
         (
             StepKind::Remove {
