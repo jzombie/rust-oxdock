@@ -162,19 +162,22 @@ jobs:
           # host), so archive from inside the stage dir instead.
           RUN ["tar", "-czf", "{{ $asset }}", "{{ $assetbin }}"]
 
-          # Checksum tool mirrors the stub per platform exactly. One entry
-          # per bundled file, bare installer names exactly as the release
-          # writes them: the stubs match ` install.sh` with a leading
-          # space, which a `./` prefix would defeat.
+          # Native hashing: HASH_SHA256 digests each bundled file
+          # identically on every platform, so the forged checksums never
+          # depend on shell tool output formatting (msys `*` markers and
+          # the like would break the stubs' leading-space match). One
+          # entry per bundled file, canonical two-space separator, bare
+          # installer names exactly as the release writes them.
           LET $p3: PIPE
-          [os:linux] WITH_IO [stdout=$p3] RUN ["sha256sum", "{{ $asset }}", "install.sh", "install.ps1", "install.oxfile"]
-          [os:macos] WITH_IO [stdout=$p3] RUN ["shasum", "-a", "256", "{{ $asset }}", "install.sh", "install.ps1", "install.oxfile"]
-          [os:windows] WITH_IO [stdout=$p3] RUN ["sha256sum", "{{ $asset }}", "install.sh", "install.ps1", "install.oxfile"]
-          WITH_IO [stdin=$p3] READ_LINE $l1
-          WITH_IO [stdin=$p3] READ_LINE $l2
-          WITH_IO [stdin=$p3] READ_LINE $l3
-          WITH_IO [stdin=$p3] READ_LINE $l4
-          WRITE SHA256SUMS "{{ $l1 }}\n{{ $l2 }}\n{{ $l3 }}\n{{ $l4 }}\n"
+          WITH_IO [stdout=$p3] HASH_SHA256 {{ $asset }}
+          WITH_IO [stdin=$p3] READ_LINE $h_asset
+          WITH_IO [stdout=$p3] HASH_SHA256 install.sh
+          WITH_IO [stdin=$p3] READ_LINE $h_sh
+          WITH_IO [stdout=$p3] HASH_SHA256 install.ps1
+          WITH_IO [stdin=$p3] READ_LINE $h_ps1
+          WITH_IO [stdout=$p3] HASH_SHA256 install.oxfile
+          WITH_IO [stdin=$p3] READ_LINE $h_ox
+          WRITE SHA256SUMS "{{ $h_asset }}  {{ $asset }}\n{{ $h_sh }}  install.sh\n{{ $h_ps1 }}  install.ps1\n{{ $h_ox }}  install.oxfile\n"
 
       # No bare-binary artifact: artifact zips strip the unix execute
       # bit in transit, and a harness chmod would silently repair a
