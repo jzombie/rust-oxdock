@@ -703,7 +703,7 @@ mod tests {
 
         let script = indoc! {
             r#"
-            ASYNC RUN "sh -c 'sleep 1; echo late > late.txt'"
+            ASYNC RUN "sh -c 'sleep 30; echo late > late.txt'"
             RUN "__oxdock_missing_command_xyz__"
             "#
         };
@@ -715,7 +715,9 @@ mod tests {
         );
         // The ASYNC handle is dropped mid-pipeline when the error propagates;
         // its Drop safety net must kill the writer before it can emit the
-        // late artifact.
+        // late artifact. The sleep is generous on purpose: it bounds the
+        // kill timeliness on loaded runners without slowing the test,
+        // which still fails fast on the missing command.
         assert!(
             !exists(&root, "late.txt"),
             "abandoned background writer must be killed by Drop teardown"
@@ -734,7 +736,7 @@ mod tests {
 
         let script = indoc! {
             r#"
-            ASYNC RUN "sh -c 'sleep 1; echo late > late.txt'"
+            ASYNC RUN "sh -c 'sleep 30; echo late > late.txt'"
             EXIT 5
             "#
         };

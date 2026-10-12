@@ -183,6 +183,17 @@ pub(super) fn run<P: ProcessManager>(cx: &mut StepCtx<'_, P>, idx: usize, cmd: &
     options.stdout = stdout_mode;
     options.stderr = stderr_mode;
 
+    // A teardown that won the race already set cancellation: spawning
+    // now would create an unkillable-by-teardown child (the killer
+    // found nothing registered and moved on to joining), so refuse
+    // before the spawn instead of after the wait.
+    {
+        use std::sync::atomic::Ordering;
+        if cx.state.cancel_token.load(Ordering::SeqCst) {
+            bail!("step {}: RUN {} interrupted by cancellation", idx + 1, cmd);
+        }
+    }
+
     // Spawn the command.
     let mut handle = match cx
         .process
@@ -204,6 +215,18 @@ pub(super) fn run<P: ProcessManager>(cx: &mut StepCtx<'_, P>, idx: usize, cmd: &
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         *guard = Some(Box::new(handle.clone()));
+    }
+
+    // Cancellation landing between spawn and registration would miss
+    // this handle the same way: re-check now that registration is
+    // visible, killing our own handle (double-kill safe: reaped PIDs
+    // zero out) instead of waiting out the child.
+    {
+        use std::sync::atomic::Ordering;
+        if cx.state.cancel_token.load(Ordering::SeqCst) {
+            let _ = handle.kill();
+            bail!("step {}: RUN {} interrupted by cancellation", idx + 1, cmd);
+        }
     }
 
     // Wait for the process to complete.
@@ -291,6 +314,15 @@ pub(super) fn run_argv<P: ProcessManager>(
     options.stdout = stdout_mode;
     options.stderr = stderr_mode;
 
+    // Same pre-spawn cancellation refusal as [`run`]: a teardown that
+    // already ran must not gain a child it can no longer see.
+    {
+        use std::sync::atomic::Ordering;
+        if cx.state.cancel_token.load(Ordering::SeqCst) {
+            bail!("step {}: RUN {argv:?} interrupted by cancellation", idx + 1);
+        }
+    }
+
     // Spawn the executable directly (no shell).
     let mut handle = match cx
         .process
@@ -315,6 +347,15 @@ pub(super) fn run_argv<P: ProcessManager>(
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         *guard = Some(Box::new(handle.clone()));
+    }
+
+    // Same post-registration re-check as [`run`].
+    {
+        use std::sync::atomic::Ordering;
+        if cx.state.cancel_token.load(Ordering::SeqCst) {
+            let _ = handle.kill();
+            bail!("step {}: RUN {argv:?} interrupted by cancellation", idx + 1);
+        }
     }
 
     // Wait for the process to complete.
