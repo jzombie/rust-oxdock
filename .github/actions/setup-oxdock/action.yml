@@ -9,7 +9,7 @@ description: Install the oxdock interpreter so later steps can use shell oxdock.
 
 inputs:
   version:
-    description: Full release tag to install (e.g. v0.24.4-alpha), or `latest` to resolve the newest release.
+    description: Full release tag to install (e.g. v0.25.0-alpha; 0.25.0-alpha minimum where ARCHIVE/UNARCHIVE support matters), or `latest` to resolve the newest release.
     required: false
     default: latest
   binary-name:
