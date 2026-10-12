@@ -1052,7 +1052,7 @@ fn non_string_username_bails() {
     .expect_err("non-string username must fail");
     assert!(
         err.to_string()
-            .contains("option 'username' must be a STRING"),
+            .contains("option 'username': expected STRING, got INT"),
         "{err:#}"
     );
 }
@@ -1092,7 +1092,10 @@ fn non_string_key_path_bails() {
         "#},
     )
     .expect_err("non-string key_path must fail");
-    assert!(err.to_string().contains("must be a STRING"), "{err:#}");
+    assert!(
+        err.to_string().contains("expected STRING, got INT"),
+        "{err:#}"
+    );
 }
 
 #[test]

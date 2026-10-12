@@ -2217,13 +2217,13 @@ pub(crate) fn for_loop<P: ProcessManager>(
                 };
                 cx.state.declare_var(
                     clean_idx,
-                    kt,
+                    kt.clone(),
                     super::args::coerce_value(Value::int(i as i64), &kt)?,
                 )?;
             }
             cx.state.declare_var(
                 clean_val_var.clone(),
-                val_tag,
+                val_tag.clone(),
                 super::args::coerce_value(item.clone(), &val_tag)?,
             )?;
 
@@ -2282,7 +2282,7 @@ pub(crate) fn for_loop<P: ProcessManager>(
             )?;
             cx.state.declare_var(
                 clean_val_var.clone(),
-                val_tag,
+                val_tag.clone(),
                 super::args::coerce_value(v, &val_tag)?,
             )?;
 
@@ -2403,7 +2403,7 @@ pub(crate) fn call_func_value<P: ProcessManager>(
             cx.state.push_scope();
             let outcome: Result<Value> = (|| {
                 for ((pname, ptype), pval) in def.params.iter().zip(arg_vals) {
-                    cx.state.declare_var(pname.clone(), *ptype, pval)?;
+                    cx.state.declare_var(pname.clone(), ptype.clone(), pval)?;
                 }
                 let flow = super::steps::execute_steps(
                     cx.state,
@@ -2443,10 +2443,33 @@ pub(crate) fn call_func_value<P: ProcessManager>(
             }
         }
         FuncBody::Pure(func) => {
-            func(arg_vals).with_context(|| format!("step {}: function `{name}` failed", idx + 1))
+            let value = func(arg_vals)
+                .with_context(|| format!("step {}: function `{name}` failed", idx + 1))?;
+            super::args::check_host_return_value(
+                &format!(
+                    "step {}: function `{}` returned",
+                    idx + 1,
+                    super::base_name(name)
+                ),
+                &entry.meta.returns,
+                &value,
+            )?;
+            Ok(value)
         }
-        FuncBody::Ctx(func) => func(cx, arg_vals)
-            .with_context(|| format!("step {}: function `{name}` failed", idx + 1)),
+        FuncBody::Ctx(func) => {
+            let value = func(cx, arg_vals)
+                .with_context(|| format!("step {}: function `{name}` failed", idx + 1))?;
+            super::args::check_host_return_value(
+                &format!(
+                    "step {}: function `{}` returned",
+                    idx + 1,
+                    super::base_name(name)
+                ),
+                &entry.meta.returns,
+                &value,
+            )?;
+            Ok(value)
+        }
     }
 }
 

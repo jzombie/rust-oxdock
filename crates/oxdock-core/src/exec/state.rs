@@ -53,7 +53,7 @@ pub struct ExecState<P: ProcessManager> {
     /// field table. Populated from host modules alongside descriptors, so
     /// `LET $s: SSH_SESSION_INFO` resolves exactly when the owning module
     /// is registered. Impossible to reference an unregistered schema.
-    pub(super) record_schemas: HashMap<String, &'static [Field]>,
+    pub(super) record_schemas: HashMap<String, Arc<[Field]>>,
     /// Script-level type aliases for this run: alias name to canonical
     /// target spelling (`PERSON` to `MAP<name:STRING>`). Populated once
     /// from top-level `TYPE` steps before the static pass, so forward
@@ -389,7 +389,7 @@ impl<P: ProcessManager> ExecState<P> {
             .var_scopes
             .iter()
             .rev()
-            .find_map(|s| s.get(key).map(|(k, _)| *k))
+            .find_map(|s| s.get(key).map(|(k, _)| k.clone()))
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "undeclared variable ${key}: declare it first with LET ${key}: TYPE = ..."
@@ -416,7 +416,7 @@ impl<P: ProcessManager> ExecState<P> {
             .var_scopes
             .iter()
             .rev()
-            .find_map(|s| s.get(key).map(|(k, _)| *k))
+            .find_map(|s| s.get(key).map(|(k, _)| k.clone()))
             .ok_or_else(|| {
                 anyhow::anyhow!(
                     "undeclared variable ${key}: declare it first with LET ${key}: LIST<...> = ..."
@@ -424,7 +424,7 @@ impl<P: ProcessManager> ExecState<P> {
             })?;
         let element = match kind {
             TypeTag::List => None,
-            TypeTag::ListOf(element) => Some(*element),
+            TypeTag::ListOf(element) => Some(element.as_ref().clone()),
             _ => {
                 anyhow::bail!("LIST_APPEND ${key}: variable is {}, not LIST", kind.name());
             }

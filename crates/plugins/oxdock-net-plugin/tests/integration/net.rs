@@ -997,7 +997,60 @@ fn fetch_rejects_non_string_header_values_without_dialing() {
         LET $body: STRING = NET_FETCH("http://example.com/doc.json", {headers: {x-n: 1}})
     "#};
     let err = run_script(&root, script).expect_err("non-string header must fail");
-    assert!(err.to_string().contains("must be a STRING"), "{err:#}");
+    assert!(
+        err.to_string().contains("expected STRING, got INT"),
+        "{err:#}"
+    );
+}
+
+#[test]
+fn fetch_rejects_int_timeout_without_dialing() {
+    // The declared `DURATION|STRING` union fails an INT before any
+    // socket opens, so this runs under Miri.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD, NET]
+        LET $body: STRING = NET_FETCH("http://example.com/doc.json", {timeout: 5})
+    "#};
+    let err = run_script(&root, script).expect_err("int timeout must fail");
+    assert!(
+        err.to_string()
+            .contains("expected DURATION|STRING, got INT"),
+        "{err:#}"
+    );
+}
+
+#[test]
+fn offline_connect_reads_both_timeout_shapes() {
+    // Both `DURATION|STRING` members read before the sandbox gate:
+    // neither dials, so this runs under Miri.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    for (label, options) in [
+        ("string", "{timeout: \"10s\"}"),
+        ("duration", "{timeout: $d}"),
+    ] {
+        let registry = Arc::new(EndpointRegistry::new(true));
+        let script = format!(
+            indoc! {r#"
+                IMPORT [STD, NET]
+                LET $d: DURATION = "5s"
+                LET $in: PIPE
+                LET $out: PIPE
+                LET $c: HANDLE = ASYNC {{
+                    NET_CONNECT("23533", $in, $out, {options})
+                }}
+                AWAIT $c
+            "#},
+            options = options,
+        );
+        let err = run_script_with(registry, &root, &script).expect_err("offline dial must fail");
+        assert!(
+            err.to_string().contains("--offline mode"),
+            "{label} timeout reads past validation: {err:#}"
+        );
+    }
 }
 
 #[test]

@@ -182,8 +182,12 @@ type_name = @{ ASCII_ALPHA_UPPER ~ (ASCII_ALPHA_UPPER | ASCII_DIGIT | "_")* }
 // Compound, explicitly non-atomic: implicit whitespace stays active
 // inside the spelling even where an enclosing rule is atomic, so
 // `LIST<MAP>` and `LIST< MAP >` both parse and canonicalize to one
-// tag. Arity and shape enforce at resolution, not here.
-type_tag = !{ type_name ~ ("<" ~ type_args ~ ">")? }
+// tag. Arity and shape enforce at resolution, not here. Unions admit
+// member sets (`STRING|PIPE`, composing inside generics); repetition
+// instead of recursion keeps pathological member counts off the
+// call stack.
+type_tag = !{ type_atom ~ ("|" ~ type_atom)* }
+type_atom = { type_name ~ ("<" ~ type_args ~ ">")? }
 type_args = { type_field ~ ("," ~ type_field)* }
 type_field = { (field_name ~ "?"? ~ ":")? ~ type_tag }
 field_name = @{ ASCII_ALPHA_LOWER ~ (ASCII_ALPHA_LOWER | ASCII_DIGIT | "_")* }

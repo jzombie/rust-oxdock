@@ -1,27 +1,34 @@
 # Setup OxDock engine for `shell: oxdock` steps (`oxdock-engine` when renamed).
 #
-# One pwsh step (present on every runner OS): fetch the release installer,
-# run it, then the fresh engine runs post-install.oxfile (rename, PATH, smoke).
-# Installers are fetched, never vendored (remote consumers check out only
-# this directory); first bundled release is v0.24.4-alpha.
+# Two provenances, one tail: `release` fetches the installer for a tag
+# and runs it, `local` builds the caller's checkout with cargo. Both
+# land an engine in RUNNER_TEMP, then the fresh engine runs
+# post-install.oxfile (rename, PATH, smoke). Installers are fetched,
+# never vendored (remote consumers check out only this directory);
+# first bundled release is v0.24.4-alpha.
 name: Setup OxDock engine
 description: Install the oxdock interpreter so later steps can use shell oxdock.
 
 inputs:
   version:
-    description: Full release tag to install (e.g. v0.25.0-alpha; 0.25.0-alpha minimum where ARCHIVE/UNARCHIVE support matters), or `latest` to resolve the newest release.
+    description: Full release tag to install (e.g. v0.25.0-alpha; 0.25.0-alpha minimum where ARCHIVE/UNARCHIVE support matters), or `latest` to resolve the newest release. Ignored when source is `local`.
     required: false
     default: latest
   binary-name:
     description: Installed executable stem (`oxdock-engine` frees the bare `oxdock` name for a binary under test).
     required: false
     default: oxdock
+  source:
+    description: Engine provenance (`release` downloads the installer for `version`; `local` builds the caller's checkout with cargo, so unreleased DSL is testable before any tag exists).
+    required: false
+    default: release
 
 runs:
   using: composite
   steps:
     # Resolved tag passes explicitly: one version's assets even if latest moves mid-run.
     - name: Install OxDock engine
+      if: ${{ inputs.source == 'release' }}
       shell: pwsh
       run: |
         $ErrorActionPreference = 'Stop'
@@ -40,11 +47,48 @@ runs:
         $tmp = Join-Path $env:RUNNER_TEMP 'oxdock-installer'
         New-Item -ItemType Directory -Force -Path $tmp | Out-Null
         $stub = if ($IsWindows) { 'install.ps1' } else { 'install.sh' }
-        $ext = if ($IsWindows) { '.exe' } else { '' }
 
         Invoke-WebRequest "https://github.com/jzombie/rust-oxdock/releases/download/$v/$stub" -Headers $h -OutFile (Join-Path $tmp $stub)
         $env:VERSION = $v; $env:INSTALL_DIR = $dir
         if ($IsWindows) { & (Join-Path $tmp $stub) } else { bash (Join-Path $tmp $stub) }
+
+        # Later steps read these through $env: GITHUB_ENV persists across steps, $env: does not.
+        Add-Content $env:GITHUB_ENV "OXDOCK_ENGINE_DIR=$dir"
+        Add-Content $env:GITHUB_ENV "OXDOCK_EXPECTED_VERSION=$($v.TrimStart('v'))"
+
+    # Caller provides the checkout (this repo's workflows do; remote
+    # consumers stay on `release`): default features carry the full DSL.
+    - name: Install Rust
+      if: ${{ inputs.source == 'local' }}
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Build local OxDock engine
+      if: ${{ inputs.source == 'local' }}
+      shell: pwsh
+      working-directory: ${{ github.workspace }}
+      run: |
+        $ErrorActionPreference = 'Stop'
+
+        cargo build --release -p oxdock
+
+        $dir = Join-Path $env:RUNNER_TEMP 'oxdock-engine'
+        New-Item -ItemType Directory -Force -Path $dir | Out-Null
+        $ext = if ($IsWindows) { '.exe' } else { '' }
+        Copy-Item (Join-Path 'target' 'release' "oxdock$ext") (Join-Path $dir "oxdock$ext")
+
+        # The binary reports itself: post-install asserts this, so a
+        # stale cache surfaces here instead of haunting later steps.
+        $reported = (& (Join-Path $dir "oxdock$ext") --version).Split()[-1]
+        Add-Content $env:GITHUB_ENV "OXDOCK_ENGINE_DIR=$dir"
+        Add-Content $env:GITHUB_ENV "OXDOCK_EXPECTED_VERSION=$reported"
+
+    - name: Smoke-check the engine
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = 'Stop'
+
+        $dir = $env:OXDOCK_ENGINE_DIR
+        $ext = if ($IsWindows) { '.exe' } else { '' }
 
         # Rename before the DSL run, never inside it: the engine cannot
         # rename the file it runs from on Windows, while the installer
@@ -52,7 +96,5 @@ runs:
         $execName = "oxdock$ext"
         $wantName = "${{ inputs.binary-name }}$ext"
         if ($wantName -ne $execName) { Move-Item -Path (Join-Path $dir $execName) -Destination (Join-Path $dir $wantName) }
-        $env:OXDOCK_ENGINE_DIR = $dir
         $env:OXDOCK_ENGINE_BIN = $wantName
-        $env:OXDOCK_EXPECTED_VERSION = $v.TrimStart("v")
         & (Join-Path $dir $wantName) (Join-Path $env:GITHUB_ACTION_PATH 'post-install.oxfile')

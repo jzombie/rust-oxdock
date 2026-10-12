@@ -282,38 +282,6 @@ pub struct Heading {
     pub anchor: String,
 }
 
-fn optional_toc_int(
-    map: &BTreeMap<String, oxdock_parser::Value>,
-    key: &str,
-) -> Result<Option<i64>> {
-    let Some(value) = map.get(key) else {
-        return Ok(None);
-    };
-    let Some(n) = value.as_i64() else {
-        bail!(
-            "TOC option '{key}' must be an INT, got {}",
-            value.type_name()
-        );
-    };
-    Ok(Some(n))
-}
-
-fn optional_toc_string(
-    map: &BTreeMap<String, oxdock_parser::Value>,
-    key: &str,
-) -> Result<Option<String>> {
-    let Some(value) = map.get(key) else {
-        return Ok(None);
-    };
-    let Some(text) = value.as_str() else {
-        bail!(
-            "TOC option '{key}' must be a STRING, got {}",
-            value.type_name()
-        );
-    };
-    Ok(Some(text.to_string()))
-}
-
 /// Resolve and validate TOC options at the call boundary.
 ///
 /// All constraints fail fast here: level bounds `1 <= min_level <=
@@ -323,10 +291,58 @@ fn optional_toc_string(
 /// `{format: "inline"}` means the `min_level` layer instead of an
 /// unforced multi-level failure.
 pub fn resolve_toc_options(map: &BTreeMap<String, oxdock_parser::Value>) -> Result<TocOptions> {
-    let min_level = optional_toc_int(map, "min_level")?.unwrap_or(2);
-    let max_level_explicit = optional_toc_int(map, "max_level")?;
-    let format_raw = optional_toc_string(map, "format")?.unwrap_or_else(|| "tree".to_string());
-    let delimiter = optional_toc_string(map, "delimiter")?.unwrap_or_else(|| " | ".to_string());
+    // Compositional reads: one shape check per key, then direct
+    // narrowing. Bounds and cross-key rules below are domain logic.
+    let min_level = match map.get("min_level") {
+        Some(value) => {
+            oxdock_parser::check_value_at(
+                &oxdock_parser::TypeTag::Int,
+                value,
+                "TOC option 'min_level'",
+            )?;
+            value.as_i64().expect("check_value_at verified INT")
+        }
+        None => 2,
+    };
+    let max_level_explicit = match map.get("max_level") {
+        Some(value) => {
+            oxdock_parser::check_value_at(
+                &oxdock_parser::TypeTag::Int,
+                value,
+                "TOC option 'max_level'",
+            )?;
+            Some(value.as_i64().expect("check_value_at verified INT"))
+        }
+        None => None,
+    };
+    let format_raw = match map.get("format") {
+        Some(value) => {
+            oxdock_parser::check_value_at(
+                &oxdock_parser::TypeTag::String,
+                value,
+                "TOC option 'format'",
+            )?;
+            value
+                .as_str()
+                .expect("check_value_at verified STRING")
+                .to_string()
+        }
+        None => "tree".to_string(),
+    };
+    let delimiter = match map.get("delimiter") {
+        Some(value) => {
+            oxdock_parser::check_value_at(
+                &oxdock_parser::TypeTag::String,
+                value,
+                "TOC option 'delimiter'",
+            )?;
+            value
+                .as_str()
+                .expect("check_value_at verified STRING")
+                .to_string()
+        }
+        None => " | ".to_string(),
+    };
     let format = match format_raw.as_str() {
         "tree" => TocFormat::Tree,
         "inline" => TocFormat::Inline,

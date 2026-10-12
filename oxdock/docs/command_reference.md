@@ -598,8 +598,9 @@ LET $raw: STRING = ECHO 100
 LET $n: INT = INT($raw)
 $n = $n + 1
 
-# The declared type also converts plain strings on assignment.
-$n = "42"
+# The declared slot stays strict: strings parse only
+# through the explicit converter, never on assignment.
+$n = INT("42")
 ASSERT_EQ $n 42
 
 # Same crossing for decimals via FLOAT().
@@ -2568,6 +2569,18 @@ ASSERT_EQ $encoded "aGVsbG8="
 
 Describe one function by qualified name.
 
+Returns a MAP with name, module, kind, params, returns, rpn, and
+summary. `params` is always a LIST (empty for parameterless
+functions) of entries carrying name, param_type, allowed, docs,
+options, and optional flags, so the shape holds for every entry. Bare names
+fail closed: `DESCRIBE` requires the qualified form (except
+`INSPECT`, which is syntax rather than a registry entry). Errors
+on unknown function.
+
+Field table for the `DESCRIBE` result bundle: one source for the
+shape the host mints, so introspection, enforcement, and
+documentation cannot drift apart.
+
 **Signature:** `STD::DESCRIBE($name: STRING) -> MAP<name: STRING, module: STRING, kind: STRING, params: LIST<MAP<ANY>>, returns: STRING, rpn: BOOL, summary: STRING>`
 
 **Contexts:** [`AST`](#context-ast) only
@@ -2631,12 +2644,12 @@ Convert a value to FLOAT.
 Parses f64 (accepts int strings), bails on non-finite or non-numeric.
 
 
-**Signature:** `STD::FLOAT($val: ANY) -> FLOAT`
+**Signature:** `STD::FLOAT($val: FLOAT|INT|STRING) -> FLOAT`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
-- `$val` (`ANY`): Value to convert to `FLOAT`.
+- `$val` (`FLOAT|INT|STRING`): Value to convert to `FLOAT`.
 
 **Returns:** `FLOAT`
 
@@ -2714,12 +2727,12 @@ List workspace paths matching a glob pattern.
 Sorted, root-relative LIST; empty on no match or `..` escape.
 
 
-**Signature:** `STD::GLOB($pattern: STRING) -> LIST<STRING>`
+**Signature:** `STD::GLOB($pattern: STRING|PATH) -> LIST<STRING>`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
-- `$pattern` (`STRING`): Glob pattern matched against workspace paths.
+- `$pattern` (`STRING|PATH`): Glob pattern matched against workspace paths.
 
 **Returns:** `LIST<STRING>`
 
@@ -2746,15 +2759,15 @@ tripping the strict missing-key error.
 Convert a value to INT.
 
 Trims ASCII whitespace and parses i64. Passes Int through; Float only
-when integral and finite.
+when integral and finite; Bool as 1/0.
 
 
-**Signature:** `STD::INT($val: ANY) -> INT`
+**Signature:** `STD::INT($val: INT|FLOAT|STRING|BOOL) -> INT`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
-- `$val` (`ANY`): Value to convert to `INT`.
+- `$val` (`INT|FLOAT|STRING|BOOL`): Value to convert to `INT`.
 
 **Returns:** `INT`
 
@@ -2785,12 +2798,12 @@ ASSERT_EQ $plain false
 ```
 
 
-**Signature:** `STD::IS_EXEC($name: STRING) -> BOOL`
+**Signature:** `STD::IS_EXEC($name: STRING|PATH) -> BOOL`
 
 **Contexts:** [`AST`](#context-ast) only
 
 **Parameters:**
-- `$name` (`STRING`): Command name or file path to probe.
+- `$name` (`STRING|PATH`): Command name or file path to probe.
 
 **Returns:** `BOOL`
 
@@ -2829,12 +2842,12 @@ scalar word. `LET` coercion still checks the actual value at
 assignment.
 
 
-**Signature:** `STD::LOAD_JSON($path: STRING) -> ANY`
+**Signature:** `STD::LOAD_JSON($path: STRING|PATH) -> ANY`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
-- `$path` (`STRING`): Workspace file path to load and parse as JSON.
+- `$path` (`STRING|PATH`): Workspace file path to load and parse as JSON.
 
 **Returns:** `ANY`
 
@@ -2845,12 +2858,12 @@ Load and parse a TOML file.
 Reads a workspace file and parses TOML into a DSL value.
 
 
-**Signature:** `STD::LOAD_TOML($path: STRING) -> MAP<ANY>`
+**Signature:** `STD::LOAD_TOML($path: STRING|PATH) -> MAP<ANY>`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
-- `$path` (`STRING`): Workspace file path to load and parse as TOML.
+- `$path` (`STRING|PATH`): Workspace file path to load and parse as TOML.
 
 **Returns:** `MAP<ANY>`
 
@@ -2930,12 +2943,12 @@ ASSERT_EQ $spaced 1_000_000_000
 ```
 
 
-**Signature:** `STD::PARSE_BYTE_COUNT($text: ANY) -> INT`
+**Signature:** `STD::PARSE_BYTE_COUNT($text: INT|FLOAT|STRING) -> INT`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
-- `$text` (`ANY`): Byte-count token to parse, or bytes already.
+- `$text` (`INT|FLOAT|STRING`): Byte-count token to parse, or bytes already.
 
 **Returns:** `INT`
 
@@ -3029,12 +3042,12 @@ Reports file, dir, symlink (no-follow), or absent. AST-only by design;
 there is no RPN arm for filesystem IO.
 
 
-**Signature:** `STD::PATH_TYPE($path: STRING) -> STRING`
+**Signature:** `STD::PATH_TYPE($path: STRING|PATH) -> STRING`
 
 **Contexts:** [`AST`](#context-ast) only
 
 **Parameters:**
-- `$path` (`STRING`): Workspace path of the entry to describe.
+- `$path` (`STRING|PATH`): Workspace path of the entry to describe.
 
 **Returns:** `STRING`
 
@@ -3060,12 +3073,12 @@ ASSERT_EQ $empty false
 ```
 
 
-**Signature:** `STD::PATH_WRITABLE($path: STRING) -> BOOL`
+**Signature:** `STD::PATH_WRITABLE($path: STRING|PATH) -> BOOL`
 
 **Contexts:** [`AST`](#context-ast) only
 
 **Parameters:**
-- `$path` (`STRING`): Workspace path to probe for file creation.
+- `$path` (`STRING|PATH`): Workspace path to probe for file creation.
 
 **Returns:** `BOOL`
 
@@ -3208,12 +3221,12 @@ BOOL, LIST, MAP) survive, anything else fails here instead of
 rendering as a silent empty.
 
 
-**Signature:** `STD::TO_JSON($value: ANY) -> STRING`
+**Signature:** `STD::TO_JSON($value: STRING|INT|FLOAT|BOOL|LIST|MAP) -> STRING`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
-- `$value` (`ANY`): Value to encode as JSON.
+- `$value` (`STRING|INT|FLOAT|BOOL|LIST|MAP`): Value to encode as JSON.
 
 **Returns:** `STRING`
 

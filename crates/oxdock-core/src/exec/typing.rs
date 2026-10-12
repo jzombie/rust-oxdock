@@ -29,9 +29,11 @@ use super::state::ExecState;
 /// silently ignored. Shared by generated extractors and hand-built
 /// entries alike: both validate against the same `ParamOption`
 /// statics the metadata renders, so the documented keys and the
-/// enforced keys cannot drift apart. Per-key value checks stay with
-/// the function (defaults, coercion, and cross-key rules are logic,
-/// not shape).
+/// enforced keys cannot drift apart. Present values check against
+/// the declared `ParamOption.value` through the single shape path,
+/// so a wrong-typed option fails here naming func, key, expected,
+/// and actual instead of deeper in the body. Absent keys pass here:
+/// defaults, coercion, and cross-key rules stay function logic.
 pub fn check_options(
     map: &std::collections::BTreeMap<String, Value>,
     options: &[crate::ParamOption],
@@ -45,6 +47,13 @@ pub fn check_options(
                 known.join(", ")
             );
         }
+    }
+    for (key, value) in map.iter() {
+        let option = options
+            .iter()
+            .find(|known| known.name == *key)
+            .expect("unknown keys rejected above");
+        crate::check_value_at(&option.value, value, &format!("{func}() option '{key}'"))?;
     }
     Ok(())
 }
@@ -87,7 +96,7 @@ impl<P: ProcessManager> ExecState<P> {
     /// for `LET $x: NAME` declarations carrying conforming maps. A
     /// different field table under a live name panics instead of
     /// aliasing two shapes.
-    pub fn register_record_schema(&mut self, name: &'static str, fields: &'static [Field]) {
+    pub fn register_record_schema(&mut self, name: &'static str, fields: std::sync::Arc<[Field]>) {
         if let Some(live) = self.record_schemas.get(name) {
             if live.len() != fields.len()
                 || live
@@ -126,15 +135,16 @@ impl<P: ProcessManager> ExecState<P> {
     /// Resolve a source-level type name to its tag: builtins by closed
     /// match, customs through the type directory, named schemas through
     /// the schema directory, script aliases through the alias directory,
-    /// and generic spellings (`LIST<MAP>`, `MAP<name: STRING>`) composed
-    /// structurally with one interned entry per distinct spelling.
+    /// generic spellings (`LIST<MAP>`, `MAP<name: STRING>`) composed
+    /// structurally, and unions (`STRING|PIPE`, including inside
+    /// generics) with one interned entry per distinct spelling.
     /// Anything else bails listing every known type, schema, and alias.
     /// Single choke for every `LET`/`FUNC` declaration. Signature is
     /// stable: alias cycles and shared depth accounting thread
     /// internally, so all call sites gain generics with zero edits.
     pub fn resolve_tag(&self, name: &str) -> Result<TypeTag> {
         let canonical = canonicalize_spelling(name);
-        if canonical.contains('<') {
+        if canonical.contains('<') || canonical.contains('|') {
             return self.resolve_spelling_text(&canonical, &mut Vec::new(), 0);
         }
         self.resolve_named(&canonical, &mut Vec::new(), 0)
@@ -170,7 +180,7 @@ impl<P: ProcessManager> ExecState<P> {
             return Ok(TypeTag::Custom(descriptor));
         }
         if let Some(fields) = self.record_schemas.get(name) {
-            let tag = TypeTag::Record(fields);
+            let tag = TypeTag::Record(fields.clone());
             self.check_tag_known("declaration", &tag)?;
             return Ok(tag);
         }
@@ -202,19 +212,21 @@ impl<P: ProcessManager> ExecState<P> {
         depth: usize,
     ) -> Result<TypeTag> {
         if let Some(hit) = lookup_composed(canonical) {
-            return Ok(*hit);
+            return Ok(hit);
         }
         let spelled = parse_spelling(canonical)
             .map_err(|err| anyhow::anyhow!("invalid type spelling: {err}"))?;
         let tag = self.build_composed(&spelled, resolving, depth)?;
-        Ok(*intern_composed(canonical.to_string(), tag))
+        Ok(intern_composed(canonical.to_string(), tag))
     }
 
     /// Compose a parsed spelling into its structural tag. `LIST`
     /// takes exactly one bare argument, `MAP` takes named fields;
     /// anything else with arguments (or `MAP` with bare ones)
     /// bails naming the rule. Leaves resolve through the full
-    /// directory, so schema and alias names nest freely.
+    /// directory, so schema and alias names nest freely. Union
+    /// members resolve the same way, so unions nest inside aliases,
+    /// generics, and each other through one shared normalizer.
     fn build_composed(
         &self,
         spelled: &Spelled,
@@ -229,6 +241,13 @@ impl<P: ProcessManager> ExecState<P> {
         match spelled {
             Spelled::Named(name) => self.resolve_named(name, resolving, depth),
             Spelled::Generic { name, args } => self.build_generic(name, args, resolving, depth),
+            Spelled::Union(members) => {
+                let mut resolved = Vec::with_capacity(members.len());
+                for member in members {
+                    resolved.push(self.build_composed(member, resolving, depth)?);
+                }
+                finish_union(resolved)
+            }
         }
     }
 
@@ -263,7 +282,7 @@ impl<P: ProcessManager> ExecState<P> {
                 bail!("LIST takes exactly one bare type argument");
             };
             let element = self.build_composed(element, resolving, depth + 1)?;
-            return Ok(TypeTag::ListOf(Box::leak(Box::new(element))));
+            return Ok(TypeTag::ListOf(std::sync::Arc::new(element)));
         }
         if name == "MAP"
             && let [
@@ -278,7 +297,7 @@ impl<P: ProcessManager> ExecState<P> {
             // Explicit unknown map: the only bare MAP spelling. Anything
             // else bare still rejects below, and plain `MAP` never
             // resolves (see `resolve_named`).
-            return Ok(TypeTag::MapOf(&ANY_TAG));
+            return Ok(TypeTag::MapOf(std::sync::Arc::new(ANY_TAG)));
         }
         let mut fields = Vec::with_capacity(args.len());
         for arg in args {
@@ -286,17 +305,58 @@ impl<P: ProcessManager> ExecState<P> {
                 bail!("MAP fields require 'name: TYPE'; '{name}' takes no bare arguments");
             };
             let ty = self.build_composed(&arg.ty, resolving, depth + 1)?;
-            let leaked: &'static str = Box::leak(field_name.clone().into_boxed_str());
             fields.push(Field {
-                name: leaked,
+                name: field_name.clone(),
                 ty,
                 docs: "",
                 optional: arg.optional,
             });
         }
-        Ok(TypeTag::Record(Box::leak(fields.into_boxed_slice())))
+        Ok(TypeTag::Record(std::sync::Arc::from(fields)))
     }
 }
+
+/// Normalize resolved union members into one tag: flatten nested
+/// unions, absorb on `ANY`, deduplicate, collapse lone survivors.
+/// Members keep written order while every comparison stays
+/// order-free, so all spellings behave identically. The tag owns
+/// everything through `Arc`: shared on clone, freed with the last
+/// owner, never leaked.
+fn finish_union(members: Vec<TypeTag>) -> Result<TypeTag> {
+    let mut flat: Vec<TypeTag> = Vec::with_capacity(members.len());
+    for member in members {
+        // Nested unions splice flat: members never nest, so every
+        // comparison stays one level deep by construction.
+        if let TypeTag::Union(_, nested) = member {
+            flat.extend(nested.iter().cloned());
+        } else {
+            flat.push(member);
+        }
+    }
+    if flat.is_empty() {
+        bail!("empty union: no member shapes to admit");
+    }
+    // `ANY` absorbs the set: admitting everything is `ANY`.
+    if flat.iter().any(|member| matches!(member, TypeTag::Any)) {
+        return Ok(TypeTag::Any);
+    }
+    // Full (not just consecutive) deduplication: order-free
+    // comparisons make every permutation behave identically.
+    let mut unique: Vec<TypeTag> = Vec::with_capacity(flat.len());
+    for member in flat {
+        if !unique
+            .iter()
+            .any(|seen| super::static_check::tags_equal(seen, &member))
+        {
+            unique.push(member);
+        }
+    }
+    if unique.len() == 1 {
+        return Ok(unique.pop().expect("single survivor checked above"));
+    }
+    Ok(TypeTag::union(unique))
+}
+
 /// Collect top-level `TYPE` alias definitions into the run's
 /// alias directory: name to canonical target spelling. Runs
 /// before the static pass so forward references resolve
@@ -358,11 +418,33 @@ impl<P: ProcessManager> ExecState<P> {
             TypeTag::ListOf(element) => self.check_tag_known(what, element)?,
             TypeTag::MapOf(values) => self.check_tag_known(what, values)?,
             TypeTag::Record(fields) => {
-                for field in *fields {
+                for field in fields.iter() {
                     self.check_tag_known(what, &field.ty)?;
                 }
             }
-            _ => {}
+            // Union members recurse like shaped tags: every member
+            // must name a known type, so no unknown hides in a set.
+            TypeTag::Union(_, members) => {
+                for member in members.iter() {
+                    self.check_tag_known(what, member)?;
+                }
+            }
+            // Bare words are variants and cannot be misspelled: every
+            // builtin is listed so a new word kind fails here until
+            // its directory rule is explicit.
+            TypeTag::String
+            | TypeTag::Int
+            | TypeTag::Float
+            | TypeTag::Bool
+            | TypeTag::List
+            | TypeTag::Map
+            | TypeTag::Pipe
+            | TypeTag::Handle
+            | TypeTag::Duration
+            | TypeTag::Path
+            | TypeTag::Semaphore
+            | TypeTag::Permit
+            | TypeTag::Any => {}
         }
         Ok(())
     }

@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [0.26.0-alpha] - 2026-10-12
+
+### Added
+
+- `setup-oxdock` grows `source: local`: build the engine from the caller's checkout with cargo instead of downloading a release installer, so unreleased DSL is testable before any tag exists. The release workflow packs with its own source, so a broken `ARCHIVE` fails the pack before anything publishes.
+- Union types (`STRING|PIPE`, `LIST<STRING|PIPE>`): declarations, aliases, and function signatures admit member sets with subset-based static checks. Members keep written order and render `|`-joined; bare `LIST` and `MAP` still require shapes as members.
+- `#[union(...)]` signatures on boundary adapters: `INT()`/`FLOAT()`/`PARSE_BYTE_COUNT()` admit `INT|FLOAT|STRING`, path functions admit `STRING|PATH`, `TO_JSON()` admits `STRING|INT|FLOAT|BOOL|LIST|MAP`, and `MAP_TO_MD_TABLE()` admits `MAP<ANY>|LIST<MAP<ANY>>`. Consumers (`FORMAT_BYTE_COUNT()`, `FORMAT_DURATION()`, `SEMAPHORE_NEW()`) stay strict `INT`: strings parse only through the explicit converter.
+- `INT()` admits `BOOL` as 1/0: converters widen explicitly at the boundary while consumer slots stay strict.
+- `#[record(...)]` closed record parameters: `PACKAGE_VALUES_JSON()` takes `MAP<name: STRING, description: STRING>` with missing and extra fields failing at the boundary; `CARGO_PACKAGE()` and `WORKSPACE_PACKAGE()` return fixed records. Option values enforce their declared tags in `check_options`, and the nine hand-rolled option readers are replaced by the compositional rule (declare the tag, one `check_value_at` pass, direct reads): NET `timeout` options admit `DURATION|STRING`, `headers` enforces `MAP<STRING>`.
+
+### Changed
+
+- Integer slots are strict: strings and floats no longer coerce into `INT` params, `LET`/`SET` bindings, or union members. Callers convert explicitly (`FORMAT_BYTE_COUNT(INT($raw))`); the static pair table and the runtime coercion agree, so neither promises what the other rejects.
+- Host functions validate their declared returns: a body handing back a word outside its `returns` slot fails at the call boundary naming the function, with no coercion applied. Script functions keep inferred unification with fallthrough and loop-soundness checks.
+
 ## [0.25.1-alpha] - 2026-10-11
 
 ### Changed

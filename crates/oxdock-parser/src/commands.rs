@@ -2609,8 +2609,9 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 LET $n: INT = INT($raw)
                 $n = $n + 1
 
-                # The declared type also converts plain strings on assignment.
-                $n = "42"
+                # The declared slot stays strict: strings parse only
+                # through the explicit converter, never on assignment.
+                $n = INT("42")
                 ASSERT_EQ $n 42
 
                 # Same crossing for decimals via FLOAT().

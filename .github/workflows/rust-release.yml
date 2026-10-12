@@ -219,16 +219,17 @@ jobs:
           fi
           cargo build --release --target ${{ matrix.target }} -p ${{ inputs.binary }} --all-features
 
-      # Pack with project vocabulary: setup-oxdock installs an engine
-      # carrying ARCHIVE, so release assets never depend on host tar.
-      # Any caller qualifies because the packer is ours, not the
-      # matrix binary. Membership matches the historical pack exactly
+      # Pack with the release candidate's own engine: setup-oxdock
+      # builds the caller's checkout (source: local), so the packer
+      # carries the very ARCHIVE under release. A broken ARCHIVE fails
+      # this pack before anything publishes: the release proves its own
+      # engine. Membership matches the historical pack exactly
       # (one top-level binary, modes kept); a broken pack fails the
       # runner self-extract below before anything publishes.
       - name: Setup pack engine
-        uses: jzombie/rust-oxdock/.github/actions/setup-oxdock@v0.25.0-alpha
+        uses: ./.github/actions/setup-oxdock
         with:
-          version: v0.25.0-alpha
+          source: local
 
       - name: Archive the binary
         shell: oxdock --script {0}

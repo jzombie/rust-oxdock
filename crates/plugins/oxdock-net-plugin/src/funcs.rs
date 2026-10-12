@@ -19,13 +19,15 @@
 
 use std::collections::BTreeMap;
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use std::sync::LazyLock;
+
 use oxdock_core::{
     Field, FuncKind, FuncMeta, FuncParam, HostModule, HostRegistration, NativeFn, OxDockFn,
-    OxDockType, ParamOption, RecordSchema, StepCtx, TypeTag, Value,
+    OxDockType, ParamOption, RecordSchema, StepCtx, TypeTag, Value, check_value_at,
 };
 use oxdock_func_macro::oxdock_func;
 use oxdock_pipe::PipeHandle;
@@ -70,123 +72,39 @@ fn accept_tick() -> Duration {
     Duration::from_millis(10)
 }
 
-/// Read an optional BOOL key from the options MAP. Missing binds `None`;
-/// present non-BOOLs bail.
-fn optional_bool(map: &BTreeMap<String, Value>, func: &str, key: &str) -> Result<Option<bool>> {
-    let Some(value) = map.get(key) else {
-        return Ok(None);
-    };
-    let Some(b) = value.as_bool() else {
-        bail!(
-            "{func} option '{key}' must be a BOOL, got {}",
-            value.type_name()
-        );
-    };
-    Ok(Some(b))
-}
-
-/// Read an optional DURATION key from the options MAP: a DURATION value
-/// binds directly, a STRING parses (`5s`, `100ms`). Missing binds `None`;
-/// anything else bails.
-fn optional_duration(
-    map: &BTreeMap<String, Value>,
-    func: &str,
-    key: &str,
-) -> Result<Option<Duration>> {
-    let Some(value) = map.get(key) else {
-        return Ok(None);
-    };
-    if let Some(duration) = value.as_duration() {
-        return Ok(Some(duration));
-    }
-    if let Some(text) = value.as_str() {
-        return oxdock_parser::command::parse_duration(text)
-            .with_context(|| format!("{func} option '{key}' must be a duration, got {text:?}"))
-            .map(Some);
-    }
-    bail!(
-        "{func} option '{key}' must be a DURATION, got {}",
-        value.type_name()
-    )
-}
-
-/// Read an optional string MAP key from the options MAP: every value
-/// must be a STRING, anything else bails naming the key. Missing binds
-/// an empty vec; a non-MAP binds bail.
-fn read_string_map(
-    map: &BTreeMap<String, Value>,
-    func: &str,
-    key: &str,
-) -> Result<Vec<(String, String)>> {
-    let Some(value) = map.get(key) else {
-        return Ok(Vec::new());
-    };
-    let Some(entries) = value.as_map() else {
-        bail!(
-            "{func} option '{key}' must be a MAP, got {}",
-            value.type_name()
-        );
-    };
-    let mut out = Vec::with_capacity(entries.len());
-    for (entry_key, entry_value) in entries {
-        let Some(text) = entry_value.as_str() else {
-            bail!(
-                "{func} option '{key}' entry '{entry_key}' must be a STRING, got {}",
-                entry_value.type_name()
-            );
-        };
-        out.push((entry_key.clone(), text.to_string()));
-    }
-    Ok(out)
-}
-
-/// Read an optional non-negative INT key from the options MAP.
-/// Missing binds `None`; present non-INTs and negatives bail.
-fn optional_count(map: &BTreeMap<String, Value>, func: &str, key: &str) -> Result<Option<u64>> {
-    let Some(value) = map.get(key) else {
-        return Ok(None);
-    };
-    let Some(n) = value.as_i64() else {
-        bail!(
-            "{func} option '{key}' must be an INT, got {}",
-            value.type_name()
-        );
-    };
-    if n < 0 {
-        bail!("{func} option '{key}' must be non-negative, got {n}");
-    }
-    Ok(Some(n as u64))
-}
-
 /// `NET_FETCH` options, shared by the registration metadata and the
 /// runtime key check: one source for the keys scripts may pass, so
-/// documentation and enforcement cannot drift apart.
-static NET_FETCH_OPTIONS: &[ParamOption] = &[
-    ParamOption {
-        name: "headers",
-        value: TypeTag::Map,
-        required: false,
-        default: None,
-    },
-    ParamOption {
-        name: "timeout",
-        value: TypeTag::Duration,
-        required: false,
-        default: None,
-    },
-    ParamOption {
-        name: "max_body_bytes",
-        value: TypeTag::Int,
-        required: false,
-        default: None,
-    },
-    ParamOption {
-        name: "max_redirects",
-        value: TypeTag::Int,
-        required: false,
-        default: None,
-    },
-];
+/// documentation and enforcement cannot drift apart. Built lazily:
+/// union and shaped tags compose at runtime, so they cannot live in
+/// a `const` static.
+static NET_FETCH_OPTIONS: LazyLock<Vec<ParamOption>> = LazyLock::new(|| {
+    vec![
+        ParamOption {
+            name: "headers",
+            value: TypeTag::MapOf(std::sync::Arc::new(TypeTag::String)),
+            required: false,
+            default: None,
+        },
+        ParamOption {
+            name: "timeout",
+            value: oxdock_parser::union_tag!(Duration, String),
+            required: false,
+            default: None,
+        },
+        ParamOption {
+            name: "max_body_bytes",
+            value: TypeTag::Int,
+            required: false,
+            default: None,
+        },
+        ParamOption {
+            name: "max_redirects",
+            value: TypeTag::Int,
+            required: false,
+            default: None,
+        },
+    ]
+});
 
 /// Claim a virtual service endpoint and report its address. `bind` is a
 /// logical port (`"2251"`) or service name (`"demo-proxy"`): physical
@@ -295,12 +213,12 @@ fn net_listen<P: ProcessManager>(
 /// ASSERT_EQ $done.closed true
 /// NET_CLOSE($l.listener)
 /// ```
-#[oxdock_func(returns = TypeTag::Record(&[Field {
-    name: "closed",
+#[oxdock_func(returns = TypeTag::Record(std::sync::Arc::from([Field {
+    name: "closed".to_string(),
     ty: TypeTag::Bool,
     docs: "True when the connection closed cleanly.",
     optional: false,
-}]), summary = "Accept one connection into pipes.")]
+}])), summary = "Accept one connection into pipes.")]
 fn net_accept<P: ProcessManager>(
     cx: &mut StepCtx<P>,
     /// Listener handle from `NET_LISTEN`.
@@ -323,8 +241,9 @@ fn net_accept<P: ProcessManager>(
     // Unknown keys already failed in the wrapper against the same
     // `#[options]` static the metadata renders; only read known keys.
     let mut no_half_close = false;
-    if let Some(flag) = optional_bool(map, "NET_ACCEPT", "no_half_close")? {
-        no_half_close = flag;
+    if let Some(value) = map.get("no_half_close") {
+        check_value_at(&TypeTag::Bool, value, "NET_ACCEPT option 'no_half_close'")?;
+        no_half_close = value.as_bool().expect("check_value_at verified BOOL");
     }
     // Downstream pumps take `&Value`: re-wrap the extracted handles so
     // every helper below keeps its Value-based shape.
@@ -446,12 +365,27 @@ fn net_connect<P: ProcessManager>(
     let map = &options;
     let mut timeout = DEFAULT_DIAL_TIMEOUT;
     let mut no_half_close = false;
-    oxdock_core::check_options(map, NET_CONNECT_OPTIONS, "NET_CONNECT")?;
-    if let Some(duration) = optional_duration(map, "NET_CONNECT", "timeout")? {
-        timeout = duration;
+    oxdock_core::check_options(map, NET_CONNECT_OPTIONS.as_slice(), "NET_CONNECT")?;
+    if let Some(value) = map.get("timeout") {
+        check_value_at(
+            &oxdock_parser::union_tag!(Duration, String),
+            value,
+            "NET_CONNECT option 'timeout'",
+        )?;
+        if let Some(duration) = value.as_duration() {
+            timeout = duration;
+        } else {
+            let text = value
+                .as_str()
+                .expect("check_value_at verified DURATION|STRING");
+            timeout = oxdock_parser::command::parse_duration(text).with_context(|| {
+                format!("NET_CONNECT option 'timeout' must be a duration, got {text:?}")
+            })?;
+        }
     }
-    if let Some(flag) = optional_bool(map, "NET_CONNECT", "no_half_close")? {
-        no_half_close = flag;
+    if let Some(value) = map.get("no_half_close") {
+        check_value_at(&TypeTag::Bool, value, "NET_CONNECT option 'no_half_close'")?;
+        no_half_close = value.as_bool().expect("check_value_at verified BOOL");
     }
     // Sandbox gate first: offline runs open no OS sockets, so even a
     // literal dial must fail before parsing, DNS, or connect.
@@ -489,21 +423,24 @@ fn net_connect<P: ProcessManager>(
 
 /// CONNECT options, shared by the registration metadata and the
 /// runtime key check: one source for the keys scripts may pass, so
-/// documentation and enforcement cannot drift apart.
-static NET_CONNECT_OPTIONS: &[ParamOption] = &[
-    ParamOption {
-        name: "timeout",
-        value: TypeTag::Duration,
-        required: false,
-        default: Some("10s"),
-    },
-    ParamOption {
-        name: "no_half_close",
-        value: TypeTag::Bool,
-        required: false,
-        default: None,
-    },
-];
+/// documentation and enforcement cannot drift apart. Built lazily,
+/// like the fetch options: the timeout union composes at runtime.
+static NET_CONNECT_OPTIONS: LazyLock<Vec<ParamOption>> = LazyLock::new(|| {
+    vec![
+        ParamOption {
+            name: "timeout",
+            value: oxdock_parser::union_tag!(Duration, String),
+            required: false,
+            default: Some("10s"),
+        },
+        ParamOption {
+            name: "no_half_close",
+            value: TypeTag::Bool,
+            required: false,
+            default: None,
+        },
+    ]
+});
 
 /// Shared CONNECT plumbing: step context plus the resolved dial and pump
 /// settings, so virtual resolution stays under the argument-count lint.
@@ -670,30 +607,27 @@ pub fn module_with_endpoints<P: ProcessManager>(registry: Arc<EndpointRegistry>)
 /// `NET_LISTEN_INFO` schema and the `NET_LISTEN` return tag: one source
 /// for the shape the host mints, so introspection, enforcement, and
 /// documentation cannot drift apart.
-fn listen_result_fields() -> &'static [Field] {
-    static FIELDS: OnceLock<Vec<Field>> = OnceLock::new();
-    FIELDS.get_or_init(|| {
-        vec![
-            Field {
-                name: "listener",
-                ty: TypeTag::Custom(NetListenerTag::descriptor()),
-                docs: "Listener handle for `NET_ACCEPT` and `NET_CLOSE`.",
-                optional: false,
-            },
-            Field {
-                name: "addr",
-                ty: TypeTag::String,
-                docs: "Bound socket address (`ip:port`), or the virtual endpoint echo when socketless.",
-                optional: false,
-            },
-            Field {
-                name: "virtual",
-                ty: TypeTag::String,
-                docs: "Virtual endpoint echo of the claimed slot.",
-                optional: false,
-            },
-        ]
-    })
+fn listen_result_fields() -> Arc<[Field]> {
+    Arc::from(vec![
+        Field {
+            name: "listener".to_string(),
+            ty: TypeTag::Custom(NetListenerTag::descriptor()),
+            docs: "Listener handle for `NET_ACCEPT` and `NET_CLOSE`.",
+            optional: false,
+        },
+        Field {
+            name: "addr".to_string(),
+            ty: TypeTag::String,
+            docs: "Bound socket address (`ip:port`), or the virtual endpoint echo when socketless.",
+            optional: false,
+        },
+        Field {
+            name: "virtual".to_string(),
+            ty: TypeTag::String,
+            docs: "Virtual endpoint echo of the claimed slot.",
+            optional: false,
+        },
+    ])
 }
 
 /// Hand-built `NET_LISTEN` entry: same shape the macro would emit
@@ -800,7 +734,7 @@ fn net_connect_registration<P: ProcessManager>(
             param_type: Some(TypeTag::Map),
             allowed: None,
             docs: "Optional `timeout` and `no_half_close` settings.",
-            options: Some(NET_CONNECT_OPTIONS),
+            options: Some(NET_CONNECT_OPTIONS.as_slice()),
             optional: false,
         },
     ];
@@ -849,12 +783,12 @@ fn net_connect_registration<P: ProcessManager>(
             module: String::new(),
             kind: FuncKind::HostCtx,
             params: Some(params),
-            returns: Some(TypeTag::Record(&[Field {
-                name: "closed",
+            returns: Some(TypeTag::Record(std::sync::Arc::from([Field {
+                name: "closed".to_string(),
                 ty: TypeTag::Bool,
                 docs: "True when the connection closed cleanly.",
                 optional: false,
-            }])),
+            }]))),
             rpn: false,
             summary: "Dial a TCP endpoint into pipes.",
             docs: "Dial a TCP endpoint into pipes.",
@@ -1067,7 +1001,7 @@ fn net_fetch_registration<P: ProcessManager>() -> HostRegistration<P> {
             param_type: Some(TypeTag::Map),
             allowed: None,
             docs: "Fetch settings: `headers`, `timeout`, `max_body_bytes`, and `max_redirects`. Omittable: a missing options MAP fills `{}`.",
-            options: Some(NET_FETCH_OPTIONS),
+            options: Some(NET_FETCH_OPTIONS.as_slice()),
             optional: true,
         },
     ];
@@ -1098,14 +1032,62 @@ fn net_fetch_registration<P: ProcessManager>() -> HostRegistration<P> {
                 options_value.type_name()
             ),
         };
-        oxdock_core::check_options(&options_map, NET_FETCH_OPTIONS, "NET_FETCH")?;
-        let headers = read_string_map(&options_map, "NET_FETCH", "headers")?;
-        let timeout = optional_duration(&options_map, "NET_FETCH", "timeout")?
-            .unwrap_or(crate::fetch::DEFAULT_FETCH_TIMEOUT);
-        let max_body_bytes = optional_count(&options_map, "NET_FETCH", "max_body_bytes")?
-            .unwrap_or(crate::fetch::DEFAULT_MAX_BODY_BYTES);
-        let max_redirects = optional_count(&options_map, "NET_FETCH", "max_redirects")?
-            .unwrap_or(crate::fetch::DEFAULT_MAX_REDIRECTS as u64);
+        oxdock_core::check_options(&options_map, NET_FETCH_OPTIONS.as_slice(), "NET_FETCH")?;
+        let mut headers = Vec::new();
+        if let Some(value) = options_map.get("headers") {
+            check_value_at(
+                &TypeTag::MapOf(std::sync::Arc::new(TypeTag::String)),
+                value,
+                "NET_FETCH option 'headers'",
+            )?;
+            for (entry_key, entry_value) in
+                value.as_map().expect("check_value_at verified MAP<STRING>")
+            {
+                headers.push((
+                    entry_key.clone(),
+                    entry_value
+                        .as_str()
+                        .expect("check_value_at verified STRING elements")
+                        .to_string(),
+                ));
+            }
+        }
+        let mut timeout = crate::fetch::DEFAULT_FETCH_TIMEOUT;
+        if let Some(value) = options_map.get("timeout") {
+            check_value_at(
+                &oxdock_parser::union_tag!(Duration, String),
+                value,
+                "NET_FETCH option 'timeout'",
+            )?;
+            if let Some(duration) = value.as_duration() {
+                timeout = duration;
+            } else {
+                let text = value
+                    .as_str()
+                    .expect("check_value_at verified DURATION|STRING");
+                timeout = oxdock_parser::command::parse_duration(text).with_context(|| {
+                    format!("NET_FETCH option 'timeout' must be a duration, got {text:?}")
+                })?;
+            }
+        }
+        let mut max_body_bytes = crate::fetch::DEFAULT_MAX_BODY_BYTES;
+        if let Some(value) = options_map.get("max_body_bytes") {
+            check_value_at(&TypeTag::Int, value, "NET_FETCH option 'max_body_bytes'")?;
+            let n = value.as_i64().expect("check_value_at verified INT");
+            if n < 0 {
+                bail!("NET_FETCH option 'max_body_bytes' must be non-negative, got {n}");
+            }
+            max_body_bytes = n as u64;
+        }
+        let mut max_redirects = crate::fetch::DEFAULT_MAX_REDIRECTS as u64;
+        if let Some(value) = options_map.get("max_redirects") {
+            check_value_at(&TypeTag::Int, value, "NET_FETCH option 'max_redirects'")?;
+            let n = value.as_i64().expect("check_value_at verified INT");
+            if n < 0 {
+                bail!("NET_FETCH option 'max_redirects' must be non-negative, got {n}");
+            }
+            max_redirects = n as u64;
+        }
         let max_redirects = u32::try_from(max_redirects).map_err(|_| {
             anyhow::anyhow!("NET_FETCH() option 'max_redirects' exceeds u32: {max_redirects}")
         })?;

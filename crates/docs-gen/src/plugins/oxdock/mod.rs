@@ -335,7 +335,7 @@ mod tests {
                 TypeTag::Custom(descriptor) => out.push(descriptor.name),
                 TypeTag::ListOf(element) => leaves(element, out),
                 TypeTag::Record(fields) => {
-                    for field in *fields {
+                    for field in fields.iter() {
                         leaves(&field.ty, out);
                     }
                 }
