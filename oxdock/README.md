@@ -225,8 +225,18 @@ fn main() -> anyhow::Result<()> {
     engine.register_module(HostModule {
         name: "DEMO".to_string(),
         funcs: vec![Summarize::registration(), WordCount::registration()],
+        // Opaque custom types (`#[oxdock_type]` descriptors) this module's
+        // functions mint or accept. Empty: the examples register types on
+        // the engine directly, or use none.
         types: vec![],
+        // Named MAP shapes for functions returning structured bundles
+        // (field tables like `NET_LISTEN_INFO`). These return scalars and
+        // opaque tags only, so none.
         record_schemas: vec![],
+        // Shared state for function bodies, read with
+        // `cx.module_state::<T>("MODULE")` and attached with
+        // `.with_state(...)`. These are stateless, so none.
+        states: vec![],
     });
     let temp = oxdock_fs::GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
@@ -849,8 +859,18 @@ fn main() -> anyhow::Result<()> {
     engine.register_module(HostModule {
         name: "DEMO".to_string(),
         funcs: vec![MakeTag::registration(), ReadTag::registration()],
+        // Opaque custom types (`#[oxdock_type]` descriptors) this module's
+        // functions mint or accept. Empty: the examples register types on
+        // the engine directly, or use none.
         types: vec![],
+        // Named MAP shapes for functions returning structured bundles
+        // (field tables like `NET_LISTEN_INFO`). These return scalars and
+        // opaque tags only, so none.
         record_schemas: vec![],
+        // Shared state for function bodies, read with
+        // `cx.module_state::<T>("MODULE")` and attached with
+        // `.with_state(...)`. These are stateless, so none.
+        states: vec![],
     });
 
     let temp = oxdock_fs::GuardedPath::tempdir().unwrap();
@@ -952,8 +972,18 @@ fn main() {
     engine.register_module(HostModule {
         name: "DEMO".to_string(),
         funcs: vec![EnvOr::registration()],
+        // Opaque custom types (`#[oxdock_type]` descriptors) this module's
+        // functions mint or accept. Empty: the examples register types on
+        // the engine directly, or use none.
         types: vec![],
+        // Named MAP shapes for functions returning structured bundles
+        // (field tables like `NET_LISTEN_INFO`). These return scalars and
+        // opaque tags only, so none.
         record_schemas: vec![],
+        // Shared state for function bodies, read with
+        // `cx.module_state::<T>("MODULE")` and attached with
+        // `.with_state(...)`. These are stateless, so none.
+        states: vec![],
     });
 }
 ```
@@ -1072,8 +1102,18 @@ fn main() -> anyhow::Result<()> {
             MakeMatrix::registration(),
             MatrixGet::registration(),
         ],
+        // Opaque custom types (`#[oxdock_type]` descriptors) this module's
+        // functions mint or accept. Empty: the examples register types on
+        // the engine directly, or use none.
         types: vec![],
+        // Named MAP shapes for functions returning structured bundles
+        // (field tables like `NET_LISTEN_INFO`). These return scalars and
+        // opaque tags only, so none.
         record_schemas: vec![],
+        // Shared state for function bodies, read with
+        // `cx.module_state::<T>("MODULE")` and attached with
+        // `.with_state(...)`. These are stateless, so none.
+        states: vec![],
     });
     let temp = oxdock_fs::GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
