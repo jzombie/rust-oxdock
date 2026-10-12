@@ -102,9 +102,8 @@ jobs:
 
           RUN ["cargo", "build", "--release", "-p", "oxdock", "--all-features"]
 
-          # Identity, exact-free: the binary must report itself, and the
-          # manifest version is echoed for the log. Exact equality lives
-          # in the release gate, which enforces it authoritatively later.
+          # Identity: the binary must report the manifest version it
+          # was built from. Skew fails here, before anything stages.
           LET $manifest: MAP<ANY> = LOAD_TOML("Cargo.toml")
           ECHO "manifest: {{ $manifest.workspace.package.version }}"
 
@@ -112,7 +111,7 @@ jobs:
           [family:unix] WITH_IO [stdout=$p2] RUN ["{{ env:GITHUB_WORKSPACE }}/target/release/oxdock", "--version"]
           [family:windows] WITH_IO [stdout=$p2] RUN ["{{ env:GITHUB_WORKSPACE }}\\target\\release\\oxdock.exe", "--version"]
           WITH_IO [stdin=$p2] READ_LINE $reported
-          ASSERT_CONTAINS $reported "oxdock "
+          ASSERT_EQ $reported "oxdock {{ $manifest.workspace.package.version }}"
 
           # Stage a local release of the branch build: every leg below
           # fetches through the stub from loopback, so branch bytes
@@ -187,9 +186,13 @@ jobs:
           if [ "${{ runner.os }}" = "Windows" ]; then
             bin="target/release/oxdock.exe"
           fi
+          # Exact identity, shell-stripped: the DSL has no string
+          # surgery, so the `v` comes off here like the setup action
+          # does for its own handoff check.
+          export OXDOCK_EXPECTED_VERSION="${OXDOCK_PINNED_ENGINE#v}"
           script="${RUNNER_TEMP}/self-bootstrap.oxfile"
           cat > "$script" <<'OXDOCK_EOF'
-          INHERIT_ENV [GITHUB_TOKEN, RUNNER_TEMP, OXDOCK_PINNED_ENGINE, PATH]
+          INHERIT_ENV [GITHUB_TOKEN, RUNNER_TEMP, OXDOCK_PINNED_ENGINE, OXDOCK_EXPECTED_VERSION, PATH]
           WORKSPACE SYSTEM
           MKDIR {{ env:RUNNER_TEMP }}/self-bootstrap
           WORKDIR {{ env:RUNNER_TEMP }}/self-bootstrap
@@ -212,7 +215,7 @@ jobs:
           LET $p: PIPE
           WITH_IO [stdout=$p] RUN [$engine, "--version"]
           WITH_IO [stdin=$p] READ_LINE $reported
-          ASSERT_CONTAINS $reported "oxdock "
+          ASSERT_EQ $reported "oxdock {{ env:OXDOCK_EXPECTED_VERSION }}"
           OXDOCK_EOF
           "$bin" --script "$script"
 
