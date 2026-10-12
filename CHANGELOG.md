@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [Unreleased]
+
+### Changed
+
+- Pipelines pack release artifacts with `ARCHIVE` through the setup-oxdock engine instead of host `tar` (0.25.0-alpha minimum). Bootstrap unpacks stay shell `tar`: no engine exists yet when the first tarball opens.
+
 ## [0.25.0-alpha] - 2026-10-11
 
 ### Added
