@@ -130,7 +130,8 @@ jobs:
       # Prefer the already-published binary at the pinned ref; fall back
       # to a source build when the ref has no release yet (branch under
       # development). Either way the script comes from the central
-      # checkout, so binary and script stay mutually consistent.
+      # checkout, so binary and script stay mutually consistent. Shell
+      # tar here: cracking the first tarball predates any engine.
       - name: Fail unless the confirmation matches the tree
         shell: bash
         env:
@@ -218,11 +219,24 @@ jobs:
           fi
           cargo build --release --target ${{ matrix.target }} -p ${{ inputs.binary }} --all-features
 
+      # Pack with project vocabulary: setup-oxdock installs an engine
+      # carrying ARCHIVE, so release assets never depend on host tar.
+      # Any caller qualifies because the packer is ours, not the
+      # matrix binary. Membership matches the historical pack exactly
+      # (one top-level binary, modes kept); a broken pack fails the
+      # runner self-extract below before anything publishes.
+      - name: Setup pack engine
+        uses: jzombie/rust-oxdock/.github/actions/setup-oxdock@v0.25.0-alpha
+        with:
+          version: v0.25.0-alpha
+
       - name: Archive the binary
-        shell: bash
+        shell: oxdock --script {0}
         run: |
-          set -euo pipefail
-          tar -czf "${{ inputs.binary }}-${{ matrix.target }}.tar.gz" -C target/${{ matrix.target }}/release "${{ inputs.binary }}${{ matrix.exe }}"
+          INHERIT_ENV [GITHUB_WORKSPACE]
+          WORKSPACE SYSTEM
+          WORKDIR {{ env:GITHUB_WORKSPACE }}/target/${{ matrix.target }}/release
+          ARCHIVE ${{ inputs.binary }}${{ matrix.exe }} {{ env:GITHUB_WORKSPACE }}/${{ inputs.binary }}-${{ matrix.target }}.tar.gz
 
       - name: Upload the archive
         uses: actions/upload-artifact@v4
@@ -304,6 +318,9 @@ jobs:
       # Unpack the linux archive for the self-run step below. The
       # binary's baked manifest directory points at the build runner,
       # so that step overrides the workspace root back to this tree.
+      # Shell tar on purpose: no engine is on hand yet at this point,
+      # which usefully doubles as the system-reader side of the
+      # interop proof against the DSL-packed asset above.
       - name: Extract the release runner
         if: ${{ inputs.binaries }}
         shell: bash
@@ -334,7 +351,8 @@ jobs:
       # Everything else runs the central script with the central runner:
       # published binary at the derived pin if the ref has a release,
       # else a source build from the central checkout. The caller's own
-      # binary is never the runner.
+      # binary is never the runner. Shell tar below for the same
+      # reason: the first unpack predates any engine.
       - name: Run OxDock's gha-rust-release.oxfile at the derived pin (published binary, else source build)
         if: ${{ !(github.repository == 'jzombie/rust-oxdock' && inputs.binaries) }}
         shell: bash

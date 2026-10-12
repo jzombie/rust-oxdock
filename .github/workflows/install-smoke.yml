@@ -19,7 +19,7 @@ on:
 # to a newer tag only after it proves green; an older engine choking on
 # new syntax fails loudly at step start, which is the point.
 env:
-  OXDOCK_PINNED_ENGINE: v0.24.4-alpha
+  OXDOCK_PINNED_ENGINE: v0.25.0-alpha
 
 jobs:
   parse:
@@ -138,10 +138,11 @@ jobs:
           COPY install.oxfile {{ $stage }}/install.oxfile
           WORKDIR {{ $stage }}
 
-          # Relative archive name: GNU tar reads `host:file` in an
-          # absolute Windows path as a remote tape (`D:` looks like a
-          # host), so archive from inside the stage dir instead.
-          RUN ["tar", "-czf", "{{ $asset }}", "{{ $assetbin }}"]
+          # Self-hosted pack: the pinned engine carries ARCHIVE, so
+          # the stage packs with project vocabulary instead of host
+          # tar, whose `D:`-as-remote-tape quirk on Windows forced
+          # this relative dance originally.
+          ARCHIVE {{ $assetbin }} {{ $asset }}
 
           # Native hashing: HASH_SHA256 digests each bundled file
           # identically on every platform, so the forged checksums never
