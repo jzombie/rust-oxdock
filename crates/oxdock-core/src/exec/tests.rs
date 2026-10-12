@@ -2,7 +2,7 @@ use super::*;
 
 use anyhow::bail;
 use indoc::indoc;
-use oxdock_fs::{EntryKind, GuardedPath, MockFs, WorkspaceFs};
+use oxdock_fs::{EntryKind, GuardedPath, MockFs, WorkspaceFs, to_forward_slashes};
 use oxdock_parser::{Expr, Guard, GuardExpr, IoBinding, IoStream, StepKind};
 use oxdock_process::{
     BackgroundHandle, CommandContext, CommandMode, CommandOptions, CommandResult, CommandStdin,
@@ -2487,7 +2487,7 @@ fn unarchive_expansion_cap_trips_on_bombs() {
     let resolver = PathResolver::new_guarded(root.clone(), root.clone()).unwrap();
     let zeros = root.join("zeros.bin").unwrap();
     resolver
-        .write_file(&zeros, &vec![0u8; 5 * 1024 * 1024])
+        .write_file(&zeros, &vec![0u8; 5 * 1_024 * 1_024])
         .unwrap();
     let steps = vec![
         step(StepKind::Archive {
@@ -2523,7 +2523,7 @@ fn unarchive_expansion_cap_trips_on_bombs() {
     let restored = root.join("wide/zeros.bin").unwrap();
     assert_eq!(
         resolver.read_file(&restored).unwrap().len(),
-        5 * 1024 * 1024
+        5 * 1_024 * 1_024
     );
 }
 
@@ -2657,6 +2657,58 @@ fn archive_hashes_through_hash_sha256() {
         hex.chars().all(|c| c.is_ascii_hexdigit()),
         "hex digest expected: {hex}"
     );
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "probes real executable bits and host PATH layout; unsupported under Miri"
+)]
+fn is_exec_finds_host_tools_and_direct_files() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = temp.as_guarded_path().clone();
+    let resolver = PathResolver::new_guarded(root.clone(), root.clone()).unwrap();
+    let tools = root.join("tools").unwrap();
+    resolver.create_dir_all(&tools).unwrap();
+    // Both spellings exist so each platform finds its own: Unix runs
+    // the extensionless file, Windows the `.exe` one. A `.bat` file
+    // proves the wider extension search: runnable on Windows, a plain
+    // file on Unix.
+    for name in ["faketool", "faketool.exe", "fakebot.bat"] {
+        let exe = tools.join(name).unwrap();
+        resolver.write_file(&exe, b"fake").unwrap();
+        resolver.set_permissions_mode_unix(&exe, 0o755).unwrap();
+    }
+    let tools_str = to_forward_slashes(&tools.as_path().to_string_lossy());
+    let script = format!(
+        indoc! {r#"
+            IMPORT [STD]
+            WORKSPACE SYSTEM
+            ENV PATH="{tools}"
+            LET $found: BOOL = IS_EXEC("faketool")
+            ASSERT_EQ $found true
+            LET $miss: BOOL = IS_EXEC("no-such-tool-xyz")
+            ASSERT_EQ $miss false
+            LET $empty: BOOL = IS_EXEC("")
+            ASSERT_EQ $empty false
+            [family:unix] LET $batch: BOOL = IS_EXEC("fakebot")
+            [family:unix] ASSERT_EQ $batch false
+            [family:windows] LET $batch: BOOL = IS_EXEC("fakebot")
+            [family:windows] ASSERT_EQ $batch true
+            # Explicit script names resolve directly on both platforms:
+            # no spurious `.exe` gets appended.
+            LET $batdirect: BOOL = IS_EXEC("{tools}/fakebot.bat")
+            ASSERT_EQ $batdirect true
+            [family:unix] LET $direct: BOOL = IS_EXEC("{tools}/faketool")
+            [family:windows] LET $direct: BOOL = IS_EXEC("{tools}/faketool.exe")
+            ASSERT_EQ $direct true
+        "#},
+        tools = tools_str
+    );
+    let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
+    let steps = crate::parse_script(&script).unwrap();
+    run_steps_with_manager(fs, &steps, MockProcessManager::default(), ExecIo::new())
+        .expect("tool probe pipeline");
 }
 
 #[test]
@@ -3061,9 +3113,9 @@ fn public_entrypoint_returns_final_working_directory() {
 /// without multi-megabyte payloads (mirrors the production ratio).
 /// Disk spilling is compiled out under Miri, with the tests using these.
 #[cfg(not(miri))]
-const TEST_SPILL_THRESHOLD: usize = 1024 * 1024;
+const TEST_SPILL_THRESHOLD: usize = 1_024 * 1_024;
 #[cfg(not(miri))]
-const TEST_MAX_BACKLOG: u64 = 2 * 1024 * 1024;
+const TEST_MAX_BACKLOG: u64 = 2 * 1_024 * 1_024;
 
 /// Test backend with small thresholds (see above).
 #[cfg(not(miri))]
@@ -3078,7 +3130,7 @@ fn script_pipe_stays_in_memory_below_threshold() {
     let writer = pipe.endpoint().stream_handle();
     let reader = pipe.reader();
 
-    let payload = vec![0xABu8; 1024]; // 1 KiB: below threshold
+    let payload = vec![0xABu8; 1_024]; // 1 KiB: below threshold
     writer.lock().unwrap().write_all(&payload).unwrap();
     drop(writer);
 
@@ -3096,7 +3148,7 @@ fn script_pipe_spills_to_disk_above_threshold() {
     let reader = pipe.reader();
 
     // Exceed the threshold by 1 MiB
-    let size = TEST_SPILL_THRESHOLD + (1024 * 1024);
+    let size = TEST_SPILL_THRESHOLD + (1_024 * 1_024);
     let payload: Vec<u8> = (0..size).map(|i| (i % 256) as u8).collect();
     writer.lock().unwrap().write_all(&payload).unwrap();
     drop(writer);
@@ -3145,7 +3197,7 @@ fn script_pipe_file_truncated_on_drain() {
     let reader = pipe.reader();
 
     // Write above threshold to trigger disk spill
-    let size = TEST_SPILL_THRESHOLD + (1024 * 1024);
+    let size = TEST_SPILL_THRESHOLD + (1_024 * 1_024);
     let payload: Vec<u8> = (0..size).map(|i| (i % 256) as u8).collect();
     writer.lock().unwrap().write_all(&payload).unwrap();
     drop(writer);
@@ -3169,7 +3221,7 @@ fn script_pipe_explicit_disk_spill_and_cleanup_verification() {
     let reader = pipe.reader();
 
     // 1. Trigger disk spill (threshold + 1 MiB)
-    let size = TEST_SPILL_THRESHOLD + (1024 * 1024);
+    let size = TEST_SPILL_THRESHOLD + (1_024 * 1_024);
     let payload = vec![0x55u8; size];
     writer.lock().unwrap().write_all(&payload).unwrap();
 
@@ -3354,7 +3406,7 @@ fn spill_buffer_stays_in_memory_below_threshold() {
     let buf = Arc::new(new_spill_buffer());
     let writer = buf.writer();
 
-    let payload = vec![0xABu8; 1024]; // 1 KiB: below threshold
+    let payload = vec![0xABu8; 1_024]; // 1 KiB: below threshold
     writer.lock().unwrap().write_all(&payload).unwrap();
     assert!(!buf.is_spilled());
     assert_eq!(buf.drain_bytes().unwrap(), payload);
@@ -3371,7 +3423,7 @@ fn spill_buffer_spills_to_disk_above_threshold() {
     let writer = buf.writer();
 
     // Exceed the threshold by 1 MiB
-    let size = SPILL_THRESHOLD + (1024 * 1024);
+    let size = SPILL_THRESHOLD + (1_024 * 1_024);
     let payload: Vec<u8> = (0..size).map(|i| (i % 256) as u8).collect();
     writer.lock().unwrap().write_all(&payload).unwrap();
     drop(writer);
@@ -3421,7 +3473,7 @@ fn spill_buffer_file_truncated_on_drain_and_cleaned_on_drop() {
     let buf = Arc::new(new_spill_buffer());
     let writer = buf.writer();
 
-    let size = SPILL_THRESHOLD + (1024 * 1024);
+    let size = SPILL_THRESHOLD + (1_024 * 1_024);
     let payload = vec![0x55u8; size];
     writer.lock().unwrap().write_all(&payload).unwrap();
     drop(writer);

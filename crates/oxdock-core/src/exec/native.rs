@@ -320,6 +320,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
             ParseJson::registration(),
             PathType::registration(),
             PathWritable::registration(),
+            IsExec::registration(),
             HasKey::registration(),
             MapSet::registration(),
             MergeMaps::registration(),
@@ -702,7 +703,7 @@ fn format_byte_count(
 /// # Units parse case-insensitively; bare digits are bytes.
 /// IMPORT [STD]
 /// LET $bytes: INT = PARSE_BYTE_COUNT("1Gb")
-/// ASSERT_EQ $bytes 1000000000
+/// ASSERT_EQ $bytes 1_000_000_000
 ///
 /// # Binary suffixes scale by powers of two.
 /// LET $mebi: INT = PARSE_BYTE_COUNT("2mib")
@@ -713,7 +714,7 @@ fn format_byte_count(
 /// ASSERT_EQ $grouped 1_000_000
 ///
 /// # Plain numbers pass through as bytes already.
-/// LET $plain: INT = PARSE_BYTE_COUNT(1048576)
+/// LET $plain: INT = PARSE_BYTE_COUNT(1_048_576)
 /// ASSERT_EQ $plain 1_048_576
 ///
 /// # Bare literals group too.
@@ -764,12 +765,12 @@ fn parse_byte_count(
 /// ```oxdock
 /// # Durations render in the largest exact unit.
 /// IMPORT [STD]
-/// LET $pretty: STRING = FORMAT_DURATION(90000)
+/// LET $pretty: STRING = FORMAT_DURATION(90_000)
 /// ASSERT_EQ $pretty "90s"
 ///
 /// # The pair round-trips through the parser.
 /// LET $back: INT = PARSE_DURATION($pretty)
-/// ASSERT_EQ $back 90000
+/// ASSERT_EQ $back 90_000
 /// ```
 ///
 #[oxdock_func(pure, returns = TypeTag::String)]
@@ -796,11 +797,11 @@ fn format_duration(
 /// # A bare number means seconds, like TIMEOUT.
 /// IMPORT [STD]
 /// LET $ms: INT = PARSE_DURATION("2m")
-/// ASSERT_EQ $ms 120000
+/// ASSERT_EQ $ms 120_000
 ///
 /// # Milliseconds stay exact.
 /// LET $exact: INT = PARSE_DURATION("1500ms")
-/// ASSERT_EQ $exact 1500
+/// ASSERT_EQ $exact 1_500
 ///
 /// # One optional space separates number from unit.
 /// LET $spaced: INT = PARSE_DURATION("1 h")
@@ -942,6 +943,38 @@ fn path_writable<P: ProcessManager>(
     path: String,
 ) -> Result<Value> {
     super::args::path_writable_from_value(&[Value::string(path)], cx)
+}
+
+/// Report whether a name resolves to an executable file (#100).
+///
+/// Bare command names search `env:PATH` (`IS_EXEC("tar")` finds the
+/// first executable `tar`, plus `tar.exe`, on `PATH`); spellings
+/// containing a separator check that file directly. True means a real
+/// file with an executable bit on Unix, or an executable extension on
+/// Windows. Absolute `PATH` entries resolve through the workspace as
+/// usual, so host probing wants `WORKSPACE SYSTEM` and an inherited
+/// `PATH`; anything unresolvable reads false, never errors. AST-only
+/// by design, like `PATH_TYPE`: there is no RPN arm for filesystem IO.
+///
+/// ```oxdock
+/// # Missing tools read false instead of failing the run.
+/// IMPORT [STD]
+/// LET $missing: BOOL = IS_EXEC("no-such-tool-xyz")
+/// ASSERT_EQ $missing false
+///
+/// # Plain files are not executable on any platform.
+/// WRITE tool.txt payload
+/// LET $plain: BOOL = IS_EXEC("tool.txt")
+/// ASSERT_EQ $plain false
+/// ```
+///
+#[oxdock_func(returns = TypeTag::Bool)]
+fn is_exec<P: ProcessManager>(
+    cx: &mut StepCtx<P>,
+    /// Command name or file path to probe.
+    name: String,
+) -> Result<Value> {
+    super::args::is_exec_from_value(&[Value::string(name)], cx)
 }
 
 /// Report whether a map holds a key.

@@ -3766,7 +3766,7 @@ mod tests {
         );
 
         let steps = parse_script(
-            "UNARCHIVE pack.tar.gz unpacked --max-bytes 100000\n",
+            "UNARCHIVE pack.tar.gz unpacked --max-bytes 100_000\n",
             lower_command,
         )
         .expect("parses");
@@ -3778,20 +3778,20 @@ mod tests {
             } => {
                 assert_eq!(src.as_str(), "pack.tar.gz");
                 assert_eq!(dst.as_str(), "unpacked");
-                assert_eq!(max_bytes.as_ref().map(|a| a.as_str()), Some("100000"));
+                assert_eq!(max_bytes.as_ref().map(|a| a.as_str()), Some("100_000"));
             }
             other => panic!("expected Unarchive, got {other:?}"),
         }
         assert_eq!(
             steps[0].kind.to_string(),
-            "UNARCHIVE --max-bytes \"100000\" \"pack.tar.gz\" unpacked"
+            "UNARCHIVE --max-bytes \"100_000\" \"pack.tar.gz\" unpacked"
         );
 
         for script in [
             "ARCHIVE bundle bundle.tar.gz\n",
             "ARCHIVE --raw tool.bin tool.tar\n",
             "UNARCHIVE pack.tar.gz unpacked\n",
-            "UNARCHIVE pack.tar.gz unpacked --max-bytes 100000\n",
+            "UNARCHIVE pack.tar.gz unpacked --max-bytes 100_000\n",
         ] {
             let first = parse_script(script, lower_command).expect("parses");
             let rendered = first[0].kind.to_string() + "\n";
@@ -4304,15 +4304,18 @@ mod tests {
         assert_eq!(parse_byte_count("2MB").unwrap(), 2_000_000);
         assert_eq!(parse_byte_count("1GB").unwrap(), 1_000_000_000);
         assert_eq!(parse_byte_count("1TB").unwrap(), 1_000_000_000_000);
-        assert_eq!(parse_byte_count("10KIB").unwrap(), 10 * 1024);
-        assert_eq!(parse_byte_count("2MIB").unwrap(), 2 * 1024 * 1024);
-        assert_eq!(parse_byte_count("1GIB").unwrap(), 1024 * 1024 * 1024);
-        assert_eq!(parse_byte_count("1TIB").unwrap(), 1024 * 1024 * 1024 * 1024);
+        assert_eq!(parse_byte_count("10KIB").unwrap(), 10 * 1_024);
+        assert_eq!(parse_byte_count("2MIB").unwrap(), 2 * 1_024 * 1_024);
+        assert_eq!(parse_byte_count("1GIB").unwrap(), 1_024 * 1_024 * 1_024);
+        assert_eq!(
+            parse_byte_count("1TIB").unwrap(),
+            1_024 * 1_024 * 1_024 * 1_024
+        );
         // Case-insensitive: `1gb`, `1GB`, and `1Gb` agree.
         assert_eq!(parse_byte_count("1gb").unwrap(), 1_000_000_000);
         assert_eq!(parse_byte_count("1Gb").unwrap(), 1_000_000_000);
-        assert_eq!(parse_byte_count("1gib").unwrap(), 1024 * 1024 * 1024);
-        assert_eq!(parse_byte_count("1Gib").unwrap(), 1024 * 1024 * 1024);
+        assert_eq!(parse_byte_count("1gib").unwrap(), 1_024 * 1_024 * 1_024);
+        assert_eq!(parse_byte_count("1Gib").unwrap(), 1_024 * 1_024 * 1_024);
         // Rust-literal grouping: separators ride between digits only.
         assert_eq!(parse_byte_count("1_000").unwrap(), 1_000);
         assert_eq!(
@@ -4320,7 +4323,10 @@ mod tests {
             1_000_000_000_000
         );
         assert_eq!(parse_byte_count("1_0KB").unwrap(), 10_000);
-        assert_eq!(parse_byte_count("1_0GiB").unwrap(), 10 * 1024 * 1024 * 1024);
+        assert_eq!(
+            parse_byte_count("1_0GiB").unwrap(),
+            10 * 1_024 * 1_024 * 1_024
+        );
         // One optional space separates number from unit, never digits.
         assert_eq!(parse_byte_count("1 GB").unwrap(), 1_000_000_000);
         assert_eq!(parse_byte_count("10 KiB").unwrap(), 10_240);
@@ -4373,7 +4379,7 @@ mod tests {
                 "round-trip failed for {text}"
             );
         }
-        assert_eq!(format_byte_count(1024 * 1024 * 1024), "1GiB");
+        assert_eq!(format_byte_count(1_024 * 1_024 * 1_024), "1GiB");
         assert_eq!(format_byte_count(1_000_000_000), "1GB");
     }
 

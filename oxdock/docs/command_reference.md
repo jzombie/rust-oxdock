@@ -1831,7 +1831,7 @@ modes (confer executability with `INSTALL` there).
 
 | Flag | Type | Description |
 | --- | --- | --- |
-| `--max-bytes` | `STRING` | Cap total unpacked member bytes: bare digits are bytes (`1_000_000` grouping allowed), suffixes B/KB/MB/GB/TB (decimal) and KIB/MIB/GIB/TIB (binary), any case (defaults to 1 GiB) |
+| `--max-bytes` | `STRING` | Cap total unpacked member bytes: bare digits are bytes (`1_000_000` grouping allowed), suffixes B/KB/MB/GB/TB (decimal) and KIB/MIB/GIB/TIB (binary), any case, one optional space before the unit (defaults to 1 GiB) |
 
 **Examples:**
 
@@ -2649,12 +2649,12 @@ formatted values reparse exactly. Negative inputs fail.
 ```oxdock
 # Byte counts render in the largest exact unit.
 IMPORT [STD]
-LET $pretty: STRING = FORMAT_BYTE_COUNT(1048576)
+LET $pretty: STRING = FORMAT_BYTE_COUNT(1_048_576)
 ASSERT_EQ $pretty "1MiB"
 
 # The pair round-trips through the parser.
 LET $back: INT = PARSE_BYTE_COUNT($pretty)
-ASSERT_EQ $back 1048576
+ASSERT_EQ $back 1_048_576
 ```
 
 
@@ -2676,12 +2676,12 @@ reparse exactly. Negative inputs fail.
 ```oxdock
 # Durations render in the largest exact unit.
 IMPORT [STD]
-LET $pretty: STRING = FORMAT_DURATION(90000)
+LET $pretty: STRING = FORMAT_DURATION(90_000)
 ASSERT_EQ $pretty "90s"
 
 # The pair round-trips through the parser.
 LET $back: INT = PARSE_DURATION($pretty)
-ASSERT_EQ $back 90000
+ASSERT_EQ $back 90_000
 ```
 
 
@@ -2757,6 +2757,41 @@ when integral and finite.
 - `$val` (`ANY`): Value to convert to `INT`.
 
 **Returns:** `INT`
+
+### STD::IS_EXEC
+
+Report whether a name resolves to an executable file (#100).
+
+Bare command names search `env:PATH` (`IS_EXEC("tar")` finds the
+first executable `tar`, plus `tar.exe`, on `PATH`); spellings
+containing a separator check that file directly. True means a real
+file with an executable bit on Unix, or an executable extension on
+Windows. Absolute `PATH` entries resolve through the workspace as
+usual, so host probing wants `WORKSPACE SYSTEM` and an inherited
+`PATH`; anything unresolvable reads false, never errors. AST-only
+by design, like `PATH_TYPE`: there is no RPN arm for filesystem IO.
+
+```oxdock
+# Missing tools read false instead of failing the run.
+IMPORT [STD]
+LET $missing: BOOL = IS_EXEC("no-such-tool-xyz")
+ASSERT_EQ $missing false
+
+# Plain files are not executable on any platform.
+WRITE tool.txt payload
+LET $plain: BOOL = IS_EXEC("tool.txt")
+ASSERT_EQ $plain false
+```
+
+
+**Signature:** `STD::IS_EXEC($name: STRING) -> BOOL`
+
+**Contexts:** [`AST`](#context-ast) only
+
+**Parameters:**
+- `$name` (`STRING`): Command name or file path to probe.
+
+**Returns:** `BOOL`
 
 ### STD::IS_TERMINAL
 
@@ -2887,6 +2922,10 @@ ASSERT_EQ $plain 1_048_576
 # Bare literals group too.
 LET $bare: INT = PARSE_BYTE_COUNT(1_000_000)
 ASSERT_EQ $bare 1_000_000
+
+# One optional space separates number from unit.
+LET $spaced: INT = PARSE_BYTE_COUNT("1 GB")
+ASSERT_EQ $spaced 1_000_000_000
 ```
 
 
@@ -2910,11 +2949,15 @@ Suffixes `ms`/`s`/`m`/`h`; a bare number means seconds. Pairs with
 # A bare number means seconds, like TIMEOUT.
 IMPORT [STD]
 LET $ms: INT = PARSE_DURATION("2m")
-ASSERT_EQ $ms 120000
+ASSERT_EQ $ms 120_000
 
 # Milliseconds stay exact.
 LET $exact: INT = PARSE_DURATION("1500ms")
-ASSERT_EQ $exact 1500
+ASSERT_EQ $exact 1_500
+
+# One optional space separates number from unit.
+LET $spaced: INT = PARSE_DURATION("1 h")
+ASSERT_EQ $spaced 3_600_000
 ```
 
 

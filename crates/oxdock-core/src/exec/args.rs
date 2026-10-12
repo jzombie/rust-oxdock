@@ -431,6 +431,122 @@ pub(crate) fn path_type_from_value<P: ProcessManager>(
     Ok(Value::string(kind.to_string()))
 }
 
+/// Value-semantics core of `IS_EXEC()` (#100): true iff the name
+/// resolves to an executable file on the current platform. Bare
+/// command names search `env:PATH` (plus a `.exe` spelling on
+/// Windows); spellings containing a separator check that file
+/// directly. The empty string is immediately false. Paths resolve
+/// through the workspace like everything else: absolute `PATH`
+/// entries need `WORKSPACE SYSTEM` to be visible, and scripts only
+/// see a `PATH` they inherit. Only [`WorkspaceFs`](oxdock_fs::WorkspaceFs)
+/// trait methods are used; backends without metadata (mocks) simply
+/// report false. TOCTOU races are inherent and accepted.
+pub(crate) fn is_exec_from_value<P: ProcessManager>(
+    args: &[Value],
+    cx: &mut StepCtx<'_, P>,
+) -> Result<Value> {
+    let name_val = args
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("IS_EXEC requires a name argument"))?;
+    let name = match name_val.as_str() {
+        Some(s) => s.to_string(),
+        None => bail!("IS_EXEC name argument must evaluate to a string"),
+    };
+    if name.is_empty() {
+        return Ok(Value::bool(false));
+    }
+    Ok(Value::bool(is_exec_name(cx, &name)))
+}
+
+/// Resolve one tool spelling: direct files by path, bare names by
+/// `PATH` search.
+fn is_exec_name<P: ProcessManager>(cx: &StepCtx<'_, P>, name: &str) -> bool {
+    if name.contains('/') || name.contains('\\') {
+        return exe_candidates(name)
+            .iter()
+            .any(|candidate| is_executable_candidate(cx, candidate));
+    }
+    let path_var = cx.state.envs.get("PATH").cloned().unwrap_or_default();
+    for dir in std::env::split_paths(&path_var) {
+        let dir = dir.to_string_lossy();
+        let base = dir.trim_end_matches(['/', '\\']);
+        // Empty segments traditionally mean the working directory;
+        // probing it implicitly would surprise, so skip them.
+        if base.is_empty() {
+            continue;
+        }
+        for candidate in exe_candidates(name) {
+            if is_executable_candidate(cx, &format!("{base}/{candidate}")) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Candidate spellings for one tool name: the bare name everywhere,
+/// plus every executable extension where the platform runs them.
+fn exe_candidates(name: &str) -> Vec<String> {
+    #[cfg(windows)]
+    {
+        let lower = name.to_ascii_lowercase();
+        if ["exe", "bat", "cmd", "com"]
+            .iter()
+            .any(|ext| lower.ends_with(&format!(".{ext}")))
+        {
+            vec![name.to_string()]
+        } else {
+            vec![
+                name.to_string(),
+                format!("{name}.exe"),
+                format!("{name}.bat"),
+                format!("{name}.cmd"),
+                format!("{name}.com"),
+            ]
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        vec![name.to_string()]
+    }
+}
+
+/// True iff the candidate guards to a runnable file: a real file
+/// everywhere, plus an executable bit on Unix or an executable
+/// extension on Windows. Unresolvable spellings (missing files,
+/// paths outside the selected roots) read false, never error.
+fn is_executable_candidate<P: ProcessManager>(cx: &StepCtx<'_, P>, candidate: &str) -> bool {
+    let Ok(guard) = cx.state.fs.resolve_read(&cx.state.cwd, candidate) else {
+        return false;
+    };
+    if !matches!(
+        cx.state.fs.entry_kind(&guard),
+        Ok(oxdock_fs::EntryKind::File)
+    ) {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        cx.state
+            .fs
+            .metadata(&guard)
+            .map(|meta| meta.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(windows)]
+    {
+        let lower = candidate.to_ascii_lowercase();
+        return ["exe", "bat", "cmd", "com"]
+            .iter()
+            .any(|ext| lower.ends_with(&format!(".{ext}")));
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (candidate, &guard);
+        return false;
+    }
+}
 /// Value-semantics core of `PATH_WRITABLE()`: true iff an ordinary file
 /// can be created at the path, decided WITHOUT creating anything
 /// permanent. The empty string is immediately false (it would otherwise

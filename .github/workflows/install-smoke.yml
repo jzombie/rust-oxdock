@@ -173,6 +173,49 @@ jobs:
           path: ${{ runner.temp }}/oxdock-stage
           retention-days: 1
 
+      # Self-bootstrap through the branch engine: download the pinned
+      # (previous) release tarball and unpack it with UNARCHIVE, no
+      # system tar involved. Proves the branch vocabulary handles real
+      # release artifacts end to end. Runs on the branch binary (the
+      # pinned engine lacks UNARCHIVE); bash only stages the script
+      # file, the work is all DSL.
+      - name: Self-bootstrap previous release with branch engine
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin="target/release/oxdock"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            bin="target/release/oxdock.exe"
+          fi
+          script="${RUNNER_TEMP}/self-bootstrap.oxfile"
+          cat > "$script" <<'OXDOCK_EOF'
+          INHERIT_ENV [GITHUB_TOKEN, RUNNER_TEMP, OXDOCK_PINNED_ENGINE, PATH]
+          WORKSPACE SYSTEM
+          MKDIR {{ env:RUNNER_TEMP }}/self-bootstrap
+          WORKDIR {{ env:RUNNER_TEMP }}/self-bootstrap
+          # Target mapping mirrors the stub: this leg fetches what the
+          # stub would fetch for this runner. macOS qualifies by arch
+          # because no x86_64-apple-darwin asset is published: an Intel
+          # runner must fail naming that fact, never silently fetch
+          # the ARM64 binary into a Bad-CPU-type execution.
+          [os:macos, arch:aarch64] LET $target: STRING = "aarch64-apple-darwin"
+          [os:macos, arch:x86_64] ECHO "no Intel macOS asset is published; refusing the ARM64 binary"
+          [os:macos, arch:x86_64] EXIT 1
+          [os:linux, arch:x86_64] LET $target: STRING = "x86_64-unknown-linux-musl"
+          [os:linux, arch:aarch64] LET $target: STRING = "aarch64-unknown-linux-musl"
+          [os:windows, arch:x86_64] LET $target: STRING = "x86_64-pc-windows-msvc"
+          [os:windows, arch:aarch64] LET $target: STRING = "aarch64-pc-windows-msvc"
+          [family:unix] LET $engine: STRING = "{{ env:RUNNER_TEMP }}/self-bootstrap/prev/oxdock"
+          [family:windows] LET $engine: STRING = "{{ env:RUNNER_TEMP }}/self-bootstrap/prev/oxdock.exe"
+          RUN ["curl", "-fsSL", "-H", "Authorization: Bearer {{ env:GITHUB_TOKEN }}", "-o", "prev.tar.gz", "https://github.com/jzombie/rust-oxdock/releases/download/{{ env:OXDOCK_PINNED_ENGINE }}/oxdock-{{ $target }}.tar.gz"]
+          UNARCHIVE prev.tar.gz prev
+          LET $p: PIPE
+          WITH_IO [stdout=$p] RUN [$engine, "--version"]
+          WITH_IO [stdin=$p] READ_LINE $reported
+          ASSERT_CONTAINS $reported "oxdock "
+          OXDOCK_EOF
+          "$bin" --script "$script"
+
       # TODO: OxDock could resolve latest on its own with a new plugin module
       # dedicated for version tracking, etc.
       #
