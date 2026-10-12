@@ -11,6 +11,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 - Pipelines pack release artifacts with `ARCHIVE` through the setup-oxdock engine instead of host `tar` (0.25.0-alpha minimum). Bootstrap unpacks stay shell `tar`: no engine exists yet when the first tarball opens.
 
+### Dependencies
+
+- Bump `base64` 0.22.1 → 0.23.1 (#190).
+- Bump `libc` 0.2.189 → 0.2.190 (#191).
+- Bump `russh` 0.63.3 → 0.64.1 (#192).
+- Bump `tokio` 1.53.1 → 1.53.2 (#193).
+
 ## [0.25.0-alpha] - 2026-10-11
 
 ### Added
