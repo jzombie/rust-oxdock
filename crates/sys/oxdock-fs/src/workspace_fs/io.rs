@@ -32,7 +32,8 @@ fn refuse_final_symlink(path: &GuardedPath) -> Result<()> {
 }
 
 // Guarded filesystem IO helpers (read/write/metadata etc.).
-impl PathResolver {    #[allow(clippy::disallowed_methods)]
+impl PathResolver {
+    #[allow(clippy::disallowed_methods)]
     pub fn create_dir_all(&self, path: &GuardedPath) -> Result<()> {
         let guarded = self
             .check_access(path.as_path(), AccessMode::Write)

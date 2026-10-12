@@ -818,13 +818,27 @@ pub(super) fn archive<P: ProcessManager>(
         .with_context(|| tag.clone())?;
     if raw {
         let mut builder = tar::Builder::new(out);
-        append_archive_tree(cx.state.fs.as_ref(), &mut builder, &files, &dirs, &src_abs, &tag)?;
+        append_archive_tree(
+            cx.state.fs.as_ref(),
+            &mut builder,
+            &files,
+            &dirs,
+            &src_abs,
+            &tag,
+        )?;
         let mut out = builder.into_inner().with_context(|| tag.clone())?;
         std::io::Write::flush(&mut out).with_context(|| tag.clone())?;
     } else {
         let encoder = GzEncoder::new(out, Compression::default());
         let mut builder = tar::Builder::new(encoder);
-        append_archive_tree(cx.state.fs.as_ref(), &mut builder, &files, &dirs, &src_abs, &tag)?;
+        append_archive_tree(
+            cx.state.fs.as_ref(),
+            &mut builder,
+            &files,
+            &dirs,
+            &src_abs,
+            &tag,
+        )?;
         builder
             .into_inner()
             .with_context(|| tag.clone())?

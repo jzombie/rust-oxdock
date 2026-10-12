@@ -2892,10 +2892,7 @@ fn unarchive_refuses_planted_link_at_member_path() {
         "planted link must fail at the member write: {err:#}"
     );
     let kept = resolver.read_file(&sensitive).unwrap();
-    assert_eq!(
-        kept, b"secret",
-        "link target must survive byte-identical"
-    );
+    assert_eq!(kept, b"secret", "link target must survive byte-identical");
 }
 
 #[test]
@@ -2928,8 +2925,7 @@ fn unarchive_refuses_planted_ancestor_link() {
     let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
     let err = run_expect_err(fs, &steps, MockProcessManager::default());
     assert!(
-        err.chain()
-            .any(|c| c.to_string().contains("ancestor")),
+        err.chain().any(|c| c.to_string().contains("ancestor")),
         "planted ancestor link must fail the unpack: {err:#}"
     );
     assert!(

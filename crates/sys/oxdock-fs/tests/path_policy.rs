@@ -88,7 +88,9 @@ fn nofollow_opens_refuse_planted_links() {
     // Plain files open normally through the nofollow path.
     let mut contents = Vec::new();
     std::io::Read::read_to_end(
-        &mut resolver.open_read_nofollow(&target, &root).expect("read open"),
+        &mut resolver
+            .open_read_nofollow(&target, &root)
+            .expect("read open"),
         &mut contents,
     )
     .expect("read");
@@ -151,12 +153,12 @@ fn nofollow_opens_verify_descriptor_tree() {
     // no truncate runs before verification, and rollback only
     // removes files this open created.
     let victim = shadow.join("victim.txt").expect("victim");
-    resolver.write_file(&victim, b"precious").expect("write victim");
+    resolver
+        .write_file(&victim, b"precious")
+        .expect("write victim");
     let through_victim = sub.join("victim.txt").expect("through victim");
     assert!(
-        resolver
-            .open_write_nofollow(&through_victim, &out)
-            .is_err(),
+        resolver.open_write_nofollow(&through_victim, &out).is_err(),
         "redirected write to existing file must refuse"
     );
     let kept = resolver.read_file(&victim).expect("reread victim");

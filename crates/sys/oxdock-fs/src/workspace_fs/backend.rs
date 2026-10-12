@@ -95,7 +95,7 @@ fn fd_path(file: &fs::File) -> Result<std::path::PathBuf> {
 fn fd_path(file: &fs::File) -> Result<std::path::PathBuf> {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Storage::FileSystem::{
-        GetFinalPathNameByHandleW, FILE_NAME_NORMALIZED, VOLUME_NAME_DOS,
+        FILE_NAME_NORMALIZED, GetFinalPathNameByHandleW, VOLUME_NAME_DOS,
     };
 
     let handle = file.as_raw_handle();
@@ -176,7 +176,11 @@ fn cmp_form(path: &std::path::Path) -> std::path::PathBuf {
 /// silent: the `lstat` + flag layers still run).
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 #[allow(clippy::disallowed_types)]
-fn verify_fd_within(file: &fs::File, expected_root: &GuardedPath, path: &GuardedPath) -> Result<()> {
+fn verify_fd_within(
+    file: &fs::File,
+    expected_root: &GuardedPath,
+    path: &GuardedPath,
+) -> Result<()> {
     let _ = (file, expected_root, path);
     Ok(())
 }
