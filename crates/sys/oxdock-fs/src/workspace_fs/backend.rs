@@ -131,9 +131,14 @@ fn fd_path(file: &fs::File) -> Result<std::path::PathBuf> {
 }
 
 /// Verify an opened file still lives under its expected tree, using
-/// the descriptor's own path. Linux, macOS, and Windows: other hosts
-/// keep the `lstat` + open-flag layers, which close pre-planting but
-/// leave a swap-race microsecond.
+/// the descriptor's own path. The expected root is canonicalized
+/// through the same API first: guard roots arrive in mixed forms
+/// (verbatim canonical under confinement, lexical under `SYSTEM`),
+/// while descriptor paths are always fully resolved, so comparing
+/// without converging the domain false-rejects legitimate opens.
+/// Linux, macOS, and Windows: other hosts keep the `lstat` +
+/// open-flag layers, which close pre-planting but leave a swap-race
+/// microsecond.
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 fn verify_fd_within(
@@ -142,10 +147,21 @@ fn verify_fd_within(
     path: &GuardedPath,
 ) -> Result<()> {
     let actual = fd_path(file)?;
-    if cmp_form(&actual).starts_with(cmp_form(expected_root.as_path())) {
+    let root = std::fs::canonicalize(expected_root.as_path()).with_context(|| {
+        format!(
+            "failed to canonicalize expected tree {}",
+            expected_root.display()
+        )
+    })?;
+    if cmp_form(&actual).starts_with(cmp_form(&root)) {
         Ok(())
     } else {
-        bail!("opened {} outside its expected tree", path.display())
+        bail!(
+            "opened {} outside its expected tree {} (descriptor resolves to {})",
+            path.display(),
+            expected_root.display(),
+            actual.display()
+        )
     }
 }
 

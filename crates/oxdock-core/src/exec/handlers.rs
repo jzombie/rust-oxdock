@@ -692,8 +692,9 @@ fn collect_archive_tree(
             let mut stack = vec![(src_abs.clone(), String::new())];
             while let Some((dir_abs, dir_rel)) = stack.pop() {
                 // A swapped intermediate link would redirect the whole
-                // subtree walk: ancestors must be real directories.
-                PathResolver::refuse_link_ancestors(src_abs, &dir_abs)
+                // subtree walk: the rel prefixes must be real
+                // directories before listing.
+                PathResolver::refuse_link_ancestors(src_abs, &dir_rel)
                     .with_context(|| tag.clone())?;
                 let mut entries = fs.read_dir_entries(&dir_abs).with_context(|| tag.clone())?;
                 entries.sort_by_key(|entry| entry.file_name());
@@ -893,20 +894,24 @@ pub(super) fn unarchive<P: ProcessManager>(
         let entry_tag = format!("{tag}: member");
         match entry {
             StreamedEntry::Dir { path, mode } => {
-                let dir = dst_abs.join(&path).with_context(|| entry_tag.clone())?;
-                assert_member_within(&dst_abs, &dir, &entry_tag, &path)?;
-                // Planted intermediate links redirect whole subtrees:
-                // every existing ancestor must be a real directory.
-                PathResolver::refuse_link_ancestors(&dst_abs, &dir)
+                // Re-validate the decoder's rel at the write site: a
+                // sanitized rel is pure descent, so the join below
+                // cannot escape lexically in any path normalization
+                // domain (verbatim, short names, slashes). Escapes via
+                // planted links stay the filesystem layers' job, and
+                // those run next, on every member, in every mode.
+                let rel = sanitize_rel(&path).with_context(|| entry_tag.clone())?;
+                PathResolver::refuse_link_ancestors(&dst_abs, &rel)
                     .with_context(|| entry_tag.clone())?;
+                let dir = dst_abs.join(&rel).with_context(|| entry_tag.clone())?;
                 fs.create_dir_all(&dir).with_context(|| entry_tag.clone())?;
                 deferred_dir_modes.push((dir, mode));
             }
             StreamedEntry::File { path, mode, reader } => {
-                let file = dst_abs.join(&path).with_context(|| entry_tag.clone())?;
-                assert_member_within(&dst_abs, &file, &entry_tag, &path)?;
-                PathResolver::refuse_link_ancestors(&dst_abs, &file)
+                let rel = sanitize_rel(&path).with_context(|| entry_tag.clone())?;
+                PathResolver::refuse_link_ancestors(&dst_abs, &rel)
                     .with_context(|| entry_tag.clone())?;
+                let file = dst_abs.join(&rel).with_context(|| entry_tag.clone())?;
                 fs.ensure_parent_dir(&file)
                     .with_context(|| entry_tag.clone())?;
                 // Link-refusing open: a symlink planted at the member
@@ -999,25 +1004,6 @@ fn restore_archive_mode(
         fs.set_permissions_mode_unix(path, mode)?;
     }
     Ok(())
-}
-
-/// Final containment wall for unpacked members: the joined path must
-/// sit lexically beneath the destination. The decoder sanitizer
-/// already refused escapes and the guard re-checks containment, but
-/// this asserts the property at the write site itself, independent of
-/// both: it holds in every workspace mode (including `SYSTEM`, where
-/// the guard root is the host) and survives either wall regressing.
-fn assert_member_within(
-    dst: &GuardedPath,
-    member: &GuardedPath,
-    tag: &str,
-    path: &str,
-) -> Result<()> {
-    if member.as_path().starts_with(dst.as_path()) {
-        Ok(())
-    } else {
-        bail!("{tag}: member {path:?} escapes the destination directory")
-    }
 }
 
 pub(super) fn hash_sha256<P: ProcessManager>(

@@ -203,19 +203,26 @@ fn descriptor_verify_folds_case() {
     ignore = "GuardedPath::tempdir relies on OS tempdirs; blocked under Miri isolation"
 )]
 #[test]
-fn refuse_link_ancestors_rejects_outside_member() {
-    // Purely lexical gate, no filesystem access: a member outside the
-    // base bails before any walk, so traversal can never reach system
-    // directories no matter the path formatting.
+fn refuse_link_ancestors_rejects_parent_escape() {
+    // Purely lexical gate, no filesystem access: parent references
+    // bail before any walk, while pure descent (missing or not) is
+    // fine. Cross-platform by construction: no links, no casing.
     use oxdock_fs::PathResolver;
 
     let tempdir = GuardedPath::tempdir().expect("tempdir");
     let root = tempdir.as_guarded_path().clone();
     let base = root.join("base").expect("base");
-    let elsewhere = root.join("elsewhere").expect("elsewhere");
     assert!(
-        PathResolver::refuse_link_ancestors(&base, &elsewhere).is_err(),
-        "outside member must bail before walking"
+        PathResolver::refuse_link_ancestors(&base, "../escape").is_err(),
+        "parent escape must bail before walking"
+    );
+    assert!(
+        PathResolver::refuse_link_ancestors(&base, "a/../../escape").is_err(),
+        "nested parent escape must bail before walking"
+    );
+    assert!(
+        PathResolver::refuse_link_ancestors(&base, "a/b").is_ok(),
+        "pure descent must pass"
     );
 }
 

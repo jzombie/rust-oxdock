@@ -125,56 +125,46 @@ impl PathResolver {
         self.backend.open_write_nofollow(path, expected_root)
     }
 
-    /// Refuse planted intermediate links strictly between `base`
-    /// (exclusive, the operation's named root) and `member`: every
-    /// existing ancestor is `lstat`ed without following, so a
-    /// pre-planted directory link fails instead of redirecting the
-    /// operation beneath it. Missing ancestors are fine (fresh paths
-    /// carry nothing to plant). Runs in every workspace mode,
-    /// including `SYSTEM`, where guard containment is vacuous.
-    /// Skipped under Miri: synthetic state holds no links.
-    #[allow(clippy::disallowed_methods)]
-    pub fn refuse_link_ancestors(base: &GuardedPath, member: &GuardedPath) -> Result<()> {
-        // Structural gate: callers join members beneath base, so a
-        // member outside it is a caller bug, not an attack to walk.
-        // Without this, a formatting slip could walk past base into
-        // system directories (some of which are links, e.g. macOS
-        // `/tmp`); with it, the walk provably terminates at base.
-        if !member.as_path().starts_with(base.as_path()) {
-            bail!(
-                "member {} is not beneath {}",
-                member.display(),
-                base.display()
-            );
-        }
+    /// Refuse planted intermediate links under `base` along `rel`: a
+    /// sanitized rel is pure descent, so walking `base` extended by
+    /// each rel prefix stays in one path-normalization domain (no
+    /// verbatim/short-name/slash drift between joined paths) and can
+    /// never address anything above `base`. Every existing prefix is
+    /// `lstat`ed without following; missing ones are fresh paths with
+    /// nothing planted. Runs in every workspace mode, including
+    /// `SYSTEM`, where guard containment is vacuous. Skipped under
+    /// Miri: synthetic state holds no links.
+    #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+    pub fn refuse_link_ancestors(base: &GuardedPath, rel: &str) -> Result<()> {
         #[cfg(miri)]
         {
-            let _ = (base, member);
+            let _ = (base, rel);
             return Ok(());
         }
         #[cfg(not(miri))]
         {
-            let mut current = member.as_path().parent();
-            while let Some(dir) = current {
-                if dir == base.as_path() {
-                    break;
+            let mut current = base.as_path().to_path_buf();
+            for part in rel.split('/') {
+                // Defensive: the sanitizer removes these upstream, and
+                // `..` must never walk above base.
+                if part.is_empty() || part == "." {
+                    continue;
                 }
-                match std::fs::symlink_metadata(dir) {
+                if part == ".." {
+                    bail!("refuses parent reference above {}", base.display());
+                }
+                current.push(part);
+                match std::fs::symlink_metadata(&current) {
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                     Err(e) => {
                         return Err(e)
-                            .with_context(|| format!("lstat denied for {}", dir.display()));
+                            .with_context(|| format!("lstat denied for {}", current.display()));
                     }
                     Ok(meta) if meta.file_type().is_symlink() => {
-                        bail!(
-                            "refuses link ancestor {} above {}",
-                            dir.display(),
-                            member.display()
-                        );
+                        bail!("refuses link ancestor {}", current.display());
                     }
                     Ok(_) => {}
                 }
-                current = dir.parent();
             }
             Ok(())
         }
