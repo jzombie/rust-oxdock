@@ -1,0 +1,31 @@
+{
+  "targets": [
+    {
+      "name": "tiny-readme",
+      "out": "crates/docs-gen/examples/generic-readme/README.md",
+      "values": "crates/docs-gen/examples/generic-readme/values.json",
+      "template": "crates/docs-gen/examples/generic-readme/README.md.tmpl",
+      "fragments": {
+        "sec": ["crates/docs-gen/examples/generic-readme/fragments/sec/*.md.tmpl"]
+      }
+    },
+    {
+      "name": "tiny-llms",
+      "out": "crates/docs-gen/examples/generic-readme/llms.txt",
+      "values": "crates/docs-gen/examples/generic-readme/values.json",
+      "template": "crates/docs-gen/examples/generic-readme/llms.txt.tmpl",
+      "fragments": {
+        "sec": ["crates/docs-gen/examples/generic-readme/fragments/sec/*.md.tmpl"]
+      }
+    },
+    {
+      "name": "tiny-llms-full",
+      "out": "crates/docs-gen/examples/generic-readme/llms-full.txt",
+      "values": "crates/docs-gen/examples/generic-readme/values.json",
+      "template": "crates/docs-gen/examples/generic-readme/llms-full.txt.tmpl",
+      "fragments": {
+        "sec": ["crates/docs-gen/examples/generic-readme/fragments/sec/*.md.tmpl"]
+      }
+    }
+  ]
+}

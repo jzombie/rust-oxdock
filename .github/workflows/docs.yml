@@ -14,7 +14,7 @@
 # Conventions a calling repo follows: a Cargo workspace root (used for
 # version metadata and workspace discovery), a `docs-gen.json` config,
 # and per-target `target.json` plus templates (copy the
-# `examples/generic-readme` shape to start: values plus fragments, no
+# `crates/docs-gen/examples/generic-readme` shape to start: values plus fragments, no
 # manifests required beyond the root one). Callers hold no OxDock code.
 # The stock engine plus `RUST` and `MARKDOWN` plugins travel; the
 # `OXDOCK` registry keys only make sense for OxDock-based projects,

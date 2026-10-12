@@ -1,0 +1,22 @@
+{
+  "targets": [
+    {
+      "name": "resume-md",
+      "out": "crates/docs-gen/examples/resume/resume.md",
+      "values": "crates/docs-gen/examples/resume/values.json",
+      "template": "crates/docs-gen/examples/resume/resume.md.tmpl",
+      "fragments": {
+        "sec": ["crates/docs-gen/examples/resume/fragments/sec/*.md.tmpl"]
+      }
+    },
+    {
+      "name": "resume-jsonld",
+      "out": "crates/docs-gen/examples/resume/resume.jsonld",
+      "values": "crates/docs-gen/examples/resume/values.json",
+      "template": "crates/docs-gen/examples/resume/resume.jsonld.tmpl",
+      "fragments": {
+        "data": ["crates/docs-gen/examples/resume/fragments/data/*.tmpl"]
+      }
+    }
+  ]
+}
