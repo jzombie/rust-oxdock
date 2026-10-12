@@ -35,6 +35,7 @@
 //!         funcs: vec![EngineMakeTag::registration()],
 //!         types: vec![],
 //!         record_schemas: vec![],
+//!         states: vec![],
 //!     });
 //!     let run = engine
 //!         .run_script(

@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [0.26.1-alpha] - 2026-10-12
+
+### Added
+
+- Returns-slot conformance gate (`assert_module_returns_conformance`): every host function with a declared `returns` executes against its slot, through deterministic sampled arguments plus executable `Example` scripts; a lying slot fails `cargo test` instead of rotting generated docs. Decentralized per crate boundary (STD in core, each plugin in its own suite) behind the `test-harness` feature; watchdog threads bound every invocation so blocking samples report inconclusive instead of hanging the suite.
+- `#[example(name, code)]` function examples: structured executable snippets on `FuncMeta` reusing the command `Example` shape, rendered as fences into the generated function reference and executed by docs_conformance, with strict parity coverage tests requiring every registered function in an executed fence.
+- `HostModule::with_state` plus `StepCtx::module_state`: module-shared state (endpoint registries) reachable from `#[oxdock_func]` bodies, so no entry needs a hand-built closure to capture state.
+- Macro options expressiveness: value unions (`DURATION|STRING`), one-level collections (`MAP<STRING>`), empty `#[options()]` for reserved-but-keyless MAPs, and omittable trailing options MAPs via `#[optional]` (range arity with `{}` fill, same messages as the hand-built entries).
+
+### Changed
+
+- All hand-built host registrations converted to `#[oxdock_func]` with identical DSL contracts (NET `LISTEN`/`CONNECT`/`PORT`/`ADDR`/`FETCH`, SSH `SERVE`/`CONNECT`, STD `RAND`); options params declare bare `MAP` like every hand-built entry did, and existing suites verify parity.
+- Inline docs fences moved to structured examples; the function reference renders an Examples section per function, and fence bodies strip one leading newline like `indoc!` so no blank line follows the opener.
+- Docs prose illustrates logical ports with service names instead of bare numbers, which read like physical ports.
+
 ## [0.26.0-alpha] - 2026-10-12
 
 ### Added

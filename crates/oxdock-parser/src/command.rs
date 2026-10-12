@@ -511,7 +511,8 @@ pub struct CommandMeta {
     pub examples: &'static [Example],
 }
 
-/// An executable example for a command.
+/// An executable example for a command or function.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Example {
     pub name: &'static str,
     pub fence_meta: Option<&'static str>,

@@ -235,6 +235,7 @@ pub fn module<P: ProcessManager>() -> HostModule<P> {
         funcs: vec![Defer::registration(), ExpandDeferred::registration()],
         types: vec![],
         record_schemas: vec![],
+        states: Vec::new(),
     }
 }
 

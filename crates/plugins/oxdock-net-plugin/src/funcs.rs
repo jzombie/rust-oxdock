@@ -23,12 +23,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use std::sync::LazyLock;
 
-use oxdock_core::{
-    Field, FuncKind, FuncMeta, FuncParam, HostModule, HostRegistration, NativeFn, OxDockFn,
-    OxDockType, ParamOption, RecordSchema, StepCtx, TypeTag, Value, check_value_at,
-};
+use oxdock_core::{Field, HostModule, OxDockFn, OxDockType, RecordSchema, StepCtx, TypeTag, Value};
 use oxdock_func_macro::oxdock_func;
 use oxdock_pipe::PipeHandle;
 use oxdock_process::ProcessManager;
@@ -72,58 +68,40 @@ fn accept_tick() -> Duration {
     Duration::from_millis(10)
 }
 
-/// `NET_FETCH` options, shared by the registration metadata and the
-/// runtime key check: one source for the keys scripts may pass, so
-/// documentation and enforcement cannot drift apart. Built lazily:
-/// union and shaped tags compose at runtime, so they cannot live in
-/// a `const` static.
-static NET_FETCH_OPTIONS: LazyLock<Vec<ParamOption>> = LazyLock::new(|| {
-    vec![
-        ParamOption {
-            name: "headers",
-            value: TypeTag::MapOf(std::sync::Arc::new(TypeTag::String)),
-            required: false,
-            default: None,
-        },
-        ParamOption {
-            name: "timeout",
-            value: oxdock_parser::union_tag!(Duration, String),
-            required: false,
-            default: None,
-        },
-        ParamOption {
-            name: "max_body_bytes",
-            value: TypeTag::Int,
-            required: false,
-            default: None,
-        },
-        ParamOption {
-            name: "max_redirects",
-            value: TypeTag::Int,
-            required: false,
-            default: None,
-        },
-    ]
-});
-
 /// Claim a virtual service endpoint and report its address. `bind` is a
-/// logical port (`"2251"`) or service name (`"demo-proxy"`): physical
+/// service name (`"demo-proxy"`) or a logical port (a bare number,
+/// resolved through `-p` mappings or loopback): physical
 /// binds in-script are rejected, `0` is reserved for the CLI outer
 /// mapping. `options` is reserved for future socket settings and must be
 /// an empty MAP today. Non-blocking: returns a MAP with `listener`
 /// (NET_LISTENER), `addr` (STRING: the physical bind, or the virtual
 /// endpoint echo when socketless), and `virtual` (STRING echo).
+#[oxdock_func(returns = TypeTag::Record(listen_result_fields()), summary = "Claim a virtual service endpoint and report its address.")]
+#[example(
+    name = "claim and close",
+    code = r###"
+    IMPORT [STD, NET]
+    LET $l: NET_LISTEN_INFO = NET_LISTEN("23793", {})
+    ASSERT_EQ $l.virtual "23793"
+    NET_CLOSE($l.listener)
+    "###
+)]
 fn net_listen<P: ProcessManager>(
     cx: &mut StepCtx<P>,
-    registry: &Arc<EndpointRegistry>,
+    /// Service name or logical port; physical binds are rejected.
     bind: String,
+    /// Reserved for future socket settings; must be an empty MAP today.
+    #[options()]
     options: BTreeMap<String, Value>,
 ) -> Result<Value> {
     let _ = cx;
-    let map = &options;
-    if let Some(key) = map.keys().next() {
-        bail!("NET_LISTEN() unknown option '{key}' (no options exist yet)");
-    }
+    let registry = cx
+        .module_state::<EndpointRegistry>("NET")
+        .expect("NET module registers its endpoint registry as module state");
+    // Unknown keys already failed in the wrapper: `#[options()]`
+    // declares a reserved-but-keyless MAP, so `check_options` rejects
+    // every passed key before the body runs.
+    let _ = options;
     if bind.contains('/') {
         bail!(
             "NET_LISTEN() invalid endpoint {bind:?}: protocol-qualified endpoints cannot be claimed (UDP listen is not supported); observe -p mappings with NET_PORT/NET_ADDR instead"
@@ -131,7 +109,7 @@ fn net_listen<P: ProcessManager>(
     }
     let endpoint = parse_virtual_endpoint(&bind, "NET_LISTEN")?;
     let key = EndpointKey::tcp(endpoint);
-    let (acquired, registry) = acquire_listener(registry, &key, "NET_LISTEN")?;
+    let (acquired, registry) = acquire_listener(&registry, &key, "NET_LISTEN")?;
     let id = next_listener_id();
     let state = match acquired {
         AcquiredListener::Tcp { listener, addr } => {
@@ -179,46 +157,48 @@ fn net_listen<P: ProcessManager>(
 /// of accepting a socket; offline listeners wait for close/cancel. Returns
 /// a MAP with `closed` (BOOL); the example below asserts the key on the
 /// awaited result. The server sends first: the client side never EOFs
-/// its input, so the reply cannot race teardown. This complete program
-/// runs end to end under the docs conformance suite.
+/// its input, so the reply cannot race teardown.
 ///
-/// ```oxdock
-/// IMPORT [STD, NET]
-/// LET $l: NET_LISTEN_INFO = NET_LISTEN("doc-net-demo", {})
-///
-/// # Accept one connection into fresh pipes.
-/// LET $in: PIPE
-/// LET $out: PIPE
-/// LET $acc: HANDLE = ASYNC { NET_ACCEPT($l.listener, $in, $out, {}) }
-///
-/// # Connect a client to the listener.
-/// LET $cin: PIPE
-/// LET $cout: PIPE
-/// LET $c: HANDLE = ASYNC { NET_CONNECT("doc-net-demo", $cin, $cout, {}) }
-///
-/// # Greet through the server pipe and wait for delivery.
-/// WITH_IO [stdout=$in] ECHO "server-greeting"
-/// LET $info: MAP<ANY> = INSPECT($cout)
-/// LET $empty: BOOL = $info.buffer_bytes == 0
-/// WHILE $empty {
-///     SLEEP 100ms
-///     $info = INSPECT($cout)
-///     $empty = $info.buffer_bytes == 0
-/// }
-/// ASSERT_CONTAINS $cout "server-greeting"
-///
-/// # Shut down; the awaited result carries the closed key.
-/// CANCEL $c
-/// LET $done: MAP<ANY> = AWAIT $acc
-/// ASSERT_EQ $done.closed true
-/// NET_CLOSE($l.listener)
-/// ```
 #[oxdock_func(returns = TypeTag::Record(std::sync::Arc::from([Field {
     name: "closed".to_string(),
     ty: TypeTag::Bool,
     docs: "True when the connection closed cleanly.",
     optional: false,
 }])), summary = "Accept one connection into pipes.")]
+#[example(
+    name = "accept and greet",
+    code = r###"
+    IMPORT [STD, NET]
+    LET $l: NET_LISTEN_INFO = NET_LISTEN("doc-net-demo", {})
+
+    # Accept one connection into fresh pipes.
+    LET $in: PIPE
+    LET $out: PIPE
+    LET $acc: HANDLE = ASYNC { NET_ACCEPT($l.listener, $in, $out, {}) }
+
+    # Connect a client to the listener.
+    LET $cin: PIPE
+    LET $cout: PIPE
+    LET $c: HANDLE = ASYNC { NET_CONNECT("doc-net-demo", $cin, $cout, {}) }
+
+    # Greet through the server pipe and wait for delivery.
+    WITH_IO [stdout=$in] ECHO "server-greeting"
+    LET $info: MAP<ANY> = INSPECT($cout)
+    LET $empty: BOOL = $info.buffer_bytes == 0
+    WHILE $empty {
+        SLEEP 100ms
+        $info = INSPECT($cout)
+        $empty = $info.buffer_bytes == 0
+    }
+    ASSERT_CONTAINS $cout "server-greeting"
+
+    # Shut down; the awaited result carries the closed key.
+    CANCEL $c
+    LET $done: MAP<ANY> = AWAIT $acc
+    ASSERT_EQ $done.closed true
+    NET_CLOSE($l.listener)
+    "###
+)]
 fn net_accept<P: ProcessManager>(
     cx: &mut StepCtx<P>,
     /// Listener handle from `NET_LISTEN`.
@@ -242,8 +222,8 @@ fn net_accept<P: ProcessManager>(
     // `#[options]` static the metadata renders; only read known keys.
     let mut no_half_close = false;
     if let Some(value) = map.get("no_half_close") {
-        check_value_at(&TypeTag::Bool, value, "NET_ACCEPT option 'no_half_close'")?;
-        no_half_close = value.as_bool().expect("check_value_at verified BOOL");
+        // `check_options` verified `BOOL`; narrow directly.
+        no_half_close = value.as_bool().expect("check_options verified BOOL");
     }
     // Downstream pumps take `&Value`: re-wrap the extracted handles so
     // every helper below keeps its Value-based shape.
@@ -335,6 +315,15 @@ fn net_accept<P: ProcessManager>(
 /// `NET_ACCEPT` observes the shutdown flag on its next tick and returns
 /// instead of hanging.
 #[oxdock_func(returns = TypeTag::Bool, summary = "Shut down a NET listener.")]
+#[example(
+    name = "shut down",
+    code = r###"
+    IMPORT [STD, NET]
+    LET $l: NET_LISTEN_INFO = NET_LISTEN("23795", {})
+    LET $ok: BOOL = NET_CLOSE($l.listener)
+    ASSERT_EQ $ok true
+    "###
+)]
 fn net_close<P: ProcessManager>(cx: &mut StepCtx<P>, listener: NetListenerTag) -> Result<Value> {
     let _ = cx;
     let state = Arc::clone(listener.state());
@@ -345,16 +334,53 @@ fn net_close<P: ProcessManager>(cx: &mut StepCtx<P>, listener: NetListenerTag) -
 /// Dial a TCP endpoint and pump it through explicit pipes until it
 /// closes. Must run inside `ASYNC`. `options` holds optional `timeout`
 /// (DURATION, default 10s) and `no_half_close` BOOL. `target` is a
-/// `host:port` dial, a logical port (`"2251"`, loopback or a mapped
-/// service), or a service name (memory rendezvous, or a mapped physical
-/// address). Under `--offline` every dial bails before any DNS or socket
-/// work. Returns a MAP with `closed` (BOOL).
+/// `host:port` dial, a service name (memory rendezvous, or a mapped
+/// physical address), or a logical port (a bare number, loopback or a
+/// mapped service). Under `--offline` every dial bails before any DNS
+/// or socket work. Returns a MAP with `closed` (BOOL).
+#[oxdock_func(
+    returns = TypeTag::Record(std::sync::Arc::from([Field {
+        name: "closed".to_string(),
+        ty: TypeTag::Bool,
+        docs: "True when the connection closed cleanly.",
+        optional: false,
+    }])),
+    summary = "Dial a TCP endpoint into pipes.",
+)]
+#[example(
+    name = "dial and close",
+    code = r###"
+    IMPORT [STD, NET]
+    LET $l: NET_LISTEN_INFO = NET_LISTEN("doc-net-connect", {})
+    LET $in: PIPE
+    LET $out: PIPE
+    LET $acc: HANDLE = ASYNC { NET_ACCEPT($l.listener, $in, $out, {}) }
+    LET $cin: PIPE
+    LET $cout: PIPE
+    LET $c: HANDLE = ASYNC { NET_CONNECT("doc-net-connect", $cin, $cout, {}) }
+
+    # Close both inputs: each pump observes EOF, half-closes, and both
+    # tasks return their result maps with no cancellation. Closing only
+    # one side would strand the peer with no EOF.
+    WITH_IO [stdout=$cin] ECHO "client-hello"
+    WITH_IO [stdout=$in] ECHO "server-greeting"
+    LET $done: MAP<ANY> = AWAIT $c
+    ASSERT_EQ $done.closed true
+    LET $adone: MAP<ANY> = AWAIT $acc
+    ASSERT_EQ $adone.closed true
+    NET_CLOSE($l.listener)
+    "###
+)]
 fn net_connect<P: ProcessManager>(
     cx: &mut StepCtx<P>,
-    registry: &Arc<EndpointRegistry>,
+    /// Dial target: `host:port`, a logical port, or a service name.
     target: String,
-    in_pipe: Value,
-    out_pipe: Value,
+    /// Pipe carrying bytes consumed by the wire side.
+    in_pipe: PipeHandle,
+    /// Pipe carrying bytes produced by the wire side.
+    out_pipe: PipeHandle,
+    /// Optional `timeout` and `no_half_close` settings.
+    #[options("timeout?: DURATION|STRING = 10s", "no_half_close?: BOOL")]
     options: BTreeMap<String, Value>,
 ) -> Result<Value> {
     if !cx.is_async_task() {
@@ -362,30 +388,33 @@ fn net_connect<P: ProcessManager>(
             "NET_CONNECT requires ASYNC: wrap it as LET $t: HANDLE = ASYNC {{ NET_CONNECT($target, $in, $out, {{}}) }}"
         );
     }
+    // Module-shared endpoint registry: stashed at registration, so
+    // this entry stays declarative with no captured closure.
+    let registry = cx
+        .module_state::<EndpointRegistry>("NET")
+        .expect("NET module registers its endpoint registry as module state");
+    // Pump plumbing takes `&Value` pipes: re-wrap the extracted
+    // handles so the bridge keeps its Value-based shape.
+    let in_pipe = Value::pipe_handle(in_pipe);
+    let out_pipe = Value::pipe_handle(out_pipe);
     let map = &options;
     let mut timeout = DEFAULT_DIAL_TIMEOUT;
     let mut no_half_close = false;
-    oxdock_core::check_options(map, NET_CONNECT_OPTIONS.as_slice(), "NET_CONNECT")?;
     if let Some(value) = map.get("timeout") {
-        check_value_at(
-            &oxdock_parser::union_tag!(Duration, String),
-            value,
-            "NET_CONNECT option 'timeout'",
-        )?;
+        // `check_options` verified `DURATION|STRING`; narrow directly.
         if let Some(duration) = value.as_duration() {
             timeout = duration;
         } else {
             let text = value
                 .as_str()
-                .expect("check_value_at verified DURATION|STRING");
+                .expect("check_options verified DURATION|STRING");
             timeout = oxdock_parser::command::parse_duration(text).with_context(|| {
                 format!("NET_CONNECT option 'timeout' must be a duration, got {text:?}")
             })?;
         }
     }
     if let Some(value) = map.get("no_half_close") {
-        check_value_at(&TypeTag::Bool, value, "NET_CONNECT option 'no_half_close'")?;
-        no_half_close = value.as_bool().expect("check_value_at verified BOOL");
+        no_half_close = value.as_bool().expect("check_options verified BOOL");
     }
     // Sandbox gate first: offline runs open no OS sockets, so even a
     // literal dial must fail before parsing, DNS, or connect.
@@ -396,7 +425,7 @@ fn net_connect<P: ProcessManager>(
         let key = EndpointKey::tcp(endpoint);
         let params = ConnectParams {
             cx,
-            registry,
+            registry: &registry,
             in_pipe: &in_pipe,
             out_pipe: &out_pipe,
             timeout,
@@ -420,27 +449,6 @@ fn net_connect<P: ProcessManager>(
         !no_half_close,
     )
 }
-
-/// CONNECT options, shared by the registration metadata and the
-/// runtime key check: one source for the keys scripts may pass, so
-/// documentation and enforcement cannot drift apart. Built lazily,
-/// like the fetch options: the timeout union composes at runtime.
-static NET_CONNECT_OPTIONS: LazyLock<Vec<ParamOption>> = LazyLock::new(|| {
-    vec![
-        ParamOption {
-            name: "timeout",
-            value: oxdock_parser::union_tag!(Duration, String),
-            required: false,
-            default: Some("10s"),
-        },
-        ParamOption {
-            name: "no_half_close",
-            value: TypeTag::Bool,
-            required: false,
-            default: None,
-        },
-    ]
-});
 
 /// Shared CONNECT plumbing: step context plus the resolved dial and pump
 /// settings, so virtual resolution stays under the argument-count lint.
@@ -578,29 +586,31 @@ pub fn module_with<P: ProcessManager>() -> HostModule<P> {
     module_with_endpoints(Arc::new(EndpointRegistry::new(false)))
 }
 
-/// The `NET` host module resolving through `registry`: `NET_LISTEN` and
-/// `NET_CONNECT` close over it (the `#[oxdock_func]` macro only generates
-/// closers-over-nothing, so these two entries are built by hand with the
-/// same arity/type errors the macro would emit); `ACCEPT`/`CLOSE` reach
-/// the same registry through their `NET_LISTENER` handle.
+/// The `NET` host module resolving through `registry`: the registry
+/// travels as module state (`HostModule::with_state`) for bodies to
+/// fetch from `cx`, so every entry stays `#[oxdock_func]`;
+/// `ACCEPT`/`CLOSE` reach the same registry through their
+/// `NET_LISTENER` handle.
 pub fn module_with_endpoints<P: ProcessManager>(registry: Arc<EndpointRegistry>) -> HostModule<P> {
     HostModule {
         name: "NET".to_string(),
         funcs: vec![
-            net_listen_registration(Arc::clone(&registry)),
+            NetListen::registration(),
             NetAccept::registration(),
             NetClose::registration(),
-            net_connect_registration(Arc::clone(&registry)),
-            net_port_registration(Arc::clone(&registry)),
-            net_addr_registration(registry),
-            net_fetch_registration(),
+            NetConnect::registration(),
+            NetPort::registration(),
+            NetAddr::registration(),
+            NetFetch::registration(),
         ],
         types: vec![NetListenerTag::descriptor()],
         record_schemas: vec![RecordSchema {
             name: "NET_LISTEN_INFO",
             fields: listen_result_fields(),
         }],
+        states: Vec::new(),
     }
+    .with_state(registry)
 }
 
 /// Field table for the `NET_LISTEN` result bundle, backing the
@@ -630,342 +640,83 @@ fn listen_result_fields() -> Arc<[Field]> {
     ])
 }
 
-/// Hand-built `NET_LISTEN` entry: same shape the macro would emit
-/// (arity check, `STRING`/`Value` unpacking, metadata), plus the captured
-/// registry threaded into [`net_listen`].
-fn net_listen_registration<P: ProcessManager>(
-    registry: Arc<EndpointRegistry>,
-) -> HostRegistration<P> {
-    // One params vector feeds both the metadata and the arity check,
-    // so the two can never disagree: add a parameter once, here.
-    let params = vec![
-        FuncParam {
-            name: "bind".to_string(),
-            param_type: Some(TypeTag::String),
-            allowed: None,
-            docs: "Logical port (`\"2251\"`) or service name; physical binds are rejected.",
-            options: None,
-            optional: false,
-        },
-        FuncParam {
-            name: "options".to_string(),
-            param_type: Some(TypeTag::Map),
-            allowed: None,
-            docs: "Reserved for future socket settings; must be an empty MAP today.",
-            options: Some(&[]),
-            optional: false,
-        },
-    ];
-    let arity = params.len();
-    let func: NativeFn<P> = Arc::new(move |cx, values| {
-        if values.len() != arity {
-            bail!(
-                "NET_LISTEN() expects {arity} argument(s), got {}",
-                values.len()
-            );
-        }
-        let mut values = values.into_iter();
-        let bind = match values.next().expect("arity checked above").as_str() {
-            Some(s) => s.to_string(),
-            None => bail!("NET_LISTEN() argument `$bind` must be a STRING"),
-        };
-        let options_value = values.next().expect("arity checked above");
-        let options = match options_value.as_map() {
-            Some(map) => map.clone(),
-            None => bail!(
-                "NET_LISTEN() argument `$options` must be a MAP, got {}",
-                options_value.type_name()
-            ),
-        };
-        net_listen(cx, &registry, bind, options)
-    });
-    HostRegistration::Stateful {
-        name: "NET_LISTEN".to_string(),
-        meta: FuncMeta {
-            name: "NET_LISTEN".to_string(),
-            // Assigned at registration (`register_module` fills the
-            // module, like the macro's markers): never set here.
-            module: String::new(),
-            kind: FuncKind::HostCtx,
-            params: Some(params),
-            returns: Some(TypeTag::Record(listen_result_fields())),
-            rpn: false,
-            summary: "Claim a virtual service endpoint and report its address.",
-            docs: "Claim a virtual service endpoint and report its address.",
-        },
-        func,
-    }
-}
-
-/// Hand-built `NET_CONNECT` entry: same shape the macro would emit, plus
-/// the captured registry threaded into [`net_connect`].
-fn net_connect_registration<P: ProcessManager>(
-    registry: Arc<EndpointRegistry>,
-) -> HostRegistration<P> {
-    // One params vector feeds both the metadata and the arity check,
-    // so the two can never disagree: add a parameter once, here.
-    let params = vec![
-        FuncParam {
-            name: "target".to_string(),
-            param_type: Some(TypeTag::String),
-            allowed: None,
-            docs: "Dial target: `host:port`, a logical port, or a service name.",
-            options: None,
-            optional: false,
-        },
-        FuncParam {
-            name: "in_pipe".to_string(),
-            param_type: Some(TypeTag::Pipe),
-            allowed: None,
-            docs: "Pipe carrying bytes consumed by the wire side.",
-            options: None,
-            optional: false,
-        },
-        FuncParam {
-            name: "out_pipe".to_string(),
-            param_type: Some(TypeTag::Pipe),
-            allowed: None,
-            docs: "Pipe carrying bytes produced by the wire side.",
-            options: None,
-            optional: false,
-        },
-        FuncParam {
-            name: "options".to_string(),
-            param_type: Some(TypeTag::Map),
-            allowed: None,
-            docs: "Optional `timeout` and `no_half_close` settings.",
-            options: Some(NET_CONNECT_OPTIONS.as_slice()),
-            optional: false,
-        },
-    ];
-    let arity = params.len();
-    let func: NativeFn<P> = Arc::new(move |cx, values| {
-        if values.len() != arity {
-            bail!(
-                "NET_CONNECT() expects {arity} argument(s), got {}",
-                values.len()
-            );
-        }
-        let mut values = values.into_iter();
-        let target = match values.next().expect("arity checked above").as_str() {
-            Some(s) => s.to_string(),
-            None => bail!("NET_CONNECT() argument `$target` must be a STRING"),
-        };
-        let in_pipe = values.next().expect("arity checked above");
-        if in_pipe.as_pipe_handle().is_none() {
-            bail!(
-                "NET_CONNECT() argument `$in_pipe` must be a PIPE, got {}",
-                in_pipe.type_name()
-            );
-        }
-        let out_pipe = values.next().expect("arity checked above");
-        if out_pipe.as_pipe_handle().is_none() {
-            bail!(
-                "NET_CONNECT() argument `$out_pipe` must be a PIPE, got {}",
-                out_pipe.type_name()
-            );
-        }
-        let options_value = values.next().expect("arity checked above");
-        let options = match options_value.as_map() {
-            Some(map) => map.clone(),
-            None => bail!(
-                "NET_CONNECT() argument `$options` must be a MAP, got {}",
-                options_value.type_name()
-            ),
-        };
-        net_connect(cx, &registry, target, in_pipe, out_pipe, options)
-    });
-    HostRegistration::Stateful {
-        name: "NET_CONNECT".to_string(),
-        meta: FuncMeta {
-            name: "NET_CONNECT".to_string(),
-            // Assigned at registration, like the macro's markers.
-            module: String::new(),
-            kind: FuncKind::HostCtx,
-            params: Some(params),
-            returns: Some(TypeTag::Record(std::sync::Arc::from([Field {
-                name: "closed".to_string(),
-                ty: TypeTag::Bool,
-                docs: "True when the connection closed cleanly.",
-                optional: false,
-            }]))),
-            rpn: false,
-            summary: "Dial a TCP endpoint into pipes.",
-            docs: "Dial a TCP endpoint into pipes.",
-        },
-        func,
-    }
-}
-
 /// Report the bound port of a virtual service endpoint without claiming
 /// it, so a `-p`-mapped outer port (including ephemeral `-p 0:<inner>`
 /// resolutions) can be routed into an inner `RUN` through normal
-/// `LET`/`ENV` expansion. `target` is a logical port (`"2251"`) or a
-/// service name (`"demo-proxy"`), optionally protocol-qualified
+/// `LET`/`ENV` expansion. `target` is a service name (`"demo-proxy"`)
+/// or a logical port (a bare number), optionally protocol-qualified
 /// (`"tcp/web"`, `"udp/dns"`). Bare text resolves TCP with
 /// single-protocol fallback; text bound under both protocols must be
-/// qualified. Unbound targets bail: no `0` sentinel. The runnable example
-/// lives on the function's metadata docs (rendered into the function
-/// reference and executed by the docs conformance suite).
+/// qualified. Unbound targets bail: no `0` sentinel.
+#[oxdock_func(returns = TypeTag::Int, summary = "Report the bound port of a virtual service endpoint.")]
+#[example(
+    name = "observe port",
+    code = r###"
+    IMPORT [STD, NET]
+    LET $l: NET_LISTEN_INFO = NET_LISTEN("23791", {})
+
+    # Observe the bound port without claiming the slot twice.
+    LET $port: INT = NET_PORT("23791")
+    ASSERT_EQ $port 23791
+
+    # The shell reads its own environment, with per-platform spelling:
+    # quoted "$VAR" passes the parser through untouched on Unix ...
+    ENV PROXY_PORT="{{ $port }}"
+
+    [family:unix] LET $o: STRING = RUN echo serving on "$PROXY_PORT"
+
+    # ... while cmd expands %VAR% on Windows.
+    [family:windows] LET $o: STRING = RUN echo serving on %PROXY_PORT%
+
+    ASSERT_CONTAINS $o "23791"
+    NET_CLOSE($l.listener)
+    "###
+)]
 fn net_port<P: ProcessManager>(
     cx: &mut StepCtx<P>,
-    registry: &Arc<EndpointRegistry>,
+    /// Logical port, service name, optionally protocol-qualified; unbound targets bail.
     target: String,
 ) -> Result<Value> {
-    let _ = cx;
+    let registry = cx
+        .module_state::<EndpointRegistry>("NET")
+        .expect("NET module registers its endpoint registry as module state");
     let addr = registry.resolve_ref(&target, "NET_PORT")?;
     Ok(Value::int(i64::from(addr.port())))
-}
-
-/// Hand-built `NET_PORT` entry: same shape the macro would emit, plus the
-/// captured registry threaded into [`net_port`].
-fn net_port_registration<P: ProcessManager>(
-    registry: Arc<EndpointRegistry>,
-) -> HostRegistration<P> {
-    // One params vector feeds both the metadata and the arity check,
-    // so the two can never disagree: add a parameter once, here.
-    let params = vec![FuncParam {
-        name: "target".to_string(),
-        param_type: Some(TypeTag::String),
-        allowed: None,
-        docs: "Logical port, service name, optionally protocol-qualified; unbound targets bail.",
-        options: None,
-        optional: false,
-    }];
-    let arity = params.len();
-    let func: NativeFn<P> = Arc::new(move |cx, values| {
-        if values.len() != arity {
-            bail!(
-                "NET_PORT() expects {arity} argument(s), got {}",
-                values.len()
-            );
-        }
-        let mut values = values.into_iter();
-        let target = match values.next().expect("arity checked above").as_str() {
-            Some(s) => s.to_string(),
-            None => bail!("NET_PORT() argument `$target` must be a STRING"),
-        };
-        net_port(cx, &registry, target)
-    });
-    HostRegistration::Stateful {
-        name: "NET_PORT".to_string(),
-        meta: FuncMeta {
-            name: "NET_PORT".to_string(),
-            // Assigned at registration, like the macro's markers.
-            module: String::new(),
-            kind: FuncKind::HostCtx,
-            params: Some(params),
-            returns: Some(TypeTag::Int),
-            rpn: false,
-            summary: "Report the bound port of a virtual service endpoint.",
-            docs: indoc::indoc! {r#"
-                Report the bound port of a virtual service endpoint without claiming it, so a `-p`-mapped outer port (including ephemeral `-p 0:<inner>` resolutions) can be routed into an inner `RUN` through normal `LET`/`ENV` expansion. `target` is a logical port (`"2251"`) or a service name (`"demo-proxy"`), optionally protocol-qualified (`"tcp/web"`, `"udp/dns"`). Bare text resolves TCP with single-protocol fallback; text bound under both protocols must be qualified. Unbound targets bail: no `0` sentinel.
-
-                ```oxdock
-                IMPORT [STD, NET]
-                LET $l: NET_LISTEN_INFO = NET_LISTEN("23791", {})
-
-                # Observe the bound port without claiming the slot twice.
-                LET $port: INT = NET_PORT("23791")
-                ASSERT_EQ $port 23791
-
-                # The shell reads its own environment, with per-platform spelling:
-                # quoted "$VAR" passes the parser through untouched on Unix ...
-                ENV PROXY_PORT="{{ $port }}"
-
-                [family:unix] LET $o: STRING = RUN echo serving on "$PROXY_PORT"
-
-                # ... while cmd expands %VAR% on Windows.
-                [family:windows] LET $o: STRING = RUN echo serving on %PROXY_PORT%
-
-                ASSERT_CONTAINS $o "23791"
-                NET_CLOSE($l.listener)
-                ```"#},
-        },
-        func,
-    }
 }
 
 /// Report the full bound socket address (`ip:port`) of a virtual service
 /// endpoint without claiming it: the dial-string companion to [`net_port`].
 /// Same qualifier and fallback rules; unbound targets bail, never an
-/// empty string. The runnable example lives on the function's metadata
-/// docs (rendered into the function reference and executed by the docs
-/// conformance suite).
+/// empty string.
+#[oxdock_func(returns = TypeTag::String, summary = "Report the bound socket address of a virtual service endpoint.")]
+#[example(
+    name = "observe dial string",
+    code = r###"
+    IMPORT [STD, NET]
+    LET $l: NET_LISTEN_INFO = NET_LISTEN("23792", {})
+
+    # Observe the dial string without claiming the slot twice.
+    LET $addr: STRING = NET_ADDR("23792")
+    ASSERT_EQ $addr "127.0.0.1:23792"
+    NET_CLOSE($l.listener)
+    "###
+)]
 fn net_addr<P: ProcessManager>(
     cx: &mut StepCtx<P>,
-    registry: &Arc<EndpointRegistry>,
+    /// Logical port, service name, optionally protocol-qualified; unbound targets bail.
     target: String,
 ) -> Result<Value> {
-    let _ = cx;
+    let registry = cx
+        .module_state::<EndpointRegistry>("NET")
+        .expect("NET module registers its endpoint registry as module state");
     let addr = registry.resolve_ref(&target, "NET_ADDR")?;
     Ok(Value::string(addr.to_string()))
 }
 
-/// Hand-built `NET_ADDR` entry: same shape the macro would emit, plus the
-/// captured registry threaded into [`net_addr`].
-fn net_addr_registration<P: ProcessManager>(
-    registry: Arc<EndpointRegistry>,
-) -> HostRegistration<P> {
-    // One params vector feeds both the metadata and the arity check,
-    // so the two can never disagree: add a parameter once, here.
-    let params = vec![FuncParam {
-        name: "target".to_string(),
-        param_type: Some(TypeTag::String),
-        allowed: None,
-        docs: "Logical port, service name, optionally protocol-qualified; unbound targets bail.",
-        options: None,
-        optional: false,
-    }];
-    let arity = params.len();
-    let func: NativeFn<P> = Arc::new(move |cx, values| {
-        if values.len() != arity {
-            bail!(
-                "NET_ADDR() expects {arity} argument(s), got {}",
-                values.len()
-            );
-        }
-        let mut values = values.into_iter();
-        let target = match values.next().expect("arity checked above").as_str() {
-            Some(s) => s.to_string(),
-            None => bail!("NET_ADDR() argument `$target` must be a STRING"),
-        };
-        net_addr(cx, &registry, target)
-    });
-    HostRegistration::Stateful {
-        name: "NET_ADDR".to_string(),
-        meta: FuncMeta {
-            name: "NET_ADDR".to_string(),
-            // Assigned at registration, like the macro's markers.
-            module: String::new(),
-            kind: FuncKind::HostCtx,
-            params: Some(params),
-            returns: Some(TypeTag::String),
-            rpn: false,
-            summary: "Report the bound socket address of a virtual service endpoint.",
-            docs: indoc::indoc! {r#"
-                Report the full bound socket address (`ip:port`) of a virtual service endpoint without claiming it: the dial-string companion to `NET_PORT`. Same qualifier and fallback rules; unbound targets bail, never an empty string.
-
-                ```oxdock
-                IMPORT [STD, NET]
-                LET $l: NET_LISTEN_INFO = NET_LISTEN("23792", {})
-
-                # Observe the dial string without claiming the slot twice.
-                LET $addr: STRING = NET_ADDR("23792")
-                ASSERT_EQ $addr "127.0.0.1:23792"
-                NET_CLOSE($l.listener)
-                ```"#},
-        },
-        func,
-    }
-}
-
 /// Fetch an `https` URL to text: the network source for `PARSE_JSON`
-/// and `PARSE_TOML`. Hand-built [`HostRegistration::Stateful`] entry on
-/// the macro's shape (arity check, `STRING` unpacking, metadata) with no
-/// captured state: fetching touches the network, so the entry is
-/// `HostCtx` and never reaches the pure table that backs `{{ }}`
-/// placeholders.
+/// and `PARSE_TOML`. `HostCtx` (never pure) so the entry never reaches
+/// the pure table that backs `{{ }}` placeholders: fetching touches
+/// the network.
 ///
 /// `options` carries `headers` (a MAP of STRING to STRING, sent on
 /// every request including redirect hops), `timeout` (a DURATION
@@ -984,137 +735,94 @@ fn net_addr_registration<P: ProcessManager>(
 /// 10 MiB of body, strict UTF-8, non-2xx statuses bail. Failures name
 /// the URL and the reason; nothing retries, nothing touches the
 /// filesystem.
-fn net_fetch_registration<P: ProcessManager>() -> HostRegistration<P> {
-    // One params vector feeds both the metadata and the arity check,
-    // so the two can never disagree: add a parameter once, here.
-    let params = vec![
-        FuncParam {
-            name: "url".to_string(),
-            param_type: Some(TypeTag::String),
-            allowed: None,
-            docs: "`https` URL to fetch; cleartext `http` reaches loopback hosts only.",
-            options: None,
-            optional: false,
-        },
-        FuncParam {
-            name: "options".to_string(),
-            param_type: Some(TypeTag::Map),
-            allowed: None,
-            docs: "Fetch settings: `headers`, `timeout`, `max_body_bytes`, and `max_redirects`. Omittable: a missing options MAP fills `{}`.",
-            options: Some(NET_FETCH_OPTIONS.as_slice()),
-            optional: true,
-        },
-    ];
-    let arity = params.len();
-    let required = oxdock_core::required_arity(&params);
-    // Cloned for the fill call below: the closure takes ownership,
-    // while the metadata keeps the original. Both derive from the
-    // one params vector above.
-    let fill_params = params.clone();
-    let func: NativeFn<P> = Arc::new(move |cx, values| {
-        let _ = cx;
-        if values.len() < required || values.len() > arity {
-            bail!(
-                "NET_FETCH() expects {required} to {arity} argument(s), got {}",
-                values.len()
-            );
-        }
-        let mut values = oxdock_core::fill_optional_args(&fill_params, values).into_iter();
-        let url = match values.next().expect("arity checked above").as_str() {
-            Some(s) => s.to_string(),
-            None => bail!("NET_FETCH() argument `$url` must be a STRING"),
-        };
-        let options_value = values.next().expect("arity checked above");
-        let options_map = match options_value.as_map() {
-            Some(map) => map.clone(),
-            None => bail!(
-                "NET_FETCH() argument `$options` must be a MAP, got {}",
-                options_value.type_name()
-            ),
-        };
-        oxdock_core::check_options(&options_map, NET_FETCH_OPTIONS.as_slice(), "NET_FETCH")?;
-        let mut headers = Vec::new();
-        if let Some(value) = options_map.get("headers") {
-            check_value_at(
-                &TypeTag::MapOf(std::sync::Arc::new(TypeTag::String)),
-                value,
-                "NET_FETCH option 'headers'",
-            )?;
-            for (entry_key, entry_value) in
-                value.as_map().expect("check_value_at verified MAP<STRING>")
-            {
-                headers.push((
-                    entry_key.clone(),
-                    entry_value
-                        .as_str()
-                        .expect("check_value_at verified STRING elements")
-                        .to_string(),
-                ));
-            }
-        }
-        let mut timeout = crate::fetch::DEFAULT_FETCH_TIMEOUT;
-        if let Some(value) = options_map.get("timeout") {
-            check_value_at(
-                &oxdock_parser::union_tag!(Duration, String),
-                value,
-                "NET_FETCH option 'timeout'",
-            )?;
-            if let Some(duration) = value.as_duration() {
-                timeout = duration;
-            } else {
-                let text = value
+#[oxdock_func(returns = TypeTag::String, summary = "Fetch an https URL to text.")]
+#[example(
+    name = "loopback fetch",
+    code = r###"
+    # Serve one canned HTTP reply over loopback, then fetch it.
+    IMPORT [STD, NET]
+    LET $l: NET_LISTEN_INFO = NET_LISTEN("23797", {})
+    LET $in: PIPE
+    LET $out: PIPE
+    LET $acc: HANDLE = ASYNC { NET_ACCEPT($l.listener, $in, $out, {}) }
+    WITH_IO [stdout=$in] ECHO "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}"
+    LET $body: STRING = NET_FETCH("http://127.0.0.1:23797/doc.json", {})
+    ASSERT_EQ $body "{}"
+    CANCEL $acc
+    NET_CLOSE($l.listener)
+    "###
+)]
+fn net_fetch<P: ProcessManager>(
+    cx: &mut StepCtx<P>,
+    /// `https` URL to fetch; cleartext `http` reaches loopback hosts only.
+    url: String,
+    /// Fetch settings: `headers`, `timeout`, `max_body_bytes`, and `max_redirects`. Omittable: a missing options MAP fills `{}`.
+    #[options(
+        "headers?: MAP<STRING>",
+        "timeout?: DURATION|STRING",
+        "max_body_bytes?: INT",
+        "max_redirects?: INT"
+    )]
+    #[optional]
+    options: BTreeMap<String, Value>,
+) -> Result<Value> {
+    let _ = cx;
+    let options_map = &options;
+    let mut headers = Vec::new();
+    if let Some(value) = options_map.get("headers") {
+        // `check_options` verified `MAP<STRING>`; narrow directly.
+        for (entry_key, entry_value) in value.as_map().expect("check_options verified MAP<STRING>")
+        {
+            headers.push((
+                entry_key.clone(),
+                entry_value
                     .as_str()
-                    .expect("check_value_at verified DURATION|STRING");
-                timeout = oxdock_parser::command::parse_duration(text).with_context(|| {
-                    format!("NET_FETCH option 'timeout' must be a duration, got {text:?}")
-                })?;
-            }
+                    .expect("check_options verified STRING elements")
+                    .to_string(),
+            ));
         }
-        let mut max_body_bytes = crate::fetch::DEFAULT_MAX_BODY_BYTES;
-        if let Some(value) = options_map.get("max_body_bytes") {
-            check_value_at(&TypeTag::Int, value, "NET_FETCH option 'max_body_bytes'")?;
-            let n = value.as_i64().expect("check_value_at verified INT");
-            if n < 0 {
-                bail!("NET_FETCH option 'max_body_bytes' must be non-negative, got {n}");
-            }
-            max_body_bytes = n as u64;
-        }
-        let mut max_redirects = crate::fetch::DEFAULT_MAX_REDIRECTS as u64;
-        if let Some(value) = options_map.get("max_redirects") {
-            check_value_at(&TypeTag::Int, value, "NET_FETCH option 'max_redirects'")?;
-            let n = value.as_i64().expect("check_value_at verified INT");
-            if n < 0 {
-                bail!("NET_FETCH option 'max_redirects' must be non-negative, got {n}");
-            }
-            max_redirects = n as u64;
-        }
-        let max_redirects = u32::try_from(max_redirects).map_err(|_| {
-            anyhow::anyhow!("NET_FETCH() option 'max_redirects' exceeds u32: {max_redirects}")
-        })?;
-        let body = fetch_text_with_options(
-            &url,
-            &FetchOptions {
-                headers,
-                timeout,
-                max_body_bytes,
-                max_redirects,
-            },
-        )?;
-        Ok(Value::string(body))
-    });
-    HostRegistration::Stateful {
-        name: "NET_FETCH".to_string(),
-        meta: FuncMeta {
-            name: "NET_FETCH".to_string(),
-            // Assigned at registration, like the macro's markers.
-            module: String::new(),
-            kind: FuncKind::HostCtx,
-            params: Some(params),
-            returns: Some(TypeTag::String),
-            rpn: false,
-            summary: "Fetch an https URL to text.",
-            docs: "Fetch an `https` URL to text: the network source for `PARSE_JSON` and `PARSE_TOML`. Cleartext `http` reaches loopback hosts only. Redirects follow by hand (at most 5 hops, absolute URLs only, every hop re-validated), custom headers send on every hop, the `timeout` option overrides the 30-second whole-request deadline, `max_body_bytes` caps the body, `max_redirects` budgets the hops, strict UTF-8, non-2xx statuses bail. Compose with the pure parsers: `LET $doc: MAP<ANY> = PARSE_JSON(NET_FETCH($url, {}))`.",
-        },
-        func,
     }
+    let mut timeout = crate::fetch::DEFAULT_FETCH_TIMEOUT;
+    if let Some(value) = options_map.get("timeout") {
+        // `check_options` verified `DURATION|STRING`; narrow directly.
+        if let Some(duration) = value.as_duration() {
+            timeout = duration;
+        } else {
+            let text = value
+                .as_str()
+                .expect("check_options verified DURATION|STRING");
+            timeout = oxdock_parser::command::parse_duration(text).with_context(|| {
+                format!("NET_FETCH option 'timeout' must be a duration, got {text:?}")
+            })?;
+        }
+    }
+    let mut max_body_bytes = crate::fetch::DEFAULT_MAX_BODY_BYTES;
+    if let Some(value) = options_map.get("max_body_bytes") {
+        let n = value.as_i64().expect("check_options verified INT");
+        if n < 0 {
+            bail!("NET_FETCH option 'max_body_bytes' must be non-negative, got {n}");
+        }
+        max_body_bytes = n as u64;
+    }
+    let mut max_redirects = crate::fetch::DEFAULT_MAX_REDIRECTS as u64;
+    if let Some(value) = options_map.get("max_redirects") {
+        let n = value.as_i64().expect("check_options verified INT");
+        if n < 0 {
+            bail!("NET_FETCH option 'max_redirects' must be non-negative, got {n}");
+        }
+        max_redirects = n as u64;
+    }
+    let max_redirects = u32::try_from(max_redirects).map_err(|_| {
+        anyhow::anyhow!("NET_FETCH() option 'max_redirects' exceeds u32: {max_redirects}")
+    })?;
+    let body = fetch_text_with_options(
+        &url,
+        &FetchOptions {
+            headers,
+            timeout,
+            max_body_bytes,
+            max_redirects,
+        },
+    )?;
+    Ok(Value::string(body))
 }

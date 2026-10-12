@@ -14,9 +14,20 @@ one column per key. Fails strict on shapes with no table in them.
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
+
 - `$map` (`MAP<ANY>|LIST<MAP<ANY>>`): Record data: a MAP renders one row, a LIST of MAPs renders one row per entry with union columns.
 
 **Returns:** `STRING`
+
+**Examples:**
+
+**Example: render**
+
+```oxdock
+IMPORT [STD, MARKDOWN]
+LET $table: STRING = MAP_TO_MD_TABLE({name: "demo", stars: 3})
+ASSERT_EQ $table "| name | stars |\n| ---- | ----- |\n| demo | 3     |\n"
+```
 
 ### PARSE
 
@@ -30,9 +41,22 @@ heading with `level`, `text`, and `anchor` keys.
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
+
 - `$md` (`STRING`): Markdown document to scan for headings.
 
 **Returns:** `LIST<ANY>`
+
+**Examples:**
+
+**Example: scan**
+
+```oxdock
+IMPORT [STD, MARKDOWN]
+LET $items: LIST<ANY> = PARSE("## Alpha")
+ASSERT_EQ $items.0.level 2
+ASSERT_EQ $items.0.text "Alpha"
+ASSERT_EQ $items.0.anchor "alpha"
+```
 
 ### SECTION
 
@@ -49,10 +73,21 @@ loudly instead of publishing an empty section.
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
+
 - `$md` (`STRING`): Markdown document to slice.
 - `$needle` (`STRING`): Heading text prefix selecting the section (e.g. `[0.24.0-alpha]`).
 
 **Returns:** `STRING`
+
+**Examples:**
+
+**Example: slice**
+
+```oxdock
+IMPORT [STD, MARKDOWN]
+LET $body: STRING = SECTION("## Alpha\n\nbody text\n\n## Beta\n", "Alpha")
+ASSERT_EQ $body "## Alpha\n\nbody text\n"
+```
 
 ### TOC
 
@@ -70,6 +105,7 @@ GitHub-rendered document with working anchors.
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
+
 - `$md` (`STRING`): Document markdown text to scan for headings.
 - `$options` (`MAP<min_level?: INT, max_level?: INT, format?: STRING, delimiter?: STRING>`): TOC options: heading bounds (`min_level` default 2 skips `#`
 titles, `max_level` default 3), output layout (`format` `tree`
@@ -82,3 +118,13 @@ or `inline`, default `tree`), and the inline `delimiter`
   - `delimiter` (`STRING`, optional, default `|`)
 
 **Returns:** `STRING`
+
+**Examples:**
+
+**Example: render**
+
+```oxdock
+IMPORT [STD, MARKDOWN]
+LET $toc: STRING = TOC("# Title\n\n## Alpha\n\n### Sub\n", {})
+ASSERT_EQ $toc "- [Alpha](#alpha)\n  - [Sub](#sub)\n"
+```

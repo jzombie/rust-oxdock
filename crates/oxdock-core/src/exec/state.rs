@@ -54,6 +54,12 @@ pub struct ExecState<P: ProcessManager> {
     /// `LET $s: SSH_SESSION_INFO` resolves exactly when the owning module
     /// is registered. Impossible to reference an unregistered schema.
     pub(super) record_schemas: HashMap<String, Arc<[Field]>>,
+    /// Module-shared state stashed at registration, keyed by owning
+    /// module name plus value type. Bodies fetch it through
+    /// `StepCtx::module_state` instead of hand-built closures, so
+    /// every entry can stay `#[oxdock_func]`.
+    pub(super) module_states:
+        HashMap<(String, std::any::TypeId), Arc<dyn std::any::Any + Send + Sync>>,
     /// Script-level type aliases for this run: alias name to canonical
     /// target spelling (`PERSON` to `MAP<name:STRING>`). Populated once
     /// from top-level `TYPE` steps before the static pass, so forward
@@ -287,6 +293,7 @@ impl<P: ProcessManager> ExecState<P> {
             functions: self.functions.clone(),
             types: self.types.clone(),
             record_schemas: self.record_schemas.clone(),
+            module_states: self.module_states.clone(),
             type_aliases: self.type_aliases.clone(),
             call_depth: self.call_depth,
             task_id: self.task_id,

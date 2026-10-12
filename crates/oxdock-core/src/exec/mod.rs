@@ -1,5 +1,7 @@
 mod args;
 mod capture;
+#[cfg(any(test, feature = "test-harness"))]
+pub mod conformance;
 mod engine;
 mod exit;
 mod fs_ops;
@@ -20,6 +22,8 @@ pub use self::remote::{
 };
 
 pub use self::args::{json_to_value, value_to_json};
+#[cfg(any(test, feature = "test-harness"))]
+pub use self::conformance::assert_module_returns_conformance;
 pub use self::engine::{Engine, EngineOutput};
 pub use self::exit::{ExitRequest, exit_code_of};
 pub(crate) use self::handlers::{
@@ -366,6 +370,7 @@ fn new_state<P: ProcessManager>(fs: Box<dyn WorkspaceFs>, io: ExecIo) -> Result<
         functions: self::native::FunctionRegistry::with_builtins(),
         types: self::typing::startup_type_map(),
         record_schemas: std::collections::HashMap::new(),
+        module_states: std::collections::HashMap::new(),
         type_aliases: std::collections::HashMap::new(),
         call_depth: 0,
         // Root flow is task 0; worker ids start at 1 (see next_task_id).

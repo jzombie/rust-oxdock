@@ -33,6 +33,9 @@ sha2.workspace = true
 tar.workspace = true
 toml.workspace = true
 
+[features]
+test-harness = ["oxdock-fs/mock-fs", "oxdock-process/mock-process"]
+
 [dev-dependencies]
 indoc.workspace = true
 oxdock-fs = { workspace = true, features = ["mock-fs"] }

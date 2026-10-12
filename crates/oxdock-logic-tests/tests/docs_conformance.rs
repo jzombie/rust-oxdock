@@ -3,7 +3,7 @@ use line_ending::LineEnding;
 use oxdock_core::{ExecIo, run_steps_with_context_result_with_io};
 use oxdock_fs::{GuardedPath, PathResolver};
 use oxdock_logic_tests::mock_remote::MockRemoteRunner;
-use oxdock_parser::{COMMANDS, FencedBlock, extract_fenced_blocks};
+use oxdock_parser::{COMMANDS, FencedBlock, base_name, extract_fenced_blocks};
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -125,6 +125,119 @@ fn anchor_targets(markdown: &str) -> Vec<(usize, String)> {
                 break;
             }
         }
+    }
+    out
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "requires CARGO_MANIFEST_DIR and host filesystem for README resolution"
+)]
+fn readme_snippets_cover_every_function() -> Result<()> {
+    // Strict parity with commands: every registered builtin must appear
+    // in an executed workspace-README fence. `INSPECT` is syntax, not a
+    // registry entry, so it stays outside this rule by construction.
+    let blocks = load_readme_blocks()?;
+    let bodies: String = blocks
+        .iter()
+        .map(|b| b.body.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    for meta in oxdock_core::builtin_function_metas() {
+        let keyword = base_name(&meta.name);
+        assert!(
+            contains_keyword(&bodies, keyword),
+            "{README_NAME}: no executable example demonstrates the '{keyword}' function"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "requires CARGO_MANIFEST_DIR and host filesystem for README resolution"
+)]
+fn plugin_readme_snippets_cover_every_function() -> Result<()> {
+    // Same parity per plugin module: every registered function appears
+    // in an executed fence of its own README, which the plugin fence
+    // executor runs end to end.
+    let modules: Vec<(&str, &str)> = {
+        let mut docs = vec![
+            ("SSH", "crates/plugins/oxdock-ssh-plugin/README.md"),
+            ("NET", "crates/plugins/oxdock-net-plugin/README.md"),
+        ];
+        #[cfg(feature = "markdown")]
+        docs.push((
+            "MARKDOWN",
+            "crates/plugins/oxdock-markdown-plugin/README.md",
+        ));
+        docs
+    };
+    for (module, name) in modules {
+        let blocks = load_blocks(name)?;
+        let bodies: String = blocks
+            .iter()
+            .map(|b| b.body.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let metas = plugin_module_metas(module);
+        assert!(
+            !metas.is_empty(),
+            "{name}: no registered functions found for {module}"
+        );
+        for qualified in metas {
+            let keyword = base_name(&qualified);
+            assert!(
+                contains_keyword(&bodies, keyword),
+                "{name}: no executable example demonstrates the '{keyword}' function"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Qualified names registered by one plugin module, read live from the
+/// module under test instead of a parallel list.
+fn plugin_module_metas(module: &str) -> Vec<String> {
+    let modules = plugin_modules_for_metas();
+    modules
+        .into_iter()
+        .find(|candidate| candidate.0 == module)
+        .map(|(_, registrations)| registrations)
+        .unwrap_or_default()
+}
+
+fn plugin_modules_for_metas() -> Vec<(String, Vec<String>)> {
+    let mut out = Vec::new();
+    let ssh = oxdock_ssh_plugin::module();
+    out.push((
+        ssh.name.clone(),
+        ssh.funcs
+            .iter()
+            .map(|registration| registration.meta().name.clone())
+            .collect(),
+    ));
+    let net = oxdock_net_plugin::module();
+    out.push((
+        net.name.clone(),
+        net.funcs
+            .iter()
+            .map(|registration| registration.meta().name.clone())
+            .collect(),
+    ));
+    #[cfg(feature = "markdown")]
+    {
+        let markdown = oxdock_markdown_plugin::module();
+        out.push((
+            markdown.name.clone(),
+            markdown
+                .funcs
+                .iter()
+                .map(|registration| registration.meta().name.clone())
+                .collect(),
+        ));
     }
     out
 }

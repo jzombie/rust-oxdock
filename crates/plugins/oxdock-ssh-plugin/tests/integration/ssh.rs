@@ -31,6 +31,25 @@ fn run_script_with(
     engine.run_script(root, script)
 }
 
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "blind sampling drives SSH session paths outside Miri isolation"
+)]
+fn returns_gate_covers_ssh_functions() {
+    // Same returns contract as STD builtins, over this module's own
+    // registrations: sampled calls that reach `Ok` satisfy the slot,
+    // and anything sampling cannot reach must carry examples.
+    let module = oxdock_ssh_plugin::module();
+    let proc = oxdock_process::default_process_manager();
+    oxdock_core::assert_module_returns_conformance(
+        "SSH",
+        &module.funcs,
+        vec![module.clone()],
+        proc,
+    );
+}
+
 fn read_trimmed(path: &GuardedPath) -> String {
     use oxdock_fs::PathResolver;
     let resolver = PathResolver::new(path.root(), path.root()).unwrap();

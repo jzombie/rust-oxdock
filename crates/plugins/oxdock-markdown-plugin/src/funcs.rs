@@ -15,6 +15,14 @@ use oxdock_process::ProcessManager;
 /// one column per key. Fails strict on shapes with no table in them.
 ///
 #[oxdock_func(pure, returns = TypeTag::String)]
+#[example(
+    name = "render",
+    code = r###"
+    IMPORT [STD, MARKDOWN]
+    LET $table: STRING = MAP_TO_MD_TABLE({name: "demo", stars: 3})
+    ASSERT_EQ $table "| name | stars |\n| ---- | ----- |\n| demo | 3     |\n"
+    "###
+)]
 fn map_to_md_table(
     /// Record data: a MAP renders one row, a LIST of MAPs renders one row per entry with union columns.
     #[union(Map<Any>, List<Map<Any>>)]
@@ -33,6 +41,14 @@ fn map_to_md_table(
 /// (`[text](#github-slug)` with `-1` dedup), so output pastes into any
 /// GitHub-rendered document with working anchors.
 #[oxdock_func(pure, returns = TypeTag::String)]
+#[example(
+    name = "render",
+    code = r###"
+    IMPORT [STD, MARKDOWN]
+    LET $toc: STRING = TOC("# Title\n\n## Alpha\n\n### Sub\n", {})
+    ASSERT_EQ $toc "- [Alpha](#alpha)\n  - [Sub](#sub)\n"
+    "###
+)]
 fn toc(
     /// Document markdown text to scan for headings.
     md: String,
@@ -59,6 +75,16 @@ fn toc(
 /// Immediate helper for composition and tests: returns one MAP per
 /// heading with `level`, `text`, and `anchor` keys.
 #[oxdock_func(pure, returns = TypeTag::ListOf(std::sync::Arc::new(TypeTag::Any)))]
+#[example(
+    name = "scan",
+    code = r###"
+    IMPORT [STD, MARKDOWN]
+    LET $items: LIST<ANY> = PARSE("## Alpha")
+    ASSERT_EQ $items.0.level 2
+    ASSERT_EQ $items.0.text "Alpha"
+    ASSERT_EQ $items.0.anchor "alpha"
+    "###
+)]
 fn parse(
     /// Markdown document to scan for headings.
     md: String,
@@ -89,6 +115,14 @@ fn parse(
 /// needles fail naming the needle, so release notes extraction fails
 /// loudly instead of publishing an empty section.
 #[oxdock_func(pure, returns = TypeTag::String)]
+#[example(
+    name = "slice",
+    code = r###"
+    IMPORT [STD, MARKDOWN]
+    LET $body: STRING = SECTION("## Alpha\n\nbody text\n\n## Beta\n", "Alpha")
+    ASSERT_EQ $body "## Alpha\n\nbody text\n"
+    "###
+)]
 fn section(
     /// Markdown document to slice.
     md: String,
@@ -111,6 +145,7 @@ pub fn module_with<P: ProcessManager>() -> HostModule<P> {
         ],
         types: vec![],
         record_schemas: vec![],
+        states: Vec::new(),
     }
 }
 

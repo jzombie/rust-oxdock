@@ -1054,6 +1054,25 @@ fn offline_connect_reads_both_timeout_shapes() {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "blind sampling drives registry claim paths outside Miri isolation"
+)]
+fn returns_gate_covers_net_functions() {
+    // Same returns contract as STD builtins, over this module's own
+    // registrations: sampled calls that reach `Ok` satisfy the slot,
+    // and anything sampling cannot reach must carry examples.
+    let module = oxdock_net_plugin::module();
+    let proc = oxdock_process::default_process_manager();
+    oxdock_core::assert_module_returns_conformance(
+        "NET",
+        &module.funcs,
+        vec![module.clone()],
+        proc,
+    );
+}
+
+#[test]
 fn fetch_rejects_bad_timeout_without_dialing() {
     // Duration parsing precedes the dial, so this runs under Miri.
     let temp = GuardedPath::tempdir().unwrap();
