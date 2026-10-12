@@ -188,6 +188,42 @@ fn arb_step_kind() -> impl Strategy<Value = StepKind> {
             from: from.into(),
             to: to.into()
         }),
+        (safe_string(), safe_string()).prop_map(|(from, to)| StepKind::Archive {
+            src: from.into(),
+            dst: to.into(),
+            raw: false,
+        }),
+        (safe_string(), safe_string()).prop_map(|(from, to)| StepKind::Archive {
+            src: from.into(),
+            dst: to.into(),
+            raw: true,
+        }),
+        (safe_string(), safe_string()).prop_map(|(from, to)| StepKind::Unarchive {
+            src: from.into(),
+            dst: to.into(),
+            max_bytes: None,
+        }),
+        (
+            safe_string(),
+            safe_string(),
+            // Static flag values reparse through lower-time validation,
+            // so the generator only emits spellings that validate (the
+            // same reason other flagged variants generate defaults).
+            prop::option::of(prop_oneof![
+                Just("1".to_string()),
+                Just("500B".to_string()),
+                Just("100KB".to_string()),
+                Just("2MIB".to_string()),
+                Just("1GB".to_string()),
+                Just("1GIB".to_string()),
+                Just("1_000_000".to_string()),
+            ]),
+        )
+            .prop_map(|(from, to, cap)| StepKind::Unarchive {
+                src: from.into(),
+                dst: to.into(),
+                max_bytes: cap.map(Into::into),
+            }),
         prop::option::of(safe_string()).prop_map(|s| StepKind::Ls(s.map(Into::into))),
         Just(StepKind::Cwd),
         prop::option::of(safe_string()).prop_map(|s| StepKind::Read(s.map(Into::into))),
@@ -324,6 +360,43 @@ fn assert_steps_eq(left: &Step, right: &Step, msg: &str) {
         (StepKind::Install { from: lf, to: lt }, StepKind::Install { from: rf, to: rt }) => {
             assert!(arg_content_eq(lf, rf), "Install from mismatch: {}", msg);
             assert!(arg_content_eq(lt, rt), "Install to mismatch: {}", msg);
+        }
+        (
+            StepKind::Archive {
+                src: ls,
+                dst: ld,
+                raw: lr,
+            },
+            StepKind::Archive {
+                src: rs,
+                dst: rd,
+                raw: rr,
+            },
+        ) => {
+            assert!(arg_content_eq(ls, rs), "Archive src mismatch: {}", msg);
+            assert!(arg_content_eq(ld, rd), "Archive dst mismatch: {}", msg);
+            assert_eq!(lr, rr, "Archive raw mismatch: {}", msg);
+        }
+        (
+            StepKind::Unarchive {
+                src: ls,
+                dst: ld,
+                max_bytes: lm,
+            },
+            StepKind::Unarchive {
+                src: rs,
+                dst: rd,
+                max_bytes: rm,
+            },
+        ) => {
+            assert!(arg_content_eq(ls, rs), "Unarchive src mismatch: {}", msg);
+            assert!(arg_content_eq(ld, rd), "Unarchive dst mismatch: {}", msg);
+            assert_eq!(
+                lm.as_ref().map(|a| a.as_str()),
+                rm.as_ref().map(|a| a.as_str()),
+                "Unarchive max_bytes mismatch: {}",
+                msg
+            );
         }
         (
             StepKind::Remove {

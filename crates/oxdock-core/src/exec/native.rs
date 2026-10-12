@@ -307,6 +307,10 @@ impl<P: ProcessManager> FunctionRegistry<P> {
         vec![
             Int::registration(),
             Float::registration(),
+            FormatByteCount::registration(),
+            ParseByteCount::registration(),
+            FormatDuration::registration(),
+            ParseDuration::registration(),
             Types::registration(),
             TypeDescribe::registration(),
             Glob::registration(),
@@ -316,6 +320,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
             ParseJson::registration(),
             PathType::registration(),
             PathWritable::registration(),
+            IsExec::registration(),
             HasKey::registration(),
             MapSet::registration(),
             MergeMaps::registration(),
@@ -657,6 +662,163 @@ fn float(
     super::args::float_from_value(val)
 }
 
+/// Format a byte count canonically (`500B`, `10KB`, `2MB`, `1GB`,
+/// binary `10KIB` and friends): the inverse of `PARSE_BYTE_COUNT`, so
+/// formatted values reparse exactly. Negative inputs fail.
+///
+/// ```oxdock
+/// # Byte counts render in the largest exact unit.
+/// IMPORT [STD]
+/// LET $pretty: STRING = FORMAT_BYTE_COUNT(1_048_576)
+/// ASSERT_EQ $pretty "1MiB"
+///
+/// # The pair round-trips through the parser.
+/// LET $back: INT = PARSE_BYTE_COUNT($pretty)
+/// ASSERT_EQ $back 1_048_576
+/// ```
+///
+#[oxdock_func(pure, returns = TypeTag::String)]
+fn format_byte_count(
+    /// Byte count to format; negatives fail.
+    bytes: i64,
+) -> Result<Value> {
+    if bytes < 0 {
+        return Err(anyhow::anyhow!(
+            "FORMAT_BYTE_COUNT needs a non-negative byte count, got {bytes}"
+        ));
+    }
+    Ok(Value::string(oxdock_parser::command::format_byte_count(
+        bytes as u64,
+    )))
+}
+
+/// Parse a byte-count token to `INT` bytes.
+///
+/// Bare digits are bytes; suffixes `B`/`KB`/`MB`/`GB`/`TB` scale
+/// decimal and `KIB`/`MIB`/`GIB`/`TIB` binary, in any case. Plain
+/// `INT` values pass through (already bytes); integral finite `FLOAT`
+/// values convert. Pairs with `FORMAT_BYTE_COUNT` for the round trip.
+///
+/// ```oxdock
+/// # Units parse case-insensitively; bare digits are bytes.
+/// IMPORT [STD]
+/// LET $bytes: INT = PARSE_BYTE_COUNT("1Gb")
+/// ASSERT_EQ $bytes 1_000_000_000
+///
+/// # Binary suffixes scale by powers of two.
+/// LET $mebi: INT = PARSE_BYTE_COUNT("2mib")
+/// ASSERT_EQ $mebi 2_097_152
+///
+/// # Digit runs group Rust-literal style.
+/// LET $grouped: INT = PARSE_BYTE_COUNT("1_000_000")
+/// ASSERT_EQ $grouped 1_000_000
+///
+/// # Plain numbers pass through as bytes already.
+/// LET $plain: INT = PARSE_BYTE_COUNT(1_048_576)
+/// ASSERT_EQ $plain 1_048_576
+///
+/// # Bare literals group too.
+/// LET $bare: INT = PARSE_BYTE_COUNT(1_000_000)
+/// ASSERT_EQ $bare 1_000_000
+///
+/// # One optional space separates number from unit.
+/// LET $spaced: INT = PARSE_BYTE_COUNT("1 GB")
+/// ASSERT_EQ $spaced 1_000_000_000
+/// ```
+///
+#[oxdock_func(pure, returns = TypeTag::Int)]
+fn parse_byte_count(
+    /// Byte-count token to parse, or bytes already.
+    text: Value,
+) -> Result<Value> {
+    if let Some(n) = text.as_i64() {
+        if n < 0 {
+            return Err(anyhow::anyhow!(
+                "PARSE_BYTE_COUNT needs a non-negative byte count, got {n}"
+            ));
+        }
+        return Ok(Value::int(n));
+    }
+    if let Some(f) = text.as_f64() {
+        if f.is_finite() && f.fract() == 0.0 && f >= 0.0 && f <= i64::MAX as f64 {
+            return Ok(Value::int(f as i64));
+        }
+        return Err(anyhow::anyhow!(
+            "PARSE_BYTE_COUNT needs an integral byte count, got {f:?}"
+        ));
+    }
+    let Some(s) = text.as_str() else {
+        return Err(anyhow::anyhow!(
+            "PARSE_BYTE_COUNT needs a token or number, found {text:?}"
+        ));
+    };
+    let n = oxdock_parser::command::parse_byte_count(s)?;
+    let n = i64::try_from(n)
+        .map_err(|_| anyhow::anyhow!("PARSE_BYTE_COUNT out of INT range: {s:?}"))?;
+    Ok(Value::int(n))
+}
+
+/// Format millisecond durations canonically (`500ms`, `10s`, `2m`,
+/// `1h`): the inverse of `PARSE_DURATION`, so formatted values
+/// reparse exactly. Negative inputs fail.
+///
+/// ```oxdock
+/// # Durations render in the largest exact unit.
+/// IMPORT [STD]
+/// LET $pretty: STRING = FORMAT_DURATION(90_000)
+/// ASSERT_EQ $pretty "90s"
+///
+/// # The pair round-trips through the parser.
+/// LET $back: INT = PARSE_DURATION($pretty)
+/// ASSERT_EQ $back 90_000
+/// ```
+///
+#[oxdock_func(pure, returns = TypeTag::String)]
+fn format_duration(
+    /// Milliseconds to format; negatives fail.
+    millis: i64,
+) -> Result<Value> {
+    if millis < 0 {
+        return Err(anyhow::anyhow!(
+            "FORMAT_DURATION needs non-negative milliseconds, got {millis}"
+        ));
+    }
+    Ok(Value::string(oxdock_parser::command::format_duration(
+        &std::time::Duration::from_millis(millis as u64),
+    )))
+}
+
+/// Parse a duration token to `INT` milliseconds.
+///
+/// Suffixes `ms`/`s`/`m`/`h`; a bare number means seconds. Pairs with
+/// `FORMAT_DURATION` for the round trip.
+///
+/// ```oxdock
+/// # A bare number means seconds, like TIMEOUT.
+/// IMPORT [STD]
+/// LET $ms: INT = PARSE_DURATION("2m")
+/// ASSERT_EQ $ms 120_000
+///
+/// # Milliseconds stay exact.
+/// LET $exact: INT = PARSE_DURATION("1500ms")
+/// ASSERT_EQ $exact 1_500
+///
+/// # One optional space separates number from unit.
+/// LET $spaced: INT = PARSE_DURATION("1 h")
+/// ASSERT_EQ $spaced 3_600_000
+/// ```
+///
+#[oxdock_func(pure, returns = TypeTag::Int)]
+fn parse_duration(
+    /// Duration token to parse.
+    text: String,
+) -> Result<Value> {
+    let duration = oxdock_parser::command::parse_duration(&text)?;
+    let millis = i64::try_from(duration.as_millis())
+        .map_err(|_| anyhow::anyhow!("PARSE_DURATION out of INT range: {text:?}"))?;
+    Ok(Value::int(millis))
+}
+
 /// List workspace paths matching a glob pattern.
 ///
 /// Sorted, root-relative LIST; empty on no match or `..` escape.
@@ -781,6 +943,39 @@ fn path_writable<P: ProcessManager>(
     path: String,
 ) -> Result<Value> {
     super::args::path_writable_from_value(&[Value::string(path)], cx)
+}
+
+/// Report whether a name resolves to an executable file (#100).
+///
+/// Bare command names search `env:PATH` (`IS_EXEC("tar")` finds the
+/// first executable `tar`, plus `tar.exe`, on `PATH`); spellings
+/// containing a separator check that file directly. True means a real
+/// file with an executable bit on Unix, or a `PATHEXT` extension on
+/// Windows: each `env:PATHEXT` entry is probed in order (default
+/// `.COM;.EXE;.BAT;.CMD`, an explicitly empty value probes nothing). Absolute `PATH` entries resolve through the workspace as
+/// usual, so host probing wants `WORKSPACE SYSTEM` and an inherited
+/// `PATH`; anything unresolvable reads false, never errors. AST-only
+/// by design, like `PATH_TYPE`: there is no RPN arm for filesystem IO.
+///
+/// ```oxdock
+/// # Missing tools read false instead of failing the run.
+/// IMPORT [STD]
+/// LET $missing: BOOL = IS_EXEC("no-such-tool-xyz")
+/// ASSERT_EQ $missing false
+///
+/// # Plain files are not executable on any platform.
+/// WRITE tool.txt payload
+/// LET $plain: BOOL = IS_EXEC("tool.txt")
+/// ASSERT_EQ $plain false
+/// ```
+///
+#[oxdock_func(returns = TypeTag::Bool)]
+fn is_exec<P: ProcessManager>(
+    cx: &mut StepCtx<P>,
+    /// Command name or file path to probe.
+    name: String,
+) -> Result<Value> {
+    super::args::is_exec_from_value(&[Value::string(name)], cx)
 }
 
 /// Report whether a map holds a key.

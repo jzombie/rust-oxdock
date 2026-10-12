@@ -15,6 +15,20 @@ trait BackendImpl: Send + Sync {
     fn open_read(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Read + Send>>;
     fn open_write(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write + Send>>;
     fn open_append(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write + Send>>;
+    /// Link-refusing opens for TOCTOU-exposed paths: a final-component
+    /// symlink fails instead of redirecting the IO. Archive pack/unpack
+    /// use these after their listing probes so a planted link cannot
+    /// redirect bytes mid-run.
+    fn open_read_nofollow(
+        &self,
+        path: &GuardedPath,
+        expected_root: &GuardedPath,
+    ) -> Result<Box<dyn std::io::Read + Send>>;
+    fn open_write_nofollow(
+        &self,
+        path: &GuardedPath,
+        expected_root: &GuardedPath,
+    ) -> Result<Box<dyn std::io::Write + Send>>;
     fn canonicalize(&self, path: GuardedPath) -> Result<GuardedPath>;
     fn metadata(&self, path: &GuardedPath) -> Result<std::fs::Metadata>;
     fn entry_kind(&self, path: &GuardedPath) -> Result<super::EntryKind>;
@@ -30,6 +44,169 @@ trait BackendImpl: Send + Sync {
 #[cfg(not(miri))]
 #[derive(Clone, Copy)]
 pub(in crate::workspace_fs) struct HostBackend;
+
+/// Win32 `FILE_FLAG_OPEN_REPARSE_POINT` for
+/// `OpenOptionsExt::custom_flags`: open the link itself so subsequent
+/// IO fails instead of following. Stable API constant, spelled out to
+/// avoid a dependency for one flag.
+#[cfg(windows)]
+const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+/// True path of an open file descriptor: Linux reads its `/proc`
+/// self-link, macOS asks `fcntl(F_GETPATH)`. The descriptor is
+/// pinned, so later swaps cannot redirect its IO: checking this path
+/// closes the validation-to-open race on that side completely.
+#[cfg(target_os = "linux")]
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+#[cfg_attr(miri, allow(dead_code))]
+fn fd_path(file: &fs::File) -> Result<std::path::PathBuf> {
+    use std::os::unix::io::AsRawFd;
+    let link = format!("/proc/self/fd/{}", file.as_raw_fd());
+    std::fs::read_link(&link).with_context(|| "failed to resolve open file path".to_string())
+}
+
+/// True path of an open file descriptor via `fcntl(F_GETPATH)`.
+#[cfg(target_os = "macos")]
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+#[cfg_attr(miri, allow(dead_code))]
+fn fd_path(file: &fs::File) -> Result<std::path::PathBuf> {
+    use std::os::unix::io::AsRawFd;
+    let mut buf = vec![0 as libc::c_char; libc::MAXPATHLEN as usize];
+    // fcntl on a live descriptor with a caller-owned buffer: no
+    // aliasing, returns -1 with errno on failure.
+    let ret = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_GETPATH, buf.as_mut_ptr()) };
+    if ret == -1 {
+        bail!(
+            "failed to resolve open file path: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+    let path = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) }
+        .to_string_lossy()
+        .into_owned();
+    Ok(std::path::PathBuf::from(path))
+}
+
+/// True path of an open file handle via `GetFinalPathNameByHandleW`,
+/// returned verbatim (extended-length form, uppercase drive). No
+/// normalization: `std::fs::canonicalize`, which produced the expected
+/// root, uses the same API with the same flags, so both sides already
+/// agree on case and prefixes for the same file.
+#[cfg(windows)]
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+#[cfg_attr(miri, allow(dead_code))]
+fn fd_path(file: &fs::File) -> Result<std::path::PathBuf> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_NAME_NORMALIZED, GetFinalPathNameByHandleW, VOLUME_NAME_DOS,
+    };
+
+    let handle = file.as_raw_handle();
+    let mut buf = vec![0u16; 1024];
+    let mut len = unsafe {
+        GetFinalPathNameByHandleW(
+            handle as _,
+            buf.as_mut_ptr(),
+            buf.len() as u32,
+            FILE_NAME_NORMALIZED | VOLUME_NAME_DOS,
+        )
+    };
+    if len as usize >= buf.len() {
+        buf.resize(len as usize + 1, 0);
+        len = unsafe {
+            GetFinalPathNameByHandleW(
+                handle as _,
+                buf.as_mut_ptr(),
+                buf.len() as u32,
+                FILE_NAME_NORMALIZED | VOLUME_NAME_DOS,
+            )
+        };
+    }
+    if len == 0 {
+        bail!(
+            "failed to resolve open file path: {}",
+            std::io::Error::last_os_error()
+        );
+    }
+    Ok(std::path::PathBuf::from(String::from_utf16_lossy(
+        &buf[..len as usize],
+    )))
+}
+
+/// Verify an opened file still lives under its expected tree, using
+/// the descriptor's own path. The expected root is canonicalized
+/// through the same API first: guard roots arrive in mixed forms
+/// (verbatim canonical under confinement, lexical under `SYSTEM`),
+/// while descriptor paths are always fully resolved, so comparing
+/// without converging the domain false-rejects legitimate opens.
+/// Linux, macOS, and Windows: other hosts keep the `lstat` +
+/// open-flag layers, which close pre-planting but leave a swap-race
+/// microsecond.
+#[cfg(any(target_os = "linux", target_os = "macos", windows))]
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+#[cfg_attr(miri, allow(dead_code))]
+fn verify_fd_within(
+    file: &fs::File,
+    expected_root: &GuardedPath,
+    path: &GuardedPath,
+) -> Result<()> {
+    let actual = fd_path(file)?;
+    let root = std::fs::canonicalize(expected_root.as_path()).with_context(|| {
+        format!(
+            "failed to canonicalize expected tree {}",
+            expected_root.display()
+        )
+    })?;
+    if cmp_form(&actual).starts_with(cmp_form(&root)) {
+        Ok(())
+    } else {
+        bail!(
+            "opened {} outside its expected tree {} (descriptor resolves to {})",
+            path.display(),
+            expected_root.display(),
+            actual.display()
+        )
+    }
+}
+
+/// Comparison form for descriptor verification. macOS folds case:
+/// `realpath` preserves caller spelling while `F_GETPATH` reports
+/// on-disk case, and default volumes are case-insensitive, so exact
+/// compare false-rejects divergent spellings of one file. Folding
+/// cannot accept a distinct file here: the guard already pinned the
+/// exact file pre-swap, and a same-letters doppelganger is either the
+/// same file or unreachable through guard-resolved paths. All other
+/// hosts compare exact: both sides resolve identically there
+/// (Windows shares one API for both; Linux kernels agree).
+#[cfg(target_os = "macos")]
+#[allow(clippy::disallowed_types)]
+#[cfg_attr(miri, allow(dead_code))]
+fn cmp_form(path: &std::path::Path) -> std::path::PathBuf {
+    std::path::PathBuf::from(path.as_os_str().to_string_lossy().to_lowercase())
+}
+
+/// Comparison form for descriptor verification (exact outside macOS).
+#[cfg(not(target_os = "macos"))]
+#[allow(clippy::disallowed_types)]
+#[cfg_attr(miri, allow(dead_code))]
+fn cmp_form(path: &std::path::Path) -> std::path::PathBuf {
+    path.to_path_buf()
+}
+
+/// Other hosts cannot resolve descriptor paths with std + libc
+/// alone, so verification stays a no-op there (documented gap, not
+/// silent: the `lstat` + flag layers still run).
+#[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
+#[allow(clippy::disallowed_types)]
+#[cfg_attr(miri, allow(dead_code))]
+fn verify_fd_within(
+    file: &fs::File,
+    expected_root: &GuardedPath,
+    path: &GuardedPath,
+) -> Result<()> {
+    let _ = (file, expected_root, path);
+    Ok(())
+}
 
 #[cfg(not(miri))]
 impl HostBackend {
@@ -137,6 +314,80 @@ impl BackendImpl for HostBackend {
             .append(true)
             .open(path.as_path())
             .with_context(|| format!("failed to open {} for appending", path.display()))?;
+        Ok(Box::new(file))
+    }
+
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    fn open_read_nofollow(
+        &self,
+        path: &GuardedPath,
+        expected_root: &GuardedPath,
+    ) -> Result<Box<dyn std::io::Read + Send>> {
+        #[cfg(unix)]
+        use std::os::unix::fs::OpenOptionsExt;
+        #[cfg(windows)]
+        use std::os::windows::fs::OpenOptionsExt;
+        let mut options = fs::OpenOptions::new();
+        options.read(true);
+        // Unix refuses a link final component at open (ELOOP); Windows
+        // opens the reparse point itself, so the subsequent IO fails
+        // instead of following. Either way a swapped-in link errors
+        // atomically rather than redirecting.
+        #[cfg(unix)]
+        options.custom_flags(libc::O_NOFOLLOW);
+        #[cfg(windows)]
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        let file = options
+            .open(path.as_path())
+            .with_context(|| format!("failed to open {} for reading", path.display()))?;
+        verify_fd_within(&file, expected_root, path)?;
+        Ok(Box::new(file))
+    }
+
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    fn open_write_nofollow(
+        &self,
+        path: &GuardedPath,
+        expected_root: &GuardedPath,
+    ) -> Result<Box<dyn std::io::Write + Send>> {
+        if let Some(parent) = path.as_path().parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("creating dir {}", parent.display()))?;
+        }
+        #[cfg(unix)]
+        use std::os::unix::fs::OpenOptionsExt;
+        #[cfg(windows)]
+        use std::os::windows::fs::OpenOptionsExt;
+        let mut options = fs::OpenOptions::new();
+        // No truncate here: truncation lands on the pinned descriptor
+        // only after verification, so a redirected open cannot destroy
+        // bytes before the check runs.
+        options.write(true).create(true);
+        #[cfg(unix)]
+        options.custom_flags(libc::O_NOFOLLOW);
+        #[cfg(windows)]
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+        // Existence before the open decides rollback later: only files
+        // this open creates may be removed on mismatch.
+        let pre_existing = path.as_path().exists();
+        let file = options
+            .open(path.as_path())
+            .with_context(|| format!("failed to open {} for writing", path.display()))?;
+        if let Err(e) = verify_fd_within(&file, expected_root, path) {
+            drop(file);
+            // Roll back only files this open created: removing a
+            // pre-existing redirect target would destroy the bytes
+            // verification exists to protect. A concurrent create
+            // racing the precheck can only strand an empty file.
+            if !pre_existing {
+                let _ = fs::remove_file(path.as_path());
+            }
+            return Err(e);
+        }
+        // Truncate the verified descriptor itself: later swaps cannot
+        // redirect an open handle.
+        file.set_len(0)
+            .with_context(|| format!("failed to truncate {}", path.display()))?;
         Ok(Box::new(file))
     }
 
@@ -393,6 +644,26 @@ mod miri_backend {
         fn open_read(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Read + Send>> {
             let data = self.read_file(path)?;
             Ok(Box::new(std::io::Cursor::new(data)))
+        }
+
+        // Synthetic state holds no links, so plain opens are exact.
+        // The expected root still typechecks the caller's intent.
+        fn open_read_nofollow(
+            &self,
+            path: &GuardedPath,
+            expected_root: &GuardedPath,
+        ) -> Result<Box<dyn std::io::Read + Send>> {
+            let _ = expected_root;
+            self.open_read(path)
+        }
+
+        fn open_write_nofollow(
+            &self,
+            path: &GuardedPath,
+            expected_root: &GuardedPath,
+        ) -> Result<Box<dyn std::io::Write + Send>> {
+            let _ = expected_root;
+            self.open_write(path)
         }
 
         fn open_write(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write + Send>> {
@@ -804,6 +1075,22 @@ impl Backend {
 
     pub(super) fn open_append(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write + Send>> {
         self.as_impl().open_append(path)
+    }
+
+    pub(super) fn open_read_nofollow(
+        &self,
+        path: &GuardedPath,
+        expected_root: &GuardedPath,
+    ) -> Result<Box<dyn std::io::Read + Send>> {
+        self.as_impl().open_read_nofollow(path, expected_root)
+    }
+
+    pub(super) fn open_write_nofollow(
+        &self,
+        path: &GuardedPath,
+        expected_root: &GuardedPath,
+    ) -> Result<Box<dyn std::io::Write + Send>> {
+        self.as_impl().open_write_nofollow(path, expected_root)
     }
 
     pub(super) fn canonicalize(&self, path: GuardedPath) -> Result<GuardedPath> {

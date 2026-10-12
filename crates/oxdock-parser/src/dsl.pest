@@ -96,11 +96,14 @@ quoted_string = @{
     "'" ~ ( "\\'" | (!"'" ~ ANY) )* ~ "'"
 }
 bare_word = @{ (ASCII_ALPHANUMERIC | "_" | "-" | "." | "/")+ }
-// Numeric literal: unsigned digits with optional fraction. No leading `-`
+// Numeric literal: unsigned digits with optional fraction, Rust-style
+// `_` separators inside either run (`1_000_000`, `1_5.5_5`). No leading `-`
 // (negation routes through `expr_unary` + lowering-time fold, so `i64::MIN`
 // stages via `UnsignedIntBoundary`). Trailing guard keeps durations (`30s`,
-// `100ms`), paths (`123/456`), and versions (`1.0.0`) lexing as `bare_word`.
-numeric_literal = @{ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)? ~ !(ASCII_ALPHANUMERIC | "_" | "." | "/") }
+// `100ms`), paths (`123/456`), and versions (`1.0.0`) lexing as `bare_word`;
+// it also rejects stray separators (`1_`, `1__0`), which stay bare words.
+// Lowering strips separators before parsing (see `parse_numeric_literal`).
+numeric_literal = @{ ASCII_DIGIT+ ~ ("_" ~ ASCII_DIGIT+)* ~ ("." ~ ASCII_DIGIT+ ~ ("_" ~ ASCII_DIGIT+)*)? ~ !(ASCII_ALPHANUMERIC | "_" | "." | "/") }
 // Environment read: `env:KEY` evaluates to the script environment value.
 // Must precede `bare_word` in `expr_atom` (which would otherwise match just
 // `env` and strand `:KEY`). In argument position the `unquoted_arg` guard

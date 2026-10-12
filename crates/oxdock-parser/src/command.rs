@@ -84,7 +84,7 @@ impl ArgType {
     pub fn validate_literal(&self, literal: &str) -> Result<()> {
         match self {
             ArgType::String | ArgType::Path | ArgType::Any => Ok(()),
-            ArgType::Int => literal
+            ArgType::Int => strip_digit_separators(literal)
                 .parse::<i64>()
                 .map(|_| ())
                 .map_err(|_| anyhow!("expected int, got {literal:?}")),
@@ -260,8 +260,11 @@ pub fn split_assignment(text: &str) -> Result<Option<(String, Arg)>> {
 }
 
 /// Parse a TIMEOUT duration token (`500ms`, `10s`, `2m`, `1h`; a bare
-/// number means seconds).
+/// number means seconds). One optional space may separate the number
+/// from its unit (`30 s`), like byte counts: bare DSL tokens still
+/// split upstream, so this covers quoted strings and variables.
 pub fn parse_duration(s: &str) -> Result<std::time::Duration> {
+    let s = join_single_space(s)?;
     let (digits, unit_ms): (&str, u64) = if let Some(v) = s.strip_suffix("ms") {
         (v, 1)
     } else if let Some(v) = s.strip_suffix('s') {
@@ -271,7 +274,7 @@ pub fn parse_duration(s: &str) -> Result<std::time::Duration> {
     } else if let Some(v) = s.strip_suffix('h') {
         (v, 3_600_000)
     } else {
-        (s, 1_000)
+        (s.as_str(), 1_000)
     };
     let n: u64 = digits
         .parse()
@@ -298,6 +301,154 @@ pub fn format_duration(d: &std::time::Duration) -> String {
         format!("{}s", millis / 1_000)
     } else {
         format!("{millis}ms")
+    }
+}
+
+/// Strip Rust-style `_` digit separators when well-formed (digits and
+/// at most one `.`, separators only between digits, never leading,
+/// trailing, or doubled, with an optional leading `+`/`-` sign passing
+/// through for signed domains); otherwise return the text untouched so
+/// the caller's own parse decides. The single rule behind every
+/// string-to-number coercion (`INT` validation, assertion operands,
+/// byte counts), so `1_000_000` and `-1_000` read identically everywhere
+/// while `1__0` and `1_` never silently become numbers. Unsigned
+/// callers still reject `-` at parse time; `+` parses like every other
+/// Rust-parsed number in the DSL.
+pub fn strip_digit_separators(text: &str) -> String {
+    let body = text
+        .strip_prefix('+')
+        .or_else(|| text.strip_prefix('-'))
+        .unwrap_or(text);
+    let bytes = body.as_bytes();
+    let well_formed = !body.is_empty()
+        && bytes[0].is_ascii_digit()
+        && bytes[bytes.len() - 1].is_ascii_digit()
+        && bytes
+            .iter()
+            .all(|b| b.is_ascii_digit() || *b == b'_' || *b == b'.')
+        && !body.contains("__")
+        && body.bytes().filter(|b| *b == b'.').count() <= 1;
+    if well_formed {
+        text.replace('_', "")
+    } else {
+        text.to_string()
+    }
+}
+
+/// Join a numeric token whose unit may ride separated by one space
+/// (`1 GB`, `30 s`): surrounding whitespace trims, and exactly two
+/// whitespace-separated parts rejoin digit-run plus unit. Anything else
+/// (three parts, a split digit run like `1 0`, an empty string) fails:
+/// the space may only separate the number from its unit, never split
+/// the digits themselves.
+fn join_single_space(s: &str) -> Result<String> {
+    let mut parts = s.split_whitespace();
+    let (first, second) = (parts.next(), parts.next());
+    if parts.next().is_some() {
+        bail!("invalid numeric token: {s}");
+    }
+    match (first, second) {
+        (Some(digits), None) => Ok(digits.to_string()),
+        (Some(digits), Some(unit))
+            if digits
+                .strip_prefix('+')
+                .unwrap_or(digits)
+                .bytes()
+                .all(|b| b.is_ascii_digit() || b == b'_')
+                && unit.bytes().all(|b| b.is_ascii_alphabetic()) =>
+        {
+            Ok(format!("{digits}{unit}"))
+        }
+        _ => bail!("invalid numeric token: {s}"),
+    }
+}
+
+/// Parse a byte-count token (`500`, `500B`, `10KB`, `2MB`, `1GB`, `1TB`
+/// decimal; `10KIB`, `2MIB`, `1GIB`, `1TIB` binary; a bare number means
+/// bytes). Digit runs may group with `_` separators (`1_000_000`),
+/// Rust-literal style: leading, trailing, and doubled separators fail.
+/// One optional space may separate the number from its unit (`1 GB`);
+/// anything more stays rejected, and bare DSL tokens still split
+/// upstream (this covers quoted strings, variables, and flag values).
+/// Fractions stay rejected by design (`1.5GB` fails: float parsing
+/// cannot hold exact byte boundaries past 2^53, and every sub-unit has
+/// an exact integer spelling like `1500MB`). Matching is
+/// case-insensitive (`1gb`, `1GB`, and `1Gb` agree), mirroring
+/// [`parse_duration`]: digits only, no fractions, no signs.
+pub fn parse_byte_count(s: &str) -> Result<u64> {
+    let compact = join_single_space(s)?;
+    let s = compact.as_str();
+    let lower = s.to_ascii_lowercase();
+    let (digits, unit): (&str, u64) = if let Some(v) = lower.strip_suffix("kib") {
+        (v, 1 << 10)
+    } else if let Some(v) = lower.strip_suffix("mib") {
+        (v, 1 << 20)
+    } else if let Some(v) = lower.strip_suffix("gib") {
+        (v, 1 << 30)
+    } else if let Some(v) = lower.strip_suffix("tib") {
+        (v, 1 << 40)
+    } else if let Some(v) = lower.strip_suffix("kb") {
+        (v, 1_000)
+    } else if let Some(v) = lower.strip_suffix("mb") {
+        (v, 1_000_000)
+    } else if let Some(v) = lower.strip_suffix("gb") {
+        (v, 1_000_000_000)
+    } else if let Some(v) = lower.strip_suffix("tb") {
+        (v, 1_000_000_000_000)
+    } else if let Some(v) = lower.strip_suffix('b') {
+        (v, 1)
+    } else {
+        (lower.as_str(), 1)
+    };
+    // Suffixes strip from the lowercased copy; slice the original at
+    // the same boundary so errors echo the caller's spelling.
+    // Separators follow the shared rule, so `1_0KB` parses while
+    // `1__0KB` fails like everywhere else. A leading `+` strips before
+    // the unsigned parse (`u64` rejects it; `-` still fails below).
+    let digits = strip_digit_separators(&s[..digits.len()]);
+    let digits = digits.strip_prefix('+').unwrap_or(&digits);
+    let n: u64 = digits
+        .parse()
+        .map_err(|_| anyhow!("invalid byte count: {s}"))?;
+    let bytes = n
+        .checked_mul(unit)
+        .ok_or_else(|| anyhow!("byte count out of range: {s}"))?;
+    if bytes == 0 {
+        bail!("byte count must be positive, got: {s}");
+    }
+    Ok(bytes)
+}
+
+/// Canonical display for a byte count: largest exact unit (`500B`,
+/// `10KB`, `2MB`, `1GB`, binary `10KIB` and friends), falling back to
+/// bytes. Round-trips through [`parse_byte_count`].
+pub fn format_byte_count(n: u64) -> String {
+    const TIB: u64 = 1 << 40;
+    const TB: u64 = 1_000_000_000_000;
+    const GIB: u64 = 1 << 30;
+    const GB: u64 = 1_000_000_000;
+    const MIB: u64 = 1 << 20;
+    const MB: u64 = 1_000_000;
+    const KIB: u64 = 1 << 10;
+    const KB: u64 = 1_000;
+    if n >= TIB && n.is_multiple_of(TIB) {
+        format!("{}TiB", n / TIB)
+    } else if n >= TB && n.is_multiple_of(TB) {
+        format!("{}TB", n / TB)
+    } else if n >= GIB && n.is_multiple_of(GIB) {
+        format!("{}GiB", n / GIB)
+    } else if n >= GB && n.is_multiple_of(GB) {
+        format!("{}GB", n / GB)
+    } else if n >= MIB && n.is_multiple_of(MIB) {
+        format!("{}MiB", n / MIB)
+    } else if n >= MB && n.is_multiple_of(MB) {
+        format!("{}MB", n / MB)
+    } else if n >= KIB && n.is_multiple_of(KIB) {
+        format!("{}KiB", n / KIB)
+    } else if n >= KB && n.is_multiple_of(KB) {
+        format!("{}KB", n / KB)
+    } else {
+        format!("{n}B")
     }
 }
 

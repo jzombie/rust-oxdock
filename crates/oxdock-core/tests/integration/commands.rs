@@ -2338,6 +2338,158 @@ fn run_exec_nonzero_status_bails_with_step_context() {
 }
 
 // ---------------------------------------------------------------------------
+// Grouped numerics survive every coercion and arithmetic they touch.
+// ---------------------------------------------------------------------------
+
+/// Grouped literals, signs, parsed units, and conversions must agree
+/// through arithmetic: separators never leak into values, and every
+/// spelling of one magnitude asserts equal.
+#[test]
+fn grouped_numbers_survive_arithmetic_and_conversions() {
+    let script = indoc! {r#"
+        IMPORT [STD]
+        # Bare literals group in expression position.
+        LET $a: INT = 1_000_000
+        ASSERT_EQ $a 1000000
+        ASSERT_EQ $a 1_000_000
+
+        # Unary and binary minus over grouped literals. Negative
+        # expectations bind first: a bare `-1000` in assert position
+        # parses as subtraction, like every other negative there.
+        LET $u: INT = -1_000
+        LET $neg: INT = 0 - 1_000
+        LET $e: INT = 0 - 1_000
+        ASSERT_EQ $u $e
+        ASSERT_EQ $neg $e
+
+        # Grouped operands fold through arithmetic.
+        LET $sum: INT = 1_000_000 + 2_500_000
+        ASSERT_EQ $sum 3_500_000
+        LET $scaled: INT = 2_000 * 3_000
+        ASSERT_EQ $scaled 6_000_000
+
+        # Grouping rides fractions through arithmetic too. Negative
+        # expectations bind first, like integers above.
+        LET $f: FLOAT = 1_024.768 + 1_000.232
+        ASSERT_EQ $f 2025.0
+        LET $nf: FLOAT = 0.0 - 1_024.5
+        LET $enf: FLOAT = 0.0 - 1024.5
+        ASSERT_EQ $nf $enf
+        LET $nu: FLOAT = -1_024.25
+        LET $enu: FLOAT = 0.0 - 1024.25
+        ASSERT_EQ $nu $enu
+
+        # Parsed units join arithmetic at full precision.
+        LET $cap: INT = PARSE_BYTE_COUNT("1MB") + 500_000
+        ASSERT_EQ $cap 1_500_000
+        LET $pretty: STRING = FORMAT_BYTE_COUNT($cap)
+        ASSERT_EQ $pretty "1500KB"
+        LET $back: INT = PARSE_BYTE_COUNT($pretty)
+        ASSERT_EQ $back $cap
+
+        # Durations pair the same way.
+        LET $ms: INT = PARSE_DURATION("1m") + 30_000
+        ASSERT_EQ $ms 90_000
+        LET $dur: STRING = FORMAT_DURATION($ms)
+        ASSERT_EQ $dur "90s"
+        LET $msback: INT = PARSE_DURATION($dur)
+        ASSERT_EQ $msback $ms
+
+        # String conversions accept grouped and signed spellings.
+        LET $from_grouped: INT = INT("1_000_000")
+        ASSERT_EQ $from_grouped 1000000
+        LET $from_signed: INT = INT("-1_000")
+        ASSERT_EQ $from_signed $e
+        LET $from_plus: INT = INT("+1_000")
+        ASSERT_EQ $from_plus 1000
+    "#};
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let steps = oxdock_core::parse_script(script).unwrap();
+    run_steps(&root, &steps).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Archive interop with system tar, both directions.
+// ---------------------------------------------------------------------------
+
+/// The deployment handshake, proven instead of assumed: DSL-packed
+/// archives must unpack under system `tar` (the installer stubs do
+/// this), and system-packed archives must unpack under `UNARCHIVE`
+/// (releases pack this way). Modes ride along, so staged engines stay
+/// runnable. System `tar` ships on every supported platform; missing
+/// it fails loudly like a missing `git`.
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "spawns live processes and needs system tar for the handshake"
+)]
+fn archive_interoperates_with_system_tar() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+
+    // Probe the prerequisite loudly instead of assuming it: a missing
+    // `tar` fails naming the tool, not with a cryptic spawn error.
+    let probe = indoc! {r#"
+        IMPORT [STD]
+        INHERIT_ENV [PATH]
+        WORKSPACE SYSTEM
+        LET $has_tar: BOOL = IS_EXEC("tar")
+        ASSERT_EQ $has_tar true
+    "#};
+    run_steps(&root, &oxdock_core::parse_script(probe).unwrap()).unwrap();
+
+    let seed = indoc! {r#"
+        WRITE bundle/app.txt app-payload
+        WRITE bundle/nested/deep.txt deep-payload
+        WRITE bundle/tool.sh tool-payload
+    "#};
+    run_steps(&root, &oxdock_core::parse_script(seed).unwrap()).unwrap();
+
+    // Seed the executable bit through the resolver: the script cannot
+    // pause mid-run, so modes stage between two runs over one root.
+    let seeder = PathResolver::new(root.as_path(), root.as_path()).unwrap();
+    seeder
+        .set_permissions_mode_unix(&root.join("bundle/tool.sh").unwrap(), 0o755)
+        .unwrap();
+
+    // DSL packs, system tar unpacks: the stub handshake.
+    let pack = indoc! {r#"
+        ARCHIVE bundle bundle.tar.gz
+        MKDIR sys-out
+        RUN ["tar", "-xzf", "bundle.tar.gz", "-C", "sys-out"]
+        LET $body: STRING = READ sys-out/app.txt
+        ASSERT_EQ $body "app-payload"
+        LET $deep: STRING = READ sys-out/nested/deep.txt
+        ASSERT_EQ $deep "deep-payload"
+    "#};
+    run_steps(&root, &oxdock_core::parse_script(pack).unwrap()).unwrap();
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let tool = root.join("sys-out/tool.sh").unwrap();
+        let mode = seeder.metadata(&tool).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o755,
+            "staged engines must stay runnable, got {mode:o}"
+        );
+    }
+
+    // System packs, DSL unpacks: the release handshake, `./`-prefixed
+    // members included.
+    let unpack = indoc! {r#"
+        MKDIR sys-src
+        WRITE sys-src/note.txt sys-note
+        RUN ["tar", "-czf", "sys.tar.gz", "-C", "sys-src", "./note.txt"]
+        UNARCHIVE sys.tar.gz dsl-out
+        LET $note: STRING = READ dsl-out/note.txt
+        ASSERT_EQ $note "sys-note"
+    "#};
+    run_steps(&root, &oxdock_core::parse_script(unpack).unwrap()).unwrap();
+}
+
+// ---------------------------------------------------------------------------
 // Compile-time StepKind exhaustiveness check
 // ---------------------------------------------------------------------------
 
@@ -2358,6 +2510,8 @@ fn _assert_step_kind_exhaustiveness(kind: &StepKind) {
         StepKind::Symlink { .. } => {}
         StepKind::Mkdir(_) => {}
         StepKind::Install { .. } => {}
+        StepKind::Archive { .. } => {}
+        StepKind::Unarchive { .. } => {}
         StepKind::Ls(_) => {}
         StepKind::Cwd => {}
         StepKind::Read(_) => {}
@@ -3754,7 +3908,7 @@ fn read_large_file_streams_without_oom() {
     let root = temp.as_guarded_path().clone();
 
     // Create a 1 MiB file
-    let content = "x".repeat(1024 * 1024);
+    let content = "x".repeat(1_024 * 1_024);
     let write_steps = oxdock_core::parse_script(&format!(
         "WRITE large.txt \"{}\"",
         content.replace('"', "\\\"")
@@ -3807,7 +3961,7 @@ fn read_large_file_streams_without_oom() {
     run_steps_with_context(&root, &root, &io_steps).expect("read pipeline");
 
     let output = read_trimmed(&root.join("output.txt").unwrap());
-    assert_eq!(output.len(), 1024 * 1024);
+    assert_eq!(output.len(), 1_024 * 1_024);
     assert!(output.chars().all(|c| c == 'x'));
 }
 
@@ -3820,7 +3974,7 @@ fn read_stdin_streaming_via_pipe() {
     let root = temp.as_guarded_path().clone();
 
     // Create a 1 MiB payload and pipe it through WRITE -> READ -> WRITE
-    let content = "y".repeat(1024 * 1024);
+    let content = "y".repeat(1_024 * 1_024);
     let steps = vec![
         Step {
             guard: None,
@@ -3872,7 +4026,7 @@ fn read_stdin_streaming_via_pipe() {
     run_steps_with_context(&root, &root, &steps).expect("pipe read pipeline");
 
     let output = read_trimmed(&root.join("dest.txt").unwrap());
-    assert_eq!(output.len(), 1024 * 1024);
+    assert_eq!(output.len(), 1_024 * 1_024);
     assert!(output.chars().all(|c| c == 'y'));
 }
 

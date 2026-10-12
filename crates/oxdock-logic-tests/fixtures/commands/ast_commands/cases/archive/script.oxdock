@@ -1,0 +1,6 @@
+MKDIR src
+WRITE src/payload.txt "round trip"
+ARCHIVE src/payload.txt packed.tar.gz
+ARCHIVE --raw src/payload.txt packed.tar
+UNARCHIVE packed.tar.gz restored_gz --max-bytes 1MB
+UNARCHIVE packed.tar restored_raw

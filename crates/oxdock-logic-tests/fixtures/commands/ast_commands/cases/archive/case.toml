@@ -1,0 +1,4 @@
+name = "archive"
+
+[expect]
+files = { "restored_gz/payload.txt" = "round trip", "restored_raw/payload.txt" = "round trip" }

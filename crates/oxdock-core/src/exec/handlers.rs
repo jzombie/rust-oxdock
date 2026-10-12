@@ -2,9 +2,13 @@ use anyhow::{Context, Result, anyhow, bail};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
+use flate2::Compression;
+use flate2::write::GzEncoder;
 use oxdock_fs::CopySourceRoot;
 use oxdock_fs::EntryKind;
 use oxdock_fs::GuardedPath;
+use oxdock_fs::PathResolver;
+use oxdock_fs::to_forward_slashes;
 use oxdock_parser::{
     Arg, Expr, IoBinding, IoStream, PipeTarget, Step, StepKind, TypeTag, Value, WorkspaceTarget,
     render_structural,
@@ -13,6 +17,7 @@ use oxdock_process::{
     BackgroundHandle, CommandOptions, CommandResult, CommandStderr, CommandStdin, CommandStdout,
     INHERIT_STDOUT_ENV_VAR, PROCESS_DEBUG_ENV_VAR, ProcessManager, SharedInput,
 };
+use oxdock_remote_proto::tar::{StreamedEntry, sanitize_rel, unpack_auto_from};
 use sha2::{Digest, Sha256};
 
 use super::SNAPSHOT_PENDING_DISPLAY;
@@ -178,6 +183,17 @@ pub(super) fn run<P: ProcessManager>(cx: &mut StepCtx<'_, P>, idx: usize, cmd: &
     options.stdout = stdout_mode;
     options.stderr = stderr_mode;
 
+    // A teardown that won the race already set cancellation: spawning
+    // now would create an unkillable-by-teardown child (the killer
+    // found nothing registered and moved on to joining), so refuse
+    // before the spawn instead of after the wait.
+    {
+        use std::sync::atomic::Ordering;
+        if cx.state.cancel_token.load(Ordering::SeqCst) {
+            bail!("step {}: RUN {} interrupted by cancellation", idx + 1, cmd);
+        }
+    }
+
     // Spawn the command.
     let mut handle = match cx
         .process
@@ -199,6 +215,18 @@ pub(super) fn run<P: ProcessManager>(cx: &mut StepCtx<'_, P>, idx: usize, cmd: &
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         *guard = Some(Box::new(handle.clone()));
+    }
+
+    // Cancellation landing between spawn and registration would miss
+    // this handle the same way: re-check now that registration is
+    // visible, killing our own handle (double-kill safe: reaped PIDs
+    // zero out) instead of waiting out the child.
+    {
+        use std::sync::atomic::Ordering;
+        if cx.state.cancel_token.load(Ordering::SeqCst) {
+            let _ = handle.kill();
+            bail!("step {}: RUN {} interrupted by cancellation", idx + 1, cmd);
+        }
     }
 
     // Wait for the process to complete.
@@ -286,6 +314,15 @@ pub(super) fn run_argv<P: ProcessManager>(
     options.stdout = stdout_mode;
     options.stderr = stderr_mode;
 
+    // Same pre-spawn cancellation refusal as [`run`]: a teardown that
+    // already ran must not gain a child it can no longer see.
+    {
+        use std::sync::atomic::Ordering;
+        if cx.state.cancel_token.load(Ordering::SeqCst) {
+            bail!("step {}: RUN {argv:?} interrupted by cancellation", idx + 1);
+        }
+    }
+
     // Spawn the executable directly (no shell).
     let mut handle = match cx
         .process
@@ -310,6 +347,15 @@ pub(super) fn run_argv<P: ProcessManager>(
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         *guard = Some(Box::new(handle.clone()));
+    }
+
+    // Same post-registration re-check as [`run`].
+    {
+        use std::sync::atomic::Ordering;
+        if cx.state.cancel_token.load(Ordering::SeqCst) {
+            let _ = handle.kill();
+            bail!("step {}: RUN {argv:?} interrupted by cancellation", idx + 1);
+        }
     }
 
     // Wait for the process to complete.
@@ -561,6 +607,443 @@ pub(super) fn copy_git<P: ProcessManager>(
         .fs
         .copy_from_git(rev, from, &to_abs, include_dirty)
         .with_context(|| format!("step {}: COPY_GIT {} {} {}", idx + 1, rev, from, to))?;
+    Ok(())
+}
+
+/// Source mode for one archive header: Unix records the real mode so
+/// unpackers (system `tar` or `UNARCHIVE`) restore it; other platforms
+/// land the conventional default.
+fn archive_entry_mode(meta: &std::fs::Metadata, default: u32) -> u32 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = default;
+        meta.permissions().mode() & 0o7777
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        default
+    }
+}
+
+/// Resolve an archive source with a symlink refusal: canonical
+/// resolution routes through the final link, so the resolved guard alone
+/// cannot see it. The parent resolves normally (intermediate links stay
+/// contained); the final name is matched against the parent's own
+/// listing, whose file types never follow links. Matching is
+/// case-insensitive so case-insensitive filesystems probe the entry the
+/// resolve would actually open; any link among the matches refuses.
+fn resolve_archive_src<P: ProcessManager>(
+    cx: &StepCtx<'_, P>,
+    src: &str,
+    tag: &str,
+) -> Result<GuardedPath> {
+    let trimmed = to_forward_slashes(src).trim_end_matches('/').to_string();
+    // A leading slash roots the parent at `/` itself: without the
+    // index-zero arm `/foo` would split into parent `""` and resolve
+    // against the working directory instead of the root.
+    let (parent, name) = match trimmed.rfind('/') {
+        Some(0) => ("/".to_string(), trimmed[1..].to_string()),
+        Some(idx) => (trimmed[..idx].to_string(), trimmed[idx + 1..].to_string()),
+        None => (String::new(), trimmed),
+    };
+    if name.is_empty() || name == "." || name == ".." {
+        // Root-ish spellings carry no final component to probe: a root
+        // is never a link itself.
+        return cx
+            .state
+            .fs
+            .resolve_read(&cx.state.cwd, src)
+            .with_context(|| tag.to_string());
+    }
+    let parent_abs = if parent.is_empty() {
+        cx.state.cwd.clone()
+    } else {
+        cx.state
+            .fs
+            .resolve_read(&cx.state.cwd, &parent)
+            .with_context(|| tag.to_string())?
+    };
+    let mut matched = false;
+    for entry in cx
+        .state
+        .fs
+        .read_dir_entries(&parent_abs)
+        .with_context(|| tag.to_string())?
+    {
+        if entry
+            .file_name()
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&name)
+        {
+            matched = true;
+            let is_link = entry
+                .file_type()
+                .map(|kind| kind.is_symlink())
+                .unwrap_or(true);
+            if is_link {
+                bail!("{tag}: refuses to pack symlink source {src:?}");
+            }
+        }
+    }
+    if !matched {
+        // Genuinely missing: let the resolver report it authoritatively.
+        return cx
+            .state
+            .fs
+            .resolve_read(&cx.state.cwd, src)
+            .with_context(|| tag.to_string());
+    }
+    parent_abs.join(&name).with_context(|| tag.to_string())
+}
+
+/// Collected packable tree: `(rel, guard)` files plus `(rel, guard)`
+/// dirs, all forward-slash relative and sorted for deterministic
+/// archives.
+type ArchiveTree = (Vec<(String, GuardedPath)>, Vec<(String, GuardedPath)>);
+
+/// Collect one packable tree (see [`ArchiveTree`]). Sources arrive
+/// pre-probed ([`resolve_archive_src`]); every descendant is probed at
+/// visit time through its own listing entry, whose file type never
+/// follows links.
+fn collect_archive_tree(
+    fs: &dyn oxdock_fs::WorkspaceFs,
+    src_abs: &GuardedPath,
+    src: &str,
+    dst: &str,
+    idx: usize,
+) -> Result<ArchiveTree> {
+    let tag = format!("step {}: ARCHIVE {src} {dst}", idx + 1);
+    match fs.entry_kind(src_abs).with_context(|| tag.clone())? {
+        EntryKind::File => {
+            let base = src_abs
+                .as_path()
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .with_context(|| {
+                    format!("{tag}: source has no file name: {}", src_abs.display())
+                })?;
+            let rel = sanitize_rel(&to_forward_slashes(&base)).with_context(|| tag.clone())?;
+            Ok((vec![(rel, src_abs.clone())], Vec::new()))
+        }
+        EntryKind::Dir => {
+            let mut files = Vec::new();
+            let mut dirs = Vec::new();
+            let mut stack = vec![(src_abs.clone(), String::new())];
+            while let Some((dir_abs, dir_rel)) = stack.pop() {
+                // A swapped intermediate link would redirect the whole
+                // subtree walk: the rel prefixes must be real
+                // directories before listing.
+                PathResolver::refuse_link_ancestors(src_abs, &dir_rel)
+                    .with_context(|| tag.clone())?;
+                let mut entries = fs.read_dir_entries(&dir_abs).with_context(|| tag.clone())?;
+                entries.sort_by_key(|entry| entry.file_name());
+                for entry in entries {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    let joined = if dir_rel.is_empty() {
+                        name.clone()
+                    } else {
+                        format!("{dir_rel}/{name}")
+                    };
+                    let child_rel = to_forward_slashes(&joined);
+                    let is_link = entry
+                        .file_type()
+                        .map(|kind| kind.is_symlink())
+                        .unwrap_or(true);
+                    if is_link {
+                        bail!("{tag}: refuses to pack symlink {child_rel:?}");
+                    }
+                    let child = dir_abs.join(&name).with_context(|| tag.clone())?;
+                    match fs.entry_kind(&child).with_context(|| tag.clone())? {
+                        EntryKind::Dir => {
+                            dirs.push((child_rel.clone(), child.clone()));
+                            stack.push((child, child_rel));
+                        }
+                        EntryKind::File => files.push((child_rel, child)),
+                        EntryKind::Symlink => {
+                            unreachable!("following entry_kind never reports symlinks")
+                        }
+                    }
+                }
+            }
+            files.sort_by(|a, b| a.0.cmp(&b.0));
+            dirs.sort_by(|a, b| a.0.cmp(&b.0));
+            Ok((files, dirs))
+        }
+        EntryKind::Symlink => unreachable!("following entry_kind never reports symlinks"),
+    }
+}
+
+/// Append one collected tree to an open tar builder, opening each file
+/// only for its own append: file handles never accumulate, so archive
+/// size stays O(chunk) memory with O(1) open files.
+fn append_archive_tree<W: std::io::Write>(
+    fs: &dyn oxdock_fs::WorkspaceFs,
+    builder: &mut tar::Builder<W>,
+    files: &[(String, GuardedPath)],
+    dirs: &[(String, GuardedPath)],
+    src_abs: &GuardedPath,
+    tag: &str,
+) -> Result<()> {
+    for (rel, guard) in dirs {
+        let rel = sanitize_rel(rel).with_context(|| tag.to_string())?;
+        let mode = fs
+            .metadata(guard)
+            .map(|meta| archive_entry_mode(&meta, 0o755))
+            .with_context(|| tag.to_string())?;
+        let mut header = tar::Header::new_gnu();
+        header.set_mode(mode);
+        header.set_entry_type(tar::EntryType::Directory);
+        header.set_size(0);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, &rel, std::io::empty())
+            .with_context(|| tag.to_string())?;
+    }
+    for (rel, guard) in files {
+        let rel = sanitize_rel(rel).with_context(|| tag.to_string())?;
+        let meta = fs.metadata(guard).with_context(|| tag.to_string())?;
+        // Link-refusing open: a symlink planted after the listing
+        // probe fails here instead of packing its target's bytes, and
+        // the descriptor must stay under the packed tree.
+        let mut reader = fs
+            .open_read_nofollow(guard, src_abs)
+            .with_context(|| tag.to_string())?;
+        let mut header = tar::Header::new_gnu();
+        header.set_mode(archive_entry_mode(&meta, 0o644));
+        header.set_size(meta.len());
+        header.set_cksum();
+        builder
+            .append_data(&mut header, &rel, &mut reader)
+            .with_context(|| tag.to_string())?;
+    }
+    Ok(())
+}
+
+pub(super) fn archive<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    idx: usize,
+    src: &str,
+    dst: &str,
+    raw: bool,
+) -> Result<()> {
+    let tag = format!("step {}: ARCHIVE {src} {dst}", idx + 1);
+    let src_abs = resolve_archive_src(cx, src, &tag)?;
+    let dst_abs = cx
+        .state
+        .fs
+        .resolve_write(&cx.state.cwd, dst)
+        .with_context(|| tag.clone())?;
+    // Opening the destination truncates it: an archive landing on its
+    // own source would destroy inputs before their bytes stream, so
+    // equal paths fail closed. A pre-existing destination inside the
+    // packed tree would likewise be truncated before its own append
+    // reads it back; a fresh one is safe (collection already ran, so it
+    // cannot be a member) which keeps whole-tree archives like
+    // `ARCHIVE project project.tar.gz` working.
+    if dst_abs == src_abs {
+        bail!("{tag}: destination {dst:?} cannot be the source itself");
+    }
+    if dst_abs.as_path().starts_with(src_abs.as_path()) && dst_abs.exists() {
+        bail!("{tag}: destination {dst:?} cannot overwrite inside the packed tree");
+    }
+    let (files, dirs) = collect_archive_tree(cx.state.fs.as_ref(), &src_abs, src, dst, idx)?;
+    cx.state
+        .fs
+        .ensure_parent_dir(&dst_abs)
+        .with_context(|| tag.clone())?;
+    let out = cx
+        .state
+        .fs
+        .open_write(&dst_abs)
+        .with_context(|| tag.clone())?;
+    if raw {
+        let mut builder = tar::Builder::new(out);
+        append_archive_tree(
+            cx.state.fs.as_ref(),
+            &mut builder,
+            &files,
+            &dirs,
+            &src_abs,
+            &tag,
+        )?;
+        let mut out = builder.into_inner().with_context(|| tag.clone())?;
+        std::io::Write::flush(&mut out).with_context(|| tag.clone())?;
+    } else {
+        let encoder = GzEncoder::new(out, Compression::default());
+        let mut builder = tar::Builder::new(encoder);
+        append_archive_tree(
+            cx.state.fs.as_ref(),
+            &mut builder,
+            &files,
+            &dirs,
+            &src_abs,
+            &tag,
+        )?;
+        builder
+            .into_inner()
+            .with_context(|| tag.clone())?
+            .try_finish()
+            .with_context(|| tag.clone())?;
+    }
+    Ok(())
+}
+
+pub(super) fn unarchive<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    idx: usize,
+    src: &str,
+    dst: &str,
+    max_bytes: Option<&str>,
+) -> Result<()> {
+    let tag = format!("step {}: UNARCHIVE {src} {dst}", idx + 1);
+    let cap = match max_bytes {
+        Some(raw) => oxdock_parser::command::parse_byte_count(raw)
+            .with_context(|| format!("{tag}: --max-bytes {raw:?}"))?,
+        None => DEFAULT_UNARCHIVE_MAX_BYTES,
+    };
+    let src_abs = cx
+        .state
+        .fs
+        .resolve_read(&cx.state.cwd, src)
+        .with_context(|| tag.clone())?;
+    let dst_abs = cx
+        .state
+        .fs
+        .resolve_write(&cx.state.cwd, dst)
+        .with_context(|| tag.clone())?;
+    cx.state
+        .fs
+        .create_dir_all(&dst_abs)
+        .with_context(|| tag.clone())?;
+    let reader = cx
+        .state
+        .fs
+        .open_read(&src_abs)
+        .with_context(|| tag.clone())?;
+    let fs = cx.state.fs.as_ref();
+    // Directory modes apply after every member lands: a read-only
+    // header (e.g. 0555) would otherwise lock its own children out
+    // before they extract. Deepest first, so restrictive parents settle
+    // last with nothing left to write beneath them.
+    let mut deferred_dir_modes: Vec<(GuardedPath, u32)> = Vec::new();
+    // The expansion budget spans the whole archive, not one member: a
+    // bomb split across many just-under-cap members must still trip it.
+    let mut remaining = cap;
+    unpack_auto_from(reader, &mut |entry| {
+        let entry_tag = format!("{tag}: member");
+        match entry {
+            StreamedEntry::Dir { path, mode } => {
+                // Re-validate the decoder's rel at the write site: a
+                // sanitized rel is pure descent, so the join below
+                // cannot escape lexically in any path normalization
+                // domain (verbatim, short names, slashes). Escapes via
+                // planted links stay the filesystem layers' job, and
+                // those run next, on every member, in every mode.
+                let rel = sanitize_rel(&path).with_context(|| entry_tag.clone())?;
+                PathResolver::refuse_link_ancestors(&dst_abs, &rel)
+                    .with_context(|| entry_tag.clone())?;
+                let dir = dst_abs.join(&rel).with_context(|| entry_tag.clone())?;
+                fs.create_dir_all(&dir).with_context(|| entry_tag.clone())?;
+                deferred_dir_modes.push((dir, mode));
+            }
+            StreamedEntry::File { path, mode, reader } => {
+                let rel = sanitize_rel(&path).with_context(|| entry_tag.clone())?;
+                PathResolver::refuse_link_ancestors(&dst_abs, &rel)
+                    .with_context(|| entry_tag.clone())?;
+                let file = dst_abs.join(&rel).with_context(|| entry_tag.clone())?;
+                fs.ensure_parent_dir(&file)
+                    .with_context(|| entry_tag.clone())?;
+                // Link-refusing open: a symlink planted at the member
+                // path fails here instead of truncating its target,
+                // and the descriptor must stay under the destination.
+                let mut out = fs
+                    .open_write_nofollow(&file, &dst_abs)
+                    .with_context(|| entry_tag.clone())?;
+                // Metered copy: bombs read small and write huge, so the
+                // cap counts member bytes out, not archive bytes in. The
+                // tripped member stays truncated while the step fails.
+                let mut capped = CappedReader {
+                    inner: reader,
+                    remaining,
+                };
+                std::io::copy(&mut capped, &mut out).map_err(|e| {
+                    if e.kind() == std::io::ErrorKind::QuotaExceeded {
+                        anyhow!(
+                            "{entry_tag}: archive exceeds the {cap}-byte expansion cap at {path:?}"
+                        )
+                    } else {
+                        anyhow::Error::new(e).context(entry_tag.clone())
+                    }
+                })?;
+                remaining = capped.remaining;
+                std::io::Write::flush(&mut out).with_context(|| entry_tag.clone())?;
+                restore_archive_mode(fs, &file, mode).with_context(|| entry_tag.clone())?;
+            }
+            StreamedEntry::Symlink { path, target } => {
+                bail!("{entry_tag}: refuses symlink member {path:?} -> {target:?}");
+            }
+        }
+        Ok(())
+    })
+    .with_context(|| tag.clone())?;
+    for (dir, mode) in deferred_dir_modes.into_iter().rev() {
+        restore_archive_mode(fs, &dir, mode).with_context(|| format!("{tag}: restoring mode"))?;
+    }
+    Ok(())
+}
+
+/// Default `UNARCHIVE` expansion cap (1 GiB of member bytes): release
+/// artifacts are megabytes, so this never gates legitimate use while a
+/// decompression bomb trips it long before runner disks fill. Per-call
+/// `--max-bytes` moves the ceiling either way.
+const DEFAULT_UNARCHIVE_MAX_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// Read adapter metering decompressed member bytes against the
+/// expansion cap: bombs read small and write huge, so the meter sits on
+/// the output side. Zero-length probes pass through so EOF detection
+/// keeps working, and an exhausted budget probes the stream before
+/// erroring: a payload ending exactly on the cap reads `Ok(0)` there
+/// instead of false-tripping.
+struct CappedReader<'a> {
+    inner: &'a mut dyn std::io::Read,
+    remaining: u64,
+}
+
+impl std::io::Read for CappedReader<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        if self.remaining == 0 {
+            let mut probe = [0u8; 1];
+            if self.inner.read(&mut probe)? == 0 {
+                return Ok(0);
+            }
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::QuotaExceeded,
+                "archive member exceeds the expansion cap",
+            ));
+        }
+        let allowed = (buf.len() as u64).min(self.remaining) as usize;
+        let n = self.inner.read(&mut buf[..allowed])?;
+        self.remaining -= n as u64;
+        Ok(n)
+    }
+}
+/// Restore one header mode through the fs abstraction (Unix-effective,
+/// no-op elsewhere). Zero modes skip: a degenerate header must never
+/// brick its file unreadable.
+fn restore_archive_mode(
+    fs: &dyn oxdock_fs::WorkspaceFs,
+    path: &GuardedPath,
+    mode: u32,
+) -> Result<()> {
+    let mode = mode & 0o7777;
+    if mode != 0 {
+        fs.set_permissions_mode_unix(path, mode)?;
+    }
     Ok(())
 }
 
@@ -2627,6 +3110,36 @@ pub(crate) fn dispatch_copy<P: ProcessManager>(
     let from_resolved = super::args::resolve_arg(from, cx)?;
     let to_resolved = super::args::resolve_arg(to, cx)?;
     copy(cx, 0, from_workspace.clone(), &from_resolved, &to_resolved)
+}
+
+pub(crate) fn dispatch_archive<P: ProcessManager>(
+    step: &StepKind,
+    cx: &mut StepCtx<'_, P>,
+) -> Result<()> {
+    let StepKind::Archive { src, dst, raw } = step else {
+        unreachable!()
+    };
+    let src_resolved = super::args::resolve_arg(src, cx)?;
+    let dst_resolved = super::args::resolve_arg(dst, cx)?;
+    archive(cx, 0, &src_resolved, &dst_resolved, *raw)
+}
+
+pub(crate) fn dispatch_unarchive<P: ProcessManager>(
+    step: &StepKind,
+    cx: &mut StepCtx<'_, P>,
+) -> Result<()> {
+    let StepKind::Unarchive {
+        src,
+        dst,
+        max_bytes,
+    } = step
+    else {
+        unreachable!()
+    };
+    let src_resolved = super::args::resolve_arg(src, cx)?;
+    let dst_resolved = super::args::resolve_arg(dst, cx)?;
+    let cap_resolved = super::args::resolve_arg_opt(max_bytes, cx)?;
+    unarchive(cx, 0, &src_resolved, &dst_resolved, cap_resolved.as_deref())
 }
 
 pub(crate) fn dispatch_copy_git<P: ProcessManager>(

@@ -310,6 +310,25 @@ impl WorkspaceFs for MockFs {
         Ok(Box::new(std::io::Cursor::new(data)))
     }
 
+    // Mock state holds no links, so plain opens are exact.
+    fn open_read_nofollow(
+        &self,
+        path: &GuardedPath,
+        expected_root: &GuardedPath,
+    ) -> Result<Box<dyn std::io::Read + Send>> {
+        let _ = expected_root;
+        self.open_read(path)
+    }
+
+    fn open_write_nofollow(
+        &self,
+        path: &GuardedPath,
+        expected_root: &GuardedPath,
+    ) -> Result<Box<dyn std::io::Write + Send>> {
+        let _ = expected_root;
+        self.open_write(path)
+    }
+
     fn open_write(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write + Send>> {
         let rel = self.relative_path(path);
         // Create an empty file first

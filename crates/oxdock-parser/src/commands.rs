@@ -592,9 +592,21 @@ impl StepKind {
             StepKind::Env { value, .. } => walk_arg(value, f),
             StepKind::Copy { from, to, .. }
             | StepKind::Symlink { from, to, .. }
+            | StepKind::Archive {
+                src: from, dst: to, ..
+            }
             | StepKind::Install { from, to } => {
                 walk_arg(from, f);
                 walk_arg(to, f);
+            }
+            StepKind::Unarchive {
+                src,
+                dst,
+                max_bytes,
+            } => {
+                walk_arg(src, f);
+                walk_arg(dst, f);
+                walk_opt(max_bytes, f);
             }
             StepKind::CopyGit { rev, from, to, .. } => {
                 walk_arg(rev, f);
@@ -699,6 +711,8 @@ impl StepKind {
             | StepKind::Copy { .. }
             | StepKind::CopyGit { .. }
             | StepKind::Symlink { .. }
+            | StepKind::Archive { .. }
+            | StepKind::Unarchive { .. }
             | StepKind::Install { .. }
             | StepKind::Mkdir(_)
             | StepKind::Ls(_)
@@ -797,11 +811,16 @@ fn lower_assert_target(arg: Arg) -> ParseResult<AssertTarget> {
 fn lower_assert_operand(arg: Arg) -> Arg {
     match arg {
         Arg::String(text, false) => {
-            if let Ok(i) = text.parse::<i64>() {
+            // Separators strip only when well-formed, so `1_000_000`
+            // types as Int while `1__0` keeps its literal reading,
+            // exactly like expression position. The original text
+            // survives below for the string case.
+            let clean = crate::command::strip_digit_separators(&text);
+            if let Ok(i) = clean.parse::<i64>() {
                 Arg::Expr(Expr::Literal(Value::int(i)))
-            } else if text.contains('.') && text.parse::<f64>().is_ok() {
+            } else if clean.contains('.') && clean.parse::<f64>().is_ok() {
                 Arg::Expr(Expr::Literal(Value::float(
-                    text.parse::<f64>().unwrap_or(f64::NAN),
+                    clean.parse::<f64>().unwrap_or(f64::NAN),
                 )))
             } else if text == "true" {
                 Arg::Expr(Expr::Literal(Value::bool(true)))
@@ -1302,6 +1321,137 @@ declare_commands! {
             let from = it.next().ok_or_else(|| ParseError::validation("INSTALL", "INSTALL requires a source".to_string(), &SpanContext::line_only(0)))?;
             let to = it.next().ok_or_else(|| ParseError::validation("INSTALL", "INSTALL requires a destination".to_string(), &SpanContext::line_only(0)))?;
             Ok(StepKind::Install { from, to })
+        },
+    ],
+
+    Archive => [
+        name: "ARCHIVE",
+        variant: Archive { src: Arg, dst: Arg, raw: bool },
+        syntax: "ARCHIVE [--raw] <src> <dst>",
+        summary: "Pack a file or directory into a tarball.",
+        description: indoc! {r#"
+            Packs a file or directory into a tarball, gzip-compressed by
+            default (`--raw` writes an uncompressed tar instead).
+
+            A lone file packs as a single top-level entry under its
+            basename; a directory recurses, preserving empty dirs. Source
+            modes ride in the headers on Unix, so system `tar` restores
+            them elsewhere. Symlink sources refuse: archives cross trust
+            boundaries, so links never resolve into member bytes. Hashing
+            stays with `HASH_SHA256`, which reads the finished archive
+            like any other file.
+        "#},
+        args: &[
+            ArgSpec { name: "src", arg_type: ArgType::Path, description: "File or directory to pack", io: IoDirection::Read, index: 0, required: true, fallback_stream: None },
+            ArgSpec { name: "dst", arg_type: ArgType::Path, description: "Archive file to write", io: IoDirection::Write, index: 1, required: true, fallback_stream: None },
+        ],
+        flags: &[ FlagSpec { name: "raw", long: "--raw", value_type: FlagValueType::Flag, required: false, description: "Write an uncompressed tar instead of gzip" } ],
+        default_output: None,
+        examples: &[ Example { name: "archive directory", fence_meta: None, code: indoc! {r#"
+            # Stage a small tree to pack.
+            WRITE bundle/app.txt bundled-payload
+            WRITE bundle/nested/deep.txt deep-payload
+
+            # ARCHIVE packs it gzip-compressed by default.
+            ARCHIVE bundle bundle.tar.gz
+
+            # UNARCHIVE restores the tree under the destination.
+            UNARCHIVE bundle.tar.gz restored
+
+            # The payloads arrive byte-identical.
+            LET $body: STRING = READ restored/app.txt
+            ASSERT_EQ $body "bundled-payload"
+
+            LET $deep: STRING = READ restored/nested/deep.txt
+            ASSERT_EQ $deep "deep-payload"
+        "#} }, Example { name: "archive raw", fence_meta: None, code: indoc! {r#"
+            # A lone file packs as a single top-level entry.
+            WRITE tool.bin tool-payload
+
+            # Raw archives skip gzip and stay readable by any tar.
+            ARCHIVE --raw tool.bin tool.tar
+            UNARCHIVE tool.tar tool-out
+
+            # The entry lands under its basename.
+            LET $body: STRING = READ tool-out/tool.bin
+            ASSERT_EQ $body "tool-payload"
+        "#} } ],
+        lower: |flags, args| {
+            let raw = flags.iter().any(|(k, _)| k == "raw");
+            let mut it = args.into_iter();
+            let src = it.next().ok_or_else(|| ParseError::validation("ARCHIVE", "ARCHIVE requires a source".to_string(), &SpanContext::line_only(0)))?;
+            let dst = it.next().ok_or_else(|| ParseError::validation("ARCHIVE", "ARCHIVE requires a destination".to_string(), &SpanContext::line_only(0)))?;
+            Ok(StepKind::Archive { src, dst, raw })
+        },
+    ],
+
+    Unarchive => [
+        name: "UNARCHIVE",
+        variant: Unarchive { src: Arg, dst: Arg, max_bytes: Option<Arg> },
+        syntax: "UNARCHIVE <src> <dst> [--max-bytes <bytes>]",
+        summary: "Unpack a tarball into a directory.",
+        description: indoc! {r#"
+            Unpacks a tarball under the destination directory, creating
+            it first. Gzip and raw (`ARCHIVE --raw`) tarballs
+            self-identify by magic bytes, so no flag is needed.
+
+            Member bytes meter against a 1 GiB default expansion cap
+            across the whole archive: a decompression bomb trips it
+            instead of filling the disk, and `--max-bytes` moves the
+            ceiling either way (plain integer bytes). The tripped member
+            stays truncated on disk while the step fails loudly.
+
+            Symlink and special members refuse naming the entry, and
+            absolute or escaping paths fail closed before any byte
+            lands: the member sanitizer plus the destination join check
+            form two independent walls. Unix modes recorded in the
+            headers restore on unpack; other platforms land default
+            modes (confer executability with `INSTALL` there).
+        "#},
+        args: &[
+            ArgSpec { name: "src", arg_type: ArgType::Path, description: "Archive file to unpack", io: IoDirection::Read, index: 0, required: true, fallback_stream: None },
+            ArgSpec { name: "dst", arg_type: ArgType::Path, description: "Directory to unpack under", io: IoDirection::Write, index: 1, required: true, fallback_stream: None },
+        ],
+        flags: &[ FlagSpec { name: "max_bytes", long: "--max-bytes", value_type: FlagValueType::String, required: false, description: "Cap total unpacked member bytes: bare digits are bytes (`1_000_000` grouping allowed), suffixes B/KB/MB/GB/TB (decimal) and KIB/MIB/GIB/TIB (binary), any case, one optional space before the unit (defaults to 1 GiB)" } ],
+        default_output: None,
+        examples: &[ Example { name: "unarchive", fence_meta: None, code: indoc! {r#"
+            # Pack a note, then restore it under a fresh destination.
+            WRITE pack/note.txt packed-note
+            ARCHIVE pack pack.tar.gz
+            UNARCHIVE pack.tar.gz unpacked
+
+            LET $body: STRING = READ unpacked/note.txt
+            ASSERT_EQ $body "packed-note"
+        "#}         }, Example { name: "unarchive with a lower cap", fence_meta: None, code: indoc! {r#"
+            # Small payloads clear even a tight ceiling.
+            WRITE pack/note.txt packed-note
+            ARCHIVE pack pack.tar.gz
+            UNARCHIVE pack.tar.gz capped --max-bytes 100KB
+
+            LET $body: STRING = READ capped/note.txt
+            ASSERT_EQ $body "packed-note"
+        "#} } ],
+        lower: |flags, args| {
+            let mut it = args.into_iter();
+            let src = it.next().ok_or_else(|| ParseError::validation("UNARCHIVE", "UNARCHIVE requires an archive".to_string(), &SpanContext::line_only(0)))?;
+            let dst = it.next().ok_or_else(|| ParseError::validation("UNARCHIVE", "UNARCHIVE requires a destination".to_string(), &SpanContext::line_only(0)))?;
+            let max_bytes = flags
+                .into_iter()
+                .find_map(|(k, v)| (k == "max_bytes").then_some(v));
+            // Static literals fail fast at parse; templates and
+            // variables defer to the runtime resolver, which enforces
+            // the same shape on the resolved value.
+            if let Some(Arg::String(text, _)) = max_bytes.as_ref()
+                && !text.contains("{{")
+                && let Err(e) = crate::command::parse_byte_count(text)
+            {
+                return Err(ParseError::validation(
+                    "UNARCHIVE",
+                    format!("UNARCHIVE --max-bytes {e:#}"),
+                    &SpanContext::line_only(0),
+                ));
+            }
+            Ok(StepKind::Unarchive { src, dst, max_bytes })
         },
     ],
 
@@ -3146,6 +3296,39 @@ impl fmt::Display for StepKind {
                 fmt_value(from, quote_arg),
                 fmt_value(to, quote_arg)
             ),
+            StepKind::Archive { src, dst, raw } => {
+                if *raw {
+                    write!(
+                        f,
+                        "ARCHIVE --raw {} {}",
+                        fmt_value(src, quote_arg),
+                        fmt_value(dst, quote_arg)
+                    )
+                } else {
+                    write!(
+                        f,
+                        "ARCHIVE {} {}",
+                        fmt_value(src, quote_arg),
+                        fmt_value(dst, quote_arg)
+                    )
+                }
+            }
+            StepKind::Unarchive {
+                src,
+                dst,
+                max_bytes,
+            } => {
+                write!(f, "UNARCHIVE")?;
+                if let Some(n) = max_bytes {
+                    write!(f, " --max-bytes {}", fmt_value(n, quote_arg))?;
+                }
+                write!(
+                    f,
+                    " {} {}",
+                    fmt_value(src, quote_arg),
+                    fmt_value(dst, quote_arg)
+                )
+            }
             StepKind::Ls(a) => {
                 write!(f, "LS")?;
                 if let Some(x) = a {
@@ -3433,7 +3616,10 @@ impl fmt::Display for StepKind {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::command::{format_duration, parse_duration};
+    use crate::command::{
+        format_byte_count, format_duration, parse_byte_count, parse_duration,
+        strip_digit_separators,
+    };
     use crate::parser::parse_script;
 
     fn parse_err(script: &str) -> String {
@@ -3529,6 +3715,102 @@ mod tests {
         ] {
             let err = parse_err(bad);
             assert!(err.contains("--local requires CACHE"), "{bad}: {err}");
+        }
+    }
+
+    #[test]
+    fn archive_unarchive_parse_and_round_trip() {
+        let steps = parse_script("ARCHIVE bundle bundle.tar.gz\n", lower_command).expect("parses");
+        match &steps[0].kind {
+            StepKind::Archive { src, dst, raw } => {
+                assert_eq!(src.as_str(), "bundle");
+                assert_eq!(dst.as_str(), "bundle.tar.gz");
+                assert!(!raw);
+            }
+            other => panic!("expected Archive, got {other:?}"),
+        }
+        assert_eq!(
+            steps[0].kind.to_string(),
+            "ARCHIVE bundle \"bundle.tar.gz\""
+        );
+
+        let steps =
+            parse_script("ARCHIVE --raw tool.bin tool.tar\n", lower_command).expect("parses");
+        assert!(
+            matches!(&steps[0].kind, StepKind::Archive { raw: true, .. }),
+            "unexpected lowering: {:?}",
+            steps[0].kind
+        );
+        assert_eq!(
+            steps[0].kind.to_string(),
+            "ARCHIVE --raw \"tool.bin\" \"tool.tar\""
+        );
+
+        let steps =
+            parse_script("UNARCHIVE pack.tar.gz unpacked\n", lower_command).expect("parses");
+        match &steps[0].kind {
+            StepKind::Unarchive {
+                src,
+                dst,
+                max_bytes,
+            } => {
+                assert_eq!(src.as_str(), "pack.tar.gz");
+                assert_eq!(dst.as_str(), "unpacked");
+                assert_eq!(max_bytes, &None);
+            }
+            other => panic!("expected Unarchive, got {other:?}"),
+        }
+        assert_eq!(
+            steps[0].kind.to_string(),
+            "UNARCHIVE \"pack.tar.gz\" unpacked"
+        );
+
+        let steps = parse_script(
+            "UNARCHIVE pack.tar.gz unpacked --max-bytes 100_000\n",
+            lower_command,
+        )
+        .expect("parses");
+        match &steps[0].kind {
+            StepKind::Unarchive {
+                src,
+                dst,
+                max_bytes,
+            } => {
+                assert_eq!(src.as_str(), "pack.tar.gz");
+                assert_eq!(dst.as_str(), "unpacked");
+                assert_eq!(max_bytes.as_ref().map(|a| a.as_str()), Some("100_000"));
+            }
+            other => panic!("expected Unarchive, got {other:?}"),
+        }
+        assert_eq!(
+            steps[0].kind.to_string(),
+            "UNARCHIVE --max-bytes \"100_000\" \"pack.tar.gz\" unpacked"
+        );
+
+        for script in [
+            "ARCHIVE bundle bundle.tar.gz\n",
+            "ARCHIVE --raw tool.bin tool.tar\n",
+            "UNARCHIVE pack.tar.gz unpacked\n",
+            "UNARCHIVE pack.tar.gz unpacked --max-bytes 100_000\n",
+        ] {
+            let first = parse_script(script, lower_command).expect("parses");
+            let rendered = first[0].kind.to_string() + "\n";
+            let second = parse_script(&rendered, lower_command).expect("reparses");
+            // Quoting is parse provenance (Display normalizes it), so the
+            // fixpoint is on rendering, not on full equality.
+            assert_eq!(
+                second[0].kind.to_string(),
+                first[0].kind.to_string(),
+                "Display must fixpoint for {script:?}"
+            );
+        }
+
+        for bad in ["ARCHIVE only-src\n", "ARCHIVE\n", "UNARCHIVE only-src\n"] {
+            let err = parse_err(bad);
+            assert!(
+                err.contains("ARCHIVE") || err.contains("UNARCHIVE"),
+                "{bad}: {err}"
+            );
         }
     }
 
@@ -3996,6 +4278,9 @@ mod tests {
         assert_eq!(parse_duration("2m").unwrap(), Duration::from_secs(120));
         assert_eq!(parse_duration("1h").unwrap(), Duration::from_secs(3600));
         assert_eq!(parse_duration("30").unwrap(), Duration::from_secs(30));
+        // One optional space separates number from unit, like bytes.
+        assert_eq!(parse_duration("30 s").unwrap(), Duration::from_secs(30));
+        assert_eq!(parse_duration("2 m").unwrap(), Duration::from_secs(120));
     }
 
     #[test]
@@ -4006,6 +4291,143 @@ mod tests {
         assert!(parse_duration("0s").is_err());
         assert!(parse_duration("0").is_err());
         assert!(parse_duration("-5s").is_err());
+        // Three parts or a split digit run stay rejected.
+        assert!(parse_duration("30 s s").is_err());
+        assert!(parse_duration("3 0s").is_err());
+    }
+
+    #[test]
+    fn parse_byte_count_units() {
+        assert_eq!(parse_byte_count("500").unwrap(), 500);
+        assert_eq!(parse_byte_count("500B").unwrap(), 500);
+        assert_eq!(parse_byte_count("10KB").unwrap(), 10_000);
+        assert_eq!(parse_byte_count("2MB").unwrap(), 2_000_000);
+        assert_eq!(parse_byte_count("1GB").unwrap(), 1_000_000_000);
+        assert_eq!(parse_byte_count("1TB").unwrap(), 1_000_000_000_000);
+        assert_eq!(parse_byte_count("10KIB").unwrap(), 10 * 1_024);
+        assert_eq!(parse_byte_count("2MIB").unwrap(), 2 * 1_024 * 1_024);
+        assert_eq!(parse_byte_count("1GIB").unwrap(), 1_024 * 1_024 * 1_024);
+        assert_eq!(
+            parse_byte_count("1TIB").unwrap(),
+            1_024 * 1_024 * 1_024 * 1_024
+        );
+        // Case-insensitive: `1gb`, `1GB`, and `1Gb` agree.
+        assert_eq!(parse_byte_count("1gb").unwrap(), 1_000_000_000);
+        assert_eq!(parse_byte_count("1Gb").unwrap(), 1_000_000_000);
+        assert_eq!(parse_byte_count("1gib").unwrap(), 1_024 * 1_024 * 1_024);
+        assert_eq!(parse_byte_count("1Gib").unwrap(), 1_024 * 1_024 * 1_024);
+        // Rust-literal grouping: separators ride between digits only.
+        assert_eq!(parse_byte_count("1_000").unwrap(), 1_000);
+        assert_eq!(
+            parse_byte_count("1_000_000_000_000").unwrap(),
+            1_000_000_000_000
+        );
+        assert_eq!(parse_byte_count("1_0KB").unwrap(), 10_000);
+        assert_eq!(
+            parse_byte_count("1_0GiB").unwrap(),
+            10 * 1_024 * 1_024 * 1_024
+        );
+        // One optional space separates number from unit, never digits.
+        assert_eq!(parse_byte_count("1 GB").unwrap(), 1_000_000_000);
+        assert_eq!(parse_byte_count("10 KiB").unwrap(), 10_240);
+        assert_eq!(parse_byte_count("  2MB  ").unwrap(), 2_000_000);
+        // A leading `+` rides spaced or glued; `-` stays rejected.
+        assert_eq!(parse_byte_count("+1 GB").unwrap(), 1_000_000_000);
+        assert!(parse_byte_count("-1 GB").is_err());
+    }
+
+    #[test]
+    fn parse_byte_count_rejects_garbage() {
+        for bad in [
+            "",
+            "banana",
+            "10x",
+            "1G",
+            "1K",
+            "1.5GB",
+            "-5",
+            "-5GB",
+            "0",
+            "0GB",
+            "_100",
+            "100_",
+            "1__000",
+            "_",
+            "1_GB",
+            // A space splits tokens, never digit runs or units.
+            "1 G B",
+            "1 2",
+            "1 0",
+            // Absurd magnitudes fail loudly instead of wrapping.
+            "1000000000000000000000000",
+            "1000000000TB",
+        ] {
+            assert!(parse_byte_count(bad).is_err(), "{bad:?} must fail");
+        }
+    }
+
+    #[test]
+    fn format_byte_count_round_trips() {
+        for text in [
+            "500", "500B", "10KB", "2MB", "1GB", "1TB", "10KIB", "2MIB", "1GIB", "1TIB", "1500B",
+        ] {
+            let parsed = parse_byte_count(text).unwrap();
+            let rendered = format_byte_count(parsed);
+            assert_eq!(
+                parse_byte_count(&rendered).unwrap(),
+                parsed,
+                "round-trip failed for {text}"
+            );
+        }
+        assert_eq!(format_byte_count(1_024 * 1_024 * 1_024), "1GiB");
+        assert_eq!(format_byte_count(1_000_000_000), "1GB");
+    }
+
+    #[test]
+    fn strip_digit_separators_passes_signs_through() {
+        // Signs belong to signed domains: the strip keeps them so
+        // `-1_000` reads as -1000 wherever ints coerce, while unsigned
+        // callers (byte counts) still reject at parse time.
+        assert_eq!(strip_digit_separators("-1_000"), "-1000");
+        assert_eq!(strip_digit_separators("+1_000_000"), "+1000000");
+        assert_eq!(strip_digit_separators("-1_000.5"), "-1000.5");
+        assert_eq!(strip_digit_separators("1_000"), "1000");
+        for untouched in ["+", "-", "", "1__0", "abc", "+-5", "--5"] {
+            assert_eq!(strip_digit_separators(untouched), untouched);
+        }
+        // Unsigned byte counts reject `-` at parse time but take `+`
+        // like every other Rust-parsed number in the DSL.
+        assert!(parse_byte_count("-1_000").is_err());
+        assert_eq!(parse_byte_count("+1GB").unwrap(), 1_000_000_000);
+    }
+
+    #[test]
+    fn format_byte_count_is_lossless() {
+        // The canonical form parses back to the exact input value:
+        // formatting never loses information, only spelling.
+        // Zero is unrepresentable by design (like durations): the
+        // parser rejects it, so it cannot round-trip.
+        for n in [
+            1,
+            500,
+            999,
+            1_000,
+            1_024,
+            1_500,
+            1_000_000,
+            1_048_576,
+            1_000_000_000,
+            1_073_741_824,
+            1_000_000_000_000,
+            1_099_511_627_776,
+            u64::MAX,
+        ] {
+            assert_eq!(
+                parse_byte_count(&format_byte_count(n)).unwrap(),
+                n,
+                "lossless round-trip failed for {n}"
+            );
+        }
     }
 
     #[test]
@@ -4066,6 +4488,8 @@ mod tests {
                 | StepKind::Copy { .. }
                 | StepKind::Symlink { .. }
                 | StepKind::Mkdir(_)
+                | StepKind::Archive { .. }
+                | StepKind::Unarchive { .. }
                 | StepKind::Install { .. }
                 | StepKind::Ls(_)
                 | StepKind::Cwd

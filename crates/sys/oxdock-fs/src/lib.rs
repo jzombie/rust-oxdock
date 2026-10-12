@@ -133,6 +133,21 @@ pub trait WorkspaceFs: Send + Sync {
     fn open_read(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Read + Send>>;
     fn open_write(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write + Send>>;
     fn open_append(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write + Send>>;
+    /// Link-refusing opens for probe-then-act sequences (archive
+    /// pack/unpack): a planted final-component symlink fails instead of
+    /// redirecting bytes, and the opened descriptor's own path must
+    /// stay under `expected_root`, closing the validation-to-open race
+    /// on descriptor-pinned IO. Guard checks still run first.
+    fn open_read_nofollow(
+        &self,
+        path: &GuardedPath,
+        expected_root: &GuardedPath,
+    ) -> Result<Box<dyn std::io::Read + Send>>;
+    fn open_write_nofollow(
+        &self,
+        path: &GuardedPath,
+        expected_root: &GuardedPath,
+    ) -> Result<Box<dyn std::io::Write + Send>>;
 
     fn read_to_string(&self, path: &GuardedPath) -> Result<String>;
     #[allow(clippy::disallowed_types)]
@@ -307,6 +322,22 @@ impl WorkspaceFs for PathResolver {
 
     fn open_append(&self, path: &GuardedPath) -> Result<Box<dyn std::io::Write + Send>> {
         PathResolver::open_append(self, path)
+    }
+
+    fn open_read_nofollow(
+        &self,
+        path: &GuardedPath,
+        expected_root: &GuardedPath,
+    ) -> Result<Box<dyn std::io::Read + Send>> {
+        PathResolver::open_read_nofollow(self, path, expected_root)
+    }
+
+    fn open_write_nofollow(
+        &self,
+        path: &GuardedPath,
+        expected_root: &GuardedPath,
+    ) -> Result<Box<dyn std::io::Write + Send>> {
+        PathResolver::open_write_nofollow(self, path, expected_root)
     }
 
     fn read_to_string(&self, path: &GuardedPath) -> Result<String> {

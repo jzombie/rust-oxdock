@@ -16,6 +16,8 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | [`SYMLINK`](#symlink) | `SYMLINK [--from-workspace SNAPSHOT\|LOCAL\|CACHE\|SYSTEM] <from> <to>` |
 | [`MKDIR`](#mkdir) | `MKDIR <path>` |
 | [`INSTALL`](#install) | `INSTALL <source> <dest>` |
+| [`ARCHIVE`](#archive) | `ARCHIVE [--raw] <src> <dst>` |
+| [`UNARCHIVE`](#unarchive) | `UNARCHIVE <src> <dst> [--max-bytes <bytes>]` |
 | [`LS`](#ls) | `LS [<path>]` |
 | [`CWD`](#cwd) | `CWD` |
 | [`READ`](#read) | `READ [<path>]` |
@@ -1724,6 +1726,140 @@ ASSERT_EQ $t "file"
 ```
 
 
+### ARCHIVE
+
+Pack a file or directory into a tarball.
+
+**Syntax:** `ARCHIVE [--raw] <src> <dst>`
+
+Packs a file or directory into a tarball, gzip-compressed by
+default (`--raw` writes an uncompressed tar instead).
+
+A lone file packs as a single top-level entry under its
+basename; a directory recurses, preserving empty dirs. Source
+modes ride in the headers on Unix, so system `tar` restores
+them elsewhere. Symlink sources refuse: archives cross trust
+boundaries, so links never resolve into member bytes. Hashing
+stays with `HASH_SHA256`, which reads the finished archive
+like any other file.
+
+
+**Arguments:**
+
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| `src` | [`PATH`](#value-type-path) | yes | File or directory to pack |
+| `dst` | [`PATH`](#value-type-path) | yes | Archive file to write |
+
+**Flags:**
+
+| Flag | Type | Description |
+| --- | --- | --- |
+| `--raw` | `BOOL` | Write an uncompressed tar instead of gzip |
+
+**Examples:**
+
+**Example: archive directory**
+
+```oxdock
+# Stage a small tree to pack.
+WRITE bundle/app.txt bundled-payload
+WRITE bundle/nested/deep.txt deep-payload
+
+# ARCHIVE packs it gzip-compressed by default.
+ARCHIVE bundle bundle.tar.gz
+
+# UNARCHIVE restores the tree under the destination.
+UNARCHIVE bundle.tar.gz restored
+
+# The payloads arrive byte-identical.
+LET $body: STRING = READ restored/app.txt
+ASSERT_EQ $body "bundled-payload"
+
+LET $deep: STRING = READ restored/nested/deep.txt
+ASSERT_EQ $deep "deep-payload"
+```
+
+**Example: archive raw**
+
+```oxdock
+# A lone file packs as a single top-level entry.
+WRITE tool.bin tool-payload
+
+# Raw archives skip gzip and stay readable by any tar.
+ARCHIVE --raw tool.bin tool.tar
+UNARCHIVE tool.tar tool-out
+
+# The entry lands under its basename.
+LET $body: STRING = READ tool-out/tool.bin
+ASSERT_EQ $body "tool-payload"
+```
+
+
+### UNARCHIVE
+
+Unpack a tarball into a directory.
+
+**Syntax:** `UNARCHIVE <src> <dst> [--max-bytes <bytes>]`
+
+Unpacks a tarball under the destination directory, creating
+it first. Gzip and raw (`ARCHIVE --raw`) tarballs
+self-identify by magic bytes, so no flag is needed.
+
+Member bytes meter against a 1 GiB default expansion cap
+across the whole archive: a decompression bomb trips it
+instead of filling the disk, and `--max-bytes` moves the
+ceiling either way (plain integer bytes). The tripped member
+stays truncated on disk while the step fails loudly.
+
+Symlink and special members refuse naming the entry, and
+absolute or escaping paths fail closed before any byte
+lands: the member sanitizer plus the destination join check
+form two independent walls. Unix modes recorded in the
+headers restore on unpack; other platforms land default
+modes (confer executability with `INSTALL` there).
+
+
+**Arguments:**
+
+| Name | Type | Required | Description |
+| --- | --- | --- | --- |
+| `src` | [`PATH`](#value-type-path) | yes | Archive file to unpack |
+| `dst` | [`PATH`](#value-type-path) | yes | Directory to unpack under |
+
+**Flags:**
+
+| Flag | Type | Description |
+| --- | --- | --- |
+| `--max-bytes` | `STRING` | Cap total unpacked member bytes: bare digits are bytes (`1_000_000` grouping allowed), suffixes B/KB/MB/GB/TB (decimal) and KIB/MIB/GIB/TIB (binary), any case, one optional space before the unit (defaults to 1 GiB) |
+
+**Examples:**
+
+**Example: unarchive**
+
+```oxdock
+# Pack a note, then restore it under a fresh destination.
+WRITE pack/note.txt packed-note
+ARCHIVE pack pack.tar.gz
+UNARCHIVE pack.tar.gz unpacked
+
+LET $body: STRING = READ unpacked/note.txt
+ASSERT_EQ $body "packed-note"
+```
+
+**Example: unarchive with a lower cap**
+
+```oxdock
+# Small payloads clear even a tight ceiling.
+WRITE pack/note.txt packed-note
+ARCHIVE pack pack.tar.gz
+UNARCHIVE pack.tar.gz capped --max-bytes 100KB
+
+LET $body: STRING = READ capped/note.txt
+ASSERT_EQ $body "packed-note"
+```
+
+
 ### LS
 
 List directory.
@@ -2504,6 +2640,60 @@ Parses f64 (accepts int strings), bails on non-finite or non-numeric.
 
 **Returns:** `FLOAT`
 
+### STD::FORMAT_BYTE_COUNT
+
+Format a byte count canonically (`500B`, `10KB`, `2MB`, `1GB`,
+binary `10KIB` and friends): the inverse of `PARSE_BYTE_COUNT`, so
+formatted values reparse exactly. Negative inputs fail.
+
+```oxdock
+# Byte counts render in the largest exact unit.
+IMPORT [STD]
+LET $pretty: STRING = FORMAT_BYTE_COUNT(1_048_576)
+ASSERT_EQ $pretty "1MiB"
+
+# The pair round-trips through the parser.
+LET $back: INT = PARSE_BYTE_COUNT($pretty)
+ASSERT_EQ $back 1_048_576
+```
+
+
+**Signature:** `STD::FORMAT_BYTE_COUNT($bytes: INT) -> STRING`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+- `$bytes` (`INT`): Byte count to format; negatives fail.
+
+**Returns:** `STRING`
+
+### STD::FORMAT_DURATION
+
+Format millisecond durations canonically (`500ms`, `10s`, `2m`,
+`1h`): the inverse of `PARSE_DURATION`, so formatted values
+reparse exactly. Negative inputs fail.
+
+```oxdock
+# Durations render in the largest exact unit.
+IMPORT [STD]
+LET $pretty: STRING = FORMAT_DURATION(90_000)
+ASSERT_EQ $pretty "90s"
+
+# The pair round-trips through the parser.
+LET $back: INT = PARSE_DURATION($pretty)
+ASSERT_EQ $back 90_000
+```
+
+
+**Signature:** `STD::FORMAT_DURATION($millis: INT) -> STRING`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+- `$millis` (`INT`): Milliseconds to format; negatives fail.
+
+**Returns:** `STRING`
+
 ### STD::FUNCTIONS
 
 List all visible function names.
@@ -2567,6 +2757,42 @@ when integral and finite.
 - `$val` (`ANY`): Value to convert to `INT`.
 
 **Returns:** `INT`
+
+### STD::IS_EXEC
+
+Report whether a name resolves to an executable file (#100).
+
+Bare command names search `env:PATH` (`IS_EXEC("tar")` finds the
+first executable `tar`, plus `tar.exe`, on `PATH`); spellings
+containing a separator check that file directly. True means a real
+file with an executable bit on Unix, or a `PATHEXT` extension on
+Windows: each `env:PATHEXT` entry is probed in order (default
+`.COM;.EXE;.BAT;.CMD`, an explicitly empty value probes nothing). Absolute `PATH` entries resolve through the workspace as
+usual, so host probing wants `WORKSPACE SYSTEM` and an inherited
+`PATH`; anything unresolvable reads false, never errors. AST-only
+by design, like `PATH_TYPE`: there is no RPN arm for filesystem IO.
+
+```oxdock
+# Missing tools read false instead of failing the run.
+IMPORT [STD]
+LET $missing: BOOL = IS_EXEC("no-such-tool-xyz")
+ASSERT_EQ $missing false
+
+# Plain files are not executable on any platform.
+WRITE tool.txt payload
+LET $plain: BOOL = IS_EXEC("tool.txt")
+ASSERT_EQ $plain false
+```
+
+
+**Signature:** `STD::IS_EXEC($name: STRING) -> BOOL`
+
+**Contexts:** [`AST`](#context-ast) only
+
+**Parameters:**
+- `$name` (`STRING`): Command name or file path to probe.
+
+**Returns:** `BOOL`
 
 ### STD::IS_TERMINAL
 
@@ -2666,6 +2892,84 @@ Non MAP elements fail naming their position.
 - `$policy` (`STRING = "fail_on_duplicate" | "overwrite"`): Duplicate policy.
 
 **Returns:** `MAP<ANY>`
+
+### STD::PARSE_BYTE_COUNT
+
+Parse a byte-count token to `INT` bytes.
+
+Bare digits are bytes; suffixes `B`/`KB`/`MB`/`GB`/`TB` scale
+decimal and `KIB`/`MIB`/`GIB`/`TIB` binary, in any case. Plain
+`INT` values pass through (already bytes); integral finite `FLOAT`
+values convert. Pairs with `FORMAT_BYTE_COUNT` for the round trip.
+
+```oxdock
+# Units parse case-insensitively; bare digits are bytes.
+IMPORT [STD]
+LET $bytes: INT = PARSE_BYTE_COUNT("1Gb")
+ASSERT_EQ $bytes 1_000_000_000
+
+# Binary suffixes scale by powers of two.
+LET $mebi: INT = PARSE_BYTE_COUNT("2mib")
+ASSERT_EQ $mebi 2_097_152
+
+# Digit runs group Rust-literal style.
+LET $grouped: INT = PARSE_BYTE_COUNT("1_000_000")
+ASSERT_EQ $grouped 1_000_000
+
+# Plain numbers pass through as bytes already.
+LET $plain: INT = PARSE_BYTE_COUNT(1_048_576)
+ASSERT_EQ $plain 1_048_576
+
+# Bare literals group too.
+LET $bare: INT = PARSE_BYTE_COUNT(1_000_000)
+ASSERT_EQ $bare 1_000_000
+
+# One optional space separates number from unit.
+LET $spaced: INT = PARSE_BYTE_COUNT("1 GB")
+ASSERT_EQ $spaced 1_000_000_000
+```
+
+
+**Signature:** `STD::PARSE_BYTE_COUNT($text: ANY) -> INT`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+- `$text` (`ANY`): Byte-count token to parse, or bytes already.
+
+**Returns:** `INT`
+
+### STD::PARSE_DURATION
+
+Parse a duration token to `INT` milliseconds.
+
+Suffixes `ms`/`s`/`m`/`h`; a bare number means seconds. Pairs with
+`FORMAT_DURATION` for the round trip.
+
+```oxdock
+# A bare number means seconds, like TIMEOUT.
+IMPORT [STD]
+LET $ms: INT = PARSE_DURATION("2m")
+ASSERT_EQ $ms 120_000
+
+# Milliseconds stay exact.
+LET $exact: INT = PARSE_DURATION("1500ms")
+ASSERT_EQ $exact 1_500
+
+# One optional space separates number from unit.
+LET $spaced: INT = PARSE_DURATION("1 h")
+ASSERT_EQ $spaced 3_600_000
+```
+
+
+**Signature:** `STD::PARSE_DURATION($text: STRING) -> INT`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+- `$text` (`STRING`): Duration token to parse.
+
+**Returns:** `INT`
 
 ### STD::PARSE_JSON
 

@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [0.25.0-alpha] - 2026-10-11
+
+### Added
+
+- `ARCHIVE [--raw] <src> <dst>` and `UNARCHIVE <src> <dst> [--max-bytes <bytes>]` commands (#182): pack a file or directory into a tarball and unpack one under a destination, with no host `tar` dependency. Archives are gzip-compressed by default and raw tar with `--raw`; `UNARCHIVE` sniffs the magic bytes so no flag is needed. Packing streams one file at a time (O(chunk) memory, O(1) open files) and records Unix source modes in the headers, restoring them on unpack.
+- `UNARCHIVE` meters member bytes against a 1 GiB default expansion cap across the whole archive (a decompression bomb trips it instead of filling the disk); `--max-bytes` moves the ceiling, taking bare digits as bytes plus `B`/`KB`/`MB`/`GB`/`TB` decimal and `KIB`/`MIB`/`GIB`/`TIB` binary suffixes in any case, with one optional space before the unit.
+- Both commands fail closed on hostile input: symlink sources refuse through a listing probe (canonical resolution would otherwise hide the final link), and unpacking refuses symlink and special members, absolute or escaping paths, and empty or truncated input. Pre-planted links cannot redirect bytes around the destination, in any workspace mode. Hashing stays with `HASH_SHA256`, which reads the finished archive like any other file.
+- `STD::FORMAT_BYTE_COUNT` / `STD::PARSE_BYTE_COUNT` and `STD::FORMAT_DURATION` / `STD::PARSE_DURATION` functions: canonical rendering and parsing for byte counts (`500B`, `10KB`, `2MB`, `1GB` decimal, `KIB`/`MIB`/`GIB`/`TIB` binary, any case, bare digits are bytes) and durations (`500ms`, `10s`, `2m`, `1h`, bare digits are seconds) as `STRING`/`INT` values, so scripts can compute `--max-bytes` caps and timeouts instead of spelling literals. One optional space may separate number from unit (`1 GB`, `30 s`). Digit runs group Rust-literal style (`1_000_000`). Each pair round-trips; garbage, zero, negatives, and out-of-range magnitudes fail loudly.
+- Grouped numeric literals: integer and float literals accept Rust-style `_` separators (`1_000_000`, `1_024.768`), and every string-to-number coercion (`INT()` conversion, `ASSERT_EQ` operands, `EXIT` codes, byte counts) reads them through one shared rule, so `-1_000` means negative one thousand in every position. Leading, trailing, and doubled separators never become numbers.
+- `STD::IS_EXEC` function (#100, #55): reports whether a name resolves to an executable file on the current platform. Bare command names search `env:PATH` (plus the `.exe`, `.bat`, `.cmd`, and `.com` spellings on Windows); separator spellings check that file directly. True means a real file with an executable bit on Unix or an executable extension on Windows; anything unresolvable reads false, never errors. On Windows the extension set comes from the script's `env:PATHEXT` (default `.COM;.EXE;.BAT;.CMD`, an explicitly empty value probes nothing), so the predicate resolves what the shell would. Gating stays the script's call: `RUN` strings are shell-mediated (builtins, `&&` chains, pipes), so no pre-flight second-guesses them; `IF IS_EXEC(...)` is the opt-in check.
+
+### Changed
+
+- The `docs-gen` showcase pipelines (`resume`, `generic-readme`) move from top-level `examples/` to `crates/docs-gen/examples/`: they demonstrate the docs pipeline, not OxDock scripts, so they live with their generator. The `crates` discovery scope covers the new location (the `examples` scope is gone); all rendered outputs are byte-identical, and the reusable docs workflow's starter-shape pointer follows the move.
+
 ## [0.24.5-alpha] - 2026-10-11
 
 ### Changed

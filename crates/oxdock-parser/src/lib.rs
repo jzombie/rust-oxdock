@@ -200,6 +200,43 @@ pub mod test_lower_mock {
                     to,
                 })
             }
+            "ARCHIVE" => {
+                let raw = args.iter().any(|a| a.as_str() == "--raw");
+                let positional: Vec<_> =
+                    args.into_iter().filter(|a| a.as_str() != "--raw").collect();
+                let mut it = positional.into_iter();
+                let src = it
+                    .next()
+                    .ok_or_else(|| validation("ARCHIVE", "ARCHIVE requires a source"))?;
+                let dst = it
+                    .next()
+                    .ok_or_else(|| validation("ARCHIVE", "ARCHIVE requires a destination"))?;
+                Ok(StepKind::Archive { src, dst, raw })
+            }
+            "UNARCHIVE" => {
+                let mut max_bytes = None;
+                let mut positional = Vec::new();
+                let mut iter = args.into_iter().peekable();
+                while let Some(arg) = iter.next() {
+                    if arg.as_str() == "--max-bytes" {
+                        max_bytes = iter.next();
+                    } else {
+                        positional.push(arg);
+                    }
+                }
+                let mut it = positional.into_iter();
+                let src = it
+                    .next()
+                    .ok_or_else(|| validation("UNARCHIVE", "UNARCHIVE requires an archive"))?;
+                let dst = it
+                    .next()
+                    .ok_or_else(|| validation("UNARCHIVE", "UNARCHIVE requires a destination"))?;
+                Ok(StepKind::Unarchive {
+                    src,
+                    dst,
+                    max_bytes,
+                })
+            }
             _ => Err(ParseError::unknown_command(
                 name,
                 format!("unknown command: {name}"),
@@ -367,6 +404,24 @@ mod tests {
                     actual,
                     &AssertTarget::Value(Arg::String("pipe:ch".to_string(), false)),
                     "colon text must stay a literal value, got {actual:?}"
+                );
+            }
+            other => panic!("expected AssertEq, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn grouped_int_assert_operand_types_as_int() {
+        // Grouped digits in argument position type as INT, matching
+        // expression position: the separators never leak into values.
+        let steps = parse_script("ASSERT_EQ $x 1_000_000", crate::commands::lower_command)
+            .expect("grouped int parses");
+        match &steps[0].kind {
+            StepKind::AssertEq { expected, .. } => {
+                assert_eq!(
+                    expected,
+                    &Some(Arg::Expr(Expr::Literal(Value::int(1_000_000)))),
+                    "grouped digits must type as Int, got {expected:?}"
                 );
             }
             other => panic!("expected AssertEq, got {other:?}"),
@@ -755,6 +810,82 @@ mod tests {
             }
             other => panic!("expected Assign, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn let_assign_grouped_int_literal() {
+        let steps =
+            parse_script("LET $x: INT = 1_000_000", test_lower).expect("grouped int parses");
+        match &steps[0].kind {
+            StepKind::Assign { expr, .. } => {
+                assert_eq!(expr, &Expr::Literal(Value::int(1_000_000)));
+            }
+            other => panic!("expected Assign, got {other:?}"),
+        }
+        // Grouping rides the fraction too.
+        let steps =
+            parse_script("LET $f: FLOAT = 1_024.768", test_lower).expect("grouped float parses");
+        match &steps[0].kind {
+            StepKind::Assign { expr, .. } => {
+                assert_eq!(expr, &Expr::Literal(Value::float(1024.768)));
+            }
+            other => panic!("expected Assign, got {other:?}"),
+        }
+        // Stray separators never read as numbers: the spelling stays a
+        // bare word, exactly like expression position decides.
+        let steps = parse_script("ECHO 1__0", test_lower).expect("parses as text");
+        match &steps[0].kind {
+            StepKind::Echo(arg) => assert_eq!(arg.as_str(), "1__0"),
+            other => panic!("expected Echo, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn grouped_numeric_boundaries() {
+        // Every magnitude spells exactly once: separators strip before
+        // the value stages, so grouped and plain spellings land
+        // identical values.
+        for (spelling, expected) in [
+            ("0", Value::int(0)),
+            ("1_000", Value::int(1_000)),
+            ("1_000_000", Value::int(1_000_000)),
+            ("9_223_372_036_854_775_807", Value::int(i64::MAX)),
+            ("1_024.768", Value::float(1024.768)),
+            ("0.5", Value::float(0.5)),
+        ] {
+            let script = format!("LET $x: ANY = {spelling}");
+            let steps = parse_script(&script, test_lower).expect("parses");
+            match &steps[0].kind {
+                StepKind::Assign { expr, .. } => {
+                    assert_eq!(expr, &Expr::Literal(expected.clone()), "{spelling:?}");
+                }
+                other => panic!("expected Assign, got {other:?}"),
+            }
+            // The plain spelling stages the identical value.
+            let plain = spelling.replace('_', "");
+            let script = format!("LET $x: ANY = {plain}");
+            let again = parse_script(&script, test_lower).expect("parses");
+            assert_eq!(again, steps, "{spelling:?} must stage like {plain:?}");
+        }
+        // The unsigned staging boundary behaves identically grouped or
+        // plain: a bare MAX+1 overflows everywhere except directly
+        // under unary minus, where it stages exactly i64::MIN.
+        for spelling in ["9_223_372_036_854_775_808", "9223372036854775808"] {
+            let err = parse_script(&format!("LET $x: ANY = {spelling}"), test_lower)
+                .expect_err("boundary outside negation must fail");
+            assert!(err.to_string().contains("exceeds i64::MAX"), "{err}");
+        }
+        let steps = parse_script("LET $x: INT = -9_223_372_036_854_775_808", test_lower)
+            .expect("negated boundary parses");
+        match &steps[0].kind {
+            StepKind::Assign { expr, .. } => {
+                assert_eq!(expr, &Expr::Literal(Value::int(i64::MIN)));
+            }
+            other => panic!("expected Assign, got {other:?}"),
+        }
+        let err = parse_script("LET $x: ANY = 9_223_372_036_854_775_809", test_lower)
+            .expect_err("overflow must fail");
+        assert!(err.to_string().contains("exceeds i64::MAX"), "{err}");
     }
 
     #[test]

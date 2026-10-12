@@ -128,6 +128,60 @@ Parses f64 (accepts int strings), bails on non-finite or non-numeric.
 
 **Returns:** `FLOAT`
 
+### STD::FORMAT_BYTE_COUNT
+
+Format a byte count canonically (`500B`, `10KB`, `2MB`, `1GB`,
+binary `10KIB` and friends): the inverse of `PARSE_BYTE_COUNT`, so
+formatted values reparse exactly. Negative inputs fail.
+
+```oxdock
+# Byte counts render in the largest exact unit.
+IMPORT [STD]
+LET $pretty: STRING = FORMAT_BYTE_COUNT(1_048_576)
+ASSERT_EQ $pretty "1MiB"
+
+# The pair round-trips through the parser.
+LET $back: INT = PARSE_BYTE_COUNT($pretty)
+ASSERT_EQ $back 1_048_576
+```
+
+
+**Signature:** `STD::FORMAT_BYTE_COUNT($bytes: INT) -> STRING`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+- `$bytes` (`INT`): Byte count to format; negatives fail.
+
+**Returns:** `STRING`
+
+### STD::FORMAT_DURATION
+
+Format millisecond durations canonically (`500ms`, `10s`, `2m`,
+`1h`): the inverse of `PARSE_DURATION`, so formatted values
+reparse exactly. Negative inputs fail.
+
+```oxdock
+# Durations render in the largest exact unit.
+IMPORT [STD]
+LET $pretty: STRING = FORMAT_DURATION(90_000)
+ASSERT_EQ $pretty "90s"
+
+# The pair round-trips through the parser.
+LET $back: INT = PARSE_DURATION($pretty)
+ASSERT_EQ $back 90_000
+```
+
+
+**Signature:** `STD::FORMAT_DURATION($millis: INT) -> STRING`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+- `$millis` (`INT`): Milliseconds to format; negatives fail.
+
+**Returns:** `STRING`
+
 ### STD::FUNCTIONS
 
 List all visible function names.
@@ -191,6 +245,42 @@ when integral and finite.
 - `$val` (`ANY`): Value to convert to `INT`.
 
 **Returns:** `INT`
+
+### STD::IS_EXEC
+
+Report whether a name resolves to an executable file (#100).
+
+Bare command names search `env:PATH` (`IS_EXEC("tar")` finds the
+first executable `tar`, plus `tar.exe`, on `PATH`); spellings
+containing a separator check that file directly. True means a real
+file with an executable bit on Unix, or a `PATHEXT` extension on
+Windows: each `env:PATHEXT` entry is probed in order (default
+`.COM;.EXE;.BAT;.CMD`, an explicitly empty value probes nothing). Absolute `PATH` entries resolve through the workspace as
+usual, so host probing wants `WORKSPACE SYSTEM` and an inherited
+`PATH`; anything unresolvable reads false, never errors. AST-only
+by design, like `PATH_TYPE`: there is no RPN arm for filesystem IO.
+
+```oxdock
+# Missing tools read false instead of failing the run.
+IMPORT [STD]
+LET $missing: BOOL = IS_EXEC("no-such-tool-xyz")
+ASSERT_EQ $missing false
+
+# Plain files are not executable on any platform.
+WRITE tool.txt payload
+LET $plain: BOOL = IS_EXEC("tool.txt")
+ASSERT_EQ $plain false
+```
+
+
+**Signature:** `STD::IS_EXEC($name: STRING) -> BOOL`
+
+**Contexts:** [`AST`](#context-ast) only
+
+**Parameters:**
+- `$name` (`STRING`): Command name or file path to probe.
+
+**Returns:** `BOOL`
 
 ### STD::IS_TERMINAL
 
@@ -290,6 +380,84 @@ Non MAP elements fail naming their position.
 - `$policy` (`STRING = "fail_on_duplicate" | "overwrite"`): Duplicate policy.
 
 **Returns:** `MAP<ANY>`
+
+### STD::PARSE_BYTE_COUNT
+
+Parse a byte-count token to `INT` bytes.
+
+Bare digits are bytes; suffixes `B`/`KB`/`MB`/`GB`/`TB` scale
+decimal and `KIB`/`MIB`/`GIB`/`TIB` binary, in any case. Plain
+`INT` values pass through (already bytes); integral finite `FLOAT`
+values convert. Pairs with `FORMAT_BYTE_COUNT` for the round trip.
+
+```oxdock
+# Units parse case-insensitively; bare digits are bytes.
+IMPORT [STD]
+LET $bytes: INT = PARSE_BYTE_COUNT("1Gb")
+ASSERT_EQ $bytes 1_000_000_000
+
+# Binary suffixes scale by powers of two.
+LET $mebi: INT = PARSE_BYTE_COUNT("2mib")
+ASSERT_EQ $mebi 2_097_152
+
+# Digit runs group Rust-literal style.
+LET $grouped: INT = PARSE_BYTE_COUNT("1_000_000")
+ASSERT_EQ $grouped 1_000_000
+
+# Plain numbers pass through as bytes already.
+LET $plain: INT = PARSE_BYTE_COUNT(1_048_576)
+ASSERT_EQ $plain 1_048_576
+
+# Bare literals group too.
+LET $bare: INT = PARSE_BYTE_COUNT(1_000_000)
+ASSERT_EQ $bare 1_000_000
+
+# One optional space separates number from unit.
+LET $spaced: INT = PARSE_BYTE_COUNT("1 GB")
+ASSERT_EQ $spaced 1_000_000_000
+```
+
+
+**Signature:** `STD::PARSE_BYTE_COUNT($text: ANY) -> INT`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+- `$text` (`ANY`): Byte-count token to parse, or bytes already.
+
+**Returns:** `INT`
+
+### STD::PARSE_DURATION
+
+Parse a duration token to `INT` milliseconds.
+
+Suffixes `ms`/`s`/`m`/`h`; a bare number means seconds. Pairs with
+`FORMAT_DURATION` for the round trip.
+
+```oxdock
+# A bare number means seconds, like TIMEOUT.
+IMPORT [STD]
+LET $ms: INT = PARSE_DURATION("2m")
+ASSERT_EQ $ms 120_000
+
+# Milliseconds stay exact.
+LET $exact: INT = PARSE_DURATION("1500ms")
+ASSERT_EQ $exact 1_500
+
+# One optional space separates number from unit.
+LET $spaced: INT = PARSE_DURATION("1 h")
+ASSERT_EQ $spaced 3_600_000
+```
+
+
+**Signature:** `STD::PARSE_DURATION($text: STRING) -> INT`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+- `$text` (`STRING`): Duration token to parse.
+
+**Returns:** `INT`
 
 ### STD::PARSE_JSON
 

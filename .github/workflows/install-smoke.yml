@@ -102,9 +102,8 @@ jobs:
 
           RUN ["cargo", "build", "--release", "-p", "oxdock", "--all-features"]
 
-          # Identity, exact-free: the binary must report itself, and the
-          # manifest version is echoed for the log. Exact equality lives
-          # in the release gate, which enforces it authoritatively later.
+          # Identity: the binary must report the manifest version it
+          # was built from. Skew fails here, before anything stages.
           LET $manifest: MAP<ANY> = LOAD_TOML("Cargo.toml")
           ECHO "manifest: {{ $manifest.workspace.package.version }}"
 
@@ -112,7 +111,7 @@ jobs:
           [family:unix] WITH_IO [stdout=$p2] RUN ["{{ env:GITHUB_WORKSPACE }}/target/release/oxdock", "--version"]
           [family:windows] WITH_IO [stdout=$p2] RUN ["{{ env:GITHUB_WORKSPACE }}\\target\\release\\oxdock.exe", "--version"]
           WITH_IO [stdin=$p2] READ_LINE $reported
-          ASSERT_CONTAINS $reported "oxdock "
+          ASSERT_EQ $reported "oxdock {{ $manifest.workspace.package.version }}"
 
           # Stage a local release of the branch build: every leg below
           # fetches through the stub from loopback, so branch bytes
@@ -172,6 +171,91 @@ jobs:
           name: smoke-stage-${{ matrix.os }}
           path: ${{ runner.temp }}/oxdock-stage
           retention-days: 1
+
+      # TODO: Update comment/workflow once UNARCHIVE lands in release.
+      #
+      # Self-bootstrap through the branch engine: download the pinned
+      # (previous) release tarball and unpack it with UNARCHIVE, no
+      # system tar involved. Proves the branch vocabulary handles real
+      # release artifacts end to end. Runs on the branch binary (the
+      # pinned engine lacks UNARCHIVE); bash only stages the script
+      # file, the work is all DSL.
+      - name: Self-bootstrap previous release with branch engine
+        shell: bash
+        run: |
+          set -euo pipefail
+          branch_bin="target/release/oxdock"
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            branch_bin="target/release/oxdock.exe"
+          fi
+          # Exact identity, shell-stripped: the DSL has no string
+          # surgery, so the `v` comes off here like the setup action
+          # does for its own handoff check.
+          export OXDOCK_EXPECTED_VERSION="${OXDOCK_PINNED_ENGINE#v}"
+          script="${RUNNER_TEMP}/self-bootstrap.oxfile"
+          cat > "$script" <<'OXDOCK_EOF'
+          IMPORT [STD]
+          INHERIT_ENV [GITHUB_TOKEN, RUNNER_TEMP, OXDOCK_PINNED_ENGINE, OXDOCK_EXPECTED_VERSION, PATH]
+          WORKSPACE SYSTEM
+          MKDIR {{ env:RUNNER_TEMP }}/self-bootstrap
+          WORKDIR {{ env:RUNNER_TEMP }}/self-bootstrap
+
+          # Target mapping mirrors the stub: this leg fetches what the
+          # stub would fetch for this runner. macOS qualifies by arch
+          # because no x86_64-apple-darwin asset is published: an Intel
+          # runner must fail naming that fact, never silently fetch
+          # the ARM64 binary into a Bad-CPU-type execution.
+          [os:macos, arch:aarch64] LET $target: STRING = "aarch64-apple-darwin"
+          [os:macos, arch:x86_64] {
+            ECHO "no Intel macOS asset is published; refusing the ARM64 binary"
+            EXIT 1
+          }
+          [os:linux, arch:x86_64] LET $target: STRING = "x86_64-unknown-linux-musl"
+          [os:linux, arch:aarch64] LET $target: STRING = "aarch64-unknown-linux-musl"
+          [os:windows, arch:x86_64] LET $target: STRING = "x86_64-pc-windows-msvc"
+          [os:windows, arch:aarch64] LET $target: STRING = "aarch64-pc-windows-msvc"
+
+          # Two engines, two roles: the branch binary (outer, runs this
+          # script) proves the new code; the previous-release binary
+          # (inner, extracted below) proves the old artifact unpacks
+          # and runs under it. `$prev_engine` is the extracted file
+          # itself, executed by absolute path, so junk bytes fail at
+          # spawn instead of passing silently.
+          [family:unix] LET $prev_engine: STRING = "{{ env:RUNNER_TEMP }}/self-bootstrap/prev/oxdock"
+          [family:windows] LET $prev_engine: STRING = "{{ env:RUNNER_TEMP }}/self-bootstrap/prev/oxdock.exe"
+
+          RUN ["curl", "-fsSL", "-H", "Authorization: Bearer {{ env:GITHUB_TOKEN }}", "-o", "prev.tar.gz", "https://github.com/jzombie/rust-oxdock/releases/download/{{ env:OXDOCK_PINNED_ENGINE }}/oxdock-{{ $target }}.tar.gz"]
+          RUN ["curl", "-fsSL", "-H", "Authorization: Bearer {{ env:GITHUB_TOKEN }}", "-o", "SHA256SUMS", "https://github.com/jzombie/rust-oxdock/releases/download/{{ env:OXDOCK_PINNED_ENGINE }}/SHA256SUMS"]
+
+          # Integrity before unpack: the computed digest must name a
+          # line of the release checksum file. Junk, truncation, or a
+          # substituted tarball fails here, never in the unpack below.
+          # `grep` does the line lookup because the DSL has no string
+          # surgery; the hash itself is computed natively.
+          LET $h: PIPE
+          WITH_IO [stdout=$h] HASH_SHA256 prev.tar.gz
+          WITH_IO [stdin=$h] READ_LINE $computed
+          ECHO "verifying sha256: {{ $computed }}"
+          RUN ["grep", "-q", "^{{ $computed }} ", "SHA256SUMS"]
+
+          # Freshness: the executed binary must come from this unpack,
+          # never a stale dir. A leftover `prev/` is removed first; a
+          # fresh tree skips the removal because REMOVE fails closed
+          # on missing paths. The kind binds outside the IF because
+          # `PATH_TYPE` is AST-only: conditions evaluate over RPN.
+          LET $prev_kind: STRING = PATH_TYPE("prev")
+          IF $prev_kind != "absent" {
+            REMOVE --recursive prev
+          }
+
+          UNARCHIVE prev.tar.gz prev
+
+          LET $p: PIPE
+          WITH_IO [stdout=$p] RUN [$prev_engine, "--version"]
+          WITH_IO [stdin=$p] READ_LINE $reported
+          ASSERT_EQ $reported "oxdock {{ env:OXDOCK_EXPECTED_VERSION }}"
+          OXDOCK_EOF
+          "$branch_bin" --script "$script"
 
       # TODO: OxDock could resolve latest on its own with a new plugin module
       # dedicated for version tracking, etc.

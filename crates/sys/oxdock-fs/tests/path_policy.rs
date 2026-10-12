@@ -66,6 +66,166 @@ fn discover_workspace_root_prefers_env() {
     assert_eq!(discovered.as_path(), root.as_path());
 }
 
+#[cfg(unix)]
+#[cfg_attr(
+    miri,
+    ignore = "GuardedPath::tempdir relies on OS tempdirs; blocked under Miri isolation"
+)]
+#[test]
+fn nofollow_opens_refuse_planted_links() {
+    use oxdock_fs::PathResolver;
+
+    let tempdir = GuardedPath::tempdir().expect("tempdir");
+    let root = tempdir.as_guarded_path().clone();
+    if !oxdock_sys_test_utils::can_create_symlinks(root.as_path()) {
+        return;
+    }
+    let resolver = PathResolver::new_guarded(root.clone(), root.clone()).expect("resolver");
+    let target = root.join("target.txt").expect("target");
+    resolver.write_file(&target, b"secret").expect("write");
+    let link = root.join("link.txt").expect("link");
+    resolver.symlink(&target, &link).expect("symlink");
+    // Plain files open normally through the nofollow path.
+    let mut contents = Vec::new();
+    std::io::Read::read_to_end(
+        &mut resolver
+            .open_read_nofollow(&target, &root)
+            .expect("read open"),
+        &mut contents,
+    )
+    .expect("read");
+    assert_eq!(contents, b"secret");
+    // A planted final-component link fails instead of redirecting.
+    assert!(
+        resolver.open_read_nofollow(&link, &root).is_err(),
+        "link read must refuse"
+    );
+    assert!(
+        resolver.open_write_nofollow(&link, &root).is_err(),
+        "link write must refuse"
+    );
+    let kept = resolver.read_file(&target).expect("reread");
+    assert_eq!(kept, b"secret", "link target must survive untouched");
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg_attr(
+    miri,
+    ignore = "GuardedPath::tempdir relies on OS tempdirs; blocked under Miri isolation"
+)]
+#[test]
+fn nofollow_opens_verify_descriptor_tree() {
+    // A parent link redirects beneath the expected root: the `lstat`
+    // layers pass (final is fresh), but the descriptor's own path
+    // misses the root and the open fails. Without descriptor
+    // verification this opens fine, so the test pins the new wall.
+    use oxdock_fs::PathResolver;
+
+    let tempdir = GuardedPath::tempdir().expect("tempdir");
+    let root = tempdir.as_guarded_path().clone();
+    if !oxdock_sys_test_utils::can_create_symlinks(root.as_path()) {
+        return;
+    }
+    let resolver = PathResolver::new_guarded(root.clone(), root.clone()).expect("resolver");
+    let out = root.join("out").expect("out");
+    resolver.create_dir_all(&out).expect("mkdir out");
+    let shadow = root.join("shadow").expect("shadow");
+    resolver.create_dir_all(&shadow).expect("mkdir shadow");
+    let shadow_file = shadow.join("file.txt").expect("shadow file");
+    resolver.write_file(&shadow_file, b"shadow").expect("write");
+    let sub = out.join("sub").expect("sub");
+    resolver.symlink(&shadow, &sub).expect("plant parent link");
+    let through = sub.join("file.txt").expect("through path");
+    assert!(
+        resolver.open_read_nofollow(&through, &out).is_err(),
+        "parent-redirected read must refuse"
+    );
+    let fresh = sub.join("new.txt").expect("fresh path");
+    assert!(
+        resolver.open_write_nofollow(&fresh, &out).is_err(),
+        "parent-redirected write must refuse"
+    );
+    assert!(
+        !shadow.join("new.txt").expect("shadow new").exists(),
+        "rolled-back file must be gone"
+    );
+    // A pre-existing redirect target must survive byte-identical:
+    // no truncate runs before verification, and rollback only
+    // removes files this open created.
+    let victim = shadow.join("victim.txt").expect("victim");
+    resolver
+        .write_file(&victim, b"precious")
+        .expect("write victim");
+    let through_victim = sub.join("victim.txt").expect("through victim");
+    assert!(
+        resolver.open_write_nofollow(&through_victim, &out).is_err(),
+        "redirected write to existing file must refuse"
+    );
+    let kept = resolver.read_file(&victim).expect("reread victim");
+    assert_eq!(kept, b"precious", "redirect target must survive intact");
+}
+
+#[cfg(target_os = "macos")]
+#[cfg_attr(
+    miri,
+    ignore = "GuardedPath::tempdir relies on OS tempdirs; blocked under Miri isolation"
+)]
+#[test]
+fn descriptor_verify_folds_case() {
+    // `realpath` preserves caller spelling while `F_GETPATH` reports
+    // on-disk case. Guarding the spelling before the directory exists
+    // keeps its lexical (divergent) form; creating it lowercase after
+    // makes the descriptor report on-disk case. Exact compare rejects
+    // this one file spelled two ways; folding accepts. On
+    // case-sensitive volumes the divergent spelling addresses a
+    // distinct directory, so the open verifies trivially: no skip
+    // needed, nothing false to catch there.
+    use oxdock_fs::PathResolver;
+
+    let tempdir = GuardedPath::tempdir().expect("tempdir");
+    let root = tempdir.as_guarded_path().clone();
+    let resolver = PathResolver::new_guarded(root.clone(), root.clone()).expect("resolver");
+    let upper = root.join("CASEFOLD").expect("upper");
+    let lower = root.join("casefold").expect("lower");
+    resolver.create_dir_all(&lower).expect("mkdir");
+    let file = upper.join("f.txt").expect("file");
+    let mut handle = resolver
+        .open_write_nofollow(&file, &upper)
+        .expect("divergent-case open must verify");
+    std::io::Write::write_all(&mut handle, b"folded").expect("write");
+    drop(handle);
+    let back = resolver.read_file(&file).expect("reread");
+    assert_eq!(back, b"folded");
+}
+
+#[cfg_attr(
+    miri,
+    ignore = "GuardedPath::tempdir relies on OS tempdirs; blocked under Miri isolation"
+)]
+#[test]
+fn refuse_link_ancestors_rejects_parent_escape() {
+    // Purely lexical gate, no filesystem access: parent references
+    // bail before any walk, while pure descent (missing or not) is
+    // fine. Cross-platform by construction: no links, no casing.
+    use oxdock_fs::PathResolver;
+
+    let tempdir = GuardedPath::tempdir().expect("tempdir");
+    let root = tempdir.as_guarded_path().clone();
+    let base = root.join("base").expect("base");
+    assert!(
+        PathResolver::refuse_link_ancestors(&base, "../escape").is_err(),
+        "parent escape must bail before walking"
+    );
+    assert!(
+        PathResolver::refuse_link_ancestors(&base, "a/../../escape").is_err(),
+        "nested parent escape must bail before walking"
+    );
+    assert!(
+        PathResolver::refuse_link_ancestors(&base, "a/b").is_ok(),
+        "pure descent must pass"
+    );
+}
+
 #[cfg(feature = "mock-fs")]
 #[test]
 fn mock_fs_writes_and_reads_files() {

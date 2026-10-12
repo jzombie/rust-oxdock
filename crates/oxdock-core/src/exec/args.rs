@@ -231,7 +231,7 @@ pub(crate) fn resolve_arg_as_int<P: ProcessManager>(
     cx: &mut StepCtx<'_, P>,
 ) -> Result<i64> {
     let resolved = resolve_arg(arg, cx)?;
-    resolved
+    oxdock_parser::command::strip_digit_separators(&resolved)
         .parse::<i64>()
         .map_err(|_| anyhow::anyhow!("expected int, got {resolved:?}"))
 }
@@ -431,6 +431,168 @@ pub(crate) fn path_type_from_value<P: ProcessManager>(
     Ok(Value::string(kind.to_string()))
 }
 
+/// Value-semantics core of `IS_EXEC()` (#100): true iff the name
+/// resolves to an executable file on the current platform. Bare
+/// command names search `env:PATH` (plus a `.exe` spelling on
+/// Windows); spellings containing a separator check that file
+/// directly. The empty string is immediately false. Paths resolve
+/// through the workspace like everything else: absolute `PATH`
+/// entries need `WORKSPACE SYSTEM` to be visible, and scripts only
+/// see a `PATH` they inherit. Only [`WorkspaceFs`](oxdock_fs::WorkspaceFs)
+/// trait methods are used; backends without metadata (mocks) simply
+/// report false. TOCTOU races are inherent and accepted.
+pub(crate) fn is_exec_from_value<P: ProcessManager>(
+    args: &[Value],
+    cx: &mut StepCtx<'_, P>,
+) -> Result<Value> {
+    let name_val = args
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("IS_EXEC requires a name argument"))?;
+    let name = match name_val.as_str() {
+        Some(s) => s.to_string(),
+        None => bail!("IS_EXEC name argument must evaluate to a string"),
+    };
+    if name.is_empty() {
+        return Ok(Value::bool(false));
+    }
+    Ok(Value::bool(is_exec_name(cx, &name)))
+}
+
+/// Resolve one tool spelling: direct files by path, bare names by
+/// `PATH` search.
+fn is_exec_name<P: ProcessManager>(cx: &StepCtx<'_, P>, name: &str) -> bool {
+    let exts = platform_exts(cx);
+    if name.contains('/') || name.contains('\\') {
+        return exe_candidates(name, &exts)
+            .iter()
+            .any(|candidate| is_executable_candidate(cx, candidate, &exts));
+    }
+    let path_var = cx.state.envs.get("PATH").cloned().unwrap_or_default();
+    for dir in std::env::split_paths(&path_var) {
+        let dir = dir.to_string_lossy();
+        let base = dir.trim_end_matches(['/', '\\']);
+        // Empty segments traditionally mean the working directory;
+        // probing it implicitly would surprise, so skip them.
+        if base.is_empty() {
+            continue;
+        }
+        for candidate in exe_candidates(name, &exts) {
+            if is_executable_candidate(cx, &format!("{base}/{candidate}"), &exts) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Split a `PATHEXT` value into dotted extensions (`.EXE`, `.BAT`,
+/// ...): `;`-separated, trimmed, empties skipped, missing dots added,
+/// duplicates dropped case-insensitively. Only an unset variable falls
+/// back to the Windows default; an explicitly empty one probes nothing,
+/// matching what the shell itself resolves.
+#[cfg(windows)]
+pub(crate) fn parse_pathext(raw: Option<&str>) -> Vec<String> {
+    const DEFAULT_PATHEXT: &str = ".COM;.EXE;.BAT;.CMD";
+    let mut exts = Vec::new();
+    for piece in raw.unwrap_or(DEFAULT_PATHEXT).split(';') {
+        let stem = piece.trim().trim_start_matches('.');
+        if stem.is_empty() {
+            continue;
+        }
+        let dotted = format!(".{stem}");
+        if !exts
+            .iter()
+            .any(|seen: &String| seen.eq_ignore_ascii_case(&dotted))
+        {
+            exts.push(dotted);
+        }
+    }
+    exts
+}
+
+/// Extension list for candidate probing: the script's `PATHEXT` on
+/// Windows, empty elsewhere (Unix probes the bare name only). Read
+/// from the script environment like `PATH`, never the host's, so the
+/// answer matches the world the script runs in.
+#[cfg(windows)]
+fn platform_exts<P: ProcessManager>(cx: &StepCtx<'_, P>) -> Vec<String> {
+    parse_pathext(cx.state.envs.get("PATHEXT").map(String::as_str))
+}
+
+/// Extension list for candidate probing: the script's `PATHEXT` on
+/// Windows, empty elsewhere (Unix probes the bare name only).
+#[cfg(not(windows))]
+fn platform_exts<P: ProcessManager>(cx: &StepCtx<'_, P>) -> Vec<String> {
+    let _ = cx;
+    Vec::new()
+}
+
+/// Candidate spellings for one tool name: the bare name everywhere,
+/// plus one per executable extension on Windows. A name already
+/// carrying an extension probes as-is: appending again (`tool.bat.exe`)
+/// would never match what the shell resolves.
+fn exe_candidates(name: &str, exts: &[String]) -> Vec<String> {
+    #[cfg(windows)]
+    {
+        let lower = name.to_ascii_lowercase();
+        if exts
+            .iter()
+            .any(|ext| lower.ends_with(&ext.to_ascii_lowercase()))
+        {
+            vec![name.to_string()]
+        } else {
+            let mut out = vec![name.to_string()];
+            out.extend(exts.iter().map(|ext| format!("{name}{ext}")));
+            out
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = exts;
+        vec![name.to_string()]
+    }
+}
+
+/// True iff the candidate guards to a runnable file: a real file
+/// everywhere, plus an executable bit on Unix or a `PATHEXT` extension
+/// on Windows. Unresolvable spellings (missing files, paths outside
+/// the selected roots) read false, never error.
+fn is_executable_candidate<P: ProcessManager>(
+    cx: &StepCtx<'_, P>,
+    candidate: &str,
+    exts: &[String],
+) -> bool {
+    let Ok(guard) = cx.state.fs.resolve_read(&cx.state.cwd, candidate) else {
+        return false;
+    };
+    if !matches!(
+        cx.state.fs.entry_kind(&guard),
+        Ok(oxdock_fs::EntryKind::File)
+    ) {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        let _ = exts;
+        use std::os::unix::fs::PermissionsExt;
+        cx.state
+            .fs
+            .metadata(&guard)
+            .map(|meta| meta.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(windows)]
+    {
+        let lower = candidate.to_ascii_lowercase();
+        exts.iter()
+            .any(|ext| lower.ends_with(&ext.to_ascii_lowercase()))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (candidate, &guard, exts);
+        return false;
+    }
+}
 /// Value-semantics core of `PATH_WRITABLE()`: true iff an ordinary file
 /// can be created at the path, decided WITHOUT creating anything
 /// permanent. The empty string is immediately false (it would otherwise
@@ -671,7 +833,8 @@ pub(crate) fn int_from_value(val: Value) -> Result<Value> {
     }
     if let Some(s) = val.as_str() {
         let trimmed = trim_ascii(s);
-        return trimmed
+        let clean = oxdock_parser::command::strip_digit_separators(trimmed);
+        return clean
             .parse::<i64>()
             .map(Value::int)
             .map_err(|_| anyhow::anyhow!("INT() requires an integer string, found {s:?}"));

@@ -8,6 +8,29 @@ use crate::GuardedPath;
 #[allow(clippy::disallowed_types)]
 use crate::UnguardedPath;
 
+/// Refuse a final-component symlink at `path` without following it:/// a missing final is fine (fresh files have nothing planted), any
+/// other `lstat` failure denies. Skipped under Miri, whose synthetic
+/// state holds no links.
+#[allow(clippy::disallowed_methods)]
+fn refuse_final_symlink(path: &GuardedPath) -> Result<()> {
+    #[cfg(miri)]
+    {
+        let _ = path;
+        Ok(())
+    }
+    #[cfg(not(miri))]
+    {
+        match std::fs::symlink_metadata(path.as_path()) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e).with_context(|| format!("lstat denied for {}", path.display())),
+            Ok(meta) if meta.file_type().is_symlink() => {
+                bail!("refuses symlink final component: {}", path.display())
+            }
+            Ok(_) => Ok(()),
+        }
+    }
+}
+
 // Guarded filesystem IO helpers (read/write/metadata etc.).
 impl PathResolver {
     #[allow(clippy::disallowed_methods)]
@@ -65,6 +88,86 @@ impl PathResolver {
             .check_access(path.as_path(), AccessMode::Write)
             .with_context(|| format!("open_append denied for {}", path.display()))?;
         self.backend.open_append(&guarded)
+    }
+
+    /// Guard-checked link-refusing read open: containment of the
+    /// current resolution first, then a no-follow `lstat` refusal of a
+    /// visible final-component link, then an `O_NOFOLLOW` open of the
+    /// raw path (Unix) whose descriptor path must stay under
+    /// `expected_root`, so a link swapped in after the `lstat` fails
+    /// instead of redirecting the IO.
+    #[allow(clippy::disallowed_methods)]
+    pub fn open_read_nofollow(
+        &self,
+        path: &GuardedPath,
+        expected_root: &GuardedPath,
+    ) -> Result<Box<dyn std::io::Read + Send>> {
+        self.check_access(path.as_path(), AccessMode::Read)
+            .or_else(|_| {
+                self.check_access_with_root(&self.build_context, path.as_path(), AccessMode::Read)
+            })
+            .with_context(|| format!("open_read denied for {}", path.display()))?;
+        refuse_final_symlink(path)?;
+        self.backend.open_read_nofollow(path, expected_root)
+    }
+
+    /// Guard-checked link-refusing write open (same construction, plus
+    /// best-effort rollback of the just-created file on mismatch).
+    #[allow(clippy::disallowed_methods)]
+    pub fn open_write_nofollow(
+        &self,
+        path: &GuardedPath,
+        expected_root: &GuardedPath,
+    ) -> Result<Box<dyn std::io::Write + Send>> {
+        self.check_access(path.as_path(), AccessMode::Write)
+            .with_context(|| format!("open_write denied for {}", path.display()))?;
+        refuse_final_symlink(path)?;
+        self.backend.open_write_nofollow(path, expected_root)
+    }
+
+    /// Refuse planted intermediate links under `base` along `rel`: a
+    /// sanitized rel is pure descent, so walking `base` extended by
+    /// each rel prefix stays in one path-normalization domain (no
+    /// verbatim/short-name/slash drift between joined paths) and can
+    /// never address anything above `base`. Every existing prefix is
+    /// `lstat`ed without following; missing ones are fresh paths with
+    /// nothing planted. Runs in every workspace mode, including
+    /// `SYSTEM`, where guard containment is vacuous. Skipped under
+    /// Miri: synthetic state holds no links.
+    #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
+    pub fn refuse_link_ancestors(base: &GuardedPath, rel: &str) -> Result<()> {
+        #[cfg(miri)]
+        {
+            let _ = (base, rel);
+            Ok(())
+        }
+        #[cfg(not(miri))]
+        {
+            let mut current = base.as_path().to_path_buf();
+            for part in rel.split('/') {
+                // Defensive: the sanitizer removes these upstream, and
+                // `..` must never walk above base.
+                if part.is_empty() || part == "." {
+                    continue;
+                }
+                if part == ".." {
+                    bail!("refuses parent reference above {}", base.display());
+                }
+                current.push(part);
+                match std::fs::symlink_metadata(&current) {
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => {
+                        return Err(e)
+                            .with_context(|| format!("lstat denied for {}", current.display()));
+                    }
+                    Ok(meta) if meta.file_type().is_symlink() => {
+                        bail!("refuses link ancestor {}", current.display());
+                    }
+                    Ok(_) => {}
+                }
+            }
+            Ok(())
+        }
     }
 
     #[cfg(not(miri))]
