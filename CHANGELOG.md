@@ -14,6 +14,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - Grouped numeric literals: integer and float literals accept Rust-style `_` separators (`1_000_000`, `1_024.768`), and every string-to-number coercion (`INT()` conversion, `ASSERT_EQ` operands, `EXIT` codes, byte counts) reads them through one shared rule, so `-1_000` means negative one thousand in every position. Leading, trailing, and doubled separators never become numbers.
 - `STD::IS_EXEC` function (#100, #55): reports whether a name resolves to an executable file on the current platform. Bare command names search `env:PATH` (plus the `.exe`, `.bat`, `.cmd`, and `.com` spellings on Windows); separator spellings check that file directly. True means a real file with an executable bit on Unix or an executable extension on Windows; anything unresolvable reads false, never errors. On Windows the extension set comes from the script's `env:PATHEXT` (default `.COM;.EXE;.BAT;.CMD`, an explicitly empty value probes nothing), so the predicate resolves what the shell would. Gating stays the script's call: `RUN` strings are shell-mediated (builtins, `&&` chains, pipes), so no pre-flight second-guesses them; `IF IS_EXEC(...)` is the opt-in check.
 
+### Changed
+
+- The `docs-gen` showcase pipelines (`resume`, `generic-readme`) move from top-level `examples/` to `crates/docs-gen/examples/`: they demonstrate the docs pipeline, not OxDock scripts, so they live with their generator. The `crates` discovery scope covers the new location (the `examples` scope is gone); all rendered outputs are byte-identical, and the reusable docs workflow's starter-shape pointer follows the move.
+
 ## [0.24.5-alpha] - 2026-10-11
 
 ### Changed
