@@ -7,6 +7,7 @@ use flate2::write::GzEncoder;
 use oxdock_fs::CopySourceRoot;
 use oxdock_fs::EntryKind;
 use oxdock_fs::GuardedPath;
+use oxdock_fs::PathResolver;
 use oxdock_fs::to_forward_slashes;
 use oxdock_parser::{
     Arg, Expr, IoBinding, IoStream, PipeTarget, Step, StepKind, TypeTag, Value, WorkspaceTarget,
@@ -690,6 +691,10 @@ fn collect_archive_tree(
             let mut dirs = Vec::new();
             let mut stack = vec![(src_abs.clone(), String::new())];
             while let Some((dir_abs, dir_rel)) = stack.pop() {
+                // A swapped intermediate link would redirect the whole
+                // subtree walk: ancestors must be real directories.
+                PathResolver::refuse_link_ancestors(src_abs, &dir_abs)
+                    .with_context(|| tag.clone())?;
                 let mut entries = fs.read_dir_entries(&dir_abs).with_context(|| tag.clone())?;
                 entries.sort_by_key(|entry| entry.file_name());
                 for entry in entries {
@@ -736,6 +741,7 @@ fn append_archive_tree<W: std::io::Write>(
     builder: &mut tar::Builder<W>,
     files: &[(String, GuardedPath)],
     dirs: &[(String, GuardedPath)],
+    src_abs: &GuardedPath,
     tag: &str,
 ) -> Result<()> {
     for (rel, guard) in dirs {
@@ -756,7 +762,12 @@ fn append_archive_tree<W: std::io::Write>(
     for (rel, guard) in files {
         let rel = sanitize_rel(rel).with_context(|| tag.to_string())?;
         let meta = fs.metadata(guard).with_context(|| tag.to_string())?;
-        let mut reader = fs.open_read(guard).with_context(|| tag.to_string())?;
+        // Link-refusing open: a symlink planted after the listing
+        // probe fails here instead of packing its target's bytes, and
+        // the descriptor must stay under the packed tree.
+        let mut reader = fs
+            .open_read_nofollow(guard, src_abs)
+            .with_context(|| tag.to_string())?;
         let mut header = tar::Header::new_gnu();
         header.set_mode(archive_entry_mode(&meta, 0o644));
         header.set_size(meta.len());
@@ -807,13 +818,13 @@ pub(super) fn archive<P: ProcessManager>(
         .with_context(|| tag.clone())?;
     if raw {
         let mut builder = tar::Builder::new(out);
-        append_archive_tree(cx.state.fs.as_ref(), &mut builder, &files, &dirs, &tag)?;
+        append_archive_tree(cx.state.fs.as_ref(), &mut builder, &files, &dirs, &src_abs, &tag)?;
         let mut out = builder.into_inner().with_context(|| tag.clone())?;
         std::io::Write::flush(&mut out).with_context(|| tag.clone())?;
     } else {
         let encoder = GzEncoder::new(out, Compression::default());
         let mut builder = tar::Builder::new(encoder);
-        append_archive_tree(cx.state.fs.as_ref(), &mut builder, &files, &dirs, &tag)?;
+        append_archive_tree(cx.state.fs.as_ref(), &mut builder, &files, &dirs, &src_abs, &tag)?;
         builder
             .into_inner()
             .with_context(|| tag.clone())?
@@ -869,14 +880,27 @@ pub(super) fn unarchive<P: ProcessManager>(
         match entry {
             StreamedEntry::Dir { path, mode } => {
                 let dir = dst_abs.join(&path).with_context(|| entry_tag.clone())?;
+                assert_member_within(&dst_abs, &dir, &entry_tag, &path)?;
+                // Planted intermediate links redirect whole subtrees:
+                // every existing ancestor must be a real directory.
+                PathResolver::refuse_link_ancestors(&dst_abs, &dir)
+                    .with_context(|| entry_tag.clone())?;
                 fs.create_dir_all(&dir).with_context(|| entry_tag.clone())?;
                 deferred_dir_modes.push((dir, mode));
             }
             StreamedEntry::File { path, mode, reader } => {
                 let file = dst_abs.join(&path).with_context(|| entry_tag.clone())?;
+                assert_member_within(&dst_abs, &file, &entry_tag, &path)?;
+                PathResolver::refuse_link_ancestors(&dst_abs, &file)
+                    .with_context(|| entry_tag.clone())?;
                 fs.ensure_parent_dir(&file)
                     .with_context(|| entry_tag.clone())?;
-                let mut out = fs.open_write(&file).with_context(|| entry_tag.clone())?;
+                // Link-refusing open: a symlink planted at the member
+                // path fails here instead of truncating its target,
+                // and the descriptor must stay under the destination.
+                let mut out = fs
+                    .open_write_nofollow(&file, &dst_abs)
+                    .with_context(|| entry_tag.clone())?;
                 // Metered copy: bombs read small and write huge, so the
                 // cap counts member bytes out, not archive bytes in. The
                 // tripped member stays truncated while the step fails.
@@ -961,6 +985,25 @@ fn restore_archive_mode(
         fs.set_permissions_mode_unix(path, mode)?;
     }
     Ok(())
+}
+
+/// Final containment wall for unpacked members: the joined path must
+/// sit lexically beneath the destination. The decoder sanitizer
+/// already refused escapes and the guard re-checks containment, but
+/// this asserts the property at the write site itself, independent of
+/// both: it holds in every workspace mode (including `SYSTEM`, where
+/// the guard root is the host) and survives either wall regressing.
+fn assert_member_within(
+    dst: &GuardedPath,
+    member: &GuardedPath,
+    tag: &str,
+    path: &str,
+) -> Result<()> {
+    if member.as_path().starts_with(dst.as_path()) {
+        Ok(())
+    } else {
+        bail!("{tag}: member {path:?} escapes the destination directory")
+    }
 }
 
 pub(super) fn hash_sha256<P: ProcessManager>(

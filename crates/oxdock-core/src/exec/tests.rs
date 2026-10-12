@@ -2859,6 +2859,85 @@ fn unarchive_refuses_hostile_members() {
     }
 }
 
+#[test]
+fn unarchive_refuses_planted_link_at_member_path() {
+    // A link waiting where a member will land: the write must fail
+    // instead of truncating the link's target. Follows would destroy
+    // `sensitive.txt`; the nofollow open refuses with ELOOP.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = temp.as_guarded_path().clone();
+    if !can_create_symlinks(root.as_path()) {
+        return;
+    }
+    let resolver = PathResolver::new_guarded(root.clone(), root.clone()).unwrap();
+    let sensitive = root.join("sensitive.txt").unwrap();
+    resolver.write_file(&sensitive, b"secret").unwrap();
+    let out = root.join("out").unwrap();
+    resolver.create_dir_all(&out).unwrap();
+    let planted = out.join("evil.txt").unwrap();
+    resolver.symlink(&sensitive, &planted).unwrap();
+    let archive = root.join("planted.tar").unwrap();
+    resolver
+        .write_file(&archive, &hostile_tar_bytes("evil.txt", b"new"))
+        .unwrap();
+    let steps = vec![step(StepKind::Unarchive {
+        src: "planted.tar".into(),
+        dst: "out".into(),
+        max_bytes: None,
+    })];
+    let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
+    let err = run_expect_err(fs, &steps, MockProcessManager::default());
+    assert!(
+        err.chain().any(|c| c.to_string().contains("member")),
+        "planted link must fail at the member write: {err:#}"
+    );
+    let kept = resolver.read_file(&sensitive).unwrap();
+    assert_eq!(
+        kept, b"secret",
+        "link target must survive byte-identical"
+    );
+}
+
+#[test]
+fn unarchive_refuses_planted_ancestor_link() {
+    // A link waiting one level up: `out/sub` points at a shadow dir,
+    // so member `sub/evil.txt` would land outside the destination.
+    // The lexical wall passes (`out/sub/evil.txt` starts with `out`),
+    // which is exactly why ancestors get their own `lstat` refusal.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = temp.as_guarded_path().clone();
+    if !can_create_symlinks(root.as_path()) {
+        return;
+    }
+    let resolver = PathResolver::new_guarded(root.clone(), root.clone()).unwrap();
+    let shadow = root.join("shadow").unwrap();
+    resolver.create_dir_all(&shadow).unwrap();
+    let out = root.join("out").unwrap();
+    resolver.create_dir_all(&out).unwrap();
+    let planted = out.join("sub").unwrap();
+    resolver.symlink(&shadow, &planted).unwrap();
+    let archive = root.join("ancestor.tar").unwrap();
+    resolver
+        .write_file(&archive, &hostile_tar_bytes("sub/evil.txt", b"new"))
+        .unwrap();
+    let steps = vec![step(StepKind::Unarchive {
+        src: "ancestor.tar".into(),
+        dst: "out".into(),
+        max_bytes: None,
+    })];
+    let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
+    let err = run_expect_err(fs, &steps, MockProcessManager::default());
+    assert!(
+        err.chain()
+            .any(|c| c.to_string().contains("ancestor")),
+        "planted ancestor link must fail the unpack: {err:#}"
+    );
+    assert!(
+        !shadow.join("evil.txt").unwrap().exists(),
+        "no byte may land through the planted ancestor"
+    );
+}
+
 /// Splice a hostile member name into an otherwise valid raw tar and
 /// re-checksum its header: the `tar` builder refuses hostile names up
 /// front, but hostile bytes arrive over the wire.
