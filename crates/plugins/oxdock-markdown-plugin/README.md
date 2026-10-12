@@ -40,12 +40,12 @@ Render record data as an aligned Markdown table: one row per MAP,
 one column per key. Fails strict on shapes with no table in them.
 
 
-**Signature:** `MAP_TO_MD_TABLE($map: ANY) -> STRING`
+**Signature:** `MAP_TO_MD_TABLE($map: MAP<ANY>|LIST<MAP<ANY>>) -> STRING`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
-- `$map` (`ANY`): Record data: a MAP renders one row, a LIST of MAPs renders one row per entry with union columns.
+- `$map` (`MAP<ANY>|LIST<MAP<ANY>>`): Record data: a MAP renders one row, a LIST of MAPs renders one row per entry with union columns.
 
 **Returns:** `STRING`
 

@@ -59,12 +59,14 @@ fn guard_root(temp: &GuardedTempDir) -> GuardedPath {
 }
 
 /// One host-owned record shape for the alias-collision proof below.
-static EMP_FIELDS: &[Field] = &[Field {
-    name: "name",
-    ty: TypeTag::String,
-    docs: "",
-    optional: false,
-}];
+fn emp_fields() -> std::sync::Arc<[Field]> {
+    std::sync::Arc::from([Field {
+        name: "name".to_string(),
+        ty: TypeTag::String,
+        docs: "",
+        optional: false,
+    }])
+}
 
 fn read_trimmed(path: &GuardedPath) -> String {
     let resolver = PathResolver::new(path.root(), path.root()).unwrap();
@@ -118,7 +120,7 @@ fn type_alias_collisions_with_host_type_and_schema_fail() {
         types: vec![],
         record_schemas: vec![RecordSchema {
             name: "EMP",
-            fields: EMP_FIELDS,
+            fields: emp_fields(),
         }],
     });
     let err = engine

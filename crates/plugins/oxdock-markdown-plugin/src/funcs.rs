@@ -17,6 +17,7 @@ use oxdock_process::ProcessManager;
 #[oxdock_func(pure, returns = TypeTag::String)]
 fn map_to_md_table(
     /// Record data: a MAP renders one row, a LIST of MAPs renders one row per entry with union columns.
+    #[union(Map<Any>, List<Map<Any>>)]
     map: Value,
 ) -> Result<Value> {
     let table = crate::markdown::map_to_table(&map)?;
@@ -57,7 +58,7 @@ fn toc(
 ///
 /// Immediate helper for composition and tests: returns one MAP per
 /// heading with `level`, `text`, and `anchor` keys.
-#[oxdock_func(pure, returns = TypeTag::ListOf(&TypeTag::Any))]
+#[oxdock_func(pure, returns = TypeTag::ListOf(std::sync::Arc::new(TypeTag::Any)))]
 fn parse(
     /// Markdown document to scan for headings.
     md: String,
@@ -167,5 +168,38 @@ mod tests {
     fn toc_rejects_bad_options_at_the_boundary() {
         let options = map(&[("format", Value::string("grid".to_string()))]);
         assert!(toc("## A\n".to_string(), options.as_map().expect("map").clone()).is_err());
+    }
+
+    #[test]
+    fn toc_options_enforce_value_shapes() {
+        // The generated `#[options]` static is the single source:
+        // `check_options` fails a wrong-typed present value naming
+        // func, key, expected, and actual before the body runs.
+        let meta = match <Toc as OxDockFn<oxdock_process::ShellProcessManager>>::registration() {
+            oxdock_core::HostRegistration::Pure { meta, .. } => meta,
+            oxdock_core::HostRegistration::Stateful { meta, .. } => meta,
+        };
+        let statics = meta
+            .params
+            .as_deref()
+            .expect("params")
+            .iter()
+            .find(|param| param.name == "options")
+            .expect("options param")
+            .options
+            .expect("options static");
+        let bad: BTreeMap<String, Value> =
+            [("min_level".to_string(), Value::string("2".to_string()))]
+                .into_iter()
+                .collect();
+        let err =
+            oxdock_core::check_options(&bad, statics, "MARKDOWN::TOC").expect_err("must fail");
+        assert!(
+            format!("{err:#}").contains("expected INT, got STRING"),
+            "names the shape: {err:#}"
+        );
+        // Absent keys pass: defaults apply downstream.
+        oxdock_core::check_options(&BTreeMap::new(), statics, "MARKDOWN::TOC")
+            .expect("absent passes");
     }
 }

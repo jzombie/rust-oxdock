@@ -210,7 +210,7 @@ pub fn run_with_plugins(
         FUNC SYNC_MEMBER($member: STRING) {
             ECHO "syncing values for {{ $member }}"
 
-            LET $pkg: MAP<ANY> = RUST::CARGO_PACKAGE($member)
+                LET $pkg: MAP<name: STRING, description: STRING> = RUST::CARGO_PACKAGE($member)
             IF $pkg.name != "" {
                 LET $values_path: STRING = "{{ $member }}/.oxdock/template/values.json"
                 LET $pt: STRING = PATH_TYPE($values_path)

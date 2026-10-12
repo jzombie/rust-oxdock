@@ -6,6 +6,55 @@ use oxdock_process::ProcessManager;
 use super::state::ExecState;
 use super::steps::StepCtx;
 
+/// Single mismatch constructor for the coercion path: names the
+/// expected tag structurally and the word the value holds. All
+/// coercion arms report through here so message drift cannot hide
+/// a new admission.
+pub(crate) fn type_mismatch(ctx: &str, expected: &TypeTag, value: &Value) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{ctx}: TypeMismatch: expected {}, got {}",
+        oxdock_parser::render_structural(expected),
+        value.type_name()
+    )
+}
+
+/// Strict return-slot check for host functions: the value a host body
+/// hands back must satisfy its declared `returns` tag exactly. No
+/// coercion applies on this path: a mismatch is an implementation
+/// bug, so it fails loudly naming the function instead of reshaping
+/// the value. Script bodies carry no declared slot (their type is
+/// inferred by unification), so they never reach here. Shared by the
+/// expression call path here and the statement call path in
+/// `handlers::call_func_value`.
+pub(crate) fn check_host_return_value(
+    ctx: &str,
+    returns: &Option<TypeTag>,
+    value: &Value,
+) -> Result<()> {
+    let Some(slot) = returns else {
+        return Ok(());
+    };
+    oxdock_parser::check_value_at(slot, value, ctx)
+}
+
+/// Narrow a `STRING|PATH` word to display text: strings verbatim,
+/// paths lossy-rendered. The caller guarantees admission (macro
+/// `#[union]` extractor or an explicit check), so anything else is
+/// a bug, not a user error.
+pub(crate) fn string_or_path_text(value: &Value) -> Result<String> {
+    if let Some(s) = value.as_str() {
+        return Ok(s.to_string());
+    }
+    if let Some(p) = value.as_path() {
+        return Ok(p.to_string_lossy().to_string());
+    }
+    Err(type_mismatch(
+        "string-or-path position",
+        &oxdock_parser::union_tag!(String, Path),
+        value,
+    ))
+}
+
 /// Coerce a runtime [`Value`] word into a declared type name. Single
 /// coercion point. Type references are plain names resolved against the
 /// run's name directory here (not at parse time, where host descriptors
@@ -30,27 +79,33 @@ pub(crate) fn coerce_value(value: Value, expected: &TypeTag) -> Result<Value> {
     } else {
         return Ok(value);
     }
+    // Unions coerce member-wise, first success in written order: a
+    // union admits everything its members admit, so `LET $u:
+    // INT|FLOAT = "123"` coerces exactly like `LET $x: INT = "123"`.
+    // Static `check_arg` admits the same member pairs, so both layers
+    // agree by construction instead of one promising what the other
+    // rejects. Total failure falls through to the arms below, which
+    // name the set.
+    if let TypeTag::Union(_, members) = expected {
+        for member in members.iter() {
+            if let Ok(coerced) = coerce_value(value.clone(), member) {
+                return Ok(coerced);
+            }
+        }
+    }
     // Values of other shapes never cross-coerce; the mismatch below
     // reports both names through the tag.
     if let Some(s) = value.as_str() {
         let name = expected.name();
         return match expected {
-            TypeTag::Int => {
-                s.trim().parse::<i64>().map(Value::int).map_err(|_| {
-                    anyhow::anyhow!("TypeMismatch: expected {name}, got STRING ({s:?})")
-                })
-            }
-            TypeTag::Float => {
-                s.trim().parse::<f64>().map(Value::float).map_err(|_| {
-                    anyhow::anyhow!("TypeMismatch: expected {name}, got STRING ({s:?})")
-                })
-            }
+            // Strict integer slots: strings never parse here. The
+            // explicit `INT()` converter owns string parsing, so a
+            // string at an `INT` position fails naming both instead
+            // of silently re-parsing at every consumer.
             TypeTag::Bool => match s.trim() {
                 "true" => Ok(Value::bool(true)),
                 "false" => Ok(Value::bool(false)),
-                _ => Err(anyhow::anyhow!(
-                    "TypeMismatch: expected {name}, got STRING ({s:?})"
-                )),
+                _ => Err(type_mismatch("coercion", expected, &value)),
             },
             TypeTag::Pipe => {
                 // Strict: plain strings never coerce to pipes, so a handle is
@@ -62,7 +117,7 @@ pub(crate) fn coerce_value(value: Value, expected: &TypeTag) -> Result<Value> {
             }
             TypeTag::Duration => oxdock_parser::command::parse_duration(s.trim())
                 .map(Value::duration)
-                .map_err(|_| anyhow::anyhow!("TypeMismatch: expected {name}, got STRING ({s:?})")),
+                .map_err(|_| type_mismatch("coercion", expected, &value)),
             TypeTag::Path => {
                 // Narrow exception: materializing the PATH payload. Guard checks
                 // still run through oxdock-fs at use time.
@@ -70,65 +125,86 @@ pub(crate) fn coerce_value(value: Value, expected: &TypeTag) -> Result<Value> {
                 let path = std::path::PathBuf::from(s.trim());
                 Ok(Value::path(path))
             }
-            _ => Err(anyhow::anyhow!(
-                "TypeMismatch: expected {name}, got STRING ({s:?})"
-            )),
+            // Every other tag rejects strings here: values that
+            // already conform returned through `check_value` above,
+            // so this arm only sees genuine mismatches. Each tag is
+            // listed so a new word kind fails to compile until its
+            // string-coercion rule is explicit. `INT` and `FLOAT`
+            // stay in this list deliberately: string parsing belongs
+            // to the explicit converters, never to coercion.
+            TypeTag::String
+            | TypeTag::Int
+            | TypeTag::Float
+            | TypeTag::List
+            | TypeTag::Map
+            | TypeTag::Handle
+            | TypeTag::Semaphore
+            | TypeTag::Permit
+            | TypeTag::Any
+            | TypeTag::Custom(_)
+            | TypeTag::ListOf(_)
+            | TypeTag::Record(_)
+            | TypeTag::MapOf(_)
+            | TypeTag::Union(..) => Err(type_mismatch("coercion", expected, &value)),
         };
     }
     coerce_scalar(&value, expected)
 }
 
 /// Scalar cross-coercions between numeric, boolean, duration, path, and
-/// pipe-name words. Anything else is a `TypeMismatch`.
+/// pipe-name words. Anything else is a `TypeMismatch`. Admissions are
+/// explicit `if`s; the fallthrough rejects closed, so a new tag is
+/// refused here until its coercion rule is written.
 fn coerce_scalar(value: &Value, expected: &TypeTag) -> Result<Value> {
     if let Some(n) = value.as_i64() {
-        return match expected {
-            TypeTag::String => Ok(Value::string(n.to_string())),
-            TypeTag::Float => Ok(Value::float(n as f64)),
-            _ => Err(mismatch(expected, value)),
-        };
+        if matches!(expected, TypeTag::String) {
+            return Ok(Value::string(n.to_string()));
+        }
+        if matches!(expected, TypeTag::Float) {
+            return Ok(Value::float(n as f64));
+        }
+        return Err(mismatch(expected, value));
     }
     if let Some(f) = value.as_f64() {
-        return match expected {
-            TypeTag::String => Ok(Value::string(f.to_string())),
-            TypeTag::Int if f.fract() == 0.0 && f.is_finite() => Ok(Value::int(f as i64)),
-            _ => Err(mismatch(expected, value)),
-        };
+        if matches!(expected, TypeTag::String) {
+            return Ok(Value::string(f.to_string()));
+        }
+        // Strict: floats never narrow to integers here. Whole floats
+        // pass through the explicit `INT()` converter instead, so an
+        // `INT` slot names the mismatch rather than truncating.
+        return Err(mismatch(expected, value));
     }
     if let Some(b) = value.as_bool() {
-        return match expected {
-            TypeTag::String => Ok(Value::string(b.to_string())),
-            _ => Err(mismatch(expected, value)),
-        };
+        if matches!(expected, TypeTag::String) {
+            return Ok(Value::string(b.to_string()));
+        }
+        return Err(mismatch(expected, value));
     }
     if let Some(d) = value.as_duration() {
-        return match expected {
-            TypeTag::String => Ok(Value::string(oxdock_parser::command::format_duration(&d))),
-            _ => Err(mismatch(expected, value)),
-        };
+        if matches!(expected, TypeTag::String) {
+            return Ok(Value::string(oxdock_parser::command::format_duration(&d)));
+        }
+        return Err(mismatch(expected, value));
     }
     if let Some(p) = value.as_path() {
-        return match expected {
-            TypeTag::String => Ok(Value::string(p.to_string_lossy().to_string())),
-            _ => Err(mismatch(expected, value)),
-        };
+        if matches!(expected, TypeTag::String) {
+            return Ok(Value::string(p.to_string_lossy().to_string()));
+        }
+        return Err(mismatch(expected, value));
     }
     if value.as_pipe_handle().is_some() {
-        return match expected {
-            // Opaque rendering: stringifying a handle was already
-            // meaningless with names; `<pipe>` keeps the totality.
-            TypeTag::String => Ok(Value::string(format!("{value}"))),
-            _ => Err(mismatch(expected, value)),
-        };
+        // Opaque rendering: stringifying a handle was already
+        // meaningless with names; `<pipe>` keeps the totality.
+        if matches!(expected, TypeTag::String) {
+            return Ok(Value::string(format!("{value}")));
+        }
+        return Err(mismatch(expected, value));
     }
     Err(mismatch(expected, value))
 }
 
 fn mismatch(expected: &TypeTag, value: &Value) -> anyhow::Error {
-    anyhow::anyhow!(
-        "TypeMismatch: expected {}, got value ({value:?})",
-        expected.name()
-    )
+    type_mismatch("coercion", expected, value)
 }
 
 /// Resolve an [`Arg`] using an [`ExecState`] directly (no [`StepCtx`] needed).
@@ -333,10 +409,25 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
             }
             // Pure scalar fns first (no context needed), then stateful/IO fns.
             // Each clone ends the registry borrow before invoking user code.
+            // Both arms verify the declared return slot: a host body
+            // handing back a word outside its tag fails here, at the
+            // call boundary, with no coercion to rescue it.
             if let Some(func) = cx.state.clone_native_pure(name.as_str()) {
-                func(vals)
+                let value = func(vals)?;
+                check_host_return_value(
+                    &format!("function `{}` returned", super::base_name(name)),
+                    &meta.returns,
+                    &value,
+                )?;
+                Ok(value)
             } else if let Some(func) = cx.state.clone_native_ctx(name.as_str()) {
-                func(cx, vals)
+                let value = func(cx, vals)?;
+                check_host_return_value(
+                    &format!("function `{}` returned", super::base_name(name)),
+                    &meta.returns,
+                    &value,
+                )?;
+                Ok(value)
             } else {
                 bail!("unknown function {name}")
             }
@@ -819,8 +910,10 @@ fn trim_ascii(s: &str) -> &str {
     s.trim_matches(|c: char| c.is_ascii_whitespace())
 }
 
-/// `INT(x)`: trims ASCII whitespace and parses `i64`. Passes `Int` through;
-/// `Float` only when integral and finite; anything else bails.
+/// `INT(x)`: trims ASCII whitespace and parses `i64`. Passes `Int`
+/// through; `Float` only when integral and finite; `Bool` as 1/0;
+/// anything else bails. The explicit converter owns every admission:
+/// callers convert here, never at consumer slots.
 pub(crate) fn int_from_value(val: Value) -> Result<Value> {
     if val.as_i64().is_some() {
         return Ok(val);
@@ -831,6 +924,9 @@ pub(crate) fn int_from_value(val: Value) -> Result<Value> {
         }
         bail!("INT() requires an integer value, found FLOAT ({f:?})");
     }
+    if let Some(b) = val.as_bool() {
+        return Ok(Value::int(i64::from(b)));
+    }
     if let Some(s) = val.as_str() {
         let trimmed = trim_ascii(s);
         let clean = oxdock_parser::command::strip_digit_separators(trimmed);
@@ -839,7 +935,7 @@ pub(crate) fn int_from_value(val: Value) -> Result<Value> {
             .map(Value::int)
             .map_err(|_| anyhow::anyhow!("INT() requires an integer string, found {s:?}"));
     }
-    bail!("INT() requires an Int, Float, or String, found {val:?}")
+    bail!("INT() requires an Int, Float, Bool, or String, found {val:?}")
 }
 
 /// `FLOAT(x)`: parses `f64` (accepts int strings), bails on non-finite or
@@ -1902,6 +1998,8 @@ mod tests {
         assert_eq!(int_from_value(Value::float(3.0)).unwrap(), Value::int(3));
         assert!(int_from_value(Value::float(3.5)).is_err());
         assert!(int_from_value(Value::string("abc".to_string())).is_err());
+        assert_eq!(int_from_value(Value::bool(true)).unwrap(), Value::int(1));
+        assert_eq!(int_from_value(Value::bool(false)).unwrap(), Value::int(0));
         assert_eq!(
             float_from_value(Value::string("2.5".to_string())).unwrap(),
             Value::float(2.5)
@@ -1913,5 +2011,41 @@ mod tests {
                 "{bad:?} must fail"
             );
         }
+    }
+
+    #[test]
+    fn coerce_value_coerces_union_members_in_order() {
+        use oxdock_parser::union_tag;
+        // Built by macro: no hand-written spelling to drift.
+        let union = union_tag!(Int, Float);
+        assert_eq!(union.name(), "INT|FLOAT");
+        // Exact members pass through untouched.
+        assert_eq!(
+            coerce_value(Value::int(7), &union)
+                .expect("int passes")
+                .as_i64(),
+            Some(7)
+        );
+        // Strict boundary: strings never parse into numeric slots.
+        // The explicit `INT()` converter owns that parsing; coercion
+        // names the set instead of silently re-parsing.
+        let err = coerce_value(Value::string("123".to_string()), &union).expect_err("string fails");
+        assert!(
+            format!("{err:#}").contains("expected INT|FLOAT"),
+            "names the set: {err:#}"
+        );
+        let mixed = union_tag!(Float, String);
+        assert_eq!(
+            coerce_value(Value::int(10), &mixed)
+                .expect("int coerces")
+                .as_f64(),
+            Some(10.0)
+        );
+        // Total failure names the set, never a single member.
+        let err = coerce_value(Value::bool(true), &union).expect_err("bool fails");
+        assert!(
+            format!("{err:#}").contains("expected INT|FLOAT"),
+            "names the set: {err:#}"
+        );
     }
 }

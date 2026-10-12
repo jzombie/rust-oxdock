@@ -80,7 +80,7 @@ enum GuardClass {
 /// Inferred static type: a tag, `ANY` (as `TypeTag::Any`), or `VOID`
 /// for bodies with no `RETURN`. `VOID` is pass-level only, never a
 /// value tag.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 enum StaticTy {
     Ty(TypeTag),
     Void,
@@ -184,27 +184,102 @@ pub fn validate_script_types_counted<P: ProcessManager>(
 /// `PartialEq` (descriptors are unsized vtables), and structural
 /// comparison would equate distinct registrations; descriptors are
 /// `'static` singletons, so pointer equality is the sound rule.
-fn tags_equal(left: &TypeTag, right: &TypeTag) -> bool {
-    match (left, right) {
-        (TypeTag::String, TypeTag::String)
-        | (TypeTag::Int, TypeTag::Int)
-        | (TypeTag::Float, TypeTag::Float)
-        | (TypeTag::Bool, TypeTag::Bool)
-        | (TypeTag::List, TypeTag::List)
-        | (TypeTag::Map, TypeTag::Map)
-        | (TypeTag::Pipe, TypeTag::Pipe)
-        | (TypeTag::Handle, TypeTag::Handle)
-        | (TypeTag::Duration, TypeTag::Duration)
-        | (TypeTag::Path, TypeTag::Path)
-        | (TypeTag::Semaphore, TypeTag::Semaphore)
-        | (TypeTag::Permit, TypeTag::Permit)
-        | (TypeTag::Any, TypeTag::Any) => true,
-        (TypeTag::Custom(a), TypeTag::Custom(b)) => std::ptr::eq(*a, *b),
-        (TypeTag::ListOf(a), TypeTag::ListOf(b)) => tags_equal(a, b),
-        (TypeTag::MapOf(a), TypeTag::MapOf(b)) => tags_equal(a, b),
-        (TypeTag::Record(a), TypeTag::Record(b)) => std::ptr::eq(*a, *b),
-        _ => false,
+/// Shared with the union resolve path for member deduplication.
+pub(super) fn tags_equal(left: &TypeTag, right: &TypeTag) -> bool {
+    // Different constructors never equate: one comparison up front,
+    // so below each variant lists once and a new variant fails to
+    // compile here until its rule is explicit. The `let-else`
+    // rejections are unreachable through the discriminant check;
+    // they stay loud (never panic) rather than assumed.
+    if std::mem::discriminant(left) != std::mem::discriminant(right) {
+        return false;
     }
+    match left {
+        TypeTag::String
+        | TypeTag::Int
+        | TypeTag::Float
+        | TypeTag::Bool
+        | TypeTag::List
+        | TypeTag::Map
+        | TypeTag::Pipe
+        | TypeTag::Handle
+        | TypeTag::Duration
+        | TypeTag::Path
+        | TypeTag::Semaphore
+        | TypeTag::Permit
+        | TypeTag::Any => true,
+        TypeTag::Custom(a) => {
+            let TypeTag::Custom(b) = right else {
+                return false;
+            };
+            std::ptr::eq(*a, *b)
+        }
+        TypeTag::ListOf(a) => {
+            let TypeTag::ListOf(b) = right else {
+                return false;
+            };
+            tags_equal(a, b)
+        }
+        TypeTag::MapOf(a) => {
+            let TypeTag::MapOf(b) = right else {
+                return false;
+            };
+            tags_equal(a, b)
+        }
+        TypeTag::Record(a) => {
+            let TypeTag::Record(b) = right else {
+                return false;
+            };
+            std::sync::Arc::ptr_eq(a, b)
+        }
+        // Member sets compare order-free: construction deduplicates,
+        // so equal length plus full containment is set equality.
+        TypeTag::Union(_, a) => {
+            let TypeTag::Union(_, b) = right else {
+                return false;
+            };
+            a.len() == b.len()
+                && a.iter()
+                    .all(|member| b.iter().any(|other| tags_equal(member, other)))
+        }
+    }
+}
+
+/// Scalar pairs the runtime coercion admits by value. Single table
+/// shared by `check_arg`: static and runtime agree by construction
+/// instead of one promising what the other rejects. Deliberately
+/// excludes `STRING` into `INT`/`FLOAT` and `FLOAT` into `INT`:
+/// those need the explicit converter at the call site.
+fn coercible_pair(actual: &TypeTag, expected: &TypeTag) -> bool {
+    matches!(
+        (actual, expected),
+        (TypeTag::String, TypeTag::Bool)
+            | (TypeTag::String, TypeTag::Duration)
+            | (TypeTag::String, TypeTag::Path)
+            | (TypeTag::Int, TypeTag::String)
+            | (TypeTag::Int, TypeTag::Float)
+            | (TypeTag::Float, TypeTag::String)
+            | (TypeTag::Bool, TypeTag::String)
+            | (TypeTag::Duration, TypeTag::String)
+            | (TypeTag::Path, TypeTag::String)
+            | (TypeTag::ListOf(_), TypeTag::List)
+            | (TypeTag::List, TypeTag::ListOf(_))
+            | (TypeTag::Record(_), TypeTag::Map)
+            | (TypeTag::MapOf(_), TypeTag::Map)
+            | (TypeTag::Map, TypeTag::MapOf(_))
+    )
+}
+
+/// Single mismatch constructor for exact shape checks: names both
+/// sides structurally. The three call sites below reported
+/// byte-identical text before; they share this now so a wording fix
+/// lands once.
+fn exact_mismatch(ctx: &str, expected: &TypeTag, actual: &TypeTag) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{ctx}: TypeMismatch: expected {}, got {}",
+        render_structural(expected),
+        render_structural(actual)
+    )
 }
 
 /// Map-kind tags: bare words, fixed shapes, and value shapes alike.
@@ -227,6 +302,13 @@ fn unify(left: TypeTag, right: TypeTag, ctx: &str) -> Result<TypeTag> {
         return Ok(left);
     }
     if matches!(left, TypeTag::Any) || matches!(right, TypeTag::Any) {
+        return Ok(TypeTag::Any);
+    }
+    // Unions widen on mixed joins: member-wise unification would mint
+    // precise-but-unreadable sets, while `ANY` already means "defer
+    // to runtime" everywhere else joins give up precision. Identical
+    // unions unify exactly through `tags_equal` above.
+    if matches!(left, TypeTag::Union(..)) || matches!(right, TypeTag::Union(..)) {
         return Ok(TypeTag::Any);
     }
     // Same-kind containment: a shaped value IS its bare word, so mixed
@@ -380,10 +462,12 @@ impl Env {
                 let mut union: Option<GuardExpr> = None;
                 for entry in live {
                     unified = Some(match unified {
-                        None => entry.tag,
-                        Some(acc) => {
-                            unify(acc, entry.tag, &format!("${key} across platform guards"))?
-                        }
+                        None => entry.tag.clone(),
+                        Some(acc) => unify(
+                            acc,
+                            entry.tag.clone(),
+                            &format!("${key} across platform guards"),
+                        )?,
                     });
                     union = match (union, entry.guard.clone()) {
                         (None, None) => None,
@@ -563,7 +647,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     /// while inference is in progress.
     fn func_return(&mut self, key: &str, depth: usize) -> Result<StaticTy> {
         if let Some(known) = self.inferred.get(key) {
-            return Ok(*known);
+            return Ok(known.clone());
         }
         if self.inferring.iter().any(|name| name == key) {
             return Ok(StaticTy::Ty(TypeTag::Any));
@@ -576,7 +660,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         let result = self.check_function_body(key, &info, depth);
         self.inferring.pop();
         let ty = result?;
-        self.inferred.insert(key.to_string(), ty);
+        self.inferred.insert(key.to_string(), ty.clone());
         Ok(ty)
     }
 
@@ -1025,8 +1109,27 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                         let tag = Self::check_name_read(env, list, scope, idx)?;
                         let element = match tag {
                             TypeTag::List => None,
-                            TypeTag::ListOf(element) => Some(*element),
-                            _ => bail!(
+                            TypeTag::ListOf(element) => Some(element.as_ref().clone()),
+                            // Every non-list variant is listed: a new
+                            // tag fails here until its push rule is
+                            // explicit, so appends can never silently
+                            // enter an unexamined shape.
+                            TypeTag::String
+                            | TypeTag::Int
+                            | TypeTag::Float
+                            | TypeTag::Bool
+                            | TypeTag::Map
+                            | TypeTag::Pipe
+                            | TypeTag::Handle
+                            | TypeTag::Duration
+                            | TypeTag::Path
+                            | TypeTag::Semaphore
+                            | TypeTag::Permit
+                            | TypeTag::Any
+                            | TypeTag::Custom(_)
+                            | TypeTag::MapOf(_)
+                            | TypeTag::Record(_)
+                            | TypeTag::Union(..) => bail!(
                                 "step {}: LIST_APPEND ${}: variable is {}, not LIST",
                                 idx + 1,
                                 clean_var(list),
@@ -1195,38 +1298,47 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         if tags_equal(expected, &actual) {
             return Ok(());
         }
+        // Union admission is subset-based and order-free, composing
+        // with the pairs below (a `STRING` actual still reaches the
+        // `INT` pair through the `STRING` member, never around it).
+        // Actual-union goes first: every member must be admitted
+        // (any member may flow), which reduces unions to members
+        // before the expected-union rule sees them. Expected-union
+        // then admits where some member admits (the value holds one
+        // runtime shape). Recursion bottoms out immediately:
+        // construction flattens, so members never nest unions.
+        if let TypeTag::Union(_, members) = actual {
+            for member in members.iter() {
+                self.check_arg(expected, StaticTy::Ty((*member).clone()), ctx)?;
+            }
+            return Ok(());
+        }
+        if let TypeTag::Union(_, members) = expected {
+            for member in members.iter() {
+                if self
+                    .check_arg(member, StaticTy::Ty(actual.clone()), ctx)
+                    .is_ok()
+                {
+                    return Ok(());
+                }
+            }
+            return Err(exact_mismatch(ctx, expected, &actual));
+        }
         // Mirror coerce_value/coerce_scalar: allow pairs the runtime
-        // decides by value; reject pairs that always bail. Shaped
-        // values satisfy bare words (a record IS a map); bare words
-        // never satisfy fixed shapes, except the unknown list shape:
-        // an empty or heterogeneous literal infers bare `LIST`, which
-        // enters `LIST<...>` vacuously (mirroring the bare `MAP`
-        // into `MAP<...>` arm). Literals infer their own shapes, so
+        // decides by value; reject pairs that always bail. `STRING`
+        // never coerces into `INT` or `FLOAT`, and `FLOAT` never
+        // narrows into `INT`: those need the explicit `INT()` or
+        // `FLOAT()` converter at the call site. Shaped values satisfy
+        // bare words (a record IS a map); bare words never satisfy
+        // fixed shapes, except the unknown list shape: an empty or
+        // heterogeneous literal infers bare `LIST`, which enters
+        // `LIST<...>` vacuously (mirroring the bare `MAP` into
+        // `MAP<...>` arm). Literals infer their own shapes, so
         // dynamic values still gate through `LET` instead of slipping
         // into shaped positions. Same-constructor shapes compare
         // exactly below; the runtime walk re-validates every element,
         // so a mixed literal still fails loudly at execution.
-        let ok = matches!(
-            (&actual, expected),
-            (TypeTag::String, TypeTag::Int)
-                | (TypeTag::String, TypeTag::Float)
-                | (TypeTag::String, TypeTag::Bool)
-                | (TypeTag::String, TypeTag::Duration)
-                | (TypeTag::String, TypeTag::Path)
-                | (TypeTag::Int, TypeTag::String)
-                | (TypeTag::Int, TypeTag::Float)
-                | (TypeTag::Float, TypeTag::String)
-                | (TypeTag::Float, TypeTag::Int)
-                | (TypeTag::Bool, TypeTag::String)
-                | (TypeTag::Duration, TypeTag::String)
-                | (TypeTag::Path, TypeTag::String)
-                | (TypeTag::ListOf(_), TypeTag::List)
-                | (TypeTag::List, TypeTag::ListOf(_))
-                | (TypeTag::Record(_), TypeTag::Map)
-                | (TypeTag::MapOf(_), TypeTag::Map)
-                | (TypeTag::Map, TypeTag::MapOf(_))
-        );
-        if ok {
+        if coercible_pair(&actual, expected) {
             return Ok(());
         }
         if matches!(
@@ -1238,11 +1350,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         ) {
             return Self::check_exact(expected, &actual, ctx);
         }
-        bail!(
-            "{ctx}: TypeMismatch: expected {}, got {}",
-            render_structural(expected),
-            render_structural(&actual)
-        );
+        Err(exact_mismatch(ctx, expected, &actual))
     }
 
     /// Exact shape compatibility for same-constructor tags: element by
@@ -1263,14 +1371,14 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 Self::check_exact(e, a, ctx)
             }
             (TypeTag::Record(a_fields), TypeTag::Record(e_fields)) => {
-                for field in *e_fields {
+                for field in e_fields.iter() {
                     match a_fields.iter().find(|found| found.name == field.name) {
                         Some(found) => Self::check_exact(&field.ty, &found.ty, ctx)?,
                         None if field.optional => {}
                         None => bail!("{ctx}: missing field '{}'", field.name),
                     }
                 }
-                for field in *a_fields {
+                for field in a_fields.iter() {
                     if !e_fields.iter().any(|known| known.name == field.name) {
                         bail!("{ctx}: unknown field '{}'", field.name);
                     }
@@ -1278,7 +1386,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 Ok(())
             }
             (TypeTag::Record(a_fields), TypeTag::MapOf(inner)) => {
-                for field in *a_fields {
+                for field in a_fields.iter() {
                     Self::check_exact(inner, &field.ty, ctx)?;
                 }
                 Ok(())
@@ -1286,11 +1394,38 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             (TypeTag::ListOf(_), TypeTag::List)
             | (TypeTag::Record(_), TypeTag::Map)
             | (TypeTag::MapOf(_), TypeTag::Map) => Ok(()),
-            _ => bail!(
-                "{ctx}: TypeMismatch: expected {}, got {}",
-                render_structural(expected),
-                render_structural(actual)
-            ),
+            // Union sets match order-free both ways: construction
+            // deduplicates, so containment both ways is set equality.
+            (TypeTag::Union(_, a_members), TypeTag::Union(_, e_members)) => {
+                if a_members.len() == e_members.len()
+                    && a_members.iter().all(|actual| {
+                        e_members
+                            .iter()
+                            .any(|member| Self::check_exact(member, actual, ctx).is_ok())
+                    })
+                {
+                    Ok(())
+                } else {
+                    Err(exact_mismatch(ctx, expected, actual))
+                }
+            }
+            // A concrete actual against a union expectation (a union
+            // actual pairs with the arm above): some member must match
+            // exactly, since no coercion applies inside collections.
+            // Total over actual shapes by construction: every word is
+            // tested against the members, so future variants behave
+            // identically without listing.
+            (_, TypeTag::Union(_, e_members)) => {
+                if e_members
+                    .iter()
+                    .any(|member| Self::check_exact(member, actual, ctx).is_ok())
+                {
+                    Ok(())
+                } else {
+                    Err(exact_mismatch(ctx, expected, actual))
+                }
+            }
+            _ => Err(exact_mismatch(ctx, expected, actual)),
         }
     }
 
@@ -1320,7 +1455,12 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             // AST path owns that call shape.
             let params = meta.params.as_deref().map(|list| {
                 list.iter()
-                    .map(|param| (param.name.clone(), param.param_type.unwrap_or(TypeTag::Any)))
+                    .map(|param| {
+                        (
+                            param.name.clone(),
+                            param.param_type.clone().unwrap_or(TypeTag::Any),
+                        )
+                    })
                     .collect()
             });
             // NOTE: host `allowed` sets are checked from the meta
@@ -1342,7 +1482,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
     /// registry key the call resolved through.
     fn func_return_owned(&mut self, info: &FuncInfo, key: &str, depth: usize) -> Result<StaticTy> {
         if let Some(known) = self.inferred.get(key) {
-            return Ok(*known);
+            return Ok(known.clone());
         }
         if self.inferring.iter().any(|name| name == key) {
             return Ok(StaticTy::Ty(TypeTag::Any));
@@ -1351,7 +1491,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
         let result = self.check_function_body(key, info, depth);
         self.inferring.pop();
         let ty = result?;
-        self.inferred.insert(key.to_string(), ty);
+        self.inferred.insert(key.to_string(), ty.clone());
         Ok(ty)
     }
 
@@ -1473,7 +1613,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             };
             let (pname, ptype) = expected;
             let pat = format!("{}{display}() argument `${pname}`", loc(at));
-            self.check_arg(ptype, *actual, &pat)?;
+            self.check_arg(ptype, (*actual).clone(), &pat)?;
             if let Some(host_list) = host_params.as_deref()
                 && let Some(param) = host_list.get(position)
                 && let Some(allowed) = param.allowed
@@ -1483,9 +1623,9 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 bail!("{pat} must be one of: {}, got {text:?}", allowed.join(", "));
             }
         }
-        match *ret {
+        match ret {
             StaticTy::Void => Ok(StaticTy::Ty(TypeTag::String)),
-            other => Ok(other),
+            other => Ok(other.clone()),
         }
     }
 }
@@ -1676,18 +1816,21 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 for part in keys {
                     match current {
                         TypeTag::Record(fields) => {
-                            let Some(field) = fields.iter().find(|field| field.name == part) else {
+                            let Some(field) = fields
+                                .iter()
+                                .find(|field| field.name.as_str() == part.as_str())
+                            else {
                                 bail!(
                                     "{}: unknown field '{part}'; expected fields: {}",
                                     at(),
                                     fields
                                         .iter()
-                                        .map(|field| field.name)
+                                        .map(|field| field.name.as_str())
                                         .collect::<Vec<_>>()
                                         .join(", ")
                                 );
                             };
-                            current = field.ty;
+                            current = field.ty.clone();
                         }
                         TypeTag::ListOf(element) => {
                             // Shaped lists step into the element type on
@@ -1697,17 +1840,42 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                             if part.parse::<usize>().is_err() {
                                 bail!("{}: Invalid array index '{part}'", at());
                             }
-                            current = *element;
+                            current = element.as_ref().clone();
                         }
                         TypeTag::MapOf(values) => {
                             // Unknown maps step into their value shape;
                             // keys resolve by value at runtime.
-                            current = *values;
+                            current = values.as_ref().clone();
                         }
                         // MAP keys and LIST indices resolve by value at
                         // runtime (missing keys, bounds); the shape
                         // stays unknown here.
                         TypeTag::Map | TypeTag::List | TypeTag::Any => {
+                            return Ok(StaticTy::Ty(TypeTag::Any));
+                        }
+                        // Unions defer when some member traverses (the
+                        // runtime value holds one member; static cannot
+                        // know which) and fail only when no member can:
+                        // an all-scalar set definitely fails, exactly
+                        // like a scalar below.
+                        TypeTag::Union(_, members) => {
+                            let traversable = |member: &TypeTag| {
+                                matches!(
+                                    member,
+                                    TypeTag::Record(_)
+                                        | TypeTag::ListOf(_)
+                                        | TypeTag::MapOf(_)
+                                        | TypeTag::Map
+                                        | TypeTag::List
+                                        | TypeTag::Any
+                                )
+                            };
+                            if members.iter().all(|member| !traversable(member)) {
+                                bail!(
+                                    "{}: Cannot traverse into scalar value at key '{part}'",
+                                    at()
+                                );
+                            }
                             return Ok(StaticTy::Ty(TypeTag::Any));
                         }
                         _ => {
@@ -1846,23 +2014,44 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                                         "unknown field '{part}'; expected fields: {}",
                                         fields
                                             .iter()
-                                            .map(|field| field.name)
+                                            .map(|field| field.name.as_str())
                                             .collect::<Vec<_>>()
                                             .join(", ")
                                     );
                                 };
-                                current = field.ty;
+                                current = field.ty.clone();
                             }
                             TypeTag::ListOf(element) => {
                                 if part.parse::<usize>().is_err() {
                                     bail!("Invalid array index '{part}'");
                                 }
-                                current = *element;
+                                current = element.as_ref().clone();
                             }
                             TypeTag::MapOf(values) => {
-                                current = *values;
+                                current = values.as_ref().clone();
                             }
                             TypeTag::Map | TypeTag::List | TypeTag::Any => {
+                                current = TypeTag::Any;
+                                break;
+                            }
+                            // Unions mirror the AST path: defer when
+                            // some member traverses, fail only when no
+                            // member can.
+                            TypeTag::Union(_, members) => {
+                                let traversable = |member: &TypeTag| {
+                                    matches!(
+                                        member,
+                                        TypeTag::Record(_)
+                                            | TypeTag::ListOf(_)
+                                            | TypeTag::MapOf(_)
+                                            | TypeTag::Map
+                                            | TypeTag::List
+                                            | TypeTag::Any
+                                    )
+                                };
+                                if members.iter().all(|member| !traversable(member)) {
+                                    bail!("Cannot traverse into scalar value at key '{part}'");
+                                }
                                 current = TypeTag::Any;
                                 break;
                             }

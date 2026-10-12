@@ -3463,14 +3463,15 @@ fn block_inner_let_shadows_outer_mutation() {
 
 #[test]
 fn mutation_converts_to_declared_type() {
-    // Binding boundaries convert: the explicit type annotation authorizes
-    // string-to-number conversion (`$n = "42"` binds 42 for an INT), while
-    // a non-numeric string is an error. Expressions never convert.
+    // Binding boundaries convert explicitly: the type annotation keeps
+    // the slot, but strings parse only through `INT()`. A non-numeric
+    // string is an error either way. Expressions never convert.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
+        IMPORT [STD]
         LET $n: INT = 1
-        $n = "42"
+        $n = INT("42")
         ASSERT_EQ $n 42
     "#};
     run_script(&root, script).expect("mutation converts");
@@ -4300,7 +4301,7 @@ fn exit_accepts_variable_code() {
     let err = run_script(
         &root,
         indoc! {r#"
-            LET $c: INT = "3"
+            LET $c: INT = 3
             EXIT $c
         "#},
     )

@@ -4203,21 +4203,21 @@ fn resolve_tag_accepts_optional_fields() {
     let tag = state
         .resolve_tag("MAP<held: BOOL, permit?: PERMIT>")
         .expect("optional field resolves");
-    match tag {
+    match &tag {
         TypeTag::Record(fields) => {
             assert_eq!(fields.len(), 2);
             assert!(!fields[0].optional);
             assert!(fields[1].optional);
-            assert_eq!(fields[1].name, "permit");
+            assert_eq!(fields[1].name.as_str(), "permit");
         }
         other => panic!("expected record, got {other:?}"),
     }
     let again = state
         .resolve_tag("MAP<held: BOOL,permit?: PERMIT>")
         .expect("resolves");
-    match (tag, again) {
+    match (&tag, &again) {
         (TypeTag::Record(a), TypeTag::Record(b)) => {
-            assert!(std::ptr::eq(a.as_ptr(), b.as_ptr()), "shared entry");
+            assert!(std::sync::Arc::ptr_eq(a, b), "shared entry");
         }
         _ => panic!("expected records"),
     }
@@ -4233,7 +4233,7 @@ fn resolve_tag_interns_identical_spellings_once() {
     let second = state.resolve_tag("LIST< MAP< ANY > >").expect("resolves");
     match (first, second) {
         (TypeTag::ListOf(a), TypeTag::ListOf(b)) => {
-            assert!(std::ptr::eq(a, b), "shared interned entry");
+            assert!(std::sync::Arc::ptr_eq(&a, &b), "shared interned entry");
         }
         other => panic!("expected shaped lists, got {other:?}"),
     }
@@ -4279,17 +4279,465 @@ fn resolve_tag_rejects_generic_arity_violations() {
 }
 
 #[test]
+fn resolve_tag_unions_admit_member_sets() {
+    let fs = MockFs::new();
+    let mut state = create_exec_state(fs);
+    // Canonical spelling interns one shared instance.
+    let first = state.resolve_tag("STRING|PIPE").expect("union resolves");
+    let second = state
+        .resolve_tag("STRING|PIPE")
+        .expect("union resolves again");
+    let TypeTag::Union(_, members) = &first else {
+        panic!("union resolves to a union, got {first:?}");
+    };
+    // The spelling derives from the members: no hand-written string.
+    assert_eq!(first.name(), "STRING|PIPE");
+    assert_eq!(members.len(), 2);
+    assert!(std::ptr::eq(&first, &second) || super::static_check::tags_equal(&first, &second));
+    // Written order is preserved; behavior is order-free either way.
+    let swapped = state.resolve_tag("PIPE|STRING").expect("order resolves");
+    assert!(super::static_check::tags_equal(&first, &swapped));
+    assert_eq!(swapped.name(), "PIPE|STRING");
+    // Spacing canonicalizes away.
+    let spaced = state
+        .resolve_tag("  STRING | PIPE ")
+        .expect("spacing resolves");
+    assert!(super::static_check::tags_equal(&first, &spaced));
+    // Lone survivors collapse: no union is minted.
+    assert!(matches!(
+        state.resolve_tag("STRING|STRING").expect("dedup"),
+        TypeTag::String
+    ));
+    assert!(matches!(
+        state.resolve_tag("STRING|ANY").expect("absorb"),
+        TypeTag::Any
+    ));
+    // Shapes compose as members.
+    let shaped = state
+        .resolve_tag("LIST<STRING>|PIPE")
+        .expect("shaped member");
+    let TypeTag::Union(_, shaped_members) = shaped else {
+        panic!("shaped union resolves to a union");
+    };
+    assert_eq!(shaped_members.len(), 2);
+    // Four-way sets render in written order, `|`-joined.
+    let wide = state
+        .resolve_tag("STRING|PIPE|LIST<ANY>|MAP<ANY>")
+        .expect("wide union resolves");
+    assert_eq!(wide.name(), "STRING|PIPE|LIST<ANY>|MAP<ANY>");
+    assert_eq!(
+        oxdock_parser::render_structural(&wide),
+        "STRING|PIPE|LIST<ANY>|MAP<ANY>"
+    );
+    // Bare LIST and MAP reject as members exactly like top level:
+    // unions compose spellings, never relax them.
+    let err = state
+        .resolve_tag("STRING|LIST")
+        .expect_err("bare LIST member fails");
+    assert!(
+        format!("{err:#}").contains("bare LIST is not a declaration type"),
+        "{err:#}"
+    );
+    // Empty members and unknown names fail naming the rule.
+    let err = state
+        .resolve_tag("STRING|")
+        .expect_err("empty member fails");
+    assert!(
+        format!("{err:#}").contains("invalid type spelling"),
+        "{err:#}"
+    );
+    let err = state
+        .resolve_tag("NOPE|STRING")
+        .expect_err("unknown member fails");
+    assert!(
+        format!("{err:#}").contains("unknown type 'NOPE'"),
+        "{err:#}"
+    );
+    // Unions compose inside generics: members resolve as siblings.
+    let nested = state
+        .resolve_tag("LIST<STRING|PIPE>")
+        .expect("nested union resolves");
+    assert_eq!(
+        oxdock_parser::render_structural(&nested),
+        "LIST<STRING|PIPE>"
+    );
+    let mapped = state
+        .resolve_tag("MAP<name: STRING|PIPE>")
+        .expect("union field resolves");
+    assert_eq!(
+        oxdock_parser::render_structural(&mapped),
+        "MAP<name: STRING|PIPE>"
+    );
+    // Unions nest inside aliases through the shared path.
+    state
+        .type_aliases
+        .insert("TEXTISH".to_string(), "STRING|PIPE".to_string());
+    let aliased = state
+        .resolve_tag("TEXTISH")
+        .expect("alias to union resolves");
+    assert!(super::static_check::tags_equal(&first, &aliased));
+}
+
+#[test]
+fn union_declarations_coerce_like_members() {
+    // Strict boundary: a string never parses into a numeric union
+    // slot. The explicit `INT()` converter owns that parsing, so
+    // `LET` into a union admits exactly what its members admit.
+    let steps = crate::parse_script(indoc! {r#"
+        LET $u: INT|FLOAT = 123
+        ASSERT_EQ $u 123
+        LET $v: FLOAT|STRING = 10
+        WRITE out.txt "{{ $v }}"
+    "#})
+    .expect("parse ok");
+    let (_, files) = run_with_mock_fs(&steps);
+    assert_eq!(file_content(&files, "out.txt"), b"10");
+}
+
+#[test]
+fn union_declaration_rejects_string_for_numeric_slot() {
+    // `LET $u: INT|FLOAT = "123"` fails: strings parse only through
+    // the explicit converter, never through coercion.
+    let steps = crate::parse_script(indoc! {r#"
+        LET $u: INT|FLOAT = "123"
+    "#})
+    .expect("parse ok");
+    let fs: Box<dyn WorkspaceFs> = Box::new(MockFs::new());
+    let err = run_expect_err(fs, &steps, MockProcessManager::default());
+    assert!(
+        format!("{err:#}").contains("expected INT|FLOAT"),
+        "names the set: {err:#}"
+    );
+}
+
+#[test]
+fn int_params_reject_words_end_to_end() {
+    // Integer slots are strict: whole floats and integer strings no
+    // longer coerce into `INT` params. Callers convert explicitly
+    // through `INT()`; the contract stays `INT`.
+    let steps = crate::parse_script(indoc! {r#"
+        IMPORT [STD]
+        LET $i: INT = 2048
+        LET $from_int: STRING = FORMAT_BYTE_COUNT($i)
+        ASSERT_EQ $from_int "2KiB"
+        LET $s: STRING = "2048"
+        LET $from_string: STRING = FORMAT_BYTE_COUNT(INT($s))
+        ASSERT_EQ $from_string "2KiB"
+        LET $f: FLOAT = 2048.0
+        LET $from_float: STRING = FORMAT_BYTE_COUNT(INT($f))
+        ASSERT_EQ $from_float "2KiB"
+        WRITE out.txt "done"
+    "#})
+    .expect("parse ok");
+    let (_, files) = run_with_mock_fs(&steps);
+    assert_eq!(file_content(&files, "out.txt"), b"done");
+}
+
+#[test]
+fn int_params_reject_unconverted_words() {
+    // A string or float at an `INT` param fails naming the slot:
+    // no silent re-parse at the consumer.
+    let steps = crate::parse_script(indoc! {r#"
+        IMPORT [STD]
+        LET $s: STRING = "2048"
+        LET $x: STRING = FORMAT_BYTE_COUNT($s)
+    "#})
+    .expect("parse ok");
+    let fs: Box<dyn WorkspaceFs> = Box::new(MockFs::new());
+    let err = run_expect_err(fs, &steps, MockProcessManager::default());
+    assert!(
+        format!("{err:#}").contains("expected INT"),
+        "names the slot: {err:#}"
+    );
+}
+
+#[test]
+fn union_nests_inside_generics() {
+    // Unions compose inside every generic, record, and alias
+    // position through the shared resolve path: spellings derive
+    // from the members, and identical spellings intern once.
+    use oxdock_parser::render_structural;
+    let fs = MockFs::new();
+    let state = create_exec_state(fs);
+    for (spelling, rendered) in [
+        ("LIST<INT|STRING>", "LIST<INT|STRING>"),
+        ("MAP<k: STRING|PATH>", "MAP<k: STRING|PATH>"),
+        ("LIST<MAP<name: STRING|INT>>", "LIST<MAP<name: STRING|INT>>"),
+        (
+            "MAP<field: INT|FLOAT|STRING>",
+            "MAP<field: INT|FLOAT|STRING>",
+        ),
+        ("LIST<LIST<INT|BOOL>>", "LIST<LIST<INT|BOOL>>"),
+        ("LIST<STRING>|MAP<ANY>", "LIST<STRING>|MAP<ANY>"),
+    ] {
+        let tag = state.resolve_tag(spelling).expect("union nest resolves");
+        assert_eq!(render_structural(&tag), rendered, "{spelling}");
+        let again = state.resolve_tag(spelling).expect("resolves");
+        assert!(
+            super::static_check::tags_equal(&tag, &again),
+            "shared interned entry for {spelling}"
+        );
+    }
+    // Alias-indirected unions compose too.
+    let mut aliased = create_exec_state(MockFs::new());
+    aliased
+        .type_aliases
+        .insert("U".to_string(), "INT|STRING".to_string());
+    let tag = aliased.resolve_tag("LIST<U>").expect("alias leaf composes");
+    assert_eq!(render_structural(&tag), "LIST<INT|STRING>");
+    // Value shapes compose at the constructor level: a union member
+    // inside `MAP<...>` renders structurally and checks element-wise.
+    let valued = TypeTag::MapOf(std::sync::Arc::new(oxdock_parser::union_tag!(Int, String)));
+    assert_eq!(render_structural(&valued), "MAP<INT|STRING>");
+    oxdock_parser::check_value(
+        &valued,
+        &Value::map([("k".to_string(), Value::int(1))].into_iter().collect()),
+    )
+    .expect("member admits");
+}
+
+#[test]
+fn union_generics_check_values_elementwise() {
+    // `LET` into a union-in-generic admits members element-wise and
+    // rejects the rest naming the full structural shape.
+    let steps = crate::parse_script(indoc! {r#"
+        LET $l: LIST<INT|STRING> = [1, "a"]
+        ASSERT_EQ $l.0 1
+        LET $m: MAP<name: STRING|INT> = {name: 7}
+        ASSERT_EQ $m.name 7
+        WRITE out.txt "done"
+    "#})
+    .expect("parse ok");
+    let (_, files) = run_with_mock_fs(&steps);
+    assert_eq!(file_content(&files, "out.txt"), b"done");
+    let steps = crate::parse_script(indoc! {r#"
+        LET $l: LIST<INT|STRING> = [1, true]
+    "#})
+    .expect("parse ok");
+    let fs: Box<dyn WorkspaceFs> = Box::new(MockFs::new());
+    let err = run_expect_err(fs, &steps, MockProcessManager::default());
+    assert!(
+        format!("{err:#}").contains("expected INT|STRING"),
+        "names the member set: {err:#}"
+    );
+}
+
+#[test]
+fn builtin_union_signatures_are_honest() {
+    // Converters widen through `#[union]`; consumers stay strict.
+    // Metadata and extractor agree by construction, so the signature
+    // is the check.
+    use oxdock_parser::render_structural;
+    let metas = super::native::builtin_function_metas();
+    let signature = |name: &str| {
+        metas
+            .iter()
+            .find(|meta| meta.name == name)
+            .unwrap_or_else(|| panic!("builtin {name} exists"))
+            .params
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .map(|param| {
+                param
+                    .param_type
+                    .as_ref()
+                    .map(render_structural)
+                    .unwrap_or_default()
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    assert_eq!(signature("STD::INT"), "INT|FLOAT|STRING|BOOL");
+    assert_eq!(signature("STD::FLOAT"), "FLOAT|INT|STRING");
+    assert_eq!(signature("STD::FORMAT_BYTE_COUNT"), "INT");
+    assert_eq!(signature("STD::GLOB"), "STRING|PATH");
+    assert_eq!(signature("STD::TO_JSON"), "STRING|INT|FLOAT|BOOL|LIST|MAP");
+}
+
+#[test]
+fn converters_accept_words_end_to_end() {
+    // Explicit conversion is the one place strings parse: the
+    // converter union admits the word, the body parses it.
+    let steps = crate::parse_script(indoc! {r#"
+        IMPORT [STD]
+        LET $i: INT = INT("12")
+        ASSERT_EQ $i 12
+        LET $whole: INT = INT(12.0)
+        ASSERT_EQ $whole 12
+        LET $yes: INT = INT(true)
+        ASSERT_EQ $yes 1
+        LET $no: INT = INT(false)
+        ASSERT_EQ $no 0
+        LET $f: FLOAT = FLOAT("2.5")
+        ASSERT_EQ $f 2.5
+        LET $pretty: STRING = FORMAT_BYTE_COUNT(INT("2048"))
+        ASSERT_EQ $pretty "2KiB"
+        LET $doc: STRING = TO_JSON([1, "a"])
+        ASSERT_CONTAINS $doc "a"
+        WRITE out.txt "done"
+    "#})
+    .expect("parse ok");
+    let (_, files) = run_with_mock_fs(&steps);
+    assert_eq!(file_content(&files, "out.txt"), b"done");
+}
+
+#[test]
+fn host_return_slot_rejects_lying_body() {
+    // A host body returning a word outside its declared slot fails
+    // at the call boundary naming the function: no coercion rescues
+    // an implementation bug.
+    fn lying_module() -> HostModule<MockProcessManager> {
+        let lying: PureFn = Arc::new(|_| Ok(Value::string("x".to_string())));
+        HostModule {
+            name: "T".to_string(),
+            funcs: vec![HostRegistration::Pure {
+                name: "LIAR".to_string(),
+                meta: FuncMeta {
+                    name: "T::LIAR".to_string(),
+                    module: "T".to_string(),
+                    kind: FuncKind::HostPure,
+                    params: None,
+                    returns: Some(TypeTag::Int),
+                    rpn: false,
+                    summary: "test-only",
+                    docs: "test-only",
+                },
+                func: lying,
+            }],
+            types: vec![],
+            record_schemas: vec![],
+        }
+    }
+    let mut engine = super::Engine::<MockProcessManager>::new_custom();
+    engine.register_module(lying_module());
+    let fs: Box<dyn WorkspaceFs> = Box::new(MockFs::new());
+    let err = engine
+        .run_script_on(
+            fs,
+            "IMPORT [STD, T]\nLET $v: ANY = LIAR()\n",
+            MockProcessManager::default(),
+        )
+        .expect_err("lying return must fail");
+    let text = format!("{err:#}");
+    assert!(text.contains("LIAR"), "names the function: {text}");
+    assert!(text.contains("expected INT"), "names the slot: {text}");
+}
+
+#[test]
+fn func_loop_only_return_fails() {
+    // Loops may trip zero times, so a `RETURN` inside a loop body
+    // never satisfies the contract: the trailing path must return.
+    let steps = crate::parse_script(indoc! {r#"
+        FUNC F($xs: LIST<INT>) {
+            FOR $x: INT IN $xs {
+                RETURN $x
+            }
+        }
+    "#})
+    .expect("parse ok");
+    let fs: Box<dyn WorkspaceFs> = Box::new(MockFs::new());
+    let err = run_expect_err(fs, &steps, MockProcessManager::default());
+    assert!(
+        format!("{err:#}").contains("no RETURN on some path"),
+        "loop body cannot close: {err:#}"
+    );
+}
+
+#[test]
+fn func_branch_missing_return_fails() {
+    // An `ELSE`-less `IF` leaves the fallthrough path open: a
+    // `RETURN` on the taken branch alone fails validation.
+    let steps = crate::parse_script(indoc! {r#"
+        FUNC F($flag: BOOL) {
+            IF $flag {
+                RETURN 1
+            }
+        }
+    "#})
+    .expect("parse ok");
+    let fs: Box<dyn WorkspaceFs> = Box::new(MockFs::new());
+    let err = run_expect_err(fs, &steps, MockProcessManager::default());
+    assert!(
+        format!("{err:#}").contains("no RETURN on some path"),
+        "open branch fails: {err:#}"
+    );
+}
+
+#[test]
+fn func_trailing_return_after_loop_passes() {
+    // The same loop with a trailing `RETURN` closes every path and
+    // runs end to end.
+    let steps = crate::parse_script(indoc! {r#"
+        FUNC FIRST($xs: LIST<INT>) {
+            FOR $x: INT IN $xs {
+                RETURN $x
+            }
+            RETURN 0
+        }
+        LET $v: INT = FIRST([1, 2])
+        ASSERT_EQ $v 1
+        WRITE out.txt "done"
+    "#})
+    .expect("parse ok");
+    let (_, files) = run_with_mock_fs(&steps);
+    assert_eq!(file_content(&files, "out.txt"), b"done");
+}
+
+#[test]
+fn describe_spells_union_sets() {
+    // Introspection renders the same admission sets the boundary
+    // enforces: converters name their inputs, path funcs name
+    // `STRING|PATH`, strict consumers name `INT`.
+    let steps = crate::parse_script(indoc! {r#"
+        IMPORT [STD]
+        LET $int: MAP<ANY> = DESCRIBE("STD::INT")
+        ASSERT_EQ $int.params.0.param_type "INT|FLOAT|STRING|BOOL"
+        LET $glob: MAP<ANY> = DESCRIBE("STD::GLOB")
+        ASSERT_EQ $glob.params.0.param_type "STRING|PATH"
+        LET $fmt: MAP<ANY> = DESCRIBE("STD::FORMAT_BYTE_COUNT")
+        ASSERT_EQ $fmt.params.0.param_type "INT"
+        WRITE out.txt "done"
+    "#})
+    .expect("parse ok");
+    let (_, files) = run_with_mock_fs(&steps);
+    assert_eq!(file_content(&files, "out.txt"), b"done");
+}
+
+#[test]
+fn func_bare_return_fails_non_string_slot() {
+    // A bare `RETURN` yields the empty string: it type-checks only
+    // against a `STRING` slot and fails every other contract.
+    let steps = crate::parse_script(indoc! {r#"
+        FUNC F($flag: BOOL) {
+            IF $flag {
+                RETURN 1
+            }
+            RETURN
+        }
+        LET $v: INT = F(true)
+    "#})
+    .expect("parse ok");
+    let fs: Box<dyn WorkspaceFs> = Box::new(MockFs::new());
+    let err = run_expect_err(fs, &steps, MockProcessManager::default());
+    assert!(
+        format!("{err:#}").contains("cannot unify"),
+        "bare return mismatches INT: {err:#}"
+    );
+}
+
+#[test]
 fn resolve_tag_composes_schema_and_alias_leaves() {
     use oxdock_parser::Field;
     let fs = MockFs::new();
     let mut state = create_exec_state(fs);
-    static SCHEMA_FIELDS: &[Field] = &[Field {
-        name: "name",
+    let schema_fields: std::sync::Arc<[Field]> = std::sync::Arc::from([Field {
+        name: "name".to_string(),
         ty: TypeTag::String,
         docs: "",
         optional: false,
-    }];
-    state.register_record_schema("EMP", SCHEMA_FIELDS);
+    }]);
+    state.register_record_schema("EMP", schema_fields);
     state
         .type_aliases
         .insert("PERSON".to_string(), "MAP<name: STRING>".to_string());
@@ -4424,6 +4872,39 @@ fn merge_maps_rejects_unknown_policy_at_boundary() {
 }
 
 #[test]
+fn check_options_enforces_present_values() {
+    // Declared option values check through the single shape path:
+    // unknown keys fail as before, present wrong-typed values fail
+    // naming func, key, expected, and actual, and absent keys pass
+    // for downstream defaults.
+    let options = [
+        ParamOption {
+            name: "timeout",
+            value: oxdock_parser::union_tag!(Duration, String),
+            required: false,
+            default: None,
+        },
+        ParamOption {
+            name: "retries",
+            value: TypeTag::Int,
+            required: false,
+            default: None,
+        },
+    ];
+    crate::check_options(&std::collections::BTreeMap::new(), &options, "F").expect("absent passes");
+    let mut bad: std::collections::BTreeMap<String, Value> = std::collections::BTreeMap::new();
+    bad.insert("retries".to_string(), Value::string("3".to_string()));
+    let err = crate::check_options(&bad, &options, "F").expect_err("must fail");
+    assert!(
+        format!("{err:#}").contains("option 'retries': expected INT, got STRING"),
+        "names func, key, and shape: {err:#}"
+    );
+    let mut ok: std::collections::BTreeMap<String, Value> = std::collections::BTreeMap::new();
+    ok.insert("timeout".to_string(), Value::string("10s".to_string()));
+    crate::check_options(&ok, &options, "F").expect("union member passes");
+}
+
+#[test]
 fn run_start_rejects_unknown_type_tags() {
     // Typo'd `returns` and `params` labels fail before the first step
     // runs, listing every known type. Previously a bad `returns` label
@@ -4475,7 +4956,10 @@ fn run_start_rejects_unknown_type_tags() {
     // it, so run-start validation fails naming the function and type.
     let unregistered = TypeTag::Custom(UnregisteredTag::descriptor());
     let mut state = create_exec_state(MockFs::new());
-    state.register_module(bad_module(Some(unregistered), Some(TypeTag::String)));
+    state.register_module(bad_module(
+        Some(unregistered.clone()),
+        Some(TypeTag::String),
+    ));
     let err = state
         .validate_function_type_tags()
         .expect_err("unknown return must fail");

@@ -617,6 +617,9 @@ pub(crate) fn render_plugin_types(descriptors: &[&TypeDescriptor], metas: &[Func
 
 /// Whether a tag carries a custom handle descriptor, recursing through
 /// composites: record returns mint the handles nested in their fields.
+/// Every non-carrying variant is listed: a new tag fails here until
+/// its nesting rule is explicit, so a custom handle can never hide
+/// inside an unexamined shape.
 fn tag_mentions(tag: &TypeTag, descriptor: &TypeDescriptor) -> bool {
     match tag {
         TypeTag::Custom(other) => std::ptr::eq(*other, descriptor),
@@ -624,7 +627,22 @@ fn tag_mentions(tag: &TypeTag, descriptor: &TypeDescriptor) -> bool {
         TypeTag::Record(fields) => fields
             .iter()
             .any(|field| tag_mentions(&field.ty, descriptor)),
-        _ => false,
+        TypeTag::Union(_, members) => members
+            .iter()
+            .any(|member| tag_mentions(member, descriptor)),
+        TypeTag::String
+        | TypeTag::Int
+        | TypeTag::Float
+        | TypeTag::Bool
+        | TypeTag::List
+        | TypeTag::Map
+        | TypeTag::Pipe
+        | TypeTag::Handle
+        | TypeTag::Duration
+        | TypeTag::Path
+        | TypeTag::Semaphore
+        | TypeTag::Permit
+        | TypeTag::Any => false,
     }
 }
 
@@ -686,6 +704,83 @@ mod tests {
         assert!(
             params.contains("`$options?` (`MAP`)"),
             "bullet must mark the omittable param: {params}"
+        );
+    }
+
+    #[test]
+    fn unions_render_structurally_everywhere() {
+        // Single-renderer rule: docs spell exactly what
+        // `render_structural` spells, in signatures, bullets, and
+        // returns alike. No docs-local union formatter exists.
+        use oxdock_parser::Field;
+        use std::sync::Arc;
+        let string_path = oxdock_parser::union_tag!(String, Path);
+        let list_union = TypeTag::ListOf(Arc::new(oxdock_parser::union_tag!(Int, String)));
+        let map_union = TypeTag::MapOf(Arc::new(oxdock_parser::union_tag!(Int, String)));
+        let record_union = TypeTag::Record(Arc::from([Field {
+            name: "target".to_string(),
+            ty: string_path.clone(),
+            docs: "",
+            optional: false,
+        }]));
+        for tag in [&string_path, &list_union, &map_union, &record_union] {
+            assert_eq!(
+                render_tag(tag),
+                oxdock_parser::render_structural(tag),
+                "docs delegate, never reformat"
+            );
+        }
+        assert_eq!(render_tag(&list_union), "LIST<INT|STRING>");
+        assert_eq!(render_tag(&map_union), "MAP<INT|STRING>");
+        assert_eq!(render_tag(&record_union), "MAP<target: STRING|PATH>");
+        let meta = FuncMeta {
+            name: "T::F".to_string(),
+            module: "T".to_string(),
+            kind: FuncKind::HostPure,
+            params: Some(vec![
+                FuncParam {
+                    name: "pattern".to_string(),
+                    param_type: Some(string_path),
+                    allowed: None,
+                    docs: "",
+                    options: None,
+                    optional: false,
+                },
+                FuncParam {
+                    name: "items".to_string(),
+                    param_type: Some(list_union),
+                    allowed: None,
+                    docs: "",
+                    options: None,
+                    optional: false,
+                },
+            ]),
+            returns: Some(record_union),
+            rpn: false,
+            summary: "",
+            docs: "",
+        };
+        let signature = render_signature(&meta);
+        assert!(
+            signature.contains("$pattern: STRING|PATH"),
+            "signature names the set: {signature}"
+        );
+        assert!(
+            signature.contains("$items: LIST<INT|STRING>"),
+            "signature nests the set: {signature}"
+        );
+        assert!(
+            signature.contains("-> MAP<target: STRING|PATH>"),
+            "returns name the set: {signature}"
+        );
+        let params = render_parameters(&meta);
+        assert!(
+            params.contains("`$pattern` (`STRING|PATH`)"),
+            "bullet names the set: {params}"
+        );
+        assert!(
+            params.contains("**Returns:** `MAP<target: STRING|PATH>`"),
+            "returns block names the set: {params}"
         );
     }
 

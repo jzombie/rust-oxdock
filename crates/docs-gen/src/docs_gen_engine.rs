@@ -6,7 +6,7 @@
 //! `RUST`, `MARKDOWN`, ...). A pipeline for a project outside OxDock
 //! registers these plus its own domain plugins and nothing else.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
@@ -20,8 +20,16 @@ use oxdock_process::ProcessManager;
 /// fails with a rename hint instead of producing a placeholder nobody
 /// can type with confidence.
 #[oxdock_func(pure, returns = TypeTag::String)]
-fn file_stem(path: String) -> Result<Value> {
-    let file = path.rsplit('/').next().unwrap_or(&path);
+fn file_stem(#[union(String, Path)] path: Value) -> Result<Value> {
+    let text = match path.as_str() {
+        Some(s) => s.to_string(),
+        None => path
+            .as_path()
+            .expect("union extractor admits STRING|PATH")
+            .to_string_lossy()
+            .to_string(),
+    };
+    let file = text.rsplit('/').next().unwrap_or(&text);
     let stem = file.split('.').next().unwrap_or("");
     if stem.is_empty()
         || !stem
@@ -29,7 +37,7 @@ fn file_stem(path: String) -> Result<Value> {
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
     {
         bail!(
-            "fragment '{path}' has no placeholder-safe stem; rename it to [A-Za-z0-9_-] segments"
+            "fragment '{text}' has no placeholder-safe stem; rename it to [A-Za-z0-9_-] segments"
         );
     }
     Ok(Value::string(stem.to_string()))
@@ -51,10 +59,22 @@ fn file_stem(path: String) -> Result<Value> {
 fn expand_template<P: ProcessManager>(
     cx: &mut StepCtx<P>,
     raw: String,
-    vars: Value,
-    env: Value,
+    vars: BTreeMap<String, Value>,
+    env: BTreeMap<String, String>,
 ) -> Result<Value> {
-    render_fragment(&raw, &vars, &env, Some(cx.pure_functions()))
+    // Narrowed maps (the extractor verified `MAP<ANY>` and
+    // `MAP<STRING>` above): re-wrap for the shared fragment path,
+    // which keeps its own checks for direct callers.
+    render_fragment(
+        &raw,
+        &Value::map(vars),
+        &Value::map(
+            env.into_iter()
+                .map(|(key, text)| (key, Value::string(text)))
+                .collect(),
+        ),
+        Some(cx.pure_functions()),
+    )
 }
 
 /// Fragment expansion over an explicit scope and call table. Pure over
@@ -154,9 +174,36 @@ mod tests {
     }
 
     #[test]
+    fn expand_template_declares_map_shapes() {
+        // `vars` takes any map, `env` takes string-valued maps: the
+        // extractor enforces exactly what the fragment path checks,
+        // so the signature is the check.
+        let meta =
+            match <ExpandTemplate as OxDockFn<oxdock_process::ShellProcessManager>>::registration()
+            {
+                oxdock_core::HostRegistration::Pure { meta, .. } => meta,
+                oxdock_core::HostRegistration::Stateful { meta, .. } => meta,
+            };
+        let shape = |name: &str| {
+            meta.params
+                .as_deref()
+                .expect("params")
+                .iter()
+                .find(|param| param.name == name)
+                .unwrap_or_else(|| panic!("param {name} exists"))
+                .param_type
+                .as_ref()
+                .map(oxdock_parser::render_structural)
+                .unwrap_or_default()
+        };
+        assert_eq!(shape("vars"), "MAP<ANY>");
+        assert_eq!(shape("env"), "MAP<STRING>");
+    }
+
+    #[test]
     fn stem_strips_compound_extensions() {
         let stem = |rel: &str| {
-            file_stem(rel.to_string())
+            file_stem(Value::string(rel.to_string()))
                 .expect("stem")
                 .as_str()
                 .expect("string")
@@ -170,8 +217,8 @@ mod tests {
 
     #[test]
     fn stem_rejects_placeholder_hostile_names() {
-        assert!(file_stem("a/usage-(build.rs).md".to_string()).is_err());
-        assert!(file_stem("a/.md".to_string()).is_err());
+        assert!(file_stem(Value::string("a/usage-(build.rs).md".to_string())).is_err());
+        assert!(file_stem(Value::string("a/.md".to_string())).is_err());
     }
 
     #[test]

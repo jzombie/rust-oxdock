@@ -9,7 +9,7 @@
 use anyhow::{Result, bail};
 
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::{TypeDescriptor, Value};
 
@@ -19,11 +19,27 @@ use crate::{TypeDescriptor, Value};
 /// scripts never approach it; exceeding it bails naming the shape.
 pub const MAX_GENERIC_DEPTH: usize = 8;
 
+/// Build a union tag from member variant idents: the spelling
+/// derives from the members' own names at construction, so no
+/// hand-written string can drift from the set it names. Unknown
+/// idents fail at the `TypeTag::` path, so misspelled members never
+/// compile. Empty sets are unrepresentable (one or more idents).
+/// Runtime-built (shared `Arc` payloads, freed with the last
+/// owner): not for `const` or `static` initializers.
+#[macro_export]
+macro_rules! union_tag {
+    ($($member:ident),+ $(,)?) => {
+        $crate::TypeTag::union(vec![$($crate::TypeTag::$member),+])
+    };
+}
+
 /// One named field of a [`TypeTag::Record`] schema.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Field {
-    /// Field key as it appears in the value map.
-    pub name: &'static str,
+    /// Field key as it appears in the value map. Owned: schema names
+    /// arrive from runtime spellings, so interning them would leak
+    /// per distinct spelling.
+    pub name: String,
     /// Expected type of the field value. Nests freely.
     pub ty: TypeTag,
     /// What the field carries. Hand-registered schemas document every
@@ -39,12 +55,14 @@ pub struct Field {
 ///
 /// Builtins are variants, so exhaustiveness is compiler-checked wherever
 /// tags are matched. [`TypeTag::Custom`] carries a host descriptor for
-/// opaque handles. [`TypeTag::ListOf`], [`TypeTag::Record`], and
-/// [`TypeTag::MapOf`] shape composite values: bare `List` and `Map`
+/// opaque handles. [`TypeTag::ListOf`], [`TypeTag::Record`],
+/// [`TypeTag::MapOf`], and [`TypeTag::Union`] share their payloads
+/// through [`Arc`](std::sync::Arc): cheap clones, no leaks, freed
+/// when the last owner drops. Bare `List` and `Map`
 /// are runtime words only, never declaration spellings. Unknown
 /// lists declare `LIST<ANY>`; unknown maps declare [`TypeTag::MapOf`]
 /// with [`TypeTag::Any`] values (`MAP<ANY>`).
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub enum TypeTag {
     String,
     Int,
@@ -63,9 +81,17 @@ pub enum TypeTag {
     /// both accept unconditionally, so the tag never lies.
     Any,
     Custom(&'static TypeDescriptor),
-    ListOf(&'static TypeTag),
-    Record(&'static [Field]),
-    MapOf(&'static TypeTag),
+    ListOf(Arc<TypeTag>),
+    Record(Arc<[Field]>),
+    MapOf(Arc<TypeTag>),
+    /// Admission set over existing words (`STRING|PIPE`): values stay
+    /// whatever words the members name, so no word reader changes.
+    /// The spelling is computed once at construction from the
+    /// members and shared; `name()` borrows it with no allocation.
+    /// Members are flat, deduplicated, and order-free by
+    /// construction, and every comparison is subset-based, so member
+    /// order never matters.
+    Union(Arc<str>, Arc<[TypeTag]>),
 }
 
 /// The `ANY` word for composed tags: one shared instance so generic
@@ -87,9 +113,14 @@ impl std::fmt::Debug for TypeTag {
             TypeTag::ListOf(element) => write!(f, "ListOf({element:?})"),
             TypeTag::MapOf(values) => write!(f, "MapOf({values:?})"),
             TypeTag::Record(fields) => {
-                let names: Vec<&str> = fields.iter().map(|field| field.name).collect();
+                let names: Vec<&str> = fields.iter().map(|field| field.name.as_str()).collect();
                 write!(f, "Record({})", names.join(", "))
             }
+            // Unions render their stored spelling, like shaped tags
+            // render their contents: the spelling names every member,
+            // so no member detail is lost. Bare words share the
+            // `name()` delegation below, which is itself exhaustive.
+            TypeTag::Union(spelling, _) => write!(f, "Union({spelling})"),
             tag => write!(f, "{}", tag.name()),
         }
     }
@@ -101,10 +132,27 @@ impl std::fmt::Display for TypeTag {
     }
 }
 impl TypeTag {
+    /// Build a union tag from resolved members, computing the
+    /// canonical spelling from their structural renders. Single
+    /// source for the spelling: the macro and the resolve path
+    /// share it, so no hand-written string exists anywhere. Members
+    /// pass through as given (no normalization here): the resolve
+    /// path normalizes through its own pass before calling.
+    pub fn union(members: Vec<TypeTag>) -> TypeTag {
+        let spelling: Arc<str> = members
+            .iter()
+            .map(render_structural)
+            .collect::<Vec<_>>()
+            .join("|")
+            .into();
+        TypeTag::Union(spelling, Arc::from(members))
+    }
+
     /// Display name: the builtin label, the custom descriptor name, or
     /// the coarse word kind for shaped composites. Field detail renders
-    /// structurally, never through this string.
-    pub fn name(&self) -> &'static str {
+    /// structurally, never through this string. Borrowed in every
+    /// case: literals for words, the stored spelling for unions.
+    pub fn name(&self) -> &str {
         match self {
             TypeTag::String => "STRING",
             TypeTag::Int => "INT",
@@ -119,6 +167,9 @@ impl TypeTag {
             TypeTag::Semaphore => "SEMAPHORE",
             TypeTag::Permit => "PERMIT",
             TypeTag::Any => "ANY",
+            // Borrowed from the stored spelling: computed once at
+            // construction, shared by every clone.
+            TypeTag::Union(spelling, _) => spelling,
             TypeTag::Custom(descriptor) => descriptor.name,
             TypeTag::ListOf(_) => "LIST",
             TypeTag::MapOf(_) => "MAP",
@@ -149,10 +200,29 @@ impl TypeTag {
     }
 
     /// Field table for [`TypeTag::Record`], `None` otherwise.
-    pub fn fields(&self) -> Option<&'static [Field]> {
+    /// Every non-record variant is listed: a new variant fails to
+    /// compile here until its fieldlessness is explicit, so record
+    /// structure can never silently leak into (or out of) another tag.
+    pub fn fields(&self) -> Option<&[Field]> {
         match self {
             TypeTag::Record(fields) => Some(fields),
-            _ => None,
+            TypeTag::String
+            | TypeTag::Int
+            | TypeTag::Float
+            | TypeTag::Bool
+            | TypeTag::List
+            | TypeTag::Map
+            | TypeTag::Pipe
+            | TypeTag::Handle
+            | TypeTag::Duration
+            | TypeTag::Path
+            | TypeTag::Semaphore
+            | TypeTag::Permit
+            | TypeTag::Any
+            | TypeTag::Custom(_)
+            | TypeTag::ListOf(_)
+            | TypeTag::MapOf(_)
+            | TypeTag::Union(..) => None,
         }
     }
 }
@@ -184,9 +254,10 @@ pub fn render_structural(tag: &TypeTag) -> String {
     }
 }
 
-/// One parsed type spelling: a bare name or a generic application
+/// One parsed type spelling: a bare name, a generic application
 /// with positional (`LIST<MAP>`) or named (`MAP<name: STRING>`)
-/// arguments. A named field with a `?` suffix is optional
+/// arguments, or a union (`STRING|PIPE`) of sibling shapes. A named
+/// field with a `?` suffix is optional
 /// (`MAP<permit?: PERMIT>`). Arity and shape enforce at resolution,
 /// never here: `LIST<A, B>` and `STRING<INT>` parse and fail later
 /// naming the rule each breaks.
@@ -197,6 +268,7 @@ pub enum Spelled {
         name: String,
         args: Vec<SpelledField>,
     },
+    Union(Vec<Spelled>),
 }
 
 /// One generic argument: a bare type or a named (possibly optional)
@@ -224,11 +296,16 @@ pub fn canonicalize_spelling(s: &str) -> String {
 }
 
 /// Render one parsed spelling in canonical form: `LIST<MAP>`,
-/// `MAP<name: STRING, age: INT>`. Deterministic by construction,
-/// so equal shapes share intern entries.
+/// `MAP<name: STRING, age: INT>`, `STRING|PIPE`. Deterministic by
+/// construction, so equal shapes share intern entries.
 pub fn render_spelled(spelled: &Spelled) -> String {
     match spelled {
         Spelled::Named(name) => name.clone(),
+        Spelled::Union(members) => members
+            .iter()
+            .map(render_spelled)
+            .collect::<Vec<_>>()
+            .join("|"),
         Spelled::Generic { name, args } => {
             let rendered: Vec<String> = args
                 .iter()
@@ -263,6 +340,24 @@ pub fn parse_spelling(s: &str) -> Result<Spelled, String> {
 }
 
 fn parse_spelled_one(text: &str, depth: usize) -> Result<(Spelled, &str), String> {
+    let (first, mut rest) = parse_spelled_shape(text, depth)?;
+    if !rest.starts_with('|') {
+        return Ok((first, rest));
+    }
+    // Union tail: `A|B|C` accumulates sibling shapes at any level, so
+    // unions compose inside generic arguments as well as at top
+    // level. Members share the depth budget (siblings, not nesting);
+    // every piece consumes input, so the loop always terminates.
+    let mut members = vec![first];
+    while let Some(tail) = rest.strip_prefix('|') {
+        let (next, after) = parse_spelled_shape(tail, depth)?;
+        members.push(next);
+        rest = after;
+    }
+    Ok((Spelled::Union(members), rest))
+}
+
+fn parse_spelled_shape(text: &str, depth: usize) -> Result<(Spelled, &str), String> {
     if depth > MAX_GENERIC_DEPTH {
         return Err(format!(
             "type spelling exceeds maximum generic depth of {MAX_GENERIC_DEPTH}: {text:?}"
@@ -349,39 +444,37 @@ fn parse_spelled_field_name(text: &str) -> (Option<String>, bool, &str) {
 /// `&'static TypeTag` per distinct canonical spelling. The lock is
 /// held only for lookup/insert; leaf resolution happens outside it
 /// in the caller.
-static COMPOSED_TAGS: OnceLock<Mutex<HashMap<String, &'static TypeTag>>> = OnceLock::new();
+static COMPOSED_TAGS: OnceLock<Mutex<HashMap<String, TypeTag>>> = OnceLock::new();
 
-fn composed_table() -> &'static Mutex<HashMap<String, &'static TypeTag>> {
+fn composed_table() -> &'static Mutex<HashMap<String, TypeTag>> {
     COMPOSED_TAGS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// Look up an already-interned spelling. Resolution checks this
-/// before building, so identical spellings share one pointer.
-pub fn lookup_composed(canonical: &str) -> Option<&'static TypeTag> {
+/// before building, so identical spellings share one `Arc` payload
+/// family (pointer identity holds across clones).
+pub fn lookup_composed(canonical: &str) -> Option<TypeTag> {
     composed_table()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .get(canonical)
-        .copied()
+        .cloned()
 }
 
 /// Intern one composed tag under its canonical spelling: a raced
-/// build stores once (the loser drops its duplicate leaves, still
-/// bounded by distinct spellings per process). Exactly one leak
-/// per distinct spelling per process: the leak is the point (a
-/// process-global `'static` home for composed tags), localized
-/// here so the rest of the crate stays deny-clean.
-#[allow(clippy::disallowed_methods)]
-pub fn intern_composed(canonical: String, tag: TypeTag) -> &'static TypeTag {
+/// build stores once (the loser drops its duplicate, still bounded
+/// by distinct spellings per process). The table owns every entry
+/// (reachable, freed with the process like any cache): clones share
+/// payloads through `Arc`, so identity holds without leaks.
+pub fn intern_composed(canonical: String, tag: TypeTag) -> TypeTag {
     let mut table = composed_table()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    if let Some(hit) = table.get(&canonical).copied() {
-        return hit;
+    if let Some(hit) = table.get(&canonical) {
+        return hit.clone();
     }
-    let leaked: &'static TypeTag = Box::leak(Box::new(tag));
-    table.insert(canonical, leaked);
-    leaked
+    table.insert(canonical, tag.clone());
+    tag
 }
 
 /// Check a value against a tag, failing naming the expected shape and
@@ -441,8 +534,8 @@ pub fn check_value_at(tag: &TypeTag, value: &Value, path: &str) -> Result<()> {
         },
         TypeTag::Record(fields) => match value.as_map() {
             Some(map) => {
-                for field in *fields {
-                    match map.get(field.name) {
+                for field in fields.iter() {
+                    match map.get(field.name.as_str()) {
                         Some(item) => {
                             check_value_at(&field.ty, item, &format!("{path}.{}", field.name))?;
                         }
@@ -455,7 +548,7 @@ pub fn check_value_at(tag: &TypeTag, value: &Value, path: &str) -> Result<()> {
                     }
                 }
                 for key in map.keys() {
-                    if !fields.iter().any(|field| field.name == key) {
+                    if !fields.iter().any(|field| field.name == *key) {
                         bail!(
                             "{path}: unknown field '{key}'; expected fields: {}",
                             field_list(fields),
@@ -477,14 +570,43 @@ pub fn check_value_at(tag: &TypeTag, value: &Value, path: &str) -> Result<()> {
                 )
             }
         }
-        _ => bail!("{path}: expected {}, got {}", tag.name(), value.type_name()),
+        // Admission set: any member passing admits the value, so
+        // member order never matters. All members failing names the
+        // set, never a single member.
+        TypeTag::Union(_, members) => {
+            if members
+                .iter()
+                .any(|member| check_value(member, value).is_ok())
+            {
+                Ok(())
+            } else {
+                bail!(
+                    "{path}: expected {}, got {}",
+                    render_structural(tag),
+                    value.type_name()
+                )
+            }
+        }
+        // Scalar mismatches: every scalar is listed so a new word
+        // kind fails to compile here until its mismatch text is
+        // explicit. No future variant can silently inherit this bail.
+        TypeTag::String
+        | TypeTag::Int
+        | TypeTag::Float
+        | TypeTag::Bool
+        | TypeTag::Pipe
+        | TypeTag::Handle
+        | TypeTag::Duration
+        | TypeTag::Path
+        | TypeTag::Semaphore
+        | TypeTag::Permit => bail!("{path}: expected {}, got {}", tag.name(), value.type_name()),
     }
 }
 
 fn field_list(fields: &[Field]) -> String {
     fields
         .iter()
-        .map(|field| field.name)
+        .map(|field| field.name.as_str())
         .collect::<Vec<_>>()
         .join(", ")
 }
@@ -493,6 +615,7 @@ fn field_list(fields: &[Field]) -> String {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+    use std::sync::Arc;
 
     fn map(entries: &[(&str, Value)]) -> Value {
         Value::map(
@@ -537,21 +660,21 @@ mod tests {
 
     #[test]
     fn record_rejects_missing_and_extra_fields() {
-        static FIELDS: &[Field] = &[
+        let fields: Arc<[Field]> = Arc::from([
             Field {
-                name: "a",
+                name: "a".to_string(),
                 ty: TypeTag::String,
                 docs: "",
                 optional: false,
             },
             Field {
-                name: "b",
+                name: "b".to_string(),
                 ty: TypeTag::Int,
                 docs: "",
                 optional: false,
             },
-        ];
-        let tag = TypeTag::Record(FIELDS);
+        ]);
+        let tag = TypeTag::Record(fields);
         let good = map(&[("a", Value::string("x".to_string())), ("b", Value::int(1))]);
         assert!(check_value(&tag, &good).is_ok());
         let missing = map(&[("a", Value::string("x".to_string()))]);
@@ -575,21 +698,21 @@ mod tests {
     fn record_optional_fields_may_be_absent() {
         // Optional fields validate when present and pass when absent;
         // required fields and extra keys still fail exactly.
-        static FIELDS: &[Field] = &[
+        let fields: Arc<[Field]> = Arc::from([
             Field {
-                name: "held",
+                name: "held".to_string(),
                 ty: TypeTag::Int,
                 docs: "",
                 optional: false,
             },
             Field {
-                name: "permit",
+                name: "permit".to_string(),
                 ty: TypeTag::String,
                 docs: "",
                 optional: true,
             },
-        ];
-        let tag = TypeTag::Record(FIELDS);
+        ]);
+        let tag = TypeTag::Record(fields);
         let full = map(&[
             ("held", Value::int(1)),
             ("permit", Value::string("p".to_string())),
@@ -609,7 +732,7 @@ mod tests {
 
     #[test]
     fn list_of_checks_elements_with_index() {
-        let tag = TypeTag::ListOf(&TypeTag::Int);
+        let tag = TypeTag::ListOf(Arc::new(TypeTag::Int));
         let good = Value::list(vec![Value::int(1), Value::int(2)]);
         assert!(check_value(&tag, &good).is_ok());
         let bad = Value::list(vec![Value::int(1), Value::string("x".to_string())]);
@@ -704,7 +827,7 @@ mod tests {
         );
         assert_eq!(canonicalize_spelling("MAP< ANY >"), "MAP<ANY>");
         assert_eq!(
-            render_structural(&TypeTag::MapOf(&TypeTag::Any)),
+            render_structural(&TypeTag::MapOf(Arc::new(TypeTag::Any))),
             "MAP<ANY>"
         );
     }
@@ -713,7 +836,7 @@ mod tests {
     fn map_of_checks_values_with_paths() {
         // Value shapes walk every entry with key paths; non-maps fail
         // naming the structural shape, never the coarse word.
-        let tag = TypeTag::MapOf(&TypeTag::Int);
+        let tag = TypeTag::MapOf(Arc::new(TypeTag::Int));
         let good = map(&[("a", Value::int(1))]);
         assert!(check_value(&tag, &good).is_ok());
         let bad = map(&[("a", Value::string("x".to_string()))]);
@@ -747,26 +870,35 @@ mod tests {
     }
 
     #[test]
-    fn identical_spellings_share_one_interned_pointer() {
-        let first = intern_composed("LIST<MAP>".to_string(), TypeTag::ListOf(&TypeTag::Map));
-        let second = intern_composed("LIST<MAP>".to_string(), TypeTag::ListOf(&TypeTag::Map));
+    fn identical_spellings_share_one_interned_payload() {
+        let first = intern_composed(
+            "LIST<MAP>".to_string(),
+            TypeTag::ListOf(Arc::new(TypeTag::Map)),
+        );
+        let second = intern_composed(
+            "LIST<MAP>".to_string(),
+            TypeTag::ListOf(Arc::new(TypeTag::Map)),
+        );
+        let (TypeTag::ListOf(a), TypeTag::ListOf(b)) = (first, second) else {
+            panic!("composed tags keep their shape");
+        };
         assert!(
-            std::ptr::eq(first, second),
-            "same canonical spelling interns once"
+            Arc::ptr_eq(&a, &b),
+            "same canonical spelling shares one payload"
         );
     }
 
     #[test]
     fn structural_rendering_names_contents() {
-        static FIELDS: &[Field] = &[Field {
-            name: "name",
+        let fields: Arc<[Field]> = Arc::from([Field {
+            name: "name".to_string(),
             ty: TypeTag::String,
             docs: "",
             optional: false,
-        }];
-        static RECORD: TypeTag = TypeTag::Record(FIELDS);
-        static LIST: TypeTag = TypeTag::ListOf(&RECORD);
-        assert_eq!(render_structural(&LIST), "LIST<MAP<name: STRING>>");
+        }]);
+        let record = TypeTag::Record(fields);
+        let list = TypeTag::ListOf(Arc::new(record));
+        assert_eq!(render_structural(&list), "LIST<MAP<name: STRING>>");
         assert_eq!(render_structural(&TypeTag::Int), "INT");
     }
 }

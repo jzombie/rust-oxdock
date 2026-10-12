@@ -47,10 +47,12 @@
 //! dependencies.
 //!
 //! Types map to DSL parameters as follows: `String` accepts STRING only;
-//! `i64` accepts `Int`, integral finite `Float`, and trimmed integer strings;
-//! `f64` accepts finite `Float`, `Int`, and trimmed numeric strings; `bool`
-//! accepts `Bool` and `"true"`/`"false"` strings; `Value` accepts anything.
-//! Arity failures report `{NAME}() expects {n} argument(s), got {m}`.
+//! `i64` accepts `Int` only (convert explicitly with `INT()`); `f64`
+//! accepts finite `Float` and `Int`; `bool` accepts `Bool` and
+//! `"true"`/`"false"` strings; `Value` accepts anything. Converters
+//! (`INT()`, `FLOAT()`) widen their own inputs through `#[union]`;
+//! consumers stay strict. Arity failures report
+//! `{NAME}() expects {n} argument(s), got {m}`.
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
@@ -257,6 +259,181 @@ enum ParamKind {
     Semaphore,
     Custom(Box<Type>),
     Shaped(Shape),
+    /// Explicit admission set on a `Value` parameter (`#[union(...)]`):
+    /// the extractor strictly checks membership and passes the word
+    /// through; the body narrows explicitly. No coercion crosses
+    /// members: a `STRING` word never arrives as `INT`. Members are
+    /// scalar names (`String`, `Int`, `Path`, ...), bare words
+    /// (`List`, `Map`), or nestings (`List<Map>`, `Map<Any>`) that
+    /// compose through the shared shaped constructors.
+    Union(Vec<Type>),
+    /// Union over list elements on a `Vec<Value>` parameter
+    /// (`#[union(...)]` on `Vec<Value>`): the tag is
+    /// `LIST<member|...>` and the extractor narrows to the vector
+    /// after the single check, like every other shaped param.
+    UnionList(Vec<Type>),
+    /// Closed record on a `BTreeMap<String, Value>` parameter
+    /// (`#[record("name: String", ...)]`): the tag names every field
+    /// and `check_value_at` rejects missing and extra fields before
+    /// the body reads them directly.
+    Record(Vec<RecordField>),
+}
+
+/// One `#[record(...)]` entry (`name[?]: TYPE`): a fixed field of a
+/// closed record parameter with its value type and optionality.
+#[derive(Clone)]
+struct RecordField {
+    name: String,
+    ty: Type,
+    optional: bool,
+}
+
+/// Compose a record tag from field specs: the same tree the
+/// extractor checks, so metadata and enforcement share one source.
+/// Unknown field types fail at the definition site, never at runtime.
+fn record_tag(fields: &[RecordField]) -> TokenStream2 {
+    let entries: Vec<TokenStream2> = fields
+        .iter()
+        .map(|field| {
+            let name = LitStr::new(&field.name, proc_macro2::Span::call_site());
+            let ty = union_member_tag(&field.ty, true)
+                .expect("record field types validated at parse time");
+            let optional = field.optional;
+            quote! {
+                ::oxdock_core::Field {
+                    name: #name.to_string(),
+                    ty: #ty,
+                    docs: "",
+                    optional: #optional,
+                }
+            }
+        })
+        .collect();
+    quote! {
+        ::oxdock_core::TypeTag::Record(::std::sync::Arc::from([#(#entries),*]))
+    }
+}
+
+/// Map one `#[union(...)]` member type to its tag expression. Scalars
+/// name their word; `List<T>`/`Vec<T>` compose `LIST<...>` and
+/// `Map<T>`/`BTreeMap<String, T>` compose `MAP<...>` recursively, so
+/// `List<Map>` spells `LIST<MAP>` with no hand-written string. `Any`
+/// (spelled `Any` or `Value`) is allowed only nested: top-level it
+/// would absorb the set and the union would promise nothing.
+fn union_member_tag(ty: &Type, nested: bool) -> syn::Result<TokenStream2> {
+    let Type::Path(path) = ty else {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "union members are type names like String, Int, List<Map>, or Map<Any>",
+        ));
+    };
+    let Some(last) = path.path.segments.last() else {
+        return Err(syn::Error::new_spanned(
+            ty,
+            "union members are type names like String, Int, List<Map>, or Map<Any>",
+        ));
+    };
+    let name = last.ident.to_string();
+    match &last.arguments {
+        syn::PathArguments::None => match name.as_str() {
+            "String" => Ok(quote! { ::oxdock_core::TypeTag::String }),
+            "Int" | "i64" => Ok(quote! { ::oxdock_core::TypeTag::Int }),
+            "Float" | "f64" => Ok(quote! { ::oxdock_core::TypeTag::Float }),
+            "Bool" | "bool" => Ok(quote! { ::oxdock_core::TypeTag::Bool }),
+            "Path" => Ok(quote! { ::oxdock_core::TypeTag::Path }),
+            "Pipe" => Ok(quote! { ::oxdock_core::TypeTag::Pipe }),
+            "Duration" => Ok(quote! { ::oxdock_core::TypeTag::Duration }),
+            "List" => Ok(quote! { ::oxdock_core::TypeTag::List }),
+            "Map" => Ok(quote! { ::oxdock_core::TypeTag::Map }),
+            "Any" | "Value" if nested => Ok(quote! { ::oxdock_core::TypeTag::Any }),
+            "Any" | "Value" => Err(syn::Error::new_spanned(
+                ty,
+                "top-level Any absorbs the union; list concrete members instead",
+            )),
+            _ => Err(syn::Error::new(
+                proc_macro2::Span::call_site(),
+                "unknown union member; expected String, Int, Float, Bool, Path, Pipe, Duration, List, Map, or a List<...>/Map<...> nesting",
+            )),
+        },
+        syn::PathArguments::AngleBracketed(args) => match name.as_str() {
+            "List" | "Vec" => {
+                let items: Vec<_> = args.args.iter().collect();
+                let [inner] = items.as_slice() else {
+                    return Err(syn::Error::new_spanned(
+                        ty,
+                        "List<...> takes exactly one member type",
+                    ));
+                };
+                let syn::GenericArgument::Type(inner_ty) = inner else {
+                    return Err(syn::Error::new_spanned(
+                        ty,
+                        "List<...> takes exactly one member type",
+                    ));
+                };
+                let inner_tag = union_member_tag(inner_ty, true)?;
+                Ok(quote! {
+                    ::oxdock_core::TypeTag::ListOf(::std::sync::Arc::new(#inner_tag))
+                })
+            }
+            "Map" => {
+                let items: Vec<_> = args.args.iter().collect();
+                let [inner] = items.as_slice() else {
+                    return Err(syn::Error::new_spanned(
+                        ty,
+                        "Map<...> takes exactly one member type",
+                    ));
+                };
+                let syn::GenericArgument::Type(inner_ty) = inner else {
+                    return Err(syn::Error::new_spanned(
+                        ty,
+                        "Map<...> takes exactly one member type",
+                    ));
+                };
+                let inner_tag = union_member_tag(inner_ty, true)?;
+                Ok(quote! {
+                    ::oxdock_core::TypeTag::MapOf(::std::sync::Arc::new(#inner_tag))
+                })
+            }
+            "BTreeMap" => {
+                let items: Vec<_> = args.args.iter().collect();
+                let [key, value] = items.as_slice() else {
+                    return Err(syn::Error::new_spanned(
+                        ty,
+                        "union maps spell BTreeMap<String, member>",
+                    ));
+                };
+                let (syn::GenericArgument::Type(key_ty), syn::GenericArgument::Type(value_ty)) =
+                    (key, value)
+                else {
+                    return Err(syn::Error::new_spanned(
+                        ty,
+                        "union maps spell BTreeMap<String, member>",
+                    ));
+                };
+                let Type::Path(key_path) = key_ty else {
+                    return Err(syn::Error::new_spanned(ty, "union map keys are String"));
+                };
+                let is_string = key_path.path.segments.last().is_some_and(|last| {
+                    last.ident == "String" && matches!(last.arguments, syn::PathArguments::None)
+                });
+                if !is_string {
+                    return Err(syn::Error::new_spanned(ty, "union map keys are String"));
+                }
+                let inner_tag = union_member_tag(value_ty, true)?;
+                Ok(quote! {
+                    ::oxdock_core::TypeTag::MapOf(::std::sync::Arc::new(#inner_tag))
+                })
+            }
+            _ => Err(syn::Error::new_spanned(
+                ty,
+                "only List<...>, Map<...>, Vec<...>, and BTreeMap<String, ...> nest inside unions",
+            )),
+        },
+        syn::PathArguments::Parenthesized(_) => Err(syn::Error::new_spanned(
+            ty,
+            "union members are type names like String, Int, List<Map>, or Map<Any>",
+        )),
+    }
 }
 
 /// A composable shape: leaves are words, composites nest freely.
@@ -272,6 +449,7 @@ enum Shape {
     List,
     Map,
     ListOf(Box<Shape>),
+    MapOf(Box<Shape>),
 }
 
 impl ParamKind {
@@ -302,24 +480,69 @@ impl ParamKind {
                 let tag = Self::shape_tag(shape);
                 quote! { Some(#tag) }
             }
+            // Members compose through the shared constructor: the
+            // spelling derives from the members, so no hand-written
+            // string exists and metadata matches the extractor below.
+            // Unknown members fail at parse time, so the expect here
+            // is unreachable through any compilable input.
+            ParamKind::Union(members) => {
+                let tags: Vec<TokenStream2> = members
+                    .iter()
+                    .map(|member| {
+                        union_member_tag(member, false)
+                            .expect("union members validated at parse time")
+                    })
+                    .collect();
+                quote! { Some(::oxdock_core::TypeTag::union(vec![#(#tags),*])) }
+            }
+            // Union members nest one level inside the list: `Any`
+            // members are allowed here (they sit below `LIST`), so
+            // validation runs nested, mirroring `union_member_tag`.
+            ParamKind::UnionList(members) => {
+                let tags: Vec<TokenStream2> = members
+                    .iter()
+                    .map(|member| {
+                        union_member_tag(member, true)
+                            .expect("union members validated at parse time")
+                    })
+                    .collect();
+                quote! {
+                    Some(::oxdock_core::TypeTag::ListOf(::std::sync::Arc::new(
+                        ::oxdock_core::TypeTag::union(vec![#(#tags),*])
+                    )))
+                }
+            }
+            ParamKind::Record(fields) => {
+                let tag = record_tag(fields);
+                quote! { Some(#tag) }
+            }
         }
     }
 
     /// Metadata tag for a shape, composed recursively: the same tree
     /// the extractor checks, so documentation and enforcement share
     /// one source by construction. Emits a value; check sites borrow
-    /// it (constant promotion makes every nesting level `'static`).
+    /// it. Payloads share through `Arc`, so generated registrations
+    /// never leak.
     fn shape_tag(shape: &Shape) -> TokenStream2 {
         match shape {
             Shape::Str => quote! { ::oxdock_core::TypeTag::String },
             // Bare collections render their unknown shape (`LIST<ANY>`,
             // `MAP<ANY>`): the extractor accepts any word of the kind,
             // and the tag says exactly that instead of a bare word.
-            Shape::List => quote! { ::oxdock_core::TypeTag::ListOf(&::oxdock_core::TypeTag::Any) },
-            Shape::Map => quote! { ::oxdock_core::TypeTag::MapOf(&::oxdock_core::TypeTag::Any) },
+            Shape::List => {
+                quote! { ::oxdock_core::TypeTag::ListOf(::std::sync::Arc::new(::oxdock_core::TypeTag::Any)) }
+            }
+            Shape::Map => {
+                quote! { ::oxdock_core::TypeTag::MapOf(::std::sync::Arc::new(::oxdock_core::TypeTag::Any)) }
+            }
             Shape::ListOf(inner) => {
                 let inner_tag = Self::shape_tag(inner);
-                quote! { ::oxdock_core::TypeTag::ListOf(&#inner_tag) }
+                quote! { ::oxdock_core::TypeTag::ListOf(::std::sync::Arc::new(#inner_tag)) }
+            }
+            Shape::MapOf(inner) => {
+                let inner_tag = Self::shape_tag(inner);
+                quote! { ::oxdock_core::TypeTag::MapOf(::std::sync::Arc::new(#inner_tag)) }
             }
         }
     }
@@ -343,6 +566,12 @@ impl ParamKind {
                 let elem = ParamKind::shape_narrow(inner, &quote! { __e });
                 quote! {
                     #value.as_list().expect("check_value_at enforces LIST").iter().map(|__e| #elem).collect::<Vec<_>>()
+                }
+            }
+            Shape::MapOf(inner) => {
+                let elem = ParamKind::shape_narrow(inner, &quote! { __e });
+                quote! {
+                    #value.as_map().expect("check_value_at enforces MAP").iter().map(|(__k, __e)| (__k.clone(), #elem)).collect::<::std::collections::BTreeMap<_, _>>()
                 }
             }
         }
@@ -404,73 +633,39 @@ impl ParamKind {
             ParamKind::Int => quote! {
                 {
                     let __oxdock_v = __oxdock_values.next().expect("arity checked above");
-                    if let Some(n) = __oxdock_v.as_i64() {
-                        n
-                    } else if let Some(f) = __oxdock_v.as_f64() {
-                        if f.is_finite() && f.fract() == 0.0 && f >= i64::MIN as f64 && f <= i64::MAX as f64 {
-                            f as i64
-                        } else {
-                            ::anyhow::bail!(
-                                "{}() argument `${}` must be an integer value, found FLOAT ({f:?})",
-                                #dsl_name,
-                                stringify!(#param),
-                            )
-                        }
-                    } else if let Some(s) = __oxdock_v.as_str() {
-                        s.trim().parse::<i64>().map_err(|_| {
-                            ::anyhow::anyhow!(
-                                "{}() argument `${}` must be an integer string, found {s:?}",
-                                #dsl_name,
-                                stringify!(#param),
-                            )
-                        })?
-                    } else {
-                        ::anyhow::bail!(
-                            "{}() argument `${}` must be an Int, Float, or String, found {__oxdock_v:?}",
-                            #dsl_name,
-                            stringify!(#param),
-                        )
-                    }
+                    ::oxdock_core::check_value_at(
+                        &::oxdock_core::TypeTag::Int,
+                        &__oxdock_v,
+                        &format!("{}() argument `${}`", #dsl_name, stringify!(#param)),
+                    )?;
+                    __oxdock_v.as_i64().expect("check_value_at enforces INT")
                 }
             },
             ParamKind::Float => quote! {
                 {
                     let __oxdock_v = __oxdock_values.next().expect("arity checked above");
-                    if let Some(f) = __oxdock_v.as_f64() {
-                        if f.is_finite() {
-                            f
-                        } else {
-                            ::anyhow::bail!(
-                                "{}() argument `${}` must be finite, found FLOAT ({f:?})",
-                                #dsl_name,
-                                stringify!(#param),
-                            )
-                        }
-                    } else if let Some(n) = __oxdock_v.as_i64() {
+                    // `INT` words admit explicitly (the static pair
+                    // table agrees); strings never parse here: the
+                    // `FLOAT()` converter owns that boundary.
+                    if let Some(n) = __oxdock_v.as_i64() {
                         n as f64
-                    } else if let Some(s) = __oxdock_v.as_str() {
-                        let parsed: f64 = s.trim().parse().map_err(|_| {
-                            ::anyhow::anyhow!(
-                                "{}() argument `${}` must be a numeric string, found {s:?}",
-                                #dsl_name,
-                                stringify!(#param),
-                            )
-                        })?;
-                        if parsed.is_finite() {
-                            parsed
+                    } else {
+                        ::oxdock_core::check_value_at(
+                            &::oxdock_core::TypeTag::Float,
+                            &__oxdock_v,
+                            &format!("{}() argument `${}`", #dsl_name, stringify!(#param)),
+                        )?;
+                        let __oxdock_f =
+                            __oxdock_v.as_f64().expect("check_value_at enforces FLOAT");
+                        if __oxdock_f.is_finite() {
+                            __oxdock_f
                         } else {
                             ::anyhow::bail!(
-                                "{}() argument `${}` must be finite, found {s:?}",
+                                "{}() argument `${}` must be finite, found FLOAT ({__oxdock_f:?})",
                                 #dsl_name,
                                 stringify!(#param),
                             )
                         }
-                    } else {
-                        ::anyhow::bail!(
-                            "{}() argument `${}` must be an Int, Float, or String, found {__oxdock_v:?}",
-                            #dsl_name,
-                            stringify!(#param),
-                        )
                     }
                 }
             },
@@ -498,6 +693,72 @@ impl ParamKind {
                     }
                 }
             },
+            // Explicit admission set: strict membership check, then
+            // the word passes through as `Value` for the body to
+            // narrow explicitly. Total failure names the set through
+            // the shared renderer, never a single member.
+            ParamKind::Union(members) => {
+                let tags: Vec<TokenStream2> = members
+                    .iter()
+                    .map(|member| {
+                        union_member_tag(member, false)
+                            .expect("union members validated at parse time")
+                    })
+                    .collect();
+                quote! {
+                    {
+                        let __oxdock_v = __oxdock_values.next().expect("arity checked above");
+                        ::oxdock_core::check_value_at(
+                            &::oxdock_core::TypeTag::union(vec![#(#tags),*]),
+                            &__oxdock_v,
+                            &format!("{}() argument `${}`", #dsl_name, stringify!(#param)),
+                        )?;
+                        __oxdock_v
+                    }
+                }
+            }
+            // List-nested admission set: one check against
+            // `LIST<member|...>`, then the vector narrows exactly like
+            // a shaped list (the check already verified every
+            // element, so the clone is infallible by construction).
+            ParamKind::UnionList(members) => {
+                let tags: Vec<TokenStream2> = members
+                    .iter()
+                    .map(|member| {
+                        union_member_tag(member, true)
+                            .expect("union members validated at parse time")
+                    })
+                    .collect();
+                quote! {
+                    {
+                        let __oxdock_v = __oxdock_values.next().expect("arity checked above");
+                        ::oxdock_core::check_value_at(
+                            &::oxdock_core::TypeTag::ListOf(::std::sync::Arc::new(
+                                ::oxdock_core::TypeTag::union(vec![#(#tags),*])
+                            )),
+                            &__oxdock_v,
+                            &format!("{}() argument `${}`", #dsl_name, stringify!(#param)),
+                        )?;
+                        __oxdock_v.as_list().expect("check_value_at enforces LIST").clone()
+                    }
+                }
+            }
+            // Closed record: one check names missing and extra fields,
+            // then the map narrows like every other MAP param.
+            ParamKind::Record(fields) => {
+                let tag = record_tag(fields);
+                quote! {
+                    {
+                        let __oxdock_v = __oxdock_values.next().expect("arity checked above");
+                        ::oxdock_core::check_value_at(
+                            &(#tag),
+                            &__oxdock_v,
+                            &format!("{}() argument `${}`", #dsl_name, stringify!(#param)),
+                        )?;
+                        __oxdock_v.as_map().expect("check_value_at enforces MAP").clone()
+                    }
+                }
+            }
             ParamKind::Shaped(shape) => {
                 let tag = ParamKind::shape_tag(shape);
                 let narrow = ParamKind::shape_narrow(shape, &quote! { __oxdock_v });
@@ -612,7 +873,7 @@ fn param_kind(ty: &Type) -> syn::Result<ParamKind> {
     }
     Err(syn::Error::new_spanned(
         ty,
-        "unsupported oxdock_func parameter type; expected Value, String, i64, f64, bool, PipeHandle, Arc<SemaphoreState>, Vec<...>, or BTreeMap<String, Value>",
+        "unsupported oxdock_func parameter type; expected Value, String, i64, f64, bool, PipeHandle, Arc<SemaphoreState>, Vec<...>, BTreeMap<String, Value>, or BTreeMap<String, String>",
     ))
 }
 
@@ -632,8 +893,8 @@ fn list_shape(segment: &syn::PathSegment) -> Option<Shape> {
             "Value" => return Some(Shape::List),
             "String" => return Some(Shape::ListOf(Box::new(Shape::Str))),
             "BTreeMap" => {
-                if map_shape(inner_last).is_some() {
-                    return Some(Shape::ListOf(Box::new(Shape::Map)));
+                if let Some(shape) = map_shape(inner_last) {
+                    return Some(Shape::ListOf(Box::new(shape)));
                 }
             }
             "Vec" => {
@@ -647,9 +908,10 @@ fn list_shape(segment: &syn::PathSegment) -> Option<Shape> {
     None
 }
 
-/// Resolve `BTreeMap<String, Value>` to bare `Map`. Richer value
-/// shapes need a `MapOf` tag that does not exist yet; until it does,
-/// anything else is a macro error naming the supported spellings.
+/// Resolve `BTreeMap<String, Value>` to bare `Map` and
+/// `BTreeMap<String, String>` to `MAP<STRING>`: the value type
+/// recurses one level, so richer keys stay a macro error naming the
+/// supported spellings.
 fn map_shape(segment: &syn::PathSegment) -> Option<Shape> {
     if let syn::PathArguments::AngleBracketed(args) = &segment.arguments
         && args.args.len() == 2
@@ -666,10 +928,13 @@ fn map_shape(segment: &syn::PathSegment) -> Option<Shape> {
             && key_last.arguments.is_empty()
             && let Type::Path(value_path) = value
             && let Some(value_last) = value_path.path.segments.last()
-            && value_last.ident == "Value"
             && value_last.arguments.is_empty()
         {
-            return Some(Shape::Map);
+            match value_last.ident.to_string().as_str() {
+                "Value" => return Some(Shape::Map),
+                "String" => return Some(Shape::MapOf(Box::new(Shape::Str))),
+                _ => {}
+            }
         }
     }
     None
@@ -750,6 +1015,55 @@ fn option_value_type(name: &str) -> syn::Result<TokenStream2> {
             "unknown options value type; expected STRING, INT, FLOAT, BOOL, DURATION, PATH, MAP, LIST, or ANY",
         )),
     }
+}
+
+/// Parse `#[record("name: TYPE", "opt?: TYPE", ...)]` into field
+/// specs. A `?` suffix marks optional fields; anything else fails
+/// naming the expected `name[?]: TYPE` shape. Types parse as Rust
+/// type names (`String`, `Int`, `List<Map>`, unions nest through the
+/// same member grammar), so record fields compose exactly like union
+/// members.
+fn parse_record_attr(attr: &syn::Attribute) -> syn::Result<Vec<RecordField>> {
+    let items =
+        attr.parse_args_with(syn::punctuated::Punctuated::<LitStr, Token![,]>::parse_terminated)?;
+    if items.is_empty() {
+        return Err(syn::Error::new_spanned(
+            attr,
+            "`#[record(...)]` needs at least one entry",
+        ));
+    }
+    let mut specs = Vec::new();
+    let mut seen = HashSet::new();
+    for lit in items {
+        let text = lit.value();
+        let spanned = |msg: &str| syn::Error::new(lit.span(), msg);
+        let (name_part, ty_part) = match text.split_once(':') {
+            Some((name, ty)) => (name.trim(), ty.trim()),
+            None => {
+                return Err(spanned("expected `name: TYPE` (`?` marks optional fields)"));
+            }
+        };
+        let (name, optional) = match name_part.strip_suffix('?') {
+            Some(base) => (base.trim(), true),
+            None => (name_part, false),
+        };
+        if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return Err(spanned("record field names are nonempty ASCII identifiers"));
+        }
+        if !seen.insert(name.to_string()) {
+            return Err(spanned(&format!("duplicate record field `{name}`")));
+        }
+        let ty: Type = syn::parse_str(ty_part).map_err(|_| {
+            spanned("record field type must be a Rust type name like String, Int, or List<Map>")
+        })?;
+        union_member_tag(&ty, true).map_err(|err| syn::Error::new(lit.span(), err.to_string()))?;
+        specs.push(RecordField {
+            name: name.to_string(),
+            ty,
+            optional,
+        });
+    }
+    Ok(specs)
 }
 
 /// Parse `#[options("key: TYPE", "opt?: TYPE = default", ...)]` into
@@ -901,6 +1215,8 @@ fn expand_func(options: FuncOptions, func: ItemFn) -> syn::Result<TokenStream2> 
         };
         let mut allowed: Option<Vec<String>> = None;
         let mut options: Option<Vec<OptSpec>> = None;
+        let mut union_members: Option<Vec<Type>> = None;
+        let mut record_fields: Option<Vec<RecordField>> = None;
         for attr in &typed.attrs {
             if attr.path().is_ident("values") {
                 let parsed = attr.parse_args_with(
@@ -916,9 +1232,64 @@ fn expand_func(options: FuncOptions, func: ItemFn) -> syn::Result<TokenStream2> 
                 allowed = Some(values);
             } else if attr.path().is_ident("options") {
                 options = Some(parse_options_attr(attr)?);
+            } else if attr.path().is_ident("union") {
+                let parsed = attr.parse_args_with(
+                    syn::punctuated::Punctuated::<Type, Token![,]>::parse_terminated,
+                )?;
+                let members: Vec<Type> = parsed.into_iter().collect();
+                if members.len() < 2 {
+                    return Err(syn::Error::new_spanned(
+                        attr,
+                        "`#[union(...)]` needs at least two members",
+                    ));
+                }
+                // Member validation runs below, once the Rust type is
+                // known: `Value` params reject top-level `Any`, while
+                // `Vec<Value>` params allow it below `LIST`.
+                union_members = Some(members);
+            } else if attr.path().is_ident("record") {
+                record_fields = Some(parse_record_attr(attr)?);
             }
         }
-        let kind = param_kind(&typed.ty)?;
+        let mut kind = param_kind(&typed.ty)?;
+        if let Some(fields) = record_fields {
+            if union_members.is_some() || allowed.is_some() || options.is_some() {
+                return Err(syn::Error::new_spanned(
+                    &typed.ty,
+                    "`#[record(...)]` stands alone: no `#[union(...)]`, `#[values(...)]`, or `#[options(...)]` on the same parameter",
+                ));
+            }
+            if !matches!(kind, ParamKind::Shaped(Shape::Map)) {
+                return Err(syn::Error::new_spanned(
+                    &typed.ty,
+                    "`#[record(...)]` needs a BTreeMap<String, Value> parameter; the body reads the narrowed map directly",
+                ));
+            }
+            kind = ParamKind::Record(fields);
+        }
+        if let Some(members) = union_members {
+            if matches!(kind, ParamKind::Value) {
+                for member in &members {
+                    union_member_tag(member, false)
+                        .map_err(|err| syn::Error::new_spanned(member, err.to_string()))?;
+                }
+                kind = ParamKind::Union(members);
+            } else if matches!(kind, ParamKind::Shaped(Shape::List)) {
+                // `#[union]` on `Vec<Value>`: members sit below
+                // `LIST`, so `Any` members are allowed and validation
+                // runs nested.
+                for member in &members {
+                    union_member_tag(member, true)
+                        .map_err(|err| syn::Error::new_spanned(member, err.to_string()))?;
+                }
+                kind = ParamKind::UnionList(members);
+            } else {
+                return Err(syn::Error::new_spanned(
+                    &typed.ty,
+                    "`#[union(...)]` needs a Value parameter or a Vec<Value> parameter; the body narrows the admitted word explicitly",
+                ));
+            }
+        }
         if allowed.is_some() && !matches!(kind, ParamKind::String) {
             return Err(syn::Error::new_spanned(
                 &typed.ty,
@@ -944,18 +1315,21 @@ fn expand_func(options: FuncOptions, func: ItemFn) -> syn::Result<TokenStream2> 
             docs: param_docs,
         });
     }
-    // `#[values(...)]`, `#[options(...)]`, and per-parameter `///`
-    // docs are macro input, not real attributes: strip them so the
-    // re-emitted function compiles (`doc` is not a legal parameter
-    // attribute for rustc) without unknown-attribute errors. The prose
-    // lives on in the emitted metadata. All other parameter
-    // attributes pass through untouched.
+    // `#[values(...)]`, `#[options(...)]`, `#[union(...)]`,
+    // `#[record(...)]`, and per-parameter `///` docs are macro input,
+    // not real attributes: strip them so the re-emitted function
+    // compiles (`doc` is not a legal parameter attribute for rustc)
+    // without unknown-attribute errors. The prose lives on in the
+    // emitted metadata. All other parameter attributes pass through
+    // untouched.
     let mut emitted = func.clone();
     for arg in &mut emitted.sig.inputs {
         if let FnArg::Typed(typed) = arg {
             typed.attrs.retain(|attr| {
                 !attr.path().is_ident("values")
                     && !attr.path().is_ident("options")
+                    && !attr.path().is_ident("union")
+                    && !attr.path().is_ident("record")
                     && !attr.path().is_ident("doc")
             });
         }
@@ -1404,4 +1778,88 @@ fn expand_type(options: TypeOptions, target: syn::ItemStruct) -> syn::Result<Tok
             }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn record_attr(specs: &[&str]) -> syn::Attribute {
+        let lits = specs
+            .iter()
+            .map(|spec| LitStr::new(spec, proc_macro2::Span::call_site()))
+            .collect::<Vec<_>>();
+        let tokens = quote! { #[record(#(#lits),*)] };
+        syn::parse2::<syn::File>(quote! { #tokens fn f() {} })
+            .expect("attr parses")
+            .items
+            .into_iter()
+            .next()
+            .and_then(|item| match item {
+                syn::Item::Fn(func) => func.attrs.into_iter().next(),
+                _ => None,
+            })
+            .expect("attr present")
+    }
+
+    #[test]
+    fn record_attr_parses_required_and_optional_fields() {
+        let fields = parse_record_attr(&record_attr(&["name: String", "count?: Int"]))
+            .expect("valid record");
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].name, "name");
+        assert!(!fields[0].optional);
+        assert_eq!(fields[1].name, "count");
+        assert!(fields[1].optional);
+        // Nested field types compose through the member grammar.
+        let nested =
+            parse_record_attr(&record_attr(&["items: List<Map>"])).expect("nested record field");
+        assert_eq!(nested.len(), 1);
+    }
+
+    #[test]
+    fn record_attr_rejects_bad_specs() {
+        for bad in [
+            vec![],
+            vec!["name"],
+            vec![": String"],
+            vec!["has space: String"],
+            vec!["name: String", "name: Int"],
+            vec!["name: Frobnicate"],
+        ] {
+            assert!(
+                parse_record_attr(&record_attr(&bad)).is_err(),
+                "must reject {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn union_member_any_needs_nesting() {
+        let any: Type = syn::parse_str("Any").expect("type parses");
+        assert!(union_member_tag(&any, false).is_err());
+        assert!(union_member_tag(&any, true).is_ok());
+        let bogus: Type = syn::parse_str("Frobnicate").expect("type parses");
+        assert!(union_member_tag(&bogus, true).is_err());
+    }
+
+    #[test]
+    fn map_shape_distinguishes_value_types() {
+        fn shape_of(spelling: &str) -> Option<Shape> {
+            let ty: Type = syn::parse_str(spelling).expect("type parses");
+            let Type::Path(path) = ty else { return None };
+            let last = path.path.segments.last().expect("segment");
+            map_shape(last)
+        }
+        assert!(matches!(
+            shape_of("BTreeMap<String, Value>"),
+            Some(Shape::Map)
+        ));
+        assert!(matches!(
+            shape_of("BTreeMap<String, String>"),
+            Some(Shape::MapOf(_))
+        ));
+        assert!(shape_of("BTreeMap<String, i64>").is_none());
+        assert!(shape_of("BTreeMap<Int, Value>").is_none());
+    }
 }

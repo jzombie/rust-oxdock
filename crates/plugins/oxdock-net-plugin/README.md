@@ -128,7 +128,7 @@ instead of hanging.
 
 Dial a TCP endpoint into pipes.
 
-**Signature:** `NET_CONNECT($target: STRING, $in_pipe: PIPE, $out_pipe: PIPE, $options: MAP<timeout?: DURATION, no_half_close?: BOOL>) -> MAP<closed: BOOL>`
+**Signature:** `NET_CONNECT($target: STRING, $in_pipe: PIPE, $out_pipe: PIPE, $options: MAP<timeout?: DURATION|STRING, no_half_close?: BOOL>) -> MAP<closed: BOOL>`
 
 **Contexts:** [`AST`](#context-ast) only
 
@@ -136,8 +136,8 @@ Dial a TCP endpoint into pipes.
 - `$target` (`STRING`): Dial target: `host:port`, a logical port, or a service name.
 - `$in_pipe` (`PIPE`): Pipe carrying bytes consumed by the wire side.
 - `$out_pipe` (`PIPE`): Pipe carrying bytes produced by the wire side.
-- `$options` (`MAP<timeout?: DURATION, no_half_close?: BOOL>`): Optional `timeout` and `no_half_close` settings.
-  - `timeout` (`DURATION`, optional, default `10s`)
+- `$options` (`MAP<timeout?: DURATION|STRING, no_half_close?: BOOL>`): Optional `timeout` and `no_half_close` settings.
+  - `timeout` (`DURATION|STRING`, optional, default `10s`)
   - `no_half_close` (`BOOL`, optional)
 
 **Returns:** `MAP<closed: BOOL>`
@@ -149,15 +149,15 @@ Fetch an https URL to text.
 
 Fetch an `https` URL to text: the network source for `PARSE_JSON` and `PARSE_TOML`. Cleartext `http` reaches loopback hosts only. Redirects follow by hand (at most 5 hops, absolute URLs only, every hop re-validated), custom headers send on every hop, the `timeout` option overrides the 30-second whole-request deadline, `max_body_bytes` caps the body, `max_redirects` budgets the hops, strict UTF-8, non-2xx statuses bail. Compose with the pure parsers: `LET $doc: MAP<ANY> = PARSE_JSON(NET_FETCH($url, {}))`.
 
-**Signature:** `NET_FETCH($url: STRING, $options?: MAP<headers?: MAP, timeout?: DURATION, max_body_bytes?: INT, max_redirects?: INT>) -> STRING`
+**Signature:** `NET_FETCH($url: STRING, $options?: MAP<headers?: MAP<STRING>, timeout?: DURATION|STRING, max_body_bytes?: INT, max_redirects?: INT>) -> STRING`
 
 **Contexts:** [`AST`](#context-ast) only
 
 **Parameters:**
 - `$url` (`STRING`): `https` URL to fetch; cleartext `http` reaches loopback hosts only.
-- `$options?` (`MAP<headers?: MAP, timeout?: DURATION, max_body_bytes?: INT, max_redirects?: INT>`): Fetch settings: `headers`, `timeout`, `max_body_bytes`, and `max_redirects`. Omittable: a missing options MAP fills `{}`.
-  - `headers` (`MAP`, optional)
-  - `timeout` (`DURATION`, optional)
+- `$options?` (`MAP<headers?: MAP<STRING>, timeout?: DURATION|STRING, max_body_bytes?: INT, max_redirects?: INT>`): Fetch settings: `headers`, `timeout`, `max_body_bytes`, and `max_redirects`. Omittable: a missing options MAP fills `{}`.
+  - `headers` (`MAP<STRING>`, optional)
+  - `timeout` (`DURATION|STRING`, optional)
   - `max_body_bytes` (`INT`, optional)
   - `max_redirects` (`INT`, optional)
 

@@ -52,7 +52,7 @@ SSH_CLOSE($m.server)
 ```
 
 
-**Signature:** `SSH_ACCEPT($server: SSH_SERVER, $in_pipe: PIPE, $out_pipe: PIPE) -> MAP<closed: BOOL>`
+**Signature:** `SSH_ACCEPT($server: SSH_SERVER, $in_pipe: PIPE, $out_pipe: PIPE) -> MAP<closed: BOOL, command: STRING>`
 
 **Contexts:** [`AST`](#context-ast) only
 
@@ -61,8 +61,9 @@ SSH_CLOSE($m.server)
 - `$in_pipe` (`PIPE`): Pipe carrying bytes consumed by the wire side.
 - `$out_pipe` (`PIPE`): Pipe carrying bytes produced by the wire side.
 
-**Returns:** `MAP<closed: BOOL>`
+**Returns:** `MAP<closed: BOOL, command: STRING>`
   - `closed` (`BOOL`): True when the session closed cleanly.
+  - `command` (`STRING`): Executed command, empty for shells.
 
 ### SSH_CLOSE
 

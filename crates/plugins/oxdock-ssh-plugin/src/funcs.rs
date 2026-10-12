@@ -6,14 +6,14 @@
 //! carries bytes consumed by the wire side (the DSL writes them).
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use oxdock_core::{
     Field, FuncKind, FuncMeta, FuncParam, HostModule, HostRegistration, NativeFn, OxDockFn,
-    OxDockType, ParamOption, RecordSchema, StepCtx, TypeTag, Value,
+    OxDockType, ParamOption, RecordSchema, StepCtx, TypeTag, Value, check_value_at,
 };
 use oxdock_func_macro::oxdock_func;
 use oxdock_net_plugin::{AcquiredListener, EndpointKey, EndpointRegistry, acquire_listener};
@@ -152,44 +152,6 @@ fn ssh_dequeue<P: ProcessManager>(
     Ok(Value::map(map))
 }
 
-/// Read a required STRING key from the options MAP. Missing, non-string,
-/// or blank binds bail naming the key: a server without credentials is
-/// meaningless, so there is no default.
-fn required_string(map: &BTreeMap<String, Value>, func: &str, key: &str) -> Result<String> {
-    let Some(value) = map.get(key) else {
-        bail!("{func} option '{key}' is required");
-    };
-    let Some(s) = value.as_str() else {
-        bail!(
-            "{func} option '{key}' must be a STRING, got {}",
-            value.type_name()
-        );
-    };
-    if s.trim().is_empty() {
-        bail!("{func} option '{key}' must not be empty");
-    }
-    Ok(s.to_string())
-}
-
-/// Read an optional STRING key from the options MAP. Missing, empty, or
-/// whitespace-only binds `None`; present non-strings bail.
-fn optional_string(map: &BTreeMap<String, Value>, func: &str, key: &str) -> Result<Option<String>> {
-    let Some(value) = map.get(key) else {
-        return Ok(None);
-    };
-    let Some(s) = value.as_str() else {
-        bail!(
-            "{func} option '{key}' must be a STRING, got {}",
-            value.type_name()
-        );
-    };
-    let trimmed = s.trim();
-    if trimmed.is_empty() {
-        return Ok(None);
-    }
-    Ok(Some(s.to_string()))
-}
-
 /// Spin up an SSH server on a virtual service endpoint with the given
 /// credentials. `bind` is a logical port (`"2251"`) or service name:
 /// physical binds in-script are rejected, `0` is reserved for the CLI
@@ -236,9 +198,43 @@ fn ssh_serve<P: ProcessManager>(
 ) -> Result<Value> {
     let map = &options;
     oxdock_core::check_options(map, SSH_SERVE_OPTIONS, "SSH_SERVE")?;
-    let username = required_string(map, "SSH_SERVE", "username")?;
-    let password = required_string(map, "SSH_SERVE", "password")?;
-    let key_path = optional_string(map, "SSH_SERVE", "key_path")?;
+    // Compositional reads: one shape check per key, then direct
+    // narrowing. Missing and blank stay domain errors: a server
+    // without credentials is meaningless, so there is no default.
+    let username = match map.get("username") {
+        Some(value) => {
+            check_value_at(&TypeTag::String, value, "SSH_SERVE option 'username'")?;
+            let text = value.as_str().expect("check_value_at verified STRING");
+            if text.trim().is_empty() {
+                bail!("SSH_SERVE option 'username' must not be empty");
+            }
+            text.to_string()
+        }
+        None => bail!("SSH_SERVE option 'username' is required"),
+    };
+    let password = match map.get("password") {
+        Some(value) => {
+            check_value_at(&TypeTag::String, value, "SSH_SERVE option 'password'")?;
+            let text = value.as_str().expect("check_value_at verified STRING");
+            if text.trim().is_empty() {
+                bail!("SSH_SERVE option 'password' must not be empty");
+            }
+            text.to_string()
+        }
+        None => bail!("SSH_SERVE option 'password' is required"),
+    };
+    let key_path = match map.get("key_path") {
+        Some(value) => {
+            check_value_at(&TypeTag::String, value, "SSH_SERVE option 'key_path'")?;
+            let text = value.as_str().expect("check_value_at verified STRING");
+            if text.trim().is_empty() {
+                None
+            } else {
+                Some(text.to_string())
+            }
+        }
+        None => None,
+    };
     let endpoint = parse_serve_endpoint(&bind)?;
     let key = EndpointKey::tcp(endpoint);
     let (acquired, registry) = acquire_listener(registry, &key, "SSH_SERVE")?;
@@ -364,12 +360,17 @@ fn ssh_serve<P: ProcessManager>(
 /// SSH_CLOSE($m.server)
 /// ```
 ///
-#[oxdock_func(returns = TypeTag::Record(&[Field {
-    name: "closed",
+#[oxdock_func(returns = TypeTag::Record(std::sync::Arc::from([Field {
+    name: "closed".to_string(),
     ty: TypeTag::Bool,
     docs: "True when the session closed cleanly.",
     optional: false,
-}]), summary = "Accept one SSH session into pipes.")]
+}, Field {
+    name: "command".to_string(),
+    ty: TypeTag::String,
+    docs: "Executed command, empty for shells.",
+    optional: false,
+}])), summary = "Accept one SSH session into pipes.")]
 fn ssh_accept<P: ProcessManager>(
     cx: &mut StepCtx<P>,
     /// Server handle from `SSH_SERVE`.
@@ -414,12 +415,12 @@ fn ssh_accept<P: ProcessManager>(
 /// Returns a MAP with `closed` (BOOL).
 ///
 #[oxdock_func(
-    returns = TypeTag::Record(&[Field {
-        name: "closed",
+    returns = TypeTag::Record(std::sync::Arc::from([Field {
+        name: "closed".to_string(),
         ty: TypeTag::Bool,
         docs: "True when the session closed cleanly.",
         optional: false,
-    }]),
+    }])),
     summary = "Pump a dequeued SSH session through pipes."
 )]
 fn ssh_pump_channel<P: ProcessManager>(
@@ -589,76 +590,70 @@ fn ssh_pty_run<P: ProcessManager>(
 /// `SSH_SERVE_INFO` schema and the `SSH_SERVE` return tag: one source
 /// for the shape the host mints, so introspection, enforcement, and
 /// documentation cannot drift apart.
-fn serve_result_fields() -> &'static [Field] {
-    static FIELDS: OnceLock<Vec<Field>> = OnceLock::new();
-    FIELDS.get_or_init(|| {
-        vec![
-            Field {
-                name: "server",
-                ty: TypeTag::Custom(SshServerTag::descriptor()),
-                docs: "Server handle for `SSH_ACCEPT`, `SSH_DEQUEUE`, and `SSH_CLOSE`.",
-                optional: false,
-            },
-            Field {
-                name: "addr",
-                ty: TypeTag::String,
-                docs: "Bound socket address (`ip:port`) of the server.",
-                optional: false,
-            },
-            Field {
-                name: "username",
-                ty: TypeTag::String,
-                docs: "Configured username.",
-                optional: false,
-            },
-            Field {
-                name: "password",
-                ty: TypeTag::String,
-                docs: "Configured password.",
-                optional: false,
-            },
-            Field {
-                name: "virtual",
-                ty: TypeTag::String,
-                docs: "Virtual endpoint echo of the claimed slot.",
-                optional: false,
-            },
-        ]
-    })
+fn serve_result_fields() -> Arc<[Field]> {
+    Arc::from(vec![
+        Field {
+            name: "server".to_string(),
+            ty: TypeTag::Custom(SshServerTag::descriptor()),
+            docs: "Server handle for `SSH_ACCEPT`, `SSH_DEQUEUE`, and `SSH_CLOSE`.",
+            optional: false,
+        },
+        Field {
+            name: "addr".to_string(),
+            ty: TypeTag::String,
+            docs: "Bound socket address (`ip:port`) of the server.",
+            optional: false,
+        },
+        Field {
+            name: "username".to_string(),
+            ty: TypeTag::String,
+            docs: "Configured username.",
+            optional: false,
+        },
+        Field {
+            name: "password".to_string(),
+            ty: TypeTag::String,
+            docs: "Configured password.",
+            optional: false,
+        },
+        Field {
+            name: "virtual".to_string(),
+            ty: TypeTag::String,
+            docs: "Virtual endpoint echo of the claimed slot.",
+            optional: false,
+        },
+    ])
 }
 
 /// Field table for the `SSH_DEQUEUE` result bundle, backing the
 /// `SSH_DEQUEUE_INFO` schema and the `SSH_DEQUEUE` return tag.
-fn dequeue_result_fields() -> &'static [Field] {
-    static FIELDS: OnceLock<Vec<Field>> = OnceLock::new();
-    FIELDS.get_or_init(|| {
-        vec![
-            Field {
-                name: "session",
-                ty: TypeTag::Custom(SshSessionTag::descriptor()),
-                docs: "Session handle for `SSH_PUMP_CHANNEL` (pump ends take once).",
-                optional: false,
-            },
-            Field {
-                name: "command",
-                ty: TypeTag::String,
-                docs: "Executed command, empty for shells.",
-                optional: false,
-            },
-            Field {
-                name: "username",
-                ty: TypeTag::String,
-                docs: "Authenticated username, empty when unset.",
-                optional: false,
-            },
-            Field {
-                name: "addr",
-                ty: TypeTag::String,
-                docs: "Peer address, empty when unset.",
-                optional: false,
-            },
-        ]
-    })
+fn dequeue_result_fields() -> Arc<[Field]> {
+    Arc::from(vec![
+        Field {
+            name: "session".to_string(),
+            ty: TypeTag::Custom(SshSessionTag::descriptor()),
+            docs: "Session handle for `SSH_PUMP_CHANNEL` (pump ends take once).",
+            optional: false,
+        },
+        Field {
+            name: "command".to_string(),
+            ty: TypeTag::String,
+            docs: "Executed command, empty for shells.",
+            optional: false,
+        },
+        Field {
+            name: "username".to_string(),
+            ty: TypeTag::String,
+            docs: "Authenticated username, empty when unset.",
+            optional: false,
+        },
+        Field {
+            name: "addr".to_string(),
+            ty: TypeTag::String,
+            docs: "Peer address, empty when unset.",
+            optional: false,
+        },
+    ])
 }
 
 /// The `SSH` host module: virtual-endpoint server plus client, bridged

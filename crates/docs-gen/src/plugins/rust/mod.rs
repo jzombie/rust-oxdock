@@ -14,7 +14,7 @@ mod version;
 use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
-use oxdock_core::{HostModule, OxDockFn, StepCtx, TypeTag, Value};
+use oxdock_core::{Field, HostModule, OxDockFn, StepCtx, TypeTag, Value};
 use oxdock_fs::{GuardedPath, PathResolver};
 use oxdock_func_macro::oxdock_func;
 use oxdock_process::ProcessManager;
@@ -50,7 +50,44 @@ fn workspace_version<P: ProcessManager>(cx: &mut StepCtx<P>) -> Result<Value> {
 /// display name plus its structured given, family, and email parts,
 /// license, and repository. Citation rendering must use this map instead
 /// of copying manifest values into templates or checked-in values files.
-#[oxdock_func(returns = TypeTag::Map)]
+#[oxdock_func(returns = TypeTag::Record(std::sync::Arc::from([
+    Field {
+        name: "author".to_string(),
+        ty: TypeTag::String,
+        docs: "First author display name.",
+        optional: false,
+    },
+    Field {
+        name: "author_given".to_string(),
+        ty: TypeTag::String,
+        docs: "First author given name.",
+        optional: false,
+    },
+    Field {
+        name: "author_family".to_string(),
+        ty: TypeTag::String,
+        docs: "First author family name.",
+        optional: false,
+    },
+    Field {
+        name: "author_email".to_string(),
+        ty: TypeTag::String,
+        docs: "First author email.",
+        optional: false,
+    },
+    Field {
+        name: "license".to_string(),
+        ty: TypeTag::String,
+        docs: "SPDX license expression.",
+        optional: false,
+    },
+    Field {
+        name: "repository".to_string(),
+        ty: TypeTag::String,
+        docs: "Repository URL.",
+        optional: false,
+    },
+])))]
 fn workspace_package<P: ProcessManager>(cx: &mut StepCtx<P>) -> Result<Value> {
     let (root, resolver) = docs_resolver(cx)?;
     let package = cargo::workspace_package(&root, &resolver)?;
@@ -76,10 +113,34 @@ fn workspace_package<P: ProcessManager>(cx: &mut StepCtx<P>) -> Result<Value> {
 /// Package name and description from a member manifest. Returns empty
 /// strings when there is no manifest or no package name, so the script
 /// can skip with `IF $pkg.name != ""` instead of catching an error.
-#[oxdock_func(returns = TypeTag::Map)]
-fn cargo_package<P: ProcessManager>(cx: &mut StepCtx<P>, member: String) -> Result<Value> {
+#[oxdock_func(returns = TypeTag::Record(std::sync::Arc::from([
+    Field {
+        name: "name".to_string(),
+        ty: TypeTag::String,
+        docs: "Package name, empty when no manifest names it.",
+        optional: false,
+    },
+    Field {
+        name: "description".to_string(),
+        ty: TypeTag::String,
+        docs: "Package description, empty when absent.",
+        optional: false,
+    },
+])))]
+fn cargo_package<P: ProcessManager>(
+    cx: &mut StepCtx<P>,
+    #[union(String, Path)] member: Value,
+) -> Result<Value> {
+    let text = match member.as_str() {
+        Some(s) => s.to_string(),
+        None => member
+            .as_path()
+            .expect("union extractor admits STRING|PATH")
+            .to_string_lossy()
+            .to_string(),
+    };
     let (root, resolver) = docs_resolver(cx)?;
-    let (name, description) = cargo::cargo_package(&root, &resolver, &member)?.unwrap_or_default();
+    let (name, description) = cargo::cargo_package(&root, &resolver, &text)?.unwrap_or_default();
     let mut entries = BTreeMap::new();
     entries.insert("name".to_string(), Value::string(name));
     entries.insert("description".to_string(), Value::string(description));
@@ -92,31 +153,29 @@ fn cargo_package<P: ProcessManager>(cx: &mut StepCtx<P>, member: String) -> Resu
 /// values file exists yet; a missing `name` there keeps the manifest
 /// name instead of failing.
 #[oxdock_func(pure, returns = TypeTag::String)]
-fn package_values_json(pkg: Value, existing: Value) -> Result<Value> {
-    let pkg_map = pkg.as_map().ok_or_else(|| {
-        anyhow::anyhow!(
-            "PACKAGE_VALUES_JSON expects a MAP as its pkg argument, got {}",
-            pkg.type_name()
-        )
-    })?;
-    let name = pkg_map
+fn package_values_json(
+    /// Manifest name and description; closed: extras fail at the boundary.
+    #[record("name: String", "description: String")]
+    pkg: BTreeMap<String, Value>,
+    /// Committed values file; open: extra keys pass through untouched.
+    existing: BTreeMap<String, Value>,
+) -> Result<Value> {
+    // The `#[record]` extractor verified the closed shape above, so
+    // the reads below narrow infallibly after.
+    let name = pkg
         .get("name")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("PACKAGE_VALUES_JSON pkg misses name"))?
+        .expect("record extractor verified name")
+        .as_str()
+        .expect("record extractor verified STRING")
         .to_string();
-    let description = pkg_map
+    let description = pkg
         .get("description")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("PACKAGE_VALUES_JSON pkg misses description"))?
+        .expect("record extractor verified description")
+        .as_str()
+        .expect("record extractor verified STRING")
         .to_string();
-    let existing_map = existing.as_map().ok_or_else(|| {
-        anyhow::anyhow!(
-            "PACKAGE_VALUES_JSON expects a MAP as its existing argument, got {}",
-            existing.type_name()
-        )
-    })?;
     let mut final_name = name;
-    if let Some(override_name) = existing_map.get("name").and_then(|v| v.as_str()) {
+    if let Some(override_name) = existing.get("name").and_then(|v| v.as_str()) {
         final_name = override_name.to_string();
     }
     let merged = [("name", final_name), ("description", description)];
@@ -163,6 +222,12 @@ mod tests {
         )
     }
 
+    // The bodies take narrowed maps (the `#[record]` extractor owns
+    // the boundary): unwrap the test maps the way the extractor does.
+    fn record_map(value: Value) -> BTreeMap<String, Value> {
+        value.as_map().expect("test map").clone()
+    }
+
     #[test]
     fn package_values_merge_keeps_committed_name() {
         let pkg = map(&[
@@ -176,7 +241,7 @@ mod tests {
             ("name", Value::string("Display".to_string())),
             ("description", Value::string("stale copy".to_string())),
         ]);
-        let out = package_values_json(pkg, existing)
+        let out = package_values_json(record_map(pkg), record_map(existing))
             .expect("encode")
             .as_str()
             .expect("string")
@@ -197,7 +262,7 @@ mod tests {
             ("name", Value::string("demo-pkg".to_string())),
             ("description", Value::string("fresh".to_string())),
         ]);
-        let out = package_values_json(pkg, Value::map(BTreeMap::new()))
+        let out = package_values_json(record_map(pkg), BTreeMap::new())
             .expect("encode")
             .as_str()
             .expect("string")
@@ -214,7 +279,7 @@ mod tests {
             ("name", Value::string("demo".to_string())),
             ("description", Value::string("says \"hi\"".to_string())),
         ]);
-        let out = package_values_json(pkg, Value::map(BTreeMap::new()))
+        let out = package_values_json(record_map(pkg), BTreeMap::new())
             .expect("encode")
             .as_str()
             .expect("string")
@@ -223,5 +288,100 @@ mod tests {
             out,
             "{\"name\": \"demo\", \"description\": \"says \\\"hi\\\"\"}\n"
         );
+    }
+
+    #[test]
+    fn package_signatures_name_closed_shapes() {
+        // Metadata honesty: the record/union spellings the boundary
+        // enforces render through the single structural renderer.
+        let metas = module::<oxdock_process::DefaultProcessManager>()
+            .funcs
+            .into_iter()
+            .map(|registration| match registration {
+                oxdock_core::HostRegistration::Pure { meta, .. } => meta,
+                oxdock_core::HostRegistration::Stateful { meta, .. } => meta,
+            })
+            .collect::<Vec<_>>();
+        fn base(name: &str) -> &str {
+            name.rsplit("::").next().unwrap_or(name)
+        }
+        let signature = |name: &str| {
+            metas
+                .iter()
+                .find(|meta| base(&meta.name) == base(name))
+                .unwrap_or_else(|| panic!("fn {name} exists"))
+                .params
+                .as_deref()
+                .unwrap_or(&[])
+                .iter()
+                .map(|param| {
+                    param
+                        .param_type
+                        .as_ref()
+                        .map(oxdock_parser::render_structural)
+                        .unwrap_or_default()
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        assert_eq!(
+            signature("RUST::PACKAGE_VALUES_JSON"),
+            "MAP<name: STRING, description: STRING>, MAP<ANY>"
+        );
+        let returns = |name: &str| {
+            metas
+                .iter()
+                .find(|meta| base(&meta.name) == base(name))
+                .unwrap_or_else(|| panic!("fn {name} exists"))
+                .returns
+                .as_ref()
+                .map(oxdock_parser::render_structural)
+                .unwrap_or_default()
+        };
+        assert_eq!(
+            returns("RUST::CARGO_PACKAGE"),
+            "MAP<name: STRING, description: STRING>"
+        );
+        assert_eq!(
+            returns("RUST::WORKSPACE_PACKAGE"),
+            "MAP<author: STRING, author_given: STRING, author_family: STRING, author_email: STRING, license: STRING, repository: STRING>"
+        );
+    }
+
+    #[test]
+    fn package_values_rejects_open_pkg_end_to_end() {
+        // The closed `pkg` record fails missing and extra fields at
+        // the call boundary; extras-bearing `existing` still passes.
+        use indoc::indoc;
+        let temp = oxdock_fs::GuardedPath::tempdir().unwrap();
+        let root = temp.as_guarded_path().clone();
+        let mut engine = oxdock_core::Engine::new();
+        engine.register_module(module());
+        let err = engine
+            .run_script(
+                &root,
+                indoc! {r#"
+                    IMPORT [STD, RUST]
+                    LET $pkg: MAP<name: STRING> = {name: "demo"}
+                    LET $json: STRING = RUST::PACKAGE_VALUES_JSON($pkg, {})
+                "#},
+            )
+            .expect_err("missing description must fail");
+        assert!(
+            format!("{err:#}").contains("missing field 'description'"),
+            "names the field: {err:#}"
+        );
+        engine
+            .run_script(
+                &root,
+                indoc! {r#"
+                    IMPORT [STD, RUST]
+                    LET $pkg: MAP<name: STRING, description: STRING> = RUST::CARGO_PACKAGE(".")
+                    LET $existing: MAP<ANY> = {name: "Display", extra: 1}
+                    LET $json: STRING = RUST::PACKAGE_VALUES_JSON($pkg, $existing)
+                    ASSERT_CONTAINS $json "Display"
+                "#},
+            )
+            .expect("extras-bearing existing passes");
     }
 }

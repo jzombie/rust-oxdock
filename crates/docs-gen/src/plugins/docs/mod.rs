@@ -162,6 +162,7 @@ fn defer(
     /// Target deferred call in `MODULE::FUNC` form.
     target: String,
     /// Remaining arguments forwarded to the target after the document text.
+    #[union(String, Int, Float, Bool, List, Map)]
     args: Vec<Value>,
 ) -> Result<Value> {
     Ok(Value::string(mint_deferred(&target, &args)?))
@@ -247,6 +248,28 @@ mod tests {
             .iter()
             .map(|(key, value)| ((*key).to_string(), value.clone()))
             .collect()
+    }
+
+    #[test]
+    fn defer_args_admit_only_json_safe_words() {
+        // The `#[union]` admission set is the JSON-safe set
+        // `mint_deferred` encodes: handles fail at the boundary
+        // naming the set instead of at mint time.
+        let meta = match <Defer as OxDockFn<oxdock_process::ShellProcessManager>>::registration() {
+            oxdock_core::HostRegistration::Pure { meta, .. } => meta,
+            oxdock_core::HostRegistration::Stateful { meta, .. } => meta,
+        };
+        let args = meta
+            .params
+            .as_deref()
+            .expect("params")
+            .iter()
+            .find(|param| param.name == "args")
+            .expect("args param");
+        assert_eq!(
+            oxdock_parser::render_structural(args.param_type.as_ref().expect("args type")),
+            "LIST<STRING|INT|FLOAT|BOOL|LIST|MAP>"
+        );
     }
 
     #[test]
