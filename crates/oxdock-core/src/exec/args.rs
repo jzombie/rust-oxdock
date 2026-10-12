@@ -585,7 +585,7 @@ fn is_executable_candidate<P: ProcessManager>(
     {
         let lower = candidate.to_ascii_lowercase();
         exts.iter()
-            .any(|ext| lower.ends_with(&ext.to_ascii_lowercase()));
+            .any(|ext| lower.ends_with(&ext.to_ascii_lowercase()))
     }
     #[cfg(not(any(unix, windows)))]
     {
