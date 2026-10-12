@@ -2712,6 +2712,66 @@ fn is_exec_finds_host_tools_and_direct_files() {
 }
 
 #[test]
+#[cfg(windows)]
+fn parse_pathext_shapes_and_defaults() {
+    use super::args::parse_pathext;
+    assert_eq!(parse_pathext(None), vec![".COM", ".EXE", ".BAT", ".CMD"]);
+    assert!(parse_pathext(Some("")).is_empty());
+    assert_eq!(parse_pathext(Some("exe;bat")), vec![".exe", ".bat"]);
+    assert_eq!(
+        parse_pathext(Some(" .EXE;;.exe; ")),
+        vec![".EXE"],
+        "trims, skips empties, dedupes case-insensitively",
+    );
+    assert_eq!(
+        parse_pathext(Some(".COM;.EXE;.BAT;.CMD")),
+        vec![".COM", ".EXE", ".BAT", ".CMD"],
+    );
+}
+
+#[test]
+#[cfg(windows)]
+#[cfg_attr(
+    miri,
+    ignore = "probes real files and script PATHEXT layout; unsupported under Miri"
+)]
+fn is_exec_honors_pathext() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = temp.as_guarded_path().clone();
+    let resolver = PathResolver::new_guarded(root.clone(), root.clone()).unwrap();
+    let tools = root.join("tools").unwrap();
+    resolver.create_dir_all(&tools).unwrap();
+    // A custom extension the default set never probes, plus a stock
+    // `.bat` the custom set must ignore.
+    for name in ["custom.foo", "plain.bat"] {
+        let file = tools.join(name).unwrap();
+        resolver.write_file(&file, b"fake").unwrap();
+    }
+    let tools_str = to_forward_slashes(&tools.as_path().to_string_lossy());
+    let script = format!(
+        indoc! {r#"
+            IMPORT [STD]
+            WORKSPACE SYSTEM
+            ENV PATH="{tools}"
+            ENV PATHEXT=".FOO"
+            LET $custom: BOOL = IS_EXEC("custom")
+            ASSERT_EQ $custom true
+            LET $plain: BOOL = IS_EXEC("plain")
+            ASSERT_EQ $plain false
+            # An explicitly empty PATHEXT probes nothing at all.
+            ENV PATHEXT=""
+            LET $gone: BOOL = IS_EXEC("custom")
+            ASSERT_EQ $gone false
+        "#},
+        tools = tools_str
+    );
+    let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
+    let steps = crate::parse_script(&script).unwrap();
+    run_steps_with_manager(fs, &steps, MockProcessManager::default(), ExecIo::new())
+        .expect("pathext pipeline");
+}
+
+#[test]
 fn archive_refuses_symlink_source() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();

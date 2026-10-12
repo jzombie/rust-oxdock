@@ -461,10 +461,11 @@ pub(crate) fn is_exec_from_value<P: ProcessManager>(
 /// Resolve one tool spelling: direct files by path, bare names by
 /// `PATH` search.
 fn is_exec_name<P: ProcessManager>(cx: &StepCtx<'_, P>, name: &str) -> bool {
+    let exts = platform_exts(cx);
     if name.contains('/') || name.contains('\\') {
-        return exe_candidates(name)
+        return exe_candidates(name, &exts)
             .iter()
-            .any(|candidate| is_executable_candidate(cx, candidate));
+            .any(|candidate| is_executable_candidate(cx, candidate, &exts));
     }
     let path_var = cx.state.envs.get("PATH").cloned().unwrap_or_default();
     for dir in std::env::split_paths(&path_var) {
@@ -475,8 +476,8 @@ fn is_exec_name<P: ProcessManager>(cx: &StepCtx<'_, P>, name: &str) -> bool {
         if base.is_empty() {
             continue;
         }
-        for candidate in exe_candidates(name) {
-            if is_executable_candidate(cx, &format!("{base}/{candidate}")) {
+        for candidate in exe_candidates(name, &exts) {
+            if is_executable_candidate(cx, &format!("{base}/{candidate}"), &exts) {
                 return true;
             }
         }
@@ -484,38 +485,83 @@ fn is_exec_name<P: ProcessManager>(cx: &StepCtx<'_, P>, name: &str) -> bool {
     false
 }
 
+/// Split a `PATHEXT` value into dotted extensions (`.EXE`, `.BAT`,
+/// ...): `;`-separated, trimmed, empties skipped, missing dots added,
+/// duplicates dropped case-insensitively. Only an unset variable falls
+/// back to the Windows default; an explicitly empty one probes nothing,
+/// matching what the shell itself resolves.
+#[cfg(windows)]
+pub(crate) fn parse_pathext(raw: Option<&str>) -> Vec<String> {
+    const DEFAULT_PATHEXT: &str = ".COM;.EXE;.BAT;.CMD";
+    let mut exts = Vec::new();
+    for piece in raw.unwrap_or(DEFAULT_PATHEXT).split(';') {
+        let stem = piece.trim().trim_start_matches('.');
+        if stem.is_empty() {
+            continue;
+        }
+        let dotted = format!(".{stem}");
+        if !exts
+            .iter()
+            .any(|seen: &String| seen.eq_ignore_ascii_case(&dotted))
+        {
+            exts.push(dotted);
+        }
+    }
+    exts
+}
+
+/// Extension list for candidate probing: the script's `PATHEXT` on
+/// Windows, empty elsewhere (Unix probes the bare name only). Read
+/// from the script environment like `PATH`, never the host's, so the
+/// answer matches the world the script runs in.
+#[cfg(windows)]
+fn platform_exts<P: ProcessManager>(cx: &StepCtx<'_, P>) -> Vec<String> {
+    parse_pathext(cx.state.envs.get("PATHEXT").map(String::as_str))
+}
+
+/// Extension list for candidate probing: the script's `PATHEXT` on
+/// Windows, empty elsewhere (Unix probes the bare name only).
+#[cfg(not(windows))]
+fn platform_exts<P: ProcessManager>(cx: &StepCtx<'_, P>) -> Vec<String> {
+    let _ = cx;
+    Vec::new()
+}
+
 /// Candidate spellings for one tool name: the bare name everywhere,
-/// plus every executable extension where the platform runs them.
-fn exe_candidates(name: &str) -> Vec<String> {
+/// plus one per executable extension on Windows. A name already
+/// carrying an extension probes as-is: appending again (`tool.bat.exe`)
+/// would never match what the shell resolves.
+fn exe_candidates(name: &str, exts: &[String]) -> Vec<String> {
     #[cfg(windows)]
     {
         let lower = name.to_ascii_lowercase();
-        if ["exe", "bat", "cmd", "com"]
+        if exts
             .iter()
-            .any(|ext| lower.ends_with(&format!(".{ext}")))
+            .any(|ext| lower.ends_with(&ext.to_ascii_lowercase()))
         {
             vec![name.to_string()]
         } else {
-            vec![
-                name.to_string(),
-                format!("{name}.exe"),
-                format!("{name}.bat"),
-                format!("{name}.cmd"),
-                format!("{name}.com"),
-            ]
+            let mut out = vec![name.to_string()];
+            out.extend(exts.iter().map(|ext| format!("{name}{ext}")));
+            out
         }
     }
     #[cfg(not(windows))]
     {
+        let _ = exts;
         vec![name.to_string()]
     }
 }
 
 /// True iff the candidate guards to a runnable file: a real file
-/// everywhere, plus an executable bit on Unix or an executable
-/// extension on Windows. Unresolvable spellings (missing files,
-/// paths outside the selected roots) read false, never error.
-fn is_executable_candidate<P: ProcessManager>(cx: &StepCtx<'_, P>, candidate: &str) -> bool {
+/// everywhere, plus an executable bit on Unix or a `PATHEXT` extension
+/// on Windows. Unresolvable spellings (missing files, paths outside
+/// the selected roots) read false, never error.
+fn is_executable_candidate<P: ProcessManager>(
+    cx: &StepCtx<'_, P>,
+    candidate: &str,
+    exts: &[String],
+) -> bool {
     let Ok(guard) = cx.state.fs.resolve_read(&cx.state.cwd, candidate) else {
         return false;
     };
@@ -527,6 +573,7 @@ fn is_executable_candidate<P: ProcessManager>(cx: &StepCtx<'_, P>, candidate: &s
     }
     #[cfg(unix)]
     {
+        let _ = exts;
         use std::os::unix::fs::PermissionsExt;
         cx.state
             .fs
@@ -537,13 +584,13 @@ fn is_executable_candidate<P: ProcessManager>(cx: &StepCtx<'_, P>, candidate: &s
     #[cfg(windows)]
     {
         let lower = candidate.to_ascii_lowercase();
-        return ["exe", "bat", "cmd", "com"]
+        return exts
             .iter()
-            .any(|ext| lower.ends_with(&format!(".{ext}")));
+            .any(|ext| lower.ends_with(&ext.to_ascii_lowercase()));
     }
     #[cfg(not(any(unix, windows)))]
     {
-        let _ = (candidate, &guard);
+        let _ = (candidate, &guard, exts);
         return false;
     }
 }
