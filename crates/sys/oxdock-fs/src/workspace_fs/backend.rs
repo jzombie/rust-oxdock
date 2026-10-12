@@ -58,6 +58,7 @@ const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 /// closes the validation-to-open race on that side completely.
 #[cfg(target_os = "linux")]
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+#[cfg_attr(miri, allow(dead_code))]
 fn fd_path(file: &fs::File) -> Result<std::path::PathBuf> {
     use std::os::unix::io::AsRawFd;
     let link = format!("/proc/self/fd/{}", file.as_raw_fd());
@@ -67,6 +68,7 @@ fn fd_path(file: &fs::File) -> Result<std::path::PathBuf> {
 /// True path of an open file descriptor via `fcntl(F_GETPATH)`.
 #[cfg(target_os = "macos")]
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+#[cfg_attr(miri, allow(dead_code))]
 fn fd_path(file: &fs::File) -> Result<std::path::PathBuf> {
     use std::os::unix::io::AsRawFd;
     let mut buf = vec![0 as libc::c_char; libc::MAXPATHLEN as usize];
@@ -92,6 +94,7 @@ fn fd_path(file: &fs::File) -> Result<std::path::PathBuf> {
 /// agree on case and prefixes for the same file.
 #[cfg(windows)]
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+#[cfg_attr(miri, allow(dead_code))]
 fn fd_path(file: &fs::File) -> Result<std::path::PathBuf> {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Storage::FileSystem::{
@@ -141,6 +144,7 @@ fn fd_path(file: &fs::File) -> Result<std::path::PathBuf> {
 /// microsecond.
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+#[cfg_attr(miri, allow(dead_code))]
 fn verify_fd_within(
     file: &fs::File,
     expected_root: &GuardedPath,
@@ -176,6 +180,7 @@ fn verify_fd_within(
 /// (Windows shares one API for both; Linux kernels agree).
 #[cfg(target_os = "macos")]
 #[allow(clippy::disallowed_types)]
+#[cfg_attr(miri, allow(dead_code))]
 fn cmp_form(path: &std::path::Path) -> std::path::PathBuf {
     std::path::PathBuf::from(path.as_os_str().to_string_lossy().to_lowercase())
 }
@@ -183,6 +188,7 @@ fn cmp_form(path: &std::path::Path) -> std::path::PathBuf {
 /// Comparison form for descriptor verification (exact outside macOS).
 #[cfg(not(target_os = "macos"))]
 #[allow(clippy::disallowed_types)]
+#[cfg_attr(miri, allow(dead_code))]
 fn cmp_form(path: &std::path::Path) -> std::path::PathBuf {
     path.to_path_buf()
 }
@@ -192,6 +198,7 @@ fn cmp_form(path: &std::path::Path) -> std::path::PathBuf {
 /// silent: the `lstat` + flag layers still run).
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 #[allow(clippy::disallowed_types)]
+#[cfg_attr(miri, allow(dead_code))]
 fn verify_fd_within(
     file: &fs::File,
     expected_root: &GuardedPath,

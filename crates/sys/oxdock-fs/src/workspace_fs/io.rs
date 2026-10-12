@@ -16,7 +16,7 @@ fn refuse_final_symlink(path: &GuardedPath) -> Result<()> {
     #[cfg(miri)]
     {
         let _ = path;
-        return Ok(());
+        Ok(())
     }
     #[cfg(not(miri))]
     {
@@ -139,7 +139,7 @@ impl PathResolver {
         #[cfg(miri)]
         {
             let _ = (base, rel);
-            return Ok(());
+            Ok(())
         }
         #[cfg(not(miri))]
         {
