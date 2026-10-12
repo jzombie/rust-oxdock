@@ -16,7 +16,7 @@
 # Pin explicitly with VERSION (a tag: the API's "latest" skips
 # pre-releases, and every release here is `-alpha` until stable):
 #
-#   VERSION=v0.24.5-alpha curl -fsSL ... | bash
+#   VERSION=v0.25.0-alpha curl -fsSL ... | bash
 #
 # Pass INSTALL_DIR to choose the destination; the installer defaults
 # it when absent.
