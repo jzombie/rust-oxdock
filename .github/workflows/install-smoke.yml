@@ -172,6 +172,8 @@ jobs:
           path: ${{ runner.temp }}/oxdock-stage
           retention-days: 1
 
+      # TODO: Update comment/workflow once UNARCHIVE lands in release.
+      #
       # Self-bootstrap through the branch engine: download the pinned
       # (previous) release tarball and unpack it with UNARCHIVE, no
       # system tar involved. Proves the branch vocabulary handles real
