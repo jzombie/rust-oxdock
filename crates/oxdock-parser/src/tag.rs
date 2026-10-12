@@ -57,7 +57,7 @@ pub struct Field {
 /// tags are matched. [`TypeTag::Custom`] carries a host descriptor for
 /// opaque handles. [`TypeTag::ListOf`], [`TypeTag::Record`],
 /// [`TypeTag::MapOf`], and [`TypeTag::Union`] share their payloads
-/// through [`Arc`](std::sync::Arc): cheap clones, no leaks, freed
+/// through [`Arc`]: cheap clones, no leaks, freed
 /// when the last owner drops. Bare `List` and `Map`
 /// are runtime words only, never declaration spellings. Unknown
 /// lists declare `LIST<ANY>`; unknown maps declare [`TypeTag::MapOf`]
