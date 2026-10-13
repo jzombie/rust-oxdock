@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [0.27.1-alpha] - 2026-10-13
+
+### Fixed
+
+- Parser diagnostics for unbalanced blocks inside `IF`/`WHILE`/`FOR` (and other block statements): a break inside a body no longer misreports the head line as invalid syntax. When a keyword-led line falls back to generic lowering but the head's structural rule fails deeper on a later line, the parser reports the unterminated block in plain language (naming the construct and its opener line) at the failure position past the head, keeping the full expected set as structured data (#215). Heads without a following `{` token and single-line failures keep their exact head spans.
+
 ## [0.27.0-alpha] - 2026-10-12
 
 ### Added

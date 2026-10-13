@@ -8,7 +8,10 @@ use crate::constants::{
     SCRIPT_MODULE_NAME, qualify, split_qualified,
 };
 use crate::error::{ParseError, ParseResult, SpanContext};
-use crate::lexer::{self, RawToken, Rule, parse_pest_error, refine_span, span_for_line, span_of};
+use crate::lexer::{
+    self, LanguageParser, RawToken, Rule, parse_pest_error, refine_span, span_for_line, span_of,
+};
+use pest::Parser as _;
 use pest::iterators::Pair;
 use std::cell::RefCell;
 use std::collections::{HashSet, VecDeque};
@@ -581,9 +584,39 @@ impl<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> ScriptParser<'a, F> {
                         &self.modules,
                         &import_scopes,
                     );
-                    let kind = self
-                        .lower_instruction(&span, pair, &lctx)
-                        .map_err(|e| e.with_span(&span))?;
+                    // A `{` token on the same line after a keyword-led
+                    // instruction marks a fragmented block statement (issue
+                    // #215). The peek is free and the head name below
+                    // allocates only in that rare case, so valid scripts
+                    // pay nothing for the diagnostic fallback. The pair
+                    // always starts with its command name (grammar-ordered
+                    // first child: comments lex as separate elements and
+                    // compact `IF(` forms lex as calls), so the first
+                    // token is the keyword.
+                    let input = self.input;
+                    let opens_block = matches!(
+                        self.tokens.front(),
+                        Some(RawToken::BlockStart { line_no: next, .. }) if *next == line_no
+                    );
+                    let head_start = pair.as_span().start();
+                    let head_name = opens_block.then(|| {
+                        pair.as_str()
+                            .split_whitespace()
+                            .next()
+                            .unwrap_or("")
+                            .to_string()
+                    });
+                    let head_line = span.line;
+                    let head_step = span.step_index;
+                    let kind = self.lower_instruction(&span, pair, &lctx).map_err(|e| {
+                        let headed = e.with_span(&span);
+                        match head_name {
+                            Some(name) => refine_fragmented_block_error(
+                                input, head_start, &name, head_line, head_step, headed,
+                            ),
+                            None => headed,
+                        }
+                    })?;
                     self.handle_command_token(&span, line_no, kind)?;
                 }
                 RawToken::RunExec {
@@ -1102,6 +1135,107 @@ fn and_guard_exprs(left: Option<GuardExpr>, right: Option<GuardExpr>) -> Option<
         (Some(expr), None) | (None, Some(expr)) => Some(expr),
         (Some(lhs), Some(rhs)) => Some(GuardExpr::all(vec![lhs, rhs])),
     }
+}
+
+/// Candidate structural rules for a fragmented keyword head (issue #215).
+/// Each rule opens its `block` on the head line and may nest further
+/// blocks, so re-parsing the tail with it surfaces pest's deepest inner
+/// failure. Only rules with a demonstrated refinement are listed: every
+/// other block shape (`WITH_IO` bodies, `LET` forms, inline `ASYNC`
+/// commands) resolves through dedicated token paths or fails on its head
+/// line, so no candidate there can ever report past the head. `ELSE`
+/// lists both clauses; furthest failure wins, exactly like PEG recovery.
+/// A candidate that matches the tail reports `Ok`: full consumption means
+/// the head is structurally sound and the lowering error stands, while a
+/// partial prefix match cannot exonerate the head, so evaluation
+/// continues instead of aborting.
+fn block_fragment_candidates(name: &str) -> Option<&'static [Rule]> {
+    match name {
+        "IF" => Some(&[Rule::if_statement]),
+        "WHILE" => Some(&[Rule::while_statement]),
+        "FOR" => Some(&[Rule::for_statement]),
+        "FUNC" => Some(&[Rule::func_def]),
+        "TIMEOUT" => Some(&[Rule::timeout_statement]),
+        "REMOTE" => Some(&[Rule::remote_statement]),
+        "ASYNC" => Some(&[Rule::async_statement_block]),
+        "ELSE" => Some(&[Rule::else_if_clause, Rule::else_clause]),
+        _ => None,
+    }
+}
+
+/// Replace a fragmented block head error with a readable inner diagnostic
+/// (issue #215). The caller has already verified a `{` token on the head
+/// line, so a missing opener cannot misattribute here, and only failures
+/// past the head line refine, which keeps single-line diagnostics
+/// byte-identical. The message names the block and its opener line; the
+/// full pest expected set stays attached as structured data instead of
+/// leaking grammar rule names into user-facing text.
+fn refine_fragmented_block_error(
+    input: &str,
+    start: usize,
+    name: &str,
+    head_line: usize,
+    step_index: Option<usize>,
+    outer: ParseError,
+) -> ParseError {
+    if head_line == 0 || start >= input.len() {
+        return outer;
+    }
+    let Some(candidates) = block_fragment_candidates(name) else {
+        return outer;
+    };
+    let tail = &input[start..];
+    let mut best: Option<(usize, usize, usize, Vec<String>)> = None;
+    for rule in candidates {
+        match LanguageParser::parse(*rule, tail) {
+            Ok(mut pairs) => {
+                if pairs
+                    .next()
+                    .is_some_and(|pair| pair.as_span().end() == tail.len())
+                {
+                    return outer;
+                }
+            }
+            Err(pest_err) => {
+                let (rel_line, rel_start, rel_end) =
+                    crate::lexer::pest_span_parts(&pest_err.line_col);
+                if rel_line == 1 {
+                    continue;
+                }
+                let (_, expected) = crate::lexer::pest_variant_parts(&pest_err.variant);
+                let abs_line = head_line + rel_line - 1;
+                let deeper = match &best {
+                    None => true,
+                    Some((best_line, best_col, _, _)) => {
+                        (abs_line, rel_start) > (*best_line, *best_col)
+                    }
+                };
+                if deeper {
+                    best = Some((abs_line, rel_start, rel_end, expected));
+                }
+            }
+        }
+    }
+    let Some((abs_line, abs_start, abs_end, expected)) = best else {
+        return outer;
+    };
+    // One short-circuiting pass: a position past the final line is the
+    // empty terminal line of a trailing newline, rendered exactly like
+    // top-level end-of-input diagnostics. That position means the input
+    // ended inside the block, so the block is unclosed; a failure on a
+    // content line is an inner syntax error. Either way the header stays
+    // human: block keyword plus opener line. The pest expected set rides
+    // along as structured data only.
+    let found = input.lines().nth(abs_line.saturating_sub(1));
+    let terminal = found.is_none();
+    let eff_text = found.unwrap_or("").to_string();
+    let header = if terminal {
+        format!("unclosed `{name}` block opened on line {head_line}")
+    } else {
+        format!("syntax error in `{name}` block opened on line {head_line}")
+    };
+    crate::lexer::pest_error_at(&header, expected, abs_line, abs_start, abs_end, eff_text)
+        .with_step(step_index.unwrap_or(0))
 }
 
 fn merge_bindings(defaults: &[IoBinding], overrides: &[IoBinding]) -> Vec<IoBinding> {
