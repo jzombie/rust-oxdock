@@ -27,6 +27,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 - Listener sockets set `SO_REUSEADDR` so close-and-reclaim loops survive a still-closing previous socket instead of flaking `EADDRINUSE`.
 - `SSH_PTY_RUN` drains before teardown: the supervisor waits for output quiescence after child exit instead of releasing the console immediately, so a slow ConPTY flush no longer truncates the tail bytes (the promised drain-before-return now holds on Windows).
+- PTY spawn hands the child the native CWD (`command_path`, verbatim prefix stripped) like process spawn already does: a `\\?\` startup directory trips console apps into UNC handling, with `cmd` warning and silently defaulting elsewhere, so terminal children now actually run in the script directory. The Windows doc fence skips ConPTY's setup-handshake first line before asserting on child output.
 
 ## [0.26.0-alpha] - 2026-10-12
 

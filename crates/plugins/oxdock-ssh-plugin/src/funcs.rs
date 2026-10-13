@@ -645,6 +645,8 @@ fn ssh_pump<P: ProcessManager>(
         LET $t: HANDLE = ASYNC { SSH_PTY_RUN($sess.session, ["cmd", "/c", "echo pty-hi"], 0, 0, $pin, $pout) }
         LET $code: INT = AWAIT $t
         ASSERT_EQ $code 0
+        # ConPTY dumps its setup handshake ahead of child output, so the first line is console noise.
+        WITH_IO [stdin=$pout] READ_LINE $preamble
         WITH_IO [stdin=$pout] READ_LINE $got
         ASSERT_CONTAINS $got "pty-hi"
     }

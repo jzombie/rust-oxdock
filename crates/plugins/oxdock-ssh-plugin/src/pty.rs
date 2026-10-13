@@ -25,6 +25,7 @@ use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use oxdock_core::{StepCtx, Value};
+use oxdock_fs::command_path;
 use oxdock_pipe::PipeInner;
 use oxdock_process::{ProcessManager, SharedInput, SharedOutput};
 
@@ -333,7 +334,12 @@ pub fn pump_pty_session<P: ProcessManager>(
 
     let mut builder = portable_pty::CommandBuilder::new(&argv[0]);
     builder.args(&argv[1..]);
-    builder.cwd(cx.cwd().as_path());
+    // Native form, not the guarded verbatim path: a `\\?\` startup
+    // directory trips console apps into UNC handling (`cmd` warns and
+    // silently defaults elsewhere), the same reason process spawn
+    // goes through `command_path`.
+    let cwd = command_path(cx.cwd());
+    builder.cwd(cwd.as_ref());
     // Script ENV layers over the inherited host environment (the `RUN`
     // contract): block-scoped assignments like the session's `SSH_*`
     // relay reach the child, and scope exit reverts them.
