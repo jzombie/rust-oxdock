@@ -23,8 +23,8 @@ pub mod validate;
 
 pub use endpoints::{
     AcquiredListener, BindingSpec, EndpointRegistry, MEMORY_QUEUE_CAP, MemoryPipePair,
-    ServiceTarget, SlotKind, SocketRequirement, acquire_listener, no_cli_mapping,
-    resolve_service_target,
+    ServiceTarget, SlotKind, SocketRequirement, acquire_listener, classify_service_call,
+    no_cli_mapping, resolve_service_target,
 };
 pub use funcs::{module_with, module_with_endpoints};
 use oxdock_core::HostModule;

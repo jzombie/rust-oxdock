@@ -563,16 +563,18 @@ fn main_thread_accept_bails() {
 #[test]
 fn main_thread_connect_bails() {
     // The ASYNC gate fires before parsing, dialing, or sockets: runs
-    // under Miri too.
+    // under Miri too. Memory-mapped so pre-run passes the service
+    // through to the gate instead of failing it unmapped.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
+    let registry = memory_registry(&["test-gate-connect"]);
     let script = indoc! {r#"
         IMPORT [STD, NET]
         LET $in: PIPE
         LET $out: PIPE
         NET_CONNECT("test-gate-connect", $in, $out, {})
     "#};
-    let err = run_script(&root, script).expect_err("main-thread connect must fail");
+    let err = run_script_with(registry, &root, script).expect_err("main-thread connect must fail");
     assert!(format!("{err:#}").contains("requires ASYNC"), "{err:#}");
 }
 

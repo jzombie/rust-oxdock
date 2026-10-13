@@ -28,7 +28,7 @@ use std::sync::{
 
 use anyhow::{Context, Result, bail};
 use oxdock_core::PreRunCheck;
-use oxdock_parser::{Expr, Step};
+use oxdock_parser::{Expr, Step, StepKind};
 use oxdock_pipe::ScriptPipe;
 
 use crate::validate::{EndpointKey, VirtualEndpoint};
@@ -503,17 +503,7 @@ pub fn assert_services_bound(
     }
     let mut calls = Vec::new();
     for step in steps {
-        step.kind.walk_step_exprs(&mut |expr| {
-            if let Expr::Call { name, args } = expr
-                && let Some(func) = classify_service_call(module, name)
-            {
-                let service = match args.first() {
-                    Some(Expr::Literal(value)) => value.as_str().map(str::to_string),
-                    _ => None,
-                };
-                calls.push((func, service));
-            }
-        });
+        inspect_kind(module, &step.kind, &mut calls);
     }
     for (func, service) in calls {
         let Some(service) = service else {
@@ -526,11 +516,52 @@ pub fn assert_services_bound(
     Ok(())
 }
 
+/// Inspect one step kind and everything under it for service calls.
+/// Statement-position calls (`StepKind::Call`) name services exactly
+/// like expression calls, but the walker only visits argument exprs,
+/// never the head: without the head check a bare `NET_LISTEN("x")`
+/// step sails through pre-run and fails at call time instead.
+fn inspect_kind(module: &str, kind: &StepKind, calls: &mut Vec<(&'static str, Option<String>)>) {
+    if let StepKind::Call { name, args } = kind
+        && let Some(inspected) = inspect_call(module, name, args)
+    {
+        calls.push(inspected);
+    }
+    kind.walk_child_kinds(&mut |child| inspect_kind(module, child, calls));
+    // Shallow exprs only: `walk_step_exprs` would re-descend into the
+    // children the line above already recurses to, double-counting
+    // nested calls. Verdicts are idempotent, but the duplicate work
+    // would lie about how many services a script names.
+    kind.walk_exprs(&mut |expr| {
+        expr.walk(&mut |inner| {
+            if let Expr::Call { name, args } = inner
+                && let Some(inspected) = inspect_call(module, name, args)
+            {
+                calls.push(inspected);
+            }
+        });
+    });
+}
+
+/// Classify one call by head name, capturing the first argument when
+/// it is a service-name literal. Non-literals surface downstream as
+/// the string-literal requirement, never as silent passes.
+fn inspect_call(module: &str, name: &str, args: &[Expr]) -> Option<(&'static str, Option<String>)> {
+    let func = classify_service_call(module, name)?;
+    let service = match args.first() {
+        Some(Expr::Literal(value)) => value.as_str().map(str::to_string),
+        _ => None,
+    };
+    Some((func, service))
+}
+
 /// Map a lowered call name to the canonical function it enforces, for
 /// one module's checker. Lowered names are fully qualified
 /// (`NET::NET_LISTEN`); bare canonical spellings match too. Anything
-/// else is not this module's business.
-fn classify_service_call(module: &str, name: &str) -> Option<&'static str> {
+/// else is not this module's business. Public because the closed-world
+/// enforcement test pins this map against every registered function;
+/// the map itself stays single-sourced here.
+pub fn classify_service_call(module: &str, name: &str) -> Option<&'static str> {
     let (mod_part, base) = match name.split_once("::") {
         Some((module, base)) => (Some(module), base),
         None => (None, name),
