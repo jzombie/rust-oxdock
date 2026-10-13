@@ -2456,7 +2456,7 @@ pub(crate) fn call_func_value<P: ProcessManager>(
             )?;
             Ok(value)
         }
-        FuncBody::Ctx(func) => {
+        FuncBody::Ctx(func) | FuncBody::Both { ctx: func, .. } => {
             let value = func(cx, arg_vals)
                 .with_context(|| format!("step {}: function `{name}` failed", idx + 1))?;
             super::args::check_host_return_value(

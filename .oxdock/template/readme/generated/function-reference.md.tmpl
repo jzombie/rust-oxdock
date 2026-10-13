@@ -950,6 +950,949 @@ LET $has_permit: BOOL = HAS_KEY($second, "permit")
 ASSERT_EQ $has_permit false
 ```
 
+### STD::TEXT_CONTAINS
+
+Report whether text holds a literal substring.
+
+Returns `BOOL`; the substring search behind target filtering
+alongside the prefix and suffix tests. Matching is
+case-sensitive; there is no case-insensitive mode.
+
+
+**Signature:** `STD::TEXT_CONTAINS($text: STRING, $needle: STRING) -> BOOL`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+
+- `$text` (`STRING`): Text to search.
+- `$needle` (`STRING`): Literal substring to look for.
+
+**Returns:** `BOOL`
+
+**Examples:**
+
+**Example: contains**
+
+```oxdock
+# Present needles report true; misses report false.
+IMPORT [STD]
+LET $hit: BOOL = TEXT_CONTAINS("x86_64-linux-musl", "musl")
+ASSERT_EQ $hit true
+
+# A miss is false, not a failure.
+LET $miss: BOOL = TEXT_CONTAINS("x86_64-linux-gnu", "musl")
+ASSERT_EQ $miss false
+```
+
+### STD::TEXT_COUNT
+
+Count non-overlapping literal occurrences of a needle.
+
+Matches never share bytes, so `"aaa"` holds one `"aa"`, matching
+`grep -o 'aa' | wc -l`. An empty needle fails closed instead of
+binding every character boundary. Matching is case-sensitive;
+there is no case-insensitive mode.
+
+
+**Signature:** `STD::TEXT_COUNT($text: STRING, $needle: STRING) -> INT`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+
+- `$text` (`STRING`): Text to search.
+- `$needle` (`STRING`): Literal needle to count; empty fails closed.
+
+**Returns:** `INT`
+
+**Examples:**
+
+**Example: count**
+
+```oxdock
+# Every non-overlapping occurrence counts once.
+IMPORT [STD]
+LET $n: INT = TEXT_COUNT("hello world", "o")
+ASSERT_EQ $n 2
+
+# Overlapping candidates never double count.
+LET $once: INT = TEXT_COUNT("aaa", "aa")
+ASSERT_EQ $once 1
+```
+
+### STD::TEXT_COUNT_MATCHES
+
+Count lines matching a regex pattern.
+
+Lines split with universal newline handling, like `TEXT_LINES`,
+and each line reports independently: this is `grep -c`, so a line
+with two matches still counts once. Bad patterns fail closed
+naming the pattern and its position. Matching is case-sensitive
+unless the pattern carries an inline `(?i)` flag, which makes
+uppercase and lowercase letters match each other.
+
+
+**Signature:** `STD::TEXT_COUNT_MATCHES($text: STRING, $pattern: STRING) -> INT`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+
+- `$text` (`STRING`): Text whose lines to test.
+- `$pattern` (`STRING`): Regex pattern tested per line.
+
+**Returns:** `INT`
+
+**Examples:**
+
+**Example: count matches**
+
+```oxdock
+# One line matches once no matter how many times it hits.
+IMPORT [STD]
+LET $n: INT = TEXT_COUNT_MATCHES("test a: test\ntest b: nope\ntest c: test", ": test")
+ASSERT_EQ $n 2
+
+# A miss binds zero, never an error.
+LET $none: INT = TEXT_COUNT_MATCHES("test b: nope", ": test$")
+ASSERT_EQ $none 0
+```
+
+### STD::TEXT_ENDS_WITH
+
+Report whether text ends with a literal suffix.
+
+Returns `BOOL`; the `endsWith(matrix.target, 'linux-musl')`
+check in CI legs. Matching is case-sensitive; there is no
+case-insensitive mode.
+
+
+**Signature:** `STD::TEXT_ENDS_WITH($text: STRING, $suffix: STRING) -> BOOL`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+
+- `$text` (`STRING`): Text to test.
+- `$suffix` (`STRING`): Literal suffix to look for.
+
+**Returns:** `BOOL`
+
+**Examples:**
+
+**Example: ends with**
+
+```oxdock
+# Present suffixes report true; misses report false.
+IMPORT [STD]
+LET $hit: BOOL = TEXT_ENDS_WITH("x86_64-linux-musl", "linux-musl")
+ASSERT_EQ $hit true
+
+# A miss is false, not a failure.
+LET $miss: BOOL = TEXT_ENDS_WITH("x86_64-linux-gnu", "linux-musl")
+ASSERT_EQ $miss false
+```
+
+### STD::TEXT_EXTRACT
+
+Extract capture groups for the first regex match.
+
+Returns a `LIST<STRING>` where index 0 is the full match and the
+rest are groups in order; non-participating groups bind empty so
+indexes stay stable. No match binds an empty list. Matching is
+case-sensitive unless the pattern carries an inline `(?i)` flag,
+which makes uppercase and lowercase letters match each other.
+
+
+**Signature:** `STD::TEXT_EXTRACT($text: STRING, $pattern: STRING) -> LIST<STRING>`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+
+- `$text` (`STRING`): Text to search.
+- `$pattern` (`STRING`): Regex pattern with capture groups.
+
+**Returns:** `LIST<STRING>`
+
+**Examples:**
+
+**Example: extract**
+
+```oxdock
+# Index zero is the full match; groups follow in order.
+IMPORT [STD]
+LET $caps: LIST<STRING> = TEXT_EXTRACT("abc123", "([a-z]+)(\\d+)")
+ASSERT_EQ $caps.0 "abc123"
+ASSERT_EQ $caps.1 "abc"
+ASSERT_EQ $caps.2 "123"
+```
+
+### STD::TEXT_FIELDS
+
+Split text into whitespace-separated fields, ignoring empties.
+
+Returns a `LIST<STRING>`; the checksum-line parser that replaces
+`cut -d' ' -f1` in CI legs.
+
+
+**Signature:** `STD::TEXT_FIELDS($text: STRING) -> LIST<STRING>`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+
+- `$text` (`STRING`): Text to split into fields.
+
+**Returns:** `LIST<STRING>`
+
+**Examples:**
+
+**Example: fields**
+
+```oxdock
+# Runs of whitespace separate fields; empties never appear.
+IMPORT [STD]
+LET $fields: LIST<STRING> = TEXT_FIELDS("  abc  def ")
+ASSERT_EQ $fields.0 "abc"
+ASSERT_EQ $fields.1 "def"
+```
+
+### STD::TEXT_GREP
+
+Keep the lines matching a regex pattern.
+
+Splits with universal newline handling, like `TEXT_LINES`, and
+returns every matching line in order: plain `grep`, so a miss
+binds an empty list instead of failing. A trailing options MAP
+carries `invert`: `TEXT_GREP($text, $pattern, {invert: true})`
+keeps every non-matching line instead, the `grep -v` shape. The
+MAP omits freely; a missing MAP keeps matches. Matching is
+case-sensitive unless the pattern carries an inline `(?i)` flag,
+which makes uppercase and lowercase letters match each other. Bad
+patterns fail closed naming the pattern and its position.
+
+
+**Signature:** `STD::TEXT_GREP($text: STRING, $pattern: STRING, $options?: MAP<invert?: BOOL>) -> LIST<STRING>`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+
+- `$text` (`STRING`): Text whose lines to filter.
+- `$pattern` (`STRING`): Regex pattern keeping a line.
+- `$options?` (`MAP<invert?: BOOL>`): Filter settings: `invert`. Omittable: a missing options MAP fills `{}`.
+  - `invert` (`BOOL`, optional)
+
+**Returns:** `LIST<STRING>`
+
+**Examples:**
+
+**Example: grep**
+
+```oxdock
+# Matching lines come back as a list, in order.
+IMPORT [STD]
+LET $hits: LIST<STRING> = TEXT_GREP("one\ntwo\none more", "^one")
+ASSERT_EQ $hits.0 "one"
+ASSERT_EQ $hits.1 "one more"
+
+# A miss binds an empty list, never an error.
+LET $miss: LIST<STRING> = TEXT_GREP("one\ntwo", "^z")
+LET $joined: STRING = TEXT_JOIN($miss, ",")
+ASSERT_EQ $joined ""
+
+# The (?i) flag ignores case, so uppercase lines match too.
+LET $folded: LIST<STRING> = TEXT_GREP("One\ntwo\nONE more", "(?i)^one")
+ASSERT_EQ $folded.0 "One"
+ASSERT_EQ $folded.1 "ONE more"
+```
+
+**Example: grep invert**
+
+```oxdock
+# The invert option keeps every non-matching line instead.
+IMPORT [STD]
+LET $kept: LIST<STRING> = TEXT_GREP("one\ntwo\none more", "^one", {invert: true})
+ASSERT_EQ $kept.0 "two"
+
+# A pattern matching every line binds an empty list, never an error.
+LET $none: LIST<STRING> = TEXT_GREP("one\ntwo", "^", {invert: true})
+LET $joined: STRING = TEXT_JOIN($none, ",")
+ASSERT_EQ $joined ""
+
+# Options ride into placeholders as MAP literals. Placeholder
+# strings unescape only backslash and quote, so multiline text
+# arrives through a variable.
+LET $two_lines: STRING = "one\ntwo"
+LET $msg: STRING = 'kept:\{{ STD::TEXT_GREP($two_lines, "^one", {invert: true}) }}'
+ASSERT_EQ $msg "kept:two"
+```
+
+### STD::TEXT_JOIN
+
+Join a `LIST<STRING>` with a literal separator into a `STRING`.
+
+
+**Signature:** `STD::TEXT_JOIN($elements: LIST<STRING>, $delimiter: STRING) -> STRING`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+
+- `$elements` (`LIST<STRING>`): List elements to join.
+- `$delimiter` (`STRING`): Literal delimiter placed between elements.
+
+**Returns:** `STRING`
+
+**Examples:**
+
+**Example: join**
+
+```oxdock
+# List items join with the separator between them.
+IMPORT [STD]
+LET $joined: STRING = TEXT_JOIN(["a", "b", "c"], ",")
+ASSERT_EQ $joined "a,b,c"
+```
+
+### STD::TEXT_LENGTH
+
+Count the characters in text as Unicode scalars.
+
+Multibyte characters count once each, so this is not the byte
+length: `"héllo"` binds 5, not 6. The `${#var}` and `wc -m`
+counterpart for scripts that size tags and digests.
+
+
+**Signature:** `STD::TEXT_LENGTH($text: STRING) -> INT`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+
+- `$text` (`STRING`): Text to measure.
+
+**Returns:** `INT`
+
+**Examples:**
+
+**Example: length**
+
+```oxdock
+# Plain text counts one per character.
+IMPORT [STD]
+LET $n: INT = TEXT_LENGTH("hello")
+ASSERT_EQ $n 5
+
+# Multibyte characters count once each, not per byte.
+LET $wide: INT = TEXT_LENGTH("héllo")
+ASSERT_EQ $wide 5
+```
+
+### STD::TEXT_LINES
+
+Split text into lines with universal newline handling.
+
+Normalizes through the line-ending crate first so LF, CRLF, CR,
+and mixed endings all split, then delegates the split itself to
+`LineEnding::split` instead of hand-rolled scanning.
+Returns a `LIST<STRING>`; eager-only like `TEXT_SPLIT`.
+
+
+**Signature:** `STD::TEXT_LINES($text: STRING) -> LIST<STRING>`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+
+- `$text` (`STRING`): Text to split into lines.
+
+**Returns:** `LIST<STRING>`
+
+**Examples:**
+
+**Example: lines**
+
+```oxdock
+# Newlines split into line items.
+IMPORT [STD]
+LET $lines: LIST<STRING> = TEXT_LINES("one\ntwo\nthree")
+ASSERT_EQ $lines.0 "one"
+ASSERT_EQ $lines.1 "two"
+ASSERT_EQ $lines.2 "three"
+
+# Windows endings split the same way after normalization.
+LET $crlf: LIST<STRING> = TEXT_LINES("one\r\ntwo\r\nthree")
+ASSERT_EQ $crlf.0 "one"
+ASSERT_EQ $crlf.1 "two"
+ASSERT_EQ $crlf.2 "three"
+
+# Old Mac endings split too, and mixed endings split together because the input normalizes to LF before splitting.
+LET $mixed: LIST<STRING> = TEXT_LINES("a\r\nb\nc\rd")
+ASSERT_EQ $mixed.0 "a"
+ASSERT_EQ $mixed.1 "b"
+ASSERT_EQ $mixed.2 "c"
+ASSERT_EQ $mixed.3 "d"
+```
+
+### STD::TEXT_LINES_RANGE
+
+Read lines `from` through `to` as a `LIST<STRING>`: the `sed -n
+'A,Bp'` window over universal newlines, for reading one file
+section without holding the surrounding text.
+
+Lines are 1-based and inclusive on both ends. Ranges past the end
+clamp like sed instead of failing; a start before line 1 or past
+`to` fails closed, since no line reading satisfies it.
+
+
+**Signature:** `STD::TEXT_LINES_RANGE($text: STRING, $from: INT, $to: INT) -> LIST<STRING>`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+
+- `$text` (`STRING`): Text whose lines to window.
+- `$from` (`INT`): First line, 1-based inclusive.
+- `$to` (`INT`): Last line, inclusive; past the end clamps.
+
+**Returns:** `LIST<STRING>`
+
+**Examples:**
+
+**Example: line range**
+
+```oxdock
+# Lines 2 through 3 come back as a list, 1-based inclusive.
+IMPORT [STD]
+LET $window: LIST<STRING> = TEXT_LINES_RANGE("one\ntwo\nthree\nfour", 2, 3)
+ASSERT_EQ $window.0 "two"
+ASSERT_EQ $window.1 "three"
+
+# Ranges past the end clamp instead of failing.
+LET $tail: LIST<STRING> = TEXT_LINES_RANGE("one\ntwo", 2, 9)
+ASSERT_EQ $tail.0 "two"
+```
+
+### STD::TEXT_MATCH
+
+Report whether text matches a regex pattern.
+
+Returns `BOOL`. Bad patterns fail closed naming the pattern and
+its position. Matching is case-sensitive unless the pattern
+carries an inline `(?i)` flag, which makes uppercase and lowercase
+letters match each other.
+
+
+**Signature:** `STD::TEXT_MATCH($text: STRING, $pattern: STRING) -> BOOL`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+
+- `$text` (`STRING`): Text to test.
+- `$pattern` (`STRING`): Regex pattern to match.
+
+**Returns:** `BOOL`
+
+**Examples:**
+
+**Example: match**
+
+```oxdock
+# Regex matches report true; misses report false.
+IMPORT [STD]
+LET $hit: BOOL = TEXT_MATCH("abc123", "\\d+")
+ASSERT_EQ $hit true
+
+# A miss is false, not a failure.
+LET $miss: BOOL = TEXT_MATCH("abc", "^\\d+$")
+ASSERT_EQ $miss false
+```
+
+### STD::TEXT_REPLACE
+
+Replace every literal occurrence of `from` with `to`.
+
+Accepts `STRING` or `PIPE`; the return mirrors the input kind.
+Pipes scan through a `from.len()` sliding window, so needles split
+across chunk reads still rewrite.
+Literal sliding search, not a pattern: an empty `from` fails
+closed, and regex work with captures belongs to
+`TEXT_REPLACE_REGEX`. Matching is case-sensitive; there is no
+case-insensitive mode.
+
+
+**Signature:** `STD::TEXT_REPLACE($text: STRING|PIPE, $from: STRING, $to: STRING) -> STRING|PIPE`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+
+- `$text` (`STRING|PIPE`): Text to rewrite.
+- `$from` (`STRING`): Literal text to search for; empty fails closed.
+- `$to` (`STRING`): Literal replacement text.
+
+**Returns:** `STRING|PIPE`
+
+**Examples:**
+
+**Example: replace**
+
+```oxdock
+# Every literal occurrence rewrites in place.
+IMPORT [STD]
+LET $fixed: STRING = TEXT_REPLACE("hello world", "world", "there")
+ASSERT_EQ $fixed "hello there"
+```
+
+**Example: replace pipe mirrors**
+
+```oxdock
+# Pipe input mints pipe output with the same rewrite.
+IMPORT [STD]
+LET $cap: PIPE
+WITH_IO [stdout=$cap] {
+    ECHO "hello world"
+}
+LET $trimmed: PIPE = TEXT_TRIM($cap)
+LET $out: PIPE = TEXT_REPLACE($trimmed, "world", "there")
+WITH_IO [stdin=$out] READ_LINE $line
+ASSERT_EQ $line "hello there"
+```
+
+**Example: replace template**
+
+```oxdock
+# String inputs run inside placeholders too.
+IMPORT [STD]
+LET $msg: STRING = 'fixed:\{{ STD::TEXT_REPLACE("hello world", "world", "there") }}'
+ASSERT_EQ $msg "fixed:hello there"
+```
+
+### STD::TEXT_REPLACE_REGEX
+
+Replace every regex match, expanding `$1` and `$name` captures.
+
+Accepts `STRING` or `PIPE`; the return mirrors the input kind.
+Eager-only framing: matches span chunks, so pipe inputs stage
+through the spill substrate instead of streaming.
+Bad patterns fail closed naming the pattern and its position.
+Matching is case-sensitive unless the pattern carries an inline
+`(?i)` flag, which makes uppercase and lowercase letters match
+each other.
+The literal counterpart is `TEXT_REPLACE`.
+
+
+**Signature:** `STD::TEXT_REPLACE_REGEX($text: STRING|PIPE, $pattern: STRING, $replacement: STRING) -> STRING|PIPE`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+
+- `$text` (`STRING|PIPE`): Text to rewrite.
+- `$pattern` (`STRING`): Regex pattern to match.
+- `$replacement` (`STRING`): Replacement with `$1` and `$name` capture expansion.
+
+**Returns:** `STRING|PIPE`
+
+**Examples:**
+
+**Example: replace with captures**
+
+```oxdock
+# Capture groups expand in the replacement.
+IMPORT [STD]
+LET $swapped: STRING = TEXT_REPLACE_REGEX("2026-10-13", "(\\d+)-(\\d+)-(\\d+)", "$3/$2/$1")
+ASSERT_EQ $swapped "13/10/2026"
+```
+
+**Example: replace regex pipe mirrors**
+
+```oxdock
+# Pipe input mints pipe output with the same rewrite.
+IMPORT [STD]
+LET $cap: PIPE
+WITH_IO [stdout=$cap] {
+    ECHO "2026-10-13"
+}
+LET $trimmed: PIPE = TEXT_TRIM($cap)
+LET $out: PIPE = TEXT_REPLACE_REGEX($trimmed, "(\\d+)-(\\d+)-(\\d+)", "$3/$2/$1")
+WITH_IO [stdin=$out] READ_LINE $line
+ASSERT_EQ $line "13/10/2026"
+```
+
+**Example: replace regex template**
+
+```oxdock
+# String inputs run inside placeholders too.
+IMPORT [STD]
+LET $msg: STRING = 'swapped:\{{ STD::TEXT_REPLACE_REGEX("2026-10-13", "(\\d+)-(\\d+)-(\\d+)", "$3/$2/$1") }}'
+ASSERT_EQ $msg "swapped:13/10/2026"
+```
+
+### STD::TEXT_SPLIT
+
+Split text on a literal delimiter into a `LIST<STRING>`.
+
+An empty delimiter splits into single characters. Eager-only by
+design: splitting into a list has no line framing to stream.
+Delimiters match case-sensitively; there is no
+case-insensitive mode.
+
+
+**Signature:** `STD::TEXT_SPLIT($text: STRING, $delimiter: STRING) -> LIST<STRING>`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+
+- `$text` (`STRING`): Text to split.
+- `$delimiter` (`STRING`): Literal delimiter; empty splits into characters.
+
+**Returns:** `LIST<STRING>`
+
+**Examples:**
+
+**Example: split**
+
+```oxdock
+# Delimiters split into list items.
+IMPORT [STD]
+LET $parts: LIST<STRING> = TEXT_SPLIT("a,b,c", ",")
+ASSERT_EQ $parts.0 "a"
+ASSERT_EQ $parts.1 "b"
+ASSERT_EQ $parts.2 "c"
+```
+
+### STD::TEXT_STARTS_WITH
+
+Report whether text starts with a literal prefix.
+
+Returns `BOOL`; the literal check behind tag and target branching
+such as `matrix.target` suffix and prefix tests. Matching is
+case-sensitive; there is no case-insensitive mode.
+
+
+**Signature:** `STD::TEXT_STARTS_WITH($text: STRING, $prefix: STRING) -> BOOL`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+
+- `$text` (`STRING`): Text to test.
+- `$prefix` (`STRING`): Literal prefix to look for.
+
+**Returns:** `BOOL`
+
+**Examples:**
+
+**Example: starts with**
+
+```oxdock
+# Present prefixes report true; misses report false.
+IMPORT [STD]
+LET $hit: BOOL = TEXT_STARTS_WITH("linux-musl-x64", "linux")
+ASSERT_EQ $hit true
+
+# A miss is false, not a failure.
+LET $miss: BOOL = TEXT_STARTS_WITH("macos-arm", "linux")
+ASSERT_EQ $miss false
+```
+
+### STD::TEXT_TO_LOWER
+
+Lowercase text with full Unicode mapping.
+
+Accepts `STRING` or `PIPE`; the return mirrors the input kind.
+Pipes map chunk by chunk across a char-boundary carry, like
+`TEXT_TO_UPPER`.
+
+
+**Signature:** `STD::TEXT_TO_LOWER($text: STRING|PIPE) -> STRING|PIPE`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+
+- `$text` (`STRING|PIPE`): Text to lowercase.
+
+**Returns:** `STRING|PIPE`
+
+**Examples:**
+
+**Example: lowercase**
+
+```oxdock
+# Text folds to lowercase.
+IMPORT [STD]
+LET $quiet: STRING = TEXT_TO_LOWER("HELLO")
+ASSERT_EQ $quiet "hello"
+```
+
+**Example: lowercase pipe mirrors**
+
+```oxdock
+# Pipe input mints pipe output with the same fold.
+IMPORT [STD]
+LET $cap: PIPE
+WITH_IO [stdout=$cap] {
+    ECHO "HELLO"
+}
+LET $out: PIPE = TEXT_TO_LOWER($cap)
+WITH_IO [stdin=$out] READ_LINE $line
+ASSERT_EQ $line "hello"
+```
+
+**Example: lowercase template**
+
+```oxdock
+# String inputs run inside placeholders too.
+IMPORT [STD]
+LET $msg: STRING = 'quiet:\{{ STD::TEXT_TO_LOWER("HELLO") }}'
+ASSERT_EQ $msg "quiet:hello"
+```
+
+### STD::TEXT_TO_UPPER
+
+Uppercase text with full Unicode mapping.
+
+Accepts `STRING` or `PIPE`; the return mirrors the input kind.
+Pipes map chunk by chunk across a char-boundary carry, so
+multibyte characters split across reads still fold correctly.
+
+
+**Signature:** `STD::TEXT_TO_UPPER($text: STRING|PIPE) -> STRING|PIPE`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+
+- `$text` (`STRING|PIPE`): Text to uppercase.
+
+**Returns:** `STRING|PIPE`
+
+**Examples:**
+
+**Example: uppercase**
+
+```oxdock
+# Text folds to uppercase.
+IMPORT [STD]
+LET $loud: STRING = TEXT_TO_UPPER("hello")
+ASSERT_EQ $loud "HELLO"
+```
+
+**Example: uppercase pipe mirrors**
+
+```oxdock
+# Pipe input mints pipe output with the same fold.
+IMPORT [STD]
+LET $cap: PIPE
+WITH_IO [stdout=$cap] {
+    ECHO "hello"
+}
+LET $out: PIPE = TEXT_TO_UPPER($cap)
+WITH_IO [stdin=$out] READ_LINE $line
+ASSERT_EQ $line "HELLO"
+```
+
+**Example: uppercase template**
+
+```oxdock
+# String inputs run inside placeholders too.
+IMPORT [STD]
+LET $msg: STRING = 'loud:\{{ STD::TEXT_TO_UPPER("hello") }}'
+ASSERT_EQ $msg "loud:HELLO"
+```
+
+### STD::TEXT_TRIM
+
+Trim Unicode whitespace from both ends of text.
+
+Accepts `STRING` or `PIPE`; the return mirrors the input kind.
+Pipes stream on a pump thread with O(chunk) memory: leading
+whitespace falls at the stream head while trailing whitespace
+holds in the spill substrate until the next segment proves it
+interior, so unbounded streams never buffer unbounded memory.
+
+
+**Signature:** `STD::TEXT_TRIM($text: STRING|PIPE) -> STRING|PIPE`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+
+- `$text` (`STRING|PIPE`): Text to trim.
+
+**Returns:** `STRING|PIPE`
+
+**Examples:**
+
+**Example: trim**
+
+```oxdock
+# Leading and trailing whitespace falls away.
+IMPORT [STD]
+LET $clean: STRING = TEXT_TRIM("  hello  ")
+ASSERT_EQ $clean "hello"
+```
+
+**Example: trim pipe mirrors**
+
+```oxdock
+# Pipe input mints pipe output with the same transform.
+IMPORT [STD]
+LET $cap: PIPE
+WITH_IO [stdout=$cap] {
+    ECHO "  hello  "
+}
+LET $out: PIPE = TEXT_TRIM($cap)
+WITH_IO [stdin=$out] READ_LINE $line
+ASSERT_EQ $line "hello"
+```
+
+**Example: trim template**
+
+```oxdock
+# String inputs run inside placeholders too.
+IMPORT [STD]
+LET $msg: STRING = 'clean:\{{ STD::TEXT_TRIM("  hello  ") }}'
+ASSERT_EQ $msg "clean:hello"
+```
+
+**Example: trim file template**
+
+```oxdock
+# EXPAND templates resolve the same registry.
+IMPORT [STD]
+WRITE "tpl.txt" "clean:\\\{{ STD::TEXT_TRIM(\"  hello  \") }}"
+LET $out: STRING = EXPAND "tpl.txt"
+ASSERT_EQ $out "clean:hello"
+```
+
+### STD::TEXT_TRIM_PREFIX
+
+Strip one leading prefix, returning the input unchanged when absent.
+
+Accepts `STRING` or `PIPE`; the return mirrors the input kind.
+Pipes decide on the first `prefix.len()` bytes and stream the rest
+untouched. Matching is case-sensitive; there is no
+case-insensitive mode.
+Used for tag prefix strips such as `v1.2.3` to `1.2.3`.
+
+
+**Signature:** `STD::TEXT_TRIM_PREFIX($text: STRING|PIPE, $prefix: STRING) -> STRING|PIPE`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+
+- `$text` (`STRING|PIPE`): Text to strip.
+- `$prefix` (`STRING`): Leading prefix to remove once.
+
+**Returns:** `STRING|PIPE`
+
+**Examples:**
+
+**Example: strip prefix**
+
+```oxdock
+# A present prefix falls away; absence returns the input unchanged.
+IMPORT [STD]
+LET $bare: STRING = TEXT_TRIM_PREFIX("v1.2.3", "v")
+ASSERT_EQ $bare "1.2.3"
+
+# Missing prefixes pass through untouched.
+LET $same: STRING = TEXT_TRIM_PREFIX("1.2.3", "v")
+ASSERT_EQ $same "1.2.3"
+```
+
+**Example: strip prefix pipe mirrors**
+
+```oxdock
+# Pipe input mints pipe output with the same strip.
+IMPORT [STD]
+LET $cap: PIPE
+WITH_IO [stdout=$cap] {
+    ECHO "v1.2.3"
+}
+LET $trimmed: PIPE = TEXT_TRIM($cap)
+LET $out: PIPE = TEXT_TRIM_PREFIX($trimmed, "v")
+WITH_IO [stdin=$out] READ_LINE $line
+ASSERT_EQ $line "1.2.3"
+```
+
+**Example: strip prefix template**
+
+```oxdock
+# String inputs run inside placeholders too.
+IMPORT [STD]
+LET $msg: STRING = 'bare:\{{ STD::TEXT_TRIM_PREFIX("v1.2.3", "v") }}'
+ASSERT_EQ $msg "bare:1.2.3"
+```
+
+### STD::TEXT_TRIM_SUFFIX
+
+Strip one trailing suffix, returning the input unchanged when absent.
+
+Accepts `STRING` or `PIPE`; the return mirrors the input kind.
+Pipes hold a `suffix.len()` trailing window and stream the rest.
+Matching is case-sensitive; there is no case-insensitive mode.
+
+
+**Signature:** `STD::TEXT_TRIM_SUFFIX($text: STRING|PIPE, $suffix: STRING) -> STRING|PIPE`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+
+- `$text` (`STRING|PIPE`): Text to strip.
+- `$suffix` (`STRING`): Trailing suffix to remove once.
+
+**Returns:** `STRING|PIPE`
+
+**Examples:**
+
+**Example: strip suffix**
+
+```oxdock
+# A present suffix falls away; absence returns the input unchanged.
+IMPORT [STD]
+LET $bare: STRING = TEXT_TRIM_SUFFIX("archive.tar.gz", ".gz")
+ASSERT_EQ $bare "archive.tar"
+
+# Missing suffixes pass through untouched.
+LET $same: STRING = TEXT_TRIM_SUFFIX("archive.tar", ".gz")
+ASSERT_EQ $same "archive.tar"
+```
+
+**Example: strip suffix pipe mirrors**
+
+```oxdock
+# Pipe input mints pipe output with the same strip.
+IMPORT [STD]
+LET $cap: PIPE
+WITH_IO [stdout=$cap] {
+    ECHO "archive.tar.gz"
+}
+LET $trimmed: PIPE = TEXT_TRIM($cap)
+LET $out: PIPE = TEXT_TRIM_SUFFIX($trimmed, ".gz")
+WITH_IO [stdin=$out] READ_LINE $line
+ASSERT_EQ $line "archive.tar"
+```
+
+**Example: strip suffix template**
+
+```oxdock
+# String inputs run inside placeholders too.
+IMPORT [STD]
+LET $msg: STRING = 'bare:\{{ STD::TEXT_TRIM_SUFFIX("archive.tar.gz", ".gz") }}'
+ASSERT_EQ $msg "bare:archive.tar"
+```
+
 ### STD::TO_JSON
 
 Encode a script value as JSON with one trailing newline.

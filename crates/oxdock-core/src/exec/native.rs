@@ -154,7 +154,10 @@ pub trait OxDockFn<P: ProcessManager> {
 /// to `Engine::register_module`. Build the entry with the `#[oxdock_func]`-
 /// generated registration marker, or by hand. `Pure` entries run
 /// on both the AST and the compiled RPN math paths; `Stateful` entries run
-/// on the AST path with full step context.
+/// on the AST path with full step context. `Both` entries carry a stateful
+/// body plus a pure string projection: every context with step IO runs
+/// the body, while `{{ }}` placeholder expansion (which has no step
+/// context) runs the projection.
 pub enum HostRegistration<P: ProcessManager> {
     Stateful {
         name: String,
@@ -165,6 +168,12 @@ pub enum HostRegistration<P: ProcessManager> {
         name: String,
         meta: FuncMeta,
         func: PureFn,
+    },
+    Both {
+        name: String,
+        meta: FuncMeta,
+        func: NativeFn<P>,
+        template: PureFn,
     },
 }
 
@@ -183,6 +192,17 @@ impl<P: ProcessManager> Clone for HostRegistration<P> {
                 meta: meta.clone(),
                 func: Arc::clone(func),
             },
+            HostRegistration::Both {
+                name,
+                meta,
+                func,
+                template,
+            } => HostRegistration::Both {
+                name: name.clone(),
+                meta: meta.clone(),
+                func: Arc::clone(func),
+                template: Arc::clone(template),
+            },
         }
     }
 }
@@ -194,6 +214,7 @@ impl<P: ProcessManager> HostRegistration<P> {
         match self {
             HostRegistration::Stateful { meta, .. } => meta,
             HostRegistration::Pure { meta, .. } => meta,
+            HostRegistration::Both { meta, .. } => meta,
         }
     }
 }
@@ -208,11 +229,14 @@ pub(super) struct FuncDefData {
 }
 
 /// Executable body behind one registry entry: an interpreted script, a
-/// pure scalar function, or a stateful function with step context.
+/// pure scalar function, a stateful function with step context, or a
+/// dual entry whose pure arm serves `{{ }}` placeholders while the ctx
+/// arm serves every context that carries step IO.
 pub(super) enum FuncBody<P: ProcessManager> {
     Script(FuncDefData),
     Pure(PureFn),
     Ctx(NativeFn<P>),
+    Both { pure: PureFn, ctx: NativeFn<P> },
 }
 
 // Manual `Clone` (a derive would demand `P: Clone`).
@@ -222,6 +246,10 @@ impl<P: ProcessManager> Clone for FuncBody<P> {
             FuncBody::Script(def) => FuncBody::Script(def.clone()),
             FuncBody::Pure(func) => FuncBody::Pure(Arc::clone(func)),
             FuncBody::Ctx(func) => FuncBody::Ctx(Arc::clone(func)),
+            FuncBody::Both { pure, ctx } => FuncBody::Both {
+                pure: Arc::clone(pure),
+                ctx: Arc::clone(ctx),
+            },
         }
     }
 }
@@ -299,6 +327,22 @@ impl<P: ProcessManager> FunctionRegistry<P> {
                 HostRegistration::Pure { name, meta, func } => {
                     reg.insert_qualified(STD_MODULE_NAME, name, meta, FuncBody::Pure(func));
                 }
+                HostRegistration::Both {
+                    name,
+                    meta,
+                    func,
+                    template,
+                } => {
+                    reg.insert_qualified(
+                        STD_MODULE_NAME,
+                        name,
+                        meta,
+                        FuncBody::Both {
+                            pure: template,
+                            ctx: func,
+                        },
+                    );
+                }
             }
         }
         reg
@@ -338,6 +382,27 @@ impl<P: ProcessManager> FunctionRegistry<P> {
             Describe::registration(),
             IsTerminal::registration(),
             Eof::registration(),
+            TextTrim::registration(),
+            TextTrimPrefix::registration(),
+            TextTrimSuffix::registration(),
+            TextToUpper::registration(),
+            TextToLower::registration(),
+            TextReplace::registration(),
+            TextReplaceRegex::registration(),
+            TextSplit::registration(),
+            TextJoin::registration(),
+            TextLines::registration(),
+            TextFields::registration(),
+            TextMatch::registration(),
+            TextExtract::registration(),
+            TextStartsWith::registration(),
+            TextEndsWith::registration(),
+            TextContains::registration(),
+            TextLength::registration(),
+            TextCount::registration(),
+            TextCountMatches::registration(),
+            TextGrep::registration(),
+            TextLinesRange::registration(),
             SemaphoreNew::registration(),
             SemaphoreTryAcquire::registration(),
             SemaphoreAvailable::registration(),
@@ -363,11 +428,15 @@ impl<P: ProcessManager> FunctionRegistry<P> {
     /// Rebuild the shared pure table. Runs only on native insertion:
     /// script definitions insert `Script` bodies directly and never
     /// affect the pure set, so this stays correct between rebuilds.
+    /// Dual entries contribute their template arm, which is what
+    /// `{{ }}` placeholder expansion resolves.
     fn rebuild_pure_shared(&mut self) {
         let mut table: PureTable = HashMap::new();
         for (name, entry) in &self.entries {
-            let FuncBody::Pure(ref func) = entry.body else {
-                continue;
+            let func = match &entry.body {
+                FuncBody::Pure(func) => func,
+                FuncBody::Both { pure, .. } => pure,
+                FuncBody::Script(_) | FuncBody::Ctx(_) => continue,
             };
             if let Some((module, base)) = split_qualified(name) {
                 table
@@ -421,6 +490,26 @@ impl<P: ProcessManager> FunctionRegistry<P> {
     ) {
         meta.kind = FuncKind::HostPure;
         self.insert_qualified(module, name, meta, FuncBody::Pure(func));
+    }
+
+    pub(super) fn register_both_host(
+        &mut self,
+        module: &str,
+        name: String,
+        mut meta: FuncMeta,
+        func: NativeFn<P>,
+        template: PureFn,
+    ) {
+        meta.kind = FuncKind::HostCtx;
+        self.insert_qualified(
+            module,
+            name,
+            meta,
+            FuncBody::Both {
+                pure: template,
+                ctx: func,
+            },
+        );
     }
 
     /// Define a DSL `FUNC`: names colliding with any known base name cannot
@@ -532,9 +621,11 @@ impl<P: ProcessManager> FunctionRegistry<P> {
 
     /// Clone the pure fn for `name` (ending the registry borrow) so callers
     /// can invoke it without holding `&self` across a `&mut StepCtx` use.
+    /// Dual entries answer with their template arm.
     fn clone_pure_fn(&self, name: &str) -> Option<PureFn> {
         match self.entries.get(name)?.body {
             FuncBody::Pure(ref func) => Some(Arc::clone(func)),
+            FuncBody::Both { ref pure, .. } => Some(Arc::clone(pure)),
             _ => None,
         }
     }
@@ -554,9 +645,12 @@ impl<P: ProcessManager> FunctionRegistry<P> {
 
     /// Clone the ctx fn for `name` (ending the registry borrow) so callers
     /// can invoke it with `&mut StepCtx` without double-borrowing state.
+    /// Dual entries answer with their stateful arm, which is the full
+    /// behavior wherever step IO exists.
     fn clone_ctx_fn(&self, name: &str) -> Option<NativeFn<P>> {
         match self.entries.get(name)?.body {
             FuncBody::Ctx(ref func) => Some(Arc::clone(func)),
+            FuncBody::Both { ref ctx, .. } => Some(Arc::clone(ctx)),
             _ => None,
         }
     }
@@ -1728,6 +1822,969 @@ fn semaphore_available(
     Ok(Value::int(sem.available() as i64))
 }
 
+/// Trim Unicode whitespace from both ends of text.
+///
+/// Accepts `STRING` or `PIPE`; the return mirrors the input kind.
+/// Pipes stream on a pump thread with O(chunk) memory: leading
+/// whitespace falls at the stream head while trailing whitespace
+/// holds in the spill substrate until the next segment proves it
+/// interior, so unbounded streams never buffer unbounded memory.
+///
+#[oxdock_func(
+    rpn,
+    returns = TypeTag::union(vec![TypeTag::String, TypeTag::Pipe]),
+    template = text_trim_string
+)]
+#[example(
+    name = "trim",
+    code = r###"
+    # Leading and trailing whitespace falls away.
+    IMPORT [STD]
+    LET $clean: STRING = TEXT_TRIM("  hello  ")
+    ASSERT_EQ $clean "hello"
+    "###
+)]
+#[example(
+    name = "trim pipe mirrors",
+    code = r###"
+    # Pipe input mints pipe output with the same transform.
+    IMPORT [STD]
+    LET $cap: PIPE
+    WITH_IO [stdout=$cap] {
+        ECHO "  hello  "
+    }
+    LET $out: PIPE = TEXT_TRIM($cap)
+    WITH_IO [stdin=$out] READ_LINE $line
+    ASSERT_EQ $line "hello"
+    "###
+)]
+#[example(
+    name = "trim template",
+    code = r###"
+    # String inputs run inside placeholders too.
+    IMPORT [STD]
+    LET $msg: STRING = 'clean:{{ STD::TEXT_TRIM("  hello  ") }}'
+    ASSERT_EQ $msg "clean:hello"
+    "###
+)]
+#[example(
+    name = "trim file template",
+    code = r###"
+    # EXPAND templates resolve the same registry.
+    IMPORT [STD]
+    WRITE "tpl.txt" "clean:\{{ STD::TEXT_TRIM(\"  hello  \") }}"
+    LET $out: STRING = EXPAND "tpl.txt"
+    ASSERT_EQ $out "clean:hello"
+    "###
+)]
+fn text_trim<P: ProcessManager>(
+    cx: &mut StepCtx<P>,
+    /// Text to trim.
+    #[union(String, Pipe)]
+    text: Value,
+) -> Result<Value> {
+    super::args::mirror_stream(cx, "TEXT_TRIM", &text, super::args::TextPump::Trim)
+}
+
+/// Template projection of `TEXT_TRIM`: the same trim for `{{ }}`
+/// placeholders, which carry no step IO for pipes.
+fn text_trim_string(text: Value) -> Result<Value> {
+    super::args::mirror_string("TEXT_TRIM", &text, super::args::TextPump::Trim)
+}
+
+/// Strip one leading prefix, returning the input unchanged when absent.
+///
+/// Accepts `STRING` or `PIPE`; the return mirrors the input kind.
+/// Pipes decide on the first `prefix.len()` bytes and stream the rest
+/// untouched. Matching is case-sensitive; there is no
+/// case-insensitive mode.
+/// Used for tag prefix strips such as `v1.2.3` to `1.2.3`.
+///
+#[oxdock_func(
+    rpn,
+    returns = TypeTag::union(vec![TypeTag::String, TypeTag::Pipe]),
+    template = text_trim_prefix_string
+)]
+#[example(
+    name = "strip prefix",
+    code = r###"
+    # A present prefix falls away; absence returns the input unchanged.
+    IMPORT [STD]
+    LET $bare: STRING = TEXT_TRIM_PREFIX("v1.2.3", "v")
+    ASSERT_EQ $bare "1.2.3"
+
+    # Missing prefixes pass through untouched.
+    LET $same: STRING = TEXT_TRIM_PREFIX("1.2.3", "v")
+    ASSERT_EQ $same "1.2.3"
+    "###
+)]
+#[example(
+    name = "strip prefix pipe mirrors",
+    code = r###"
+    # Pipe input mints pipe output with the same strip.
+    IMPORT [STD]
+    LET $cap: PIPE
+    WITH_IO [stdout=$cap] {
+        ECHO "v1.2.3"
+    }
+    LET $trimmed: PIPE = TEXT_TRIM($cap)
+    LET $out: PIPE = TEXT_TRIM_PREFIX($trimmed, "v")
+    WITH_IO [stdin=$out] READ_LINE $line
+    ASSERT_EQ $line "1.2.3"
+    "###
+)]
+#[example(
+    name = "strip prefix template",
+    code = r###"
+    # String inputs run inside placeholders too.
+    IMPORT [STD]
+    LET $msg: STRING = 'bare:{{ STD::TEXT_TRIM_PREFIX("v1.2.3", "v") }}'
+    ASSERT_EQ $msg "bare:1.2.3"
+    "###
+)]
+fn text_trim_prefix<P: ProcessManager>(
+    cx: &mut StepCtx<P>,
+    /// Text to strip.
+    #[union(String, Pipe)]
+    text: Value,
+    /// Leading prefix to remove once.
+    prefix: String,
+) -> Result<Value> {
+    super::args::mirror_stream(
+        cx,
+        "TEXT_TRIM_PREFIX",
+        &text,
+        super::args::TextPump::TrimPrefix(prefix),
+    )
+}
+
+/// Template projection of `TEXT_TRIM_PREFIX`: the same strip for
+/// `{{ }}` placeholders, which carry no step IO for pipes.
+fn text_trim_prefix_string(text: Value, prefix: String) -> Result<Value> {
+    super::args::mirror_string(
+        "TEXT_TRIM_PREFIX",
+        &text,
+        super::args::TextPump::TrimPrefix(prefix),
+    )
+}
+
+/// Strip one trailing suffix, returning the input unchanged when absent.
+///
+/// Accepts `STRING` or `PIPE`; the return mirrors the input kind.
+/// Pipes hold a `suffix.len()` trailing window and stream the rest.
+/// Matching is case-sensitive; there is no case-insensitive mode.
+///
+#[oxdock_func(
+    rpn,
+    returns = TypeTag::union(vec![TypeTag::String, TypeTag::Pipe]),
+    template = text_trim_suffix_string
+)]
+#[example(
+    name = "strip suffix",
+    code = r###"
+    # A present suffix falls away; absence returns the input unchanged.
+    IMPORT [STD]
+    LET $bare: STRING = TEXT_TRIM_SUFFIX("archive.tar.gz", ".gz")
+    ASSERT_EQ $bare "archive.tar"
+
+    # Missing suffixes pass through untouched.
+    LET $same: STRING = TEXT_TRIM_SUFFIX("archive.tar", ".gz")
+    ASSERT_EQ $same "archive.tar"
+    "###
+)]
+#[example(
+    name = "strip suffix pipe mirrors",
+    code = r###"
+    # Pipe input mints pipe output with the same strip.
+    IMPORT [STD]
+    LET $cap: PIPE
+    WITH_IO [stdout=$cap] {
+        ECHO "archive.tar.gz"
+    }
+    LET $trimmed: PIPE = TEXT_TRIM($cap)
+    LET $out: PIPE = TEXT_TRIM_SUFFIX($trimmed, ".gz")
+    WITH_IO [stdin=$out] READ_LINE $line
+    ASSERT_EQ $line "archive.tar"
+    "###
+)]
+#[example(
+    name = "strip suffix template",
+    code = r###"
+    # String inputs run inside placeholders too.
+    IMPORT [STD]
+    LET $msg: STRING = 'bare:{{ STD::TEXT_TRIM_SUFFIX("archive.tar.gz", ".gz") }}'
+    ASSERT_EQ $msg "bare:archive.tar"
+    "###
+)]
+fn text_trim_suffix<P: ProcessManager>(
+    cx: &mut StepCtx<P>,
+    /// Text to strip.
+    #[union(String, Pipe)]
+    text: Value,
+    /// Trailing suffix to remove once.
+    suffix: String,
+) -> Result<Value> {
+    super::args::mirror_stream(
+        cx,
+        "TEXT_TRIM_SUFFIX",
+        &text,
+        super::args::TextPump::TrimSuffix(suffix),
+    )
+}
+
+/// Template projection of `TEXT_TRIM_SUFFIX`: the same strip for
+/// `{{ }}` placeholders, which carry no step IO for pipes.
+fn text_trim_suffix_string(text: Value, suffix: String) -> Result<Value> {
+    super::args::mirror_string(
+        "TEXT_TRIM_SUFFIX",
+        &text,
+        super::args::TextPump::TrimSuffix(suffix),
+    )
+}
+
+/// Uppercase text with full Unicode mapping.
+///
+/// Accepts `STRING` or `PIPE`; the return mirrors the input kind.
+/// Pipes map chunk by chunk across a char-boundary carry, so
+/// multibyte characters split across reads still fold correctly.
+///
+#[oxdock_func(
+    rpn,
+    returns = TypeTag::union(vec![TypeTag::String, TypeTag::Pipe]),
+    template = text_to_upper_string
+)]
+#[example(
+    name = "uppercase",
+    code = r###"
+    # Text folds to uppercase.
+    IMPORT [STD]
+    LET $loud: STRING = TEXT_TO_UPPER("hello")
+    ASSERT_EQ $loud "HELLO"
+    "###
+)]
+#[example(
+    name = "uppercase pipe mirrors",
+    code = r###"
+    # Pipe input mints pipe output with the same fold.
+    IMPORT [STD]
+    LET $cap: PIPE
+    WITH_IO [stdout=$cap] {
+        ECHO "hello"
+    }
+    LET $out: PIPE = TEXT_TO_UPPER($cap)
+    WITH_IO [stdin=$out] READ_LINE $line
+    ASSERT_EQ $line "HELLO"
+    "###
+)]
+#[example(
+    name = "uppercase template",
+    code = r###"
+    # String inputs run inside placeholders too.
+    IMPORT [STD]
+    LET $msg: STRING = 'loud:{{ STD::TEXT_TO_UPPER("hello") }}'
+    ASSERT_EQ $msg "loud:HELLO"
+    "###
+)]
+fn text_to_upper<P: ProcessManager>(
+    cx: &mut StepCtx<P>,
+    /// Text to uppercase.
+    #[union(String, Pipe)]
+    text: Value,
+) -> Result<Value> {
+    super::args::mirror_stream(cx, "TEXT_TO_UPPER", &text, super::args::TextPump::ToUpper)
+}
+
+/// Template projection of `TEXT_TO_UPPER`: the same fold for `{{ }}`
+/// placeholders, which carry no step IO for pipes.
+fn text_to_upper_string(text: Value) -> Result<Value> {
+    super::args::mirror_string("TEXT_TO_UPPER", &text, super::args::TextPump::ToUpper)
+}
+
+/// Lowercase text with full Unicode mapping.
+///
+/// Accepts `STRING` or `PIPE`; the return mirrors the input kind.
+/// Pipes map chunk by chunk across a char-boundary carry, like
+/// `TEXT_TO_UPPER`.
+///
+#[oxdock_func(
+    rpn,
+    returns = TypeTag::union(vec![TypeTag::String, TypeTag::Pipe]),
+    template = text_to_lower_string
+)]
+#[example(
+    name = "lowercase",
+    code = r###"
+    # Text folds to lowercase.
+    IMPORT [STD]
+    LET $quiet: STRING = TEXT_TO_LOWER("HELLO")
+    ASSERT_EQ $quiet "hello"
+    "###
+)]
+#[example(
+    name = "lowercase pipe mirrors",
+    code = r###"
+    # Pipe input mints pipe output with the same fold.
+    IMPORT [STD]
+    LET $cap: PIPE
+    WITH_IO [stdout=$cap] {
+        ECHO "HELLO"
+    }
+    LET $out: PIPE = TEXT_TO_LOWER($cap)
+    WITH_IO [stdin=$out] READ_LINE $line
+    ASSERT_EQ $line "hello"
+    "###
+)]
+#[example(
+    name = "lowercase template",
+    code = r###"
+    # String inputs run inside placeholders too.
+    IMPORT [STD]
+    LET $msg: STRING = 'quiet:{{ STD::TEXT_TO_LOWER("HELLO") }}'
+    ASSERT_EQ $msg "quiet:hello"
+    "###
+)]
+fn text_to_lower<P: ProcessManager>(
+    cx: &mut StepCtx<P>,
+    /// Text to lowercase.
+    #[union(String, Pipe)]
+    text: Value,
+) -> Result<Value> {
+    super::args::mirror_stream(cx, "TEXT_TO_LOWER", &text, super::args::TextPump::ToLower)
+}
+
+/// Template projection of `TEXT_TO_LOWER`: the same fold for `{{ }}`
+/// placeholders, which carry no step IO for pipes.
+fn text_to_lower_string(text: Value) -> Result<Value> {
+    super::args::mirror_string("TEXT_TO_LOWER", &text, super::args::TextPump::ToLower)
+}
+
+/// Replace every literal occurrence of `from` with `to`.
+///
+/// Accepts `STRING` or `PIPE`; the return mirrors the input kind.
+/// Pipes scan through a `from.len()` sliding window, so needles split
+/// across chunk reads still rewrite.
+/// Literal sliding search, not a pattern: an empty `from` fails
+/// closed, and regex work with captures belongs to
+/// `TEXT_REPLACE_REGEX`. Matching is case-sensitive; there is no
+/// case-insensitive mode.
+///
+#[oxdock_func(
+    rpn,
+    returns = TypeTag::union(vec![TypeTag::String, TypeTag::Pipe]),
+    template = text_replace_string
+)]
+#[example(
+    name = "replace",
+    code = r###"
+    # Every literal occurrence rewrites in place.
+    IMPORT [STD]
+    LET $fixed: STRING = TEXT_REPLACE("hello world", "world", "there")
+    ASSERT_EQ $fixed "hello there"
+    "###
+)]
+#[example(
+    name = "replace pipe mirrors",
+    code = r###"
+    # Pipe input mints pipe output with the same rewrite.
+    IMPORT [STD]
+    LET $cap: PIPE
+    WITH_IO [stdout=$cap] {
+        ECHO "hello world"
+    }
+    LET $trimmed: PIPE = TEXT_TRIM($cap)
+    LET $out: PIPE = TEXT_REPLACE($trimmed, "world", "there")
+    WITH_IO [stdin=$out] READ_LINE $line
+    ASSERT_EQ $line "hello there"
+    "###
+)]
+#[example(
+    name = "replace template",
+    code = r###"
+    # String inputs run inside placeholders too.
+    IMPORT [STD]
+    LET $msg: STRING = 'fixed:{{ STD::TEXT_REPLACE("hello world", "world", "there") }}'
+    ASSERT_EQ $msg "fixed:hello there"
+    "###
+)]
+fn text_replace<P: ProcessManager>(
+    cx: &mut StepCtx<P>,
+    /// Text to rewrite.
+    #[union(String, Pipe)]
+    text: Value,
+    /// Literal text to search for; empty fails closed.
+    from: String,
+    /// Literal replacement text.
+    to: String,
+) -> Result<Value> {
+    super::args::mirror_stream(
+        cx,
+        "TEXT_REPLACE",
+        &text,
+        super::args::TextPump::ReplaceLiteral { from, to },
+    )
+}
+
+/// Template projection of `TEXT_REPLACE`: the same rewrite for `{{ }}`
+/// placeholders, which carry no step IO for pipes.
+fn text_replace_string(text: Value, from: String, to: String) -> Result<Value> {
+    super::args::mirror_string(
+        "TEXT_REPLACE",
+        &text,
+        super::args::TextPump::ReplaceLiteral { from, to },
+    )
+}
+
+/// Replace every regex match, expanding `$1` and `$name` captures.
+///
+/// Accepts `STRING` or `PIPE`; the return mirrors the input kind.
+/// Eager-only framing: matches span chunks, so pipe inputs stage
+/// through the spill substrate instead of streaming.
+/// Bad patterns fail closed naming the pattern and its position.
+/// Matching is case-sensitive unless the pattern carries an inline
+/// `(?i)` flag, which makes uppercase and lowercase letters match
+/// each other.
+/// The literal counterpart is `TEXT_REPLACE`.
+///
+#[oxdock_func(
+    rpn,
+    returns = TypeTag::union(vec![TypeTag::String, TypeTag::Pipe]),
+    template = text_replace_regex_string
+)]
+#[example(
+    name = "replace with captures",
+    code = r###"
+    # Capture groups expand in the replacement.
+    IMPORT [STD]
+    LET $swapped: STRING = TEXT_REPLACE_REGEX("2026-10-13", "(\\d+)-(\\d+)-(\\d+)", "$3/$2/$1")
+    ASSERT_EQ $swapped "13/10/2026"
+    "###
+)]
+#[example(
+    name = "replace regex pipe mirrors",
+    code = r###"
+    # Pipe input mints pipe output with the same rewrite.
+    IMPORT [STD]
+    LET $cap: PIPE
+    WITH_IO [stdout=$cap] {
+        ECHO "2026-10-13"
+    }
+    LET $trimmed: PIPE = TEXT_TRIM($cap)
+    LET $out: PIPE = TEXT_REPLACE_REGEX($trimmed, "(\\d+)-(\\d+)-(\\d+)", "$3/$2/$1")
+    WITH_IO [stdin=$out] READ_LINE $line
+    ASSERT_EQ $line "13/10/2026"
+    "###
+)]
+#[example(
+    name = "replace regex template",
+    code = r###"
+    # String inputs run inside placeholders too.
+    IMPORT [STD]
+    LET $msg: STRING = 'swapped:{{ STD::TEXT_REPLACE_REGEX("2026-10-13", "(\\d+)-(\\d+)-(\\d+)", "$3/$2/$1") }}'
+    ASSERT_EQ $msg "swapped:13/10/2026"
+    "###
+)]
+fn text_replace_regex<P: ProcessManager>(
+    cx: &mut StepCtx<P>,
+    /// Text to rewrite.
+    #[union(String, Pipe)]
+    text: Value,
+    /// Regex pattern to match.
+    pattern: String,
+    /// Replacement with `$1` and `$name` capture expansion.
+    replacement: String,
+) -> Result<Value> {
+    if let Some(s) = text.as_str() {
+        let out =
+            super::args::text_replace_regex_str(s, &pattern, &replacement, "TEXT_REPLACE_REGEX")?;
+        return Ok(Value::string(out));
+    }
+    let content = super::args::read_pipe_eager(cx, "TEXT_REPLACE_REGEX", &text)?;
+    let out = super::args::text_replace_regex_str(
+        &content,
+        &pattern,
+        &replacement,
+        "TEXT_REPLACE_REGEX",
+    )?;
+    super::args::write_completed_pipe(cx, "TEXT_REPLACE_REGEX", out)
+}
+
+/// Template projection of `TEXT_REPLACE_REGEX`: the same rewrite for
+/// `{{ }}` placeholders, which carry no step IO for pipes.
+fn text_replace_regex_string(text: Value, pattern: String, replacement: String) -> Result<Value> {
+    let Some(s) = text.as_str() else {
+        return Err(super::args::pipe_needs_step_io("TEXT_REPLACE_REGEX"));
+    };
+    let out = super::args::text_replace_regex_str(s, &pattern, &replacement, "TEXT_REPLACE_REGEX")?;
+    Ok(Value::string(out))
+}
+
+/// Split text on a literal delimiter into a `LIST<STRING>`.
+///
+/// An empty delimiter splits into single characters. Eager-only by
+/// design: splitting into a list has no line framing to stream.
+/// Delimiters match case-sensitively; there is no
+/// case-insensitive mode.
+///
+#[oxdock_func(pure, returns = TypeTag::ListOf(std::sync::Arc::new(TypeTag::String)))]
+#[example(
+    name = "split",
+    code = r###"
+    # Delimiters split into list items.
+    IMPORT [STD]
+    LET $parts: LIST<STRING> = TEXT_SPLIT("a,b,c", ",")
+    ASSERT_EQ $parts.0 "a"
+    ASSERT_EQ $parts.1 "b"
+    ASSERT_EQ $parts.2 "c"
+    "###
+)]
+fn text_split(
+    /// Text to split.
+    text: String,
+    /// Literal delimiter; empty splits into characters.
+    delimiter: String,
+) -> Result<Value> {
+    Ok(super::args::text_list_value(super::args::text_split_str(
+        &text, &delimiter,
+    )))
+}
+
+/// Join a `LIST<STRING>` with a literal separator into a `STRING`.
+///
+#[oxdock_func(pure, returns = TypeTag::String)]
+#[example(
+    name = "join",
+    code = r###"
+    # List items join with the separator between them.
+    IMPORT [STD]
+    LET $joined: STRING = TEXT_JOIN(["a", "b", "c"], ",")
+    ASSERT_EQ $joined "a,b,c"
+    "###
+)]
+fn text_join(
+    /// List elements to join.
+    elements: Vec<String>,
+    /// Literal delimiter placed between elements.
+    delimiter: String,
+) -> Result<Value> {
+    Ok(Value::string(elements.join(delimiter.as_str())))
+}
+
+/// Split text into lines with universal newline handling.
+///
+/// Normalizes through the line-ending crate first so LF, CRLF, CR,
+/// and mixed endings all split, then delegates the split itself to
+/// `LineEnding::split` instead of hand-rolled scanning.
+/// Returns a `LIST<STRING>`; eager-only like `TEXT_SPLIT`.
+///
+#[oxdock_func(pure, returns = TypeTag::ListOf(std::sync::Arc::new(TypeTag::String)))]
+#[example(
+    name = "lines",
+    code = r###"
+    # Newlines split into line items.
+    IMPORT [STD]
+    LET $lines: LIST<STRING> = TEXT_LINES("one\ntwo\nthree")
+    ASSERT_EQ $lines.0 "one"
+    ASSERT_EQ $lines.1 "two"
+    ASSERT_EQ $lines.2 "three"
+
+    # Windows endings split the same way after normalization.
+    LET $crlf: LIST<STRING> = TEXT_LINES("one\r\ntwo\r\nthree")
+    ASSERT_EQ $crlf.0 "one"
+    ASSERT_EQ $crlf.1 "two"
+    ASSERT_EQ $crlf.2 "three"
+
+    # Old Mac endings split too, and mixed endings split together because the input normalizes to LF before splitting.
+    LET $mixed: LIST<STRING> = TEXT_LINES("a\r\nb\nc\rd")
+    ASSERT_EQ $mixed.0 "a"
+    ASSERT_EQ $mixed.1 "b"
+    ASSERT_EQ $mixed.2 "c"
+    ASSERT_EQ $mixed.3 "d"
+    "###
+)]
+fn text_lines(
+    /// Text to split into lines.
+    text: String,
+) -> Result<Value> {
+    Ok(super::args::text_list_value(super::args::text_lines_str(
+        &text,
+    )))
+}
+
+/// Split text into whitespace-separated fields, ignoring empties.
+///
+/// Returns a `LIST<STRING>`; the checksum-line parser that replaces
+/// `cut -d' ' -f1` in CI legs.
+///
+#[oxdock_func(pure, returns = TypeTag::ListOf(std::sync::Arc::new(TypeTag::String)))]
+#[example(
+    name = "fields",
+    code = r###"
+    # Runs of whitespace separate fields; empties never appear.
+    IMPORT [STD]
+    LET $fields: LIST<STRING> = TEXT_FIELDS("  abc  def ")
+    ASSERT_EQ $fields.0 "abc"
+    ASSERT_EQ $fields.1 "def"
+    "###
+)]
+fn text_fields(
+    /// Text to split into fields.
+    text: String,
+) -> Result<Value> {
+    Ok(super::args::text_list_value(super::args::text_fields_str(
+        &text,
+    )))
+}
+
+/// Read lines `from` through `to` as a `LIST<STRING>`: the `sed -n
+/// 'A,Bp'` window over universal newlines, for reading one file
+/// section without holding the surrounding text.
+///
+/// Lines are 1-based and inclusive on both ends. Ranges past the end
+/// clamp like sed instead of failing; a start before line 1 or past
+/// `to` fails closed, since no line reading satisfies it.
+///
+#[oxdock_func(pure, returns = TypeTag::ListOf(std::sync::Arc::new(TypeTag::String)))]
+#[example(
+    name = "line range",
+    code = r###"
+    # Lines 2 through 3 come back as a list, 1-based inclusive.
+    IMPORT [STD]
+    LET $window: LIST<STRING> = TEXT_LINES_RANGE("one\ntwo\nthree\nfour", 2, 3)
+    ASSERT_EQ $window.0 "two"
+    ASSERT_EQ $window.1 "three"
+
+    # Ranges past the end clamp instead of failing.
+    LET $tail: LIST<STRING> = TEXT_LINES_RANGE("one\ntwo", 2, 9)
+    ASSERT_EQ $tail.0 "two"
+    "###
+)]
+fn text_lines_range(
+    /// Text whose lines to window.
+    text: String,
+    /// First line, 1-based inclusive.
+    from: i64,
+    /// Last line, inclusive; past the end clamps.
+    to: i64,
+) -> Result<Value> {
+    Ok(super::args::text_list_value(
+        super::args::text_lines_range_str(&text, from, to, "TEXT_LINES_RANGE")?,
+    ))
+}
+
+/// Report whether text matches a regex pattern.
+///
+/// Returns `BOOL`. Bad patterns fail closed naming the pattern and
+/// its position. Matching is case-sensitive unless the pattern
+/// carries an inline `(?i)` flag, which makes uppercase and lowercase
+/// letters match each other.
+///
+#[oxdock_func(pure, returns = TypeTag::Bool)]
+#[example(
+    name = "match",
+    code = r###"
+    # Regex matches report true; misses report false.
+    IMPORT [STD]
+    LET $hit: BOOL = TEXT_MATCH("abc123", "\\d+")
+    ASSERT_EQ $hit true
+
+    # A miss is false, not a failure.
+    LET $miss: BOOL = TEXT_MATCH("abc", "^\\d+$")
+    ASSERT_EQ $miss false
+    "###
+)]
+fn text_match(
+    /// Text to test.
+    text: String,
+    /// Regex pattern to match.
+    pattern: String,
+) -> Result<Value> {
+    let re = super::args::text_compile_pattern("TEXT_MATCH", &pattern)?;
+    Ok(Value::bool(re.is_match(&text)))
+}
+
+/// Extract capture groups for the first regex match.
+///
+/// Returns a `LIST<STRING>` where index 0 is the full match and the
+/// rest are groups in order; non-participating groups bind empty so
+/// indexes stay stable. No match binds an empty list. Matching is
+/// case-sensitive unless the pattern carries an inline `(?i)` flag,
+/// which makes uppercase and lowercase letters match each other.
+///
+#[oxdock_func(pure, returns = TypeTag::ListOf(std::sync::Arc::new(TypeTag::String)))]
+#[example(
+    name = "extract",
+    code = r###"
+    # Index zero is the full match; groups follow in order.
+    IMPORT [STD]
+    LET $caps: LIST<STRING> = TEXT_EXTRACT("abc123", "([a-z]+)(\\d+)")
+    ASSERT_EQ $caps.0 "abc123"
+    ASSERT_EQ $caps.1 "abc"
+    ASSERT_EQ $caps.2 "123"
+    "###
+)]
+fn text_extract(
+    /// Text to search.
+    text: String,
+    /// Regex pattern with capture groups.
+    pattern: String,
+) -> Result<Value> {
+    let groups = super::args::text_extract_str(&text, &pattern, "TEXT_EXTRACT")?;
+    Ok(super::args::text_list_value(groups))
+}
+
+/// Report whether text starts with a literal prefix.
+///
+/// Returns `BOOL`; the literal check behind tag and target branching
+/// such as `matrix.target` suffix and prefix tests. Matching is
+/// case-sensitive; there is no case-insensitive mode.
+///
+#[oxdock_func(pure, returns = TypeTag::Bool)]
+#[example(
+    name = "starts with",
+    code = r###"
+    # Present prefixes report true; misses report false.
+    IMPORT [STD]
+    LET $hit: BOOL = TEXT_STARTS_WITH("linux-musl-x64", "linux")
+    ASSERT_EQ $hit true
+
+    # A miss is false, not a failure.
+    LET $miss: BOOL = TEXT_STARTS_WITH("macos-arm", "linux")
+    ASSERT_EQ $miss false
+    "###
+)]
+fn text_starts_with(
+    /// Text to test.
+    text: String,
+    /// Literal prefix to look for.
+    prefix: String,
+) -> Result<Value> {
+    Ok(Value::bool(text.starts_with(prefix.as_str())))
+}
+
+/// Report whether text ends with a literal suffix.
+///
+/// Returns `BOOL`; the `endsWith(matrix.target, 'linux-musl')`
+/// check in CI legs. Matching is case-sensitive; there is no
+/// case-insensitive mode.
+///
+#[oxdock_func(pure, returns = TypeTag::Bool)]
+#[example(
+    name = "ends with",
+    code = r###"
+    # Present suffixes report true; misses report false.
+    IMPORT [STD]
+    LET $hit: BOOL = TEXT_ENDS_WITH("x86_64-linux-musl", "linux-musl")
+    ASSERT_EQ $hit true
+
+    # A miss is false, not a failure.
+    LET $miss: BOOL = TEXT_ENDS_WITH("x86_64-linux-gnu", "linux-musl")
+    ASSERT_EQ $miss false
+    "###
+)]
+fn text_ends_with(
+    /// Text to test.
+    text: String,
+    /// Literal suffix to look for.
+    suffix: String,
+) -> Result<Value> {
+    Ok(Value::bool(text.ends_with(suffix.as_str())))
+}
+
+/// Report whether text holds a literal substring.
+///
+/// Returns `BOOL`; the substring search behind target filtering
+/// alongside the prefix and suffix tests. Matching is
+/// case-sensitive; there is no case-insensitive mode.
+///
+#[oxdock_func(pure, returns = TypeTag::Bool)]
+#[example(
+    name = "contains",
+    code = r###"
+    # Present needles report true; misses report false.
+    IMPORT [STD]
+    LET $hit: BOOL = TEXT_CONTAINS("x86_64-linux-musl", "musl")
+    ASSERT_EQ $hit true
+
+    # A miss is false, not a failure.
+    LET $miss: BOOL = TEXT_CONTAINS("x86_64-linux-gnu", "musl")
+    ASSERT_EQ $miss false
+    "###
+)]
+fn text_contains(
+    /// Text to search.
+    text: String,
+    /// Literal substring to look for.
+    needle: String,
+) -> Result<Value> {
+    Ok(Value::bool(text.contains(needle.as_str())))
+}
+
+/// Count the characters in text as Unicode scalars.
+///
+/// Multibyte characters count once each, so this is not the byte
+/// length: `"héllo"` binds 5, not 6. The `${#var}` and `wc -m`
+/// counterpart for scripts that size tags and digests.
+///
+#[oxdock_func(pure, returns = TypeTag::Int)]
+#[example(
+    name = "length",
+    code = r###"
+    # Plain text counts one per character.
+    IMPORT [STD]
+    LET $n: INT = TEXT_LENGTH("hello")
+    ASSERT_EQ $n 5
+
+    # Multibyte characters count once each, not per byte.
+    LET $wide: INT = TEXT_LENGTH("héllo")
+    ASSERT_EQ $wide 5
+    "###
+)]
+fn text_length(
+    /// Text to measure.
+    text: String,
+) -> Result<Value> {
+    Ok(Value::int(text.chars().count() as i64))
+}
+
+/// Count non-overlapping literal occurrences of a needle.
+///
+/// Matches never share bytes, so `"aaa"` holds one `"aa"`, matching
+/// `grep -o 'aa' | wc -l`. An empty needle fails closed instead of
+/// binding every character boundary. Matching is case-sensitive;
+/// there is no case-insensitive mode.
+///
+#[oxdock_func(pure, returns = TypeTag::Int)]
+#[example(
+    name = "count",
+    code = r###"
+    # Every non-overlapping occurrence counts once.
+    IMPORT [STD]
+    LET $n: INT = TEXT_COUNT("hello world", "o")
+    ASSERT_EQ $n 2
+
+    # Overlapping candidates never double count.
+    LET $once: INT = TEXT_COUNT("aaa", "aa")
+    ASSERT_EQ $once 1
+    "###
+)]
+fn text_count(
+    /// Text to search.
+    text: String,
+    /// Literal needle to count; empty fails closed.
+    needle: String,
+) -> Result<Value> {
+    let n = super::args::text_count_str(&text, &needle, "TEXT_COUNT")?;
+    Ok(Value::int(n))
+}
+
+/// Count lines matching a regex pattern.
+///
+/// Lines split with universal newline handling, like `TEXT_LINES`,
+/// and each line reports independently: this is `grep -c`, so a line
+/// with two matches still counts once. Bad patterns fail closed
+/// naming the pattern and its position. Matching is case-sensitive
+/// unless the pattern carries an inline `(?i)` flag, which makes
+/// uppercase and lowercase letters match each other.
+///
+#[oxdock_func(pure, returns = TypeTag::Int)]
+#[example(
+    name = "count matches",
+    code = r###"
+    # One line matches once no matter how many times it hits.
+    IMPORT [STD]
+    LET $n: INT = TEXT_COUNT_MATCHES("test a: test\ntest b: nope\ntest c: test", ": test")
+    ASSERT_EQ $n 2
+
+    # A miss binds zero, never an error.
+    LET $none: INT = TEXT_COUNT_MATCHES("test b: nope", ": test$")
+    ASSERT_EQ $none 0
+    "###
+)]
+fn text_count_matches(
+    /// Text whose lines to test.
+    text: String,
+    /// Regex pattern tested per line.
+    pattern: String,
+) -> Result<Value> {
+    let n = super::args::text_count_matches_str(&text, &pattern, "TEXT_COUNT_MATCHES")?;
+    Ok(Value::int(n))
+}
+
+/// Keep the lines matching a regex pattern.
+///
+/// Splits with universal newline handling, like `TEXT_LINES`, and
+/// returns every matching line in order: plain `grep`, so a miss
+/// binds an empty list instead of failing. A trailing options MAP
+/// carries `invert`: `TEXT_GREP($text, $pattern, {invert: true})`
+/// keeps every non-matching line instead, the `grep -v` shape. The
+/// MAP omits freely; a missing MAP keeps matches. Matching is
+/// case-sensitive unless the pattern carries an inline `(?i)` flag,
+/// which makes uppercase and lowercase letters match each other. Bad
+/// patterns fail closed naming the pattern and its position.
+///
+#[oxdock_func(pure, returns = TypeTag::ListOf(std::sync::Arc::new(TypeTag::String)))]
+#[example(
+    name = "grep",
+    code = r###"
+    # Matching lines come back as a list, in order.
+    IMPORT [STD]
+    LET $hits: LIST<STRING> = TEXT_GREP("one\ntwo\none more", "^one")
+    ASSERT_EQ $hits.0 "one"
+    ASSERT_EQ $hits.1 "one more"
+
+    # A miss binds an empty list, never an error.
+    LET $miss: LIST<STRING> = TEXT_GREP("one\ntwo", "^z")
+    LET $joined: STRING = TEXT_JOIN($miss, ",")
+    ASSERT_EQ $joined ""
+
+    # The (?i) flag ignores case, so uppercase lines match too.
+    LET $folded: LIST<STRING> = TEXT_GREP("One\ntwo\nONE more", "(?i)^one")
+    ASSERT_EQ $folded.0 "One"
+    ASSERT_EQ $folded.1 "ONE more"
+    "###
+)]
+#[example(
+    name = "grep invert",
+    code = r###"
+    # The invert option keeps every non-matching line instead.
+    IMPORT [STD]
+    LET $kept: LIST<STRING> = TEXT_GREP("one\ntwo\none more", "^one", {invert: true})
+    ASSERT_EQ $kept.0 "two"
+
+    # A pattern matching every line binds an empty list, never an error.
+    LET $none: LIST<STRING> = TEXT_GREP("one\ntwo", "^", {invert: true})
+    LET $joined: STRING = TEXT_JOIN($none, ",")
+    ASSERT_EQ $joined ""
+
+    # Options ride into placeholders as MAP literals. Placeholder
+    # strings unescape only backslash and quote, so multiline text
+    # arrives through a variable.
+    LET $two_lines: STRING = "one\ntwo"
+    LET $msg: STRING = 'kept:{{ STD::TEXT_GREP($two_lines, "^one", {invert: true}) }}'
+    ASSERT_EQ $msg "kept:two"
+    "###
+)]
+fn text_grep(
+    /// Text whose lines to filter.
+    text: String,
+    /// Regex pattern keeping a line.
+    pattern: String,
+    /// Filter settings: `invert`. Omittable: a missing options MAP fills `{}`.
+    #[options("invert?: BOOL")]
+    #[optional]
+    options: BTreeMap<String, Value>,
+) -> Result<Value> {
+    // `check_options` in the wrapper verified the shape above (keys
+    // and value types); the read below narrows infallibly after.
+    let invert = super::args::text_invert_flag(&options);
+    Ok(super::args::text_list_value(super::args::text_grep_str(
+        &text,
+        &pattern,
+        invert,
+        "TEXT_GREP",
+    )?))
+}
+
 /// True when a pipe sits at end of stream: closed with nothing buffered,
 /// so the next `READ_LINE` would bind `""` via EOF rather than a line.
 /// Live writers, pinned keepers, and buffered bytes all answer false.
@@ -1963,6 +3020,15 @@ impl<P: ProcessManager> ExecState<P> {
                     self.functions
                         .register_pure_host(&module.name, name, meta, func);
                 }
+                HostRegistration::Both {
+                    name,
+                    meta,
+                    func,
+                    template,
+                } => {
+                    self.functions
+                        .register_both_host(&module.name, name, meta, func, template);
+                }
             }
         }
         for descriptor in module.types {
@@ -2144,5 +3210,106 @@ mod tests {
             Some(true),
             "omittable param must read true"
         );
+    }
+
+    #[test]
+    fn template_twins_mirror_string_paths_and_refuse_pipes() {
+        // Every template twin answers strings through the shared pump
+        // semantics and refuses pipes naming the step IO they need:
+        // placeholder evaluation carries no step context to pump
+        // through. Table-driven so a twinless mirror op fails here
+        // naming it.
+        let pipe = Value::pipe_fresh();
+        type TwinCase = (&'static str, Box<dyn Fn() -> Result<Value>>);
+        let cases: Vec<TwinCase> = vec![
+            (
+                "TEXT_TRIM",
+                Box::new(|| text_trim_string(Value::string("  hello  ".to_string()))),
+            ),
+            (
+                "TEXT_TRIM_PREFIX",
+                Box::new(|| {
+                    text_trim_prefix_string(Value::string("v1".to_string()), "v".to_string())
+                }),
+            ),
+            (
+                "TEXT_TRIM_SUFFIX",
+                Box::new(|| {
+                    text_trim_suffix_string(Value::string("a.gz".to_string()), "x".to_string())
+                }),
+            ),
+            (
+                "TEXT_TO_UPPER",
+                Box::new(|| text_to_upper_string(Value::string("hi".to_string()))),
+            ),
+            (
+                "TEXT_TO_LOWER",
+                Box::new(|| text_to_lower_string(Value::string("HI".to_string()))),
+            ),
+            (
+                "TEXT_REPLACE",
+                Box::new(|| {
+                    text_replace_string(
+                        Value::string("ab".to_string()),
+                        "b".to_string(),
+                        "c".to_string(),
+                    )
+                }),
+            ),
+            (
+                "TEXT_REPLACE_REGEX",
+                Box::new(|| {
+                    text_replace_regex_string(
+                        Value::string("ab".to_string()),
+                        "b".to_string(),
+                        "c".to_string(),
+                    )
+                }),
+            ),
+        ];
+        assert_eq!(cases.len(), 7, "every mirror op needs a twin row");
+        for (name, run) in &cases {
+            let value = run().unwrap_or_else(|e| panic!("{name} twin must answer strings: {e:#}"));
+            assert!(
+                value.as_str().is_some(),
+                "{name} twin must answer STRING, got {}",
+                value.type_name()
+            );
+        }
+        assert_eq!(
+            text_trim_string(Value::string("  hello  ".to_string()))
+                .expect("trim twin")
+                .as_str(),
+            Some("hello")
+        );
+        // Pipes refuse through the shared message on every twin.
+        let pipe_cases: Vec<(&str, Result<Value>)> = vec![
+            ("TEXT_TRIM", text_trim_string(pipe.clone())),
+            (
+                "TEXT_TRIM_PREFIX",
+                text_trim_prefix_string(pipe.clone(), "v".to_string()),
+            ),
+            (
+                "TEXT_TRIM_SUFFIX",
+                text_trim_suffix_string(pipe.clone(), ".gz".to_string()),
+            ),
+            ("TEXT_TO_UPPER", text_to_upper_string(pipe.clone())),
+            ("TEXT_TO_LOWER", text_to_lower_string(pipe.clone())),
+            (
+                "TEXT_REPLACE",
+                text_replace_string(pipe.clone(), "a".to_string(), "b".to_string()),
+            ),
+            (
+                "TEXT_REPLACE_REGEX",
+                text_replace_regex_string(pipe.clone(), "a".to_string(), "b".to_string()),
+            ),
+        ];
+        for (name, result) in pipe_cases {
+            let err = result.expect_err(&format!("{name} twin must refuse PIPE"));
+            assert!(
+                format!("{err:#}").contains("step IO"),
+                "{name} refusal names the missing context: {err:#}"
+            );
+        }
     }
 }

@@ -46,6 +46,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "aho-corasick"
+version = "1.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c982642fa9e8606056828ee9a8505737230110bb1099153c79efe865c59d12ba"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
 name = "android_system_properties"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -792,7 +801,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1530,7 +1539,7 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
 name = "oxdock"
-version = "0.27.1-alpha"
+version = "0.28.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -1546,7 +1555,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-build"
-version = "0.27.1-alpha"
+version = "0.28.0-alpha"
 dependencies = [
  "anyhow",
  "oxdock-core",
@@ -1562,7 +1571,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-cli"
-version = "0.27.1-alpha"
+version = "0.28.0-alpha"
 dependencies = [
  "anyhow",
  "futures-executor",
@@ -1589,12 +1598,13 @@ dependencies = [
 
 [[package]]
 name = "oxdock-core"
-version = "0.27.1-alpha"
+version = "0.28.0-alpha"
 dependencies = [
  "anyhow",
  "base64",
  "flate2",
  "indoc",
+ "line-ending",
  "oxdock-fs",
  "oxdock-func-macro",
  "oxdock-parser",
@@ -1604,6 +1614,7 @@ dependencies = [
  "oxdock-sys-test-utils",
  "proptest",
  "rand 0.10.3",
+ "regex",
  "serde_json",
  "sha2",
  "tar",
@@ -1612,7 +1623,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-doc-tests"
-version = "0.27.1-alpha"
+version = "0.28.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -1626,7 +1637,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-embed"
-version = "0.27.1-alpha"
+version = "0.28.0-alpha"
 dependencies = [
  "anyhow",
  "oxdock-fs",
@@ -1638,7 +1649,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-fixture"
-version = "0.27.1-alpha"
+version = "0.28.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -1649,7 +1660,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-fs"
-version = "0.27.1-alpha"
+version = "0.28.0-alpha"
 dependencies = [
  "anyhow",
  "cache-manager",
@@ -1663,7 +1674,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-func-macro"
-version = "0.27.1-alpha"
+version = "0.28.0-alpha"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1673,7 +1684,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-logic-tests"
-version = "0.27.1-alpha"
+version = "0.28.0-alpha"
 dependencies = [
  "anyhow",
  "cargo_metadata",
@@ -1700,7 +1711,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-macros"
-version = "0.27.1-alpha"
+version = "0.28.0-alpha"
 dependencies = [
  "anyhow",
  "oxdock-build",
@@ -1717,7 +1728,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-markdown-plugin"
-version = "0.27.1-alpha"
+version = "0.28.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -1731,7 +1742,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-net-plugin"
-version = "0.27.1-alpha"
+version = "0.28.0-alpha"
 dependencies = [
  "anyhow",
  "futures-executor",
@@ -1758,7 +1769,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-parser"
-version = "0.27.1-alpha"
+version = "0.28.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -1776,7 +1787,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-pipe"
-version = "0.27.1-alpha"
+version = "0.28.0-alpha"
 dependencies = [
  "anyhow",
  "oxdock-fs",
@@ -1784,7 +1795,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-process"
-version = "0.27.1-alpha"
+version = "0.28.0-alpha"
 dependencies = [
  "anyhow",
  "libc",
@@ -1797,7 +1808,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-remote-proto"
-version = "0.27.1-alpha"
+version = "0.28.0-alpha"
 dependencies = [
  "anyhow",
  "flate2",
@@ -1810,7 +1821,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-ssh-plugin"
-version = "0.27.1-alpha"
+version = "0.28.0-alpha"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1830,7 +1841,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-sys-test-utils"
-version = "0.27.1-alpha"
+version = "0.28.0-alpha"
 
 [[package]]
 name = "p256"
@@ -2241,6 +2252,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "regex"
+version = "1.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f020237b6c8eed93db2e2cb53c00c60a8e1bc73da7d073199a1180401450218d"
+dependencies = [
+ "aho-corasick",
+ "memchr",
+ "regex-automata",
+ "regex-syntax",
+]
+
+[[package]]
+name = "regex-automata"
+version = "0.4.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ad8553b9b26413251cbf30e620595c7a41b3887f03da04579c0e6b0d6a06b4b2"
+dependencies = [
+ "aho-corasick",
+ "memchr",
+ "regex-syntax",
+]
+
+[[package]]
 name = "regex-syntax"
 version = "0.8.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2381,7 +2415,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2781,7 +2815,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

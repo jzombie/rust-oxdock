@@ -221,7 +221,8 @@ impl<P: ProcessManager> Engine<P> {
             for registration in &staged.funcs {
                 let base = match registration {
                     HostRegistration::Stateful { name, .. }
-                    | HostRegistration::Pure { name, .. } => name,
+                    | HostRegistration::Pure { name, .. }
+                    | HostRegistration::Both { name, .. } => name,
                 };
                 let qualified = format!("{}::{base}", staged.name);
                 if !seen.insert(qualified.clone()) {
@@ -256,6 +257,7 @@ impl<P: ProcessManager> Engine<P> {
                 let name = match registration {
                     HostRegistration::Stateful { name, .. } => name,
                     HostRegistration::Pure { name, .. } => name,
+                    HostRegistration::Both { name, .. } => name,
                 };
                 functions.insert(name.clone());
             }

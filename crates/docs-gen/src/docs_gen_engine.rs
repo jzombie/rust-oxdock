@@ -184,6 +184,7 @@ mod tests {
             {
                 oxdock_core::HostRegistration::Pure { meta, .. } => meta,
                 oxdock_core::HostRegistration::Stateful { meta, .. } => meta,
+                oxdock_core::HostRegistration::Both { meta, .. } => meta,
             };
         let shape = |name: &str| {
             meta.params

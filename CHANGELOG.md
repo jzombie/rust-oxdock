@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [0.28.0-alpha] - 2026-10-13
+
+### Added
+
+- `STD::TEXT_*` string surgery vocabulary (#203): `TEXT_TRIM`, `TEXT_TRIM_PREFIX`, `TEXT_TRIM_SUFFIX`, `TEXT_TO_UPPER`, `TEXT_TO_LOWER`, `TEXT_REPLACE`, `TEXT_REPLACE_REGEX`, `TEXT_SPLIT`, `TEXT_JOIN`, `TEXT_LINES`, `TEXT_FIELDS`, `TEXT_MATCH`, `TEXT_EXTRACT`, `TEXT_STARTS_WITH`, `TEXT_ENDS_WITH`, `TEXT_CONTAINS`, `TEXT_LENGTH`, `TEXT_COUNT`, `TEXT_COUNT_MATCHES`, `TEXT_GREP`, `TEXT_LINES_RANGE`.
+
+### Dependencies
+
+- Add `regex` 1.13.1 (`TEXT_*` pattern trio).
+
 ## [0.27.1-alpha] - 2026-10-13
 
 ### Fixed

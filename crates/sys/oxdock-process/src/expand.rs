@@ -462,6 +462,15 @@ fn parse_call(key: &str) -> Option<(&str, &str, Vec<String>)> {
     Some((module, func, split_args(args_src)))
 }
 
+/// Split a `MODULE::FUNC(args)` placeholder body for call resolution
+/// outside the streaming expander. Returns `None` when the body is not
+/// call shaped, so plain keys keep their own handling. Shared with
+/// engine-side string expansion so both paths parse identically.
+pub fn parse_placeholder_call(key: &str) -> Option<(String, String, Vec<String>)> {
+    let (module, func, args) = parse_call(key.trim())?;
+    Some((module.to_string(), func.to_string(), args))
+}
+
 /// Maximum nesting for map and list literals in placeholder call args.
 const MAX_LITERAL_DEPTH: usize = 16;
 
@@ -518,6 +527,17 @@ fn split_top_level(src: &str, sep: char) -> Vec<String> {
         out.push(last.to_string());
     }
     out
+}
+
+/// Resolve one placeholder call argument against script variables for
+/// call resolution outside the streaming expander. Same grammar there:
+/// `$var.path`, string, int, float, and bool literals, plus `{...}`
+/// and `[...]` literals holding those shapes nested.
+pub fn resolve_placeholder_arg(
+    src: &str,
+    vars: &HashMap<String, oxdock_parser::Value>,
+) -> Result<oxdock_parser::Value> {
+    resolve_call_arg(src, vars)
 }
 
 /// Resolve one call argument to a value: `$var.path` from vars, a
@@ -768,7 +788,16 @@ fn resolve_key_path_strict(
 }
 
 /// Format a Value as a string for inline interpolation.
-fn format_value_for_string(val: &oxdock_parser::Value) -> String {
+/// Render a script value as inline text: the single renderer behind
+/// placeholder expansion everywhere (streaming file templates and
+/// engine string expansion alike), so one value renders one way in
+/// every context.
+///
+/// Float rendering is defined as `f.to_string()`: Rust's `Display` for
+/// `f64` already produces the shortest round-trip decimal (Ryū since
+/// 1.36), so `ECHO` / `{{ }}` output stays clean (`3.14`, not
+/// `3.140000`) with no extra dependency.
+pub fn format_value_for_string(val: &oxdock_parser::Value) -> String {
     if let Some(s) = val.as_str() {
         return s.to_string();
     }

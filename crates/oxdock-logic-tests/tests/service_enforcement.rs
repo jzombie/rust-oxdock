@@ -70,6 +70,7 @@ fn registration_name(registration: &HostRegistration<DefaultProcessManager>) -> 
     match registration {
         HostRegistration::Stateful { name, .. } => name,
         HostRegistration::Pure { name, .. } => name,
+        HostRegistration::Both { name, .. } => name,
     }
 }
 
@@ -77,6 +78,7 @@ fn registration_base(registration: &HostRegistration<DefaultProcessManager>) -> 
     match registration {
         HostRegistration::Stateful { meta, .. } => base_name(&meta.name),
         HostRegistration::Pure { meta, .. } => base_name(&meta.name),
+        HostRegistration::Both { meta, .. } => base_name(&meta.name),
     }
 }
 
