@@ -191,9 +191,19 @@ pub fn tokenize(input: &str) -> Result<Vec<RawToken<'_>>, ParseError> {
 /// the expected sets and hint as structured fields. Shared by script
 /// tokenizing and snippet expression parsing.
 pub fn parse_pest_error(err: pest::error::Error<Rule>) -> ParseError {
-    use pest::error::{ErrorVariant, LineColLocation};
+    let (line_no, col_start, col_end) = pest_span_parts(&err.line_col);
+    let (header, expected) = pest_variant_parts(&err.variant);
+    let line = err.line().to_string();
+    pest_error_at(&header, expected, line_no, col_start, col_end, line)
+}
 
-    let (line_no, col_start, col_end) = match err.line_col {
+/// Collapse a pest position into a single-line span: a point stays a
+/// point, a same-line range keeps its inclusive end, and a multi-line
+/// range clamps to its start column. Shared with absolute-coordinate
+/// re-parses so both paths measure spans identically.
+pub(crate) fn pest_span_parts(line_col: &pest::error::LineColLocation) -> (usize, usize, usize) {
+    use pest::error::LineColLocation;
+    match *line_col {
         LineColLocation::Pos((line, col)) => (line, col, col),
         LineColLocation::Span((line, col), (end_line, end_col)) => {
             if line == end_line {
@@ -203,11 +213,18 @@ pub fn parse_pest_error(err: pest::error::Error<Rule>) -> ParseError {
                 (line, col, col)
             }
         }
-    };
+    }
+}
 
+/// Split a pest failure variant into its message header and expected set.
+/// Shared by [`parse_pest_error`] and absolute-coordinate re-parses.
+pub(crate) fn pest_variant_parts(
+    variant: &pest::error::ErrorVariant<Rule>,
+) -> (String, Vec<String>) {
+    use pest::error::ErrorVariant;
     let mut expected: Vec<String> = Vec::new();
     let mut msg = String::new();
-    match &err.variant {
+    match variant {
         ErrorVariant::ParsingError {
             positives,
             negatives,
@@ -235,28 +252,42 @@ pub fn parse_pest_error(err: pest::error::Error<Rule>) -> ParseError {
             msg.push_str(message);
         }
     }
+    (msg, expected)
+}
 
-    let line = err.line();
+/// Assemble a `PestParse` diagnostic for explicit coordinates with the
+/// exact legacy rendering (uppercase note, caret block). [`parse_pest_error`]
+/// delegates with the failure's own relative position; absolute-coordinate
+/// re-parses (issue #215) pass adjusted coordinates and source text.
+pub(crate) fn pest_error_at(
+    header: &str,
+    expected: Vec<String>,
+    line_no: usize,
+    col_start: usize,
+    col_end: usize,
+    line_text: String,
+) -> ParseError {
+    let mut msg = header.to_string();
     let caret_len = col_end.saturating_sub(col_start).saturating_add(1).max(1);
     let caret_pad = " ".repeat(col_start.saturating_sub(1));
     let caret_mark = "^".repeat(caret_len);
 
-    let note = detect_case_error(line);
+    let note = detect_case_error(&line_text);
     if let Some(note) = &note {
         msg.push_str(&format!("\nnote: {note}"));
     }
 
     msg.push_str(&format!(
-        "\n  --> line {line_no}, col {col_start}-{col_end}\n  {line_no} | {line}\n    | {pad}{caret}",
+        "\n  --> line {line_no}, col {col_start}-{col_end}\n  {line_no} | {line_text}\n    | {pad}{caret}",
         line_no = line_no,
         col_start = col_start,
         col_end = col_end,
-        line = line,
+        line_text = line_text.as_str(),
         pad = caret_pad,
         caret = caret_mark
     ));
 
-    let ctx = SpanContext::full(line_no, col_start, col_end, line.to_string());
+    let ctx = SpanContext::full(line_no, col_start, col_end, line_text);
     ParseError::pest(msg, expected, note, &ctx)
 }
 
