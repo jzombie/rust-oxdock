@@ -1897,6 +1897,35 @@ pub struct ModuleState {
     state: std::sync::Arc<dyn std::any::Any + Send + Sync>,
 }
 
+/// A pre-run steps inspection: pure function of the parsed steps,
+///
+/// shared so the struct field stays under the complexity lint.
+pub type PreRunInspector = dyn Fn(&[Step]) -> Result<()> + Send + Sync;
+
+/// A pre-run check riding in a module's `states`: the runner executes
+/// every staged check against the parsed steps before the first step
+/// runs, so unmapped services fail fast with zero side effects. Modules
+/// attach one with `.with_state(Arc::new(check))`; the runner discovers
+/// them by type, so no struct field or plugin knowledge is needed here.
+#[derive(Clone)]
+pub struct PreRunCheck {
+    check: Arc<PreRunInspector>,
+}
+
+impl PreRunCheck {
+    /// Wrap a steps inspector as a pre-run check.
+    pub fn new(check: impl Fn(&[Step]) -> Result<()> + Send + Sync + 'static) -> Self {
+        Self {
+            check: Arc::new(check),
+        }
+    }
+
+    /// Run the inspection: `Ok` lets execution start.
+    pub fn run(&self, steps: &[Step]) -> Result<()> {
+        (self.check)(steps)
+    }
+}
+
 impl<P: ProcessManager> HostModule<P> {
     /// Attach shared state for bodies to fetch with
     /// `cx.module_state::<T>("MODULE")`. Chainable, like registration.
@@ -1906,6 +1935,18 @@ impl<P: ProcessManager> HostModule<P> {
             state,
         });
         self
+    }
+
+    /// Run every staged [`PreRunCheck`] against already-parsed steps.
+    /// The runner calls this before the first step executes; the first
+    /// failing check aborts the run with no side effects.
+    pub fn check_pre_run(&self, steps: &[Step]) -> Result<()> {
+        for state in &self.states {
+            if let Some(check) = state.state.downcast_ref::<PreRunCheck>() {
+                check.run(steps)?;
+            }
+        }
+        Ok(())
     }
 }
 

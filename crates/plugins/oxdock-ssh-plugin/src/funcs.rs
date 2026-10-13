@@ -13,7 +13,10 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use oxdock_core::{Field, HostModule, OxDockFn, OxDockType, RecordSchema, StepCtx, TypeTag, Value};
 use oxdock_func_macro::oxdock_func;
-use oxdock_net_plugin::{AcquiredListener, EndpointKey, EndpointRegistry, acquire_listener};
+use oxdock_net_plugin::{
+    AcquiredListener, EndpointKey, EndpointRegistry, ServiceTarget, SocketRequirement,
+    acquire_listener, no_cli_mapping, parse_virtual_endpoint, resolve_service_target,
+};
 use oxdock_pipe::PipeHandle;
 use oxdock_process::ProcessManager;
 use russh::keys::{Algorithm, PrivateKey};
@@ -76,7 +79,7 @@ fn dequeue_session<P: ProcessManager>(
     name = "route one session",
     code = r###"
     IMPORT [STD, SSH]
-    LET $m: SSH_SERVE_INFO = SSH_SERVE("23703", {username: "u", password: "p"})
+    LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-route", {username: "u", password: "p"})
 
     # Serve: dequeue one session and pump a synthetic reply.
     LET $in: PIPE
@@ -90,7 +93,7 @@ fn dequeue_session<P: ProcessManager>(
     # Connect a client to the server.
     LET $cin: PIPE
     LET $cout: PIPE
-    LET $c: HANDLE = ASYNC { SSH_CONNECT("23703", "u", "p", $cin, $cout) }
+    LET $c: HANDLE = ASYNC { SSH_CONNECT("doc-ssh-route", "u", "p", $cin, $cout) }
 
     # Close both inputs: each pump observes EOF, half-closes, and every
     # task returns with no cancellation.
@@ -139,10 +142,11 @@ fn ssh_dequeue<P: ProcessManager>(
     Ok(Value::map(map))
 }
 
-/// Spin up an SSH server on a virtual service endpoint with the given
-/// credentials. `bind` is a service name (`"demo-proxy"`) or a logical
-/// port (a bare number): physical binds in-script are rejected, `0` is
-/// reserved for the CLI outer mapping. `options` is a MAP with required `username`/`password`
+/// Spin up an SSH server on a runner-mapped service with the given
+/// credentials. `bind` is a service name; the runner maps it with
+/// `-p`/`--listen`, and unmapped services bail with the mapping hint
+/// (SSH needs a TCP socket, so there is no memory fallback).
+/// `options` is a MAP with required `username`/`password`
 /// STRINGs (a server without credentials is meaningless, so blanks bail)
 /// and the optional `key_path` STRING (workspace-relative OpenSSH Ed25519
 /// file, load-or-create; a leading `/` anchors to the workspace root like
@@ -151,21 +155,22 @@ fn ssh_dequeue<P: ProcessManager>(
 /// Non-blocking: returns a MAP with `server` (SSH_SERVER),
 /// `addr` (STRING: the physical bind, or the virtual endpoint echo when
 /// socketless), `username` and `password` (STRINGs), and `virtual`
-/// (STRING echo). Memory services bail: SSH needs a TCP socket, so map
-/// the name with `-p`/`--listen`.
+/// (STRING echo). Unmapped and memory services bail with the CLI
+/// mapping hint: SSH needs a TCP socket, so map the name with
+/// `-p`/`--listen`.
 #[oxdock_func(returns = TypeTag::Record(serve_result_fields()), summary = "Serve SSH on a virtual service endpoint.")]
 #[example(
     name = "serve and close",
     code = r###"
     IMPORT [STD, SSH]
-    LET $m: SSH_SERVE_INFO = SSH_SERVE("23701", {username: "u", password: "p"})
-    ASSERT_EQ $m.virtual "23701"
+    LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-serve", {username: "u", password: "p"})
+    ASSERT_EQ $m.virtual "doc-ssh-serve"
     SSH_CLOSE($m.server)
     "###
 )]
 fn ssh_serve<P: ProcessManager>(
     cx: &mut StepCtx<P>,
-    /// Virtual service endpoint to serve (logical port or service name).
+    /// Service name to serve; the runner maps it with -p/--listen.
     bind: String,
     /// Server credentials and host key.
     #[options("username: STRING", "password: STRING", "key_path?: STRING")]
@@ -211,7 +216,12 @@ fn ssh_serve<P: ProcessManager>(
         .expect("SSH module registers its endpoint registry as module state");
     let endpoint = parse_serve_endpoint(&bind)?;
     let key = EndpointKey::tcp(endpoint);
-    let (acquired, registry) = acquire_listener(&registry, &key, "SSH_SERVE")?;
+    let (acquired, registry) = acquire_listener(
+        &registry,
+        &key,
+        "SSH_SERVE",
+        SocketRequirement::SocketRequired,
+    )?;
     let host_key = match load_or_create_host_key(cx, "SSH_SERVE", key_path)? {
         Some(key) => key,
         None => PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519)
@@ -247,10 +257,10 @@ fn ssh_serve<P: ProcessManager>(
             (addr, addr.to_string(), Some(thread))
         }
         AcquiredListener::Memory => {
+            // Defensive: `acquire_listener` with `SocketRequired` already
+            // bailed; the text still comes from the one shared helper.
             drop(shutdown_rx);
-            bail!(
-                "SSH_SERVE: '{key}' is a memory service (SSH needs a TCP socket; map it with -p/--listen)"
-            )
+            return Err(no_cli_mapping("SSH_SERVE", &key.endpoint));
         }
         AcquiredListener::Offline => {
             // Socketless servers spawn no thread: DEQUEUE waits on the
@@ -315,13 +325,13 @@ fn ssh_serve<P: ProcessManager>(
     name = "accept and close",
     code = r###"
     IMPORT [STD, SSH]
-    LET $m: SSH_SERVE_INFO = SSH_SERVE("23704", {username: "u", password: "p"})
+    LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-accept", {username: "u", password: "p"})
     LET $in: PIPE
     LET $out: PIPE
     LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
     LET $cin: PIPE
     LET $cout: PIPE
-    LET $c: HANDLE = ASYNC { SSH_CONNECT("23704", "u", "p", $cin, $cout) }
+    LET $c: HANDLE = ASYNC { SSH_CONNECT("doc-ssh-accept", "u", "p", $cin, $cout) }
 
     # Close both inputs: each pump observes EOF, half-closes, and both
     # tasks return their result maps with no cancellation.
@@ -391,11 +401,11 @@ fn ssh_accept<P: ProcessManager>(
     name = "pump a session",
     code = r###"
     IMPORT [STD, SSH]
-    LET $m: SSH_SERVE_INFO = SSH_SERVE("23705", {username: "u", password: "p"})
+    LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-pump", {username: "u", password: "p"})
     LET $d: HANDLE = ASYNC { SSH_DEQUEUE($m.server) }
     LET $cin: PIPE
     LET $cout: PIPE
-    LET $c: HANDLE = ASYNC { SSH_CONNECT("23705", "u", "p", $cin, $cout) }
+    LET $c: HANDLE = ASYNC { SSH_CONNECT("doc-ssh-pump", "u", "p", $cin, $cout) }
     WITH_IO [stdout=$cin] ECHO "client-hello"
     LET $sess: SSH_DEQUEUE_INFO = AWAIT $d
     LET $sin: PIPE
@@ -441,7 +451,7 @@ fn ssh_pump_channel<P: ProcessManager>(
     name = "shut down",
     code = r###"
     IMPORT [STD, SSH]
-    LET $m: SSH_SERVE_INFO = SSH_SERVE("23707", {username: "u", password: "p"})
+    LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-close", {username: "u", password: "p"})
     LET $ok: BOOL = SSH_CLOSE($m.server)
     ASSERT_EQ $ok true
     "###
@@ -460,23 +470,22 @@ fn ssh_close<P: ProcessManager>(
 /// Connect to an SSH server with distinct inner credentials and pump the
 /// shell channel through explicit pipes until it closes. Must run inside
 /// `ASYNC`, concurrently with the `SSH_PUMP` tasks (never before them).
-/// `target` is a service name (CLI-mapped address only; unmapped names
-/// are memory services and SSH needs TCP), a logical port (a bare
-/// number: CLI-mapped address or loopback default), a served address
-/// (`$m.addr`), or a `host:port` dial. Under `--offline` the dial bails before any DNS
-/// or socket work. Returns a MAP with `closed` (BOOL).
+/// `target` is a service name resolved through runner mappings: SSH
+/// needs a TCP socket, so unmapped services bail with the CLI mapping
+/// hint. Under `--offline` the dial bails before any socket work.
+/// Returns a MAP with `closed` (BOOL).
 #[oxdock_func(returns = TypeTag::Map, summary = "Open an SSH client session into pipes.")]
 #[example(
     name = "connect and close",
     code = r###"
     IMPORT [STD, SSH]
-    LET $m: SSH_SERVE_INFO = SSH_SERVE("23702", {username: "u", password: "p"})
+    LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-connect", {username: "u", password: "p"})
     LET $in: PIPE
     LET $out: PIPE
     LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
     LET $cin: PIPE
     LET $cout: PIPE
-    LET $c: HANDLE = ASYNC { SSH_CONNECT("23702", "u", "p", $cin, $cout) }
+    LET $c: HANDLE = ASYNC { SSH_CONNECT("doc-ssh-connect", "u", "p", $cin, $cout) }
 
     # Close both inputs: each pump observes EOF, half-closes, and both
     # tasks return their result maps with no cancellation.
@@ -491,7 +500,7 @@ fn ssh_close<P: ProcessManager>(
 )]
 fn ssh_connect<P: ProcessManager>(
     cx: &mut StepCtx<P>,
-    /// Dial target: logical port, service name, served address, or `host:port`.
+    /// Dial target: a service name resolved through runner mappings.
     target: String,
     /// Inner credentials for the SSH session.
     username: String,
@@ -521,7 +530,23 @@ fn ssh_connect<P: ProcessManager>(
     if username.is_empty() {
         bail!("SSH_CONNECT username must not be empty");
     }
-    let addr = crate::validate::resolve_connect_addr(&registry, &target)?;
+    // Strictly symbolic, resolved through the single shared resolver:
+    // served addresses and `host:port` shapes already failed in the
+    // parser below, so only runner-mapped services reach the dial.
+    let endpoint = parse_virtual_endpoint(&target, "SSH_CONNECT")?;
+    let key = EndpointKey::tcp(endpoint);
+    let addr = match resolve_service_target(
+        &registry,
+        &key,
+        "SSH_CONNECT",
+        SocketRequirement::SocketRequired,
+    )? {
+        ServiceTarget::Tcp(addr) => addr,
+        // Defensive: the shared resolver already bailed; same text.
+        ServiceTarget::Memory => {
+            return Err(no_cli_mapping("SSH_CONNECT", &key.endpoint));
+        }
+    };
     let runtime = connect_runtime()?;
     let session = runtime
         .block_on(connect_session(&addr, &username, &password))
@@ -596,11 +621,11 @@ fn ssh_pump<P: ProcessManager>(
     name = "run under a terminal",
     code = r###"
     IMPORT [STD, SSH]
-    LET $m: SSH_SERVE_INFO = SSH_SERVE("23706", {username: "u", password: "p"})
+    LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-pty", {username: "u", password: "p"})
     LET $d: HANDLE = ASYNC { SSH_DEQUEUE($m.server) }
     LET $cin: PIPE
     LET $cout: PIPE
-    LET $c: HANDLE = ASYNC { SSH_CONNECT("23706", "u", "p", $cin, $cout) }
+    LET $c: HANDLE = ASYNC { SSH_CONNECT("doc-ssh-pty", "u", "p", $cin, $cout) }
     WITH_IO [stdout=$cin] ECHO "client-hello"
     LET $sess: SSH_DEQUEUE_INFO = AWAIT $d
 
@@ -745,8 +770,11 @@ pub fn module_with<P: ProcessManager>() -> HostModule<P> {
 /// The `SSH` host module resolving through `registry`: the registry
 /// travels as module state (`HostModule::with_state`) for bodies to
 /// fetch from `cx`, so every entry stays `#[oxdock_func]`. Everything
-/// else reaches the same registry through its `SSH_SERVER` handle.
+/// else reaches the same registry through its `SSH_SERVER` handle. A
+/// pre-run service check rides along: every service the steps name must
+/// be fully bound before execution starts.
 pub fn module_with_endpoints<P: ProcessManager>(registry: Arc<EndpointRegistry>) -> HostModule<P> {
+    let check = registry.pre_run_check("SSH");
     HostModule {
         name: "SSH".to_string(),
         funcs: vec![
@@ -773,4 +801,5 @@ pub fn module_with_endpoints<P: ProcessManager>(registry: Arc<EndpointRegistry>)
         states: Vec::new(),
     }
     .with_state(registry)
+    .with_state(Arc::new(check))
 }

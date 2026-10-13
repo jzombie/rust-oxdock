@@ -55,13 +55,13 @@ never EOFs its input, so the reply cannot race teardown.
 
 ```oxdock
 IMPORT [STD, SSH]
-LET $m: SSH_SERVE_INFO = SSH_SERVE("23704", {username: "u", password: "p"})
+LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-accept", {username: "u", password: "p"})
 LET $in: PIPE
 LET $out: PIPE
 LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
 LET $cin: PIPE
 LET $cout: PIPE
-LET $c: HANDLE = ASYNC { SSH_CONNECT("23704", "u", "p", $cin, $cout) }
+LET $c: HANDLE = ASYNC { SSH_CONNECT("doc-ssh-accept", "u", "p", $cin, $cout) }
 
 # Close both inputs: each pump observes EOF, half-closes, and both
 # tasks return their result maps with no cancellation.
@@ -99,7 +99,7 @@ returns BOOL true when no thread remains.
 
 ```oxdock
 IMPORT [STD, SSH]
-LET $m: SSH_SERVE_INFO = SSH_SERVE("23707", {username: "u", password: "p"})
+LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-close", {username: "u", password: "p"})
 LET $ok: BOOL = SSH_CLOSE($m.server)
 ASSERT_EQ $ok true
 ```
@@ -111,11 +111,10 @@ Open an SSH client session into pipes.
 Connect to an SSH server with distinct inner credentials and pump the
 shell channel through explicit pipes until it closes. Must run inside
 `ASYNC`, concurrently with the `SSH_PUMP` tasks (never before them).
-`target` is a service name (CLI-mapped address only; unmapped names
-are memory services and SSH needs TCP), a logical port (a bare
-number: CLI-mapped address or loopback default), a served address
-(`$m.addr`), or a `host:port` dial. Under `--offline` the dial bails before any DNS
-or socket work. Returns a MAP with `closed` (BOOL).
+`target` is a service name resolved through runner mappings: SSH
+needs a TCP socket, so unmapped services bail with the CLI mapping
+hint. Under `--offline` the dial bails before any socket work.
+Returns a MAP with `closed` (BOOL).
 
 **Signature:** `SSH_CONNECT($target: STRING, $username: STRING, $password: STRING, $in_pipe: PIPE, $out_pipe: PIPE) -> MAP`
 
@@ -123,7 +122,7 @@ or socket work. Returns a MAP with `closed` (BOOL).
 
 **Parameters:**
 
-- `$target` (`STRING`): Dial target: logical port, service name, served address, or `host:port`.
+- `$target` (`STRING`): Dial target: a service name resolved through runner mappings.
 - `$username` (`STRING`): Inner credentials for the SSH session.
 - `$password` (`STRING`): Inner credentials for the SSH session.
 - `$in_pipe` (`PIPE`): Pipe carrying bytes consumed by the wire side.
@@ -137,13 +136,13 @@ or socket work. Returns a MAP with `closed` (BOOL).
 
 ```oxdock
 IMPORT [STD, SSH]
-LET $m: SSH_SERVE_INFO = SSH_SERVE("23702", {username: "u", password: "p"})
+LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-connect", {username: "u", password: "p"})
 LET $in: PIPE
 LET $out: PIPE
 LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
 LET $cin: PIPE
 LET $cout: PIPE
-LET $c: HANDLE = ASYNC { SSH_CONNECT("23702", "u", "p", $cin, $cout) }
+LET $c: HANDLE = ASYNC { SSH_CONNECT("doc-ssh-connect", "u", "p", $cin, $cout) }
 
 # Close both inputs: each pump observes EOF, half-closes, and both
 # tasks return their result maps with no cancellation.
@@ -193,7 +192,7 @@ EOFs its input, so the reply cannot race teardown.
 
 ```oxdock
 IMPORT [STD, SSH]
-LET $m: SSH_SERVE_INFO = SSH_SERVE("23703", {username: "u", password: "p"})
+LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-route", {username: "u", password: "p"})
 
 # Serve: dequeue one session and pump a synthetic reply.
 LET $in: PIPE
@@ -207,7 +206,7 @@ LET $w: HANDLE = ASYNC {
 # Connect a client to the server.
 LET $cin: PIPE
 LET $cout: PIPE
-LET $c: HANDLE = ASYNC { SSH_CONNECT("23703", "u", "p", $cin, $cout) }
+LET $c: HANDLE = ASYNC { SSH_CONNECT("doc-ssh-route", "u", "p", $cin, $cout) }
 
 # Close both inputs: each pump observes EOF, half-closes, and every
 # task returns with no cancellation.
@@ -257,11 +256,11 @@ relay) reaches the child; the working directory comes from the script.
 
 ```oxdock
 IMPORT [STD, SSH]
-LET $m: SSH_SERVE_INFO = SSH_SERVE("23706", {username: "u", password: "p"})
+LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-pty", {username: "u", password: "p"})
 LET $d: HANDLE = ASYNC { SSH_DEQUEUE($m.server) }
 LET $cin: PIPE
 LET $cout: PIPE
-LET $c: HANDLE = ASYNC { SSH_CONNECT("23706", "u", "p", $cin, $cout) }
+LET $c: HANDLE = ASYNC { SSH_CONNECT("doc-ssh-pty", "u", "p", $cin, $cout) }
 WITH_IO [stdout=$cin] ECHO "client-hello"
 LET $sess: SSH_DEQUEUE_INFO = AWAIT $d
 
@@ -353,11 +352,11 @@ Returns a MAP with `closed` (BOOL).
 
 ```oxdock
 IMPORT [STD, SSH]
-LET $m: SSH_SERVE_INFO = SSH_SERVE("23705", {username: "u", password: "p"})
+LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-pump", {username: "u", password: "p"})
 LET $d: HANDLE = ASYNC { SSH_DEQUEUE($m.server) }
 LET $cin: PIPE
 LET $cout: PIPE
-LET $c: HANDLE = ASYNC { SSH_CONNECT("23705", "u", "p", $cin, $cout) }
+LET $c: HANDLE = ASYNC { SSH_CONNECT("doc-ssh-pump", "u", "p", $cin, $cout) }
 WITH_IO [stdout=$cin] ECHO "client-hello"
 LET $sess: SSH_DEQUEUE_INFO = AWAIT $d
 LET $sin: PIPE
@@ -375,10 +374,11 @@ SSH_CLOSE($m.server)
 
 Serve SSH on a virtual service endpoint.
 
-Spin up an SSH server on a virtual service endpoint with the given
-credentials. `bind` is a service name (`"demo-proxy"`) or a logical
-port (a bare number): physical binds in-script are rejected, `0` is
-reserved for the CLI outer mapping. `options` is a MAP with required `username`/`password`
+Spin up an SSH server on a runner-mapped service with the given
+credentials. `bind` is a service name; the runner maps it with
+`-p`/`--listen`, and unmapped services bail with the mapping hint
+(SSH needs a TCP socket, so there is no memory fallback).
+`options` is a MAP with required `username`/`password`
 STRINGs (a server without credentials is meaningless, so blanks bail)
 and the optional `key_path` STRING (workspace-relative OpenSSH Ed25519
 file, load-or-create; a leading `/` anchors to the workspace root like
@@ -387,8 +387,9 @@ in-memory key).
 Non-blocking: returns a MAP with `server` (SSH_SERVER),
 `addr` (STRING: the physical bind, or the virtual endpoint echo when
 socketless), `username` and `password` (STRINGs), and `virtual`
-(STRING echo). Memory services bail: SSH needs a TCP socket, so map
-the name with `-p`/`--listen`.
+(STRING echo). Unmapped and memory services bail with the CLI
+mapping hint: SSH needs a TCP socket, so map the name with
+`-p`/`--listen`.
 
 **Signature:** `SSH_SERVE($bind: STRING, $options: MAP<username: STRING, password: STRING, key_path?: STRING>) -> MAP<server: SSH_SERVER, addr: STRING, username: STRING, password: STRING, virtual: STRING>`
 
@@ -396,7 +397,7 @@ the name with `-p`/`--listen`.
 
 **Parameters:**
 
-- `$bind` (`STRING`): Virtual service endpoint to serve (logical port or service name).
+- `$bind` (`STRING`): Service name to serve; the runner maps it with -p/--listen.
 - `$options` (`MAP<username: STRING, password: STRING, key_path?: STRING>`): Server credentials and host key.
   - `username` (`STRING`, required)
   - `password` (`STRING`, required)
@@ -416,8 +417,8 @@ the name with `-p`/`--listen`.
 
 ```oxdock
 IMPORT [STD, SSH]
-LET $m: SSH_SERVE_INFO = SSH_SERVE("23701", {username: "u", password: "p"})
-ASSERT_EQ $m.virtual "23701"
+LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-serve", {username: "u", password: "p"})
+ASSERT_EQ $m.virtual "doc-ssh-serve"
 SSH_CLOSE($m.server)
 ```
 

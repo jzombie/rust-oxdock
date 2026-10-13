@@ -4,7 +4,8 @@
 IMPORT [STD, SSH]
 WORKSPACE LOCAL
 
-# 1. Ephemeral server setup
+# 1. Ephemeral server setup (runner must map the service first:
+# oxdock -p <host_port>:ssh-server ...; unmapped services bail).
 LET $server: SSH_SERVE_INFO = SSH_SERVE(
     "ssh-server", {
         username: "test",

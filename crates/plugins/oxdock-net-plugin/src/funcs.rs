@@ -18,7 +18,7 @@
 //! [`HostRegistration::Stateful`]: oxdock_core::HostRegistration::Stateful
 
 use std::collections::BTreeMap;
-use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
+use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -31,14 +31,13 @@ use oxdock_process::ProcessManager;
 
 use crate::bridge::{pump_memory, pump_stream};
 use crate::endpoints::{
-    AcquiredListener, EndpointRegistry, MemoryPipePair, SlotKind, acquire_listener,
+    AcquiredListener, EndpointRegistry, MemoryPipePair, ServiceTarget, SocketRequirement,
+    acquire_listener, resolve_service_target,
 };
 use crate::fetch::{FetchOptions, fetch_text_with_options};
 use crate::state::ListenerState;
 use crate::types::NetListenerTag;
-use crate::validate::{
-    EndpointKey, VirtualEndpoint, parse_connect_endpoint, parse_virtual_endpoint,
-};
+use crate::validate::{EndpointKey, parse_virtual_endpoint};
 
 /// Unique listener ids per process.
 static LISTENER_IDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -68,27 +67,27 @@ fn accept_tick() -> Duration {
     Duration::from_millis(10)
 }
 
-/// Claim a virtual service endpoint and report its address. `bind` is a
-/// service name (`"demo-proxy"`) or a logical port (a bare number,
-/// resolved through `-p` mappings or loopback): physical
-/// binds in-script are rejected, `0` is reserved for the CLI outer
-/// mapping. `options` is reserved for future socket settings and must be
-/// an empty MAP today. Non-blocking: returns a MAP with `listener`
-/// (NET_LISTENER), `addr` (STRING: the physical bind, or the virtual
-/// endpoint echo when socketless), and `virtual` (STRING echo).
-#[oxdock_func(returns = TypeTag::Record(listen_result_fields()), summary = "Claim a virtual service endpoint and report its address.")]
+/// Claim a runner-mapped service endpoint and report its address.
+/// `bind` is a service name; the runner maps it to a physical bind with
+/// `-p`/`--listen` or to memory explicitly. Unmapped names are a hard
+/// error before execution. Scripts never bind. `options` is reserved for
+/// future socket settings and must be an empty MAP today. Non-blocking:
+/// returns a MAP with `listener` (NET_LISTENER), `addr` (STRING: the
+/// physical bind, or the virtual endpoint echo when socketless), and
+/// `virtual` (STRING echo).
+#[oxdock_func(returns = TypeTag::Record(listen_result_fields()), summary = "Claim a runner-mapped service endpoint and report its address.")]
 #[example(
     name = "claim and close",
     code = r###"
     IMPORT [STD, NET]
-    LET $l: NET_LISTEN_INFO = NET_LISTEN("23793", {})
-    ASSERT_EQ $l.virtual "23793"
+    LET $l: NET_LISTEN_INFO = NET_LISTEN("doc-net-listen", {})
+    ASSERT_EQ $l.virtual "doc-net-listen"
     NET_CLOSE($l.listener)
     "###
 )]
 fn net_listen<P: ProcessManager>(
     cx: &mut StepCtx<P>,
-    /// Service name or logical port; physical binds are rejected.
+    /// Service name; the runner maps it with -p/--listen or memory.
     bind: String,
     /// Reserved for future socket settings; must be an empty MAP today.
     #[options()]
@@ -109,7 +108,12 @@ fn net_listen<P: ProcessManager>(
     }
     let endpoint = parse_virtual_endpoint(&bind, "NET_LISTEN")?;
     let key = EndpointKey::tcp(endpoint);
-    let (acquired, registry) = acquire_listener(&registry, &key, "NET_LISTEN")?;
+    let (acquired, registry) = acquire_listener(
+        &registry,
+        &key,
+        "NET_LISTEN",
+        SocketRequirement::SocketlessOk,
+    )?;
     let id = next_listener_id();
     let state = match acquired {
         AcquiredListener::Tcp { listener, addr } => {
@@ -319,7 +323,7 @@ fn net_accept<P: ProcessManager>(
     name = "shut down",
     code = r###"
     IMPORT [STD, NET]
-    LET $l: NET_LISTEN_INFO = NET_LISTEN("23795", {})
+    LET $l: NET_LISTEN_INFO = NET_LISTEN("doc-net-close", {})
     LET $ok: BOOL = NET_CLOSE($l.listener)
     ASSERT_EQ $ok true
     "###
@@ -331,13 +335,13 @@ fn net_close<P: ProcessManager>(cx: &mut StepCtx<P>, listener: NetListenerTag) -
     Ok(Value::bool(true))
 }
 
-/// Dial a TCP endpoint and pump it through explicit pipes until it
-/// closes. Must run inside `ASYNC`. `options` holds optional `timeout`
-/// (DURATION, default 10s) and `no_half_close` BOOL. `target` is a
-/// `host:port` dial, a service name (memory rendezvous, or a mapped
-/// physical address), or a logical port (a bare number, loopback or a
-/// mapped service). Under `--offline` every dial bails before any DNS
-/// or socket work. Returns a MAP with `closed` (BOOL).
+/// Dial a runner-mapped service and pump it through explicit pipes
+/// until it closes. Must run inside `ASYNC`. `options` holds optional
+/// `timeout` (DURATION, default 10s) and `no_half_close` BOOL. `target`
+/// is a service name resolved through runner mappings (or an
+/// explicitly-mapped memory rendezvous): physical dials come only from
+/// mappings, never from script text. Under `--offline` every dial bails
+/// before any socket work. Returns a MAP with `closed` (BOOL).
 #[oxdock_func(
     returns = TypeTag::Record(std::sync::Arc::from([Field {
         name: "closed".to_string(),
@@ -373,7 +377,7 @@ fn net_close<P: ProcessManager>(cx: &mut StepCtx<P>, listener: NetListenerTag) -
 )]
 fn net_connect<P: ProcessManager>(
     cx: &mut StepCtx<P>,
-    /// Dial target: `host:port`, a logical port, or a service name.
+    /// Dial target: a service name resolved through runner mappings.
     target: String,
     /// Pipe carrying bytes consumed by the wire side.
     in_pipe: PipeHandle,
@@ -421,33 +425,20 @@ fn net_connect<P: ProcessManager>(
     if registry.is_offline() {
         bail!("NET_CONNECT failed: engine running in --offline mode");
     }
-    if let Ok(endpoint) = parse_virtual_endpoint(&target, "NET_CONNECT") {
-        let key = EndpointKey::tcp(endpoint);
-        let params = ConnectParams {
-            cx,
-            registry: &registry,
-            in_pipe: &in_pipe,
-            out_pipe: &out_pipe,
-            timeout,
-            half_close: !no_half_close,
-        };
-        return connect_virtual(&params, &key, &target);
-    }
-    let (host, port) = parse_connect_endpoint(&target)?;
-    let addr = (host.as_str(), port)
-        .to_socket_addrs()
-        .with_context(|| format!("NET_CONNECT {target:?} did not resolve"))?
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("NET_CONNECT {target:?} did not resolve"))?;
-    dial_tcp(
+    // Strictly symbolic: every target is a service name resolved through
+    // runner mappings (or memory rendezvous). Physical `host:port` shapes
+    // already failed in `parse_virtual_endpoint` below.
+    let endpoint = parse_virtual_endpoint(&target, "NET_CONNECT")?;
+    let key = EndpointKey::tcp(endpoint);
+    let params = ConnectParams {
         cx,
-        &target,
-        addr,
-        &in_pipe,
-        &out_pipe,
+        registry: &registry,
+        in_pipe: &in_pipe,
+        out_pipe: &out_pipe,
         timeout,
-        !no_half_close,
-    )
+        half_close: !no_half_close,
+    };
+    connect_virtual(&params, &key, &target)
 }
 
 /// Shared CONNECT plumbing: step context plus the resolved dial and pump
@@ -461,8 +452,8 @@ struct ConnectParams<'a, P: ProcessManager> {
     half_close: bool,
 }
 
-/// Dial one resolved address and pump it. Shared by raw `host:port`
-/// dials, loopback port dials, and mapped-service dials.
+/// Dial one runner-resolved address and pump it. Only mapped-service
+/// dials reach here: resolution already ran through the shared resolver.
 fn dial_tcp<P: ProcessManager>(
     cx: &StepCtx<P>,
     target: &str,
@@ -480,73 +471,37 @@ fn dial_tcp<P: ProcessManager>(
     Ok(Value::map(out))
 }
 
-/// Resolve a logical CONNECT target: memory rendezvous, mapped physical
-/// address, or loopback dial. Names auto-create their memory slot so
-/// client-before-server order works from either side.
+/// Resolve a CONNECT target through the single shared resolver: a
+/// runner-mapped physical address, or an explicitly-mapped memory
+/// rendezvous. No script string ever dials a physical address directly.
 fn connect_virtual<P: ProcessManager>(
     params: &ConnectParams<'_, P>,
     key: &EndpointKey,
     target: &str,
 ) -> Result<Value> {
-    match &key.endpoint {
-        VirtualEndpoint::Port(port) => match params.registry.slot_kind(key) {
-            SlotKind::Memory => connect_memory(
-                params.cx,
-                params.registry,
-                key,
-                params.in_pipe,
-                params.out_pipe,
-                params.half_close,
-            ),
-            SlotKind::TcpBound(addr) => dial_tcp(
-                params.cx,
-                target,
-                addr,
-                params.in_pipe,
-                params.out_pipe,
-                params.timeout,
-                params.half_close,
-            ),
-            SlotKind::TcpUnbound => {
-                bail!("NET_CONNECT: '{key}' was never bound (the runner must call bind_all)")
-            }
-            SlotKind::Offline => bail!("NET_CONNECT: '{key}' is offline"),
-            SlotKind::Unmapped => dial_tcp(
-                params.cx,
-                target,
-                SocketAddr::from(([127, 0, 0, 1], *port)),
-                params.in_pipe,
-                params.out_pipe,
-                params.timeout,
-                params.half_close,
-            ),
-        },
-        VirtualEndpoint::Name(_) => match params.registry.slot_kind(key) {
-            SlotKind::Memory | SlotKind::Unmapped => {
-                params.registry.ensure_memory_slot(key);
-                connect_memory(
-                    params.cx,
-                    params.registry,
-                    key,
-                    params.in_pipe,
-                    params.out_pipe,
-                    params.half_close,
-                )
-            }
-            SlotKind::TcpBound(addr) => dial_tcp(
-                params.cx,
-                target,
-                addr,
-                params.in_pipe,
-                params.out_pipe,
-                params.timeout,
-                params.half_close,
-            ),
-            SlotKind::TcpUnbound => {
-                bail!("NET_CONNECT: '{key}' was never bound (the runner must call bind_all)")
-            }
-            SlotKind::Offline => bail!("NET_CONNECT: '{key}' is offline"),
-        },
+    match resolve_service_target(
+        params.registry,
+        key,
+        "NET_CONNECT",
+        SocketRequirement::SocketlessOk,
+    )? {
+        ServiceTarget::Tcp(addr) => dial_tcp(
+            params.cx,
+            target,
+            addr,
+            params.in_pipe,
+            params.out_pipe,
+            params.timeout,
+            params.half_close,
+        ),
+        ServiceTarget::Memory => connect_memory(
+            params.cx,
+            params.registry,
+            key,
+            params.in_pipe,
+            params.out_pipe,
+            params.half_close,
+        ),
     }
 }
 
@@ -590,8 +545,10 @@ pub fn module_with<P: ProcessManager>() -> HostModule<P> {
 /// travels as module state (`HostModule::with_state`) for bodies to
 /// fetch from `cx`, so every entry stays `#[oxdock_func]`;
 /// `ACCEPT`/`CLOSE` reach the same registry through their
-/// `NET_LISTENER` handle.
+/// `NET_LISTENER` handle. A pre-run service check rides along: every
+/// service the steps name must be fully bound before execution starts.
 pub fn module_with_endpoints<P: ProcessManager>(registry: Arc<EndpointRegistry>) -> HostModule<P> {
+    let check = registry.pre_run_check("NET");
     HostModule {
         name: "NET".to_string(),
         funcs: vec![
@@ -611,6 +568,7 @@ pub fn module_with_endpoints<P: ProcessManager>(registry: Arc<EndpointRegistry>)
         states: Vec::new(),
     }
     .with_state(registry)
+    .with_state(Arc::new(check))
 }
 
 /// Field table for the `NET_LISTEN` result bundle, backing the
@@ -640,24 +598,27 @@ fn listen_result_fields() -> Arc<[Field]> {
     ])
 }
 
-/// Report the bound port of a virtual service endpoint without claiming
+/// Report the bound port of a runner-mapped service without claiming
 /// it, so a `-p`-mapped outer port (including ephemeral `-p 0:<inner>`
 /// resolutions) can be routed into an inner `RUN` through normal
-/// `LET`/`ENV` expansion. `target` is a service name (`"demo-proxy"`)
-/// or a logical port (a bare number), optionally protocol-qualified
-/// (`"tcp/web"`, `"udp/dns"`). Bare text resolves TCP with
-/// single-protocol fallback; text bound under both protocols must be
-/// qualified. Unbound targets bail: no `0` sentinel.
-#[oxdock_func(returns = TypeTag::Int, summary = "Report the bound port of a virtual service endpoint.")]
+/// `LET`/`ENV` expansion. `target` is a service name, optionally
+/// protocol-qualified (`"tcp/web"`, `"udp/dns"`). Bare text resolves TCP
+/// with single-protocol fallback; text bound under both protocols must
+/// be qualified. Memory, offline, and unmapped services bail: with no
+/// physical bind there is no port to report.
+#[oxdock_func(returns = TypeTag::Int, summary = "Report the bound port of a runner-mapped service.")]
 #[example(
     name = "observe port",
     code = r###"
     IMPORT [STD, NET]
-    LET $l: NET_LISTEN_INFO = NET_LISTEN("23791", {})
+    LET $l: NET_LISTEN_INFO = NET_LISTEN("doc-net-observe", {})
 
-    # Observe the bound port without claiming the slot twice.
-    LET $port: INT = NET_PORT("23791")
-    ASSERT_EQ $port 23791
+    # Observe the bound port without claiming the slot twice, and prove
+    # it agrees with the dial string from the same bind.
+    LET $port: INT = NET_PORT("doc-net-observe")
+    LET $addr: STRING = NET_ADDR("doc-net-observe")
+    ASSERT_CONTAINS $addr "{{ $port }}"
+    ASSERT_CONTAINS $addr "127.0.0.1:"
 
     # The shell reads its own environment, with per-platform spelling:
     # quoted "$VAR" passes the parser through untouched on Unix ...
@@ -668,48 +629,49 @@ fn listen_result_fields() -> Arc<[Field]> {
     # ... while cmd expands %VAR% on Windows.
     [family:windows] LET $o: STRING = RUN echo serving on %PROXY_PORT%
 
-    ASSERT_CONTAINS $o "23791"
+    ASSERT_CONTAINS $o "serving on"
     NET_CLOSE($l.listener)
     "###
 )]
 fn net_port<P: ProcessManager>(
     cx: &mut StepCtx<P>,
-    /// Logical port, service name, optionally protocol-qualified; unbound targets bail.
+    /// Service name, optionally protocol-qualified; socketless targets bail.
     target: String,
 ) -> Result<Value> {
     let registry = cx
         .module_state::<EndpointRegistry>("NET")
         .expect("NET module registers its endpoint registry as module state");
-    let addr = registry.resolve_ref(&target, "NET_PORT")?;
+    let addr = registry.resolve_ref(&target, "NET_PORT", "port")?;
     Ok(Value::int(i64::from(addr.port())))
 }
 
-/// Report the full bound socket address (`ip:port`) of a virtual service
-/// endpoint without claiming it: the dial-string companion to [`net_port`].
-/// Same qualifier and fallback rules; unbound targets bail, never an
-/// empty string.
-#[oxdock_func(returns = TypeTag::String, summary = "Report the bound socket address of a virtual service endpoint.")]
+/// Report the full bound socket address (`ip:port`) of a runner-mapped
+/// service without claiming it: the dial-string companion to
+/// [`net_port`]. Same qualifier and fallback rules; socketless targets
+/// bail, never an empty string.
+#[oxdock_func(returns = TypeTag::String, summary = "Report the bound socket address of a runner-mapped service.")]
 #[example(
     name = "observe dial string",
     code = r###"
     IMPORT [STD, NET]
-    LET $l: NET_LISTEN_INFO = NET_LISTEN("23792", {})
+    LET $l: NET_LISTEN_INFO = NET_LISTEN("doc-net-dial", {})
 
-    # Observe the dial string without claiming the slot twice.
-    LET $addr: STRING = NET_ADDR("23792")
-    ASSERT_EQ $addr "127.0.0.1:23792"
+    # Observe the dial string without claiming the slot twice: a real
+    # loopback bind, so the shape is always ip:port.
+    LET $addr: STRING = NET_ADDR("doc-net-dial")
+    ASSERT_CONTAINS $addr "127.0.0.1:"
     NET_CLOSE($l.listener)
     "###
 )]
 fn net_addr<P: ProcessManager>(
     cx: &mut StepCtx<P>,
-    /// Logical port, service name, optionally protocol-qualified; unbound targets bail.
+    /// Service name, optionally protocol-qualified; socketless targets bail.
     target: String,
 ) -> Result<Value> {
     let registry = cx
         .module_state::<EndpointRegistry>("NET")
         .expect("NET module registers its endpoint registry as module state");
-    let addr = registry.resolve_ref(&target, "NET_ADDR")?;
+    let addr = registry.resolve_ref(&target, "NET_ADDR", "address")?;
     Ok(Value::string(addr.to_string()))
 }
 
@@ -739,14 +701,16 @@ fn net_addr<P: ProcessManager>(
 #[example(
     name = "loopback fetch",
     code = r###"
-    # Serve one canned HTTP reply over loopback, then fetch it.
+    # Serve one canned HTTP reply on the harness-mapped service, then
+    # fetch it through the observed dial string.
     IMPORT [STD, NET]
-    LET $l: NET_LISTEN_INFO = NET_LISTEN("23797", {})
+    LET $l: NET_LISTEN_INFO = NET_LISTEN("doc-net-fetch", {})
     LET $in: PIPE
     LET $out: PIPE
     LET $acc: HANDLE = ASYNC { NET_ACCEPT($l.listener, $in, $out, {}) }
     WITH_IO [stdout=$in] ECHO "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}"
-    LET $body: STRING = NET_FETCH("http://127.0.0.1:23797/doc.json", {})
+    LET $base: STRING = NET_ADDR("doc-net-fetch")
+    LET $body: STRING = NET_FETCH("http://{{ $base }}/doc.json", {})
     ASSERT_EQ $body "{}"
     CANCEL $acc
     NET_CLOSE($l.listener)

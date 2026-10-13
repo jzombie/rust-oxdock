@@ -44,7 +44,7 @@ pub use self::io::PipeStream;
 pub use self::io::PushManifestSink;
 pub use self::native::{
     FuncKind, FuncMeta, FuncParam, FunctionRegistry, HostModule, HostRegistration, NativeFn,
-    OxDockFn, ParamOption, PureFn, PureTable, RecordSchema, builtin_function_metas,
+    OxDockFn, ParamOption, PreRunCheck, PureFn, PureTable, RecordSchema, builtin_function_metas,
     builtin_function_names, fill_optional_args, required_arity, std_module_table,
 };
 pub use self::state::ExecState;
@@ -328,6 +328,11 @@ pub fn run_steps_with_manager_with_modules<P: ProcessManager>(
     types: Vec<&'static self::typing::TypeDescriptor>,
 ) -> Result<(GuardedPath, Box<dyn WorkspaceFs>, BTreeMap<String, Value>)> {
     let mut state = new_state(fs, io)?;
+    for module in &modules {
+        // Pre-run checks first: unmapped services fail here, before the
+        // first step executes and with zero side effects.
+        module.check_pre_run(steps)?;
+    }
     for module in modules {
         state.register_module(module);
     }

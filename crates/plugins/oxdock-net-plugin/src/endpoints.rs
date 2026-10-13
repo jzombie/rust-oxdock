@@ -1,20 +1,23 @@
 //! Virtual endpoint registry: logical service keys to physical bindings.
 //!
-//! Scripts declare a [`VirtualEndpoint`] (a fixed port or a service name)
-//! and never touch physical binds. The host runner (CLI) maps each key to
-//! a [`BindingSpec`] before the run; [`EndpointRegistry::bind_all`] opens
-//! the sockets up front so `EADDRINUSE` fails fast, before any script
-//! parses. `SERVE`/`LISTEN` calls then [`claim`] a pre-bound socket (a
-//! `try_clone` sharing the kernel backlog) instead of taking ownership, so
-//! close-and-rebind loops keep working; [`release`] on close/drop frees
-//! the slot for the next claimant.
+//! Isolation mandate: scripts declare service names, the runner binds
+//! ports. Nothing in a script ever produces a physical bind (except
+//! what we directly cannot control via `RUN`): `SERVE`/`LISTEN` on a
+//! CLI-mapped key [`claim`] a pre-bound socket (a `try_clone` sharing
+//! the kernel backlog). Memory rendezvous needs an explicit runner
+//! mapping too; unmapped keys are a hard error raised by the pre-run
+//! check before the first step executes.
+//!
+//! Dials resolve the same way through one shared resolver. Bare numbers
+//! stay parseable as port keys so CLI-mapped slots (`-p 2222:2251`,
+//! `--listen 2251`) remain claimable, but an unmapped number never binds
+//! or dials from a script.
 //!
 //! Memory slots hold bounded queues of pipe pairs for in-process IPC with
 //! zero sockets; the global offline flag turns every acquisition socketless
 //! and gates all dial-out (see the `--offline` sandbox invariant).
 //!
 //! [`claim`]: EndpointRegistry::claim
-//! [`release`]: EndpointRegistry::release
 
 use std::collections::{BTreeMap, VecDeque};
 use std::net::{SocketAddr, TcpListener};
@@ -24,6 +27,8 @@ use std::sync::{
 };
 
 use anyhow::{Context, Result, bail};
+use oxdock_core::PreRunCheck;
+use oxdock_parser::{Expr, Step};
 use oxdock_pipe::ScriptPipe;
 
 use crate::validate::{EndpointKey, VirtualEndpoint};
@@ -33,6 +38,30 @@ use crate::validate::{EndpointKey, VirtualEndpoint};
 /// without bound. Mirrors the SSH `CHANNEL_CAPACITY = 64` precedent.
 pub const MEMORY_QUEUE_CAP: usize = 64;
 
+/// Bind a loopback listener with `SO_REUSEADDR` so close-and-rebind
+/// loops survive a still-closing previous socket: rebind succeeds while
+/// the old FD drains instead of flaking `EADDRINUSE`. No `SO_REUSEPORT`,
+/// so a live listener still blocks a second claim (the double-claim
+/// refusal test pins that).
+fn bind_reusable(addr: SocketAddr) -> Result<TcpListener> {
+    let domain = match addr {
+        SocketAddr::V4(_) => socket2::Domain::IPV4,
+        SocketAddr::V6(_) => socket2::Domain::IPV6,
+    };
+    let socket = socket2::Socket::new(domain, socket2::Type::STREAM, Some(socket2::Protocol::TCP))
+        .with_context(|| format!("NET socket for {addr} failed"))?;
+    socket
+        .set_reuse_address(true)
+        .with_context(|| format!("NET reuse flag for {addr} failed"))?;
+    socket
+        .bind(&addr.into())
+        .with_context(|| format!("NET bind {addr} failed"))?;
+    socket
+        .listen(128)
+        .with_context(|| format!("NET listen {addr} failed"))?;
+    Ok(socket.into())
+}
+
 /// Physical binding for one virtual endpoint, decided by the host runner.
 #[derive(Debug, Clone)]
 pub enum BindingSpec {
@@ -41,6 +70,10 @@ pub enum BindingSpec {
     /// Bind exactly this address. The only place a wildcard or a
     /// non-loopback interface may appear: the CLI `--listen`/`-p` flags.
     Exposed { addr: SocketAddr },
+    /// Dial-only target owned outside the registry (a harness-held test
+    /// listener, a proxied upstream): resolvable for dials, never bound
+    /// by `bind_all`, never claimable for LISTEN.
+    DialOnly { addr: SocketAddr },
     /// No socket. Serves return live handles; accepts wait for close.
     Offline,
     /// In-process IPC: no socket, sessions queue as pipe pairs.
@@ -89,7 +122,8 @@ pub enum AcquiredListener {
 /// [`EndpointRegistry::slot_kind`]: EndpointRegistry::slot_kind
 #[derive(Debug, Clone)]
 pub enum SlotKind {
-    /// No slot mapped: ports dial loopback, names auto-create memory.
+    /// No slot mapped: serve and dial bail everywhere (memory needs an
+    /// explicit runner mapping). Never a bind.
     Unmapped,
     /// Bound physical address: dial it.
     TcpBound(SocketAddr),
@@ -101,11 +135,41 @@ pub enum SlotKind {
     Offline,
 }
 
+/// Whether a serve/dial path tolerates socketless operation. NET paths
+/// pass `SocketlessOk` (explicitly-mapped memory services rendezvous
+/// in-process); SSH paths pass `SocketRequired` (SSH needs a TCP
+/// socket, so anything socketless bails with the CLI mapping hint).
+/// Unmapped keys bail under both policies. One enum, one match, both
+/// plugins: resolution never forks per plugin.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SocketRequirement {
+    SocketlessOk,
+    SocketRequired,
+}
+
+/// What a service key resolves to for dialing: a bound physical
+/// address, or an in-process memory rendezvous. Returned by the single
+/// shared resolver both plugins call.
+#[derive(Debug, Clone, Copy)]
+pub enum ServiceTarget {
+    Tcp(SocketAddr),
+    Memory,
+}
+
+/// The one CLI-mapping bail text. Both plugins, serve and dial: the
+/// wording lives in this function and nowhere else. Exported so the SSH
+/// defensive arms report it without restating it.
+pub fn no_cli_mapping(func: &str, endpoint: &VirtualEndpoint) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{func} service '{endpoint}' has no CLI port mapping; pass -p <host_port>:{endpoint} at invocation"
+    )
+}
+
 struct ListenerSlot {
     spec: BindingSpec,
     socket: Option<Arc<TcpListener>>,
-    /// Bound by `bind_all` (host-owned, survives release) vs inline by a
-    /// plugin (dropped on release so the port frees).
+    /// Bound by `bind_all` (host-owned, survives release) vs memory
+    /// (dropped on release so the slot frees).
     persistent: bool,
     claimed: AtomicBool,
     memory: VecDeque<MemoryPipePair>,
@@ -144,6 +208,31 @@ impl EndpointRegistry {
     /// Whether this registry runs socketless (`--offline`).
     pub fn is_offline(&self) -> bool {
         self.offline
+    }
+
+    /// Runner-side mapping for one service name to a physical bind (`-p`
+    /// semantics without flag parsing): the single constructor test
+    /// harnesses use to pre-map services to ephemeral loopback before
+    /// running scripts. The runner binds, the script declares.
+    pub fn add_cli_mapping(&self, service: &str, addr: &str) -> Result<()> {
+        let addr: SocketAddr = addr.parse().with_context(|| {
+            format!("CLI mapping for '{service}' needs a host:port address, got {addr:?}")
+        })?;
+        self.add_mapping(
+            &EndpointKey::tcp(VirtualEndpoint::Name(service.to_string())),
+            BindingSpec::Exposed { addr },
+        )
+    }
+
+    /// Stage a pre-run service check for one module: every service key
+    /// the steps name must be fully bound (runner-mapped socket or
+    /// explicitly-mapped memory) before the first step executes.
+    /// `module` selects the function set (`"NET"` or `"SSH"`). The runner
+    /// discovers the check by type, so this travels in module states next
+    /// to the registry itself.
+    pub fn pre_run_check(self: &Arc<Self>, module: &'static str) -> PreRunCheck {
+        let registry = Arc::clone(self);
+        PreRunCheck::new(move |steps| assert_services_bound(&registry, module, steps))
     }
 
     fn lock_slots<'a>(&'a self) -> std::sync::MutexGuard<'a, BTreeMap<EndpointKey, ListenerSlot>> {
@@ -193,9 +282,11 @@ impl EndpointRegistry {
             let addr = match &slot.spec {
                 BindingSpec::Loopback { port } => SocketAddr::from(([127, 0, 0, 1], *port)),
                 BindingSpec::Exposed { addr } => *addr,
-                BindingSpec::Offline | BindingSpec::Memory => continue,
+                BindingSpec::DialOnly { .. } | BindingSpec::Offline | BindingSpec::Memory => {
+                    continue;
+                }
             };
-            let listener = TcpListener::bind(addr)
+            let listener = bind_reusable(addr)
                 .with_context(|| format!("bind {addr} for virtual '{key}' failed"))?;
             slot.socket = Some(Arc::new(listener));
             slot.persistent = true;
@@ -224,27 +315,54 @@ impl EndpointRegistry {
     /// explicit qualifier (`tcp/web`, `udp/dns`, `-p`-style `dns/udp`)
     /// resolves strictly, while bare text defaults to TCP with
     /// single-protocol fallback (bare `dns` finds lone `udp/dns`). Bare
-    /// text bound under both protocols fails fast as ambiguous; anything
-    /// unbound fails as not bound, echoing the caller's text.
-    pub fn resolve_ref(&self, raw: &str, func: &str) -> Result<SocketAddr> {
+    /// text bound under both protocols fails fast as ambiguous. Anything
+    /// without a bound socket bails: memory and offline services report
+    /// the virtual-channel message, unmapped services the mapping hint.
+    /// `noun` is `"port"` (`NET_PORT`) or `"address"` (`NET_ADDR`).
+    pub fn resolve_ref(&self, raw: &str, func: &str, noun: &str) -> Result<SocketAddr> {
         let text = raw.trim();
         let (protocol, endpoint) = crate::validate::parse_endpoint_ref(text, func)?;
+        let resolve_one = |key: &EndpointKey, kind: &SlotKind| -> Result<SocketAddr> {
+            match kind {
+                SlotKind::TcpBound(addr) => Ok(*addr),
+                SlotKind::Memory | SlotKind::Offline => bail!(
+                    "{func} service '{}' is running as an in-memory virtual channel with no physical {noun}",
+                    key.endpoint
+                ),
+                SlotKind::Unmapped => bail!(
+                    "{func} service '{}' is not mapped by the runner (map it with -p/--listen)",
+                    key.endpoint
+                ),
+                SlotKind::TcpUnbound => {
+                    bail!("{func}: '{key}' was never bound (the runner must call bind_all)")
+                }
+            }
+        };
         match protocol {
             Some(protocol) => {
                 let key = EndpointKey { protocol, endpoint };
-                self.bound_addr(&key)
-                    .ok_or_else(|| anyhow::anyhow!("virtual endpoint '{text}' is not bound"))
+                let kind = self.slot_kind(&key);
+                resolve_one(&key, &kind)
             }
             None => {
                 let tcp = EndpointKey::tcp(endpoint.clone());
                 let udp = EndpointKey::udp(endpoint);
-                match (self.bound_addr(&tcp), self.bound_addr(&udp)) {
-                    (Some(_), Some(_)) => bail!(
+                let tcp_kind = self.slot_kind(&tcp);
+                let udp_kind = self.slot_kind(&udp);
+                match (&tcp_kind, &udp_kind) {
+                    (SlotKind::TcpBound(_), SlotKind::TcpBound(_)) => bail!(
                         "ambiguous virtual endpoint '{text}': both TCP and UDP bindings exist; qualify as 'tcp/{text}' or 'udp/{text}'"
                     ),
-                    (Some(addr), None) | (None, Some(addr)) => Ok(addr),
-                    (None, None) => {
-                        bail!("virtual endpoint '{text}' is not bound")
+                    // A known slot's verdict beats an absent one; TCP
+                    // first preserves the bare-text default.
+                    _ => {
+                        if matches!(tcp_kind, SlotKind::Unmapped)
+                            && !matches!(udp_kind, SlotKind::Unmapped)
+                        {
+                            resolve_one(&udp, &udp_kind)
+                        } else {
+                            resolve_one(&tcp, &tcp_kind)
+                        }
                     }
                 }
             }
@@ -278,6 +396,12 @@ impl EndpointRegistry {
         match slot.spec {
             BindingSpec::Memory => Ok(AcquiredListener::Memory),
             BindingSpec::Offline => Ok(AcquiredListener::Offline),
+            BindingSpec::DialOnly { .. } => {
+                slot.claimed.store(false, Ordering::SeqCst);
+                bail!(
+                    "{func}: '{key}' is a dial-only mapping (the runner owns the socket; LISTEN elsewhere)"
+                )
+            }
             BindingSpec::Loopback { .. } | BindingSpec::Exposed { .. } => {
                 slot.claimed.store(false, Ordering::SeqCst);
                 bail!("{func}: '{key}' was never bound (the runner must call bind_all)")
@@ -285,42 +409,11 @@ impl EndpointRegistry {
         }
     }
 
-    /// Register an inline fallback bind (unmapped bare port, bound by the
-    /// plugin itself on loopback). The slot starts claimed; a racing twin
-    /// that claimed first makes this bail `already claimed` and the fresh
-    /// socket drops unlistened.
-    pub fn register_inline(
-        &self,
-        key: &EndpointKey,
-        listener: TcpListener,
-        func: &str,
-    ) -> Result<Arc<TcpListener>> {
-        let mut slots = self.lock_slots();
-        if slots.contains_key(key) {
-            bail!("{func}: '{key}' is already claimed");
-        }
-        let shared = Arc::new(listener);
-        slots.insert(
-            key.clone(),
-            ListenerSlot {
-                spec: BindingSpec::Loopback {
-                    port: shared.local_addr().map(|addr| addr.port()).unwrap_or(0),
-                },
-                socket: Some(Arc::clone(&shared)),
-                persistent: false,
-                claimed: AtomicBool::new(true),
-                memory: VecDeque::new(),
-            },
-        );
-        Ok(shared)
-    }
-
     /// Free a slot for the next claimant. Missing slots are ignored
     /// (socketless offline acquisitions never register); closing twice
-    /// stays silent. Inline (non-persistent) slots vanish entirely, with
-    /// their sockets and any queued memory pairs, so re-bind loops start
-    /// clean and ports free promptly; host-bound (persistent) slots keep
-    /// their socket and just unclaim for re-claim.
+    /// stays silent. Memory slots vanish entirely, with their sockets and
+    /// any queued memory pairs; host-bound (persistent) slots keep their
+    /// socket and just unclaim for re-claim.
     pub fn release(&self, key: &EndpointKey) {
         let mut slots = self.lock_slots();
         let inline = slots.get(key).is_some_and(|slot| !slot.persistent);
@@ -357,6 +450,7 @@ impl EndpointRegistry {
         match &slot.spec {
             BindingSpec::Memory => SlotKind::Memory,
             BindingSpec::Offline => SlotKind::Offline,
+            BindingSpec::DialOnly { addr } => SlotKind::TcpBound(*addr),
             BindingSpec::Loopback { .. } | BindingSpec::Exposed { .. } => {
                 match slot
                     .socket
@@ -394,49 +488,154 @@ impl EndpointRegistry {
     }
 }
 
-/// Acquire a listener for `SERVE`/`LISTEN`: claim a mapped slot, bind the
-/// loopback fallback inline for unmapped bare ports, or open a memory
-/// rendezvous for unmapped service names (in-process IPC needs no host
-/// mapping). Unmapped names auto-register so client-before-server order
-/// works from either side. Offline registries acquire socketless without
-/// touching the network. Shared by the NET and SSH plugins so the
-/// fallback shape stays identical.
+/// Fail a run before its first step when a named service is not fully
+/// bound: the runner never mapped it, or mapped it without binding.
+/// Offline registries pass trivially (socketless by runner decree).
+/// Enforcement behind the isolation mandate; call-time resolution
+/// repeats the same verdicts for defense in depth.
+pub fn assert_services_bound(
+    registry: &EndpointRegistry,
+    module: &str,
+    steps: &[Step],
+) -> Result<()> {
+    if registry.is_offline() {
+        return Ok(());
+    }
+    let mut calls = Vec::new();
+    for step in steps {
+        step.kind.walk_step_exprs(&mut |expr| {
+            if let Expr::Call { name, args } = expr
+                && let Some(func) = classify_service_call(module, name)
+            {
+                let service = match args.first() {
+                    Some(Expr::Literal(value)) => value.as_str().map(str::to_string),
+                    _ => None,
+                };
+                calls.push((func, service));
+            }
+        });
+    }
+    for (func, service) in calls {
+        let Some(service) = service else {
+            bail!(
+                "{func} service names must be string literals so the runner can verify bindings before execution"
+            );
+        };
+        check_service_bound(registry, func, &service)?;
+    }
+    Ok(())
+}
+
+/// Map a lowered call name to the canonical function it enforces, for
+/// one module's checker. Lowered names are fully qualified
+/// (`NET::NET_LISTEN`); bare canonical spellings match too. Anything
+/// else is not this module's business.
+fn classify_service_call(module: &str, name: &str) -> Option<&'static str> {
+    let (mod_part, base) = match name.split_once("::") {
+        Some((module, base)) => (Some(module), base),
+        None => (None, name),
+    };
+    match (module, mod_part, base) {
+        ("NET", _, "NET_LISTEN") | ("NET", Some("NET"), "LISTEN") => Some("NET_LISTEN"),
+        ("NET", _, "NET_CONNECT") | ("NET", Some("NET"), "CONNECT") => Some("NET_CONNECT"),
+        ("NET", _, "NET_PORT") | ("NET", Some("NET"), "PORT") => Some("NET_PORT"),
+        ("NET", _, "NET_ADDR") | ("NET", Some("NET"), "ADDR") => Some("NET_ADDR"),
+        ("SSH", _, "SSH_SERVE") | ("SSH", Some("SSH"), "SERVE") => Some("SSH_SERVE"),
+        ("SSH", _, "SSH_CONNECT") | ("SSH", Some("SSH"), "CONNECT") => Some("SSH_CONNECT"),
+        _ => None,
+    }
+}
+
+/// Verify one named service is fully bound: a runner-mapped socket, an
+/// explicitly-mapped memory slot, or an offline designation. Anything
+/// else is a hard error naming the fix. Introspection targets reuse
+/// their own verdicts (same text as the call path).
+fn check_service_bound(registry: &EndpointRegistry, func: &str, service: &str) -> Result<()> {
+    if func == "NET_PORT" || func == "NET_ADDR" {
+        let noun = if func == "NET_ADDR" {
+            "address"
+        } else {
+            "port"
+        };
+        return registry.resolve_ref(service, func, noun).map(|_| ());
+    }
+    let endpoint = crate::validate::parse_virtual_endpoint(service, func)?;
+    let key = EndpointKey::tcp(endpoint);
+    let sockets = match func {
+        "SSH_SERVE" | "SSH_CONNECT" => SocketRequirement::SocketRequired,
+        _ => SocketRequirement::SocketlessOk,
+    };
+    match registry.slot_kind(&key) {
+        SlotKind::TcpBound(_) | SlotKind::Offline => Ok(()),
+        SlotKind::Memory => match sockets {
+            SocketRequirement::SocketlessOk => Ok(()),
+            SocketRequirement::SocketRequired => Err(no_cli_mapping(func, &key.endpoint)),
+        },
+        SlotKind::TcpUnbound => {
+            bail!("{func}: '{key}' was never bound (the runner must call bind_all)")
+        }
+        SlotKind::Unmapped => Err(no_cli_mapping(func, &key.endpoint)),
+    }
+}
+
+/// Acquire a listener for `SERVE`/`LISTEN`: claim a runner-mapped slot.
+/// Unmapped keys are a hard error everywhere (memory rendezvous needs an
+/// explicit runner mapping; see `assert_services_bound`, which fails the
+/// run before execution reaches here). Callers needing a socket (SSH)
+/// additionally bail on mapped-memory slots with the CLI mapping hint.
+/// Offline registries acquire socketless without touching the network.
+/// One function, both plugins: serve resolution never forks per plugin,
+/// and no script string ever binds a physical port.
 pub fn acquire_listener(
     registry: &Arc<EndpointRegistry>,
     key: &EndpointKey,
     func: &str,
+    sockets: SocketRequirement,
 ) -> Result<(AcquiredListener, Arc<EndpointRegistry>)> {
     if registry.is_offline() {
         return Ok((AcquiredListener::Offline, Arc::clone(registry)));
     }
-    if registry.has(key) {
-        return registry
-            .claim(key, func)
-            .map(|got| (got, Arc::clone(registry)));
+    if !registry.has(key) {
+        return Err(no_cli_mapping(func, &key.endpoint));
     }
-    match &key.endpoint {
-        VirtualEndpoint::Port(port) => {
-            let addr = SocketAddr::from(([127, 0, 0, 1], *port));
-            let listener =
-                TcpListener::bind(addr).with_context(|| format!("{func} bind {addr} failed"))?;
-            let shared = registry.register_inline(key, listener, func)?;
-            let bound = shared
-                .local_addr()
-                .with_context(|| format!("{func} cannot read its bound address"))?;
-            Ok((
-                AcquiredListener::Tcp {
-                    listener: shared,
-                    addr: bound,
-                },
-                Arc::clone(registry),
-            ))
+    let (acquired, registry) = registry
+        .claim(key, func)
+        .map(|got| (got, Arc::clone(registry)))?;
+    match (acquired, sockets) {
+        (AcquiredListener::Memory, SocketRequirement::SocketRequired) => {
+            Err(no_cli_mapping(func, &key.endpoint))
         }
-        VirtualEndpoint::Name(_) => {
-            registry.ensure_memory_slot(key);
-            registry
-                .claim(key, func)
-                .map(|got| (got, Arc::clone(registry)))
+        (got, _) => Ok((got, registry)),
+    }
+}
+
+/// Resolve a dial target for `CONNECT`: a runner-mapped socket address,
+/// or an explicitly-mapped memory rendezvous when the caller tolerates
+/// socketless operation (NET). Unmapped keys are a hard error everywhere
+/// (see `assert_services_bound`, which fails the run first); callers
+/// needing a socket (SSH) additionally bail on mapped-memory slots.
+/// One function, both plugins: dial resolution never forks per plugin,
+/// and no script string ever dials a physical address.
+pub fn resolve_service_target(
+    registry: &Arc<EndpointRegistry>,
+    key: &EndpointKey,
+    func: &str,
+    sockets: SocketRequirement,
+) -> Result<ServiceTarget> {
+    if registry.is_offline() {
+        bail!("{func}: '{key}' is offline")
+    }
+    match registry.slot_kind(key) {
+        SlotKind::TcpBound(addr) => Ok(ServiceTarget::Tcp(addr)),
+        SlotKind::Memory => match sockets {
+            SocketRequirement::SocketlessOk => Ok(ServiceTarget::Memory),
+            SocketRequirement::SocketRequired => Err(no_cli_mapping(func, &key.endpoint)),
+        },
+        SlotKind::Unmapped => Err(no_cli_mapping(func, &key.endpoint)),
+        SlotKind::TcpUnbound => {
+            bail!("{func}: '{key}' was never bound (the runner must call bind_all)")
         }
+        SlotKind::Offline => bail!("{func}: '{key}' is offline"),
     }
 }
 
@@ -602,46 +801,71 @@ mod tests {
             )
             .expect("mapping");
         registry.bind_all().expect("bind_all");
-        let web = registry.resolve_ref("web", "NET_PORT").expect("bare tcp");
+        let web = registry
+            .resolve_ref("web", "NET_PORT", "port")
+            .expect("bare tcp");
         assert_ne!(web.port(), 0);
         assert_eq!(
             registry
-                .resolve_ref("tcp/web", "NET_PORT")
+                .resolve_ref("tcp/web", "NET_PORT", "port")
                 .expect("explicit tcp"),
             web
         );
         let dns = registry
-            .resolve_ref("dns", "NET_PORT")
+            .resolve_ref("dns", "NET_PORT", "port")
             .expect("bare udp fallback");
         assert_ne!(dns.port(), 0);
         assert_eq!(
             registry
-                .resolve_ref("udp/dns", "NET_PORT")
+                .resolve_ref("udp/dns", "NET_PORT", "port")
                 .expect("explicit udp"),
             dns
         );
         assert_eq!(
             registry
-                .resolve_ref("dns/udp", "NET_PORT")
+                .resolve_ref("dns/udp", "NET_PORT", "port")
                 .expect("suffix form"),
             dns
         );
+        // Wrong protocol on a bound name: not mapped under that key.
         let err = format!(
             "{:#}",
-            registry.resolve_ref("tcp/dns", "NET_PORT").unwrap_err()
+            registry
+                .resolve_ref("tcp/dns", "NET_PORT", "port")
+                .unwrap_err()
         );
-        assert!(err.contains("is not bound"), "{err}");
+        assert!(err.contains("is not mapped"), "{err}");
+        // Unknown names never report a sentinel.
         let err = format!(
             "{:#}",
-            registry.resolve_ref("nope", "NET_PORT").unwrap_err()
+            registry
+                .resolve_ref("nope", "NET_PORT", "port")
+                .unwrap_err()
         );
-        assert!(err.contains("is not bound"), "{err}");
-        // Memory slots have no socket: not bound, never a sentinel.
+        assert!(err.contains("is not mapped"), "{err}");
+        // Memory slots have no socket: the virtual-channel message, with
+        // the caller's noun.
         registry
             .add_mapping(&named_key("mem"), BindingSpec::Memory)
             .expect("mapping");
-        let err = format!("{:#}", registry.resolve_ref("mem", "NET_PORT").unwrap_err());
-        assert!(err.contains("is not bound"), "{err}");
+        let err = format!(
+            "{:#}",
+            registry.resolve_ref("mem", "NET_PORT", "port").unwrap_err()
+        );
+        assert!(
+            err.contains("is running as an in-memory virtual channel with no physical port"),
+            "{err}"
+        );
+        let err = format!(
+            "{:#}",
+            registry
+                .resolve_ref("mem", "NET_ADDR", "address")
+                .unwrap_err()
+        );
+        assert!(
+            err.contains("is running as an in-memory virtual channel with no physical address"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -661,13 +885,20 @@ mod tests {
             )
             .expect("mapping");
         registry.bind_all().expect("bind_all");
-        let err = format!("{:#}", registry.resolve_ref("dns", "NET_PORT").unwrap_err());
+        let err = format!(
+            "{:#}",
+            registry.resolve_ref("dns", "NET_PORT", "port").unwrap_err()
+        );
         assert!(err.contains("ambiguous"), "{err}");
         assert!(err.contains("tcp/dns"), "{err}");
         assert!(err.contains("udp/dns"), "{err}");
         // Qualified lookups stay independent despite the collision.
-        let tcp = registry.resolve_ref("tcp/dns", "NET_PORT").expect("tcp");
-        let udp = registry.resolve_ref("udp/dns", "NET_PORT").expect("udp");
+        let tcp = registry
+            .resolve_ref("tcp/dns", "NET_PORT", "port")
+            .expect("tcp");
+        let udp = registry
+            .resolve_ref("udp/dns", "NET_PORT", "port")
+            .expect("udp");
         assert_ne!(tcp.port(), 0);
         assert_ne!(udp.port(), 0);
     }

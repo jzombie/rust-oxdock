@@ -393,21 +393,42 @@ fn execute_plugin_block(block: &FencedBlock, name: &str) -> Result<()> {
     let fs: Box<dyn oxdock_fs::WorkspaceFs> = Box::new(resolver);
     // Doc fences name logical services, never physical addresses, so
     // the harness maps them the way a CLI runner would: ephemeral
-    // loopback binds resolved through the registry. Unmapped names
-    // would fall back to memory rendezvous, which SSH rejects.
+    // loopback binds resolved through the registry. Scripts declare,
+    // the runner binds.
     let ssh_registry = std::sync::Arc::new(oxdock_net_plugin::EndpointRegistry::new(false));
-    ssh_registry
-        .add_mapping(
-            &oxdock_net_plugin::EndpointKey::tcp(oxdock_net_plugin::VirtualEndpoint::Name(
-                "doc-ssh-demo".to_string(),
-            )),
-            oxdock_net_plugin::BindingSpec::Loopback { port: 0 },
-        )
-        .context("map doc service")?;
-    ssh_registry.bind_all().context("bind doc service")?;
+    for service in [
+        "doc-ssh-route",
+        "doc-ssh-serve",
+        "doc-ssh-accept",
+        "doc-ssh-pump",
+        "doc-ssh-close",
+        "doc-ssh-connect",
+        "doc-ssh-pty",
+        "doc-ssh-demo",
+    ] {
+        ssh_registry
+            .add_cli_mapping(service, "127.0.0.1:0")
+            .context("map doc service")?;
+    }
+    ssh_registry.bind_all().context("bind doc services")?;
+    let net_registry = std::sync::Arc::new(oxdock_net_plugin::EndpointRegistry::new(false));
+    for service in [
+        "doc-net-listen",
+        "doc-net-demo",
+        "doc-net-connect",
+        "doc-net-observe",
+        "doc-net-dial",
+        "doc-net-close",
+        "doc-net-fetch",
+    ] {
+        net_registry
+            .add_cli_mapping(service, "127.0.0.1:0")
+            .context("map doc service")?;
+    }
+    net_registry.bind_all().context("bind doc services")?;
     let mut modules = vec![
         oxdock_ssh_plugin::module_with_endpoints(ssh_registry),
-        oxdock_net_plugin::module(),
+        oxdock_net_plugin::module_with_endpoints(net_registry),
     ];
     #[cfg(feature = "markdown")]
     modules.push(oxdock_markdown_plugin::module());
