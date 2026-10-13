@@ -54,7 +54,53 @@ IF $dry == "false" {
     [env:GITHUB_ACTIONS] {
         ECHO "::group::Publish workspace"
     }
-    RUN ["cargo", "publish", "--workspace"]
+    LET $probedir: STRING = "{{ env:RUNNER_TEMP }}"
+    IF $probedir == "" {
+        $probedir = "/tmp"
+    }
+    LET $meta_raw: STRING = RUN cargo metadata --no-deps --format-version 1
+    LET $meta: MAP<ANY> = PARSE_JSON($meta_raw)
+    LET $round: INT = 0
+    LET $landed: BOOL = false
+    # A successful round is convergence: transient errors and partial progress just run another.
+    WHILE !$landed {
+        $round = $round + 1
+        IF $round == 10 {
+            ECHO "workspace publish did not converge"
+            EXIT 1
+        }
+        LET $excludes: STRING = ""
+        LET $missing: INT = 0
+        FOR $pkg: MAP<ANY> IN $meta.packages {
+            LET $pname: STRING = $pkg.name
+            LET $pver: STRING = $pkg.version
+            # Probes run outside the tree: cargo info inside the workspace resolves local packages instead of the registry.
+            LET $probe: STRING = RUN cd "{{ $probedir }}" && cargo info "{{ $pname }}@{{ $pver }}" >/dev/null 2>&1 || printf OXDOCK_PUBLISH_MISSING
+            IF $probe == "" {
+                # Exclude what landed: cargo has no skip-existing, so a resumed run fails on the first published crate.
+                $excludes = "{{ $excludes }} --exclude {{ $pname }}"
+            } ELSE {
+                $missing = $missing + 1
+            }
+        }
+        IF $missing == 0 {
+            # Every member landed: nothing to publish, and cargo refuses an all-excluded invocation.
+            $landed = true
+        } ELSE {
+            # Cargo keeps topological order over the rest and skips publish=false members itself.
+            # Output goes to the round log, never the capture: progress text ahead of a failure would defeat the exact sentinel match.
+            LET $round_out: STRING = RUN cargo publish --workspace{{ $excludes }} >"{{ $probedir }}/publish-round.log" 2>&1 || printf OXDOCK_PUBLISH_ROUND_FAILED
+            IF $round_out == "OXDOCK_PUBLISH_ROUND_FAILED" {
+                ECHO "publish round failed; last output:"
+                LET $diag: STRING = RUN cat "{{ $probedir }}/publish-round.log"
+                ECHO "{{ $diag }}"
+                ECHO "rechecking the registry"
+                SLEEP 30s
+            } ELSE {
+                $landed = true
+            }
+        }
+    }
     [env:GITHUB_ACTIONS] {
         ECHO "::endgroup::"
     }
@@ -95,5 +141,9 @@ IF $dry == "false" {
         RUN ["gh", "release", "create", "v{{ $version }}", "--title", "{{ $version }}", "--notes-file", "target/release-notes.md", "target/artifacts/{{ $bin }}-x86_64-unknown-linux-musl.tar.gz", "target/artifacts/{{ $bin }}-aarch64-unknown-linux-musl.tar.gz", "target/artifacts/{{ $bin }}-aarch64-apple-darwin.tar.gz", "target/artifacts/{{ $bin }}-x86_64-pc-windows-msvc.tar.gz", "target/artifacts/{{ $bin }}-aarch64-pc-windows-msvc.tar.gz", "target/artifacts/SHA256SUMS", "target/artifacts/install.sh", "target/artifacts/install.ps1", "target/artifacts/install.oxfile"]
     }
 } ELSE {
+    ECHO "=== RELEASE NOTES ==="
+    LET $preview: STRING = READ "target/release-notes.md"
+    ECHO "{{ $preview }}"
+    ECHO "=== END RELEASE NOTES ==="
     ECHO "Dry run complete: nothing published, no tag created."
 }

@@ -198,6 +198,34 @@ fn fixture_changelog() -> String {
     "# Changelog\n\n## [9.9.9-t] - 2026-10-09\n\n### Added\n\n- Thing.\n\n## [0.0.0-old] - 2026-01-01\n\n- Decoy.\n".to_string()
 }
 
+/// Canned `cargo metadata` for a two-crate fixture registry at the
+/// fixture version: `demo-a` plus `demo-b`, both publishable.
+#[cfg(feature = "markdown")]
+fn fixture_registry_json() -> String {
+    format!(
+        "{{\"packages\": [{{\"name\": \"demo-a\", \"version\": \"{FIXTURE_VERSION}\"}}, {{\"name\": \"demo-b\", \"version\": \"{FIXTURE_VERSION}\"}}]}}"
+    )
+}
+
+/// Script the fixture registry state behind the release script's
+/// probes: landed crates answer empty (present, like a quiet `cargo
+/// info`), missing crates answer the sentinel (absent, like the
+/// script's own `|| printf` fallback). Needles carry no quotes: the
+/// engine strips them before the recorder sees the shell text.
+#[cfg(feature = "markdown")]
+fn script_registry(run: &ReleaseRun, landed: &[&str]) {
+    run.manager
+        .respond("cargo metadata", &fixture_registry_json());
+    for name in ["demo-a", "demo-b"] {
+        let probe = format!("cargo info {name}@{FIXTURE_VERSION}");
+        if landed.contains(&name) {
+            run.manager.respond(&probe, "");
+        } else {
+            run.manager.respond(&probe, "OXDOCK_PUBLISH_MISSING");
+        }
+    }
+}
+
 #[cfg(feature = "markdown")]
 struct ReleaseRun {
     _temp: oxdock_fs::GuardedTempDir,
@@ -292,36 +320,45 @@ fn dry_run_runs_only_the_dry_publish() -> Result<()> {
     Ok(())
 }
 
-/// Full run with binaries: the exact eight-invocation pipeline in order.
-/// Workspace publishing stays workspace-scoped (exact argv proves no
-/// per-crate flags), the tag gate passes on identical canned output,
-/// and creation carries every asset plus the checksums file.
+/// Full run with binaries and a partial registry: `demo-a` landed so
+/// the publish excludes it, `demo-b` is missing so the round runs.
+/// Publishing stays workspace-scoped (one invocation, no per-crate
+/// publishes); the tag gate passes on identical canned output, and
+/// creation carries every asset plus the checksums file.
 #[test]
 #[cfg(feature = "markdown")]
 #[cfg_attr(miri, ignore = "needs host tempdir for the fixture root")]
 fn real_run_with_binaries_runs_the_full_pipeline() -> Result<()> {
     let run = release_harness(FIXTURE_VERSION, "false", "true")?;
+    script_registry(&run, &["demo-a"]);
+    run.manager.respond("cargo publish --workspace", "");
     run.execute()?;
     let calls = run.calls();
-    assert_eq!(calls.len(), 8, "eight invocations in order: {calls:?}");
+    assert_eq!(calls.len(), 11, "eleven invocations in order: {calls:?}");
     assert_eq!(
-        argv_calls(&calls)[..2],
+        argv_calls(&calls)[0],
         vec![
-            vec![
-                "cargo".to_string(),
-                "publish".to_string(),
-                "--workspace".to_string(),
-                "--dry-run".to_string(),
-            ],
-            vec![
-                "cargo".to_string(),
-                "publish".to_string(),
-                "--workspace".to_string(),
-            ],
+            "cargo".to_string(),
+            "publish".to_string(),
+            "--workspace".to_string(),
+            "--dry-run".to_string(),
         ],
-        "workspace publish, dry first, no per-crate flags"
+        "dry run first"
     );
     let shells = shell_calls(&calls);
+    let publish: Vec<&&str> = shells
+        .iter()
+        .filter(|shell| shell.contains("cargo publish --workspace"))
+        .collect();
+    assert_eq!(publish.len(), 1, "one real publish: {shells:?}");
+    assert!(
+        publish[0].contains("--exclude demo-a"),
+        "landed crate excluded: {shells:?}"
+    );
+    assert!(
+        !publish[0].contains("demo-b"),
+        "missing crate never excluded: {shells:?}"
+    );
     assert!(
         shells
             .iter()
@@ -371,15 +408,25 @@ fn real_run_with_binaries_runs_the_full_pipeline() -> Result<()> {
     Ok(())
 }
 
-/// Full run without binaries: tag, push, and cleanup still run, but the
-/// creation call carries notes alone with no asset paths.
+/// Full run without binaries on a fully landed registry: every probe
+/// answers present, so the loop converges without invoking publish at
+/// all. Tag, push, and cleanup still run, and creation carries notes
+/// alone with no asset paths.
 #[test]
 #[cfg(feature = "markdown")]
 #[cfg_attr(miri, ignore = "needs host tempdir for the fixture root")]
 fn real_run_without_binaries_creates_notes_only() -> Result<()> {
     let run = release_harness(FIXTURE_VERSION, "false", "false")?;
+    script_registry(&run, &["demo-a", "demo-b"]);
     run.execute()?;
     let calls = run.calls();
+    let shells = shell_calls(&calls);
+    assert!(
+        !shells
+            .iter()
+            .any(|shell| shell.contains("cargo publish --workspace")),
+        "publish skipped when nothing is missing: {shells:?}"
+    );
     let argvs = argv_calls(&calls);
     let creates: Vec<&Vec<String>> = argvs
         .iter()
@@ -405,6 +452,70 @@ fn real_run_without_binaries_creates_notes_only() -> Result<()> {
             Call::Shell(script) => script.contains(".tar.gz"),
         }),
         "no asset path anywhere in a binaries-off run: {calls:?}"
+    );
+    Ok(())
+}
+
+/// All-landed registry with binaries: the publish is skipped yet the
+/// creation still carries every asset. Covers the zero-missing guard
+/// independently of the binaries-off shape above.
+#[test]
+#[cfg(feature = "markdown")]
+#[cfg_attr(miri, ignore = "needs host tempdir for the fixture root")]
+fn all_landed_with_binaries_skips_publish() -> Result<()> {
+    let run = release_harness(FIXTURE_VERSION, "false", "true")?;
+    script_registry(&run, &["demo-a", "demo-b"]);
+    run.execute()?;
+    let calls = run.calls();
+    let shells = shell_calls(&calls);
+    assert!(
+        !shells
+            .iter()
+            .any(|shell| shell.contains("cargo publish --workspace")),
+        "publish skipped when nothing is missing: {shells:?}"
+    );
+    let argvs = argv_calls(&calls);
+    let creates: Vec<&Vec<String>> = argvs
+        .iter()
+        .filter(|argv| argv.first().is_some_and(|exe| exe == "gh"))
+        .collect();
+    assert_eq!(creates.len(), 1, "one creation: {creates:?}");
+    assert!(
+        creates[0].iter().any(|arg| arg.contains(".tar.gz")),
+        "assets still attached: {creates:?}"
+    );
+    Ok(())
+}
+
+/// A failed round retries and converges: the first publish answers
+/// the failure sentinel, diagnostics surface, and the second round
+/// re-probes before publishing clean. Registry probes stay sticky
+/// across rounds; only the publish answers once.
+#[test]
+#[cfg(feature = "markdown")]
+#[cfg_attr(miri, ignore = "needs host tempdir for the fixture root")]
+fn publish_retries_failed_round_then_converges() -> Result<()> {
+    let run = release_harness(FIXTURE_VERSION, "false", "true")?;
+    script_registry(&run, &["demo-a"]);
+    run.manager
+        .respond_once("cargo publish --workspace", "OXDOCK_PUBLISH_ROUND_FAILED");
+    run.manager.respond("cargo publish --workspace", "");
+    run.manager.respond("cat ", "boom");
+    run.execute()?;
+    let calls = run.calls();
+    let shells = shell_calls(&calls);
+    let publish: Vec<&&str> = shells
+        .iter()
+        .filter(|shell| shell.contains("cargo publish --workspace"))
+        .collect();
+    assert_eq!(
+        publish.len(),
+        2,
+        "failed round plus converged round: {shells:?}"
+    );
+    assert!(
+        shells.iter().any(|shell| shell.starts_with("cat ")),
+        "failure diagnostics surface: {shells:?}"
     );
     Ok(())
 }
