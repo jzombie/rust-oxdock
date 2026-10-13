@@ -68,7 +68,7 @@ IF $dry == "false" {
         IF $round == 10 {
             ECHO "workspace publish did not converge"
             EXIT 1
-        
+        }
         LET $excludes: STRING = ""
         LET $missing: INT = 0
         FOR $pkg: MAP<ANY> IN $meta.packages {
