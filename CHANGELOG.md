@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [Unreleased]
+
+### Changed
+
+- CI converges `rust-lint` and `rust-tests` into one OxDock-driven `rust-checks` pipeline (#202): every `run:` body is an inline leg on the pinned `v0.28.0-alpha` engine, with lockfile and toolchain hashing plus coverage parsing in native DSL (`HASH_SHA256`, `TEXT_EXTRACT`, `TEXT_GREP`, `TEXT_FIELDS`). The Miri badge script counts listings with `TEXT_COUNT_MATCHES` instead of `grep -c`. The `setup-oxdock` minimum moves to `0.28.0-alpha` for the string surgery vocabulary.
+
 ## [0.28.0-alpha] - 2026-10-13
 
 ### Added

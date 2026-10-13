@@ -9,4 +9,4 @@ Tests live across the workspace; prefer [oxdock-logic-tests](../crates/oxdock-lo
 
 Prefer `cargo test --workspace --tests` to cover all crates. Fixtures for the build-time macros live under `crates/oxdock-logic-tests/fixtures/integration/buildtime_macros`.
 
-Full workspace results are visible on the [CI runs](https://github.com/jzombie/rust-oxdock/actions/workflows/rust-tests.yml) page.
+Full workspace results are visible on the [CI runs](https://github.com/jzombie/rust-oxdock/actions/workflows/rust-checks.yml) page.

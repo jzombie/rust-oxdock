@@ -16,12 +16,20 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
+# Pinned interpreter for every OxDock step below. TEXT_* string surgery
+# needs 0.28.0-alpha minimum. Bump only after a newer tag proves green;
+# an older engine choking on new syntax fails loudly at step start.
+env:
+  OXDOCK_PINNED_ENGINE: v0.28.0-alpha
+
 jobs:
   miri:
     name: miri (ubuntu-latest)
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      OXDOCK_WORKSPACE_ROOT: ${{ github.workspace }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -33,27 +41,35 @@ jobs:
         with:
           components: miri
 
-      - name: Capture rustc commit hash
-        id: rustc-miri
-        shell: bash
-        run: |
-          set -euo pipefail
-          rustc -Vv
-          echo "hash=$(rustc -Vv | sed -n 's/^commit-hash: //p')" >> "$GITHUB_OUTPUT"
+      # Pinned engine, never `latest`: the badge must name a fixed
+      # release, and a moving default would change CI with no repo
+      # diff. The pin lives in top-level `env`, not here.
+      - name: Install OxDock engine
+        uses: ./.github/actions/setup-oxdock
+        with:
+          version: ${{ env.OXDOCK_PINNED_ENGINE }}
 
-      - name: Calculate lockfile hash
-        id: lockfile-miri
-        shell: bash
+      # Native hashing: HASH_SHA256 digests Cargo.lock directly, and
+      # TEXT_EXTRACT picks the rustc commit out of the version report.
+      # No sha256sum, shasum, awk, or sed.
+      - name: Hash lockfile and toolchain
+        id: hashes
+        shell: oxdock --script {0}
         run: |
-          if command -v sha256sum >/dev/null 2>&1; then
-            HASH=$(sha256sum Cargo.lock | awk '{print $1}')
-          elif command -v shasum >/dev/null 2>&1; then
-            HASH=$(shasum -a 256 Cargo.lock | awk '{print $1}')
-          else
-            echo "No hashing utility found"
-            exit 1
-          fi
-          echo "hash=$HASH" >> "$GITHUB_OUTPUT"
+          IMPORT [STD]
+          INHERIT_ENV [GITHUB_OUTPUT, GITHUB_WORKSPACE]
+          WORKSPACE SYSTEM
+          WORKDIR {{ env:GITHUB_WORKSPACE }}
+          ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
+          LET $hp: PIPE
+          WITH_IO [stdout=$hp] HASH_SHA256 Cargo.lock
+          WITH_IO [stdin=$hp] READ_LINE $lock
+          ECHO "lockfile: {{ $lock }}"
+          APPEND "{{ env:GITHUB_OUTPUT }}" "lockfile_hash={{ $lock }}\n"
+          LET $report: STRING = RUN ["rustc", "-Vv"]
+          LET $caps: LIST<STRING> = TEXT_EXTRACT($report, "(?m)^commit-hash: (\\S+)")
+          ECHO "rustc: {{ $caps.1 }}"
+          APPEND "{{ env:GITHUB_OUTPUT }}" "rustc_hash={{ $caps.1 }}\n"
 
       - name: Cache Cargo dependencies for Miri
         uses: actions/cache@v4
@@ -64,21 +80,13 @@ jobs:
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
-          key: miri-${{ runner.os }}-${{ steps.rustc-miri.outputs.hash }}-${{ steps.lockfile-miri.outputs.hash }}
+          key: miri-${{ runner.os }}-${{ steps.hashes.outputs.rustc_hash }}-${{ steps.hashes.outputs.lockfile_hash }}
 
       - name: Prepare Miri
         run: cargo miri setup
 
       - name: Run Miri (unit tests only)
         run: cargo miri test --workspace --all-features --lib --tests
-
-      # Pinned engine, never `latest`: the badge must name a fixed
-      # release, and a moving default would change CI with no repo
-      # diff. Bump only after a newer tag proves green.
-      - name: Install OxDock engine
-        uses: ./.github/actions/setup-oxdock
-        with:
-          version: v0.24.4-alpha
 
       - name: Report Miri coverage
         shell: bash

@@ -26,12 +26,13 @@ IF $cmd == "" {
     $cmd = "cargo test --workspace --all-features --lib --tests"
 }
 
-# Listings run in the system shell: pipes and `|| true` are shell
-# syntax (grep -c exits 1 on zero matches, which must not fail the run).
-LET $total_out: STRING = RUN "{{ $cmd }} -- --list --format terse | grep -c ': test' || true"
-LET $ignored_out: STRING = RUN "{{ $cmd }} -- --ignored --list --format terse | grep -c ': test' || true"
-LET $total: INT = INT($total_out)
-LET $ignored: INT = INT($ignored_out)
+# Listings capture raw and count in the DSL: TEXT_COUNT_MATCHES is the
+# grep -c shape, so a zero-match listing binds zero instead of failing
+# the run the way grep -c does without an `|| true` guard.
+LET $total_listing: STRING = RUN "{{ $cmd }} -- --list --format terse"
+LET $ignored_listing: STRING = RUN "{{ $cmd }} -- --ignored --list --format terse"
+LET $total: INT = TEXT_COUNT_MATCHES($total_listing, ": test")
+LET $ignored: INT = TEXT_COUNT_MATCHES($ignored_listing, ": test")
 LET $run_cnt: INT = $total - $ignored
 
 LET $pct: FLOAT = 0.0

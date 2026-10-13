@@ -37,6 +37,14 @@ fn badge_script_parses_and_covers_all_surfaces() -> Result<()> {
         "badge script writes the badge JSON"
     );
     assert!(
+        text.contains("TEXT_COUNT_MATCHES"),
+        "badge script counts listings in the DSL, never through grep"
+    );
+    assert!(
+        !text.contains("| grep -c"),
+        "badge script no longer pipes listings through grep"
+    );
+    assert!(
         text.contains("GITHUB_OUTPUT") && text.contains("GITHUB_STEP_SUMMARY"),
         "badge script bridges both runner files"
     );
