@@ -23,6 +23,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - New `BindingSpec::DialOnly` slot: resolvable for dials against harness-held listeners and runner-owned upstreams, never bound by `bind_all`, never claimable for `LISTEN`.
 - Listener sockets set `SO_REUSEADDR` so close-and-reclaim loops survive a still-closing previous socket.
 - Unmapped services are a hard error before execution: modules stage a `PreRunCheck` in their states and the runner verifies every named service is fully bound (mapped socket or explicitly-mapped memory) up front, aborting with zero side effects on failure. Memory rendezvous needs an explicit runner mapping; service names must be string literals.
+- `SSH_PTY_RUN` drains before teardown: the supervisor waits for output quiescence after child exit instead of releasing the console immediately, so a slow ConPTY flush no longer truncates the tail bytes (the promised drain-before-return now holds on Windows).
 
 ## [0.26.0-alpha] - 2026-10-12
 
