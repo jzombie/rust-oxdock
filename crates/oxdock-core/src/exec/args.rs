@@ -1,7 +1,9 @@
 use anyhow::{Result, bail};
 use oxdock_fs::EntryKind;
 use oxdock_parser::{Arg, ArgPart, ArithOp, CompareOp, Expr, LogicalOp, MathOp, TypeTag, Value};
-use oxdock_process::ProcessManager;
+use oxdock_pipe::{SharedInput, SharedOutput, SpillBuffer};
+use oxdock_process::{ProcessManager, format_value_for_string};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::state::ExecState;
 use super::steps::StepCtx;
@@ -407,21 +409,25 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
             for arg in args {
                 vals.push(evaluate_expr(arg, cx)?);
             }
-            // Pure scalar fns first (no context needed), then stateful/IO fns.
+            // Stateful/IO fns first (full behavior where step IO
+            // exists), then pure scalar fns. Dual entries answer with
+            // their ctx arm here and their template arm only where no
+            // context exists; single-arm entries are unaffected either
+            // way, since one lookup always misses for them.
             // Each clone ends the registry borrow before invoking user code.
             // Both arms verify the declared return slot: a host body
             // handing back a word outside its tag fails here, at the
             // call boundary, with no coercion to rescue it.
-            if let Some(func) = cx.state.clone_native_pure(name.as_str()) {
-                let value = func(vals)?;
+            if let Some(func) = cx.state.clone_native_ctx(name.as_str()) {
+                let value = func(cx, vals)?;
                 check_host_return_value(
                     &format!("function `{}` returned", super::base_name(name)),
                     &meta.returns,
                     &value,
                 )?;
                 Ok(value)
-            } else if let Some(func) = cx.state.clone_native_ctx(name.as_str()) {
-                let value = func(cx, vals)?;
+            } else if let Some(func) = cx.state.clone_native_pure(name.as_str()) {
+                let value = func(vals)?;
                 check_host_return_value(
                     &format!("function `{}` returned", super::base_name(name)),
                     &meta.returns,
@@ -1200,19 +1206,21 @@ fn evaluate_compiled_math<P: ProcessManager>(
                     args.push(pop_stack(&mut stack)?);
                 }
                 args.reverse();
-                // RPN math path: pure scalar fns plus stateful fns opted
-                // into `rpn` run through the registry; anything else
-                // (PATH_TYPE, FUNCTIONS, DESCRIBE, TYPES, TYPE_DESCRIBE)
-                // is AST-only by design.
-                let val = if let Some(func) = cx.state.clone_native_pure(name.as_str()) {
-                    func(args)?
-                } else if cx
+                // RPN math path: stateful fns opted into `rpn` first
+                // (full behavior where step IO exists), then pure
+                // scalar fns; anything else (PATH_TYPE, FUNCTIONS,
+                // DESCRIBE, TYPES, TYPE_DESCRIBE) is AST-only by
+                // design. Dual entries answer with their ctx arm here,
+                // like every other context carrying cx.
+                let val = if cx
                     .state
                     .native_meta(name.as_str())
                     .is_some_and(|meta| meta.rpn)
                     && let Some(func) = cx.state.clone_native_ctx(name.as_str())
                 {
                     func(cx, args)?
+                } else if let Some(func) = cx.state.clone_native_pure(name.as_str()) {
+                    func(args)?
                 } else {
                     bail!("unknown function {name}")
                 };
@@ -1564,6 +1572,41 @@ pub(crate) fn expand_string<P: ProcessManager>(
                             // Missing → emit empty
                         } else if let Some(val) = state.get_var(key) {
                             output.push_str(&format_value_for_string(&val));
+                        } else if let Some((module, func, args_src)) =
+                            oxdock_process::parse_placeholder_call(key)
+                        {
+                            // `{{ MODULE::FUNC(args) }}` through the shared
+                            // pure table: the same registry EXPAND
+                            // templates resolve, so ordinary strings and
+                            // file templates agree. Unknown functions and
+                            // bad args fail here instead of rendering
+                            // empty; keys that are not call shaped keep
+                            // the empty below (no variable can spell
+                            // `::` plus parens).
+                            let table = state.pure_function_table();
+                            let callee = table
+                                .get(module.as_str())
+                                .and_then(|entries| entries.get(func.as_str()))
+                                .ok_or_else(|| {
+                                    let mut known: Vec<String> = table
+                                        .iter()
+                                        .flat_map(|(m, entries)| {
+                                            entries.keys().map(move |f| format!("{m}::{f}"))
+                                        })
+                                        .collect();
+                                    known.sort();
+                                    anyhow::anyhow!(
+                                        "unknown placeholder function '{module}::{func}'; known functions: {}",
+                                        known.join(", ")
+                                    )
+                                })?;
+                            let vars = state.all_vars();
+                            let mut args = Vec::with_capacity(args_src.len());
+                            for src in args_src {
+                                args.push(oxdock_process::resolve_placeholder_arg(&src, &vars)?);
+                            }
+                            let result = callee(args)?;
+                            output.push_str(&format_value_for_string(&result));
                         }
                         // Bare key not in DSL vars → emit empty
                     }
@@ -1641,52 +1684,779 @@ pub(crate) fn expand_dsl_vars<P: ProcessManager>(input: &str, state: &ExecState<
     output
 }
 
-/// Format a `Value` as a string for inline interpolation.
-///
-/// Float rendering is defined as `f.to_string()`: Rust's `Display` for `f64`
-/// already produces the shortest round-trip decimal (Ryū since 1.36), so
-/// `ECHO` / `{{ }}` output stays clean (`3.14`, not `3.140000`) with no
-/// extra dependency. This rendering also feeds the `==`/`!=` string
-/// fallback for non-numeric operands.
-pub(crate) fn format_value_for_string(val: &Value) -> String {
-    if let Some(s) = val.as_str() {
-        return s.to_string();
+/// Compile size limit for `TEXT_*` regex patterns. Bounds automata
+/// construction so a hostile pattern fails closed at compile time.
+pub(crate) const TEXT_REGEX_SIZE_LIMIT: usize = 1_000_000;
+
+/// Bound on cached compiled patterns. Loops reusing a few patterns (a
+/// per-line `TEXT_MATCH` over many lines) compile once; adversarial
+/// pattern churn clears instead of growing without bound. Keyed by the
+/// pattern text alone: compilation is a pure function of it.
+const TEXT_PATTERN_CACHE_MAX: usize = 64;
+
+static TEXT_PATTERN_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, regex::Regex>>,
+> = std::sync::OnceLock::new();
+
+fn text_pattern_cache() -> &'static std::sync::Mutex<std::collections::HashMap<String, regex::Regex>>
+{
+    TEXT_PATTERN_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Compile a `TEXT_*` regex pattern, failing closed with position
+/// info on bad patterns. The `regex` crate is automata backed with
+/// linear-time matching and no backtracking. Compiled successes cache
+/// by pattern text so repeated calls skip reconstruction; a poisoned
+/// cache degrades to recompiling instead of failing.
+pub(crate) fn text_compile_pattern(func: &str, pattern: &str) -> Result<regex::Regex> {
+    if let Some(hit) = text_pattern_cache()
+        .lock()
+        .map(|guard| guard.get(pattern).cloned())
+        .unwrap_or(None)
+    {
+        return Ok(hit);
     }
-    if let Some(i) = val.as_i64() {
-        return i.to_string();
+    let re = regex::RegexBuilder::new(pattern)
+        .size_limit(TEXT_REGEX_SIZE_LIMIT)
+        .build()
+        .map_err(|e| anyhow::anyhow!("{func} invalid pattern {pattern:?}: {e}"))?;
+    if let Ok(mut guard) = text_pattern_cache().lock() {
+        if guard.len() >= TEXT_PATTERN_CACHE_MAX {
+            guard.clear();
+        }
+        guard.insert(pattern.to_string(), re.clone());
     }
-    if let Some(f) = val.as_f64() {
-        return f.to_string();
+    Ok(re)
+}
+
+/// Trim Unicode whitespace from both ends.
+pub(crate) fn text_trim_str(s: &str) -> String {
+    s.trim().to_string()
+}
+
+/// Strip one leading `prefix`, returning the input unchanged when absent.
+pub(crate) fn text_trim_prefix_str(s: &str, prefix: &str) -> String {
+    s.strip_prefix(prefix).unwrap_or(s).to_string()
+}
+
+/// Strip one trailing `suffix`, returning the input unchanged when absent.
+pub(crate) fn text_trim_suffix_str(s: &str, suffix: &str) -> String {
+    s.strip_suffix(suffix).unwrap_or(s).to_string()
+}
+
+/// Split on a literal delimiter. An empty delimiter splits into chars.
+pub(crate) fn text_split_str(s: &str, delimiter: &str) -> Vec<String> {
+    if delimiter.is_empty() {
+        return s.chars().map(|c| c.to_string()).collect();
     }
-    if let Some(b) = val.as_bool() {
-        return b.to_string();
+    s.split(delimiter).map(str::to_string).collect()
+}
+
+/// Split into whitespace-separated fields, ignoring empties.
+pub(crate) fn text_fields_str(s: &str) -> Vec<String> {
+    s.split_whitespace().map(str::to_string).collect()
+}
+
+/// Split into lines with universal newline handling: normalize through
+/// the line-ending crate first so LF, CRLF, CR, and mixed endings all
+/// split, then delegate the split itself to `LineEnding::split` rather
+/// than hand-rolling the scan. Bare `LineEnding::split` alone only
+/// splits the predominant ending, leaving mixed breaks joined.
+pub(crate) fn text_lines_str(s: &str) -> Vec<String> {
+    line_ending::LineEnding::split(&line_ending::LineEnding::normalize(s))
+}
+
+/// Literal replacement, failing closed on an empty search string:
+/// `str::replace` with an empty needle injects between every char.
+pub(crate) fn text_replace_literal_str(
+    s: &str,
+    from: &str,
+    to: &str,
+    func: &str,
+) -> Result<String> {
+    if from.is_empty() {
+        bail!("{func} needs a non-empty search string");
     }
-    // Pipes render through `Display` (`<pipe>`) via the fallthrough below;
-    // handles are opaque and have no string form to spell.
-    if let Some(d) = val.as_duration() {
-        return oxdock_parser::command::format_duration(&d);
+    Ok(s.replace(from, to))
+}
+
+/// Regex replacement with `$1` and `$name` capture expansion over every
+/// match. Bad patterns fail closed through the shared compiler.
+pub(crate) fn text_replace_regex_str(
+    s: &str,
+    pattern: &str,
+    replacement: &str,
+    func: &str,
+) -> Result<String> {
+    let re = text_compile_pattern(func, pattern)?;
+    Ok(re.replace_all(s, replacement).into_owned())
+}
+
+/// Count non-overlapping literal occurrences, failing closed on an
+/// empty needle: `str` matching with an empty needle binds every
+/// character boundary, which is never the caller's intent.
+pub(crate) fn text_count_str(s: &str, needle: &str, func: &str) -> Result<i64> {
+    if needle.is_empty() {
+        bail!("{func} needs a non-empty needle");
     }
-    if let Some(p) = val.as_path() {
-        return p.to_string_lossy().to_string();
+    Ok(s.match_indices(needle).count() as i64)
+}
+
+/// Lines matching a pattern, splitting with universal newline
+/// handling like `TEXT_LINES`: the `grep` shape (matching lines out, a
+/// miss binds an empty list, never an error). `invert` flips the
+/// filter to the `grep -v` shape: every non-matching line comes back
+/// in order. Case follows the pattern: an inline `(?i)` flag makes
+/// uppercase and lowercase letters match each other.
+pub(crate) fn text_grep_str(
+    s: &str,
+    pattern: &str,
+    invert: bool,
+    func: &str,
+) -> Result<Vec<String>> {
+    let re = text_compile_pattern(func, pattern)?;
+    Ok(text_lines_str(s)
+        .into_iter()
+        .filter(|line| re.is_match(line) != invert)
+        .collect())
+}
+
+/// Count lines matching a pattern: the `grep -c` shape over
+/// [`text_grep_str`], so one line counts once no matter how many times
+/// it hits.
+pub(crate) fn text_count_matches_str(s: &str, pattern: &str, func: &str) -> Result<i64> {
+    Ok(text_grep_str(s, pattern, false, func)?.len() as i64)
+}
+
+/// Read the `invert` flag from a `TEXT_GREP` options MAP: missing
+/// means keep matching lines, `true` flips to the `grep -v` shape.
+/// `check_options` verified the shape above; the read below narrows
+/// infallibly after.
+pub(crate) fn text_invert_flag(options: &std::collections::BTreeMap<String, Value>) -> bool {
+    options
+        .get("invert")
+        .map(|value| value.as_bool().expect("check_options verified BOOL"))
+        .unwrap_or(false)
+}
+
+/// Slice universal lines 1-based inclusive, clamping past the end
+/// like `sed -n 'A,Bp'`: a start past the last line binds an empty
+/// list, and an end past it stops at the last line. `from < 1` or
+/// `from > to` fails closed, since no line reading satisfies it.
+pub(crate) fn text_lines_range_str(s: &str, from: i64, to: i64, func: &str) -> Result<Vec<String>> {
+    if from < 1 {
+        bail!("{func} needs a 1-based start line, got {from}");
     }
-    if let Some(items) = val.as_list() {
-        return items
-            .iter()
-            .map(format_value_for_string)
-            .collect::<Vec<_>>()
-            .join(" ");
+    if from > to {
+        bail!("{func} needs start <= end, got {from}..={to}");
     }
-    if let Some(map) = val.as_map() {
-        return map
-            .iter()
-            .map(|(k, v)| format!("\"{}\": {}", k, format_value_for_string(v)))
-            .collect::<Vec<_>>()
-            .join(", ");
+    let lines = text_lines_str(s);
+    let start = (from - 1) as usize;
+    if start >= lines.len() {
+        return Ok(Vec::new());
     }
-    if let Some(id) = val.as_handle() {
-        return format!("task#{}", id);
+    let end = (to as usize).min(lines.len());
+    Ok(lines[start..end].to_vec())
+}
+
+/// Capture groups for the first match: index 0 is the full match,
+/// following indexes are groups in order. Non-participating groups
+/// bind empty so indexes stay stable. No match binds an empty list.
+pub(crate) fn text_extract_str(s: &str, pattern: &str, func: &str) -> Result<Vec<String>> {
+    let re = text_compile_pattern(func, pattern)?;
+    let Some(caps) = re.captures(s) else {
+        return Ok(Vec::new());
+    };
+    let mut out = Vec::with_capacity(caps.len());
+    for i in 0..caps.len() {
+        out.push(
+            caps.get(i)
+                .map(|m| m.as_str().to_string())
+                .unwrap_or_default(),
+        );
     }
-    format!("{}", val)
+    Ok(out)
+}
+
+/// One streaming text transform over a pipe. String inputs apply
+/// eagerly through `apply_str` with identical semantics; pipe inputs
+/// stream chunk by chunk on a pump thread with O(chunk) memory plus
+/// op-bounded windows, spilling through `SpillBuffer` where a
+/// hold-back can grow (trim's trailing whitespace). Backpressure rides
+/// the pipe substrate: a stalled reader stalls the pump, and output
+/// past the spill backlog cap fails its write and ends the stream.
+pub(crate) enum TextPump {
+    Trim,
+    TrimPrefix(String),
+    TrimSuffix(String),
+    ToUpper,
+    ToLower,
+    ReplaceLiteral { from: String, to: String },
+}
+
+impl TextPump {
+    /// Eager string application with the exact semantics the pump
+    /// produces chunk by chunk, so string and pipe inputs agree.
+    /// Shared by the stateful body and the template projection.
+    pub(crate) fn apply_str(&self, s: &str, func: &str) -> Result<String> {
+        match self {
+            TextPump::Trim => Ok(text_trim_str(s)),
+            TextPump::TrimPrefix(prefix) => Ok(text_trim_prefix_str(s, prefix)),
+            TextPump::TrimSuffix(suffix) => Ok(text_trim_suffix_str(s, suffix)),
+            TextPump::ToUpper => Ok(s.to_uppercase()),
+            TextPump::ToLower => Ok(s.to_lowercase()),
+            TextPump::ReplaceLiteral { from, to } => text_replace_literal_str(s, from, to, func),
+        }
+    }
+}
+
+/// String-only projection of a mirror op for `{{ }}` placeholder
+/// expansion: strings apply eagerly through the shared pump semantics,
+/// pipes bail naming the step IO they need (placeholder evaluation
+/// has no step context to pump through).
+pub(crate) fn mirror_string(func: &str, value: &Value, pump: TextPump) -> Result<Value> {
+    if let Some(s) = value.as_str() {
+        return pump.apply_str(s, func).map(Value::string);
+    }
+    Err(pipe_needs_step_io(func))
+}
+
+/// Refusal for pipe words reaching a template projection: one message
+/// for every mirror op, so the boundary cannot drift per function.
+pub(crate) fn pipe_needs_step_io(func: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{func} on PIPE input needs step IO, unavailable to placeholder calls; pass a STRING there"
+    )
+}
+
+/// Mirror a `STRING|PIPE` input through a transform: strings apply
+/// eagerly, pipes stream on a named pump thread while the output
+/// handle returns immediately. Argument validation that can fail
+/// (empty search strings) runs before spawning so misuses bail at the
+/// call site instead of truncating a stream.
+pub(crate) fn mirror_stream<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    func: &str,
+    value: &Value,
+    pump: TextPump,
+) -> Result<Value> {
+    if let Some(s) = value.as_str() {
+        return pump.apply_str(s, func).map(Value::string);
+    }
+    if value.as_pipe_handle().is_none() {
+        return Err(type_mismatch(
+            &format!("{func} text position"),
+            &oxdock_parser::union_tag!(String, Pipe),
+            value,
+        ));
+    }
+    if let TextPump::ReplaceLiteral { from, .. } = &pump
+        && from.is_empty()
+    {
+        bail!("{func} needs a non-empty search string");
+    }
+    let reader = cx
+        .pipe_reader(value)
+        .map_err(|e| anyhow::anyhow!("{func} cannot read PIPE input: {e:#}"))?;
+    let output = cx.new_pipe();
+    let writer = cx
+        .pipe_writer(&output)
+        .map_err(|e| anyhow::anyhow!("{func} cannot create PIPE output: {e:#}"))?;
+    let cancelled = cx.cancel_token();
+    let thread_name = format!("oxdock-text-{func}-pump");
+    std::thread::Builder::new()
+        .name(thread_name)
+        .spawn(move || run_text_pump(reader, writer, pump, &cancelled))
+        .map_err(|e| anyhow::anyhow!("{func} cannot spawn pump thread: {e}"))?;
+    Ok(output)
+}
+
+/// Pump stop signal: the downstream read end closed early (Unix
+/// short-circuit, e.g. a consumer that took one line and left). Not a
+/// failure: the pump exits cleanly without tripping cancellation, so a
+/// disconnected consumer never aborts the run.
+#[derive(Debug)]
+struct PumpDownstreamClosed;
+
+impl std::fmt::Display for PumpDownstreamClosed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("text pump downstream closed its read end")
+    }
+}
+
+impl std::error::Error for PumpDownstreamClosed {}
+
+/// Pump body: move bytes from `reader` to `writer` through one
+/// transform until input EOF, cancellation, or failure. The writer
+/// drops on every exit path, so the output pipe closes and downstream
+/// readers observe EOF instead of hanging. Mid-stream failures
+/// (undecodable bytes in a char-interpreting op, a spill write past
+/// the backlog cap) trip the shared cancellation flag before exiting:
+/// the pump thread owns no call-site error channel, so tripping cancel
+/// fails the run loudly at the next step boundary instead of letting
+/// consumers proceed on truncated bytes. A downstream disconnect
+/// (`BrokenPipe`) stops cleanly with no trip: short-circuiting a
+/// pipeline must never read as an engine abort.
+fn run_text_pump(
+    reader: SharedInput,
+    writer: SharedOutput,
+    pump: TextPump,
+    cancelled: &AtomicBool,
+) {
+    let fail_closed = |cancelled: &AtomicBool| {
+        cancelled.store(true, Ordering::SeqCst);
+    };
+    let mut state = TextPumpState::new(pump);
+    let mut chunk = [0u8; super::io::CHUNK_SIZE];
+    loop {
+        if cancelled.load(Ordering::SeqCst) {
+            break;
+        }
+        let n = match reader.lock() {
+            Ok(mut guard) => match guard.read(&mut chunk) {
+                Ok(n) => n,
+                Err(_) => {
+                    fail_closed(cancelled);
+                    break;
+                }
+            },
+            Err(_) => {
+                fail_closed(cancelled);
+                break;
+            }
+        };
+        if n == 0 {
+            if let Err(e) = state.flush(&writer)
+                && e.downcast_ref::<PumpDownstreamClosed>().is_none()
+            {
+                fail_closed(cancelled);
+            }
+            break;
+        }
+        if let Err(e) = state.push(&chunk[..n], &writer) {
+            if e.downcast_ref::<PumpDownstreamClosed>().is_none() {
+                fail_closed(cancelled);
+            }
+            break;
+        }
+    }
+}
+
+/// Per-op streaming state behind `run_text_pump`. `push` transforms one
+/// input chunk and writes output promptly; `flush` emits the trailing
+/// remainder at input EOF. Either fails on undecodable bytes (char
+/// interpreting ops), poisoned locks, or spill writes past the backlog
+/// cap; the pump ends the stream on any failure.
+enum TextPumpState {
+    Case {
+        upper: bool,
+        carry: Vec<u8>,
+    },
+    Trim {
+        leading: bool,
+        carry: Vec<u8>,
+        held: SpillBuffer,
+    },
+    Prefix {
+        prefix: Vec<u8>,
+        buf: Vec<u8>,
+        decided: bool,
+    },
+    Suffix {
+        suffix: Vec<u8>,
+        window: Vec<u8>,
+    },
+    Replace {
+        from: Vec<u8>,
+        to: Vec<u8>,
+        buf: Vec<u8>,
+    },
+}
+
+impl TextPumpState {
+    fn new(pump: TextPump) -> Self {
+        match pump {
+            TextPump::Trim => Self::Trim {
+                leading: false,
+                carry: Vec::new(),
+                held: SpillBuffer::new(),
+            },
+            TextPump::TrimPrefix(prefix) => Self::Prefix {
+                prefix: prefix.into_bytes(),
+                buf: Vec::new(),
+                decided: false,
+            },
+            TextPump::TrimSuffix(suffix) => Self::Suffix {
+                suffix: suffix.into_bytes(),
+                window: Vec::new(),
+            },
+            TextPump::ToUpper => Self::Case {
+                upper: true,
+                carry: Vec::new(),
+            },
+            TextPump::ToLower => Self::Case {
+                upper: false,
+                carry: Vec::new(),
+            },
+            TextPump::ReplaceLiteral { from, to } => Self::Replace {
+                from: from.into_bytes(),
+                to: to.into_bytes(),
+                buf: Vec::new(),
+            },
+        }
+    }
+
+    fn push(&mut self, data: &[u8], writer: &SharedOutput) -> Result<()> {
+        match self {
+            Self::Case { upper, carry } => Self::push_case(*upper, carry, data, writer),
+            Self::Trim {
+                leading,
+                carry,
+                held,
+            } => Self::push_trim(leading, carry, held, data, writer),
+            Self::Prefix {
+                prefix,
+                buf,
+                decided,
+            } => Self::push_prefix(prefix, buf, decided, data, writer),
+            Self::Suffix { suffix, window } => Self::push_suffix(suffix, window, data, writer),
+            Self::Replace { from, to, buf } => Self::push_replace(from, to, buf, data, writer),
+        }
+    }
+
+    fn flush(&mut self, writer: &SharedOutput) -> Result<()> {
+        match self {
+            Self::Case { upper, carry } => {
+                let text = std::str::from_utf8(carry)
+                    .map_err(|_| anyhow::anyhow!("text pump input is not valid UTF-8"))?;
+                let mapped = if *upper {
+                    text.to_uppercase()
+                } else {
+                    text.to_lowercase()
+                };
+                Self::write(writer, mapped.as_bytes())
+            }
+            Self::Trim {
+                leading,
+                carry,
+                held,
+            } => {
+                if !*leading {
+                    return Ok(());
+                }
+                // Trailing whitespace stays held: drop the spill
+                // without draining, then emit the decoded tail minus
+                // its own trailing run.
+                let _ = held;
+                let text = std::str::from_utf8(carry)
+                    .map_err(|_| anyhow::anyhow!("text pump input is not valid UTF-8"))?;
+                let head = text.trim_end_matches(char::is_whitespace);
+                Self::write(writer, head.as_bytes())
+            }
+            Self::Prefix { buf, decided, .. } => {
+                if *decided {
+                    return Ok(());
+                }
+                *decided = true;
+                let rest = std::mem::take(buf);
+                Self::write(writer, &rest)
+            }
+            Self::Suffix { suffix, window } => {
+                let rest = std::mem::take(window);
+                if !suffix.is_empty() && rest.as_slice() == suffix.as_slice() {
+                    return Ok(());
+                }
+                Self::write(writer, &rest)
+            }
+            Self::Replace { from, to, buf } => {
+                let (out, consumed) = Self::replace_scan(from, to, buf, buf.len());
+                buf.drain(..consumed);
+                Self::write(writer, &out)
+            }
+        }
+    }
+
+    /// Write one output segment, skipping empties so the pipe never
+    /// observes a zero-length write. A broken downstream read end
+    /// carries the typed stop signal instead of a failure, so the pump
+    /// exits cleanly without tripping cancellation.
+    fn write(writer: &SharedOutput, bytes: &[u8]) -> Result<()> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        writer
+            .lock()
+            .map_err(|_| anyhow::anyhow!("text pump writer lock poisoned"))?
+            .write_all(bytes)
+            .map_err(|e| {
+                if e.kind() == std::io::ErrorKind::BrokenPipe {
+                    anyhow::Error::new(PumpDownstreamClosed)
+                } else {
+                    anyhow::anyhow!("text pump write failed: {e}")
+                }
+            })?;
+        Ok(())
+    }
+
+    /// Drain a spill hold-back into the output (spill failures past the
+    /// backlog cap end the stream through the caller).
+    fn drain_into(held: &SpillBuffer, writer: &SharedOutput) -> Result<()> {
+        let bytes = held
+            .drain_bytes()
+            .map_err(|e| anyhow::anyhow!("text pump spill drain failed: {e}"))?;
+        Self::write(writer, &bytes)
+    }
+
+    /// Split staged bytes into a char-boundary valid head plus an
+    /// incomplete tail to carry, so multibyte characters split across
+    /// pipe chunks never misdecode.
+    fn head_tail(staged: &[u8]) -> (&[u8], &[u8]) {
+        let hold = trailing_incomplete_len(staged);
+        staged.split_at(staged.len() - hold)
+    }
+
+    fn push_case(
+        upper: bool,
+        carry: &mut Vec<u8>,
+        data: &[u8],
+        writer: &SharedOutput,
+    ) -> Result<()> {
+        let mut staged = std::mem::take(carry);
+        staged.extend_from_slice(data);
+        let (head, tail) = Self::head_tail(&staged);
+        let text = std::str::from_utf8(head)
+            .map_err(|_| anyhow::anyhow!("text pump input is not valid UTF-8"))?;
+        let mapped = if upper {
+            text.to_uppercase()
+        } else {
+            text.to_lowercase()
+        };
+        Self::write(writer, mapped.as_bytes())?;
+        *carry = tail.to_vec();
+        Ok(())
+    }
+
+    fn push_trim(
+        leading: &mut bool,
+        carry: &mut Vec<u8>,
+        held: &SpillBuffer,
+        data: &[u8],
+        writer: &SharedOutput,
+    ) -> Result<()> {
+        let mut staged = std::mem::take(carry);
+        staged.extend_from_slice(data);
+        let (head, tail) = Self::head_tail(&staged);
+        let mut text = std::str::from_utf8(head)
+            .map_err(|_| anyhow::anyhow!("text pump input is not valid UTF-8"))?;
+        if !*leading {
+            text = text.trim_start_matches(char::is_whitespace);
+            if text.is_empty() {
+                *carry = tail.to_vec();
+                return Ok(());
+            }
+            *leading = true;
+        }
+        let content = text.trim_end_matches(char::is_whitespace);
+        let ws = &text[content.len()..];
+        if !content.is_empty() {
+            Self::drain_into(held, writer)?;
+            Self::write(writer, content.as_bytes())?;
+        }
+        held.push_bytes(ws.as_bytes())
+            .map_err(|e| anyhow::anyhow!("text pump spill failed: {e}"))?;
+        *carry = tail.to_vec();
+        Ok(())
+    }
+
+    fn push_prefix(
+        prefix: &[u8],
+        buf: &mut Vec<u8>,
+        decided: &mut bool,
+        data: &[u8],
+        writer: &SharedOutput,
+    ) -> Result<()> {
+        if *decided {
+            return Self::write(writer, data);
+        }
+        buf.extend_from_slice(data);
+        if buf.len() < prefix.len() {
+            return Ok(());
+        }
+        *decided = true;
+        let taken = std::mem::take(buf);
+        match taken.strip_prefix(prefix) {
+            Some(rest) => Self::write(writer, rest),
+            None => Self::write(writer, &taken),
+        }
+    }
+
+    fn push_suffix(
+        suffix: &[u8],
+        window: &mut Vec<u8>,
+        data: &[u8],
+        writer: &SharedOutput,
+    ) -> Result<()> {
+        if suffix.is_empty() {
+            return Self::write(writer, data);
+        }
+        window.extend_from_slice(data);
+        if window.len() > suffix.len() {
+            let emit = window.len() - suffix.len();
+            Self::write(writer, &window[..emit])?;
+            window.drain(..emit);
+        }
+        Ok(())
+    }
+
+    fn push_replace(
+        from: &[u8],
+        to: &[u8],
+        buf: &mut Vec<u8>,
+        data: &[u8],
+        writer: &SharedOutput,
+    ) -> Result<()> {
+        buf.extend_from_slice(data);
+        let retain = (from.len() - 1).min(buf.len());
+        let emit_until = buf.len() - retain;
+        let (out, consumed) = Self::replace_scan(from, to, buf, emit_until);
+        buf.drain(..consumed);
+        Self::write(writer, &out)
+    }
+
+    /// Scan `buf[..limit]` for non-overlapping literal matches,
+    /// returning the rewritten bytes plus the consumed length. Matches
+    /// crossing `limit` stay buffered: their visible part is a needle
+    /// prefix that future bytes may complete.
+    fn replace_scan(from: &[u8], to: &[u8], buf: &[u8], limit: usize) -> (Vec<u8>, usize) {
+        let mut out = Vec::with_capacity(limit);
+        let mut i = 0;
+        while i < limit {
+            if buf[i..].starts_with(from) {
+                out.extend_from_slice(to);
+                i += from.len();
+            } else {
+                out.push(buf[i]);
+                i += 1;
+            }
+        }
+        (out, i)
+    }
+}
+
+/// Length of a possibly-incomplete UTF-8 sequence at the end of `buf`:
+/// a lead byte plus fewer continuations than it needs. Complete tails
+/// validate immediately (return 0); anything strictly invalid is left
+/// for `from_utf8` to reject rather than hidden in the hold-back.
+fn trailing_incomplete_len(buf: &[u8]) -> usize {
+    for n in 1..=3 {
+        if n > buf.len() {
+            break;
+        }
+        let b = buf[buf.len() - n];
+        if b < 0x80 {
+            break;
+        }
+        if b >= 0xC0 {
+            // 0xF5-0xFF never leads a valid sequence: fail now
+            // instead of holding bytes no future read can redeem.
+            if b > 0xF4 {
+                break;
+            }
+            let need = if b < 0xE0 {
+                2
+            } else if b < 0xF0 {
+                3
+            } else {
+                4
+            };
+            if n < need {
+                return n;
+            }
+            break;
+        }
+    }
+    0
+}
+
+/// Eager pipe read for ops whose framing needs the whole content at
+/// once (regex replacement: matches span chunks). Stages through the
+/// spill substrate (memory then disk, failing closed past its backlog
+/// cap) instead of one heap buffer, with incremental UTF-8 validation
+/// per chunk so a bad lead byte fails on arrival.
+pub(crate) fn read_pipe_eager<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    func: &str,
+    value: &Value,
+) -> Result<String> {
+    if value.as_pipe_handle().is_none() {
+        return Err(type_mismatch(
+            &format!("{func} text position"),
+            &oxdock_parser::union_tag!(String, Pipe),
+            value,
+        ));
+    }
+    let reader = cx
+        .pipe_reader(value)
+        .map_err(|e| anyhow::anyhow!("{func} cannot read PIPE input: {e:#}"))?;
+    let spill = SpillBuffer::new();
+    let mut carry = Vec::new();
+    let mut chunk = [0u8; super::io::CHUNK_SIZE];
+    loop {
+        let n = reader.lock().map(|mut guard| guard.read(&mut chunk));
+        let n = n
+            .map_err(|_| anyhow::anyhow!("{func} pipe reader lock poisoned"))?
+            .map_err(|e| anyhow::anyhow!("{func} cannot read PIPE input: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        let mut staged = std::mem::take(&mut carry);
+        staged.extend_from_slice(&chunk[..n]);
+        let hold = trailing_incomplete_len(&staged);
+        let valid_len = staged.len() - hold;
+        std::str::from_utf8(&staged[..valid_len])
+            .map_err(|_| anyhow::anyhow!("{func} PIPE input is not valid UTF-8"))?;
+        spill
+            .push_bytes(&staged[..valid_len])
+            .map_err(|e| anyhow::anyhow!("{func} PIPE input exceeds the spill backlog: {e}"))?;
+        carry = staged[valid_len..].to_vec();
+    }
+    spill
+        .push_bytes(&carry)
+        .map_err(|e| anyhow::anyhow!("{func} PIPE input exceeds the spill backlog: {e}"))?;
+    spill
+        .drain_string_strict()
+        .map_err(|_| anyhow::anyhow!("{func} PIPE input is not valid UTF-8"))
+}
+
+/// Completed pipe for eager pipe-out: mints a task-owned handle, writes
+/// the bytes, and closes by dropping the writer, so readers drain the
+/// content then observe EOF exactly like a finished pump.
+pub(crate) fn write_completed_pipe<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    func: &str,
+    text: String,
+) -> Result<Value> {
+    let pipe = cx.new_pipe();
+    let writer = cx
+        .pipe_writer(&pipe)
+        .map_err(|e| anyhow::anyhow!("{func} cannot create PIPE output: {e:#}"))?;
+    {
+        let mut guard = writer
+            .lock()
+            .map_err(|_| anyhow::anyhow!("{func} pipe writer lock poisoned"))?;
+        guard
+            .write_all(text.as_bytes())
+            .map_err(|e| anyhow::anyhow!("{func} cannot write PIPE output: {e}"))?;
+        guard
+            .flush()
+            .map_err(|e| anyhow::anyhow!("{func} cannot write PIPE output: {e}"))?;
+    }
+    Ok(pipe)
+}
+
+/// Lift a string list into a `LIST<STRING>` word.
+pub(crate) fn text_list_value(items: Vec<String>) -> Value {
+    Value::list(items.into_iter().map(Value::string).collect())
 }
 
 #[cfg(test)]
@@ -2047,5 +2817,221 @@ mod tests {
             format!("{err:#}").contains("expected INT|FLOAT"),
             "names the set: {err:#}"
         );
+    }
+
+    #[test]
+    fn text_helpers_cover_table_ops() {
+        assert_eq!(text_trim_str("  hello  "), "hello");
+        assert_eq!(text_trim_prefix_str("v1.2.3", "v"), "1.2.3");
+        assert_eq!(text_trim_prefix_str("1.2.3", "v"), "1.2.3");
+        assert_eq!(text_trim_suffix_str("archive.tar.gz", ".gz"), "archive.tar");
+        assert_eq!(text_trim_suffix_str("archive.tar", ".gz"), "archive.tar");
+        assert_eq!(text_split_str("a,b,c", ","), vec!["a", "b", "c"]);
+        assert_eq!(text_split_str("ab", ""), vec!["a", "b"]);
+        assert_eq!(text_fields_str("  abc  def "), vec!["abc", "def"]);
+        assert_eq!(
+            text_lines_str("one\ntwo\nthree"),
+            vec!["one", "two", "three"]
+        );
+        assert_eq!(
+            text_lines_str("one\r\ntwo\r\nthree"),
+            vec!["one", "two", "three"]
+        );
+        assert_eq!(
+            text_lines_str("one\rtwo\rthree"),
+            vec!["one", "two", "three"]
+        );
+        assert_eq!(text_lines_str("a\r\nb\nc\rd"), vec!["a", "b", "c", "d"]);
+        assert_eq!(
+            text_replace_literal_str("hello world", "world", "there", "TEXT_REPLACE")
+                .expect("replace"),
+            "hello there"
+        );
+        assert!(
+            text_replace_literal_str("hello", "", "x", "TEXT_REPLACE").is_err(),
+            "empty search strings must fail closed"
+        );
+        assert_eq!(
+            text_replace_regex_str(
+                "2026-10-13",
+                "(\\d+)-(\\d+)-(\\d+)",
+                "$3/$2/$1",
+                "TEXT_REPLACE_REGEX"
+            )
+            .expect("regex replace"),
+            "13/10/2026"
+        );
+        assert_eq!(trailing_incomplete_len("abc".as_bytes()), 0);
+        assert_eq!(trailing_incomplete_len("é".as_bytes()), 0);
+        assert_eq!(trailing_incomplete_len(&[0xC3]), 1);
+        assert_eq!("héllo".chars().count(), 5);
+        assert_eq!(
+            text_count_str("hello world", "o", "TEXT_COUNT").expect("count"),
+            2
+        );
+        assert_eq!(text_count_str("aaa", "aa", "TEXT_COUNT").expect("once"), 1);
+        assert!(text_count_str("aaa", "", "TEXT_COUNT").is_err());
+        assert_eq!(
+            text_count_matches_str("test a: test\ntest b: nope", ": test", "TEXT_COUNT_MATCHES")
+                .expect("count matches"),
+            1
+        );
+        assert_eq!(
+            text_count_matches_str("a\r\nb\nc", "^[ab]$", "TEXT_COUNT_MATCHES")
+                .expect("universal lines"),
+            2
+        );
+        assert_eq!(
+            text_grep_str("one\ntwo\none more", "^one", false, "TEXT_GREP").expect("grep"),
+            vec!["one", "one more"]
+        );
+        assert!(
+            text_grep_str("one\ntwo", "^z", false, "TEXT_GREP")
+                .expect("miss")
+                .is_empty()
+        );
+        assert_eq!(
+            text_grep_str("one\ntwo\none more", "^one", true, "TEXT_GREP").expect("invert"),
+            vec!["two"]
+        );
+        assert!(
+            text_grep_str("one\ntwo", "^", true, "TEXT_GREP")
+                .expect("invert match-all")
+                .is_empty()
+        );
+        // Compiled patterns cache by text: same pattern, same automaton.
+        let first = text_compile_pattern("TEXT_MATCH", "\\d+").expect("compile");
+        let second = text_compile_pattern("TEXT_MATCH", "\\d+").expect("cached");
+        assert_eq!(first.as_str(), second.as_str());
+        assert_eq!(
+            text_lines_range_str("one\ntwo\nthree\nfour", 2, 3, "TEXT_LINES_RANGE")
+                .expect("window"),
+            vec!["two", "three"]
+        );
+        assert_eq!(
+            text_lines_range_str("one\ntwo", 2, 9, "TEXT_LINES_RANGE").expect("clamp"),
+            vec!["two"]
+        );
+        assert!(
+            text_lines_range_str("one\ntwo", 9, 12, "TEXT_LINES_RANGE")
+                .expect("past end")
+                .is_empty()
+        );
+        assert!(text_lines_range_str("one", 0, 2, "TEXT_LINES_RANGE").is_err());
+        assert!(text_lines_range_str("one", 3, 2, "TEXT_LINES_RANGE").is_err());
+        assert_eq!(
+            text_extract_str("abc123", "([a-z]+)(\\d+)", "TEXT_EXTRACT").expect("extract"),
+            vec!["abc123", "abc", "123"]
+        );
+        assert!(
+            text_extract_str("abc", "^\\d+$", "TEXT_EXTRACT")
+                .expect("miss")
+                .is_empty()
+        );
+        assert!(text_compile_pattern("TEXT_MATCH", "([").is_err());
+        assert_eq!(
+            text_list_value(vec!["a".to_string()])
+                .as_list()
+                .expect("list")
+                .len(),
+            1
+        );
+    }
+
+    /// Drive one pump state through chunked pushes plus flush, collecting
+    /// output from a spill-backed writer. Lets pump framing tests run
+    /// without threads or script pipes.
+    fn pump_to_string(pump: TextPump, chunks: &[&[u8]]) -> String {
+        use std::sync::Arc;
+        let spill = Arc::new(SpillBuffer::new());
+        let writer = spill.writer();
+        let mut state = TextPumpState::new(pump);
+        for chunk in chunks {
+            state.push(chunk, &writer).expect("pump push runs");
+        }
+        state.flush(&writer).expect("pump flush runs");
+        let out = spill.drain_bytes().expect("spill drains");
+        String::from_utf8(out).expect("pump output is UTF-8")
+    }
+
+    #[test]
+    fn text_pump_streams_case_across_char_cuts() {
+        // A two-byte char split across pushes still folds as one char.
+        let out = pump_to_string(TextPump::ToUpper, &[&[0xC3], &[0xA9]]);
+        assert_eq!(out, "É");
+        let out = pump_to_string(TextPump::ToLower, &[b"HE", b"LLO"]);
+        assert_eq!(out, "hello");
+        // Invalid bytes end the stream at the bad chunk.
+        use std::sync::Arc;
+        let spill = Arc::new(SpillBuffer::new());
+        let writer = spill.writer();
+        let mut state = TextPumpState::new(TextPump::ToUpper);
+        state.push(b"ok", &writer).expect("valid prefix writes");
+        assert!(state.push(&[0xFF], &writer).is_err());
+    }
+
+    #[test]
+    fn text_pump_trims_edges_streaming() {
+        // Leading whitespace falls at the head, trailing at EOF, and
+        // interior whitespace passes through across chunk cuts.
+        let out = pump_to_string(TextPump::Trim, &[b"   hel", b"lo   ", b"   "]);
+        assert_eq!(out, "hello");
+        let out = pump_to_string(TextPump::Trim, &[b"  a  b  "]);
+        assert_eq!(out, "a  b");
+        // All-whitespace input strips to empty.
+        let out = pump_to_string(TextPump::Trim, &[b"   ", b"\n\t "]);
+        assert_eq!(out, "");
+    }
+
+    #[test]
+    fn text_pump_prefix_decides_once_at_head() {
+        // A prefix split across pushes still strips exactly once.
+        let out = pump_to_string(TextPump::TrimPrefix("v".to_string()), &[b"v", b"1.2.3"]);
+        assert_eq!(out, "1.2.3");
+        // Absent prefixes pass through untouched, and short inputs
+        // emit whole at EOF.
+        let out = pump_to_string(TextPump::TrimPrefix("v".to_string()), &[b"1", b".2"]);
+        assert_eq!(out, "1.2");
+        // Only the head decides: later occurrences stay.
+        let out = pump_to_string(TextPump::TrimPrefix("ab".to_string()), &[b"ababa"]);
+        assert_eq!(out, "aba");
+    }
+
+    #[test]
+    fn text_pump_suffix_holds_trailing_window() {
+        // A suffix split across pushes still strips exactly once.
+        let out = pump_to_string(
+            TextPump::TrimSuffix(".gz".to_string()),
+            &[b"archive.tar", b".g", b"z"],
+        );
+        assert_eq!(out, "archive.tar");
+        // Near misses and short inputs pass through untouched.
+        let out = pump_to_string(TextPump::TrimSuffix(".gz".to_string()), &[b"archive.tar"]);
+        assert_eq!(out, "archive.tar");
+        let out = pump_to_string(TextPump::TrimSuffix(".gz".to_string()), &[b"ab"]);
+        assert_eq!(out, "ab");
+    }
+
+    #[test]
+    fn text_pump_replace_spans_chunk_cuts() {
+        // A needle split across pushes still rewrites, in order, with
+        // no recursive rescan of replacement text.
+        let out = pump_to_string(
+            TextPump::ReplaceLiteral {
+                from: "world".to_string(),
+                to: "there".to_string(),
+            },
+            &[b"hello wo", b"rld and world"],
+        );
+        assert_eq!(out, "hello there and there");
+        // Single-byte needles stream byte by byte.
+        let out = pump_to_string(
+            TextPump::ReplaceLiteral {
+                from: "a".to_string(),
+                to: "b".to_string(),
+            },
+            &[b"aaa", b"aa"],
+        );
+        assert_eq!(out, "bbbbb");
     }
 }

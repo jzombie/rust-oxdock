@@ -421,7 +421,8 @@ impl<'a, P: ProcessManager> StepCtx<'a, P> {
     /// `{{ MODULE::FUNC(args) }}` through the live registry instead of
     /// hardcoding module or function names. Stateful, script, and pipe
     /// backed entries never appear here: placeholder evaluation has no
-    /// step context and must stay side effect free.
+    /// step context and must stay side effect free. Dual entries
+    /// contribute their template arm.
     pub fn pure_functions(&self) -> std::sync::Arc<PureTable> {
         self.state.pure_function_table()
     }
@@ -517,6 +518,14 @@ impl<'a, P: ProcessManager> StepCtx<'a, P> {
         self.state
             .cancel_token
             .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Shared cancellation flag for pump threads spawned by host
+    /// functions: clone into the worker and poll each tick, same as
+    /// `is_cancelled`, so `CANCEL`/`TIMEOUT` ends the pump and its
+    /// writer drop closes the output pipe for downstream readers.
+    pub fn cancel_token(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.state.cancel_token)
     }
 
     /// Whether this step runs on an `ASYNC` task thread. Blocking pumps

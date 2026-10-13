@@ -35,6 +35,11 @@
 //!   `LOAD_TOML`); override with `name = "..."`. The declared return type
 //!   comes from `returns = TypeTag::...` (a `TypeTag` expression) and
 //!   defaults to none.
+//! - `template = path::to::twin` links a pure string projection for
+//!   `{{ }}` placeholder calls: the twin takes the same parameters
+//!   minus `cx` and answers strings, bailing on words that need step
+//!   IO. Valid only on stateful functions; pure functions already run
+//!   in templates.
 //! - The first doc-comment line becomes `FuncMeta.summary`; the full doc
 //!   text becomes `FuncMeta.docs`. Override the summary with `summary = "..."`.
 //! - Repeatable `#[example(name = "...", code = "...")]` attributes become
@@ -153,6 +158,7 @@ struct FuncOptions {
     name: Option<String>,
     returns: Option<syn::Expr>,
     summary: Option<String>,
+    template: Option<syn::Path>,
 }
 
 impl Parse for FuncOptions {
@@ -182,6 +188,14 @@ impl Parse for FuncOptions {
                     }
                     continue;
                 }
+                if key == "template" {
+                    let path: syn::Path = input.parse()?;
+                    options.template = Some(path);
+                    if input.peek(Token![,]) {
+                        input.parse::<Token![,]>()?;
+                    }
+                    continue;
+                }
                 let value: syn::LitStr = input.parse()?;
                 if key == "name" {
                     options.name = Some(value.value());
@@ -190,7 +204,7 @@ impl Parse for FuncOptions {
                 } else {
                     return Err(syn::Error::new(
                         key.span(),
-                        "unknown oxdock_func option; expected pure, rpn, name, returns, or summary",
+                        "unknown oxdock_func option; expected pure, rpn, name, returns, summary, or template",
                     ));
                 }
             } else {
@@ -1606,28 +1620,32 @@ fn expand_func(options: FuncOptions, func: ItemFn) -> syn::Result<TokenStream2> 
             }
         });
     }
-    let unpacks = params.iter().enumerate().map(|(option_idx, p)| {
-        let name = &p.ident;
-        let extract = p.kind.extractor(name, &dsl_name, p.allowed.as_deref());
-        // Options-bearing MAP params validate their keys against the
-        // same static the metadata renders: unknown keys fail here,
-        // in the wrapper, so bodies never re-check them. The binding
-        // is already a map (the extractor enforces MAP), so the check
-        // takes it directly with no value round-trip.
-        let check = match &p.options {
-            Some(_) => {
-                let static_ident = format_ident!("__OXDOCK_OPTIONS_{option_idx}");
-                quote! {
-                    ::oxdock_core::check_options(&#name, #static_ident.as_slice(), #dsl_name)?;
+    let unpacks: Vec<TokenStream2> = params
+        .iter()
+        .enumerate()
+        .map(|(option_idx, p)| {
+            let name = &p.ident;
+            let extract = p.kind.extractor(name, &dsl_name, p.allowed.as_deref());
+            // Options-bearing MAP params validate their keys against the
+            // same static the metadata renders: unknown keys fail here,
+            // in the wrapper, so bodies never re-check them. The binding
+            // is already a map (the extractor enforces MAP), so the check
+            // takes it directly with no value round-trip.
+            let check = match &p.options {
+                Some(_) => {
+                    let static_ident = format_ident!("__OXDOCK_OPTIONS_{option_idx}");
+                    quote! {
+                        ::oxdock_core::check_options(&#name, #static_ident.as_slice(), #dsl_name)?;
+                    }
                 }
+                None => quote! {},
+            };
+            quote! {
+                let #name = #extract;
+                #check
             }
-            None => quote! {},
-        };
-        quote! {
-            let #name = #extract;
-            #check
-        }
-    });
+        })
+        .collect();
     let values_iter = if params.is_empty() {
         quote! { let _ = __oxdock_values; }
     } else {
@@ -1739,6 +1757,12 @@ fn expand_func(options: FuncOptions, func: ItemFn) -> syn::Result<TokenStream2> 
             "pure oxdock_func functions already run on the math path; drop rpn",
         ));
     }
+    if options.template.is_some() && manager_param.is_none() {
+        return Err(syn::Error::new_spanned(
+            &func.sig.ident,
+            "template projection needs a stateful function; pure functions already run in templates",
+        ));
+    }
     let kind = if manager_param.is_some() {
         quote! { ::oxdock_core::FuncKind::HostCtx }
     } else {
@@ -1765,6 +1789,10 @@ fn expand_func(options: FuncOptions, func: ItemFn) -> syn::Result<TokenStream2> 
     // generics with the manager bound enforced; pure entries mint a fresh
     // manager parameter (pure functions take no generics of their own,
     // since a generic entry point could never form a function pointer).
+    // A `template` projection adds a pure adapter sharing the arity check
+    // and extractors, so the template path enforces exactly what the
+    // stateful path enforces; the twin answers strings and bails on
+    // words needing step IO.
     let export = match manager_param {
         Some(manager) => {
             let mut extended = func.sig.generics.clone();
@@ -1779,6 +1807,36 @@ fn expand_func(options: FuncOptions, func: ItemFn) -> syn::Result<TokenStream2> 
                 .predicates
                 .push(bound);
             let (_, _, extended_where) = extended.split_for_impl();
+            let template_arm = match &options.template {
+                Some(twin) => {
+                    let invoke_template = quote! {
+                        |__oxdock_values: Vec<::oxdock_core::Value>|
+                        -> ::anyhow::Result<::oxdock_core::Value> {
+                            #arity_check
+                            #values_iter
+                            #(#unpacks)*
+                            #twin(#(#param_names),*)
+                        }
+                    };
+                    quote! {
+                        let template: ::oxdock_core::PureFn =
+                            ::std::sync::Arc::new(#invoke_template);
+                        ::oxdock_core::HostRegistration::Both {
+                            name: #dsl_name.to_string(),
+                            meta: #meta,
+                            func,
+                            template,
+                        }
+                    }
+                }
+                None => quote! {
+                    ::oxdock_core::HostRegistration::Stateful {
+                        name: #dsl_name.to_string(),
+                        meta: #meta,
+                        func,
+                    }
+                },
+            };
             quote! {
                 #[doc = #marker_docs]
                 pub struct #marker_ident;
@@ -1790,11 +1848,7 @@ fn expand_func(options: FuncOptions, func: ItemFn) -> syn::Result<TokenStream2> 
                         #(#options_statics)*
                         let func: ::oxdock_core::NativeFn<#manager> =
                             ::std::sync::Arc::new(#invoke);
-                        ::oxdock_core::HostRegistration::Stateful {
-                            name: #dsl_name.to_string(),
-                            meta: #meta,
-                            func,
-                        }
+                        #template_arm
                     }
                 }
             }

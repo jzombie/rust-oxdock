@@ -301,6 +301,7 @@ mod tests {
             .map(|registration| match registration {
                 oxdock_core::HostRegistration::Pure { meta, .. } => meta,
                 oxdock_core::HostRegistration::Stateful { meta, .. } => meta,
+                oxdock_core::HostRegistration::Both { meta, .. } => meta,
             })
             .collect::<Vec<_>>();
         fn base(name: &str) -> &str {

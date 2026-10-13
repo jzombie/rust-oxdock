@@ -67,6 +67,7 @@ pub fn assert_module_returns_conformance<P: ProcessManager + Clone + Send + 'sta
         let (base, meta) = match registration {
             HostRegistration::Pure { name, meta, .. } => (name.clone(), meta),
             HostRegistration::Stateful { name, meta, .. } => (name.clone(), meta),
+            HostRegistration::Both { name, meta, .. } => (name.clone(), meta),
         };
         let qualified = format!("{module_name}::{base}");
         if meta.returns.is_none() {
@@ -155,6 +156,18 @@ fn invoke_sample<P: ProcessManager + Send + 'static>(
     match registration {
         HostRegistration::Pure { func, .. } => {
             let func = func.clone();
+            std::thread::spawn(move || {
+                let _ = done_tx.send(match func(args) {
+                    Ok(value) => SampleOutcome::Ok(value),
+                    Err(_) => SampleOutcome::Err,
+                });
+            });
+        }
+        // Dual entries sample through the template arm: it answers
+        // strings without staging pipes, while pipe samples bail fast
+        // instead of blocking on backends no producer feeds.
+        HostRegistration::Both { template, .. } => {
+            let func = template.clone();
             std::thread::spawn(move || {
                 let _ = done_tx.send(match func(args) {
                     Ok(value) => SampleOutcome::Ok(value),

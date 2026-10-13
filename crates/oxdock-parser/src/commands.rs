@@ -1693,7 +1693,14 @@ declare_commands! {
             environment; `{{ $var }}` reads a script variable (dotted paths allowed).
             A missing key is an error, never a silent empty.
 
-            Substitution runs in a single pass. EXPAND is not recursive and does not
+            Calls: `{{ MODULE::FUNC(args) }}` invokes a pure registry function
+            with `$var.path` references and `STRING`, `INT`, `FLOAT`, and `BOOL`
+            literals as arguments. Only pure functions resolve here: stateful,
+            script-defined, and pipe-backed entries fail naming themselves,
+            since placeholder evaluation carries no step context. The same
+            calls resolve in ordinary strings, so both paths agree.
+
+            Substitution runs in a single pass. `EXPAND` is not recursive and does not
             expand nested placeholders: a value that itself contains `{{ ... }}` is
             inserted verbatim and never expanded again.
 
@@ -1769,6 +1776,15 @@ declare_commands! {
 
                 EXPAND template.md
                 ASSERT_CONTAINS stdout "Hi Alice!"
+            "#} },
+            Example { name: "function call", fence_meta: None, code: indoc! {r#"
+                # Pure registry functions run inside placeholders.
+                # WRITE would interpolate {{ }} right away, so escape it.
+                IMPORT [STD]
+                WRITE template.md "Count: \{{ STD::TEXT_COUNT(\"one two two three\", \"two\") }}!"
+
+                EXPAND template.md
+                ASSERT_CONTAINS stdout "Count: 2!"
             "#} },
         ],
         lower: |_flags, args| {

@@ -25,6 +25,8 @@ mod phase_boundary;
 mod reference_examples;
 #[path = "integration/remote.rs"]
 mod remote;
+#[path = "integration/text_pumps.rs"]
+mod text_pumps;
 #[path = "integration/unified_values.rs"]
 mod unified_values;
 #[path = "integration/unquoted_syntax.rs"]

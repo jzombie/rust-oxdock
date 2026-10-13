@@ -213,6 +213,7 @@ mod tests {
         let meta = match <Toc as OxDockFn<oxdock_process::ShellProcessManager>>::registration() {
             oxdock_core::HostRegistration::Pure { meta, .. } => meta,
             oxdock_core::HostRegistration::Stateful { meta, .. } => meta,
+            oxdock_core::HostRegistration::Both { meta, .. } => meta,
         };
         let statics = meta
             .params

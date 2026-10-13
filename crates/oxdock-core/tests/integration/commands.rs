@@ -1722,6 +1722,50 @@ fn rpn_math_position_runs_rpn_capable_stateful_calls() {
 }
 
 #[test]
+fn condition_position_runs_grep_with_omitted_and_literal_options() {
+    // Both option shapes must answer identically in conditions: the
+    // omitted MAP fills `{}` on the RPN math path, while a MAP
+    // literal has no RPN encoding and evaluates on the AST fallback.
+    // Miri-clean: no filesystem.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD]
+        LET $hits: LIST<STRING> = TEXT_GREP("one\ntwo", "^one")
+        LET $which: STRING = "neither"
+        IF TEXT_GREP("one\ntwo", "^one") == $hits {
+            $which = "rpn"
+        }
+        ASSERT_EQ $which "rpn"
+        LET $kept: LIST<STRING> = TEXT_GREP("one\ntwo", "^one", {invert: true})
+        IF TEXT_GREP("one\ntwo", "^one", {invert: true}) == $kept {
+            $which = "ast-fallback"
+        }
+        ASSERT_EQ $which "ast-fallback"
+        ASSERT_EQ $kept.0 "two"
+    "#};
+    run_script(&root, script).expect("math-position calls run");
+}
+
+#[test]
+fn grep_rejects_wrong_typed_invert_option() {
+    // `check_options` validates option value types before the body
+    // runs: a non-BOOL `invert` fails naming the option instead of
+    // reaching the body. Miri-clean: no filesystem.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD]
+        LET $kept: LIST<STRING> = TEXT_GREP("one", "^one", {invert: 123})
+    "#};
+    let err = run_script(&root, script).expect_err("wrong-typed option must fail");
+    assert!(
+        err.to_string().contains("option 'invert'"),
+        "names the option: {err}"
+    );
+}
+
+#[test]
 fn recursion_depth_limit_names_function() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
