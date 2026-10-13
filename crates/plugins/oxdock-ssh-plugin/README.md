@@ -269,21 +269,19 @@ LET $sess: SSH_DEQUEUE_INFO = AWAIT $d
 CANCEL $c
 LET $pin: PIPE
 LET $pout: PIPE
+# Assert on the whole pipe: terminal streams carry setup noise ahead
+# of child output, so line reads are version-dependent.
 [family:unix] {
     LET $t: HANDLE = ASYNC { SSH_PTY_RUN($sess.session, ["sh", "-c", "echo pty-hi"], 0, 0, $pin, $pout) }
     LET $code: INT = AWAIT $t
     ASSERT_EQ $code 0
-    WITH_IO [stdin=$pout] READ_LINE $got
-    ASSERT_CONTAINS $got "pty-hi"
+    ASSERT_CONTAINS $pout "pty-hi"
 }
 [family:windows] {
     LET $t: HANDLE = ASYNC { SSH_PTY_RUN($sess.session, ["cmd", "/c", "echo pty-hi"], 0, 0, $pin, $pout) }
     LET $code: INT = AWAIT $t
     ASSERT_EQ $code 0
-    # ConPTY dumps its setup handshake ahead of child output, so the first line is console noise.
-    WITH_IO [stdin=$pout] READ_LINE $preamble
-    WITH_IO [stdin=$pout] READ_LINE $got
-    ASSERT_CONTAINS $got "pty-hi"
+    ASSERT_CONTAINS $pout "pty-hi"
 }
 SSH_CLOSE($m.server)
 ```
