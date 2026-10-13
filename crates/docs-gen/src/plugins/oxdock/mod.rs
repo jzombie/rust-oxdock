@@ -40,7 +40,7 @@ fn value_types() -> Result<Value> {
 /// Generated function reference from the `#[oxdock_func]` registry.
 #[oxdock_func(pure, returns = TypeTag::String)]
 fn function_reference() -> Result<Value> {
-    Ok(Value::string(command_ref::render_function_reference()))
+    Ok(Value::string(command_ref::render_function_reference()?))
 }
 
 /// Generated context reference for the function listings: the single
@@ -66,7 +66,7 @@ fn plugin_function_reference(module: String) -> Result<Value> {
     Ok(Value::string(command_ref::render_plugin_reference(
         &entry.metas,
         &module,
-    )))
+    )?))
 }
 
 /// Generated value-type reference for one plugin module's handle types.
@@ -136,6 +136,7 @@ pub fn module<P: ProcessManager>() -> HostModule<P> {
         ],
         types: vec![],
         record_schemas: vec![],
+        states: Vec::new(),
     }
 }
 

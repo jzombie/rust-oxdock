@@ -15,41 +15,7 @@ that need no pre-pump inspection; use those directly to route on
 session metadata first. Returns a MAP with `closed` (BOOL) and
 `command` (STRING, empty for shells); the example below asserts both
 keys on the awaited result. The server sends first: the client side
-never EOFs its input, so the reply cannot race teardown. This
-complete program runs end to end under the docs conformance suite.
-
-```oxdock
-IMPORT [STD, SSH]
-LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-demo", {username: "u", password: "p"})
-
-# Accept one session into fresh pipes.
-LET $in: PIPE
-LET $out: PIPE
-LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
-
-# Connect a client to the server.
-LET $cin: PIPE
-LET $cout: PIPE
-LET $c: HANDLE = ASYNC { SSH_CONNECT("doc-ssh-demo", "u", "p", $cin, $cout) }
-
-# Greet through the server pipe and wait for delivery.
-WITH_IO [stdout=$in] ECHO "server-greeting"
-LET $info: MAP<ANY> = INSPECT($cout)
-LET $empty: BOOL = $info.buffer_bytes == 0
-WHILE $empty {
-    SLEEP 100ms
-    $info = INSPECT($cout)
-    $empty = $info.buffer_bytes == 0
-}
-ASSERT_CONTAINS $cout "server-greeting"
-
-# The awaited result carries both keys; then shut down.
-LET $done: MAP<ANY> = AWAIT $acc
-ASSERT_EQ $done.closed true
-ASSERT_CONTAINS $done "command"
-CANCEL $c
-SSH_CLOSE($m.server)
-```
+never EOFs its input, so the reply cannot race teardown.
 
 
 **Signature:** `SSH_ACCEPT($server: SSH_SERVER, $in_pipe: PIPE, $out_pipe: PIPE) -> MAP<closed: BOOL, command: STRING>`
@@ -57,13 +23,41 @@ SSH_CLOSE($m.server)
 **Contexts:** [`AST`](#context-ast) only
 
 **Parameters:**
+
 - `$server` (`SSH_SERVER`): Server handle from `SSH_SERVE`.
 - `$in_pipe` (`PIPE`): Pipe carrying bytes consumed by the wire side.
 - `$out_pipe` (`PIPE`): Pipe carrying bytes produced by the wire side.
 
 **Returns:** `MAP<closed: BOOL, command: STRING>`
+
   - `closed` (`BOOL`): True when the session closed cleanly.
   - `command` (`STRING`): Executed command, empty for shells.
+
+**Examples:**
+
+**Example: accept and close**
+
+```oxdock
+IMPORT [STD, SSH]
+LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-accept", {username: "u", password: "p"})
+LET $in: PIPE
+LET $out: PIPE
+LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
+LET $cin: PIPE
+LET $cout: PIPE
+LET $c: HANDLE = ASYNC { SSH_CONNECT("doc-ssh-accept", "u", "p", $cin, $cout) }
+
+# Close both inputs: each pump observes EOF, half-closes, and both
+# tasks return their result maps with no cancellation.
+WITH_IO [stdout=$cin] ECHO "client-hello"
+WITH_IO [stdout=$in] ECHO "server-greeting"
+LET $done: MAP<ANY> = AWAIT $acc
+ASSERT_EQ $done.closed true
+ASSERT_CONTAINS $done "command"
+LET $cDone: MAP<ANY> = AWAIT $c
+ASSERT_EQ $cDone.closed true
+SSH_CLOSE($m.server)
+```
 
 ### SSH_CLOSE
 
@@ -78,26 +72,72 @@ returns BOOL true when no thread remains.
 **Contexts:** [`AST`](#context-ast) only
 
 **Parameters:**
+
 - `$server` (`SSH_SERVER`): Server handle from `SSH_SERVE`.
 
 **Returns:** `BOOL`
 
+**Examples:**
+
+**Example: shut down**
+
+```oxdock
+IMPORT [STD, SSH]
+LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-close", {username: "u", password: "p"})
+LET $ok: BOOL = SSH_CLOSE($m.server)
+ASSERT_EQ $ok true
+```
+
 ### SSH_CONNECT
 
-Open an SSH client session into pipes. Target shapes: a logical port (CLI-mapped address or loopback default), a service name (CLI-mapped address only), a served address, or a host:port dial.
+Open an SSH client session into pipes.
+
+Connect to an SSH server with distinct inner credentials and pump the
+shell channel through explicit pipes until it closes. Must run inside
+`ASYNC`, concurrently with the `SSH_PUMP` tasks (never before them).
+`target` is a service name resolved through runner mappings: SSH
+needs a TCP socket, so unmapped services bail with the CLI mapping
+hint. Under `--offline` the dial bails before any socket work.
+Returns a MAP with `closed` (BOOL).
 
 **Signature:** `SSH_CONNECT($target: STRING, $username: STRING, $password: STRING, $in_pipe: PIPE, $out_pipe: PIPE) -> MAP`
 
 **Contexts:** [`AST`](#context-ast) only
 
 **Parameters:**
-- `$target` (`STRING`): Dial target: logical port, service name, served address, or `host:port`.
+
+- `$target` (`STRING`): Dial target: a service name resolved through runner mappings.
 - `$username` (`STRING`): Inner credentials for the SSH session.
 - `$password` (`STRING`): Inner credentials for the SSH session.
 - `$in_pipe` (`PIPE`): Pipe carrying bytes consumed by the wire side.
 - `$out_pipe` (`PIPE`): Pipe carrying bytes produced by the wire side.
 
 **Returns:** `MAP`
+
+**Examples:**
+
+**Example: connect and close**
+
+```oxdock
+IMPORT [STD, SSH]
+LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-connect", {username: "u", password: "p"})
+LET $in: PIPE
+LET $out: PIPE
+LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
+LET $cin: PIPE
+LET $cout: PIPE
+LET $c: HANDLE = ASYNC { SSH_CONNECT("doc-ssh-connect", "u", "p", $cin, $cout) }
+
+# Close both inputs: each pump observes EOF, half-closes, and both
+# tasks return their result maps with no cancellation.
+WITH_IO [stdout=$cin] ECHO "client-hello"
+WITH_IO [stdout=$in] ECHO "server-greeting"
+LET $done: MAP<ANY> = AWAIT $c
+ASSERT_EQ $done.closed true
+LET $adone: MAP<ANY> = AWAIT $acc
+ASSERT_EQ $adone.closed true
+SSH_CLOSE($m.server)
+```
 
 ### SSH_DEQUEUE
 
@@ -112,47 +152,7 @@ client identity. Must run inside `ASYNC`. Returns a MAP with
 Routing shape: compare the dequeued command against known commands,
 build a fresh pipe pair per session, and pump a synthetic reply with
 `SSH_PUMP_CHANNEL`. The server sends first: the client side never
-EOFs its input, so the reply cannot race teardown. This complete
-program runs end to end under the docs conformance suite.
-
-```oxdock
-IMPORT [STD, SSH]
-LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-demo", {username: "u", password: "p"})
-
-# Serve: dequeue one session and pump a synthetic reply.
-LET $in: PIPE
-LET $out: PIPE
-LET $w: HANDLE = ASYNC {
-    LET $sess: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
-    ASSERT_CONTAINS $sess "session"
-    ASSERT_CONTAINS $sess "command"
-    ASSERT_CONTAINS $sess "username"
-    ASSERT_CONTAINS $sess "addr"
-    ASSERT_EQ $sess.username "u"
-    SSH_PUMP_CHANNEL($sess.session, $in, $out)
-}
-
-# Connect a client to the server.
-LET $cin: PIPE
-LET $cout: PIPE
-LET $c: HANDLE = ASYNC { SSH_CONNECT("doc-ssh-demo", "u", "p", $cin, $cout) }
-
-# Greet through the server pipe and wait for delivery.
-WITH_IO [stdout=$in] ECHO "server-greeting"
-LET $info: MAP<ANY> = INSPECT($cout)
-LET $empty: BOOL = $info.buffer_bytes == 0
-WHILE $empty {
-    SLEEP 100ms
-    $info = INSPECT($cout)
-    $empty = $info.buffer_bytes == 0
-}
-ASSERT_CONTAINS $cout "server-greeting"
-
-# Shut everything down.
-AWAIT $w
-CANCEL $c
-SSH_CLOSE($m.server)
-```
+EOFs its input, so the reply cannot race teardown.
 
 
 **Signature:** `SSH_DEQUEUE($server: SSH_SERVER) -> MAP<session: SSH_SESSION, command: STRING, username: STRING, addr: STRING>`
@@ -160,13 +160,47 @@ SSH_CLOSE($m.server)
 **Contexts:** [`AST`](#context-ast) only
 
 **Parameters:**
+
 - `$server` (`SSH_SERVER`): Server handle from `SSH_SERVE`.
 
 **Returns:** `MAP<session: SSH_SESSION, command: STRING, username: STRING, addr: STRING>`
+
   - `session` (`SSH_SESSION`): Session handle for `SSH_PUMP_CHANNEL` (pump ends take once).
   - `command` (`STRING`): Executed command, empty for shells.
   - `username` (`STRING`): Authenticated username, empty when unset.
   - `addr` (`STRING`): Peer address, empty when unset.
+
+**Examples:**
+
+**Example: route one session**
+
+```oxdock
+IMPORT [STD, SSH]
+LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-route", {username: "u", password: "p"})
+
+# Serve: dequeue one session and pump a synthetic reply.
+LET $in: PIPE
+LET $out: PIPE
+LET $w: HANDLE = ASYNC {
+    LET $sess: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
+    ASSERT_EQ $sess.username "u"
+    SSH_PUMP_CHANNEL($sess.session, $in, $out)
+}
+
+# Connect a client to the server.
+LET $cin: PIPE
+LET $cout: PIPE
+LET $c: HANDLE = ASYNC { SSH_CONNECT("doc-ssh-route", "u", "p", $cin, $cout) }
+
+# Close both inputs: each pump observes EOF, half-closes, and every
+# task returns with no cancellation.
+WITH_IO [stdout=$cin] ECHO "client-hello"
+WITH_IO [stdout=$in] ECHO "server-greeting"
+LET $cDone: MAP<ANY> = AWAIT $c
+ASSERT_EQ $cDone.closed true
+AWAIT $w
+SSH_CLOSE($m.server)
+```
 
 ### SSH_PTY_RUN
 
@@ -190,6 +224,7 @@ relay) reaches the child; the working directory comes from the script.
 **Contexts:** [`AST`](#context-ast) only
 
 **Parameters:**
+
 - `$session` (`SSH_SESSION`): Session handle from `SSH_DEQUEUE`.
 - `$argv` (`LIST<STRING>`): Program and arguments to run.
 - `$rows` (`INT`): Terminal rows when positive, session size otherwise.
@@ -198,6 +233,42 @@ relay) reaches the child; the working directory comes from the script.
 - `$out_pipe` (`PIPE`): Pipe carrying bytes produced by the child.
 
 **Returns:** `INT`
+
+**Examples:**
+
+**Example: run under a terminal**
+
+```oxdock
+IMPORT [STD, SSH]
+LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-pty", {username: "u", password: "p"})
+LET $d: HANDLE = ASYNC { SSH_DEQUEUE($m.server) }
+LET $cin: PIPE
+LET $cout: PIPE
+LET $c: HANDLE = ASYNC { SSH_CONNECT("doc-ssh-pty", "u", "p", $cin, $cout) }
+WITH_IO [stdout=$cin] ECHO "client-hello"
+LET $sess: SSH_DEQUEUE_INFO = AWAIT $d
+
+# The client task only proved the session live: cancel it before the
+# terminal run, so no two pumps share the session.
+CANCEL $c
+LET $pin: PIPE
+LET $pout: PIPE
+# Assert on the whole pipe: terminal streams carry setup noise ahead
+# of child output, so line reads are version-dependent.
+[family:unix] {
+    LET $t: HANDLE = ASYNC { SSH_PTY_RUN($sess.session, ["sh", "-c", "echo pty-hi"], 0, 0, $pin, $pout) }
+    LET $code: INT = AWAIT $t
+    ASSERT_EQ $code 0
+    ASSERT_CONTAINS $pout "pty-hi"
+}
+[family:windows] {
+    LET $t: HANDLE = ASYNC { SSH_PTY_RUN($sess.session, ["cmd", "/c", "echo pty-hi"], 0, 0, $pin, $pout) }
+    LET $code: INT = AWAIT $t
+    ASSERT_EQ $code 0
+    ASSERT_CONTAINS $pout "pty-hi"
+}
+SSH_CLOSE($m.server)
+```
 
 ### SSH_PUMP
 
@@ -213,10 +284,27 @@ the other end is live (usually an `ASYNC` task).
 **Contexts:** [`AST`](#context-ast) only
 
 **Parameters:**
+
 - `$from_pipe` (`PIPE`): Source pipe to drain.
 - `$to_pipe` (`PIPE`): Target pipe receiving the bytes (closed at EOF).
 
 **Returns:** `INT`
+
+**Examples:**
+
+**Example: copy**
+
+```oxdock
+# Closing the source ends the copy: the count proves the bytes moved.
+IMPORT [STD, SSH]
+LET $in: PIPE
+WITH_IO [stdout=$in] ECHO "pump-me"
+LET $out: PIPE
+LET $n: INT = SSH_PUMP($in, $out)
+ASSERT_EQ $n 8
+WITH_IO [stdin=$out] READ_LINE $got
+ASSERT_EQ $got "pump-me"
+```
 
 ### SSH_PUMP_CHANNEL
 
@@ -233,31 +321,87 @@ Returns a MAP with `closed` (BOOL).
 **Contexts:** [`AST`](#context-ast) only
 
 **Parameters:**
+
 - `$session` (`SSH_SESSION`): Session handle from `SSH_DEQUEUE` (pump ends take once).
 - `$in_pipe` (`PIPE`): Pipe carrying bytes consumed by the wire side.
 - `$out_pipe` (`PIPE`): Pipe carrying bytes produced by the wire side.
 
 **Returns:** `MAP<closed: BOOL>`
+
   - `closed` (`BOOL`): True when the session closed cleanly.
+
+**Examples:**
+
+**Example: pump a session**
+
+```oxdock
+IMPORT [STD, SSH]
+LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-pump", {username: "u", password: "p"})
+LET $d: HANDLE = ASYNC { SSH_DEQUEUE($m.server) }
+LET $cin: PIPE
+LET $cout: PIPE
+LET $c: HANDLE = ASYNC { SSH_CONNECT("doc-ssh-pump", "u", "p", $cin, $cout) }
+WITH_IO [stdout=$cin] ECHO "client-hello"
+LET $sess: SSH_DEQUEUE_INFO = AWAIT $d
+LET $sin: PIPE
+LET $sout: PIPE
+LET $p: HANDLE = ASYNC { SSH_PUMP_CHANNEL($sess.session, $sin, $sout) }
+WITH_IO [stdout=$sin] ECHO "server-greeting"
+LET $cDone: MAP<ANY> = AWAIT $c
+ASSERT_EQ $cDone.closed true
+LET $pDone: MAP<ANY> = AWAIT $p
+ASSERT_EQ $pDone.closed true
+SSH_CLOSE($m.server)
+```
 
 ### SSH_SERVE
 
 Serve SSH on a virtual service endpoint.
+
+Spin up an SSH server on a runner-mapped service with the given
+credentials. `bind` is a service name; the runner maps it with
+`-p`/`--listen`, and unmapped services bail with the mapping hint
+(SSH needs a TCP socket, so there is no memory fallback).
+`options` is a MAP with required `username`/`password`
+STRINGs (a server without credentials is meaningless, so blanks bail)
+and the optional `key_path` STRING (workspace-relative OpenSSH Ed25519
+file, load-or-create; a leading `/` anchors to the workspace root like
+WRITE, and escapes still bail; absent or blank keeps the ephemeral
+in-memory key).
+Non-blocking: returns a MAP with `server` (SSH_SERVER),
+`addr` (STRING: the physical bind, or the virtual endpoint echo when
+socketless), `username` and `password` (STRINGs), and `virtual`
+(STRING echo). Unmapped and memory services bail with the CLI
+mapping hint: SSH needs a TCP socket, so map the name with
+`-p`/`--listen`.
 
 **Signature:** `SSH_SERVE($bind: STRING, $options: MAP<username: STRING, password: STRING, key_path?: STRING>) -> MAP<server: SSH_SERVER, addr: STRING, username: STRING, password: STRING, virtual: STRING>`
 
 **Contexts:** [`AST`](#context-ast) only
 
 **Parameters:**
-- `$bind` (`STRING`): Virtual service endpoint to serve (logical port or service name).
+
+- `$bind` (`STRING`): Service name to serve; the runner maps it with -p/--listen.
 - `$options` (`MAP<username: STRING, password: STRING, key_path?: STRING>`): Server credentials and host key.
   - `username` (`STRING`, required)
   - `password` (`STRING`, required)
   - `key_path` (`STRING`, optional)
 
 **Returns:** `MAP<server: SSH_SERVER, addr: STRING, username: STRING, password: STRING, virtual: STRING>`
+
   - `server` (`SSH_SERVER`): Server handle for `SSH_ACCEPT`, `SSH_DEQUEUE`, and `SSH_CLOSE`.
   - `addr` (`STRING`): Bound socket address (`ip:port`) of the server.
   - `username` (`STRING`): Configured username.
   - `password` (`STRING`): Configured password.
   - `virtual` (`STRING`): Virtual endpoint echo of the claimed slot.
+
+**Examples:**
+
+**Example: serve and close**
+
+```oxdock
+IMPORT [STD, SSH]
+LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-serve", {username: "u", password: "p"})
+ASSERT_EQ $m.virtual "doc-ssh-serve"
+SSH_CLOSE($m.server)
+```

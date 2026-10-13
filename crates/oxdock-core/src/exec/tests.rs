@@ -865,6 +865,7 @@ fn create_exec_state(fs: MockFs) -> ExecState<MockProcessManager> {
         functions: super::native::FunctionRegistry::with_builtins(),
         types: super::typing::startup_type_map(),
         record_schemas: std::collections::HashMap::new(),
+        module_states: std::collections::HashMap::new(),
         type_aliases: std::collections::HashMap::new(),
         call_depth: 0,
         task_id: 0,
@@ -3992,6 +3993,7 @@ fn host_round_trip_through_adapters() {
             rpn: false,
             summary: "test-only host pipe relay",
             docs: "test-only",
+            examples: &[],
         }
     }
     let relay: NativeFn<MockProcessManager> = Arc::new(|cx, vals| {
@@ -4014,6 +4016,7 @@ fn host_round_trip_through_adapters() {
         }],
         types: vec![],
         record_schemas: vec![],
+        states: Vec::new(),
     };
     let table = oxdock_parser::ModuleTable {
         modules: std::collections::HashMap::from([(
@@ -4073,6 +4076,7 @@ fn expand_placeholder_calls_pure_host_function() {
             rpn: false,
             summary: "test-only pure shout",
             docs: "test-only",
+            examples: &[],
         }
     }
     let shout: PureFn = Arc::new(|vals| {
@@ -4091,6 +4095,7 @@ fn expand_placeholder_calls_pure_host_function() {
         }],
         types: vec![],
         record_schemas: vec![],
+        states: Vec::new(),
     };
     let table = oxdock_parser::ModuleTable {
         modules: std::collections::HashMap::from([(
@@ -4602,11 +4607,13 @@ fn host_return_slot_rejects_lying_body() {
                     rpn: false,
                     summary: "test-only",
                     docs: "test-only",
+                    examples: &[],
                 },
                 func: lying,
             }],
             types: vec![],
             record_schemas: vec![],
+            states: Vec::new(),
         }
     }
     let mut engine = super::Engine::<MockProcessManager>::new_custom();
@@ -4905,6 +4912,25 @@ fn check_options_enforces_present_values() {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "blind sampling draws OS randomness through unseeded RAND, outside Miri isolation"
+)]
+fn returns_gate_covers_std_builtins() {
+    // Every builtin honors its declared `returns`: sampled calls that
+    // reach `Ok` satisfy the slot, and anything sampling cannot reach
+    // must carry executable examples. A lying slot fails here, never
+    // in generated docs.
+    let proc = MockProcessManager::default();
+    super::assert_module_returns_conformance(
+        "STD",
+        &super::native::FunctionRegistry::<MockProcessManager>::builtin_registrations(),
+        Vec::new(),
+        proc,
+    );
+}
+
+#[test]
 fn run_start_rejects_unknown_type_tags() {
     // Typo'd `returns` and `params` labels fail before the first step
     // runs, listing every known type. Previously a bad `returns` label
@@ -4944,11 +4970,13 @@ fn run_start_rejects_unknown_type_tags() {
                     rpn: false,
                     summary: "test-only",
                     docs: "test-only",
+                    examples: &[],
                 },
                 func: noop,
             }],
             types: vec![],
             record_schemas: vec![],
+            states: Vec::new(),
         }
     }
     // A custom descriptor whose name was never registered: tags make the
@@ -5020,11 +5048,13 @@ fn run_start_rejects_misplaced_optional_params() {
                     rpn: false,
                     summary: "test-only",
                     docs: "test-only",
+                    examples: &[],
                 },
                 func: noop,
             }],
             types: vec![],
             record_schemas: vec![],
+            states: Vec::new(),
         }
     }
     // Optional MAP before a required param: rejected.
@@ -5112,6 +5142,7 @@ fn host_take_twice_on_os_bails() {
             rpn: false,
             summary: "test-only host take-twice probe",
             docs: "test-only",
+            examples: &[],
         }
     }
     let probe: NativeFn<MockProcessManager> = Arc::new(|cx, vals| {
@@ -5130,6 +5161,7 @@ fn host_take_twice_on_os_bails() {
         }],
         types: vec![],
         record_schemas: vec![],
+        states: Vec::new(),
     };
     let table = oxdock_parser::ModuleTable {
         modules: std::collections::HashMap::from([(

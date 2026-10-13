@@ -4,9 +4,13 @@
 //! with a reason. Validation-only, offline, and memory tests run
 //! everywhere: no sockets, no threads beyond engine tasks.
 //!
-//! Fixed virtual ports (`23511`-`23530`) replace the old ephemeral binds:
-//! scripts declare fixed logical endpoints now, and each test owns its
-//! port so parallel runs never collide.
+//! Socket tests run against runner-mapped services (`mapped_registry`):
+//! scripts name services, the harness binds ephemeral loopback, so no
+//! fixed ports appear anywhere and parallel runs never collide.
+//! Validation-only, offline, and memory tests keep fixed virtual names:
+//! pure identifiers, never bound. The anti-binding proofs at the bottom
+//! are the only tests naming numbers, and they assert those numbers
+//! never touch the host network.
 
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
@@ -103,26 +107,97 @@ fn read_line_deadline(stream: &mut TcpStream, what: &str) -> Vec<u8> {
     }
 }
 
+/// Runner-mapped memory registry for services: in-process rendezvous
+/// by explicit runner designation, never by fallback.
+fn memory_registry(services: &[&str]) -> Arc<EndpointRegistry> {
+    let registry = Arc::new(EndpointRegistry::new(false));
+    for service in services {
+        registry
+            .add_mapping(
+                &EndpointKey::tcp(oxdock_net_plugin::VirtualEndpoint::Name(
+                    service.to_string(),
+                )),
+                BindingSpec::Memory,
+            )
+            .expect("map memory service");
+    }
+    registry
+}
+
+/// Runner-mapped registry for one service: the harness binds ephemeral
+/// loopback, the script only ever names the service. Mirrors a CLI
+/// `-p 127.0.0.1:0:<service>` invocation.
+fn mapped_registry(service: &str) -> Arc<EndpointRegistry> {
+    let registry = Arc::new(EndpointRegistry::new(false));
+    registry
+        .add_cli_mapping(service, "127.0.0.1:0")
+        .expect("map service");
+    registry.bind_all().expect("bind service");
+    registry
+}
+
+/// Map one service to an explicit address (a harness-held listener).
+/// The slot is dial-only: resolvable, never bound, never claimable.
+fn mapped_registry_to(service: &str, addr: &str) -> Arc<EndpointRegistry> {
+    let registry = Arc::new(EndpointRegistry::new(false));
+    registry
+        .add_mapping(
+            &EndpointKey::tcp(oxdock_net_plugin::VirtualEndpoint::Name(
+                service.to_string(),
+            )),
+            BindingSpec::DialOnly {
+                addr: addr.parse().expect("dial addr"),
+            },
+        )
+        .expect("map service");
+    registry
+}
+
+/// Hold a numeric service name nobody else holds: bind ephemeral, read
+/// the port back, and rebind it, retrying against parallel tests racing
+/// for the same port. Used ONLY by the anti-binding proofs, where the
+/// script must name a number the host never bound. A plugin that stole
+/// the number fails every retry, so theft still fails deterministically.
+fn hold_numeric_name() -> (TcpListener, String) {
+    for _ in 0..50 {
+        let port = TcpListener::bind("127.0.0.1:0")
+            .expect("ephemeral bind")
+            .local_addr()
+            .expect("addr")
+            .port();
+        match TcpListener::bind(format!("127.0.0.1:{port}")) {
+            Ok(held) => return (held, port.to_string()),
+            Err(_) => continue,
+        }
+    }
+    panic!("could not hold a numeric service name");
+}
+
 #[test]
 #[cfg_attr(miri, ignore = "needs loopback TCP")]
 fn listen_reports_loopback_addr_and_virtual_echo() {
-    // Unmapped bare ports bind loopback inline: the default with no CLI
-    // flags. The result MAP echoes the virtual endpoint alongside.
+    // A runner-mapped service reports its real bind; the result MAP
+    // echoes the virtual name alongside.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
+    let registry = mapped_registry("test-listen-echo");
     let script = indoc! {r#"
         IMPORT [STD, NET]
-        LET $l: NET_LISTEN_INFO = NET_LISTEN("23511", {})
+        LET $l: NET_LISTEN_INFO = NET_LISTEN("test-listen-echo", {})
         WRITE addr.txt "{{ $l.addr }}"
         WRITE virt.txt "{{ $l.virtual }}"
         NET_CLOSE($l.listener)
     "#};
-    run_script(&root, script).expect("loopback listen runs");
-    assert_eq!(
-        read_trimmed(&root.join("addr.txt").unwrap()),
-        "127.0.0.1:23511"
+    run_script_with(registry, &root, script).expect("loopback listen runs");
+    let addr = read_trimmed(&root.join("addr.txt").unwrap());
+    assert!(
+        addr.starts_with("127.0.0.1:") && !addr.ends_with(":0"),
+        "mapped service reports its real bind: {addr}"
     );
-    assert_eq!(read_trimmed(&root.join("virt.txt").unwrap()), "23511");
+    assert_eq!(
+        read_trimmed(&root.join("virt.txt").unwrap()),
+        "test-listen-echo"
+    );
 }
 
 #[test]
@@ -158,6 +233,117 @@ fn ephemeral_zero_banned_in_script() {
     assert!(err.to_string().contains("-p 0:"), "{err:#}");
 }
 
+/// The isolation mandate, proved end to end: a service named like a
+/// port number is a hard error before execution, never a bind or dial.
+/// The harness holds the number open (bound, never accepting) while the
+/// script fails the pre-run check; then it asserts the harness saw zero
+/// inbound connections, the script wrote zero output files, and the
+/// number stayed free.
+#[test]
+#[cfg_attr(miri, ignore = "needs loopback TCP plus threads")]
+fn numeric_service_names_never_touch_the_host() {
+    let (held, name) = hold_numeric_name();
+    let number = name.clone();
+    held.set_nonblocking(true).expect("nonblocking");
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = indoc! {r#"
+        IMPORT [STD, NET]
+        LET $l: NET_LISTEN_INFO = NET_LISTEN("__SVC__", {})
+        LET $sin: PIPE
+        LET $sout: PIPE
+        LET $t: HANDLE = ASYNC { NET_ACCEPT($l.listener, $sin, $sout, {}) }
+        LET $e: HANDLE = ASYNC {
+            WITH_IO [stdin=$sout] READ_LINE $line
+            WITH_IO [stdout=$sin] ECHO "{{ $line }}"
+        }
+        LET $cin: PIPE
+        LET $cout: PIPE
+        LET $c: HANDLE = ASYNC { NET_CONNECT("__SVC__", $cin, $cout, {}) }
+        WITH_IO [stdout=$cin] ECHO "number-echo"
+        WITH_IO [stdin=$cout] READ_LINE $got
+        AWAIT $c
+        AWAIT $t
+        AWAIT $e
+        NET_CLOSE($l.listener)
+        WRITE out.txt "{{ $got }}"
+    "#}
+    .replace("__SVC__", &name);
+    let err = run_script(&root, &script).expect_err("unmapped numeric must fail pre-run");
+    assert!(
+        err.to_string().contains(&format!(
+            "NET_LISTEN service '{name}' has no CLI port mapping"
+        )),
+        "{err:#}"
+    );
+    // Pre-run means pre-execution: the echo write never happened.
+    assert!(
+        read_trimmed(&root.join("out.txt").unwrap()).is_empty(),
+        "no step executed"
+    );
+    // The script finished failing: any dial it made would sit in the
+    // backlog. WouldBlock proves zero inbound connections.
+    match held.accept() {
+        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+        accepted => panic!("numeric service touched the host network: {accepted:?}"),
+    }
+    // Nothing bound it either: the harness retakes the number. Retry
+    // against parallel tests; a plugin theft fails every attempt.
+    drop(held);
+    let mut retaken = false;
+    for _ in 0..50 {
+        if TcpListener::bind(format!("127.0.0.1:{number}")).is_ok() {
+            retaken = true;
+            break;
+        }
+    }
+    assert!(retaken, "number stayed free");
+}
+
+/// Introspection on a numeric service reports no physical port: serve
+/// and dial flavors fail pre-run with the CLI mapping hint, while
+/// `NET_PORT`/`NET_ADDR` alone fail with the not-mapped message. Either
+/// way no host number is ever observed.
+#[test]
+#[cfg_attr(miri, ignore = "needs loopback TCP")]
+fn numeric_introspection_reports_no_physical_port() {
+    let (_held, number) = hold_numeric_name();
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = format!(
+        indoc! {r#"
+            IMPORT [STD, NET]
+            LET $l: NET_LISTEN_INFO = NET_LISTEN("{number}", {{}})
+        "#},
+        number = number,
+    );
+    let err = run_script(&root, &script).expect_err("unmapped serve must fail pre-run");
+    assert!(
+        err.to_string().contains(&format!(
+            "NET_LISTEN service '{number}' has no CLI port mapping"
+        )),
+        "{err:#}"
+    );
+    for (func, ty) in [("NET_PORT", "INT"), ("NET_ADDR", "STRING")] {
+        let script = format!(
+            indoc! {r#"
+                IMPORT [STD, NET]
+                LET $x: {ty} = {func}("{number}")
+            "#},
+            number = number,
+            ty = ty,
+            func = func,
+        );
+        let err = run_script(&root, &script).expect_err("unmapped lookup must fail pre-run");
+        assert!(
+            err.to_string().contains(&format!(
+                "{func} service '{number}' is not mapped by the runner"
+            )),
+            "{err:#}"
+        );
+    }
+}
+
 #[test]
 #[cfg_attr(miri, ignore = "needs loopback TCP plus threads")]
 fn accept_connect_roundtrip() {
@@ -166,9 +352,10 @@ fn accept_connect_roundtrip() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let probe = root.clone();
+    let registry = mapped_registry("test-accept-echo");
     let script = indoc! {r#"
         IMPORT [STD, NET]
-        LET $l: NET_LISTEN_INFO = NET_LISTEN("23513", {})
+        LET $l: NET_LISTEN_INFO = NET_LISTEN("test-accept-echo", {})
         WRITE addr.txt "{{ $l.addr }}"
         LET $in: PIPE
         LET $out: PIPE
@@ -181,7 +368,7 @@ fn accept_connect_roundtrip() {
         AWAIT $e
         NET_CLOSE($l.listener)
     "#};
-    let handle = std::thread::spawn(move || run_script(&root, script));
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
     std::thread::sleep(Duration::from_secs(2));
     let addr = read_addr(&probe);
     let mut client = connect_retry(&addr);
@@ -201,9 +388,10 @@ fn accept_connect_roundtrip() {
 #[cfg_attr(miri, ignore = "needs loopback TCP plus threads")]
 fn connect_roundtrip_against_real_server() {
     // Dial-out: a real server thread answers one line and half-closes;
-    // the script captures the reply. Raw `host:port` dials still work.
+    // the script dials it through a runner-mapped service name and
+    // captures the reply.
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-    let port = listener.local_addr().expect("addr").port();
+    let server_addr = listener.local_addr().expect("addr").to_string();
     let server = std::thread::spawn(move || {
         let (mut conn, _) = listener.accept().expect("accept");
         conn.set_read_timeout(Some(Duration::from_secs(5)))
@@ -229,22 +417,18 @@ fn connect_roundtrip_against_real_server() {
     });
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    let script = format!(
-        indoc! {r#"
-            IMPORT [STD, NET]
-            LET $req: PIPE
-            LET $resp: PIPE
-            LET $t: HANDLE = ASYNC {{
-                NET_CONNECT("127.0.0.1:{port}", $req, $resp, {{}})
-            }}
-            WITH_IO [stdout=$req] ECHO "hello"
-            WITH_IO [stdin=$resp] READ_LINE $got
-            AWAIT $t
-            WRITE out.txt "{{{{ $got }}}}"
-        "#},
-        port = port
-    );
-    run_script(&root, &script).expect("connect roundtrip runs");
+    let registry = mapped_registry_to("test-real-dial", &server_addr);
+    let script = indoc! {r#"
+        IMPORT [STD, NET]
+        LET $req: PIPE
+        LET $resp: PIPE
+        LET $t: HANDLE = ASYNC { NET_CONNECT("test-real-dial", $req, $resp, {}) }
+        WITH_IO [stdout=$req] ECHO "hello"
+        WITH_IO [stdin=$resp] READ_LINE $got
+        AWAIT $t
+        WRITE out.txt "{{ $got }}"
+    "#};
+    run_script_with(registry, &root, script).expect("connect roundtrip runs");
     assert_eq!(read_trimmed(&root.join("out.txt").unwrap()), "world");
     server.join().expect("server thread");
 }
@@ -255,7 +439,7 @@ fn no_half_close_defers_fin() {
     // With `no_half_close`, stdin EOF leaves the socket write side open:
     // the peer sees no FIN and must close first.
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-    let port = listener.local_addr().expect("addr").port();
+    let server_addr = listener.local_addr().expect("addr").to_string();
     let server = std::thread::spawn(move || {
         let (mut conn, _) = listener.accept().expect("accept");
         conn.set_read_timeout(Some(Duration::from_secs(5)))
@@ -280,22 +464,18 @@ fn no_half_close_defers_fin() {
     });
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    let script = format!(
-        indoc! {r#"
-            IMPORT [STD, NET]
-            LET $req: PIPE
-            LET $resp: PIPE
-            LET $t: HANDLE = ASYNC {{
-                NET_CONNECT("127.0.0.1:{port}", $req, $resp, {{no_half_close: true}})
-            }}
-            WITH_IO [stdout=$req] ECHO "hi"
-            WITH_IO [stdin=$resp] READ_LINE $got
-            AWAIT $t
-            WRITE out.txt "{{{{ $got }}}}"
-        "#},
-        port = port
-    );
-    run_script(&root, &script).expect("no-half-close runs");
+    let registry = mapped_registry_to("test-no-fin", &server_addr);
+    let script = indoc! {r#"
+        IMPORT [STD, NET]
+        LET $req: PIPE
+        LET $resp: PIPE
+        LET $t: HANDLE = ASYNC { NET_CONNECT("test-no-fin", $req, $resp, {no_half_close: true}) }
+        WITH_IO [stdout=$req] ECHO "hi"
+        WITH_IO [stdin=$resp] READ_LINE $got
+        AWAIT $t
+        WRITE out.txt "{{ $got }}"
+    "#};
+    run_script_with(registry, &root, script).expect("no-half-close runs");
     assert_eq!(read_trimmed(&root.join("out.txt").unwrap()), "bye");
     server.join().expect("server thread");
 }
@@ -306,38 +486,37 @@ fn listen_refuses_while_serving() {
     // Claiming the same service twice fails fast on the second call.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
+    let registry = mapped_registry("test-double-claim");
     let script = indoc! {r#"
         IMPORT [STD, NET]
-        LET $a: NET_LISTEN_INFO = NET_LISTEN("23514", {})
-        LET $b: NET_LISTEN_INFO = NET_LISTEN("23514", {})
+        LET $a: NET_LISTEN_INFO = NET_LISTEN("test-double-claim", {})
+        LET $b: NET_LISTEN_INFO = NET_LISTEN("test-double-claim", {})
         NET_CLOSE($a.listener)
         NET_CLOSE($b.listener)
     "#};
-    let err = run_script(&root, script).expect_err("second claim must fail");
+    let err = run_script_with(registry, &root, script).expect_err("second claim must fail");
     assert!(err.to_string().contains("already claimed"), "{err:#}");
 }
 
 #[test]
 #[cfg_attr(miri, ignore = "needs loopback TCP")]
 fn reclaim_after_close_rebinds() {
-    // Close-and-rebind loops work: release frees the slot, so the next
-    // LISTEN on the same service binds clean (the slot-take starvation
-    // fix: slots are claimed, never consumed).
+    // Close-and-reclaim loops work: release frees the claim, so the next
+    // LISTEN on the same service re-claims the runner's socket (same
+    // address both times; the slot-take starvation fix: slots are
+    // claimed, never consumed).
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
+    let registry = mapped_registry("test-reclaim");
     let script = indoc! {r#"
         IMPORT [STD, NET]
-        LET $a: NET_LISTEN_INFO = NET_LISTEN("23515", {})
+        LET $a: NET_LISTEN_INFO = NET_LISTEN("test-reclaim", {})
         NET_CLOSE($a.listener)
-        LET $b: NET_LISTEN_INFO = NET_LISTEN("23515", {})
-        WRITE addr.txt "{{ $b.addr }}"
+        LET $b: NET_LISTEN_INFO = NET_LISTEN("test-reclaim", {})
+        ASSERT_EQ $a.addr $b.addr
         NET_CLOSE($b.listener)
     "#};
-    run_script(&root, script).expect("re-bind after close runs");
-    assert_eq!(
-        read_trimmed(&root.join("addr.txt").unwrap()),
-        "127.0.0.1:23515"
-    );
+    run_script_with(registry, &root, script).expect("re-claim after close runs");
 }
 
 #[test]
@@ -348,9 +527,10 @@ fn close_during_accept_returns() {
     // task waits with no client in flight.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
+    let registry = mapped_registry("test-close-accept");
     let script = indoc! {r#"
         IMPORT [STD, NET]
-        LET $l: NET_LISTEN_INFO = NET_LISTEN("23516", {})
+        LET $l: NET_LISTEN_INFO = NET_LISTEN("test-close-accept", {})
         LET $in: PIPE
         LET $out: PIPE
         LET $t: HANDLE = ASYNC { NET_ACCEPT($l.listener, $in, $out, {}) }
@@ -358,7 +538,7 @@ fn close_during_accept_returns() {
         NET_CLOSE($l.listener)
         AWAIT $t
     "#};
-    let err = run_script(&root, script).expect_err("closed accept must fail");
+    let err = run_script_with(registry, &root, script).expect_err("closed accept must fail");
     assert!(err.to_string().contains("listener is closed"), "{err:#}");
 }
 
@@ -368,43 +548,49 @@ fn main_thread_accept_bails() {
     // The ASYNC gate fires before any accept loop work.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
+    let registry = mapped_registry("test-main-accept");
     let script = indoc! {r#"
         IMPORT [STD, NET]
-        LET $l: NET_LISTEN_INFO = NET_LISTEN("23518", {})
+        LET $l: NET_LISTEN_INFO = NET_LISTEN("test-main-accept", {})
         LET $in: PIPE
         LET $out: PIPE
         NET_ACCEPT($l.listener, $in, $out, {})
     "#};
-    let err = run_script(&root, script).expect_err("main-thread accept must fail");
+    let err = run_script_with(registry, &root, script).expect_err("main-thread accept must fail");
     assert!(format!("{err:#}").contains("requires ASYNC"), "{err:#}");
 }
 
 #[test]
 fn main_thread_connect_bails() {
     // The ASYNC gate fires before parsing, dialing, or sockets: runs
-    // under Miri too.
+    // under Miri too. Memory-mapped so pre-run passes the service
+    // through to the gate instead of failing it unmapped.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
+    let registry = memory_registry(&["test-gate-connect"]);
     let script = indoc! {r#"
         IMPORT [STD, NET]
         LET $in: PIPE
         LET $out: PIPE
-        NET_CONNECT("127.0.0.1:9", $in, $out, {})
+        NET_CONNECT("test-gate-connect", $in, $out, {})
     "#};
-    let err = run_script(&root, script).expect_err("main-thread connect must fail");
+    let err = run_script_with(registry, &root, script).expect_err("main-thread connect must fail");
     assert!(format!("{err:#}").contains("requires ASYNC"), "{err:#}");
 }
 
 #[test]
 fn unknown_options_bail() {
     // Option validation precedes all socket work: no Miri ignore needed.
+    // The service is memory-mapped so validation (not binding) fails.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
+    let registry = memory_registry(&["test-bad-option"]);
     let script = indoc! {r#"
         IMPORT [STD, NET]
-        LET $l: NET_LISTEN_INFO = NET_LISTEN("23519", {backlog: 5})
+        LET $l: NET_LISTEN_INFO = NET_LISTEN("test-bad-option", {backlog: 5})
     "#};
-    let err = run_script(&root, script).expect_err("unknown listen option must fail");
+    let err =
+        run_script_with(registry, &root, script).expect_err("unknown listen option must fail");
     assert!(
         err.to_string().contains("unknown option 'backlog'"),
         "{err:#}"
@@ -418,7 +604,7 @@ fn proxy_terminates() {
     // bytes flow up through CONNECT, upstream bytes flow down through
     // ACCEPT, and a client disconnect cascades through both tasks.
     let upstream = TcpListener::bind("127.0.0.1:0").expect("bind");
-    let upstream_port = upstream.local_addr().expect("addr").port();
+    let upstream_addr = upstream.local_addr().expect("addr").to_string();
     let helper = std::thread::spawn(move || {
         let (mut conn, _) = upstream.accept().expect("accept");
         conn.set_read_timeout(Some(Duration::from_secs(5)))
@@ -442,31 +628,39 @@ fn proxy_terminates() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let probe = root.clone();
-    // The upstream port travels by file (written before the script
-    // spawns, so no race); the downstream addr comes back the same way.
-    {
-        use oxdock_fs::PathResolver;
-        let resolver = PathResolver::new(root.root(), root.root()).unwrap();
-        let staged = root.join("up.txt").unwrap();
-        resolver
-            .write_file(&staged, upstream_port.to_string().as_bytes())
-            .expect("stage upstream port");
-    }
+    // Both ends are runner-mapped services: the downstream listener gets
+    // ephemeral loopback, the upstream dial target points at the harness
+    // listener (dial-only: the runner never binds what it does not own).
+    // The downstream addr comes back by file.
+    let registry = Arc::new(EndpointRegistry::new(false));
+    registry
+        .add_cli_mapping("test-proxy-down", "127.0.0.1:0")
+        .expect("map downstream");
+    registry
+        .add_mapping(
+            &EndpointKey::tcp(oxdock_net_plugin::VirtualEndpoint::Name(
+                "test-proxy-up".to_string(),
+            )),
+            BindingSpec::DialOnly {
+                addr: upstream_addr.parse().expect("upstream addr"),
+            },
+        )
+        .expect("map upstream");
+    registry.bind_all().expect("bind downstream");
     let script = indoc! {r#"
         IMPORT [STD, NET]
-        LET $up_port: STRING = READ up.txt
-        LET $l: NET_LISTEN_INFO = NET_LISTEN("23520", {})
+        LET $l: NET_LISTEN_INFO = NET_LISTEN("test-proxy-down", {})
         WRITE addr.txt "{{ $l.addr }}"
         LET $s2c: PIPE
         LET $c2s: PIPE
         LET $ls: HANDLE = ASYNC { NET_ACCEPT($l.listener, $s2c, $c2s, {}) }
-        LET $up: HANDLE = ASYNC { NET_CONNECT("127.0.0.1:{{ $up_port }}", $c2s, $s2c, {}) }
+        LET $up: HANDLE = ASYNC { NET_CONNECT("test-proxy-up", $c2s, $s2c, {}) }
         AWAIT $up
         AWAIT $ls
         WRITE done.txt "both-tasks-completed"
         NET_CLOSE($l.listener)
     "#};
-    let handle = std::thread::spawn(move || run_script(&root, script));
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
     let addr = read_addr(&probe);
     let mut client = connect_retry(&addr);
     client.write_all(b"ping\n").expect("write ping");
@@ -491,7 +685,7 @@ fn peer_fin_then_late_producer_completes() {
     // silent period (no premature exit on socket EOF) and still deliver
     // bytes the script produces afterwards.
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
-    let port = listener.local_addr().expect("addr").port();
+    let server_addr = listener.local_addr().expect("addr").to_string();
     let server = std::thread::spawn(move || {
         let (mut conn, _) = listener.accept().expect("accept");
         conn.set_read_timeout(Some(Duration::from_secs(5)))
@@ -503,21 +697,17 @@ fn peer_fin_then_late_producer_completes() {
     });
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    let script = format!(
-        indoc! {r#"
-            IMPORT [STD, NET]
-            LET $req: PIPE
-            LET $resp: PIPE
-            LET $t: HANDLE = ASYNC {{
-                NET_CONNECT("127.0.0.1:{port}", $req, $resp, {{}})
-            }}
-            SLEEP 300ms
-            WITH_IO [stdout=$req] ECHO "late"
-            AWAIT $t
-        "#},
-        port = port
-    );
-    run_script(&root, &script).expect("late producer runs");
+    let registry = mapped_registry_to("test-peer-fin", &server_addr);
+    let script = indoc! {r#"
+        IMPORT [STD, NET]
+        LET $req: PIPE
+        LET $resp: PIPE
+        LET $t: HANDLE = ASYNC { NET_CONNECT("test-peer-fin", $req, $resp, {}) }
+        SLEEP 300ms
+        WITH_IO [stdout=$req] ECHO "late"
+        AWAIT $t
+    "#};
+    run_script_with(registry, &root, script).expect("late producer runs");
     server.join().expect("server thread");
 }
 
@@ -528,9 +718,10 @@ fn cancel_accept_blocked_returns_promptly() {
     // loop observes the task token per tick.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
+    let registry = mapped_registry("test-cancel-accept");
     let script = indoc! {r#"
         IMPORT [STD, NET]
-        LET $l: NET_LISTEN_INFO = NET_LISTEN("23521", {})
+        LET $l: NET_LISTEN_INFO = NET_LISTEN("test-cancel-accept", {})
         LET $in: PIPE
         LET $out: PIPE
         LET $t: HANDLE = ASYNC { NET_ACCEPT($l.listener, $in, $out, {}) }
@@ -538,7 +729,7 @@ fn cancel_accept_blocked_returns_promptly() {
         NET_CLOSE($l.listener)
     "#};
     let start = Instant::now();
-    run_script(&root, script).expect("cancel returns");
+    run_script_with(registry, &root, script).expect("cancel returns");
     assert!(
         start.elapsed() < Duration::from_secs(5),
         "CANCEL of an accept-blocked task must return promptly"
@@ -553,9 +744,10 @@ fn second_accept_serves_next_client() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let probe = root.clone();
+    let registry = mapped_registry("test-second-accept");
     let script = indoc! {r#"
         IMPORT [STD, NET]
-        LET $l: NET_LISTEN_INFO = NET_LISTEN("23522", {})
+        LET $l: NET_LISTEN_INFO = NET_LISTEN("test-second-accept", {})
         WRITE addr.txt "{{ $l.addr }}"
         LET $in1: PIPE
         LET $out1: PIPE
@@ -578,7 +770,7 @@ fn second_accept_serves_next_client() {
         NET_CLOSE($l.listener)
         WRITE done.txt "two-sessions"
     "#};
-    let handle = std::thread::spawn(move || run_script(&root, script));
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
     let addr = read_addr(&probe);
     for want in [b"one\n".as_slice(), b"two\n".as_slice()] {
         let mut client = connect_retry(&addr);
@@ -602,23 +794,15 @@ fn second_accept_serves_next_client() {
 #[cfg_attr(miri, ignore = "needs loopback TCP plus threads")]
 fn prebound_claim_serves_cli_mapped_socket() {
     // The CLI path: a pre-bound ephemeral socket is claimed by LISTEN,
-    // and real TCP clients reach it. No script-declared port involved.
-    let registry = Arc::new(EndpointRegistry::new(false));
-    registry
-        .add_mapping(
-            &EndpointKey::tcp(oxdock_net_plugin::VirtualEndpoint::Port(23530)),
-            BindingSpec::Exposed {
-                addr: "127.0.0.1:0".parse().expect("addr"),
-            },
-        )
-        .expect("mapping");
-    registry.bind_all().expect("bind_all resolves ephemeral");
+    // and real TCP clients reach it. The script names a service; the
+    // runner owns the bind.
+    let registry = mapped_registry("test-prebound");
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let probe = root.clone();
     let script = indoc! {r#"
         IMPORT [STD, NET]
-        LET $l: NET_LISTEN_INFO = NET_LISTEN("23530", {})
+        LET $l: NET_LISTEN_INFO = NET_LISTEN("test-prebound", {})
         WRITE addr.txt "{{ $l.addr }}"
         LET $in: PIPE
         LET $out: PIPE
@@ -650,11 +834,12 @@ fn prebound_claim_serves_cli_mapped_socket() {
 
 #[test]
 fn memory_session_roundtrips_with_zero_sockets() {
-    // In-process IPC: a named service auto-opens a memory rendezvous with
-    // no CLI mapping and no sockets. CONNECT and ACCEPT pump through it
-    // like a TCP session. No Miri ignore: pure pipe backends.
+    // In-process IPC on an explicitly-mapped memory service: CONNECT
+    // and ACCEPT pump through it like a TCP session. No Miri ignore:
+    // pure pipe backends.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
+    let registry = memory_registry(&["mem-echo"]);
     let script = indoc! {r#"
         IMPORT [STD, NET]
         LET $l: NET_LISTEN_INFO = NET_LISTEN("mem-echo", {})
@@ -677,17 +862,19 @@ fn memory_session_roundtrips_with_zero_sockets() {
         NET_CLOSE($l.listener)
         WRITE out.txt "{{ $got }}"
     "#};
-    run_script(&root, script).expect("memory session runs");
+    run_script_with(registry, &root, script).expect("memory session runs");
     assert_eq!(read_trimmed(&root.join("virt.txt").unwrap()), "mem-echo");
     assert_eq!(read_trimmed(&root.join("out.txt").unwrap()), "hello-memory");
 }
 
 #[test]
 fn memory_client_before_server_rendezvous() {
-    // CONNECT before LISTEN: the client auto-creates the memory slot and
-    // queues; the later ACCEPT pops it. Order-independent rendezvous.
+    // CONNECT before LISTEN on an explicitly-mapped memory service: the
+    // client queues; the later ACCEPT pops it. Order-independent
+    // rendezvous, still by runner designation.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
+    let registry = memory_registry(&["mem-early"]);
     let script = indoc! {r#"
         IMPORT [STD, NET]
         LET $cin: PIPE
@@ -710,7 +897,7 @@ fn memory_client_before_server_rendezvous() {
         NET_CLOSE($l.listener)
         WRITE out.txt "{{ $got }}"
     "#};
-    run_script(&root, script).expect("early client runs");
+    run_script_with(registry, &root, script).expect("early client runs");
     assert_eq!(read_trimmed(&root.join("out.txt").unwrap()), "early-bird");
 }
 
@@ -753,14 +940,20 @@ fn offline_listen_and_close_opens_no_socket() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, NET]
-        LET $l: NET_LISTEN_INFO = NET_LISTEN("23531", {})
+        LET $l: NET_LISTEN_INFO = NET_LISTEN("test-offline-echo", {})
         WRITE addr.txt "{{ $l.addr }}"
         WRITE virt.txt "{{ $l.virtual }}"
         NET_CLOSE($l.listener)
     "#};
     run_script_with(registry, &root, script).expect("offline listen runs");
-    assert_eq!(read_trimmed(&root.join("addr.txt").unwrap()), "23531");
-    assert_eq!(read_trimmed(&root.join("virt.txt").unwrap()), "23531");
+    assert_eq!(
+        read_trimmed(&root.join("addr.txt").unwrap()),
+        "test-offline-echo"
+    );
+    assert_eq!(
+        read_trimmed(&root.join("virt.txt").unwrap()),
+        "test-offline-echo"
+    );
 }
 
 #[test]
@@ -769,7 +962,7 @@ fn offline_connect_bails_before_sockets() {
     // loopback literal and a virtual port both bail. Runs under Miri.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    for target in ["127.0.0.1:9", "23532"] {
+    for target in ["test-offline-dial-a", "test-offline-dial-b"] {
         let registry = Arc::new(EndpointRegistry::new(true));
         let script = format!(
             indoc! {r#"
@@ -1039,7 +1232,7 @@ fn offline_connect_reads_both_timeout_shapes() {
                 LET $in: PIPE
                 LET $out: PIPE
                 LET $c: HANDLE = ASYNC {{
-                    NET_CONNECT("23533", $in, $out, {options})
+                    NET_CONNECT("test-offline-timeout", $in, $out, {options})
                 }}
                 AWAIT $c
             "#},
@@ -1051,6 +1244,42 @@ fn offline_connect_reads_both_timeout_shapes() {
             "{label} timeout reads past validation: {err:#}"
         );
     }
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "blind sampling drives registry claim paths outside Miri isolation"
+)]
+fn returns_gate_covers_net_functions() {
+    // Same returns contract as STD builtins, over this module's own
+    // registrations: sampled calls that reach `Ok` satisfy the slot,
+    // and anything sampling cannot reach must carry examples. Examples
+    // name `doc-net-*` services, so the harness pre-maps them the way a
+    // CLI runner would: scripts declare, the runner binds.
+    let registry = Arc::new(EndpointRegistry::new(false));
+    for service in [
+        "doc-net-listen",
+        "doc-net-demo",
+        "doc-net-connect",
+        "doc-net-observe",
+        "doc-net-dial",
+        "doc-net-close",
+        "doc-net-fetch",
+    ] {
+        registry
+            .add_cli_mapping(service, "127.0.0.1:0")
+            .expect("map doc service");
+    }
+    registry.bind_all().expect("bind doc services");
+    let module = module_with_endpoints(registry);
+    let proc = oxdock_process::default_process_manager();
+    oxdock_core::assert_module_returns_conformance(
+        "NET",
+        &module.funcs,
+        vec![module.clone()],
+        proc,
+    );
 }
 
 #[test]
@@ -1130,7 +1359,7 @@ fn port_and_addr_fail_loudly_when_unbound() {
         LET $port: INT = NET_PORT("never-mapped-xyz")
     "#};
     let err = run_script(&root, script).expect_err("unmapped lookup must fail");
-    assert!(err.to_string().contains("is not bound"), "{err:#}");
+    assert!(err.to_string().contains("is not mapped"), "{err:#}");
 
     let registry = Arc::new(EndpointRegistry::new(false));
     registry

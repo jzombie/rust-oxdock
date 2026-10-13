@@ -37,6 +37,14 @@
 //!   defaults to none.
 //! - The first doc-comment line becomes `FuncMeta.summary`; the full doc
 //!   text becomes `FuncMeta.docs`. Override the summary with `summary = "..."`.
+//! - Repeatable `#[example(name = "...", code = "...")]` attributes become
+//!   `FuncMeta.examples`: executable `oxdock` snippets rendered into the
+//!   generated reference and executed by docs_conformance. Optional
+//!   `fence_meta = "..."` carries the fence info string
+//!   (`expect_error:"..."`, `roots:unified`, ...). Bodies are raw
+//!   strings, so `code = r#"..."#` keeps multi-line scripts legible;
+//!   raise the hash count (`r###"..."###`) when the script itself
+//!   contains a `"#` run (markdown headings like `"## Title"`).
 //!
 //! The macro keeps the original function untouched (still directly callable
 //! and unit testable) and emits one sibling next to it: a registration
@@ -59,7 +67,7 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use std::collections::HashSet;
 use syn::parse::{Parse, ParseStream};
-use syn::{FnArg, ItemFn, Lit, LitStr, Meta, Pat, Token, Type};
+use syn::{Attribute, FnArg, Ident, ItemFn, Lit, LitStr, Meta, Pat, Token, Type};
 
 /// Host export macro for DSL native and host functions. See the crate docs for the
 /// full contract: `#[oxdock_func]` for stateful functions taking
@@ -234,6 +242,10 @@ struct Param {
     kind: ParamKind,
     allowed: Option<Vec<String>>,
     options: Option<Vec<OptSpec>>,
+    /// `#[optional]` omittable trailing options MAP: omission fills
+    /// `{}`, and the rendered signature marks `$name?`. Valid only
+    /// trailing (expansion-enforced, mirroring run-start validation).
+    optional: bool,
     docs: String,
 }
 
@@ -997,9 +1009,49 @@ fn doc_lines(attrs: &[syn::Attribute]) -> Vec<String> {
 }
 
 /// Map one `#[options(...)]` value type name to its tag expression.
-/// Options values are data (scalars and plain collections); handles
-/// never hide inside option maps.
+/// Options values are data (scalars and one-level collections);
+/// handles never hide inside option maps. `|` composes an admission
+/// set (`DURATION|STRING`); `MAP<SCALAR>` and `LIST<SCALAR>` shape one
+/// level of collection. Members reuse the single-type grammar below,
+/// so unions and collections spell no new names.
 fn option_value_type(name: &str) -> syn::Result<TokenStream2> {
+    let name = name.trim();
+    if name.contains('|') {
+        let mut members = Vec::new();
+        for part in name.split('|') {
+            members.push(option_single_value_type(part.trim())?);
+        }
+        if members.len() < 2 {
+            return Err(syn::Error::new(
+                proc_macro2::Span::call_site(),
+                "options unions need at least two members (`A|B`)",
+            ));
+        }
+        return Ok(quote! { ::oxdock_core::TypeTag::union(vec![#(#members),*]) });
+    }
+    if let Some(inner) = name
+        .strip_prefix("MAP<")
+        .and_then(|rest| rest.strip_suffix('>'))
+    {
+        let values = option_single_value_type(inner.trim())?;
+        return Ok(quote! {
+            ::oxdock_core::TypeTag::MapOf(::std::sync::Arc::new(#values))
+        });
+    }
+    if let Some(inner) = name
+        .strip_prefix("LIST<")
+        .and_then(|rest| rest.strip_suffix('>'))
+    {
+        let element = option_single_value_type(inner.trim())?;
+        return Ok(quote! {
+            ::oxdock_core::TypeTag::ListOf(::std::sync::Arc::new(#element))
+        });
+    }
+    option_single_value_type(name)
+}
+
+/// Map one bare `#[options(...)]` value type name to its tag.
+fn option_single_value_type(name: &str) -> syn::Result<TokenStream2> {
     match name {
         "STRING" => Ok(quote! { ::oxdock_core::TypeTag::String }),
         "INT" => Ok(quote! { ::oxdock_core::TypeTag::Int }),
@@ -1012,7 +1064,7 @@ fn option_value_type(name: &str) -> syn::Result<TokenStream2> {
         "ANY" => Ok(quote! { ::oxdock_core::TypeTag::Any }),
         _ => Err(syn::Error::new(
             proc_macro2::Span::call_site(),
-            "unknown options value type; expected STRING, INT, FLOAT, BOOL, DURATION, PATH, MAP, LIST, or ANY",
+            "unknown options value type; expected STRING, INT, FLOAT, BOOL, DURATION, PATH, MAP, LIST, ANY, an A|B union, or MAP<SCALAR>/LIST<SCALAR>",
         )),
     }
 }
@@ -1066,18 +1118,114 @@ fn parse_record_attr(attr: &syn::Attribute) -> syn::Result<Vec<RecordField>> {
     Ok(specs)
 }
 
+/// One `#[example(...)]` entry: a named executable snippet for the
+/// generated reference. `fence_meta` carries the fence info string
+/// when the example needs it (`expect_error:"..."`, `roots:unified`).
+struct FnExample {
+    name: String,
+    code: String,
+    fence_meta: Option<String>,
+}
+
+/// Parse `#[example(name = "...", code = "...", fence_meta = "...")]`.
+/// `name` and `code` are required; `fence_meta` is optional. Unknown
+/// keys fail naming the three legal ones, so typos cannot silently
+/// become documentation.
+fn parse_example_attr(attr: &Attribute) -> syn::Result<FnExample> {
+    let mut name: Option<LitStr> = None;
+    let mut code: Option<LitStr> = None;
+    let mut fence_meta: Option<LitStr> = None;
+    attr.parse_args_with(|input: ParseStream| {
+        while !input.is_empty() {
+            let key: Ident = input.parse()?;
+            input.parse::<Token![=]>()?;
+            let value: LitStr = input.parse()?;
+            match key.to_string().as_str() {
+                "name" => name = Some(value),
+                "code" => code = Some(value),
+                "fence_meta" => fence_meta = Some(value),
+                _ => {
+                    return Err(syn::Error::new(
+                        key.span(),
+                        "unknown example key; expected name, code, or fence_meta",
+                    ));
+                }
+            }
+            if input.peek(Token![,]) {
+                input.parse::<Token![,]>()?;
+            }
+        }
+        Ok(())
+    })?;
+    let Some(name) = name else {
+        return Err(syn::Error::new_spanned(
+            attr,
+            "`#[example(...)]` needs `name = \"...\"`",
+        ));
+    };
+    let Some(code) = code else {
+        return Err(syn::Error::new_spanned(
+            attr,
+            "`#[example(...)]` needs `code = \"...\"`",
+        ));
+    };
+    if name.value().trim().is_empty() {
+        return Err(syn::Error::new(name.span(), "example names are nonempty"));
+    }
+    if code.value().trim().is_empty() {
+        return Err(syn::Error::new(code.span(), "example code is nonempty"));
+    }
+    Ok(FnExample {
+        name: name.value(),
+        // Attribute strings cannot call `indoc!`, so dedent here:
+        // bodies indent naturally under the attribute while fences
+        // render flush like command examples.
+        code: dedent_code(&code.value()),
+        fence_meta: fence_meta.map(|lit| lit.value()),
+    })
+}
+
+/// Strip one leading newline plus the common indentation of
+/// non-blank lines (`indoc!` semantics for attribute bodies, which
+/// cannot invoke the macro). Blank lines keep no indentation.
+/// Prefix stripping never panics: every non-blank line carries at
+/// least the minimum run by construction.
+fn dedent_code(code: &str) -> String {
+    let mut lines: Vec<&str> = code.split('\n').collect();
+    if lines.first().is_some_and(|line| line.trim().is_empty()) {
+        lines.remove(0);
+    }
+    let min = lines
+        .iter()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| line.len() - line.trim_start_matches(' ').len())
+        .min()
+        .unwrap_or(0);
+    let prefix = " ".repeat(min);
+    lines
+        .iter()
+        .map(|line| {
+            if line.trim().is_empty() {
+                String::new()
+            } else {
+                line.strip_prefix(prefix.as_str())
+                    .unwrap_or(line)
+                    .to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Parse `#[options("key: TYPE", "opt?: TYPE = default", ...)]` into
 /// specs. A `?` suffix marks optional keys (defaults need it);
 /// anything else fails naming the expected `name[?]: TYPE` shape.
+/// An empty list (`#[options()]`) declares a reserved-but-keyless
+/// MAP: every passed key fails, documenting the reservation in the
+/// metadata instead of a hand-built entry.
 fn parse_options_attr(attr: &syn::Attribute) -> syn::Result<Vec<OptSpec>> {
     let items =
         attr.parse_args_with(syn::punctuated::Punctuated::<LitStr, Token![,]>::parse_terminated)?;
-    if items.is_empty() {
-        return Err(syn::Error::new_spanned(
-            attr,
-            "`#[options(...)]` needs at least one entry",
-        ));
-    }
     let mut specs = Vec::new();
     let mut seen = HashSet::new();
     for lit in items {
@@ -1217,6 +1365,7 @@ fn expand_func(options: FuncOptions, func: ItemFn) -> syn::Result<TokenStream2> 
         let mut options: Option<Vec<OptSpec>> = None;
         let mut union_members: Option<Vec<Type>> = None;
         let mut record_fields: Option<Vec<RecordField>> = None;
+        let mut omittable = false;
         for attr in &typed.attrs {
             if attr.path().is_ident("values") {
                 let parsed = attr.parse_args_with(
@@ -1249,6 +1398,11 @@ fn expand_func(options: FuncOptions, func: ItemFn) -> syn::Result<TokenStream2> 
                 union_members = Some(members);
             } else if attr.path().is_ident("record") {
                 record_fields = Some(parse_record_attr(attr)?);
+            } else if attr.path().is_ident("optional") {
+                attr.meta.require_path_only().map_err(|_| {
+                    syn::Error::new_spanned(attr, "`#[optional]` takes no arguments")
+                })?;
+                omittable = true;
             }
         }
         let mut kind = param_kind(&typed.ty)?;
@@ -1302,6 +1456,12 @@ fn expand_func(options: FuncOptions, func: ItemFn) -> syn::Result<TokenStream2> 
                 "`#[options(...)]` needs a MAP parameter",
             ));
         }
+        if omittable && options.is_none() {
+            return Err(syn::Error::new_spanned(
+                &typed.ty,
+                "`#[optional]` needs `#[options(...)]` on the same parameter: only options MAPs may be omitted",
+            ));
+        }
         // Per-parameter `///` docs ride the parameter itself: no
         // section to parse, no names to match (position is identity),
         // so prose cannot vary in structure. They pass through to
@@ -1312,16 +1472,28 @@ fn expand_func(options: FuncOptions, func: ItemFn) -> syn::Result<TokenStream2> 
             kind,
             allowed,
             options,
+            optional: omittable,
             docs: param_docs,
         });
     }
+    // Optional params must trail, mirroring run-start validation at
+    // expansion time: omission fills from the end, so a required
+    // param after an omittable one could never receive its value.
+    if let Some(pos) = params.iter().position(|p| p.optional)
+        && params[pos + 1..].iter().any(|p| !p.optional)
+    {
+        return Err(syn::Error::new(
+            params[pos].ident.span(),
+            "optional params must trail: no required param may follow an `#[optional]` one",
+        ));
+    }
     // `#[values(...)]`, `#[options(...)]`, `#[union(...)]`,
-    // `#[record(...)]`, and per-parameter `///` docs are macro input,
-    // not real attributes: strip them so the re-emitted function
-    // compiles (`doc` is not a legal parameter attribute for rustc)
-    // without unknown-attribute errors. The prose lives on in the
-    // emitted metadata. All other parameter attributes pass through
-    // untouched.
+    // `#[record(...)]`, `#[optional]`, and per-parameter `///` docs
+    // are macro input, not real attributes: strip them so the
+    // re-emitted function compiles (`doc` is not a legal parameter
+    // attribute for rustc) without unknown-attribute errors. The
+    // prose lives on in the emitted metadata. All other parameter
+    // attributes pass through untouched.
     let mut emitted = func.clone();
     for arg in &mut emitted.sig.inputs {
         if let FnArg::Typed(typed) = arg {
@@ -1330,10 +1502,22 @@ fn expand_func(options: FuncOptions, func: ItemFn) -> syn::Result<TokenStream2> 
                     && !attr.path().is_ident("options")
                     && !attr.path().is_ident("union")
                     && !attr.path().is_ident("record")
+                    && !attr.path().is_ident("optional")
                     && !attr.path().is_ident("doc")
             });
         }
     }
+    // `#[example(...)]` is macro input too: parse every entry off the
+    // item, then strip the attributes so rustc never sees them.
+    let mut fn_examples = Vec::new();
+    for attr in &func.attrs {
+        if attr.path().is_ident("example") {
+            fn_examples.push(parse_example_attr(attr)?);
+        }
+    }
+    emitted
+        .attrs
+        .retain(|attr| !attr.path().is_ident("example"));
 
     let arity = params.len();
     let param_names: Vec<&syn::Ident> = params.iter().map(|p| &p.ident).collect();
@@ -1346,7 +1530,17 @@ fn expand_func(options: FuncOptions, func: ItemFn) -> syn::Result<TokenStream2> 
     // function or parameter strings.
     for (option_idx, p) in params.iter().enumerate() {
         let name = p.ident.to_string();
-        let kind = p.kind.type_path();
+        // Options-bearing MAPs declare bare `MAP`: the key detail
+        // lives in `options` (rendered as a record, checked by
+        // `check_options`), and run-start validation admits only
+        // bare `MAP` for omittable params, like every hand-built
+        // entry. The extractor still enforces MAP below.
+        let kind = if p.options.is_some() {
+            quote! { Some(::oxdock_core::TypeTag::Map) }
+        } else {
+            p.kind.type_path()
+        };
+        let is_optional = p.optional;
         let param_docs = LitStr::new(&p.docs, proc_macro2::Span::call_site());
         let allowed = match &p.allowed {
             Some(values) => {
@@ -1383,10 +1577,19 @@ fn expand_func(options: FuncOptions, func: ItemFn) -> syn::Result<TokenStream2> 
                         }
                     });
                 }
+                // Lazy static: option values compose unions at runtime
+                // (`TypeTag::union` allocates), which a plain `static`
+                // array cannot hold. Deref coercion still yields the
+                // `&[ParamOption]` slice the metadata and the key check
+                // share, so one emission covers both scalar and union
+                // values with no bifurcated shape.
                 options_statics.push(quote! {
-                    static #static_ident: [::oxdock_core::ParamOption; #count] = [#(#entries),*];
+                    static #static_ident: ::std::sync::LazyLock<[::oxdock_core::ParamOption; #count]> =
+                        ::std::sync::LazyLock::new(|| [#(#entries),*]);
                 });
-                quote! { Some(&#static_ident) }
+                // Explicit slice: struct fields are not coercion sites,
+                // so the `&LazyLock` never derefs by itself here.
+                quote! { Some(#static_ident.as_slice()) }
             }
             None => quote! { None },
         };
@@ -1397,10 +1600,9 @@ fn expand_func(options: FuncOptions, func: ItemFn) -> syn::Result<TokenStream2> 
                 allowed: #allowed,
                 docs: #param_docs,
                 options: #options_meta,
-                // The macro has no defaults syntax: generated params
-                // are always required. Hand-built entries alone mark
-                // trailing options MAPs optional.
-                optional: false,
+                // `#[optional]` trailing options MAPs render `$name?`;
+                // everything else stays required.
+                optional: #is_optional,
             }
         });
     }
@@ -1416,7 +1618,7 @@ fn expand_func(options: FuncOptions, func: ItemFn) -> syn::Result<TokenStream2> 
             Some(_) => {
                 let static_ident = format_ident!("__OXDOCK_OPTIONS_{option_idx}");
                 quote! {
-                    ::oxdock_core::check_options(&#name, &#static_ident, #dsl_name)?;
+                    ::oxdock_core::check_options(&#name, #static_ident.as_slice(), #dsl_name)?;
                 }
             }
             None => quote! {},
@@ -1443,6 +1645,68 @@ fn expand_func(options: FuncOptions, func: ItemFn) -> syn::Result<TokenStream2> 
         .returns
         .map(|expr| quote! { Some(#expr) })
         .unwrap_or(quote! { None });
+    // Executable examples: one `Example` per `#[example(...)]`,
+    // emitted as a static slice into the metadata. No entry means
+    // an empty slice, never `None`: absence is visible, not hidden.
+    let example_metas: Vec<TokenStream2> = fn_examples
+        .iter()
+        .map(|example| {
+            let name = LitStr::new(&example.name, proc_macro2::Span::call_site());
+            let code = LitStr::new(&example.code, proc_macro2::Span::call_site());
+            let fence_meta = match &example.fence_meta {
+                Some(meta) => {
+                    let lit = LitStr::new(meta, proc_macro2::Span::call_site());
+                    quote! { Some(#lit) }
+                }
+                None => quote! { None },
+            };
+            quote! {
+                ::oxdock_core::Example {
+                    name: #name,
+                    fence_meta: #fence_meta,
+                    code: #code,
+                }
+            }
+        })
+        .collect();
+
+    // Required count: total params minus the trailing `#[optional]`
+    // run. Omission fills from the end with empty MAPs, so the check
+    // below names the same range `fill_optional_args` enforces for
+    // hand-built entries.
+    let required = arity - params.iter().rev().take_while(|p| p.optional).count();
+    let arity_check = if required == arity {
+        quote! {
+            if __oxdock_values.len() != #arity {
+                ::anyhow::bail!(
+                    "{}() expects {} argument(s), got {}",
+                    #dsl_name,
+                    #arity,
+                    __oxdock_values.len(),
+                );
+            }
+        }
+    } else {
+        quote! {
+            if __oxdock_values.len() < #required || __oxdock_values.len() > #arity {
+                ::anyhow::bail!(
+                    "{}() expects {} to {} argument(s), got {}",
+                    #dsl_name,
+                    #required,
+                    #arity,
+                    __oxdock_values.len(),
+                );
+            }
+            // Only trailing options MAPs can be missing (expansion
+            // enforced above), so every gap fills `{}` exactly.
+            let mut __oxdock_values = __oxdock_values;
+            while __oxdock_values.len() < #arity {
+                __oxdock_values.push(::oxdock_core::Value::map(
+                    ::std::collections::BTreeMap::new(),
+                ));
+            }
+        }
+    };
 
     // The entry point closes over nothing: arity check, unpack, then the
     // original function. A closure keeps it out of the namespace entirely;
@@ -1452,14 +1716,7 @@ fn expand_func(options: FuncOptions, func: ItemFn) -> syn::Result<TokenStream2> 
             |#pat: #ty,
              __oxdock_values: Vec<::oxdock_core::Value>|
              -> ::anyhow::Result<::oxdock_core::Value> {
-                if __oxdock_values.len() != #arity {
-                    ::anyhow::bail!(
-                        "{}() expects {} argument(s), got {}",
-                        #dsl_name,
-                        #arity,
-                        __oxdock_values.len(),
-                    );
-                }
+                #arity_check
                 #values_iter
                 #(#unpacks)*
                 #ident(#cx, #(#param_names),*)
@@ -1468,14 +1725,7 @@ fn expand_func(options: FuncOptions, func: ItemFn) -> syn::Result<TokenStream2> 
         _ => quote! {
             |__oxdock_values: Vec<::oxdock_core::Value>|
              -> ::anyhow::Result<::oxdock_core::Value> {
-                if __oxdock_values.len() != #arity {
-                    ::anyhow::bail!(
-                        "{}() expects {} argument(s), got {}",
-                        #dsl_name,
-                        #arity,
-                        __oxdock_values.len(),
-                    );
-                }
+                #arity_check
                 #values_iter
                 #(#unpacks)*
                 #ident(#(#param_names),*)
@@ -1507,6 +1757,7 @@ fn expand_func(options: FuncOptions, func: ItemFn) -> syn::Result<TokenStream2> 
             rpn: #rpn,
             summary: #summary,
             docs: #docs_text,
+            examples: &[#(#example_metas),*],
         }
     };
 
@@ -1832,6 +2083,105 @@ mod tests {
                 "must reject {bad:?}"
             );
         }
+    }
+
+    fn example_attr(tokens: proc_macro2::TokenStream) -> syn::Attribute {
+        syn::parse2::<syn::File>(quote! { #tokens fn f() {} })
+            .expect("attr parses")
+            .items
+            .into_iter()
+            .next()
+            .and_then(|item| match item {
+                syn::Item::Fn(func) => func.attrs.into_iter().next(),
+                _ => None,
+            })
+            .expect("attr present")
+    }
+
+    #[test]
+    fn example_attr_parses_name_code_and_fence_meta() {
+        let entry = parse_example_attr(&example_attr(
+            quote! { #[example(name = "basic", code = "INT(\"1\")")] },
+        ))
+        .expect("valid example");
+        assert_eq!(entry.name, "basic");
+        assert_eq!(entry.code, "INT(\"1\")");
+        assert_eq!(entry.fence_meta, None);
+        let meta = parse_example_attr(&example_attr(
+            quote! { #[example(name = "fails", fence_meta = "expect_error:\"nope\"", code = "EXIT 1")] },
+        ))
+        .expect("fence meta parses");
+        assert_eq!(meta.fence_meta.as_deref(), Some("expect_error:\"nope\""));
+    }
+
+    #[test]
+    fn example_attr_rejects_missing_and_unknown_keys() {
+        for tokens in [
+            quote! { #[example(code = "INT(\"1\")")] },
+            quote! { #[example(name = "basic")] },
+            quote! { #[example(name = "", code = "INT(\"1\")")] },
+            quote! { #[example(name = "basic", code = "  ")] },
+            quote! { #[example(name = "basic", code = "INT(\"1\")", bogus = "x")] },
+        ] {
+            assert!(
+                parse_example_attr(&example_attr(tokens)).is_err(),
+                "must reject bad example attr"
+            );
+        }
+    }
+
+    #[test]
+    fn options_values_accept_unions_and_shallow_collections() {
+        let union = option_value_type("DURATION|STRING").expect("union parses");
+        let rendered = quote! { #union }.to_string();
+        assert!(
+            rendered.contains("union")
+                && rendered.contains("Duration")
+                && rendered.contains("String"),
+            "union emits the admission set: {rendered}"
+        );
+        let map = option_value_type("MAP<STRING>").expect("map parses");
+        let rendered = quote! { #map }.to_string();
+        assert!(
+            rendered.contains("MapOf") && rendered.contains("String"),
+            "map shapes its values: {rendered}"
+        );
+        let list = option_value_type("LIST<INT>").expect("list parses");
+        assert!(
+            quote! { #list }.to_string().contains("ListOf"),
+            "list shapes its elements"
+        );
+        for bad in ["DURATION|", "MAP<LIST<STRING>>", "HANDLE", "FROBNICATE"] {
+            assert!(option_value_type(bad).is_err(), "must reject {bad:?}");
+        }
+    }
+
+    #[test]
+    fn options_attr_accepts_empty_key_lists() {
+        let attr_tokens = quote! { #[options()] };
+        let attr = syn::parse2::<syn::File>(quote! { #attr_tokens fn f() {} })
+            .expect("attr parses")
+            .items
+            .into_iter()
+            .next()
+            .and_then(|item| match item {
+                syn::Item::Fn(func) => func.attrs.into_iter().next(),
+                _ => None,
+            })
+            .expect("attr present");
+        assert!(
+            parse_options_attr(&attr)
+                .expect("empty options parse")
+                .is_empty(),
+            "empty options declare a reserved-but-keyless MAP"
+        );
+    }
+
+    #[test]
+    fn example_code_dedents_like_indoc() {
+        let out = dedent_code("\n    IMPORT [STD]\n    LET $x: INT = 1\n\n      NESTED\n");
+        assert_eq!(out, "IMPORT [STD]\nLET $x: INT = 1\n\n  NESTED\n");
+        assert_eq!(dedent_code("FLUSH"), "FLUSH");
     }
 
     #[test]

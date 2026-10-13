@@ -35,6 +35,16 @@ Prefer explicit, test-only skips over runtime detection.
 - **Process Execution**: Use `oxdock-process` abstractions instead of raw `std::process::Command`.
     - Logic handling process execution differences (e.g. Miri vs Native) belongs in `oxdock-process`.
 
+## Network Isolation
+
+Scripts declare logical topology, the runner owns physical infrastructure. This is absolute and load bearing for sandboxing, portability, and CI stability: a script that names a number must behave identically on every machine, so numbers in scripts are never ports.
+
+- **Scripts name services**: every string passed to `NET_LISTEN`, `NET_CONNECT`, `SSH_SERVE`, `SSH_CONNECT`, `NET_PORT`, and `NET_ADDR` is a symbolic service name. Bare numbers stay parseable as port keys so CLI-mapped slots remain claimable, but an unmapped number never binds or dials from a script. `host:port` shapes are rejected in-script.
+- **Only the runner binds**: physical ports come exclusively from CLI `--listen`/`-p` mappings (via `bind_all`), or from test harnesses via `EndpointRegistry::add_cli_mapping` plus `bind_all`. Memory rendezvous needs an explicit runner mapping too: an unmapped key is a hard error everywhere, never a silent fallback.
+- **Bound before execution**: every service a script names must be fully bound (mapped socket or explicitly-mapped memory) before the first step runs. Modules stage a `PreRunCheck` in their states; the runner executes all staged checks against the parsed steps up front, so an unmapped key fails fast with zero side effects. Service names must be string literals so the check can see them.
+- **One resolution path**: serve and dial resolution for both plugins flows through `acquire_listener` and `resolve_service_target` in `crates/plugins/oxdock-net-plugin/src/endpoints.rs`, parameterized by `SocketRequirement`. Do not fork per-plugin match arms or restate the bail texts anywhere else.
+- **Tests**: socket tests pre-map services through the harness and assert on resolved addresses, never on fixed ports. Hardcoded port numbers appear only in anti-binding proofs that assert those numbers never touch the host network.
+
 ## Cross-Platform Compatibility
 
 - **Consistency**: All features and DSL commands must behave identically across platforms (Linux, macOS, Windows) as much as possible.

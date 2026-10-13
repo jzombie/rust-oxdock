@@ -31,6 +31,42 @@ fn run_script_with(
     engine.run_script(root, script)
 }
 
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "blind sampling drives SSH session paths outside Miri isolation"
+)]
+fn returns_gate_covers_ssh_functions() {
+    // Same returns contract as STD builtins, over this module's own
+    // registrations: sampled calls that reach `Ok` satisfy the slot,
+    // and anything sampling cannot reach must carry examples. Examples
+    // name `doc-ssh-*` services, so the harness pre-maps them the way a
+    // CLI runner would: scripts declare, the runner binds.
+    let registry = Arc::new(oxdock_net_plugin::EndpointRegistry::new(false));
+    for service in [
+        "doc-ssh-route",
+        "doc-ssh-serve",
+        "doc-ssh-accept",
+        "doc-ssh-pump",
+        "doc-ssh-close",
+        "doc-ssh-connect",
+        "doc-ssh-pty",
+    ] {
+        registry
+            .add_cli_mapping(service, "127.0.0.1:0")
+            .expect("map doc service");
+    }
+    registry.bind_all().expect("bind doc services");
+    let module = oxdock_ssh_plugin::module_with_endpoints(registry);
+    let proc = oxdock_process::default_process_manager();
+    oxdock_core::assert_module_returns_conformance(
+        "SSH",
+        &module.funcs,
+        vec![module.clone()],
+        proc,
+    );
+}
+
 fn read_trimmed(path: &GuardedPath) -> String {
     use oxdock_fs::PathResolver;
     let resolver = PathResolver::new(path.root(), path.root()).unwrap();
@@ -71,6 +107,65 @@ fn poll_file(probe: &GuardedPath, name: &str) -> String {
         }
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// Runner-mapped registry for one service: the harness binds ephemeral
+/// loopback, the script only ever names the service. Mirrors a CLI
+/// `-p 127.0.0.1:0:<service>` invocation.
+fn mapped_registry(service: &str) -> Arc<oxdock_net_plugin::EndpointRegistry> {
+    let registry = Arc::new(oxdock_net_plugin::EndpointRegistry::new(false));
+    registry
+        .add_cli_mapping(service, "127.0.0.1:0")
+        .expect("map service");
+    registry.bind_all().expect("bind service");
+    registry
+}
+
+/// Runner-mapped memory registry for services: in-process rendezvous
+/// by explicit runner designation. SSH rejects these pre-run; NET
+/// rendezvous on them.
+fn memory_registry(services: &[&str]) -> Arc<oxdock_net_plugin::EndpointRegistry> {
+    let registry = Arc::new(oxdock_net_plugin::EndpointRegistry::new(false));
+    for service in services {
+        registry
+            .add_mapping(
+                &oxdock_net_plugin::EndpointKey::tcp(oxdock_net_plugin::VirtualEndpoint::Name(
+                    service.to_string(),
+                )),
+                oxdock_net_plugin::BindingSpec::Memory,
+            )
+            .expect("map memory service");
+    }
+    registry
+}
+
+/// Real bound address of a mapped service, for the `TestClient` driver.
+fn service_addr(registry: &Arc<oxdock_net_plugin::EndpointRegistry>, service: &str) -> SocketAddr {
+    registry
+        .bound_addr(&oxdock_net_plugin::EndpointKey::tcp(
+            oxdock_net_plugin::VirtualEndpoint::Name(service.to_string()),
+        ))
+        .expect("service bound")
+}
+
+/// Hold a numeric service name nobody else holds: bind ephemeral, read
+/// the port back, and rebind it, retrying against parallel tests racing
+/// for the same port. Used ONLY by the anti-binding proofs, where the
+/// script must name a number the host never bound. A plugin that stole
+/// the number fails every retry, so theft still fails deterministically.
+fn hold_numeric_name() -> (std::net::TcpListener, String) {
+    for _ in 0..50 {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("ephemeral bind")
+            .local_addr()
+            .expect("addr")
+            .port();
+        match std::net::TcpListener::bind(format!("127.0.0.1:{port}")) {
+            Ok(held) => return (held, port.to_string()),
+            Err(_) => continue,
+        }
+    }
+    panic!("could not hold a numeric service name");
 }
 
 struct TestHandler;
@@ -246,18 +341,19 @@ impl TestClient {
 fn serve_and_close_roundtrip() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-serve-close");
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("23331", {username: "guest", password: "close-pass"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-serve-close", {username: "guest", password: "close-pass"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $closed: BOOL = SSH_CLOSE($m.server)
         WRITE closed.txt "{{ $closed }}"
     "#};
-    run_script(&root, script).expect("serve and close runs");
+    run_script_with(registry, &root, script).expect("serve and close runs");
     let addr = read_trimmed(&root.join("addr.txt").unwrap());
-    assert_eq!(
-        addr, "127.0.0.1:23331",
-        "fixed virtual port binds loopback: {addr}"
+    assert!(
+        addr.starts_with("127.0.0.1:") && !addr.ends_with(":0"),
+        "mapped service reports its real bind: {addr}"
     );
     assert_eq!(read_trimmed(&root.join("closed.txt").unwrap()), "true");
 }
@@ -267,15 +363,17 @@ fn serve_and_close_roundtrip() {
 fn wrong_password_rejected() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-auth");
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("23221", {username: "guest", password: "right-pass"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-auth", {username: "guest", password: "right-pass"})
         SLEEP 8s
         SSH_CLOSE($m.server)
     "#};
-    let handle = std::thread::spawn(move || run_script(&root, script));
+    // Pre-bound by the harness: the driver addr is known before spawning.
+    let addr = service_addr(&registry, "test-ssh-auth");
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
     std::thread::sleep(Duration::from_secs(2));
-    let addr: SocketAddr = "127.0.0.1:23221".parse().unwrap();
     let wrong = TestClient::connect(addr, "guest", "wrong-pass");
     assert!(wrong.is_err(), "wrong password must be rejected");
     let wrong_user = TestClient::connect(addr, "intruder", "right-pass");
@@ -291,9 +389,10 @@ fn wrong_password_rejected() {
 fn accept_echo_roundtrip() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-echo");
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("23222", {username: "guest", password: "echo-pass"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-echo", {username: "guest", password: "echo-pass"})
         LET $in: PIPE
         LET $out: PIPE
         LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
@@ -302,9 +401,9 @@ fn accept_echo_roundtrip() {
         AWAIT $echo
         SSH_CLOSE($m.server)
     "#};
-    let handle = std::thread::spawn(move || run_script(&root, script));
+    let addr = service_addr(&registry, "test-ssh-echo");
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
     std::thread::sleep(Duration::from_secs(2));
-    let addr: SocketAddr = "127.0.0.1:23222".parse().unwrap();
     let mut client = TestClient::connect(addr, "guest", "echo-pass").expect("client connects");
     client.send(b"hello-echo").expect("client sends");
     let echoed = client
@@ -329,9 +428,10 @@ fn pty_request_accepted_echo_roundtrip() {
     // session must proceed to full duplex like a pty-less one.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-pty");
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("23225", {username: "guest", password: "pty-pass"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-pty", {username: "guest", password: "pty-pass"})
         LET $in: PIPE
         LET $out: PIPE
         LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
@@ -340,9 +440,9 @@ fn pty_request_accepted_echo_roundtrip() {
         AWAIT $echo
         SSH_CLOSE($m.server)
     "#};
-    let handle = std::thread::spawn(move || run_script(&root, script));
+    let addr = service_addr(&registry, "test-ssh-pty");
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
     std::thread::sleep(Duration::from_secs(2));
-    let addr: SocketAddr = "127.0.0.1:23225".parse().unwrap();
     let mut client =
         TestClient::connect_with_pty(addr, "guest", "pty-pass").expect("pty client connects");
     client.send(b"hello-pty").expect("client sends");
@@ -385,10 +485,11 @@ fn pty_explicit_size_unix() {
     // override whatever the client requested.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-pty-size");
     let probe = root.clone();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("23334", {username: "u", password: "p"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-pty-size", {username: "u", password: "p"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $h: HANDLE = ASYNC {
             LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
@@ -401,7 +502,7 @@ fn pty_explicit_size_unix() {
         AWAIT $h
         SSH_CLOSE($m.server)
     "#};
-    let handle = std::thread::spawn(move || run_script(&root, script));
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
     let addr = read_addr(&probe);
     let addr: SocketAddr = addr.parse().expect("addr parses");
     let client = TestClient::connect(addr, "u", "p").expect("client connects");
@@ -422,10 +523,11 @@ fn pty_explicit_size_windows() {
     // Same contract through ConPTY: `mode con` reports the sized buffer.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-pty-size-win");
     let probe = root.clone();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("23335", {username: "u", password: "p"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-pty-size-win", {username: "u", password: "p"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $h: HANDLE = ASYNC {
             LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
@@ -441,7 +543,7 @@ fn pty_explicit_size_windows() {
         AWAIT $h
         SSH_CLOSE($m.server)
     "#};
-    let handle = std::thread::spawn(move || run_script(&root, script));
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
     let addr = read_addr(&probe);
     let addr: SocketAddr = addr.parse().expect("addr parses");
     let client = TestClient::connect(addr, "u", "p").expect("client connects");
@@ -464,10 +566,11 @@ fn pty_child_sees_session_env_unix() {
     // requested command) through SSH_* vars.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-env");
     let probe = root.clone();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("23353", {username: "u", password: "p"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-env", {username: "u", password: "p"})
         WRITE addr.txt "{{ $m.addr }}"
         ENV PROBE_TOP="top"
         LET $h: HANDLE = ASYNC {
@@ -481,14 +584,14 @@ fn pty_child_sees_session_env_unix() {
             LET $t: HANDLE = ASYNC { SSH_PTY_RUN($dq.session, ["sh", "-c", "echo relay:$SSH_USER:$SSH_CLIENT:$SSH_SERVER:$SSH_COMMAND:$PROBE_TOP"], 0, 0, $in, $out) }
             AWAIT $t
             ASSERT_CONTAINS $out "relay:u:127.0.0.1:"
-            ASSERT_CONTAINS $out "127.0.0.1:23353"
+            ASSERT_CONTAINS $out "127.0.0.1:"
             ASSERT_CONTAINS $out "probe-command"
             ASSERT_CONTAINS $out ":top"
         }
         AWAIT $h
         SSH_CLOSE($m.server)
     "#};
-    let handle = std::thread::spawn(move || run_script(&root, script));
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
     let addr = read_addr(&probe);
     let addr: SocketAddr = addr.parse().expect("addr parses");
     let client =
@@ -510,10 +613,11 @@ fn pty_child_sees_session_env_windows() {
     // Same contract through ConPTY: `cmd` expands the relayed vars.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-env-win");
     let probe = root.clone();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("23354", {username: "u", password: "p"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-env-win", {username: "u", password: "p"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $h: HANDLE = ASYNC {
             LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
@@ -525,12 +629,12 @@ fn pty_child_sees_session_env_windows() {
             LET $t: HANDLE = ASYNC { SSH_PTY_RUN($dq.session, ["cmd", "/c", "echo relay:%SSH_USER%:%SSH_CLIENT%:%SSH_SERVER%"], 0, 0, $in, $out) }
             AWAIT $t
             ASSERT_CONTAINS $out "relay:u:127.0.0.1:"
-            ASSERT_CONTAINS $out "127.0.0.1:23354"
+            ASSERT_CONTAINS $out "127.0.0.1:"
         }
         AWAIT $h
         SSH_CLOSE($m.server)
     "#};
-    let handle = std::thread::spawn(move || run_script(&root, script));
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
     let addr = read_addr(&probe);
     let addr: SocketAddr = addr.parse().expect("addr parses");
     let client = TestClient::connect(addr, "u", "p").expect("client connects");
@@ -550,10 +654,11 @@ fn semaphore_guards_the_accept_loop() {
     // task return, no decrement code anywhere).
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-sem");
     let probe = root.clone();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("23355", {username: "guest", password: "pass"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-sem", {username: "guest", password: "pass"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $sem: SEMAPHORE = SEMAPHORE_NEW(1)
         LET $w: HANDLE = ASYNC {
@@ -581,7 +686,7 @@ fn semaphore_guards_the_accept_loop() {
         WRITE admitted.txt "{{ $a3.held }}"
         SSH_CLOSE($m.server)
     "#};
-    let handle = std::thread::spawn(move || run_script(&root, script));
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
     let addr = read_addr(&probe);
     let addr: SocketAddr = addr.parse().expect("addr parses");
     let client_a = TestClient::connect(addr, "guest", "pass").expect("first client connects");
@@ -615,9 +720,10 @@ fn pty_live_resize_unix() {
     // session's own cell carries the resize; other sessions never see it.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-resize");
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("23336", {username: "u", password: "p"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-resize", {username: "u", password: "p"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $h: HANDLE = ASYNC {
             LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
@@ -630,7 +736,7 @@ fn pty_live_resize_unix() {
         AWAIT $h
         SSH_CLOSE($m.server)
     "#};
-    let handle = std::thread::spawn(move || run_script(&root, script));
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
     let addr_path = temp.as_guarded_path().join("addr.txt").unwrap();
     let addr: SocketAddr = loop {
         std::thread::sleep(Duration::from_millis(100));
@@ -658,9 +764,10 @@ fn pty_live_resize_windows() {
     // interact with stdin).
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-resize-win");
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("23337", {username: "u", password: "p"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-resize-win", {username: "u", password: "p"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $h: HANDLE = ASYNC {
             LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
@@ -676,7 +783,7 @@ fn pty_live_resize_windows() {
         AWAIT $h
         SSH_CLOSE($m.server)
     "#};
-    let handle = std::thread::spawn(move || run_script(&root, script));
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
     let addr_path = temp.as_guarded_path().join("addr.txt").unwrap();
     let addr: SocketAddr = loop {
         std::thread::sleep(Duration::from_millis(100));
@@ -697,14 +804,15 @@ fn pty_live_resize_windows() {
 fn main_thread_accept_bails() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-main-accept");
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("23338", {username: "guest", password: "pass"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-main-accept", {username: "guest", password: "pass"})
         LET $in: PIPE
         LET $out: PIPE
         SSH_ACCEPT($m.server, $in, $out)
     "#};
-    let err = run_script(&root, script).expect_err("main-thread ACCEPT must bail");
+    let err = run_script_with(registry, &root, script).expect_err("main-thread ACCEPT must bail");
     assert!(format!("{err:#}").contains("requires ASYNC"), "{err:#}");
 }
 
@@ -713,9 +821,10 @@ fn main_thread_accept_bails() {
 fn teardown_wakes_blocked_accept() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-teardown");
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("23339", {username: "guest", password: "pass"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-teardown", {username: "guest", password: "pass"})
         LET $in: PIPE
         LET $out: PIPE
         LET $t: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
@@ -724,7 +833,7 @@ fn teardown_wakes_blocked_accept() {
         AWAIT $t
     "#};
     let start = Instant::now();
-    let err = run_script(&root, script).expect_err("ACCEPT must fail after close");
+    let err = run_script_with(registry, &root, script).expect_err("ACCEPT must fail after close");
     // ASYNC task errors now carry the full causal chain across the task
     // boundary, so the inner close reason is visible end to end.
     assert!(format!("{err:#}").contains("closed"), "{err:#}");
@@ -768,9 +877,10 @@ fn inner_exit_closes_outer_session() {
     // ACCEPT in its pump with the client hanging.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-inner-exit");
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("23340", {username: "test", password: "test123"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-inner-exit", {username: "test", password: "test123"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $c_in: PIPE
         LET $c_out: PIPE
@@ -781,7 +891,7 @@ fn inner_exit_closes_outer_session() {
     "#};
     let (done_tx, done_rx) = std::sync::mpsc::channel();
     let handle = std::thread::spawn(move || {
-        let result = run_script(&root, script);
+        let result = run_script_with(registry, &root, script);
         let _ = done_tx.send(());
         result
     });
@@ -826,11 +936,12 @@ fn real_openssh_client_echo_roundtrip() {
     // openssh configuration that stalls, client-side and pre-auth.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-real-client");
     let script = indoc! {r##"
         IMPORT [STD, SSH]
         WRITE askpass.sh "#!/bin/sh\necho test123\n"
         RUN ["chmod", "+x", "askpass.sh"]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("23341", {username: "test", password: "test123"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-real-client", {username: "test", password: "test123"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $in: PIPE
         LET $out: PIPE
@@ -840,7 +951,7 @@ fn real_openssh_client_echo_roundtrip() {
         AWAIT $echo
         SSH_CLOSE($m.server)
     "##};
-    let handle = std::thread::spawn(move || run_script(&root, script));
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
     let addr_path = temp.as_guarded_path().join("addr.txt").unwrap();
     let addr = loop {
         std::thread::sleep(Duration::from_millis(100));
@@ -890,8 +1001,8 @@ fn proxy_outer_to_inner_roundtrip() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $o: SSH_SERVE_INFO = SSH_SERVE("23223", {username: "outer", password: "outer-pass"})
-        LET $i: SSH_SERVE_INFO = SSH_SERVE("23224", {username: "inner", password: "inner-pass"})
+        LET $o: SSH_SERVE_INFO = SSH_SERVE("test-ssh-proxy-outer", {username: "outer", password: "outer-pass"})
+        LET $i: SSH_SERVE_INFO = SSH_SERVE("test-ssh-proxy-inner", {username: "inner", password: "inner-pass"})
         LET $j_in: PIPE
         LET $j_out: PIPE
         LET $h_inner: HANDLE = ASYNC { SSH_ACCEPT($i.server, $j_in, $j_out) }
@@ -900,7 +1011,7 @@ fn proxy_outer_to_inner_roundtrip() {
         LET $c_out: PIPE
         LET $i_in: PIPE
         LET $i_out: PIPE
-        LET $h_conn: HANDLE = ASYNC { SSH_CONNECT("127.0.0.1:23224", "inner", "inner-pass", $i_in, $i_out) }
+        LET $h_conn: HANDLE = ASYNC { SSH_CONNECT("test-ssh-proxy-inner", "inner", "inner-pass", $i_in, $i_out) }
         LET $h_p1: HANDLE = ASYNC { SSH_PUMP($c_out, $i_in) }
         LET $h_p2: HANDLE = ASYNC { SSH_PUMP($i_out, $c_in) }
         LET $h_acc: HANDLE = ASYNC { SSH_ACCEPT($o.server, $c_in, $c_out) }
@@ -913,9 +1024,16 @@ fn proxy_outer_to_inner_roundtrip() {
         SSH_CLOSE($o.server)
         SSH_CLOSE($i.server)
     "#};
-    let handle = std::thread::spawn(move || run_script(&root, script));
+    // One registry maps both legs; the inner CONNECT goes through the
+    // mapped name, never a physical dial.
+    let registry = mapped_registry("test-ssh-proxy-outer");
+    registry
+        .add_cli_mapping("test-ssh-proxy-inner", "127.0.0.1:0")
+        .expect("map inner");
+    registry.bind_all().expect("bind inner");
+    let addr = service_addr(&registry, "test-ssh-proxy-outer");
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
     std::thread::sleep(Duration::from_secs(3));
-    let addr: SocketAddr = "127.0.0.1:23223".parse().unwrap();
     let mut client =
         TestClient::connect(addr, "outer", "outer-pass").expect("outer client connects");
     client.send(b"proxy-ping").expect("client sends");
@@ -938,11 +1056,13 @@ fn proxy_outer_to_inner_roundtrip() {
 fn unknown_serve_option_bails() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    let err = run_script(
+    let registry = mapped_registry("test-ssh-bad-option");
+    let err = run_script_with(
+        registry,
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
-            LET $m: SSH_SERVE_INFO = SSH_SERVE("23342", {username: "guest", password: "pass", frobnicate: 1})
+            LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-bad-option", {username: "guest", password: "pass", frobnicate: 1})
             SSH_CLOSE($m.server)
         "#},
     )
@@ -960,11 +1080,13 @@ fn non_map_serve_options_bails() {
     // statically with TypeMismatch before any socket opens.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    let err = run_script(
+    let registry = mapped_registry("test-ssh-bad-options");
+    let err = run_script_with(
+        registry,
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
-            LET $m: SSH_SERVE_INFO = SSH_SERVE("23343", "nope")
+            LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-bad-options", "nope")
             SSH_CLOSE($m.server)
         "#},
     )
@@ -978,11 +1100,13 @@ fn non_map_serve_options_bails() {
 fn missing_username_bails() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    let err = run_script(
+    let registry = mapped_registry("test-ssh-no-user");
+    let err = run_script_with(
+        registry,
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
-            LET $m: SSH_SERVE_INFO = SSH_SERVE("23323", {password: "pass"})
+            LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-no-user", {password: "pass"})
             SSH_CLOSE($m.server)
         "#},
     )
@@ -1000,11 +1124,13 @@ fn empty_password_bails() {
     // password is generated.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    let err = run_script(
+    let registry = mapped_registry("test-ssh-empty-pass");
+    let err = run_script_with(
+        registry,
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
-            LET $m: SSH_SERVE_INFO = SSH_SERVE("23324", {username: "guest", password: ""})
+            LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-empty-pass", {username: "guest", password: ""})
             SSH_CLOSE($m.server)
         "#},
     )
@@ -1021,11 +1147,13 @@ fn empty_password_bails() {
 fn missing_password_bails() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    let err = run_script(
+    let registry = mapped_registry("test-ssh-no-pass");
+    let err = run_script_with(
+        registry,
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
-            LET $m: SSH_SERVE_INFO = SSH_SERVE("23325", {username: "guest"})
+            LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-no-pass", {username: "guest"})
             SSH_CLOSE($m.server)
         "#},
     )
@@ -1041,11 +1169,13 @@ fn missing_password_bails() {
 fn non_string_username_bails() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    let err = run_script(
+    let registry = mapped_registry("test-ssh-bad-user-type");
+    let err = run_script_with(
+        registry,
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
-            LET $m: SSH_SERVE_INFO = SSH_SERVE("23326", {username: 1, password: "pass"})
+            LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-bad-user-type", {username: 1, password: "pass"})
             SSH_CLOSE($m.server)
         "#},
     )
@@ -1062,11 +1192,13 @@ fn non_string_username_bails() {
 fn unknown_option_names_all_valid_keys() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    let err = run_script(
+    let registry = mapped_registry("test-ssh-frobnicate");
+    let err = run_script_with(
+        registry,
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
-            LET $m: SSH_SERVE_INFO = SSH_SERVE("23327", {username: "guest", password: "pass", frobnicate: 1})
+            LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-frobnicate", {username: "guest", password: "pass", frobnicate: 1})
             SSH_CLOSE($m.server)
         "#},
     )
@@ -1083,11 +1215,13 @@ fn unknown_option_names_all_valid_keys() {
 fn non_string_key_path_bails() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    let err = run_script(
+    let registry = mapped_registry("test-ssh-bad-keypath-type");
+    let err = run_script_with(
+        registry,
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
-            LET $m: SSH_SERVE_INFO = SSH_SERVE("23344", {username: "guest", password: "pass", key_path: 1})
+            LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-bad-keypath-type", {username: "guest", password: "pass", key_path: 1})
             SSH_CLOSE($m.server)
         "#},
     )
@@ -1104,17 +1238,18 @@ fn stable_host_key_reused_across_restarts() {
     use oxdock_fs::PathResolver;
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-key-stable");
     let serve_first = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("23311", {username: "guest", password: "key-pass", key_path: "ssh_host_key"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-key-stable", {username: "guest", password: "key-pass", key_path: "ssh_host_key"})
         SSH_CLOSE($m.server)
     "#};
     let serve_second = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("23312", {username: "guest", password: "key-pass", key_path: "ssh_host_key"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-key-stable", {username: "guest", password: "key-pass", key_path: "ssh_host_key"})
         SSH_CLOSE($m.server)
     "#};
-    run_script(&root, serve_first).expect("first boot creates the key");
+    run_script_with(registry.clone(), &root, serve_first).expect("first boot creates the key");
     let resolver = PathResolver::new(root.root(), root.root()).unwrap();
     let key_path = root.join("ssh_host_key").unwrap();
     let first = resolver.read_file(&key_path).expect("key file exists");
@@ -1122,7 +1257,7 @@ fn stable_host_key_reused_across_restarts() {
         first.starts_with(b"-----BEGIN OPENSSH PRIVATE KEY-----"),
         "key file is OpenSSH PEM"
     );
-    run_script(&root, serve_second).expect("second boot loads the key");
+    run_script_with(registry.clone(), &root, serve_second).expect("second boot loads the key");
     let second = resolver.read_file(&key_path).expect("key file still there");
     assert_eq!(first, second, "restart must reuse the key, not regenerate");
 }
@@ -1131,21 +1266,28 @@ fn stable_host_key_reused_across_restarts() {
 #[cfg_attr(miri, ignore = "needs loopback TCP plus threads plus a Tokio runtime")]
 fn loaded_host_key_serves_clients() {
     // Behavioral proof the loaded key is a working host key: create it on
-    // one boot, then run a full echo roundtrip on the next.
+    // one boot, then run a full echo roundtrip on the next. Both boots
+    // serve mapped names: key loading happens past acquisition.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    run_script(
+    let registry = mapped_registry("test-ssh-key-first");
+    registry
+        .add_cli_mapping("test-ssh-key-client", "127.0.0.1:0")
+        .expect("map client service");
+    registry.bind_all().expect("bind client service");
+    run_script_with(
+        registry.clone(),
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
-            LET $m: SSH_SERVE_INFO = SSH_SERVE("23313", {username: "guest", password: "key-pass", key_path: "ssh_host_key"})
+            LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-key-first", {username: "guest", password: "key-pass", key_path: "ssh_host_key"})
             SSH_CLOSE($m.server)
         "#},
     )
     .expect("first boot creates the key");
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("23314", {username: "guest", password: "key-pass", key_path: "ssh_host_key"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-key-client", {username: "guest", password: "key-pass", key_path: "ssh_host_key"})
         LET $in: PIPE
         LET $out: PIPE
         LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
@@ -1154,9 +1296,9 @@ fn loaded_host_key_serves_clients() {
         AWAIT $echo
         SSH_CLOSE($m.server)
     "#};
-    let handle = std::thread::spawn(move || run_script(&root, script));
+    let addr = service_addr(&registry, "test-ssh-key-client");
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
     std::thread::sleep(Duration::from_secs(2));
-    let addr: SocketAddr = "127.0.0.1:23314".parse().unwrap();
     let mut client = TestClient::connect(addr, "guest", "key-pass").expect("client connects");
     client.send(b"stable-key-echo").expect("client sends");
     let echoed = client
@@ -1183,11 +1325,12 @@ fn created_host_key_has_owner_only_permissions() {
     use std::os::unix::fs::PermissionsExt;
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    run_script(
+    let registry = mapped_registry("test-ssh-key-perms");
+    run_script_with(registry,
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
-            LET $m: SSH_SERVE_INFO = SSH_SERVE("23315", {username: "guest", password: "key-pass", key_path: "ssh_host_key"})
+            LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-key-perms", {username: "guest", password: "key-pass", key_path: "ssh_host_key"})
             SSH_CLOSE($m.server)
         "#},
     )
@@ -1209,6 +1352,7 @@ fn invalid_host_key_file_bails() {
     use oxdock_fs::PathResolver;
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-key-invalid");
     let resolver = PathResolver::new(root.root(), root.root()).unwrap();
     let key_path = root.join("ssh_host_key").unwrap();
     resolver.write_file(&key_path, b"not-a-key").unwrap();
@@ -1217,11 +1361,11 @@ fn invalid_host_key_file_bails() {
     resolver
         .set_permissions_mode_unix(&key_path, 0o600)
         .unwrap();
-    let err = run_script(
+    let err = run_script_with(registry,
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
-            LET $m: SSH_SERVE_INFO = SSH_SERVE("23316", {username: "guest", password: "key-pass", key_path: "ssh_host_key"})
+            LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-key-invalid", {username: "guest", password: "key-pass", key_path: "ssh_host_key"})
             SSH_CLOSE($m.server)
         "#},
     )
@@ -1236,13 +1380,14 @@ fn world_readable_host_key_bails() {
     use oxdock_fs::PathResolver;
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-key-world");
     let resolver = PathResolver::new(root.root(), root.root()).unwrap();
     let key_path = root.join("ssh_host_key").unwrap();
-    run_script(
+    run_script_with(registry.clone(),
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
-            LET $m: SSH_SERVE_INFO = SSH_SERVE("23317", {username: "guest", password: "key-pass", key_path: "ssh_host_key"})
+            LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-key-world", {username: "guest", password: "key-pass", key_path: "ssh_host_key"})
             SSH_CLOSE($m.server)
         "#},
     )
@@ -1250,11 +1395,11 @@ fn world_readable_host_key_bails() {
     resolver
         .set_permissions_mode_unix(&key_path, 0o644)
         .unwrap();
-    let err = run_script(
+    let err = run_script_with(registry.clone(),
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
-            LET $m: SSH_SERVE_INFO = SSH_SERVE("23318", {username: "guest", password: "key-pass", key_path: "ssh_host_key"})
+            LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-key-world", {username: "guest", password: "key-pass", key_path: "ssh_host_key"})
             SSH_CLOSE($m.server)
         "#},
     )
@@ -1273,11 +1418,12 @@ fn blank_key_path_keeps_ephemeral_key() {
     use oxdock_fs::PathResolver;
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    run_script(
+    let registry = mapped_registry("test-ssh-key-blank");
+    run_script_with(registry,
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
-            LET $m: SSH_SERVE_INFO = SSH_SERVE("23319", {username: "guest", password: "key-pass", key_path: ""})
+            LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-key-blank", {username: "guest", password: "key-pass", key_path: ""})
             SSH_CLOSE($m.server)
         "#},
     )
@@ -1294,11 +1440,12 @@ fn blank_key_path_keeps_ephemeral_key() {
 fn escaping_key_path_bails() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    let err = run_script(
+    let registry = mapped_registry("test-ssh-key-escape");
+    let err = run_script_with(registry,
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
-            LET $m: SSH_SERVE_INFO = SSH_SERVE("23320", {username: "guest", password: "key-pass", key_path: "../escape_key"})
+            LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-key-escape", {username: "guest", password: "key-pass", key_path: "../escape_key"})
             SSH_CLOSE($m.server)
         "#},
     )
@@ -1314,21 +1461,22 @@ fn leading_slash_key_path_anchors_to_workspace_root() {
     use oxdock_fs::PathResolver;
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-key-slash");
     let serve_first = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("23321", {username: "guest", password: "key-pass", key_path: "/slash_key"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-key-slash", {username: "guest", password: "key-pass", key_path: "/slash_key"})
         SSH_CLOSE($m.server)
     "#};
     let serve_second = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("23322", {username: "guest", password: "key-pass", key_path: "/slash_key"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-key-slash", {username: "guest", password: "key-pass", key_path: "/slash_key"})
         SSH_CLOSE($m.server)
     "#};
-    run_script(&root, serve_first).expect("first boot creates the key");
+    run_script_with(registry.clone(), &root, serve_first).expect("first boot creates the key");
     let resolver = PathResolver::new(root.root(), root.root()).unwrap();
     let key_path = root.join("slash_key").unwrap();
     let first = resolver.read_file(&key_path).expect("key file exists");
-    run_script(&root, serve_second).expect("second boot loads the key");
+    run_script_with(registry.clone(), &root, serve_second).expect("second boot loads the key");
     let second = resolver.read_file(&key_path).expect("key file still there");
     assert_eq!(first, second, "restart must reuse the key, not regenerate");
 }
@@ -1341,10 +1489,12 @@ fn dequeue_exposes_metadata_before_pump() {
     // pump started.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-dequeue");
+    let addr = service_addr(&registry, "test-ssh-dequeue");
     let probe = root.clone();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("23328", {username: "guest", password: "pass"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-dequeue", {username: "guest", password: "pass"})
         LET $t: HANDLE = ASYNC {
             LET $sess: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             WRITE meta.txt "{{ $sess.command }}|{{ $sess.username }}|{{ $sess.addr }}"
@@ -1352,9 +1502,8 @@ fn dequeue_exposes_metadata_before_pump() {
         AWAIT $t
         SSH_CLOSE($m.server)
     "#};
-    let handle = std::thread::spawn(move || run_script(&root, script));
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
     std::thread::sleep(Duration::from_secs(2));
-    let addr: SocketAddr = "127.0.0.1:23328".parse().unwrap();
     let client = TestClient::connect_exec(addr, "guest", "pass", "health-check")
         .expect("client exec connects");
     client.close();
@@ -1384,10 +1533,12 @@ fn virtual_command_router() {
     // reply from pure DSL logic (no OS binaries), pump it.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-router");
+    let addr = service_addr(&registry, "test-ssh-router");
     let probe = root.clone();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("23329", {username: "guest", password: "pass"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-router", {username: "guest", password: "pass"})
         LET $t: HANDLE = ASYNC {
             LET $sess: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             IF $sess.command == "health-check" {
@@ -1404,9 +1555,8 @@ fn virtual_command_router() {
         AWAIT $t
         SSH_CLOSE($m.server)
     "#};
-    let handle = std::thread::spawn(move || run_script(&root, script));
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
     std::thread::sleep(Duration::from_secs(2));
-    let addr: SocketAddr = "127.0.0.1:23329".parse().unwrap();
     let mut client = TestClient::connect_exec(addr, "guest", "pass", "health-check")
         .expect("client exec connects");
     let reply = client
@@ -1437,10 +1587,12 @@ fn unknown_virtual_command_rejected_cleanly() {
     // rejection and the script completes without streaming anything.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-reject");
+    let addr = service_addr(&registry, "test-ssh-reject");
     let probe = root.clone();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("23330", {username: "guest", password: "pass"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-reject", {username: "guest", password: "pass"})
         LET $t: HANDLE = ASYNC {
             LET $sess: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             IF $sess.command == "health-check" {
@@ -1452,9 +1604,8 @@ fn unknown_virtual_command_rejected_cleanly() {
         AWAIT $t
         SSH_CLOSE($m.server)
     "#};
-    let handle = std::thread::spawn(move || run_script(&root, script));
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
     std::thread::sleep(Duration::from_secs(2));
-    let addr: SocketAddr = "127.0.0.1:23330".parse().unwrap();
     let client = TestClient::connect_exec(addr, "guest", "pass", "frobnicate")
         .expect("client exec connects");
     client.close();
@@ -1476,10 +1627,12 @@ fn session_value_crosses_await_boundary() {
     // binding without hanging or losing its ends.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-session");
+    let addr = service_addr(&registry, "test-ssh-session");
     let probe = root.clone();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("23332", {username: "guest", password: "pass"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-session", {username: "guest", password: "pass"})
         LET $t: HANDLE = ASYNC {
             LET $sess: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             RETURN $sess.session
@@ -1488,9 +1641,8 @@ fn session_value_crosses_await_boundary() {
         WRITE stage.txt "bound"
         SSH_CLOSE($m.server)
     "#};
-    let handle = std::thread::spawn(move || run_script(&root, script));
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
     std::thread::sleep(Duration::from_secs(2));
-    let addr: SocketAddr = "127.0.0.1:23332".parse().unwrap();
     let client =
         TestClient::connect_exec(addr, "guest", "pass", "x").expect("client exec connects");
     client.close();
@@ -1512,9 +1664,11 @@ fn pump_channel_second_pump_bails() {
     // bails instead of splitting bytes across pumps.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-pump-twice");
+    let addr = service_addr(&registry, "test-ssh-pump-twice");
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("23333", {username: "guest", password: "pass"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-pump-twice", {username: "guest", password: "pass"})
         LET $t: HANDLE = ASYNC {
             LET $sess: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             RETURN $sess.session
@@ -1529,9 +1683,8 @@ fn pump_channel_second_pump_bails() {
         LET $p2: HANDLE = ASYNC { SSH_PUMP_CHANNEL($s, $in, $out) }
         AWAIT $p2
     "#};
-    let handle = std::thread::spawn(move || run_script(&root, script));
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
     std::thread::sleep(Duration::from_secs(2));
-    let addr: SocketAddr = "127.0.0.1:23333".parse().unwrap();
     let client =
         TestClient::connect_exec(addr, "guest", "pass", "x").expect("client exec connects");
     client.close();
@@ -1555,7 +1708,7 @@ fn worker_pool_script_parses() {
         WORKSPACE LOCAL
 
         LET $server: SSH_SERVE_INFO = SSH_SERVE(
-            "127.0.0.1:2241", {
+            "test-ssh-pool-parse", {
                 username: "test",
                 password: "test123",
                 key_path: "test_key"
@@ -1635,9 +1788,10 @@ fn pool_accept_round_robins_across_workers() {
     // leg here is a DSL pump (script pipes), so teardown propagates EOF.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-pool");
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("23345", {username: "test", password: "test123"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-pool", {username: "test", password: "test123"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $workers: LIST<ANY> = []
         LET $w: INT = 0
@@ -1656,7 +1810,7 @@ fn pool_accept_round_robins_across_workers() {
         AWAIT $workers
         SSH_CLOSE($m.server)
     "#};
-    let handle = std::thread::spawn(move || run_script(&root, script));
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
     let addr_path = temp.as_guarded_path().join("addr.txt").unwrap();
     let addr_str = {
         use oxdock_fs::PathResolver;
@@ -1711,9 +1865,10 @@ fn pool_pty_run_companions_terminate() {
     // hangs. That engine trap is tracked separately.)
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-pty-pool");
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("23346", {username: "test", password: "test123"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-pty-pool", {username: "test", password: "test123"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $workers: LIST<ANY> = []
         LET $w: INT = 0
@@ -1733,7 +1888,7 @@ fn pool_pty_run_companions_terminate() {
         AWAIT $workers
         SSH_CLOSE($m.server)
     "#};
-    let handle = std::thread::spawn(move || run_script(&root, script));
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
     let addr_path = temp.as_guarded_path().join("addr.txt").unwrap();
     let addr_str = {
         use oxdock_fs::PathResolver;
@@ -1777,23 +1932,28 @@ fn pool_pty_run_companions_terminate() {
 #[test]
 #[cfg_attr(miri, ignore = "needs loopback TCP plus threads plus a Tokio runtime")]
 fn serve_reports_virtual_echo() {
-    // Virtual endpoints: the result MAP echoes the logical endpoint
-    // alongside the physical bind.
+    // Mapped services: the result MAP echoes the service name alongside
+    // the runner-assigned bind.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-virtual-echo");
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("23347", {username: "guest", password: "pass"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-virtual-echo", {username: "guest", password: "pass"})
         WRITE addr.txt "{{ $m.addr }}"
         WRITE virt.txt "{{ $m.virtual }}"
         SSH_CLOSE($m.server)
     "#};
-    run_script(&root, script).expect("serve runs");
-    assert_eq!(
-        read_trimmed(&root.join("addr.txt").unwrap()),
-        "127.0.0.1:23347"
+    run_script_with(registry, &root, script).expect("serve runs");
+    let addr = read_trimmed(&root.join("addr.txt").unwrap());
+    assert!(
+        addr.starts_with("127.0.0.1:") && !addr.ends_with(":0"),
+        "mapped service reports its real bind: {addr}"
     );
-    assert_eq!(read_trimmed(&root.join("virt.txt").unwrap()), "23347");
+    assert_eq!(
+        read_trimmed(&root.join("virt.txt").unwrap()),
+        "test-ssh-virtual-echo"
+    );
 }
 
 #[test]
@@ -1811,6 +1971,81 @@ fn physical_serve_binds_rejected_in_script() {
     assert!(err.to_string().contains("logical endpoints"), "{err:#}");
 }
 
+/// The isolation mandate for SSH, proved end to end: a service named
+/// like a port number never binds the host network. SERVE bails with
+/// the CLI mapping hint, and the harness binds the number afterwards
+/// to prove nothing took it.
+#[test]
+#[cfg_attr(miri, ignore = "needs a Tokio runtime for the SSH module")]
+fn numeric_serve_never_binds() {
+    let (held, number) = hold_numeric_name();
+    drop(held);
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = format!(
+        indoc! {r#"
+            IMPORT [STD, SSH]
+            LET $m: SSH_SERVE_INFO = SSH_SERVE("{number}", {{username: "guest", password: "pass"}})
+        "#},
+        number = number,
+    );
+    let err = run_script(&root, &script).expect_err("numeric serve must fail");
+    assert!(
+        err.to_string().contains(&format!(
+            "SSH_SERVE service '{number}' has no CLI port mapping; pass -p <host_port>:{number} at invocation"
+        )),
+        "{err:#}"
+    );
+    // Nothing bound it: the harness retakes the number. Retry against
+    // parallel tests; a plugin theft fails every attempt.
+    let mut retaken = false;
+    for _ in 0..50 {
+        if std::net::TcpListener::bind(format!("127.0.0.1:{number}")).is_ok() {
+            retaken = true;
+            break;
+        }
+    }
+    assert!(retaken, "number stayed free");
+}
+
+/// The dial half: a numeric service never dials either. The harness
+/// holds the number open (bound, never accepting) while the script
+/// CONNECTs; resolution bails before any socket work, and the harness
+/// saw zero inbound connections.
+#[test]
+#[cfg_attr(miri, ignore = "needs loopback TCP plus threads plus a Tokio runtime")]
+fn numeric_connect_never_dials() {
+    let (held, number) = hold_numeric_name();
+    held.set_nonblocking(true).expect("nonblocking");
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let script = format!(
+        indoc! {r#"
+            IMPORT [STD, SSH]
+            LET $in: PIPE
+            LET $out: PIPE
+            LET $c: HANDLE = ASYNC {{
+                SSH_CONNECT("{number}", "guest", "pass", $in, $out)
+            }}
+            AWAIT $c
+        "#},
+        number = number,
+    );
+    let err = run_script(&root, &script).expect_err("numeric connect must fail");
+    assert!(
+        err.to_string().contains(&format!(
+            "SSH_CONNECT service '{number}' has no CLI port mapping"
+        )),
+        "{err:#}"
+    );
+    // The script finished: any dial it made would sit in the backlog.
+    // WouldBlock proves zero inbound connections were ever attempted.
+    match held.accept() {
+        Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+        accepted => panic!("numeric service touched the host network: {accepted:?}"),
+    }
+}
+
 #[test]
 #[cfg_attr(miri, ignore = "needs a Tokio runtime for the SSH module")]
 fn memory_service_serve_rejected() {
@@ -1823,28 +2058,56 @@ fn memory_service_serve_rejected() {
         LET $m: SSH_SERVE_INFO = SSH_SERVE("ssh-mem-svc", {username: "guest", password: "pass"})
     "#};
     let err = run_script(&root, script).expect_err("memory serve must fail");
-    assert!(err.to_string().contains("needs a TCP socket"), "{err:#}");
+    assert!(
+        err.to_string().contains("has no CLI port mapping"),
+        "{err:#}"
+    );
+}
+
+/// A memory-mapped service fails SSH before execution, not at the
+/// serve step: the pre-run check enforces the socket requirement, so
+/// even the preceding WRITE never happens.
+#[test]
+#[cfg_attr(miri, ignore = "needs a Tokio runtime for the SSH module")]
+fn memory_mapped_serve_fails_before_execution() {
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let registry = memory_registry(&["test-ssh-mem-mapped"]);
+    let script = indoc! {r#"
+        IMPORT [STD, SSH]
+        WRITE early.txt "must-not-exist"
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-mem-mapped", {username: "guest", password: "pass"})
+        SSH_CLOSE($m.server)
+    "#};
+    let err = run_script_with(registry, &root, script).expect_err("memory serve must fail pre-run");
+    assert!(
+        err.to_string()
+            .contains("SSH_SERVE service 'test-ssh-mem-mapped' has no CLI port mapping"),
+        "{err:#}"
+    );
+    assert!(
+        read_trimmed(&root.join("early.txt").unwrap()).is_empty(),
+        "no step executed"
+    );
 }
 
 #[test]
 #[cfg_attr(miri, ignore = "needs a Tokio runtime for the SSH module")]
 fn serve_reclaim_after_close_rebinds() {
-    // Close-and-reserve loops work: release frees the slot for re-serve.
+    // Close-and-reclaim loops work: release frees the claim, so the next
+    // SERVE on the same service re-claims the runner's socket.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-reclaim");
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $a: SSH_SERVE_INFO = SSH_SERVE("23351", {username: "guest", password: "pass"})
+        LET $a: SSH_SERVE_INFO = SSH_SERVE("test-ssh-reclaim", {username: "guest", password: "pass"})
         SSH_CLOSE($a.server)
-        LET $b: SSH_SERVE_INFO = SSH_SERVE("23351", {username: "guest", password: "pass"})
-        WRITE addr.txt "{{ $b.addr }}"
+        LET $b: SSH_SERVE_INFO = SSH_SERVE("test-ssh-reclaim", {username: "guest", password: "pass"})
+        ASSERT_EQ $a.addr $b.addr
         SSH_CLOSE($b.server)
     "#};
-    run_script(&root, script).expect("re-serve after close runs");
-    assert_eq!(
-        read_trimmed(&root.join("addr.txt").unwrap()),
-        "127.0.0.1:23351"
-    );
+    run_script_with(registry, &root, script).expect("re-serve after close runs");
 }
 
 #[test]
@@ -1857,13 +2120,16 @@ fn offline_serve_and_close_opens_no_socket() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("23349", {username: "guest", password: "pass"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-offline-serve", {username: "guest", password: "pass"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $closed: BOOL = SSH_CLOSE($m.server)
         WRITE closed.txt "{{ $closed }}"
     "#};
     run_script_with(registry, &root, script).expect("offline serve runs");
-    assert_eq!(read_trimmed(&root.join("addr.txt").unwrap()), "23349");
+    assert_eq!(
+        read_trimmed(&root.join("addr.txt").unwrap()),
+        "test-ssh-offline-serve"
+    );
     assert_eq!(read_trimmed(&root.join("closed.txt").unwrap()), "true");
 }
 
@@ -1880,7 +2146,7 @@ fn offline_connect_bails_before_sockets() {
         LET $in: PIPE
         LET $out: PIPE
         LET $c: HANDLE = ASYNC {
-            SSH_CONNECT("127.0.0.1:23350", "guest", "pass", $in, $out)
+            SSH_CONNECT("test-ssh-offline-connect", "guest", "pass", $in, $out)
         }
         AWAIT $c
     "#};
@@ -1901,10 +2167,11 @@ fn concurrent_guests_keep_their_own_pty_size() {
     // request clobber the first (last-writer-wins).
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-two-guests");
     let probe = root.clone();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("23352", {username: "u", password: "p"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-two-guests", {username: "u", password: "p"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $h: HANDLE = ASYNC {
             LET $a: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
@@ -1923,7 +2190,7 @@ fn concurrent_guests_keep_their_own_pty_size() {
         AWAIT $h
         SSH_CLOSE($m.server)
     "#};
-    let handle = std::thread::spawn(move || run_script(&root, script));
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
     let addr = read_addr(&probe);
     let addr: SocketAddr = addr.parse().expect("addr parses");
     let client_a =
@@ -1942,22 +2209,22 @@ fn concurrent_guests_keep_their_own_pty_size() {
 #[test]
 #[cfg_attr(miri, ignore = "needs loopback TCP plus threads plus a Tokio runtime")]
 fn logical_port_connect_roundtrip() {
-    // Pattern 1: the client dials the logical port, never a physical
-    // address. Unmapped ports default to loopback, so no `127.0.0.1`
-    // appears anywhere in this script. The server sends first: the
-    // client side never EOFs its input, so the reply cannot race
-    // teardown.
+    // The client dials a service name, never a physical address: the
+    // runner mapped it to loopback before the run. The server sends
+    // first: the client side never EOFs its input, so the reply cannot
+    // race teardown.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-mapped-roundtrip");
     let script = indoc! {r#"
         IMPORT [STD, SSH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("23541", {username: "guest", password: "echo-pass"})
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-mapped-roundtrip", {username: "guest", password: "echo-pass"})
         LET $in: PIPE
         LET $out: PIPE
         LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
         LET $cin: PIPE
         LET $cout: PIPE
-        LET $c: HANDLE = ASYNC { SSH_CONNECT("23541", "guest", "echo-pass", $cin, $cout) }
+        LET $c: HANDLE = ASYNC { SSH_CONNECT("test-ssh-mapped-roundtrip", "guest", "echo-pass", $cin, $cout) }
         WITH_IO [stdout=$in] ECHO "server-greeting"
         LET $info: MAP<ANY> = INSPECT($cout)
         LET $empty: BOOL = $info.buffer_bytes == 0
@@ -1976,7 +2243,7 @@ fn logical_port_connect_roundtrip() {
         CANCEL $c
         SSH_CLOSE($m.server)
     "#};
-    let handle = std::thread::spawn(move || run_script(&root, script));
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
     handle
         .join()
         .expect("script thread joins")

@@ -16,6 +16,9 @@ normal = ["tracing"]
 development = []
 build = []
 
+[features]
+test-harness = ["oxdock-fs/mock-fs", "oxdock-process/mock-process"]
+
 [dependencies]
 anyhow.workspace = true
 base64.workspace = true

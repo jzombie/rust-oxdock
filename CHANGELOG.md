@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [0.27.0-alpha] - 2026-10-12
+
+### Added
+
+- Returns-slot conformance gate (`assert_module_returns_conformance`): every host function with a declared `returns` executes against its slot, through deterministic sampled arguments plus executable `Example` scripts; a lying slot fails `cargo test` instead of rotting generated docs. Decentralized per crate boundary (STD in core, each plugin in its own suite) behind the `test-harness` feature; watchdog threads bound every invocation so blocking samples report inconclusive instead of hanging the suite.
+- `#[example(name, code)]` function examples: structured executable snippets on `FuncMeta` reusing the command `Example` shape, rendered as fences into the generated function reference and executed by docs_conformance, with strict parity coverage tests requiring every registered function in an executed fence.
+- `HostModule::with_state` plus `StepCtx::module_state`: module-shared state (endpoint registries) reachable from `#[oxdock_func]` bodies, so no entry needs a hand-built closure to capture state.
+- Macro options expressiveness: value unions (`DURATION|STRING`), one-level collections (`MAP<STRING>`), empty `#[options()]` for reserved-but-keyless MAPs, and omittable trailing options MAPs via `#[optional]` (range arity with `{}` fill, same messages as the hand-built entries).
+- New `BindingSpec::DialOnly` slot: resolvable for dials against harness-held listeners and runner-owned upstreams, never bound by `bind_all`, never claimable for `LISTEN`.
+
+### Changed
+
+- All hand-built host registrations converted to `#[oxdock_func]` with identical DSL contracts (NET `LISTEN`/`CONNECT`/`PORT`/`ADDR`/`FETCH`, SSH `SERVE`/`CONNECT`, STD `RAND`); options params declare bare `MAP` like every hand-built entry did, and existing suites verify parity.
+- Inline docs fences moved to structured examples; the function reference renders an Examples section per function, and fence bodies strip one leading newline like `indoc!` so no blank line follows the opener.
+- Docs prose illustrates logical ports with service names instead of bare numbers, which read like physical ports.
+- Network isolation mandate: scripts declare service names, only the runner binds ports. The inline loopback fallback is removed, so no script string ever binds or dials a physical port: `NET_LISTEN`/`SSH_SERVE`/`NET_CONNECT`/`SSH_CONNECT` on an unmapped key fail before execution with the CLI mapping hint, and physical `host:port` dials are rejected in-script. Explicitly-mapped memory slots still rendezvous in-process (SSH rejects them, which needs a TCP socket). Serve and dial resolution for both plugins flows through one shared implementation (`acquire_listener`/`resolve_service_target`, parameterized by `SocketRequirement`); the CLI mapping hint lives in one function. `NET_PORT`/`NET_ADDR` on socketless services bail instead of reporting sentinels. Test harnesses pre-map services via `EndpointRegistry::add_cli_mapping` plus `bind_all`; hardcoded ports appear only in anti-binding proofs.
+- Unmapped services are a hard error before execution: modules stage a `PreRunCheck` in their states and the runner verifies every named service is fully bound (mapped socket or explicitly-mapped memory) up front, aborting with zero side effects on failure. Statement-position calls are inspected too, not just expression calls, at every nesting level (loops, function bodies, async blocks, branches). Memory rendezvous needs an explicit runner mapping; service names must be string literals. Closed-world tests pin the inspected function set and every constructor's wiring.
+
+### Fixed
+
+- Listener sockets set `SO_REUSEADDR` so close-and-reclaim loops survive a still-closing previous socket instead of flaking `EADDRINUSE`.
+- `SSH_PTY_RUN` drains before teardown: the supervisor waits for output quiescence after child exit instead of releasing the console immediately, so a slow ConPTY flush no longer truncates the tail bytes (the promised drain-before-return now holds on Windows).
+- PTY spawn hands the child the native CWD (`command_path`, verbatim prefix stripped) like process spawn already does: a `\\?\` startup directory trips console apps into UNC handling, with `cmd` warning and silently defaulting elsewhere, so terminal children now actually run in the script directory. The doc fence asserts on the whole output pipe instead of line-reading, since ConPTY setup noise ahead of child output is version-dependent.
+
 ## [0.26.0-alpha] - 2026-10-12
 
 ### Added

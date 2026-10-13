@@ -525,6 +525,23 @@ impl<'a, P: ProcessManager> StepCtx<'a, P> {
         self.state.inside_async
     }
 
+    /// Module-shared state stashed at registration (`HostModule::with_state`).
+    /// Lets `#[oxdock_func]` bodies reach state that cannot ride in a
+    /// value (endpoint registries) without hand-built closures. `None`
+    /// when the module registered no such state: a programmer error at
+    /// module-build time, never a script failure.
+    pub fn module_state<T: Send + Sync + 'static>(
+        &self,
+        module: &str,
+    ) -> Option<std::sync::Arc<T>> {
+        self.state
+            .module_states
+            .get(&(module.to_string(), std::any::TypeId::of::<T>()))?
+            .clone()
+            .downcast::<T>()
+            .ok()
+    }
+
     /// Resolve an explicitly passed `PIPE` value to its script backend for
     /// timeout-bounded reads (`read_into_timeout`). This is value-based on
     /// purpose: the ambient `out_pipe`/`stdin_pipe` fields only populate via

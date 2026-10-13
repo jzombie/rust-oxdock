@@ -1,13 +1,14 @@
 //! TCP networking for OxDock scripts.
 //!
 //! This crate exposes a `NET` host module through the [`Engine`]
-//! facade: `NET_LISTEN` claims a virtual service endpoint (mapped to a
-//! physical bind by the host runner, loopback by default) and reports its
-//! address, `NET_ACCEPT` pumps one connection through explicit DSL pipes,
-//! `NET_CLOSE` tears the listener down, and `NET_CONNECT` dials out or
-//! joins a memory session. It also owns the endpoint-validation helpers
-//! and the virtual endpoint registry shared by host plugins, so shapes
-//! stay identical everywhere.
+//! facade: `NET_LISTEN` claims a runner-mapped service endpoint and
+//! reports its address, `NET_ACCEPT` pumps one connection through
+//! explicit DSL pipes, `NET_CLOSE` tears the listener down, and
+//! `NET_CONNECT` dials out or joins a memory session. Unmapped services
+//! rendezvous in memory; scripts never bind. It also owns the
+//! endpoint-validation helpers and the virtual endpoint registry shared
+//! by host plugins, so resolution stays literally one code path
+//! everywhere.
 //!
 //! [`Engine`]: oxdock_core::Engine
 
@@ -21,8 +22,9 @@ mod types;
 pub mod validate;
 
 pub use endpoints::{
-    AcquiredListener, BindingSpec, EndpointRegistry, MEMORY_QUEUE_CAP, MemoryPipePair, SlotKind,
-    acquire_listener,
+    AcquiredListener, BindingSpec, EndpointRegistry, MEMORY_QUEUE_CAP, MemoryPipePair,
+    ServiceTarget, SlotKind, SocketRequirement, acquire_listener, classify_service_call,
+    no_cli_mapping, resolve_service_target,
 };
 pub use funcs::{module_with, module_with_endpoints};
 use oxdock_core::HostModule;

@@ -29,9 +29,11 @@ oxdock-remote-proto.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 shell-words.workspace = true
+socket2.workspace = true
 ureq.workspace = true
 
 [dev-dependencies]
+oxdock-core = { workspace = true, features = ["test-harness"] }
 oxdock-fs.workspace = true
 oxdock-sys-test-utils.workspace = true
 

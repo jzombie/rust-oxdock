@@ -1,5 +1,7 @@
 mod args;
 mod capture;
+#[cfg(any(test, feature = "test-harness"))]
+pub mod conformance;
 mod engine;
 mod exit;
 mod fs_ops;
@@ -20,6 +22,8 @@ pub use self::remote::{
 };
 
 pub use self::args::{json_to_value, value_to_json};
+#[cfg(any(test, feature = "test-harness"))]
+pub use self::conformance::assert_module_returns_conformance;
 pub use self::engine::{Engine, EngineOutput};
 pub use self::exit::{ExitRequest, exit_code_of};
 pub(crate) use self::handlers::{
@@ -40,7 +44,7 @@ pub use self::io::PipeStream;
 pub use self::io::PushManifestSink;
 pub use self::native::{
     FuncKind, FuncMeta, FuncParam, FunctionRegistry, HostModule, HostRegistration, NativeFn,
-    OxDockFn, ParamOption, PureFn, PureTable, RecordSchema, builtin_function_metas,
+    OxDockFn, ParamOption, PreRunCheck, PureFn, PureTable, RecordSchema, builtin_function_metas,
     builtin_function_names, fill_optional_args, required_arity, std_module_table,
 };
 pub use self::state::ExecState;
@@ -324,6 +328,11 @@ pub fn run_steps_with_manager_with_modules<P: ProcessManager>(
     types: Vec<&'static self::typing::TypeDescriptor>,
 ) -> Result<(GuardedPath, Box<dyn WorkspaceFs>, BTreeMap<String, Value>)> {
     let mut state = new_state(fs, io)?;
+    for module in &modules {
+        // Pre-run checks first: unmapped services fail here, before the
+        // first step executes and with zero side effects.
+        module.check_pre_run(steps)?;
+    }
     for module in modules {
         state.register_module(module);
     }
@@ -366,6 +375,7 @@ fn new_state<P: ProcessManager>(fs: Box<dyn WorkspaceFs>, io: ExecIo) -> Result<
         functions: self::native::FunctionRegistry::with_builtins(),
         types: self::typing::startup_type_map(),
         record_schemas: std::collections::HashMap::new(),
+        module_states: std::collections::HashMap::new(),
         type_aliases: std::collections::HashMap::new(),
         call_depth: 0,
         // Root flow is task 0; worker ids start at 1 (see next_task_id).

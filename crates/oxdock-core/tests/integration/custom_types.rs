@@ -50,6 +50,7 @@ fn run_with_tag_hosts(root: &GuardedPath, script: &str) -> Result<(), anyhow::Er
         funcs: vec![MakeTag::registration(), ReadTag::registration()],
         types: vec![],
         record_schemas: vec![],
+        states: vec![],
     });
     engine.run_script(root, script).map(|_| ())
 }
@@ -122,6 +123,7 @@ fn type_alias_collisions_with_host_type_and_schema_fail() {
             name: "EMP",
             fields: emp_fields(),
         }],
+        states: vec![],
     });
     let err = engine
         .run_script(&root, "TYPE TAG = MAP\n")
@@ -182,6 +184,7 @@ fn engine_runs_with_custom_process_manager() {
         funcs: vec![MakeTag::registration(), ReadTag::registration()],
         types: vec![],
         record_schemas: vec![],
+        states: vec![],
     });
     let run = engine
         .run_script_on(
@@ -342,6 +345,7 @@ fn run_with_matrix_hosts(root: &GuardedPath, script: &str) -> Result<EngineOutpu
         ],
         types: vec![],
         record_schemas: vec![],
+        states: vec![],
     });
     engine.run_script(root, script)
 }
@@ -367,6 +371,7 @@ fn duplicate_qualified_registration_panics() {
         funcs: vec![MakeTag::registration()],
         types: vec![],
         record_schemas: vec![],
+        states: vec![],
     };
     engine.register_module(module());
     engine.register_module(module());
@@ -398,11 +403,13 @@ fn host_module_cannot_reclaim_std_name() {
                 rpn: false,
                 summary: "Shadow attempt.",
                 docs: "Must never replace the builtin.",
+                examples: &[],
             },
             func: Arc::new(|_| Ok(Value::string(String::new()))),
         }],
         types: vec![],
         record_schemas: vec![],
+        states: vec![],
     });
 }
 
@@ -419,12 +426,14 @@ fn same_base_name_in_different_modules_coexists() {
         funcs: vec![MakeTag::registration(), ReadTag::registration()],
         types: vec![],
         record_schemas: vec![],
+        states: vec![],
     });
     engine.register_module(HostModule {
         name: "OTHER".to_string(),
         funcs: vec![MakeTag::registration()],
         types: vec![],
         record_schemas: vec![],
+        states: vec![],
     });
     engine
         .run_script(
@@ -455,6 +464,7 @@ fn conflicting_payload_type_for_live_name_panics() {
         funcs: vec![MakeTag::registration(), ReadTag::registration()],
         types: vec![],
         record_schemas: vec![],
+        states: vec![],
     });
     engine.register_type::<ImpostorTag>();
     engine

@@ -11,7 +11,7 @@ The default build (with the `net` feature) prints the following for
 omitted:
 
 ```text
-oxdock 0.26.0-alpha — CLI tooling for executing OxDock's Dockerfile-inspired DSL on native platforms.
+oxdock 0.27.0-alpha — CLI tooling for executing OxDock's Dockerfile-inspired DSL on native platforms.
 
 Usage: oxdock [OPTIONS] [SCRIPT]
   SCRIPT             script file path (same as `--script <file>`); `-` reads stdin
@@ -33,7 +33,7 @@ Scripts declare logical endpoints (a port like 2251); the flags above map them t
 - Create an isolated, temporary workspace and run a script inside it.
 - Drop into an interactive shell inside the temporary workspace with `oxdock --shell` (requires a TTY).
 - Run a DSL script via `--script <path>` or by piping a script into stdin.
-- Map virtual service endpoints to physical interfaces: scripts declare logical ports or names (`NET_LISTEN("2251")`), and `--listen`, `-p`, or `--offline` decide what they bind to (defaults to loopback). Endpoint flags need the `net` Cargo feature (on by default; `--no-default-features` builds reject them).
+- Map virtual service endpoints to physical interfaces: scripts declare service names (`NET_LISTEN("web-gateway")`), and `--listen`, `-p`, or `--offline` decide what they bind to. Endpoint flags need the `net` Cargo feature (on by default; `--no-default-features` builds reject them).
 - Expose the real workspace to scripts via `WORKSPACE LOCAL` / `WORKSPACE SNAPSHOT` so steps can target either the temporary workspace or the live repo.
 
 ## Notes

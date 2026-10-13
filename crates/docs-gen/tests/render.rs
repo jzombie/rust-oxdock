@@ -341,6 +341,7 @@ fn test_module() -> HostModule<DefaultProcessManager> {
         funcs: vec![Ping::registration()],
         types: vec![],
         record_schemas: vec![],
+        states: vec![],
     }
 }
 

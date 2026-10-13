@@ -20,15 +20,46 @@
 use std::io::{Read, Write};
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Instant;
 
 use anyhow::{Context, Result, bail};
 use oxdock_core::{StepCtx, Value};
+use oxdock_fs::command_path;
 use oxdock_pipe::PipeInner;
 use oxdock_process::{ProcessManager, SharedInput, SharedOutput};
 
 use crate::bridge::{CHUNK, TICK, read_pipe};
 use crate::state::{PtySize, SharedPtySize, snapshot_pty_size};
+
+/// Post-exit output silence that ends the drain wait: long enough to
+/// cover ConPTY screen-buffer flush lag on loaded runners, short enough
+/// that a stranded console costs little.
+const DRAIN_QUIESCE_MS: u64 = 250;
+/// Post-exit backstop: teardown runs no matter what past this point, so
+/// a pathological console cannot strand the close.
+const DRAIN_CAP_MS: u64 = 30_000;
+
+/// Millis since a session epoch. Monotonic by construction: interval
+/// math must never read the wall clock (NTP steps would skew quiescence
+/// and the cap in either direction).
+fn elapsed_ms(epoch: Instant) -> u64 {
+    epoch.elapsed().as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+/// Whether the console teardown is due: output has been silent since
+/// the child died for longer than the quiescence window, or the cap
+/// elapsed. Silence anchors at the LATER of last output and death: a
+/// child silent before exit still gets its full post-exit drain wait.
+/// Pure function of timestamps, so unit tests pin the policy without
+/// threads or terminals.
+fn drain_overdue(last_output_ms: u64, exited_ms: Option<u64>, now_ms: u64) -> bool {
+    let Some(exited) = exited_ms else {
+        return false;
+    };
+    now_ms.saturating_sub(last_output_ms.max(exited)) >= DRAIN_QUIESCE_MS
+        || now_ms.saturating_sub(exited) >= DRAIN_CAP_MS
+}
 
 /// ConPTY console-setup handshake. portable-pty builds the console with
 /// `PSEUDOCONSOLE_INHERIT_CURSOR`, so when the parent has no console of
@@ -86,14 +117,18 @@ fn answer_conhost_queries(
 /// Pump master-terminal output into the `out_pipe` writer. Ends on
 /// master EOF (child and its children are gone; `portable-pty`
 /// normalizes the platform EIO-into-EOF kink for us) or on console
-/// teardown (the supervisor releases the master once the child is
-/// observed gone, which closes a ConPTY output pipe that would
-/// otherwise stay open). Also answers ConPTY setup queries in band.
+/// teardown (the supervisor releases the master once the drain is due,
+/// which closes a ConPTY output pipe that would otherwise stay open).
+/// Also answers ConPTY setup queries in band. Stamps `activity` with
+/// the current millis on every forwarded chunk so the supervisor can
+/// tell a draining console from a stranded one.
 fn pump_master_out(
     reader: &mut Box<dyn Read + Send>,
     writer: &SharedOutput,
     master_in: &Arc<Mutex<Box<dyn Write + Send>>>,
     cancel: &AtomicBool,
+    activity: &AtomicU64,
+    epoch: Instant,
 ) -> Result<()> {
     let mut buffer = [0u8; CHUNK];
     let mut query_tail = [0u8; 3];
@@ -123,6 +158,7 @@ fn pump_master_out(
                     .write_all(&buffer[..count])
                     .context("SSH pty output pipe write failed")?;
                 guard.flush().context("SSH pty output pipe flush failed")?;
+                activity.store(elapsed_ms(epoch), Ordering::SeqCst);
             }
         }
     }
@@ -279,19 +315,31 @@ pub fn pump_pty_session<P: ProcessManager>(
             .take_writer()
             .context("SSH pty master writer failed")?,
     ));
-    // Console teardown handle. Released once the child is observed
-    // gone (see the supervisor loop): ConPTY keeps the output pipe
-    // open until ClosePseudoConsole runs, which lives in this handle,
-    // so holding it to function end strands the output worker in its
+    // Console teardown handle. Released once the output drain is due
+    // (see the supervisor loop): ConPTY keeps the output pipe open
+    // until ClosePseudoConsole runs, which lives in this handle, so
+    // holding it to function end strands the output worker in its
     // blocking read after the child exits (EOF waits for teardown,
     // teardown waits for the scope join, the join waits for the
-    // worker). Unix reports child death as master EOF either way, so
-    // the early release changes nothing there.
+    // worker). Releasing it the instant the child dies truncates the
+    // drain instead: a slow ConPTY flush loses to teardown and the
+    // tail bytes never reach the pipe. Unix reports child death as
+    // master EOF either way, so the worker usually beats the drain
+    // wait there and the quiescence path stays inert.
     let mut master_opt = Some(pair.master);
+    // Last forwarded output, for the drain wait. Bytes flowing after
+    // child death mean ConPTY is still flushing: keep waiting.
+    let epoch = Instant::now();
+    let activity = AtomicU64::new(elapsed_ms(epoch));
 
     let mut builder = portable_pty::CommandBuilder::new(&argv[0]);
     builder.args(&argv[1..]);
-    builder.cwd(cx.cwd().as_path());
+    // Native form, not the guarded verbatim path: a `\\?\` startup
+    // directory trips console apps into UNC handling (`cmd` warns and
+    // silently defaults elsewhere), the same reason process spawn
+    // goes through `command_path`.
+    let cwd = command_path(cx.cwd());
+    builder.cwd(cwd.as_ref());
     // Script ENV layers over the inherited host environment (the `RUN`
     // contract): block-scoped assignments like the session's `SSH_*`
     // relay reach the child, and scope exit reverts them.
@@ -319,10 +367,21 @@ pub fn pump_pty_session<P: ProcessManager>(
             )
         }));
         let mut worker_out = Some(scope.spawn(|| {
-            let result = pump_master_out(&mut master_reader, &writer, &master_writer, cancel);
+            let result = pump_master_out(
+                &mut master_reader,
+                &writer,
+                &master_writer,
+                cancel,
+                &activity,
+                epoch,
+            );
             peer_done.store(true, Ordering::SeqCst);
             result
         }));
+        // Child-death timestamp for the drain wait. Set once, on the
+        // first observation below; teardown follows quiescence, never
+        // the death itself.
+        let mut exited_ms: Option<u64> = None;
         loop {
             reap(&mut worker_in, &mut failed);
             let out_was_live = worker_out.is_some();
@@ -345,27 +404,49 @@ pub fn pump_pty_session<P: ProcessManager>(
                     let _ = master.resize(to_portable_size(applied));
                 }
             }
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    peer_done.store(true, Ordering::SeqCst);
-                    if exit_code.is_none() {
+            // Never poll a reaped child: past the first observed exit
+            // the wait handle is spent (Unix answers further polls with
+            // ECHILD), and re-stamping the death would push the drain
+            // wait out from under quiescence.
+            if exit_code.is_none() {
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        peer_done.store(true, Ordering::SeqCst);
                         exit_code = Some(i64::from(status.exit_code()));
+                        // The child is gone: note when, but keep the
+                        // console until the drain is due so a slow flush
+                        // still lands. Deferred to function end this
+                        // deadlocks on Windows, where the ConPTY host
+                        // holds the output pipe open until
+                        // ClosePseudoConsole runs; torn down the instant
+                        // the child dies it truncates the tail instead.
+                        exited_ms = Some(elapsed_ms(epoch));
                     }
-                    // The child is gone: tear down the console now so the
-                    // output worker's blocking read observes EOF. Deferred
-                    // to function end this deadlocks on Windows, where the
-                    // ConPTY host holds the output pipe open until
-                    // ClosePseudoConsole runs.
-                    master_opt = None;
+                    Ok(None) => {}
+                    Err(_) => {
+                        peer_done.store(true, Ordering::SeqCst);
+                        // The wait handle is broken: no exit will ever be
+                        // observed, so note it once and let the drain wait
+                        // below force the release. Workers drain to EOF
+                        // and the reaper below reports.
+                        if exited_ms.is_none() {
+                            exited_ms = Some(elapsed_ms(epoch));
+                        }
+                    }
                 }
-                Ok(None) => {}
-                Err(_) => {
-                    peer_done.store(true, Ordering::SeqCst);
-                    // The wait handle is broken: no exit will ever be
-                    // observed, so release the console the same way.
-                    // Workers drain to EOF and the reaper below reports.
-                    master_opt = None;
-                }
+            }
+            // Due drain with a live output worker: release the console
+            // so its blocking read observes EOF, then reaping closes the
+            // pipe after the flushed tail.
+            if worker_out.is_some()
+                && master_opt.is_some()
+                && drain_overdue(
+                    activity.load(Ordering::SeqCst),
+                    exited_ms,
+                    elapsed_ms(epoch),
+                )
+            {
+                master_opt = None;
             }
             if cx.is_cancelled() {
                 cancel.store(true, Ordering::SeqCst);
@@ -440,6 +521,33 @@ mod tests {
             seen.lock().expect("sink readable").as_slice(),
             b"\x1b[1;1R".as_slice()
         );
+    }
+
+    #[test]
+    fn drain_waits_for_quiescence_not_death() {
+        // Fresh death with recent output: keep waiting for the flush.
+        assert!(!drain_overdue(1000, Some(1000), 1000));
+        assert!(!drain_overdue(1090, Some(1000), 1100));
+        // Silent past the window: tear down even though the worker
+        // never EOF'd on its own.
+        assert!(drain_overdue(1000, Some(1000), 1000 + DRAIN_QUIESCE_MS));
+        // Late flush resets the wait, until the cap.
+        assert!(!drain_overdue(5000, Some(1000), 5100));
+        assert!(drain_overdue(
+            1000 + DRAIN_CAP_MS,
+            Some(1000),
+            1000 + DRAIN_CAP_MS
+        ));
+        // No death observed: never tear down.
+        assert!(!drain_overdue(1000, None, 1000 + DRAIN_CAP_MS + 1));
+        // Silence before death must not bypass the post-exit wait: the
+        // window anchors at the later of last output and death.
+        assert!(!drain_overdue(500, Some(1000), 1000));
+        assert!(!drain_overdue(500, Some(1000), 1000 + DRAIN_QUIESCE_MS - 1));
+        assert!(drain_overdue(500, Some(1000), 1000 + DRAIN_QUIESCE_MS));
+        // Output after death extends the window past the death mark.
+        assert!(!drain_overdue(1100, Some(1000), 1200));
+        assert!(drain_overdue(1100, Some(1000), 1100 + DRAIN_QUIESCE_MS));
     }
 
     #[test]

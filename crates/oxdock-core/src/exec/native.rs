@@ -14,7 +14,6 @@ use super::io::StreamHandle;
 use super::state::ExecState;
 use super::steps::StepCtx;
 use super::typing::TypeDescriptor;
-use super::typing::check_options;
 
 /// Origin of a callable in the unified function registry. `Script` is an
 /// interpreted `FUNC` body; `HostCtx` and `HostPure` are compiled Rust
@@ -127,6 +126,12 @@ pub struct FuncMeta {
     pub rpn: bool,
     pub summary: &'static str,
     pub docs: &'static str,
+    /// Executable examples, rendered as ```oxdock fences into the
+    /// generated reference and executed by docs_conformance like
+    /// command examples. The single precondition mechanism: the
+    /// returns gate executes these blocks to cover functions blind
+    /// sampling cannot reach.
+    pub examples: &'static [crate::Example],
 }
 
 /// Pure scalar function: no filesystem, no scope, no process access.
@@ -475,6 +480,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
                     rpn: false,
                     summary: "DSL-defined function.",
                     docs: "Defined via FUNC in script.",
+                    examples: &[],
                 },
                 body: FuncBody::Script(FuncDefData {
                     params: params.to_vec(),
@@ -643,6 +649,16 @@ pub fn std_module_table() -> oxdock_parser::ModuleTable {
 /// when integral and finite; Bool as 1/0.
 ///
 #[oxdock_func(pure, returns = TypeTag::Int)]
+#[example(
+    name = "convert",
+    code = r###"
+    IMPORT [STD]
+    LET $n: INT = INT("42")
+    ASSERT_EQ $n 42
+    LET $flag: INT = INT(true)
+    ASSERT_EQ $flag 1
+    "###
+)]
 fn int(
     /// Value to convert to `INT`.
     #[union(Int, Float, String, Bool)]
@@ -656,6 +672,16 @@ fn int(
 /// Parses f64 (accepts int strings), bails on non-finite or non-numeric.
 ///
 #[oxdock_func(pure, returns = TypeTag::Float)]
+#[example(
+    name = "convert",
+    code = r###"
+    IMPORT [STD]
+    LET $f: FLOAT = FLOAT("1.5")
+    ASSERT_EQ $f 1.5
+    LET $whole: FLOAT = FLOAT(2)
+    ASSERT_EQ $whole 2.0
+    "###
+)]
 fn float(
     /// Value to convert to `FLOAT`.
     #[union(Float, Int, String)]
@@ -668,18 +694,20 @@ fn float(
 /// binary `10KIB` and friends): the inverse of `PARSE_BYTE_COUNT`, so
 /// formatted values reparse exactly. Negative inputs fail.
 ///
-/// ```oxdock
-/// # Byte counts render in the largest exact unit.
-/// IMPORT [STD]
-/// LET $pretty: STRING = FORMAT_BYTE_COUNT(1_048_576)
-/// ASSERT_EQ $pretty "1MiB"
-///
-/// # The pair round-trips through the parser.
-/// LET $back: INT = PARSE_BYTE_COUNT($pretty)
-/// ASSERT_EQ $back 1_048_576
-/// ```
-///
 #[oxdock_func(pure, returns = TypeTag::String)]
+#[example(
+    name = "format and round-trip",
+    code = r###"
+    # Byte counts render in the largest exact unit.
+    IMPORT [STD]
+    LET $pretty: STRING = FORMAT_BYTE_COUNT(1_048_576)
+    ASSERT_EQ $pretty "1MiB"
+
+    # The pair round-trips through the parser.
+    LET $back: INT = PARSE_BYTE_COUNT($pretty)
+    ASSERT_EQ $back 1_048_576
+    "###
+)]
 fn format_byte_count(
     /// Byte count to format; negatives fail.
     bytes: i64,
@@ -729,6 +757,16 @@ fn format_byte_count(
 /// ```
 ///
 #[oxdock_func(pure, returns = TypeTag::Int)]
+#[example(
+    name = "parse",
+    code = r###"
+    IMPORT [STD]
+    LET $n: INT = PARSE_BYTE_COUNT("10KB")
+    ASSERT_EQ $n 10_000
+    LET $identity: INT = PARSE_BYTE_COUNT(512)
+    ASSERT_EQ $identity 512
+    "###
+)]
 fn parse_byte_count(
     /// Byte-count token to parse, or bytes already.
     #[union(Int, Float, String)]
@@ -765,18 +803,20 @@ fn parse_byte_count(
 /// `1h`): the inverse of `PARSE_DURATION`, so formatted values
 /// reparse exactly. Negative inputs fail.
 ///
-/// ```oxdock
-/// # Durations render in the largest exact unit.
-/// IMPORT [STD]
-/// LET $pretty: STRING = FORMAT_DURATION(90_000)
-/// ASSERT_EQ $pretty "90s"
-///
-/// # The pair round-trips through the parser.
-/// LET $back: INT = PARSE_DURATION($pretty)
-/// ASSERT_EQ $back 90_000
-/// ```
-///
 #[oxdock_func(pure, returns = TypeTag::String)]
+#[example(
+    name = "format and round-trip",
+    code = r###"
+    # Durations render in the largest exact unit.
+    IMPORT [STD]
+    LET $pretty: STRING = FORMAT_DURATION(90_000)
+    ASSERT_EQ $pretty "90s"
+
+    # The pair round-trips through the parser.
+    LET $back: INT = PARSE_DURATION($pretty)
+    ASSERT_EQ $back 90_000
+    "###
+)]
 fn format_duration(
     /// Milliseconds to format; negatives fail.
     millis: i64,
@@ -796,22 +836,24 @@ fn format_duration(
 /// Suffixes `ms`/`s`/`m`/`h`; a bare number means seconds. Pairs with
 /// `FORMAT_DURATION` for the round trip.
 ///
-/// ```oxdock
-/// # A bare number means seconds, like TIMEOUT.
-/// IMPORT [STD]
-/// LET $ms: INT = PARSE_DURATION("2m")
-/// ASSERT_EQ $ms 120_000
-///
-/// # Milliseconds stay exact.
-/// LET $exact: INT = PARSE_DURATION("1500ms")
-/// ASSERT_EQ $exact 1_500
-///
-/// # One optional space separates number from unit.
-/// LET $spaced: INT = PARSE_DURATION("1 h")
-/// ASSERT_EQ $spaced 3_600_000
-/// ```
-///
 #[oxdock_func(pure, returns = TypeTag::Int)]
+#[example(
+    name = "parse",
+    code = r###"
+    # A bare number means seconds, like TIMEOUT.
+    IMPORT [STD]
+    LET $ms: INT = PARSE_DURATION("2m")
+    ASSERT_EQ $ms 120_000
+
+    # Milliseconds stay exact.
+    LET $exact: INT = PARSE_DURATION("1500ms")
+    ASSERT_EQ $exact 1_500
+
+    # One optional space separates number from unit.
+    LET $spaced: INT = PARSE_DURATION("1 h")
+    ASSERT_EQ $spaced 3_600_000
+    "###
+)]
 fn parse_duration(
     /// Duration token to parse.
     text: String,
@@ -827,6 +869,18 @@ fn parse_duration(
 /// Sorted, root-relative LIST; empty on no match or `..` escape.
 ///
 #[oxdock_func(rpn, returns = TypeTag::ListOf(std::sync::Arc::new(TypeTag::String)))]
+#[example(
+    name = "match",
+    code = r###"
+    IMPORT [STD]
+    WRITE "notes-a.md" "a"
+    WRITE "notes-b.md" "b"
+    WRITE "other.txt" "c"
+    LET $found: LIST<STRING> = GLOB("notes-*.md")
+    ASSERT_EQ $found.0 "notes-a.md"
+    ASSERT_EQ $found.1 "notes-b.md"
+    "###
+)]
 fn glob<P: ProcessManager>(
     cx: &mut StepCtx<P>,
     /// Glob pattern matched against workspace paths.
@@ -842,6 +896,15 @@ fn glob<P: ProcessManager>(
 /// Reads a workspace file and parses TOML into a DSL value.
 ///
 #[oxdock_func(rpn, returns = TypeTag::MapOf(std::sync::Arc::new(TypeTag::Any)))]
+#[example(
+    name = "load",
+    code = r###"
+    IMPORT [STD]
+    WRITE "cfg.toml" "title = \"demo\""
+    LET $cfg: MAP<ANY> = LOAD_TOML("cfg.toml")
+    ASSERT_EQ $cfg.title "demo"
+    "###
+)]
 fn load_toml<P: ProcessManager>(
     cx: &mut StepCtx<P>,
     /// Workspace file path to load and parse as TOML.
@@ -860,6 +923,15 @@ fn load_toml<P: ProcessManager>(
 /// assignment.
 ///
 #[oxdock_func(rpn, returns = TypeTag::Any)]
+#[example(
+    name = "load",
+    code = r###"
+    IMPORT [STD]
+    WRITE "data.json" "{\"a\": 1}"
+    LET $doc: MAP<ANY> = LOAD_JSON("data.json")
+    ASSERT_EQ $doc.a 1
+    "###
+)]
 fn load_json<P: ProcessManager>(
     cx: &mut StepCtx<P>,
     /// Workspace file path to load and parse as JSON.
@@ -876,6 +948,14 @@ fn load_json<P: ProcessManager>(
 /// contents, and captured text share one JSON/TOML shape.
 ///
 #[oxdock_func(pure, returns = TypeTag::MapOf(std::sync::Arc::new(TypeTag::Any)))]
+#[example(
+    name = "parse",
+    code = r###"
+    IMPORT [STD]
+    LET $doc: MAP<ANY> = PARSE_TOML("title = \"demo\"")
+    ASSERT_EQ $doc.title "demo"
+    "###
+)]
 fn parse_toml(
     /// TOML text already held in memory.
     text: String,
@@ -891,20 +971,22 @@ fn parse_toml(
 /// parses to `LIST` or a scalar word. `LET` coercion still checks the
 /// actual value at assignment.
 ///
-/// ```oxdock
-/// # Parse in-memory JSON text with the same conversion as file loading.
-/// IMPORT [STD]
-/// LET $body: STRING = "{\"a\": 1}"
-/// LET $doc: ANY = PARSE_JSON($body)
-/// ASSERT_EQ $doc.a 1
-///
-/// # Top-level arrays parse to LIST, which is why the return is ANY.
-/// LET $items: LIST<ANY> = PARSE_JSON("[1, 2]")
-/// ASSERT_EQ $items.0 1
-/// ASSERT_EQ $items.1 2
-/// ```
-///
 #[oxdock_func(pure, returns = TypeTag::Any)]
+#[example(
+    name = "parse",
+    code = r###"
+    # Parse in-memory JSON text with the same conversion as file loading.
+    IMPORT [STD]
+    LET $body: STRING = "{\"a\": 1}"
+    LET $doc: ANY = PARSE_JSON($body)
+    ASSERT_EQ $doc.a 1
+
+    # Top-level arrays parse to LIST, which is why the return is ANY.
+    LET $items: LIST<ANY> = PARSE_JSON("[1, 2]")
+    ASSERT_EQ $items.0 1
+    ASSERT_EQ $items.1 2
+    "###
+)]
 fn parse_json(
     /// JSON text already held in memory.
     text: String,
@@ -918,6 +1000,17 @@ fn parse_json(
 /// there is no RPN arm for filesystem IO.
 ///
 #[oxdock_func(returns = TypeTag::String)]
+#[example(
+    name = "describe",
+    code = r###"
+    IMPORT [STD]
+    WRITE "entry.txt" "words"
+    LET $kind: STRING = PATH_TYPE("entry.txt")
+    ASSERT_EQ $kind "file"
+    LET $missing: STRING = PATH_TYPE("no-such-entry.txt")
+    ASSERT_EQ $missing "absent"
+    "###
+)]
 fn path_type<P: ProcessManager>(
     cx: &mut StepCtx<P>,
     /// Workspace path of the entry to describe.
@@ -936,18 +1029,20 @@ fn path_type<P: ProcessManager>(
 /// AST-only by design, like `PATH_TYPE`: there is no RPN arm for
 /// filesystem IO.
 ///
-/// ```oxdock
-/// # An absent nested path is writable when its ancestor is.
-/// IMPORT [STD]
-/// LET $fresh: BOOL = PATH_WRITABLE("probe-check/nested/file.txt")
-/// ASSERT_EQ $fresh true
-///
-/// # The empty string never aliases the working directory.
-/// LET $empty: BOOL = PATH_WRITABLE("")
-/// ASSERT_EQ $empty false
-/// ```
-///
 #[oxdock_func(returns = TypeTag::Bool)]
+#[example(
+    name = "probe",
+    code = r###"
+    # An absent nested path is writable when its ancestor is.
+    IMPORT [STD]
+    LET $fresh: BOOL = PATH_WRITABLE("probe-check/nested/file.txt")
+    ASSERT_EQ $fresh true
+
+    # The empty string never aliases the working directory.
+    LET $empty: BOOL = PATH_WRITABLE("")
+    ASSERT_EQ $empty false
+    "###
+)]
 fn path_writable<P: ProcessManager>(
     cx: &mut StepCtx<P>,
     /// Workspace path to probe for file creation.
@@ -970,19 +1065,21 @@ fn path_writable<P: ProcessManager>(
 /// `PATH`; anything unresolvable reads false, never errors. AST-only
 /// by design, like `PATH_TYPE`: there is no RPN arm for filesystem IO.
 ///
-/// ```oxdock
-/// # Missing tools read false instead of failing the run.
-/// IMPORT [STD]
-/// LET $missing: BOOL = IS_EXEC("no-such-tool-xyz")
-/// ASSERT_EQ $missing false
-///
-/// # Plain files are not executable on any platform.
-/// WRITE tool.txt payload
-/// LET $plain: BOOL = IS_EXEC("tool.txt")
-/// ASSERT_EQ $plain false
-/// ```
-///
 #[oxdock_func(returns = TypeTag::Bool)]
+#[example(
+    name = "probe",
+    code = r###"
+    # Missing tools read false instead of failing the run.
+    IMPORT [STD]
+    LET $missing: BOOL = IS_EXEC("no-such-tool-xyz")
+    ASSERT_EQ $missing false
+
+    # Plain files are not executable on any platform.
+    WRITE tool.txt payload
+    LET $plain: BOOL = IS_EXEC("tool.txt")
+    ASSERT_EQ $plain false
+    "###
+)]
 fn is_exec<P: ProcessManager>(
     cx: &mut StepCtx<P>,
     /// Command name or file path to probe.
@@ -999,6 +1096,17 @@ fn is_exec<P: ProcessManager>(
 /// tripping the strict missing-key error.
 ///
 #[oxdock_func(pure, returns = TypeTag::Bool)]
+#[example(
+    name = "probe",
+    code = r###"
+    IMPORT [STD]
+    LET $m: MAP<ANY> = PARSE_JSON("{\"a\": 1}")
+    LET $hit: BOOL = HAS_KEY($m, "a")
+    ASSERT_EQ $hit true
+    LET $miss: BOOL = HAS_KEY($m, "b")
+    ASSERT_EQ $miss false
+    "###
+)]
 fn has_key(
     /// Map to probe.
     map: BTreeMap<String, Value>,
@@ -1014,6 +1122,14 @@ fn has_key(
 /// instead of silently shadowing each other.
 ///
 #[oxdock_func(pure, returns = TypeTag::MapOf(std::sync::Arc::new(TypeTag::Any)))]
+#[example(
+    name = "insert",
+    code = r###"
+    IMPORT [STD]
+    LET $m: MAP<ANY> = MAP_SET({seed: 0}, "a", 1)
+    ASSERT_EQ $m.a 1
+    "###
+)]
 fn map_set(
     /// Map to insert into.
     map: BTreeMap<String, Value>,
@@ -1025,131 +1141,54 @@ fn map_set(
     super::args::map_set_from_value(Value::map(map), key, value)
 }
 
-/// `RAND` options, shared by the registration metadata and the
-/// arity check. One params vector feeds both, so the two can never
-/// disagree: add a parameter once, here.
-static RAND_OPTIONS: &[ParamOption] = &[ParamOption {
-    name: "seed",
-    value: TypeTag::Int,
-    required: false,
-    default: None,
-}];
-
 /// Draw a random FLOAT uniformly from [0, 1), optionally seeded.
 ///
 /// Impure by design: unseeded calls return different values, so this
 /// runs on the AST script path only, never as a `{{ }}` placeholder
 /// call. A seed draws the same value on every run, for deterministic
-/// fixtures. Scale and shift the draw for wider ranges. Hand-built
-/// (not `#[oxdock_func]`): the macro marks every param required, and
-/// only hand-built entries can leave a trailing options MAP omittable,
-/// so bare `RAND()` fills `{}`.
+/// fixtures. Scale and shift the draw for wider ranges.
 ///
-/// ```oxdock
-/// # Scale a unit draw into a backoff delay between 1 and 11 seconds.
-/// IMPORT [STD]
-/// LET $draw: FLOAT = RAND()
-/// LET $delay: FLOAT = 1.0 + $draw * 10.0
-/// IF $delay < 1.0 {
-///     EXIT 1
-/// }
-/// IF $delay >= 11.0 {
-///     EXIT 1
-/// }
-/// ECHO "retrying in {{ $delay }}s"
-///
-/// # A seed draws the same value on every run.
-/// LET $one: FLOAT = RAND({seed: 7})
-/// LET $two: FLOAT = RAND({seed: 7})
-/// ASSERT_EQ $one $two
-/// ```
-///
-/// Registration marker for `RAND`, hand-implementing [`OxDockFn`]:
-/// the `#[oxdock_func]` macro marks every param required, and only a
-/// hand-built entry can leave the trailing options MAP omittable, so
-/// bare `RAND()` fills `{}`.
-pub struct Rand;
-impl<P: ProcessManager> OxDockFn<P> for Rand {
-    fn registration() -> HostRegistration<P> {
-        rand_registration()
+#[oxdock_func(returns = TypeTag::Float, summary = "Draw a random FLOAT uniformly from [0, 1), optionally seeded.")]
+#[example(
+    name = "seeded draw",
+    code = r###"
+    # A seed draws the same value on every run.
+    IMPORT [STD]
+    LET $one: FLOAT = RAND({seed: 7})
+    LET $two: FLOAT = RAND({seed: 7})
+    ASSERT_EQ $one $two
+    "###
+)]
+#[example(
+    name = "unseeded draw",
+    code = r###"
+    # Scale a unit draw into a backoff delay between 1 and 11 seconds.
+    IMPORT [STD]
+    LET $draw: FLOAT = RAND()
+    LET $delay: FLOAT = 1.0 + $draw * 10.0
+    IF $delay < 1.0 {
+        EXIT 1
     }
-}
-
-fn rand_registration<P: ProcessManager>() -> HostRegistration<P> {
-    // One params vector feeds both the metadata and the arity check,
-    // so the two can never disagree: add a parameter once, here.
-    let params = vec![FuncParam {
-        name: "options".to_string(),
-        param_type: Some(TypeTag::Map),
-        allowed: None,
-        docs: "Draw settings: `seed`. Omittable: a missing options MAP fills `{}`.",
-        options: Some(RAND_OPTIONS),
-        optional: true,
-    }];
-    let arity = params.len();
-    let required = required_arity(&params);
-    let fill_params = params.clone();
-    let func: NativeFn<P> = Arc::new(move |cx, values| {
-        let _ = cx;
-        if values.len() < required || values.len() > arity {
-            anyhow::bail!(
-                "RAND() expects {required} to {arity} argument(s), got {}",
-                values.len()
-            );
-        }
-        let mut values = fill_optional_args(&fill_params, values).into_iter();
-        let options_value = values.next().expect("arity checked above");
-        let options_map = match options_value.as_map() {
-            Some(map) => map.clone(),
-            None => anyhow::bail!(
-                "RAND() argument `$options` must be a MAP, got {}",
-                options_value.type_name()
-            ),
-        };
-        check_options(&options_map, RAND_OPTIONS, "RAND")?;
-        // `check_options` verified the shape above; the read below
-        // narrows infallibly after.
-        let seed = options_map
-            .get("seed")
-            .map(|value| value.as_i64().expect("check_options verified INT"));
-        super::args::rand_float_from_value(seed)
-    });
-    HostRegistration::Stateful {
-        name: "RAND".to_string(),
-        meta: FuncMeta {
-            name: "RAND".to_string(),
-            // Assigned at registration, like the macro's markers.
-            module: String::new(),
-            kind: FuncKind::HostCtx,
-            params: Some(params),
-            returns: Some(TypeTag::Float),
-            rpn: false,
-            summary: "Draw a random FLOAT uniformly from [0, 1), optionally seeded.",
-            docs: indoc::indoc! {r#"
-                Draw a random FLOAT uniformly from [0, 1), optionally seeded. Impure by design: unseeded calls return different values, so this runs on the AST script path only, never as a `{{ }}` placeholder call. A seed draws the same value on every run, for deterministic fixtures. Scale and shift the draw for wider ranges. Hand-built (not `#[oxdock_func]`): the macro marks every param required, and only hand-built entries can leave a trailing options MAP omittable, so bare `RAND()` fills `{}`.
-
-                ```oxdock
-                # Scale a unit draw into a backoff delay between 1 and 11 seconds.
-                IMPORT [STD]
-                LET $draw: FLOAT = RAND()
-                LET $delay: FLOAT = 1.0 + $draw * 10.0
-                IF $delay < 1.0 {
-                    EXIT 1
-                }
-                IF $delay >= 11.0 {
-                    EXIT 1
-                }
-                ECHO "retrying in {{ $delay }}s"
-
-                # A seed draws the same value on every run.
-                LET $one: FLOAT = RAND({seed: 7})
-                LET $two: FLOAT = RAND({seed: 7})
-                ASSERT_EQ $one $two
-                ```
-            "#},
-        },
-        func,
+    IF $delay >= 11.0 {
+        EXIT 1
     }
+    ECHO "retrying in {{ $delay }}s"
+    "###
+)]
+fn rand<P: ProcessManager>(
+    cx: &mut StepCtx<P>,
+    /// Draw settings: `seed`. Omittable: a missing options MAP fills `{}`.
+    #[options("seed?: INT")]
+    #[optional]
+    options: BTreeMap<String, Value>,
+) -> Result<Value> {
+    let _ = cx;
+    // `check_options` in the wrapper verified the shape above; the
+    // read below narrows infallibly after.
+    let seed = options
+        .get("seed")
+        .map(|value| value.as_i64().expect("check_options verified INT"));
+    super::args::rand_float_from_value(seed)
 }
 
 /// Encode a STRING as standard base64.
@@ -1157,14 +1196,16 @@ fn rand_registration<P: ProcessManager>() -> HostRegistration<P> {
 /// Padded RFC 4648 alphabet, so encoded output pastes into any
 /// standard decoder. Pairs with `BASE64_DECODE` for the round trip.
 ///
-/// ```oxdock
-/// # Encode text to standard base64.
-/// IMPORT [STD]
-/// LET $encoded: STRING = BASE64_ENCODE("hello")
-/// ASSERT_EQ $encoded "aGVsbG8="
-/// ```
-///
 #[oxdock_func(pure, returns = TypeTag::String)]
+#[example(
+    name = "encode",
+    code = r###"
+    # Encode text to standard base64.
+    IMPORT [STD]
+    LET $encoded: STRING = BASE64_ENCODE("hello")
+    ASSERT_EQ $encoded "aGVsbG8="
+    "###
+)]
 fn base64_encode(
     /// Text to encode.
     text: String,
@@ -1178,14 +1219,16 @@ fn base64_encode(
 /// non-UTF-8 payloads instead of rendering a silent empty. Pairs
 /// with `BASE64_ENCODE` for the round trip.
 ///
-/// ```oxdock
-/// # Decode standard base64 back to text.
-/// IMPORT [STD]
-/// LET $decoded: STRING = BASE64_DECODE("aGVsbG8=")
-/// ASSERT_EQ $decoded "hello"
-/// ```
-///
 #[oxdock_func(pure, returns = TypeTag::String)]
+#[example(
+    name = "decode",
+    code = r###"
+    # Decode standard base64 back to text.
+    IMPORT [STD]
+    LET $decoded: STRING = BASE64_DECODE("aGVsbG8=")
+    ASSERT_EQ $decoded "hello"
+    "###
+)]
 fn base64_decode(
     /// Base64 text to decode.
     text: String,
@@ -1200,6 +1243,14 @@ fn base64_decode(
 /// rendering as a silent empty.
 ///
 #[oxdock_func(pure, returns = TypeTag::String)]
+#[example(
+    name = "encode",
+    code = r###"
+    IMPORT [STD]
+    LET $json: STRING = TO_JSON({a: 1})
+    ASSERT_EQ $json "{\"a\":1}\n"
+    "###
+)]
 fn to_json(
     /// Value to encode as JSON.
     #[union(String, Int, Float, Bool, List, Map)]
@@ -1216,6 +1267,14 @@ fn to_json(
 /// on config shapes (a path string or a path list) without failing.
 ///
 #[oxdock_func(pure, returns = TypeTag::String)]
+#[example(
+    name = "name the word",
+    code = r###"
+    IMPORT [STD]
+    LET $word: STRING = TYPE_OF(42)
+    ASSERT_EQ $word "INT"
+    "###
+)]
 fn type_of(
     /// Value whose word to name.
     value: Value,
@@ -1231,6 +1290,15 @@ fn type_of(
 /// Non MAP elements fail naming their position.
 ///
 #[oxdock_func(pure, returns = TypeTag::MapOf(std::sync::Arc::new(TypeTag::Any)))]
+#[example(
+    name = "merge",
+    code = r###"
+    IMPORT [STD]
+    LET $m: MAP<ANY> = MERGE_MAPS([{a: 1}, {b: 2}], "overwrite")
+    ASSERT_EQ $m.a 1
+    ASSERT_EQ $m.b 2
+    "###
+)]
 fn merge_maps(
     /// LIST of MAPs to merge in order.
     maps: Vec<BTreeMap<String, Value>>,
@@ -1249,6 +1317,14 @@ fn merge_maps(
 /// Sorted LIST of qualified `MODULE::NAME` entries: DSL-defined plus native
 /// plus host-registered names.
 #[oxdock_func(returns = TypeTag::ListOf(std::sync::Arc::new(TypeTag::String)))]
+#[example(
+    name = "list",
+    code = r###"
+    IMPORT [STD]
+    LET $names: LIST<STRING> = FUNCTIONS()
+    ASSERT_CONTAINS $names "STD::INT"
+    "###
+)]
 fn functions<P: ProcessManager>(cx: &mut StepCtx<P>) -> Result<Value> {
     let mut names: Vec<String> = cx
         .state
@@ -1316,6 +1392,15 @@ fn functions<P: ProcessManager>(cx: &mut StepCtx<P>) -> Result<Value> {
     }]))
     summary = "Describe one function by qualified name."
 )]
+#[example(
+    name = "describe",
+    code = r###"
+    IMPORT [STD]
+    LET $info: MAP<ANY> = DESCRIBE("STD::INT")
+    ASSERT_EQ $info.name "STD::INT"
+    ASSERT_EQ $info.returns "INT"
+    "###
+)]
 fn describe<P: ProcessManager>(
     cx: &mut StepCtx<P>,
     /// Qualified function name (`MODULE::NAME`).
@@ -1337,6 +1422,14 @@ fn describe<P: ProcessManager>(
 /// run's name directory, so it runs on the AST path like the other
 /// introspection functions.
 #[oxdock_func(returns = TypeTag::ListOf(std::sync::Arc::new(TypeTag::String)))]
+#[example(
+    name = "list",
+    code = r###"
+    IMPORT [STD]
+    LET $names: LIST<STRING> = TYPES()
+    ASSERT_CONTAINS $names "STRING"
+    "###
+)]
 fn types<P: ProcessManager>(cx: &mut StepCtx<P>) -> Result<Value> {
     Ok(Value::list(
         cx.state
@@ -1368,6 +1461,14 @@ fn types<P: ProcessManager>(cx: &mut StepCtx<P>) -> Result<Value> {
     docs: "Full documentation text.",
     optional: false,
 }])))]
+#[example(
+    name = "describe",
+    code = r###"
+    IMPORT [STD]
+    LET $info: MAP<ANY> = TYPE_DESCRIBE("STRING")
+    ASSERT_EQ $info.name "STRING"
+    "###
+)]
 fn type_describe<P: ProcessManager>(
     cx: &mut StepCtx<P>,
     /// Type name to describe.
@@ -1423,6 +1524,15 @@ fn type_describe<P: ProcessManager>(
 /// reads the step context like the other introspection functions.
 ///
 #[oxdock_func(returns = TypeTag::Bool)]
+#[example(
+    name = "null stdin",
+    code = r###"
+    # A null stdin is never a terminal, in every harness.
+    IMPORT [STD]
+    LET $term: BOOL = IS_TERMINAL("stdin")
+    ASSERT_EQ $term false
+    "###
+)]
 fn is_terminal<P: ProcessManager>(
     cx: &mut StepCtx<P>,
     /// Stream name: `stdin`, `stdout`, or `stderr` (exact match).
@@ -1511,17 +1621,19 @@ fn is_terminal<P: ProcessManager>(
 /// `SEMAPHORE_TRY_ACQUIRE`, never through the `SEMAPHORE_AVAILABLE`
 /// readout.
 ///
-/// ```oxdock
-/// # Mint a semaphore admitting at most two holders.
-/// IMPORT [STD]
-/// LET $sem: SEMAPHORE = SEMAPHORE_NEW(2)
-///
-/// # A fresh semaphore reports its full cap as available.
-/// LET $free: INT = SEMAPHORE_AVAILABLE($sem)
-/// ASSERT_EQ $free 2
-/// ```
-///
 #[oxdock_func(returns = TypeTag::Semaphore)]
+#[example(
+    name = "mint",
+    code = r###"
+    # Mint a semaphore admitting at most two holders.
+    IMPORT [STD]
+    LET $sem: SEMAPHORE = SEMAPHORE_NEW(2)
+
+    # A fresh semaphore reports its full cap as available.
+    LET $free: INT = SEMAPHORE_AVAILABLE($sem)
+    ASSERT_EQ $free 2
+    "###
+)]
 fn semaphore_new<P: ProcessManager>(
     cx: &mut StepCtx<P>,
     /// Maximum concurrent holders; must be positive.
@@ -1544,21 +1656,6 @@ fn semaphore_new<P: ProcessManager>(
 /// unless `held`: missing-key access bails strictly.
 /// Never waits, so no wait can wedge.
 ///
-/// ```oxdock
-/// # First acquire holds with a permit to bind.
-/// IMPORT [STD]
-/// LET $sem: SEMAPHORE = SEMAPHORE_NEW(1)
-/// LET $first: MAP<held: BOOL, permit?: PERMIT> = SEMAPHORE_TRY_ACQUIRE($sem)
-/// ASSERT_EQ $first.held true
-/// LET $permit: PERMIT = $first.permit
-///
-/// # A capped semaphore answers held false with no permit key.
-/// LET $second: MAP<held: BOOL, permit?: PERMIT> = SEMAPHORE_TRY_ACQUIRE($sem)
-/// ASSERT_EQ $second.held false
-/// LET $has_permit: BOOL = HAS_KEY($second, "permit")
-/// ASSERT_EQ $has_permit false
-/// ```
-///
 #[oxdock_func(returns = TypeTag::Record(std::sync::Arc::from([Field {
     name: "held".to_string(),
     ty: TypeTag::Bool,
@@ -1570,6 +1667,23 @@ fn semaphore_new<P: ProcessManager>(
     docs: "Permit handle; read only when `held`.",
     optional: true,
 }])))]
+#[example(
+    name = "acquire",
+    code = r###"
+    # First acquire holds with a permit to bind.
+    IMPORT [STD]
+    LET $sem: SEMAPHORE = SEMAPHORE_NEW(1)
+    LET $first: MAP<held: BOOL, permit?: PERMIT> = SEMAPHORE_TRY_ACQUIRE($sem)
+    ASSERT_EQ $first.held true
+    LET $permit: PERMIT = $first.permit
+
+    # A capped semaphore answers held false with no permit key.
+    LET $second: MAP<held: BOOL, permit?: PERMIT> = SEMAPHORE_TRY_ACQUIRE($sem)
+    ASSERT_EQ $second.held false
+    LET $has_permit: BOOL = HAS_KEY($second, "permit")
+    ASSERT_EQ $has_permit false
+    "###
+)]
 fn semaphore_try_acquire<P: ProcessManager>(
     cx: &mut StepCtx<P>,
     /// Semaphore handle from `SEMAPHORE_NEW`.
@@ -1592,19 +1706,21 @@ fn semaphore_try_acquire<P: ProcessManager>(
 /// Exact at read time and stale the instant the caller acts on it, so it
 /// must never drive admission: that is `SEMAPHORE_TRY_ACQUIRE`'s job.
 ///
-/// ```oxdock
-/// # Hold one permit on a cap of two.
-/// IMPORT [STD]
-/// LET $sem: SEMAPHORE = SEMAPHORE_NEW(2)
-/// LET $acq: MAP<held: BOOL, permit?: PERMIT> = SEMAPHORE_TRY_ACQUIRE($sem)
-/// ASSERT_EQ $acq.held true
-///
-/// # One held permit leaves exactly one free.
-/// LET $free: INT = SEMAPHORE_AVAILABLE($sem)
-/// ASSERT_EQ $free 1
-/// ```
-///
 #[oxdock_func(pure, returns = TypeTag::Int)]
+#[example(
+    name = "readout",
+    code = r###"
+    # Hold one permit on a cap of two.
+    IMPORT [STD]
+    LET $sem: SEMAPHORE = SEMAPHORE_NEW(2)
+    LET $acq: MAP<held: BOOL, permit?: PERMIT> = SEMAPHORE_TRY_ACQUIRE($sem)
+    ASSERT_EQ $acq.held true
+
+    # One held permit leaves exactly one free.
+    LET $free: INT = SEMAPHORE_AVAILABLE($sem)
+    ASSERT_EQ $free 1
+    "###
+)]
 fn semaphore_available(
     /// Semaphore handle from `SEMAPHORE_NEW`.
     sem: Arc<SemaphoreState>,
@@ -1622,25 +1738,27 @@ fn semaphore_available(
 /// `PIPE`, so the extractor and the static pass reject them before
 /// the body runs.
 ///
-/// ```oxdock
-/// # Capture two lines, then drain to end of stream with no sentinel line.
-/// IMPORT [STD]
-/// LET $cap: PIPE
-/// WITH_IO [stdout=$cap] {
-///     ECHO "one"
-///     ECHO "two"
-/// }
-///
-/// # The loop exits on close, and the count proves both lines drained.
-/// LET $n: INT = 0
-/// WHILE !EOF($cap) {
-///     WITH_IO [stdin=$cap] READ_LINE $line
-///     $n = $n + 1
-/// }
-/// ASSERT_EQ $n 2
-/// ```
-///
 #[oxdock_func(returns = TypeTag::Bool)]
+#[example(
+    name = "drain to end",
+    code = r###"
+    # Capture two lines, then drain to end of stream with no sentinel line.
+    IMPORT [STD]
+    LET $cap: PIPE
+    WITH_IO [stdout=$cap] {
+        ECHO "one"
+        ECHO "two"
+    }
+
+    # The loop exits on close, and the count proves both lines drained.
+    LET $n: INT = 0
+    WHILE !EOF($cap) {
+        WITH_IO [stdin=$cap] READ_LINE $line
+        $n = $n + 1
+    }
+    ASSERT_EQ $n 2
+    "###
+)]
 fn eof<P: ProcessManager>(
     cx: &mut StepCtx<P>,
     /// Pipe handle to query for end of stream.
@@ -1761,6 +1879,75 @@ pub struct HostModule<P: ProcessManager> {
     pub funcs: Vec<HostRegistration<P>>,
     pub types: Vec<&'static TypeDescriptor>,
     pub record_schemas: Vec<RecordSchema>,
+    /// Shared module state (endpoint registries and the like), stashed
+    /// at registration and reachable from bodies through
+    /// `StepCtx::module_state`. Lets every entry stay `#[oxdock_func]`:
+    /// the macro only generates closers-over-nothing, so state that
+    /// cannot ride in a value travels here instead of a hand-built
+    /// closure. Prefer `.with_state(...)` over spelling this field.
+    pub states: Vec<ModuleState>,
+}
+
+/// One shared state object traveling with its module. Keyed by the
+/// owning module name plus the value type at registration, so two
+/// modules sharing one state type never collide.
+#[derive(Clone)]
+pub struct ModuleState {
+    id: std::any::TypeId,
+    state: std::sync::Arc<dyn std::any::Any + Send + Sync>,
+}
+
+/// A pre-run steps inspection: pure function of the parsed steps,
+///
+/// shared so the struct field stays under the complexity lint.
+pub type PreRunInspector = dyn Fn(&[Step]) -> Result<()> + Send + Sync;
+
+/// A pre-run check riding in a module's `states`: the runner executes
+/// every staged check against the parsed steps before the first step
+/// runs, so unmapped services fail fast with zero side effects. Modules
+/// attach one with `.with_state(Arc::new(check))`; the runner discovers
+/// them by type, so no struct field or plugin knowledge is needed here.
+#[derive(Clone)]
+pub struct PreRunCheck {
+    check: Arc<PreRunInspector>,
+}
+
+impl PreRunCheck {
+    /// Wrap a steps inspector as a pre-run check.
+    pub fn new(check: impl Fn(&[Step]) -> Result<()> + Send + Sync + 'static) -> Self {
+        Self {
+            check: Arc::new(check),
+        }
+    }
+
+    /// Run the inspection: `Ok` lets execution start.
+    pub fn run(&self, steps: &[Step]) -> Result<()> {
+        (self.check)(steps)
+    }
+}
+
+impl<P: ProcessManager> HostModule<P> {
+    /// Attach shared state for bodies to fetch with
+    /// `cx.module_state::<T>("MODULE")`. Chainable, like registration.
+    pub fn with_state<T: Send + Sync + 'static>(mut self, state: std::sync::Arc<T>) -> Self {
+        self.states.push(ModuleState {
+            id: std::any::TypeId::of::<T>(),
+            state,
+        });
+        self
+    }
+
+    /// Run every staged [`PreRunCheck`] against already-parsed steps.
+    /// The runner calls this before the first step executes; the first
+    /// failing check aborts the run with no side effects.
+    pub fn check_pre_run(&self, steps: &[Step]) -> Result<()> {
+        for state in &self.states {
+            if let Some(check) = state.state.downcast_ref::<PreRunCheck>() {
+                check.run(steps)?;
+            }
+        }
+        Ok(())
+    }
 }
 
 impl<P: ProcessManager> ExecState<P> {
@@ -1784,6 +1971,10 @@ impl<P: ProcessManager> ExecState<P> {
         for schema in module.record_schemas {
             self.register_record_schema(schema.name, schema.fields);
         }
+        for state in module.states {
+            self.module_states
+                .insert((module.name.clone(), state.id), state.state);
+        }
     }
 
     /// All visible functions: natives plus hosts plus current DSL definitions.
@@ -1800,6 +1991,7 @@ impl<P: ProcessManager> ExecState<P> {
                 rpn: false,
                 summary: "Inspect a variable binding.",
                 docs: "INSPECT($var): dedicated AST node taking a variable, not a value.",
+                examples: &[],
             });
         }
         out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1822,6 +2014,7 @@ impl<P: ProcessManager> ExecState<P> {
                 rpn: false,
                 summary: "Inspect a variable binding.",
                 docs: "INSPECT($var): dedicated AST node taking a variable, not a value.",
+                examples: &[],
             }));
         }
         None
@@ -1876,6 +2069,7 @@ mod tests {
             rpn: false,
             summary: "test-only",
             docs: "test-only",
+            examples: &[],
         };
         let value = meta_to_value(&meta);
         let map = value.as_map().expect("describe value is a map");
@@ -1928,6 +2122,7 @@ mod tests {
             rpn: false,
             summary: "test-only",
             docs: "test-only",
+            examples: &[],
         };
         let value = meta_to_value(&meta);
         let map = value.as_map().expect("describe value is a map");

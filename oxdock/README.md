@@ -6,11 +6,11 @@ Unlike Docker's Linux-VM requirement on non-Linux hosts, OxDock runs directly on
 
 Platform gating selects OS-specific steps, and remote targets bind over any stdio transport. Only RUN touches the host shell.
 
-The syntax is line-oriented in the spirit of BASIC, with a static type system checking scripts before the first step runs. Plain Rust functions become script functions with one attribute: `#[oxdock_func]` exports them into namespaced modules scripts call as `DEMO::NAME(...)`. See [Extending OxDock from Rust](#extending-oxdock-from-rust).
+The syntax is line-oriented with optional semicolon terminators and a static type system checking scripts before the first step runs. Plain Rust functions become script functions with one attribute: `#[oxdock_func]` exports them into namespaced modules scripts call as `DEMO::NAME(...)`. See [Extending OxDock from Rust](#extending-oxdock-from-rust).
 
-[Documentation](https://docs.rs/oxdock/0.26.0-alpha/oxdock/)
+[Documentation](https://docs.rs/oxdock/0.27.0-alpha/oxdock/)
 
-Add it to your Rust build with `cargo add oxdock@0.26.0-alpha`, or install the standalone runner with `cargo install oxdock@0.26.0-alpha`.
+Add it to your Rust build with `cargo add oxdock@0.27.0-alpha`, or install the standalone runner with `cargo install oxdock@0.27.0-alpha`.
 
 Run a script:
 
@@ -110,8 +110,8 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     LET $a: STRING = READ dist/alpha.txt
     LET $b: STRING = READ dist/beta.txt
     LET $p: STRING = READ dist/picked.txt
-    ASSERT_EQ $a "alpha OxDock 0.26.0-alpha"
-    ASSERT_EQ $b "beta OxDock 0.26.0-alpha"
+    ASSERT_EQ $a "alpha OxDock 0.27.0-alpha"
+    ASSERT_EQ $b "beta OxDock 0.27.0-alpha"
     ASSERT_EQ $p "alpha"
 };
 
@@ -123,7 +123,7 @@ let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolve
 let out = root.join("dist/alpha.txt").expect("out path");
 assert_eq!(
     resolver.read_to_string(&out).expect("read out"),
-    "alpha OxDock 0.26.0-alpha"
+    "alpha OxDock 0.27.0-alpha"
 );
 ```
 
@@ -225,8 +225,18 @@ fn main() -> anyhow::Result<()> {
     engine.register_module(HostModule {
         name: "DEMO".to_string(),
         funcs: vec![Summarize::registration(), WordCount::registration()],
+        // Opaque custom types (`#[oxdock_type]` descriptors) this module's
+        // functions mint or accept. Empty: the examples register types on
+        // the engine directly, or use none.
         types: vec![],
+        // Named MAP shapes for functions returning structured bundles
+        // (field tables like `NET_LISTEN_INFO`). These return scalars and
+        // opaque tags only, so none.
         record_schemas: vec![],
+        // Shared state for function bodies, read with
+        // `cx.module_state::<T>("MODULE")` and attached with
+        // `.with_state(...)`. These are stateless, so none.
+        states: vec![],
     });
     let temp = oxdock_fs::GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
@@ -809,7 +819,7 @@ Keeping inheritance selective avoids leaking secrets by default while still allo
 Install the binary from the registry:
 
 ```sh
-cargo install oxdock@0.26.0-alpha
+cargo install oxdock@0.27.0-alpha
 ```
 
 Run a script file:
@@ -849,8 +859,18 @@ fn main() -> anyhow::Result<()> {
     engine.register_module(HostModule {
         name: "DEMO".to_string(),
         funcs: vec![MakeTag::registration(), ReadTag::registration()],
+        // Opaque custom types (`#[oxdock_type]` descriptors) this module's
+        // functions mint or accept. Empty: the examples register types on
+        // the engine directly, or use none.
         types: vec![],
+        // Named MAP shapes for functions returning structured bundles
+        // (field tables like `NET_LISTEN_INFO`). These return scalars and
+        // opaque tags only, so none.
         record_schemas: vec![],
+        // Shared state for function bodies, read with
+        // `cx.module_state::<T>("MODULE")` and attached with
+        // `.with_state(...)`. These are stateless, so none.
+        states: vec![],
     });
 
     let temp = oxdock_fs::GuardedPath::tempdir().unwrap();
@@ -952,8 +972,18 @@ fn main() {
     engine.register_module(HostModule {
         name: "DEMO".to_string(),
         funcs: vec![EnvOr::registration()],
+        // Opaque custom types (`#[oxdock_type]` descriptors) this module's
+        // functions mint or accept. Empty: the examples register types on
+        // the engine directly, or use none.
         types: vec![],
+        // Named MAP shapes for functions returning structured bundles
+        // (field tables like `NET_LISTEN_INFO`). These return scalars and
+        // opaque tags only, so none.
         record_schemas: vec![],
+        // Shared state for function bodies, read with
+        // `cx.module_state::<T>("MODULE")` and attached with
+        // `.with_state(...)`. These are stateless, so none.
+        states: vec![],
     });
 }
 ```
@@ -1072,8 +1102,18 @@ fn main() -> anyhow::Result<()> {
             MakeMatrix::registration(),
             MatrixGet::registration(),
         ],
+        // Opaque custom types (`#[oxdock_type]` descriptors) this module's
+        // functions mint or accept. Empty: the examples register types on
+        // the engine directly, or use none.
         types: vec![],
+        // Named MAP shapes for functions returning structured bundles
+        // (field tables like `NET_LISTEN_INFO`). These return scalars and
+        // opaque tags only, so none.
         record_schemas: vec![],
+        // Shared state for function bodies, read with
+        // `cx.module_state::<T>("MODULE")` and attached with
+        // `.with_state(...)`. These are stateless, so none.
+        states: vec![],
     });
     let temp = oxdock_fs::GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
@@ -1156,7 +1196,7 @@ Or pin the version in `Cargo.toml`:
 
 ```toml
 [dependencies]
-oxdock = { version = "0.26.0-alpha", default-features = false }
+oxdock = { version = "0.27.0-alpha", default-features = false }
 ```
 
 ## Glossary

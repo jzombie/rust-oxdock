@@ -1482,14 +1482,20 @@ mod tests {
         let resolver = PathResolver::new(workspace_root.as_path(), workspace_root.as_path())?;
         let script = indoc! {"
             IMPORT [STD, SSH]
-            LET $m: SSH_SERVE_INFO = SSH_SERVE(\"23301\", {username: \"test\", password: \"test123\"})
+            LET $m: SSH_SERVE_INFO = SSH_SERVE(\"cli-ssh-svc\", {username: \"test\", password: \"test123\"})
             SSH_CLOSE($m.server)
         "};
         resolver.write_file(&script_path, script.as_bytes())?;
         let opts = Options {
             script: ScriptSource::Path(script_path),
             shell: false,
-            endpoints: EndpointFlags::default(),
+            endpoints: EndpointFlags {
+                publishes: vec![(
+                    std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
+                    "cli-ssh-svc".to_string(),
+                )],
+                ..EndpointFlags::default()
+            },
             remote_serve: false,
             remotes: Vec::new(),
         };
@@ -1520,7 +1526,15 @@ mod tests {
         let opts = Options {
             script: ScriptSource::Path(script_path),
             shell: false,
-            endpoints: EndpointFlags::default(),
+            // The port key is only a registry name here: the outer bind
+            // is ephemeral, so no fixed host port is ever touched.
+            endpoints: EndpointFlags {
+                publishes: vec![(
+                    std::net::SocketAddr::from(([127, 0, 0, 1], 0)),
+                    "23501".to_string(),
+                )],
+                ..EndpointFlags::default()
+            },
             remote_serve: false,
             remotes: Vec::new(),
         };

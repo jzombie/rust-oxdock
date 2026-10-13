@@ -2524,22 +2524,27 @@ Fails naming the input on invalid alphabet characters or
 non-UTF-8 payloads instead of rendering a silent empty. Pairs
 with `BASE64_ENCODE` for the round trip.
 
-```oxdock
-# Decode standard base64 back to text.
-IMPORT [STD]
-LET $decoded: STRING = BASE64_DECODE("aGVsbG8=")
-ASSERT_EQ $decoded "hello"
-```
-
 
 **Signature:** `STD::BASE64_DECODE($text: STRING) -> STRING`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
+
 - `$text` (`STRING`): Base64 text to decode.
 
 **Returns:** `STRING`
+
+**Examples:**
+
+**Example: decode**
+
+```oxdock
+# Decode standard base64 back to text.
+IMPORT [STD]
+LET $decoded: STRING = BASE64_DECODE("aGVsbG8=")
+ASSERT_EQ $decoded "hello"
+```
 
 ### STD::BASE64_ENCODE
 
@@ -2548,22 +2553,27 @@ Encode a STRING as standard base64.
 Padded RFC 4648 alphabet, so encoded output pastes into any
 standard decoder. Pairs with `BASE64_DECODE` for the round trip.
 
-```oxdock
-# Encode text to standard base64.
-IMPORT [STD]
-LET $encoded: STRING = BASE64_ENCODE("hello")
-ASSERT_EQ $encoded "aGVsbG8="
-```
-
 
 **Signature:** `STD::BASE64_ENCODE($text: STRING) -> STRING`
 
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
+
 - `$text` (`STRING`): Text to encode.
 
 **Returns:** `STRING`
+
+**Examples:**
+
+**Example: encode**
+
+```oxdock
+# Encode text to standard base64.
+IMPORT [STD]
+LET $encoded: STRING = BASE64_ENCODE("hello")
+ASSERT_EQ $encoded "aGVsbG8="
+```
 
 ### STD::DESCRIBE
 
@@ -2586,9 +2596,11 @@ documentation cannot drift apart.
 **Contexts:** [`AST`](#context-ast) only
 
 **Parameters:**
+
 - `$name` (`STRING`): Qualified function name (`MODULE::NAME`).
 
 **Returns:** `MAP<name: STRING, module: STRING, kind: STRING, params: LIST<MAP<ANY>>, returns: STRING, rpn: BOOL, summary: STRING>`
+
   - `name` (`STRING`): Qualified function name.
   - `module` (`STRING`): Owning module.
   - `kind` (`STRING`): Origin label (`host` or `script`).
@@ -2596,6 +2608,17 @@ documentation cannot drift apart.
   - `returns` (`STRING`): Structural return shape (empty when untagged).
   - `rpn` (`BOOL`): True when callable in RPN position.
   - `summary` (`STRING`): One-line description.
+
+**Examples:**
+
+**Example: describe**
+
+```oxdock
+IMPORT [STD]
+LET $info: MAP<ANY> = DESCRIBE("STD::INT")
+ASSERT_EQ $info.name "STD::INT"
+ASSERT_EQ $info.returns "INT"
+```
 
 ### STD::EOF
 
@@ -2608,6 +2631,21 @@ best-effort (kernel bytes are invisible there; see `INSPECT`).
 Non-pipe arguments bail at the boundary: the parameter declares
 `PIPE`, so the extractor and the static pass reject them before
 the body runs.
+
+
+**Signature:** `STD::EOF($pipe: PIPE) -> BOOL`
+
+**Contexts:** [`AST`](#context-ast) only
+
+**Parameters:**
+
+- `$pipe` (`PIPE`): Pipe handle to query for end of stream.
+
+**Returns:** `BOOL`
+
+**Examples:**
+
+**Example: drain to end**
 
 ```oxdock
 # Capture two lines, then drain to end of stream with no sentinel line.
@@ -2627,16 +2665,6 @@ WHILE !EOF($cap) {
 ASSERT_EQ $n 2
 ```
 
-
-**Signature:** `STD::EOF($pipe: PIPE) -> BOOL`
-
-**Contexts:** [`AST`](#context-ast) only
-
-**Parameters:**
-- `$pipe` (`PIPE`): Pipe handle to query for end of stream.
-
-**Returns:** `BOOL`
-
 ### STD::FLOAT
 
 Convert a value to FLOAT.
@@ -2649,15 +2677,43 @@ Parses f64 (accepts int strings), bails on non-finite or non-numeric.
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
+
 - `$val` (`FLOAT|INT|STRING`): Value to convert to `FLOAT`.
 
 **Returns:** `FLOAT`
+
+**Examples:**
+
+**Example: convert**
+
+```oxdock
+IMPORT [STD]
+LET $f: FLOAT = FLOAT("1.5")
+ASSERT_EQ $f 1.5
+LET $whole: FLOAT = FLOAT(2)
+ASSERT_EQ $whole 2.0
+```
 
 ### STD::FORMAT_BYTE_COUNT
 
 Format a byte count canonically (`500B`, `10KB`, `2MB`, `1GB`,
 binary `10KIB` and friends): the inverse of `PARSE_BYTE_COUNT`, so
 formatted values reparse exactly. Negative inputs fail.
+
+
+**Signature:** `STD::FORMAT_BYTE_COUNT($bytes: INT) -> STRING`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+
+- `$bytes` (`INT`): Byte count to format; negatives fail.
+
+**Returns:** `STRING`
+
+**Examples:**
+
+**Example: format and round-trip**
 
 ```oxdock
 # Byte counts render in the largest exact unit.
@@ -2670,21 +2726,26 @@ LET $back: INT = PARSE_BYTE_COUNT($pretty)
 ASSERT_EQ $back 1_048_576
 ```
 
-
-**Signature:** `STD::FORMAT_BYTE_COUNT($bytes: INT) -> STRING`
-
-**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
-
-**Parameters:**
-- `$bytes` (`INT`): Byte count to format; negatives fail.
-
-**Returns:** `STRING`
-
 ### STD::FORMAT_DURATION
 
 Format millisecond durations canonically (`500ms`, `10s`, `2m`,
 `1h`): the inverse of `PARSE_DURATION`, so formatted values
 reparse exactly. Negative inputs fail.
+
+
+**Signature:** `STD::FORMAT_DURATION($millis: INT) -> STRING`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+
+- `$millis` (`INT`): Milliseconds to format; negatives fail.
+
+**Returns:** `STRING`
+
+**Examples:**
+
+**Example: format and round-trip**
 
 ```oxdock
 # Durations render in the largest exact unit.
@@ -2696,16 +2757,6 @@ ASSERT_EQ $pretty "90s"
 LET $back: INT = PARSE_DURATION($pretty)
 ASSERT_EQ $back 90_000
 ```
-
-
-**Signature:** `STD::FORMAT_DURATION($millis: INT) -> STRING`
-
-**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
-
-**Parameters:**
-- `$millis` (`INT`): Milliseconds to format; negatives fail.
-
-**Returns:** `STRING`
 
 ### STD::FUNCTIONS
 
@@ -2720,6 +2771,16 @@ plus host-registered names.
 
 **Returns:** `LIST<STRING>`
 
+**Examples:**
+
+**Example: list**
+
+```oxdock
+IMPORT [STD]
+LET $names: LIST<STRING> = FUNCTIONS()
+ASSERT_CONTAINS $names "STD::INT"
+```
+
 ### STD::GLOB
 
 List workspace paths matching a glob pattern.
@@ -2732,9 +2793,24 @@ Sorted, root-relative LIST; empty on no match or `..` escape.
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
+
 - `$pattern` (`STRING|PATH`): Glob pattern matched against workspace paths.
 
 **Returns:** `LIST<STRING>`
+
+**Examples:**
+
+**Example: match**
+
+```oxdock
+IMPORT [STD]
+WRITE "notes-a.md" "a"
+WRITE "notes-b.md" "b"
+WRITE "other.txt" "c"
+LET $found: LIST<STRING> = GLOB("notes-*.md")
+ASSERT_EQ $found.0 "notes-a.md"
+ASSERT_EQ $found.1 "notes-b.md"
+```
 
 ### STD::HAS_KEY
 
@@ -2749,10 +2825,24 @@ tripping the strict missing-key error.
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
+
 - `$map` (`MAP<ANY>`): Map to probe.
 - `$key` (`STRING`): Key to look up.
 
 **Returns:** `BOOL`
+
+**Examples:**
+
+**Example: probe**
+
+```oxdock
+IMPORT [STD]
+LET $m: MAP<ANY> = PARSE_JSON("{\"a\": 1}")
+LET $hit: BOOL = HAS_KEY($m, "a")
+ASSERT_EQ $hit true
+LET $miss: BOOL = HAS_KEY($m, "b")
+ASSERT_EQ $miss false
+```
 
 ### STD::INT
 
@@ -2767,9 +2857,22 @@ when integral and finite; Bool as 1/0.
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
+
 - `$val` (`INT|FLOAT|STRING|BOOL`): Value to convert to `INT`.
 
 **Returns:** `INT`
+
+**Examples:**
+
+**Example: convert**
+
+```oxdock
+IMPORT [STD]
+LET $n: INT = INT("42")
+ASSERT_EQ $n 42
+LET $flag: INT = INT(true)
+ASSERT_EQ $flag 1
+```
 
 ### STD::IS_EXEC
 
@@ -2785,6 +2888,21 @@ usual, so host probing wants `WORKSPACE SYSTEM` and an inherited
 `PATH`; anything unresolvable reads false, never errors. AST-only
 by design, like `PATH_TYPE`: there is no RPN arm for filesystem IO.
 
+
+**Signature:** `STD::IS_EXEC($name: STRING|PATH) -> BOOL`
+
+**Contexts:** [`AST`](#context-ast) only
+
+**Parameters:**
+
+- `$name` (`STRING|PATH`): Command name or file path to probe.
+
+**Returns:** `BOOL`
+
+**Examples:**
+
+**Example: probe**
+
 ```oxdock
 # Missing tools read false instead of failing the run.
 IMPORT [STD]
@@ -2796,16 +2914,6 @@ WRITE tool.txt payload
 LET $plain: BOOL = IS_EXEC("tool.txt")
 ASSERT_EQ $plain false
 ```
-
-
-**Signature:** `STD::IS_EXEC($name: STRING|PATH) -> BOOL`
-
-**Contexts:** [`AST`](#context-ast) only
-
-**Parameters:**
-- `$name` (`STRING|PATH`): Command name or file path to probe.
-
-**Returns:** `BOOL`
 
 ### STD::IS_TERMINAL
 
@@ -2828,9 +2936,21 @@ reads the step context like the other introspection functions.
 **Contexts:** [`AST`](#context-ast) only
 
 **Parameters:**
+
 - `$stream_name` (`STRING = "stdin" | "stdout" | "stderr"`): Stream name: `stdin`, `stdout`, or `stderr` (exact match).
 
 **Returns:** `BOOL`
+
+**Examples:**
+
+**Example: null stdin**
+
+```oxdock
+# A null stdin is never a terminal, in every harness.
+IMPORT [STD]
+LET $term: BOOL = IS_TERMINAL("stdin")
+ASSERT_EQ $term false
+```
 
 ### STD::LOAD_JSON
 
@@ -2847,9 +2967,21 @@ assignment.
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
+
 - `$path` (`STRING|PATH`): Workspace file path to load and parse as JSON.
 
 **Returns:** `ANY`
+
+**Examples:**
+
+**Example: load**
+
+```oxdock
+IMPORT [STD]
+WRITE "data.json" "{\"a\": 1}"
+LET $doc: MAP<ANY> = LOAD_JSON("data.json")
+ASSERT_EQ $doc.a 1
+```
 
 ### STD::LOAD_TOML
 
@@ -2863,9 +2995,21 @@ Reads a workspace file and parses TOML into a DSL value.
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
+
 - `$path` (`STRING|PATH`): Workspace file path to load and parse as TOML.
 
 **Returns:** `MAP<ANY>`
+
+**Examples:**
+
+**Example: load**
+
+```oxdock
+IMPORT [STD]
+WRITE "cfg.toml" "title = \"demo\""
+LET $cfg: MAP<ANY> = LOAD_TOML("cfg.toml")
+ASSERT_EQ $cfg.title "demo"
+```
 
 ### STD::MAP_SET
 
@@ -2880,11 +3024,22 @@ instead of silently shadowing each other.
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
+
 - `$map` (`MAP<ANY>`): Map to insert into.
 - `$key` (`STRING`): Key to insert; duplicates fail.
 - `$value` (`ANY`): Value to store.
 
 **Returns:** `MAP<ANY>`
+
+**Examples:**
+
+**Example: insert**
+
+```oxdock
+IMPORT [STD]
+LET $m: MAP<ANY> = MAP_SET({seed: 0}, "a", 1)
+ASSERT_EQ $m.a 1
+```
 
 ### STD::MERGE_MAPS
 
@@ -2901,10 +3056,22 @@ Non MAP elements fail naming their position.
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
+
 - `$maps` (`LIST<MAP<ANY>>`): LIST of MAPs to merge in order.
 - `$policy` (`STRING = "fail_on_duplicate" | "overwrite"`): Duplicate policy.
 
 **Returns:** `MAP<ANY>`
+
+**Examples:**
+
+**Example: merge**
+
+```oxdock
+IMPORT [STD]
+LET $m: MAP<ANY> = MERGE_MAPS([{a: 1}, {b: 2}], "overwrite")
+ASSERT_EQ $m.a 1
+ASSERT_EQ $m.b 2
+```
 
 ### STD::PARSE_BYTE_COUNT
 
@@ -2948,9 +3115,22 @@ ASSERT_EQ $spaced 1_000_000_000
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
+
 - `$text` (`INT|FLOAT|STRING`): Byte-count token to parse, or bytes already.
 
 **Returns:** `INT`
+
+**Examples:**
+
+**Example: parse**
+
+```oxdock
+IMPORT [STD]
+LET $n: INT = PARSE_BYTE_COUNT("10KB")
+ASSERT_EQ $n 10_000
+LET $identity: INT = PARSE_BYTE_COUNT(512)
+ASSERT_EQ $identity 512
+```
 
 ### STD::PARSE_DURATION
 
@@ -2958,6 +3138,21 @@ Parse a duration token to `INT` milliseconds.
 
 Suffixes `ms`/`s`/`m`/`h`; a bare number means seconds. Pairs with
 `FORMAT_DURATION` for the round trip.
+
+
+**Signature:** `STD::PARSE_DURATION($text: STRING) -> INT`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+
+- `$text` (`STRING`): Duration token to parse.
+
+**Returns:** `INT`
+
+**Examples:**
+
+**Example: parse**
 
 ```oxdock
 # A bare number means seconds, like TIMEOUT.
@@ -2974,16 +3169,6 @@ LET $spaced: INT = PARSE_DURATION("1 h")
 ASSERT_EQ $spaced 3_600_000
 ```
 
-
-**Signature:** `STD::PARSE_DURATION($text: STRING) -> INT`
-
-**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
-
-**Parameters:**
-- `$text` (`STRING`): Duration token to parse.
-
-**Returns:** `INT`
-
 ### STD::PARSE_JSON
 
 Parse JSON text already held in memory.
@@ -2993,6 +3178,21 @@ contents, and captured text share one JSON value shape. Returns
 `ANY` by design, matching `LOAD_JSON`: a top-level array or scalar
 parses to `LIST` or a scalar word. `LET` coercion still checks the
 actual value at assignment.
+
+
+**Signature:** `STD::PARSE_JSON($text: STRING) -> ANY`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+
+- `$text` (`STRING`): JSON text already held in memory.
+
+**Returns:** `ANY`
+
+**Examples:**
+
+**Example: parse**
 
 ```oxdock
 # Parse in-memory JSON text with the same conversion as file loading.
@@ -3007,16 +3207,6 @@ ASSERT_EQ $items.0 1
 ASSERT_EQ $items.1 2
 ```
 
-
-**Signature:** `STD::PARSE_JSON($text: STRING) -> ANY`
-
-**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
-
-**Parameters:**
-- `$text` (`STRING`): JSON text already held in memory.
-
-**Returns:** `ANY`
-
 ### STD::PARSE_TOML
 
 Parse TOML text already held in memory.
@@ -3030,9 +3220,20 @@ contents, and captured text share one JSON/TOML shape.
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
+
 - `$text` (`STRING`): TOML text already held in memory.
 
 **Returns:** `MAP<ANY>`
+
+**Examples:**
+
+**Example: parse**
+
+```oxdock
+IMPORT [STD]
+LET $doc: MAP<ANY> = PARSE_TOML("title = \"demo\"")
+ASSERT_EQ $doc.title "demo"
+```
 
 ### STD::PATH_TYPE
 
@@ -3047,9 +3248,23 @@ there is no RPN arm for filesystem IO.
 **Contexts:** [`AST`](#context-ast) only
 
 **Parameters:**
+
 - `$path` (`STRING|PATH`): Workspace path of the entry to describe.
 
 **Returns:** `STRING`
+
+**Examples:**
+
+**Example: describe**
+
+```oxdock
+IMPORT [STD]
+WRITE "entry.txt" "words"
+LET $kind: STRING = PATH_TYPE("entry.txt")
+ASSERT_EQ $kind "file"
+LET $missing: STRING = PATH_TYPE("no-such-entry.txt")
+ASSERT_EQ $missing "absent"
+```
 
 ### STD::PATH_WRITABLE
 
@@ -3060,6 +3275,21 @@ directory, and probes writability by creating and deleting a probe
 file, so retry loops never litter. The empty string is false.
 AST-only by design, like `PATH_TYPE`: there is no RPN arm for
 filesystem IO.
+
+
+**Signature:** `STD::PATH_WRITABLE($path: STRING|PATH) -> BOOL`
+
+**Contexts:** [`AST`](#context-ast) only
+
+**Parameters:**
+
+- `$path` (`STRING|PATH`): Workspace path to probe for file creation.
+
+**Returns:** `BOOL`
+
+**Examples:**
+
+**Example: probe**
 
 ```oxdock
 # An absent nested path is writable when its ancestor is.
@@ -3072,19 +3302,40 @@ LET $empty: BOOL = PATH_WRITABLE("")
 ASSERT_EQ $empty false
 ```
 
+### STD::RAND
 
-**Signature:** `STD::PATH_WRITABLE($path: STRING|PATH) -> BOOL`
+Draw a random FLOAT uniformly from [0, 1), optionally seeded.
+
+Impure by design: unseeded calls return different values, so this
+runs on the AST script path only, never as a `{{ }}` placeholder
+call. A seed draws the same value on every run, for deterministic
+fixtures. Scale and shift the draw for wider ranges.
+
+
+**Signature:** `STD::RAND($options?: MAP<seed?: INT>) -> FLOAT`
 
 **Contexts:** [`AST`](#context-ast) only
 
 **Parameters:**
-- `$path` (`STRING|PATH`): Workspace path to probe for file creation.
 
-**Returns:** `BOOL`
+- `$options?` (`MAP<seed?: INT>`): Draw settings: `seed`. Omittable: a missing options MAP fills `{}`.
+  - `seed` (`INT`, optional)
 
-### STD::RAND
+**Returns:** `FLOAT`
 
-Draw a random FLOAT uniformly from [0, 1), optionally seeded. Impure by design: unseeded calls return different values, so this runs on the AST script path only, never as a `{{ }}` placeholder call. A seed draws the same value on every run, for deterministic fixtures. Scale and shift the draw for wider ranges. Hand-built (not `#[oxdock_func]`): the macro marks every param required, and only hand-built entries can leave a trailing options MAP omittable, so bare `RAND()` fills `{}`.
+**Examples:**
+
+**Example: seeded draw**
+
+```oxdock
+# A seed draws the same value on every run.
+IMPORT [STD]
+LET $one: FLOAT = RAND({seed: 7})
+LET $two: FLOAT = RAND({seed: 7})
+ASSERT_EQ $one $two
+```
+
+**Example: unseeded draw**
 
 ```oxdock
 # Scale a unit draw into a backoff delay between 1 and 11 seconds.
@@ -3098,23 +3349,7 @@ IF $delay >= 11.0 {
     EXIT 1
 }
 ECHO "retrying in {{ $delay }}s"
-
-# A seed draws the same value on every run.
-LET $one: FLOAT = RAND({seed: 7})
-LET $two: FLOAT = RAND({seed: 7})
-ASSERT_EQ $one $two
 ```
-
-
-**Signature:** `STD::RAND($options?: MAP<seed?: INT>) -> FLOAT`
-
-**Contexts:** [`AST`](#context-ast) only
-
-**Parameters:**
-- `$options?` (`MAP<seed?: INT>`): Draw settings: `seed`. Omittable: a missing options MAP fills `{}`.
-  - `seed` (`INT`, optional)
-
-**Returns:** `FLOAT`
 
 ### STD::SEMAPHORE_AVAILABLE
 
@@ -3123,6 +3358,21 @@ Read free permits under the lock, with no mutation.
 Observability only (audit lines, healthchecks: `active = max - free`).
 Exact at read time and stale the instant the caller acts on it, so it
 must never drive admission: that is `SEMAPHORE_TRY_ACQUIRE`'s job.
+
+
+**Signature:** `STD::SEMAPHORE_AVAILABLE($sem: SEMAPHORE) -> INT`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+
+- `$sem` (`SEMAPHORE`): Semaphore handle from `SEMAPHORE_NEW`.
+
+**Returns:** `INT`
+
+**Examples:**
+
+**Example: readout**
 
 ```oxdock
 # Hold one permit on a cap of two.
@@ -3136,16 +3386,6 @@ LET $free: INT = SEMAPHORE_AVAILABLE($sem)
 ASSERT_EQ $free 1
 ```
 
-
-**Signature:** `STD::SEMAPHORE_AVAILABLE($sem: SEMAPHORE) -> INT`
-
-**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
-
-**Parameters:**
-- `$sem` (`SEMAPHORE`): Semaphore handle from `SEMAPHORE_NEW`.
-
-**Returns:** `INT`
-
 ### STD::SEMAPHORE_NEW
 
 Create a counting semaphore admitting at most `max` concurrent holders.
@@ -3154,6 +3394,21 @@ Non-positive maxima bail. The word names a shared backend: every clone
 observes the same count, and admission runs through
 `SEMAPHORE_TRY_ACQUIRE`, never through the `SEMAPHORE_AVAILABLE`
 readout.
+
+
+**Signature:** `STD::SEMAPHORE_NEW($max: INT) -> SEMAPHORE`
+
+**Contexts:** [`AST`](#context-ast) only
+
+**Parameters:**
+
+- `$max` (`INT`): Maximum concurrent holders; must be positive.
+
+**Returns:** `SEMAPHORE`
+
+**Examples:**
+
+**Example: mint**
 
 ```oxdock
 # Mint a semaphore admitting at most two holders.
@@ -3165,16 +3420,6 @@ LET $free: INT = SEMAPHORE_AVAILABLE($sem)
 ASSERT_EQ $free 2
 ```
 
-
-**Signature:** `STD::SEMAPHORE_NEW($max: INT) -> SEMAPHORE`
-
-**Contexts:** [`AST`](#context-ast) only
-
-**Parameters:**
-- `$max` (`INT`): Maximum concurrent holders; must be positive.
-
-**Returns:** `SEMAPHORE`
-
 ### STD::SEMAPHORE_TRY_ACQUIRE
 
 Attempt one non-blocking acquire, always answering a MAP.
@@ -3184,6 +3429,24 @@ with no `permit` key: branch on `$m.held` directly. The DSL has no
 null, so the absent key is the miss shape. Do not read `$m.permit`
 unless `held`: missing-key access bails strictly.
 Never waits, so no wait can wedge.
+
+
+**Signature:** `STD::SEMAPHORE_TRY_ACQUIRE($sem: SEMAPHORE) -> MAP<held: BOOL, permit?: PERMIT>`
+
+**Contexts:** [`AST`](#context-ast) only
+
+**Parameters:**
+
+- `$sem` (`SEMAPHORE`): Semaphore handle from `SEMAPHORE_NEW`.
+
+**Returns:** `MAP<held: BOOL, permit?: PERMIT>`
+
+  - `held` (`BOOL`): `true` with the permit under `permit`, `false` with no `permit` key.
+  - `permit` (`PERMIT`, optional): Permit handle; read only when `held`.
+
+**Examples:**
+
+**Example: acquire**
 
 ```oxdock
 # First acquire holds with a permit to bind.
@@ -3200,18 +3463,6 @@ LET $has_permit: BOOL = HAS_KEY($second, "permit")
 ASSERT_EQ $has_permit false
 ```
 
-
-**Signature:** `STD::SEMAPHORE_TRY_ACQUIRE($sem: SEMAPHORE) -> MAP<held: BOOL, permit?: PERMIT>`
-
-**Contexts:** [`AST`](#context-ast) only
-
-**Parameters:**
-- `$sem` (`SEMAPHORE`): Semaphore handle from `SEMAPHORE_NEW`.
-
-**Returns:** `MAP<held: BOOL, permit?: PERMIT>`
-  - `held` (`BOOL`): `true` with the permit under `permit`, `false` with no `permit` key.
-  - `permit` (`PERMIT`, optional): Permit handle; read only when `held`.
-
 ### STD::TO_JSON
 
 Encode a script value as JSON with one trailing newline.
@@ -3226,9 +3477,20 @@ rendering as a silent empty.
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
+
 - `$value` (`STRING|INT|FLOAT|BOOL|LIST|MAP`): Value to encode as JSON.
 
 **Returns:** `STRING`
+
+**Examples:**
+
+**Example: encode**
+
+```oxdock
+IMPORT [STD]
+LET $json: STRING = TO_JSON({a: 1})
+ASSERT_EQ $json "{\"a\":1}\n"
+```
 
 ### STD::TYPES
 
@@ -3244,6 +3506,16 @@ introspection functions.
 
 **Returns:** `LIST<STRING>`
 
+**Examples:**
+
+**Example: list**
+
+```oxdock
+IMPORT [STD]
+LET $names: LIST<STRING> = TYPES()
+ASSERT_CONTAINS $names "STRING"
+```
+
 ### STD::TYPE_DESCRIBE
 
 Describe one type by name.
@@ -3257,12 +3529,24 @@ Reads the run's name directory, so it runs on the AST path.
 **Contexts:** [`AST`](#context-ast) only
 
 **Parameters:**
+
 - `$name` (`STRING`): Type name to describe.
 
 **Returns:** `MAP<name: STRING, summary: STRING, docs: STRING>`
+
   - `name` (`STRING`): Queried type name.
   - `summary` (`STRING`): One-line description.
   - `docs` (`STRING`): Full documentation text.
+
+**Examples:**
+
+**Example: describe**
+
+```oxdock
+IMPORT [STD]
+LET $info: MAP<ANY> = TYPE_DESCRIBE("STRING")
+ASSERT_EQ $info.name "STRING"
+```
 
 ### STD::TYPE_OF
 
@@ -3279,9 +3563,20 @@ on config shapes (a path string or a path list) without failing.
 **Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
 
 **Parameters:**
+
 - `$value` (`ANY`): Value whose word to name.
 
 **Returns:** `STRING`
+
+**Examples:**
+
+**Example: name the word**
+
+```oxdock
+IMPORT [STD]
+LET $word: STRING = TYPE_OF(42)
+ASSERT_EQ $word "INT"
+```
 
 <!-- GENERATED by docs-gen from function context metadata. Do not edit by hand. -->
 ## Contexts

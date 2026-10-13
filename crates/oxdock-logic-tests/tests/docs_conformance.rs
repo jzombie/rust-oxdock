@@ -3,7 +3,7 @@ use line_ending::LineEnding;
 use oxdock_core::{ExecIo, run_steps_with_context_result_with_io};
 use oxdock_fs::{GuardedPath, PathResolver};
 use oxdock_logic_tests::mock_remote::MockRemoteRunner;
-use oxdock_parser::{COMMANDS, FencedBlock, extract_fenced_blocks};
+use oxdock_parser::{COMMANDS, FencedBlock, base_name, extract_fenced_blocks};
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -125,6 +125,119 @@ fn anchor_targets(markdown: &str) -> Vec<(usize, String)> {
                 break;
             }
         }
+    }
+    out
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "requires CARGO_MANIFEST_DIR and host filesystem for README resolution"
+)]
+fn readme_snippets_cover_every_function() -> Result<()> {
+    // Strict parity with commands: every registered builtin must appear
+    // in an executed workspace-README fence. `INSPECT` is syntax, not a
+    // registry entry, so it stays outside this rule by construction.
+    let blocks = load_readme_blocks()?;
+    let bodies: String = blocks
+        .iter()
+        .map(|b| b.body.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    for meta in oxdock_core::builtin_function_metas() {
+        let keyword = base_name(&meta.name);
+        assert!(
+            contains_keyword(&bodies, keyword),
+            "{README_NAME}: no executable example demonstrates the '{keyword}' function"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "requires CARGO_MANIFEST_DIR and host filesystem for README resolution"
+)]
+fn plugin_readme_snippets_cover_every_function() -> Result<()> {
+    // Same parity per plugin module: every registered function appears
+    // in an executed fence of its own README, which the plugin fence
+    // executor runs end to end.
+    let modules: Vec<(&str, &str)> = {
+        let mut docs = vec![
+            ("SSH", "crates/plugins/oxdock-ssh-plugin/README.md"),
+            ("NET", "crates/plugins/oxdock-net-plugin/README.md"),
+        ];
+        #[cfg(feature = "markdown")]
+        docs.push((
+            "MARKDOWN",
+            "crates/plugins/oxdock-markdown-plugin/README.md",
+        ));
+        docs
+    };
+    for (module, name) in modules {
+        let blocks = load_blocks(name)?;
+        let bodies: String = blocks
+            .iter()
+            .map(|b| b.body.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let metas = plugin_module_metas(module);
+        assert!(
+            !metas.is_empty(),
+            "{name}: no registered functions found for {module}"
+        );
+        for qualified in metas {
+            let keyword = base_name(&qualified);
+            assert!(
+                contains_keyword(&bodies, keyword),
+                "{name}: no executable example demonstrates the '{keyword}' function"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Qualified names registered by one plugin module, read live from the
+/// module under test instead of a parallel list.
+fn plugin_module_metas(module: &str) -> Vec<String> {
+    let modules = plugin_modules_for_metas();
+    modules
+        .into_iter()
+        .find(|candidate| candidate.0 == module)
+        .map(|(_, registrations)| registrations)
+        .unwrap_or_default()
+}
+
+fn plugin_modules_for_metas() -> Vec<(String, Vec<String>)> {
+    let mut out = Vec::new();
+    let ssh = oxdock_ssh_plugin::module();
+    out.push((
+        ssh.name.clone(),
+        ssh.funcs
+            .iter()
+            .map(|registration| registration.meta().name.clone())
+            .collect(),
+    ));
+    let net = oxdock_net_plugin::module();
+    out.push((
+        net.name.clone(),
+        net.funcs
+            .iter()
+            .map(|registration| registration.meta().name.clone())
+            .collect(),
+    ));
+    #[cfg(feature = "markdown")]
+    {
+        let markdown = oxdock_markdown_plugin::module();
+        out.push((
+            markdown.name.clone(),
+            markdown
+                .funcs
+                .iter()
+                .map(|registration| registration.meta().name.clone())
+                .collect(),
+        ));
     }
     out
 }
@@ -280,21 +393,42 @@ fn execute_plugin_block(block: &FencedBlock, name: &str) -> Result<()> {
     let fs: Box<dyn oxdock_fs::WorkspaceFs> = Box::new(resolver);
     // Doc fences name logical services, never physical addresses, so
     // the harness maps them the way a CLI runner would: ephemeral
-    // loopback binds resolved through the registry. Unmapped names
-    // would fall back to memory rendezvous, which SSH rejects.
+    // loopback binds resolved through the registry. Scripts declare,
+    // the runner binds.
     let ssh_registry = std::sync::Arc::new(oxdock_net_plugin::EndpointRegistry::new(false));
-    ssh_registry
-        .add_mapping(
-            &oxdock_net_plugin::EndpointKey::tcp(oxdock_net_plugin::VirtualEndpoint::Name(
-                "doc-ssh-demo".to_string(),
-            )),
-            oxdock_net_plugin::BindingSpec::Loopback { port: 0 },
-        )
-        .context("map doc service")?;
-    ssh_registry.bind_all().context("bind doc service")?;
+    for service in [
+        "doc-ssh-route",
+        "doc-ssh-serve",
+        "doc-ssh-accept",
+        "doc-ssh-pump",
+        "doc-ssh-close",
+        "doc-ssh-connect",
+        "doc-ssh-pty",
+        "doc-ssh-demo",
+    ] {
+        ssh_registry
+            .add_cli_mapping(service, "127.0.0.1:0")
+            .context("map doc service")?;
+    }
+    ssh_registry.bind_all().context("bind doc services")?;
+    let net_registry = std::sync::Arc::new(oxdock_net_plugin::EndpointRegistry::new(false));
+    for service in [
+        "doc-net-listen",
+        "doc-net-demo",
+        "doc-net-connect",
+        "doc-net-observe",
+        "doc-net-dial",
+        "doc-net-close",
+        "doc-net-fetch",
+    ] {
+        net_registry
+            .add_cli_mapping(service, "127.0.0.1:0")
+            .context("map doc service")?;
+    }
+    net_registry.bind_all().context("bind doc services")?;
     let mut modules = vec![
         oxdock_ssh_plugin::module_with_endpoints(ssh_registry),
-        oxdock_net_plugin::module(),
+        oxdock_net_plugin::module_with_endpoints(net_registry),
     ];
     #[cfg(feature = "markdown")]
     modules.push(oxdock_markdown_plugin::module());

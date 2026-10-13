@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use oxdock_core::startup_descriptors;
-use oxdock_core::{ArgType, CommandMeta, all_metadata, all_structural_metadata};
+use oxdock_core::{ArgType, CommandMeta, Example, all_metadata, all_structural_metadata};
 use oxdock_core::{FuncMeta, FuncParam, TypeDescriptor, TypeTag, builtin_function_metas};
 use oxdock_markdown_plugin::markdown::escape_table_cell;
 use oxdock_parser::MathOp;
@@ -271,35 +271,53 @@ fn render_meta(meta: &CommandMeta) -> Result<String> {
 
     if !meta.examples.is_empty() {
         out.push_str("**Examples:**\n\n");
-        for example in meta.examples {
-            out.push_str(&format!("**Example: {}**\n\n", example.name));
-            let fence = example
-                .fence_meta
-                .map_or_else(|| "oxdock".to_string(), |m| format!("oxdock {m}"));
-            out.push_str(&format!(
-                "```{}\n{}\n```\n\n",
-                fence,
-                escape_placeholders(example.code.trim_end())
-            ));
-            // Fences that must fail carry their needle in the info string
-            // (invisible once rendered), so print it as prose: readers see
-            // the expected error, and the conformance runner pins it.
-            if let Some(fence_meta) = example.fence_meta {
-                let needle = oxdock_parser::expect_error_from_info(&format!("oxdock {fence_meta}"))
-                    .with_context(|| {
-                        format!("example '{}' has malformed fence metadata", example.name)
-                    })?;
-                if let Some(needle) = needle {
-                    out.push_str(&format!(
-                        "**Expected error:** `{}`\n\n",
-                        escape_placeholders(&needle)
-                    ));
-                }
-            }
-        }
+        out.push_str(&render_examples(meta.examples)?);
     }
 
     out.push('\n');
+    Ok(out)
+}
+
+/// Render executable examples as ```oxdock fences: shared by command
+/// and function references, so both execute under docs_conformance.
+/// Fences that must fail print their needle as prose: readers see the
+/// expected error, and the conformance runner pins it.
+fn render_examples(examples: &[Example]) -> Result<String> {
+    let mut out = String::new();
+    for example in examples {
+        out.push_str(&format!("**Example: {}**\n\n", example.name));
+        let fence = example
+            .fence_meta
+            .map_or_else(|| "oxdock".to_string(), |m| format!("oxdock {m}"));
+        // Attribute bodies open with a newline (`code = r###"\n...`);
+        // strip exactly one like `indoc!` does for command examples,
+        // so no blank line follows the fence opener.
+        let code = example
+            .code
+            .strip_prefix('\n')
+            .unwrap_or(example.code)
+            .trim_end();
+        out.push_str(&format!(
+            "```{}\n{}\n```\n\n",
+            fence,
+            escape_placeholders(code)
+        ));
+        // Fences that must fail carry their needle in the info string
+        // (invisible once rendered), so print it as prose: readers see
+        // the expected error, and the conformance runner pins it.
+        if let Some(fence_meta) = example.fence_meta {
+            let needle = oxdock_parser::expect_error_from_info(&format!("oxdock {fence_meta}"))
+                .with_context(|| {
+                    format!("example '{}' has malformed fence metadata", example.name)
+                })?;
+            if let Some(needle) = needle {
+                out.push_str(&format!(
+                    "**Expected error:** `{}`\n\n",
+                    escape_placeholders(&needle)
+                ));
+            }
+        }
+    }
     Ok(out)
 }
 
@@ -462,7 +480,7 @@ fn render_parameters(meta: &FuncMeta) -> String {
     }
     let mut sections = Vec::new();
     if !bullets.is_empty() {
-        sections.push(format!("**Parameters:**\n{}", bullets.join("\n")));
+        sections.push(format!("**Parameters:**\n\n{}", bullets.join("\n")));
     }
     if let Some(returns) = meta.returns.as_ref() {
         sections.push(render_returns(returns));
@@ -480,6 +498,7 @@ fn render_parameters(meta: &FuncMeta) -> String {
 fn render_returns(returns: &TypeTag) -> String {
     let mut out = format!("**Returns:** `{}`", render_tag(returns));
     if let TypeTag::Record(fields) = returns {
+        out.push('\n');
         for field in fields.iter() {
             out.push_str(&format!(
                 "\n  - `{}` (`{}`{})",
@@ -501,7 +520,7 @@ fn render_returns(returns: &TypeTag) -> String {
 /// STD rendering shares this path through `render_function_reference`.
 /// Callable names render verbatim (`MODULE::NAME` for builtins,
 /// `MODULE_NAME` for plugin entries, matching the registry).
-pub(crate) fn render_plugin_reference(metas: &[FuncMeta], module: &str) -> String {
+pub(crate) fn render_plugin_reference(metas: &[FuncMeta], module: &str) -> Result<String> {
     let mut out = String::new();
     out.push_str(&format!(
         "<!-- GENERATED by docs-gen from {module} function metadata. Do not edit by hand. -->\n",
@@ -548,17 +567,21 @@ pub(crate) fn render_plugin_reference(metas: &[FuncMeta], module: &str) -> Strin
         };
         out.push_str(&format!("**Contexts:** {contexts}\n\n"));
         out.push_str(&render_parameters(meta));
+        if !meta.examples.is_empty() {
+            out.push_str("**Examples:**\n\n");
+            out.push_str(&render_examples(meta.examples)?);
+        }
     }
     while out.ends_with('\n') {
         out.pop();
     }
     out.push('\n');
-    out
+    Ok(out)
 }
 
 /// Function reference for the STD builtins: the same renderer plugins
 /// share, over the `#[oxdock_func]` registry.
-pub(crate) fn render_function_reference() -> String {
+pub(crate) fn render_function_reference() -> Result<String> {
     render_plugin_reference(&builtin_function_metas(), "STD")
 }
 
@@ -690,6 +713,7 @@ mod tests {
             rpn: false,
             summary: "",
             docs: "",
+            examples: &[],
         };
         let signature = render_signature(&meta);
         assert!(
@@ -759,6 +783,7 @@ mod tests {
             rpn: false,
             summary: "",
             docs: "",
+            examples: &[],
         };
         let signature = render_signature(&meta);
         assert!(
@@ -873,7 +898,7 @@ mod tests {
     fn function_reference_covers_every_builtin() {
         // Derived from the `#[oxdock_func]` registry, not a hardcoded
         // list, so adding a builtin automatically extends this check.
-        let reference = render_function_reference();
+        let reference = render_function_reference().expect("reference renders");
         for meta in builtin_function_metas() {
             assert!(
                 reference.contains(&format!("### {}", meta.name)),
