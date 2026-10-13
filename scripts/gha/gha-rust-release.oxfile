@@ -141,5 +141,9 @@ IF $dry == "false" {
         RUN ["gh", "release", "create", "v{{ $version }}", "--title", "{{ $version }}", "--notes-file", "target/release-notes.md", "target/artifacts/{{ $bin }}-x86_64-unknown-linux-musl.tar.gz", "target/artifacts/{{ $bin }}-aarch64-unknown-linux-musl.tar.gz", "target/artifacts/{{ $bin }}-aarch64-apple-darwin.tar.gz", "target/artifacts/{{ $bin }}-x86_64-pc-windows-msvc.tar.gz", "target/artifacts/{{ $bin }}-aarch64-pc-windows-msvc.tar.gz", "target/artifacts/SHA256SUMS", "target/artifacts/install.sh", "target/artifacts/install.ps1", "target/artifacts/install.oxfile"]
     }
 } ELSE {
+    ECHO "=== RELEASE NOTES ==="
+    LET $preview: STRING = READ "target/release-notes.md"
+    ECHO "{{ $preview }}"
+    ECHO "=== END RELEASE NOTES ==="
     ECHO "Dry run complete: nothing published, no tag created."
 }
