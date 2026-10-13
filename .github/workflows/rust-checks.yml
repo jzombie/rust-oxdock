@@ -284,8 +284,12 @@ jobs:
         flags: ["--all-features", "--no-default-features"]
     permissions:
       contents: read
-    env:
-      OXDOCK_WORKSPACE_ROOT: ${{ github.workspace }}
+    # No OXDOCK_WORKSPACE_ROOT here by design: it would leak through
+    # RUN into the test processes, where discover_workspace_root
+    # prefers it over CARGO_MANIFEST_DIR and manifest-relative tests
+    # resolve against the checkout instead of their fixtures. The
+    # engine falls back to CWD discovery, which is this checkout for
+    # every step below.
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -361,8 +365,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-    env:
-      OXDOCK_WORKSPACE_ROOT: ${{ github.workspace }}
+    # No OXDOCK_WORKSPACE_ROOT here, same reason as the test job:
+    # llvm-cov executes the suite, and the variable would hijack root
+    # discovery inside the test processes.
     outputs:
       line_coverage: ${{ steps.cov-summary.outputs.line_percent }}
     steps:

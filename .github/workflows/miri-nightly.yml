@@ -28,8 +28,10 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-    env:
-      OXDOCK_WORKSPACE_ROOT: ${{ github.workspace }}
+    # No job-level OXDOCK_WORKSPACE_ROOT: `cargo miri test` executes
+    # the suite, and the variable would leak into the test processes
+    # and hijack root discovery there. OxDock steps below bridge it
+    # per step instead; their children never run tests.
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -55,6 +57,8 @@ jobs:
       - name: Hash lockfile and toolchain
         id: hashes
         shell: oxdock --script {0}
+        env:
+          OXDOCK_WORKSPACE_ROOT: ${{ github.workspace }}
         run: |
           IMPORT [STD]
           INHERIT_ENV [GITHUB_OUTPUT, GITHUB_WORKSPACE]
