@@ -781,6 +781,7 @@ jobs:
         uses: ./.github/actions/setup-oxdock
         with:
           version: ${{ env.OXDOCK_PINNED_ENGINE }}
+          # TODO: Remove after 0.29.0-alpha release
           source: local
           binary-name: oxdock-engine
 

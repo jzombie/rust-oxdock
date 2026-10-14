@@ -49,6 +49,7 @@ jobs:
         uses: ./.github/actions/setup-oxdock
         with:
           version: ${{ env.OXDOCK_PINNED_ENGINE }}
+          # TODO: Remove after 0.29.0-alpha release
           source: local
 
       # Native hashing: HASH_SHA256 digests Cargo.lock identically on
@@ -60,6 +61,9 @@ jobs:
         run: |
           IMPORT [STD]
           INHERIT_ENV [GITHUB_OUTPUT, GITHUB_WORKSPACE, PATH]
+          # Tier 4 bridge: rustup shims resolve toolchains through the host home.
+          [family:unix] INHERIT_ENV [HOME]
+          [family:windows] INHERIT_ENV [USERPROFILE]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
 
@@ -238,6 +242,9 @@ jobs:
         run: |
           IMPORT [STD]
           INHERIT_ENV [GITHUB_OUTPUT, GITHUB_WORKSPACE, PATH]
+          # Tier 4 bridge: rustup shims resolve toolchains through the host home.
+          [family:unix] INHERIT_ENV [HOME]
+          [family:windows] INHERIT_ENV [USERPROFILE]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
@@ -334,6 +341,9 @@ jobs:
         run: |
           IMPORT [STD]
           INHERIT_ENV [GITHUB_OUTPUT, GITHUB_WORKSPACE, PATH]
+          # Tier 4 bridge: rustup shims resolve toolchains through the host home.
+          [family:unix] INHERIT_ENV [HOME]
+          [family:windows] INHERIT_ENV [USERPROFILE]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           [family:unix] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
@@ -427,6 +437,9 @@ jobs:
         run: |
           IMPORT [STD]
           INHERIT_ENV [GITHUB_OUTPUT, GITHUB_WORKSPACE, PATH]
+          # Tier 4 bridge: rustup shims resolve toolchains through the host home.
+          [family:unix] INHERIT_ENV [HOME]
+          [family:windows] INHERIT_ENV [USERPROFILE]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
@@ -535,6 +548,7 @@ jobs:
         uses: ./.github/actions/setup-oxdock
         with:
           version: ${{ env.OXDOCK_PINNED_ENGINE }}
+          # TODO: Remove after 0.29.0-alpha release
           source: local
 
       - name: Evaluate all results
