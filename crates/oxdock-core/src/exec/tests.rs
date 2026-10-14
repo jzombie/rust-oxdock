@@ -5754,14 +5754,16 @@ fn seeded_term_defaults_without_prelude() {
 }
 
 #[test]
-#[cfg(unix)]
 #[cfg_attr(
     miri,
     ignore = "spawns real OS processes, which die under Miri isolation"
 )]
 fn isolated_reseeds_factory_defaults() {
     // The discriminating parity proof: top level and block see the
-    // identical seed, and outer customs stay out of the block.
+    // identical seed, and outer customs stay out of the block. The
+    // script spawns nothing (WRITE/ENV only), so the proof runs on
+    // every platform; only the PATH default differs (`TMPDIR` rides
+    // the Windows seed too, for cross-compiled tools).
     let temp = run_seeded_case(indoc! {r#"
         ENV OUTER_CUSTOM=outer-val
         WRITE top-path.txt "{{ env:PATH }}"
@@ -5772,13 +5774,16 @@ fn isolated_reseeds_factory_defaults() {
             WRITE inner-custom.txt "{{ env:OUTER_CUSTOM }}"
         }
     "#});
-    assert_eq!(
-        read_case_file(&temp, "top-path.txt"),
+    #[allow(clippy::disallowed_macros)]
+    let expected_path = if cfg!(windows) {
+        oxdock_fs::env::os::windows::DEFAULT_PATH
+    } else {
         oxdock_fs::env::os::unix::DEFAULT_PATH
-    );
+    };
+    assert_eq!(read_case_file(&temp, "top-path.txt"), expected_path);
     assert_eq!(
         read_case_file(&temp, "inner-path.txt"),
-        oxdock_fs::env::os::unix::DEFAULT_PATH,
+        expected_path,
         "ISOLATED reseeds the identical baseline"
     );
     assert_eq!(

@@ -289,17 +289,42 @@ mod tests {
     use oxdock_fs::env as oxdock_env;
     use std::collections::HashMap;
 
-    fn make_ctx(envs: &[(&str, &str)]) -> (oxdock_fs::GuardedTempDir, CommandContext) {
+    fn make_ctx_from_map(
+        map: HashMap<String, String>,
+    ) -> (oxdock_fs::GuardedTempDir, CommandContext) {
         let temp = GuardedPath::tempdir().expect("tempdir");
         let guard = temp.as_guarded_path().clone();
         let cwd: PolicyPath = guard.clone().into();
+        let scratch = oxdock_fs::reserve_cargo_scratch().expect("scratch");
+        let ctx = CommandContext::from_map(&cwd, &map, &scratch, &guard, &guard);
+        (temp, ctx)
+    }
+
+    /// Mirror the session seed on Windows: production maps always
+    /// carry the NT loader anchor, so success-path tests stage it
+    /// explicitly here instead of tripping the fail-safe under test.
+    /// The anchor check itself is proven anchorless by
+    /// `apply_ctx_systemroot_check_follows_platform`, which bypasses
+    /// `make_ctx`.
+    #[cfg(windows)]
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    fn with_windows_anchor(mut map: HashMap<String, String>) -> HashMap<String, String> {
+        if !crate::env_policy::has_var(&map, oxdock_env::os::windows::SYSTEM_ROOT) {
+            let root = std::env::var(oxdock_env::os::windows::SYSTEM_ROOT)
+                .unwrap_or_else(|_| oxdock_env::os::windows::DEFAULT_SYSTEM_ROOT.to_string());
+            map.insert(oxdock_env::os::windows::SYSTEM_ROOT.to_string(), root);
+        }
+        map
+    }
+
+    fn make_ctx(envs: &[(&str, &str)]) -> (oxdock_fs::GuardedTempDir, CommandContext) {
         let map: HashMap<String, String> = envs
             .iter()
             .map(|(key, value)| (key.to_string(), value.to_string()))
             .collect();
-        let scratch = oxdock_fs::reserve_cargo_scratch().expect("scratch");
-        let ctx = CommandContext::from_map(&cwd, &map, &scratch, &guard, &guard);
-        (temp, ctx)
+        #[cfg(windows)]
+        let map = with_windows_anchor(map);
+        make_ctx_from_map(map)
     }
 
     /// Host executable-lookup env for real-spawn tests: closed children
@@ -580,7 +605,10 @@ mod tests {
     fn apply_ctx_stages_map_verbatim() {
         // The map is the single source of truth: declared entries stage
         // exactly as spelled, and nothing is injected. PATH is present
-        // because the closed child env requires it for bare names.
+        // because the closed child env requires it for bare names (on
+        // Windows `make_ctx` additionally stages the seeded NT loader
+        // anchor the fail-safe requires; the anchor itself is proven
+        // anchorless elsewhere).
         let (_temp, ctx) = make_ctx(&[
             (oxdock_env::cargo::TARGET_DIR, "custom-target"),
             ("FOO", "bar"),
@@ -703,7 +731,14 @@ mod tests {
     #[test]
     #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
     fn apply_ctx_systemroot_check_follows_platform() {
-        let (_temp, ctx) = make_ctx(&[(oxdock_env::os::PATH, "test-path")]);
+        // Raw map, bypassing `make_ctx` (which mirrors the seeded NT
+        // loader anchor): proves the fail-safe trips on a genuinely
+        // anchorless map instead of passing through helper staging.
+        let map: HashMap<String, String> = [(oxdock_env::os::PATH, "test-path")]
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect();
+        let (_temp, ctx) = make_ctx_from_map(map);
         let mut cmd = ProcessCommand::new("prog");
         #[allow(clippy::disallowed_macros)]
         if cfg!(windows) {

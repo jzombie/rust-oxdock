@@ -134,6 +134,9 @@ fn spawn_transport(
 ) -> Result<(Arc<RpcSyncClient>, std::process::Child)> {
     let mut staged = oxdock_process::seed_transport();
     for (key, value) in envs {
+        // De-duplicate casing variants before inserting, so the map
+        // never carries two spellings of one name into dispatch.
+        staged.retain(|k, _| !oxdock_process::names_eq(k, key));
         staged.insert(key.clone(), value.clone());
     }
     // Same unified pre-flight as every `RUN` child, one shared
