@@ -162,6 +162,8 @@ pub mod os {
             PROGRAM_W6432 = "ProgramW6432",
             /// System drive root.
             SYSTEM_DRIVE = "SystemDrive",
+            /// Processor architecture (installer arch detection reads it).
+            PROCESSOR_ARCHITECTURE = "PROCESSOR_ARCHITECTURE",
         }
 
         /// Fallback `PATH`: core system directories, used only when

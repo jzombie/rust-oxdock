@@ -44,6 +44,7 @@ Mirrored from the host at session start and on every `ISOLATED` entry; fallbacks
 | `ProgramW6432` | host value; omitted when unset | seeded default: explicit script values win |
 | `COMSPEC` | host value; omitted when unset | seeded default: explicit script values win |
 | `SystemDrive` | host value; omitted when unset | seeded default: explicit script values win |
+| `PROCESSOR_ARCHITECTURE` | host value; omitted when unset | seeded default: explicit script values win |
 | `CARGO_TARGET_DIR` | session `<scratch>/target`, owned by cargo alone | seeded default: explicit script values win |
 
 ### Explicit routing

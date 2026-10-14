@@ -395,6 +395,11 @@ fn windows_extra_seed_table() -> Vec<SeedRow> {
             value: SeedValue::HostOnly,
             doc: "host value; omitted when unset",
         },
+        SeedRow {
+            name: windows::PROCESSOR_ARCHITECTURE,
+            value: SeedValue::HostOnly,
+            doc: "host value; omitted when unset",
+        },
     ]
 }
 
@@ -728,6 +733,7 @@ mod tests {
             (windows::PROGRAM_W6432, "C:\\HostProgramW6432"),
             (windows::COMSPEC, "C:\\HostWindows\\system32\\cmd.exe"),
             (windows::SYSTEM_DRIVE, "C:"),
+            (windows::PROCESSOR_ARCHITECTURE, "AMD64"),
         ]);
         let lookup = |name: &str| stub.get(name).cloned();
         let mut rows = platform_seed_table();
@@ -802,6 +808,10 @@ mod tests {
             assert_eq!(
                 seed.get(windows::SYSTEM_DRIVE).map(String::as_str),
                 Some("C:")
+            );
+            assert_eq!(
+                seed.get(windows::PROCESSOR_ARCHITECTURE).map(String::as_str),
+                Some("AMD64")
             );
         }
     }
@@ -899,6 +909,7 @@ mod tests {
                 windows::PROGRAM_W6432,
                 windows::COMSPEC,
                 windows::SYSTEM_DRIVE,
+                windows::PROCESSOR_ARCHITECTURE,
             ] {
                 assert!(
                     !seed.contains_key(name),
