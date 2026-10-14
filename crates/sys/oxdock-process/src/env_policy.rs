@@ -810,7 +810,8 @@ mod tests {
                 Some("C:")
             );
             assert_eq!(
-                seed.get(windows::PROCESSOR_ARCHITECTURE).map(String::as_str),
+                seed.get(windows::PROCESSOR_ARCHITECTURE)
+                    .map(String::as_str),
                 Some("AMD64")
             );
         }
