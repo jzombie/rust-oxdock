@@ -6,7 +6,7 @@ use anyhow::{Result, bail};
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 use std::process::ExitStatus;
 
-use oxdock_fs::{GuardedPath, PathResolver, PolicyPath, env as oxdock_env};
+use oxdock_fs::{GuardedPath, PathResolver, PolicyPath};
 use oxdock_sys_test_utils::exit_status_from_code;
 
 use crate::contract::{
@@ -527,18 +527,7 @@ fn expand_env(input: &str, ctx: &CommandContext) -> String {
                         }
                         name.push(ch);
                     }
-                    let val = if name == oxdock_env::cargo::TARGET_DIR {
-                        ctx.cargo_target_dir().display().to_string()
-                    } else {
-                        // Script env with substrate read-through
-                        // (Tier 1/2, PATH baseline), matching the tiered
-                        // child env of real spawns.
-                        ctx.envs()
-                            .get(&name)
-                            .cloned()
-                            .or_else(|| ctx.substrate().get(&name).map(str::to_string))
-                            .unwrap_or_default()
-                    };
+                    let val = ctx.envs().get(&name).cloned().unwrap_or_default();
                     out.push_str(&val);
                 }
                 Some(next) if next.is_alphanumeric() || *next == '_' => {
@@ -552,18 +541,7 @@ fn expand_env(input: &str, ctx: &CommandContext) -> String {
                             break;
                         }
                     }
-                    let val = if name == oxdock_env::cargo::TARGET_DIR {
-                        ctx.cargo_target_dir().display().to_string()
-                    } else {
-                        // Script env with substrate read-through
-                        // (Tier 1/2, PATH baseline), matching the tiered
-                        // child env of real spawns.
-                        ctx.envs()
-                            .get(&name)
-                            .cloned()
-                            .or_else(|| ctx.substrate().get(&name).map(str::to_string))
-                            .unwrap_or_default()
-                    };
+                    let val = ctx.envs().get(&name).cloned().unwrap_or_default();
                     out.push_str(&val);
                 }
                 _ => {
@@ -584,16 +562,8 @@ fn env_lookup(name: &str, ctx: &CommandContext) -> String {
     // Accept both `{{ env:X }}` and bare `{{ X }}` forms, matching the
     // host-side `expand_command_env` semantics.
     let key = name.strip_prefix("env:").unwrap_or(name);
-    if key == oxdock_env::cargo::TARGET_DIR {
-        return ctx.cargo_target_dir().display().to_string();
-    }
-    // Script env with substrate read-through (Tier 1/2, PATH baseline),
-    // matching the tiered child env of real spawns.
-    ctx.envs()
-        .get(key)
-        .cloned()
-        .or_else(|| ctx.substrate().get(key).map(str::to_string))
-        .unwrap_or_default()
+    // Script map only, matching the seeded child env of real spawns.
+    ctx.envs().get(key).cloned().unwrap_or_default()
 }
 
 #[cfg(miri)]
@@ -718,8 +688,7 @@ mod synthetic_backend_tests {
             .map(|(key, value)| (key.to_string(), value.to_string()))
             .collect();
         let scratch = oxdock_fs::reserve_cargo_scratch().expect("scratch");
-        let substrate = crate::env_policy::SubstrateEnv::capture_for_scratch(&scratch);
-        let ctx = CommandContext::from_map(&cwd, &map, &scratch, &substrate, &guard, &guard);
+        let ctx = CommandContext::from_map(&cwd, &map, &scratch, &guard, &guard);
         (guard, ctx)
     }
 
@@ -745,7 +714,7 @@ mod synthetic_backend_tests {
 
     #[test]
     fn expand_env_supports_brace_and_dollar_forms() {
-        let (_root, ctx) = miri_ctx(&[("FOO", "bar")]);
+        let (_root, ctx) = miri_ctx(&[("FOO", "bar"), ("CARGO_TARGET_DIR", "/scratch/target")]);
 
         assert_eq!(expand_env("{{ env:FOO }}!", &ctx), "bar!");
         assert_eq!(expand_env("$FOO!", &ctx), "bar!");
@@ -753,8 +722,9 @@ mod synthetic_backend_tests {
         assert_eq!(expand_env("cost $$5", &ctx), "cost $$5");
         assert_eq!(expand_env("[${MISSING_XYZ}]", &ctx), "[]");
 
+        // The seed carries CARGO_TARGET_DIR in the map; expansion reads it there.
         let target = expand_env("${CARGO_TARGET_DIR}", &ctx);
-        assert!(!target.is_empty(), "executor default must resolve");
+        assert_eq!(target, "/scratch/target");
     }
 
     #[test]

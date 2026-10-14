@@ -680,7 +680,11 @@ pub(super) fn run_remote_block<P: ProcessManager>(
     // Stderr streams live when the step error handle is a shared writer;
     // otherwise the runner returns all stderr bytes in the response.
     let stderr_sink = cx.err_shared();
-    let mut transport_env: Vec<(String, String)> = cx.env_snapshot().into_iter().collect();
+    let mut transport_env: Vec<(String, String)> = cx
+        .env_snapshot()
+        .into_iter()
+        .filter(|(key, value)| oxdock_process::seed_differs(&cx.state.seed, key, value))
+        .collect();
     transport_env.sort();
     let request = RemoteRequest {
         target: target.to_string(),

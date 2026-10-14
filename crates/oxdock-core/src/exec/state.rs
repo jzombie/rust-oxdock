@@ -26,11 +26,12 @@ pub struct ExecState<P: ProcessManager> {
     /// nameable as a `&GuardedPath`, so host code cannot `ensure()` or
     /// `create_dir_all` it. The child `cargo` creates it on demand.
     pub(super) cargo_scratch: CargoScratch,
-    /// Lazily captured session substrate (Tier 1/2/3). `OnceLock`
-    /// because capture performs host reads and `ExecState` is shared
-    /// by reference at dispatch; first `command_ctx()` or `get_env()`
-    /// wins and every later read sees the same snapshot.
-    pub(super) substrate_cell: std::sync::OnceLock<oxdock_process::SubstrateEnv>,
+    /// Pure session seed from [`oxdock_process::seed_defaults`], stored at
+    /// init alongside the layered `envs`. `ISOLATED` resets clone this
+    /// (not the layered map), and transport sanitize diffs against it.
+    /// Built once: re-seeding would re-read host fallbacks and break
+    /// state stability.
+    pub(super) seed: Arc<HashMap<String, String>>,
     pub(super) cwd: GuardedPath,
     pub(super) envs: Arc<HashMap<String, String>>,
     /// Outer-scope env snapshots for `ISOLATED` blocks, innermost last.
@@ -257,78 +258,38 @@ impl KeeperExpiry {
 }
 
 impl<P: ProcessManager> ExecState<P> {
-    /// Lazily captured session substrate (Tier 1/2/3). Built on first
-    /// dispatch, never at session init, so interpretive-only sessions
-    /// perform no host reads and touch no disk.
-    pub(super) fn substrate(&self) -> &oxdock_process::SubstrateEnv {
-        self.substrate_cell.get_or_init(|| {
-            let tmp = self.cargo_scratch.tmp_command_path();
-            oxdock_process::SubstrateEnv::capture(&tmp.to_string_lossy())
-        })
-    }
-
-    /// Whether execution is inside an `ISOLATED` block (any depth).
-    pub(super) fn is_isolated(&self) -> bool {
-        !self.isolated_stack.is_empty()
-    }
-
-    /// Whether the PATH baseline applies here: everywhere except inside
-    /// `ISOLATED` without an inner `PATH` (Tier 3 is omitted there).
-    pub(super) fn baseline_applies(&self) -> bool {
-        if !self.is_isolated() {
-            return true;
-        }
-        self.envs.keys().any(|k| {
-            #[allow(clippy::disallowed_macros)]
-            if cfg!(windows) {
-                k.eq_ignore_ascii_case(oxdock_fs::env::os::PATH)
-            } else {
-                k == oxdock_fs::env::os::PATH
-            }
-        })
-    }
-
-    /// Read-through environment lookup for DSL evaluation
-    /// (`is_exec_name`, `Expr::Env`, expansions): the script map first,
-    /// substrate fallback second, with the PATH baseline suppressed
-    /// inside unpatched `ISOLATED` scopes so evaluation and spawn agree.
-    /// Never writes back: snapshots stay clean.
+    /// Script-map environment lookup for DSL evaluation (`is_exec_name`,
+    /// `Expr::Env`, expansions): exact hit first, case-insensitive
+    /// fallback on Windows so `{{ env:Path }}` resolves the seeded
+    /// `PATH`. The map is seeded at init, so no fallback layer exists.
     pub(super) fn get_env(&self, key: &str) -> Option<&str> {
         if let Some(v) = self.envs.get(key) {
             return Some(v.as_str());
         }
         #[allow(clippy::disallowed_macros)]
-        let is_path = if cfg!(windows) {
-            key.eq_ignore_ascii_case(oxdock_fs::env::os::PATH)
-        } else {
-            key == oxdock_fs::env::os::PATH
-        };
-        if is_path && !self.baseline_applies() {
-            return None;
+        if cfg!(windows) {
+            return self
+                .envs
+                .iter()
+                .find(|(k, _)| oxdock_process::names_eq(k, key))
+                .map(|(_, v)| v.as_str());
         }
-        self.substrate().get(key)
+        None
     }
 
     pub(super) fn command_ctx(&self) -> Result<CommandContext> {
         // Resolve the working directory through the snapshot choke point: a
         // snapshot-rooted cwd materializes here (so `RUN` executes against a
         // real directory) while a local cwd resolves purely lexically with
-        // zero I/O. `CARGO_TARGET_DIR` is the pre-reserved scratch name (never
-        // ensured by us); callers may still override it via the env map, which
-        // apply_ctx respects when spawning processes.
+        // zero I/O. The seeded scratch materializes alongside: `HOME` and
+        // `TMPDIR` point at it, so children writing temp or profile data
+        // must observe real directories, never lexical candidates.
         let cwd = self.fs.resolve_write(&self.cwd, ".")?;
-        // Clone the substrate with the baseline suppressed exactly where
-        // assembly skips it, so the context spawn sites receive agrees
-        // with what `get_env` reports during evaluation.
-        let mut substrate = self.substrate().clone();
-        if !self.baseline_applies() {
-            substrate = substrate.without_baseline();
-        }
+        self.cargo_scratch.ensure_materialized()?;
         Ok(CommandContext::new(
             &cwd.into(),
             Arc::clone(&self.envs),
             &self.cargo_scratch,
-            &substrate,
             self.fs.root(),
             self.fs.build_context(),
         ))
@@ -347,14 +308,7 @@ impl<P: ProcessManager> ExecState<P> {
         Self {
             fs: self.fs.clone_box(),
             cargo_scratch: self.cargo_scratch.clone(),
-            substrate_cell: match self.substrate_cell.get() {
-                Some(s) => {
-                    let cell = std::sync::OnceLock::new();
-                    let _ = cell.set(s.clone());
-                    cell
-                }
-                None => std::sync::OnceLock::new(),
-            },
+            seed: Arc::clone(&self.seed),
             cwd: self.cwd.clone(),
             envs: Arc::clone(&self.envs),
             bg_children: Vec::new(),

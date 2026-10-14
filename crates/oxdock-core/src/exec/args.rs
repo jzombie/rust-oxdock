@@ -1560,8 +1560,7 @@ pub(crate) fn expand_string<P: ProcessManager>(
                             // Missing → emit empty
                         }
                     } else {
-                        // {{ env:KEY }} : script env with substrate
-                        // read-through (Tier 1/2, PATH baseline)
+                        // {{ env:KEY }} : seeded script env map
                         // {{ script_env:KEY }} : explicit script env only
                         // {{ bare_key }} : DSL variable only, NOT env
                         if let Some(env_key) = key.strip_prefix("env:") {

@@ -1062,13 +1062,14 @@ declare_commands! {
             Must appear before any other commands. Several directives may
             appear so platform-specific names ride explicit guards
             (`[family:windows] INHERIT_ENV [USERPROFILE]`); each guarded
-            line runs only when its guard passes. OS substrate needs no
-            declaration: the engine auto-injects loader invariants
+            line runs only when its guard passes. Sandbox defaults need
+            no declaration: the session seeds loader bindings
             (`SystemRoot` on Windows), terminal and extension defaults
             (`TERM`, `PATHEXT`), scratch temp (`TMPDIR`/`TEMP`/`TMP`
-            bound to the session), and a sanctioned `PATH` baseline for
-            core utilities. Identity and secrets (`HOME`, tokens) stay
-            opt-in here.
+            bound to the session), and a `PATH` baseline for core
+            utilities. Identity and secrets stay opt-in here: `HOME`
+            seeds to the scratch, so host homes and tokens arrive only
+            through this directive.
         "#},
         args: &[ ArgSpec { name: "keys", arg_type: ArgType::Rest(&ArgType::String), description: "Host variables to inherit", io: IoDirection::Read, index: 0, required: false, fallback_stream: None } ],
         flags: &[],
@@ -1154,8 +1155,8 @@ declare_commands! {
             ASSERT_CONTAINS $o "hello"
         "#}         }, Example { name: "run exec form", fence_meta: None, code: indoc! {r#"
             # No shell: `>` stays a literal argument, so no file is created.
-            # Toolchain spawns bridge Tier 4 explicitly: rustup shims
-            # resolve toolchains through the host home.
+            # Toolchain spawns bridge the host home explicitly: rustup
+            # shims resolve toolchains through the host home.
             IMPORT [STD]
             INHERIT_ENV [PATH]
             [family:unix] INHERIT_ENV [HOME]
@@ -2876,17 +2877,18 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
         CommandMeta {
             name: "ISOLATED",
             syntax: "ISOLATED { INHERIT_ENV [...] <commands> } | ISOLATED <command...>",
-            summary: "Run steps with a scrubbed script environment.",
+            summary: "Run steps with the seeded script environment.",
             description: indoc! {r#"
-                Clears the script environment for the block: spawned children
-                see only names the block re-adds through its leading
-                `INHERIT_ENV`, resolved against the outer scope, never the
-                host. Absent names stay absent silently, matching top-level
+                Resets the script environment for the block to the session
+                seed: spawned children see the sandbox defaults plus names
+                the block re-adds through its leading `INHERIT_ENV`,
+                resolved against the outer scope, never the host. Absent
+                names stay absent silently, matching top-level
                 `INHERIT_ENV`. Script variables, pipes, and files flow
-                through untouched; only `env:` is scrubbed. Blocks nest
-                (each level snapshots the already-scrubbed parent, so
-                nesting only narrows) and compose with `ASYNC` and `FUNC`.
-                Scope exit restores the prior environment.
+                through untouched; only `env:` is reset. Blocks nest
+                (each level re-seeds from the same seed, so nesting only
+                narrows through the allowlists) and compose with `ASYNC`
+                and `FUNC`. Scope exit restores the prior environment.
             "#},
             args: &[],
             flags: &[],
@@ -2910,14 +2912,25 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 "#},
                 },
                 Example {
-                    name: "closed child env",
-                    fence_meta: Some("expect_error:\"INHERIT_ENV [PATH]\""),
+                    name: "reseeded child env",
+                    fence_meta: None,
                     code: indoc! {r#"
-                    # No PATH was routed, so the spawn fails naming the fix
-                    # before anything executes, on every platform.
+                    # The block resets to the session seed: plain steps and
+                    # spawns run with zero prelude, while outer customs
+                    # stay out.
+                    ENV OUTER_CUSTOM=outer-val
+                    WRITE top-path.txt "{{ env:PATH }}"
                     ISOLATED {
-                        RUN ["cargo", "--version"]
+                        WRITE inner-path.txt "{{ env:PATH }}"
+                        WRITE inner-custom.txt "{{ env:OUTER_CUSTOM }}"
+                        RUN "echo seed-ok"
                     }
+                    LET $top: STRING = READ top-path.txt
+                    LET $inner: STRING = READ inner-path.txt
+                    ASSERT_EQ $inner $top
+                    LET $custom: STRING = READ inner-custom.txt
+                    ASSERT_EQ $custom ""
+                    ASSERT_CONTAINS stdout "seed-ok"
                 "#},
                 },
                 Example {

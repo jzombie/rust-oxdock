@@ -113,13 +113,17 @@ impl RemoteRunner for StdioSession {
     }
 }
 
-/// Spawn the transport process on tiered substrate: Tier 1 OS plus
-/// Tier 3 PATH baseline under the script env snapshot, never host
-/// inherit and never Tier 2 session scratch (transports are
-/// infrastructure, not session workloads). The transport resolves its
-/// program through the staged `PATH` like any `RUN` child. Child
-/// stderr stays inherited so transport diagnostics reach host stderr
-/// directly, matching the previous muxio spawn shape.
+/// Spawn the transport process on the transport seed: loader
+/// invariants plus extension/terminal defaults plus the `PATH`
+/// baseline under the sanitized request envs, never host inherit and
+/// never session scratch (transports are infrastructure, not session
+/// workloads). The request arrives pre-sanitized against the session
+/// seed (seeded scratch/identity values dropped); the transport seed
+/// bridges the host profile when the request lacks one, so `ssh` keeps
+/// host key discovery. The transport resolves its program through the
+/// staged `PATH` like any `RUN` child. Child stderr stays inherited so
+/// transport diagnostics reach host stderr directly, matching the
+/// previous muxio spawn shape.
 /// The returned child stays owned by the session and is killed in
 /// teardown, preserving the lazy-spawn/scoped-teardown lifecycle.
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
@@ -128,11 +132,10 @@ fn spawn_transport(
     args: &[&str],
     envs: &[(String, String)],
 ) -> Result<(Arc<RpcSyncClient>, std::process::Child)> {
-    let script: std::collections::HashMap<String, String> = envs.iter().cloned().collect();
-    // Transports own no session scratch: capture bare substrate (Tier 2
-    // binds an empty tmp path, unused by transport assembly).
-    let substrate = oxdock_process::SubstrateEnv::capture("");
-    let staged = substrate.assemble_transport(&script);
+    let mut staged = oxdock_process::seed_transport();
+    for (key, value) in envs {
+        staged.insert(key.clone(), value.clone());
+    }
     // Same unified pre-flight as every `RUN` child, one shared
     // implementation so the diagnostics cannot drift per call site.
     oxdock_process::check_spawn_anchors(program, &staged, false)?;

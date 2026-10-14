@@ -1128,25 +1128,10 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 }
                 Ok(live)
             }
-            StepKind::Env { key, .. } => {
-                // Tier 1A loader invariants are engine-owned: overriding
-                // them breaks child CRT initialization, so the static
-                // pass rejects them here and assembly drops stragglers.
-                #[allow(clippy::disallowed_macros)]
-                let immutable = if cfg!(windows) {
-                    key.eq_ignore_ascii_case(oxdock_fs::env::os::windows::substrate::SYSTEM_ROOT)
-                        || key.eq_ignore_ascii_case(oxdock_fs::env::os::windows::substrate::WINDIR)
-                } else {
-                    key == oxdock_fs::env::os::windows::substrate::SYSTEM_ROOT
-                        || key == oxdock_fs::env::os::windows::substrate::WINDIR
-                };
-                if immutable {
-                    bail!(
-                        "step {}: ENV {key}=... targets an OS loader invariant; remove it (the engine injects {})",
-                        idx + 1,
-                        oxdock_fs::env::os::windows::substrate::SYSTEM_ROOT,
-                    );
-                }
+            StepKind::Env { .. } => {
+                // Uniform script-wins: the seed populates defaults and
+                // explicit `ENV` overwrites them like any other variable.
+                // No name is immutable.
                 self.check_step_args(&step.kind, env, scope, idx, depth)?;
                 Ok(live)
             }

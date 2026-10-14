@@ -2,15 +2,14 @@
 
 {{ $docs_ctx.description }}
 
-> Rendered by `cargo run -p docs-gen` from the live tier tables in
+> Rendered by `cargo run -p docs-gen` from the live seed tables in
 > `oxdock_process::env_policy`. Do not edit by hand: the engine is the
-> single source, and a parity test fails if any assembled name goes
-> undescribed.
+> single source, and a test fails if any seed row goes undescribed.
 
-Script authors route Tier 4 explicitly: toolchain legs declare
+Script authors route host values explicitly: toolchain legs declare
 `INHERIT_ENV [PATH]` plus `[family:unix] INHERIT_ENV [HOME]` /
 `[family:windows] INHERIT_ENV [USERPROFILE]` when the spawned program
 resolves toolchains through the host home. Everything else below
-arrives without declaration.
+arrives seeded, without declaration.
 
 {{ $files.generated.env_contracts }}

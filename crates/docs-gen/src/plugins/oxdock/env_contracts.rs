@@ -1,16 +1,16 @@
 //! Live environment-variable contract reference: rendered from the
-//! tier tables in `oxdock_process::env_policy`, so the documented
-//! substrate can never drift from the assembled one. A parity test
-//! pins that every assembled name is described and vice versa; this
-//! renderer only formats.
+//! seed tables in `oxdock_process::env_policy`, so the documented
+//! defaults can never drift from the seeded ones. A test pins that
+//! every seeded name renders; this renderer only formats.
 
 use anyhow::Result;
 use oxdock_markdown_plugin::markdown::escape_table_cell;
 
 /// Render the full contract reference as markdown. Formatting only:
 ///
-/// - tier chapters (title, body, rows) come from
-///   `env_policy::tier_section` / `describe_tiers`,
+/// - the intro is `env_policy::CONTRACT_INTRO_MD`,
+/// - the baseline table is `env_policy::describe_baseline_defaults`,
+/// - the routing chapter is `env_policy::ROUTING_MD`,
 /// - the enforcement chapter is `env_policy::PRECEDENCE_MD`,
 /// - the host-read table is `env_policy::engine_host_reads`.
 ///
@@ -19,25 +19,20 @@ use oxdock_markdown_plugin::markdown::escape_table_cell;
 pub fn render_env_contracts() -> Result<String> {
     use oxdock_process::env_policy;
     let mut out = String::from(env_policy::CONTRACT_INTRO_MD);
-    for tier in env_policy::tier_order() {
-        let (_, body) = env_policy::tier_section(tier)
-            .ok_or_else(|| anyhow::anyhow!("tier {tier} has rows but no section chapter"))?;
-        let heading = env_policy::tier_heading(tier)
-            .ok_or_else(|| anyhow::anyhow!("tier {tier} has rows but no heading"))?;
-        out.push_str(&format!("\n{heading}\n\n{body}\n\n"));
-        out.push_str("| Variable | Default | Rule |\n| --- | --- | --- |\n");
-        for entry in env_policy::describe_tiers()
-            .iter()
-            .filter(|entry| entry.tier == tier)
-        {
-            out.push_str(&format!(
-                "| `{}` | {} | {} |\n",
-                escape_table_cell(entry.name),
-                escape_table_cell(entry.default),
-                escape_table_cell(entry.rule)
-            ));
-        }
+    out.push('\n');
+    out.push_str(env_policy::BASELINE_INTRO_MD);
+    out.push_str("\n| Variable | Default source | Rule |\n| --- | --- | --- |\n");
+    for entry in env_policy::describe_baseline_defaults() {
+        out.push_str(&format!(
+            "| `{}` | {} | {} |\n",
+            escape_table_cell(entry.name),
+            escape_table_cell(entry.default_source),
+            escape_table_cell(entry.rule)
+        ));
     }
+    out.push('\n');
+    out.push_str(env_policy::ROUTING_MD);
+    out.push('\n');
     out.push_str(env_policy::HOST_READS_INTRO_MD);
     out.push_str("\n| Variable | Read by | Purpose |\n| --- | --- | --- |\n");
     for read in env_policy::engine_host_reads() {
@@ -69,14 +64,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn contract_renders_every_tier() {
-        // Tier labels come from core's tier_order(): a new tier renders
-        // without touching this test.
+    fn contract_renders_baseline_defaults() {
+        // Every seeded name renders in the baseline table; the table
+        // is mapped from the seed rows, so this pins the renderer
+        // against the core table.
         let text = render_env_contracts().expect("renders");
-        for tier in oxdock_process::env_policy::tier_order() {
-            let heading = oxdock_process::env_policy::tier_heading(tier)
-                .expect("core headings cover every tier");
-            assert!(text.contains(&heading), "tier {tier} section missing");
+        assert!(
+            text.contains("### Sandbox baseline defaults"),
+            "baseline section missing"
+        );
+        for entry in oxdock_process::env_policy::describe_baseline_defaults() {
+            assert!(
+                text.contains(&format!("`{}`", entry.name)),
+                "{} missing",
+                entry.name
+            );
         }
         for name in [
             "SystemRoot",
@@ -101,14 +103,14 @@ mod tests {
         use oxdock_fs::env::os::{unix, windows};
         let text = render_env_contracts().expect("renders");
         for name in [
-            windows::substrate::SYSTEM_ROOT,
-            windows::substrate::WINDIR,
-            windows::substrate::PATHEXT,
-            unix::substrate::TERM,
-            windows::managed::TEMP,
-            windows::managed::TMP,
-            unix::managed::TMPDIR,
-            unix::managed::HOME,
+            windows::SYSTEM_ROOT,
+            windows::WINDIR,
+            windows::PATHEXT,
+            unix::TERM,
+            windows::TEMP,
+            windows::TMP,
+            unix::TMPDIR,
+            unix::HOME,
             unix::LOGNAME,
             unix::USER,
             windows::USERNAME,
@@ -165,15 +167,18 @@ mod tests {
 
     #[test]
     fn contract_chapters_come_from_core() {
-        // Section bodies and the enforcement chapter are core constants:
-        // the renderer formats, never authors.
+        // Section bodies and the routing/enforcement chapters are core
+        // constants: the renderer formats, never authors.
         let text = render_env_contracts().expect("renders");
-        for tier in oxdock_process::env_policy::tier_order() {
-            let (_, body) = oxdock_process::env_policy::tier_section(tier)
-                .expect("core chapters cover every tier");
+        for chapter in [
+            oxdock_process::env_policy::CONTRACT_INTRO_MD,
+            oxdock_process::env_policy::BASELINE_INTRO_MD,
+            oxdock_process::env_policy::ROUTING_MD,
+        ] {
             assert!(
-                text.contains(body.lines().next().unwrap_or_default()),
-                "tier {tier} body missing"
+                text.contains(chapter.lines().next().unwrap_or_default()),
+                "chapter missing: {}",
+                chapter.lines().next().unwrap_or_default()
             );
         }
         assert!(

@@ -23,7 +23,8 @@ pub use contract::{
 #[cfg(not(miri))]
 pub use contract::{OsPipeReader, OsPipeWriter, create_os_pipe};
 pub use env_policy::{
-    SubstrateEnv, check_spawn_anchors, has_var, is_sanctioned_seed, needs_path_lookup,
+    check_spawn_anchors, has_var, is_sanctioned_seed, names_eq, needs_path_lookup, seed_defaults,
+    seed_differs, seed_transport,
 };
 pub use expand::{
     PlaceholderCall, StreamingExpand, expand_command_env, expand_script_env,

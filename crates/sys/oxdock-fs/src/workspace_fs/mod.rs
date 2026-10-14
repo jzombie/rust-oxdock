@@ -126,7 +126,7 @@ pub enum EntryKind {
 /// Passing a `CargoScratch` where a `&GuardedPath` is required is a compile
 /// error. The only operations are rendering subpaths for the child
 /// environment (`display`/`command_path` for `CARGO_TARGET_DIR`,
-/// `tmp_command_path` for Tier 2 temp) and recording it in test doubles
+/// `tmp_command_path` for seeded temp) and recording it in test doubles
 /// (`to_path_buf`). The root materializes lazily: construction performs
 /// no filesystem I/O, so interpretive-only sessions never touch disk.
 #[derive(Clone)]
@@ -176,13 +176,44 @@ impl CargoScratch {
         }
     }
 
-    /// Platform-adjusted `tmp` subpath for Tier 2 temp bindings,
+    /// Platform-adjusted `tmp` subpath for seeded temp bindings,
     /// created on first use (native only; synthetic under Miri).
     pub fn tmp_command_path(&self) -> std::path::PathBuf {
         match self.tmp() {
             Ok(t) => command_path(&t).into_owned(),
             Err(_) => std::path::PathBuf::new(),
         }
+    }
+
+    /// Lexical `<scratch>/tmp` display path for seed bindings: the
+    /// pre-computed candidate, no filesystem I/O. The spawn path
+    /// materializes it through [`CargoScratch::ensure_materialized`]
+    /// before any child observes it.
+    pub fn tmp_seed_display(&self) -> String {
+        self.seed_display("tmp")
+    }
+
+    /// Lexical `<scratch>/target` display path for seed bindings: the
+    /// pre-computed candidate, no filesystem I/O. Cargo creates the
+    /// directory on demand; the engine never ensures it.
+    pub fn target_seed_display(&self) -> String {
+        self.seed_display("target")
+    }
+
+    fn seed_display(&self, leaf: &str) -> String {
+        let path = self.root.candidate_path().join(leaf);
+        path::GuardedPath::from_guarded_parts(path.clone(), path).display()
+    }
+
+    /// Materialize the scratch hierarchy before spawn: root plus `tmp`
+    /// (native; flag flip under Miri). Called in `command_ctx`, the
+    /// choke point every real spawn flows through, so seeded
+    /// `HOME`/`TMPDIR` paths exist when children write them. `target`
+    /// stays uncreated: cargo owns it on demand.
+    pub fn ensure_materialized(&self) -> Result<()> {
+        self.root.ensure().map(|_| ())?;
+        self.tmp().map(|_| ())?;
+        Ok(())
     }
 
     /// Owned raw `target` path for test-double recording. Must never be

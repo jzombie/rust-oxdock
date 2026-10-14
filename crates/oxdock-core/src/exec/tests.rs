@@ -846,7 +846,7 @@ fn create_exec_state(fs: MockFs) -> ExecState<MockProcessManager> {
     let mut state = ExecState {
         fs: Box::new(fs.clone()),
         cargo_scratch: oxdock_fs::reserve_cargo_scratch().unwrap(),
-        substrate_cell: std::sync::OnceLock::new(),
+        seed: Arc::new(HashMap::new()),
         cwd: fs.root().clone(),
         envs: Arc::new(HashMap::new()),
         bg_children: Vec::new(),
@@ -5648,7 +5648,7 @@ fn isolated_allowlist_cannot_reach_host_only_names() {
 
 /// Run a script with the real process manager over a fresh tempdir root,
 /// returning the tempdir (kept alive). Real spawns prove tier injection.
-fn run_tiered_case(script: &str) -> oxdock_fs::GuardedTempDir {
+fn run_seeded_case(script: &str) -> oxdock_fs::GuardedTempDir {
     use oxdock_fs::PathResolver;
     let steps = crate::parse_script(script).expect("tiered case parses");
     let temp = GuardedPath::tempdir().expect("tempdir");
@@ -5679,9 +5679,9 @@ fn read_case_file(temp: &oxdock_fs::GuardedTempDir, name: &str) -> String {
     miri,
     ignore = "spawns real OS processes, which die under Miri isolation"
 )]
-fn tiered_baseline_path_runs_shell_without_prelude() {
-    // No INHERIT_ENV at all: the sanctioned baseline still resolves `sh`.
-    run_tiered_case(indoc! {r#"
+fn seeded_baseline_path_runs_shell_without_prelude() {
+    // No INHERIT_ENV at all: the seeded baseline still resolves `sh`.
+    run_seeded_case(indoc! {r#"
         RUN "echo tier-ok"
     "#});
 }
@@ -5692,13 +5692,13 @@ fn tiered_baseline_path_runs_shell_without_prelude() {
     miri,
     ignore = "spawns real OS processes, which die under Miri isolation"
 )]
-fn tiered_path_baseline_visible_to_expansion() {
-    let temp = run_tiered_case(indoc! {r#"
+fn seeded_path_baseline_visible_to_expansion() {
+    let temp = run_seeded_case(indoc! {r#"
         WRITE path.txt "{{ env:PATH }}"
     "#});
     assert_eq!(
         read_case_file(&temp, "path.txt"),
-        oxdock_fs::env::os::unix::substrate::SANCTIONED_PATH
+        oxdock_fs::env::os::unix::DEFAULT_PATH
     );
 }
 
@@ -5708,8 +5708,8 @@ fn tiered_path_baseline_visible_to_expansion() {
     miri,
     ignore = "spawns real OS processes, which die under Miri isolation"
 )]
-fn tiered_explicit_path_wins_over_baseline() {
-    let temp = run_tiered_case(indoc! {r#"
+fn seeded_explicit_path_wins_over_baseline() {
+    let temp = run_seeded_case(indoc! {r#"
         ENV PATH=/custom/bin
         WRITE path.txt "{{ env:PATH }}"
     "#});
@@ -5722,8 +5722,8 @@ fn tiered_explicit_path_wins_over_baseline() {
     miri,
     ignore = "spawns real OS processes, which die under Miri isolation"
 )]
-fn tiered_tmpdir_bound_to_scratch_not_host() {
-    let temp = run_tiered_case(indoc! {r#"
+fn seeded_tmpdir_bound_to_scratch_not_host() {
+    let temp = run_seeded_case(indoc! {r#"
         WRITE tmpdir.txt "{{ env:TMPDIR }}"
     "#});
     let bound = read_case_file(&temp, "tmpdir.txt");
@@ -5746,8 +5746,8 @@ fn tiered_tmpdir_bound_to_scratch_not_host() {
     miri,
     ignore = "spawns real OS processes, which die under Miri isolation"
 )]
-fn tiered_term_defaults_without_prelude() {
-    let temp = run_tiered_case(indoc! {r#"
+fn seeded_term_defaults_without_prelude() {
+    let temp = run_seeded_case(indoc! {r#"
         WRITE term.txt "{{ env:TERM }}"
     "#});
     assert!(!read_case_file(&temp, "term.txt").is_empty());
@@ -5759,47 +5759,37 @@ fn tiered_term_defaults_without_prelude() {
     miri,
     ignore = "spawns real OS processes, which die under Miri isolation"
 )]
-fn tiered_isolated_suppresses_baseline_but_keeps_temp() {
-    // The discriminating parity proof: top level sees the baseline,
-    // the block does not, and Tier 2 flows through both.
-    let temp = run_tiered_case(indoc! {r#"
+fn isolated_reseeds_factory_defaults() {
+    // The discriminating parity proof: top level and block see the
+    // identical seed, and outer customs stay out of the block.
+    let temp = run_seeded_case(indoc! {r#"
+        ENV OUTER_CUSTOM=outer-val
         WRITE top-path.txt "{{ env:PATH }}"
         WRITE top-tmp.txt "{{ env:TMPDIR }}"
         ISOLATED {
             WRITE inner-path.txt "{{ env:PATH }}"
             WRITE inner-tmp.txt "{{ env:TMPDIR }}"
+            WRITE inner-custom.txt "{{ env:OUTER_CUSTOM }}"
         }
     "#});
     assert_eq!(
         read_case_file(&temp, "top-path.txt"),
-        oxdock_fs::env::os::unix::substrate::SANCTIONED_PATH
+        oxdock_fs::env::os::unix::DEFAULT_PATH
     );
     assert_eq!(
         read_case_file(&temp, "inner-path.txt"),
-        "",
-        "baseline must stay invisible inside unpatched ISOLATED"
+        oxdock_fs::env::os::unix::DEFAULT_PATH,
+        "ISOLATED reseeds the identical baseline"
     );
     assert_eq!(
         read_case_file(&temp, "inner-tmp.txt"),
         read_case_file(&temp, "top-tmp.txt"),
-        "Tier 2 temp flows into blocks: substrate is not a leak"
+        "seeded temp matches across the block boundary"
     );
-}
-
-#[test]
-fn static_check_rejects_tier1a_override() {
-    let steps = crate::parse_script(indoc! {r#"
-        ENV SystemRoot=C:\Invalid
-        RUN "echo hi"
-    "#})
-    .expect("parses (rejection is static, not syntactic)");
-    let fs = MockFs::new();
-    let state = create_exec_state(fs);
-    let err = super::static_check::validate_script_types_counted(&steps, &state)
-        .expect_err("Tier 1A override must fail statically");
-    assert!(
-        err.to_string().contains("loader invariant"),
-        "unexpected error: {err}"
+    assert_eq!(
+        read_case_file(&temp, "inner-custom.txt"),
+        "",
+        "outer customs stay out of ISOLATED"
     );
 }
 
@@ -5808,20 +5798,20 @@ fn static_check_rejects_tier1a_override() {
     miri,
     ignore = "spawns real OS processes, which die under Miri isolation"
 )]
-fn tiered_no_prelude_child_env_holds_boundary() {
-    // The Tier-4 regression proof the tiers exist for: a script declaring
-    // NOTHING spawns a child whose environment carries exactly the
-    // engine-managed substrate, never host identity. Past failure mode:
+fn seeded_no_prelude_child_env_holds_boundary() {
+    // The closedness regression proof: a script declaring NOTHING
+    // spawns a child whose environment carries exactly the seeded
+    // sandbox defaults, never host identity. Past failure mode:
     // the operator's `$SHELL` (zsh) re-polluted scrubbed children with
     // host `HOME`/`LOGNAME`/`PATH` via `/etc/zshenv` and `getpwuid`
     // synthesis. Batch execution is pinned to `sh`/`cmd`, so the dump
     // below is deterministic on every host, every platform.
-    let probe = TestEnvGuard::set("OXDOCK_TIER_AUDIT_PROBE", "host-secret");
+    let probe = TestEnvGuard::set("OXDOCK_SEED_AUDIT_PROBE", "host-secret");
     let _probe = probe;
     let host_home = std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .unwrap_or_default();
-    let temp = run_tiered_case(indoc! {r#"
+    let temp = run_seeded_case(indoc! {r#"
         [family:unix] RUN "env > env.txt"
         [family:windows] RUN "set > env.txt"
     "#});
@@ -5834,16 +5824,16 @@ fn tiered_no_prelude_child_env_holds_boundary() {
     }
     #[allow(clippy::disallowed_macros)]
     if cfg!(windows) {
-        use oxdock_fs::env::os::windows::{managed, substrate};
-        // Tier 3: exactly the sanctioned baseline, never host extensions.
+        use oxdock_fs::env::os::windows;
+        // Seeded PATH: exactly the sandbox baseline, never host extensions.
         assert_eq!(
             got.get("PATH")
                 .or_else(|| got.get("Path"))
                 .map(String::as_str),
-            Some(substrate::SANCTIONED_PATH),
+            Some(windows::DEFAULT_PATH),
             "child PATH must be the baseline: {got:?}"
         );
-        // Tier 2 + managed home: scratch-bound, never the host's.
+        // Seeded home and temp: scratch-bound, never the host's.
         let home = got.get("HOME").cloned().unwrap_or_default();
         let norm = home.replace('\\', "/");
         assert!(
@@ -5860,10 +5850,10 @@ fn tiered_no_prelude_child_env_holds_boundary() {
             Some(home.as_str()),
             "TMP shares the scratch tmp: {got:?}"
         );
-        // Managed identity: sandbox name, never host identity.
+        // Seeded identity: sandbox name, never host identity.
         assert_eq!(
             got.get("USERNAME").map(String::as_str),
-            Some(substrate::MANAGED_IDENTITY),
+            Some(oxdock_fs::env::os::SANDBOX_IDENTITY),
             "USERNAME must be the sandbox identity: {got:?}"
         );
         // Native profile anchor binds the scratch: without it Windows
@@ -5873,16 +5863,21 @@ fn tiered_no_prelude_child_env_holds_boundary() {
             Some(home.as_str()),
             "USERPROFILE must bind the session scratch: {got:?}"
         );
-        let _ = managed::HOME;
+        // Unix rows ride Windows too, for cross-compiled tools.
+        assert_eq!(
+            got.get("TMPDIR").map(String::as_str),
+            Some(home.as_str()),
+            "TMPDIR must bind the session scratch: {got:?}"
+        );
     } else {
-        use oxdock_fs::env::os::unix::{managed, substrate};
-        // Tier 3: exactly the sanctioned baseline, never host extensions.
+        use oxdock_fs::env::os::unix;
+        // Seeded PATH: exactly the sandbox baseline, never host extensions.
         assert_eq!(
             got.get("PATH").map(String::as_str),
-            Some(substrate::SANCTIONED_PATH),
+            Some(unix::DEFAULT_PATH),
             "child PATH must be the baseline: {got:?}"
         );
-        // Tier 2 + managed home: scratch-bound, never the host's.
+        // Seeded home and temp: scratch-bound, never the host's.
         let home = got.get("HOME").cloned().unwrap_or_default();
         let tmpdir = got.get("TMPDIR").cloned().unwrap_or_default();
         assert_eq!(
@@ -5893,23 +5888,22 @@ fn tiered_no_prelude_child_env_holds_boundary() {
             home.ends_with("/tmp") && home.contains("oxdock-"),
             "HOME must bind the session scratch, got {home:?}"
         );
-        // Managed identity: sandbox name, never host identity.
+        // Seeded identity: sandbox name, never host identity.
         assert_eq!(
             got.get("LOGNAME").map(String::as_str),
-            Some(substrate::MANAGED_IDENTITY),
+            Some(oxdock_fs::env::os::SANDBOX_IDENTITY),
             "LOGNAME must be the sandbox identity: {got:?}"
         );
         assert_eq!(
             got.get("USER").map(String::as_str),
-            Some(substrate::MANAGED_IDENTITY),
+            Some(oxdock_fs::env::os::SANDBOX_IDENTITY),
             "USER must be the sandbox identity: {got:?}"
         );
         assert!(!got.get("TERM").cloned().unwrap_or_default().is_empty());
-        let _ = managed::TMPDIR;
     }
-    // Tier 4: host values must not appear anywhere, on any platform.
+    // No host values anywhere, on any platform.
     assert!(
-        !got.contains_key("OXDOCK_TIER_AUDIT_PROBE"),
+        !got.contains_key("OXDOCK_SEED_AUDIT_PROBE"),
         "host probe leaked: {got:?}"
     );
     if !host_home.is_empty() {

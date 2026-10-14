@@ -21,6 +21,7 @@ mock-process = []
 
 [dependencies]
 anyhow.workspace = true
+indoc.workspace = true
 oxdock-fs.workspace = true
 oxdock-parser.workspace = true
 oxdock-pipe.workspace = true

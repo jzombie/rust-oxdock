@@ -7,7 +7,6 @@ use std::process::Command as ProcessCommand;
 use std::process::Stdio;
 
 use oxdock_fs::PolicyPath;
-use oxdock_fs::env as oxdock_env;
 
 use crate::child::ChildHandle;
 use crate::contract::{
@@ -187,24 +186,11 @@ fn apply_ctx(
         PolicyPath::Unguarded(p) => std::borrow::Cow::Borrowed(p.as_path()),
     };
     command.current_dir(cwd_path);
-    // Tiered child env: script env layered over engine-managed
-    // substrate (Tier 1 OS + Tier 2 scratch temp + Tier 3 PATH
-    // baseline), never host inherit. Explicit script values win within
-    // their tier; Tier 1A invariants cannot be overridden. Anchor
-    // diagnostics live in one place (`env_policy`) shared with every
-    // other spawn site, so the messages cannot drift per call site.
-    let mut staged = ctx.substrate().assemble(ctx.envs().as_ref(), true);
-    // `CARGO_TARGET_DIR` rides alongside, not inside, the tiers: an
-    // explicit script value wins, else the session scratch target.
-    if !crate::env_policy::has_var(ctx.envs().as_ref(), oxdock_env::cargo::TARGET_DIR) {
-        staged.insert(
-            oxdock_env::cargo::TARGET_DIR.to_string(),
-            ctx.cargo_target_dir()
-                .command_path()
-                .to_string_lossy()
-                .into_owned(),
-        );
-    }
+    // Closed child env: the script map is the single source of truth
+    // (seeded at session start, uniformly overwritten by ENV). Stage
+    // it verbatim after the shared anchor pre-flight, so the messages
+    // cannot drift per call site.
+    let staged = ctx.envs().as_ref().clone();
     crate::env_policy::check_spawn_anchors(program, &staged, require_path)?;
     command.env_clear();
     command.envs(&staged);
@@ -300,6 +286,7 @@ fn spawn_child_with_streams(
 mod tests {
     use super::*;
     use oxdock_fs::GuardedPath;
+    use oxdock_fs::env as oxdock_env;
     use std::collections::HashMap;
 
     fn make_ctx(envs: &[(&str, &str)]) -> (oxdock_fs::GuardedTempDir, CommandContext) {
@@ -311,8 +298,7 @@ mod tests {
             .map(|(key, value)| (key.to_string(), value.to_string()))
             .collect();
         let scratch = oxdock_fs::reserve_cargo_scratch().expect("scratch");
-        let substrate = crate::env_policy::SubstrateEnv::capture_for_scratch(&scratch);
-        let ctx = CommandContext::from_map(&cwd, &map, &scratch, &substrate, &guard, &guard);
+        let ctx = CommandContext::from_map(&cwd, &map, &scratch, &guard, &guard);
         (temp, ctx)
     }
 
@@ -354,8 +340,7 @@ mod tests {
             map.insert(key.to_string(), value.to_string());
         }
         let scratch = oxdock_fs::reserve_cargo_scratch().expect("scratch");
-        let substrate = crate::env_policy::SubstrateEnv::capture_for_scratch(&scratch);
-        let ctx = CommandContext::from_map(&cwd, &map, &scratch, &substrate, &guard, &guard);
+        let ctx = CommandContext::from_map(&cwd, &map, &scratch, &guard, &guard);
         (temp, ctx)
     }
 
@@ -413,7 +398,7 @@ mod tests {
         // PATH the helper bridges, and needs a writable home for its
         // toolchain lookup. Managed HOME points at scratch (no
         // toolchains), so this test bridges the host home explicitly:
-        // production scripts needing toolchains route Tier 4 the same
+        // production scripts needing toolchains route it the same
         // way instead of inheriting it ambiently.
         #[allow(clippy::disallowed_macros)]
         #[cfg(unix)]
@@ -592,44 +577,18 @@ mod tests {
 
     #[test]
     #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-    fn apply_ctx_sets_cwd_and_cargo_target_dir_precedence() {
-        // Default branch: executor-provided cargo target dir wins when the
-        // env map has no explicit override. PATH is seeded because the
-        // closed child env requires it for bare program names.
-        let (temp_a, ctx_a) = make_ctx(&[(oxdock_env::os::PATH, "test-path")]);
-        let expected_default = ctx_a
-            .cargo_target_dir()
-            .command_path()
-            .to_string_lossy()
-            .into_owned();
-        let mut cmd = ProcessCommand::new("prog");
-        apply_ctx(&mut cmd, &ctx_a, "prog", false).expect("apply with explicit PATH");
-        let envs_a: HashMap<String, String> = cmd
-            .get_envs()
-            .map(|(k, v)| {
-                (
-                    k.to_string_lossy().into_owned(),
-                    v.map(|value| value.to_string_lossy().into_owned())
-                        .unwrap_or_default(),
-                )
-            })
-            .collect();
-        assert_eq!(
-            envs_a.get(oxdock_env::cargo::TARGET_DIR),
-            Some(&expected_default)
-        );
-        drop(temp_a);
-
-        // Override branch: an explicit CARGO_TARGET_DIR env mapping wins over
-        // the executor default.
-        let (temp_b, ctx_b) = make_ctx(&[
+    fn apply_ctx_stages_map_verbatim() {
+        // The map is the single source of truth: declared entries stage
+        // exactly as spelled, and nothing is injected. PATH is present
+        // because the closed child env requires it for bare names.
+        let (_temp, ctx) = make_ctx(&[
             (oxdock_env::cargo::TARGET_DIR, "custom-target"),
             ("FOO", "bar"),
             (oxdock_env::os::PATH, "test-path"),
         ]);
         let mut cmd = ProcessCommand::new("prog");
-        apply_ctx(&mut cmd, &ctx_b, "prog", false).expect("apply with explicit PATH");
-        let envs_b: HashMap<String, String> = cmd
+        apply_ctx(&mut cmd, &ctx, "prog", false).expect("apply with explicit PATH");
+        let envs: HashMap<String, String> = cmd
             .get_envs()
             .map(|(k, v)| {
                 (
@@ -640,13 +599,29 @@ mod tests {
             })
             .collect();
         assert_eq!(
-            envs_b
-                .get(oxdock_env::cargo::TARGET_DIR)
-                .map(String::as_str),
+            envs.get(oxdock_env::cargo::TARGET_DIR).map(String::as_str),
             Some("custom-target")
         );
-        assert_eq!(envs_b.get("FOO").map(String::as_str), Some("bar"));
-        drop(temp_b);
+        assert_eq!(envs.get("FOO").map(String::as_str), Some("bar"));
+
+        // Absent stays absent: no silent CARGO_TARGET_DIR injection.
+        let (_temp, ctx) = make_ctx(&[(oxdock_env::os::PATH, "test-path")]);
+        let mut cmd = ProcessCommand::new("prog");
+        apply_ctx(&mut cmd, &ctx, "prog", false).expect("apply with explicit PATH");
+        let envs: HashMap<String, String> = cmd
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|value| value.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                )
+            })
+            .collect();
+        assert!(
+            !envs.contains_key(oxdock_env::cargo::TARGET_DIR),
+            "unstaged names must stay out: {envs:?}"
+        );
     }
 
     #[test]
@@ -693,34 +668,19 @@ mod tests {
         );
     }
 
-    /// Tier 3: a bare program name without a script PATH still stages
-    /// the sanctioned baseline instead of bailing, so core utilities
-    /// resolve with zero prelude.
+    /// No baseline injection: a bare program name without a script
+    /// PATH bails naming the `INHERIT_ENV [PATH]` fix, so missing
+    /// seed entries fail loudly instead of resolving through a
+    /// silent default.
     #[test]
     #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-    fn apply_ctx_stages_baseline_path_for_bare_program() {
+    fn apply_ctx_bails_for_bare_program_without_path() {
         let (_temp, ctx) = make_ctx(&[("FOO", "bar")]);
         let mut cmd = ProcessCommand::new("prog");
-        apply_ctx(&mut cmd, &ctx, "prog", false).expect("baseline must satisfy the anchor");
-        let envs: HashMap<String, String> = cmd
-            .get_envs()
-            .map(|(k, v)| {
-                (
-                    k.to_string_lossy().into_owned(),
-                    v.map(|value| value.to_string_lossy().into_owned())
-                        .unwrap_or_default(),
-                )
-            })
-            .collect();
-        #[allow(clippy::disallowed_macros)]
-        let baseline = if cfg!(windows) {
-            oxdock_env::os::windows::substrate::SANCTIONED_PATH
-        } else {
-            oxdock_env::os::unix::substrate::SANCTIONED_PATH
-        };
-        assert_eq!(
-            envs.get(oxdock_env::os::PATH).map(String::as_str),
-            Some(baseline)
+        let err = apply_ctx(&mut cmd, &ctx, "prog", false).expect_err("PATH anchor must trip");
+        assert!(
+            err.to_string().contains("INHERIT_ENV [PATH]"),
+            "unexpected error: {err}"
         );
     }
 
@@ -736,17 +696,42 @@ mod tests {
         apply_ctx(&mut rel_cmd, &ctx, "sub/prog", false).expect("relative path needs no PATH");
     }
 
-    /// Tier 1A: the NT loader anchor injects on Windows, so the anchor
-    /// check passes with zero prelude; elsewhere there is nothing to
-    /// check and staging still succeeds.
+    /// The NT loader anchor is seeded, never injected: without a
+    /// script `SystemRoot` the anchor check bails on Windows (naming
+    /// the fix); elsewhere there is nothing to check and staging
+    /// still succeeds.
     #[test]
     #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
     fn apply_ctx_systemroot_check_follows_platform() {
         let (_temp, ctx) = make_ctx(&[(oxdock_env::os::PATH, "test-path")]);
         let mut cmd = ProcessCommand::new("prog");
-        apply_ctx(&mut cmd, &ctx, "prog", false).expect("tiers satisfy anchors on every platform");
         #[allow(clippy::disallowed_macros)]
         if cfg!(windows) {
+            let err =
+                apply_ctx(&mut cmd, &ctx, "prog", false).expect_err("SystemRoot anchor must trip");
+            assert!(
+                err.to_string().contains("SystemRoot"),
+                "unexpected error: {err}"
+            );
+        } else {
+            apply_ctx(&mut cmd, &ctx, "prog", false).expect("no anchor beyond PATH on unix");
+        }
+    }
+
+    /// Windows casing: `Path` satisfies the case-insensitive anchor
+    /// and stages exactly as spelled. No canonicalization, no drops:
+    /// the map is staged verbatim.
+    #[test]
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    fn apply_ctx_accepts_windows_casing_variants() {
+        // Deliberate non-canonical spelling: this test proves the
+        // anchor matches case-insensitively while staging keeps the
+        // script spelling, so the literal stays.
+        let (_temp, ctx) = make_ctx(&[("Path", "test-path")]);
+        let mut cmd = ProcessCommand::new("prog");
+        #[allow(clippy::disallowed_macros)]
+        if cfg!(windows) {
+            apply_ctx(&mut cmd, &ctx, "prog", false).expect("cased PATH satisfies the anchor");
             let envs: HashMap<String, String> = cmd
                 .get_envs()
                 .map(|(k, v)| {
@@ -757,48 +742,13 @@ mod tests {
                     )
                 })
                 .collect();
-            assert!(
-                envs.contains_key(oxdock_env::os::windows::substrate::SYSTEM_ROOT),
-                "Tier 1A must stage SystemRoot: {envs:?}"
-            );
-        }
-    }
-
-    /// Windows casing: `SYSTEMROOT` and `Path` spellings satisfy the
-    /// case-insensitive Tier 1A drop (script values for loader
-    /// invariants are replaced by the injected anchor, never honored).
-    #[test]
-    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-    fn apply_ctx_accepts_windows_casing_variants() {
-        // Deliberate non-canonical spellings: this test proves alternate
-        // casings hit the same Tier 1A rule, so the literals stay.
-        let (_temp, ctx) = make_ctx(&[("SYSTEMROOT", "C:\\Windows"), ("Path", "test-path")]);
-        let mut cmd = ProcessCommand::new("prog");
-        apply_ctx(&mut cmd, &ctx, "prog", false).expect("tiers stage on every platform");
-        let envs: HashMap<String, String> = cmd
-            .get_envs()
-            .map(|(k, v)| {
-                (
-                    k.to_string_lossy().into_owned(),
-                    v.map(|value| value.to_string_lossy().into_owned())
-                        .unwrap_or_default(),
-                )
-            })
-            .collect();
-        // Explicit PATH always wins over the baseline, any casing.
-        #[allow(clippy::disallowed_macros)]
-        if cfg!(windows) {
-            let path_val = envs
-                .iter()
-                .find(|(k, _)| k.eq_ignore_ascii_case(oxdock_env::os::PATH))
-                .map(|(_, v)| v.clone())
-                .unwrap_or_default();
-            assert_eq!(path_val, "test-path");
-        } else {
             assert_eq!(envs.get("Path").map(String::as_str), Some("test-path"));
-            assert_eq!(
-                envs.get(oxdock_env::os::PATH).map(String::as_str),
-                Some(oxdock_env::os::unix::substrate::SANCTIONED_PATH)
+        } else {
+            let err = apply_ctx(&mut cmd, &ctx, "prog", false)
+                .expect_err("cased PATH is not PATH on unix");
+            assert!(
+                err.to_string().contains("INHERIT_ENV [PATH]"),
+                "unexpected error: {err}"
             );
         }
     }

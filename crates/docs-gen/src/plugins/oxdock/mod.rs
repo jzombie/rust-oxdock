@@ -81,8 +81,8 @@ fn plugin_type_reference(module: String) -> Result<Value> {
 }
 
 /// Generated environment-variable contract reference from the live
-/// tier tables, so the documented substrate can never drift from the
-/// assembled one.
+/// seed tables, so the documented defaults can never drift from the
+/// seeded ones.
 #[oxdock_func(pure, returns = TypeTag::String)]
 fn env_contracts() -> Result<Value> {
     Ok(Value::string(env_contracts::render_env_contracts()?))

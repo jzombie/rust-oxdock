@@ -346,7 +346,17 @@ pub fn run_steps_with_manager_with_modules<P: ProcessManager>(
 fn new_state<P: ProcessManager>(fs: Box<dyn WorkspaceFs>, io: ExecIo) -> Result<ExecState<P>> {
     let cwd = fs.root().clone();
     let build_context = fs.build_context().clone();
-    let mut envs = BuiltinEnv::collect(&build_context).into_envs();
+    let cargo_scratch = reserve_cargo_scratch()?;
+    // Seeded script environment: sandbox defaults first, then explicit
+    // layers win (BuiltinEnv sanctions, `io` overrides route host
+    // entries). The pure seed is stored alongside for `ISOLATED`
+    // resets and transport sanitize.
+    let seed = Arc::new(oxdock_process::seed_defaults(
+        &cargo_scratch.tmp_seed_display(),
+        &cargo_scratch.target_seed_display(),
+    ));
+    let mut envs = (*seed).clone();
+    envs.extend(BuiltinEnv::collect(&build_context).into_envs());
     for (key, value) in io.inherit_env_overrides() {
         envs.insert(key.clone(), value.clone());
     }
@@ -356,8 +366,8 @@ fn new_state<P: ProcessManager>(fs: Box<dyn WorkspaceFs>, io: ExecIo) -> Result<
     let exact_stdout = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
     let mut state = ExecState {
         fs,
-        cargo_scratch: reserve_cargo_scratch()?,
-        substrate_cell: std::sync::OnceLock::new(),
+        cargo_scratch,
+        seed,
         cwd,
         envs,
         bg_children: Vec::new(),

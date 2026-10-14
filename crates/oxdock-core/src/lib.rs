@@ -1362,11 +1362,12 @@ mod tests {
         let mid = read_env("mid.txt");
         let deep = read_env("deep.txt");
 
-        // Expected names per depth. SystemRoot rides the allowlists, so it
-        // appears on Windows and is skipped elsewhere; CARGO_TARGET_DIR is
-        // injected for every spawn. Tier substrate rides every spawn too:
-        // TERM + TMPDIR on unix (Tier 1B default + Tier 2 scratch), and
-        // PATHEXT + TEMP + TMP on Windows. The shell itself adds a few
+        // Expected names per depth. The seed rides every spawn (top,
+        // mid after reseed, deep after reseed): PATH, CARGO_TARGET_DIR,
+        // SystemRoot on Windows, TERM + TMPDIR + HOME + LOGNAME + USER
+        // on unix (plus the same unix rows on Windows for
+        // cross-compiled tools), and PATHEXT + TEMP + TMP + USERPROFILE
+        // + USERNAME on Windows. The shell itself adds a few
         // names (`PWD`, `SHLVL`, `_` on unix shells) that no allowlist
         // routes: those are shell-added, not leaked, and named explicitly
         // so any newcomer fails loudly with its name shown.
@@ -1377,25 +1378,31 @@ mod tests {
             &["PWD", "SHLVL", "_"]
         };
         #[allow(clippy::disallowed_macros)]
-        let (with_root, with_tiers): (&[&str], &[&str]) = if cfg!(windows) {
+        let (with_root, with_seed): (&[&str], &[&str]) = if cfg!(windows) {
             (
                 &[oxdock_env::os::windows::SYSTEM_ROOT],
                 &[
-                    oxdock_env::os::windows::substrate::PATHEXT,
-                    oxdock_env::os::windows::managed::TEMP,
-                    oxdock_env::os::windows::managed::TMP,
-                    oxdock_env::os::windows::managed::HOME,
-                    oxdock_env::os::windows::managed::USERPROFILE,
+                    oxdock_env::os::windows::PATHEXT,
+                    oxdock_env::os::windows::TEMP,
+                    oxdock_env::os::windows::TMP,
+                    oxdock_env::os::unix::HOME,
+                    oxdock_env::os::windows::USERPROFILE,
                     oxdock_env::os::windows::USERNAME,
+                    oxdock_env::os::windows::SYSTEM_ROOT,
+                    oxdock_env::os::windows::WINDIR,
+                    oxdock_env::os::unix::TMPDIR,
+                    oxdock_env::os::unix::LOGNAME,
+                    oxdock_env::os::unix::USER,
+                    oxdock_env::os::unix::TERM,
                 ],
             )
         } else {
             (
                 &[],
                 &[
-                    oxdock_env::os::unix::substrate::TERM,
-                    oxdock_env::os::unix::managed::TMPDIR,
-                    oxdock_env::os::unix::managed::HOME,
+                    oxdock_env::os::unix::TERM,
+                    oxdock_env::os::unix::TMPDIR,
+                    oxdock_env::os::unix::HOME,
                     oxdock_env::os::unix::LOGNAME,
                     oxdock_env::os::unix::USER,
                 ],
@@ -1404,11 +1411,11 @@ mod tests {
         let mut expect_top: Vec<&str> =
             vec![oxdock_env::os::PATH, "OUTER", oxdock_env::cargo::TARGET_DIR];
         expect_top.extend(with_root);
-        expect_top.extend(with_tiers);
+        expect_top.extend(with_seed);
         let expect_mid = expect_top.clone();
         let mut expect_deep: Vec<&str> = vec![oxdock_env::os::PATH, oxdock_env::cargo::TARGET_DIR];
         expect_deep.extend(with_root);
-        expect_deep.extend(with_tiers);
+        expect_deep.extend(with_seed);
         for (label, got, mut want) in [
             ("top", &top, expect_top),
             ("mid", &mid, expect_mid),

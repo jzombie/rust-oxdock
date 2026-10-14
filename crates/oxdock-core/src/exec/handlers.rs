@@ -4551,7 +4551,7 @@ struct IsolatedScopeGuard<'a, 'b, P: ProcessManager> {
 impl<'a, 'b, P: ProcessManager> IsolatedScopeGuard<'a, 'b, P> {
     fn enter(cx: &'a mut StepCtx<'b, P>) -> Self {
         cx.state.isolated_stack.push(Arc::clone(&cx.state.envs));
-        cx.state.envs = Arc::new(HashMap::new());
+        cx.state.envs = Arc::clone(&cx.state.seed);
         Self { cx }
     }
 }
@@ -4583,10 +4583,12 @@ impl<P: ProcessManager> Drop for IsolatedScopeGuard<'_, '_, P> {
     }
 }
 
-/// Execute an `ISOLATED` body with a scrubbed script environment: only
-/// names the block re-adds through its leading allowlist reach spawned
-/// children. Variables, pipes, and files flow through untouched; scope
-/// exit restores the prior environment via the guard, on every path.
+/// Execute an `ISOLATED` body with the seeded script environment:
+/// the map resets to the session seed, and only names the block
+/// re-adds through its leading allowlist reach spawned children on
+/// top of that seed. Variables, pipes, and files flow through
+/// untouched; scope exit restores the prior environment via the
+/// guard, on every path.
 pub(crate) fn isolated<P: ProcessManager>(cx: &mut StepCtx<'_, P>, body: &[Step]) -> Result<Flow> {
     let mut guard = IsolatedScopeGuard::enter(cx);
     // Reborrow through the guard once: field borrows off a direct `&mut`
@@ -4628,7 +4630,13 @@ pub(crate) fn isolated_inherit_env<P: ProcessManager>(
     };
     let envs = Arc::make_mut(&mut cx.state.envs);
     for key in keys {
-        if let Some(value) = snapshot.get(key) {
+        let matched = snapshot
+            .iter()
+            .find(|(k, _)| oxdock_process::names_eq(k, key));
+        if let Some((_, value)) = matched {
+            // De-duplicate casing variants before inserting, so the map
+            // never carries two spellings of one name into dispatch.
+            envs.retain(|k, _| !oxdock_process::names_eq(k, key));
             envs.insert(key.clone(), value.clone());
         }
     }

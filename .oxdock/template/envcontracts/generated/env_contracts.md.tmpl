@@ -1,103 +1,67 @@
-## Tier contract
+## Seeded environment
 
-Every spawned child receives the script environment layered over
-engine-managed substrate, never ambient host state. Tiers 1 and 2
-inject on every spawn including `ISOLATED`; Tier 3 injects
-everywhere except `ISOLATED` without an inner `PATH`; Tier 4
-arrives only by explicit routing.
+Session start writes sandbox defaults directly into the script
+environment map; explicit script `ENV`/`INHERIT_ENV` overwrite
+entries uniformly; `ISOLATED` resets the map to the same seed.
+Nothing injects at spawn time and nothing is immutable: every
+default below is overridable like any other variable.
 
-### Tier 1A: OS loader invariants
+### Sandbox baseline defaults
 
-Required for process initialization on Windows: the dynamic
-linker and MSVC CRT cannot run without these. Injecting them
-is not a leak.
+Seeded at session start and on every `ISOLATED` entry. Explicit script values win.
 
-| Variable | Default | Rule |
+| Variable | Default source | Rule |
 | --- | --- | --- |
-| `SystemRoot` | host value, else the `C:\Windows` fallback | immutable: injected unconditionally; script values dropped at assembly and rejected by the static pass |
-| `windir` | same root as `SystemRoot` | immutable, same as `SystemRoot` |
+| `PATH` | sandbox baseline (`/usr/bin:/bin:/usr/sbin:/sbin`, `C:\Windows\System32;C:\Windows`) | seeded default: explicit script values win |
+| `TMPDIR` | session `<scratch>/tmp` | seeded default: explicit script values win |
+| `HOME` | session `<scratch>/tmp`, so tools cannot discover host configs | seeded default: explicit script values win |
+| `LOGNAME` | fixed sandbox name `oxdock` (shells would otherwise synthesize host identity from `getpwuid`) | seeded default: explicit script values win |
+| `USER` | fixed sandbox name `oxdock` | seeded default: explicit script values win |
+| `TERM` | host value, else `dumb` | seeded default: explicit script values win |
+| `TEMP` | session `<scratch>/tmp` | seeded default: explicit script values win |
+| `TMP` | session `<scratch>/tmp` | seeded default: explicit script values win |
+| `USERPROFILE` | session `<scratch>/tmp` (native profile anchor; the Win32 API would otherwise resolve the host profile) | seeded default: explicit script values win |
+| `USERNAME` | fixed sandbox name `oxdock` | seeded default: explicit script values win |
+| `SystemRoot` | host value, else the `C:\Windows` fallback | seeded default: explicit script values win |
+| `windir` | same root as `SystemRoot` | seeded default: explicit script values win |
+| `PATHEXT` | host value, else `.COM;.EXE;.BAT;.CMD` | seeded default: explicit script values win |
+| `CARGO_TARGET_DIR` | session `<scratch>/target`, owned by cargo alone | seeded default: explicit script values win |
 
-### Tier 1B: Substrate defaults
+### Explicit routing
 
-Terminal identity and executable-extension resolution. Host
-values apply when set, synthetic fallbacks otherwise; scripts
-override freely.
+Host variables enter scripts only when listed in `INHERIT_ENV`
+(inside `ISOLATED`, only when listed in the block allowlist, which
+copies from the enclosing scope). Absent stays absent.
 
-| Variable | Default | Rule |
-| --- | --- | --- |
-| `PATHEXT` | host value, else `.COM;.EXE;.BAT;.CMD` | default: script values win |
-| `TERM` | host value, else `dumb` | default: script values win |
-
-### Tier 2: Managed temp and home
-
-Scratch spaces and tool home, always bound to the session
-`<scratch>/tmp` so children can neither read nor collide with
-host temporary files and configs.
-
-| Variable | Default | Rule |
-| --- | --- | --- |
-| `TEMP` | session `<scratch>/tmp` | managed: script values win; never host-inherited |
-| `TMP` | session `<scratch>/tmp` | managed: script values win; never host-inherited |
-| `USERPROFILE` | session `<scratch>/tmp` (native profile anchor; Win32 API fallback would otherwise resolve the host profile) | managed: script values win; never host-inherited |
-| `TMPDIR` | session `<scratch>/tmp` | managed: script values win; never host-inherited |
-| `HOME` | session `<scratch>/tmp`, so tools cannot discover host configs | managed: script values win; never host-inherited |
-
-### Managed identity
-
-Shells synthesize login identity from `getpwuid` when these
-are absent, which would reintroduce host identity into
-scrubbed children. The engine pins the sandbox name instead.
-
-| Variable | Default | Rule |
-| --- | --- | --- |
-| `LOGNAME` | fixed sandbox name `oxdock` (shells would otherwise synthesize host identity from `getpwuid`) | managed: script values win |
-| `USER` | fixed sandbox name `oxdock` | managed: script values win |
-| `USERNAME` | fixed sandbox name `oxdock` | managed: script values win |
-
-### Tier 3: Execution path
-
-Sanctioned system directories for core utilities. Host `PATH`
-extensions (custom toolchains, user bins) still require
-explicit `INHERIT_ENV [PATH]`.
-
-| Variable | Default | Rule |
-| --- | --- | --- |
-| `PATH` | sanctioned baseline (`/usr/bin:/bin:/usr/sbin:/sbin`, `C:\Windows\System32;C:\Windows`) | baseline: script values win; suppressed inside `ISOLATED` without an inner `PATH` |
-
-### Tier 4: Identity and credentials
-
-User data, configs, and secrets. Zero automatic injection:
-toolchain legs bridge what they need explicitly.
-
-| Variable | Default | Rule |
-| --- | --- | --- |
-| `USERPROFILE` | absent on Unix; managed scratch binding on Windows (Tier 2) | zero host injection everywhere: bridged explicitly on Unix; script values win |
 ### Host reads
 
-Variables the engine process itself touches (not injects).
+Variables the engine process itself touches (not seeds into scripts).
 
 | Variable | Read by | Purpose |
 | --- | --- | --- |
 | `SHELL` | oxdock_process::shell::shell_program | interactive shell resolution (`oxdock --shell`); batch steps pin `sh` |
 | `COMSPEC` | oxdock_process::shell::shell_program | interactive shell resolution on Windows; batch steps pin `cmd` |
-| `TERM` | SubstrateEnv::capture | Tier 1B default; synthetic `dumb` when the host sets nothing |
-| `SystemRoot` | SubstrateEnv::capture | Tier 1A anchor; fallback is the `C:\Windows` constant |
-| `PATHEXT` | SubstrateEnv::capture | Tier 1B default; synthetic list when the host sets nothing |
-| `TMPDIR` | GuardedPath::tempdir (via tempfile) | scratch root placement only; the value is never injected |
+| `TERM` | seed_defaults | seeded default; synthetic `dumb` when the host sets nothing |
+| `SystemRoot` | seed_defaults | seeded default; fallback is the `C:\Windows` constant |
+| `PATHEXT` | seed_defaults | seeded default; synthetic list when the host sets nothing |
+| `HOME` | seed_transport | transport profile bridge only: the host value reaches `ssh` key discovery, never scripts |
+| `USERPROFILE` | seed_transport | transport profile bridge only: the host value reaches `ssh.exe` key discovery, never scripts |
+| `TMPDIR` | LazyGuardedTempDir::new (via std::env::temp_dir) | scratch root placement only; the value is never seeded |
 | `CARGO_FEATURE_*` | BuiltinEnv::collect | sanctioned ambient seed: Cargo-namespaced feature flags |
 | `CARGO_CFG_*` | BuiltinEnv::collect | sanctioned ambient seed: Cargo-namespaced cfg flags |
 
 ### Precedence and enforcement
 
-Tier 1A is immutable: the static pass rejects `ENV SystemRoot=...`
-and assembly drops script values for those names. Every other
-tier lets explicit script `ENV`/`INHERIT_ENV` win. `check_spawn_anchors`
-validates the final assembled map with no caller-specific flags:
-present anchors pass, and the absent baseline inside unpatched
-`ISOLATED` blocks trips the bail naming `INHERIT_ENV [PATH]`.
+Uniform script-wins: the seed populates defaults, and explicit
+script `ENV`/`INHERIT_ENV` overwrite them like any other variable.
+No name is immutable. `ISOLATED` resets to the identical seed, so
+inner and outer scopes start from the same defaults.
+`check_spawn_anchors` validates the final staged map with no
+caller-specific flags: present anchors pass, absent ones bail
+naming the `INHERIT_ENV` fix.
 
 Source of truth: `crates/sys/oxdock-fs/src/env.rs` (names) and
-`crates/sys/oxdock-process/src/env_policy.rs` (assembly). This
+`crates/sys/oxdock-process/src/env_policy.rs` (seeding). This
 file is generated; do not edit by hand.
 
 ### Engine plumbing

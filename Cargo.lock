@@ -1665,6 +1665,7 @@ dependencies = [
  "anyhow",
  "cache-manager",
  "glob",
+ "indoc",
  "libc",
  "oxdock-sys-test-utils",
  "tempfile",
@@ -1798,6 +1799,7 @@ name = "oxdock-process"
 version = "0.28.0-alpha"
 dependencies = [
  "anyhow",
+ "indoc",
  "libc",
  "oxdock-fs",
  "oxdock-parser",

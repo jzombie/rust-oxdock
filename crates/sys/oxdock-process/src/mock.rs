@@ -376,9 +376,7 @@ mod tests {
         let guard = temp.as_guarded_path().clone();
         let cwd: PolicyPath = guard.clone().into();
         let scratch = oxdock_fs::reserve_cargo_scratch().expect("scratch");
-        let substrate = crate::env_policy::SubstrateEnv::capture_for_scratch(&scratch);
-        let ctx =
-            CommandContext::from_map(&cwd, &HashMap::new(), &scratch, &substrate, &guard, &guard);
+        let ctx = CommandContext::from_map(&cwd, &HashMap::new(), &scratch, &guard, &guard);
         (guard, ctx)
     }
 

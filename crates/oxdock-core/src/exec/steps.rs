@@ -396,10 +396,9 @@ impl<'a, P: ProcessManager> StepCtx<'a, P> {
         self.state.get_var(key)
     }
 
-    /// Look up an environment variable visible to the script:
-    /// the script map first, session substrate (Tier 1/2, PATH baseline)
-    /// second. The baseline is suppressed inside `ISOLATED` without an
-    /// inner `PATH`, matching what child spawns receive.
+    /// Look up an environment variable visible to the script: the
+    /// script map, seeded at session start. Exact hit first,
+    /// case-insensitive fallback on Windows.
     pub fn get_env(&self, key: &str) -> Option<String> {
         self.state.get_env(key).map(str::to_string)
     }
@@ -414,35 +413,12 @@ impl<'a, P: ProcessManager> StepCtx<'a, P> {
         self.state.envs.as_ref().clone()
     }
 
-    /// Final child environment for spawn sites outside `CommandContext`
-    /// (PTY): script env over session substrate with the baseline
-    /// suppressed exactly where assembly skips it, plus
-    /// `CARGO_TARGET_DIR` (explicit script value wins, else the session
-    /// scratch target). Mirrors what `apply_ctx` stages for `RUN`.
-    pub fn child_envs(&self) -> HashMap<String, String> {
-        let mut substrate = self.state.substrate().clone();
-        if !self.state.baseline_applies() {
-            substrate = substrate.without_baseline();
-        }
-        let mut staged = substrate.assemble(&self.state.envs, true);
-        if !staged.keys().any(|k| {
-            #[allow(clippy::disallowed_macros)]
-            if cfg!(windows) {
-                k.eq_ignore_ascii_case(oxdock_fs::env::cargo::TARGET_DIR)
-            } else {
-                k == oxdock_fs::env::cargo::TARGET_DIR
-            }
-        }) {
-            staged.insert(
-                oxdock_fs::env::cargo::TARGET_DIR.to_string(),
-                self.state
-                    .cargo_scratch
-                    .command_path()
-                    .to_string_lossy()
-                    .into_owned(),
-            );
-        }
-        staged
+    /// Materialize the session scratch hierarchy (root + `tmp`) for
+    /// spawn sites that stage children without a `CommandContext`
+    /// (PTY): the seeded `HOME`/`TMPDIR` paths must exist when the
+    /// guest writes them, even when no `RUN` step ran first.
+    pub fn ensure_scratch_materialized(&self) -> Result<()> {
+        self.state.cargo_scratch.ensure_materialized()
     }
 
     /// Current working directory (guarded; stays inside the workspace).

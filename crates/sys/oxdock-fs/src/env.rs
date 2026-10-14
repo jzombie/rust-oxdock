@@ -11,10 +11,10 @@
 //! type, the latter nothing.)
 //!
 //! Rendered reference: `ENV_CONTRACTS.md` at the repository root
-//! (generated from the live tier tables by `cargo run -p docs-gen`).
+//! (generated from the live seed tables by `cargo run -p docs-gen`).
 
 //! Rendered reference: `ENV_CONTRACTS.md` at the repository root
-//! (generated from the live tier tables by `cargo run -p docs-gen`).
+//! (generated from the live seed tables by `cargo run -p docs-gen`).
 
 /// Defines string constants and their module inventory in one place, so
 /// contract rendering cannot miss a name: adding a constant without
@@ -101,112 +101,74 @@ pub mod cargo {
 }
 
 /// Names owned by the host OS, divided by family. `PATH` is shared:
-/// every platform resolves bare executable names through it.
+/// every platform resolves bare executable names through it. Each
+/// family module is flat: every name plus the sandbox baseline value
+/// constants the seeder reads. Name constants route through
+/// `define_names!` (with the `ALL` inventory); baseline values are
+/// plain constants beside them.
 pub mod os {
     /// Executable lookup path, shared by all families.
     pub const PATH: &str = "PATH";
 
+    /// Managed sandbox identity: fixed `LOGNAME`/`USER`/`USERNAME`
+    /// default, shared by all families. Shells synthesize login
+    /// identity from `getpwuid` (or the Win32 profile API) when these
+    /// are absent, which would reintroduce host identity into scrubbed
+    /// children; the engine pins the sandbox name instead. Explicit
+    /// script values win.
+    pub const SANDBOX_IDENTITY: &str = "oxdock";
+
     /// Unix-owned names.
     pub mod unix {
-        /// Shell resolution.
-        pub const SHELL: &str = "SHELL";
-        /// Home directory.
-        pub const HOME: &str = "HOME";
-        /// Login name (synthesized by shells from `getpwuid` when absent).
-        pub const LOGNAME: &str = "LOGNAME";
-        /// User name (synthesized by shells from `getpwuid` when absent).
-        pub const USER: &str = "USER";
-        /// System temp-dir override honored by fixture runners.
-        pub const TMPDIR: &str = "TMPDIR";
-
-        /// Tiered-injection substrate (Unix): OS execution requirements
-        /// the engine auto-injects, never ambient leaks.
-        pub mod substrate {
-            /// Tier 1B: terminal identity. Host value when set, else
-            /// [`FALLBACK_TERM`]; explicit script values win.
-            pub const TERM: &str = "TERM";
-            /// Tier 1B fallback when the host sets no `TERM`.
-            pub const FALLBACK_TERM: &str = "dumb";
-            /// Sanctioned Tier 3 baseline: core system directories.
-            pub const SANCTIONED_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
-            /// Managed sandbox identity: fixed `LOGNAME`/`USER` default.
-            /// Shells synthesize these from `getpwuid` when absent, which
-            /// would reintroduce host identity into scrubbed children;
-            /// the engine pins the sandbox name instead. Explicit script
-            /// values win.
-            pub const MANAGED_IDENTITY: &str = "oxdock";
+        define_names! {
+            /// Shell resolution.
+            SHELL = "SHELL",
+            /// Home directory.
+            HOME = "HOME",
+            /// Login name (synthesized by shells from `getpwuid` when absent).
+            LOGNAME = "LOGNAME",
+            /// User name (synthesized by shells from `getpwuid` when absent).
+            USER = "USER",
+            /// System temp-dir override honored by fixture runners.
+            TMPDIR = "TMPDIR",
+            /// Terminal identity. Host value when set, else
+            /// [`DEFAULT_TERM`]; explicit script values win.
+            TERM = "TERM",
         }
 
-        /// Tier 2 managed-temp names: always present in children, bound
-        /// to the session scratch, never inherited from the host.
-        pub mod managed {
-            /// Managed home: bound to `<scratch>/tmp` so tools cannot
-            /// discover host configs (`~/.gitconfig`, `~/.ssh`). Explicit
-            /// script values win.
-            pub use super::HOME;
-            /// Unix scratch override, bound to `<scratch>/tmp`.
-            pub use super::TMPDIR;
-        }
+        /// Sandbox `PATH` baseline: core system directories.
+        pub const DEFAULT_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
+        /// Fallback when the host sets no `TERM`.
+        pub const DEFAULT_TERM: &str = "dumb";
     }
 
     /// Windows-owned names.
     pub mod windows {
-        /// Shell resolution.
-        pub const COMSPEC: &str = "COMSPEC";
-        /// System root anchor (case-insensitive on Windows).
-        pub const SYSTEM_ROOT: &str = "SystemRoot";
-        /// User profile directory.
-        pub const USERPROFILE: &str = "USERPROFILE";
-        /// Executable-extension list.
-        pub const PATHEXT: &str = "PATHEXT";
-        /// Temporary directory (primary).
-        pub const TEMP: &str = "TEMP";
-        /// Temporary directory (secondary).
-        pub const TMP: &str = "TMP";
-        /// User name (Windows shells read, not synthesize).
-        pub const USERNAME: &str = "USERNAME";
-
-        /// Tiered-injection substrate (Windows): OS execution
-        /// requirements the engine auto-injects, never ambient leaks.
-        pub mod substrate {
-            /// Tier 1A: immutable NT loader invariants. Injected
-            /// unconditionally; script values for these names are
-            /// dropped at child assembly and rejected by the static
-            /// pass.
-            pub use super::SYSTEM_ROOT;
-            /// Tier 1A: Windows directory, companion to `SYSTEM_ROOT`.
-            pub const WINDIR: &str = "windir";
-            /// Tier 1B: executable-extension list. Default when the
-            /// script map lacks it; explicit script values win.
-            pub use super::PATHEXT;
-            /// Tier 1A fallback when the host sets no `SystemRoot`.
-            pub const FALLBACK_SYSTEM_ROOT: &str = r"C:\Windows";
-            /// Tier 1B fallback when the host sets no `PATHEXT`.
-            pub const DEFAULT_PATHEXT: &str = ".COM;.EXE;.BAT;.CMD";
-            /// Sanctioned Tier 3 baseline: core system directories.
-            pub const SANCTIONED_PATH: &str = r"C:\Windows\System32;C:\Windows";
-            /// Managed sandbox identity: fixed `USERNAME` default, so
-            /// scrubbed children carry the sandbox name instead of host
-            /// identity. Explicit script values win.
-            pub const MANAGED_IDENTITY: &str = "oxdock";
+        define_names! {
+            /// Shell resolution.
+            COMSPEC = "COMSPEC",
+            /// System root anchor (case-insensitive on Windows).
+            SYSTEM_ROOT = "SystemRoot",
+            /// Windows directory, companion to `SYSTEM_ROOT`.
+            WINDIR = "windir",
+            /// User profile directory.
+            USERPROFILE = "USERPROFILE",
+            /// Executable-extension list.
+            PATHEXT = "PATHEXT",
+            /// Temporary directory (primary).
+            TEMP = "TEMP",
+            /// Temporary directory (secondary).
+            TMP = "TMP",
+            /// User name (Windows shells read, not synthesize).
+            USERNAME = "USERNAME",
         }
 
-        /// Tier 2 managed-temp names: always present in children, bound
-        /// to the session scratch, never inherited from the host.
-        pub mod managed {
-            /// Managed home: bound to `<scratch>/tmp` so tools cannot
-            /// discover host configs. Explicit script values win.
-            pub use super::super::unix::HOME;
-            /// Windows scratch override (primary), bound to `<scratch>/tmp`.
-            pub use super::TEMP;
-            /// Windows scratch override (secondary), bound to `<scratch>/tmp`.
-            pub use super::TMP;
-            /// Managed profile: native Windows toolchains resolve user
-            /// directories through `USERPROFILE` (falling back to the
-            /// Win32 profile API when absent), so it binds the scratch
-            /// like `HOME` does for ported utilities.
-            pub use super::USERPROFILE;
-        }
+        /// Sandbox `PATH` baseline: core system directories.
+        pub const DEFAULT_PATH: &str = r"C:\Windows\System32;C:\Windows";
+        /// Fallback when the host sets no `PATHEXT`.
+        pub const DEFAULT_PATHEXT: &str = ".COM;.EXE;.BAT;.CMD";
+        /// Fallback when the host sets no `SystemRoot`.
+        pub const DEFAULT_SYSTEM_ROOT: &str = r"C:\Windows";
     }
 }
 
@@ -262,9 +224,13 @@ pub fn plumbing() -> Vec<PlumbingEntry> {
 }
 
 /// Plumbing-table chapter preamble, sourced here with the inventory.
-pub const PLUMBING_INTRO_MD: &str = "### Engine plumbing\n\nNames the engine and Cargo provide to the host process itself.\n\
-     None of these inject into children; scripts see them only through\n\
-     explicit routing.\n";
+pub const PLUMBING_INTRO_MD: &str = indoc::indoc! {"
+    ### Engine plumbing
+
+    Names the engine and Cargo provide to the host process itself.
+    None of these inject into children; scripts see them only through
+    explicit routing.
+"};
 
 #[cfg(test)]
 mod tests {
@@ -280,6 +246,8 @@ mod tests {
             ("oxdock", oxdock::ALL),
             ("cargo", cargo::ALL),
             ("cargo::build", cargo::build::ALL),
+            ("os::unix", os::unix::ALL),
+            ("os::windows", os::windows::ALL),
         ] {
             let mut seen = std::collections::HashSet::new();
             for name in all {
@@ -297,6 +265,14 @@ mod tests {
         assert!(
             cargo::ALL.contains(&cargo::MANIFEST_DIR),
             "plumbing must name MANIFEST_DIR"
+        );
+        assert!(
+            os::unix::ALL.contains(&os::unix::TERM),
+            "unix inventory must name TERM"
+        );
+        assert!(
+            os::windows::ALL.contains(&os::windows::WINDIR),
+            "windows inventory must name WINDIR"
         );
         assert_eq!(
             plumbing().len(),

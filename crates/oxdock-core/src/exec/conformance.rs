@@ -328,7 +328,7 @@ fn mock_state<P: ProcessManager>() -> ExecState<P> {
     let mut state = ExecState {
         fs: Box::new(fs.clone()),
         cargo_scratch: oxdock_fs::reserve_cargo_scratch().expect("cargo scratch"),
-        substrate_cell: std::sync::OnceLock::new(),
+        seed: Arc::new(HashMap::new()),
         cwd: fs.root().clone(),
         envs: Arc::new(HashMap::new()),
         bg_children: Vec::new(),
