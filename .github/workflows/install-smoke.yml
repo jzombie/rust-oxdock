@@ -79,6 +79,8 @@ jobs:
         uses: ./.github/actions/setup-oxdock
         with:
           version: ${{ env.OXDOCK_PINNED_ENGINE }}
+          # TODO: Remove after 0.29.0-alpha release
+          source: local
 
       # The binary under test is this branch, never a published tag:
       # behavior fixes prove before any release ships them. Same build
@@ -310,6 +312,8 @@ jobs:
         uses: ./.github/actions/setup-oxdock
         with:
           version: ${{ env.OXDOCK_PINNED_ENGINE }}
+          # TODO: Remove after 0.29.0-alpha release
+          source: local
           binary-name: oxdock-engine
 
       # Every leg below fetches the staged branch build through the
@@ -407,6 +411,8 @@ jobs:
         uses: ./.github/actions/setup-oxdock
         with:
           version: ${{ env.OXDOCK_PINNED_ENGINE }}
+          # TODO: Remove after 0.29.0-alpha release
+          source: local
           binary-name: oxdock-engine
 
       # Piped delivery: the stub arrives on stdin exactly as real users
@@ -508,6 +514,8 @@ jobs:
         uses: ./.github/actions/setup-oxdock
         with:
           version: ${{ env.OXDOCK_PINNED_ENGINE }}
+          # TODO: Remove after 0.29.0-alpha release
+          source: local
           binary-name: oxdock-engine
 
       # No engine override anywhere by design, so the unpacked release
@@ -597,6 +605,8 @@ jobs:
         uses: ./.github/actions/setup-oxdock
         with:
           version: ${{ env.OXDOCK_PINNED_ENGINE }}
+          # TODO: Remove after 0.29.0-alpha release
+          source: local
           binary-name: oxdock-engine
 
       # Default location: no INSTALL_DIR anywhere by design, so each
@@ -686,6 +696,8 @@ jobs:
         uses: ./.github/actions/setup-oxdock
         with:
           version: ${{ env.OXDOCK_PINNED_ENGINE }}
+          # TODO: Remove after 0.29.0-alpha release
+          source: local
           binary-name: oxdock-engine
 
       # Ephemeral run: executes the template-rendered one-liners that
@@ -769,6 +781,7 @@ jobs:
         uses: ./.github/actions/setup-oxdock
         with:
           version: ${{ env.OXDOCK_PINNED_ENGINE }}
+          source: local
           binary-name: oxdock-engine
 
       # Pinned by this leg itself: the stub resolves the newest tag
@@ -873,6 +886,8 @@ jobs:
         uses: ./.github/actions/setup-oxdock
         with:
           version: ${{ env.OXDOCK_PINNED_ENGINE }}
+          # TODO: Remove after 0.29.0-alpha release
+          source: local
           binary-name: oxdock-engine
 
       # Same job, so $HOME (and the cache) persists across runs: the
@@ -985,6 +1000,8 @@ jobs:
         uses: ./.github/actions/setup-oxdock
         with:
           version: ${{ env.OXDOCK_PINNED_ENGINE }}
+          # TODO: Remove after 0.29.0-alpha release
+          source: local
           binary-name: oxdock-engine
 
       # Blackholed egress: with a warm cache and pinned resolution,
