@@ -91,9 +91,7 @@ jobs:
         shell: oxdock --script {0}
         run: |
           IMPORT [STD]
-          INHERIT_ENV [GITHUB_OUTPUT, GITHUB_PATH, GITHUB_WORKSPACE, RUNNER_TEMP, PATH]
-          [family:unix] INHERIT_ENV [HOME]
-          [family:windows] INHERIT_ENV [USERPROFILE]
+          INHERIT_ENV [GITHUB_OUTPUT, GITHUB_PATH, GITHUB_WORKSPACE, RUNNER_TEMP]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
 
@@ -200,7 +198,7 @@ jobs:
           script="${RUNNER_TEMP}/self-bootstrap.oxfile"
           cat > "$script" <<'OXDOCK_EOF'
           IMPORT [STD]
-          INHERIT_ENV [GITHUB_TOKEN, RUNNER_TEMP, OXDOCK_PINNED_ENGINE, OXDOCK_EXPECTED_VERSION, PATH]
+          INHERIT_ENV [GITHUB_TOKEN, RUNNER_TEMP, OXDOCK_PINNED_ENGINE, OXDOCK_EXPECTED_VERSION]
           WORKSPACE SYSTEM
           MKDIR {{ env:RUNNER_TEMP }}/self-bootstrap
           WORKDIR {{ env:RUNNER_TEMP }}/self-bootstrap
@@ -330,9 +328,8 @@ jobs:
           OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.head_ref || github.ref_name }}/install.oxfile
         run: |
           IMPORT [STD]
-          INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, GITHUB_TOKEN, PATH]
-          [family:unix] INHERIT_ENV [HOME]
-          [family:windows] INHERIT_ENV [USERPROFILE, LOCALAPPDATA]
+          INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, GITHUB_TOKEN]
+          [family:windows] INHERIT_ENV [LOCALAPPDATA]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           # Source truth for version identity: the installed binary must
@@ -429,9 +426,8 @@ jobs:
           OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.head_ref || github.ref_name }}/install.oxfile
         run: |
           IMPORT [STD]
-          INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, GITHUB_TOKEN, PATH]
-          [family:unix] INHERIT_ENV [HOME]
-          [family:windows] INHERIT_ENV [USERPROFILE, LOCALAPPDATA]
+          INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, GITHUB_TOKEN]
+          [family:windows] INHERIT_ENV [LOCALAPPDATA]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           # Source truth for version identity: the installed binary must
@@ -532,9 +528,8 @@ jobs:
           OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.head_ref || github.ref_name }}/install.oxfile
         run: |
           IMPORT [STD]
-          INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, GITHUB_TOKEN, PATH]
-          [family:unix] INHERIT_ENV [HOME]
-          [family:windows] INHERIT_ENV [USERPROFILE, LOCALAPPDATA]
+          INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, GITHUB_TOKEN]
+          [family:windows] INHERIT_ENV [LOCALAPPDATA]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           # Source truth for version identity: the installed binary must
@@ -625,9 +620,8 @@ jobs:
           OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.head_ref || github.ref_name }}/install.oxfile
         run: |
           IMPORT [STD]
-          INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, GITHUB_TOKEN, PATH]
-          [family:unix] INHERIT_ENV [HOME]
-          [family:windows] INHERIT_ENV [USERPROFILE, LOCALAPPDATA]
+          INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, GITHUB_TOKEN]
+          [family:windows] INHERIT_ENV [LOCALAPPDATA]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           # Source truth for version identity: the installed binary must
@@ -716,9 +710,7 @@ jobs:
           OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.head_ref || github.ref_name }}/install.oxfile
         run: |
           IMPORT [STD]
-          INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, INSTALL_DIR_NIX, INSTALL_DIR_WIN, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, GITHUB_TOKEN, PATH]
-          [family:unix] INHERIT_ENV [HOME]
-          [family:windows] INHERIT_ENV [USERPROFILE]
+          INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, INSTALL_DIR_NIX, INSTALL_DIR_WIN, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, GITHUB_TOKEN]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           [family:unix] ENV INSTALL_DIR="{{ env:INSTALL_DIR_NIX }}"
@@ -818,9 +810,8 @@ jobs:
           OXDOCK_CACHE_DIR: ${{ runner.temp }}/oxdock-cache-newest
         run: |
           IMPORT [STD]
-          INHERIT_ENV [SMOKE_TAG, SMOKE_VERSION, OXDOCK_CACHE_DIR, RUNNER_TEMP, GITHUB_WORKSPACE, GITHUB_TOKEN, PATH]
-          [family:unix] INHERIT_ENV [HOME]
-          [family:windows] INHERIT_ENV [USERPROFILE, LOCALAPPDATA]
+          INHERIT_ENV [SMOKE_TAG, SMOKE_VERSION, OXDOCK_CACHE_DIR, RUNNER_TEMP, GITHUB_WORKSPACE, GITHUB_TOKEN]
+          [family:windows] INHERIT_ENV [LOCALAPPDATA]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           LET $e: PIPE
@@ -906,9 +897,8 @@ jobs:
           OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.head_ref || github.ref_name }}/install.oxfile
         run: |
           IMPORT [STD]
-          INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, GITHUB_TOKEN, PATH]
-          [family:unix] INHERIT_ENV [HOME]
-          [family:windows] INHERIT_ENV [USERPROFILE, LOCALAPPDATA]
+          INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, GITHUB_TOKEN]
+          [family:windows] INHERIT_ENV [LOCALAPPDATA]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           # Source truth for version identity: the installed binary must
@@ -1025,9 +1015,8 @@ jobs:
           OXDOCK_OXFILE_URL: https://raw.githubusercontent.com/${{ github.repository }}/${{ github.head_ref || github.ref_name }}/install.oxfile
         run: |
           IMPORT [STD]
-          INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, GITHUB_TOKEN, PATH]
-          [family:unix] INHERIT_ENV [HOME]
-          [family:windows] INHERIT_ENV [USERPROFILE, LOCALAPPDATA]
+          INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, GITHUB_TOKEN]
+          [family:windows] INHERIT_ENV [LOCALAPPDATA]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           # Source truth for version identity: the installed binary must

@@ -60,10 +60,7 @@ jobs:
         shell: oxdock --script {0}
         run: |
           IMPORT [STD]
-          INHERIT_ENV [GITHUB_OUTPUT, GITHUB_WORKSPACE, PATH]
-          # Tier 4 bridge: rustup shims resolve toolchains through the host home.
-          [family:unix] INHERIT_ENV [HOME]
-          [family:windows] INHERIT_ENV [USERPROFILE]
+          INHERIT_ENV [GITHUB_OUTPUT, GITHUB_WORKSPACE]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
 
@@ -101,9 +98,7 @@ jobs:
         shell: oxdock --script {0}
         run: |
           IMPORT [STD]
-          INHERIT_ENV [GITHUB_WORKSPACE, PATH]
-          [family:unix] INHERIT_ENV [HOME]
-          [family:windows] INHERIT_ENV [USERPROFILE]
+          INHERIT_ENV [GITHUB_WORKSPACE]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           [family:unix] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
@@ -125,9 +120,7 @@ jobs:
         shell: oxdock --script {0}
         run: |
           IMPORT [STD]
-          INHERIT_ENV [GITHUB_WORKSPACE, PATH]
-          [family:unix] INHERIT_ENV [HOME]
-          [family:windows] INHERIT_ENV [USERPROFILE]
+          INHERIT_ENV [GITHUB_WORKSPACE]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           [family:unix] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
@@ -138,9 +131,7 @@ jobs:
         shell: oxdock --script {0}
         run: |
           IMPORT [STD]
-          INHERIT_ENV [GITHUB_WORKSPACE, PATH]
-          [family:unix] INHERIT_ENV [HOME]
-          [family:windows] INHERIT_ENV [USERPROFILE]
+          INHERIT_ENV [GITHUB_WORKSPACE]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           [family:unix] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
@@ -151,9 +142,7 @@ jobs:
         shell: oxdock --script {0}
         run: |
           IMPORT [STD]
-          INHERIT_ENV [GITHUB_WORKSPACE, PATH]
-          [family:unix] INHERIT_ENV [HOME]
-          [family:windows] INHERIT_ENV [USERPROFILE]
+          INHERIT_ENV [GITHUB_WORKSPACE]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           [family:unix] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
@@ -164,9 +153,7 @@ jobs:
         shell: oxdock --script {0}
         run: |
           IMPORT [STD]
-          INHERIT_ENV [GITHUB_WORKSPACE, PATH]
-          [family:unix] INHERIT_ENV [HOME]
-          [family:windows] INHERIT_ENV [USERPROFILE]
+          INHERIT_ENV [GITHUB_WORKSPACE]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           [family:unix] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
@@ -177,9 +164,7 @@ jobs:
         shell: oxdock --script {0}
         run: |
           IMPORT [STD]
-          INHERIT_ENV [GITHUB_WORKSPACE, PATH]
-          [family:unix] INHERIT_ENV [HOME]
-          [family:windows] INHERIT_ENV [USERPROFILE]
+          INHERIT_ENV [GITHUB_WORKSPACE]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           [family:unix] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
@@ -191,9 +176,7 @@ jobs:
         shell: oxdock --script {0}
         run: |
           IMPORT [STD]
-          INHERIT_ENV [GITHUB_WORKSPACE, PATH]
-          [family:unix] INHERIT_ENV [HOME]
-          [family:windows] INHERIT_ENV [USERPROFILE]
+          INHERIT_ENV [GITHUB_WORKSPACE]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           [family:unix] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
@@ -204,9 +187,7 @@ jobs:
         shell: oxdock --script {0}
         run: |
           IMPORT [STD]
-          INHERIT_ENV [GITHUB_WORKSPACE, PATH]
-          [family:unix] INHERIT_ENV [HOME]
-          [family:windows] INHERIT_ENV [USERPROFILE]
+          INHERIT_ENV [GITHUB_WORKSPACE]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           [family:unix] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
@@ -241,10 +222,7 @@ jobs:
         shell: oxdock --script {0}
         run: |
           IMPORT [STD]
-          INHERIT_ENV [GITHUB_OUTPUT, GITHUB_WORKSPACE, PATH]
-          # Tier 4 bridge: rustup shims resolve toolchains through the host home.
-          [family:unix] INHERIT_ENV [HOME]
-          [family:windows] INHERIT_ENV [USERPROFILE]
+          INHERIT_ENV [GITHUB_OUTPUT, GITHUB_WORKSPACE]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
@@ -277,9 +255,7 @@ jobs:
         shell: oxdock --script {0}
         run: |
           IMPORT [STD]
-          INHERIT_ENV [GITHUB_WORKSPACE, PATH]
-          [family:unix] INHERIT_ENV [HOME]
-          [family:windows] INHERIT_ENV [USERPROFILE]
+          INHERIT_ENV [GITHUB_WORKSPACE]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
@@ -287,15 +263,15 @@ jobs:
           IF !$has_udeps {
             RUN ["cargo", "install", "cargo-udeps", "--locked"]
           }
-          RUN ["cargo", "udeps", "--workspace", "--all-targets", "--all-features"]
+          # Explicit +nightly: udeps needs nightly cargo, and the closed
+          # script env does not inherit the runner's RUSTUP_TOOLCHAIN.
+          RUN ["cargo", "+nightly", "udeps", "--workspace", "--all-targets", "--all-features"]
 
       - name: Run Clippy with cfg miri
         shell: oxdock --script {0}
         run: |
           IMPORT [STD]
-          INHERIT_ENV [GITHUB_WORKSPACE, PATH]
-          [family:unix] INHERIT_ENV [HOME]
-          [family:windows] INHERIT_ENV [USERPROFILE]
+          INHERIT_ENV [GITHUB_WORKSPACE]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
@@ -340,10 +316,7 @@ jobs:
         shell: oxdock --script {0}
         run: |
           IMPORT [STD]
-          INHERIT_ENV [GITHUB_OUTPUT, GITHUB_WORKSPACE, PATH]
-          # Tier 4 bridge: rustup shims resolve toolchains through the host home.
-          [family:unix] INHERIT_ENV [HOME]
-          [family:windows] INHERIT_ENV [USERPROFILE]
+          INHERIT_ENV [GITHUB_OUTPUT, GITHUB_WORKSPACE]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           [family:unix] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
@@ -378,9 +351,7 @@ jobs:
         shell: oxdock --script {0}
         run: |
           IMPORT [STD]
-          INHERIT_ENV [GITHUB_WORKSPACE, PATH]
-          [family:unix] INHERIT_ENV [HOME]
-          [family:windows] INHERIT_ENV [USERPROFILE]
+          INHERIT_ENV [GITHUB_WORKSPACE]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           [family:unix] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
@@ -391,9 +362,7 @@ jobs:
         shell: oxdock --script {0}
         run: |
           IMPORT [STD]
-          INHERIT_ENV [GITHUB_WORKSPACE, PATH]
-          [family:unix] INHERIT_ENV [HOME]
-          [family:windows] INHERIT_ENV [USERPROFILE]
+          INHERIT_ENV [GITHUB_WORKSPACE]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           [family:unix] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
@@ -436,10 +405,7 @@ jobs:
         shell: oxdock --script {0}
         run: |
           IMPORT [STD]
-          INHERIT_ENV [GITHUB_OUTPUT, GITHUB_WORKSPACE, PATH]
-          # Tier 4 bridge: rustup shims resolve toolchains through the host home.
-          [family:unix] INHERIT_ENV [HOME]
-          [family:windows] INHERIT_ENV [USERPROFILE]
+          INHERIT_ENV [GITHUB_OUTPUT, GITHUB_WORKSPACE]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
@@ -474,9 +440,7 @@ jobs:
         shell: oxdock --script {0}
         run: |
           IMPORT [STD]
-          INHERIT_ENV [GITHUB_WORKSPACE, PATH]
-          [family:unix] INHERIT_ENV [HOME]
-          [family:windows] INHERIT_ENV [USERPROFILE]
+          INHERIT_ENV [GITHUB_WORKSPACE]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"

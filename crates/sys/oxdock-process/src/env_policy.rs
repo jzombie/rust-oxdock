@@ -1,17 +1,19 @@
 //! Central host-injection policy: the single place deciding what may flow
 //! from the host OS into scripts and spawned children.
 //!
-//! Seeded-map world, stated once: session start writes sandbox defaults
-//! directly into the script env map ([`seed_defaults`]); explicit script
-//! `ENV`/`INHERIT_ENV` overwrite entries uniformly; `ISOLATED` resets the
-//! map to the same seed. No read-through proxies, no suppression
-//! branches: the map is the single source of truth and every spawn site
-//! stages it verbatim after [`check_spawn_anchors`].
+//! Seeded-map world, stated once: session start mirrors host
+//! essentials directly into the script env map ([`seed_defaults`]);
+//! explicit script `ENV`/`INHERIT_ENV` overwrite entries uniformly;
+//! `ISOLATED` resets the map to the same seed. No read-through
+//! proxies, no suppression branches: the map is the single source of
+//! truth and every spawn site stages it verbatim after
+//! [`check_spawn_anchors`].
 //!
-//! Names the engine reads from the host are narrow and listed:
-//! loader/terminal fallbacks (`SystemRoot`, `PATHEXT`, `TERM`) with
-//! synthetic defaults, the transport profile bridge (`HOME`,
-//! `USERPROFILE`), and shell resolution. Nothing else flows ambiently.
+//! Names the engine reads from the host are narrow and listed: the
+//! essential seed rows below plus loader/terminal fallbacks
+//! (`SystemRoot`, `PATHEXT`, `TERM`), the transport profile bridge
+//! (`HOME`, `USERPROFILE`), and shell resolution. Nothing else flows
+//! ambiently.
 //!
 //! Every spawn site stages through here instead of hand-rolling its
 //! own overlay and diagnostics, so the rule cannot drift per call site.
@@ -107,24 +109,29 @@ fn host_var(name: &str) -> Option<String> {
 pub const CONTRACT_INTRO_MD: &str = indoc::indoc! {"
     ## Seeded environment
 
-    Session start writes sandbox defaults directly into the script
-    environment map; explicit script `ENV`/`INHERIT_ENV` overwrite
-    entries uniformly; `ISOLATED` resets the map to the same seed.
-    Nothing injects at spawn time and nothing is immutable: every
-    default below is overridable like any other variable.
+    Session start mirrors host essentials directly into the script
+    environment map; hardcoded fallbacks apply only when the host
+    lacks a value, and identity rows stay absent instead of invented.
+    Explicit script `ENV`/`INHERIT_ENV` overwrite entries uniformly;
+    `ISOLATED` resets the map to the same seed. Nothing injects at
+    spawn time and nothing is immutable: every default below is
+    overridable like any other variable.
 "};
 
 /// Baseline-defaults chapter preamble, sourced here with the table.
-pub const BASELINE_INTRO_MD: &str = "### Sandbox baseline defaults\n\nSeeded at session start and on every `ISOLATED` entry. Explicit script values win.\n";
+pub const BASELINE_INTRO_MD: &str = "### Host-mirrored defaults\n\nMirrored from the host at session start and on every `ISOLATED` entry; fallbacks apply only when the host lacks a value. Explicit script values win.\n";
 
 /// Explicit-routing chapter, sourced here so the rule lives with the
 /// seed it constrains.
 pub const ROUTING_MD: &str = indoc::indoc! {"
     ### Explicit routing
 
-    Host variables enter scripts only when listed in `INHERIT_ENV`
-    (inside `ISOLATED`, only when listed in the block allowlist, which
-    copies from the enclosing scope). Absent stays absent.
+    Essential variables (`PATH`, `HOME`/`USERPROFILE`, temp bindings,
+    loader anchors) mirror the host by default, with hardcoded
+    fallbacks only when the host lacks them. Everything else enters
+    scripts only when listed in `INHERIT_ENV` (inside `ISOLATED`, only
+    when listed in the block allowlist, which copies from the enclosing
+    scope). Absent stays absent.
 "};
 
 /// Precedence and enforcement chapter, sourced here so the guarantee
@@ -183,6 +190,21 @@ pub fn engine_host_reads() -> Vec<HostRead> {
             purpose: "interactive shell resolution on Windows; batch steps pin `cmd`",
         },
         HostRead {
+            name: oxdock_env::os::PATH,
+            reader: "seed_defaults",
+            purpose: "mirrored default; platform baseline when the host sets nothing",
+        },
+        HostRead {
+            name: unix::HOME,
+            reader: "seed_defaults",
+            purpose: "mirrored default; session scratch when the host sets nothing",
+        },
+        HostRead {
+            name: windows::USERPROFILE,
+            reader: "seed_defaults",
+            purpose: "mirrored default; session scratch when the host sets nothing",
+        },
+        HostRead {
             name: unix::TERM,
             reader: "seed_defaults",
             purpose: "seeded default; synthetic `dumb` when the host sets nothing",
@@ -225,7 +247,7 @@ pub fn engine_host_reads() -> Vec<HostRead> {
     ]
 }
 /// One declarative row per seeded variable: the single source of
-/// truth for sandbox defaults. [`seed_defaults`] interprets `value`;
+/// truth for host-mirrored defaults. [`seed_defaults`] interprets `value`;
 /// [`describe_baseline_defaults`] renders `doc`. Adding a default
 /// means adding one row here: a name seeded but undescribed (or vice
 /// versa) is unrepresentable, so no parity test polices the mapping.
@@ -238,15 +260,22 @@ struct SeedRow {
     doc: &'static str,
 }
 
-/// How one seed row computes its value.
+/// How one seed row computes its value. Every variant reads the
+/// host first: a hardcoded value applies only when the host lacks
+/// the variable (Miri, bare `env -i`). Scripts declare what the
+/// host cannot.
 enum SeedValue {
-    /// Session `<scratch>/tmp`.
+    /// Host value when set, else session `<scratch>/tmp`.
     ScratchTmp,
+    /// Host `HOME`, else host `USERPROFILE` (ported POSIX tools on
+    /// Windows read `HOME` first), else session `<scratch>/tmp`.
+    HomeDir,
     /// Session `<scratch>/target`.
     ScratchTarget,
-    /// Fixed sandbox name (`os::SANDBOX_IDENTITY`).
-    Identity,
-    /// Platform `DEFAULT_PATH` baseline.
+    /// Host value when set; omitted when the host lacks it. No
+    /// fiction: identity comes from the operator, never the engine.
+    HostOnly,
+    /// Host value when set, else the platform `DEFAULT_PATH` baseline.
     BaselinePath,
     /// Host value when set, else the fallback constant.
     HostOrFallback(&'static str),
@@ -265,27 +294,27 @@ fn unix_seed_table() -> Vec<SeedRow> {
         SeedRow {
             name: oxdock_env::os::PATH,
             value: SeedValue::BaselinePath,
-            doc: "sandbox baseline (`/usr/bin:/bin:/usr/sbin:/sbin`, `C:\\Windows\\System32;C:\\Windows`)",
+            doc: "host value, else the platform baseline (`/usr/bin:/bin:/usr/sbin:/sbin`, `C:\\Windows\\System32;C:\\Windows`)",
         },
         SeedRow {
             name: unix::TMPDIR,
             value: SeedValue::ScratchTmp,
-            doc: "session `<scratch>/tmp`",
+            doc: "host value, else session `<scratch>/tmp`",
         },
         SeedRow {
             name: unix::HOME,
-            value: SeedValue::ScratchTmp,
-            doc: "session `<scratch>/tmp`, so tools cannot discover host configs",
+            value: SeedValue::HomeDir,
+            doc: "host `HOME`, else host `USERPROFILE`, else session `<scratch>/tmp`",
         },
         SeedRow {
             name: unix::LOGNAME,
-            value: SeedValue::Identity,
-            doc: "fixed sandbox name `oxdock` (shells would otherwise synthesize host identity from `getpwuid`)",
+            value: SeedValue::HostOnly,
+            doc: "host value; omitted when unset",
         },
         SeedRow {
             name: unix::USER,
-            value: SeedValue::Identity,
-            doc: "fixed sandbox name `oxdock`",
+            value: SeedValue::HostOnly,
+            doc: "host value; omitted when unset",
         },
         SeedRow {
             name: unix::TERM,
@@ -298,30 +327,30 @@ fn unix_seed_table() -> Vec<SeedRow> {
 /// Windows-only seed rows. The Windows seed is these plus the full
 /// unix table: cross-compiled unix utilities and unix shells running
 /// on Windows (`git-bash`, MSYS2, Cygwin) read `TMPDIR`/`TERM`/
-/// `LOGNAME`/`USER`, not their `TEMP`/native counterparts, so the
-/// sandbox binds both spellings to the same scratch.
+/// `LOGNAME`/`USER`, not their `TEMP`/native counterparts, so both
+/// spellings resolve on Windows.
 fn windows_extra_seed_table() -> Vec<SeedRow> {
     use oxdock_env::os::windows;
     vec![
         SeedRow {
             name: windows::TEMP,
             value: SeedValue::ScratchTmp,
-            doc: "session `<scratch>/tmp`",
+            doc: "host value, else session `<scratch>/tmp`",
         },
         SeedRow {
             name: windows::TMP,
             value: SeedValue::ScratchTmp,
-            doc: "session `<scratch>/tmp`",
+            doc: "host value, else session `<scratch>/tmp`",
         },
         SeedRow {
             name: windows::USERPROFILE,
             value: SeedValue::ScratchTmp,
-            doc: "session `<scratch>/tmp` (native profile anchor; the Win32 API would otherwise resolve the host profile)",
+            doc: "host value, else session `<scratch>/tmp` (native profile anchor)",
         },
         SeedRow {
             name: windows::USERNAME,
-            value: SeedValue::Identity,
-            doc: "fixed sandbox name `oxdock`",
+            value: SeedValue::HostOnly,
+            doc: "host value; omitted when unset",
         },
         SeedRow {
             name: windows::SYSTEM_ROOT,
@@ -361,49 +390,65 @@ fn common_seed_table() -> Vec<SeedRow> {
     }]
 }
 
-/// Sandbox defaults for one session, written directly into the script
-/// env map at session start and reused verbatim for every `ISOLATED`
-/// reset: the current platform's seed table interpreted row by row, no
-/// per-name code. Explicit script `ENV`/`INHERIT_ENV` overwrite these
-/// like any other variable. `scratch_tmp` is the session
-/// `<scratch>/tmp` display path; `scratch_target` is the `target`
-/// subpath for `CARGO_TARGET_DIR`. Never host-read wholesale: only
-/// the narrow `HostOrFallback` rows read the host (with synthetic
-/// defaults); anything wider reintroduces dirty `PATH`, credential
-/// leaks, and CI drift.
+/// Session seed, written directly into the script env map at
+/// session start and reused verbatim for every `ISOLATED` reset: the
+/// current platform's seed table interpreted row by row, no per-name
+/// code. Every row mirrors the host when the host defines the
+/// variable; hardcoded values are fallbacks for a missing host value
+/// only. Explicit script `ENV`/`INHERIT_ENV` overwrite these like any
+/// other variable. `scratch_tmp` is the session `<scratch>/tmp`
+/// display path; `scratch_target` is the `target` subpath for
+/// `CARGO_TARGET_DIR`. Narrow by name, never wholesale: only the
+/// listed rows read the host, so ambient secrets and harness
+/// internals still stay out unless explicitly routed.
 pub fn seed_defaults(scratch_tmp: &str, scratch_target: &str) -> HashMap<String, String> {
     let mut rows = platform_seed_table();
     rows.extend(common_seed_table());
-    interpret_seed_table(&rows, scratch_tmp, scratch_target)
+    interpret_seed_table(&rows, scratch_tmp, scratch_target, &host_var)
 }
 
-/// Interpret one row list into a map. A row whose value cannot be
-/// determined is omitted, never fatal: an `AliasOf` target missing
-/// from the same table simply leaves the alias out (a test proves
-/// every table fully resolves, so a dangling alias fails in CI, not
-/// in production). No variable enters the map undefined.
+/// Interpret one row list into a map. `host` supplies host values so
+/// tests can stub the host hermetically; production passes
+/// [`host_var`]. A row whose value cannot be determined is omitted,
+/// never fatal: an `AliasOf` target missing from the same table, or a
+/// `HostOnly` name the host lacks, simply leaves the name out (a test
+/// proves every table fully resolves against a complete stub host, so
+/// a dangling alias fails in CI, not in production). No variable
+/// enters the map undefined.
 fn interpret_seed_table(
     rows: &[SeedRow],
     scratch_tmp: &str,
     scratch_target: &str,
+    host: &dyn Fn(&str) -> Option<String>,
 ) -> HashMap<String, String> {
     let mut seed = HashMap::with_capacity(rows.len());
     for row in rows {
         let value = match row.value {
-            SeedValue::ScratchTmp => scratch_tmp.to_string(),
+            SeedValue::ScratchTmp => host(row.name).unwrap_or_else(|| scratch_tmp.to_string()),
+            SeedValue::HomeDir => host(row.name)
+                .or_else(|| host(oxdock_env::os::windows::USERPROFILE))
+                .unwrap_or_else(|| scratch_tmp.to_string()),
             SeedValue::ScratchTarget => scratch_target.to_string(),
-            SeedValue::Identity => oxdock_env::os::SANDBOX_IDENTITY.to_string(),
-            SeedValue::BaselinePath =>
-            {
-                #[allow(clippy::disallowed_macros)]
-                if cfg!(windows) {
-                    oxdock_env::os::windows::DEFAULT_PATH.to_string()
+            SeedValue::HostOnly => {
+                let Some(mirrored) = host(row.name) else {
+                    continue;
+                };
+                mirrored
+            }
+            SeedValue::BaselinePath => {
+                if let Some(mirrored) = host(row.name) {
+                    mirrored
                 } else {
-                    oxdock_env::os::unix::DEFAULT_PATH.to_string()
+                    #[allow(clippy::disallowed_macros)]
+                    if cfg!(windows) {
+                        oxdock_env::os::windows::DEFAULT_PATH.to_string()
+                    } else {
+                        oxdock_env::os::unix::DEFAULT_PATH.to_string()
+                    }
                 }
             }
             SeedValue::HostOrFallback(fallback) => {
-                host_var(row.name).unwrap_or_else(|| fallback.to_string())
+                host(row.name).unwrap_or_else(|| fallback.to_string())
             }
             SeedValue::AliasOf(_) => continue,
         };
@@ -420,47 +465,53 @@ fn interpret_seed_table(
 }
 
 /// Transport seed for infrastructure spawns (`ssh`, local binaries):
-/// loader invariants plus extension/terminal defaults plus the `PATH`
-/// baseline, layered under the sanitized request envs. No scratch, no
-/// sandbox identity: transports authenticate as the invoking user, so
+/// loader invariants plus extension/terminal defaults plus the host
+/// `PATH`, layered under the sanitized request envs. No scratch and
+/// no identity rows: transports authenticate as the invoking user, so
 /// when the sanitized request lacks a profile binding the seed
 /// bridges the host's actual `HOME` (unix) / `USERPROFILE` (windows)
 /// for key discovery. An explicitly routed script value always wins.
 pub fn seed_transport() -> HashMap<String, String> {
+    transport_seed(&host_var)
+}
+
+/// Transport seed with a stubbable host lookup (see
+/// [`interpret_seed_table`]): production passes [`host_var`].
+fn transport_seed(host: &dyn Fn(&str) -> Option<String>) -> HashMap<String, String> {
     use oxdock_env::os::{unix, windows};
     let mut seed = HashMap::new();
     #[allow(clippy::disallowed_macros)]
     if cfg!(windows) {
         seed.insert(
             oxdock_env::os::PATH.to_string(),
-            windows::DEFAULT_PATH.to_string(),
+            host(oxdock_env::os::PATH).unwrap_or_else(|| windows::DEFAULT_PATH.to_string()),
         );
-        let root = host_var(windows::SYSTEM_ROOT)
-            .unwrap_or_else(|| windows::DEFAULT_SYSTEM_ROOT.to_string());
+        let root =
+            host(windows::SYSTEM_ROOT).unwrap_or_else(|| windows::DEFAULT_SYSTEM_ROOT.to_string());
         seed.insert(windows::SYSTEM_ROOT.to_string(), root.clone());
         seed.insert(windows::WINDIR.to_string(), root);
         seed.insert(
             windows::PATHEXT.to_string(),
-            host_var(windows::PATHEXT).unwrap_or_else(|| windows::DEFAULT_PATHEXT.to_string()),
+            host(windows::PATHEXT).unwrap_or_else(|| windows::DEFAULT_PATHEXT.to_string()),
         );
-        if let Some(home) = host_var(windows::USERPROFILE) {
+        if let Some(home) = host(windows::USERPROFILE) {
             seed.insert(windows::USERPROFILE.to_string(), home.clone());
             // Ported OpenSSH binaries inspect `$HOME` first: bridge the
             // host home when set, else the profile just bridged.
             if !has_var(&seed, unix::HOME) {
-                seed.insert(unix::HOME.to_string(), host_var(unix::HOME).unwrap_or(home));
+                seed.insert(unix::HOME.to_string(), host(unix::HOME).unwrap_or(home));
             }
         }
     } else {
         seed.insert(
             oxdock_env::os::PATH.to_string(),
-            unix::DEFAULT_PATH.to_string(),
+            host(oxdock_env::os::PATH).unwrap_or_else(|| unix::DEFAULT_PATH.to_string()),
         );
         seed.insert(
             unix::TERM.to_string(),
-            host_var(unix::TERM).unwrap_or_else(|| unix::DEFAULT_TERM.to_string()),
+            host(unix::TERM).unwrap_or_else(|| unix::DEFAULT_TERM.to_string()),
         );
-        if let Some(home) = host_var(unix::HOME) {
+        if let Some(home) = host(unix::HOME) {
             seed.insert(unix::HOME.to_string(), home);
         }
     }
@@ -470,9 +521,9 @@ pub fn seed_transport() -> HashMap<String, String> {
 /// Whether a request entry survives transport sanitize: true when the
 /// session seed lacks the name or holds a different value. Key
 /// comparison uses [`names_eq`], so Windows casing differences cannot
-/// bypass the filter. Seeded scratch/identity values drop (the
-/// transport must not bind session scratch); explicitly routed values
-/// that differ survive.
+/// bypass the filter. Seeded scratch values drop (the transport must
+/// not bind session scratch); explicitly routed values that differ
+/// survive.
 pub fn seed_differs(seed: &HashMap<String, String>, key: &str, value: &str) -> bool {
     match seed.iter().find(|(k, _)| names_eq(k, key)) {
         Some((_, seeded)) => seeded != value,
@@ -480,7 +531,7 @@ pub fn seed_differs(seed: &HashMap<String, String>, key: &str, value: &str) -> b
     }
 }
 
-/// One row of the sandbox baseline table: rendered from the seed
+/// One row of the host-mirrored defaults table: rendered from the seed
 /// table, so the documented contract cannot drift from the engine.
 pub struct BaselineDefaultEntry {
     /// Variable name (an `oxdock_fs::env` constant value).
@@ -491,7 +542,7 @@ pub struct BaselineDefaultEntry {
     pub rule: &'static str,
 }
 
-/// The sandbox baseline contract as static data, in render order: the
+/// The host-mirrored defaults contract as static data, in render order: the
 /// union of every seed table mapped to rows. There is exactly one row
 /// list because there is exactly one seed list.
 pub fn describe_baseline_defaults() -> Vec<BaselineDefaultEntry> {
@@ -572,94 +623,208 @@ mod tests {
         seed_defaults("/scratch/tmp", "/scratch/target")
     }
 
+    /// Stub host for hermetic proofs: parallel tests cannot skew a
+    /// private map, and no test mutates the real process env (a live
+    /// `PATH`/`HOME` guard would race concurrent spawns).
+    fn stub_host(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect()
+    }
+
     #[test]
-    fn seed_writes_sandbox_defaults() {
-        let seed = seed_for_tests();
+    fn seed_mirrors_host_essentials() {
+        // Host-first: every essential mirrors the stub host. Scratch
+        // and fallback constants apply only to names the stub lacks
+        // (proven by `seed_falls_back_without_host`).
+        use oxdock_env::os::{unix, windows};
+        let stub = stub_host(&[
+            (oxdock_env::os::PATH, "/host/bin"),
+            (unix::HOME, "/host/home"),
+            (unix::TMPDIR, "/host/tmp"),
+            (unix::USER, "host-user"),
+            (unix::LOGNAME, "host-user"),
+            (unix::TERM, "host-term"),
+            (windows::SYSTEM_ROOT, "C:\\HostWindows"),
+            (windows::PATHEXT, ".HOST"),
+            (windows::TEMP, "/host/temp"),
+            (windows::TMP, "/host/temp"),
+            (windows::USERPROFILE, "/host/profile"),
+            (windows::USERNAME, "host-user"),
+        ]);
+        let lookup = |name: &str| stub.get(name).cloned();
+        let mut rows = platform_seed_table();
+        rows.extend(common_seed_table());
+        let seed = interpret_seed_table(&rows, "/scratch/tmp", "/scratch/target", &lookup);
+        assert_eq!(
+            seed.get(oxdock_env::os::PATH).map(String::as_str),
+            Some("/host/bin")
+        );
+        assert_eq!(seed.get(unix::HOME).map(String::as_str), Some("/host/home"));
+        assert_eq!(
+            seed.get(unix::TMPDIR).map(String::as_str),
+            Some("/host/tmp")
+        );
+        assert_eq!(seed.get(unix::USER).map(String::as_str), Some("host-user"));
+        assert_eq!(
+            seed.get(unix::LOGNAME).map(String::as_str),
+            Some("host-user")
+        );
+        assert_eq!(seed.get(unix::TERM).map(String::as_str), Some("host-term"));
+        assert_eq!(
+            seed.get(oxdock_env::cargo::TARGET_DIR).map(String::as_str),
+            Some("/scratch/target")
+        );
         #[allow(clippy::disallowed_macros)]
         if cfg!(windows) {
             assert_eq!(
-                seed.get(oxdock_env::os::PATH),
-                Some(&oxdock_env::os::windows::DEFAULT_PATH.to_string())
+                seed.get(windows::SYSTEM_ROOT).map(String::as_str),
+                Some("C:\\HostWindows")
             );
             assert_eq!(
-                seed.get(oxdock_env::os::windows::SYSTEM_ROOT),
-                Some(
-                    &std::env::var(oxdock_env::os::windows::SYSTEM_ROOT).unwrap_or_else(|_| {
-                        oxdock_env::os::windows::DEFAULT_SYSTEM_ROOT.to_string()
-                    })
-                )
+                seed.get(windows::WINDIR).map(String::as_str),
+                Some("C:\\HostWindows"),
+                "WINDIR aliases the mirrored SystemRoot"
             );
             assert_eq!(
-                seed.get(oxdock_env::os::windows::TEMP),
-                Some(&"/scratch/tmp".to_string())
+                seed.get(windows::PATHEXT).map(String::as_str),
+                Some(".HOST")
             );
             assert_eq!(
-                seed.get(oxdock_env::os::windows::USERPROFILE),
-                Some(&"/scratch/tmp".to_string())
+                seed.get(windows::TEMP).map(String::as_str),
+                Some("/host/temp")
             );
             assert_eq!(
-                seed.get(oxdock_env::os::windows::USERNAME),
-                Some(&oxdock_env::os::SANDBOX_IDENTITY.to_string())
-            );
-            // Windows inherits the unix rows for cross-compiled tools
-            // and unix shells running on Windows.
-            assert_eq!(
-                seed.get(oxdock_env::os::unix::TMPDIR),
-                Some(&"/scratch/tmp".to_string())
+                seed.get(windows::TMP).map(String::as_str),
+                Some("/host/temp")
             );
             assert_eq!(
-                seed.get(oxdock_env::os::unix::LOGNAME),
-                Some(&oxdock_env::os::SANDBOX_IDENTITY.to_string())
+                seed.get(windows::USERPROFILE).map(String::as_str),
+                Some("/host/profile")
             );
             assert_eq!(
-                seed.get(oxdock_env::os::unix::USER),
-                Some(&oxdock_env::os::SANDBOX_IDENTITY.to_string())
+                seed.get(windows::USERNAME).map(String::as_str),
+                Some("host-user")
             );
-            assert!(seed.contains_key(oxdock_env::os::unix::TERM));
-        } else {
-            assert_eq!(
-                seed.get(oxdock_env::os::PATH),
-                Some(&oxdock_env::os::unix::DEFAULT_PATH.to_string())
-            );
-            assert_eq!(
-                seed.get(oxdock_env::os::unix::TMPDIR),
-                Some(&"/scratch/tmp".to_string())
-            );
-            assert_eq!(
-                seed.get(oxdock_env::os::unix::HOME),
-                Some(&"/scratch/tmp".to_string())
-            );
-            assert_eq!(
-                seed.get(oxdock_env::os::unix::LOGNAME),
-                Some(&oxdock_env::os::SANDBOX_IDENTITY.to_string())
-            );
-            assert_eq!(
-                seed.get(oxdock_env::os::unix::USER),
-                Some(&oxdock_env::os::SANDBOX_IDENTITY.to_string())
-            );
-            assert!(seed.contains_key(oxdock_env::os::unix::TERM));
         }
+    }
+
+    #[test]
+    fn seed_home_bridges_userprofile() {
+        // Ported POSIX tools on Windows read `HOME` first: with no
+        // host `HOME`, the row bridges the host profile instead of
+        // falling to scratch.
+        let stub = stub_host(&[(oxdock_env::os::windows::USERPROFILE, "/host/profile")]);
+        let lookup = |name: &str| stub.get(name).cloned();
+        let mut rows = platform_seed_table();
+        rows.extend(common_seed_table());
+        let seed = interpret_seed_table(&rows, "/scratch/tmp", "/scratch/target", &lookup);
         assert_eq!(
-            seed.get(oxdock_env::cargo::TARGET_DIR),
-            Some(&"/scratch/target".to_string())
+            seed.get(oxdock_env::os::unix::HOME).map(String::as_str),
+            Some("/host/profile")
         );
     }
 
     #[test]
-    fn seed_reads_no_host_identity() {
-        // The seed binds scratch and fixed identity; host login names,
-        // homes, and profiles never flow, even when the host sets them.
-        let seed = seed_for_tests();
-        for probe in ["HOST_HOME_PROBE", "HOST_LOGNAME_PROBE"] {
-            assert!(!seed.contains_key(probe), "unexpected key: {seed:?}");
-        }
+    fn seed_falls_back_without_host() {
+        // An empty stub host (Miri, bare `env -i`): baselines and
+        // scratch apply, identity rows stay absent instead of invented.
+        use oxdock_env::os::{unix, windows};
+        let mut rows = platform_seed_table();
+        rows.extend(common_seed_table());
+        let seed = interpret_seed_table(&rows, "/scratch/tmp", "/scratch/target", &|_: &str| {
+            None::<String>
+        });
         #[allow(clippy::disallowed_macros)]
-        if cfg!(not(windows)) {
-            let host_user = std::env::var("USER").unwrap_or_default();
-            if !host_user.is_empty() && host_user != oxdock_env::os::SANDBOX_IDENTITY {
-                assert_ne!(seed.get(oxdock_env::os::unix::USER), Some(&host_user));
-            }
+        let expected_path = if cfg!(windows) {
+            windows::DEFAULT_PATH
+        } else {
+            unix::DEFAULT_PATH
+        };
+        assert_eq!(
+            seed.get(oxdock_env::os::PATH).map(String::as_str),
+            Some(expected_path)
+        );
+        assert_eq!(
+            seed.get(unix::HOME).map(String::as_str),
+            Some("/scratch/tmp")
+        );
+        assert_eq!(
+            seed.get(unix::TMPDIR).map(String::as_str),
+            Some("/scratch/tmp")
+        );
+        assert!(
+            !seed.contains_key(unix::USER) && !seed.contains_key(unix::LOGNAME),
+            "absent identity must stay absent: {seed:?}"
+        );
+        assert_eq!(
+            seed.get(unix::TERM).map(String::as_str),
+            Some(unix::DEFAULT_TERM)
+        );
+        assert_eq!(
+            seed.get(oxdock_env::cargo::TARGET_DIR).map(String::as_str),
+            Some("/scratch/target")
+        );
+        #[allow(clippy::disallowed_macros)]
+        if cfg!(windows) {
+            assert_eq!(
+                seed.get(windows::SYSTEM_ROOT).map(String::as_str),
+                Some(windows::DEFAULT_SYSTEM_ROOT)
+            );
+            assert_eq!(
+                seed.get(windows::WINDIR).map(String::as_str),
+                Some(windows::DEFAULT_SYSTEM_ROOT),
+                "WINDIR aliases the fallback SystemRoot"
+            );
+            assert_eq!(
+                seed.get(windows::PATHEXT).map(String::as_str),
+                Some(windows::DEFAULT_PATHEXT)
+            );
+            assert_eq!(
+                seed.get(windows::TEMP).map(String::as_str),
+                Some("/scratch/tmp")
+            );
+            assert_eq!(
+                seed.get(windows::TMP).map(String::as_str),
+                Some("/scratch/tmp")
+            );
+            assert_eq!(
+                seed.get(windows::USERPROFILE).map(String::as_str),
+                Some("/scratch/tmp")
+            );
+            assert!(
+                !seed.contains_key(windows::USERNAME),
+                "absent identity must stay absent: {seed:?}"
+            );
         }
+    }
+
+    #[test]
+    fn seed_omits_absent_identity() {
+        // Identity is host-or-absent: a stub host without login names
+        // seeds no identity rows, and unrelated probes never appear.
+        use oxdock_env::os::unix;
+        let stub = stub_host(&[
+            (oxdock_env::os::PATH, "/host/bin"),
+            ("HOST_HOME_PROBE", "/nowhere"),
+        ]);
+        let lookup = |name: &str| stub.get(name).cloned();
+        let mut rows = platform_seed_table();
+        rows.extend(common_seed_table());
+        let seed = interpret_seed_table(&rows, "/scratch/tmp", "/scratch/target", &lookup);
+        assert!(
+            !seed.contains_key(unix::USER) && !seed.contains_key(unix::LOGNAME),
+            "absent identity must stay absent: {seed:?}"
+        );
+        assert!(
+            !seed.contains_key("HOST_HOME_PROBE"),
+            "unlisted names never seed: {seed:?}"
+        );
+        assert_eq!(
+            seed.get(oxdock_env::os::PATH).map(String::as_str),
+            Some("/host/bin")
+        );
     }
 
     #[test]
@@ -672,6 +837,29 @@ mod tests {
         ));
         assert!(seed_differs(&seed, oxdock_env::os::PATH, "/custom/bin"));
         assert!(seed_differs(&seed, "OXDOCK_CUSTOM_UNSEEDED", "1"));
+    }
+
+    #[test]
+    fn transport_seed_mirrors_host_path() {
+        // Transports resolve through the host PATH, with the platform
+        // baseline only as fallback.
+        let stub = stub_host(&[(oxdock_env::os::PATH, "/host/bin")]);
+        let staged = transport_seed(&|name: &str| stub.get(name).cloned());
+        assert_eq!(
+            staged.get(oxdock_env::os::PATH).map(String::as_str),
+            Some("/host/bin")
+        );
+        let bare = transport_seed(&|_: &str| None::<String>);
+        #[allow(clippy::disallowed_macros)]
+        let expected = if cfg!(windows) {
+            oxdock_env::os::windows::DEFAULT_PATH
+        } else {
+            oxdock_env::os::unix::DEFAULT_PATH
+        };
+        assert_eq!(
+            bare.get(oxdock_env::os::PATH).map(String::as_str),
+            Some(expected)
+        );
     }
 
     #[test]
@@ -700,6 +888,7 @@ mod tests {
         assert!(!reads.is_empty());
         for read in &reads {
             let known = [
+                oxdock_env::os::PATH,
                 oxdock_env::os::unix::SHELL,
                 oxdock_env::os::windows::COMSPEC,
                 oxdock_env::os::unix::TERM,
@@ -747,9 +936,16 @@ mod tests {
                 row.name
             );
         }
-        // Every table fully resolves: unix rows, windows rows over unix
-        // rows (WINDIR aliases SYSTEM_ROOT), and the common row. An
-        // alias pointing nowhere panics here, not in production.
+        // Every table fully resolves against a complete stub host:
+        // unix rows, windows rows over unix rows (WINDIR aliases
+        // SYSTEM_ROOT), and the common row. An alias pointing nowhere
+        // panics here, not in production. The stub (not the live
+        // process env) keeps the proof hermetic on every machine.
+        let stub: HashMap<String, String> = rows
+            .iter()
+            .map(|row| (row.name.to_string(), format!("host-{}", row.name)))
+            .collect();
+        let lookup = |name: &str| stub.get(name).cloned();
         for table in [unix_seed_table(), {
             let mut windows = unix_seed_table();
             windows.extend(windows_extra_seed_table());
@@ -757,7 +953,8 @@ mod tests {
         }] {
             let mut with_common = table;
             with_common.extend(common_seed_table());
-            let interpreted = interpret_seed_table(&with_common, "/scratch/tmp", "/scratch/target");
+            let interpreted =
+                interpret_seed_table(&with_common, "/scratch/tmp", "/scratch/target", &lookup);
             assert_eq!(
                 interpreted.len(),
                 with_common.len(),
@@ -773,7 +970,9 @@ mod tests {
         }
         let mut expected: Vec<&str> = platform_seed_table().iter().map(|row| row.name).collect();
         expected.push(oxdock_env::cargo::TARGET_DIR);
-        let seed = seed_for_tests();
+        let mut platform = platform_seed_table();
+        platform.extend(common_seed_table());
+        let seed = interpret_seed_table(&platform, "/scratch/tmp", "/scratch/target", &lookup);
         assert_eq!(
             seed.len(),
             expected.len(),

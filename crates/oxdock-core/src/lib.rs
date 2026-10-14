@@ -1368,9 +1368,9 @@ mod tests {
         // on unix (plus the same unix rows on Windows for
         // cross-compiled tools), and PATHEXT + TEMP + TMP + USERPROFILE
         // + USERNAME on Windows. The shell itself adds a few
-        // names (`PWD`, `SHLVL`, `_` on unix shells) that no allowlist
-        // routes: those are shell-added, not leaked, and named explicitly
-        // so any newcomer fails loudly with its name shown.
+        // names (`PWD` everywhere, plus `SHLVL` and `_` under bash but
+        // not dash) that no allowlist routes: shells disagree, so the
+        // assertion below is two-sided instead of exact equality.
         #[allow(clippy::disallowed_macros)]
         let shell_added: &[&str] = if cfg!(windows) {
             &[]
@@ -1421,15 +1421,39 @@ mod tests {
             ("mid", &mid, expect_mid),
             ("deep", &deep, expect_deep),
         ] {
+            // HostOnly rows seed only when the host defines them
+            // (native Windows defines USERNAME but not USER/LOGNAME;
+            // bare shells may define none): drop host-absent identity
+            // names from the expectation. The child reads the same
+            // process env, so host presence is the exact oracle.
+            want.retain(|name| {
+                ![
+                    oxdock_env::os::unix::USER,
+                    oxdock_env::os::unix::LOGNAME,
+                    oxdock_env::os::windows::USERNAME,
+                ]
+                .contains(name)
+                    || std::env::var(*name).is_ok()
+            });
             want.extend(shell_added);
-            want.sort_unstable();
-            want.dedup();
-            let mut found: Vec<&str> = got.keys().map(String::as_str).collect();
-            found.sort_unstable();
-            assert_eq!(
-                found, want,
-                "{label} dump carries exactly the allowlist: {got:?}"
-            );
+            // Two-sided: every routed name must appear, and every
+            // appearing name must be routed or shell-known. A newcomer
+            // outside both lists still fails with its name shown.
+            for name in &want {
+                if shell_added.contains(name) {
+                    continue;
+                }
+                assert!(
+                    got.contains_key(*name),
+                    "{label} dump lacks routed name {name}: {got:?}"
+                );
+            }
+            for key in got.keys() {
+                assert!(
+                    want.contains(&key.as_str()),
+                    "{label} dump carries unexpected name {key}: {got:?}"
+                );
+            }
         }
         assert_eq!(top.get("OUTER").map(String::as_str), Some("outer-val"));
         assert_eq!(mid.get("OUTER").map(String::as_str), Some("outer-val"));

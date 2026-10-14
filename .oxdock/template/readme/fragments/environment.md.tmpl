@@ -1,6 +1,6 @@
 ## Selective environment inheritance
 
-Scripts no longer inherit the caller's environment wholesale. Host variables stay private unless you opt in explicitly.
+Scripts no longer inherit the caller's environment wholesale. Except for the host-mirrored essentials documented in [ENV_CONTRACTS.md]({{ $docs_global.env_contracts_url }}), host variables stay private unless you opt in explicitly.
 
 - Add `INHERIT_ENV [FOO, BAR, BAZ]` at the very top of the script to copy those keys from the process environment before any other command runs.
 - The directive must be top-level: no guards, no surrounding blocks, and no repeats. Trying to nest or guard it triggers a parser error so scripts stay deterministic.
@@ -9,4 +9,4 @@ Scripts no longer inherit the caller's environment wholesale. Host variables sta
 
 Keeping inheritance selective avoids leaking secrets by default while still allowing ergonomics for well-known keys (proxy settings, artifact caches, etc.).
 
-Every variable the engine injects into spawned children, by tier, is specified in [ENV_CONTRACTS.md]({{ $docs_global.env_contracts_url }}).
+Every variable the seed provides to spawned children is specified in [ENV_CONTRACTS.md]({{ $docs_global.env_contracts_url }}).

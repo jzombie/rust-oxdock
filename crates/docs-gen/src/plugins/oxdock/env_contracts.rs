@@ -70,7 +70,7 @@ mod tests {
         // against the core table.
         let text = render_env_contracts().expect("renders");
         assert!(
-            text.contains("### Sandbox baseline defaults"),
+            text.contains("### Host-mirrored defaults"),
             "baseline section missing"
         );
         for entry in oxdock_process::env_policy::describe_baseline_defaults() {

@@ -752,7 +752,7 @@ Scripts are sequences of instructions, one per line (`;` separates two; quoted s
 - **Commands are uppercase** and case-sensitive: `WORKDIR`, not `workdir`. Lowercase or mixed-case spellings are parse errors with an uppercase hint.
 - One instruction per line; a semicolon (`;`) splits multiple instructions on a single line.
 - Paths and arguments use forward slashes (`/`) for portability (see [Path Separators](#path-separators)).
-- Scripts do **not** inherit your shell environment unless `INHERIT_ENV` opts specific keys in (see [Selective environment inheritance](#selective-environment-inheritance)).
+- Scripts start with host-mirrored essentials (`PATH`, `HOME`, temp bindings, loader anchors); anything beyond those needs `INHERIT_ENV` to opt specific keys in (see [Selective environment inheritance](#selective-environment-inheritance)).
 
 ### Declared variable types
 
@@ -827,9 +827,6 @@ ASSERT_CONTAINS stdout "two"
 Shell form (`RUN <command...>`) joins its arguments and runs the string in the system shell. Exec form (`RUN ["exe", "arg", ...]`) spawns the executable directly with no shell. Exec form has no shell expansion, globbing, redirection, or pipes. Quoted `{{ ... }}` templates still interpolate per element, and guards and wrappers (`ASYNC`, `TIMEOUT`, `WITH_IO`) apply to both forms.
 
 ```oxdock
-INHERIT_ENV [PATH]
-[family:unix] INHERIT_ENV [HOME]
-[family:windows] INHERIT_ENV [USERPROFILE]
 RUN ["cargo", "--version"]
 ASSERT_CONTAINS stdout "cargo"
 ```
@@ -850,7 +847,6 @@ ASSERT_CONTAINS stdout "visible-after-comments"
 ```
 
 ```oxdock
-INHERIT_ENV [PATH]
 ECHO hash-mid-line # stays-in-payload
 ASSERT_CONTAINS stdout "hash-mid-line # stays-in-payload"
 
@@ -907,7 +903,7 @@ A guard is a bracketed expression that gates the instruction or block that follo
 
 Guards attach to the next instruction. Several guard lines in a row chain onto the same target, and a guard immediately followed by `{` opens a guarded block whose guard applies to every enclosed instruction.
 
-Guard evaluation checks the script environment only: `ENV` entries, `INHERIT_ENV` opt-ins, and builtin keys. Host variables stay invisible unless inherited, so guards interact naturally with `INHERIT_ENV` and `ENV`.
+Guard evaluation checks the script environment only: `ENV` entries, `INHERIT_ENV` opt-ins, and builtin keys. Non-essential host variables stay invisible unless inherited, so guards interact naturally with `INHERIT_ENV` and `ENV`.
 
 ### Environment guards
 
@@ -5870,7 +5866,7 @@ specific token.
 
 ## Selective environment inheritance
 
-Scripts no longer inherit the caller's environment wholesale. Host variables stay private unless you opt in explicitly.
+Scripts no longer inherit the caller's environment wholesale. Except for the host-mirrored essentials documented in [ENV_CONTRACTS.md](https://github.com/jzombie/rust-oxdock/blob/main/ENV_CONTRACTS.md), host variables stay private unless you opt in explicitly.
 
 - Add `INHERIT_ENV [FOO, BAR, BAZ]` at the very top of the script to copy those keys from the process environment before any other command runs.
 - The directive must be top-level: no guards, no surrounding blocks, and no repeats. Trying to nest or guard it triggers a parser error so scripts stay deterministic.
@@ -5879,7 +5875,7 @@ Scripts no longer inherit the caller's environment wholesale. Host variables sta
 
 Keeping inheritance selective avoids leaking secrets by default while still allowing ergonomics for well-known keys (proxy settings, artifact caches, etc.).
 
-Every variable the engine injects into spawned children, by tier, is specified in [ENV_CONTRACTS.md](https://github.com/jzombie/rust-oxdock/blob/main/ENV_CONTRACTS.md).
+Every variable the seed provides to spawned children is specified in [ENV_CONTRACTS.md](https://github.com/jzombie/rust-oxdock/blob/main/ENV_CONTRACTS.md).
 
 ## Path Separators
 

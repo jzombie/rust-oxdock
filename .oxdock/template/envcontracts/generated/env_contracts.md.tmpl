@@ -1,27 +1,29 @@
 ## Seeded environment
 
-Session start writes sandbox defaults directly into the script
-environment map; explicit script `ENV`/`INHERIT_ENV` overwrite
-entries uniformly; `ISOLATED` resets the map to the same seed.
-Nothing injects at spawn time and nothing is immutable: every
-default below is overridable like any other variable.
+Session start mirrors host essentials directly into the script
+environment map; hardcoded fallbacks apply only when the host
+lacks a value, and identity rows stay absent instead of invented.
+Explicit script `ENV`/`INHERIT_ENV` overwrite entries uniformly;
+`ISOLATED` resets the map to the same seed. Nothing injects at
+spawn time and nothing is immutable: every default below is
+overridable like any other variable.
 
-### Sandbox baseline defaults
+### Host-mirrored defaults
 
-Seeded at session start and on every `ISOLATED` entry. Explicit script values win.
+Mirrored from the host at session start and on every `ISOLATED` entry; fallbacks apply only when the host lacks a value. Explicit script values win.
 
 | Variable | Default source | Rule |
 | --- | --- | --- |
-| `PATH` | sandbox baseline (`/usr/bin:/bin:/usr/sbin:/sbin`, `C:\Windows\System32;C:\Windows`) | seeded default: explicit script values win |
-| `TMPDIR` | session `<scratch>/tmp` | seeded default: explicit script values win |
-| `HOME` | session `<scratch>/tmp`, so tools cannot discover host configs | seeded default: explicit script values win |
-| `LOGNAME` | fixed sandbox name `oxdock` (shells would otherwise synthesize host identity from `getpwuid`) | seeded default: explicit script values win |
-| `USER` | fixed sandbox name `oxdock` | seeded default: explicit script values win |
+| `PATH` | host value, else the platform baseline (`/usr/bin:/bin:/usr/sbin:/sbin`, `C:\Windows\System32;C:\Windows`) | seeded default: explicit script values win |
+| `TMPDIR` | host value, else session `<scratch>/tmp` | seeded default: explicit script values win |
+| `HOME` | host `HOME`, else host `USERPROFILE`, else session `<scratch>/tmp` | seeded default: explicit script values win |
+| `LOGNAME` | host value; omitted when unset | seeded default: explicit script values win |
+| `USER` | host value; omitted when unset | seeded default: explicit script values win |
 | `TERM` | host value, else `dumb` | seeded default: explicit script values win |
-| `TEMP` | session `<scratch>/tmp` | seeded default: explicit script values win |
-| `TMP` | session `<scratch>/tmp` | seeded default: explicit script values win |
-| `USERPROFILE` | session `<scratch>/tmp` (native profile anchor; the Win32 API would otherwise resolve the host profile) | seeded default: explicit script values win |
-| `USERNAME` | fixed sandbox name `oxdock` | seeded default: explicit script values win |
+| `TEMP` | host value, else session `<scratch>/tmp` | seeded default: explicit script values win |
+| `TMP` | host value, else session `<scratch>/tmp` | seeded default: explicit script values win |
+| `USERPROFILE` | host value, else session `<scratch>/tmp` (native profile anchor) | seeded default: explicit script values win |
+| `USERNAME` | host value; omitted when unset | seeded default: explicit script values win |
 | `SystemRoot` | host value, else the `C:\Windows` fallback | seeded default: explicit script values win |
 | `windir` | same root as `SystemRoot` | seeded default: explicit script values win |
 | `PATHEXT` | host value, else `.COM;.EXE;.BAT;.CMD` | seeded default: explicit script values win |
@@ -29,9 +31,12 @@ Seeded at session start and on every `ISOLATED` entry. Explicit script values wi
 
 ### Explicit routing
 
-Host variables enter scripts only when listed in `INHERIT_ENV`
-(inside `ISOLATED`, only when listed in the block allowlist, which
-copies from the enclosing scope). Absent stays absent.
+Essential variables (`PATH`, `HOME`/`USERPROFILE`, temp bindings,
+loader anchors) mirror the host by default, with hardcoded
+fallbacks only when the host lacks them. Everything else enters
+scripts only when listed in `INHERIT_ENV` (inside `ISOLATED`, only
+when listed in the block allowlist, which copies from the enclosing
+scope). Absent stays absent.
 
 ### Host reads
 
@@ -41,6 +46,9 @@ Variables the engine process itself touches (not seeds into scripts).
 | --- | --- | --- |
 | `SHELL` | oxdock_process::shell::shell_program | interactive shell resolution (`oxdock --shell`); batch steps pin `sh` |
 | `COMSPEC` | oxdock_process::shell::shell_program | interactive shell resolution on Windows; batch steps pin `cmd` |
+| `PATH` | seed_defaults | mirrored default; platform baseline when the host sets nothing |
+| `HOME` | seed_defaults | mirrored default; session scratch when the host sets nothing |
+| `USERPROFILE` | seed_defaults | mirrored default; session scratch when the host sets nothing |
 | `TERM` | seed_defaults | seeded default; synthetic `dumb` when the host sets nothing |
 | `SystemRoot` | seed_defaults | seeded default; fallback is the `C:\Windows` constant |
 | `PATHEXT` | seed_defaults | seeded default; synthetic list when the host sets nothing |

@@ -6,10 +6,8 @@
 > `oxdock_process::env_policy`. Do not edit by hand: the engine is the
 > single source, and a test fails if any seed row goes undescribed.
 
-Script authors route host values explicitly: toolchain legs declare
-`INHERIT_ENV [PATH]` plus `[family:unix] INHERIT_ENV [HOME]` /
-`[family:windows] INHERIT_ENV [USERPROFILE]` when the spawned program
-resolves toolchains through the host home. Everything else below
-arrives seeded, without declaration.
+Script authors route non-essential host values explicitly with
+`INHERIT_ENV`. Everything else below arrives mirrored from the host,
+without declaration.
 
 {{ $files.generated.env_contracts }}

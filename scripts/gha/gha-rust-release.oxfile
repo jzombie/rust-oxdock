@@ -7,9 +7,7 @@
 
 IMPORT [STD, MARKDOWN]
 
-INHERIT_ENV [RELEASE_CONFIRM, RELEASE_DRY_RUN, RELEASE_BINARY, RELEASE_BINARIES, GITHUB_ACTIONS, PATH]
-[family:unix] INHERIT_ENV [HOME]
-[family:windows] INHERIT_ENV [USERPROFILE]
+INHERIT_ENV [RELEASE_CONFIRM, RELEASE_DRY_RUN, RELEASE_BINARY, RELEASE_BINARIES, GITHUB_ACTIONS]
 
 # Pin to the live tree: scripts start in an isolated snapshot, and every
 # release step (manifest read, publish, tag) must hit the real repo.

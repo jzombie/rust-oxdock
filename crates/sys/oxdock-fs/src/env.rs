@@ -102,21 +102,13 @@ pub mod cargo {
 
 /// Names owned by the host OS, divided by family. `PATH` is shared:
 /// every platform resolves bare executable names through it. Each
-/// family module is flat: every name plus the sandbox baseline value
-/// constants the seeder reads. Name constants route through
-/// `define_names!` (with the `ALL` inventory); baseline values are
-/// plain constants beside them.
+/// family module is flat: every name plus the fallback value constants
+/// the seeder reads when the host lacks a variable. Name constants
+/// route through `define_names!` (with the `ALL` inventory); fallback
+/// values are plain constants beside them.
 pub mod os {
     /// Executable lookup path, shared by all families.
     pub const PATH: &str = "PATH";
-
-    /// Managed sandbox identity: fixed `LOGNAME`/`USER`/`USERNAME`
-    /// default, shared by all families. Shells synthesize login
-    /// identity from `getpwuid` (or the Win32 profile API) when these
-    /// are absent, which would reintroduce host identity into scrubbed
-    /// children; the engine pins the sandbox name instead. Explicit
-    /// script values win.
-    pub const SANDBOX_IDENTITY: &str = "oxdock";
 
     /// Unix-owned names.
     pub mod unix {
@@ -136,7 +128,8 @@ pub mod os {
             TERM = "TERM",
         }
 
-        /// Sandbox `PATH` baseline: core system directories.
+        /// Fallback `PATH`: core system directories, used only when
+        /// the host sets no `PATH`.
         pub const DEFAULT_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
         /// Fallback when the host sets no `TERM`.
         pub const DEFAULT_TERM: &str = "dumb";
@@ -163,7 +156,8 @@ pub mod os {
             USERNAME = "USERNAME",
         }
 
-        /// Sandbox `PATH` baseline: core system directories.
+        /// Fallback `PATH`: core system directories, used only when
+        /// the host sets no `PATH`.
         pub const DEFAULT_PATH: &str = r"C:\Windows\System32;C:\Windows";
         /// Fallback when the host sets no `PATHEXT`.
         pub const DEFAULT_PATHEXT: &str = ".COM;.EXE;.BAT;.CMD";
