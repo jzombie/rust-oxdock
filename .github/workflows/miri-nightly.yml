@@ -57,8 +57,6 @@ jobs:
       - name: Hash lockfile and toolchain
         id: hashes
         shell: oxdock --script {0}
-        env:
-          OXDOCK_WORKSPACE_ROOT: ${{ github.workspace }}
         run: |
           IMPORT [STD]
           INHERIT_ENV [GITHUB_OUTPUT, GITHUB_WORKSPACE]
