@@ -4607,7 +4607,10 @@ pub(crate) fn isolated<P: ProcessManager>(cx: &mut StepCtx<'_, P>, body: &[Step]
         false,
     );
     drop(guard);
-    result
+    // Inner steps number from the block, not the script: name the
+    // boundary so `step 1: RUN ...` inside ISOLATED never reads as the
+    // script's first step.
+    result.with_context(|| "inside ISOLATED block".to_string())
 }
 
 /// Resolve a block allowlist against the enclosing `ISOLATED` snapshot
