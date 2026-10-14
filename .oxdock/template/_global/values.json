@@ -10,7 +10,7 @@
   "ssh_plugin_readme": "https://github.com/jzombie/rust-oxdock/blob/main/crates/plugins/oxdock-ssh-plugin/README.md",
   "net_plugin_readme": "https://github.com/jzombie/rust-oxdock/blob/main/crates/plugins/oxdock-net-plugin/README.md",
   "markdown_plugin_readme": "https://github.com/jzombie/rust-oxdock/blob/main/crates/plugins/oxdock-markdown-plugin/README.md",
-  "ci_url": "https://github.com/jzombie/rust-oxdock/actions/workflows/rust-tests.yml",
+  "ci_url": "https://github.com/jzombie/rust-oxdock/actions/workflows/rust-checks.yml",
   "stub_msg_using_cached": "using cached oxdock $VERSION",
   "stub_msg_downloading": "downloading oxdock $VERSION",
   "stub_url_releases_latest": "https://api.github.com/repos/$REPO/releases?per_page=1",

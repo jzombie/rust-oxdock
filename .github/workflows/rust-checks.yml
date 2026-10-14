@@ -1,0 +1,522 @@
+# Unified Rust checks: lint, test, coverage, and docs freshness in one
+# OxDock-driven pipeline. YAML keeps jobs, uses steps, matrices,
+# secrets, and reusable calls; every run body is an inline OxDock leg
+# (shell oxdock --script) interpreted by the pinned engine. String
+# surgery lives in the DSL (HASH_SHA256, TEXT_EXTRACT, TEXT_FIELDS),
+# never in shell pipelines.
+
+name: rust-checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Ensure only one run per branch or PR at a time. If new commits are
+# pushed, older jobs cancel automatically.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Pinned interpreter for every leg below. TEXT_* string surgery needs
+# 0.28.0-alpha minimum; bump deliberately after a newer tag proves
+# green. An older engine choking on new syntax fails loudly at step
+# start, which is the point.
+env:
+  OXDOCK_PINNED_ENGINE: v0.28.0-alpha
+
+jobs:
+  lint-stable:
+    name: lint-stable (OS=${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    permissions:
+      contents: read
+    env:
+      OXDOCK_WORKSPACE_ROOT: ${{ github.workspace }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install OxDock engine
+        uses: ./.github/actions/setup-oxdock
+        with:
+          version: ${{ env.OXDOCK_PINNED_ENGINE }}
+
+      # Native hashing: HASH_SHA256 digests Cargo.lock identically on
+      # every platform, and TEXT_EXTRACT picks the rustc commit out of
+      # the version report. No sha256sum, shasum, awk, or sed.
+      - name: Hash lockfile and toolchain
+        id: hashes
+        shell: oxdock --script {0}
+        run: |
+          IMPORT [STD]
+          INHERIT_ENV [GITHUB_OUTPUT, GITHUB_WORKSPACE]
+          WORKSPACE SYSTEM
+          WORKDIR {{ env:GITHUB_WORKSPACE }}
+
+          # Nested cargo builds run isolated in a temp target dir
+          # unless told otherwise. Pin it to the workspace so the
+          # restored cache below actually applies.
+          [family:unix] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
+          [family:windows] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}\\target"
+
+          LET $hp: PIPE
+          WITH_IO [stdout=$hp] HASH_SHA256 Cargo.lock
+          WITH_IO [stdin=$hp] READ_LINE $lock
+          ECHO "lockfile: {{ $lock }}"
+          APPEND "{{ env:GITHUB_OUTPUT }}" "lockfile_hash={{ $lock }}\n"
+
+          LET $report: STRING = RUN ["rustc", "-Vv"]
+          LET $caps: LIST<STRING> = TEXT_EXTRACT($report, "(?m)^commit-hash: (\\S+)")
+          ECHO "rustc: {{ $caps.1 }}"
+          APPEND "{{ env:GITHUB_OUTPUT }}" "rustc_hash={{ $caps.1 }}\n"
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-lint-${{ steps.hashes.outputs.lockfile_hash }}
+          restore-keys: |
+            ${{ runner.os }}-lint-
+
+      - name: Install rustfmt and clippy
+        shell: oxdock --script {0}
+        run: |
+          IMPORT [STD]
+          INHERIT_ENV [GITHUB_WORKSPACE]
+          WORKSPACE SYSTEM
+          WORKDIR {{ env:GITHUB_WORKSPACE }}
+          [family:unix] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
+          [family:windows] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}\\target"
+          RUN ["rustup", "component", "add", "rustfmt", "clippy"]
+
+      # Tool-install rules: rustup and cargo binstall run as direct
+      # typed argv, never through sh. The curl to bash binstall
+      # bootstrap stays a YAML shell step below, never an OxDock leg.
+      - name: Install cargo-binstall bootstrap
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v cargo-binstall >/dev/null 2>&1; then
+            curl -sSfL https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
+          fi
+
+      - name: Install lint tools
+        shell: oxdock --script {0}
+        run: |
+          IMPORT [STD]
+          INHERIT_ENV [GITHUB_WORKSPACE]
+          WORKSPACE SYSTEM
+          WORKDIR {{ env:GITHUB_WORKSPACE }}
+          [family:unix] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
+          [family:windows] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}\\target"
+          RUN ["cargo", "binstall", "--no-confirm", "--no-symlinks", "--force", "cargo-deny", "cargo-audit", "cargo-sort"]
+
+      - name: Check Cargo manifest sorting
+        shell: oxdock --script {0}
+        run: |
+          IMPORT [STD]
+          INHERIT_ENV [GITHUB_WORKSPACE]
+          WORKSPACE SYSTEM
+          WORKDIR {{ env:GITHUB_WORKSPACE }}
+          [family:unix] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
+          [family:windows] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}\\target"
+          RUN ["cargo", "sort", "--workspace", "--check"]
+
+      - name: Check formatting
+        shell: oxdock --script {0}
+        run: |
+          IMPORT [STD]
+          INHERIT_ENV [GITHUB_WORKSPACE]
+          WORKSPACE SYSTEM
+          WORKDIR {{ env:GITHUB_WORKSPACE }}
+          [family:unix] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
+          [family:windows] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}\\target"
+          RUN ["cargo", "fmt", "--all", "--", "--check"]
+
+      - name: Run Clippy
+        shell: oxdock --script {0}
+        run: |
+          IMPORT [STD]
+          INHERIT_ENV [GITHUB_WORKSPACE]
+          WORKSPACE SYSTEM
+          WORKDIR {{ env:GITHUB_WORKSPACE }}
+          [family:unix] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
+          [family:windows] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}\\target"
+          RUN ["cargo", "clippy", "--workspace", "--all-targets", "--all-features", "--", "-D", "warnings"]
+
+      - name: Check documentation
+        shell: oxdock --script {0}
+        run: |
+          IMPORT [STD]
+          INHERIT_ENV [GITHUB_WORKSPACE]
+          WORKSPACE SYSTEM
+          WORKDIR {{ env:GITHUB_WORKSPACE }}
+          [family:unix] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
+          [family:windows] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}\\target"
+          ENV RUSTDOCFLAGS="-D warnings"
+          RUN ["cargo", "doc", "--workspace", "--no-deps", "--document-private-items"]
+
+      - name: Run cargo-deny
+        shell: oxdock --script {0}
+        run: |
+          IMPORT [STD]
+          INHERIT_ENV [GITHUB_WORKSPACE]
+          WORKSPACE SYSTEM
+          WORKDIR {{ env:GITHUB_WORKSPACE }}
+          [family:unix] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
+          [family:windows] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}\\target"
+          RUN ["cargo", "deny", "check"]
+
+      - name: Run cargo-audit
+        shell: oxdock --script {0}
+        run: |
+          IMPORT [STD]
+          INHERIT_ENV [GITHUB_WORKSPACE]
+          WORKSPACE SYSTEM
+          WORKDIR {{ env:GITHUB_WORKSPACE }}
+          [family:unix] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
+          [family:windows] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}\\target"
+          RUN ["cargo", "audit"]
+
+  lint-nightly:
+    name: lint-nightly
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      OXDOCK_WORKSPACE_ROOT: ${{ github.workspace }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt, clippy
+
+      - name: Install OxDock engine
+        uses: ./.github/actions/setup-oxdock
+        with:
+          version: ${{ env.OXDOCK_PINNED_ENGINE }}
+
+      - name: Hash lockfile and toolchain
+        id: hashes
+        shell: oxdock --script {0}
+        run: |
+          IMPORT [STD]
+          INHERIT_ENV [GITHUB_OUTPUT, GITHUB_WORKSPACE]
+          WORKSPACE SYSTEM
+          WORKDIR {{ env:GITHUB_WORKSPACE }}
+          ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
+          LET $hp: PIPE
+          WITH_IO [stdout=$hp] HASH_SHA256 Cargo.lock
+          WITH_IO [stdin=$hp] READ_LINE $lock
+          ECHO "lockfile: {{ $lock }}"
+          APPEND "{{ env:GITHUB_OUTPUT }}" "lockfile_hash={{ $lock }}\n"
+          LET $report: STRING = RUN ["rustc", "-Vv"]
+          LET $caps: LIST<STRING> = TEXT_EXTRACT($report, "(?m)^commit-hash: (\\S+)")
+          ECHO "rustc: {{ $caps.1 }}"
+          APPEND "{{ env:GITHUB_OUTPUT }}" "rustc_hash={{ $caps.1 }}\n"
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-udeps-${{ steps.hashes.outputs.lockfile_hash }}
+          restore-keys: |
+            ${{ runner.os }}-udeps-
+
+      # One job shares target across both legs below, so the udeps
+      # build warms the miri clippy that follows.
+      - name: Check unused dependencies
+        shell: oxdock --script {0}
+        run: |
+          IMPORT [STD]
+          INHERIT_ENV [GITHUB_WORKSPACE, PATH]
+          WORKSPACE SYSTEM
+          WORKDIR {{ env:GITHUB_WORKSPACE }}
+          ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
+          LET $has_udeps: BOOL = IS_EXEC("cargo-udeps")
+          IF !$has_udeps {
+            RUN ["cargo", "install", "cargo-udeps", "--locked"]
+          }
+          RUN ["cargo", "udeps", "--workspace", "--all-targets", "--all-features"]
+
+      - name: Run Clippy with cfg miri
+        shell: oxdock --script {0}
+        run: |
+          IMPORT [STD]
+          INHERIT_ENV [GITHUB_WORKSPACE]
+          WORKSPACE SYSTEM
+          WORKDIR {{ env:GITHUB_WORKSPACE }}
+          ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
+          ENV RUSTFLAGS="--cfg miri"
+          RUN ["cargo", "+nightly", "clippy", "--workspace", "--all-targets", "--all-features", "--", "-D", "warnings"]
+
+  test:
+    name: test (OS=${{ matrix.os }}, Flags=${{ matrix.flags }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # The arm leg is pinned by necessity (no -latest label exists
+        # for arm). Ubuntu 26.04 is GA, so the matrix converges there.
+        os: [ubuntu-latest, ubuntu-26.04-arm, macos-latest, windows-latest]
+        flags: ["--all-features", "--no-default-features"]
+    permissions:
+      contents: read
+    # No OXDOCK_WORKSPACE_ROOT here by design: it would leak through
+    # RUN into the test processes, where discover_workspace_root
+    # prefers it over CARGO_MANIFEST_DIR and manifest-relative tests
+    # resolve against the checkout instead of their fixtures. The
+    # engine falls back to CWD discovery, which is this checkout for
+    # every step below.
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install OxDock engine
+        uses: ./.github/actions/setup-oxdock
+        with:
+          version: ${{ env.OXDOCK_PINNED_ENGINE }}
+
+      - name: Hash lockfile and toolchain
+        id: hashes
+        shell: oxdock --script {0}
+        run: |
+          IMPORT [STD]
+          INHERIT_ENV [GITHUB_OUTPUT, GITHUB_WORKSPACE]
+          WORKSPACE SYSTEM
+          WORKDIR {{ env:GITHUB_WORKSPACE }}
+          [family:unix] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
+          [family:windows] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}\\target"
+          LET $hp: PIPE
+          WITH_IO [stdout=$hp] HASH_SHA256 Cargo.lock
+          WITH_IO [stdin=$hp] READ_LINE $lock
+          ECHO "lockfile: {{ $lock }}"
+          APPEND "{{ env:GITHUB_OUTPUT }}" "lockfile_hash={{ $lock }}\n"
+          LET $report: STRING = RUN ["rustc", "-Vv"]
+          LET $caps: LIST<STRING> = TEXT_EXTRACT($report, "(?m)^commit-hash: (\\S+)")
+          ECHO "rustc: {{ $caps.1 }}"
+          APPEND "{{ env:GITHUB_OUTPUT }}" "rustc_hash={{ $caps.1 }}\n"
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          # runner.arch segments ARM from x64: runner.os reports Linux
+          # on both, so without it the ARM legs restore x86_64 cargo
+          # binaries and fail with Exec format error.
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ steps.hashes.outputs.rustc_hash }}-${{ steps.hashes.outputs.lockfile_hash }}-${{ matrix.flags }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-cargo-${{ steps.hashes.outputs.rustc_hash }}-${{ steps.hashes.outputs.lockfile_hash }}-
+
+      - name: Test workspace
+        shell: oxdock --script {0}
+        run: |
+          IMPORT [STD]
+          INHERIT_ENV [GITHUB_WORKSPACE]
+          WORKSPACE SYSTEM
+          WORKDIR {{ env:GITHUB_WORKSPACE }}
+          [family:unix] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
+          [family:windows] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}\\target"
+          RUN ["cargo", "test", "--workspace", "${{ matrix.flags }}", "--lib", "--bins", "--tests", "--examples", "--", "--include-ignored"]
+
+      - name: README doctests
+        shell: oxdock --script {0}
+        run: |
+          IMPORT [STD]
+          INHERIT_ENV [GITHUB_WORKSPACE]
+          WORKSPACE SYSTEM
+          WORKDIR {{ env:GITHUB_WORKSPACE }}
+          [family:unix] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
+          [family:windows] ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}\\target"
+          RUN ["cargo", "test", "-p", "oxdock-doc-tests", "--doc", "${{ matrix.flags }}"]
+
+  coverage:
+    name: coverage (cargo-llvm-cov)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    # No OXDOCK_WORKSPACE_ROOT here, same reason as the test job:
+    # llvm-cov executes the suite, and the variable would hijack root
+    # discovery inside the test processes.
+    outputs:
+      line_coverage: ${{ steps.cov-summary.outputs.line_percent }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install Rust with llvm-tools
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Install OxDock engine
+        uses: ./.github/actions/setup-oxdock
+        with:
+          version: ${{ env.OXDOCK_PINNED_ENGINE }}
+
+      - name: Hash lockfile and toolchain
+        id: hashes
+        shell: oxdock --script {0}
+        run: |
+          IMPORT [STD]
+          INHERIT_ENV [GITHUB_OUTPUT, GITHUB_WORKSPACE]
+          WORKSPACE SYSTEM
+          WORKDIR {{ env:GITHUB_WORKSPACE }}
+          ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
+          LET $hp: PIPE
+          WITH_IO [stdout=$hp] HASH_SHA256 Cargo.lock
+          WITH_IO [stdin=$hp] READ_LINE $lock
+          ECHO "lockfile: {{ $lock }}"
+          APPEND "{{ env:GITHUB_OUTPUT }}" "lockfile_hash={{ $lock }}\n"
+          LET $report: STRING = RUN ["rustc", "-Vv"]
+          LET $caps: LIST<STRING> = TEXT_EXTRACT($report, "(?m)^commit-hash: (\\S+)")
+          ECHO "rustc: {{ $caps.1 }}"
+          APPEND "{{ env:GITHUB_OUTPUT }}" "rustc_hash={{ $caps.1 }}\n"
+
+      - name: Cache Cargo dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: cov-${{ runner.os }}-${{ steps.hashes.outputs.rustc_hash }}-${{ steps.hashes.outputs.lockfile_hash }}
+          restore-keys: |
+            cov-${{ runner.os }}-${{ steps.hashes.outputs.rustc_hash }}-
+
+      # Coverage data leg: the suite runs once under `--no-report`,
+      # then both reports render from that single run with `--no-run`.
+      # No awk, tr, or shell redirect: the summary string is captured
+      # and written natively.
+      - name: Generate coverage data
+        shell: oxdock --script {0}
+        run: |
+          IMPORT [STD]
+          INHERIT_ENV [GITHUB_WORKSPACE]
+          WORKSPACE SYSTEM
+          WORKDIR {{ env:GITHUB_WORKSPACE }}
+          ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
+
+          # Fresh profdata only: stale counters from the restored cache
+          # would merge into these numbers.
+          RUN ["cargo", "llvm-cov", "clean", "--workspace"]
+
+          # The one slow step: runs the suite under coverage, no report.
+          RUN ["cargo", "llvm-cov", "--workspace", "--all-features", "--no-report"]
+
+          # Report-only passes over that run. No tests execute twice.
+          RUN ["cargo", "llvm-cov", "--workspace", "--all-features", "--no-run", "--lcov", "--output-path", "lcov.info"]
+
+          LET $summary: STRING = RUN ["cargo", "llvm-cov", "--workspace", "--all-features", "--no-run", "--summary-only"]
+          WRITE coverage-summary.txt "{{ $summary }}"
+          ECHO "{{ $summary }}"
+
+      # Summary parse leg: TEXT_GREP selects the TOTAL row like awk,
+      # TEXT_FIELDS splits it, TEXT_TRIM_SUFFIX drops the percent like
+      # tr. A missing TOTAL row defaults to zero like the old fallback.
+      - name: Parse coverage summary
+        id: cov-summary
+        shell: oxdock --script {0}
+        run: |
+          IMPORT [STD]
+          INHERIT_ENV [GITHUB_OUTPUT, GITHUB_STEP_SUMMARY, GITHUB_WORKSPACE]
+          WORKSPACE SYSTEM
+          WORKDIR {{ env:GITHUB_WORKSPACE }}
+          ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"
+          LET $summary: STRING = READ "coverage-summary.txt"
+          LET $found: BOOL = TEXT_MATCH($summary, "(?m)^TOTAL")
+          LET $pct: STRING = "0"
+          IF $found {
+            LET $rows: LIST<STRING> = TEXT_GREP($summary, "^TOTAL")
+            LET $fields: LIST<STRING> = TEXT_FIELDS($rows.0)
+            $pct = TEXT_TRIM_SUFFIX($fields.9, "%")
+          }
+          ECHO "line coverage: {{ $pct }}"
+          APPEND "{{ env:GITHUB_OUTPUT }}" "line_percent={{ $pct }}\n"
+          APPEND "{{ env:GITHUB_STEP_SUMMARY }}" "### Coverage summary\n\n{{ $summary }}\n"
+
+      - name: Upload to Coveralls
+        uses: coverallsapp/github-action@v2
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path-to-lcov: lcov.info
+
+  # Dogfoods the reusable docs pipeline against this repo itself:
+  # same render plus drift check a downstream caller gets.
+  docs-fresh:
+    name: docs-fresh (docs-gen output matches checked-in docs)
+    uses: ./.github/workflows/docs.yml
+
+  verdict:
+    name: verdict
+    runs-on: ubuntu-latest
+    needs: [lint-stable, lint-nightly, test, coverage, docs-fresh]
+    if: ${{ always() }}
+    permissions:
+      contents: read
+    env:
+      OXDOCK_WORKSPACE_ROOT: ${{ github.workspace }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Install OxDock engine
+        uses: ./.github/actions/setup-oxdock
+        with:
+          version: ${{ env.OXDOCK_PINNED_ENGINE }}
+
+      - name: Evaluate all results
+        shell: oxdock --script {0}
+        run: |
+          IMPORT [STD]
+          INHERIT_ENV [GITHUB_WORKSPACE]
+          WORKSPACE SYSTEM
+          WORKDIR {{ env:GITHUB_WORKSPACE }}
+          LET $lint_stable: STRING = "${{ needs.lint-stable.result }}"
+          ASSERT_EQ $lint_stable "success"
+          LET $lint_nightly: STRING = "${{ needs.lint-nightly.result }}"
+          ASSERT_EQ $lint_nightly "success"
+          LET $test: STRING = "${{ needs.test.result }}"
+          ASSERT_EQ $test "success"
+          LET $coverage: STRING = "${{ needs.coverage.result }}"
+          ASSERT_EQ $coverage "success"
+          LET $docs: STRING = "${{ needs.docs-fresh.result }}"
+          ASSERT_EQ $docs "success"
+          ECHO "All checks succeeded."
