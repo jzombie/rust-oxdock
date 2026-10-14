@@ -82,9 +82,9 @@ jobs:
           # TODO: Remove after 0.29.0-alpha release
           source: local
 
-      # TODO: TEMPORARY DIAGNOSTIC (remove before merge): Windows cargo steps
-      # failed at link.exe under the closed script env while ambient
-      # builds work. Dump the ambient toolchain env to confirm which
+      # TODO: remove before merge (DIAG-TEMP). Windows cargo steps failed
+      # at link.exe under the closed script env while ambient builds
+      # work. Dump the ambient toolchain env to confirm which
       # variables native discovery needs.
       - name: Dump ambient Windows toolchain env (temporary)
         if: runner.os == 'Windows'
