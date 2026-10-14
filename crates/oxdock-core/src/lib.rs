@@ -1373,7 +1373,9 @@ mod tests {
         // of exact equality.
         #[allow(clippy::disallowed_macros)]
         let shell_added: &[&str] = if cfg!(windows) {
-            &[]
+            // `cmd.exe` injects `PROMPT=$P$G` when unset, like unix
+            // shells add `PWD`.
+            &["PROMPT"]
         } else {
             &["PWD", "SHLVL", "_"]
         };
