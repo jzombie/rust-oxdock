@@ -799,6 +799,7 @@ fn collect_step_kinds(kind: &StepKind, kinds: &mut HashSet<String>) {
         | StepKind::Timeout { body, .. }
         | StepKind::RemoteBlock { body, .. }
         | StepKind::AssignAsync { body, .. }
+        | StepKind::Isolated { body, .. }
         | StepKind::AsyncBlock { body } => vec![body],
         StepKind::If {
             then_body,
