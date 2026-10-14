@@ -396,9 +396,12 @@ impl<'a, P: ProcessManager> StepCtx<'a, P> {
         self.state.get_var(key)
     }
 
-    /// Look up an environment variable visible to the script.
+    /// Look up an environment variable visible to the script:
+    /// the script map first, session substrate (Tier 1/2, PATH baseline)
+    /// second. The baseline is suppressed inside `ISOLATED` without an
+    /// inner `PATH`, matching what child spawns receive.
     pub fn get_env(&self, key: &str) -> Option<String> {
-        self.state.envs.get(key).cloned()
+        self.state.get_env(key).map(str::to_string)
     }
 
     /// Snapshot of the script-visible environment: `ENV` assignments
@@ -409,6 +412,37 @@ impl<'a, P: ProcessManager> StepCtx<'a, P> {
     /// machinery.
     pub fn env_snapshot(&self) -> HashMap<String, String> {
         self.state.envs.as_ref().clone()
+    }
+
+    /// Final child environment for spawn sites outside `CommandContext`
+    /// (PTY): script env over session substrate with the baseline
+    /// suppressed exactly where assembly skips it, plus
+    /// `CARGO_TARGET_DIR` (explicit script value wins, else the session
+    /// scratch target). Mirrors what `apply_ctx` stages for `RUN`.
+    pub fn child_envs(&self) -> HashMap<String, String> {
+        let mut substrate = self.state.substrate().clone();
+        if !self.state.baseline_applies() {
+            substrate = substrate.without_baseline();
+        }
+        let mut staged = substrate.assemble(&self.state.envs, true);
+        if !staged.keys().any(|k| {
+            #[allow(clippy::disallowed_macros)]
+            if cfg!(windows) {
+                k.eq_ignore_ascii_case(oxdock_fs::env::cargo::TARGET_DIR)
+            } else {
+                k == oxdock_fs::env::cargo::TARGET_DIR
+            }
+        }) {
+            staged.insert(
+                oxdock_fs::env::cargo::TARGET_DIR.to_string(),
+                self.state
+                    .cargo_scratch
+                    .command_path()
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+        staged
     }
 
     /// Current working directory (guarded; stays inside the workspace).
@@ -705,6 +739,7 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
         | StepKind::For { .. }
         | StepKind::If { .. }
         | StepKind::Timeout { .. }
+        | StepKind::Isolated { .. }
         | StepKind::WithIo { .. }
         | StepKind::AssignCapture { .. } => {
             return dispatch_flow_step(cmd, &mut cx, generation, idx);
@@ -753,6 +788,10 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
                 }],
                 generation,
             )?;
+            Ok(())
+        }
+        StepKind::IsolatedInheritEnv { keys } => {
+            handlers::isolated_inherit_env(&mut cx, keys)?;
             Ok(())
         }
         StepKind::Copy {
@@ -961,6 +1000,7 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
         | StepKind::For { .. }
         | StepKind::If { .. }
         | StepKind::Timeout { .. }
+        | StepKind::Isolated { .. }
         | StepKind::WithIo { .. }
         | StepKind::AssignCapture { .. } => {
             unreachable!("compound steps dispatch before this match")
@@ -1023,6 +1063,7 @@ fn execute_steps_inner<P: ProcessManager>(
                 | StepKind::For { .. }
                 | StepKind::If { .. }
                 | StepKind::Timeout { .. }
+                | StepKind::Isolated { .. }
                 | StepKind::WithIo { .. }
                 | StepKind::AssignCapture { .. } => {
                     dispatch_flow_step(&step.kind, &mut cx, generation, idx)
@@ -1032,6 +1073,10 @@ fn execute_steps_inner<P: ProcessManager>(
                         StepKind::InheritEnv { keys } => {
                             handlers::inherit_env(&mut cx, keys)?;
                             sync_iteration_assert_needles(cx.state, steps, generation)?;
+                            Ok(())
+                        }
+                        StepKind::IsolatedInheritEnv { keys } => {
+                            handlers::isolated_inherit_env(&mut cx, keys)?;
                             Ok(())
                         }
                         StepKind::Workdir(arg) => {
@@ -1295,6 +1340,7 @@ fn execute_steps_inner<P: ProcessManager>(
                         | StepKind::For { .. }
                         | StepKind::If { .. }
                         | StepKind::Timeout { .. }
+                        | StepKind::Isolated { .. }
                         | StepKind::WithIo { .. }
                         | StepKind::AssignCapture { .. } => {
                             unreachable!("compound steps dispatch in the outer match")
@@ -1653,6 +1699,7 @@ fn dispatch_flow_step<P: ProcessManager>(
             let duration = super::args::resolve_arg_as_duration(duration, cx)?;
             handlers::timeout(cx, idx, &duration, body)
         }
+        StepKind::Isolated { body } => handlers::isolated(cx, body),
         StepKind::WithIo { bindings, cmd } => handlers::with_io(cx, generation, idx, bindings, cmd),
         StepKind::AssignCapture {
             var,

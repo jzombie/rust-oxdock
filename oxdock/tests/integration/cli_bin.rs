@@ -17,7 +17,7 @@ fn cli_binary_runs_script() {
 
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_oxdock"));
     cmd.arg("--script").arg("script.ox");
-    cmd.env(oxdock_fs::env::WORKSPACE_ROOT, root.display());
+    cmd.env(oxdock_fs::env::oxdock::WORKSPACE_ROOT, root.display());
     let status = cmd.status().expect("run cli");
     assert!(status.success(), "expected successful CLI exit");
 }
@@ -38,7 +38,7 @@ fn cli_exit_code_relays_script_exit() {
 
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_oxdock"));
     cmd.arg("--script").arg("script.ox");
-    cmd.env(oxdock_fs::env::WORKSPACE_ROOT, root.display());
+    cmd.env(oxdock_fs::env::oxdock::WORKSPACE_ROOT, root.display());
     let status = cmd.status().expect("run cli");
     assert_eq!(status.code(), Some(3), "host EXIT must reach the OS");
 }
@@ -59,7 +59,7 @@ fn cli_exit_code_is_one_on_plain_failure() {
 
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_oxdock"));
     cmd.arg("--script").arg("script.ox");
-    cmd.env(oxdock_fs::env::WORKSPACE_ROOT, root.display());
+    cmd.env(oxdock_fs::env::oxdock::WORKSPACE_ROOT, root.display());
     let status = cmd.status().expect("run cli");
     assert_eq!(status.code(), Some(1), "non-exit failures stay at 1");
 }
@@ -87,7 +87,7 @@ fn cli_exit_code_relays_guest_exit_over_loopback() {
         .arg("script.ox")
         .arg("--remote")
         .arg(format!("loop=\"{bin}\""));
-    cmd.env(oxdock_fs::env::WORKSPACE_ROOT, root.display());
+    cmd.env(oxdock_fs::env::oxdock::WORKSPACE_ROOT, root.display());
     let status = cmd.status().expect("run cli");
     assert_eq!(status.code(), Some(3), "guest EXIT must reach the OS");
 }

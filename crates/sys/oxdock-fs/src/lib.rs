@@ -11,9 +11,9 @@ pub fn init_temp_gc() {
 }
 
 pub fn discover_workspace_root() -> Result<GuardedPath> {
-    if let Ok(root) = std::env::var(env::WORKSPACE_ROOT) {
+    if let Ok(root) = std::env::var(env::oxdock::WORKSPACE_ROOT) {
         return GuardedPath::new_root_from_str(&root)
-            .with_context(|| format!("invalid {} {root}", env::WORKSPACE_ROOT));
+            .with_context(|| format!("invalid {} {root}", env::oxdock::WORKSPACE_ROOT));
     }
 
     if let Ok(resolver) = PathResolver::from_manifest_env() {

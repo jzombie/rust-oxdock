@@ -1506,6 +1506,8 @@ fn step_kind_name(kind: &StepKind) -> &'static str {
         StepKind::AwaitCapture { .. } => "AwaitCapture",
         StepKind::Cancel { .. } => "Cancel",
         StepKind::Timeout { .. } => "Timeout",
+        StepKind::Isolated { .. } => "Isolated",
+        StepKind::IsolatedInheritEnv { .. } => "IsolatedInheritEnv",
         StepKind::RemoteBlock { .. } => "RemoteBlock",
         StepKind::Sleep { .. } => "Sleep",
         StepKind::ListAppend { .. } => "ListAppend",

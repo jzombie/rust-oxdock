@@ -344,6 +344,7 @@ fn serve_and_close_roundtrip() {
     let registry = mapped_registry("test-ssh-serve-close");
     let script = indoc! {r#"
         IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-serve-close", {username: "guest", password: "close-pass"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $closed: BOOL = SSH_CLOSE($m.server)
@@ -366,6 +367,7 @@ fn wrong_password_rejected() {
     let registry = mapped_registry("test-ssh-auth");
     let script = indoc! {r#"
         IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-auth", {username: "guest", password: "right-pass"})
         SLEEP 8s
         SSH_CLOSE($m.server)
@@ -392,6 +394,7 @@ fn accept_echo_roundtrip() {
     let registry = mapped_registry("test-ssh-echo");
     let script = indoc! {r#"
         IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-echo", {username: "guest", password: "echo-pass"})
         LET $in: PIPE
         LET $out: PIPE
@@ -431,6 +434,7 @@ fn pty_request_accepted_echo_roundtrip() {
     let registry = mapped_registry("test-ssh-pty");
     let script = indoc! {r#"
         IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-pty", {username: "guest", password: "pty-pass"})
         LET $in: PIPE
         LET $out: PIPE
@@ -489,6 +493,7 @@ fn pty_explicit_size_unix() {
     let probe = root.clone();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-pty-size", {username: "u", password: "p"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $h: HANDLE = ASYNC {
@@ -527,6 +532,7 @@ fn pty_explicit_size_windows() {
     let probe = root.clone();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-pty-size-win", {username: "u", password: "p"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $h: HANDLE = ASYNC {
@@ -570,6 +576,7 @@ fn pty_child_sees_session_env_unix() {
     let probe = root.clone();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-env", {username: "u", password: "p"})
         WRITE addr.txt "{{ $m.addr }}"
         ENV PROBE_TOP="top"
@@ -617,6 +624,7 @@ fn pty_child_sees_session_env_windows() {
     let probe = root.clone();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-env-win", {username: "u", password: "p"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $h: HANDLE = ASYNC {
@@ -658,6 +666,7 @@ fn semaphore_guards_the_accept_loop() {
     let probe = root.clone();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-sem", {username: "guest", password: "pass"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $sem: SEMAPHORE = SEMAPHORE_NEW(1)
@@ -723,6 +732,7 @@ fn pty_live_resize_unix() {
     let registry = mapped_registry("test-ssh-resize");
     let script = indoc! {r#"
         IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-resize", {username: "u", password: "p"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $h: HANDLE = ASYNC {
@@ -767,6 +777,7 @@ fn pty_live_resize_windows() {
     let registry = mapped_registry("test-ssh-resize-win");
     let script = indoc! {r#"
         IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-resize-win", {username: "u", password: "p"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $h: HANDLE = ASYNC {
@@ -807,6 +818,7 @@ fn main_thread_accept_bails() {
     let registry = mapped_registry("test-ssh-main-accept");
     let script = indoc! {r#"
         IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-main-accept", {username: "guest", password: "pass"})
         LET $in: PIPE
         LET $out: PIPE
@@ -824,6 +836,7 @@ fn teardown_wakes_blocked_accept() {
     let registry = mapped_registry("test-ssh-teardown");
     let script = indoc! {r#"
         IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-teardown", {username: "guest", password: "pass"})
         LET $in: PIPE
         LET $out: PIPE
@@ -850,6 +863,7 @@ fn cancel_mid_pump_terminates() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
         LET $a: PIPE
         LET $b: PIPE
         LET $t: HANDLE = ASYNC SSH_PUMP($a, $b)
@@ -880,6 +894,7 @@ fn inner_exit_closes_outer_session() {
     let registry = mapped_registry("test-ssh-inner-exit");
     let script = indoc! {r#"
         IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-inner-exit", {username: "test", password: "test123"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $c_in: PIPE
@@ -939,6 +954,7 @@ fn real_openssh_client_echo_roundtrip() {
     let registry = mapped_registry("test-ssh-real-client");
     let script = indoc! {r##"
         IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
         WRITE askpass.sh "#!/bin/sh\necho test123\n"
         RUN ["chmod", "+x", "askpass.sh"]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-real-client", {username: "test", password: "test123"})
@@ -1001,6 +1017,7 @@ fn proxy_outer_to_inner_roundtrip() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
         LET $o: SSH_SERVE_INFO = SSH_SERVE("test-ssh-proxy-outer", {username: "outer", password: "outer-pass"})
         LET $i: SSH_SERVE_INFO = SSH_SERVE("test-ssh-proxy-inner", {username: "inner", password: "inner-pass"})
         LET $j_in: PIPE
@@ -1062,6 +1079,7 @@ fn unknown_serve_option_bails() {
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
+         INHERIT_ENV [PATH]
             LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-bad-option", {username: "guest", password: "pass", frobnicate: 1})
             SSH_CLOSE($m.server)
         "#},
@@ -1086,6 +1104,7 @@ fn non_map_serve_options_bails() {
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
+         INHERIT_ENV [PATH]
             LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-bad-options", "nope")
             SSH_CLOSE($m.server)
         "#},
@@ -1106,6 +1125,7 @@ fn missing_username_bails() {
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
+         INHERIT_ENV [PATH]
             LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-no-user", {password: "pass"})
             SSH_CLOSE($m.server)
         "#},
@@ -1130,6 +1150,7 @@ fn empty_password_bails() {
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
+         INHERIT_ENV [PATH]
             LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-empty-pass", {username: "guest", password: ""})
             SSH_CLOSE($m.server)
         "#},
@@ -1153,6 +1174,7 @@ fn missing_password_bails() {
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
+         INHERIT_ENV [PATH]
             LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-no-pass", {username: "guest"})
             SSH_CLOSE($m.server)
         "#},
@@ -1175,6 +1197,7 @@ fn non_string_username_bails() {
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
+         INHERIT_ENV [PATH]
             LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-bad-user-type", {username: 1, password: "pass"})
             SSH_CLOSE($m.server)
         "#},
@@ -1198,6 +1221,7 @@ fn unknown_option_names_all_valid_keys() {
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
+         INHERIT_ENV [PATH]
             LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-frobnicate", {username: "guest", password: "pass", frobnicate: 1})
             SSH_CLOSE($m.server)
         "#},
@@ -1221,6 +1245,7 @@ fn non_string_key_path_bails() {
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
+         INHERIT_ENV [PATH]
             LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-bad-keypath-type", {username: "guest", password: "pass", key_path: 1})
             SSH_CLOSE($m.server)
         "#},
@@ -1241,11 +1266,13 @@ fn stable_host_key_reused_across_restarts() {
     let registry = mapped_registry("test-ssh-key-stable");
     let serve_first = indoc! {r#"
         IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-key-stable", {username: "guest", password: "key-pass", key_path: "ssh_host_key"})
         SSH_CLOSE($m.server)
     "#};
     let serve_second = indoc! {r#"
         IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-key-stable", {username: "guest", password: "key-pass", key_path: "ssh_host_key"})
         SSH_CLOSE($m.server)
     "#};
@@ -1280,6 +1307,7 @@ fn loaded_host_key_serves_clients() {
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
+         INHERIT_ENV [PATH]
             LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-key-first", {username: "guest", password: "key-pass", key_path: "ssh_host_key"})
             SSH_CLOSE($m.server)
         "#},
@@ -1287,6 +1315,7 @@ fn loaded_host_key_serves_clients() {
     .expect("first boot creates the key");
     let script = indoc! {r#"
         IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-key-client", {username: "guest", password: "key-pass", key_path: "ssh_host_key"})
         LET $in: PIPE
         LET $out: PIPE
@@ -1330,6 +1359,7 @@ fn created_host_key_has_owner_only_permissions() {
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
+         INHERIT_ENV [PATH]
             LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-key-perms", {username: "guest", password: "key-pass", key_path: "ssh_host_key"})
             SSH_CLOSE($m.server)
         "#},
@@ -1365,6 +1395,7 @@ fn invalid_host_key_file_bails() {
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
+         INHERIT_ENV [PATH]
             LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-key-invalid", {username: "guest", password: "key-pass", key_path: "ssh_host_key"})
             SSH_CLOSE($m.server)
         "#},
@@ -1387,6 +1418,7 @@ fn world_readable_host_key_bails() {
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
+         INHERIT_ENV [PATH]
             LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-key-world", {username: "guest", password: "key-pass", key_path: "ssh_host_key"})
             SSH_CLOSE($m.server)
         "#},
@@ -1399,6 +1431,7 @@ fn world_readable_host_key_bails() {
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
+         INHERIT_ENV [PATH]
             LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-key-world", {username: "guest", password: "key-pass", key_path: "ssh_host_key"})
             SSH_CLOSE($m.server)
         "#},
@@ -1423,6 +1456,7 @@ fn blank_key_path_keeps_ephemeral_key() {
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
+         INHERIT_ENV [PATH]
             LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-key-blank", {username: "guest", password: "key-pass", key_path: ""})
             SSH_CLOSE($m.server)
         "#},
@@ -1445,6 +1479,7 @@ fn escaping_key_path_bails() {
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
+         INHERIT_ENV [PATH]
             LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-key-escape", {username: "guest", password: "key-pass", key_path: "../escape_key"})
             SSH_CLOSE($m.server)
         "#},
@@ -1464,11 +1499,13 @@ fn leading_slash_key_path_anchors_to_workspace_root() {
     let registry = mapped_registry("test-ssh-key-slash");
     let serve_first = indoc! {r#"
         IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-key-slash", {username: "guest", password: "key-pass", key_path: "/slash_key"})
         SSH_CLOSE($m.server)
     "#};
     let serve_second = indoc! {r#"
         IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-key-slash", {username: "guest", password: "key-pass", key_path: "/slash_key"})
         SSH_CLOSE($m.server)
     "#};
@@ -1494,6 +1531,7 @@ fn dequeue_exposes_metadata_before_pump() {
     let probe = root.clone();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-dequeue", {username: "guest", password: "pass"})
         LET $t: HANDLE = ASYNC {
             LET $sess: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
@@ -1538,6 +1576,7 @@ fn virtual_command_router() {
     let probe = root.clone();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-router", {username: "guest", password: "pass"})
         LET $t: HANDLE = ASYNC {
             LET $sess: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
@@ -1592,6 +1631,7 @@ fn unknown_virtual_command_rejected_cleanly() {
     let probe = root.clone();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-reject", {username: "guest", password: "pass"})
         LET $t: HANDLE = ASYNC {
             LET $sess: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
@@ -1632,6 +1672,7 @@ fn session_value_crosses_await_boundary() {
     let probe = root.clone();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-session", {username: "guest", password: "pass"})
         LET $t: HANDLE = ASYNC {
             LET $sess: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
@@ -1668,6 +1709,7 @@ fn pump_channel_second_pump_bails() {
     let addr = service_addr(&registry, "test-ssh-pump-twice");
     let script = indoc! {r#"
         IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-pump-twice", {username: "guest", password: "pass"})
         LET $t: HANDLE = ASYNC {
             LET $sess: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
@@ -1705,6 +1747,7 @@ fn worker_pool_script_parses() {
     let table = engine.module_table();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
         WORKSPACE LOCAL
 
         LET $server: SSH_SERVE_INFO = SSH_SERVE(
@@ -1743,13 +1786,13 @@ fn worker_pool_script_parses() {
         AWAIT $workers
     "#};
     let steps = oxdock_core::parse_script_with_modules(script, table).expect("pool parses");
-    // IMPORT is a directive, not a step: WORKSPACE, LET, ECHO, LET, LET,
-    // WHILE, AWAIT.
-    assert_eq!(steps.len(), 7, "all pool steps lower");
+    // IMPORT is a directive, not a step: INHERIT_ENV, WORKSPACE, LET,
+    // ECHO, LET, LET, WHILE, AWAIT.
+    assert_eq!(steps.len(), 8, "all pool steps lower");
     assert!(
-        matches!(&steps[6].kind, oxdock_core::StepKind::Await { var } if var == "workers"),
+        matches!(&steps[7].kind, oxdock_core::StepKind::Await { var } if var == "workers"),
         "pool ends with the group await, got {:?}",
-        steps[6].kind
+        steps[7].kind
     );
 }
 
@@ -1765,6 +1808,7 @@ fn finite_worker_pool_runs_to_completion() {
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
+         INHERIT_ENV [PATH]
             LET $workers: LIST<ANY> = []
             LET $w: INT = 0
             WHILE $w < 4 {
@@ -1791,6 +1835,7 @@ fn pool_accept_round_robins_across_workers() {
     let registry = mapped_registry("test-ssh-pool");
     let script = indoc! {r#"
         IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-pool", {username: "test", password: "test123"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $workers: LIST<ANY> = []
@@ -1868,6 +1913,7 @@ fn pool_pty_run_companions_terminate() {
     let registry = mapped_registry("test-ssh-pty-pool");
     let script = indoc! {r#"
         IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-pty-pool", {username: "test", password: "test123"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $workers: LIST<ANY> = []
@@ -1939,6 +1985,7 @@ fn serve_reports_virtual_echo() {
     let registry = mapped_registry("test-ssh-virtual-echo");
     let script = indoc! {r#"
         IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-virtual-echo", {username: "guest", password: "pass"})
         WRITE addr.txt "{{ $m.addr }}"
         WRITE virt.txt "{{ $m.virtual }}"
@@ -1965,6 +2012,7 @@ fn physical_serve_binds_rejected_in_script() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("127.0.0.1:23348", {username: "guest", password: "pass"})
     "#};
     let err = run_script(&root, script).expect_err("physical bind must fail");
@@ -1985,6 +2033,7 @@ fn numeric_serve_never_binds() {
     let script = format!(
         indoc! {r#"
             IMPORT [STD, SSH]
+         INHERIT_ENV [PATH]
             LET $m: SSH_SERVE_INFO = SSH_SERVE("{number}", {{username: "guest", password: "pass"}})
         "#},
         number = number,
@@ -2022,6 +2071,7 @@ fn numeric_connect_never_dials() {
     let script = format!(
         indoc! {r#"
             IMPORT [STD, SSH]
+         INHERIT_ENV [PATH]
             LET $in: PIPE
             LET $out: PIPE
             LET $c: HANDLE = ASYNC {{
@@ -2055,6 +2105,7 @@ fn memory_service_serve_rejected() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("ssh-mem-svc", {username: "guest", password: "pass"})
     "#};
     let err = run_script(&root, script).expect_err("memory serve must fail");
@@ -2075,6 +2126,7 @@ fn memory_mapped_serve_fails_before_execution() {
     let registry = memory_registry(&["test-ssh-mem-mapped"]);
     let script = indoc! {r#"
         IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
         WRITE early.txt "must-not-exist"
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-mem-mapped", {username: "guest", password: "pass"})
         SSH_CLOSE($m.server)
@@ -2101,6 +2153,7 @@ fn serve_reclaim_after_close_rebinds() {
     let registry = mapped_registry("test-ssh-reclaim");
     let script = indoc! {r#"
         IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
         LET $a: SSH_SERVE_INFO = SSH_SERVE("test-ssh-reclaim", {username: "guest", password: "pass"})
         SSH_CLOSE($a.server)
         LET $b: SSH_SERVE_INFO = SSH_SERVE("test-ssh-reclaim", {username: "guest", password: "pass"})
@@ -2120,6 +2173,7 @@ fn offline_serve_and_close_opens_no_socket() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-offline-serve", {username: "guest", password: "pass"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $closed: BOOL = SSH_CLOSE($m.server)
@@ -2143,6 +2197,7 @@ fn offline_connect_bails_before_sockets() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
         LET $in: PIPE
         LET $out: PIPE
         LET $c: HANDLE = ASYNC {
@@ -2171,6 +2226,7 @@ fn concurrent_guests_keep_their_own_pty_size() {
     let probe = root.clone();
     let script = indoc! {r#"
         IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-two-guests", {username: "u", password: "p"})
         WRITE addr.txt "{{ $m.addr }}"
         LET $h: HANDLE = ASYNC {
@@ -2218,6 +2274,7 @@ fn logical_port_connect_roundtrip() {
     let registry = mapped_registry("test-ssh-mapped-roundtrip");
     let script = indoc! {r#"
         IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-mapped-roundtrip", {username: "guest", password: "echo-pass"})
         LET $in: PIPE
         LET $out: PIPE
@@ -2272,6 +2329,7 @@ fn mapped_name_connect_roundtrip() {
     let root = guard_root(&temp);
     let script = indoc! {r#"
         IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-demo", {username: "guest", password: "echo-pass"})
         LET $in: PIPE
         LET $out: PIPE

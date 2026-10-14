@@ -78,6 +78,7 @@ pub enum Command {
     Exit,
     Async,
     Timeout,
+    Isolated,
     Sleep,
     ListAppend,
 }
@@ -111,6 +112,7 @@ pub const COMMANDS: &[Command] = &[
     Command::AssertContains,
     Command::Exit,
     Command::Timeout,
+    Command::Isolated,
     Command::Sleep,
     Command::ListAppend,
 ];
@@ -154,6 +156,7 @@ impl Command {
             Command::Exit => "EXIT",
             Command::Async => "ASYNC",
             Command::Timeout => "TIMEOUT",
+            Command::Isolated => "ISOLATED",
             Command::Sleep => "SLEEP",
             Command::ListAppend => "LIST_APPEND",
         }
@@ -194,13 +197,19 @@ impl Command {
             Command::Timeout => {
                 "TIMEOUT <duration> <command...> | TIMEOUT <duration> { <commands> }"
             }
+            Command::Isolated => {
+                "ISOLATED { INHERIT_ENV [...] <commands> } | ISOLATED <command...>"
+            }
             Command::Sleep => "SLEEP <duration>",
             Command::ListAppend => "LIST_APPEND $list <item>",
         }
     }
 
     pub const fn expects_inner_command(self) -> bool {
-        matches!(self, Command::WithIo | Command::Async | Command::Timeout)
+        matches!(
+            self,
+            Command::WithIo | Command::Async | Command::Timeout | Command::Isolated
+        )
     }
 
     pub fn parse(s: &str) -> Option<Self> {
@@ -234,6 +243,7 @@ impl Command {
             "EXIT" => Some(Command::Exit),
             "ASYNC" => Some(Command::Async),
             "TIMEOUT" => Some(Command::Timeout),
+            "ISOLATED" => Some(Command::Isolated),
             "SLEEP" => Some(Command::Sleep),
             "LIST_APPEND" => Some(Command::ListAppend),
             _ => None,

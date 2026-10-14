@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use oxdock_fs::{GuardedPath, PathResolver};
 
 fn repo_root() -> Result<String> {
-    let manifest_dir = std::env::var(oxdock_fs::env::CARGO_MANIFEST_DIR)
+    let manifest_dir = std::env::var(oxdock_fs::env::cargo::MANIFEST_DIR)
         .context("CARGO_MANIFEST_DIR missing")?
         .replace('\\', "/");
     Ok(manifest_dir

@@ -42,6 +42,7 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | [`AWAIT`](#await) | `AWAIT $var \| LET $out: STRING = AWAIT $var` |
 | [`CANCEL`](#cancel) | `CANCEL $var` |
 | [`TIMEOUT`](#timeout) | `TIMEOUT <duration> <command...> \| TIMEOUT <duration> { <commands> } \| TIMEOUT <duration> AWAIT $var` |
+| [`ISOLATED`](#isolated) | `ISOLATED { INHERIT_ENV [...] <commands> } \| ISOLATED <command...>` |
 | [`REMOTE`](#remote) | `REMOTE <target> [[$var, ...] [env:NAME, ...]] { <commands> }` |
 | [`FUNC`](#func) | `FUNC NAME([$param: TYPE, ...]) { <commands> }` |
 | [`RETURN`](#return) | `RETURN [<expr>]` |
@@ -804,6 +805,85 @@ TIMEOUT 30s AWAIT $quick
 ```
 
 
+### ISOLATED
+
+Run steps with a scrubbed script environment.
+
+**Syntax:** `ISOLATED { INHERIT_ENV [...] <commands> } | ISOLATED <command...>`
+
+Clears the script environment for the block: spawned children
+see only names the block re-adds through its leading
+`INHERIT_ENV`, resolved against the outer scope, never the
+host. Absent names stay absent silently, matching top-level
+`INHERIT_ENV`. Script variables, pipes, and files flow
+through untouched; only `env:` is scrubbed. Blocks nest
+(each level snapshots the already-scrubbed parent, so
+nesting only narrows) and compose with `ASYNC` and `FUNC`.
+Scope exit restores the prior environment.
+
+
+**Examples:**
+
+**Example: isolated scope**
+
+```oxdock
+# The block sees a clean env; plain steps still run and
+# outer bindings survive untouched.
+ENV MODE=outer
+ISOLATED {
+    ENV MODE=inner
+    WRITE inner.txt "{{ env:MODE }}"
+}
+LET $back: STRING = "{{ env:MODE }}"
+ASSERT_EQ $back "outer"
+LET $body: STRING = READ inner.txt
+ASSERT_EQ $body "inner"
+```
+
+**Example: closed child env**
+
+```oxdock expect_error:"INHERIT_ENV [PATH]"
+# No PATH was routed, so the spawn fails naming the fix
+# before anything executes, on every platform.
+ISOLATED {
+    RUN ["cargo", "--version"]
+}
+```
+
+**Expected error:** `INHERIT_ENV [PATH]`
+
+**Example: absent names stay absent**
+
+```oxdock
+# Listing a name the outer scope lacks is not an error:
+# the block simply runs without it.
+ISOLATED {
+    INHERIT_ENV [OXDOC_DEFINITELY_ABSENT_12345]
+    ECHO still-runs
+}
+ASSERT_CONTAINS stdout "still-runs"
+```
+
+**Example: nesting narrows**
+
+```oxdock
+# Each level snapshots the already-scrubbed parent, so
+# an inner block cannot recover what the outer dropped.
+ENV KEEP=yes
+ISOLATED {
+    INHERIT_ENV [KEEP]
+    ISOLATED {
+        ENV KEEP=inner
+        WRITE deep.txt "{{ env:KEEP }}"
+    }
+    LET $mid: STRING = "{{ env:KEEP }}"
+    ASSERT_EQ $mid "yes"
+}
+LET $deep: STRING = READ deep.txt
+ASSERT_EQ $deep "inner"
+```
+
+
 ### REMOTE
 
 Run a sealed block on a remote target.
@@ -1398,7 +1478,9 @@ ASSERT_EQ $outer_body "production"
 ```oxdock
 # A shell command reads its own environment, with
 # per-platform spelling: quoted "$VAR" passes the parser
-# through untouched on Unix ...
+# through untouched on Unix ... The shell itself resolves
+# through the listed PATH, like every spawned child.
+INHERIT_ENV [PATH]
 ENV PROXY_PORT=23791
 
 [family:unix] LET $o: STRING = RUN echo serving on "$PROXY_PORT"
@@ -1418,8 +1500,16 @@ Inherit env vars from host.
 
 Declares which host environment variables to inherit into the script.
 
-Must appear before any other commands and at most once. Without this
-directive, the script starts with an empty environment.
+Must appear before any other commands. Several directives may
+appear so platform-specific names ride explicit guards
+(`[family:windows] INHERIT_ENV [USERPROFILE]`); each guarded
+line runs only when its guard passes. OS substrate needs no
+declaration: the engine auto-injects loader invariants
+(`SystemRoot` on Windows), terminal and extension defaults
+(`TERM`, `PATHEXT`), scratch temp (`TMPDIR`/`TEMP`/`TMP`
+bound to the session), and a sanctioned `PATH` baseline for
+core utilities. Identity and secrets (`HOME`, tokens) stay
+opt-in here.
 
 
 **Arguments:**
@@ -1433,9 +1523,11 @@ directive, the script starts with an empty environment.
 **Example: inherit env**
 
 ```oxdock
-INHERIT_ENV [PATH, HOME]
+INHERIT_ENV [PATH]
+[family:unix] INHERIT_ENV [HOME]
 LET $path: STRING = env:PATH
-ASSERT_CONTAINS $path ":"
+[family:unix] ASSERT_CONTAINS $path ":"
+[family:windows] ASSERT_CONTAINS $path ";"
 ```
 
 
@@ -1494,7 +1586,11 @@ Execute shell command or direct executable.
 **Syntax:** `RUN <command...> | RUN ["exe", "arg", ...]`
 
 Shell form (`RUN <command...>`) runs the joined command string in the
-system shell (`$SHELL -c` / `COMSPEC /C`).
+batch shell (`sh -c` / `cmd /C`). Never the operator's login
+shell: login shells re-pollute scrubbed children from system
+profiles and break script portability, so step execution is
+pinned to POSIX `sh` (interactive `oxdock --shell` still uses
+`$SHELL`).
 
 Exec form (`RUN ["exe", "arg", ...]`) spawns the executable directly
 with no shell, so there is no shell expansion, globbing, redirection,
@@ -1515,6 +1611,9 @@ both forms.
 **Example: run**
 
 ```oxdock
+# Spawned children resolve through the listed PATH: closed
+# child env is the default, not ambient inherit.
+INHERIT_ENV [PATH]
 RUN echo hello
 
 # Captured runs prove the output, not just the exit status.
@@ -1526,7 +1625,12 @@ ASSERT_CONTAINS $o "hello"
 
 ```oxdock
 # No shell: `>` stays a literal argument, so no file is created.
+# Toolchain spawns bridge Tier 4 explicitly: rustup shims
+# resolve toolchains through the host home.
 IMPORT [STD]
+INHERIT_ENV [PATH]
+[family:unix] INHERIT_ENV [HOME]
+[family:windows] INHERIT_ENV [USERPROFILE]
 RUN ["cargo", "--version", ">", "x.txt"]
 ASSERT_CONTAINS stdout "cargo"
 

@@ -983,7 +983,10 @@ mod tests {
         let cases = [
             (MathOp::PushConst(Value::int(2)), "PushConst(2)"),
             (MathOp::LoadVar("a".to_string()), "LoadVar($a)"),
-            (MathOp::LoadEnv("HOME".to_string()), "LoadEnv(env:HOME)"),
+            (
+                MathOp::LoadEnv(oxdock_fs::env::os::unix::HOME.to_string()),
+                "LoadEnv(env:HOME)",
+            ),
             (
                 MathOp::LoadKeyPath {
                     base: "m".to_string(),

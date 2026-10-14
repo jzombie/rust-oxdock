@@ -23,6 +23,7 @@ pub struct CommandContext {
     cwd: PolicyPath,
     envs: Arc<HashMap<String, String>>,
     cargo_target_dir: CargoScratch,
+    substrate: crate::env_policy::SubstrateEnv,
     workspace_root: GuardedPath,
     build_context: GuardedPath,
 }
@@ -32,6 +33,7 @@ impl CommandContext {
         cwd: &PolicyPath,
         envs: Arc<HashMap<String, String>>,
         cargo_target_dir: &CargoScratch,
+        substrate: &crate::env_policy::SubstrateEnv,
         workspace_root: &GuardedPath,
         build_context: &GuardedPath,
     ) -> Self {
@@ -39,6 +41,7 @@ impl CommandContext {
             cwd: cwd.clone(),
             envs,
             cargo_target_dir: cargo_target_dir.clone(),
+            substrate: substrate.clone(),
             workspace_root: workspace_root.clone(),
             build_context: build_context.clone(),
         }
@@ -49,6 +52,7 @@ impl CommandContext {
         cwd: &PolicyPath,
         envs: &HashMap<String, String>,
         cargo_target_dir: &CargoScratch,
+        substrate: &crate::env_policy::SubstrateEnv,
         workspace_root: &GuardedPath,
         build_context: &GuardedPath,
     ) -> Self {
@@ -56,6 +60,7 @@ impl CommandContext {
             cwd,
             Arc::new(envs.clone()),
             cargo_target_dir,
+            substrate,
             workspace_root,
             build_context,
         )
@@ -71,6 +76,10 @@ impl CommandContext {
 
     pub fn cargo_target_dir(&self) -> &CargoScratch {
         &self.cargo_target_dir
+    }
+
+    pub fn substrate(&self) -> &crate::env_policy::SubstrateEnv {
+        &self.substrate
     }
 
     pub fn workspace_root(&self) -> &GuardedPath {

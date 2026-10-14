@@ -1,87 +1,151 @@
 # Environment Variable Contracts
 
-Every environment variable the OxDock workspace reads, writes, or documents —
-with its current status after the build-script pipeline migration
-(Prototype commits, `d2b732e..HEAD`), exact consuming functions, and
-transition rationale.
+Every variable the engine injects into spawned children, by tier.
 
-Statuses:
+> Rendered by `cargo run -p docs-gen` from the live tier tables in
+> `oxdock_process::env_policy`. Do not edit by hand: the engine is the
+> single source, and a parity test fails if any assembled name goes
+> undescribed.
 
-- **Retained** — read by the same logical component as before the migration.
-- **Relocated** — same semantics, different owning crate/function.
-- **Purged** — intentionally deleted; a test or doc pins the removal.
-- **New** — introduced by the build-script pipeline.
+Script authors route Tier 4 explicitly: toolchain legs declare
+`INHERIT_ENV [PATH]` plus `[family:unix] INHERIT_ENV [HOME]` /
+`[family:windows] INHERIT_ENV [USERPROFILE]` when the spawned program
+resolves toolchains through the host home. Everything else below
+arrives without declaration.
 
-| Variable | Status | Consumers (file : function) | Notes |
-|---|---|---|---|
-| `OXDOCK_WORKSPACE_ROOT` | Retained | `crates/sys/oxdock-fs/src/lib.rs` : `discover_workspace_root`; propagated to child processes via `oxdock-fs::FixtureInstance::cargo` / CLI | Overrides workspace-root discovery; highest-priority input |
-| `OXDOCK_INHERIT_STDOUT` | Retained | `crates/oxdock-core/src/exec/handlers.rs` : `run` (read from script env map) | Value `1`/`true` (case-insensitive) forces stdout+stderr inheritance even when capture streams are wired; pinned by executor tests |
-| `OXDOCK_EMBED_DEBUG` | Relocated (shared) | helpers `assets.rs` : `embed_debug_enabled()` → invoked from BOTH `oxdock-macros/src/lib.rs` : `build_assets` AND helpers `build_and_materialize` | Truthiness `1` / any-case `true` |
-| `RUST_ANALYZER_INTERNALS_DO_NOT_USE` | Relocated (shared) | helpers `assets.rs` : `execution_is_skipped_with` → invoked from BOTH the restored inline macros (`expand_embed_internal`/`expand_prepare_internal`) and helpers asset engine | IDE skip predicate: stub placeholder / silent success instead of execution |
-| `RUSTFLAGS` (`--cfg miri` substring) | Relocated (shared) | same as above | Miri-configured builds skip asset execution; unrelated flags (e.g. `-Dwarnings`) must NOT trigger it (negative branch pinned in tests) |
-| current-exe contains `rust-analyzer` | Relocated (shared) | same as above | Executable-name fallback predicate |
-| `VSCODE_PID` + absence of `TERM` | Relocated (shared) | same as above | VS Code background-task heuristic; interactive terminals do not skip |
-| `OXDOCK_EMBED_FORCE_REBUILD` | **Purged** | *(none)* | Old macro cache-bust gate. Invalidation is now owned by Cargo via `cargo:rerun-if-changed` directives emitted by helpers `run_spec`; completeness + ordering pinned by `packaging_invariant::directives_are_complete_and_ordered`. Do not re-introduce. |
-| `.git` presence / `CARGO_PRIMARY_PACKAGE` (gate input) | **Purged** (as gate) | *(none in production code)* | The old `should_build = has_git \|\| is_primary` gate is gone; build scripts always execute outside IDE-skip contexts. Registry consumers running build.rs equals the normal ecosystem trust model. |
-| `CARGO_PRIMARY_PACKAGE` (test infra) | Retained | `crates/sys/oxdock-process/src/serial_cargo_env.rs` : `manifest_env_guard` | Set/restored around tests that emulate primary vs dependency packages; no production reader remains |
-| `CARGO_MANIFEST_DIR` | Retained | `crates/sys/oxdock-fs/src/workspace_fs/mod.rs` : `PathResolver::from_manifest_env`; `oxdock-build/src/assets.rs` : `run_spec`, `script_text`, `clear_dir` helpers | Anchor for manifest-relative resolution and directive paths |
-| `OUT_DIR` | New | `oxdock-build/src/assets.rs` : `out_dir_root`; `oxdock-macros` : `oxdock_embed!` expansion (`include!(concat!(env!("OUT_DIR"), …))`) | Destination for materialized assets and generated typed modules |
-| `RUSTC` | Retained | `oxdock-build/src/lib.rs` : `emit_cfg_envs` (default `"rustc"`) | Toolchain override for `--print cfg` probing |
-| `TARGET` | Retained | `oxdock-build/src/lib.rs` : `collect_cfg_lines` | Forwarded as `--target` when present |
-| `SHELL` | Retained | `crates/sys/oxdock-process/src/shell.rs` : `shell_program` (unix fallback `sh`) | Interactive-shell resolution |
-| `COMSPEC` | Retained | `crates/sys/oxdock-process/src/shell.rs` : `shell_program` (windows fallback `cmd`) | Windows shell resolution |
-| `CARGO_FEATURE_*` / `CARGO_CFG_*` | Retained | `crates/sys/oxdock-process/src/builtin_env.rs` : `BuiltinEnv::collect`; emitted for consumer crates by helpers `emit_feature_envs` | Natively visible inside build-script processes, so DSL scripts read them without relay (env_injection fixture pins this) |
-| `OXDOCK_CACHE_APP` | New | `crates/sys/oxdock-fs/src/workspace_fs/cache.rs` : `auto_detect_app_name` | Highest-priority cache application identity override (after an explicit `with_cache_app`/`set_cache_app` argument); sanitized to a filesystem-safe segment |
-| `OXDOCK_CACHE_DIR` | New | `crates/sys/oxdock-fs/src/workspace_fs/cache.rs` : `resolve_cache_dir` | Exact-directory override for the OS-native cache root; takes precedence over project-dirs resolution. Scoped to the OS flavor: `WORKSPACE CACHE --local` always uses `<project>/.cache/workspace`. Default layout when unset: macOS `~/Library/Caches/com.oxdock.<app>/workspace`, Linux `$XDG_CACHE_HOME/<app>/workspace` (lowercased), Windows `%LOCALAPPDATA%\oxdock\<app>\cache\workspace`; temp-dir fallback when no home dir exists. Tests pin this to a temp dir for hermeticity |
-| `CARGO_PKG_NAME` (runtime) | Retained (new reader) | `crates/sys/oxdock-fs/src/workspace_fs/cache.rs` : `auto_detect_app_name` | Read from the process environment (populated by Cargo for `cargo run`/`cargo test` and visible to proc-macro hosts through the compiler driver env); never read from disk, never via `env!` inside `oxdock-fs` |
+## Tier contract
 
-## Transition log (Prototype commits)
+Every spawned child receives the script environment layered over
+engine-managed substrate, never ambient host state. Tiers 1 and 2
+inject on every spawn including `ISOLATED`; Tier 3 injects
+everywhere except `ISOLATED` without an inner `PATH`; Tier 4
+arrives only by explicit routing.
 
-1. **Purged:** `OXDOCK_EMBED_FORCE_REBUILD` plus the `.git`/`CARGO_PRIMARY_PACKAGE`
-   execution gates. Rationale: Cargo's `rerun-if-changed` invalidation replaces
-   manual cache busting; registry consumers executing build scripts is the
-   normal ecosystem trust model. Guard rails: directive golden-completeness and
-   packaging-invariant tests in `oxdock-build/tests/packaging_invariant.rs`.
-2. **Relocated:** `OXDOCK_EMBED_DEBUG` and all four IDE/Miri skip predicates,
-   from proc-macro execution time (`oxdock-macros`) to build-script
-   execution time (`oxdock-build`). Semantics preserved verbatim;
-   full 8-branch decision matrix unit-tested.
-3. **Retained:** every other variable above; consumption sites moved only where
-   the containing module was split (`exec.rs` → `exec/handlers.rs`,
-   process `lib.rs` → submodules).
+### Tier 1A: OS loader invariants
 
-## Verification
+Required for process initialization on Windows: the dynamic
+linker and MSVC CRT cannot run without these. Injecting them
+is not a leak.
 
-- `cargo test -p oxdock-build --test packaging_invariant`
-  covers skip-predicate branches, directive completeness/ordering, and
-  with-git/without-git equivalence.
-- Full battery: `cargo fmt --all --check` · `cargo clippy --workspace
-  --all-targets --all-features -- -D warnings` · `cargo test --workspace
-  --all-features --tests` · Miri on `oxdock-process` + `oxdock-core`
-  (`cargo +nightly miri test -p oxdock-process -p oxdock-core --all-features`;
-  falls back to the CI Miri job when no local nightly toolchain is installed).
+| Variable | Default | Rule |
+| --- | --- | --- |
+| `SystemRoot` | host value, else the `C:\Windows` fallback | immutable: injected unconditionally; script values dropped at assembly and rejected by the static pass |
+| `windir` | same root as `SystemRoot` | immutable, same as `SystemRoot` |
 
-## Dual-mode asset pipeline
+### Tier 1B: Substrate defaults
 
-1. **Inline (primary contract).** `oxdock_embed! { name, script: { … } | "…", out_dir }`
-   and `oxdock_prepare! { … }` execute the DSL inside the proc-macro via the guarded
-   engine. No build.rs is required. Cache: `<out_dir>/.oxdock_hash`
-   content-fingerprint of script text, statically discoverable inputs, and all
-   referenced env values (`{{ env:KEY }}` templates + `[env:KEY]` guards);
-   matching fingerprint ⇒ zero re-execution. Known limitation: dynamically
-   constructed inputs that are invisible to static analysis are not
-   fingerprinted — touch the script (or a watched file) to invalidate.
-2. **Build-script (alternative).** `oxdock_build::embed_assets /
-   prepare_assets` from build.rs with `oxdock_embed!(Ident)` consumer macro. Adds
-   Cargo-native `rerun-if-changed` invalidation for tracked inputs.
+Terminal identity and executable-extension resolution. Host
+values apply when set, synthetic fallbacks otherwise; scripts
+override freely.
 
-Both paths share skip predicates, debug flag semantics, the guarded executor,
-and the staged materializer.
+| Variable | Default | Rule |
+| --- | --- | --- |
+| `PATHEXT` | host value, else `.COM;.EXE;.BAT;.CMD` | default: script values win |
+| `TERM` | host value, else `dumb` | default: script values win |
 
-**Forcing rebuilds.** Two levers: bump `OXDOCK_EMBED_FINGERPRINT_SALT`
-(precision — one rebuild, then caching resumes) or set
-`OXDOCK_EMBED_FORCE_REBUILD=1` (bypasses cache reads while set). On the inline
-path, changing an env var does NOT by itself re-invoke rustc — pair it with a
-source-file `touch` or `cargo clean -p <pkg>` so the macro actually re-expands.
-On the build.rs path, salt edits trigger reruns automatically via the emitted
-directive.
+### Tier 2: Managed temp and home
+
+Scratch spaces and tool home, always bound to the session
+`<scratch>/tmp` so children can neither read nor collide with
+host temporary files and configs.
+
+| Variable | Default | Rule |
+| --- | --- | --- |
+| `TEMP` | session `<scratch>/tmp` | managed: script values win; never host-inherited |
+| `TMP` | session `<scratch>/tmp` | managed: script values win; never host-inherited |
+| `USERPROFILE` | session `<scratch>/tmp` (native profile anchor; Win32 API fallback would otherwise resolve the host profile) | managed: script values win; never host-inherited |
+| `TMPDIR` | session `<scratch>/tmp` | managed: script values win; never host-inherited |
+| `HOME` | session `<scratch>/tmp`, so tools cannot discover host configs | managed: script values win; never host-inherited |
+
+### Managed identity
+
+Shells synthesize login identity from `getpwuid` when these
+are absent, which would reintroduce host identity into
+scrubbed children. The engine pins the sandbox name instead.
+
+| Variable | Default | Rule |
+| --- | --- | --- |
+| `LOGNAME` | fixed sandbox name `oxdock` (shells would otherwise synthesize host identity from `getpwuid`) | managed: script values win |
+| `USER` | fixed sandbox name `oxdock` | managed: script values win |
+| `USERNAME` | fixed sandbox name `oxdock` | managed: script values win |
+
+### Tier 3: Execution path
+
+Sanctioned system directories for core utilities. Host `PATH`
+extensions (custom toolchains, user bins) still require
+explicit `INHERIT_ENV [PATH]`.
+
+| Variable | Default | Rule |
+| --- | --- | --- |
+| `PATH` | sanctioned baseline (`/usr/bin:/bin:/usr/sbin:/sbin`, `C:\Windows\System32;C:\Windows`) | baseline: script values win; suppressed inside `ISOLATED` without an inner `PATH` |
+
+### Tier 4: Identity and credentials
+
+User data, configs, and secrets. Zero automatic injection:
+toolchain legs bridge what they need explicitly.
+
+| Variable | Default | Rule |
+| --- | --- | --- |
+| `USERPROFILE` | absent on Unix; managed scratch binding on Windows (Tier 2) | zero host injection everywhere: bridged explicitly on Unix; script values win |
+### Host reads
+
+Variables the engine process itself touches (not injects).
+
+| Variable | Read by | Purpose |
+| --- | --- | --- |
+| `SHELL` | oxdock_process::shell::shell_program | interactive shell resolution (`oxdock --shell`); batch steps pin `sh` |
+| `COMSPEC` | oxdock_process::shell::shell_program | interactive shell resolution on Windows; batch steps pin `cmd` |
+| `TERM` | SubstrateEnv::capture | Tier 1B default; synthetic `dumb` when the host sets nothing |
+| `SystemRoot` | SubstrateEnv::capture | Tier 1A anchor; fallback is the `C:\Windows` constant |
+| `PATHEXT` | SubstrateEnv::capture | Tier 1B default; synthetic list when the host sets nothing |
+| `TMPDIR` | GuardedPath::tempdir (via tempfile) | scratch root placement only; the value is never injected |
+| `CARGO_FEATURE_*` | BuiltinEnv::collect | sanctioned ambient seed: Cargo-namespaced feature flags |
+| `CARGO_CFG_*` | BuiltinEnv::collect | sanctioned ambient seed: Cargo-namespaced cfg flags |
+
+### Precedence and enforcement
+
+Tier 1A is immutable: the static pass rejects `ENV SystemRoot=...`
+and assembly drops script values for those names. Every other
+tier lets explicit script `ENV`/`INHERIT_ENV` win. `check_spawn_anchors`
+validates the final assembled map with no caller-specific flags:
+present anchors pass, and the absent baseline inside unpatched
+`ISOLATED` blocks trips the bail naming `INHERIT_ENV [PATH]`.
+
+Source of truth: `crates/sys/oxdock-fs/src/env.rs` (names) and
+`crates/sys/oxdock-process/src/env_policy.rs` (assembly). This
+file is generated; do not edit by hand.
+
+### Engine plumbing
+
+Names the engine and Cargo provide to the host process itself.
+None of these inject into children; scripts see them only through
+explicit routing.
+
+| Variable | Owner | Rule |
+| --- | --- | --- |
+| `OXDOCK_CACHE_DIR` | oxdock | engine plumbing: read at explicit call sites; never inherited |
+| `OXDOCK_CACHE_APP` | oxdock | engine plumbing: read at explicit call sites; never inherited |
+| `oxdock` | oxdock | engine plumbing: read at explicit call sites; never inherited |
+| `OXDOCK_WORKSPACE_ROOT` | oxdock | engine plumbing: read at explicit call sites; never inherited |
+| `OXDOCK_EMBED_DEBUG` | oxdock | engine plumbing: read at explicit call sites; never inherited |
+| `OXDOCK_EMBED_FINGERPRINT_SALT` | oxdock | engine plumbing: read at explicit call sites; never inherited |
+| `OXDOCK_EMBED_FORCE_REBUILD` | oxdock | engine plumbing: read at explicit call sites; never inherited |
+| `OXDOCK_BANNER` | oxdock | engine plumbing: read at explicit call sites; never inherited |
+| `OXDOCK_INHERIT_STDOUT` | oxdock | engine plumbing: read at explicit call sites; never inherited |
+| `OXDOCK_SHELL_REEXEC` | oxdock | engine plumbing: read at explicit call sites; never inherited |
+| `OXDOCK_FIXTURE_TARGET_DIR` | oxdock | engine plumbing: read at explicit call sites; never inherited |
+| `OXDOCK_AST_CASE` | oxdock | engine plumbing: read at explicit call sites; never inherited |
+| `OXDOCK_AST_ONLY_COVERAGE` | oxdock | engine plumbing: read at explicit call sites; never inherited |
+| `OXDOCK_MULTI_GUARD_TEST_PASS` | oxdock | engine plumbing: read at explicit call sites; never inherited |
+| `OXDOCK_MULTI_GUARD_TEST_FAIL` | oxdock | engine plumbing: read at explicit call sites; never inherited |
+| `OXDOCK_GUARD_TEST_TOKEN_UNSET` | oxdock | engine plumbing: read at explicit call sites; never inherited |
+| `CARGO_MANIFEST_DIR` | cargo | Cargo-provided: relayed only through sanctioned seeds or explicit routing |
+| `CARGO_PKG_NAME` | cargo | Cargo-provided: relayed only through sanctioned seeds or explicit routing |
+| `CARGO_PRIMARY_PACKAGE` | cargo | Cargo-provided: relayed only through sanctioned seeds or explicit routing |
+| `CARGO_TARGET_DIR` | cargo | Cargo-provided: relayed only through sanctioned seeds or explicit routing |
+| `CARGO_INCREMENTAL` | cargo | Cargo-provided: relayed only through sanctioned seeds or explicit routing |
+| `CARGO_CFG_FEATURE` | cargo | Cargo-provided: relayed only through sanctioned seeds or explicit routing |
+| `OUT_DIR` | cargo::build | Cargo-provided: relayed only through sanctioned seeds or explicit routing |
+| `TARGET` | cargo::build | Cargo-provided: relayed only through sanctioned seeds or explicit routing |
+| `PROFILE` | cargo::build | Cargo-provided: relayed only through sanctioned seeds or explicit routing |
+| `RUSTC` | cargo::build | Cargo-provided: relayed only through sanctioned seeds or explicit routing |

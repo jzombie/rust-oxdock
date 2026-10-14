@@ -39,7 +39,7 @@ library [Functions](#functions).
 
 **Browse by section:**
 
-[Quick start](#quick-start) | [Dynamically embed assets at compile time](#dynamically-embed-assets-at-compile-time) | [Run scripts inline](#run-scripts-inline) | [Extend the language](#extend-the-language) | [Runtime architecture](#runtime-architecture) | [Extending OxDock from Rust](#extending-oxdock-from-rust) | [Machine model](#machine-model) | [Variants](#variants) | [Goals](#goals) | [Lexical structure](#lexical-structure) | [Guards and scoped blocks](#guards-and-scoped-blocks) | [Command Reference](#command-reference) | [Value types](#value-types) | [Functions](#functions) | [Contexts](#contexts) | [Plugin references](#plugin-references) | [Errors stop the pipeline](#errors-stop-the-pipeline) | [Selective environment inheritance](#selective-environment-inheritance) | [Path Separators](#path-separators) | [Workspaces & Filesystem](#workspaces--filesystem) | [Environment variable contracts](#environment-variable-contracts) | [GitHub Actions Integration](#github-actions-integration) | [Testing & Coverage](#testing--coverage) | [Glossary](#glossary) | [Citation](#citation) | [License](#license)
+[Quick start](#quick-start) | [Dynamically embed assets at compile time](#dynamically-embed-assets-at-compile-time) | [Run scripts inline](#run-scripts-inline) | [Extend the language](#extend-the-language) | [Runtime architecture](#runtime-architecture) | [Extending OxDock from Rust](#extending-oxdock-from-rust) | [Machine model](#machine-model) | [Variants](#variants) | [Goals](#goals) | [Lexical structure](#lexical-structure) | [Guards and scoped blocks](#guards-and-scoped-blocks) | [Command Reference](#command-reference) | [Value types](#value-types) | [Functions](#functions) | [Contexts](#contexts) | [Plugin references](#plugin-references) | [Errors stop the pipeline](#errors-stop-the-pipeline) | [Selective environment inheritance](#selective-environment-inheritance) | [Path Separators](#path-separators) | [Workspaces & Filesystem](#workspaces--filesystem) | [GitHub Actions Integration](#github-actions-integration) | [Testing & Coverage](#testing--coverage) | [Glossary](#glossary) | [Citation](#citation) | [License](#license)
 
 ## Quick start
 
@@ -1022,6 +1022,9 @@ ASSERT_CONTAINS stdout "two"
 Shell form (`RUN <command...>`) joins its arguments and runs the string in the system shell. Exec form (`RUN ["exe", "arg", ...]`) spawns the executable directly with no shell. Exec form has no shell expansion, globbing, redirection, or pipes. Quoted `{{ ... }}` templates still interpolate per element, and guards and wrappers (`ASYNC`, `TIMEOUT`, `WITH_IO`) apply to both forms.
 
 ```oxdock
+INHERIT_ENV [PATH]
+[family:unix] INHERIT_ENV [HOME]
+[family:windows] INHERIT_ENV [USERPROFILE]
 RUN ["cargo", "--version"]
 ASSERT_CONTAINS stdout "cargo"
 ```
@@ -1042,6 +1045,7 @@ ASSERT_CONTAINS stdout "visible-after-comments"
 ```
 
 ```oxdock
+INHERIT_ENV [PATH]
 ECHO hash-mid-line # stays-in-payload
 ASSERT_CONTAINS stdout "hash-mid-line # stays-in-payload"
 
@@ -1321,6 +1325,7 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | [`AWAIT`](#await) | `AWAIT $var \| LET $out: STRING = AWAIT $var` |
 | [`CANCEL`](#cancel) | `CANCEL $var` |
 | [`TIMEOUT`](#timeout) | `TIMEOUT <duration> <command...> \| TIMEOUT <duration> { <commands> } \| TIMEOUT <duration> AWAIT $var` |
+| [`ISOLATED`](#isolated) | `ISOLATED { INHERIT_ENV [...] <commands> } \| ISOLATED <command...>` |
 | [`REMOTE`](#remote) | `REMOTE <target> [[$var, ...] [env:NAME, ...]] { <commands> }` |
 | [`FUNC`](#func) | `FUNC NAME([$param: TYPE, ...]) { <commands> }` |
 | [`RETURN`](#return) | `RETURN [<expr>]` |
@@ -2083,6 +2088,85 @@ TIMEOUT 30s AWAIT $quick
 ```
 
 
+### ISOLATED
+
+Run steps with a scrubbed script environment.
+
+**Syntax:** `ISOLATED { INHERIT_ENV [...] <commands> } | ISOLATED <command...>`
+
+Clears the script environment for the block: spawned children
+see only names the block re-adds through its leading
+`INHERIT_ENV`, resolved against the outer scope, never the
+host. Absent names stay absent silently, matching top-level
+`INHERIT_ENV`. Script variables, pipes, and files flow
+through untouched; only `env:` is scrubbed. Blocks nest
+(each level snapshots the already-scrubbed parent, so
+nesting only narrows) and compose with `ASYNC` and `FUNC`.
+Scope exit restores the prior environment.
+
+
+**Examples:**
+
+**Example: isolated scope**
+
+```oxdock
+# The block sees a clean env; plain steps still run and
+# outer bindings survive untouched.
+ENV MODE=outer
+ISOLATED {
+    ENV MODE=inner
+    WRITE inner.txt "{{ env:MODE }}"
+}
+LET $back: STRING = "{{ env:MODE }}"
+ASSERT_EQ $back "outer"
+LET $body: STRING = READ inner.txt
+ASSERT_EQ $body "inner"
+```
+
+**Example: closed child env**
+
+```oxdock expect_error:"INHERIT_ENV [PATH]"
+# No PATH was routed, so the spawn fails naming the fix
+# before anything executes, on every platform.
+ISOLATED {
+    RUN ["cargo", "--version"]
+}
+```
+
+**Expected error:** `INHERIT_ENV [PATH]`
+
+**Example: absent names stay absent**
+
+```oxdock
+# Listing a name the outer scope lacks is not an error:
+# the block simply runs without it.
+ISOLATED {
+    INHERIT_ENV [OXDOC_DEFINITELY_ABSENT_12345]
+    ECHO still-runs
+}
+ASSERT_CONTAINS stdout "still-runs"
+```
+
+**Example: nesting narrows**
+
+```oxdock
+# Each level snapshots the already-scrubbed parent, so
+# an inner block cannot recover what the outer dropped.
+ENV KEEP=yes
+ISOLATED {
+    INHERIT_ENV [KEEP]
+    ISOLATED {
+        ENV KEEP=inner
+        WRITE deep.txt "{{ env:KEEP }}"
+    }
+    LET $mid: STRING = "{{ env:KEEP }}"
+    ASSERT_EQ $mid "yes"
+}
+LET $deep: STRING = READ deep.txt
+ASSERT_EQ $deep "inner"
+```
+
+
 ### REMOTE
 
 Run a sealed block on a remote target.
@@ -2677,7 +2761,9 @@ ASSERT_EQ $outer_body "production"
 ```oxdock
 # A shell command reads its own environment, with
 # per-platform spelling: quoted "$VAR" passes the parser
-# through untouched on Unix ...
+# through untouched on Unix ... The shell itself resolves
+# through the listed PATH, like every spawned child.
+INHERIT_ENV [PATH]
 ENV PROXY_PORT=23791
 
 [family:unix] LET $o: STRING = RUN echo serving on "$PROXY_PORT"
@@ -2697,8 +2783,16 @@ Inherit env vars from host.
 
 Declares which host environment variables to inherit into the script.
 
-Must appear before any other commands and at most once. Without this
-directive, the script starts with an empty environment.
+Must appear before any other commands. Several directives may
+appear so platform-specific names ride explicit guards
+(`[family:windows] INHERIT_ENV [USERPROFILE]`); each guarded
+line runs only when its guard passes. OS substrate needs no
+declaration: the engine auto-injects loader invariants
+(`SystemRoot` on Windows), terminal and extension defaults
+(`TERM`, `PATHEXT`), scratch temp (`TMPDIR`/`TEMP`/`TMP`
+bound to the session), and a sanctioned `PATH` baseline for
+core utilities. Identity and secrets (`HOME`, tokens) stay
+opt-in here.
 
 
 **Arguments:**
@@ -2712,9 +2806,11 @@ directive, the script starts with an empty environment.
 **Example: inherit env**
 
 ```oxdock
-INHERIT_ENV [PATH, HOME]
+INHERIT_ENV [PATH]
+[family:unix] INHERIT_ENV [HOME]
 LET $path: STRING = env:PATH
-ASSERT_CONTAINS $path ":"
+[family:unix] ASSERT_CONTAINS $path ":"
+[family:windows] ASSERT_CONTAINS $path ";"
 ```
 
 
@@ -2773,7 +2869,11 @@ Execute shell command or direct executable.
 **Syntax:** `RUN <command...> | RUN ["exe", "arg", ...]`
 
 Shell form (`RUN <command...>`) runs the joined command string in the
-system shell (`$SHELL -c` / `COMSPEC /C`).
+batch shell (`sh -c` / `cmd /C`). Never the operator's login
+shell: login shells re-pollute scrubbed children from system
+profiles and break script portability, so step execution is
+pinned to POSIX `sh` (interactive `oxdock --shell` still uses
+`$SHELL`).
 
 Exec form (`RUN ["exe", "arg", ...]`) spawns the executable directly
 with no shell, so there is no shell expansion, globbing, redirection,
@@ -2794,6 +2894,9 @@ both forms.
 **Example: run**
 
 ```oxdock
+# Spawned children resolve through the listed PATH: closed
+# child env is the default, not ambient inherit.
+INHERIT_ENV [PATH]
 RUN echo hello
 
 # Captured runs prove the output, not just the exit status.
@@ -2805,7 +2908,12 @@ ASSERT_CONTAINS $o "hello"
 
 ```oxdock
 # No shell: `>` stays a literal argument, so no file is created.
+# Toolchain spawns bridge Tier 4 explicitly: rustup shims
+# resolve toolchains through the host home.
 IMPORT [STD]
+INHERIT_ENV [PATH]
+[family:unix] INHERIT_ENV [HOME]
+[family:windows] INHERIT_ENV [USERPROFILE]
 RUN ["cargo", "--version", ">", "x.txt"]
 ASSERT_CONTAINS stdout "cargo"
 
@@ -5964,6 +6072,8 @@ Scripts no longer inherit the caller's environment wholesale. Host variables sta
 
 Keeping inheritance selective avoids leaking secrets by default while still allowing ergonomics for well-known keys (proxy settings, artifact caches, etc.).
 
+Every variable the engine injects into spawned children, by tier, is specified in [ENV_CONTRACTS.md](https://github.com/jzombie/rust-oxdock/blob/main/ENV_CONTRACTS.md).
+
 ## Path Separators
 
 - **Cross-platform behavior:** Paths in OxDock scripts are treated as filesystem paths and are resolved using Rust's `Path`/`PathBuf` APIs. That means you can use either `/`-separated paths or `./`-prefixed relative paths in scripts and they will be interpreted correctly on Windows, macOS, and Linux.
@@ -5993,10 +6103,6 @@ Keeping inheritance selective avoids leaking secrets by default while still allo
 - **What `oxdock-fs` protects you from:** the guardrails are pragmatic. They prevent common mistakes such as accidentally writing outside the materialized workspace or reading files from arbitrary absolute paths. However, they are not a full sandbox. A determined process or script can still create destructive actions (for example, invoking native `RUN` commands that modify external state). If you require strict isolation, run OxDock inside a container or VM.
 
 - **Performance:** routing via `oxdock-fs` adds negligible overhead for typical workloads. The module focuses on correctness and containment with minimal runtime cost so interactive iteration remains fast.
-
-## Environment variable contracts
-
-Environment variables understood by the toolchain (workspace roots, caching fingerprints, IDE integrations) are specified in [ENV_CONTRACTS.md](./ENV_CONTRACTS.md).
 
 ## GitHub Actions Integration
 

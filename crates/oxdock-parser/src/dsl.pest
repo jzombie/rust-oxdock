@@ -14,11 +14,11 @@ blank = _{ (WHITESPACE | linebreak)+ }
 script = { SOI ~ element* ~ EOI }
 
 // Structural statements MUST precede generic commands
-element = _{ blank | hash_comment | COMMENT | semicolon | guard_line | block_start | block_end | if_statement | for_statement | while_statement | func_def | import_statement | export_statement | call_statement | return_statement | break_statement | continue_statement | let_async_statement | let_capture_statement | await_statement | cancel_statement | let_statement | mutate_statement | timeout_statement | remote_statement | async_statement_block | async_statement | type_statement | command }
+element = _{ blank | hash_comment | COMMENT | semicolon | guard_line | block_start | block_end | if_statement | for_statement | while_statement | func_def | import_statement | export_statement | call_statement | return_statement | break_statement | continue_statement | let_async_statement | let_capture_statement | await_statement | cancel_statement | let_statement | mutate_statement | timeout_statement | isolated_statement | remote_statement | async_statement_block | async_statement | type_statement | command }
 
 // Inside for/let blocks, block_start/block_end must NOT appear as elements
 // (the block's own braces handle them).  Nested guard blocks use guard_block.
-block_element = _{ blank | hash_comment | COMMENT | semicolon | guard_block | guard_line | if_statement | for_statement | while_statement | func_def | import_statement | export_statement | call_statement | return_statement | break_statement | continue_statement | let_async_statement | let_capture_statement | await_statement | cancel_statement | let_statement | mutate_statement | timeout_statement | remote_statement | async_statement_block | async_statement | type_statement | command }
+block_element = _{ blank | hash_comment | COMMENT | semicolon | guard_block | guard_line | if_statement | for_statement | while_statement | func_def | import_statement | export_statement | call_statement | return_statement | break_statement | continue_statement | let_async_statement | let_capture_statement | await_statement | cancel_statement | let_statement | mutate_statement | timeout_statement | isolated_statement | remote_statement | async_statement_block | async_statement | type_statement | command }
 guard_block = ${ guard_line ~ gap ~ block }
 
 block_start = { "{" }
@@ -325,6 +325,14 @@ timeout_literal = @{ ASCII_DIGIT+ ~ ("ms" | "s" | "m" | "h")? }
 timeout_duration = { timeout_literal | dollar_ident | quoted_string | templated_arg }
 timeout_statement = ${ timeout_keyword ~ sep ~ timeout_duration ~ sep ~ (block | await_statement | cancel_statement | call_statement | while_statement | command) }
 
+// ISOLATED { ... } — run a block with a scrubbed script environment: the
+// child env starts empty and only names re-added by the block-leading
+// INHERIT_ENV (resolved against the outer scope, never the host) reach
+// spawned processes. Compound-atomic like its siblings: explicit `sep`
+// separators starve when implicit whitespace is active.
+isolated_keyword = _{ "ISOLATED" ~ !(ASCII_ALPHANUMERIC | "_") }
+isolated_statement = ${ isolated_keyword ~ sep ~ (block | await_statement | cancel_statement | call_statement | while_statement | command) }
+
 // REMOTE <target> [<bindings>] { <commands> } — run a sealed block on a
 // remote target bound by host inventory. Block-only: no single-command
 // form exists, and REMOTE never appears inside `command`/`command_inner`,
@@ -342,8 +350,8 @@ remote_binding = { remote_var_binding | remote_env_binding }
 remote_bindings = { "[" ~ gap_nl ~ (remote_binding ~ gap_nl ~ ("," ~ gap_nl ~ remote_binding ~ gap_nl)*)? ~ gap_nl ~ "]" }
 remote_statement = ${ remote_keyword ~ sep ~ remote_target ~ (gap ~ remote_bindings)? ~ gap ~ block }
 
-command = _{ with_io_command | inherit_env_command | timeout_statement | remote_statement | async_statement_block | async_statement | cancel_statement | call_statement | while_statement | run_exec_inner | instruction_inner }
-command_inner = { inherit_env_command | timeout_statement | remote_statement | async_statement | async_statement_block | cancel_statement | call_statement | while_statement | run_exec_statement | instruction }
+command = _{ with_io_command | inherit_env_command | timeout_statement | isolated_statement | remote_statement | async_statement_block | async_statement | cancel_statement | call_statement | while_statement | run_exec_inner | instruction_inner }
+command_inner = { inherit_env_command | timeout_statement | isolated_statement | remote_statement | async_statement | async_statement_block | cancel_statement | call_statement | while_statement | run_exec_statement | instruction }
 
 with_io_command = ${ "WITH_IO" ~ sep ~ io_flags ~ (sep ~ command)? }
 io_flags = { "[" ~ ws? ~ io_binding ~ (ws? ~ "," ~ ws? ~ io_binding)* ~ ws? ~ "]" }

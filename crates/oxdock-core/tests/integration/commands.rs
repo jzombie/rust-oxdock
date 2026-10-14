@@ -3,7 +3,9 @@ use oxdock_core::{
     ExecIo, run_steps, run_steps_with_context, run_steps_with_context_result_with_io,
     run_steps_with_fs,
 };
-use oxdock_fs::{GuardedPath, GuardedTempDir, PathResolver, ensure_git_identity};
+use oxdock_fs::{
+    GuardedPath, GuardedTempDir, PathResolver, ensure_git_identity, env as oxdock_env,
+};
 use oxdock_parser::{IoBinding, IoStream, Step, StepKind, Value, WorkspaceTarget};
 use oxdock_process::CommandBuilder;
 use std::collections::BTreeMap;
@@ -20,6 +22,18 @@ fn capture_pipeline(pipe: &str, path: &str, cmd: StepKind) -> Vec<Step> {
     // internal to the test, so underscores stand in.
     let var = pipe.replace('-', "_");
     vec![
+        // Closed child env: captured commands resolve through the listed PATH.
+        Step {
+            guard: None,
+            kind: StepKind::InheritEnv {
+                keys: vec![
+                    oxdock_env::os::PATH.to_string(),
+                    oxdock_env::os::windows::SYSTEM_ROOT.to_string(),
+                ],
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+        },
         Step {
             guard: None,
             kind: StepKind::Assign {
@@ -245,6 +259,17 @@ fn commands_behave_cross_platform() {
     };
 
     let steps = vec![
+        Step {
+            guard: None,
+            kind: StepKind::InheritEnv {
+                keys: vec![
+                    oxdock_env::os::PATH.to_string(),
+                    oxdock_env::os::windows::SYSTEM_ROOT.to_string(),
+                ],
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+        },
         Step {
             guard: None,
             kind: StepKind::Workdir("/".into()),
@@ -1183,7 +1208,7 @@ fn cwd_prints_to_stdout() {
     let steps = vec![
         Step {
             guard: None,
-            kind: StepKind::Workdir("a/b".into()),
+            kind: StepKind::Workdir("/".into()),
             scope_enter: 0,
             scope_exit: 0,
         },
@@ -1651,6 +1676,7 @@ fn run_exec_form_rejects_task_handles() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
+        INHERIT_ENV [PATH]
         LET $t: HANDLE = ASYNC ECHO hi
         RUN ["cargo", $t]
     "#};
@@ -1830,8 +1856,12 @@ fn inspect_reports_script_pipe_for_single_run() {
     // One pipe kind: even single-RUN producers stay store-and-forward
     // script pipes, so INSPECT always reports script no matter which
     // task or command bound the handle. `cargo --version` is the portable
-    // single-RUN producer; its tiny output never fills the pipe.
+    // single-RUN producer; its tiny output never fills the pipe. Bare
+    // program names resolve through the listed PATH (closed child env).
     let script = indoc! {r#"
+        INHERIT_ENV [PATH]
+        [family:unix] INHERIT_ENV [HOME]
+        [family:windows] INHERIT_ENV [USERPROFILE]
         LET $osp: PIPE
         LET $t: HANDLE = WITH_IO [stdout=$osp] ASYNC RUN ["cargo", "--version"]
         AWAIT $t
@@ -2293,6 +2323,7 @@ fn assert_contains_sees_streamed_child_output() {
     let root = guard_root(&temp);
     #[cfg(unix)]
     let script = indoc! {r#"
+        INHERIT_ENV [PATH]
         RUN "echo child-echo-line"
         ASSERT_CONTAINS stdout "child-echo-line"
     "#};
@@ -2338,8 +2369,12 @@ fn run_exec_form_spawns_directly_and_pipes_stdout() {
 
     // `cargo` drives the test suite itself, so it exists on every platform
     // without relying on shell builtins (`echo` is not a Windows executable).
+    // The bare program name resolves through the listed PATH (closed child env).
     let script = indoc!(
         r#"
+        INHERIT_ENV [PATH]
+        [family:unix] INHERIT_ENV [HOME]
+        [family:windows] INHERIT_ENV [USERPROFILE]
         LET $cap: PIPE
         WITH_IO [stdout=$cap] RUN ["cargo", "--version"]
         WITH_IO [stdin=$cap] WRITE out.txt
@@ -2347,9 +2382,11 @@ fn run_exec_form_spawns_directly_and_pipes_stdout() {
     );
     let steps = oxdock_core::parse_script(script).unwrap();
     assert!(
-        matches!(&steps[1].kind, StepKind::WithIo { cmd, .. } if matches!(cmd.as_ref(), StepKind::RunExec { .. })),
-        "second step must wrap RunExec, got {:?}",
-        steps[1].kind
+        steps.iter().any(
+            |step| matches!(&step.kind, StepKind::WithIo { cmd, .. } if matches!(cmd.as_ref(), StepKind::RunExec { .. }))
+        ),
+        "one step must wrap RunExec, got {:?}",
+        steps.iter().map(|step| &step.kind).collect::<Vec<_>>()
     );
     run_steps_with_context_result_with_io(&root, &root, &steps, ExecIo::new()).unwrap();
 
@@ -2369,15 +2406,22 @@ fn run_exec_nonzero_status_bails_with_step_context() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
 
-    let steps = oxdock_core::parse_script(r#"RUN ["cargo", "--invalid-oxdock-flag-xyz"]"#).unwrap();
+    let steps = oxdock_core::parse_script(indoc! {r#"
+        INHERIT_ENV [PATH]
+        [family:unix] INHERIT_ENV [HOME]
+        [family:windows] INHERIT_ENV [USERPROFILE]
+        RUN ["cargo", "--invalid-oxdock-flag-xyz"]
+    "#})
+    .unwrap();
     let err = run_steps(&root, &steps).unwrap_err();
     let msg = format!("{err:#}");
     // Foreground failures surface the manager's non-zero error wrapped in
     // step context : identical to shell `RUN` (the `exited with status`
     // spelling is the background/ASYNC path in `run_argv`/`run`).
     assert!(
-        msg.contains("step 1: RUN") && msg.contains("failed with status"),
-        "error must carry step index and status, got: {msg}"
+        msg.contains("RUN [\"cargo\", \"--invalid-oxdock-flag-xyz\"]")
+            && msg.contains("failed with status"),
+        "error must carry the failing command and status, got: {msg}"
     );
 }
 
@@ -2497,8 +2541,10 @@ fn archive_interoperates_with_system_tar() {
         .set_permissions_mode_unix(&root.join("bundle/tool.sh").unwrap(), 0o755)
         .unwrap();
 
-    // DSL packs, system tar unpacks: the stub handshake.
+    // DSL packs, system tar unpacks: the stub handshake. The bare `tar`
+    // resolves through the listed PATH (closed child env).
     let pack = indoc! {r#"
+        INHERIT_ENV [PATH]
         ARCHIVE bundle bundle.tar.gz
         MKDIR sys-out
         RUN ["tar", "-xzf", "bundle.tar.gz", "-C", "sys-out"]
@@ -2521,8 +2567,9 @@ fn archive_interoperates_with_system_tar() {
     }
 
     // System packs, DSL unpacks: the release handshake, `./`-prefixed
-    // members included.
+    // members included. The bare `tar` resolves through the listed PATH.
     let unpack = indoc! {r#"
+        INHERIT_ENV [PATH]
         MKDIR sys-src
         WRITE sys-src/note.txt sys-note
         RUN ["tar", "-czf", "sys.tar.gz", "-C", "sys-src", "./note.txt"]
@@ -2581,6 +2628,8 @@ fn _assert_step_kind_exhaustiveness(kind: &StepKind) {
         StepKind::AwaitCapture { .. } => {}
         StepKind::Cancel { .. } => {}
         StepKind::Timeout { .. } => {}
+        StepKind::Isolated { .. } => {}
+        StepKind::IsolatedInheritEnv { .. } => {}
         StepKind::RemoteBlock { .. } => {}
         StepKind::Sleep { .. } => {}
         StepKind::ListAppend { .. } => {}
@@ -3740,8 +3789,10 @@ fn with_io_bg_routes_stdin_stdout() {
     let output = Arc::new(Mutex::new(Vec::new()));
 
     // Spawns a background non-blocking pass-through child process concurrently
-    // alongside a mainline foreground step.
+    // alongside a mainline foreground step. Bare names resolve through the
+    // listed PATH (closed child env).
     let script = indoc! {r#"
+        INHERIT_ENV [PATH]
         [family:unix] WITH_IO [stdin, stdout] ASYNC RUN "cat"
         [family:windows] WITH_IO [stdin, stdout] ASYNC RUN "sort"
         RUN "echo foreground"
@@ -4810,7 +4861,7 @@ fn guarded_target_selection_with_unconditional_capture() {
     // plain string under guard; the RUN capture runs unconditionally, so
     // every downstream read is covered on all paths.
     let script = indoc! {r#"
-        INHERIT_ENV [PLAYGROUND_MAIN]
+        INHERIT_ENV [PLAYGROUND_MAIN, PATH]
         LET $target: STRING = "HEAD"
         [eq(env:PLAYGROUND_MAIN, "1")] $target = "main"
         LET $body: STRING = RUN echo diff $target

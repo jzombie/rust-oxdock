@@ -8,3 +8,5 @@ Scripts no longer inherit the caller's environment wholesale. Host variables sta
 - Test harnesses and embedders can supply values programmatically; the [environment-guards example](#environment-guards) injects `DEPLOY_TARGET` through the docs-conformance runner rather than the real process environment.
 
 Keeping inheritance selective avoids leaking secrets by default while still allowing ergonomics for well-known keys (proxy settings, artifact caches, etc.).
+
+Every variable the engine injects into spawned children, by tier, is specified in [ENV_CONTRACTS.md]({{ $docs_global.env_contracts_url }}).

@@ -1,5 +1,6 @@
 use anyhow::{Result, bail};
 use oxdock_fs::EntryKind;
+use oxdock_fs::env as oxdock_env;
 use oxdock_parser::{Arg, ArgPart, ArithOp, CompareOp, Expr, LogicalOp, MathOp, TypeTag, Value};
 use oxdock_pipe::{SharedInput, SharedOutput, SpillBuffer};
 use oxdock_process::{ProcessManager, format_value_for_string};
@@ -341,8 +342,8 @@ pub(crate) fn evaluate_expr<P: ProcessManager>(
             .state
             .get_var(name)
             .ok_or_else(|| anyhow::anyhow!("undefined variable ${name}")),
-        Expr::Env(key) => match cx.state.envs.get(key) {
-            Some(v) => Ok(Value::string(v.clone())),
+        Expr::Env(key) => match cx.state.get_env(key) {
+            Some(v) => Ok(Value::string(v.to_string())),
             None => anyhow::bail!("undefined environment variable `env:{key}`"),
         },
         Expr::KeyPath { base, keys } => resolve_key_path_value(cx, base, keys),
@@ -564,7 +565,7 @@ fn is_exec_name<P: ProcessManager>(cx: &StepCtx<'_, P>, name: &str) -> bool {
             .iter()
             .any(|candidate| is_executable_candidate(cx, candidate, &exts));
     }
-    let path_var = cx.state.envs.get("PATH").cloned().unwrap_or_default();
+    let path_var = cx.state.get_env(oxdock_env::os::PATH).unwrap_or_default();
     for dir in std::env::split_paths(&path_var) {
         let dir = dir.to_string_lossy();
         let base = dir.trim_end_matches(['/', '\\']);
@@ -613,7 +614,7 @@ pub(crate) fn parse_pathext(raw: Option<&str>) -> Vec<String> {
 /// answer matches the world the script runs in.
 #[cfg(windows)]
 fn platform_exts<P: ProcessManager>(cx: &StepCtx<'_, P>) -> Vec<String> {
-    parse_pathext(cx.state.envs.get("PATHEXT").map(String::as_str))
+    parse_pathext(cx.state.get_env(oxdock_env::os::windows::PATHEXT))
 }
 
 /// Extension list for candidate probing: the script's `PATHEXT` on
@@ -1193,8 +1194,8 @@ fn evaluate_compiled_math<P: ProcessManager>(
                     .ok_or_else(|| anyhow::anyhow!("undefined variable ${name}"))?;
                 stack.push(val);
             }
-            MathOp::LoadEnv(key) => match cx.state.envs.get(key) {
-                Some(v) => stack.push(Value::string(v.clone())),
+            MathOp::LoadEnv(key) => match cx.state.get_env(key) {
+                Some(v) => stack.push(Value::string(v.to_string())),
                 None => anyhow::bail!("undefined environment variable `env:{key}`"),
             },
             MathOp::LoadKeyPath { base, keys } => {
@@ -1559,13 +1560,20 @@ pub(crate) fn expand_string<P: ProcessManager>(
                             // Missing → emit empty
                         }
                     } else {
-                        // {{ env:KEY }} : look up in env (script + process)
-                        // {{ script_env:KEY }} : explicit script env
+                        // {{ env:KEY }} : script env with substrate
+                        // read-through (Tier 1/2, PATH baseline)
+                        // {{ script_env:KEY }} : explicit script env only
                         // {{ bare_key }} : DSL variable only, NOT env
-                        if let Some(env_key) = key
-                            .strip_prefix("env:")
-                            .or_else(|| key.strip_prefix("script_env:"))
-                        {
+                        if let Some(env_key) = key.strip_prefix("env:") {
+                            if let Some(val) = env
+                                .get(env_key)
+                                .map(String::as_str)
+                                .or_else(|| state.get_env(env_key))
+                            {
+                                output.push_str(val);
+                            }
+                            // Missing → emit empty
+                        } else if let Some(env_key) = key.strip_prefix("script_env:") {
                             if let Some(val) = env.get(env_key) {
                                 output.push_str(val);
                             }

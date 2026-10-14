@@ -19,7 +19,7 @@ const ANCHOR_DOCUMENTS: &[&str] = &[README_NAME, OXDOCK_README_NAME, CRATE_DOCS_
 
 fn repo_root() -> Result<String> {
     // Normalize separators first: Windows CARGO_MANIFEST_DIR uses backslashes.
-    let manifest_dir = std::env::var(oxdock_fs::env::CARGO_MANIFEST_DIR)
+    let manifest_dir = std::env::var(oxdock_fs::env::cargo::MANIFEST_DIR)
         .context("CARGO_MANIFEST_DIR missing")?
         .replace('\\', "/");
     Ok(manifest_dir
@@ -600,7 +600,7 @@ fn pin_doc_cache_dir() -> Result<()> {
     // SAFETY: written once per process to the same value before any fence
     // resolver is constructed; fences never mutate it back.
     unsafe {
-        std::env::set_var(oxdock_fs::env::CACHE_DIR, dir);
+        std::env::set_var(oxdock_fs::env::oxdock::CACHE_DIR, dir);
     }
     Ok(())
 }

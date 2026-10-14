@@ -179,7 +179,7 @@ pub fn embed_force_rebuild() -> bool {
 /// True when `OXDOCK_EMBED_DEBUG` requests verbose asset-pipeline logging
 /// (`1` or any casing of `true`).
 pub fn embed_debug_enabled() -> bool {
-    debug_enabled_from(std::env::var(oxdock_env::EMBED_DEBUG).ok())
+    debug_enabled_from(std::env::var(oxdock_env::oxdock::EMBED_DEBUG).ok())
 }
 
 /// Truthiness rules for debug logging: enabled by `1` or any casing of `true`.
@@ -265,7 +265,7 @@ fn init() {
 }
 
 fn out_dir_root() -> Result<GuardedPath> {
-    let out = std::env::var(oxdock_env::OUT_DIR)
+    let out = std::env::var(oxdock_env::cargo::build::OUT_DIR)
         .context("OUT_DIR missing (not running as a build script?)")?;
     GuardedPath::new_root_from_str(&out).map_err(|e| anyhow::anyhow!("invalid OUT_DIR {out}: {e}"))
 }
@@ -326,7 +326,7 @@ fn run_spec(
 
     // Emitting ANY rerun directive disables cargo's default invalidate-
     // everything, so watching build.rs is mandatory completeness.
-    let manifest = std::env::var(oxdock_env::CARGO_MANIFEST_DIR)
+    let manifest = std::env::var(oxdock_env::cargo::MANIFEST_DIR)
         .context("CARGO_MANIFEST_DIR missing (not running as a build script?)")?;
     push(
         &mut directives,
@@ -384,7 +384,7 @@ fn join_manifest(manifest: &str, rel: &str) -> String {
 /// emitted EMPTY directly, without syncing from any snapshot or (worse) the
 /// live workspace tree.
 fn build_and_materialize(name: &str, script: &str, subdir: &str) -> Result<()> {
-    let debug = debug_enabled_from(std::env::var(oxdock_env::EMBED_DEBUG).ok());
+    let debug = debug_enabled_from(std::env::var(oxdock_env::oxdock::EMBED_DEBUG).ok());
 
     // Parse first so LOCAL-only scripts never create a snapshot directory.
     let steps =

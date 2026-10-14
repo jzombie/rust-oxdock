@@ -328,10 +328,12 @@ fn mock_state<P: ProcessManager>() -> ExecState<P> {
     let mut state = ExecState {
         fs: Box::new(fs.clone()),
         cargo_scratch: oxdock_fs::reserve_cargo_scratch().expect("cargo scratch"),
+        substrate_cell: std::sync::OnceLock::new(),
         cwd: fs.root().clone(),
         envs: Arc::new(HashMap::new()),
         bg_children: Vec::new(),
         scope_stack: Vec::new(),
+        isolated_stack: Vec::new(),
         io: ExecIo::new(),
         assert_windows: Arc::new(std::sync::Mutex::new(HashMap::new())),
         assert_windows_stderr: Arc::new(std::sync::Mutex::new(HashMap::new())),

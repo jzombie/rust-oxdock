@@ -7,7 +7,7 @@ use oxdock_logic_tests::recording::{Call, RecordingManager, argv_calls, shell_ca
 fn repo_root() -> Result<String> {
     // Same layout derivation as docs_conformance: normalize separators
     // first since Windows CARGO_MANIFEST_DIR uses backslashes.
-    let manifest_dir = std::env::var(oxdock_fs::env::CARGO_MANIFEST_DIR)
+    let manifest_dir = std::env::var(oxdock_fs::env::cargo::MANIFEST_DIR)
         .context("CARGO_MANIFEST_DIR missing")?
         .replace('\\', "/");
     Ok(manifest_dir

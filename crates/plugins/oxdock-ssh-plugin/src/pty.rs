@@ -340,11 +340,18 @@ pub fn pump_pty_session<P: ProcessManager>(
     // goes through `command_path`.
     let cwd = command_path(cx.cwd());
     builder.cwd(cwd.as_ref());
-    // Script ENV layers over the inherited host environment (the `RUN`
-    // contract): block-scoped assignments like the session's `SSH_*`
-    // relay reach the child, and scope exit reverts them.
-    for (key, value) in cx.env_snapshot() {
-        builder.env(&key, &value);
+    // Tiered child env like `RUN`: script env over session substrate
+    // (Tier 1 OS + Tier 2 scratch temp + Tier 3 PATH baseline, baseline
+    // suppressed inside unpatched `ISOLATED`), never host inherit.
+    // Terminal definitions ride the same rule with a Tier 1B default: a
+    // leg needing curses capability lists `INHERIT_ENV [TERM]` (or sets
+    // it) and the snapshot carries it; otherwise the host TERM (else
+    // `dumb`) applies instead of failing visibly in the child.
+    let staged = cx.child_envs();
+    oxdock_process::check_spawn_anchors(&argv[0], &staged, false)?;
+    builder.env_clear();
+    for (key, value) in &staged {
+        builder.env(key, value);
     }
     let mut child = pair
         .slave

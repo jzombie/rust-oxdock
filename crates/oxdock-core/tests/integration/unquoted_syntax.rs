@@ -247,7 +247,7 @@ fn echo_unquoted_message() {
 fn run_unquoted_command() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
-    run_script(&root, "RUN echo test123").unwrap();
+    run_script(&root, "INHERIT_ENV [PATH]\nRUN echo test123").unwrap();
 }
 
 #[test]
@@ -257,6 +257,7 @@ fn run_unquoted_command_with_env_expansion() {
     run_script(
         &root,
         indoc! {r#"
+        INHERIT_ENV [PATH]
         ENV GREETING="hello"
         RUN echo {{ env:GREETING }}
     "#},

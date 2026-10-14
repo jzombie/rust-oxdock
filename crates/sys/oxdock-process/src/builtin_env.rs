@@ -21,8 +21,10 @@ impl BuiltinEnv {
             // Note: proc-macro processes do NOT receive these by default; the
             // oxdock-build build script emits them via rustc-env.
             // These are already namespaced by Cargo (CARGO_FEATURE_*, CARGO_CFG_*).
+            // The admitted set lives in one place (`env_policy`) with every
+            // other host-injection rule; nothing else flows ambiently.
             for (key, value) in std::env::vars() {
-                if key.starts_with("CARGO_FEATURE_") || key.starts_with("CARGO_CFG_") {
+                if crate::env_policy::is_sanctioned_seed(&key) {
                     values.entry(key).or_insert(value);
                 }
             }
@@ -43,7 +45,7 @@ impl BuiltinEnv {
 
 fn cargo_features_from_env() -> Vec<String> {
     let mut out = Vec::new();
-    if let Ok(cfg_features) = std::env::var(oxdock_env::CARGO_CFG_FEATURE) {
+    if let Ok(cfg_features) = std::env::var(oxdock_env::cargo::CFG_FEATURE) {
         out.extend(split_feature_list(&cfg_features));
     }
     out
@@ -86,7 +88,7 @@ mod tests {
         let root = temp.as_guarded_path().clone();
         let _guard = manifest_env_guard(&root, true);
         let _cfg = TestEnvGuard::set(
-            oxdock_env::CARGO_CFG_FEATURE,
+            oxdock_env::cargo::CFG_FEATURE,
             "my-feat, other_feat,,  spaced ",
         );
         let env = BuiltinEnv::collect(&root).into_envs();
@@ -102,7 +104,7 @@ mod tests {
         let temp = GuardedPath::tempdir().expect("tempdir");
         let root = temp.as_guarded_path().clone();
         let _guard = manifest_env_guard(&root, true);
-        let _cfg = TestEnvGuard::set(oxdock_env::CARGO_CFG_FEATURE, "my-feat");
+        let _cfg = TestEnvGuard::set(oxdock_env::cargo::CFG_FEATURE, "my-feat");
         let _existing = TestEnvGuard::set("CARGO_FEATURE_MY_FEAT", "custom");
         let env = BuiltinEnv::collect(&root).into_envs();
 

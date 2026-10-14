@@ -45,6 +45,8 @@ define_pipeline! {
     StepKind::AwaitCapture { .. } => exec::dispatch_await_capture_step,
     StepKind::Cancel { .. } => exec::dispatch_cancel_step,
     StepKind::Timeout { .. } => exec::dispatch_timeout_step,
+    StepKind::Isolated { .. } => exec::dispatch_isolated_step,
+    StepKind::IsolatedInheritEnv { .. } => exec::dispatch_isolated_inherit_env,
     StepKind::Sleep { .. } => exec::dispatch_sleep_step,
     StepKind::ListAppend { .. } => exec::dispatch_push_into_step,
     StepKind::FuncDef { .. } => exec::dispatch_func_def,
@@ -130,12 +132,22 @@ mod tests {
             "printf %s \"$CARGO_TARGET_DIR\" > seen.txt"
         };
 
-        let steps = vec![Step {
-            guard: None,
-            kind: StepKind::Run(cmd.to_string().into()),
-            scope_enter: 0,
-            scope_exit: 0,
-        }];
+        let steps = vec![
+            Step {
+                guard: None,
+                kind: StepKind::InheritEnv {
+                    keys: vec![oxdock_env::os::PATH.to_string()],
+                },
+                scope_enter: 0,
+                scope_exit: 0,
+            },
+            Step {
+                guard: None,
+                kind: StepKind::Run(cmd.to_string().into()),
+                scope_enter: 0,
+                scope_exit: 0,
+            },
+        ];
 
         run_steps(&root, &steps).unwrap();
 
@@ -147,9 +159,10 @@ mod tests {
             legacy.display().to_string(),
             "CARGO_TARGET_DIR must not target the workspace tree"
         );
+        let normalized = seen.trim().replace('\\', "/");
         assert!(
-            seen.trim().contains("oxdock-cargo-"),
-            "CARGO_TARGET_DIR must point at the isolated scratch location, got {seen:?}"
+            normalized.ends_with("/target") && normalized.contains("oxdock-"),
+            "CARGO_TARGET_DIR must point at the isolated scratch target dir, got {seen:?}"
         );
     }
 
@@ -159,7 +172,8 @@ mod tests {
         let root = guard_root(&temp);
 
         // Snapshot-rooted RUN executes against the snapshot workdir.
-        let steps = parse_script("RUN echo hi").unwrap();
+        // Closed child env: the shell resolves through the listed PATH.
+        let steps = parse_script("INHERIT_ENV [PATH]\nRUN echo hi").unwrap();
         let output = run_steps_with_lazy_snapshot(&root, &steps, ExecIo::new()).unwrap();
         assert!(
             output.snapshot.is_materialized(),
@@ -168,6 +182,7 @@ mod tests {
 
         // LOCAL-rooted RUN executes against the live tree.
         let steps = parse_script(indoc! {r#"
+            INHERIT_ENV [PATH]
             WORKSPACE LOCAL
             RUN echo hi
         "#})
@@ -317,7 +332,7 @@ mod tests {
         let temp = GuardedPath::tempdir().unwrap();
         let root = guard_root(&temp);
 
-        let guard_var = oxdock_env::GUARD_TEST_TOKEN_UNSET;
+        let guard_var = oxdock_env::oxdock::GUARD_TEST_TOKEN_UNSET;
         let script = format!(
             indoc!(
                 r#"
@@ -529,7 +544,8 @@ mod tests {
         let temp = GuardedPath::tempdir().unwrap();
         let root = guard_root(&temp);
 
-        let profile = std::env::var(oxdock_env::PROFILE).unwrap_or_else(|_| "debug".to_string());
+        let profile = std::env::var(oxdock_env::cargo::build::PROFILE)
+            .unwrap_or_else(|_| "debug".to_string());
         let script = format!(
             indoc!(
                 r#"
@@ -559,7 +575,7 @@ mod tests {
         let temp = GuardedPath::tempdir().unwrap();
         let root = guard_root(&temp);
 
-        let key = oxdock_env::MULTI_GUARD_TEST_PASS;
+        let key = oxdock_env::oxdock::MULTI_GUARD_TEST_PASS;
 
         let script = format!(
             indoc!(
@@ -586,7 +602,7 @@ mod tests {
         let temp = GuardedPath::tempdir().unwrap();
         let root = guard_root(&temp);
 
-        let key = oxdock_env::MULTI_GUARD_TEST_FAIL;
+        let key = oxdock_env::oxdock::MULTI_GUARD_TEST_FAIL;
 
         let script = format!(
             indoc!(
@@ -619,7 +635,8 @@ mod tests {
         let root = guard_root(&temp);
 
         // Background succeeds quickly; pipeline should complete without error.
-        let script = "ASYNC RUN \"sh -c 'sleep 0.05'\"";
+        // Closed child env: the shell resolves through the listed PATH.
+        let script = "INHERIT_ENV [PATH]\nASYNC RUN \"sh -c 'sleep 0.05'\"";
         let steps = crate::parse_script(script).unwrap();
         let res = run_steps(&root, &steps);
         assert!(res.is_ok(), "ASYNC success should allow clean exit");
@@ -635,7 +652,7 @@ mod tests {
         let temp = GuardedPath::tempdir().unwrap();
         let root = guard_root(&temp);
 
-        let script = "ASYNC RUN \"sh -c 'sleep 0.05; exit 7'\"";
+        let script = "INHERIT_ENV [PATH]\nASYNC RUN \"sh -c 'sleep 0.05; exit 7'\"";
         let steps = crate::parse_script(script).unwrap();
         let err = run_steps(&root, &steps).unwrap_err();
         let msg = err.to_string();
@@ -657,6 +674,7 @@ mod tests {
 
         let script = indoc! {
             r#"
+            INHERIT_ENV [PATH]
             ASYNC RUN "sh -c 'sleep 0.2; echo one > one.txt'"
             ASYNC RUN "sh -c 'sleep 0.5; echo two > two.txt'"
             WRITE "done.txt" "ok"
@@ -703,6 +721,7 @@ mod tests {
 
         let script = indoc! {
             r#"
+            INHERIT_ENV [PATH]
             ASYNC RUN "sh -c 'sleep 30; echo late > late.txt'"
             RUN "__oxdock_missing_command_xyz__"
             "#
@@ -736,6 +755,7 @@ mod tests {
 
         let script = indoc! {
             r#"
+            INHERIT_ENV [PATH]
             ASYNC RUN "sh -c 'sleep 30; echo late > late.txt'"
             EXIT 5
             "#
@@ -797,6 +817,7 @@ mod tests {
         let script = if cfg!(windows) {
             indoc! {
                 r#"
+                INHERIT_ENV [PATH]
                 ENV FOO="bar"
                 RUN "echo %FOO% > run.txt"
                 ASYNC RUN "echo %FOO% > bg.txt"
@@ -805,6 +826,7 @@ mod tests {
         } else {
             indoc! {
                 r#"
+                INHERIT_ENV [PATH]
                 ENV FOO="bar"
                 RUN "sh -c 'printf %s \"$FOO\" > run.txt'"
                 ASYNC RUN "sh -c 'printf %s \"$FOO\" > bg.txt'"
@@ -889,11 +911,11 @@ mod tests {
             let lock = CACHE_DIR_LOCK
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let prev = std::env::var(oxdock_env::CACHE_DIR).ok();
+            let prev = std::env::var(oxdock_env::oxdock::CACHE_DIR).ok();
             // SAFETY: serialized by `CACHE_DIR_LOCK`, restored on drop.
             unsafe {
                 std::env::set_var(
-                    oxdock_env::CACHE_DIR,
+                    oxdock_env::oxdock::CACHE_DIR,
                     dir.as_path().to_string_lossy().into_owned(),
                 );
             }
@@ -905,8 +927,8 @@ mod tests {
         fn drop(&mut self) {
             unsafe {
                 match &self.prev {
-                    Some(v) => std::env::set_var(oxdock_env::CACHE_DIR, v),
-                    None => std::env::remove_var(oxdock_env::CACHE_DIR),
+                    Some(v) => std::env::set_var(oxdock_env::oxdock::CACHE_DIR, v),
+                    None => std::env::remove_var(oxdock_env::oxdock::CACHE_DIR),
                 }
             }
         }
@@ -1222,5 +1244,197 @@ mod tests {
         assert!(exists(&local_root, ".cache/workspace/a.txt"));
         #[cfg(not(miri))]
         assert!(exists(&snapshot_root, "cargo.toml"));
+    }
+
+    /// The isolation discriminator: real children on both sides of the
+    /// boundary. A plain `RUN` sees the outer var; the identical `RUN`
+    /// inside `ISOLATED` does not. Mock-recorded envs cannot prove this
+    /// (they assert staged maps, never spawned children); only executed
+    /// processes distinguish a scrub from generic block scoping. One
+    /// script with platform guards, no `$` spellings anywhere, so
+    /// DSL-level dollar expansion cannot confound what the child itself
+    /// observes.
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "spawns real child processes; Miri does not support process execution"
+    )]
+    fn isolated_hides_outer_env_from_real_children() {
+        let temp = GuardedPath::tempdir().unwrap();
+        let root = guard_root(&temp);
+
+        // One unguarded allowlist per scope: absent names skip silently,
+        // so the SystemRoot entry is inert off Windows and load-bearing
+        // on it. The inner list re-adds PATH (children cannot spawn
+        // without it) but not OUTER: that omission is the assertion.
+        // Writes stay inside the scopes that bind their variables:
+        // block-local `$boxed` does not leak outward by design.
+        let script = indoc!(
+            r#"
+            INHERIT_ENV [PATH]
+            ENV OUTER=outer-val
+            [family:unix] LET $plain: STRING = RUN ["sh", "-c", "printenv OUTER || echo absent"]
+            [family:windows] LET $plain: STRING = RUN ["cmd", "/c", "if defined OUTER (echo outer-val) else (echo absent)"]
+            WRITE plain.txt "{{ $plain }}"
+            ISOLATED {
+                INHERIT_ENV [PATH]
+                [family:unix] LET $boxed: STRING = RUN ["sh", "-c", "printenv OUTER || echo absent"]
+                [family:windows] LET $boxed: STRING = RUN ["cmd", "/c", "if defined OUTER (echo outer-val) else (echo absent)"]
+                WRITE boxed.txt "{{ $boxed }}"
+            }
+            "#
+        );
+        let steps = crate::parse_script(script).unwrap();
+        run_steps(&root, &steps).unwrap();
+
+        assert_eq!(
+            read_trimmed(&root.join("plain.txt").unwrap()),
+            "outer-val",
+            "plain RUN must see the outer var"
+        );
+        assert_eq!(
+            read_trimmed(&root.join("boxed.txt").unwrap()),
+            "absent",
+            "ISOLATED RUN must not see the outer var"
+        );
+    }
+
+    /// Exact-set child env audit: one `FUNC` dumps the child environment it
+    /// observes, called from three isolation depths. Each dump must contain exactly the expected names with the expected values
+    /// and nothing else; a host-only sentinel set in the test process
+    /// must be absent at every depth. This is the end-to-end closedness
+    /// proof: recorded maps cannot show what a real child observes.
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "spawns real child processes; Miri does not support process execution"
+    )]
+    fn child_env_matches_allowlist_at_every_depth() {
+        fn env_map(text: &str) -> std::collections::BTreeMap<String, String> {
+            text.lines()
+                .filter_map(|line| {
+                    line.split_once('=')
+                        .map(|(k, v)| (k.to_string(), v.to_string()))
+                })
+                .collect()
+        }
+
+        // Host-only sentinel: never routed anywhere, must appear in no dump.
+        // RAII-guarded so a mid-test failure still restores process env.
+        let _probe_guard = oxdock_process::TestEnvGuard::set("OXDOCK_ENV_AUDIT_PROBE", "host-only");
+        let temp = GuardedPath::tempdir().unwrap();
+        let root = guard_root(&temp);
+
+        // One unguarded allowlist per scope (absent names skip silently).
+        // The mid level re-adds OUTER; the deep level drops it again, so
+        // the three dumps prove pass-through, re-adding, and narrowing.
+        let script = indoc!(
+            r#"
+            INHERIT_ENV [PATH]
+            ENV OUTER=outer-val
+            FUNC DUMPENV() {
+                [family:unix] LET $o: STRING = RUN ["sh", "-c", "env"]
+                [family:windows] LET $o: STRING = RUN ["cmd", "/c", "set"]
+                RETURN $o
+            }
+            LET $top: STRING = DUMPENV()
+            WRITE top.txt "{{ $top }}"
+            ISOLATED {
+                INHERIT_ENV [PATH, OUTER]
+                LET $mid: STRING = DUMPENV()
+                WRITE mid.txt "{{ $mid }}"
+                ISOLATED {
+                    INHERIT_ENV [PATH]
+                    LET $deep: STRING = DUMPENV()
+                    WRITE deep.txt "{{ $deep }}"
+                }
+            }
+            "#
+        );
+        let steps = crate::parse_script(script).unwrap();
+        run_steps(&root, &steps).unwrap();
+
+        let read_env = |name: &str| {
+            let body = read_trimmed(&root.join(name).unwrap());
+            env_map(&body)
+        };
+        let top = read_env("top.txt");
+        let mid = read_env("mid.txt");
+        let deep = read_env("deep.txt");
+
+        // Expected names per depth. SystemRoot rides the allowlists, so it
+        // appears on Windows and is skipped elsewhere; CARGO_TARGET_DIR is
+        // injected for every spawn. Tier substrate rides every spawn too:
+        // TERM + TMPDIR on unix (Tier 1B default + Tier 2 scratch), and
+        // PATHEXT + TEMP + TMP on Windows. The shell itself adds a few
+        // names (`PWD`, `SHLVL`, `_` on unix shells) that no allowlist
+        // routes: those are shell-added, not leaked, and named explicitly
+        // so any newcomer fails loudly with its name shown.
+        #[allow(clippy::disallowed_macros)]
+        let shell_added: &[&str] = if cfg!(windows) {
+            &[]
+        } else {
+            &["PWD", "SHLVL", "_"]
+        };
+        #[allow(clippy::disallowed_macros)]
+        let (with_root, with_tiers): (&[&str], &[&str]) = if cfg!(windows) {
+            (
+                &[oxdock_env::os::windows::SYSTEM_ROOT],
+                &[
+                    oxdock_env::os::windows::substrate::PATHEXT,
+                    oxdock_env::os::windows::managed::TEMP,
+                    oxdock_env::os::windows::managed::TMP,
+                    oxdock_env::os::windows::managed::HOME,
+                    oxdock_env::os::windows::managed::USERPROFILE,
+                    oxdock_env::os::windows::USERNAME,
+                ],
+            )
+        } else {
+            (
+                &[],
+                &[
+                    oxdock_env::os::unix::substrate::TERM,
+                    oxdock_env::os::unix::managed::TMPDIR,
+                    oxdock_env::os::unix::managed::HOME,
+                    oxdock_env::os::unix::LOGNAME,
+                    oxdock_env::os::unix::USER,
+                ],
+            )
+        };
+        let mut expect_top: Vec<&str> =
+            vec![oxdock_env::os::PATH, "OUTER", oxdock_env::cargo::TARGET_DIR];
+        expect_top.extend(with_root);
+        expect_top.extend(with_tiers);
+        let expect_mid = expect_top.clone();
+        let mut expect_deep: Vec<&str> = vec![oxdock_env::os::PATH, oxdock_env::cargo::TARGET_DIR];
+        expect_deep.extend(with_root);
+        expect_deep.extend(with_tiers);
+        for (label, got, mut want) in [
+            ("top", &top, expect_top),
+            ("mid", &mid, expect_mid),
+            ("deep", &deep, expect_deep),
+        ] {
+            want.extend(shell_added);
+            want.sort_unstable();
+            want.dedup();
+            let mut found: Vec<&str> = got.keys().map(String::as_str).collect();
+            found.sort_unstable();
+            assert_eq!(
+                found, want,
+                "{label} dump carries exactly the allowlist: {got:?}"
+            );
+        }
+        assert_eq!(top.get("OUTER").map(String::as_str), Some("outer-val"));
+        assert_eq!(mid.get("OUTER").map(String::as_str), Some("outer-val"));
+        assert!(
+            !deep.contains_key("OUTER"),
+            "narrowed level must drop OUTER: {deep:?}"
+        );
+        for (label, got) in [("top", &top), ("mid", &mid), ("deep", &deep)] {
+            assert!(
+                !got.contains_key("OXDOCK_ENV_AUDIT_PROBE"),
+                "{label} dump leaked a host-only var: {got:?}"
+            );
+        }
     }
 }

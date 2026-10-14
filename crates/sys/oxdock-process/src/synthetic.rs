@@ -527,13 +527,16 @@ fn expand_env(input: &str, ctx: &CommandContext) -> String {
                         }
                         name.push(ch);
                     }
-                    let val = if name == oxdock_env::CARGO_TARGET_DIR {
+                    let val = if name == oxdock_env::cargo::TARGET_DIR {
                         ctx.cargo_target_dir().display().to_string()
                     } else {
+                        // Script env with substrate read-through
+                        // (Tier 1/2, PATH baseline), matching the tiered
+                        // child env of real spawns.
                         ctx.envs()
                             .get(&name)
                             .cloned()
-                            .or_else(|| std::env::var(&name).ok())
+                            .or_else(|| ctx.substrate().get(&name).map(str::to_string))
                             .unwrap_or_default()
                     };
                     out.push_str(&val);
@@ -549,13 +552,16 @@ fn expand_env(input: &str, ctx: &CommandContext) -> String {
                             break;
                         }
                     }
-                    let val = if name == oxdock_env::CARGO_TARGET_DIR {
+                    let val = if name == oxdock_env::cargo::TARGET_DIR {
                         ctx.cargo_target_dir().display().to_string()
                     } else {
+                        // Script env with substrate read-through
+                        // (Tier 1/2, PATH baseline), matching the tiered
+                        // child env of real spawns.
                         ctx.envs()
                             .get(&name)
                             .cloned()
-                            .or_else(|| std::env::var(&name).ok())
+                            .or_else(|| ctx.substrate().get(&name).map(str::to_string))
                             .unwrap_or_default()
                     };
                     out.push_str(&val);
@@ -578,13 +584,15 @@ fn env_lookup(name: &str, ctx: &CommandContext) -> String {
     // Accept both `{{ env:X }}` and bare `{{ X }}` forms, matching the
     // host-side `expand_command_env` semantics.
     let key = name.strip_prefix("env:").unwrap_or(name);
-    if key == oxdock_env::CARGO_TARGET_DIR {
+    if key == oxdock_env::cargo::TARGET_DIR {
         return ctx.cargo_target_dir().display().to_string();
     }
+    // Script env with substrate read-through (Tier 1/2, PATH baseline),
+    // matching the tiered child env of real spawns.
     ctx.envs()
         .get(key)
         .cloned()
-        .or_else(|| std::env::var(key).ok())
+        .or_else(|| ctx.substrate().get(key).map(str::to_string))
         .unwrap_or_default()
 }
 
@@ -710,7 +718,8 @@ mod synthetic_backend_tests {
             .map(|(key, value)| (key.to_string(), value.to_string()))
             .collect();
         let scratch = oxdock_fs::reserve_cargo_scratch().expect("scratch");
-        let ctx = CommandContext::from_map(&cwd, &map, &scratch, &guard, &guard);
+        let substrate = crate::env_policy::SubstrateEnv::capture_for_scratch(&scratch);
+        let ctx = CommandContext::from_map(&cwd, &map, &scratch, &substrate, &guard, &guard);
         (guard, ctx)
     }
 

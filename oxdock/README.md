@@ -510,6 +510,9 @@ ASSERT_CONTAINS stdout "two"
 Shell form (`RUN <command...>`) joins its arguments and runs the string in the system shell. Exec form (`RUN ["exe", "arg", ...]`) spawns the executable directly with no shell. Exec form has no shell expansion, globbing, redirection, or pipes. Quoted `{{ ... }}` templates still interpolate per element, and guards and wrappers (`ASYNC`, `TIMEOUT`, `WITH_IO`) apply to both forms.
 
 ```oxdock
+INHERIT_ENV [PATH]
+[family:unix] INHERIT_ENV [HOME]
+[family:windows] INHERIT_ENV [USERPROFILE]
 RUN ["cargo", "--version"]
 ASSERT_CONTAINS stdout "cargo"
 ```
@@ -530,6 +533,7 @@ ASSERT_CONTAINS stdout "visible-after-comments"
 ```
 
 ```oxdock
+INHERIT_ENV [PATH]
 ECHO hash-mid-line # stays-in-payload
 ASSERT_CONTAINS stdout "hash-mid-line # stays-in-payload"
 
@@ -783,6 +787,8 @@ Scripts no longer inherit the caller's environment wholesale. Host variables sta
 - Test harnesses and embedders can supply values programmatically; the [environment-guards example](#environment-guards) injects `DEPLOY_TARGET` through the docs-conformance runner rather than the real process environment.
 
 Keeping inheritance selective avoids leaking secrets by default while still allowing ergonomics for well-known keys (proxy settings, artifact caches, etc.).
+
+Every variable the engine injects into spawned children, by tier, is specified in [ENV_CONTRACTS.md](https://github.com/jzombie/rust-oxdock/blob/main/ENV_CONTRACTS.md).
 
 ## Path Separators
 

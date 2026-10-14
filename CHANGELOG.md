@@ -7,8 +7,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ## [Unreleased]
 
+### Added
+
+- `ISOLATED { ... }` block (#220): runs steps with a scrubbed script environment. Children see only names the block re-adds through its leading `INHERIT_ENV`, resolved against the outer scope, never the host; absent names stay absent silently. Blocks nest (each level snapshots the already-scrubbed parent, so narrowing is monotonic), compose with `ASYNC` and `FUNC`, and restore on exit. New `StepKind::IsolatedInheritEnv` node keeps the nested allowlist distinct from the prelude bridge.
+
 ### Changed
 
+- [breaking] Scripts are affected: spawned children now inherit exactly the script environment (`INHERIT_ENV` plus `ENV` steps) with no host passthrough (#221). `apply_ctx` clears the child env and overlays only staged names, keeping the `CARGO_TARGET_DIR` inject; missing `PATH` (bare names and all shell form) and missing `SystemRoot` on Windows fail naming the `INHERIT_ENV` fix instead of surfacing bare `ENOENT` or loader crashes. `REMOTE` transports and SSH PTY children follow the same closed rule. Every workflow leg, oxfile, test script, and doc fence now declares its full allowlist (`PATH`, `SystemRoot`, `HOME`/`USERPROFILE`, temp dirs as needed); the `OXDOCK_WORKSPACE_ROOT` leak that broke manifest-relative tests under CI is structurally impossible.
 - CI converges `rust-lint` and `rust-tests` into one OxDock-driven `rust-checks` pipeline (#202): every `run:` body is an inline leg on the pinned `v0.28.0-alpha` engine, with lockfile and toolchain hashing plus coverage parsing in native DSL (`HASH_SHA256`, `TEXT_EXTRACT`, `TEXT_GREP`, `TEXT_FIELDS`). The Miri badge script counts listings with `TEXT_COUNT_MATCHES` instead of `grep -c`. The `setup-oxdock` minimum moves to `0.28.0-alpha` for the string surgery vocabulary.
 
 ## [0.28.0-alpha] - 2026-10-13

@@ -59,7 +59,7 @@ jobs:
         shell: oxdock --script {0}
         run: |
           IMPORT [STD]
-          INHERIT_ENV [GITHUB_OUTPUT, GITHUB_WORKSPACE]
+          INHERIT_ENV [GITHUB_OUTPUT, GITHUB_WORKSPACE, PATH]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           ENV CARGO_TARGET_DIR="{{ env:GITHUB_WORKSPACE }}/target"

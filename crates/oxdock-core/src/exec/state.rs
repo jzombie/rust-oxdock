@@ -26,8 +26,21 @@ pub struct ExecState<P: ProcessManager> {
     /// nameable as a `&GuardedPath`, so host code cannot `ensure()` or
     /// `create_dir_all` it. The child `cargo` creates it on demand.
     pub(super) cargo_scratch: CargoScratch,
+    /// Lazily captured session substrate (Tier 1/2/3). `OnceLock`
+    /// because capture performs host reads and `ExecState` is shared
+    /// by reference at dispatch; first `command_ctx()` or `get_env()`
+    /// wins and every later read sees the same snapshot.
+    pub(super) substrate_cell: std::sync::OnceLock<oxdock_process::SubstrateEnv>,
     pub(super) cwd: GuardedPath,
     pub(super) envs: Arc<HashMap<String, String>>,
+    /// Outer-scope env snapshots for `ISOLATED` blocks, innermost last.
+    /// Each entry is the script env as it stood at that block's entry, so
+    /// the block allowlist resolves against the enclosing scope even as
+    /// the live envs are scrubbed underneath. Nesting snapshots the
+    /// already-scrubbed parent, so narrowing is monotonic by
+    /// construction. Cloned (not reset) by `fork()` so tasks spawned
+    /// inside a block inherit its scrub.
+    pub(super) isolated_stack: Vec<Arc<HashMap<String, String>>>,
     pub(super) bg_children: Vec<Box<dyn BackgroundHandle>>,
     pub(super) scope_stack: Vec<ScopeSnapshot>,
     pub(super) io: ExecIo,
@@ -244,6 +257,58 @@ impl KeeperExpiry {
 }
 
 impl<P: ProcessManager> ExecState<P> {
+    /// Lazily captured session substrate (Tier 1/2/3). Built on first
+    /// dispatch, never at session init, so interpretive-only sessions
+    /// perform no host reads and touch no disk.
+    pub(super) fn substrate(&self) -> &oxdock_process::SubstrateEnv {
+        self.substrate_cell.get_or_init(|| {
+            let tmp = self.cargo_scratch.tmp_command_path();
+            oxdock_process::SubstrateEnv::capture(&tmp.to_string_lossy())
+        })
+    }
+
+    /// Whether execution is inside an `ISOLATED` block (any depth).
+    pub(super) fn is_isolated(&self) -> bool {
+        !self.isolated_stack.is_empty()
+    }
+
+    /// Whether the PATH baseline applies here: everywhere except inside
+    /// `ISOLATED` without an inner `PATH` (Tier 3 is omitted there).
+    pub(super) fn baseline_applies(&self) -> bool {
+        if !self.is_isolated() {
+            return true;
+        }
+        self.envs.keys().any(|k| {
+            #[allow(clippy::disallowed_macros)]
+            if cfg!(windows) {
+                k.eq_ignore_ascii_case(oxdock_fs::env::os::PATH)
+            } else {
+                k == oxdock_fs::env::os::PATH
+            }
+        })
+    }
+
+    /// Read-through environment lookup for DSL evaluation
+    /// (`is_exec_name`, `Expr::Env`, expansions): the script map first,
+    /// substrate fallback second, with the PATH baseline suppressed
+    /// inside unpatched `ISOLATED` scopes so evaluation and spawn agree.
+    /// Never writes back: snapshots stay clean.
+    pub(super) fn get_env(&self, key: &str) -> Option<&str> {
+        if let Some(v) = self.envs.get(key) {
+            return Some(v.as_str());
+        }
+        #[allow(clippy::disallowed_macros)]
+        let is_path = if cfg!(windows) {
+            key.eq_ignore_ascii_case(oxdock_fs::env::os::PATH)
+        } else {
+            key == oxdock_fs::env::os::PATH
+        };
+        if is_path && !self.baseline_applies() {
+            return None;
+        }
+        self.substrate().get(key)
+    }
+
     pub(super) fn command_ctx(&self) -> Result<CommandContext> {
         // Resolve the working directory through the snapshot choke point: a
         // snapshot-rooted cwd materializes here (so `RUN` executes against a
@@ -252,10 +317,18 @@ impl<P: ProcessManager> ExecState<P> {
         // ensured by us); callers may still override it via the env map, which
         // apply_ctx respects when spawning processes.
         let cwd = self.fs.resolve_write(&self.cwd, ".")?;
+        // Clone the substrate with the baseline suppressed exactly where
+        // assembly skips it, so the context spawn sites receive agrees
+        // with what `get_env` reports during evaluation.
+        let mut substrate = self.substrate().clone();
+        if !self.baseline_applies() {
+            substrate = substrate.without_baseline();
+        }
         Ok(CommandContext::new(
             &cwd.into(),
             Arc::clone(&self.envs),
             &self.cargo_scratch,
+            &substrate,
             self.fs.root(),
             self.fs.build_context(),
         ))
@@ -274,10 +347,19 @@ impl<P: ProcessManager> ExecState<P> {
         Self {
             fs: self.fs.clone_box(),
             cargo_scratch: self.cargo_scratch.clone(),
+            substrate_cell: match self.substrate_cell.get() {
+                Some(s) => {
+                    let cell = std::sync::OnceLock::new();
+                    let _ = cell.set(s.clone());
+                    cell
+                }
+                None => std::sync::OnceLock::new(),
+            },
             cwd: self.cwd.clone(),
             envs: Arc::clone(&self.envs),
             bg_children: Vec::new(),
             scope_stack: Vec::new(),
+            isolated_stack: self.isolated_stack.clone(),
             io: self.io.clone(),
             assert_windows: Arc::clone(&self.assert_windows),
             assert_windows_stderr: Arc::clone(&self.assert_windows_stderr),

@@ -31,6 +31,7 @@ fn run_script(script: &str) -> Result<()> {
 fn tag_prefix_strip_matches_shell_expansion() -> Result<()> {
     run_script(indoc! {r#"
         IMPORT [STD]
+        INHERIT_ENV [PATH]
         LET $raw: STRING = RUN ["sh", "-c", "tag=v0.27.1-alpha; printf '%s' \"${tag#v}\""]
         LET $dsl: STRING = TEXT_TRIM_PREFIX("v0.27.1-alpha", "v")
         ASSERT_EQ $dsl $raw
@@ -46,6 +47,7 @@ fn tag_prefix_strip_matches_shell_expansion() -> Result<()> {
 fn checksum_line_lookup_matches_grep_anchor() -> Result<()> {
     run_script(indoc! {r#"
         IMPORT [STD]
+        INHERIT_ENV [PATH]
         LET $line: STRING = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  oxdock-x86_64-unknown-linux-musl.tar.gz"
         LET $raw: STRING = RUN ["sh", "-c", "if printf '%s\n' 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  oxdock-x86_64-unknown-linux-musl.tar.gz' | grep -q '^e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 '; then echo true; else echo false; fi"]
         LET $shell: STRING = TEXT_TRIM($raw)
@@ -69,6 +71,7 @@ fn checksum_line_lookup_matches_grep_anchor() -> Result<()> {
 fn checksum_field_split_matches_awk_first_field() -> Result<()> {
     run_script(indoc! {r#"
         IMPORT [STD]
+        INHERIT_ENV [PATH]
         LET $raw: STRING = RUN ["sh", "-c", "printf '%s\n' 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  Cargo.lock' | awk '{print $1}'"]
         LET $shell: STRING = TEXT_TRIM($raw)
         LET $fields: LIST<STRING> = TEXT_FIELDS("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  Cargo.lock")
@@ -84,6 +87,7 @@ fn checksum_field_split_matches_awk_first_field() -> Result<()> {
 fn tag_extract_matches_grep_cut_chain() -> Result<()> {
     run_script(indoc! {r#"
         IMPORT [STD]
+        INHERIT_ENV [PATH]
         LET $raw: STRING = RUN ["sh", "-c", "printf '%s\n' '  \"tag_name\": \"v0.27.1-alpha\",' | grep '\"tag_name\"' | cut -d'\"' -f4"]
         LET $shell: STRING = TEXT_TRIM($raw)
         LET $caps: LIST<STRING> = TEXT_EXTRACT("  \"tag_name\": \"v0.27.1-alpha\",", "\"tag_name\": \"([^\"]+)\"")
@@ -101,6 +105,7 @@ fn tag_extract_matches_grep_cut_chain() -> Result<()> {
 fn commit_hash_extract_matches_sed_line_pick() -> Result<()> {
     run_script(indoc! {r#"
         IMPORT [STD]
+        INHERIT_ENV [PATH]
         LET $raw: STRING = RUN ["sh", "-c", "printf '%s\n' 'rustc 1.99.0 (5f94df478 2026-08-27)' 'binary: rustc' 'commit-hash: 5f94df478b8a7f5e0078f8e85d14300e5814e9b6' | sed -n 's/^commit-hash: //p'"]
         LET $shell: STRING = TEXT_TRIM($raw)
         LET $report: STRING = "rustc 1.99.0 (5f94df478 2026-08-27)\nbinary: rustc\ncommit-hash: 5f94df478b8a7f5e0078f8e85d14300e5814e9b6"
@@ -117,6 +122,7 @@ fn commit_hash_extract_matches_sed_line_pick() -> Result<()> {
 fn coverage_total_parse_matches_awk_row_pick() -> Result<()> {
     run_script(indoc! {r#"
         IMPORT [STD]
+        INHERIT_ENV [PATH]
         LET $raw: STRING = RUN ["sh", "-c", "printf '%s\n' 'TOTAL 100 0 100% 50 0 100% 200 0 85.71%' | awk '/^TOTAL/ {print $10}' | tr -d '%'"]
         LET $shell: STRING = TEXT_TRIM($raw)
         LET $fields: LIST<STRING> = TEXT_FIELDS("TOTAL 100 0 100% 50 0 100% 200 0 85.71%")
@@ -144,6 +150,7 @@ fn coverage_total_parse_matches_awk_row_pick() -> Result<()> {
 fn text_lines_range_matches_sed_window() -> Result<()> {
     run_script(indoc! {r#"
         IMPORT [STD]
+        INHERIT_ENV [PATH]
         LET $raw: STRING = RUN ["sh", "-c", "printf '%s\n' 'one' 'two' 'three' 'four' | sed -n '2,3p'"]
         LET $shell: STRING = TEXT_TRIM($raw)
         LET $window: LIST<STRING> = TEXT_LINES_RANGE("one\ntwo\nthree\nfour", 2, 3)
@@ -166,6 +173,7 @@ fn text_lines_range_matches_sed_window() -> Result<()> {
 fn target_predicates_match_runner_expressions() -> Result<()> {
     run_script(indoc! {r#"
         IMPORT [STD]
+        INHERIT_ENV [PATH]
         # endsWith(matrix.target, 'linux-musl'): musl legs go static.
         LET $musl: BOOL = TEXT_ENDS_WITH("x86_64-unknown-linux-musl", "linux-musl")
         ASSERT_EQ $musl true
@@ -190,6 +198,7 @@ fn target_predicates_match_runner_expressions() -> Result<()> {
 fn workflow_ref_parse_matches_shell_expansion() -> Result<()> {
     run_script(indoc! {r#"
         IMPORT [STD]
+        INHERIT_ENV [PATH]
         LET $raw: STRING = RUN ["sh", "-c", "ref='octo/repo/.github/workflows/ci.yml@refs/tags/v0.27.1'; ref=\"${ref##*@}\"; ref=\"${ref#refs/tags/}\"; ref=\"${ref#refs/heads/}\"; printf '%s' \"$ref\""]
         LET $full: STRING = "octo/repo/.github/workflows/ci.yml@refs/tags/v0.27.1"
         LET $at: LIST<STRING> = TEXT_EXTRACT($full, "@([^@]+)$")
@@ -214,6 +223,7 @@ fn workflow_ref_parse_matches_shell_expansion() -> Result<()> {
 fn target_env_translation_matches_tr() -> Result<()> {
     run_script(indoc! {r#"
         IMPORT [STD]
+        INHERIT_ENV [PATH]
         LET $raw: STRING = RUN ["sh", "-c", "printf '%s' 'x86_64-unknown-linux-musl' | tr '-' '_'"]
         LET $dsl: STRING = TEXT_REPLACE("x86_64-unknown-linux-musl", "-", "_")
         ASSERT_EQ $dsl $raw
@@ -227,6 +237,7 @@ fn target_env_translation_matches_tr() -> Result<()> {
 fn text_length_matches_shell_count() -> Result<()> {
     run_script(indoc! {r#"
         IMPORT [STD]
+        INHERIT_ENV [PATH]
         LET $raw: STRING = RUN ["sh", "-c", "tag=v0.27.1-alpha; printf '%s' \"${#tag}\""]
         LET $shell: STRING = TEXT_TRIM($raw)
         LET $n: INT = TEXT_LENGTH("v0.27.1-alpha")
@@ -241,6 +252,7 @@ fn text_length_matches_shell_count() -> Result<()> {
 fn text_count_matches_grep_o_wc() -> Result<()> {
     run_script(indoc! {r#"
         IMPORT [STD]
+        INHERIT_ENV [PATH]
         LET $raw: STRING = RUN ["sh", "-c", "printf '%s' 'aaa' | grep -o 'aa' | wc -l"]
         LET $shell: STRING = TEXT_TRIM($raw)
         LET $n: INT = TEXT_COUNT("aaa", "aa")
@@ -255,6 +267,7 @@ fn text_count_matches_grep_o_wc() -> Result<()> {
 fn text_count_matches_matches_grep_c() -> Result<()> {
     run_script(indoc! {r#"
         IMPORT [STD]
+        INHERIT_ENV [PATH]
         LET $raw: STRING = RUN ["sh", "-c", "printf '%s\n' 'test a: test' 'test b: nope' | grep -c ': test'"]
         LET $shell: STRING = TEXT_TRIM($raw)
         LET $n: INT = TEXT_COUNT_MATCHES("test a: test\ntest b: nope", ": test")
@@ -269,6 +282,7 @@ fn text_count_matches_matches_grep_c() -> Result<()> {
 fn text_grep_matches_grep_lines() -> Result<()> {
     run_script(indoc! {r#"
         IMPORT [STD]
+        INHERIT_ENV [PATH]
         LET $raw: STRING = RUN ["sh", "-c", "printf '%s\n' 'one' 'two' 'one more' | grep '^one'"]
         LET $shell: STRING = TEXT_TRIM($raw)
         LET $hits: LIST<STRING> = TEXT_GREP("one\ntwo\none more", "^one")
@@ -284,6 +298,7 @@ fn text_grep_matches_grep_lines() -> Result<()> {
 fn text_grep_invert_matches_grep_v() -> Result<()> {
     run_script(indoc! {r#"
         IMPORT [STD]
+        INHERIT_ENV [PATH]
         LET $raw: STRING = RUN ["sh", "-c", "printf '%s\n' 'one' 'two' 'one more' | grep -v '^one'"]
         LET $shell: STRING = TEXT_TRIM($raw)
         LET $kept: LIST<STRING> = TEXT_GREP("one\ntwo\none more", "^one", {invert: true})

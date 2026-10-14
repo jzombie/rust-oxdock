@@ -1366,6 +1366,13 @@ fn emit_stepkind(
             let d = emit_arg(duration, interp);
             quote! { StepKind::Timeout { duration: #d, body: vec![#(#steps),*] } }
         }
+        StepKind::Isolated { body } => {
+            let steps: Vec<_> = body.iter().map(|s| emit_step(s, interp)).collect();
+            quote! { StepKind::Isolated { body: vec![#(#steps),*] } }
+        }
+        StepKind::IsolatedInheritEnv { keys } => {
+            quote! { StepKind::IsolatedInheritEnv { keys: vec![#(#keys.to_string()),*] } }
+        }
         StepKind::RemoteBlock {
             target,
             vars,

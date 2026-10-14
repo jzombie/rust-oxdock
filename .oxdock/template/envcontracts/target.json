@@ -1,0 +1,15 @@
+{
+  "targets": [
+    {
+      "name": "env-contracts",
+      "out": "ENV_CONTRACTS.md",
+      "values": ".oxdock/template/envcontracts/values.json",
+      "template": ".oxdock/template/envcontracts/ENV_CONTRACTS.md.tmpl",
+      "fragments": {
+        "generated": [
+          ".oxdock/template/envcontracts/generated/*"
+        ]
+      }
+    }
+  ]
+}
