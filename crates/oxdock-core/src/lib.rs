@@ -722,7 +722,8 @@ mod tests {
         let script = indoc! {
             r#"
             INHERIT_ENV [PATH]
-            ASYNC RUN "sh -c 'sleep 30; echo late > late.txt'"
+            ASYNC RUN "sh -c 'echo started > started.txt; sleep 30; echo late > late.txt'"
+            TIMEOUT 25s RUN "sh -c 'while [ ! -f started.txt ]; do sleep 0.05; done'"
             RUN "__oxdock_missing_command_xyz__"
             "#
         };
@@ -736,7 +737,14 @@ mod tests {
         // its Drop safety net must kill the writer before it can emit the
         // late artifact. The sleep is generous on purpose: it bounds the
         // kill timeliness on loaded runners without slowing the test,
-        // which still fails fast on the missing command.
+        // which still fails fast on the missing command. The rendezvous
+        // step is load-bearing: on a loaded runner the worker thread can
+        // start after the failing step, leaving nothing registered to
+        // kill; blocking until `started.txt` exists proves the writer is
+        // registered and sleeping before the error hits, so the kill
+        // guarantee is deterministic, not scheduling-dependent. The
+        // `TIMEOUT` wrapper bounds the rendezvous itself: a worker that
+        // never starts fails fast here instead of polling forever.
         assert!(
             !exists(&root, "late.txt"),
             "abandoned background writer must be killed by Drop teardown"
