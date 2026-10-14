@@ -1362,84 +1362,42 @@ mod tests {
         let mid = read_env("mid.txt");
         let deep = read_env("deep.txt");
 
-        // Expected names per depth. The seed rides every spawn (top,
-        // mid after reseed, deep after reseed): PATH, CARGO_TARGET_DIR,
-        // SystemRoot on Windows, TERM + TMPDIR + HOME + LOGNAME + USER
-        // on unix (plus the same unix rows on Windows for
-        // cross-compiled tools), and PATHEXT + TEMP + TMP + USERPROFILE
-        // + USERNAME on Windows. The shell itself adds a few
-        // names (`PWD` everywhere, plus `SHLVL` and `_` under bash but
-        // not dash) that no allowlist routes: shells disagree, so the
-        // assertion below is two-sided instead of exact equality.
+        // Expected names per depth, derived from the seed table (not
+        // hardcoded): PATH, CARGO_TARGET_DIR, loader anchors, temp
+        // bindings, and identity rows. `OUTER` rides top and mid after
+        // the allowlist re-adds it; deep narrows it out. The seed rides
+        // every spawn (top, mid after reseed, deep after reseed). The
+        // shell itself adds a few names (`PWD` everywhere, plus `SHLVL`
+        // and `_` under bash but not dash) that no allowlist routes:
+        // shells disagree, so the assertion below is two-sided instead
+        // of exact equality.
         #[allow(clippy::disallowed_macros)]
         let shell_added: &[&str] = if cfg!(windows) {
             &[]
         } else {
             &["PWD", "SHLVL", "_"]
         };
-        #[allow(clippy::disallowed_macros)]
-        let (with_root, with_seed): (&[&str], &[&str]) = if cfg!(windows) {
-            (
-                &[oxdock_env::os::windows::SYSTEM_ROOT],
-                &[
-                    oxdock_env::os::windows::PATHEXT,
-                    oxdock_env::os::windows::TEMP,
-                    oxdock_env::os::windows::TMP,
-                    oxdock_env::os::unix::HOME,
-                    oxdock_env::os::windows::USERPROFILE,
-                    oxdock_env::os::windows::USERNAME,
-                    oxdock_env::os::windows::SYSTEM_ROOT,
-                    oxdock_env::os::windows::WINDIR,
-                    oxdock_env::os::windows::PROGRAM_FILES,
-                    oxdock_env::os::windows::PROGRAM_FILES_X86,
-                    oxdock_env::os::windows::PROGRAM_W6432,
-                    oxdock_env::os::windows::COMSPEC,
-                    oxdock_env::os::windows::SYSTEM_DRIVE,
-                    oxdock_env::os::unix::TMPDIR,
-                    oxdock_env::os::unix::LOGNAME,
-                    oxdock_env::os::unix::USER,
-                    oxdock_env::os::unix::TERM,
-                ],
-            )
-        } else {
-            (
-                &[],
-                &[
-                    oxdock_env::os::unix::TERM,
-                    oxdock_env::os::unix::TMPDIR,
-                    oxdock_env::os::unix::HOME,
-                    oxdock_env::os::unix::LOGNAME,
-                    oxdock_env::os::unix::USER,
-                ],
-            )
-        };
-        let mut expect_top: Vec<&str> =
-            vec![oxdock_env::os::PATH, "OUTER", oxdock_env::cargo::TARGET_DIR];
-        expect_top.extend(with_root);
-        expect_top.extend(with_seed);
+        // Seed-derived key set: omitting rows count only when the
+        // host defines them. Every other row always seeds (fallbacks
+        // and aliases resolve unconditionally). The child reads the
+        // same process env, so host presence is the exact oracle.
+        // Adding a seed row needs no edit here.
+        let mut seed_names: Vec<&str> = Vec::new();
+        for entry in oxdock_process::env_policy::current_platform_seed() {
+            let present = !entry.omits_when_unset || std::env::var(entry.name).is_ok();
+            if present {
+                seed_names.push(entry.name);
+            }
+        }
+        let mut expect_top: Vec<&str> = vec!["OUTER"];
+        expect_top.extend(seed_names.iter().copied());
         let expect_mid = expect_top.clone();
-        let mut expect_deep: Vec<&str> = vec![oxdock_env::os::PATH, oxdock_env::cargo::TARGET_DIR];
-        expect_deep.extend(with_root);
-        expect_deep.extend(with_seed);
+        let expect_deep: Vec<&str> = seed_names;
         for (label, got, mut want) in [
             ("top", &top, expect_top),
             ("mid", &mid, expect_mid),
             ("deep", &deep, expect_deep),
         ] {
-            // HostOnly rows seed only when the host defines them
-            // (native Windows defines USERNAME but not USER/LOGNAME;
-            // bare shells may define none): drop host-absent identity
-            // names from the expectation. The child reads the same
-            // process env, so host presence is the exact oracle.
-            want.retain(|name| {
-                ![
-                    oxdock_env::os::unix::USER,
-                    oxdock_env::os::unix::LOGNAME,
-                    oxdock_env::os::windows::USERNAME,
-                ]
-                .contains(name)
-                    || std::env::var(*name).is_ok()
-            });
             want.extend(shell_added);
             // Two-sided: every routed name must appear, and every
             // appearing name must be routed or shell-known. A newcomer

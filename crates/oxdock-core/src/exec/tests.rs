@@ -5863,26 +5863,45 @@ fn seeded_no_prelude_child_env_holds_boundary() {
             ),
         }
     }
+    // Seed-derived assertions: every seeded row behaves per its kind
+    // (mirror, fallback const, scratch shape, or absence). Special
+    // shapes assert below: `HOME`'s profile bridge, `TARGET_DIR`'s
+    // target leaf, `WINDIR`'s alias. Adding an ordinary seed row needs
+    // no edit here.
+    for entry in oxdock_process::env_policy::current_platform_seed() {
+        let name = entry.name;
+        if name == oxdock_fs::env::os::unix::HOME
+            || name == oxdock_fs::env::cargo::TARGET_DIR
+            || name == oxdock_fs::env::os::windows::WINDIR
+        {
+            continue;
+        }
+        if entry.omits_when_unset {
+            assert_identity(&got, name);
+        } else if let Some(fallback) = entry.fallback {
+            assert_eq!(
+                got.get(name).map(String::as_str),
+                std::env::var(name).ok().as_deref().or(Some(fallback)),
+                "{name} must mirror the host or its fallback: {got:?}"
+            );
+        } else {
+            assert_mirrored(&got, name);
+        }
+    }
+    // Alias rows mirror their target: both present and equal, or both
+    // absent (unix never seeds either).
+    assert_eq!(
+        got.get(oxdock_fs::env::os::windows::WINDIR)
+            .map(String::as_str),
+        got.get(oxdock_fs::env::os::windows::SYSTEM_ROOT)
+            .map(String::as_str),
+        "WINDIR must equal SystemRoot: {got:?}"
+    );
     #[allow(clippy::disallowed_macros)]
     if cfg!(windows) {
         use oxdock_fs::env::os::windows;
-        // Mirrored PATH: the host value, never a synthetic baseline.
-        assert_eq!(
-            got.get("PATH")
-                .or_else(|| got.get("Path"))
-                .map(String::as_str),
-            std::env::var("PATH")
-                .ok()
-                .as_deref()
-                .or(Some(windows::DEFAULT_PATH)),
-            "child PATH must mirror the host: {got:?}"
-        );
-        // Mirrored home and temp: host values, scratch-bound only when
-        // the host lacks them. `HOME` bridges the host profile when
-        // the host sets no `HOME` (ported POSIX tools read it first).
-        assert_mirrored(&got, windows::TEMP);
-        assert_mirrored(&got, windows::TMP);
-        assert_mirrored(&got, windows::USERPROFILE);
+        // `HOME` bridges the host profile when the host sets no `HOME`
+        // (ported POSIX tools read it first).
         match std::env::var(oxdock_fs::env::os::unix::HOME)
             .ok()
             .or_else(|| std::env::var(windows::USERPROFILE).ok())
@@ -5904,55 +5923,9 @@ fn seeded_no_prelude_child_env_holds_boundary() {
                 );
             }
         }
-        assert_mirrored(&got, oxdock_fs::env::os::unix::TMPDIR);
-        // Mirrored identity: host value or absent, never invented.
-        assert_identity(&got, windows::USERNAME);
-        assert_identity(&got, oxdock_fs::env::os::unix::LOGNAME);
-        assert_identity(&got, oxdock_fs::env::os::unix::USER);
-        // Install locations and interpreter: host values or absent.
-        // Native toolchain discovery reads them from the child env.
-        assert_identity(&got, windows::PROGRAM_FILES);
-        assert_identity(&got, windows::PROGRAM_FILES_X86);
-        assert_identity(&got, windows::PROGRAM_W6432);
-        assert_identity(&got, windows::COMSPEC);
-        assert_identity(&got, windows::SYSTEM_DRIVE);
-        // Loader anchors: host values, constant fallbacks.
-        assert_eq!(
-            got.get(windows::SYSTEM_ROOT).map(String::as_str),
-            std::env::var(windows::SYSTEM_ROOT)
-                .ok()
-                .as_deref()
-                .or(Some(windows::DEFAULT_SYSTEM_ROOT)),
-            "child SystemRoot must mirror the host: {got:?}"
-        );
-        assert_eq!(
-            got.get(windows::PATHEXT).map(String::as_str),
-            std::env::var(windows::PATHEXT)
-                .ok()
-                .as_deref()
-                .or(Some(windows::DEFAULT_PATHEXT)),
-            "child PATHEXT must mirror the host: {got:?}"
-        );
     } else {
-        use oxdock_fs::env::os::unix;
-        // Mirrored PATH: the host value, never a synthetic baseline.
-        assert_eq!(
-            got.get("PATH").map(String::as_str),
-            std::env::var("PATH")
-                .ok()
-                .as_deref()
-                .or(Some(unix::DEFAULT_PATH)),
-            "child PATH must mirror the host: {got:?}"
-        );
-        // Mirrored home and temp: host values, scratch-bound only when
-        // the host lacks them. Each mirrors independently: host HOME
-        // and TMPDIR need not agree with each other.
-        assert_mirrored(&got, unix::HOME);
-        assert_mirrored(&got, unix::TMPDIR);
-        // Mirrored identity: host values or absent, never invented.
-        assert_identity(&got, unix::LOGNAME);
-        assert_identity(&got, unix::USER);
-        assert!(!got.get("TERM").cloned().unwrap_or_default().is_empty());
+        // Unix `HOME` has no bridge: host value or scratch shape.
+        assert_mirrored(&got, oxdock_fs::env::os::unix::HOME);
     }
     // No ambient secrets anywhere, on any platform.
     assert!(

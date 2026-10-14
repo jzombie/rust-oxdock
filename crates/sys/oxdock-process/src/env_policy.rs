@@ -561,6 +561,8 @@ pub fn seed_differs(seed: &HashMap<String, String>, key: &str, value: &str) -> b
 
 /// One row of the host-mirrored defaults table: rendered from the seed
 /// table, so the documented contract cannot drift from the engine.
+/// Tests also derive expectations from these rows instead of
+/// hardcoding names, so adding a seed row needs no test edits.
 pub struct BaselineDefaultEntry {
     /// Variable name (an `oxdock_fs::env` constant value).
     pub name: &'static str,
@@ -568,6 +570,44 @@ pub struct BaselineDefaultEntry {
     pub default_source: &'static str,
     /// What a script declaration does (uniform: [`SEED_RULE`]).
     pub rule: &'static str,
+    /// Whether the row omits the name when the host lacks it
+    /// (`HostOnly` rows): tests expect such names only when the host
+    /// defines them.
+    pub omits_when_unset: bool,
+    /// Hardcoded fallback for rows that always seed
+    /// (`BaselinePath`/`HostOrFallback`); `None` for scratch-shaped,
+    /// alias, and omitting rows, whose tests assert shape, target
+    /// equality, or absence instead.
+    pub fallback: Option<&'static str>,
+}
+
+/// Map one seed row to its contract entry: the single place turning
+/// `SeedValue` semantics into documented and testable facts.
+fn entry_of(row: &SeedRow) -> BaselineDefaultEntry {
+    let (omits_when_unset, fallback) = match row.value {
+        SeedValue::HostOnly => (true, None),
+        SeedValue::BaselinePath =>
+        {
+            #[allow(clippy::disallowed_macros)]
+            if cfg!(windows) {
+                (false, Some(oxdock_env::os::windows::DEFAULT_PATH))
+            } else {
+                (false, Some(oxdock_env::os::unix::DEFAULT_PATH))
+            }
+        }
+        SeedValue::HostOrFallback(fallback) => (false, Some(fallback)),
+        SeedValue::ScratchTmp
+        | SeedValue::HomeDir
+        | SeedValue::ScratchTarget
+        | SeedValue::AliasOf(_) => (false, None),
+    };
+    BaselineDefaultEntry {
+        name: row.name,
+        default_source: row.doc,
+        rule: SEED_RULE,
+        omits_when_unset,
+        fallback,
+    }
 }
 
 /// The host-mirrored defaults contract as static data, in render order: the
@@ -577,13 +617,16 @@ pub fn describe_baseline_defaults() -> Vec<BaselineDefaultEntry> {
     let mut rows = unix_seed_table();
     rows.extend(windows_extra_seed_table());
     rows.extend(common_seed_table());
-    rows.into_iter()
-        .map(|row| BaselineDefaultEntry {
-            name: row.name,
-            default_source: row.doc,
-            rule: SEED_RULE,
-        })
-        .collect()
+    rows.iter().map(entry_of).collect()
+}
+
+/// Seed entries for the current platform (platform table plus the
+/// common rows): what the child env actually contains, for tests that
+/// assert exact dump key sets without hardcoding names.
+pub fn current_platform_seed() -> Vec<BaselineDefaultEntry> {
+    let mut rows = platform_seed_table();
+    rows.extend(common_seed_table());
+    rows.iter().map(entry_of).collect()
 }
 
 #[cfg(test)]

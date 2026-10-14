@@ -97,36 +97,6 @@ mod tests {
     }
 
     #[test]
-    fn contract_names_match_live_consts() {
-        // The table must name the exact constant values, so a renamed
-        // constant fails here instead of drifting the doc.
-        use oxdock_fs::env::os::{unix, windows};
-        let text = render_env_contracts().expect("renders");
-        for name in [
-            windows::SYSTEM_ROOT,
-            windows::WINDIR,
-            windows::PATHEXT,
-            windows::PROGRAM_FILES,
-            windows::PROGRAM_FILES_X86,
-            windows::PROGRAM_W6432,
-            windows::COMSPEC,
-            windows::SYSTEM_DRIVE,
-            unix::TERM,
-            windows::TEMP,
-            windows::TMP,
-            unix::TMPDIR,
-            unix::HOME,
-            unix::LOGNAME,
-            unix::USER,
-            windows::USERNAME,
-            windows::USERPROFILE,
-            oxdock_fs::env::os::PATH,
-        ] {
-            assert!(text.contains(name), "{name} missing");
-        }
-    }
-
-    #[test]
     fn contract_renders_host_reads_from_core() {
         // Host interaction comes from core's engine_host_reads(), never
         // renderer prose: every declared read must appear.
