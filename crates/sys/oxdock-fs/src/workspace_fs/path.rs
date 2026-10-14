@@ -368,6 +368,7 @@ pub struct GuardedTempDir {
 /// Owned cleanup for a natively materialized pre-computed candidate:
 /// `tempfile::TempDir` cannot wrap a pre-existing path, so candidate
 /// roots carry this guard instead and delete synchronously on drop.
+#[cfg_attr(miri, allow(dead_code))]
 #[allow(clippy::disallowed_types)]
 pub struct PathCleanupGuard(PathBuf);
 
