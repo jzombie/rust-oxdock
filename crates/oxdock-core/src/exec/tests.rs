@@ -5909,6 +5909,13 @@ fn seeded_no_prelude_child_env_holds_boundary() {
         assert_identity(&got, windows::USERNAME);
         assert_identity(&got, oxdock_fs::env::os::unix::LOGNAME);
         assert_identity(&got, oxdock_fs::env::os::unix::USER);
+        // Install locations and interpreter: host values or absent.
+        // Native toolchain discovery reads them from the child env.
+        assert_identity(&got, windows::PROGRAM_FILES);
+        assert_identity(&got, windows::PROGRAM_FILES_X86);
+        assert_identity(&got, windows::PROGRAM_W6432);
+        assert_identity(&got, windows::COMSPEC);
+        assert_identity(&got, windows::SYSTEM_DRIVE);
         // Loader anchors: host values, constant fallbacks.
         assert_eq!(
             got.get(windows::SYSTEM_ROOT).map(String::as_str),

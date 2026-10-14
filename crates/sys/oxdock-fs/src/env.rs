@@ -154,6 +154,14 @@ pub mod os {
             TMP = "TMP",
             /// User name (Windows shells read, not synthesize).
             USERNAME = "USERNAME",
+            /// Program install root (toolchain discovery reads it).
+            PROGRAM_FILES = "ProgramFiles",
+            /// 32-bit program install root (vswhere lives under it).
+            PROGRAM_FILES_X86 = "ProgramFiles(x86)",
+            /// 64-bit program install root.
+            PROGRAM_W6432 = "ProgramW6432",
+            /// System drive root.
+            SYSTEM_DRIVE = "SystemDrive",
         }
 
         /// Fallback `PATH`: core system directories, used only when

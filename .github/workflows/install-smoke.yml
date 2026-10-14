@@ -82,6 +82,28 @@ jobs:
           # TODO: Remove after 0.29.0-alpha release
           source: local
 
+      # TODO: TEMPORARY DIAGNOSTIC (remove before merge): Windows cargo steps
+      # failed at link.exe under the closed script env while ambient
+      # builds work. Dump the ambient toolchain env to confirm which
+      # variables native discovery needs.
+      - name: Dump ambient Windows toolchain env (temporary)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Get-ChildItem Env: |
+            Where-Object { $_.Name -match '^(VS|VC|VSCMD|Windows|UCRT|UniversalCRT|ExtensionSdk|DevEnv|Framework|VisualStudio|INCLUDE|LIB|LIBPATH|Program|CommonProgram|System|COMSPEC|PATHEXT|windir|OS|PROCESSOR|NUMBER_OF|USERPROFILE|HOMEDRIVE|HOMEPATH|PATH|ProgramData|ALLUSERSPROFILE|PUBLIC|COMPUTERNAME|USERDOMAIN|SESSIONNAME|TMP|TEMP)$' } |
+            Sort-Object Name |
+            Format-Table -AutoSize |
+            Out-String -Width 4096
+          '--- vswhere ---'
+          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+          "vswhere path: $vswhere"
+          "vswhere exists: $(Test-Path $vswhere)"
+          '--- link.exe on PATH ---'
+          where.exe link.exe
+          '--- VS registry ---'
+          Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\VisualStudio\SxS\VS7' -ErrorAction SilentlyContinue
+
       # The binary under test is this branch, never a published tag:
       # behavior fixes prove before any release ships them. Same build
       # the release ships (all features), by package name. The build

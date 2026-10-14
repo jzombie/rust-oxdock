@@ -328,7 +328,10 @@ fn unix_seed_table() -> Vec<SeedRow> {
 /// unix table: cross-compiled unix utilities and unix shells running
 /// on Windows (`git-bash`, MSYS2, Cygwin) read `TMPDIR`/`TERM`/
 /// `LOGNAME`/`USER`, not their `TEMP`/native counterparts, so both
-/// spellings resolve on Windows.
+/// spellings resolve on Windows. The install-location rows ride along
+/// because native toolchain discovery reads them from the environment:
+/// without install roots and the interpreter in the child env, MSVC
+/// linker lookup falls back to `PATH` and finds Git's `link.exe`.
 fn windows_extra_seed_table() -> Vec<SeedRow> {
     use oxdock_env::os::windows;
     vec![
@@ -366,6 +369,31 @@ fn windows_extra_seed_table() -> Vec<SeedRow> {
             name: windows::PATHEXT,
             value: SeedValue::HostOrFallback(windows::DEFAULT_PATHEXT),
             doc: "host value, else `.COM;.EXE;.BAT;.CMD`",
+        },
+        SeedRow {
+            name: windows::PROGRAM_FILES,
+            value: SeedValue::HostOnly,
+            doc: "host value; omitted when unset",
+        },
+        SeedRow {
+            name: windows::PROGRAM_FILES_X86,
+            value: SeedValue::HostOnly,
+            doc: "host value; omitted when unset",
+        },
+        SeedRow {
+            name: windows::PROGRAM_W6432,
+            value: SeedValue::HostOnly,
+            doc: "host value; omitted when unset",
+        },
+        SeedRow {
+            name: windows::COMSPEC,
+            value: SeedValue::HostOnly,
+            doc: "host value; omitted when unset",
+        },
+        SeedRow {
+            name: windows::SYSTEM_DRIVE,
+            value: SeedValue::HostOnly,
+            doc: "host value; omitted when unset",
         },
     ]
 }
@@ -652,6 +680,11 @@ mod tests {
             (windows::TMP, "/host/temp"),
             (windows::USERPROFILE, "/host/profile"),
             (windows::USERNAME, "host-user"),
+            (windows::PROGRAM_FILES, "C:\\HostProgramFiles"),
+            (windows::PROGRAM_FILES_X86, "C:\\HostProgramFilesX86"),
+            (windows::PROGRAM_W6432, "C:\\HostProgramW6432"),
+            (windows::COMSPEC, "C:\\HostWindows\\system32\\cmd.exe"),
+            (windows::SYSTEM_DRIVE, "C:"),
         ]);
         let lookup = |name: &str| stub.get(name).cloned();
         let mut rows = platform_seed_table();
@@ -706,6 +739,26 @@ mod tests {
             assert_eq!(
                 seed.get(windows::USERNAME).map(String::as_str),
                 Some("host-user")
+            );
+            assert_eq!(
+                seed.get(windows::PROGRAM_FILES).map(String::as_str),
+                Some("C:\\HostProgramFiles")
+            );
+            assert_eq!(
+                seed.get(windows::PROGRAM_FILES_X86).map(String::as_str),
+                Some("C:\\HostProgramFilesX86")
+            );
+            assert_eq!(
+                seed.get(windows::PROGRAM_W6432).map(String::as_str),
+                Some("C:\\HostProgramW6432")
+            );
+            assert_eq!(
+                seed.get(windows::COMSPEC).map(String::as_str),
+                Some("C:\\HostWindows\\system32\\cmd.exe")
+            );
+            assert_eq!(
+                seed.get(windows::SYSTEM_DRIVE).map(String::as_str),
+                Some("C:")
             );
         }
     }
@@ -797,6 +850,18 @@ mod tests {
                 !seed.contains_key(windows::USERNAME),
                 "absent identity must stay absent: {seed:?}"
             );
+            for name in [
+                windows::PROGRAM_FILES,
+                windows::PROGRAM_FILES_X86,
+                windows::PROGRAM_W6432,
+                windows::COMSPEC,
+                windows::SYSTEM_DRIVE,
+            ] {
+                assert!(
+                    !seed.contains_key(name),
+                    "absent install-location rows must stay absent: {seed:?}"
+                );
+            }
         }
     }
 

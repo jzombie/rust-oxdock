@@ -39,6 +39,11 @@ Mirrored from the host at session start and on every `ISOLATED` entry; fallbacks
 | `SystemRoot` | host value, else the `C:\Windows` fallback | seeded default: explicit script values win |
 | `windir` | same root as `SystemRoot` | seeded default: explicit script values win |
 | `PATHEXT` | host value, else `.COM;.EXE;.BAT;.CMD` | seeded default: explicit script values win |
+| `ProgramFiles` | host value; omitted when unset | seeded default: explicit script values win |
+| `ProgramFiles(x86)` | host value; omitted when unset | seeded default: explicit script values win |
+| `ProgramW6432` | host value; omitted when unset | seeded default: explicit script values win |
+| `COMSPEC` | host value; omitted when unset | seeded default: explicit script values win |
+| `SystemDrive` | host value; omitted when unset | seeded default: explicit script values win |
 | `CARGO_TARGET_DIR` | session `<scratch>/target`, owned by cargo alone | seeded default: explicit script values win |
 
 ### Explicit routing
