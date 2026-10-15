@@ -219,7 +219,7 @@ jobs:
           fi
           cargo build --release --target ${{ matrix.target }} -p ${{ inputs.binary }} --all-features
 
-      # TODO: This step could be stipped (see next step)
+      # TODO: This step could be skipped (see next step)
       #
       # Pack with the release candidate's own engine: setup-oxdock
       # builds the caller's checkout (source: local), so the packer
@@ -233,7 +233,7 @@ jobs:
         with:
           source: local
 
-      # TODO: This could reuse the same binary are built in "Build the release binary"
+      # TODO: This could reuse the same binary as built in "Build the release binary"
       - name: Archive the binary
         shell: oxdock --script {0}
         run: |
