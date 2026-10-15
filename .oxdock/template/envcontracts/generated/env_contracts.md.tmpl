@@ -15,27 +15,27 @@ absent; explicit script values win.
 
 | Variable | Platforms |
 | --- | --- |
-| `PATH` | unix, windows |
-| `HOME` | unix |
-| `TMPDIR` | unix |
-| `TERM` | unix |
-| `LOGNAME` | unix |
-| `USER` | unix |
-| `TEMP` | windows |
-| `TMP` | windows |
-| `USERPROFILE` | windows |
-| `LOCALAPPDATA` | windows |
-| `APPDATA` | windows |
-| `SystemRoot` | windows |
-| `windir` | windows |
-| `PATHEXT` | windows |
-| `ProgramFiles` | windows |
-| `ProgramFiles(x86)` | windows |
-| `ProgramW6432` | windows |
-| `COMSPEC` | windows |
-| `SystemDrive` | windows |
-| `PROCESSOR_ARCHITECTURE` | windows |
-| `CARGO_TARGET_DIR` | unix, windows |
+| [`PATH`]({{ $docs_global.code_search_url }}+PATH&type=code) | unix, windows |
+| [`HOME`]({{ $docs_global.code_search_url }}+HOME&type=code) | unix |
+| [`TMPDIR`]({{ $docs_global.code_search_url }}+TMPDIR&type=code) | unix |
+| [`TERM`]({{ $docs_global.code_search_url }}+TERM&type=code) | unix |
+| [`LOGNAME`]({{ $docs_global.code_search_url }}+LOGNAME&type=code) | unix |
+| [`USER`]({{ $docs_global.code_search_url }}+USER&type=code) | unix |
+| [`TEMP`]({{ $docs_global.code_search_url }}+TEMP&type=code) | windows |
+| [`TMP`]({{ $docs_global.code_search_url }}+TMP&type=code) | windows |
+| [`USERPROFILE`]({{ $docs_global.code_search_url }}+USERPROFILE&type=code) | windows |
+| [`LOCALAPPDATA`]({{ $docs_global.code_search_url }}+LOCALAPPDATA&type=code) | windows |
+| [`APPDATA`]({{ $docs_global.code_search_url }}+APPDATA&type=code) | windows |
+| [`SystemRoot`]({{ $docs_global.code_search_url }}+SystemRoot&type=code) | windows |
+| [`windir`]({{ $docs_global.code_search_url }}+windir&type=code) | windows |
+| [`PATHEXT`]({{ $docs_global.code_search_url }}+PATHEXT&type=code) | windows |
+| [`ProgramFiles`]({{ $docs_global.code_search_url }}+ProgramFiles&type=code) | windows |
+| [`ProgramFiles(x86)`]({{ $docs_global.code_search_url }}+ProgramFiles%28x86%29&type=code) | windows |
+| [`ProgramW6432`]({{ $docs_global.code_search_url }}+ProgramW6432&type=code) | windows |
+| [`COMSPEC`]({{ $docs_global.code_search_url }}+COMSPEC&type=code) | windows |
+| [`SystemDrive`]({{ $docs_global.code_search_url }}+SystemDrive&type=code) | windows |
+| [`PROCESSOR_ARCHITECTURE`]({{ $docs_global.code_search_url }}+PROCESSOR_ARCHITECTURE&type=code) | windows |
+| [`CARGO_TARGET_DIR`]({{ $docs_global.code_search_url }}+CARGO_TARGET_DIR&type=code) | unix, windows |
 
 ### Explicit routing
 
@@ -50,11 +50,11 @@ Variables the engine process itself touches.
 
 | Variable | Read by |
 | --- | --- |
-| `SHELL` | oxdock_process::shell::shell_program |
-| `COMSPEC` | oxdock_process::shell::shell_program |
-| `TMPDIR` | LazyGuardedTempDir::new (via std::env::temp_dir) |
-| `CARGO_FEATURE_*` | BuiltinEnv::collect |
-| `CARGO_CFG_*` | BuiltinEnv::collect |
+| [`SHELL`]({{ $docs_global.code_search_url }}+SHELL&type=code) | oxdock_process::shell::shell_program |
+| [`COMSPEC`]({{ $docs_global.code_search_url }}+COMSPEC&type=code) | oxdock_process::shell::shell_program |
+| [`TMPDIR`]({{ $docs_global.code_search_url }}+TMPDIR&type=code) | LazyGuardedTempDir::new (via std::env::temp_dir) |
+| [`CARGO_FEATURE_*`]({{ $docs_global.code_search_url }}+CARGO_FEATURE_%2A&type=code) | BuiltinEnv::collect |
+| [`CARGO_CFG_*`]({{ $docs_global.code_search_url }}+CARGO_CFG_%2A&type=code) | BuiltinEnv::collect |
 
 ### Precedence and enforcement
 
@@ -79,29 +79,29 @@ sanctioned seed or explicit routing. Nothing flows ambiently.
 
 | Variable | Owner |
 | --- | --- |
-| `OXDOCK_CACHE_DIR` | oxdock |
-| `OXDOCK_CACHE_APP` | oxdock |
-| `oxdock` | oxdock |
-| `OXDOCK_WORKSPACE_ROOT` | oxdock |
-| `OXDOCK_EMBED_DEBUG` | oxdock |
-| `OXDOCK_EMBED_FINGERPRINT_SALT` | oxdock |
-| `OXDOCK_EMBED_FORCE_REBUILD` | oxdock |
-| `OXDOCK_BANNER` | oxdock |
-| `OXDOCK_INHERIT_STDOUT` | oxdock |
-| `OXDOCK_SHELL_REEXEC` | oxdock |
-| `OXDOCK_FIXTURE_TARGET_DIR` | oxdock |
-| `OXDOCK_AST_CASE` | oxdock |
-| `OXDOCK_AST_ONLY_COVERAGE` | oxdock |
-| `OXDOCK_MULTI_GUARD_TEST_PASS` | oxdock |
-| `OXDOCK_MULTI_GUARD_TEST_FAIL` | oxdock |
-| `OXDOCK_GUARD_TEST_TOKEN_UNSET` | oxdock |
-| `CARGO_MANIFEST_DIR` | cargo |
-| `CARGO_PKG_NAME` | cargo |
-| `CARGO_PRIMARY_PACKAGE` | cargo |
-| `CARGO_TARGET_DIR` | cargo |
-| `CARGO_INCREMENTAL` | cargo |
-| `CARGO_CFG_FEATURE` | cargo |
-| `OUT_DIR` | cargo::build |
-| `TARGET` | cargo::build |
-| `PROFILE` | cargo::build |
-| `RUSTC` | cargo::build |
+| [`OXDOCK_CACHE_DIR`]({{ $docs_global.code_search_url }}+OXDOCK_CACHE_DIR&type=code) | oxdock |
+| [`OXDOCK_CACHE_APP`]({{ $docs_global.code_search_url }}+OXDOCK_CACHE_APP&type=code) | oxdock |
+| [`oxdock`]({{ $docs_global.code_search_url }}+oxdock&type=code) | oxdock |
+| [`OXDOCK_WORKSPACE_ROOT`]({{ $docs_global.code_search_url }}+OXDOCK_WORKSPACE_ROOT&type=code) | oxdock |
+| [`OXDOCK_EMBED_DEBUG`]({{ $docs_global.code_search_url }}+OXDOCK_EMBED_DEBUG&type=code) | oxdock |
+| [`OXDOCK_EMBED_FINGERPRINT_SALT`]({{ $docs_global.code_search_url }}+OXDOCK_EMBED_FINGERPRINT_SALT&type=code) | oxdock |
+| [`OXDOCK_EMBED_FORCE_REBUILD`]({{ $docs_global.code_search_url }}+OXDOCK_EMBED_FORCE_REBUILD&type=code) | oxdock |
+| [`OXDOCK_BANNER`]({{ $docs_global.code_search_url }}+OXDOCK_BANNER&type=code) | oxdock |
+| [`OXDOCK_INHERIT_STDOUT`]({{ $docs_global.code_search_url }}+OXDOCK_INHERIT_STDOUT&type=code) | oxdock |
+| [`OXDOCK_SHELL_REEXEC`]({{ $docs_global.code_search_url }}+OXDOCK_SHELL_REEXEC&type=code) | oxdock |
+| [`OXDOCK_FIXTURE_TARGET_DIR`]({{ $docs_global.code_search_url }}+OXDOCK_FIXTURE_TARGET_DIR&type=code) | oxdock |
+| [`OXDOCK_AST_CASE`]({{ $docs_global.code_search_url }}+OXDOCK_AST_CASE&type=code) | oxdock |
+| [`OXDOCK_AST_ONLY_COVERAGE`]({{ $docs_global.code_search_url }}+OXDOCK_AST_ONLY_COVERAGE&type=code) | oxdock |
+| [`OXDOCK_MULTI_GUARD_TEST_PASS`]({{ $docs_global.code_search_url }}+OXDOCK_MULTI_GUARD_TEST_PASS&type=code) | oxdock |
+| [`OXDOCK_MULTI_GUARD_TEST_FAIL`]({{ $docs_global.code_search_url }}+OXDOCK_MULTI_GUARD_TEST_FAIL&type=code) | oxdock |
+| [`OXDOCK_GUARD_TEST_TOKEN_UNSET`]({{ $docs_global.code_search_url }}+OXDOCK_GUARD_TEST_TOKEN_UNSET&type=code) | oxdock |
+| [`CARGO_MANIFEST_DIR`]({{ $docs_global.code_search_url }}+CARGO_MANIFEST_DIR&type=code) | cargo |
+| [`CARGO_PKG_NAME`]({{ $docs_global.code_search_url }}+CARGO_PKG_NAME&type=code) | cargo |
+| [`CARGO_PRIMARY_PACKAGE`]({{ $docs_global.code_search_url }}+CARGO_PRIMARY_PACKAGE&type=code) | cargo |
+| [`CARGO_TARGET_DIR`]({{ $docs_global.code_search_url }}+CARGO_TARGET_DIR&type=code) | cargo |
+| [`CARGO_INCREMENTAL`]({{ $docs_global.code_search_url }}+CARGO_INCREMENTAL&type=code) | cargo |
+| [`CARGO_CFG_FEATURE`]({{ $docs_global.code_search_url }}+CARGO_CFG_FEATURE&type=code) | cargo |
+| [`OUT_DIR`]({{ $docs_global.code_search_url }}+OUT_DIR&type=code) | cargo::build |
+| [`TARGET`]({{ $docs_global.code_search_url }}+TARGET&type=code) | cargo::build |
+| [`PROFILE`]({{ $docs_global.code_search_url }}+PROFILE&type=code) | cargo::build |
+| [`RUSTC`]({{ $docs_global.code_search_url }}+RUSTC&type=code) | cargo::build |

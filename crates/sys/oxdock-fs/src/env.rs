@@ -180,13 +180,22 @@ pub struct PlumbingEntry {
 pub fn plumbing() -> Vec<PlumbingEntry> {
     let mut out = Vec::new();
     for name in oxdock::ALL {
-        out.push(PlumbingEntry { owner: "oxdock", name });
+        out.push(PlumbingEntry {
+            owner: "oxdock",
+            name,
+        });
     }
     for name in cargo::ALL {
-        out.push(PlumbingEntry { owner: "cargo", name });
+        out.push(PlumbingEntry {
+            owner: "cargo",
+            name,
+        });
     }
     for name in cargo::build::ALL {
-        out.push(PlumbingEntry { owner: "cargo::build", name });
+        out.push(PlumbingEntry {
+            owner: "cargo::build",
+            name,
+        });
     }
     out
 }

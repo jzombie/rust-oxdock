@@ -27,27 +27,27 @@ absent; explicit script values win.
 
 | Variable | Platforms |
 | --- | --- |
-| `PATH` | unix, windows |
-| `HOME` | unix |
-| `TMPDIR` | unix |
-| `TERM` | unix |
-| `LOGNAME` | unix |
-| `USER` | unix |
-| `TEMP` | windows |
-| `TMP` | windows |
-| `USERPROFILE` | windows |
-| `LOCALAPPDATA` | windows |
-| `APPDATA` | windows |
-| `SystemRoot` | windows |
-| `windir` | windows |
-| `PATHEXT` | windows |
-| `ProgramFiles` | windows |
-| `ProgramFiles(x86)` | windows |
-| `ProgramW6432` | windows |
-| `COMSPEC` | windows |
-| `SystemDrive` | windows |
-| `PROCESSOR_ARCHITECTURE` | windows |
-| `CARGO_TARGET_DIR` | unix, windows |
+| [`PATH`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+PATH&type=code) | unix, windows |
+| [`HOME`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+HOME&type=code) | unix |
+| [`TMPDIR`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+TMPDIR&type=code) | unix |
+| [`TERM`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+TERM&type=code) | unix |
+| [`LOGNAME`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+LOGNAME&type=code) | unix |
+| [`USER`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+USER&type=code) | unix |
+| [`TEMP`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+TEMP&type=code) | windows |
+| [`TMP`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+TMP&type=code) | windows |
+| [`USERPROFILE`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+USERPROFILE&type=code) | windows |
+| [`LOCALAPPDATA`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+LOCALAPPDATA&type=code) | windows |
+| [`APPDATA`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+APPDATA&type=code) | windows |
+| [`SystemRoot`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+SystemRoot&type=code) | windows |
+| [`windir`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+windir&type=code) | windows |
+| [`PATHEXT`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+PATHEXT&type=code) | windows |
+| [`ProgramFiles`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+ProgramFiles&type=code) | windows |
+| [`ProgramFiles(x86)`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+ProgramFiles%28x86%29&type=code) | windows |
+| [`ProgramW6432`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+ProgramW6432&type=code) | windows |
+| [`COMSPEC`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+COMSPEC&type=code) | windows |
+| [`SystemDrive`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+SystemDrive&type=code) | windows |
+| [`PROCESSOR_ARCHITECTURE`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+PROCESSOR_ARCHITECTURE&type=code) | windows |
+| [`CARGO_TARGET_DIR`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+CARGO_TARGET_DIR&type=code) | unix, windows |
 
 ### Explicit routing
 
@@ -62,11 +62,11 @@ Variables the engine process itself touches.
 
 | Variable | Read by |
 | --- | --- |
-| `SHELL` | oxdock_process::shell::shell_program |
-| `COMSPEC` | oxdock_process::shell::shell_program |
-| `TMPDIR` | LazyGuardedTempDir::new (via std::env::temp_dir) |
-| `CARGO_FEATURE_*` | BuiltinEnv::collect |
-| `CARGO_CFG_*` | BuiltinEnv::collect |
+| [`SHELL`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+SHELL&type=code) | oxdock_process::shell::shell_program |
+| [`COMSPEC`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+COMSPEC&type=code) | oxdock_process::shell::shell_program |
+| [`TMPDIR`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+TMPDIR&type=code) | LazyGuardedTempDir::new (via std::env::temp_dir) |
+| [`CARGO_FEATURE_*`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+CARGO_FEATURE_%2A&type=code) | BuiltinEnv::collect |
+| [`CARGO_CFG_*`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+CARGO_CFG_%2A&type=code) | BuiltinEnv::collect |
 
 ### Precedence and enforcement
 
@@ -91,29 +91,29 @@ sanctioned seed or explicit routing. Nothing flows ambiently.
 
 | Variable | Owner |
 | --- | --- |
-| `OXDOCK_CACHE_DIR` | oxdock |
-| `OXDOCK_CACHE_APP` | oxdock |
-| `oxdock` | oxdock |
-| `OXDOCK_WORKSPACE_ROOT` | oxdock |
-| `OXDOCK_EMBED_DEBUG` | oxdock |
-| `OXDOCK_EMBED_FINGERPRINT_SALT` | oxdock |
-| `OXDOCK_EMBED_FORCE_REBUILD` | oxdock |
-| `OXDOCK_BANNER` | oxdock |
-| `OXDOCK_INHERIT_STDOUT` | oxdock |
-| `OXDOCK_SHELL_REEXEC` | oxdock |
-| `OXDOCK_FIXTURE_TARGET_DIR` | oxdock |
-| `OXDOCK_AST_CASE` | oxdock |
-| `OXDOCK_AST_ONLY_COVERAGE` | oxdock |
-| `OXDOCK_MULTI_GUARD_TEST_PASS` | oxdock |
-| `OXDOCK_MULTI_GUARD_TEST_FAIL` | oxdock |
-| `OXDOCK_GUARD_TEST_TOKEN_UNSET` | oxdock |
-| `CARGO_MANIFEST_DIR` | cargo |
-| `CARGO_PKG_NAME` | cargo |
-| `CARGO_PRIMARY_PACKAGE` | cargo |
-| `CARGO_TARGET_DIR` | cargo |
-| `CARGO_INCREMENTAL` | cargo |
-| `CARGO_CFG_FEATURE` | cargo |
-| `OUT_DIR` | cargo::build |
-| `TARGET` | cargo::build |
-| `PROFILE` | cargo::build |
-| `RUSTC` | cargo::build |
+| [`OXDOCK_CACHE_DIR`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+OXDOCK_CACHE_DIR&type=code) | oxdock |
+| [`OXDOCK_CACHE_APP`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+OXDOCK_CACHE_APP&type=code) | oxdock |
+| [`oxdock`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+oxdock&type=code) | oxdock |
+| [`OXDOCK_WORKSPACE_ROOT`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+OXDOCK_WORKSPACE_ROOT&type=code) | oxdock |
+| [`OXDOCK_EMBED_DEBUG`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+OXDOCK_EMBED_DEBUG&type=code) | oxdock |
+| [`OXDOCK_EMBED_FINGERPRINT_SALT`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+OXDOCK_EMBED_FINGERPRINT_SALT&type=code) | oxdock |
+| [`OXDOCK_EMBED_FORCE_REBUILD`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+OXDOCK_EMBED_FORCE_REBUILD&type=code) | oxdock |
+| [`OXDOCK_BANNER`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+OXDOCK_BANNER&type=code) | oxdock |
+| [`OXDOCK_INHERIT_STDOUT`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+OXDOCK_INHERIT_STDOUT&type=code) | oxdock |
+| [`OXDOCK_SHELL_REEXEC`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+OXDOCK_SHELL_REEXEC&type=code) | oxdock |
+| [`OXDOCK_FIXTURE_TARGET_DIR`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+OXDOCK_FIXTURE_TARGET_DIR&type=code) | oxdock |
+| [`OXDOCK_AST_CASE`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+OXDOCK_AST_CASE&type=code) | oxdock |
+| [`OXDOCK_AST_ONLY_COVERAGE`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+OXDOCK_AST_ONLY_COVERAGE&type=code) | oxdock |
+| [`OXDOCK_MULTI_GUARD_TEST_PASS`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+OXDOCK_MULTI_GUARD_TEST_PASS&type=code) | oxdock |
+| [`OXDOCK_MULTI_GUARD_TEST_FAIL`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+OXDOCK_MULTI_GUARD_TEST_FAIL&type=code) | oxdock |
+| [`OXDOCK_GUARD_TEST_TOKEN_UNSET`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+OXDOCK_GUARD_TEST_TOKEN_UNSET&type=code) | oxdock |
+| [`CARGO_MANIFEST_DIR`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+CARGO_MANIFEST_DIR&type=code) | cargo |
+| [`CARGO_PKG_NAME`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+CARGO_PKG_NAME&type=code) | cargo |
+| [`CARGO_PRIMARY_PACKAGE`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+CARGO_PRIMARY_PACKAGE&type=code) | cargo |
+| [`CARGO_TARGET_DIR`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+CARGO_TARGET_DIR&type=code) | cargo |
+| [`CARGO_INCREMENTAL`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+CARGO_INCREMENTAL&type=code) | cargo |
+| [`CARGO_CFG_FEATURE`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+CARGO_CFG_FEATURE&type=code) | cargo |
+| [`OUT_DIR`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+OUT_DIR&type=code) | cargo::build |
+| [`TARGET`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+TARGET&type=code) | cargo::build |
+| [`PROFILE`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+PROFILE&type=code) | cargo::build |
+| [`RUSTC`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+RUSTC&type=code) | cargo::build |

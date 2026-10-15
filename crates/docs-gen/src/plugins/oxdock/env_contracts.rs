@@ -6,6 +6,34 @@
 use anyhow::Result;
 use oxdock_markdown_plugin::markdown::escape_table_cell;
 
+/// Percent-encode one code-search query term: word characters pass
+/// through, everything else becomes `%XX`. Keeps names like
+/// `ProgramFiles(x86)` and `CARGO_FEATURE_*` link-safe.
+fn encode_search_term(term: &str) -> String {
+    let mut out = String::with_capacity(term.len());
+    for byte in term.bytes() {
+        if byte.is_ascii_alphanumeric() || byte == b'_' {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
+/// Render one contract name cell as a code-search link. The repo
+/// qualifier stays a template global (`$docs_global.code_search_url`,
+/// single-sourced in `_global/values.json`); only the name encoding
+/// happens here. Quadrupled braces emit the literal `{{ }}`
+/// placeholder for the later template pass.
+fn code_link(name: &str) -> String {
+    format!(
+        "[`{}`]({{{{ $docs_global.code_search_url }}}}+{}&type=code)",
+        escape_table_cell(name),
+        encode_search_term(name),
+    )
+}
+
 /// Render the full contract reference as markdown. Formatting only:
 ///
 /// - the intro is `env_policy::CONTRACT_INTRO_MD`,
@@ -27,8 +55,8 @@ pub fn render_env_contracts() -> Result<String> {
     out.push_str("\n| Variable | Platforms |\n| --- | --- |\n");
     for entry in env_policy::describe_baseline_defaults() {
         out.push_str(&format!(
-            "| `{}` | {} |\n",
-            escape_table_cell(entry.name),
+            "| {} | {} |\n",
+            code_link(entry.name),
             escape_table_cell(entry.platforms),
         ));
     }
@@ -39,8 +67,8 @@ pub fn render_env_contracts() -> Result<String> {
     out.push_str("\n| Variable | Read by |\n| --- | --- |\n");
     for read in env_policy::engine_host_reads() {
         out.push_str(&format!(
-            "| `{}` | {} |\n",
-            escape_table_cell(read.name),
+            "| {} | {} |\n",
+            code_link(read.name),
             escape_table_cell(read.reader),
         ));
     }
@@ -51,8 +79,8 @@ pub fn render_env_contracts() -> Result<String> {
     out.push_str("\n| Variable | Owner |\n| --- | --- |\n");
     for entry in oxdock_fs::env::plumbing() {
         out.push_str(&format!(
-            "| `{}` | {} |\n",
-            escape_table_cell(entry.name),
+            "| {} | {} |\n",
+            code_link(entry.name),
             escape_table_cell(entry.owner),
         ));
     }
@@ -62,6 +90,29 @@ pub fn render_env_contracts() -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn contract_links_names_to_code_search() {
+        // Every rendered name links the repo-qualified code search;
+        // the qualifier stays a template global, only the term encodes
+        // here. Pins the awkward characters: parens and `*`.
+        assert_eq!(encode_search_term("PATH"), "PATH");
+        assert_eq!(
+            encode_search_term("ProgramFiles(x86)"),
+            "ProgramFiles%28x86%29"
+        );
+        assert_eq!(encode_search_term("CARGO_FEATURE_*"), "CARGO_FEATURE_%2A");
+        let link = code_link("ProgramFiles(x86)");
+        assert!(
+            link.contains("{{ $docs_global.code_search_url }}+ProgramFiles%28x86%29&type=code"),
+            "unexpected link: {link}"
+        );
+        let text = render_env_contracts().expect("renders");
+        assert!(
+            text.contains("+ProgramFiles%28x86%29&type=code"),
+            "baseline row lost its link"
+        );
+    }
 
     #[test]
     fn contract_renders_baseline_defaults() {
@@ -84,7 +135,11 @@ mod tests {
                 entry.name
             );
             assert!(
-                text.contains(&format!("| `{}` | {} |", entry.name, entry.platforms)),
+                text.contains(&format!(
+                    "{} | {} |",
+                    code_link(entry.name),
+                    entry.platforms
+                )),
                 "{} renders without its platforms",
                 entry.name
             );
