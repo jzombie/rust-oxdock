@@ -2859,6 +2859,59 @@ fn pty_session_opens_cleared() {
 }
 
 #[test]
+#[cfg(windows)]
+#[cfg_attr(
+    miri,
+    ignore = "needs loopback TCP plus threads plus ConPTY plus subprocesses"
+)]
+fn conhost_setup_query_never_reaches_client_windows() {
+    // A real terminal answers `ESC[6n` itself, and that answer lands in
+    // the shell as stray input eating the first keystroke. The pump
+    // answers conhost locally, so the query must never reach the wire:
+    // read through the prompt and assert the whole stream is clean.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-no-dsr-leak");
+    let script = indoc! {r#"
+        IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-no-dsr-leak", {username: "u", password: "p"})
+        WRITE addr.txt "{{ $m.addr }}"
+        LET $h: HANDLE = ASYNC {
+            LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
+            LET $to_child: PIPE
+            LET $from_child: PIPE
+            LET $pty: HANDLE = ASYNC { SSH_PTY_RUN($dq.session, ["powershell.exe", "-NoProfile"], 0, 0, $to_child, $from_child) }
+            LET $pump: HANDLE = ASYNC { SSH_PUMP_CHANNEL($dq.session, $from_child, $to_child) }
+            LET $code: INT = AWAIT $pty
+            AWAIT $pump
+        }
+        AWAIT $h
+        SSH_CLOSE($m.server)
+    "#};
+    let probe = root.clone();
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    let addr = read_addr(&probe);
+    let addr: SocketAddr = addr.parse().expect("addr parses");
+    let mut client = TestClient::connect_with_pty(addr, "u", "p").expect("client connects");
+    let out = client
+        .read_until(b"> ", Duration::from_secs(20))
+        .expect("prompt renders");
+    assert!(
+        !out.windows(3).any(|window| window == b"[6n"),
+        "conhost setup query must not reach the client"
+    );
+    client.send(b"exit\r").expect("client exits shell");
+    client
+        .wait_close(Duration::from_secs(20))
+        .expect("server closes");
+    handle
+        .join()
+        .expect("script thread joins")
+        .expect("shell session completes");
+}
+
+#[test]
 #[cfg_attr(
     miri,
     ignore = "needs loopback TCP plus threads plus a Tokio runtime"

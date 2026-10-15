@@ -58,7 +58,12 @@ async fn serve_async(
 ) -> Result<()> {
     let config = Arc::new(russh::server::Config {
         inactivity_timeout: Some(INACTIVITY_TIMEOUT),
-        auth_rejection_time: Duration::from_secs(1),
+        // Rejection padding stays (user-enumeration resistance), but
+        // sized for an ephemeral proxy: every login waits this out
+        // (the client's opening `none` probe included), so a full
+        // second stalls each password prompt by a noticeable beat.
+        auth_rejection_time: Duration::from_millis(100),
+        auth_rejection_time_initial: Some(Duration::from_millis(100)),
         keys: vec![key],
         ..Default::default()
     });

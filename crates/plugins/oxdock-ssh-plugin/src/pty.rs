@@ -67,51 +67,87 @@ fn drain_overdue(last_output_ms: u64, exited_ms: Option<u64>, now_ms: u64) -> bo
 /// and stalls console setup, and the client with it, until the query is
 /// answered. A terminal emulator answers in band as part of VT handling;
 /// this pump is the only reader, so the output worker answers on its
-/// behalf. Query bytes are still forwarded untouched: they are genuine
-/// console output and substring assertions must observe the full stream.
-/// The reply reports a fresh 1,1 cursor. Only conhost can emit this
-/// sequence toward us (a child cursor query travels the opposite
-/// direction, into conhost), so answering never injects stray input into
-/// the child. Unix ptys never emit the query, so this is inert there.
+/// behalf. The query itself is consumed, never forwarded: a real
+/// terminal would answer it too, and that answer lands in the shell as
+/// stray input that eats the user's first keystroke. The reply reports
+/// a fresh 1,1 cursor. Only conhost can emit this sequence toward us
+/// (a child cursor query travels the opposite direction, into
+/// conhost), so answering never injects stray input into the child.
+/// Unix ptys never emit the query, so this is inert there.
 const CONHOST_DSR_QUERY: &[u8] = b"\x1b[6n";
 const CONHOST_CPR_REPLY: &[u8] = b"\x1b[1;1R";
 
-/// Answer every ConPTY cursor query in `chunk`, carrying a short tail
-/// across reads so a query split over two reads still matches. The reply
-/// is best effort: setup may complete, or teardown race, concurrently.
-fn answer_conhost_queries(
-    chunk: &[u8],
-    tail: &mut [u8; 3],
-    tail_len: &mut usize,
-    master_in: &Arc<Mutex<Box<dyn Write + Send>>>,
-) {
-    let mut probe = Vec::with_capacity(*tail_len + chunk.len());
-    probe.extend_from_slice(&tail[..*tail_len]);
-    probe.extend_from_slice(chunk);
-    // Answer matches that involve new bytes; matches fully inside the
-    // old tail were answered on the previous call.
-    let mut answers = 0;
-    let mut idx = 0;
-    while idx + CONHOST_DSR_QUERY.len() <= probe.len() {
-        if &probe[idx..idx + CONHOST_DSR_QUERY.len()] == CONHOST_DSR_QUERY
-            && idx + CONHOST_DSR_QUERY.len() > *tail_len
+/// Streaming `ESC[6n` filter over master output: answers each query
+/// once through the master writer and releases the chunk minus query
+/// bytes. A trailing query-prefix is held for the next chunk, so a
+/// query split over two reads still matches and never reaches the wire
+/// half. `flush` releases held bytes at EOF: they never completed a
+/// query, so they are genuine output.
+struct DsrFilter {
+    carry: [u8; 3],
+    len: usize,
+}
+
+impl DsrFilter {
+    fn new() -> Self {
+        Self {
+            carry: [0u8; 3],
+            len: 0,
+        }
+    }
+
+    fn feed(
+        &mut self,
+        chunk: &[u8],
+        master_in: &Arc<Mutex<Box<dyn Write + Send>>>,
+    ) -> Vec<u8> {
+        let mut probe = Vec::with_capacity(self.len + chunk.len());
+        probe.extend_from_slice(&self.carry[..self.len]);
+        probe.extend_from_slice(chunk);
+        // Consumed bytes never rescan: a completed query leaves the
+        // stream, so every match here is new and answered exactly once.
+        let mut answers = 0;
+        let mut kept = Vec::with_capacity(probe.len());
+        let mut idx = 0;
+        while idx + CONHOST_DSR_QUERY.len() <= probe.len() {
+            if &probe[idx..idx + CONHOST_DSR_QUERY.len()] == CONHOST_DSR_QUERY {
+                answers += 1;
+                idx += CONHOST_DSR_QUERY.len();
+            } else {
+                kept.push(probe[idx]);
+                idx += 1;
+            }
+        }
+        kept.extend_from_slice(&probe[idx..]);
+        // Hold back the longest trailing query-prefix: it may yet
+        // complete a split query, and must not reach the wire half.
+        let widest = kept.len().min(CONHOST_DSR_QUERY.len() - 1);
+        let mut hold = 0;
+        for width in (1..=widest).rev() {
+            if &kept[kept.len() - width..] == &CONHOST_DSR_QUERY[..width] {
+                hold = width;
+                break;
+            }
+        }
+        let emit = kept[..kept.len() - hold].to_vec();
+        self.carry[..hold].copy_from_slice(&kept[kept.len() - hold..]);
+        self.len = hold;
+        if answers > 0
+            && let Ok(mut guard) = master_in.lock()
         {
-            answers += 1;
-            idx += CONHOST_DSR_QUERY.len();
-        } else {
-            idx += 1;
+            for _ in 0..answers {
+                let _ = guard.write_all(CONHOST_CPR_REPLY);
+            }
+            let _ = guard.flush();
         }
+        emit
     }
-    if answers > 0
-        && let Ok(mut guard) = master_in.lock()
-    {
-        for _ in 0..answers {
-            let _ = guard.write_all(CONHOST_CPR_REPLY);
-        }
-        let _ = guard.flush();
+
+    fn flush(&mut self) -> Vec<u8> {
+        let tail = self.carry[..self.len].to_vec();
+        self.len = 0;
+        tail
     }
-    *tail_len = (*tail_len + chunk.len()).min(tail.len());
-    tail[..*tail_len].copy_from_slice(&probe[probe.len() - *tail_len..]);
 }
 
 /// Pump master-terminal output into the `out_pipe` writer. Ends on
@@ -119,9 +155,10 @@ fn answer_conhost_queries(
 /// normalizes the platform EIO-into-EOF kink for us) or on console
 /// teardown (the supervisor releases the master once the drain is due,
 /// which closes a ConPTY output pipe that would otherwise stay open).
-/// Also answers ConPTY setup queries in band. Stamps `activity` with
-/// the current millis on every forwarded chunk so the supervisor can
-/// tell a draining console from a stranded one.
+/// Also answers ConPTY setup queries in band while stripping them from
+/// the stream. Stamps `activity` with the current millis on every
+/// forwarded chunk so the supervisor can tell a draining console from
+/// a stranded one.
 fn pump_master_out(
     reader: &mut Box<dyn Read + Send>,
     writer: &SharedOutput,
@@ -131,8 +168,7 @@ fn pump_master_out(
     epoch: Instant,
 ) -> Result<()> {
     let mut buffer = [0u8; CHUNK];
-    let mut query_tail = [0u8; 3];
-    let mut query_tail_len = 0usize;
+    let mut queries = DsrFilter::new();
     loop {
         if cancel.load(Ordering::SeqCst) {
             break;
@@ -145,22 +181,31 @@ fn pump_master_out(
             Err(err) => bail!("SSH pty master read failed: {err}"),
             Ok(0) => break,
             Ok(count) => {
-                answer_conhost_queries(
-                    &buffer[..count],
-                    &mut query_tail,
-                    &mut query_tail_len,
-                    master_in,
-                );
+                let clean = queries.feed(&buffer[..count], master_in);
+                if clean.is_empty() {
+                    continue;
+                }
                 let mut guard = writer
                     .lock()
                     .map_err(|_| anyhow::anyhow!("SSH pty output lock poisoned"))?;
                 guard
-                    .write_all(&buffer[..count])
+                    .write_all(&clean)
                     .context("SSH pty output pipe write failed")?;
                 guard.flush().context("SSH pty output pipe flush failed")?;
                 activity.store(elapsed_ms(epoch), Ordering::SeqCst);
             }
         }
+    }
+    // Held query-prefix bytes never completed: genuine output, release.
+    let tail = queries.flush();
+    if !tail.is_empty() {
+        let mut guard = writer
+            .lock()
+            .map_err(|_| anyhow::anyhow!("SSH pty output lock poisoned"))?;
+        guard
+            .write_all(&tail)
+            .context("SSH pty output pipe write failed")?;
+        guard.flush().context("SSH pty output pipe flush failed")?;
     }
     Ok(())
 }
@@ -545,23 +590,59 @@ mod tests {
     }
 
     #[test]
-    fn answers_split_query_once() {
+    fn query_answered_once_and_stripped() {
         let (master_in, seen) = harness();
-        let mut tail = [0u8; 3];
-        let mut tail_len = 0;
-        answer_conhost_queries(b"abc\x1b[", &mut tail, &mut tail_len, &master_in);
+        let mut filter = DsrFilter::new();
+        assert_eq!(
+            filter.feed(b"ab\x1b[6ncd", &master_in).as_slice(),
+            b"abcd"
+        );
+        assert_eq!(
+            seen.lock().expect("sink readable").as_slice(),
+            b"\x1b[1;1R".as_slice()
+        );
+        assert!(filter.flush().is_empty());
+    }
+
+    #[test]
+    fn split_query_answered_once_and_stripped() {
+        let (master_in, seen) = harness();
+        let mut filter = DsrFilter::new();
+        assert_eq!(
+            filter.feed(b"abc\x1b[", &master_in).as_slice(),
+            b"abc"
+        );
         assert!(seen.lock().expect("sink readable").is_empty());
-        answer_conhost_queries(b"6nrest", &mut tail, &mut tail_len, &master_in);
+        assert_eq!(
+            filter.feed(b"6nrest", &master_in).as_slice(),
+            b"rest"
+        );
         assert_eq!(
             seen.lock().expect("sink readable").as_slice(),
             b"\x1b[1;1R".as_slice()
         );
-        // Replaying the boundary afterwards must not double answer.
-        answer_conhost_queries(b"more", &mut tail, &mut tail_len, &master_in);
+        // Replay past the boundary: the consumed query never rescans.
+        assert_eq!(
+            filter.feed(b"more", &master_in).as_slice(),
+            b"more"
+        );
         assert_eq!(
             seen.lock().expect("sink readable").as_slice(),
             b"\x1b[1;1R".as_slice()
         );
+        assert!(filter.flush().is_empty());
+    }
+
+    #[test]
+    fn trailing_prefix_flushed_at_eof() {
+        let (master_in, seen) = harness();
+        let mut filter = DsrFilter::new();
+        assert_eq!(
+            filter.feed(b"ends with \x1b[", &master_in).as_slice(),
+            b"ends with "
+        );
+        assert!(seen.lock().expect("sink readable").is_empty());
+        assert_eq!(filter.flush().as_slice(), b"\x1b[");
     }
 
     #[test]
@@ -594,14 +675,12 @@ mod tests {
     #[test]
     fn silent_without_query() {
         let (master_in, seen) = harness();
-        let mut tail = [0u8; 3];
-        let mut tail_len = 0;
-        answer_conhost_queries(
-            b"plain output, no query",
-            &mut tail,
-            &mut tail_len,
-            &master_in,
+        let mut filter = DsrFilter::new();
+        assert_eq!(
+            filter.feed(b"plain output, no query", &master_in).as_slice(),
+            b"plain output, no query"
         );
         assert!(seen.lock().expect("sink readable").is_empty());
+        assert!(filter.flush().is_empty());
     }
 }
