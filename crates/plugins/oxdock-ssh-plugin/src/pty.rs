@@ -120,7 +120,7 @@ impl DsrFilter {
         let widest = kept.len().min(CONHOST_DSR_QUERY.len() - 1);
         let mut hold = 0;
         for width in (1..=widest).rev() {
-            if &kept[kept.len() - width..] == &CONHOST_DSR_QUERY[..width] {
+            if kept[kept.len() - width..] == CONHOST_DSR_QUERY[..width] {
                 hold = width;
                 break;
             }
