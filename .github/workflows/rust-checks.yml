@@ -49,8 +49,6 @@ jobs:
         uses: ./.github/actions/setup-oxdock
         with:
           version: ${{ env.OXDOCK_PINNED_ENGINE }}
-          # TODO: Remove after 0.29.0-alpha release
-          source: local
 
       # Native hashing: HASH_SHA256 digests Cargo.lock identically on
       # every platform, and TEXT_EXTRACT picks the rustc commit out of
@@ -214,8 +212,6 @@ jobs:
         uses: ./.github/actions/setup-oxdock
         with:
           version: ${{ env.OXDOCK_PINNED_ENGINE }}
-          # TODO: Remove after 0.29.0-alpha release
-          source: local
 
       - name: Hash lockfile and toolchain
         id: hashes
@@ -307,8 +303,6 @@ jobs:
         uses: ./.github/actions/setup-oxdock
         with:
           version: ${{ env.OXDOCK_PINNED_ENGINE }}
-          # TODO: Remove after 0.29.0-alpha release
-          source: local
 
       - name: Hash lockfile and toolchain
       # TODO: Remove after 0.29.0-alpha release
@@ -397,8 +391,6 @@ jobs:
         uses: ./.github/actions/setup-oxdock
         with:
           version: ${{ env.OXDOCK_PINNED_ENGINE }}
-          # TODO: Remove after 0.29.0-alpha release
-          source: local
 
       - name: Hash lockfile and toolchain
         id: hashes
@@ -512,8 +504,6 @@ jobs:
         uses: ./.github/actions/setup-oxdock
         with:
           version: ${{ env.OXDOCK_PINNED_ENGINE }}
-          # TODO: Remove after 0.29.0-alpha release
-          source: local
 
       - name: Evaluate all results
         shell: oxdock --script {0}
