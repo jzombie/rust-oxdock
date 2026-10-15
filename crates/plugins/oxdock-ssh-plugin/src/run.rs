@@ -14,9 +14,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::{Context, Result, bail};
 use oxdock_core::{StepCtx, Value};
 use oxdock_fs::command_path;
-use oxdock_process::{BackgroundHandle, CommandBuilder, PipedChild, ProcessManager, SharedOutput};
+use oxdock_process::{
+    BackgroundHandle, ChildHandle, CommandBuilder, PipedChild, ProcessManager, SharedOutput,
+};
 
-use crate::bridge::{CHUNK, TICK, read_pipe};
+use crate::bridge::{
+    CHUNK, ChildCtl, DeferredClose, InputSink, TickInfo, pump_pipe_to_sink, supervise_child_pump,
+};
 
 /// Copy one child stream into a DSL pipe until EOF. Ends on child EOF;
 /// a dead child closes its ends, so EOF always arrives without help.
@@ -44,30 +48,60 @@ fn pump_fd_to_pipe(
     Ok(())
 }
 
-/// Reap one finished worker, recording the first error.
-fn reap(
-    slot: &mut Option<std::thread::ScopedJoinHandle<'_, Result<()>>>,
-    failed: &mut Option<anyhow::Error>,
-) {
-    if !slot.as_ref().is_some_and(|handle| handle.is_finished()) {
-        return;
-    }
-    let Some(handle) = slot.take() else {
-        return;
-    };
-    match handle.join() {
-        Ok(Ok(())) => {}
-        Ok(Err(err)) => {
-            if failed.is_none() {
-                *failed = Some(err);
+/// Backend half of the shared child-pump core: plain-pipe handles. No
+/// extras: pipes EOF on their own, so teardown is just reap plus close.
+struct RunChild<'a> {
+    handle: ChildHandle,
+    peer_done: &'a AtomicBool,
+    report: Option<&'a dyn Fn(u32)>,
+}
+
+impl ChildCtl for RunChild<'_> {
+    fn poll_exit(&mut self) -> Option<i64> {
+        match self.handle.try_wait() {
+            Ok(Some(status)) => {
+                self.peer_done.store(true, Ordering::SeqCst);
+                match status.code() {
+                    Some(code) if code >= 0 => {
+                        if let Some(report) = self.report {
+                            report(code as u32);
+                        }
+                        Some(i64::from(code))
+                    }
+                    // Signaled: no meaningful code to report.
+                    _ => Some(-1),
+                }
+            }
+            Ok(None) => None,
+            Err(_) => {
+                self.peer_done.store(true, Ordering::SeqCst);
+                Some(-1)
             }
         }
-        Err(_) => {
-            if failed.is_none() {
-                *failed = Some(anyhow::anyhow!("SSH run worker panicked"));
-            }
+    }
+
+    fn kill(&mut self) {
+        let _ = self.handle.kill();
+    }
+
+    fn wait_code(&mut self) -> Result<i64> {
+        // Workers drained without an observed exit: reap the
+        // authoritative status blocking.
+        match self.handle.wait() {
+            Ok(status) => match status.code() {
+                Some(code) if code >= 0 => {
+                    if let Some(report) = self.report {
+                        report(code as u32);
+                    }
+                    Ok(i64::from(code))
+                }
+                _ => Ok(-1),
+            },
+            Err(err) => bail!("SSH run reaped with error: {err}"),
         }
     }
+
+    fn on_tick(&mut self, _tick: TickInfo) {}
 }
 
 /// Run `argv` with piped stdio through explicit DSL pipes until the
@@ -120,131 +154,67 @@ pub fn pump_run_session<P: ProcessManager>(
         .spawn_piped_with_stderr()
         .context("SSH run spawn failed")?;
     let PipedChild {
-        mut handle,
+        handle,
         stdin,
         stdout,
         stderr,
     } = piped;
-    let mut child_stdin: Box<dyn Write + Send> = Box::new(stdin);
+    let child_stdin: Box<dyn Write + Send> = Box::new(stdin);
     let mut child_stdout: Box<dyn Read + Send> = Box::new(stdout);
     let Some(stderr) = stderr else {
         bail!("SSH run spawn lost stderr");
     };
     let mut child_stderr: Box<dyn Read + Send> = Box::new(stderr);
 
-    let mut failed: Option<anyhow::Error> = None;
-    let mut out_closed = false;
-    let mut err_closed = false;
     let peer_done = AtomicBool::new(false);
-    let mut exit_code: Option<i64> = None;
-    std::thread::scope(|scope| {
-        // Owned by the worker, not borrowed: thread end drops the
-        // handle, which closes the child stdin. A borrowed handle
-        // would outlive the worker in this frame and the child would
-        // never observe EOF. Shared flags ride in by reference.
+    let mut run_child = RunChild {
+        handle,
+        peer_done: &peer_done,
+        report: on_exit,
+    };
+    let exit_code = std::thread::scope(|scope| {
+        // Pre-bound shared borrows (all `Copy`) plus owned values: the
+        // `move` closure below takes these and borrows nothing else
+        // from this frame. Owned stdin drops at thread end, closing
+        // the child stdin; a borrowed handle would outlive the worker
+        // and the child would never observe EOF.
+        let reader_in = &reader;
+        let backend_in = backend.as_ref();
         let peer_done_in = &peer_done;
         let mut worker_in = Some(scope.spawn(move || {
-            let mut buffer = [0u8; CHUNK];
-            loop {
-                if cancel.load(Ordering::SeqCst) || peer_done_in.load(Ordering::SeqCst) {
-                    break;
-                }
-                match read_pipe(&reader, backend.as_ref(), &mut buffer) {
-                    Err(err) => bail!("SSH run input pipe read failed: {err}"),
-                    Ok(None) => continue,
-                    // DSL EOF closes the child stdin: the child observes
-                    // EOF then. Not peer-done: the child may still
-                    // produce output after its input ends.
-                    Ok(Some(0)) => break,
-                    Ok(Some(count)) => {
-                        if child_stdin.write_all(&buffer[..count]).is_err() {
-                            break;
-                        }
-                        if child_stdin.flush().is_err() {
-                            break;
-                        }
-                    }
-                }
-            }
-            Ok(())
+            pump_pipe_to_sink(
+                reader_in,
+                backend_in,
+                InputSink::Owned(child_stdin),
+                cancel,
+                peer_done_in,
+                "SSH run",
+            )
         }));
-        let mut worker_out =
+        let worker_out =
             Some(scope.spawn(|| pump_fd_to_pipe(&mut child_stdout, &out_writer, "stdout")));
-        let mut worker_err =
+        let worker_err =
             Some(scope.spawn(|| pump_fd_to_pipe(&mut child_stderr, &err_writer, "stderr")));
-        loop {
-            // Child exit first, ahead of worker reaping below: the
-            // reporter (the SSH wire exit-status) must queue before the
-            // EOF closes trigger the pump EOF, or a fast child wins the
-            // race against it. Never poll past the first observed exit:
-            // the wait handle is spent after reaping.
-            if exit_code.is_none() {
-                match handle.try_wait() {
-                    Ok(Some(status)) => {
-                        peer_done.store(true, Ordering::SeqCst);
-                        match status.code() {
-                            Some(code) if code >= 0 => {
-                                exit_code = Some(i64::from(code));
-                                if let Some(report) = on_exit {
-                                    report(code as u32);
-                                }
-                            }
-                            // Signaled: no meaningful code to report.
-                            _ => exit_code = Some(-1),
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(_) => {
-                        peer_done.store(true, Ordering::SeqCst);
-                        exit_code = Some(-1);
-                    }
-                }
-            }
-            reap(&mut worker_in, &mut failed);
-            let out_was_live = worker_out.is_some();
-            reap(&mut worker_out, &mut failed);
-            let err_was_live = worker_err.is_some();
-            reap(&mut worker_err, &mut failed);
-            // Deferred closes: each DSL pipe closes only after the exit
-            // is observed, so the report above always precedes them.
-            if out_was_live && worker_out.is_none() && !out_closed && exit_code.is_some() {
-                out_closed = true;
-                let _ = cx.close_pipe(out_pipe);
-            }
-            if err_was_live && worker_err.is_none() && !err_closed && exit_code.is_some() {
-                err_closed = true;
-                let _ = cx.close_pipe(err_pipe);
-            }
-            if cx.is_cancelled() {
-                cancel.store(true, Ordering::SeqCst);
-                let _ = handle.kill();
-            }
-            if worker_in.is_none() && worker_out.is_none() && worker_err.is_none() {
-                break;
-            }
-            std::thread::sleep(TICK);
-        }
-    });
-    if let Some(err) = failed {
-        return Err(err);
-    }
+        let mut outputs = [
+            (
+                worker_out,
+                DeferredClose {
+                    pipe: out_pipe,
+                    closed: false,
+                },
+            ),
+            (
+                worker_err,
+                DeferredClose {
+                    pipe: err_pipe,
+                    closed: false,
+                },
+            ),
+        ];
+        supervise_child_pump(cx, cancel, &mut run_child, &mut worker_in, &mut outputs)
+    })?;
     match exit_code {
         Some(code) => Ok(code),
-        None => {
-            // Workers drained without an observed exit: reap the
-            // authoritative status blocking.
-            match handle.wait() {
-                Ok(status) => match status.code() {
-                    Some(code) if code >= 0 => {
-                        if let Some(report) = on_exit {
-                            report(code as u32);
-                        }
-                        Ok(i64::from(code))
-                    }
-                    _ => Ok(-1),
-                },
-                Err(err) => bail!("SSH run reaped with error: {err}"),
-            }
-        }
+        None => run_child.wait_code(),
     }
 }

@@ -12,7 +12,9 @@
 //! on the calling supervisor thread. Workers receive only owned,
 //! thread-safe handles.
 
+use std::io::Write;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -141,8 +143,9 @@ fn pump_in(
     Ok(())
 }
 
-/// Reap one finished worker, recording the first error.
-fn reap(
+/// Reap one finished worker, recording the first error. Shared by the
+/// wire pumps above and the child pumps below: never block-join live.
+pub(crate) fn reap(
     slot: &mut Option<std::thread::ScopedJoinHandle<'_, Result<()>>>,
     failed: &mut Option<anyhow::Error>,
 ) {
@@ -290,4 +293,145 @@ pub fn pump_pipe_to_pipe<P: ProcessManager>(
     }
     let _ = cx.close_pipe(to_pipe);
     Ok(total)
+}
+
+// Shared child-pump core for the `SSH_PTY_RUN` and `SSH_RUN` backends.
+// A terminal child and a piped child differ only in spawn, teardown
+// extras, and input-sink ownership; exit-first reporting, deferred
+// closes, and cancel-kill must never diverge between them, so they
+// share this supervisor. The wire pumps above stay separate: channel
+// half-close has no child to reap.
+
+/// One supervised worker slot on a scoped thread.
+pub(crate) type WorkerSlot<'s> = Option<std::thread::ScopedJoinHandle<'s, Result<()>>>;
+
+/// Backend half of the shared core: spawn-specific pieces the core
+/// cannot know. Poll observes once and reports inside, so the wire
+/// status always precedes the EOF closes the core applies after.
+pub(crate) trait ChildCtl {
+    /// Poll child exit once. On first observation queue the wire status
+    /// and record the code. Returns the code once observed (a signaled
+    /// death still counts: clients observe a codeless close).
+    fn poll_exit(&mut self) -> Option<i64>;
+    /// Kill on cancellation.
+    fn kill(&mut self);
+    /// Blocking reap fallback when workers drained unseen.
+    fn wait_code(&mut self) -> Result<i64>;
+    /// Per-tick backend duties (live resize, drain teardown).
+    fn on_tick(&mut self, tick: TickInfo);
+}
+
+/// Liveness snapshot for [`ChildCtl::on_tick`].
+pub(crate) struct TickInfo {
+    /// Whether any output worker is still alive this round.
+    pub out_alive: bool,
+}
+
+/// One DSL pipe closed after its worker drains, gated on an observed
+/// exit so the wire status always precedes the EOF.
+pub(crate) struct DeferredClose<'a> {
+    pub pipe: &'a Value,
+    pub closed: bool,
+}
+
+/// Input sink ownership: a terminal master writer is shared with the
+/// output worker (setup answers flow through it) and outlives the
+/// input worker; a piped child stdin is owned by the input worker, so
+/// thread end drops it and the child observes EOF.
+pub(crate) enum InputSink {
+    Owned(Box<dyn Write + Send>),
+    Shared(Arc<Mutex<Box<dyn Write + Send>>>),
+}
+
+/// Pump DSL-pipe bytes into a child stdin sink until pipe EOF,
+/// cancellation, or `peer_done` (child gone: bytes would have nowhere
+/// to go).
+pub(crate) fn pump_pipe_to_sink(
+    reader: &SharedInput,
+    backend: Option<&Arc<PipeInner>>,
+    mut sink: InputSink,
+    cancel: &AtomicBool,
+    peer_done: &AtomicBool,
+    func: &str,
+) -> Result<()> {
+    let mut buffer = [0u8; CHUNK];
+    loop {
+        if cancel.load(Ordering::SeqCst) || peer_done.load(Ordering::SeqCst) {
+            break;
+        }
+        match read_pipe(reader, backend, &mut buffer) {
+            Err(err) => bail!("{func} input pipe read failed: {err}"),
+            Ok(None) => continue,
+            Ok(Some(0)) => break,
+            Ok(Some(count)) => match &mut sink {
+                InputSink::Owned(handle) => {
+                    if handle.write_all(&buffer[..count]).is_err() {
+                        break;
+                    }
+                    if handle.flush().is_err() {
+                        break;
+                    }
+                }
+                InputSink::Shared(shared) => {
+                    let mut guard = shared
+                        .lock()
+                        .map_err(|_| anyhow::anyhow!("{func} sink lock poisoned"))?;
+                    if guard.write_all(&buffer[..count]).is_err() {
+                        break;
+                    }
+                    if guard.flush().is_err() {
+                        break;
+                    }
+                }
+            },
+        }
+    }
+    Ok(())
+}
+
+/// Supervise spawned workers around one child: exit-first reporting,
+/// deferred pipe closes, cancel-kill. Returns the observed exit code,
+/// if any; the caller runs the blocking [`ChildCtl::wait_code`]
+/// fallback when workers drained unseen.
+pub(crate) fn supervise_child_pump<'s, 'v, P: ProcessManager>(
+    cx: &StepCtx<P>,
+    cancel: &AtomicBool,
+    child: &mut dyn ChildCtl,
+    input: &mut WorkerSlot<'s>,
+    outputs: &mut [(WorkerSlot<'s>, DeferredClose<'v>)],
+) -> Result<Option<i64>> {
+    let mut failed: Option<anyhow::Error> = None;
+    let mut exit_code: Option<i64> = None;
+    loop {
+        // Child exit first, ahead of reaping: the reporter (the SSH
+        // wire exit-status) must queue before the EOF closes trigger
+        // the pump EOF, or a fast child wins the race against it.
+        if exit_code.is_none() {
+            exit_code = child.poll_exit();
+        }
+        reap(input, &mut failed);
+        let mut out_alive = false;
+        for (worker, close) in outputs.iter_mut() {
+            let was_live = worker.is_some();
+            reap(worker, &mut failed);
+            out_alive = out_alive || was_live;
+            if was_live && worker.is_none() && !close.closed && exit_code.is_some() {
+                close.closed = true;
+                let _ = cx.close_pipe(close.pipe);
+            }
+        }
+        if cx.is_cancelled() {
+            cancel.store(true, Ordering::SeqCst);
+            child.kill();
+        }
+        child.on_tick(TickInfo { out_alive });
+        if input.is_none() && outputs.iter().all(|(worker, _)| worker.is_none()) {
+            break;
+        }
+        std::thread::sleep(TICK);
+    }
+    if let Some(err) = failed {
+        return Err(err);
+    }
+    Ok(exit_code)
 }

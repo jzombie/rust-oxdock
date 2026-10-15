@@ -1638,7 +1638,7 @@ fn unknown_option_names_all_valid_keys() {
     .expect_err("unknown option must fail");
     assert!(
         err.to_string()
-            .contains("(expected: username, password, key_path)"),
+            .contains("(expected: username, password, key_path, idle_timeout)"),
         "{err:#}"
     );
 }
@@ -3101,6 +3101,48 @@ fn run_exec_splits_stderr() {
         .join()
         .expect("script thread joins")
         .expect("run session completes");
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "needs loopback TCP plus threads plus a Tokio runtime")]
+fn serve_accepts_idle_timeout_option() {
+    // Plumbing, not timing: waiting out a real timeout would stall the
+    // suite. The option must parse, reach the server, and leave a
+    // working session behind; garbage must bail naming the option.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-idle-opt");
+    let script = indoc! {r#"
+        IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-idle-opt", {username: "u", password: "p", idle_timeout: "5s"})
+        WRITE addr.txt "{{ $m.addr }}"
+        SLEEP 5s
+        SSH_CLOSE($m.server)
+    "#};
+    let probe = root.clone();
+    let thread_root = root.clone();
+    let handle = std::thread::spawn(move || run_script_with(registry, &thread_root, script));
+    let addr = read_addr(&probe);
+    let addr: SocketAddr = addr.parse().expect("addr parses");
+    let client = TestClient::connect(addr, "u", "p").expect("client connects");
+    client.close();
+    handle
+        .join()
+        .expect("script thread joins")
+        .expect("serve with idle_timeout runs");
+
+    let registry = mapped_registry("test-ssh-idle-bad");
+    let script = indoc! {r#"
+        IMPORT [STD, SSH]
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-idle-bad", {username: "u", password: "p", idle_timeout: "soon"})
+        SSH_CLOSE($m.server)
+    "#};
+    let err = run_script_with(registry, &root, script).expect_err("bad duration must fail");
+    assert!(
+        err.to_string().contains("idle_timeout"),
+        "failure names the option: {err:#}"
+    );
 }
 
 #[test]

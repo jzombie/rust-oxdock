@@ -18,8 +18,11 @@ use crate::auth::ServerFactory;
 use crate::state::{CHANNEL_CAPACITY, DownMsg, SessionQueue, ShutdownSignal, UpMsg};
 use russh::server::Server as _;
 
-/// Inactivity timeout for idle SSH sessions.
-const INACTIVITY_TIMEOUT: Duration = Duration::from_secs(300);
+/// Default idle kill for quiet SSH legs: connections with no traffic
+/// this long are reaped, so vanished clients cannot leak tasks, ports,
+/// and permits forever. `SSH_SERVE` accepts an `idle_timeout` override
+/// per server (zero disables); this default covers `SSH_CONNECT` legs.
+pub const DEFAULT_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Drive one `SSH_SERVE` listener until shutdown. Owns the current-thread
 /// runtime; returns when the listener closes (shutdown or fatal accept
@@ -32,6 +35,7 @@ pub fn serve(
     password: String,
     queue: Arc<SessionQueue>,
     shutdown_rx: std::sync::mpsc::Receiver<ShutdownSignal>,
+    inactivity_timeout: Option<Duration>,
 ) {
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -41,10 +45,18 @@ pub fn serve(
         Err(_) => return,
     };
     runtime.block_on(async move {
-        serve_async(listener, key, user, password, queue, shutdown_rx)
-            .await
-            .map(|_| ())
-            .unwrap_or(());
+        serve_async(
+            listener,
+            key,
+            user,
+            password,
+            queue,
+            shutdown_rx,
+            inactivity_timeout,
+        )
+        .await
+        .map(|_| ())
+        .unwrap_or(());
     });
 }
 
@@ -55,9 +67,10 @@ async fn serve_async(
     password: String,
     queue: Arc<SessionQueue>,
     shutdown_rx: std::sync::mpsc::Receiver<ShutdownSignal>,
+    inactivity_timeout: Option<Duration>,
 ) -> Result<()> {
     let config = Arc::new(russh::server::Config {
-        inactivity_timeout: Some(INACTIVITY_TIMEOUT),
+        inactivity_timeout,
         // Rejection padding stays (user-enumeration resistance), but
         // sized for an ephemeral proxy: every login waits this out
         // (the client's opening `none` probe included), so a full
@@ -143,7 +156,7 @@ pub async fn connect_session(
     password: &str,
 ) -> Result<OutboundSession> {
     let config = Arc::new(russh::client::Config {
-        inactivity_timeout: Some(INACTIVITY_TIMEOUT),
+        inactivity_timeout: Some(DEFAULT_INACTIVITY_TIMEOUT),
         ..Default::default()
     });
     let mut session = russh::client::connect(config, *target, AcceptAnyHostKey)
@@ -223,4 +236,17 @@ pub async fn connect_session(
         wire_done,
         handle: session,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_inactivity_timeout_is_five_minutes() {
+        // The idle kill default is a policy choice, not an accident:
+        // pin it so a quiet edit cannot reintroduce the beat every
+        // login used to wait out.
+        assert_eq!(DEFAULT_INACTIVITY_TIMEOUT, Duration::from_secs(300));
+    }
 }

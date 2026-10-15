@@ -495,19 +495,22 @@ Spin up an SSH server on a runner-mapped service. Unmapped and
 memory services bail: SSH needs a TCP socket.
 `options` takes required `username`/`password` STRINGs plus the
 optional `key_path` STRING (workspace-relative Ed25519 file,
-load-or-create; blank keeps the ephemeral key).
+load-or-create; blank keeps the ephemeral key) and the optional
+`idle_timeout` DURATION (quiet-connection kill, default 5m; zero
+disables it for persistent sessions).
 
-**Signature:** `SSH_SERVE($bind: STRING, $options: MAP<username: STRING, password: STRING, key_path?: STRING>) -> MAP<server: SSH_SERVER, addr: STRING, username: STRING, password: STRING, virtual: STRING>`
+**Signature:** `SSH_SERVE($bind: STRING, $options: MAP<username: STRING, password: STRING, key_path?: STRING, idle_timeout?: DURATION|STRING>) -> MAP<server: SSH_SERVER, addr: STRING, username: STRING, password: STRING, virtual: STRING>`
 
 **Contexts:** [`AST`](#context-ast) only
 
 **Parameters:**
 
 - `$bind` (`STRING`): Service name to serve; the runner maps it with -p/--listen.
-- `$options` (`MAP<username: STRING, password: STRING, key_path?: STRING>`): Server credentials and host key.
+- `$options` (`MAP<username: STRING, password: STRING, key_path?: STRING, idle_timeout?: DURATION|STRING>`): Server credentials and host key.
   - `username` (`STRING`, required)
   - `password` (`STRING`, required)
   - `key_path` (`STRING`, optional)
+  - `idle_timeout` (`DURATION|STRING`, optional)
 
 **Returns:** `MAP<server: SSH_SERVER, addr: STRING, username: STRING, password: STRING, virtual: STRING>`
 

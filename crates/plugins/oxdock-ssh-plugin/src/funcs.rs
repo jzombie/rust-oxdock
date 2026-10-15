@@ -141,7 +141,9 @@ fn ssh_dequeue<P: ProcessManager>(
 /// memory services bail: SSH needs a TCP socket.
 /// `options` takes required `username`/`password` STRINGs plus the
 /// optional `key_path` STRING (workspace-relative Ed25519 file,
-/// load-or-create; blank keeps the ephemeral key).
+/// load-or-create; blank keeps the ephemeral key) and the optional
+/// `idle_timeout` DURATION (quiet-connection kill, default 5m; zero
+/// disables it for persistent sessions).
 #[oxdock_func(returns = TypeTag::Record(serve_result_fields()), summary = "Serve SSH on a virtual service endpoint.")]
 #[example(
     name = "serve and close",
@@ -157,7 +159,12 @@ fn ssh_serve<P: ProcessManager>(
     /// Service name to serve; the runner maps it with -p/--listen.
     bind: String,
     /// Server credentials and host key.
-    #[options("username: STRING", "password: STRING", "key_path?: STRING")]
+    #[options(
+        "username: STRING",
+        "password: STRING",
+        "key_path?: STRING",
+        "idle_timeout?: DURATION|STRING"
+    )]
     options: BTreeMap<String, Value>,
 ) -> Result<Value> {
     let map = &options;
@@ -191,6 +198,25 @@ fn ssh_serve<P: ProcessManager>(
             }
         }
         None => None,
+    };
+    // Idle kill override: absent keeps the default, zero disables the
+    // timeout entirely (persistent sessions must opt out explicitly).
+    let idle_timeout = match map.get("idle_timeout") {
+        Some(value) => {
+            // `check_options` verified `DURATION|STRING`; narrow directly.
+            let timeout = if let Some(duration) = value.as_duration() {
+                duration
+            } else {
+                let text = value
+                    .as_str()
+                    .expect("check_options verified DURATION|STRING");
+                oxdock_parser::command::parse_duration(text).with_context(|| {
+                    format!("SSH_SERVE option 'idle_timeout' must be a duration, got {text:?}")
+                })?
+            };
+            (!timeout.is_zero()).then_some(timeout)
+        }
+        None => Some(crate::runtime::DEFAULT_INACTIVITY_TIMEOUT),
     };
     let registry = cx
         .module_state::<EndpointRegistry>("SSH")
@@ -231,6 +257,7 @@ fn ssh_serve<P: ProcessManager>(
                         thread_pass,
                         thread_queue,
                         shutdown_rx,
+                        idle_timeout,
                     )
                 })
                 .context("SSH_SERVE cannot spawn the server thread")?;
