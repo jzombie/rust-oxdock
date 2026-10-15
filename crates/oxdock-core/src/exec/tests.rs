@@ -5416,6 +5416,28 @@ fn isolated_allowlist_reads_outer_scope() {
 }
 
 #[test]
+fn isolated_allowlist_prefers_outer_override_over_seed() {
+    // The discriminator for snapshot-copy vs host-re-mirroring: the
+    // parent overrides a seeded name, and the block allowlist must
+    // copy the enclosing override, not reseed the host value.
+    let (_temp, mock) = run_isolated_case(indoc! {r#"
+        ENV PATH=/custom/bin
+        ISOLATED {
+            INHERIT_ENV [PATH]
+            RUN "echo hi"
+        }
+    "#});
+    let runs = mock.recorded_runs();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(
+        runs[0].envs.get("PATH").map(String::as_str),
+        Some("/custom/bin"),
+        "allowlist must copy the enclosing override, not the host seed: {:?}",
+        runs[0].envs
+    );
+}
+
+#[test]
 fn isolated_absent_names_stay_absent() {
     // Listing a name the outer scope lacks is not an error: the block
     // simply runs without it, matching top-level INHERIT_ENV.
