@@ -351,7 +351,17 @@ fn windows_extra_seed_table() -> Vec<SeedRow> {
             doc: "host value, else session `<scratch>/tmp` (native profile anchor)",
         },
         SeedRow {
-            name: windows::USERNAME,
+            name: windows::USERPROFILE,
+            value: SeedValue::HostOnly,
+            doc: "host value; omitted when unset",
+        },
+        SeedRow {
+            name: windows::LOCALAPPDATA,
+            value: SeedValue::HostOnly,
+            doc: "host value; omitted when unset",
+        },
+        SeedRow {
+            name: windows::APPDATA,
             value: SeedValue::HostOnly,
             doc: "host value; omitted when unset",
         },
@@ -533,6 +543,13 @@ fn transport_seed(host: &dyn Fn(&str) -> Option<String>) -> HashMap<String, Stri
             // host home when set, else the profile just bridged.
             if !has_var(&seed, unix::HOME) {
                 seed.insert(unix::HOME.to_string(), host(unix::HOME).unwrap_or(home));
+            }
+        }
+        // Profile data roots travel with the user, like the profile
+        // itself: installers and tools read them unconditionally.
+        for name in [windows::LOCALAPPDATA, windows::APPDATA] {
+            if let Some(value) = host(name) {
+                seed.insert(name.to_string(), value);
             }
         }
     } else {

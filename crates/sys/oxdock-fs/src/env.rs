@@ -146,6 +146,10 @@ pub mod os {
             WINDIR = "windir",
             /// User profile directory.
             USERPROFILE = "USERPROFILE",
+            /// Local app-data directory (per-machine profile data).
+            LOCALAPPDATA = "LOCALAPPDATA",
+            /// Roaming app-data directory.
+            APPDATA = "APPDATA",
             /// Executable-extension list.
             PATHEXT = "PATHEXT",
             /// Temporary directory (primary).
