@@ -2718,7 +2718,10 @@ fn is_exec_finds_host_tools_and_direct_files() {
 #[cfg(windows)]
 fn parse_pathext_shapes_and_defaults() {
     use super::args::parse_pathext;
-    assert_eq!(parse_pathext(None), vec![".COM", ".EXE", ".BAT", ".CMD"]);
+    assert!(
+        parse_pathext(None).is_empty(),
+        "unset PATHEXT probes nothing"
+    );
     assert!(parse_pathext(Some("")).is_empty());
     assert_eq!(parse_pathext(Some("exe;bat")), vec![".exe", ".bat"]);
     assert_eq!(
@@ -5690,19 +5693,13 @@ fn seeded_host_path_runs_shell_without_prelude() {
     miri,
     ignore = "spawns real OS processes, which die under Miri isolation"
 )]
-fn seeded_path_baseline_visible_to_expansion() {
+fn seeded_path_visible_to_expansion() {
     // No INHERIT_ENV at all: the mirrored host PATH is visible to
-    // expansion, with the platform baseline only as fallback.
+    // expansion when the host defines it, empty otherwise.
     let temp = run_seeded_case(indoc! {r#"
         WRITE path.txt "{{ env:PATH }}"
     "#});
-    #[allow(clippy::disallowed_macros)]
-    let fallback = if cfg!(windows) {
-        oxdock_fs::env::os::windows::DEFAULT_PATH
-    } else {
-        oxdock_fs::env::os::unix::DEFAULT_PATH
-    };
-    let expected = std::env::var(oxdock_fs::env::os::PATH).unwrap_or_else(|_| fallback.to_string());
+    let expected = std::env::var(oxdock_fs::env::os::PATH).unwrap_or_default();
     assert_eq!(read_case_file(&temp, "path.txt"), expected);
 }
 
@@ -5724,24 +5721,14 @@ fn seeded_explicit_path_wins_over_seed() {
     miri,
     ignore = "spawns real OS processes, which die under Miri isolation"
 )]
-fn seeded_tmpdir_bound_to_scratch_not_host() {
-    // TMPDIR mirrors the host when set; only an unset host TMPDIR
-    // binds the session scratch. The name rides the Windows seed too,
-    // for cross-compiled tools.
+fn seeded_tmpdir_mirrors_or_absent() {
+    // TMPDIR mirrors the host when set, absents when not. Unix-family:
+    // Windows scripts needing it route `INHERIT_ENV`.
     let temp = run_seeded_case(indoc! {r#"
         WRITE tmpdir.txt "{{ env:TMPDIR }}"
     "#});
-    let bound = read_case_file(&temp, "tmpdir.txt");
-    match std::env::var(oxdock_fs::env::os::unix::TMPDIR).ok() {
-        Some(host) => assert_eq!(bound, host, "TMPDIR must mirror the host, got {bound:?}"),
-        None => {
-            let shaped = bound.replace('\\', "/");
-            assert!(
-                shaped.ends_with("/tmp") && shaped.contains("oxdock-"),
-                "TMPDIR must bind the session scratch tmp dir when the host lacks it, got {bound:?}"
-            );
-        }
-    }
+    let expected = std::env::var(oxdock_fs::env::os::unix::TMPDIR).unwrap_or_default();
+    assert_eq!(read_case_file(&temp, "tmpdir.txt"), expected);
 }
 
 #[test]
@@ -5749,11 +5736,12 @@ fn seeded_tmpdir_bound_to_scratch_not_host() {
     miri,
     ignore = "spawns real OS processes, which die under Miri isolation"
 )]
-fn seeded_term_defaults_without_prelude() {
+fn seeded_term_mirrors_or_absent() {
     let temp = run_seeded_case(indoc! {r#"
         WRITE term.txt "{{ env:TERM }}"
     "#});
-    assert!(!read_case_file(&temp, "term.txt").is_empty());
+    let expected = std::env::var(oxdock_fs::env::os::unix::TERM).unwrap_or_default();
+    assert_eq!(read_case_file(&temp, "term.txt"), expected);
 }
 
 #[test]
@@ -5765,9 +5753,7 @@ fn isolated_reseeds_factory_defaults() {
     // The discriminating parity proof: top level and block see the
     // identical seed, and outer customs stay out of the block. The
     // script spawns nothing (WRITE/ENV only), so the proof runs on
-    // every platform; the PATH expectation mirrors the host with the
-    // platform baseline as fallback (`TMPDIR` rides the Windows seed
-    // too, for cross-compiled tools).
+    // every platform; the PATH expectation mirrors the host or absents.
     let temp = run_seeded_case(indoc! {r#"
         ENV OUTER_CUSTOM=outer-val
         WRITE top-path.txt "{{ env:PATH }}"
@@ -5778,14 +5764,7 @@ fn isolated_reseeds_factory_defaults() {
             WRITE inner-custom.txt "{{ env:OUTER_CUSTOM }}"
         }
     "#});
-    #[allow(clippy::disallowed_macros)]
-    let fallback_path = if cfg!(windows) {
-        oxdock_fs::env::os::windows::DEFAULT_PATH
-    } else {
-        oxdock_fs::env::os::unix::DEFAULT_PATH
-    };
-    let expected_path =
-        std::env::var(oxdock_fs::env::os::PATH).unwrap_or_else(|_| fallback_path.to_string());
+    let expected_path = std::env::var(oxdock_fs::env::os::PATH).unwrap_or_default();
     assert_eq!(read_case_file(&temp, "top-path.txt"), expected_path);
     assert_eq!(
         read_case_file(&temp, "inner-path.txt"),
@@ -5830,31 +5809,10 @@ fn seeded_no_prelude_child_env_holds_boundary() {
             got.insert(k.to_string(), v.to_string());
         }
     }
-    // Essentials mirror the test process env (the seed reads the same
-    // host); scratch shape applies only when the host lacks the name.
+    // Mirror or absent: the child carries the host value when the
+    // host defines the name, and nothing otherwise. Never invented.
     // Read-only: parallel tests cannot skew these.
-    fn assert_mirrored(got: &HashMap<String, String>, name: &str) {
-        match std::env::var(name).ok() {
-            Some(host) => assert_eq!(
-                got.get(name).map(String::as_str),
-                Some(host.as_str()),
-                "{name} must mirror the host: {got:?}"
-            ),
-            None => {
-                let value = got
-                    .get(name)
-                    .cloned()
-                    .unwrap_or_default()
-                    .replace('\\', "/");
-                assert!(
-                    value.ends_with("/tmp") && value.contains("oxdock-"),
-                    "{name} must bind the session scratch when the host lacks it, got {value:?}"
-                );
-            }
-        }
-    }
-    // Identity mirrors the host or stays absent: never invented.
-    fn assert_identity(got: &HashMap<String, String>, name: &str) {
+    fn assert_seeded(got: &HashMap<String, String>, name: &str) {
         match std::env::var(name).ok() {
             Some(host) => assert_eq!(
                 got.get(name).map(String::as_str),
@@ -5867,69 +5825,15 @@ fn seeded_no_prelude_child_env_holds_boundary() {
             ),
         }
     }
-    // Seed-derived assertions: every seeded row behaves per its kind
-    // (mirror, fallback const, scratch shape, or absence). Special
-    // shapes assert below: `HOME`'s profile bridge, `TARGET_DIR`'s
-    // target leaf, `WINDIR`'s alias. Adding an ordinary seed row needs
-    // no edit here.
+    // Seed-derived assertions: every declared row mirrors the host or
+    // stays absent. Only the engine-owned target dir binds scratch
+    // (proven below). Adding a seed row needs no edit here.
     for entry in oxdock_process::env_policy::current_platform_seed() {
         let name = entry.name;
-        if name == oxdock_fs::env::os::unix::HOME
-            || name == oxdock_fs::env::cargo::TARGET_DIR
-            || name == oxdock_fs::env::os::windows::WINDIR
-        {
+        if name == oxdock_fs::env::cargo::TARGET_DIR {
             continue;
         }
-        if entry.omits_when_unset {
-            assert_identity(&got, name);
-        } else if let Some(fallback) = entry.fallback {
-            assert_eq!(
-                got.get(name).map(String::as_str),
-                std::env::var(name).ok().as_deref().or(Some(fallback)),
-                "{name} must mirror the host or its fallback: {got:?}"
-            );
-        } else {
-            assert_mirrored(&got, name);
-        }
-    }
-    // Alias rows mirror their target: both present and equal, or both
-    // absent (unix never seeds either).
-    assert_eq!(
-        got.get(oxdock_fs::env::os::windows::WINDIR)
-            .map(String::as_str),
-        got.get(oxdock_fs::env::os::windows::SYSTEM_ROOT)
-            .map(String::as_str),
-        "WINDIR must equal SystemRoot: {got:?}"
-    );
-    #[allow(clippy::disallowed_macros)]
-    if cfg!(windows) {
-        use oxdock_fs::env::os::windows;
-        // `HOME` bridges the host profile when the host sets no `HOME`
-        // (ported POSIX tools read it first).
-        match std::env::var(oxdock_fs::env::os::unix::HOME)
-            .ok()
-            .or_else(|| std::env::var(windows::USERPROFILE).ok())
-        {
-            Some(home) => assert_eq!(
-                got.get("HOME").map(String::as_str),
-                Some(home.as_str()),
-                "child HOME must mirror the host: {got:?}"
-            ),
-            None => {
-                let home = got
-                    .get("HOME")
-                    .cloned()
-                    .unwrap_or_default()
-                    .replace('\\', "/");
-                assert!(
-                    home.ends_with("/tmp") && home.contains("oxdock-"),
-                    "child HOME must bind the session scratch when the host lacks it, got {home:?}"
-                );
-            }
-        }
-    } else {
-        // Unix `HOME` has no bridge: host value or scratch shape.
-        assert_mirrored(&got, oxdock_fs::env::os::unix::HOME);
+        assert_seeded(&got, name);
     }
     // No ambient secrets anywhere, on any platform.
     assert!(
@@ -5952,4 +5856,29 @@ fn seeded_no_prelude_child_env_holds_boundary() {
         target.ends_with("/target") && target.contains("oxdock-"),
         "CARGO_TARGET_DIR must bind the scratch target dir: {got:?}"
     );
+}
+
+#[test]
+fn inherit_env_description_names_no_seed_rows() {
+    // The INHERIT_ENV description must point at the contract, never
+    // enumerate seeded names: any backticked baseline name here fails,
+    // forcing authors back to the pointer. Pure metadata, no spawns.
+    let description = crate::all_metadata()
+        .into_iter()
+        .find(|meta| meta.name == "INHERIT_ENV")
+        .expect("INHERIT_ENV registered")
+        .description;
+    // Normalized: source line-breaks must never break the pointer check.
+    let flat = description.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        flat.contains("Environment Variable Contracts"),
+        "INHERIT_ENV description must point at the contract"
+    );
+    for entry in oxdock_process::env_policy::describe_baseline_defaults() {
+        assert!(
+            !description.contains(&format!("`{}`", entry.name)),
+            "INHERIT_ENV description enumerates seeded name `{}`; point at the contract instead",
+            entry.name
+        );
+    }
 }

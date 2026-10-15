@@ -1359,9 +1359,8 @@ mod tests {
         let mid = read_env("mid.txt");
         let deep = read_env("deep.txt");
 
-        // Expected names per depth, derived from the seed table (not
-        // hardcoded): PATH, CARGO_TARGET_DIR, loader anchors, temp
-        // bindings, and identity rows. `OUTER` rides top and mid after
+        // Expected names per depth, derived from the seed declaration
+        // (not hardcoded). `OUTER` rides top and mid after
         // the allowlist re-adds it; deep narrows it out. The seed rides
         // every spawn (top, mid after reseed, deep after reseed). The
         // shell itself adds a few names (`PWD` everywhere, plus `SHLVL`
@@ -1376,15 +1375,13 @@ mod tests {
         } else {
             &["PWD", "SHLVL", "_"]
         };
-        // Seed-derived key set: omitting rows count only when the
-        // host defines them. Every other row always seeds (fallbacks
-        // and aliases resolve unconditionally). The child reads the
-        // same process env, so host presence is the exact oracle.
-        // Adding a seed row needs no edit here.
+        // Seed-derived key set: mirror rows count only when the host
+        // defines them; the engine-owned row always seeds. The child
+        // reads the same process env, so host presence is the exact
+        // oracle. Adding a seed row needs no edit here.
         let mut seed_names: Vec<&str> = Vec::new();
         for entry in oxdock_process::env_policy::current_platform_seed() {
-            let present = !entry.omits_when_unset || std::env::var(entry.name).is_ok();
-            if present {
+            if entry.name == oxdock_env::cargo::TARGET_DIR || std::env::var(entry.name).is_ok() {
                 seed_names.push(entry.name);
             }
         }

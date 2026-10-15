@@ -1061,14 +1061,12 @@ declare_commands! {
             appear so platform-specific names ride explicit guards
             (`[family:windows] INHERIT_ENV [USERPROFILE]`); each guarded
             line runs only when its guard passes. Sandbox defaults need
-            no declaration: the session seeds loader bindings
-            (`SystemRoot` on Windows), terminal and extension defaults
-            (`TERM`, `PATHEXT`), the host `PATH`, and the user's profile
-            locations (`HOME`, `USERPROFILE`, `LOCALAPPDATA`, `APPDATA`).
-            Scratch temp (`TMPDIR`/`TEMP`/`TMP`) binds the session, and
-            `HOME` falls back to it only when the host sets no home.
-            Secrets and tool config stay opt-in here: tokens, `CARGO_HOME`,
-            and anything else arrive only through this directive.
+            no declaration: loader bindings, terminal defaults, the host
+            lookup path, and the user's profile locations seed
+            automatically. See Environment Variable Contracts for the
+            exact list, which grows with the engine. Secrets and tool
+            config stay opt-in here: a token or a `CARGO_HOME` override
+            arrives only through this directive.
         "#},
         args: &[ ArgSpec { name: "keys", arg_type: ArgType::Rest(&ArgType::String), description: "Host variables to inherit", io: IoDirection::Read, index: 0, required: false, fallback_stream: None } ],
         flags: &[],

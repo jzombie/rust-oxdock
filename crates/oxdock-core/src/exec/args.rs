@@ -585,14 +585,13 @@ fn is_exec_name<P: ProcessManager>(cx: &StepCtx<'_, P>, name: &str) -> bool {
 
 /// Split a `PATHEXT` value into dotted extensions (`.EXE`, `.BAT`,
 /// ...): `;`-separated, trimmed, empties skipped, missing dots added,
-/// duplicates dropped case-insensitively. Only an unset variable falls
-/// back to the Windows default; an explicitly empty one probes nothing,
-/// matching what the shell itself resolves.
+/// duplicates dropped case-insensitively. An unset variable probes
+/// nothing: extension search needs a host-provided list, and inventing
+/// one would resolve names the script world cannot see.
 #[cfg(windows)]
 pub(crate) fn parse_pathext(raw: Option<&str>) -> Vec<String> {
-    const DEFAULT_PATHEXT: &str = ".COM;.EXE;.BAT;.CMD";
     let mut exts = Vec::new();
-    for piece in raw.unwrap_or(DEFAULT_PATHEXT).split(';') {
+    for piece in raw.unwrap_or_default().split(';') {
         let stem = piece.trim().trim_start_matches('.');
         if stem.is_empty() {
             continue;

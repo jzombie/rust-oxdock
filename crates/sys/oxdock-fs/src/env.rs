@@ -102,10 +102,8 @@ pub mod cargo {
 
 /// Names owned by the host OS, divided by family. `PATH` is shared:
 /// every platform resolves bare executable names through it. Each
-/// family module is flat: every name plus the fallback value constants
-/// the seeder reads when the host lacks a variable. Name constants
-/// route through `define_names!` (with the `ALL` inventory); fallback
-/// values are plain constants beside them.
+/// family module is flat. Name constants route through `define_names!`
+/// (with the `ALL` inventory).
 pub mod os {
     /// Executable lookup path, shared by all families.
     pub const PATH: &str = "PATH";
@@ -123,16 +121,9 @@ pub mod os {
             USER = "USER",
             /// System temp-dir override honored by fixture runners.
             TMPDIR = "TMPDIR",
-            /// Terminal identity. Host value when set, else
-            /// [`DEFAULT_TERM`]; explicit script values win.
+            /// Terminal identity.
             TERM = "TERM",
         }
-
-        /// Fallback `PATH`: core system directories, used only when
-        /// the host sets no `PATH`.
-        pub const DEFAULT_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
-        /// Fallback when the host sets no `TERM`.
-        pub const DEFAULT_TERM: &str = "dumb";
     }
 
     /// Windows-owned names.
@@ -169,14 +160,6 @@ pub mod os {
             /// Processor architecture (installer arch detection reads it).
             PROCESSOR_ARCHITECTURE = "PROCESSOR_ARCHITECTURE",
         }
-
-        /// Fallback `PATH`: core system directories, used only when
-        /// the host sets no `PATH`.
-        pub const DEFAULT_PATH: &str = r"C:\Windows\System32;C:\Windows";
-        /// Fallback when the host sets no `PATHEXT`.
-        pub const DEFAULT_PATHEXT: &str = ".COM;.EXE;.BAT;.CMD";
-        /// Fallback when the host sets no `SystemRoot`.
-        pub const DEFAULT_SYSTEM_ROOT: &str = r"C:\Windows";
     }
 }
 

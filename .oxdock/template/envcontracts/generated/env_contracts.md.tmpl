@@ -1,84 +1,75 @@
 ## Seeded environment
 
-Session start mirrors host essentials directly into the script
-environment map; hardcoded fallbacks apply only when the host
-lacks a value, and identity rows stay absent instead of invented.
-Explicit script `ENV`/`INHERIT_ENV` overwrite entries uniformly;
-`ISOLATED` resets the map to the same seed. Nothing injects at
-spawn time and nothing is immutable: every default below is
-overridable like any other variable.
+Session start copies host values for the declared names directly
+into the script environment map. A host lacking a name leaves it
+absent: nothing is synthesized, nothing is immutable. Explicit
+script `ENV`/`INHERIT_ENV` overwrite entries uniformly; `ISOLATED`
+resets the map to the same seed. A missing value surfaces at spawn
+time, with the exact `INHERIT_ENV` declaration to add.
 
 ### Host-mirrored defaults
 
-Mirrored from the host at session start and on every `ISOLATED` entry; fallbacks apply only when the host lacks a value. Explicit script values win.
+Declared names mirrored from the host at session start and on every
+`ISOLATED` entry, wherever the host defines them. Absent stays
+absent; explicit script values win.
 
-| Variable | Default source | Rule |
-| --- | --- | --- |
-| `PATH` | host value, else the platform baseline (`/usr/bin:/bin:/usr/sbin:/sbin`, `C:\Windows\System32;C:\Windows`) | seeded default: explicit script values win |
-| `TMPDIR` | host value, else session `<scratch>/tmp` | seeded default: explicit script values win |
-| `HOME` | host `HOME`, else host `USERPROFILE`, else session `<scratch>/tmp` | seeded default: explicit script values win |
-| `LOGNAME` | host value; omitted when unset | seeded default: explicit script values win |
-| `USER` | host value; omitted when unset | seeded default: explicit script values win |
-| `TERM` | host value, else `dumb` | seeded default: explicit script values win |
-| `TEMP` | host value, else session `<scratch>/tmp` | seeded default: explicit script values win |
-| `TMP` | host value, else session `<scratch>/tmp` | seeded default: explicit script values win |
-| `USERPROFILE` | host value, else session `<scratch>/tmp` (native profile anchor) | seeded default: explicit script values win |
-| `USERPROFILE` | host value; omitted when unset | seeded default: explicit script values win |
-| `LOCALAPPDATA` | host value; omitted when unset | seeded default: explicit script values win |
-| `APPDATA` | host value; omitted when unset | seeded default: explicit script values win |
-| `SystemRoot` | host value, else the `C:\Windows` fallback | seeded default: explicit script values win |
-| `windir` | same root as `SystemRoot` | seeded default: explicit script values win |
-| `PATHEXT` | host value, else `.COM;.EXE;.BAT;.CMD` | seeded default: explicit script values win |
-| `ProgramFiles` | host value; omitted when unset | seeded default: explicit script values win |
-| `ProgramFiles(x86)` | host value; omitted when unset | seeded default: explicit script values win |
-| `ProgramW6432` | host value; omitted when unset | seeded default: explicit script values win |
-| `COMSPEC` | host value; omitted when unset | seeded default: explicit script values win |
-| `SystemDrive` | host value; omitted when unset | seeded default: explicit script values win |
-| `PROCESSOR_ARCHITECTURE` | host value; omitted when unset | seeded default: explicit script values win |
-| `CARGO_TARGET_DIR` | session `<scratch>/target`, owned by cargo alone | seeded default: explicit script values win |
+| Variable | Platforms |
+| --- | --- |
+| `PATH` | unix, windows |
+| `HOME` | unix |
+| `TMPDIR` | unix |
+| `TERM` | unix |
+| `LOGNAME` | unix |
+| `USER` | unix |
+| `TEMP` | windows |
+| `TMP` | windows |
+| `USERPROFILE` | windows |
+| `LOCALAPPDATA` | windows |
+| `APPDATA` | windows |
+| `SystemRoot` | windows |
+| `windir` | windows |
+| `PATHEXT` | windows |
+| `ProgramFiles` | windows |
+| `ProgramFiles(x86)` | windows |
+| `ProgramW6432` | windows |
+| `COMSPEC` | windows |
+| `SystemDrive` | windows |
+| `PROCESSOR_ARCHITECTURE` | windows |
+| `CARGO_TARGET_DIR` | unix, windows |
 
 ### Explicit routing
 
-Essential variables (`PATH`, `HOME`/`USERPROFILE`, temp bindings,
-loader anchors) mirror the host by default, with hardcoded
-fallbacks only when the host lacks them. Everything else enters
-scripts only when listed in `INHERIT_ENV` (inside `ISOLATED`, only
-when listed in the block allowlist, which copies from the enclosing
-scope). Absent stays absent.
+The defaults in the table above mirror the host. Everything else
+enters scripts only when listed in `INHERIT_ENV` (inside `ISOLATED`,
+only when listed in the block allowlist, which copies from the
+enclosing scope). Absent stays absent.
 
 ### Host reads
 
-Variables the engine process itself touches (not seeds into scripts).
+Variables the engine process itself touches.
 
-| Variable | Read by | Purpose |
-| --- | --- | --- |
-| `SHELL` | oxdock_process::shell::shell_program | interactive shell resolution (`oxdock --shell`); batch steps pin `sh` |
-| `COMSPEC` | oxdock_process::shell::shell_program | interactive shell resolution on Windows; batch steps pin `cmd` |
-| `PATH` | seed_defaults | mirrored default; platform baseline when the host sets nothing |
-| `HOME` | seed_defaults | mirrored default; session scratch when the host sets nothing |
-| `USERPROFILE` | seed_defaults | mirrored default; session scratch when the host sets nothing |
-| `TERM` | seed_defaults | seeded default; synthetic `dumb` when the host sets nothing |
-| `SystemRoot` | seed_defaults | seeded default; fallback is the `C:\Windows` constant |
-| `PATHEXT` | seed_defaults | seeded default; synthetic list when the host sets nothing |
-| `HOME` | seed_transport | transport profile bridge only: the host value reaches `ssh` key discovery, never scripts |
-| `USERPROFILE` | seed_transport | transport profile bridge only: the host value reaches `ssh.exe` key discovery, never scripts |
-| `TMPDIR` | LazyGuardedTempDir::new (via std::env::temp_dir) | scratch root placement only; the value is never seeded |
-| `CARGO_FEATURE_*` | BuiltinEnv::collect | sanctioned ambient seed: Cargo-namespaced feature flags |
-| `CARGO_CFG_*` | BuiltinEnv::collect | sanctioned ambient seed: Cargo-namespaced cfg flags |
+| Variable | Read by |
+| --- | --- |
+| `SHELL` | oxdock_process::shell::shell_program |
+| `COMSPEC` | oxdock_process::shell::shell_program |
+| `TMPDIR` | LazyGuardedTempDir::new (via std::env::temp_dir) |
+| `CARGO_FEATURE_*` | BuiltinEnv::collect |
+| `CARGO_CFG_*` | BuiltinEnv::collect |
 
 ### Precedence and enforcement
 
-Uniform script-wins: the seed populates defaults, and explicit
+Uniform script-wins: the seed populates mirrors, and explicit
 script `ENV`/`INHERIT_ENV` overwrite them like any other variable.
 No name is immutable. `ISOLATED` resets to the identical seed, so
 inner and outer scopes start from the same defaults.
 `check_spawn_anchors` validates the final staged map with no
-caller-specific flags: present anchors pass, absent ones bail
-naming the `INHERIT_ENV` fix.
+caller-specific flags: present anchors pass, absent ones bail with
+the exact `INHERIT_ENV` declaration to add.
 
-Source of truth: `crates/sys/oxdock-fs/src/env.rs` (names) and
-`crates/sys/oxdock-process/src/env_policy.rs` (seeding). This
-file is generated; do not edit by hand.
+Source of truth: the `define_env_contract!` invocation in
+`crates/sys/oxdock-process/src/env_policy.rs` (names live in
+`crates/sys/oxdock-fs/src/env.rs`). This file is generated; do not
+edit by hand.
 
 ### Engine plumbing
 

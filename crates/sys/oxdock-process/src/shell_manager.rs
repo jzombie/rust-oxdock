@@ -313,15 +313,16 @@ mod tests {
     /// Mirror the session seed on Windows: production maps always
     /// carry the NT loader anchor, so success-path tests stage it
     /// explicitly here instead of tripping the fail-safe under test.
-    /// The anchor check itself is proven anchorless by
+    /// Mirror or omit, like the seed: a host lacking the anchor leaves
+    /// it out. The anchor check itself is proven anchorless by
     /// `apply_ctx_systemroot_check_follows_platform`, which bypasses
     /// `make_ctx`.
     #[cfg(windows)]
     #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
     fn with_windows_anchor(mut map: HashMap<String, String>) -> HashMap<String, String> {
-        if !crate::env_policy::has_var(&map, oxdock_env::os::windows::SYSTEM_ROOT) {
-            let root = std::env::var(oxdock_env::os::windows::SYSTEM_ROOT)
-                .unwrap_or_else(|_| oxdock_env::os::windows::DEFAULT_SYSTEM_ROOT.to_string());
+        if !crate::env_policy::has_var(&map, oxdock_env::os::windows::SYSTEM_ROOT)
+            && let Ok(root) = std::env::var(oxdock_env::os::windows::SYSTEM_ROOT)
+        {
             map.insert(oxdock_env::os::windows::SYSTEM_ROOT.to_string(), root);
         }
         map
