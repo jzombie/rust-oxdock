@@ -1897,14 +1897,22 @@ Run steps with the seeded script environment.
 
 Resets the script environment for the block to the session
 seed: spawned children see the sandbox defaults plus names
-the block re-adds through its leading `INHERIT_ENV`,
-resolved against the outer scope, never the host. Absent
-names stay absent silently, matching top-level
-`INHERIT_ENV`. Script variables, pipes, and files flow
-through untouched; only `env:` is reset. Blocks nest
-(each level re-seeds from the same seed, so nesting only
-narrows through the allowlists) and compose with `ASYNC`
-and `FUNC`. Scope exit restores the prior environment.
+the block re-adds through its leading `INHERIT_ENV`.
+
+The allowlist resolves against the outer scope, never the
+host. Absent names stay absent silently, matching top-level
+`INHERIT_ENV`.
+
+Script variables, pipes, and files flow through untouched;
+only `env:` is reset. Files share the session workspace:
+blocks selecting the same `WORKSPACE` target resolve to the
+same directory with no per-block overlay, so one block's
+writes are visible to another.
+
+Blocks nest (each level re-seeds from the same seed, so
+nesting only narrows through the allowlists) and compose
+with `ASYNC` and `FUNC`. Scope exit restores the prior
+environment.
 
 
 **Examples:**
@@ -1988,15 +1996,19 @@ Runs the braced block on the named remote target, which the
 host binds at startup (`--remote`). The block is sealed:
 only header-listed `$var` and `env:NAME` entries cross, the
 guest starts empty, and results return through declared
-transfers or `WITH_IO` pipes. The target is a static
-literal, never a variable. Unknown targets fail before
-execution starts. Bodies check twice: the host static
-pass validates the body before anything ships, and the
-guest re-validates on arrival through the same entry
-point, so a body type error fails locally, never mid-run
-on the remote. A failing guest fails the host step: EXIT
-in the body exits the guest, and the host relays the code
-to its own process exit status (see EXIT).
+transfers or `WITH_IO` pipes.
+
+The target is a static literal, never a variable. Unknown
+targets fail before execution starts.
+
+Bodies check twice: the host static pass validates the
+body before anything ships, and the guest re-validates on
+arrival through the same entry point, so a body type error
+fails locally, never mid-run on the remote.
+
+A failing guest fails the host step: EXIT in the body
+exits the guest, and the host relays the code to its own
+process exit status (see EXIT).
 
 
 **Examples:**
@@ -2427,6 +2439,8 @@ Switches the workspace root. The selection reverts at scope
 exit like `WORKDIR`.
 
 - `SNAPSHOT`: the materialized build snapshot (the default).
+  One session-shared directory: every selection resolves to
+  it, in any block.
 - `LOCAL`: the local workspace directory.
 - `CACHE`: a persistent per-project directory shared across
   runs, never evicted. It lives under the OS user cache
@@ -2595,13 +2609,16 @@ Declares which host environment variables to inherit into the script.
 Must appear before any other commands. Several directives may
 appear so platform-specific names ride explicit guards
 (`[family:windows] INHERIT_ENV [USERPROFILE]`); each guarded
-line runs only when its guard passes. Sandbox defaults need
-no declaration: loader bindings, terminal defaults, the host
-lookup path, and the user's profile locations seed
-automatically. See Environment Variable Contracts for the
-exact list, which grows with the engine. Secrets and tool
-config stay opt-in here: a token or a `CARGO_HOME` override
-arrives only through this directive.
+line runs only when its guard passes.
+
+Sandbox defaults need no declaration: loader bindings,
+terminal defaults, the host lookup path, and the user's
+profile locations seed automatically. See Environment
+Variable Contracts for the exact list, which grows with the
+engine.
+
+Secrets and tool config stay opt-in here: a token or a
+`CARGO_HOME` override arrives only through this directive.
 
 
 **Arguments:**
