@@ -1830,12 +1830,8 @@ fn inspect_reports_script_pipe_for_single_run() {
     // One pipe kind: even single-RUN producers stay store-and-forward
     // script pipes, so INSPECT always reports script no matter which
     // task or command bound the handle. `cargo --version` is the portable
-    // single-RUN producer; its tiny output never fills the pipe. `cargo`
-    // needs the ambient home for toolchain lookup, so the suite bridges
-    // the host home explicitly instead of inheriting it ambiently.
+    // single-RUN producer; its tiny output never fills the pipe.
     let script = indoc! {r#"
-        [family:unix] INHERIT_ENV [HOME]
-        [family:windows] INHERIT_ENV [USERPROFILE]
         LET $osp: PIPE
         LET $t: HANDLE = WITH_IO [stdout=$osp] ASYNC RUN ["cargo", "--version"]
         AWAIT $t
@@ -2338,8 +2334,6 @@ fn run_exec_form_spawns_directly_and_pipes_stdout() {
     // without relying on shell builtins (`echo` is not a Windows executable).
     let script = indoc!(
         r#"
-        [family:unix] INHERIT_ENV [HOME]
-        [family:windows] INHERIT_ENV [USERPROFILE]
         LET $cap: PIPE
         WITH_IO [stdout=$cap] RUN ["cargo", "--version"]
         WITH_IO [stdin=$cap] WRITE out.txt
@@ -2372,8 +2366,6 @@ fn run_exec_nonzero_status_bails_with_step_context() {
     let root = guard_root(&temp);
 
     let steps = oxdock_core::parse_script(indoc! {r#"
-        [family:unix] INHERIT_ENV [HOME]
-        [family:windows] INHERIT_ENV [USERPROFILE]
         RUN ["cargo", "--invalid-oxdock-flag-xyz"]
     "#})
     .unwrap();
@@ -2484,7 +2476,6 @@ fn archive_interoperates_with_system_tar() {
     // `tar` fails naming the tool, not with a cryptic spawn error.
     let probe = indoc! {r#"
         IMPORT [STD]
-        INHERIT_ENV [PATH]
         WORKSPACE SYSTEM
         LET $has_tar: BOOL = IS_EXEC("tar")
         ASSERT_EQ $has_tar true

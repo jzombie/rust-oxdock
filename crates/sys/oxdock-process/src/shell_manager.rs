@@ -430,11 +430,11 @@ mod tests {
     #[test]
     fn run_argv_spawns_directly_without_shell() {
         // `cargo` here is a rustup shim: it resolves through the host
-        // PATH the helper bridges, and needs a writable home for its
-        // toolchain lookup. Managed HOME points at scratch (no
-        // toolchains), so this test bridges the host home explicitly:
-        // production scripts needing toolchains route it the same
-        // way instead of inheriting it ambiently.
+        // PATH the helper bridges, and needs a home for its toolchain
+        // lookup. This helper builds its map by hand instead of going
+        // through the session seed, so it bridges the host home
+        // explicitly; production sessions seed the host home
+        // automatically.
         #[allow(clippy::disallowed_macros)]
         #[cfg(unix)]
         let home = std::env::var(oxdock_env::os::unix::HOME).unwrap_or_default();

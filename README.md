@@ -2767,9 +2767,7 @@ ASSERT_EQ $outer_body "production"
 ```oxdock
 # A shell command reads its own environment, with
 # per-platform spelling: quoted "$VAR" passes the parser
-# through untouched on Unix ... The shell itself resolves
-# through the listed PATH, like every spawned child.
-INHERIT_ENV [PATH]
+# through untouched on Unix ...
 ENV PROXY_PORT=23791
 
 [family:unix] LET $o: STRING = RUN echo serving on "$PROXY_PORT"
@@ -2813,7 +2811,6 @@ through this directive.
 **Example: inherit env**
 
 ```oxdock
-INHERIT_ENV [PATH]
 [family:unix] INHERIT_ENV [HOME]
 LET $path: STRING = env:PATH
 [family:unix] ASSERT_CONTAINS $path ":"
@@ -2901,9 +2898,8 @@ both forms.
 **Example: run**
 
 ```oxdock
-# Spawned children resolve through the listed PATH: closed
-# child env is the default, not ambient inherit.
-INHERIT_ENV [PATH]
+# Spawned children resolve through the seeded host PATH:
+# closed child env is the default, not ambient inherit.
 RUN echo hello
 
 # Captured runs prove the output, not just the exit status.
@@ -2918,7 +2914,6 @@ ASSERT_CONTAINS $o "hello"
 # Toolchain spawns bridge the host home explicitly: rustup
 # shims resolve toolchains through the host home.
 IMPORT [STD]
-INHERIT_ENV [PATH]
 [family:unix] INHERIT_ENV [HOME]
 [family:windows] INHERIT_ENV [USERPROFILE]
 RUN ["cargo", "--version", ">", "x.txt"]

@@ -1035,9 +1035,7 @@ declare_commands! {
             Example { name: "shell reads env per platform", fence_meta: None, code: indoc! {r#"
                 # A shell command reads its own environment, with
                 # per-platform spelling: quoted "$VAR" passes the parser
-                # through untouched on Unix ... The shell itself resolves
-                # through the listed PATH, like every spawned child.
-                INHERIT_ENV [PATH]
+                # through untouched on Unix ...
                 ENV PROXY_PORT=23791
 
                 [family:unix] LET $o: STRING = RUN echo serving on "$PROXY_PORT"
@@ -1075,7 +1073,6 @@ declare_commands! {
         flags: &[],
         default_output: None,
         examples: &[ Example { name: "inherit env", fence_meta: None, code: indoc! {r#"
-            INHERIT_ENV [PATH]
             [family:unix] INHERIT_ENV [HOME]
             LET $path: STRING = env:PATH
             [family:unix] ASSERT_CONTAINS $path ":"
@@ -1145,9 +1142,8 @@ declare_commands! {
         flags: &[],
         default_output: None,
         examples: &[ Example { name: "run", fence_meta: None, code: indoc! {r#"
-            # Spawned children resolve through the listed PATH: closed
-            # child env is the default, not ambient inherit.
-            INHERIT_ENV [PATH]
+            # Spawned children resolve through the seeded host PATH:
+            # closed child env is the default, not ambient inherit.
             RUN echo hello
 
             # Captured runs prove the output, not just the exit status.
@@ -1158,7 +1154,6 @@ declare_commands! {
             # Toolchain spawns bridge the host home explicitly: rustup
             # shims resolve toolchains through the host home.
             IMPORT [STD]
-            INHERIT_ENV [PATH]
             [family:unix] INHERIT_ENV [HOME]
             [family:windows] INHERIT_ENV [USERPROFILE]
             RUN ["cargo", "--version", ">", "x.txt"]

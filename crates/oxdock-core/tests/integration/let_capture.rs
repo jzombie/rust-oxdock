@@ -161,7 +161,6 @@ fn let_capture_run() {
     #[cfg(windows)]
     let shell_cmd = "cmd /c echo run-cap";
     let script = indoc! {r#"
-        INHERIT_ENV [PATH]
         LET $x: STRING = RUN "{CMD}"
         ASSERT_CONTAINS $x "run-cap"
     "#}
