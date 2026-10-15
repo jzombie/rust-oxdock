@@ -164,63 +164,41 @@ pub mod os {
 }
 
 /// One engine-plumbing name: an `oxdock::` or `cargo::` variable and
-/// the rule routing it. Rendered into the contract's plumbing table.
+/// its owning module. Rendered into the contract's plumbing table; the
+/// routing rule is uniform and lives in the chapter intro, not per row.
 pub struct PlumbingEntry {
     /// Owning module (`"oxdock"`, `"cargo"`, `"cargo::build"`).
     pub owner: &'static str,
     /// Variable name (an inventory constant value).
     pub name: &'static str,
-    /// Routing rule for this owner's names.
-    pub rule: &'static str,
 }
 
-/// Routing rule for `oxdock::` plumbing: explicit call-site reads from
-/// the host process, never ambient inheritance into scripts or children.
-pub const OXDOCK_PLUMBING_RULE: &str =
-    "engine plumbing: read at explicit call sites; never inherited";
-/// Routing rule for `cargo::` names: provided by Cargo to build scripts,
-/// proc macros, and test processes; relayed into scripts only through
-/// sanctioned seeds or explicit routing.
-pub const CARGO_PLUMBING_RULE: &str =
-    "Cargo-provided: relayed only through sanctioned seeds or explicit routing";
-
 /// Engine-plumbing inventory: every `oxdock::` / `cargo::` name with
-/// its routing rule. Built from the module `ALL` arrays the
+/// its owning module. Built from the module `ALL` arrays the
 /// `define_names!` macro emits, so a new constant appears here with
 /// no extra registration.
 pub fn plumbing() -> Vec<PlumbingEntry> {
     let mut out = Vec::new();
     for name in oxdock::ALL {
-        out.push(PlumbingEntry {
-            owner: "oxdock",
-            name,
-            rule: OXDOCK_PLUMBING_RULE,
-        });
+        out.push(PlumbingEntry { owner: "oxdock", name });
     }
     for name in cargo::ALL {
-        out.push(PlumbingEntry {
-            owner: "cargo",
-            name,
-            rule: CARGO_PLUMBING_RULE,
-        });
+        out.push(PlumbingEntry { owner: "cargo", name });
     }
     for name in cargo::build::ALL {
-        out.push(PlumbingEntry {
-            owner: "cargo::build",
-            name,
-            rule: CARGO_PLUMBING_RULE,
-        });
+        out.push(PlumbingEntry { owner: "cargo::build", name });
     }
     out
 }
 
 /// Plumbing-table chapter preamble, sourced here with the inventory.
+/// The routing rule is uniform, so it lives here, not per row.
 pub const PLUMBING_INTRO_MD: &str = indoc::indoc! {"
     ### Engine plumbing
 
     Names the engine and Cargo provide to the host process itself.
-    None of these inject into children; scripts see them only through
-    explicit routing.
+    Read at explicit call sites; reaches scripts only through the
+    sanctioned seed or explicit routing. Nothing flows ambiently.
 "};
 
 #[cfg(test)]

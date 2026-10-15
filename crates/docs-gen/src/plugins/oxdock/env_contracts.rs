@@ -48,13 +48,12 @@ pub fn render_env_contracts() -> Result<String> {
     out.push_str(env_policy::PRECEDENCE_MD);
     out.push('\n');
     out.push_str(oxdock_fs::env::PLUMBING_INTRO_MD);
-    out.push_str("\n| Variable | Owner | Rule |\n| --- | --- | --- |\n");
+    out.push_str("\n| Variable | Owner |\n| --- | --- |\n");
     for entry in oxdock_fs::env::plumbing() {
         out.push_str(&format!(
-            "| `{}` | {} | {} |\n",
+            "| `{}` | {} |\n",
             escape_table_cell(entry.name),
             escape_table_cell(entry.owner),
-            escape_table_cell(entry.rule)
         ));
     }
     Ok(out)

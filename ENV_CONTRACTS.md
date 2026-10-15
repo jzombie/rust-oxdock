@@ -86,34 +86,34 @@ edit by hand.
 ### Engine plumbing
 
 Names the engine and Cargo provide to the host process itself.
-None of these inject into children; scripts see them only through
-explicit routing.
+Read at explicit call sites; reaches scripts only through the
+sanctioned seed or explicit routing. Nothing flows ambiently.
 
-| Variable | Owner | Rule |
-| --- | --- | --- |
-| `OXDOCK_CACHE_DIR` | oxdock | engine plumbing: read at explicit call sites; never inherited |
-| `OXDOCK_CACHE_APP` | oxdock | engine plumbing: read at explicit call sites; never inherited |
-| `oxdock` | oxdock | engine plumbing: read at explicit call sites; never inherited |
-| `OXDOCK_WORKSPACE_ROOT` | oxdock | engine plumbing: read at explicit call sites; never inherited |
-| `OXDOCK_EMBED_DEBUG` | oxdock | engine plumbing: read at explicit call sites; never inherited |
-| `OXDOCK_EMBED_FINGERPRINT_SALT` | oxdock | engine plumbing: read at explicit call sites; never inherited |
-| `OXDOCK_EMBED_FORCE_REBUILD` | oxdock | engine plumbing: read at explicit call sites; never inherited |
-| `OXDOCK_BANNER` | oxdock | engine plumbing: read at explicit call sites; never inherited |
-| `OXDOCK_INHERIT_STDOUT` | oxdock | engine plumbing: read at explicit call sites; never inherited |
-| `OXDOCK_SHELL_REEXEC` | oxdock | engine plumbing: read at explicit call sites; never inherited |
-| `OXDOCK_FIXTURE_TARGET_DIR` | oxdock | engine plumbing: read at explicit call sites; never inherited |
-| `OXDOCK_AST_CASE` | oxdock | engine plumbing: read at explicit call sites; never inherited |
-| `OXDOCK_AST_ONLY_COVERAGE` | oxdock | engine plumbing: read at explicit call sites; never inherited |
-| `OXDOCK_MULTI_GUARD_TEST_PASS` | oxdock | engine plumbing: read at explicit call sites; never inherited |
-| `OXDOCK_MULTI_GUARD_TEST_FAIL` | oxdock | engine plumbing: read at explicit call sites; never inherited |
-| `OXDOCK_GUARD_TEST_TOKEN_UNSET` | oxdock | engine plumbing: read at explicit call sites; never inherited |
-| `CARGO_MANIFEST_DIR` | cargo | Cargo-provided: relayed only through sanctioned seeds or explicit routing |
-| `CARGO_PKG_NAME` | cargo | Cargo-provided: relayed only through sanctioned seeds or explicit routing |
-| `CARGO_PRIMARY_PACKAGE` | cargo | Cargo-provided: relayed only through sanctioned seeds or explicit routing |
-| `CARGO_TARGET_DIR` | cargo | Cargo-provided: relayed only through sanctioned seeds or explicit routing |
-| `CARGO_INCREMENTAL` | cargo | Cargo-provided: relayed only through sanctioned seeds or explicit routing |
-| `CARGO_CFG_FEATURE` | cargo | Cargo-provided: relayed only through sanctioned seeds or explicit routing |
-| `OUT_DIR` | cargo::build | Cargo-provided: relayed only through sanctioned seeds or explicit routing |
-| `TARGET` | cargo::build | Cargo-provided: relayed only through sanctioned seeds or explicit routing |
-| `PROFILE` | cargo::build | Cargo-provided: relayed only through sanctioned seeds or explicit routing |
-| `RUSTC` | cargo::build | Cargo-provided: relayed only through sanctioned seeds or explicit routing |
+| Variable | Owner |
+| --- | --- |
+| `OXDOCK_CACHE_DIR` | oxdock |
+| `OXDOCK_CACHE_APP` | oxdock |
+| `oxdock` | oxdock |
+| `OXDOCK_WORKSPACE_ROOT` | oxdock |
+| `OXDOCK_EMBED_DEBUG` | oxdock |
+| `OXDOCK_EMBED_FINGERPRINT_SALT` | oxdock |
+| `OXDOCK_EMBED_FORCE_REBUILD` | oxdock |
+| `OXDOCK_BANNER` | oxdock |
+| `OXDOCK_INHERIT_STDOUT` | oxdock |
+| `OXDOCK_SHELL_REEXEC` | oxdock |
+| `OXDOCK_FIXTURE_TARGET_DIR` | oxdock |
+| `OXDOCK_AST_CASE` | oxdock |
+| `OXDOCK_AST_ONLY_COVERAGE` | oxdock |
+| `OXDOCK_MULTI_GUARD_TEST_PASS` | oxdock |
+| `OXDOCK_MULTI_GUARD_TEST_FAIL` | oxdock |
+| `OXDOCK_GUARD_TEST_TOKEN_UNSET` | oxdock |
+| `CARGO_MANIFEST_DIR` | cargo |
+| `CARGO_PKG_NAME` | cargo |
+| `CARGO_PRIMARY_PACKAGE` | cargo |
+| `CARGO_TARGET_DIR` | cargo |
+| `CARGO_INCREMENTAL` | cargo |
+| `CARGO_CFG_FEATURE` | cargo |
+| `OUT_DIR` | cargo::build |
+| `TARGET` | cargo::build |
+| `PROFILE` | cargo::build |
+| `RUSTC` | cargo::build |
