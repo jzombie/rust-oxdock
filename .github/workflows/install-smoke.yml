@@ -325,7 +325,6 @@ jobs:
         run: |
           IMPORT [STD]
           INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, GITHUB_TOKEN]
-          [family:windows] INHERIT_ENV [LOCALAPPDATA]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           # Source truth for version identity: the installed binary must
@@ -421,7 +420,6 @@ jobs:
         run: |
           IMPORT [STD]
           INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, GITHUB_TOKEN]
-          [family:windows] INHERIT_ENV [LOCALAPPDATA]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           # Source truth for version identity: the installed binary must
@@ -521,7 +519,6 @@ jobs:
         run: |
           IMPORT [STD]
           INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, GITHUB_TOKEN]
-          [family:windows] INHERIT_ENV [LOCALAPPDATA]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           # Source truth for version identity: the installed binary must
@@ -611,7 +608,6 @@ jobs:
         run: |
           IMPORT [STD]
           INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, GITHUB_TOKEN]
-          [family:windows] INHERIT_ENV [LOCALAPPDATA]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           # Source truth for version identity: the installed binary must
@@ -797,7 +793,6 @@ jobs:
         run: |
           IMPORT [STD]
           INHERIT_ENV [SMOKE_TAG, SMOKE_VERSION, OXDOCK_CACHE_DIR, RUNNER_TEMP, GITHUB_WORKSPACE, GITHUB_TOKEN]
-          [family:windows] INHERIT_ENV [LOCALAPPDATA]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           LET $e: PIPE
@@ -882,7 +877,6 @@ jobs:
         run: |
           IMPORT [STD]
           INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, GITHUB_TOKEN]
-          [family:windows] INHERIT_ENV [LOCALAPPDATA]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           # Source truth for version identity: the installed binary must
@@ -998,7 +992,6 @@ jobs:
         run: |
           IMPORT [STD]
           INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT, VERSION, RUNNER_TEMP, GITHUB_WORKSPACE, GITHUB_TOKEN]
-          [family:windows] INHERIT_ENV [LOCALAPPDATA]
           WORKSPACE SYSTEM
           WORKDIR {{ env:GITHUB_WORKSPACE }}
           # Source truth for version identity: the installed binary must
