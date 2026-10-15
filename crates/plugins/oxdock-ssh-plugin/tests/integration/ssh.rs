@@ -839,6 +839,168 @@ fn env_relay_preserves_backslashes_windows() {
     miri,
     ignore = "needs loopback TCP plus threads plus ConPTY plus subprocesses"
 )]
+fn cmd_env_relay_quoted_reg_query_windows() {
+    // The windows-headless TODO, verbatim: plain quoted `reg query`
+    // paths must work once the transport is faithful. They do through
+    // the environment relay: quotes reach `cmd` untouched, so the key
+    // resolves instead of looking up a `\"...`-prefixed name.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-env-reg-win");
+    let script = indoc! {r#"
+        IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-env-reg-win", {username: "u", password: "p"})
+        WRITE addr.txt "{{ $m.addr }}"
+        LET $h: HANDLE = ASYNC {
+            LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
+            ENV SSH_COMMAND="{{ $dq.command }}"
+            LET $in: PIPE
+            LET $out: PIPE
+            LET $t: HANDLE = ASYNC { SSH_PTY_RUN($dq.session, ["cmd", "/c", "%SSH_COMMAND%"], 0, 0, $in, $out) }
+            LET $code: INT = AWAIT $t
+            ASSERT_EQ $code 0
+            ASSERT_CONTAINS $out "SetupType"
+            ASSERT_CONTAINS $out "REG_DWORD"
+        }
+        AWAIT $h
+        SSH_CLOSE($m.server)
+    "#};
+    let probe = root.clone();
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    let addr = read_addr(&probe);
+    let addr: SocketAddr = addr.parse().expect("addr parses");
+    let client = TestClient::connect_exec(addr, "u", "p", "reg query \"HKLM\\SYSTEM\\Setup\" /v SetupType")
+        .expect("client connects");
+    client.close();
+    handle
+        .join()
+        .expect("script thread joins")
+        .expect("quoted reg query resolves");
+}
+
+#[test]
+#[cfg(windows)]
+#[cfg_attr(
+    miri,
+    ignore = "needs loopback TCP plus threads plus ConPTY plus subprocesses"
+)]
+fn cmd_env_relay_full_probe_windows() {
+    // The windows-headless readiness probe, verbatim
+    // (`src/ssh.rs::reg_probe_command` on feat/oxdock-ssh): `&`-chained
+    // queries with `2>nul` redirects, `set` + `call` deferred expansion
+    // with single `%`, and `&&`/`||` verdicts. All five markers must
+    // arrive through the environment relay, proving the quote-free
+    // contortions are unnecessary: this exact shape runs unmodified.
+    // The single `%` also proves interpolation never touches `%`.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-env-probe-win");
+    let script = indoc! {r#"
+        IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-env-probe-win", {username: "u", password: "p"})
+        WRITE addr.txt "{{ $m.addr }}"
+        LET $h: HANDLE = ASYNC {
+            LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
+            ENV SSH_COMMAND="{{ $dq.command }}"
+            LET $in: PIPE
+            LET $out: PIPE
+            LET $t: HANDLE = ASYNC { SSH_PTY_RUN($dq.session, ["cmd", "/c", "%SSH_COMMAND%"], 0, 0, $in, $out) }
+            LET $code: INT = AWAIT $t
+            ASSERT_EQ $code 0
+            ASSERT_CONTAINS $out "[SETUP]"
+            ASSERT_CONTAINS $out "[OOBE]"
+            ASSERT_CONTAINS $out "[CBS]"
+            ASSERT_CONTAINS $out "[WU]"
+            ASSERT_CONTAINS $out "[END]"
+            ASSERT_CONTAINS $out "SetupType"
+        }
+        AWAIT $h
+        SSH_CLOSE($m.server)
+    "#};
+    let probe = root.clone();
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    let addr = read_addr(&probe);
+    let addr: SocketAddr = addr.parse().expect("addr parses");
+    let command = [
+        "echo [SETUP]",
+        "reg query HKLM\\SYSTEM\\Setup /v SetupType 2>nul",
+        "echo [OOBE]",
+        "reg query HKLM\\SYSTEM\\Setup /v OOBEInProgress 2>nul",
+        "echo [CBS]",
+        "set WHCBSK=HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Component Based Servicing\\RebootPending& call reg query %WHCBSK% 2>nul && echo YES || echo NO",
+        "echo [WU]",
+        "set WHWUK=HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\WindowsUpdate\\Auto Update\\RebootRequired& call reg query %WHWUK% 2>nul && echo YES || echo NO",
+        "echo [END]",
+    ]
+    .join(" & ");
+    let client =
+        TestClient::connect_exec(addr, "u", "p", &command).expect("client connects");
+    client.close();
+    handle
+        .join()
+        .expect("script thread joins")
+        .expect("full probe runs unmodified");
+}
+
+#[test]
+#[cfg(windows)]
+#[cfg_attr(
+    miri,
+    ignore = "needs loopback TCP plus threads plus ConPTY plus subprocesses"
+)]
+fn cmd_env_relay_quoted_powershell_windows() {
+    // The windows-headless diet TODO: a plain quoted `-Command` string
+    // carrying a pipeline must survive. The relay hands `cmd` the text
+    // verbatim; `cmd` keeps the quoted pipe inside the argument, and
+    // PowerShell parses the pipeline itself.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-env-ps-win");
+    let script = indoc! {r#"
+        IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-env-ps-win", {username: "u", password: "p"})
+        WRITE addr.txt "{{ $m.addr }}"
+        LET $h: HANDLE = ASYNC {
+            LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
+            ENV SSH_COMMAND="{{ $dq.command }}"
+            LET $in: PIPE
+            LET $out: PIPE
+            LET $t: HANDLE = ASYNC { SSH_PTY_RUN($dq.session, ["cmd", "/c", "%SSH_COMMAND%"], 0, 0, $in, $out) }
+            LET $code: INT = AWAIT $t
+            ASSERT_EQ $code 0
+            ASSERT_CONTAINS $out "QP-ALPHA"
+            ASSERT_CONTAINS $out "QP-BETA"
+        }
+        AWAIT $h
+        SSH_CLOSE($m.server)
+    "#};
+    let probe = root.clone();
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    let addr = read_addr(&probe);
+    let addr: SocketAddr = addr.parse().expect("addr parses");
+    let client = TestClient::connect_exec(
+        addr,
+        "u",
+        "p",
+        "powershell -NoProfile -Command \"'qp-alpha','qp-beta' | ForEach-Object { $_.ToUpper() }\"",
+    )
+    .expect("client connects");
+    client.close();
+    handle
+        .join()
+        .expect("script thread joins")
+        .expect("quoted powershell pipeline runs");
+}
+
+#[test]
+#[cfg(windows)]
+#[cfg_attr(
+    miri,
+    ignore = "needs loopback TCP plus threads plus ConPTY plus subprocesses"
+)]
 fn interactive_shell_first_bytes_survive_windows() {
     // Windows-only stress probe for the issue 223 first-keystroke loss:
     // the suspected race site is the ConPTY console-setup handshake,
