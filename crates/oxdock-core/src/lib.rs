@@ -709,7 +709,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[cfg_attr(
         miri,
         ignore = "timing-sensitive background process test is unreliable under Miri"
@@ -721,8 +720,8 @@ mod tests {
 
         let script = indoc! {
             r#"
-            INHERIT_ENV [PATH]
-            ASYNC RUN "sh -c 'sleep 30; echo late > late.txt'"
+            [family:unix] ASYNC RUN "sh -c 'sleep 30; echo late > late.txt'"
+            [family:windows] ASYNC RUN "cmd /c \"ping -n 31 127.0.0.1 > NUL & echo late > late.txt\""
             RUN "__oxdock_missing_command_xyz__"
             "#
         };
@@ -739,7 +738,11 @@ mod tests {
         // which still fails fast on the missing command. No rendezvous
         // step: the RUN pre-spawn cancellation check closes the worker
         // startup race, so a polling TIMEOUT only adds shared cancel
-        // state that outlives its step.
+        // state that outlives its step. No INHERIT_ENV either: the
+        // session seed already carries the host `PATH` (and `SystemRoot`
+        // on Windows), so plain `RUN` resolves without boilerplate. The
+        // Windows line nests `cmd` the way the engine wraps the Unix
+        // shell, so both spell the same tree-kill guarantee.
         assert!(
             !exists(&root, "late.txt"),
             "abandoned background writer must be killed by Drop teardown"
