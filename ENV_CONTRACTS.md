@@ -35,7 +35,9 @@ Mirrored from the host at session start and on every `ISOLATED` entry; fallbacks
 | `TEMP` | host value, else session `<scratch>/tmp` | seeded default: explicit script values win |
 | `TMP` | host value, else session `<scratch>/tmp` | seeded default: explicit script values win |
 | `USERPROFILE` | host value, else session `<scratch>/tmp` (native profile anchor) | seeded default: explicit script values win |
-| `USERNAME` | host value; omitted when unset | seeded default: explicit script values win |
+| `USERPROFILE` | host value; omitted when unset | seeded default: explicit script values win |
+| `LOCALAPPDATA` | host value; omitted when unset | seeded default: explicit script values win |
+| `APPDATA` | host value; omitted when unset | seeded default: explicit script values win |
 | `SystemRoot` | host value, else the `C:\Windows` fallback | seeded default: explicit script values win |
 | `windir` | same root as `SystemRoot` | seeded default: explicit script values win |
 | `PATHEXT` | host value, else `.COM;.EXE;.BAT;.CMD` | seeded default: explicit script values win |

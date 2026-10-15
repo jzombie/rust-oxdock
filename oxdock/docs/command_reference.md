@@ -1514,11 +1514,12 @@ appear so platform-specific names ride explicit guards
 line runs only when its guard passes. Sandbox defaults need
 no declaration: the session seeds loader bindings
 (`SystemRoot` on Windows), terminal and extension defaults
-(`TERM`, `PATHEXT`), scratch temp (`TMPDIR`/`TEMP`/`TMP`
-bound to the session), and a `PATH` baseline for core
-utilities. Identity and secrets stay opt-in here: `HOME`
-seeds to the scratch, so host homes and tokens arrive only
-through this directive.
+(`TERM`, `PATHEXT`), the host `PATH`, and the user's profile
+locations (`HOME`, `USERPROFILE`, `LOCALAPPDATA`, `APPDATA`).
+Scratch temp (`TMPDIR`/`TEMP`/`TMP`) binds the session, and
+`HOME` falls back to it only when the host sets no home.
+Secrets and tool config stay opt-in here: tokens, `CARGO_HOME`,
+and anything else arrive only through this directive.
 
 
 **Arguments:**
