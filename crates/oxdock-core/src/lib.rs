@@ -618,8 +618,8 @@ mod tests {
         // Background succeeds quickly; pipeline should complete without error.
         let script = indoc! {
             r#"
-            [family:unix] ASYNC RUN "sh -c 'sleep 0.05'"
-            [family:windows] ASYNC RUN "cmd /c \"ping -n 1 127.0.0.1 > NUL\""
+            [family:unix] ASYNC RUN "sleep 0.05"
+            [family:windows] ASYNC RUN "ping -n 1 127.0.0.1"
             "#
         };
         let steps = crate::parse_script(script).unwrap();
@@ -638,8 +638,8 @@ mod tests {
 
         let script = indoc! {
             r#"
-            [family:unix] ASYNC RUN "sh -c 'sleep 0.05; exit 7'"
-            [family:windows] ASYNC RUN "cmd /c \"exit 7\""
+            [family:unix] ASYNC RUN "sleep 0.05; exit 7"
+            [family:windows] ASYNC RUN "exit 7"
             "#
         };
         let steps = crate::parse_script(script).unwrap();
@@ -664,10 +664,10 @@ mod tests {
 
         let script = indoc! {
             r#"
-            [family:unix] ASYNC RUN "sh -c 'sleep 0.2; echo one > one.txt'"
-            [family:windows] ASYNC RUN "cmd /c \"ping -n 2 127.0.0.1 > NUL & echo one > one.txt\""
-            [family:unix] ASYNC RUN "sh -c 'sleep 0.5; echo two > two.txt'"
-            [family:windows] ASYNC RUN "cmd /c \"ping -n 3 127.0.0.1 > NUL & echo two > two.txt\""
+            [family:unix] ASYNC RUN "sleep 0.2; echo one > one.txt"
+            [family:windows] ASYNC RUN "ping -n 2 127.0.0.1 > NUL & echo one > one.txt"
+            [family:unix] ASYNC RUN "sleep 0.5; echo two > two.txt"
+            [family:windows] ASYNC RUN "ping -n 3 127.0.0.1 > NUL & echo two > two.txt"
             WRITE "done.txt" "ok"
             "#
         };
@@ -718,13 +718,14 @@ mod tests {
 
         let script = indoc! {
             r#"
-            [family:unix] ASYNC RUN "sh -c 'sleep 30; echo late > late.txt'"
-            [family:windows] ASYNC RUN "cmd /c \"ping -n 31 127.0.0.1 > NUL & echo late > late.txt\""
+            [family:unix] ASYNC RUN "sleep 30; echo late > late.txt"
+            [family:windows] ASYNC RUN "ping -n 31 127.0.0.1 > NUL & echo late > late.txt"
             RUN "__oxdock_missing_command_xyz__"
             "#
         };
 
         let steps = crate::parse_script(script).unwrap();
+        let start = Instant::now();
         assert!(
             run_steps(&root, &steps).is_err(),
             "pipeline should fail on the missing command"
@@ -738,12 +739,21 @@ mod tests {
         // startup race, so a polling TIMEOUT only adds shared cancel
         // state that outlives its step. No INHERIT_ENV either: the
         // session seed already carries the host `PATH` (and `SystemRoot`
-        // on Windows), so plain `RUN` resolves without boilerplate. The
-        // Windows line nests `cmd` the way the engine wraps the Unix
-        // shell, so both spell the same tree-kill guarantee.
+        // on Windows), so plain `RUN` resolves without boilerplate. One
+        // shell level only: the engine already wraps the script, so each
+        // line spells its sleep-then-write chain directly and the tree
+        // under test is identical on both platforms.
         assert!(
             !exists(&root, "late.txt"),
             "abandoned background writer must be killed by Drop teardown"
+        );
+        // A direct-child-only kill passes the assertion above but stalls
+        // pump EOF on the orphaned sleeper for the full 30s: bound the
+        // whole run so that regression fails loud instead of slow.
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(25),
+            "teardown must end the tree promptly, took {:?}",
+            start.elapsed()
         );
     }
 
@@ -758,8 +768,8 @@ mod tests {
 
         let script = indoc! {
             r#"
-            [family:unix] ASYNC RUN "sh -c 'sleep 30; echo late > late.txt'"
-            [family:windows] ASYNC RUN "cmd /c \"ping -n 31 127.0.0.1 > NUL & echo late > late.txt\""
+            [family:unix] ASYNC RUN "sleep 30; echo late > late.txt"
+            [family:windows] ASYNC RUN "ping -n 31 127.0.0.1 > NUL & echo late > late.txt"
             EXIT 5
             "#
         };
@@ -820,9 +830,9 @@ mod tests {
             r#"
             ENV FOO="bar"
             [family:windows] RUN "echo %FOO% > run.txt"
-            [family:unix] RUN "sh -c 'printf %s \"$FOO\" > run.txt'"
+            [family:unix] RUN "printf %s \"$FOO\" > run.txt"
             [family:windows] ASYNC RUN "echo %FOO% > bg.txt"
-            [family:unix] ASYNC RUN "sh -c 'printf %s \"$FOO\" > bg.txt'"
+            [family:unix] ASYNC RUN "printf %s \"$FOO\" > bg.txt"
             "#
         };
 
