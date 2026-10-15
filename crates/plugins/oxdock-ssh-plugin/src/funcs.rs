@@ -60,16 +60,11 @@ fn dequeue_session<P: ProcessManager>(
     }
 }
 
-/// Dequeue one authenticated session and expose its metadata before any
-/// byte pumping starts, so scripts can route on the requested command or
-/// client identity. Must run inside `ASYNC`. Returns a MAP with
-/// `session` (SSH_SESSION), `command` (STRING, empty for shells),
-/// `username` and `addr` (STRINGs, empty when unknown).
+/// Dequeue one authenticated session for routing before any byte
+/// pumping starts. Must run inside `ASYNC`.
 ///
-/// Routing shape: compare the dequeued command against known commands,
-/// build a fresh pipe pair per session, and pump a synthetic reply with
-/// `SSH_PUMP_CHANNEL`. The server sends first: the client side never
-/// EOFs its input, so the reply cannot race teardown.
+/// The server sends first: the client side never EOFs its input, so a
+/// synthetic reply cannot race teardown.
 ///
 #[oxdock_func(
     returns = TypeTag::Record(dequeue_result_fields()),
@@ -142,22 +137,11 @@ fn ssh_dequeue<P: ProcessManager>(
     Ok(Value::map(map))
 }
 
-/// Spin up an SSH server on a runner-mapped service with the given
-/// credentials. `bind` is a service name; the runner maps it with
-/// `-p`/`--listen`, and unmapped services bail with the mapping hint
-/// (SSH needs a TCP socket, so there is no memory fallback).
-/// `options` is a MAP with required `username`/`password`
-/// STRINGs (a server without credentials is meaningless, so blanks bail)
-/// and the optional `key_path` STRING (workspace-relative OpenSSH Ed25519
-/// file, load-or-create; a leading `/` anchors to the workspace root like
-/// WRITE, and escapes still bail; absent or blank keeps the ephemeral
-/// in-memory key).
-/// Non-blocking: returns a MAP with `server` (SSH_SERVER),
-/// `addr` (STRING: the physical bind, or the virtual endpoint echo when
-/// socketless), `username` and `password` (STRINGs), and `virtual`
-/// (STRING echo). Unmapped and memory services bail with the CLI
-/// mapping hint: SSH needs a TCP socket, so map the name with
-/// `-p`/`--listen`.
+/// Spin up an SSH server on a runner-mapped service. Unmapped and
+/// memory services bail: SSH needs a TCP socket.
+/// `options` takes required `username`/`password` STRINGs plus the
+/// optional `key_path` STRING (workspace-relative Ed25519 file,
+/// load-or-create; blank keeps the ephemeral key).
 #[oxdock_func(returns = TypeTag::Record(serve_result_fields()), summary = "Serve SSH on a virtual service endpoint.")]
 #[example(
     name = "serve and close",
@@ -177,9 +161,6 @@ fn ssh_serve<P: ProcessManager>(
     options: BTreeMap<String, Value>,
 ) -> Result<Value> {
     let map = &options;
-    // Compositional reads: presence and blank stay domain errors (a
-    // server without credentials is meaningless, so there is no
-    // default); shapes already passed `check_options` in the wrapper.
     let username = match map.get("username") {
         Some(value) => {
             let text = value.as_str().expect("check_options verified STRING");
@@ -233,8 +214,7 @@ fn ssh_serve<P: ProcessManager>(
     let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel::<ShutdownSignal>();
     let (local_addr, addr_text, thread) = match acquired {
         AcquiredListener::Tcp { listener, addr } => {
-            // The slot keeps the shared backlog socket; the runtime owns
-            // its own clone.
+            // The runtime owns a clone; the slot keeps the backlog socket.
             let owned = listener
                 .try_clone()
                 .context("SSH_SERVE cannot clone its listener")?;
@@ -257,16 +237,12 @@ fn ssh_serve<P: ProcessManager>(
             (addr, addr.to_string(), Some(thread))
         }
         AcquiredListener::Memory => {
-            // Defensive: `acquire_listener` with `SocketRequired` already
-            // bailed; the text still comes from the one shared helper.
+            // Unreachable: `SocketRequired` already bailed; same text.
             drop(shutdown_rx);
             return Err(no_cli_mapping("SSH_SERVE", &key.endpoint));
         }
         AcquiredListener::Offline => {
-            // Socketless servers spawn no thread: DEQUEUE waits on the
-            // queue until close (test drivers push sessions via the
-            // queue). Dropping the receiver makes later shutdown sends a
-            // silent no-op.
+            // No thread: dropping the receiver makes shutdown a no-op.
             drop(shutdown_rx);
             (
                 std::net::SocketAddr::from(([0, 0, 0, 0], 0)),
@@ -300,15 +276,11 @@ fn ssh_serve<P: ProcessManager>(
     Ok(Value::map(map))
 }
 
-/// Accept the next authenticated session and pump it through explicit
-/// pipes until the channel closes. Must run inside `ASYNC`. Returns a
-/// MAP with `closed` (BOOL) and `command` (STRING, empty for shells).
-/// Thin wrapper over `SSH_DEQUEUE` + `SSH_PUMP_CHANNEL` for worker loops
-/// that need no pre-pump inspection; use those directly to route on
-/// session metadata first. Returns a MAP with `closed` (BOOL) and
-/// `command` (STRING, empty for shells); the example below asserts both
-/// keys on the awaited result. The server sends first: the client side
-/// never EOFs its input, so the reply cannot race teardown.
+/// `SSH_DEQUEUE` + `SSH_PUMP_CHANNEL` in one call, for worker loops
+/// that need no pre-pump inspection. Must run inside `ASYNC`.
+///
+/// The server sends first: the client side never EOFs its input, so
+/// the reply cannot race teardown.
 ///
 #[oxdock_func(returns = TypeTag::Record(std::sync::Arc::from([Field {
     name: "closed".to_string(),
@@ -359,8 +331,6 @@ fn ssh_accept<P: ProcessManager>(
             "SSH_ACCEPT requires ASYNC: wrap it as LET $t: HANDLE = ASYNC {{ SSH_ACCEPT($server, $in, $out) }}"
         );
     }
-    // Downstream pumps take `&Value`: re-wrap the extracted handles so
-    // every helper below keeps its Value-based shape.
     let in_pipe = Value::pipe_handle(in_pipe);
     let out_pipe = Value::pipe_handle(out_pipe);
     let state = Arc::clone(server.state());
@@ -384,10 +354,9 @@ fn ssh_accept<P: ProcessManager>(
     Ok(Value::map(map))
 }
 
-/// Pump a dequeued session between explicit DSL pipes until the channel
-/// closes. Must run inside `ASYNC`. The session ends are take-once: a
-/// second pump on the same session bails instead of splitting bytes.
-/// Returns a MAP with `closed` (BOOL).
+/// Pump a dequeued session through explicit pipes until the channel
+/// closes. Must run inside `ASYNC`. Pump ends take once: a second
+/// pump bails instead of splitting bytes.
 ///
 #[oxdock_func(
     returns = TypeTag::Record(std::sync::Arc::from([Field {
@@ -432,8 +401,6 @@ fn ssh_pump_channel<P: ProcessManager>(
     if !cx.is_async_task() {
         bail!("SSH_PUMP_CHANNEL requires ASYNC: pump it in its own task after SSH_DEQUEUE");
     }
-    // Downstream pumps take `&Value`: re-wrap the extracted handles so
-    // every helper below keeps its Value-based shape.
     let in_pipe = Value::pipe_handle(in_pipe);
     let out_pipe = Value::pipe_handle(out_pipe);
     let (up_rx, down_tx) = session.take_pump_ends()?;
@@ -444,15 +411,10 @@ fn ssh_pump_channel<P: ProcessManager>(
     Ok(Value::map(map))
 }
 
-/// Report the session's exit status to the client (RFC 4254 section
-/// 6.10), so stock `ssh` exits with the real code instead of 255.
-/// Queues ahead of the channel close: call it once the exit code is
-/// known and before the pump drains, so the status lands ahead of
-/// `Eof`. Usable before, during, or after `SSH_PUMP_CHANNEL`: the
-/// control sender survives the take-once pump ends. `SSH_PTY_RUN`
-/// children report by themselves at child exit, so call this only for
-/// legs driven by other means (a `RUN` subprocess, a synthetic
-/// reply). Bails once the wire writer is gone. Returns BOOL true.
+/// Report the session's exit status to the client (RFC 4254 6.10),
+/// ahead of the channel close. Survives the take-once pump ends, so
+/// call it before the pump drains. `SSH_PTY_RUN` reports by itself;
+/// this covers other legs (`RUN`, synthetic replies).
 #[oxdock_func(returns = TypeTag::Bool, summary = "Send the session exit status to the client.")]
 #[example(
     name = "report exit status",
@@ -498,8 +460,8 @@ fn ssh_send_exit_status<P: ProcessManager>(
     Ok(Value::bool(true))
 }
 
-/// Shut a server down and join its runtime thread (bounded). Idempotent:
-/// returns BOOL true when no thread remains.
+/// Shut a server down and join its runtime thread (bounded).
+/// Idempotent.
 ///
 #[oxdock_func(returns = TypeTag::Bool, summary = "Shut down an SSH server.")]
 #[example(
@@ -522,14 +484,11 @@ fn ssh_close<P: ProcessManager>(
     Ok(Value::bool(state.join_thread(CLOSE_JOIN_TIMEOUT)))
 }
 
-/// Connect to an SSH server with distinct inner credentials and pump the
-/// shell channel through explicit pipes until it closes. Must run inside
-/// `ASYNC`, concurrently with the `SSH_PUMP` tasks (never before them).
-/// `target` is a service name resolved through runner mappings: SSH
-/// needs a TCP socket, so unmapped services bail with the CLI mapping
-/// hint. Under `--offline` the dial bails before any socket work.
-/// Returns a MAP with `closed` (BOOL) and `exit_status` (INT, -1 when
-/// the server sent none).
+/// Open an SSH client session and pump its shell channel through
+/// explicit pipes until it closes. Must run inside `ASYNC`, beside
+/// the pump tasks. Under `--offline` the dial bails before any
+/// socket work. The result MAP carries `exit_status`, or -1 when the
+/// server sent none.
 #[oxdock_func(returns = TypeTag::Map, summary = "Open an SSH client session into pipes.")]
 #[example(
     name = "connect and close",
@@ -570,25 +529,19 @@ fn ssh_connect<P: ProcessManager>(
     if !cx.is_async_task() {
         bail!("SSH_CONNECT requires ASYNC: run it in its own task beside the SSH_PUMP tasks");
     }
-    // Module-shared endpoint registry: stashed at registration, so
-    // this entry stays declarative with no captured closure.
+    // Registry travels as module state.
     let registry = cx
         .module_state::<EndpointRegistry>("SSH")
         .expect("SSH module registers its endpoint registry as module state");
-    // The session pump takes `&Value` pipes: re-wrap the extracted
-    // handles so the bridge keeps its Value-based shape.
     let in_pipe = Value::pipe_handle(in_pipe);
     let out_pipe = Value::pipe_handle(out_pipe);
-    // Sandbox gate first: offline runs open no OS sockets.
     if registry.is_offline() {
         bail!("SSH_CONNECT failed: engine running in --offline mode");
     }
     if username.is_empty() {
         bail!("SSH_CONNECT username must not be empty");
     }
-    // Strictly symbolic, resolved through the single shared resolver:
-    // served addresses and `host:port` shapes already failed in the
-    // parser below, so only runner-mapped services reach the dial.
+    // Symbolic only: physical shapes already failed in the parser.
     let endpoint = parse_virtual_endpoint(&target, "SSH_CONNECT")?;
     let key = EndpointKey::tcp(endpoint);
     let addr = match resolve_service_target(
@@ -598,7 +551,7 @@ fn ssh_connect<P: ProcessManager>(
         SocketRequirement::SocketRequired,
     )? {
         ServiceTarget::Tcp(addr) => addr,
-        // Defensive: the shared resolver already bailed; same text.
+        // Unreachable: the shared resolver already bailed; same text.
         ServiceTarget::Memory => {
             return Err(no_cli_mapping("SSH_CONNECT", &key.endpoint));
         }
@@ -621,8 +574,7 @@ fn ssh_connect<P: ProcessManager>(
     let pump = pump_session(cx, &in_pipe, &out_pipe, up_rx, down_tx, &cancel, false);
     let _ = runtime.block_on(handle.disconnect(russh::Disconnect::ByApplication, "", ""));
     pump?;
-    // Join the wire task after disconnect: a status arriving after EOF
-    // is recorded before this read, so the map never races the wire.
+    // Joined after disconnect: a post-EOF status records before this read.
     let _ = runtime.block_on(wire_done);
     let mut map = BTreeMap::new();
     map.insert("closed".to_string(), Value::bool(true));
@@ -638,8 +590,7 @@ fn ssh_connect<P: ProcessManager>(
 }
 
 /// Copy one pipe into another until EOF, then close the target.
-/// Returns the INT byte count. Either task placement works, as long as
-/// the other end is live (usually an `ASYNC` task).
+/// Either task placement works, as long as the other end is live.
 ///
 #[oxdock_func(returns = TypeTag::Int, summary = "Copy one pipe into another until EOF.")]
 #[example(
@@ -663,8 +614,6 @@ fn ssh_pump<P: ProcessManager>(
     /// Target pipe receiving the bytes (closed at EOF).
     to_pipe: PipeHandle,
 ) -> Result<Value> {
-    // `pump_pipe_to_pipe` takes `&Value`: re-wrap the extracted
-    // handles so the bridge keeps its Value-based shape.
     let from_pipe = Value::pipe_handle(from_pipe);
     let to_pipe = Value::pipe_handle(to_pipe);
     let cancel = AtomicBool::new(false);
@@ -672,21 +621,26 @@ fn ssh_pump<P: ProcessManager>(
     Ok(Value::int(total))
 }
 
-/// Run `argv` under a local pseudo-terminal sized from the dequeued
-/// session and pump it through explicit pipes until the child exits.
-/// `rows`/`cols` seed the initial size when positive; non-positive falls
-/// back to the session's requested size (the outer pty request, 24x80
-/// default). Outer window-change requests resize this session's terminal
-/// live; every session owns its size cell, so concurrent guests never
-/// observe each other. Must run inside `ASYNC`. Returns the INT exit
-/// code, which is also reported as the session's wire `exit-status` at
-/// child exit (ahead of the pump drain), so stock clients report the
-/// real code instead of 255. Arguments join by MSVCRT rules on
-/// Windows, so CRT programs parse back exactly `argv`; `cmd /c` is
-/// the exception (its tail is a command, not `argv`, and it does not
-/// understand the quoting), so route command text through the
-/// environment instead (`ENV SSH_COMMAND="..."`, child runs
-/// `["cmd", "/c", "%SSH_COMMAND%"]`), which travels verbatim.
+/// Run `argv` under a local pseudo-terminal and pump it through
+/// explicit pipes until the child exits. Must run inside `ASYNC`.
+/// Returns the INT exit code.
+///
+/// `rows`/`cols` seed the initial size when positive, else the
+/// session's requested size (24x80 default). Outer window-changes
+/// resize live; each session owns its cell.
+///
+/// The code also reports as the wire `exit-status` at child exit, so
+/// stock clients see the real code instead of 255.
+///
+/// Windows joining follows MSVCRT rules, so CRT programs parse back
+/// exactly `argv`. `cmd /c` is the exception (its tail is a command,
+/// not `argv`): route command text via `ENV SSH_COMMAND="..."` with
+/// `["cmd", "/c", "%SSH_COMMAND%"]` instead.
+///
+/// Stdin arrives untranslated. Consoles submit on CR, so a DSL line
+/// bound for a console child ends with `\r`. Real terminals already
+/// send CR for Enter.
+///
 /// Environment is exactly the script environment like `RUN`:
 /// block-scoped `ENV` (such as the session's `SSH_USER` / `SSH_CLIENT` /
 /// `SSH_SERVER` / `SSH_COMMAND` relay) reaches the child; host names
@@ -750,8 +704,6 @@ fn ssh_pty_run<P: ProcessManager>(
     if !cx.is_async_task() {
         bail!("SSH_PTY_RUN requires ASYNC: run it in its own task beside the session pump task");
     }
-    // `pump_pty_session` takes `&Value` pipes: re-wrap the extracted
-    // handles so the bridge keeps its Value-based shape.
     let in_pipe = Value::pipe_handle(in_pipe);
     let out_pipe = Value::pipe_handle(out_pipe);
     let initial = if rows > 0 && cols > 0 {
@@ -760,9 +712,7 @@ fn ssh_pty_run<P: ProcessManager>(
         session.pty_size()
     };
     let cancel = AtomicBool::new(false);
-    // Report the child code on the wire at exit observation (best
-    // effort: a session that never pumps has no reader, and a torn-down
-    // channel drops it). The returned code stays authoritative.
+    // Best effort: an unpumped session has no reader.
     let report = |code: u32| {
         let _ = session.send_exit_status(code);
     };
@@ -779,10 +729,7 @@ fn ssh_pty_run<P: ProcessManager>(
     Ok(Value::int(code))
 }
 
-/// Field table for the `SSH_SERVE` result bundle, backing the
-/// `SSH_SERVE_INFO` schema and the `SSH_SERVE` return tag: one source
-/// for the shape the host mints, so introspection, enforcement, and
-/// documentation cannot drift apart.
+/// Field table backing the `SSH_SERVE_INFO` schema and return tag.
 fn serve_result_fields() -> Arc<[Field]> {
     Arc::from(vec![
         Field {
@@ -818,8 +765,7 @@ fn serve_result_fields() -> Arc<[Field]> {
     ])
 }
 
-/// Field table for the `SSH_DEQUEUE` result bundle, backing the
-/// `SSH_DEQUEUE_INFO` schema and the `SSH_DEQUEUE` return tag.
+/// Field table backing the `SSH_DEQUEUE_INFO` schema and return tag.
 fn dequeue_result_fields() -> Arc<[Field]> {
     Arc::from(vec![
         Field {

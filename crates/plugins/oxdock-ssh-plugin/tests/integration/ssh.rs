@@ -506,15 +506,15 @@ fn drive_outer_resize(addr: SocketAddr, cols: u16, rows: u16) {
 }
 
 #[test]
-#[cfg(unix)]
 #[cfg_attr(
     miri,
-    ignore = "needs loopback TCP plus threads plus forkpty plus subprocesses"
+    ignore = "needs loopback TCP plus threads plus a terminal plus subprocesses"
 )]
-fn pty_explicit_size_unix() {
-    // A pty sized explicitly must report exactly that size: `stty size`
-    // prints "rows cols". The session comes from DEQUEUE; explicit dims
-    // override whatever the client requested.
+fn pty_explicit_size() {
+    // A pty sized explicitly must report exactly that size. The session
+    // comes from DEQUEUE; explicit dims override whatever the client
+    // requested. Unix reads `stty size` ("rows cols"); ConPTY answers
+    // `mode con`.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-pty-size");
@@ -524,13 +524,25 @@ fn pty_explicit_size_unix() {
         INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-pty-size", {username: "u", password: "p"})
         WRITE addr.txt "{{ $m.addr }}"
+        LET $child: LIST<STRING> = ["sh", "-c", "stty size"]
+        [family:windows] {
+            $child = ["cmd", "/c", "mode con"]
+        }
         LET $h: HANDLE = ASYNC {
             LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             LET $in: PIPE
             LET $out: PIPE
-            LET $t: HANDLE = ASYNC { SSH_PTY_RUN($dq.session, ["sh", "-c", "stty size"], 40, 100, $in, $out) }
+            LET $t: HANDLE = ASYNC { SSH_PTY_RUN($dq.session, $child, 40, 100, $in, $out) }
             AWAIT $t
-            ASSERT_CONTAINS $out "40 100"
+            [family:unix] {
+                ASSERT_CONTAINS $out "40 100"
+            }
+            [family:windows] {
+                ASSERT_CONTAINS $out "Lines:"
+                ASSERT_CONTAINS $out "40"
+                ASSERT_CONTAINS $out "Columns:"
+                ASSERT_CONTAINS $out "100"
+            }
         }
         AWAIT $h
         SSH_CLOSE($m.server)
@@ -547,57 +559,15 @@ fn pty_explicit_size_unix() {
 }
 
 #[test]
-#[cfg(windows)]
 #[cfg_attr(
     miri,
-    ignore = "needs loopback TCP plus threads plus ConPTY plus subprocesses"
+    ignore = "needs loopback TCP plus threads plus a terminal plus subprocesses"
 )]
-fn pty_explicit_size_windows() {
-    // Same contract through ConPTY: `mode con` reports the sized buffer.
-    let temp = GuardedPath::tempdir().unwrap();
-    let root = guard_root(&temp);
-    let registry = mapped_registry("test-ssh-pty-size-win");
-    let probe = root.clone();
-    let script = indoc! {r#"
-        IMPORT [STD, SSH]
-        INHERIT_ENV [PATH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-pty-size-win", {username: "u", password: "p"})
-        WRITE addr.txt "{{ $m.addr }}"
-        LET $h: HANDLE = ASYNC {
-            LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
-            LET $in: PIPE
-            LET $out: PIPE
-            LET $t: HANDLE = ASYNC { SSH_PTY_RUN($dq.session, ["cmd", "/c", "mode con"], 40, 100, $in, $out) }
-            AWAIT $t
-            ASSERT_CONTAINS $out "Lines:"
-            ASSERT_CONTAINS $out "40"
-            ASSERT_CONTAINS $out "Columns:"
-            ASSERT_CONTAINS $out "100"
-        }
-        AWAIT $h
-        SSH_CLOSE($m.server)
-    "#};
-    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
-    let addr = read_addr(&probe);
-    let addr: SocketAddr = addr.parse().expect("addr parses");
-    let client = TestClient::connect(addr, "u", "p").expect("client connects");
-    handle
-        .join()
-        .expect("script thread joins")
-        .expect("explicit pty size runs");
-    client.close();
-}
-
-#[test]
-#[cfg(unix)]
-#[cfg_attr(
-    miri,
-    ignore = "needs loopback TCP plus threads plus forkpty plus subprocesses"
-)]
-fn pty_child_sees_session_env_unix() {
+fn pty_child_sees_session_env() {
     // Block-scoped ENV rides into the pty spawn: the child observes the
     // dequeued session's identity (user, client and server addresses,
-    // requested command) through SSH_* vars.
+    // requested command) through SSH_* vars. Unix expands `$VAR`;
+    // ConPTY expands `%VAR%`.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-env");
@@ -608,6 +578,10 @@ fn pty_child_sees_session_env_unix() {
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-env", {username: "u", password: "p"})
         WRITE addr.txt "{{ $m.addr }}"
         ENV PROBE_TOP="top"
+        LET $child: LIST<STRING> = ["sh", "-c", "echo relay:$SSH_USER:$SSH_CLIENT:$SSH_SERVER:$SSH_COMMAND:$PROBE_TOP"]
+        [family:windows] {
+            $child = ["cmd", "/c", "echo relay:%SSH_USER%:%SSH_CLIENT%:%SSH_SERVER%:%SSH_COMMAND%:%PROBE_TOP%"]
+        }
         LET $h: HANDLE = ASYNC {
             LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             ENV SSH_USER="{{ $dq.username }}"
@@ -616,7 +590,7 @@ fn pty_child_sees_session_env_unix() {
             ENV SSH_COMMAND="{{ $dq.command }}"
             LET $in: PIPE
             LET $out: PIPE
-            LET $t: HANDLE = ASYNC { SSH_PTY_RUN($dq.session, ["sh", "-c", "echo relay:$SSH_USER:$SSH_CLIENT:$SSH_SERVER:$SSH_COMMAND:$PROBE_TOP"], 0, 0, $in, $out) }
+            LET $t: HANDLE = ASYNC { SSH_PTY_RUN($dq.session, $child, 0, 0, $in, $out) }
             AWAIT $t
             ASSERT_CONTAINS $out "relay:u:127.0.0.1:"
             ASSERT_CONTAINS $out "127.0.0.1:"
@@ -639,58 +613,16 @@ fn pty_child_sees_session_env_unix() {
 }
 
 #[test]
-#[cfg(windows)]
-#[cfg_attr(
-    miri,
-    ignore = "needs loopback TCP plus threads plus ConPTY plus subprocesses"
-)]
-fn pty_child_sees_session_env_windows() {
-    // Same contract through ConPTY: `cmd` expands the relayed vars.
-    let temp = GuardedPath::tempdir().unwrap();
-    let root = guard_root(&temp);
-    let registry = mapped_registry("test-ssh-env-win");
-    let probe = root.clone();
-    let script = indoc! {r#"
-        IMPORT [STD, SSH]
-        INHERIT_ENV [PATH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-env-win", {username: "u", password: "p"})
-        WRITE addr.txt "{{ $m.addr }}"
-        LET $h: HANDLE = ASYNC {
-            LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
-            ENV SSH_USER="{{ $dq.username }}"
-            ENV SSH_CLIENT="{{ $dq.addr }}"
-            ENV SSH_SERVER="{{ $m.addr }}"
-            LET $in: PIPE
-            LET $out: PIPE
-            LET $t: HANDLE = ASYNC { SSH_PTY_RUN($dq.session, ["cmd", "/c", "echo relay:%SSH_USER%:%SSH_CLIENT%:%SSH_SERVER%"], 0, 0, $in, $out) }
-            AWAIT $t
-            ASSERT_CONTAINS $out "relay:u:127.0.0.1:"
-            ASSERT_CONTAINS $out "127.0.0.1:"
-        }
-        AWAIT $h
-        SSH_CLOSE($m.server)
-    "#};
-    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
-    let addr = read_addr(&probe);
-    let addr: SocketAddr = addr.parse().expect("addr parses");
-    let client = TestClient::connect(addr, "u", "p").expect("client connects");
-    handle
-        .join()
-        .expect("script thread joins")
-        .expect("session env relay runs");
-    client.close();
-}
-
-#[test]
 #[cfg(unix)]
 #[cfg_attr(
     miri,
     ignore = "needs loopback TCP plus threads plus forkpty plus subprocesses"
 )]
 fn argv_preserves_quote_backslash_unix() {
-    // Baseline argv fidelity: `execvp` carries the dequeued command
-    // byte-verbatim, so `printf %s` must observe quotes and backslashes
-    // exactly as the client sent them.
+    // Unix-only by construction: asserts `execvp` delivers argv
+    // byte-verbatim. Windows joins argv into one command line by
+    // design, so the same assertion cannot hold there; the Windows
+    // side pins its own contract in the `cmd_*` tests below.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-argv-unix");
@@ -731,8 +663,9 @@ fn argv_preserves_quote_backslash_unix() {
     ignore = "needs loopback TCP plus threads plus ConPTY plus subprocesses"
 )]
 fn cmd_argv_preserves_backslashes_windows() {
-    // Backslashes without quotes must survive the argv to command-line
-    // join: `cmd` receives them literally.
+    // Issue 223 claim, `cmd`-specific: backslashes without quotes must
+    // survive the argv to command-line join literally. No Unix twin:
+    // Unix never joins, proven by `argv_preserves_quote_backslash_unix`.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-argv-bs-win");
@@ -818,7 +751,9 @@ fn cmd_env_quote_behavior_windows() {
     ignore = "needs loopback TCP plus threads plus ConPTY plus subprocesses"
 )]
 fn cmd_argv_percent_verbatim_windows() {
-    // Percent signs travel verbatim through the spawn: no doubling.
+    // Issue 223 claim, `cmd`-specific: percent signs travel verbatim
+    // through the spawn with no doubling. No Unix twin: `%` is
+    // ordinary data outside `cmd`.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-argv-pct-win");
@@ -860,7 +795,10 @@ fn cmd_argv_percent_verbatim_windows() {
 )]
 fn env_relay_preserves_backslashes_windows() {
     // Environment relay is byte-verbatim: backslash runs in the
-    // dequeued command must reach `cmd` untouched.
+    // dequeued command must reach `cmd` untouched. Windows-only
+    // because the corruption claim (issue 223 bug 2) is about `cmd`
+    // observing the relay; the shared verbatim path is proven on both
+    // platforms by `pty_child_sees_session_env`.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-env-bs-win");
@@ -902,10 +840,11 @@ fn env_relay_preserves_backslashes_windows() {
     ignore = "needs loopback TCP plus threads plus ConPTY plus subprocesses"
 )]
 fn interactive_shell_first_bytes_survive_windows() {
-    // Stress probe for first-keystroke loss on fresh interactive
-    // sessions: each of several fresh pty+shell connections sends a
-    // marker immediately after the handshake, and every marker must
-    // round-trip through the echo pump.
+    // Windows-only stress probe for the issue 223 first-keystroke loss:
+    // the suspected race site is the ConPTY console-setup handshake,
+    // which has no Unix counterpart. Each of several fresh pty+shell
+    // connections sends a marker immediately after the handshake, and
+    // every marker must round-trip through the echo pump.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-shell-stress");
@@ -1017,15 +956,16 @@ fn semaphore_guards_the_accept_loop() {
 }
 
 #[test]
-#[cfg(unix)]
 #[cfg_attr(
     miri,
-    ignore = "needs loopback TCP plus threads plus forkpty plus subprocesses"
+    ignore = "needs loopback TCP plus threads plus a terminal plus subprocesses"
 )]
-fn pty_live_resize_unix() {
-    // An outer window-change mid-session must resize the local terminal:
-    // `stty size` read after the change reports the new dimensions. The
-    // session's own cell carries the resize; other sessions never see it.
+fn pty_live_resize() {
+    // An outer window-change mid-session must resize the local terminal.
+    // The session's own cell carries the resize; other sessions never
+    // see it. Unix reads `stty size` after a delay; ConPTY answers
+    // `mode con` (`ping` is the delay hack: `timeout` can interact
+    // with stdin).
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-resize");
@@ -1034,61 +974,25 @@ fn pty_live_resize_unix() {
         INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-resize", {username: "u", password: "p"})
         WRITE addr.txt "{{ $m.addr }}"
+        LET $child: LIST<STRING> = ["sh", "-c", "sleep 4; stty size"]
+        [family:windows] {
+            $child = ["cmd", "/c", "ping -n 5 127.0.0.1 >nul & mode con"]
+        }
         LET $h: HANDLE = ASYNC {
             LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             LET $in: PIPE
             LET $out: PIPE
-            LET $t: HANDLE = ASYNC { SSH_PTY_RUN($dq.session, ["sh", "-c", "sleep 4; stty size"], 0, 0, $in, $out) }
+            LET $t: HANDLE = ASYNC { SSH_PTY_RUN($dq.session, $child, 0, 0, $in, $out) }
             AWAIT $t
-            ASSERT_CONTAINS $out "50 120"
-        }
-        AWAIT $h
-        SSH_CLOSE($m.server)
-    "#};
-    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
-    let addr_path = temp.as_guarded_path().join("addr.txt").unwrap();
-    let addr: SocketAddr = loop {
-        std::thread::sleep(Duration::from_millis(100));
-        let text = read_trimmed(&addr_path);
-        if !text.is_empty() {
-            break text.parse().expect("addr parses");
-        }
-    };
-    drive_outer_resize(addr, 120, 50);
-    handle
-        .join()
-        .expect("script thread joins")
-        .expect("resize script completes");
-}
-
-#[test]
-#[cfg(windows)]
-#[cfg_attr(
-    miri,
-    ignore = "needs loopback TCP plus threads plus ConPTY plus subprocesses"
-)]
-fn pty_live_resize_windows() {
-    // Same contract through ConPTY: `mode con` read after the change
-    // reports the new buffer. `ping` is the delay hack (`timeout` can
-    // interact with stdin).
-    let temp = GuardedPath::tempdir().unwrap();
-    let root = guard_root(&temp);
-    let registry = mapped_registry("test-ssh-resize-win");
-    let script = indoc! {r#"
-        IMPORT [STD, SSH]
-        INHERIT_ENV [PATH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-resize-win", {username: "u", password: "p"})
-        WRITE addr.txt "{{ $m.addr }}"
-        LET $h: HANDLE = ASYNC {
-            LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
-            LET $in: PIPE
-            LET $out: PIPE
-            LET $t: HANDLE = ASYNC { SSH_PTY_RUN($dq.session, ["cmd", "/c", "ping -n 5 127.0.0.1 >nul & mode con"], 0, 0, $in, $out) }
-            AWAIT $t
-            ASSERT_CONTAINS $out "Lines:"
-            ASSERT_CONTAINS $out "50"
-            ASSERT_CONTAINS $out "Columns:"
-            ASSERT_CONTAINS $out "120"
+            [family:unix] {
+                ASSERT_CONTAINS $out "50 120"
+            }
+            [family:windows] {
+                ASSERT_CONTAINS $out "Lines:"
+                ASSERT_CONTAINS $out "50"
+                ASSERT_CONTAINS $out "Columns:"
+                ASSERT_CONTAINS $out "120"
+            }
         }
         AWAIT $h
         SSH_CLOSE($m.server)
@@ -2663,15 +2567,18 @@ fn mapped_name_connect_roundtrip() {
 }
 
 #[test]
-#[cfg(unix)]
 #[cfg_attr(
     miri,
-    ignore = "needs loopback TCP plus threads plus forkpty plus subprocesses"
+    ignore = "needs loopback TCP plus threads plus a terminal plus subprocesses"
 )]
-fn proxy_client_lingers_for_reply_and_status_unix() {
+fn proxy_client_lingers_for_reply_and_status() {
     // Client-side pumps must not end with their own stdin EOF: the
     // echo reply and the exit-status arrive after it. Ending early
     // returns first and disconnects, killing the server mid-reply.
+    // Same shape as the README proxy fence: each child reads a stdin
+    // line and exits by itself (`cat` on Unix; a console line read on
+    // Windows, where children never observe stdin EOF), and the client
+    // sends CR with the line because consoles submit on CR only.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-proxy-linger");
@@ -2679,11 +2586,15 @@ fn proxy_client_lingers_for_reply_and_status_unix() {
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-proxy-linger", {username: "guest", password: "pass"})
+        LET $child: LIST<STRING> = ["cat"]
+        [family:windows] {
+            $child = ["cmd", "/v:on", "/c", "(set /p line= && echo got:!line!)"]
+        }
         LET $srv: HANDLE = ASYNC {
             LET $sess: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             LET $c_in: PIPE
             LET $c_out: PIPE
-            LET $pty: HANDLE = ASYNC { SSH_PTY_RUN($sess.session, ["cat"], 0, 0, $c_out, $c_in) }
+            LET $pty: HANDLE = ASYNC { SSH_PTY_RUN($sess.session, $child, 0, 0, $c_out, $c_in) }
             LET $pump: HANDLE = ASYNC { SSH_PUMP_CHANNEL($sess.session, $c_in, $c_out) }
             LET $code: INT = AWAIT $pty
             ASSERT_EQ $code 0
@@ -2692,7 +2603,7 @@ fn proxy_client_lingers_for_reply_and_status_unix() {
         LET $cin: PIPE
         LET $cout: PIPE
         LET $c: HANDLE = ASYNC { SSH_CONNECT("test-ssh-proxy-linger", "guest", "pass", $cin, $cout) }
-        WITH_IO [stdout=$cin] ECHO "linger-ping"
+        WITH_IO [stdout=$cin] ECHO "linger-ping\r"
         LET $cDone: MAP<ANY> = AWAIT $c
         ASSERT_EQ $cDone.closed true
         ASSERT_EQ $cDone.exit_status 0
@@ -2747,12 +2658,11 @@ fn send_exit_status_reaches_exec_client() {
 }
 
 #[test]
-#[cfg(unix)]
 #[cfg_attr(
     miri,
-    ignore = "needs loopback TCP plus threads plus forkpty plus subprocesses"
+    ignore = "needs loopback TCP plus threads plus a terminal plus subprocesses"
 )]
-fn pty_child_code_reaches_exec_client_unix() {
+fn pty_child_code_reaches_exec_client() {
     // The proxy shape from the issue: the `SSH_PTY_RUN` exit code is
     // reported on the wire at child exit (ahead of the pump drain), so
     // stock clients report the real code instead of 255. No explicit
@@ -2764,11 +2674,15 @@ fn pty_child_code_reaches_exec_client_unix() {
         IMPORT [STD, SSH]
         INHERIT_ENV [PATH]
         LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-exit-status-pty", {username: "guest", password: "pass"})
+        LET $child: LIST<STRING> = ["sh", "-c", "exit 7"]
+        [family:windows] {
+            $child = ["cmd", "/c", "exit 7"]
+        }
         LET $h: HANDLE = ASYNC {
             LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
             LET $c_in: PIPE
             LET $c_out: PIPE
-            LET $t: HANDLE = ASYNC { SSH_PTY_RUN($dq.session, ["sh", "-c", "exit 7"], 0, 0, $c_out, $c_in) }
+            LET $t: HANDLE = ASYNC { SSH_PTY_RUN($dq.session, $child, 0, 0, $c_out, $c_in) }
             LET $p: HANDLE = ASYNC { SSH_PUMP_CHANNEL($dq.session, $c_in, $c_out) }
             LET $code: INT = AWAIT $t
             ASSERT_EQ $code 7
@@ -2778,50 +2692,6 @@ fn pty_child_code_reaches_exec_client_unix() {
         SSH_CLOSE($m.server)
     "#};
     let addr = service_addr(&registry, "test-ssh-exit-status-pty");
-    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
-    std::thread::sleep(Duration::from_secs(2));
-    let mut client =
-        TestClient::connect_exec(addr, "guest", "pass", "probe").expect("client exec connects");
-    let code = client
-        .wait_exit_status(Duration::from_secs(10))
-        .expect("exit-status arrives");
-    assert_eq!(code, 7, "client must observe the child exit code");
-    client.close();
-    handle
-        .join()
-        .expect("script thread joins")
-        .expect("proxy status script completes");
-}
-
-#[test]
-#[cfg(windows)]
-#[cfg_attr(
-    miri,
-    ignore = "needs loopback TCP plus threads plus ConPTY plus subprocesses"
-)]
-fn pty_child_code_reaches_exec_client_windows() {
-    // Same contract through ConPTY: `cmd` exit code reaches the client.
-    let temp = GuardedPath::tempdir().unwrap();
-    let root = guard_root(&temp);
-    let registry = mapped_registry("test-ssh-exit-status-pty-win");
-    let script = indoc! {r#"
-        IMPORT [STD, SSH]
-        INHERIT_ENV [PATH]
-        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-exit-status-pty-win", {username: "guest", password: "pass"})
-        LET $h: HANDLE = ASYNC {
-            LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
-            LET $c_in: PIPE
-            LET $c_out: PIPE
-            LET $t: HANDLE = ASYNC { SSH_PTY_RUN($dq.session, ["cmd", "/c", "exit 7"], 0, 0, $c_out, $c_in) }
-            LET $p: HANDLE = ASYNC { SSH_PUMP_CHANNEL($dq.session, $c_in, $c_out) }
-            LET $code: INT = AWAIT $t
-            ASSERT_EQ $code 7
-            AWAIT $p
-        }
-        AWAIT $h
-        SSH_CLOSE($m.server)
-    "#};
-    let addr = service_addr(&registry, "test-ssh-exit-status-pty-win");
     let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
     std::thread::sleep(Duration::from_secs(2));
     let mut client =
