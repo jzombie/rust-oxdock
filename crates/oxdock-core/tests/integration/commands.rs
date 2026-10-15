@@ -3,9 +3,7 @@ use oxdock_core::{
     ExecIo, run_steps, run_steps_with_context, run_steps_with_context_result_with_io,
     run_steps_with_fs,
 };
-use oxdock_fs::{
-    GuardedPath, GuardedTempDir, PathResolver, ensure_git_identity, env as oxdock_env,
-};
+use oxdock_fs::{GuardedPath, GuardedTempDir, PathResolver, ensure_git_identity};
 use oxdock_parser::{IoBinding, IoStream, Step, StepKind, Value, WorkspaceTarget};
 use oxdock_process::CommandBuilder;
 use std::collections::BTreeMap;
@@ -22,18 +20,6 @@ fn capture_pipeline(pipe: &str, path: &str, cmd: StepKind) -> Vec<Step> {
     // internal to the test, so underscores stand in.
     let var = pipe.replace('-', "_");
     vec![
-        // Closed child env: captured commands resolve through the listed PATH.
-        Step {
-            guard: None,
-            kind: StepKind::InheritEnv {
-                keys: vec![
-                    oxdock_env::os::PATH.to_string(),
-                    oxdock_env::os::windows::SYSTEM_ROOT.to_string(),
-                ],
-            },
-            scope_enter: 0,
-            scope_exit: 0,
-        },
         Step {
             guard: None,
             kind: StepKind::Assign {
@@ -259,17 +245,6 @@ fn commands_behave_cross_platform() {
     };
 
     let steps = vec![
-        Step {
-            guard: None,
-            kind: StepKind::InheritEnv {
-                keys: vec![
-                    oxdock_env::os::PATH.to_string(),
-                    oxdock_env::os::windows::SYSTEM_ROOT.to_string(),
-                ],
-            },
-            scope_enter: 0,
-            scope_exit: 0,
-        },
         Step {
             guard: None,
             kind: StepKind::Workdir("/".into()),
@@ -1676,7 +1651,6 @@ fn run_exec_form_rejects_task_handles() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let script = indoc! {r#"
-        INHERIT_ENV [PATH]
         LET $t: HANDLE = ASYNC ECHO hi
         RUN ["cargo", $t]
     "#};
@@ -1856,10 +1830,10 @@ fn inspect_reports_script_pipe_for_single_run() {
     // One pipe kind: even single-RUN producers stay store-and-forward
     // script pipes, so INSPECT always reports script no matter which
     // task or command bound the handle. `cargo --version` is the portable
-    // single-RUN producer; its tiny output never fills the pipe. Bare
-    // program names resolve through the listed PATH (closed child env).
+    // single-RUN producer; its tiny output never fills the pipe. `cargo`
+    // needs the ambient home for toolchain lookup, so the suite bridges
+    // the host home explicitly instead of inheriting it ambiently.
     let script = indoc! {r#"
-        INHERIT_ENV [PATH]
         [family:unix] INHERIT_ENV [HOME]
         [family:windows] INHERIT_ENV [USERPROFILE]
         LET $osp: PIPE
@@ -2321,15 +2295,8 @@ fn assert_contains_sees_interpreter_output_without_capture_sink() {
 fn assert_contains_sees_streamed_child_output() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    #[cfg(unix)]
     let script = indoc! {r#"
-        INHERIT_ENV [PATH]
         RUN "echo child-echo-line"
-        ASSERT_CONTAINS stdout "child-echo-line"
-    "#};
-    #[cfg(windows)]
-    let script = indoc! {r#"
-        RUN "cmd /c echo child-echo-line"
         ASSERT_CONTAINS stdout "child-echo-line"
     "#};
     run_script(&root, script).expect("child output is recorded");
@@ -2369,10 +2336,8 @@ fn run_exec_form_spawns_directly_and_pipes_stdout() {
 
     // `cargo` drives the test suite itself, so it exists on every platform
     // without relying on shell builtins (`echo` is not a Windows executable).
-    // The bare program name resolves through the listed PATH (closed child env).
     let script = indoc!(
         r#"
-        INHERIT_ENV [PATH]
         [family:unix] INHERIT_ENV [HOME]
         [family:windows] INHERIT_ENV [USERPROFILE]
         LET $cap: PIPE
@@ -2407,7 +2372,6 @@ fn run_exec_nonzero_status_bails_with_step_context() {
     let root = guard_root(&temp);
 
     let steps = oxdock_core::parse_script(indoc! {r#"
-        INHERIT_ENV [PATH]
         [family:unix] INHERIT_ENV [HOME]
         [family:windows] INHERIT_ENV [USERPROFILE]
         RUN ["cargo", "--invalid-oxdock-flag-xyz"]
@@ -2541,10 +2505,8 @@ fn archive_interoperates_with_system_tar() {
         .set_permissions_mode_unix(&root.join("bundle/tool.sh").unwrap(), 0o755)
         .unwrap();
 
-    // DSL packs, system tar unpacks: the stub handshake. The bare `tar`
-    // resolves through the listed PATH (closed child env).
+    // DSL packs, system tar unpacks: the stub handshake.
     let pack = indoc! {r#"
-        INHERIT_ENV [PATH]
         ARCHIVE bundle bundle.tar.gz
         MKDIR sys-out
         RUN ["tar", "-xzf", "bundle.tar.gz", "-C", "sys-out"]
@@ -2567,9 +2529,8 @@ fn archive_interoperates_with_system_tar() {
     }
 
     // System packs, DSL unpacks: the release handshake, `./`-prefixed
-    // members included. The bare `tar` resolves through the listed PATH.
+    // members included.
     let unpack = indoc! {r#"
-        INHERIT_ENV [PATH]
         MKDIR sys-src
         WRITE sys-src/note.txt sys-note
         RUN ["tar", "-czf", "sys.tar.gz", "-C", "sys-src", "./note.txt"]
@@ -3789,10 +3750,8 @@ fn with_io_bg_routes_stdin_stdout() {
     let output = Arc::new(Mutex::new(Vec::new()));
 
     // Spawns a background non-blocking pass-through child process concurrently
-    // alongside a mainline foreground step. Bare names resolve through the
-    // listed PATH (closed child env).
+    // alongside a mainline foreground step.
     let script = indoc! {r#"
-        INHERIT_ENV [PATH]
         [family:unix] WITH_IO [stdin, stdout] ASYNC RUN "cat"
         [family:windows] WITH_IO [stdin, stdout] ASYNC RUN "sort"
         RUN "echo foreground"
@@ -4861,7 +4820,7 @@ fn guarded_target_selection_with_unconditional_capture() {
     // plain string under guard; the RUN capture runs unconditionally, so
     // every downstream read is covered on all paths.
     let script = indoc! {r#"
-        INHERIT_ENV [PLAYGROUND_MAIN, PATH]
+        INHERIT_ENV [PLAYGROUND_MAIN]
         LET $target: STRING = "HEAD"
         [eq(env:PLAYGROUND_MAIN, "1")] $target = "main"
         LET $body: STRING = RUN echo diff $target

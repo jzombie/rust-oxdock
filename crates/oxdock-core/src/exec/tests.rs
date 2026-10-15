@@ -5318,7 +5318,6 @@ fn force_close_eofs_despite_writer_and_keeper() {
 }
 
 #[test]
-#[cfg(unix)]
 #[cfg_attr(
     miri,
     ignore = "spawns real OS processes and kernel pipes, which die under Miri isolation"
@@ -5337,7 +5336,6 @@ fn script_pipe_fresh_handles_across_sessions() {
     let temp = GuardedPath::tempdir().expect("tempdir");
     let root = temp.as_guarded_path().clone();
     let steps = crate::parse_script(indoc! {r#"
-        INHERIT_ENV [PATH]
         LET $x: PIPE
         WITH_IO [stdout=$x] ASYNC RUN "echo one"
         WITH_IO [stdin=$x] WRITE f1.txt
@@ -5358,7 +5356,8 @@ fn script_pipe_fresh_handles_across_sessions() {
         let content = check
             .read_to_string(&root.join("f1.txt").expect("join"))
             .expect("read file");
-        assert_eq!(content, "one\n");
+        // `cmd` emits CRLF; the proof is handle freshness, not line endings.
+        assert_eq!(content.replace("\r\n", "\n"), "one\n");
     }
 }
 
@@ -5674,20 +5673,19 @@ fn read_case_file(temp: &oxdock_fs::GuardedTempDir, name: &str) -> String {
 }
 
 #[test]
-#[cfg(unix)]
 #[cfg_attr(
     miri,
     ignore = "spawns real OS processes, which die under Miri isolation"
 )]
 fn seeded_host_path_runs_shell_without_prelude() {
-    // No INHERIT_ENV at all: the mirrored host PATH still resolves `sh`.
+    // No INHERIT_ENV at all: the mirrored host PATH still resolves the
+    // shell (`sh` or `cmd` per platform).
     run_seeded_case(indoc! {r#"
         RUN "echo tier-ok"
     "#});
 }
 
 #[test]
-#[cfg(unix)]
 #[cfg_attr(
     miri,
     ignore = "spawns real OS processes, which die under Miri isolation"
@@ -5698,13 +5696,17 @@ fn seeded_path_baseline_visible_to_expansion() {
     let temp = run_seeded_case(indoc! {r#"
         WRITE path.txt "{{ env:PATH }}"
     "#});
-    let expected = std::env::var(oxdock_fs::env::os::PATH)
-        .unwrap_or_else(|_| oxdock_fs::env::os::unix::DEFAULT_PATH.to_string());
+    #[allow(clippy::disallowed_macros)]
+    let fallback = if cfg!(windows) {
+        oxdock_fs::env::os::windows::DEFAULT_PATH
+    } else {
+        oxdock_fs::env::os::unix::DEFAULT_PATH
+    };
+    let expected = std::env::var(oxdock_fs::env::os::PATH).unwrap_or_else(|_| fallback.to_string());
     assert_eq!(read_case_file(&temp, "path.txt"), expected);
 }
 
 #[test]
-#[cfg(unix)]
 #[cfg_attr(
     miri,
     ignore = "spawns real OS processes, which die under Miri isolation"
@@ -5718,29 +5720,31 @@ fn seeded_explicit_path_wins_over_seed() {
 }
 
 #[test]
-#[cfg(unix)]
 #[cfg_attr(
     miri,
     ignore = "spawns real OS processes, which die under Miri isolation"
 )]
 fn seeded_tmpdir_bound_to_scratch_not_host() {
     // TMPDIR mirrors the host when set; only an unset host TMPDIR
-    // binds the session scratch.
+    // binds the session scratch. The name rides the Windows seed too,
+    // for cross-compiled tools.
     let temp = run_seeded_case(indoc! {r#"
         WRITE tmpdir.txt "{{ env:TMPDIR }}"
     "#});
     let bound = read_case_file(&temp, "tmpdir.txt");
     match std::env::var(oxdock_fs::env::os::unix::TMPDIR).ok() {
         Some(host) => assert_eq!(bound, host, "TMPDIR must mirror the host, got {bound:?}"),
-        None => assert!(
-            bound.ends_with("/tmp") && bound.contains("oxdock-"),
-            "TMPDIR must bind the session scratch tmp dir when the host lacks it, got {bound:?}"
-        ),
+        None => {
+            let shaped = bound.replace('\\', "/");
+            assert!(
+                shaped.ends_with("/tmp") && shaped.contains("oxdock-"),
+                "TMPDIR must bind the session scratch tmp dir when the host lacks it, got {bound:?}"
+            );
+        }
     }
 }
 
 #[test]
-#[cfg(unix)]
 #[cfg_attr(
     miri,
     ignore = "spawns real OS processes, which die under Miri isolation"

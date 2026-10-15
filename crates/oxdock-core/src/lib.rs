@@ -94,8 +94,6 @@ mod tests {
     use oxdock_fs::{
         GuardedPath, GuardedTempDir, PathResolver, env as oxdock_env, to_forward_slashes,
     };
-    use oxdock_parser::{Step, StepKind};
-    #[cfg(unix)]
     use std::time::Instant;
 
     fn guard_root(temp: &GuardedTempDir) -> GuardedPath {
@@ -132,22 +130,7 @@ mod tests {
             "printf %s \"$CARGO_TARGET_DIR\" > seen.txt"
         };
 
-        let steps = vec![
-            Step {
-                guard: None,
-                kind: StepKind::InheritEnv {
-                    keys: vec![oxdock_env::os::PATH.to_string()],
-                },
-                scope_enter: 0,
-                scope_exit: 0,
-            },
-            Step {
-                guard: None,
-                kind: StepKind::Run(cmd.to_string().into()),
-                scope_enter: 0,
-                scope_exit: 0,
-            },
-        ];
+        let steps = parse_script(&format!("RUN {cmd}")).unwrap();
 
         run_steps(&root, &steps).unwrap();
 
@@ -172,8 +155,8 @@ mod tests {
         let root = guard_root(&temp);
 
         // Snapshot-rooted RUN executes against the snapshot workdir.
-        // Closed child env: the shell resolves through the listed PATH.
-        let steps = parse_script("INHERIT_ENV [PATH]\nRUN echo hi").unwrap();
+        // The seeded host PATH resolves the shell with no allowlist.
+        let steps = parse_script("RUN echo hi").unwrap();
         let output = run_steps_with_lazy_snapshot(&root, &steps, ExecIo::new()).unwrap();
         assert!(
             output.snapshot.is_materialized(),
@@ -182,7 +165,6 @@ mod tests {
 
         // LOCAL-rooted RUN executes against the live tree.
         let steps = parse_script(indoc! {r#"
-            INHERIT_ENV [PATH]
             WORKSPACE LOCAL
             RUN echo hi
         "#})
@@ -624,7 +606,6 @@ mod tests {
         assert!(exists(&root, "always.txt"), "unguarded step should run");
     }
 
-    #[cfg(unix)]
     #[cfg_attr(
         miri,
         ignore = "stdout streaming not supported for background command under Miri"
@@ -635,14 +616,17 @@ mod tests {
         let root = guard_root(&temp);
 
         // Background succeeds quickly; pipeline should complete without error.
-        // Closed child env: the shell resolves through the listed PATH.
-        let script = "INHERIT_ENV [PATH]\nASYNC RUN \"sh -c 'sleep 0.05'\"";
+        let script = indoc! {
+            r#"
+            [family:unix] ASYNC RUN "sh -c 'sleep 0.05'"
+            [family:windows] ASYNC RUN "cmd /c \"ping -n 1 127.0.0.1 > NUL\""
+            "#
+        };
         let steps = crate::parse_script(script).unwrap();
         let res = run_steps(&root, &steps);
         assert!(res.is_ok(), "ASYNC success should allow clean exit");
     }
 
-    #[cfg(unix)]
     #[cfg_attr(
         miri,
         ignore = "stdout streaming not supported for background command under Miri"
@@ -652,17 +636,23 @@ mod tests {
         let temp = GuardedPath::tempdir().unwrap();
         let root = guard_root(&temp);
 
-        let script = "INHERIT_ENV [PATH]\nASYNC RUN \"sh -c 'sleep 0.05; exit 7'\"";
+        let script = indoc! {
+            r#"
+            [family:unix] ASYNC RUN "sh -c 'sleep 0.05; exit 7'"
+            [family:windows] ASYNC RUN "cmd /c \"exit 7\""
+            "#
+        };
         let steps = crate::parse_script(script).unwrap();
         let err = run_steps(&root, &steps).unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("ASYNC process exited with status") || msg.contains("exit status: 7"),
+            msg.contains("ASYNC process exited with status")
+                || msg.contains("exit status: 7")
+                || msg.contains("exit code: 7"),
             "should surface failing ASYNC exit code"
         );
     }
 
-    #[cfg(unix)]
     #[cfg_attr(
         miri,
         ignore = "timing-sensitive background process test is unreliable under Miri"
@@ -674,9 +664,10 @@ mod tests {
 
         let script = indoc! {
             r#"
-            INHERIT_ENV [PATH]
-            ASYNC RUN "sh -c 'sleep 0.2; echo one > one.txt'"
-            ASYNC RUN "sh -c 'sleep 0.5; echo two > two.txt'"
+            [family:unix] ASYNC RUN "sh -c 'sleep 0.2; echo one > one.txt'"
+            [family:windows] ASYNC RUN "cmd /c \"ping -n 2 127.0.0.1 > NUL & echo one > one.txt\""
+            [family:unix] ASYNC RUN "sh -c 'sleep 0.5; echo two > two.txt'"
+            [family:windows] ASYNC RUN "cmd /c \"ping -n 3 127.0.0.1 > NUL & echo two > two.txt\""
             WRITE "done.txt" "ok"
             "#
         };
@@ -696,16 +687,23 @@ mod tests {
             "first background should finish and emit output"
         );
         // With the new poll-all model, both children run to completion.
-        // The second background (~0.5s) should also finish.
+        // The second background should also finish.
         assert!(
             exists(&root, "two.txt"),
             "second background should finish (poll-all waits for all)"
         );
 
-        let upper = 0.8;
+        // Shell sleep granularity differs per platform (`sleep` seconds
+        // against `ping` whole seconds), so only the bounds branch.
+        #[allow(clippy::disallowed_macros)]
+        let (lower, upper) = if cfg!(windows) {
+            (0.9, 3.0)
+        } else {
+            (0.15, 0.8)
+        };
         assert!(
-            elapsed.as_secs_f32() < upper && elapsed.as_secs_f32() > 0.15,
-            "should wait for both backgrounds (~0.5s); got {elapsed:?}"
+            elapsed.as_secs_f32() < upper && elapsed.as_secs_f32() > lower,
+            "should wait for both backgrounds; got {elapsed:?}"
         );
     }
 
@@ -749,7 +747,6 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[cfg_attr(
         miri,
         ignore = "stdout streaming not supported for background command under Miri"
@@ -761,8 +758,8 @@ mod tests {
 
         let script = indoc! {
             r#"
-            INHERIT_ENV [PATH]
-            ASYNC RUN "sh -c 'sleep 30; echo late > late.txt'"
+            [family:unix] ASYNC RUN "sh -c 'sleep 30; echo late > late.txt'"
+            [family:windows] ASYNC RUN "cmd /c \"ping -n 31 127.0.0.1 > NUL & echo late > late.txt\""
             EXIT 5
             "#
         };
@@ -819,25 +816,14 @@ mod tests {
         let temp = GuardedPath::tempdir().unwrap();
         let root = guard_root(&temp);
 
-        #[allow(clippy::disallowed_macros)]
-        let script = if cfg!(windows) {
-            indoc! {
-                r#"
-                INHERIT_ENV [PATH]
-                ENV FOO="bar"
-                RUN "echo %FOO% > run.txt"
-                ASYNC RUN "echo %FOO% > bg.txt"
-                "#
-            }
-        } else {
-            indoc! {
-                r#"
-                INHERIT_ENV [PATH]
-                ENV FOO="bar"
-                RUN "sh -c 'printf %s \"$FOO\" > run.txt'"
-                ASYNC RUN "sh -c 'printf %s \"$FOO\" > bg.txt'"
-                "#
-            }
+        let script = indoc! {
+            r#"
+            ENV FOO="bar"
+            [family:windows] RUN "echo %FOO% > run.txt"
+            [family:unix] RUN "sh -c 'printf %s \"$FOO\" > run.txt'"
+            [family:windows] ASYNC RUN "echo %FOO% > bg.txt"
+            [family:unix] ASYNC RUN "sh -c 'printf %s \"$FOO\" > bg.txt'"
+            "#
         };
 
         let steps = crate::parse_script(script).unwrap();
@@ -1269,21 +1255,18 @@ mod tests {
         let temp = GuardedPath::tempdir().unwrap();
         let root = guard_root(&temp);
 
-        // One unguarded allowlist per scope: absent names skip silently,
-        // so the SystemRoot entry is inert off Windows and load-bearing
-        // on it. The inner list re-adds PATH (children cannot spawn
-        // without it) but not OUTER: that omission is the assertion.
+        // One unguarded allowlist per scope: absent names skip silently.
+        // The seed already provides PATH at every reseed, so the lists
+        // only route OUTER: its omission inside is the assertion.
         // Writes stay inside the scopes that bind their variables:
         // block-local `$boxed` does not leak outward by design.
         let script = indoc!(
             r#"
-            INHERIT_ENV [PATH]
             ENV OUTER=outer-val
             [family:unix] LET $plain: STRING = RUN ["sh", "-c", "printenv OUTER || echo absent"]
             [family:windows] LET $plain: STRING = RUN ["cmd", "/c", "if defined OUTER (echo outer-val) else (echo absent)"]
             WRITE plain.txt "{{ $plain }}"
             ISOLATED {
-                INHERIT_ENV [PATH]
                 [family:unix] LET $boxed: STRING = RUN ["sh", "-c", "printenv OUTER || echo absent"]
                 [family:windows] LET $boxed: STRING = RUN ["cmd", "/c", "if defined OUTER (echo outer-val) else (echo absent)"]
                 WRITE boxed.txt "{{ $boxed }}"
@@ -1331,12 +1314,11 @@ mod tests {
         let temp = GuardedPath::tempdir().unwrap();
         let root = guard_root(&temp);
 
-        // One unguarded allowlist per scope (absent names skip silently).
         // The mid level re-adds OUTER; the deep level drops it again, so
         // the three dumps prove pass-through, re-adding, and narrowing.
+        // PATH needs no allowlist: the seed provides it at every level.
         let script = indoc!(
             r#"
-            INHERIT_ENV [PATH]
             ENV OUTER=outer-val
             FUNC DUMPENV() {
                 [family:unix] LET $o: STRING = RUN ["sh", "-c", "env"]
@@ -1346,11 +1328,10 @@ mod tests {
             LET $top: STRING = DUMPENV()
             WRITE top.txt "{{ $top }}"
             ISOLATED {
-                INHERIT_ENV [PATH, OUTER]
+                INHERIT_ENV [OUTER]
                 LET $mid: STRING = DUMPENV()
                 WRITE mid.txt "{{ $mid }}"
                 ISOLATED {
-                    INHERIT_ENV [PATH]
                     LET $deep: STRING = DUMPENV()
                     WRITE deep.txt "{{ $deep }}"
                 }
