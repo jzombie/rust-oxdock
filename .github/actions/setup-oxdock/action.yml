@@ -4,14 +4,13 @@
 # and runs it, `local` builds the caller's checkout with cargo. Both
 # land an engine in RUNNER_TEMP, then the fresh engine runs
 # post-install.oxfile (rename, PATH, smoke). Installers are fetched,
-# never vendored (remote consumers check out only this directory);
-# first bundled release is v0.24.4-alpha.
+# never vendored (remote consumers check out only this directory).
 name: Setup OxDock engine
 description: Install the oxdock interpreter so later steps can use shell oxdock.
 
 inputs:
   version:
-    description: Full release tag to install (e.g. v0.28.0-alpha; 0.28.0-alpha minimum where TEXT_* string surgery support matters), or `latest` to resolve the newest release. Ignored when source is `local`.
+    description: Full release tag to install (e.g. v0.29.0-alpha). Ignored when source is `local`.
     required: false
     default: latest
   binary-name:
