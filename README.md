@@ -4289,8 +4289,8 @@ Bare command names search `env:PATH` (`IS_EXEC("tar")` finds the
 first executable `tar`, plus `tar.exe`, on `PATH`); spellings
 containing a separator check that file directly. True means a real
 file with an executable bit on Unix, or a `PATHEXT` extension on
-Windows: each `env:PATHEXT` entry is probed in order (default
-`.COM;.EXE;.BAT;.CMD`, an explicitly empty value probes nothing). Absolute `PATH` entries resolve through the workspace as
+Windows: each `env:PATHEXT` entry is probed in order (unset or empty
+probes nothing). Absolute `PATH` entries resolve through the workspace as
 usual, so host probing wants `WORKSPACE SYSTEM` and an inherited
 `PATH`; anything unresolvable reads false, never errors. AST-only
 by design, like `PATH_TYPE`: there is no RPN arm for filesystem IO.
