@@ -1,87 +1,119 @@
 # Environment Variable Contracts
 
-Every environment variable the OxDock workspace reads, writes, or documents —
-with its current status after the build-script pipeline migration
-(Prototype commits, `d2b732e..HEAD`), exact consuming functions, and
-transition rationale.
+Every variable the engine seeds into script environments.
 
-Statuses:
+> Rendered by `cargo run -p docs-gen` from the contract declaration in
+> `oxdock_process::env_policy`. Do not edit by hand: the declaration is
+> the single source, and the table below renders it verbatim.
 
-- **Retained** — read by the same logical component as before the migration.
-- **Relocated** — same semantics, different owning crate/function.
-- **Purged** — intentionally deleted; a test or doc pins the removal.
-- **New** — introduced by the build-script pipeline.
+Script authors route non-essential host values explicitly with
+`INHERIT_ENV`. Everything else below arrives mirrored from the host,
+without declaration.
 
-| Variable | Status | Consumers (file : function) | Notes |
-|---|---|---|---|
-| `OXDOCK_WORKSPACE_ROOT` | Retained | `crates/sys/oxdock-fs/src/lib.rs` : `discover_workspace_root`; propagated to child processes via `oxdock-fs::FixtureInstance::cargo` / CLI | Overrides workspace-root discovery; highest-priority input |
-| `OXDOCK_INHERIT_STDOUT` | Retained | `crates/oxdock-core/src/exec/handlers.rs` : `run` (read from script env map) | Value `1`/`true` (case-insensitive) forces stdout+stderr inheritance even when capture streams are wired; pinned by executor tests |
-| `OXDOCK_EMBED_DEBUG` | Relocated (shared) | helpers `assets.rs` : `embed_debug_enabled()` → invoked from BOTH `oxdock-macros/src/lib.rs` : `build_assets` AND helpers `build_and_materialize` | Truthiness `1` / any-case `true` |
-| `RUST_ANALYZER_INTERNALS_DO_NOT_USE` | Relocated (shared) | helpers `assets.rs` : `execution_is_skipped_with` → invoked from BOTH the restored inline macros (`expand_embed_internal`/`expand_prepare_internal`) and helpers asset engine | IDE skip predicate: stub placeholder / silent success instead of execution |
-| `RUSTFLAGS` (`--cfg miri` substring) | Relocated (shared) | same as above | Miri-configured builds skip asset execution; unrelated flags (e.g. `-Dwarnings`) must NOT trigger it (negative branch pinned in tests) |
-| current-exe contains `rust-analyzer` | Relocated (shared) | same as above | Executable-name fallback predicate |
-| `VSCODE_PID` + absence of `TERM` | Relocated (shared) | same as above | VS Code background-task heuristic; interactive terminals do not skip |
-| `OXDOCK_EMBED_FORCE_REBUILD` | **Purged** | *(none)* | Old macro cache-bust gate. Invalidation is now owned by Cargo via `cargo:rerun-if-changed` directives emitted by helpers `run_spec`; completeness + ordering pinned by `packaging_invariant::directives_are_complete_and_ordered`. Do not re-introduce. |
-| `.git` presence / `CARGO_PRIMARY_PACKAGE` (gate input) | **Purged** (as gate) | *(none in production code)* | The old `should_build = has_git \|\| is_primary` gate is gone; build scripts always execute outside IDE-skip contexts. Registry consumers running build.rs equals the normal ecosystem trust model. |
-| `CARGO_PRIMARY_PACKAGE` (test infra) | Retained | `crates/sys/oxdock-process/src/serial_cargo_env.rs` : `manifest_env_guard` | Set/restored around tests that emulate primary vs dependency packages; no production reader remains |
-| `CARGO_MANIFEST_DIR` | Retained | `crates/sys/oxdock-fs/src/workspace_fs/mod.rs` : `PathResolver::from_manifest_env`; `oxdock-build/src/assets.rs` : `run_spec`, `script_text`, `clear_dir` helpers | Anchor for manifest-relative resolution and directive paths |
-| `OUT_DIR` | New | `oxdock-build/src/assets.rs` : `out_dir_root`; `oxdock-macros` : `oxdock_embed!` expansion (`include!(concat!(env!("OUT_DIR"), …))`) | Destination for materialized assets and generated typed modules |
-| `RUSTC` | Retained | `oxdock-build/src/lib.rs` : `emit_cfg_envs` (default `"rustc"`) | Toolchain override for `--print cfg` probing |
-| `TARGET` | Retained | `oxdock-build/src/lib.rs` : `collect_cfg_lines` | Forwarded as `--target` when present |
-| `SHELL` | Retained | `crates/sys/oxdock-process/src/shell.rs` : `shell_program` (unix fallback `sh`) | Interactive-shell resolution |
-| `COMSPEC` | Retained | `crates/sys/oxdock-process/src/shell.rs` : `shell_program` (windows fallback `cmd`) | Windows shell resolution |
-| `CARGO_FEATURE_*` / `CARGO_CFG_*` | Retained | `crates/sys/oxdock-process/src/builtin_env.rs` : `BuiltinEnv::collect`; emitted for consumer crates by helpers `emit_feature_envs` | Natively visible inside build-script processes, so DSL scripts read them without relay (env_injection fixture pins this) |
-| `OXDOCK_CACHE_APP` | New | `crates/sys/oxdock-fs/src/workspace_fs/cache.rs` : `auto_detect_app_name` | Highest-priority cache application identity override (after an explicit `with_cache_app`/`set_cache_app` argument); sanitized to a filesystem-safe segment |
-| `OXDOCK_CACHE_DIR` | New | `crates/sys/oxdock-fs/src/workspace_fs/cache.rs` : `resolve_cache_dir` | Exact-directory override for the OS-native cache root; takes precedence over project-dirs resolution. Scoped to the OS flavor: `WORKSPACE CACHE --local` always uses `<project>/.cache/workspace`. Default layout when unset: macOS `~/Library/Caches/com.oxdock.<app>/workspace`, Linux `$XDG_CACHE_HOME/<app>/workspace` (lowercased), Windows `%LOCALAPPDATA%\oxdock\<app>\cache\workspace`; temp-dir fallback when no home dir exists. Tests pin this to a temp dir for hermeticity |
-| `CARGO_PKG_NAME` (runtime) | Retained (new reader) | `crates/sys/oxdock-fs/src/workspace_fs/cache.rs` : `auto_detect_app_name` | Read from the process environment (populated by Cargo for `cargo run`/`cargo test` and visible to proc-macro hosts through the compiler driver env); never read from disk, never via `env!` inside `oxdock-fs` |
+## Seeded environment
 
-## Transition log (Prototype commits)
+Session start copies host values for the declared names directly
+into the script environment map. A host lacking a name leaves it
+absent: nothing is synthesized, nothing is immutable. Explicit
+script `ENV`/`INHERIT_ENV` overwrite entries uniformly; `ISOLATED`
+resets the map to the same seed. A missing value surfaces at spawn
+time, with the exact `INHERIT_ENV` declaration to add.
 
-1. **Purged:** `OXDOCK_EMBED_FORCE_REBUILD` plus the `.git`/`CARGO_PRIMARY_PACKAGE`
-   execution gates. Rationale: Cargo's `rerun-if-changed` invalidation replaces
-   manual cache busting; registry consumers executing build scripts is the
-   normal ecosystem trust model. Guard rails: directive golden-completeness and
-   packaging-invariant tests in `oxdock-build/tests/packaging_invariant.rs`.
-2. **Relocated:** `OXDOCK_EMBED_DEBUG` and all four IDE/Miri skip predicates,
-   from proc-macro execution time (`oxdock-macros`) to build-script
-   execution time (`oxdock-build`). Semantics preserved verbatim;
-   full 8-branch decision matrix unit-tested.
-3. **Retained:** every other variable above; consumption sites moved only where
-   the containing module was split (`exec.rs` → `exec/handlers.rs`,
-   process `lib.rs` → submodules).
+### Host-mirrored defaults
 
-## Verification
+Declared names mirrored from the host at session start and on every
+`ISOLATED` entry, wherever the host defines them. Absent stays
+absent; explicit script values win.
 
-- `cargo test -p oxdock-build --test packaging_invariant`
-  covers skip-predicate branches, directive completeness/ordering, and
-  with-git/without-git equivalence.
-- Full battery: `cargo fmt --all --check` · `cargo clippy --workspace
-  --all-targets --all-features -- -D warnings` · `cargo test --workspace
-  --all-features --tests` · Miri on `oxdock-process` + `oxdock-core`
-  (`cargo +nightly miri test -p oxdock-process -p oxdock-core --all-features`;
-  falls back to the CI Miri job when no local nightly toolchain is installed).
+| Variable | Platforms |
+| --- | --- |
+| [`PATH`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+PATH&type=code) | unix, windows |
+| [`HOME`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+HOME&type=code) | unix |
+| [`TMPDIR`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+TMPDIR&type=code) | unix |
+| [`TERM`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+TERM&type=code) | unix |
+| [`LOGNAME`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+LOGNAME&type=code) | unix |
+| [`USER`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+USER&type=code) | unix |
+| [`TEMP`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+TEMP&type=code) | windows |
+| [`TMP`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+TMP&type=code) | windows |
+| [`USERPROFILE`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+USERPROFILE&type=code) | windows |
+| [`LOCALAPPDATA`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+LOCALAPPDATA&type=code) | windows |
+| [`APPDATA`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+APPDATA&type=code) | windows |
+| [`SystemRoot`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+SystemRoot&type=code) | windows |
+| [`windir`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+windir&type=code) | windows |
+| [`PATHEXT`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+PATHEXT&type=code) | windows |
+| [`ProgramFiles`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+ProgramFiles&type=code) | windows |
+| [`ProgramFiles(x86)`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+ProgramFiles%28x86%29&type=code) | windows |
+| [`ProgramW6432`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+ProgramW6432&type=code) | windows |
+| [`COMSPEC`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+COMSPEC&type=code) | windows |
+| [`SystemDrive`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+SystemDrive&type=code) | windows |
+| [`PROCESSOR_ARCHITECTURE`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+PROCESSOR_ARCHITECTURE&type=code) | windows |
+| [`CARGO_TARGET_DIR`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+CARGO_TARGET_DIR&type=code) | unix, windows |
 
-## Dual-mode asset pipeline
+### Explicit routing
 
-1. **Inline (primary contract).** `oxdock_embed! { name, script: { … } | "…", out_dir }`
-   and `oxdock_prepare! { … }` execute the DSL inside the proc-macro via the guarded
-   engine. No build.rs is required. Cache: `<out_dir>/.oxdock_hash`
-   content-fingerprint of script text, statically discoverable inputs, and all
-   referenced env values (`{{ env:KEY }}` templates + `[env:KEY]` guards);
-   matching fingerprint ⇒ zero re-execution. Known limitation: dynamically
-   constructed inputs that are invisible to static analysis are not
-   fingerprinted — touch the script (or a watched file) to invalidate.
-2. **Build-script (alternative).** `oxdock_build::embed_assets /
-   prepare_assets` from build.rs with `oxdock_embed!(Ident)` consumer macro. Adds
-   Cargo-native `rerun-if-changed` invalidation for tracked inputs.
+The defaults in the table above mirror the host. Everything else
+enters scripts only when listed in `INHERIT_ENV` (inside `ISOLATED`,
+only when listed in the block allowlist, which copies from the
+enclosing scope). Absent stays absent.
 
-Both paths share skip predicates, debug flag semantics, the guarded executor,
-and the staged materializer.
+### Host reads
 
-**Forcing rebuilds.** Two levers: bump `OXDOCK_EMBED_FINGERPRINT_SALT`
-(precision — one rebuild, then caching resumes) or set
-`OXDOCK_EMBED_FORCE_REBUILD=1` (bypasses cache reads while set). On the inline
-path, changing an env var does NOT by itself re-invoke rustc — pair it with a
-source-file `touch` or `cargo clean -p <pkg>` so the macro actually re-expands.
-On the build.rs path, salt edits trigger reruns automatically via the emitted
-directive.
+Variables the engine process itself touches.
+
+| Variable | Read by |
+| --- | --- |
+| [`SHELL`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+SHELL&type=code) | oxdock_process::shell::shell_program |
+| [`COMSPEC`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+COMSPEC&type=code) | oxdock_process::shell::shell_program |
+| [`TMPDIR`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+TMPDIR&type=code) | LazyGuardedTempDir::new (via std::env::temp_dir) |
+| [`CARGO_FEATURE_*`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+CARGO_FEATURE_%2A&type=code) | BuiltinEnv::collect |
+| [`CARGO_CFG_*`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+CARGO_CFG_%2A&type=code) | BuiltinEnv::collect |
+
+### Precedence and enforcement
+
+Uniform script-wins: the seed populates mirrors, and explicit
+script `ENV`/`INHERIT_ENV` overwrite them like any other variable.
+No name is immutable. `ISOLATED` resets to the identical seed, so
+inner and outer scopes start from the same defaults.
+`check_spawn_anchors` validates the final staged map with no
+caller-specific flags: present anchors pass, absent ones bail with
+the exact `INHERIT_ENV` declaration to add.
+
+Source of truth: the `define_env_contract!` invocation in
+`crates/sys/oxdock-process/src/env_policy.rs` (names live in
+`crates/sys/oxdock-fs/src/env.rs`). This file is generated; do not
+edit by hand.
+
+### Engine plumbing
+
+Names the engine and Cargo provide to the host process itself.
+Read at explicit call sites; reaches scripts only through the
+sanctioned seed or explicit routing. Nothing flows ambiently.
+
+| Variable | Owner |
+| --- | --- |
+| [`OXDOCK_CACHE_DIR`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+OXDOCK_CACHE_DIR&type=code) | oxdock |
+| [`OXDOCK_CACHE_APP`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+OXDOCK_CACHE_APP&type=code) | oxdock |
+| [`oxdock`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+oxdock&type=code) | oxdock |
+| [`OXDOCK_WORKSPACE_ROOT`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+OXDOCK_WORKSPACE_ROOT&type=code) | oxdock |
+| [`OXDOCK_EMBED_DEBUG`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+OXDOCK_EMBED_DEBUG&type=code) | oxdock |
+| [`OXDOCK_EMBED_FINGERPRINT_SALT`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+OXDOCK_EMBED_FINGERPRINT_SALT&type=code) | oxdock |
+| [`OXDOCK_EMBED_FORCE_REBUILD`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+OXDOCK_EMBED_FORCE_REBUILD&type=code) | oxdock |
+| [`OXDOCK_BANNER`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+OXDOCK_BANNER&type=code) | oxdock |
+| [`OXDOCK_INHERIT_STDOUT`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+OXDOCK_INHERIT_STDOUT&type=code) | oxdock |
+| [`OXDOCK_SHELL_REEXEC`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+OXDOCK_SHELL_REEXEC&type=code) | oxdock |
+| [`OXDOCK_FIXTURE_TARGET_DIR`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+OXDOCK_FIXTURE_TARGET_DIR&type=code) | oxdock |
+| [`OXDOCK_AST_CASE`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+OXDOCK_AST_CASE&type=code) | oxdock |
+| [`OXDOCK_AST_ONLY_COVERAGE`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+OXDOCK_AST_ONLY_COVERAGE&type=code) | oxdock |
+| [`OXDOCK_MULTI_GUARD_TEST_PASS`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+OXDOCK_MULTI_GUARD_TEST_PASS&type=code) | oxdock |
+| [`OXDOCK_MULTI_GUARD_TEST_FAIL`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+OXDOCK_MULTI_GUARD_TEST_FAIL&type=code) | oxdock |
+| [`OXDOCK_GUARD_TEST_TOKEN_UNSET`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+OXDOCK_GUARD_TEST_TOKEN_UNSET&type=code) | oxdock |
+| [`CARGO_MANIFEST_DIR`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+CARGO_MANIFEST_DIR&type=code) | cargo |
+| [`CARGO_PKG_NAME`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+CARGO_PKG_NAME&type=code) | cargo |
+| [`CARGO_PRIMARY_PACKAGE`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+CARGO_PRIMARY_PACKAGE&type=code) | cargo |
+| [`CARGO_TARGET_DIR`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+CARGO_TARGET_DIR&type=code) | cargo |
+| [`CARGO_INCREMENTAL`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+CARGO_INCREMENTAL&type=code) | cargo |
+| [`CARGO_CFG_FEATURE`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+CARGO_CFG_FEATURE&type=code) | cargo |
+| [`OUT_DIR`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+OUT_DIR&type=code) | cargo::build |
+| [`TARGET`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+TARGET&type=code) | cargo::build |
+| [`PROFILE`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+PROFILE&type=code) | cargo::build |
+| [`RUSTC`](https://github.com/search?q=repo%3Ajzombie%2Frust-oxdock+RUSTC&type=code) | cargo::build |

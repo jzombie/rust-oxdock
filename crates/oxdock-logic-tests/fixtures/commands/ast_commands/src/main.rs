@@ -19,7 +19,7 @@ fn main() {
 
 fn run() -> Result<()> {
     let resolver = PathResolver::from_manifest_env().context("resolve fixture manifest dir")?;
-    let case_filter = std::env::var(oxdock_env::AST_CASE).ok();
-    let only_coverage = std::env::var_os(oxdock_env::AST_ONLY_COVERAGE).is_some();
+    let case_filter = std::env::var(oxdock_env::oxdock::AST_CASE).ok();
+    let only_coverage = std::env::var_os(oxdock_env::oxdock::AST_ONLY_COVERAGE).is_some();
     ast_runner::run_ast_suites(resolver.root(), case_filter.as_deref(), only_coverage)
 }

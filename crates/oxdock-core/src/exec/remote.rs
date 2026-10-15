@@ -324,6 +324,10 @@ pub struct RemoteRequest {
     /// polls this on every pump tick and tears the session down promptly
     /// when set, so a blocked transport never strands the pipeline.
     pub cancelled: Arc<AtomicBool>,
+    /// Script environment snapshot for the transport process itself: the
+    /// runner spawns with exactly these names (closed child env, never
+    /// host inherit), sorted for deterministic diagnostics.
+    pub envs: Vec<(String, String)>,
 }
 
 /// What a [`RemoteRunner`] returns: stdio bytes only. Declared pushes are
@@ -676,6 +680,12 @@ pub(super) fn run_remote_block<P: ProcessManager>(
     // Stderr streams live when the step error handle is a shared writer;
     // otherwise the runner returns all stderr bytes in the response.
     let stderr_sink = cx.err_shared();
+    let mut transport_env: Vec<(String, String)> = cx
+        .env_snapshot()
+        .into_iter()
+        .filter(|(key, value)| oxdock_process::seed_differs(&cx.state.seed, key, value))
+        .collect();
+    transport_env.sort();
     let request = RemoteRequest {
         target: target.to_string(),
         script_text,
@@ -686,6 +696,7 @@ pub(super) fn run_remote_block<P: ProcessManager>(
         stdout: cx.out_pipe.clone(),
         stderr_sink,
         cancelled: Arc::clone(&cx.state.cancel_token),
+        envs: transport_env,
     };
     // Host wins on partition: transport errors fail the step here and no
     // partial guest state is ever applied. The runner applies declared

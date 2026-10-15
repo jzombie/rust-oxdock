@@ -134,26 +134,54 @@ impl BackgroundHandle for ChildHandle {
         // &mut Child : no aliasing, no UB.
         #[cfg(unix)]
         {
-            unsafe {
-                libc::kill(pid as i32, libc::SIGKILL);
+            // Negative PID signals the whole process group. Background
+            // children run in their own group (see `run_prepared`), so
+            // orphaned grandchildren die with the direct child instead
+            // of holding pipe write ends open past the kill and stalling
+            // pump EOF. A fully exited tree reports ESRCH, which is the
+            // already-dead outcome teardown wants.
+            let group = -(pid as i32);
+            let rc = unsafe { libc::kill(group, libc::SIGKILL) };
+            if rc != 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) {
+                unsafe {
+                    libc::kill(pid as i32, libc::SIGKILL);
+                }
             }
         }
         #[cfg(windows)]
+        #[allow(clippy::disallowed_methods, clippy::disallowed_types)]
         {
-            // Open the process by PID and terminate it. This works even when
-            // wait() has taken the `Child` out of `ChildInner`, and avoids
-            // storing a raw HANDLE (which is neither Send nor Sync and would
-            // break the `BackgroundHandle: Send` bound).
-            // `pid` is zeroed after successful wait, so recycled PIDs are safe.
-            use windows_sys::Win32::Foundation::CloseHandle;
-            use windows_sys::Win32::System::Threading::{
-                OpenProcess, PROCESS_TERMINATE, TerminateProcess,
-            };
-            unsafe {
-                let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
-                if !handle.is_null() {
-                    TerminateProcess(handle, 1);
-                    CloseHandle(handle);
+            // Tree kill first: `taskkill /T` ends child processes the
+            // direct terminate below would orphan, and orphaned
+            // grandchildren holding pipe write ends open stall pump EOF
+            // exactly like orphaned process groups do on Unix. A missing
+            // target (already exited tree) is the desired end state, so
+            // only a failure to launch taskkill itself falls back to the
+            // direct terminate. Ambient env (never the script map) keeps
+            // teardown independent of whatever the script set.
+            let tree_killed = std::process::Command::new("taskkill")
+                .args(["/F", "/T", "/PID", &pid.to_string()])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .is_ok();
+            if !tree_killed {
+                // Open the process by PID and terminate it. This works even when
+                // wait() has taken the `Child` out of `ChildInner`, and avoids
+                // storing a raw HANDLE (which is neither Send nor Sync and would
+                // break the `BackgroundHandle: Send` bound).
+                // `pid` is zeroed after successful wait, so recycled PIDs are safe.
+                use windows_sys::Win32::Foundation::CloseHandle;
+                use windows_sys::Win32::System::Threading::{
+                    OpenProcess, PROCESS_TERMINATE, TerminateProcess,
+                };
+                unsafe {
+                    let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
+                    if !handle.is_null() {
+                        TerminateProcess(handle, 1);
+                        CloseHandle(handle);
+                    }
                 }
             }
         }

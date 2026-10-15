@@ -608,10 +608,11 @@ fn ssh_pump<P: ProcessManager>(
 /// default). Outer window-change requests resize this session's terminal
 /// live; every session owns its size cell, so concurrent guests never
 /// observe each other. Must run inside `ASYNC`. Returns the INT exit
-/// code. Environment is inherited from the host process and layered with
-/// the script environment like `RUN`: block-scoped `ENV` (such as the
-/// session's `SSH_USER` / `SSH_CLIENT` / `SSH_SERVER` / `SSH_COMMAND`
-/// relay) reaches the child; the working directory comes from the script.
+/// code. Environment is exactly the script environment like `RUN`:
+/// block-scoped `ENV` (such as the session's `SSH_USER` / `SSH_CLIENT` /
+/// `SSH_SERVER` / `SSH_COMMAND` relay) reaches the child; host names
+/// arrive only through `INHERIT_ENV`, including `TERM` for terminal
+/// definitions. The working directory comes from the script.
 ///
 #[oxdock_func(
     returns = TypeTag::Int,
@@ -621,6 +622,7 @@ fn ssh_pump<P: ProcessManager>(
     name = "run under a terminal",
     code = r###"
     IMPORT [STD, SSH]
+    INHERIT_ENV [PATH]
     LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-pty", {username: "u", password: "p"})
     LET $d: HANDLE = ASYNC { SSH_DEQUEUE($m.server) }
     LET $cin: PIPE

@@ -678,12 +678,14 @@ impl<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> ScriptParser<'a, F> {
             ));
         }
 
-        // Validate `INHERIT_ENV` directives: only allowed in the prelude (before
-        // any other commands) and at most one occurrence.
+        // Validate `INHERIT_ENV` directives: only allowed in the prelude
+        // (before any other commands). Several may appear so
+        // platform-specific names ride guarded lines
+        // (`[family:windows] INHERIT_ENV [SystemRoot]`); each guarded
+        // line runs only when its guard passes, like any other step.
         {
             let ctx = self.eof_span();
             let mut seen_non_prelude = false;
-            let mut inherit_count = 0usize;
             for step in &self.steps {
                 match &step.kind {
                     StepKind::InheritEnv { .. } => {
@@ -694,14 +696,6 @@ impl<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> ScriptParser<'a, F> {
                                 &ctx,
                             ));
                         }
-                        if step.guard.is_some() || step.scope_enter > 0 || step.scope_exit > 0 {
-                            return Err(ParseError::structural(
-                                "inherit_env",
-                                "INHERIT_ENV cannot be guarded or nested inside blocks".to_string(),
-                                &ctx,
-                            ));
-                        }
-                        inherit_count += 1;
                     }
                     kind => {
                         if contains_inherit_env(kind) {
@@ -714,13 +708,6 @@ impl<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> ScriptParser<'a, F> {
                         seen_non_prelude = true;
                     }
                 }
-            }
-            if inherit_count > 1 {
-                return Err(ParseError::structural(
-                    "inherit_env",
-                    "only one INHERIT_ENV directive is allowed".to_string(),
-                    &ctx,
-                ));
             }
         }
 
@@ -1156,6 +1143,7 @@ fn block_fragment_candidates(name: &str) -> Option<&'static [Rule]> {
         "FOR" => Some(&[Rule::for_statement]),
         "FUNC" => Some(&[Rule::func_def]),
         "TIMEOUT" => Some(&[Rule::timeout_statement]),
+        "ISOLATED" => Some(&[Rule::isolated_statement]),
         "REMOTE" => Some(&[Rule::remote_statement]),
         "ASYNC" => Some(&[Rule::async_statement_block]),
         "ELSE" => Some(&[Rule::else_if_clause, Rule::else_clause]),
@@ -1418,6 +1406,11 @@ fn parse_structural_command_with_lower(
                             ctx, inner, lctx,
                         )?));
                     }
+                    Rule::isolated_statement => {
+                        cmd = Some(Box::new(parse_structural_command_with_lower(
+                            ctx, inner, lctx,
+                        )?));
+                    }
                     Rule::remote_statement => {
                         cmd = Some(Box::new(parse_structural_command_with_lower(
                             ctx, inner, lctx,
@@ -1473,6 +1466,7 @@ fn parse_structural_command_with_lower(
         Rule::async_statement => parse_async_statement_from_pair(ctx, pair, lctx)?,
         Rule::async_statement_block => parse_async_statement_block_from_pair(ctx, pair, lctx)?,
         Rule::timeout_statement => parse_timeout_statement_from_pair(ctx, pair, lctx)?,
+        Rule::isolated_statement => parse_isolated_statement_from_pair(ctx, pair, lctx)?,
         Rule::remote_statement => parse_remote_statement_from_pair(ctx, pair, lctx)?,
         Rule::type_statement => parse_type_statement_from_pair(ctx, pair)?,
         Rule::command_inner => {
@@ -2650,6 +2644,95 @@ fn parse_timeout_duration_arg(ctx: &SpanContext, pair: Pair<Rule>) -> ParseResul
     ))
 }
 
+/// Lower `ISOLATED { ... }` (or a single command): parse the body, then
+/// rewrite every nested prelude-shaped `INHERIT_ENV` into
+/// `IsolatedInheritEnv` so the block allowlist reads the isolated
+/// snapshot instead of the host. The rewrite runs here, during lowering,
+/// so later validators only ever see the dedicated node inside `ISOLATED`
+/// bodies and the prelude rule stays untouched.
+fn parse_isolated_statement_from_pair(
+    ctx: &SpanContext,
+    pair: Pair<Rule>,
+    lctx: &LowerCtx,
+) -> ParseResult<StepKind> {
+    let span = refine_span(ctx, &pair);
+    let mut body: Option<Vec<Step>> = None;
+    for inner in pair.into_inner() {
+        match inner.as_rule() {
+            Rule::block => {
+                body = Some(parse_block_elements_with_lower(ctx, inner, lctx)?);
+            }
+            Rule::await_statement => {
+                let kind = parse_await_statement_from_pair(ctx, inner)?;
+                body = Some(vec![Step {
+                    guard: None,
+                    kind,
+                    scope_enter: 0,
+                    scope_exit: 0,
+                }]);
+            }
+            Rule::cancel_statement => {
+                let kind = parse_cancel_statement_from_pair(ctx, inner)?;
+                body = Some(vec![Step {
+                    guard: None,
+                    kind,
+                    scope_enter: 0,
+                    scope_exit: 0,
+                }]);
+            }
+            Rule::with_io_command
+            | Rule::inherit_env_command
+            | Rule::async_statement
+            | Rule::async_statement_block
+            | Rule::call_statement
+            | Rule::while_statement
+            | Rule::func_def
+            | Rule::return_statement
+            | Rule::break_statement
+            | Rule::continue_statement
+            | Rule::timeout_statement
+            | Rule::isolated_statement
+            | Rule::remote_statement => {
+                let kind = parse_structural_command_with_lower(ctx, inner, lctx)?;
+                body = Some(vec![Step {
+                    guard: None,
+                    kind,
+                    scope_enter: 0,
+                    scope_exit: 0,
+                }]);
+            }
+            Rule::instruction | Rule::instruction_inner => {
+                let kind = lower_instruction_pair(ctx, inner, lctx)?;
+                body = Some(vec![Step {
+                    guard: None,
+                    kind,
+                    scope_enter: 0,
+                    scope_exit: 0,
+                }]);
+            }
+            Rule::run_exec_statement | Rule::run_exec_inner => {
+                let kind = lower_run_exec_pair(ctx, inner, lctx)?;
+                body = Some(vec![Step {
+                    guard: None,
+                    kind,
+                    scope_enter: 0,
+                    scope_exit: 0,
+                }]);
+            }
+            _ => {}
+        }
+    }
+    let mut body = body.ok_or_else(|| {
+        ParseError::validation(
+            "ISOLATED",
+            "ISOLATED requires a command or block".to_string(),
+            &span,
+        )
+    })?;
+    rewrite_isolated_inherit(&mut body);
+    Ok(StepKind::Isolated { body })
+}
+
 fn parse_timeout_statement_from_pair(
     ctx: &SpanContext,
     pair: Pair<Rule>,
@@ -2695,6 +2778,7 @@ fn parse_timeout_statement_from_pair(
             | Rule::break_statement
             | Rule::continue_statement
             | Rule::timeout_statement
+            | Rule::isolated_statement
             | Rule::remote_statement => {
                 let kind = parse_structural_command_with_lower(ctx, inner, lctx)?;
                 body = Some(vec![Step {
@@ -2744,6 +2828,58 @@ fn parse_timeout_statement_from_pair(
 /// have no session, no inventory, and no defined sync boundary.
 fn contains_remote_block(steps: &[Step]) -> bool {
     steps.iter().any(|step| contains_remote_kind(&step.kind))
+}
+
+/// Rewrite prelude-shaped `INHERIT_ENV` nodes anywhere inside an `ISOLATED`
+/// body into `IsolatedInheritEnv`: the nested allowlist reads the isolated
+/// snapshot, never the host. Distinct node, distinct read rule, so the
+/// prelude validator (which only knows `InheritEnv`) never fires here and
+/// diagnostics stay unambiguous.
+fn rewrite_isolated_inherit(body: &mut [Step]) {
+    for step in body {
+        rewrite_isolated_inherit_kind(&mut step.kind);
+    }
+}
+
+/// Single-kind half of [`rewrite_isolated_inherit`]: rewrite the node
+/// itself, then recurse through whatever it contains (`WITH_IO` wraps and
+/// `LET`-capture nest one boxed command; every other body is a step
+/// slice with the same treatment). `FUNC` and `REMOTE` bodies are
+/// deliberately skipped: function bodies execute at call time (possibly
+/// after the block exits and its snapshot is gone) and remote bodies ship
+/// to guests under their own bridging, so a nested `INHERIT_ENV` there
+/// keeps the standard prelude-nesting rejection instead of silently
+/// changing read rules.
+fn rewrite_isolated_inherit_kind(kind: &mut StepKind) {
+    if let StepKind::InheritEnv { keys } = kind {
+        *kind = StepKind::IsolatedInheritEnv { keys: keys.clone() };
+    }
+    match kind {
+        StepKind::For { body, .. }
+        | StepKind::While { body, .. }
+        | StepKind::Timeout { body, .. }
+        | StepKind::Isolated { body }
+        | StepKind::AssignAsync { body, .. }
+        | StepKind::AsyncBlock { body } => rewrite_isolated_inherit(body),
+        StepKind::If {
+            then_body,
+            else_ifs,
+            else_body,
+            ..
+        } => {
+            rewrite_isolated_inherit(then_body);
+            for (_, branch) in else_ifs {
+                rewrite_isolated_inherit(branch);
+            }
+            if let Some(else_body) = else_body {
+                rewrite_isolated_inherit(else_body);
+            }
+        }
+        StepKind::WithIo { cmd, .. } | StepKind::AssignCapture { cmd, .. } => {
+            rewrite_isolated_inherit_kind(cmd);
+        }
+        _ => {}
+    }
 }
 
 fn contains_remote_kind(kind: &StepKind) -> bool {
@@ -3064,6 +3200,9 @@ fn parse_async_statement_from_pair(
                     Rule::timeout_statement | Rule::cancel_statement => {
                         inner_cmd = Some(parse_structural_command_with_lower(ctx, child, lctx)?);
                     }
+                    Rule::isolated_statement => {
+                        inner_cmd = Some(parse_structural_command_with_lower(ctx, child, lctx)?);
+                    }
                     Rule::remote_statement => {
                         inner_cmd = Some(parse_structural_command_with_lower(ctx, child, lctx)?);
                     }
@@ -3225,6 +3364,7 @@ fn parse_block_elements_with_lower(
             | Rule::if_statement
             | Rule::async_statement
             | Rule::timeout_statement
+            | Rule::isolated_statement
             | Rule::remote_statement
             | Rule::async_statement_block => {
                 let step_kind = parse_structural_command_with_lower(ctx, elem, lctx)?;

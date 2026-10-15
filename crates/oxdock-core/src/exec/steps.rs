@@ -396,9 +396,11 @@ impl<'a, P: ProcessManager> StepCtx<'a, P> {
         self.state.get_var(key)
     }
 
-    /// Look up an environment variable visible to the script.
+    /// Look up an environment variable visible to the script: the
+    /// script map, seeded at session start. Exact hit first,
+    /// case-insensitive fallback on Windows.
     pub fn get_env(&self, key: &str) -> Option<String> {
-        self.state.envs.get(key).cloned()
+        self.state.get_env(key).map(str::to_string)
     }
 
     /// Snapshot of the script-visible environment: `ENV` assignments
@@ -409,6 +411,14 @@ impl<'a, P: ProcessManager> StepCtx<'a, P> {
     /// machinery.
     pub fn env_snapshot(&self) -> HashMap<String, String> {
         self.state.envs.as_ref().clone()
+    }
+
+    /// Materialize the session scratch hierarchy (root + `tmp`) for
+    /// spawn sites that stage children without a `CommandContext`
+    /// (PTY): the seeded `HOME`/`TMPDIR` paths must exist when the
+    /// guest writes them, even when no `RUN` step ran first.
+    pub fn ensure_scratch_materialized(&self) -> Result<()> {
+        self.state.cargo_scratch.ensure_materialized()
     }
 
     /// Current working directory (guarded; stays inside the workspace).
@@ -705,6 +715,7 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
         | StepKind::For { .. }
         | StepKind::If { .. }
         | StepKind::Timeout { .. }
+        | StepKind::Isolated { .. }
         | StepKind::WithIo { .. }
         | StepKind::AssignCapture { .. } => {
             return dispatch_flow_step(cmd, &mut cx, generation, idx);
@@ -753,6 +764,10 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
                 }],
                 generation,
             )?;
+            Ok(())
+        }
+        StepKind::IsolatedInheritEnv { keys } => {
+            handlers::isolated_inherit_env(&mut cx, keys)?;
             Ok(())
         }
         StepKind::Copy {
@@ -961,6 +976,7 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
         | StepKind::For { .. }
         | StepKind::If { .. }
         | StepKind::Timeout { .. }
+        | StepKind::Isolated { .. }
         | StepKind::WithIo { .. }
         | StepKind::AssignCapture { .. } => {
             unreachable!("compound steps dispatch before this match")
@@ -1023,6 +1039,7 @@ fn execute_steps_inner<P: ProcessManager>(
                 | StepKind::For { .. }
                 | StepKind::If { .. }
                 | StepKind::Timeout { .. }
+                | StepKind::Isolated { .. }
                 | StepKind::WithIo { .. }
                 | StepKind::AssignCapture { .. } => {
                     dispatch_flow_step(&step.kind, &mut cx, generation, idx)
@@ -1032,6 +1049,10 @@ fn execute_steps_inner<P: ProcessManager>(
                         StepKind::InheritEnv { keys } => {
                             handlers::inherit_env(&mut cx, keys)?;
                             sync_iteration_assert_needles(cx.state, steps, generation)?;
+                            Ok(())
+                        }
+                        StepKind::IsolatedInheritEnv { keys } => {
+                            handlers::isolated_inherit_env(&mut cx, keys)?;
                             Ok(())
                         }
                         StepKind::Workdir(arg) => {
@@ -1295,6 +1316,7 @@ fn execute_steps_inner<P: ProcessManager>(
                         | StepKind::For { .. }
                         | StepKind::If { .. }
                         | StepKind::Timeout { .. }
+                        | StepKind::Isolated { .. }
                         | StepKind::WithIo { .. }
                         | StepKind::AssignCapture { .. } => {
                             unreachable!("compound steps dispatch in the outer match")
@@ -1653,6 +1675,7 @@ fn dispatch_flow_step<P: ProcessManager>(
             let duration = super::args::resolve_arg_as_duration(duration, cx)?;
             handlers::timeout(cx, idx, &duration, body)
         }
+        StepKind::Isolated { body } => handlers::isolated(cx, body),
         StepKind::WithIo { bindings, cmd } => handlers::with_io(cx, generation, idx, bindings, cmd),
         StepKind::AssignCapture {
             var,

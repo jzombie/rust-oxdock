@@ -9,7 +9,9 @@ use std::collections::BTreeSet;
 
 use anyhow::Result;
 use oxdock_build::{DslSource, EmbedSpec, execution_is_skipped_with, try_embed_assets};
-use oxdock_fs::{GuardedPath, PathResolver, normalized_path, to_forward_slashes};
+use oxdock_fs::{
+    GuardedPath, PathResolver, env as oxdock_env, normalized_path, to_forward_slashes,
+};
 use oxdock_sys_test_utils::TestEnvGuard;
 
 /// Materialize a minimal package tree (build.rs + DSL + input file) under a
@@ -190,4 +192,28 @@ fn skip_predicate_branch_matrix() {
         |_| None,
         || Some("/bin/cargo".into())
     ));
+}
+
+/// Hermeticity pin: manifest-relative tests must not observe an ambient
+/// `OXDOCK_WORKSPACE_ROOT` (CI job envs and developer shells export it for
+/// the engine, and `discover_workspace_root` prefers it over the guarded
+/// manifest dir). Removing it here keeps root discovery on the fixture
+/// tree no matter the ambient environment; the guard restores the prior
+/// state on drop with per-key serialization.
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "needs host tempdir for the fixture root plus real env mutation"
+)]
+fn manifest_resolution_ignores_ambient_workspace_root() -> Result<()> {
+    let _pin = TestEnvGuard::remove(oxdock_env::oxdock::WORKSPACE_ROOT);
+    let pkg = setup_package("invariant_hermetic", false)?;
+    let root_display = normalized_path(pkg.as_guarded_path());
+    let out_dir = normalized_path(&pkg.as_guarded_path().join("out-hermetic")?);
+    let (dirs, _module) = run_embed(&root_display, &out_dir)?;
+    assert!(
+        dirs.iter().any(|d| d.ends_with("/in.txt")),
+        "COPY source must resolve against the manifest dir: {dirs:?}"
+    );
+    Ok(())
 }

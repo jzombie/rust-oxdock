@@ -15,7 +15,8 @@
 use anyhow::Result;
 
 use super::GuardedPath;
-use crate::env::{CACHE_APP, CACHE_DIR, CARGO_PKG_NAME, FALLBACK_APP_NAME};
+use crate::env::cargo::PKG_NAME as CARGO_PKG_NAME;
+use crate::env::oxdock::{CACHE_APP, CACHE_DIR, FALLBACK_APP_NAME};
 
 /// Group name under the project cache root owned by workspace resolution.
 // Keep this stable: cache contents must survive upgrades.
@@ -281,7 +282,8 @@ use std::sync::{Mutex, MutexGuard};
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::env::{CACHE_APP, CACHE_DIR, CARGO_PKG_NAME};
+    use crate::env::cargo::PKG_NAME as CARGO_PKG_NAME;
+    use crate::env::oxdock::{CACHE_APP, CACHE_DIR};
 
     #[test]
     fn sanitize_keeps_safe_segments_and_falls_back() {

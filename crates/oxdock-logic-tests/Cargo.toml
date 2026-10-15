@@ -13,10 +13,12 @@ publish = false
 [features]
 slow-integration = []
 # On by default so plugin conformance covers MARKDOWN fences.
-# `--no-default-features` drops the markdown plugin; its README
-# fences are then skipped like any other unregistered module.
+# `--no-default-features` drops markdown registration; its README
+# fences are then skipped like any other unregistered module. The
+# dependency itself stays (dev-deps cannot be optional); only the
+# registration is feature-gated.
 default = ["markdown"]
-markdown = ["dep:oxdock-markdown-plugin"]
+markdown = []
 
 [dependencies]
 anyhow.workspace = true
@@ -25,12 +27,10 @@ libtest-mimic.workspace = true
 oxdock-core.workspace = true
 oxdock-fixture.workspace = true
 oxdock-fs.workspace = true
-oxdock-markdown-plugin = { workspace = true, optional = true }
 oxdock-net-plugin.workspace = true
 oxdock-parser.workspace = true
 oxdock-pipe.workspace = true
 oxdock-process.workspace = true
-oxdock-ssh-plugin.workspace = true
 oxdock-sys-test-utils.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -40,7 +40,9 @@ toml_edit.workspace = true
 indoc.workspace = true
 line-ending.workspace = true
 oxdock-macros.workspace = true
+oxdock-markdown-plugin.workspace = true
 oxdock-parser = { workspace = true, features = ["proc-macro-api"] }
+oxdock-ssh-plugin.workspace = true
 proc-macro2.workspace = true
 proptest.workspace = true
 

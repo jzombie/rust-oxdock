@@ -611,6 +611,7 @@ fn listen_result_fields() -> Arc<[Field]> {
     name = "observe port",
     code = r###"
     IMPORT [STD, NET]
+    INHERIT_ENV [PATH]
     LET $l: NET_LISTEN_INFO = NET_LISTEN("doc-net-observe", {})
 
     # Observe the bound port without claiming the slot twice, and prove

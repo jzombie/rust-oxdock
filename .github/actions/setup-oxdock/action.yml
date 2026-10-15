@@ -19,7 +19,7 @@ inputs:
     required: false
     default: oxdock
   source:
-    description: Engine provenance (`release` downloads the installer for `version`; `local` builds the caller's checkout with cargo, so unreleased DSL is testable before any tag exists).
+    description: Engine provenance (`release` downloads the installer for `version`; `local` builds the caller's checkout with cargo, so unreleased DSL is testable before any tag exists). An empty value behaves as `release`, so callers may pass the OXDOCK_ENGINE_SOURCE workflow variable and select the provenance once in workflow `env:`; deleting that variable restores the release without touching any call site.
     required: false
     default: release
 
@@ -28,7 +28,11 @@ runs:
   steps:
     # Resolved tag passes explicitly: one version's assets even if latest moves mid-run.
     - name: Install OxDock engine
-      if: ${{ inputs.source == 'release' }}
+      # `!=` (not `==`) so an empty `source` falls back to release:
+      # callers opt into `local` explicitly, never by omission. This is
+      # what lets workflows pass the OXDOCK_ENGINE_SOURCE variable
+      # while keeping release the behavior when that variable is gone.
+      if: ${{ inputs.source != 'local' }}
       shell: pwsh
       run: |
         $ErrorActionPreference = 'Stop'

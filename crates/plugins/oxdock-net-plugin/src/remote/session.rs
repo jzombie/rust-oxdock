@@ -106,11 +106,59 @@ impl RemoteRunner for StdioSession {
         let program = argv.remove(0);
         let mut full_args: Vec<&str> = argv;
         full_args.push("--remote-serve");
-        let client =
-            RpcSyncClient::spawn(program, &full_args).context("REMOTE transport spawn failed")?;
-        let session = MuxioSession::new(client, &request)?;
+        let (client, transport) = spawn_transport(program, &full_args, &request.envs)
+            .context("REMOTE transport spawn failed")?;
+        let session = MuxioSession::new(client, &request, transport)?;
         session.run(request, fs, &self.config)
     }
+}
+
+/// Spawn the transport process on the transport seed: loader
+/// invariants plus extension/terminal defaults plus the `PATH`
+/// baseline under the sanitized request envs, never host inherit and
+/// never session scratch (transports are infrastructure, not session
+/// workloads). The request arrives pre-sanitized against the session
+/// seed (seeded scratch/identity values dropped); the transport seed
+/// bridges the host profile when the request lacks one, so `ssh` keeps
+/// host key discovery. The transport resolves its program through the
+/// staged `PATH` like any `RUN` child. Child stderr stays inherited so
+/// transport diagnostics reach host stderr directly, matching the
+/// previous muxio spawn shape.
+/// The returned child stays owned by the session and is killed in
+/// teardown, preserving the lazy-spawn/scoped-teardown lifecycle.
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+fn spawn_transport(
+    program: &str,
+    args: &[&str],
+    envs: &[(String, String)],
+) -> Result<(Arc<RpcSyncClient>, std::process::Child)> {
+    let mut staged = oxdock_process::seed_transport();
+    for (key, value) in envs {
+        // De-duplicate casing variants before inserting, so the map
+        // never carries two spellings of one name into dispatch.
+        staged.retain(|k, _| !oxdock_process::names_eq(k, key));
+        staged.insert(key.clone(), value.clone());
+    }
+    // Same unified pre-flight as every `RUN` child, one shared
+    // implementation so the diagnostics cannot drift per call site.
+    oxdock_process::check_spawn_anchors(program, &staged, false)?;
+    let mut child = std::process::Command::new(program);
+    child
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::inherit());
+    child.env_clear();
+    child.envs(&staged);
+    let mut child = child.spawn().context("REMOTE transport spawn failed")?;
+    let stdin: std::process::ChildStdin = child.stdin.take().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::BrokenPipe, "child has no piped stdin")
+    })?;
+    let stdout: std::process::ChildStdout = child.stdout.take().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::BrokenPipe, "child has no piped stdout")
+    })?;
+    let client = RpcSyncClient::new(Box::new(stdout), Box::new(stdin));
+    Ok((client, child))
 }
 
 /// Counter for unique spill names within one session: `create_spill_file`
@@ -138,10 +186,20 @@ struct MuxioSession {
     result_hash: Option<sha2::Sha256>,
     result_json: Option<Vec<u8>>,
     result_head: Vec<u8>,
+    /// Owned transport child behind the muxio client: killed explicitly in
+    /// teardown since `std` children (unlike the previous muxio-owned one)
+    /// do not die on drop.
+    #[allow(clippy::disallowed_types)]
+    transport: Option<std::process::Child>,
 }
 
 impl MuxioSession {
-    fn new(client: Arc<RpcSyncClient>, request: &RemoteRequest) -> Result<Self> {
+    #[allow(clippy::disallowed_types)]
+    fn new(
+        client: Arc<RpcSyncClient>,
+        request: &RemoteRequest,
+        transport: std::process::Child,
+    ) -> Result<Self> {
         Ok(Self {
             client,
             cancelled: Arc::clone(&request.cancelled),
@@ -156,6 +214,7 @@ impl MuxioSession {
             result_hash: None,
             result_json: None,
             result_head: Vec::new(),
+            transport: Some(transport),
         })
     }
 
@@ -376,11 +435,16 @@ impl MuxioSession {
         config: &SessionConfig,
     ) -> Result<RemoteResponse> {
         let outcome = self.run_inner(&request, fs, config);
-        // Scoped teardown on every path: stop the stdin pump, join it.
-        // Dropping the client kills the child.
+        // Scoped teardown on every path: stop the stdin pump, join it,
+        // then kill the owned transport child. Dropping the client alone
+        // no longer kills anything since the child is self-spawned.
         self.dead.store(true, Ordering::SeqCst);
         if let Some(pump) = self.stdin_pump.take() {
             let _ = pump.join();
+        }
+        if let Some(mut transport) = self.transport.take() {
+            let _ = transport.kill();
+            let _ = transport.wait();
         }
         outcome
     }

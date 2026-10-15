@@ -47,7 +47,8 @@ fn feature_env_lines() -> Vec<String> {
 /// A rustc that runs but exits nonzero contributes nothing; a rustc that
 /// cannot spawn is an error.
 pub fn emit_cfg_envs() -> Result<()> {
-    let rustc = std::env::var(oxdock_env::RUSTC).unwrap_or_else(|_| "rustc".to_string());
+    let rustc =
+        std::env::var(oxdock_env::cargo::build::RUSTC).unwrap_or_else(|_| "rustc".to_string());
     for line in collect_cfg_lines(&rustc)? {
         println!("{line}");
     }
@@ -72,7 +73,7 @@ fn cfg_command_args(target: Option<&str>) -> Vec<String> {
 /// still surfaces as an error.
 fn collect_cfg_lines(rustc: &str) -> Result<Vec<String>> {
     let mut cmd = CommandBuilder::new(rustc);
-    let target = std::env::var(oxdock_env::TARGET).ok();
+    let target = std::env::var(oxdock_env::cargo::build::TARGET).ok();
     for arg in cfg_command_args(target.as_deref()) {
         cmd.arg(arg);
     }

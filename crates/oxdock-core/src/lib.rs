@@ -45,6 +45,8 @@ define_pipeline! {
     StepKind::AwaitCapture { .. } => exec::dispatch_await_capture_step,
     StepKind::Cancel { .. } => exec::dispatch_cancel_step,
     StepKind::Timeout { .. } => exec::dispatch_timeout_step,
+    StepKind::Isolated { .. } => exec::dispatch_isolated_step,
+    StepKind::IsolatedInheritEnv { .. } => exec::dispatch_isolated_inherit_env,
     StepKind::Sleep { .. } => exec::dispatch_sleep_step,
     StepKind::ListAppend { .. } => exec::dispatch_push_into_step,
     StepKind::FuncDef { .. } => exec::dispatch_func_def,
@@ -92,8 +94,6 @@ mod tests {
     use oxdock_fs::{
         GuardedPath, GuardedTempDir, PathResolver, env as oxdock_env, to_forward_slashes,
     };
-    use oxdock_parser::{Step, StepKind};
-    #[cfg(unix)]
     use std::time::Instant;
 
     fn guard_root(temp: &GuardedTempDir) -> GuardedPath {
@@ -130,12 +130,7 @@ mod tests {
             "printf %s \"$CARGO_TARGET_DIR\" > seen.txt"
         };
 
-        let steps = vec![Step {
-            guard: None,
-            kind: StepKind::Run(cmd.to_string().into()),
-            scope_enter: 0,
-            scope_exit: 0,
-        }];
+        let steps = parse_script(&format!("RUN {cmd}")).unwrap();
 
         run_steps(&root, &steps).unwrap();
 
@@ -147,9 +142,10 @@ mod tests {
             legacy.display().to_string(),
             "CARGO_TARGET_DIR must not target the workspace tree"
         );
+        let normalized = seen.trim().replace('\\', "/");
         assert!(
-            seen.trim().contains("oxdock-cargo-"),
-            "CARGO_TARGET_DIR must point at the isolated scratch location, got {seen:?}"
+            normalized.ends_with("/target") && normalized.contains("oxdock-"),
+            "CARGO_TARGET_DIR must point at the isolated scratch target dir, got {seen:?}"
         );
     }
 
@@ -159,6 +155,7 @@ mod tests {
         let root = guard_root(&temp);
 
         // Snapshot-rooted RUN executes against the snapshot workdir.
+        // The seeded host PATH resolves the shell with no allowlist.
         let steps = parse_script("RUN echo hi").unwrap();
         let output = run_steps_with_lazy_snapshot(&root, &steps, ExecIo::new()).unwrap();
         assert!(
@@ -317,7 +314,7 @@ mod tests {
         let temp = GuardedPath::tempdir().unwrap();
         let root = guard_root(&temp);
 
-        let guard_var = oxdock_env::GUARD_TEST_TOKEN_UNSET;
+        let guard_var = oxdock_env::oxdock::GUARD_TEST_TOKEN_UNSET;
         let script = format!(
             indoc!(
                 r#"
@@ -529,7 +526,8 @@ mod tests {
         let temp = GuardedPath::tempdir().unwrap();
         let root = guard_root(&temp);
 
-        let profile = std::env::var(oxdock_env::PROFILE).unwrap_or_else(|_| "debug".to_string());
+        let profile = std::env::var(oxdock_env::cargo::build::PROFILE)
+            .unwrap_or_else(|_| "debug".to_string());
         let script = format!(
             indoc!(
                 r#"
@@ -559,7 +557,7 @@ mod tests {
         let temp = GuardedPath::tempdir().unwrap();
         let root = guard_root(&temp);
 
-        let key = oxdock_env::MULTI_GUARD_TEST_PASS;
+        let key = oxdock_env::oxdock::MULTI_GUARD_TEST_PASS;
 
         let script = format!(
             indoc!(
@@ -586,7 +584,7 @@ mod tests {
         let temp = GuardedPath::tempdir().unwrap();
         let root = guard_root(&temp);
 
-        let key = oxdock_env::MULTI_GUARD_TEST_FAIL;
+        let key = oxdock_env::oxdock::MULTI_GUARD_TEST_FAIL;
 
         let script = format!(
             indoc!(
@@ -608,7 +606,6 @@ mod tests {
         assert!(exists(&root, "always.txt"), "unguarded step should run");
     }
 
-    #[cfg(unix)]
     #[cfg_attr(
         miri,
         ignore = "stdout streaming not supported for background command under Miri"
@@ -619,13 +616,17 @@ mod tests {
         let root = guard_root(&temp);
 
         // Background succeeds quickly; pipeline should complete without error.
-        let script = "ASYNC RUN \"sh -c 'sleep 0.05'\"";
+        let script = indoc! {
+            r#"
+            [family:unix] ASYNC RUN "sleep 0.05"
+            [family:windows] ASYNC RUN "ping -n 1 127.0.0.1"
+            "#
+        };
         let steps = crate::parse_script(script).unwrap();
         let res = run_steps(&root, &steps);
         assert!(res.is_ok(), "ASYNC success should allow clean exit");
     }
 
-    #[cfg(unix)]
     #[cfg_attr(
         miri,
         ignore = "stdout streaming not supported for background command under Miri"
@@ -635,17 +636,23 @@ mod tests {
         let temp = GuardedPath::tempdir().unwrap();
         let root = guard_root(&temp);
 
-        let script = "ASYNC RUN \"sh -c 'sleep 0.05; exit 7'\"";
+        let script = indoc! {
+            r#"
+            [family:unix] ASYNC RUN "sleep 0.05; exit 7"
+            [family:windows] ASYNC RUN "exit 7"
+            "#
+        };
         let steps = crate::parse_script(script).unwrap();
         let err = run_steps(&root, &steps).unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("ASYNC process exited with status") || msg.contains("exit status: 7"),
+            msg.contains("ASYNC process exited with status")
+                || msg.contains("exit status: 7")
+                || msg.contains("exit code: 7"),
             "should surface failing ASYNC exit code"
         );
     }
 
-    #[cfg(unix)]
     #[cfg_attr(
         miri,
         ignore = "timing-sensitive background process test is unreliable under Miri"
@@ -657,8 +664,10 @@ mod tests {
 
         let script = indoc! {
             r#"
-            ASYNC RUN "sh -c 'sleep 0.2; echo one > one.txt'"
-            ASYNC RUN "sh -c 'sleep 0.5; echo two > two.txt'"
+            [family:unix] ASYNC RUN "sleep 0.2; echo one > one.txt"
+            [family:windows] ASYNC RUN "ping -n 2 127.0.0.1 > NUL & echo one > one.txt"
+            [family:unix] ASYNC RUN "sleep 0.5; echo two > two.txt"
+            [family:windows] ASYNC RUN "ping -n 3 127.0.0.1 > NUL & echo two > two.txt"
             WRITE "done.txt" "ok"
             "#
         };
@@ -678,20 +687,26 @@ mod tests {
             "first background should finish and emit output"
         );
         // With the new poll-all model, both children run to completion.
-        // The second background (~0.5s) should also finish.
+        // The second background should also finish.
         assert!(
             exists(&root, "two.txt"),
             "second background should finish (poll-all waits for all)"
         );
 
-        let upper = 0.8;
+        // Shell sleep granularity differs per platform (`sleep` seconds
+        // against `ping` whole seconds), so only the bounds branch.
+        #[allow(clippy::disallowed_macros)]
+        let (lower, upper) = if cfg!(windows) {
+            (0.9, 3.0)
+        } else {
+            (0.15, 0.8)
+        };
         assert!(
-            elapsed.as_secs_f32() < upper && elapsed.as_secs_f32() > 0.15,
-            "should wait for both backgrounds (~0.5s); got {elapsed:?}"
+            elapsed.as_secs_f32() < upper && elapsed.as_secs_f32() > lower,
+            "should wait for both backgrounds; got {elapsed:?}"
         );
     }
 
-    #[cfg(unix)]
     #[cfg_attr(
         miri,
         ignore = "timing-sensitive background process test is unreliable under Miri"
@@ -703,12 +718,14 @@ mod tests {
 
         let script = indoc! {
             r#"
-            ASYNC RUN "sh -c 'sleep 30; echo late > late.txt'"
+            [family:unix] ASYNC RUN "sleep 30; echo late > late.txt"
+            [family:windows] ASYNC RUN "ping -n 31 127.0.0.1 > NUL & echo late > late.txt"
             RUN "__oxdock_missing_command_xyz__"
             "#
         };
 
         let steps = crate::parse_script(script).unwrap();
+        let start = Instant::now();
         assert!(
             run_steps(&root, &steps).is_err(),
             "pipeline should fail on the missing command"
@@ -717,14 +734,29 @@ mod tests {
         // its Drop safety net must kill the writer before it can emit the
         // late artifact. The sleep is generous on purpose: it bounds the
         // kill timeliness on loaded runners without slowing the test,
-        // which still fails fast on the missing command.
+        // which still fails fast on the missing command. No rendezvous
+        // step: the RUN pre-spawn cancellation check closes the worker
+        // startup race, so a polling TIMEOUT only adds shared cancel
+        // state that outlives its step. No INHERIT_ENV either: the
+        // session seed already carries the host `PATH` (and `SystemRoot`
+        // on Windows), so plain `RUN` resolves without boilerplate. One
+        // shell level only: the engine already wraps the script, so each
+        // line spells its sleep-then-write chain directly and the tree
+        // under test is identical on both platforms.
         assert!(
             !exists(&root, "late.txt"),
             "abandoned background writer must be killed by Drop teardown"
         );
+        // A direct-child-only kill passes the assertion above but stalls
+        // pump EOF on the orphaned sleeper for the full 30s: bound the
+        // whole run so that regression fails loud instead of slow.
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(25),
+            "teardown must end the tree promptly, took {:?}",
+            start.elapsed()
+        );
     }
 
-    #[cfg(unix)]
     #[cfg_attr(
         miri,
         ignore = "stdout streaming not supported for background command under Miri"
@@ -736,7 +768,8 @@ mod tests {
 
         let script = indoc! {
             r#"
-            ASYNC RUN "sh -c 'sleep 30; echo late > late.txt'"
+            [family:unix] ASYNC RUN "sleep 30; echo late > late.txt"
+            [family:windows] ASYNC RUN "ping -n 31 127.0.0.1 > NUL & echo late > late.txt"
             EXIT 5
             "#
         };
@@ -793,23 +826,14 @@ mod tests {
         let temp = GuardedPath::tempdir().unwrap();
         let root = guard_root(&temp);
 
-        #[allow(clippy::disallowed_macros)]
-        let script = if cfg!(windows) {
-            indoc! {
-                r#"
-                ENV FOO="bar"
-                RUN "echo %FOO% > run.txt"
-                ASYNC RUN "echo %FOO% > bg.txt"
-                "#
-            }
-        } else {
-            indoc! {
-                r#"
-                ENV FOO="bar"
-                RUN "sh -c 'printf %s \"$FOO\" > run.txt'"
-                ASYNC RUN "sh -c 'printf %s \"$FOO\" > bg.txt'"
-                "#
-            }
+        let script = indoc! {
+            r#"
+            ENV FOO="bar"
+            [family:windows] RUN "echo %FOO% > run.txt"
+            [family:unix] RUN "printf %s \"$FOO\" > run.txt"
+            [family:windows] ASYNC RUN "echo %FOO% > bg.txt"
+            [family:unix] ASYNC RUN "printf %s \"$FOO\" > bg.txt"
+            "#
         };
 
         let steps = crate::parse_script(script).unwrap();
@@ -889,11 +913,11 @@ mod tests {
             let lock = CACHE_DIR_LOCK
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let prev = std::env::var(oxdock_env::CACHE_DIR).ok();
+            let prev = std::env::var(oxdock_env::oxdock::CACHE_DIR).ok();
             // SAFETY: serialized by `CACHE_DIR_LOCK`, restored on drop.
             unsafe {
                 std::env::set_var(
-                    oxdock_env::CACHE_DIR,
+                    oxdock_env::oxdock::CACHE_DIR,
                     dir.as_path().to_string_lossy().into_owned(),
                 );
             }
@@ -905,8 +929,8 @@ mod tests {
         fn drop(&mut self) {
             unsafe {
                 match &self.prev {
-                    Some(v) => std::env::set_var(oxdock_env::CACHE_DIR, v),
-                    None => std::env::remove_var(oxdock_env::CACHE_DIR),
+                    Some(v) => std::env::set_var(oxdock_env::oxdock::CACHE_DIR, v),
+                    None => std::env::remove_var(oxdock_env::oxdock::CACHE_DIR),
                 }
             }
         }
@@ -1222,5 +1246,185 @@ mod tests {
         assert!(exists(&local_root, ".cache/workspace/a.txt"));
         #[cfg(not(miri))]
         assert!(exists(&snapshot_root, "cargo.toml"));
+    }
+
+    /// The isolation discriminator: real children on both sides of the
+    /// boundary. A plain `RUN` sees the outer var; the identical `RUN`
+    /// inside `ISOLATED` does not. Mock-recorded envs cannot prove this
+    /// (they assert staged maps, never spawned children); only executed
+    /// processes distinguish a scrub from generic block scoping. One
+    /// script with platform guards, no `$` spellings anywhere, so
+    /// DSL-level dollar expansion cannot confound what the child itself
+    /// observes.
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "spawns real child processes; Miri does not support process execution"
+    )]
+    fn isolated_hides_outer_env_from_real_children() {
+        let temp = GuardedPath::tempdir().unwrap();
+        let root = guard_root(&temp);
+
+        // One unguarded allowlist per scope: absent names skip silently.
+        // The seed already provides PATH at every reseed, so the lists
+        // only route OUTER: its omission inside is the assertion.
+        // Writes stay inside the scopes that bind their variables:
+        // block-local `$boxed` does not leak outward by design.
+        let script = indoc!(
+            r#"
+            ENV OUTER=outer-val
+            [family:unix] LET $plain: STRING = RUN ["sh", "-c", "printenv OUTER || echo absent"]
+            [family:windows] LET $plain: STRING = RUN ["cmd", "/c", "if defined OUTER (echo outer-val) else (echo absent)"]
+            WRITE plain.txt "{{ $plain }}"
+            ISOLATED {
+                [family:unix] LET $boxed: STRING = RUN ["sh", "-c", "printenv OUTER || echo absent"]
+                [family:windows] LET $boxed: STRING = RUN ["cmd", "/c", "if defined OUTER (echo outer-val) else (echo absent)"]
+                WRITE boxed.txt "{{ $boxed }}"
+            }
+            "#
+        );
+        let steps = crate::parse_script(script).unwrap();
+        run_steps(&root, &steps).unwrap();
+
+        assert_eq!(
+            read_trimmed(&root.join("plain.txt").unwrap()),
+            "outer-val",
+            "plain RUN must see the outer var"
+        );
+        assert_eq!(
+            read_trimmed(&root.join("boxed.txt").unwrap()),
+            "absent",
+            "ISOLATED RUN must not see the outer var"
+        );
+    }
+
+    /// Exact-set child env audit: one `FUNC` dumps the child environment it
+    /// observes, called from three isolation depths. Each dump must contain exactly the expected names with the expected values
+    /// and nothing else; a host-only sentinel set in the test process
+    /// must be absent at every depth. This is the end-to-end closedness
+    /// proof: recorded maps cannot show what a real child observes.
+    #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "spawns real child processes; Miri does not support process execution"
+    )]
+    fn child_env_matches_allowlist_at_every_depth() {
+        fn env_map(text: &str) -> std::collections::BTreeMap<String, String> {
+            text.lines()
+                .filter_map(|line| {
+                    line.split_once('=')
+                        .map(|(k, v)| (k.to_string(), v.to_string()))
+                })
+                .collect()
+        }
+
+        // Host-only sentinel: never routed anywhere, must appear in no dump.
+        // RAII-guarded so a mid-test failure still restores process env.
+        let _probe_guard = oxdock_process::TestEnvGuard::set("OXDOCK_ENV_AUDIT_PROBE", "host-only");
+        let temp = GuardedPath::tempdir().unwrap();
+        let root = guard_root(&temp);
+
+        // The mid level re-adds OUTER; the deep level drops it again, so
+        // the three dumps prove pass-through, re-adding, and narrowing.
+        // PATH needs no allowlist: the seed provides it at every level.
+        let script = indoc!(
+            r#"
+            ENV OUTER=outer-val
+            FUNC DUMPENV() {
+                [family:unix] LET $o: STRING = RUN ["sh", "-c", "env"]
+                [family:windows] LET $o: STRING = RUN ["cmd", "/c", "set"]
+                RETURN $o
+            }
+            LET $top: STRING = DUMPENV()
+            WRITE top.txt "{{ $top }}"
+            ISOLATED {
+                INHERIT_ENV [OUTER]
+                LET $mid: STRING = DUMPENV()
+                WRITE mid.txt "{{ $mid }}"
+                ISOLATED {
+                    LET $deep: STRING = DUMPENV()
+                    WRITE deep.txt "{{ $deep }}"
+                }
+            }
+            "#
+        );
+        let steps = crate::parse_script(script).unwrap();
+        run_steps(&root, &steps).unwrap();
+
+        let read_env = |name: &str| {
+            let body = read_trimmed(&root.join(name).unwrap());
+            env_map(&body)
+        };
+        let top = read_env("top.txt");
+        let mid = read_env("mid.txt");
+        let deep = read_env("deep.txt");
+
+        // Expected names per depth, derived from the seed declaration
+        // (not hardcoded). `OUTER` rides top and mid after
+        // the allowlist re-adds it; deep narrows it out. The seed rides
+        // every spawn (top, mid after reseed, deep after reseed). The
+        // shell itself adds a few names (`PWD` everywhere, plus `SHLVL`
+        // and `_` under bash but not dash) that no allowlist routes:
+        // shells disagree, so the assertion below is two-sided instead
+        // of exact equality.
+        #[allow(clippy::disallowed_macros)]
+        let shell_added: &[&str] = if cfg!(windows) {
+            // `cmd.exe` injects `PROMPT=$P$G` when unset, like unix
+            // shells add `PWD`.
+            &["PROMPT"]
+        } else {
+            &["PWD", "SHLVL", "_"]
+        };
+        // Seed-derived key set: mirror rows count only when the host
+        // defines them; the engine-owned row always seeds. The child
+        // reads the same process env, so host presence is the exact
+        // oracle. Adding a seed row needs no edit here.
+        let mut seed_names: Vec<&str> = Vec::new();
+        for entry in oxdock_process::env_policy::current_platform_seed() {
+            if entry.name == oxdock_env::cargo::TARGET_DIR || std::env::var(entry.name).is_ok() {
+                seed_names.push(entry.name);
+            }
+        }
+        let mut expect_top: Vec<&str> = vec!["OUTER"];
+        expect_top.extend(seed_names.iter().copied());
+        let expect_mid = expect_top.clone();
+        let expect_deep: Vec<&str> = seed_names;
+        for (label, got, mut want) in [
+            ("top", &top, expect_top),
+            ("mid", &mid, expect_mid),
+            ("deep", &deep, expect_deep),
+        ] {
+            want.extend(shell_added);
+            // Two-sided: every routed name must appear, and every
+            // appearing name must be routed or shell-known. A newcomer
+            // outside both lists still fails with its name shown.
+            for name in &want {
+                if shell_added.contains(name) {
+                    continue;
+                }
+                assert!(
+                    got.contains_key(*name),
+                    "{label} dump lacks routed name {name}: {got:?}"
+                );
+            }
+            for key in got.keys() {
+                assert!(
+                    want.contains(&key.as_str()),
+                    "{label} dump carries unexpected name {key}: {got:?}"
+                );
+            }
+        }
+        assert_eq!(top.get("OUTER").map(String::as_str), Some("outer-val"));
+        assert_eq!(mid.get("OUTER").map(String::as_str), Some("outer-val"));
+        assert!(
+            !deep.contains_key("OUTER"),
+            "narrowed level must drop OUTER: {deep:?}"
+        );
+        for (label, got) in [("top", &top), ("mid", &mid), ("deep", &deep)] {
+            assert!(
+                !got.contains_key("OXDOCK_ENV_AUDIT_PROBE"),
+                "{label} dump leaked a host-only var: {got:?}"
+            );
+        }
     }
 }

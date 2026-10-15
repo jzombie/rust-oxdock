@@ -674,7 +674,10 @@ mod tests {
     /// the `cache` module's guard so parallel tests cannot race overrides.
     fn pin_cache_dir(dir: &GuardedPath) -> super::super::cache::SerialCacheEnv {
         let dir_str = dir.as_path().to_string_lossy().into_owned();
-        super::super::cache::SerialCacheEnv::new(&[(crate::env::CACHE_DIR, Some(dir_str.as_str()))])
+        super::super::cache::SerialCacheEnv::new(&[(
+            crate::env::oxdock::CACHE_DIR,
+            Some(dir_str.as_str()),
+        )])
     }
 
     /// `WORKSPACE CACHE` round trip (issue #163): switching selects the

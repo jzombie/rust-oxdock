@@ -3,8 +3,11 @@ use oxdock_macros::oxdock_embed;
 oxdock_embed! {
     name: DemoAssets,
     script: {
+        // Closed child env: the seeded host PATH resolves the failing
+        // command, so the failure is a status failure (the reporting
+        // shape under test), never a resolution failure.
         WORKDIR /
-        RUN __oxdock_missing_command__
+        RUN ["cargo", "--invalid-oxdock-flag-xyz"]
     },
     out_dir: "prebuilt",
 }

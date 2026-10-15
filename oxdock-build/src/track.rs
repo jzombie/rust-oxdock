@@ -267,6 +267,14 @@ pub fn collect_env_references(steps: &[Step]) -> BTreeSet<String> {
             StepKind::InheritEnv { keys: inherit } => {
                 keys.extend(inherit.iter().cloned());
             }
+            StepKind::Isolated { body } => {
+                for k in collect_env_references(body) {
+                    keys.insert(k);
+                }
+            }
+            StepKind::IsolatedInheritEnv { keys: inherit } => {
+                keys.extend(inherit.iter().cloned());
+            }
             StepKind::Run(t) | StepKind::Echo(t) => template_keys(&mut keys, t),
             StepKind::RunExec { argv } => {
                 for arg in argv {

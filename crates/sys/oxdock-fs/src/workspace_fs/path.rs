@@ -13,7 +13,6 @@ use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 #[cfg(not(miri))]
 use std::sync::OnceLock;
-#[cfg(miri)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 #[cfg(not(miri))]
 use std::time::Duration;
@@ -24,6 +23,13 @@ use tracing::warn;
 
 #[cfg(miri)]
 static TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+/// Process-local counter for pre-computed scratch candidates: the leaf
+/// is unique within this process, the PID namespaces it across live
+/// processes. Uniqueness, not secrecy: the marker/lock protocol proves
+/// ownership for the GC sweep.
+#[cfg(not(miri))]
+static CANDIDATE_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
 #[cfg_attr(miri, allow(dead_code))]
 const OXDOCK_TEMP_PREFIX: &str = "oxdock-";
@@ -102,7 +108,7 @@ impl GuardedPath {
         // leaves an unmarked dir the GC never reclaims.
         let lock = write_temp_lock(&guard)?;
         write_temp_marker(&guard)?;
-        Ok(GuardedTempDir::new(guard, Some(tempdir), Some(lock)))
+        Ok(GuardedTempDir::new(guard, Some(tempdir), Some(lock), None))
     }
 
     /// Create a synthetic temporary directory when running under Miri.
@@ -126,7 +132,7 @@ impl GuardedPath {
             root: path.clone(),
             path,
         };
-        Ok(GuardedTempDir::new(guard, None, None))
+        Ok(GuardedTempDir::new(guard, None, None, None))
     }
 
     /// Remove any stale tempdirs created by OxDock in the system temp dir. This helps
@@ -356,16 +362,68 @@ pub struct GuardedTempDir {
     guard: Option<GuardedPath>,
     tempdir: Option<TempDir>,
     lock: Option<File>,
+    cleanup: Option<PathCleanupGuard>,
+}
+
+/// Owned cleanup for a natively materialized pre-computed candidate:
+/// `tempfile::TempDir` cannot wrap a pre-existing path, so candidate
+/// roots carry this guard instead and delete synchronously on drop.
+#[cfg_attr(miri, allow(dead_code))]
+#[allow(clippy::disallowed_types)]
+pub struct PathCleanupGuard(PathBuf);
+
+impl Drop for PathCleanupGuard {
+    fn drop(&mut self) {
+        #[cfg(not(miri))]
+        remove_tree_best_effort(&self.0);
+    }
 }
 
 impl GuardedTempDir {
     #[allow(clippy::disallowed_types)]
-    fn new(guard: GuardedPath, tempdir: Option<TempDir>, lock: Option<File>) -> Self {
+    fn new(
+        guard: GuardedPath,
+        tempdir: Option<TempDir>,
+        lock: Option<File>,
+        cleanup: Option<PathCleanupGuard>,
+    ) -> Self {
         Self {
             guard: Some(guard),
             tempdir,
             lock,
+            cleanup,
         }
+    }
+
+    /// Materialize a pre-computed candidate leaf: create the directory,
+    /// then publish lock-before-marker exactly like `tempdir_with`, so
+    /// the startup GC sweep treats candidate roots identically.
+    /// `create_dir` (not `create_dir_all`) detects cross-process
+    /// collisions: a pre-existing leaf is a should-be-impossible bug
+    /// (the leaf carries PID, counter, and wall-clock nanos), failed
+    /// fast so the baked seed map can never desynchronize from disk.
+    #[cfg(not(miri))]
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    fn try_candidate(path: &Path) -> Result<Self> {
+        match std::fs::create_dir(path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                return Err(anyhow::anyhow!(
+                    "scratch candidate collided (clock reuse?): {}",
+                    path.display()
+                ));
+            }
+            Err(e) => return Err(e.into()),
+        }
+        let guard = GuardedPath::new_root(path)?;
+        let lock = write_temp_lock(&guard)?;
+        write_temp_marker(&guard)?;
+        Ok(Self::new(
+            guard,
+            None,
+            Some(lock),
+            Some(PathCleanupGuard(path.to_path_buf())),
+        ))
     }
 
     pub fn as_guarded_path(&self) -> &GuardedPath {
@@ -375,6 +433,9 @@ impl GuardedTempDir {
     #[allow(clippy::disallowed_types)]
     pub fn into_parts(mut self) -> (Option<TempDir>, GuardedPath) {
         let _ = self.lock.take();
+        // Persisted by the caller: forget the cleanup guard so `Drop`
+        // cannot delete a directory that outlives this handle.
+        std::mem::forget(self.cleanup.take());
         (self.tempdir.take(), self.guard.take().unwrap())
     }
 }
@@ -406,25 +467,13 @@ impl Drop for GuardedTempDir {
         if let Some(tempdir) = self.tempdir.take() {
             let path = tempdir.path().to_path_buf();
             drop(tempdir);
-            if path.exists() {
-                let _ = std::fs::remove_dir_all(&path);
-                // Windows can defer directory teardown if a scanner briefly
-                // holds a handle; retry a few times to avoid leaving debris
-                // that breaks parent-process assertions.
-                if path.exists() {
-                    for _ in 0..5 {
-                        std::thread::sleep(Duration::from_millis(10));
-                        if !path.exists() {
-                            break;
-                        }
-                        let _ = std::fs::remove_dir_all(&path);
-                        if !path.exists() {
-                            break;
-                        }
-                    }
-                }
-            }
+            remove_tree_best_effort(&path);
         }
+        // Candidate roots carry no `TempDir`: the owned cleanup guard
+        // fires here, after the lock handle above released, so Windows
+        // never deletes a tree containing our open lock file.
+        #[cfg(not(miri))]
+        drop(self.cleanup.take());
 
         #[cfg(miri)]
         {
@@ -445,10 +494,12 @@ impl std::fmt::Display for GuardedTempDir {
 /// Lazily-created guarded temporary directory backing the execution snapshot
 /// (issue #131).
 ///
-/// Construction performs no filesystem I/O on native targets: the directory is
-/// allocated atomically (via `tempfile::Builder`, marker/lock order preserved)
-/// on the first `ensure()` call. Under Miri a synthetic id is reserved at
-/// construction so deterministic numbering is unaffected by laziness.
+/// Construction performs no filesystem I/O on native targets: the lexical
+/// candidate path is pre-computed (PID-namespaced counter leaf under the
+/// system temp root) and the directory materializes on the first
+/// `ensure()` call, preserving marker/lock order. Under Miri a synthetic
+/// id is reserved at construction so deterministic numbering is
+/// unaffected by laziness.
 ///
 /// Ownership is unified: the single `OnceLock<GuardedTempDir>` cell owns the
 /// directory guard AND its `GuardedPath`, so a path reference can never
@@ -459,6 +510,11 @@ pub struct LazyGuardedTempDir {
     cell: Box<std::sync::OnceLock<GuardedTempDir>>,
     init_lock: std::sync::Mutex<()>,
     materialized: std::sync::atomic::AtomicBool,
+    /// Lexical candidate path, fixed at construction (native): the seed
+    /// renders it before any spawn materializes it.
+    #[cfg(not(miri))]
+    #[allow(clippy::disallowed_types)]
+    candidate: PathBuf,
 }
 
 impl Default for LazyGuardedTempDir {
@@ -468,8 +524,10 @@ impl Default for LazyGuardedTempDir {
 }
 
 impl LazyGuardedTempDir {
-    /// Reserve the lazy holder. No filesystem I/O on native targets. Under
-    /// Miri the synthetic path is reserved (and boxed) synchronously so
+    /// Reserve the lazy holder. No filesystem I/O on native targets: the
+    /// lexical candidate is pre-computed for seed rendering while the
+    /// directory materializes on first `ensure()`. Under Miri the
+    /// synthetic path is reserved (and boxed) synchronously so
     /// deterministic numbering follows instantiation order, while the
     /// materialized flag still flips only in `ensure()`.
     #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
@@ -480,6 +538,7 @@ impl LazyGuardedTempDir {
                 cell: Box::new(std::sync::OnceLock::new()),
                 init_lock: std::sync::Mutex::new(()),
                 materialized: std::sync::atomic::AtomicBool::new(false),
+                candidate: fresh_candidate(),
             }
         }
         #[cfg(miri)]
@@ -491,6 +550,7 @@ impl LazyGuardedTempDir {
                     root: path.clone(),
                     path,
                 },
+                None,
                 None,
                 None,
             );
@@ -543,13 +603,13 @@ impl LazyGuardedTempDir {
         if let Some(path) = self.get() {
             return Ok(path);
         }
-        // Native: atomic `tempfile` allocation (marker/lock order preserved by
-        // the shared constructor). Miri: the cell was seeded at construction;
-        // only the flag flips here so the store below runs on both targets.
+        // Native: materialize the pre-computed candidate. Miri:
+        // the cell was seeded at construction; only the flag flips here
+        // so the store below runs on both targets.
         #[cfg(not(miri))]
         {
-            let tmp = GuardedPath::tempdir()?;
-            let _ = self.cell.set(tmp);
+            let dir = GuardedTempDir::try_candidate(&self.candidate_path())?;
+            let _ = self.cell.set(dir);
         }
         self.materialized
             .store(true, std::sync::atomic::Ordering::Release);
@@ -558,6 +618,24 @@ impl LazyGuardedTempDir {
             .get()
             .map(GuardedTempDir::as_guarded_path)
             .expect("lazy tempdir cell populated by ensure"))
+    }
+
+    /// Lexical candidate path for seed rendering: fixed at construction
+    /// on native targets, the reserved synthetic path under Miri.
+    /// Never touches the host filesystem.
+    #[allow(clippy::disallowed_types)]
+    pub fn candidate_path(&self) -> PathBuf {
+        #[cfg(not(miri))]
+        {
+            self.candidate.clone()
+        }
+        #[cfg(miri)]
+        {
+            self.cell
+                .get()
+                .map(|dir| dir.as_guarded_path().to_path_buf())
+                .expect("miri lazy tempdir cell seeded at construction")
+        }
     }
 
     /// Force physical creation without borrowing the path. Composition roots
@@ -754,6 +832,55 @@ fn write_temp_lock(guard: &GuardedPath) -> Result<File> {
 #[cfg(miri)]
 fn write_temp_lock(_guard: &GuardedPath) -> Result<File> {
     Err(anyhow::anyhow!("temp lock unused under Miri"))
+}
+
+/// Best-effort synchronous tree removal with Windows teardown retries:
+/// scanners can briefly hold handles after our lock released, so one
+/// pass is not enough to avoid debris that breaks assertions.
+#[cfg(not(miri))]
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+fn remove_tree_best_effort(path: &Path) {
+    if !path.exists() {
+        return;
+    }
+    let _ = std::fs::remove_dir_all(path);
+    if path.exists() {
+        for _ in 0..5 {
+            std::thread::sleep(Duration::from_millis(10));
+            if !path.exists() {
+                break;
+            }
+            let _ = std::fs::remove_dir_all(path);
+            if !path.exists() {
+                break;
+            }
+        }
+    }
+}
+
+/// Pre-compute the lexical candidate leaf for a lazy scratch root:
+/// `<tmp>/oxdock-<pid>-<n>-<nanos>`. No filesystem I/O (base
+/// canonicalization is a read-only `stat`): the seed renders this path
+/// before any spawn materializes it. PID namespaces live processes,
+/// the counter disambiguates instances, wall-clock nanos defeat PID
+/// reuse after a SIGKILLed predecessor: a colliding leaf is a
+/// should-be-impossible bug, failed fast at `ensure()`, never bumped
+/// (a bumped path would desynchronize the baked seed map from disk).
+#[cfg(not(miri))]
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+fn fresh_candidate() -> PathBuf {
+    let n = CANDIDATE_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut base = std::env::temp_dir();
+    if let Ok(canonical) = base.canonicalize() {
+        base = canonical;
+    }
+    #[allow(clippy::disallowed_methods)]
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    base.join(format!("{OXDOCK_TEMP_PREFIX}{pid}-{n}-{nanos}"))
 }
 
 #[cfg(not(miri))]
@@ -1025,7 +1152,7 @@ mod tests {
         let guard = GuardedPath::new_root(tempdir.path()).expect("guarded root");
         write_temp_marker(&guard).expect("marker");
         let lock = write_temp_lock(&guard).expect("lock");
-        let temp = GuardedTempDir::new(guard, Some(tempdir), Some(lock));
+        let temp = GuardedTempDir::new(guard, Some(tempdir), Some(lock), None);
         let path = temp.as_guarded_path().to_path_buf();
         std::mem::forget(temp);
 

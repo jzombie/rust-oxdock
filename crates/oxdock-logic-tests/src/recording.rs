@@ -8,6 +8,7 @@
 //! wins, so register specific needles before general ones.
 
 use anyhow::Result;
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 /// One intercepted process invocation: exec-form argv or shell-form text.
@@ -32,6 +33,7 @@ struct Responder {
 #[derive(Clone)]
 pub struct RecordingManager {
     log: Arc<Mutex<Vec<Call>>>,
+    env_log: Arc<Mutex<Vec<HashMap<String, String>>>>,
     responders: Arc<Mutex<Vec<Responder>>>,
 }
 
@@ -39,6 +41,7 @@ impl RecordingManager {
     pub fn new() -> Self {
         Self {
             log: Arc::new(Mutex::new(Vec::new())),
+            env_log: Arc::new(Mutex::new(Vec::new())),
             responders: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -78,6 +81,22 @@ impl RecordingManager {
 
     pub fn calls(&self) -> Vec<Call> {
         self.log.lock().expect("log").clone()
+    }
+
+    /// Staged child env per recorded call, index-aligned with [`Self::calls`]:
+    /// exactly the script env the spawn would have received (closed child
+    /// env proof reads through here). `Call` shapes stay unchanged so
+    /// existing assertions keep compiling.
+    pub fn call_envs(&self) -> Vec<HashMap<String, String>> {
+        self.env_log.lock().expect("env log").clone()
+    }
+
+    fn record(&self, call: Call, ctx: &oxdock_process::CommandContext) {
+        self.log.lock().expect("log").push(call);
+        self.env_log
+            .lock()
+            .expect("env log")
+            .push(ctx.envs().as_ref().clone());
     }
 }
 
@@ -120,14 +139,11 @@ impl oxdock_process::ProcessManager for RecordingManager {
 
     fn run_command(
         &mut self,
-        _ctx: &oxdock_process::CommandContext,
+        ctx: &oxdock_process::CommandContext,
         script: &str,
         options: oxdock_process::CommandOptions,
     ) -> Result<oxdock_process::CommandResult<Self::Handle>> {
-        self.log
-            .lock()
-            .expect("log")
-            .push(Call::Shell(script.to_string()));
+        self.record(Call::Shell(script.to_string()), ctx);
         // Scripted stdout feeds the capture sink behind `LET $x = RUN`:
         // the engine binds sink bytes, never the result value, so the
         // response must be written into the provided writer. Unmatched
@@ -151,14 +167,11 @@ impl oxdock_process::ProcessManager for RecordingManager {
 
     fn run_argv(
         &mut self,
-        _ctx: &oxdock_process::CommandContext,
+        ctx: &oxdock_process::CommandContext,
         argv: &[String],
         options: oxdock_process::CommandOptions,
     ) -> Result<oxdock_process::CommandResult<Self::Handle>> {
-        self.log
-            .lock()
-            .expect("log")
-            .push(Call::Argv(argv.to_vec()));
+        self.record(Call::Argv(argv.to_vec()), ctx);
         match options.stdout {
             oxdock_process::CommandStdout::Capture => Ok(oxdock_process::CommandResult::Captured(
                 b"deadbeef\n".to_vec(),
@@ -188,4 +201,57 @@ pub fn shell_calls(calls: &[Call]) -> Vec<&str> {
             Call::Shell(script) => Some(script.as_str()),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Staged child env stays index-aligned with calls and carries exactly
+    /// the script env: a routed name arrives, a host-only name never does.
+    /// The manager never spawns, so this pins the plumbing (not the OS
+    /// boundary, which `shell_manager` proves with real children).
+    #[test]
+    fn call_envs_align_with_calls_and_hold_script_env() {
+        let steps = oxdock_core::parse_script(
+            "INHERIT_ENV [PROBE_KEPT]\nRUN [\"prog\", \"x\"]\nRUN \"echo hi\"\n",
+        )
+        .expect("probe script parses");
+        // Host-only probe: RAII-guarded so a mid-test failure still restores.
+        let _probe_guard =
+            oxdock_sys_test_utils::TestEnvGuard::set("OXDOCK_RECORDING_PROBE_DROPPED", "host-only");
+        let temp = oxdock_fs::GuardedPath::tempdir().expect("tempdir");
+        let root = temp.as_guarded_path().clone();
+        let setup =
+            oxdock_fs::PathResolver::new_guarded(root.clone(), root.clone()).expect("resolver");
+        let fs: Box<dyn oxdock_fs::WorkspaceFs> = Box::new(setup);
+        let manager = RecordingManager::new();
+        let mut io = oxdock_core::ExecIo::new();
+        io.insert_inherit_env("PROBE_KEPT", "routed");
+        oxdock_core::run_steps_with_manager_with_modules(
+            fs,
+            &steps,
+            manager.clone(),
+            io,
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect("probe script runs");
+
+        let calls = manager.calls();
+        let envs = manager.call_envs();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            envs.len(),
+            calls.len(),
+            "every recorded call stages exactly one env map"
+        );
+        for staged in &envs {
+            assert_eq!(staged.get("PROBE_KEPT").map(String::as_str), Some("routed"));
+            assert!(
+                !staged.contains_key("OXDOCK_RECORDING_PROBE_DROPPED"),
+                "host-only names never stage: {staged:?}"
+            );
+        }
+    }
 }

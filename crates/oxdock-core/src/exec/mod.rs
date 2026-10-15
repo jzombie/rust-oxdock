@@ -33,11 +33,12 @@ pub(crate) use self::handlers::{
     dispatch_call, dispatch_cancel_step, dispatch_continue, dispatch_copy, dispatch_copy_git,
     dispatch_cwd, dispatch_echo, dispatch_env, dispatch_exit, dispatch_expand, dispatch_for_loop,
     dispatch_func_def, dispatch_hash_sha256, dispatch_if_then, dispatch_inherit_env,
-    dispatch_install, dispatch_ls, dispatch_mkdir, dispatch_prompt, dispatch_push_into_step,
-    dispatch_read, dispatch_read_line, dispatch_remote, dispatch_remove, dispatch_return,
-    dispatch_run, dispatch_run_exec, dispatch_set, dispatch_sleep_step, dispatch_symlink,
-    dispatch_timeout_step, dispatch_unarchive, dispatch_while_loop, dispatch_with_io,
-    dispatch_with_io_block, dispatch_workdir, dispatch_workspace, dispatch_write,
+    dispatch_install, dispatch_isolated_inherit_env, dispatch_isolated_step, dispatch_ls,
+    dispatch_mkdir, dispatch_prompt, dispatch_push_into_step, dispatch_read, dispatch_read_line,
+    dispatch_remote, dispatch_remove, dispatch_return, dispatch_run, dispatch_run_exec,
+    dispatch_set, dispatch_sleep_step, dispatch_symlink, dispatch_timeout_step, dispatch_unarchive,
+    dispatch_while_loop, dispatch_with_io, dispatch_with_io_block, dispatch_workdir,
+    dispatch_workspace, dispatch_write,
 };
 pub use self::io::ExecIo;
 pub use self::io::PipeStream;
@@ -345,7 +346,17 @@ pub fn run_steps_with_manager_with_modules<P: ProcessManager>(
 fn new_state<P: ProcessManager>(fs: Box<dyn WorkspaceFs>, io: ExecIo) -> Result<ExecState<P>> {
     let cwd = fs.root().clone();
     let build_context = fs.build_context().clone();
-    let mut envs = BuiltinEnv::collect(&build_context).into_envs();
+    let cargo_scratch = reserve_cargo_scratch()?;
+    // Seeded script environment: sandbox defaults first, then explicit
+    // layers win (BuiltinEnv sanctions, `io` overrides route host
+    // entries). The pure seed is stored alongside for `ISOLATED`
+    // resets and transport sanitize.
+    let seed = Arc::new(oxdock_process::seed_defaults(
+        &cargo_scratch.tmp_seed_display(),
+        &cargo_scratch.target_seed_display(),
+    ));
+    let mut envs = (*seed).clone();
+    envs.extend(BuiltinEnv::collect(&build_context).into_envs());
     for (key, value) in io.inherit_env_overrides() {
         envs.insert(key.clone(), value.clone());
     }
@@ -355,11 +366,13 @@ fn new_state<P: ProcessManager>(fs: Box<dyn WorkspaceFs>, io: ExecIo) -> Result<
     let exact_stdout = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
     let mut state = ExecState {
         fs,
-        cargo_scratch: reserve_cargo_scratch()?,
+        cargo_scratch,
+        seed,
         cwd,
         envs,
         bg_children: Vec::new(),
         scope_stack: Vec::new(),
+        isolated_stack: Vec::new(),
         io,
         assert_windows: assert_windows.clone(),
         assert_windows_stderr: assert_windows_stderr.clone(),

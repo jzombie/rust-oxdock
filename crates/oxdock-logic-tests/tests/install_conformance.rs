@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use oxdock_core::{ExecIo, run_steps_with_manager_with_modules};
-use oxdock_fs::{GuardedPath, PathResolver};
+use oxdock_fs::{GuardedPath, PathResolver, env as oxdock_env};
 use oxdock_logic_tests::recording::{RecordingManager, argv_calls};
 
 /// sha256 of `INSTALL_PAYLOAD`, computed once and pinned beside it: if
@@ -10,7 +10,7 @@ const INSTALL_PAYLOAD: &[u8] = b"oxdock-install-fixture-payload-v1";
 const INSTALL_DIGEST: &str = "8e6873401de1e38cfc5b986fd9330e26d7299469509d968f0b49031a7cfa1734";
 
 fn repo_root() -> Result<String> {
-    let manifest_dir = std::env::var(oxdock_fs::env::CARGO_MANIFEST_DIR)
+    let manifest_dir = std::env::var(oxdock_fs::env::cargo::MANIFEST_DIR)
         .context("CARGO_MANIFEST_DIR missing")?
         .replace('\\', "/");
     Ok(manifest_dir
@@ -116,9 +116,12 @@ fn install_harness(payload: &[u8], digest: &str, dir: Option<&str>) -> Result<In
             root.join(dir)?.as_path().display().to_string(),
         );
     } else {
-        io.insert_inherit_env("HOME", root.join("home")?.as_path().display().to_string());
         io.insert_inherit_env(
-            "USERPROFILE",
+            oxdock_env::os::unix::HOME,
+            root.join("home")?.as_path().display().to_string(),
+        );
+        io.insert_inherit_env(
+            oxdock_env::os::windows::USERPROFILE,
             root.join("home")?.as_path().display().to_string(),
         );
     }
@@ -209,8 +212,9 @@ fn tampered_asset_aborts_before_place() -> Result<()> {
 #[cfg_attr(miri, ignore = "needs host tempdir for the fixture root")]
 fn missing_dir_fails_naming_install_dir() -> Result<()> {
     let mut run = install_harness(INSTALL_PAYLOAD, INSTALL_DIGEST, None)?;
-    run.io.remove_inherit_env("HOME");
-    run.io.remove_inherit_env("USERPROFILE");
+    run.io.remove_inherit_env(oxdock_env::os::unix::HOME);
+    run.io
+        .remove_inherit_env(oxdock_env::os::windows::USERPROFILE);
     let err = run.execute().expect_err("no dir must fail");
     let rendered = format!("{err:#}");
     assert!(

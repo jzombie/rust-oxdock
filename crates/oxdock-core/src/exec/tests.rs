@@ -8,7 +8,7 @@ use oxdock_process::{
     BackgroundHandle, CommandContext, CommandMode, CommandOptions, CommandResult, CommandStdin,
     MockProcessManager, MockRunCall, ProcessManager,
 };
-use oxdock_sys_test_utils::{can_create_symlinks, exit_status_from_code};
+use oxdock_sys_test_utils::{TestEnvGuard, can_create_symlinks, exit_status_from_code};
 use std::collections::HashMap;
 use std::process::ExitStatus;
 use std::sync::{Arc, Mutex};
@@ -846,10 +846,12 @@ fn create_exec_state(fs: MockFs) -> ExecState<MockProcessManager> {
     let mut state = ExecState {
         fs: Box::new(fs.clone()),
         cargo_scratch: oxdock_fs::reserve_cargo_scratch().unwrap(),
+        seed: Arc::new(HashMap::new()),
         cwd: fs.root().clone(),
         envs: Arc::new(HashMap::new()),
         bg_children: Vec::new(),
         scope_stack: Vec::new(),
+        isolated_stack: Vec::new(),
         io: ExecIo::new(),
         assert_windows: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         assert_windows_stderr: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
@@ -2716,7 +2718,10 @@ fn is_exec_finds_host_tools_and_direct_files() {
 #[cfg(windows)]
 fn parse_pathext_shapes_and_defaults() {
     use super::args::parse_pathext;
-    assert_eq!(parse_pathext(None), vec![".COM", ".EXE", ".BAT", ".CMD"]);
+    assert!(
+        parse_pathext(None).is_empty(),
+        "unset PATHEXT probes nothing"
+    );
     assert!(parse_pathext(Some("")).is_empty());
     assert_eq!(parse_pathext(Some("exe;bat")), vec![".exe", ".bat"]);
     assert_eq!(
@@ -5316,7 +5321,6 @@ fn force_close_eofs_despite_writer_and_keeper() {
 }
 
 #[test]
-#[cfg(unix)]
 #[cfg_attr(
     miri,
     ignore = "spawns real OS processes and kernel pipes, which die under Miri isolation"
@@ -5355,6 +5359,548 @@ fn script_pipe_fresh_handles_across_sessions() {
         let content = check
             .read_to_string(&root.join("f1.txt").expect("join"))
             .expect("read file");
-        assert_eq!(content, "one\n");
+        // `cmd` emits CRLF; the proof is handle freshness, not line endings.
+        assert_eq!(content.replace("\r\n", "\n"), "one\n");
+    }
+}
+
+/// Run a script with the recording mock over a fresh tempdir root,
+/// returning the tempdir (kept alive) and the mock for env assertions.
+/// Recorded envs are exactly the script env each spawn would receive.
+fn run_isolated_case(script: &str) -> (oxdock_fs::GuardedTempDir, MockProcessManager) {
+    let steps = crate::parse_script(script).expect("isolated case parses");
+    let temp = GuardedPath::tempdir().expect("tempdir");
+    let root = temp.as_guarded_path().clone();
+    let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).expect("resolver"));
+    let mock = MockProcessManager::default();
+    run_steps_with_manager(fs, &steps, mock.clone(), ExecIo::new())
+        .unwrap_or_else(|err| panic!("isolated case runs: {err:#}"));
+    (temp, mock)
+}
+
+#[test]
+fn isolated_scrubs_outer_env_for_children() {
+    let (_temp, mock) = run_isolated_case(indoc! {r#"
+        ENV OUTER=topsecret
+        ISOLATED {
+            RUN "echo hi"
+        }
+    "#});
+    let runs = mock.recorded_runs();
+    assert_eq!(runs.len(), 1);
+    assert!(
+        !runs[0].envs.contains_key("OUTER"),
+        "scrubbed name must not reach children: {:?}",
+        runs[0].envs
+    );
+}
+
+#[test]
+fn isolated_allowlist_reads_outer_scope() {
+    let (_temp, mock) = run_isolated_case(indoc! {r#"
+        ENV KEEP=yes
+        ENV DROP=no
+        ISOLATED {
+            INHERIT_ENV [KEEP]
+            RUN "echo hi"
+        }
+    "#});
+    let runs = mock.recorded_runs();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].envs.get("KEEP").map(String::as_str), Some("yes"));
+    assert!(
+        !runs[0].envs.contains_key("DROP"),
+        "unlisted names stay out: {:?}",
+        runs[0].envs
+    );
+}
+
+#[test]
+fn isolated_allowlist_prefers_outer_override_over_seed() {
+    // The discriminator for snapshot-copy vs host-re-mirroring: the
+    // parent overrides a seeded name, and the block allowlist must
+    // copy the enclosing override, not reseed the host value.
+    let (_temp, mock) = run_isolated_case(indoc! {r#"
+        ENV PATH=/custom/bin
+        ISOLATED {
+            INHERIT_ENV [PATH]
+            RUN "echo hi"
+        }
+    "#});
+    let runs = mock.recorded_runs();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(
+        runs[0].envs.get("PATH").map(String::as_str),
+        Some("/custom/bin"),
+        "allowlist must copy the enclosing override, not the host seed: {:?}",
+        runs[0].envs
+    );
+}
+
+#[test]
+fn isolated_absent_names_stay_absent() {
+    // Listing a name the outer scope lacks is not an error: the block
+    // simply runs without it, matching top-level INHERIT_ENV.
+    let temp = GuardedPath::tempdir().expect("tempdir");
+    let root = temp.as_guarded_path().clone();
+    let steps = crate::parse_script(indoc! {r#"
+        ISOLATED {
+            INHERIT_ENV [OXDOC_DEFINITELY_ABSENT_12345]
+            WRITE ok.txt done
+        }
+        LET $b: STRING = READ ok.txt
+        ASSERT_EQ $b "done"
+    "#})
+    .expect("absent allowlist parses");
+    let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).expect("resolver"));
+    run_steps_with_manager(fs, &steps, MockProcessManager::default(), ExecIo::new())
+        .unwrap_or_else(|err| panic!("absent allowlist runs: {err:#}"));
+}
+
+#[test]
+fn isolated_nesting_narrows_monotonically() {
+    let (_temp, mock) = run_isolated_case(indoc! {r#"
+        ENV A=1
+        ENV B=2
+        ENV C=3
+        ISOLATED {
+            INHERIT_ENV [A, B, C]
+            ISOLATED {
+                INHERIT_ENV [A, B]
+                ISOLATED {
+                    INHERIT_ENV [A]
+                    RUN "echo deep"
+                }
+                RUN "echo mid"
+            }
+            RUN "echo outer"
+        }
+    "#});
+    let runs = mock.recorded_runs();
+    assert_eq!(runs.len(), 3);
+    let keys = |i: usize| {
+        let mut names: Vec<&str> = runs[i]
+            .envs
+            .keys()
+            .filter(|k| ["A", "B", "C"].contains(&k.as_str()))
+            .map(String::as_str)
+            .collect();
+        names.sort_unstable();
+        names
+    };
+    assert_eq!(keys(0), vec!["A"], "deepest level keeps only A");
+    assert_eq!(keys(1), vec!["A", "B"], "middle level keeps A and B");
+    assert_eq!(keys(2), vec!["A", "B", "C"], "outer level keeps all three");
+}
+
+#[test]
+fn isolated_restores_env_on_exit() {
+    let (_temp, mock) = run_isolated_case(indoc! {r#"
+        ENV M=outer
+        ISOLATED {
+            ENV M=inner
+            RUN "echo hi"
+        }
+        RUN "echo hi"
+    "#});
+    let runs = mock.recorded_runs();
+    assert_eq!(runs.len(), 2);
+    assert_eq!(runs[0].envs.get("M").map(String::as_str), Some("inner"));
+    assert_eq!(runs[1].envs.get("M").map(String::as_str), Some("outer"));
+}
+
+#[test]
+fn isolated_shares_vars_and_files() {
+    // Only env: is scrubbed. Bindings, pipes, and files flow through.
+    let temp = GuardedPath::tempdir().expect("tempdir");
+    let root = temp.as_guarded_path().clone();
+    let steps = crate::parse_script(indoc! {r#"
+        LET $who: STRING = "world"
+        ENV MODE=outer
+        ISOLATED {
+            ENV MODE=inner
+            WRITE hello.txt "hi {{ $who }} {{ env:MODE }}"
+        }
+        LET $back: STRING = "{{ env:MODE }}"
+        ASSERT_EQ $back "outer"
+    "#})
+    .expect("sharing case parses");
+    let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).expect("resolver"));
+    run_steps_with_manager(fs, &steps, MockProcessManager::default(), ExecIo::new())
+        .unwrap_or_else(|err| panic!("sharing case runs: {err:#}"));
+    let check = PathResolver::new(root.as_path(), root.as_path()).expect("resolver");
+    let body = check
+        .read_to_string(&root.join("hello.txt").expect("join"))
+        .expect("read file");
+    assert_eq!(body, "hi world inner");
+}
+
+#[test]
+fn isolated_works_inside_func() {
+    let (_temp, mock) = run_isolated_case(indoc! {r#"
+        ENV SECRET=topsecret
+        FUNC PROBE() {
+            ISOLATED {
+                RUN "echo hi"
+            }
+        }
+        PROBE()
+    "#});
+    let runs = mock.recorded_runs();
+    assert_eq!(runs.len(), 1);
+    assert!(
+        !runs[0].envs.contains_key("SECRET"),
+        "function-contained block scrubs too: {:?}",
+        runs[0].envs
+    );
+}
+
+#[test]
+fn isolated_async_task_inherits_scrub() {
+    let (_temp, mock) = run_isolated_case(indoc! {r#"
+        ENV SECRET=topsecret
+        ENV KEEP=yes
+        ISOLATED {
+            INHERIT_ENV [KEEP]
+            LET $t: HANDLE = ASYNC { RUN "echo hi" }
+            AWAIT $t
+        }
+    "#});
+    let spawns = mock.spawn_log();
+    assert_eq!(spawns.len(), 1);
+    assert_eq!(spawns[0].envs.get("KEEP").map(String::as_str), Some("yes"));
+    assert!(
+        !spawns[0].envs.contains_key("SECRET"),
+        "async child of a block stays scrubbed: {:?}",
+        spawns[0].envs
+    );
+}
+
+#[test]
+fn isolated_inside_async_scopes_to_task() {
+    let (_temp, mock) = run_isolated_case(indoc! {r#"
+        ENV SECRET=topsecret
+        LET $t: HANDLE = ASYNC {
+            ISOLATED {
+                RUN "echo hi"
+            }
+        }
+        AWAIT $t
+    "#});
+    let spawns = mock.spawn_log();
+    assert_eq!(spawns.len(), 1);
+    assert!(
+        !spawns[0].envs.contains_key("SECRET"),
+        "block inside a task scrubs that task: {:?}",
+        spawns[0].envs
+    );
+}
+
+#[test]
+fn plain_block_keeps_outer_env_for_children() {
+    // Control for the scrub tests below: an ordinary scoped block is
+    // transparent to envs, so only ISOLATED drops outer names.
+    let (_temp, mock) = run_isolated_case(indoc! {r#"
+        ENV OUTER=topsecret
+        [bool:true] {
+            RUN "echo hi"
+        }
+    "#});
+    let runs = mock.recorded_runs();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(
+        runs[0].envs.get("OUTER").map(String::as_str),
+        Some("topsecret"),
+        "plain blocks must not scrub: {:?}",
+        runs[0].envs
+    );
+}
+
+#[test]
+fn isolated_allowlist_prefers_outer_scope_over_host() {
+    // The discriminating proof: when host and outer scope disagree on a
+    // listed name, the child sees the OUTER value. A host-reading
+    // implementation would answer "from-host" here.
+    // RAII-guarded invented probe (not a real env var, so no constant).
+    let _host = TestEnvGuard::set("OXDOCK_OUTER_WINS_PROBE", "from-host");
+    let (_temp, mock) = run_isolated_case(indoc! {r#"
+        ENV OXDOCK_OUTER_WINS_PROBE=from-outer
+        ISOLATED {
+            INHERIT_ENV [OXDOCK_OUTER_WINS_PROBE]
+            RUN "echo hi"
+        }
+    "#});
+    let runs = mock.recorded_runs();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(
+        runs[0]
+            .envs
+            .get("OXDOCK_OUTER_WINS_PROBE")
+            .map(String::as_str),
+        Some("from-outer"),
+        "allowlist must read the outer scope, never the host: {:?}",
+        runs[0].envs
+    );
+}
+
+#[test]
+fn isolated_allowlist_cannot_reach_host_only_names() {
+    // Airtightness: a name the host exports but no outer scope routed
+    // stays absent even when the inner allowlist names it. Listing is
+    // necessary but not sufficient; outer-scope presence decides.
+    let _host = oxdock_sys_test_utils::TestEnvGuard::set("OXDOC_HOST_ONLY_PROBE", "host");
+    let (_temp, mock) = run_isolated_case(indoc! {r#"
+        ENV ELSEWHERE=yes
+        ISOLATED {
+            INHERIT_ENV [OXDOC_HOST_ONLY_PROBE]
+            RUN "echo hi"
+        }
+    "#});
+    let runs = mock.recorded_runs();
+    assert_eq!(runs.len(), 1);
+    assert!(
+        !runs[0].envs.contains_key("OXDOC_HOST_ONLY_PROBE"),
+        "host-only names must not cross the boundary: {:?}",
+        runs[0].envs
+    );
+    assert!(
+        !runs[0].envs.contains_key("ELSEWHERE"),
+        "unlisted outer names stay out too: {:?}",
+        runs[0].envs
+    );
+}
+
+/// Run a script with the real process manager over a fresh tempdir root,
+/// returning the tempdir (kept alive). Real spawns prove tier injection.
+fn run_seeded_case(script: &str) -> oxdock_fs::GuardedTempDir {
+    use oxdock_fs::PathResolver;
+    let steps = crate::parse_script(script).expect("tiered case parses");
+    let temp = GuardedPath::tempdir().expect("tempdir");
+    let root = temp.as_guarded_path().clone();
+    let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).expect("resolver"));
+    run_steps_with_manager(
+        fs,
+        &steps,
+        oxdock_process::default_process_manager(),
+        ExecIo::new(),
+    )
+    .unwrap_or_else(|err| panic!("tiered case runs: {err:#}"));
+    temp
+}
+
+fn read_case_file(temp: &oxdock_fs::GuardedTempDir, name: &str) -> String {
+    use oxdock_fs::PathResolver;
+    let root = temp.as_guarded_path().clone();
+    let reader = PathResolver::new(root.as_path(), root.as_path()).expect("resolver");
+    reader
+        .read_to_string(&root.join(name).expect("join"))
+        .expect("case file readable")
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "spawns real OS processes, which die under Miri isolation"
+)]
+fn seeded_host_path_runs_shell_without_prelude() {
+    // No INHERIT_ENV at all: the mirrored host PATH still resolves the
+    // shell (`sh` or `cmd` per platform).
+    run_seeded_case(indoc! {r#"
+        RUN "echo tier-ok"
+    "#});
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "spawns real OS processes, which die under Miri isolation"
+)]
+fn seeded_path_visible_to_expansion() {
+    // No INHERIT_ENV at all: the mirrored host PATH is visible to
+    // expansion when the host defines it, empty otherwise.
+    let temp = run_seeded_case(indoc! {r#"
+        WRITE path.txt "{{ env:PATH }}"
+    "#});
+    let expected = std::env::var(oxdock_fs::env::os::PATH).unwrap_or_default();
+    assert_eq!(read_case_file(&temp, "path.txt"), expected);
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "spawns real OS processes, which die under Miri isolation"
+)]
+fn seeded_explicit_path_wins_over_seed() {
+    let temp = run_seeded_case(indoc! {r#"
+        ENV PATH=/custom/bin
+        WRITE path.txt "{{ env:PATH }}"
+    "#});
+    assert_eq!(read_case_file(&temp, "path.txt"), "/custom/bin");
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "spawns real OS processes, which die under Miri isolation"
+)]
+fn seeded_tmpdir_mirrors_or_absent() {
+    // TMPDIR mirrors the host when set, absents when not. Unix-family:
+    // Windows scripts needing it route `INHERIT_ENV`.
+    let temp = run_seeded_case(indoc! {r#"
+        WRITE tmpdir.txt "{{ env:TMPDIR }}"
+    "#});
+    let expected = std::env::var(oxdock_fs::env::os::unix::TMPDIR).unwrap_or_default();
+    assert_eq!(read_case_file(&temp, "tmpdir.txt"), expected);
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "spawns real OS processes, which die under Miri isolation"
+)]
+fn seeded_term_mirrors_or_absent() {
+    let temp = run_seeded_case(indoc! {r#"
+        WRITE term.txt "{{ env:TERM }}"
+    "#});
+    let expected = std::env::var(oxdock_fs::env::os::unix::TERM).unwrap_or_default();
+    assert_eq!(read_case_file(&temp, "term.txt"), expected);
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "spawns real OS processes, which die under Miri isolation"
+)]
+fn isolated_reseeds_factory_defaults() {
+    // The discriminating parity proof: top level and block see the
+    // identical seed, and outer customs stay out of the block. The
+    // script spawns nothing (WRITE/ENV only), so the proof runs on
+    // every platform; the PATH expectation mirrors the host or absents.
+    let temp = run_seeded_case(indoc! {r#"
+        ENV OUTER_CUSTOM=outer-val
+        WRITE top-path.txt "{{ env:PATH }}"
+        WRITE top-tmp.txt "{{ env:TMPDIR }}"
+        ISOLATED {
+            WRITE inner-path.txt "{{ env:PATH }}"
+            WRITE inner-tmp.txt "{{ env:TMPDIR }}"
+            WRITE inner-custom.txt "{{ env:OUTER_CUSTOM }}"
+        }
+    "#});
+    let expected_path = std::env::var(oxdock_fs::env::os::PATH).unwrap_or_default();
+    assert_eq!(read_case_file(&temp, "top-path.txt"), expected_path);
+    assert_eq!(
+        read_case_file(&temp, "inner-path.txt"),
+        expected_path,
+        "ISOLATED reseeds the identical seed"
+    );
+    assert_eq!(
+        read_case_file(&temp, "inner-tmp.txt"),
+        read_case_file(&temp, "top-tmp.txt"),
+        "seeded temp matches across the block boundary"
+    );
+    assert_eq!(
+        read_case_file(&temp, "inner-custom.txt"),
+        "",
+        "outer customs stay out of ISOLATED"
+    );
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "spawns real OS processes, which die under Miri isolation"
+)]
+fn seeded_no_prelude_child_env_holds_boundary() {
+    // The closedness regression proof: a script declaring NOTHING
+    // spawns a child whose environment carries the host-mirrored
+    // essentials, never ambient secrets. Past failure mode:
+    // the operator's `$SHELL` (zsh) re-polluted scrubbed children with
+    // host vars via `/etc/zshenv` and `getpwuid` synthesis. Batch
+    // execution is pinned to `sh`/`cmd`, so the dump below is
+    // deterministic on every host, every platform.
+    let probe = TestEnvGuard::set("OXDOCK_SEED_AUDIT_PROBE", "host-secret");
+    let _probe = probe;
+    let temp = run_seeded_case(indoc! {r#"
+        [family:unix] RUN "env > env.txt"
+        [family:windows] RUN "set > env.txt"
+    "#});
+    let body = read_case_file(&temp, "env.txt");
+    let mut got = HashMap::new();
+    for line in body.lines() {
+        if let Some((k, v)) = line.split_once('=') {
+            got.insert(k.to_string(), v.to_string());
+        }
+    }
+    // Mirror or absent: the child carries the host value when the
+    // host defines the name, and nothing otherwise. Never invented.
+    // Read-only: parallel tests cannot skew these.
+    fn assert_seeded(got: &HashMap<String, String>, name: &str) {
+        match std::env::var(name).ok() {
+            Some(host) => assert_eq!(
+                got.get(name).map(String::as_str),
+                Some(host.as_str()),
+                "{name} must mirror the host: {got:?}"
+            ),
+            None => assert!(
+                !got.contains_key(name),
+                "{name} must stay absent when the host lacks it: {got:?}"
+            ),
+        }
+    }
+    // Seed-derived assertions: every declared row mirrors the host or
+    // stays absent. Only the engine-owned target dir binds scratch
+    // (proven below). Adding a seed row needs no edit here.
+    for entry in oxdock_process::env_policy::current_platform_seed() {
+        let name = entry.name;
+        if name == oxdock_fs::env::cargo::TARGET_DIR {
+            continue;
+        }
+        assert_seeded(&got, name);
+    }
+    // No ambient secrets anywhere, on any platform.
+    assert!(
+        !got.contains_key("OXDOCK_SEED_AUDIT_PROBE"),
+        "host probe leaked: {got:?}"
+    );
+    assert!(
+        !got.contains_key("CARGO_HOME")
+            && !got.contains_key("GNUPGHOME")
+            && !got.contains_key("SSH_AUTH_SOCK"),
+        "credential-adjacent host names leaked: {got:?}"
+    );
+    // Substrate present: scratch target dir.
+    let target = got
+        .get("CARGO_TARGET_DIR")
+        .cloned()
+        .unwrap_or_default()
+        .replace('\\', "/");
+    assert!(
+        target.ends_with("/target") && target.contains("oxdock-"),
+        "CARGO_TARGET_DIR must bind the scratch target dir: {got:?}"
+    );
+}
+
+#[test]
+fn inherit_env_description_names_no_seed_rows() {
+    // The INHERIT_ENV description must point at the contract, never
+    // enumerate seeded names: any backticked baseline name here fails,
+    // forcing authors back to the pointer. Pure metadata, no spawns.
+    let description = crate::all_metadata()
+        .into_iter()
+        .find(|meta| meta.name == "INHERIT_ENV")
+        .expect("INHERIT_ENV registered")
+        .description;
+    // Normalized: source line-breaks must never break the pointer check.
+    let flat = description.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        flat.contains("Environment Variable Contracts"),
+        "INHERIT_ENV description must point at the contract"
+    );
+    for entry in oxdock_process::env_policy::describe_baseline_defaults() {
+        assert!(
+            !description.contains(&format!("`{}`", entry.name)),
+            "INHERIT_ENV description enumerates seeded name `{}`; point at the contract instead",
+            entry.name
+        );
     }
 }

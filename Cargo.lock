@@ -1539,7 +1539,7 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
 name = "oxdock"
-version = "0.28.0-alpha"
+version = "0.29.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -1555,7 +1555,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-build"
-version = "0.28.0-alpha"
+version = "0.29.0-alpha"
 dependencies = [
  "anyhow",
  "oxdock-core",
@@ -1571,7 +1571,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-cli"
-version = "0.28.0-alpha"
+version = "0.29.0-alpha"
 dependencies = [
  "anyhow",
  "futures-executor",
@@ -1598,7 +1598,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-core"
-version = "0.28.0-alpha"
+version = "0.29.0-alpha"
 dependencies = [
  "anyhow",
  "base64",
@@ -1623,7 +1623,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-doc-tests"
-version = "0.28.0-alpha"
+version = "0.29.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -1637,7 +1637,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-embed"
-version = "0.28.0-alpha"
+version = "0.29.0-alpha"
 dependencies = [
  "anyhow",
  "oxdock-fs",
@@ -1649,7 +1649,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-fixture"
-version = "0.28.0-alpha"
+version = "0.29.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -1660,11 +1660,12 @@ dependencies = [
 
 [[package]]
 name = "oxdock-fs"
-version = "0.28.0-alpha"
+version = "0.29.0-alpha"
 dependencies = [
  "anyhow",
  "cache-manager",
  "glob",
+ "indoc",
  "libc",
  "oxdock-sys-test-utils",
  "tempfile",
@@ -1674,7 +1675,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-func-macro"
-version = "0.28.0-alpha"
+version = "0.29.0-alpha"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1684,7 +1685,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-logic-tests"
-version = "0.28.0-alpha"
+version = "0.29.0-alpha"
 dependencies = [
  "anyhow",
  "cargo_metadata",
@@ -1711,7 +1712,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-macros"
-version = "0.28.0-alpha"
+version = "0.29.0-alpha"
 dependencies = [
  "anyhow",
  "oxdock-build",
@@ -1728,7 +1729,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-markdown-plugin"
-version = "0.28.0-alpha"
+version = "0.29.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -1742,7 +1743,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-net-plugin"
-version = "0.28.0-alpha"
+version = "0.29.0-alpha"
 dependencies = [
  "anyhow",
  "futures-executor",
@@ -1769,7 +1770,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-parser"
-version = "0.28.0-alpha"
+version = "0.29.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -1787,7 +1788,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-pipe"
-version = "0.28.0-alpha"
+version = "0.29.0-alpha"
 dependencies = [
  "anyhow",
  "oxdock-fs",
@@ -1795,9 +1796,10 @@ dependencies = [
 
 [[package]]
 name = "oxdock-process"
-version = "0.28.0-alpha"
+version = "0.29.0-alpha"
 dependencies = [
  "anyhow",
+ "indoc",
  "libc",
  "oxdock-fs",
  "oxdock-parser",
@@ -1808,7 +1810,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-remote-proto"
-version = "0.28.0-alpha"
+version = "0.29.0-alpha"
 dependencies = [
  "anyhow",
  "flate2",
@@ -1821,7 +1823,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-ssh-plugin"
-version = "0.28.0-alpha"
+version = "0.29.0-alpha"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1841,7 +1843,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-sys-test-utils"
-version = "0.28.0-alpha"
+version = "0.29.0-alpha"
 
 [[package]]
 name = "p256"
@@ -2420,9 +2422,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.45"
+version = "0.23.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
+checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
  "log",
  "once_cell",
@@ -2812,7 +2814,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

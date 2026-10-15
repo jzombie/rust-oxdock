@@ -1518,6 +1518,88 @@ mod tests {
     }
 
     #[test]
+    fn isolated_block_rewrites_nested_allowlist() {
+        // The nested allowlist parses as the dedicated node (host-reading
+        // prelude node must not survive inside the block), including
+        // through a nested block and a nested ISOLATED.
+        let script = indoc! {r#"
+            ISOLATED {
+                INHERIT_ENV [KEEP]
+                IF true {
+                    INHERIT_ENV [ALSO]
+                }
+                ISOLATED {
+                    INHERIT_ENV [DEEP]
+                }
+            }
+        "#};
+        let steps = parse_script(script, test_lower).expect("parse should succeed");
+        match &steps[0].kind {
+            StepKind::Isolated { body } => {
+                assert!(
+                    matches!(&body[0].kind, StepKind::IsolatedInheritEnv { .. }),
+                    "direct allowlist rewrites, got {:?}",
+                    body[0].kind
+                );
+                match &body[1].kind {
+                    StepKind::If { then_body, .. } => assert!(
+                        matches!(&then_body[0].kind, StepKind::IsolatedInheritEnv { .. }),
+                        "allowlist inside nested IF rewrites, got {:?}",
+                        then_body[0].kind
+                    ),
+                    other => panic!("expected If, got {:?}", other),
+                }
+                match &body[2].kind {
+                    StepKind::Isolated { body: inner } => assert!(
+                        matches!(&inner[0].kind, StepKind::IsolatedInheritEnv { .. }),
+                        "allowlist inside nested ISOLATED rewrites, got {:?}",
+                        inner[0].kind
+                    ),
+                    other => panic!("expected Isolated, got {:?}", other),
+                }
+            }
+            other => panic!("expected Isolated, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn isolated_single_command_form_parses() {
+        // Single-command form runs with a fully closed env: no allowlist
+        // means nothing is re-added.
+        let script = indoc! {r#"
+            ISOLATED RUN echo hi
+        "#};
+        let steps = parse_script(script, test_lower).expect("parse should succeed");
+        match &steps[0].kind {
+            StepKind::Isolated { body } => {
+                assert_eq!(body.len(), 1);
+                assert!(matches!(&body[0].kind, StepKind::Run(_)));
+            }
+            other => panic!("expected Isolated, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn isolated_func_body_inherit_still_rejected() {
+        // Function bodies execute at call time, possibly after the block
+        // exits and its snapshot is gone: a nested allowlist there keeps
+        // the standard prelude-nesting rejection instead of silently
+        // changing read rules.
+        let script = indoc! {r#"
+            ISOLATED {
+                FUNC F() {
+                    INHERIT_ENV [NOPE]
+                }
+            }
+        "#};
+        let err = parse_script(script, test_lower).expect_err("FUNC-nested allowlist must fail");
+        assert!(
+            err.to_string().contains("nested"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn with_io_async_block_nested_let_map_parses() {
         // LET with a spaced map literal inside a WITH_IO-wrapped block.
         let script = indoc! {r#"

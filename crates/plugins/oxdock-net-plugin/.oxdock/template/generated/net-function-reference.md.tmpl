@@ -314,6 +314,7 @@ physical bind there is no port to report.
 
 ```oxdock
 IMPORT [STD, NET]
+INHERIT_ENV [PATH]
 LET $l: NET_LISTEN_INFO = NET_LISTEN("doc-net-observe", {})
 
 # Observe the bound port without claiming the slot twice, and prove

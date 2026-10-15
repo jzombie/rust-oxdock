@@ -13,7 +13,7 @@ use crate::contract::{
     BackgroundHandle, CommandContext, CommandMode, CommandOptions, CommandResult, CommandStderr,
     CommandStdin, CommandStdout, PROCESS_DEBUG_ENV_VAR, ProcessManager, SharedInput, SharedOutput,
 };
-use crate::shell::{direct_cmd, shell_cmd};
+use crate::shell::{batch_shell, direct_cmd, shell_cmd};
 
 /// Default process manager that shells out using the system shell.
 #[derive(Clone, Default)]
@@ -34,7 +34,11 @@ impl ProcessManager for ShellProcessManager {
             eprintln!("oxbook run_command: {script}");
         }
         let mut command = shell_cmd(script);
-        apply_ctx(&mut command, ctx);
+        let program = batch_shell();
+        // Shell form always requires PATH: the shell binary may resolve
+        // without it, but every command inside the script text resolves
+        // through the child's PATH.
+        apply_ctx(&mut command, ctx, &program, true)?;
         let CommandOptions {
             mode,
             stdin,
@@ -55,7 +59,8 @@ impl ProcessManager for ShellProcessManager {
             eprintln!("oxbook run_argv: {argv:?}");
         }
         let mut command = direct_cmd(argv)?;
-        apply_ctx(&mut command, ctx);
+        let program = argv.first().map(String::as_str).unwrap_or_default();
+        apply_ctx(&mut command, ctx, program, false)?;
         let CommandOptions {
             mode,
             stdin,
@@ -147,6 +152,16 @@ fn run_prepared(
             Ok(CommandResult::Completed)
         }
         CommandMode::Background => {
+            // Own process group: teardown signals the whole tree (see
+            // `ChildHandle::kill`), so orphaned grandchildren die with
+            // the direct child instead of holding pipe write ends open
+            // past the kill and stalling pump EOF. Foreground keeps the
+            // parent group so terminal signals still reach children.
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::CommandExt;
+                command.process_group(0);
+            }
             let handle =
                 spawn_child_with_streams(command, stdin_stream, stdout_stream, stderr_stream)?;
             Ok(CommandResult::Background(handle))
@@ -155,7 +170,12 @@ fn run_prepared(
 }
 
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-fn apply_ctx(command: &mut ProcessCommand, ctx: &CommandContext) {
+fn apply_ctx(
+    command: &mut ProcessCommand,
+    ctx: &CommandContext,
+    program: &str,
+    require_path: bool,
+) -> Result<()> {
     // Use command_path to strip Windows verbatim prefixes (\\?\) before passing to Command.
     // While Rust's `std::process::Command` handles verbatim paths in current_dir correctly,
     // environment variables are passed as-is. If we pass a verbatim path in `CARGO_TARGET_DIR`,
@@ -176,15 +196,15 @@ fn apply_ctx(command: &mut ProcessCommand, ctx: &CommandContext) {
         PolicyPath::Unguarded(p) => std::borrow::Cow::Borrowed(p.as_path()),
     };
     command.current_dir(cwd_path);
-    command.envs(ctx.envs().as_ref());
-    if let Some(val) = ctx.envs().get("CARGO_TARGET_DIR") {
-        command.env("CARGO_TARGET_DIR", val);
-    } else {
-        command.env(
-            "CARGO_TARGET_DIR",
-            ctx.cargo_target_dir().command_path().into_owned(),
-        );
-    }
+    // Closed child env: the script map is the single source of truth
+    // (seeded at session start, uniformly overwritten by ENV). Stage
+    // it verbatim after the shared anchor pre-flight, so the messages
+    // cannot drift per call site.
+    let staged = ctx.envs().as_ref().clone();
+    crate::env_policy::check_spawn_anchors(program, &staged, require_path)?;
+    command.env_clear();
+    command.envs(&staged);
+    Ok(())
 }
 
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
@@ -276,16 +296,85 @@ fn spawn_child_with_streams(
 mod tests {
     use super::*;
     use oxdock_fs::GuardedPath;
+    use oxdock_fs::env as oxdock_env;
     use std::collections::HashMap;
 
-    fn make_ctx(envs: &[(&str, &str)]) -> (oxdock_fs::GuardedTempDir, CommandContext) {
+    fn make_ctx_from_map(
+        map: HashMap<String, String>,
+    ) -> (oxdock_fs::GuardedTempDir, CommandContext) {
         let temp = GuardedPath::tempdir().expect("tempdir");
         let guard = temp.as_guarded_path().clone();
         let cwd: PolicyPath = guard.clone().into();
+        let scratch = oxdock_fs::reserve_cargo_scratch().expect("scratch");
+        let ctx = CommandContext::from_map(&cwd, &map, &scratch, &guard, &guard);
+        (temp, ctx)
+    }
+
+    /// Mirror the session seed on Windows: production maps always
+    /// carry the NT loader anchor, so success-path tests stage it
+    /// explicitly here instead of tripping the fail-safe under test.
+    /// Mirror or omit, like the seed: a host lacking the anchor leaves
+    /// it out. The anchor check itself is proven anchorless by
+    /// `apply_ctx_systemroot_check_follows_platform`, which bypasses
+    /// `make_ctx`.
+    #[cfg(windows)]
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    fn with_windows_anchor(mut map: HashMap<String, String>) -> HashMap<String, String> {
+        if !crate::env_policy::has_var(&map, oxdock_env::os::windows::SYSTEM_ROOT)
+            && let Ok(root) = std::env::var(oxdock_env::os::windows::SYSTEM_ROOT)
+        {
+            map.insert(oxdock_env::os::windows::SYSTEM_ROOT.to_string(), root);
+        }
+        map
+    }
+
+    fn make_ctx(envs: &[(&str, &str)]) -> (oxdock_fs::GuardedTempDir, CommandContext) {
         let map: HashMap<String, String> = envs
             .iter()
             .map(|(key, value)| (key.to_string(), value.to_string()))
             .collect();
+        #[cfg(windows)]
+        let map = with_windows_anchor(map);
+        make_ctx_from_map(map)
+    }
+
+    /// Host executable-lookup env for real-spawn tests: closed children
+    /// resolve binaries only through the script env, so tests that spawn
+    /// real tools must route the host lookup path explicitly, exactly
+    /// like workflow legs route `INHERIT_ENV [PATH]`.
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    fn host_exec_env() -> HashMap<String, String> {
+        let mut map = HashMap::new();
+        if let Ok(path) = std::env::var(oxdock_env::os::PATH) {
+            map.insert(oxdock_env::os::PATH.to_string(), path);
+        }
+        #[allow(clippy::disallowed_macros)]
+        if cfg!(windows) {
+            for key in [
+                oxdock_env::os::windows::SYSTEM_ROOT,
+                oxdock_env::os::windows::PATHEXT,
+                oxdock_env::os::windows::COMSPEC,
+                oxdock_env::os::windows::TEMP,
+                oxdock_env::os::windows::TMP,
+            ] {
+                if let Ok(value) = std::env::var(key) {
+                    map.insert(key.to_string(), value);
+                }
+            }
+        }
+        map
+    }
+
+    fn make_ctx_with_host_exec(
+        extra: &[(&str, &str)],
+    ) -> (oxdock_fs::GuardedTempDir, CommandContext) {
+        let temp = GuardedPath::tempdir().expect("tempdir");
+        let guard = temp.as_guarded_path().clone();
+        let cwd: PolicyPath = guard.clone().into();
+        let mut map = host_exec_env();
+        for (key, value) in extra {
+            map.insert(key.to_string(), value.to_string());
+        }
         let scratch = oxdock_fs::reserve_cargo_scratch().expect("scratch");
         let ctx = CommandContext::from_map(&cwd, &map, &scratch, &guard, &guard);
         (temp, ctx)
@@ -293,7 +382,7 @@ mod tests {
 
     #[test]
     fn background_capture_stdout_bails_without_spawning() {
-        let (_temp, ctx) = make_ctx(&[]);
+        let (_temp, ctx) = make_ctx_with_host_exec(&[]);
         let mut pm = ShellProcessManager;
         let options = CommandOptions {
             mode: CommandMode::Background,
@@ -316,7 +405,7 @@ mod tests {
     )]
     #[test]
     fn foreground_capture_returns_child_stdout_bytes() {
-        let (_temp, ctx) = make_ctx(&[]);
+        let (_temp, ctx) = make_ctx_with_host_exec(&[]);
         let mut pm = ShellProcessManager;
         let options = CommandOptions {
             stdout: CommandStdout::Capture,
@@ -341,7 +430,25 @@ mod tests {
     )]
     #[test]
     fn run_argv_spawns_directly_without_shell() {
-        let (_temp, ctx) = make_ctx(&[]);
+        // `cargo` here is a rustup shim: it resolves through the host
+        // PATH the helper bridges, and needs a home for its toolchain
+        // lookup. This helper builds its map by hand instead of going
+        // through the session seed, so it bridges the host home
+        // explicitly; production sessions seed the host home
+        // automatically.
+        #[allow(clippy::disallowed_macros)]
+        #[cfg(unix)]
+        let home = std::env::var(oxdock_env::os::unix::HOME).unwrap_or_default();
+        #[allow(clippy::disallowed_macros)]
+        #[cfg(windows)]
+        let home = std::env::var(oxdock_env::os::windows::USERPROFILE).unwrap_or_default();
+        #[allow(clippy::disallowed_macros)]
+        #[cfg(unix)]
+        let home_key = oxdock_env::os::unix::HOME;
+        #[allow(clippy::disallowed_macros)]
+        #[cfg(windows)]
+        let home_key = oxdock_env::os::windows::USERPROFILE;
+        let (_temp, ctx) = make_ctx_with_host_exec(&[(home_key, home.as_str())]);
         let mut pm = ShellProcessManager;
         let options = CommandOptions {
             stdout: CommandStdout::Capture,
@@ -363,7 +470,7 @@ mod tests {
 
     #[test]
     fn run_argv_rejects_empty_argv_without_spawning() {
-        let (_temp, ctx) = make_ctx(&[]);
+        let (_temp, ctx) = make_ctx_with_host_exec(&[]);
         let mut pm = ShellProcessManager;
         let err = match pm.run_argv(&ctx, &[], CommandOptions::foreground()) {
             Err(err) => err,
@@ -392,7 +499,7 @@ mod tests {
     )]
     #[test]
     fn streams_large_stdout_through_shared_output_without_deadlock() {
-        let (_temp, ctx) = make_ctx(&[]);
+        let (_temp, ctx) = make_ctx_with_host_exec(&[]);
         let mut pm = ShellProcessManager;
         let buffer = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
         let options = CommandOptions {
@@ -413,7 +520,7 @@ mod tests {
     )]
     #[test]
     fn foreground_stdin_is_piped_through_copy_thread() {
-        let (_temp, ctx) = make_ctx(&[]);
+        let (_temp, ctx) = make_ctx_with_host_exec(&[]);
         let mut pm = ShellProcessManager;
         // Windows `sort` requires `\r\n` line endings to recognize lines.
         #[cfg(windows)]
@@ -450,7 +557,7 @@ mod tests {
     fn os_pipe_streams_producer_to_consumer_with_eof() {
         use crate::contract::{BackgroundHandle, create_os_pipe};
 
-        let (_temp, ctx) = make_ctx(&[]);
+        let (_temp, ctx) = make_ctx_with_host_exec(&[]);
         let (reader, writer) = create_os_pipe().expect("os pipe");
         let mut pm = ShellProcessManager;
 
@@ -506,36 +613,21 @@ mod tests {
 
     #[test]
     #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-    fn apply_ctx_sets_cwd_and_cargo_target_dir_precedence() {
-        // Default branch: executor-provided cargo target dir wins when the
-        // env map has no explicit override.
-        let (temp_a, ctx_a) = make_ctx(&[]);
-        let expected_default = ctx_a
-            .cargo_target_dir()
-            .command_path()
-            .to_string_lossy()
-            .into_owned();
+    fn apply_ctx_stages_map_verbatim() {
+        // The map is the single source of truth: declared entries stage
+        // exactly as spelled, and nothing is injected. PATH is present
+        // because the closed child env requires it for bare names (on
+        // Windows `make_ctx` additionally stages the seeded NT loader
+        // anchor the fail-safe requires; the anchor itself is proven
+        // anchorless elsewhere).
+        let (_temp, ctx) = make_ctx(&[
+            (oxdock_env::cargo::TARGET_DIR, "custom-target"),
+            ("FOO", "bar"),
+            (oxdock_env::os::PATH, "test-path"),
+        ]);
         let mut cmd = ProcessCommand::new("prog");
-        apply_ctx(&mut cmd, &ctx_a);
-        let envs_a: HashMap<String, String> = cmd
-            .get_envs()
-            .map(|(k, v)| {
-                (
-                    k.to_string_lossy().into_owned(),
-                    v.map(|value| value.to_string_lossy().into_owned())
-                        .unwrap_or_default(),
-                )
-            })
-            .collect();
-        assert_eq!(envs_a.get("CARGO_TARGET_DIR"), Some(&expected_default));
-        drop(temp_a);
-
-        // Override branch: an explicit CARGO_TARGET_DIR env mapping wins over
-        // the executor default.
-        let (temp_b, ctx_b) = make_ctx(&[("CARGO_TARGET_DIR", "custom-target"), ("FOO", "bar")]);
-        let mut cmd = ProcessCommand::new("prog");
-        apply_ctx(&mut cmd, &ctx_b);
-        let envs_b: HashMap<String, String> = cmd
+        apply_ctx(&mut cmd, &ctx, "prog", false).expect("apply with explicit PATH");
+        let envs: HashMap<String, String> = cmd
             .get_envs()
             .map(|(k, v)| {
                 (
@@ -546,23 +638,205 @@ mod tests {
             })
             .collect();
         assert_eq!(
-            envs_b.get("CARGO_TARGET_DIR").map(String::as_str),
+            envs.get(oxdock_env::cargo::TARGET_DIR).map(String::as_str),
             Some("custom-target")
         );
-        assert_eq!(envs_b.get("FOO").map(String::as_str), Some("bar"));
-        drop(temp_b);
+        assert_eq!(envs.get("FOO").map(String::as_str), Some("bar"));
+
+        // Absent stays absent: no silent CARGO_TARGET_DIR injection.
+        let (_temp, ctx) = make_ctx(&[(oxdock_env::os::PATH, "test-path")]);
+        let mut cmd = ProcessCommand::new("prog");
+        apply_ctx(&mut cmd, &ctx, "prog", false).expect("apply with explicit PATH");
+        let envs: HashMap<String, String> = cmd
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|value| value.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                )
+            })
+            .collect();
+        assert!(
+            !envs.contains_key(oxdock_env::cargo::TARGET_DIR),
+            "unstaged names must stay out: {envs:?}"
+        );
     }
 
     #[test]
     #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
     fn apply_ctx_sets_working_directory_from_guarded_cwd() {
-        let (_temp, ctx) = make_ctx(&[]);
+        let (_temp, ctx) = make_ctx(&[(oxdock_env::os::PATH, "test-path")]);
         let mut cmd = ProcessCommand::new("prog");
-        apply_ctx(&mut cmd, &ctx);
+        apply_ctx(&mut cmd, &ctx, "prog", false).expect("apply with explicit PATH");
         let expected = oxdock_fs::command_path(match ctx.cwd() {
             PolicyPath::Guarded(guarded) => guarded,
             PolicyPath::Unguarded(_) => panic!("expected guarded cwd"),
         });
         assert_eq!(cmd.get_current_dir(), Some(expected.as_ref()));
+    }
+
+    /// Closed child env: a host variable never routed through the script env
+    /// must not appear in the staged command env, while declared names do.
+    #[test]
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    fn apply_ctx_clears_host_env() {
+        // RAII-guarded: a mid-test failure still restores process env.
+        let _probe_guard = crate::TestEnvGuard::set("OXDOCK_CLOSED_ENV_PROBE", "leaked");
+        let (_temp, ctx) = make_ctx(&[(oxdock_env::os::PATH, "test-path"), ("DECLARED", "yes")]);
+        let mut cmd = ProcessCommand::new("prog");
+        apply_ctx(&mut cmd, &ctx, "prog", false).expect("apply with explicit PATH");
+        let envs: HashMap<String, String> = cmd
+            .get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|value| value.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
+                )
+            })
+            .collect();
+        assert!(
+            !envs.contains_key("OXDOCK_CLOSED_ENV_PROBE"),
+            "host env must not reach children: {envs:?}"
+        );
+        assert_eq!(envs.get("DECLARED").map(String::as_str), Some("yes"));
+        assert_eq!(
+            envs.get(oxdock_env::os::PATH).map(String::as_str),
+            Some("test-path")
+        );
+    }
+
+    /// No baseline injection: a bare program name without a script
+    /// PATH bails naming the `INHERIT_ENV [PATH]` fix, so missing
+    /// seed entries fail loudly instead of resolving through a
+    /// silent default.
+    #[test]
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    fn apply_ctx_bails_for_bare_program_without_path() {
+        let (_temp, ctx) = make_ctx(&[("FOO", "bar")]);
+        let mut cmd = ProcessCommand::new("prog");
+        let err = apply_ctx(&mut cmd, &ctx, "prog", false).expect_err("PATH anchor must trip");
+        assert!(
+            err.to_string().contains("INHERIT_ENV [PATH]"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// Pre-flight skips separator-carrying programs: absolute and relative
+    /// pathed invocations resolve without `PATH` and stay hermetic.
+    #[test]
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    fn apply_ctx_skips_path_check_for_pathed_program() {
+        let (_temp, ctx) = make_ctx(&[("FOO", "bar")]);
+        let mut unix_cmd = ProcessCommand::new("/bin/prog");
+        apply_ctx(&mut unix_cmd, &ctx, "/bin/prog", false).expect("absolute path needs no PATH");
+        let mut rel_cmd = ProcessCommand::new("sub/prog");
+        apply_ctx(&mut rel_cmd, &ctx, "sub/prog", false).expect("relative path needs no PATH");
+    }
+
+    /// The NT loader anchor is seeded, never injected: without a
+    /// script `SystemRoot` the anchor check bails on Windows (naming
+    /// the fix); elsewhere there is nothing to check and staging
+    /// still succeeds.
+    #[test]
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    fn apply_ctx_systemroot_check_follows_platform() {
+        // Raw map, bypassing `make_ctx` (which mirrors the seeded NT
+        // loader anchor): proves the fail-safe trips on a genuinely
+        // anchorless map instead of passing through helper staging.
+        let map: HashMap<String, String> = [(oxdock_env::os::PATH, "test-path")]
+            .iter()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect();
+        let (_temp, ctx) = make_ctx_from_map(map);
+        let mut cmd = ProcessCommand::new("prog");
+        #[allow(clippy::disallowed_macros)]
+        if cfg!(windows) {
+            let err =
+                apply_ctx(&mut cmd, &ctx, "prog", false).expect_err("SystemRoot anchor must trip");
+            assert!(
+                err.to_string().contains("SystemRoot"),
+                "unexpected error: {err}"
+            );
+        } else {
+            apply_ctx(&mut cmd, &ctx, "prog", false).expect("no anchor beyond PATH on unix");
+        }
+    }
+
+    /// Windows casing: `Path` satisfies the case-insensitive anchor
+    /// and stages exactly as spelled. No canonicalization, no drops:
+    /// the map is staged verbatim.
+    #[test]
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    fn apply_ctx_accepts_windows_casing_variants() {
+        // Deliberate non-canonical spelling: this test proves the
+        // anchor matches case-insensitively while staging keeps the
+        // script spelling, so the literal stays.
+        let (_temp, ctx) = make_ctx(&[("Path", "test-path")]);
+        let mut cmd = ProcessCommand::new("prog");
+        #[allow(clippy::disallowed_macros)]
+        if cfg!(windows) {
+            apply_ctx(&mut cmd, &ctx, "prog", false).expect("cased PATH satisfies the anchor");
+            let envs: HashMap<String, String> = cmd
+                .get_envs()
+                .map(|(k, v)| {
+                    (
+                        k.to_string_lossy().into_owned(),
+                        v.map(|value| value.to_string_lossy().into_owned())
+                            .unwrap_or_default(),
+                    )
+                })
+                .collect();
+            assert_eq!(envs.get("Path").map(String::as_str), Some("test-path"));
+        } else {
+            let err = apply_ctx(&mut cmd, &ctx, "prog", false)
+                .expect_err("cased PATH is not PATH on unix");
+            assert!(
+                err.to_string().contains("INHERIT_ENV [PATH]"),
+                "unexpected error: {err}"
+            );
+        }
+    }
+
+    /// End-to-end closedness: a real child sees declared vars and cannot see
+    /// a host-only sentinel, proving the boundary past `apply_ctx` staging.
+    #[cfg_attr(miri, ignore = "spawns a real child process, unsupported under Miri")]
+    #[test]
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    fn spawned_child_does_not_see_host_env() {
+        // RAII-guarded: a mid-test failure still restores process env.
+        let _probe_guard = crate::TestEnvGuard::set("OXDOCK_CLOSED_ENV_PROBE", "leaked");
+        let (_temp, ctx) = make_ctx_with_host_exec(&[("OXDOCK_CHILD_MARKER", "here")]);
+        let mut pm = ShellProcessManager;
+        #[cfg(windows)]
+        let script = "if defined OXDOCK_CLOSED_ENV_PROBE (echo PROBE-SEEN) else (echo PROBE-CLEAN)& echo MARKER-%OXDOCK_CHILD_MARKER%";
+        #[cfg(not(windows))]
+        let script = "echo \"probe=${OXDOCK_CLOSED_ENV_PROBE:-unset} marker=${OXDOCK_CHILD_MARKER:-missing}\"";
+        let options = CommandOptions {
+            stdout: CommandStdout::Capture,
+            ..Default::default()
+        };
+        let out = match pm.run_command(&ctx, script, options).expect("run") {
+            CommandResult::Captured(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+            CommandResult::Completed => panic!("expected Captured, got Completed"),
+            CommandResult::Background(_) => panic!("expected Captured, got Background"),
+        };
+        #[cfg(windows)]
+        {
+            assert!(out.contains("PROBE-CLEAN"), "child saw host env: {out}");
+            assert!(
+                out.contains("MARKER-here"),
+                "child missed script env: {out}"
+            );
+        }
+        #[cfg(not(windows))]
+        {
+            assert!(out.contains("probe=unset"), "child saw host env: {out}");
+            assert!(
+                out.contains("marker=here"),
+                "child missed script env: {out}"
+            );
+        }
     }
 }

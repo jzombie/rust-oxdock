@@ -558,7 +558,7 @@ pub mod harness {
         cmd.args(&case.args);
         if let Some(target) = &temp_target {
             cmd.env(
-                oxdock_env::CARGO_TARGET_DIR,
+                oxdock_env::cargo::TARGET_DIR,
                 command_path(target).into_owned(),
             );
         }
@@ -665,7 +665,7 @@ pub mod harness {
 
             let template_path = std::path::Path::new(&spec.template);
             let mut cmd = Command::new(binary);
-            cmd.env(oxdock_env::CARGO_MANIFEST_DIR, template_path);
+            cmd.env(oxdock_env::cargo::MANIFEST_DIR, template_path);
             for (key, value) in &case.env {
                 cmd.env(key, value);
             }
@@ -674,7 +674,7 @@ pub mod harness {
             }
             if let Some(target) = &config.shared_target_dir {
                 let target_dir = oxdock_fs::command_path(target).into_owned();
-                cmd.env(oxdock_env::CARGO_TARGET_DIR, target_dir);
+                cmd.env(oxdock_env::cargo::TARGET_DIR, target_dir);
             }
 
             // Symlink capability check : independent of shared_target_dir
@@ -872,9 +872,9 @@ pub mod harness {
                 .arg("build")
                 .arg("--message-format=json")
                 .current_dir(instance.root().as_path())
-                .env(oxdock_env::CARGO_TARGET_DIR, target_dir);
-            if std::env::var_os(oxdock_env::CARGO_INCREMENTAL).is_none() {
-                build.env(oxdock_env::CARGO_INCREMENTAL, "1");
+                .env(oxdock_env::cargo::TARGET_DIR, target_dir);
+            if std::env::var_os(oxdock_env::cargo::INCREMENTAL).is_none() {
+                build.env(oxdock_env::cargo::INCREMENTAL, "1");
             }
             let output = build
                 .output()
@@ -978,7 +978,7 @@ pub mod harness {
                 .arg("--package")
                 .arg(package)
                 .current_dir(instance_root.as_path())
-                .env(oxdock_env::CARGO_TARGET_DIR, target_dir)
+                .env(oxdock_env::cargo::TARGET_DIR, target_dir)
                 .output()
                 .with_context(|| format!("evict fixture {} from shared target", spec.name))?;
             if !output.status.success() {
@@ -1012,7 +1012,7 @@ pub mod harness {
             clippy::disallowed_macros
         )]
         {
-            if std::env::var_os(oxdock_env::TMPDIR).is_some() {
+            if std::env::var_os(oxdock_env::os::unix::TMPDIR).is_some() {
                 return;
             }
             if !std::path::Path::new("/dev/shm").exists() {
@@ -1020,7 +1020,7 @@ pub mod harness {
             }
             // Safety: called sequentially in main() before worker threads spawn.
             unsafe {
-                std::env::set_var(oxdock_env::TMPDIR, "/dev/shm");
+                std::env::set_var(oxdock_env::os::unix::TMPDIR, "/dev/shm");
             }
         }
     }
@@ -1049,12 +1049,12 @@ pub mod harness {
             clippy::disallowed_macros
         )]
         {
-            if let Ok(dir) = std::env::var(oxdock_env::FIXTURE_TARGET_DIR) {
+            if let Ok(dir) = std::env::var(oxdock_env::oxdock::FIXTURE_TARGET_DIR) {
                 let guarded = ensure_target_dir(std::path::Path::new(&dir))?;
                 eprintln!("fixture target dir (override): {}", guarded.display());
                 return Ok((guarded, None));
             }
-            if let Ok(target) = std::env::var(oxdock_env::CARGO_TARGET_DIR) {
+            if let Ok(target) = std::env::var(oxdock_env::cargo::TARGET_DIR) {
                 let root = std::path::Path::new(&target).join("oxdock-fixtures");
                 let guarded = ensure_target_dir(&root)?;
                 eprintln!("fixture target dir (shared): {}", guarded.display());
@@ -1102,8 +1102,8 @@ pub mod harness {
     /// workload incremental compilation accelerates.
     pub fn maybe_enable_incremental(cmd: &mut oxdock_process::CommandBuilder) {
         #[allow(clippy::disallowed_macros)]
-        if std::env::var_os(oxdock_env::CARGO_INCREMENTAL).is_none() {
-            cmd.env(oxdock_env::CARGO_INCREMENTAL, "1");
+        if std::env::var_os(oxdock_env::cargo::INCREMENTAL).is_none() {
+            cmd.env(oxdock_env::cargo::INCREMENTAL, "1");
         }
     }
 

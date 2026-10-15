@@ -1183,7 +1183,7 @@ fn cwd_prints_to_stdout() {
     let steps = vec![
         Step {
             guard: None,
-            kind: StepKind::Workdir("a/b".into()),
+            kind: StepKind::Workdir("/".into()),
             scope_enter: 0,
             scope_exit: 0,
         },
@@ -2291,14 +2291,8 @@ fn assert_contains_sees_interpreter_output_without_capture_sink() {
 fn assert_contains_sees_streamed_child_output() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    #[cfg(unix)]
     let script = indoc! {r#"
         RUN "echo child-echo-line"
-        ASSERT_CONTAINS stdout "child-echo-line"
-    "#};
-    #[cfg(windows)]
-    let script = indoc! {r#"
-        RUN "cmd /c echo child-echo-line"
         ASSERT_CONTAINS stdout "child-echo-line"
     "#};
     run_script(&root, script).expect("child output is recorded");
@@ -2347,9 +2341,11 @@ fn run_exec_form_spawns_directly_and_pipes_stdout() {
     );
     let steps = oxdock_core::parse_script(script).unwrap();
     assert!(
-        matches!(&steps[1].kind, StepKind::WithIo { cmd, .. } if matches!(cmd.as_ref(), StepKind::RunExec { .. })),
-        "second step must wrap RunExec, got {:?}",
-        steps[1].kind
+        steps.iter().any(
+            |step| matches!(&step.kind, StepKind::WithIo { cmd, .. } if matches!(cmd.as_ref(), StepKind::RunExec { .. }))
+        ),
+        "one step must wrap RunExec, got {:?}",
+        steps.iter().map(|step| &step.kind).collect::<Vec<_>>()
     );
     run_steps_with_context_result_with_io(&root, &root, &steps, ExecIo::new()).unwrap();
 
@@ -2369,15 +2365,19 @@ fn run_exec_nonzero_status_bails_with_step_context() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
 
-    let steps = oxdock_core::parse_script(r#"RUN ["cargo", "--invalid-oxdock-flag-xyz"]"#).unwrap();
+    let steps = oxdock_core::parse_script(indoc! {r#"
+        RUN ["cargo", "--invalid-oxdock-flag-xyz"]
+    "#})
+    .unwrap();
     let err = run_steps(&root, &steps).unwrap_err();
     let msg = format!("{err:#}");
     // Foreground failures surface the manager's non-zero error wrapped in
     // step context : identical to shell `RUN` (the `exited with status`
     // spelling is the background/ASYNC path in `run_argv`/`run`).
     assert!(
-        msg.contains("step 1: RUN") && msg.contains("failed with status"),
-        "error must carry step index and status, got: {msg}"
+        msg.contains("RUN [\"cargo\", \"--invalid-oxdock-flag-xyz\"]")
+            && msg.contains("failed with status"),
+        "error must carry the failing command and status, got: {msg}"
     );
 }
 
@@ -2476,7 +2476,6 @@ fn archive_interoperates_with_system_tar() {
     // `tar` fails naming the tool, not with a cryptic spawn error.
     let probe = indoc! {r#"
         IMPORT [STD]
-        INHERIT_ENV [PATH]
         WORKSPACE SYSTEM
         LET $has_tar: BOOL = IS_EXEC("tar")
         ASSERT_EQ $has_tar true
@@ -2581,6 +2580,8 @@ fn _assert_step_kind_exhaustiveness(kind: &StepKind) {
         StepKind::AwaitCapture { .. } => {}
         StepKind::Cancel { .. } => {}
         StepKind::Timeout { .. } => {}
+        StepKind::Isolated { .. } => {}
+        StepKind::IsolatedInheritEnv { .. } => {}
         StepKind::RemoteBlock { .. } => {}
         StepKind::Sleep { .. } => {}
         StepKind::ListAppend { .. } => {}

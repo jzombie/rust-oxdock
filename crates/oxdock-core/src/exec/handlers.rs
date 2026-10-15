@@ -2829,6 +2829,7 @@ fn collect_body_bindings<P: ProcessManager>(
             collect_body_bindings(cmd, state, out);
         }
         StepKind::Timeout { body, .. }
+        | StepKind::Isolated { body }
         | StepKind::For { body, .. }
         | StepKind::While { body, .. } => {
             for step in body {
@@ -3635,6 +3636,16 @@ pub(crate) fn dispatch_inherit_env<P: ProcessManager>(
     inherit_env(cx, keys)
 }
 
+pub(crate) fn dispatch_isolated_inherit_env<P: ProcessManager>(
+    step: &StepKind,
+    cx: &mut StepCtx<'_, P>,
+) -> Result<()> {
+    let StepKind::IsolatedInheritEnv { keys } = step else {
+        unreachable!()
+    };
+    isolated_inherit_env(cx, keys)
+}
+
 // ── Structural dispatch wrappers ────────────────────────────────────────────
 
 pub(crate) fn dispatch_for_loop<P: ProcessManager>(
@@ -3803,7 +3814,8 @@ fn step_returns_value(kind: &StepKind) -> bool {
         StepKind::WithIo { cmd, .. } => step_returns_value(cmd),
         StepKind::For { body, .. }
         | StepKind::While { body, .. }
-        | StepKind::Timeout { body, .. } => body_returns_value(body),
+        | StepKind::Timeout { body, .. }
+        | StepKind::Isolated { body } => body_returns_value(body),
         StepKind::If {
             then_body,
             else_ifs,
@@ -4400,6 +4412,17 @@ pub(crate) fn dispatch_timeout_step<P: ProcessManager>(
     top_level_flow(timeout(cx, 0, &duration, body)?)
 }
 
+/// Pipeline dispatch wrapper for `Isolated`
+pub(crate) fn dispatch_isolated_step<P: ProcessManager>(
+    step: &StepKind,
+    cx: &mut StepCtx<'_, P>,
+) -> Result<()> {
+    let StepKind::Isolated { body } = step else {
+        unreachable!()
+    };
+    top_level_flow(isolated(cx, body)?)
+}
+
 /// Dispatch `TIMEOUT <duration> <body>`: run `body` on the current thread
 /// with a deadline. If the deadline elapses first, cancel the state,
 /// `kill()` the active foreground process (when one is registered), and
@@ -4513,6 +4536,111 @@ pub(crate) fn timeout<P: ProcessManager>(
             }
         }
     }
+}
+
+/// RAII scope for `ISOLATED` bodies: snapshots the script env, clears it,
+/// and restores both on drop across every exit path (`?`, `bail!`, early
+/// return). Wraps `&mut StepCtx` (not `&mut ExecState`): holding the state
+/// borrow directly would collide with the mutable borrow
+/// `execute_scoped_steps` needs (E0499), so the body executes through the
+/// `DerefMut` reborrow instead.
+struct IsolatedScopeGuard<'a, 'b, P: ProcessManager> {
+    cx: &'a mut StepCtx<'b, P>,
+}
+
+impl<'a, 'b, P: ProcessManager> IsolatedScopeGuard<'a, 'b, P> {
+    fn enter(cx: &'a mut StepCtx<'b, P>) -> Self {
+        cx.state.isolated_stack.push(Arc::clone(&cx.state.envs));
+        cx.state.envs = Arc::clone(&cx.state.seed);
+        Self { cx }
+    }
+}
+
+impl<'a, 'b, P: ProcessManager> std::ops::Deref for IsolatedScopeGuard<'a, 'b, P> {
+    type Target = StepCtx<'b, P>;
+
+    fn deref(&self) -> &Self::Target {
+        self.cx
+    }
+}
+
+impl<'a, 'b, P: ProcessManager> std::ops::DerefMut for IsolatedScopeGuard<'a, 'b, P> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.cx
+    }
+}
+
+impl<P: ProcessManager> Drop for IsolatedScopeGuard<'_, '_, P> {
+    fn drop(&mut self) {
+        // Tolerant pop: imbalance is unreachable by construction (entry
+        // always pushes before body code runs), and a panicking `Drop`
+        // during unwind would abort the process. Worst case the live
+        // envs stay as the body left them, exactly like a normal scope
+        // whose pop failed.
+        if let Some(snapshot) = self.cx.state.isolated_stack.pop() {
+            self.cx.state.envs = snapshot;
+        }
+    }
+}
+
+/// Execute an `ISOLATED` body with the seeded script environment:
+/// the map resets to the session seed, and only names the block
+/// re-adds through its leading allowlist reach spawned children on
+/// top of that seed. Variables, pipes, and files flow through
+/// untouched; scope exit restores the prior environment via the
+/// guard, on every path.
+pub(crate) fn isolated<P: ProcessManager>(cx: &mut StepCtx<'_, P>, body: &[Step]) -> Result<Flow> {
+    let mut guard = IsolatedScopeGuard::enter(cx);
+    // Reborrow through the guard once: field borrows off a direct `&mut`
+    // place stay disjoint (unlike repeated `DerefMut` autorefs), so the
+    // ten borrows below coexist. The guard outlives the call and its
+    // `Drop` restores on every exit path, including `Err` returns.
+    let scoped: &mut StepCtx<'_, P> = &mut guard;
+    let result = super::steps::execute_scoped_steps(
+        scoped.state,
+        scoped.process,
+        body,
+        scoped.stdin.clone(),
+        scoped.expose_stdin,
+        scoped.out.clone(),
+        scoped.err.clone(),
+        scoped.out_pipe.clone(),
+        scoped.stdin_pipe.clone(),
+        false,
+    );
+    drop(guard);
+    // Inner steps number from the block, not the script: name the
+    // boundary so `step 1: RUN ...` inside ISOLATED never reads as the
+    // script's first step.
+    result.with_context(|| "inside ISOLATED block".to_string())
+}
+
+/// Resolve a block allowlist against the enclosing `ISOLATED` snapshot
+/// only: never host env, never host-provided overrides. Absent names stay
+/// absent silently (matching top-level `INHERIT_ENV`), so optional tokens
+/// stay expressible. Outside any block this is unreachable by
+/// construction (the parser only produces the node inside `ISOLATED`,
+/// and the static pass rejects strays); the bail is defense in depth.
+pub(crate) fn isolated_inherit_env<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    keys: &[String],
+) -> Result<()> {
+    let Some(snapshot) = cx.state.isolated_stack.last().cloned() else {
+        bail!("isolated allowlist outside ISOLATED");
+    };
+    let envs = Arc::make_mut(&mut cx.state.envs);
+    for key in keys {
+        let matched = snapshot
+            .iter()
+            .find(|(k, _)| oxdock_process::names_eq(k, key));
+        if let Some((_, value)) = matched {
+            // De-duplicate casing variants before inserting, so the map
+            // never carries two spellings of one name into dispatch.
+            envs.retain(|k, _| !oxdock_process::names_eq(k, key));
+            envs.insert(key.clone(), value.clone());
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

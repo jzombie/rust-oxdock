@@ -2,7 +2,7 @@ use anyhow::{Context, Result, bail};
 use oxdock_fs::GuardedPath;
 #[cfg(all(unix, not(miri)))]
 use oxdock_fs::PathResolver;
-use oxdock_fs::env::BANNER;
+use oxdock_fs::env::oxdock::BANNER;
 use std::ffi::OsStr;
 use std::fs::File;
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
@@ -13,12 +13,31 @@ use crate::CommandBuilder;
 pub fn shell_program() -> String {
     #[cfg(windows)]
     {
-        std::env::var(oxdock_fs::env::COMSPEC).unwrap_or_else(|_| "cmd".to_string())
+        std::env::var(oxdock_fs::env::os::windows::COMSPEC).unwrap_or_else(|_| "cmd".to_string())
     }
 
     #[cfg(not(windows))]
     {
-        std::env::var(oxdock_fs::env::SHELL).unwrap_or_else(|_| "sh".to_string())
+        std::env::var(oxdock_fs::env::os::unix::SHELL).unwrap_or_else(|_| "sh".to_string())
+    }
+}
+
+/// Deterministic batch shell for `RUN` step execution: `sh` on Unix,
+/// `cmd` on Windows. Never the operator's `$SHELL`: login shells
+/// re-pollute scrubbed children (observed live: zsh sourcing
+/// `/etc/zshenv` and synthesizing `HOME`/`LOGNAME` from `getpwuid`
+/// regardless of flags) and break script portability (`fish`/`tcsh`
+/// cannot run POSIX step text). Interactive use (`oxdock --shell`)
+/// keeps `shell_program()`.
+pub fn batch_shell() -> String {
+    #[cfg(windows)]
+    {
+        "cmd".to_string()
+    }
+
+    #[cfg(not(windows))]
+    {
+        "sh".to_string()
     }
 }
 
@@ -37,7 +56,7 @@ pub(crate) fn direct_cmd(argv: &[String]) -> Result<Command> {
 
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 pub(crate) fn shell_cmd(cmd: &str) -> Command {
-    let program = shell_program();
+    let program = batch_shell();
     let mut c = Command::new(program);
     #[allow(clippy::disallowed_macros)]
     if cfg!(windows) {
@@ -254,9 +273,9 @@ mod tests {
     fn shell_program_prefers_env_override() {
         let _lock = ENV_LOCK.lock().expect("env lock");
         #[cfg(windows)]
-        let _guard = TestEnvGuard::set(oxdock_fs::env::COMSPEC, "custom-cmd");
+        let _guard = TestEnvGuard::set(oxdock_fs::env::os::windows::COMSPEC, "custom-cmd");
         #[cfg(not(windows))]
-        let _guard = TestEnvGuard::set(oxdock_fs::env::SHELL, "custom-sh");
+        let _guard = TestEnvGuard::set(oxdock_fs::env::os::unix::SHELL, "custom-sh");
         let program = shell_program();
         #[cfg(windows)]
         assert_eq!(program, "custom-cmd");
@@ -291,12 +310,12 @@ mod tests {
         let _lock = ENV_LOCK.lock().expect("env lock");
         #[cfg(windows)]
         {
-            let _guard = TestEnvGuard::remove(oxdock_fs::env::COMSPEC);
+            let _guard = TestEnvGuard::remove(oxdock_fs::env::os::windows::COMSPEC);
             assert_eq!(shell_program(), "cmd");
         }
         #[cfg(not(windows))]
         {
-            let _guard = TestEnvGuard::remove(oxdock_fs::env::SHELL);
+            let _guard = TestEnvGuard::remove(oxdock_fs::env::os::unix::SHELL);
             assert_eq!(shell_program(), "sh");
         }
     }
@@ -394,7 +413,7 @@ mod interactive_shell_tests {
     use crate::CommandSnapshot;
     use anyhow::Result;
     use oxdock_fs::GuardedPath;
-    use oxdock_fs::env::BANNER;
+    use oxdock_fs::env::oxdock::BANNER;
     use std::sync::{Arc, Mutex};
 
     #[cfg(any(unix, windows))]

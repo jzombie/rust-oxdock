@@ -42,6 +42,7 @@ See the [changelog](https://github.com/jzombie/rust-oxdock/blob/main/CHANGELOG.m
 | [`AWAIT`](#await) | `AWAIT $var \| LET $out: STRING = AWAIT $var` |
 | [`CANCEL`](#cancel) | `CANCEL $var` |
 | [`TIMEOUT`](#timeout) | `TIMEOUT <duration> <command...> \| TIMEOUT <duration> { <commands> } \| TIMEOUT <duration> AWAIT $var` |
+| [`ISOLATED`](#isolated) | `ISOLATED { INHERIT_ENV [...] <commands> } \| ISOLATED <command...>` |
 | [`REMOTE`](#remote) | `REMOTE <target> [[$var, ...] [env:NAME, ...]] { <commands> }` |
 | [`FUNC`](#func) | `FUNC NAME([$param: TYPE, ...]) { <commands> }` |
 | [`RETURN`](#return) | `RETURN [<expr>]` |
@@ -804,6 +805,103 @@ TIMEOUT 30s AWAIT $quick
 ```
 
 
+### ISOLATED
+
+Run steps with the seeded script environment.
+
+**Syntax:** `ISOLATED { INHERIT_ENV [...] <commands> } | ISOLATED <command...>`
+
+Resets the script environment for the block to the session
+seed: spawned children see the sandbox defaults plus names
+the block re-adds through its leading `INHERIT_ENV`.
+
+The allowlist resolves against the outer scope, never the
+host. Absent names stay absent silently, matching top-level
+`INHERIT_ENV`.
+
+Script variables, pipes, and files flow through untouched;
+only `env:` is reset. Files share the session workspace:
+blocks selecting the same `WORKSPACE` target resolve to the
+same directory with no per-block overlay, so one block's
+writes are visible to another.
+
+Blocks nest (each level re-seeds from the same seed, so
+nesting only narrows through the allowlists) and compose
+with `ASYNC` and `FUNC`. Scope exit restores the prior
+environment.
+
+
+**Examples:**
+
+**Example: isolated scope**
+
+```oxdock
+# The block sees a clean env; plain steps still run and
+# outer bindings survive untouched.
+ENV MODE=outer
+ISOLATED {
+    ENV MODE=inner
+    WRITE inner.txt "{{ env:MODE }}"
+}
+LET $back: STRING = "{{ env:MODE }}"
+ASSERT_EQ $back "outer"
+LET $body: STRING = READ inner.txt
+ASSERT_EQ $body "inner"
+```
+
+**Example: reseeded child env**
+
+```oxdock
+# The block resets to the session seed: plain steps and
+# spawns run with zero prelude, while outer customs
+# stay out.
+ENV OUTER_CUSTOM=outer-val
+WRITE top-path.txt "{{ env:PATH }}"
+ISOLATED {
+    WRITE inner-path.txt "{{ env:PATH }}"
+    WRITE inner-custom.txt "{{ env:OUTER_CUSTOM }}"
+    RUN "echo seed-ok"
+}
+LET $top: STRING = READ top-path.txt
+LET $inner: STRING = READ inner-path.txt
+ASSERT_EQ $inner $top
+LET $custom: STRING = READ inner-custom.txt
+ASSERT_EQ $custom ""
+ASSERT_CONTAINS stdout "seed-ok"
+```
+
+**Example: absent names stay absent**
+
+```oxdock
+# Listing a name the outer scope lacks is not an error:
+# the block simply runs without it.
+ISOLATED {
+    INHERIT_ENV [OXDOC_DEFINITELY_ABSENT_12345]
+    ECHO still-runs
+}
+ASSERT_CONTAINS stdout "still-runs"
+```
+
+**Example: nesting narrows**
+
+```oxdock
+# Each level snapshots the already-scrubbed parent, so
+# an inner block cannot recover what the outer dropped.
+ENV KEEP=yes
+ISOLATED {
+    INHERIT_ENV [KEEP]
+    ISOLATED {
+        ENV KEEP=inner
+        WRITE deep.txt "{{ env:KEEP }}"
+    }
+    LET $mid: STRING = "{{ env:KEEP }}"
+    ASSERT_EQ $mid "yes"
+}
+LET $deep: STRING = READ deep.txt
+ASSERT_EQ $deep "inner"
+```
+
+
 ### REMOTE
 
 Run a sealed block on a remote target.
@@ -814,15 +912,19 @@ Runs the braced block on the named remote target, which the
 host binds at startup (`--remote`). The block is sealed:
 only header-listed `$var` and `env:NAME` entries cross, the
 guest starts empty, and results return through declared
-transfers or `WITH_IO` pipes. The target is a static
-literal, never a variable. Unknown targets fail before
-execution starts. Bodies check twice: the host static
-pass validates the body before anything ships, and the
-guest re-validates on arrival through the same entry
-point, so a body type error fails locally, never mid-run
-on the remote. A failing guest fails the host step: EXIT
-in the body exits the guest, and the host relays the code
-to its own process exit status (see EXIT).
+transfers or `WITH_IO` pipes.
+
+The target is a static literal, never a variable. Unknown
+targets fail before execution starts.
+
+Bodies check twice: the host static pass validates the
+body before anything ships, and the guest re-validates on
+arrival through the same entry point, so a body type error
+fails locally, never mid-run on the remote.
+
+A failing guest fails the host step: EXIT in the body
+exits the guest, and the host relays the code to its own
+process exit status (see EXIT).
 
 
 **Examples:**
@@ -1253,6 +1355,8 @@ Switches the workspace root. The selection reverts at scope
 exit like `WORKDIR`.
 
 - `SNAPSHOT`: the materialized build snapshot (the default).
+  One session-shared directory: every selection resolves to
+  it, in any block.
 - `LOCAL`: the local workspace directory.
 - `CACHE`: a persistent per-project directory shared across
   runs, never evicted. It lives under the OS user cache
@@ -1418,8 +1522,19 @@ Inherit env vars from host.
 
 Declares which host environment variables to inherit into the script.
 
-Must appear before any other commands and at most once. Without this
-directive, the script starts with an empty environment.
+Must appear before any other commands. Several directives may
+appear so platform-specific names ride explicit guards
+(`[family:windows] INHERIT_ENV [USERPROFILE]`); each guarded
+line runs only when its guard passes.
+
+Sandbox defaults need no declaration: loader bindings,
+terminal defaults, the host lookup path, and the user's
+profile locations seed automatically. See Environment
+Variable Contracts for the exact list, which grows with the
+engine.
+
+Secrets and tool config stay opt-in here: a token or a
+`CARGO_HOME` override arrives only through this directive.
 
 
 **Arguments:**
@@ -1433,9 +1548,10 @@ directive, the script starts with an empty environment.
 **Example: inherit env**
 
 ```oxdock
-INHERIT_ENV [PATH, HOME]
+[family:unix] INHERIT_ENV [HOME]
 LET $path: STRING = env:PATH
-ASSERT_CONTAINS $path ":"
+[family:unix] ASSERT_CONTAINS $path ":"
+[family:windows] ASSERT_CONTAINS $path ";"
 ```
 
 
@@ -1494,7 +1610,11 @@ Execute shell command or direct executable.
 **Syntax:** `RUN <command...> | RUN ["exe", "arg", ...]`
 
 Shell form (`RUN <command...>`) runs the joined command string in the
-system shell (`$SHELL -c` / `COMSPEC /C`).
+batch shell (`sh -c` / `cmd /C`). Never the operator's login
+shell: login shells re-pollute scrubbed children from system
+profiles and break script portability, so step execution is
+pinned to POSIX `sh` (interactive `oxdock --shell` still uses
+`$SHELL`).
 
 Exec form (`RUN ["exe", "arg", ...]`) spawns the executable directly
 with no shell, so there is no shell expansion, globbing, redirection,
@@ -1515,6 +1635,8 @@ both forms.
 **Example: run**
 
 ```oxdock
+# Spawned children resolve through the seeded host PATH:
+# closed child env is the default, not ambient inherit.
 RUN echo hello
 
 # Captured runs prove the output, not just the exit status.
@@ -1526,7 +1648,11 @@ ASSERT_CONTAINS $o "hello"
 
 ```oxdock
 # No shell: `>` stays a literal argument, so no file is created.
+# Toolchain spawns bridge the host home explicitly: rustup
+# shims resolve toolchains through the host home.
 IMPORT [STD]
+[family:unix] INHERIT_ENV [HOME]
+[family:windows] INHERIT_ENV [USERPROFILE]
 RUN ["cargo", "--version", ">", "x.txt"]
 ASSERT_CONTAINS stdout "cargo"
 
@@ -2901,8 +3027,8 @@ Bare command names search `env:PATH` (`IS_EXEC("tar")` finds the
 first executable `tar`, plus `tar.exe`, on `PATH`); spellings
 containing a separator check that file directly. True means a real
 file with an executable bit on Unix, or a `PATHEXT` extension on
-Windows: each `env:PATHEXT` entry is probed in order (default
-`.COM;.EXE;.BAT;.CMD`, an explicitly empty value probes nothing). Absolute `PATH` entries resolve through the workspace as
+Windows: each `env:PATHEXT` entry is probed in order (unset or empty
+probes nothing). Absolute `PATH` entries resolve through the workspace as
 usual, so host probing wants `WORKSPACE SYSTEM` and an inherited
 `PATH`; anything unresolvable reads false, never errors. AST-only
 by design, like `PATH_TYPE`: there is no RPN arm for filesystem IO.

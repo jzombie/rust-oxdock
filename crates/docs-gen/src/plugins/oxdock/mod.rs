@@ -8,6 +8,7 @@
 //! itself, registered by no project outside OxDock.
 
 mod command_ref;
+mod env_contracts;
 
 use anyhow::Result;
 use oxdock_core::{FuncMeta, HostModule, OxDockFn, TypeDescriptor, TypeTag, Value};
@@ -79,6 +80,14 @@ fn plugin_type_reference(module: String) -> Result<Value> {
     )))
 }
 
+/// Generated environment-variable contract reference from the live
+/// seed tables, so the documented defaults can never drift from the
+/// seeded ones.
+#[oxdock_func(pure, returns = TypeTag::String)]
+fn env_contracts() -> Result<Value> {
+    Ok(Value::string(env_contracts::render_env_contracts()?))
+}
+
 /// Render one generated input by config key, so the pipeline loops
 /// over `generated` entries instead of hardcoding one call per
 /// artifact. The key-to-call mapping lives here, with the OxDock
@@ -97,6 +106,7 @@ fn generated(key: String) -> Result<Value> {
         "net_function_reference" => plugin_function_reference("NET".to_string()),
         "net_type_reference" => plugin_type_reference("NET".to_string()),
         "markdown_function_reference" => plugin_function_reference("MARKDOWN".to_string()),
+        "env_contracts" => env_contracts(),
         _ => {
             const KNOWN: &[&str] = &[
                 "command_index",
@@ -109,6 +119,7 @@ fn generated(key: String) -> Result<Value> {
                 "net_function_reference",
                 "net_type_reference",
                 "markdown_function_reference",
+                "env_contracts",
             ];
             anyhow::bail!(
                 "unknown generated key '{key}'; known keys: {}",
@@ -130,6 +141,7 @@ pub fn module<P: ProcessManager>() -> HostModule<P> {
             FunctionReference::registration(),
             ContextReference::registration(),
             LowerMath::registration(),
+            EnvContracts::registration(),
             PluginFunctionReference::registration(),
             PluginTypeReference::registration(),
             Generated::registration(),

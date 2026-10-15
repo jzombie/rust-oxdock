@@ -20,6 +20,7 @@ fn verify_display_sync_with_metadata() {
             | StepKind::While { body, .. }
             | StepKind::FuncDef { body, .. }
             | StepKind::Timeout { body, .. }
+            | StepKind::Isolated { body }
             | StepKind::AssignAsync { body, .. }
             | StepKind::AsyncBlock { body } => vec![body],
             StepKind::If {

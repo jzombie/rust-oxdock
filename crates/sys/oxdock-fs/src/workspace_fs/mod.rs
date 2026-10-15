@@ -121,63 +121,119 @@ pub enum EntryKind {
 /// land in the live tree, under `WORKSPACE SNAPSHOT` in the isolated
 /// snapshot directory.
 ///
-/// Opaque by design: the inner guarded path is not exposed, so neither
+/// Opaque by design: the inner guarded root is not exposed, so neither
 /// snapshot style `ensure()` creation nor `create_dir_all` can name it.
 /// Passing a `CargoScratch` where a `&GuardedPath` is required is a compile
-/// error. The only operations are rendering it for the child environment
-/// (`display`, `command_path`) and recording it in test doubles
-/// (`to_path_buf`). Creation, if ever needed, is performed on demand by the
-/// child `cargo` invocation itself. Host code never creates it.
-#[derive(Clone, Debug)]
-pub struct CargoScratch(GuardedPath);
+/// error. The only operations are rendering subpaths for the child
+/// environment (`display`/`command_path` for `CARGO_TARGET_DIR`,
+/// `tmp_command_path` for seeded temp) and recording it in test doubles
+/// (`to_path_buf`). The root materializes lazily: construction performs
+/// no filesystem I/O, so interpretive-only sessions never touch disk.
+#[derive(Clone)]
+pub struct CargoScratch {
+    root: Arc<LazyGuardedTempDir>,
+}
 
-#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
-impl CargoScratch {
-    /// Render for `CARGO_TARGET_DIR` environment bindings.
-    pub fn display(&self) -> String {
-        self.0.display()
-    }
-
-    /// Platform-adjusted form for process spawning (verbatim-prefix
-    /// stripping on Windows), mirroring [`command_path`].
-    pub fn command_path(&self) -> std::borrow::Cow<'_, std::path::Path> {
-        command_path(&self.0)
-    }
-
-    /// Owned raw path for test-double recording. Must never be created
-    /// through; it exists so mocks can assert on the value.
-    pub fn to_path_buf(&self) -> std::path::PathBuf {
-        self.0.to_path_buf()
+#[allow(clippy::disallowed_types)]
+impl std::fmt::Debug for CargoScratch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CargoScratch(..)")
     }
 }
 
-/// Reserve a [`CargoScratch`] name inside the system temp hierarchy.
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+impl CargoScratch {
+    fn target(&self) -> Result<GuardedPath> {
+        self.root.ensure()?.join("target")
+    }
+
+    fn tmp(&self) -> Result<GuardedPath> {
+        let tmp = self.root.ensure()?.join("tmp")?;
+        #[cfg(not(miri))]
+        {
+            std::fs::create_dir_all(tmp.as_path())?;
+        }
+        Ok(tmp)
+    }
+
+    /// Render for `CARGO_TARGET_DIR` environment bindings: the `target`
+    /// subpath, owned by cargo alone.
+    pub fn display(&self) -> String {
+        self.target()
+            .map(|t| t.display())
+            .unwrap_or_else(|_| String::new())
+    }
+
+    /// Platform-adjusted `target` subpath for process spawning
+    /// (verbatim-prefix stripping on Windows), mirroring
+    /// [`command_path`].
+    pub fn command_path(&self) -> std::path::PathBuf {
+        // `ensure()` only fails on host I/O errors; fall back to an
+        // empty path rather than panicking in rendering positions.
+        match self.target() {
+            Ok(t) => command_path(&t).into_owned(),
+            Err(_) => std::path::PathBuf::new(),
+        }
+    }
+
+    /// Platform-adjusted `tmp` subpath for seeded temp bindings,
+    /// created on first use (native only; synthetic under Miri).
+    pub fn tmp_command_path(&self) -> std::path::PathBuf {
+        match self.tmp() {
+            Ok(t) => command_path(&t).into_owned(),
+            Err(_) => std::path::PathBuf::new(),
+        }
+    }
+
+    /// Lexical `<scratch>/tmp` display path for seed bindings: the
+    /// pre-computed candidate, no filesystem I/O. The spawn path
+    /// materializes it through [`CargoScratch::ensure_materialized`]
+    /// before any child observes it.
+    pub fn tmp_seed_display(&self) -> String {
+        self.seed_display("tmp")
+    }
+
+    /// Lexical `<scratch>/target` display path for seed bindings: the
+    /// pre-computed candidate, no filesystem I/O. Cargo creates the
+    /// directory on demand; the engine never ensures it.
+    pub fn target_seed_display(&self) -> String {
+        self.seed_display("target")
+    }
+
+    fn seed_display(&self, leaf: &str) -> String {
+        let path = self.root.candidate_path().join(leaf);
+        path::GuardedPath::from_guarded_parts(path.clone(), path).display()
+    }
+
+    /// Materialize the scratch hierarchy before spawn: root plus `tmp`
+    /// (native; flag flip under Miri). Called in `command_ctx`, the
+    /// choke point every real spawn flows through, so seeded
+    /// `HOME`/`TMPDIR` paths exist when children write them. `target`
+    /// stays uncreated: cargo owns it on demand.
+    pub fn ensure_materialized(&self) -> Result<()> {
+        self.root.ensure().map(|_| ())?;
+        self.tmp().map(|_| ())?;
+        Ok(())
+    }
+
+    /// Owned raw `target` path for test-double recording. Must never be
+    /// created through; it exists so mocks can assert on the value.
+    pub fn to_path_buf(&self) -> std::path::PathBuf {
+        self.target().map(|t| t.to_path_buf()).unwrap_or_default()
+    }
+}
+
+/// Reserve a [`CargoScratch`] session root inside the system temp hierarchy.
 ///
-/// Pure name reservation: containment is verified against the real temp root,
-/// but the directory is created on demand by the child `cargo` invocation
-/// itself. Never by us. Reservation performs only root canonicalization and
-/// stat I/O (no leaf creation and no leaf reads); build outputs stay a
-/// managed, guarded location instead of an arbitrary relative string (or
-/// the live workspace tree). The counter plus elapsed-nanos leaf makes the
-/// name unique per process, not unguessable; since we never create or
-/// follow it, reservation alone presents no TOCTOU surface.
+/// Pure lazy reservation: no filesystem I/O on native targets (the root
+/// materializes on first subpath access through `LazyGuardedTempDir`).
+/// Build outputs stay a managed, guarded location instead of an arbitrary
+/// relative string (or the live workspace tree).
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 pub fn reserve_cargo_scratch() -> Result<CargoScratch> {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::Instant;
-    static SCRATCH_COUNTER: AtomicU64 = AtomicU64::new(0);
-    static SCRATCH_EPOCH: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
-    let id = SCRATCH_COUNTER.fetch_add(1, Ordering::Relaxed);
-    // Monotonic clock: available under Miri isolation (unlike wall-clock
-    // time), unique per process via the counter. Uniqueness (not secrecy)
-    // is what matters here: a reserved-but-never-created name presents no
-    // TOCTOU surface.
-    let nanos = SCRATCH_EPOCH.get_or_init(Instant::now).elapsed().as_nanos();
-    let leaf = format!("oxdock-cargo-{id}-{nanos:x}");
-    let temp_root = std::env::temp_dir();
-    // The temp root exists, so guarding performs no creation: the missing
-    // candidate is normalized lexically and containment-verified.
-    GuardedPath::new(&temp_root, &temp_root.join(leaf)).map(CargoScratch)
+    Ok(CargoScratch {
+        root: Arc::new(LazyGuardedTempDir::new()),
+    })
 }
 
 pub mod path;
@@ -294,8 +350,8 @@ impl PathResolver {
     /// creation so callers avoid ad-hoc path construction.
     #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
     pub fn from_manifest_env() -> Result<Self> {
-        let manifest_dir = std::env::var(crate::env::CARGO_MANIFEST_DIR)
-            .with_context(|| format!("{} missing", crate::env::CARGO_MANIFEST_DIR))?;
+        let manifest_dir = std::env::var(crate::env::cargo::MANIFEST_DIR)
+            .with_context(|| format!("{} missing", crate::env::cargo::MANIFEST_DIR))?;
         let path = Path::new(&manifest_dir);
         Self::new(path, path)
     }

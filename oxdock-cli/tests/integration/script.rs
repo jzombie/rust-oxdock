@@ -27,6 +27,14 @@ fn script_runs_copy_and_symlink() {
     let steps = vec![
         Step {
             guard: None,
+            kind: StepKind::InheritEnv {
+                keys: vec!["PATH".to_string()],
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+        },
+        Step {
+            guard: None,
             kind: StepKind::Workdir("client".into()),
             scope_enter: 0,
             scope_exit: 0,

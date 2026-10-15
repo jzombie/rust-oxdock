@@ -8,9 +8,9 @@ Platform gating selects OS-specific steps, and remote targets bind over any stdi
 
 The syntax is line-oriented with optional semicolon terminators and a static type system checking scripts before the first step runs. Plain Rust functions become script functions with one attribute: `#[oxdock_func]` exports them into namespaced modules scripts call as `DEMO::NAME(...)`. See [Extending OxDock from Rust](#extending-oxdock-from-rust).
 
-[Documentation](https://docs.rs/oxdock/0.28.0-alpha/oxdock/)
+[Documentation](https://docs.rs/oxdock/0.29.0-alpha/oxdock/)
 
-Add it to your Rust build with `cargo add oxdock@0.28.0-alpha`, or install the standalone runner with `cargo install oxdock@0.28.0-alpha`.
+Add it to your Rust build with `cargo add oxdock@0.29.0-alpha`, or install the standalone runner with `cargo install oxdock@0.29.0-alpha`.
 
 Run a script:
 
@@ -110,8 +110,8 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     LET $a: STRING = READ dist/alpha.txt
     LET $b: STRING = READ dist/beta.txt
     LET $p: STRING = READ dist/picked.txt
-    ASSERT_EQ $a "alpha OxDock 0.28.0-alpha"
-    ASSERT_EQ $b "beta OxDock 0.28.0-alpha"
+    ASSERT_EQ $a "alpha OxDock 0.29.0-alpha"
+    ASSERT_EQ $b "beta OxDock 0.29.0-alpha"
     ASSERT_EQ $p "alpha"
 };
 
@@ -123,7 +123,7 @@ let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolve
 let out = root.join("dist/alpha.txt").expect("out path");
 assert_eq!(
     resolver.read_to_string(&out).expect("read out"),
-    "alpha OxDock 0.28.0-alpha"
+    "alpha OxDock 0.29.0-alpha"
 );
 ```
 
@@ -435,7 +435,7 @@ Scripts are sequences of instructions, one per line (`;` separates two; quoted s
 - **Commands are uppercase** and case-sensitive: `WORKDIR`, not `workdir`. Lowercase or mixed-case spellings are parse errors with an uppercase hint.
 - One instruction per line; a semicolon (`;`) splits multiple instructions on a single line.
 - Paths and arguments use forward slashes (`/`) for portability (see [Path Separators](#path-separators)).
-- Scripts do **not** inherit your shell environment unless `INHERIT_ENV` opts specific keys in (see [Selective environment inheritance](#selective-environment-inheritance)).
+- Scripts start with host-mirrored essentials (`PATH`, `HOME`, temp bindings, loader anchors); anything beyond those needs `INHERIT_ENV` to opt specific keys in (see [Selective environment inheritance](#selective-environment-inheritance)).
 
 ### Declared variable types
 
@@ -586,7 +586,7 @@ A guard is a bracketed expression that gates the instruction or block that follo
 
 Guards attach to the next instruction. Several guard lines in a row chain onto the same target, and a guard immediately followed by `{` opens a guarded block whose guard applies to every enclosed instruction.
 
-Guard evaluation checks the script environment only: `ENV` entries, `INHERIT_ENV` opt-ins, and builtin keys. Host variables stay invisible unless inherited, so guards interact naturally with `INHERIT_ENV` and `ENV`.
+Guard evaluation checks the script environment only: `ENV` entries, `INHERIT_ENV` opt-ins, and builtin keys. Non-essential host variables stay invisible unless inherited, so guards interact naturally with `INHERIT_ENV` and `ENV`.
 
 ### Environment guards
 
@@ -775,7 +775,7 @@ so the documented behavior is guaranteed to match.
 
 ## Selective environment inheritance
 
-Scripts no longer inherit the caller's environment wholesale. Host variables stay private unless you opt in explicitly.
+Scripts no longer inherit the caller's environment wholesale. Except for the host-mirrored essentials documented in [ENV_CONTRACTS.md](https://github.com/jzombie/rust-oxdock/blob/main/ENV_CONTRACTS.md), host variables stay private unless you opt in explicitly.
 
 - Add `INHERIT_ENV [FOO, BAR, BAZ]` at the very top of the script to copy those keys from the process environment before any other command runs.
 - The directive must be top-level: no guards, no surrounding blocks, and no repeats. Trying to nest or guard it triggers a parser error so scripts stay deterministic.
@@ -783,6 +783,8 @@ Scripts no longer inherit the caller's environment wholesale. Host variables sta
 - Test harnesses and embedders can supply values programmatically; the [environment-guards example](#environment-guards) injects `DEPLOY_TARGET` through the docs-conformance runner rather than the real process environment.
 
 Keeping inheritance selective avoids leaking secrets by default while still allowing ergonomics for well-known keys (proxy settings, artifact caches, etc.).
+
+Every variable the seed provides to spawned children is specified in [ENV_CONTRACTS.md](https://github.com/jzombie/rust-oxdock/blob/main/ENV_CONTRACTS.md).
 
 ## Path Separators
 
@@ -819,7 +821,7 @@ Keeping inheritance selective avoids leaking secrets by default while still allo
 Install the binary from the registry:
 
 ```sh
-cargo install oxdock@0.28.0-alpha
+cargo install oxdock@0.29.0-alpha
 ```
 
 Run a script file:
@@ -1196,7 +1198,7 @@ Or pin the version in `Cargo.toml`:
 
 ```toml
 [dependencies]
-oxdock = { version = "0.28.0-alpha", default-features = false }
+oxdock = { version = "0.29.0-alpha", default-features = false }
 ```
 
 ## Glossary

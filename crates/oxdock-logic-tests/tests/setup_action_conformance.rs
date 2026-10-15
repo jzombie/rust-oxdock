@@ -16,7 +16,7 @@ use oxdock_core::{ExecIo, run_steps_with_manager_with_modules};
 use oxdock_fs::{GuardedPath, PathResolver};
 
 fn repo_root() -> Result<String> {
-    let manifest_dir = std::env::var(oxdock_fs::env::CARGO_MANIFEST_DIR)
+    let manifest_dir = std::env::var(oxdock_fs::env::cargo::MANIFEST_DIR)
         .context("CARGO_MANIFEST_DIR missing")?
         .replace('\\', "/");
     Ok(manifest_dir

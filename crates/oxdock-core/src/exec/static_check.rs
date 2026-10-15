@@ -149,6 +149,10 @@ struct Checker<'a, P: ProcessManager> {
     inferred: HashMap<String, StaticTy>,
     inferring: Vec<String>,
     visits: u64,
+    /// Nesting depth inside `ISOLATED` bodies: the isolated allowlist node
+    /// is legal only below an `ISOLATED` head, at any depth including
+    /// through nested blocks and nested `ISOLATED` itself.
+    isolated_depth: usize,
 }
 
 /// Run the static pass over top-level steps plus every collected
@@ -552,6 +556,7 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
             inferred: HashMap::new(),
             inferring: Vec::new(),
             visits: 0,
+            isolated_depth: 0,
         }
     }
 
@@ -1036,6 +1041,39 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 }
                 Ok(out)
             }
+            StepKind::Isolated { body } => {
+                // Same in-place scoping as TIMEOUT: `RETURN` inside
+                // still returns from the enclosing function; only the
+                // child env is scrubbed, never the type flow. Depth
+                // tracks nesting so the allowlist node stays legal at
+                // any depth below this head, including nested blocks
+                // and nested `ISOLATED`.
+                self.isolated_depth += 1;
+                let inner = self.walk_body(body, env, scope, depth + 1)?;
+                self.isolated_depth -= 1;
+                let mut out = live;
+                out.has_return = inner.has_return;
+                out.types = inner.types;
+                out.falls_through = inner.falls_through;
+                if !inner.falls_through {
+                    return Ok(out);
+                }
+                Ok(out)
+            }
+            StepKind::IsolatedInheritEnv { .. } => {
+                // Only the parser produces this node, strictly inside
+                // `ISOLATED` bodies; anywhere else it is a bug, never a
+                // user spelling (the grammar has no other production).
+                // The node carries no expressions and binds nothing, so
+                // inside its scope it is a no-op for types.
+                if self.isolated_depth == 0 {
+                    return Err(anyhow::anyhow!(
+                        "step {}: isolated allowlist outside ISOLATED",
+                        idx + 1
+                    ));
+                }
+                Ok(live)
+            }
             StepKind::RemoteBlock {
                 target, vars, body, ..
             } => {
@@ -1088,6 +1126,13 @@ impl<'a, P: ProcessManager> Checker<'a, P> {
                 if !env.is_declared(&key) {
                     env.insert_top(key, TypeTag::String, step.guard.as_ref());
                 }
+                Ok(live)
+            }
+            StepKind::Env { .. } => {
+                // Uniform script-wins: the seed populates defaults and
+                // explicit `ENV` overwrites them like any other variable.
+                // No name is immutable.
+                self.check_step_args(&step.kind, env, scope, idx, depth)?;
                 Ok(live)
             }
             _ => {

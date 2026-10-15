@@ -6,7 +6,7 @@ use anyhow::{Result, bail};
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 use std::process::ExitStatus;
 
-use oxdock_fs::{GuardedPath, PathResolver, PolicyPath, env as oxdock_env};
+use oxdock_fs::{GuardedPath, PathResolver, PolicyPath};
 use oxdock_sys_test_utils::exit_status_from_code;
 
 use crate::contract::{
@@ -527,15 +527,7 @@ fn expand_env(input: &str, ctx: &CommandContext) -> String {
                         }
                         name.push(ch);
                     }
-                    let val = if name == oxdock_env::CARGO_TARGET_DIR {
-                        ctx.cargo_target_dir().display().to_string()
-                    } else {
-                        ctx.envs()
-                            .get(&name)
-                            .cloned()
-                            .or_else(|| std::env::var(&name).ok())
-                            .unwrap_or_default()
-                    };
+                    let val = ctx.envs().get(&name).cloned().unwrap_or_default();
                     out.push_str(&val);
                 }
                 Some(next) if next.is_alphanumeric() || *next == '_' => {
@@ -549,15 +541,7 @@ fn expand_env(input: &str, ctx: &CommandContext) -> String {
                             break;
                         }
                     }
-                    let val = if name == oxdock_env::CARGO_TARGET_DIR {
-                        ctx.cargo_target_dir().display().to_string()
-                    } else {
-                        ctx.envs()
-                            .get(&name)
-                            .cloned()
-                            .or_else(|| std::env::var(&name).ok())
-                            .unwrap_or_default()
-                    };
+                    let val = ctx.envs().get(&name).cloned().unwrap_or_default();
                     out.push_str(&val);
                 }
                 _ => {
@@ -578,14 +562,8 @@ fn env_lookup(name: &str, ctx: &CommandContext) -> String {
     // Accept both `{{ env:X }}` and bare `{{ X }}` forms, matching the
     // host-side `expand_command_env` semantics.
     let key = name.strip_prefix("env:").unwrap_or(name);
-    if key == oxdock_env::CARGO_TARGET_DIR {
-        return ctx.cargo_target_dir().display().to_string();
-    }
-    ctx.envs()
-        .get(key)
-        .cloned()
-        .or_else(|| std::env::var(key).ok())
-        .unwrap_or_default()
+    // Script map only, matching the seeded child env of real spawns.
+    ctx.envs().get(key).cloned().unwrap_or_default()
 }
 
 #[cfg(miri)]
@@ -736,7 +714,7 @@ mod synthetic_backend_tests {
 
     #[test]
     fn expand_env_supports_brace_and_dollar_forms() {
-        let (_root, ctx) = miri_ctx(&[("FOO", "bar")]);
+        let (_root, ctx) = miri_ctx(&[("FOO", "bar"), ("CARGO_TARGET_DIR", "/scratch/target")]);
 
         assert_eq!(expand_env("{{ env:FOO }}!", &ctx), "bar!");
         assert_eq!(expand_env("$FOO!", &ctx), "bar!");
@@ -744,8 +722,9 @@ mod synthetic_backend_tests {
         assert_eq!(expand_env("cost $$5", &ctx), "cost $$5");
         assert_eq!(expand_env("[${MISSING_XYZ}]", &ctx), "[]");
 
+        // The seed carries CARGO_TARGET_DIR in the map; expansion reads it there.
         let target = expand_env("${CARGO_TARGET_DIR}", &ctx);
-        assert!(!target.is_empty(), "executor default must resolve");
+        assert_eq!(target, "/scratch/target");
     }
 
     #[test]

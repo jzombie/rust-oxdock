@@ -26,8 +26,22 @@ pub struct ExecState<P: ProcessManager> {
     /// nameable as a `&GuardedPath`, so host code cannot `ensure()` or
     /// `create_dir_all` it. The child `cargo` creates it on demand.
     pub(super) cargo_scratch: CargoScratch,
+    /// Pure session seed from [`oxdock_process::seed_defaults`], stored at
+    /// init alongside the layered `envs`. `ISOLATED` resets clone this
+    /// (not the layered map), and transport sanitize diffs against it.
+    /// Built once: re-seeding would re-read host fallbacks and break
+    /// state stability.
+    pub(super) seed: Arc<HashMap<String, String>>,
     pub(super) cwd: GuardedPath,
     pub(super) envs: Arc<HashMap<String, String>>,
+    /// Outer-scope env snapshots for `ISOLATED` blocks, innermost last.
+    /// Each entry is the script env as it stood at that block's entry, so
+    /// the block allowlist resolves against the enclosing scope even as
+    /// the live envs are scrubbed underneath. Nesting snapshots the
+    /// already-scrubbed parent, so narrowing is monotonic by
+    /// construction. Cloned (not reset) by `fork()` so tasks spawned
+    /// inside a block inherit its scrub.
+    pub(super) isolated_stack: Vec<Arc<HashMap<String, String>>>,
     pub(super) bg_children: Vec<Box<dyn BackgroundHandle>>,
     pub(super) scope_stack: Vec<ScopeSnapshot>,
     pub(super) io: ExecIo,
@@ -244,14 +258,34 @@ impl KeeperExpiry {
 }
 
 impl<P: ProcessManager> ExecState<P> {
+    /// Script-map environment lookup for DSL evaluation (`is_exec_name`,
+    /// `Expr::Env`, expansions): exact hit first, case-insensitive
+    /// fallback on Windows so `{{ env:Path }}` resolves the seeded
+    /// `PATH`. The map is seeded at init, so no fallback layer exists.
+    pub(super) fn get_env(&self, key: &str) -> Option<&str> {
+        if let Some(v) = self.envs.get(key) {
+            return Some(v.as_str());
+        }
+        #[allow(clippy::disallowed_macros)]
+        if cfg!(windows) {
+            return self
+                .envs
+                .iter()
+                .find(|(k, _)| oxdock_process::names_eq(k, key))
+                .map(|(_, v)| v.as_str());
+        }
+        None
+    }
+
     pub(super) fn command_ctx(&self) -> Result<CommandContext> {
         // Resolve the working directory through the snapshot choke point: a
         // snapshot-rooted cwd materializes here (so `RUN` executes against a
         // real directory) while a local cwd resolves purely lexically with
-        // zero I/O. `CARGO_TARGET_DIR` is the pre-reserved scratch name (never
-        // ensured by us); callers may still override it via the env map, which
-        // apply_ctx respects when spawning processes.
+        // zero I/O. The seeded scratch materializes alongside: `HOME` and
+        // `TMPDIR` point at it, so children writing temp or profile data
+        // must observe real directories, never lexical candidates.
         let cwd = self.fs.resolve_write(&self.cwd, ".")?;
+        self.cargo_scratch.ensure_materialized()?;
         Ok(CommandContext::new(
             &cwd.into(),
             Arc::clone(&self.envs),
@@ -274,10 +308,12 @@ impl<P: ProcessManager> ExecState<P> {
         Self {
             fs: self.fs.clone_box(),
             cargo_scratch: self.cargo_scratch.clone(),
+            seed: Arc::clone(&self.seed),
             cwd: self.cwd.clone(),
             envs: Arc::clone(&self.envs),
             bg_children: Vec::new(),
             scope_stack: Vec::new(),
+            isolated_stack: self.isolated_stack.clone(),
             io: self.io.clone(),
             assert_windows: Arc::clone(&self.assert_windows),
             assert_windows_stderr: Arc::clone(&self.assert_windows_stderr),

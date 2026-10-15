@@ -8,7 +8,7 @@ status = "failure"
 
 [expect.stderr]
 contains = [
-  "__oxdock_missing_command__",
+  "invalid-oxdock-flag-xyz",
   "failed with status",
   "filesystem snapshot",
   "(command",

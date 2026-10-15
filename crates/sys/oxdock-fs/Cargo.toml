@@ -26,6 +26,7 @@ mock-fs = []
 anyhow.workspace = true
 cache-manager.workspace = true
 glob.workspace = true
+indoc.workspace = true
 tempfile.workspace = true
 tracing = { workspace = true }
 

@@ -1,3 +1,4 @@
+use indoc::indoc;
 use oxdock_core::run_steps;
 use oxdock_fs::{GuardedPath, PathResolver};
 use oxdock_parser::{Step, StepKind};
@@ -36,17 +37,11 @@ fn incremental_execution_persists_filesystem_state() {
 
     // Second execution: Modify the file
     // This simulates a second command running against the same environment (filesystem)
-    let steps2 = vec![Step {
-        guard: None,
-        #[allow(clippy::disallowed_macros)]
-        kind: StepKind::Run(if cfg!(windows) {
-            "echo updated> state.txt".into()
-        } else {
-            "echo updated > state.txt".into()
-        }),
-        scope_enter: 0,
-        scope_exit: 0,
-    }];
+    let steps2 = oxdock_core::parse_script(indoc! {r#"
+        [family:windows] RUN "echo updated> state.txt"
+        [family:unix] RUN "echo updated > state.txt"
+    "#})
+    .unwrap();
 
     run_steps(&root, &steps2).unwrap();
     assert_eq!(read_file(&root.join("state.txt").unwrap()), "updated");
@@ -81,17 +76,11 @@ fn incremental_execution_persists_cwd() {
     // Second execution: Verify we can access the file created in the previous step
     // Note: run_steps resets CWD to root by default unless we pass a modified context.
     // But here we just want to verify the file exists.
-    let steps2 = vec![Step {
-        guard: None,
-        #[allow(clippy::disallowed_macros)]
-        kind: StepKind::Run(if cfg!(windows) {
-            "type subdir\\marker.txt".into()
-        } else {
-            "cat subdir/marker.txt".into()
-        }),
-        scope_enter: 0,
-        scope_exit: 0,
-    }];
+    let steps2 = oxdock_core::parse_script(indoc! {r#"
+        [family:windows] RUN "type subdir\marker.txt"
+        [family:unix] RUN "cat subdir/marker.txt"
+    "#})
+    .unwrap();
 
     run_steps(&root, &steps2).unwrap();
 }
