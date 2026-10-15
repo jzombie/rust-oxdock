@@ -26,6 +26,11 @@ pub const CHANNEL_CAPACITY: usize = 64;
 pub enum DownMsg {
     Data(Bytes),
     Eof,
+    /// Server-to-client `exit-status` request (RFC 4254 section 6.10).
+    /// Queued FIFO like every other message, so bytes sent before it
+    /// still flush first. The wire writer sends the request, then keeps
+    /// serving the queue: `Eof` and close still follow from the pump.
+    ExitStatus(u32),
 }
 
 /// Wire bytes toward the DSL pipes. `Eof` is a half-close: no more bytes

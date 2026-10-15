@@ -443,6 +443,58 @@ fn ssh_pump_channel<P: ProcessManager>(
     Ok(Value::map(map))
 }
 
+/// Report the session's exit status to the client (RFC 4254 section
+/// 6.10), so stock `ssh` exits with the real code instead of 255.
+/// Queues ahead of the channel close: call it after the child exits
+/// (usually the `SSH_PTY_RUN` return) and before the pump drains, so
+/// the status lands ahead of `Eof`. Usable before, during, or after
+/// `SSH_PUMP_CHANNEL`: the control sender survives the take-once pump
+/// ends. Bails once the wire writer is gone. Returns BOOL true.
+#[oxdock_func(returns = TypeTag::Bool, summary = "Send the session exit status to the client.")]
+#[example(
+    name = "report exit status",
+    code = r###"
+    IMPORT [STD, SSH]
+    LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-exit-status", {username: "u", password: "p"})
+    LET $srv: HANDLE = ASYNC {
+        LET $sess: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
+        LET $sin: PIPE
+        LET $sout: PIPE
+        LET $p: HANDLE = ASYNC { SSH_PUMP_CHANNEL($sess.session, $sin, $sout) }
+        SSH_SEND_EXIT_STATUS($sess.session, 3)
+        WITH_IO [stdout=$sin] ECHO "server-greeting"
+        AWAIT $p
+    }
+    LET $cin: PIPE
+    LET $cout: PIPE
+    LET $c: HANDLE = ASYNC { SSH_CONNECT("doc-ssh-exit-status", "u", "p", $cin, $cout) }
+    # Close the client input: its pump observes EOF and half-closes, so
+    # both pumps drain instead of idling on an empty pipe.
+    WITH_IO [stdout=$cin] ECHO "client-hello"
+    LET $cDone: MAP<ANY> = AWAIT $c
+    ASSERT_EQ $cDone.closed true
+    ASSERT_EQ $cDone.exit_status 3
+    AWAIT $srv
+    SSH_CLOSE($m.server)
+    "###
+)]
+fn ssh_send_exit_status<P: ProcessManager>(
+    cx: &mut StepCtx<P>,
+    /// Session handle from `SSH_DEQUEUE`.
+    session: SshSessionTag,
+    /// Exit status to report (0 to 4294967295).
+    code: i64,
+) -> Result<Value> {
+    let _ = cx;
+    if code < 0 {
+        bail!("SSH_SEND_EXIT_STATUS code must not be negative: {code}");
+    }
+    let code = u32::try_from(code)
+        .map_err(|_| anyhow::anyhow!("SSH_SEND_EXIT_STATUS code out of range: {code}"))?;
+    session.send_exit_status(code)?;
+    Ok(Value::bool(true))
+}
+
 /// Shut a server down and join its runtime thread (bounded). Idempotent:
 /// returns BOOL true when no thread remains.
 ///
@@ -473,7 +525,8 @@ fn ssh_close<P: ProcessManager>(
 /// `target` is a service name resolved through runner mappings: SSH
 /// needs a TCP socket, so unmapped services bail with the CLI mapping
 /// hint. Under `--offline` the dial bails before any socket work.
-/// Returns a MAP with `closed` (BOOL).
+/// Returns a MAP with `closed` (BOOL) and `exit_status` (INT, -1 when
+/// the server sent none).
 #[oxdock_func(returns = TypeTag::Map, summary = "Open an SSH client session into pipes.")]
 #[example(
     name = "connect and close",
@@ -554,6 +607,7 @@ fn ssh_connect<P: ProcessManager>(
     let crate::runtime::OutboundSession {
         up_rx,
         down_tx,
+        exit_status,
         handle,
         ..
     } = session;
@@ -563,6 +617,14 @@ fn ssh_connect<P: ProcessManager>(
     pump?;
     let mut map = BTreeMap::new();
     map.insert("closed".to_string(), Value::bool(true));
+    let status = exit_status
+        .lock()
+        .map(|slot| slot.map(i64::from))
+        .unwrap_or(None);
+    map.insert(
+        "exit_status".to_string(),
+        Value::int(status.unwrap_or(-1)),
+    );
     Ok(Value::map(map))
 }
 
@@ -608,7 +670,10 @@ fn ssh_pump<P: ProcessManager>(
 /// default). Outer window-change requests resize this session's terminal
 /// live; every session owns its size cell, so concurrent guests never
 /// observe each other. Must run inside `ASYNC`. Returns the INT exit
-/// code. Environment is exactly the script environment like `RUN`:
+/// code, which is also reported as the session's wire `exit-status` at
+/// child exit (ahead of the pump drain), so stock clients report the
+/// real code instead of 255. Environment is exactly the script
+/// environment like `RUN`:
 /// block-scoped `ENV` (such as the session's `SSH_USER` / `SSH_CLIENT` /
 /// `SSH_SERVER` / `SSH_COMMAND` relay) reaches the child; host names
 /// arrive only through `INHERIT_ENV`, including `TERM` for terminal
@@ -681,6 +746,12 @@ fn ssh_pty_run<P: ProcessManager>(
         session.pty_size()
     };
     let cancel = AtomicBool::new(false);
+    // Report the child code on the wire at exit observation (best
+    // effort: a session that never pumps has no reader, and a torn-down
+    // channel drops it). The returned code stays authoritative.
+    let report = |code: u32| {
+        let _ = session.send_exit_status(code);
+    };
     let code = crate::pty::pump_pty_session(
         cx,
         &argv,
@@ -689,6 +760,7 @@ fn ssh_pty_run<P: ProcessManager>(
         &in_pipe,
         &out_pipe,
         &cancel,
+        Some(&report),
     )?;
     Ok(Value::int(code))
 }
@@ -784,6 +856,7 @@ pub fn module_with_endpoints<P: ProcessManager>(registry: Arc<EndpointRegistry>)
             SshAccept::registration(),
             SshDequeue::registration(),
             SshPumpChannel::registration(),
+            SshSendExitStatus::registration(),
             SshClose::registration(),
             SshConnect::registration(),
             SshPump::registration(),

@@ -278,6 +278,12 @@ fn to_portable_size(size: PtySize) -> portable_pty::PtySize {
 /// each tick), pumping `in_pipe` into it and its output into `out_pipe`.
 /// Blocks until the child exits and its output drains, then returns the
 /// exit code. Cancellation kills the child.
+///
+/// `on_exit` fires exactly once with the learned exit code, at child
+/// exit observation: ahead of the drain close, so a reporter (the SSH
+/// wire `exit-status`) queues before the pump EOF that the close
+/// triggers. A fast child would otherwise win the race against a
+/// script-level report issued after this function returns.
 #[allow(clippy::too_many_arguments)]
 pub fn pump_pty_session<P: ProcessManager>(
     cx: &StepCtx<P>,
@@ -287,6 +293,7 @@ pub fn pump_pty_session<P: ProcessManager>(
     in_pipe: &Value,
     out_pipe: &Value,
     cancel: &AtomicBool,
+    on_exit: Option<&dyn Fn(u32)>,
 ) -> Result<i64> {
     if argv.is_empty() {
         bail!("SSH_PTY_RUN needs at least a program");
@@ -389,36 +396,23 @@ pub fn pump_pty_session<P: ProcessManager>(
         // the death itself.
         let mut exited_ms: Option<u64> = None;
         loop {
-            reap(&mut worker_in, &mut failed);
-            let out_was_live = worker_out.is_some();
-            reap(&mut worker_out, &mut failed);
-            if out_was_live && worker_out.is_none() && !out_closed {
-                out_closed = true;
-                let _ = cx.close_pipe(out_pipe);
-            }
-            // Live resize: an outer window-change bumps the shared cell's
-            // sequence; apply it so the kernel SIGWINCHes the child,
-            // which forwards it to the remote end itself. Sequenced, so
-            // an explicit open size is never clobbered by a stale default.
-            let current = snapshot_pty_size(size_source);
-            if current.seq != applied_seq.seq {
-                applied = current.size;
-                applied_seq = current;
-                // The master is gone once the child exits (see below):
-                // a dead child has no terminal left to resize.
-                if let Some(master) = master_opt.as_ref() {
-                    let _ = master.resize(to_portable_size(applied));
-                }
-            }
-            // Never poll a reaped child: past the first observed exit
-            // the wait handle is spent (Unix answers further polls with
-            // ECHILD), and re-stamping the death would push the drain
-            // wait out from under quiescence.
+            // Child exit first, ahead of worker reaping below: the
+            // reporter (the SSH wire exit-status) must queue before
+            // the drain close triggers the pump EOF, or a fast child
+            // wins the race against it. Never poll a reaped child:
+            // past the first observed exit the wait handle is spent
+            // (Unix answers further polls with ECHILD), and
+            // re-stamping the death would push the drain wait out
+            // from under quiescence.
             if exit_code.is_none() {
                 match child.try_wait() {
                     Ok(Some(status)) => {
                         peer_done.store(true, Ordering::SeqCst);
-                        exit_code = Some(i64::from(status.exit_code()));
+                        let code = status.exit_code();
+                        exit_code = Some(i64::from(code));
+                        if let Some(report) = on_exit {
+                            report(code);
+                        }
                         // The child is gone: note when, but keep the
                         // console until the drain is due so a slow flush
                         // still lands. Deferred to function end this
@@ -439,6 +433,27 @@ pub fn pump_pty_session<P: ProcessManager>(
                             exited_ms = Some(elapsed_ms(epoch));
                         }
                     }
+                }
+            }
+            reap(&mut worker_in, &mut failed);
+            let out_was_live = worker_out.is_some();
+            reap(&mut worker_out, &mut failed);
+            if out_was_live && worker_out.is_none() && !out_closed {
+                out_closed = true;
+                let _ = cx.close_pipe(out_pipe);
+            }
+            // Live resize: an outer window-change bumps the shared cell's
+            // sequence; apply it so the kernel SIGWINCHes the child,
+            // which forwards it to the remote end itself. Sequenced, so
+            // an explicit open size is never clobbered by a stale default.
+            let current = snapshot_pty_size(size_source);
+            if current.seq != applied_seq.seq {
+                applied = current.size;
+                applied_seq = current;
+                // The master is gone once the child exits (see below):
+                // a dead child has no terminal left to resize.
+                if let Some(master) = master_opt.as_ref() {
+                    let _ = master.resize(to_portable_size(applied));
                 }
             }
             // Due drain with a live output worker: release the console
@@ -473,7 +488,13 @@ pub fn pump_pty_session<P: ProcessManager>(
             // Workers drained without an observed exit (cancellation or
             // master EOF race): reap the authoritative status blocking.
             match child.wait() {
-                Ok(status) => Ok(i64::from(status.exit_code())),
+                Ok(status) => {
+                    let code = status.exit_code();
+                    if let Some(report) = on_exit {
+                        report(code);
+                    }
+                    Ok(i64::from(code))
+                }
                 Err(err) => bail!("SSH pty reaped with error: {err}"),
             }
         }

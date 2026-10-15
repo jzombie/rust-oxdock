@@ -68,6 +68,10 @@ struct SshSessionInner {
     pty_size: crate::state::SharedPtySize,
     up_rx: Mutex<Option<mpsc::Receiver<UpMsg>>>,
     down_tx: Mutex<Option<mpsc::Sender<DownMsg>>>,
+    /// Control sender kept across pumps: a clone of `down_tx` held back
+    /// at construction, so `SSH_SEND_EXIT_STATUS` can queue the
+    /// `exit-status` request even while a byte pump owns the main ends.
+    control_tx: mpsc::Sender<DownMsg>,
 }
 
 /// Handle to one dequeued SSH session instance.
@@ -97,9 +101,21 @@ impl SshSessionTag {
                 peer_addr,
                 pty_size,
                 up_rx: Mutex::new(Some(up_rx)),
-                down_tx: Mutex::new(Some(down_tx)),
+                down_tx: Mutex::new(Some(down_tx.clone())),
+                control_tx: down_tx,
             }),
         }
+    }
+
+    /// Queue an `exit-status` request for the client. Usable before,
+    /// during, or after the byte pump: the control sender survives
+    /// `take_pump_ends`. Bails once the wire writer is gone.
+    pub fn send_exit_status(&self, code: u32) -> Result<()> {
+        self.inner
+            .control_tx
+            .blocking_send(crate::state::DownMsg::ExitStatus(code))
+            .map_err(|_| anyhow::anyhow!("SSH session wire writer is gone"))?;
+        Ok(())
     }
 
     pub fn command(&self) -> Option<String> {

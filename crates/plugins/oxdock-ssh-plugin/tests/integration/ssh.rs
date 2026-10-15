@@ -51,6 +51,7 @@ fn returns_gate_covers_ssh_functions() {
         "doc-ssh-close",
         "doc-ssh-connect",
         "doc-ssh-pty",
+        "doc-ssh-exit-status",
     ] {
         registry
             .add_cli_mapping(service, "127.0.0.1:0")
@@ -333,6 +334,33 @@ impl TestClient {
             runtime, session, ..
         } = self;
         let _ = runtime.block_on(session.disconnect(russh::Disconnect::ByApplication, "", ""));
+    }
+
+    /// Wait for the server's `exit-status` request. Data, acks, and a
+    /// pre-status EOF are skipped like stock clients skip them; close or
+    /// timeout bails.
+    fn wait_exit_status(&mut self, timeout: Duration) -> anyhow::Result<u32> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .unwrap_or_default();
+            if remaining.is_zero() {
+                anyhow::bail!("timed out waiting for exit-status");
+            }
+            let message = self
+                .runtime
+                .block_on(async { tokio::time::timeout(remaining, self.reader.wait()).await })
+                .map_err(|_| anyhow::anyhow!("timed out waiting for exit-status"))?
+                .ok_or_else(|| anyhow::anyhow!("server closed the channel before exit-status"))?;
+            match message {
+                russh::ChannelMsg::ExitStatus { exit_status } => return Ok(exit_status),
+                russh::ChannelMsg::Close => {
+                    anyhow::bail!("channel ended before exit-status")
+                }
+                _ => {}
+            }
+        }
     }
 }
 
@@ -2361,4 +2389,169 @@ fn mapped_name_connect_roundtrip() {
         .join()
         .expect("script thread joins")
         .expect("mapped connect script completes end to end");
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "needs loopback TCP plus threads plus a Tokio runtime"
+)]
+fn send_exit_status_reaches_exec_client() {
+    // No byte pump involved: the status queues on the control sender and
+    // the wire writer delivers it, so a client learns the code even when
+    // the session never pumps.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-exit-status-raw");
+    let script = indoc! {r#"
+        IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-exit-status-raw", {username: "guest", password: "pass"})
+        LET $h: HANDLE = ASYNC {
+            LET $sess: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
+            SSH_SEND_EXIT_STATUS($sess.session, 42)
+        }
+        AWAIT $h
+        SSH_CLOSE($m.server)
+    "#};
+    let addr = service_addr(&registry, "test-ssh-exit-status-raw");
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    std::thread::sleep(Duration::from_secs(2));
+    let mut client =
+        TestClient::connect_exec(addr, "guest", "pass", "probe").expect("client exec connects");
+    let code = client
+        .wait_exit_status(Duration::from_secs(10))
+        .expect("exit-status arrives");
+    assert_eq!(code, 42, "client must observe the sent status");
+    client.close();
+    handle
+        .join()
+        .expect("script thread joins")
+        .expect("status script completes");
+}
+
+#[test]
+#[cfg(unix)]
+#[cfg_attr(
+    miri,
+    ignore = "needs loopback TCP plus threads plus forkpty plus subprocesses"
+)]
+fn pty_child_code_reaches_exec_client_unix() {
+    // The proxy shape from the issue: the `SSH_PTY_RUN` exit code is
+    // reported on the wire at child exit (ahead of the pump drain), so
+    // stock clients report the real code instead of 255. No explicit
+    // send: the terminal run reports by itself.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-exit-status-pty");
+    let script = indoc! {r#"
+        IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-exit-status-pty", {username: "guest", password: "pass"})
+        LET $h: HANDLE = ASYNC {
+            LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
+            LET $c_in: PIPE
+            LET $c_out: PIPE
+            LET $t: HANDLE = ASYNC { SSH_PTY_RUN($dq.session, ["sh", "-c", "exit 7"], 0, 0, $c_out, $c_in) }
+            LET $p: HANDLE = ASYNC { SSH_PUMP_CHANNEL($dq.session, $c_in, $c_out) }
+            LET $code: INT = AWAIT $t
+            ASSERT_EQ $code 7
+            AWAIT $p
+        }
+        AWAIT $h
+        SSH_CLOSE($m.server)
+    "#};
+    let addr = service_addr(&registry, "test-ssh-exit-status-pty");
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    std::thread::sleep(Duration::from_secs(2));
+    let mut client =
+        TestClient::connect_exec(addr, "guest", "pass", "probe").expect("client exec connects");
+    let code = client
+        .wait_exit_status(Duration::from_secs(10))
+        .expect("exit-status arrives");
+    assert_eq!(code, 7, "client must observe the child exit code");
+    client.close();
+    handle
+        .join()
+        .expect("script thread joins")
+        .expect("proxy status script completes");
+}
+
+#[test]
+#[cfg(windows)]
+#[cfg_attr(
+    miri,
+    ignore = "needs loopback TCP plus threads plus ConPTY plus subprocesses"
+)]
+fn pty_child_code_reaches_exec_client_windows() {
+    // Same contract through ConPTY: `cmd` exit code reaches the client.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-exit-status-pty-win");
+    let script = indoc! {r#"
+        IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-exit-status-pty-win", {username: "guest", password: "pass"})
+        LET $h: HANDLE = ASYNC {
+            LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
+            LET $c_in: PIPE
+            LET $c_out: PIPE
+            LET $t: HANDLE = ASYNC { SSH_PTY_RUN($dq.session, ["cmd", "/c", "exit 7"], 0, 0, $c_out, $c_in) }
+            LET $p: HANDLE = ASYNC { SSH_PUMP_CHANNEL($dq.session, $c_in, $c_out) }
+            LET $code: INT = AWAIT $t
+            ASSERT_EQ $code 7
+            AWAIT $p
+        }
+        AWAIT $h
+        SSH_CLOSE($m.server)
+    "#};
+    let addr = service_addr(&registry, "test-ssh-exit-status-pty-win");
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    std::thread::sleep(Duration::from_secs(2));
+    let mut client =
+        TestClient::connect_exec(addr, "guest", "pass", "probe").expect("client exec connects");
+    let code = client
+        .wait_exit_status(Duration::from_secs(10))
+        .expect("exit-status arrives");
+    assert_eq!(code, 7, "client must observe the child exit code");
+    client.close();
+    handle
+        .join()
+        .expect("script thread joins")
+        .expect("proxy status script completes");
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "needs loopback TCP plus threads plus a Tokio runtime"
+)]
+fn send_exit_status_rejects_negative_code() {
+    // Exit codes are unsigned on the wire: a negative code bails
+    // instead of wrapping.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-exit-status-neg");
+    let addr = service_addr(&registry, "test-ssh-exit-status-neg");
+    let script = indoc! {r#"
+        IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-exit-status-neg", {username: "guest", password: "pass"})
+        LET $h: HANDLE = ASYNC {
+            LET $sess: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
+            SSH_SEND_EXIT_STATUS($sess.session, -1)
+        }
+        AWAIT $h
+        SSH_CLOSE($m.server)
+    "#};
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    std::thread::sleep(Duration::from_secs(2));
+    let client =
+        TestClient::connect_exec(addr, "guest", "pass", "probe").expect("client exec connects");
+    client.close();
+    let err = handle
+        .join()
+        .expect("script thread joins")
+        .expect_err("negative code must fail");
+    assert!(err.to_string().contains("must not be negative"), "{err:#}");
 }
