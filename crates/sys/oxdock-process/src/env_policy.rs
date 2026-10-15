@@ -157,8 +157,11 @@ pub const PRECEDENCE_MD: &str = indoc::indoc! {"
 
 /// Host-reads chapter preamble, sourced here with the inventory it
 /// introduces.
-pub const HOST_READS_INTRO_MD: &str =
-    "### Host reads\n\nVariables the engine process itself touches.\n";
+pub const HOST_READS_INTRO_MD: &str = indoc::indoc! {"
+    ### Host reads
+
+    Variables the engine process itself touches.
+"};
 
 /// Engine-process reads are declared in the `define_env_contract!`
 /// invocation below.
