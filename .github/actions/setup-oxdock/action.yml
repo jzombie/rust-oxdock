@@ -10,7 +10,7 @@ description: Install the oxdock interpreter so later steps can use shell oxdock.
 
 inputs:
   version:
-    description: Full release tag to install (e.g. v0.29.0-alpha). Ignored when source is `local`.
+    description: Full release tag to install (e.g. v0.29.0-alpha), or `latest` to resolve the newest release. Ignored when source is `local`.
     required: false
     default: latest
   binary-name:
