@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [UNRELEASED]
+
+### Dependencies
+
+- Bump `cache-manager` 0.5.0 → 0.6.0 (#228).
+- Bump `indoc` 2.0.7 → 2.0.8 (#227).
+- Bump `pest_derive` 2.9.2 → 2.9.3 (#230).
+- Bump `pest_meta` 2.9.2 → 2.9.3 (#229).
+- Bump `serde_json` 1.0.151 → 1.0.154 (#231).
+
 ## [0.29.0-alpha] - 2026-10-15
 
 ### Added
