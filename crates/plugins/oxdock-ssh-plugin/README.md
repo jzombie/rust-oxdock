@@ -25,10 +25,13 @@ INHERIT_ENV [PATH]
 # Serve the proxy on a runner-mapped service.
 LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-demo", {username: "u", password: "p"})
 
-# Pick the echo child per platform.
+# Pick the echo child per platform. Each child reads a stdin line and
+# exits by itself: a ConPTY child never observes stdin EOF (the console
+# input stays open until the child exits), so `cat`-style filters that
+# wait for EOF would strand the run on Windows.
 LET $child: LIST<STRING> = ["cat"]
 [family:windows] {
-    $child = ["cmd", "/c", "more"]
+    $child = ["cmd", "/v:on", "/c", "(set /p line= && echo got:!line!)"]
 }
 
 # Accept one session in the background: relay its identity into the child environment, then bridge the wire through the PTY child.
@@ -51,12 +54,17 @@ LET $srv: HANDLE = ASYNC {
     AWAIT $pump
 }
 
-# Dial the proxy and prove the child echoed the bytes back.
+# Dial the proxy and prove the child echoed the bytes back. The CR
+# ends the line for the Windows console child: conhost submits cooked
+# input on CR only, and the pump is a byte pump, so it never rewrites
+# bytes in flight. A real client terminal already sends CR for Enter;
+# only synthetic DSL input states it explicitly. `cat` echoes the CR
+# back harmlessly on Unix.
 LET $cin: PIPE
 LET $cout: PIPE
 LET $c: HANDLE = ASYNC { SSH_CONNECT("doc-ssh-demo", "u", "p", $cin, $cout) }
 
-WITH_IO [stdout=$cin] ECHO "proxy-ping"
+WITH_IO [stdout=$cin] ECHO "proxy-ping\r"
 
 LET $cDone: MAP<ANY> = AWAIT $c
 ASSERT_EQ $cDone.closed true
@@ -285,8 +293,13 @@ live; every session owns its size cell, so concurrent guests never
 observe each other. Must run inside `ASYNC`. Returns the INT exit
 code, which is also reported as the session's wire `exit-status` at
 child exit (ahead of the pump drain), so stock clients report the
-real code instead of 255. Environment is exactly the script
-environment like `RUN`:
+real code instead of 255. Arguments join by MSVCRT rules on
+Windows, so CRT programs parse back exactly `argv`; `cmd /c` is
+the exception (its tail is a command, not `argv`, and it does not
+understand the quoting), so route command text through the
+environment instead (`ENV SSH_COMMAND="..."`, child runs
+`["cmd", "/c", "%SSH_COMMAND%"]`), which travels verbatim.
+Environment is exactly the script environment like `RUN`:
 block-scoped `ENV` (such as the session's `SSH_USER` / `SSH_CLIENT` /
 `SSH_SERVER` / `SSH_COMMAND` relay) reaches the child; host names
 arrive only through `INHERIT_ENV`, including `TERM` for terminal

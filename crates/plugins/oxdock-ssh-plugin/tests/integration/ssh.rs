@@ -682,6 +682,277 @@ fn pty_child_sees_session_env_windows() {
 }
 
 #[test]
+#[cfg(unix)]
+#[cfg_attr(
+    miri,
+    ignore = "needs loopback TCP plus threads plus forkpty plus subprocesses"
+)]
+fn argv_preserves_quote_backslash_unix() {
+    // Baseline argv fidelity: `execvp` carries the dequeued command
+    // byte-verbatim, so `printf %s` must observe quotes and backslashes
+    // exactly as the client sent them.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-argv-unix");
+    let script = indoc! {r#"
+        IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-argv-unix", {username: "u", password: "p"})
+        WRITE addr.txt "{{ $m.addr }}"
+        LET $h: HANDLE = ASYNC {
+            LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
+            LET $in: PIPE
+            LET $out: PIPE
+            LET $t: HANDLE = ASYNC { SSH_PTY_RUN($dq.session, ["printf", "%s", $dq.command], 0, 0, $in, $out) }
+            LET $code: INT = AWAIT $t
+            ASSERT_EQ $code 0
+            ASSERT_CONTAINS $out "a\"b\\c"
+        }
+        AWAIT $h
+        SSH_CLOSE($m.server)
+    "#};
+    let probe = root.clone();
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    let addr = read_addr(&probe);
+    let addr: SocketAddr = addr.parse().expect("addr parses");
+    let client =
+        TestClient::connect_exec(addr, "u", "p", "a\"b\\c").expect("client connects");
+    client.close();
+    handle
+        .join()
+        .expect("script thread joins")
+        .expect("argv fidelity holds");
+}
+
+#[test]
+#[cfg(windows)]
+#[cfg_attr(
+    miri,
+    ignore = "needs loopback TCP plus threads plus ConPTY plus subprocesses"
+)]
+fn cmd_argv_preserves_backslashes_windows() {
+    // Backslashes without quotes must survive the argv to command-line
+    // join: `cmd` receives them literally.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-argv-bs-win");
+    let script = indoc! {r#"
+        IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-argv-bs-win", {username: "u", password: "p"})
+        WRITE addr.txt "{{ $m.addr }}"
+        LET $h: HANDLE = ASYNC {
+            LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
+            LET $in: PIPE
+            LET $out: PIPE
+            LET $t: HANDLE = ASYNC { SSH_PTY_RUN($dq.session, ["cmd", "/c", $dq.command], 0, 0, $in, $out) }
+            LET $code: INT = AWAIT $t
+            ASSERT_EQ $code 0
+            ASSERT_CONTAINS $out "AB\\CD"
+        }
+        AWAIT $h
+        SSH_CLOSE($m.server)
+    "#};
+    let probe = root.clone();
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    let addr = read_addr(&probe);
+    let addr: SocketAddr = addr.parse().expect("addr parses");
+    let client =
+        TestClient::connect_exec(addr, "u", "p", "echo AB\\CD").expect("client connects");
+    client.close();
+    handle
+        .join()
+        .expect("script thread joins")
+        .expect("backslashes survive argv");
+}
+
+#[test]
+#[cfg(windows)]
+#[cfg_attr(
+    miri,
+    ignore = "needs loopback TCP plus threads plus ConPTY plus subprocesses"
+)]
+fn cmd_env_quote_behavior_windows() {
+    // Quoted segments travel through the environment relay instead of
+    // `cmd /c` argv: the join quotes for CRT programs, which `cmd`
+    // does not parse back, so command text rides `%SSH_COMMAND%`
+    // verbatim (see issue 223).
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-env-q-win");
+    let script = indoc! {r#"
+        IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-env-q-win", {username: "u", password: "p"})
+        WRITE addr.txt "{{ $m.addr }}"
+        LET $h: HANDLE = ASYNC {
+            LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
+            ENV SSH_COMMAND="{{ $dq.command }}"
+            LET $in: PIPE
+            LET $out: PIPE
+            LET $t: HANDLE = ASYNC { SSH_PTY_RUN($dq.session, ["cmd", "/c", "%SSH_COMMAND%"], 0, 0, $in, $out) }
+            LET $code: INT = AWAIT $t
+            ASSERT_EQ $code 0
+            ASSERT_CONTAINS $out "\"foo bar\""
+        }
+        AWAIT $h
+        SSH_CLOSE($m.server)
+    "#};
+    let probe = root.clone();
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    let addr = read_addr(&probe);
+    let addr: SocketAddr = addr.parse().expect("addr parses");
+    let client =
+        TestClient::connect_exec(addr, "u", "p", "echo \"foo bar\"").expect("client connects");
+    client.close();
+    handle
+        .join()
+        .expect("script thread joins")
+        .expect("quotes survive env relay");
+}
+
+#[test]
+#[cfg(windows)]
+#[cfg_attr(
+    miri,
+    ignore = "needs loopback TCP plus threads plus ConPTY plus subprocesses"
+)]
+fn cmd_argv_percent_verbatim_windows() {
+    // Percent signs travel verbatim through the spawn: no doubling.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-argv-pct-win");
+    let script = indoc! {r#"
+        IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-argv-pct-win", {username: "u", password: "p"})
+        WRITE addr.txt "{{ $m.addr }}"
+        LET $h: HANDLE = ASYNC {
+            LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
+            LET $in: PIPE
+            LET $out: PIPE
+            LET $t: HANDLE = ASYNC { SSH_PTY_RUN($dq.session, ["cmd", "/c", $dq.command], 0, 0, $in, $out) }
+            LET $code: INT = AWAIT $t
+            ASSERT_EQ $code 0
+            ASSERT_CONTAINS $out "100%%done"
+        }
+        AWAIT $h
+        SSH_CLOSE($m.server)
+    "#};
+    let probe = root.clone();
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    let addr = read_addr(&probe);
+    let addr: SocketAddr = addr.parse().expect("addr parses");
+    let client =
+        TestClient::connect_exec(addr, "u", "p", "echo 100%%done").expect("client connects");
+    client.close();
+    handle
+        .join()
+        .expect("script thread joins")
+        .expect("percent signs survive argv");
+}
+
+#[test]
+#[cfg(windows)]
+#[cfg_attr(
+    miri,
+    ignore = "needs loopback TCP plus threads plus ConPTY plus subprocesses"
+)]
+fn env_relay_preserves_backslashes_windows() {
+    // Environment relay is byte-verbatim: backslash runs in the
+    // dequeued command must reach `cmd` untouched.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-env-bs-win");
+    let script = indoc! {r#"
+        IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-env-bs-win", {username: "u", password: "p"})
+        WRITE addr.txt "{{ $m.addr }}"
+        LET $h: HANDLE = ASYNC {
+            LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
+            ENV SSH_COMMAND="{{ $dq.command }}"
+            LET $in: PIPE
+            LET $out: PIPE
+            LET $t: HANDLE = ASYNC { SSH_PTY_RUN($dq.session, ["cmd", "/c", "%SSH_COMMAND%"], 0, 0, $in, $out) }
+            LET $code: INT = AWAIT $t
+            ASSERT_EQ $code 0
+            ASSERT_CONTAINS $out "AB\\CD\\\\EF"
+        }
+        AWAIT $h
+        SSH_CLOSE($m.server)
+    "#};
+    let probe = root.clone();
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    let addr = read_addr(&probe);
+    let addr: SocketAddr = addr.parse().expect("addr parses");
+    let client =
+        TestClient::connect_exec(addr, "u", "p", "echo AB\\CD\\\\EF").expect("client connects");
+    client.close();
+    handle
+        .join()
+        .expect("script thread joins")
+        .expect("backslashes survive env relay");
+}
+
+#[test]
+#[cfg(windows)]
+#[cfg_attr(
+    miri,
+    ignore = "needs loopback TCP plus threads plus ConPTY plus subprocesses"
+)]
+fn interactive_shell_first_bytes_survive_windows() {
+    // Stress probe for first-keystroke loss on fresh interactive
+    // sessions: each of several fresh pty+shell connections sends a
+    // marker immediately after the handshake, and every marker must
+    // round-trip through the echo pump.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-shell-stress");
+    let script = indoc! {r#"
+        IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-shell-stress", {username: "guest", password: "pass"})
+        WRITE addr.txt "{{ $m.addr }}"
+        LET $i: INT = 0
+        WHILE $i < 10 {
+            LET $in: PIPE
+            LET $out: PIPE
+            LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
+            LET $echo: HANDLE = ASYNC { SSH_PUMP($out, $in) }
+            AWAIT $acc
+            AWAIT $echo
+            $i = $i + 1
+        }
+        SSH_CLOSE($m.server)
+    "#};
+    let probe = root.clone();
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    let addr = read_addr(&probe);
+    let addr: SocketAddr = addr.parse().expect("addr parses");
+    for i in 0..10 {
+        let marker = format!("first-byte-{i}");
+        let mut client =
+            TestClient::connect_with_pty(addr, "guest", "pass").expect("client connects");
+        client.send(marker.as_bytes()).expect("client sends");
+        let echoed = client
+            .read_until(marker.as_bytes(), Duration::from_secs(10))
+            .expect("marker round-trips");
+        assert!(
+            echoed
+                .windows(marker.len())
+                .any(|window| window == marker.as_bytes()),
+            "session {i} must deliver its first bytes"
+        );
+        client.close();
+    }
+    handle
+        .join()
+        .expect("script thread joins")
+        .expect("stress script completes");
+}
+
+#[test]
 #[cfg_attr(miri, ignore = "needs loopback TCP plus threads plus a Tokio runtime")]
 fn semaphore_guards_the_accept_loop() {
     // End to end of the proxy admission shape: cap 1 admits the first

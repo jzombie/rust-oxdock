@@ -308,7 +308,7 @@ mod tests {
             ),
             (
                 "SSH_SESSION",
-                "Minted by `SSH_DEQUEUE`; used by `SSH_PTY_RUN`, `SSH_PUMP_CHANNEL`.",
+                "Minted by `SSH_DEQUEUE`; used by `SSH_PTY_RUN`, `SSH_PUMP_CHANNEL`, `SSH_SEND_EXIT_STATUS`.",
             ),
         ] {
             let section = ssh

@@ -681,8 +681,13 @@ fn ssh_pump<P: ProcessManager>(
 /// observe each other. Must run inside `ASYNC`. Returns the INT exit
 /// code, which is also reported as the session's wire `exit-status` at
 /// child exit (ahead of the pump drain), so stock clients report the
-/// real code instead of 255. Environment is exactly the script
-/// environment like `RUN`:
+/// real code instead of 255. Arguments join by MSVCRT rules on
+/// Windows, so CRT programs parse back exactly `argv`; `cmd /c` is
+/// the exception (its tail is a command, not `argv`, and it does not
+/// understand the quoting), so route command text through the
+/// environment instead (`ENV SSH_COMMAND="..."`, child runs
+/// `["cmd", "/c", "%SSH_COMMAND%"]`), which travels verbatim.
+/// Environment is exactly the script environment like `RUN`:
 /// block-scoped `ENV` (such as the session's `SSH_USER` / `SSH_CLIENT` /
 /// `SSH_SERVER` / `SSH_COMMAND` relay) reaches the child; host names
 /// arrive only through `INHERIT_ENV`, including `TERM` for terminal
