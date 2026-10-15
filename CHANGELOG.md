@@ -15,6 +15,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - Bump `pest_meta` 2.9.2 → 2.9.3 (#229).
 - Bump `serde_json` 1.0.151 → 1.0.154 (#231).
 
+### Fixed
+
+- Background teardown no longer races the shell's fork of a grandchild. The group kill enumerates members at one instant, so a grandchild forked after that enumeration escaped it while the shell still died; the orphaned sleeper then held inherited pipe write ends open and stalled pump EOF in `ChildHandle::wait` for its full runtime (seen as flaky `background_killed_when_unrelated_step_fails` teardown stalls around 30s on macOS CI). `wait`/`try_wait`/`Drop` now sweep the killed child's process group once the leader is reaped, which is still addressable at the same pgid while any escapee lives; `kill` and `Drop` share one tree-kill helper (`kill_tree`), and `Drop` uses it instead of a direct-child-only `Child::kill`, so an abandoned `ASYNC` handle's tree dies as one unit.
+
 ## [0.29.0-alpha] - 2026-10-15
 
 ### Added
