@@ -305,7 +305,6 @@ jobs:
           version: ${{ env.OXDOCK_PINNED_ENGINE }}
 
       - name: Hash lockfile and toolchain
-      # TODO: Remove after 0.29.0-alpha release
         id: hashes
         shell: oxdock --script {0}
         run: |
