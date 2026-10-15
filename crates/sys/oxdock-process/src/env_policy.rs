@@ -10,7 +10,7 @@
 //! `INHERIT_ENV` fix: a missing host value is a host problem, reported,
 //! never papered over.
 //!
-//! Names are declared once in the [`define_env_contract!`] invocation
+//! Names are declared once in the `define_env_contract!` invocation
 //! below with their platforms. Doc tables, seed maps, and tests all derive
 //! from that declaration, so there is no second list to drift.
 //!
@@ -160,7 +160,7 @@ pub const PRECEDENCE_MD: &str = indoc::indoc! {"
 pub const HOST_READS_INTRO_MD: &str =
     "### Host reads\n\nVariables the engine process itself touches.\n";
 
-/// Engine-process reads are declared in the [`define_env_contract!`]
+/// Engine-process reads are declared in the `define_env_contract!`
 /// invocation below.
 /// One declared seed row: name plus the platforms seeding it, rendered
 /// into the contract table. Tests derive expectations from these rows
