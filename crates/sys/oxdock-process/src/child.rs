@@ -134,8 +134,18 @@ impl BackgroundHandle for ChildHandle {
         // &mut Child : no aliasing, no UB.
         #[cfg(unix)]
         {
-            unsafe {
-                libc::kill(pid as i32, libc::SIGKILL);
+            // Negative PID signals the whole process group. Background
+            // children run in their own group (see `run_prepared`), so
+            // orphaned grandchildren die with the direct child instead
+            // of holding pipe write ends open past the kill and stalling
+            // pump EOF. A fully exited tree reports ESRCH, which is the
+            // already-dead outcome teardown wants.
+            let group = -(pid as i32);
+            let rc = unsafe { libc::kill(group, libc::SIGKILL) };
+            if rc != 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) {
+                unsafe {
+                    libc::kill(pid as i32, libc::SIGKILL);
+                }
             }
         }
         #[cfg(windows)]

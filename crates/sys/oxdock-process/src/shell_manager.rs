@@ -152,6 +152,16 @@ fn run_prepared(
             Ok(CommandResult::Completed)
         }
         CommandMode::Background => {
+            // Own process group: teardown signals the whole tree (see
+            // `ChildHandle::kill`), so orphaned grandchildren die with
+            // the direct child instead of holding pipe write ends open
+            // past the kill and stalling pump EOF. Foreground keeps the
+            // parent group so terminal signals still reach children.
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::CommandExt;
+                command.process_group(0);
+            }
             let handle =
                 spawn_child_with_streams(command, stdin_stream, stdout_stream, stderr_stream)?;
             Ok(CommandResult::Background(handle))

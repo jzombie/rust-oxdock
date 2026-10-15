@@ -149,25 +149,13 @@ impl BackgroundHandle for ThreadJoinHandle {
         // Signal cancellation
         self.cancel_token.store(true, Ordering::SeqCst);
         // Kill any active OS process to interrupt blocking wait
-        let mut killed = false;
         if let Ok(mut guard) = self.active_process.lock()
             && let Some(ref mut proc) = *guard
         {
             let _ = proc.kill();
-            killed = true;
         }
-        // TODO: remove after background_killed diagnosis (DIAG-TEMP):
-        // trace what the killer observes. Runner log timestamps expose
-        // 30s gaps.
-        eprintln!(
-            "DIAG-TEMP bg kill on {:?}: registered={} finished={}",
-            std::thread::current().id(),
-            killed,
-            self.join.as_ref().is_some_and(|h| h.is_finished())
-        );
         // Join the thread to ensure it completes before returning
         self.reap();
-        eprintln!("DIAG-TEMP bg kill done on {:?}", std::thread::current().id());
         Ok(())
     }
 
@@ -658,12 +646,6 @@ fn cleanup_assertion_generation<P: ProcessManager>(
 /// thread. Named entries are root-owned: worker threads must never block on
 /// sibling tasks, which may depend on the worker via AWAIT.
 fn teardown_tasks_on_error<P: ProcessManager>(state: &mut ExecState<P>) {
-    // TODO: remove after background_killed diagnosis (DIAG-TEMP).
-    eprintln!(
-        "DIAG-TEMP teardown_tasks_on_error on {:?}: {} bg children",
-        std::thread::current().id(),
-        state.bg_children.len()
-    );
     for survivor in state.bg_children.iter_mut() {
         let _ = survivor.kill();
     }
