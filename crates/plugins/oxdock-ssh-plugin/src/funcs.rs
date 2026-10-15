@@ -637,6 +637,9 @@ fn ssh_pump<P: ProcessManager>(
 /// The code also reports as the wire `exit-status` at child exit, so
 /// stock clients see the real code instead of 255.
 ///
+/// Every session opens cleared and homed, like Win32-OpenSSH, so the
+/// child renders onto a known blank screen.
+///
 /// Windows joining follows MSVCRT rules, so CRT programs parse back
 /// exactly `argv`. `cmd /c` is the exception (its tail is a command,
 /// not `argv`): route command text via `ENV SSH_COMMAND="..."` with

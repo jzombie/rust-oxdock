@@ -2814,6 +2814,53 @@ fn proxy_client_lingers_for_reply_and_status() {
 #[test]
 #[cfg_attr(
     miri,
+    ignore = "needs loopback TCP plus threads plus a terminal plus subprocesses"
+)]
+fn pty_session_opens_cleared() {
+    // Win32-OpenSSH parity: every console session opens cleared and
+    // homed, so the child renders onto a known blank screen. The clear
+    // leads the stream (written synchronously before the pump starts);
+    // `[2J` is plain ASCII, so a contains-assert pins it without an
+    // ESC-capable matcher.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-pty-clear");
+    let script = indoc! {r#"
+        IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-pty-clear", {username: "u", password: "p"})
+        WRITE addr.txt "{{ $m.addr }}"
+        LET $child: LIST<STRING> = ["sh", "-c", "exit 0"]
+        [family:windows] {
+            $child = ["cmd", "/c", "exit 0"]
+        }
+        LET $h: HANDLE = ASYNC {
+            LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
+            LET $in: PIPE
+            LET $out: PIPE
+            LET $t: HANDLE = ASYNC { SSH_PTY_RUN($dq.session, $child, 0, 0, $in, $out) }
+            LET $code: INT = AWAIT $t
+            ASSERT_EQ $code 0
+            ASSERT_CONTAINS $out "[2J"
+        }
+        AWAIT $h
+        SSH_CLOSE($m.server)
+    "#};
+    let probe = root.clone();
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    let addr = read_addr(&probe);
+    let addr: SocketAddr = addr.parse().expect("addr parses");
+    let client = TestClient::connect(addr, "u", "p").expect("client connects");
+    handle
+        .join()
+        .expect("script thread joins")
+        .expect("cleared session opens");
+    client.close();
+}
+
+#[test]
+#[cfg_attr(
+    miri,
     ignore = "needs loopback TCP plus threads plus a Tokio runtime"
 )]
 fn pump_channel_close_reaches_client_while_session_held() {

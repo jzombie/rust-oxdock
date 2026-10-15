@@ -365,6 +365,20 @@ pub fn pump_pty_session<P: ProcessManager>(
         .context("SSH pty spawn failed")?;
     drop(pair.slave);
 
+    // Win32-OpenSSH parity: every console session opens cleared and
+    // homed, so the child renders onto a known blank screen instead of
+    // whatever the client held. Synchronously first, ahead of all
+    // console output (their paint and ours never reorder past this).
+    {
+        let mut guard = writer
+            .lock()
+            .map_err(|_| anyhow::anyhow!("SSH pty output lock poisoned"))?;
+        guard
+            .write_all(b"\x1b[2J\x1b[H")
+            .context("SSH pty session init write failed")?;
+        guard.flush().context("SSH pty session init flush failed")?;
+    }
+
     let mut failed: Option<anyhow::Error> = None;
     let mut out_closed = false;
     let peer_done = AtomicBool::new(false);
