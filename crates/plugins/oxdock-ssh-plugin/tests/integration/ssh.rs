@@ -435,8 +435,18 @@ fn wrong_password_rejected() {
     let addr = service_addr(&registry, "test-ssh-auth");
     let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
     std::thread::sleep(Duration::from_secs(2));
+    // Timed: russh pads every rejection to at least `auth_rejection_time`
+    // (the client's opening `none` probe included), so a 1s padding
+    // stalls each password prompt by a noticeable beat. The rejection
+    // must land far under a second.
+    let start = Instant::now();
     let wrong = TestClient::connect(addr, "guest", "wrong-pass");
+    let elapsed = start.elapsed();
     assert!(wrong.is_err(), "wrong password must be rejected");
+    assert!(
+        elapsed < Duration::from_millis(800),
+        "wrong-password rejection took {elapsed:?}: auth padding regressed"
+    );
     let wrong_user = TestClient::connect(addr, "intruder", "right-pass");
     assert!(wrong_user.is_err(), "wrong username must be rejected");
     handle
