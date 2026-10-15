@@ -65,6 +65,9 @@ const NON_SERVICE_SSH: &[&str] = &[
     "SSH_PUMP",
     "SSH_PTY_RUN",
     "SSH_SEND_EXIT_STATUS",
+    // Session-scoped like SSH_PTY_RUN: takes a session and pipes, never
+    // a service name.
+    "SSH_RUN",
 ];
 
 fn registration_name(registration: &HostRegistration<DefaultProcessManager>) -> &str {

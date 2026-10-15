@@ -51,6 +51,7 @@ fn returns_gate_covers_ssh_functions() {
         "doc-ssh-close",
         "doc-ssh-connect",
         "doc-ssh-pty",
+        "doc-ssh-run",
         "doc-ssh-exit-status",
     ] {
         registry
@@ -2921,6 +2922,185 @@ fn conhost_setup_query_never_reaches_client_windows() {
         .join()
         .expect("script thread joins")
         .expect("shell session completes");
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "needs loopback TCP plus threads plus a real subprocess"
+)]
+fn run_exec_binary_roundtrip() {
+    // SSH_RUN is the binary-safe leg: bytes travel untouched (no init
+    // sequence, no newline translation), stdout and stderr stay split,
+    // and stdin EOF closes the child stdin so a stdin-driven child
+    // exits on its own (the zero exit-status below proves it).
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-run-bin");
+    let script = indoc! {r#"
+        IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-run-bin", {username: "u", password: "p"})
+        WRITE addr.txt "{{ $m.addr }}"
+        LET $child: LIST<STRING> = ["sh", "-c", "cat"]
+        [family:windows] {
+            $child = ["powershell.exe", "-NoProfile", "-Command", "$i=[Console]::OpenStandardInput(); $o=[Console]::OpenStandardOutput(); $i.CopyTo($o)"]
+        }
+        LET $h: HANDLE = ASYNC {
+            LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
+            LET $to_child: PIPE
+            LET $from_child: PIPE
+            LET $err: PIPE
+            LET $run: HANDLE = ASYNC { SSH_RUN($dq.session, $child, $to_child, $from_child, $err) }
+            LET $pump: HANDLE = ASYNC { SSH_PUMP_CHANNEL($dq.session, $from_child, $to_child) }
+            LET $code: INT = AWAIT $run
+            AWAIT $pump
+            ASSERT_EQ $code 0
+        }
+        AWAIT $h
+        SSH_CLOSE($m.server)
+    "#};
+    let probe = root.clone();
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    let addr = read_addr(&probe);
+    let addr: SocketAddr = addr.parse().expect("addr parses");
+    let mut client = TestClient::connect(addr, "u", "p").expect("client connects");
+    // NUL, high bytes, and a bare LF: any translation layer mangles one
+    // of these, and the trailing marker bounds the read.
+    let blob: Vec<u8> = b"bin\x00\xffary\nbare-lf\r\ncrlf\r\nEND\r\n".to_vec();
+    client.send(&blob).expect("client sends blob");
+    let echoed = client
+        .read_until(b"END\r\n", Duration::from_secs(15))
+        .expect("blob round-trips");
+    assert_eq!(echoed, blob, "bytes must travel untouched");
+    client.eof().expect("client half-closes");
+    assert_eq!(
+        client
+            .wait_exit_status(Duration::from_secs(15))
+            .expect("exit-status arrives"),
+        0,
+        "stdin EOF must close the child stdin so cat exits 0"
+    );
+    client
+        .wait_close(Duration::from_secs(15))
+        .expect("server closes");
+    handle
+        .join()
+        .expect("script thread joins")
+        .expect("run session completes");
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "needs loopback TCP plus threads plus a real subprocess"
+)]
+fn run_exec_reports_exit_code() {
+    // A fast child must not lose its status to the close: the wire
+    // report queues the instant the exit is observed, ahead of the EOF
+    // pipe closes.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-run-code");
+    let script = indoc! {r#"
+        IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-run-code", {username: "u", password: "p"})
+        WRITE addr.txt "{{ $m.addr }}"
+        LET $child: LIST<STRING> = ["sh", "-c", "exit 3"]
+        [family:windows] {
+            $child = ["cmd", "/c", "exit 3"]
+        }
+        LET $h: HANDLE = ASYNC {
+            LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
+            LET $to_child: PIPE
+            LET $from_child: PIPE
+            LET $err: PIPE
+            LET $run: HANDLE = ASYNC { SSH_RUN($dq.session, $child, $to_child, $from_child, $err) }
+            LET $pump: HANDLE = ASYNC { SSH_PUMP_CHANNEL($dq.session, $from_child, $to_child) }
+            LET $code: INT = AWAIT $run
+            AWAIT $pump
+            ASSERT_EQ $code 3
+        }
+        AWAIT $h
+        SSH_CLOSE($m.server)
+    "#};
+    let probe = root.clone();
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    let addr = read_addr(&probe);
+    let addr: SocketAddr = addr.parse().expect("addr parses");
+    let mut client = TestClient::connect(addr, "u", "p").expect("client connects");
+    assert_eq!(
+        client
+            .wait_exit_status(Duration::from_secs(15))
+            .expect("exit-status arrives"),
+        3,
+        "fast child must report its real code, not 255"
+    );
+    client
+        .wait_close(Duration::from_secs(15))
+        .expect("server closes");
+    handle
+        .join()
+        .expect("script thread joins")
+        .expect("run session completes");
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "needs loopback TCP plus threads plus a real subprocess"
+)]
+fn run_exec_splits_stderr() {
+    // Diagnostics ride their own pipe: stderr bytes must never appear
+    // in the stdout stream the client observes.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-run-err");
+    let script = indoc! {r#"
+        IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-run-err", {username: "u", password: "p"})
+        WRITE addr.txt "{{ $m.addr }}"
+        LET $child: LIST<STRING> = ["sh", "-c", "echo out; echo oops >&2"]
+        [family:windows] {
+            $child = ["cmd", "/c", "echo out & echo oops 1>&2"]
+        }
+        LET $h: HANDLE = ASYNC {
+            LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
+            LET $to_child: PIPE
+            LET $from_child: PIPE
+            LET $err: PIPE
+            LET $run: HANDLE = ASYNC { SSH_RUN($dq.session, $child, $to_child, $from_child, $err) }
+            LET $pump: HANDLE = ASYNC { SSH_PUMP_CHANNEL($dq.session, $from_child, $to_child) }
+            LET $code: INT = AWAIT $run
+            AWAIT $pump
+            ASSERT_EQ $code 0
+            ASSERT_CONTAINS $err "oops"
+        }
+        AWAIT $h
+        SSH_CLOSE($m.server)
+    "#};
+    let probe = root.clone();
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    let addr = read_addr(&probe);
+    let addr: SocketAddr = addr.parse().expect("addr parses");
+    let mut client = TestClient::connect(addr, "u", "p").expect("client connects");
+    let out = client
+        .read_until(b"out", Duration::from_secs(15))
+        .expect("stdout arrives");
+    assert!(
+        !out.windows(4).any(|window| window == b"oops"),
+        "stderr must never pollute the stdout stream"
+    );
+    client.eof().expect("client half-closes");
+    client
+        .wait_close(Duration::from_secs(15))
+        .expect("server closes");
+    handle
+        .join()
+        .expect("script thread joins")
+        .expect("run session completes");
 }
 
 #[test]

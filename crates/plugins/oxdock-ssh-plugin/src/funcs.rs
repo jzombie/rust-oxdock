@@ -734,6 +734,104 @@ fn ssh_pty_run<P: ProcessManager>(
     Ok(Value::int(code))
 }
 
+/// Run `argv` directly (no terminal) and pump it through explicit pipes
+/// until the child exits. Must run inside `ASYNC`. Returns the INT exit
+/// code (-1 when the child died by signal).
+///
+/// Bytes travel untouched: no init sequence, no newline translation, no
+/// setup handshake. This is the binary-safe leg `scp`-style protocols
+/// need; `SSH_PTY_RUN` owns the interactive side instead.
+///
+/// The code reports as the wire `exit-status` at child exit, so stock
+/// clients see the real code instead of 255. Signaled children report
+/// nothing: clients observe the close without a status.
+///
+/// Stdin EOF closes the child's stdin, so stdin-driven children like
+/// `cat` exit on their own. Standard output and error ride separate
+/// pipes: diagnostics must never pollute the byte stream.
+///
+/// Environment is exactly the script environment like `RUN`:
+/// block-scoped `ENV` reaches the child; host names arrive only through
+/// `INHERIT_ENV`. The working directory comes from the script.
+///
+/// Windows joining follows MSVCRT rules, so CRT programs parse back
+/// exactly `argv`. `cmd /c` is the exception (its tail is a command,
+/// not `argv`): route command text via `ENV SSH_COMMAND="..."` with
+/// `["cmd", "/c", "%SSH_COMMAND%"]` instead.
+#[oxdock_func(
+    returns = TypeTag::Int,
+    summary = "Run a command with piped stdio into explicit pipes."
+)]
+#[example(
+    name = "run with piped stdio",
+    code = r###"
+    IMPORT [STD, SSH]
+    INHERIT_ENV [PATH]
+    LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-run", {username: "u", password: "p"})
+    LET $d: HANDLE = ASYNC { SSH_DEQUEUE($m.server) }
+    LET $cin: PIPE
+    LET $cout: PIPE
+    LET $c: HANDLE = ASYNC { SSH_CONNECT("doc-ssh-run", "u", "p", $cin, $cout) }
+    WITH_IO [stdout=$cin] ECHO "client-hello"
+    LET $sess: SSH_DEQUEUE_INFO = AWAIT $d
+
+    # The client task only proved the session live: cancel it before the
+    # run, so no two pumps share the session.
+    CANCEL $c
+    LET $pin: PIPE
+    LET $pout: PIPE
+    LET $perr: PIPE
+    [family:unix] {
+        LET $t: HANDLE = ASYNC { SSH_RUN($sess.session, ["sh", "-c", "echo run-hi"], $pin, $pout, $perr) }
+        LET $code: INT = AWAIT $t
+        ASSERT_EQ $code 0
+        ASSERT_CONTAINS $pout "run-hi"
+    }
+    [family:windows] {
+        LET $t: HANDLE = ASYNC { SSH_RUN($sess.session, ["cmd", "/c", "echo run-hi"], $pin, $pout, $perr) }
+        LET $code: INT = AWAIT $t
+        ASSERT_EQ $code 0
+        ASSERT_CONTAINS $pout "run-hi"
+    }
+    SSH_CLOSE($m.server)
+    "###
+)]
+fn ssh_run<P: ProcessManager>(
+    cx: &mut StepCtx<P>,
+    /// Session handle from `SSH_DEQUEUE`.
+    session: SshSessionTag,
+    /// Program and arguments to run.
+    argv: Vec<String>,
+    /// Pipe carrying bytes consumed by the child on stdin.
+    in_pipe: PipeHandle,
+    /// Pipe carrying bytes produced by the child on stdout.
+    out_pipe: PipeHandle,
+    /// Pipe carrying bytes produced by the child on stderr.
+    err_pipe: PipeHandle,
+) -> Result<Value> {
+    if !cx.is_async_task() {
+        bail!("SSH_RUN requires ASYNC: run it in its own task beside the session pump task");
+    }
+    let in_pipe = Value::pipe_handle(in_pipe);
+    let out_pipe = Value::pipe_handle(out_pipe);
+    let err_pipe = Value::pipe_handle(err_pipe);
+    let cancel = AtomicBool::new(false);
+    // Best effort: an unpumped session has no reader.
+    let report = |code: u32| {
+        let _ = session.send_exit_status(code);
+    };
+    let code = crate::run::pump_run_session(
+        cx,
+        &argv,
+        &in_pipe,
+        &out_pipe,
+        &err_pipe,
+        &cancel,
+        Some(&report),
+    )?;
+    Ok(Value::int(code))
+}
+
 /// Field table backing the `SSH_SERVE_INFO` schema and return tag.
 fn serve_result_fields() -> Arc<[Field]> {
     Arc::from(vec![
@@ -826,6 +924,7 @@ pub fn module_with_endpoints<P: ProcessManager>(registry: Arc<EndpointRegistry>)
             SshConnect::registration(),
             SshPump::registration(),
             SshPtyRun::registration(),
+            SshRun::registration(),
         ],
         types: vec![SshServerTag::descriptor(), SshSessionTag::descriptor()],
         record_schemas: vec![
