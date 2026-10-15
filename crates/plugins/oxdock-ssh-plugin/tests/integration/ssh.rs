@@ -678,8 +678,7 @@ fn argv_preserves_quote_backslash_unix() {
     let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
     let addr = read_addr(&probe);
     let addr: SocketAddr = addr.parse().expect("addr parses");
-    let client =
-        TestClient::connect_exec(addr, "u", "p", "a\"b\\c").expect("client connects");
+    let client = TestClient::connect_exec(addr, "u", "p", "a\"b\\c").expect("client connects");
     client.close();
     handle
         .join()
@@ -721,8 +720,7 @@ fn cmd_argv_preserves_backslashes_windows() {
     let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
     let addr = read_addr(&probe);
     let addr: SocketAddr = addr.parse().expect("addr parses");
-    let client =
-        TestClient::connect_exec(addr, "u", "p", "echo AB\\CD").expect("client connects");
+    let client = TestClient::connect_exec(addr, "u", "p", "echo AB\\CD").expect("client connects");
     client.close();
     handle
         .join()
@@ -901,8 +899,13 @@ fn cmd_env_relay_quoted_reg_query_windows() {
     let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
     let addr = read_addr(&probe);
     let addr: SocketAddr = addr.parse().expect("addr parses");
-    let client = TestClient::connect_exec(addr, "u", "p", "reg query \"HKLM\\SYSTEM\\Setup\" /v SetupType")
-        .expect("client connects");
+    let client = TestClient::connect_exec(
+        addr,
+        "u",
+        "p",
+        "reg query \"HKLM\\SYSTEM\\Setup\" /v SetupType",
+    )
+    .expect("client connects");
     client.close();
     handle
         .join()
@@ -966,8 +969,7 @@ fn cmd_env_relay_full_probe_windows() {
         "echo [END]",
     ]
     .join(" & ");
-    let client =
-        TestClient::connect_exec(addr, "u", "p", &command).expect("client connects");
+    let client = TestClient::connect_exec(addr, "u", "p", &command).expect("client connects");
     client.close();
     handle
         .join()
@@ -2912,10 +2914,7 @@ fn conhost_setup_query_never_reaches_client_windows() {
 }
 
 #[test]
-#[cfg_attr(
-    miri,
-    ignore = "needs loopback TCP plus threads plus a Tokio runtime"
-)]
+#[cfg_attr(miri, ignore = "needs loopback TCP plus threads plus a Tokio runtime")]
 fn pump_channel_close_reaches_client_while_session_held() {
     // Regression: the exit-status control sender must not outlive the
     // pump. The client half-closes, the pump drains, and the server
@@ -2946,8 +2945,7 @@ fn pump_channel_close_reaches_client_while_session_held() {
     let addr = service_addr(&registry, "test-ssh-pump-close");
     let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
     std::thread::sleep(Duration::from_secs(2));
-    let mut client =
-        TestClient::connect(addr, "guest", "pass").expect("client connects");
+    let mut client = TestClient::connect(addr, "guest", "pass").expect("client connects");
     client.send(b"close-me").expect("client sends");
     let echoed = client
         .read_until(b"close-me", Duration::from_secs(10))
@@ -2968,10 +2966,7 @@ fn pump_channel_close_reaches_client_while_session_held() {
 }
 
 #[test]
-#[cfg_attr(
-    miri,
-    ignore = "needs loopback TCP plus threads plus a Tokio runtime"
-)]
+#[cfg_attr(miri, ignore = "needs loopback TCP plus threads plus a Tokio runtime")]
 fn send_exit_status_reaches_exec_client() {
     // No byte pump involved: the status queues on the control sender and
     // the wire writer delivers it, so a client learns the code even when
@@ -3057,10 +3052,7 @@ fn pty_child_code_reaches_exec_client() {
 }
 
 #[test]
-#[cfg_attr(
-    miri,
-    ignore = "needs loopback TCP plus threads plus a Tokio runtime"
-)]
+#[cfg_attr(miri, ignore = "needs loopback TCP plus threads plus a Tokio runtime")]
 fn send_exit_status_rejects_negative_code() {
     // Exit codes are unsigned on the wire: a negative code bails
     // instead of wrapping.

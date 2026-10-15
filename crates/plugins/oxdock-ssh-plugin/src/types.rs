@@ -116,7 +116,11 @@ impl SshSessionTag {
     /// pump finishes; after that it bails, so a late send fails loudly
     /// instead of hanging a client that already saw the close.
     pub fn send_exit_status(&self, code: u32) -> Result<()> {
-        let slot = self.inner.control_tx.lock().unwrap_or_else(|p| p.into_inner());
+        let slot = self
+            .inner
+            .control_tx
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
         let Some(tx) = slot.as_ref() else {
             bail!("SSH session pump already finished");
         };

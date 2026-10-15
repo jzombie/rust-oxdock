@@ -219,8 +219,9 @@ pub fn pump_session<P: ProcessManager>(
             }
             result
         }));
-        let mut worker_out =
-            Some(scope.spawn(|| pump_out(&writer, &mut up_rx, cancel, &peer_done, break_on_peer_done)));
+        let mut worker_out = Some(
+            scope.spawn(|| pump_out(&writer, &mut up_rx, cancel, &peer_done, break_on_peer_done)),
+        );
         loop {
             reap(&mut worker_in, &mut failed);
             let out_was_live = worker_out.is_some();

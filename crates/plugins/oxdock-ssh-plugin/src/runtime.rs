@@ -183,9 +183,7 @@ pub async fn connect_session(
         while let Some(message) = reader.wait().await {
             match message {
                 russh::ChannelMsg::Data { data } => {
-                    let _ = up_tx
-                        .send(UpMsg::Data(Bytes::copy_from_slice(&data)))
-                        .await;
+                    let _ = up_tx.send(UpMsg::Data(Bytes::copy_from_slice(&data))).await;
                 }
                 russh::ChannelMsg::ExitStatus { exit_status: code } => {
                     if let Ok(mut slot) = exit_status_writer.lock() {

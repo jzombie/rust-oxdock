@@ -96,11 +96,7 @@ impl DsrFilter {
         }
     }
 
-    fn feed(
-        &mut self,
-        chunk: &[u8],
-        master_in: &Arc<Mutex<Box<dyn Write + Send>>>,
-    ) -> Vec<u8> {
+    fn feed(&mut self, chunk: &[u8], master_in: &Arc<Mutex<Box<dyn Write + Send>>>) -> Vec<u8> {
         let mut probe = Vec::with_capacity(self.len + chunk.len());
         probe.extend_from_slice(&self.carry[..self.len]);
         probe.extend_from_slice(chunk);
@@ -593,10 +589,7 @@ mod tests {
     fn query_answered_once_and_stripped() {
         let (master_in, seen) = harness();
         let mut filter = DsrFilter::new();
-        assert_eq!(
-            filter.feed(b"ab\x1b[6ncd", &master_in).as_slice(),
-            b"abcd"
-        );
+        assert_eq!(filter.feed(b"ab\x1b[6ncd", &master_in).as_slice(), b"abcd");
         assert_eq!(
             seen.lock().expect("sink readable").as_slice(),
             b"\x1b[1;1R".as_slice()
@@ -608,24 +601,15 @@ mod tests {
     fn split_query_answered_once_and_stripped() {
         let (master_in, seen) = harness();
         let mut filter = DsrFilter::new();
-        assert_eq!(
-            filter.feed(b"abc\x1b[", &master_in).as_slice(),
-            b"abc"
-        );
+        assert_eq!(filter.feed(b"abc\x1b[", &master_in).as_slice(), b"abc");
         assert!(seen.lock().expect("sink readable").is_empty());
-        assert_eq!(
-            filter.feed(b"6nrest", &master_in).as_slice(),
-            b"rest"
-        );
+        assert_eq!(filter.feed(b"6nrest", &master_in).as_slice(), b"rest");
         assert_eq!(
             seen.lock().expect("sink readable").as_slice(),
             b"\x1b[1;1R".as_slice()
         );
         // Replay past the boundary: the consumed query never rescans.
-        assert_eq!(
-            filter.feed(b"more", &master_in).as_slice(),
-            b"more"
-        );
+        assert_eq!(filter.feed(b"more", &master_in).as_slice(), b"more");
         assert_eq!(
             seen.lock().expect("sink readable").as_slice(),
             b"\x1b[1;1R".as_slice()
@@ -677,7 +661,9 @@ mod tests {
         let (master_in, seen) = harness();
         let mut filter = DsrFilter::new();
         assert_eq!(
-            filter.feed(b"plain output, no query", &master_in).as_slice(),
+            filter
+                .feed(b"plain output, no query", &master_in)
+                .as_slice(),
             b"plain output, no query"
         );
         assert!(seen.lock().expect("sink readable").is_empty());

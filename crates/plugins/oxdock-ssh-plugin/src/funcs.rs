@@ -587,10 +587,7 @@ fn ssh_connect<P: ProcessManager>(
         .lock()
         .map(|slot| slot.map(i64::from))
         .unwrap_or(None);
-    map.insert(
-        "exit_status".to_string(),
-        Value::int(status.unwrap_or(-1)),
-    );
+    map.insert("exit_status".to_string(), Value::int(status.unwrap_or(-1)));
     Ok(Value::map(map))
 }
 
