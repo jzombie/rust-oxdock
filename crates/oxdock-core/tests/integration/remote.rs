@@ -5,10 +5,6 @@
 //! bytes. This proves the core contract: closed scope, header injection,
 //! `WITH_IO` byte flow, and manifest-diff deletion.
 
-use std::io::{Read, Write};
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
-
 use anyhow::Result;
 use indoc::indoc;
 use oxdock_core::{
@@ -16,20 +12,30 @@ use oxdock_core::{
 };
 use oxdock_fs::{GuardedPath, GuardedTempDir, PathResolver, WorkspaceFs};
 use oxdock_process::MockProcessManager;
+use std::io::{Read, Write};
+use std::sync::{Arc, Mutex};
 
 /// In-process stand-in for the NET SSH session: sealed guest execution on
 /// a temp workspace with the same engine and parser the host uses.
 struct LocalRunner;
 
 impl LocalRunner {
-    fn drain_backend(backend: &oxdock_pipe::PipeInner) -> Result<Vec<u8>> {
+    fn drain_backend(backend: &std::sync::Arc<oxdock_pipe::PipeInner>) -> Result<Vec<u8>> {
+        // EOF-driven, mirroring the mock in oxdock-logic-tests: the
+        // guest stdin ends when its writers detach, never on a quiet
+        // timeout (stopping early on a lull would lose late bytes).
+        let reader = backend.reader_handle();
         let mut out = Vec::new();
         let mut buf = [0u8; 8192];
         loop {
-            match backend.read_into_timeout(&mut buf, Duration::from_millis(10))? {
-                Some(0) | None => break,
-                Some(n) => out.extend_from_slice(&buf[..n]),
+            let count = reader
+                .lock()
+                .map_err(|_| anyhow::anyhow!("mock stdin lock poisoned"))?
+                .read(&mut buf)?;
+            if count == 0 {
+                break;
             }
+            out.extend_from_slice(&buf[..count]);
         }
         Ok(out)
     }

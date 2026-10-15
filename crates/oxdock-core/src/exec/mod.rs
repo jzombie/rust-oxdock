@@ -379,6 +379,7 @@ fn new_state<P: ProcessManager>(fs: Box<dyn WorkspaceFs>, io: ExecIo) -> Result<
         exact_stdout: exact_stdout.clone(),
         var_scopes: Vec::new(),
         cancel_token: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        cancel_hub: std::sync::Arc::new(oxdock_process::CancelHub::new()),
         active_process: std::sync::Arc::new(std::sync::Mutex::new(None)),
         named_tasks: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         next_task_id: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),

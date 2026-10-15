@@ -453,7 +453,7 @@ fn wrong_password_rejected() {
     handle
         .join()
         .expect("script thread joins")
-        .expect("script runs");
+        .expect("run session completes");
 }
 
 #[test]

@@ -3003,6 +3003,7 @@ pub(crate) fn dispatch_async_block<P: ProcessManager>(
         .as_ref()
         .map(|backend| KeeperGuard::new(std::sync::Arc::clone(backend)));
     let cancel_token = std::sync::Arc::clone(&forked_state.cancel_token);
+    let cancel_hub = std::sync::Arc::clone(&forked_state.cancel_hub);
     let active_process = std::sync::Arc::clone(&forked_state.active_process);
     let worker: std::sync::Arc<std::sync::Mutex<Option<std::thread::ThreadId>>> =
         std::sync::Arc::new(std::sync::Mutex::new(None));
@@ -3049,6 +3050,7 @@ pub(crate) fn dispatch_async_block<P: ProcessManager>(
         .push(Box::new(super::steps::ThreadJoinHandle::new(
             join,
             cancel_token,
+            cancel_hub,
             active_process,
             worker,
         )));
@@ -3887,6 +3889,7 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
         .as_ref()
         .map(|backend| KeeperGuard::new(std::sync::Arc::clone(backend)));
     let cancel_token = std::sync::Arc::clone(&forked_state.cancel_token);
+    let cancel_hub = std::sync::Arc::clone(&forked_state.cancel_hub);
     let active_process = std::sync::Arc::clone(&forked_state.active_process);
     let worker: std::sync::Arc<std::sync::Mutex<Option<std::thread::ThreadId>>> =
         std::sync::Arc::new(std::sync::Mutex::new(None));
@@ -3991,7 +3994,8 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
     });
 
     // Create the thread handle
-    let handle = super::steps::ThreadJoinHandle::new(join, cancel_token, active_process, worker);
+    let handle =
+        super::steps::ThreadJoinHandle::new(join, cancel_token, cancel_hub, active_process, worker);
 
     // Store in named_tasks as a synchronized entry. The handle lives inside
     // the entry so CANCEL can tear it down even under concurrent AWAIT.
@@ -4444,6 +4448,7 @@ pub(crate) fn timeout<P: ProcessManager>(
     let done = Arc::new(AtomicBool::new(false));
     let fired = Arc::new(AtomicBool::new(false));
     let cancel_token = Arc::clone(&cx.state.cancel_token);
+    let cancel_hub = Arc::clone(&cx.state.cancel_hub);
     let active_process = Arc::clone(&cx.state.active_process);
 
     // Deadline watcher: enforces the timeout while the body runs on this
@@ -4459,6 +4464,7 @@ pub(crate) fn timeout<P: ProcessManager>(
             if Instant::now() >= deadline {
                 watcher_fired.store(true, Ordering::SeqCst);
                 cancel_token.store(true, Ordering::SeqCst);
+                cancel_hub.mark_cancelled();
                 if let Ok(mut guard) = active_process.lock()
                     && let Some(proc) = guard.as_mut()
                 {

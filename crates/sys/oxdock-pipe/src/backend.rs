@@ -9,7 +9,6 @@
 
 use std::io::{self, Read, Write};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::Duration;
 
 use crate::slot::{SharedInput, SharedOutput};
 use crate::spill::SpillBuffer;
@@ -100,6 +99,7 @@ struct PipeState {
     writers: usize,
     keepers: usize,
     closed: bool,
+    cancelled: bool,
 }
 
 impl PipeState {
@@ -109,6 +109,7 @@ impl PipeState {
             writers: 0,
             keepers: 0,
             closed: false,
+            cancelled: false,
         }
     }
 }
@@ -153,6 +154,7 @@ impl PipeInner {
         let mut state = self.lock_state();
         state.writers += 1;
         state.closed = false;
+        state.cancelled = false;
     }
 
     /// Live data-writer attachments (excludes keeper pins). Used for
@@ -166,6 +168,26 @@ impl PipeInner {
     /// plus an empty buffer. Used for EOF checks; never blocks.
     pub fn is_closed(&self) -> bool {
         self.lock_state().closed
+    }
+
+    /// Cancel the pipe: blocked readers wake at once and observe EOF
+    /// after draining buffered bytes, exactly like a close, but writers,
+    /// keepers, and the buffer are untouched (a later writer attachment
+    /// resurrects the pipe, same as after `force_close`). This is how a
+    /// supervisor ends pumps whose worker sits in a blocking read with
+    /// no timeout: no tick, no wakeup message, just the read ending.
+    /// Sticky until a new writer attaches; never blocks.
+    pub fn cancel(&self) {
+        let mut state = self.lock_state();
+        state.cancelled = true;
+        drop(state);
+        self.ready.notify_all();
+    }
+
+    /// Cancel latch, for diagnostics. Readers never consult it directly:
+    /// they observe cancellation as EOF from the read itself.
+    pub fn is_cancelled(&self) -> bool {
+        self.lock_state().cancelled
     }
 
     /// Bytes currently buffered for readers. Used for diagnostics.
@@ -244,46 +266,13 @@ impl PipeInner {
             if n > 0 {
                 return Ok(n);
             }
-            if state.closed {
+            if state.closed || state.cancelled {
                 return Ok(0);
             }
             state = self
                 .ready
                 .wait(state)
                 .map_err(|_| io::Error::other("pipe wait poisoned"))?;
-        }
-    }
-
-    /// Timeout-bounded variant of the blocking buffer read for bridge
-    /// worker loops: returns `Ok(None)` when the backstop elapses with no
-    /// data and no close, so cancellation resolves on a tick instead of
-    /// hanging on a condvar. Bridge-only caller; every DSL reader keeps
-    /// the blocking read with unchanged semantics.
-    pub fn read_into_timeout(
-        &self,
-        buf: &mut [u8],
-        backstop: Duration,
-    ) -> io::Result<Option<usize>> {
-        if buf.is_empty() {
-            return Ok(Some(0));
-        }
-        let mut state = self.lock_state();
-        loop {
-            let n = state.buffer.read_into(buf)?;
-            if n > 0 {
-                return Ok(Some(n));
-            }
-            if state.closed {
-                return Ok(Some(0));
-            }
-            let (guard, waited) = self
-                .ready
-                .wait_timeout(state, backstop)
-                .map_err(|_| io::Error::other("pipe wait poisoned"))?;
-            state = guard;
-            if waited.timed_out() {
-                return Ok(None);
-            }
         }
     }
 
@@ -495,5 +484,75 @@ impl Drop for KeeperGuard {
         if let Some(inner) = self.inner.take() {
             inner.unpin_keeper();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cancel_wakes_blocked_reader_with_eof() {
+        // The event-driven contract: a reader parked in the blocking
+        // read with no data and no close returns EOF the moment
+        // `cancel` runs. No timeout, no tick: the test thread parks,
+        // the main thread cancels, the join must return.
+        let pipe = ScriptPipe::new();
+        let inner = pipe.pipe_inner();
+        let reader = std::thread::spawn(move || {
+            let mut buf = [0u8; 8];
+            inner.read_into(&mut buf)
+        });
+        // Rendezvous sleep: yields until the reader is almost surely
+        // parked in the condvar wait (test-only synchronization, not a
+        // production backstop). Even if the reader has not parked yet,
+        // the assertion still holds: cancel is sticky.
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        pipe.pipe_inner().cancel();
+        let observed = reader
+            .join()
+            .expect("reader thread joins")
+            .expect("read works");
+        assert_eq!(observed, 0, "cancelled read observes EOF");
+        assert!(pipe.pipe_inner().is_cancelled());
+    }
+
+    #[test]
+    fn cancel_preserves_buffered_bytes_for_drain() {
+        // Cancellation ends the wait, not the data: buffered bytes
+        // still drain first, then EOF. Writers are undisturbed.
+        let pipe = ScriptPipe::new();
+        let writer = pipe.endpoint().stream_handle();
+        writer
+            .lock()
+            .expect("writer lock")
+            .write_all(b"kept")
+            .expect("write works");
+        pipe.pipe_inner().cancel();
+        let inner = pipe.pipe_inner();
+        let mut buf = [0u8; 8];
+        let first = inner.read_into(&mut buf).expect("drain works");
+        assert_eq!(&buf[..first], b"kept");
+        let second = inner.read_into(&mut buf).expect("EOF after drain");
+        assert_eq!(second, 0);
+    }
+
+    #[test]
+    fn attach_resurrects_cancelled_pipe() {
+        // A new writer attachment clears the cancel latch, mirroring
+        // `force_close` resurrection semantics.
+        let pipe = ScriptPipe::new();
+        pipe.pipe_inner().cancel();
+        let writer = pipe.endpoint().stream_handle();
+        writer
+            .lock()
+            .expect("writer lock")
+            .write_all(b"anew")
+            .expect("write works");
+        let inner = pipe.pipe_inner();
+        assert!(!inner.is_cancelled());
+        let mut buf = [0u8; 8];
+        let count = inner.read_into(&mut buf).expect("read works");
+        assert_eq!(&buf[..count], b"anew");
     }
 }

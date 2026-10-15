@@ -6,7 +6,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use anyhow::Result;
 use oxdock_fs::{CargoScratch, GuardedPath, WorkspaceFs};
 use oxdock_parser::{Field, Step, TypeDescriptor, TypeTag, Value};
-use oxdock_process::{BackgroundHandle, CommandContext, ProcessManager};
+use oxdock_process::{BackgroundHandle, CancelHub, CommandContext, ProcessManager};
 
 use super::io::{ExactCapture, ExecIo, SlidingWindow};
 use super::native::FunctionRegistry;
@@ -82,6 +82,11 @@ pub struct ExecState<P: ProcessManager> {
     /// Cancellation token for background thread teardown.
     #[allow(dead_code)]
     pub(super) cancel_token: Arc<AtomicBool>,
+    /// Event hub fanning the same cancellation to pump supervisors.
+    /// Marked everywhere the token is stored, so blocking pumps wake
+    /// without polling. Forks get a fresh hub with their fresh token.
+    #[allow(dead_code)]
+    pub(super) cancel_hub: Arc<CancelHub>,
     /// Handle to the currently executing foreground OS process, so
     /// ThreadJoinHandle::kill() can interrupt a blocking wait().
     #[allow(dead_code)]
@@ -320,6 +325,7 @@ impl<P: ProcessManager> ExecState<P> {
             exact_stdout: Arc::clone(&self.exact_stdout),
             var_scopes: self.var_scopes.clone(),
             cancel_token: Arc::new(AtomicBool::new(false)),
+            cancel_hub: Arc::new(CancelHub::new()),
             active_process: Arc::new(Mutex::new(None)),
             named_tasks: Arc::clone(&self.named_tasks),
             next_task_id: Arc::clone(&self.next_task_id),

@@ -8,7 +8,6 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use oxdock_core::{Field, HostModule, OxDockFn, OxDockType, RecordSchema, StepCtx, TypeTag, Value};
@@ -33,31 +32,56 @@ use crate::validate::parse_serve_endpoint;
 /// Unique server ids per process.
 static SERVER_IDS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-/// Dequeue tick: shutdown and cancellation surface within a few ticks.
-const DEQUEUE_TICK: Duration = Duration::from_millis(10);
-
 /// Block until the queue yields an authenticated session (or teardown).
-/// Shared by `SSH_DEQUEUE` and the `SSH_ACCEPT` wrapper.
+/// Shared by `SSH_DEQUEUE` and the `SSH_ACCEPT` wrapper. No timeout:
+/// a waiter parks in the queue condvar while a bridge thread parks on
+/// the task hub; on hub fire the bridge pokes the queue awake and the
+/// waiter ends with `Cancelled`. One transient thread per call, spent
+/// only on wakeups, never on ticks.
 fn dequeue_session<P: ProcessManager>(
     cx: &StepCtx<P>,
     queue: &Arc<SessionQueue>,
     func: &str,
 ) -> Result<PendingSession> {
-    loop {
-        match queue.try_pop() {
-            Dequeue::Session(session) => return Ok(session),
-            Dequeue::Shutdown => bail!("{func}: server is closed"),
-            Dequeue::Empty => {}
-        }
-        match queue.wait_for_session(DEQUEUE_TICK) {
-            Dequeue::Session(session) => return Ok(session),
-            Dequeue::Shutdown => bail!("{func}: server is closed"),
-            Dequeue::Empty => {}
-        }
-        if cx.is_cancelled() {
-            bail!("{func}: task cancelled");
-        }
-    }
+    let hub = cx.cancel_hub();
+    let bridge_queue = Arc::clone(queue);
+    let bridge_hub = Arc::clone(&hub);
+    let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+    std::thread::scope(|scope| {
+        let bridge = scope.spawn(move || {
+            // Rendezvous: read the sequence, then signal, then park,
+            // so the release below can never land before the wait.
+            let seen = bridge_hub.sequence();
+            let _ = started_tx.send(());
+            let (cancelled, _) = bridge_hub.wait(seen);
+            if cancelled {
+                bridge_queue.poke();
+            }
+        });
+        let result = loop {
+            if hub.is_cancelled() || cx.is_cancelled() {
+                break Err(anyhow::anyhow!("{func}: task cancelled"));
+            }
+            match queue.try_pop() {
+                Dequeue::Session(session) => break Ok(session),
+                Dequeue::Shutdown => break Err(anyhow::anyhow!("{func}: server is closed")),
+                Dequeue::Empty | Dequeue::Cancelled => {}
+            }
+            match queue.wait_blocking(&hub) {
+                Dequeue::Session(session) => break Ok(session),
+                Dequeue::Shutdown => break Err(anyhow::anyhow!("{func}: server is closed")),
+                Dequeue::Cancelled | Dequeue::Empty => {}
+            }
+        };
+        // Release the bridge (rendezvous first so the poke cannot
+        // land before its wait, then poke, never cancel: the dequeue
+        // may have ended cleanly) and join it: no thread outlives the
+        // call.
+        let _ = started_rx.recv();
+        hub.poke();
+        let _ = bridge.join();
+        result
+    })
 }
 
 /// Dequeue one authenticated session for routing before any byte
