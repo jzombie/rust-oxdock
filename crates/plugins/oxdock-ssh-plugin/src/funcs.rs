@@ -405,7 +405,12 @@ fn ssh_pump_channel<P: ProcessManager>(
     let out_pipe = Value::pipe_handle(out_pipe);
     let (up_rx, down_tx) = session.take_pump_ends()?;
     let cancel = AtomicBool::new(false);
-    pump_session(cx, &in_pipe, &out_pipe, up_rx, down_tx, &cancel, true)?;
+    // Release the control sender when the pump ends (pass or fail):
+    // the wire writer must observe the drain and close then, not when
+    // the last session clone drops long after.
+    let pump = pump_session(cx, &in_pipe, &out_pipe, up_rx, down_tx, &cancel, true);
+    session.finish_pump();
+    pump?;
     let mut map = BTreeMap::new();
     map.insert("closed".to_string(), Value::bool(true));
     Ok(Value::map(map))

@@ -336,6 +336,37 @@ impl TestClient {
         let _ = runtime.block_on(session.disconnect(russh::Disconnect::ByApplication, "", ""));
     }
 
+    /// Half-close our stdin: the server observes EOF while the channel
+    /// stays open for the reply and the close.
+    fn eof(&mut self) -> anyhow::Result<()> {
+        self.runtime
+            .block_on(self.writer.eof())
+            .map_err(|err| anyhow::anyhow!("test client eof failed: {err}"))?;
+        Ok(())
+    }
+
+    /// Wait for the server to close the channel, skipping any straggler
+    /// messages. Times out loudly: a server that never closes a drained
+    /// pump strands the client.
+    fn wait_close(&mut self, timeout: Duration) -> anyhow::Result<()> {
+        let deadline = Instant::now() + timeout;
+        loop {
+            let remaining = deadline
+                .checked_duration_since(Instant::now())
+                .unwrap_or_default();
+            if remaining.is_zero() {
+                anyhow::bail!("timed out waiting for server close");
+            }
+            let message = self
+                .runtime
+                .block_on(async { tokio::time::timeout(remaining, self.reader.wait()).await })
+                .map_err(|_| anyhow::anyhow!("timed out waiting for server close"))?;
+            if message.is_none() {
+                return Ok(());
+            }
+        }
+    }
+
     /// Wait for the server's `exit-status` request. Data, acks, and a
     /// pre-status EOF are skipped like stock clients skip them; close or
     /// timeout bails.
@@ -2778,6 +2809,62 @@ fn proxy_client_lingers_for_reply_and_status() {
         .join()
         .expect("script thread joins")
         .expect("proxy linger completes");
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "needs loopback TCP plus threads plus a Tokio runtime"
+)]
+fn pump_channel_close_reaches_client_while_session_held() {
+    // Regression: the exit-status control sender must not outlive the
+    // pump. The client half-closes, the pump drains, and the server
+    // must close the channel while the script still holds the session
+    // (parked in SLEEP, long past the drain): a close that waits for
+    // the last session clone strands the client.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-pump-close");
+    let script = indoc! {r#"
+        IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-pump-close", {username: "guest", password: "pass"})
+        LET $t: HANDLE = ASYNC {
+            LET $sess: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
+            RETURN $sess.session
+        }
+        LET $s: SSH_SESSION = AWAIT $t
+        LET $in: PIPE
+        LET $out: PIPE
+        LET $p: HANDLE = ASYNC { SSH_PUMP_CHANNEL($s, $in, $out) }
+        LET $e: HANDLE = ASYNC { SSH_PUMP($out, $in) }
+        SLEEP 12s
+        AWAIT $p
+        AWAIT $e
+        SSH_CLOSE($m.server)
+    "#};
+    let addr = service_addr(&registry, "test-ssh-pump-close");
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    std::thread::sleep(Duration::from_secs(2));
+    let mut client =
+        TestClient::connect(addr, "guest", "pass").expect("client connects");
+    client.send(b"close-me").expect("client sends");
+    let echoed = client
+        .read_until(b"close-me", Duration::from_secs(10))
+        .expect("echo returns");
+    assert!(
+        echoed.windows(8).any(|window| window == b"close-me"),
+        "echoed bytes must round-trip"
+    );
+    client.eof().expect("client half-closes");
+    client
+        .wait_close(Duration::from_secs(10))
+        .expect("server closes the drained channel");
+    client.close();
+    handle
+        .join()
+        .expect("script thread joins")
+        .expect("close script completes");
 }
 
 #[test]

@@ -68,10 +68,15 @@ struct SshSessionInner {
     pty_size: crate::state::SharedPtySize,
     up_rx: Mutex<Option<mpsc::Receiver<UpMsg>>>,
     down_tx: Mutex<Option<mpsc::Sender<DownMsg>>>,
-    /// Control sender kept across pumps: a clone of `down_tx` held back
-    /// at construction, so `SSH_SEND_EXIT_STATUS` can queue the
-    /// `exit-status` request even while a byte pump owns the main ends.
-    control_tx: mpsc::Sender<DownMsg>,
+    /// Control sender for the wire `exit-status`, kept across pumps:
+    /// a clone of `down_tx` held back at construction, so
+    /// `SSH_SEND_EXIT_STATUS` can queue the request even while a byte
+    /// pump owns the main ends. Released when the pump finishes (see
+    /// `finish_pump`): the wire writer must observe the drain and close
+    /// the channel then, not when the last session clone drops (long
+    /// after, on an accept loop holding the session). Dies with the
+    /// last session clone for sessions that never pump.
+    control_tx: Mutex<Option<mpsc::Sender<DownMsg>>>,
 }
 
 /// Handle to one dequeued SSH session instance.
@@ -102,20 +107,33 @@ impl SshSessionTag {
                 pty_size,
                 up_rx: Mutex::new(Some(up_rx)),
                 down_tx: Mutex::new(Some(down_tx.clone())),
-                control_tx: down_tx,
+                control_tx: Mutex::new(Some(down_tx)),
             }),
         }
     }
 
-    /// Queue an `exit-status` request for the client. Usable before,
-    /// during, or after the byte pump: the control sender survives
-    /// `take_pump_ends`. Bails once the wire writer is gone.
+    /// Queue an `exit-status` request for the client. Usable before the
+    /// pump finishes; after that it bails, so a late send fails loudly
+    /// instead of hanging a client that already saw the close.
     pub fn send_exit_status(&self, code: u32) -> Result<()> {
-        self.inner
-            .control_tx
-            .blocking_send(crate::state::DownMsg::ExitStatus(code))
+        let slot = self.inner.control_tx.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(tx) = slot.as_ref() else {
+            bail!("SSH session pump already finished");
+        };
+        tx.blocking_send(crate::state::DownMsg::ExitStatus(code))
             .map_err(|_| anyhow::anyhow!("SSH session wire writer is gone"))?;
         Ok(())
+    }
+
+    /// Release the control sender once the byte pump finishes. The wire
+    /// writer then observes the drain and closes the channel promptly,
+    /// even while the script still holds the session. Idempotent.
+    pub fn finish_pump(&self) {
+        self.inner
+            .control_tx
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .take();
     }
 
     pub fn command(&self) -> Option<String> {
