@@ -373,6 +373,7 @@ fn ssh_accept<P: ProcessManager>(
         session.up_rx,
         session.down_tx,
         &cancel,
+        true,
     )?;
     let mut map = BTreeMap::new();
     map.insert("closed".to_string(), Value::bool(true));
@@ -437,7 +438,7 @@ fn ssh_pump_channel<P: ProcessManager>(
     let out_pipe = Value::pipe_handle(out_pipe);
     let (up_rx, down_tx) = session.take_pump_ends()?;
     let cancel = AtomicBool::new(false);
-    pump_session(cx, &in_pipe, &out_pipe, up_rx, down_tx, &cancel)?;
+    pump_session(cx, &in_pipe, &out_pipe, up_rx, down_tx, &cancel, true)?;
     let mut map = BTreeMap::new();
     map.insert("closed".to_string(), Value::bool(true));
     Ok(Value::map(map))
@@ -445,11 +446,13 @@ fn ssh_pump_channel<P: ProcessManager>(
 
 /// Report the session's exit status to the client (RFC 4254 section
 /// 6.10), so stock `ssh` exits with the real code instead of 255.
-/// Queues ahead of the channel close: call it after the child exits
-/// (usually the `SSH_PTY_RUN` return) and before the pump drains, so
-/// the status lands ahead of `Eof`. Usable before, during, or after
-/// `SSH_PUMP_CHANNEL`: the control sender survives the take-once pump
-/// ends. Bails once the wire writer is gone. Returns BOOL true.
+/// Queues ahead of the channel close: call it once the exit code is
+/// known and before the pump drains, so the status lands ahead of
+/// `Eof`. Usable before, during, or after `SSH_PUMP_CHANNEL`: the
+/// control sender survives the take-once pump ends. `SSH_PTY_RUN`
+/// children report by themselves at child exit, so call this only for
+/// legs driven by other means (a `RUN` subprocess, a synthetic
+/// reply). Bails once the wire writer is gone. Returns BOOL true.
 #[oxdock_func(returns = TypeTag::Bool, summary = "Send the session exit status to the client.")]
 #[example(
     name = "report exit status",
@@ -608,13 +611,19 @@ fn ssh_connect<P: ProcessManager>(
         up_rx,
         down_tx,
         exit_status,
+        wire_done,
         handle,
         ..
     } = session;
     let cancel = AtomicBool::new(false);
-    let pump = pump_session(cx, &in_pipe, &out_pipe, up_rx, down_tx, &cancel);
+    // Client linger: the reply and the exit-status arrive after the
+    // client's own stdin EOF, so never cut the output wait short.
+    let pump = pump_session(cx, &in_pipe, &out_pipe, up_rx, down_tx, &cancel, false);
     let _ = runtime.block_on(handle.disconnect(russh::Disconnect::ByApplication, "", ""));
     pump?;
+    // Join the wire task after disconnect: a status arriving after EOF
+    // is recorded before this read, so the map never races the wire.
+    let _ = runtime.block_on(wire_done);
     let mut map = BTreeMap::new();
     map.insert("closed".to_string(), Value::bool(true));
     let status = exit_status

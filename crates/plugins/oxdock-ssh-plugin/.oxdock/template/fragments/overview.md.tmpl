@@ -7,3 +7,56 @@ runner that registers the host module on the
 [Engine facade]({{ $docs_global.engine_facade_url }}). The function
 reference below lists every entry with signatures; the type reference
 lists the session and server handles.
+
+A minimal proxy accepts one session, relays its identity into the
+child environment, and bridges the wire through a PTY child until
+both directions drain:
+
+```oxdock
+IMPORT [STD, SSH]
+INHERIT_ENV [PATH]
+
+# Serve the proxy on a runner-mapped service.
+LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-demo", {username: "u", password: "p"})
+
+# Pick the echo child per platform.
+LET $child: LIST<STRING> = ["cat"]
+[family:windows] {
+    $child = ["cmd", "/c", "more"]
+}
+
+# Accept one session in the background: relay its identity into the child environment, then bridge the wire through the PTY child.
+LET $srv: HANDLE = ASYNC {
+    LET $sess: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
+
+    ENV SSH_USER="\{{ $sess.username }}"
+    ENV SSH_CLIENT="\{{ $sess.addr }}"
+    ENV SSH_SERVER="\{{ $m.addr }}"
+
+    LET $c_in: PIPE
+    LET $c_out: PIPE
+
+    LET $pty: HANDLE = ASYNC { SSH_PTY_RUN($sess.session, $child, 0, 0, $c_out, $c_in) }
+    LET $pump: HANDLE = ASYNC { SSH_PUMP_CHANNEL($sess.session, $c_in, $c_out) }
+
+    LET $code: INT = AWAIT $pty
+    ASSERT_EQ $code 0
+
+    AWAIT $pump
+}
+
+# Dial the proxy and prove the child echoed the bytes back.
+LET $cin: PIPE
+LET $cout: PIPE
+LET $c: HANDLE = ASYNC { SSH_CONNECT("doc-ssh-demo", "u", "p", $cin, $cout) }
+
+WITH_IO [stdout=$cin] ECHO "proxy-ping"
+
+LET $cDone: MAP<ANY> = AWAIT $c
+ASSERT_EQ $cDone.closed true
+ASSERT_EQ $cDone.exit_status 0
+ASSERT_CONTAINS $cout "proxy-ping"
+
+AWAIT $srv
+SSH_CLOSE($m.server)
+```

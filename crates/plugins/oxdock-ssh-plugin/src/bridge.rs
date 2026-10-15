@@ -66,16 +66,20 @@ struct PumpHandles {
 /// via the supervisor's force-close : waiting for it would deadlock).
 /// The supervisor force-closes the output pipe right after this worker
 /// is reaped, so downstream observes EOF promptly.
-/// Also ends when the stdin direction finishes first (`peer_done`): the
-/// response producers are gone, so anything still arriving has nowhere
-/// to go : this is what releases a pump whose inner leg (a `RUN`
-/// subprocess, an exited remote) died while the outer client idles.
-/// Queued bytes still flush first; only the wait ends.
+/// When `break_on_peer_done`, also ends when the stdin direction
+/// finishes first (`peer_done`): the response producers are gone, so
+/// anything still arriving has nowhere to go : this is what releases a
+/// server pump whose inner leg (a `RUN` subprocess, an exited remote)
+/// died while the outer client idles. Queued bytes still flush first;
+/// only the wait ends. Server-side only: a client must linger for the
+/// reply and the exit-status, which legitimately arrive after its own
+/// stdin EOF, so client pumps always wait for the wire EOF or close.
 fn pump_out(
     writer: &SharedOutput,
     up_rx: &mut mpsc::Receiver<UpMsg>,
     cancel: &AtomicBool,
     peer_done: &AtomicBool,
+    break_on_peer_done: bool,
 ) -> Result<()> {
     use tokio::sync::mpsc::error::TryRecvError;
     loop {
@@ -94,7 +98,7 @@ fn pump_out(
             }
             Ok(UpMsg::Eof) | Err(TryRecvError::Disconnected) => break,
             Err(TryRecvError::Empty) => {
-                if peer_done.load(Ordering::SeqCst) {
+                if break_on_peer_done && peer_done.load(Ordering::SeqCst) {
                     break;
                 }
                 std::thread::sleep(TICK);
@@ -169,6 +173,11 @@ fn reap(
 /// as soon as the wire direction ends so downstream observes EOF
 /// promptly instead of waiting out unrelated writer and keeper
 /// lifetimes. The first worker error wins.
+///
+/// `break_on_peer_done` releases the output wait once the input side
+/// ends: pass true for server pumps (a dead inner leg with an idling
+/// outer client would strand the close), false for client pumps (the
+/// reply and the exit-status arrive after the client's own stdin EOF).
 pub fn pump_session<P: ProcessManager>(
     cx: &StepCtx<P>,
     in_pipe: &Value,
@@ -176,6 +185,7 @@ pub fn pump_session<P: ProcessManager>(
     up_rx: mpsc::Receiver<UpMsg>,
     down_tx: mpsc::Sender<DownMsg>,
     cancel: &AtomicBool,
+    break_on_peer_done: bool,
 ) -> Result<()> {
     let reader = cx
         .pipe_reader(in_pipe)
@@ -210,7 +220,7 @@ pub fn pump_session<P: ProcessManager>(
             result
         }));
         let mut worker_out =
-            Some(scope.spawn(|| pump_out(&writer, &mut up_rx, cancel, &peer_done)));
+            Some(scope.spawn(|| pump_out(&writer, &mut up_rx, cancel, &peer_done, break_on_peer_done)));
         loop {
             reap(&mut worker_in, &mut failed);
             let out_was_live = worker_out.is_some();

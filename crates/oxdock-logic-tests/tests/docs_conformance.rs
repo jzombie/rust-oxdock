@@ -404,6 +404,7 @@ fn execute_plugin_block(block: &FencedBlock, name: &str) -> Result<()> {
         "doc-ssh-close",
         "doc-ssh-connect",
         "doc-ssh-pty",
+        "doc-ssh-exit-status",
         "doc-ssh-demo",
     ] {
         ssh_registry

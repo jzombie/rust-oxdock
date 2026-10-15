@@ -109,6 +109,9 @@ pub struct OutboundSession {
     /// First `exit-status` the server sent, if any. Shared with the wire
     /// task; read after the pump drains.
     pub exit_status: Arc<std::sync::Mutex<Option<u32>>>,
+    /// Wire task join handle: awaited after disconnect so a status that
+    /// arrives after EOF is recorded before the result map is read.
+    pub wire_done: tokio::task::JoinHandle<()>,
     pub(crate) handle: russh::client::Handle<AcceptAnyHostKey>,
 }
 
@@ -164,20 +167,20 @@ pub async fn connect_session(
     // Wire bytes toward the pump. A channel EOF half-closes the pump
     // (it may still flush its own output); a close ends the queue by
     // dropping the sender. The first exit-status is recorded for the
-    // result map; later ones cannot happen on one channel.
+    // result map; later ones cannot happen on one channel. EOF never
+    // ends this task: a status learned at child teardown can arrive
+    // after it (stock clients behave the same), and only Close or
+    // disconnect means no more messages will ever come. Sends after
+    // the pump is gone fail silently and the drain continues.
     let exit_status = Arc::new(std::sync::Mutex::new(None));
     let exit_status_writer = Arc::clone(&exit_status);
-    tokio::spawn(async move {
+    let wire_done = tokio::spawn(async move {
         while let Some(message) = reader.wait().await {
             match message {
                 russh::ChannelMsg::Data { data } => {
-                    if up_tx
+                    let _ = up_tx
                         .send(UpMsg::Data(Bytes::copy_from_slice(&data)))
-                        .await
-                        .is_err()
-                    {
-                        break;
-                    }
+                        .await;
                 }
                 russh::ChannelMsg::ExitStatus { exit_status: code } => {
                     if let Ok(mut slot) = exit_status_writer.lock() {
@@ -186,7 +189,6 @@ pub async fn connect_session(
                 }
                 russh::ChannelMsg::Eof => {
                     let _ = up_tx.send(UpMsg::Eof).await;
-                    break;
                 }
                 russh::ChannelMsg::Close => break,
                 _ => {}
@@ -215,6 +217,7 @@ pub async fn connect_session(
         up_rx,
         down_tx,
         exit_status,
+        wire_done,
         handle: session,
     })
 }

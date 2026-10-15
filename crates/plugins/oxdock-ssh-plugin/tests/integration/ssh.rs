@@ -2392,6 +2392,51 @@ fn mapped_name_connect_roundtrip() {
 }
 
 #[test]
+#[cfg(unix)]
+#[cfg_attr(
+    miri,
+    ignore = "needs loopback TCP plus threads plus forkpty plus subprocesses"
+)]
+fn proxy_client_lingers_for_reply_and_status_unix() {
+    // Client-side pumps must not end with their own stdin EOF: the
+    // echo reply and the exit-status arrive after it. Ending early
+    // returns first and disconnects, killing the server mid-reply.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-proxy-linger");
+    let script = indoc! {r#"
+        IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-proxy-linger", {username: "guest", password: "pass"})
+        LET $srv: HANDLE = ASYNC {
+            LET $sess: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
+            LET $c_in: PIPE
+            LET $c_out: PIPE
+            LET $pty: HANDLE = ASYNC { SSH_PTY_RUN($sess.session, ["cat"], 0, 0, $c_out, $c_in) }
+            LET $pump: HANDLE = ASYNC { SSH_PUMP_CHANNEL($sess.session, $c_in, $c_out) }
+            LET $code: INT = AWAIT $pty
+            ASSERT_EQ $code 0
+            AWAIT $pump
+        }
+        LET $cin: PIPE
+        LET $cout: PIPE
+        LET $c: HANDLE = ASYNC { SSH_CONNECT("test-ssh-proxy-linger", "guest", "pass", $cin, $cout) }
+        WITH_IO [stdout=$cin] ECHO "linger-ping"
+        LET $cDone: MAP<ANY> = AWAIT $c
+        ASSERT_EQ $cDone.closed true
+        ASSERT_EQ $cDone.exit_status 0
+        ASSERT_CONTAINS $cout "linger-ping"
+        AWAIT $srv
+        SSH_CLOSE($m.server)
+    "#};
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    handle
+        .join()
+        .expect("script thread joins")
+        .expect("proxy linger completes");
+}
+
+#[test]
 #[cfg_attr(
     miri,
     ignore = "needs loopback TCP plus threads plus a Tokio runtime"
