@@ -1,4 +1,6 @@
 use anyhow::Result;
+#[cfg(windows)]
+use std::os::windows::io::OwnedHandle;
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 use std::process::{Child, ExitStatus};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -22,9 +24,12 @@ struct ChildInner {
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 pub struct ChildHandle {
     inner: Arc<Mutex<ChildInner>>,
-    /// OS process ID for signal-based kill on Unix and `OpenProcess`-based
-    /// terminate on Windows.
+    /// OS process ID: the reap sentinel guarding `kill` on both platforms,
+    /// and the process-group kill key on Unix.
     pid: Arc<AtomicU32>,
+    /// Windows job covering the whole spawn tree; shared across clones.
+    #[cfg(windows)]
+    job: Arc<OwnedHandle>,
 }
 
 impl ChildHandle {
@@ -33,7 +38,7 @@ impl ChildHandle {
         child: Child,
         stdin_thread: Option<std::thread::JoinHandle<()>>,
         io_threads: Vec<std::thread::JoinHandle<()>>,
-    ) -> Self {
+    ) -> Result<Self> {
         // The stdin feeder is deliberately detached, never joined (see
         // below): it blocks reading the producer pipe, whose writers may
         // legitimately outlive a short-lived child (a session pump feeding
@@ -43,11 +48,19 @@ impl ChildHandle {
         // handles then; it holds no lock anyone else needs (fresh reader
         // handle per spawn).
         let _ = stdin_thread;
-        #[cfg(unix)]
         let pid = child.id();
         #[cfg(windows)]
-        let pid = child.id();
-        Self {
+        let job = match assign_job(&child) {
+            Ok(job) => Arc::new(job),
+            Err(err) => {
+                // A live child with no job would escape teardown: end it
+                // before surfacing the failed spawn.
+                let mut child = child;
+                let _ = child.kill();
+                return Err(err);
+            }
+        };
+        Ok(Self {
             inner: Arc::new(Mutex::new(ChildInner {
                 child: Some(child),
                 io_threads,
@@ -56,7 +69,9 @@ impl ChildHandle {
                 killed: AtomicBool::new(false),
             })),
             pid: Arc::new(AtomicU32::new(pid)),
-        }
+            #[cfg(windows)]
+            job,
+        })
     }
 }
 
@@ -155,21 +170,22 @@ impl BackgroundHandle for ChildHandle {
             .unwrap_or_else(|e| e.into_inner())
             .killed
             .store(true, Ordering::SeqCst);
+        #[cfg(unix)]
         kill_tree(pid);
+        #[cfg(windows)]
+        terminate_job(self.job.as_ref());
         Ok(())
     }
 }
 
-/// Kill the whole tree rooted at `pid`: the process group on Unix (a
-/// background child owns its group, see `run_prepared`), `taskkill /T`
-/// plus a direct terminate on Windows. Best-effort: a fully exited tree
-/// reports ESRCH / a missing target, which is the already-dead outcome
-/// teardown wants.
+/// Kill the whole tree rooted at `pid` via its process group: a background
+/// child owns its group (see `run_prepared`), so orphaned grandchildren
+/// die with the direct child instead of holding pipe write ends open past
+/// the kill and stalling pump EOF. Best-effort: a fully exited tree
+/// reports ESRCH, which is the already-dead outcome teardown wants.
 #[cfg(unix)]
 fn kill_tree(pid: u32) {
-    // Negative PID signals the whole process group, so orphaned
-    // grandchildren die with the direct child instead of holding pipe
-    // write ends open past the kill and stalling pump EOF.
+    // Negative PID signals the whole process group.
     let group = -(pid as i32);
     let rc = unsafe { libc::kill(group, libc::SIGKILL) };
     if rc != 0 && std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH) {
@@ -179,40 +195,44 @@ fn kill_tree(pid: u32) {
     }
 }
 
+/// Create an unnamed job object and assign `child` to it. Assignment
+/// happens after spawn because std exposes no `CREATE_SUSPENDED` with a
+/// resume handle, so a grandchild the child forks before this call would
+/// join only by inheritance from an already-assigned member; the window
+/// is bounded by the caller's post-spawn setup and is the same class of
+/// bound std users accept. No `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`:
+/// natural completion must leave `RUN "daemon &"` grandchildren alive,
+/// matching Unix, where a post-reap kill is a no-op.
 #[cfg(windows)]
-#[allow(clippy::disallowed_methods, clippy::disallowed_types)]
-fn kill_tree(pid: u32) {
-    // Tree kill first: `taskkill /T` ends child processes the direct
-    // terminate below would orphan, and orphaned grandchildren holding
-    // pipe write ends open stall pump EOF exactly like orphaned process
-    // groups do on Unix. A missing target (already exited tree) is the
-    // desired end state, so only a failure to launch taskkill itself
-    // falls back to the direct terminate. Ambient env (never the script
-    // map) keeps teardown independent of whatever the script set.
-    let tree_killed = std::process::Command::new("taskkill")
-        .args(["/F", "/T", "/PID", &pid.to_string()])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok();
-    if !tree_killed {
-        // Open the process by PID and terminate it. This works even when
-        // wait() has taken the `Child` out of `ChildInner`, and avoids
-        // storing a raw HANDLE (which is neither Send nor Sync and would
-        // break the `BackgroundHandle: Send` bound).
-        // `pid` is zeroed after successful wait, so recycled PIDs are safe.
-        use windows_sys::Win32::Foundation::CloseHandle;
-        use windows_sys::Win32::System::Threading::{
-            OpenProcess, PROCESS_TERMINATE, TerminateProcess,
-        };
-        unsafe {
-            let handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
-            if !handle.is_null() {
-                TerminateProcess(handle, 1);
-                CloseHandle(handle);
-            }
-        }
+fn assign_job(child: &Child) -> Result<OwnedHandle> {
+    use std::os::windows::io::{AsRawHandle, FromRawHandle};
+    use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW};
+
+    let raw = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+    if raw.is_null() {
+        return Err(
+            anyhow::Error::new(std::io::Error::last_os_error()).context("CreateJobObjectW failed")
+        );
+    }
+    let job = unsafe { OwnedHandle::from_raw_handle(raw) };
+    if unsafe { AssignProcessToJobObject(job.as_raw_handle(), child.as_raw_handle()) } == 0 {
+        return Err(anyhow::Error::new(std::io::Error::last_os_error())
+            .context("AssignProcessToJobObject failed"));
+    }
+    Ok(job)
+}
+
+/// Terminate every current member of the job in one kernel call, and
+/// mark it terminating so members created afterwards die at creation:
+/// no enumeration, so the Unix fork-during-kill race class has no
+/// Windows counterpart and no post-reap sweep is needed.
+#[cfg(windows)]
+fn terminate_job(job: &OwnedHandle) {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::System::JobObjects::TerminateJobObject;
+
+    unsafe {
+        TerminateJobObject(job.as_raw_handle(), 1);
     }
 }
 
@@ -258,16 +278,18 @@ impl Drop for ChildHandle {
             // leaves orphaned grandchildren holding inherited pipe write
             // ends open, and whoever joins the pumps then stalls until
             // they exit on their own.
-            let pid = self.pid.load(Ordering::SeqCst);
             guard.killed.store(true, Ordering::SeqCst);
-            kill_tree(pid);
+            #[cfg(unix)]
+            kill_tree(self.pid.load(Ordering::SeqCst));
+            #[cfg(windows)]
+            terminate_job(self.job.as_ref());
             if let Some(child) = guard.child.as_mut() {
                 let _ = child.wait();
             }
             // Same post-reap sweep as `wait`/`try_wait`: reach a
             // grandchild that forked after the kill's enumeration.
             #[cfg(unix)]
-            sweep_process_group(pid);
+            sweep_process_group(self.pid.load(Ordering::SeqCst));
         }
         guard.reaped = true;
         // `io_threads` are deliberately NOT joined: a grandchild inheriting
@@ -346,6 +368,71 @@ mod tests {
             unsafe { libc::kill(-(pid as i32), 0) },
             -1,
             "sweep must end the escapee's process group"
+        );
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::ChildHandle;
+    use crate::CommandBuilder;
+    use std::os::windows::io::AsRawHandle;
+    use std::time::{Duration, Instant};
+    use windows_sys::Win32::System::JobObjects::{
+        JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JobObjectBasicAccountingInformation,
+        QueryInformationJobObject,
+    };
+
+    fn active_processes(handle: &ChildHandle) -> u32 {
+        let mut info = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
+        let ok = unsafe {
+            QueryInformationJobObject(
+                handle.job.as_raw_handle(),
+                JobObjectBasicAccountingInformation,
+                &mut info as *mut _ as *mut _,
+                std::mem::size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+                std::ptr::null_mut(),
+            )
+        };
+        assert_ne!(
+            ok,
+            0,
+            "QueryInformationJobObject failed: {}",
+            std::io::Error::last_os_error()
+        );
+        info.ActiveProcesses
+    }
+
+    /// Assignment lands the whole tree in the job: `cmd` keeps running
+    /// its own foreground ping while `start /b` backgrounds a second
+    /// ping, so the job holds leader plus grandchild. The kill must end
+    /// both; a direct-child-only kill would leave the orphaned ping
+    /// running and ActiveProcesses nonzero past the deadline.
+    #[cfg_attr(miri, ignore = "spawns a real child process, unsupported under Miri")]
+    #[test]
+    fn kill_terminates_grandchild_that_outlives_the_leader() {
+        let mut handle = CommandBuilder::new("cmd")
+            .args(["/c", "start /b ping -n 30 127.0.0.1 & ping -n 30 127.0.0.1"])
+            .spawn()
+            .expect("spawn");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while active_processes(&handle) < 2 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            active_processes(&handle) >= 2,
+            "leader and grandchild should both be in the job"
+        );
+        handle.kill().expect("kill");
+        handle.wait().expect("wait");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while active_processes(&handle) != 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert_eq!(
+            active_processes(&handle),
+            0,
+            "job kill must terminate the grandchild too"
         );
     }
 }
