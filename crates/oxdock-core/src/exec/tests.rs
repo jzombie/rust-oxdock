@@ -858,6 +858,7 @@ fn create_exec_state(fs: MockFs) -> ExecState<MockProcessManager> {
         exact_stdout: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         var_scopes: Vec::new(),
         cancel_token: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        cancel_hub: Arc::new(oxdock_process::CancelHub::new()),
         active_process: Arc::new(std::sync::Mutex::new(None)),
         named_tasks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         next_task_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),

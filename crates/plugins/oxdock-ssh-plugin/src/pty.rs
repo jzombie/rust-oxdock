@@ -26,18 +26,23 @@ use std::time::Instant;
 use anyhow::{Context, Result, bail};
 use oxdock_core::{StepCtx, Value};
 use oxdock_fs::command_path;
-use oxdock_pipe::PipeInner;
-use oxdock_process::{ProcessManager, SharedInput, SharedOutput};
+use oxdock_process::run_guarded as guard_worker;
+use oxdock_process::{PUMP_CHUNK, ProcessManager, SharedOutput};
 
-use crate::bridge::{CHUNK, TICK, read_pipe};
-use crate::state::{PtySize, SharedPtySize, snapshot_pty_size};
+use crate::bridge::{
+    ChildDone, ChildExited, DeferredClose, InputSink, close_drained_outputs, note_failure,
+    pump_pipe_to_sink,
+};
+use crate::state::{PtySize, PtySizeStamp, SharedPtySize, snapshot_pty_size, wait_size_changed};
 
 /// Post-exit output silence that ends the drain wait: long enough to
 /// cover ConPTY screen-buffer flush lag on loaded runners, short enough
 /// that a stranded console costs little.
 const DRAIN_QUIESCE_MS: u64 = 250;
 /// Post-exit backstop: teardown runs no matter what past this point, so
-/// a pathological console cannot strand the close.
+/// a pathological console cannot strand the close. Enforced
+/// opportunistically at drain-deadline arrivals (re-arms keep arriving
+/// while bytes flow), so no long-lived timer thread is needed.
 const DRAIN_CAP_MS: u64 = 30_000;
 
 /// Millis since a session epoch. Monotonic by construction: interval
@@ -67,51 +72,83 @@ fn drain_overdue(last_output_ms: u64, exited_ms: Option<u64>, now_ms: u64) -> bo
 /// and stalls console setup, and the client with it, until the query is
 /// answered. A terminal emulator answers in band as part of VT handling;
 /// this pump is the only reader, so the output worker answers on its
-/// behalf. Query bytes are still forwarded untouched: they are genuine
-/// console output and substring assertions must observe the full stream.
-/// The reply reports a fresh 1,1 cursor. Only conhost can emit this
-/// sequence toward us (a child cursor query travels the opposite
-/// direction, into conhost), so answering never injects stray input into
-/// the child. Unix ptys never emit the query, so this is inert there.
+/// behalf. The query itself is consumed, never forwarded: a real
+/// terminal would answer it too, and that answer lands in the shell as
+/// stray input that eats the user's first keystroke. The reply reports
+/// a fresh 1,1 cursor. Only conhost can emit this sequence toward us
+/// (a child cursor query travels the opposite direction, into
+/// conhost), so answering never injects stray input into the child.
+/// Unix ptys never emit the query, so this is inert there.
 const CONHOST_DSR_QUERY: &[u8] = b"\x1b[6n";
 const CONHOST_CPR_REPLY: &[u8] = b"\x1b[1;1R";
 
-/// Answer every ConPTY cursor query in `chunk`, carrying a short tail
-/// across reads so a query split over two reads still matches. The reply
-/// is best effort: setup may complete, or teardown race, concurrently.
-fn answer_conhost_queries(
-    chunk: &[u8],
-    tail: &mut [u8; 3],
-    tail_len: &mut usize,
-    master_in: &Arc<Mutex<Box<dyn Write + Send>>>,
-) {
-    let mut probe = Vec::with_capacity(*tail_len + chunk.len());
-    probe.extend_from_slice(&tail[..*tail_len]);
-    probe.extend_from_slice(chunk);
-    // Answer matches that involve new bytes; matches fully inside the
-    // old tail were answered on the previous call.
-    let mut answers = 0;
-    let mut idx = 0;
-    while idx + CONHOST_DSR_QUERY.len() <= probe.len() {
-        if &probe[idx..idx + CONHOST_DSR_QUERY.len()] == CONHOST_DSR_QUERY
-            && idx + CONHOST_DSR_QUERY.len() > *tail_len
+/// Streaming `ESC[6n` filter over master output: answers each query
+/// once through the master writer and releases the chunk minus query
+/// bytes. A trailing query-prefix is held for the next chunk, so a
+/// query split over two reads still matches and never reaches the wire
+/// half. `flush` releases held bytes at EOF: they never completed a
+/// query, so they are genuine output.
+struct DsrFilter {
+    carry: [u8; 3],
+    len: usize,
+}
+
+impl DsrFilter {
+    fn new() -> Self {
+        Self {
+            carry: [0u8; 3],
+            len: 0,
+        }
+    }
+
+    fn feed(&mut self, chunk: &[u8], master_in: &Arc<Mutex<Box<dyn Write + Send>>>) -> Vec<u8> {
+        let mut probe = Vec::with_capacity(self.len + chunk.len());
+        probe.extend_from_slice(&self.carry[..self.len]);
+        probe.extend_from_slice(chunk);
+        // Consumed bytes never rescan: a completed query leaves the
+        // stream, so every match here is new and answered exactly once.
+        let mut answers = 0;
+        let mut kept = Vec::with_capacity(probe.len());
+        let mut idx = 0;
+        while idx + CONHOST_DSR_QUERY.len() <= probe.len() {
+            if &probe[idx..idx + CONHOST_DSR_QUERY.len()] == CONHOST_DSR_QUERY {
+                answers += 1;
+                idx += CONHOST_DSR_QUERY.len();
+            } else {
+                kept.push(probe[idx]);
+                idx += 1;
+            }
+        }
+        kept.extend_from_slice(&probe[idx..]);
+        // Hold back the longest trailing query-prefix: it may yet
+        // complete a split query, and must not reach the wire half.
+        let widest = kept.len().min(CONHOST_DSR_QUERY.len() - 1);
+        let mut hold = 0;
+        for width in (1..=widest).rev() {
+            if kept[kept.len() - width..] == CONHOST_DSR_QUERY[..width] {
+                hold = width;
+                break;
+            }
+        }
+        let emit = kept[..kept.len() - hold].to_vec();
+        self.carry[..hold].copy_from_slice(&kept[kept.len() - hold..]);
+        self.len = hold;
+        if answers > 0
+            && let Ok(mut guard) = master_in.lock()
         {
-            answers += 1;
-            idx += CONHOST_DSR_QUERY.len();
-        } else {
-            idx += 1;
+            for _ in 0..answers {
+                let _ = guard.write_all(CONHOST_CPR_REPLY);
+            }
+            let _ = guard.flush();
         }
+        emit
     }
-    if answers > 0
-        && let Ok(mut guard) = master_in.lock()
-    {
-        for _ in 0..answers {
-            let _ = guard.write_all(CONHOST_CPR_REPLY);
-        }
-        let _ = guard.flush();
+
+    fn flush(&mut self) -> Vec<u8> {
+        let tail = self.carry[..self.len].to_vec();
+        self.len = 0;
+        tail
     }
-    *tail_len = (*tail_len + chunk.len()).min(tail.len());
-    tail[..*tail_len].copy_from_slice(&probe[probe.len() - *tail_len..]);
 }
 
 /// Pump master-terminal output into the `out_pipe` writer. Ends on
@@ -119,9 +156,10 @@ fn answer_conhost_queries(
 /// normalizes the platform EIO-into-EOF kink for us) or on console
 /// teardown (the supervisor releases the master once the drain is due,
 /// which closes a ConPTY output pipe that would otherwise stay open).
-/// Also answers ConPTY setup queries in band. Stamps `activity` with
-/// the current millis on every forwarded chunk so the supervisor can
-/// tell a draining console from a stranded one.
+/// Also answers ConPTY setup queries in band while stripping them from
+/// the stream. Stamps `activity` with the current millis on every
+/// forwarded chunk so the supervisor can tell a draining console from
+/// a stranded one.
 fn pump_master_out(
     reader: &mut Box<dyn Read + Send>,
     writer: &SharedOutput,
@@ -130,9 +168,8 @@ fn pump_master_out(
     activity: &AtomicU64,
     epoch: Instant,
 ) -> Result<()> {
-    let mut buffer = [0u8; CHUNK];
-    let mut query_tail = [0u8; 3];
-    let mut query_tail_len = 0usize;
+    let mut buffer = [0u8; PUMP_CHUNK];
+    let mut queries = DsrFilter::new();
     loop {
         if cancel.load(Ordering::SeqCst) {
             break;
@@ -145,22 +182,31 @@ fn pump_master_out(
             Err(err) => bail!("SSH pty master read failed: {err}"),
             Ok(0) => break,
             Ok(count) => {
-                answer_conhost_queries(
-                    &buffer[..count],
-                    &mut query_tail,
-                    &mut query_tail_len,
-                    master_in,
-                );
+                let clean = queries.feed(&buffer[..count], master_in);
+                if clean.is_empty() {
+                    continue;
+                }
                 let mut guard = writer
                     .lock()
                     .map_err(|_| anyhow::anyhow!("SSH pty output lock poisoned"))?;
                 guard
-                    .write_all(&buffer[..count])
+                    .write_all(&clean)
                     .context("SSH pty output pipe write failed")?;
                 guard.flush().context("SSH pty output pipe flush failed")?;
                 activity.store(elapsed_ms(epoch), Ordering::SeqCst);
             }
         }
+    }
+    // Held query-prefix bytes never completed: genuine output, release.
+    let tail = queries.flush();
+    if !tail.is_empty() {
+        let mut guard = writer
+            .lock()
+            .map_err(|_| anyhow::anyhow!("SSH pty output lock poisoned"))?;
+        guard
+            .write_all(&tail)
+            .context("SSH pty output pipe write failed")?;
+        guard.flush().context("SSH pty output pipe flush failed")?;
     }
     Ok(())
 }
@@ -183,84 +229,63 @@ fn send_release_nudge(writer: &Arc<Mutex<Box<dyn Write + Send>>>) {
     let _ = writer;
 }
 
-/// Sends [`send_release_nudge`] when the input pump ends, on every exit
-/// path. The shared writer outlives this pump (the output worker keeps
-/// a clone for ConPTY answers), so without this guard a stdin-driven
-/// child like `cat` never observes EOF after its pipe closes and the
-/// session strands.
-struct ReleaseNudge<'a> {
-    writer: &'a Arc<Mutex<Box<dyn Write + Send>>>,
+/// Reaper half of the pty backend: owns the blocking wait. The
+/// supervisor kills through a split killer and applies resizes and
+/// drain teardown; this only ever waits, reports, and announces the
+/// exit. ConPTY holds the master open past child death, so no pipe EOF
+/// can stand in for the wait: without it the supervisor could never
+/// tell a draining console from a stranded one. All shared state is
+/// reference counted: the reaper runs detached, so nothing here
+/// borrows the pump frame.
+struct PtyWaiter {
+    child: Box<dyn portable_pty::Child + Send + Sync>,
+    peer_done: Arc<AtomicBool>,
+    report: Option<Arc<dyn Fn(u32) + Send + Sync>>,
 }
 
-impl Drop for ReleaseNudge<'_> {
-    fn drop(&mut self) {
-        send_release_nudge(self.writer);
-    }
-}
-
-/// Pump `in_pipe` bytes into the master side (toward the child). Ends on
-/// pipe EOF, cancellation, or `peer_done` (child gone: bytes would have
-/// nowhere to go). The master writer is shared with the output worker,
-/// which uses it to answer ConPTY setup queries.
-fn pump_master_in(
-    reader: &SharedInput,
-    backend: Option<&Arc<PipeInner>>,
-    writer: &Arc<Mutex<Box<dyn Write + Send>>>,
-    cancel: &AtomicBool,
-    peer_done: &AtomicBool,
-) -> Result<()> {
-    let _nudge = ReleaseNudge { writer };
-    let mut buffer = [0u8; CHUNK];
-    loop {
-        if cancel.load(Ordering::SeqCst) || peer_done.load(Ordering::SeqCst) {
-            break;
-        }
-        match read_pipe(reader, backend, &mut buffer) {
-            Err(err) => bail!("SSH pty input pipe read failed: {err}"),
-            Ok(None) => continue,
-            Ok(Some(0)) => {
-                break;
-            }
-            Ok(Some(count)) => {
-                let mut guard = writer
-                    .lock()
-                    .map_err(|_| anyhow::anyhow!("SSH pty master lock poisoned"))?;
-                if guard.write_all(&buffer[..count]).is_err() {
-                    break;
+impl PtyWaiter {
+    /// Block until the child exits and report the wire status inside,
+    /// returning the code. A broken wait handle reports nothing (there
+    /// is no status to report) and still yields -1, so the
+    /// supervisor's drain wait forces the release. The report always
+    /// precedes the EOF closes the supervisor applies after.
+    fn wait_exit(mut self) -> i64 {
+        let code = match self.child.wait() {
+            Ok(status) => {
+                let code = status.exit_code();
+                if let Some(report) = self.report {
+                    report(code);
                 }
-                if guard.flush().is_err() {
-                    break;
-                }
+                i64::from(code)
             }
-        }
+            Err(_) => -1,
+        };
+        self.peer_done.store(true, Ordering::SeqCst);
+        code
     }
-    Ok(())
 }
 
-/// Reap one finished worker, recording the first error.
-fn reap(
-    slot: &mut Option<std::thread::ScopedJoinHandle<'_, Result<()>>>,
-    failed: &mut Option<anyhow::Error>,
-) {
-    if !slot.as_ref().is_some_and(|handle| handle.is_finished()) {
-        return;
-    }
-    let Some(handle) = slot.take() else {
-        return;
-    };
-    match handle.join() {
-        Ok(Ok(())) => {}
-        Ok(Err(err)) => {
-            if failed.is_none() {
-                *failed = Some(err);
-            }
-        }
-        Err(_) => {
-            if failed.is_none() {
-                *failed = Some(anyhow::anyhow!("SSH pty worker panicked"));
-            }
-        }
-    }
+/// Supervisor-side terminal state: the console handle (dropped for
+/// teardown), live size tracking, and drain bookkeeping. The reaper
+/// owns the child; this owns everything else, so no `&mut` is ever
+/// shared across the wait.
+struct PtyTerm {
+    master: Option<Box<dyn portable_pty::MasterPty + Send>>,
+    size_source: SharedPtySize,
+    applied_seq: PtySizeStamp,
+    activity: Arc<AtomicU64>,
+    epoch: Instant,
+    exited_ms: Option<u64>,
+    drain_generation: u64,
+}
+
+/// Supervisor events. `Resize` and `DrainDue` come from watcher
+/// threads; completions arrive through `guard_worker`.
+enum PtyEvent {
+    Done(ChildDone),
+    Exited(ChildExited),
+    Resize,
+    DrainDue(u64),
 }
 
 fn to_portable_size(size: PtySize) -> portable_pty::PtySize {
@@ -278,6 +303,12 @@ fn to_portable_size(size: PtySize) -> portable_pty::PtySize {
 /// each tick), pumping `in_pipe` into it and its output into `out_pipe`.
 /// Blocks until the child exits and its output drains, then returns the
 /// exit code. Cancellation kills the child.
+///
+/// `on_exit` fires exactly once with the learned exit code, at child
+/// exit observation: ahead of the drain close, so a reporter (the SSH
+/// wire `exit-status`) queues before the pump EOF that the close
+/// triggers. A fast child would otherwise win the race against a
+/// script-level report issued after this function returns.
 #[allow(clippy::too_many_arguments)]
 pub fn pump_pty_session<P: ProcessManager>(
     cx: &StepCtx<P>,
@@ -286,7 +317,7 @@ pub fn pump_pty_session<P: ProcessManager>(
     size_source: &SharedPtySize,
     in_pipe: &Value,
     out_pipe: &Value,
-    cancel: &AtomicBool,
+    on_exit: Option<Arc<dyn Fn(u32) + Send + Sync>>,
 ) -> Result<i64> {
     if argv.is_empty() {
         bail!("SSH_PTY_RUN needs at least a program");
@@ -297,14 +328,13 @@ pub fn pump_pty_session<P: ProcessManager>(
     let writer = cx
         .pipe_writer(out_pipe)
         .context("SSH pty cannot borrow the output pipe")?;
-    let backend = cx.pipe_backend(in_pipe);
 
-    let mut applied = initial;
-    let mut applied_seq = snapshot_pty_size(size_source);
+    let applied = initial;
+    let applied_seq = snapshot_pty_size(size_source);
     let pair = portable_pty::native_pty_system()
         .openpty(to_portable_size(applied))
         .context("SSH pty allocation failed")?;
-    let mut master_reader = pair
+    let master_reader = pair
         .master
         .try_clone_reader()
         .context("SSH pty master reader failed")?;
@@ -326,11 +356,11 @@ pub fn pump_pty_session<P: ProcessManager>(
     // tail bytes never reach the pipe. Unix reports child death as
     // master EOF either way, so the worker usually beats the drain
     // wait there and the quiescence path stays inert.
-    let mut master_opt = Some(pair.master);
+    let master_opt = Some(pair.master);
     // Last forwarded output, for the drain wait. Bytes flowing after
     // child death mean ConPTY is still flushing: keep waiting.
     let epoch = Instant::now();
-    let activity = AtomicU64::new(elapsed_ms(epoch));
+    let activity = Arc::new(AtomicU64::new(elapsed_ms(epoch)));
 
     let mut builder = portable_pty::CommandBuilder::new(&argv[0]);
     builder.args(&argv[1..]);
@@ -352,132 +382,312 @@ pub fn pump_pty_session<P: ProcessManager>(
     for (key, value) in &staged {
         builder.env(key, value);
     }
-    let mut child = pair
+    let child = pair
         .slave
         .spawn_command(builder)
         .context("SSH pty spawn failed")?;
     drop(pair.slave);
 
+    // Win32-OpenSSH parity: every console session opens cleared and
+    // homed, so the child renders onto a known blank screen instead of
+    // whatever the client held. Synchronously first, ahead of all
+    // console output (their paint and ours never reorder past this).
+    {
+        let mut guard = writer
+            .lock()
+            .map_err(|_| anyhow::anyhow!("SSH pty output lock poisoned"))?;
+        guard
+            .write_all(b"\x1b[2J\x1b[H")
+            .context("SSH pty session init write failed")?;
+        guard.flush().context("SSH pty session init flush failed")?;
+    }
+
+    let peer_done = Arc::new(AtomicBool::new(false));
+    // Split killer, valid while the reaper owns the wait handle:
+    // `clone_killer` exists exactly so a thread blocked in `wait` can
+    // still be signalled independently.
+    let mut killer = child.clone_killer();
+    let waiter = PtyWaiter {
+        child,
+        peer_done: Arc::clone(&peer_done),
+        report: on_exit,
+    };
+    let mut term = PtyTerm {
+        master: master_opt,
+        size_source: Arc::clone(size_source),
+        applied_seq,
+        activity: Arc::clone(&activity),
+        epoch,
+        exited_ms: None,
+        drain_generation: 0,
+    };
+    let hub = cx.cancel_hub();
+    // Task-local cancellation shared with the detached workers (see
+    // the capture rule in `bridge::pump_session`).
+    let cancel = Arc::new(AtomicBool::new(false));
+    let in_backend = cx.pipe_backend(in_pipe);
+    let resize_stop = Arc::new(AtomicBool::new(false));
+    let (event_tx, event_rx) = std::sync::mpsc::channel::<PtyEvent>();
     let mut failed: Option<anyhow::Error> = None;
-    let mut out_closed = false;
-    let peer_done = AtomicBool::new(false);
+    let mut in_done = false;
     let mut exit_code: Option<i64> = None;
-    std::thread::scope(|scope| {
-        let mut worker_in = Some(scope.spawn(|| {
-            pump_master_in(
-                &reader,
-                backend.as_ref(),
-                &master_writer,
-                cancel,
-                &peer_done,
-            )
-        }));
-        let mut worker_out = Some(scope.spawn(|| {
-            let result = pump_master_out(
-                &mut master_reader,
-                &writer,
-                &master_writer,
-                cancel,
-                &activity,
-                epoch,
-            );
-            peer_done.store(true, Ordering::SeqCst);
-            result
-        }));
-        // Child-death timestamp for the drain wait. Set once, on the
-        // first observation below; teardown follows quiescence, never
-        // the death itself.
-        let mut exited_ms: Option<u64> = None;
+    let mut outputs = [(
+        false,
+        DeferredClose {
+            pipe: out_pipe,
+            closed: false,
+        },
+    )];
+
+    // Arm a one-shot drain deadline (inlined at both use sites: a
+    // sleeper cannot spawn through a reborrowed scope): sleep `millis`,
+    // send `DrainDue(generation)`, exit. Schedule-once, act-once: this
+    // is a deadline, not a poll. Silence past the deadline means
+    // ConPTY is done flushing (or stranded); bytes in flight re-arm
+    // it. Sleeps at most one quiescence window, so a parked sleeper
+    // never delays teardown past it.
+    // Detached workers: the supervisor never joins them, so a worker
+    // parked in an uninterruptible read cannot strand the task thread.
+    // Clone every shared handle HERE, in plain (non-`move`) context
+    // (see the capture rule in `bridge::pump_session`); the frame
+    // keeps its own writers so backends detach at frame end.
+    let input_tx = event_tx.clone();
+    let output_tx = event_tx.clone();
+    let reaper_tx = event_tx.clone();
+    let resize_tx = event_tx.clone();
+    let input_hub = Arc::clone(&hub);
+    let output_hub = Arc::clone(&hub);
+    let reaper_hub = Arc::clone(&hub);
+    let resize_hub = Arc::clone(&hub);
+    let reader_in = Arc::clone(&reader);
+    let writer_out = Arc::clone(&writer);
+    let master_writer_in = Arc::clone(&master_writer);
+    let master_writer_out = Arc::clone(&master_writer);
+    let nudge_writer = Arc::clone(&master_writer);
+    let activity_out = Arc::clone(&activity);
+    let peer_done_in = Arc::clone(&peer_done);
+    let peer_done_out = Arc::clone(&peer_done);
+    let cancel_in = Arc::clone(&cancel);
+    let cancel_out = Arc::clone(&cancel);
+    let resize_cell = Arc::clone(size_source);
+    let resize_stop_in = Arc::clone(&resize_stop);
+    let mut resize_seen = applied_seq.seq;
+    std::thread::spawn(move || {
+        guard_worker(
+            &input_hub,
+            &input_tx,
+            |outcome| PtyEvent::Done(ChildDone(0, outcome)),
+            || {
+                let result = pump_pipe_to_sink(
+                    &reader_in,
+                    InputSink::Shared(master_writer_in),
+                    &cancel_in,
+                    &peer_done_in,
+                    "SSH pty",
+                );
+                // Unix EOF nudge replicating portable-pty's master-writer
+                // drop: the shared writer outlives this worker, so without
+                // it a stdin-blocked child never observes EOF.
+                send_release_nudge(&nudge_writer);
+                result
+            },
+        );
+    });
+    std::thread::spawn(move || {
+        let mut master_reader = master_reader;
+        guard_worker(
+            &output_hub,
+            &output_tx,
+            |outcome| PtyEvent::Done(ChildDone(1, outcome)),
+            || {
+                let result = pump_master_out(
+                    &mut master_reader,
+                    &writer_out,
+                    &master_writer_out,
+                    &cancel_out,
+                    &activity_out,
+                    epoch,
+                );
+                peer_done_out.store(true, Ordering::SeqCst);
+                result
+            },
+        );
+    });
+    std::thread::spawn(move || {
+        let code = waiter.wait_exit();
+        let _ = reaper_tx.send(PtyEvent::Exited(ChildExited(code)));
+        reaper_hub.poke();
+    });
+    // Resize watcher: sleeps in the size cell until a
+    // window-change lands, then asks the supervisor to apply it.
+    // No sequence polling: the cell notifies on every record.
+    // Detached; retired explicitly below (stop plus notify, then
+    // join: the wake is prompt, so the join is bounded).
+    let resize_watcher = std::thread::spawn(move || {
         loop {
-            reap(&mut worker_in, &mut failed);
-            let out_was_live = worker_out.is_some();
-            reap(&mut worker_out, &mut failed);
-            if out_was_live && worker_out.is_none() && !out_closed {
-                out_closed = true;
-                let _ = cx.close_pipe(out_pipe);
+            let snapshot = wait_size_changed(&resize_cell, resize_seen, &resize_stop_in);
+            if resize_stop_in.load(Ordering::SeqCst) {
+                break;
             }
-            // Live resize: an outer window-change bumps the shared cell's
-            // sequence; apply it so the kernel SIGWINCHes the child,
-            // which forwards it to the remote end itself. Sequenced, so
-            // an explicit open size is never clobbered by a stale default.
-            let current = snapshot_pty_size(size_source);
-            if current.seq != applied_seq.seq {
-                applied = current.size;
-                applied_seq = current;
-                // The master is gone once the child exits (see below):
-                // a dead child has no terminal left to resize.
-                if let Some(master) = master_opt.as_ref() {
-                    let _ = master.resize(to_portable_size(applied));
-                }
-            }
-            // Never poll a reaped child: past the first observed exit
-            // the wait handle is spent (Unix answers further polls with
-            // ECHILD), and re-stamping the death would push the drain
-            // wait out from under quiescence.
-            if exit_code.is_none() {
-                match child.try_wait() {
-                    Ok(Some(status)) => {
-                        peer_done.store(true, Ordering::SeqCst);
-                        exit_code = Some(i64::from(status.exit_code()));
-                        // The child is gone: note when, but keep the
-                        // console until the drain is due so a slow flush
-                        // still lands. Deferred to function end this
-                        // deadlocks on Windows, where the ConPTY host
-                        // holds the output pipe open until
-                        // ClosePseudoConsole runs; torn down the instant
-                        // the child dies it truncates the tail instead.
-                        exited_ms = Some(elapsed_ms(epoch));
+            resize_seen = snapshot.seq;
+            let _ = resize_tx.send(PtyEvent::Resize);
+            resize_hub.poke();
+        }
+    });
+    // Supervisor: drain completions, translate hub events into
+    // worker wakes, block on the hub otherwise. Every wake path is
+    // idempotent so repeated wakes while cancelled stay harmless.
+    // Cancellation breaks at once (after teardown): with detached
+    // workers there is no join to wait out, so the task thread
+    // always returns.
+    let mut seen = hub.sequence();
+    loop {
+        for event in event_rx.try_iter() {
+            match event {
+                PtyEvent::Done(done) => {
+                    if done.0 == 0 {
+                        in_done = true;
+                        note_failure(&mut failed, done.1, "input worker");
+                    } else {
+                        outputs[0].0 = true;
+                        note_failure(&mut failed, done.1, "output worker");
                     }
-                    Ok(None) => {}
-                    Err(_) => {
-                        peer_done.store(true, Ordering::SeqCst);
-                        // The wait handle is broken: no exit will ever be
-                        // observed, so note it once and let the drain wait
-                        // below force the release. Workers drain to EOF
-                        // and the reaper below reports.
-                        if exited_ms.is_none() {
-                            exited_ms = Some(elapsed_ms(epoch));
+                }
+                PtyEvent::Exited(exited) => {
+                    if exit_code.is_none() {
+                        exit_code = Some(exited.0);
+                        // The child is gone: note when, but the
+                        // console lives until the drain is due so a
+                        // slow flush still lands. Releasing it here
+                        // would truncate the tail; holding it to
+                        // function end strands the output worker
+                        // (ConPTY holds the pipe open until
+                        // ClosePseudoConsole runs). The quiet
+                        // deadline below threads between them.
+                        // Input ends at once (bytes pump nowhere):
+                        // the old tick observed `peer_done`; without
+                        // a tick the wake must be explicit.
+                        if let Some(inner) = in_backend.as_ref() {
+                            inner.cancel();
+                        }
+                        term.exited_ms = Some(elapsed_ms(term.epoch));
+                        term.drain_generation += 1;
+                        let generation = term.drain_generation;
+                        let quiet = quiet_remaining(&term);
+                        let drain_tx = event_tx.clone();
+                        let drain_hub = Arc::clone(&hub);
+                        // Detached one-shot sleeper (never joined):
+                        // it fires once and exits within a
+                        // quiescence window, so no join is needed.
+                        std::thread::spawn(move || {
+                            std::thread::sleep(std::time::Duration::from_millis(quiet));
+                            let _ = drain_tx.send(PtyEvent::DrainDue(generation));
+                            drain_hub.poke();
+                        });
+                    }
+                }
+                PtyEvent::Resize => {
+                    // Live resize: an outer window-change bumps the
+                    // shared cell's sequence; apply it so the kernel
+                    // SIGWINCHes the child, which forwards it to the
+                    // remote end itself. Sequenced, so an explicit
+                    // open size is never clobbered by a stale
+                    // default. The master is gone once released: a
+                    // dead child has no terminal left to resize.
+                    let current = snapshot_pty_size(&term.size_source);
+                    if current.seq != term.applied_seq.seq {
+                        term.applied_seq = current;
+                        if let Some(master) = term.master.as_ref() {
+                            let _ = master.resize(to_portable_size(current.size));
                         }
                     }
                 }
+                PtyEvent::DrainDue(generation) => {
+                    // Due drain with a live output worker: release
+                    // the console so its blocking read observes EOF,
+                    // then the close below lands after the flushed
+                    // tail. Bytes still flowing re-arm the deadline
+                    // instead; the cap inside `drain_overdue` bounds
+                    // the pathological console no matter what.
+                    if generation != term.drain_generation || term.master.is_none() || outputs[0].0
+                    {
+                        continue;
+                    }
+                    if drain_overdue(
+                        term.activity.load(Ordering::SeqCst),
+                        term.exited_ms,
+                        elapsed_ms(term.epoch),
+                    ) {
+                        term.master = None;
+                    } else {
+                        term.drain_generation += 1;
+                        let next_generation = term.drain_generation;
+                        let quiet = quiet_remaining(&term);
+                        let drain_tx = event_tx.clone();
+                        let drain_hub = Arc::clone(&hub);
+                        // Detached one-shot sleeper (never joined):
+                        // it fires once and exits within a
+                        // quiescence window, so no join is needed.
+                        std::thread::spawn(move || {
+                            std::thread::sleep(std::time::Duration::from_millis(quiet));
+                            let _ = drain_tx.send(PtyEvent::DrainDue(next_generation));
+                            drain_hub.poke();
+                        });
+                    }
+                }
             }
-            // Due drain with a live output worker: release the console
-            // so its blocking read observes EOF, then reaping closes the
-            // pipe after the flushed tail.
-            if worker_out.is_some()
-                && master_opt.is_some()
-                && drain_overdue(
-                    activity.load(Ordering::SeqCst),
-                    exited_ms,
-                    elapsed_ms(epoch),
-                )
-            {
-                master_opt = None;
-            }
-            if cx.is_cancelled() {
-                cancel.store(true, Ordering::SeqCst);
-                let _ = child.kill();
-            }
-            if worker_in.is_none() && worker_out.is_none() {
-                break;
-            }
-            std::thread::sleep(TICK);
         }
-    });
+        let outputs_done = close_drained_outputs(cx, &mut outputs, exit_code.is_some());
+        if in_done && outputs_done && exit_code.is_some() {
+            break;
+        }
+        if hub.is_cancelled() || cx.is_cancelled() {
+            cancel.store(true, Ordering::SeqCst);
+            if let Some(inner) = in_backend.as_ref() {
+                inner.cancel();
+            }
+            // Release the console so a worker parked in the master
+            // read ends at once; teardown drops it at function end
+            // either way.
+            term.master = None;
+            let _ = killer.kill();
+            // Prompt downstream EOF on the way out, then return at
+            // once: with detached workers there is no join to wait
+            // out, so the task thread always returns.
+            let _ = cx.close_pipe(in_pipe);
+            let _ = cx.close_pipe(out_pipe);
+            break;
+        }
+        (_, seen) = hub.wait(seen);
+    }
+    // Retire the resize watcher, then join it: the stop flag plus
+    // the poke wake it promptly, so the join is bounded (unlike a
+    // worker parked in an uninterruptible read, which is never
+    // joined).
+    resize_stop.store(true, Ordering::SeqCst);
+    crate::state::poke_size(size_source);
+    let _ = resize_watcher.join();
     if let Some(err) = failed {
         return Err(err);
     }
-    match exit_code {
-        Some(code) => Ok(code),
-        None => {
-            // Workers drained without an observed exit (cancellation or
-            // master EOF race): reap the authoritative status blocking.
-            match child.wait() {
-                Ok(status) => Ok(i64::from(status.exit_code())),
-                Err(err) => bail!("SSH pty reaped with error: {err}"),
-            }
-        }
+    if cancel.load(Ordering::SeqCst) {
+        anyhow::bail!("SSH pty run interrupted by cancellation");
     }
+    Ok(exit_code.unwrap_or(-1))
+}
+
+/// Millis until the drain deadline from here: the quiescence window
+/// past the later of last output and child death, floored at one so a
+/// due drain still schedules (and observes) its release.
+fn quiet_remaining(term: &PtyTerm) -> u64 {
+    let now = elapsed_ms(term.epoch);
+    let anchor = term
+        .activity
+        .load(Ordering::SeqCst)
+        .max(term.exited_ms.unwrap_or(now));
+    DRAIN_QUIESCE_MS
+        .saturating_sub(now.saturating_sub(anchor))
+        .max(1)
 }
 
 #[cfg(test)]
@@ -510,23 +720,47 @@ mod tests {
     }
 
     #[test]
-    fn answers_split_query_once() {
+    fn query_answered_once_and_stripped() {
         let (master_in, seen) = harness();
-        let mut tail = [0u8; 3];
-        let mut tail_len = 0;
-        answer_conhost_queries(b"abc\x1b[", &mut tail, &mut tail_len, &master_in);
+        let mut filter = DsrFilter::new();
+        assert_eq!(filter.feed(b"ab\x1b[6ncd", &master_in).as_slice(), b"abcd");
+        assert_eq!(
+            seen.lock().expect("sink readable").as_slice(),
+            b"\x1b[1;1R".as_slice()
+        );
+        assert!(filter.flush().is_empty());
+    }
+
+    #[test]
+    fn split_query_answered_once_and_stripped() {
+        let (master_in, seen) = harness();
+        let mut filter = DsrFilter::new();
+        assert_eq!(filter.feed(b"abc\x1b[", &master_in).as_slice(), b"abc");
         assert!(seen.lock().expect("sink readable").is_empty());
-        answer_conhost_queries(b"6nrest", &mut tail, &mut tail_len, &master_in);
+        assert_eq!(filter.feed(b"6nrest", &master_in).as_slice(), b"rest");
         assert_eq!(
             seen.lock().expect("sink readable").as_slice(),
             b"\x1b[1;1R".as_slice()
         );
-        // Replaying the boundary afterwards must not double answer.
-        answer_conhost_queries(b"more", &mut tail, &mut tail_len, &master_in);
+        // Replay past the boundary: the consumed query never rescans.
+        assert_eq!(filter.feed(b"more", &master_in).as_slice(), b"more");
         assert_eq!(
             seen.lock().expect("sink readable").as_slice(),
             b"\x1b[1;1R".as_slice()
         );
+        assert!(filter.flush().is_empty());
+    }
+
+    #[test]
+    fn trailing_prefix_flushed_at_eof() {
+        let (master_in, seen) = harness();
+        let mut filter = DsrFilter::new();
+        assert_eq!(
+            filter.feed(b"ends with \x1b[", &master_in).as_slice(),
+            b"ends with "
+        );
+        assert!(seen.lock().expect("sink readable").is_empty());
+        assert_eq!(filter.flush().as_slice(), b"\x1b[");
     }
 
     #[test]
@@ -559,14 +793,14 @@ mod tests {
     #[test]
     fn silent_without_query() {
         let (master_in, seen) = harness();
-        let mut tail = [0u8; 3];
-        let mut tail_len = 0;
-        answer_conhost_queries(
-            b"plain output, no query",
-            &mut tail,
-            &mut tail_len,
-            &master_in,
+        let mut filter = DsrFilter::new();
+        assert_eq!(
+            filter
+                .feed(b"plain output, no query", &master_in)
+                .as_slice(),
+            b"plain output, no query"
         );
         assert!(seen.lock().expect("sink readable").is_empty());
+        assert!(filter.flush().is_empty());
     }
 }

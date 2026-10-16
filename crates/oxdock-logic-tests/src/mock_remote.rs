@@ -17,15 +17,22 @@ use std::sync::{Arc, Mutex};
 pub struct MockRemoteRunner;
 
 impl MockRemoteRunner {
-    fn drain_backend(backend: &oxdock_pipe::PipeInner) -> Result<Vec<u8>> {
-        use std::time::Duration;
+    fn drain_backend(backend: &std::sync::Arc<oxdock_pipe::PipeInner>) -> Result<Vec<u8>> {
+        // EOF-driven: the guest stdin ends when its writers detach,
+        // the same rule the real transport pump enforces. No quiet
+        // timeout: stopping early on a lull would lose late bytes.
+        let reader = backend.reader_handle();
         let mut out = Vec::new();
         let mut buf = [0u8; 8192];
         loop {
-            match backend.read_into_timeout(&mut buf, Duration::from_millis(10))? {
-                Some(0) | None => break,
-                Some(n) => out.extend_from_slice(&buf[..n]),
+            let count = reader
+                .lock()
+                .map_err(|_| anyhow!("mock stdin lock poisoned"))?
+                .read(&mut buf)?;
+            if count == 0 {
+                break;
             }
+            out.extend_from_slice(&buf[..count]);
         }
         Ok(out)
     }

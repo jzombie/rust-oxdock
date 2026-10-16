@@ -92,7 +92,7 @@ socket2 = "0.6.5"
 syn = { version = "3.0.4", features = ["full", "visit"] }
 tar = "0.4.46"
 tempfile = "3.27.0"
-tokio = { version = "1", features = ["rt", "net", "sync", "time", "io-util"] }
+tokio = { version = "1", features = ["rt", "net", "sync", "time", "io-util", "macros"] }
 toml = "1.1.4"
 toml_edit = "0.25.13"
 tracing = "0.1.44"

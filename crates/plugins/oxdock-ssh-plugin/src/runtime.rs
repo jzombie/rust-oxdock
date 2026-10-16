@@ -18,8 +18,11 @@ use crate::auth::ServerFactory;
 use crate::state::{CHANNEL_CAPACITY, DownMsg, SessionQueue, ShutdownSignal, UpMsg};
 use russh::server::Server as _;
 
-/// Inactivity timeout for idle SSH sessions.
-const INACTIVITY_TIMEOUT: Duration = Duration::from_secs(300);
+/// Default idle kill for quiet SSH legs: connections with no traffic
+/// this long are reaped, so vanished clients cannot leak tasks, ports,
+/// and permits forever. `SSH_SERVE` accepts an `idle_timeout` override
+/// per server (zero disables); this default covers `SSH_CONNECT` legs.
+pub const DEFAULT_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Drive one `SSH_SERVE` listener until shutdown. Owns the current-thread
 /// runtime; returns when the listener closes (shutdown or fatal accept
@@ -32,6 +35,7 @@ pub fn serve(
     password: String,
     queue: Arc<SessionQueue>,
     shutdown_rx: std::sync::mpsc::Receiver<ShutdownSignal>,
+    inactivity_timeout: Option<Duration>,
 ) {
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -41,10 +45,18 @@ pub fn serve(
         Err(_) => return,
     };
     runtime.block_on(async move {
-        serve_async(listener, key, user, password, queue, shutdown_rx)
-            .await
-            .map(|_| ())
-            .unwrap_or(());
+        serve_async(
+            listener,
+            key,
+            user,
+            password,
+            queue,
+            shutdown_rx,
+            inactivity_timeout,
+        )
+        .await
+        .map(|_| ())
+        .unwrap_or(());
     });
 }
 
@@ -55,10 +67,16 @@ async fn serve_async(
     password: String,
     queue: Arc<SessionQueue>,
     shutdown_rx: std::sync::mpsc::Receiver<ShutdownSignal>,
+    inactivity_timeout: Option<Duration>,
 ) -> Result<()> {
     let config = Arc::new(russh::server::Config {
-        inactivity_timeout: Some(INACTIVITY_TIMEOUT),
-        auth_rejection_time: Duration::from_secs(1),
+        inactivity_timeout,
+        // Rejection padding stays (user-enumeration resistance), but
+        // sized for an ephemeral proxy: every login waits this out
+        // (the client's opening `none` probe included), so a full
+        // second stalls each password prompt by a noticeable beat.
+        auth_rejection_time: Duration::from_millis(100),
+        auth_rejection_time_initial: Some(Duration::from_millis(100)),
         keys: vec![key],
         ..Default::default()
     });
@@ -106,6 +124,12 @@ impl russh::client::Handler for AcceptAnyHostKey {
 pub struct OutboundSession {
     pub up_rx: mpsc::Receiver<UpMsg>,
     pub down_tx: mpsc::Sender<DownMsg>,
+    /// First `exit-status` the server sent, if any. Shared with the wire
+    /// task; read after the pump drains.
+    pub exit_status: Arc<std::sync::Mutex<Option<u32>>>,
+    /// Wire task join handle: awaited after disconnect so a status that
+    /// arrives after EOF is recorded before the result map is read.
+    pub wire_done: tokio::task::JoinHandle<()>,
     pub(crate) handle: russh::client::Handle<AcceptAnyHostKey>,
 }
 
@@ -132,7 +156,7 @@ pub async fn connect_session(
     password: &str,
 ) -> Result<OutboundSession> {
     let config = Arc::new(russh::client::Config {
-        inactivity_timeout: Some(INACTIVITY_TIMEOUT),
+        inactivity_timeout: Some(DEFAULT_INACTIVITY_TIMEOUT),
         ..Default::default()
     });
     let mut session = russh::client::connect(config, *target, AcceptAnyHostKey)
@@ -160,22 +184,27 @@ pub async fn connect_session(
 
     // Wire bytes toward the pump. A channel EOF half-closes the pump
     // (it may still flush its own output); a close ends the queue by
-    // dropping the sender.
-    tokio::spawn(async move {
+    // dropping the sender. The first exit-status is recorded for the
+    // result map; later ones cannot happen on one channel. EOF never
+    // ends this task: a status learned at child teardown can arrive
+    // after it (stock clients behave the same), and only Close or
+    // disconnect means no more messages will ever come. Sends after
+    // the pump is gone fail silently and the drain continues.
+    let exit_status = Arc::new(std::sync::Mutex::new(None));
+    let exit_status_writer = Arc::clone(&exit_status);
+    let wire_done = tokio::spawn(async move {
         while let Some(message) = reader.wait().await {
             match message {
                 russh::ChannelMsg::Data { data } => {
-                    if up_tx
-                        .send(UpMsg::Data(Bytes::copy_from_slice(&data)))
-                        .await
-                        .is_err()
-                    {
-                        break;
+                    let _ = up_tx.send(UpMsg::Data(Bytes::copy_from_slice(&data))).await;
+                }
+                russh::ChannelMsg::ExitStatus { exit_status: code } => {
+                    if let Ok(mut slot) = exit_status_writer.lock() {
+                        slot.get_or_insert(code);
                     }
                 }
                 russh::ChannelMsg::Eof => {
                     let _ = up_tx.send(UpMsg::Eof).await;
-                    break;
                 }
                 russh::ChannelMsg::Close => break,
                 _ => {}
@@ -190,6 +219,8 @@ pub async fn connect_session(
             let result = match message {
                 DownMsg::Data(bytes) => writer.data_bytes(bytes).await.map(|_| ()),
                 DownMsg::Eof => writer.eof().await.map(|_| ()),
+                // Server-to-client only: never queued on this leg.
+                DownMsg::ExitStatus(_) => Ok(()),
             };
             if result.is_err() {
                 break;
@@ -201,6 +232,21 @@ pub async fn connect_session(
     Ok(OutboundSession {
         up_rx,
         down_tx,
+        exit_status,
+        wire_done,
         handle: session,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_inactivity_timeout_is_five_minutes() {
+        // The idle kill default is a policy choice, not an accident:
+        // pin it so a quiet edit cannot reintroduce the beat every
+        // login used to wait out.
+        assert_eq!(DEFAULT_INACTIVITY_TIMEOUT, Duration::from_secs(300));
+    }
 }

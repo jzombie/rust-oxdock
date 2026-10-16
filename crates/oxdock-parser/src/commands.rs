@@ -1601,9 +1601,10 @@ declare_commands! {
         flags: &[],
         default_output: None,
         examples: &[ Example { name: "prompt needs a terminal", fence_meta: Some("expect_error:\"non-TTY\""), code: indoc! {r#"
-            # Headless runs have no terminal: without a default the
+            # A redirected stdin can never answer: without a default the
             # prompt fails instead of hanging or reading piped stdin.
-            PROMPT $dir "Install destination?"
+            LET $p: PIPE
+            WITH_IO [stdin=$p] PROMPT $dir "Install destination?"
         "#} } ],
         lower: |_flags, args| {
             let mut it = args.into_iter();

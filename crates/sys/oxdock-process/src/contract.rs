@@ -132,6 +132,21 @@ impl From<Option<SharedInput>> for CommandStdin {
     }
 }
 
+impl CommandStdin {
+    /// Whether stdin is bound to a virtual pipe (`WITH_IO [stdin=...]`).
+    /// A redirected stdin can never answer an interactive prompt, so
+    /// terminal-facing steps treat this as non-interactive even when
+    /// the host process itself owns a TTY.
+    pub fn is_redirected(&self) -> bool {
+        match self {
+            CommandStdin::Stream(_) => true,
+            #[cfg(not(miri))]
+            CommandStdin::OsPipe(_) => true,
+            CommandStdin::Null | CommandStdin::Inherit => false,
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 pub enum CommandStderr {
     #[default]
@@ -220,6 +235,14 @@ pub trait ProcessManager: Clone + Send + 'static {
         _options: CommandOptions,
     ) -> Result<CommandResult<Self::Handle>> {
         bail!("run_argv not implemented for argv {argv:?}")
+    }
+
+    /// Whether host stdin is an interactive terminal. The default
+    /// implementation reports the real stdin; test doubles override
+    /// this so prompt paths stay hermetic under any harness stdin.
+    fn stdin_is_terminal(&self) -> bool {
+        use std::io::IsTerminal;
+        std::io::stdin().is_terminal()
     }
 
     /// Spawn an argv command without waiting for completion. The default

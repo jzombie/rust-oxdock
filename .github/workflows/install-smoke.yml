@@ -19,11 +19,11 @@ on:
 # to a newer tag only after it proves green; an older engine choking on
 # new syntax fails loudly at step start, which is the point.
 env:
-  OXDOCK_PINNED_ENGINE: v0.26.0-alpha
-  # TODO: Remove after 0.29.0-alpha release: legs run the branch-built
-  # engine so unreleased DSL is testable. Deleting this restores the
-  # pinned release with no other edits (empty selects release).
-  OXDOCK_ENGINE_SOURCE: local
+  OXDOCK_PINNED_ENGINE: v0.29.0-alpha
+  # Legs run the branch-built engine so unreleased DSL is testable.
+  # Deleting this restores the pinned release with no other edits (empty
+  # selects release).
+  # OXDOCK_ENGINE_SOURCE: local
 
 jobs:
   parse:

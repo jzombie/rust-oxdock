@@ -6,6 +6,7 @@ pub mod env_policy;
 mod expand;
 #[cfg(feature = "mock-process")]
 mod mock;
+pub mod pump;
 pub mod serial_cargo_env;
 mod shell;
 mod shell_manager;
@@ -31,6 +32,7 @@ pub use expand::{
     format_value_for_string, parse_placeholder_call, resolve_placeholder_arg,
 };
 pub use oxdock_sys_test_utils::TestEnvGuard;
+pub use pump::{CancelGuard, CancelHub, PUMP_CHUNK, read_pump_chunk, run_guarded};
 pub use shell::{ShellLauncher, batch_shell, shell_program, spawn_interactive_shell};
 pub use shell_manager::ShellProcessManager;
 
