@@ -54,14 +54,16 @@ fn pump_fd_to_pipe(
 /// Backend half of the shared child-pump core: plain-pipe handles. No
 /// extras: pipes EOF on their own, so teardown is just reap plus close.
 /// The reaper owns the wait handle; the supervisor kills through a
-/// clone (pid-based, valid mid-wait) and applies deferred closes.
-struct RunWaiter<'a> {
+/// clone (pid-based, valid mid-wait) and applies deferred closes. All
+/// shared state is reference counted: the reaper runs detached, so
+/// nothing here borrows the pump frame.
+struct RunWaiter {
     handle: ChildHandle,
-    peer_done: &'a AtomicBool,
-    report: Option<&'a (dyn Fn(u32) + Sync)>,
+    peer_done: Arc<AtomicBool>,
+    report: Option<Arc<dyn Fn(u32) + Send + Sync>>,
 }
 
-impl RunWaiter<'_> {
+impl RunWaiter {
     /// Block until the child exits and report the wire status inside,
     /// returning the code. Signaled deaths and broken wait handles map
     /// to -1 (clients observe the close without a status). Runs on the
@@ -86,6 +88,62 @@ impl RunWaiter<'_> {
     }
 }
 
+/// One supervisor event: a directional worker finished, or the reaper
+/// observed child exit. A single channel carries both so the
+/// supervisor parks on one blocking receive after servicing
+/// cancellation, with zero CPU and no second queue to poll.
+enum RunEvent {
+    Done(ChildDone),
+    Exited(ChildExited),
+}
+
+/// Apply one supervisor event: completion bookkeeping and deferred
+/// closes stay gated on an observed exit, exactly as before. Shared by
+/// the drain loop and the post-cancel park, so both paths observe the
+/// same ordering and neither duplicates the arms.
+#[allow(clippy::too_many_arguments)]
+fn handle_run_event(
+    event: RunEvent,
+    in_done: &mut bool,
+    outputs: &mut [(bool, DeferredClose<'_>)],
+    failed: &mut Option<anyhow::Error>,
+    exit_code: &mut Option<i64>,
+    in_backend: &Option<Arc<oxdock_pipe::PipeInner>>,
+) {
+    match event {
+        RunEvent::Done(done) => {
+            let name = match done.0 {
+                0 => {
+                    *in_done = true;
+                    "input worker"
+                }
+                1 => {
+                    outputs[0].0 = true;
+                    "stdout worker"
+                }
+                2 => {
+                    outputs[1].0 = true;
+                    "stderr worker"
+                }
+                _ => "unknown worker",
+            };
+            note_failure(failed, done.1, name);
+        }
+        RunEvent::Exited(exited) => {
+            if exit_code.is_none() {
+                *exit_code = Some(exited.0);
+                // The child is gone: bytes pump nowhere, so end a
+                // worker parked in its pipe read. The old tick
+                // observed `peer_done`; without a tick the wake
+                // must be explicit.
+                if let Some(inner) = in_backend.as_ref() {
+                    inner.cancel();
+                }
+            }
+        }
+    }
+}
+
 /// Run `argv` with piped stdio through explicit DSL pipes until the
 /// child exits. Returns the exit code, or -1 when the child died by
 /// signal (nothing reportable then: clients observe the close without
@@ -99,8 +157,7 @@ pub fn pump_run_session<P: ProcessManager>(
     in_pipe: &Value,
     out_pipe: &Value,
     err_pipe: &Value,
-    cancel: &AtomicBool,
-    on_exit: Option<&(dyn Fn(u32) + Sync)>,
+    on_exit: Option<Arc<dyn Fn(u32) + Send + Sync>>,
 ) -> Result<i64> {
     if argv.is_empty() {
         bail!("SSH_RUN needs at least a program");
@@ -147,19 +204,21 @@ pub fn pump_run_session<P: ProcessManager>(
     };
     let child_stderr: Box<dyn Read + Send> = Box::new(stderr);
 
-    let peer_done = AtomicBool::new(false);
+    let peer_done = Arc::new(AtomicBool::new(false));
     let waiter = RunWaiter {
         handle,
-        peer_done: &peer_done,
+        peer_done: Arc::clone(&peer_done),
         report: on_exit,
     };
     // Pid-based kill handle, valid while the reaper owns the wait
     // handle: killing never needs the `&mut` the blocking wait holds.
     let mut killer = waiter.handle.clone();
     let hub = cx.cancel_hub();
+    // Task-local cancellation shared with the detached workers (see
+    // `bridge::pump_session` for the capture rule).
+    let cancel = Arc::new(AtomicBool::new(false));
     let in_backend = cx.pipe_backend(in_pipe);
-    let (done_tx, done_rx) = std::sync::mpsc::channel::<ChildDone>();
-    let (exit_tx, exit_rx) = std::sync::mpsc::channel::<ChildExited>();
+    let (event_tx, event_rx) = std::sync::mpsc::channel::<RunEvent>();
     let mut failed: Option<anyhow::Error> = None;
     let mut in_done = false;
     let mut exit_code: Option<i64> = None;
@@ -179,116 +238,112 @@ pub fn pump_run_session<P: ProcessManager>(
             },
         ),
     ];
-    std::thread::scope(|scope| {
-        // Owned captures only (senders cloned, Arcs and stdio halves
-        // moved in, shared borrows pre-bound: all `Copy`). Owned
-        // stdin drops at thread end, closing the child stdin; a
-        // borrowed handle would outlive the worker and the child
-        // would never observe EOF.
-        let reader_in = &reader;
-        let peer_done_in = &peer_done;
-        let in_tx = done_tx.clone();
-        let out_tx = done_tx.clone();
-        let err_tx = done_tx.clone();
-        let in_hub = Arc::clone(&hub);
-        let out_hub = Arc::clone(&hub);
-        let err_hub = Arc::clone(&hub);
-        // Shared writers, cloned outside the `move` closures (see the
-        // capture rule in `bridge::pump_session`): the frame keeps its
-        // own Arc so backends detach at frame end, after the exit.
-        let out_writer_out = Arc::clone(&out_writer);
-        let err_writer_out = Arc::clone(&err_writer);
-        scope.spawn(move || {
-            guard_worker(
-                &in_hub,
-                &in_tx,
-                |outcome| ChildDone(0, outcome),
-                || {
-                    pump_pipe_to_sink(
-                        reader_in,
-                        InputSink::Owned(child_stdin),
-                        cancel,
-                        peer_done_in,
-                        "SSH run",
-                    )
-                },
-            );
-        });
-        scope.spawn(move || {
-            let mut child_stdout = child_stdout;
-            guard_worker(
-                &out_hub,
-                &out_tx,
-                |outcome| ChildDone(1, outcome),
-                || pump_fd_to_pipe(&mut child_stdout, &out_writer_out, "stdout"),
-            );
-        });
-        scope.spawn(move || {
-            let mut child_stderr = child_stderr;
-            guard_worker(
-                &err_hub,
-                &err_tx,
-                |outcome| ChildDone(2, outcome),
-                || pump_fd_to_pipe(&mut child_stderr, &err_writer_out, "stderr"),
-            );
-        });
-        let reaper_hub = Arc::clone(&hub);
-        scope.spawn(move || {
-            let code = waiter.wait_exit();
-            let _ = exit_tx.send(ChildExited(code));
-            reaper_hub.poke();
-        });
-        // Supervisor: drain completions, translate hub events into
-        // worker wakes, block otherwise. Every wake path is idempotent
-        // so repeated wakes while cancelled stay harmless.
-        let mut seen = hub.sequence();
-        loop {
-            for event in done_rx.try_iter() {
-                let name = match event.0 {
-                    0 => {
-                        in_done = true;
-                        "input worker"
-                    }
-                    1 => {
-                        outputs[0].0 = true;
-                        "stdout worker"
-                    }
-                    2 => {
-                        outputs[1].0 = true;
-                        "stderr worker"
-                    }
-                    _ => "unknown worker",
-                };
-                note_failure(&mut failed, event.1, name);
-            }
-            for event in exit_rx.try_iter() {
-                if exit_code.is_none() {
-                    exit_code = Some(event.0);
-                    // The child is gone: bytes pump nowhere, so end a
-                    // worker parked in its pipe read. The old tick
-                    // observed `peer_done`; without a tick the wake
-                    // must be explicit.
-                    if let Some(inner) = in_backend.as_ref() {
-                        inner.cancel();
-                    }
-                }
-            }
-            let outputs_done = close_drained_outputs(cx, &mut outputs, exit_code.is_some());
-            if in_done && outputs_done && exit_code.is_some() {
-                break;
-            }
-            if hub.is_cancelled() || cx.is_cancelled() {
-                cancel.store(true, Ordering::SeqCst);
-                if let Some(inner) = in_backend.as_ref() {
-                    inner.cancel();
-                }
-                let _ = killer.kill();
-            }
-            (_, seen) = hub.wait(seen);
-        }
+    // Detached workers: the supervisor never joins them, so a worker
+    // parked in an uninterruptible read (an orphaned grandchild
+    // holding its stdio past every kill) cannot strand the task
+    // thread. Capture rule: clone every shared handle HERE, in plain
+    // (non-`move`) context, and move only the clones into the
+    // workers. A `move` closure moves everything it touches, even
+    // through `&`: cloning inside would steal the frame's own Arc,
+    // and pipe writers must stay attached until frame end. Owned
+    // stdin drops at its worker's end, closing the child stdin; a
+    // borrowed handle would outlive the worker and the child would
+    // never observe EOF.
+    let in_tx = event_tx.clone();
+    let out_tx = event_tx.clone();
+    let err_tx = event_tx.clone();
+    let in_hub = Arc::clone(&hub);
+    let out_hub = Arc::clone(&hub);
+    let err_hub = Arc::clone(&hub);
+    let reaper_hub = Arc::clone(&hub);
+    let reader_in = Arc::clone(&reader);
+    let peer_done_in = Arc::clone(&peer_done);
+    let cancel_in = Arc::clone(&cancel);
+    let out_writer_out = Arc::clone(&out_writer);
+    let err_writer_out = Arc::clone(&err_writer);
+    std::thread::spawn(move || {
+        guard_worker(
+            &in_hub,
+            &in_tx,
+            |outcome| RunEvent::Done(ChildDone(0, outcome)),
+            || {
+                pump_pipe_to_sink(
+                    &reader_in,
+                    InputSink::Owned(child_stdin),
+                    &cancel_in,
+                    &peer_done_in,
+                    "SSH run",
+                )
+            },
+        );
     });
-    if let Some(err) = failed {
-        return Err(err);
+    std::thread::spawn(move || {
+        let mut child_stdout = child_stdout;
+        guard_worker(
+            &out_hub,
+            &out_tx,
+            |outcome| RunEvent::Done(ChildDone(1, outcome)),
+            || pump_fd_to_pipe(&mut child_stdout, &out_writer_out, "stdout"),
+        );
+    });
+    std::thread::spawn(move || {
+        let mut child_stderr = child_stderr;
+        guard_worker(
+            &err_hub,
+            &err_tx,
+            |outcome| RunEvent::Done(ChildDone(2, outcome)),
+            || pump_fd_to_pipe(&mut child_stderr, &err_writer_out, "stderr"),
+        );
+    });
+    std::thread::spawn(move || {
+        let code = waiter.wait_exit();
+        let _ = event_tx.send(RunEvent::Exited(ChildExited(code)));
+        reaper_hub.poke();
+    });
+    // Supervisor: drain completions, translate hub events into worker
+    // wakes, block on the hub otherwise. Every wake path is idempotent
+    // so repeated wakes while cancelled stay harmless. Cancellation
+    // breaks at once (after teardown): with detached workers there is
+    // no join to wait out, so the task thread always returns.
+    let mut seen = hub.sequence();
+    loop {
+        for event in event_rx.try_iter() {
+            handle_run_event(
+                event,
+                &mut in_done,
+                &mut outputs,
+                &mut failed,
+                &mut exit_code,
+                &in_backend,
+            );
+        }
+        let outputs_done = close_drained_outputs(cx, &mut outputs, exit_code.is_some());
+        if in_done && outputs_done && exit_code.is_some() {
+            break;
+        }
+        if hub.is_cancelled() || cx.is_cancelled() {
+            cancel.store(true, Ordering::SeqCst);
+            if let Some(inner) = in_backend.as_ref() {
+                inner.cancel();
+            }
+            let _ = killer.kill();
+            // Prompt downstream EOF on the way out: readers parked
+            // past this see the close instead of hanging, and writers
+            // still pushing fail out of their loops.
+            let _ = cx.close_pipe(in_pipe);
+            let _ = cx.close_pipe(out_pipe);
+            let _ = cx.close_pipe(err_pipe);
+            break;
+        }
+        (_, seen) = hub.wait(seen);
     }
-    Ok(exit_code.unwrap_or(-1))
+    match failed {
+        Some(err) => Err(err),
+        None => {
+            if cancel.load(Ordering::SeqCst) {
+                anyhow::bail!("SSH run interrupted by cancellation");
+            }
+            Ok(exit_code.unwrap_or(-1))
+        }
+    }
 }

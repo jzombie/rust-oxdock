@@ -181,6 +181,15 @@ pub(crate) fn note_failure(
 /// observes EOF promptly instead of waiting out unrelated writer and
 /// keeper lifetimes. The first worker error wins.
 ///
+/// Workers run detached: the supervisor never joins them, so a worker
+/// parked in an uninterruptible read (an orphaned grandchild holding
+/// its pipe past every kill) cannot strand the task thread. Every
+/// worker owns its captures outright (`Arc` clones, moved queue ends)
+/// and reports through [`guard_worker`]; the frame keeps its own pipe
+/// writers so backends detach at frame end. A stuck worker parks
+/// quietly in kernel space holding its references until its pipe
+/// severs; it never spins, and it never blocks teardown.
+///
 /// The wire worker waits on the data queue and a supervisor wake queue
 /// together (one blocking wait, no timeout): wakes release it for
 /// cancellation or a finished peer, while the data queue's sender-drop
@@ -196,7 +205,6 @@ pub fn pump_session<P: ProcessManager>(
     out_pipe: &Value,
     up_rx: mpsc::Receiver<UpMsg>,
     down_tx: mpsc::Sender<DownMsg>,
-    cancel: &AtomicBool,
     break_on_peer_done: bool,
 ) -> Result<()> {
     let reader = cx
@@ -207,6 +215,10 @@ pub fn pump_session<P: ProcessManager>(
         .context("SSH pump cannot borrow the output pipe")?;
     let in_backend = cx.pipe_backend(in_pipe);
     let hub = cx.cancel_hub();
+    // Task-local cancellation shared with the detached workers. The
+    // caller's token stays the source of truth (`cx.is_cancelled`);
+    // this flag is the workers' copy of it.
+    let cancel = Arc::new(AtomicBool::new(false));
     // Bare current-thread wait runtime for the wire worker's joint
     // queue wait: no drivers, no threads of its own, just a parking
     // spot. One per session; the client legs already pay more than
@@ -218,92 +230,104 @@ pub fn pump_session<P: ProcessManager>(
     // best-effort: a full queue means queued wakes already guarantee
     // the worker releases.
     let (wake_tx, wake_rx) = mpsc::channel::<()>(8);
-    let peer_done = AtomicBool::new(false);
+    let peer_done = Arc::new(AtomicBool::new(false));
     let (done_tx, done_rx) = std::sync::mpsc::channel::<SessionDone>();
     let mut failed: Option<anyhow::Error> = None;
     let mut in_done = false;
     let mut out_done = false;
     let mut out_closed = false;
-    std::thread::scope(|scope| {
-        // Capture rule for every worker below: a `move` closure moves
-        // everything it touches, even through `&`. Shared refs must be
-        // pre-bound outside (a `&` is `Copy`) and shared writers
-        // explicitly cloned outside, or the frame loses them early and
-        // backends detach mid-session. Queue ends and stdio halves
-        // move in deliberately.
-        let in_tx = done_tx.clone();
-        let out_tx = done_tx.clone();
-        let peer_done_in = &peer_done;
-        let reader_in = &reader;
-        let down_tx_in = &down_tx;
-        let writer_out = Arc::clone(&writer);
-        let in_hub = Arc::clone(&hub);
-        let out_hub = Arc::clone(&hub);
-        scope.spawn(move || {
-            guard_worker(&in_hub, &in_tx, SessionDone::InDone, || {
-                let result = pump_in(reader_in, down_tx_in, cancel);
-                if result.is_ok() {
-                    peer_done_in.store(true, Ordering::SeqCst);
-                }
-                result
-            });
+    // Detached workers: the supervisor never joins them, so a worker
+    // parked in an uninterruptible read cannot strand the task thread.
+    // Every worker owns its captures outright (`Arc` clones, moved
+    // queue ends); the frame keeps its own pipe writers so backends
+    // detach at frame end.
+    let in_tx = done_tx.clone();
+    let out_tx = done_tx.clone();
+    let peer_done_in = Arc::clone(&peer_done);
+    let peer_done_out = Arc::clone(&peer_done);
+    let reader_in = Arc::clone(&reader);
+    let down_tx_in = down_tx.clone();
+    let writer_out = Arc::clone(&writer);
+    let cancel_in = Arc::clone(&cancel);
+    let cancel_out = Arc::clone(&cancel);
+    let in_hub = Arc::clone(&hub);
+    let out_hub = Arc::clone(&hub);
+    std::thread::spawn(move || {
+        guard_worker(&in_hub, &in_tx, SessionDone::InDone, || {
+            let result = pump_in(&reader_in, &down_tx_in, &cancel_in);
+            if result.is_ok() {
+                peer_done_in.store(true, Ordering::SeqCst);
+            }
+            result
         });
-        scope.spawn(move || {
-            guard_worker(&out_hub, &out_tx, SessionDone::OutDone, || {
-                pump_out(
-                    &writer_out,
-                    up_rx,
-                    wake_rx,
-                    wait_runtime,
-                    cancel,
-                    peer_done_in,
-                    break_on_peer_done,
-                )
-            });
-        });
-        // Supervisor: drain completions, translate hub events into
-        // worker wakes, block otherwise. Every wake path is idempotent
-        // (flag stores, pipe cancel, best-effort wakes) so repeated
-        // wakes while cancelled stay harmless.
-        let mut seen = hub.sequence();
-        loop {
-            for event in done_rx.try_iter() {
-                match event {
-                    SessionDone::InDone(outcome) => {
-                        in_done = true;
-                        note_failure(&mut failed, outcome, "input worker");
-                        if break_on_peer_done {
-                            let _ = wake_tx.try_send(());
-                        }
-                    }
-                    SessionDone::OutDone(outcome) => {
-                        out_done = true;
-                        note_failure(&mut failed, outcome, "output worker");
-                        if !out_closed {
-                            out_closed = true;
-                            // Best-effort EOF propagation: unbound/OS pipes cannot
-                            // force-close, and their kernel halves close by drop.
-                            let _ = cx.close_pipe(out_pipe);
-                        }
-                    }
-                }
-            }
-            if in_done && out_done {
-                break;
-            }
-            if hub.is_cancelled() || cx.is_cancelled() {
-                cancel.store(true, Ordering::SeqCst);
-                if let Some(inner) = in_backend.as_ref() {
-                    inner.cancel();
-                }
-                let _ = wake_tx.try_send(());
-            }
-            (_, seen) = hub.wait(seen);
-        }
     });
+    std::thread::spawn(move || {
+        guard_worker(&out_hub, &out_tx, SessionDone::OutDone, || {
+            pump_out(
+                &writer_out,
+                up_rx,
+                wake_rx,
+                wait_runtime,
+                &cancel_out,
+                &peer_done_out,
+                break_on_peer_done,
+            )
+        });
+    });
+    // Supervisor: drain completions, translate hub events into worker
+    // wakes, block on the hub otherwise. Every wake path is idempotent
+    // so repeated wakes while cancelled stay harmless. Cancellation
+    // breaks at once (after teardown): with detached workers there is
+    // no join to wait out, so the task thread always returns.
+    let mut seen = hub.sequence();
+    loop {
+        for event in done_rx.try_iter() {
+            match event {
+                SessionDone::InDone(outcome) => {
+                    in_done = true;
+                    note_failure(&mut failed, outcome, "input worker");
+                    if break_on_peer_done {
+                        let _ = wake_tx.try_send(());
+                    }
+                }
+                SessionDone::OutDone(outcome) => {
+                    out_done = true;
+                    note_failure(&mut failed, outcome, "output worker");
+                    if !out_closed {
+                        out_closed = true;
+                        // Best-effort EOF propagation: unbound/OS pipes cannot
+                        // force-close, and their kernel halves close by drop.
+                        let _ = cx.close_pipe(out_pipe);
+                    }
+                }
+            }
+        }
+        if in_done && out_done {
+            break;
+        }
+        if hub.is_cancelled() || cx.is_cancelled() {
+            cancel.store(true, Ordering::SeqCst);
+            if let Some(inner) = in_backend.as_ref() {
+                inner.cancel();
+            }
+            let _ = wake_tx.try_send(());
+            // Prompt downstream EOF on the way out: readers parked
+            // past this see the close instead of hanging, and writers
+            // still pushing fail out of their loops.
+            let _ = cx.close_pipe(in_pipe);
+            let _ = cx.close_pipe(out_pipe);
+            break;
+        }
+        (_, seen) = hub.wait(seen);
+    }
     match failed {
         Some(err) => Err(err),
-        None => Ok(()),
+        None => {
+            if cancel.load(Ordering::SeqCst) {
+                anyhow::bail!("SSH pump interrupted by cancellation");
+            }
+            Ok(())
+        }
     }
 }
 

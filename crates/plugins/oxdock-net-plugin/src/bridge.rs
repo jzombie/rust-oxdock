@@ -65,6 +65,15 @@ fn suppress_peer_gone(op: std::io::Result<()>) -> std::io::Result<()> {
 /// worker reports instead of stranding the supervisor past scope end.
 struct NetDone<T>(usize, std::thread::Result<Result<T>>);
 
+/// Completion of one memory-pump worker. A single channel carries
+/// both directions (the input completion retrieves the lingered
+/// writer) so the supervisor parks on one blocking receive after
+/// servicing cancellation, with zero CPU and no second queue.
+enum MemoryDone {
+    InDone(std::thread::Result<Result<Option<SharedOutput>>>),
+    OutDone(std::thread::Result<Result<()>>),
+}
+
 /// Record the first worker error. Later errors lose: the first failure
 /// explains the teardown.
 fn note_failure<T>(
@@ -200,37 +209,46 @@ pub fn pump_stream<P: ProcessManager>(
         .with_context(|| format!("{func} failed to clone socket"))?;
     let hub: Arc<CancelHub> = cx.cancel_hub();
     let (done_tx, done_rx) = std::sync::mpsc::channel::<NetDone<()>>();
-    let cancel = AtomicBool::new(false);
+    // Task-local cancellation shared with the detached workers.
+    let cancel = Arc::new(AtomicBool::new(false));
     let mut failed: Option<anyhow::Error> = None;
     let mut in_done = false;
     let mut out_done = false;
-    std::thread::scope(|scope| {
+    {
         let in_tx = done_tx.clone();
         let out_tx = done_tx.clone();
         let in_hub = Arc::clone(&hub);
         let out_hub = Arc::clone(&hub);
-        let cancel_flag = &cancel;
-        scope.spawn(move || {
+        let cancel_in = Arc::clone(&cancel);
+        let cancel_out = Arc::clone(&cancel);
+        // Owned call-site names: detached workers cannot borrow the
+        // frame's `&str`.
+        let func_in = func.to_string();
+        let func_out = func.to_string();
+        std::thread::spawn(move || {
             guard_worker(
                 &in_hub,
                 &in_tx,
                 |outcome| NetDone(0, outcome),
-                || pump_in(func, reader, sock_in, cancel_flag, half_close),
+                || pump_in(&func_in, reader, sock_in, &cancel_in, half_close),
             );
         });
-        scope.spawn(move || {
+        std::thread::spawn(move || {
             guard_worker(
                 &out_hub,
                 &out_tx,
                 |outcome| NetDone(1, outcome),
-                || pump_out(func, writer, out_inner, sock_out, cancel_flag),
+                || pump_out(&func_out, writer, out_inner, sock_out, &cancel_out),
             );
         });
         // Supervisor: drain completions, translate hub events into
-        // worker wakes, block otherwise. Every wake path is idempotent
-        // so repeated wakes while cancelled stay harmless. Cancelling
-        // the input backend ends a worker parked in its pipe read; the
-        // backend is task-scoped, so no live session observes it.
+        // worker wakes, block on the hub otherwise. Every wake path is
+        // idempotent so repeated wakes while cancelled stay harmless.
+        // Cancelling the input backend ends a worker parked in its
+        // pipe read; the backend is task-scoped, so no live session
+        // observes it. Cancellation breaks at once (after teardown):
+        // with detached workers there is no join to wait out, so the
+        // task thread always returns.
         let mut seen = hub.sequence();
         loop {
             for event in done_rx.try_iter() {
@@ -251,10 +269,14 @@ pub fn pump_stream<P: ProcessManager>(
                     inner.cancel();
                 }
                 let _ = suppress_peer_gone(stream.shutdown(Shutdown::Both));
+                // Prompt downstream EOF on the way out.
+                let _ = cx.close_pipe(in_pipe);
+                let _ = cx.close_pipe(out_pipe);
+                break;
             }
             (_, seen) = hub.wait(seen);
         }
-    });
+    }
     match failed {
         Some(err) => Err(err),
         None => {
@@ -375,53 +397,59 @@ pub fn pump_memory<P: ProcessManager>(
     let peer_writer = outgoing.writer_handle();
     let incoming_reader = incoming.reader_handle();
     let hub: Arc<CancelHub> = cx.cancel_hub();
-    let (in_tx, in_rx) = std::sync::mpsc::channel::<NetDone<Option<SharedOutput>>>();
-    let (out_tx, out_rx) = std::sync::mpsc::channel::<NetDone<()>>();
-    let cancel = AtomicBool::new(false);
+    let (event_tx, event_rx) = std::sync::mpsc::channel::<MemoryDone>();
+    // Task-local cancellation shared with the detached workers.
+    let cancel = Arc::new(AtomicBool::new(false));
     let mut failed: Option<anyhow::Error> = None;
     let mut in_done = false;
     let mut out_done = false;
     // A lingered writer (half-close off) stays alive until both
     // workers are done, then drops with the scope.
     let mut lingered: Option<SharedOutput> = None;
-    std::thread::scope(|scope| {
-        let in_send = in_tx.clone();
-        let out_send = out_tx.clone();
+    {
+        let in_send = event_tx.clone();
+        let out_send = event_tx.clone();
         let in_hub = Arc::clone(&hub);
         let out_hub = Arc::clone(&hub);
-        let cancel_flag = &cancel;
-        scope.spawn(move || {
-            guard_worker(
-                &in_hub,
-                &in_send,
-                |outcome| NetDone(0, outcome),
-                || memory_pump_in(func, reader, peer_writer, cancel_flag, half_close),
-            );
+        let cancel_in = Arc::clone(&cancel);
+        let cancel_out = Arc::clone(&cancel);
+        // Owned call-site names: detached workers cannot borrow the
+        // frame's `&str`.
+        let func_in = func.to_string();
+        let func_out = func.to_string();
+        std::thread::spawn(move || {
+            guard_worker(&in_hub, &in_send, MemoryDone::InDone, || {
+                memory_pump_in(&func_in, reader, peer_writer, &cancel_in, half_close)
+            });
         });
-        scope.spawn(move || {
-            guard_worker(
-                &out_hub,
-                &out_send,
-                |outcome| NetDone(1, outcome),
-                || memory_pump_out(func, writer, out_inner, incoming_reader, cancel_flag),
-            );
+        std::thread::spawn(move || {
+            guard_worker(&out_hub, &out_send, MemoryDone::OutDone, || {
+                memory_pump_out(&func_out, writer, out_inner, incoming_reader, &cancel_out)
+            });
         });
         // Supervisor: same event shape as [`pump_stream`], plus the
         // lingered writer retrieved from the input completion.
+        // Cancellation breaks at once (after teardown): with detached
+        // workers there is no join to wait out, so the task thread
+        // always returns.
         let mut seen = hub.sequence();
         loop {
-            for event in in_rx.try_iter() {
-                in_done = true;
-                match event.1 {
-                    Ok(Ok(value)) => {
-                        lingered = value;
+            for event in event_rx.try_iter() {
+                match event {
+                    MemoryDone::InDone(outcome) => {
+                        in_done = true;
+                        match outcome {
+                            Ok(Ok(value)) => {
+                                lingered = value;
+                            }
+                            outcome => note_failure(&mut failed, outcome, "input worker", func),
+                        }
                     }
-                    outcome => note_failure(&mut failed, outcome, "input worker", func),
+                    MemoryDone::OutDone(outcome) => {
+                        out_done = true;
+                        note_failure(&mut failed, outcome, "output worker", func);
+                    }
                 }
-            }
-            for event in out_rx.try_iter() {
-                out_done = true;
-                note_failure(&mut failed, event.1, "output worker", func);
             }
             if in_done && out_done {
                 break;
@@ -433,10 +461,16 @@ pub fn pump_memory<P: ProcessManager>(
                 }
                 incoming.force_close();
                 outgoing.force_close();
+                // Prompt downstream EOF on the way out, then return at
+                // once: with detached workers there is no join to wait
+                // out, so the task thread always returns.
+                let _ = cx.close_pipe(in_pipe);
+                let _ = cx.close_pipe(out_pipe);
+                break;
             }
             (_, seen) = hub.wait(seen);
         }
-    });
+    }
     drop(lingered);
     match failed {
         Some(err) => Err(err),

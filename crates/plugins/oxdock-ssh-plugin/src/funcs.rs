@@ -385,7 +385,6 @@ fn ssh_accept<P: ProcessManager>(
     let in_pipe = Value::pipe_handle(in_pipe);
     let out_pipe = Value::pipe_handle(out_pipe);
     let state = Arc::clone(server.state());
-    let cancel = AtomicBool::new(false);
     let session = dequeue_session(cx, state.queue(), "SSH_ACCEPT")?;
     pump_session(
         cx,
@@ -393,7 +392,6 @@ fn ssh_accept<P: ProcessManager>(
         &out_pipe,
         session.up_rx,
         session.down_tx,
-        &cancel,
         true,
     )?;
     let mut map = BTreeMap::new();
@@ -455,11 +453,10 @@ fn ssh_pump_channel<P: ProcessManager>(
     let in_pipe = Value::pipe_handle(in_pipe);
     let out_pipe = Value::pipe_handle(out_pipe);
     let (up_rx, down_tx) = session.take_pump_ends()?;
-    let cancel = AtomicBool::new(false);
     // Release the control sender when the pump ends (pass or fail):
     // the wire writer must observe the drain and close then, not when
     // the last session clone drops long after.
-    let pump = pump_session(cx, &in_pipe, &out_pipe, up_rx, down_tx, &cancel, true);
+    let pump = pump_session(cx, &in_pipe, &out_pipe, up_rx, down_tx, true);
     session.finish_pump();
     pump?;
     let mut map = BTreeMap::new();
@@ -624,10 +621,9 @@ fn ssh_connect<P: ProcessManager>(
         handle,
         ..
     } = session;
-    let cancel = AtomicBool::new(false);
     // Client linger: the reply and the exit-status arrive after the
     // client's own stdin EOF, so never cut the output wait short.
-    let pump = pump_session(cx, &in_pipe, &out_pipe, up_rx, down_tx, &cancel, false);
+    let pump = pump_session(cx, &in_pipe, &out_pipe, up_rx, down_tx, false);
     let _ = runtime.block_on(handle.disconnect(russh::Disconnect::ByApplication, "", ""));
     pump?;
     // Joined after disconnect: a post-EOF status records before this read.
@@ -767,10 +763,11 @@ fn ssh_pty_run<P: ProcessManager>(
     } else {
         session.pty_size()
     };
-    let cancel = AtomicBool::new(false);
-    // Best effort: an unpumped session has no reader.
-    let report = |code: u32| {
-        let _ = session.send_exit_status(code);
+    // Best effort: an unpumped session has no reader. Owned clone:
+    // the reaper runs detached, so the callback must be `'static`.
+    let session_report = session.clone();
+    let report = move |code: u32| {
+        let _ = session_report.send_exit_status(code);
     };
     let code = crate::pty::pump_pty_session(
         cx,
@@ -779,8 +776,7 @@ fn ssh_pty_run<P: ProcessManager>(
         &session.pty_size_handle(),
         &in_pipe,
         &out_pipe,
-        &cancel,
-        Some(&report),
+        Some(std::sync::Arc::new(report)),
     )?;
     Ok(Value::int(code))
 }
@@ -866,10 +862,11 @@ fn ssh_run<P: ProcessManager>(
     let in_pipe = Value::pipe_handle(in_pipe);
     let out_pipe = Value::pipe_handle(out_pipe);
     let err_pipe = Value::pipe_handle(err_pipe);
-    let cancel = AtomicBool::new(false);
-    // Best effort: an unpumped session has no reader.
-    let report = |code: u32| {
-        let _ = session.send_exit_status(code);
+    // Best effort: an unpumped session has no reader. Owned clone:
+    // the reaper runs detached, so the callback must be `'static`.
+    let session_report = session.clone();
+    let report = move |code: u32| {
+        let _ = session_report.send_exit_status(code);
     };
     let code = crate::run::pump_run_session(
         cx,
@@ -877,8 +874,7 @@ fn ssh_run<P: ProcessManager>(
         &in_pipe,
         &out_pipe,
         &err_pipe,
-        &cancel,
-        Some(&report),
+        Some(std::sync::Arc::new(report)),
     )?;
     Ok(Value::int(code))
 }

@@ -694,7 +694,172 @@ fn argv_preserves_quote_backslash_unix() {
     handle
         .join()
         .expect("script thread joins")
-        .expect("argv fidelity holds");
+        .expect("run session completes");
+}
+
+/// Serializes the thread-liveness tests below. Pump workers in all
+/// other tests terminate promptly, but nothing stops them from
+/// overlapping in time; the gauge is process-global, so these two
+/// tests hold the lock while asserting on it.
+static GAUGE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Poll the live-worker gauge back to `base`. Test-only rendezvous
+/// (production paths never poll): worker termination is prompt but
+/// asynchronous once threads detach, so the assertion waits instead
+/// of assuming. Returns false on expiry instead of hanging the suite.
+fn poll_gauge_to(base: u64, timeout: Duration) -> bool {
+    let start = Instant::now();
+    while oxdock_process::live_pump_workers() != base {
+        if start.elapsed() >= timeout {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    true
+}
+
+#[test]
+#[cfg(unix)]
+#[cfg_attr(
+    miri,
+    ignore = "needs loopback TCP plus threads plus a real subprocess plus a daemonized grandchild"
+)]
+fn run_cancel_with_orphan_stdout_returns_promptly() {
+    // A daemonized grandchild holds the child's stdout open past every
+    // kill: `sh` backgrounds `sleep` and exits at once, and the reaper
+    // zeroes the pid on wait, so the cancel-time kill is a no-op and
+    // nothing ever signals the orphan. The output worker parks in its
+    // read forever. The supervisor must still return promptly on
+    // cancellation; only the parked worker is left behind (it drains
+    // when the orphan dies, asserted below). Under a joining scope
+    // this test hangs instead of failing it.
+    let _gauge = GAUGE_LOCK.lock().expect("gauge lock");
+    let base = oxdock_process::live_pump_workers();
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-run-orphan");
+    let script = indoc! {r#"
+        IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-run-orphan", {username: "u", password: "p"})
+        WRITE addr.txt "{{ $m.addr }}"
+        LET $h: HANDLE = ASYNC {
+            LET $dq: SSH_DEQUEUE_INFO = SSH_DEQUEUE($m.server)
+            LET $to_child: PIPE
+            LET $from_child: PIPE
+            LET $err: PIPE
+            LET $run: HANDLE = ASYNC { TIMEOUT 8s SSH_RUN($dq.session, ["sh", "-c", "sleep 20 >&1 &"], $to_child, $from_child, $err) }
+            LET $code: INT = AWAIT $run
+            ASSERT_EQ $code 0
+        }
+        AWAIT $h
+        SSH_CLOSE($m.server)
+    "#};
+    let probe = root.clone();
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    let addr = read_addr(&probe);
+    let addr: SocketAddr = addr.parse().expect("addr parses");
+    let _client = TestClient::connect(addr, "u", "p").expect("client connects");
+    let start = Instant::now();
+    let err = handle
+        .join()
+        .expect("script thread joins")
+        .expect_err("cancelling past an orphan-held pipe must fail the TIMEOUT, fast");
+    let elapsed = start.elapsed();
+    assert!(
+        err.to_string().contains("TIMEOUT"),
+        "TIMEOUT owns the failure, not the hang: {err:#}",
+    );
+    assert!(
+        elapsed >= Duration::from_secs(7),
+        "the timeout ran its course first: {elapsed:?}",
+    );
+    assert!(
+        elapsed < Duration::from_secs(20),
+        "cancellation returned promptly past the orphan: {elapsed:?}",
+    );
+    // The orphan outlives the assertion by design; its death drains
+    // the parked workers, which the gauge observes. Proves the leak is
+    // bounded by the orphan's life, not the session's.
+    assert!(
+        poll_gauge_to(base, Duration::from_secs(40)),
+        "parked workers drain when the orphan dies",
+    );
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "needs loopback TCP plus threads plus real subprocesses"
+)]
+fn pump_workers_drain_after_completion_and_cancel() {
+    // Hygiene for the common case: workers of finished sessions must
+    // drain back to baseline, on the clean path and on cancellation
+    // (non-orphan: every wake fires, so nothing parks). The orphan
+    // above is excluded by the lock; everything else terminates.
+    let _gauge = GAUGE_LOCK.lock().expect("gauge lock");
+    let base = oxdock_process::live_pump_workers();
+    // Clean echo session first.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-drain-clean");
+    let script = indoc! {r#"
+        IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-drain-clean", {username: "guest", password: "echo-pass"})
+        LET $in: PIPE
+        LET $out: PIPE
+        LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
+        LET $echo: HANDLE = ASYNC { SSH_PUMP($out, $in) }
+        AWAIT $acc
+        AWAIT $echo
+        SSH_CLOSE($m.server)
+    "#};
+    let addr = service_addr(&registry, "test-ssh-drain-clean");
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    std::thread::sleep(Duration::from_secs(2));
+    let mut client = TestClient::connect(addr, "guest", "echo-pass").expect("client connects");
+    client.send(b"drain-me").expect("client sends");
+    client
+        .read_until(b"drain-me", Duration::from_secs(10))
+        .expect("echo returns");
+    client.close();
+    handle
+        .join()
+        .expect("script thread joins")
+        .expect("clean session completes");
+    assert!(
+        poll_gauge_to(base, Duration::from_secs(15)),
+        "workers drain after a clean session",
+    );
+    // Cancelled session second: connect, then cancel the client leg.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-drain-cancel");
+    let script = indoc! {r#"
+        IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-drain-cancel", {username: "guest", password: "echo-pass"})
+        LET $in: PIPE
+        LET $out: PIPE
+        LET $acc: HANDLE = ASYNC { SSH_ACCEPT($m.server, $in, $out) }
+        LET $cin: PIPE
+        LET $cout: PIPE
+        LET $c: HANDLE = ASYNC { SSH_CONNECT("test-ssh-drain-cancel", "guest", "echo-pass", $cin, $cout) }
+        WITH_IO [stdout=$in] ECHO "server-greeting"
+        AWAIT $acc
+        CANCEL $c
+        SSH_CLOSE($m.server)
+    "#};
+    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    handle
+        .join()
+        .expect("script thread joins")
+        .expect("cancelled session completes end to end");
+    assert!(
+        poll_gauge_to(base, Duration::from_secs(15)),
+        "workers drain after cancellation",
+    );
 }
 
 #[test]

@@ -114,7 +114,10 @@ impl SshSessionTag {
 
     /// Queue an `exit-status` request for the client. Usable before the
     /// pump finishes; after that it bails, so a late send fails loudly
-    /// instead of hanging a client that already saw the close.
+    /// instead of hanging a client that already saw the close. Never
+    /// blocks: a saturated queue means the wire side is wedged behind
+    /// network backpressure, and parking the reporter on it would stall
+    /// teardown behind a dead network. That failure also bails loudly.
     pub fn send_exit_status(&self, code: u32) -> Result<()> {
         let slot = self
             .inner
@@ -124,8 +127,15 @@ impl SshSessionTag {
         let Some(tx) = slot.as_ref() else {
             bail!("SSH session pump already finished");
         };
-        tx.blocking_send(crate::state::DownMsg::ExitStatus(code))
-            .map_err(|_| anyhow::anyhow!("SSH session wire writer is gone"))?;
+        tx.try_send(crate::state::DownMsg::ExitStatus(code))
+            .map_err(|err| match err {
+                tokio::sync::mpsc::error::TrySendError::Full(_) => {
+                    anyhow::anyhow!("SSH session wire queue saturated under backpressure")
+                }
+                tokio::sync::mpsc::error::TrySendError::Closed(_) => {
+                    anyhow::anyhow!("SSH session wire writer is gone")
+                }
+            })?;
         Ok(())
     }
 

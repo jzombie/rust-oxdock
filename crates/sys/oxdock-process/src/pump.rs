@@ -28,6 +28,22 @@ use oxdock_pipe::{PipeInner, SharedInput};
 /// latency, not bulk throughput; bulk legs chunk above this.
 pub const PUMP_CHUNK: usize = 8192;
 
+/// Live pump workers right now, across all sessions in this process.
+/// Test observability, not control flow: green assertions cannot see
+/// parked threads, so stuck-thread regressions need a gauge that can.
+/// Incremented on worker entry, decremented when the body returns
+/// (before the completion send, so a received completion implies the
+/// decrement is visible). Reapers, watchers, and one-shot sleepers
+/// are not counted: each has a bounded termination proof (kill,
+/// explicit retire plus join, finite sleep), so only the
+/// unbounded-read set needs watching.
+static LIVE_PUMP_WORKERS: AtomicU64 = AtomicU64::new(0);
+
+/// Current value of the live-worker gauge (see above).
+pub fn live_pump_workers() -> u64 {
+    LIVE_PUMP_WORKERS.load(Ordering::SeqCst)
+}
+
 /// Cancellation fan-out for one pump session. One hub per supervised
 /// call, shared by its workers and supervisor: `mark_cancelled` ends
 /// every waiter at once, `poke` wakes the supervisor for a queued
@@ -93,7 +109,9 @@ impl CancelHub {
 
     /// Block until cancellation or a poke past `seen`. Returns the
     /// cancellation flag with the current sequence. Spurious wakes
-    /// re-check the predicate, never escape.
+    /// re-check the predicate, never escape. The sequence is read
+    /// while still holding the lock so the returned value predates
+    /// the wakeup decision it informs.
     pub fn wait(&self, seen: u64) -> (bool, u64) {
         let mut flag = self
             .state
@@ -106,8 +124,9 @@ impl CancelHub {
                 .unwrap_or_else(|poison| poison.into_inner());
         }
         let cancelled = *flag;
+        let current = self.sequence.load(Ordering::SeqCst);
         drop(flag);
-        (cancelled, self.sequence.load(Ordering::SeqCst))
+        (cancelled, current)
     }
 }
 
@@ -144,7 +163,9 @@ pub fn run_guarded<T, M: Send>(
     done: impl FnOnce(std::thread::Result<T>) -> M,
     body: impl FnOnce() -> T,
 ) {
+    LIVE_PUMP_WORKERS.fetch_add(1, Ordering::SeqCst);
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
+    LIVE_PUMP_WORKERS.fetch_sub(1, Ordering::SeqCst);
     let _ = tx.send(done(outcome));
     hub.poke();
 }
@@ -205,6 +226,12 @@ impl Drop for CancelGuard {
 mod tests {
     use super::*;
 
+    /// Serializes the gauge-observing tests: the gauge is process
+    /// global and the harness runs tests on parallel threads, so two
+    /// tests bracketing `run_guarded` calls would otherwise observe
+    /// each other's in-flight increments.
+    static GAUGE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn hub_wait_returns_on_poke_without_cancelling() {
         let hub = CancelHub::new();
@@ -230,6 +257,7 @@ mod tests {
 
     #[test]
     fn guarded_delivery_survives_panic() {
+        let _lock = GAUGE_TEST_LOCK.lock().expect("gauge test lock");
         let hub = CancelHub::new();
         let (tx, rx) = std::sync::mpsc::channel();
         run_guarded(
@@ -239,6 +267,31 @@ mod tests {
             || -> u32 { panic!("boom") },
         );
         assert!(rx.recv().expect("exactly one message"), "panic delivered");
+    }
+
+    #[test]
+    fn guarded_worker_gauge_balances() {
+        let _lock = GAUGE_TEST_LOCK.lock().expect("gauge test lock");
+        // The gauge brackets the body synchronously here (no threads),
+        // so this is deterministic: every entry pairs with exactly one
+        // exit, including through panics.
+        let hub = CancelHub::new();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let base = live_pump_workers();
+        run_guarded(
+            &hub,
+            &tx,
+            |outcome: std::thread::Result<u32>| outcome,
+            || 41,
+        );
+        run_guarded(
+            &hub,
+            &tx,
+            |outcome: std::thread::Result<u32>| outcome,
+            || -> u32 { panic!("boom") },
+        );
+        assert_eq!(live_pump_workers(), base, "entries pair with exits");
+        drop((rx, hub));
     }
 
     #[test]
