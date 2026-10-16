@@ -3335,9 +3335,11 @@ pub(super) fn prompt<P: ProcessManager>(
     }
     #[cfg(not(miri))]
     {
-        use std::io::IsTerminal;
         let clean_var = var.trim_start_matches('$').to_string();
-        if !std::io::stdin().is_terminal() {
+        // Interactivity needs both a host TTY and an unredirected
+        // stdin: a `WITH_IO [stdin=...]` pipe can never answer a
+        // prompt, so PROMPT short-circuits instead of blocking on it.
+        if !cx.process.stdin_is_terminal() || cx.stdin.is_redirected() {
             match default {
                 Some(d) => {
                     eprintln!("non-interactive: using default for {message}");

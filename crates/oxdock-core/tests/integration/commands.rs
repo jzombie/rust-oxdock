@@ -1283,6 +1283,46 @@ fn run_script(root: &GuardedPath, script: &str) -> Result<(), anyhow::Error> {
     run_steps_with_context_result_with_io(root, root, &steps, ExecIo::new()).map(|_| ())
 }
 
+fn run_script_headless(root: &GuardedPath, script: &str) -> Result<(), anyhow::Error> {
+    // PROMPT consults the ambient stdin TTY state, so an interactive
+    // `cargo test` (stdin is a terminal) would block on read_line.
+    // The mock reports headless stdin and keeps these tests hermetic.
+    run_script_with_process(root, script, oxdock_process::MockProcessManager::default())
+}
+
+fn run_script_with_process<P: oxdock_process::ProcessManager>(
+    root: &GuardedPath,
+    script: &str,
+    process: P,
+) -> Result<(), anyhow::Error> {
+    let steps = oxdock_core::parse_script(script).expect("parse script");
+    let resolver = PathResolver::new_guarded(root.clone(), root.clone())?;
+    oxdock_core::run_steps_with_manager(Box::new(resolver), &steps, process, ExecIo::new())
+        .map(|_| ())
+}
+
+/// Reports a host TTY while running everything else through the mock.
+/// Proves stdin-redirection gates do not depend on the host terminal.
+#[derive(Clone)]
+struct TtyManager(oxdock_process::MockProcessManager);
+
+impl oxdock_process::ProcessManager for TtyManager {
+    type Handle = oxdock_process::MockHandle;
+
+    fn stdin_is_terminal(&self) -> bool {
+        true
+    }
+
+    fn run_command(
+        &mut self,
+        ctx: &oxdock_process::CommandContext,
+        script: &str,
+        options: oxdock_process::CommandOptions,
+    ) -> anyhow::Result<oxdock_process::CommandResult<Self::Handle>> {
+        self.0.run_command(ctx, script, options)
+    }
+}
+
 fn run_script_with_scope(
     root: &GuardedPath,
     script: &str,
@@ -2056,7 +2096,7 @@ fn install_replaces_existing_destination() {
 fn prompt_without_default_fails_closed_on_non_tty() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    let err = run_script(&root, "PROMPT $dir \"Install destination?\"")
+    let err = run_script_headless(&root, "PROMPT $dir \"Install destination?\"")
         .expect_err("headless prompt without default must fail");
     assert!(
         err.to_string().contains("non-TTY"),
@@ -2072,7 +2112,7 @@ fn prompt_without_default_fails_closed_on_non_tty() {
 fn prompt_with_default_binds_without_reading_stdin() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
-    run_script(
+    run_script_headless(
         &root,
         indoc! {r#"
             PROMPT $dir "Install destination?" "fallback-dir"
@@ -2082,6 +2122,43 @@ fn prompt_with_default_binds_without_reading_stdin() {
         "#},
     )
     .expect("default binds without a terminal");
+}
+
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "PROMPT bails under Miri (no terminal); redirect gating is native-only"
+)]
+fn prompt_with_redirected_stdin_ignores_host_tty() {
+    // Even with a host TTY, a WITH_IO stdin pipe can never answer a
+    // prompt: PROMPT short-circuits instead of blocking on it.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    run_script_with_process(
+        &root,
+        indoc! {r#"
+            LET $p: PIPE
+            WITH_IO [stdin=$p] PROMPT $dir "Install destination?" "fallback-dir"
+            WRITE out.txt "{{ $dir }}"
+            LET $body: STRING = READ out.txt
+            ASSERT_EQ $body "fallback-dir"
+        "#},
+        TtyManager(oxdock_process::MockProcessManager::default()),
+    )
+    .expect("redirected stdin binds the default");
+    let err = run_script_with_process(
+        &root,
+        indoc! {r#"
+            LET $q: PIPE
+            WITH_IO [stdin=$q] PROMPT $dir "Install destination?"
+        "#},
+        TtyManager(oxdock_process::MockProcessManager::default()),
+    )
+    .expect_err("redirected stdin without default must fail");
+    assert!(
+        err.to_string().contains("non-TTY"),
+        "failure names the non-TTY: {err}"
+    );
 }
 
 #[test]
