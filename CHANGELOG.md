@@ -17,7 +17,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ### Fixed
 
-- Background teardown no longer races the shell's fork of a grandchild. The group kill enumerates members at one instant, so a grandchild forked after that enumeration escaped it while the shell still died; the orphaned sleeper then held inherited pipe write ends open and stalled pump EOF in `ChildHandle::wait` for its full runtime (seen as flaky `background_killed_when_unrelated_step_fails` teardown stalls around 30s on macOS CI). `wait`/`try_wait`/`Drop` now sweep the killed child's process group once the leader is reaped, which is still addressable at the same pgid while any escapee lives; `kill` and `Drop` share one tree-kill helper (`kill_tree`), and `Drop` uses it instead of a direct-child-only `Child::kill`, so an abandoned `ASYNC` handle's tree dies as one unit. On Windows the tree kill is now a Job Object: the spawn tree is assigned to an unnamed job in `ChildHandle::new`, and kill/drop terminate the job, which replaces `taskkill /T` and the `OpenProcess` fallback and removes the enumeration race class there entirely (no sweep is needed because a terminating job also kills members created after the terminate).
+- Background (`ASYNC`) teardown no longer stalls: killing a background step now takes its whole process tree with it, so orphaned grandchildren holding the output pipes open can no longer delay `AWAIT`/`CANCEL`/step completion (the intermittent ~30s `background_killed_when_unrelated_step_fails` stall on macOS CI).
+- On Unix, the process group is swept once after the leader is reaped, catching any straggler forked during the kill.
+- On Windows, spawn trees are assigned to a Job Object at spawn time and killed by terminating the job, replacing the `taskkill /T` + `OpenProcess` fallback and its own enumeration race.
+- Dropping an abandoned `ASYNC` handle kills the tree the same way.
 
 ## [0.29.0-alpha] - 2026-10-15
 
