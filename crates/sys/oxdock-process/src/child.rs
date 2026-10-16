@@ -204,6 +204,7 @@ fn kill_tree(pid: u32) {
 /// natural completion must leave `RUN "daemon &"` grandchildren alive,
 /// matching Unix, where a post-reap kill is a no-op.
 #[cfg(windows)]
+#[allow(clippy::disallowed_types)]
 fn assign_job(child: &Child) -> Result<OwnedHandle> {
     use std::os::windows::io::{AsRawHandle, FromRawHandle};
     use windows_sys::Win32::System::JobObjects::{AssignProcessToJobObject, CreateJobObjectW};
