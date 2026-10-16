@@ -3211,9 +3211,10 @@ a default binds with a stderr note, while no default bails.
 **Example: prompt needs a terminal**
 
 ```oxdock expect_error:"non-TTY"
-# Headless runs have no terminal: without a default the
+# A redirected stdin can never answer: without a default the
 # prompt fails instead of hanging or reading piped stdin.
-PROMPT $dir "Install destination?"
+LET $p: PIPE
+WITH_IO [stdin=$p] PROMPT $dir "Install destination?"
 ```
 
 **Expected error:** `non-TTY`

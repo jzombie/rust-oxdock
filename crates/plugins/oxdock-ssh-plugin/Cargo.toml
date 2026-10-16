@@ -17,6 +17,7 @@ oxdock-core.workspace = true
 oxdock-fs.workspace = true
 oxdock-func-macro.workspace = true
 oxdock-net-plugin.workspace = true
+oxdock-parser.workspace = true
 oxdock-pipe.workspace = true
 oxdock-process.workspace = true
 portable-pty.workspace = true

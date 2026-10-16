@@ -20,13 +20,6 @@
 //! Declared transfers stream straight between disk and wire with O(chunk)
 //! memory through spill staging: no transfer size cap exists anywhere.
 
-use std::io::{Read, Write};
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
-};
-use std::time::Duration;
-
 use anyhow::{Context, Result, bail};
 use futures_util::StreamExt;
 use muxio_core::rpc::RpcRequest;
@@ -38,9 +31,11 @@ use oxdock_core::{RemoteRequest, RemoteResponse, RemoteRunner};
 use oxdock_fs::{GuardedPath, PathResolver, WorkspaceFs};
 use oxdock_remote_proto::{channel, methods, tar, types};
 use sha2::Digest;
-
-/// Pump tick for cancellation checks and stdin drain backstops.
-const TICK: Duration = Duration::from_millis(10);
+use std::io::{Read, Write};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 
 /// Host identity bundle for the handshake. Built once at CLI startup from
 /// the compiled binary plus the engine module table. Module names are
@@ -175,6 +170,9 @@ struct MuxioSession {
     cancelled: Arc<AtomicBool>,
     dead: Arc<AtomicBool>,
     stdin_pump: Option<std::thread::JoinHandle<()>>,
+    /// Stdin backend feeding the pump: cancelled at teardown so the
+    /// pump's blocking read ends without a tick.
+    stdin_backend: Option<Arc<oxdock_pipe::PipeInner>>,
     stdout_backend: Option<Arc<oxdock_pipe::PipeInner>>,
     stderr_sink: Option<oxdock_process::SharedOutput>,
     stdout_accum: Vec<u8>,
@@ -205,6 +203,7 @@ impl MuxioSession {
             cancelled: Arc::clone(&request.cancelled),
             dead: Arc::new(AtomicBool::new(false)),
             stdin_pump: None,
+            stdin_backend: None,
             stdout_backend: request.stdout.clone(),
             stderr_sink: request.stderr_sink.clone(),
             stdout_accum: Vec::new(),
@@ -346,6 +345,8 @@ impl MuxioSession {
     ) {
         let cancelled = Arc::clone(&self.cancelled);
         let dead = Arc::clone(&self.dead);
+        let reader = backend.reader_handle();
+        self.stdin_backend = Some(backend);
         let pump = std::thread::Builder::new()
             .name("oxdock-remote-stdin-pump".to_string())
             .spawn(move || {
@@ -354,9 +355,10 @@ impl MuxioSession {
                     if cancelled.load(Ordering::SeqCst) || dead.load(Ordering::SeqCst) {
                         break;
                     }
-                    match backend.read_into_timeout(&mut buf, TICK) {
-                        Ok(Some(0)) | Ok(None) if dead.load(Ordering::SeqCst) => break,
-                        Ok(Some(0)) => {
+                    // Blocking read, no backstop: teardown cancels the
+                    // backend, which ends the wait as EOF.
+                    match oxdock_process::read_pump_chunk(&reader, &mut buf) {
+                        Ok(0) => {
                             // EOF: writers detached. End the guest stdin.
                             let _ = encoder
                                 .lock()
@@ -364,8 +366,7 @@ impl MuxioSession {
                                 .end_stream();
                             break;
                         }
-                        Ok(None) => {}
-                        Ok(Some(n)) => {
+                        Ok(n) => {
                             let done = encoder
                                 .lock()
                                 .unwrap_or_else(|poison| poison.into_inner())
@@ -435,10 +436,14 @@ impl MuxioSession {
         config: &SessionConfig,
     ) -> Result<RemoteResponse> {
         let outcome = self.run_inner(&request, fs, config);
-        // Scoped teardown on every path: stop the stdin pump, join it,
-        // then kill the owned transport child. Dropping the client alone
+        // Scoped teardown on every path: cancel the stdin backend so
+        // its blocking read ends, stop the stdin pump, join it, then
+        // kill the owned transport child. Dropping the client alone
         // no longer kills anything since the child is self-spawned.
         self.dead.store(true, Ordering::SeqCst);
+        if let Some(backend) = self.stdin_backend.take() {
+            backend.cancel();
+        }
         if let Some(pump) = self.stdin_pump.take() {
             let _ = pump.join();
         }

@@ -1832,6 +1832,7 @@ dependencies = [
  "oxdock-fs",
  "oxdock-func-macro",
  "oxdock-net-plugin",
+ "oxdock-parser",
  "oxdock-pipe",
  "oxdock-process",
  "oxdock-sys-test-utils",

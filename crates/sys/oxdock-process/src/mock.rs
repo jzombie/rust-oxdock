@@ -129,6 +129,10 @@ impl MockProcessManager {
 impl ProcessManager for MockProcessManager {
     type Handle = MockHandle;
 
+    fn stdin_is_terminal(&self) -> bool {
+        false
+    }
+
     fn run_command(
         &mut self,
         ctx: &CommandContext,

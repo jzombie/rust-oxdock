@@ -7,6 +7,7 @@
 
 use std::collections::VecDeque;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -26,6 +27,11 @@ pub const CHANNEL_CAPACITY: usize = 64;
 pub enum DownMsg {
     Data(Bytes),
     Eof,
+    /// Server-to-client `exit-status` request (RFC 4254 section 6.10).
+    /// Queued FIFO like every other message, so bytes sent before it
+    /// still flush first. The wire writer sends the request, then keeps
+    /// serving the queue: `Eof` and close still follow from the pump.
+    ExitStatus(u32),
 }
 
 /// Wire bytes toward the DSL pipes. `Eof` is a half-close: no more bytes
@@ -71,10 +77,15 @@ pub struct QueueState {
     shutdown: bool,
 }
 
-/// Dequeue outcome for one wait tick.
+/// Dequeue outcome for one wait.
 pub enum Dequeue {
     Session(PendingSession),
     Shutdown,
+    /// Task cancelled while parked: the cancel bridge poked the queue
+    /// awake and the hub reads cancelled.
+    Cancelled,
+    /// Nothing queued right now (`try_pop` only; blocking waits never
+    /// return this).
     Empty,
 }
 
@@ -137,26 +148,35 @@ impl SessionQueue {
         }
     }
 
-    /// Wait for a session up to `timeout`. Returns [`Dequeue::Empty`] on
-    /// tick expiry so the caller can poll cancellation.
-    pub fn wait_for_session(&self, timeout: Duration) -> Dequeue {
-        let guard = self
+    /// Block until a session arrives, the server shuts down, or the
+    /// hub reads cancelled. No timeout: the caller pokes the queue
+    /// awake on cancel (see `dequeue_session`), the predicate observes
+    /// the hub, and the waiter ends. Spurious wakes re-check.
+    pub fn wait_blocking(&self, hub: &oxdock_process::CancelHub) -> Dequeue {
+        let mut guard = self
             .state
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        let (mut guard, _timeout_result) = self
+        guard = self
             .cvar
-            .wait_timeout_while(guard, timeout, |state| {
-                state.sessions.is_empty() && !state.shutdown
+            .wait_while(guard, |state| {
+                state.sessions.is_empty() && !state.shutdown && !hub.is_cancelled()
             })
             .unwrap_or_else(|poison| poison.into_inner());
         if let Some(session) = guard.sessions.pop_front() {
             Dequeue::Session(session)
-        } else if guard.shutdown {
-            Dequeue::Shutdown
+        } else if hub.is_cancelled() {
+            Dequeue::Cancelled
         } else {
-            Dequeue::Empty
+            Dequeue::Shutdown
         }
+    }
+
+    /// Wake every waiter without shutting down. The cancel bridge in
+    /// `dequeue_session` calls this when the task cancels so a waiter
+    /// parked with no traffic still ends, then re-checks cancellation.
+    pub fn poke(&self) {
+        self.cvar.notify_all();
     }
 }
 
@@ -227,28 +247,74 @@ impl PtySizeStamp {
     }
 }
 
-pub type SharedPtySize = Arc<Mutex<PtySizeStamp>>;
+pub type SharedPtySize = Arc<SizeCell>;
+
+/// Shareable terminal-size cell: one instance per connection, held by
+/// the connection handler (writer) and the session's pty pump. The
+/// condvar lets a resize watcher sleep until a window-change lands
+/// instead of polling the sequence.
+#[derive(Debug)]
+pub struct SizeCell {
+    stamp: Mutex<PtySizeStamp>,
+    changed: Condvar,
+}
 
 /// Fresh size cell at the default dimensions, sequence zero.
 pub fn shared_pty_size() -> SharedPtySize {
-    Arc::new(Mutex::new(PtySizeStamp {
-        size: PtySize::default(),
-        seq: 0,
-    }))
+    Arc::new(SizeCell {
+        stamp: Mutex::new(PtySizeStamp {
+            size: PtySize::default(),
+            seq: 0,
+        }),
+        changed: Condvar::new(),
+    })
 }
 
-/// Record dimensions on a shared cell (poison-tolerant).
+/// Record dimensions on a shared cell (poison-tolerant) and wake its
+/// resize watcher. Notifies under the stamp lock: the watcher holds
+/// the same lock across its check-to-sleep transition, so the notify
+/// can never slip between the check and the sleep.
 pub fn set_shared_pty_size(cell: &SharedPtySize, size: PtySize) {
-    if let Ok(mut slot) = cell.lock() {
+    if let Ok(mut slot) = cell.stamp.lock() {
         slot.bump(size);
+        cell.changed.notify_all();
     }
 }
 
 /// Snapshot a shared cell with its sequence (poison-tolerant).
 pub fn snapshot_pty_size(cell: &SharedPtySize) -> PtySizeStamp {
-    cell.lock()
+    cell.stamp
+        .lock()
         .map(|slot| *slot)
         .unwrap_or_else(|poison| *poison.into_inner())
+}
+
+/// Wake the cell's watcher without recording a size: teardown retires
+/// the resize watcher this way, so no watcher outlives its session.
+/// Notifies under the stamp lock, same lost-wakeup reasoning as
+/// [`set_shared_pty_size`].
+pub fn poke_size(cell: &SharedPtySize) {
+    if let Ok(slot) = cell.stamp.lock() {
+        cell.changed.notify_all();
+        drop(slot);
+    }
+}
+
+/// Sleep until the cell's sequence moves past `seen` (window-change
+/// arrived) or `stop` reads true (teardown). Returns the fresh
+/// snapshot; the caller re-checks `stop` to tell the two apart.
+pub fn wait_size_changed(cell: &SharedPtySize, seen: u64, stop: &AtomicBool) -> PtySizeStamp {
+    let mut slot = cell
+        .stamp
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    while slot.seq == seen && !stop.load(Ordering::SeqCst) {
+        slot = cell
+            .changed
+            .wait(slot)
+            .unwrap_or_else(|poison| poison.into_inner());
+    }
+    *slot
 }
 
 /// Lifetime state behind one `SSH_SERVER` value.
@@ -387,15 +453,51 @@ mod tests {
 
     #[test]
     fn shutdown_wakes_empty_waiter() {
+        // No timeout anymore: the waiter parks in a blocking wait and
+        // the shutdown signal wakes it.
         let queue = SessionQueue::new();
+        let hub = oxdock_process::CancelHub::new();
         std::thread::scope(|scope| {
-            let waiter = scope.spawn(|| queue.wait_for_session(Duration::from_secs(30)));
+            let waiter = scope.spawn(|| queue.wait_blocking(&hub));
             std::thread::sleep(Duration::from_millis(50));
             queue.signal_shutdown();
             assert!(matches!(
                 waiter.join().expect("waiter joins"),
                 Dequeue::Shutdown
             ));
+        });
+    }
+
+    #[test]
+    fn cancel_wakes_empty_waiter() {
+        // The dequeue cancel bridge: hub fires, queue poked, waiter
+        // ends with Cancelled instead of hanging.
+        let queue = SessionQueue::new();
+        let hub = oxdock_process::CancelHub::new();
+        std::thread::scope(|scope| {
+            let waiter = scope.spawn(|| queue.wait_blocking(&hub));
+            std::thread::sleep(Duration::from_millis(50));
+            hub.mark_cancelled();
+            queue.poke();
+            assert!(matches!(
+                waiter.join().expect("waiter joins"),
+                Dequeue::Cancelled
+            ));
+        });
+    }
+
+    #[test]
+    fn size_change_wakes_watcher() {
+        let cell = shared_pty_size();
+        let seen = snapshot_pty_size(&cell).seq;
+        let stop = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            let watcher = scope.spawn(|| wait_size_changed(&cell, seen, &stop));
+            std::thread::sleep(Duration::from_millis(50));
+            set_shared_pty_size(&cell, PtySize::new(40, 120));
+            let snapshot = watcher.join().expect("watcher joins");
+            assert_eq!(snapshot.size, PtySize::new(40, 120));
+            assert_ne!(snapshot.seq, seen);
         });
     }
 

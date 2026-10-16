@@ -62,6 +62,7 @@ async fn drive_wire(
         let result = match message {
             DownMsg::Data(bytes) => handle.data(id, bytes).await.map(|_| ()).map_err(|_| ()),
             DownMsg::Eof => handle.eof(id).await,
+            DownMsg::ExitStatus(code) => handle.exit_status_request(id, code).await,
         };
         if result.is_err() {
             break;

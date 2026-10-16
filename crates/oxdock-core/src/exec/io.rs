@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{self, Write};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, atomic::AtomicU64};
 
 use anyhow::Result;
 #[cfg(not(miri))]
@@ -181,6 +181,10 @@ pub struct ExecIo {
     /// to state, so a serve loop holding only `ExecIo` can pack exactly
     /// what ran. `None` on hosts (nothing records).
     push_manifest_sink: Option<PushManifestSink>,
+    /// Shared pump-worker count for this run. The root hub adopts it
+    /// and forks inherit it, so one run's workers attribute to exactly
+    /// one counter even as tasks fan out.
+    worker_counter: Arc<AtomicU64>,
 }
 
 /// Shared append-only manifest of executed `--to-host` declarations.
@@ -550,6 +554,17 @@ impl ExecIo {
 
     pub fn set_stderr(&mut self, stderr: Option<SharedOutput>) {
         self.stderr = stderr;
+    }
+
+    /// Stage this run's pump-worker count. Chainable.
+    pub fn set_worker_counter(&mut self, counter: Arc<AtomicU64>) -> &mut Self {
+        self.worker_counter = counter;
+        self
+    }
+
+    /// This run's shared pump-worker count.
+    pub fn worker_counter(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.worker_counter)
     }
 
     /// Stage the transport behind one `REMOTE` target. Chainable; the NET
