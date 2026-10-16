@@ -15,6 +15,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - Bump `pest_meta` 2.9.2 → 2.9.3 (#229).
 - Bump `serde_json` 1.0.151 → 1.0.154 (#231).
 
+### Fixed
+
+- Background (`ASYNC`) teardown no longer stalls: killing a background step now takes its whole process tree with it, so orphaned grandchildren holding the output pipes open can no longer delay `AWAIT`/`CANCEL`/step completion (the intermittent ~30s `background_killed_when_unrelated_step_fails` stall on macOS CI).
+- On Unix, the process group is swept once after the leader is reaped, catching any straggler forked during the kill.
+- On Windows, spawn trees are assigned to a Job Object at spawn time and killed by terminating the job, replacing the `taskkill /T` + `OpenProcess` fallback and its own enumeration race.
+- Dropping an abandoned `ASYNC` handle kills the tree the same way.
+
 ## [0.29.0-alpha] - 2026-10-15
 
 ### Added
