@@ -376,6 +376,7 @@ mod tests {
 mod windows_tests {
     use super::ChildHandle;
     use crate::CommandBuilder;
+    use crate::contract::BackgroundHandle;
     use std::os::windows::io::AsRawHandle;
     use std::time::{Duration, Instant};
     use windows_sys::Win32::System::JobObjects::{
