@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [UNRELEASED]
+
+### Added
+
+- Binary-safe `SSH_RUN` for non-interactive remote execution: no init handshake, no output translation, split stderr, exit code reporting, plus `SSH_SEND_EXIT_STATUS` and per-session `exit_status` on `SSH_CONNECT` (#223).
+- `SSH_SERVE idle_timeout` option: inactivity deadline for sessions (default 300s, zero disables) (#223).
+- Instance-scoped pump-worker telemetry: `CancelHub` counts its own guarded workers, staged per run through `ExecIo` and inherited across task forks, so leak assertions stay hermetic under parallel harnesses with no process-global gauge.
+
+### Changed
+
+- Event-driven pump core shared by SSH and NET: `CancelHub` (sequence-guarded condvar) replaces tick/backstop polling; supervisors drain queues before every wait, workers send-then-poke, pipe cancellation arrives as EOF. `ChildCtl` and the readiness tick machinery are removed.
+- Detached pump workers: supervisors never join pump threads, so a worker parked in an uninterruptible read (an orphaned grandchild holding stdio past every kill) cannot strand cancellation; the parked worker drains when its pipes sever, bounding the leak by the orphan's life instead of the session's.
+- `PROMPT` interactivity is context-aware: a `WITH_IO [stdin=...]` redirect takes the non-interactive path (default binds, else bail) even when the host owns a TTY, and the terminal check is injectable through `ProcessManager::stdin_is_terminal` so tests stay hermetic.
+
+### Fixed
+
+- ConPTY DSR handshake (`ESC[6n`) is consumed locally and answered in-process, never forwarded to the client.
+- SSH sessions open cleared (`ESC[2J ESC[H`).
+- Auth rejection padded (100ms) against user enumeration.
+- `cmd /c` argv forwarding for exec sessions: single-element forwarding with no interpolation mangling.
+- Doc and fixture `PROMPT` fences no longer block on an ambient terminal: the `ast_commands` prompt case and the `command_reference` prompt example redirect stdin through a pipe.
+
 ## [0.29.0-alpha] - 2026-10-15
 
 ### Added
