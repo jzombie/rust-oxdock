@@ -325,7 +325,9 @@ impl<P: ProcessManager> ExecState<P> {
             exact_stdout: Arc::clone(&self.exact_stdout),
             var_scopes: self.var_scopes.clone(),
             cancel_token: Arc::new(AtomicBool::new(false)),
-            cancel_hub: Arc::new(CancelHub::new()),
+            // Fresh cancellation, inherited telemetry: the fork's
+            // workers still attribute to the originating run.
+            cancel_hub: Arc::new(CancelHub::with_counter(self.cancel_hub.worker_counter())),
             active_process: Arc::new(Mutex::new(None)),
             named_tasks: Arc::clone(&self.named_tasks),
             next_task_id: Arc::clone(&self.next_task_id),

@@ -28,22 +28,6 @@ use oxdock_pipe::{PipeInner, SharedInput};
 /// latency, not bulk throughput; bulk legs chunk above this.
 pub const PUMP_CHUNK: usize = 8192;
 
-/// Live pump workers right now, across all sessions in this process.
-/// Test observability, not control flow: green assertions cannot see
-/// parked threads, so stuck-thread regressions need a gauge that can.
-/// Incremented on worker entry, decremented when the body returns
-/// (before the completion send, so a received completion implies the
-/// decrement is visible). Reapers, watchers, and one-shot sleepers
-/// are not counted: each has a bounded termination proof (kill,
-/// explicit retire plus join, finite sleep), so only the
-/// unbounded-read set needs watching.
-static LIVE_PUMP_WORKERS: AtomicU64 = AtomicU64::new(0);
-
-/// Current value of the live-worker gauge (see above).
-pub fn live_pump_workers() -> u64 {
-    LIVE_PUMP_WORKERS.load(Ordering::SeqCst)
-}
-
 /// Cancellation fan-out for one pump session. One hub per supervised
 /// call, shared by its workers and supervisor: `mark_cancelled` ends
 /// every waiter at once, `poke` wakes the supervisor for a queued
@@ -54,16 +38,40 @@ pub struct CancelHub {
     state: Mutex<bool>,
     woken: Condvar,
     sequence: AtomicU64,
+    /// Live workers guarded through this hub. Bumped on entry and
+    /// dropped before delivery in `run_guarded`, so observing zero
+    /// means every worker already exited. Shared (not fresh) across
+    /// forks: cancellation scopes per task, telemetry per script run,
+    /// which keeps parallel tests hermetic without a global counter.
+    active: Arc<AtomicU64>,
 }
 
 impl CancelHub {
-    /// Fresh hub: not cancelled, sequence zero.
+    /// Fresh hub: not cancelled, sequence zero, private telemetry.
     pub fn new() -> Self {
+        Self::with_counter(Arc::new(AtomicU64::new(0)))
+    }
+
+    /// Fresh hub sharing an external worker count. Forks use this so
+    /// per-task cancellation stays independent while telemetry still
+    /// attributes to the originating run.
+    pub fn with_counter(counter: Arc<AtomicU64>) -> Self {
         Self {
             state: Mutex::new(false),
             woken: Condvar::new(),
             sequence: AtomicU64::new(0),
+            active: counter,
         }
+    }
+
+    /// The shared worker count, for forks to inherit.
+    pub fn worker_counter(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.active)
+    }
+
+    /// Workers currently inside `run_guarded` on this hub.
+    pub fn active_workers(&self) -> u64 {
+        self.active.load(Ordering::SeqCst)
     }
 
     /// Current sequence. A supervisor records it, drains its queue,
@@ -163,9 +171,15 @@ pub fn run_guarded<T, M: Send>(
     done: impl FnOnce(std::thread::Result<T>) -> M,
     body: impl FnOnce() -> T,
 ) {
-    LIVE_PUMP_WORKERS.fetch_add(1, Ordering::SeqCst);
+    // Instance telemetry on the hub (not a global): bumped on entry
+    // and dropped when the body returns, before the completion send,
+    // so a received completion implies the decrement is visible.
+    // Reapers, watchers, and one-shot sleepers are not counted: each
+    // has a bounded termination proof (kill, explicit retire plus
+    // join, finite sleep), so only the unbounded-read set is watched.
+    hub.active.fetch_add(1, Ordering::SeqCst);
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
-    LIVE_PUMP_WORKERS.fetch_sub(1, Ordering::SeqCst);
+    hub.active.fetch_sub(1, Ordering::SeqCst);
     let _ = tx.send(done(outcome));
     hub.poke();
 }
@@ -226,12 +240,6 @@ impl Drop for CancelGuard {
 mod tests {
     use super::*;
 
-    /// Serializes the gauge-observing tests: the gauge is process
-    /// global and the harness runs tests on parallel threads, so two
-    /// tests bracketing `run_guarded` calls would otherwise observe
-    /// each other's in-flight increments.
-    static GAUGE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     #[test]
     fn hub_wait_returns_on_poke_without_cancelling() {
         let hub = CancelHub::new();
@@ -257,7 +265,6 @@ mod tests {
 
     #[test]
     fn guarded_delivery_survives_panic() {
-        let _lock = GAUGE_TEST_LOCK.lock().expect("gauge test lock");
         let hub = CancelHub::new();
         let (tx, rx) = std::sync::mpsc::channel();
         run_guarded(
@@ -271,18 +278,21 @@ mod tests {
 
     #[test]
     fn guarded_worker_gauge_balances() {
-        let _lock = GAUGE_TEST_LOCK.lock().expect("gauge test lock");
         // The gauge brackets the body synchronously here (no threads),
         // so this is deterministic: every entry pairs with exactly one
-        // exit, including through panics.
+        // exit, including through panics. Per-hub telemetry keeps it
+        // hermetic under parallel harnesses: no global to pollute.
         let hub = CancelHub::new();
         let (tx, rx) = std::sync::mpsc::channel();
-        let base = live_pump_workers();
+        assert_eq!(hub.active_workers(), 0);
         run_guarded(
             &hub,
             &tx,
             |outcome: std::thread::Result<u32>| outcome,
-            || 41,
+            || {
+                assert_eq!(hub.active_workers(), 1, "entry counted");
+                41
+            },
         );
         run_guarded(
             &hub,
@@ -290,7 +300,7 @@ mod tests {
             |outcome: std::thread::Result<u32>| outcome,
             || -> u32 { panic!("boom") },
         );
-        assert_eq!(live_pump_workers(), base, "entries pair with exits");
+        assert_eq!(hub.active_workers(), 0, "entries pair with exits");
         drop((rx, hub));
     }
 

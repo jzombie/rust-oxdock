@@ -364,6 +364,9 @@ fn new_state<P: ProcessManager>(fs: Box<dyn WorkspaceFs>, io: ExecIo) -> Result<
     let assert_windows = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
     let assert_windows_stderr = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
     let exact_stdout = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    // Run-scoped worker telemetry: the root hub adopts the staged
+    // counter so every pump worker this run spawns attributes to it.
+    let worker_counter = io.worker_counter();
     let mut state = ExecState {
         fs,
         cargo_scratch,
@@ -379,7 +382,7 @@ fn new_state<P: ProcessManager>(fs: Box<dyn WorkspaceFs>, io: ExecIo) -> Result<
         exact_stdout: exact_stdout.clone(),
         var_scopes: Vec::new(),
         cancel_token: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        cancel_hub: std::sync::Arc::new(oxdock_process::CancelHub::new()),
+        cancel_hub: std::sync::Arc::new(oxdock_process::CancelHub::with_counter(worker_counter)),
         active_process: std::sync::Arc::new(std::sync::Mutex::new(None)),
         named_tasks: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         next_task_id: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),

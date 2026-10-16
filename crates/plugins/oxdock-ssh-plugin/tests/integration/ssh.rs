@@ -4,11 +4,14 @@
 //! all of them skip under Miri with a reason.
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 use std::time::{Duration, Instant};
 
 use indoc::indoc;
-use oxdock_core::{Engine, EngineOutput};
+use oxdock_core::{Engine, EngineOutput, ExecIo};
 use oxdock_fs::{GuardedPath, GuardedTempDir};
 
 fn guard_root(temp: &GuardedTempDir) -> GuardedPath {
@@ -27,6 +30,22 @@ fn run_script_with(
     script: &str,
 ) -> anyhow::Result<EngineOutput> {
     let mut engine = Engine::new();
+    engine.register_module(oxdock_ssh_plugin::module_with_endpoints(registry));
+    engine.run_script(root, script)
+}
+
+/// [`run_script_with`] with this run's worker telemetry staged: the
+/// test owns the counter and polls it for zero, hermetic under
+/// parallel harnesses with no process-global gauge involved.
+fn run_script_with_workers(
+    registry: Arc<oxdock_net_plugin::EndpointRegistry>,
+    root: &GuardedPath,
+    script: &str,
+    workers: Arc<AtomicU64>,
+) -> anyhow::Result<EngineOutput> {
+    let mut io = ExecIo::new();
+    io.set_worker_counter(workers);
+    let mut engine = Engine::new().with_io(io);
     engine.register_module(oxdock_ssh_plugin::module_with_endpoints(registry));
     engine.run_script(root, script)
 }
@@ -697,19 +716,12 @@ fn argv_preserves_quote_backslash_unix() {
         .expect("run session completes");
 }
 
-/// Serializes the thread-liveness tests below. Pump workers in all
-/// other tests terminate promptly, but nothing stops them from
-/// overlapping in time; the gauge is process-global, so these two
-/// tests hold the lock while asserting on it.
-static GAUGE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// Poll the live-worker gauge back to `base`. Test-only rendezvous
-/// (production paths never poll): worker termination is prompt but
-/// asynchronous once threads detach, so the assertion waits instead
-/// of assuming. Returns false on expiry instead of hanging the suite.
-fn poll_gauge_to(base: u64, timeout: Duration) -> bool {
+/// Poll this run's worker count to zero. The run is finite and the
+/// counter attributes only its own workers, so zero is reachable
+/// exactly when nothing leaked; expiry fails loudly, never hangs.
+fn poll_workers_zero(workers: &Arc<AtomicU64>, timeout: Duration) -> bool {
     let start = Instant::now();
-    while oxdock_process::live_pump_workers() != base {
+    while workers.load(Ordering::SeqCst) != 0 {
         if start.elapsed() >= timeout {
             return false;
         }
@@ -733,8 +745,10 @@ fn run_cancel_with_orphan_stdout_returns_promptly() {
     // cancellation; only the parked worker is left behind (it drains
     // when the orphan dies, asserted below). Under a joining scope
     // this test hangs instead of failing it.
-    let _gauge = GAUGE_LOCK.lock().expect("gauge lock");
-    let base = oxdock_process::live_pump_workers();
+    // Own telemetry: the run stages this counter and every forked
+    // task hub shares it, so the poll below observes exactly this
+    // script's workers under any parallel load.
+    let workers = Arc::new(AtomicU64::new(0));
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
     let registry = mapped_registry("test-ssh-run-orphan");
@@ -756,7 +770,10 @@ fn run_cancel_with_orphan_stdout_returns_promptly() {
         SSH_CLOSE($m.server)
     "#};
     let probe = root.clone();
-    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    let session_workers = Arc::clone(&workers);
+    let handle = std::thread::spawn(move || {
+        run_script_with_workers(registry, &root, script, session_workers)
+    });
     let addr = read_addr(&probe);
     let addr: SocketAddr = addr.parse().expect("addr parses");
     let _client = TestClient::connect(addr, "u", "p").expect("client connects");
@@ -779,10 +796,11 @@ fn run_cancel_with_orphan_stdout_returns_promptly() {
         "cancellation returned promptly past the orphan: {elapsed:?}",
     );
     // The orphan outlives the assertion by design; its death drains
-    // the parked workers, which the gauge observes. Proves the leak is
-    // bounded by the orphan's life, not the session's.
+    // the parked worker. Malfunction would leave this run's count
+    // elevated forever, so zero proves the leak is bounded by the
+    // orphan's life, not the session's.
     assert!(
-        poll_gauge_to(base, Duration::from_secs(40)),
+        poll_workers_zero(&workers, Duration::from_secs(90)),
         "parked workers drain when the orphan dies",
     );
 }
@@ -794,11 +812,10 @@ fn run_cancel_with_orphan_stdout_returns_promptly() {
 )]
 fn pump_workers_drain_after_completion_and_cancel() {
     // Hygiene for the common case: workers of finished sessions must
-    // drain back to baseline, on the clean path and on cancellation
-    // (non-orphan: every wake fires, so nothing parks). The orphan
-    // above is excluded by the lock; everything else terminates.
-    let _gauge = GAUGE_LOCK.lock().expect("gauge lock");
-    let base = oxdock_process::live_pump_workers();
+    // drain back to zero, on the clean path and on cancellation
+    // (non-orphan: every wake fires, so nothing parks). Own
+    // telemetry, so concurrent tests cannot pollute the observation.
+    let workers = Arc::new(AtomicU64::new(0));
     // Clean echo session first.
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
@@ -816,7 +833,9 @@ fn pump_workers_drain_after_completion_and_cancel() {
         SSH_CLOSE($m.server)
     "#};
     let addr = service_addr(&registry, "test-ssh-drain-clean");
-    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    let clean_workers = Arc::clone(&workers);
+    let handle =
+        std::thread::spawn(move || run_script_with_workers(registry, &root, script, clean_workers));
     std::thread::sleep(Duration::from_secs(2));
     let mut client = TestClient::connect(addr, "guest", "echo-pass").expect("client connects");
     client.send(b"drain-me").expect("client sends");
@@ -829,7 +848,7 @@ fn pump_workers_drain_after_completion_and_cancel() {
         .expect("script thread joins")
         .expect("clean session completes");
     assert!(
-        poll_gauge_to(base, Duration::from_secs(15)),
+        poll_workers_zero(&workers, Duration::from_secs(90)),
         "workers drain after a clean session",
     );
     // Cancelled session second: connect, then cancel the client leg.
@@ -851,13 +870,16 @@ fn pump_workers_drain_after_completion_and_cancel() {
         CANCEL $c
         SSH_CLOSE($m.server)
     "#};
-    let handle = std::thread::spawn(move || run_script_with(registry, &root, script));
+    let cancel_workers = Arc::clone(&workers);
+    let handle = std::thread::spawn(move || {
+        run_script_with_workers(registry, &root, script, cancel_workers)
+    });
     handle
         .join()
         .expect("script thread joins")
         .expect("cancelled session completes end to end");
     assert!(
-        poll_gauge_to(base, Duration::from_secs(15)),
+        poll_workers_zero(&workers, Duration::from_secs(90)),
         "workers drain after cancellation",
     );
 }
