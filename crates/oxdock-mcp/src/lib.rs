@@ -55,6 +55,16 @@ pub fn init_handler(config: McpServerConfig) -> Result<OxDockHandler> {
     if parsed.exports.is_empty() {
         bail!("no EXPORT entries: add `EXPORT [NAME, ...]` to expose MCP tools");
     }
+    if parsed
+        .exports
+        .iter()
+        .any(|name| name == server::STATUS_TOOL_NAME)
+    {
+        bail!(
+            "{} is reserved for the host status tool",
+            server::STATUS_TOOL_NAME
+        );
+    }
     let (fs, hold) = session_fs(&config.workspace_root)?;
     let session = McpSession::init(
         fs,
@@ -70,7 +80,13 @@ pub fn init_handler(config: McpServerConfig) -> Result<OxDockHandler> {
             docs.insert(qualified, pair);
         }
     }
-    let handler = OxDockHandler::from_handler_parts(session, metas, &docs, vec![hold])?;
+    let handler = OxDockHandler::from_handler_parts_with_status(
+        session,
+        metas,
+        &docs,
+        vec![hold],
+        &config.script,
+    )?;
     if config.watch {
         Ok(handler.with_watch(WatchConfig {
             script_path: config.script_path,

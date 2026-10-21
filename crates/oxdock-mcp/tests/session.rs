@@ -134,7 +134,7 @@ fn opaque_export_fails_before_serving() {
 fn reload_swaps_tools_and_keeps_old_on_broken_edit() {
     let (config, _root) = handler_config(DEMO);
     let handler = init_handler(config).expect("init");
-    assert_eq!(handler.tool_names().len(), 3);
+    assert_eq!(handler.tool_names().len(), 4);
 
     let root = test_fs().1;
     let modules = Vec::new();
@@ -142,24 +142,74 @@ fn reload_swaps_tools_and_keeps_old_on_broken_edit() {
     handler
         .reload(
             indoc! {r#"
-                FUNC SOLO() {
-                  RETURN "one"
-                }
-                EXPORT SOLO
+            FUNC SOLO() {
+              RETURN "one"
+            }
+            EXPORT SOLO
             "#},
             modules.clone(),
             types.clone(),
             &root,
         )
         .expect("reload");
-    assert_eq!(handler.tool_names(), vec!["SOLO".to_string()]);
+    assert_eq!(
+        handler.tool_names(),
+        vec!["SOLO".to_string(), "MCP_STATUS".to_string()]
+    );
 
     handler
         .reload("FUNC BROKEN( {", modules, types, &root)
         .expect_err("broken edit must fail");
     assert_eq!(
         handler.tool_names(),
-        vec!["SOLO".to_string()],
+        vec!["SOLO".to_string(), "MCP_STATUS".to_string()],
         "broken edit keeps the live tools"
+    );
+}
+
+#[test]
+fn status_reports_generation_and_failure() {
+    use oxdock_mcp::server::STATUS_TOOL_NAME;
+    let (config, root) = handler_config(DEMO);
+    let handler = init_handler(config).expect("init");
+    assert_eq!(handler.generation(), 1);
+    assert!(handler.tool_names().contains(&STATUS_TOOL_NAME.to_string()));
+
+    let payload = handler.status_payload();
+    assert_eq!(payload["generation"], 1);
+    assert_eq!(payload["last_reload"]["ok"], true);
+    let first_hash = payload["script_sha256"].as_str().expect("hash").to_string();
+
+    handler
+        .reload(DEMO, Vec::new(), Vec::new(), &root)
+        .expect("reload");
+    assert_eq!(handler.generation(), 2);
+    let payload = handler.status_payload();
+    assert_eq!(payload["generation"], 2);
+    assert_eq!(payload["script_sha256"].as_str(), Some(first_hash.as_str()));
+
+    handler
+        .reload("FUNC BROKEN( {", Vec::new(), Vec::new(), &root)
+        .expect_err("broken edit must fail");
+    assert_eq!(handler.generation(), 2, "failed reload keeps generation");
+    let payload = handler.status_payload();
+    assert_eq!(payload["last_reload"]["ok"], false);
+    assert!(payload["last_reload"]["message"]
+        .as_str()
+        .expect("message")
+        .contains("BROKEN"));
+}
+
+#[test]
+fn status_tool_name_is_reserved() {
+    let (config, _root) = handler_config(indoc! {r#"
+        FUNC MCP_STATUS() {
+          RETURN "spoof"
+        }
+        EXPORT MCP_STATUS
+    "#});
+    assert!(
+        init_handler(config).is_err(),
+        "EXPORT MCP_STATUS must fail"
     );
 }

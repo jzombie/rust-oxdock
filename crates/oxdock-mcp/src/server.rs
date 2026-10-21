@@ -19,6 +19,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use oxdock_core::{FuncMeta, McpSession, Value, value_to_json};
 use oxdock_fs::{GuardedPath, LazyGuardedTempDir, PathResolver, WorkspaceFs};
+use sha2::{Digest, Sha256};
 use oxdock_process::DefaultProcessManager;
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler,
@@ -41,7 +42,29 @@ struct HandlerInner {
     /// Snapshot backing-dir holds, one per (re)load. Unmaterialized
     /// handles are path-only, so retained reloads cost nothing on disk.
     _holds: Vec<Arc<LazyGuardedTempDir>>,
+    /// Host-side load identity, reported by `MCP_STATUS`.
+    status: StatusState,
 }
+
+/// What `MCP_STATUS` reports. `generation` starts at 1 and increments on
+/// every successful reload (resets on process restart): agents compare it
+/// across calls to detect tools changing underneath them. `script_sha256`
+/// is the hex of the loaded file bytes: stable across restarts, so the
+/// exact file version stays correlatable. `last_reload` records the most
+/// recent reload attempt, including failures, so broken edits are
+/// client-visible instead of stderr-only.
+#[derive(Debug, Clone)]
+struct StatusState {
+    generation: u64,
+    script_sha256: String,
+    loaded_at_unix: u64,
+    last_reload_ok: bool,
+    last_reload_message: String,
+}
+
+/// Reserved host tool name. `EXPORT`ing it is rejected: the status tool
+/// is synthesized by the host on every load.
+pub const STATUS_TOOL_NAME: &str = "MCP_STATUS";
 
 /// File-watch settings for hot reload. Cloned into the watcher task.
 #[derive(Clone)]
@@ -75,18 +98,21 @@ impl OxDockHandler {
         metas: Vec<FuncMeta>,
         docs: &HashMapDoc,
     ) -> Result<Self> {
+        reject_reserved_metas(&metas)?;
         let tools = build_tool_table(metas, docs)?;
-        Self::from_parts(session, tools, Vec::new(), None)
+        Self::from_parts(session, tools, Vec::new(), None, StatusState::initial(""))
     }
 
-    pub(crate) fn from_handler_parts(
+    pub(crate) fn from_handler_parts_with_status(
         session: McpSession<DefaultProcessManager>,
         metas: Vec<FuncMeta>,
         docs: &HashMapDoc,
         holds: Vec<Arc<LazyGuardedTempDir>>,
+        script_text: &str,
     ) -> Result<Self> {
+        reject_reserved_metas(&metas)?;
         let tools = build_tool_table(metas, docs)?;
-        Self::from_parts(session, tools, holds, None)
+        Self::from_parts(session, tools, holds, None, StatusState::initial(script_text))
     }
 
     fn from_parts(
@@ -94,12 +120,16 @@ impl OxDockHandler {
         tools: Vec<McpTool>,
         holds: Vec<Arc<LazyGuardedTempDir>>,
         watch: Option<WatchConfig>,
+        status: StatusState,
     ) -> Result<Self> {
+        let mut tools = tools;
+        tools.push(status_tool());
         Ok(Self {
             inner: Arc::new(Mutex::new(HandlerInner {
                 session,
                 tools,
                 _holds: holds,
+                status,
             })),
             watch,
         })
@@ -120,8 +150,9 @@ impl OxDockHandler {
     }
 
     /// Rebuild the session and tool table from fresh script text and swap
-    /// them in atomically. Fails without touching the live session, so a
-    /// broken edit keeps serving the old tools.
+    /// them in atomically. Records the attempt in the status first: a
+    /// broken edit keeps serving the old tools but reports the failure
+    /// through `MCP_STATUS`.
     pub fn reload(
         &self,
         script_text: &str,
@@ -131,40 +162,76 @@ impl OxDockHandler {
         types: Vec<&'static oxdock_core::TypeDescriptor>,
         workspace_root: &GuardedPath,
     ) -> Result<()> {
-        let mut engine = oxdock_core::Engine::new();
-        for module in &modules {
-            engine.register_module(module.clone());
-        }
-        let parsed = oxdock_core::parse_script_with_modules_and_exports(
-            script_text,
-            engine.module_table(),
-        )?;
-        if parsed.exports.is_empty() {
-            anyhow::bail!("reload: no EXPORT entries, keeping live session");
-        }
-        let (fs, hold) = session_fs(workspace_root)?;
-        let session = McpSession::init(
-            fs,
-            oxdock_process::default_process_manager(),
-            modules,
-            types,
-            &parsed,
-        )?;
-        let metas = session.tool_metas()?;
-        let mut docs: HashMap<String, (String, String)> = HashMap::new();
-        for qualified in metas.iter().map(|meta| meta.name.clone()) {
-            if let Some(pair) = session.tool_doc(&qualified) {
-                docs.insert(qualified, pair);
+        let outcome = match Self::build_inner(script_text, modules, types, workspace_root) {
+            Ok(outcome) => outcome,
+            Err(err) => {
+                self.note_failed_reload(format!("{err:#}"));
+                return Err(err);
             }
-        }
-        let tools = build_tool_table(metas, &docs)?;
+        };
         let mut inner = self.inner.lock().map_err(|_| {
             anyhow::anyhow!("MCP session lock poisoned during reload")
         })?;
-        inner.session = session;
+        inner.status.generation += 1;
+        inner.status.script_sha256 = outcome.hash.clone();
+        inner.status.loaded_at_unix = unix_now();
+        inner.status.last_reload_ok = true;
+        inner.status.last_reload_message = format!(
+            "reload generation {}: {} tool(s)",
+            inner.status.generation,
+            outcome.tools.len(),
+        );
+        inner.session = outcome.session;
+        let mut tools = outcome.tools;
+        tools.push(status_tool());
         inner.tools = tools;
-        inner._holds.push(hold);
+        inner._holds.push(outcome.hold);
         Ok(())
+    }
+
+    /// Record a failed reload without touching the live session, so the
+    /// failure is client-visible through `MCP_STATUS`.
+    fn note_failed_reload(&self, message: String) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.status.last_reload_ok = false;
+            inner.status.last_reload_message = message;
+        }
+    }
+
+    /// Current load generation. Starts at 1, increments per reload.
+    pub fn generation(&self) -> u64 {
+        self.inner
+            .lock()
+            .map(|inner| inner.status.generation)
+            .unwrap_or(0)
+    }
+
+    /// The `MCP_STATUS` payload: generation, served tools, script hash,
+    /// load time, and the last reload outcome.
+    pub fn status_payload(&self) -> JsonValue {
+        let Some(snapshot) = self.inner.lock().ok().map(|inner| {
+            (
+                inner.status.clone(),
+                inner
+                    .tools
+                    .iter()
+                    .map(|tool| tool.name.clone())
+                    .collect::<Vec<_>>(),
+            )
+        }) else {
+            return serde_json::json!({"ok": false, "error": "session lock poisoned"});
+        };
+        let (status, tools) = snapshot;
+        serde_json::json!({
+            "generation": status.generation,
+            "tools": tools,
+            "script_sha256": status.script_sha256,
+            "loaded_at_unix": status.loaded_at_unix,
+            "last_reload": {
+                "ok": status.last_reload_ok,
+                "message": status.last_reload_message,
+            },
+        })
     }
 
     /// Spawn the content poll task. Broken edits log to stderr and keep
@@ -202,6 +269,7 @@ impl OxDockHandler {
                         handler.tool_names().len(),
                         watch.script_path.display()
                     ),
+                    // reload() already recorded the failure for MCP_STATUS.
                     Err(err) => eprintln!("mcp reload: keeping live session: {err:#}"),
                 }
             }
@@ -271,6 +339,27 @@ impl ServerHandler for OxDockHandler {
         request: CallToolRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
+        // Host-synthesized status probe: answered from the handler state,
+        // never dispatched into the script session.
+        if request.name.as_ref() == STATUS_TOOL_NAME {
+            let payload = self.status_payload();
+            let mut content = vec![ContentBlock::json(&payload).map_err(|err| {
+                McpError::new(
+                    rmcp::model::ErrorCode::INTERNAL_ERROR,
+                    format!("MCP content encode failed: {err}"),
+                    None,
+                )
+            })?];
+            content.push(ContentBlock::text(format!(
+                "generation {}: {} tool(s), last reload ok={}",
+                payload["generation"],
+                payload["tools"].as_array().map(|tools| tools.len()).unwrap_or(0),
+                payload["last_reload"]["ok"],
+            )));
+            let mut result = CallToolResult::success(content);
+            result.structured_content = Some(crate::tools::wrap_structured(payload));
+            return Ok(result.into());
+        }
         let tool = self.find(request.name.as_ref()).ok_or_else(|| {
             McpError::new(
                 rmcp::model::ErrorCode::METHOD_NOT_FOUND,
@@ -412,6 +501,134 @@ fn rmcp_tool_for(tool: &McpTool) -> Tool {
     };
     Tool::new(tool.name.clone(), tool.description.clone(), schema_map)
         .with_raw_output_schema(Arc::new(output_map))
+}
+
+/// Reject an `EXPORT` of the synthesized host tool name.
+fn reject_reserved_metas(metas: &[FuncMeta]) -> Result<()> {
+    for meta in metas {
+        if oxdock_parser::base_name(&meta.name) == STATUS_TOOL_NAME {
+            anyhow::bail!("{STATUS_TOOL_NAME} is reserved for the host status tool");
+        }
+    }
+    Ok(())
+}
+
+/// The synthesized host status tool, appended after every export table.
+fn status_tool() -> McpTool {
+    use crate::tools::output_schema_for;
+    let mut input = serde_json::Map::new();
+    input.insert(
+        "type".to_string(),
+        JsonValue::String("object".to_string()),
+    );
+    let input_schema = JsonValue::Object(input);
+    McpTool {
+        name: STATUS_TOOL_NAME.to_string(),
+        qualified: "MCP::STATUS".to_string(),
+        description: "Host status: load generation, served tools, script hash, and the last reload outcome. Generation starts at 1 and increments per successful reload; compare it across calls to detect tools changing underneath you.".to_string(),
+        input_schema,
+        output_schema: output_schema_for(&status_meta()).unwrap_or(JsonValue::Object(serde_json::Map::new())),
+        params: Vec::new(),
+    }
+}
+
+fn status_meta() -> FuncMeta {
+    FuncMeta {
+        name: "MCP::STATUS".to_string(),
+        module: "MCP".to_string(),
+        kind: oxdock_core::FuncKind::Script,
+        params: Some(Vec::new()),
+        returns: None,
+        rpn: false,
+        summary: "Host status probe.",
+        docs: "Reports the live session identity.",
+        examples: &[],
+    }
+}
+
+impl StatusState {
+    fn initial(script_text: &str) -> Self {
+        Self {
+            generation: 1,
+            script_sha256: script_hash(script_text),
+            loaded_at_unix: unix_now(),
+            last_reload_ok: true,
+            last_reload_message: "initial load".to_string(),
+        }
+    }
+}
+
+fn script_hash(text: &str) -> String {
+    let digest = Sha256::digest(text.as_bytes());
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or(0)
+}
+
+/// One validated rebuild: parse, init the session, derive the table.
+/// Shared by initial load (via `init_handler`) and hot reload.
+struct BuiltInner {
+    session: McpSession<DefaultProcessManager>,
+    tools: Vec<McpTool>,
+    hash: String,
+    hold: Arc<LazyGuardedTempDir>,
+}
+
+impl OxDockHandler {
+    fn build_inner(
+        script_text: &str,
+        modules: Vec<
+            oxdock_core::HostModule<oxdock_process::DefaultProcessManager>,
+        >,
+        types: Vec<&'static oxdock_core::TypeDescriptor>,
+        workspace_root: &GuardedPath,
+    ) -> Result<BuiltInner> {
+        let mut engine = oxdock_core::Engine::new();
+        for module in &modules {
+            engine.register_module(module.clone());
+        }
+        let parsed = oxdock_core::parse_script_with_modules_and_exports(
+            script_text,
+            engine.module_table(),
+        )?;
+        if parsed.exports.is_empty() {
+            anyhow::bail!("no EXPORT entries: add `EXPORT [NAME, ...]` to expose MCP tools");
+        }
+        if parsed
+            .exports
+            .iter()
+            .any(|name| name == STATUS_TOOL_NAME)
+        {
+            anyhow::bail!("{STATUS_TOOL_NAME} is reserved for the host status tool");
+        }
+        let (fs, hold) = session_fs(workspace_root)?;
+        let session = McpSession::init(
+            fs,
+            oxdock_process::default_process_manager(),
+            modules,
+            types,
+            &parsed,
+        )?;
+        let metas = session.tool_metas()?;
+        let mut docs: HashMap<String, (String, String)> = HashMap::new();
+        for qualified in metas.iter().map(|meta| meta.name.clone()) {
+            if let Some(pair) = session.tool_doc(&qualified) {
+                docs.insert(qualified, pair);
+            }
+        }
+        let tools = build_tool_table(metas, &docs)?;
+        Ok(BuiltInner {
+            session,
+            tools,
+            hash: script_hash(script_text),
+            hold,
+        })
+    }
 }
 
 /// Script docs keyed by qualified name, for handler construction.

@@ -18,7 +18,12 @@ edits keep serving the old tools. Exported signatures project to JSON
 Schema, and only JSON-compatible types serve: opaque host types fail
 fast before the reactor opens. Captured stdout and stderr ride the
 result `content` block, so framing stays clean while `ECHO` output
-stays visible.
+stays visible. A synthesized `MCP_STATUS` tool rides alongside every
+table: it reports the load generation (1 at startup, plus one per
+successful reload), the served tool names, the script content hash,
+and the last reload outcome, so agents can detect tools changing
+underneath them and broken edits stay visible instead of
+stderr-only.
 
 ```oxdock
 # Define an exported tool and call it directly.
