@@ -14,6 +14,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - Bump `pest_derive` 2.9.2 → 2.9.3 (#230).
 - Bump `pest_meta` 2.9.2 → 2.9.3 (#229).
 - Bump `serde_json` 1.0.151 → 1.0.154 (#231).
+- Bump `rustls-webpki` 0.103.15 → 0.103.16 (RUSTSEC-2026-0382).
+- Bump `webpki-roots` 1.0.9 → 1.0.10 (RUSTSEC-2026-0381).
 
 ### Fixed
 
