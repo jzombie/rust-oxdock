@@ -27,6 +27,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - `cmd /c` argv forwarding for exec sessions: single-element forwarding with no interpolation mangling.
 - Doc and fixture `PROMPT` fences no longer block on an ambient terminal: the `ast_commands` prompt case and the `command_reference` prompt example redirect stdin through a pipe.
 
+### Dependencies
+
+- Bump `cache-manager` 0.5.0 → 0.6.0 (#228).
+- Bump `indoc` 2.0.7 → 2.0.8 (#227).
+- Bump `pest_derive` 2.9.2 → 2.9.3 (#230).
+- Bump `pest_meta` 2.9.2 → 2.9.3 (#229).
+- Bump `serde_json` 1.0.151 → 1.0.154 (#231).
+- Bump `rustls-webpki` 0.103.15 → 0.103.16 (RUSTSEC-2026-0382).
+- Bump `webpki-roots` 1.0.9 → 1.0.10 (RUSTSEC-2026-0381).
+
 ## [0.29.0-alpha] - 2026-10-15
 
 ### Added
