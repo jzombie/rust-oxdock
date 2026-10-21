@@ -38,4 +38,28 @@ FUNC WHEREAMI() {
   LET $dir: STRING = CWD
   RETURN TEXT_TRIM($dir)
 }
-EXPORT [ADD, GREET, APP_NAME, COUNT, WHEREAMI]
+# Agent self-help: one tool over the whole introspection surface.
+# Topic "" (or anything unprefixed) returns the index: every visible
+# function name plus every known type name. "FUNC:MOD::NAME" returns
+# the full DESCRIBE map for one function. "TYPE:NAME" returns the
+# TYPE_DESCRIBE map for one type. Always returns a MAP so the shape
+# never varies. Unknown names fail with the registry error.
+FUNC HELP($topic: STRING) {
+  IF TEXT_STARTS_WITH($topic, "FUNC:") {
+    LET $name: STRING = TEXT_TRIM_PREFIX($topic, "FUNC:")
+    LET $info: MAP<ANY> = DESCRIBE($name)
+    LET $fout: MAP<ANY> = {kind: "func", info: $info}
+    RETURN $fout
+  }
+  IF TEXT_STARTS_WITH($topic, "TYPE:") {
+    LET $tname: STRING = TEXT_TRIM_PREFIX($topic, "TYPE:")
+    LET $tinfo: MAP<ANY> = TYPE_DESCRIBE($tname)
+    LET $tout: MAP<ANY> = {kind: "type", info: $tinfo}
+    RETURN $tout
+  }
+  LET $funcs: LIST<STRING> = FUNCTIONS()
+  LET $types: LIST<STRING> = TYPES()
+  LET $iout: MAP<ANY> = {kind: "index", functions: $funcs, types: $types}
+  RETURN $iout
+}
+EXPORT [ADD, GREET, APP_NAME, COUNT, WHEREAMI, HELP]

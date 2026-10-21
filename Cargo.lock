@@ -1909,6 +1909,7 @@ dependencies = [
  "portable-pty",
  "rand 0.10.3",
  "russh",
+ "shell-words",
  "tokio",
 ]
 

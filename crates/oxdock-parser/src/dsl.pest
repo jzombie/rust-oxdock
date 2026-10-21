@@ -372,8 +372,9 @@ inherit_list = { "[" ~ ws? ~ env_key ~ (ws? ~ "," ~ ws? ~ env_key)* ~ ws? ~ "]" 
 import_module = @{ ASCII_ALPHA_UPPER ~ (ASCII_ALPHA_UPPER | ASCII_DIGIT | "_")* }
 import_list = { "[" ~ ws? ~ import_module ~ (ws? ~ "," ~ ws? ~ import_module)* ~ ws? ~ "]" }
 import_statement = ${ import_keyword ~ sep ~ (import_list | import_module) }
-export_list = { "[" ~ ws? ~ func_ident ~ (ws? ~ "," ~ ws? ~ func_ident)* ~ ws? ~ "]" }
-export_statement = ${ export_keyword ~ sep ~ (export_list | func_ident) }
+export_ident = @{ func_ident ~ ("::" ~ func_ident)? }
+export_list = { "[" ~ ws? ~ export_ident ~ (ws? ~ "," ~ ws? ~ export_ident)* ~ ws? ~ "]" }
+export_statement = ${ export_keyword ~ sep ~ (export_list | export_ident) }
 
 // Generic instruction: uppercase command name followed by arguments.
 // instruction_inner (non-atomic) — used inside with_io_command's command rule.

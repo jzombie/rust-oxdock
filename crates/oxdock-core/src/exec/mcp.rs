@@ -152,11 +152,17 @@ impl<P: ProcessManager> McpSession<P> {
     /// Dispatch one exported tool by bare base name with ordered args.
     /// Arity and type coercion ride the normal call path. Captures
     /// drain into the result and truncate to zero before returning.
+    /// Qualified exports (`STD::INT`) answer under their base name;
+    /// tool-name duplicates fail at table build, so the match is unique.
     pub fn call(&mut self, base: &str, args: Vec<Value>) -> Result<McpCallOutput> {
-        let qualified = oxdock_parser::qualify(oxdock_parser::SCRIPT_MODULE_NAME, base);
-        if !self.exports.iter().any(|e| e == base) {
-            anyhow::bail!("unknown MCP tool `{base}`");
-        }
+        let qualified = if self.exports.iter().any(|e| e == base) {
+            oxdock_parser::qualify(oxdock_parser::SCRIPT_MODULE_NAME, base)
+        } else {
+            match self.exports.iter().find(|e| e.rsplit("::").next() == Some(base)) {
+                Some(export) => export.clone(),
+                None => anyhow::bail!("unknown MCP tool `{base}`"),
+            }
+        };
         let exprs: Vec<Expr> = args.into_iter().map(Expr::Literal).collect();
         let assert_windows = Arc::clone(&self.state.assert_windows);
         let assert_windows_stderr = Arc::clone(&self.state.assert_windows_stderr);

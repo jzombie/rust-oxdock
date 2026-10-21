@@ -399,7 +399,7 @@ fn structural_hint(name: &str, received: &str) -> Option<String> {
             "IMPORT brings module functions into bare-call scope, e.g. `IMPORT [STD]` or `IMPORT [STD, MOCK]`; got {got}."
         )),
         name if name == KEYWORD_EXPORT => Some(
-            "EXPORT marks top-level FUNCs as tools, e.g. `EXPORT FOO` or `EXPORT [FOO, BAR]`."
+            "EXPORT marks script FUNCs and qualified host functions as tools, e.g. `EXPORT FOO`, `EXPORT [FOO, STD::INT]`."
                 .to_string(),
         ),
         _ => None,

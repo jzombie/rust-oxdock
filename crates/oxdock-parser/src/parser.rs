@@ -747,18 +747,30 @@ impl<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> ScriptParser<'a, F> {
             validate_remote_copy_placement(&self.steps, &ctx)?;
         }
 
-        // Validate single-file `EXPORT` names against top-level `FUNC`
-        // definitions. Forward references are allowed (EXPORT may precede
-        // its FUNCs), so this runs at end of parse against the completed
-        // top-level scope. Duplicates are rejected at the EXPORT site.
+        // Validate `EXPORT` names at end of parse. Forward references
+        // are allowed (EXPORT may precede its FUNCs), so this runs
+        // against the completed top-level scope. Bare names must match
+        // a top-level `FUNC`; qualified `MOD::NAME` names must match a
+        // known module member (opaque modules skip the member check;
+        // the runtime registry resolves them or fails serving).
+        // Duplicates are rejected at the EXPORT site.
         {
             let top: HashSet<String> = func_scopes.borrow()[0].clone();
             for name in &self.exports {
-                if !top.contains(name) {
+                let valid = match name.split_once("::") {
+                    None => top.contains(name),
+                    Some((module, base)) if module == SCRIPT_MODULE_NAME => top.contains(base),
+                    Some((module, base)) => match self.modules.modules.get(module) {
+                        None => false,
+                        Some(None) => true,
+                        Some(Some(funcs)) => funcs.functions.contains(base),
+                    },
+                };
+                if !valid {
                     let ctx = self.eof_span();
                     return Err(ParseError::validation(
                         KEYWORD_EXPORT,
-                        format!("EXPORT `{name}` does not match any top-level FUNC"),
+                        format!("EXPORT `{name}` does not match any top-level FUNC or known module member"),
                         &ctx,
                     ));
                 }
@@ -796,22 +808,23 @@ impl<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> ScriptParser<'a, F> {
         lower_import_statement(ctx, pair, lctx)
     }
 
-    /// Lower an `EXPORT` statement: record single-file tool names in
-    /// source order, emit nothing. Guards are rejected by the caller.
-    /// Duplicates fail here; unknown names fail at end of parse so
-    /// forward references (`EXPORT` before `FUNC`) keep working.
+    /// Lower an `EXPORT` statement: record script tool names plus
+    /// qualified host names in source order, emit nothing. Guards are
+    /// rejected by the caller. Duplicates fail here; unknown names fail
+    /// at end of parse so forward references (`EXPORT` before `FUNC`)
+    /// keep working.
     fn lower_export(&mut self, ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<()> {
         let mut names = Vec::new();
         for inner in pair.into_inner() {
             match inner.as_rule() {
                 Rule::export_list => {
                     for item in inner.into_inner() {
-                        if item.as_rule() == Rule::func_ident {
+                        if item.as_rule() == Rule::export_ident {
                             names.push(item.as_str().to_string());
                         }
                     }
                 }
-                Rule::func_ident => names.push(inner.as_str().to_string()),
+                Rule::export_ident => names.push(inner.as_str().to_string()),
                 _ => {}
             }
         }
@@ -824,7 +837,9 @@ impl<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> ScriptParser<'a, F> {
             ));
         }
         for name in names {
-            check_func_ident(ctx, &name)?;
+            for part in name.split("::") {
+                check_func_ident(ctx, part)?;
+            }
             if self.exports.contains(&name) {
                 return Err(ParseError::validation(
                     KEYWORD_EXPORT,

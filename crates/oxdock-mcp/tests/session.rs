@@ -110,6 +110,28 @@ fn unknown_tool_fails() {
 }
 
 #[test]
+fn qualified_host_export_serves_with_registry_docs() {
+    use oxdock_mcp::build_tool_table;
+    use std::collections::HashMap;
+    let mut session = init_session(indoc! {r#"
+        EXPORT [STD::INT]
+    "#});
+    let metas = session.tool_metas().expect("metas");
+    assert_eq!(metas.len(), 1);
+    assert_eq!(metas[0].name, "STD::INT");
+    // Dispatch answers under the base name through the normal call path.
+    let out = session
+        .call("INT", vec![Value::string("42".to_string())])
+        .expect("call");
+    assert_eq!(out.value.as_i64(), Some(42));
+    // No script comments exist, so the description falls back to the
+    // registry summary: host docs carry over with no wrapper.
+    let table = build_tool_table(metas, &HashMap::new()).expect("table");
+    assert_eq!(table[0].name, "INT");
+    assert!(!table[0].description.is_empty(), "registry docs carry over");
+}
+
+#[test]
 fn missing_export_list_fails_fast() {
     let (config, _root) = handler_config(indoc! {r#"
         FUNC FOO() {

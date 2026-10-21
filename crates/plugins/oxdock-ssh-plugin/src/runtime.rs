@@ -24,6 +24,141 @@ use russh::server::Server as _;
 /// per server (zero disables); this default covers `SSH_CONNECT` legs.
 pub const DEFAULT_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// Default cap per stream for one-shot exec: matches the 8 MiB pipe
+/// spill and MCP result caps, so one build log cannot flood the agent.
+pub const DEFAULT_EXEC_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+/// Default wall clock for one-shot exec: kill with partials past this.
+pub const DEFAULT_EXEC_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Outcome of one one-shot remote exec. `exit` is `None` when the
+/// server never sent a status (timeout, early close); callers map that
+/// to -1 like `SSH_CONNECT` does.
+pub struct ExecOutcome {
+    pub exit: Option<i64>,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub truncated: bool,
+    pub timed_out: bool,
+}
+
+/// Run `command` (one pre-joined shell string) on `target` and collect
+/// the result. The join happens once at the call site via
+/// `shell_words::join`, never by hand: argv crosses every other
+/// boundary as values, and this is the single place it becomes a
+/// string. Caps apply while reading, so a flood stops growing the
+/// buffers while the drain continues to the exit status. A timeout
+/// abandons the drain but keeps whatever arrived: partials are where
+/// the diagnosis lives, so they must not be discarded.
+pub async fn run_remote_exec(
+    target: &SocketAddr,
+    username: &str,
+    password: &str,
+    command: Vec<u8>,
+    timeout: Duration,
+    max_bytes: usize,
+) -> Result<ExecOutcome> {
+    #[derive(Default)]
+    struct Shared {
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
+        truncated: bool,
+        exit: Option<i64>,
+    }
+    let shared = Arc::new(std::sync::Mutex::new(Shared::default()));
+    let worker = Arc::clone(&shared);
+    let timed_out = tokio::time::timeout(timeout, async move {
+        let config = Arc::new(russh::client::Config {
+            inactivity_timeout: Some(DEFAULT_INACTIVITY_TIMEOUT),
+            ..Default::default()
+        });
+        let mut session = russh::client::connect(config, *target, AcceptAnyHostKey)
+            .await
+            .context("SSH_EXEC dial failed")?;
+        let authenticated = session
+            .authenticate_password(username, password)
+            .await
+            .context("SSH_EXEC authentication exchange failed")?;
+        if !matches!(authenticated, russh::client::AuthResult::Success) {
+            bail!("SSH_EXEC authentication rejected");
+        }
+        let mut channel = session
+            .channel_open_session()
+            .await
+            .context("SSH_EXEC channel open failed")?;
+        channel
+            .exec(true, command)
+            .await
+            .context("SSH_EXEC exec request failed")?;
+        let mut eof = false;
+        // Messages arrive in channel order, so everything before
+        // `ExitStatus` is already collected when it lands. Success acks
+        // for the exec request fall through: the request was accepted
+        // once the server announces the session.
+        loop {
+            match channel.wait().await {
+                None => break,
+                Some(russh::ChannelMsg::Data { data }) => {
+                    let mut guard = worker.lock().unwrap_or_else(|poison| poison.into_inner());
+                    let room = max_bytes.saturating_sub(guard.stdout.len());
+                    if data.len() > room {
+                        guard.truncated = true;
+                    }
+                    guard.stdout.extend_from_slice(&data[..room.min(data.len())]);
+                }
+                Some(russh::ChannelMsg::ExtendedData { data, ext: 1 }) => {
+                    let mut guard = worker.lock().unwrap_or_else(|poison| poison.into_inner());
+                    let room = max_bytes.saturating_sub(guard.stderr.len());
+                    if data.len() > room {
+                        guard.truncated = true;
+                    }
+                    guard.stderr.extend_from_slice(&data[..room.min(data.len())]);
+                }
+                Some(russh::ChannelMsg::ExitStatus { exit_status }) => {
+                    let mut guard = worker.lock().unwrap_or_else(|poison| poison.into_inner());
+                    guard.exit.get_or_insert(i64::from(exit_status));
+                }
+                Some(russh::ChannelMsg::Eof) => {
+                    eof = true;
+                }
+                Some(russh::ChannelMsg::Close) => break,
+                Some(_) => {}
+            }
+            let done = worker
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .exit
+                .is_some()
+                && eof;
+            if done {
+                break;
+            }
+        }
+        let _ = session
+            .disconnect(russh::Disconnect::ByApplication, "", "")
+            .await;
+        Ok::<_, anyhow::Error>(())
+    })
+    .await;
+    let mut guard = shared.lock().unwrap_or_else(|poison| poison.into_inner());    match timed_out {
+        Ok(Ok(())) => Ok(ExecOutcome {
+            exit: guard.exit,
+            stdout: std::mem::take(&mut guard.stdout),
+            stderr: std::mem::take(&mut guard.stderr),
+            truncated: guard.truncated,
+            timed_out: false,
+        }),
+        Ok(Err(err)) => Err(err),
+        Err(_) => Ok(ExecOutcome {
+            exit: guard.exit,
+            stdout: std::mem::take(&mut guard.stdout),
+            stderr: std::mem::take(&mut guard.stderr),
+            truncated: guard.truncated,
+            timed_out: true,
+        }),
+    }
+}
+
 /// Drive one `SSH_SERVE` listener until shutdown. Owns the current-thread
 /// runtime; returns when the listener closes (shutdown or fatal accept
 /// error). Connected sessions drain independently. The host key arrives

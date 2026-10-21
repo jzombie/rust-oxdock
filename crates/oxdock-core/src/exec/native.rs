@@ -707,11 +707,17 @@ impl<P: ProcessManager> FunctionRegistry<P> {
     /// name the first missing export; callers fail fast before serving.
     pub fn exported_metas(&self, exports: &[String]) -> anyhow::Result<Vec<FuncMeta>> {
         let mut out = Vec::with_capacity(exports.len());
-        for base in exports {
-            let qualified = qualify(SCRIPT_MODULE_NAME, base);
+        for name in exports {
+            // Bare names are script FUNCs; qualified names address the
+            // registry directly, so host functions export with their
+            // own metadata and docs.
+            let qualified = match name.split_once("::") {
+                None => qualify(SCRIPT_MODULE_NAME, name),
+                Some(_) => name.clone(),
+            };
             match self.entries.get(&qualified) {
                 Some(entry) => out.push(entry.meta.clone()),
-                None => anyhow::bail!("EXPORT `{base}` does not match any defined script function"),
+                None => anyhow::bail!("EXPORT `{name}` matches no defined script function or known host function"),
             }
         }
         Ok(out)

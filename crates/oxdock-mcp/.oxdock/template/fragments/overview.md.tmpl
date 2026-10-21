@@ -1,7 +1,10 @@
 ## Overview
 
 MCP tool hosting for exported script functions. A script marks its
-callable surface with `EXPORT [ADD, GREET]` (single-file scope), and
+callable surface with `EXPORT [ADD, GREET]` (script `FUNC`s), or names
+a host function directly with `EXPORT [STD::TEXT_JOIN]`: registry
+summaries and docs carry over as the tool description, so host tools
+serve with no wrapper. Cross-file `EXPORT` stays out of scope.
 `oxdock --mcp script.oxdock` serves each entry as an MCP tool over
 stdio JSON-RPC instead of running linear steps. The reactor keeps one
 initialized session: linear steps run once at startup (ambient `ENV`,

@@ -260,6 +260,84 @@ fn export_unknown_name_fails() {
 }
 
 #[test]
+fn export_qualified_host_name_passes() {
+    use oxdock_parser::parse_script_with_modules_and_exports;
+    let parsed = parse_script_with_modules_and_exports(
+        indoc! {r#"
+            FUNC FOO() {
+                RETURN "x"
+            }
+            EXPORT [FOO, ALPHA::GLOB]
+        "#},
+        mock_lower,
+        HashSet::new(),
+        table(),
+    )
+    .expect("qualified export parses");
+    assert_eq!(
+        parsed.exports,
+        vec!["FOO".to_string(), "ALPHA::GLOB".to_string()]
+    );
+}
+
+#[test]
+fn export_qualified_script_name_passes() {
+    use oxdock_parser::parse_script_with_modules_and_exports;
+    let parsed = parse_script_with_modules_and_exports(
+        indoc! {r#"
+            FUNC FOO() {
+                RETURN "x"
+            }
+            EXPORT SCRIPT::FOO
+        "#},
+        mock_lower,
+        HashSet::new(),
+        table(),
+    )
+    .expect("SCRIPT-qualified export parses");
+    assert_eq!(parsed.exports, vec!["SCRIPT::FOO".to_string()]);
+}
+
+#[test]
+fn export_qualified_unknown_member_fails() {
+    use oxdock_parser::parse_script_with_modules_and_exports;
+    let err = parse_script_with_modules_and_exports(
+        "EXPORT ALPHA::MISSING\n",
+        mock_lower,
+        HashSet::new(),
+        table(),
+    )
+    .expect_err("unknown member export must fail");
+    assert!(err.to_string().contains("ALPHA::MISSING"), "{err}");
+}
+
+#[test]
+fn export_qualified_unknown_module_fails() {
+    use oxdock_parser::parse_script_with_modules_and_exports;
+    let err = parse_script_with_modules_and_exports(
+        "EXPORT NOPE::FOO\n",
+        mock_lower,
+        HashSet::new(),
+        table(),
+    )
+    .expect_err("unknown module export must fail");
+    assert!(err.to_string().contains("NOPE::FOO"), "{err}");
+}
+
+#[test]
+fn export_qualified_opaque_module_passes() {
+    use oxdock_parser::parse_script_with_modules_and_exports;
+    let parsed = parse_script_with_modules_and_exports(
+        "EXPORT OPAQ::ANYTHING\n",
+        mock_lower,
+        HashSet::new(),
+        table(),
+    )
+    .expect("opaque module export parses; the registry resolves it or fails serving");
+    assert_eq!(parsed.exports, vec!["OPAQ::ANYTHING".to_string()]);
+}
+
+#[test]
 fn export_duplicate_fails() {
     use oxdock_parser::parse_script_with_modules_and_exports;
     let err = parse_script_with_modules_and_exports(
@@ -325,7 +403,7 @@ fn export_docs_absent_without_comments() {
     )
     .expect("export without docs parses");
     assert!(
-        parsed.func_docs.get("FOO").is_none(),
+        !parsed.func_docs.contains_key("FOO"),
         "no docs without comments"
     );
 }
@@ -348,7 +426,7 @@ fn export_docs_ignore_slash_comments() {
     )
     .expect("export with slash comments parses");
     assert!(
-        parsed.func_docs.get("FOO").is_none(),
+        !parsed.func_docs.contains_key("FOO"),
         "slash comments are not docs"
     );
 }
