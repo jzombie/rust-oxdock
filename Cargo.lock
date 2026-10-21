@@ -322,9 +322,9 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "cache-manager"
-version = "0.5.0"
+version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "216b7b4ff753c73d33ffea0166bf3bf89b7ba16fb55e7bc7730818bab8ac8195"
+checksum = "3d16266b6585746ebb43da97987694bbaa4b32c2de02e6cadb9a22e4faf2fc14"
 dependencies = [
  "directories",
 ]
@@ -1176,9 +1176,9 @@ dependencies = [
 
 [[package]]
 name = "indoc"
-version = "2.0.7"
+version = "2.0.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "79cf5c93f93228cf8efb3ba362535fb11199ac548a09ce117c9b1adc3030d706"
+checksum = "a37b2691796cffeb8a8cd305ac66e65841559f147f4e63231d0eafa4db5384d1"
 dependencies = [
  "rustversion",
 ]
@@ -1539,7 +1539,7 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
 name = "oxdock"
-version = "0.29.0-alpha"
+version = "0.30.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -1555,7 +1555,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-build"
-version = "0.29.0-alpha"
+version = "0.30.0-alpha"
 dependencies = [
  "anyhow",
  "oxdock-core",
@@ -1571,7 +1571,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-cli"
-version = "0.29.0-alpha"
+version = "0.30.0-alpha"
 dependencies = [
  "anyhow",
  "futures-executor",
@@ -1598,7 +1598,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-core"
-version = "0.29.0-alpha"
+version = "0.30.0-alpha"
 dependencies = [
  "anyhow",
  "base64",
@@ -1623,7 +1623,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-doc-tests"
-version = "0.29.0-alpha"
+version = "0.30.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -1637,7 +1637,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-embed"
-version = "0.29.0-alpha"
+version = "0.30.0-alpha"
 dependencies = [
  "anyhow",
  "oxdock-fs",
@@ -1649,7 +1649,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-fixture"
-version = "0.29.0-alpha"
+version = "0.30.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -1660,7 +1660,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-fs"
-version = "0.29.0-alpha"
+version = "0.30.0-alpha"
 dependencies = [
  "anyhow",
  "cache-manager",
@@ -1675,7 +1675,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-func-macro"
-version = "0.29.0-alpha"
+version = "0.30.0-alpha"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1685,7 +1685,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-logic-tests"
-version = "0.29.0-alpha"
+version = "0.30.0-alpha"
 dependencies = [
  "anyhow",
  "cargo_metadata",
@@ -1712,7 +1712,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-macros"
-version = "0.29.0-alpha"
+version = "0.30.0-alpha"
 dependencies = [
  "anyhow",
  "oxdock-build",
@@ -1729,7 +1729,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-markdown-plugin"
-version = "0.29.0-alpha"
+version = "0.30.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -1743,7 +1743,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-net-plugin"
-version = "0.29.0-alpha"
+version = "0.30.0-alpha"
 dependencies = [
  "anyhow",
  "futures-executor",
@@ -1770,7 +1770,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-parser"
-version = "0.29.0-alpha"
+version = "0.30.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -1788,7 +1788,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-pipe"
-version = "0.29.0-alpha"
+version = "0.30.0-alpha"
 dependencies = [
  "anyhow",
  "oxdock-fs",
@@ -1796,7 +1796,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-process"
-version = "0.29.0-alpha"
+version = "0.30.0-alpha"
 dependencies = [
  "anyhow",
  "indoc",
@@ -1810,7 +1810,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-remote-proto"
-version = "0.29.0-alpha"
+version = "0.30.0-alpha"
 dependencies = [
  "anyhow",
  "flate2",
@@ -1823,7 +1823,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-ssh-plugin"
-version = "0.29.0-alpha"
+version = "0.30.0-alpha"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1832,6 +1832,7 @@ dependencies = [
  "oxdock-fs",
  "oxdock-func-macro",
  "oxdock-net-plugin",
+ "oxdock-parser",
  "oxdock-pipe",
  "oxdock-process",
  "oxdock-sys-test-utils",
@@ -1843,7 +1844,7 @@ dependencies = [
 
 [[package]]
 name = "oxdock-sys-test-utils"
-version = "0.29.0-alpha"
+version = "0.30.0-alpha"
 
 [[package]]
 name = "p256"
@@ -1942,19 +1943,21 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "pest"
-version = "2.9.2"
+version = "2.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "45d3aca230fad2e6f6317ca0a72724338c4960cb97168a85cdee66df4a9a21a8"
+checksum = "b568374ba38b33a6c627141f891faf16902b08d2db26b8ede1bcb0a15b1919fa"
 dependencies = [
  "memchr",
+ "psm",
+ "stacker",
  "ucd-trie",
 ]
 
 [[package]]
 name = "pest_derive"
-version = "2.9.2"
+version = "2.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "284b60557f2c4a2e72ad3f2d34d42685a2fa4a6a61d0d2a10c0ae2a5e916c2cf"
+checksum = "b66e184b924cebaaff20ab2256ca52f12332d528a39aa76553b5d96f92aacf7f"
 dependencies = [
  "pest",
  "pest_generator",
@@ -1962,22 +1965,22 @@ dependencies = [
 
 [[package]]
 name = "pest_generator"
-version = "2.9.2"
+version = "2.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d9d1f08a115309ee99268cf85e5228e0e56aa9caf8841ec12866b6be07c3109"
+checksum = "a87478d267e4de54a626af9754f2f0f58e927aac6ed0575fe89bc05ad6851694"
 dependencies = [
  "pest",
  "pest_meta",
  "proc-macro2",
  "quote",
- "syn 2.0.119",
+ "syn 3.0.6",
 ]
 
 [[package]]
 name = "pest_meta"
-version = "2.9.2"
+version = "2.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed93ba1a9ffcca32130a5188701c81c0c49cf00d4b7c5007d5148951d743adcb"
+checksum = "4f986f248b4241ac359b831f6139aaa34e03b08a37b6caf7e201a33f95c869e1"
 dependencies = [
  "pest",
 ]
@@ -2148,6 +2151,15 @@ dependencies = [
  "rusty-fork",
  "tempfile",
  "unarray",
+]
+
+[[package]]
+name = "psm"
+version = "0.1.24"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "200b9ff220857e53e184257720a14553b2f4aa02577d2ed9842d45d4b9654810"
+dependencies = [
+ "cc",
 ]
 
 [[package]]
@@ -2446,9 +2458,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.15"
+version = "0.103.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
+checksum = "4443b1b6d39d7c663139942cc4558262562d2c84123bb6282ef177009ca8b281"
 dependencies = [
  "ring",
  "rustls-pki-types",
@@ -2551,9 +2563,9 @@ dependencies = [
 
 [[package]]
 name = "serde_json"
-version = "1.0.151"
+version = "1.0.154"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c841b55ecdae098c80dcae9cf767f6f8a0c2cdb3416bbef72181df4d0fe73f14"
+checksum = "e7e9cc8b1b85264074fbcc02a88680c4096b1e47df8f739dceb03bf482f04bd6"
 dependencies = [
  "itoa",
  "memchr",
@@ -2763,6 +2775,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "stacker"
+version = "0.1.25"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "707f49d46706bacf8a2b00d51dace3f9de527c13eec3778f570c411f89e69967"
+dependencies = [
+ "cc",
+ "cfg-if",
+ "libc",
+ "psm",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "strsim"
 version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2814,7 +2839,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -3148,9 +3173,9 @@ dependencies = [
 
 [[package]]
 name = "webpki-roots"
-version = "1.0.9"
+version = "1.0.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7dcd9d09a39985f5344844e66b0c530a33843579125f23e21e9f0f220850f22a"
+checksum = "1c1c8e20c8a38fc7d65abfe74eb7280e4aa667e8eec8bc84996d2874810748d9"
 dependencies = [
  "rustls-pki-types",
 ]

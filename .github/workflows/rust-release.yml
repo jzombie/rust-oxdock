@@ -219,18 +219,26 @@ jobs:
           fi
           cargo build --release --target ${{ matrix.target }} -p ${{ inputs.binary }} --all-features
 
+      # NOTE: This step is intentionally kept (see next step).
+      #
       # Pack with the release candidate's own engine: setup-oxdock
       # builds the caller's checkout (source: local), so the packer
       # carries the very ARCHIVE under release. A broken ARCHIVE fails
       # this pack before anything publishes: the release proves its own
       # engine. Membership matches the historical pack exactly
       # (one top-level binary, modes kept); a broken pack fails the
-      # runner self-extract below before anything publishes.
+      # runner self-extract below before anything publishes. The
+      # duplicate build is an intentional self-hosting proof, not
+      # a candidate for reuse of the step above.
       - name: Setup pack engine
         uses: ./.github/actions/setup-oxdock
         with:
           source: local
 
+      # NOTE: This intentionally reuses the candidate engine from the
+      # step above instead of the binary from "Build the release binary":
+      # the duplicate build validates the candidate engine by
+      # self-hosting the archive step.
       - name: Archive the binary
         shell: oxdock --script {0}
         run: |
@@ -375,4 +383,3 @@ jobs:
           else
             cargo run --manifest-path rust-release/Cargo.toml -p oxdock --features markdown -- rust-release/scripts/gha/gha-rust-release.oxfile
           fi
-

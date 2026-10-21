@@ -74,6 +74,15 @@ impl CommandBuilder {
         self
     }
 
+    /// Clear the inherited host environment, so staged script env is the
+    /// whole child env. Mirrors `std::process::Command::env_clear` while
+    /// keeping the snapshot consistent for diagnostics.
+    pub fn env_clear(&mut self) -> &mut Self {
+        self.inner.env_clear();
+        self.envs.clear();
+        self
+    }
+
     pub fn stdin_file(&mut self, file: File) -> &mut Self {
         self.inner.stdin(Stdio::from(file));
         self
@@ -150,7 +159,7 @@ impl CommandBuilder {
                 .inner
                 .spawn()
                 .with_context(|| format!("failed to spawn {desc}"))?;
-            Ok(ChildHandle::new(child, None, Vec::new()))
+            ChildHandle::new(child, None, Vec::new())
         }
     }
 
@@ -185,10 +194,55 @@ impl CommandBuilder {
                 .stdout
                 .take()
                 .with_context(|| format!("spawned process has no piped stdout: {desc}"))?;
+            let handle = ChildHandle::new(child, None, Vec::new())?;
             Ok(PipedChild {
-                handle: ChildHandle::new(child, None, Vec::new()),
+                handle,
                 stdin,
                 stdout,
+                stderr: None,
+            })
+        }
+    }
+
+    /// Like [`spawn_piped`](Self::spawn_piped), but stderr is also piped
+    /// and handed back: binary-safe sessions keep diagnostics off stdout
+    /// and route them to their own pipe. Dropping the half closes it.
+    #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+    pub fn spawn_piped_with_stderr(&mut self) -> Result<PipedChild> {
+        #[cfg(miri)]
+        {
+            let _ = self;
+            bail!("spawn is not supported under Miri synthetic process backend")
+        }
+
+        #[cfg(not(miri))]
+        {
+            self.inner.stdin(Stdio::piped());
+            self.inner.stdout(Stdio::piped());
+            self.inner.stderr(Stdio::piped());
+            let desc = format!("{:?}", self.inner);
+            let mut child = self
+                .inner
+                .spawn()
+                .with_context(|| format!("failed to spawn {desc}"))?;
+            let stdin = child
+                .stdin
+                .take()
+                .with_context(|| format!("spawned process has no piped stdin: {desc}"))?;
+            let stdout = child
+                .stdout
+                .take()
+                .with_context(|| format!("spawned process has no piped stdout: {desc}"))?;
+            let stderr = child
+                .stderr
+                .take()
+                .with_context(|| format!("spawned process has no piped stderr: {desc}"))?;
+            let handle = ChildHandle::new(child, None, Vec::new())?;
+            Ok(PipedChild {
+                handle,
+                stdin,
+                stdout,
+                stderr: Some(stderr),
             })
         }
     }
@@ -214,14 +268,16 @@ pub struct CommandSnapshot {
 }
 
 /// A spawned child with its stdio halves detached for frame pumps.
-/// Dropping `stdin`/`stdout` closes the pipes; `handle` keeps kill-on-drop
-/// and reaping semantics. Only constructed by
-/// [`CommandBuilder::spawn_piped`].
+/// Dropping `stdin`/`stdout`/`stderr` closes the pipes; `handle` keeps
+/// kill-on-drop and reaping semantics. Only constructed by
+/// [`CommandBuilder::spawn_piped`] (stderr stays inherited there) and
+/// [`CommandBuilder::spawn_piped_with_stderr`].
 #[allow(clippy::disallowed_types, clippy::disallowed_methods)]
 pub struct PipedChild {
     pub handle: ChildHandle,
     pub stdin: std::process::ChildStdin,
     pub stdout: std::process::ChildStdout,
+    pub stderr: Option<std::process::ChildStderr>,
 }
 
 pub struct CommandOutput {

@@ -15,6 +15,7 @@ mod bridge;
 mod funcs;
 mod keys;
 mod pty;
+mod run;
 mod runtime;
 mod state;
 mod types;

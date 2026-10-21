@@ -34,6 +34,7 @@ use oxdock_pipe::PipeInner;
 pub(super) struct ThreadJoinHandle {
     join: Option<std::thread::JoinHandle<Result<()>>>,
     cancel_token: Arc<AtomicBool>,
+    cancel_hub: Arc<oxdock_process::CancelHub>,
     active_process: Arc<Mutex<Option<Box<dyn BackgroundHandle>>>>,
     /// Identity of the worker thread, published by the child on entry.
     /// Forked worker state shares the parent task registry via `Arc`, so a
@@ -55,12 +56,14 @@ impl ThreadJoinHandle {
     pub(super) fn new(
         join: std::thread::JoinHandle<Result<()>>,
         cancel_token: Arc<AtomicBool>,
+        cancel_hub: Arc<oxdock_process::CancelHub>,
         active_process: Arc<Mutex<Option<Box<dyn BackgroundHandle>>>>,
         worker: Arc<Mutex<Option<std::thread::ThreadId>>>,
     ) -> Self {
         Self {
             join: Some(join),
             cancel_token,
+            cancel_hub,
             active_process,
             worker,
             thread_error: None,
@@ -148,6 +151,9 @@ impl BackgroundHandle for ThreadJoinHandle {
     fn kill(&mut self) -> Result<()> {
         // Signal cancellation
         self.cancel_token.store(true, Ordering::SeqCst);
+        // Fan out to pump supervisors waiting on the hub (blocking
+        // reads and channel waits cannot poll the token).
+        self.cancel_hub.mark_cancelled();
         // Kill any active OS process to interrupt blocking wait
         if let Ok(mut guard) = self.active_process.lock()
             && let Some(ref mut proc) = *guard
@@ -538,6 +544,13 @@ impl<'a, P: ProcessManager> StepCtx<'a, P> {
         Arc::clone(&self.state.cancel_token)
     }
 
+    /// Event hub for the same cancellation: supervisors of blocking
+    /// pumps wait on this instead of polling the token, and every
+    /// `kill`/`TIMEOUT` path marks it alongside the token store.
+    pub fn cancel_hub(&self) -> Arc<oxdock_process::CancelHub> {
+        Arc::clone(&self.state.cancel_hub)
+    }
+
     /// Whether this step runs on an `ASYNC` task thread. Blocking pumps
     /// must refuse the main sequential flow.
     pub fn is_async_task(&self) -> bool {
@@ -562,11 +575,11 @@ impl<'a, P: ProcessManager> StepCtx<'a, P> {
     }
 
     /// Resolve an explicitly passed `PIPE` value to its script backend for
-    /// timeout-bounded reads (`read_into_timeout`). This is value-based on
+    /// backend-aware pump operations (explicit close, cancel). This is value-based on
     /// purpose: the ambient `out_pipe`/`stdin_pipe` fields only populate via
     /// engine-level `WITH_IO` resolution, which never runs for host function
     /// calls. Returns `None` for unbound and OS-materialized handles, which
-    /// fall back to blocking reads.
+    /// fall back to plain blocking I/O.
     pub fn pipe_backend(&self, value: &Value) -> Option<Arc<PipeInner>> {
         let handle = value.as_pipe_handle()?;
         oxdock_pipe::script_backend(&handle)

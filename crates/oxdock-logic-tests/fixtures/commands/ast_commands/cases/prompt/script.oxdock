@@ -1,4 +1,6 @@
-# Headless runs never read stdin: with a default the prompt binds it
-# and continues instead of hanging.
-PROMPT $dir "Install destination?" "fallback-dir"
+# A redirected stdin can never answer a prompt: with a default the
+# prompt binds it and continues instead of hanging, even when the
+# host process owns a TTY.
+LET $p: PIPE
+WITH_IO [stdin=$p] PROMPT $dir "Install destination?" "fallback-dir"
 WRITE out.txt "{{ $dir }}"

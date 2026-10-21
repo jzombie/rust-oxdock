@@ -289,7 +289,7 @@ fn spawn_child_with_streams(
         io_threads.push(thread);
     }
 
-    Ok(ChildHandle::new(child, stdin_thread, io_threads))
+    ChildHandle::new(child, stdin_thread, io_threads)
 }
 
 #[cfg(test)]
