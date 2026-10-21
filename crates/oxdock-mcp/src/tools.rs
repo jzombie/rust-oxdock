@@ -33,10 +33,7 @@ pub struct McpTool {
 /// Build the servable tool table from exported metas and script docs.
 /// `docs` maps qualified names to (summary, docs). Errors on duplicate
 /// bare names and on opaque parameter or return types.
-pub fn build_tool_table(
-    metas: Vec<FuncMeta>,
-    docs: &HashMapDoc,
-) -> Result<Vec<McpTool>> {
+pub fn build_tool_table(metas: Vec<FuncMeta>, docs: &HashMapDoc) -> Result<Vec<McpTool>> {
     let mut seen: HashSet<String> = HashSet::new();
     let mut out = Vec::with_capacity(metas.len());
     for meta in metas {
@@ -44,17 +41,17 @@ pub fn build_tool_table(
         if !seen.insert(base.clone()) {
             bail!("duplicate MCP tool name `{base}`");
         }
-    let description = tool_description(&meta, docs);
-    let (input_schema, params) = input_schema_for(&meta)?;
-    let output_schema = output_schema_for(&meta)?;
-    out.push(McpTool {
-        name: base,
-        qualified: meta.name.clone(),
-        description,
-        input_schema,
-        output_schema,
-        params,
-    });
+        let description = tool_description(&meta, docs);
+        let (input_schema, params) = input_schema_for(&meta)?;
+        let output_schema = output_schema_for(&meta)?;
+        out.push(McpTool {
+            name: base,
+            qualified: meta.name.clone(),
+            description,
+            input_schema,
+            output_schema,
+            params,
+        });
     }
     Ok(out)
 }
@@ -147,8 +144,10 @@ fn input_schema_for(meta: &FuncMeta) -> Result<(JsonValue, Vec<FuncParam>)> {
         if let Some(allowed) = param.allowed
             && let JsonValue::Object(ref mut map) = slot
         {
-            let values: Vec<JsonValue> =
-                allowed.iter().map(|s| JsonValue::String(s.to_string())).collect();
+            let values: Vec<JsonValue> = allowed
+                .iter()
+                .map(|s| JsonValue::String(s.to_string()))
+                .collect();
             map.insert("enum".to_string(), JsonValue::Array(values));
         }
         if !param.docs.is_empty()

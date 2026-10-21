@@ -23,8 +23,14 @@ fn init_session(script: &str) -> McpSession<oxdock_process::DefaultProcessManage
     let parsed =
         parse_script_with_modules_and_exports(script, engine.module_table()).expect("parse");
     let (fs, _root) = test_fs();
-    McpSession::init(fs, default_process_manager(), Vec::new(), Vec::new(), &parsed)
-        .expect("session init")
+    McpSession::init(
+        fs,
+        default_process_manager(),
+        Vec::new(),
+        Vec::new(),
+        &parsed,
+    )
+    .expect("session init")
 }
 
 fn handler_config(script: &str) -> (McpServerConfig, GuardedPath) {
@@ -110,10 +116,7 @@ fn missing_export_list_fails_fast() {
           RETURN "x"
         }
     "#});
-    assert!(
-        init_handler(config).is_err(),
-        "no EXPORT must fail"
-    );
+    assert!(init_handler(config).is_err(), "no EXPORT must fail");
 }
 
 #[test]
@@ -194,10 +197,12 @@ fn status_reports_generation_and_failure() {
     assert_eq!(handler.generation(), 2, "failed reload keeps generation");
     let payload = handler.status_payload();
     assert_eq!(payload["last_reload"]["ok"], false);
-    assert!(payload["last_reload"]["message"]
-        .as_str()
-        .expect("message")
-        .contains("BROKEN"));
+    assert!(
+        payload["last_reload"]["message"]
+            .as_str()
+            .expect("message")
+            .contains("BROKEN")
+    );
 }
 
 #[test]
@@ -208,8 +213,5 @@ fn status_tool_name_is_reserved() {
         }
         EXPORT MCP_STATUS
     "#});
-    assert!(
-        init_handler(config).is_err(),
-        "EXPORT MCP_STATUS must fail"
-    );
+    assert!(init_handler(config).is_err(), "EXPORT MCP_STATUS must fail");
 }

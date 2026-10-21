@@ -19,20 +19,19 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use oxdock_core::{FuncMeta, McpSession, Value, value_to_json};
 use oxdock_fs::{GuardedPath, LazyGuardedTempDir, PathResolver, WorkspaceFs};
-use sha2::{Digest, Sha256};
 use oxdock_process::DefaultProcessManager;
 use rmcp::{
     ErrorData as McpError, Peer, RoleServer, ServerHandler,
     model::{
-        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
-        GetPromptResponse, InitializeRequestParams, InitializeResult, ListPromptsResult,
-        ListResourceTemplatesResult, ListResourcesResult, ListToolsResult,
-        PaginatedRequestParams, ReadResourceRequestParams, ServerNotification,
-        Tool, ToolListChangedNotification,
+        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, GetPromptResponse,
+        InitializeRequestParams, InitializeResult, ListPromptsResult, ListResourceTemplatesResult,
+        ListResourcesResult, ListToolsResult, PaginatedRequestParams, ReadResourceRequestParams,
+        ServerNotification, Tool, ToolListChangedNotification,
     },
     service::RequestContext,
 };
 use serde_json::Value as JsonValue;
+use sha2::{Digest, Sha256};
 
 use crate::tools::{HashMapDoc, McpTool, build_tool_table, map_json_args};
 
@@ -75,8 +74,7 @@ pub struct WatchConfig {
     /// Workspace root for session filesystems.
     pub workspace_root: GuardedPath,
     /// Host modules re-registered on every reload.
-    pub modules:
-        Vec<oxdock_core::HostModule<oxdock_process::DefaultProcessManager>>,
+    pub modules: Vec<oxdock_core::HostModule<oxdock_process::DefaultProcessManager>>,
     /// Host types re-registered on every reload.
     pub types: Vec<&'static oxdock_core::TypeDescriptor>,
     /// Poll interval in milliseconds.
@@ -113,7 +111,13 @@ impl OxDockHandler {
     ) -> Result<Self> {
         reject_reserved_metas(&metas)?;
         let tools = build_tool_table(metas, docs)?;
-        Self::from_parts(session, tools, holds, None, StatusState::initial(script_text))
+        Self::from_parts(
+            session,
+            tools,
+            holds,
+            None,
+            StatusState::initial(script_text),
+        )
     }
 
     fn from_parts(
@@ -157,9 +161,7 @@ impl OxDockHandler {
     pub fn reload(
         &self,
         script_text: &str,
-        modules: Vec<
-            oxdock_core::HostModule<oxdock_process::DefaultProcessManager>,
-        >,
+        modules: Vec<oxdock_core::HostModule<oxdock_process::DefaultProcessManager>>,
         types: Vec<&'static oxdock_core::TypeDescriptor>,
         workspace_root: &GuardedPath,
     ) -> Result<()> {
@@ -170,9 +172,10 @@ impl OxDockHandler {
                 return Err(err);
             }
         };
-        let mut inner = self.inner.lock().map_err(|_| {
-            anyhow::anyhow!("MCP session lock poisoned during reload")
-        })?;
+        let mut inner = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow::anyhow!("MCP session lock poisoned during reload"))?;
         inner.status.generation += 1;
         inner.status.script_sha256 = outcome.hash.clone();
         inner.status.loaded_at_unix = unix_now();
@@ -248,8 +251,7 @@ impl OxDockHandler {
             // Seed with the live text so the first tick never rebuilds.
             let mut last: Option<String> =
                 read_guarded(&watch.workspace_root, &watch.script_path).ok();
-            let mut ticker =
-                tokio::time::interval(Duration::from_millis(watch.poll_ms.max(100)));
+            let mut ticker = tokio::time::interval(Duration::from_millis(watch.poll_ms.max(100)));
             loop {
                 ticker.tick().await;
                 // Debounce editors that write in stages (temp file plus
@@ -266,7 +268,12 @@ impl OxDockHandler {
                     continue;
                 }
                 last = Some(text.clone());
-                match handler.reload(&text, watch.modules.clone(), watch.types.clone(), &watch.workspace_root) {
+                match handler.reload(
+                    &text,
+                    watch.modules.clone(),
+                    watch.types.clone(),
+                    &watch.workspace_root,
+                ) {
                     Ok(()) => {
                         eprintln!(
                             "mcp reload: serving {} tool(s) from {}",
@@ -299,9 +306,7 @@ impl OxDockHandler {
 
 /// Build the lazy session filesystem plus its backing-dir hold. The hold
 /// must outlive the session, so it rides in `HandlerInner`.
-pub fn session_fs(
-    root: &GuardedPath,
-) -> Result<(Box<dyn WorkspaceFs>, Arc<LazyGuardedTempDir>)> {
+pub fn session_fs(root: &GuardedPath) -> Result<(Box<dyn WorkspaceFs>, Arc<LazyGuardedTempDir>)> {
     let mut resolver = PathResolver::new_lazy(root.clone()).context("guard workspace root")?;
     resolver.set_workspace_root(root.clone());
     let hold = resolver.snapshot_handle();
@@ -319,9 +324,8 @@ fn read_guarded(root: &GuardedPath, path: &GuardedPath) -> Result<String> {
 impl ServerHandler for OxDockHandler {
     fn get_info(&self) -> rmcp::model::ServerConfig {
         let mut info = rmcp::model::ServerConfig::default();
-        info.instructions = Some(
-            "OxDock script tools: each EXPORTed FUNC is one MCP tool.".to_string(),
-        );
+        info.instructions =
+            Some("OxDock script tools: each EXPORTed FUNC is one MCP tool.".to_string());
         let mut tools_cap = rmcp::model::ToolsCapability::default();
         tools_cap.list_changed = Some(true);
         info.capabilities.tools = Some(tools_cap);
@@ -368,7 +372,10 @@ impl ServerHandler for OxDockHandler {
             content.push(ContentBlock::text(format!(
                 "generation {}: {} tool(s), last reload ok={}",
                 payload["generation"],
-                payload["tools"].as_array().map(|tools| tools.len()).unwrap_or(0),
+                payload["tools"]
+                    .as_array()
+                    .map(|tools| tools.len())
+                    .unwrap_or(0),
                 payload["last_reload"]["ok"],
             )));
             let mut result = CallToolResult::success(content);
@@ -396,9 +403,9 @@ impl ServerHandler for OxDockHandler {
         let name = tool.name.clone();
         let inner = Arc::clone(&self.inner);
         let output = tokio::task::spawn_blocking(move || {
-            let mut guard = inner.lock().map_err(|_| {
-                anyhow::anyhow!("MCP session lock poisoned during `{name}`")
-            })?;
+            let mut guard = inner
+                .lock()
+                .map_err(|_| anyhow::anyhow!("MCP session lock poisoned during `{name}`"))?;
             guard.session.call(&name, values)
         })
         .await
@@ -419,7 +426,10 @@ impl ServerHandler for OxDockHandler {
         let json = value_to_json(&output.value).map_err(|err| {
             McpError::new(
                 rmcp::model::ErrorCode::INTERNAL_ERROR,
-                format!("MCP tool `{}` returned an unserializable value: {err:#}", tool.name),
+                format!(
+                    "MCP tool `{}` returned an unserializable value: {err:#}",
+                    tool.name
+                ),
                 None,
             )
         })?;
@@ -532,10 +542,7 @@ fn reject_reserved_metas(metas: &[FuncMeta]) -> Result<()> {
 fn status_tool() -> McpTool {
     use crate::tools::output_schema_for;
     let mut input = serde_json::Map::new();
-    input.insert(
-        "type".to_string(),
-        JsonValue::String("object".to_string()),
-    );
+    input.insert("type".to_string(), JsonValue::String("object".to_string()));
     let input_schema = JsonValue::Object(input);
     McpTool {
         name: STATUS_TOOL_NAME.to_string(),
@@ -597,9 +604,7 @@ struct BuiltInner {
 impl OxDockHandler {
     fn build_inner(
         script_text: &str,
-        modules: Vec<
-            oxdock_core::HostModule<oxdock_process::DefaultProcessManager>,
-        >,
+        modules: Vec<oxdock_core::HostModule<oxdock_process::DefaultProcessManager>>,
         types: Vec<&'static oxdock_core::TypeDescriptor>,
         workspace_root: &GuardedPath,
     ) -> Result<BuiltInner> {
@@ -607,18 +612,12 @@ impl OxDockHandler {
         for module in &modules {
             engine.register_module(module.clone());
         }
-        let parsed = oxdock_core::parse_script_with_modules_and_exports(
-            script_text,
-            engine.module_table(),
-        )?;
+        let parsed =
+            oxdock_core::parse_script_with_modules_and_exports(script_text, engine.module_table())?;
         if parsed.exports.is_empty() {
             anyhow::bail!("no EXPORT entries: add `EXPORT [NAME, ...]` to expose MCP tools");
         }
-        if parsed
-            .exports
-            .iter()
-            .any(|name| name == STATUS_TOOL_NAME)
-        {
+        if parsed.exports.iter().any(|name| name == STATUS_TOOL_NAME) {
             anyhow::bail!("{STATUS_TOOL_NAME} is reserved for the host status tool");
         }
         let (fs, hold) = session_fs(workspace_root)?;

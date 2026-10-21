@@ -345,7 +345,10 @@ pub fn run_steps_with_manager_with_modules<P: ProcessManager>(
     finish_run(state, process, steps)
 }
 
-pub(crate) fn new_state<P: ProcessManager>(fs: Box<dyn WorkspaceFs>, io: ExecIo) -> Result<ExecState<P>> {
+pub(crate) fn new_state<P: ProcessManager>(
+    fs: Box<dyn WorkspaceFs>,
+    io: ExecIo,
+) -> Result<ExecState<P>> {
     let cwd = fs.root().clone();
     let build_context = fs.build_context().clone();
     let cargo_scratch = reserve_cargo_scratch()?;

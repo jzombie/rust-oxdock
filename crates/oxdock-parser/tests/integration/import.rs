@@ -252,7 +252,11 @@ fn export_unknown_name_fails() {
         table(),
     )
     .expect_err("unknown export must fail");
-    assert!(err.to_string().contains("does not match any top-level FUNC"), "{err}");
+    assert!(
+        err.to_string()
+            .contains("does not match any top-level FUNC"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -320,7 +324,10 @@ fn export_docs_absent_without_comments() {
         table(),
     )
     .expect("export without docs parses");
-    assert!(parsed.func_docs.get("FOO").is_none(), "no docs without comments");
+    assert!(
+        parsed.func_docs.get("FOO").is_none(),
+        "no docs without comments"
+    );
 }
 
 #[test]

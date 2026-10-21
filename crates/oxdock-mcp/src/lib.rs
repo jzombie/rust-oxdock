@@ -31,9 +31,7 @@ pub struct McpServerConfig {
     /// Script text (already read; the CLI owns file IO).
     pub script: String,
     /// extra host modules beyond STD (NET/SSH/MARKDOWN when enabled).
-    pub modules: Vec<
-        oxdock_core::HostModule<oxdock_process::DefaultProcessManager>,
-    >,
+    pub modules: Vec<oxdock_core::HostModule<oxdock_process::DefaultProcessManager>>,
     /// extra host types beyond startup descriptors.
     pub types: Vec<&'static oxdock_core::TypeDescriptor>,
     /// Poll the script file and hot-swap the session on change.
@@ -107,13 +105,15 @@ pub async fn serve_stdio(handler: OxDockHandler) -> Result<()> {
     use rmcp::ServiceExt;
     let transport = rmcp::transport::io::stdio();
     let reloader = handler.clone();
-    let service = handler.serve(transport).await.map_err(|err| {
-        anyhow::anyhow!("MCP stdio serve failed: {err}")
-    })?;
+    let service = handler
+        .serve(transport)
+        .await
+        .map_err(|err| anyhow::anyhow!("MCP stdio serve failed: {err}"))?;
     reloader.spawn_reloader(Some(service.peer().clone()));
-    service.waiting().await.map_err(|err| {
-        anyhow::anyhow!("MCP stdio service failed: {err}")
-    })?;
+    service
+        .waiting()
+        .await
+        .map_err(|err| anyhow::anyhow!("MCP stdio service failed: {err}"))?;
     Ok(())
 }
 

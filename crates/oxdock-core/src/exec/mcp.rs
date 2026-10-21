@@ -21,7 +21,7 @@ use super::native::{FuncMeta, HostModule};
 use super::state::ExecState;
 use super::steps::Flow;
 use super::typing::TypeDescriptor;
-use super::{execute_steps, Value};
+use super::{Value, execute_steps};
 use oxdock_fs::WorkspaceFs;
 
 /// Captured output cap per call. Matches the assertion-capture scale:
@@ -90,9 +90,10 @@ impl<P: ProcessManager> McpSession<P> {
             assert_windows,
             exact_stdout,
         )));
-        let stderr = state.io.stderr().map(|sink| {
-            StreamHandle::Stream(teed_stderr(Some(sink), assert_windows_stderr))
-        });
+        let stderr = state
+            .io
+            .stderr()
+            .map(|sink| StreamHandle::Stream(teed_stderr(Some(sink), assert_windows_stderr)));
         let mut process = process;
         let stdin = state.io.stdin().into();
         let flow = execute_steps(
@@ -165,9 +166,11 @@ impl<P: ProcessManager> McpSession<P> {
             assert_windows,
             exact_stdout,
         )));
-        let err = self.state.io.stderr().map(|sink| {
-            StreamHandle::Stream(teed_stderr(Some(sink), assert_windows_stderr))
-        });
+        let err = self
+            .state
+            .io
+            .stderr()
+            .map(|sink| StreamHandle::Stream(teed_stderr(Some(sink), assert_windows_stderr)));
         let value = {
             let state_ptr: *mut ExecState<P> = &mut self.state;
             let process_ptr: *mut P = &mut self.process;

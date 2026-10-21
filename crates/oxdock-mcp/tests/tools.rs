@@ -26,7 +26,12 @@ fn meta(name: &str, params: Vec<FuncParam>) -> FuncMeta {
     meta_docs(name, params, "summary", "docs")
 }
 
-fn meta_docs(name: &str, params: Vec<FuncParam>, summary: &'static str, docs: &'static str) -> FuncMeta {
+fn meta_docs(
+    name: &str,
+    params: Vec<FuncParam>,
+    summary: &'static str,
+    docs: &'static str,
+) -> FuncMeta {
     FuncMeta {
         name: name.to_string(),
         module: "SCRIPT".to_string(),
@@ -59,13 +64,12 @@ fn schema_leaves_map_to_json_types() {
 
 #[test]
 fn schema_nesting_projects() {
-    let list_int = schema_for_tag(&TypeTag::ListOf(Arc::new(TypeTag::Int)))
-        .expect("list schema");
+    let list_int = schema_for_tag(&TypeTag::ListOf(Arc::new(TypeTag::Int))).expect("list schema");
     assert_eq!(list_int["type"], "array");
     assert_eq!(list_int["items"]["type"], "integer");
 
-    let map_values = schema_for_tag(&TypeTag::MapOf(Arc::new(TypeTag::String)))
-        .expect("map schema");
+    let map_values =
+        schema_for_tag(&TypeTag::MapOf(Arc::new(TypeTag::String))).expect("map schema");
     assert_eq!(map_values["type"], "object");
     assert_eq!(map_values["additionalProperties"]["type"], "string");
 
@@ -112,9 +116,7 @@ fn schema_rejects_opaque_types() {
         schema_for_tag(&tag).expect_err(format!("{tag:?} must fail").as_str());
         assert!(!is_json_compatible(&tag));
     }
-    assert!(is_json_compatible(&TypeTag::ListOf(Arc::new(
-        TypeTag::Int
-    ))));
+    assert!(is_json_compatible(&TypeTag::ListOf(Arc::new(TypeTag::Int))));
     assert!(!is_json_compatible(&TypeTag::ListOf(Arc::new(
         TypeTag::Pipe
     ))));
@@ -135,10 +137,7 @@ fn tool_table_builds_schema_and_validates() {
 
 #[test]
 fn tool_table_rejects_duplicates_and_opaque() {
-    let dupes = vec![
-        meta("SCRIPT::FOO", vec![]),
-        meta("SCRIPT::FOO", vec![]),
-    ];
+    let dupes = vec![meta("SCRIPT::FOO", vec![]), meta("SCRIPT::FOO", vec![])];
     build_tool_table(dupes, &Default::default()).expect_err("duplicates must fail");
 
     let opaque = vec![meta("SCRIPT::P", vec![param("p", TypeTag::Pipe)])];
@@ -157,7 +156,10 @@ fn tool_description_prefers_script_docs() {
     let mut docs = HashMap::new();
     docs.insert(
         "SCRIPT::FOO".to_string(),
-        ("Adds one.".to_string(), "Adds one.\nSecond line.".to_string()),
+        (
+            "Adds one.".to_string(),
+            "Adds one.\nSecond line.".to_string(),
+        ),
     );
     let table = build_tool_table(metas, &docs).expect("table");
     assert_eq!(table[0].description, "Adds one.\nSecond line.");
@@ -188,8 +190,7 @@ fn map_json_args_orders_and_fills() {
     assert_eq!(values[1].as_i64(), Some(3));
 
     map_json_args(&params, &json!({"a": 1})).expect_err("missing required must fail");
-    map_json_args(&params, &json!({"a": 1, "b": 2, "c": 3}))
-        .expect_err("surplus must fail");
+    map_json_args(&params, &json!({"a": 1, "b": 2, "c": 3})).expect_err("surplus must fail");
     map_json_args(&params, &json!([1, 2])).expect_err("non-object must fail");
 }
 
@@ -221,8 +222,8 @@ fn output_envelope_is_always_an_object() {
 fn map_json_args_optional_trailing_fills() {
     let mut opt = param("opts", TypeTag::Map);
     opt.optional = true;
-    let values = map_json_args(&[param("a", TypeTag::Int), opt], &json!({"a": 1}))
-        .expect("optional fills");
+    let values =
+        map_json_args(&[param("a", TypeTag::Int), opt], &json!({"a": 1})).expect("optional fills");
     assert_eq!(values.len(), 2);
     assert!(values[1].as_map().is_some());
 }

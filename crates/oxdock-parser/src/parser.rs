@@ -1245,7 +1245,11 @@ fn strip_func_head(trimmed: &str) -> Option<String> {
         .chars()
         .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
         .collect();
-    if name.is_empty() || !name.bytes().all(|b| b.is_ascii_uppercase() || b == b'_' || b.is_ascii_digit()) {
+    if name.is_empty()
+        || !name
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b == b'_' || b.is_ascii_digit())
+    {
         return None;
     }
     if name.starts_with(|c: char| c.is_ascii_digit()) {
