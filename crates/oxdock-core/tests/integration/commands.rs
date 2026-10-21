@@ -4387,10 +4387,12 @@ fn exit_accepts_full_int64_range_at_lower() {
 fn timeout_accepts_variable_duration() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = guard_root(&temp);
+    // Bound is generous for loaded CI runners; the test proves
+    // variable DURATION resolution, not deadline precision.
     run_script(
         &root,
         indoc! {r#"
-            LET $d: DURATION = "50ms"
+            LET $d: DURATION = "2s"
             TIMEOUT $d WRITE done.txt yes
         "#},
     )
