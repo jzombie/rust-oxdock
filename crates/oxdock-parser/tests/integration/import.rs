@@ -306,6 +306,47 @@ fn export_docs_collected_from_hash_comments() {
 }
 
 #[test]
+fn export_docs_absent_without_comments() {
+    use oxdock_parser::parse_script_with_modules_and_exports;
+    let parsed = parse_script_with_modules_and_exports(
+        indoc! {r#"
+            FUNC FOO() {
+                RETURN "x"
+            }
+            EXPORT FOO
+        "#},
+        mock_lower,
+        HashSet::new(),
+        table(),
+    )
+    .expect("export without docs parses");
+    assert!(parsed.func_docs.get("FOO").is_none(), "no docs without comments");
+}
+
+#[test]
+fn export_docs_ignore_slash_comments() {
+    use oxdock_parser::parse_script_with_modules_and_exports;
+    let parsed = parse_script_with_modules_and_exports(
+        indoc! {r#"
+            // Adds one.
+            // Second line.
+            FUNC FOO() {
+                RETURN "x"
+            }
+            EXPORT FOO
+        "#},
+        mock_lower,
+        HashSet::new(),
+        table(),
+    )
+    .expect("export with slash comments parses");
+    assert!(
+        parsed.func_docs.get("FOO").is_none(),
+        "slash comments are not docs"
+    );
+}
+
+#[test]
 fn import_cannot_be_guarded() {
     let err = parse(indoc! {r#"
         [env:FOO]

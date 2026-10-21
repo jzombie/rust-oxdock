@@ -23,6 +23,10 @@ fn param(name: &str, tag: TypeTag) -> FuncParam {
 }
 
 fn meta(name: &str, params: Vec<FuncParam>) -> FuncMeta {
+    meta_docs(name, params, "summary", "docs")
+}
+
+fn meta_docs(name: &str, params: Vec<FuncParam>, summary: &'static str, docs: &'static str) -> FuncMeta {
     FuncMeta {
         name: name.to_string(),
         module: "SCRIPT".to_string(),
@@ -30,8 +34,8 @@ fn meta(name: &str, params: Vec<FuncParam>) -> FuncMeta {
         params: Some(params),
         returns: None,
         rpn: false,
-        summary: "summary",
-        docs: "docs",
+        summary,
+        docs,
         examples: &[],
     }
 }
@@ -157,6 +161,22 @@ fn tool_description_prefers_script_docs() {
     );
     let table = build_tool_table(metas, &docs).expect("table");
     assert_eq!(table[0].description, "Adds one.\nSecond line.");
+}
+
+#[test]
+fn tool_description_falls_back_to_meta() {
+    use std::collections::HashMap;
+    let metas = vec![meta("SCRIPT::FOO", vec![])];
+    let table = build_tool_table(metas, &HashMap::new()).expect("table");
+    assert_eq!(table[0].description, "summary\ndocs");
+}
+
+#[test]
+fn tool_description_empty_without_any_docs() {
+    use std::collections::HashMap;
+    let metas = vec![meta_docs("SCRIPT::FOO", vec![], "", "")];
+    let table = build_tool_table(metas, &HashMap::new()).expect("table");
+    assert_eq!(table[0].description, "");
 }
 
 #[test]

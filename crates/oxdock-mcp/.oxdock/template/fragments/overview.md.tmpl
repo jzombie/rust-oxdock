@@ -6,7 +6,10 @@ callable surface with `EXPORT [ADD, GREET]` (single-file scope), and
 stdio JSON-RPC instead of running linear steps. The reactor keeps one
 initialized session: linear steps run once at startup (ambient `ENV`,
 function definitions), then every `tools/call` dispatches through the
-live state. The script file is polled and the session hot-swaps on
+live state. Tool descriptions come from the `#` comment block directly
+above each `FUNC`; `//` and `/* */` comments are valid script but never
+feed descriptions, and an undocumented function serves with its registry
+summary or an empty description. The script file is polled and the session hot-swaps on
 change, so edits take effect on the next call with no restart; broken
 edits keep serving the old tools. Successful reloads also emit
 `notifications/tools/list_changed` (advertised via the tools
