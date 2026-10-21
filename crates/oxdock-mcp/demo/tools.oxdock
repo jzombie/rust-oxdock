@@ -1,5 +1,7 @@
 # Demo ambient setup: linear init runs this before serving.
+IMPORT [STD]
 ENV APP_NAME=oxdock-demo
+WORKSPACE LOCAL
 # Adds two integers. Returns the sum.
 FUNC ADD($a: INT, $b: INT) {
   RETURN $a + $b
@@ -31,4 +33,9 @@ FUNC COUNT($from: INT, $to: INT) {
   RETURN $out
 }
 
-EXPORT [ADD, GREET, APP_NAME, COUNT]
+# Reports the session working directory. Proves which root the server answers from.
+FUNC WHEREAMI() {
+  LET $dir: STRING = CWD
+  RETURN TEXT_TRIM($dir)
+}
+EXPORT [ADD, GREET, APP_NAME, COUNT, WHEREAMI]
