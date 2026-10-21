@@ -4,13 +4,30 @@ ENV APP_NAME=oxdock-demo
 FUNC ADD($a: INT, $b: INT) {
   RETURN $a + $b
 }
-# Greets a name. Echoes a line (captured into the result, never onto the wire) and returns the name unchanged.
+# Greets a name. Echoes a line (captured into the result, never onto the wire) and returns a greeting.
 FUNC GREET($name: STRING) {
   ECHO "greeting requested"
-  RETURN $name
+  RETURN "Hello, {{ $name }}"
 }
 # Returns the demo app name from the ambient environment. Proves linear init ran.
 FUNC APP_NAME() {
   RETURN env:APP_NAME
 }
-EXPORT [ADD, GREET, APP_NAME]
+# Counts from $from toward $to by ones: upward when $from is below $to, downward otherwise. Returns the full sequence.
+FUNC COUNT($from: INT, $to: INT) {
+  LET $out: LIST<INT> = []
+  LET $i: INT = $from
+  IF $from <= $to {
+    WHILE $i <= $to {
+      LIST_APPEND $out $i
+      $i = $i + 1
+    }
+  } ELSE {
+    WHILE $i >= $to {
+      LIST_APPEND $out $i
+      $i = $i - 1
+    }
+  }
+  RETURN $out
+}
+EXPORT [ADD, GREET, APP_NAME, COUNT]
