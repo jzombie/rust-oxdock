@@ -27,14 +27,20 @@ fn init_session(script: &str) -> McpSession<oxdock_process::DefaultProcessManage
         .expect("session init")
 }
 
-fn handler_config(script: &str) -> McpServerConfig {
-    let (fs, _root) = test_fs();
-    McpServerConfig {
-        fs,
-        script: script.to_string(),
-        modules: Vec::new(),
-        types: Vec::new(),
-    }
+fn handler_config(script: &str) -> (McpServerConfig, GuardedPath) {
+    let (_fs, root) = test_fs();
+    let script_path = root.join("tools.oxdock").expect("script path");
+    (
+        McpServerConfig {
+            workspace_root: root.clone(),
+            script_path,
+            script: script.to_string(),
+            modules: Vec::new(),
+            types: Vec::new(),
+            watch: false,
+        },
+        root,
+    )
 }
 
 const DEMO: &str = indoc! {r#"
@@ -99,27 +105,61 @@ fn unknown_tool_fails() {
 
 #[test]
 fn missing_export_list_fails_fast() {
-    assert!(
-        init_handler(handler_config(indoc! {r#"
+    let (config, _root) = handler_config(indoc! {r#"
         FUNC FOO() {
           RETURN "x"
         }
-    "#}))
-        .is_err(),
+    "#});
+    assert!(
+        init_handler(config).is_err(),
         "no EXPORT must fail"
     );
 }
 
 #[test]
 fn opaque_export_fails_before_serving() {
-    assert!(
-        init_handler(handler_config(indoc! {r#"
+    let (config, _root) = handler_config(indoc! {r#"
         FUNC P($p: PIPE) {
           RETURN "x"
         }
         EXPORT P
-    "#}))
-        .is_err(),
+    "#});
+    assert!(
+        init_handler(config).is_err(),
         "opaque params must fail fast"
+    );
+}
+
+#[test]
+fn reload_swaps_tools_and_keeps_old_on_broken_edit() {
+    let (config, _root) = handler_config(DEMO);
+    let handler = init_handler(config).expect("init");
+    assert_eq!(handler.tool_names().len(), 3);
+
+    let root = test_fs().1;
+    let modules = Vec::new();
+    let types = Vec::new();
+    handler
+        .reload(
+            indoc! {r#"
+                FUNC SOLO() {
+                  RETURN "one"
+                }
+                EXPORT SOLO
+            "#},
+            modules.clone(),
+            types.clone(),
+            &root,
+        )
+        .expect("reload");
+    assert_eq!(handler.tool_names(), vec!["SOLO".to_string()]);
+
+    handler
+        .reload("FUNC BROKEN( {", modules, types, &root)
+        .expect_err("broken edit must fail");
+    assert_eq!(
+        handler.tool_names(),
+        vec!["SOLO".to_string()],
+        "broken edit keeps the live tools"
     );
 }

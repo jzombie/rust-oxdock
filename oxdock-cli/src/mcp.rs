@@ -2,25 +2,28 @@
 //! everything to `oxdock-mcp`, and block on the stdio reactor.
 //!
 //! The CLI owns argument parsing, workspace guards, and endpoint binding;
-//! `oxdock-mcp` owns the tool table, JSON boundary, and JSON-RPC loop.
+//! `oxdock-mcp` owns the tool table, the JSON boundary, the JSON-RPC loop,
+//! and hot reload (the script file is polled and the session swaps live).
 
 use std::io::IsTerminal;
 
-use anyhow::{Context, Result, bail};
-use oxdock_fs::{GuardedPath, PathResolver, WorkspaceFs};
+use anyhow::{Result, bail};
 
 use crate::{Options, ScriptSource, cli_host_modules_with, cli_host_types, read_script};
 
 /// Serve `EXPORT`ed FUNCs as MCP tools over stdio. Reads the script file,
 /// binds endpoint sockets up front (fail fast), initializes the session
 /// (linear steps run once), then serves until the client disconnects.
-pub fn serve_mcp(opts: Options, workspace_root: GuardedPath) -> Result<()> {
+/// Edits to the script file hot-swap the session; broken edits keep
+/// serving the old tools with a stderr note.
+pub fn serve_mcp(opts: Options, workspace_root: oxdock_fs::GuardedPath) -> Result<()> {
     if std::io::stdin().is_terminal() || std::io::stdout().is_terminal() {
         bail!("--mcp requires piped stdio transport");
     }
-    let ScriptSource::Path(_path) = &opts.script else {
+    let ScriptSource::Path(path) = &opts.script else {
         bail!("--mcp requires a script file (stdin carries the JSON-RPC stream)");
     };
+    let script_path = path.clone();
     let script = read_script(&opts.script)?;
 
     #[cfg(feature = "net")]
@@ -35,20 +38,13 @@ pub fn serve_mcp(opts: Options, workspace_root: GuardedPath) -> Result<()> {
     };
     let types = cli_host_types();
 
-    // Lazy snapshot backing for session execution: materializes only if
-    // the script touches snapshot-targeted paths. Held for the session
-    // lifetime so the backing dir outlives the reactor.
-    let mut resolver = PathResolver::new_lazy(workspace_root.clone())
-        .context("guard workspace root for --mcp")?;
-    resolver.set_workspace_root(workspace_root.clone());
-    let _snapshot = resolver.snapshot_handle();
-    let fs: Box<dyn WorkspaceFs> = Box::new(resolver);
-
     let handler = oxdock_mcp::init_handler(oxdock_mcp::McpServerConfig {
-        fs,
+        workspace_root,
+        script_path,
         script,
         modules,
         types,
+        watch: true,
     })?;
     oxdock_mcp::serve_stdio_blocking(handler)
 }

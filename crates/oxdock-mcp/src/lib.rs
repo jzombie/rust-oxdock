@@ -3,13 +3,15 @@
 //! The reactor keeps one [`McpSession`] for the process lifetime: linear
 //! init once, then `tools/list` serves the precomputed table and each
 //! `tools/call` dispatches through the live state. Capture sinks drain
-//! into the response and truncate to zero after every call.
+//! into the response and truncate to zero after every call. With watching
+//! enabled the server polls the script file and hot-swaps the session on
+//! change; broken edits keep serving the old tools.
 
 pub mod schema;
 pub mod server;
 pub mod tools;
 
-pub use server::{DocsMap, OxDockHandler};
+pub use server::{DocsMap, OxDockHandler, WatchConfig, session_fs};
 pub use tools::{
     HashMapDoc, McpTool, build_tool_table, map_json_args, output_schema_for, value_to_json_result,
     wrap_structured,
@@ -19,12 +21,13 @@ use std::collections::HashMap;
 
 use anyhow::{Result, bail};
 use oxdock_core::{Engine, McpSession};
-use oxdock_process::default_process_manager;
 
 /// Parsed script plus the host surface needed to serve it.
 pub struct McpServerConfig {
-    /// Execution filesystem (the CLI hands its lazy snapshot resolver).
-    pub fs: Box<dyn oxdock_fs::WorkspaceFs>,
+    /// Workspace root for session filesystems.
+    pub workspace_root: oxdock_fs::GuardedPath,
+    /// Script file, watched for hot reload when enabled.
+    pub script_path: oxdock_fs::GuardedPath,
     /// Script text (already read; the CLI owns file IO).
     pub script: String,
     /// extra host modules beyond STD (NET/SSH/MARKDOWN when enabled).
@@ -33,7 +36,12 @@ pub struct McpServerConfig {
     >,
     /// extra host types beyond startup descriptors.
     pub types: Vec<&'static oxdock_core::TypeDescriptor>,
+    /// Poll the script file and hot-swap the session on change.
+    pub watch: bool,
 }
+
+/// Poll interval for hot reload.
+pub const WATCH_POLL_MS: u64 = 500;
 
 /// Initialize the session: parse, execute linear steps once, validate
 /// `EXPORT`, and build the rmcp handler. Fails fast on opaque types.
@@ -47,11 +55,12 @@ pub fn init_handler(config: McpServerConfig) -> Result<OxDockHandler> {
     if parsed.exports.is_empty() {
         bail!("no EXPORT entries: add `EXPORT [NAME, ...]` to expose MCP tools");
     }
+    let (fs, hold) = session_fs(&config.workspace_root)?;
     let session = McpSession::init(
-        config.fs,
-        default_process_manager(),
-        config.modules,
-        config.types,
+        fs,
+        oxdock_process::default_process_manager(),
+        config.modules.clone(),
+        config.types.clone(),
         &parsed,
     )?;
     let metas = session.tool_metas()?;
@@ -61,11 +70,24 @@ pub fn init_handler(config: McpServerConfig) -> Result<OxDockHandler> {
             docs.insert(qualified, pair);
         }
     }
-    OxDockHandler::new(session, metas, &docs)
+    let handler = OxDockHandler::from_handler_parts(session, metas, &docs, vec![hold])?;
+    if config.watch {
+        Ok(handler.with_watch(WatchConfig {
+            script_path: config.script_path,
+            workspace_root: config.workspace_root,
+            modules: config.modules,
+            types: config.types,
+            poll_ms: WATCH_POLL_MS,
+        }))
+    } else {
+        Ok(handler)
+    }
 }
 
-/// Serve the handler over stdio until the client disconnects.
+/// Serve the handler over stdio until the client disconnects. Spawns the
+/// hot-reload poll task first when watching is configured.
 pub async fn serve_stdio(handler: OxDockHandler) -> Result<()> {
+    handler.spawn_reloader();
     use rmcp::ServiceExt;
     let transport = rmcp::transport::io::stdio();
     let service = handler.serve(transport).await.map_err(|err| {
