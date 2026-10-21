@@ -22,12 +22,13 @@ use oxdock_fs::{GuardedPath, LazyGuardedTempDir, PathResolver, WorkspaceFs};
 use sha2::{Digest, Sha256};
 use oxdock_process::DefaultProcessManager;
 use rmcp::{
-    ErrorData as McpError, RoleServer, ServerHandler,
+    ErrorData as McpError, Peer, RoleServer, ServerHandler,
     model::{
         CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock,
         GetPromptResponse, InitializeRequestParams, InitializeResult, ListPromptsResult,
         ListResourceTemplatesResult, ListResourcesResult, ListToolsResult,
-        PaginatedRequestParams, ReadResourceRequestParams, Tool,
+        PaginatedRequestParams, ReadResourceRequestParams, ServerNotification,
+        Tool, ToolListChangedNotification,
     },
     service::RequestContext,
 };
@@ -234,9 +235,11 @@ impl OxDockHandler {
         })
     }
 
-    /// Spawn the content poll task. Broken edits log to stderr and keep
-    /// the live session; only a good edit swaps.
-    pub fn spawn_reloader(&self) {
+    /// Spawn the content poll task. On success the watcher also sends
+    /// `notifications/tools/list_changed` so clients re-fetch instead of
+    /// showing a frozen list. Broken edits log to stderr and keep the
+    /// live session; only a good edit swaps.
+    pub fn spawn_reloader(&self, peer: Option<Peer<RoleServer>>) {
         let Some(watch) = self.watch.clone() else {
             return;
         };
@@ -264,11 +267,21 @@ impl OxDockHandler {
                 }
                 last = Some(text.clone());
                 match handler.reload(&text, watch.modules.clone(), watch.types.clone(), &watch.workspace_root) {
-                    Ok(()) => eprintln!(
-                        "mcp reload: serving {} tool(s) from {}",
-                        handler.tool_names().len(),
-                        watch.script_path.display()
-                    ),
+                    Ok(()) => {
+                        eprintln!(
+                            "mcp reload: serving {} tool(s) from {}",
+                            handler.tool_names().len(),
+                            watch.script_path.display()
+                        );
+                        if let Some(peer) = &peer {
+                            let note = ServerNotification::ToolListChangedNotification(
+                                ToolListChangedNotification::default(),
+                            );
+                            if let Err(err) = peer.send_notification(note).await {
+                                eprintln!("mcp reload: list_changed notify failed: {err:#}");
+                            }
+                        }
+                    }
                     // reload() already recorded the failure for MCP_STATUS.
                     Err(err) => eprintln!("mcp reload: keeping live session: {err:#}"),
                 }
@@ -309,7 +322,9 @@ impl ServerHandler for OxDockHandler {
         info.instructions = Some(
             "OxDock script tools: each EXPORTed FUNC is one MCP tool.".to_string(),
         );
-        info.capabilities.tools = Some(Default::default());
+        let mut tools_cap = rmcp::model::ToolsCapability::default();
+        tools_cap.list_changed = Some(true);
+        info.capabilities.tools = Some(tools_cap);
         info
     }
 

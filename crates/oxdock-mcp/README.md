@@ -14,7 +14,10 @@ initialized session: linear steps run once at startup (ambient `ENV`,
 function definitions), then every `tools/call` dispatches through the
 live state. The script file is polled and the session hot-swaps on
 change, so edits take effect on the next call with no restart; broken
-edits keep serving the old tools. Exported signatures project to JSON
+edits keep serving the old tools. Successful reloads also emit
+`notifications/tools/list_changed` (advertised via the tools
+`listChanged` capability), so clients re-fetch instead of showing a
+frozen list. Exported signatures project to JSON
 Schema, and only JSON-compatible types serve: opaque host types fail
 fast before the reactor opens. Captured stdout and stderr ride the
 result `content` block, so framing stays clean while `ECHO` output

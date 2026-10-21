@@ -30,4 +30,5 @@ FUNC COUNT($from: INT, $to: INT) {
   }
   RETURN $out
 }
+
 EXPORT [ADD, GREET, APP_NAME, COUNT]

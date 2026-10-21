@@ -101,14 +101,16 @@ pub fn init_handler(config: McpServerConfig) -> Result<OxDockHandler> {
 }
 
 /// Serve the handler over stdio until the client disconnects. Spawns the
-/// hot-reload poll task first when watching is configured.
+/// hot-reload poll task first when watching is configured, handing it the
+/// peer so successful reloads also emit `tools/list_changed`.
 pub async fn serve_stdio(handler: OxDockHandler) -> Result<()> {
-    handler.spawn_reloader();
     use rmcp::ServiceExt;
     let transport = rmcp::transport::io::stdio();
+    let reloader = handler.clone();
     let service = handler.serve(transport).await.map_err(|err| {
         anyhow::anyhow!("MCP stdio serve failed: {err}")
     })?;
+    reloader.spawn_reloader(Some(service.peer().clone()));
     service.waiting().await.map_err(|err| {
         anyhow::anyhow!("MCP stdio service failed: {err}")
     })?;
