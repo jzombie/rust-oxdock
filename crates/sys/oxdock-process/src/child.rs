@@ -287,9 +287,12 @@ impl Drop for ChildHandle {
             if let Some(child) = guard.child.as_mut() {
                 let _ = child.wait();
             }
-            // Same post-reap sweep as `wait`/`try_wait`: reach a
-            // grandchild that forked after the kill's enumeration.
-            #[cfg(unix)]
+        }
+        // Sweep when killed even if the leader already exited: an
+        // escapee forked during the kill's enumeration outlives the
+        // leader and keeps the group alive. Matches wait and try_wait.
+        #[cfg(unix)]
+        if guard.killed.load(Ordering::SeqCst) {
             sweep_process_group(self.pid.load(Ordering::SeqCst));
         }
         guard.reaped = true;
