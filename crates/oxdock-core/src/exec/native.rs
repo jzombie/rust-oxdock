@@ -411,6 +411,8 @@ impl<P: ProcessManager> FunctionRegistry<P> {
             SemaphoreNew::registration(),
             SemaphoreTryAcquire::registration(),
             SemaphoreAvailable::registration(),
+            ShellSplitArgs::registration(),
+            ShellJoinArgs::registration(),
         ]
     }
 
@@ -2403,6 +2405,77 @@ fn text_join(
     Ok(Value::string(elements.join(delimiter.as_str())))
 }
 
+/// Split a shell command string into argv words.
+///
+/// Parses POSIX shell word syntax (single and double quotes, backslash
+/// escapes) with the `shell-words` crate, the same splitter the remote
+/// plugins use. Returns a `LIST<STRING>`. Unbalanced quotes fail.
+/// Inverse of `SHELL_JOIN_ARGS`: joining the result re-splits
+/// to the same words.
+///
+/// Shell syntax only: plain prose with no quoting splits on
+/// whitespace like any shell would, which is rarely what prose wants.
+///
+#[oxdock_func(pure, returns = TypeTag::ListOf(std::sync::Arc::new(TypeTag::String)))]
+#[example(
+    name = "split args",
+    code = r###"
+    # Quoted segments stay one word.
+    IMPORT [STD]
+    LET $argv: LIST<STRING> = SHELL_SPLIT_ARGS("gh issue comment 153 --body-file notes.md")
+    ASSERT_EQ $argv.0 "gh"
+    ASSERT_EQ $argv.3 "153"
+    ASSERT_EQ $argv.5 "notes.md"
+
+    # Quotes and escapes parse the shell way.
+    LET $quoted: LIST<STRING> = SHELL_SPLIT_ARGS("say \"hi there\" 'a b'")
+    ASSERT_EQ $quoted.0 "say"
+    ASSERT_EQ $quoted.1 "hi there"
+    ASSERT_EQ $quoted.2 "a b"
+    "###
+)]
+fn shell_split_args(
+    /// Shell command string to split into words.
+    command: String,
+) -> Result<Value> {
+    match shell_words::split(&command) {
+        Ok(words) => Ok(super::args::text_list_value(words)),
+        Err(err) => anyhow::bail!("SHELL_SPLIT_ARGS: {err}"),
+    }
+}
+
+/// Join argv words into one shell-parseable string.
+///
+/// Quotes each word with POSIX single-quote escaping through the
+/// `shell-words` crate, so the result re-splits to the same words.
+/// Inverse of `SHELL_SPLIT_ARGS` on the word side: splitting the
+/// result returns the input list unchanged.
+///
+#[oxdock_func(pure, returns = TypeTag::String)]
+#[example(
+    name = "join args",
+    code = r###"
+    # Plain words join with spaces and no quoting.
+    IMPORT [STD]
+    LET $plain: STRING = SHELL_JOIN_ARGS(["gh", "issue", "list"])
+    ASSERT_EQ $plain "gh issue list"
+
+    # Words with spaces quote, and the round trip is exact.
+    LET $words: LIST<STRING> = ["say", "hi there", "a'b"]
+    LET $joined: STRING = SHELL_JOIN_ARGS($words)
+    LET $back: LIST<STRING> = SHELL_SPLIT_ARGS($joined)
+    ASSERT_EQ $back.0 "say"
+    ASSERT_EQ $back.1 "hi there"
+    ASSERT_EQ $back.2 "a'b"
+    "###
+)]
+fn shell_join_args(
+    /// Words to join into a shell command string.
+    words: Vec<String>,
+) -> Result<Value> {
+    Ok(Value::string(shell_words::join(&words)))
+}
+
 /// Split text into lines with universal newline handling.
 ///
 /// Normalizes through the line-ending crate first so LF, CRLF, CR,
@@ -3345,5 +3418,29 @@ mod tests {
                 "{name} refusal names the missing context: {err:#}"
             );
         }
+    }
+
+    #[test]
+    fn shell_words_join_split_round_trip() {
+        // Join and split are absolute inverses on the word side: the
+        // joiner quotes through `shell-words`, the splitter parses the
+        // same syntax, so every adversarial word survives the round trip.
+        let words = vec![
+            "gh".to_string(),
+            "issue".to_string(),
+            "comment".to_string(),
+            "with spaces".to_string(),
+            "it's".to_string(),
+            "say \"hi\"".to_string(),
+            "$HOME".to_string(),
+            "$(whoami)".to_string(),
+            "C:\\path\\to".to_string(),
+            "naïve café".to_string(),
+            "".to_string(),
+        ];
+        let joined = shell_words::join(&words);
+        let back = shell_words::split(&joined).expect("join output must parse");
+        assert_eq!(back, words);
+        assert!(shell_words::split("unbalanced \"quote").is_err());
     }
 }

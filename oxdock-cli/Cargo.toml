@@ -2,7 +2,7 @@
 name = "oxdock-cli"
 description = "CLI tooling for executing OxDock's Dockerfile-inspired DSL on native platforms."
 categories = ["command-line-utilities"]
-keywords = ["cli", "oxdock", "dsl", "workflow"]
+keywords = ["cli", "oxdock", "dsl", "workflow", "mcp"]
 authors.workspace = true
 version.workspace = true
 edition.workspace = true

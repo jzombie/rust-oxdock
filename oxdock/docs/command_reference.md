@@ -3610,6 +3610,88 @@ LET $has_permit: BOOL = HAS_KEY($second, "permit")
 ASSERT_EQ $has_permit false
 ```
 
+### STD::SHELL_JOIN_ARGS
+
+Join argv words into one shell-parseable string.
+
+Quotes each word with POSIX single-quote escaping through the
+`shell-words` crate, so the result re-splits to the same words.
+Inverse of `SHELL_SPLIT_ARGS` on the word side: splitting the
+result returns the input list unchanged.
+
+
+**Signature:** `STD::SHELL_JOIN_ARGS($words: LIST<STRING>) -> STRING`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+
+- `$words` (`LIST<STRING>`): Words to join into a shell command string.
+
+**Returns:** `STRING`
+
+**Examples:**
+
+**Example: join args**
+
+```oxdock
+# Plain words join with spaces and no quoting.
+IMPORT [STD]
+LET $plain: STRING = SHELL_JOIN_ARGS(["gh", "issue", "list"])
+ASSERT_EQ $plain "gh issue list"
+
+# Words with spaces quote, and the round trip is exact.
+LET $words: LIST<STRING> = ["say", "hi there", "a'b"]
+LET $joined: STRING = SHELL_JOIN_ARGS($words)
+LET $back: LIST<STRING> = SHELL_SPLIT_ARGS($joined)
+ASSERT_EQ $back.0 "say"
+ASSERT_EQ $back.1 "hi there"
+ASSERT_EQ $back.2 "a'b"
+```
+
+### STD::SHELL_SPLIT_ARGS
+
+Split a shell command string into argv words.
+
+Parses POSIX shell word syntax (single and double quotes, backslash
+escapes) with the `shell-words` crate, the same splitter the remote
+plugins use. Returns a `LIST<STRING>`. Unbalanced quotes fail.
+Inverse of `SHELL_JOIN_ARGS`: joining the result re-splits
+to the same words.
+
+Shell syntax only: plain prose with no quoting splits on
+whitespace like any shell would, which is rarely what prose wants.
+
+
+**Signature:** `STD::SHELL_SPLIT_ARGS($command: STRING) -> LIST<STRING>`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+
+- `$command` (`STRING`): Shell command string to split into words.
+
+**Returns:** `LIST<STRING>`
+
+**Examples:**
+
+**Example: split args**
+
+```oxdock
+# Quoted segments stay one word.
+IMPORT [STD]
+LET $argv: LIST<STRING> = SHELL_SPLIT_ARGS("gh issue comment 153 --body-file notes.md")
+ASSERT_EQ $argv.0 "gh"
+ASSERT_EQ $argv.3 "153"
+ASSERT_EQ $argv.5 "notes.md"
+
+# Quotes and escapes parse the shell way.
+LET $quoted: LIST<STRING> = SHELL_SPLIT_ARGS("say \"hi there\" 'a b'")
+ASSERT_EQ $quoted.0 "say"
+ASSERT_EQ $quoted.1 "hi there"
+ASSERT_EQ $quoted.2 "a b"
+```
+
 ### STD::TEXT_CONTAINS
 
 Report whether text holds a literal substring.

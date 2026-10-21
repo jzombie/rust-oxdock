@@ -1667,6 +1667,7 @@ dependencies = [
  "regex",
  "serde_json",
  "sha2",
+ "shell-words",
  "tar",
  "toml",
 ]

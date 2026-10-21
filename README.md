@@ -39,7 +39,7 @@ library [Functions](#functions).
 
 **Browse by section:**
 
-[Quick start](#quick-start) | [Dynamically embed assets at compile time](#dynamically-embed-assets-at-compile-time) | [Run scripts inline](#run-scripts-inline) | [Extend the language](#extend-the-language) | [Runtime architecture](#runtime-architecture) | [Extending OxDock from Rust](#extending-oxdock-from-rust) | [Machine model](#machine-model) | [Variants](#variants) | [Goals](#goals) | [Lexical structure](#lexical-structure) | [Guards and scoped blocks](#guards-and-scoped-blocks) | [Command Reference](#command-reference) | [Value types](#value-types) | [Functions](#functions) | [Contexts](#contexts) | [Plugin references](#plugin-references) | [Errors stop the pipeline](#errors-stop-the-pipeline) | [Selective environment inheritance](#selective-environment-inheritance) | [Path Separators](#path-separators) | [Workspaces & Filesystem](#workspaces--filesystem) | [GitHub Actions Integration](#github-actions-integration) | [Testing & Coverage](#testing--coverage) | [Glossary](#glossary) | [Citation](#citation) | [License](#license)
+[Quick start](#quick-start) | [Dynamically embed assets at compile time](#dynamically-embed-assets-at-compile-time) | [Run scripts inline](#run-scripts-inline) | [Extend the language](#extend-the-language) | [Runtime architecture](#runtime-architecture) | [MCP hosting](#mcp-hosting) | [Extending OxDock from Rust](#extending-oxdock-from-rust) | [Machine model](#machine-model) | [Variants](#variants) | [Goals](#goals) | [Lexical structure](#lexical-structure) | [Guards and scoped blocks](#guards-and-scoped-blocks) | [Command Reference](#command-reference) | [Value types](#value-types) | [Functions](#functions) | [Contexts](#contexts) | [Plugin references](#plugin-references) | [Errors stop the pipeline](#errors-stop-the-pipeline) | [Selective environment inheritance](#selective-environment-inheritance) | [Path Separators](#path-separators) | [Workspaces & Filesystem](#workspaces--filesystem) | [GitHub Actions Integration](#github-actions-integration) | [Testing & Coverage](#testing--coverage) | [Glossary](#glossary) | [Citation](#citation) | [License](#license)
 
 ## Quick start
 
@@ -495,6 +495,21 @@ ASSERT_EQ $w "from-cache"
 LET $y: STRING = READ sys.txt
 ASSERT_EQ $y "from-system"
 ```
+
+## MCP hosting
+
+A script can serve its `EXPORT`ed functions as MCP tools instead of
+running linear steps. Build with the feature and pass a script to the
+flag:
+
+```sh
+cargo build -p oxdock --features mcp
+./target/debug/oxdock --mcp tools.oxdock
+```
+
+Each entry serves over stdio JSON-RPC with live reload on file
+change. Client setup, including the OpenCode `opencode.jsonc` entry
+shape, lives in [crates/oxdock-mcp/README.md](./crates/oxdock-mcp/README.md).
 
 ## Extending OxDock from Rust
 
@@ -4887,6 +4902,88 @@ LET $second: MAP<held: BOOL, permit?: PERMIT> = SEMAPHORE_TRY_ACQUIRE($sem)
 ASSERT_EQ $second.held false
 LET $has_permit: BOOL = HAS_KEY($second, "permit")
 ASSERT_EQ $has_permit false
+```
+
+### STD::SHELL_JOIN_ARGS
+
+Join argv words into one shell-parseable string.
+
+Quotes each word with POSIX single-quote escaping through the
+`shell-words` crate, so the result re-splits to the same words.
+Inverse of `SHELL_SPLIT_ARGS` on the word side: splitting the
+result returns the input list unchanged.
+
+
+**Signature:** `STD::SHELL_JOIN_ARGS($words: LIST<STRING>) -> STRING`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+
+- `$words` (`LIST<STRING>`): Words to join into a shell command string.
+
+**Returns:** `STRING`
+
+**Examples:**
+
+**Example: join args**
+
+```oxdock
+# Plain words join with spaces and no quoting.
+IMPORT [STD]
+LET $plain: STRING = SHELL_JOIN_ARGS(["gh", "issue", "list"])
+ASSERT_EQ $plain "gh issue list"
+
+# Words with spaces quote, and the round trip is exact.
+LET $words: LIST<STRING> = ["say", "hi there", "a'b"]
+LET $joined: STRING = SHELL_JOIN_ARGS($words)
+LET $back: LIST<STRING> = SHELL_SPLIT_ARGS($joined)
+ASSERT_EQ $back.0 "say"
+ASSERT_EQ $back.1 "hi there"
+ASSERT_EQ $back.2 "a'b"
+```
+
+### STD::SHELL_SPLIT_ARGS
+
+Split a shell command string into argv words.
+
+Parses POSIX shell word syntax (single and double quotes, backslash
+escapes) with the `shell-words` crate, the same splitter the remote
+plugins use. Returns a `LIST<STRING>`. Unbalanced quotes fail.
+Inverse of `SHELL_JOIN_ARGS`: joining the result re-splits
+to the same words.
+
+Shell syntax only: plain prose with no quoting splits on
+whitespace like any shell would, which is rarely what prose wants.
+
+
+**Signature:** `STD::SHELL_SPLIT_ARGS($command: STRING) -> LIST<STRING>`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+
+- `$command` (`STRING`): Shell command string to split into words.
+
+**Returns:** `LIST<STRING>`
+
+**Examples:**
+
+**Example: split args**
+
+```oxdock
+# Quoted segments stay one word.
+IMPORT [STD]
+LET $argv: LIST<STRING> = SHELL_SPLIT_ARGS("gh issue comment 153 --body-file notes.md")
+ASSERT_EQ $argv.0 "gh"
+ASSERT_EQ $argv.3 "153"
+ASSERT_EQ $argv.5 "notes.md"
+
+# Quotes and escapes parse the shell way.
+LET $quoted: LIST<STRING> = SHELL_SPLIT_ARGS("say \"hi there\" 'a b'")
+ASSERT_EQ $quoted.0 "say"
+ASSERT_EQ $quoted.1 "hi there"
+ASSERT_EQ $quoted.2 "a b"
 ```
 
 ### STD::TEXT_CONTAINS
