@@ -159,7 +159,7 @@ impl CommandBuilder {
                 .inner
                 .spawn()
                 .with_context(|| format!("failed to spawn {desc}"))?;
-            Ok(ChildHandle::new(child, None, Vec::new()))
+            ChildHandle::new(child, None, Vec::new())
         }
     }
 
@@ -194,8 +194,9 @@ impl CommandBuilder {
                 .stdout
                 .take()
                 .with_context(|| format!("spawned process has no piped stdout: {desc}"))?;
+            let handle = ChildHandle::new(child, None, Vec::new())?;
             Ok(PipedChild {
-                handle: ChildHandle::new(child, None, Vec::new()),
+                handle,
                 stdin,
                 stdout,
                 stderr: None,
@@ -236,8 +237,9 @@ impl CommandBuilder {
                 .stderr
                 .take()
                 .with_context(|| format!("spawned process has no piped stderr: {desc}"))?;
+            let handle = ChildHandle::new(child, None, Vec::new())?;
             Ok(PipedChild {
-                handle: ChildHandle::new(child, None, Vec::new()),
+                handle,
                 stdin,
                 stdout,
                 stderr: Some(stderr),
