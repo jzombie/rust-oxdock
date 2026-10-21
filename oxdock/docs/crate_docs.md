@@ -2362,8 +2362,9 @@ like `LET` scoping but with no runtime footprint. Guards do
 not apply to it. Two imported modules exporting one name is
 an ambiguity error: qualify the call instead.
 
-`EXPORT` is reserved for future script-module support and
-cannot be used yet.
+`EXPORT` marks top-level script `FUNC`s as externally
+callable tools (`EXPORT FOO`, `EXPORT [FOO, BAR]`).
+Single-file scope; see the MCP host for consumption.
 
 
 **Examples:**

@@ -1,0 +1,16 @@
+# Demo ambient setup: linear init runs this before serving.
+ENV APP_NAME=oxdock-demo
+# Adds two integers. Returns the sum.
+FUNC ADD($a: INT, $b: INT) {
+  RETURN $a + $b
+}
+# Greets a name. Echoes a line (captured into the result, never onto the wire) and returns the name unchanged.
+FUNC GREET($name: STRING) {
+  ECHO "greeting requested"
+  RETURN $name
+}
+# Returns the demo app name from the ambient environment. Proves linear init ran.
+FUNC APP_NAME() {
+  RETURN env:APP_NAME
+}
+EXPORT [ADD, GREET, APP_NAME]

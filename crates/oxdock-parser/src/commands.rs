@@ -399,7 +399,7 @@ fn structural_hint(name: &str, received: &str) -> Option<String> {
             "IMPORT brings module functions into bare-call scope, e.g. `IMPORT [STD]` or `IMPORT [STD, MOCK]`; got {got}."
         )),
         name if name == KEYWORD_EXPORT => Some(
-            "`EXPORT` is reserved for future script-module support and cannot be used yet."
+            "EXPORT marks top-level FUNCs as tools, e.g. `EXPORT FOO` or `EXPORT [FOO, BAR]`."
                 .to_string(),
         ),
         _ => None,
@@ -3359,8 +3359,9 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 not apply to it. Two imported modules exporting one name is
                 an ambiguity error: qualify the call instead.
 
-                `EXPORT` is reserved for future script-module support and
-                cannot be used yet.
+                `EXPORT` marks top-level script `FUNC`s as externally
+                callable tools (`EXPORT FOO`, `EXPORT [FOO, BAR]`).
+                Single-file scope; see the MCP host for consumption.
             "#},
             args: &[],
             flags: &[],

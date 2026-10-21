@@ -87,6 +87,22 @@ pub fn parse_script_with_modules(
     )?)
 }
 
+/// Parse with modules plus single-file `EXPORT` metadata and `#` docs.
+/// Used by the MCP host; the linear runner ignores the extra fields.
+pub fn parse_script_with_modules_and_exports(
+    input: &str,
+    modules: oxdock_parser::ModuleTable,
+) -> anyhow::Result<oxdock_parser::ParsedScript> {
+    let mut reserved = builtin_function_names();
+    reserved.extend(modules.reserved_base_names());
+    Ok(oxdock_parser::parse_script_with_modules_and_exports(
+        input,
+        lower_command,
+        reserved,
+        modules,
+    )?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

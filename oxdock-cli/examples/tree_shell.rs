@@ -43,6 +43,7 @@ fn main() -> anyhow::Result<()> {
             shell,
             endpoints: EndpointFlags::default(),
             remote_serve: false,
+            mcp: false,
             remotes: Vec::new(),
         },
         root,

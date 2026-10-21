@@ -1,0 +1,38 @@
+[package]
+name = "oxdock-mcp"
+description = "MCP tool hosting for exported OxDock script functions over stdio JSON-RPC."
+categories = ["development-tools"]
+keywords = ["oxdock", "mcp", "dsl", "tools"]
+authors.workspace = true
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[package.metadata.cargo-udeps.ignore]
+normal = ["tracing"]
+development = []
+build = []
+
+[features]
+default = []
+
+[dependencies]
+anyhow.workspace = true
+oxdock-core.workspace = true
+oxdock-fs.workspace = true
+oxdock-parser.workspace = true
+oxdock-process.workspace = true
+rmcp.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+indoc.workspace = true
+oxdock-sys-test-utils.workspace = true
+
+[lints]
+workspace = true

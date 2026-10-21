@@ -304,6 +304,10 @@ pub struct FunctionRegistry<P: ProcessManager> {
     entries: HashMap<String, FuncEntry<P>>,
     scopes: Vec<ScopeFrame<P>>,
     pure_shared: Arc<PureTable>,
+    /// Script `#` doc comments keyed by qualified `SCRIPT::NAME`.
+    /// Populated by the MCP host after linear execution; the tool
+    /// table reads these with fallback to `FuncMeta` summary.
+    script_docs: HashMap<String, (String, String)>,
 }
 
 impl<P: ProcessManager> FunctionRegistry<P> {
@@ -311,6 +315,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
         let mut reg = Self {
             entries: HashMap::new(),
             pure_shared: Arc::new(HashMap::new()),
+            script_docs: HashMap::new(),
             scopes: vec![ScopeFrame {
                 defined: HashSet::new(),
                 shadowed: Vec::new(),
@@ -681,6 +686,34 @@ impl<P: ProcessManager> FunctionRegistry<P> {
         out.sort_by(|a, b| a.name.cmp(&b.name));
         out
     }
+
+    /// Install script `#` docs keyed by bare base name. Stored under
+    /// qualified `SCRIPT::NAME` keys.
+    pub fn set_script_docs(&mut self, docs: &HashMap<String, (String, String)>) {
+        for (base, pair) in docs {
+            self.script_docs
+                .insert(qualify(SCRIPT_MODULE_NAME, base), pair.clone());
+        }
+    }
+
+    /// Script doc pair for a qualified name, if the parser collected one.
+    pub fn script_doc_for(&self, qualified: &str) -> Option<(String, String)> {
+        self.script_docs.get(qualified).cloned()
+    }
+
+    /// Metadata for single-file `EXPORT` names in source order. Errors
+    /// name the first missing export; callers fail fast before serving.
+    pub fn exported_metas(&self, exports: &[String]) -> anyhow::Result<Vec<FuncMeta>> {
+        let mut out = Vec::with_capacity(exports.len());
+        for base in exports {
+            let qualified = qualify(SCRIPT_MODULE_NAME, base);
+            match self.entries.get(&qualified) {
+                Some(entry) => out.push(entry.meta.clone()),
+                None => anyhow::bail!("EXPORT `{base}` does not match any defined script function"),
+            }
+        }
+        Ok(out)
+    }
 }
 
 impl<P: ProcessManager> Clone for FunctionRegistry<P> {
@@ -689,6 +722,7 @@ impl<P: ProcessManager> Clone for FunctionRegistry<P> {
             entries: self.entries.clone(),
             scopes: self.scopes.clone(),
             pure_shared: Arc::clone(&self.pure_shared),
+            script_docs: self.script_docs.clone(),
         }
     }
 }

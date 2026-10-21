@@ -366,11 +366,14 @@ inherit_list = { "[" ~ ws? ~ env_key ~ (ws? ~ "," ~ ws? ~ env_key)* ~ ws? ~ "]" 
 // IMPORT [STD, MOCK] / IMPORT MOCK — bring module functions into bare-call
 // scope from this point to the enclosing block exit. A pure lowering
 // directive: updates LowerCtx import frames, emits zero runtime steps.
-// EXPORT is reserved for future script imports and rejected at lowering.
+// EXPORT [FOO, BAR] / EXPORT FOO — mark top-level script FUNCs as
+// externally callable tools (single-file scope; cross-file stays in #115).
+// Top-level only, never guarded, emits zero runtime steps.
 import_module = @{ ASCII_ALPHA_UPPER ~ (ASCII_ALPHA_UPPER | ASCII_DIGIT | "_")* }
 import_list = { "[" ~ ws? ~ import_module ~ (ws? ~ "," ~ ws? ~ import_module)* ~ ws? ~ "]" }
 import_statement = ${ import_keyword ~ sep ~ (import_list | import_module) }
-export_statement = ${ export_keyword ~ sep ~ (!linebreak ~ !";" ~ ANY)* }
+export_list = { "[" ~ ws? ~ func_ident ~ (ws? ~ "," ~ ws? ~ func_ident)* ~ ws? ~ "]" }
+export_statement = ${ export_keyword ~ sep ~ (export_list | func_ident) }
 
 // Generic instruction: uppercase command name followed by arguments.
 // instruction_inner (non-atomic) — used inside with_io_command's command rule.

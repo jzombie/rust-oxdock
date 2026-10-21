@@ -189,9 +189,120 @@ fn func_cannot_shadow_module_function() {
 }
 
 #[test]
-fn export_is_reserved() {
-    let err = parse("EXPORT FOO\n").expect_err("export must fail");
-    assert!(err.to_string().contains("reserved"), "{err}");
+fn export_single_and_list_forms() {
+    use oxdock_parser::parse_script_with_modules_and_exports;
+    let parsed = parse_script_with_modules_and_exports(
+        indoc! {r#"
+            FUNC FOO() {
+                RETURN "x"
+            }
+            EXPORT FOO
+        "#},
+        mock_lower,
+        HashSet::new(),
+        table(),
+    )
+    .expect("single export parses");
+    assert_eq!(parsed.exports, vec!["FOO".to_string()]);
+    assert_eq!(parsed.steps.len(), 1);
+
+    let parsed = parse_script_with_modules_and_exports(
+        indoc! {r#"
+            FUNC FOO() {
+                RETURN "x"
+            }
+            FUNC BAR() {
+                RETURN "y"
+            }
+            EXPORT [FOO, BAR]
+        "#},
+        mock_lower,
+        HashSet::new(),
+        table(),
+    )
+    .expect("list export parses");
+    assert_eq!(parsed.exports, vec!["FOO".to_string(), "BAR".to_string()]);
+}
+
+#[test]
+fn export_forward_reference_allowed() {
+    use oxdock_parser::parse_script_with_modules_and_exports;
+    let parsed = parse_script_with_modules_and_exports(
+        indoc! {r#"
+            EXPORT FOO
+            FUNC FOO() {
+                RETURN "x"
+            }
+        "#},
+        mock_lower,
+        HashSet::new(),
+        table(),
+    )
+    .expect("forward export parses");
+    assert_eq!(parsed.exports, vec!["FOO".to_string()]);
+}
+
+#[test]
+fn export_unknown_name_fails() {
+    use oxdock_parser::parse_script_with_modules_and_exports;
+    let err = parse_script_with_modules_and_exports(
+        "EXPORT MISSING\n",
+        mock_lower,
+        HashSet::new(),
+        table(),
+    )
+    .expect_err("unknown export must fail");
+    assert!(err.to_string().contains("does not match any top-level FUNC"), "{err}");
+}
+
+#[test]
+fn export_duplicate_fails() {
+    use oxdock_parser::parse_script_with_modules_and_exports;
+    let err = parse_script_with_modules_and_exports(
+        indoc! {r#"
+            FUNC FOO() {
+                RETURN "x"
+            }
+            EXPORT [FOO, FOO]
+        "#},
+        mock_lower,
+        HashSet::new(),
+        table(),
+    )
+    .expect_err("duplicate export must fail");
+    assert!(err.to_string().contains("duplicate EXPORT"), "{err}");
+}
+
+#[test]
+fn export_cannot_be_guarded() {
+    let err = parse(indoc! {r#"
+        [env:FOO]
+        EXPORT FOO
+    "#})
+    .expect_err("guarded export must fail");
+    assert!(err.to_string().contains("cannot be guarded"), "{err}");
+}
+
+#[test]
+fn export_docs_collected_from_hash_comments() {
+    use oxdock_parser::parse_script_with_modules_and_exports;
+    let parsed = parse_script_with_modules_and_exports(
+        indoc! {r#"
+            # Adds one.
+            # Second line.
+            FUNC FOO() {
+                RETURN "x"
+            }
+            EXPORT FOO
+        "#},
+        mock_lower,
+        HashSet::new(),
+        table(),
+    )
+    .expect("export with docs parses");
+    let (summary, docs) = parsed.func_docs.get("FOO").expect("docs collected");
+    assert_eq!(summary, "Adds one.");
+    assert!(docs.contains("Second line"), "{docs}");
 }
 
 #[test]

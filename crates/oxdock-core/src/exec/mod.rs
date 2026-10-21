@@ -7,6 +7,7 @@ mod exit;
 mod fs_ops;
 mod handlers;
 mod io;
+pub mod mcp;
 mod native;
 pub mod remote;
 mod state;
@@ -43,6 +44,7 @@ pub(crate) use self::handlers::{
 pub use self::io::ExecIo;
 pub use self::io::PipeStream;
 pub use self::io::PushManifestSink;
+pub use self::mcp::{McpCallOutput, McpSession};
 pub use self::native::{
     FuncKind, FuncMeta, FuncParam, FunctionRegistry, HostModule, HostRegistration, NativeFn,
     OxDockFn, ParamOption, PreRunCheck, PureFn, PureTable, RecordSchema, builtin_function_metas,
@@ -343,7 +345,7 @@ pub fn run_steps_with_manager_with_modules<P: ProcessManager>(
     finish_run(state, process, steps)
 }
 
-fn new_state<P: ProcessManager>(fs: Box<dyn WorkspaceFs>, io: ExecIo) -> Result<ExecState<P>> {
+pub(crate) fn new_state<P: ProcessManager>(fs: Box<dyn WorkspaceFs>, io: ExecIo) -> Result<ExecState<P>> {
     let cwd = fs.root().clone();
     let build_context = fs.build_context().clone();
     let cargo_scratch = reserve_cargo_scratch()?;

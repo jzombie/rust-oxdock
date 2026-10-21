@@ -387,6 +387,28 @@ pub struct StepCtx<'a, P: ProcessManager> {
 }
 
 impl<'a, P: ProcessManager> StepCtx<'a, P> {
+    /// Minimal context for headless MCP tool dispatch: no stdin, caller
+    /// supplied output handles, no pipe backends. Stdin is always Null
+    /// so tools can never block on host input.
+    pub(super) fn for_mcp(
+        state: &'a mut ExecState<P>,
+        process: &'a mut P,
+        stdin: CommandStdin,
+        out: Option<StreamHandle>,
+        err: Option<StreamHandle>,
+    ) -> Self {
+        Self {
+            state,
+            process,
+            stdin,
+            expose_stdin: false,
+            out,
+            err,
+            out_pipe: None,
+            stdin_pipe: None,
+        }
+    }
+
     /// Shared writer behind the step error stream, when one exists (never
     /// for OS kernel pairs). Lets streaming hosts pump guest stderr live
     /// instead of buffering it to the end of the block.
