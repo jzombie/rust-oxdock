@@ -180,8 +180,25 @@ pub fn run_guarded<T, M: Send>(
     hub.active.fetch_add(1, Ordering::SeqCst);
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
     hub.active.fetch_sub(1, Ordering::SeqCst);
+    // Poke on drop so a panicking `done` still wakes the supervisor.
+    // The explicit poke below disarms this; the double wake would be
+    // harmless (sequence bump plus notify) but one wake is enough.
+    // All current `done` closures are infallible enum constructors.
+    struct PokeGuard<'a> {
+        hub: &'a CancelHub,
+        armed: bool,
+    }
+    impl Drop for PokeGuard<'_> {
+        fn drop(&mut self) {
+            if self.armed {
+                self.hub.poke();
+            }
+        }
+    }
+    let mut poke = PokeGuard { hub, armed: true };
     let _ = tx.send(done(outcome));
     hub.poke();
+    poke.armed = false;
 }
 
 /// RAII cancellation bridge for single-threaded pumps (no supervisor
