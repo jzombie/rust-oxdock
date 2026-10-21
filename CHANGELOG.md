@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [Unreleased]
+
+### Added
+
+- MCP server hosting for exported script functions (#153): `oxdock --mcp script.oxdock` serves top-level `EXPORT`ed `FUNC`s as MCP tools over stdio (rmcp, JSON-RPC). The new `oxdock-mcp` crate owns the reactor and tool table; `--mcp` is behind a `mcp` cargo feature (off by default, on with `--all-features`). Full module `EXPORT` stays deferred to #115: only single-file top-level `EXPORT FOO` / `EXPORT [FOO, BAR]` with unknown-name and duplicate validation.
+- JSON projection for exported signatures: `STRING/INT/FLOAT/BOOL/LIST/MAP` plus shaped containers project to tool schemas; opaque handles (`PIPE/HANDLE/DURATION/PATH/SEMAPHORE/PERMIT`, custom types) fail fast before serving. Bare primitives are wrapped as `{"result": value}` with a matching `outputSchema`.
+- Hot reload for the MCP server: the script file is re-read on change and swapped atomically, so edits take effect on the next call with no restart. Broken edits keep serving the previous generation and record the failure instead of swapping. Successful reloads emit `notifications/tools/list_changed` (advertised via the tools `listChanged` capability) so clients re-fetch instead of showing a frozen list.
+- Synthesized `MCP_STATUS` tool on every MCP server: reports load generation (starts at 1, +1 per successful reload), tool list, script SHA-256, load time, and the last reload outcome. `EXPORT MCP_STATUS` is reserved and rejected.
+
 ## [0.30.0-alpha] - 2026-10-21
 
 ### Added
