@@ -156,6 +156,101 @@ fn opaque_export_fails_before_serving() {
 }
 
 #[test]
+fn qualified_opaque_export_still_registers() {
+    // Proves the EXPORT declaration is layer-agnostic: every step below
+    // lives in oxdock-parser / oxdock-core, and no oxdock-mcp code runs.
+    // TEXT_TRIM returns a STRING|PIPE union with no JSON projection, yet
+    // all three stages accept it. If any of these fails, the export
+    // itself is broken, not just its MCP serving.
+    let script = indoc! {r#"
+        IMPORT [STD]
+        EXPORT [STD::TEXT_TRIM]
+    "#};
+    // Stage 1 (oxdock-parser): the declaration parses and the export
+    // list records the qualified name verbatim.
+    let engine = Engine::new();
+    let parsed =
+        parse_script_with_modules_and_exports(script, engine.module_table())
+            .expect("export must parse");
+    assert!(parsed.exports.contains(&"STD::TEXT_TRIM".to_string()));
+    // Stage 2 (oxdock-core): linear session init accepts the export.
+    // McpSession is core session machinery (state + registry); despite
+    // the name it performs no JSON projection and opens no transport.
+    let (fs, _root) = test_fs();
+    let session = McpSession::init(
+        fs,
+        default_process_manager(),
+        Vec::new(),
+        Vec::new(),
+        &parsed,
+    )
+    .expect("session init must accept the export");
+    assert!(session.exports().contains(&"STD::TEXT_TRIM".to_string()));
+    // Stage 3 (oxdock-core registry): the qualified name resolves to
+    // real function metadata. Registry lookup succeeds; only the
+    // MCP-layer JSON projection (tested below) refuses it.
+    let metas = session.tool_metas().expect("registry must resolve it");
+    assert!(metas.iter().any(|m| oxdock_parser::base_name(&m.name) == "TEXT_TRIM"));
+}
+
+#[test]
+fn mcp_table_build_hard_fails_on_opaque_host_signature() {
+    use oxdock_mcp::build_tool_table;
+    use std::collections::HashMap;
+
+    // Proves the refusal lives in the MCP layer: build_tool_table is
+    // oxdock-mcp code that projects registry metadata into JSON tool
+    // schemas, and its own error names both the layer ("MCP tool") and
+    // the function. It bails instead of skipping, so no table with a
+    // silent hole can ever be built.
+    let engine = Engine::new();
+    let parsed = parse_script_with_modules_and_exports(
+        indoc! {r#"
+            IMPORT [STD]
+            EXPORT [STD::TEXT_TRIM]
+        "#},
+        engine.module_table(),
+    )
+    .expect("parse");
+    let (fs, _root) = test_fs();
+    let session = McpSession::init(
+        fs,
+        default_process_manager(),
+        Vec::new(),
+        Vec::new(),
+        &parsed,
+    )
+    .expect("session init");
+    let metas = session.tool_metas().expect("metas");
+    let err = build_tool_table(metas, &HashMap::new())
+        .err()
+        .expect("MCP must hard-fail, never silently skip");
+    let msg = err.to_string();
+    assert!(msg.contains("cannot expose MCP tool"), "{msg}");
+    assert!(msg.contains("TEXT_TRIM"), "{msg}");
+}
+
+#[test]
+fn mcp_init_hard_fails_before_serving_opaque_tool() {
+    // Proves startup loudness end to end: init_handler is oxdock-mcp's
+    // own constructor, and the two tests above already proved every
+    // upstream stage (parse, session, registry) succeeds on this exact
+    // script. So this failure can only come from the MCP layer, and the
+    // server never opens with an unservable entry. The error names its
+    // layer, not the export.
+    let (config, _root) = handler_config(indoc! {r#"
+        IMPORT [STD]
+        EXPORT [STD::TEXT_TRIM]
+    "#});
+    let err = init_handler(config)
+        .err()
+        .expect("MCP init must hard-fail");
+    let msg = err.to_string();
+    assert!(msg.contains("cannot expose MCP tool"), "{msg}");
+    assert!(msg.contains("TEXT_TRIM"), "{msg}");
+}
+
+#[test]
 fn reload_swaps_tools_and_keeps_old_on_broken_edit() {
     let (config, _root) = handler_config(DEMO);
     let handler = init_handler(config).expect("init");
