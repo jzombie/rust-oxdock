@@ -717,7 +717,9 @@ impl<P: ProcessManager> FunctionRegistry<P> {
             };
             match self.entries.get(&qualified) {
                 Some(entry) => out.push(entry.meta.clone()),
-                None => anyhow::bail!("EXPORT `{name}` matches no defined script function or known host function"),
+                None => anyhow::bail!(
+                    "EXPORT `{name}` matches no defined script function or known host function"
+                ),
             }
         }
         Ok(out)

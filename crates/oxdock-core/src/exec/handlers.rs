@@ -438,10 +438,21 @@ fn flatten_exec_value(val: &Value, out: &mut Vec<String>) -> Result<()> {
         return Ok(());
     }
     if val.as_pipe_handle().is_some() {
-        // Opaque rendering: a handle in argv position stringifies like
-        // anywhere else (`<pipe>`).
-        out.push(format!("{val}"));
-        return Ok(());
+        // A pipe in argv position is always a bug: a child process
+        // cannot receive a handle as an argument string.
+        anyhow::bail!(
+            "cannot pass PIPE as a command argument: pipes carry streams between steps, not text. Capture the producing step's output with LET $var: STRING = ... instead."
+        );
+    }
+    if val.as_semaphore().is_some() {
+        anyhow::bail!(
+            "cannot pass SEMAPHORE as a command argument: semaphores coordinate task access between steps, not text."
+        );
+    }
+    if val.as_permit().is_some() {
+        anyhow::bail!(
+            "cannot pass PERMIT as a command argument: permits grant scoped task access, not text."
+        );
     }
     if let Some(d) = val.as_duration() {
         out.push(oxdock_parser::command::format_duration(&d));
@@ -2938,7 +2949,7 @@ pub(crate) fn dispatch_run<P: ProcessManager>(
         unreachable!()
     };
     let cmd = super::args::resolve_arg(arg, cx)?;
-    let cmd = super::args::expand_dsl_vars(&cmd, cx.state);
+    let cmd = super::args::expand_dsl_vars(&cmd, cx.state)?;
     run(cx, 0, &cmd)
 }
 

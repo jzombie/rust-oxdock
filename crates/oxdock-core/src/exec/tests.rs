@@ -3439,7 +3439,7 @@ mod escape_props {
     /// backslash escapes first, bare `$var` second.
     fn shell_resolve(input: &str, state: &ExecState<MockProcessManager>) -> String {
         let expanded = expand_string(input, &state.envs, state).expect("expansion is infallible");
-        expand_dsl_vars(&expanded, state)
+        expand_dsl_vars(&expanded, state).expect("test vars never hold pipes")
     }
 
     proptest! {
@@ -3765,6 +3765,26 @@ fn spawn_manifest_outer_pipe_stays_script() {
     .expect("parse ok");
     let files = run_script_with_timeout(steps, vec![], Duration::from_secs(15));
     assert_eq!(file_content(&files, "kind.txt"), b"script");
+}
+
+#[test]
+fn echo_of_pipe_handle_fails_loudly() {
+    // A pipe is plumbing between steps, not text: rendering a handle
+    // as `<pipe>` hid the bug, so string slots refuse pipes with
+    // remediation instead of stringifying the handle.
+    let steps = crate::parse_script(indoc! {r#"
+        LET $p: PIPE
+        WITH_IO [stdout=$p] ECHO "hello"
+        ECHO $p
+    "#})
+    .expect("parse ok");
+    let root = GuardedPath::new_root_from_str(".").unwrap();
+    let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
+    let err = run_expect_err(fs, &steps, MockProcessManager::default());
+    assert!(
+        format!("{err:#}").contains("cannot render PIPE as STRING"),
+        "unexpected error: {err:#}"
+    );
 }
 
 #[test]

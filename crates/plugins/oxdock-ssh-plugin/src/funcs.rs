@@ -956,10 +956,7 @@ fn ssh_exec<P: ProcessManager>(
     argv: Vec<String>,
     /// `timeout` DURATION|STRING (default 60s) and `max_bytes` INT
     /// (default 8 MiB per stream).
-    #[options(
-        "timeout?: DURATION|STRING",
-        "max_bytes?: INT"
-    )]
+    #[options("timeout?: DURATION|STRING", "max_bytes?: INT")]
     options: BTreeMap<String, Value>,
 ) -> Result<Value> {
     if argv.is_empty() {
@@ -1012,9 +1009,7 @@ fn ssh_exec<P: ProcessManager>(
     let max_bytes = match options.get("max_bytes") {
         None => crate::runtime::DEFAULT_EXEC_MAX_BYTES,
         Some(value) => {
-            let bytes = value
-                .as_i64()
-                .expect("check_options verified INT");
+            let bytes = value.as_i64().expect("check_options verified INT");
             if bytes <= 0 {
                 bail!("SSH_EXEC option 'max_bytes' must be positive");
             }
@@ -1031,10 +1026,7 @@ fn ssh_exec<P: ProcessManager>(
         ))
         .context("SSH_EXEC failed")?;
     let mut map = BTreeMap::new();
-    map.insert(
-        "exit".to_string(),
-        Value::int(outcome.exit.unwrap_or(-1)),
-    );
+    map.insert("exit".to_string(), Value::int(outcome.exit.unwrap_or(-1)));
     map.insert(
         "stdout".to_string(),
         Value::string(String::from_utf8_lossy(&outcome.stdout).into_owned()),

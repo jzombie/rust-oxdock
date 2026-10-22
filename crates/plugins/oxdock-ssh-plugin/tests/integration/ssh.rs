@@ -3505,10 +3505,7 @@ fn send_exit_status_rejects_negative_code() {
 
 #[test]
 #[cfg(unix)]
-#[cfg_attr(
-    miri,
-    ignore = "needs loopback TCP plus threads plus subprocesses"
-)]
+#[cfg_attr(miri, ignore = "needs loopback TCP plus threads plus subprocesses")]
 fn exec_argv_round_trip_preserves_hostile_words() {
     // Unix-only by construction: the responder runs `echo` with one
     // hostile argument, so the test asserts the wire join and the
@@ -3552,10 +3549,7 @@ fn exec_argv_round_trip_preserves_hostile_words() {
 }
 
 #[test]
-#[cfg_attr(
-    miri,
-    ignore = "needs loopback TCP plus threads plus a Tokio runtime"
-)]
+#[cfg_attr(miri, ignore = "needs loopback TCP plus threads plus a Tokio runtime")]
 fn exec_timeout_returns_partials() {
     // Nobody dequeues, so the exec never runs: the client kills the
     // wait at the option timeout and returns what arrived (nothing)

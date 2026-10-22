@@ -158,7 +158,11 @@ impl<P: ProcessManager> McpSession<P> {
         let qualified = if self.exports.iter().any(|e| e == base) {
             oxdock_parser::qualify(oxdock_parser::SCRIPT_MODULE_NAME, base)
         } else {
-            match self.exports.iter().find(|e| e.rsplit("::").next() == Some(base)) {
+            match self
+                .exports
+                .iter()
+                .find(|e| e.rsplit("::").next() == Some(base))
+            {
                 Some(export) => export.clone(),
                 None => anyhow::bail!("unknown MCP tool `{base}`"),
             }

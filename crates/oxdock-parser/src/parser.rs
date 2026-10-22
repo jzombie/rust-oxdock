@@ -770,7 +770,9 @@ impl<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> ScriptParser<'a, F> {
                     let ctx = self.eof_span();
                     return Err(ParseError::validation(
                         KEYWORD_EXPORT,
-                        format!("EXPORT `{name}` does not match any top-level FUNC or known module member"),
+                        format!(
+                            "EXPORT `{name}` does not match any top-level FUNC or known module member"
+                        ),
                         &ctx,
                     ));
                 }

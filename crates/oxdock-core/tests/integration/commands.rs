@@ -2866,8 +2866,11 @@ fn semaphore_admits_to_cap_then_rejects() {
         ASSERT_EQ $active 2
         WRITE first.txt "{{ $first.permit }}"
     "#};
-    run_script(&root, script).expect("admit to cap runs");
-    assert_eq!(read_trimmed(&root.join("first.txt").unwrap()), "<permit>");
+    let err = run_script(&root, script).expect_err("permit must not render as text");
+    assert!(
+        err.to_string().contains("cannot render PERMIT as STRING"),
+        "unexpected error: {err}"
+    );
 }
 
 #[test]

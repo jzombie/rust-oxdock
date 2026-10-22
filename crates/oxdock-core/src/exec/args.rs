@@ -196,10 +196,13 @@ fn coerce_scalar(value: &Value, expected: &TypeTag) -> Result<Value> {
         return Err(mismatch(expected, value));
     }
     if value.as_pipe_handle().is_some() {
-        // Opaque rendering: stringifying a handle was already
-        // meaningless with names; `<pipe>` keeps the totality.
+        // Pipes are refused in string slots: they carry streams between
+        // steps, not text, and silently rendering a handle hides a bug.
+        // Capture the producing step's output with LET instead.
         if matches!(expected, TypeTag::String) {
-            return Ok(Value::string(format!("{value}")));
+            anyhow::bail!(
+                "coercion: TypeMismatch: expected STRING, got PIPE: pipes carry streams between steps, not text. Capture the producing step's output with LET $var: STRING = ... instead."
+            );
         }
         return Err(mismatch(expected, value));
     }
@@ -246,7 +249,7 @@ pub(crate) fn resolve_arg<P: ProcessManager>(arg: &Arg, cx: &mut StepCtx<'_, P>)
         Arg::String(s, _) => Ok(expand_string(s, &cx.state.envs, cx.state)?),
         Arg::Expr(e) => {
             let val = evaluate_expr(e, cx)?;
-            Ok(format_value_for_string(&val))
+            format_value_for_string(&val)
         }
         Arg::Parts(parts) => {
             let mut out = String::new();
@@ -257,7 +260,7 @@ pub(crate) fn resolve_arg<P: ProcessManager>(arg: &Arg, cx: &mut StepCtx<'_, P>)
                     }
                     ArgPart::Expr(e) => {
                         let val = evaluate_expr(e, cx)?;
-                        out.push_str(&format_value_for_string(&val));
+                        out.push_str(&format_value_for_string(&val)?);
                     }
                 }
             }
@@ -895,8 +898,8 @@ fn apply_compare(op: CompareOp, left: &Value, right: &Value) -> Result<Value> {
     }
     match op {
         CompareOp::Eq | CompareOp::Ne => {
-            let ls = format_value_for_string(left);
-            let rs = format_value_for_string(right);
+            let ls = format_value_for_string(left)?;
+            let rs = format_value_for_string(right)?;
             let result = match op {
                 CompareOp::Eq => ls == rs,
                 CompareOp::Ne => ls != rs,
@@ -1554,7 +1557,7 @@ pub(crate) fn expand_string<P: ProcessManager>(
                                 }
                             }
                             if let Some(v) = current {
-                                output.push_str(&format_value_for_string(&v));
+                                output.push_str(&format_value_for_string(&v)?);
                             }
                             // Missing → emit empty
                         }
@@ -1577,7 +1580,7 @@ pub(crate) fn expand_string<P: ProcessManager>(
                             }
                             // Missing → emit empty
                         } else if let Some(val) = state.get_var(key) {
-                            output.push_str(&format_value_for_string(&val));
+                            output.push_str(&format_value_for_string(&val)?);
                         } else if let Some((module, func, args_src)) =
                             oxdock_process::parse_placeholder_call(key)
                         {
@@ -1612,7 +1615,7 @@ pub(crate) fn expand_string<P: ProcessManager>(
                                 args.push(oxdock_process::resolve_placeholder_arg(&src, &vars)?);
                             }
                             let result = callee(args)?;
-                            output.push_str(&format_value_for_string(&result));
+                            output.push_str(&format_value_for_string(&result)?);
                         }
                         // Bare key not in DSL vars → emit empty
                     }
@@ -1642,7 +1645,7 @@ pub(crate) fn expand_string<P: ProcessManager>(
 /// from `\$var` at this stage (`expand_string` already collapsed `\\`), so it
 /// also yields a literal `$var`; prefer `{{ $var }}`-adjacent forms when a
 /// literal backslash must precede an interpolated value.
-pub(crate) fn expand_dsl_vars<P: ProcessManager>(input: &str, state: &ExecState<P>) -> String {
+ pub(crate) fn expand_dsl_vars<P: ProcessManager>(input: &str, state: &ExecState<P>) -> anyhow::Result<String> {
     let mut output = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
     while let Some(c) = chars.next() {
@@ -1678,7 +1681,7 @@ pub(crate) fn expand_dsl_vars<P: ProcessManager>(input: &str, state: &ExecState<
                 continue;
             }
             if let Some(val) = state.get_var(&var_name) {
-                output.push_str(&format_value_for_string(&val));
+                output.push_str(&format_value_for_string(&val)?);
             } else {
                 output.push('$');
                 output.push_str(&var_name);
@@ -1687,7 +1690,7 @@ pub(crate) fn expand_dsl_vars<P: ProcessManager>(input: &str, state: &ExecState<
             output.push(c);
         }
     }
-    output
+    Ok(output)
 }
 
 /// Compile size limit for `TEXT_*` regex patterns. Bounds automata

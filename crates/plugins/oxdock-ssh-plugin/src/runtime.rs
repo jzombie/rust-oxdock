@@ -104,7 +104,9 @@ pub async fn run_remote_exec(
                     if data.len() > room {
                         guard.truncated = true;
                     }
-                    guard.stdout.extend_from_slice(&data[..room.min(data.len())]);
+                    guard
+                        .stdout
+                        .extend_from_slice(&data[..room.min(data.len())]);
                 }
                 Some(russh::ChannelMsg::ExtendedData { data, ext: 1 }) => {
                     let mut guard = worker.lock().unwrap_or_else(|poison| poison.into_inner());
@@ -112,7 +114,9 @@ pub async fn run_remote_exec(
                     if data.len() > room {
                         guard.truncated = true;
                     }
-                    guard.stderr.extend_from_slice(&data[..room.min(data.len())]);
+                    guard
+                        .stderr
+                        .extend_from_slice(&data[..room.min(data.len())]);
                 }
                 Some(russh::ChannelMsg::ExitStatus { exit_status }) => {
                     let mut guard = worker.lock().unwrap_or_else(|poison| poison.into_inner());
@@ -140,7 +144,8 @@ pub async fn run_remote_exec(
         Ok::<_, anyhow::Error>(())
     })
     .await;
-    let mut guard = shared.lock().unwrap_or_else(|poison| poison.into_inner());    match timed_out {
+    let mut guard = shared.lock().unwrap_or_else(|poison| poison.into_inner());
+    match timed_out {
         Ok(Ok(())) => Ok(ExecOutcome {
             exit: guard.exit,
             stdout: std::mem::take(&mut guard.stdout),

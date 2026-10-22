@@ -760,7 +760,7 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
     match cmd {
         StepKind::Run(arg) => {
             let cmd = super::args::resolve_arg(arg, &mut cx)?;
-            let cmd = super::args::expand_dsl_vars(&cmd, cx.state);
+            let cmd = super::args::expand_dsl_vars(&cmd, cx.state)?;
             handlers::run(&mut cx, idx, &cmd)
         }
         StepKind::RunExec { argv } => {
@@ -1109,7 +1109,7 @@ fn execute_steps_inner<P: ProcessManager>(
                         }
                         StepKind::Run(arg) => {
                             let cmd = super::args::resolve_arg(arg, &mut cx)?;
-                            let cmd = super::args::expand_dsl_vars(&cmd, cx.state);
+                            let cmd = super::args::expand_dsl_vars(&cmd, cx.state)?;
                             handlers::run(&mut cx, idx, &cmd)
                         }
                         StepKind::RunExec { argv } => {

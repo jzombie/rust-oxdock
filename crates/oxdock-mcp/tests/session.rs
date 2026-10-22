@@ -169,9 +169,8 @@ fn qualified_opaque_export_still_registers() {
     // Stage 1 (oxdock-parser): the declaration parses and the export
     // list records the qualified name verbatim.
     let engine = Engine::new();
-    let parsed =
-        parse_script_with_modules_and_exports(script, engine.module_table())
-            .expect("export must parse");
+    let parsed = parse_script_with_modules_and_exports(script, engine.module_table())
+        .expect("export must parse");
     assert!(parsed.exports.contains(&"STD::TEXT_TRIM".to_string()));
     // Stage 2 (oxdock-core): linear session init accepts the export.
     // McpSession is core session machinery (state + registry); despite
@@ -190,7 +189,11 @@ fn qualified_opaque_export_still_registers() {
     // real function metadata. Registry lookup succeeds; only the
     // MCP-layer JSON projection (tested below) refuses it.
     let metas = session.tool_metas().expect("registry must resolve it");
-    assert!(metas.iter().any(|m| oxdock_parser::base_name(&m.name) == "TEXT_TRIM"));
+    assert!(
+        metas
+            .iter()
+            .any(|m| oxdock_parser::base_name(&m.name) == "TEXT_TRIM")
+    );
 }
 
 #[test]
@@ -241,9 +244,7 @@ fn mcp_init_hard_fails_before_serving_opaque_tool() {
         IMPORT [STD]
         EXPORT [STD::TEXT_TRIM]
     "#});
-    let err = init_handler(config)
-        .err()
-        .expect("MCP init must hard-fail");
+    let err = init_handler(config).err().expect("MCP init must hard-fail");
     let msg = err.to_string();
     assert!(msg.contains("cannot expose MCP tool"), "{msg}");
     assert!(msg.contains("TEXT_TRIM"), "{msg}");
