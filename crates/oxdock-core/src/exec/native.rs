@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use oxdock_func_macro::oxdock_func;
+use oxdock_parser::value::HandleValue;
 use oxdock_parser::{
     Field, KEYWORD_INSPECT, SCRIPT_MODULE_NAME, STD_MODULE_NAME, SemaphoreState, Step, TypeTag,
     Value, base_name, qualify, render_structural, split_qualified,
@@ -304,6 +305,10 @@ pub struct FunctionRegistry<P: ProcessManager> {
     entries: HashMap<String, FuncEntry<P>>,
     scopes: Vec<ScopeFrame<P>>,
     pure_shared: Arc<PureTable>,
+    /// Script `#` doc comments keyed by qualified `SCRIPT::NAME`.
+    /// Populated by the MCP host after linear execution; the tool
+    /// table reads these with fallback to `FuncMeta` summary.
+    script_docs: HashMap<String, (String, String)>,
 }
 
 impl<P: ProcessManager> FunctionRegistry<P> {
@@ -311,6 +316,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
         let mut reg = Self {
             entries: HashMap::new(),
             pure_shared: Arc::new(HashMap::new()),
+            script_docs: HashMap::new(),
             scopes: vec![ScopeFrame {
                 defined: HashSet::new(),
                 shadowed: Vec::new(),
@@ -382,6 +388,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
             Describe::registration(),
             IsTerminal::registration(),
             Eof::registration(),
+            TaskPoll::registration(),
             TextTrim::registration(),
             TextTrimPrefix::registration(),
             TextTrimSuffix::registration(),
@@ -406,6 +413,8 @@ impl<P: ProcessManager> FunctionRegistry<P> {
             SemaphoreNew::registration(),
             SemaphoreTryAcquire::registration(),
             SemaphoreAvailable::registration(),
+            ShellSplitArgs::registration(),
+            ShellJoinArgs::registration(),
         ]
     }
 
@@ -681,6 +690,42 @@ impl<P: ProcessManager> FunctionRegistry<P> {
         out.sort_by(|a, b| a.name.cmp(&b.name));
         out
     }
+
+    /// Install script `#` docs keyed by bare base name. Stored under
+    /// qualified `SCRIPT::NAME` keys.
+    pub fn set_script_docs(&mut self, docs: &HashMap<String, (String, String)>) {
+        for (base, pair) in docs {
+            self.script_docs
+                .insert(qualify(SCRIPT_MODULE_NAME, base), pair.clone());
+        }
+    }
+
+    /// Script doc pair for a qualified name, if the parser collected one.
+    pub fn script_doc_for(&self, qualified: &str) -> Option<(String, String)> {
+        self.script_docs.get(qualified).cloned()
+    }
+
+    /// Metadata for single-file `EXPORT` names in source order. Errors
+    /// name the first missing export; callers fail fast before serving.
+    pub fn exported_metas(&self, exports: &[String]) -> anyhow::Result<Vec<FuncMeta>> {
+        let mut out = Vec::with_capacity(exports.len());
+        for name in exports {
+            // Bare names are script FUNCs; qualified names address the
+            // registry directly, so host functions export with their
+            // own metadata and docs.
+            let qualified = match name.split_once("::") {
+                None => qualify(SCRIPT_MODULE_NAME, name),
+                Some(_) => name.clone(),
+            };
+            match self.entries.get(&qualified) {
+                Some(entry) => out.push(entry.meta.clone()),
+                None => anyhow::bail!(
+                    "EXPORT `{name}` matches no defined script function or known host function"
+                ),
+            }
+        }
+        Ok(out)
+    }
 }
 
 impl<P: ProcessManager> Clone for FunctionRegistry<P> {
@@ -689,6 +734,7 @@ impl<P: ProcessManager> Clone for FunctionRegistry<P> {
             entries: self.entries.clone(),
             scopes: self.scopes.clone(),
             pure_shared: Arc::clone(&self.pure_shared),
+            script_docs: self.script_docs.clone(),
         }
     }
 }
@@ -2369,6 +2415,77 @@ fn text_join(
     Ok(Value::string(elements.join(delimiter.as_str())))
 }
 
+/// Split a shell command string into argv words.
+///
+/// Parses POSIX shell word syntax (single and double quotes, backslash
+/// escapes) with the `shell-words` crate, the same splitter the remote
+/// plugins use. Returns a `LIST<STRING>`. Unbalanced quotes fail.
+/// Inverse of `SHELL_JOIN_ARGS`: joining the result re-splits
+/// to the same words.
+///
+/// Shell syntax only: plain prose with no quoting splits on
+/// whitespace like any shell would, which is rarely what prose wants.
+///
+#[oxdock_func(pure, returns = TypeTag::ListOf(std::sync::Arc::new(TypeTag::String)))]
+#[example(
+    name = "split args",
+    code = r###"
+    # Quoted segments stay one word.
+    IMPORT [STD]
+    LET $argv: LIST<STRING> = SHELL_SPLIT_ARGS("gh issue comment 153 --body-file notes.md")
+    ASSERT_EQ $argv.0 "gh"
+    ASSERT_EQ $argv.3 "153"
+    ASSERT_EQ $argv.5 "notes.md"
+
+    # Quotes and escapes parse the shell way.
+    LET $quoted: LIST<STRING> = SHELL_SPLIT_ARGS("say \"hi there\" 'a b'")
+    ASSERT_EQ $quoted.0 "say"
+    ASSERT_EQ $quoted.1 "hi there"
+    ASSERT_EQ $quoted.2 "a b"
+    "###
+)]
+fn shell_split_args(
+    /// Shell command string to split into words.
+    command: String,
+) -> Result<Value> {
+    match shell_words::split(&command) {
+        Ok(words) => Ok(super::args::text_list_value(words)),
+        Err(err) => anyhow::bail!("SHELL_SPLIT_ARGS: {err}"),
+    }
+}
+
+/// Join argv words into one shell-parseable string.
+///
+/// Quotes each word with POSIX single-quote escaping through the
+/// `shell-words` crate, so the result re-splits to the same words.
+/// Inverse of `SHELL_SPLIT_ARGS` on the word side: splitting the
+/// result returns the input list unchanged.
+///
+#[oxdock_func(pure, returns = TypeTag::String)]
+#[example(
+    name = "join args",
+    code = r###"
+    # Plain words join with spaces and no quoting.
+    IMPORT [STD]
+    LET $plain: STRING = SHELL_JOIN_ARGS(["gh", "issue", "list"])
+    ASSERT_EQ $plain "gh issue list"
+
+    # Words with spaces quote, and the round trip is exact.
+    LET $words: LIST<STRING> = ["say", "hi there", "a'b"]
+    LET $joined: STRING = SHELL_JOIN_ARGS($words)
+    LET $back: LIST<STRING> = SHELL_SPLIT_ARGS($joined)
+    ASSERT_EQ $back.0 "say"
+    ASSERT_EQ $back.1 "hi there"
+    ASSERT_EQ $back.2 "a'b"
+    "###
+)]
+fn shell_join_args(
+    /// Words to join into a shell command string.
+    words: Vec<String>,
+) -> Result<Value> {
+    Ok(Value::string(shell_words::join(&words)))
+}
+
 /// Split text into lines with universal newline handling.
 ///
 /// Normalizes through the line-ending crate first so LF, CRLF, CR,
@@ -2823,6 +2940,136 @@ fn eof<P: ProcessManager>(
 ) -> Result<Value> {
     let info = cx.state.io.inspect_pipe(&pipe);
     Ok(Value::bool(info.closed && info.buffered == 0))
+}
+
+/// Field table for the `TASK_POLL` result map. Shared by the declared
+/// return tag and the generated schema and reference docs, so the
+/// shape agents see is the shape the builtin builds.
+fn task_poll_result_fields() -> Arc<[Field]> {
+    Arc::from(vec![
+        Field {
+            name: "state".to_string(),
+            ty: TypeTag::String,
+            docs: "Task phase: `running` or `finished`.",
+            optional: false,
+        },
+        Field {
+            name: "ok".to_string(),
+            ty: TypeTag::Bool,
+            docs: "True unless the task failed.",
+            optional: false,
+        },
+        Field {
+            name: "stdout_tail".to_string(),
+            ty: TypeTag::String,
+            docs: "Bounded stdout tail, live while running.",
+            optional: false,
+        },
+        Field {
+            name: "stderr_tail".to_string(),
+            ty: TypeTag::String,
+            docs: "Bounded stderr tail, live while running.",
+            optional: false,
+        },
+        Field {
+            name: "truncated_bytes".to_string(),
+            ty: TypeTag::Int,
+            docs: "Dropped head bytes past the per-stream cap.",
+            optional: false,
+        },
+        Field {
+            name: "exit_code".to_string(),
+            ty: TypeTag::Int,
+            docs: "Process exit code, present once finished.",
+            optional: true,
+        },
+        Field {
+            name: "result".to_string(),
+            ty: TypeTag::Any,
+            docs: "Task `RETURN` value, present on clean finish.",
+            optional: true,
+        },
+        Field {
+            name: "error".to_string(),
+            ty: TypeTag::String,
+            docs: "Failure text, present on failed finish.",
+            optional: true,
+        },
+    ])
+}
+
+/// Poll a background task without consuming it.
+///
+/// Reports the running state, the output tails accumulated so far,
+/// and the final outcome once finished. Repeated polls are safe, and
+/// a later `AWAIT` still joins normally. Polling after `AWAIT` fails
+/// like double-await: the handle is spent.
+///
+/// Map keys: `state` always names the phase (`"running"` or
+/// `"finished"`); `ok` is true unless the task failed; `stdout_tail`
+/// and `stderr_tail` carry bounded output with `truncated_bytes`
+/// counting dropped head bytes. Finished tasks add `exit_code`;
+/// clean finishes add `result`, failed ones add `error` instead.
+#[oxdock_func(returns = TypeTag::Record(task_poll_result_fields()))]
+#[example(
+    name = "running poll",
+    code = r###"
+    # A sleeping task is still running on the first poll.
+    IMPORT [STD]
+    LET $t: HANDLE = ASYNC { SLEEP 30s }
+    LET $m: MAP<state: STRING, ok: BOOL, stdout_tail: STRING, stderr_tail: STRING, truncated_bytes: INT, exit_code?: INT, result?: ANY, error?: STRING> = TASK_POLL($t)
+    ASSERT_EQ $m.state "running"
+    ASSERT_EQ $m.ok true
+    # Clean up the sleeper so the run ends promptly.
+    CANCEL $t
+    "###
+)]
+#[example(
+    name = "finished poll",
+    code = r###"
+    # A finished task reports its value and final tails, then still awaits.
+    IMPORT [STD]
+    LET $t: HANDLE = ASYNC { ECHO "hi"; SLEEP 1s; RETURN "done" }
+    # Do other work while the task runs; poll once it should be done.
+    SLEEP 2s
+    LET $m: MAP<state: STRING, ok: BOOL, stdout_tail: STRING, stderr_tail: STRING, truncated_bytes: INT, exit_code?: INT, result?: ANY, error?: STRING> = TASK_POLL($t)
+    ASSERT_EQ $m.state "finished"
+    ASSERT_EQ $m.result "done"
+    LET $o: STRING = AWAIT $t
+    ASSERT_EQ $o "done"
+    "###
+)]
+fn task_poll<P: ProcessManager>(
+    cx: &mut StepCtx<P>,
+    /// Task handle from ASYNC.
+    task: HandleValue,
+) -> Result<Value> {
+    let entry =
+        super::handlers::resolve_task_entry_by_id(task.0, &format!("TASK_POLL({})", task.0), cx)?;
+    let obs = entry.observe_completion();
+    let (stdout_tail, stderr_tail, dropped) = entry.snapshot_tails();
+    let mut out = BTreeMap::new();
+    out.insert(
+        "state".to_string(),
+        Value::string(if obs.running { "running" } else { "finished" }.to_string()),
+    );
+    out.insert("ok".to_string(), Value::bool(obs.ok));
+    if !obs.running {
+        out.insert("exit_code".to_string(), Value::int(obs.exit_code));
+    }
+    if let Some(result) = obs.result {
+        out.insert("result".to_string(), result);
+    }
+    if !obs.error.is_empty() {
+        out.insert("error".to_string(), Value::string(obs.error));
+    }
+    out.insert("stdout_tail".to_string(), Value::string(stdout_tail));
+    out.insert("stderr_tail".to_string(), Value::string(stderr_tail));
+    out.insert(
+        "truncated_bytes".to_string(),
+        Value::int(dropped.min(i64::MAX as u64) as i64),
+    );
+    Ok(Value::map(out))
 }
 
 fn meta_to_value(meta: &FuncMeta) -> Value {
@@ -3311,5 +3558,29 @@ mod tests {
                 "{name} refusal names the missing context: {err:#}"
             );
         }
+    }
+
+    #[test]
+    fn shell_words_join_split_round_trip() {
+        // Join and split are absolute inverses on the word side: the
+        // joiner quotes through `shell-words`, the splitter parses the
+        // same syntax, so every adversarial word survives the round trip.
+        let words = vec![
+            "gh".to_string(),
+            "issue".to_string(),
+            "comment".to_string(),
+            "with spaces".to_string(),
+            "it's".to_string(),
+            "say \"hi\"".to_string(),
+            "$HOME".to_string(),
+            "$(whoami)".to_string(),
+            "C:\\path\\to".to_string(),
+            "naïve café".to_string(),
+            "".to_string(),
+        ];
+        let joined = shell_words::join(&words);
+        let back = shell_words::split(&joined).expect("join output must parse");
+        assert_eq!(back, words);
+        assert!(shell_words::split("unbalanced \"quote").is_err());
     }
 }

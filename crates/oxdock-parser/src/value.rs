@@ -165,7 +165,7 @@ impl PartialEq for PipeValue {
 /// Background ASYNC task handle for AWAIT/CANCEL.
 #[oxdock_type(crate_path = "::oxdock_parser", name = "HANDLE", inline)]
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct HandleValue(pub u64);
+pub struct HandleValue(pub u64);
 
 /// Shared admission-control counter backing `SEMAPHORE` words. Clones
 /// share the backend, so every word naming one semaphore observes the

@@ -283,6 +283,7 @@ enum ParamKind {
     Bool,
     Pipe,
     Semaphore,
+    Handle,
     Custom(Box<Type>),
     Shaped(Shape),
     /// Explicit admission set on a `Value` parameter (`#[union(...)]`):
@@ -491,6 +492,9 @@ impl ParamKind {
             // `PipeHandle` renders `PIPE`: the extractor below accepts
             // only pipe words, so metadata, check, and signature agree.
             ParamKind::Pipe => quote! { Some(::oxdock_core::TypeTag::Pipe) },
+            // `HandleValue` renders `HANDLE`: the extractor below accepts
+            // only task-handle words, so metadata, check, and signature agree.
+            ParamKind::Handle => quote! { Some(::oxdock_core::TypeTag::Handle) },
             // `Arc<SemaphoreState>` renders `SEMAPHORE` for the same
             // reason: the extractor is the `as_semaphore` read.
             ParamKind::Semaphore => quote! { Some(::oxdock_core::TypeTag::Semaphore) },
@@ -828,6 +832,20 @@ impl ParamKind {
                     }
                 }
             },
+            ParamKind::Handle => quote! {
+                {
+                    let __oxdock_v = __oxdock_values.next().expect("arity checked above");
+                    match __oxdock_v.as_handle() {
+                        Some(__oxdock_h) => ::oxdock_parser::value::HandleValue(__oxdock_h),
+                        None => ::anyhow::bail!(
+                            "{}() argument `${}` must be a HANDLE, got {}",
+                            #dsl_name,
+                            stringify!(#param),
+                            __oxdock_v.type_name(),
+                        ),
+                    }
+                }
+            },
             ParamKind::Custom(ty) => quote! {
                 {
                     let __oxdock_v = __oxdock_values.next().expect("arity checked above");
@@ -860,6 +878,7 @@ fn param_kind(ty: &Type) -> syn::Result<ParamKind> {
             "f64" => return Ok(ParamKind::Float),
             "bool" => return Ok(ParamKind::Bool),
             "PipeHandle" => return Ok(ParamKind::Pipe),
+            "HandleValue" => return Ok(ParamKind::Handle),
             "Arc" => {
                 // Shared semaphore backends travel as `Arc<SemaphoreState>`,
                 // read back with `as_semaphore` like pipes.
@@ -899,7 +918,7 @@ fn param_kind(ty: &Type) -> syn::Result<ParamKind> {
     }
     Err(syn::Error::new_spanned(
         ty,
-        "unsupported oxdock_func parameter type; expected Value, String, i64, f64, bool, PipeHandle, Arc<SemaphoreState>, Vec<...>, BTreeMap<String, Value>, or BTreeMap<String, String>",
+        "unsupported oxdock_func parameter type; expected Value, String, i64, f64, bool, PipeHandle, HandleValue, Arc<SemaphoreState>, Vec<...>, BTreeMap<String, Value>, or BTreeMap<String, String>",
     ))
 }
 

@@ -51,6 +51,11 @@ const ENFORCED: &[(&str, &str, &[&str])] = &[
         "SSH_CONNECT",
         &["SSH_CONNECT", "SSH::SSH_CONNECT", "SSH::CONNECT"],
     ),
+    (
+        "SSH",
+        "SSH_EXEC",
+        &["SSH_EXEC", "SSH::SSH_EXEC", "SSH::EXEC"],
+    ),
 ];
 
 /// Registered functions that take no service name, per module. A new

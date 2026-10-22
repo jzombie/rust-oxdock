@@ -8,6 +8,7 @@ members = [
     "crates/oxdock-func-macro",
     "crates/oxdock-logic-tests",
     "crates/oxdock-logic-tests/fixtures/commands/ast_commands",
+    "crates/oxdock-mcp",
     "crates/oxdock-parser",
     "crates/oxdock-remote-proto",
     "crates/plugins/oxdock-markdown-plugin",
@@ -67,6 +68,7 @@ oxdock-func-macro = { path = "crates/oxdock-func-macro", version = "0.30.0-alpha
 oxdock-logic-tests = { path = "crates/oxdock-logic-tests", version = "0.30.0-alpha" }
 oxdock-macros = { path = "oxdock-macros", version = "0.30.0-alpha" }
 oxdock-markdown-plugin = { path = "crates/plugins/oxdock-markdown-plugin", version = "0.30.0-alpha" }
+oxdock-mcp = { path = "crates/oxdock-mcp", version = "0.30.0-alpha" }
 oxdock-net-plugin = { path = "crates/plugins/oxdock-net-plugin", version = "0.30.0-alpha" }
 oxdock-parser = { path = "crates/oxdock-parser", version = "0.30.0-alpha" }
 oxdock-pipe = { path = "crates/sys/oxdock-pipe", version = "0.30.0-alpha" }
@@ -83,6 +85,7 @@ pulldown-cmark = { version = "0.13.4", default-features = false }
 quote = "1.0.47"
 rand = "0.10"
 regex = "1.13.1"
+rmcp = { version = "3.6.0", features = ["server", "transport-io"] }
 russh = { version = "0.64.1", default-features = false, features = ["aws-lc-rs"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.151"

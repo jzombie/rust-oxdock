@@ -2,7 +2,7 @@
 name = "oxdock"
 description = "Dockerfile-inspired build DSL. Native. Embed scripts at compile time in Rust, or run the same scripts as standalone CLI pipelines."
 categories = ["command-line-utilities", "development-tools"]
-keywords = ["oxdock", "embed", "dsl", "build", "compile-time"]
+keywords = ["oxdock", "embed", "dsl", "mcp", "compile-time"]
 authors.workspace = true
 version.workspace = true
 edition.workspace = true
@@ -29,6 +29,8 @@ ssh = ["cli", "net", "oxdock-cli/ssh"]
 # Markdown helpers in the CLI runner (oxdock-markdown-plugin). Opt-in so
 # default and minimal builds keep their current module surface.
 markdown = ["oxdock-cli/markdown"]
+# MCP tool hosting for EXPORTed script functions. Opt-in; on with --all-features.
+mcp = ["oxdock-cli/mcp"]
 
 [dependencies]
 oxdock-build.workspace = true

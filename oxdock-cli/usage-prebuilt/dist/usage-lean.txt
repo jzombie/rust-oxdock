@@ -4,6 +4,7 @@ Usage: oxdock [OPTIONS] [SCRIPT]
   SCRIPT             script file path (same as `--script <file>`); `-` reads stdin
   --script <file|->  script file (relative resolves under the OxDock workspace root), or `-` for stdin
   --shell            run the script, then drop into an interactive shell (requires a TTY)
+  --mcp              serve EXPORTed FUNCs as MCP tools over stdio (requires the `mcp` feature)
   --offline          open no sockets (endpoint flags require the `net` feature)
   --help, -h         print this help and exit
   --version, -V      print the version and exit

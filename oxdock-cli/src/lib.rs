@@ -23,6 +23,8 @@ use std::collections::BTreeMap;
 
 mod endpoints;
 pub use endpoints::EndpointFlags;
+#[cfg(feature = "mcp")]
+mod mcp;
 
 // CLI usage bodies, one file per Cargo feature variant: statically
 // compiled assets cannot branch on Cargo features, so the script
@@ -40,6 +42,7 @@ oxdock_embed! {
             ECHO "  SCRIPT             script file path (same as `--script <file>`); `-` reads stdin"
             ECHO "  --script <file|->  script file (relative resolves under the OxDock workspace root), or `-` for stdin"
             ECHO "  --shell            run the script, then drop into an interactive shell (requires a TTY)"
+            ECHO "  --mcp              serve EXPORTed FUNCs as MCP tools over stdio (requires the `mcp` feature)"
             IF $is_net {
                 ECHO "  --listen <addr>    expose a logical service port ([host:]port, repeatable)"
                 ECHO "  -p <[host:]outer:inner>  map outer port to an inner service port or name (repeatable; outer 0 is ephemeral; bare outer binds loopback, prefix 0.0.0.0: for all interfaces)"
@@ -205,6 +208,24 @@ pub fn run() -> Result<()> {
     if opts.remote_serve {
         bail!("--remote-serve requires the `net` feature (rebuild with --features net)");
     }
+    // MCP tool hosting owns stdio like the guest serve loop: no script
+    // execution past init, no shell, no remote serve alongside it.
+    if opts.mcp {
+        #[cfg(feature = "mcp")]
+        {
+            if opts.shell || opts.remote_serve || !opts.remotes.is_empty() {
+                bail!("--mcp runs alone (no --shell, --remote-serve, or --remote)");
+            }
+            if !opts.endpoints.listens.is_empty() || !opts.endpoints.publishes.is_empty() {
+                bail!("--mcp runs alone (no --listen/-p)");
+            }
+            return mcp::serve_mcp(opts, workspace_root);
+        }
+        #[cfg(not(feature = "mcp"))]
+        {
+            bail!("--mcp requires the `mcp` feature (rebuild with --features mcp)");
+        }
+    }
     execute(opts, workspace_root)
 }
 
@@ -239,6 +260,9 @@ pub struct Options {
     pub shell: bool,
     pub endpoints: EndpointFlags,
     pub remote_serve: bool,
+    /// Serve `EXPORT`ed FUNCs as MCP tools over stdio instead of running
+    /// linear steps. Requires the `mcp` feature; see `--mcp`.
+    pub mcp: bool,
     /// Raw `--remote <target>="<command>"` pairs, in flag order. Validated
     /// and tokenized at inventory build; empty in lean builds (flag bails).
     pub remotes: Vec<(String, String)>,
@@ -255,6 +279,7 @@ impl Options {
         let mut shell = false;
         let mut endpoints = EndpointFlags::default();
         let mut remote_serve = false;
+        let mut mcp = false;
         // Pushed only under `net`; without it the binding never mutates.
         #[cfg_attr(not(feature = "net"), allow(unused_mut))]
         let mut remotes: Vec<(String, String)> = Vec::new();
@@ -344,6 +369,9 @@ impl Options {
                 Long("remote-serve") => {
                     remote_serve = true;
                 }
+                Long("mcp") => {
+                    mcp = true;
+                }
                 Long("remote") => {
                     let raw = value_string(parser.value().map_err(|_| {
                         anyhow::anyhow!("--remote requires <target>=\"<command>\"")
@@ -395,6 +423,7 @@ impl Options {
             shell,
             endpoints,
             remote_serve,
+            mcp,
             remotes,
         })
     }
@@ -953,6 +982,7 @@ mod tests {
             shell: true,
             endpoints: EndpointFlags::default(),
             remote_serve: false,
+            mcp: false,
             remotes: Vec::new(),
         };
 
@@ -1029,6 +1059,39 @@ mod tests {
             ScriptSource::Path(path) => assert_eq!(path, script_path),
             ScriptSource::Stdin => panic!("expected path script"),
         }
+    }
+
+    #[cfg_attr(
+        miri,
+        ignore = "GuardedPath::tempdir relies on OS tempdirs; blocked under Miri isolation"
+    )]
+    #[test]
+    fn options_parse_mcp_flag() {
+        let workspace = GuardedPath::tempdir().expect("tempdir");
+        let workspace_root = workspace.as_guarded_path().clone();
+        let mut args = vec!["--mcp".to_string(), "tools.oxdock".to_string()].into_iter();
+        let opts = Options::parse(&mut args, &workspace_root).expect("parse");
+        assert!(opts.mcp);
+        match opts.script {
+            ScriptSource::Path(path) => assert_eq!(
+                path,
+                workspace_root.join("tools.oxdock").expect("script path")
+            ),
+            ScriptSource::Stdin => panic!("expected path script"),
+        }
+    }
+
+    #[cfg_attr(
+        miri,
+        ignore = "GuardedPath::tempdir relies on OS tempdirs; blocked under Miri isolation"
+    )]
+    #[test]
+    fn options_parse_mcp_defaults_off() {
+        let workspace = GuardedPath::tempdir().expect("tempdir");
+        let workspace_root = workspace.as_guarded_path().clone();
+        let mut args = vec!["script.txt".to_string()].into_iter();
+        let opts = Options::parse(&mut args, &workspace_root).expect("parse");
+        assert!(!opts.mcp);
     }
 
     #[cfg_attr(
@@ -1358,6 +1421,7 @@ mod tests {
             shell: false,
             endpoints: EndpointFlags::default(),
             remote_serve: false,
+            mcp: false,
             remotes: Vec::new(),
         };
         let result = execute_with_result(opts, workspace_root).expect("execute");
@@ -1390,6 +1454,7 @@ mod tests {
             shell: false,
             endpoints: EndpointFlags::default(),
             remote_serve: false,
+            mcp: false,
             remotes: Vec::new(),
         };
         let result = execute_with_result(opts, workspace_root.clone()).expect("execute");
@@ -1425,6 +1490,7 @@ mod tests {
             shell: false,
             endpoints: EndpointFlags::default(),
             remote_serve: false,
+            mcp: false,
             remotes: Vec::new(),
         };
         let result = execute_with_result(opts, workspace_root.clone()).expect("execute");
@@ -1451,6 +1517,7 @@ mod tests {
             shell: true,
             endpoints: EndpointFlags::default(),
             remote_serve: false,
+            mcp: false,
             remotes: Vec::new(),
         };
         let called = RefCell::new(None::<(String, String)>);
@@ -1501,6 +1568,7 @@ mod tests {
                 ..EndpointFlags::default()
             },
             remote_serve: false,
+            mcp: false,
             remotes: Vec::new(),
         };
         execute_with_result(opts, workspace_root)?;
@@ -1540,6 +1608,7 @@ mod tests {
                 ..EndpointFlags::default()
             },
             remote_serve: false,
+            mcp: false,
             remotes: Vec::new(),
         };
         execute_with_result(opts, workspace_root)?;
@@ -1579,6 +1648,7 @@ mod tests {
                 ..EndpointFlags::default()
             },
             remote_serve: false,
+            mcp: false,
             remotes: Vec::new(),
         };
         let result = execute_with_result(opts, workspace_root)?;
@@ -1626,6 +1696,7 @@ mod tests {
             shell: false,
             endpoints: EndpointFlags::default(),
             remote_serve: false,
+            mcp: false,
             remotes: Vec::new(),
         };
         let err = match execute_with_result(opts, workspace_root) {
@@ -1690,6 +1761,7 @@ mod tests {
             shell: false,
             endpoints: EndpointFlags::default(),
             remote_serve: false,
+            mcp: false,
             remotes: Vec::new(),
         };
         let err = match execute_with_result(opts, workspace_root) {

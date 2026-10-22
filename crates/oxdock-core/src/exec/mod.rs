@@ -7,6 +7,7 @@ mod exit;
 mod fs_ops;
 mod handlers;
 mod io;
+pub mod mcp;
 mod native;
 pub mod remote;
 mod state;
@@ -21,7 +22,7 @@ pub use self::remote::{
     apply_push_symlink,
 };
 
-pub use self::args::{json_to_value, value_to_json};
+pub use self::args::{json_to_value, json_to_value_typed, value_to_json, value_to_json_typed};
 #[cfg(any(test, feature = "test-harness"))]
 pub use self::conformance::assert_module_returns_conformance;
 pub use self::engine::{Engine, EngineOutput};
@@ -43,12 +44,15 @@ pub(crate) use self::handlers::{
 pub use self::io::ExecIo;
 pub use self::io::PipeStream;
 pub use self::io::PushManifestSink;
+pub use self::io::{StreamChunk, StreamHook, TeeStream};
+pub use self::mcp::{McpCallOutput, McpSession};
 pub use self::native::{
     FuncKind, FuncMeta, FuncParam, FunctionRegistry, HostModule, HostRegistration, NativeFn,
     OxDockFn, ParamOption, PreRunCheck, PureFn, PureTable, RecordSchema, builtin_function_metas,
     builtin_function_names, fill_optional_args, required_arity, std_module_table,
 };
 pub use self::state::ExecState;
+pub use self::state::MAX_RUNNING_TASKS;
 pub use self::steps::StepCtx;
 pub use self::typing::{
     Field, LIST_TAG, MAP_TAG, OxDockType, TypeDescriptor, TypeTag, Value, ValuePayload,
@@ -343,7 +347,10 @@ pub fn run_steps_with_manager_with_modules<P: ProcessManager>(
     finish_run(state, process, steps)
 }
 
-fn new_state<P: ProcessManager>(fs: Box<dyn WorkspaceFs>, io: ExecIo) -> Result<ExecState<P>> {
+pub(crate) fn new_state<P: ProcessManager>(
+    fs: Box<dyn WorkspaceFs>,
+    io: ExecIo,
+) -> Result<ExecState<P>> {
     let cwd = fs.root().clone();
     let build_context = fs.build_context().clone();
     let cargo_scratch = reserve_cargo_scratch()?;
@@ -386,6 +393,7 @@ fn new_state<P: ProcessManager>(fs: Box<dyn WorkspaceFs>, io: ExecIo) -> Result<
         active_process: std::sync::Arc::new(std::sync::Mutex::new(None)),
         named_tasks: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         next_task_id: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(1)),
+        live_tasks: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
         inside_async: false,
         keeper_expiry: None,
         cancellable: false,
@@ -434,11 +442,12 @@ fn finish_run<P: ProcessManager>(
         state.io.stdout(),
         assert_windows,
         exact_stdout,
+        None,
     )));
     let stderr = state
         .io
         .stderr()
-        .map(|sink| StreamHandle::Stream(teed_stderr(Some(sink), assert_windows_stderr)));
+        .map(|sink| StreamHandle::Stream(teed_stderr(Some(sink), assert_windows_stderr, None)));
     let mut proc_mgr = process;
     let flow = execute_steps(
         &mut state,

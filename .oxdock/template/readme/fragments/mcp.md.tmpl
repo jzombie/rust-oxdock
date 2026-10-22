@@ -1,0 +1,14 @@
+## MCP hosting
+
+A script can serve its `EXPORT`ed functions as MCP tools instead of
+running linear steps. Build with the feature and pass a script to the
+flag:
+
+```sh
+cargo build -p oxdock --features mcp
+./target/debug/oxdock --mcp tools.oxdock
+```
+
+Each entry serves over stdio JSON-RPC with live reload on file
+change. Client setup, including the OpenCode `opencode.jsonc` entry
+shape, lives in [crates/oxdock-mcp/README.md](./crates/oxdock-mcp/README.md).
