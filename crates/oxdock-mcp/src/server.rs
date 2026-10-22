@@ -241,15 +241,14 @@ impl OxDockHandler {
         let handler = self.clone();
         tokio::spawn(async move {
             // Seed with the live text so the first tick never rebuilds.
-            let mut last: Option<String> =
-                read_guarded(&watch.workspace_root, &watch.script_path).ok();
+            let mut last: Option<String> = read_guarded(&watch.script_path).ok();
             let mut ticker = tokio::time::interval(Duration::from_millis(watch.poll_ms.max(100)));
             loop {
                 ticker.tick().await;
                 // Debounce editors that write in stages (temp file plus
                 // rename): settle before reading so a torn write parses.
                 tokio::time::sleep(Duration::from_millis(100)).await;
-                let text = match read_guarded(&watch.workspace_root, &watch.script_path) {
+                let text = match read_guarded(&watch.script_path) {
                     Ok(text) => text,
                     Err(err) => {
                         eprintln!("mcp reload: cannot read script: {err:#}");
@@ -305,11 +304,13 @@ pub fn session_fs(root: &GuardedPath) -> Result<(Box<dyn WorkspaceFs>, Arc<LazyG
     Ok((Box::new(resolver), hold))
 }
 
-/// Read one workspace file through the guard. The watcher stays on
-/// guarded reads so edits outside the root never load.
-fn read_guarded(root: &GuardedPath, path: &GuardedPath) -> Result<String> {
-    let resolver =
-        PathResolver::new(root.as_path(), root.as_path()).context("guard workspace root")?;
+/// Read one script file through its own guard. Absolute script paths
+/// carry their parent as guard root (`join_script`), which may differ
+/// from the workspace root when the server was launched elsewhere;
+/// rooting the read at the path itself keeps reload working there.
+fn read_guarded(path: &GuardedPath) -> Result<String> {
+    let anchor = path.root();
+    let resolver = PathResolver::new(anchor, anchor).context("guard script root")?;
     resolver.read_to_string(path)
 }
 
