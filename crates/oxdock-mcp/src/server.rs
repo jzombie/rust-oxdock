@@ -13,11 +13,14 @@
 //! serving until a good edit lands.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicUsize, Ordering},
+};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use oxdock_core::{FuncMeta, McpSession, Value, value_to_json};
+use oxdock_core::{FuncMeta, McpSession, StreamChunk, StreamHook, TeeStream, Value, value_to_json};
 use oxdock_fs::{GuardedPath, LazyGuardedTempDir, PathResolver, WorkspaceFs};
 use oxdock_process::DefaultProcessManager;
 use rmcp::{
@@ -30,6 +33,11 @@ use rmcp::{
     },
     service::RequestContext,
 };
+/// Logging/message imports live separately: the notification family is
+/// deprecated by SEP-2577, but it remains the only content-carrying
+/// mid-call channel in this rmcp version (see `stream_note`).
+#[allow(deprecated)]
+use rmcp::model::{LoggingLevel, LoggingMessageNotification, LoggingMessageNotificationParam};
 use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
 
@@ -349,7 +357,7 @@ impl ServerHandler for OxDockHandler {
     async fn call_tool(
         &self,
         request: CallToolRequestParams,
-        _context: RequestContext<RoleServer>,
+        context: RequestContext<RoleServer>,
     ) -> Result<CallToolResponse, McpError> {
         // Host-synthesized status probe: answered from the handler state,
         // never dispatched into the script session.
@@ -395,11 +403,31 @@ impl ServerHandler for OxDockHandler {
         })?;
         let name = tool.name.clone();
         let inner = Arc::clone(&self.inner);
+        // Live stream: default-routed step output forwards as
+        // notifications/message while the blocking call runs. Bounded
+        // channel with try_send: a slow client never blocks script
+        // execution, overflow drops and counts. Explicit WITH_IO
+        // redirections bypass the tee, so redirected bytes stay silent
+        // here exactly as they stay off the terminal outside MCP.
+        let (stream_tx, stream_rx) = std::sync::mpsc::sync_channel::<StreamChunk>(512);
+        let stream_dropped = Arc::new(AtomicUsize::new(0));
+        let hook = StreamHook { tx: stream_tx, dropped: Arc::clone(&stream_dropped) };
+        let peer = context.peer.clone();
+        let rt = tokio::runtime::Handle::current();
+        let stream_tool = tool.name.clone();
+        let forwarder = tokio::task::spawn_blocking(move || {
+            while let Ok(chunk) = stream_rx.recv() {
+                let _ = rt.block_on(peer.send_notification(stream_note(&stream_tool, &chunk)));
+            }
+        });
         let output = tokio::task::spawn_blocking(move || {
             let mut guard = inner
                 .lock()
                 .map_err(|_| anyhow::anyhow!("MCP session lock poisoned during `{name}`"))?;
-            guard.session.call(&name, values)
+            guard.session.set_stream_hook(Some(hook));
+            let result = guard.session.call(&name, values);
+            guard.session.set_stream_hook(None);
+            result
         })
         .await
         .map_err(|err| {
@@ -416,6 +444,11 @@ impl ServerHandler for OxDockHandler {
                 None,
             )
         })?;
+        // Forwarder drains on tx drop (the session closure returned, on
+        // either path). Join so every streamed byte precedes the final
+        // result; then report transit drops, if any.
+        let _ = forwarder.await;
+        let dropped = stream_dropped.load(Ordering::Relaxed);
         let json = value_to_json(&output.value).map_err(|err| {
             McpError::new(
                 rmcp::model::ErrorCode::INTERNAL_ERROR,
@@ -433,11 +466,10 @@ impl ServerHandler for OxDockHandler {
                 None,
             )
         })?];
-        if !output.stdout.is_empty() {
-            content.push(ContentBlock::text(output.stdout));
-        }
-        if !output.stderr.is_empty() {
-            content.push(ContentBlock::text(output.stderr));
+        if dropped > 0 {
+            content.push(ContentBlock::text(format!(
+                "[live stream dropped {dropped} chunk(s) under backpressure]"
+            )));
         }
         let mut result = CallToolResult::success(content);
         result.structured_content = Some(crate::tools::wrap_structured(json));
@@ -506,6 +538,30 @@ impl ServerHandler for OxDockHandler {
         context.peer.set_peer_info(request.clone());
         self.negotiate_initialize(&request)
     }
+}
+
+/// One live output fragment as a `notifications/message`. Logging (not
+/// progress) carries the content: progress needs a client-supplied
+/// token and has no meaningful denominator mid-call, while every
+/// client receives log messages unconditionally. `notifications/message`
+/// is deprecated by SEP-2577 but remains the only content-carrying
+/// mid-call channel in this rmcp version; revisit when a streaming
+/// result body exists.
+#[allow(deprecated)]
+fn stream_note(tool: &str, chunk: &StreamChunk) -> ServerNotification {
+    let (level, text) = match chunk.kind {
+        TeeStream::Stdout => (
+            LoggingLevel::Info,
+            String::from_utf8_lossy(&chunk.bytes).into_owned(),
+        ),
+        TeeStream::Stderr => (
+            LoggingLevel::Warning,
+            String::from_utf8_lossy(&chunk.bytes).into_owned(),
+        ),
+    };
+    let param = LoggingMessageNotificationParam::new(level, serde_json::Value::String(text))
+        .with_logger(tool.to_string());
+    ServerNotification::LoggingMessageNotification(LoggingMessageNotification::new(param))
 }
 
 fn rmcp_tool_for(tool: &McpTool) -> Tool {

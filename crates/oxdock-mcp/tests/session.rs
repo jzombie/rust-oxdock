@@ -2,7 +2,7 @@
 //! drain and truncation, init-semantics proof, and fail-fast validation.
 
 use indoc::indoc;
-use oxdock_core::{Engine, McpSession, Value, parse_script_with_modules_and_exports};
+use oxdock_core::{Engine, McpSession, StreamHook, TeeStream, Value, parse_script_with_modules_and_exports};
 use oxdock_fs::{GuardedPath, PathResolver, WorkspaceFs};
 use oxdock_mcp::{McpServerConfig, init_handler};
 use oxdock_process::default_process_manager;
@@ -99,6 +99,57 @@ fn call_dispatches_math_and_truncates_captures() {
     assert_eq!(one.stdout, two.stdout, "sinks must truncate between calls");
     assert_eq!(one.stdout.matches("hello").count(), 1);
     assert_eq!(one.value.as_str(), Some("x"));
+}
+
+const STREAM_DEMO: &str = indoc! {r#"
+    # Says two lines, then returns. Both lines stream live.
+    FUNC CHATTY() {
+      ECHO "one"
+      ECHO "two"
+      RETURN "done"
+    }
+    # Writes only into a pipe: nothing default-routed, so nothing
+    # streams. Redirected bytes stay silent by construction.
+    FUNC QUIET() {
+      LET $p: PIPE
+      WITH_IO [stdout=$p] ECHO "into pipe"
+      RETURN "done"
+    }
+    EXPORT [CHATTY, QUIET]
+"#};
+
+#[test]
+fn default_routed_output_streams_live_per_write() {
+    let mut session = init_session(STREAM_DEMO);
+    let (tx, rx) = std::sync::mpsc::sync_channel(64);
+    let dropped = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    session.set_stream_hook(Some(StreamHook { tx, dropped: dropped.clone() }));
+    let out = session.call("CHATTY", vec![]).expect("call");
+    session.set_stream_hook(None);
+    assert_eq!(out.value.as_str(), Some("done"));
+    // Final content still carries the full text: streaming adds live
+    // delivery, it does not remove the record.
+    assert!(out.stdout.contains("one") && out.stdout.contains("two"));
+    let chunks: Vec<_> = rx.try_iter().collect();
+    assert!(chunks.len() >= 2, "writes stream as they happen");
+    assert!(chunks.iter().all(|chunk| chunk.kind == TeeStream::Stdout));
+    let streamed: Vec<u8> = chunks.into_iter().flat_map(|chunk| chunk.bytes).collect();
+    assert_eq!(streamed, b"one\ntwo\n");
+    assert_eq!(dropped.load(std::sync::atomic::Ordering::Relaxed), 0);
+}
+
+#[test]
+fn redirected_output_never_streams() {
+    let mut session = init_session(STREAM_DEMO);
+    let (tx, rx) = std::sync::mpsc::sync_channel(64);
+    session.set_stream_hook(Some(StreamHook {
+        tx,
+        dropped: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+    }));
+    let out = session.call("QUIET", vec![]).expect("call");
+    session.set_stream_hook(None);
+    assert_eq!(out.value.as_str(), Some("done"));
+    assert_eq!(rx.try_iter().count(), 0, "redirected bytes must not stream");
 }
 
 #[test]

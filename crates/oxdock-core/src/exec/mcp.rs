@@ -16,7 +16,7 @@ use oxdock_parser::{Expr, ParsedScript};
 use oxdock_process::{CommandStdin, ProcessManager, SharedOutput};
 
 use super::handlers::call_func_value;
-use super::io::{ExecIo, StreamHandle, teed_stderr, teed_stdout};
+use super::io::{ExecIo, StreamHandle, StreamHook, teed_stderr, teed_stdout};
 use super::native::{FuncMeta, HostModule};
 use super::state::ExecState;
 use super::steps::Flow;
@@ -26,7 +26,7 @@ use oxdock_fs::WorkspaceFs;
 
 /// Captured output cap per call. Matches the assertion-capture scale:
 /// larger outputs truncate with a marker instead of breaking framing.
-const MCP_CAPTURE_CAP: usize = 8 * 1024 * 1024;
+const MCP_TAIL_CAP: usize = 64 * 1024;
 
 /// One tool invocation result: the return value plus drained captures.
 #[derive(Debug, Clone)]
@@ -42,8 +42,12 @@ pub struct McpSession<P: ProcessManager> {
     state: ExecState<P>,
     process: P,
     exports: Vec<String>,
-    stdout_buf: Arc<Mutex<Vec<u8>>>,
-    stderr_buf: Arc<Mutex<Vec<u8>>>,
+    stdout_buf: Arc<Mutex<TailRing>>,
+    stderr_buf: Arc<Mutex<TailRing>>,
+    /// Live-stream tap installed by the host per call. `None` outside a
+    /// streaming call; the per-call tees clone it so only default-routed
+    /// bytes stream, never redirected ones.
+    stream_hook: Option<StreamHook>,
 }
 
 impl<P: ProcessManager> McpSession<P> {
@@ -58,8 +62,10 @@ impl<P: ProcessManager> McpSession<P> {
         types: Vec<&'static TypeDescriptor>,
         parsed: &ParsedScript,
     ) -> Result<Self> {
-        let stdout_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::<u8>::new()));
-        let stderr_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let stdout_buf: Arc<Mutex<TailRing>> =
+            Arc::new(Mutex::new(TailRing { buf: Vec::new(), total: 0 }));
+        let stderr_buf: Arc<Mutex<TailRing>> =
+            Arc::new(Mutex::new(TailRing { buf: Vec::new(), total: 0 }));
         let stdout_sink: SharedOutput = stdout_buf.clone();
         let stderr_sink: SharedOutput = stderr_buf.clone();
         let mut io = ExecIo::new();
@@ -89,11 +95,12 @@ impl<P: ProcessManager> McpSession<P> {
             state.io.stdout(),
             assert_windows,
             exact_stdout,
+            None,
         )));
         let stderr = state
             .io
             .stderr()
-            .map(|sink| StreamHandle::Stream(teed_stderr(Some(sink), assert_windows_stderr)));
+            .map(|sink| StreamHandle::Stream(teed_stderr(Some(sink), assert_windows_stderr, None)));
         let mut process = process;
         let stdin = state.io.stdin().into();
         let flow = execute_steps(
@@ -130,12 +137,20 @@ impl<P: ProcessManager> McpSession<P> {
             exports: parsed.exports.clone(),
             stdout_buf,
             stderr_buf,
+            stream_hook: None,
         })
     }
 
     /// Export list in source order.
     pub fn exports(&self) -> &[String] {
         &self.exports
+    }
+
+    /// Install (or clear with `None`) the live-stream tap for the next
+    /// `call`. The host sets this per call around dispatch and clears
+    /// it after; only default-routed bytes stream while installed.
+    pub fn set_stream_hook(&mut self, hook: Option<StreamHook>) {
+        self.stream_hook = hook;
     }
 
     /// Tool metadata for the export list, in source order. Fails fast
@@ -150,8 +165,10 @@ impl<P: ProcessManager> McpSession<P> {
     }
 
     /// Dispatch one exported tool by bare base name with ordered args.
-    /// Arity and type coercion ride the normal call path. Captures
-    /// drain into the result and truncate to zero before returning.
+    /// Arity and type coercion ride the normal call path. Tail rings
+    /// drain into the result and reset to zero before returning, on
+    /// success and on failure alike, so a failed call never pollutes
+    /// the next one. On failure the drained tails ride the error.
     /// Qualified exports (`STD::INT`) answer under their base name;
     /// tool-name duplicates fail at table build, so the match is unique.
     pub fn call(&mut self, base: &str, args: Vec<Value>) -> Result<McpCallOutput> {
@@ -171,16 +188,16 @@ impl<P: ProcessManager> McpSession<P> {
         let assert_windows = Arc::clone(&self.state.assert_windows);
         let assert_windows_stderr = Arc::clone(&self.state.assert_windows_stderr);
         let exact_stdout = Arc::clone(&self.state.exact_stdout);
+        let hook = self.stream_hook.clone();
         let out = Some(StreamHandle::Stream(teed_stdout(
             self.state.io.stdout(),
             assert_windows,
             exact_stdout,
+            hook.clone(),
         )));
-        let err = self
-            .state
-            .io
-            .stderr()
-            .map(|sink| StreamHandle::Stream(teed_stderr(Some(sink), assert_windows_stderr)));
+        let err = self.state.io.stderr().map(|sink| {
+            StreamHandle::Stream(teed_stderr(Some(sink), assert_windows_stderr, hook))
+        });
         let value = {
             let state_ptr: *mut ExecState<P> = &mut self.state;
             let process_ptr: *mut P = &mut self.process;
@@ -191,7 +208,25 @@ impl<P: ProcessManager> McpSession<P> {
                 out,
                 err,
             );
-            call_func_value(&mut ctx, 0, &qualified, &exprs)?
+            match call_func_value(&mut ctx, 0, &qualified, &exprs) {
+                Ok(value) => value,
+                Err(err) => {
+                    // Drain on failure too: the next call must not see
+                    // this call's bytes, and the tails are the diagnosis.
+                    let stdout = capped_drain(&self.stdout_buf);
+                    let stderr = capped_drain(&self.stderr_buf);
+                    let mut msg = format!("{err:#}");
+                    if !stdout.is_empty() {
+                        msg.push_str("\n--- captured stdout ---\n");
+                        msg.push_str(&tail_chars(&stdout, 4096));
+                    }
+                    if !stderr.is_empty() {
+                        msg.push_str("\n--- captured stderr ---\n");
+                        msg.push_str(&tail_chars(&stderr, 4096));
+                    }
+                    return Err(anyhow::anyhow!("{msg}"));
+                }
+            }
         };
         let stdout = capped_drain(&self.stdout_buf);
         let stderr = capped_drain(&self.stderr_buf);
@@ -203,25 +238,72 @@ impl<P: ProcessManager> McpSession<P> {
     }
 }
 
-/// Lock, clone, and truncate a concrete capture buffer.
-fn drain_buf(buf: &Arc<Mutex<Vec<u8>>>) {
-    if let Ok(mut guard) = buf.lock() {
-        guard.clear();
+/// Fixed-size tail ring for MCP stdout/stderr. Never grows: the buffer
+/// holds at most `MCP_TAIL_CAP` bytes no matter how much a tool writes,
+/// and the live stream (not this ring) is how clients see the full
+/// output. The final result carries only the tail, so non-streaming
+/// clients still see how a call ended. `total` records every byte ever
+/// written so the drain can report when the head was dropped.
+/// Reports full consumption: capture is lossy by design, and
+/// backpressure into script execution would risk deadlocking pumps.
+struct TailRing {
+    buf: Vec<u8>,
+    total: u64,
+}
+
+impl std::io::Write for TailRing {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.total += bytes.len() as u64;
+        self.buf.extend_from_slice(bytes);
+        let excess = self.buf.len().saturating_sub(MCP_TAIL_CAP);
+        if excess > 0 {
+            self.buf.drain(..excess);
+        }
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 
-/// Drain a concrete buffer into a lossy string with an 8MiB cap.
-/// Truncates to zero.
-fn capped_drain(buf: &Arc<Mutex<Vec<u8>>>) -> String {
+/// Lock and truncate a tail ring, resetting its total.
+fn drain_buf(buf: &Arc<Mutex<TailRing>>) {
+    if let Ok(mut guard) = buf.lock() {
+        guard.buf.clear();
+        guard.total = 0;
+    }
+}
+
+/// Last `n` chars of `s` on a char boundary. Error messages carry
+/// tails, never whole buffers.
+fn tail_chars(s: &str, n: usize) -> String {
+    if s.chars().count() <= n {
+        return s.to_string();
+    }
+    s.chars().rev().take(n).collect::<Vec<_>>().into_iter().rev().collect()
+}
+
+/// Drain a tail ring into a lossy string. Truncates to zero. When the
+/// tool wrote more than the ring holds, only the tail is returned with
+/// a note naming the dropped head: the live stream (not this string)
+/// is the complete record.
+fn capped_drain(buf: &Arc<Mutex<TailRing>>) -> String {
     let mut text = String::new();
     if let Ok(mut guard) = buf.lock() {
-        let bytes = guard.clone();
-        guard.clear();
-        if bytes.len() > MCP_CAPTURE_CAP {
-            text = String::from_utf8_lossy(&bytes[..MCP_CAPTURE_CAP]).into_owned();
-            text.push_str("\n[truncated]");
+        let ring = std::mem::replace(
+            &mut *guard,
+            TailRing { buf: Vec::new(), total: 0 },
+        );
+        if ring.total > ring.buf.len() as u64 {
+            text = format!(
+                "\n[truncated: showing last {} of {} bytes; full output went to the live stream]",
+                ring.buf.len(),
+                ring.total
+            );
+            text = String::from_utf8_lossy(&ring.buf).into_owned() + &text;
         } else {
-            text = String::from_utf8_lossy(&bytes).into_owned();
+            text = String::from_utf8_lossy(&ring.buf).into_owned();
         }
     }
     text

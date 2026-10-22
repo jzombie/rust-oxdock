@@ -44,6 +44,7 @@ pub(crate) use self::handlers::{
 pub use self::io::ExecIo;
 pub use self::io::PipeStream;
 pub use self::io::PushManifestSink;
+pub use self::io::{StreamChunk, StreamHook, TeeStream};
 pub use self::mcp::{McpCallOutput, McpSession};
 pub use self::native::{
     FuncKind, FuncMeta, FuncParam, FunctionRegistry, HostModule, HostRegistration, NativeFn,
@@ -439,11 +440,12 @@ fn finish_run<P: ProcessManager>(
         state.io.stdout(),
         assert_windows,
         exact_stdout,
+        None,
     )));
     let stderr = state
         .io
         .stderr()
-        .map(|sink| StreamHandle::Stream(teed_stderr(Some(sink), assert_windows_stderr)));
+        .map(|sink| StreamHandle::Stream(teed_stderr(Some(sink), assert_windows_stderr, None)));
     let mut proc_mgr = process;
     let flow = execute_steps(
         &mut state,
