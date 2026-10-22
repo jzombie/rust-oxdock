@@ -102,19 +102,11 @@ impl OxDockHandler {
         Self::from_parts(session, tools, Vec::new(), None, StatusState::initial(""))
     }
 
-    pub(crate) fn from_handler_parts_with_status(
-        session: McpSession<DefaultProcessManager>,
-        metas: Vec<FuncMeta>,
-        docs: &HashMapDoc,
-        holds: Vec<Arc<LazyGuardedTempDir>>,
-        script_text: &str,
-    ) -> Result<Self> {
-        reject_reserved_metas(&metas)?;
-        let tools = build_tool_table(metas, docs)?;
+    pub(crate) fn from_built(built: BuiltInner, script_text: &str) -> Result<Self> {
         Self::from_parts(
-            session,
-            tools,
-            holds,
+            built.session,
+            built.tools,
+            vec![built.hold],
             None,
             StatusState::initial(script_text),
         )
@@ -593,16 +585,17 @@ fn unix_now() -> u64 {
 }
 
 /// One validated rebuild: parse, init the session, derive the table.
-/// Shared by initial load (via `init_handler`) and hot reload.
-struct BuiltInner {
-    session: McpSession<DefaultProcessManager>,
-    tools: Vec<McpTool>,
-    hash: String,
-    hold: Arc<LazyGuardedTempDir>,
+/// The single assembly sequence shared by initial load and hot reload,
+/// so startup and reload cannot drift apart.
+pub(crate) struct BuiltInner {
+    pub(crate) session: McpSession<DefaultProcessManager>,
+    pub(crate) tools: Vec<McpTool>,
+    pub(crate) hash: String,
+    pub(crate) hold: Arc<LazyGuardedTempDir>,
 }
 
 impl OxDockHandler {
-    fn build_inner(
+    pub(crate) fn build_inner(
         script_text: &str,
         modules: Vec<oxdock_core::HostModule<oxdock_process::DefaultProcessManager>>,
         types: Vec<&'static oxdock_core::TypeDescriptor>,
@@ -629,6 +622,7 @@ impl OxDockHandler {
             &parsed,
         )?;
         let metas = session.tool_metas()?;
+        reject_reserved_metas(&metas)?;
         let mut docs: HashMap<String, (String, String)> = HashMap::new();
         for qualified in metas.iter().map(|meta| meta.name.clone()) {
             if let Some(pair) = session.tool_doc(&qualified) {

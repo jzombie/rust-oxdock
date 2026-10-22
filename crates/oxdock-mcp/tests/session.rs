@@ -223,8 +223,7 @@ fn mcp_table_build_hard_fails_on_opaque_host_signature() {
     .expect("session init");
     let metas = session.tool_metas().expect("metas");
     let err = build_tool_table(metas, &HashMap::new())
-        .err()
-        .expect("MCP must hard-fail, never silently skip");
+        .expect_err("MCP must hard-fail, never silently skip");
     let msg = err.to_string();
     assert!(msg.contains("cannot expose MCP tool"), "{msg}");
     assert!(msg.contains("TEXT_TRIM"), "{msg}");

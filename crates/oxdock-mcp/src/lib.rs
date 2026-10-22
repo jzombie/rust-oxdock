@@ -17,10 +17,7 @@ pub use tools::{
     wrap_structured,
 };
 
-use std::collections::HashMap;
-
-use anyhow::{Result, bail};
-use oxdock_core::{Engine, McpSession};
+use anyhow::Result;
 
 /// Parsed script plus the host surface needed to serve it.
 pub struct McpServerConfig {
@@ -43,48 +40,16 @@ pub const WATCH_POLL_MS: u64 = 500;
 
 /// Initialize the session: parse, execute linear steps once, validate
 /// `EXPORT`, and build the rmcp handler. Fails fast on opaque types.
+/// Assembly rides the same [`OxDockHandler::build_inner`] sequence as
+/// hot reload, so startup and reload cannot drift apart.
 pub fn init_handler(config: McpServerConfig) -> Result<OxDockHandler> {
-    let mut engine = Engine::new();
-    for module in &config.modules {
-        engine.register_module(module.clone());
-    }
-    let parsed =
-        oxdock_core::parse_script_with_modules_and_exports(&config.script, engine.module_table())?;
-    if parsed.exports.is_empty() {
-        bail!("no EXPORT entries: add `EXPORT [NAME, ...]` to expose MCP tools");
-    }
-    if parsed
-        .exports
-        .iter()
-        .any(|name| name == server::STATUS_TOOL_NAME)
-    {
-        bail!(
-            "{} is reserved for the host status tool",
-            server::STATUS_TOOL_NAME
-        );
-    }
-    let (fs, hold) = session_fs(&config.workspace_root)?;
-    let session = McpSession::init(
-        fs,
-        oxdock_process::default_process_manager(),
+    let built = OxDockHandler::build_inner(
+        &config.script,
         config.modules.clone(),
         config.types.clone(),
-        &parsed,
+        &config.workspace_root,
     )?;
-    let metas = session.tool_metas()?;
-    let mut docs: HashMap<String, (String, String)> = HashMap::new();
-    for qualified in metas.iter().map(|meta| meta.name.clone()) {
-        if let Some(pair) = session.tool_doc(&qualified) {
-            docs.insert(qualified, pair);
-        }
-    }
-    let handler = OxDockHandler::from_handler_parts_with_status(
-        session,
-        metas,
-        &docs,
-        vec![hold],
-        &config.script,
-    )?;
+    let handler = OxDockHandler::from_built(built, &config.script)?;
     if config.watch {
         Ok(handler.with_watch(WatchConfig {
             script_path: config.script_path,
