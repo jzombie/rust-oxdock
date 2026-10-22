@@ -1101,11 +1101,21 @@ pub(crate) fn to_json_from_value(value: Value) -> Result<Value> {
 }
 
 /// Script values to JSON. Maps stay sorted (the word holds a BTreeMap);
-/// only template-safe shapes survive: STRING, INT, FLOAT, BOOL, LIST,
-/// and MAP. Anything else fails naming the type instead of rendering
+/// only STRING, INT, FLOAT, BOOL, LIST, and MAP survive, plus HANDLE
+/// words, which project as `{"task_id": N}` so task handles cross
+/// JSON boundaries the same shape the typed helpers enforce.
+/// Anything else fails naming the type instead of rendering
 /// a silent empty. Shared by `TO_JSON` and any host bridging values
 /// across a JSON boundary (sentinel payloads, wire frames).
 pub fn value_to_json(value: &Value) -> Result<serde_json::Value> {
+    if let Some(id) = value.as_handle() {
+        let mut map = serde_json::Map::new();
+        map.insert(
+            "task_id".to_string(),
+            serde_json::Value::Number(serde_json::Number::from(id)),
+        );
+        return Ok(serde_json::Value::Object(map));
+    }
     if let Some(map) = value.as_map() {
         return map
             .iter()
@@ -1424,6 +1434,55 @@ pub(crate) fn parse_json_from_value(value: Value) -> Result<Value> {
         bail!("PARSE_JSON expects a STRING, got {}", value.type_name());
     };
     load_json_value(text)
+}
+
+/// Tag-directed JSON decoding for host boundaries. `None` and
+/// non-`HANDLE` tags behave exactly like [`json_to_value`]; a
+/// `Some(TypeTag::Handle)` tag requires the `{"task_id": N}` object
+/// form and rejects anything else naming the shape. Shape errors
+/// (non-object, missing key, surplus keys, zero id) fail here;
+/// unknown ids fail later at task lookup.
+pub fn json_to_value_typed(tag: Option<&TypeTag>, v: serde_json::Value) -> Result<Value> {
+    if !matches!(tag, Some(TypeTag::Handle)) {
+        return Ok(json_to_value(v));
+    }
+    let map = match v {
+        serde_json::Value::Object(map) => map,
+        other => bail!("HANDLE argument must be an object like {{\"task_id\": 7}}, got {other}"),
+    };
+    if map.len() != 1 || !map.contains_key("task_id") {
+        bail!("HANDLE argument must be exactly {{\"task_id\": N}} with no other keys");
+    }
+    let id = match map["task_id"] {
+        serde_json::Value::Number(ref n) => n.as_u64().filter(|id| *id >= 1),
+        _ => None,
+    }
+    .ok_or_else(|| anyhow::anyhow!("HANDLE argument `task_id` must be a positive integer"))?;
+    Ok(Value::handle(id))
+}
+
+/// Tag-directed JSON encoding for host boundaries. `None` and
+/// non-`HANDLE` tags behave exactly like [`value_to_json`]; a
+/// `Some(TypeTag::Handle)` tag projects the id as `{"task_id": N}`
+/// and fails naming the type for anything that is not a handle.
+pub fn value_to_json_typed(tag: Option<&TypeTag>, value: &Value) -> Result<serde_json::Value> {
+    if !matches!(tag, Some(TypeTag::Handle)) {
+        return value_to_json(value);
+    }
+    match value.as_handle() {
+        Some(id) => {
+            let mut map = serde_json::Map::new();
+            map.insert(
+                "task_id".to_string(),
+                serde_json::Value::Number(serde_json::Number::from(id)),
+            );
+            Ok(serde_json::Value::Object(map))
+        }
+        None => bail!(
+            "cannot encode {} as HANDLE; expected a task handle",
+            value.type_name()
+        ),
+    }
 }
 
 /// Convert a `serde_json::Value` to a DSL `Value`. The strict inverse
@@ -2711,7 +2770,13 @@ mod tests {
             .expect("string")
             .to_string();
         assert_eq!(encoded, "{\"a\":[\"x\",true],\"b\":2}\n");
-        assert!(to_json_from_value(Value::handle(1)).is_err());
+        assert_eq!(
+            to_json_from_value(Value::handle(1))
+                .expect("handles project")
+                .as_str()
+                .expect("string"),
+            "{\"task_id\":1}\n"
+        );
     }
 
     #[test]

@@ -13,6 +13,63 @@ use oxdock_pipe::{
 };
 use oxdock_process::{CommandStderr, CommandStdin, CommandStdout};
 
+/// Fan-out writer for background tasks: every default-routed byte goes
+/// to the parent handle exactly as an unwrapped write would, and a copy
+/// lands in the task's tail ring for `TASK_POLL`. Parent semantics are
+/// preserved verbatim (Stream sink, inherited host stdio, OS-pipe bail),
+/// so the only observable difference is the retained copy.
+pub(super) struct TaskTee {
+    parent: Option<StreamHandle>,
+    tails: Arc<Mutex<super::state::TaskTails>>,
+    stream: TeeStream,
+}
+
+impl TaskTee {
+    /// Wrap a worker handle: `None` parent inherits host stdio, matching
+    /// `write_stdout`/`write_stderr` behavior for the unwrapped case.
+    pub(super) fn wrap(
+        parent: Option<StreamHandle>,
+        tails: &Arc<Mutex<super::state::TaskTails>>,
+        stream: TeeStream,
+    ) -> Option<StreamHandle> {
+        Some(StreamHandle::Stream(Arc::new(Mutex::new(Self {
+            parent,
+            tails: Arc::clone(tails),
+            stream,
+        }))))
+    }
+}
+
+impl Write for TaskTee {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match &self.parent {
+            Some(StreamHandle::Stream(writer)) => {
+                if let Ok(mut guard) = writer.lock() {
+                    guard.write_all(buf)?;
+                }
+            }
+            #[cfg(not(miri))]
+            Some(StreamHandle::Os(_)) => {
+                return Err(io::Error::other(
+                    "cannot write DSL output to a live OS pipe",
+                ));
+            }
+            None => match self.stream {
+                TeeStream::Stdout => io::stdout().write_all(buf)?,
+                TeeStream::Stderr => io::stderr().write_all(buf)?,
+            },
+        }
+        if let Ok(mut tails) = self.tails.lock() {
+            tails.push(self.stream, buf);
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Handle-scoped pipe resolution. No central index exists: every method
 /// below takes the `PIPE` value's backend cell, materializing it on first
 /// binding (first-binding-wins under the cell lock) and adapting later

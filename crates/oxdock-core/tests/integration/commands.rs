@@ -2680,6 +2680,27 @@ fn step_kind_exhaustiveness_check() {
 }
 
 // ---------------------------------------------------------------------------
+// Anonymous ASYNC admission control
+// ---------------------------------------------------------------------------
+
+#[test]
+#[cfg_attr(miri, ignore = "spawns real background worker threads")]
+fn anonymous_spawn_storm_hits_concurrency_limit() {
+    use oxdock_core::MAX_RUNNING_TASKS;
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let mut script = String::new();
+    for _ in 0..=MAX_RUNNING_TASKS {
+        script.push_str("ASYNC { SLEEP 30s }\n");
+    }
+    let err = run_script(&root, &script).expect_err("65th anonymous spawn must refuse");
+    assert!(
+        err.to_string().contains("concurrency limit exceeded"),
+        "{err:#}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // CANCEL
 // ---------------------------------------------------------------------------
 

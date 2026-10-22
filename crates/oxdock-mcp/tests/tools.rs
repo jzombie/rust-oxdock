@@ -107,7 +107,6 @@ fn schema_nesting_projects() {
 fn schema_rejects_opaque_types() {
     for tag in [
         TypeTag::Pipe,
-        TypeTag::Handle,
         TypeTag::Duration,
         TypeTag::Path,
         TypeTag::Semaphore,
@@ -119,6 +118,20 @@ fn schema_rejects_opaque_types() {
     assert!(is_json_compatible(&TypeTag::ListOf(Arc::new(TypeTag::Int))));
     assert!(!is_json_compatible(&TypeTag::ListOf(Arc::new(
         TypeTag::Pipe
+    ))));
+}
+
+#[test]
+fn schema_projects_handle_as_task_id_object() {
+    assert!(is_json_compatible(&TypeTag::Handle));
+    let schema = schema_for_tag(&TypeTag::Handle).expect("handle schema");
+    assert_eq!(schema["type"], "object");
+    assert_eq!(schema["properties"]["task_id"]["type"], "integer");
+    assert_eq!(schema["properties"]["task_id"]["minimum"], 1);
+    assert_eq!(schema["required"], json!(["task_id"]));
+    assert_eq!(schema["additionalProperties"], false);
+    assert!(is_json_compatible(&TypeTag::ListOf(Arc::new(
+        TypeTag::Handle
     ))));
 }
 
@@ -144,9 +157,19 @@ fn tool_table_rejects_duplicates_and_opaque() {
     build_tool_table(opaque, &Default::default()).expect_err("opaque params must fail");
 
     let mut returns_pipe = meta("SCRIPT::Q", vec![]);
-    returns_pipe.returns = Some(TypeTag::Handle);
+    returns_pipe.returns = Some(TypeTag::Pipe);
     build_tool_table(vec![returns_pipe], &Default::default())
         .expect_err("opaque returns must fail");
+
+    let mut returns_handle = meta("SCRIPT::H", vec![param("t", TypeTag::Handle)]);
+    returns_handle.returns = Some(TypeTag::Handle);
+    let table = build_tool_table(vec![returns_handle], &Default::default())
+        .expect("handle signatures must serve");
+    assert_eq!(table[0].input_schema["properties"]["t"]["type"], "object");
+    assert_eq!(
+        table[0].output_schema["properties"]["result"]["type"],
+        "object"
+    );
 }
 
 #[test]
@@ -192,6 +215,24 @@ fn map_json_args_orders_and_fills() {
     map_json_args(&params, &json!({"a": 1})).expect_err("missing required must fail");
     map_json_args(&params, &json!({"a": 1, "b": 2, "c": 3})).expect_err("surplus must fail");
     map_json_args(&params, &json!([1, 2])).expect_err("non-object must fail");
+}
+
+#[test]
+fn map_json_args_projects_handles_through_task_id() {
+    use oxdock_mcp::tools::value_to_json_result;
+    let params = vec![param("t", TypeTag::Handle)];
+    let values = map_json_args(&params, &json!({"t": {"task_id": 7}})).expect("handle maps");
+    assert_eq!(values[0].as_handle(), Some(7));
+
+    map_json_args(&params, &json!({"t": 7})).expect_err("bare integer must fail");
+    map_json_args(&params, &json!({"t": {"task_id": 0}})).expect_err("zero id must fail");
+    map_json_args(&params, &json!({"t": {"task_id": 7, "x": 1}}))
+        .expect_err("surplus keys must fail");
+    map_json_args(&params, &json!({"t": {"task_id": "7"}})).expect_err("string id must fail");
+    map_json_args(&params, &json!({})).expect_err("missing handle must fail");
+
+    let back = value_to_json_result(Some(&TypeTag::Handle), &values[0]).expect("round trip");
+    assert_eq!(back, json!({"task_id": 7}));
 }
 
 #[test]

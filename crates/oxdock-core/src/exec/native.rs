@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use oxdock_func_macro::oxdock_func;
+use oxdock_parser::value::HandleValue;
 use oxdock_parser::{
     Field, KEYWORD_INSPECT, SCRIPT_MODULE_NAME, STD_MODULE_NAME, SemaphoreState, Step, TypeTag,
     Value, base_name, qualify, render_structural, split_qualified,
@@ -387,6 +388,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
             Describe::registration(),
             IsTerminal::registration(),
             Eof::registration(),
+            TaskPoll::registration(),
             TextTrim::registration(),
             TextTrimPrefix::registration(),
             TextTrimSuffix::registration(),
@@ -2938,6 +2940,136 @@ fn eof<P: ProcessManager>(
 ) -> Result<Value> {
     let info = cx.state.io.inspect_pipe(&pipe);
     Ok(Value::bool(info.closed && info.buffered == 0))
+}
+
+/// Field table for the `TASK_POLL` result map. Shared by the declared
+/// return tag and the generated schema and reference docs, so the
+/// shape agents see is the shape the builtin builds.
+fn task_poll_result_fields() -> Arc<[Field]> {
+    Arc::from(vec![
+        Field {
+            name: "state".to_string(),
+            ty: TypeTag::String,
+            docs: "Task phase: `running` or `finished`.",
+            optional: false,
+        },
+        Field {
+            name: "ok".to_string(),
+            ty: TypeTag::Bool,
+            docs: "True unless the task failed.",
+            optional: false,
+        },
+        Field {
+            name: "stdout_tail".to_string(),
+            ty: TypeTag::String,
+            docs: "Bounded stdout tail, live while running.",
+            optional: false,
+        },
+        Field {
+            name: "stderr_tail".to_string(),
+            ty: TypeTag::String,
+            docs: "Bounded stderr tail, live while running.",
+            optional: false,
+        },
+        Field {
+            name: "truncated_bytes".to_string(),
+            ty: TypeTag::Int,
+            docs: "Dropped head bytes past the per-stream cap.",
+            optional: false,
+        },
+        Field {
+            name: "exit_code".to_string(),
+            ty: TypeTag::Int,
+            docs: "Process exit code, present once finished.",
+            optional: true,
+        },
+        Field {
+            name: "result".to_string(),
+            ty: TypeTag::Any,
+            docs: "Task `RETURN` value, present on clean finish.",
+            optional: true,
+        },
+        Field {
+            name: "error".to_string(),
+            ty: TypeTag::String,
+            docs: "Failure text, present on failed finish.",
+            optional: true,
+        },
+    ])
+}
+
+/// Poll a background task without consuming it.
+///
+/// Reports the running state, the output tails accumulated so far,
+/// and the final outcome once finished. Repeated polls are safe, and
+/// a later `AWAIT` still joins normally. Polling after `AWAIT` fails
+/// like double-await: the handle is spent.
+///
+/// Map keys: `state` always names the phase (`"running"` or
+/// `"finished"`); `ok` is true unless the task failed; `stdout_tail`
+/// and `stderr_tail` carry bounded output with `truncated_bytes`
+/// counting dropped head bytes. Finished tasks add `exit_code`;
+/// clean finishes add `result`, failed ones add `error` instead.
+#[oxdock_func(returns = TypeTag::Record(task_poll_result_fields()))]
+#[example(
+    name = "running poll",
+    code = r###"
+    # A sleeping task is still running on the first poll.
+    IMPORT [STD]
+    LET $t: HANDLE = ASYNC { SLEEP 30s }
+    LET $m: MAP<state: STRING, ok: BOOL, stdout_tail: STRING, stderr_tail: STRING, truncated_bytes: INT, exit_code?: INT, result?: ANY, error?: STRING> = TASK_POLL($t)
+    ASSERT_EQ $m.state "running"
+    ASSERT_EQ $m.ok true
+    # Clean up the sleeper so the run ends promptly.
+    CANCEL $t
+    "###
+)]
+#[example(
+    name = "finished poll",
+    code = r###"
+    # A finished task reports its value and final tails, then still awaits.
+    IMPORT [STD]
+    LET $t: HANDLE = ASYNC { ECHO "hi"; SLEEP 1s; RETURN "done" }
+    # Do other work while the task runs; poll once it should be done.
+    SLEEP 2s
+    LET $m: MAP<state: STRING, ok: BOOL, stdout_tail: STRING, stderr_tail: STRING, truncated_bytes: INT, exit_code?: INT, result?: ANY, error?: STRING> = TASK_POLL($t)
+    ASSERT_EQ $m.state "finished"
+    ASSERT_EQ $m.result "done"
+    LET $o: STRING = AWAIT $t
+    ASSERT_EQ $o "done"
+    "###
+)]
+fn task_poll<P: ProcessManager>(
+    cx: &mut StepCtx<P>,
+    /// Task handle from ASYNC.
+    task: HandleValue,
+) -> Result<Value> {
+    let entry =
+        super::handlers::resolve_task_entry_by_id(task.0, &format!("TASK_POLL({})", task.0), cx)?;
+    let obs = entry.observe_completion();
+    let (stdout_tail, stderr_tail, dropped) = entry.snapshot_tails();
+    let mut out = BTreeMap::new();
+    out.insert(
+        "state".to_string(),
+        Value::string(if obs.running { "running" } else { "finished" }.to_string()),
+    );
+    out.insert("ok".to_string(), Value::bool(obs.ok));
+    if !obs.running {
+        out.insert("exit_code".to_string(), Value::int(obs.exit_code));
+    }
+    if let Some(result) = obs.result {
+        out.insert("result".to_string(), result);
+    }
+    if !obs.error.is_empty() {
+        out.insert("error".to_string(), Value::string(obs.error));
+    }
+    out.insert("stdout_tail".to_string(), Value::string(stdout_tail));
+    out.insert("stderr_tail".to_string(), Value::string(stderr_tail));
+    out.insert(
+        "truncated_bytes".to_string(),
+        Value::int(dropped.min(i64::MAX as u64) as i64),
+    );
+    Ok(Value::map(out))
 }
 
 fn meta_to_value(meta: &FuncMeta) -> Value {

@@ -424,3 +424,217 @@ fn status_tool_name_is_reserved() {
     "#});
     assert!(init_handler(config).is_err(), "EXPORT MCP_STATUS must fail");
 }
+
+const HANDLE_DEMO: &str = indoc! {r#"
+    IMPORT [STD]
+    # Spawns a sleeper and returns its handle for polling.
+    FUNC SPAWN_SLOW() {
+      LET $t: HANDLE = ASYNC { SLEEP 30s }
+      RETURN $t
+    }
+    # Spawns a fast task and returns its handle for polling.
+    FUNC SPAWN_FAST() {
+      LET $t: HANDLE = ASYNC { ECHO "hi"; RETURN "done" }
+      RETURN $t
+    }
+    # Polls any task handle by value.
+    FUNC POLL_WRAP($t: HANDLE) {
+      RETURN TASK_POLL($t)
+    }
+    EXPORT [SPAWN_SLOW, SPAWN_FAST, POLL_WRAP, STD::TASK_POLL]
+"#};
+
+fn handle_param() -> Vec<oxdock_core::FuncParam> {
+    vec![oxdock_core::FuncParam {
+        name: "task".to_string(),
+        param_type: Some(oxdock_parser::TypeTag::Handle),
+        allowed: None,
+        docs: "",
+        options: None,
+        optional: false,
+    }]
+}
+
+fn poll_once(
+    session: &mut McpSession<oxdock_process::DefaultProcessManager>,
+    id: i64,
+) -> serde_json::Value {
+    let args = oxdock_mcp::tools::map_json_args(
+        &handle_param(),
+        &serde_json::json!({"task": {"task_id": id}}),
+    )
+    .expect("task_id maps");
+    let snap = session.call("POLL_WRAP", args).expect("poll live task");
+    oxdock_mcp::tools::value_to_json_result(None, &snap.value).expect("snapshot json")
+}
+
+fn poll_until_finished(
+    session: &mut McpSession<oxdock_process::DefaultProcessManager>,
+    id: i64,
+) -> serde_json::Value {
+    for _ in 0..200 {
+        let snap = poll_once(session, id);
+        if snap["state"] == "finished" {
+            return snap;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("background task {id} did not finish in time");
+}
+
+#[test]
+fn handle_crosses_the_boundary_as_task_id() {
+    use oxdock_mcp::build_tool_table;
+    use std::collections::HashMap;
+    let mut session = init_session(HANDLE_DEMO);
+    let metas = session.tool_metas().expect("metas");
+    let table = build_tool_table(metas, &HashMap::new()).expect("handle table serves");
+    let names: Vec<String> = table.iter().map(|tool| tool.name.clone()).collect();
+    assert!(names.contains(&"TASK_POLL".to_string()), "{names:?}");
+    let spawn = table
+        .iter()
+        .find(|tool| tool.name == "SPAWN_SLOW")
+        .expect("spawn tool");
+    assert!(
+        spawn.output_schema.is_object(),
+        "handle return has a schema"
+    );
+
+    let out = session.call("SPAWN_SLOW", vec![]).expect("spawn");
+    let id = out.value.as_handle().expect("spawn returns a handle");
+    let wire =
+        oxdock_mcp::tools::value_to_json_result(None, &out.value).expect("untyped projection");
+    assert_eq!(wire, serde_json::json!({"task_id": id}));
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "spawns real background worker threads")]
+fn task_poll_reports_running() {
+    let mut session = init_session(HANDLE_DEMO);
+    let out = session.call("SPAWN_SLOW", vec![]).expect("spawn");
+    let id = out.value.as_handle().expect("spawn returns a handle") as i64;
+
+    let first = poll_once(&mut session, id);
+    assert_eq!(first["state"], "running", "{first}");
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "spawns real background worker threads")]
+fn task_poll_returns_value_and_tail() {
+    let mut session = init_session(HANDLE_DEMO);
+    let out = session.call("SPAWN_FAST", vec![]).expect("spawn");
+    let id = out.value.as_handle().expect("spawn returns a handle") as i64;
+
+    let done = poll_until_finished(&mut session, id);
+    assert_eq!(done["state"], "finished");
+    assert_eq!(done["ok"], true);
+    assert_eq!(done["result"], "done");
+    assert!(
+        done["stdout_tail"]
+            .as_str()
+            .is_some_and(|s| s.contains("hi")),
+        "{done}"
+    );
+
+    let again = poll_once(&mut session, id);
+    assert_eq!(again["state"], "finished", "poll never consumes");
+}
+
+#[test]
+fn task_poll_unknown_id_fails() {
+    let mut session = init_session(HANDLE_DEMO);
+    let args = oxdock_mcp::tools::map_json_args(
+        &handle_param(),
+        &serde_json::json!({"task": {"task_id": 999}}),
+    )
+    .expect("shape ok");
+    let err = session
+        .call("POLL_WRAP", args)
+        .expect_err("unknown id must fail");
+    assert!(err.to_string().contains("not found"), "{err:#}");
+}
+
+#[test]
+fn task_poll_rejects_non_handle() {
+    let mut session = init_session(HANDLE_DEMO);
+    let err = session
+        .call("POLL_WRAP", vec![Value::int(1)])
+        .expect_err("int must fail");
+    assert!(err.to_string().contains("expected HANDLE"), "{err:#}");
+}
+
+const BG_WORKSPACE_DEMO: &str = indoc! {r#"
+    IMPORT [STD]
+    # Detaches a directory read under a workspace switch.
+    FUNC BG_WHERE() {
+      LET $t: HANDLE = ASYNC {
+        WORKSPACE LOCAL
+        LET $d: STRING = CWD
+        RETURN TEXT_TRIM($d)
+      }
+      RETURN $t
+    }
+    EXPORT [BG_WHERE, STD::TASK_POLL]
+"#};
+
+#[test]
+fn async_block_supports_workspace_switch_and_handle_return() {
+    let mut session = init_session(BG_WORKSPACE_DEMO);
+    let out = session.call("BG_WHERE", vec![]).expect("spawn");
+    let id = out.value.as_handle().expect("spawn returns a handle") as i64;
+    let args = oxdock_mcp::tools::map_json_args(
+        &handle_param(),
+        &serde_json::json!({"task": {"task_id": id}}),
+    )
+    .expect("task_id maps");
+    let mut done = serde_json::json!(null);
+    for _ in 0..200 {
+        let snap = session.call("TASK_POLL", args.clone()).expect("poll");
+        let payload =
+            oxdock_mcp::tools::value_to_json_result(None, &snap.value).expect("snapshot json");
+        if payload["state"] == "finished" {
+            done = payload;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(done["state"], "finished", "{done}");
+    assert!(done["result"].as_str().is_some_and(|s| !s.is_empty()));
+}
+
+#[test]
+#[cfg(unix)]
+#[cfg_attr(miri, ignore = "spawns real background worker threads")]
+fn async_block_runs_child_processes() {
+    let mut session = init_session(indoc! {r#"
+        IMPORT [STD]
+        FUNC BG_RUN() {
+          LET $t: HANDLE = ASYNC {
+            LET $o: STRING = RUN ["echo", "bg-hi"]
+            RETURN TEXT_TRIM($o)
+          }
+          RETURN $t
+        }
+        EXPORT [BG_RUN, STD::TASK_POLL]
+    "#});
+    let out = session.call("BG_RUN", vec![]).expect("spawn");
+    let id = out.value.as_handle().expect("spawn returns a handle") as i64;
+    let mut done = serde_json::json!(null);
+    for _ in 0..200 {
+        let args = oxdock_mcp::tools::map_json_args(
+            &handle_param(),
+            &serde_json::json!({"task": {"task_id": id}}),
+        )
+        .expect("task_id maps");
+        let snap = session.call("TASK_POLL", args).expect("poll");
+        let payload =
+            oxdock_mcp::tools::value_to_json_result(None, &snap.value).expect("snapshot json");
+        if payload["state"] == "finished" {
+            done = payload;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert_eq!(done["state"], "finished", "{done}");
+    assert_eq!(done["result"], "bg-hi");
+}

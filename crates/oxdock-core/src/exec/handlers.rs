@@ -22,7 +22,7 @@ use sha2::{Digest, Sha256};
 
 use super::SNAPSHOT_PENDING_DISPLAY;
 use super::fs_ops::{canonical_cwd, copy_entry, hash_path};
-use super::io::{StreamHandle, write_stdout};
+use super::io::{StreamHandle, TaskTee, TeeStream, write_stdout};
 use super::native::FuncBody;
 use super::state::{ExecState, MAX_CALL_DEPTH, TaskPhase};
 use super::steps::{Flow, StepCtx};
@@ -2980,11 +2980,10 @@ pub(crate) fn dispatch_async_block<P: ProcessManager>(
     let body = body.clone();
     // Anonymous workers get an identity up front: the pin walk judges
     // promotion from the worker's perspective, and pipes the worker mints
-    // carry this id as their declaration origin.
-    let worker_task_id = cx
-        .state
-        .next_task_id
-        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    // carry this id as their declaration origin. Allocation runs the
+    // retained-finished sweep so anonymous spawns share the single
+    // capacity gate.
+    let worker_task_id = cx.state.alloc_task_id()?;
     let expiry = pin_async_keepers(cx, &body, worker_task_id)?;
 
     // Fork the execution state for the child thread.
@@ -3025,6 +3024,11 @@ pub(crate) fn dispatch_async_block<P: ProcessManager>(
     // Control flow never crosses the thread boundary: a stray BREAK,
     // CONTINUE, or RETURN becomes a step-numbered error here.
     let join = std::thread::spawn(move || {
+        // Slot guard first: dropping on return or unwind releases the
+        // global live-task count, so the cap tracks threads actually
+        // alive rather than table entries.
+        let _slot =
+            super::state::TaskSlotGuard::new(std::sync::Arc::clone(&forked_state.live_tasks));
         *worker_child.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::thread::current().id());
         let _out_keepalive = out_keepalive;
         let mut child_state = forked_state;
@@ -3860,11 +3864,10 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
     body: &[Step],
     cx: &mut StepCtx<'_, P>,
 ) -> Result<()> {
-    // Generate a unique task ID
-    let task_id = cx
-        .state
-        .next_task_id
-        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    // Generate a unique task ID. Allocation refuses past the live-task
+    // cap, so a spawn storm fails the step loudly instead of wedging
+    // the host.
+    let task_id = cx.state.alloc_task_id()?;
 
     // Pre-allocate keeper handles synchronously on this thread, before the
     // worker exists, so pipes the task produces to (e.g. keeper
@@ -3888,12 +3891,14 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
     let stdin = cx.stdin.clone();
     let expose_stdin = cx.expose_stdin;
     // Tasks share the parent writer: output streams live, exactly like the
-    // main flow. There is no per-task capture sink; a task's *value* (for
-    // `LET $o = AWAIT $t`) travels only through an explicit `RETURN`, like
-    // a function call. Stderr keeps parent wiring. Live pipe backends ride
+    // main flow. A task's *value* (for `LET $o = AWAIT $t`) travels only
+    // through an explicit `RETURN`, like a function call. A copy of every
+    // default-routed byte also lands in the task's tail ring for
+    // `TASK_POLL`. Stderr keeps parent wiring. Live pipe backends ride
     // along the same way, so a REMOTE step in the task keeps streaming.
-    let out = cx.out.clone();
-    let err = cx.err.clone();
+    let tails = std::sync::Arc::new(std::sync::Mutex::new(super::state::TaskTails::new()));
+    let out = TaskTee::wrap(cx.out.clone(), &tails, TeeStream::Stdout);
+    let err = TaskTee::wrap(cx.err.clone(), &tails, TeeStream::Stderr);
     let out_pipe = cx.out_pipe.clone();
     let stdin_pipe = cx.stdin_pipe.clone();
     // Same lifetime hold as the block-task worker: a concurrent drain
@@ -3926,6 +3931,11 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
     let returns_value = call_task.is_some() || body_returns_value(&body);
     let (entry_tx, entry_rx) = std::sync::mpsc::channel::<Arc<super::state::TaskEntry>>();
     let join = std::thread::spawn(move || {
+        // Slot guard first: dropping on return or unwind releases the
+        // global live-task count, so the cap tracks threads actually
+        // alive rather than table entries.
+        let _slot =
+            super::state::TaskSlotGuard::new(std::sync::Arc::clone(&forked_state.live_tasks));
         *worker_child.lock().unwrap_or_else(|e| e.into_inner()) = Some(std::thread::current().id());
         let _out_keepalive = out_keepalive;
         let mut child_state = forked_state;
@@ -4013,8 +4023,8 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
     // Store in named_tasks as a synchronized entry. The handle lives inside
     // the entry so CANCEL can tear it down even under concurrent AWAIT.
     // Published to the child above so tasks store their RETURN value
-    // under the entry lock. Entries carry no output sink: task stdout
-    // streams live to the shared parent writer.
+    // under the entry lock. The entry also owns the tail ring fed by
+    // the worker tee, so TASK_POLL can snapshot output mid-flight.
     {
         let mut named = cx
             .state
@@ -4024,6 +4034,7 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
         let entry = Arc::new(super::state::TaskEntry::new(
             Box::new(handle),
             returns_value,
+            Arc::clone(&tails),
         ));
         named.insert(task_id, Arc::clone(&entry));
         let _ = entry_tx.send(entry);
@@ -4062,8 +4073,9 @@ fn resolve_task_entry<P: ProcessManager>(
 
 /// Resolve a task id to its shared registry entry. Backs single-handle
 /// AWAIT plus the per-member path of LIST AWAIT so double-await and
-/// already-reaped reporting never diverge.
-fn resolve_task_entry_by_id<P: ProcessManager>(
+/// already-reaped reporting never diverge. `TASK_POLL` reuses the same
+/// lookup so deserialized ids resolve without a scope variable.
+pub(crate) fn resolve_task_entry_by_id<P: ProcessManager>(
     task_id: u64,
     label: &str,
     cx: &StepCtx<'_, P>,

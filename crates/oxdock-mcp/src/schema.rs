@@ -46,6 +46,22 @@ pub fn schema_for_tag(tag: &TypeTag) -> Result<Value> {
             Ok(Value::Object(map))
         }
         TypeTag::Any => Ok(Value::Object(Map::new())),
+        TypeTag::Handle => {
+            let mut id = Map::new();
+            id.insert("type".to_string(), Value::String("integer".to_string()));
+            id.insert("minimum".to_string(), Value::Number(1.into()));
+            let mut properties = Map::new();
+            properties.insert("task_id".to_string(), Value::Object(id));
+            let mut map = Map::new();
+            map.insert("type".to_string(), Value::String("object".to_string()));
+            map.insert("properties".to_string(), Value::Object(properties));
+            map.insert(
+                "required".to_string(),
+                Value::Array(vec![Value::String("task_id".to_string())]),
+            );
+            map.insert("additionalProperties".to_string(), Value::Bool(false));
+            Ok(Value::Object(map))
+        }
         TypeTag::ListOf(element) => {
             let mut map = Map::new();
             map.insert("type".to_string(), Value::String("array".to_string()));
@@ -85,7 +101,6 @@ pub fn schema_for_tag(tag: &TypeTag) -> Result<Value> {
             Ok(Value::Object(map))
         }
         TypeTag::Pipe
-        | TypeTag::Handle
         | TypeTag::Duration
         | TypeTag::Path
         | TypeTag::Semaphore
@@ -137,7 +152,8 @@ fn tag_name(tag: &TypeTag) -> String {
 
 /// Whether a tag survives the JSON value boundary. Mirrors the
 /// `value_to_json` accept set plus the shaped containers built from it.
-/// Opaque words return false so callers can fail fast with context.
+/// `HANDLE` projects as `{"task_id": N}`. All other opaque words return
+/// false so callers can fail fast with context.
 pub fn is_json_compatible(tag: &TypeTag) -> bool {
     match tag {
         TypeTag::String
@@ -146,13 +162,13 @@ pub fn is_json_compatible(tag: &TypeTag) -> bool {
         | TypeTag::Bool
         | TypeTag::List
         | TypeTag::Map
-        | TypeTag::Any => true,
+        | TypeTag::Any
+        | TypeTag::Handle => true,
         TypeTag::ListOf(element) => is_json_compatible(element),
         TypeTag::MapOf(values) => is_json_compatible(values),
         TypeTag::Record(fields) => fields.iter().all(|field| is_json_compatible(&field.ty)),
         TypeTag::Union(_, members) => members.iter().all(is_json_compatible),
         TypeTag::Pipe
-        | TypeTag::Handle
         | TypeTag::Duration
         | TypeTag::Path
         | TypeTag::Semaphore

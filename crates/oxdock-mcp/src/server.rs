@@ -15,12 +15,12 @@
 use std::collections::HashMap;
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicUsize, Ordering},
+    atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use oxdock_core::{FuncMeta, McpSession, StreamChunk, StreamHook, TeeStream, Value, value_to_json};
+use oxdock_core::{FuncMeta, McpSession, StreamChunk, StreamHook, TeeStream, Value};
 use oxdock_fs::{GuardedPath, LazyGuardedTempDir, PathResolver, WorkspaceFs};
 use oxdock_process::DefaultProcessManager;
 /// Logging/message imports live separately: the notification family is
@@ -384,6 +384,13 @@ impl ServerHandler for OxDockHandler {
             result.structured_content = Some(crate::tools::wrap_structured(payload));
             return Ok(result.into());
         }
+        // Extracted before the partial move of `arguments` below:
+        // the token borrows the whole request.
+        let progress_token = request.progress_token();
+        let args_json = request
+            .arguments
+            .map(JsonValue::Object)
+            .unwrap_or(JsonValue::Null);
         let tool = self.find(request.name.as_ref()).ok_or_else(|| {
             McpError::new(
                 rmcp::model::ErrorCode::METHOD_NOT_FOUND,
@@ -391,13 +398,6 @@ impl ServerHandler for OxDockHandler {
                 None,
             )
         })?;
-        // Extracted before `arguments` moves below: the token borrow
-        // must precede the partial move.
-        let progress_token = request.progress_token();
-        let args_json = request
-            .arguments
-            .map(JsonValue::Object)
-            .unwrap_or(JsonValue::Null);
         let values: Vec<Value> = map_json_args(&tool.params, &args_json).map_err(|err| {
             McpError::new(
                 rmcp::model::ErrorCode::INVALID_PARAMS,
@@ -422,6 +422,14 @@ impl ServerHandler for OxDockHandler {
         let peer = context.peer.clone();
         let rt = tokio::runtime::Handle::current();
         let stream_tool = tool.name.clone();
+        // The call may return while background workers still hold
+        // stream senders (detached ASYNC tasks outlive the call).
+        // The forwarder must stop then: it forwards live bytes only,
+        // and the finished result carries no replay. `done` breaks the
+        // wait; without it the join below would stall until the last
+        // worker exits, and every detached call would time out.
+        let done = Arc::new(AtomicBool::new(false));
+        let done_write = Arc::clone(&done);
         // Standards-first streaming: a client-supplied progress token
         // addresses progress notifications (not deprecated, content in
         // `message`, byte count as progress). Without a token there is
@@ -430,40 +438,14 @@ impl ServerHandler for OxDockHandler {
         // the best available channel; when rmcp removes the deprecated
         // family, only the fallback branch goes with it. No fork.
         let forwarder = tokio::task::spawn_blocking(move || {
-            // Frame coalescing: stage bytes per stream and flush one
-            // notification per batch. Same bytes, far fewer envelopes.
-            const COALESCE_CAP: usize = 4096;
-            const COALESCE_IDLE: Duration = Duration::from_millis(50);
-            let mut bytes_so_far: u64 = 0;
-            let mut coal = Coalescer::new(COALESCE_CAP);
-            let send_batch = |tool: &str,
-                              token: Option<&rmcp::model::ProgressToken>,
-                              total: u64,
-                              batch: StreamChunk| {
-                let note = stream_notification(tool, token, total, &batch);
+            let send_batch = |total: u64, batch: StreamChunk| {
+                let note =
+                    stream_notification(&stream_tool, progress_token.as_ref(), total, &batch);
                 // Best effort: a gone client fails sends until the call
                 // ends and the channel closes; the thread then exits.
                 let _ = rt.block_on(peer.send_notification(note));
             };
-            loop {
-                match stream_rx.recv_timeout(COALESCE_IDLE) {
-                    Ok(chunk) => {
-                        bytes_so_far += chunk.bytes.len() as u64;
-                        for batch in coal.push(chunk.kind, &chunk.bytes) {
-                            send_batch(&stream_tool, progress_token.as_ref(), bytes_so_far, batch);
-                        }
-                    }
-                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                        for batch in coal.flush() {
-                            send_batch(&stream_tool, progress_token.as_ref(), bytes_so_far, batch);
-                        }
-                    }
-                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-                }
-            }
-            for batch in coal.flush() {
-                send_batch(&stream_tool, progress_token.as_ref(), bytes_so_far, batch);
-            }
+            run_forwarder(stream_rx, &done_write, send_batch);
         });
         let output = tokio::task::spawn_blocking(move || {
             let mut guard = inner
@@ -472,6 +454,10 @@ impl ServerHandler for OxDockHandler {
             guard.session.set_stream_hook(Some(hook));
             let result = guard.session.call(&name, values);
             guard.session.set_stream_hook(None);
+            // The call is done: stop the forwarder even if detached
+            // workers still hold senders. Late bytes stay in the
+            // bounded channel and drop there, counted, never blocking.
+            done.store(true, Ordering::SeqCst);
             result
         })
         .await
@@ -489,21 +475,22 @@ impl ServerHandler for OxDockHandler {
                 None,
             )
         })?;
-        // Forwarder drains on tx drop (the session closure returned, on
-        // either path). Join so every streamed byte precedes the final
-        // result; then report transit drops, if any.
+        // The call is done and the forwarder was told to stop: join
+        // so every streamed byte precedes the final result; then
+        // report transit drops, if any.
         let _ = forwarder.await;
         let dropped = stream_dropped.load(Ordering::Relaxed);
-        let json = value_to_json(&output.value).map_err(|err| {
-            McpError::new(
-                rmcp::model::ErrorCode::INTERNAL_ERROR,
-                format!(
-                    "MCP tool `{}` returned an unserializable value: {err:#}",
-                    tool.name
-                ),
-                None,
-            )
-        })?;
+        let json = crate::tools::value_to_json_result(tool.returns.as_ref(), &output.value)
+            .map_err(|err| {
+                McpError::new(
+                    rmcp::model::ErrorCode::INTERNAL_ERROR,
+                    format!(
+                        "MCP tool `{}` returned an unserializable value: {err:#}",
+                        tool.name
+                    ),
+                    None,
+                )
+            })?;
         let mut content = vec![ContentBlock::json(&json).map_err(|err| {
             McpError::new(
                 rmcp::model::ErrorCode::INTERNAL_ERROR,
@@ -683,6 +670,52 @@ impl Coalescer {
     }
 }
 
+/// Pump the live-stream channel until the call ends or all senders
+/// drop. Coalesces per stream and emits ready batches with a running
+/// byte total, exactly like the inline loop it replaces. Exit is
+/// non-blocking in both directions: `done` stops the wait even with
+/// live senders (detached workers outlive the call), and queued
+/// chunks still drain first so nothing that arrived is lost. Plain
+/// disconnect still terminates the same way.
+fn run_forwarder(
+    rx: std::sync::mpsc::Receiver<StreamChunk>,
+    done: &AtomicBool,
+    mut emit: impl FnMut(u64, StreamChunk),
+) {
+    const COALESCE_CAP: usize = 4096;
+    const COALESCE_IDLE: Duration = Duration::from_millis(50);
+    let mut bytes_so_far: u64 = 0;
+    let mut coal = Coalescer::new(COALESCE_CAP);
+    loop {
+        if done.load(Ordering::Relaxed) {
+            for chunk in rx.try_iter() {
+                bytes_so_far += chunk.bytes.len() as u64;
+                for batch in coal.push(chunk.kind, &chunk.bytes) {
+                    emit(bytes_so_far, batch);
+                }
+            }
+            break;
+        }
+        match rx.recv_timeout(COALESCE_IDLE) {
+            Ok(chunk) => {
+                bytes_so_far += chunk.bytes.len() as u64;
+                for batch in coal.push(chunk.kind, &chunk.bytes) {
+                    emit(bytes_so_far, batch);
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                for batch in coal.flush() {
+                    emit(bytes_so_far, batch);
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+        }
+    }
+    for batch in coal.flush() {
+        emit(bytes_so_far, batch);
+    }
+}
+
 fn rmcp_tool_for(tool: &McpTool) -> Tool {
     let schema_map = match &tool.input_schema {
         JsonValue::Object(map) => map.clone(),
@@ -719,6 +752,7 @@ fn status_tool() -> McpTool {
         input_schema,
         output_schema: output_schema_for(&status_meta()).unwrap_or(JsonValue::Object(serde_json::Map::new())),
         params: Vec::new(),
+        returns: None,
     }
 }
 
@@ -894,5 +928,96 @@ mod tests {
         assert_eq!(drained.len(), 1);
         assert_eq!(drained[0].kind, TeeStream::Stderr);
         assert_eq!(drained[0].bytes, b"err");
+    }
+
+    /// Run the forwarder on its own thread and report completion
+    /// through a oneshot. Joining the thread directly would hang the
+    /// whole suite if the loop ever stops terminating, so every
+    /// forwarder test fails fast instead.
+    fn run_forwarder_async(
+        rx: std::sync::mpsc::Receiver<StreamChunk>,
+        done: Arc<AtomicBool>,
+        collected: Arc<Mutex<Vec<(u64, StreamChunk)>>>,
+    ) -> std::sync::mpsc::Receiver<()> {
+        let (over_tx, over_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            run_forwarder(rx, &done, |total, batch| {
+                collected
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push((total, batch));
+            });
+            let _ = over_tx.send(());
+        });
+        over_rx
+    }
+
+    fn collected_bytes(collected: &Arc<Mutex<Vec<(u64, StreamChunk)>>>) -> Vec<u8> {
+        collected
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .flat_map(|(_, chunk)| chunk.bytes.clone())
+            .collect()
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "spawns real OS threads around blocking channel waits")]
+    fn forwarder_exits_on_done_with_live_sender() {
+        // Regression test for detached calls hanging the tools/call
+        // response: the worker thread holds a sender for the whole
+        // run, so only the done flag can release the join.
+        let (tx, rx) = std::sync::mpsc::sync_channel::<StreamChunk>(512);
+        let done = Arc::new(AtomicBool::new(false));
+        let collected = Arc::new(Mutex::new(Vec::new()));
+        let over = run_forwarder_async(rx, Arc::clone(&done), Arc::clone(&collected));
+        tx.send(chunk(TeeStream::Stdout, b"hi"))
+            .expect("channel open");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if !collected_bytes(&collected).is_empty() || std::time::Instant::now() > deadline {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(collected_bytes(&collected), b"hi", "live bytes forward");
+        // The sender stays alive on purpose from here on: only `done`
+        // may stop the loop, never the channel.
+        done.store(true, Ordering::SeqCst);
+        over.recv_timeout(std::time::Duration::from_secs(5))
+            .expect("forwarder must exit on done with live sender");
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "spawns real OS threads around blocking channel waits")]
+    fn forwarder_drains_queued_chunks_before_done_exit() {
+        // Chunks already queued when done fires must still be
+        // delivered: the flag stops waiting, never drops buffered
+        // bytes.
+        let (tx, rx) = std::sync::mpsc::sync_channel::<StreamChunk>(512);
+        for word in [b"one".as_slice(), b"two".as_slice(), b"three".as_slice()] {
+            tx.send(chunk(TeeStream::Stdout, word)).expect("buffered");
+        }
+        drop(tx);
+        let done = Arc::new(AtomicBool::new(true));
+        let collected = Arc::new(Mutex::new(Vec::new()));
+        let over = run_forwarder_async(rx, done, Arc::clone(&collected));
+        over.recv_timeout(std::time::Duration::from_secs(5))
+            .expect("forwarder must drain then exit");
+        assert_eq!(collected_bytes(&collected), b"onetwothree");
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore = "spawns real OS threads around blocking channel waits")]
+    fn forwarder_exits_on_disconnect() {
+        // No chunks, no done flag, sender dropped: classic idle exit.
+        let (tx, rx) = std::sync::mpsc::sync_channel::<StreamChunk>(512);
+        drop(tx);
+        let done = Arc::new(AtomicBool::new(false));
+        let collected = Arc::new(Mutex::new(Vec::new()));
+        let over = run_forwarder_async(rx, done, Arc::clone(&collected));
+        over.recv_timeout(std::time::Duration::from_secs(5))
+            .expect("forwarder must exit on disconnect");
+        assert!(collected_bytes(&collected).is_empty());
     }
 }

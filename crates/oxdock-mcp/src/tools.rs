@@ -7,7 +7,10 @@
 use std::collections::{BTreeMap, HashSet};
 
 use anyhow::{Result, bail};
-use oxdock_core::{FuncMeta, FuncParam, Value, fill_optional_args, json_to_value};
+use oxdock_core::{
+    FuncMeta, FuncParam, TypeTag, Value, fill_optional_args, json_to_value_typed,
+    value_to_json_typed,
+};
 use serde_json::{Map, Value as JsonValue};
 
 use crate::schema::{is_json_compatible, schema_for_tag};
@@ -28,6 +31,9 @@ pub struct McpTool {
     pub output_schema: JsonValue,
     /// Parameter table in declaration order, for arg mapping.
     pub params: Vec<FuncParam>,
+    /// Declared return tag, for result projection. `None` renders
+    /// through the untyped boundary.
+    pub returns: Option<TypeTag>,
 }
 
 /// Build the servable tool table from exported metas and script docs.
@@ -51,6 +57,7 @@ pub fn build_tool_table(metas: Vec<FuncMeta>, docs: &HashMapDoc) -> Result<Vec<M
             input_schema,
             output_schema,
             params,
+            returns: meta.returns.clone(),
         });
     }
     Ok(out)
@@ -186,7 +193,10 @@ pub fn map_json_args(params: &[FuncParam], args: &JsonValue) -> Result<Vec<Value
     let mut values = Vec::with_capacity(params.len());
     for param in params {
         match object.get(&param.name) {
-            Some(json) => values.push(json_to_value(json.clone())),
+            Some(json) => values.push(json_to_value_typed(
+                param.param_type.as_ref(),
+                json.clone(),
+            )?),
             None => {
                 if param.optional {
                     values.push(Value::map(BTreeMap::new()));
@@ -212,7 +222,9 @@ pub fn map_json_args(params: &[FuncParam], args: &JsonValue) -> Result<Vec<Value
     Ok(fill_optional_args(params, values))
 }
 
-/// Serialize a return `Value` to JSON. Opaque words fail naming the type.
-pub fn value_to_json_result(value: &Value) -> Result<JsonValue> {
-    oxdock_core::value_to_json(value)
+/// Serialize a return `Value` to JSON through the declared return
+/// tag. `HANDLE` projects as `{"task_id": N}`; every other tag rides
+/// the untyped boundary. Opaque words fail naming the type.
+pub fn value_to_json_result(tag: Option<&TypeTag>, value: &Value) -> Result<JsonValue> {
+    value_to_json_typed(tag, value)
 }
