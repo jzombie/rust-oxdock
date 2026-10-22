@@ -23,21 +23,22 @@ use anyhow::{Context, Result};
 use oxdock_core::{FuncMeta, McpSession, StreamChunk, StreamHook, TeeStream, Value, value_to_json};
 use oxdock_fs::{GuardedPath, LazyGuardedTempDir, PathResolver, WorkspaceFs};
 use oxdock_process::DefaultProcessManager;
-use rmcp::{
-    ErrorData as McpError, Peer, RoleServer, ServerHandler,
-    model::{
-        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, GetPromptResponse,
-        InitializeRequestParams, InitializeResult, ListPromptsResult, ListResourceTemplatesResult,
-        ListResourcesResult, ListToolsResult, PaginatedRequestParams, ReadResourceRequestParams,
-        ServerNotification, Tool, ToolListChangedNotification,
-    },
-    service::RequestContext,
-};
 /// Logging/message imports live separately: the notification family is
 /// deprecated by SEP-2577, but it remains the only content-carrying
 /// mid-call channel in this rmcp version (see `stream_note`).
 #[allow(deprecated)]
 use rmcp::model::{LoggingLevel, LoggingMessageNotification, LoggingMessageNotificationParam};
+use rmcp::{
+    ErrorData as McpError, Peer, RoleServer, ServerHandler,
+    model::{
+        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, GetPromptResponse,
+        InitializeRequestParams, InitializeResult, ListPromptsResult, ListResourceTemplatesResult,
+        ListResourcesResult, ListToolsResult, PaginatedRequestParams, ProgressNotification,
+        ProgressNotificationParam, ReadResourceRequestParams, RequestParamsMeta,
+        ServerNotification, Tool, ToolListChangedNotification,
+    },
+    service::RequestContext,
+};
 use serde_json::Value as JsonValue;
 use sha2::{Digest, Sha256};
 
@@ -390,6 +391,9 @@ impl ServerHandler for OxDockHandler {
                 None,
             )
         })?;
+        // Extracted before `arguments` moves below: the token borrow
+        // must precede the partial move.
+        let progress_token = request.progress_token();
         let args_json = request
             .arguments
             .map(JsonValue::Object)
@@ -411,13 +415,54 @@ impl ServerHandler for OxDockHandler {
         // here exactly as they stay off the terminal outside MCP.
         let (stream_tx, stream_rx) = std::sync::mpsc::sync_channel::<StreamChunk>(512);
         let stream_dropped = Arc::new(AtomicUsize::new(0));
-        let hook = StreamHook { tx: stream_tx, dropped: Arc::clone(&stream_dropped) };
+        let hook = StreamHook {
+            tx: stream_tx,
+            dropped: Arc::clone(&stream_dropped),
+        };
         let peer = context.peer.clone();
         let rt = tokio::runtime::Handle::current();
         let stream_tool = tool.name.clone();
+        // Standards-first streaming: a client-supplied progress token
+        // addresses progress notifications (not deprecated, content in
+        // `message`, byte count as progress). Without a token there is
+        // nothing to address progress to, so chunks fall back to
+        // notifications/message. Each chunk goes out exactly once, on
+        // the best available channel; when rmcp removes the deprecated
+        // family, only the fallback branch goes with it. No fork.
         let forwarder = tokio::task::spawn_blocking(move || {
-            while let Ok(chunk) = stream_rx.recv() {
-                let _ = rt.block_on(peer.send_notification(stream_note(&stream_tool, &chunk)));
+            // Frame coalescing: stage bytes per stream and flush one
+            // notification per batch. Same bytes, far fewer envelopes.
+            const COALESCE_CAP: usize = 4096;
+            const COALESCE_IDLE: Duration = Duration::from_millis(50);
+            let mut bytes_so_far: u64 = 0;
+            let mut coal = Coalescer::new(COALESCE_CAP);
+            let send_batch = |tool: &str,
+                              token: Option<&rmcp::model::ProgressToken>,
+                              total: u64,
+                              batch: StreamChunk| {
+                let note = stream_notification(tool, token, total, &batch);
+                // Best effort: a gone client fails sends until the call
+                // ends and the channel closes; the thread then exits.
+                let _ = rt.block_on(peer.send_notification(note));
+            };
+            loop {
+                match stream_rx.recv_timeout(COALESCE_IDLE) {
+                    Ok(chunk) => {
+                        bytes_so_far += chunk.bytes.len() as u64;
+                        for batch in coal.push(chunk.kind, &chunk.bytes) {
+                            send_batch(&stream_tool, progress_token.as_ref(), bytes_so_far, batch);
+                        }
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        for batch in coal.flush() {
+                            send_batch(&stream_tool, progress_token.as_ref(), bytes_so_far, batch);
+                        }
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+            }
+            for batch in coal.flush() {
+                send_batch(&stream_tool, progress_token.as_ref(), bytes_so_far, batch);
             }
         });
         let output = tokio::task::spawn_blocking(move || {
@@ -540,15 +585,26 @@ impl ServerHandler for OxDockHandler {
     }
 }
 
-/// One live output fragment as a `notifications/message`. Logging (not
-/// progress) carries the content: progress needs a client-supplied
-/// token and has no meaningful denominator mid-call, while every
-/// client receives log messages unconditionally. `notifications/message`
-/// is deprecated by SEP-2577 but remains the only content-carrying
-/// mid-call channel in this rmcp version; revisit when a streaming
-/// result body exists.
+/// One live output fragment as a client notification. Progress first
+/// when the request carried a token (standards-clean, content in
+/// `message`, byte count as progress, no total since the length is
+/// unknowable mid-run); notifications/message fallback otherwise.
+/// `notifications/message` is deprecated by SEP-2577 but remains the
+/// only content-carrying mid-call channel for token-less clients in
+/// this rmcp version; only the fallback branch depends on it.
 #[allow(deprecated)]
-fn stream_note(tool: &str, chunk: &StreamChunk) -> ServerNotification {
+fn stream_notification(
+    tool: &str,
+    token: Option<&rmcp::model::ProgressToken>,
+    bytes_so_far: u64,
+    chunk: &StreamChunk,
+) -> ServerNotification {
+    let text = String::from_utf8_lossy(&chunk.bytes).into_owned();
+    if let Some(token) = token {
+        let param =
+            ProgressNotificationParam::new(token.clone(), bytes_so_far as f64).with_message(text);
+        return ServerNotification::ProgressNotification(ProgressNotification::new(param));
+    }
     let (level, text) = match chunk.kind {
         TeeStream::Stdout => (
             LoggingLevel::Info,
@@ -562,6 +618,69 @@ fn stream_note(tool: &str, chunk: &StreamChunk) -> ServerNotification {
     let param = LoggingMessageNotificationParam::new(level, serde_json::Value::String(text))
         .with_logger(tool.to_string());
     ServerNotification::LoggingMessageNotification(LoggingMessageNotification::new(param))
+}
+
+/// Frame coalescer: stages bytes per stream, emits ready batches.
+/// Same bytes, fewer envelopes. Bounded and constant: two `cap`-byte
+/// stagers, flushed on fill, idle timeout, stream switch, and drain.
+/// Drop accounting lives upstream at ingress, untouched by batching.
+struct Coalescer {
+    out: Vec<u8>,
+    err: Vec<u8>,
+    cap: usize,
+}
+
+impl Coalescer {
+    fn new(cap: usize) -> Self {
+        Self {
+            out: Vec::new(),
+            err: Vec::new(),
+            cap,
+        }
+    }
+
+    /// Stage one write; returns batches ready to send now, in order.
+    /// A stream switch flushes the other side first so interleaving
+    /// stays faithful; a fill flushes the writer's own stage first.
+    fn push(&mut self, kind: TeeStream, bytes: &[u8]) -> Vec<StreamChunk> {
+        let mut ready = Vec::new();
+        let (own, other_kind, other) = match kind {
+            TeeStream::Stdout => (&mut self.out, TeeStream::Stderr, &mut self.err),
+            TeeStream::Stderr => (&mut self.err, TeeStream::Stdout, &mut self.out),
+        };
+        if !other.is_empty() {
+            ready.push(StreamChunk {
+                kind: other_kind,
+                bytes: std::mem::take(other),
+            });
+        }
+        if own.len() + bytes.len() > self.cap && !own.is_empty() {
+            ready.push(StreamChunk {
+                kind,
+                bytes: std::mem::take(own),
+            });
+        }
+        own.extend_from_slice(bytes);
+        ready
+    }
+
+    /// Drain both stagers, stdout then stderr. Empty stages emit nothing.
+    fn flush(&mut self) -> Vec<StreamChunk> {
+        let mut ready = Vec::new();
+        if !self.out.is_empty() {
+            ready.push(StreamChunk {
+                kind: TeeStream::Stdout,
+                bytes: std::mem::take(&mut self.out),
+            });
+        }
+        if !self.err.is_empty() {
+            ready.push(StreamChunk {
+                kind: TeeStream::Stderr,
+                bytes: std::mem::take(&mut self.err),
+            });
+        }
+        ready
+    }
 }
 
 fn rmcp_tool_for(tool: &McpTool) -> Tool {
@@ -698,3 +817,82 @@ impl OxDockHandler {
 
 /// Script docs keyed by qualified name, for handler construction.
 pub type DocsMap = HashMap<String, (String, String)>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rmcp::model::{NumberOrString, ProgressToken};
+
+    fn chunk(kind: TeeStream, bytes: &[u8]) -> StreamChunk {
+        StreamChunk {
+            kind,
+            bytes: bytes.to_vec(),
+        }
+    }
+
+    #[test]
+    fn token_present_prefers_progress_with_content() {
+        let token = ProgressToken(NumberOrString::Number(7));
+        let note = stream_notification("TOOL", Some(&token), 42, &chunk(TeeStream::Stdout, b"hi"));
+        let ServerNotification::ProgressNotification(progress) = note else {
+            panic!("expected progress notification, got something else");
+        };
+        assert_eq!(progress.params.progress, 42.0);
+        assert_eq!(progress.params.message.as_deref(), Some("hi"));
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn token_absent_falls_back_to_logging_message() {
+        let note = stream_notification("TOOL", None, 42, &chunk(TeeStream::Stderr, b"oops"));
+        let ServerNotification::LoggingMessageNotification(log) = note else {
+            panic!("expected logging notification, got something else");
+        };
+        assert_eq!(log.params.level, LoggingLevel::Warning);
+        assert_eq!(log.params.logger.as_deref(), Some("TOOL"));
+        assert_eq!(
+            log.params.data,
+            serde_json::Value::String("oops".to_string())
+        );
+    }
+
+    #[test]
+    fn coalescer_batches_small_writes_and_flushes_on_drain() {
+        let mut coal = Coalescer::new(4096);
+        assert!(coal.push(TeeStream::Stdout, b"tick ").is_empty());
+        assert!(coal.push(TeeStream::Stdout, b"one").is_empty());
+        let ready = coal.push(TeeStream::Stdout, b"\n");
+        assert!(ready.is_empty(), "under cap: nothing emitted yet");
+        let drained = coal.flush();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].kind, TeeStream::Stdout);
+        assert_eq!(drained[0].bytes, b"tick one\n");
+        assert!(coal.flush().is_empty(), "drained stays drained");
+    }
+
+    #[test]
+    fn coalescer_splits_at_cap_and_keeps_stream_attribution() {
+        let mut coal = Coalescer::new(8);
+        assert!(coal.push(TeeStream::Stdout, b"12345678").is_empty());
+        let ready = coal.push(TeeStream::Stdout, b"more");
+        assert_eq!(ready.len(), 1);
+        assert_eq!(ready[0].bytes, b"12345678");
+        let drained = coal.flush();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].bytes, b"more");
+    }
+
+    #[test]
+    fn coalescer_flushes_other_stream_first_on_switch() {
+        let mut coal = Coalescer::new(4096);
+        assert!(coal.push(TeeStream::Stdout, b"out").is_empty());
+        let ready = coal.push(TeeStream::Stderr, b"err");
+        assert_eq!(ready.len(), 1, "switch flushes the waiting side first");
+        assert_eq!(ready[0].kind, TeeStream::Stdout);
+        assert_eq!(ready[0].bytes, b"out");
+        let drained = coal.flush();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].kind, TeeStream::Stderr);
+        assert_eq!(drained[0].bytes, b"err");
+    }
+}

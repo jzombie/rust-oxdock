@@ -1645,7 +1645,10 @@ pub(crate) fn expand_string<P: ProcessManager>(
 /// from `\$var` at this stage (`expand_string` already collapsed `\\`), so it
 /// also yields a literal `$var`; prefer `{{ $var }}`-adjacent forms when a
 /// literal backslash must precede an interpolated value.
- pub(crate) fn expand_dsl_vars<P: ProcessManager>(input: &str, state: &ExecState<P>) -> anyhow::Result<String> {
+pub(crate) fn expand_dsl_vars<P: ProcessManager>(
+    input: &str,
+    state: &ExecState<P>,
+) -> anyhow::Result<String> {
     let mut output = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
     while let Some(c) = chars.next() {

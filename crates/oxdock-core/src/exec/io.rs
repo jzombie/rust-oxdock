@@ -518,7 +518,10 @@ impl Write for TeeWriter {
         // overflow drops and counts. Redirected bytes never reach this
         // tee, so explicit `WITH_IO` stays silent by construction.
         if let Some(hook) = &self.hook {
-            let chunk = StreamChunk { kind: self.stream, bytes: buf.to_vec() };
+            let chunk = StreamChunk {
+                kind: self.stream,
+                bytes: buf.to_vec(),
+            };
             if hook.tx.try_send(chunk).is_err() {
                 hook.dropped
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -799,7 +802,10 @@ mod tests {
             stream,
             windows: Arc::new(Mutex::new(HashMap::new())),
             exact: Arc::new(Mutex::new(HashMap::new())),
-            hook: Some(StreamHook { tx, dropped: dropped.clone() }),
+            hook: Some(StreamHook {
+                tx,
+                dropped: dropped.clone(),
+            }),
         };
         (tee, rx, dropped, vec)
     }
@@ -821,7 +827,8 @@ mod tests {
     fn full_channel_drops_and_counts_without_blocking() {
         let (mut tee, rx, dropped, _sink) = tee_with_hook(TeeStream::Stdout, 1);
         tee.write_all(b"first\n").expect("write");
-        tee.write_all(b"second\n").expect("write must not block on full");
+        tee.write_all(b"second\n")
+            .expect("write must not block on full");
         assert_eq!(dropped.load(std::sync::atomic::Ordering::Relaxed), 1);
         let kept = rx.try_recv().expect("first chunk kept");
         assert_eq!(kept.bytes, b"first\n");

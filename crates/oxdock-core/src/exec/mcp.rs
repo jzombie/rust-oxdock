@@ -62,10 +62,14 @@ impl<P: ProcessManager> McpSession<P> {
         types: Vec<&'static TypeDescriptor>,
         parsed: &ParsedScript,
     ) -> Result<Self> {
-        let stdout_buf: Arc<Mutex<TailRing>> =
-            Arc::new(Mutex::new(TailRing { buf: Vec::new(), total: 0 }));
-        let stderr_buf: Arc<Mutex<TailRing>> =
-            Arc::new(Mutex::new(TailRing { buf: Vec::new(), total: 0 }));
+        let stdout_buf: Arc<Mutex<TailRing>> = Arc::new(Mutex::new(TailRing {
+            buf: Vec::new(),
+            total: 0,
+        }));
+        let stderr_buf: Arc<Mutex<TailRing>> = Arc::new(Mutex::new(TailRing {
+            buf: Vec::new(),
+            total: 0,
+        }));
         let stdout_sink: SharedOutput = stdout_buf.clone();
         let stderr_sink: SharedOutput = stderr_buf.clone();
         let mut io = ExecIo::new();
@@ -195,9 +199,10 @@ impl<P: ProcessManager> McpSession<P> {
             exact_stdout,
             hook.clone(),
         )));
-        let err = self.state.io.stderr().map(|sink| {
-            StreamHandle::Stream(teed_stderr(Some(sink), assert_windows_stderr, hook))
-        });
+        let err =
+            self.state.io.stderr().map(|sink| {
+                StreamHandle::Stream(teed_stderr(Some(sink), assert_windows_stderr, hook))
+            });
         let value = {
             let state_ptr: *mut ExecState<P> = &mut self.state;
             let process_ptr: *mut P = &mut self.process;
@@ -281,7 +286,13 @@ fn tail_chars(s: &str, n: usize) -> String {
     if s.chars().count() <= n {
         return s.to_string();
     }
-    s.chars().rev().take(n).collect::<Vec<_>>().into_iter().rev().collect()
+    s.chars()
+        .rev()
+        .take(n)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect()
 }
 
 /// Drain a tail ring into a lossy string. Truncates to zero. When the
@@ -293,7 +304,10 @@ fn capped_drain(buf: &Arc<Mutex<TailRing>>) -> String {
     if let Ok(mut guard) = buf.lock() {
         let ring = std::mem::replace(
             &mut *guard,
-            TailRing { buf: Vec::new(), total: 0 },
+            TailRing {
+                buf: Vec::new(),
+                total: 0,
+            },
         );
         if ring.total > ring.buf.len() as u64 {
             text = format!(

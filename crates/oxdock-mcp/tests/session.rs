@@ -2,7 +2,9 @@
 //! drain and truncation, init-semantics proof, and fail-fast validation.
 
 use indoc::indoc;
-use oxdock_core::{Engine, McpSession, StreamHook, TeeStream, Value, parse_script_with_modules_and_exports};
+use oxdock_core::{
+    Engine, McpSession, StreamHook, TeeStream, Value, parse_script_with_modules_and_exports,
+};
 use oxdock_fs::{GuardedPath, PathResolver, WorkspaceFs};
 use oxdock_mcp::{McpServerConfig, init_handler};
 use oxdock_process::default_process_manager;
@@ -123,7 +125,10 @@ fn default_routed_output_streams_live_per_write() {
     let mut session = init_session(STREAM_DEMO);
     let (tx, rx) = std::sync::mpsc::sync_channel(64);
     let dropped = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    session.set_stream_hook(Some(StreamHook { tx, dropped: dropped.clone() }));
+    session.set_stream_hook(Some(StreamHook {
+        tx,
+        dropped: dropped.clone(),
+    }));
     let out = session.call("CHATTY", vec![]).expect("call");
     session.set_stream_hook(None);
     assert_eq!(out.value.as_str(), Some("done"));
@@ -150,6 +155,42 @@ fn redirected_output_never_streams() {
     session.set_stream_hook(None);
     assert_eq!(out.value.as_str(), Some("done"));
     assert_eq!(rx.try_iter().count(), 0, "redirected bytes must not stream");
+}
+
+#[test]
+fn bare_run_output_streams_through_the_pump() {
+    // Bare RUN (no LET capture) routes child output to the default
+    // stdout: the pump path must stream exactly like ECHO does.
+    // `echo` via sh keeps this platform-gated to non-Windows; the
+    // ECHO test above covers the shared tee path everywhere.
+    let script = indoc! {r#"
+        FUNC LOUD() {
+          RUN ["sh", "-c", "echo loud"]
+          RETURN "done"
+        }
+        EXPORT [LOUD]
+    "#};
+    let mut session = init_session(script);
+    let (tx, rx) = std::sync::mpsc::sync_channel(64);
+    session.set_stream_hook(Some(StreamHook {
+        tx,
+        dropped: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+    }));
+    let out = session.call("LOUD", vec![]).expect("call");
+    session.set_stream_hook(None);
+    assert_eq!(out.value.as_str(), Some("done"));
+    let streamed: Vec<u8> = rx
+        .try_iter()
+        .flat_map(|chunk| {
+            assert_eq!(chunk.kind, TeeStream::Stdout);
+            chunk.bytes
+        })
+        .collect();
+    assert!(
+        streamed.windows(b"loud".len()).any(|w| w == b"loud"),
+        "pump output must stream, got: {}",
+        String::from_utf8_lossy(&streamed)
+    );
 }
 
 #[test]
