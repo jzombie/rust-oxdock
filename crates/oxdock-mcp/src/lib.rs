@@ -1,6 +1,6 @@
 //! MCP tool hosting for exported OxDock script functions.
 //!
-//! The reactor keeps one [`McpSession`] for the process lifetime: linear
+//! The reactor keeps one [`oxdock_core::McpSession`] for the process lifetime: linear
 //! init once, then `tools/list` serves the precomputed table and each
 //! `tools/call` dispatches through the live state. Capture sinks drain
 //! into the response and truncate to zero after every call. With watching
@@ -40,7 +40,7 @@ pub const WATCH_POLL_MS: u64 = 500;
 
 /// Initialize the session: parse, execute linear steps once, validate
 /// `EXPORT`, and build the rmcp handler. Fails fast on opaque types.
-/// Assembly rides the same [`OxDockHandler::build_inner`] sequence as
+/// Assembly rides the same `build_inner` sequence as
 /// hot reload, so startup and reload cannot drift apart.
 pub fn init_handler(config: McpServerConfig) -> Result<OxDockHandler> {
     let built = OxDockHandler::build_inner(
