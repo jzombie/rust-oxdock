@@ -879,6 +879,167 @@ fn ssh_run<P: ProcessManager>(
     Ok(Value::int(code))
 }
 
+/// Run one argv vector on a remote host over SSH and collect the
+/// result. Stateless by design: every call carries its target,
+/// credentials, and argv, holds no session, and returns one MAP with
+/// `exit`, `stdout`, `stderr`, `truncated`, and `timed_out`. A retry
+/// after a dropped channel repeats the same bytes, so idempotent
+/// commands make retries boring.
+///
+/// The argv never becomes a shell string in script hands: it joins
+/// once here through `shell_words::join`, the same vetted
+/// implementation behind `SHELL_SPLIT_ARGS`/`SHELL_JOIN_ARGS` and the
+/// remote plugins. Quoting `$HOME`, backticks, and redirects arrive as
+/// literal arguments because no layer between the caller and this join
+/// re-parses them.
+///
+/// Output caps apply while reading: past `max_bytes` per stream the
+/// buffers stop growing but the drain continues, so a flood still
+/// learns its exit status and reports `truncated`. A timeout kills
+/// the wait and returns whatever arrived with `timed_out`. `exit` is
+/// -1 when the server never sent a status.
+#[oxdock_func(returns = TypeTag::Map, summary = "Run argv on a remote host over SSH and collect the result.")]
+#[example(
+    name = "exec collects remote output",
+    code = r###"
+    # The server side answers exec with a local run: dequeue the
+    # session, split the joined command back into argv, run it, and
+    # pump the child output into the channel. The exit status rides
+    # the wire through the session report.
+    IMPORT [STD, SSH]
+    INHERIT_ENV [PATH]
+    LET $m: SSH_SERVE_INFO = SSH_SERVE("doc-ssh-exec", {username: "u", password: "p"})
+    LET $d: HANDLE = ASYNC { SSH_DEQUEUE($m.server) }
+    LET $runner: HANDLE = ASYNC {
+        LET $sess: SSH_DEQUEUE_INFO = AWAIT $d
+        LET $argv: LIST<STRING> = SHELL_SPLIT_ARGS($sess.command)
+        LET $wire: PIPE
+        LET $drain: PIPE
+        LET $pump: HANDLE = ASYNC { SSH_PUMP_CHANNEL($sess.session, $wire, $drain) }
+        LET $pin: PIPE
+        LET $pout: PIPE
+        LET $perr: PIPE
+        LET $run: HANDLE = ASYNC { SSH_RUN($sess.session, $argv, $pin, $pout, $perr) }
+        LET $n: INT = SSH_PUMP($pout, $wire)
+        LET $code: INT = AWAIT $run
+        LET $pDone: MAP<ANY> = AWAIT $pump
+        ASSERT_EQ $code 0
+    }
+
+    # One call, one MAP: argv in, collected streams out.
+    [family:unix] {
+        LET $res: MAP<ANY> = SSH_EXEC("doc-ssh-exec", "u", "p", ["echo", "exec-hi"], {})
+        ASSERT_EQ $res.timed_out false
+        ASSERT_EQ $res.exit 0
+        ASSERT_CONTAINS $res.stdout "exec-hi"
+    }
+    [family:windows] {
+        LET $res: MAP<ANY> = SSH_EXEC("doc-ssh-exec", "u", "p", ["cmd", "/c", "echo exec-hi"], {})
+        ASSERT_EQ $res.timed_out false
+        ASSERT_EQ $res.exit 0
+        ASSERT_CONTAINS $res.stdout "exec-hi"
+    }
+    AWAIT $runner
+    SSH_CLOSE($m.server)
+    "###
+)]
+fn ssh_exec<P: ProcessManager>(
+    cx: &mut StepCtx<P>,
+    /// Dial target: a service name resolved through runner mappings.
+    target: String,
+    /// Inner credentials for the SSH session.
+    username: String,
+    /// Inner credentials for the SSH session.
+    password: String,
+    /// Program and arguments to run remotely; joined once, by the
+    /// plugin, with POSIX shell quoting.
+    argv: Vec<String>,
+    /// `timeout` DURATION|STRING (default 60s) and `max_bytes` INT
+    /// (default 8 MiB per stream).
+    #[options("timeout?: DURATION|STRING", "max_bytes?: INT")]
+    options: BTreeMap<String, Value>,
+) -> Result<Value> {
+    if argv.is_empty() {
+        bail!("SSH_EXEC needs at least a program");
+    }
+    if username.is_empty() {
+        bail!("SSH_EXEC username must not be empty");
+    }
+    let registry = cx
+        .module_state::<EndpointRegistry>("SSH")
+        .expect("SSH module registers its endpoint registry as module state");
+    if registry.is_offline() {
+        bail!("SSH_EXEC failed: engine running in --offline mode");
+    }
+    // Symbolic only: physical shapes already failed in the parser.
+    let endpoint = parse_virtual_endpoint(&target, "SSH_EXEC")?;
+    let key = EndpointKey::tcp(endpoint);
+    let addr = match resolve_service_target(
+        &registry,
+        &key,
+        "SSH_EXEC",
+        SocketRequirement::SocketRequired,
+    )? {
+        ServiceTarget::Tcp(addr) => addr,
+        // Unreachable: the shared resolver already bailed; same text.
+        ServiceTarget::Memory => {
+            return Err(no_cli_mapping("SSH_EXEC", &key.endpoint));
+        }
+    };
+    let timeout = match options.get("timeout") {
+        None => crate::runtime::DEFAULT_EXEC_TIMEOUT,
+        Some(value) => {
+            // `check_options` verified `DURATION|STRING`; narrow directly.
+            let timeout = if let Some(duration) = value.as_duration() {
+                duration
+            } else {
+                let text = value
+                    .as_str()
+                    .expect("check_options verified DURATION|STRING");
+                oxdock_parser::command::parse_duration(text).with_context(|| {
+                    format!("SSH_EXEC option 'timeout' must be a duration, got {text:?}")
+                })?
+            };
+            if timeout.is_zero() {
+                bail!("SSH_EXEC option 'timeout' must be positive");
+            }
+            timeout
+        }
+    };
+    let max_bytes = match options.get("max_bytes") {
+        None => crate::runtime::DEFAULT_EXEC_MAX_BYTES,
+        Some(value) => {
+            let bytes = value.as_i64().expect("check_options verified INT");
+            if bytes <= 0 {
+                bail!("SSH_EXEC option 'max_bytes' must be positive");
+            }
+            bytes as usize
+        }
+    };
+    // The single shell encoding in the pipeline: argv becomes one
+    // string here, and only here.
+    let command = shell_words::join(&argv).into_bytes();
+    let runtime = connect_runtime()?;
+    let outcome = runtime
+        .block_on(crate::runtime::run_remote_exec(
+            &addr, &username, &password, command, timeout, max_bytes,
+        ))
+        .context("SSH_EXEC failed")?;
+    let mut map = BTreeMap::new();
+    map.insert("exit".to_string(), Value::int(outcome.exit.unwrap_or(-1)));
+    map.insert(
+        "stdout".to_string(),
+        Value::string(String::from_utf8_lossy(&outcome.stdout).into_owned()),
+    );
+    map.insert(
+        "stderr".to_string(),
+        Value::string(String::from_utf8_lossy(&outcome.stderr).into_owned()),
+    );
+    map.insert("truncated".to_string(), Value::bool(outcome.truncated));
+    map.insert("timed_out".to_string(), Value::bool(outcome.timed_out));
+    Ok(Value::map(map))
+}
+
 /// Field table backing the `SSH_SERVE_INFO` schema and return tag.
 fn serve_result_fields() -> Arc<[Field]> {
     Arc::from(vec![
@@ -969,6 +1130,7 @@ pub fn module_with_endpoints<P: ProcessManager>(registry: Arc<EndpointRegistry>)
             SshSendExitStatus::registration(),
             SshClose::registration(),
             SshConnect::registration(),
+            SshExec::registration(),
             SshPump::registration(),
             SshPtyRun::registration(),
             SshRun::registration(),

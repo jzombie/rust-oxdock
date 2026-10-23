@@ -31,7 +31,7 @@ Platform gating selects OS-specific steps, and remote targets bind over any stdi
 
 The syntax is line-oriented with optional semicolon terminators and a static type system checking scripts before the first step runs. Plain Rust functions become script functions with one attribute: `#[oxdock_func]` exports them into namespaced modules scripts call as `DEMO::NAME(...)`. See [Extending OxDock from Rust](#extending-oxdock-from-rust).
 
-[Documentation](https://docs.rs/oxdock/0.30.0-alpha/oxdock/)
+[Documentation](https://docs.rs/oxdock/0.31.0-alpha/oxdock/)
 
 Jump to the [Command Reference](#command-reference) below for the full
 command list with runnable examples, or view the growing list of standard
@@ -39,7 +39,7 @@ library [Functions](#functions).
 
 **Browse by section:**
 
-[Quick start](#quick-start) | [Dynamically embed assets at compile time](#dynamically-embed-assets-at-compile-time) | [Run scripts inline](#run-scripts-inline) | [Extend the language](#extend-the-language) | [Runtime architecture](#runtime-architecture) | [Extending OxDock from Rust](#extending-oxdock-from-rust) | [Machine model](#machine-model) | [Variants](#variants) | [Goals](#goals) | [Lexical structure](#lexical-structure) | [Guards and scoped blocks](#guards-and-scoped-blocks) | [Command Reference](#command-reference) | [Value types](#value-types) | [Functions](#functions) | [Contexts](#contexts) | [Plugin references](#plugin-references) | [Errors stop the pipeline](#errors-stop-the-pipeline) | [Selective environment inheritance](#selective-environment-inheritance) | [Path Separators](#path-separators) | [Workspaces & Filesystem](#workspaces--filesystem) | [GitHub Actions Integration](#github-actions-integration) | [Testing & Coverage](#testing--coverage) | [Glossary](#glossary) | [Citation](#citation) | [License](#license)
+[Quick start](#quick-start) | [Dynamically embed assets at compile time](#dynamically-embed-assets-at-compile-time) | [Run scripts inline](#run-scripts-inline) | [Extend the language](#extend-the-language) | [Runtime architecture](#runtime-architecture) | [MCP hosting](#mcp-hosting) | [Extending OxDock from Rust](#extending-oxdock-from-rust) | [Machine model](#machine-model) | [Variants](#variants) | [Goals](#goals) | [Lexical structure](#lexical-structure) | [Guards and scoped blocks](#guards-and-scoped-blocks) | [Command Reference](#command-reference) | [Value types](#value-types) | [Functions](#functions) | [Contexts](#contexts) | [Plugin references](#plugin-references) | [Errors stop the pipeline](#errors-stop-the-pipeline) | [Selective environment inheritance](#selective-environment-inheritance) | [Path Separators](#path-separators) | [Workspaces & Filesystem](#workspaces--filesystem) | [GitHub Actions Integration](#github-actions-integration) | [Testing & Coverage](#testing--coverage) | [Glossary](#glossary) | [Citation](#citation) | [License](#license)
 
 ## Quick start
 
@@ -54,19 +54,19 @@ library [Functions](#functions).
 **Build from source via Cargo** *(default features only)*:
 
 ```sh
-cargo install oxdock@0.30.0-alpha
+cargo install oxdock@0.31.0-alpha
 ```
 
 For a full-feature build:
 
 ```sh
-cargo install oxdock@0.30.0-alpha --all-features
+cargo install oxdock@0.31.0-alpha --all-features
 ```
 
 ### Add to Rust project
 
 ```sh
-cargo add oxdock@0.30.0-alpha
+cargo add oxdock@0.31.0-alpha
 ```
 
 Run a script:
@@ -167,8 +167,8 @@ let steps: Vec<oxdock_parser::Step> = oxdock! {
     LET $a: STRING = READ dist/alpha.txt
     LET $b: STRING = READ dist/beta.txt
     LET $p: STRING = READ dist/picked.txt
-    ASSERT_EQ $a "alpha OxDock 0.30.0-alpha"
-    ASSERT_EQ $b "beta OxDock 0.30.0-alpha"
+    ASSERT_EQ $a "alpha OxDock 0.31.0-alpha"
+    ASSERT_EQ $b "beta OxDock 0.31.0-alpha"
     ASSERT_EQ $p "alpha"
 };
 
@@ -180,7 +180,7 @@ let resolver = PathResolver::new(root.as_path(), root.as_path()).expect("resolve
 let out = root.join("dist/alpha.txt").expect("out path");
 assert_eq!(
     resolver.read_to_string(&out).expect("read out"),
-    "alpha OxDock 0.30.0-alpha"
+    "alpha OxDock 0.31.0-alpha"
 );
 ```
 
@@ -495,6 +495,52 @@ ASSERT_EQ $w "from-cache"
 LET $y: STRING = READ sys.txt
 ASSERT_EQ $y "from-system"
 ```
+
+## MCP hosting
+
+A script serves its `EXPORT`ed functions as MCP tools instead of
+running linear steps. One function, one tool:
+
+```oxdock
+# Adds two integers. Returns the sum.
+FUNC ADD($a: INT, $b: INT) {
+  RETURN $a + $b
+}
+
+# The export marks the tool without changing linear calls.
+EXPORT [ADD]
+LET $sum: INT = ADD(2, 3)
+ASSERT_EQ $sum 5
+```
+
+Build with the feature and pass the script to the flag:
+
+```sh
+cargo build -p oxdock --features mcp
+./target/debug/oxdock --mcp tools.oxdock
+```
+
+Register the server in OpenCode with an `opencode.jsonc` entry.
+Any key under `mcp` becomes the tool prefix:
+
+```jsonc
+{
+  "mcp": {
+    "oxdock-demo": {
+      "type": "local",
+      "command": ["/path/to/oxdock", "--mcp", "/path/to/tools.oxdock"],
+      "enabled": true
+    }
+  }
+}
+```
+
+Each entry serves over stdio JSON-RPC with live reload on file
+change. The function above appears as `oxdock-demo_ADD`: a call
+with `{"a": 2, "b": 3}` resolves `{"result": 5}`, and `ECHO`
+output streams live instead of landing in the result. Wire shapes,
+the detach pattern for long calls, and reload semantics live in
+[crates/oxdock-mcp/README.md](./crates/oxdock-mcp/README.md).
 
 ## Extending OxDock from Rust
 
@@ -2557,8 +2603,9 @@ like `LET` scoping but with no runtime footprint. Guards do
 not apply to it. Two imported modules exporting one name is
 an ambiguity error: qualify the call instead.
 
-`EXPORT` is reserved for future script-module support and
-cannot be used yet.
+`EXPORT` marks top-level script `FUNC`s as externally
+callable tools (`EXPORT FOO`, `EXPORT [FOO, BAR]`).
+Single-file scope; see the MCP host for consumption.
 
 
 **Examples:**
@@ -4888,6 +4935,152 @@ LET $has_permit: BOOL = HAS_KEY($second, "permit")
 ASSERT_EQ $has_permit false
 ```
 
+### STD::SHELL_JOIN_ARGS
+
+Join argv words into one shell-parseable string.
+
+Quotes each word with POSIX single-quote escaping through the
+`shell-words` crate, so the result re-splits to the same words.
+Inverse of `SHELL_SPLIT_ARGS` on the word side: splitting the
+result returns the input list unchanged.
+
+
+**Signature:** `STD::SHELL_JOIN_ARGS($words: LIST<STRING>) -> STRING`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+
+- `$words` (`LIST<STRING>`): Words to join into a shell command string.
+
+**Returns:** `STRING`
+
+**Examples:**
+
+**Example: join args**
+
+```oxdock
+# Plain words join with spaces and no quoting.
+IMPORT [STD]
+LET $plain: STRING = SHELL_JOIN_ARGS(["gh", "issue", "list"])
+ASSERT_EQ $plain "gh issue list"
+
+# Words with spaces quote, and the round trip is exact.
+LET $words: LIST<STRING> = ["say", "hi there", "a'b"]
+LET $joined: STRING = SHELL_JOIN_ARGS($words)
+LET $back: LIST<STRING> = SHELL_SPLIT_ARGS($joined)
+ASSERT_EQ $back.0 "say"
+ASSERT_EQ $back.1 "hi there"
+ASSERT_EQ $back.2 "a'b"
+```
+
+### STD::SHELL_SPLIT_ARGS
+
+Split a shell command string into argv words.
+
+Parses POSIX shell word syntax (single and double quotes, backslash
+escapes) with the `shell-words` crate, the same splitter the remote
+plugins use. Returns a `LIST<STRING>`. Unbalanced quotes fail.
+Inverse of `SHELL_JOIN_ARGS`: joining the result re-splits
+to the same words.
+
+Shell syntax only: plain prose with no quoting splits on
+whitespace like any shell would, which is rarely what prose wants.
+
+
+**Signature:** `STD::SHELL_SPLIT_ARGS($command: STRING) -> LIST<STRING>`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Parameters:**
+
+- `$command` (`STRING`): Shell command string to split into words.
+
+**Returns:** `LIST<STRING>`
+
+**Examples:**
+
+**Example: split args**
+
+```oxdock
+# Quoted segments stay one word.
+IMPORT [STD]
+LET $argv: LIST<STRING> = SHELL_SPLIT_ARGS("gh issue comment 153 --body-file notes.md")
+ASSERT_EQ $argv.0 "gh"
+ASSERT_EQ $argv.3 "153"
+ASSERT_EQ $argv.5 "notes.md"
+
+# Quotes and escapes parse the shell way.
+LET $quoted: LIST<STRING> = SHELL_SPLIT_ARGS("say \"hi there\" 'a b'")
+ASSERT_EQ $quoted.0 "say"
+ASSERT_EQ $quoted.1 "hi there"
+ASSERT_EQ $quoted.2 "a b"
+```
+
+### STD::TASK_POLL
+
+Poll a background task without consuming it.
+
+Reports the running state, the output tails accumulated so far,
+and the final outcome once finished. Repeated polls are safe, and
+a later `AWAIT` still joins normally. Polling after `AWAIT` fails
+like double-await: the handle is spent.
+
+Map keys: `state` always names the phase (`"running"` or
+`"finished"`); `ok` is true unless the task failed; `stdout_tail`
+and `stderr_tail` carry bounded output with `truncated_bytes`
+counting dropped head bytes. Finished tasks add `exit_code`;
+clean finishes add `result`, failed ones add `error` instead.
+
+**Signature:** `STD::TASK_POLL($task: HANDLE) -> MAP<state: STRING, ok: BOOL, stdout_tail: STRING, stderr_tail: STRING, truncated_bytes: INT, exit_code?: INT, result?: ANY, error?: STRING>`
+
+**Contexts:** [`AST`](#context-ast) only
+
+**Parameters:**
+
+- `$task` (`HANDLE`): Task handle from ASYNC.
+
+**Returns:** `MAP<state: STRING, ok: BOOL, stdout_tail: STRING, stderr_tail: STRING, truncated_bytes: INT, exit_code?: INT, result?: ANY, error?: STRING>`
+
+  - `state` (`STRING`): Task phase: `running` or `finished`.
+  - `ok` (`BOOL`): True unless the task failed.
+  - `stdout_tail` (`STRING`): Bounded stdout tail, live while running.
+  - `stderr_tail` (`STRING`): Bounded stderr tail, live while running.
+  - `truncated_bytes` (`INT`): Dropped head bytes past the per-stream cap.
+  - `exit_code` (`INT`, optional): Process exit code, present once finished.
+  - `result` (`ANY`, optional): Task `RETURN` value, present on clean finish.
+  - `error` (`STRING`, optional): Failure text, present on failed finish.
+
+**Examples:**
+
+**Example: running poll**
+
+```oxdock
+# A sleeping task is still running on the first poll.
+IMPORT [STD]
+LET $t: HANDLE = ASYNC { SLEEP 30s }
+LET $m: MAP<state: STRING, ok: BOOL, stdout_tail: STRING, stderr_tail: STRING, truncated_bytes: INT, exit_code?: INT, result?: ANY, error?: STRING> = TASK_POLL($t)
+ASSERT_EQ $m.state "running"
+ASSERT_EQ $m.ok true
+# Clean up the sleeper so the run ends promptly.
+CANCEL $t
+```
+
+**Example: finished poll**
+
+```oxdock
+# A finished task reports its value and final tails, then still awaits.
+IMPORT [STD]
+LET $t: HANDLE = ASYNC { ECHO "hi"; SLEEP 1s; RETURN "done" }
+# Do other work while the task runs; poll once it should be done.
+SLEEP 2s
+LET $m: MAP<state: STRING, ok: BOOL, stdout_tail: STRING, stderr_tail: STRING, truncated_bytes: INT, exit_code?: INT, result?: ANY, error?: STRING> = TASK_POLL($t)
+ASSERT_EQ $m.state "finished"
+ASSERT_EQ $m.result "done"
+LET $o: STRING = AWAIT $t
+ASSERT_EQ $o "done"
+```
+
 ### STD::TEXT_CONTAINS
 
 Report whether text holds a literal substring.
@@ -5946,6 +6139,30 @@ LET $word: STRING = TYPE_OF(42)
 ASSERT_EQ $word "INT"
 ```
 
+### STD::VERSION
+
+Report the running engine version.
+
+Returns the workspace version baked in at compile time, so scripts
+and agents can branch on engine behavior instead of probing it.
+
+**Signature:** `STD::VERSION() -> STRING`
+
+**Contexts:** [`AST`](#context-ast), [`RPN`](#context-rpn)
+
+**Returns:** `STRING`
+
+**Examples:**
+
+**Example: report**
+
+```oxdock
+# The engine reports its own build version as a dotted string.
+IMPORT [STD]
+LET $v: STRING = VERSION()
+ASSERT_CONTAINS $v "."
+```
+
 <!-- GENERATED by docs-gen from function context metadata. Do not edit by hand. -->
 ## Contexts
 
@@ -6238,13 +6455,13 @@ cargo +nightly miri test --workspace --all-features --lib --tests
 
 ## Citation
 
-If you use OxDock in published work, cite version `0.30.0-alpha` with the metadata in [CITATION.cff](./CITATION.cff).
+If you use OxDock in published work, cite version `0.31.0-alpha` with the metadata in [CITATION.cff](./CITATION.cff).
 
 ```bibtex
 @software{oxdock,
   author = "Jeremy Harris",
   title = "OxDock",
-  version = "0.30.0-alpha",
+  version = "0.31.0-alpha",
   url = "https://github.com/jzombie/rust-oxdock",
   license = "Apache-2.0"
 }

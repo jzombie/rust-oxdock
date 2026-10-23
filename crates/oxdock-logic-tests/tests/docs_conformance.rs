@@ -403,6 +403,7 @@ fn execute_plugin_block(block: &FencedBlock, name: &str) -> Result<()> {
         "doc-ssh-pump",
         "doc-ssh-close",
         "doc-ssh-connect",
+        "doc-ssh-exec",
         "doc-ssh-pty",
         "doc-ssh-run",
         "doc-ssh-exit-status",

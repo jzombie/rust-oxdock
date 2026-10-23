@@ -1,0 +1,78 @@
+## Overview
+
+MCP tool hosting for exported script functions.
+
+A script marks its callable surface with `EXPORT [ADD, GREET]`
+(script `FUNC`s), or names a host function directly with
+`EXPORT [STD::TEXT_JOIN]`: registry summaries and docs carry over
+as the tool description, so host tools serve with no wrapper.
+Cross-file `EXPORT` stays out of scope.
+
+`oxdock --mcp script.oxdock` serves each entry as an MCP tool over
+stdio JSON-RPC instead of running linear steps. The reactor keeps
+one initialized session: linear steps run once at startup (ambient
+`ENV`, function definitions), then every `tools/call` dispatches
+through the live state.
+
+Tool descriptions come from the `#` comment block directly above
+each `FUNC`; `//` and `/* */` comments are valid script but never
+feed descriptions, and an undocumented function serves with its
+registry summary or an empty description.
+
+The script file is polled and the session hot-swaps on change, so
+edits take effect on the next call with no restart; broken edits
+keep serving the old tools. Successful reloads also emit
+`notifications/tools/list_changed` (advertised via the tools
+`listChanged` capability), so clients re-fetch instead of showing
+a frozen list.
+
+Exported signatures project to JSON Schema, and only
+JSON-compatible types serve: opaque host types fail fast before
+the reactor opens. Default-routed stdout and stderr stream to the
+client live as notifications while the call runs, so `ECHO` output
+stays visible without touching the process wire. The final result
+carries only the return value, plus a drop notice if a slow client
+overflowed the bounded channel.
+
+A synthesized `MCP_STATUS` tool rides alongside every table: it
+reports the load generation (1 at startup, plus one per successful
+reload), the served tool names, the script content hash, and the
+last reload outcome, so agents can detect tools changing underneath
+them and broken edits stay visible instead of stderr-only.
+
+Long calls detach instead of blocking: wrap the slow steps in an
+`ASYNC` block and `RETURN` the task handle. The call returns at
+once with `{"task_id": N}`, and the exported `STD::TASK_POLL`
+builtin snapshots the job by handle: running state, output tails
+so far, and the final value or exit once finished. Handles are
+ordinary words, so `CANCEL` and `AWAIT` keep working on them
+in-script, and `TASK_POLL` never consumes: repeated polls and a
+later `AWAIT` all see the same outcome.
+
+```oxdock
+IMPORT [STD]
+# Detach a slow command and hand back its handle.
+FUNC SLOW_OP() {
+  LET $t: HANDLE = ASYNC { RUN ["sleep", "30"] }
+  RETURN $t
+}
+# Poll the handle: running with tails so far, then finished.
+FUNC POLL_WRAP($t: HANDLE) {
+  RETURN TASK_POLL($t)
+}
+# The export marks the tools without changing linear calls.
+EXPORT [SLOW_OP, POLL_WRAP, STD::TASK_POLL]
+```
+
+
+```oxdock
+# Define an exported tool and call it directly.
+FUNC ADD($a: INT, $b: INT) {
+  RETURN $a + $b
+}
+EXPORT [ADD]
+
+# The export marks the tool without changing linear calls.
+LET $sum: INT = ADD(2, 3)
+ASSERT_EQ $sum 5
+```

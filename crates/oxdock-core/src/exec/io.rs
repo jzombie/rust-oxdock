@@ -13,6 +13,63 @@ use oxdock_pipe::{
 };
 use oxdock_process::{CommandStderr, CommandStdin, CommandStdout};
 
+/// Fan-out writer for background tasks: every default-routed byte goes
+/// to the parent handle exactly as an unwrapped write would, and a copy
+/// lands in the task's tail ring for `TASK_POLL`. Parent semantics are
+/// preserved verbatim (Stream sink, inherited host stdio, OS-pipe bail),
+/// so the only observable difference is the retained copy.
+pub(super) struct TaskTee {
+    parent: Option<StreamHandle>,
+    tails: Arc<Mutex<super::state::TaskTails>>,
+    stream: TeeStream,
+}
+
+impl TaskTee {
+    /// Wrap a worker handle: `None` parent inherits host stdio, matching
+    /// `write_stdout`/`write_stderr` behavior for the unwrapped case.
+    pub(super) fn wrap(
+        parent: Option<StreamHandle>,
+        tails: &Arc<Mutex<super::state::TaskTails>>,
+        stream: TeeStream,
+    ) -> Option<StreamHandle> {
+        Some(StreamHandle::Stream(Arc::new(Mutex::new(Self {
+            parent,
+            tails: Arc::clone(tails),
+            stream,
+        }))))
+    }
+}
+
+impl Write for TaskTee {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        match &self.parent {
+            Some(StreamHandle::Stream(writer)) => {
+                if let Ok(mut guard) = writer.lock() {
+                    guard.write_all(buf)?;
+                }
+            }
+            #[cfg(not(miri))]
+            Some(StreamHandle::Os(_)) => {
+                return Err(io::Error::other(
+                    "cannot write DSL output to a live OS pipe",
+                ));
+            }
+            None => match self.stream {
+                TeeStream::Stdout => io::stdout().write_all(buf)?,
+                TeeStream::Stderr => io::stderr().write_all(buf)?,
+            },
+        }
+        if let Ok(mut tails) = self.tails.lock() {
+            tails.push(self.stream, buf);
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 /// Handle-scoped pipe resolution. No central index exists: every method
 /// below takes the `PIPE` value's backend cell, materializing it on first
 /// binding (first-binding-wins under the cell lock) and adapting later
@@ -444,10 +501,35 @@ impl ExactCapture {
 }
 
 /// Which host stream a tee forwards to when no capture sink is configured.
-#[derive(Clone, Copy)]
-enum TeeStream {
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TeeStream {
     Stdout,
     Stderr,
+}
+
+/// One live output fragment: the bytes from a single tee write plus
+/// which host stream they belong to. Carried from the synchronous
+/// execution threads to the MCP forwarder over a bounded channel.
+#[derive(Clone, Debug)]
+pub struct StreamChunk {
+    /// Which host stream produced these bytes.
+    pub kind: TeeStream,
+    /// Raw bytes as written. Decoded lossily at the forward edge.
+    pub bytes: Vec<u8>,
+}
+
+/// Live-stream tap for a tool call. Cloned into every per-call tee:
+/// each default-routed write `try_send`s one chunk. Bounded channel,
+/// so a chatty tool cannot grow the queue without bound; overflow
+/// chunks are dropped and counted. Explicit `WITH_IO` redirections
+/// bypass the tee entirely, so redirected bytes never stream.
+#[derive(Clone, Debug)]
+pub struct StreamHook {
+    /// Bounded egress. `try_send` only: never blocks script execution.
+    pub tx: std::sync::mpsc::SyncSender<StreamChunk>,
+    /// Chunks dropped on a full channel. Read after the call for the
+    /// transit note; lossy transit never affects the tail buffers.
+    pub dropped: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// Wraps the configured stdout sink so every byte written to it is also
@@ -459,6 +541,7 @@ struct TeeWriter {
     stream: TeeStream,
     windows: Arc<Mutex<HashMap<(usize, usize), SlidingWindow>>>,
     exact: Arc<Mutex<HashMap<usize, ExactCapture>>>,
+    hook: Option<StreamHook>,
 }
 
 impl Write for TeeWriter {
@@ -487,6 +570,20 @@ impl Write for TeeWriter {
                 capture.push_chunk(buf);
             }
         }
+        // Live tap: default-routed bytes stream to the MCP forwarder.
+        // `try_send` only, so a slow client never blocks execution;
+        // overflow drops and counts. Redirected bytes never reach this
+        // tee, so explicit `WITH_IO` stays silent by construction.
+        if let Some(hook) = &self.hook {
+            let chunk = StreamChunk {
+                kind: self.stream,
+                bytes: buf.to_vec(),
+            };
+            if hook.tx.try_send(chunk).is_err() {
+                hook.dropped
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
         Ok(buf.len())
     }
 
@@ -512,27 +609,31 @@ pub(crate) fn teed_stdout(
     sink: Option<SharedOutput>,
     windows: Arc<Mutex<HashMap<(usize, usize), SlidingWindow>>>,
     exact: Arc<Mutex<HashMap<usize, ExactCapture>>>,
+    hook: Option<StreamHook>,
 ) -> SharedOutput {
     Arc::new(Mutex::new(TeeWriter {
         inner: sink,
         stream: TeeStream::Stdout,
         windows,
         exact,
+        hook,
     }))
 }
 
 /// Installs the tee around `sink` (or real stderr when absent) for
 /// `ASSERT_CONTAINS stderr` substring observers. Exact matching is not
-/// offered over stderr; use pipe targets or harness captures for that.
+/// offered over stderr; use pipe targets or harness captures instead.
 pub(crate) fn teed_stderr(
     sink: Option<SharedOutput>,
     windows: Arc<Mutex<HashMap<(usize, usize), SlidingWindow>>>,
+    hook: Option<StreamHook>,
 ) -> SharedOutput {
     Arc::new(Mutex::new(TeeWriter {
         inner: sink,
         stream: TeeStream::Stderr,
         windows,
         exact: Arc::new(Mutex::new(HashMap::new())),
+        hook,
     }))
 }
 
@@ -734,4 +835,59 @@ pub(super) fn assemble_default_io(
     io.set_stdout(stdout.clone());
     io.set_stderr(stdout);
     io
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One tee plus its hook channel, drop counter, and backing sink.
+    type TestTee = (
+        TeeWriter,
+        std::sync::mpsc::Receiver<StreamChunk>,
+        Arc<std::sync::atomic::AtomicUsize>,
+        Arc<Mutex<Vec<u8>>>,
+    );
+
+    fn tee_with_hook(stream: TeeStream, bound: usize) -> TestTee {
+        let vec: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let sink: SharedOutput = vec.clone();
+        let (tx, rx) = std::sync::mpsc::sync_channel(bound);
+        let dropped = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let tee = TeeWriter {
+            inner: Some(sink),
+            stream,
+            windows: Arc::new(Mutex::new(HashMap::new())),
+            exact: Arc::new(Mutex::new(HashMap::new())),
+            hook: Some(StreamHook {
+                tx,
+                dropped: dropped.clone(),
+            }),
+        };
+        (tee, rx, dropped, vec)
+    }
+
+    #[test]
+    fn hook_receives_stderr_kind_and_sink_still_gets_bytes() {
+        let (mut tee, rx, dropped, sink) = tee_with_hook(TeeStream::Stderr, 8);
+        tee.write_all(b"oops\n").expect("write");
+        tee.flush().expect("flush");
+        let chunk = rx.try_recv().expect("one chunk streamed");
+        assert_eq!(chunk.kind, TeeStream::Stderr);
+        assert_eq!(chunk.bytes, b"oops\n");
+        assert_eq!(dropped.load(std::sync::atomic::Ordering::Relaxed), 0);
+        let guard = sink.lock().expect("sink lock");
+        assert_eq!(guard.as_slice(), b"oops\n");
+    }
+
+    #[test]
+    fn full_channel_drops_and_counts_without_blocking() {
+        let (mut tee, rx, dropped, _sink) = tee_with_hook(TeeStream::Stdout, 1);
+        tee.write_all(b"first\n").expect("write");
+        tee.write_all(b"second\n")
+            .expect("write must not block on full");
+        assert_eq!(dropped.load(std::sync::atomic::Ordering::Relaxed), 1);
+        let kept = rx.try_recv().expect("first chunk kept");
+        assert_eq!(kept.bytes, b"first\n");
+    }
 }

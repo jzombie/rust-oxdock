@@ -387,7 +387,7 @@ fn lookup(
             return resolve_key_path_strict(&parts, vars);
         }
         if let Some(val) = vars.get(var_key) {
-            return Ok(format_value_for_string(val));
+            return format_value_for_string(val);
         }
         let hint = if env.contains_key(var_key) {
             format!("; did you mean 'env:{var_key}' (environment variable)?")
@@ -413,7 +413,7 @@ fn lookup(
             args.push(resolve_call_arg(&src, vars)?);
         }
         let result = resolver(module, func, args)?;
-        return Ok(format_value_for_string(&result));
+        return format_value_for_string(&result);
     }
 
     // 5. Unprefixed key: could be a missing step override or invalid syntax
@@ -784,58 +784,72 @@ fn resolve_key_path_strict(
         }
     }
 
-    Ok(format_value_for_string(current))
+    format_value_for_string(current)
 }
 
 /// Format a Value as a string for inline interpolation.
 /// Render a script value as inline text: the single renderer behind
 /// placeholder expansion everywhere (streaming file templates and
 /// engine string expansion alike), so one value renders one way in
-/// every context.
+/// every context. Pipes are refused: they carry streams between
+/// steps, not text, and silently rendering a handle hides a bug.
 ///
 /// Float rendering is defined as `f.to_string()`: Rust's `Display` for
 /// `f64` already produces the shortest round-trip decimal (Ryū since
 /// 1.36), so `ECHO` / `{{ }}` output stays clean (`3.14`, not
 /// `3.140000`) with no extra dependency.
-pub fn format_value_for_string(val: &oxdock_parser::Value) -> String {
+pub fn format_value_for_string(val: &oxdock_parser::Value) -> anyhow::Result<String> {
     if let Some(s) = val.as_str() {
-        return s.to_string();
+        return Ok(s.to_string());
     }
     if let Some(i) = val.as_i64() {
-        return i.to_string();
+        return Ok(i.to_string());
     }
     if let Some(f) = val.as_f64() {
-        return f.to_string();
+        return Ok(f.to_string());
     }
     if let Some(b) = val.as_bool() {
-        return b.to_string();
+        return Ok(b.to_string());
     }
-    // Pipes render through `Display` (`<pipe>`) via the fallthrough below;
-    // handles are opaque and have no string form to spell.
+    if val.as_pipe_handle().is_some() {
+        anyhow::bail!(
+            "cannot render PIPE as STRING: pipes carry streams between steps, not text. Capture the producing step's output with LET $var: STRING = ... instead."
+        );
+    }
+    if val.as_semaphore().is_some() {
+        anyhow::bail!(
+            "cannot render SEMAPHORE as STRING: semaphores coordinate task access between steps, not text."
+        );
+    }
+    if val.as_permit().is_some() {
+        anyhow::bail!(
+            "cannot render PERMIT as STRING: permits grant scoped task access, not text."
+        );
+    }
     if let Some(d) = val.as_duration() {
-        return oxdock_parser::command::format_duration(&d);
+        return Ok(oxdock_parser::command::format_duration(&d));
     }
     if let Some(p) = val.as_path() {
-        return p.to_string_lossy().to_string();
+        return Ok(p.to_string_lossy().to_string());
     }
     if let Some(items) = val.as_list() {
-        return items
+        let parts: Vec<String> = items
             .iter()
             .map(format_value_for_string)
-            .collect::<Vec<_>>()
-            .join(" ");
+            .collect::<anyhow::Result<_>>()?;
+        return Ok(parts.join(" "));
     }
     if let Some(map) = val.as_map() {
-        return map
-            .iter()
-            .map(|(k, v)| format!("\"{}\": {}", k, format_value_for_string(v)))
-            .collect::<Vec<_>>()
-            .join(", ");
+        let mut parts = Vec::with_capacity(map.len());
+        for (k, v) in map.iter() {
+            parts.push(format!("\"{}\": {}", k, format_value_for_string(v)?));
+        }
+        return Ok(parts.join(", "));
     }
     if let Some(id) = val.as_handle() {
-        return format!("task#{}", id);
+        return Ok(format!("task#{}", id));
     }
-    format!("{}", val)
+    Ok(format!("{}", val))
 }
 
 // Legacy functions for backward compatibility

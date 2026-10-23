@@ -69,6 +69,7 @@ fn returns_gate_covers_ssh_functions() {
         "doc-ssh-pump",
         "doc-ssh-close",
         "doc-ssh-connect",
+        "doc-ssh-exec",
         "doc-ssh-pty",
         "doc-ssh-run",
         "doc-ssh-exit-status",
@@ -3500,4 +3501,70 @@ fn send_exit_status_rejects_negative_code() {
         .expect("script thread joins")
         .expect_err("negative code must fail");
     assert!(err.to_string().contains("must not be negative"), "{err:#}");
+}
+
+#[test]
+#[cfg(unix)]
+#[cfg_attr(miri, ignore = "needs loopback TCP plus threads plus subprocesses")]
+fn exec_argv_round_trip_preserves_hostile_words() {
+    // Unix-only by construction: the responder runs `echo` with one
+    // hostile argument, so the test asserts the wire join and the
+    // responder split preserved every byte. Quoting, `$vars`, and
+    // backticks cross as literal argument bytes because argv never
+    // becomes a shell string in script hands: the single join lives in
+    // the plugin behind `shell_words::join`.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-exec-quote");
+    let script = indoc! {r#"
+        IMPORT [STD, SSH]
+        INHERIT_ENV [PATH]
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-exec-quote", {username: "u", password: "p"})
+        LET $d: HANDLE = ASYNC { SSH_DEQUEUE($m.server) }
+        LET $runner: HANDLE = ASYNC {
+            LET $sess: SSH_DEQUEUE_INFO = AWAIT $d
+            LET $argv: LIST<STRING> = SHELL_SPLIT_ARGS($sess.command)
+            LET $wire: PIPE
+            LET $drain: PIPE
+            LET $pump: HANDLE = ASYNC { SSH_PUMP_CHANNEL($sess.session, $wire, $drain) }
+            LET $pin: PIPE
+            LET $pout: PIPE
+            LET $perr: PIPE
+            LET $run: HANDLE = ASYNC { SSH_RUN($sess.session, $argv, $pin, $pout, $perr) }
+            LET $n: INT = SSH_PUMP($pout, $wire)
+            LET $code: INT = AWAIT $run
+            LET $pDone: MAP<ANY> = AWAIT $pump
+            ASSERT_EQ $code 0
+        }
+        LET $nasty: STRING = "it's $HOME \"quoted\" `ticked`"
+        LET $res: MAP<ANY> = SSH_EXEC("test-ssh-exec-quote", "u", "p", ["echo", $nasty], {})
+        ASSERT_EQ $res.timed_out false
+        ASSERT_EQ $res.truncated false
+        ASSERT_EQ $res.exit 0
+        ASSERT_CONTAINS $res.stdout $nasty
+        AWAIT $runner
+        SSH_CLOSE($m.server)
+    "#};
+    run_script_with(registry, &root, script).expect("hostile argv round-trips byte-identical");
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "needs loopback TCP plus threads plus a Tokio runtime")]
+fn exec_timeout_returns_partials() {
+    // Nobody dequeues, so the exec never runs: the client kills the
+    // wait at the option timeout and returns what arrived (nothing)
+    // with `timed_out` set instead of hanging or erroring.
+    let temp = GuardedPath::tempdir().unwrap();
+    let root = guard_root(&temp);
+    let registry = mapped_registry("test-ssh-exec-timeout");
+    let script = indoc! {r#"
+        IMPORT [STD, SSH]
+        LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-exec-timeout", {username: "u", password: "p"})
+        LET $res: MAP<ANY> = SSH_EXEC("test-ssh-exec-timeout", "u", "p", ["echo", "hi"], {timeout: "1s"})
+        ASSERT_EQ $res.timed_out true
+        LET $unknown: INT = 0 - 1
+        ASSERT_EQ $res.exit $unknown
+        SSH_CLOSE($m.server)
+    "#};
+    run_script_with(registry, &root, script).expect("exec timeout returns partials");
 }
