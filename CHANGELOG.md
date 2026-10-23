@@ -18,6 +18,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - Qualified `EXPORT` of host functions (#153): `EXPORT [STD::TEXT_JOIN]` serves registry functions with no script wrapper; registry summaries and docs carry over as tool descriptions. Bare names still resolve to script `FUNC`s; unknown members and modules fail at parse, opaque signatures fail fast at serve.
 - `STD::VERSION()` reports the running engine version as a `STRING` (workspace version baked in at compile time), so scripts and agents can read the build they run on; servable to MCP clients through qualified `EXPORT [STD::VERSION]`.
 
+### Dependencies
+
+- Bump `ctutils` 0.4.2 → 0.4.5 (RUSTSEC-2026-0385).
+- Bump `tokio` 1.53.2 → 1.54.1 (RUSTSEC-2026-0386).
+
 ## [0.30.0-alpha] - 2026-10-21
 
 ### Added
