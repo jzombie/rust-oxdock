@@ -22,6 +22,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 - Bump `ctutils` 0.4.2 → 0.4.5 (RUSTSEC-2026-0385).
 - Bump `tokio` 1.53.2 → 1.54.1 (RUSTSEC-2026-0386).
+- Bump `libc` 0.2.190 → 0.2.191 (#237).
+- Bump `pest` / `pest_derive` / `pest_generator` / `pest_meta` 2.9.3 → 2.9.4 (#238, #240, #241).
+- Bump `proptest` 1.11.0 → 1.12.0 (#239).
+- Update transitive `getrandom` 0.3.4 → 0.4.3 (`tempfile` dep; drops the 0.3 series from the lockfile).
 
 ## [0.30.0-alpha] - 2026-10-21
 
