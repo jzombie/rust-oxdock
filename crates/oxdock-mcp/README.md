@@ -34,9 +34,11 @@ a frozen list.
 
 Exported signatures project to JSON Schema, and only
 JSON-compatible types serve: opaque host types fail fast before
-the reactor opens. Captured stdout and stderr ride the result
-`content` block, so framing stays clean while `ECHO` output stays
-visible.
+the reactor opens. Default-routed stdout and stderr stream to the
+client live as notifications while the call runs, so `ECHO` output
+stays visible without touching the process wire. The final result
+carries only the return value, plus a drop notice if a slow client
+overflowed the bounded channel.
 
 A synthesized `MCP_STATUS` tool rides alongside every table: it
 reports the load generation (1 at startup, plus one per successful
@@ -107,6 +109,36 @@ Build once with `cargo build -p oxdock --features mcp`, then restart
 OpenCode (or resync its MCP servers) so the client connects and lists
 tools. Each `EXPORT`ed function appears as `<name>_<FUNC>` with the
 `#` doc block as its description.
+
+```jsonc
+// tools/list advertises each entry with its schema.
+{
+  "name": "oxdock-demo_ADD",
+  "description": "Adds two integers. Returns the sum.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "a": { "type": "integer" },
+      "b": { "type": "integer" }
+    },
+    "required": ["a", "b"]
+  }
+}
+// tools/call dispatches by tool name with a JSON argument object.
+{
+  "name": "oxdock-demo_ADD",
+  "arguments": { "a": 2, "b": 3 }
+}
+// The result carries the JSON return value under `result`.
+{
+  "result": 5
+}
+```
+
+`ECHO` output never lands in the result: it streams as log
+notifications while the call runs, then the value follows. A call
+to `GREET` streams `greeting requested` mid-call and resolves
+`{"result": "Hello, Ada"}` at the end.
 
 Edits to the script file reload live with no restart, and the server
 emits `notifications/tools/list_changed` so compliant clients

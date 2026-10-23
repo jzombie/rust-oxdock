@@ -28,9 +28,11 @@ a frozen list.
 
 Exported signatures project to JSON Schema, and only
 JSON-compatible types serve: opaque host types fail fast before
-the reactor opens. Captured stdout and stderr ride the result
-`content` block, so framing stays clean while `ECHO` output stays
-visible.
+the reactor opens. Default-routed stdout and stderr stream to the
+client live as notifications while the call runs, so `ECHO` output
+stays visible without touching the process wire. The final result
+carries only the return value, plus a drop notice if a slow client
+overflowed the bounded channel.
 
 A synthesized `MCP_STATUS` tool rides alongside every table: it
 reports the load generation (1 at startup, plus one per successful

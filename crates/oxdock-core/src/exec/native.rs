@@ -389,6 +389,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
             IsTerminal::registration(),
             Eof::registration(),
             TaskPoll::registration(),
+            Version::registration(),
             TextTrim::registration(),
             TextTrimPrefix::registration(),
             TextTrimSuffix::registration(),
@@ -1450,6 +1451,24 @@ fn merge_maps(
         Value::list(maps.into_iter().map(Value::map).collect()),
         policy,
     )
+}
+
+/// Report the running engine version.
+///
+/// Returns the workspace version baked in at compile time, so scripts
+/// and agents can branch on engine behavior instead of probing it.
+#[oxdock_func(pure, returns = TypeTag::String)]
+#[example(
+    name = "report",
+    code = r###"
+    # The engine reports its own build version as a dotted string.
+    IMPORT [STD]
+    LET $v: STRING = VERSION()
+    ASSERT_CONTAINS $v "."
+    "###
+)]
+fn version() -> Result<Value> {
+    Ok(Value::string(env!("CARGO_PKG_VERSION").to_string()))
 }
 
 /// List all visible function names.

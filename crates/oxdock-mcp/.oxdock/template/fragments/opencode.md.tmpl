@@ -25,6 +25,36 @@ OpenCode (or resync its MCP servers) so the client connects and lists
 tools. Each `EXPORT`ed function appears as `<name>_<FUNC>` with the
 `#` doc block as its description.
 
+```jsonc
+// tools/list advertises each entry with its schema.
+{
+  "name": "oxdock-demo_ADD",
+  "description": "Adds two integers. Returns the sum.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "a": { "type": "integer" },
+      "b": { "type": "integer" }
+    },
+    "required": ["a", "b"]
+  }
+}
+// tools/call dispatches by tool name with a JSON argument object.
+{
+  "name": "oxdock-demo_ADD",
+  "arguments": { "a": 2, "b": 3 }
+}
+// The result carries the JSON return value under `result`.
+{
+  "result": 5
+}
+```
+
+`ECHO` output never lands in the result: it streams as log
+notifications while the call runs, then the value follows. A call
+to `GREET` streams `greeting requested` mid-call and resolves
+`{"result": "Hello, Ada"}` at the end.
+
 Edits to the script file reload live with no restart, and the server
 emits `notifications/tools/list_changed` so compliant clients
 re-fetch instead of showing a frozen list. Call `MCP_STATUS` any time

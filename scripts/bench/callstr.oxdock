@@ -1,0 +1,11 @@
+IMPORT [STD]
+FUNC WORK($x: INT) {
+  RETURN TEXT_TRIM("  {{ $x }}  ")
+}
+LET $i: INT = 0
+LET $last: STRING = ""
+WHILE $i < 20000 {
+  $last = WORK($i)
+  $i = $i + 1
+}
+ECHO $last
