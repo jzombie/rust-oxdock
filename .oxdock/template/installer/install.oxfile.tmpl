@@ -91,23 +91,21 @@ IF $has_piped {
             LET $is_ghfile: BOOL = $ghkind == "file"
 
             IF $is_ghfile {
-                # Expected version: bridged value wins; otherwise derive
-                # from the placed binary, else from the tag. One rule,
-                # here, never in shell.
+                # Expected version, one rule: a `v`-tagged bridge wins
+                # (real tags gate hard); anything else derives from the
+                # placed binary itself. Legs ride fictitious versions,
+                # so only real tags assert.
                 LET $bridge: STRING = "\{{ env:OXDOCK_EXPECTED_VERSION }}"
-                LET $missing_bridge: BOOL = $bridge == ""
-                LET $expected: STRING = $bridge
+                LET $use_bridge: BOOL = TEXT_STARTS_WITH($bridge, "v")
+                LET $expected: STRING = ""
 
-                IF $missing_bridge {
-                    IF $has_bin {
-                        LET $bv: PIPE
-                        WITH_IO [stdout=$bv] RUN ["\{{ $dest }}", "--version"]
-                        WITH_IO [stdin=$bv] READ_LINE $rawver
-                        $expected = TEXT_TRIM_PREFIX($rawver, "oxdock ")
-                    } ELSE {
-                        LET $vtag: STRING = "\{{ env:OXDOCK_VERSION }}"
-                        $expected = TEXT_TRIM_PREFIX($vtag, "v")
-                    }
+                IF $use_bridge {
+                    $expected = TEXT_TRIM_PREFIX($bridge, "v")
+                } ELSE {
+                    LET $bv: PIPE
+                    WITH_IO [stdout=$bv] RUN ["\{{ $dest }}", "--version"]
+                    WITH_IO [stdin=$bv] READ_LINE $rawver
+                    $expected = TEXT_TRIM_PREFIX($rawver, "oxdock ")
                 }
 
                 LET $has_expected: BOOL = $expected != ""

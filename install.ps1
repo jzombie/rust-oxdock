@@ -239,6 +239,8 @@ try {
 
   $env:OXDOCK_VERSION = $Version
 
+  $env:OXDOCK_EXPECTED_VERSION = $Version
+
   $env:OXDOCK_SKIP_DOWNLOAD = '0'
 
   # An explicit OXDOCK_ENGINE runs the installer instead of the
@@ -282,6 +284,7 @@ try {
         $Fresh = Join-Path $env:OXDOCK_DIR "$RawName.exe"
       }
 
+      $env:OXDOCK_EXPECTED_VERSION = $Version
       $env:OXDOCK_SKIP_DOWNLOAD = '1'
 
       try {

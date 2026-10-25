@@ -128,7 +128,7 @@ fn ci_tail_harness() -> Result<CiTailRun> {
     io.insert_inherit_env("OXDOCK_VERSION", "0.0.0-test");
     io.insert_inherit_env("OXDOCK_BINARY_NAME", bin);
     io.insert_inherit_env("OXDOCK_SKIP_DOWNLOAD", "1");
-    io.insert_inherit_env("OXDOCK_EXPECTED_VERSION", "0.0.0-test");
+    io.insert_inherit_env("OXDOCK_EXPECTED_VERSION", "v0.0.0-test");
     io.insert_inherit_env("GITHUB_PATH", gh_path.as_path().display().to_string());
     io.insert_inherit_env("GITHUB_ENV", gh_env.as_path().display().to_string());
     Ok(CiTailRun {
@@ -203,18 +203,18 @@ fn ci_tail_derives_version_when_unbridged() -> Result<()> {
     Ok(())
 }
 
-/// Tag-derived version: no bridge, no override binary. This is the
-/// stub fresh-tail shape: the tag trims to the expectation.
+/// No bridge, no override binary: the tail derives from the
+/// pre-placed binary. This is the stub fresh-tail shape.
 #[test]
 #[cfg(unix)]
 #[cfg_attr(
     miri,
     ignore = "spawns a real OS process, which dies under Miri isolation"
 )]
-fn ci_tail_derives_version_from_tag() -> Result<()> {
+fn ci_tail_derives_version_without_override() -> Result<()> {
     let mut run = ci_tail_harness()?;
     run.io.insert_inherit_env("OXDOCK_BIN", "");
-    run.io.insert_inherit_env("OXDOCK_VERSION", "v0.0.0-test");
+    run.io.insert_inherit_env("OXDOCK_VERSION", "9.9.9-t");
     run.io.insert_inherit_env("OXDOCK_EXPECTED_VERSION", "");
     write_fixture_engine(&run.engine_dir.join("oxdock-engine-test")?)?;
     execute(&run)?;
