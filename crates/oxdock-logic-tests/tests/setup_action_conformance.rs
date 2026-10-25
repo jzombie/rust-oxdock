@@ -60,6 +60,7 @@ fn install_script_pins_single_path() -> Result<()> {
     for marker in [
         "OXDOCK_BINARY_NAME",
         "OXDOCK_SKIP_DOWNLOAD",
+        "PATH_JOIN",
         "LET $skip: BOOL",
         "TEXT_TRIM_SUFFIX",
         "TEXT_TRIM_PREFIX",

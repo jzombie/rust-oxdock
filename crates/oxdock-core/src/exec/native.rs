@@ -393,6 +393,7 @@ impl<P: ProcessManager> FunctionRegistry<P> {
             TextTrim::registration(),
             TextTrimPrefix::registration(),
             TextTrimSuffix::registration(),
+            PathJoin::registration(),
             TextToUpper::registration(),
             TextToLower::registration(),
             TextReplace::registration(),
@@ -2105,6 +2106,43 @@ fn text_trim_suffix_string(text: Value, suffix: String) -> Result<Value> {
         &text,
         super::args::TextPump::TrimSuffix(suffix),
     )
+}
+
+/// Join a directory and a file name with the host-native separator.
+///
+/// Both inputs accept `STRING` or workspace `PATH` words; the result
+/// is a `STRING` joined with the platform separator, so installers
+/// never hand-roll separators in templates. No filesystem access:
+/// missing parents fail later at the consumer. Stays `STRING` (not
+/// `PATH`) on purpose: the joined value is a not-yet-validated
+/// destination string like `$dir` itself, and `PATH` words
+/// re-canonicalize to forward slashes on template expansion, which
+/// would undo the native join.
+#[oxdock_func(returns = TypeTag::String)]
+#[example(
+    name = "join path",
+    code = r###"
+    # Directory and file stem join with the native separator.
+    # Source `\\` is one backslash at runtime; `/` works on Windows
+    # too, native just reads better there.
+    IMPORT [STD]
+    LET $p: STRING = PATH_JOIN("some-dir", "some-file")
+    [family:unix] ASSERT_EQ $p "some-dir/some-file"
+    [family:windows] ASSERT_EQ $p "some-dir\\some-file"
+    "###
+)]
+fn path_join<P: ProcessManager>(
+    _cx: &mut StepCtx<P>,
+    /// Directory half of the destination.
+    #[union(String, Path)]
+    dir: Value,
+    /// File half of the destination.
+    #[union(String, Path)]
+    name: Value,
+) -> Result<Value> {
+    let d = super::args::string_or_path_text(&dir)?;
+    let n = super::args::string_or_path_text(&name)?;
+    Ok(Value::string(oxdock_fs::join_native(&d, &n)))
 }
 
 /// Uppercase text with full Unicode mapping.

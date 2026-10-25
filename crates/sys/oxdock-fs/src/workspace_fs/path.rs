@@ -777,6 +777,18 @@ pub fn to_forward_slashes(s: &str) -> String {
     s.replace('\\', "/")
 }
 
+/// Join a directory and a file name with the host-native separator.
+/// Pure string join with `std::path` semantics and no filesystem
+/// access: the parent may not exist yet. Lives here (not in
+/// `oxdock-core`) because host path types stay inside this crate.
+#[allow(clippy::disallowed_types, clippy::disallowed_methods)]
+pub fn join_native(dir: &str, name: &str) -> String {
+    std::path::Path::new(dir)
+        .join(name)
+        .to_string_lossy()
+        .into_owned()
+}
+
 /// Convert a guarded path into a stable, forward-slash string suitable for
 /// serialization, embedding, logging, or CLI output. This strips Windows
 /// verbatim prefixes and ensures separators are `/`.

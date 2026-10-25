@@ -69,8 +69,9 @@ IF $has_piped {
     # Destination derives after the prompt: PROMPT mutates $dir in
     # place, and placing before it would strand the binary at the
     # pre-prompt default while reporting the prompted dir.
-    LET $dest: STRING = "\{{ $dir }}/\{{ $stem }}"
-    [family:windows] $dest = "\{{ $dir }}/\{{ $stem }}.exe"
+    LET $filename: STRING = "\{{ $stem }}"
+    [family:windows] $filename = "\{{ $stem }}.exe"
+    LET $dest: STRING = PATH_JOIN($dir, $filename)
 
     # Verify and place. The CI tail runs only on the fresh pass
     # below, never here: the old engine must not touch CI files.

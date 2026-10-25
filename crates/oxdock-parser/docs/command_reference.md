@@ -3382,6 +3382,44 @@ LET $doc: MAP<ANY> = PARSE_TOML("title = \"demo\"")
 ASSERT_EQ $doc.title "demo"
 ```
 
+### STD::PATH_JOIN
+
+Join a directory and a file name with the host-native separator.
+
+Both inputs accept `STRING` or workspace `PATH` words; the result
+is a `STRING` joined with the platform separator, so installers
+never hand-roll separators in templates. No filesystem access:
+missing parents fail later at the consumer. Stays `STRING` (not
+`PATH`) on purpose: the joined value is a not-yet-validated
+destination string like `$dir` itself, and `PATH` words
+re-canonicalize to forward slashes on template expansion, which
+would undo the native join.
+
+**Signature:** `STD::PATH_JOIN($dir: STRING|PATH, $name: STRING|PATH) -> STRING`
+
+**Contexts:** [`AST`](#context-ast) only
+
+**Parameters:**
+
+- `$dir` (`STRING|PATH`): Directory half of the destination.
+- `$name` (`STRING|PATH`): File half of the destination.
+
+**Returns:** `STRING`
+
+**Examples:**
+
+**Example: join path**
+
+```oxdock
+# Directory and file stem join with the native separator.
+# Source `\` is one backslash at runtime; `/` works on Windows
+# too, native just reads better there.
+IMPORT [STD]
+LET $p: STRING = PATH_JOIN("some-dir", "some-file")
+[family:unix] ASSERT_EQ $p "some-dir/some-file"
+[family:windows] ASSERT_EQ $p "some-dir\some-file"
+```
+
 ### STD::PATH_TYPE
 
 Describe a filesystem entry.
