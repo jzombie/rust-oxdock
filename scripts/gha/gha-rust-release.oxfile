@@ -92,7 +92,7 @@ IF $dry == "false" {
             LET $round_out: STRING = RUN 'cargo publish --workspace{{ $excludes }} >"{{ $probedir }}/publish-round.log" 2>&1 || printf OXDOCK_PUBLISH_ROUND_FAILED'
             IF $round_out == "OXDOCK_PUBLISH_ROUND_FAILED" {
                 ECHO "publish round failed; last output:"
-                LET $diag: STRING = RUN cat "{{ $probedir }}/publish-round.log"
+                LET $diag: STRING = RUN 'cat "{{ $probedir }}/publish-round.log"'
                 ECHO "{{ $diag }}"
                 ECHO "rechecking the registry"
                 SLEEP 30s
@@ -115,8 +115,8 @@ IF $dry == "false" {
     # suffix would break under cmd). Both sides carry identical
     # formatting, so the exact comparison holds. A moved or missing tag
     # fails here.
-    LET $head: STRING = RUN git rev-parse HEAD
-    LET $tagged: STRING = RUN git rev-list -n 1 "v{{ $version }}"
+    LET $head: STRING = RUN 'git rev-parse HEAD'
+    LET $tagged: STRING = RUN 'git rev-list -n 1 "v{{ $version }}"'
     ASSERT_EQ $head $tagged
     # Resume safety: a run that dies mid-release must converge on
     # re-dispatch. Deleting any existing release first makes creation
