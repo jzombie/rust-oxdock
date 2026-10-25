@@ -4768,6 +4768,14 @@ pub(crate) fn timeout<P: ProcessManager>(
     // foreground process registers in active_process, where the watcher can
     // reach it. Restored afterwards (nesting-safe: an outer TIMEOUT already
     // sets this, and the restore preserves it).
+    //
+    // The scope never joins background work (`wait_at_end` stays false,
+    // like IF/FOR/WHILE/ISOLATED bodies): joining here would wait for tasks
+    // started outside the scope, so a long-lived server task turns every
+    // later TIMEOUT into a wait for its deadline. Tasks the body itself
+    // backgrounds are reaped at the pipeline top as usual; a genuinely
+    // stuck body is still killed through the cancellation token and the
+    // active-process handle above.
     let prev_cancellable = cx.state.cancellable;
     cx.state.cancellable = true;
     let result = super::steps::execute_scoped_steps(
@@ -4780,7 +4788,7 @@ pub(crate) fn timeout<P: ProcessManager>(
         cx.err.clone(),
         cx.out_pipe.clone(),
         cx.stdin_pipe.clone(),
-        true,
+        false,
     );
     cx.state.cancellable = prev_cancellable;
 

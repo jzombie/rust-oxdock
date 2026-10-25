@@ -23,6 +23,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 
 ### Fixed
 
+- `TIMEOUT` scopes no longer join background work started outside the scope at scope end (matching `IF`/`FOR`/`WHILE`/`ISOLATED` bodies, which never reap): a long-lived `ASYNC` server task used to hold every later `TIMEOUT` step open to its deadline, which hung the install-smoke prompt stanza for the full 300s after the install had already succeeded. Tasks the body itself backgrounds are still reaped at the pipeline top, and a genuinely stuck body is still killed through the deadline watcher.
 - Concurrent `ECHO` lines no longer interleave mid-line: the message and its newline emit in one write instead of two formatting writes that re-locked the shared parent separately, so parallel tasks keep atomic lines.
 
 ## [0.31.0-alpha] - 2026-10-25

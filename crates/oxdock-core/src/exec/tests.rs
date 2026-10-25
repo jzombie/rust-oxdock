@@ -3241,6 +3241,60 @@ fn timeout_preserves_preexisting_cancellation() {
 }
 
 #[test]
+#[cfg_attr(
+    miri,
+    ignore = "spawns ASYNC worker threads and asserts a wall-clock promptness bound; untestable under Miri isolation"
+)]
+fn timeout_scope_does_not_join_prior_background_work() {
+    // A TIMEOUT scope bounds only its own body. A long-lived task started
+    // before the scope (the install-smoke server pattern: ASYNC server,
+    // TIMEOUT prompt step, CANCEL server) must not hold the scope open to
+    // its deadline: the instant body means the step returns at once with
+    // no deadline error. Pre-fix this held the scope for the full
+    // deadline, then reported it with the body error
+    // "ASYNC task cancelled". The promptness bound carries headroom on
+    // purpose: fixed code returns in milliseconds, and only scheduler
+    // stalls larger than five seconds could trip it.
+    let root = GuardedPath::new_root_from_str(".").unwrap();
+    let steps = vec![
+        Step {
+            guard: None,
+            kind: StepKind::AssignAsync {
+                var: "srv".into(),
+                decl_type: "HANDLE".to_string(),
+                body: vec![step(StepKind::Run("server".into()))],
+            },
+            scope_enter: 0,
+            scope_exit: 0,
+        },
+        timeout_step("30s", vec![step(StepKind::Run("echo quick".into()))]),
+        step(StepKind::Cancel { var: "srv".into() }),
+    ];
+    let mock = MockProcessManager::default();
+    // Two never-ready plans, not one: the ASYNC worker thread and the
+    // TIMEOUT body's cancellable foreground spawn race for plan order,
+    // and whichever spawn loses must still observe a pending handle.
+    // (`wait()` on the foreground handle returns at once regardless;
+    // only `try_wait` polls the countdown, so the instant body is
+    // unaffected either way.)
+    mock.push_bg_plan(usize::MAX, success_status());
+    mock.push_bg_plan(usize::MAX, success_status());
+    let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
+    let start = std::time::Instant::now();
+    run_steps_with_manager(fs, &steps, mock.clone(), ExecIo::new())
+        .expect("instant body under TIMEOUT must not wait out a prior server task");
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(5),
+        "TIMEOUT scope must return without joining prior background work"
+    );
+    assert!(
+        mock.killed().contains(&"server".to_string()),
+        "CANCEL must still tear down the server task afterwards, got: {:?}",
+        mock.killed()
+    );
+}
+
+#[test]
 fn public_entrypoint_returns_final_working_directory() {
     let temp = GuardedPath::tempdir().unwrap();
     let root = temp.as_guarded_path().clone();
