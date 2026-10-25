@@ -55,6 +55,29 @@ fn release_script_parses() -> Result<()> {
     Ok(())
 }
 
+/// The whole release script must parse on a small stack, not just a
+/// roomy dev machine: LET-capture used to nest a second full parse
+/// inside the first and trip pest's stack guard on small-stack
+/// runners (musl static binary), failing release day with
+/// `stack limit reached`. Parses here on a 256 KiB thread.
+#[test]
+#[cfg(feature = "markdown")]
+#[cfg_attr(
+    miri,
+    ignore = "reads scripts/gha/gha-rust-release.oxfile from the repository checkout layout"
+)]
+fn release_script_parses_on_small_stack() -> Result<()> {
+    let text = load_release_script()?;
+    let child = std::thread::Builder::new()
+        .stack_size(256 * 1024)
+        .spawn(move || parse_release_script(&text))
+        .context("spawn small-stack parse thread")?;
+    child
+        .join()
+        .map_err(|_| anyhow::anyhow!("small-stack parse panicked"))??;
+    Ok(())
+}
+
 /// The standalone version gate must always parse: it guards the build
 /// matrix, so a breaking language change that invalidates it fails the
 /// PR that makes the change, never release day.

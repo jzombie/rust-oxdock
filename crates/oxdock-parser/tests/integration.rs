@@ -35,6 +35,8 @@ mod platform_display;
 mod remote_block;
 #[path = "integration/run_exec.rs"]
 mod run_exec;
+#[path = "integration/run_shell_stack.rs"]
+mod run_shell_stack;
 #[path = "integration/timeout_block.rs"]
 mod timeout_block;
 #[path = "integration/type_syntax.rs"]
