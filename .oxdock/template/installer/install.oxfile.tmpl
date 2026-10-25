@@ -19,8 +19,10 @@ IF $has_piped {
     LET $bin: STRING = "\{{ env:OXDOCK_BIN }}"
     LET $dir: STRING = "\{{ env:OXDOCK_DIR }}"
 
-    # Install name, default `oxdock`.
-    LET $stem: STRING = "\{{ env:OXDOCK_BINARY_NAME }}"
+    # Install name, default `oxdock`. The stub passes the stem through
+    # untouched; the single strip lives here.
+    LET $rawstem: STRING = "\{{ env:OXDOCK_BINARY_NAME }}"
+    LET $stem: STRING = TEXT_TRIM_SUFFIX($rawstem, ".exe")
     LET $missing_stem: BOOL = $stem == ""
 
     IF $missing_stem {
@@ -89,17 +91,23 @@ IF $has_piped {
             LET $is_ghfile: BOOL = $ghkind == "file"
 
             IF $is_ghfile {
-                # `local` builds bridge no expected version: derive it
-                # from the binary instead of parsing in shell.
-                LET $envexp: STRING = "\{{ env:OXDOCK_EXPECTED_VERSION }}"
-                LET $missing_envexp: BOOL = $envexp == ""
-                LET $expected: STRING = $envexp
+                # Expected version: bridged value wins; otherwise derive
+                # from the placed binary, else from the tag. One rule,
+                # here, never in shell.
+                LET $bridge: STRING = "\{{ env:OXDOCK_EXPECTED_VERSION }}"
+                LET $missing_bridge: BOOL = $bridge == ""
+                LET $expected: STRING = $bridge
 
-                IF $missing_envexp {
-                    LET $pv: PIPE
-                    WITH_IO [stdout=$pv] RUN ["\{{ $dest }}", "--version"]
-                    WITH_IO [stdin=$pv] READ_LINE $rawver
-                    $expected = TEXT_TRIM_PREFIX($rawver, "oxdock ")
+                IF $missing_bridge {
+                    IF $has_bin {
+                        LET $bv: PIPE
+                        WITH_IO [stdout=$bv] RUN ["\{{ $dest }}", "--version"]
+                        WITH_IO [stdin=$bv] READ_LINE $rawver
+                        $expected = TEXT_TRIM_PREFIX($rawver, "oxdock ")
+                    } ELSE {
+                        LET $vtag: STRING = "\{{ env:OXDOCK_VERSION }}"
+                        $expected = TEXT_TRIM_PREFIX($vtag, "v")
+                    }
                 }
 
                 LET $has_expected: BOOL = $expected != ""

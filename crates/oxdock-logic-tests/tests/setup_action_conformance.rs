@@ -61,6 +61,8 @@ fn install_script_pins_single_path() -> Result<()> {
         "OXDOCK_BINARY_NAME",
         "OXDOCK_SKIP_DOWNLOAD",
         "LET $skip: BOOL",
+        "TEXT_TRIM_SUFFIX",
+        "TEXT_TRIM_PREFIX",
         "LET $has_ghpath: BOOL",
         "LET $has_expected: BOOL",
         "INSTALL $bin $dest",
@@ -192,6 +194,29 @@ fn ci_tail_smokes_and_publishes() -> Result<()> {
 fn ci_tail_derives_version_when_unbridged() -> Result<()> {
     let mut run = ci_tail_harness()?;
     run.io.insert_inherit_env("OXDOCK_EXPECTED_VERSION", "");
+    execute(&run)?;
+    let published = std::fs::read_to_string(run.gh_path.as_path())?;
+    assert!(
+        published.contains(&run.engine_dir.as_path().display().to_string()),
+        "engine directory must land on GITHUB_PATH, got: {published:?}"
+    );
+    Ok(())
+}
+
+/// Tag-derived version: no bridge, no override binary. This is the
+/// stub fresh-tail shape: the tag trims to the expectation.
+#[test]
+#[cfg(unix)]
+#[cfg_attr(
+    miri,
+    ignore = "spawns a real OS process, which dies under Miri isolation"
+)]
+fn ci_tail_derives_version_from_tag() -> Result<()> {
+    let mut run = ci_tail_harness()?;
+    run.io.insert_inherit_env("OXDOCK_BIN", "");
+    run.io.insert_inherit_env("OXDOCK_VERSION", "v0.0.0-test");
+    run.io.insert_inherit_env("OXDOCK_EXPECTED_VERSION", "");
+    write_fixture_engine(&run.engine_dir.join("oxdock-engine-test")?)?;
     execute(&run)?;
     let published = std::fs::read_to_string(run.gh_path.as_path())?;
     assert!(

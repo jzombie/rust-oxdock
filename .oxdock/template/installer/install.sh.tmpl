@@ -41,19 +41,9 @@ if [ -z "$VERSION" ] || [ "$VERSION" = "latest" ]; then
 
 fi
 
-# CI renames without a shell step: the stem rides to install.oxfile,
-# which defaults empty to `oxdock`. Strip a trailing .exe so a stem
-# plus the oxfile's Windows suffix never doubles. Public runs leave
-# OXDOCK_BINARY_NAME unset and place bare `oxdock`.
-BINARY_NAME="${OXDOCK_BINARY_NAME:-oxdock}"
-
-case "$BINARY_NAME" in
-  *.exe) BINARY_NAME="${BINARY_NAME%.exe}" ;;
-esac
-
-# DSL has no string surgery: strip the leading `v` here for the hard
-# `--version`-vs-expected gate bridged below.
-EXPECTED_VERSION="${VERSION#v}"
+# Install name and expected version ride through untouched: the
+# single strip lives in install.oxfile (TEXT_TRIM_SUFFIX/PREFIX),
+# never here.
 
 case "$(uname -s)-$(uname -m)" in
   Darwin-arm64) TARGET="aarch64-apple-darwin" ;;
@@ -334,8 +324,7 @@ fi
   OXDOCK_BIN="$BIN" \
   OXDOCK_DIR="$OXDOCK_DIR" \
   OXDOCK_VERSION="$VERSION" \
-  OXDOCK_BINARY_NAME="$BINARY_NAME" \
-  OXDOCK_EXPECTED_VERSION="$EXPECTED_VERSION" \
+  OXDOCK_BINARY_NAME="${OXDOCK_BINARY_NAME:-}" \
   OXDOCK_SKIP_DOWNLOAD=0 \
   OXDOCK_INTERPRETER="$ENGINE" \
   OXDOCK_PIPED_SCRIPT="$OXDOCK_PIPED_SCRIPT" \
@@ -351,22 +340,27 @@ fi
 
 # CI tail under the fresh binary: the oxfile above verified and placed
 # under the old engine; re-running the same file with SKIP=1 proves the
-# fresh binary runs DSL before its directory lands on PATH. Dual-gated
-# in shell exactly like the oxfile: GITHUB_PATH must name a real file
-# and an expected version must be bridged, so off-runner this is a
-# no-op and `curl | bash` never touches CI files.
-if [ -n "$EXPECTED_VERSION" ] && [ -n "${GITHUB_PATH:-}" ] && [ -f "$GITHUB_PATH" ]; then
-  FRESH="$OXDOCK_DIR/$BINARY_NAME"
+# fresh binary runs DSL before its directory lands on PATH. Gated here
+# on the PATH file alone; the oxfile owns the version gate, so
+# off-runner this is a no-op and `curl | bash` never touches CI files.
+if [ -n "${GITHUB_PATH:-}" ] && [ -f "$GITHUB_PATH" ]; then
+  RAW_NAME="${OXDOCK_BINARY_NAME:-oxdock}"
 
-  case "$(uname -s)" in
-    MINGW64*|MSYS*|CYGWIN*) FRESH="$FRESH.exe" ;;
+  case "$RAW_NAME" in
+    *.exe) FRESH="$OXDOCK_DIR/$RAW_NAME" ;;
+    *)
+      FRESH="$OXDOCK_DIR/$RAW_NAME"
+
+      case "$(uname -s)" in
+        MINGW64*|MSYS*|CYGWIN*) FRESH="$FRESH.exe" ;;
+      esac
+      ;;
   esac
 
   (cd "$tmp" && \
     OXDOCK_DIR="$OXDOCK_DIR" \
     OXDOCK_VERSION="$VERSION" \
-    OXDOCK_BINARY_NAME="$BINARY_NAME" \
-    OXDOCK_EXPECTED_VERSION="$EXPECTED_VERSION" \
+    OXDOCK_BINARY_NAME="$RAW_NAME" \
     OXDOCK_SKIP_DOWNLOAD=1 \
     "$FRESH" "$tmp/{{ $docs_global.stub_name_oxfile }}") || {
     code=$?
