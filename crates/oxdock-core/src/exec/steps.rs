@@ -354,6 +354,21 @@ pub(super) fn sync_iteration_assert_needles<P: ProcessManager>(
     Ok(())
 }
 
+/// Pseudo-terminal request carried from `WITH_IO [tty]` bindings to
+/// the `RUN` handlers: terminal geometry for the pty master. `None`
+/// (the common case) keeps hermetic pipes. Only `with_io` populates
+/// this from the step bindings; every other context constructs `None`.
+/// Dimensions stay optional until spawn: unnamed sides read the host
+/// terminal when one sits behind our own stdio, falling back to the
+/// shared default otherwise.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TtyRequest {
+    /// Terminal rows (`rows = <int>`), or `None` to read the host.
+    pub rows: Option<u16>,
+    /// Terminal columns (`cols = <int>`), or `None` to read the host.
+    pub cols: Option<u16>,
+}
+
 /// Per-step execution context handed to every command handler.
 ///
 /// Host-registered functions receive this context: read script state through
@@ -384,6 +399,11 @@ pub struct StepCtx<'a, P: ProcessManager> {
     /// reads without touching shared pipe semantics (`None` for OS pairs,
     /// which fall back to blocking reads).
     pub(super) stdin_pipe: Option<Arc<PipeInner>>,
+    /// Pseudo-terminal request from an enclosing `WITH_IO [tty]`
+    /// binding. `RUN` handlers spawn through the shared pty pump when
+    /// this is `Some`; every other command ignores it (lowering rejects
+    /// `tty` outside `RUN` before execution reaches them).
+    pub(super) tty: Option<TtyRequest>,
 }
 
 impl<'a, P: ProcessManager> StepCtx<'a, P> {
@@ -406,6 +426,7 @@ impl<'a, P: ProcessManager> StepCtx<'a, P> {
             err,
             out_pipe: None,
             stdin_pipe: None,
+            tty: None,
         }
     }
 
@@ -726,6 +747,7 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
     err: Option<StreamHandle>,
     out_pipe: Option<Arc<PipeInner>>,
     stdin_pipe: Option<Arc<PipeInner>>,
+    tty: Option<TtyRequest>,
 ) -> Result<Flow> {
     let mut cx = StepCtx {
         state,
@@ -736,6 +758,7 @@ pub(super) fn execute_single_step_with_generation<P: ProcessManager>(
         err,
         out_pipe,
         stdin_pipe,
+        tty,
     };
     // Compound steps (loops, functions, scoped wrappers) participate in
     // Flow and dispatch through the Flow path; every other variant runs
@@ -1061,6 +1084,7 @@ fn execute_steps_inner<P: ProcessManager>(
                 err: err.clone(),
                 out_pipe: out_pipe.clone(),
                 stdin_pipe: stdin_pipe.clone(),
+                tty: None,
             };
             // Function/loop control steps dispatch through the Flow path;
             // every other variant runs the leaf pipeline and yields Done.

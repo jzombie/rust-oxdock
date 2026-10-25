@@ -189,6 +189,7 @@ fn invoke_sample<P: ProcessManager + Send + 'static>(
                     err: None,
                     out_pipe: None,
                     stdin_pipe: None,
+                    tty: None,
                 };
                 let _ = done_tx.send(match func(&mut cx, args) {
                     Ok(value) => SampleOutcome::Ok(value),

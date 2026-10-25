@@ -1,6 +1,6 @@
 use anyhow::{Context, Result, anyhow, bail};
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use flate2::Compression;
 use flate2::write::GzEncoder;
@@ -8,6 +8,8 @@ use oxdock_fs::CopySourceRoot;
 use oxdock_fs::EntryKind;
 use oxdock_fs::GuardedPath;
 use oxdock_fs::PathResolver;
+use oxdock_fs::PolicyPath;
+use oxdock_fs::command_path;
 use oxdock_fs::to_forward_slashes;
 use oxdock_parser::{
     Arg, Expr, IoBinding, IoStream, PipeTarget, Step, StepKind, TypeTag, Value, WorkspaceTarget,
@@ -15,8 +17,10 @@ use oxdock_parser::{
 };
 use oxdock_process::{
     BackgroundHandle, CommandOptions, CommandResult, CommandStderr, CommandStdin, CommandStdout,
-    INHERIT_STDOUT_ENV_VAR, PROCESS_DEBUG_ENV_VAR, ProcessManager, SharedInput,
+    INHERIT_STDOUT_ENV_VAR, PROCESS_DEBUG_ENV_VAR, ProcessManager, SharedInput, batch_shell,
+    check_spawn_anchors, read_pump_chunk,
 };
+use oxdock_pty::{PtyInput, PtyOutcome, PtyRequest, WatchSize, run_pty_session};
 use oxdock_remote_proto::tar::{StreamedEntry, sanitize_rel, unpack_auto_from};
 use sha2::{Digest, Sha256};
 
@@ -26,8 +30,8 @@ use super::fs_ops::{canonical_cwd, copy_entry, hash_path};
 use super::io::{StreamHandle, TaskTee, TeeStream, write_stdout};
 use super::native::FuncBody;
 use super::state::{ExecState, MAX_CALL_DEPTH, TaskPhase};
-use super::steps::{Flow, StepCtx};
-use oxdock_pipe::{KeeperGuard, PipeHandle, PipeInner};
+use super::steps::{Flow, StepCtx, TtyRequest};
+use oxdock_pipe::{KeeperGuard, PipeHandle, PipeInner, SharedOutput};
 
 /// Map a Flow reaching a context-free boundary (pipeline top, thread join)
 /// into status. Only Done passes; anything else is a step-numbered error
@@ -135,6 +139,11 @@ pub(super) fn env<P: ProcessManager>(
 }
 
 pub(super) fn run<P: ProcessManager>(cx: &mut StepCtx<'_, P>, idx: usize, cmd: &str) -> Result<()> {
+    // Terminal steps spawn through the shared pty pump instead of the
+    // process manager; everything else below stays hermetic pipes.
+    if let Some(tty) = cx.tty {
+        return run_pty(cx, idx, &tty_shell_argv(cmd), tty, cmd, true);
+    }
     let ctx = cx.state.command_ctx()?;
     let step_stdin = if cx.expose_stdin {
         cx.stdin.clone()
@@ -266,6 +275,12 @@ pub(super) fn run_argv<P: ProcessManager>(
     idx: usize,
     argv: &[String],
 ) -> Result<()> {
+    // Terminal steps spawn through the shared pty pump instead of the
+    // process manager; everything else below stays hermetic pipes.
+    if let Some(tty) = cx.tty {
+        let what = format!("{argv:?}");
+        return run_pty(cx, idx, argv, tty, &what, false);
+    }
     let ctx = cx.state.command_ctx()?;
     let step_stdin = if cx.expose_stdin {
         cx.stdin.clone()
@@ -382,6 +397,141 @@ pub(super) fn run_argv<P: ProcessManager>(
         );
     }
     Ok(())
+}
+
+/// Pseudo-terminal counterpart of [`run`]/[`run_argv`]: spawns `argv`
+/// under a pty through the shared pump instead of the process manager,
+/// blocking the step like any `RUN` until the child exits and its
+/// output drains.
+///
+/// The terminal request rides `cx.tty` (populated only by `with_io`
+/// from `[tty]` bindings); every other path keeps hermetic pipes. The
+/// master is one interleaved stream: it lands exclusively in the step
+/// stdout sink, stdin flows only from a `stdin = $p` script pipe (bare
+/// `[tty]` runs closed), and cancellation kills the child through the
+/// pump's own path before reporting like any interrupted `RUN`.
+/// Environment, anchors, and working directory mirror [`run_argv`]
+/// exactly: closed child env from the script map, the same anchor
+/// pre-flight the native spawn runs (`shell` selects the shell-form
+/// `PATH` requirement), the same snapshot-choked cwd. `what` renders
+/// the step in errors exactly like the calling form.
+#[allow(clippy::too_many_arguments)]
+fn run_pty<P: ProcessManager>(
+    cx: &mut StepCtx<'_, P>,
+    idx: usize,
+    argv: &[String],
+    tty: TtyRequest,
+    what: &str,
+    shell: bool,
+) -> Result<()> {
+    use std::sync::atomic::Ordering;
+    if argv.is_empty() {
+        bail!("step {}: RUN {what} needs at least a program", idx + 1);
+    }
+    // Same pre-spawn cancellation refusal as [`run`].
+    if cx.state.cancel_token.load(Ordering::SeqCst) {
+        bail!("step {}: RUN {what} interrupted by cancellation", idx + 1);
+    }
+    if std::env::var(PROCESS_DEBUG_ENV_VAR).is_ok() {
+        eprintln!("DEBUG: step RUN {what} under tty {tty:?}");
+    }
+    // Closed child env from the script map, staged verbatim after the
+    // same anchor pre-flight the native spawn runs inside `apply_ctx`.
+    let ctx = cx.state.command_ctx()?;
+    let staged = ctx.envs().as_ref().clone();
+    check_spawn_anchors(&argv[0], &staged, shell)?;
+    let cwd = match ctx.cwd() {
+        PolicyPath::Guarded(p) => command_path(p).to_string_lossy().into_owned(),
+        PolicyPath::Unguarded(p) => p.as_path().to_string_lossy().into_owned(),
+    };
+    // Stdin feeds the master only from a `stdin = $p` script pipe: the
+    // backend behind it carries the wake hook that releases a worker
+    // parked in a blocking read when the child dies. Anything else
+    // (bare `[tty]`, ambient inheritance, unwakeable descriptors) runs
+    // closed instead of stranding the session on a worker that can
+    // never observe exit.
+    let input = match &cx.stdin {
+        CommandStdin::Null | CommandStdin::Inherit => None,
+        CommandStdin::Stream(reader) => match cx.stdin_pipe.clone() {
+            Some(backend) => {
+                let reader = reader.clone();
+                Some(PtyInput {
+                    read_chunk: Box::new(move |buf| read_pump_chunk(&reader, buf)),
+                    cancel: Box::new(move || {
+                        backend.cancel();
+                    }),
+                })
+            }
+            None => None,
+        },
+        #[cfg(not(miri))]
+        CommandStdin::OsPipe(_) => {
+            bail!(
+                "step {}: WITH_IO [tty] stdin cannot arrive on a live OS pipe; bind a script pipe with stdin=$var",
+                idx + 1
+            )
+        }
+    };
+    // Master output lands exclusively in the step stdout sink. `None`
+    // inherits host stdout, matching `write_stdout`; a live OS handle
+    // is unreachable (terminal stdio resolves bridged), so it stays a
+    // defensive bail like the DSL writers.
+    let output: SharedOutput = match &cx.out {
+        Some(StreamHandle::Stream(writer)) => writer.clone(),
+        None => Arc::new(Mutex::new(std::io::stdout())),
+        #[cfg(not(miri))]
+        Some(StreamHandle::Os(_)) => {
+            bail!(
+                "step {}: WITH_IO [tty] stdout cannot arrive on a live OS pipe; bind a script pipe with stdout=$var",
+                idx + 1
+            )
+        }
+    };
+    let hub = cx.cancel_hub();
+    let token = cx.cancel_token();
+    // Geometry resolves here, at spawn: unnamed sides read the host
+    // terminal behind our own stdio, so the pty matches the window
+    // the author actually sees, not a stale parse-time guess. The
+    // size cell keeps following the host while the step runs, so a
+    // mid-run resize reaches the child through the normal watcher.
+    let size = oxdock_pty::resolve_size(tty.rows, tty.cols);
+    let outcome = run_pty_session(PtyRequest {
+        argv: argv.to_vec(),
+        env: staged.into_iter().collect(),
+        cwd,
+        initial_size: size,
+        input,
+        output,
+        size_source: WatchSize::following_host(tty.rows, tty.cols),
+        should_cancel: Box::new(move || hub.is_cancelled() || token.load(Ordering::SeqCst)),
+        on_exit: None,
+        on_output_drained: None,
+        func: "RUN",
+    })
+    .with_context(|| format!("step {}: RUN {what}", idx + 1))?;
+    // Pipe EOF rides the writer drops like any `RUN`: the supervisor
+    // returns only after the output worker finished, so every byte is
+    // already in the sink before the code below runs.
+    match outcome {
+        PtyOutcome::Completed(code) => {
+            if code != 0 {
+                bail!("step {}: RUN {what} exited with status {code}", idx + 1);
+            }
+            Ok(())
+        }
+        PtyOutcome::Cancelled => {
+            bail!("step {}: RUN {what} interrupted by cancellation", idx + 1);
+        }
+    }
+}
+
+/// Shell-form argv for a terminal spawn: the same deterministic batch
+/// shell the native spawn runs (`sh -c` / `cmd /C`), so shell steps
+/// read identically under pipes and under a pty.
+fn tty_shell_argv(cmd: &str) -> Vec<String> {
+    #[allow(clippy::disallowed_macros)]
+    let flag = if cfg!(windows) { "/C" } else { "-c" };
+    vec![batch_shell(), flag.to_string(), cmd.to_string()]
 }
 
 /// Resolve exec-form (`RUN [...]`) argv elements with explicit coercion:
@@ -2001,6 +2151,7 @@ pub(crate) fn with_io<P: ProcessManager>(
 ) -> Result<Flow> {
     let (step_stdin, next_expose_stdin, step_stdout, step_stderr, out_pipe, stdin_pipe) =
         resolve_io_streams(cx, idx, bindings, cmd)?;
+    let tty = tty_request(idx, bindings, cmd)?;
 
     super::steps::execute_single_step_with_generation(
         cx.state,
@@ -2014,7 +2165,54 @@ pub(crate) fn with_io<P: ProcessManager>(
         step_stderr,
         out_pipe,
         stdin_pipe,
+        tty,
     )
+}
+
+/// Extract the pty request from `WITH_IO` bindings, enforcing the
+/// terminal rules every construction shares (direct steps and
+/// block-expanded defaults alike reach this through `with_io`, so the
+/// parser's span-carrying checks stay advisory while these decide).
+/// Returns `None` for terminal-unaware steps, keeping hermetic pipes.
+/// Geometry stays unresolved here: the spawn reads the host terminal
+/// for unnamed sides, so a size change between steps is honored.
+fn tty_request(idx: usize, bindings: &[IoBinding], cmd: &StepKind) -> Result<Option<TtyRequest>> {
+    let mut tty = false;
+    let mut rows = None;
+    let mut cols = None;
+    for binding in bindings {
+        match binding.stream {
+            IoStream::Tty => tty = true,
+            IoStream::Rows(value) => rows = Some(value),
+            IoStream::Cols(value) => cols = Some(value),
+            IoStream::Stdin | IoStream::Stdout | IoStream::Stderr => {}
+        }
+    }
+    if !tty {
+        if rows.is_some() || cols.is_some() {
+            bail!(
+                "step {}: WITH_IO [rows]/[cols] need [tty] on the same step: geometry without a terminal has nothing to size",
+                idx + 1
+            );
+        }
+        return Ok(None);
+    }
+    if bindings
+        .iter()
+        .any(|b| matches!(b.stream, IoStream::Stderr))
+    {
+        bail!(
+            "step {}: WITH_IO [tty] cannot bind stderr: the pty master carries stdout and stderr interleaved, so the two streams cannot demultiplex",
+            idx + 1
+        );
+    }
+    match cmd {
+        StepKind::Run(_) | StepKind::RunExec { .. } => Ok(Some(TtyRequest { rows, cols })),
+        _ => bail!(
+            "step {}: WITH_IO [tty] only wraps a RUN step: the pty master is one interleaved child stream, so terminal-unaware commands cannot run under it",
+            idx + 1
+        ),
+    }
 }
 
 /// Resolve `WITH_IO` bindings against the active context handles, shared by
@@ -2048,6 +2246,9 @@ fn resolve_io_streams<P: ProcessManager>(
     let mut seen_stdin = false;
     let mut seen_stdout = false;
     let mut seen_stderr = false;
+    let mut seen_tty = false;
+    let mut seen_rows = false;
+    let mut seen_cols = false;
     // `direct` (take vs bridged-shared) still judges by the ultimate
     // command: only RUN consumes raw descriptors. Promotion, in contrast,
     // is decided per handle below by declaration scope : and only on
@@ -2057,6 +2258,17 @@ fn resolve_io_streams<P: ProcessManager>(
     // unshared pipes via the spawn-time pin walk.
     let direct = run_terminated(cmd);
     let allow_promote = cx.state.inside_async;
+    // A pty master is one interleaved byte stream: its stdio stays on
+    // script backends, never on zero copy OS descriptors. The pin walk
+    // already skips terminal-bound handles; suppressing promotion here
+    // as well keeps a handle an outer scope promoted usable through the
+    // take-once bridge instead of a raw descriptor handoff.
+    let tty_present = bindings.iter().any(|b| matches!(b.stream, IoStream::Tty));
+    // Under a terminal the pin walk leaves stdio undecided, so force
+    // script backends here (`direct` only judges take vs bridge on
+    // already-OS handles, which then bridge take-once like DSL
+    // consumers instead of handing the child a raw descriptor).
+    let direct = direct && !tty_present;
 
     for binding in bindings {
         if let Some(target) = &binding.pipe {
@@ -2064,7 +2276,7 @@ fn resolve_io_streams<P: ProcessManager>(
             // Main-flow bindings materialize here; task-body bindings were
             // decided by the spawn-time pin walk, making this a no-op
             // there. Either way the scope check, not the command, rules.
-            let promote = allow_promote && cx.state.can_promote_to_os(&handle);
+            let promote = allow_promote && !tty_present && cx.state.can_promote_to_os(&handle);
             cx.state.io.ensure_handle(&handle, promote)?;
         }
         match binding.stream {
@@ -2076,7 +2288,8 @@ fn resolve_io_streams<P: ProcessManager>(
                 next_expose_stdin = true;
                 (step_stdin, stdin_pipe) = if let Some(target) = &binding.pipe {
                     let handle = resolve_pipe_handle(cx, idx, target)?;
-                    let promote = allow_promote && cx.state.can_promote_to_os(&handle);
+                    let promote =
+                        allow_promote && !tty_present && cx.state.can_promote_to_os(&handle);
                     let (stdin, backend) =
                         cx.state.io.resolve_stdin(idx, &handle, direct, promote)?;
                     (stdin, backend)
@@ -2091,7 +2304,8 @@ fn resolve_io_streams<P: ProcessManager>(
                 seen_stdout = true;
                 (step_stdout, out_pipe) = if let Some(target) = &binding.pipe {
                     let handle = resolve_pipe_handle(cx, idx, target)?;
-                    let promote = allow_promote && cx.state.can_promote_to_os(&handle);
+                    let promote =
+                        allow_promote && !tty_present && cx.state.can_promote_to_os(&handle);
                     let (stdout, backend) =
                         cx.state.io.resolve_stdout(idx, &handle, direct, promote)?;
                     (Some(stdout), backend)
@@ -2106,11 +2320,30 @@ fn resolve_io_streams<P: ProcessManager>(
                 seen_stderr = true;
                 step_stderr = if let Some(target) = &binding.pipe {
                     let handle = resolve_pipe_handle(cx, idx, target)?;
-                    let promote = allow_promote && cx.state.can_promote_to_os(&handle);
+                    let promote =
+                        allow_promote && !tty_present && cx.state.can_promote_to_os(&handle);
                     Some(cx.state.io.resolve_stderr(idx, &handle, direct, promote)?)
                 } else {
                     cx.err.clone()
                 };
+            }
+            IoStream::Tty => {
+                if seen_tty {
+                    bail!("step {}: WITH_IO declared tty more than once", idx + 1);
+                }
+                seen_tty = true;
+            }
+            IoStream::Rows(_) => {
+                if seen_rows {
+                    bail!("step {}: WITH_IO declared rows more than once", idx + 1);
+                }
+                seen_rows = true;
+            }
+            IoStream::Cols(_) => {
+                if seen_cols {
+                    bail!("step {}: WITH_IO declared cols more than once", idx + 1);
+                }
+                seen_cols = true;
             }
         }
     }
@@ -2669,6 +2902,9 @@ pub(crate) fn assign_capture<P: ProcessManager>(
             err: step_stderr,
             out_pipe,
             stdin_pipe,
+            // `CALL` layers never carry a terminal: lowering rejects
+            // `tty` outside `RUN` before execution reaches them.
+            tty: None,
         };
         let value = call_func_value(&mut sub_cx, idx, name, args)?;
         let tag = sub_cx.state.resolve_tag(&decl_type)?;
@@ -2693,6 +2929,9 @@ pub(crate) fn assign_capture<P: ProcessManager>(
         // is no backend to carry.
         None,
         None,
+        // A `WITH_IO [tty]` capture re-resolves its own request when the
+        // inner step runs through `with_io`; ambient carriage stays empty.
+        cx.tty,
     )?;
     match flow {
         Flow::Done => {}
@@ -2826,7 +3065,21 @@ fn collect_body_bindings<P: ProcessManager>(
 ) {
     match kind {
         StepKind::WithIo { bindings, cmd } => {
+            // Terminal stdio never promotes: the pty master is one
+            // interleaved byte stream pumped through script backends,
+            // so its descriptors stay out of the OS-pipe walk even
+            // inside `ASYNC` single-`RUN` bodies that would otherwise
+            // promote them. Geometry bindings carry no pipes.
+            let tty = bindings.iter().any(|b| matches!(b.stream, IoStream::Tty));
             for binding in bindings {
+                if tty
+                    && matches!(
+                        binding.stream,
+                        IoStream::Stdin | IoStream::Stdout | IoStream::Stderr
+                    )
+                {
+                    continue;
+                }
                 let Some(target) = &binding.pipe else {
                     continue;
                 };
@@ -3954,6 +4207,7 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
                 err,
                 out_pipe,
                 stdin_pipe,
+                tty: None,
             };
             // Apply call-site bindings (e.g. stdin pipes) like the inline
             // path; stdout stays shared-live (parse rejects stdout pipes).
@@ -3973,6 +4227,7 @@ pub(crate) fn dispatch_assign_async<P: ProcessManager>(
                     err: task_err,
                     out_pipe: task_out_pipe.or(child_cx.out_pipe.clone()),
                     stdin_pipe: task_stdin_pipe.or(child_cx.stdin_pipe.clone()),
+                    tty: None,
                 };
                 call_func_value(&mut sub_cx, 0, &name, &args)?
             };

@@ -3225,6 +3225,7 @@ fn timeout_preserves_preexisting_cancellation() {
         err: None,
         out_pipe: None,
         stdin_pipe: None,
+        tty: None,
     };
     super::handlers::timeout(&mut cx, 0, &std::time::Duration::from_secs(30), &[])
         .expect("empty body must succeed");

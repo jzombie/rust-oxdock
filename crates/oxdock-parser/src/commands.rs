@@ -242,13 +242,16 @@ fn fmt_raw_arg(arg: &Arg) -> String {
 
 fn fmt_io(b: &IoBinding) -> String {
     let s = match b.stream {
-        IoStream::Stdin => "stdin",
-        IoStream::Stdout => "stdout",
-        IoStream::Stderr => "stderr",
+        IoStream::Stdin => "stdin".to_string(),
+        IoStream::Stdout => "stdout".to_string(),
+        IoStream::Stderr => "stderr".to_string(),
+        IoStream::Tty => "tty".to_string(),
+        IoStream::Rows(rows) => format!("rows={rows}"),
+        IoStream::Cols(cols) => format!("cols={cols}"),
     };
     match &b.pipe {
         Some(PipeTarget::Var(v)) => format!("{}=${}", s, v),
-        None => s.to_string(),
+        None => s,
     }
 }
 
@@ -407,11 +410,12 @@ fn structural_hint(name: &str, received: &str) -> Option<String> {
 }
 
 /// Diagnose a `WITH_IO` line that failed to parse: most often a malformed
-/// binding list (bindings are bare streams or `<stream>=$var`).
+/// binding list (bindings are bare streams, `<stream>=$var`, bare `tty`,
+/// or `rows`/`cols` dimensions).
 fn with_io_hint(got: &str, received: &str) -> String {
     const SYNTAX: &str =
         "WITH_IO needs `WITH_IO [bindings] <command>` or `WITH_IO [bindings] { <commands> }`";
-    const BINDINGS: &str = "bindings are `stdin`, `stdout`, `stderr`, or `<stream>=$var` with a PIPE-typed variable (e.g. `[stdout=$p]`, `[stdin=$p]`)";
+    const BINDINGS: &str = "bindings are `stdin`, `stdout`, `stderr`, or `<stream>=$var` with a PIPE-typed variable (e.g. `[stdout=$p]`, `[stdin=$p]`); `tty` is a bare flag for RUN steps, with `rows = <int>` / `cols = <int>` geometry (e.g. `[tty, rows=40, cols=100]`)";
     if let Some(after_open) = received.strip_prefix('[') {
         match after_open.split_once(']') {
             None => {
@@ -427,9 +431,30 @@ fn with_io_hint(got: &str, received: &str) -> String {
                         Some((stream, binding)) => (stream.trim(), Some(binding.trim())),
                         None => (part, None),
                     };
+                    if matches!(stream, "rows" | "cols") {
+                        let valid = binding.is_some_and(|value| {
+                            value
+                                .parse::<u64>()
+                                .is_ok_and(|dim| (1..=u64::from(u16::MAX)).contains(&dim))
+                        });
+                        if !valid {
+                            return format!(
+                                "{SYNTAX}: invalid geometry `{part}`; `rows`/`cols` need a positive integer 1-65535 (e.g. `rows=40`) and require `tty`; got {got}."
+                            );
+                        }
+                        continue;
+                    }
+                    if stream == "tty" {
+                        if binding.is_some() {
+                            return format!(
+                                "{SYNTAX}: invalid binding `{part}`; `tty` is a bare flag (geometry rides `rows`/`cols`, e.g. `[tty, rows=40]`); got {got}."
+                            );
+                        }
+                        continue;
+                    }
                     if !matches!(stream, "stdin" | "stdout" | "stderr") {
                         return format!(
-                            "{SYNTAX}: invalid stream `{stream}`; expected `stdin`, `stdout`, or `stderr`; got {got}."
+                            "{SYNTAX}: invalid stream `{stream}`; expected `stdin`, `stdout`, `stderr`, or `tty`; got {got}."
                         );
                     }
                     let valid = match binding {
@@ -2089,7 +2114,7 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
     vec![
         CommandMeta {
             name: "WITH_IO",
-            syntax: "WITH_IO [<stream>[=$var], ...] <command> | WITH_IO [bindings] { <commands> }",
+            syntax: "WITH_IO [<stream>[=$var], ...] <command> | WITH_IO [bindings] { <commands> } | WITH_IO [tty[, stdin=$p][, rows=<int>][, cols=<int>]] RUN ...",
             summary: "Reroute standard streams.",
             description: indoc! {r#"
                 Reroutes the standard streams of the next command or, in block form,
@@ -2099,6 +2124,27 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 variable (`stdout=$p`, `stdin=$p`), resolved from the variable
                 when the step runs. Both stdout and stderr pipes capture output
                 the same way. Declare the handle first with `LET $p: PIPE`.
+
+                A `RUN` step can opt into a pseudo-terminal with the bare `tty`
+                flag instead of a new command: `WITH_IO [tty] RUN [...]`
+                spawns the child under a pty sized from the host terminal
+                when it names none (24x80 fallback off-terminal;
+                `rows = <int>` / `cols = <int>` override each side).
+                Unnamed sides track the host window while the step runs
+                (signal-driven on Unix, polled where no window signal
+                exists); explicit sides stay pinned.
+                The master carries the child's interleaved stdout and stderr
+                as one stream, so it routes exclusively to `stdout` (step
+                capture or a `stdout = $p` pipe): `stderr` bindings alongside
+                `tty` are rejected, and `tty` outside a `RUN` step is
+                rejected. `stdin = $p` feeds the master; bare `[tty]`
+                leaves stdin closed. Expect pty translation in assertions:
+                newlines arrive as carriage return plus newline, and prompts
+                echo input. An input pipe that EOFs contributes a
+                terminal-echoed end-of-transmission marker on some
+                platforms: prefer `ASSERT_CONTAINS` over byte-exact
+                assertions on fed sessions. Pty-backed descriptors never promote to OS
+                kernel pipes, even inside `ASYNC` single-`RUN` bodies.
 
                 Pipes hold bytes in memory and spill to a temp file above 8 MiB, so a
                 producer can finish before the consumer starts.
@@ -2153,6 +2199,18 @@ pub fn all_structural_metadata() -> Vec<CommandMeta> {
                 WITH_IO [stdout=$p] ECHO hello
                 WITH_IO [stdin=$p] READ_LINE $line
                 ASSERT_EQ $line "hello"
+            "#},
+                },
+                Example {
+                    name: "pty terminal binding",
+                    fence_meta: None,
+                    code: indoc! {r#"
+                # A RUN step under bare `tty` sees a terminal: newlines
+                # arrive translated, so assert with CONTAINS, never EQ.
+                LET $p: PIPE
+                WITH_IO [tty, stdout=$p] RUN "echo hello-tty"
+                WITH_IO [stdin=$p] READ_LINE $line
+                ASSERT_CONTAINS $line "hello-tty"
             "#},
                 },
             ],

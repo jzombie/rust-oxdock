@@ -1160,19 +1160,25 @@ jobs:
           WITH_IO [stdin=$p] READ_LINE $got
           ASSERT_EQ $got "oxdock {{ $manifest.workspace.package.version }}"
 
-          # Interactive destination prompt, Unix only: no pty on
-          # Windows runners, and the DSL limb is OS-agnostic. A pty
-          # makes the stub treat stdin as a console; the answer pipes
-          # through it into the prompt.
-          [family:unix] LET $promptdir: STRING = "{{ env:RUNNER_TEMP }}/oxprompt-fresh"
-          [os:linux] RUN ["sh", "-c", "printf '%s\n' '{{ $promptdir }}' | script -qec 'bash ./install.sh' /dev/null"]
-          [os:macos] RUN ["sh", "-c", "printf '%s\n' '{{ $promptdir }}' | script -q /dev/null bash ./install.sh"]
-          [family:unix] LET $pkind: STRING = PATH_TYPE("{{ $promptdir }}/oxdock")
-          [family:unix] ASSERT_EQ $pkind "file"
-          [family:unix] LET $pp: PIPE
+          # Interactive destination prompt on every runner: the
+          # terminal makes the stub treat stdin as a console, and the
+          # answer pipes through the master into the prompt. One
+          # portable stanza replaces the old per-OS `script(1)` shim;
+          # Windows rides the same surface through ConPTY.
+          LET $promptdir: STRING = "{{ env:RUNNER_TEMP }}/oxprompt-fresh"
+          [family:windows] $promptdir = "{{ env:RUNNER_TEMP }}\\oxprompt-fresh"
+          LET $answer: PIPE
+          WITH_IO [stdout=$answer] ECHO "{{ $promptdir }}"
+          [family:unix] WITH_IO [tty, stdin=$answer] RUN ["bash", "./install.sh"]
+          [family:windows] WITH_IO [tty, stdin=$answer] RUN ["pwsh", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", ".\\install.ps1"]
+          LET $pkind: STRING = PATH_TYPE("{{ $promptdir }}/oxdock")
+          [family:windows] $pkind = PATH_TYPE("{{ $promptdir }}\\oxdock.exe")
+          ASSERT_EQ $pkind "file"
+          LET $pp: PIPE
           [family:unix] WITH_IO [stdout=$pp] RUN ["{{ $promptdir }}/oxdock", "--version"]
-          [family:unix] WITH_IO [stdin=$pp] READ_LINE $pgot
-          [family:unix] ASSERT_EQ $pgot "oxdock {{ $manifest.workspace.package.version }}"
+          [family:windows] WITH_IO [stdout=$pp] RUN ["{{ $promptdir }}\\oxdock.exe", "--version"]
+          WITH_IO [stdin=$pp] READ_LINE $pgot
+          ASSERT_EQ $pgot "oxdock {{ $manifest.workspace.package.version }}"
 
           CANCEL $srv
 

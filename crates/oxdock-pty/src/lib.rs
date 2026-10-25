@@ -22,4 +22,7 @@ mod size;
 pub use drain::{DRAIN_CAP_MS, DRAIN_QUIESCE_MS, drain_overdue};
 pub use filter::DsrFilter;
 pub use run::{PtyInput, PtyOutcome, PtyRequest, ReadChunk, run_pty_session};
-pub use size::{PtySize, SizeSource, WatchSize};
+pub use size::{
+    DEFAULT_TTY_COLS, DEFAULT_TTY_ROWS, PtySize, SizeSource, WatchSize, host_terminal_size,
+    resolve_size,
+};

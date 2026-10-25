@@ -197,6 +197,15 @@ if (-not $env:OXDOCK_STUB_ACTIVE) {
 
   }
 
+  # Interactive consoles confirm the destination in the oxfile: export
+  # the flag only with a console behind stdin. Re-probed, never
+  # inherited: under ConPTY the session is interactive with no
+  # redirection, under pipes the stdin drain above already decided
+  # piped vs install, so the answer matches on re-entry.
+  if ([Environment]::UserInteractive -and -not [Console]::IsInputRedirected) {
+    $env:OXDOCK_INTERACTIVE = '1'
+  }
+
   $env:OXDOCK_STUB_ACTIVE = '1'
 
   & (Join-Path $VDir 'install.ps1')

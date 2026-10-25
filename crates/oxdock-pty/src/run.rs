@@ -163,21 +163,27 @@ struct PtyTerm {
 }
 
 /// Release nudge replicating portable-pty's Unix master-writer drop:
-/// newline plus EOT so a stdin-blocked child observes EOF and exits.
+/// EOT so a stdin-blocked child observes EOF and exits, led by a
+/// newline only when the fed bytes end mid-line (canonical-mode VEOF
+/// already submits a buffered partial line, while a leading newline
+/// on a line-complete buffer would inject a phantom empty line).
 /// Upstream only has this behavior on Unix (its Windows master writer
 /// drop just closes the handle), so this is unix-only too: Windows
 /// console children must never observe stray input bytes.
-fn send_release_nudge(writer: &Arc<Mutex<Box<dyn Write + Send>>>) {
+fn send_release_nudge(writer: &Arc<Mutex<Box<dyn Write + Send>>>, newline: bool) {
     #[cfg(unix)]
     if let Ok(mut guard) = writer.lock() {
         // Default termios VEOF (Ctrl-D); our ptys never customize it,
         // and the fd hides behind the trait object, so the byte is
         // fixed here rather than read back like upstream does.
-        let _ = guard.write_all(b"\n\x04");
+        if newline {
+            let _ = guard.write_all(b"\n");
+        }
+        let _ = guard.write_all(b"\x04");
         let _ = guard.flush();
     }
     #[cfg(not(unix))]
-    let _ = writer;
+    let _ = (writer, newline);
 }
 
 /// Pump master-terminal output into the sink. Ends on master EOF
@@ -249,15 +255,21 @@ fn pump_master_out(
 
 /// Pump caller stdin bytes into the master writer until EOF,
 /// cancellation, or `peer_done` (child gone: bytes would have nowhere
-/// to go).
+/// to go). Reports whether the fed bytes end mid-line: the release
+/// nudge must submit a pending partial line before signalling EOF,
+/// but must not inject a newline when the buffer is already
+/// line-complete (that newline would echo back as a phantom empty
+/// line and hand the next reader a spurious blank instead of EOF).
 fn pump_stdin_to_master(
     read_chunk: &mut (dyn FnMut(&mut [u8]) -> std::io::Result<usize> + Send),
     master: &Arc<Mutex<Box<dyn Write + Send>>>,
     cancel: &Arc<AtomicBool>,
     peer_done: &Arc<AtomicBool>,
     func: &'static str,
-) -> Result<()> {
+) -> Result<bool> {
     let mut buffer = [0u8; PUMP_CHUNK];
+    let mut fed = false;
+    let mut ends_newline = true;
     loop {
         if cancel.load(Ordering::SeqCst) || peer_done.load(Ordering::SeqCst) {
             break;
@@ -275,10 +287,75 @@ fn pump_stdin_to_master(
                 if guard.flush().is_err() {
                     break;
                 }
+                fed = true;
+                ends_newline = buffer[count - 1] == b'\n';
             }
         }
     }
-    Ok(())
+    Ok(fed && !ends_newline)
+}
+
+/// Spawn the Unix window-change watch: one thread blocked in SIGWINCH
+/// delivery, repolling host-tracked dimensions on each signal and
+/// asking the supervisor to apply real moves through the normal
+/// resize path. Returns the close handle plus the thread when the
+/// source tracks the host; `None` for static cells and remote
+/// sessions (no watch, opener size stands), and on signal-registry
+/// failure (same static fallback, never a session failure).
+#[cfg(unix)]
+fn spawn_sigwinch_watch(
+    size_source: &Arc<dyn SizeSource>,
+    event_tx: &mpsc::Sender<PtyEvent>,
+) -> Option<(signal_hook::iterator::Handle, std::thread::JoinHandle<()>)> {
+    if !size_source.follows_host() {
+        return None;
+    }
+    let mut signals = signal_hook::iterator::Signals::new([signal_hook::consts::SIGWINCH]).ok()?;
+    let handle = signals.handle();
+    let size = Arc::clone(size_source);
+    let tx = event_tx.clone();
+    let thread = std::thread::spawn(move || {
+        for _ in signals.forever() {
+            // Unchanged probes stay silent; only real moves reach the
+            // supervisor, so a stray SIGWINCH never re-SIGWINCHes the
+            // child for an identical size.
+            if size.repoll() {
+                let _ = tx.send(PtyEvent::Resize);
+            }
+        }
+    });
+    Some((handle, thread))
+}
+
+/// Spawn the repoll watch for platforms without a window signal: one
+/// thread re-reading host-tracked dimensions on a bounded tick,
+/// retired through the shared stop below. `None` for static cells
+/// and remote sessions, like the SIGWINCH watch.
+#[cfg(windows)]
+fn spawn_repoll_watch(
+    size_source: &Arc<dyn SizeSource>,
+    stop: &Arc<AtomicBool>,
+    event_tx: &mpsc::Sender<PtyEvent>,
+) -> Option<std::thread::JoinHandle<()>> {
+    if !size_source.follows_host() {
+        return None;
+    }
+    let size = Arc::clone(size_source);
+    let tx = event_tx.clone();
+    let stop = Arc::clone(stop);
+    Some(std::thread::spawn(move || {
+        while !stop.load(Ordering::SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(
+                crate::size::HOST_FOLLOW_POLL_MS,
+            ));
+            if stop.load(Ordering::SeqCst) {
+                break;
+            }
+            if size.repoll() {
+                let _ = tx.send(PtyEvent::Resize);
+            }
+        }
+    }))
 }
 
 /// Run one pty session to completion: spawn under a pty sized from
@@ -395,8 +472,18 @@ pub fn run_pty_session(mut req: PtyRequest<'_>) -> Result<PtyOutcome> {
                 // Unix EOF nudge replicating portable-pty's master-writer
                 // drop: the shared writer outlives this worker, so
                 // without it a stdin-blocked child never observes EOF.
-                send_release_nudge(&nudge_writer);
-                result
+                // The pump reports whether a partial line is still
+                // pending; only then does the nudge lead with a newline.
+                match result {
+                    Ok(partial) => {
+                        send_release_nudge(&nudge_writer, partial);
+                        Ok(())
+                    }
+                    Err(err) => {
+                        send_release_nudge(&nudge_writer, true);
+                        Err(err)
+                    }
+                }
             }));
             let outcome = match outcome {
                 Ok(inner) => inner,
@@ -445,6 +532,17 @@ pub fn run_pty_session(mut req: PtyRequest<'_>) -> Result<PtyOutcome> {
             }
         }
     });
+    // Host-window watch: repoll host-tracked dimensions on
+    // window-change events so unnamed sides follow the host while the
+    // step runs. Unix learns promptly through SIGWINCH; platforms
+    // without a window signal repoll on a bounded tick instead.
+    // Sources without host-tracked dimensions (static cells, remote
+    // sessions) need no watch and run exactly as before. Retired
+    // explicitly below alongside the resize watcher.
+    #[cfg(unix)]
+    let sigwinch_watch = spawn_sigwinch_watch(&req.size_source, &event_tx);
+    #[cfg(windows)]
+    let repoll_watch = spawn_repoll_watch(&req.size_source, &resize_stop, &event_tx);
     // Supervisor: drain completions, apply resizes, arm the drain
     // deadline, and break at once on cancellation. Every wake path is
     // idempotent so repeated wakes while cancelled stay harmless.
@@ -578,6 +676,19 @@ pub fn run_pty_session(mut req: PtyRequest<'_>) -> Result<PtyOutcome> {
     resize_stop.store(true, Ordering::SeqCst);
     req.size_source.poke();
     let _ = resize_watcher.join();
+    // Retire the host-window watch: closing wakes the blocked
+    // iterator at once on Unix, so the join is prompt like the
+    // watcher above; the shared stop plus the tick bound it
+    // everywhere else.
+    #[cfg(unix)]
+    if let Some((handle, thread)) = sigwinch_watch {
+        handle.close();
+        let _ = thread.join();
+    }
+    #[cfg(windows)]
+    if let Some(thread) = repoll_watch {
+        let _ = thread.join();
+    }
     if let Some(err) = failed {
         return Err(err);
     }

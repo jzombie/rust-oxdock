@@ -114,6 +114,10 @@ fn smoke_steps_parse_and_cover_all_legs() -> Result<()> {
         "installed oxdock",
         "| iex",
         "INHERIT_ENV [OXDOCK_OXFILE_URL, SMOKE_PORT",
+        // Terminal prompt: the isolated leg answers the destination
+        // prompt through a pty master, never a `script(1)` shim, so a
+        // revert to shell hacks fails loudly here.
+        "WITH_IO [tty",
     ] {
         assert!(
             joined.contains(marker),

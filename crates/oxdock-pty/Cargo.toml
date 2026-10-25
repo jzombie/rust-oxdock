@@ -14,5 +14,12 @@ publish.workspace = true
 anyhow.workspace = true
 portable-pty.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+signal-hook.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys.workspace = true
+
 [lints]
 workspace = true
