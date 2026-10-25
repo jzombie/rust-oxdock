@@ -1676,7 +1676,7 @@ fn unknown_serve_option_bails() {
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
-         INHERIT_ENV [PATH]
+            INHERIT_ENV [PATH]
             LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-bad-option", {username: "guest", password: "pass", frobnicate: 1})
             SSH_CLOSE($m.server)
         "#},
@@ -1701,7 +1701,7 @@ fn non_map_serve_options_bails() {
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
-         INHERIT_ENV [PATH]
+            INHERIT_ENV [PATH]
             LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-bad-options", "nope")
             SSH_CLOSE($m.server)
         "#},
@@ -1722,7 +1722,7 @@ fn missing_username_bails() {
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
-         INHERIT_ENV [PATH]
+            INHERIT_ENV [PATH]
             LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-no-user", {password: "pass"})
             SSH_CLOSE($m.server)
         "#},
@@ -1747,7 +1747,7 @@ fn empty_password_bails() {
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
-         INHERIT_ENV [PATH]
+            INHERIT_ENV [PATH]
             LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-empty-pass", {username: "guest", password: ""})
             SSH_CLOSE($m.server)
         "#},
@@ -1771,7 +1771,7 @@ fn missing_password_bails() {
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
-         INHERIT_ENV [PATH]
+            INHERIT_ENV [PATH]
             LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-no-pass", {username: "guest"})
             SSH_CLOSE($m.server)
         "#},
@@ -1794,7 +1794,7 @@ fn non_string_username_bails() {
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
-         INHERIT_ENV [PATH]
+            INHERIT_ENV [PATH]
             LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-bad-user-type", {username: 1, password: "pass"})
             SSH_CLOSE($m.server)
         "#},
@@ -1818,7 +1818,7 @@ fn unknown_option_names_all_valid_keys() {
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
-         INHERIT_ENV [PATH]
+            INHERIT_ENV [PATH]
             LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-frobnicate", {username: "guest", password: "pass", frobnicate: 1})
             SSH_CLOSE($m.server)
         "#},
@@ -1842,7 +1842,7 @@ fn non_string_key_path_bails() {
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
-         INHERIT_ENV [PATH]
+            INHERIT_ENV [PATH]
             LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-bad-keypath-type", {username: "guest", password: "pass", key_path: 1})
             SSH_CLOSE($m.server)
         "#},
@@ -1904,7 +1904,7 @@ fn loaded_host_key_serves_clients() {
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
-         INHERIT_ENV [PATH]
+            INHERIT_ENV [PATH]
             LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-key-first", {username: "guest", password: "key-pass", key_path: "ssh_host_key"})
             SSH_CLOSE($m.server)
         "#},
@@ -1956,7 +1956,7 @@ fn created_host_key_has_owner_only_permissions() {
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
-         INHERIT_ENV [PATH]
+            INHERIT_ENV [PATH]
             LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-key-perms", {username: "guest", password: "key-pass", key_path: "ssh_host_key"})
             SSH_CLOSE($m.server)
         "#},
@@ -1992,7 +1992,7 @@ fn invalid_host_key_file_bails() {
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
-         INHERIT_ENV [PATH]
+            INHERIT_ENV [PATH]
             LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-key-invalid", {username: "guest", password: "key-pass", key_path: "ssh_host_key"})
             SSH_CLOSE($m.server)
         "#},
@@ -2015,7 +2015,7 @@ fn world_readable_host_key_bails() {
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
-         INHERIT_ENV [PATH]
+            INHERIT_ENV [PATH]
             LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-key-world", {username: "guest", password: "key-pass", key_path: "ssh_host_key"})
             SSH_CLOSE($m.server)
         "#},
@@ -2028,7 +2028,7 @@ fn world_readable_host_key_bails() {
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
-         INHERIT_ENV [PATH]
+            INHERIT_ENV [PATH]
             LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-key-world", {username: "guest", password: "key-pass", key_path: "ssh_host_key"})
             SSH_CLOSE($m.server)
         "#},
@@ -2053,7 +2053,7 @@ fn blank_key_path_keeps_ephemeral_key() {
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
-         INHERIT_ENV [PATH]
+            INHERIT_ENV [PATH]
             LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-key-blank", {username: "guest", password: "key-pass", key_path: ""})
             SSH_CLOSE($m.server)
         "#},
@@ -2076,7 +2076,7 @@ fn escaping_key_path_bails() {
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
-         INHERIT_ENV [PATH]
+            INHERIT_ENV [PATH]
             LET $m: SSH_SERVE_INFO = SSH_SERVE("test-ssh-key-escape", {username: "guest", password: "key-pass", key_path: "../escape_key"})
             SSH_CLOSE($m.server)
         "#},
@@ -2405,7 +2405,7 @@ fn finite_worker_pool_runs_to_completion() {
         &root,
         indoc! {r#"
             IMPORT [STD, SSH]
-         INHERIT_ENV [PATH]
+            INHERIT_ENV [PATH]
             LET $workers: LIST<ANY> = []
             LET $w: INT = 0
             WHILE $w < 4 {
@@ -2630,7 +2630,7 @@ fn numeric_serve_never_binds() {
     let script = format!(
         indoc! {r#"
             IMPORT [STD, SSH]
-         INHERIT_ENV [PATH]
+            INHERIT_ENV [PATH]
             LET $m: SSH_SERVE_INFO = SSH_SERVE("{number}", {{username: "guest", password: "pass"}})
         "#},
         number = number,
@@ -2668,7 +2668,7 @@ fn numeric_connect_never_dials() {
     let script = format!(
         indoc! {r#"
             IMPORT [STD, SSH]
-         INHERIT_ENV [PATH]
+            INHERIT_ENV [PATH]
             LET $in: PIPE
             LET $out: PIPE
             LET $c: HANDLE = ASYNC {{
