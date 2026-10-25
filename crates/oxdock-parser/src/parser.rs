@@ -2700,7 +2700,6 @@ fn parse_let_capture_statement_from_pair(
     lctx: &LowerCtx,
 ) -> ParseResult<StepKind> {
     let span = refine_span(ctx, &pair);
-    use pest::Parser;
     let mut var = None;
     let mut decl_type: Option<String> = None;
     let mut await_pair = None;
@@ -2782,7 +2781,7 @@ fn parse_let_capture_statement_from_pair(
     if let Some(ins) = instruction_pair {
         let text = ins.as_str().to_string();
         let mut lead = None;
-        for token in ins.into_inner() {
+        for token in ins.clone().into_inner() {
             if token.as_rule() == Rule::command_name {
                 lead = Some(token.as_str().to_string());
                 break;
@@ -2792,20 +2791,11 @@ fn parse_let_capture_statement_from_pair(
             ParseError::validation("LET", "LET capture requires a command".to_string(), &span)
         })?;
         if crate::commands::is_known_command(&lead) {
-            let kind = lower_instruction_pair(
-                ctx,
-                lexer::LanguageParser::parse(Rule::instruction, &text)
-                    .map_err(parse_pest_error)?
-                    .next()
-                    .ok_or_else(|| {
-                        ParseError::validation(
-                            "LET",
-                            "LET capture requires a command".to_string(),
-                            &span,
-                        )
-                    })?,
-                lctx,
-            )?;
+            // Lower the already-parsed pair directly. Re-parsing its
+            // text would nest a second full parse inside this one and
+            // exhaust small stacks (musl release runner); spans also
+            // keep their real line numbers this way.
+            let kind = lower_instruction_pair(ctx, ins, lctx)?;
             reject_async_in_capture(ctx, &kind)?;
             reject_pipe_stdout_in_capture(ctx, &kind)?;
             return Ok(StepKind::AssignCapture {
