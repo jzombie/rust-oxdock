@@ -17,15 +17,15 @@ development = []
 build = []
 
 [features]
-default = ["net"]
+default = ["net", "ssh", "markdown", "mcp"]
 net = ["dep:oxdock-net-plugin", "dep:oxdock-remote-proto"]
 ssh = ["net", "dep:oxdock-ssh-plugin"]
-# Markdown helpers in the CLI runner (oxdock-markdown-plugin). Opt-in so
-# default and minimal builds keep their current module surface.
+# Markdown helpers in the CLI runner (oxdock-markdown-plugin). On by
+# default; `--no-default-features` builds drop the module.
 markdown = ["dep:oxdock-markdown-plugin"]
 # MCP tool hosting for EXPORTed script functions (oxdock-mcp reactor
-# behind `--mcp`). Opt-in so default builds keep their module surface;
-# enabled by `--all-features`.
+# behind `--mcp`). On by default; `--no-default-features` builds drop
+# it.
 mcp = ["dep:oxdock-mcp"]
 
 [dependencies]

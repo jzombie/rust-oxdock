@@ -3,9 +3,9 @@
 # an interactive onward hop to `orb`. Per-session PTY children with
 # semaphore admission. Mirrors the proof shape behind issue #223.
 #
-# Run it (build once first: a feature-gated rebuild under `-q` prints
+# Run it (build once first: a quiet rebuild under `-q` prints
 # nothing and looks hung):
-#   cargo build -p oxdock --features ssh
+#   cargo build -p oxdock
 #   ./target/debug/oxdock -p 2222:ssh-server --script scripts/proto.ssh-proxy.oxdock
 # Then connect (password `test123`):
 #   ssh -p 2222 test@127.0.0.1

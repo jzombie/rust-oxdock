@@ -51,16 +51,11 @@ library [Functions](#functions).
      installer-grade trust for unproven bytes. Restore the stanzas
      from git history once the release smoke is green. -->
 
-**Build from source via Cargo** *(default features only)*:
+**Build from source via Cargo** (same full module surface as the
+release downloads: `NET`, `SSH`, `MARKDOWN`, plus `--mcp` hosting):
 
 ```sh
 cargo install oxdock@0.31.0-alpha
-```
-
-For a full-feature build:
-
-```sh
-cargo install oxdock@0.31.0-alpha --all-features
 ```
 
 ### Add to Rust project
@@ -513,10 +508,11 @@ LET $sum: INT = ADD(2, 3)
 ASSERT_EQ $sum 5
 ```
 
-Build with the feature and pass the script to the flag:
+Pass the script to the flag (`--mcp` hosting ships in default
+builds; only `--no-default-features` builds drop it):
 
 ```sh
-cargo build -p oxdock --features mcp
+cargo build -p oxdock
 ./target/debug/oxdock --mcp tools.oxdock
 ```
 
