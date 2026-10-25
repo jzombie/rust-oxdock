@@ -3281,7 +3281,12 @@ fn run_exec_splits_stderr() {
         !out.windows(4).any(|window| window == b"oops"),
         "stderr must never pollute the stdout stream"
     );
-    client.eof().expect("client half-closes");
+    // Half-close races server teardown for immediately-exiting
+    // children: if the server already closed the channel, the close
+    // wait below observes it at once instead of failing on the lost
+    // race. A genuinely wedged channel still fails loudly there, and
+    // the script join below still catches server-side failures.
+    let _ = client.eof();
     client
         .wait_close(Duration::from_secs(15))
         .expect("server closes");

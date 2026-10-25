@@ -3151,10 +3151,13 @@ impl BackgroundHandle for BlockingHandle {
     ignore = "TIMEOUT deadline is wall-clock and the test blocks on a condvar; untestable under Miri isolation"
 )]
 fn timeout_fires_and_kills_blocking_command() {
-    let steps = vec![timeout_step(
-        "200ms",
-        vec![step(StepKind::Run("hang".into()))],
-    )];
+    // Generous deadline for a wall-clock race: the failure mode is a
+    // descheduled main thread stalling past the deadline before the
+    // body even registers, and sub-second deadlines sit inside CI
+    // scheduling jitter on loaded runners. The body blocks forever,
+    // so the test always costs exactly the deadline; 2s buys an
+    // order of magnitude of headroom at a fixed two-second cost.
+    let steps = vec![timeout_step("2s", vec![step(StepKind::Run("hang".into()))])];
     let fs = MockFs::new();
     let fs = Box::new(fs) as Box<dyn WorkspaceFs>;
     let runner = BlockingRunner::default();

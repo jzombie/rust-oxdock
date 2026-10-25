@@ -632,8 +632,15 @@ fn flatten_exec_value(val: &Value, out: &mut Vec<String>) -> Result<()> {
 }
 
 pub(super) fn echo<P: ProcessManager>(cx: &mut StepCtx<'_, P>, msg: &str) -> Result<()> {
+    // One formatted write, not `writeln!`: the formatting machinery
+    // emits the text and the newline as separate writes, and each one
+    // re-locks the shared parent behind task tees, so concurrent
+    // tasks interleave mid-line ("worker 0worker 1"). A single
+    // `write_all` keeps every backend's synchronous completion as one
+    // atomic line.
+    let line = format!("{msg}\n");
     write_stdout(cx.out.clone(), |writer| {
-        writeln!(writer, "{}", msg)?;
+        writer.write_all(line.as_bytes())?;
         Ok(())
     })?;
     Ok(())

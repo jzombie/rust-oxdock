@@ -21,6 +21,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - `source: local` is the CI bootstrap until `v0.32.0-alpha` ships the new bundle (currently pinned `v0.29.0-alpha` bundles predate the tail and publish no `PATH`).
 - `install.ps1` exports `OXDOCK_INTERACTIVE=1` on interactive consoles (`UserInteractive` without input redirection), matching the shell stub's `[ -t 0 ]` probe: Windows installs under ConPTY now confirm the destination through the `PROMPT` branch instead of silently taking the default.
 
+### Fixed
+
+- Concurrent `ECHO` lines no longer interleave mid-line: the message and its newline emit in one write instead of two formatting writes that re-locked the shared parent separately, so parallel tasks keep atomic lines.
+
 ## [0.31.0-alpha] - 2026-10-25
 
 ### Added
