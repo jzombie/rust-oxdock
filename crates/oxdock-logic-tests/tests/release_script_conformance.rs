@@ -210,14 +210,14 @@ fn fixture_registry_json() -> String {
 /// Script the fixture registry state behind the release script's
 /// probes: landed crates answer empty (present, like a quiet `cargo
 /// info`), missing crates answer the sentinel (absent, like the
-/// script's own `|| printf` fallback). Needles carry no quotes: the
-/// engine strips them before the recorder sees the shell text.
+/// script's own `|| printf` fallback). Needles carry the double quotes
+/// the single-quoted probe preserves around the package spec.
 #[cfg(feature = "markdown")]
 fn script_registry(run: &ReleaseRun, landed: &[&str]) {
     run.manager
         .respond("cargo metadata", &fixture_registry_json());
     for name in ["demo-a", "demo-b"] {
-        let probe = format!("cargo info {name}@{FIXTURE_VERSION}");
+        let probe = format!("cargo info \"{name}@{FIXTURE_VERSION}\"");
         if landed.contains(&name) {
             run.manager.respond(&probe, "");
         } else {
