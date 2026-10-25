@@ -4,8 +4,8 @@
 //! Lowering errors inside LET-capture also keep their real file line:
 //! the removed nested re-parse reported line 1 for everything.
 use indoc::indoc;
-use oxdock_parser::{StepKind, lower_command, parse_script};
 use oxdock_parser::ast::Arg;
+use oxdock_parser::{StepKind, lower_command, parse_script};
 
 fn shell_text(step: &oxdock_parser::Step) -> &str {
     let StepKind::AssignCapture { cmd, .. } = &step.kind else {
@@ -29,12 +29,20 @@ fn release_shell_lines_lower_to_exact_shell_text() {
         LET $round_out: STRING = RUN cargo publish --workspace{{ $excludes }} >"{{ $probedir }}/publish-round.log" 2>&1 || printf OXDOCK_PUBLISH_ROUND_FAILED
     "#};
     let steps = parse_script(script, lower_command).expect("release lines must parse");
-    assert_eq!(steps.len(), 4, "got: {:?}", steps.iter().map(|s| &s.kind).collect::<Vec<_>>());
+    assert_eq!(
+        steps.len(),
+        4,
+        "got: {:?}",
+        steps.iter().map(|s| &s.kind).collect::<Vec<_>>()
+    );
     assert_eq!(
         shell_text(&steps[0]),
         r#"cd {{ $probedir }} && cargo info {{ $pname }}@{{ $pver }} >/dev/null 2>&1 || printf OXDOCK_PUBLISH_MISSING"#,
     );
-    assert_eq!(shell_text(&steps[1]), r#"cat {{ $probedir }}/publish-round.log"#);
+    assert_eq!(
+        shell_text(&steps[1]),
+        r#"cat {{ $probedir }}/publish-round.log"#
+    );
     assert_eq!(shell_text(&steps[2]), "git rev-parse HEAD");
     assert_eq!(
         shell_text(&steps[3]),
