@@ -138,4 +138,7 @@ default everywhere.
 - New crate's tests green natively, properly `ignore`d under Miri.
 - Full `install-smoke.yml` matrix green, including the rewritten
   `isolated` leg on all five runners and the prompt path without
-  `script(1)`.
+  `script(1)`. Windows runners are the ConPTY proof: the DSR
+  handshake, drain quiescence, and teardown paths only execute there,
+  so a green windows-latest + windows-11-arm is the gate, not a
+  bonus.
