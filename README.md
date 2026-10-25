@@ -39,7 +39,7 @@ library [Functions](#functions).
 
 **Browse by section:**
 
-[Quick start](#quick-start) | [Dynamically embed assets at compile time](#dynamically-embed-assets-at-compile-time) | [Run scripts inline](#run-scripts-inline) | [Extend the language](#extend-the-language) | [Runtime architecture](#runtime-architecture) | [MCP hosting](#mcp-hosting) | [Extending OxDock from Rust](#extending-oxdock-from-rust) | [Machine model](#machine-model) | [Variants](#variants) | [Goals](#goals) | [Lexical structure](#lexical-structure) | [Guards and scoped blocks](#guards-and-scoped-blocks) | [Command Reference](#command-reference) | [Value types](#value-types) | [Functions](#functions) | [Contexts](#contexts) | [Plugin references](#plugin-references) | [Errors stop the pipeline](#errors-stop-the-pipeline) | [Selective environment inheritance](#selective-environment-inheritance) | [Path Separators](#path-separators) | [Workspaces & Filesystem](#workspaces--filesystem) | [GitHub Actions Integration](#github-actions-integration) | [Testing & Coverage](#testing--coverage) | [Glossary](#glossary) | [Citation](#citation) | [License](#license)
+[Quick start](#quick-start) | [Dynamically embed assets at compile time](#dynamically-embed-assets-at-compile-time) | [Run scripts inline](#run-scripts-inline) | [Extend the language](#extend-the-language) | [Runtime architecture](#runtime-architecture) | [Why this shape](#why-this-shape) | [MCP hosting](#mcp-hosting) | [Extending OxDock from Rust](#extending-oxdock-from-rust) | [Machine model](#machine-model) | [Variants](#variants) | [Goals](#goals) | [Lexical structure](#lexical-structure) | [Guards and scoped blocks](#guards-and-scoped-blocks) | [Command Reference](#command-reference) | [Value types](#value-types) | [Functions](#functions) | [Contexts](#contexts) | [Plugin references](#plugin-references) | [Errors stop the pipeline](#errors-stop-the-pipeline) | [Selective environment inheritance](#selective-environment-inheritance) | [Path Separators](#path-separators) | [Workspaces & Filesystem](#workspaces--filesystem) | [GitHub Actions Integration](#github-actions-integration) | [Testing & Coverage](#testing--coverage) | [Glossary](#glossary) | [Citation](#citation) | [License](#license)
 
 ## Quick start
 
@@ -490,6 +490,12 @@ ASSERT_EQ $w "from-cache"
 LET $y: STRING = READ sys.txt
 ASSERT_EQ $y "from-system"
 ```
+
+## Why this shape
+
+Scripts state effects, and the engine confines each one. Reading outside the project is rejected before any file opens: paths resolve inside the workspace first. Environment variables read empty unless the script declares them: the host environment stays invisible by default. A network endpoint binds nothing until the runner maps it: scripts name services, never ports. A general scripting language allows all three silently and inherits whatever they find; here every dependency is declared, so every run is reproducible, with the conformance suites pinning the contract.
+
+The trade is deliberate. A general scripting language prototypes orchestration just as fast, but its scripts hold full authority and can silently depend on anything. OxDock gives up that expressiveness so every run is reproducible and inspectable: the same script with the same inputs produces the same observable effects, with the conformance suites pinning the contract. The engine binary stays fixed while process lives in editable text, so orchestration iterates at script speed and only the vocabulary itself ever needs recompiling.
 
 ## MCP hosting
 
