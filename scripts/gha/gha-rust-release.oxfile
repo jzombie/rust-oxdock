@@ -75,7 +75,7 @@ IF $dry == "false" {
             LET $pname: STRING = $pkg.name
             LET $pver: STRING = $pkg.version
             # Probes run outside the tree: cargo info inside the workspace resolves local packages instead of the registry.
-            LET $probe: STRING = RUN cd "{{ $probedir }}" && cargo info "{{ $pname }}@{{ $pver }}" >/dev/null 2>&1 || printf OXDOCK_PUBLISH_MISSING
+            LET $probe: STRING = RUN 'cd "{{ $probedir }}" && cargo info "{{ $pname }}@{{ $pver }}" >/dev/null 2>&1 || printf OXDOCK_PUBLISH_MISSING'
             IF $probe == "" {
                 # Exclude what landed: cargo has no skip-existing, so a resumed run fails on the first published crate.
                 $excludes = "{{ $excludes }} --exclude {{ $pname }}"
@@ -89,7 +89,7 @@ IF $dry == "false" {
         } ELSE {
             # Cargo keeps topological order over the rest and skips publish=false members itself.
             # Output goes to the round log, never the capture: progress text ahead of a failure would defeat the exact sentinel match.
-            LET $round_out: STRING = RUN cargo publish --workspace{{ $excludes }} >"{{ $probedir }}/publish-round.log" 2>&1 || printf OXDOCK_PUBLISH_ROUND_FAILED
+            LET $round_out: STRING = RUN 'cargo publish --workspace{{ $excludes }} >"{{ $probedir }}/publish-round.log" 2>&1 || printf OXDOCK_PUBLISH_ROUND_FAILED'
             IF $round_out == "OXDOCK_PUBLISH_ROUND_FAILED" {
                 ECHO "publish round failed; last output:"
                 LET $diag: STRING = RUN cat "{{ $probedir }}/publish-round.log"
@@ -123,7 +123,7 @@ IF $dry == "false" {
     # unconditional: first runs delete nothing, resumed runs replace the
     # partial release with a fresh one from current notes. `|| cd .`
     # swallows the delete when nothing exists (cmd has no `true`).
-    RUN gh release delete "v{{ $version }}" --yes || cd .
+    RUN 'gh release delete "v{{ $version }}" --yes || cd .'
     # The archives are the build matrix output, downloaded by the
     # workflow into target/artifacts/ (see the asset contract in
     # release.yml): the tag carries the product version and the binary
