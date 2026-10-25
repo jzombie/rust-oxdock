@@ -862,6 +862,7 @@ fn create_exec_state(fs: MockFs) -> ExecState<MockProcessManager> {
         active_process: Arc::new(std::sync::Mutex::new(None)),
         named_tasks: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         next_task_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+        live_tasks: Arc::new(std::sync::atomic::AtomicU64::new(0)),
         inside_async: false,
         keeper_expiry: None,
         cancellable: false,
@@ -3439,7 +3440,7 @@ mod escape_props {
     /// backslash escapes first, bare `$var` second.
     fn shell_resolve(input: &str, state: &ExecState<MockProcessManager>) -> String {
         let expanded = expand_string(input, &state.envs, state).expect("expansion is infallible");
-        expand_dsl_vars(&expanded, state)
+        expand_dsl_vars(&expanded, state).expect("test vars never hold pipes")
     }
 
     proptest! {
@@ -3765,6 +3766,26 @@ fn spawn_manifest_outer_pipe_stays_script() {
     .expect("parse ok");
     let files = run_script_with_timeout(steps, vec![], Duration::from_secs(15));
     assert_eq!(file_content(&files, "kind.txt"), b"script");
+}
+
+#[test]
+fn echo_of_pipe_handle_fails_loudly() {
+    // A pipe is plumbing between steps, not text: rendering a handle
+    // as `<pipe>` hid the bug, so string slots refuse pipes with
+    // remediation instead of stringifying the handle.
+    let steps = crate::parse_script(indoc! {r#"
+        LET $p: PIPE
+        WITH_IO [stdout=$p] ECHO "hello"
+        ECHO $p
+    "#})
+    .expect("parse ok");
+    let root = GuardedPath::new_root_from_str(".").unwrap();
+    let fs = Box::new(PathResolver::new_guarded(root.clone(), root.clone()).unwrap());
+    let err = run_expect_err(fs, &steps, MockProcessManager::default());
+    assert!(
+        format!("{err:#}").contains("cannot render PIPE as STRING"),
+        "unexpected error: {err:#}"
+    );
 }
 
 #[test]
@@ -5904,4 +5925,111 @@ fn inherit_env_description_names_no_seed_rows() {
             entry.name
         );
     }
+}
+
+#[test]
+fn task_tails_caps_at_64k_and_counts_drops() {
+    use super::io::TeeStream;
+    use super::state::TaskTails;
+    let mut tails = TaskTails::new();
+    tails.push(TeeStream::Stdout, b"hello");
+    tails.push(TeeStream::Stderr, b"oops");
+    tails.push(TeeStream::Stdout, &[b'x'; 100_000]);
+    let (out, err, dropped) = tails.snapshot();
+    assert_eq!(out.len(), 64 * 1024, "head drops keep the cap");
+    assert!(out.ends_with("xxx"), "tail survives eviction");
+    assert_eq!(err, "oops");
+    assert!(dropped > 0, "dropped head bytes are counted");
+    let (again, _, _) = tails.snapshot();
+    assert_eq!(out, again, "snapshots are non-destructive");
+}
+
+#[test]
+fn sweep_evicts_oldest_finished_past_cap() {
+    use super::state::{MAX_RETAINED_FINISHED, TaskEntry, TaskTails};
+    let mut state = create_exec_state(MockFs::new());
+    let mut ids = Vec::new();
+    for _ in 0..=MAX_RETAINED_FINISHED {
+        let id = state.alloc_task_id().expect("alloc under cap");
+        let entry = Arc::new(TaskEntry::new(
+            Box::new(BlockingHandle {
+                script: String::new(),
+                kills: Arc::new(Mutex::new(Vec::new())),
+                state: Arc::new((Mutex::new(true), std::sync::Condvar::new())),
+            }),
+            false,
+            Arc::new(Mutex::new(TaskTails::new())),
+        ));
+        state
+            .named_tasks
+            .lock()
+            .unwrap()
+            .insert(id, Arc::clone(&entry));
+        ids.push(id);
+        // The thread behind a finished entry has exited: release its
+        // slot the way the worker-end guard would, so the sweep test
+        // exercises eviction rather than admission refusal.
+        state
+            .live_tasks
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+    state.alloc_task_id().expect("alloc triggers sweep");
+    let named = state.named_tasks.lock().unwrap();
+    assert_eq!(named.len(), MAX_RETAINED_FINISHED, "cap is a hard cap");
+    assert!(!named.contains_key(&ids[0]), "oldest finished evicted");
+    assert!(
+        named.contains_key(&ids[ids.len() - 1]),
+        "newest finished kept"
+    );
+}
+
+#[test]
+fn alloc_refuses_past_max_running_tasks() {
+    use super::state::MAX_RUNNING_TASKS;
+    let mut state = create_exec_state(MockFs::new());
+    for _ in 0..MAX_RUNNING_TASKS {
+        state.alloc_task_id().expect("alloc under cap");
+    }
+    let err = state.alloc_task_id().expect_err("cap must refuse");
+    assert!(
+        err.to_string().contains("concurrency limit exceeded"),
+        "{err:#}"
+    );
+    // A released slot admits again: the count tracks live threads,
+    // not table entries.
+    state
+        .live_tasks
+        .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    state.alloc_task_id().expect("slot freed");
+}
+
+#[test]
+fn observe_completion_reports_running_then_finished() {
+    use super::state::{TaskEntry, TaskTails};
+    let live = Arc::new(TaskEntry::new(
+        Box::new(BlockingHandle {
+            script: String::new(),
+            kills: Arc::new(Mutex::new(Vec::new())),
+            state: Arc::new((Mutex::new(false), std::sync::Condvar::new())),
+        }),
+        true,
+        Arc::new(Mutex::new(TaskTails::new())),
+    ));
+    let snap = live.observe_completion();
+    assert!(snap.running, "pending handle reads running");
+
+    let done = Arc::new(TaskEntry::new(
+        Box::new(BlockingHandle {
+            script: String::new(),
+            kills: Arc::new(Mutex::new(Vec::new())),
+            state: Arc::new((Mutex::new(true), std::sync::Condvar::new())),
+        }),
+        true,
+        Arc::new(Mutex::new(TaskTails::new())),
+    ));
+    let snap = done.observe_completion();
+    assert!(!snap.running, "completed handle reads finished");
+    let again = done.observe_completion();
+    assert!(!again.running, "repeat polls stay finished");
+    assert_eq!(again.exit_code, snap.exit_code, "outcome is cached");
 }

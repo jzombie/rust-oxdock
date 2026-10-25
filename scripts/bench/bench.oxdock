@@ -1,0 +1,62 @@
+# Head-to-head interpreter shootout: release oxdock vs python3 vs
+# bash on the same loop shapes. Run from the repository root so the
+# relative paths below resolve: `oxdock scripts/bench/bench.oxdock`.
+# Unix only: the inner timing uses /bin/bash TIMEFORMAT. Build the
+# release binary first with `cargo build --release -p oxdock`: the
+# harness measures that exact binary, and in-script cargo builds run
+# hermetic (full recompile every run), so the build stays a separate
+# explicit step. Each contestant prints exactly one result line; the
+# harness checks it, so a wrong answer fails instead of timing
+# garbage.
+WORKSPACE LOCAL
+IMPORT [STD]
+
+# Fail fast unless we run from the repo root. PATH_TYPE parses in
+# value position with STD imported; bind it first, then branch.
+LET $root_kind: STRING = PATH_TYPE("Cargo.toml")
+IF $root_kind != "file" {
+  ASSERT_EQ "repo-root" "run bench.oxdock from the repository root"
+}
+
+# Time one contestant: run under bash TIMEFORMAT, take the last
+# non-empty output line as seconds, and require the expected result
+# line somewhere in the output. Answers as one report row.
+FUNC TIME_EVENT($label: STRING, $cmd: STRING, $want: STRING) {
+  LET $timed: STRING = RUN ["/bin/bash", "-c", "TIMEFORMAT=%R; { time {{ $cmd }}; } 2>&1"]
+  LET $lines: LIST<STRING> = TEXT_LINES($timed)
+  LET $secs: STRING = ""
+  LET $seen: BOOL = false
+  FOR $line: STRING IN $lines {
+    LET $t: STRING = TEXT_TRIM($line)
+    IF TEXT_LENGTH($t) > 0 {
+      IF $t == $want {
+        $seen = true
+      } ELSE {
+        IF TEXT_LENGTH($secs) == 0 {
+          $secs = $t
+        }
+      }
+    }
+  }
+  ASSERT_EQ $seen true
+  IF TEXT_LENGTH($secs) == 0 {
+    ASSERT_EQ "timed" "no timing line captured"
+  }
+  RETURN "{{ $label }}: {{ $secs }}s"
+}
+
+# The release binary running this script is the binary under test:
+# invoke as `target/release/oxdock --script scripts/bench/bench.oxdock`.
+
+LET $r1: STRING = TIME_EVENT("arith/oxdock", "target/release/oxdock --script scripts/bench/arith.oxdock", "499999500000")
+LET $r2: STRING = TIME_EVENT("arith/python", "python3 scripts/bench/arith.py", "499999500000")
+LET $r3: STRING = TIME_EVENT("arith/bash", "bash scripts/bench/arith.sh", "499999500000")
+LET $r4: STRING = TIME_EVENT("callstr/oxdock", "target/release/oxdock --script scripts/bench/callstr.oxdock", "19999")
+LET $r5: STRING = TIME_EVENT("callstr/python", "python3 scripts/bench/callstr.py", "19999")
+LET $r6: STRING = TIME_EVENT("callstr/bash", "bash scripts/bench/callstr.sh", "19999")
+ECHO $r1
+ECHO $r2
+ECHO $r3
+ECHO $r4
+ECHO $r5
+ECHO $r6

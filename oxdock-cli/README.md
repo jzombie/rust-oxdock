@@ -11,12 +11,13 @@ The default build (with the `net` feature) prints the following for
 omitted:
 
 ```text
-oxdock 0.30.0-alpha — CLI tooling for executing OxDock's Dockerfile-inspired DSL on native platforms.
+oxdock 0.31.0-alpha — CLI tooling for executing OxDock's Dockerfile-inspired DSL on native platforms.
 
 Usage: oxdock [OPTIONS] [SCRIPT]
   SCRIPT             script file path (same as `--script <file>`); `-` reads stdin
   --script <file|->  script file (relative resolves under the OxDock workspace root), or `-` for stdin
   --shell            run the script, then drop into an interactive shell (requires a TTY)
+  --mcp              serve EXPORTed FUNCs as MCP tools over stdio (requires the `mcp` feature)
   --listen <addr>    expose a logical service port ([host:]port, repeatable)
   -p <[host:]outer:inner>  map outer port to an inner service port or name (repeatable; outer 0 is ephemeral; bare outer binds loopback, prefix 0.0.0.0: for all interfaces)
   --offline          open no sockets (conflicts with --listen/-p)

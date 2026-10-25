@@ -1,0 +1,65 @@
+# Demo ambient setup: linear init runs this before serving.
+IMPORT [STD]
+ENV APP_NAME=oxdock-demo
+WORKSPACE LOCAL
+# Adds two integers. Returns the sum.
+FUNC ADD($a: INT, $b: INT) {
+  RETURN $a + $b
+}
+# Greets a name. Echoes a line (captured into the result, never onto the wire) and returns a greeting.
+FUNC GREET($name: STRING) {
+  ECHO "greeting requested"
+  RETURN "Hello, {{ $name }}"
+}
+# Returns the demo app name from the ambient environment. Proves linear init ran.
+FUNC APP_NAME() {
+  RETURN env:APP_NAME
+}
+# Counts from $from toward $to by ones: upward when $from is below $to, downward otherwise. Returns the full sequence.
+FUNC COUNT($from: INT, $to: INT) {
+  LET $out: LIST<INT> = []
+  LET $i: INT = $from
+  IF $from <= $to {
+    WHILE $i <= $to {
+      LIST_APPEND $out $i
+      $i = $i + 1
+    }
+  } ELSE {
+    WHILE $i >= $to {
+      LIST_APPEND $out $i
+      $i = $i - 1
+    }
+  }
+  RETURN $out
+}
+
+# Reports the session working directory. Proves which root the server answers from.
+FUNC WHEREAMI() {
+  LET $dir: STRING = CWD
+  RETURN TEXT_TRIM($dir)
+}
+# Agent self-help: one tool over the whole introspection surface.
+# Topic "" (or anything unprefixed) returns the index: every visible
+# function name plus every known type name. "FUNC:MOD::NAME" returns
+# the full DESCRIBE map for one function. "TYPE:NAME" returns the
+# TYPE_DESCRIBE map for one type. Always returns a MAP so the shape
+# never varies. Unknown names fail with the registry error.
+FUNC HELP($topic: STRING) {
+  IF TEXT_STARTS_WITH($topic, "FUNC:") {
+    LET $name: STRING = TEXT_TRIM_PREFIX($topic, "FUNC:")
+    LET $info: MAP<ANY> = DESCRIBE($name)
+    LET $fout: MAP<ANY> = {kind: "func", info: $info}
+    RETURN $fout
+  }
+  IF TEXT_STARTS_WITH($topic, "TYPE:") {
+    LET $tname: STRING = TEXT_TRIM_PREFIX($topic, "TYPE:")
+    LET $tinfo: MAP<ANY> = TYPE_DESCRIBE($tname)
+    LET $tout: MAP<ANY> = {kind: "type", info: $tinfo}
+    RETURN $tout
+  }
+  LET $funcs: LIST<STRING> = FUNCTIONS()
+  LET $types: LIST<STRING> = TYPES()
+  LET $iout: MAP<ANY> = {kind: "index", functions: $funcs, types: $types}
+  RETURN $iout
+}
+EXPORT [ADD, GREET, APP_NAME, COUNT, WHEREAMI, HELP]

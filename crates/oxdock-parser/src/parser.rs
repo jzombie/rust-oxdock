@@ -298,6 +298,17 @@ struct ScopeFrame {
     had_command: bool,
 }
 
+/// Parsed script with single-file `EXPORT` metadata. `steps` is the
+/// linear execution plan, `exports` the `EXPORT` names in source order,
+/// and `func_docs` maps top-level `FUNC` base names to (summary, docs)
+/// collected from the immediately preceding `#` comment block.
+#[derive(Debug, Clone, Default)]
+pub struct ParsedScript {
+    pub steps: Vec<Step>,
+    pub exports: Vec<String>,
+    pub func_docs: std::collections::HashMap<String, (String, String)>,
+}
+
 #[derive(Clone)]
 struct PendingIoBlock<'a> {
     line_no: usize,
@@ -384,6 +395,9 @@ pub struct ScriptParser<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> {
     /// Seed for the base `FUNC` scope, from an enclosing parse's visible
     /// definitions (snippet re-parses). Empty for top-level parses.
     preseed_funcs: HashSet<String>,
+    /// Single-file `EXPORT` names in source order. Top-level only;
+    /// validated against top-level `FUNC` definitions at end of parse.
+    exports: Vec<String>,
 }
 
 impl<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> ScriptParser<'a, F> {
@@ -440,8 +454,9 @@ impl<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> ScriptParser<'a, F> {
             lower,
             reserved_names,
             modules,
-            preseed_imports,
             preseed_funcs,
+            preseed_imports,
+            exports: Vec::new(),
         })
     }
 
@@ -451,7 +466,14 @@ impl<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> ScriptParser<'a, F> {
         span_for_line(self.input, lines)
     }
 
-    pub fn parse(mut self) -> ParseResult<Vec<Step>> {
+    pub fn parse(self) -> ParseResult<Vec<Step>> {
+        Ok(self.parse_with_exports()?.steps)
+    }
+
+    /// Parse and return steps plus single-file `EXPORT` names and
+    /// preceding `#` doc comments for top-level `FUNC`s. Forward
+    /// references allowed: `EXPORT` may precede its `FUNC`s.
+    pub fn parse_with_exports(mut self) -> ParseResult<ParsedScript> {
         // Function scope tracking rides alongside lowering (issue #146).
         // `func_scopes` is a parse-local stack: the bottom is the top-level
         // scope, `{`/`}` toggle nested ones below, and braced statement
@@ -538,9 +560,10 @@ impl<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> ScriptParser<'a, F> {
                         &import_scopes,
                     );
                     // IMPORT/EXPORT are lowering directives, not steps:
-                    // IMPORT updates the import frames, EXPORT is reserved.
-                    // Both emit zero runtime steps. Neither may be guarded:
-                    // a guard here would leak onto the following statement.
+                    // IMPORT updates the import frames, EXPORT records
+                    // single-file tool names. Both emit zero runtime
+                    // steps. Neither may be guarded: a guard here would
+                    // leak onto the following statement.
                     if pair.as_rule() == Rule::import_statement {
                         if self.pending_guards.is_some() || self.pending_inline_guards.is_some() {
                             return Err(ParseError::structural(
@@ -553,11 +576,15 @@ impl<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> ScriptParser<'a, F> {
                         continue;
                     }
                     if pair.as_rule() == Rule::export_statement {
-                        return Err(ParseError::validation(
-                            KEYWORD_EXPORT,
-                            "`EXPORT` is reserved for future script-module support and cannot be used yet.".to_string(),
-                            &span,
-                        ));
+                        if self.pending_guards.is_some() || self.pending_inline_guards.is_some() {
+                            return Err(ParseError::structural(
+                                KEYWORD_EXPORT,
+                                "EXPORT cannot be guarded".to_string(),
+                                &span,
+                            ));
+                        }
+                        self.lower_export(&span, pair)?;
+                        continue;
                     }
                     if pair.as_rule() == Rule::type_statement
                         && (self.pending_guards.is_some() || self.pending_inline_guards.is_some())
@@ -720,7 +747,46 @@ impl<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> ScriptParser<'a, F> {
             validate_remote_copy_placement(&self.steps, &ctx)?;
         }
 
-        Ok(self.steps)
+        // Validate `EXPORT` names at end of parse. Forward references
+        // are allowed (EXPORT may precede its FUNCs), so this runs
+        // against the completed top-level scope. Bare names must match
+        // a top-level `FUNC`; qualified `MOD::NAME` names must match a
+        // known module member (opaque modules skip the member check;
+        // the runtime registry resolves them or fails serving).
+        // Duplicates are rejected at the EXPORT site.
+        {
+            let top: HashSet<String> = func_scopes.borrow()[0].clone();
+            for name in &self.exports {
+                let valid = match name.split_once("::") {
+                    None => top.contains(name),
+                    Some((module, base)) if module == SCRIPT_MODULE_NAME => top.contains(base),
+                    Some((module, base)) => match self.modules.modules.get(module) {
+                        None => false,
+                        Some(None) => true,
+                        Some(Some(funcs)) => funcs.functions.contains(base),
+                    },
+                };
+                if !valid {
+                    let ctx = self.eof_span();
+                    return Err(ParseError::validation(
+                        KEYWORD_EXPORT,
+                        format!(
+                            "EXPORT `{name}` does not match any top-level FUNC or known module member"
+                        ),
+                        &ctx,
+                    ));
+                }
+            }
+        }
+
+        let func_docs = collect_func_docs(self.input, &self.steps);
+        let exports = std::mem::take(&mut self.exports);
+        let steps = std::mem::take(&mut self.steps);
+        Ok(ParsedScript {
+            steps,
+            exports,
+            func_docs,
+        })
     }
 
     fn lower_instruction(
@@ -742,6 +808,50 @@ impl<'a, F: Fn(&str, Vec<Arg>) -> ParseResult<StepKind>> ScriptParser<'a, F> {
         lctx: &LowerCtx,
     ) -> ParseResult<()> {
         lower_import_statement(ctx, pair, lctx)
+    }
+
+    /// Lower an `EXPORT` statement: record script tool names plus
+    /// qualified host names in source order, emit nothing. Guards are
+    /// rejected by the caller. Duplicates fail here; unknown names fail
+    /// at end of parse so forward references (`EXPORT` before `FUNC`)
+    /// keep working.
+    fn lower_export(&mut self, ctx: &SpanContext, pair: Pair<Rule>) -> ParseResult<()> {
+        let mut names = Vec::new();
+        for inner in pair.into_inner() {
+            match inner.as_rule() {
+                Rule::export_list => {
+                    for item in inner.into_inner() {
+                        if item.as_rule() == Rule::export_ident {
+                            names.push(item.as_str().to_string());
+                        }
+                    }
+                }
+                Rule::export_ident => names.push(inner.as_str().to_string()),
+                _ => {}
+            }
+        }
+        if names.is_empty() {
+            return Err(ParseError::validation(
+                KEYWORD_EXPORT,
+                "EXPORT requires at least one function name, e.g. `EXPORT FOO` or `EXPORT [FOO, BAR]`"
+                    .to_string(),
+                ctx,
+            ));
+        }
+        for name in names {
+            for part in name.split("::") {
+                check_func_ident(ctx, part)?;
+            }
+            if self.exports.contains(&name) {
+                return Err(ParseError::validation(
+                    KEYWORD_EXPORT,
+                    format!("duplicate EXPORT `{name}`"),
+                    ctx,
+                ));
+            }
+            self.exports.push(name);
+        }
+        Ok(())
     }
 
     fn handle_guard_token(&mut self, line_end: usize, expr: GuardExpr) -> ParseResult<()> {
@@ -1064,7 +1174,139 @@ pub fn parse_script_with_modules(
     reserved_names: HashSet<String>,
     modules: ModuleTable,
 ) -> ParseResult<Vec<Step>> {
-    ScriptParser::new_with_modules(input, lower, reserved_names, modules)?.parse()
+    Ok(parse_script_with_modules_and_exports(input, lower, reserved_names, modules)?.steps)
+}
+
+/// Parse with modules plus single-file `EXPORT` metadata and `#` doc
+/// comments for top-level `FUNC`s. Used by the MCP host; the linear
+/// runner keeps using `parse_script_with_modules` and ignores exports.
+pub fn parse_script_with_modules_and_exports(
+    input: &str,
+    lower: impl Fn(&str, Vec<Arg>) -> ParseResult<StepKind>,
+    reserved_names: HashSet<String>,
+    modules: ModuleTable,
+) -> ParseResult<ParsedScript> {
+    ScriptParser::new_with_modules(input, lower, reserved_names, modules)?.parse_with_exports()
+}
+
+/// Parse without modules plus `EXPORT` metadata. Used by tests and
+/// tooling that lower with the shared mock.
+pub fn parse_script_with_exports(
+    input: &str,
+    lower: impl Fn(&str, Vec<Arg>) -> ParseResult<StepKind>,
+) -> ParseResult<ParsedScript> {
+    ScriptParser::new(input, lower)?.parse_with_exports()
+}
+
+/// Collect `(summary, docs)` for top-level `FUNC`s from the immediately
+/// preceding `#` comment block. Scoped to FUNC definition lines only:
+/// the global lexer still discards `#` everywhere else, so no grammar
+/// rule changes and no blast radius. A blank line breaks the block.
+fn collect_func_docs(
+    input: &str,
+    steps: &[Step],
+) -> std::collections::HashMap<String, (String, String)> {
+    use std::collections::{HashMap, HashSet};
+    let lines: Vec<&str> = input.lines().collect();
+    // Top-level FUNC definition lines keyed by base name. Brace depth
+    // tracks nesting so only depth-0 `FUNC` lines count; the first
+    // occurrence wins because same-scope duplicates fail at lowering.
+    let mut def_lines: HashMap<String, usize> = HashMap::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut depth: usize = 0;
+    for (idx, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+        let is_comment = trimmed.starts_with('#');
+        let is_guard_only = trimmed.starts_with('[');
+        if !is_comment
+            && !is_guard_only
+            && let Some(rest) = strip_func_head(trimmed)
+            && depth == 0
+            && !seen.contains(&rest)
+        {
+            seen.insert(rest.clone());
+            def_lines.insert(rest, idx + 1);
+        }
+        if !is_comment {
+            for ch in line.chars() {
+                if ch == '{' {
+                    depth = depth.saturating_add(1);
+                } else if ch == '}' {
+                    depth = depth.saturating_sub(1);
+                }
+            }
+        }
+    }
+    let mut out: HashMap<String, (String, String)> = HashMap::new();
+    for step in steps {
+        if let StepKind::FuncDef { name, .. } = &step.kind
+            && !out.contains_key(name)
+            && let Some(&line_no) = def_lines.get(name)
+            && let Some((summary, docs)) = docs_above(&lines, line_no)
+        {
+            out.insert(name.clone(), (summary, docs));
+        }
+    }
+    out
+}
+
+/// Strip a `FUNC NAME` head, returning the bare uppercase name. Rejects
+/// qualified or malformed heads by returning `None`.
+fn strip_func_head(trimmed: &str) -> Option<String> {
+    let rest = trimmed.strip_prefix("FUNC")?;
+    let after = rest.strip_prefix([' ', '\t'])?;
+    if after.is_empty() {
+        return None;
+    }
+    let name: String = after
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect();
+    if name.is_empty()
+        || !name
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b == b'_' || b.is_ascii_digit())
+    {
+        return None;
+    }
+    if name.starts_with(|c: char| c.is_ascii_digit()) {
+        return None;
+    }
+    Some(name)
+}
+
+/// Read the contiguous `#` block immediately above `line_no` (1-based).
+/// Returns `(summary, docs)` with `#` prefixes stripped. `None` when no
+/// comment block is adjacent. Exported through unit tests via steps.
+fn docs_above(lines: &[&str], line_no: usize) -> Option<(String, String)> {
+    if line_no <= 1 {
+        return None;
+    }
+    let mut block: Vec<String> = Vec::new();
+    let mut idx = line_no - 1;
+    while idx > 0 {
+        idx -= 1;
+        let trimmed = lines[idx].trim_start();
+        if trimmed.is_empty() {
+            break;
+        }
+        if let Some(body) = trimmed.strip_prefix('#') {
+            let text = body.strip_prefix(' ').unwrap_or(body);
+            block.push(text.to_string());
+        } else {
+            break;
+        }
+        if idx == 0 {
+            break;
+        }
+    }
+    if block.is_empty() {
+        return None;
+    }
+    block.reverse();
+    let summary = block.first().cloned().unwrap_or_default();
+    let docs = block.join("\n");
+    Some((summary, docs))
 }
 
 /// Parse one expression from source text with an empty module scope, for
@@ -3457,10 +3699,9 @@ fn parse_block_elements_with_lower(
                 lower_import_statement(ctx, elem, lctx)?;
             }
             Rule::export_statement => {
-                return Err(ParseError::validation(
+                return Err(ParseError::structural(
                     KEYWORD_EXPORT,
-                    "`EXPORT` is reserved for future script-module support and cannot be used yet."
-                        .to_string(),
+                    "EXPORT is only allowed at the top level".to_string(),
                     ctx,
                 ));
             }

@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [0.31.0-alpha] - 2026-10-24
+
+### Added
+
+- MCP server hosting for exported script functions (#153): `oxdock --mcp script.oxdock` serves top-level `EXPORT`ed `FUNC`s as MCP tools over stdio (rmcp, JSON-RPC). The new `oxdock-mcp` crate owns the reactor and tool table; `--mcp` is behind a `mcp` cargo feature (off by default, on with `--all-features`). Full module `EXPORT` stays deferred to #115: only single-file top-level `EXPORT FOO` / `EXPORT [FOO, BAR]` with unknown-name and duplicate validation.
+- JSON projection for exported signatures: `STRING/INT/FLOAT/BOOL/LIST/MAP` plus shaped containers project to tool schemas; opaque handles (`PIPE/HANDLE/DURATION/PATH/SEMAPHORE/PERMIT`, custom types) fail fast before serving. Bare primitives are wrapped as `{"result": value}` with a matching `outputSchema`.
+- Hot reload for the MCP server: the script file is re-read on change and swapped atomically, so edits take effect on the next call with no restart. Broken edits keep serving the previous generation and record the failure instead of swapping. Successful reloads emit `notifications/tools/list_changed` (advertised via the tools `listChanged` capability) so clients re-fetch instead of showing a frozen list.
+- Synthesized `MCP_STATUS` tool on every MCP server: reports load generation (starts at 1, +1 per successful reload), tool list, script SHA-256, load time, and the last reload outcome. `EXPORT MCP_STATUS` is reserved and rejected.
+- Live-streamed tool output: default-routed stdout/stderr flow to the MCP client while the call runs. Clients sending a progress token get progress notifications (chunk text in `message`, byte count as progress); without a token, chunks arrive as `notifications/message` log records. Streams stay attributed and ordered; the final result carries the return value.
+- Script-driven background tasks for MCP tools: wrap slow steps in an `ASYNC` block and `RETURN` the task `HANDLE`, which crosses the wire as `{"task_id": N}`; the call returns immediately while the worker keeps running. The new `STD::TASK_POLL($task)` builtin reports a typed record: always-present `state` (`"running"`/`"finished"`), `ok`, `stdout_tail`, `stderr_tail`, `truncated_bytes`, plus `exit_code` once finished, `result` on clean finish, and `error` on failed finish. `TASK_POLL` never consumes, so repeated polls and a later `AWAIT` all work; polling after `AWAIT` fails like double-await, and unknown ids fail loudly. Per-task tails are capped at 64 KiB per stream with head-drop counting, retained finished tasks are capped at 128 per session with oldest-first eviction, and spawning past 64 live tasks fails loudly with the cap named. `CANCEL`/`AWAIT` keep working on in-script handles unchanged.
+- Qualified `EXPORT` of host functions (#153): `EXPORT [STD::TEXT_JOIN]` serves registry functions with no script wrapper; registry summaries and docs carry over as tool descriptions. Bare names still resolve to script `FUNC`s; unknown members and modules fail at parse, opaque signatures fail fast at serve.
+- `STD::VERSION()` reports the running engine version as a `STRING` (workspace version baked in at compile time), so scripts and agents can read the build they run on; servable to MCP clients through qualified `EXPORT [STD::VERSION]`.
+
+### Dependencies
+
+- Bump `ctutils` 0.4.2 → 0.4.5 (RUSTSEC-2026-0385).
+- Bump `tokio` 1.53.2 → 1.54.1 (RUSTSEC-2026-0386).
+- Bump `libc` 0.2.190 → 0.2.191 (#237).
+- Bump `pest` / `pest_derive` / `pest_generator` / `pest_meta` 2.9.3 → 2.9.4 (#238, #240, #241).
+- Bump `proptest` 1.11.0 → 1.12.0 (#239).
+- Update transitive `getrandom` 0.3.4 → 0.4.3 (`tempfile` dep; drops the 0.3 series from the lockfile).
+- Bump transitive `crypto-bigint` 0.7.5 → 0.7.8 (RUSTSEC-2026-0387).
+
 ## [0.30.0-alpha] - 2026-10-21
 
 ### Added

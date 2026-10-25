@@ -1,0 +1,7 @@
+LET $n: INT = 0
+LET $i: INT = 0
+WHILE $i < 1000000 {
+  $n = $n + $i
+  $i = $i + 1
+}
+ECHO $n

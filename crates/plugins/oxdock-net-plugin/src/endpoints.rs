@@ -573,6 +573,7 @@ pub fn classify_service_call(module: &str, name: &str) -> Option<&'static str> {
         ("NET", _, "NET_ADDR") | ("NET", Some("NET"), "ADDR") => Some("NET_ADDR"),
         ("SSH", _, "SSH_SERVE") | ("SSH", Some("SSH"), "SERVE") => Some("SSH_SERVE"),
         ("SSH", _, "SSH_CONNECT") | ("SSH", Some("SSH"), "CONNECT") => Some("SSH_CONNECT"),
+        ("SSH", _, "SSH_EXEC") | ("SSH", Some("SSH"), "EXEC") => Some("SSH_EXEC"),
         _ => None,
     }
 }
@@ -593,7 +594,7 @@ fn check_service_bound(registry: &EndpointRegistry, func: &str, service: &str) -
     let endpoint = crate::validate::parse_virtual_endpoint(service, func)?;
     let key = EndpointKey::tcp(endpoint);
     let sockets = match func {
-        "SSH_SERVE" | "SSH_CONNECT" => SocketRequirement::SocketRequired,
+        "SSH_SERVE" | "SSH_CONNECT" | "SSH_EXEC" => SocketRequirement::SocketRequired,
         _ => SocketRequirement::SocketlessOk,
     };
     match registry.slot_kind(&key) {

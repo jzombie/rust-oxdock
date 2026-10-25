@@ -113,6 +113,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         shell: false,
         endpoints: EndpointFlags::default(),
         remote_serve: false,
+        mcp: false,
         remotes: Vec::new(),
     };
 

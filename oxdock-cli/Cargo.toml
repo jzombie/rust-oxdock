@@ -2,7 +2,7 @@
 name = "oxdock-cli"
 description = "CLI tooling for executing OxDock's Dockerfile-inspired DSL on native platforms."
 categories = ["command-line-utilities"]
-keywords = ["cli", "oxdock", "dsl", "workflow"]
+keywords = ["cli", "oxdock", "dsl", "workflow", "mcp"]
 authors.workspace = true
 version.workspace = true
 edition.workspace = true
@@ -23,6 +23,10 @@ ssh = ["net", "dep:oxdock-ssh-plugin"]
 # Markdown helpers in the CLI runner (oxdock-markdown-plugin). Opt-in so
 # default and minimal builds keep their current module surface.
 markdown = ["dep:oxdock-markdown-plugin"]
+# MCP tool hosting for EXPORTed script functions (oxdock-mcp reactor
+# behind `--mcp`). Opt-in so default builds keep their module surface;
+# enabled by `--all-features`.
+mcp = ["dep:oxdock-mcp"]
 
 [dependencies]
 anyhow.workspace = true
@@ -36,6 +40,7 @@ oxdock-core.workspace = true
 oxdock-fs.workspace = true
 oxdock-macros.workspace = true
 oxdock-markdown-plugin = { workspace = true, optional = true }
+oxdock-mcp = { workspace = true, optional = true }
 oxdock-net-plugin = { workspace = true, optional = true }
 oxdock-parser.workspace = true
 oxdock-pipe.workspace = true

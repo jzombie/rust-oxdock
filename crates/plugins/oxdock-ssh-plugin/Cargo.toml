@@ -23,6 +23,7 @@ oxdock-process.workspace = true
 portable-pty.workspace = true
 rand.workspace = true
 russh.workspace = true
+shell-words.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]

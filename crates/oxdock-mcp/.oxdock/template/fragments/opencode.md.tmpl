@@ -1,0 +1,84 @@
+## OpenCode setup
+
+To drive a script from OpenCode, build with the feature and register
+the server in `opencode.jsonc`. Any key under `mcp` becomes the tool
+prefix, so name it after the toolset it serves.
+
+```jsonc
+{
+  "mcp": {
+    "oxdock-demo": {
+      "type": "local",
+      "command": [
+        "/path/to/oxdock",
+        "--mcp",
+        "/path/to/tools.oxdock"
+      ],
+      "enabled": true
+    }
+  }
+}
+```
+
+Build once with `cargo build -p oxdock --features mcp`, then restart
+OpenCode (or resync its MCP servers) so the client connects and lists
+tools. Each `EXPORT`ed function appears as `<name>_<FUNC>` with the
+`#` doc block as its description.
+
+```jsonc
+// tools/list advertises each entry with its schema.
+{
+  "name": "oxdock-demo_ADD",
+  "description": "Adds two integers. Returns the sum.",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "a": { "type": "integer" },
+      "b": { "type": "integer" }
+    },
+    "required": ["a", "b"]
+  }
+}
+// tools/call dispatches by tool name with a JSON argument object.
+{
+  "name": "oxdock-demo_ADD",
+  "arguments": { "a": 2, "b": 3 }
+}
+// The result carries the JSON return value under `result`.
+{
+  "result": 5
+}
+```
+
+`ECHO` output never lands in the result: it streams as log
+notifications while the call runs, then the value follows. A call
+to `GREET` streams `greeting requested` mid-call and resolves
+`{"result": "Hello, Ada"}` at the end.
+
+Edits to the script file reload live with no restart, and the server
+emits `notifications/tools/list_changed` so compliant clients
+re-fetch instead of showing a frozen list. Call `MCP_STATUS` any time
+to check the load generation, the served tool names, and whether the
+last reload succeeded.
+
+Long calls should detach: wrap the slow steps in an `ASYNC` block
+and `RETURN` the task handle, which crosses the wire as
+`{"task_id": N}`. Export `STD::TASK_POLL` alongside and poll the
+handle until `state` reads `finished`. Foreground calls hold the
+session, so a minutes-long run starves every other call until it
+returns. Retained finished tasks are capped, so abandoned polls
+cannot grow the session without bound.
+
+```jsonc
+// Detach by returning a handle; the call answers immediately.
+{
+  "name": "CARGO_TEST",
+  "arguments": { "options": {} }
+}
+// Poll the handle: `state` reads `running` with tails so far,
+// then `finished` with the return value under `result`.
+{
+  "name": "TASK_POLL",
+  "arguments": { "task": { "task_id": 1 } }
+}
+```
