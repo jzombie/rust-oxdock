@@ -90,6 +90,7 @@ pub struct PtyRequest<'a> {
 }
 
 /// How a session ended. Worker failures surface as `Err`, never here.
+#[derive(Debug)]
 pub enum PtyOutcome {
     /// Child reaped with its exit code, output drained.
     Completed(i64),
@@ -447,9 +448,15 @@ pub fn run_pty_session(mut req: PtyRequest<'_>) -> Result<PtyOutcome> {
     // Supervisor: drain completions, apply resizes, arm the drain
     // deadline, and break at once on cancellation. Every wake path is
     // idempotent so repeated wakes while cancelled stay harmless.
+    // A single blocking receive (never try_iter plus a discarding
+    // recv): every queued event must reach the match below, since a
+    // dropped completion strands the session and a dropped resize is
+    // silently lost.
     loop {
-        for event in event_rx.try_iter() {
-            match event {
+        match event_rx.recv_timeout(std::time::Duration::from_millis(SUPERVISOR_POLL_MS)) {
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Ok(event) => match event {
                 PtyEvent::Done(done) => {
                     if done.0 == 0 {
                         in_done = true;
@@ -468,6 +475,13 @@ pub fn run_pty_session(mut req: PtyRequest<'_>) -> Result<PtyOutcome> {
                 PtyEvent::Exited(exited) => {
                     if exit_code.is_none() {
                         exit_code = Some(exited.0);
+                        // The child is gone: input pumps nowhere, so
+                        // wake a worker blocked in its chunk read at
+                        // once. Without this an idle input pipe never
+                        // EOFs and the session strands on `in_done`.
+                        if let Some(wake) = input_cancel.as_ref() {
+                            (**wake)();
+                        }
                         // The child is gone: note when, but the console
                         // lives until the drain is due. Releasing it
                         // here would truncate a slow ConPTY flush; the
@@ -509,8 +523,9 @@ pub fn run_pty_session(mut req: PtyRequest<'_>) -> Result<PtyOutcome> {
                     // close lands after the flushed tail. Bytes still in
                     // flight re-arm the deadline instead; the cap inside
                     // `drain_overdue` bounds the pathological console no
-                    // matter what.
-                    if generation != term.drain_generation || term.master.is_none() || !outputs_done
+                    // matter what. A finished worker needs no release:
+                    // it already saw its EOF.
+                    if generation != term.drain_generation || term.master.is_none() || outputs_done
                     {
                         continue;
                     }
@@ -538,7 +553,7 @@ pub fn run_pty_session(mut req: PtyRequest<'_>) -> Result<PtyOutcome> {
                         });
                     }
                 }
-            }
+            },
         }
         if in_done && outputs_done && exit_code.is_some() {
             break;
@@ -556,7 +571,6 @@ pub fn run_pty_session(mut req: PtyRequest<'_>) -> Result<PtyOutcome> {
             let _ = killer.kill();
             break;
         }
-        let _ = event_rx.recv_timeout(std::time::Duration::from_millis(SUPERVISOR_POLL_MS));
     }
     // Retire the resize watcher, then join: the wake is prompt, so the
     // join is bounded (unlike a worker parked in an uninterruptible
