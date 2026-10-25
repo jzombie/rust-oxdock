@@ -26,6 +26,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 - Bump `pest` / `pest_derive` / `pest_generator` / `pest_meta` 2.9.3 → 2.9.4 (#238, #240, #241).
 - Bump `proptest` 1.11.0 → 1.12.0 (#239).
 - Update transitive `getrandom` 0.3.4 → 0.4.3 (`tempfile` dep; drops the 0.3 series from the lockfile).
+- Bump transitive `crypto-bigint` 0.7.5 → 0.7.8 (RUSTSEC-2026-0387).
 
 ## [0.30.0-alpha] - 2026-10-21
 
