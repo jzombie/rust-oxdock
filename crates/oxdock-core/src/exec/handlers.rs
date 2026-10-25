@@ -21,6 +21,7 @@ use oxdock_remote_proto::tar::{StreamedEntry, sanitize_rel, unpack_auto_from};
 use sha2::{Digest, Sha256};
 
 use super::SNAPSHOT_PENDING_DISPLAY;
+use super::args::parse_bool_str;
 use super::fs_ops::{canonical_cwd, copy_entry, hash_path};
 use super::io::{StreamHandle, TaskTee, TeeStream, write_stdout};
 use super::native::FuncBody;
@@ -145,7 +146,7 @@ pub(super) fn run<P: ProcessManager>(cx: &mut StepCtx<'_, P>, idx: usize, cmd: &
         .state
         .envs
         .get(INHERIT_STDOUT_ENV_VAR)
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .map(|v| parse_bool_str(v).unwrap_or(false))
         .unwrap_or(false);
 
     if std::env::var(PROCESS_DEBUG_ENV_VAR).is_ok() {
@@ -276,7 +277,7 @@ pub(super) fn run_argv<P: ProcessManager>(
         .state
         .envs
         .get(INHERIT_STDOUT_ENV_VAR)
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .map(|v| parse_bool_str(v).unwrap_or(false))
         .unwrap_or(false);
 
     if std::env::var(PROCESS_DEBUG_ENV_VAR).is_ok() {

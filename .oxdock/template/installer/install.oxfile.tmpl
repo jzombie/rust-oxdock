@@ -1,73 +1,141 @@
-# Installs the downloaded OxDock release binary after running cross-platform
-# interpreter bootstrapper (install.sh on Unix; install.ps1 on Windows).
-# Piped stdin runs instead of installing: the stub saves any piped bytes
-# and bridges that file as OXDOCK_PIPED_SCRIPT, and the fetched
-# interpreter (bridged as OXDOCK_INTERPRETER) reinvokes itself on that
-# script below. Nothing is placed and no destination is derived in run
-# mode.
+# Installs the downloaded OxDock release binary.
+# Piped stdin runs instead of installing.
 
 IMPORT [STD]
 
-INHERIT_ENV [OXDOCK_ASSET, OXDOCK_SHA, OXDOCK_BIN, OXDOCK_DIR, OXDOCK_VERSION, OXDOCK_PIPED_SCRIPT, OXDOCK_INTERPRETER, OXDOCK_INTERACTIVE]
+INHERIT_ENV [OXDOCK_ASSET, OXDOCK_SHA, OXDOCK_BIN, OXDOCK_DIR, OXDOCK_VERSION, OXDOCK_PIPED_SCRIPT, OXDOCK_INTERPRETER, OXDOCK_INTERACTIVE, OXDOCK_BINARY_NAME, OXDOCK_EXPECTED_VERSION, GITHUB_PATH, GITHUB_ENV, OXDOCK_SKIP_DOWNLOAD]
 
-# Full filesystem access: installation writes outside any workspace.
 WORKSPACE SYSTEM
 
-# Run vs install is decided here, never in the stub: a non-empty piped
-# script bridge means execute it with the fetched interpreter.
+# Piped input runs under the fetched interpreter.
 LET $piped: STRING = "\{{ env:OXDOCK_PIPED_SCRIPT }}"
-IF $piped != "" {
+LET $has_piped: BOOL = $piped != ""
+
+IF $has_piped {
     RUN ["\{{ env:OXDOCK_INTERPRETER }}", "\{{ env:OXDOCK_PIPED_SCRIPT }}"]
 } ELSE {
-    # Install locations arrive through the stub environment. HOME and
-    # USERPROFILE mirror the host for fix suggestions: the stub never
-    # sets them, the seed supplies them.
     LET $asset: STRING = "\{{ env:OXDOCK_ASSET }}"
     LET $want: STRING = "\{{ env:OXDOCK_SHA }}"
     LET $bin: STRING = "\{{ env:OXDOCK_BIN }}"
     LET $dir: STRING = "\{{ env:OXDOCK_DIR }}"
-    # Interactive consoles confirm the destination: the stub exports
-    # OXDOCK_INTERACTIVE only with a console behind stdin, and PROMPT
-    # itself refuses non-TTY stdin as backstop. The outer LET above owns
-    # $dir, so PROMPT mutates it in place; the loop retries until the
-    # path is a writable dir or a creatable absence, then INSTALL below
-    # stays fail-closed regardless.
+
+    # Install name, default `oxdock`.
+    LET $stem: STRING = "\{{ env:OXDOCK_BINARY_NAME }}"
+    LET $missing_stem: BOOL = $stem == ""
+
+    IF $missing_stem {
+        $stem = "oxdock"
+    }
+
+    # Skip flag for `local` builds.
+    LET $skip: BOOL = "\{{ env:OXDOCK_SKIP_DOWNLOAD }}"
+
+    LET $dest: STRING = "\{{ $dir }}/\{{ $stem }}"
+    [family:windows] $dest = "\{{ $dir }}/\{{ $stem }}.exe"
+
+    # Interactive destination prompt.
     IF "\{{ env:OXDOCK_INTERACTIVE }}" != "" {
         PROMPT $dir "Install destination?" "\{{ env:OXDOCK_DIR }}"
+
         WHILE true {
             LET $kind: STRING = PATH_TYPE($dir)
             LET $writable: BOOL = PATH_WRITABLE($dir)
+
             IF $kind == "dir" || $kind == "absent" {
                 IF $writable {
                     BREAK
                 }
             }
+
             PROMPT $dir "Install destination?"
         }
     }
+
+    # Missing dir fails naming the override.
     IF $dir == "" {
         [family:unix] LET $home: STRING = "\{{ env:HOME }}"
         [family:windows] LET $home: STRING = "\{{ env:USERPROFILE }}"
+
         IF $home == "" {
             [family:unix] ECHO "no install directory: HOME is unset, so set INSTALL_DIR (example: INSTALL_DIR=\"$HOME/{{ $docs_global.unix_default_suffix }}\")"
             [family:windows] ECHO "no install directory: USERPROFILE is unset, so set INSTALL_DIR (example: $env:INSTALL_DIR = \"{{ $docs_global.windows_default_prefix }}{{ $docs_global.windows_default_suffix }}\")"
             EXIT 1
         }
+
         [family:unix] ECHO "no install directory: set INSTALL_DIR (example: INSTALL_DIR=\"$HOME/{{ $docs_global.unix_default_suffix }}\")"
         [family:windows] ECHO "no install directory: set INSTALL_DIR (example: $env:INSTALL_DIR = \"{{ $docs_global.windows_default_prefix }}{{ $docs_global.windows_default_suffix }}\")"
         EXIT 1
     }
 
-    # Refuse to place anything the checksum rejects.
-    LET $actual: STRING = HASH_SHA256 $asset
-    # The digest command terminates its line: the comparison includes it.
-    # Rust never emits \r\n here on any platform, so this is exact.
-    ASSERT_EQ $actual "\{{ $want }}\n"
+    # Verify and place. The CI tail runs only on the fresh pass
+    # below, never here: the old engine must not touch CI files.
+    IF $skip {
+        LET $has_bin: BOOL = $bin != ""
 
-    # Place the verified binary and report where it landed.
-    LET $dest: STRING = "\{{ $dir }}/oxdock"
-    [family:windows] $dest = "\{{ $dir }}/oxdock.exe"
-    INSTALL $bin $dest
-    ECHO "installed oxdock \{{ env:OXDOCK_VERSION }} to \{{ $dir }}"
-    ECHO "ensure \{{ $dir }} is on PATH"
+        IF $has_bin {
+            INSTALL $bin $dest
+        }
+
+        ECHO "installed oxdock \{{ env:OXDOCK_VERSION }} to \{{ $dir }}"
+        ECHO "ensure \{{ $dir }} is on PATH"
+
+        # CI smoke and PATH publish, fresh engine only. Strict nest:
+        # assert + APPENDs together or not at all.
+        LET $ghpath: STRING = "\{{ env:GITHUB_PATH }}"
+        LET $has_ghpath: BOOL = $ghpath != ""
+
+        IF $has_ghpath {
+            LET $ghkind: STRING = PATH_TYPE($ghpath)
+            LET $is_ghfile: BOOL = $ghkind == "file"
+
+            IF $is_ghfile {
+                # `local` builds bridge no expected version: derive it
+                # from the binary instead of parsing in shell.
+                LET $envexp: STRING = "\{{ env:OXDOCK_EXPECTED_VERSION }}"
+                LET $missing_envexp: BOOL = $envexp == ""
+                LET $expected: STRING = $envexp
+
+                IF $missing_envexp {
+                    LET $pv: PIPE
+                    WITH_IO [stdout=$pv] RUN ["\{{ $dest }}", "--version"]
+                    WITH_IO [stdin=$pv] READ_LINE $rawver
+                    $expected = TEXT_TRIM_PREFIX($rawver, "oxdock ")
+                }
+
+                LET $has_expected: BOOL = $expected != ""
+
+                IF $has_expected {
+                    LET $tailkind: STRING = PATH_TYPE("\{{ $dest }}")
+                    ASSERT_EQ $tailkind "file"
+
+                    LET $v: PIPE
+                    WITH_IO [stdout=$v] RUN ["\{{ $dest }}", "--version"]
+                    WITH_IO [stdin=$v] READ_LINE $reported
+                    ASSERT_EQ $reported "oxdock \{{ $expected }}"
+
+                    APPEND "\{{ env:GITHUB_PATH }}" "\{{ $dir }}\n"
+
+                    LET $ghenv: STRING = "\{{ env:GITHUB_ENV }}"
+                    LET $has_ghenv: BOOL = $ghenv != ""
+
+                    IF $has_ghenv {
+                        LET $envkind: STRING = PATH_TYPE($ghenv)
+                        LET $is_envfile: BOOL = $envkind == "file"
+
+                        IF $is_envfile {
+                            APPEND "\{{ env:GITHUB_ENV }}" "OXDOCK_ENGINE_DIR=\{{ $dir }}\n"
+                        }
+                    }
+                }
+            }
+        }
+    } ELSE {
+        LET $actual: STRING = HASH_SHA256 $asset
+        ASSERT_EQ $actual "\{{ $want }}\n"
+
+        INSTALL $bin $dest
+
+        ECHO "installed oxdock \{{ env:OXDOCK_VERSION }} to \{{ $dir }}"
+        ECHO "ensure \{{ $dir }} is on PATH"
+    }
 }

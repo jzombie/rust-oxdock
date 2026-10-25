@@ -20,6 +20,10 @@
 # Pass INSTALL_DIR to choose the destination; the installer defaults
 # it when absent.
 #
+# Pass OXDOCK_BINARY_NAME to choose the installed stem (default
+# `oxdock`; the installer appends `.exe` on Windows). CI passes
+# `oxdock-engine` to free the bare name for a binary under test.
+#
 # Point OXDOCK_ENGINE at a branch-built binary to run the installer
 # with it instead of the downloaded release (CI smoke proves behavior
 # fixes before any release ships them). The asset still downloads and
@@ -40,9 +44,18 @@ $CacheRoot = if ($env:OXDOCK_CACHE_DIR) { $env:OXDOCK_CACHE_DIR } else { Join-Pa
 $ApiHeaders = @{}
 if ($env:GITHUB_TOKEN) { $ApiHeaders['Authorization'] = "Bearer $($env:GITHUB_TOKEN)" }
 
-if (-not $Version) {
+if (-not $Version -or $Version -eq 'latest') {
   $Version = (Invoke-RestMethod "https://api.github.com/repos/$REPO/releases?per_page=1" -Headers $ApiHeaders)[0].tag_name
 }
+
+# CI renames without a shell step: the stem rides to install.oxfile,
+# which defaults empty to `oxdock`. Strip a trailing .exe so a stem
+# plus the oxfile's Windows suffix never doubles.
+$BinaryName = if ($env:OXDOCK_BINARY_NAME) { $env:OXDOCK_BINARY_NAME } else { 'oxdock' }
+if ($BinaryName -like '*.exe') { $BinaryName = $BinaryName.Substring(0, $BinaryName.Length - 4) }
+# DSL has no string surgery: strip the leading `v` here for the hard
+# `--version`-vs-expected gate bridged below.
+$ExpectedVersion = $Version.TrimStart('v')
 
 $ArchTarget = switch ($env:PROCESSOR_ARCHITECTURE) {
   'AMD64' { 'x86_64-pc-windows-msvc' }
@@ -173,6 +186,9 @@ try {
   if ($env:INSTALL_DIR) { $env:OXDOCK_DIR = $env:INSTALL_DIR } elseif ($env:LOCALAPPDATA) { $env:OXDOCK_DIR = Join-Path $env:LOCALAPPDATA 'Microsoft\WindowsApps' }
   $env:OXDOCK_SHA = $Expected
   $env:OXDOCK_VERSION = $Version
+  $env:OXDOCK_BINARY_NAME = $BinaryName
+  $env:OXDOCK_EXPECTED_VERSION = $ExpectedVersion
+  $env:OXDOCK_SKIP_DOWNLOAD = '0'
   # An explicit OXDOCK_ENGINE runs the installer instead of the
   # unpacked release; it must name an existing file, and fails closed
   # otherwise.
@@ -193,6 +209,23 @@ try {
     & $Engine (Join-Path $tmp 'install.oxfile')
     $code = $LASTEXITCODE
     if ($code -ne 0) { throw "installer failed with exit code $code" }
+    # CI tail under the fresh binary: the oxfile above verified and
+    # placed under the old engine; re-running the same file with SKIP=1
+    # proves the fresh binary runs DSL before its directory lands on
+    # PATH. Dual-gated exactly like the oxfile: GITHUB_PATH must name a
+    # real file and an expected version must be bridged, so off-runner
+    # this is a no-op.
+    if ($ExpectedVersion -and $env:GITHUB_PATH -and (Test-Path $env:GITHUB_PATH -PathType Leaf)) {
+      $Fresh = Join-Path $env:OXDOCK_DIR "$BinaryName.exe"
+      $env:OXDOCK_SKIP_DOWNLOAD = '1'
+      try {
+        & $Fresh (Join-Path $tmp 'install.oxfile')
+        $freshCode = $LASTEXITCODE
+        if ($freshCode -ne 0) { throw "installer failed with exit code $freshCode (fresh tail)" }
+      } finally {
+        $env:OXDOCK_SKIP_DOWNLOAD = $null
+      }
+    }
   } finally {
     # Restore first: deleting the working directory while standing
     # inside it fails as in use and would mask the real error.

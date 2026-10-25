@@ -21,6 +21,10 @@
 # Pass INSTALL_DIR to choose the destination; the installer defaults
 # it when absent.
 #
+# Pass OXDOCK_BINARY_NAME to choose the installed stem (default
+# `oxdock`; the installer appends `.exe` on Windows). CI passes
+# `oxdock-engine` to free the bare name for a binary under test.
+#
 # Point OXDOCK_ENGINE at a branch-built binary to run the installer
 # with it instead of the downloaded release (CI smoke proves behavior
 # fixes before any release ships them). The asset still downloads and
@@ -47,12 +51,24 @@ gh_curl() {
   fi
 }
 
-if [ -z "$VERSION" ]; then
+if [ -z "$VERSION" ] || [ "$VERSION" = "latest" ]; then
   # No `grep -m1`: every stage consumes the body to EOF, else curl
   # fails writing to the closed pipe under `pipefail` (exit 23).
   # The releases endpoint yields exactly one `tag_name` per page entry.
   VERSION=$(gh_curl "https://api.github.com/repos/$REPO/releases?per_page=1" | grep '"tag_name"' | cut -d'"' -f4)
 fi
+
+# CI renames without a shell step: the stem rides to install.oxfile,
+# which defaults empty to `oxdock`. Strip a trailing .exe so a stem
+# plus the oxfile's Windows suffix never doubles. Public runs leave
+# OXDOCK_BINARY_NAME unset and place bare `oxdock`.
+BINARY_NAME="${OXDOCK_BINARY_NAME:-oxdock}"
+case "$BINARY_NAME" in
+  *.exe) BINARY_NAME="${BINARY_NAME%.exe}" ;;
+esac
+# DSL has no string surgery: strip the leading `v` here for the hard
+# `--version`-vs-expected gate bridged below.
+EXPECTED_VERSION="${VERSION#v}"
 
 case "$(uname -s)-$(uname -m)" in
   Darwin-arm64) TARGET="aarch64-apple-darwin" ;;
@@ -258,10 +274,27 @@ fi
 if [ -n "${OXDOCK_PIPED_SCRIPT:-}" ] && [ -f "$OXDOCK_PIPED_SCRIPT" ]; then
   trap 'rm -rf "$tmp" "$OXDOCK_PIPED_SCRIPT"' EXIT
 fi
-(cd "$tmp" && OXDOCK_ASSET="$VDIR/$ASSET" OXDOCK_SHA="$EXPECTED" OXDOCK_BIN="$BIN" OXDOCK_DIR="$OXDOCK_DIR" OXDOCK_VERSION="$VERSION" OXDOCK_INTERPRETER="$ENGINE" OXDOCK_PIPED_SCRIPT="$OXDOCK_PIPED_SCRIPT" OXDOCK_INTERACTIVE="$OXDOCK_INTERACTIVE" "$ENGINE" "$tmp/install.oxfile") || {
+(cd "$tmp" && OXDOCK_ASSET="$VDIR/$ASSET" OXDOCK_SHA="$EXPECTED" OXDOCK_BIN="$BIN" OXDOCK_DIR="$OXDOCK_DIR" OXDOCK_VERSION="$VERSION" OXDOCK_BINARY_NAME="$BINARY_NAME" OXDOCK_EXPECTED_VERSION="$EXPECTED_VERSION" OXDOCK_SKIP_DOWNLOAD=0 OXDOCK_INTERPRETER="$ENGINE" OXDOCK_PIPED_SCRIPT="$OXDOCK_PIPED_SCRIPT" OXDOCK_INTERACTIVE="$OXDOCK_INTERACTIVE" "$ENGINE" "$tmp/install.oxfile") || {
   code=$?
   echo "installer failed with exit code $code" >&2
   exit "$code"
 }
+# CI tail under the fresh binary: the oxfile above verified and placed
+# under the old engine; re-running the same file with SKIP=1 proves the
+# fresh binary runs DSL before its directory lands on PATH. Dual-gated
+# in shell exactly like the oxfile: GITHUB_PATH must name a real file
+# and an expected version must be bridged, so off-runner this is a
+# no-op and `curl | bash` never touches CI files.
+if [ -n "$EXPECTED_VERSION" ] && [ -n "${GITHUB_PATH:-}" ] && [ -f "$GITHUB_PATH" ]; then
+  FRESH="$OXDOCK_DIR/$BINARY_NAME"
+  case "$(uname -s)" in
+    MINGW64*|MSYS*|CYGWIN*) FRESH="$FRESH.exe" ;;
+  esac
+  (cd "$tmp" && OXDOCK_DIR="$OXDOCK_DIR" OXDOCK_VERSION="$VERSION" OXDOCK_BINARY_NAME="$BINARY_NAME" OXDOCK_EXPECTED_VERSION="$EXPECTED_VERSION" OXDOCK_SKIP_DOWNLOAD=1 "$FRESH" "$tmp/install.oxfile") || {
+    code=$?
+    echo "installer failed with exit code $code (fresh tail)" >&2
+    exit "$code"
+  }
+fi
 }
 run_installer
