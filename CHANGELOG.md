@@ -10,6 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/) and this 
 ### Added
 
 - `STD::PATH_JOIN($dir, $name)` function: join a directory and a file name with the host-native separator (`\` on Windows, `/` elsewhere). Both inputs admit `STRING` or `PATH`; the result is a `STRING` with no filesystem access. `install.oxfile` places through it, which removed the last backslash literals from the installer templates.
+- New `oxdock-pty` crate: shared pseudo-terminal pump (spawn under a pty, pump pipes through the master, apply resizes, drain to quiescence) with no run-model dependencies. The SSH plugin's terminal bridge is now a thin adapter over it; behavior is unchanged.
 - Single `BOOL` spelling for the whole runtime: case-insensitive `true`/`false`/`yes`/`no`/`on`/`off` plus `1`/`0` (surrounding whitespace trimmed). `STRING` → `BOOL` coercion and the `INHERIT_STDOUT` flag checks share one parser, replacing the piecemeal per-site rules. `INT` `1`/`0` coerce to `BOOL` as well; anything else stays a `TypeMismatch`.
 
 ### Changed

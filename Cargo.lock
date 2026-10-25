@@ -1901,6 +1901,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "oxdock-pty"
+version = "0.31.0-alpha"
+dependencies = [
+ "anyhow",
+ "portable-pty",
+]
+
+[[package]]
 name = "oxdock-remote-proto"
 version = "0.31.0-alpha"
 dependencies = [
@@ -1927,6 +1935,7 @@ dependencies = [
  "oxdock-parser",
  "oxdock-pipe",
  "oxdock-process",
+ "oxdock-pty",
  "oxdock-sys-test-utils",
  "portable-pty",
  "rand",

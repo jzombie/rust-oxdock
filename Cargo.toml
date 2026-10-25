@@ -10,6 +10,7 @@ members = [
     "crates/oxdock-logic-tests/fixtures/commands/ast_commands",
     "crates/oxdock-mcp",
     "crates/oxdock-parser",
+    "crates/oxdock-pty",
     "crates/oxdock-remote-proto",
     "crates/plugins/oxdock-markdown-plugin",
     "crates/plugins/oxdock-net-plugin",
@@ -73,6 +74,7 @@ oxdock-net-plugin = { path = "crates/plugins/oxdock-net-plugin", version = "0.31
 oxdock-parser = { path = "crates/oxdock-parser", version = "0.31.0-alpha" }
 oxdock-pipe = { path = "crates/sys/oxdock-pipe", version = "0.31.0-alpha" }
 oxdock-process = { path = "crates/sys/oxdock-process", version = "0.31.0-alpha" }
+oxdock-pty = { path = "crates/oxdock-pty", version = "0.31.0-alpha" }
 oxdock-remote-proto = { path = "crates/oxdock-remote-proto", version = "0.31.0-alpha" }
 oxdock-ssh-plugin = { path = "crates/plugins/oxdock-ssh-plugin", version = "0.31.0-alpha" }
 oxdock-sys-test-utils = { path = "crates/sys/oxdock-sys-test-utils", version = "0.31.0-alpha" }
