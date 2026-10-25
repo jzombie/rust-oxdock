@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/) and this project adheres to
  (or is loosely based on) Semantic Versioning.
 
+## [UNRELEASED]
+
+### Added
+
+- `STD::PATH_JOIN($dir, $name)` function: join a directory and a file name with the host-native separator (`\` on Windows, `/` elsewhere). Both inputs admit `STRING` or `PATH`; the result is a `STRING` with no filesystem access. `install.oxfile` places through it, which removed the last backslash literals from the installer templates.
+- Single `BOOL` spelling for the whole runtime: case-insensitive `true`/`false`/`yes`/`no`/`on`/`off` plus `1`/`0` (surrounding whitespace trimmed). `STRING` → `BOOL` coercion and the `INHERIT_STDOUT` flag checks share one parser, replacing the piecemeal per-site rules. `INT` `1`/`0` coerce to `BOOL` as well; anything else stays a `TypeMismatch`.
+
+### Changed
+
+- `setup-oxdock` collapses into the installer stubs (#245): the release path is one piped stub call per OS with inputs crossing on `env:`, no version math, renames, or `GITHUB_ENV` writes in the action. The stubs resolve `latest` themselves (including the literal string) and pass names through untouched; `install.oxfile` owns the install name (`OXDOCK_BINARY_NAME`, `.exe` appended on Windows), the `OXDOCK_SKIP_DOWNLOAD=1` local-build tail, and the nested CI gate (a `v`-tagged bridge trims to the expectation, otherwise derived from the placed binary; assert plus `GITHUB_PATH`/`GITHUB_ENV` appends fire together or not at all). The fresh binary re-runs the same file for smoke before its directory lands on `PATH`. New `isolated` leg (blanked CI routing proves the installer stays silent off-runner, plus a Unix pty prompt test) and `prebuilt` leg (unpack the staged tarball, install an override binary with a tagged expectation) cover the tail limbs on all five runners; every leg now routes `GITHUB_PATH`/`GITHUB_ENV`.
+- `source: local` is the CI bootstrap until `v0.32.0-alpha` ships the new bundle (currently pinned `v0.29.0-alpha` bundles predate the tail and publish no `PATH`).
+
 ## [0.31.0-alpha] - 2026-10-25
 
 ### Added
