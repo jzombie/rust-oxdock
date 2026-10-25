@@ -342,9 +342,9 @@ jobs:
           ENV OXDOCK_RELEASE_BASE="http://127.0.0.1:{{ env:SMOKE_PORT }}"
           LET $srv: HANDLE = ASYNC { RUN ["python3", "-m", "http.server", "{{ env:SMOKE_PORT }}", "--bind", "127.0.0.1", "--directory", "{{ env:RUNNER_TEMP }}/oxdock-stage"] }
 
-          # Bounded readiness wait in shell: the DSL has no try/retry, so a
-          # slow listener gets 30s and a dead one fails with listener state
-          # in the log instead of a bare connect timeout.
+          # Bounded readiness wait in shell: the DSL has no try/retry
+          # (see #243), so a slow listener gets 30s and a dead one fails
+          # with listener state in the log instead of a bare connect timeout.
           [family:unix] RUN ["sh", "-c", "for i in $(seq 1 30); do curl -fs http://127.0.0.1:{{ env:SMOKE_PORT }}/ >/dev/null && exit 0; sleep 1; done; lsof -iTCP:{{ env:SMOKE_PORT }} -sTCP:LISTEN || true; exit 1"]
           [family:windows] RUN ["pwsh", "-NoProfile", "-Command", "for ($i=0; $i -lt 30; $i++) { curl.exe -fs http://127.0.0.1:{{ env:SMOKE_PORT }}/ | Out-Null; if ($LASTEXITCODE -eq 0) { exit 0 }; Start-Sleep -Seconds 1 }; Get-NetTCPConnection -LocalPort {{ env:SMOKE_PORT }} -ErrorAction SilentlyContinue; exit 1"]
 
@@ -437,9 +437,9 @@ jobs:
           ENV OXDOCK_RELEASE_BASE="http://127.0.0.1:{{ env:SMOKE_PORT }}"
           LET $srv: HANDLE = ASYNC { RUN ["python3", "-m", "http.server", "{{ env:SMOKE_PORT }}", "--bind", "127.0.0.1", "--directory", "{{ env:RUNNER_TEMP }}/oxdock-stage"] }
 
-          # Bounded readiness wait in shell: the DSL has no try/retry, so a
-          # slow listener gets 30s and a dead one fails with listener state
-          # in the log instead of a bare connect timeout.
+          # Bounded readiness wait in shell: the DSL has no try/retry
+          # (see #243), so a slow listener gets 30s and a dead one fails
+          # with listener state in the log instead of a bare connect timeout.
           [family:unix] RUN ["sh", "-c", "for i in $(seq 1 30); do curl -fs http://127.0.0.1:{{ env:SMOKE_PORT }}/ >/dev/null && exit 0; sleep 1; done; lsof -iTCP:{{ env:SMOKE_PORT }} -sTCP:LISTEN || true; exit 1"]
           [family:windows] RUN ["pwsh", "-NoProfile", "-Command", "for ($i=0; $i -lt 30; $i++) { curl.exe -fs http://127.0.0.1:{{ env:SMOKE_PORT }}/ | Out-Null; if ($LASTEXITCODE -eq 0) { exit 0 }; Start-Sleep -Seconds 1 }; Get-NetTCPConnection -LocalPort {{ env:SMOKE_PORT }} -ErrorAction SilentlyContinue; exit 1"]
 
@@ -537,9 +537,9 @@ jobs:
           ENV OXDOCK_RELEASE_BASE="http://127.0.0.1:{{ env:SMOKE_PORT }}"
           LET $srv: HANDLE = ASYNC { RUN ["python3", "-m", "http.server", "{{ env:SMOKE_PORT }}", "--bind", "127.0.0.1", "--directory", "{{ env:RUNNER_TEMP }}/oxdock-stage"] }
 
-          # Bounded readiness wait in shell: the DSL has no try/retry, so a
-          # slow listener gets 30s and a dead one fails with listener state
-          # in the log instead of a bare connect timeout.
+          # Bounded readiness wait in shell: the DSL has no try/retry
+          # (see #243), so a slow listener gets 30s and a dead one fails
+          # with listener state in the log instead of a bare connect timeout.
           [family:unix] RUN ["sh", "-c", "for i in $(seq 1 30); do curl -fs http://127.0.0.1:{{ env:SMOKE_PORT }}/ >/dev/null && exit 0; sleep 1; done; lsof -iTCP:{{ env:SMOKE_PORT }} -sTCP:LISTEN || true; exit 1"]
           [family:windows] RUN ["pwsh", "-NoProfile", "-Command", "for ($i=0; $i -lt 30; $i++) { curl.exe -fs http://127.0.0.1:{{ env:SMOKE_PORT }}/ | Out-Null; if ($LASTEXITCODE -eq 0) { exit 0 }; Start-Sleep -Seconds 1 }; Get-NetTCPConnection -LocalPort {{ env:SMOKE_PORT }} -ErrorAction SilentlyContinue; exit 1"]
 
@@ -627,9 +627,9 @@ jobs:
           ENV OXDOCK_RELEASE_BASE="http://127.0.0.1:{{ env:SMOKE_PORT }}"
           LET $srv: HANDLE = ASYNC { RUN ["python3", "-m", "http.server", "{{ env:SMOKE_PORT }}", "--bind", "127.0.0.1", "--directory", "{{ env:RUNNER_TEMP }}/oxdock-stage"] }
 
-          # Bounded readiness wait in shell: the DSL has no try/retry, so a
-          # slow listener gets 30s and a dead one fails with listener state
-          # in the log instead of a bare connect timeout.
+          # Bounded readiness wait in shell: the DSL has no try/retry
+          # (see #243), so a slow listener gets 30s and a dead one fails
+          # with listener state in the log instead of a bare connect timeout.
           [family:unix] RUN ["sh", "-c", "for i in $(seq 1 30); do curl -fs http://127.0.0.1:{{ env:SMOKE_PORT }}/ >/dev/null && exit 0; sleep 1; done; lsof -iTCP:{{ env:SMOKE_PORT }} -sTCP:LISTEN || true; exit 1"]
           [family:windows] RUN ["pwsh", "-NoProfile", "-Command", "for ($i=0; $i -lt 30; $i++) { curl.exe -fs http://127.0.0.1:{{ env:SMOKE_PORT }}/ | Out-Null; if ($LASTEXITCODE -eq 0) { exit 0 }; Start-Sleep -Seconds 1 }; Get-NetTCPConnection -LocalPort {{ env:SMOKE_PORT }} -ErrorAction SilentlyContinue; exit 1"]
 
@@ -717,9 +717,9 @@ jobs:
           ENV OXDOCK_RELEASE_BASE="http://127.0.0.1:{{ env:SMOKE_PORT }}"
           LET $srv: HANDLE = ASYNC { RUN ["python3", "-m", "http.server", "{{ env:SMOKE_PORT }}", "--bind", "127.0.0.1", "--directory", "{{ env:RUNNER_TEMP }}/oxdock-stage"] }
 
-          # Bounded readiness wait in shell: the DSL has no try/retry, so a
-          # slow listener gets 30s and a dead one fails with listener state
-          # in the log instead of a bare connect timeout.
+          # Bounded readiness wait in shell: the DSL has no try/retry
+          # (see #243), so a slow listener gets 30s and a dead one fails
+          # with listener state in the log instead of a bare connect timeout.
           [family:unix] RUN ["sh", "-c", "for i in $(seq 1 30); do curl -fs http://127.0.0.1:{{ env:SMOKE_PORT }}/ >/dev/null && exit 0; sleep 1; done; lsof -iTCP:{{ env:SMOKE_PORT }} -sTCP:LISTEN || true; exit 1"]
           [family:windows] RUN ["pwsh", "-NoProfile", "-Command", "for ($i=0; $i -lt 30; $i++) { curl.exe -fs http://127.0.0.1:{{ env:SMOKE_PORT }}/ | Out-Null; if ($LASTEXITCODE -eq 0) { exit 0 }; Start-Sleep -Seconds 1 }; Get-NetTCPConnection -LocalPort {{ env:SMOKE_PORT }} -ErrorAction SilentlyContinue; exit 1"]
 
@@ -899,9 +899,9 @@ jobs:
           ENV OXDOCK_RELEASE_BASE="http://127.0.0.1:{{ env:SMOKE_PORT }}"
           LET $srv: HANDLE = ASYNC { RUN ["python3", "-m", "http.server", "{{ env:SMOKE_PORT }}", "--bind", "127.0.0.1", "--directory", "{{ env:RUNNER_TEMP }}/oxdock-stage"] }
 
-          # Bounded readiness wait in shell: the DSL has no try/retry, so a
-          # slow listener gets 30s and a dead one fails with listener state
-          # in the log instead of a bare connect timeout.
+          # Bounded readiness wait in shell: the DSL has no try/retry
+          # (see #243), so a slow listener gets 30s and a dead one fails
+          # with listener state in the log instead of a bare connect timeout.
           [family:unix] RUN ["sh", "-c", "for i in $(seq 1 30); do curl -fs http://127.0.0.1:{{ env:SMOKE_PORT }}/ >/dev/null && exit 0; sleep 1; done; lsof -iTCP:{{ env:SMOKE_PORT }} -sTCP:LISTEN || true; exit 1"]
           [family:windows] RUN ["pwsh", "-NoProfile", "-Command", "for ($i=0; $i -lt 30; $i++) { curl.exe -fs http://127.0.0.1:{{ env:SMOKE_PORT }}/ | Out-Null; if ($LASTEXITCODE -eq 0) { exit 0 }; Start-Sleep -Seconds 1 }; Get-NetTCPConnection -LocalPort {{ env:SMOKE_PORT }} -ErrorAction SilentlyContinue; exit 1"]
 
@@ -1105,9 +1105,9 @@ jobs:
           ENV OXDOCK_RELEASE_BASE="http://127.0.0.1:{{ env:SMOKE_PORT }}"
           LET $srv: HANDLE = ASYNC { RUN ["python3", "-m", "http.server", "{{ env:SMOKE_PORT }}", "--bind", "127.0.0.1", "--directory", "{{ env:RUNNER_TEMP }}/oxdock-stage"] }
 
-          # Bounded readiness wait in shell: the DSL has no try/retry, so a
-          # slow listener gets 30s and a dead one fails with listener state
-          # in the log instead of a bare connect timeout.
+          # Bounded readiness wait in shell: the DSL has no try/retry
+          # (see #243), so a slow listener gets 30s and a dead one fails
+          # with listener state in the log instead of a bare connect timeout.
           [family:unix] RUN ["sh", "-c", "for i in $(seq 1 30); do curl -fs http://127.0.0.1:{{ env:SMOKE_PORT }}/ >/dev/null && exit 0; sleep 1; done; lsof -iTCP:{{ env:SMOKE_PORT }} -sTCP:LISTEN || true; exit 1"]
           [family:windows] RUN ["pwsh", "-NoProfile", "-Command", "for ($i=0; $i -lt 30; $i++) { curl.exe -fs http://127.0.0.1:{{ env:SMOKE_PORT }}/ | Out-Null; if ($LASTEXITCODE -eq 0) { exit 0 }; Start-Sleep -Seconds 1 }; Get-NetTCPConnection -LocalPort {{ env:SMOKE_PORT }} -ErrorAction SilentlyContinue; exit 1"]
 
