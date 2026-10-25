@@ -32,9 +32,6 @@ IF $has_piped {
     # Skip flag for `local` builds.
     LET $skip: BOOL = "{{ env:OXDOCK_SKIP_DOWNLOAD }}"
 
-    LET $dest: STRING = "{{ $dir }}/{{ $stem }}"
-    [family:windows] $dest = "{{ $dir }}/{{ $stem }}.exe"
-
     # Interactive destination prompt.
     IF "{{ env:OXDOCK_INTERACTIVE }}" != "" {
         PROMPT $dir "Install destination?" "{{ env:OXDOCK_DIR }}"
@@ -68,6 +65,12 @@ IF $has_piped {
         [family:windows] ECHO "no install directory: set INSTALL_DIR (example: $env:INSTALL_DIR = \"%LOCALAPPDATA%\Microsoft\WindowsApps\")"
         EXIT 1
     }
+
+    # Destination derives after the prompt: PROMPT mutates $dir in
+    # place, and placing before it would strand the binary at the
+    # pre-prompt default while reporting the prompted dir.
+    LET $dest: STRING = "{{ $dir }}/{{ $stem }}"
+    [family:windows] $dest = "{{ $dir }}/{{ $stem }}.exe"
 
     # Verify and place. The CI tail runs only on the fresh pass
     # below, never here: the old engine must not touch CI files.

@@ -273,9 +273,11 @@ try {
     # CI tail under the fresh binary: the oxfile above verified and
     # placed under the old engine; re-running the same file with SKIP=1
     # proves the fresh binary runs DSL before its directory lands on
-    # PATH. Gated here on the PATH file alone; the oxfile owns the
-    # version gate, so off-runner this is a no-op.
-    if ($env:GITHUB_PATH -and (Test-Path $env:GITHUB_PATH -PathType Leaf)) {
+    # PATH. Gated here on the PATH file alone (the oxfile owns the
+    # version gate), and never in piped-run mode: nothing was placed
+    # there, so no fresh binary exists. Off-runner installs skip
+    # silently either way.
+    if (-not $env:OXDOCK_PIPED_SCRIPT -and $env:GITHUB_PATH -and (Test-Path $env:GITHUB_PATH -PathType Leaf)) {
       $RawName = if ($env:OXDOCK_BINARY_NAME) { $env:OXDOCK_BINARY_NAME } else { 'oxdock' }
 
       if ($RawName -like '*.exe') {
